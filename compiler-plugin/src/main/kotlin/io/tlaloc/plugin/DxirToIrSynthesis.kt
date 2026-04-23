@@ -284,6 +284,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // in :core/ops. Everything else maps to the matching member op.
         if (op.op == OpKind.STEP) return irStep(op, env, context)
         if (op.op == OpKind.NOT) return irNot(op, env)
+        if (op.op == OpKind.LAND) return irLand(op, env)
         if (op.op == OpKind.RELU) return irRelu(op, env, context)
         if (op.op == OpKind.BROADCAST) return irBroadcast(op, env, context)
         if (op.op == OpKind.SQRT) return irSqrt(op, env, context)
@@ -375,6 +376,39 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         )
         call.arguments[0] = irGet(operandDecl)
         return call
+    }
+
+    /**
+     * §0.4.55 — `OpKind.LAND(a, b)` → Kotlin `a and b` (infix `Boolean.and`). Emitted
+     * by the break-hoist path in `lowerRawWhileLoop`'s branchless select: the `broke`
+     * carried var's update uses LAND over Bool operands. We route to `kotlin.Boolean.and`
+     * rather than `&&` so the dxir-to-IR mapping stays 1:1 with the dxir op (short-
+     * circuit semantics don't matter here since both operands are cheap Bool values).
+     */
+    private fun IrBuilderWithScope.irLand(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+    ): IrExpression? {
+        val lhsDecl = env[op.operands[0].id] ?: return null
+        val rhsDecl = env[op.operands[1].id] ?: return null
+        val sym = booleanAndSymbol() ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = pluginContext.irBuiltIns.booleanType,
+            symbol = sym,
+        )
+        call.arguments[0] = irGet(lhsDecl)
+        call.arguments[1] = irGet(rhsDecl)
+        return call
+    }
+
+    private fun booleanAndSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            classId = ClassId(FqName("kotlin"), Name.identifier("Boolean")),
+            callableName = Name.identifier("and"),
+        )
+        return pluginContext.referenceFunctions(callableId).firstOrNull()
     }
 
     /**

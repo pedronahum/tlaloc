@@ -39,6 +39,43 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.55 Stage D.3ii investigation — break-bearing WHILE correctness is harder than a single session 2026-04-24
+
+Attempted D.3ii (reverse-mode-over-WHILE for break-bearing loops) — ended up deferred after discovering the intended design interacts non-trivially with PhiCalculus's F2/C1 distribution pass. Shipping what was actually validated this session: nothing user-facing. Reverting `lowerRawWhileLoop` back to §0.4.50's LAND-hoist shape (which handles break_cond referencing only carried vars; body-local-dep break_conds still fall back to the tape). Adding LAND synthesis via `Boolean.and` as a standalone infrastructure piece — not load-bearing until a future D.3ii path re-introduces LAND at the synthesis layer.
+
+**What was attempted**:
+
+Designed a branchless-select lowering for trailing `if (cond) break`:
+
+1. Add a Bool `broke` carried var to the WHILE (init false).
+2. Body computes break_pred AFTER the original body stmts (so `d` in `if (d < eps) break` is visible via `env[d_sym]`).
+3. For each non-counter carried var v: emit `new_v = if (broke) original else computed` as a single-result IF — SCT natively handles single-result IFs via §0.4.23's branch-reverse walk.
+4. Cond-referenced carrieds (counters) skip gating — they advance every iter so the loop still terminates at N.
+5. `new_broke = broke OR break_pred` via `NOT(LAND(NOT broke, NOT break_pred))`.
+
+The **design is structurally sound**: C5-unrolling the per-iter single-result IFs gives a correct straight-line gradient via chain rule on each IF's branch adjoint. And body-local break conds work because break_pred is computed *after* the body stmts, within the same region's env.
+
+**What broke**:
+
+After C5 unrolls, PhiCalculus's F2/C1 distribution pass (`IF(p, a, b) op c → IF(p, a op c, b op c)`) pushes downstream ops into each IF's branches. For my test doubling-with-break kernel, this produced IFs with body-internal MULs — `%18 = if(%2) { %16 = mul(%0, %15); yield %16 } { %17 = mul(%4, %15); yield %17 }` — instead of the clean `if(broke, old, new_computed)` shape. The post-distribution form has two issues:
+
+1. Multiple IFs per unrolled iteration (one from my gating, one from distribution moving the next-iter MUL into branches). SCT accepts them individually but the composition creates chains the synthesis didn't get right.
+2. Synthesis ultimately rejected with "falls outside the scalar-primitive synthesis scope" — not because of unsupported ops per se, but because the distributed IFs' internal structure exceeded what the single-result-IF synthesis path validates.
+
+**Why this is deeper than it looks**: the IF-based break gating is the *natural* correctness pattern, but F2/C1 distribution was designed for a world where IFs only gate single outer-scope values, not where they're used as branchless multiplexers. Fixing this properly needs either (a) a "don't distribute into break-gating IFs" guard in F2/C1, recognising the branchless-select pattern; or (b) a different lowering (e.g., purely-arithmetic branchless with F32 `broke` + CAST(Bool→F32), which in turn needs `Bool→F32` CAST synthesis via `if (b) 1.0f else 0.0f`); or (c) a smaller scope — reject source shapes with body-local break refs, accepting just the §0.4.50 LAND-hoist path for carried-dep conds. Each is a design-session's worth of work.
+
+**Net change**:
+
+- `lowerRawWhileLoop` reverted to §0.4.50's LAND-hoist shape. Still limited to break_conds that reference only carried vars.
+- Added `irLand` / `booleanAndSymbol` in `DxirToIrSynthesis`. Harmless; not load-bearing today; available for a future D.3ii path.
+- Test suite unchanged — no new tests. Full suite green (no regression).
+
+**Path forward suggestions**:
+
+The session revealed that a **runtime-tape fallback** is the simplest user-facing win: if a break-bearing WHILE doesn't match any closure pattern, let the plugin silently fall back to the tape-based AD path in `:autograd` (which already handles arbitrary control flow). The user gets a correct gradient, just slower — no compile error. That's what `grad` does for "unsupported lambda shapes" in general; extending the fallback doesn't require making the synthesis scope grow. Filed as **D.3ii-tape** — probably 1 session, no IR changes needed.
+
+True paper-faithful break closure (D.3ii-closed-form, symbolic inequality solving) remains deferred with the same 2+ session estimate.
+
 #### 0.4.54 Stage D.3iii-i — integer-param gradients emit typed zero; for-loop symbolic T closes end-to-end 2026-04-24
 
 D.3iii-i closes the Int-gradient synthesis issue D.3iii filed. `grad2 { x: Float, T: Int -> for (i in 0 until T) { ... } }` now lowers, coarsens, SCT-transforms, and synthesises cleanly: gradient wrt `x` is the C6 closed form (`2^T · x` for the doubling kernel); gradient wrt `T` is `const(0, I32)`, matching the `grad2` call's `Pair<Float, Int>` return type. With D.3iii shipping raw-while symbolic T and D.3iii-i closing the for-loop path, **both loop surfaces now accept runtime-parameter T**.

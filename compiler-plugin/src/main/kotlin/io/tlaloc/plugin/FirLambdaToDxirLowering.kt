@@ -343,6 +343,10 @@ object FirLambdaToDxirLowering {
                 }
                 val primaryPred = lowerPredicate(loop.condition, env, this)
                 val pred = if (breakCond != null) {
+                    // §0.4.50 — LAND-hoist for break cond. Works when break_cond
+                    // references only carried vars (cond region has them via args[k]).
+                    // Body-local-dep breaks (e.g., `if (d < eps) break` where d is a
+                    // body-local val) fail here — deferred to D.3ii-correctness.
                     val breakPred = lowerPredicate(breakCond, env, this)
                     val notBreak = op(OpKind.NOT, listOf(breakPred), boolS)
                     op(OpKind.LAND, listOf(primaryPred, notBreak), boolS)
@@ -432,6 +436,7 @@ object FirLambdaToDxirLowering {
     private fun isEffectivelyEmpty(block: FirBlock): Boolean {
         return block.statements.isEmpty()
     }
+
 
     private fun assertNoStrayBreak(statements: List<Any>, loop: FirWhileLoop) {
         for (stmt in statements) {
