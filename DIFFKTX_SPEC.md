@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.53 Stage D.3iii — symbolic trip counts: raw-while with runtime-parameter T closes via C6 2026-04-24
+
+D.3iii lifts the concrete-literal-only restriction on loop trip counts. User code can now write `while (k < T) { ... }` where `T` is a lambda parameter (Float or Double), and C6's existing `TripCount.Symbolic` path produces an O(1) closed form in terms of T. The same compiled gradient lambda now handles any runtime T without recompiling per size — the prerequisite for paper-relevant `T = 50 / 100 / 500` benchmarking from a single binary.
+
+**Changes**:
+
+1. **Raw-while already lowered symbolic T through `lowerPredicate`** ([FirLambdaToDxirLowering.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt)). `while (k < T)` where T is a lambda param flows via `lowerExpr → lookupReference → DxirParam`, and `extractTripCount` already accepts `DxirParam`. So the FIR surface was never the blocker. Verified via a new probe: `grad2 { x: Float, T: Float -> var d = x; var k = 0.0f; while (k < T) { d = d*2; k = k+1 }; d }` at T=3, 5, 10 all produce the expected `2^T · x` gradient from the SAME compiled lambda.
+
+2. **`OpKind.LOG` + `OpKind.EXP` synthesis** ([DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt)). C6 differentiating `a^n` wrt `n` produces `a^n · ln(a)` — LOG shows up in the grad body whenever the trip count is a differentiable parameter. Pre-D.3iii, LOG was an unsupported op kind; synthesis fell back silently. Added `irLog` + `irExp` via a shared `irUnaryMathCall` helper, routing to `kotlin.math.ln` / `kotlin.math.exp`. EXP is defensive — no current benchmark emits it, but the cost of adding both together is trivial.
+
+3. **`PowRule` accepts Int-typed exponents** ([Vjp.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt)). C6 closure for integer-typed T emits `POW(F32_base, I32_exp)`. The existing `PowRule` rejected non-float exponents as a type-sanity guard. Widened to accept I32/I64 by inserting a CAST at adjoint-emission entry — keeps the gradient math in float land without changing the forward dxir shape.
+
+4. **`extractForLoopTripCount` accepts arbitrary expressions** ([FirLambdaToDxirLowering.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt)). The return type went from `Int?` to a sealed `ForLoopBound` with `Concrete(value: Int)` and `Expression(expr: FirExpression)`. `lowerDesugaredForLoop` now lowers the expression inline and types the counter/increment to match the bound's dtype via new `zeroOfDtype` / `oneOfDtype` helpers. The concrete-literal path is unchanged.
+
+**What's deferred**:
+
+- **For-loop with symbolic Int T hits an Int-gradient synthesis issue.** `grad2 { x: Float, T: Int -> for (i in 0 until T) { ... } }` lowers + C6-closes to `pow(a, T) · x` correctly at the dxir level, but synthesis then needs to emit `Pair<Float, Float>` (the gradient wrt x AND the gradient wrt T) to match the `grad2` call's typed return. For Int-typed params, the gradient-wrt-T is structurally Int in the type system but semantically zero (Int params aren't differentiable). Synthesis currently emits a float-typed gradient via `PowRule.dExp`, which mismatches the expected Int type. **Filed as D.3iii-follow-up** — the fix is straightforward (emit `const(0, I32)` for gradients wrt integer params instead of routing through VJP rules) but orthogonal to the paper-speedup story. The `ForLoopBound` extension is in place and ready; future `D.3iii-i` (Int-grad synthesis) unblocks the for-loop path end-to-end.
+
+- **Paper-scale measurement from a single binary.** Requires `grad2(DTensor<Rank1<Sym>, F32>, Float) -> Float` in the autograd stub + verifying the synthesis handles the `Pair<DTensor, Float>` return. The scaffolding is there; it's another session of plumbing.
+
+**Tests added** (+1 new):
+
+- [`TlalocPluginDiagnosticTest.ir transform gradient of symbolic-T raw while-loop matches 2 power T`](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginDiagnosticTest.kt) — scales the gradient across three T values (3, 5, 10) against the same compiled lambda. Sentinel reject + closed-form correctness (`|dx - 2^T| / 2^T < 1e-4`).
+
+**Decisions worth flagging**:
+
+- **The "just use raw-while" path dodges the Int-grad rabbit hole.** For measuring scaling at paper-relevant T, the user can write `while (k < T)` with Float `T` and Float counter — which the existing plumbing already supports end-to-end. `for (i in 0 until T)` needs Int T for IntRange, which opens the Int-grad box. Both paths are legitimate source-level patterns; shipping raw-while first keeps D.3iii focused while leaving the for-loop path unblocked structurally (the ForLoopBound extension is in place).
+
+- **EXP synthesis is defensive.** Added alongside LOG because the C6/C7 derivative emission landscape is large and the next benchmark (HMC / CartPole) is likely to emit EXP somewhere. Free to add given we already wrote the shared helper; removes a future stumbling block.
+
+- **PowRule's Int→Float CAST for the adjoint is cheap but asymmetric.** The dExp gradient is technically of Float type (the CAST's output type) even when rawExp is Int, so callers that propagate dExp as part of a gradient-wrt-Int-param expect Float-typed gradients. This is fine for most use cases but does tie into the Int-grad follow-up above: the gradient-output-type-matches-param-type invariant needs explicit zeroing for Int params; PowRule's behavior doesn't cause correctness issues on its own, but the chain of rules produces a type mismatch at the synthesis-output boundary.
+
+**Stage D status (post-§0.4.53)** — unchanged benchmark list:
+
+| # | benchmark | status |
+|---|-----------|--------|
+| 1 | **BGDHyperOpt** | full source port (no break), paper-speedup closure + **symbolic T via raw-while** (§0.4.52 / §0.4.53) |
+| 2 | **HookeanSpring** | full port (§0.4.47) |
+| 3 | HMC | not ported |
+| 4 | **Brachistochrone** | full port (§0.4.43) |
+| 5 | CartPole | not ported |
+| 6 | QWOP | not ported |
+
+**Recommended next pickup**:
+
+1. **D.3iii-i Int-gradient synthesis** — closes the for-loop symbolic-T path. Short follow-up.
+2. **D.3ii break-hoisted WHILE closure** — paper-faithful convergence break via symbolic inequality solving. 2 sessions.
+3. **D.4 HMC** — paper's hardest control-flow benchmark.
+4. **D.1i Symja Simplify on grad expressions** — complementary optimization.
+5. **grad2(DTensor, Float)** — enables paper-scale scaling measurement from a single binary.
+
+**Out of scope (still)**: PyTorch / JAX cross-framework, multi-dim GATHER/SCATTER, forward SCATTER from user code, `:stablehlo` SCATTER_ADD/LAND/POW/LOG/EXP widening, `diagnosticReporter` migration, sub-projecting the plugin, F64 tape path, region-internal DCE/CSE, `:benchmarks` Gradle module.
+
+**Definition-of-done for §0.4.53 — met**:
+- `while (k < T)` with runtime-parameter T produces correct closed-form gradient across multiple T values from the same compiled lambda ✓
+- `OpKind.LOG` + `OpKind.EXP` synthesis via `kotlin.math.ln` / `kotlin.math.exp` ✓
+- `PowRule` accepts I32/I64 exponents via CAST ✓
+- `extractForLoopTripCount` accepts arbitrary FIR expressions (not only literals); counter dtype matches bound ✓
+- Full suite green; no regression ✓
+
 #### 0.4.52 Stage D.3iv — C6 algebraic pre-normalization via Symja; paper-speedup closure fires on natural BGDHyperOpt kernel 2026-04-23
 
 D.3iv closes the last gap D.3i identified: the natural BGDHyperOpt user code `w = w - r·(2·(Sx2·w - Sxy))/M` now triggers C6 closure end-to-end, producing constant-time gradient regardless of outer trip count. **Natural T=50 gradient ratio drops from 11.1× (D.3i) to 1.27× — a 9.5× gradient speedup from one session's work.**

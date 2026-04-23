@@ -398,12 +398,22 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val base = op.operands[0]
-            val exp = op.operands[1]
+            val rawExp = op.operands[1]
             require(base.type.dtype == io.tlaloc.core.F32 || base.type.dtype == io.tlaloc.core.F64) {
                 "PowRule: only F32/F64 base supported (got ${base.type.dtype})"
             }
-            require(exp.type.dtype == io.tlaloc.core.F32 || exp.type.dtype == io.tlaloc.core.F64) {
-                "PowRule: only F32/F64 exp supported (got ${exp.type.dtype})"
+            // §0.4.53 — integer exponents (I32/I64) flow through C6's closed-form
+            // `a^n` when `n` is a symbolic Int trip count. Cast to the base's float
+            // dtype for the adjoint arithmetic; the dExp gradient is unused by
+            // callers that propagate only floating-point upstream adjoints, but we
+            // still compute it for API uniformity (Int gradients round to 0).
+            val exp = if (rawExp.type.dtype == io.tlaloc.core.F32 || rawExp.type.dtype == io.tlaloc.core.F64) {
+                rawExp
+            } else {
+                require(rawExp.type.dtype == io.tlaloc.core.I32 || rawExp.type.dtype == io.tlaloc.core.I64) {
+                    "PowRule: only F32/F64/I32/I64 exp supported (got ${rawExp.type.dtype})"
+                }
+                builder.op(OpKind.CAST, listOf(rawExp), op.type)
             }
             val oneValue: Any = when (exp.type.dtype) {
                 io.tlaloc.core.F32 -> 1.0f
@@ -423,7 +433,12 @@ object VjpRegistry {
             val dExpFactor = builder.op(OpKind.MUL, listOf(basePowExp, logBase), op.type)
             val dExp = builder.op(OpKind.MUL, listOf(upstream, dExpFactor), op.type)
 
-            return listOf(base to dBase, exp to dExp)
+            return listOf(rawExp to dExp, base to dBase).let {
+                // Preserve original operand-order pairing (base then exp). The dExp
+                // slot must use rawExp (the original I32/I64 handle) so gradient
+                // accumulation resolves to the original SSA id.
+                listOf(base to dBase, rawExp to dExp)
+            }
         }
     }
 

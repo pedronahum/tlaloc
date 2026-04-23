@@ -1029,6 +1029,49 @@ class TlalocPluginDiagnosticTest {
     }
 
     @Test
+    fun `ir transform gradient of symbolic-T raw while-loop matches 2 power T`() {
+        // §0.4.53 — raw `while (k < T)` where T is a grad2 lambda parameter (Float).
+        // C6's `TripCount.Symbolic` path should fire, producing a closed form
+        // `2^T · x`. d(2^T · x)/dx = 2^T. Tested at three concrete runtime T values
+        // to confirm the SAME compiled lambda handles all of them (O(1) in T).
+        val src = """
+            import io.tlaloc.autograd.grad2
+            import kotlin.math.pow
+            fun main() {
+                val g = grad2 { x: Float, T: Float ->
+                    var d = x
+                    var k = 0.0f
+                    while (k < T) {
+                        d = d * 2.0f
+                        k = k + 1.0f
+                    }
+                    d
+                }
+                for (tval in listOf(3.0f, 5.0f, 10.0f)) {
+                    val (dx, _) = g(1.0f, tval)
+                    val expected = 2.0f.pow(tval)
+                    println("${'$'}tval:${'$'}dx:${'$'}expected")
+                }
+            }
+        """.trimIndent()
+        val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN, user = src)
+        assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+        val lines = result.stdout.trim().lines()
+        assertEquals(3, lines.size, "expected 3 lines, got:\n${result.stdout}")
+        for (line in lines) {
+            val (tval, dx, expected) = line.split(":").map { it.toFloat() }
+            assertTrue(
+                kotlin.math.abs(dx + 1.0f) > 1e-3f,
+                "T=$tval dx=$dx matches broken-stub sentinel; IR transform did not fire",
+            )
+            assertTrue(
+                kotlin.math.abs(dx - expected) / kotlin.math.abs(expected) < 1e-4f,
+                "T=$tval: dx=$dx expected=$expected — symbolic-T C6 closure wrong",
+            )
+        }
+    }
+
+    @Test
     fun `ir transform gradient of raw while-loop iterate5 produces 32`() {
         // §0.4.50 — raw `while (cond) { ... }` form of the iterate5 kernel. User writes
         // the counter `k` explicitly (no synthetic for-desugaring); lowerRawWhileLoop
@@ -1818,6 +1861,7 @@ class TlalocPluginDiagnosticTest {
             fun valueAndGrad2(f: (Float, Float) -> Float): (Float, Float) -> Triple<Float, Float, Float> =
                 { _, _ -> Triple(-1.0f, -1.0f, -1.0f) }
         """.trimIndent()
+
 
         private val AUTOGRAD_STUB_DTENSOR_SCALAR = """
             package io.tlaloc.autograd

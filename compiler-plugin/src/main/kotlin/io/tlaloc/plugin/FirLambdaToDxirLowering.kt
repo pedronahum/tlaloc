@@ -489,9 +489,9 @@ object FirLambdaToDxirLowering {
         val whileLoop = statements[1] as? FirWhileLoop
             ?: throw LoweringException("desugared-for-loop second statement is not a FirWhileLoop")
 
-        val tripCount = extractForLoopTripCount(iterProp)
+        val tripBound = extractForLoopTripCount(iterProp)
             ?: throw LoweringException(
-                "for-loop range must be `0 until <concrete-Int-literal>` (B.4b scope)",
+                "for-loop range must be `0 until <int-literal-or-expr>` (B.4b scope)",
             )
 
         val innerBlock = whileLoop.block
@@ -527,14 +527,24 @@ object FirLambdaToDxirLowering {
 
         val i32s = DxirType(I32, emptyList())
         val boolS = DxirType(Bool, emptyList())
-        val counterInit = emitter.const(0, i32s)
-        val nConst = emitter.const(tripCount, i32s)
+        // §0.4.53 — counter dtype matches the bound. Concrete Int bound keeps I32 counter
+        // (preserving §0.4.39's established C5 shape); expression bound uses whatever
+        // dtype the lowered expression yields (typically F32 for a `Float` lambda param).
+        val (nBound, counterDtype) = when (tripBound) {
+            is ForLoopBound.Concrete -> emitter.const(tripBound.value, i32s) to i32s
+            is ForLoopBound.Expression -> {
+                val lowered = lowerExpr(tripBound.expr, env, emitter)
+                lowered to lowered.type
+            }
+        }
+        val counterInit = emitter.const(zeroOfDtype(counterDtype), counterDtype)
+        val counterIncr = emitter.const(oneOfDtype(counterDtype), counterDtype)
         val counterArgIdx = carriedSyms.size  // last block-arg is the counter
 
         val w = emitter.whileOp(
             inits = carriedInits + counterInit,
             cond = { args ->
-                val diff = op(OpKind.SUB, listOf(nConst, args[counterArgIdx]), i32s)
+                val diff = op(OpKind.SUB, listOf(nBound, args[counterArgIdx]), counterDtype)
                 val pred = op(OpKind.STEP, listOf(diff), boolS)
                 yields(pred)
             },
@@ -553,8 +563,7 @@ object FirLambdaToDxirLowering {
                 for (stmt in userBodyStatements) {
                     lowerStatement(stmt, env, this, isLast = false)
                 }
-                val one = const(1, i32s)
-                val newCounter = op(OpKind.ADD, listOf(args[counterArgIdx], one), i32s)
+                val newCounter = op(OpKind.ADD, listOf(args[counterArgIdx], counterIncr), counterDtype)
                 val carriedYields: Array<DxirNode> = Array(carriedSyms.size) { k -> env[carriedSyms[k]]!! }
                 yields(*carriedYields, newCounter)
             },
@@ -565,10 +574,22 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * Extract the trip-count `N` from the synthetic `val <iterator> = (0 until N).iterator()`
-     * property. Returns null on any shape mismatch (caller throws [LoweringException]).
+     * §0.4.53 — for-loop trip-count is either a concrete Int literal or an arbitrary
+     * FIR expression (typically a lambda-param reference, e.g., `for (i in 0 until T)`
+     * where T is `Int`/`Float`). The expression path lowers inside
+     * [lowerDesugaredForLoop] via [lowerExpr] so PhiCalculus's C6 `TripCount.Symbolic`
+     * path can close loops whose trip count is a runtime parameter.
      */
-    private fun extractForLoopTripCount(iterProp: FirProperty): Int? {
+    private sealed interface ForLoopBound {
+        data class Concrete(val value: Int) : ForLoopBound
+        data class Expression(val expr: FirExpression) : ForLoopBound
+    }
+
+    /**
+     * Extract the trip-count `N` from the synthetic `val <iterator> = (0 until N).iterator()`
+     * property. Returns null on shape mismatch (not a `0 until …` range).
+     */
+    private fun extractForLoopTripCount(iterProp: FirProperty): ForLoopBound? {
         val iterInit = iterProp.initializer as? FirFunctionCall ?: return null
         val iterSym = iterInit.calleeReference.toResolvedCallableSymbol() ?: return null
         if (iterSym.callableId?.callableName?.asString() != "iterator") return null
@@ -579,11 +600,13 @@ object FirLambdaToDxirLowering {
         if (rangeCid.callableName.asString() != "until") return null
         val startExpr = receiver(rangeExpr) as? FirLiteralExpression ?: return null
         if ((startExpr.value as? Number)?.toInt() != 0) return null
-        val endExpr = rangeExpr.argumentList.arguments.firstOrNull() as? FirLiteralExpression
-            ?: return null
-        val endValue = (endExpr.value as? Number)?.toInt() ?: return null
-        if (endValue < 0) return null
-        return endValue
+        val endExpr = rangeExpr.argumentList.arguments.firstOrNull() ?: return null
+        if (endExpr is FirLiteralExpression) {
+            val endValue = (endExpr.value as? Number)?.toInt() ?: return null
+            if (endValue < 0) return null
+            return ForLoopBound.Concrete(endValue)
+        }
+        return ForLoopBound.Expression(endExpr)
     }
 
     /**
@@ -808,6 +831,23 @@ object FirLambdaToDxirLowering {
         is Int -> I32
         is Long -> I64
         else -> null
+    }
+
+    /** §0.4.53 — dtype-matched zero/one constants for synthesizing for-loop counters. */
+    private fun zeroOfDtype(type: DxirType): Any = when (type.dtype) {
+        F32 -> 0.0f
+        F64 -> 0.0
+        I32 -> 0
+        I64 -> 0L
+        else -> throw LoweringException("unsupported counter dtype ${type.dtype}")
+    }
+
+    private fun oneOfDtype(type: DxirType): Any = when (type.dtype) {
+        F32 -> 1.0f
+        F64 -> 1.0
+        I32 -> 1
+        I64 -> 1L
+        else -> throw LoweringException("unsupported counter dtype ${type.dtype}")
     }
 
     private fun ConeKotlinType.renderForError(): String =

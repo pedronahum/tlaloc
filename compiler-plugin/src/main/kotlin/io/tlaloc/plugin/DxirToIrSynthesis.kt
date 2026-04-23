@@ -288,6 +288,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.BROADCAST) return irBroadcast(op, env, context)
         if (op.op == OpKind.SQRT) return irSqrt(op, env, context)
         if (op.op == OpKind.POW) return irPow(op, env, context)
+        if (op.op == OpKind.LOG) return irLog(op, env, context)
+        if (op.op == OpKind.EXP) return irExp(op, env, context)
         if (op.op == OpKind.CAST) return irCast(op, env, context)
         if (op.op == OpKind.GATHER) return irGather(op, env, context)
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
@@ -781,6 +783,67 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             params.size == 2 && params[0].type == targetType && params[1].type == targetType
+        }
+    }
+
+    /**
+     * §0.4.53 — `OpKind.LOG(x)` → `kotlin.math.ln(x)`. Emitted by C6's closed-form
+     * differentiation wrt a symbolic trip count: `d/dn (a^n) = a^n · ln(a)`. No LOG
+     * support in synthesis previously because BGDHyperOpt's gradient was wrt the
+     * hyperparameter (r, inside `a`) not wrt the iteration count; symbolic T changes
+     * that. Scalar-only (F32 / F64).
+     */
+    private fun IrBuilderWithScope.irLog(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("ln"))
+
+    /**
+     * §0.4.53 — `OpKind.EXP(x)` → `kotlin.math.exp(x)`. Mirrors [irLog]; kept here so
+     * any future C6/C7 closed form that differentiates into an `exp` term has a
+     * synthesis path. Scalar-only (F32 / F64).
+     */
+    private fun IrBuilderWithScope.irExp(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("exp"))
+
+    private fun IrBuilderWithScope.irUnaryMathCall(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+        callable: Name,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        if (!op.type.isScalar) return null
+        val operandDecl = env[op.operands[0].id] ?: return null
+        val ty = irTypeFor(op.type, context) ?: return null
+        val sym = mathModuleSymbolFor(op.type.dtype, callable) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = ty,
+            symbol = sym,
+        )
+        call.arguments[0] = irGet(operandDecl)
+        return call
+    }
+
+    private fun mathModuleSymbolFor(dtype: DType, callable: Name): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("kotlin.math"),
+            callableName = callable,
+        )
+        val targetType = when (dtype) {
+            F32 -> pluginContext.irBuiltIns.floatType
+            F64 -> pluginContext.irBuiltIns.doubleType
+            else -> return null
+        }
+        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+            val params = sym.owner.parameters
+            params.size == 1 && params[0].type == targetType
         }
     }
 
