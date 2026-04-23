@@ -1,0 +1,22 @@
+[versions]
+kotlin = "2.2.20"
+kotlinx-coroutines = "1.10.2"
+kotest = "5.9.1"
+# Stage B coarsening — symbolic engine. LGPL-3.0 (not Apache-2.0 as docs/STAGE_B_PLAN.md
+# §10.2 originally claimed; corrected in §0.4.13). LGPL allows linking from non-LGPL
+# code, so Tlaloc's eventual Apache-2.0 license is unaffected — but modifications to
+# matheclipse-core itself would be LGPL, so we treat Symja as a strict runtime
+# dependency, never a fork-and-patch surface.
+symja = "3.1.1"
+
+[libraries]
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
+kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
+kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
+kotlin-compiler-embeddable = { module = "org.jetbrains.kotlin:kotlin-compiler-embeddable", version.ref = "kotlin" }
+symja-core = { module = "org.matheclipse:matheclipse-core", version.ref = "symja" }
+
+[plugins]
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

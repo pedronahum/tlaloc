@@ -1,0 +1,280 @@
+package io.tlaloc.plugin
+
+import io.tlaloc.ir.DxirFunction
+import io.tlaloc.ir.passes.CoarseningCache
+import io.tlaloc.ir.passes.DiskCoarseningCache
+import io.tlaloc.ir.passes.DxirReverseTransform
+import io.tlaloc.ir.passes.NoOpCoarseningCache
+import io.tlaloc.ir.passes.PhiCalculus
+import io.tlaloc.ir.passes.SymbolicEngine
+import io.tlaloc.ir.passes.SymjaEngine
+import io.tlaloc.ir.pretty
+import java.nio.file.Path
+import java.nio.file.Paths
+import org.jetbrains.kotlin.backend.common.IrElementTransformerVoidWithContext
+import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
+import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
+import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
+import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.expressions.IrCall
+import org.jetbrains.kotlin.ir.expressions.IrExpression
+import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
+import org.jetbrains.kotlin.ir.util.callableId
+
+/**
+ * Session-4 IR phase. Walks every [IrCall] in the module fragment; for each call whose
+ * callee FQN matches a Tlaloc `grad` / `valueAndGrad` intrinsic AND whose source range
+ * has a matching [TlalocLoweringHandoff] entry (populated by the FIR checker), synthesise
+ * a fresh lambda expression that evaluates the forward pass of the stored [DxirFunction]
+ * and return it in place of the original call.
+ *
+ * Session-4 scope is forward-only: `grad` and friends, at the IR level, currently return
+ * the same scalar value the user's lambda would produce (not the derivative). The `grad`
+ * transform is the next item; this work is the machinery that lets `grad` lower to plain
+ * Kotlin bytecode in the first place. If the synthesis fails (e.g. the DxirFunction
+ * references a tensor type or an op outside the primitive-scalar surface), we fall back
+ * to the original call so the runtime-tape path in `:autograd` still runs.
+ *
+ * For every match — even when synthesis is skipped — we emit a `WARNING` via the plugin's
+ * message collector naming the DxirFunction. That diagnostic is also what the older
+ * scaffolding-era test asserts against.
+ */
+class TlalocIrGenerationExtension : IrGenerationExtension {
+
+    @OptIn(UnsafeDuringIrConstructionAPI::class)
+    override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
+        // IrPluginContext.messageCollector is deprecated in favour of `diagnosticReporter`
+        // (KT-78277). Migrating would require declaring IR-phase diagnostic factories + a
+        // renderer that preserves the "Tlaloc IR extension saw handoff …" prefix that the
+        // scaffolding test asserts on; that refactor is tracked separately and is a clean
+        // lift once the grad transform lands and the diagnostic surface stabilises. For
+        // now we keep the MessageCollector path and silence the deprecation locally.
+        @Suppress("DEPRECATION")
+        val mc = pluginContext.messageCollector
+        val synth = DxirToIrSynthesis(pluginContext)
+        // §0.4.24 — SymjaEngine is lazy-initialised once per compilation invocation so
+        // Symja's ~1-3s classload cost amortises across all `grad`/`valueAndGrad` call
+        // sites in the module. Null if instantiation fails (classpath issue, Log4j init,
+        // …); in that case PhiCalculus.apply runs engine-free, which is sufficient for
+        // IF-only primals (F1/F2/F3/C3 fire; C5-C9 silently skip). Loop primals (Stage
+        // B.4b) will want a hard error instead.
+        val engineLazy: Lazy<SymbolicEngine?> = lazy(LazyThreadSafetyMode.NONE) {
+            try { SymjaEngine() } catch (_: Throwable) { null }
+        }
+        // §0.4.26 — coarsening cache (plan §5.4). Opt-in via system property
+        // `tlaloc.cache.dir=<path>` (default: disabled). When enabled, PhiCalculus.apply's
+        // output is memoised against the input primal's canonical SHA-256 hash, keyed
+        // additionally by the CAS version string so a Symja / plugin bump invalidates
+        // stale entries. Disabled by default because introducing disk state to every
+        // compilation unit is a deliberate opt-in; most existing test harnesses don't
+        // need it. CI / dev environments set the property in Gradle to enable.
+        val cache: CoarseningCache = buildCoarseningCache(mc)
+
+        val transformer = object : IrElementTransformerVoidWithContext() {
+            override fun visitCall(expression: IrCall): IrExpression {
+                val transformed = super.visitCall(expression) as IrCall
+                val ownerFn = transformed.symbol.owner
+                val cid = ownerFn.callableId
+                if (cid.className != null ||
+                    cid.packageName.asString() != "io.tlaloc.autograd" ||
+                    cid.callableName.asString() !in INTRINSIC_NAMES
+                ) return transformed
+
+                val fn: DxirFunction = TlalocLoweringHandoff.take(
+                    transformed.startOffset, transformed.endOffset,
+                ) ?: return transformed
+
+                mc.report(
+                    CompilerMessageSeverity.WARNING,
+                    "Tlaloc IR extension saw handoff for '${fn.name}':\n${fn.pretty().trimEnd()}",
+                    null,
+                )
+
+                // Stage A follow-up (§0.4.4): route all four intrinsics through the
+                // reverse-mode transform. `grad` / `grad2` emit only the gradients;
+                // `valueAndGrad` / `valueAndGrad2` prepend the primal return so the
+                // synthesiser can box a Pair / Triple with the value alongside the
+                // gradients. Gate violations (multi-return, non-scalar return, regions,
+                // multi-result ops, unsupported OpKinds) fall back to the runtime tape.
+                val callableName = cid.callableName.asString()
+                val includeForward = callableName == "valueAndGrad" || callableName == "valueAndGrad2"
+
+                // §0.4.24 — Stage B.4a. Run PhiCalculus.apply before SCT so IF/WHILE
+                // primals are coarsened ahead of the reverse transform. For IF-only
+                // primals the engine-backed corollaries never fire, so F1/F2/F3/C3
+                // suffice and null-engine is also valid. For loops (B.4b), the engine
+                // will be required. If Symja blew up during lazy init, fall through
+                // without coarsening — Stage A's post-§0.4.23 SCT handles bare IFs.
+                //
+                // §0.4.33 — Stage C.3b.3a. When the system property `tlaloc.soi.enabled`
+                // is set to "true", replace the PhiCalculus.apply call with
+                // PhiCalculus.coarsenFunction, which wraps the primal in an OpKind.
+                // COARSENED op carrying the pre-computed gradient_body. C.3b.3a scope
+                // is single-return + root-is-leaf only; multi-return + valueAndGrad
+                // paths fall back to the existing pipeline. The SOI path skips the
+                // coarsening cache because the cache is keyed by input hash (same key
+                // as the non-SOI path) — a follow-up can add a mode suffix to the key.
+                val useSoiCoarsening = System.getProperty(SOI_ENABLED_PROPERTY) == "true" &&
+                    !includeForward &&
+                    fn.returns.size == 1
+                // §0.4.36 — runtime-tunable L via the `tlaloc.soi.size.limit` property.
+                // Default 50 per plan §8.2 + paper §5 (paper's starting recommendation).
+                // Smaller values (e.g., 10-20) trigger multi-SOI branch coarsening on
+                // smaller IF primals; larger values keep whole-function coarsening for
+                // bigger primals. The sweep in `LSweepTest` shows no measurable compile-
+                // time sensitivity in the 5-200 range on typical scalar benchmarks.
+                val soiSizeLimit = System.getProperty(SOI_SIZE_LIMIT_PROPERTY)?.toIntOrNull()?.takeIf { it > 0 }
+                    ?: 50
+                val coarsened: DxirFunction = try {
+                    if (useSoiCoarsening) {
+                        PhiCalculus.coarsenFunction(fn, engineLazy.value, sizeLimit = soiSizeLimit)
+                    } else {
+                        cache.getOrCompute(fn) { PhiCalculus.apply(fn, engineLazy.value) }
+                    }
+                } catch (t: Throwable) {
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc IR extension: PhiCalculus.${if (useSoiCoarsening) "coarsenFunction" else "apply"} " +
+                            "failed on '${fn.name}' (${t::class.simpleName}: ${t.message}); " +
+                            "continuing with the raw primal",
+                        null,
+                    )
+                    fn
+                }
+                val toSynthesise: DxirFunction = tryReverseTransform(coarsened, includeForward) ?: run {
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                            "DxirReverseTransform rejected the dxir (gate violation)",
+                        null,
+                    )
+                    return transformed
+                }
+
+                val replacement = synth.synthesise(toSynthesise, transformed, currentDeclarationParent!!)
+                if (replacement == null) {
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                            "DxirFunction falls outside the scalar-primitive synthesis scope",
+                        null,
+                    )
+                    return transformed
+                }
+                // With Pair/Triple boxing in synthesis (§0.4.4), the four intrinsics'
+                // declared return types line up when the surface is scalar-primitive:
+                // `grad` → `(P) -> R`, `grad2` → `(A, B) -> Pair<A, B>`, `valueAndGrad` →
+                // `(P) -> Pair<R, P>`, `valueAndGrad2` → `(A, B) -> Triple<R, A, B>`. The
+                // guard still fires for surfaces we can't synthesise (tensors, unsupported
+                // op kinds, DScalar boxing, etc.) — in that case we keep the original call
+                // so the runtime-tape path runs.
+                if (replacement.type != transformed.type) {
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                            "synthesised type ${replacement.type} doesn't match call type " +
+                            "${transformed.type} (forward-only scope)",
+                        null,
+                    )
+                    return transformed
+                }
+                return replacement
+            }
+        }
+
+        for (file in moduleFragment.files) {
+            file.transformChildren(transformer, null)
+        }
+
+        // Clear any unclaimed entries so a re-run of the in-process compiler harness
+        // doesn't find stale handoffs from a previous invocation.
+        TlalocLoweringHandoff.clear()
+    }
+
+    /**
+     * Runs [DxirReverseTransform.apply] guarded against its hard gates. Returns `null` if
+     * the primal violates a gate (e.g., non-scalar return, regions, unsupported op kind);
+     * the caller falls back to the original runtime call.
+     */
+    private fun tryReverseTransform(primal: DxirFunction, includeForward: Boolean): DxirFunction? = try {
+        DxirReverseTransform.apply(primal, includeForward)
+    } catch (_: IllegalArgumentException) {
+        null
+    } catch (_: IllegalStateException) {
+        null
+    }
+
+    /**
+     * §0.4.26 — resolve the [CoarseningCache] impl for this compilation. Reads the
+     * system property `tlaloc.cache.dir`:
+     *
+     *  - Unset or empty → [NoOpCoarseningCache] (caching disabled; default behaviour).
+     *  - Set to a filesystem path → [DiskCoarseningCache] under that directory, keyed
+     *    by `CAS_VERSION` (Symja version × plugin version; any bump invalidates cached
+     *    entries).
+     *  - Set to `":memory:"` → an anonymous in-memory cache for tests. Not useful in
+     *    real builds but keeps the test harness from touching disk.
+     *
+     * Failures (permission errors, unwritable path) demote to NoOp + emit a WARNING;
+     * compilation continues without caching rather than erroring.
+     */
+    private fun buildCoarseningCache(mc: org.jetbrains.kotlin.cli.common.messages.MessageCollector): CoarseningCache {
+        val raw = System.getProperty(CACHE_DIR_PROPERTY).orEmpty().trim()
+        if (raw.isEmpty()) return NoOpCoarseningCache
+        if (raw == ":memory:") return io.tlaloc.ir.passes.InMemoryCoarseningCache()
+        return try {
+            val dir: Path = Paths.get(raw).toAbsolutePath()
+            DiskCoarseningCache(dir, CAS_VERSION)
+        } catch (t: Throwable) {
+            mc.report(
+                CompilerMessageSeverity.WARNING,
+                "Tlaloc IR extension: coarsening cache disabled — failed to open '$raw' " +
+                    "(${t::class.simpleName}: ${t.message})",
+                null,
+            )
+            NoOpCoarseningCache
+        }
+    }
+
+    companion object {
+        private val INTRINSIC_NAMES: Set<String> = setOf(
+            "grad", "grad2", "valueAndGrad", "valueAndGrad2",
+        )
+
+        /**
+         * System property name the plugin reads to decide where to write cache entries.
+         * Unset = caching disabled. See [buildCoarseningCache] for accepted values.
+         */
+        const val CACHE_DIR_PROPERTY: String = "tlaloc.cache.dir"
+
+        /**
+         * §0.4.33 — system property toggling Stage C.3b.3a SOI-based coarsening.
+         * When set to "true", `grad { ... }` calls route through
+         * [PhiCalculus.coarsenFunction] (wraps the primal in an OpKind.COARSENED op
+         * with pre-computed gradient_body). `valueAndGrad` + multi-return primals
+         * continue to use the existing [PhiCalculus.apply] path because C.3b.3a
+         * doesn't yet handle them.
+         */
+        const val SOI_ENABLED_PROPERTY: String = "tlaloc.soi.enabled"
+
+        /**
+         * §0.4.36 — system property overriding the SOI size-limit `L` when coarsening is
+         * enabled. Must be a positive integer. Unset / invalid values fall back to the
+         * paper-informed default of 50 (plan §8.2). `LSweepTest` in `:ir/jvmTest` sweeps
+         * L ∈ {5, 25, 50, 100, 200} across a benchmark suite to inform tuning; see
+         * §0.4.36 for empirical findings.
+         */
+        const val SOI_SIZE_LIMIT_PROPERTY: String = "tlaloc.soi.size.limit"
+
+        /**
+         * CAS version string per plan §3.2.2 — bumps invalidate cached entries. Tied to
+         * the plugin build (bump on plugin code changes that alter PhiCalculus output or
+         * reverse-transform semantics) AND to Symja's resolved runtime version. Format:
+         * `"tlaloc-<plugin>-symja-<symja>"`. The Symja version is read lazily (Symja's
+         * package-info may not load until the first engine instantiation), so we bake a
+         * build-time placeholder here and callers that need Symja-version-keyed cache
+         * behaviour can override by recomputing.
+         */
+        const val CAS_VERSION: String = "tlaloc-0.4.26-symja-3.0.0"
+    }
+}
