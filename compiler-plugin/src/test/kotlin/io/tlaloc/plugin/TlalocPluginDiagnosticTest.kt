@@ -1072,6 +1072,54 @@ class TlalocPluginDiagnosticTest {
     }
 
     @Test
+    fun `ir transform gradient of symbolic-T for-loop matches 2 power T`() {
+        // §0.4.54 — `for (i in 0 until T)` where T is a grad2 lambda param (Int).
+        // extractForLoopTripCount (§0.4.53) accepts non-literal bounds; the counter
+        // dtype matches the bound (I32 here). C6 closes via `TripCount.Symbolic`
+        // to `2^T · x`. §0.4.54 forces the gradient-wrt-T slot to `const(0, I32)`,
+        // letting synthesis box the result as `Pair<Float, Int>` without the Float
+        // dExp from PowRule's CAST-to-float adjoint path.
+        val src = """
+            import io.tlaloc.autograd.grad2
+            import kotlin.math.pow
+            fun main() {
+                val g = grad2 { x: Float, T: Int ->
+                    var d = x
+                    for (i in 0 until T) {
+                        d = d * 2.0f
+                    }
+                    d
+                }
+                for (tval in listOf(3, 5, 10)) {
+                    val (dx, dT) = g(1.0f, tval)
+                    val expected = 2.0f.pow(tval.toFloat())
+                    println("${'$'}tval:${'$'}dx:${'$'}expected:${'$'}dT")
+                }
+            }
+        """.trimIndent()
+        val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN_FLOAT_INT, user = src)
+        assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+        val lines = result.stdout.trim().lines()
+        assertEquals(3, lines.size, "expected 3 lines, got:\n${result.stdout}")
+        for (line in lines) {
+            val parts = line.split(":")
+            val tval = parts[0].toInt()
+            val dx = parts[1].toFloat()
+            val expected = parts[2].toFloat()
+            val dT = parts[3].toInt()
+            assertTrue(
+                kotlin.math.abs(dx + 1.0f) > 1e-3f,
+                "T=$tval dx=$dx matches broken-stub sentinel; IR transform did not fire",
+            )
+            assertTrue(
+                kotlin.math.abs(dx - expected) / kotlin.math.abs(expected) < 1e-4f,
+                "T=$tval: dx=$dx expected=$expected — symbolic-T for-loop C6 closure wrong",
+            )
+            assertEquals(0, dT, "T=$tval: gradient wrt Int param should be structurally zero")
+        }
+    }
+
+    @Test
     fun `ir transform gradient of raw while-loop iterate5 produces 32`() {
         // §0.4.50 — raw `while (cond) { ... }` form of the iterate5 kernel. User writes
         // the counter `k` explicitly (no synthetic for-desugaring); lowerRawWhileLoop
@@ -1860,6 +1908,13 @@ class TlalocPluginDiagnosticTest {
                 { _ -> -1.0f to -1.0f }
             fun valueAndGrad2(f: (Float, Float) -> Float): (Float, Float) -> Triple<Float, Float, Float> =
                 { _, _ -> Triple(-1.0f, -1.0f, -1.0f) }
+        """.trimIndent()
+
+        /** §0.4.54 — grad2 stub for `(Float, Int) -> Float`; symbolic-T for-loop tests. */
+        private val AUTOGRAD_STUB_BROKEN_FLOAT_INT = """
+            package io.tlaloc.autograd
+            fun grad2(f: (Float, Int) -> Float): (Float, Int) -> Pair<Float, Int> =
+                { _, _ -> -1.0f to -1 }
         """.trimIndent()
 
 

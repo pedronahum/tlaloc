@@ -39,6 +39,61 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.54 Stage D.3iii-i — integer-param gradients emit typed zero; for-loop symbolic T closes end-to-end 2026-04-24
+
+D.3iii-i closes the Int-gradient synthesis issue D.3iii filed. `grad2 { x: Float, T: Int -> for (i in 0 until T) { ... } }` now lowers, coarsens, SCT-transforms, and synthesises cleanly: gradient wrt `x` is the C6 closed form (`2^T · x` for the doubling kernel); gradient wrt `T` is `const(0, I32)`, matching the `grad2` call's `Pair<Float, Int>` return type. With D.3iii shipping raw-while symbolic T and D.3iii-i closing the for-loop path, **both loop surfaces now accept runtime-parameter T**.
+
+**Single change** ([DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt)). In the per-param gradient-return assembly:
+
+```kotlin
+val gradReturns = primal.params.map { p ->
+    if (isIntegerDtype(p.type.dtype)) {
+        const(zeroValueFor(p.type.dtype), p.type)
+    } else {
+        gradAccum[p.id] ?: const(zeroValueFor(p.type.dtype), p.type)
+    }
+}
+```
+
+Integer-typed params (I32, I64, Bool) aren't differentiable — their gradient is structurally zero. Pre-§0.4.54 the VJP chain happened to compute SOMETHING (often a Float-typed expression arising from `PowRule.dExp`'s CAST path, cf. §0.4.53), which type-mismatched against the `primal.params[i].type` slot in the grad function's return list. Synthesis then failed to box the mismatched return types into the expected `Pair`. The fix short-circuits integer params to a typed zero regardless of what the VJP chain accumulated — mathematically correct (integer params aren't a continuous axis of variation) and type-correct (matches `primal.params[i].type`).
+
+`zeroValueFor` gained a `Bool → 0.0f` arm (Bool uses F32 0/1 encoding per §0.4.14's STEP/NOT convention); `isIntegerDtype` is a local predicate.
+
+**Test added**:
+
+- [`TlalocPluginDiagnosticTest.ir transform gradient of symbolic-T for-loop matches 2 power T`](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginDiagnosticTest.kt) — `grad2 { x: Float, T: Int -> for (i in 0 until T) d = d*2; d }` at T = 3, 5, 10 from the same compiled lambda. Asserts both that `dx = 2^T` (C6 closure correct) AND that `dT == 0` (Int-param zero-grad invariant).
+
+**Decisions worth flagging**:
+
+- **Force-zero is simpler than type-rewriting.** An alternative would be to cast the VJP-accumulated float gradient back to the Int type at the grad-return boundary (`CAST(Float → I32)`, truncating). That preserves the "compute a gradient then type-coerce" shape but doesn't reflect the underlying semantics — an Int param's gradient is zero, not "the float gradient truncated". Force-zero also eliminates wasted compute for any Int-param derivative path that would otherwise be emitted and then discarded at the boundary.
+
+- **Bool is in the zero-grad set too.** Bool params aren't a surface users write today — `grad2 { x: Float, b: Boolean -> ... }` isn't a legitimate differentiable shape — but the IR supports Bool through `OpKind.STEP`/`NOT` internals, so covering it here keeps the predicate uniform. If a future surface exposes Bool params directly, this decision pre-answers "what's d/dBool".
+
+- **PowRule's I32 / I64 exp CAST (§0.4.53) is still needed.** Even though we now emit zero for Int-param gradients at the TOP-LEVEL, PowRule's adjoint for `POW(base, int_exp)` still needs to compute `dBase` = `upstream · exp · base^(exp-1)` — which requires Float arithmetic on `exp`. The CAST is about intermediate gradient computation within the chain, orthogonal to the grad-return type.
+
+**Stage D status (post-§0.4.54)** — BGDHyperOpt line upgraded to note symbolic-T for-loop:
+
+| # | benchmark | status |
+|---|-----------|--------|
+| 1 | **BGDHyperOpt** | full source port, paper-speedup closure + **symbolic T via raw-while AND for-loop** (§0.4.52 / §0.4.53 / §0.4.54) |
+| 2 | **HookeanSpring** | full port (§0.4.47) |
+| 3 | **Brachistochrone** | full port (§0.4.43) |
+| 4 | HMC | not ported |
+| 5 | CartPole | not ported |
+| 6 | QWOP | not ported |
+
+**Recommended next pickup**:
+
+1. **D.3ii break-hoisted WHILE closure** — paper-faithful convergence break. Symbolic inequality solving.
+2. **D.4 HMC** — paper's hardest control-flow benchmark.
+3. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement from a single binary.
+4. **D.1i Symja Simplify on grad expressions** — complementary optimization.
+
+**Definition-of-done for §0.4.54 — met**:
+- Int-typed param gradients emit a typed zero regardless of VJP accumulation ✓
+- `grad2 { x, T: Int -> for (i in 0 until T) ... }` ports end-to-end; grad wrt x = `2^T · x`; grad wrt T = 0 ✓
+- Full suite green; no regression in Brachistochrone / HookeanSpring / BGDHyperOpt ✓
+
 #### 0.4.53 Stage D.3iii — symbolic trip counts: raw-while with runtime-parameter T closes via C6 2026-04-24
 
 D.3iii lifts the concrete-literal-only restriction on loop trip counts. User code can now write `while (k < T) { ... }` where `T` is a lambda parameter (Float or Double), and C6's existing `TripCount.Symbolic` path produces an O(1) closed form in terms of T. The same compiled gradient lambda now handles any runtime T without recompiling per size — the prerequisite for paper-relevant `T = 50 / 100 / 500` benchmarking from a single binary.

@@ -260,10 +260,20 @@ object DxirReverseTransform {
             }
 
             // --- 4. Returns: gradient per primal param. Unused params get a typed zero.
+            //        §0.4.54 — Integer-typed params (I32, I64, Bool) aren't differentiable.
+            //        Emit a typed zero regardless of what the VJP chain accumulated, so
+            //        the grad function's return types match `primal.params.types` for the
+            //        synthesis's Pair/Triple boxing. Without this, PowRule-style chains
+            //        that CAST Int exponents to Float for adjoint arithmetic produce a
+            //        Float-typed dExp which doesn't type-check against an Int-typed param.
             //        When `includeForward`, prepend the cloned primal return so the caller
             //        can emit `valueAndGrad` / `valueAndGrad2` without re-running forward. ---
             val gradReturns = primal.params.map { p ->
-                gradAccum[p.id] ?: const(zeroValueFor(p.type.dtype), p.type)
+                if (isIntegerDtype(p.type.dtype)) {
+                    const(zeroValueFor(p.type.dtype), p.type)
+                } else {
+                    gradAccum[p.id] ?: const(zeroValueFor(p.type.dtype), p.type)
+                }
             }
             if (includeForward) {
                 val forwardReturn = nodeMap[ret.id]
@@ -1029,6 +1039,11 @@ object DxirReverseTransform {
         F64 -> 0.0
         I32 -> 0
         I64 -> 0L
+        io.tlaloc.core.Bool -> 0.0f  // Bool dtype uses F32 0/1 encoding (see OpKind.STEP/NOT comments).
         else -> error("DxirReverseTransform: cannot zero-seed gradient for dtype $dtype")
     }
+
+    /** §0.4.54 — integer dtypes whose gradients are structurally zero. */
+    private fun isIntegerDtype(dtype: io.tlaloc.core.DType): Boolean =
+        dtype == I32 || dtype == I64 || dtype == io.tlaloc.core.Bool
 }
