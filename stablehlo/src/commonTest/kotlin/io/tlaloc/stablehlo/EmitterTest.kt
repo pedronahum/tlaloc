@@ -72,6 +72,30 @@ class EmitterTest {
     }
 
     @Test
+    fun emitsRankNFloatArrayConstAsNestedDenseLiteral() {
+        // §0.4.73 — rank-N DxirConst carrying a FloatArray (the form produced by
+        // §0.4.71's Capture fix) formats as a nested dense<...> literal matching
+        // the declared shape. Scalars still go through the existing Float/Double
+        // arm (Capture.kt unpacks `value[0]` for rank-0 leaves, so a scalar const's
+        // value is a Float, not a FloatArray).
+        val rank1Fn = DxirBuilder.function("c1") {
+            val c = const(floatArrayOf(1f, 2f, 3f), DxirType(F32, listOf(3)))
+            listOf(c)
+        }
+        val mlir1 = rank1Fn.toStablehlo()
+        assertTrue(mlir1.contains("dense<[1.0, 2.0, 3.0]>"), "rank-1 dense literal missing: $mlir1")
+        assertTrue(mlir1.contains("tensor<3xf32>"), mlir1)
+
+        val rank2Fn = DxirBuilder.function("c2") {
+            val c = const(floatArrayOf(1f, 2f, 3f, 4f), DxirType(F32, listOf(2, 2)))
+            listOf(c)
+        }
+        val mlir2 = rank2Fn.toStablehlo()
+        assertTrue(mlir2.contains("dense<[[1.0, 2.0], [3.0, 4.0]]>"), "rank-2 nested dense missing: $mlir2")
+        assertTrue(mlir2.contains("tensor<2x2xf32>"), mlir2)
+    }
+
+    @Test
     fun emitsBooleanOps() {
         // §0.4.60 — NOT and LAND lower to `stablehlo.not` / `stablehlo.and` on
         // Bool (i1) inputs. The ops were introduced by Stage B (F3 canonical-

@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.73 StableHLO emitter: `FloatArray` const arm — closes the rank-N capture round-trip 2026-04-24
+
+§0.4.72 fixed the interpreter's `DxirConst` handler to accept `FloatArray` values so captured rank-N constants could evaluate end-to-end. The parallel fix for the StableHLO emitter was filed as a follow-up — this session lands it. Captured rank-N constants now round-trip cleanly through `stablehlo-translate --serialize`, closing the last piece of the Capture → StableHLO pipeline for the §0.4.71-introduced FloatArray const form.
+
+**The fix** in [Emitter.kt:emitConst](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt): added a `is FloatArray -> denseFromArray(v, node.type.dims)` arm. The new private `denseFromArray` helper recursively formats the row-major array as a nested MLIR dense literal matching the declared shape:
+
+- rank-1 `[3]` → `[1.0, 2.0, 3.0]`
+- rank-2 `[2, 2]` → `[[1.0, 2.0], [3.0, 4.0]]`
+- rank-3 `[2, 2, 2]` → `[[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]`
+
+Then the existing `stablehlo.constant dense<$literal> : ${node.type.toMlir()}` emission sends the whole thing through, producing a valid MLIR `stablehlo.constant` op that `stablehlo-translate` accepts.
+
+**Two new tests**:
+
+1. [`EmitterTest.emitsRankNFloatArrayConstAsNestedDenseLiteral`](stablehlo/src/commonTest/kotlin/io/tlaloc/stablehlo/EmitterTest.kt) — string-match assertion on the emitted literal for rank-1 `[3]` and rank-2 `[2, 2]`. Pins the specific nesting shape.
+
+2. [`RoundTripTest.floatArrayConstsRoundTrip`](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) — sends rank-1 `[3]`, rank-1 `[4]`, rank-2 `[2, 2]`, rank-2 `[3, 2]`, and rank-3 `[2, 2, 2]` const-only DxirFunctions through `stablehlo-translate --serialize --target=1.0.0`. All five accepted as valid MLIR. The rank-3 case is there to prove the recursive formatter handles depth > 2.
+
+**Decisions worth flagging**:
+
+- **Scalar DxirConst still lowers via the existing `Number` arms.** `Capture.kt:32` unpacks `e.value[0]` for rank-0 leaves, so scalar const values are `Float` (or `Double`), not `FloatArray`. The new FloatArray arm is strictly rank ≥ 1. `denseFromArray` has a `require(dims.isNotEmpty())` guard against accidental rank-0 callers — fast-fail if a future refactor tries to route scalars through this path.
+
+- **Recursive slice via `FloatArray(chunkSize) { j -> values[i * chunkSize + j] }` rather than `sliceArray`**. Same result, avoids the intermediate copy that `sliceArray` would make (it allocates an IntRange object and then copies). Marginal perf difference; cleaner to keep explicit.
+
+- **`joinToString` on the base case.** The inner rank-1 formatter uses `joinToString(prefix="[", postfix="]") { it.toString() }`. Float's `toString()` emits a canonical form that MLIR accepts (`1.0`, `2.5E-3`, `NaN`, etc.). Considered formatting with `String.format("%g", ...)` for consistency, but MLIR's dense literal parser accepts Kotlin's canonical form, and imposing a format mask could round-trip-break numbers that lose precision under `%g`'s default width.
+
+- **Did NOT add a `capture + round-trip-through-stablehlo-translate` integration test.** That would extend `RoundTripTest` with a `capture { x -> x + x.constant(floatArrayOf(...)) }` → `toStablehlo()` → `stablehlo-translate` pipeline. Useful belt-and-braces but outside the minimum closing — `EmitterTest` pins the format, `RoundTripTest` pins MLIR validity, `CaptureTest` pins the interpreter path. All three combined cover the full chain. Filed as a future belt-and-braces case.
+
+**Tests added** (+2 new; +5 validated shapes inside the second test):
+
+- `EmitterTest.emitsRankNFloatArrayConstAsNestedDenseLiteral`
+- `RoundTripTest.floatArrayConstsRoundTrip` (covers rank-1 / rank-2 / rank-3)
+
+Full suite is green: **626 tests** (+2 over §0.4.72).
+
+**Recommended next pickup** (shrinks further):
+
+1. **Scalar-rank broadcasting for `+` / `-` / `*` / `/`** — genuine broadcast arithmetic.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+3. **D.1i Symja `Simplify` on grad expressions** — paper mechanism (ii).
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling.
+5. **`diagnosticReporter` migration** — cosmetic.
+6. **End-to-end `capture + stablehlo-translate` with rank-N const** — belt-and-braces pipeline test.
+
+**Definition-of-done for §0.4.73 — met**:
+- `Emitter.emitConst` handles `FloatArray` values via nested dense literal ✓
+- Recursive formatter covers arbitrary rank ≥ 1 ✓
+- Unit test pins the literal shape; round-trip test pins MLIR validity across rank-1/2/3 ✓
+- Full suite green at 626 tests (+2) ✓
+
 #### 0.4.72 DxirInterpreter: handle `FloatArray` const values; rank-1/rank-2 capture-with-const tests 2026-04-24
 
 Direct belt-and-braces follow-up to §0.4.71. Adding rank-1 and rank-2 capture-with-const regression tests immediately surfaced a SECOND latent bug: `DxirInterpreter`'s `DxirConst` handler only accepted `Number` values (single scalar → splat). The §0.4.71 fix stored rank-N const values as `FloatArray`; feeding that through `DxirInterpreter.evalFunction` crashed with "non-numeric const value". So even though §0.4.71 repaired Capture, the resulting captured function wouldn't evaluate end-to-end for rank > 0.

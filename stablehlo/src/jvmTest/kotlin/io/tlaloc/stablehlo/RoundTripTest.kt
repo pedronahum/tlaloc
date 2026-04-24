@@ -102,6 +102,30 @@ class RoundTripTest {
     }
 
     @Test
+    fun floatArrayConstsRoundTrip() {
+        // §0.4.73 — captured rank-N `FloatArray` consts (introduced by §0.4.71's
+        // Capture fix) now emit as nested dense<...> literals. Round-trips
+        // through `stablehlo-translate --serialize` to confirm the literal is
+        // MLIR-valid at rank 1, rank 2, and rank 3.
+        requireTranslateOrSkip()
+        val cases = listOf(
+            "rank-1 [3]" to (floatArrayOf(1f, 2f, 3f) to listOf(3)),
+            "rank-1 [4]" to (floatArrayOf(1f, 2f, 3f, 4f) to listOf(4)),
+            "rank-2 [2, 2]" to (floatArrayOf(1f, 2f, 3f, 4f) to listOf(2, 2)),
+            "rank-2 [3, 2]" to (floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f) to listOf(3, 2)),
+            "rank-3 [2, 2, 2]" to (floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f) to listOf(2, 2, 2)),
+        )
+        for ((label, pair) in cases) {
+            val (values, dims) = pair
+            val fn = DxirBuilder.function("c") {
+                val c = const(values, DxirType(F32, dims))
+                listOf(c)
+            }
+            validate(DxirModule(listOf(fn)).toStablehlo(), "FloatArray const $label")
+        }
+    }
+
+    @Test
     fun booleanOpsRoundTrip() {
         // §0.4.61 — paired with §0.4.60's NOT/LAND emitter arms. The internal
         // `EmitterTest.emitsBooleanOps` only string-matches the output; this test

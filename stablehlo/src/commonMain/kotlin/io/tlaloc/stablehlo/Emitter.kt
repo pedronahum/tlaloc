@@ -111,9 +111,34 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             is Double -> v.toString()
             is Int -> v.toString()
             is Long -> v.toString()
+            // §0.4.73 — rank-N const carries a FloatArray (§0.4.71 Capture fix,
+            // §0.4.72 DxirInterpreter fix). Format as a nested dense literal
+            // matching the declared type's dims. Rank-0 literal goes through
+            // the Float/Double arms above because the scalar capture path uses
+            // `e.value[0]` directly; FloatArray here is strictly rank ≥ 1.
+            is FloatArray -> denseFromArray(v, node.type.dims)
             else -> error("non-numeric DxirConst value: $v (${v::class.simpleName})")
         }
         out.appendLine("$step$name = stablehlo.constant dense<$literal> : ${node.type.toMlir()}")
+    }
+
+    /**
+     * §0.4.73 — format a row-major `FloatArray` as an MLIR dense literal matching
+     * [dims]. Rank-1 produces `[1.0, 2.0, 3.0]`; rank-2 produces
+     * `[[1.0, 2.0], [3.0, 4.0]]`; rank-N is recursive. Matches the syntax
+     * `stablehlo-translate` consumes for `stablehlo.constant dense<...> : tensor<RxCxf32>`.
+     */
+    private fun denseFromArray(values: FloatArray, dims: List<Int>): String {
+        require(dims.isNotEmpty()) { "denseFromArray: empty dims (use the scalar arm instead)" }
+        if (dims.size == 1) return values.joinToString(prefix = "[", postfix = "]") { it.toString() }
+        val outer = dims[0]
+        val inner = dims.drop(1)
+        val chunkSize = values.size / outer
+        val chunks = (0 until outer).map { i ->
+            val slice = FloatArray(chunkSize) { j -> values[i * chunkSize + j] }
+            denseFromArray(slice, inner)
+        }
+        return chunks.joinToString(prefix = "[", postfix = "]")
     }
 
     private fun emitOp(step: String, node: DxirOp) {
