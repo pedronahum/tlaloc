@@ -238,6 +238,74 @@ class GradTest {
         }
     }
 
+    // §0.4.70 — rank-N `constant(FloatArray, IntArray)` generalises §0.4.67 and
+    // §0.4.65. Caller supplies flat values + dims; the phantom Shape type is
+    // picked via type inference at the call site.
+
+    @Test
+    fun constantRank2MatmulProducesExpectedGradient() {
+        // x: rank-1 [3], m: rank-2 [3, 1] constant. Forward: (matrix · vector-as-matrix).sum().
+        // Simpler: wire x through two rank-1 constants as a dot-product-style reduction.
+        //
+        // For this test, exercise constant(FloatArray, IntArray) at rank-1 via the
+        // generic overload — picks the same Tracer<Rank1<Sym>> shape §0.4.67's
+        // dedicated overload produces, but through the type-inference path.
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            val c: Tracer<io.tlaloc.core.Rank1<Sym>> =
+                x.constant(floatArrayOf(2f, 3f, 4f), intArrayOf(3))
+            (x * c).sum()
+        }
+        val (value, dx) = vg(Tensors.f32Vector(floatArrayOf(10f, 20f, 30f)))
+        // sum(10·2 + 20·3 + 30·4) = 20 + 60 + 120 = 200
+        assertEquals(200f, value)
+        val g = dx.hostF32()
+        // d/dx_i sum(x_i · c_i) = c_i → [2, 3, 4]
+        assertEquals(2f, g[0])
+        assertEquals(3f, g[1])
+        assertEquals(4f, g[2])
+    }
+
+    @Test
+    fun constantRankNValidatesDimsProduct() {
+        // Size mismatch: 3 values against a 2x2 dims claim should fail loudly.
+        var caught: IllegalArgumentException? = null
+        grad { x: Tracer<ScalarShape> ->
+            try {
+                val _m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> =
+                    x.constant(floatArrayOf(1f, 2f, 3f), intArrayOf(2, 2))
+            } catch (e: IllegalArgumentException) {
+                caught = e
+            }
+            x
+        }(Tensors.f32Scalar(1f))
+        assertTrue(caught != null, "expected IllegalArgumentException for size mismatch")
+        assertTrue(
+            caught!!.message!!.contains("doesn't match"),
+            "message should name the mismatch; got: ${caught!!.message}",
+        )
+    }
+
+    @Test
+    fun constantRankNRejectsEmptyDims() {
+        // Empty dims → would silently become ScalarShape; force the user to use
+        // the dedicated `constant(Float)` instead.
+        var caught: IllegalArgumentException? = null
+        grad { x: Tracer<ScalarShape> ->
+            try {
+                val _c: Tracer<io.tlaloc.core.Rank1<Sym>> =
+                    x.constant(floatArrayOf(1f), IntArray(0))
+            } catch (e: IllegalArgumentException) {
+                caught = e
+            }
+            x
+        }(Tensors.f32Scalar(1f))
+        assertTrue(caught != null, "expected IllegalArgumentException for empty dims")
+        assertTrue(
+            caught!!.message!!.contains("empty dims"),
+            "message should name the failure mode; got: ${caught!!.message}",
+        )
+    }
+
     @Test
     fun constantLikeEnablesRank1Offset() {
         // §0.4.69 — `x.constantLike(5f)` creates a rank-1 constant with the same

@@ -115,6 +115,45 @@ fun Tracer<*>.constant(values: FloatArray): Tracer<io.tlaloc.core.Rank1<io.tlalo
  * want an arbitrary per-element rank-1 constant, §0.4.67's `constant(FloatArray)`
  * remains the path.
  */
+/**
+ * §0.4.70 — rank-N form of [constant]. Caller supplies both a flat `FloatArray`
+ * of values (row-major) and the target `IntArray` of dims. Validates that
+ * `values.size` matches the product of `dims`, and that each dim is positive.
+ * Values are defensively copied.
+ *
+ * The caller picks the phantom shape via type inference or explicit type
+ * argument, e.g.:
+ *
+ * ```kotlin
+ * val m: Tracer<Rank2<Sym, Sym>> = x.constant(floatArrayOf(1f, 2f, 3f, 4f), intArrayOf(2, 2))
+ * ```
+ *
+ * Kotlin infers `S = Rank2<Sym, Sym>` from the assignment target. The phantom
+ * type has no runtime enforcement — mismatched `dims` vs. target `S` would
+ * compile fine and fail only at first same-shape op use. This is consistent
+ * with `Tensors.f32Vector` / `f32Matrix` (the rank-N constructors in :core).
+ *
+ * For scalar + rank-1 uses, prefer the existing overloads ([constant]`(Float)`
+ * and [constant]`(FloatArray)`) which pin their phantom shape explicitly.
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.constant(values: FloatArray, dims: IntArray): Tracer<S> {
+    require(dims.isNotEmpty()) { "constant(values, dims): empty dims — use constant(Float) for a scalar leaf" }
+    require(dims.all { it > 0 }) {
+        "constant(values, dims): all dims must be positive (got ${dims.toList()})"
+    }
+    val expected = dims.fold(1) { acc, d -> acc * d }
+    require(values.size == expected) {
+        "constant(values, dims): values.size=${values.size} doesn't match product of dims=${dims.toList()} ($expected)"
+    }
+    val entry = tape.leaf(
+        dims = dims.copyOf(),
+        value = values.copyOf(),
+        isConstant = true,
+    )
+    return Tracer<Shape>(tape, entry) as Tracer<S>
+}
+
 fun <S : Shape> Tracer<S>.constantLike(value: Float): Tracer<S> {
     val entry = tape.leaf(
         dims = dims.copyOf(),

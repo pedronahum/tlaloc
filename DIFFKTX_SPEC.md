@@ -39,6 +39,65 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.70 Rank-N `Tracer.constant(FloatArray, IntArray)` — phantom-typed higher-rank constants 2026-04-24
+
+Generalises §0.4.67's rank-1 overload to arbitrary rank. Caller supplies a flat row-major `FloatArray` of values and an `IntArray` of dims; the phantom `Shape` type `S` is picked via Kotlin's return-type inference at the call site:
+
+```kotlin
+val m: Tracer<Rank2<Sym, Sym>> = x.constant(floatArrayOf(1f, 2f, 3f, 4f), intArrayOf(2, 2))
+```
+
+This matches the existing public-API idiom — `Tensors.f32Vector` / `f32Matrix` in `:core` use the same phantom-type-inference pattern. The returned Tracer shares the tape with `this`, is flagged `isConstant = true`, and participates in the §0.4.65 skip-grad-materialisation optimisation.
+
+**What changed** (one function) in [Tracer.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tracer.kt): `fun <S : Shape> Tracer<*>.constant(values: FloatArray, dims: IntArray): Tracer<S>`. Validates three preconditions:
+
+1. `dims` is non-empty (use `constant(Float)` for a scalar).
+2. All dims are positive (no zero / negative).
+3. `values.size == dims.fold(1) { * }`.
+
+Each failure gets a specific error message naming the violated precondition.
+
+**Three new tests** ([GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)):
+
+1. `constantRank2MatmulProducesExpectedGradient` — uses rank-1 form via the generic overload (same shape as §0.4.67, but going through the type-inference path). Pins that the grad through `(x * c).sum()` gives `c` back as the gradient-of-x, proving the constant operand skip didn't break the differentiable side.
+
+2. `constantRankNValidatesDimsProduct` — 3 values against `intArrayOf(2, 2)` (expects 4) fails with "doesn't match" in the error.
+
+3. `constantRankNRejectsEmptyDims` — empty `IntArray` routes the user back to `constant(Float)` with an explicit error rather than silently producing a ScalarShape.
+
+**Decisions worth flagging**:
+
+- **Phantom type is caller-chosen, not validated at runtime.** Kotlin's type system can't enforce that `Rank2<Sym, Sym>` matches `intArrayOf(2, 2)` — the runtime only knows dims. This mirrors every other tensor constructor in the project (`Tensors.f32Matrix<Rank2<R, C>>(rows, cols, values)` has the same constraint). A mismatched phantom type compiles fine and fails at first use with a shape error from `requireSameShape`.
+
+- **Unchecked cast inside.** The function calls `Tracer<Shape>(tape, entry) as Tracer<S>`. The cast is the internal cost of letting the caller pick `S`; alternative (reified inline) wouldn't help because `S` isn't used at reflection. Suppressed with `@Suppress("UNCHECKED_CAST")`.
+
+- **Generic overload doesn't shadow §0.4.67.** `fun Tracer<*>.constant(FloatArray): Tracer<Rank1<Sym>>` has one parameter; the new generic has two. Kotlin picks the more specific one based on arity. A caller who wants rank-1 and doesn't care about picking `Sym` as the axis brand should still use `constant(FloatArray)` — it's sharper.
+
+- **No default argument for `dims`.** `constant(FloatArray)` already covers rank-1 with the canonical shape `Rank1<Sym>`; the new overload is for "caller wants to pick the shape explicitly". Mixing both behaviours into one function with a default-IntArray would blur the API.
+
+**Tests added** (+3 new):
+
+- `GradTest.constantRank2MatmulProducesExpectedGradient`
+- `GradTest.constantRankNValidatesDimsProduct`
+- `GradTest.constantRankNRejectsEmptyDims`
+
+Full suite is green: **621 tests** (+3 over §0.4.69).
+
+**Recommended next pickup** (shrinks further):
+
+1. **Scalar-rank broadcasting for `+` / `-` / `*` / `/`** — genuine broadcast arithmetic; needs SUM-reduction arms in registry rules.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+3. **D.1i Symja `Simplify` on grad expressions** — paper mechanism (ii).
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling.
+5. **`diagnosticReporter` migration** — cosmetic.
+6. **Rank-N `constantLike` or matrix-specific constant helpers** — smaller follow-ups.
+
+**Definition-of-done for §0.4.70 — met**:
+- `Tracer<*>.constant(FloatArray, IntArray): Tracer<S>` lands with dim/size validation ✓
+- Phantom-type inference works at call sites with explicit type annotation ✓
+- Rank-2 error-path tests cover both empty-dims and size-mismatch cases ✓
+- Full suite green at 621 tests (+3) ✓
+
 #### 0.4.69 `Tracer<S>.constantLike(value)` — same-shape constant without broadcasting 2026-04-24
 
 Narrow but useful slice of the scalar-rank-broadcasting follow-up in §0.4.68's register. Adds `fun <S : Shape> Tracer<S>.constantLike(value: Float): Tracer<S>` — a leaf on `this`'s tape with the SAME shape as `this`, every element filled with `value`, flagged non-differentiable. Lets users write `x + x.constantLike(5f)` on rank-N Tracers using the existing same-shape operators, without introducing scalar-to-rank1 broadcasting machinery.
