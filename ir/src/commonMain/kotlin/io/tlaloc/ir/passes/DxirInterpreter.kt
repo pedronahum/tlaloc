@@ -119,9 +119,25 @@ object DxirInterpreter {
                 "DxirInterpreter: param '${node.name}' (id=${node.id}) missing from env",
             )
             is DxirConst -> {
-                val v = (node.value as? Number)?.toFloat()
-                    ?: error("DxirInterpreter: non-numeric const value ${node.value}")
-                FloatArray(sizeOf(node.type)) { v }
+                val size = sizeOf(node.type)
+                when (val v = node.value) {
+                    // Scalar-valued const: splat the single value over the declared
+                    // output shape. Canonical form for `const(1.0f, f32)` etc.
+                    is Number -> FloatArray(size) { v.toFloat() }
+                    // §0.4.72 — rank-N const whose value is a full FloatArray.
+                    // Capture.kt (§0.4.71 fix) uses this form to carry the tape's
+                    // cached rank-N leaf value through to the captured function.
+                    // The array's size must match the declared type's size — a
+                    // mismatch here is a compile-pipeline bug, not a user error.
+                    is FloatArray -> {
+                        require(v.size == size) {
+                            "DxirInterpreter: FloatArray const has size ${v.size} but type ${node.type} " +
+                                "requires $size"
+                        }
+                        v.copyOf()
+                    }
+                    else -> error("DxirInterpreter: non-numeric const value ${node.value}")
+                }
             }
             is DxirOp -> evalOp(node, env, multiResults)
             is DxirOpResult -> error("unreachable — handled above")

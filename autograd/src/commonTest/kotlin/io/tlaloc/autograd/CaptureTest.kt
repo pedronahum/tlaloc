@@ -128,6 +128,66 @@ class CaptureTest {
     }
 
     @Test
+    fun capturesFunctionWithRank1ConstantLeaf() {
+        // §0.4.72 — rank-1 capture with a per-element FloatArray constant.
+        // Pre-§0.4.72 the interpreter only accepted Number scalars and would
+        // crash on the FloatArray const values §0.4.71's fix ships. Uses plain
+        // elementwise ADD (no reduction) to stay inside evalFunction's bridge
+        // op set.
+        val fn = capture(
+            f = { x: Tracer<Rank1<Sym>> -> x + x.constant(floatArrayOf(10f, 20f, 30f)) },
+            input = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f)),
+            name = "rank1_plus_const",
+        )
+        val consts = fn.body.filterIsInstance<DxirConst>()
+        assertEquals(1, consts.size, "exactly one DxirConst for the rank-1 constant leaf")
+        val constNode = consts.single()
+        assertTrue(
+            constNode.value is FloatArray,
+            "rank-1 const carries a FloatArray; got ${constNode.value::class.simpleName}",
+        )
+        assertEquals(3, (constNode.value as FloatArray).size)
+
+        // End-to-end: interpreter evaluates the rank-1 add, producing [11, 22, 33].
+        val outputs = DxirInterpreter.evalFunction(fn, listOf(floatArrayOf(1f, 2f, 3f)))
+        val result = outputs.single()
+        assertEquals(11f, result[0])
+        assertEquals(22f, result[1])
+        assertEquals(33f, result[2])
+    }
+
+    @Test
+    fun capturesFunctionWithRank2ConstantLeaf() {
+        // §0.4.72 — rank-2 capture. x=[[1,2],[3,4]] + m=[[10,20],[30,40]] yields
+        // [[11,22],[33,44]]. Exercises the FloatArray const path at rank 2.
+        val fn = capture(
+            f = { x: Tracer<Rank2<Sym, Sym>> ->
+                val m: Tracer<Rank2<Sym, Sym>> =
+                    x.constant(floatArrayOf(10f, 20f, 30f, 40f), intArrayOf(2, 2))
+                x + m
+            },
+            input = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+            name = "rank2_plus_const",
+        )
+        val consts = fn.body.filterIsInstance<DxirConst>()
+        assertEquals(1, consts.size)
+        val constNode = consts.single()
+        assertTrue(
+            constNode.value is FloatArray,
+            "rank-2 const carries a FloatArray; got ${constNode.value::class.simpleName}",
+        )
+        assertEquals(4, (constNode.value as FloatArray).size)
+        assertEquals(listOf(2, 2), constNode.type.dims)
+
+        val outputs = DxirInterpreter.evalFunction(fn, listOf(floatArrayOf(1f, 2f, 3f, 4f)))
+        val result = outputs.single()
+        assertEquals(11f, result[0])
+        assertEquals(22f, result[1])
+        assertEquals(33f, result[2])
+        assertEquals(44f, result[3])
+    }
+
+    @Test
     fun returnIdsOutsideTapeRejected() {
         val tape = Tape()
         val leaf = tape.traceLeaf<ScalarShape>(Tensors.f32Scalar(1f))

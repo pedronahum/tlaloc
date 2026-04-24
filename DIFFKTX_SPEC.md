@@ -39,6 +39,69 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.72 DxirInterpreter: handle `FloatArray` const values; rank-1/rank-2 capture-with-const tests 2026-04-24
+
+Direct belt-and-braces follow-up to §0.4.71. Adding rank-1 and rank-2 capture-with-const regression tests immediately surfaced a SECOND latent bug: `DxirInterpreter`'s `DxirConst` handler only accepted `Number` values (single scalar → splat). The §0.4.71 fix stored rank-N const values as `FloatArray`; feeding that through `DxirInterpreter.evalFunction` crashed with "non-numeric const value". So even though §0.4.71 repaired Capture, the resulting captured function wouldn't evaluate end-to-end for rank > 0.
+
+**The fix** in [DxirInterpreter.kt:121-137](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt):
+
+```kotlin
+is DxirConst -> {
+    val size = sizeOf(node.type)
+    when (val v = node.value) {
+        is Number -> FloatArray(size) { v.toFloat() }  // existing: splat
+        is FloatArray -> {                             // §0.4.72: per-element
+            require(v.size == size) { ... }
+            v.copyOf()
+        }
+        else -> error("non-numeric const value")
+    }
+}
+```
+
+- `Number` → splat (one value over the whole shape) — existing canonical form.
+- `FloatArray` → per-element (full backing array, with a size-matching guard) — new form introduced by §0.4.71's `Capture.kt` fix.
+
+Defensive `copyOf()` on the FloatArray path so the interpreter's cached env entry doesn't alias the DxirConst's internal buffer.
+
+**Two new tests** in [CaptureTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/CaptureTest.kt):
+
+1. `capturesFunctionWithRank1ConstantLeaf` — `f(x) = x + [10, 20, 30]` at x=[1,2,3] → [11, 22, 33]. Asserts the captured `DxirConst.value` is a `FloatArray` of size 3, and that `DxirInterpreter.evalFunction` evaluates correctly.
+
+2. `capturesFunctionWithRank2ConstantLeaf` — `f(x) = x + [[10,20],[30,40]]` at x=[[1,2],[3,4]] → [[11,22],[33,44]]. Same shape checks at rank 2; asserts output per-element.
+
+**Decisions worth flagging**:
+
+- **Stayed inside the bridge op set.** `evalFunction` routes ops through `evalOp`'s "bridge" set (ADD/SUB/MUL/DIV/NEG/POW/LOG/EXP/SQRT/TANH/SIGMOID/MATMUL/CAST). SUM / MEAN / RELU / STEP are NOT in that set and fail with `op X not in the bridge's supported set`. An initial draft of these tests used `.sum()` to collapse the rank-1/rank-2 output to a scalar — needed adjusting. Final form uses bare elementwise `+` and checks the rank-N output directly. Worth flagging because the same gotcha will bite any future test that captures a reduction-containing lambda and tries to eval it.
+
+- **Size validation on FloatArray consts is required.** Without the `require(v.size == size)` guard, a mismatched const (e.g. a 3-element FloatArray on a rank-1[4] type) would silently extend or truncate inside the output's per-element loop. The `require` is cheap and catches exactly this class of compile-pipeline bug.
+
+- **Capture.kt's `copyOf()` and interpreter's `copyOf()` BOTH fire**. The capture path defensive-copies the tape-entry buffer into the DxirConst at SSA build time; the interpreter defensive-copies again when materialising the const for a particular eval. Redundant under a careful-caller contract, but cheap enough to keep both for robustness — a future refactor that relaxes one end of the copy chain doesn't suddenly introduce aliasing.
+
+- **StableHLO emitter's Float/Double/Int/Long pattern left unchanged**. [Emitter.kt:109-115](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L109-L115) would fail on a `FloatArray` const with "non-numeric DxirConst value". For the interpreter path this doesn't matter (captured lambdas evaluated via `evalFunction` don't go through the emitter). If a future test captures a function with a rank-N const and round-trips it through `stablehlo-translate`, the emitter would need a parallel arm to format `FloatArray` as a dense MLIR literal (`dense<[1.0, 2.0, ...]>` for rank-1, nested brackets for rank-N). Filed as follow-up; not blocking today's work.
+
+**Tests added** (+2 new):
+
+- `CaptureTest.capturesFunctionWithRank1ConstantLeaf`
+- `CaptureTest.capturesFunctionWithRank2ConstantLeaf`
+
+Full suite is green: **624 tests** (+2 over §0.4.71).
+
+**Recommended next pickup**:
+
+1. **StableHLO emitter arm for `FloatArray` const values** — closes the round-trip path for captured rank-N constants. Small, well-scoped follow-up.
+2. **Scalar-rank broadcasting for `+` / `-` / `*` / `/`** — genuine broadcast arithmetic.
+3. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+4. **D.1i Symja `Simplify` on grad expressions** — paper mechanism (ii).
+5. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling.
+6. **`diagnosticReporter` migration** — cosmetic.
+
+**Definition-of-done for §0.4.72 — met**:
+- `DxirInterpreter` handles both `Number` (splat) and `FloatArray` (per-element) const values ✓
+- Size validation guards against mismatched FloatArray consts ✓
+- Rank-1 + rank-2 capture-with-const tests evaluate correctly end-to-end ✓
+- Full suite green at 624 tests (+2) ✓
+
 #### 0.4.71 Capture bug: non-param leaves stored as String consts — fix + regression test 2026-04-24
 
 Bug found while auditing how §0.4.65's `Tracer.constant(Float)` interacts with the capture → dxir bridge. Was latent dead code until §0.4.65 gave users a way to create non-param tape leaves.
