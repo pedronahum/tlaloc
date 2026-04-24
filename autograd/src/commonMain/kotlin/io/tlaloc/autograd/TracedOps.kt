@@ -74,6 +74,58 @@ fun <S : Shape> Tracer<S>.neg(): Tracer<S> {
     return Tracer<S>(tape, e)
 }
 
+// §0.4.63 — elementwise unary math. The IR side (VjpRegistry) has had rules for
+// SQRT / EXP / LOG / TANH / SIGMOID / POW since §0.4.22, but the Tracer surface
+// exposed none of them — so a user writing `grad { x -> x.sqrt() }` would get
+// an unresolved-reference compile error. These are the tracer-side wrappers.
+// Each wrapper (a) computes the forward value directly (no tape) so `entry.value`
+// is populated for downstream predicate reads via `peek()` / `.scalar`, and
+// (b) records the op on the tape for the reverse walk.
+//
+// Forward math uses `kotlin.math.*` for F32 — matches what DxirInterpreter
+// would compute through the VjpRegistry bridge, avoiding drift between the
+// tape's cached forward value and the value the grad rule will re-evaluate.
+
+fun <S : Shape> Tracer<S>.sqrt(): Tracer<S> {
+    val v = entry.value
+    val out = FloatArray(v.size)
+    for (i in v.indices) out[i] = kotlin.math.sqrt(v[i])
+    val e = tape.op(OpKind.SQRT, intArrayOf(id), dims.copyOf(), out)
+    return Tracer<S>(tape, e)
+}
+
+fun <S : Shape> Tracer<S>.exp(): Tracer<S> {
+    val v = entry.value
+    val out = FloatArray(v.size)
+    for (i in v.indices) out[i] = kotlin.math.exp(v[i])
+    val e = tape.op(OpKind.EXP, intArrayOf(id), dims.copyOf(), out)
+    return Tracer<S>(tape, e)
+}
+
+fun <S : Shape> Tracer<S>.log(): Tracer<S> {
+    val v = entry.value
+    val out = FloatArray(v.size)
+    for (i in v.indices) out[i] = kotlin.math.ln(v[i])
+    val e = tape.op(OpKind.LOG, intArrayOf(id), dims.copyOf(), out)
+    return Tracer<S>(tape, e)
+}
+
+fun <S : Shape> Tracer<S>.tanh(): Tracer<S> {
+    val v = entry.value
+    val out = FloatArray(v.size)
+    for (i in v.indices) out[i] = kotlin.math.tanh(v[i])
+    val e = tape.op(OpKind.TANH, intArrayOf(id), dims.copyOf(), out)
+    return Tracer<S>(tape, e)
+}
+
+fun <S : Shape> Tracer<S>.sigmoid(): Tracer<S> {
+    val v = entry.value
+    val out = FloatArray(v.size)
+    for (i in v.indices) out[i] = 1f / (1f + kotlin.math.exp(-v[i]))
+    val e = tape.op(OpKind.SIGMOID, intArrayOf(id), dims.copyOf(), out)
+    return Tracer<S>(tape, e)
+}
+
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value
     var acc = 0f

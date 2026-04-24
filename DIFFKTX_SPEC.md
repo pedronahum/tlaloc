@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.63 Tracer surface — unary math ops (sqrt / exp / log / tanh / sigmoid) 2026-04-24
+
+Fills a long-standing gap: the VjpRegistry has had rules for SQRT / EXP / LOG / TANH / SIGMOID / POW since §0.4.22, but the Tracer surface exposed none of them. A user writing `grad { x -> x.sqrt() }` on the runtime-tape path got an unresolved-reference compile error. Those five unary math ops now have Tracer wrappers and are routed by `Backward.kt` into the existing registry rules. 600-tests milestone crossed along the way.
+
+**Two changes**:
+
+1. **Five Tracer wrappers in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt)**: `Tracer<S>.sqrt()`, `.exp()`, `.log()`, `.tanh()`, `.sigmoid()`. Each computes the forward value directly with `kotlin.math.*`, populating `entry.value` so downstream `peek()` / `.scalar` reads work, and records the op on the tape for the reverse walk. Unlike the arithmetic ops these use the unary `(input) -> output` shape on the tape.
+
+2. **Dispatch extension in [Backward.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Backward.kt)**: five new OpKind arms added alongside ADD/SUB/…/MATMUL routing through `applyRegistryRule`. Before §0.4.63, the `else -> error("VJP not implemented: …")` branch swallowed these kinds; nothing on the tape produced them, so the `else` never fired. With the Tracer surface exposing them, routing is now load-bearing.
+
+`POW` intentionally NOT added to the Tracer surface — it's a binary op (`base^exp`), needs a two-Tracer API shape, and `d + d` / `x.exp().log()` cover the usual "I want x^2" paths. A dedicated `Tracer.pow(other: Tracer<S>)` can be added in a separate session if a concrete benchmark needs it.
+
+**Tests added** (+6 new in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)):
+
+- `sqrtBackwardIsHalfOverSqrt` — √4 = 2, d/dx√x |_{x=4} = 0.25. Exact equality (F32 representable).
+- `expBackwardIsExp` — exp(0) = 1 at both forward and grad; exp(1) ≈ e at both.
+- `logBackwardIsReciprocal` — ln(4) forward, 0.25 grad.
+- `tanhBackwardIsOneMinusTanhSquared` — forward + 1 - tanh² identity at x=0 and x=1.
+- `sigmoidBackwardIsSigmoidTimesOneMinusSigmoid` — σ(0) = ½, σ·(1-σ) = ¼; large-x grad → 0.
+- `chainedUnaryMathRoundTrips` — `x.exp().sqrt()` at x=0: forward = 1, grad = 0.5. Proves composition through the VjpRegistry bridge.
+
+**Decisions worth flagging**:
+
+- **Forward math uses `kotlin.math.*`, not the VjpRegistry's `DxirInterpreter.evalNode`.** The tape caches the forward value at op record time so later reads (including `peek()` / `.scalar` polls) don't need to re-evaluate the rule. Using `kotlin.math.sqrt(f)` is both faster (no dxir build-and-eval) and trivially obvious — the numeric result couldn't realistically drift from what `DxirInterpreter` would compute through an `OpKind.SQRT` bridge call, because `DxirInterpreter` itself calls `kotlin.math.sqrt` under the hood. Documented in the TracedOps.kt comment so a future refactor doesn't "unify through the bridge" and regress perf for no semantic gain.
+
+- **Sigmoid forward is `1 / (1 + exp(-x))`, not `exp(x) / (1 + exp(x))`.** The former has better numerical behaviour for large positive x (saturates at 1 cleanly), the latter overflows. Same formula DxirInterpreter uses. Pinned by the `sigmoid at x=10 → grad ≈ 0` assertion.
+
+- **No `Tracer<S>.pow(other: Tracer<S>)` in this session.** POW's grad rule is in VjpRegistry, but its API shape is binary (base, exp) and both operands need to be Tracer (not Float). Adding it touches operand-aliasing and exponent-int-vs-float corners the current scalar-surface VJP doesn't yet flex. A focused follow-up session can add it once there's a concrete call site.
+
+- **Did NOT touch `capture`/`capture2`'s dxir bridge.** Those live in `:autograd/Capture.kt` and should transparently accept the new ops once a test case exercises them. `DxirBridgeEquivalenceTest` already walks the tape through all the existing ops; extending it to exercise `sqrt().exp()` on a Tracer→capture→DxirInterpreter round-trip is a clean follow-up that belongs in its own session (the bridge has its own op-kind whitelist).
+
+**Stage D status** — unchanged benchmark list; the Tracer surface is now feature-complete for the paper's elementwise math needs (except POW, per above):
+
+| # | benchmark | status |
+|---|-----------|--------|
+| 1 | **BGDHyperOpt** | full source port, paper-speedup closure + symbolic T (§0.4.52 / §0.4.53 / §0.4.54); break-bearing shapes end-to-end proven (§0.4.56–§0.4.58); Tracer.peek() + .scalar (§0.4.59 / §0.4.62); unary math now on Tracer (§0.4.63) |
+| 2 | **HookeanSpring** | full port (§0.4.47) |
+| 3 | **Brachistochrone** | full port (§0.4.43) |
+| 4 | HMC | not ported |
+| 5 | CartPole | not ported |
+| 6 | QWOP | not ported |
+
+**Recommended next pickup**:
+
+1. **`Tracer.pow(other: Tracer<S>)` + GradTest** — the remaining VjpRegistry rule without a Tracer-surface wrapper.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+3. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement.
+5. **Out-of-scope list housekeeping** — consolidate deferred items across §0.4.N notes.
+
+**Definition-of-done for §0.4.63 — met**:
+- `Tracer<S>.sqrt() / .exp() / .log() / .tanh() / .sigmoid()` land on the Tracer surface ✓
+- `Backward.kt` routes SQRT/EXP/LOG/TANH/SIGMOID through the VjpRegistry ✓
+- Each op has a forward + grad test with exact or tight-tolerance assertion ✓
+- Full suite green at 600 tests (+6) ✓
+
 #### 0.4.62 `Tracer<ScalarShape>.scalar` — type-safe scalar-only shortcut for `peek()` 2026-04-24
 
 Adds an extension property `val Tracer<ScalarShape>.scalar: Float` that delegates to `peek()` but is compile-time restricted to rank-0 tracers. Closes the §0.4.59 "could still be added later" item.

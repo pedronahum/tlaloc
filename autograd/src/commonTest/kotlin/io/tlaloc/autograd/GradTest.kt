@@ -143,6 +143,77 @@ class GradTest {
         assertContentEquals(floatArrayOf(2f, 2f, 2f), out.hostF32())
     }
 
+    // §0.4.63 — unary math surface on Tracer. These wrap VjpRegistry rules that
+    // have existed since §0.4.22 but had no tape path until now.
+
+    @Test
+    fun sqrtBackwardIsHalfOverSqrt() {
+        // d/dx sqrt(x) = 1 / (2 sqrt(x)). Forward value and backward grad both pinned.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x.sqrt() }
+        val (value, dx) = vg(Tensors.f32Scalar(4f))
+        assertEquals(2f, value)
+        assertEquals(0.25f, dx.hostF32()[0])  // 1 / (2·2) = 0.25
+    }
+
+    @Test
+    fun expBackwardIsExp() {
+        // d/dx exp(x) = exp(x). At x = 0: forward = 1, grad = 1.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x.exp() }
+        val (v0, d0) = vg(Tensors.f32Scalar(0f))
+        assertEquals(1f, v0)
+        assertEquals(1f, d0.hostF32()[0])
+        // At x = 1: forward = exp(1), grad = exp(1).
+        val (v1, d1) = vg(Tensors.f32Scalar(1f))
+        val e = kotlin.math.E.toFloat()
+        assertTrue(abs(v1 - e) < 1e-5f, "expected exp(1) ≈ e; got $v1")
+        assertTrue(abs(d1.hostF32()[0] - e) < 1e-5f, "expected grad(exp) = exp; got ${d1.hostF32()[0]}")
+    }
+
+    @Test
+    fun logBackwardIsReciprocal() {
+        // d/dx log(x) = 1/x. At x = 4: forward = ln(4) ≈ 1.386, grad = 0.25.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x.log() }
+        val (v, dx) = vg(Tensors.f32Scalar(4f))
+        assertTrue(abs(v - kotlin.math.ln(4f)) < 1e-5f, "forward = ln(4); got $v")
+        assertEquals(0.25f, dx.hostF32()[0])
+    }
+
+    @Test
+    fun tanhBackwardIsOneMinusTanhSquared() {
+        // d/dx tanh(x) = 1 - tanh(x)^2. At x = 0: forward = 0, grad = 1.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x.tanh() }
+        val (v0, d0) = vg(Tensors.f32Scalar(0f))
+        assertEquals(0f, v0)
+        assertEquals(1f, d0.hostF32()[0])
+        // At x = 1: forward = tanh(1), grad = 1 - tanh(1)^2.
+        val (v1, d1) = vg(Tensors.f32Scalar(1f))
+        val t1 = kotlin.math.tanh(1f)
+        assertTrue(abs(v1 - t1) < 1e-5f, "forward = tanh(1); got $v1")
+        assertTrue(abs(d1.hostF32()[0] - (1f - t1 * t1)) < 1e-5f, "grad = 1 - tanh^2; got ${d1.hostF32()[0]}")
+    }
+
+    @Test
+    fun sigmoidBackwardIsSigmoidTimesOneMinusSigmoid() {
+        // d/dx σ(x) = σ(x)(1 - σ(x)). At x = 0: forward = 0.5, grad = 0.25.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x.sigmoid() }
+        val (v0, d0) = vg(Tensors.f32Scalar(0f))
+        assertEquals(0.5f, v0)
+        assertEquals(0.25f, d0.hostF32()[0])
+        // Large positive: σ ≈ 1, grad ≈ 0.
+        val (_, dLarge) = vg(Tensors.f32Scalar(10f))
+        assertTrue(dLarge.hostF32()[0] < 1e-3f, "grad should be ~0 at x=10; got ${dLarge.hostF32()[0]}")
+    }
+
+    @Test
+    fun chainedUnaryMathRoundTrips() {
+        // f(x) = sqrt(exp(x)); f'(x) = sqrt(exp(x)) / 2 = f(x) / 2. At x = 0:
+        // f = 1, f' = 0.5.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x.exp().sqrt() }
+        val (v, dx) = vg(Tensors.f32Scalar(0f))
+        assertEquals(1f, v)
+        assertEquals(0.5f, dx.hostF32()[0])
+    }
+
     @Test
     fun negBackward() {
         val g = grad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> x.neg().sum() }

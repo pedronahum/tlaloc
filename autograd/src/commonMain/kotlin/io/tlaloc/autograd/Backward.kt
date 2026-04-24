@@ -49,7 +49,12 @@ internal fun backward(tape: Tape, outputId: Int, seedGrad: FloatArray): Gradient
         when (entry.op) {
             null -> {} // leaf; nothing upstream to propagate
             OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.NEG, OpKind.RELU,
-            OpKind.SUM, OpKind.MEAN, OpKind.MATMUL ->
+            OpKind.SUM, OpKind.MEAN, OpKind.MATMUL,
+            // §0.4.63 — routed alongside the existing arms now that the Tracer
+            // surface exposes sqrt/exp/log/tanh/sigmoid. Rules were already in
+            // VjpRegistry since §0.4.22; prior to §0.4.63 nothing on the tape
+            // produced these op kinds, so the dispatch arm was dead.
+            OpKind.SQRT, OpKind.EXP, OpKind.LOG, OpKind.TANH, OpKind.SIGMOID ->
                 applyRegistryRule(entry.op, entry, entries, g, grads)
             OpKind.STEP -> {
                 // step(x) = 1 if x > 0 else 0.  Its derivative is identically zero
