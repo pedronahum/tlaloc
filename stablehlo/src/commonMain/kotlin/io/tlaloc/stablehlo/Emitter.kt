@@ -236,23 +236,23 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.BATCHNORM -> emitBatchNorm(step, name, ops, node)
             OpKind.SPLIT -> emitSplit(step, node, ops[0], node.operands[0].type)
             OpKind.MANUAL_COMPUTATION -> emitManualComputation(step, name, ops, node)
+            // §0.4.60 — `stablehlo.not` / `stablehlo.and` on Bool (i1) inputs. Added
+            // alongside the existing `stablehlo.power` arm at line 140; these three
+            // were listed as "out of scope" in §0.4.53 but the underlying MLIR ops
+            // are a one-liner each. Keeping them as errors forced Stage B's
+            // coarsening output to avoid NOT/LAND even where they were the
+            // structurally correct form (§0.4.55's break-hoist uses
+            // `LAND(cond, NOT(break_cond))` and can now flow through the emitter
+            // once D.3i PhiCalculus closure lands — no more "add StableHLO arm"
+            // prerequisite.
+            OpKind.NOT -> unary(step, name, "stablehlo.not", ops[0], outType)
+            OpKind.LAND -> binary(step, name, "stablehlo.and", ops[0], ops[1], outType)
             // Structured-control-flow ops: Stage B's coarsening pass closes IF / WHILE
             // regions into straight-line dxir before this emitter sees them. Lowering
             // either op directly to `stablehlo.if` / `stablehlo.while` is deferred
             // post-Stage-B; until then, an unclosed IF/WHILE reaching the emitter is a
             // compiler bug (the coarsening pass should have closed it or rejected the
             // primal). Loud failure beats silent miscompile.
-            OpKind.NOT -> error(
-                "StableHLO lowering for OpKind.NOT deferred post-Stage-B (Stage B.1 added " +
-                    "this op as F3's canonicalisation primitive). Direct lowering would be " +
-                    "`stablehlo.not` on a Bool tensor; deferred alongside IF/WHILE (op id=${node.id})",
-            )
-            OpKind.POW -> error(
-                "StableHLO lowering for OpKind.POW deferred post-Stage-B (Stage B.3 added " +
-                    "POW interpreter support for C6/C9 closed-form output). Direct lowering " +
-                    "would be `stablehlo.power`; deferred until benchmark bring-up needs it " +
-                    "(op id=${node.id})",
-            )
             OpKind.IF -> error(
                 "StableHLO lowering for OpKind.IF deferred post-Stage-B; the φ-calculus " +
                     "coarsening pass should close this IF before emission (op id=${node.id})",

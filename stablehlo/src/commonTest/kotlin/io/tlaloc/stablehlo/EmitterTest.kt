@@ -72,6 +72,25 @@ class EmitterTest {
     }
 
     @Test
+    fun emitsBooleanOps() {
+        // §0.4.60 — NOT and LAND lower to `stablehlo.not` / `stablehlo.and` on
+        // Bool (i1) inputs. The ops were introduced by Stage B (F3 canonical-
+        // isation / §0.4.50 break-hoist) and had their emission deferred until
+        // benchmark bring-up demanded it; the deferral error is now a direct
+        // lowering. Until D.3i PhiCalculus closure of LAND-composed WHILE lands,
+        // nothing *in the compiler* produces residual NOT/LAND outside an IF or
+        // WHILE region — but hand-constructed dxir can, and so can the φ-calculus
+        // once D.3i unblocks, so the emitter arm is load-bearing.
+        val boolT = DxirType(io.tlaloc.core.Bool, listOf(4))
+        assertTrue(singleUnary(OpKind.NOT, boolT).contains("stablehlo.not"))
+        assertTrue(singleOpFunction(OpKind.LAND, boolT).contains("stablehlo.and"))
+        // Scalar (rank-0) Bool — the shape the break-hoist cond region terminates with.
+        val boolScalar = DxirType(io.tlaloc.core.Bool, emptyList())
+        val mlir = singleOpFunction(OpKind.LAND, boolScalar)
+        assertTrue(mlir.contains("stablehlo.and") && mlir.contains("tensor<i1>"), mlir)
+    }
+
+    @Test
     fun reluLowersToConstantPlusMaximum() {
         val mlir = singleUnary(OpKind.RELU, DxirType(F32, listOf(4)))
         assertTrue(mlir.contains("stablehlo.constant dense<0.0> : tensor<4xf32>"), mlir)

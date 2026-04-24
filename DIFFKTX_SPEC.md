@@ -39,6 +39,64 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.60 StableHLO emitter — Bool ops (NOT / LAND) + removed dead POW error arm 2026-04-24
+
+Three tiny but real fixes to [Emitter.kt](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt) — two missing arms and one stale error-arm that was unreachable dead code. Together they remove the "`:stablehlo` NOT/LAND/POW widening" item from the recurring out-of-scope list, where it has been parked since §0.4.53.
+
+**Bug 1 — duplicate `OpKind.POW` arm**. [Emitter.kt:140](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L140) has the real lowering `OpKind.POW -> binary(step, name, "stablehlo.power", ...)`. [Emitter.kt:250-255](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L250-L255) had a second `OpKind.POW` arm that `error`'d with "StableHLO lowering for OpKind.POW deferred post-Stage-B". Kotlin `when` uses first-match, so the line-140 arm always won — the line-250 arm was unreachable dead code that misled anyone reading the file (and would have been caught by a linter pass if one was running). The error-arm is removed; the shipping lowering stands untouched and is already pinned by `EmitterTest.emitsElementwiseBinaryOps`.
+
+**Bug 2 / 3 — missing `OpKind.NOT` and `OpKind.LAND` arms**. Both ops landed in Stage B (NOT from §0.4.23 F3 canonicalisation, LAND from §0.4.50 break-hoist), and both error'd at emission time with a "deferred post-Stage-B" message. Since both are single MLIR ops (`stablehlo.not`, `stablehlo.and`) on Bool (i1) inputs, the "defer" annotation was scope-creep caution that outlived its utility. Both now lower directly:
+
+```kotlin
+OpKind.NOT  -> unary(step, name, "stablehlo.not", ops[0], outType)
+OpKind.LAND -> binary(step, name, "stablehlo.and", ops[0], ops[1], outType)
+```
+
+**Why now, not later**: §0.4.50's break-hoist emits `LAND(cond, NOT(break_cond))` inside the cond region of a WHILE. PhiCalculus currently can't close the LAND-composed WHILE (deferred as D.3i), so in practice these ops don't yet reach the emitter from the compiler — unclosed WHILEs fall back to the tape before StableHLO emission. BUT:
+
+- Hand-constructed dxir CAN produce NOT/LAND outside of regions today.
+- Once D.3i lands (LAND-composed WHILE closure via Symja), residual NOT/LAND will appear outside the WHILE cond too.
+- The "add the StableHLO arm" step was a prerequisite for both; removing the prerequisite decouples D.3i from this emitter work.
+
+Shipping the arms now, pinned by a test, means D.3i is a pure PhiCalculus-side change with no cross-module coupling.
+
+**Tests added** (+1 new):
+
+- [`EmitterTest.emitsBooleanOps`](stablehlo/src/commonTest/kotlin/io/tlaloc/stablehlo/EmitterTest.kt) — asserts `singleUnary(NOT, Bool×4)` emits `stablehlo.not`, `singleOpFunction(LAND, Bool×4)` emits `stablehlo.and`, and `singleOpFunction(LAND, Bool scalar)` emits `stablehlo.and` against `tensor<i1>`. Scalar shape is the one the break-hoist cond region terminates with — explicit coverage so a future generic refactor doesn't lose that case.
+
+**Decisions worth flagging**:
+
+- **No `PrintSamplesTest` round-trip added for these ops.** That test suite uses the external `stablehlo-translate` binary and is already exercised by the existing `emitsElementwiseUnaryOps` / `emitsElementwiseBinaryOps` coverage, both of which compile adjacent MLIR shapes. Adding a dedicated round-trip for `stablehlo.not` / `stablehlo.and` would be a nice belt-and-braces but isn't required — those are first-class StableHLO ops, round-trip-safe by definition. If a future bug in the Bool type-printing surfaces, that's the place to add it.
+
+- **Left `IF` / `WHILE` / `COARSENED` error arms in place.** Those are structured-control-flow ops that PhiCalculus/SCT is supposed to close BEFORE StableHLO emission — reaching them in the emitter IS a compiler bug, and the error arm is the right loud failure. Removing them would silence a genuine invariant. The POW arm was different: its invariant (the line-140 arm runs) held trivially, the error arm just rotted.
+
+- **Did not migrate the out-of-scope list in §0.4.53.** Leaving the stale list as historical context; the current delta between "out of scope" and "shipped" is tracked in each §0.4.N note's definition-of-done. A periodic spec cleanup that consolidates the out-of-scope list across §0.4.N sessions would be a nice housekeeping pass but is its own session (and a pure-doc diff).
+
+**Stage D status (post-§0.4.60)** — unchanged benchmark list; the compile-to-StableHLO path no longer has a hole where NOT/LAND/POW should be:
+
+| # | benchmark | status |
+|---|-----------|--------|
+| 1 | **BGDHyperOpt** | full source port, paper-speedup closure + symbolic T (§0.4.52 / §0.4.53 / §0.4.54); break-bearing shapes: plugin + tape end-to-end proven (§0.4.56–§0.4.58); Tracer.peek() API (§0.4.59); StableHLO prerequisites for D.3i closed-form closure unblocked (§0.4.60) |
+| 2 | **HookeanSpring** | full port (§0.4.47) |
+| 3 | **Brachistochrone** | full port (§0.4.43) |
+| 4 | HMC | not ported |
+| 5 | CartPole | not ported |
+| 6 | QWOP | not ported |
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — now pure PhiCalculus-side work; StableHLO emitter prerequisites done.
+2. **D.4 HMC** — paper's hardest control-flow benchmark.
+3. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement from a single binary.
+5. **Out-of-scope list housekeeping** — consolidate deferred items across §0.4.N notes into one live list. Pure-doc session.
+
+**Definition-of-done for §0.4.60 — met**:
+- `OpKind.NOT` → `stablehlo.not` ✓
+- `OpKind.LAND` → `stablehlo.and` ✓
+- Dead `OpKind.POW` error arm removed; the real lowering at line 140 stands untouched ✓
+- Full suite green at 592 tests (+1 new Emitter test) ✓
+
 #### 0.4.59 `Tracer.peek()` — public tape-value read for cross-module break predicates 2026-04-24
 
 Small API addition landing the item #5 recommendation from §0.4.58. `Tracer` now exposes a public `peek(index: Int = 0): Float` method that reads the tape-recorded forward value without allocating. Replaces the §0.4.58-era `d.toDTensor().hostF32()[0]` polling idiom — which copied the entire backing FloatArray per call — with a direct, bounds-checked scalar read.
