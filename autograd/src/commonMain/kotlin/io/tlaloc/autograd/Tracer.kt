@@ -101,3 +101,25 @@ fun Tracer<*>.constant(values: FloatArray): Tracer<io.tlaloc.core.Rank1<io.tlalo
     )
     return Tracer(tape, entry)
 }
+
+/**
+ * §0.4.69 — same-shape constant convenience. Creates a leaf on [this]'s tape
+ * with the SAME shape as [this], every element filled with [value], flagged
+ * non-differentiable. Enables `x + x.constantLike(5f)` on rank-N Tracers
+ * without going through scalar-rank broadcasting: the constant and [this]
+ * already share a shape so the existing same-shape `plus`/`minus`/`times`/`div`
+ * overloads apply directly.
+ *
+ * Generalises §0.4.65's scalar `constant(Float)` (which only returns a scalar
+ * Tracer) by projecting the fill value into [this]'s shape. For callers who
+ * want an arbitrary per-element rank-1 constant, §0.4.67's `constant(FloatArray)`
+ * remains the path.
+ */
+fun <S : Shape> Tracer<S>.constantLike(value: Float): Tracer<S> {
+    val entry = tape.leaf(
+        dims = dims.copyOf(),
+        value = FloatArray(size) { value },
+        isConstant = true,
+    )
+    return Tracer(tape, entry)
+}

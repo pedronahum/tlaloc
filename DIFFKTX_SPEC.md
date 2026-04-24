@@ -39,6 +39,49 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.69 `Tracer<S>.constantLike(value)` — same-shape constant without broadcasting 2026-04-24
+
+Narrow but useful slice of the scalar-rank-broadcasting follow-up in §0.4.68's register. Adds `fun <S : Shape> Tracer<S>.constantLike(value: Float): Tracer<S>` — a leaf on `this`'s tape with the SAME shape as `this`, every element filled with `value`, flagged non-differentiable. Lets users write `x + x.constantLike(5f)` on rank-N Tracers using the existing same-shape operators, without introducing scalar-to-rank1 broadcasting machinery.
+
+**What changed** (one function): [Tracer.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tracer.kt). Reuses the §0.4.65 `isConstant = true` flag — `Backward.applyRegistryRule` already short-circuits contributions targeting constant operands, so PowRule-style "compute-then-discard dExp" cost is also skipped here even though the op path is just ADD.
+
+**Design choice — `constantLike` vs scalar-rank broadcasting**: the register in §0.4.68 listed "scalar-rank broadcasting for +/-/*// " as a 1-2 session item, because making `Tracer<Rank1<Sym>> + Tracer<ScalarShape>` work end-to-end needs the reverse rule to emit a SUM-reduction for the scalar operand's grad. `constantLike` dodges that entirely by ensuring both operands of `+`/`-`/`*`/`/` share the shape; the existing same-shape rules apply unchanged. Less general than true broadcasting, but covers the common case ("add a constant bias", "scale everything by a factor") cleanly.
+
+**Three new tests** ([GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)):
+
+1. `constantLikeEnablesRank1Offset` — `(x + x.constantLike(5f)).sum()` for x=[1,2,3] → value 21, grad_x=[1,1,1]. Exercises the rank-1 ADD + SumRule path on a constant+tracer combination.
+
+2. `constantLikePreservesShape` — same formula on scalar and rank-1 receivers. Scalar: `x * x.constantLike(3f)` at x=2 → value 6, grad 3. Rank-1: `(x * x.constantLike(0.5f)).sum()` at x=[4,8,12] → value 12, grad=[0.5, 0.5, 0.5]. Pins that `constantLike` matches the receiver's shape.
+
+3. `constantLikeIsNonDifferentiable` — `(x + c + c).sum()` where `c = x.constantLike(5f)`; grad_x is still [1, 1], not something weird involving `c`'s accumulation. Pins that the §0.4.65 constant-skip applies to `constantLike` too.
+
+**Decisions worth flagging**:
+
+- **Extension function, not a member on `Tape`**. Follows the pattern established by §0.4.65's `Tracer<*>.constant(f)`: the caller is inside a `grad { x -> ... }` lambda, so a Tracer is in hand; widening the Tape's public surface isn't justified by this use case.
+
+- **No matching `constantLike(values: FloatArray)` overload**. `constantLike` means "same shape, filled with single value". A per-element fill is already covered by §0.4.67's `constant(FloatArray)` for rank-1, and by a (deferred) rank-N `constant(FloatArray, IntArray)` for higher ranks. Keeping one crisp meaning per name.
+
+- **Forward fill uses `FloatArray(size) { value }` (lambda constructor).** Equivalent to allocating then looping, but one line and the JIT inlines it. No perf difference in practice; shorter.
+
+- **Skipped scalar-rank broadcasting for `+`/`-`/`*`/`/`**. That's still deferred per §0.4.68; getting it right needs the AddRule / MulRule / etc. to SUM the grad of a scalar-shaped operand when paired with a rank-N operand. `constantLike` was the zero-dependency-change path to unblock the `x + 5f` idiom for the common "additive bias" case. Full broadcasting remains in the follow-up list.
+
+Full suite is green: **618 tests** (+3 over §0.4.68).
+
+**Recommended next pickup** (trimmed):
+
+1. **Scalar-rank broadcasting for `+` / `-` / `*` / `/`** — true broadcasting beyond same-shape. Now unblocked for use cases where the scalar operand is a genuine `Tracer<ScalarShape>` (user might pass a scalar parameter, not a constant); 1-2 sessions.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+3. **D.1i Symja `Simplify` on grad expressions** — paper mechanism (ii).
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling.
+5. **`diagnosticReporter` migration** — cosmetic refactor.
+6. **Rank-N `Tracer.constant(FloatArray, IntArray)`** — higher-rank constants.
+
+**Definition-of-done for §0.4.69 — met**:
+- `Tracer<S>.constantLike(Float): Tracer<S>` lands with defensive `copyOf()` of `dims` ✓
+- Rank-1 + scalar tests exercise the receiver-shape preservation ✓
+- Non-differentiable contract pinned by the repeated-operand test ✓
+- Full suite green at 618 tests (+3) ✓
+
 #### 0.4.68 Out-of-scope register — consolidated snapshot as of §0.4.67 2026-04-24
 
 Pure-doc session. The "Out of scope (still)" list has been repeated at the bottom of every §0.4.N note since §0.4.3, with entries progressively narrowing as items shipped — but some items shipped silently in one note and were still listed as deferred in the next. This section captures the CURRENT deferred register in one place so future sessions have a single authoritative reference. Individual §0.4.N notes are left unchanged — they're frozen-in-time milestones by design.

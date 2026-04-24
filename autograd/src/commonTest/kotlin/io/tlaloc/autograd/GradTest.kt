@@ -239,6 +239,60 @@ class GradTest {
     }
 
     @Test
+    fun constantLikeEnablesRank1Offset() {
+        // §0.4.69 — `x.constantLike(5f)` creates a rank-1 constant with the same
+        // shape as `x`. Lets `x + x.constantLike(5f)` work without broadcasting:
+        // both operands are same-shape, so the existing `plus` applies directly.
+        // For x = [1, 2, 3]: f(x) = sum(x + 5) = 1+2+3 + 15 = 21, grad_x = [1,1,1].
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x + x.constantLike(5f)).sum()
+        }
+        val (value, dx) = vg(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(21f, value)
+        val g = dx.hostF32()
+        assertEquals(1f, g[0])
+        assertEquals(1f, g[1])
+        assertEquals(1f, g[2])
+    }
+
+    @Test
+    fun constantLikePreservesShape() {
+        // Matches receiver shape across different ranks: scalar and rank-1.
+        val vgScalar = valueAndGrad { x: Tracer<ScalarShape> -> x * x.constantLike(3f) }
+        val (v, dx) = vgScalar(Tensors.f32Scalar(2f))
+        assertEquals(6f, v)
+        assertEquals(3f, dx.hostF32()[0], "grad through (x * 3) = 3")
+
+        val vgRank1 = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x * x.constantLike(0.5f)).sum()
+        }
+        val (v1, d1) = vgRank1(Tensors.f32Vector(floatArrayOf(4f, 8f, 12f)))
+        assertEquals(12f, v1)  // (4 + 8 + 12) * 0.5 = 12
+        val g1 = d1.hostF32()
+        assertEquals(0.5f, g1[0])
+        assertEquals(0.5f, g1[1])
+        assertEquals(0.5f, g1[2])
+    }
+
+    @Test
+    fun constantLikeIsNonDifferentiable() {
+        // The constantLike leaf is flagged `isConstant = true`, so even if the
+        // user deliberately referenced the returned Tracer elsewhere (say in a
+        // product with itself), its contribution to backward doesn't show up
+        // on any Tracer the user can retrieve via `grad` / `valueAndGrad`.
+        // This test pins: grad_x through `x + c + c` where `c = x.constantLike(5f)`
+        // is still 1 per element, not 1 + <something involving c's nonexistent grad>.
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            val c = x.constantLike(5f)
+            (x + c + c).sum()  // = sum(x) + 2 · sum(c) — grad_x is still [1, 1, 1]
+        }
+        val (_, dx) = vg(Tensors.f32Vector(floatArrayOf(1f, 1f)))
+        val g = dx.hostF32()
+        assertEquals(1f, g[0])
+        assertEquals(1f, g[1])
+    }
+
+    @Test
     fun constantRank1PerElementExponentSchedule() {
         // §0.4.67 — rank-1 `x.constant(FloatArray)` lets each element of a
         // rank-1 tracer get its own exponent. For x = [2, 3, 4] with
