@@ -149,6 +149,21 @@ fun <S : Shape> Tracer<S>.pow(other: Tracer<S>): Tracer<S> {
     return Tracer<S>(tape, e)
 }
 
+// §0.4.75 — scalar-literal operator overloads. The "broadcasting story" for
+// `Tracer<S> <op> Float` composes cleanly through `.constantLike(scalar)` +
+// the existing same-shape operators: the scalar is promoted to a rank-S
+// constant leaf (flagged non-differentiable via §0.4.65's isConstant path),
+// and the existing plus/minus/times/div/pow operators apply unchanged. The
+// constant-skip short-circuit in `Backward.applyRegistryRule` means no
+// gradient work is spent on the promoted leaf. Callers can write idiomatic
+// `x + 5f`, `x * 0.5f` on any rank without reaching for `x.constantLike(...)`
+// explicitly.
+
+operator fun <S : Shape> Tracer<S>.plus(scalar: Float): Tracer<S> = this + constantLike(scalar)
+operator fun <S : Shape> Tracer<S>.minus(scalar: Float): Tracer<S> = this - constantLike(scalar)
+operator fun <S : Shape> Tracer<S>.times(scalar: Float): Tracer<S> = this * constantLike(scalar)
+operator fun <S : Shape> Tracer<S>.div(scalar: Float): Tracer<S> = this / constantLike(scalar)
+
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value
     var acc = 0f

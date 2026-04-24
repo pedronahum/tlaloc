@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.75 Scalar-literal operator overloads (`x + 5f`, `x * 0.5f`, …) via `constantLike` 2026-04-24
+
+Ships the §0.4.68 register item "Scalar-rank broadcasting for `+` / `-` / `*` / `/`" — but via the cheap compositional path, not via true broadcasting + VJP rule changes. `Tracer<S> op Float` promotes the literal to a same-shape constant leaf (`constantLike(scalar)`) and routes through the existing same-shape operators; no new OpKind, no new VJP rule, no changes to `Backward.applyRegistryRule` beyond what `isConstant` skip already does.
+
+**The four one-liners** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt):
+
+```kotlin
+operator fun <S : Shape> Tracer<S>.plus(scalar: Float): Tracer<S>  = this + constantLike(scalar)
+operator fun <S : Shape> Tracer<S>.minus(scalar: Float): Tracer<S> = this - constantLike(scalar)
+operator fun <S : Shape> Tracer<S>.times(scalar: Float): Tracer<S> = this * constantLike(scalar)
+operator fun <S : Shape> Tracer<S>.div(scalar: Float): Tracer<S>   = this / constantLike(scalar)
+```
+
+Each delegates to the existing `Tracer<S> op Tracer<S>`, both operands same-shape. The `constantLike(scalar)` leaf is `isConstant = true`, so `Backward.applyRegistryRule` skips the grad-materialisation step for it — per-op reverse cost is identical to the non-broadcasting path.
+
+**Why this isn't true broadcasting**: true broadcasting would let `x + Tracer<ScalarShape>` work even when the scalar is a *differentiable* parameter (e.g. a hyperparameter the user wants a gradient for). That path requires adding a `BROADCAST` rule to `VjpRegistry` (reverse = SUM-reduce) and wiring it through `Backward`. The compositional path shipped here covers the much more common "literal scalar folded into a rank-N expression" case without that plumbing. Users who need a differentiable scalar still have `grad2 { x, s -> ... }` or `x * s` where both operands are Tracers of matching shape.
+
+**Five new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `scalarAddIsIdentityOnGrad` — `f(x) = x + 5f` on scalar and rank-1 inputs. Value shifts, grad = 1 per element.
+2. `scalarSubtractShiftsForwardOnly` — `f(x) = x - 2f`. Grad = 1.
+3. `scalarMultiplyScalesGrad` — `f(x) = x * 3f` scalar, and `f(x) = (x * 0.5f).sum()` rank-1. Grad matches the scale factor per element.
+4. `scalarDivScalesGradReciprocally` — `f(x) = x / 4f`. Grad = 1/4.
+5. `scalarOpsComposeInExpressions` — chained `((x + 1f) * 2f - 3f).sum()` on rank-1. Confirms all four operators compose correctly; grad = 2 per element (the multiplicative chain factor).
+
+**Decisions worth flagging**:
+
+- **Scalar is always `Float`, not `Number`.** Kotlin doesn't auto-convert `Int` → `Float` for operator dispatch; a caller writing `x + 5` (Int literal) would need `x + 5f` or `x + 5.0f`. The ergonomic cost is low (suffix `f` is one keystroke) and avoids the precision-loss surprises of silent `Int` promotion.
+
+- **No `Float op Tracer<S>` direction yet.** `5f + x` would need `operator fun Float.plus(tracer: Tracer<S>)`. Intentionally deferred — it's only useful if the tracer is the right-hand side, and the idiomatic Kotlin pattern is `tracer + scalar`. Can add later when a concrete call site wants it.
+
+- **Composed like `this <op> constantLike(scalar)`, not a new tape path.** Each scalar op produces one extra entry on the tape (the constant leaf). Forward cost is negligible (single allocation of a shape-filled FloatArray). Reverse cost is zero for the constant side (skipped by §0.4.65). For a typical kernel with N scalar ops the tape grows by N entries over the no-broadcast variant.
+
+- **`pow(Float)` NOT added.** POW's dExp side is non-trivial to skip cleanly when the exp is a constant leaf — the VJP rule still builds `x^e · ln(x)` in the dxir tree even if the seed-step is skipped. A dedicated `Tracer<S>.pow(exp: Float)` that introduces a new OpKind without the dExp side would be a separate perf optimisation; filed as a future follow-up.
+
+**Tests added** (+5 new):
+
+- `GradTest.scalarAddIsIdentityOnGrad`
+- `GradTest.scalarSubtractShiftsForwardOnly`
+- `GradTest.scalarMultiplyScalesGrad`
+- `GradTest.scalarDivScalesGradReciprocally`
+- `GradTest.scalarOpsComposeInExpressions`
+
+Full suite is green: **632 tests** (+5 over §0.4.74).
+
+**Recommended next pickup** (the "scalar-rank broadcasting" entry shrinks to "differentiable scalar broadcasting"):
+
+1. **Differentiable scalar broadcasting** — `x + Tracer<ScalarShape>` where the scalar is a differentiable parameter (distinct from a constant literal). Needs a `BROADCAST` VJP rule. 1 session.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **grad2(DTensor, Float)**.
+5. **`diagnosticReporter` migration**.
+6. **`Tracer<S>.pow(Float)` with skip-dExp-construction** — avoids the rule's grad_exp tree when exp is a Float literal.
+
+**Definition-of-done for §0.4.75 — met**:
+- Four scalar-literal operator overloads (plus/minus/times/div) on the Tracer surface ✓
+- Each delegates to same-shape op through a constant leaf; no new tape op kinds ✓
+- Tests pin forward value, per-element grad, and chained composition on scalar + rank-1 ✓
+- Full suite green at 632 tests (+5) ✓
+
 #### 0.4.74 End-to-end integration: captured rank-N const round-trips through `stablehlo-translate` 2026-04-24
 
 Composes the §0.4.71 / §0.4.72 / §0.4.73 fixes into one integration test. A user lambda creates a non-param leaf via `Tracer.constant(FloatArray)`, gets captured (§0.4.71's fix stores the value as a FloatArray-typed `DxirConst`), lowered to StableHLO (§0.4.73's emitter uses the new nested dense-literal formatter), and validated end-to-end by `stablehlo-translate --serialize`. Breaks if ANY of the three intermediate pieces regresses.

@@ -306,6 +306,78 @@ class GradTest {
         )
     }
 
+    // §0.4.75 — scalar-literal operator overloads (`x + 5f`, `x * 0.5f`, etc.).
+    // These are convenience sugar over `x <op> x.constantLike(scalar)`; no new
+    // tape op kind or VJP rule needed.
+
+    @Test
+    fun scalarAddIsIdentityOnGrad() {
+        // f(x) = x + 5. df/dx = 1 on every element.
+        val vgScalar = valueAndGrad { x: Tracer<ScalarShape> -> x + 5f }
+        val (v, dx) = vgScalar(Tensors.f32Scalar(3f))
+        assertEquals(8f, v)
+        assertEquals(1f, dx.hostF32()[0])
+
+        val vgRank1 = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (x + 5f).sum() }
+        val (v1, d1) = vgRank1(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(21f, v1)  // 6+7+8
+        val g = d1.hostF32()
+        assertEquals(1f, g[0])
+        assertEquals(1f, g[1])
+        assertEquals(1f, g[2])
+    }
+
+    @Test
+    fun scalarSubtractShiftsForwardOnly() {
+        // f(x) = x - 2. df/dx = 1.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x - 2f }
+        val (v, dx) = vg(Tensors.f32Scalar(7f))
+        assertEquals(5f, v)
+        assertEquals(1f, dx.hostF32()[0])
+    }
+
+    @Test
+    fun scalarMultiplyScalesGrad() {
+        // f(x) = x * 3. df/dx = 3 on every element.
+        val vgScalar = valueAndGrad { x: Tracer<ScalarShape> -> x * 3f }
+        val (v, dx) = vgScalar(Tensors.f32Scalar(4f))
+        assertEquals(12f, v)
+        assertEquals(3f, dx.hostF32()[0])
+
+        val vgRank1 = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (x * 0.5f).sum() }
+        val (v1, d1) = vgRank1(Tensors.f32Vector(floatArrayOf(2f, 4f, 6f)))
+        assertEquals(6f, v1)  // (1+2+3)
+        val g = d1.hostF32()
+        assertEquals(0.5f, g[0])
+        assertEquals(0.5f, g[1])
+        assertEquals(0.5f, g[2])
+    }
+
+    @Test
+    fun scalarDivScalesGradReciprocally() {
+        // f(x) = x / 4. df/dx = 1/4.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x / 4f }
+        val (v, dx) = vg(Tensors.f32Scalar(12f))
+        assertEquals(3f, v)
+        assertEquals(0.25f, dx.hostF32()[0])
+    }
+
+    @Test
+    fun scalarOpsComposeInExpressions() {
+        // f(x) = (x + 1) * 2 - 3 on rank-1; chains all four operators.
+        // Forward at x=[1, 2, 3]: (2*2 - 3, 3*2 - 3, 4*2 - 3) = (1, 3, 5). sum = 9.
+        // grad_x per element = d/dx of (x + 1) * 2 - 3 = 2. So all grad = 2.
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            ((x + 1f) * 2f - 3f).sum()
+        }
+        val (v, dx) = vg(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(9f, v)
+        val g = dx.hostF32()
+        assertEquals(2f, g[0])
+        assertEquals(2f, g[1])
+        assertEquals(2f, g[2])
+    }
+
     @Test
     fun constantLikeEnablesRank1Offset() {
         // §0.4.69 — `x.constantLike(5f)` creates a rank-1 constant with the same
