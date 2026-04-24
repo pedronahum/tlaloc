@@ -310,6 +310,89 @@ class GradTest {
     // These are convenience sugar over `x <op> x.constantLike(scalar)`; no new
     // tape op kind or VJP rule needed.
 
+    // §0.4.77 — differentiable scalar-to-rank1 broadcasting. These tests pin
+    // the gradient of BOTH operands: the rank-1 operand gets the usual per-
+    // element derivative, and the scalar operand receives a SUM-reduced
+    // gradient (via the new BroadcastRule's reverse).
+
+    @Test
+    fun rank1PlusScalarTracerGivesBothGradients() {
+        // f(x, c) = sum(x + c) at x=[1,2,3], c=10. Value 36.
+        //   grad_x_i = d/dx_i sum(x + c) = 1 → [1, 1, 1].
+        //   grad_c = d/dc sum(x + c) = N = 3 (once per element).
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank1<Sym>>, c: Tracer<ScalarShape> ->
+            (x + c).sum()
+        }
+        val (value, dx, dc) = vg(
+            Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)),
+            Tensors.f32Scalar(10f),
+        )
+        assertEquals(36f, value)
+        val gx = dx.hostF32()
+        assertEquals(1f, gx[0])
+        assertEquals(1f, gx[1])
+        assertEquals(1f, gx[2])
+        assertEquals(3f, dc.hostF32()[0], "grad_c = sum(1) across N=3 elements")
+    }
+
+    @Test
+    fun rank1TimesScalarTracerGivesBothGradients() {
+        // f(x, c) = sum(x * c) at x=[2, 4, 8], c=3. Value = 3 · 14 = 42.
+        //   grad_x_i = d/dx_i sum(x · c) = c = 3.
+        //   grad_c = d/dc sum(x · c) = sum(x) = 14.
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank1<Sym>>, c: Tracer<ScalarShape> ->
+            (x * c).sum()
+        }
+        val (value, dx, dc) = vg(
+            Tensors.f32Vector(floatArrayOf(2f, 4f, 8f)),
+            Tensors.f32Scalar(3f),
+        )
+        assertEquals(42f, value)
+        val gx = dx.hostF32()
+        assertEquals(3f, gx[0])
+        assertEquals(3f, gx[1])
+        assertEquals(3f, gx[2])
+        assertEquals(14f, dc.hostF32()[0], "grad_c = sum(x)")
+    }
+
+    @Test
+    fun rank1MinusScalarTracerReverseSubtract() {
+        // f(x, c) = sum(x - c) at x=[5, 10], c=2. Value = 11.
+        //   grad_x = [1, 1].
+        //   grad_c = -2 (one per element × -1).
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank1<Sym>>, c: Tracer<ScalarShape> ->
+            (x - c).sum()
+        }
+        val (value, dx, dc) = vg(
+            Tensors.f32Vector(floatArrayOf(5f, 10f)),
+            Tensors.f32Scalar(2f),
+        )
+        assertEquals(11f, value)
+        val gx = dx.hostF32()
+        assertEquals(1f, gx[0])
+        assertEquals(1f, gx[1])
+        assertEquals(-2f, dc.hostF32()[0], "grad_c = -N for N=2 elements")
+    }
+
+    @Test
+    fun rank1DivByScalarTracerGivesReciprocalGrad() {
+        // f(x, c) = sum(x / c) at x=[4, 8], c=2. Value = 2 + 4 = 6.
+        //   grad_x_i = 1/c = 0.5.
+        //   grad_c = -sum(x)/c² = -12/4 = -3.
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank1<Sym>>, c: Tracer<ScalarShape> ->
+            (x / c).sum()
+        }
+        val (value, dx, dc) = vg(
+            Tensors.f32Vector(floatArrayOf(4f, 8f)),
+            Tensors.f32Scalar(2f),
+        )
+        assertEquals(6f, value)
+        val gx = dx.hostF32()
+        assertTrue(abs(gx[0] - 0.5f) < 1e-5f)
+        assertTrue(abs(gx[1] - 0.5f) < 1e-5f)
+        assertTrue(abs(dc.hostF32()[0] - (-3f)) < 1e-5f, "grad_c = -sum(x)/c² = -3; got ${dc.hostF32()[0]}")
+    }
+
     @Test
     fun scalarPowScalesGradViaExponent() {
         // §0.4.76 — f(x) = x^3 as `x.pow(3f)`. Grad = 3·x². At x=2 → value=8, grad=12.

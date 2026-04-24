@@ -461,6 +461,19 @@ object DxirInterpreter {
                     else -> a.copyOf()
                 }
             }
+            // §0.4.77 — SUM is the reverse of BROADCAST (scalar-input MVP).
+            // BroadcastRule emits `SUM(upstream)` as the grad contribution for
+            // a scalar operand that was broadcast to a higher rank; the
+            // contribution flows through `applyRegistryRule`'s evalNode call,
+            // which in turn lands here. Straight accumulator over all
+            // elements — matches the Tracer-surface `Tracer<S>.sum()` op and
+            // the SumRule's primal semantics.
+            OpKind.SUM -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                var acc = 0f
+                for (x in a) acc += x
+                floatArrayOf(acc)
+            }
             else -> error("DxirInterpreter: op ${op.op} not in the bridge's supported set")
         }
     }

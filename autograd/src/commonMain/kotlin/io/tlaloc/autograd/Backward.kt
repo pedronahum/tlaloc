@@ -59,7 +59,12 @@ internal fun backward(tape: Tape, outputId: Int, seedGrad: FloatArray): Gradient
             // `Tracer<S>.pow(Tracer<S>)` can emit it. Rule has been in VjpRegistry
             // since §0.4.22 and was already internally used by C6's closed-form
             // output (§0.4.52); this is the new surface-producer.
-            OpKind.POW ->
+            OpKind.POW,
+            // §0.4.77 — BROADCAST produced by the scalar-op-rank-N operators
+            // (e.g. `Tracer<Rank1<A>>.plus(Tracer<ScalarShape>)`). The
+            // BroadcastRule's reverse is SUM-to-scalar; the rule is registered
+            // in VjpRegistry for MVP scalar-input case.
+            OpKind.BROADCAST ->
                 applyRegistryRule(entry.op, entry, entries, g, grads)
             OpKind.STEP -> {
                 // step(x) = 1 if x > 0 else 0.  Its derivative is identically zero

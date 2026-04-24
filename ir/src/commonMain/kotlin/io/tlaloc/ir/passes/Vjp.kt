@@ -516,6 +516,34 @@ object VjpRegistry {
         }
     }
 
+    /**
+     * §0.4.77 — reverse of BROADCAST. When a lower-rank input is broadcast to a
+     * higher-rank output, the gradient flowing back must be SUM-reduced across
+     * the inserted dims to return to the input's shape.
+     *
+     * MVP scope: scalar input only (input type `isScalar`). `SUM(upstream)` over
+     * all dims collapses the upstream to a scalar, matching the input's shape.
+     * General broadcasting reverse (rank-N input to rank-M output with partial
+     * axis alignment) needs axis-aware partial SUM — deferred until a use case
+     * demands it.
+     *
+     * [readsPrimalOperandIndices] = `emptySet()`: the rule only needs the
+     * upstream's shape (to know what to sum) and the input's type (to shape
+     * the sum). Neither requires reading the primal operand's cached value.
+     */
+    val BroadcastRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val input = op.operands[0]
+            require(input.type.isScalar) {
+                "BroadcastRule: only scalar input supported in §0.4.77 MVP (got ${input.type}). " +
+                    "General broadcasting reverse needs axis-aware partial SUM — deferred."
+            }
+            val contribution = builder.op(OpKind.SUM, listOf(upstream), input.type)
+            return listOf(input to contribution)
+        }
+    }
+
     private val rules: Map<OpKind, VjpRule> = mapOf(
         OpKind.ADD to AddRule,
         OpKind.SUB to SubRule,
@@ -534,6 +562,7 @@ object VjpRegistry {
         OpKind.SIGMOID to SigmoidRule,
         OpKind.CAST to CastRule,
         OpKind.GATHER to GatherRule,
+        OpKind.BROADCAST to BroadcastRule,
     )
 
     operator fun get(kind: OpKind): VjpRule? = rules[kind]

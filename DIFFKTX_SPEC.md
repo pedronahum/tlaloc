@@ -39,6 +39,83 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.77 Differentiable scalar broadcasting — `Tracer<Rank1<A>> op Tracer<ScalarShape>` 2026-04-24
+
+Ships the first real broadcasting path — a scalar `Tracer<ScalarShape>` can now participate in rank-1 arithmetic with a proper gradient on both sides. Complements §0.4.75's literal-scalar overloads (which promote a `Float` constant) by handling the case where the scalar is itself a differentiable parameter.
+
+**Three coordinated changes**:
+
+1. **[Vjp.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt)** — new `BroadcastRule` in `VjpRegistry`:
+
+   ```kotlin
+   val BroadcastRule: VjpRule = object : VjpRule {
+       override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder) =
+           listOf(op.operands[0] to builder.op(OpKind.SUM, listOf(upstream), input.type))
+   }
+   ```
+
+   MVP scope: scalar input only (`input.type.isScalar` guarded). Reverse is `SUM(upstream)` — collapses all dims to scalar, matching the input's shape. General broadcasting reverse (rank-K → rank-N with partial axis alignment) would need axis-aware partial SUM; deferred until a use case demands it. Registered in `rules` alongside the existing rules.
+
+2. **[Backward.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Backward.kt)** — `OpKind.BROADCAST` added to the registry-dispatch arm. Before §0.4.77 no tape op produced BROADCAST, so the else-error was defensive dead code.
+
+3. **[TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt)** — four new operator overloads:
+
+   ```kotlin
+   @JvmName("plusScalarTracer")  operator fun <A> Tracer<Rank1<A>>.plus(scalar: Tracer<ScalarShape>)
+   @JvmName("minusScalarTracer") operator fun <A> Tracer<Rank1<A>>.minus(scalar: Tracer<ScalarShape>)
+   @JvmName("timesScalarTracer") operator fun <A> Tracer<Rank1<A>>.times(scalar: Tracer<ScalarShape>)
+   @JvmName("divScalarTracer")   operator fun <A> Tracer<Rank1<A>>.div(scalar: Tracer<ScalarShape>)
+   ```
+
+   Each calls a private `broadcastScalar` helper that records an `OpKind.BROADCAST` op on the tape (lifting scalar → rank-1), then invokes the existing same-shape binary op. `@JvmName` is required because JVM erasure collides these with the existing `Tracer<S>.plus(Tracer<S>)` signature — after erasure both are `plus(Tracer, Tracer)`.
+
+4. **[DxirInterpreter.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt)** — new `OpKind.SUM` arm in the bridge `evalOp`. BroadcastRule's reverse contribution emits a `SUM` node; `applyRegistryRule`'s `evalNode` lands on the bridge's `evalOp`, which previously rejected SUM with "not in the bridge's supported set". Straight accumulator, matches SumRule's primal semantics.
+
+**Four tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+- `rank1PlusScalarTracerGivesBothGradients` — `sum(x + c)` at x=[1,2,3], c=10. grad_x=[1,1,1], grad_c=3 (= N).
+- `rank1TimesScalarTracerGivesBothGradients` — `sum(x * c)` at x=[2,4,8], c=3. grad_x=[3,3,3], grad_c=14 (= sum x).
+- `rank1MinusScalarTracerReverseSubtract` — `sum(x - c)` at x=[5,10], c=2. grad_c=-2 (negative N).
+- `rank1DivByScalarTracerGivesReciprocalGrad` — `sum(x/c)` at x=[4,8], c=2. grad_x=[0.5, 0.5], grad_c=-3 (= -sum(x)/c²).
+
+Each test pins BOTH operand gradients — the rank-1 operand via the usual per-element derivative, and the scalar operand via BroadcastRule's SUM-reverse. Failure in BroadcastRule would surface as a wrong scalar-side gradient; failure in the `@JvmName` / operator-resolution would show as a compile error.
+
+**Decisions worth flagging**:
+
+- **MVP: scalar-input only.** Full broadcasting reverse requires detecting which dims are being broadcast (input had size 1 vs. a real size vs. didn't exist) and SUMming over those specific dims. The MVP guard (`require(input.type.isScalar)`) fails loudly if a future call site produces a non-scalar-input BROADCAST; extension is straightforward once axis-aware partial-SUM lands.
+
+- **Rank-1 receiver only on the Tracer surface.** Rank-2 and higher receivers would follow the same pattern (broadcast scalar to target shape, same-shape op). Adding them means ~4 more overloads per rank. Filed as a follow-up — current benchmarks exercise rank-1 exclusively for broadcasted-scalar operations.
+
+- **`@JvmName` chosen over type-erasure workarounds.** Alternative patterns (wrapper types, extension-on-object-with-phantom) would avoid the `@JvmName` dance but introduce more API surface. The annotation is localised and well-understood. JVM-only projects pay zero cost; KMP consumers on non-JVM targets likewise don't see the JVM-specific collision.
+
+- **SUM added to the bridge evalOp; did NOT backport to the main evalOp's structured-control-flow path.** The bridge is the registry-reverse path (called from `applyRegistryRule`); structured `evalFunction` has its own op coverage. Adding SUM to the bridge closes the specific gap BroadcastRule introduced without widening unrelated scope.
+
+**Tests added** (+4 new):
+
+- `GradTest.rank1PlusScalarTracerGivesBothGradients`
+- `GradTest.rank1TimesScalarTracerGivesBothGradients`
+- `GradTest.rank1MinusScalarTracerReverseSubtract`
+- `GradTest.rank1DivByScalarTracerGivesReciprocalGrad`
+
+Full suite is green: **637 tests** (+4 over §0.4.76).
+
+**Recommended next pickup**:
+
+1. **Rank-2 + rank-N receiver overloads** for the scalar-broadcast operators — natural extension of §0.4.77's rank-1 work.
+2. **General axis-aware BROADCAST reverse** — lifts the MVP scalar-input guard; enables `Tracer<Rank1<A>> op Tracer<Rank2<A, B>>` etc.
+3. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+4. **D.1i Symja `Simplify` on grad expressions**.
+5. **grad2(DTensor, Float)**.
+6. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.77 — met**:
+- `BroadcastRule` in `VjpRegistry` with reverse = `SUM(upstream)` for scalar input ✓
+- `Backward.kt` dispatches `OpKind.BROADCAST` through the registry ✓
+- Four `Tracer<Rank1<A>>.op(Tracer<ScalarShape>)` overloads with `@JvmName` disambiguation ✓
+- `DxirInterpreter` bridge handles `OpKind.SUM` ✓
+- Four tests pin both-operand gradients for each of plus / minus / times / div ✓
+- Full suite green at 637 tests (+4) ✓
+
 #### 0.4.76 `Tracer<S>.pow(Float)` — scalar-literal pow via `constantLike` 2026-04-24
 
 Direct §0.4.75 follow-up. Adds `fun <S : Shape> Tracer<S>.pow(scalar: Float): Tracer<S>` — delegates to `this.pow(constantLike(scalar))`. Lets users write `x.pow(2f)` for squaring without constructing a scalar Tracer or a Float leaf by hand, matching the §0.4.75 idiom for `+`/`-`/`*`/`/`.

@@ -176,6 +176,56 @@ operator fun <S : Shape> Tracer<S>.div(scalar: Float): Tracer<S> = this / consta
  */
 fun <S : Shape> Tracer<S>.pow(scalar: Float): Tracer<S> = this.pow(constantLike(scalar))
 
+// §0.4.77 — differentiable scalar-to-rank1 broadcasting. Unlike §0.4.75's
+// scalar-literal overloads (which promote a Float constant), these overloads
+// accept a Tracer<ScalarShape> that participates in the reverse walk. The
+// scalar gets a SUM-reduced gradient, while the rank-1 operand sees a
+// per-element gradient matching the expression's elementwise derivative.
+//
+// Forward: broadcast scalar to rank-1 (records OpKind.BROADCAST on the tape
+// with the rank-1 operand's dims as target), then run the regular same-shape
+// op. Backward routes BROADCAST through VjpRegistry.BroadcastRule which
+// emits SUM(upstream) as the reverse.
+//
+// Scope for §0.4.77: rank-1 receiver only. Rank-2+ overloads are a
+// straight-line extension using the same machinery; deferred until a use case
+// surfaces.
+
+private fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.broadcastScalar(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank1<A>> {
+    val tape = sameTape(this, scalar)
+    val scalarValue = scalar.entry.value[0]
+    val broadcasted = FloatArray(size) { scalarValue }
+    val e = tape.op(OpKind.BROADCAST, intArrayOf(scalar.id), dims.copyOf(), broadcasted)
+    return Tracer<io.tlaloc.core.Rank1<A>>(tape, e)
+}
+
+// @JvmName distinguishes these from the same-shape Tracer<S>.plus/minus/times/div
+// above — after JVM type erasure all four methods would have signature
+// `plus(Tracer, Tracer)`. Each gets a distinct JVM name so both overloads
+// coexist without "Platform declaration clash" errors.
+
+@kotlin.jvm.JvmName("plusScalarTracer")
+operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.plus(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank1<A>> = this + broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("minusScalarTracer")
+operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.minus(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank1<A>> = this - broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("timesScalarTracer")
+operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.times(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank1<A>> = this * broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("divScalarTracer")
+operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.div(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank1<A>> = this / broadcastScalar(scalar)
+
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value
     var acc = 0f
