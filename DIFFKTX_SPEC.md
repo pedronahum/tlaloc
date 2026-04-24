@@ -39,6 +39,74 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.81 `gradWithScalar` / `valueAndGradWithScalar` — (DTensor, Float) ergonomic overloads 2026-04-24
+
+Ships the §0.4.68 register / §0.4.75 follow-up item "grad2(DTensor, Float) — paper-scale BGDHyperOpt scaling measurement". The §0.4.77 scalar broadcasting surface already lets `grad2 { x: Tracer<Rank1<Sym>>, c: Tracer<ScalarShape> -> ... }` work end-to-end; this session adds a pair of convenience helpers that accept the scalar operand as a raw `Float`, internally wrap it as a scalar `DTensor`, and unwrap the scalar gradient back to `Float` at the return boundary. No changes to the underlying backward mechanics.
+
+**Two new functions** in [Grad.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Grad.kt):
+
+```kotlin
+fun <S : Shape> valueAndGradWithScalar(
+    f: (Tracer<S>, Tracer<ScalarShape>) -> Tracer<ScalarShape>,
+): (DTensor<S, F32>, Float) -> Triple<Float, DTensor<S, F32>, Float>
+
+fun <S : Shape> gradWithScalar(
+    f: (Tracer<S>, Tracer<ScalarShape>) -> Tracer<ScalarShape>,
+): (DTensor<S, F32>, Float) -> Pair<DTensor<S, F32>, Float>
+```
+
+Internally: allocate a `DTensor<ScalarShape, F32>(HostF32Storage(floatArrayOf(b)), IntArray(0), F32)` from the raw Float input, route through `Tape`/`backward`, and read the scalar-gradient leaf's value back via `.hostF32()[0]`.
+
+Lets users write idiomatic code for a paper-scale BGDHyperOpt port:
+
+```kotlin
+val g = gradWithScalar { w: Tracer<Rank1<Sym>>, lr: Tracer<ScalarShape> ->
+    val loss = ...  // uses w and lr
+    loss
+}
+val (dw, dLr) = g(weightVector, 0.01f)
+```
+
+**Three tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `gradWithScalarWrapsAndUnwraps` — `sum(x * c)` at x=[2,4,8], c=3. Checks grad_x=[3,3,3], grad_c=14 (as a Float, not a DTensor).
+2. `valueAndGradWithScalarReturnsValueAndBothGradients` — `sum(x + c)` at x=[1,2], c=5. Checks value=13, grad_x=[1,1], grad_c=2.
+3. `gradWithScalarPreservesExistingGrad2Semantics` — cross-check against the existing `grad2` with `Tensors.f32Scalar` wrapping. Both paths must produce numerically identical gradients.
+
+**Decisions worth flagging**:
+
+- **New name, not a `grad2` overload.** Kotlin's type inference would see the signature `(Tracer<S>, Tracer<ScalarShape>) -> Tracer<ScalarShape>` as compatible with both the generic `grad2 { S1, S2 -> ... }` (with `S2 = ScalarShape`) and the new `(DTensor, Float)`-returning variant — producing overload ambiguity. A different Kotlin name keeps each surface unambiguous.
+
+- **Name chosen: `gradWithScalar`.** Reads as "gradient where the second operand is a scalar" without implying the first is a specific shape. Alternative `grad2DTensorFloat` is noisier and couples naming to return types. `gradMixed` is too generic.
+
+- **`valueAndGradWithScalar` returns `Triple<Float, DTensor<S, F32>, Float>`** — matches the shape of `valueAndGrad2` (value first, then grads in arg order). Float unwrapping at the grad position is the whole point of this overload.
+
+- **Raw Float input vs. wrapping in `Tensors.f32Scalar`**. The helper does the exact same wrapping internally. Users who want to pass a DTensor directly still have the full `grad2 { ... }` surface. Both coexist without shadowing.
+
+- **Did not add `valueAndGradDTensorFloat` / `gradDTensorFloat` for every rank combination.** The `S : Shape` bound covers scalar/rank-1/rank-2/... on the DTensor side; the scalar-shape second operand is hard-pinned. If a use case surfaces for `(Float, DTensor)` (scalar first, tensor second), the mirror helper is a copy-paste. Filed as future if needed.
+
+**Tests added** (+3 new):
+
+- `GradTest.gradWithScalarWrapsAndUnwraps`
+- `GradTest.valueAndGradWithScalarReturnsValueAndBothGradients`
+- `GradTest.gradWithScalarPreservesExistingGrad2Semantics`
+
+Full suite is green: **644 tests** (+3 over §0.4.80).
+
+**Recommended next pickup**:
+
+1. **General axis-aware BROADCAST reverse** — lifts MVP scalar-input guard.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **`diagnosticReporter` migration**.
+5. **Mirror `(Float, DTensor)` variant of gradWithScalar** — if a use case surfaces for scalar-first argument order.
+
+**Definition-of-done for §0.4.81 — met**:
+- `gradWithScalar` + `valueAndGradWithScalar` land in Grad.kt ✓
+- Internal wrap-unwrap threads through the existing valueAndGrad2 path ✓
+- Tests cover forward value, per-element grad_x, scalar grad_c, and cross-check against legacy grad2 ✓
+- Full suite green at 644 tests (+3) ✓
+
 #### 0.4.80 Tape-op attrs plumbing — fixes captured-BROADCAST round-trip 2026-04-24
 
 Bug found while writing a round-trip test for captured scalar-broadcast (the §0.4.77 path through `capture + stablehlo-translate`). §0.4.77's tape-side `broadcastScalar` helper called `tape.op(OpKind.BROADCAST, ...)` without passing `broadcast_dimensions` attrs. `Capture.kt` built a `DxirOp` with empty attrs. The StableHLO emitter's `emitBroadcast` then required `broadcast_dimensions` and crashed with `op BROADCAST missing int-list attr 'broadcast_dimensions'`.

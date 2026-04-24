@@ -315,6 +315,60 @@ class GradTest {
     // element derivative, and the scalar operand receives a SUM-reduced
     // gradient (via the new BroadcastRule's reverse).
 
+    // §0.4.81 — (DTensor, Float) ergonomic overloads for grad2 / valueAndGrad2.
+    // Accept the scalar as a raw Float, unwrap the scalar gradient back to Float
+    // at the return boundary. Underlying path is the same as §0.4.77's scalar
+    // broadcast — these tests pin the wrapping/unwrapping correctness.
+
+    @Test
+    fun gradWithScalarWrapsAndUnwraps() {
+        // f(x, c) = sum(x * c) at x=[2, 4, 8], c=3. value=42.
+        //   grad_x=[3, 3, 3]. grad_c = sum(x) = 14.
+        val g = gradWithScalar { x: Tracer<io.tlaloc.core.Rank1<Sym>>, c: Tracer<ScalarShape> ->
+            (x * c).sum()
+        }
+        val (dx, dc) = g(Tensors.f32Vector(floatArrayOf(2f, 4f, 8f)), 3f)
+        val gx = dx.hostF32()
+        assertEquals(3f, gx[0])
+        assertEquals(3f, gx[1])
+        assertEquals(3f, gx[2])
+        assertEquals(14f, dc, "grad_c should be unwrapped to Float; got $dc")
+    }
+
+    @Test
+    fun valueAndGradWithScalarReturnsValueAndBothGradients() {
+        // f(x, c) = sum(x + c) at x=[1, 2], c=5. value = 13. grad_x=[1, 1]. grad_c = N = 2.
+        val vg = valueAndGradWithScalar { x: Tracer<io.tlaloc.core.Rank1<Sym>>, c: Tracer<ScalarShape> ->
+            (x + c).sum()
+        }
+        val (value, dx, dc) = vg(Tensors.f32Vector(floatArrayOf(1f, 2f)), 5f)
+        assertEquals(13f, value)
+        val gx = dx.hostF32()
+        assertEquals(1f, gx[0])
+        assertEquals(1f, gx[1])
+        assertEquals(2f, dc)
+    }
+
+    @Test
+    fun gradWithScalarPreservesExistingGrad2Semantics() {
+        // Cross-check: `gradWithScalar { x, c -> ... }` agrees with
+        // `grad2 { x, c -> ... }` when c is passed through Tensors.f32Scalar.
+        val f = { x: Tracer<io.tlaloc.core.Rank1<Sym>>, c: Tracer<ScalarShape> ->
+            (x * c + x).sum()
+        }
+        val new = gradWithScalar(f)
+        val legacy = grad2(f)
+        val xIn = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f))
+        val (dxNew, dcNew) = new(xIn, 4f)
+        val (dxLegacy, dcLegacy) = legacy(xIn, Tensors.f32Scalar(4f))
+        val newArr = dxNew.hostF32()
+        val legacyArr = dxLegacy.hostF32()
+        assertEquals(legacyArr[0], newArr[0])
+        assertEquals(legacyArr[1], newArr[1])
+        assertEquals(legacyArr[2], newArr[2])
+        assertEquals(dcLegacy.hostF32()[0], dcNew)
+    }
+
     @Test
     fun rank2PlusScalarTracerGivesBothGradients() {
         // §0.4.78 — rank-2 extension of §0.4.77's scalar broadcast.
