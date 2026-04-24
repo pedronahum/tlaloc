@@ -39,6 +39,75 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.68 Out-of-scope register — consolidated snapshot as of §0.4.67 2026-04-24
+
+Pure-doc session. The "Out of scope (still)" list has been repeated at the bottom of every §0.4.N note since §0.4.3, with entries progressively narrowing as items shipped — but some items shipped silently in one note and were still listed as deferred in the next. This section captures the CURRENT deferred register in one place so future sessions have a single authoritative reference. Individual §0.4.N notes are left unchanged — they're frozen-in-time milestones by design.
+
+**Still genuinely deferred**:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX parity baselines | Big project; paper's benchmarks mostly reproduced internally. |
+| Tensor ops | Multi-dim GATHER/SCATTER | Rank-1 lands in §0.4.41–§0.4.42; rank-N+ needs typed-shape plumbing. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v` in a grad lambda) | FIR surface piece; no call site needs it yet. |
+| Tensor ops | General rank-N BROADCAST / TRANSPOSE in `DxirToIrSynthesis` | Rank-1 SUM-shaped is covered; other shapes reject. |
+| Tensor ops | Batched MATMUL | Rank-2 only at the emitter + synthesis boundary. |
+| Tensor ops | Rank-N `DxirConst` lowering in synthesis | Scalar + rank-1 land; higher ranks fall back. |
+| StableHLO emitter | SCATTER_ADD widening (`stablehlo.scatter` with accumulator) | `:core`'s SCATTER_ADD is internal-only; no direct MLIR lowering yet. |
+| StableHLO emitter | Scatter-into-zeros pattern | `:autograd`'s SCATTER bridge's common case; needs a dedicated arm. |
+| Plugin | `diagnosticReporter` migration (KT-78277) | IrPluginContext.messageCollector is deprecated; FIR-side already migrated, IR-side still uses `@Suppress("DEPRECATION")`. |
+| Plugin | Sub-projecting the plugin (§13) | One-module-per-role factorisation; gated on reaching a stable public surface. |
+| Tape | F64 tape path | Tape is F32-only; no call site yet. |
+| PhiCalculus | Region-internal DCE/CSE | §0.4.48 added structural CSE + const-fold at top level; IF/WHILE region bodies still untouched. |
+| PhiCalculus | Multi-result IF | Single-result covered by §0.4.14 F1+F3. |
+| PhiCalculus | Multi-back-edge WHILE | Single-back-edge covered by C5–C9 (§0.4.15–§0.4.19). |
+| PhiCalculus | Multi-result COARSENED | Single-result covered by §0.4.31; multi-result splices still need design. |
+| PhiCalculus | Recursive `splitOnReuses` for still-too-large fragments | §0.4.29 handles one split; nested re-splits deferred. |
+| PhiCalculus | Cache pruning | `tlaloc.cache.dir` grows unbounded; no TTL / LRU. |
+| PhiCalculus | `gradient_body` with nested regions | Linear gradient bodies lower; IF/WHILE inside a gradient body deferred. |
+| PhiCalculus | Fragment-SOI splicing (multi-COARSENED per branch body) | §0.4.35 splices one per branch; more complex branch fabrics not yet. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 added trailing `if (cond) break`; bare `break` elsewhere, `continue`, labeled break still reject. |
+| Control flow | `return` inside branches | Branches yield their region's trailing expression; `return` midway still rejects. |
+| Control flow | Nested control flow in every combination | Nested for-in-while + inner-for-inside-break scenarios still need case-by-case work. |
+| Control flow | Multi-block regions | Each region is single-block today. |
+| Infrastructure | `:benchmarks` Gradle module | Perf probes live in-test today (`BGDHyperOptTest` etc.). A dedicated `:benchmarks` with `kotlinx-benchmark` would reduce variance and allow statistical reporting. |
+
+**Recently shipped** (items that appeared in historical Out-of-scope lists but are now done; these are NOT deferred anymore):
+
+- **`:stablehlo` emitter widening for NOT / LAND / POW / LOG / EXP** — NOT and LAND in §0.4.60 + round-trip validated §0.4.61; POW (§0.4.60 cleanup of duplicate error arm; real lowering at line 140), LOG, EXP already shipped pre-§0.4.53.
+- **Raw `while (cond)` lowering** — §0.4.50 (Stage D.3-complete).
+- **Array indexing** (`arr[i]` on rank-1 tracer) — §0.4.42 FIR surface + §0.4.41 GATHER substrate.
+- **Stage C SOI identification** — §0.4.27 onwards (Stages C.1 → C.3b.3b2).
+- **Trailing `if (cond) break`** — §0.4.50 Gap 3 with LAND-hoist.
+- **Symja symbolic simplification (paper mechanism (ii))** — §0.4.48 documented structural half (CSE + const-fold); §0.4.52 wired Symja `Simplify` into C6's closed-form path for BGDHyperOpt. Full "simplify whole gradient expression" still deferred as **D.1i** (in the active follow-up list, not the out-of-scope register).
+
+**Decisions worth flagging**:
+
+- **Register here, not rewrite there.** §0.4.N notes are hand-off documents — they reflect what was true at session close. Rewriting them for post-hoc accuracy would lose audit value. Future readers compare notes chronologically (which forced this consolidation). Ongoing `Out of scope` lines at the bottom of future §0.4.N notes can now be shorter or just reference this register.
+
+- **Tabular, not enumerative.** Prior lists were comma-separated one-liners that became unreadable past ~10 entries. A table with an Area column lets a reader scan by concern (tensor / plugin / PhiCalculus / etc.).
+
+- **"Recently shipped" included deliberately.** A pure deferred-list would make "why did X disappear from §0.4.N's out-of-scope line?" un-answerable without git history. The shipped list acts as a changelog for the register itself.
+
+- **`HMC / CartPole / QWOP benchmark ports` NOT listed.** Those are in the Stage D benchmark matrix (search for "HMC" in §0.4.47-onwards status tables) — they're aspirational ports, not "out of scope" in the policy-boundary sense. The register is for "we intentionally decided not to do this". Missing benchmarks are "we haven't gotten to it yet".
+
+**No tests added** — pure-doc session. Full suite unchanged at 615.
+
+**Recommended next pickup** — register now authoritative:
+
+1. **Scalar-rank broadcasting for `+` / `-` / `*` / `/`** — so `x + x.constant(5f)` works on rank-1 Tracers. Probably 1-2 sessions.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+3. **D.1i Symja `Simplify` on grad expressions** — paper mechanism (ii), full form.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling from a single binary.
+5. **`diagnosticReporter` migration** — now listed in the register, small cosmetic refactor.
+6. **Rank-N `Tracer.constant(FloatArray, IntArray)`** — generalises §0.4.67 when a rank-2+ call site surfaces.
+
+**Definition-of-done for §0.4.68 — met**:
+- Consolidated deferred-items table spans every item that appeared in historical `Out of scope` lines ✓
+- Shipped items clearly separated from still-deferred items ✓
+- Historical §0.4.N notes left unchanged ✓
+- No code change; no new tests ✓
+
 #### 0.4.67 Rank-1 `Tracer.constant(FloatArray)` — per-element constant leaf 2026-04-24
 
 Generalises §0.4.65's scalar-only `constant(Float)` to rank-1. A user can now write `x.pow(x.constant(floatArrayOf(2f, 3f, 4f)))` for a per-element exponent schedule, or stage any fixed rank-1 offset alongside a `Tracer<Rank1<Sym>>` differentiable slot. Same constant-skip path as §0.4.65: the leaf is flagged `isConstant = true`, so `Backward.applyRegistryRule` short-circuits any materialisation targeting it.
