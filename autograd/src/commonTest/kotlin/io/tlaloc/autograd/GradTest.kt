@@ -239,6 +239,61 @@ class GradTest {
     }
 
     @Test
+    fun constantRank1PerElementExponentSchedule() {
+        // §0.4.67 — rank-1 `x.constant(FloatArray)` lets each element of a
+        // rank-1 tracer get its own exponent. For x = [2, 3, 4] with
+        // exponents [3, 2, 1], `sum(x^e)` = 8 + 9 + 4 = 21.
+        // grad_x[i] = e[i] · x[i]^(e[i] - 1) = [3·4, 2·3, 1·1] = [12, 6, 1].
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            x.pow(x.constant(floatArrayOf(3f, 2f, 1f))).sum()
+        }
+        val (value, dx) = vg(Tensors.f32Vector(floatArrayOf(2f, 3f, 4f)))
+        assertEquals(21f, value)
+        val g = dx.hostF32()
+        assertTrue(abs(g[0] - 12f) < 1e-5f, "grad_x[0] = 12; got ${g[0]}")
+        assertTrue(abs(g[1] - 6f) < 1e-5f, "grad_x[1] = 6; got ${g[1]}")
+        assertTrue(abs(g[2] - 1f) < 1e-5f, "grad_x[2] = 1; got ${g[2]}")
+    }
+
+    @Test
+    fun constantRank1DefensivelyCopiesInput() {
+        // Pin that a caller mutation to the passed-in array doesn't desync
+        // the tape's cached values. Subtle gotcha if `constant(FloatArray)`
+        // stored the reference — a grad computed after the mutation would
+        // use stale values.
+        val g = grad { x: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            val src = floatArrayOf(1f, 1f)
+            val c = x.constant(src)
+            src[0] = 999f  // mutate AFTER handing off to constant()
+            src[1] = 999f
+            (x + c).sum()  // grad_x should still be [1, 1] — c's values
+            // frozen at constant() time. `c` is non-differentiable so the
+            // mutation doesn't even appear in the value computation.
+        }
+        val out = g(Tensors.f32Vector(floatArrayOf(5f, 10f)))
+        val arr = out.hostF32()
+        assertEquals(1f, arr[0])
+        assertEquals(1f, arr[1])
+    }
+
+    @Test
+    fun constantRank1RejectsEmptyArray() {
+        // Empty arrays can't form a rank-1 tensor — pin the require() fires
+        // loudly instead of producing a zero-dim runtime surprise.
+        var caught: IllegalArgumentException? = null
+        grad { x: Tracer<ScalarShape> ->
+            try {
+                x.constant(FloatArray(0))
+            } catch (e: IllegalArgumentException) {
+                caught = e
+            }
+            x
+        }(Tensors.f32Scalar(1f))
+        assertTrue(caught != null, "expected IllegalArgumentException for empty FloatArray")
+        assertTrue(caught!!.message!!.contains("empty"), "message should name the failure; got: ${caught!!.message}")
+    }
+
+    @Test
     fun constantTracerAsAdditiveOffsetLeavesGradUnchanged() {
         // Adding a constant offset shifts forward but leaves grad_x at 1.
         // Pins that `.constant()` composes with arithmetic operators, not only

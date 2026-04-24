@@ -80,3 +80,24 @@ fun Tracer<*>.constant(value: Float): Tracer<io.tlaloc.core.ScalarShape> {
     val entry = tape.leaf(dims = IntArray(0), value = floatArrayOf(value), isConstant = true)
     return Tracer(tape, entry)
 }
+
+/**
+ * §0.4.67 — rank-1 form of [constant]. Creates a `Rank1<Sym>` leaf on the same
+ * tape as [this], flagged non-differentiable. Defensively copies [values] so a
+ * later caller mutation of the input array doesn't desync from the tape's cache.
+ *
+ * Useful for `x.pow(x.constant(floatArrayOf(2f, 3f, 4f)))` (per-element exponent
+ * schedule), or as a fixed bias in an `x + x.constant(...)` pattern once the
+ * broadcasting story lands. The `Sym` symbolic axis is unbranded — any concrete
+ * Rank1 type the caller prefers can be used at the call site via `as`, but the
+ * canonical shape here is `Rank1<Sym>` to match `Tensors.f32Vector`'s default.
+ */
+fun Tracer<*>.constant(values: FloatArray): Tracer<io.tlaloc.core.Rank1<io.tlaloc.core.Sym>> {
+    require(values.isNotEmpty()) { "constant(FloatArray): empty array is not a valid rank-1 tracer" }
+    val entry = tape.leaf(
+        dims = intArrayOf(values.size),
+        value = values.copyOf(),
+        isConstant = true,
+    )
+    return Tracer(tape, entry)
+}

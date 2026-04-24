@@ -39,6 +39,53 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.67 Rank-1 `Tracer.constant(FloatArray)` — per-element constant leaf 2026-04-24
+
+Generalises §0.4.65's scalar-only `constant(Float)` to rank-1. A user can now write `x.pow(x.constant(floatArrayOf(2f, 3f, 4f)))` for a per-element exponent schedule, or stage any fixed rank-1 offset alongside a `Tracer<Rank1<Sym>>` differentiable slot. Same constant-skip path as §0.4.65: the leaf is flagged `isConstant = true`, so `Backward.applyRegistryRule` short-circuits any materialisation targeting it.
+
+**What changed** (one addition): `fun Tracer<*>.constant(values: FloatArray): Tracer<Rank1<Sym>>` in [Tracer.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tracer.kt). Rejects empty arrays with a clear message (can't form a rank-1 tensor), and `copyOf()`s the input so caller-side mutation of the passed array after the call can't desync from the tape's cached values.
+
+**Three new tests**:
+
+1. `constantRank1PerElementExponentSchedule` — `sum(x^e)` with x = [2, 3, 4] and e = [3, 2, 1]. Value 21, grad_x = [12, 6, 1]. Exercises the combined path: rank-1 constant → POW → SUM → reverse via VjpRegistry. PowRule's grad_e contribution is skipped via the §0.4.65 constant-skip, so the test implicitly pins that optimisation stays in effect for rank-1 leaves too.
+
+2. `constantRank1DefensivelyCopiesInput` — caller's `FloatArray` gets mutated AFTER `x.constant(src)` returns. Grad still computes correctly because the tape cached its own copy. Pins the defensive-copy contract; a future refactor that stores the reference would fail this test.
+
+3. `constantRank1RejectsEmptyArray` — empty `FloatArray` → `IllegalArgumentException` with a message naming the failure mode.
+
+**Decisions worth flagging**:
+
+- **Rank-1 shape is `Rank1<Sym>`, not a generic `Rank1<*>`**. `Tensors.f32Vector` (the only public rank-1 constructor) also defaults to `Rank1<Sym>`, so the caller doesn't need to cast for interop. If a caller uses a branded axis type (e.g. `Rank1<Batch>`), they can `as Tracer<Rank1<Batch>>` at the call site — the underlying dxir only cares about dims, not the phantom axis label.
+
+- **`copyOf()` by default.** Tape entries are cached for later reads via `peek()`, so the contract "handing a FloatArray to `constant()` transfers ownership, but mutation after the call is still safe" requires a copy. The alternative (document "don't mutate") would save an allocation but surface a subtle bug for any future user; defensive copy is cheaper than an incident.
+
+- **No rank-2+ overload in this session.** A `Tracer<*>.constant(values: FloatArray, dims: IntArray): Tracer<<whatever>>` would work but needs a ShapeToken / typed constructor to stay type-safe. Filed as a future extension; rank-1 covers every current use site.
+
+- **Skipped `Tape.constant(...)` as a public API.** §0.4.65 + §0.4.67 both route through the Tracer extension because a user already holds a Tracer inside their `grad { ... }` lambda, and exposing the Tape directly (which is `internal`) would widen the API surface without a good reason.
+
+**Tests added** (+3 new):
+
+- `GradTest.constantRank1PerElementExponentSchedule`
+- `GradTest.constantRank1DefensivelyCopiesInput`
+- `GradTest.constantRank1RejectsEmptyArray`
+
+Full suite is green: **615 tests** (+3 over §0.4.66).
+
+**Recommended next pickup**:
+
+1. **Scalar-rank broadcasting for `+` / `-` / `*` / `/`** — `Tracer<Rank1<S>>.plus(Tracer<ScalarShape>)` etc., so users can write `x + x.constant(5f)` on rank-1 Tracers. Needs registry-side Sum-on-broadcast handling; 1-2 sessions.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+3. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement.
+5. **Out-of-scope list housekeeping** — consolidate deferred items.
+6. **Rank-N `Tracer.constant(FloatArray, IntArray)`** — generalises §0.4.67.
+
+**Definition-of-done for §0.4.67 — met**:
+- `Tracer<*>.constant(FloatArray): Tracer<Rank1<Sym>>` lands with defensive copy and empty-array rejection ✓
+- Per-element exponent schedule test exercises the combined constant + POW + SUM path ✓
+- Defensive-copy contract pinned by explicit mutation test ✓
+- Full suite green at 615 tests (+3) ✓
+
 #### 0.4.66 Bridge-equivalence coverage for §0.4.63's unary math + §0.4.64's pow 2026-04-24
 
 Ships the §0.4.65 follow-up #4. Six new tests in [DxirBridgeEquivalenceTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/DxirBridgeEquivalenceTest.kt) — one each for `sqrt`, `exp`, `log`, `tanh`, `sigmoid` (all landed in §0.4.63), plus one for `pow` (§0.4.64). Each test cross-checks:
