@@ -39,6 +39,60 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.85 Rank-2 + rank-1 row-broadcast on the Tracer surface; fix: Backward carries tape-attrs onto the rule's primal 2026-04-24
+
+Adds Tracer-surface cross-rank broadcasting (the §0.4.84 follow-up #1). `matrix + row_vector` now works when the matrix is rank-2 `[M, N]` and the row-vector is rank-1 `[N]` — the row is broadcast along axis 0 to match the matrix, operators apply as usual, and the reverse routes through §0.4.84's axis-aware BroadcastRule to SUM the upstream back to rank-1.
+
+Also uncovered (and fixed) a latent bug in `Backward.applyRegistryRule`: the transient primal it built for the rule omitted the tape entry's attrs. Scalar broadcasts worked because BroadcastRule's empty-`broadcast_dimensions` arm handles the scalar case; non-scalar broadcasts hit the rule's `"empty broadcast_dimensions requires scalar input"` guard.
+
+**Three coordinated changes**:
+
+1. **[TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt)** — new private `Tracer<Rank2<A, B>>.broadcastRow(row: Tracer<Rank1<B>>)` helper. Records `OpKind.BROADCAST` with `broadcast_dimensions = listOf(1)` (input dim 0 maps to output dim 1; output dim 0 is the broadcast-inserted axis). Forward expands `row.entry.value` across M rows by `broadcasted[idx] = rowValues[idx % n]`. Four operator overloads (`plus`/`minus`/`times`/`div`) on `Tracer<Rank2<A, B>>.op(Tracer<Rank1<B>>)` route through `broadcastRow` + the existing same-shape op. Each has a distinct `@JvmName` (`plusRank1Row`, etc.) to avoid JVM erasure collisions with the §0.4.77/§0.4.78 scalar-broadcast overloads.
+
+2. **[Backward.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Backward.kt)** — `applyRegistryRule` now carries `entry.attrs` onto the transient primal DxirOp it builds for the rule: `op(kind, operandParams, outputType, attrs = entry.attrs)`. Pre-§0.4.85 the primal had empty attrs, so BroadcastRule never saw the `broadcast_dimensions` the tape carried. Latent bug until this session's non-scalar case exposed it.
+
+3. Fresh runtime exposure validates the §0.4.84 axis-aware BroadcastRule end-to-end: tape BROADCAST with `broadcast_dimensions = [1]` → rule reads attrs → emits `SUM(upstream, reduction_dims = [0])` → interpreter runs the partial SUM → grad_row comes back as the column-wise sum.
+
+**Three new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `rank2PlusRank1RowBroadcastsAndSums` — `sum(x + b)` with x=[[1..3],[4..6]] and b=[10,20,30]. value=141, grad_x=ones(2,3), grad_b=[2,2,2] (column-wise row-count).
+2. `rank2TimesRank1RowGivesColumnWeightedGrads` — `sum(x * w)` with x=[[1,2],[3,4]] and w=[10,100]. grad_x=[[10,100],[10,100]] (each element weighted by its column's w), grad_w=[4,6] (column sums of x).
+3. `rank2BroadcastRowShapeMismatchThrows` — matrix col size 2 vs row size 3 → `IllegalArgumentException` naming the mismatch.
+
+**Decisions worth flagging**:
+
+- **Only the matrix-op-row direction (not row-op-matrix).** `row + matrix` would need a separate overload on `Tracer<Rank1<B>>.plus(Tracer<Rank2<A, B>>)`. Commutative ops (plus, times) give the same result regardless of direction, so users of `row + matrix` can write `matrix + row` as a workaround. Non-commutative (minus, div) would need separate overloads for the reverse-order meaning. Filed as extension; current use cases all run `matrix + bias`-style.
+
+- **Also not the column-broadcast direction** (rank-1 `[M]` broadcast across a rank-2 `[M, N]` via `broadcast_dimensions = [0]`). Symmetric to this session but needs its own overload set. Adding it is a clean extension; deferred until a call site wants it.
+
+- **`broadcasted[idx] = rowValues[idx % n]`** for the forward. This is row-major: index `idx` in the output corresponds to input `idx % cols`. For M=2, N=3 this gives `[row[0], row[1], row[2], row[0], row[1], row[2]]` which is [[r0,r1,r2],[r0,r1,r2]] — correct row-vector broadcast.
+
+- **`Backward.applyRegistryRule` attrs-fix is a general improvement.** Pre-§0.4.85, any VjpRule that inspected `op.attrs` on the primal would get empty attrs. Only BroadcastRule in its §0.4.84 form exercises this path today (the other rules don't read attrs), but the fix is correct in general and means future rules can rely on attrs being present.
+
+- **Shape-mismatch validation at broadcast time.** `broadcastRow` checks `dims[1] == row.dims[0]` explicitly. The `@JvmName`-operator callers don't add their own checks; the broadcast helper is the single source of truth. Error message names both sizes so users can fix the call site directly.
+
+**Tests added** (+3 new):
+
+- `GradTest.rank2PlusRank1RowBroadcastsAndSums`
+- `GradTest.rank2TimesRank1RowGivesColumnWeightedGrads`
+- `GradTest.rank2BroadcastRowShapeMismatchThrows`
+
+Full suite is green: **654 tests** (+3 over §0.4.84).
+
+**Recommended next pickup**:
+
+1. **Rank-1 column broadcast** — `Tracer<Rank2<A, B>> op Tracer<Rank1<A>>` with `broadcast_dimensions = [0]`.
+2. **Reverse-order overloads** — `row + matrix`, `col - matrix`, etc. for callsite flexibility.
+3. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+4. **D.1i Symja `Simplify` on grad expressions**.
+5. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.85 — met**:
+- Four `Tracer<Rank2<A, B>>.op(Tracer<Rank1<B>>)` operator overloads ✓
+- `Backward.applyRegistryRule` propagates tape entry's attrs to the rule's primal ✓
+- Three tests cover forward value, both-side gradients, shape-mismatch error ✓
+- Full suite green at 654 tests (+3) ✓
+
 #### 0.4.84 Axis-aware BROADCAST reverse — partial SUM across broadcast-inserted dims 2026-04-24
 
 Lifts the §0.4.77 MVP scalar-input guard on `BroadcastRule`. General cross-rank broadcasting reverse now works: rank-1 → rank-2 broadcasts sum the upstream over the inserted axis back to rank-1; rank-N → rank-M with partial axis alignment sums over whichever output dims aren't named in `broadcast_dimensions`.

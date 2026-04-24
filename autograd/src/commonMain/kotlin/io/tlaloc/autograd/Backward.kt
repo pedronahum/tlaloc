@@ -114,7 +114,11 @@ private fun applyRegistryRule(
             val opType = DxirType(F32, entries[entry.inputs[i]].dims.toList())
             param("op$i", opType)
         }
-        val primal = op(kind, operandParams, outputType)
+        // §0.4.85 — carry the tape entry's attrs onto the transient primal.
+        // BroadcastRule reads `broadcast_dimensions` from here; without this
+        // propagation any non-scalar-input BROADCAST would hit the rule's
+        // "empty broadcast_dimensions requires scalar input" guard.
+        val primal = op(kind, operandParams, outputType, attrs = entry.attrs)
 
         val contributions = rule.apply(primal, upstream, this)
 

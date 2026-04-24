@@ -394,6 +394,71 @@ class GradTest {
         assertEquals(dcLegacy.hostF32()[0], dcNew)
     }
 
+    // §0.4.85 — rank-2-plus-rank-1 row-vector broadcasting. Matrix's each row
+    // gets `row` added; gradient wrt `row` is the column-wise sum of the
+    // upstream (via §0.4.84's axis-aware BroadcastRule).
+
+    @Test
+    fun rank2PlusRank1RowBroadcastsAndSums() {
+        // f(x, b) = sum(x + b). x is [[1, 2, 3], [4, 5, 6]], b is [10, 20, 30].
+        //   Forward: [[11, 22, 33], [14, 25, 36]] → sum = 141.
+        //   grad_x = ones(2, 3) → [[1, 1, 1], [1, 1, 1]].
+        //   grad_b_j = sum over rows = 2 for each column → [2, 2, 2].
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, b: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x + b).sum()
+        }
+        val (value, dx, db) = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f)),
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 20f, 30f)),
+        )
+        assertEquals(141f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 6) assertEquals(1f, gx[i], "grad_x[$i]")
+        val gb = db.hostF32()
+        assertEquals(2f, gb[0])
+        assertEquals(2f, gb[1])
+        assertEquals(2f, gb[2])
+    }
+
+    @Test
+    fun rank2TimesRank1RowGivesColumnWeightedGrads() {
+        // f(x, w) = sum(x * w). x is [[1, 2], [3, 4]], w is [10, 100].
+        //   Forward: [[10, 200], [30, 400]] → sum = 640.
+        //   grad_x_ij = w_j → [[10, 100], [10, 100]].
+        //   grad_w_j = sum over rows of x_*j = [4, 6].
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, w: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x * w).sum()
+        }
+        val (value, dx, dw) = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 100f)),
+        )
+        assertEquals(640f, value)
+        val gx = dx.hostF32()
+        assertEquals(10f, gx[0]); assertEquals(100f, gx[1]); assertEquals(10f, gx[2]); assertEquals(100f, gx[3])
+        val gw = dw.hostF32()
+        assertEquals(4f, gw[0])  // 1 + 3
+        assertEquals(6f, gw[1])  // 2 + 4
+    }
+
+    @Test
+    fun rank2BroadcastRowShapeMismatchThrows() {
+        // Matrix col size (2) != row size (3) → loud fail.
+        var caught: IllegalArgumentException? = null
+        try {
+            valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, b: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+                (x + b).sum()
+            }(
+                Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+                Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f)),
+            )
+        } catch (e: IllegalArgumentException) {
+            caught = e
+        }
+        assertTrue(caught != null, "expected IllegalArgumentException for size mismatch")
+        assertTrue(caught!!.message!!.contains("doesn't match"), "message should name mismatch: ${caught!!.message}")
+    }
+
     @Test
     fun rank2PlusScalarTracerGivesBothGradients() {
         // §0.4.78 — rank-2 extension of §0.4.77's scalar broadcast.

@@ -264,6 +264,58 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
     scalar: Tracer<io.tlaloc.core.ScalarShape>,
 ): Tracer<Rank2<A, B>> = this / broadcastScalar(scalar)
 
+// §0.4.85 — rank-1-to-rank-2 row-vector broadcasting. `matrix + row` replicates
+// `row` (a rank-1 tracer of size N) across the M rows of `matrix` (rank-2
+// [M, N]), then applies the same-shape op. The reverse uses §0.4.84's
+// axis-aware BroadcastRule: grad wrt row is SUM(upstream) over axis 0 (the
+// broadcast-inserted axis), producing a rank-1 gradient.
+//
+// Records BROADCAST with `broadcast_dimensions = [1]`: input dim 0 → output
+// dim 1, so output dim 0 is broadcast-inserted. BroadcastRule's reverse then
+// emits `SUM(upstream, reduction_dims = [0])` — exactly the row-wise sum
+// users expect as the gradient of a bias term.
+
+private fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastRow(
+    row: Tracer<io.tlaloc.core.Rank1<B>>,
+): Tracer<Rank2<A, B>> {
+    require(dims[1] == row.dims[0]) {
+        "broadcastRow: row size ${row.dims[0]} doesn't match matrix col size ${dims[1]}"
+    }
+    val tape = sameTape(this, row)
+    val m = dims[0]
+    val n = dims[1]
+    val rowValues = row.entry.value
+    val broadcasted = FloatArray(m * n) { idx -> rowValues[idx % n] }
+    val e = tape.op(
+        OpKind.BROADCAST,
+        intArrayOf(row.id),
+        dims.copyOf(),
+        broadcasted,
+        attrs = mapOf("broadcast_dimensions" to listOf(1)),
+    )
+    return Tracer<Rank2<A, B>>(tape, e)
+}
+
+@kotlin.jvm.JvmName("plusRank1Row")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.plus(
+    row: Tracer<io.tlaloc.core.Rank1<B>>,
+): Tracer<Rank2<A, B>> = this + broadcastRow(row)
+
+@kotlin.jvm.JvmName("minusRank1Row")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.minus(
+    row: Tracer<io.tlaloc.core.Rank1<B>>,
+): Tracer<Rank2<A, B>> = this - broadcastRow(row)
+
+@kotlin.jvm.JvmName("timesRank1Row")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.times(
+    row: Tracer<io.tlaloc.core.Rank1<B>>,
+): Tracer<Rank2<A, B>> = this * broadcastRow(row)
+
+@kotlin.jvm.JvmName("divRank1Row")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
+    row: Tracer<io.tlaloc.core.Rank1<B>>,
+): Tracer<Rank2<A, B>> = this / broadcastRow(row)
+
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value
     var acc = 0f
