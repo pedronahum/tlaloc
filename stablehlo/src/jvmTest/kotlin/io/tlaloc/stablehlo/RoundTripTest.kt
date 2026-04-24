@@ -3,7 +3,9 @@ package io.tlaloc.stablehlo
 import io.tlaloc.autograd.Tracer
 import io.tlaloc.autograd.capture
 import io.tlaloc.autograd.capture2
+import io.tlaloc.autograd.constant
 import io.tlaloc.autograd.matmul
+import io.tlaloc.autograd.plus
 import io.tlaloc.autograd.relu
 import io.tlaloc.autograd.sum
 import io.tlaloc.autograd.times
@@ -99,6 +101,42 @@ class RoundTripTest {
             }
             validate(DxirModule(listOf(fn)).toStablehlo(), op.name)
         }
+    }
+
+    @Test
+    fun capturedLambdaWithRankNConstantRoundTripsThroughStablehloTranslate() {
+        // §0.4.74 — full pipeline integration: a user lambda that creates a
+        // non-param leaf via `Tracer.constant(FloatArray)`, gets captured into
+        // a DxirFunction (§0.4.71 Capture fix stores it as a FloatArray-valued
+        // DxirConst), lowered to StableHLO (§0.4.73 emitter's nested dense
+        // literal arm), and validated by `stablehlo-translate --serialize`.
+        //
+        // Previously each piece had its own test: CaptureTest for the DxirConst
+        // value shape, DxirInterpreter for local eval (§0.4.72), EmitterTest /
+        // RoundTripTest for the emission. Composing them into one test ensures
+        // a future refactor that breaks the chain at any intermediate point
+        // fails a specific test with a clear breadcrumb.
+        requireTranslateOrSkip()
+
+        // Rank-1: `f(x) = x + [10, 20, 30]`.
+        val rank1Fn = capture(
+            f = { x: Tracer<Rank1<Sym>> -> x + x.constant(floatArrayOf(10f, 20f, 30f)) },
+            input = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f)),
+            name = "cap_rank1",
+        )
+        validate(DxirModule(listOf(rank1Fn)).toStablehlo(), "capture rank-1 + const")
+
+        // Rank-2: `f(x) = x + [[10, 20], [30, 40]]`.
+        val rank2Fn = capture(
+            f = { x: Tracer<Rank2<Sym, Sym>> ->
+                val m: Tracer<Rank2<Sym, Sym>> =
+                    x.constant(floatArrayOf(10f, 20f, 30f, 40f), intArrayOf(2, 2))
+                x + m
+            },
+            input = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+            name = "cap_rank2",
+        )
+        validate(DxirModule(listOf(rank2Fn)).toStablehlo(), "capture rank-2 + const")
     }
 
     @Test

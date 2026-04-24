@@ -39,6 +39,53 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.74 End-to-end integration: captured rank-N const round-trips through `stablehlo-translate` 2026-04-24
+
+Composes the §0.4.71 / §0.4.72 / §0.4.73 fixes into one integration test. A user lambda creates a non-param leaf via `Tracer.constant(FloatArray)`, gets captured (§0.4.71's fix stores the value as a FloatArray-typed `DxirConst`), lowered to StableHLO (§0.4.73's emitter uses the new nested dense-literal formatter), and validated end-to-end by `stablehlo-translate --serialize`. Breaks if ANY of the three intermediate pieces regresses.
+
+**What changed**: one new test in [RoundTripTest.kt](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) — `capturedLambdaWithRankNConstantRoundTripsThroughStablehloTranslate`. Two sub-cases:
+
+1. Rank-1: `f(x: Rank1<Sym>) = x + x.constant(floatArrayOf(10f, 20f, 30f))`.
+2. Rank-2: `f(x: Rank2<Sym, Sym>) = x + x.constant(floatArrayOf(10f, 20f, 30f, 40f), intArrayOf(2, 2))`.
+
+Both are captured via `capture`, serialised via `toStablehlo()`, and run through the `stablehlo-translate --serialize --target=1.0.0` validator. Failure modes that each piece of the pipeline would produce:
+
+- §0.4.71 Capture regression: `DxirConst.value` would revert to a `String`; emitter would catch it with `non-numeric DxirConst value`.
+- §0.4.72 Interpreter regression: doesn't fire here (round-trip test doesn't evaluate), but a parallel CaptureTest already covers it.
+- §0.4.73 Emitter regression: nested dense literal would revert to `error("non-numeric ...")` or produce malformed MLIR; `stablehlo-translate` rejects with a parser error.
+
+**Imports needed from `:autograd`**: `constant`, `plus` (the `Tracer.plus` operator; not automatically picked up when the source-set boundaries don't match what the existing round-trip tests exercise). Added both to the test file's imports.
+
+**Decisions worth flagging**:
+
+- **Integration test in `stablehlo/jvmTest`, not somewhere else.** The `autograd/commonTest` `CaptureTest` can't reach `stablehlo-translate` (common test set), and `stablehlo/jvmTest` already has the round-trip harness and `requireTranslateOrSkip()` scaffold. The test only couples back onto `:autograd` via the existing `implementation(project(":autograd"))` dep that `stablehlo` already had for the `Tracer` / `capture` imports in earlier round-trip tests — no new dependency.
+
+- **No assertion on the emitted MLIR text shape.** That's [EmitterTest.kt](stablehlo/src/commonTest/kotlin/io/tlaloc/stablehlo/EmitterTest.kt#emitsRankNFloatArrayConstAsNestedDenseLiteral)'s job. This test's only assertion is "stablehlo-translate accepted the output"; any other inspection would duplicate finer-grained tests and couple the integration test to an internal format.
+
+- **Rank-3 not included here.** `RoundTripTest.floatArrayConstsRoundTrip` (§0.4.73) already validates rank-3 dense literals as standalone consts. A captured rank-3 lambda would need `Rank3` in `:core`, which doesn't exist as a public shape type (rank-3+ capture paths are deferred per §0.4.68). Once those land, an extension to this test is a natural addition.
+
+- **End-to-end covered; not "everything exercises the bridge".** The two sub-cases go through `capture → emit → stablehlo-translate`. They don't exercise `DxirInterpreter.evalFunction` — that path is covered by §0.4.72's CaptureTest cases. Two separate pipelines, two separate tests; no single mega-test that tries to be all things.
+
+**Tests added** (+1 new with 2 sub-cases):
+
+- `RoundTripTest.capturedLambdaWithRankNConstantRoundTripsThroughStablehloTranslate` (rank-1 + rank-2)
+
+Full suite is green: **627 tests** (+1 over §0.4.73).
+
+**Recommended next pickup**:
+
+1. **Scalar-rank broadcasting for `+` / `-` / `*` / `/`** — genuine broadcast arithmetic; needs SUM-reduction arms in registry rules.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+3. **D.1i Symja `Simplify` on grad expressions** — paper mechanism (ii).
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling.
+5. **`diagnosticReporter` migration** — cosmetic.
+
+**Definition-of-done for §0.4.74 — met**:
+- Rank-1 + rank-2 captured lambdas with `FloatArray` consts round-trip through `stablehlo-translate --serialize` ✓
+- Single integration test exercises Capture + Emitter + external validator in one call ✓
+- Self-skips when the binary is unavailable, matching the rest of `RoundTripTest` ✓
+- Full suite green at 627 tests (+1) ✓
+
 #### 0.4.73 StableHLO emitter: `FloatArray` const arm — closes the rank-N capture round-trip 2026-04-24
 
 §0.4.72 fixed the interpreter's `DxirConst` handler to accept `FloatArray` values so captured rank-N constants could evaluate end-to-end. The parallel fix for the StableHLO emitter was filed as a follow-up — this session lands it. Captured rank-N constants now round-trip cleanly through `stablehlo-translate --serialize`, closing the last piece of the Capture → StableHLO pipeline for the §0.4.71-introduced FloatArray const form.
