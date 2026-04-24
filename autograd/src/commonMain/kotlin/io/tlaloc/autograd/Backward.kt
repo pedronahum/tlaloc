@@ -54,7 +54,12 @@ internal fun backward(tape: Tape, outputId: Int, seedGrad: FloatArray): Gradient
             // surface exposes sqrt/exp/log/tanh/sigmoid. Rules were already in
             // VjpRegistry since §0.4.22; prior to §0.4.63 nothing on the tape
             // produced these op kinds, so the dispatch arm was dead.
-            OpKind.SQRT, OpKind.EXP, OpKind.LOG, OpKind.TANH, OpKind.SIGMOID ->
+            OpKind.SQRT, OpKind.EXP, OpKind.LOG, OpKind.TANH, OpKind.SIGMOID,
+            // §0.4.64 — POW joins the registry-dispatch arm now that
+            // `Tracer<S>.pow(Tracer<S>)` can emit it. Rule has been in VjpRegistry
+            // since §0.4.22 and was already internally used by C6's closed-form
+            // output (§0.4.52); this is the new surface-producer.
+            OpKind.POW ->
                 applyRegistryRule(entry.op, entry, entries, g, grads)
             OpKind.STEP -> {
                 // step(x) = 1 if x > 0 else 0.  Its derivative is identically zero

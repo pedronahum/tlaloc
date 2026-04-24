@@ -204,6 +204,69 @@ class GradTest {
         assertTrue(dLarge.hostF32()[0] < 1e-3f, "grad should be ~0 at x=10; got ${dLarge.hostF32()[0]}")
     }
 
+    // §0.4.64 — `Tracer.pow(other)` closes the last VjpRegistry rule without a
+    // Tracer surface wrapper. Both operands are differentiable, so valueAndGrad2
+    // seeds both sides of the reverse walk.
+
+    @Test
+    fun powBackwardAtIntegerExponent() {
+        // f(x, e) = x^e. At x = 3, e = 2:
+        //   value = 9
+        //   grad_x = e · x^(e-1) = 2 · 3^1 = 6
+        //   grad_e = x^e · ln(x) = 9 · ln 3
+        val vg = valueAndGrad2 { x: Tracer<ScalarShape>, e: Tracer<ScalarShape> -> x.pow(e) }
+        val (value, dx, de) = vg(Tensors.f32Scalar(3f), Tensors.f32Scalar(2f))
+        assertEquals(9f, value)
+        assertEquals(6f, dx.hostF32()[0])
+        val expected = 9f * kotlin.math.ln(3f)
+        assertTrue(
+            abs(de.hostF32()[0] - expected) < 1e-4f,
+            "grad_e = x^e · ln(x) ≈ $expected; got ${de.hostF32()[0]}",
+        )
+    }
+
+    @Test
+    fun powBackwardAtFractionalExponent() {
+        // f(x, e) = x^e. At x = 4, e = 0.5 (square root):
+        //   value = 2
+        //   grad_x = 0.5 · 4^(-0.5) = 0.25
+        //   grad_e = 2 · ln(4)
+        val vg = valueAndGrad2 { x: Tracer<ScalarShape>, e: Tracer<ScalarShape> -> x.pow(e) }
+        val (value, dx, de) = vg(Tensors.f32Scalar(4f), Tensors.f32Scalar(0.5f))
+        assertEquals(2f, value)
+        assertTrue(abs(dx.hostF32()[0] - 0.25f) < 1e-6f, "grad_x ≈ 0.25; got ${dx.hostF32()[0]}")
+        val expected = 2f * kotlin.math.ln(4f)
+        assertTrue(
+            abs(de.hostF32()[0] - expected) < 1e-4f,
+            "grad_e = 2·ln(4) ≈ $expected; got ${de.hostF32()[0]}",
+        )
+    }
+
+    @Test
+    fun powRank1BroadcastsElementwise() {
+        // f(x, e) = sum(x^e) with same-shape rank-1 operands.
+        // At x = [2, 3], e = [3, 2]:
+        //   value = 8 + 9 = 17
+        //   grad_x_i = e_i · x_i^(e_i - 1) = [3·4, 2·3] = [12, 6]
+        //   grad_e_i = x_i^{e_i} · ln(x_i) = [8·ln2, 9·ln3]
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank1<Sym>>, e: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            x.pow(e).sum()
+        }
+        val (value, dx, de) = vg(
+            Tensors.f32Vector(floatArrayOf(2f, 3f)),
+            Tensors.f32Vector(floatArrayOf(3f, 2f)),
+        )
+        assertEquals(17f, value)
+        val gx = dx.hostF32()
+        assertTrue(abs(gx[0] - 12f) < 1e-5f, "grad_x[0] = 12; got ${gx[0]}")
+        assertTrue(abs(gx[1] - 6f) < 1e-5f, "grad_x[1] = 6; got ${gx[1]}")
+        val ge = de.hostF32()
+        val expected0 = 8f * kotlin.math.ln(2f)
+        val expected1 = 9f * kotlin.math.ln(3f)
+        assertTrue(abs(ge[0] - expected0) < 1e-4f, "grad_e[0] ≈ $expected0; got ${ge[0]}")
+        assertTrue(abs(ge[1] - expected1) < 1e-4f, "grad_e[1] ≈ $expected1; got ${ge[1]}")
+    }
+
     @Test
     fun chainedUnaryMathRoundTrips() {
         // f(x) = sqrt(exp(x)); f'(x) = sqrt(exp(x)) / 2 = f(x) / 2. At x = 0:

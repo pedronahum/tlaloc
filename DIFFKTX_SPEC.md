@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.64 Tracer surface — `pow(other)` closes the last VjpRegistry rule without a wrapper 2026-04-24
+
+Direct §0.4.63 follow-up. Adds `Tracer<S>.pow(other: Tracer<S>)` to [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt), extends [Backward.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Backward.kt) to route `OpKind.POW` through the existing `PowRule`, and pins forward + both-side-grad correctness with three `valueAndGrad2` tests.
+
+**What was deferred in §0.4.63 and why it's different now**: POW is binary (base, exp), not unary — so the Tracer wrapper took two operands and had to thread both through the tape, which meant the two-param `valueAndGrad2` harness rather than the one-param `valueAndGrad`. Dispatch was otherwise identical to §0.4.63's SQRT/EXP/LOG/TANH/SIGMOID arm: PowRule already exists in VjpRegistry (§0.4.22; §0.4.53 widened for Int exp in C6), so this session was purely a new surface-producer plus a Backward-side routing arm.
+
+**Three GradTest cases**:
+
+1. `powBackwardAtIntegerExponent` — f(x, e) = x^e at x=3, e=2. Value 9; grad_x = e·x^(e-1) = 6 (exact); grad_e = x^e·ln(x) = 9·ln 3 (1e-4 tolerance).
+2. `powBackwardAtFractionalExponent` — x=4, e=0.5 (sqrt by another name). Value 2; grad_x = 0.25 (exact); grad_e = 2·ln 4 (tolerance-checked).
+3. `powRank1BroadcastsElementwise` — rank-1 `x.pow(e).sum()`, x=[2,3], e=[3,2]. Exercises per-element POW followed by SUM, so each slot's grad_x and grad_e get independently seeded via SumRule.
+
+**Decisions worth flagging**:
+
+- **Differentiable exponent**, not constant. Kotlin Tracer has no constant-lifting surface (per `DxirBridgeEquivalenceTest.kt:162`), so an exp like `x.pow(2f)` isn't directly expressible — the test traces `2f` as a leaf and lets PowRule produce a grad_e the caller may discard. For strict constant-exp cases (no grad_e), a future lightweight `ConstTracer` wrapper would skip seeding the constant's id entirely; tracked as a future convenience but not shipping here.
+
+- **`kotlin.math.pow` for forward math**. Imported `kotlin.math.pow` and use it directly for the forward value — same policy as §0.4.63's `kotlin.math.sqrt/ln/exp/…` wrappers. Matches what `DxirInterpreter` would compute through the POW bridge.
+
+- **Reused `requireSameShape` + `sameTape`**. PowRule's VJP math assumes same-shape operands (no broadcasting), which is the existing TracedOps contract. A future cross-shape POW (`x^e` where `e` is a scalar broadcast over `x` rank-1) would need a broadcast arm; out of scope for this session.
+
+- **No `operator` modifier / `infix` keyword**. Kotlin's `pow` isn't a reserved operator (unlike `plus`/`minus`/`times`/`div`), and an infix `x pow e` reads less well than `x.pow(e)` in Kotlin style. `Float.pow(Float)` from `kotlin.math` is member-call by convention; matches.
+
+**Stage D status** — unchanged benchmark list; the Tracer runtime surface is now feature-complete for every op in the VjpRegistry:
+
+| # | benchmark | status |
+|---|-----------|--------|
+| 1 | **BGDHyperOpt** | full source port, paper-speedup closure + symbolic T (§0.4.52 / §0.4.53 / §0.4.54); break-bearing shapes end-to-end proven (§0.4.56–§0.4.58); Tracer surface complete (§0.4.59 / §0.4.62 / §0.4.63 / §0.4.64) |
+| 2 | **HookeanSpring** | full port (§0.4.47) |
+| 3 | **Brachistochrone** | full port (§0.4.43) |
+| 4 | HMC | not ported |
+| 5 | CartPole | not ported |
+| 6 | QWOP | not ported |
+
+Full suite is green: **603 tests** (+3 over §0.4.63).
+
+**Recommended next pickup** (list shrinks as items ship):
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+2. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+3. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement.
+4. **DxirBridgeEquivalenceTest extension** — exercise the capture bridge for the new unary math + pow on Tracer. Single session, belt-and-braces coverage.
+5. **Constant-tracer convenience** — a `Tape.constant(f: Float): Tracer<ScalarShape>` that marks the leaf as non-differentiable, so `x.pow(const(2f))` doesn't seed the exp side.
+6. **Out-of-scope list housekeeping** — consolidate deferred items.
+
+**Definition-of-done for §0.4.64 — met**:
+- `Tracer<S>.pow(Tracer<S>)` lands with forward + both-side grad paths ✓
+- `Backward.kt` routes `OpKind.POW` through VjpRegistry ✓
+- Tests cover integer exp, fractional exp, rank-1 broadcasting ✓
+- Full suite green at 603 tests (+3) ✓
+
 #### 0.4.63 Tracer surface — unary math ops (sqrt / exp / log / tanh / sigmoid) 2026-04-24
 
 Fills a long-standing gap: the VjpRegistry has had rules for SQRT / EXP / LOG / TANH / SIGMOID / POW since §0.4.22, but the Tracer surface exposed none of them. A user writing `grad { x -> x.sqrt() }` on the runtime-tape path got an unresolved-reference compile error. Those five unary math ops now have Tracer wrappers and are routed by `Backward.kt` into the existing registry rules. 600-tests milestone crossed along the way.

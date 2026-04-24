@@ -5,6 +5,7 @@ import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.ir.OpKind
+import kotlin.math.pow
 
 private fun requireSameShape(a: Tracer<*>, b: Tracer<*>) {
     require(a.dims.contentEquals(b.dims)) {
@@ -123,6 +124,28 @@ fun <S : Shape> Tracer<S>.sigmoid(): Tracer<S> {
     val out = FloatArray(v.size)
     for (i in v.indices) out[i] = 1f / (1f + kotlin.math.exp(-v[i]))
     val e = tape.op(OpKind.SIGMOID, intArrayOf(id), dims.copyOf(), out)
+    return Tracer<S>(tape, e)
+}
+
+/**
+ * §0.4.64 — elementwise `base^exp`. Both operands must be same-shape F32 Tracers
+ * sharing one tape. VjpRegistry's `PowRule` (§0.4.22; §0.4.53 widened for Int exp
+ * inside C6's closed form) computes grad_base = upstream · exp · base^(exp-1)
+ * and grad_exp = upstream · base^exp · ln(base). Both flow back through the
+ * tape when [Backward.kt:49] routes `OpKind.POW` into the registry.
+ *
+ * For `x ↦ x^k` where `k` is a runtime-known scalar, wrap `k` as a scalar leaf
+ * (e.g. `tape.traceLeaf(f32Scalar(k))`) — it participates in the reverse walk,
+ * but if you don't seed `k` with anything in the lambda it contributes no grad.
+ * For constant-exp cases where `k` need NOT be differentiable, a future
+ * lightweight "constant tracer" wrapper would avoid the leaf dance; tracked as
+ * a potential convenience but not shipping here (out of scope for §0.4.64).
+ */
+fun <S : Shape> Tracer<S>.pow(other: Tracer<S>): Tracer<S> {
+    requireSameShape(this, other)
+    val tape = sameTape(this, other)
+    val out = elementwise(entry.value, other.entry.value) { x, y -> x.pow(y) }
+    val e = tape.op(OpKind.POW, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
