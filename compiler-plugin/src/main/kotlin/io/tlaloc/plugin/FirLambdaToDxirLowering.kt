@@ -345,9 +345,20 @@ object FirLambdaToDxirLowering {
                 val pred = if (breakCond != null) {
                     // §0.4.50 — LAND-hoist for break cond. Works when break_cond
                     // references only carried vars (cond region has them via args[k]).
-                    // Body-local-dep breaks (e.g., `if (d < eps) break` where d is a
-                    // body-local val) fail here — deferred to D.3ii-correctness.
-                    val breakPred = lowerPredicate(breakCond, env, this)
+                    // §0.4.56 D.3ii-tape — body-local-dep breaks (e.g., `if (d < eps) break`
+                    // where d is a body-local val) surface here as a `reference to symbol
+                    // outside the lowering scope` from lookupReference. Rewrap so the
+                    // runtime-tape fallback diagnostic names the actual trigger rather
+                    // than the low-level env miss.
+                    val breakPred = try {
+                        lowerPredicate(breakCond, env, this)
+                    } catch (e: LoweringException) {
+                        throw LoweringException(
+                            "break condition references a value not carried across the " +
+                                "loop iteration — only break conditions over carried `var`s " +
+                                "are supported at compile time (${e.message})",
+                        )
+                    }
                     val notBreak = op(OpKind.NOT, listOf(breakPred), boolS)
                     op(OpKind.LAND, listOf(primaryPred, notBreak), boolS)
                 } else {

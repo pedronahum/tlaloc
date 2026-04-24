@@ -1207,9 +1207,10 @@ class TlalocPluginDiagnosticTest {
 
     @Test
     fun `lambda with while loop falls back to runtime tape`() {
-        // Raw `while (cond) { ... }` is out of B.4b scope (only desugared-for-loops
-        // are recognised). The FirWhileLoop statement hits `lowerStatement`'s else
-        // branch → LoweringException → TLALOC_LAMBDA_UNSUPPORTED → broken-stub sentinel.
+        // Raw while with a data-dependent predicate — trip count varies with the
+        // carried var, doesn't match C5/C6/C7 coarsening. Plugin accepts the surface
+        // (§0.4.50), PhiCalculus leaves it un-coarsened, DxirReverseTransform rejects
+        // at its `OpKind.IF` guard → WARNING + broken-stub sentinel.
         val src = """
             import io.tlaloc.autograd.grad
             fun main() {
@@ -1223,6 +1224,87 @@ class TlalocPluginDiagnosticTest {
         """.trimIndent()
         val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN, user = src)
         assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+        assertEquals("-1.0", result.stdout.trim(), "expected runtime-tape fallback sentinel")
+    }
+
+    @Test
+    fun `break-bearing while with carried-only break cond falls back to runtime tape`() {
+        // §0.4.55 D.3ii-tape — the FIR surface accepts trailing `if (cond) break`
+        // when the break predicate references only carried vars (§0.4.50 LAND-hoist).
+        // For a data-dependent carried cond, PhiCalculus's C5/C6/C7 don't close,
+        // DxirReverseTransform rejects at its op-kind guard, TlalocIrGenerationExtension
+        // returns the original call, and the runtime-tape path runs. Compilation must
+        // succeed (no ERROR) and the call must fall back to the broken-stub sentinel.
+        val src = """
+            import io.tlaloc.autograd.grad
+            fun main() {
+                val g = grad { x: Float ->
+                    var d = x
+                    while (d < 100.0f) {
+                        d = d * 2.0f
+                        if (d > 50.0f) break
+                    }
+                    d
+                }
+                println(g(1.0f))
+            }
+        """.trimIndent()
+        val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN, user = src)
+        assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+        val unsupported = result.messages.filter {
+            it.message.contains("Tlaloc could not lower lambda")
+        }
+        assertEquals(
+            0,
+            unsupported.size,
+            "expected zero TLALOC_LAMBDA_UNSUPPORTED (FIR accepts carried-only break), got:\n" +
+                result.messages.joinToString("\n") { "[${it.severity}] ${it.message}" },
+        )
+        assertEquals("-1.0", result.stdout.trim(), "expected runtime-tape fallback sentinel")
+    }
+
+    @Test
+    fun `break-bearing while with body-local break cond falls back to runtime tape`() {
+        // §0.4.55 D.3ii-tape — when a trailing `if (cond) break`'s condition references
+        // a body-local `val` (not a carried `var`), the FIR lowering's LAND-hoist can't
+        // resolve the reference in the cond region and raises LoweringException. The
+        // intrinsic checker converts that to a WARNING diagnostic and leaves the call
+        // site untouched, so the runtime-tape path runs instead of the plugin-rewritten
+        // gradient. Correctness of the tape's gradient is the tape's responsibility;
+        // this probe pins that the FIR surface gives up cleanly rather than erroring
+        // out or producing a wrong forward result.
+        val src = """
+            import io.tlaloc.autograd.grad
+            fun main() {
+                val g = grad { x: Float ->
+                    var d = x
+                    var k = 0
+                    while (k < 100) {
+                        d = d * 2.0f
+                        k = k + 1
+                        val delta = d - 50.0f
+                        if (delta > 0.0f) break
+                    }
+                    d
+                }
+                println(g(1.0f))
+            }
+        """.trimIndent()
+        val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN, user = src)
+        assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+        val unsupported = result.messages.filter {
+            it.message.contains("Tlaloc could not lower lambda")
+        }
+        assertEquals(
+            1,
+            unsupported.size,
+            "expected exactly one TLALOC_LAMBDA_UNSUPPORTED for body-local break cond, got:\n" +
+                result.messages.joinToString("\n") { "[${it.severity}] ${it.message}" },
+        )
+        val msg = unsupported.single().message
+        assert(msg.contains("break condition") && msg.contains("carried")) {
+            "expected diagnostic to name the break-condition reason, got: $msg"
+        }
         assertEquals("-1.0", result.stdout.trim(), "expected runtime-tape fallback sentinel")
     }
 

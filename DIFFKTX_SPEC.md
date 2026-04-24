@@ -39,6 +39,61 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.56 Stage D.3ii-tape — regression-pin the runtime-tape fallback for break-bearing WHILE; better diagnostic for body-local break cond 2026-04-24
+
+Tight follow-up to §0.4.55. No IR / PhiCalculus / synthesis changes — the plugin already falls back to the runtime-tape path for every break-bearing WHILE shape that isn't closure-closable, via two distinct mechanisms; this session pins both with regression tests and improves the user-facing diagnostic for the harder-to-diagnose case.
+
+**Why now**: §0.4.55 deferred break-bearing-WHILE closed-form closure and pointed at "runtime-tape fallback is the simplest user-facing win (1 session, no IR changes)". The fallback machinery already exists end-to-end — `LoweringException` in [FirLambdaToDxirLowering.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt) becomes `Result.Failure` in `lower()`, which the checker renders as a `LAMBDA_UNSUPPORTED` **warning** and leaves the call site untouched; unclosed WHILEs that lower successfully at FIR then trip `tryReverseTransform`'s catch in [TlalocIrGenerationExtension.kt:199-205](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L199-L205) and get the same "keep the original call" treatment. The gap wasn't the plumbing — it was test coverage that proves a break-bearing WHILE cannot regress into a hard compile error.
+
+**Changes**:
+
+1. **Two new tests in [TlalocPluginDiagnosticTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginDiagnosticTest.kt)**:
+   - `break-bearing while with carried-only break cond falls back to runtime tape` — the §0.4.55 shape: FIR surface accepts the LAND-hoist, PhiCalculus can't close the composed cond, `DxirReverseTransform` rejects, IR extension keeps the original call, broken-stub sentinel (`-1.0`) fires. Asserts zero `LAMBDA_UNSUPPORTED` warnings (surface accepts) and the sentinel output (plugin didn't rewrite, tape path ran).
+   - `break-bearing while with body-local break cond falls back to runtime tape` — trailing `if (delta > 0.0f) break` where `delta` is a body-local `val`. Today this raises `LoweringException` from `lookupReference`'s env miss, which becomes exactly one `LAMBDA_UNSUPPORTED` warning; asserts both the warning count and the sentinel output.
+
+2. **Better diagnostic wrapping in `lowerRawWhileLoop`'s break-cond path**. Wrapped `lowerPredicate(breakCond, env, this)` in a try/catch that rewraps `LoweringException` with an explicit "break condition references a value not carried across the loop iteration — only break conditions over carried `var`s are supported at compile time" message. The original env-miss reason is retained in parens for debuggability. Pre-§0.4.56 the user saw `Tlaloc could not lower lambda: reference to symbol outside the lowering scope: <qualified name>` — informative to a compiler writer, opaque to a user who just wants to know why their `grad { ... }` didn't specialize.
+
+3. **Stale comment cleanup** on the existing `lambda with while loop falls back to runtime tape` test — its comment still claimed "Raw while is out of B.4b scope (only desugared-for-loops are recognised)", which hasn't been true since §0.4.50. Replaced with the actual current rationale (data-dependent predicate → no C5/C6/C7 closure → `DxirReverseTransform` rejects at the op-kind guard).
+
+**Decisions worth flagging**:
+
+- **Test-only + one-line code polish is deliberate.** §0.4.55 explicitly deferred the PhiCalculus closure work ("each is a design-session's worth of work"); the fallback invariant was the cheap win. The diagnostic rewrap is the only production-code change, and it affects exactly one error path. Shipping the pin separately from any future closure work keeps the regression surface isolated — if a future session changes PhiCalculus/SCT in a way that accidentally turns the fallback into a hard error, the two new tests fail loudly.
+
+- **Sentinel-based fallback proof vs. real-tape gradient proof.** The tests use the `AUTOGRAD_STUB_BROKEN` sentinel — they prove the plugin didn't rewrite the call, not that the runtime tape produces a correct gradient. That's intentional: the `(Float) -> Float` surface doesn't map to the real autograd's `(Tracer<S>) -> Tracer<ScalarShape>` signature, so there's no real tape to run from a Float-surface test. A real-tape end-to-end test would need to use the Tracer surface (via `:autograd` on the test classpath); filed as a possible D.3ii-tape-tracer follow-up but not load-bearing for the pin itself — the runtime-tape math is already covered by `:autograd`'s own `GradTest` / `CaptureTest`.
+
+- **Not shrinking the diagnostic surface.** Considered suppressing the `LAMBDA_UNSUPPORTED` warning entirely for break-bearing WHILEs (since the tape fallback is expected, not an error), but kept it as a warning. Users need some signal that their `grad { ... }` didn't get the specialised path — silent tape-fallback on a hot loop would surprise a user debugging a perf regression.
+
+**Tests added** (+2 new):
+- [`TlalocPluginDiagnosticTest.break-bearing while with carried-only break cond falls back to runtime tape`](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginDiagnosticTest.kt)
+- [`TlalocPluginDiagnosticTest.break-bearing while with body-local break cond falls back to runtime tape`](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginDiagnosticTest.kt)
+
+Full suite is green: **585 tests** (+2 over the pre-§0.4.56 baseline).
+
+**Stage D status (post-§0.4.56)** — unchanged benchmark list; break-bearing-WHILE tape fallback now regression-covered:
+
+| # | benchmark | status |
+|---|-----------|--------|
+| 1 | **BGDHyperOpt** | full source port, paper-speedup closure + symbolic T via raw-while AND for-loop (§0.4.52 / §0.4.53 / §0.4.54); break-bearing shapes correctly fall through to runtime tape (§0.4.56 pin) |
+| 2 | **HookeanSpring** | full port (§0.4.47) |
+| 3 | **Brachistochrone** | full port (§0.4.43) |
+| 4 | HMC | not ported |
+| 5 | CartPole | not ported |
+| 6 | QWOP | not ported |
+
+**Recommended next pickup**:
+
+1. **D.3ii closed-form closure** — paper-faithful break-bearing WHILE via symbolic inequality solving. 2+ design-sessions (deferred in §0.4.55).
+2. **D.3ii-tape-tracer** — end-to-end test on the Tracer surface that proves the runtime tape produces a correct gradient for a break-bearing WHILE. Requires `:autograd` on the plugin test classpath. 1 session; complements this one.
+3. **D.4 HMC** — paper's hardest control-flow benchmark.
+4. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+5. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement from a single binary.
+
+**Definition-of-done for §0.4.56 — met**:
+- Break-bearing WHILE with carried-only break cond: surface accepts, IR falls back to tape, no compile error ✓ (pinned)
+- Break-bearing WHILE with body-local break cond: FIR gives up cleanly, IR falls back to tape, no compile error ✓ (pinned)
+- Diagnostic message for body-local break cond names the actual cause, not the low-level env miss ✓
+- Full suite green at 585 tests (+2 new) ✓
+
 #### 0.4.55 Stage D.3ii investigation — break-bearing WHILE correctness is harder than a single session 2026-04-24
 
 Attempted D.3ii (reverse-mode-over-WHILE for break-bearing loops) — ended up deferred after discovering the intended design interacts non-trivially with PhiCalculus's F2/C1 distribution pass. Shipping what was actually validated this session: nothing user-facing. Reverting `lowerRawWhileLoop` back to §0.4.50's LAND-hoist shape (which handles break_cond referencing only carried vars; body-local-dep break_conds still fall back to the tape). Adding LAND synthesis via `Boolean.and` as a standalone infrastructure piece — not load-bearing until a future D.3ii path re-introduces LAND at the synthesis layer.
