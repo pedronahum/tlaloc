@@ -39,6 +39,53 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.57 Stage D.3ii-tape-tracer — gradient-correctness pin on the Tracer surface for break-bearing WHILE 2026-04-24
+
+Direct follow-up to §0.4.56. §0.4.56 pinned the *plugin-level* fallback — "the plugin doesn't crash on a break-bearing WHILE, the call stays intact". This session pins the other half of the invariant: the runtime tape the call falls through to **actually produces the correct gradient**. Without this, the §0.4.56 pin could silently regress the tape's AD correctness and the combined story (plugin + tape) would still be broken.
+
+**Changes**: three tests in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt). No production-code changes.
+
+1. **`breakBearingWhileDoublesUntilThreshold`** — canonical shape. `grad { x: Tracer<ScalarShape> -> var d = x; while (d <= 10) d = d + d; d }` at `x = 0.5`. Five doublings record five ADD ops on the tape; reverse walk produces `df/dx = 2^5 = 32`. Asserts `32f` exactly (no tolerance — integer powers of 2 are exact in `Float`).
+
+2. **`breakBearingWhileIterationCountDependsOnInput`** — the point of D.3ii. Same lambda, three input values: `x=0.5` → 5 doublings → 32, `x=3` → 2 doublings → 4, `x=11` → 0 doublings → 1. Pins that the SAME compiled `grad { ... }` produces different closed-form gradients per invocation, because the tape records a different number of ADDs each time. This is exactly the property the plugin's closure pipeline can't emit ahead-of-time without symbolic inequality solving (deferred in §0.4.55).
+
+3. **`breakBearingWhileValueAndGradAgree`** — paired `valueAndGrad` surface. Asserts `x=0.5` forward value is `16` AND backward is `32`. Rules out silent divergence between the value on the tape and the value the backward seed propagates from.
+
+**Decisions worth flagging**:
+
+- **Used `d + d` instead of `d * 2f`.** The Tracer API has no constant-literal surface — no way for a user to multiply a `Tracer<ScalarShape>` by a plain `Float`. `DxirBridgeEquivalenceTest.kt:162` already notes this constraint. For a doubling kernel `d + d` is equivalent and exercises exactly the same self-aliased ADD the backward path handles ([Backward.kt:95-101](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Backward.kt#L95-L101) — "repeat-input aliasing like `x * x` is disambiguated via `indexOf`"). The aliasing edge case was already covered by `x * x` tests; this extends it to ADD.
+
+- **Break condition reads `d.entry.value[0]`.** The Tracer exposes its backing FloatArray through `entry.value` — this is how users can poll tape state without emitting an op. The read does NOT record on the tape (it's a plain Kotlin array access), which is exactly what you want for a loop predicate: the decision to break is host-side, and the tape only records the arithmetic that actually ran. No new surface needed — this is a standard Tracer idiom (also used in `GradTest.sgdMinimizesQuadratic`'s outer SGD driver).
+
+- **No plugin integration test here.** A full end-to-end "user writes `grad { x: Tracer<...> -> ... break-bearing while ... }` and it flows through the plugin → falls back → runtime tape → correct gradient" test would need `:autograd` on `:compiler-plugin`'s test classpath, which is a build-config change not needed for the correctness claim. The Tracer surface tape path is proven here in `:autograd`; the plugin-side pass-through is proven in §0.4.56's `TlalocPluginDiagnosticTest`. Together they close the chain without adding a cross-module test dependency.
+
+- **Exact equality assertions (no `abs < eps`).** Integer powers of 2 up to 2^23 are exact in IEEE 754 Float, and the test inputs stay well under that bound. If a future change introduces rounding (e.g., a SIMD path that reorders adds), the exact-equal assertion will fail — which is the right behavior, not a false positive.
+
+**Stage D status (post-§0.4.57)** — unchanged benchmark list; break-bearing WHILE gradient-correctness on the Tracer surface now pinned:
+
+| # | benchmark | status |
+|---|-----------|--------|
+| 1 | **BGDHyperOpt** | full source port, paper-speedup closure + symbolic T via raw-while AND for-loop (§0.4.52 / §0.4.53 / §0.4.54); break-bearing shapes correctly fall through to runtime tape (§0.4.56 plugin pin) with correct gradient (§0.4.57 tape pin) |
+| 2 | **HookeanSpring** | full port (§0.4.47) |
+| 3 | **Brachistochrone** | full port (§0.4.43) |
+| 4 | HMC | not ported |
+| 5 | CartPole | not ported |
+| 6 | QWOP | not ported |
+
+**Recommended next pickup**:
+
+1. **D.3ii closed-form closure** — paper-faithful break-bearing WHILE via symbolic inequality solving. 2+ design-sessions (deferred in §0.4.55).
+2. **D.4 HMC** — paper's hardest control-flow benchmark.
+3. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement from a single binary.
+5. **`:compiler-plugin` integration test with real `:autograd`** — would add `:autograd` as a test dep and prove the full fall-through chain with no stubs. Optional; the two-test decoupling here is already a tight pin.
+
+**Definition-of-done for §0.4.57 — met**:
+- Break-bearing WHILE with data-dependent predicate produces correct closed-form gradient via the runtime tape ✓
+- Same compiled `grad { ... }` adapts the gradient to input-dependent iteration count ✓
+- `valueAndGrad` flavor: forward and backward agree on the same tape ✓
+- Full suite green at 588 tests (+3 new) ✓
+
 #### 0.4.56 Stage D.3ii-tape — regression-pin the runtime-tape fallback for break-bearing WHILE; better diagnostic for body-local break cond 2026-04-24
 
 Tight follow-up to §0.4.55. No IR / PhiCalculus / synthesis changes — the plugin already falls back to the runtime-tape path for every break-bearing WHILE shape that isn't closure-closable, via two distinct mechanisms; this session pins both with regression tests and improves the user-facing diagnostic for the harder-to-diagnose case.

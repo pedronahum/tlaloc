@@ -149,4 +149,69 @@ class GradTest {
         val out = g(Tensors.f32Vector(floatArrayOf(5f, -3f, 2f)))
         assertContentEquals(floatArrayOf(-1f, -1f, -1f), out.hostF32())
     }
+
+    // §0.4.57 — D.3ii-tape-tracer. The compiler plugin cannot specialise a
+    // break-bearing `while` at compile time (§0.4.55 closure is deferred; §0.4.56
+    // pinned the plugin-level fallback), so the user's `grad { ... }` falls through
+    // to this runtime tape. The tape records ops as the loop actually executes and
+    // walks them in reverse — arbitrary control flow (including data-dependent
+    // break) is handled natively. These tests pin the gradient correctness end-to-
+    // end on the Tracer surface.
+
+    @Test
+    fun breakBearingWhileDoublesUntilThreshold() {
+        // f(x) = x doubled repeatedly until x*2^k > 10. For x = 0.5:
+        //   k=0..4: d ∈ {0.5, 1, 2, 4, 8}  (d <= 10 each time, keep doubling)
+        //   k=5:    d = 16  → exit the loop (16 > 10)
+        // Final d = 32x (= 16 at x=0.5). df/dx = 32.
+        val g = grad { x: Tracer<ScalarShape> ->
+            var d = x
+            while (d.entry.value[0] <= 10f) {
+                d = d + d
+            }
+            d
+        }
+        val out = g(Tensors.f32Scalar(0.5f)).hostF32()[0]
+        assertEquals(32f, out, "expected df/dx = 2^(#iterations) = 32 for x=0.5")
+    }
+
+    @Test
+    fun breakBearingWhileIterationCountDependsOnInput() {
+        // Same kernel as above. For x = 3.0 the thresholded iterations stop earlier:
+        //   k=0: d=3     (3 <= 10)
+        //   k=1: d=6     (6 <= 10)
+        //   k=2: d=12    (12 > 10 → exit BEFORE the 3rd doubling runs)
+        // Only 2 ADD ops recorded → df/dx = 2^2 = 4.
+        //
+        // Pins the defining property of a data-dependent break: the number of tape
+        // entries — and therefore the closed-form adjoint — varies per invocation
+        // of the same `grad { ... }` lambda.
+        val g = grad { x: Tracer<ScalarShape> ->
+            var d = x
+            while (d.entry.value[0] <= 10f) {
+                d = d + d
+            }
+            d
+        }
+        assertEquals(4f, g(Tensors.f32Scalar(3f)).hostF32()[0], "x=3: 2 doublings → df/dx = 4")
+        assertEquals(32f, g(Tensors.f32Scalar(0.5f)).hostF32()[0], "x=0.5: 5 doublings → df/dx = 32")
+        assertEquals(1f, g(Tensors.f32Scalar(11f)).hostF32()[0], "x=11: 0 doublings → df/dx = 1")
+    }
+
+    @Test
+    fun breakBearingWhileValueAndGradAgree() {
+        // Pair with `valueAndGrad` to verify the forward value is what the reverse
+        // path actually differentiates — no silent divergence between tape-recorded
+        // value and the result used as the backward seed.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> ->
+            var d = x
+            while (d.entry.value[0] <= 10f) {
+                d = d + d
+            }
+            d
+        }
+        val (value, dx) = vg(Tensors.f32Scalar(0.5f))
+        assertEquals(16f, value, "x=0.5 · 2^5 = 16")
+        assertEquals(32f, dx.hostF32()[0], "df/dx = 2^5 = 32")
+    }
 }
