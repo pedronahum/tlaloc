@@ -220,6 +220,50 @@ class DxirBridgeEquivalenceTest {
     // mis-evaluating.
 
     @Test
+    fun colBroadcastMatchesTapeAndSctPaths() {
+        // §0.4.88 — mirror of §0.4.86. The §0.4.87 column-broadcast records
+        // BROADCAST with broadcast_dimensions = [0] (input dim 0 → output
+        // dim 0; output dim 1 is broadcast-inserted). The reverse is
+        // SUM(upstream, reduction_dims = [1]) per §0.4.84. Cross-check tape
+        // vs SCT for this axis layout — any drift between the rule's axis
+        // selection and the interpreter's partial-SUM would fail here.
+        val f32_2x3 = DxirType(F32, listOf(2, 3))
+        val f32_2 = DxirType(F32, listOf(2))
+        val primal = io.tlaloc.ir.DxirBuilder.function("x_plus_col_sum") {
+            val x = param("x", f32_2x3)
+            val col = param("col", f32_2)
+            val bcast = op(
+                OpKind.BROADCAST,
+                listOf(col),
+                f32_2x3,
+                attrs = mapOf("broadcast_dimensions" to listOf(0)),
+            )
+            val sum = op(OpKind.ADD, listOf(x, bcast), f32_2x3)
+            val out = op(OpKind.SUM, listOf(sum), f32)
+            listOf(out)
+        }
+        val gradFn = DxirReverseTransform.apply(primal)
+        val xInput = floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f)
+        val colInput = floatArrayOf(10f, 100f)
+        val sctOut = DxirInterpreter.evalFunction(gradFn, listOf(xInput, colInput))
+        val sctDx = sctOut[0]
+        val sctDcol = sctOut[1]
+
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, col: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x + x.broadcastCol(col)).sum()
+        }
+        val (_, tapeDx, tapeDcol) = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 3, xInput),
+            Tensors.f32Vector<Sym>(colInput),
+        )
+        val tapeDxArr = tapeDx.hostF32()
+        val tapeDcolArr = tapeDcol.hostF32()
+
+        for (i in 0 until 6) assertClose(tapeDxArr[i], sctDx[i], "col-broadcast dx[$i]")
+        for (i in 0 until 2) assertClose(tapeDcolArr[i], sctDcol[i], "col-broadcast dcol[$i]")
+    }
+
+    @Test
     fun rowBroadcastMatchesTapeAndSctPaths() {
         // §0.4.86 — rank-1 row-broadcast (§0.4.85) through the §0.4.84 axis-
         // aware BroadcastRule. Build the SAME primal two ways:

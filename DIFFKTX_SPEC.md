@@ -39,6 +39,45 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.88 Bridge-equivalence pin for column-broadcast reverse 2026-04-24
+
+Mirror of §0.4.86 for the §0.4.87 column-broadcast direction. Builds `(x + col).sum()` two ways — via Tracer lambda using `x.broadcastCol(col)` AND as a hand-rolled `DxirFunction` with `BROADCAST` attrs `broadcast_dimensions = [0]` — runs both through backward, asserts gradient outputs agree.
+
+**One new test** in [DxirBridgeEquivalenceTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/DxirBridgeEquivalenceTest.kt): `colBroadcastMatchesTapeAndSctPaths`. Inputs: x = 2×3 matrix, col = rank-1 size 2.
+
+- **Tape path**: `valueAndGrad2 { x, col -> (x + x.broadcastCol(col)).sum() }` → (tapeDx, tapeDcol).
+- **SCT path**: primal with `BROADCAST(col, broadcast_dimensions=[0])` → `ADD(x, bcast)` → `SUM`. `DxirReverseTransform.apply` + `evalFunction` → (sctDx, sctDcol).
+- **Assertions**: per-element equality on rank-2 grad_x (6 asserts) and rank-1 grad_col (2 asserts).
+
+Failure here would catch a BroadcastRule miscomputation of `reduceDims` for `broadcast_dimensions = [0]` (should be `[1]`, not `[0]`), or a DxirInterpreter partial-SUM bug on axis 1 specifically (the row-broadcast pin exercises axis 0).
+
+**Decisions worth flagging**:
+
+- **Covers a different axis from §0.4.86.** Together the two tests exercise both `reduction_dims = [0]` (row broadcast; sum over axis 0) and `reduction_dims = [1]` (col broadcast; sum over axis 1). A bug in the BroadcastRule's `outputRank.filter { it !in broadcastDims }` that flipped the semantics would fail at least one of the two tests.
+
+- **Shape choice `[2, 3]` + col `[2]`.** Non-square so axis 0 and axis 1 reductions produce different-sized results — easier to spot a "wrong axis reduced" bug than square shapes where swap might look correct numerically.
+
+- **Single test, not four.** Paralleling §0.4.87's three-test coverage would duplicate information; the bridge test pins agreement between *two paths* and is independent of how many operators are covered on the Tracer side.
+
+**Tests added** (+1 new):
+
+- `DxirBridgeEquivalenceTest.colBroadcastMatchesTapeAndSctPaths`
+
+Full suite is green: **659 tests** (+1 over §0.4.87).
+
+**Recommended next pickup**:
+
+1. **Public `broadcastRow` named method** — complement §0.4.85's implicit operator for API symmetry.
+2. **Reverse-order broadcast ops** — `Tracer<Rank1>.op(Tracer<Rank2>)` for non-commutative arithmetic.
+3. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+4. **D.1i Symja `Simplify` on grad expressions**.
+5. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.88 — met**:
+- Tape and SCT paths for column-broadcast produce identical gradients ✓
+- Both grad_x (rank-2) and grad_col (rank-1) asserted element-wise ✓
+- Full suite green at 659 tests (+1) ✓
+
 #### 0.4.87 `broadcastCol` — rank-1 column-vector broadcast as a named builder 2026-04-24
 
 Ships column broadcasting for `Tracer<Rank2<A, B>>` + `Tracer<Rank1<A>>`. Exposed as a named method (not an operator) because the `plus(Tracer<Rank1<A>>)` / `plus(Tracer<Rank1<B>>)` overload pair collapses source-level-ambiguous when the phantom types `A` and `B` are both `Sym` (the default from `Tensors.f32Matrix<Sym, Sym>` callers). Users write `matrix + matrix.broadcastCol(col)` explicitly — one extra method call, unambiguous at every call site.
