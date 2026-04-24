@@ -316,6 +316,46 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
     row: Tracer<io.tlaloc.core.Rank1<B>>,
 ): Tracer<Rank2<A, B>> = this / broadcastRow(row)
 
+/**
+ * §0.4.87 — rank-1-to-rank-2 column-vector broadcast. Produces a rank-2 tracer
+ * where each column-entry gets the corresponding [col] value replicated across
+ * all columns. Shape contract: `col.dims[0] == this.dims[0]` (matrix row
+ * count); output shape matches [this].
+ *
+ * Not an operator overload: `Tracer<Rank2<A, B>>.plus(Tracer<Rank1<A>>)` would
+ * clash source-level with §0.4.85's `Tracer<Rank2<A, B>>.plus(Tracer<Rank1<B>>)`
+ * when the phantom types A and B are both `Sym` (the default for `Tensors.
+ * f32Matrix<Sym, Sym>` callers). Kotlin's overload resolution picks "more
+ * specific", and both candidates are equally specific for `Rank1<Sym>` — so the
+ * call site is ambiguous. Exposing the col-broadcast as a named builder avoids
+ * the collision; users write `matrix + matrix.broadcastCol(col)` explicitly.
+ *
+ * Records `OpKind.BROADCAST` with `broadcast_dimensions = listOf(0)` (input dim
+ * 0 → output dim 0; output dim 1 is broadcast-inserted). §0.4.84's axis-aware
+ * BroadcastRule reverses it as `SUM(upstream, reduction_dims = [1])` →
+ * rank-1 grad back to [col].
+ */
+fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastCol(
+    col: Tracer<io.tlaloc.core.Rank1<A>>,
+): Tracer<Rank2<A, B>> {
+    require(dims[0] == col.dims[0]) {
+        "broadcastCol: col size ${col.dims[0]} doesn't match matrix row size ${dims[0]}"
+    }
+    val tape = sameTape(this, col)
+    val m = dims[0]
+    val n = dims[1]
+    val colValues = col.entry.value
+    val broadcasted = FloatArray(m * n) { idx -> colValues[idx / n] }
+    val e = tape.op(
+        OpKind.BROADCAST,
+        intArrayOf(col.id),
+        dims.copyOf(),
+        broadcasted,
+        attrs = mapOf("broadcast_dimensions" to listOf(0)),
+    )
+    return Tracer<Rank2<A, B>>(tape, e)
+}
+
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value
     var acc = 0f

@@ -399,6 +399,70 @@ class GradTest {
     // upstream (via §0.4.84's axis-aware BroadcastRule).
 
     @Test
+    fun rank2PlusBroadcastColAppliesColumnVectorAcrossColumns() {
+        // §0.4.87 — `matrix + matrix.broadcastCol(col)` replicates `col`
+        // (size M) across all N columns. For x = [[1,2,3],[4,5,6]] and
+        // col=[10,100]: broadcast = [[10,10,10],[100,100,100]]. sum(x+bcast) =
+        // (1+10)+(2+10)+(3+10)+(4+100)+(5+100)+(6+100) = 33 + 315 = 348 … wait,
+        // let me recompute: 11+12+13+104+105+106 = 36+315 = 351. Yes 351.
+        //   grad_x = ones(2, 3).
+        //   grad_col_i = sum over cols of 1 = N = 3.
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, col: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x + x.broadcastCol(col)).sum()
+        }
+        val (value, dx, dcol) = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f)),
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 100f)),
+        )
+        assertEquals(351f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 6) assertEquals(1f, gx[i], "grad_x[$i]")
+        val gc = dcol.hostF32()
+        assertEquals(3f, gc[0], "grad_col[0] = N")
+        assertEquals(3f, gc[1], "grad_col[1] = N")
+    }
+
+    @Test
+    fun rank2TimesBroadcastColWeightsEachRow() {
+        // f(x, col) = sum(x * col_broadcast) at x=[[1,2],[3,4]], col=[10,100].
+        //   broadcast = [[10,10],[100,100]].
+        //   product = [[10,20],[300,400]]. sum = 730.
+        //   grad_x_ij = col_i → [[10,10],[100,100]].
+        //   grad_col_i = sum over j of x_ij = [1+2, 3+4] = [3, 7].
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, col: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x * x.broadcastCol(col)).sum()
+        }
+        val (value, dx, dcol) = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 100f)),
+        )
+        assertEquals(730f, value)
+        val gx = dx.hostF32()
+        assertEquals(10f, gx[0]); assertEquals(10f, gx[1]); assertEquals(100f, gx[2]); assertEquals(100f, gx[3])
+        val gc = dcol.hostF32()
+        assertEquals(3f, gc[0])
+        assertEquals(7f, gc[1])
+    }
+
+    @Test
+    fun rank2BroadcastColShapeMismatchThrows() {
+        // Matrix row size 2 vs col size 3 → clear error.
+        var caught: IllegalArgumentException? = null
+        try {
+            valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, col: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+                (x + x.broadcastCol(col)).sum()
+            }(
+                Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+                Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f)),
+            )
+        } catch (e: IllegalArgumentException) {
+            caught = e
+        }
+        assertTrue(caught != null, "expected IllegalArgumentException for size mismatch")
+        assertTrue(caught!!.message!!.contains("doesn't match"), "message should name mismatch: ${caught!!.message}")
+    }
+
+    @Test
     fun rank2PlusRank1RowBroadcastsAndSums() {
         // f(x, b) = sum(x + b). x is [[1, 2, 3], [4, 5, 6]], b is [10, 20, 30].
         //   Forward: [[11, 22, 33], [14, 25, 36]] → sum = 141.

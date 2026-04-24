@@ -39,6 +39,59 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.87 `broadcastCol` — rank-1 column-vector broadcast as a named builder 2026-04-24
+
+Ships column broadcasting for `Tracer<Rank2<A, B>>` + `Tracer<Rank1<A>>`. Exposed as a named method (not an operator) because the `plus(Tracer<Rank1<A>>)` / `plus(Tracer<Rank1<B>>)` overload pair collapses source-level-ambiguous when the phantom types `A` and `B` are both `Sym` (the default from `Tensors.f32Matrix<Sym, Sym>` callers). Users write `matrix + matrix.broadcastCol(col)` explicitly — one extra method call, unambiguous at every call site.
+
+**One new function** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt):
+
+```kotlin
+fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastCol(
+    col: Tracer<Rank1<A>>,
+): Tracer<Rank2<A, B>>
+```
+
+Records `OpKind.BROADCAST` with `broadcast_dimensions = listOf(0)` (input dim 0 maps to output dim 0; output dim 1 is broadcast-inserted). Forward populates the output buffer as `broadcasted[idx] = colValues[idx / n]` — each row's entries are all `col[row_index]`. Reverse routes through §0.4.84's axis-aware `BroadcastRule`, which emits `SUM(upstream, reduction_dims = [1])` → rank-1 grad summed over each row.
+
+**Three new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `rank2PlusBroadcastColAppliesColumnVectorAcrossColumns` — x=[[1..3],[4..6]], col=[10,100]. Forward value=351, grad_x=ones, grad_col=[3,3] (N-column-sum).
+2. `rank2TimesBroadcastColWeightsEachRow` — x=[[1,2],[3,4]], col=[10,100]. grad_x weighted per row by `col_i`, grad_col = row-sums of x.
+3. `rank2BroadcastColShapeMismatchThrows` — row-size-mismatch error path.
+
+**Decisions worth flagging**:
+
+- **Named method, not operator — why this session, not earlier.** §0.4.85's row-broadcast fit cleanly as an operator (`Tracer<Rank2<A, B>>.plus(Tracer<Rank1<B>>)`) because the column axis (B) was uniquely chosen. A second operator with `Tracer<Rank1<A>>` collides with the first when A=B (symbolic axes). `@JvmName` makes each *JVM* signature unique, but Kotlin's *source-level* overload resolution still sees equally-specific candidates and errors. Explicit `broadcastCol` avoids the ambiguity; users pay one method call of verbosity to get both semantics. `matrix.broadcastCol(col)` makes the direction explicit — arguably *better* self-documentation than an implicit `matrix + col` that relies on reading axis labels.
+
+- **Did not also add `broadcastRow` as a public method.** §0.4.85's row broadcast keeps its operator-call ergonomics; adding a public named form would be noise. If a user *wanted* to express row broadcast explicitly, the workaround is one line: `matrix + matrix.broadcastCol(col.transpose())` — except there's no transpose on Tracer either. Filed as future: expose `broadcastRow` publicly when a call site justifies it.
+
+- **Forward formula `broadcasted[idx] = colValues[idx / n]`**. The `/n` integer-divides the row index; each consecutive `n` output elements get the same `col` value. Correct for row-major layout of `[M, N]`.
+
+- **`BroadcastRule` handled this case free.** §0.4.84's axis-aware reverse generalised to non-scalar inputs; no rule-side change was needed this session. The Tracer surface addition just exercises it in a new direction.
+
+**Tests added** (+3 new):
+
+- `GradTest.rank2PlusBroadcastColAppliesColumnVectorAcrossColumns`
+- `GradTest.rank2TimesBroadcastColWeightsEachRow`
+- `GradTest.rank2BroadcastColShapeMismatchThrows`
+
+Full suite is green: **658 tests** (+3 over §0.4.86).
+
+**Recommended next pickup**:
+
+1. **Public `broadcastRow` named method** — complement §0.4.85's implicit operator for API symmetry.
+2. **Reverse-order broadcast ops** — `Tracer<Rank1>.op(Tracer<Rank2>)` for non-commutative arithmetic.
+3. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+4. **D.1i Symja `Simplify` on grad expressions**.
+5. **`diagnosticReporter` migration**.
+6. **Bridge-equivalence pin for col-broadcast reverse** — §0.4.86 did row; matching col-broadcast test is a direct analog.
+
+**Definition-of-done for §0.4.87 — met**:
+- `Tracer<Rank2<A, B>>.broadcastCol(Tracer<Rank1<A>>)` public helper ✓
+- Records BROADCAST with `broadcast_dimensions = [0]` ✓
+- Three tests cover forward value, both-side gradients, shape-mismatch error ✓
+- Full suite green at 658 tests (+3) ✓
+
 #### 0.4.86 Bridge-equivalence pin for rank-1 row-broadcast reverse 2026-04-24
 
 Belt-and-braces follow-up to §0.4.85 and §0.4.84. Extends §0.4.79's bridge-equivalence pattern (tape vs. SCT) to the new cross-rank BROADCAST path: builds `(x + b).sum()` with `x: rank-2`, `b: rank-1` both as a Tracer lambda AND as a hand-rolled `DxirFunction` (with `broadcast_dimensions = [1]` on the BROADCAST), runs both through backward, asserts their gradient outputs agree.
