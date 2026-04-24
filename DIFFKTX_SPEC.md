@@ -39,6 +39,46 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.79 Bridge-equivalence pin for scalar-broadcast BROADCAST reverse 2026-04-24
+
+One-test belt-and-braces for §0.4.77's `BroadcastRule`. Constructs the same primal two ways — via tape (Tracer lambda `(x * c).sum()`) and via hand-rolled `DxirFunction` (`BROADCAST(c) → MUL(x, bcast) → SUM(prod)`) — runs both through backward and asserts their gradient outputs agree across the board.
+
+**The test** in [DxirBridgeEquivalenceTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/DxirBridgeEquivalenceTest.kt): `scalarBroadcastMatchesTapeAndSctPaths`. Inputs x=[2, 4, 8], c=3.
+
+- **Tape path**: `valueAndGrad2 { x, c -> (x * c).sum() }` → (tapeDx, tapeDc).
+- **SCT path**: same op sequence as a `DxirFunction` → `DxirReverseTransform.apply` → `DxirInterpreter.evalFunction` → (sctDx, sctDc).
+- **Assertions**: tapeDx per-element equals sctDx (3 asserts); tapeDc equals sctDc (1 assert). All within the file's existing `tol = 1e-5f`.
+
+This is the §0.4.66 pattern extended to BROADCAST — §0.4.66 covered unary math + pow, but BROADCAST landed later (§0.4.77) and didn't get the same cross-path proof. Filling that gap now means any future change to `BroadcastRule` (whether it's the rule itself, the `applyRegistryRule` dispatch, or the bridge evalOp's SUM arm) fails this test with a specific diagnostic rather than silently diverging between the two paths.
+
+**Decisions worth flagging**:
+
+- **Single shape case (rank-1, N=3).** BroadcastRule's MVP guard (`input.type.isScalar`) restricts the scalar→rank-N shape, and the SCT path goes through the same rule. Rank-2 broadcasting (§0.4.78) uses the same rule — covered implicitly via the tape side. A dedicated rank-2 bridge-equiv test would exercise one extra emitter arm but not any new rule path; filed as future belt-and-braces.
+
+- **Kept file's `f32` as rank-0 scalar**. DxirBridgeEquivalenceTest declares a file-local `f32 = DxirType(F32, emptyList())` for scalar operands. My test uses it for `c`, the scalar operand; `x` uses the locally-defined `f32vec3`. Follows the pattern of the nearby `sumGrad` / `meanGrad` tests that declare rank-specific types inline.
+
+- **Hand-wrote the DxirFunction instead of extracting a helper.** The test is one-off and the builder DSL is already concise. Extracting a `broadcastMulSum(x, c)` helper would trade one-site clarity for DRY but make the intent harder to read at the callsite.
+
+**Tests added** (+1 new):
+
+- `DxirBridgeEquivalenceTest.scalarBroadcastMatchesTapeAndSctPaths`
+
+Full suite is green: **640 tests** (+1 over §0.4.78).
+
+**Recommended next pickup** (unchanged):
+
+1. **General axis-aware BROADCAST reverse** — lifts MVP scalar-input guard.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **grad2(DTensor, Float)**.
+5. **`diagnosticReporter` migration**.
+6. **Rank-2 / rank-N bridge-equivalence follow-up** — emitter coverage across more ranks.
+
+**Definition-of-done for §0.4.79 — met**:
+- Tape path and SCT path for `(x * c).sum()` (scalar broadcast) produce identical gradients within `tol = 1e-5f` ✓
+- Test covers both grad_x and grad_c via cross-check ✓
+- Full suite green at 640 tests (+1) ✓
+
 #### 0.4.78 Rank-2 scalar broadcasting — `Tracer<Rank2<A, B>> op Tracer<ScalarShape>` 2026-04-24
 
 Natural extension of §0.4.77. Adds four `Tracer<Rank2<A, B>>.{plus/minus/times/div}(Tracer<ScalarShape>)` operator overloads with `@JvmName` disambiguation, and generalises the shared `broadcastScalar` helper from rank-1-specific to `Tracer<S>.broadcastScalar(scalar)` so rank-1 and rank-2 paths go through the same tape-op emission.

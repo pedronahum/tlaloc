@@ -220,6 +220,49 @@ class DxirBridgeEquivalenceTest {
     // mis-evaluating.
 
     @Test
+    fun scalarBroadcastMatchesTapeAndSctPaths() {
+        // §0.4.79 — BROADCAST-based scalar broadcasting (§0.4.77). Constructs the
+        // SAME primal two ways:
+        //   * Tape:  valueAndGrad2 { x, c -> (x * c).sum() }, which the
+        //            Tracer.times(scalar) overload records as
+        //            BROADCAST(c) → bcast, MUL(x, bcast), SUM(prod).
+        //   * SCT:   DxirFunction with the exact same ops in the same order,
+        //            then DxirReverseTransform.apply + evalFunction.
+        // Cross-check both grad_x and grad_c on a representative input.
+        val f32vec3 = DxirType(F32, listOf(3))
+        val primal = io.tlaloc.ir.DxirBuilder.function("x_times_c_sum") {
+            val x = param("x", f32vec3)
+            val c = param("c", f32)
+            val bcastC = op(
+                OpKind.BROADCAST,
+                listOf(c),
+                f32vec3,
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val prod = op(OpKind.MUL, listOf(x, bcastC), f32vec3)
+            val s = op(OpKind.SUM, listOf(prod), f32)
+            listOf(s)
+        }
+        val gradFn = DxirReverseTransform.apply(primal)
+        val xInput = floatArrayOf(2f, 4f, 8f)
+        val cInput = floatArrayOf(3f)
+        val sctOut = DxirInterpreter.evalFunction(gradFn, listOf(xInput, cInput))
+        val sctDx = sctOut[0]
+        val sctDc = sctOut[1][0]
+
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank1<Sym>>, c: Tracer<ScalarShape> ->
+            (x * c).sum()
+        }
+        val (_, tapeDx, tapeDc) = vg(Tensors.f32Vector(xInput), Tensors.f32Scalar(cInput[0]))
+        val tapeDxArr = tapeDx.hostF32()
+
+        assertClose(tapeDxArr[0], sctDx[0], "broadcast dx[0]")
+        assertClose(tapeDxArr[1], sctDx[1], "broadcast dx[1]")
+        assertClose(tapeDxArr[2], sctDx[2], "broadcast dx[2]")
+        assertClose(tapeDc.hostF32()[0], sctDc, "broadcast dc")
+    }
+
+    @Test
     fun sqrtGradMatchesClosedFormAndTape() {
         // d/dx sqrt(x) = 1 / (2 sqrt(x)).
         val primal = DxirBuilder.function("sqrt") {
