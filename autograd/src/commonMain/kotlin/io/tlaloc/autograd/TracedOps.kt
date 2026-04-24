@@ -164,6 +164,18 @@ operator fun <S : Shape> Tracer<S>.minus(scalar: Float): Tracer<S> = this - cons
 operator fun <S : Shape> Tracer<S>.times(scalar: Float): Tracer<S> = this * constantLike(scalar)
 operator fun <S : Shape> Tracer<S>.div(scalar: Float): Tracer<S> = this / constantLike(scalar)
 
+/**
+ * §0.4.76 — scalar-literal `pow` overload. Follows the §0.4.75 pattern: promote
+ * the Float literal to a same-shape constant leaf and route through the
+ * existing `Tracer<S>.pow(Tracer<S>)` surface. PowRule still builds its
+ * `grad_exp = upstream · x^e · ln(x)` tree — the §0.4.65 constant-skip cuts
+ * the DxirInterpreter evaluation step but not the rule's dxir construction.
+ * For callers who want to save that construction cost on a hot loop, a
+ * dedicated `OpKind.SCALAR_POW` with a one-sided VjpRule is filed as a future
+ * optimisation (§0.4.75's decision note).
+ */
+fun <S : Shape> Tracer<S>.pow(scalar: Float): Tracer<S> = this.pow(constantLike(scalar))
+
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value
     var acc = 0f

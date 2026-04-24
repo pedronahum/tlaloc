@@ -39,6 +39,53 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.76 `Tracer<S>.pow(Float)` — scalar-literal pow via `constantLike` 2026-04-24
+
+Direct §0.4.75 follow-up. Adds `fun <S : Shape> Tracer<S>.pow(scalar: Float): Tracer<S>` — delegates to `this.pow(constantLike(scalar))`. Lets users write `x.pow(2f)` for squaring without constructing a scalar Tracer or a Float leaf by hand, matching the §0.4.75 idiom for `+`/`-`/`*`/`/`.
+
+**One-line addition** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt):
+
+```kotlin
+fun <S : Shape> Tracer<S>.pow(scalar: Float): Tracer<S> = this.pow(constantLike(scalar))
+```
+
+Same constant-skip optimisation path as §0.4.75: PowRule's `grad_exp = upstream · x^e · ln(x)` tree is still built (registry-protocol requirement), but `Backward.applyRegistryRule` skips the DxirInterpreter evaluation step for the constant-flagged exponent operand. Per-op reverse cost is identical to a hand-written `this.pow(this.constantLike(scalar))`.
+
+**One test** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt): `scalarPowScalesGradViaExponent`:
+
+- Scalar case: `f(x) = x.pow(3f)` at x=2 → value=8, grad=12 (= 3·x²).
+- Rank-1 case: `f(x) = x.pow(2f).sum()` at x=[1, 2, 3] → value=14, grad=[2, 4, 6].
+
+Tight tolerance (1e-5f) — the `constantLike(scalar)` path routes through the same POW evaluation as `pow(Tracer)`, so any drift would come from `constantLike`'s FloatArray population loop, which is exact for integer-valued Floats.
+
+**Decisions worth flagging**:
+
+- **Not an `operator fun`.** Kotlin's `pow` isn't a reserved infix operator. Matches the existing `Tracer<S>.pow(Tracer<S>)` style (§0.4.64); callers write `x.pow(2f)`, not `x pow 2f`.
+
+- **No skip-dExp-construction.** §0.4.75's decision note flagged this as a potential future optimisation — a dedicated `OpKind.SCALAR_POW` with a one-sided VjpRule that only emits `grad_base`. Doing so means adding a new OpKind across IR + interpreter + emitter + rule, which is at least a session on its own. For now, the compositional path reuses POW and accepts the dExp-tree-build cost; for hot loops the measured overhead would need a perf probe to motivate the dedicated op kind.
+
+- **Scalar argument is `Float`, not `Number`.** Same Kotlin-operator-promotion caveat as §0.4.75 — `x.pow(2)` (Int literal) would need `x.pow(2f)` or `x.pow(2.0f)`. Low ergonomic cost.
+
+**Tests added** (+1 new):
+
+- `GradTest.scalarPowScalesGradViaExponent`
+
+Full suite is green: **633 tests** (+1 over §0.4.75).
+
+**Recommended next pickup**:
+
+1. **Differentiable scalar broadcasting** — `x + Tracer<ScalarShape>` with SUM-reduction in the BROADCAST VJP rule. 1 session.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **grad2(DTensor, Float)**.
+5. **`diagnosticReporter` migration**.
+6. **`OpKind.SCALAR_POW` with skip-dExp-construction** — dedicated rule that only emits `grad_base`, saving the dExp tree-build cost. Perf optimisation; measured regression needed to motivate.
+
+**Definition-of-done for §0.4.76 — met**:
+- `Tracer<S>.pow(Float)` method on the Tracer surface ✓
+- Scalar + rank-1 grad tests with closed-form assertions ✓
+- Full suite green at 633 tests (+1) ✓
+
 #### 0.4.75 Scalar-literal operator overloads (`x + 5f`, `x * 0.5f`, …) via `constantLike` 2026-04-24
 
 Ships the §0.4.68 register item "Scalar-rank broadcasting for `+` / `-` / `*` / `/`" — but via the cheap compositional path, not via true broadcasting + VJP rule changes. `Tracer<S> op Float` promotes the literal to a same-shape constant leaf (`constantLike(scalar)`) and routes through the existing same-shape operators; no new OpKind, no new VJP rule, no changes to `Backward.applyRegistryRule` beyond what `isConstant` skip already does.

@@ -311,6 +311,24 @@ class GradTest {
     // tape op kind or VJP rule needed.
 
     @Test
+    fun scalarPowScalesGradViaExponent() {
+        // §0.4.76 — f(x) = x^3 as `x.pow(3f)`. Grad = 3·x². At x=2 → value=8, grad=12.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x.pow(3f) }
+        val (v, dx) = vg(Tensors.f32Scalar(2f))
+        assertEquals(8f, v)
+        assertTrue(abs(dx.hostF32()[0] - 12f) < 1e-5f, "grad_x = 3·x² = 12; got ${dx.hostF32()[0]}")
+
+        // Rank-1 elementwise: f(x) = sum(x^2) at x=[1, 2, 3] → value 14, grad=[2, 4, 6].
+        val vgR1 = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> x.pow(2f).sum() }
+        val (v1, d1) = vgR1(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(14f, v1)
+        val g = d1.hostF32()
+        assertTrue(abs(g[0] - 2f) < 1e-5f)
+        assertTrue(abs(g[1] - 4f) < 1e-5f)
+        assertTrue(abs(g[2] - 6f) < 1e-5f)
+    }
+
+    @Test
     fun scalarAddIsIdentityOnGrad() {
         // f(x) = x + 5. df/dx = 1 on every element.
         val vgScalar = valueAndGrad { x: Tracer<ScalarShape> -> x + 5f }
