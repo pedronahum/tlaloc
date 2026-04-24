@@ -371,6 +371,30 @@ operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.div(
     row: Tracer<io.tlaloc.core.Rank1<A>>,
 ): Tracer<io.tlaloc.core.Rank1<A>> = row.broadcastScalar(this) / row
 
+// §0.4.92 — reverse-order scalar-to-rank-2 broadcast operators. `scalar op matrix`
+// where scalar is LHS. Complements §0.4.78's rank-2-on-LHS scalar-broadcast
+// overloads. Same pattern as §0.4.91 but for rank-2 receivers.
+
+@kotlin.jvm.JvmName("plusRank2ScalarLhs")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.plus(
+    matrix: Tracer<Rank2<A, B>>,
+): Tracer<Rank2<A, B>> = matrix.broadcastScalar(this) + matrix
+
+@kotlin.jvm.JvmName("minusRank2ScalarLhs")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.minus(
+    matrix: Tracer<Rank2<A, B>>,
+): Tracer<Rank2<A, B>> = matrix.broadcastScalar(this) - matrix
+
+@kotlin.jvm.JvmName("timesRank2ScalarLhs")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.times(
+    matrix: Tracer<Rank2<A, B>>,
+): Tracer<Rank2<A, B>> = matrix.broadcastScalar(this) * matrix
+
+@kotlin.jvm.JvmName("divRank2ScalarLhs")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.div(
+    matrix: Tracer<Rank2<A, B>>,
+): Tracer<Rank2<A, B>> = matrix.broadcastScalar(this) / matrix
+
 // §0.4.90 — reverse-order row-broadcast operators. `row + matrix`, `row - matrix`,
 // etc. where the rank-1 tracer is the LHS. Matters specifically for non-
 // commutative ops (minus, div) where argument order changes the math. Each

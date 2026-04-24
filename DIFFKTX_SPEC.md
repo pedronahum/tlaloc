@@ -39,6 +39,52 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.92 Reverse-order scalar-to-rank-2 broadcast operators — `scalar op matrix` 2026-04-24
+
+Rank-2 companion to §0.4.91. Four more operator overloads on `Tracer<ScalarShape>` that take a `Tracer<Rank2<A, B>>`, completing the scalar-LHS broadcast surface. Identical pattern: `broadcastScalar` lifts the scalar to the matrix's shape, then the existing same-shape operator applies.
+
+**Four new overloads** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt):
+
+```kotlin
+operator fun <A, B> Tracer<ScalarShape>.plus(matrix: Tracer<Rank2<A, B>>)  = matrix.broadcastScalar(this) + matrix
+operator fun <A, B> Tracer<ScalarShape>.minus(matrix: Tracer<Rank2<A, B>>) = matrix.broadcastScalar(this) - matrix
+operator fun <A, B> Tracer<ScalarShape>.times(matrix: Tracer<Rank2<A, B>>) = matrix.broadcastScalar(this) * matrix
+operator fun <A, B> Tracer<ScalarShape>.div(matrix: Tracer<Rank2<A, B>>)   = matrix.broadcastScalar(this) / matrix
+```
+
+`@JvmName` suffix `Rank2ScalarLhs` — distinguishes from §0.4.91's `Rank1ScalarLhs` after JVM erasure collapses both to `plus(Tracer, Tracer)`.
+
+**Two new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `reverseOrderScalarMinusRank2DiffersFromMatrixMinusScalar` — `sum(s - m)` at s=10, m=[[1,2],[3,4]]. Value=30, grad_s=M·N=4, grad_m=-1 per element. Pins sign-flip correctness.
+2. `reverseOrderScalarTimesRank2CommutativeMatch` — `s * m` and `m * s` produce identical gradients for a 2×3 matrix input.
+
+**Decisions worth flagging**:
+
+- **The broadcast surface is now symmetric across all four operand-shape combinations at rank ≤ 2.** Scalar+Rank1, Rank1+Scalar, Scalar+Rank2, Rank2+Scalar all have operator forms; the matrix-plus-row/col direction also has both implicit operator (row) and named builder (col) forms. A future user writing `0.5f * matrix` (Float literal × Tracer) still needs an extra overload if they want the scalar-literal + matrix direction — §0.4.75's rank-agnostic `Tracer<S>.times(scalar: Float)` handles matrix * 0.5f but not 0.5f * matrix. Filed as future follow-up.
+
+- **Non-commutative test only covers minus.** Division is covered symmetrically with §0.4.91's `scalarDivRank1` test; the rank-2 case uses the same rule stack (BroadcastRule scalar-arm + DivRule + SumRule), so adding a rank-2-div test would mostly restate what's already proven. Cut for signal-per-test ratio.
+
+**Tests added** (+2 new):
+
+- `GradTest.reverseOrderScalarMinusRank2DiffersFromMatrixMinusScalar`
+- `GradTest.reverseOrderScalarTimesRank2CommutativeMatch`
+
+Full suite is green: **668 tests** (+2 over §0.4.91).
+
+**Recommended next pickup**:
+
+1. **Float-literal LHS for broadcast** — `0.5f * matrix` (Float on LHS, Tracer on RHS). Currently §0.4.75's `Tracer<S>.times(Float)` covers `matrix * 0.5f` only.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.92 — met**:
+- Four `Tracer<ScalarShape>.op(Tracer<Rank2<A, B>>)` overloads with `@JvmName` ✓
+- Non-commutative test pins sign-flip correctness ✓
+- Commutative test verifies call-order independence ✓
+- Full suite green at 668 tests (+2) ✓
+
 #### 0.4.91 Reverse-order scalar-to-rank-1 broadcast operators — `scalar op row` 2026-04-24
 
 Complements §0.4.77's rank-1-on-LHS scalar-broadcast overloads. `scalar - row` and `scalar / row` are now natively expressible; the non-commutative semantics are what matter. Four new operator overloads on `Tracer<ScalarShape>` that take a `Tracer<Rank1<A>>`, each with a distinct `@JvmName` suffix.

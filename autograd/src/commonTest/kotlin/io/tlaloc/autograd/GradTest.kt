@@ -399,6 +399,46 @@ class GradTest {
     // upstream (via §0.4.84's axis-aware BroadcastRule).
 
     @Test
+    fun reverseOrderScalarMinusRank2DiffersFromMatrixMinusScalar() {
+        // §0.4.92 — `scalar - matrix` is NOT the same as `matrix - scalar`.
+        // For scalar=10, matrix=[[1, 2], [3, 4]]:
+        //   scalar - matrix = [[9, 8], [7, 6]], sum = 30.
+        //   grad_scalar = M*N = 4.
+        //   grad_matrix = -1 per element.
+        val vg = valueAndGrad2 { s: Tracer<ScalarShape>, m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> ->
+            (s - m).sum()
+        }
+        val (value, dScalar, dMatrix) = vg(
+            Tensors.f32Scalar(10f),
+            Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+        )
+        assertEquals(30f, value)
+        assertEquals(4f, dScalar.hostF32()[0], "grad_scalar = M·N = 4")
+        val gm = dMatrix.hostF32()
+        for (i in 0 until 4) assertEquals(-1f, gm[i])
+    }
+
+    @Test
+    fun reverseOrderScalarTimesRank2CommutativeMatch() {
+        // scalar * matrix and matrix * scalar must agree (commutative).
+        val vgFwd = valueAndGrad2 { s: Tracer<ScalarShape>, m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> ->
+            (m * s).sum()
+        }
+        val vgRev = valueAndGrad2 { s: Tracer<ScalarShape>, m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> ->
+            (s * m).sum()
+        }
+        val sIn = Tensors.f32Scalar(2f)
+        val mIn = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))
+        val (vF, dsF, dmF) = vgFwd(sIn, mIn)
+        val (vR, dsR, dmR) = vgRev(sIn, mIn)
+        assertEquals(vF, vR)
+        assertEquals(dsF.hostF32()[0], dsR.hostF32()[0])
+        val dF = dmF.hostF32()
+        val dR = dmR.hostF32()
+        for (i in 0 until 6) assertEquals(dF[i], dR[i])
+    }
+
+    @Test
     fun reverseOrderScalarMinusRank1DiffersFromRank1MinusScalar() {
         // §0.4.91 — `scalar - row` is NOT the same as `row - scalar`. For
         // scalar=10, row=[1, 2, 3]:
