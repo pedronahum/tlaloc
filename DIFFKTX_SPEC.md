@@ -39,6 +39,63 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.84 Axis-aware BROADCAST reverse — partial SUM across broadcast-inserted dims 2026-04-24
+
+Lifts the §0.4.77 MVP scalar-input guard on `BroadcastRule`. General cross-rank broadcasting reverse now works: rank-1 → rank-2 broadcasts sum the upstream over the inserted axis back to rank-1; rank-N → rank-M with partial axis alignment sums over whichever output dims aren't named in `broadcast_dimensions`.
+
+**Two coordinated changes**:
+
+1. **[Vjp.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt)** — `BroadcastRule.apply` now:
+   - Reads `broadcast_dimensions` from the op's attrs (MVP assumed empty/scalar).
+   - If empty, keeps the old scalar-to-any-shape path — `SUM(upstream)` → scalar, no `reduction_dims` attr.
+   - If non-empty, computes `reduceDims = (0 until outputRank).filter { it !in broadcastDims }` and emits `SUM(upstream)` with `attrs = mapOf("reduction_dims" to reduceDims)`.
+   - Degenerate identity-broadcast case (input shape equals output shape; `broadcast_dimensions` covers all axes) forwards the upstream unchanged.
+
+2. **[DxirInterpreter.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt)** — the bridge `evalOp`'s `OpKind.SUM` arm (added in §0.4.77 for scalar BroadcastRule's reverse) now handles a `reduction_dims` attr. Without attrs, behaves as before (all-dims → scalar). With attrs, computes an axis-aware partial SUM: for each input flat index, decomposes to input coords, projects to output coords by dropping the reduced axes, accumulates.
+
+**Four new tests** in [DxirInterpreterTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirInterpreterTest.kt):
+
+- `sumWithoutReductionDimsCollapsesToScalar` — rank-2 input → scalar. Regression for the pre-§0.4.84 behaviour.
+- `sumWithReductionDimsRank2Axis0ProducesRank1` — `[[1,2],[3,4]]` summed over dim 0 → `[4, 6]`. Pin that axis 0 reduction produces the column-wise sums.
+- `sumWithReductionDimsRank2Axis1ProducesRank1` — same input summed over dim 1 → `[3, 7]`. Row-wise.
+- `sumWithReductionDimsRank3DropsTwoAxes` — rank-3 `[2,2,2]` summed over dims `[0, 2]` → rank-1 `[2]`. Exercises the general multi-axis reduction loop.
+
+**Decisions worth flagging**:
+
+- **Kept the scalar path as a special case for clarity**. An implementation that always used `reduction_dims = (0 until outputRank).toList()` for scalar inputs would be one less branch but would lose the "no attrs → all dims" convention the rest of the emitter uses. Keeping the branch aligns the rule with `readReductionDims`'s `null → all axes` fallback in the Emitter.
+
+- **No Tracer-surface API for cross-rank broadcast yet.** §0.4.78 added scalar-to-rank-N overloads, but rank-1-to-rank-2 broadcasting from the Tracer surface isn't plumbed. The rule and interpreter now support it; when a Tracer call site surfaces (probably via `Tracer<Rank1<B>>.plus(Tracer<Rank2<A, B>>)` or similar), the infrastructure is ready.
+
+- **Row-major strides computed inline, not via a shared helper.** The stride computation is 8 lines and used only here; a `rowMajorStrides(dims: IntArray): IntArray` helper would be justified if a second caller shows up, but not yet.
+
+- **DxirReverseTransform not touched.** The MVP BroadcastRule (scalar-only) is registered in VjpRegistry; DxirReverseTransform just dispatches through the registry. The generalised rule works the same way — no transform-side changes needed.
+
+- **Emitter StableHLO SUM already reads `reduction_dims`**. `readReductionDims` has been the emitter's entry point all along; it handles both cases (missing attr → all axes, present attr → specific axes). Round-trip to StableHLO for a partial-SUM gradient body works without emitter changes — only the interpreter's bridge SUM needed widening.
+
+**Tests added** (+4 new):
+
+- `DxirInterpreterTest.sumWithoutReductionDimsCollapsesToScalar`
+- `DxirInterpreterTest.sumWithReductionDimsRank2Axis0ProducesRank1`
+- `DxirInterpreterTest.sumWithReductionDimsRank2Axis1ProducesRank1`
+- `DxirInterpreterTest.sumWithReductionDimsRank3DropsTwoAxes`
+
+Full suite is green: **651 tests** (+4 over §0.4.83).
+
+**Recommended next pickup**:
+
+1. **Tracer-surface cross-rank broadcast** — `Tracer<Rank1<B>> op Tracer<Rank2<A, B>>` using the now-ready BroadcastRule machinery.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **`diagnosticReporter` migration**.
+5. **Bridge-equivalence pin for axis-aware BROADCAST reverse** — belt-and-braces similar to §0.4.79.
+
+**Definition-of-done for §0.4.84 — met**:
+- `BroadcastRule` handles non-scalar input with an axis-aware partial SUM reverse ✓
+- `DxirInterpreter` bridge SUM handles `reduction_dims` attr ✓
+- Rank-2 (axis 0 + axis 1) and rank-3 partial-SUM tests pin the general case ✓
+- Scalar (no attrs) path unchanged ✓
+- Full suite green at 651 tests (+4) ✓
+
 #### 0.4.83 Captured rank-2 scalar-broadcast round-trip through `stablehlo-translate` 2026-04-24
 
 Belt-and-braces complement to §0.4.80's rank-1 capture-broadcast round-trip. §0.4.78 added `Tracer<Rank2<A, B>> op Tracer<ScalarShape>` overloads; the underlying tape op is identical to rank-1 (same `BROADCAST` with rank-2 target dims), so the fix in §0.4.80 should carry over. This test pins that assumption end-to-end.

@@ -229,6 +229,94 @@ class DxirInterpreterTest {
         assertEquals(8f, out[0][0])
     }
 
+    // §0.4.84 — axis-aware SUM in the interpreter's bridge evalOp. Supports both
+    // the pre-§0.4.84 all-dims collapse (no attrs, matches Tracer.sum()) and the
+    // new partial-SUM path (`reduction_dims` attr) used by BroadcastRule's
+    // reverse on non-scalar input.
+
+    @Test
+    fun sumWithoutReductionDimsCollapsesToScalar() {
+        // Rank-2 input [[1, 2], [3, 4]], no attrs → sum = 10, scalar output.
+        val f32_2x2 = DxirType(F32, listOf(2, 2))
+        val fn = DxirBuilder.function("sum_all") {
+            val x = param("x", f32_2x2)
+            val s = op(OpKind.SUM, listOf(x), f32s)
+            listOf(s)
+        }
+        val out = DxirInterpreter.evalFunction(fn, listOf(floatArrayOf(1f, 2f, 3f, 4f)))
+        assertEquals(1, out.size)
+        assertEquals(1, out[0].size)
+        assertEquals(10f, out[0][0])
+    }
+
+    @Test
+    fun sumWithReductionDimsRank2Axis0ProducesRank1() {
+        // Rank-2 [[1, 2], [3, 4]] summed over dim 0 → [4, 6] (rank-1, size-2).
+        val f32_2x2 = DxirType(F32, listOf(2, 2))
+        val f32_2 = DxirType(F32, listOf(2))
+        val fn = DxirBuilder.function("sum_axis0") {
+            val x = param("x", f32_2x2)
+            val s = op(
+                OpKind.SUM,
+                listOf(x),
+                f32_2,
+                attrs = mapOf("reduction_dims" to listOf(0)),
+            )
+            listOf(s)
+        }
+        val out = DxirInterpreter.evalFunction(fn, listOf(floatArrayOf(1f, 2f, 3f, 4f)))
+        assertEquals(1, out.size)
+        assertEquals(2, out[0].size)
+        assertEquals(4f, out[0][0])  // 1 + 3
+        assertEquals(6f, out[0][1])  // 2 + 4
+    }
+
+    @Test
+    fun sumWithReductionDimsRank2Axis1ProducesRank1() {
+        // Rank-2 [[1, 2], [3, 4]] summed over dim 1 → [3, 7] (rank-1, size-2).
+        val f32_2x2 = DxirType(F32, listOf(2, 2))
+        val f32_2 = DxirType(F32, listOf(2))
+        val fn = DxirBuilder.function("sum_axis1") {
+            val x = param("x", f32_2x2)
+            val s = op(
+                OpKind.SUM,
+                listOf(x),
+                f32_2,
+                attrs = mapOf("reduction_dims" to listOf(1)),
+            )
+            listOf(s)
+        }
+        val out = DxirInterpreter.evalFunction(fn, listOf(floatArrayOf(1f, 2f, 3f, 4f)))
+        assertEquals(3f, out[0][0])  // 1 + 2
+        assertEquals(7f, out[0][1])  // 3 + 4
+    }
+
+    @Test
+    fun sumWithReductionDimsRank3DropsTwoAxes() {
+        // Rank-3 [2, 2, 2] summed over dims [0, 2] → rank-1 [2].
+        // Input: [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+        //   along axis 0: [[6, 8], [10, 12]]
+        //   then along axis 2: [14, 22]
+        val f32_2x2x2 = DxirType(F32, listOf(2, 2, 2))
+        val f32_2 = DxirType(F32, listOf(2))
+        val fn = DxirBuilder.function("sum_0_2") {
+            val x = param("x", f32_2x2x2)
+            val s = op(
+                OpKind.SUM,
+                listOf(x),
+                f32_2,
+                attrs = mapOf("reduction_dims" to listOf(0, 2)),
+            )
+            listOf(s)
+        }
+        val out = DxirInterpreter.evalFunction(
+            fn,
+            listOf(floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f)),
+        )
+        assertEquals(14f, out[0][0])
+        assertEquals(22f, out[0][1])
+    }
+
     @Test
     fun whileExceedingIterationCapErrorsLoudly() {
         // Build a WHILE with predicate always-true and trivial body (carries an unchanged

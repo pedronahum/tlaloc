@@ -461,18 +461,61 @@ object DxirInterpreter {
                     else -> a.copyOf()
                 }
             }
-            // §0.4.77 — SUM is the reverse of BROADCAST (scalar-input MVP).
-            // BroadcastRule emits `SUM(upstream)` as the grad contribution for
-            // a scalar operand that was broadcast to a higher rank; the
-            // contribution flows through `applyRegistryRule`'s evalNode call,
-            // which in turn lands here. Straight accumulator over all
-            // elements — matches the Tracer-surface `Tracer<S>.sum()` op and
-            // the SumRule's primal semantics.
+            // §0.4.77 — SUM is the reverse of BROADCAST (scalar-input MVP),
+            // widened in §0.4.84 to handle axis-aware partial SUM via a
+            // `reduction_dims` attr.
+            //   * No attrs (or empty list) → sum over all axes → scalar.
+            //     Matches Tracer.sum()'s all-axis primal and §0.4.77 MVP.
+            //   * `reduction_dims = [a, b, ...]` → sum over those axes in
+            //     the input, preserving the remaining axes. Used by
+            //     BroadcastRule's axis-aware reverse (§0.4.84).
             OpKind.SUM -> {
                 val a = evalNode(op.operands[0], env, multiResults)
-                var acc = 0f
-                for (x in a) acc += x
-                floatArrayOf(acc)
+                @Suppress("UNCHECKED_CAST")
+                val reduceDims = (op.attrs["reduction_dims"] as? List<Int>) ?: emptyList()
+                val inputType = op.operands[0].type
+                if (reduceDims.isEmpty()) {
+                    var acc = 0f
+                    for (x in a) acc += x
+                    floatArrayOf(acc)
+                } else {
+                    // Generic axis-aware sum: iterate input linearly, project each
+                    // element to an output index (by dropping the reduced axes'
+                    // coordinates), accumulate.
+                    val inputDims = inputType.dims
+                    val keepDims = (0 until inputDims.size).filter { it !in reduceDims }
+                    val outShape = keepDims.map { inputDims[it] }
+                    val outSize = if (outShape.isEmpty()) 1 else outShape.fold(1) { acc, d -> acc * d }
+                    val out = FloatArray(outSize)
+                    // Row-major strides for input dims.
+                    val inStrides = IntArray(inputDims.size)
+                    if (inputDims.isNotEmpty()) {
+                        inStrides[inputDims.size - 1] = 1
+                        for (i in inputDims.size - 2 downTo 0) {
+                            inStrides[i] = inStrides[i + 1] * inputDims[i + 1]
+                        }
+                    }
+                    val outStrides = IntArray(keepDims.size)
+                    if (keepDims.isNotEmpty()) {
+                        outStrides[keepDims.size - 1] = 1
+                        for (i in keepDims.size - 2 downTo 0) {
+                            outStrides[i] = outStrides[i + 1] * outShape[i + 1]
+                        }
+                    }
+                    for (flat in 0 until a.size) {
+                        // Decompose `flat` into input coords, then project to out-coord.
+                        var rem = flat
+                        var outIdx = 0
+                        for (d in inputDims.indices) {
+                            val coord = rem / inStrides[d]
+                            rem -= coord * inStrides[d]
+                            val keepPos = keepDims.indexOf(d)
+                            if (keepPos >= 0) outIdx += coord * outStrides[keepPos]
+                        }
+                        out[outIdx] += a[flat]
+                    }
+                    out
+                }
             }
             else -> error("DxirInterpreter: op ${op.op} not in the bridge's supported set")
         }

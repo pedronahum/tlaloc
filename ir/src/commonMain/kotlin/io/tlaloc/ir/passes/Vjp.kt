@@ -521,11 +521,11 @@ object VjpRegistry {
      * higher-rank output, the gradient flowing back must be SUM-reduced across
      * the inserted dims to return to the input's shape.
      *
-     * MVP scope: scalar input only (input type `isScalar`). `SUM(upstream)` over
-     * all dims collapses the upstream to a scalar, matching the input's shape.
-     * General broadcasting reverse (rank-N input to rank-M output with partial
-     * axis alignment) needs axis-aware partial SUM — deferred until a use case
-     * demands it.
+     * §0.4.84 — generalised to axis-aware partial SUM. The `broadcast_dimensions`
+     * attr on the primal BROADCAST names which output axes the input's axes map
+     * to; the reverse sums over the *other* output axes (those inserted by
+     * broadcasting). Falls back to the scalar-input special case (SUM over all
+     * dims → scalar, no `reduction_dims` attr) when broadcast_dims is empty.
      *
      * [readsPrimalOperandIndices] = `emptySet()`: the rule only needs the
      * upstream's shape (to know what to sum) and the input's type (to shape
@@ -535,11 +535,32 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val input = op.operands[0]
-            require(input.type.isScalar) {
-                "BroadcastRule: only scalar input supported in §0.4.77 MVP (got ${input.type}). " +
-                    "General broadcasting reverse needs axis-aware partial SUM — deferred."
+            @Suppress("UNCHECKED_CAST")
+            val broadcastDims = (op.attrs["broadcast_dimensions"] as? List<Int>) ?: emptyList()
+            if (broadcastDims.isEmpty()) {
+                // Scalar input case: SUM over all dims → scalar. The interpreter's
+                // bridge-SUM arm defaults to "all dims" when `reduction_dims` is
+                // absent, so no attr needed here.
+                require(input.type.isScalar) {
+                    "BroadcastRule: empty broadcast_dimensions requires scalar input; got ${input.type}"
+                }
+                val contribution = builder.op(OpKind.SUM, listOf(upstream), input.type)
+                return listOf(input to contribution)
             }
-            val contribution = builder.op(OpKind.SUM, listOf(upstream), input.type)
+            // Non-scalar input: reduce over output dims NOT listed in broadcast_dims.
+            val outputRank = op.type.rank
+            val reduceDims = (0 until outputRank).filter { it !in broadcastDims }
+            if (reduceDims.isEmpty()) {
+                // Degenerate: input and output have the same shape (broadcast is an
+                // identity). Upstream passes straight through.
+                return listOf(input to upstream)
+            }
+            val contribution = builder.op(
+                OpKind.SUM,
+                listOf(upstream),
+                input.type,
+                attrs = mapOf("reduction_dims" to reduceDims),
+            )
             return listOf(input to contribution)
         }
     }
