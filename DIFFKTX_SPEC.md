@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.91 Reverse-order scalar-to-rank-1 broadcast operators — `scalar op row` 2026-04-24
+
+Complements §0.4.77's rank-1-on-LHS scalar-broadcast overloads. `scalar - row` and `scalar / row` are now natively expressible; the non-commutative semantics are what matter. Four new operator overloads on `Tracer<ScalarShape>` that take a `Tracer<Rank1<A>>`, each with a distinct `@JvmName` suffix.
+
+**Four new overloads** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt):
+
+```kotlin
+operator fun <A> Tracer<ScalarShape>.plus(row: Tracer<Rank1<A>>)  = row.broadcastScalar(this) + row
+operator fun <A> Tracer<ScalarShape>.minus(row: Tracer<Rank1<A>>) = row.broadcastScalar(this) - row
+operator fun <A> Tracer<ScalarShape>.times(row: Tracer<Rank1<A>>) = row.broadcastScalar(this) * row
+operator fun <A> Tracer<ScalarShape>.div(row: Tracer<Rank1<A>>)   = row.broadcastScalar(this) / row
+```
+
+Each lifts `this` (the scalar) to the rank-1's shape via `broadcastScalar`, then applies the same-shape operator. The existing §0.4.65 constant-skip / §0.4.77 scalar-broadcast machinery handles grads in both directions: grad_scalar = SUM-to-scalar of upstream, grad_row = upstream (for + and -, with sign flip for minus at the rank-1 position).
+
+**Three new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `reverseOrderScalarMinusRank1DiffersFromRank1MinusScalar` — `sum(s - r)` at s=10, r=[1,2,3]. value=24 (opposite sign from `r-s`), grad_scalar=N=3, grad_row=-1 per element. Pins the scalar-LHS direction flip.
+
+2. `reverseOrderScalarDivRank1ProducesCorrectGradients` — `sum(s / r)` at s=12, r=[2,3,4]. value=13. grad_s = Σ 1/r_i = 13/12. grad_r_i = -s/r_i². Tolerance 1e-5 on the rational values.
+
+3. `reverseOrderScalarPlusRank1CommutativeMatch` — `s + r` vs `r + s` sanity for the commutative direction.
+
+**Decisions worth flagging**:
+
+- **Only rank-1 coverage this session.** A symmetric set for `Tracer<ScalarShape>.op(Tracer<Rank2<A, B>>)` is a straight copy-paste — adds 4 more overloads. Deferred until a concrete call site wants it; rank-1 is the common case for hyperparameter-times-vector kernels.
+
+- **`broadcastScalar` stays `private`.** My new overloads use it from within the same file; no need to widen visibility. If a future external caller wants explicit broadcast staging, §0.4.69's `constantLike(Float)` + §0.4.87's `broadcastCol` / §0.4.89's `broadcastRow` already cover the main cases.
+
+- **`@JvmName` suffix uses `Rank1ScalarLhs` to distinguish from `Rank1Row` (matrix-LHS, row-RHS) and `ScalarTracerRank1` (rank-1-LHS, scalar-RHS)**. Keeps the JVM signatures unambiguous across the four pairwise combinations.
+
+**Tests added** (+3 new):
+
+- `GradTest.reverseOrderScalarMinusRank1DiffersFromRank1MinusScalar`
+- `GradTest.reverseOrderScalarDivRank1ProducesCorrectGradients`
+- `GradTest.reverseOrderScalarPlusRank1CommutativeMatch`
+
+Full suite is green: **666 tests** (+3 over §0.4.90).
+
+**Recommended next pickup**:
+
+1. **`Tracer<ScalarShape>.op(Tracer<Rank2<A, B>>)`** — reverse-order for the rank-2 scalar-broadcast case (§0.4.78 companion).
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.91 — met**:
+- Four `Tracer<ScalarShape>.op(Tracer<Rank1<A>>)` operator overloads with `@JvmName` disambiguation ✓
+- Non-commutative tests (minus, div) pin correct sign/closed-form math ✓
+- Commutative test verifies call-order independence ✓
+- Full suite green at 666 tests (+3) ✓
+
 #### 0.4.90 Reverse-order row-broadcast operators — `row op matrix` 2026-04-24
 
 Adds four `Tracer<Rank1<B>>.op(Tracer<Rank2<A, B>>)` operators — the row-vector-on-LHS direction. Complements §0.4.85's `Tracer<Rank2>.op(Tracer<Rank1>)` pair. Matters most for **non-commutative** ops: `row - matrix` and `row / matrix` give mathematically different results from the matrix-on-LHS form. The commutative forms (`row + matrix`, `row * matrix`) are included for symmetry so users aren't forced to swap operand order for no reason.

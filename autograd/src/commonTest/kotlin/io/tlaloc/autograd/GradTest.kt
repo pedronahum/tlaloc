@@ -399,6 +399,68 @@ class GradTest {
     // upstream (via §0.4.84's axis-aware BroadcastRule).
 
     @Test
+    fun reverseOrderScalarMinusRank1DiffersFromRank1MinusScalar() {
+        // §0.4.91 — `scalar - row` is NOT the same as `row - scalar`. For
+        // scalar=10, row=[1, 2, 3]:
+        //   row - scalar = [-9, -8, -7], sum = -24.
+        //   scalar - row = [9, 8, 7], sum = 24.
+        // grad_scalar for (scalar - row) = sum over i of +1 = N = 3.
+        // grad_row for (scalar - row) = -1 per element.
+        val vg = valueAndGrad2 { s: Tracer<ScalarShape>, r: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (s - r).sum()
+        }
+        val (value, dScalar, dRow) = vg(
+            Tensors.f32Scalar(10f),
+            Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f)),
+        )
+        assertEquals(24f, value)
+        assertEquals(3f, dScalar.hostF32()[0], "grad_scalar = N = 3")
+        val gr = dRow.hostF32()
+        assertEquals(-1f, gr[0]); assertEquals(-1f, gr[1]); assertEquals(-1f, gr[2])
+    }
+
+    @Test
+    fun reverseOrderScalarDivRank1ProducesCorrectGradients() {
+        // f(s, r) = sum(s / r) at s=12, r=[2, 3, 4].
+        //   broadcast s = [12, 12, 12]. quotient = [6, 4, 3]. sum = 13.
+        //   grad_s = sum over i of 1/r_i = 1/2 + 1/3 + 1/4 = 13/12 ≈ 1.0833.
+        //   grad_r_i = -s / r_i² = [-3, -4/3, -3/4].
+        val vg = valueAndGrad2 { s: Tracer<ScalarShape>, r: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (s / r).sum()
+        }
+        val (value, dScalar, dRow) = vg(
+            Tensors.f32Scalar(12f),
+            Tensors.f32Vector<Sym>(floatArrayOf(2f, 3f, 4f)),
+        )
+        assertEquals(13f, value)
+        assertTrue(abs(dScalar.hostF32()[0] - 13f / 12f) < 1e-5f, "grad_s = 13/12; got ${dScalar.hostF32()[0]}")
+        val gr = dRow.hostF32()
+        assertTrue(abs(gr[0] - (-3f)) < 1e-5f)
+        assertTrue(abs(gr[1] - (-12f / 9f)) < 1e-5f)  // -4/3 ≈ -1.333
+        assertTrue(abs(gr[2] - (-12f / 16f)) < 1e-5f)  // -3/4 = -0.75
+    }
+
+    @Test
+    fun reverseOrderScalarPlusRank1CommutativeMatch() {
+        // scalar + row and row + scalar must agree on value + both grads.
+        val vgFwd = valueAndGrad2 { s: Tracer<ScalarShape>, r: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (r + s).sum()
+        }
+        val vgRev = valueAndGrad2 { s: Tracer<ScalarShape>, r: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (s + r).sum()
+        }
+        val sIn = Tensors.f32Scalar(7f)
+        val rIn = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f))
+        val (vF, dsF, drF) = vgFwd(sIn, rIn)
+        val (vR, dsR, drR) = vgRev(sIn, rIn)
+        assertEquals(vF, vR)
+        assertEquals(dsF.hostF32()[0], dsR.hostF32()[0])
+        val dF = drF.hostF32()
+        val dR = drR.hostF32()
+        for (i in 0 until 3) assertEquals(dF[i], dR[i])
+    }
+
+    @Test
     fun reverseOrderRowMinusMatrixDiffersFromMatrixMinusRow() {
         // §0.4.90 — `row - matrix` is NOT the same as `matrix - row`. For
         // row = [10, 20], matrix = [[1, 2], [3, 4]]:
