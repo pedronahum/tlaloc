@@ -104,6 +104,24 @@ class RoundTripTest {
     }
 
     @Test
+    fun capturedScalarBroadcastRoundTripsThroughStablehloTranslate() {
+        // §0.4.80 — §0.4.77's scalar-broadcast Tracer operator records
+        // OpKind.BROADCAST on the tape. Capture carries that op through to a
+        // DxirFunction; the StableHLO emitter formats it as `stablehlo.
+        // broadcast_in_dim ... dims = [...]`. This test verifies the captured
+        // function is valid MLIR — catches any mismatch between the tape-side
+        // BROADCAST recording (no attrs) and the emitter's attr requirements.
+        requireTranslateOrSkip()
+        val rank1 = capture2(
+            f = { x: Tracer<Rank1<Sym>>, c: Tracer<ScalarShape> -> (x * c).sum() },
+            a = Tensors.f32Vector<Sym>(floatArrayOf(2f, 4f, 8f)),
+            b = Tensors.f32Scalar(3f),
+            name = "cap_scalar_bcast",
+        )
+        validate(DxirModule(listOf(rank1)).toStablehlo(), "capture rank-1 with scalar broadcast")
+    }
+
+    @Test
     fun capturedLambdaWithRankNConstantRoundTripsThroughStablehloTranslate() {
         // §0.4.74 — full pipeline integration: a user lambda that creates a
         // non-param leaf via `Tracer.constant(FloatArray)`, gets captured into

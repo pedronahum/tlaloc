@@ -202,7 +202,17 @@ private fun <S : Shape> Tracer<S>.broadcastScalar(
     val tape = sameTape(this, scalar)
     val scalarValue = scalar.entry.value[0]
     val broadcasted = FloatArray(size) { scalarValue }
-    val e = tape.op(OpKind.BROADCAST, intArrayOf(scalar.id), dims.copyOf(), broadcasted)
+    // §0.4.80 — carry `broadcast_dimensions` in the tape op's attrs so both the
+    // capture → dxir bridge (emitter requires this attr) and the DxirInterpreter
+    // BROADCAST arm see the same shape metadata the IR expects. Scalar input
+    // has rank 0, so the canonical attr value is an empty list.
+    val e = tape.op(
+        OpKind.BROADCAST,
+        intArrayOf(scalar.id),
+        dims.copyOf(),
+        broadcasted,
+        attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+    )
     return Tracer<S>(tape, e)
 }
 

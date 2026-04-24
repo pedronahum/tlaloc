@@ -16,6 +16,14 @@ class TapeEntry internal constructor(
      * gradient-emission responsibilities and are never flagged constant.
      */
     val isConstant: Boolean = false,
+    /**
+     * §0.4.80 — attributes carried alongside the op, mirroring the dxir
+     * DxirOp.attrs map. Most ops don't need attrs (their semantics are fully
+     * determined by inputs + dims); BROADCAST needs `broadcast_dimensions` so
+     * captures and StableHLO emission can reconstruct the dxir shape without
+     * extra inference. Only meaningful when `op != null`.
+     */
+    val attrs: Map<String, Any> = emptyMap(),
 ) {
     val isLeaf: Boolean get() = op == null
     val size: Int get() = value.size
@@ -31,8 +39,14 @@ class Tape {
         return entry
     }
 
-    internal fun op(op: OpKind, inputs: IntArray, dims: IntArray, value: FloatArray): TapeEntry {
-        val entry = TapeEntry(_entries.size, op, inputs, dims, value)
+    internal fun op(
+        op: OpKind,
+        inputs: IntArray,
+        dims: IntArray,
+        value: FloatArray,
+        attrs: Map<String, Any> = emptyMap(),
+    ): TapeEntry {
+        val entry = TapeEntry(_entries.size, op, inputs, dims, value, attrs = attrs)
         _entries += entry
         return entry
     }

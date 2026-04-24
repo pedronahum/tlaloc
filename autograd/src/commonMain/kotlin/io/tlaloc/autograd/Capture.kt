@@ -48,6 +48,11 @@ fun Tape.toDxirFunction(
                         idToNode[id] ?: error("tape entry ${e.id} references unknown input $id")
                     },
                     type = type,
+                    // §0.4.80 — propagate the tape entry's attrs onto the dxir
+                    // op. BROADCAST needs `broadcast_dimensions` here; emitter
+                    // and interpreter both read attrs and error out when
+                    // required keys are missing.
+                    attrs = e.attrs,
                 )
             }
             idToNode[e.id] = node

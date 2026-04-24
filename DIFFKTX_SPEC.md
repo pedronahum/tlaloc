@@ -39,6 +39,53 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.80 Tape-op attrs plumbing — fixes captured-BROADCAST round-trip 2026-04-24
+
+Bug found while writing a round-trip test for captured scalar-broadcast (the §0.4.77 path through `capture + stablehlo-translate`). §0.4.77's tape-side `broadcastScalar` helper called `tape.op(OpKind.BROADCAST, ...)` without passing `broadcast_dimensions` attrs. `Capture.kt` built a `DxirOp` with empty attrs. The StableHLO emitter's `emitBroadcast` then required `broadcast_dimensions` and crashed with `op BROADCAST missing int-list attr 'broadcast_dimensions'`.
+
+**Three coordinated changes**:
+
+1. **[Tape.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tape.kt)** — `TapeEntry` gains `attrs: Map<String, Any> = emptyMap()`. `Tape.op()` gains an optional `attrs` parameter. Existing callers compile unchanged (default empty map); only BROADCAST currently needs to populate it.
+
+2. **[TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt)** — `broadcastScalar` now records `attrs = mapOf("broadcast_dimensions" to emptyList<Int>())` on the BROADCAST op. Scalar input has rank 0, so the canonical dims list is empty.
+
+3. **[Capture.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Capture.kt)** — the op-branch of `toDxirFunction` now passes `attrs = e.attrs` to the DxirBuilder's `op(...)` factory. Previously no attrs were propagated; this was fine until §0.4.77 introduced the first attr-bearing tape op.
+
+**One new test** in [RoundTripTest.kt](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt): `capturedScalarBroadcastRoundTripsThroughStablehloTranslate`. Captures `f(x, c) = (x * c).sum()` via `capture2`, lowers to StableHLO, sends through `stablehlo-translate --serialize --target=1.0.0`. Pre-§0.4.80 this would have failed with the missing-attr error; post-fix it produces valid MLIR.
+
+**Decisions worth flagging**:
+
+- **Attr map on TapeEntry is typed `Map<String, Any>`** — mirrors `DxirOp.attrs`. The `Any` value-type is a deliberate concession to the ad-hoc shape of MLIR attr values (Int list, String, Int, Float, Boolean, …). Validating attr shapes at tape-recording time would require per-op schemas; the current scheme delegates validation to the emitter/interpreter (which already have shape-aware arms like `intListAttr`).
+
+- **Default empty attrs preserves existing call sites.** Every `tape.op(...)` call site outside `broadcastScalar` passes no attrs. They compile unchanged and produce empty-attrs tape entries, which in turn produce empty-attrs DxirOps — the existing behavior.
+
+- **Capture gets the attrs free from the tape entry.** No dxir-side inference needed; the tape is the source of truth. A future refactor that adds more attr-bearing tape ops just needs to populate `attrs = ...` on the tape-recording side.
+
+- **Interpreter already handled missing attrs gracefully for BROADCAST.** `DxirInterpreter`'s BROADCAST arm defaults to `emptyList()` when the attr is missing. The StableHLO emitter's `intListAttr`, by contrast, throws on missing attrs — that's the right invariant for valid MLIR, and the bug was on the tape-recording side (not populating what the op schema requires).
+
+- **No parallel interpreter fix needed**. Pre-§0.4.80, `DxirInterpreter.evalFunction` on a captured scalar-broadcast function worked (the interpreter's "missing attr → empty list" fallback absorbed the gap). Post-§0.4.80 the attr is present, so the interpreter still works; nothing regresses.
+
+**Tests added** (+1 new):
+
+- `RoundTripTest.capturedScalarBroadcastRoundTripsThroughStablehloTranslate`
+
+Full suite is green: **641 tests** (+1 over §0.4.79).
+
+**Recommended next pickup** (unchanged):
+
+1. **General axis-aware BROADCAST reverse** — lifts MVP scalar-input guard.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **grad2(DTensor, Float)**.
+5. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.80 — met**:
+- `TapeEntry` + `Tape.op` carry optional attrs ✓
+- BROADCAST recorded with `broadcast_dimensions = []` ✓
+- Capture propagates attrs to DxirOp ✓
+- Captured scalar-broadcast round-trips through `stablehlo-translate --serialize` ✓
+- Full suite green at 641 tests (+1) ✓
+
 #### 0.4.79 Bridge-equivalence pin for scalar-broadcast BROADCAST reverse 2026-04-24
 
 One-test belt-and-braces for §0.4.77's `BroadcastRule`. Constructs the same primal two ways — via tape (Tracer lambda `(x * c).sum()`) and via hand-rolled `DxirFunction` (`BROADCAST(c) → MUL(x, bcast) → SUM(prod)`) — runs both through backward and asserts their gradient outputs agree across the board.
