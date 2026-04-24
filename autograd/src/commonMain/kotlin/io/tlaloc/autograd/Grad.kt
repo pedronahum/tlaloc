@@ -98,3 +98,32 @@ fun <S : Shape> gradWithScalar(
     val vg = valueAndGradWithScalar(f)
     return { a, b -> val t = vg(a, b); t.second to t.third }
 }
+
+// §0.4.82 — pure-scalar convenience. Both operands are Floats; both gradients
+// are Floats. Wraps each as a `Tensors.f32Scalar`-style DTensor internally.
+// Target use: scalar calculus playgrounds / tight numeric experiments where
+// DTensor wrapping/unwrapping at the boundary is noise.
+
+fun valueAndGradWithScalars(
+    f: (Tracer<ScalarShape>, Tracer<ScalarShape>) -> Tracer<ScalarShape>,
+): (Float, Float) -> Triple<Float, Float, Float> = { aFloat, bFloat ->
+    val tape = Tape()
+    val aTensor = DTensor<ScalarShape, F32>(HostF32Storage(floatArrayOf(aFloat)), IntArray(0), F32)
+    val bTensor = DTensor<ScalarShape, F32>(HostF32Storage(floatArrayOf(bFloat)), IntArray(0), F32)
+    val ta = tape.traceLeaf<ScalarShape>(aTensor)
+    val tb = tape.traceLeaf<ScalarShape>(bTensor)
+    val out = f(ta, tb)
+    require(out.rank == 0) { "valueAndGradWithScalars expects scalar output, got rank ${out.rank}" }
+    val value = out.entry.value[0]
+    val grads = backward(tape, out.id, floatArrayOf(1f))
+    val da = gradTensor<ScalarShape>(tape, grads, ta.id).hostF32()[0]
+    val db = gradTensor<ScalarShape>(tape, grads, tb.id).hostF32()[0]
+    Triple(value, da, db)
+}
+
+fun gradWithScalars(
+    f: (Tracer<ScalarShape>, Tracer<ScalarShape>) -> Tracer<ScalarShape>,
+): (Float, Float) -> Pair<Float, Float> {
+    val vg = valueAndGradWithScalars(f)
+    return { a, b -> val t = vg(a, b); t.second to t.third }
+}

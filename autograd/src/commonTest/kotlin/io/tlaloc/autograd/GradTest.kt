@@ -321,6 +321,31 @@ class GradTest {
     // broadcast — these tests pin the wrapping/unwrapping correctness.
 
     @Test
+    fun gradWithScalarsProducesBothScalarGradients() {
+        // §0.4.82 — f(a, b) = a² + a·b at a=2, b=3. Value = 4 + 6 = 10.
+        //   grad_a = 2a + b = 7.  grad_b = a = 2.
+        val g = gradWithScalars { a: Tracer<ScalarShape>, b: Tracer<ScalarShape> ->
+            a * a + a * b
+        }
+        val (da, db) = g(2f, 3f)
+        assertEquals(7f, da)
+        assertEquals(2f, db)
+    }
+
+    @Test
+    fun valueAndGradWithScalarsReturnsFullTriple() {
+        // f(a, b) = (a - b) · (a + b) = a² - b². At a=5, b=3: value = 16.
+        //   grad_a = 2a = 10. grad_b = -2b = -6.
+        val vg = valueAndGradWithScalars { a: Tracer<ScalarShape>, b: Tracer<ScalarShape> ->
+            (a - b) * (a + b)
+        }
+        val (value, da, db) = vg(5f, 3f)
+        assertEquals(16f, value)
+        assertEquals(10f, da)
+        assertEquals(-6f, db)
+    }
+
+    @Test
     fun gradWithScalarWrapsAndUnwraps() {
         // f(x, c) = sum(x * c) at x=[2, 4, 8], c=3. value=42.
         //   grad_x=[3, 3, 3]. grad_c = sum(x) = 14.

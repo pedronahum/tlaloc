@@ -39,6 +39,65 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.82 `gradWithScalars` / `valueAndGradWithScalars` — pure-scalar pair convenience 2026-04-24
+
+Direct §0.4.81 extension for the pure-scalar case. Same wrapping/unwrapping idea, but BOTH operands are `Float` and BOTH gradients come back as `Float`. Target use: scalar calculus playgrounds and tight numeric experiments where `Tensors.f32Scalar(...)` wrapping is noise.
+
+**Two new functions** in [Grad.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Grad.kt):
+
+```kotlin
+fun valueAndGradWithScalars(
+    f: (Tracer<ScalarShape>, Tracer<ScalarShape>) -> Tracer<ScalarShape>,
+): (Float, Float) -> Triple<Float, Float, Float>
+
+fun gradWithScalars(
+    f: (Tracer<ScalarShape>, Tracer<ScalarShape>) -> Tracer<ScalarShape>,
+): (Float, Float) -> Pair<Float, Float>
+```
+
+Implementation: allocate two scalar DTensors at the call boundary, route through `Tape` + `backward`, and read the two scalar grads out. Matches §0.4.81's pattern but with both sides as scalars.
+
+Lets users write straight calculus:
+
+```kotlin
+val g = gradWithScalars { a, b -> a * a + a * b }
+val (da, db) = g(2f, 3f)  // da = 2a + b = 7, db = a = 2
+```
+
+**Two tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `gradWithScalarsProducesBothScalarGradients` — `f(a, b) = a² + a·b` at a=2, b=3 → grad=(7, 2). Exact-equal assertions; Float arithmetic on small integers is precise.
+2. `valueAndGradWithScalarsReturnsFullTriple` — `(a - b) · (a + b) = a² - b²` at a=5, b=3 → value=16, grad=(10, -6).
+
+**Decisions worth flagging**:
+
+- **Name `gradWithScalars` (plural) vs. §0.4.81's `gradWithScalar` (singular).** The plural explicitly signals "both operands are scalars" in contrast to the DTensor-tensor-plus-scalar §0.4.81 variant. Keeps both surface paths visibly distinct without name collision.
+
+- **No plural-singular collision with Kotlin's overload resolution.** §0.4.81's `gradWithScalar` is `(Tracer<S>, Tracer<Scalar>) → ...`; §0.4.82's `gradWithScalars` is `(Tracer<Scalar>, Tracer<Scalar>) → ...`. Even if named identically, Kotlin would still pick the latter when `S = ScalarShape` via more-specific-match rules — but different names remove any ambiguity and serve as documentation.
+
+- **Value tests use exact equality.** Integer-power inputs (a², a·b, etc.) are representable exactly in Float for the test ranges chosen. If a future reader swaps in fractional inputs, the tests would need tolerance; the current exact equality is a canary for "someone changed the math and didn't check".
+
+- **Did NOT add a `gradWithFloats` alias.** "Scalars" is the vocabulary the Tracer API uses (`Tracer<ScalarShape>`); "floats" would suggest a different underlying path. One name per concept.
+
+**Tests added** (+2 new):
+
+- `GradTest.gradWithScalarsProducesBothScalarGradients`
+- `GradTest.valueAndGradWithScalarsReturnsFullTriple`
+
+Full suite is green: **646 tests** (+2 over §0.4.81).
+
+**Recommended next pickup**:
+
+1. **General axis-aware BROADCAST reverse** — lifts MVP scalar-input guard.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.82 — met**:
+- `gradWithScalars` + `valueAndGradWithScalars` land in Grad.kt ✓
+- Two tests pin both-side gradient correctness and forward value ✓
+- Full suite green at 646 tests (+2) ✓
+
 #### 0.4.81 `gradWithScalar` / `valueAndGradWithScalar` — (DTensor, Float) ergonomic overloads 2026-04-24
 
 Ships the §0.4.68 register / §0.4.75 follow-up item "grad2(DTensor, Float) — paper-scale BGDHyperOpt scaling measurement". The §0.4.77 scalar broadcasting surface already lets `grad2 { x: Tracer<Rank1<Sym>>, c: Tracer<ScalarShape> -> ... }` work end-to-end; this session adds a pair of convenience helpers that accept the scalar operand as a raw `Float`, internally wrap it as a scalar `DTensor`, and unwrap the scalar gradient back to `Float` at the return boundary. No changes to the underlying backward mechanics.
