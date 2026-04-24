@@ -102,6 +102,37 @@ class RoundTripTest {
     }
 
     @Test
+    fun booleanOpsRoundTrip() {
+        // §0.4.61 — paired with §0.4.60's NOT/LAND emitter arms. The internal
+        // `EmitterTest.emitsBooleanOps` only string-matches the output; this test
+        // sends the emitted MLIR through `stablehlo-translate --serialize` so we
+        // catch any invalid MLIR syntax / type / op semantics (e.g. a botched
+        // `tensor<i1>` printing, a typo in the op name). Three shapes: rank-1
+        // Bool NOT, rank-1 Bool LAND, and scalar Bool LAND — the last matches the
+        // shape the §0.4.50 break-hoist cond region terminates with.
+        requireTranslateOrSkip()
+        val boolRank1 = DxirType(io.tlaloc.core.Bool, listOf(4))
+        val boolScalar = DxirType(io.tlaloc.core.Bool, emptyList())
+
+        val notFn = DxirBuilder.function("not_rank1") {
+            val a = param("a", boolRank1)
+            val b = op(OpKind.NOT, listOf(a), boolRank1)
+            listOf(b)
+        }
+        validate(DxirModule(listOf(notFn)).toStablehlo(), "NOT rank-1 i1")
+
+        for ((label, t) in listOf("rank-1 i1" to boolRank1, "scalar i1" to boolScalar)) {
+            val fn = DxirBuilder.function("land") {
+                val a = param("a", t)
+                val b = param("b", t)
+                val c = op(OpKind.LAND, listOf(a, b), t)
+                listOf(c)
+            }
+            validate(DxirModule(listOf(fn)).toStablehlo(), "LAND $label")
+        }
+    }
+
+    @Test
     fun elementwiseUnaryOpsRoundTrip() {
         requireTranslateOrSkip()
         val unaries = listOf(

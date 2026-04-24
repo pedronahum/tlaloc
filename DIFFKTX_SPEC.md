@@ -39,6 +39,48 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.61 StableHLO — round-trip pin for Bool ops via `stablehlo-translate` 2026-04-24
+
+Follow-up to §0.4.60. Adds a single test (`RoundTripTest.booleanOpsRoundTrip`) that sends §0.4.60's emitted `stablehlo.not` / `stablehlo.and` MLIR through the external `stablehlo-translate --serialize --target=1.0.0` binary. §0.4.60's `EmitterTest.emitsBooleanOps` only string-matches the emitter output; this session's test upgrades that to a "real MLIR parser accepts it as well-formed" guarantee — which is what matters once downstream tooling (PJRT, IREE) starts consuming the output.
+
+**What changed** (one test file): [RoundTripTest.kt](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) — new `booleanOpsRoundTrip` validates three shapes:
+
+- rank-1 Bool NOT (`tensor<4xi1>` → `stablehlo.not` → `tensor<4xi1>`),
+- rank-1 Bool LAND (`stablehlo.and`),
+- scalar Bool LAND (the shape a break-hoist cond region terminates with per §0.4.50).
+
+Uses the existing `StablehloTranslate` + `requireTranslateOrSkip()` scaffolding from §pre-0.4.11, so boxes without the binary on `PATH` skip cleanly via JUnit's `assumeTrue`.
+
+**Decisions worth flagging**:
+
+- **Separated from the `emitsBooleanOps` in-process test.** Round-trip tests live in `:stablehlo`'s `jvmTest` source set (they shell out to native binaries); `EmitterTest` lives in `commonTest` (platform-agnostic). Keeping the string-match assertion in common and the external-tool round-trip in JVM keeps the dependency graph honest — a future KMP consumer of `:stablehlo` on Native wouldn't drag in the `stablehlo-translate` requirement.
+
+- **Target version pinned to 1.0.0** (matches the pattern of every other round-trip in the file). The Bool-op syntax is stable across recent StableHLO revisions, but pinning keeps us aligned with the rest of the suite; any version skew shows up in a single consistent place.
+
+- **Three shape variants, not one**. Scalar Bool MLIR printing (`tensor<i1>` vs `tensor<0xi1>` vs `i1`) is a subtle case where hand-rolled emitters have tripped up historically. Covering both rank-1 and scalar Bool for LAND plus rank-1 Bool for NOT exercises the dtype formatter, the binary emit path, and the unary emit path.
+
+- **Did not add a LAND-plus-NOT chained test.** `stablehlo-translate` validates each op in isolation AND as a module; a chained `NOT(LAND(...))` would exercise exactly the same emitter arms plus a small amount of SSA name plumbing, which every other existing round-trip test already covers. Adding a chain case would be marginal coverage for real cost.
+
+**Tests added** (+1 new):
+
+- [`RoundTripTest.booleanOpsRoundTrip`](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) — external-tool validated `stablehlo.not` / `stablehlo.and` emission.
+
+Full suite is green: **593 tests** (+1 over §0.4.60). Assertion ran against live `stablehlo-translate` on Apple Silicon (`/opt/homebrew/bin/stablehlo-translate`, per the reference-memory bundle). Serialization accepted all three shapes.
+
+**Recommended next pickup** (unchanged from §0.4.60):
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work; StableHLO prerequisites now both shipped (§0.4.60) and validated (§0.4.61).
+2. **D.4 HMC** — paper's hardest control-flow benchmark.
+3. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement from a single binary.
+5. **Out-of-scope list housekeeping** — consolidate deferred items across §0.4.N notes. Pure-doc session.
+
+**Definition-of-done for §0.4.61 — met**:
+- `stablehlo.not` (rank-1 Bool) round-trips through `stablehlo-translate --serialize` ✓
+- `stablehlo.and` (rank-1 and scalar Bool) round-trips ✓
+- Test self-skips when the external binary is unavailable, matching the rest of `RoundTripTest` ✓
+- Full suite green at 593 tests (+1) ✓
+
 #### 0.4.60 StableHLO emitter — Bool ops (NOT / LAND) + removed dead POW error arm 2026-04-24
 
 Three tiny but real fixes to [Emitter.kt](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt) — two missing arms and one stale error-arm that was unreachable dead code. Together they remove the "`:stablehlo` NOT/LAND/POW widening" item from the recurring out-of-scope list, where it has been parked since §0.4.53.
