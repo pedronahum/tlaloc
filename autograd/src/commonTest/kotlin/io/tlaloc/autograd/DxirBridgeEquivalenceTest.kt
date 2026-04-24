@@ -220,6 +220,53 @@ class DxirBridgeEquivalenceTest {
     // mis-evaluating.
 
     @Test
+    fun rowBroadcastMatchesTapeAndSctPaths() {
+        // §0.4.86 — rank-1 row-broadcast (§0.4.85) through the §0.4.84 axis-
+        // aware BroadcastRule. Build the SAME primal two ways:
+        //   * Tape:  valueAndGrad2 { x, b -> (x + b).sum() } where x is rank-2
+        //            and b is rank-1 [N]. Tracer<Rank2>.plus(Tracer<Rank1>)
+        //            records BROADCAST with broadcast_dimensions = [1].
+        //   * SCT:   hand-rolled DxirFunction with the same op sequence.
+        // Pre-§0.4.85 the SCT path's Backward-side applyRegistryRule dropped
+        // attrs on the transient primal, so BroadcastRule failed the "scalar
+        // input" guard. Post-§0.4.85 both paths must agree on grad_x and grad_b.
+        val f32_2x3 = DxirType(F32, listOf(2, 3))
+        val f32_3 = DxirType(F32, listOf(3))
+        val primal = io.tlaloc.ir.DxirBuilder.function("x_plus_b_sum") {
+            val x = param("x", f32_2x3)
+            val b = param("b", f32_3)
+            val bcast = op(
+                OpKind.BROADCAST,
+                listOf(b),
+                f32_2x3,
+                attrs = mapOf("broadcast_dimensions" to listOf(1)),
+            )
+            val sum = op(OpKind.ADD, listOf(x, bcast), f32_2x3)
+            val out = op(OpKind.SUM, listOf(sum), f32)
+            listOf(out)
+        }
+        val gradFn = DxirReverseTransform.apply(primal)
+        val xInput = floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f)
+        val bInput = floatArrayOf(10f, 20f, 30f)
+        val sctOut = DxirInterpreter.evalFunction(gradFn, listOf(xInput, bInput))
+        val sctDx = sctOut[0]
+        val sctDb = sctOut[1]
+
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, b: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x + b).sum()
+        }
+        val (_, tapeDx, tapeDb) = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 3, xInput),
+            Tensors.f32Vector<Sym>(bInput),
+        )
+        val tapeDxArr = tapeDx.hostF32()
+        val tapeDbArr = tapeDb.hostF32()
+
+        for (i in 0 until 6) assertClose(tapeDxArr[i], sctDx[i], "row-broadcast dx[$i]")
+        for (i in 0 until 3) assertClose(tapeDbArr[i], sctDb[i], "row-broadcast db[$i]")
+    }
+
+    @Test
     fun scalarBroadcastMatchesTapeAndSctPaths() {
         // §0.4.79 — BROADCAST-based scalar broadcasting (§0.4.77). Constructs the
         // SAME primal two ways:

@@ -39,6 +39,44 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.86 Bridge-equivalence pin for rank-1 row-broadcast reverse 2026-04-24
+
+Belt-and-braces follow-up to §0.4.85 and §0.4.84. Extends §0.4.79's bridge-equivalence pattern (tape vs. SCT) to the new cross-rank BROADCAST path: builds `(x + b).sum()` with `x: rank-2`, `b: rank-1` both as a Tracer lambda AND as a hand-rolled `DxirFunction` (with `broadcast_dimensions = [1]` on the BROADCAST), runs both through backward, asserts their gradient outputs agree.
+
+**The test** in [DxirBridgeEquivalenceTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/DxirBridgeEquivalenceTest.kt): `rowBroadcastMatchesTapeAndSctPaths`. Inputs x = 2×3 matrix, b = rank-1 size 3.
+
+- **Tape path**: `valueAndGrad2 { x, b -> (x + b).sum() }` → (tapeDx, tapeDb). Uses §0.4.85's `Tracer<Rank2>.plus(Tracer<Rank1>)` operator.
+- **SCT path**: primal is `BROADCAST(b, broadcast_dimensions=[1])` → `ADD(x, bcast)` → `SUM`. `DxirReverseTransform.apply` + `DxirInterpreter.evalFunction` → (sctDx, sctDb).
+- **Assertions**: per-element equality on both rank-2 grad_x (6 asserts) and rank-1 grad_b (3 asserts).
+
+Failure here would catch: a BroadcastRule regression on non-scalar input; a `Backward.applyRegistryRule` attrs-propagation regression (§0.4.85 fixed that latent bug); a DxirInterpreter axis-aware SUM bug (§0.4.84's partial-SUM arm); or an SCT-side issue cloning the BROADCAST op.
+
+**Decisions worth flagging**:
+
+- **Single shape (2×3 + size-3).** The rule + interpreter are rank-agnostic for the axis-aware path, so one non-trivial shape catches the class of regressions. Rank-3+ coverage is a future belt-and-braces addition.
+
+- **Used `.sum()` to collapse to scalar for the final loss.** The SCT-side primal emits `OpKind.SUM` → `DxirReverseTransform` emits `BROADCAST(upstream=1.0, target=rank-2)` as the reverse, which then flows back through the ADD and into `b` via the axis-aware BroadcastRule → partial SUM → rank-1 grad_b. Exercises the full reverse chain.
+
+- **Asserts per-element close, not exact.** Tape and SCT both go through `kotlin.math` / primitive Float arithmetic on identical shapes; drift should be 0 ULPs, but `assertClose` (1e-5f tol) is the established pattern in this file and guards against surprise operator-ordering differences.
+
+**Tests added** (+1 new):
+
+- `DxirBridgeEquivalenceTest.rowBroadcastMatchesTapeAndSctPaths`
+
+Full suite is green: **655 tests** (+1 over §0.4.85).
+
+**Recommended next pickup**:
+
+1. **Rank-1 column broadcast** — `Tracer<Rank2<A, B>> op Tracer<Rank1<A>>`. Note: overload collides with row-broadcast when `A = B` (both rank-1 inputs look identical post-erasure with symbolic axes); probably needs a named method rather than operator.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.86 — met**:
+- Tape and SCT paths for rank-1 row-broadcast produce identical gradients ✓
+- Both grad_x (rank-2) and grad_b (rank-1) asserted element-wise ✓
+- Full suite green at 655 tests (+1) ✓
+
 #### 0.4.85 Rank-2 + rank-1 row-broadcast on the Tracer surface; fix: Backward carries tape-attrs onto the rule's primal 2026-04-24
 
 Adds Tracer-surface cross-rank broadcasting (the §0.4.84 follow-up #1). `matrix + row_vector` now works when the matrix is rank-2 `[M, N]` and the row-vector is rank-1 `[N]` — the row is broadcast along axis 0 to match the matrix, operators apply as usual, and the reverse routes through §0.4.84's axis-aware BroadcastRule to SUM the upstream back to rank-1.
