@@ -39,6 +39,64 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.71 Capture bug: non-param leaves stored as String consts — fix + regression test 2026-04-24
+
+Bug found while auditing how §0.4.65's `Tracer.constant(Float)` interacts with the capture → dxir bridge. Was latent dead code until §0.4.65 gave users a way to create non-param tape leaves.
+
+**The bug** in [Capture.kt:32](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Capture.kt#L32):
+
+```kotlin
+// WRONG — "leaf${e.id}" is a String, passed to `const(value: Any, type)` as the VALUE.
+e.op == null -> const("leaf${e.id}", type)
+```
+
+The `DxirBuilder.const(value: Any, type: DxirType)` signature has `value: Any` — so passing a `String` compiles fine but produces a `DxirConst` holding `"leaf1"` instead of a numeric value. Pre-§0.4.65 the branch was dead: the only way a tape got a leaf was via `traceLeaf`, which `capture` / `capture2` always passed to `paramIds`, so `e.id in paramIdSet` always matched on line 31 first. §0.4.65's `Tracer.constant(Float)` introduced user-facing non-param leaves; §0.4.67 / §0.4.70 extended that to rank-1 / rank-N; any capture of a lambda using those calls would produce a broken `DxirConst`. `DxirInterpreter.evalFunction` would crash when asked to splat a `String` into a `FloatArray` output.
+
+**The fix** (5-line replacement, same file):
+
+```kotlin
+e.op == null -> {
+    val constValue: Any = if (e.dims.isEmpty()) e.value[0] else e.value.copyOf()
+    const(constValue, type)
+}
+```
+
+Scalars pass `Float`; rank-N leaves pass the full backing `FloatArray`. Both paths are what the interpreter + synthesis expect. Defensive `copyOf()` on the rank-N side so a later caller mutation of the tape-entry buffer doesn't desync the captured const.
+
+**Regression test** in [CaptureTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/CaptureTest.kt) — `capturesFunctionWithConstantLeafAsDxirConst`. Captures `f(x) = x + x.constant(5f)` at x=2 and:
+
+1. Asserts the captured function has exactly one `DxirConst`.
+2. Asserts that const's `value` is a `Float` or `Double` (pinning the bug fix — the original failure mode was `String = "leaf1"`).
+3. Asserts the const's numeric value is the expected 5f.
+4. Evaluates the captured function via `DxirInterpreter.evalFunction` at x=2 and asserts the output is 7f (proving end-to-end correctness).
+
+**Decisions worth flagging**:
+
+- **Pinning the bug with a direct value assertion, not a "runtime doesn't error".** "Runs without crashing" would have been fooled by e.g. a `NaN` const — a weaker pin that still regresses silently. Asserting `Float or Double` catches any future refactor that accidentally widens `const`'s value type again.
+
+- **Scalar vs. rank-N const value type is different (`Float` vs. `FloatArray`)**. That asymmetry comes from `DxirConst` / `DxirInterpreter`'s pre-existing contract, not from my fix. Noted here because future readers may be surprised that `const(e.value[0], ...)` is a `Float` but `const(e.value.copyOf(), ...)` is a `FloatArray`; the interpreter's `const-splat` code handles both shapes.
+
+- **Did not audit StableHLO emitter for the same issue**. [Emitter.kt:116](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L116) formats `DxirConst.value` with `when (v) { is Float -> v.toString(); is Double -> v.toString(); is Int -> ... }`. Strings would fall through to `error("non-numeric DxirConst value ...")` — a loud crash, so the bug would have been detectable via round-trip tests too if any exercised the constant-leaf path (they didn't). Leaving the emitter's String check in place; it's a legitimate loud-failure guard.
+
+- **No rank-N constant capture test yet**. The regression test only covers scalar. Adding rank-1 + rank-2 variants would be belt-and-braces but uses the same fix path; filed as a future belt-and-braces follow-up if a test gap surfaces in a benchmark.
+
+Full suite is green: **622 tests** (+1 over §0.4.70).
+
+**Recommended next pickup** (unchanged + one new):
+
+1. **Scalar-rank broadcasting for `+` / `-` / `*` / `/`** — genuine broadcast arithmetic.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+3. **D.1i Symja `Simplify` on grad expressions** — paper mechanism (ii).
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling.
+5. **`diagnosticReporter` migration** — cosmetic.
+6. **Rank-1 + rank-2 `capturesFunctionWithConstantLeaf` tests** — belt-and-braces for §0.4.71's fix.
+
+**Definition-of-done for §0.4.71 — met**:
+- Latent bug in `Capture.kt:32` identified and fixed ✓
+- Regression test asserts `DxirConst.value` is numeric, not a placeholder String ✓
+- End-to-end eval via `DxirInterpreter` returns the expected numerical value ✓
+- Full suite green at 622 tests (+1) ✓
+
 #### 0.4.70 Rank-N `Tracer.constant(FloatArray, IntArray)` — phantom-typed higher-rank constants 2026-04-24
 
 Generalises §0.4.67's rank-1 overload to arbitrary rank. Caller supplies a flat row-major `FloatArray` of values and an `IntArray` of dims; the phantom `Shape` type `S` is picked via Kotlin's return-type inference at the call site:

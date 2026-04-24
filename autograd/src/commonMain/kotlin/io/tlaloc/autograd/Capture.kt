@@ -29,7 +29,19 @@ fun Tape.toDxirFunction(
             val type = DxirType(F32, e.dims.toList())
             val node: DxirNode = when {
                 e.id in paramIdSet -> param("p${e.id}", type)
-                e.op == null -> const("leaf${e.id}", type)
+                // §0.4.71 — non-param leaves are constants. Pre-§0.4.71 this
+                // branch passed the SSA placeholder name ("leaf${id}") as the
+                // const's value, producing a malformed DxirConst holding a
+                // String. The branch was dead until §0.4.65's `Tracer.constant`
+                // introduced user-facing non-param leaves; fix is to pass the
+                // actual cached float value from the tape entry. For scalars
+                // that's `value[0]`; for rank-N leaves the const value is the
+                // whole FloatArray (interpreter + synthesis already know how
+                // to splat a rank-N const from a FloatArray).
+                e.op == null -> {
+                    val constValue: Any = if (e.dims.isEmpty()) e.value[0] else e.value.copyOf()
+                    const(constValue, type)
+                }
                 else -> op(
                     kind = e.op,
                     operands = e.inputs.map { id ->

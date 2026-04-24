@@ -5,10 +5,12 @@ import io.tlaloc.core.Rank2
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
+import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirModule
 import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.passes.DxirInterpreter
 import io.tlaloc.ir.pretty
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -90,6 +92,39 @@ class CaptureTest {
         // Names are p0, p1 — reflect tape leaf ids in declaration order.
         assertEquals("p0", paramNames[0])
         assertEquals("p1", paramNames[1])
+    }
+
+    @Test
+    fun capturesFunctionWithConstantLeafAsDxirConst() {
+        // §0.4.71 — `capture` / `capture2` handle non-param leaves created via
+        // §0.4.65's `Tracer.constant(f)`. Pre-§0.4.71, the `e.op == null` branch
+        // in `toDxirFunction` called `const("leaf${id}", type)` passing a String
+        // name as the const's *value*, producing a malformed DxirConst that
+        // couldn't round-trip through the interpreter. That branch was dead code
+        // before §0.4.65 (only `traceLeaf` made leaves); §0.4.65 surfaced it.
+        //
+        // This test captures `f(x) = x + const(5)` at x = 2 and evaluates the
+        // captured DxirFunction — expected output is 7, NOT a type error.
+        val fn = capture(
+            f = { x: Tracer<ScalarShape> -> x + x.constant(5f) },
+            input = Tensors.f32Scalar(2f),
+            name = "plus_const",
+        )
+        val consts = fn.body.filterIsInstance<DxirConst>()
+        assertEquals(1, consts.size, "captured function should have exactly one DxirConst (the constant leaf)")
+        // The DxirConst's value must be the actual number we stored, not the
+        // placeholder "leaf${id}" string the pre-§0.4.71 code shipped.
+        val constNode = consts.single()
+        assertTrue(
+            constNode.value is Float || constNode.value is Double,
+            "DxirConst value should be a numeric type; got ${constNode.value::class.simpleName} = ${constNode.value}",
+        )
+        val numericValue = (constNode.value as Number).toFloat()
+        assertEquals(5f, numericValue)
+
+        // End-to-end: evaluating the captured function at x=2 yields 7.
+        val outputs = DxirInterpreter.evalFunction(fn, listOf(floatArrayOf(2f)))
+        assertEquals(7f, outputs.single()[0])
     }
 
     @Test
