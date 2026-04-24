@@ -39,6 +39,37 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.83 Captured rank-2 scalar-broadcast round-trip through `stablehlo-translate` 2026-04-24
+
+Belt-and-braces complement to §0.4.80's rank-1 capture-broadcast round-trip. §0.4.78 added `Tracer<Rank2<A, B>> op Tracer<ScalarShape>` overloads; the underlying tape op is identical to rank-1 (same `BROADCAST` with rank-2 target dims), so the fix in §0.4.80 should carry over. This test pins that assumption end-to-end.
+
+**What changed**: one new test in [RoundTripTest.kt](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) — `capturedRank2ScalarBroadcastRoundTripsThroughStablehloTranslate`. Captures `(x * c).sum()` where `x: Tracer<Rank2<Sym, Sym>>` (2×2 matrix) and `c: Tracer<ScalarShape>`, lowers to StableHLO, sends through `stablehlo-translate --serialize --target=1.0.0`. No assertions beyond "accepted as valid MLIR".
+
+**Decisions worth flagging**:
+
+- **Used `(x * c).sum()` form to exercise the full chain**: BROADCAST → MUL → SUM → func.return. Gives the round-trip path more to chew on than a bare BROADCAST + return. If the rank-2 BROADCAST's `broadcast_in_dim` emission were subtly wrong (e.g. wrong shape literal), the downstream MUL's shape check in MLIR would catch it.
+
+- **No per-rank parameterisation**. The two tests (§0.4.80 rank-1, §0.4.83 rank-2) stay separate for clarity; a parameterised `listOf(rank1Shape, rank2Shape)` would mean one assertion hides two failures. Trade-off: duplicate setup for better failure localisation.
+
+- **Did not add rank-3 yet**. `Rank3` isn't a public `:core` shape; §0.4.78's rank-2 coverage is the current ceiling. When a rank-3 shape type lands in `:core`, a matching broadcast overload + this test's rank-3 variant is a straight copy-paste.
+
+**Tests added** (+1 new):
+
+- `RoundTripTest.capturedRank2ScalarBroadcastRoundTripsThroughStablehloTranslate`
+
+Full suite is green: **647 tests** (+1 over §0.4.82).
+
+**Recommended next pickup** (unchanged):
+
+1. **General axis-aware BROADCAST reverse** — lifts MVP scalar-input guard.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.83 — met**:
+- Rank-2 captured scalar broadcast round-trips through `stablehlo-translate --serialize` ✓
+- Full suite green at 647 tests (+1) ✓
+
 #### 0.4.82 `gradWithScalars` / `valueAndGradWithScalars` — pure-scalar pair convenience 2026-04-24
 
 Direct §0.4.81 extension for the pure-scalar case. Same wrapping/unwrapping idea, but BOTH operands are `Float` and BOTH gradients come back as `Float`. Target use: scalar calculus playgrounds and tight numeric experiments where `Tensors.f32Scalar(...)` wrapping is noise.

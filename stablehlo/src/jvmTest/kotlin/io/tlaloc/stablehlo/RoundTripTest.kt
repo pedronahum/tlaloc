@@ -122,6 +122,24 @@ class RoundTripTest {
     }
 
     @Test
+    fun capturedRank2ScalarBroadcastRoundTripsThroughStablehloTranslate() {
+        // §0.4.83 — rank-2 extension of §0.4.80's round-trip. §0.4.78's rank-2
+        // scalar-broadcast overload records the SAME OpKind.BROADCAST shape on
+        // the tape (with rank-2 target dims), so the same emitter arm handles
+        // it. This test pins that the rank axis doesn't drift — if the
+        // generalised `broadcastScalar` helper ever regresses a rank-specific
+        // attr, the stablehlo-translate validator catches it here.
+        requireTranslateOrSkip()
+        val rank2 = capture2(
+            f = { x: Tracer<Rank2<Sym, Sym>>, c: Tracer<ScalarShape> -> (x * c).sum() },
+            a = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+            b = Tensors.f32Scalar(0.5f),
+            name = "cap_rank2_scalar_bcast",
+        )
+        validate(DxirModule(listOf(rank2)).toStablehlo(), "capture rank-2 with scalar broadcast")
+    }
+
+    @Test
     fun capturedLambdaWithRankNConstantRoundTripsThroughStablehloTranslate() {
         // §0.4.74 — full pipeline integration: a user lambda that creates a
         // non-param leaf via `Tracer.constant(FloatArray)`, gets captured into
