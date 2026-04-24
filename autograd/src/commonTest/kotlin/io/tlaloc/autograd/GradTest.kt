@@ -316,6 +316,41 @@ class GradTest {
     // gradient (via the new BroadcastRule's reverse).
 
     @Test
+    fun rank2PlusScalarTracerGivesBothGradients() {
+        // §0.4.78 — rank-2 extension of §0.4.77's scalar broadcast.
+        // f(x, c) = sum(x + c) at x=[[1,2],[3,4]], c=5.
+        //   value = sum([6,7,8,9]) = 30. grad_x=[[1,1],[1,1]]. grad_c=4 (= M*N).
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, c: Tracer<ScalarShape> ->
+            (x + c).sum()
+        }
+        val (value, dx, dc) = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+            Tensors.f32Scalar(5f),
+        )
+        assertEquals(30f, value)
+        val gx = dx.hostF32()
+        assertEquals(1f, gx[0]); assertEquals(1f, gx[1]); assertEquals(1f, gx[2]); assertEquals(1f, gx[3])
+        assertEquals(4f, dc.hostF32()[0], "grad_c = M · N = 4")
+    }
+
+    @Test
+    fun rank2TimesScalarTracerGivesBothGradients() {
+        // f(x, c) = sum(x * c) at x=[[1, 2], [3, 4]], c=2.
+        //   value = 2 · (1+2+3+4) = 20. grad_x=[[c,c],[c,c]]=[[2,2],[2,2]]. grad_c=sum(x)=10.
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, c: Tracer<ScalarShape> ->
+            (x * c).sum()
+        }
+        val (value, dx, dc) = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+            Tensors.f32Scalar(2f),
+        )
+        assertEquals(20f, value)
+        val gx = dx.hostF32()
+        assertEquals(2f, gx[0]); assertEquals(2f, gx[1]); assertEquals(2f, gx[2]); assertEquals(2f, gx[3])
+        assertEquals(10f, dc.hostF32()[0], "grad_c = sum(x) = 10")
+    }
+
+    @Test
     fun rank1PlusScalarTracerGivesBothGradients() {
         // f(x, c) = sum(x + c) at x=[1,2,3], c=10. Value 36.
         //   grad_x_i = d/dx_i sum(x + c) = 1 → [1, 1, 1].

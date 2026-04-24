@@ -191,14 +191,19 @@ fun <S : Shape> Tracer<S>.pow(scalar: Float): Tracer<S> = this.pow(constantLike(
 // straight-line extension using the same machinery; deferred until a use case
 // surfaces.
 
-private fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.broadcastScalar(
+// §0.4.77 helper generalised to arbitrary non-scalar shape by §0.4.78 so the
+// rank-1 and rank-2 overloads share one implementation. The reverse rule is
+// already rank-agnostic: BroadcastRule's SUM-to-scalar collapses any shape to
+// rank 0, so adding a rank-2 receiver overload just needs a new operator wrap
+// with distinct @JvmName.
+private fun <S : Shape> Tracer<S>.broadcastScalar(
     scalar: Tracer<io.tlaloc.core.ScalarShape>,
-): Tracer<io.tlaloc.core.Rank1<A>> {
+): Tracer<S> {
     val tape = sameTape(this, scalar)
     val scalarValue = scalar.entry.value[0]
     val broadcasted = FloatArray(size) { scalarValue }
     val e = tape.op(OpKind.BROADCAST, intArrayOf(scalar.id), dims.copyOf(), broadcasted)
-    return Tracer<io.tlaloc.core.Rank1<A>>(tape, e)
+    return Tracer<S>(tape, e)
 }
 
 // @JvmName distinguishes these from the same-shape Tracer<S>.plus/minus/times/div
@@ -206,25 +211,48 @@ private fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.broadcastScalar(
 // `plus(Tracer, Tracer)`. Each gets a distinct JVM name so both overloads
 // coexist without "Platform declaration clash" errors.
 
-@kotlin.jvm.JvmName("plusScalarTracer")
+@kotlin.jvm.JvmName("plusScalarTracerRank1")
 operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.plus(
     scalar: Tracer<io.tlaloc.core.ScalarShape>,
 ): Tracer<io.tlaloc.core.Rank1<A>> = this + broadcastScalar(scalar)
 
-@kotlin.jvm.JvmName("minusScalarTracer")
+@kotlin.jvm.JvmName("minusScalarTracerRank1")
 operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.minus(
     scalar: Tracer<io.tlaloc.core.ScalarShape>,
 ): Tracer<io.tlaloc.core.Rank1<A>> = this - broadcastScalar(scalar)
 
-@kotlin.jvm.JvmName("timesScalarTracer")
+@kotlin.jvm.JvmName("timesScalarTracerRank1")
 operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.times(
     scalar: Tracer<io.tlaloc.core.ScalarShape>,
 ): Tracer<io.tlaloc.core.Rank1<A>> = this * broadcastScalar(scalar)
 
-@kotlin.jvm.JvmName("divScalarTracer")
+@kotlin.jvm.JvmName("divScalarTracerRank1")
 operator fun <A : ShapeAtom> Tracer<io.tlaloc.core.Rank1<A>>.div(
     scalar: Tracer<io.tlaloc.core.ScalarShape>,
 ): Tracer<io.tlaloc.core.Rank1<A>> = this / broadcastScalar(scalar)
+
+// §0.4.78 — rank-2 receiver overloads. Same pattern as §0.4.77's rank-1 set.
+// BroadcastRule's reverse (SUM-to-scalar) handles rank-2 input without changes.
+
+@kotlin.jvm.JvmName("plusScalarTracerRank2")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.plus(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<Rank2<A, B>> = this + broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("minusScalarTracerRank2")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.minus(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<Rank2<A, B>> = this - broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("timesScalarTracerRank2")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.times(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<Rank2<A, B>> = this * broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("divScalarTracerRank2")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<Rank2<A, B>> = this / broadcastScalar(scalar)
 
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value

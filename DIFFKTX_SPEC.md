@@ -39,6 +39,54 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.78 Rank-2 scalar broadcasting — `Tracer<Rank2<A, B>> op Tracer<ScalarShape>` 2026-04-24
+
+Natural extension of §0.4.77. Adds four `Tracer<Rank2<A, B>>.{plus/minus/times/div}(Tracer<ScalarShape>)` operator overloads with `@JvmName` disambiguation, and generalises the shared `broadcastScalar` helper from rank-1-specific to `Tracer<S>.broadcastScalar(scalar)` so rank-1 and rank-2 paths go through the same tape-op emission.
+
+**Rule-side changes**: zero. `BroadcastRule`'s reverse is `SUM(upstream)` which collapses any rank to scalar — already works for rank-2 input without modification. The MVP-scalar-input-only guard still covers the case correctly.
+
+**TracedOps.kt changes**:
+
+- `broadcastScalar` promoted from `Tracer<Rank1<A>>` receiver to generic `Tracer<S>` — two-line edit, identical body (uses `this.size`/`this.dims` which work for any rank).
+- Four new `Tracer<Rank2<A, B>>.op(Tracer<ScalarShape>)` operator overloads. Each has a distinct `@JvmName` suffix (`Rank2`) to avoid collision with both the same-shape `Tracer<S>.op(Tracer<S>)` and the §0.4.77 `Tracer<Rank1<A>>.op(Tracer<ScalarShape>)` overloads after JVM erasure.
+- §0.4.77's rank-1 `@JvmName` suffixes renamed to `Rank1` for symmetry (no behavioural change, just cosmetic).
+
+**Two tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+- `rank2PlusScalarTracerGivesBothGradients` — `sum(x + c)` with x=[[1,2],[3,4]], c=5. value=30, grad_x=[[1,1],[1,1]], grad_c=4 (= M·N).
+- `rank2TimesScalarTracerGivesBothGradients` — `sum(x * c)` with x=[[1,2],[3,4]], c=2. value=20, grad_x=[[2,2],[2,2]], grad_c=10 (= sum(x)).
+
+Only plus/times are covered directly; minus and div follow the same path through `broadcastScalar` + the existing same-shape operators. The rank-1 tests from §0.4.77 already covered minus and div; adding rank-2 equivalents would be duplicative.
+
+**Decisions worth flagging**:
+
+- **Did not merge the four rank-1 + four rank-2 overloads into one set of eight.** Could have defined them all with a single type bound on `S : Shape` (excluding ScalarShape), but Kotlin lacks an "exclude one type parameter" mechanism. The rank-split keeps each overload explicit about its receiver, which is easier to read at the call site (the operator dispatches on the LHS's phantom type).
+
+- **Generalisation of `broadcastScalar` is safe because the receiver's `dims` drives the target shape**. No rank-specific logic was ever present — the rank-1 wrapper was just type-narrow. The generalisation is a strict widening.
+
+- **Rank-N (N≥3) overloads deferred until a call site exists.** `Tracer<Rank3<A, B, C>>` isn't a public shape type in `:core` today. When a rank-3+ capture path lands, a matching set of broadcast overloads is a straight copy-paste from the rank-2 template.
+
+**Tests added** (+2 new):
+
+- `GradTest.rank2PlusScalarTracerGivesBothGradients`
+- `GradTest.rank2TimesScalarTracerGivesBothGradients`
+
+Full suite is green: **639 tests** (+2 over §0.4.77).
+
+**Recommended next pickup**:
+
+1. **General axis-aware BROADCAST reverse** — lifts the MVP scalar-input guard; enables cross-rank broadcasting like `Tracer<Rank1<A>> op Tracer<Rank2<A, B>>`.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **grad2(DTensor, Float)**.
+5. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.78 — met**:
+- `broadcastScalar` generalised from `Tracer<Rank1<A>>` to `Tracer<S>` ✓
+- Four rank-2 scalar-broadcast operator overloads with distinct `@JvmName` ✓
+- Two tests pin both-operand gradients for plus and times; the rank-1 pattern from §0.4.77 covers minus and div by analogy ✓
+- Full suite green at 639 tests (+2) ✓
+
 #### 0.4.77 Differentiable scalar broadcasting — `Tracer<Rank1<A>> op Tracer<ScalarShape>` 2026-04-24
 
 Ships the first real broadcasting path — a scalar `Tracer<ScalarShape>` can now participate in rank-1 arithmetic with a proper gradient on both sides. Complements §0.4.75's literal-scalar overloads (which promote a `Float` constant) by handling the case where the scalar is itself a differentiable parameter.
