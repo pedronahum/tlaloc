@@ -50,9 +50,12 @@ class TlalocPluginTracerFallbackTest {
             import io.tlaloc.core.Tensors
             import io.tlaloc.core.hostF32
             fun main() {
+                // §0.4.59 — `d.peek()` replaces the §0.4.58-era `d.toDTensor().hostF32()[0]`
+                // polling idiom. No per-iteration FloatArray copy; the same fallback +
+                // runtime-tape behaviour is invariant.
                 val g = grad { x: Tracer<ScalarShape> ->
                     var d = x
-                    while (d.toDTensor().hostF32()[0] <= 10.0f) {
+                    while (d.peek() <= 10.0f) {
                         d = d + d
                     }
                     d

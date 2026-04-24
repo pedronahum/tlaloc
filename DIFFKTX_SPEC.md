@@ -39,6 +39,52 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.59 `Tracer.peek()` — public tape-value read for cross-module break predicates 2026-04-24
+
+Small API addition landing the item #5 recommendation from §0.4.58. `Tracer` now exposes a public `peek(index: Int = 0): Float` method that reads the tape-recorded forward value without allocating. Replaces the §0.4.58-era `d.toDTensor().hostF32()[0]` polling idiom — which copied the entire backing FloatArray per call — with a direct, bounds-checked scalar read.
+
+**What changed**:
+
+1. **[Tracer.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tracer.kt)**: added `fun peek(index: Int = 0): Float`. Requires `index in 0 until size` with a diagnostic message that names the failure mode. Does NOT copy — returns the Float at the requested offset in `entry.value`. Doc comment spells out the contract (no mutation of obtained array; public API surfaces no FloatArray handle anyway).
+
+2. **[GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)**: refactored the three §0.4.57 break-bearing tests from `d.entry.value[0]` (internal reach-through, only visible inside `:autograd`) to `d.peek()` (public, same behaviour). Two new tests pin the API directly:
+   - `peekReturnsCurrentForwardValueForScalar` — calls `peek()` between each `d = d + d` inside a traced function, asserts the list of observed values is `[1.5, 3, 6]`. Verifies the tape-recorded value advances exactly when a new op is emitted, not on some stale snapshot.
+   - `peekRejectsOutOfBoundsIndex` — calls `peek(99)` on a size-3 rank-1 tracer, asserts `IllegalArgumentException` with "out of bounds" in the message.
+
+3. **[TlalocPluginTracerFallbackTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginTracerFallbackTest.kt)**: §0.4.58's integration test now uses `d.peek()` instead of `d.toDTensor().hostF32()[0]`. The compile + execute path proves `peek()` resolves correctly across the module boundary (extension-less instance method; no import surprise).
+
+**Decisions worth flagging**:
+
+- **Method on `Tracer`, not a top-level extension.** Extensions on internal-field-bearing types can technically be written to access those fields if declared in the same module, but the resulting bytecode exposes package-scoped helpers that are awkward to discover. A direct method on `Tracer` makes the API appear where users expect it (dotted instance access), shows up in IDE completion naturally, and keeps the doc comment attached to the class where readers look. The extension path would have saved ~3 lines at the cost of discoverability.
+
+- **`index` default = 0 rather than a separate `scalar` property.** Considered `val Tracer<ScalarShape>.scalar: Float get() = entry.value[0]` — type-safer, only compiles on scalar tracers. Rejected because it doesn't generalise: a user polling `arr.peek(2)` on a rank-1 tracer wants the same API shape. Given scalars are `rank == 0` and the default argument handles that common case, one method covers both. The type-safe property could still be added later as a convenience without breaking `peek()`.
+
+- **Bounds check lives at the call site, not in the accessor.** `entry.value[index]` on a Kotlin FloatArray throws `ArrayIndexOutOfBoundsException` natively — we could have relied on that. The explicit `require(index in 0 until size)` with a shape-aware message trades one check for a clearer error; the per-call cost is negligible relative to the surrounding tape machinery.
+
+- **Does NOT defensively copy.** `peek()` returns a Float primitive, not an array, so there's nothing to copy. If a future API exposes a vector-view (`peekArray(): FloatArray`), that one WILL need to copy — noted in the doc.
+
+**Why this ships now, not later**: §0.4.58's integration test used the verbose polling idiom because `entry` was `internal`. That test now reads cleaner, demonstrates the real use case, and serves as a live example for users writing break-bearing WHILE kernels on the Tracer surface. Shipping the API together with its primary consumer makes the intent obvious.
+
+**Tests added** (+2 new):
+- [`GradTest.peekReturnsCurrentForwardValueForScalar`](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)
+- [`GradTest.peekRejectsOutOfBoundsIndex`](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)
+
+Full suite is green: **591 tests** (+2 over §0.4.58).
+
+**Recommended next pickup** (unchanged from §0.4.58 less item #5):
+
+1. **D.3ii closed-form closure** — paper-faithful break-bearing WHILE via symbolic inequality solving. 2+ design-sessions (deferred in §0.4.55).
+2. **D.4 HMC** — paper's hardest control-flow benchmark.
+3. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement from a single binary.
+
+**Definition-of-done for §0.4.59 — met**:
+- Public `Tracer.peek()` accessor lands with bounds check ✓
+- Existing §0.4.57 break-bearing tests migrated to `peek()` ✓
+- §0.4.58 cross-module integration test migrated to `peek()` and still passes ✓
+- Two new direct tests pin the API's behaviour and its failure mode ✓
+- Full suite green at 591 tests (+2) ✓
+
 #### 0.4.58 Stage D.3ii-tape-tracer-integration — end-to-end proof: plugin falls back, real `:autograd` produces correct gradient 2026-04-24
 
 Closes the D.3ii-tape trilogy (§0.4.56 plugin-pin, §0.4.57 tape-pin, now §0.4.58 integration-pin) by running the full pipeline without stubs. The Tlaloc plugin compiles a user's `grad { x: Tracer<ScalarShape> -> ... break-bearing while ... }`, cannot specialise the shape, returns the original call untouched, and at runtime the real `:autograd` tape produces the correct gradient. No code paths faked — the assertion is on actual arithmetic.

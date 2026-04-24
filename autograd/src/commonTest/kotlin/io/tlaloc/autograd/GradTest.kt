@@ -164,9 +164,12 @@ class GradTest {
         //   k=0..4: d ∈ {0.5, 1, 2, 4, 8}  (d <= 10 each time, keep doubling)
         //   k=5:    d = 16  → exit the loop (16 > 10)
         // Final d = 32x (= 16 at x=0.5). df/dx = 32.
+        //
+        // §0.4.59 — uses `d.peek()` instead of `d.entry.value[0]`; public API
+        // replaces the internal backing-array reach-through.
         val g = grad { x: Tracer<ScalarShape> ->
             var d = x
-            while (d.entry.value[0] <= 10f) {
+            while (d.peek() <= 10f) {
                 d = d + d
             }
             d
@@ -188,7 +191,7 @@ class GradTest {
         // of the same `grad { ... }` lambda.
         val g = grad { x: Tracer<ScalarShape> ->
             var d = x
-            while (d.entry.value[0] <= 10f) {
+            while (d.peek() <= 10f) {
                 d = d + d
             }
             d
@@ -199,13 +202,50 @@ class GradTest {
     }
 
     @Test
+    fun peekReturnsCurrentForwardValueForScalar() {
+        // §0.4.59 — `peek()` reads the tape-recorded forward value without
+        // allocating. Exercised inside a traced function so `d.peek()` returns
+        // the rolling value of `d = d + d` as the tape accrues ADDs.
+        val recorded = mutableListOf<Float>()
+        val g = grad { x: Tracer<ScalarShape> ->
+            var d = x
+            recorded.add(d.peek())
+            d = d + d
+            recorded.add(d.peek())
+            d = d + d
+            recorded.add(d.peek())
+            d
+        }
+        g(Tensors.f32Scalar(1.5f))
+        assertEquals(listOf(1.5f, 3f, 6f), recorded)
+    }
+
+    @Test
+    fun peekRejectsOutOfBoundsIndex() {
+        // §0.4.59 — `peek(index)` validates bounds. Pins the contract so future
+        // refactors can't silently return stale/garbage floats for bad indices.
+        var caught: IllegalArgumentException? = null
+        grad { x: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            try {
+                x.peek(99)
+            } catch (e: IllegalArgumentException) {
+                caught = e
+            }
+            x.sum()
+        }(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertTrue(caught != null, "expected IllegalArgumentException for peek(99) on size-3 tracer")
+        assertTrue(caught!!.message!!.contains("out of bounds"),
+            "message should name the failure mode; got: ${caught!!.message}")
+    }
+
+    @Test
     fun breakBearingWhileValueAndGradAgree() {
         // Pair with `valueAndGrad` to verify the forward value is what the reverse
         // path actually differentiates — no silent divergence between tape-recorded
         // value and the result used as the backward seed.
         val vg = valueAndGrad { x: Tracer<ScalarShape> ->
             var d = x
-            while (d.entry.value[0] <= 10f) {
+            while (d.peek() <= 10f) {
                 d = d + d
             }
             d
