@@ -395,6 +395,18 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.d
     matrix: Tracer<Rank2<A, B>>,
 ): Tracer<Rank2<A, B>> = matrix.broadcastScalar(this) / matrix
 
+// §0.4.93 — Float-literal LHS broadcast. `0.5f * matrix`, `1f - row`, etc.
+// Closes the last corner of the scalar-op-tensor surface: §0.4.75 gave us
+// `tracer <op> Float`; these four give us `Float <op> tracer`. Generic over
+// receiver shape via `constantLike` — works for scalar, rank-1, rank-2 (and
+// anything else with a shape-aware `constantLike`). Matters for non-
+// commutative directions (`5f - tracer`, `10f / tracer`).
+
+operator fun <S : Shape> Float.plus(tracer: Tracer<S>): Tracer<S>  = tracer.constantLike(this) + tracer
+operator fun <S : Shape> Float.minus(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this) - tracer
+operator fun <S : Shape> Float.times(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this) * tracer
+operator fun <S : Shape> Float.div(tracer: Tracer<S>): Tracer<S>   = tracer.constantLike(this) / tracer
+
 // §0.4.90 — reverse-order row-broadcast operators. `row + matrix`, `row - matrix`,
 // etc. where the rank-1 tracer is the LHS. Matters specifically for non-
 // commutative ops (minus, div) where argument order changes the math. Each

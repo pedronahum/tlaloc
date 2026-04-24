@@ -399,6 +399,46 @@ class GradTest {
     // upstream (via §0.4.84's axis-aware BroadcastRule).
 
     @Test
+    fun floatLiteralLhsMinusRowFlipsSignFromRowMinusFloat() {
+        // §0.4.93 — `5f - row` is NOT the same as `row - 5f`. For row=[1,2,3]:
+        //   row - 5f = [-4, -3, -2], sum = -9.
+        //   5f - row = [4, 3, 2], sum = 9.
+        //   grad_row for (5f - row) = -1 per element.
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (5f - x).sum() }
+        val (value, dx) = vg(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(9f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 3) assertEquals(-1f, gx[i], "grad_row[$i]")
+    }
+
+    @Test
+    fun floatLiteralLhsDivMatrixProducesReciprocalScaledGrads() {
+        // f(x) = sum(6f / x) at x=[2, 3, 6]. value = 3 + 2 + 1 = 6.
+        //   grad_x_i = -6 / x_i² = [-6/4, -6/9, -6/36] = [-1.5, -0.667, -0.167].
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (6f / x).sum() }
+        val (value, dx) = vg(Tensors.f32Vector(floatArrayOf(2f, 3f, 6f)))
+        assertEquals(6f, value)
+        val gx = dx.hostF32()
+        assertTrue(abs(gx[0] - (-6f / 4f)) < 1e-5f, "grad[0] ≈ -1.5; got ${gx[0]}")
+        assertTrue(abs(gx[1] - (-6f / 9f)) < 1e-5f, "grad[1] ≈ -0.667; got ${gx[1]}")
+        assertTrue(abs(gx[2] - (-6f / 36f)) < 1e-5f, "grad[2] ≈ -0.167; got ${gx[2]}")
+    }
+
+    @Test
+    fun floatLiteralLhsTimesMatrixCommutesWithRhsTimes() {
+        // `2f * matrix` and `matrix * 2f` are commutative — same value, same grad.
+        val mIn = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f))
+        val vgLhs = valueAndGrad { m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> -> (2f * m).sum() }
+        val vgRhs = valueAndGrad { m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> -> (m * 2f).sum() }
+        val (vL, dL) = vgLhs(mIn)
+        val (vR, dR) = vgRhs(mIn)
+        assertEquals(vL, vR)
+        val dLArr = dL.hostF32()
+        val dRArr = dR.hostF32()
+        for (i in 0 until 4) assertEquals(dLArr[i], dRArr[i])
+    }
+
+    @Test
     fun reverseOrderScalarMinusRank2DiffersFromMatrixMinusScalar() {
         // §0.4.92 — `scalar - matrix` is NOT the same as `matrix - scalar`.
         // For scalar=10, matrix=[[1, 2], [3, 4]]:

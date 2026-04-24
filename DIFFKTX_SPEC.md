@@ -39,6 +39,72 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.93 Float-literal LHS broadcast — `0.5f * matrix`, `1f - row`, etc. 2026-04-24
+
+Closes the last corner of the broadcast surface. §0.4.75 gave us `tracer op Float`; this session adds `Float op tracer` — the Float-on-LHS direction. Four generic `operator fun <S : Shape> Float.op(Tracer<S>): Tracer<S>` overloads, each lifting the literal via `constantLike(this)` and applying the same-shape operator. Works uniformly for scalar, rank-1, and rank-2 receivers.
+
+**Four new overloads** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt):
+
+```kotlin
+operator fun <S : Shape> Float.plus(tracer: Tracer<S>): Tracer<S>  = tracer.constantLike(this) + tracer
+operator fun <S : Shape> Float.minus(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this) - tracer
+operator fun <S : Shape> Float.times(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this) * tracer
+operator fun <S : Shape> Float.div(tracer: Tracer<S>): Tracer<S>   = tracer.constantLike(this) / tracer
+```
+
+No `@JvmName` needed — `Float.plus(Tracer<*>)` is a genuinely new JVM signature (receiver class is `Float`, not `Tracer`). The dispatch is unambiguous from the Kotlin-source side and the JVM-erasure side.
+
+**Three new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `floatLiteralLhsMinusRowFlipsSignFromRowMinusFloat` — `5f - row` at row=[1,2,3]. value=9 (vs -9 for `row - 5f`), grad_row=-1 per element.
+2. `floatLiteralLhsDivMatrixProducesReciprocalScaledGrads` — `6f / x` at x=[2,3,6]. Closed-form: grad_x_i = -6/x_i². Verified within 1e-5.
+3. `floatLiteralLhsTimesMatrixCommutesWithRhsTimes` — `2f * matrix` and `matrix * 2f` produce identical value + grad.
+
+**Decisions worth flagging**:
+
+- **Generic `Tracer<S>` receiver covers all ranks.** `constantLike` is already rank-agnostic (§0.4.69), so one definition per operator suffices. No per-rank overloads needed.
+
+- **No `Double` / `Int` LHS overloads.** Kotlin doesn't promote numeric literals across operator dispatch, so `0.5 * matrix` (Double literal) still won't compile. Users write `0.5f * matrix`. Adding `Double` and `Int` variants is easy future work if call sites need them; held off for surface-area discipline.
+
+- **Float-constant operand is non-differentiable by construction.** `constantLike(Float)` creates an isConstant leaf (§0.4.65); the reverse walk skips materialising grad contributions targeting it. So the `5f` in `5f - row` doesn't need a "grad_scalar" output — there's no scalar parameter to grad against.
+
+- **`Float * matrix` compiles cleanly against the generic overload.** Without this session's additions, Kotlin would have given an "unresolved reference" error. Post-§0.4.93, the compiler picks the Float-receiver extension.
+
+**Broadcast surface summary (as of §0.4.93)**:
+
+| Shape + direction | Operator form | Named builder |
+|---|---|---|
+| `tracer op tracer` (same shape) | Native operators | — |
+| `tracer op Float` | §0.4.75 (+/−/×/÷), §0.4.76 (pow) | — |
+| `Float op tracer` | §0.4.93 (+/−/×/÷) | — |
+| `Tracer<S> op Tracer<ScalarShape>`, S≠Scalar | §0.4.77 (rank-1), §0.4.78 (rank-2) | — |
+| `Tracer<ScalarShape> op Tracer<S>`, S≠Scalar | §0.4.91 (rank-1), §0.4.92 (rank-2) | — |
+| `Tracer<Rank2<A, B>> op Tracer<Rank1<B>>` (row) | §0.4.85 operator | §0.4.89 `broadcastRow` |
+| `Tracer<Rank1<B>> op Tracer<Rank2<A, B>>` (reverse row) | §0.4.90 operator | — |
+| `Tracer<Rank2<A, B>> op Tracer<Rank1<A>>` (col) | — (overload ambiguity at A=B) | §0.4.87 `broadcastCol` |
+
+**Tests added** (+3 new):
+
+- `GradTest.floatLiteralLhsMinusRowFlipsSignFromRowMinusFloat`
+- `GradTest.floatLiteralLhsDivMatrixProducesReciprocalScaledGrads`
+- `GradTest.floatLiteralLhsTimesMatrixCommutesWithRhsTimes`
+
+Full suite is green: **671 tests** (+3 over §0.4.92).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on grad expressions**.
+3. **`diagnosticReporter` migration**.
+4. **Double/Int literal LHS overloads** — if a concrete call site justifies it.
+5. **Rank-N (N≥3) broadcast operator set** — gated on a public `Rank3` shape type in `:core`.
+
+**Definition-of-done for §0.4.93 — met**:
+- Four generic `Float.op(Tracer<S>)` overloads ✓
+- Non-commutative tests (minus, div) pin sign/closed-form math ✓
+- Commutative test verifies parity with the RHS-Float form ✓
+- Full suite green at 671 tests (+3) ✓
+
 #### 0.4.92 Reverse-order scalar-to-rank-2 broadcast operators — `scalar op matrix` 2026-04-24
 
 Rank-2 companion to §0.4.91. Four more operator overloads on `Tracer<ScalarShape>` that take a `Tracer<Rank2<A, B>>`, completing the scalar-LHS broadcast surface. Identical pattern: `broadcastScalar` lifts the scalar to the matrix's shape, then the existing same-shape operator applies.
