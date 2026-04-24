@@ -39,6 +39,61 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.66 Bridge-equivalence coverage for §0.4.63's unary math + §0.4.64's pow 2026-04-24
+
+Ships the §0.4.65 follow-up #4. Six new tests in [DxirBridgeEquivalenceTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/DxirBridgeEquivalenceTest.kt) — one each for `sqrt`, `exp`, `log`, `tanh`, `sigmoid` (all landed in §0.4.63), plus one for `pow` (§0.4.64). Each test cross-checks:
+
+- the closed-form derivative (textbook formula),
+- the tape-side path (`Tracer.{op}` → `valueAndGrad` → registry via `Backward.kt`),
+- the SCT path (build the same primal as a `DxirFunction`, hand it to `DxirReverseTransform.apply`, evaluate via `DxirInterpreter.evalFunction`).
+
+If any two paths drift apart the test fails with a `|Δ| = ...` message pointing at the specific value. Belt-and-braces: the §0.4.63 + §0.4.64 unit tests already pin each path in isolation; §0.4.66 pins that they haven't silently diverged through dispatch glue (registry routing in Backward, the `readsPrimalOperandIndices` bridge param, the scratch-function builder).
+
+**What's actually being verified**: VjpRegistry has had rules for these ops since §0.4.22, and `DxirReverseTransform` has always routed through it. But the tape side only started producing these OpKinds in §0.4.63 / §0.4.64. Before this session, nothing exercised the "tape produces OpKind.SQRT → Backward routes to VjpRegistry → registry's SqrtRule emits `0.5 * upstream / sqrt(x)` as dxir → DxirInterpreter walks that dxir" full chain. §0.4.66 makes that chain load-bearing in CI.
+
+**Test scaffolding notes**:
+
+- The `pow` test uses a new two-param primal shape and calls `DxirInterpreter.evalFunction(gradFn, listOf(floatArrayOf(xv), floatArrayOf(ev)))` directly — cleaner than widening the existing `sctGrad` helper for a one-off. If a future session adds more binary ops (e.g. `Tracer.atan2`) it'd be worth factoring the two-param helper out; premature here.
+
+- All tolerance is `tol = 1e-5f` (existing file-level constant). For inputs outside [-10, 10] this might become tight (EXP at v=2 gives ≈7.39, a couple ULPs drift in either direction is possible); chose the inputs [-3..3] range to stay comfortably inside that.
+
+- Used `assertClose` (file-local `|Δ| < tol`) rather than `assertEquals(expected, actual)` — SQRT / EXP / TANH / SIGMOID all round, so exact-equal would be false for non-integer inputs. The closed-form comparison targets are themselves computed by `kotlin.math.*`, same source DxirInterpreter + the tape use, so the drift comes from op-graph shape (e.g. `upstream * 0.5 * rsqrt` vs `0.5 * upstream / sqrt`), not from the primitive.
+
+**Decisions worth flagging**:
+
+- **Six separate tests, not a loop over `OpKind.values()`.** Each op's closed-form is different; expressing them in one parameterised test would need a table of `(OpKind, Tracer-method, closed-form-expected)` tuples, which is noisier than the current inline style and hides the op at the failure site. Keeping them separate also means a failure names the op directly in the test ID.
+
+- **`sigmoid` uses `1 / (1 + exp(-x))` form for the closed-form check.** Matches both `DxirInterpreter`'s SigmoidRule output and the `Tracer.sigmoid` forward math (§0.4.63's note). The alternative form `exp(x) / (1 + exp(x))` overflows for large positive x; pinning the rule's form in the test guards against an accidental refactor to the overflow-prone variant.
+
+- **No `.constant()` tests in this file.** §0.4.65's skip-on-constant optimisation is a tape-side concern — the SCT path doesn't have a constant notion (constants are `DxirConst` there), and cross-checking "tape skips vs SCT evaluates" would be comparing apples and oranges. The §0.4.65 `GradTest` cases already prove the tape path produces correct user-visible output with constants, which is what matters.
+
+**Tests added** (+6 new):
+
+- `sqrtGradMatchesClosedFormAndTape`
+- `expGradEqualsForwardExp`
+- `logGradIsReciprocal`
+- `tanhGradIsOneMinusTanhSquared`
+- `sigmoidGradIsSigmoidTimesOneMinusSigmoid`
+- `powGradBothParamsMatchTape`
+
+All in [DxirBridgeEquivalenceTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/DxirBridgeEquivalenceTest.kt).
+
+Full suite is green: **612 tests** (+6 over §0.4.65).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+2. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+3. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement.
+4. **Rank-1 `Tracer.constant(FloatArray)`** — generalises §0.4.65's scalar-only wrapper.
+5. **Out-of-scope list housekeeping** — consolidate deferred items.
+
+**Definition-of-done for §0.4.66 — met**:
+- Each §0.4.63 unary (sqrt / exp / log / tanh / sigmoid) has a tape-vs-SCT equivalence test ✓
+- §0.4.64's pow has a two-param tape-vs-SCT equivalence test ✓
+- Closed-form derivative is asserted alongside path-vs-path parity ✓
+- Full suite green at 612 tests (+6) ✓
+
 #### 0.4.65 `Tracer.constant(f)` — opaque constant leaf with short-circuited reverse walk 2026-04-24
 
 Ships the §0.4.64 follow-up #5. Adds `Tracer<*>.constant(value: Float): Tracer<ScalarShape>` as an ergonomic shortcut for `x.pow(x.constant(2f))`-style kernels where one operand is a trace-time-known constant. Under the hood the leaf is flagged `isConstant = true`, and `Backward.applyRegistryRule` skips the DxirInterpreter evaluation for any contribution targeting a constant entry — cuts the per-POW step's per-iter cost when the exp is static.

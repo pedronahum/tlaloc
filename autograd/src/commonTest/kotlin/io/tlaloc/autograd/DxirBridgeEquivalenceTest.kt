@@ -214,6 +214,119 @@ class DxirBridgeEquivalenceTest {
         }
     }
 
+    // §0.4.66 — tape-vs-SCT parity for the §0.4.63 unary math ops (SQRT/EXP/LOG/TANH/
+    // SIGMOID) and §0.4.64's POW. Both paths route through VjpRegistry's rules, so
+    // numerical drift between them would mean one of the two dispatch sites is
+    // mis-evaluating.
+
+    @Test
+    fun sqrtGradMatchesClosedFormAndTape() {
+        // d/dx sqrt(x) = 1 / (2 sqrt(x)).
+        val primal = DxirBuilder.function("sqrt") {
+            val x = param("x", f32)
+            val y = op(OpKind.SQRT, listOf(x), f32)
+            listOf(y)
+        }
+        for (v in listOf(0.25f, 1.0f, 4.0f, 9.0f)) {
+            val tape = tapeGrad({ x -> x.sqrt() }, v)
+            val sct = sctGrad(primal, v)
+            val expected = 0.5f / kotlin.math.sqrt(v)
+            assertClose(expected, sct, "sqrt closed-form at v=$v")
+            assertClose(tape, sct, "sqrt tape-vs-sct at v=$v")
+        }
+    }
+
+    @Test
+    fun expGradEqualsForwardExp() {
+        // d/dx exp(x) = exp(x). Both forward and backward paths rely on the same
+        // `kotlin.math.exp` under the hood, so any drift would be in dispatch glue.
+        val primal = DxirBuilder.function("exp") {
+            val x = param("x", f32)
+            val y = op(OpKind.EXP, listOf(x), f32)
+            listOf(y)
+        }
+        for (v in listOf(-1f, 0f, 0.5f, 2f)) {
+            val tape = tapeGrad({ x -> x.exp() }, v)
+            val sct = sctGrad(primal, v)
+            val expected = kotlin.math.exp(v)
+            assertClose(expected, sct, "exp closed-form at v=$v")
+            assertClose(tape, sct, "exp tape-vs-sct at v=$v")
+        }
+    }
+
+    @Test
+    fun logGradIsReciprocal() {
+        // d/dx log(x) = 1/x. Defined only for x > 0.
+        val primal = DxirBuilder.function("log") {
+            val x = param("x", f32)
+            val y = op(OpKind.LOG, listOf(x), f32)
+            listOf(y)
+        }
+        for (v in listOf(0.5f, 1f, 2f, 10f)) {
+            val tape = tapeGrad({ x -> x.log() }, v)
+            val sct = sctGrad(primal, v)
+            assertClose(1f / v, sct, "log closed-form at v=$v")
+            assertClose(tape, sct, "log tape-vs-sct at v=$v")
+        }
+    }
+
+    @Test
+    fun tanhGradIsOneMinusTanhSquared() {
+        // d/dx tanh(x) = 1 - tanh(x)^2.
+        val primal = DxirBuilder.function("tanh") {
+            val x = param("x", f32)
+            val y = op(OpKind.TANH, listOf(x), f32)
+            listOf(y)
+        }
+        for (v in listOf(-2f, 0f, 0.5f, 3f)) {
+            val tape = tapeGrad({ x -> x.tanh() }, v)
+            val sct = sctGrad(primal, v)
+            val t = kotlin.math.tanh(v)
+            assertClose(1f - t * t, sct, "tanh closed-form at v=$v")
+            assertClose(tape, sct, "tanh tape-vs-sct at v=$v")
+        }
+    }
+
+    @Test
+    fun sigmoidGradIsSigmoidTimesOneMinusSigmoid() {
+        // d/dx σ(x) = σ(x)(1 - σ(x)).
+        val primal = DxirBuilder.function("sig") {
+            val x = param("x", f32)
+            val y = op(OpKind.SIGMOID, listOf(x), f32)
+            listOf(y)
+        }
+        for (v in listOf(-3f, 0f, 1f, 4f)) {
+            val tape = tapeGrad({ x -> x.sigmoid() }, v)
+            val sct = sctGrad(primal, v)
+            val s = 1f / (1f + kotlin.math.exp(-v))
+            assertClose(s * (1f - s), sct, "sigmoid closed-form at v=$v")
+            assertClose(tape, sct, "sigmoid tape-vs-sct at v=$v")
+        }
+    }
+
+    @Test
+    fun powGradBothParamsMatchTape() {
+        // f(x, e) = x^e. Reproduces the §0.4.64 GradTest via the bridge: build
+        // a two-param primal with POW, take SCT grads through
+        // DxirReverseTransform, and cross-check against the tape's valueAndGrad2.
+        val primal = DxirBuilder.function("pow") {
+            val x = param("x", f32)
+            val e = param("e", f32)
+            val y = op(OpKind.POW, listOf(x, e), f32)
+            listOf(y)
+        }
+        val gradFn = DxirReverseTransform.apply(primal)
+        val vg = valueAndGrad2 { x: Tracer<ScalarShape>, e: Tracer<ScalarShape> -> x.pow(e) }
+        for ((xv, ev) in listOf(3f to 2f, 4f to 0.5f, 2f to 3f)) {
+            val sctOut = DxirInterpreter.evalFunction(gradFn, listOf(floatArrayOf(xv), floatArrayOf(ev)))
+            val sctDx = sctOut[0][0]
+            val sctDe = sctOut[1][0]
+            val (_, tapeDx, tapeDe) = vg(Tensors.f32Scalar(xv), Tensors.f32Scalar(ev))
+            assertClose(tapeDx.hostF32()[0], sctDx, "pow grad_x tape-vs-sct at (x=$xv, e=$ev)")
+            assertClose(tapeDe.hostF32()[0], sctDe, "pow grad_e tape-vs-sct at (x=$xv, e=$ev)")
+        }
+    }
+
     @Test
     fun sumGrad() {
         // f(x) = sum(x) over x: f32[4],  ∂f/∂xᵢ = 1 for all i.  Exercises SumRule's
