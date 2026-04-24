@@ -64,3 +64,19 @@ internal fun sameTape(a: Tracer<*>, b: Tracer<*>): Tape {
     require(a.tape === b.tape) { "operands come from different tapes" }
     return a.tape
 }
+
+/**
+ * §0.4.65 — creates a scalar constant leaf on the same tape as [this]. The leaf is
+ * flagged `isConstant`, so the reverse walk short-circuits any gradient flowing
+ * into it — the exp position of `x.pow(x.constant(2f))` doesn't spend compute
+ * materialising PowRule's `x^e · ln(x)` path for a value the user can't retrieve.
+ *
+ * Typical use: `x.pow(x.constant(2f))` for a squaring kernel whose exponent is
+ * known at trace time, `y - x.constant(threshold)` to bias a Tracer against a
+ * constant offset, etc. The scalar shape is always `ScalarShape`; a rank-1
+ * overload can be added when a use case surfaces.
+ */
+fun Tracer<*>.constant(value: Float): Tracer<io.tlaloc.core.ScalarShape> {
+    val entry = tape.leaf(dims = IntArray(0), value = floatArrayOf(value), isConstant = true)
+    return Tracer(tape, entry)
+}

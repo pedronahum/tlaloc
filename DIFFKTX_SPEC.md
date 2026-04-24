@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.65 `Tracer.constant(f)` — opaque constant leaf with short-circuited reverse walk 2026-04-24
+
+Ships the §0.4.64 follow-up #5. Adds `Tracer<*>.constant(value: Float): Tracer<ScalarShape>` as an ergonomic shortcut for `x.pow(x.constant(2f))`-style kernels where one operand is a trace-time-known constant. Under the hood the leaf is flagged `isConstant = true`, and `Backward.applyRegistryRule` skips the DxirInterpreter evaluation for any contribution targeting a constant entry — cuts the per-POW step's per-iter cost when the exp is static.
+
+**Three changes**:
+
+1. **[Tape.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tape.kt)**: added `isConstant: Boolean = false` to `TapeEntry` and a new `isConstant` parameter on `Tape.leaf()`. Defaults preserve prior behaviour; only tracers created through the new `.constant(f)` path set the flag.
+
+2. **[Tracer.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tracer.kt)**: new `fun Tracer<*>.constant(value: Float): Tracer<ScalarShape>` extension. Uses `this.tape` to create a leaf on the same tape as the calling Tracer, so the user writes `x.constant(2f)` inside a `grad { x -> ... }` lambda without needing a separate Tape handle.
+
+3. **[Backward.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Backward.kt)**: `applyRegistryRule` now checks each operand's entry for `isConstant` and skips the `DxirInterpreter.evalNode(contribution, env)` + `grads.seed(...)` path when it's true. The VJP rule's contribution tree is still built (that's bound up with the registry-protocol handshake), but the expensive interpreter walk is cut. Per-iter savings are visible on POW's `dExp = upstream · x^e · ln(x)` path — three ops not to interpret.
+
+**Three new GradTest cases**:
+
+- `constantTracerEnablesSquaringWithoutExpLeaf` — `x.pow(x.constant(2f))` at x=3: value 9, grad 6. Exact equality — same math as the §0.4.64 two-leaf version, the constant just doesn't escape to the user.
+- `constantTracerMatchesTwoLeafVariant` — cross-checks `x.pow(x.constant(2f))` against `valueAndGrad2 { x, e -> x.pow(e) }` at e=2 for x ∈ {1, 2, 4, 0.5}. Pins the constant-skip as a no-op on user-visible output.
+- `constantTracerAsAdditiveOffsetLeavesGradUnchanged` — `x + x.constant(5f)` at x=3: value 8, grad 1. Proves `.constant()` composes with operators other than pow.
+
+**Decisions worth flagging**:
+
+- **Flag on the tape entry, not on the Tracer.** The Tracer is immutable and thin (id-delegating). Putting the flag on TapeEntry means Backward has it in hand without needing to carry a parallel ID→isConstant map. One `Boolean` field per entry; negligible cost. (`TapeEntry` is a `class`, not a `data class`, so binary-compat is stable as long as the new default parameter is last.)
+
+- **Constant leaves DO show up in `tape.entries`.** Capture / bridge / interpreter paths that iterate entries still see them as valid leaves with cached values — just non-differentiable. Any code that materialises a dxir function from a tape (e.g. `DxirBridgeEquivalenceTest`'s `capture` path) will correctly pass the constant through. A future refactor may add a `DxirConst` lowering for constant leaves instead of `DxirParam`, but that's a cleaner-code concern, not correctness.
+
+- **Scalar-only wrapper.** `constant(value: Float)` returns `Tracer<ScalarShape>`. A rank-1 variant (`constant(values: FloatArray): Tracer<Rank1<Sym>>`) is a natural extension — added when a use case surfaces. A shape-generic `Tape.constant(DTensor<S, F32>)` is similar; deferred until the broadcast story justifies it.
+
+- **Skip happens at seed time, not at rule-construction time.** PowRule still builds its `dExp = upstream · x^e · ln(x)` tree — we just don't evaluate it. Building the dxir tree is cheap (a few allocations); evaluating it walks the tree and allocates a FloatArray per op. Measuring the savings on Brachistochrone / HookeanSpring would need a dedicated perf probe; the kernel-fixture tests don't currently use `.constant()`, so the savings there is 0 by construction. The real win lands when users migrate to the `.constant()` idiom.
+
+**Tests added** (+3 new):
+
+- [`GradTest.constantTracerEnablesSquaringWithoutExpLeaf`](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)
+- [`GradTest.constantTracerMatchesTwoLeafVariant`](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)
+- [`GradTest.constantTracerAsAdditiveOffsetLeavesGradUnchanged`](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt)
+
+Full suite is green: **606 tests** (+3 over §0.4.64).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+2. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+3. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement.
+4. **DxirBridgeEquivalenceTest extension** — exercise the capture bridge for the new unary math + pow + constants on Tracer.
+5. **Rank-1 `Tracer.constant(values: FloatArray)`** — generalises §0.4.65's scalar-only wrapper when a rank-1 constant use case surfaces.
+6. **Out-of-scope list housekeeping** — consolidate deferred items.
+
+**Definition-of-done for §0.4.65 — met**:
+- `Tape.leaf(isConstant = true)` + `TapeEntry.isConstant` land ✓
+- `Tracer<*>.constant(Float)` public extension ✓
+- `Backward.applyRegistryRule` skips grad materialisation for constant operands ✓
+- Three GradTest cases cover squaring, cross-check against two-leaf variant, additive-offset use ✓
+- Full suite green at 606 tests (+3) ✓
+
 #### 0.4.64 Tracer surface — `pow(other)` closes the last VjpRegistry rule without a wrapper 2026-04-24
 
 Direct §0.4.63 follow-up. Adds `Tracer<S>.pow(other: Tracer<S>)` to [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt), extends [Backward.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Backward.kt) to route `OpKind.POW` through the existing `PowRule`, and pins forward + both-side-grad correctness with three `valueAndGrad2` tests.

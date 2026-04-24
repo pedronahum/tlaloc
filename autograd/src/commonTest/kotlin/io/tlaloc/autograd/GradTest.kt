@@ -208,6 +208,47 @@ class GradTest {
     // Tracer surface wrapper. Both operands are differentiable, so valueAndGrad2
     // seeds both sides of the reverse walk.
 
+    // §0.4.65 — `Tracer.constant(f)` wraps a scalar leaf flagged opaque so
+    // Backward skips materialising any grad contribution targeting it. Confirms
+    // both ergonomics (shorter call site) and correctness (the grad wrt x still
+    // agrees with the two-leaf variant from §0.4.64).
+
+    @Test
+    fun constantTracerEnablesSquaringWithoutExpLeaf() {
+        // f(x) = x^2 using `x.constant(2f)`. Expected grad_x = 2x. At x = 3:
+        //   value = 9, grad = 6. Identical to §0.4.64's two-leaf variant but
+        //   the constant doesn't surface a second gradient output to the user.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x.pow(x.constant(2f)) }
+        val (value, dx) = vg(Tensors.f32Scalar(3f))
+        assertEquals(9f, value)
+        assertEquals(6f, dx.hostF32()[0])
+    }
+
+    @Test
+    fun constantTracerMatchesTwoLeafVariant() {
+        // Cross-check: x.pow(x.constant(2f)) and valueAndGrad2 { x, e -> x.pow(e) }
+        // at e=2 give the same grad_x. Pins the constant-skip optimisation as
+        // a no-op on user-visible output.
+        val withConstant = valueAndGrad { x: Tracer<ScalarShape> -> x.pow(x.constant(2f)) }
+        val twoLeaves = valueAndGrad2 { x: Tracer<ScalarShape>, e: Tracer<ScalarShape> -> x.pow(e) }
+        for (xv in listOf(1f, 2f, 4f, 0.5f)) {
+            val (_, dxCon) = withConstant(Tensors.f32Scalar(xv))
+            val (_, dxTwo, _) = twoLeaves(Tensors.f32Scalar(xv), Tensors.f32Scalar(2f))
+            assertEquals(dxTwo.hostF32()[0], dxCon.hostF32()[0], "grad_x mismatch at x=$xv")
+        }
+    }
+
+    @Test
+    fun constantTracerAsAdditiveOffsetLeavesGradUnchanged() {
+        // Adding a constant offset shifts forward but leaves grad_x at 1.
+        // Pins that `.constant()` composes with arithmetic operators, not only
+        // with pow.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x + x.constant(5f) }
+        val (v, dx) = vg(Tensors.f32Scalar(3f))
+        assertEquals(8f, v)
+        assertEquals(1f, dx.hostF32()[0], "grad_x through (x + const) should be 1")
+    }
+
     @Test
     fun powBackwardAtIntegerExponent() {
         // f(x, e) = x^e. At x = 3, e = 2:

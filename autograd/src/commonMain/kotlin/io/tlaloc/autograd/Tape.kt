@@ -8,6 +8,14 @@ class TapeEntry internal constructor(
     val inputs: IntArray,
     val dims: IntArray,
     val value: FloatArray,
+    /**
+     * §0.4.65 — marks a leaf as an opaque constant. The reverse walk short-circuits
+     * any contribution targeting this entry (the user never asks for its gradient,
+     * so there's no point materialising the VJP rule's dExp/dBase-like expression
+     * for it). Only meaningful on leaves (`op == null`); ops carry their own
+     * gradient-emission responsibilities and are never flagged constant.
+     */
+    val isConstant: Boolean = false,
 ) {
     val isLeaf: Boolean get() = op == null
     val size: Int get() = value.size
@@ -17,8 +25,8 @@ class Tape {
     private val _entries = mutableListOf<TapeEntry>()
     val entries: List<TapeEntry> get() = _entries
 
-    internal fun leaf(dims: IntArray, value: FloatArray): TapeEntry {
-        val entry = TapeEntry(_entries.size, op = null, inputs = IntArray(0), dims = dims, value = value)
+    internal fun leaf(dims: IntArray, value: FloatArray, isConstant: Boolean = false): TapeEntry {
+        val entry = TapeEntry(_entries.size, op = null, inputs = IntArray(0), dims = dims, value = value, isConstant = isConstant)
         _entries += entry
         return entry
     }

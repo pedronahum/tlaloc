@@ -123,6 +123,14 @@ private fun applyRegistryRule(
             require(idx >= 0) {
                 "VjpRule for $kind returned an operand key not present in primal.operands"
             }
+            // §0.4.65 — skip gradient materialisation for operands flagged as
+            // opaque constants. The VJP rule already built its contribution tree;
+            // we cut off the evaluate-and-seed step, which is where the cost
+            // lives (DxirInterpreter walks the tree and allocates a FloatArray
+            // per node). The builder walk above is unavoidable with the current
+            // rule protocol; cheap next to the interpreter step we save here.
+            val targetEntry = entries[entry.inputs[idx]]
+            if (targetEntry.isConstant) continue
             val evaluated = DxirInterpreter.evalNode(contribution, env)
             grads.seed(entry.inputs[idx], evaluated)
         }
