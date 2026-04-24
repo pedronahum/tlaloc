@@ -39,6 +39,40 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.89 Public `broadcastRow` — API symmetry with §0.4.87's `broadcastCol` 2026-04-24
+
+Makes §0.4.85's `broadcastRow` helper public. Complementary to §0.4.87's named `broadcastCol`: users who want the broadcast direction to read explicitly at the call site (inside larger expressions, for instance) can now write `matrix + matrix.broadcastRow(row)` — mirroring the col-broadcast ergonomic pattern. The existing §0.4.85 implicit operator (`matrix + row`) continues to delegate to the same builder; no behavioural change, no new op kinds.
+
+**One visibility change** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt): `private fun Tracer<Rank2<A, B>>.broadcastRow(...)` → `fun Tracer<Rank2<A, B>>.broadcastRow(...)`. Body unchanged.
+
+**One new test** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt): `broadcastRowExposedPubliclyMatchesImplicitOperator`. Computes `(x + b).sum()` and `(x + x.broadcastRow(b)).sum()` with the same inputs, asserts the forward value + both gradients agree element-wise. Pins that the operator stays a thin pass-through to the builder.
+
+**Decisions worth flagging**:
+
+- **API symmetry is the main benefit, not new capability.** Users writing `matrix + row` got the same semantics before §0.4.89. The public builder just gives them a syntactic form that makes the broadcast direction unambiguous in code review — matters most in expression-heavy code where two rank-1 tracers might be in scope simultaneously.
+
+- **No matching operator-free `plus(col)` / `minus(col)` etc.** §0.4.87's decision stands: the col-broadcast direction had to be named-method-only because of source-level overload ambiguity with row broadcast at A=B. Row broadcast can afford to keep the implicit operator AND expose the builder.
+
+- **No behavioural change in the implicit path.** The §0.4.85 tests still exercise the same code path; adding this public wrapper didn't touch the operator.
+
+**Tests added** (+1 new):
+
+- `GradTest.broadcastRowExposedPubliclyMatchesImplicitOperator`
+
+Full suite is green: **660 tests** (+1 over §0.4.88).
+
+**Recommended next pickup**:
+
+1. **Reverse-order broadcast ops** — `Tracer<Rank1>.op(Tracer<Rank2>)` for non-commutative arithmetic.
+2. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+3. **D.1i Symja `Simplify` on grad expressions**.
+4. **`diagnosticReporter` migration**.
+
+**Definition-of-done for §0.4.89 — met**:
+- `broadcastRow` is now public ✓
+- One cross-check test pins parity with the implicit operator ✓
+- Full suite green at 660 tests (+1) ✓
+
 #### 0.4.88 Bridge-equivalence pin for column-broadcast reverse 2026-04-24
 
 Mirror of §0.4.86 for the §0.4.87 column-broadcast direction. Builds `(x + col).sum()` two ways — via Tracer lambda using `x.broadcastCol(col)` AND as a hand-rolled `DxirFunction` with `BROADCAST` attrs `broadcast_dimensions = [0]` — runs both through backward, asserts gradient outputs agree.

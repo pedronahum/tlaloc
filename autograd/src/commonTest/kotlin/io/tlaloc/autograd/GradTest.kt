@@ -399,6 +399,32 @@ class GradTest {
     // upstream (via §0.4.84's axis-aware BroadcastRule).
 
     @Test
+    fun broadcastRowExposedPubliclyMatchesImplicitOperator() {
+        // §0.4.89 — §0.4.85's `Tracer<Rank2>.plus(Tracer<Rank1>)` operator and
+        // the newly-public `broadcastRow` must produce identical forward +
+        // backward results; the operator is a thin wrapper over the builder.
+        val xInput = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))
+        val bInput = Tensors.f32Vector<Sym>(floatArrayOf(10f, 20f, 30f))
+
+        val vgImplicit = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, b: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x + b).sum()
+        }
+        val vgExplicit = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, b: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x + x.broadcastRow(b)).sum()
+        }
+
+        val (vImp, dxImp, dbImp) = vgImplicit(xInput, bInput)
+        val (vExp, dxExp, dbExp) = vgExplicit(xInput, bInput)
+        assertEquals(vImp, vExp)
+        val gxImp = dxImp.hostF32()
+        val gxExp = dxExp.hostF32()
+        for (i in 0 until 6) assertEquals(gxImp[i], gxExp[i], "grad_x[$i] implicit vs explicit")
+        val gbImp = dbImp.hostF32()
+        val gbExp = dbExp.hostF32()
+        for (i in 0 until 3) assertEquals(gbImp[i], gbExp[i], "grad_b[$i] implicit vs explicit")
+    }
+
+    @Test
     fun rank2PlusBroadcastColAppliesColumnVectorAcrossColumns() {
         // §0.4.87 — `matrix + matrix.broadcastCol(col)` replicates `col`
         // (size M) across all N columns. For x = [[1,2,3],[4,5,6]] and

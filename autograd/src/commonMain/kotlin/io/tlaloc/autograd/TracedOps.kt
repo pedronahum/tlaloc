@@ -275,7 +275,17 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
 // emits `SUM(upstream, reduction_dims = [0])` — exactly the row-wise sum
 // users expect as the gradient of a bias term.
 
-private fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastRow(
+/**
+ * §0.4.89 — public companion to the §0.4.85 `Tracer<Rank2<A, B>>.plus(Tracer<Rank1<B>>)`
+ * operator. Same machinery (records BROADCAST with `broadcast_dimensions = [1]`),
+ * exposed as a named builder so users who want the broadcast direction to be
+ * explicit in their code can call it directly — e.g. inside a larger expression
+ * where the implicit operator overload would be harder to read.
+ *
+ * Mirrors §0.4.87's `broadcastCol` in both signature and intent. The §0.4.85
+ * implicit operator continues to delegate here; no behavioural change.
+ */
+fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastRow(
     row: Tracer<io.tlaloc.core.Rank1<B>>,
 ): Tracer<Rank2<A, B>> {
     require(dims[1] == row.dims[0]) {
