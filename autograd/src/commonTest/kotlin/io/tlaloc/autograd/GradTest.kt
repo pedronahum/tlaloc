@@ -399,6 +399,77 @@ class GradTest {
     // upstream (via §0.4.84's axis-aware BroadcastRule).
 
     @Test
+    fun reverseOrderRowMinusMatrixDiffersFromMatrixMinusRow() {
+        // §0.4.90 — `row - matrix` is NOT the same as `matrix - row`. For
+        // row = [10, 20], matrix = [[1, 2], [3, 4]]:
+        //   matrix - row = [[-9, -18], [-7, -16]]  sum = -50.
+        //   row - matrix = [[9, 18], [7, 16]]      sum = 50.
+        // grad_row for (row - matrix): sum over rows of +1 = M = 2 per element → [2, 2].
+        // grad_matrix for (row - matrix): -1 per element → ones(2,2) negated.
+        val vg = valueAndGrad2 { row: Tracer<io.tlaloc.core.Rank1<Sym>>, m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> ->
+            (row - m).sum()
+        }
+        val (value, dRow, dMatrix) = vg(
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 20f)),
+            Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+        )
+        assertEquals(50f, value)
+        val gr = dRow.hostF32()
+        assertEquals(2f, gr[0])  // sum over M rows of +1 = 2
+        assertEquals(2f, gr[1])
+        val gm = dMatrix.hostF32()
+        for (i in 0 until 4) assertEquals(-1f, gm[i], "grad_matrix[$i] = -1")
+    }
+
+    @Test
+    fun reverseOrderRowDivMatrixProducesCorrectGradients() {
+        // f(row, m) = sum(row / m) at row=[6, 8], m=[[2, 4], [3, 2]].
+        //   broadcast row = [[6, 8], [6, 8]].
+        //   quotient     = [[3, 2], [2, 4]].  sum = 11.
+        //   grad_row_j = sum over rows of 1/m_ij = (1/2 + 1/3, 1/4 + 1/2) = (5/6, 3/4).
+        //   grad_m_ij = -row_j / m_ij² → [[-6/4, -8/16], [-6/9, -8/4]]
+        //             = [[-1.5, -0.5], [-0.667, -2]].
+        val vg = valueAndGrad2 { row: Tracer<io.tlaloc.core.Rank1<Sym>>, m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> ->
+            (row / m).sum()
+        }
+        val (value, dRow, dMatrix) = vg(
+            Tensors.f32Vector<Sym>(floatArrayOf(6f, 8f)),
+            Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(2f, 4f, 3f, 2f)),
+        )
+        assertEquals(11f, value)
+        val gr = dRow.hostF32()
+        assertTrue(abs(gr[0] - (1f / 2f + 1f / 3f)) < 1e-5f, "grad_row[0] = 5/6; got ${gr[0]}")
+        assertTrue(abs(gr[1] - (1f / 4f + 1f / 2f)) < 1e-5f, "grad_row[1] = 3/4; got ${gr[1]}")
+        val gm = dMatrix.hostF32()
+        assertTrue(abs(gm[0] - (-6f / 4f)) < 1e-5f, "grad_m[0,0] = -1.5; got ${gm[0]}")
+        assertTrue(abs(gm[1] - (-8f / 16f)) < 1e-5f, "grad_m[0,1] = -0.5; got ${gm[1]}")
+    }
+
+    @Test
+    fun reverseOrderCommutativeOpsMatchForwardOrder() {
+        // row + matrix and matrix + row must yield the same result (addition
+        // is commutative). Pin that the two call sites agree for both value
+        // and gradient.
+        val row = Tensors.f32Vector<Sym>(floatArrayOf(10f, 20f, 30f))
+        val mat = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))
+        val vgForward = valueAndGrad2 { r: Tracer<io.tlaloc.core.Rank1<Sym>>, m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> ->
+            (m + r).sum()
+        }
+        val vgReverse = valueAndGrad2 { r: Tracer<io.tlaloc.core.Rank1<Sym>>, m: Tracer<io.tlaloc.core.Rank2<Sym, Sym>> ->
+            (r + m).sum()
+        }
+        val (vFwd, drFwd, dmFwd) = vgForward(row, mat)
+        val (vRev, drRev, dmRev) = vgReverse(row, mat)
+        assertEquals(vFwd, vRev)
+        val drFwdArr = drFwd.hostF32()
+        val drRevArr = drRev.hostF32()
+        for (i in 0 until 3) assertEquals(drFwdArr[i], drRevArr[i], "grad_row[$i]")
+        val dmFwdArr = dmFwd.hostF32()
+        val dmRevArr = dmRev.hostF32()
+        for (i in 0 until 6) assertEquals(dmFwdArr[i], dmRevArr[i], "grad_matrix[$i]")
+    }
+
+    @Test
     fun broadcastRowExposedPubliclyMatchesImplicitOperator() {
         // §0.4.89 — §0.4.85's `Tracer<Rank2>.plus(Tracer<Rank1>)` operator and
         // the newly-public `broadcastRow` must produce identical forward +

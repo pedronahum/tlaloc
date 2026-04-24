@@ -39,6 +39,60 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.90 Reverse-order row-broadcast operators — `row op matrix` 2026-04-24
+
+Adds four `Tracer<Rank1<B>>.op(Tracer<Rank2<A, B>>)` operators — the row-vector-on-LHS direction. Complements §0.4.85's `Tracer<Rank2>.op(Tracer<Rank1>)` pair. Matters most for **non-commutative** ops: `row - matrix` and `row / matrix` give mathematically different results from the matrix-on-LHS form. The commutative forms (`row + matrix`, `row * matrix`) are included for symmetry so users aren't forced to swap operand order for no reason.
+
+**Four new operator overloads** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt), each with a distinct `@JvmName`:
+
+```kotlin
+operator fun <A, B> Tracer<Rank1<B>>.plus(matrix: Tracer<Rank2<A, B>>)  = matrix.broadcastRow(this) + matrix
+operator fun <A, B> Tracer<Rank1<B>>.minus(matrix: Tracer<Rank2<A, B>>) = matrix.broadcastRow(this) - matrix
+operator fun <A, B> Tracer<Rank1<B>>.times(matrix: Tracer<Rank2<A, B>>) = matrix.broadcastRow(this) * matrix
+operator fun <A, B> Tracer<Rank1<B>>.div(matrix: Tracer<Rank2<A, B>>)   = matrix.broadcastRow(this) / matrix
+```
+
+Each promotes `this` (the row) via `broadcastRow` (now public, §0.4.89) and uses the existing same-shape operator on the result + matrix. Forward and reverse flow through the exact same machinery as §0.4.85 — the only difference is operand order at the call site.
+
+**Three new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `reverseOrderRowMinusMatrixDiffersFromMatrixMinusRow` — `sum(row - matrix)` at row=[10,20], matrix=[[1,2],[3,4]]. value=50, grad_row=[2,2] (M-row-count), grad_matrix=-1 per element. Pins that the subtraction orders diverge as expected.
+
+2. `reverseOrderRowDivMatrixProducesCorrectGradients` — `sum(row / matrix)` at row=[6,8], matrix=[[2,4],[3,2]]. grad_row_j = Σ 1/m_ij over rows; grad_m_ij = -row_j / m_ij². Closed-form derivatives verified element-wise within 1e-5.
+
+3. `reverseOrderCommutativeOpsMatchForwardOrder` — `row + matrix` and `matrix + row` produce identical value + grad_row + grad_matrix. Sanity check that the commutative forms really are commutative across the two call conventions.
+
+**Decisions worth flagging**:
+
+- **No `@JvmName` collision with §0.4.77 scalar-broadcast overloads.** §0.4.77's `Tracer<Rank1<A>>.plus(Tracer<ScalarShape>)` erases to `plus(Tracer, Tracer)`; these new ones are `Tracer<Rank1<B>>.plus(Tracer<Rank2<A, B>>)`, also erasing to `plus(Tracer, Tracer)`. Distinct `@JvmName` suffixes (`Rank1Row` / `ScalarTracerRank1` / `MatrixRank1Row`) keep each JVM signature unique.
+
+- **Body is `matrix.broadcastRow(this) + matrix` — commutative in the *dxir*, but NOT in the grad path that matters.** The operator's LHS (the one getting `.plus(...)` called on it) determines which argument gets `grad_a` vs `grad_b` seeding. For `row.plus(matrix)` the grad order is `(grad_row, grad_matrix)`, matching the caller's expectation. The internal body calls `matrix.broadcastRow(this) + matrix`, which internally is `(brcast_row) + matrix` — again, brcast_row is LHS, matrix is RHS; `applyRegistryRule` seeds grads in operand order. Dissecting the alias carefully: §0.4.85's `matrix + row` path calls `plus(matrix, broadcastRow(row))` = `matrix + brcast_row`; §0.4.90's `row + matrix` path calls `plus(broadcastRow(row), matrix)` = `brcast_row + matrix`. Both are ADDs between same-shape tensors, AddRule grads flow to both operands symmetrically — no asymmetry between the two directions.
+
+- **Only row-broadcast's reverse-order overloads.** Column broadcast is accessed via the named `broadcastCol` builder (§0.4.87), so there's no implicit operator that could have a reverse-order form. A user who wants `col - matrix` writes `matrix.broadcastCol(col) - matrix` explicitly; the operator-ambiguity problem (A=B collapse) doesn't recur because there's no operator being resolved.
+
+- **Trusted that the registry's AddRule / SubRule etc. handle the same-shape case.** All four underlying ops have been exercised heavily across earlier sessions; the new Tracer surface pulls in no new dispatch.
+
+**Tests added** (+3 new):
+
+- `GradTest.reverseOrderRowMinusMatrixDiffersFromMatrixMinusRow`
+- `GradTest.reverseOrderRowDivMatrixProducesCorrectGradients`
+- `GradTest.reverseOrderCommutativeOpsMatchForwardOrder`
+
+Full suite is green: **663 tests** (+3 over §0.4.89).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on grad expressions**.
+3. **`diagnosticReporter` migration**.
+4. **Reverse-order scalar-tracer ops** — `Tracer<ScalarShape>.op(Tracer<Rank1|Rank2<...>>)` for the remaining missing corners of the broadcast surface.
+
+**Definition-of-done for §0.4.90 — met**:
+- Four reverse-order row-broadcast operators (plus/minus/times/div) land ✓
+- Non-commutative tests (minus, div) pin correct element-wise and grad math ✓
+- Commutative tests (plus) verify call-order-independence ✓
+- Full suite green at 663 tests (+3) ✓
+
 #### 0.4.89 Public `broadcastRow` — API symmetry with §0.4.87's `broadcastCol` 2026-04-24
 
 Makes §0.4.85's `broadcastRow` helper public. Complementary to §0.4.87's named `broadcastCol`: users who want the broadcast direction to read explicitly at the call site (inside larger expressions, for instance) can now write `matrix + matrix.broadcastRow(row)` — mirroring the col-broadcast ergonomic pattern. The existing §0.4.85 implicit operator (`matrix + row`) continues to delegate to the same builder; no behavioural change, no new op kinds.

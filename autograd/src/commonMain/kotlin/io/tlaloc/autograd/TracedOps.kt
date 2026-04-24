@@ -345,6 +345,33 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
  * BroadcastRule reverses it as `SUM(upstream, reduction_dims = [1])` →
  * rank-1 grad back to [col].
  */
+// §0.4.90 — reverse-order row-broadcast operators. `row + matrix`, `row - matrix`,
+// etc. where the rank-1 tracer is the LHS. Matters specifically for non-
+// commutative ops (minus, div) where argument order changes the math. Each
+// overload promotes `this` (the row) to the matrix's shape via `broadcastRow`
+// and forwards to the existing same-shape operator. @JvmName disambiguates
+// from §0.4.77's `Tracer<Rank1<A>>.plus(Tracer<ScalarShape>)` after erasure.
+
+@kotlin.jvm.JvmName("plusMatrixRank1Row")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.Rank1<B>>.plus(
+    matrix: Tracer<Rank2<A, B>>,
+): Tracer<Rank2<A, B>> = matrix.broadcastRow(this) + matrix
+
+@kotlin.jvm.JvmName("minusMatrixRank1Row")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.Rank1<B>>.minus(
+    matrix: Tracer<Rank2<A, B>>,
+): Tracer<Rank2<A, B>> = matrix.broadcastRow(this) - matrix
+
+@kotlin.jvm.JvmName("timesMatrixRank1Row")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.Rank1<B>>.times(
+    matrix: Tracer<Rank2<A, B>>,
+): Tracer<Rank2<A, B>> = matrix.broadcastRow(this) * matrix
+
+@kotlin.jvm.JvmName("divMatrixRank1Row")
+operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.Rank1<B>>.div(
+    matrix: Tracer<Rank2<A, B>>,
+): Tracer<Rank2<A, B>> = matrix.broadcastRow(this) / matrix
+
 fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastCol(
     col: Tracer<io.tlaloc.core.Rank1<A>>,
 ): Tracer<Rank2<A, B>> {
