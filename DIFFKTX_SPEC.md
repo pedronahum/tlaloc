@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.58 Stage D.3ii-tape-tracer-integration — end-to-end proof: plugin falls back, real `:autograd` produces correct gradient 2026-04-24
+
+Closes the D.3ii-tape trilogy (§0.4.56 plugin-pin, §0.4.57 tape-pin, now §0.4.58 integration-pin) by running the full pipeline without stubs. The Tlaloc plugin compiles a user's `grad { x: Tracer<ScalarShape> -> ... break-bearing while ... }`, cannot specialise the shape, returns the original call untouched, and at runtime the real `:autograd` tape produces the correct gradient. No code paths faked — the assertion is on actual arithmetic.
+
+**Build change** (one-liner). [compiler-plugin/build.gradle.kts](compiler-plugin/build.gradle.kts): `testImplementation(project(":autograd"))` + `evaluationDependsOn(":autograd")` + `dependsOn(autogradJvmJar)` on the test task. Puts `:autograd`'s `jvmJar` on the test's `java.class.path`, which is the compile classpath the in-process `K2JVMCompiler` reads for user-snippet compilation.
+
+**New test** ([TlalocPluginTracerFallbackTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginTracerFallbackTest.kt)). `break-bearing while on Tracer surface falls back and runtime tape produces correct gradient` — compiles:
+
+```kotlin
+import io.tlaloc.autograd.*
+import io.tlaloc.core.ScalarShape
+import io.tlaloc.core.Tensors
+import io.tlaloc.core.hostF32
+fun main() {
+    val g = grad { x: Tracer<ScalarShape> ->
+        var d = x
+        while (d.toDTensor().hostF32()[0] <= 10.0f) { d = d + d }
+        d
+    }
+    println(g(Tensors.f32Scalar(0.5f)).hostF32()[0])
+}
+```
+
+Asserts `exitCode == 0` and `stdout == "32.0"`. That 32 is arithmetic truth (five doublings × initial gradient of 1 = 2^5) computed by `:autograd/Backward.kt`, not a sentinel.
+
+**Decisions worth flagging**:
+
+- **Split from `TlalocPluginDiagnosticTest` into a new class.** That test class uses stubs exclusively — `AUTOGRAD_STUB`, `AUTOGRAD_STUB_BROKEN`, and variants. Mixing real-autograd tests into it would be confusing and would require branching the `compileAndRun` harness. The new class has its own minimal harness (no stub file; one compileAndRun variant). The duplication (~80 lines of harness) follows the existing pattern where `HookeanSpringTest`, `BrachistochroneTest`, `BGDHyperOptTest` each also carry their own `compileAndRun` — cheap relative to the clarity benefit.
+
+- **Wildcard import in the user snippet.** `d + d` on `Tracer<S>` resolves through the top-level `operator fun Tracer<S>.plus` extension in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt). Extensions declared at package level require explicit import; starry-wildcard (`import io.tlaloc.autograd.*`) is the simplest path that covers `grad`, `Tracer`, and all the operator extensions. Initial draft used individual `import io.tlaloc.autograd.grad` / `import io.tlaloc.autograd.Tracer` and hit `Unresolved reference 'plus' for operator '+'` — documented here so future test authors don't repeat it.
+
+- **`d.toDTensor().hostF32()[0]` for the break predicate (not `d.entry.value[0]`).** [Tracer.kt:11](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tracer.kt#L11) declares `entry` as `internal`, which means it crosses source sets within `:autograd` but NOT into `:compiler-plugin`'s tests. The public `toDTensor()` copies the backing FloatArray, so each iteration pays an O(size) allocation — cheap for scalars (1 float) and the right abstraction for cross-module users. Worth noting for benchmarks: if a future perf test polls a large Tracer's value in a hot loop, add a public `peek(): Float` helper to avoid the copy.
+
+- **No assertion on `LAMBDA_UNSUPPORTED` diagnostic count.** Either the FIR surface rejects outright (Tracer params out of scalar-primitive scope → warning) OR it accepts and synthesis rejects downstream (no warning, just "kept original call" trace). Both terminate at the same observable outcome (runtime tape runs, correct output). Asserting on the specific internal path would make the test brittle to refactors of the plugin's rejection boundary. The output correctness is the invariant that matters; the path it took is implementation detail.
+
+- **Test cost is ~2 seconds.** Compiles a tiny user snippet in-process, runs it in a URLClassLoader. Acceptable for the full suite; if it ever grows to multiple Tracer-surface integration cases, consider extracting the compile-harness into a shared base class.
+
+**Tests added** (+1 new):
+- [`TlalocPluginTracerFallbackTest.break-bearing while on Tracer surface falls back and runtime tape produces correct gradient`](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginTracerFallbackTest.kt)
+
+Full suite is green: **589 tests** (+1 over §0.4.57).
+
+**Stage D status (post-§0.4.58)** — unchanged benchmark list; the D.3ii-tape story closes end-to-end:
+
+| # | benchmark | status |
+|---|-----------|--------|
+| 1 | **BGDHyperOpt** | full source port, paper-speedup closure + symbolic T via raw-while AND for-loop (§0.4.52 / §0.4.53 / §0.4.54); break-bearing shapes: plugin falls through (§0.4.56), runtime tape produces correct gradient (§0.4.57), full end-to-end integration pinned (§0.4.58) |
+| 2 | **HookeanSpring** | full port (§0.4.47) |
+| 3 | **Brachistochrone** | full port (§0.4.43) |
+| 4 | HMC | not ported |
+| 5 | CartPole | not ported |
+| 6 | QWOP | not ported |
+
+**Recommended next pickup**:
+
+1. **D.3ii closed-form closure** — paper-faithful break-bearing WHILE via symbolic inequality solving. 2+ design-sessions (deferred in §0.4.55). Now that the fallback path is fully pinned, the closure work can land without worrying about breaking the slow-but-correct path.
+2. **D.4 HMC** — paper's hardest control-flow benchmark.
+3. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement from a single binary.
+5. **Public `Tracer.peek()` accessor** — removes the toDTensor-copy overhead for tape-predicate reads from outside `:autograd`. Small.
+
+**Definition-of-done for §0.4.58 — met**:
+- `:autograd` wired onto the plugin test classpath ✓
+- User code using real `Tracer` surface + break-bearing `while` compiles through the plugin ✓
+- Runtime tape produces correct gradient (32.0 = 2^5) — observed as actual stdout, not a sentinel ✓
+- Full suite green at 589 tests (+1) ✓
+
 #### 0.4.57 Stage D.3ii-tape-tracer — gradient-correctness pin on the Tracer surface for break-bearing WHILE 2026-04-24
 
 Direct follow-up to §0.4.56. §0.4.56 pinned the *plugin-level* fallback — "the plugin doesn't crash on a break-bearing WHILE, the call stays intact". This session pins the other half of the invariant: the runtime tape the call falls through to **actually produces the correct gradient**. Without this, the §0.4.56 pin could silently regress the tape's AD correctness and the combined story (plugin + tape) would still be broken.
