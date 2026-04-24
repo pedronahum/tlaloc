@@ -169,7 +169,7 @@ class GradTest {
         // replaces the internal backing-array reach-through.
         val g = grad { x: Tracer<ScalarShape> ->
             var d = x
-            while (d.peek() <= 10f) {
+            while (d.scalar <= 10f) {
                 d = d + d
             }
             d
@@ -191,7 +191,7 @@ class GradTest {
         // of the same `grad { ... }` lambda.
         val g = grad { x: Tracer<ScalarShape> ->
             var d = x
-            while (d.peek() <= 10f) {
+            while (d.scalar <= 10f) {
                 d = d + d
             }
             d
@@ -221,6 +221,27 @@ class GradTest {
     }
 
     @Test
+    fun scalarPropertyDelegatesToPeek() {
+        // §0.4.62 — `Tracer<ScalarShape>.scalar` is a type-safe extension that
+        // compiles only on rank-0 tracers. Behaviour equals `peek()`; pin it
+        // so the shortcut doesn't silently diverge from the underlying read.
+        val observed = mutableListOf<Float>()
+        val g = grad { x: Tracer<ScalarShape> ->
+            var d = x
+            observed.add(d.scalar)
+            d = d + d
+            observed.add(d.scalar)
+            d
+        }
+        g(Tensors.f32Scalar(2.5f))
+        assertEquals(listOf(2.5f, 5f), observed)
+        // `scalar` must agree with `peek()` at every step.
+        val vg = valueAndGrad { x: Tracer<ScalarShape> -> x + x + x }
+        val (value, _) = vg(Tensors.f32Scalar(4f))
+        assertEquals(12f, value)
+    }
+
+    @Test
     fun peekRejectsOutOfBoundsIndex() {
         // §0.4.59 — `peek(index)` validates bounds. Pins the contract so future
         // refactors can't silently return stale/garbage floats for bad indices.
@@ -245,7 +266,7 @@ class GradTest {
         // value and the result used as the backward seed.
         val vg = valueAndGrad { x: Tracer<ScalarShape> ->
             var d = x
-            while (d.peek() <= 10f) {
+            while (d.scalar <= 10f) {
                 d = d + d
             }
             d

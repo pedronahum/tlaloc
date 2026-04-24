@@ -41,6 +41,20 @@ class Tracer<S : Shape> internal constructor(
     }
 }
 
+/**
+ * §0.4.62 — type-safe shortcut for `Tracer<ScalarShape>.peek()`. Compiles only on
+ * scalar tracers (rank 0), so a user writing `arr.scalar` on a `Tracer<Rank1<N>>`
+ * gets a compile error at the call site instead of a silent `peek(0)` that returns
+ * only the first element. Follow-up to §0.4.59 where this convenience was noted as
+ * "could still be added later without breaking `peek()`".
+ *
+ * Implemented as an extension property (not a member) because member-on-generic-
+ * with-specific-type-parameter can't express "only on `S = ScalarShape`". An
+ * extension where the receiver type is `Tracer<ScalarShape>` does exactly this.
+ */
+val Tracer<io.tlaloc.core.ScalarShape>.scalar: Float
+    get() = peek()
+
 internal fun <S : Shape> Tape.traceLeaf(value: DTensor<S, F32>): Tracer<S> {
     val entry = leaf(dims = value.dims.copyOf(), value = value.hostF32().copyOf())
     return Tracer(this, entry)

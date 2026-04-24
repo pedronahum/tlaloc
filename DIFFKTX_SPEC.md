@@ -39,6 +39,48 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.62 `Tracer<ScalarShape>.scalar` — type-safe scalar-only shortcut for `peek()` 2026-04-24
+
+Adds an extension property `val Tracer<ScalarShape>.scalar: Float` that delegates to `peek()` but is compile-time restricted to rank-0 tracers. Closes the §0.4.59 "could still be added later" item.
+
+**Why**: §0.4.59 shipped `peek(index: Int = 0)` — generic, works on any rank. But the common case in break-bearing scalar loops is polling a `Tracer<ScalarShape>`, where `peek()` is an unchecked default-to-0 read. A future refactor that changes a `Tracer<ScalarShape>` to `Tracer<Rank1<Sym>>` would silently keep returning `peek(0)` (the first element, not what the caller meant). The `.scalar` property catches that at compile time: `arr.scalar` on a rank-1 tracer fails to resolve.
+
+**Implementation** ([Tracer.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Tracer.kt)): three-line extension property, delegating straight to `peek()`. Kept as an extension (not a member) because Kotlin can't express "member method only compiles when the class's type parameter is specifically `ScalarShape`" — a receiver-typed extension does exactly that.
+
+**Migrations** — existing break-bearing tests now use the shortcut where the tracer is scalar:
+
+- [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt): three break-bearing `while (d.peek() <= 10f)` → `while (d.scalar <= 10f)`.
+- [TlalocPluginTracerFallbackTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginTracerFallbackTest.kt): same migration in the cross-module integration test. Resolves cleanly across the module boundary and through the in-process Kotlin compiler's user-snippet compile path.
+
+**Tests added** (+1 new):
+
+- [`GradTest.scalarPropertyDelegatesToPeek`](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt) — pins that `.scalar` reads the same value `peek()` would, both before and after tape ops accrue. Checks two cases: mid-trace poll on a doubling kernel; forward value via `valueAndGrad`.
+
+**Decisions worth flagging**:
+
+- **Kept `peek()` as-is, not deprecated.** `peek(index)` is genuinely useful for rank-1+ tracers. `.scalar` is a convenience for the scalar case, not a replacement. Users who want explicit indexing still have it.
+
+- **No `Tracer<Rank1<S>>.at(i)` companion**. Tempting to add for symmetry, but `peek(i)` already covers that cleanly and adding a second API would be gratuitous — `.scalar` earns its existence by catching a type-safety issue, a rank-1 `at()` would just rename `peek()`.
+
+- **No `Tracer<ScalarShape>.scalarValue` alias or `.value`**. `.scalar` is short and read as "the scalar value of this tracer". `.value` would collide with Kotlin property-access semantics in places (autograd's TapeEntry has `value: FloatArray`). Leaving one name for one concept.
+
+Full suite is green: **594 tests** (+1 over §0.4.61).
+
+**Recommended next pickup** (unchanged from §0.4.61):
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — pure PhiCalculus-side work.
+2. **D.4 HMC** — paper's hardest control-flow benchmark.
+3. **D.1i Symja `Simplify` on grad expressions** — complementary optimization pass.
+4. **grad2(DTensor, Float)** — paper-scale BGDHyperOpt scaling measurement.
+5. **Out-of-scope list housekeeping** — consolidate deferred items across §0.4.N notes.
+
+**Definition-of-done for §0.4.62 — met**:
+- `Tracer<ScalarShape>.scalar` extension property lands with type restriction to scalar ✓
+- Existing break-bearing tests migrated to the shortcut ✓
+- Direct test pins `.scalar` delegates to `peek()` without drift ✓
+- Cross-module integration test still passes with the new API ✓
+- Full suite green at 594 tests (+1) ✓
+
 #### 0.4.61 StableHLO — round-trip pin for Bool ops via `stablehlo-translate` 2026-04-24
 
 Follow-up to §0.4.60. Adds a single test (`RoundTripTest.booleanOpsRoundTrip`) that sends §0.4.60's emitted `stablehlo.not` / `stablehlo.and` MLIR through the external `stablehlo-translate --serialize --target=1.0.0` binary. §0.4.60's `EmitterTest.emitsBooleanOps` only string-matches the emitter output; this session's test upgrades that to a "real MLIR parser accepts it as well-formed" guarantee — which is what matters once downstream tooling (PJRT, IREE) starts consuming the output.
