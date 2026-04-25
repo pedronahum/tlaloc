@@ -39,6 +39,77 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.126 D.3i Phase 3a — break-cond dependency classification 2026-04-25
+
+§0.4.125 closed Phase 2 with the four structural invariants of a break-bearing WHILE — fully-validated `Pattern`s now flow downstream with a known counter index and trip-count bound. Phase 3 is "break-iteration computation" — a multi-session arc that ultimately solves for the smallest `k` where `breakCond` first becomes true. This session ships Phase 3a: a typed dependency classifier that future closure phases dispatch on to pick the right break-iteration computation strategy.
+
+**The mechanism** in [BreakBearingWhile.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt). A new sealed class `BreakCondClass` enumerates the four cases the closure pipeline cares about:
+
+```kotlin
+sealed class BreakCondClass {
+    data class Constant(val alwaysBreaks: Boolean) : BreakCondClass() {
+        val breakIteration: Int? get() = if (alwaysBreaks) 0 else null
+    }
+    data object LoopInvariant : BreakCondClass()
+    data object CounterOnly : BreakCondClass()
+    data object CarriedDependent : BreakCondClass()
+}
+
+fun classifyBreakCond(pattern: Pattern): BreakCondClass?
+```
+
+`classifyBreakCond` returns null when `pattern.counterArgIdx` is null — the classifier requires the §0.4.123/§0.4.124/§0.4.125 invariants so it can distinguish counter references from generic carried-arg references. When the precondition holds, it walks `breakCond`'s operand tree (descending through `DxirOp.operands`, `DxirOpResult.source`, and `DxirCall.args`, but NOT into nested `DxirOp.regions` since those introduce their own scope) and collects the cond block-arg ids reached. The classification then dispatches on what's in that set:
+
+- `reached.isEmpty() && breakCond is DxirConst` → `Constant(alwaysBreaks = value)`. The closure is fully resolved at compile time: `breakIteration = 0` if `alwaysBreaks`, `null` otherwise.
+- `reached.isEmpty()` (any other shape) → `LoopInvariant`. The runtime arm can evaluate it once before the loop and branch.
+- `reached.all { it == counterArgId }` → `CounterOnly`. Phase 3b's symbolic solver can compute the break iteration from the counter shape.
+- otherwise → `CarriedDependent`. The closure must keep per-iteration evaluation of the predicate.
+
+**Decisions worth flagging**:
+
+- **Constant only fires on a bare `DxirConst` at the top.** A tree like `LAND(const(true), const(true))` reaches no cond block-args but isn't a `DxirConst` itself — we mark it `LoopInvariant` rather than constant-fold the tree. Constant folding is a separate concern (PhiCalculus's `applyCSE` neighborhood) and trying to do it here would duplicate logic + create classifier entanglement with op-tree evaluation. The split keeps Phase 3a's contract simple: the only inputs that resolve fully at compile time are ones the rest of the pipeline already collapsed to a literal.
+
+- **Mixed counter+carried collapses to CarriedDependent.** Rather than introducing a fifth `Mixed` class, the classifier treats any non-counter dependency as forcing the per-iteration evaluation arm — because a closure that depends on a carried value cannot use the symbolic solver path regardless of whether the counter is also referenced. The two-class split (CounterOnly vs CarriedDependent) is what Phase 3b/3c actually need.
+
+- **Walker descends through `DxirCall.args` for completeness.** Today the FIR-side hoist doesn't produce `DxirCall` inside breakConds, but the IR shape supports it (a user could write a break predicate that calls a sub-function). Walking call args costs nothing structurally and prevents a "wrong classification because we missed a path" failure mode if call-bearing breakConds ever appear. Mirrors how `referencesId` in [PhiCalculus.kt:606](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L606) walks all operand edges defensively.
+
+- **Walker doesn't enter `DxirOp.regions`.** Block args declared inside a nested IF's then-region (e.g.) are out of scope for the cond region's analysis — they're bound by their own region. Operand walking stops at the boundary so we never confuse "the predicate uses an inner region's block arg" with "the predicate uses one of OUR cond args". This keeps the classifier robust against inner control flow inside breakCond.
+
+- **`data object` for the no-state classes.** The three non-constant classes carry no payload — they're sentinel values. Using `data object` (Kotlin 1.9+) gives them `toString()` / `equals` / `hashCode` for free and keeps the test assertions clean (`assertEquals(LoopInvariant, klass)` instead of identity checks). The sealed hierarchy stays exhaustive for future `when` consumers.
+
+- **Phase 3a is foundational, not closure-emitting.** This session deliberately doesn't change any production rewrite path — `coarsenFunction`'s WHILE handler still doesn't see `BreakCondClass`. Phase 3b will: it consumes the classifier's output to dispatch into "constant-fold the loop / evaluate-once / Symja-solve / runtime-fallback" arms. Carving Phase 3a cleanly means Phase 3b can land each arm independently without re-litigating the classification.
+
+**Tests added** (+8 new) in [BreakBearingWhileTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/BreakBearingWhileTest.kt):
+
+- `BreakBearingWhileTest.classifyConstantTrueBreakCond` — `breakCond = const(true)`. Pin: `Constant(alwaysBreaks = true)`, `breakIteration = 0`.
+- `BreakBearingWhileTest.classifyConstantFalseBreakCond` — `breakCond = const(false)`. Pin: `Constant(alwaysBreaks = false)`, `breakIteration = null`.
+- `BreakBearingWhileTest.classifyLoopInvariantBreakCondViaParam` — `breakCond = NOT(flagParam)` where `flagParam` is a function param. Pin: `LoopInvariant`.
+- `BreakBearingWhileTest.classifyLoopInvariantBreakCondViaOpOnConst` — `breakCond = STEP(threshold)` where `threshold` is a region-external `const`. Pin: `LoopInvariant` (NOT folded to `Constant` — that's a separate concern).
+- `BreakBearingWhileTest.classifyCounterOnlyBreakCond` — `breakCond = STEP(SUB(args[counterIdx], cap))`. Pin: `CounterOnly`.
+- `BreakBearingWhileTest.classifyCarriedDependentBreakCond` — `breakCond = STEP(args[0])` where `args[0]` is the f32 carried, counter at idx 1. Pin: `CarriedDependent`.
+- `BreakBearingWhileTest.classifyMixedCounterAndCarriedAsCarriedDependent` — `breakCond = LAND(STEP(args[0]), STEP(args[1]))` reaches both. Pin: collapses to `CarriedDependent`.
+- `BreakBearingWhileTest.classifyReturnsNullWhenCounterArgIdxIsNull` — foreign origCond shape leaves Phase 1.5 unmet. Pin: `classifyBreakCond` returns null.
+
+Full suite is green: **772 tests** (+8 over §0.4.125).
+
+**Recommended next pickup** (next /loop firing — D.3i Phase 3b begins):
+
+1. **D.3i Phase 3b — Constant + LoopInvariant closure arms.** Now that the classifier returns a typed enum, Phase 3b can wire the two trivially-resolved arms into `coarsenFunction`'s WHILE handler. For `Constant(alwaysBreaks = true)`: replace the WHILE with the inits (loop runs zero times). For `Constant(alwaysBreaks = false)`: rewrite the cond region to drop the LAND-NOT wrapper (loop becomes a vanilla bounded WHILE, eligible for the existing C5/C6 closures). For `LoopInvariant`: emit an outer IF that dispatches between zero-iteration and full-loop arms based on the predicate's runtime value. These are real, single-session-tractable arms because the rewrites are structural — no Symja required yet.
+2. **Multi-result COARSENED**.
+3. **`:benchmarks` Gradle module**.
+4. **HMC benchmark port — Phase 1**.
+
+**Definition-of-done for §0.4.126 — met**:
+- `BreakCondClass` sealed hierarchy with four typed cases lands ✓
+- `classifyBreakCond(pattern)` returns null when Phase 1.5/2 invariants unmet ✓
+- Walker descends through Op operands, OpResult sources, and Call args ✓
+- Walker does NOT descend into nested regions (scope discipline) ✓
+- `Constant.breakIteration` exposes the trivially-resolved closure value ✓
+- Mixed counter+carried collapses to `CarriedDependent` (no `Mixed` class) ✓
+- 8 tests pin each classification arm + the null precondition ✓
+- D.3i Phase 3b unblocked — closure arms can now dispatch on a typed enum ✓
+- Full suite stays green at 772 tests (+8) ✓
+
 #### 0.4.125 D.3i Phase 2 — counter init + back-edge validation 2026-04-25
 
 §0.4.124's Phase 1.5 extracted the counter index and trip-count bound from `origCond` when it matched the canonical `STEP(SUB(n, args[i]))` shape. But the WHILE op's CARRYING semantics weren't validated — a primal could pass Phase 1.5 with a counter init of `const(2)` (instead of 0) or a back-edge of `ADD(args[i], const(2))` (instead of +1). This session adds those two structural invariants. When either fails, the counter fields downgrade to null even though the LAND-NOT structural match still succeeds.

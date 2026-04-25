@@ -1,9 +1,11 @@
 package io.tlaloc.ir.passes
 
 import io.tlaloc.ir.DxirBlockArg
+import io.tlaloc.ir.DxirCall
 import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
+import io.tlaloc.ir.DxirOpResult
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.OpKind
 
@@ -51,6 +53,50 @@ object BreakBearingWhile {
         val tripCountConst: Int? = null,
         val tripCountParam: DxirParam? = null,
     )
+
+    /**
+     * §0.4.126 — D.3i Phase 3a. Dependency classification of the break predicate.
+     * Future closure phases dispatch on this to pick the right break-iteration
+     * computation strategy:
+     *  - [Constant] — folded at compile time; the closure is fully resolved (skip
+     *    the loop entirely or treat as a vanilla [OpKind.WHILE]).
+     *  - [LoopInvariant] — predicate is constant across iterations but only known
+     *    at runtime; the closure can evaluate it once before the loop and branch.
+     *  - [CounterOnly] — depends only on the counter block-arg (and loop-invariant
+     *    operands); break iteration is structurally derivable (Phase 3b: Symja).
+     *  - [CarriedDependent] — depends on at least one non-counter carried block-arg;
+     *    the break must stay per-iteration (Phase 3c: runtime fallback).
+     */
+    sealed class BreakCondClass {
+        /**
+         * The predicate folded down to a Boolean constant. [breakIteration] is `0`
+         * when the loop breaks unconditionally and `null` when it never breaks.
+         */
+        data class Constant(val alwaysBreaks: Boolean) : BreakCondClass() {
+            val breakIteration: Int? get() = if (alwaysBreaks) 0 else null
+        }
+
+        /**
+         * Predicate depends only on values stable across the loop body (function
+         * params, region-external constants, ops outside the [OpKind.WHILE]). The
+         * runtime arm can evaluate it once before the loop runs.
+         */
+        data object LoopInvariant : BreakCondClass()
+
+        /**
+         * Predicate depends only on the counter block-arg (plus loop-invariant
+         * values). The closure can solve symbolically for the smallest `k` where
+         * the predicate becomes true.
+         */
+        data object CounterOnly : BreakCondClass()
+
+        /**
+         * Predicate depends on at least one carried block-arg other than the
+         * counter — i.e., the break-iteration depends on accumulated state. The
+         * closure must keep per-iteration evaluation of the predicate.
+         */
+        data object CarriedDependent : BreakCondClass()
+    }
 
     /**
      * Recognise the LAND-composed break-bearing shape on [op]. Returns null if [op]
@@ -103,6 +149,56 @@ object BreakBearingWhile {
             tripCountConst = counter.tripCountConst,
             tripCountParam = counter.tripCountParam,
         )
+    }
+
+    /**
+     * §0.4.126 — D.3i Phase 3a. Classify [pattern]'s [Pattern.breakCond] by what
+     * it depends on within the cond region, so future closure phases can dispatch
+     * to the right break-iteration computation strategy.
+     *
+     * Returns null when [Pattern.counterArgIdx] is null — the classifier requires
+     * the Phase-1/1.5/2 invariants (see [Pattern]) to be satisfied so it can
+     * distinguish counter references from generic carried-arg references.
+     *
+     * The walk descends through [DxirOp.operands], [DxirOpResult.source], and
+     * [DxirCall.args], collecting the cond block-arg ids reached. It does NOT
+     * enter nested regions: [DxirOp.regions] are scoped, so any block args
+     * declared inside them are out of scope of the cond region's analysis.
+     */
+    fun classifyBreakCond(pattern: Pattern): BreakCondClass? {
+        val counterArgIdx = pattern.counterArgIdx ?: return null
+        val condBlock = pattern.whileOp.regions[0].blocks.single()
+        val condArgIds = condBlock.args.map { it.id }.toHashSet()
+        val counterArgId = condBlock.args[counterArgIdx].id
+
+        val reached = HashSet<Int>()
+        collectCondArgsReached(pattern.breakCond, condArgIds, reached, HashSet())
+
+        return when {
+            reached.isEmpty() -> {
+                val constBool = (pattern.breakCond as? DxirConst)?.value as? Boolean
+                if (constBool != null) BreakCondClass.Constant(alwaysBreaks = constBool)
+                else BreakCondClass.LoopInvariant
+            }
+            reached.all { it == counterArgId } -> BreakCondClass.CounterOnly
+            else -> BreakCondClass.CarriedDependent
+        }
+    }
+
+    private fun collectCondArgsReached(
+        node: DxirNode,
+        condArgIds: Set<Int>,
+        reached: MutableSet<Int>,
+        visited: MutableSet<Int>,
+    ) {
+        if (!visited.add(node.id)) return
+        when (node) {
+            is DxirBlockArg -> if (node.id in condArgIds) reached += node.id
+            is DxirOp -> for (operand in node.operands) collectCondArgsReached(operand, condArgIds, reached, visited)
+            is DxirOpResult -> for (operand in node.source.operands) collectCondArgsReached(operand, condArgIds, reached, visited)
+            is DxirCall -> for (arg in node.args) collectCondArgsReached(arg, condArgIds, reached, visited)
+            is DxirConst, is DxirParam -> Unit
+        }
     }
 
     /**

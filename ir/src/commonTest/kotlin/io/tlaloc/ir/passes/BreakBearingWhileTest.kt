@@ -26,6 +26,282 @@ class BreakBearingWhileTest {
     private fun findWhile(fn: io.tlaloc.ir.DxirFunction): DxirOp =
         fn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.WHILE }
 
+    // --- D.3i Phase 3a (§0.4.126) breakCond classification tests ---
+
+    @Test
+    fun classifyConstantTrueBreakCond() {
+        // breakCond is `const(true)` directly. Classifier returns Constant(true)
+        // with breakIteration = 0 — the loop breaks on iteration 0.
+        val fn = DxirBuilder.function("constTrueBreak") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(const(true, boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))!!
+        val klass = BreakBearingWhile.classifyBreakCond(pattern)
+        val constant = klass as BreakBearingWhile.BreakCondClass.Constant
+        assertEquals(true, constant.alwaysBreaks)
+        assertEquals(0, constant.breakIteration)
+    }
+
+    @Test
+    fun classifyConstantFalseBreakCond() {
+        // breakCond is `const(false)` directly. Classifier returns Constant(false)
+        // with breakIteration = null — the loop never breaks.
+        val fn = DxirBuilder.function("constFalseBreak") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(const(false, boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))!!
+        val klass = BreakBearingWhile.classifyBreakCond(pattern)
+        val constant = klass as BreakBearingWhile.BreakCondClass.Constant
+        assertEquals(false, constant.alwaysBreaks)
+        assertNull(constant.breakIteration)
+    }
+
+    @Test
+    fun classifyLoopInvariantBreakCondViaParam() {
+        // breakCond depends only on a function param (loop-invariant). Not a bare
+        // const so doesn't fold to Constant — classifier returns LoopInvariant.
+        val fn = DxirBuilder.function("loopInvBreak") {
+            val x = param("x", f32s)
+            val flag = param("flag", boolS)  // loop-invariant predicate
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(flag), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))!!
+        val klass = BreakBearingWhile.classifyBreakCond(pattern)
+        assertEquals(BreakBearingWhile.BreakCondClass.LoopInvariant, klass)
+    }
+
+    @Test
+    fun classifyLoopInvariantBreakCondViaOpOnConst() {
+        // breakCond is an op tree but reaches no cond block-arg — only constants.
+        // Not a bare DxirConst at the top, so classified as LoopInvariant
+        // (constant-folding the whole tree is out of Phase 3a's scope).
+        val fn = DxirBuilder.function("constTreeBreak") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val threshold = const(5, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    // STEP(threshold) — depends only on a region-external const.
+                    val brkInner = op(OpKind.STEP, listOf(threshold), boolS)
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))!!
+        val klass = BreakBearingWhile.classifyBreakCond(pattern)
+        assertEquals(BreakBearingWhile.BreakCondClass.LoopInvariant, klass)
+    }
+
+    @Test
+    fun classifyCounterOnlyBreakCond() {
+        // breakCond depends only on the counter block-arg (args[1]) plus a constant.
+        // Phase 3b/Symja can solve for the break iteration symbolically.
+        val fn = DxirBuilder.function("counterOnlyBreak") {
+            val x = param("x", f32s)
+            val n = const(10, i32s)
+            val zero = const(0, i32s)
+            val cap = const(3, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    // breakCond = STEP(SUB(args[1], cap)) — true when counter > cap.
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(args[1], cap), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))!!
+        val klass = BreakBearingWhile.classifyBreakCond(pattern)
+        assertEquals(BreakBearingWhile.BreakCondClass.CounterOnly, klass)
+    }
+
+    @Test
+    fun classifyCarriedDependentBreakCond() {
+        // breakCond reaches args[0] (the f32 carried, NOT the counter at args[1]).
+        // Closure must keep per-iteration evaluation of the predicate.
+        val fn = DxirBuilder.function("carriedBreak") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(OpKind.STEP, listOf(args[0]), boolS)
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))!!
+        val klass = BreakBearingWhile.classifyBreakCond(pattern)
+        assertEquals(BreakBearingWhile.BreakCondClass.CarriedDependent, klass)
+    }
+
+    @Test
+    fun classifyMixedCounterAndCarriedAsCarriedDependent() {
+        // breakCond reaches BOTH the counter (args[1]) and a non-counter carried
+        // (args[0]). Any non-counter dependency forces CarriedDependent — the
+        // classifier collapses the case rather than splitting "Mixed" out.
+        val fn = DxirBuilder.function("mixedBreak") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    // breakCond = LAND(STEP(args[0]), STEP(args[1])) — touches both.
+                    val brkA = op(OpKind.STEP, listOf(args[0]), boolS)
+                    val brkB = op(OpKind.STEP, listOf(args[1]), boolS)
+                    val brkInner = op(OpKind.LAND, listOf(brkA, brkB), boolS)
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))!!
+        val klass = BreakBearingWhile.classifyBreakCond(pattern)
+        assertEquals(BreakBearingWhile.BreakCondClass.CarriedDependent, klass)
+    }
+
+    @Test
+    fun classifyReturnsNullWhenCounterArgIdxIsNull() {
+        // Foreign origCond shape leaves Pattern.counterArgIdx null. classifyBreakCond
+        // requires Phase-1/1.5/2 invariants to be met — without a known counter index
+        // it can't distinguish counter from generic carried args. Returns null.
+        val fn = DxirBuilder.function("foreignCondForClassify") {
+            val x = param("x", f32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(OpKind.STEP, listOf(args[0]), boolS)
+                    val notBrk = op(OpKind.NOT, listOf(op(OpKind.STEP, listOf(args[1]), boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))!!
+        assertNull(pattern.counterArgIdx, "precondition: foreign cond shape leaves counterArgIdx null")
+        assertNull(BreakBearingWhile.classifyBreakCond(pattern))
+    }
+
     // --- D.3i Phase 2 (§0.4.125) validation tests ---
 
     @Test
