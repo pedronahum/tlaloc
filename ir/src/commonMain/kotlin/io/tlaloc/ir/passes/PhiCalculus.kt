@@ -1,6 +1,7 @@
 package io.tlaloc.ir.passes
 
 import io.tlaloc.ir.DxirBlock
+import io.tlaloc.ir.DxirBlockArg
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirCall
 import io.tlaloc.ir.DxirConst
@@ -303,12 +304,12 @@ object PhiCalculus {
         work = applyF1Pass(work)
         work = applyC3Pass(work)
         work = applyF1Pass(work)
-        // §0.4.127 — D.3i Phase 3b. Fold break-bearing WHILEs whose break predicate
-        // classifies as [BreakBearingWhile.BreakCondClass.Constant]: alwaysBreaks=true
-        // collapses the WHILE to its inits (zero iterations); alwaysBreaks=false drops
-        // the LAND-NOT wrapper from the cond region, exposing a vanilla bounded WHILE
-        // for the C5–C9 closures below to pick up in the same singlePass iteration.
-        work = applyBreakBearingConstantFoldPass(work)
+        // §0.4.127 — D.3i Phase 3b (Constant arms). §0.4.128 — D.3i Phase 3c
+        // (LoopInvariant arm). See [applyBreakBearingClosurePass] for the full
+        // dispatch on [BreakBearingWhile.classifyBreakCond]. Runs before C5–C9 so
+        // any newly-vanilla WHILEs produced by the closure flow through the
+        // standard corollaries in the same [singlePass] iteration.
+        work = applyBreakBearingClosurePass(work)
         // Engine-backed corollaries first (most specific first per plan §4.13). When
         // fired, they replace WHILEs with closed-form expressions — including for
         // SYMBOLIC trip counts, which C5's direct unroll cannot handle. C5 is the
@@ -495,89 +496,224 @@ object PhiCalculus {
         }
 
     // ------------------------------------------------------------------------
-    // §0.4.127 — D.3i Phase 3b. Constant-classified break-bearing WHILE folds.
+    // §0.4.127 — D.3i Phase 3b (Constant arms) + §0.4.128 — D.3i Phase 3c
+    // (LoopInvariant arm). Closure rewrites for break-bearing WHILEs.
     //
     // The FIR-side hoist for `while (cond) { ...; if (break_cond) break }` produces a
     // WHILE whose cond region is `LAND(origCond, NOT(breakCond))` (per [OpKind.LAND]'s
-    // source comment). When [BreakBearingWhile.classifyBreakCond] returns a Constant
-    // class, the closure is fully resolved at compile time and we can rewrite the IR
-    // without invoking Symja or runtime evaluation:
-    //  - alwaysBreaks=true  → loop runs zero times; results = inits.
-    //  - alwaysBreaks=false → drop the LAND-NOT wrapper; cond region terminator
-    //    becomes origCond. The resulting vanilla bounded WHILE flows into the
-    //    standard C5–C9 closures inside the same [singlePass] iteration.
-    //
-    // Non-Constant classifications (LoopInvariant / CounterOnly / CarriedDependent)
-    // are handled by later D.3i phases and bypass this pass.
+    // source comment). [BreakBearingWhile.classifyBreakCond] returns a typed enum that
+    // tells this pass how to rewrite the WHILE — three arms today, with CounterOnly
+    // and CarriedDependent left for later D.3i phases:
+    //  - Constant(alwaysBreaks=true)  → loop runs zero times; results = inits.
+    //  - Constant(alwaysBreaks=false) → drop the LAND-NOT wrapper; cond region
+    //    terminator becomes origCond. The resulting vanilla bounded WHILE flows
+    //    into the standard C5–C9 closures inside the same [singlePass] iteration.
+    //  - LoopInvariant → lift breakCond into outer scope and emit
+    //    `IF(breakCond, then=inits, else=vanillaWhile)`. The runtime evaluation of
+    //    breakCond happens once before the loop instead of every iteration.
     // ------------------------------------------------------------------------
 
-    private fun applyBreakBearingConstantFoldPass(fn: DxirFunction): DxirFunction {
-        // Pre-scan: only break-bearing WHILEs whose breakCond classifies as Constant.
-        // Foreign or non-Constant patterns are left for downstream phases.
-        val toFold = HashMap<Int, BreakBearingWhile.BreakCondClass.Constant>()
+    private fun applyBreakBearingClosurePass(fn: DxirFunction): DxirFunction {
+        // Pre-scan: collect break-bearing WHILEs whose breakCond classifies as
+        // Constant or LoopInvariant. Other classifications fall through to later
+        // D.3i phases.
+        val toRewrite = HashMap<Int, BreakBearingWhile.BreakCondClass>()
         for (n in fn.body) {
             if (n !is DxirOp) continue
             if (n.op != OpKind.WHILE) continue
             val pattern = BreakBearingWhile.detect(n) ?: continue
-            val klass = BreakBearingWhile.classifyBreakCond(pattern)
-                as? BreakBearingWhile.BreakCondClass.Constant ?: continue
-            toFold[n.id] = klass
+            val klass = BreakBearingWhile.classifyBreakCond(pattern) ?: continue
+            when (klass) {
+                is BreakBearingWhile.BreakCondClass.Constant,
+                BreakBearingWhile.BreakCondClass.LoopInvariant -> toRewrite[n.id] = klass
+                BreakBearingWhile.BreakCondClass.CounterOnly,
+                BreakBearingWhile.BreakCondClass.CarriedDependent -> Unit
+            }
         }
-        if (toFold.isEmpty()) return fn
+        if (toRewrite.isEmpty()) return fn
 
         return rewriteFunction(fn) { op, nodeMap, multiOut, builder ->
-            val klass = toFold[op.id] ?: return@rewriteFunction null
-            if (klass.alwaysBreaks) {
-                // Zero-iteration collapse: every result resolves to its init operand.
-                val perIndex = op.operands.map { init ->
-                    nodeMap[init.id]
-                        ?: error(
-                            "applyBreakBearingConstantFoldPass: init id=${init.id} for " +
-                                "WHILE id=${op.id} missing from nodeMap (broken SSA before fold)",
-                        )
-                }
-                multiOut[op.id] = perIndex
-                // Mirror the [applyC5Pass] convention: nodeMap[op.id] gets the index-0
-                // value (multiOut takes precedence for DxirOpResult refs at higher indices).
-                perIndex[0]
-            } else {
-                // Drop the LAND-NOT wrapper from the cond region. We re-clone the cond
-                // body verbatim (the LAND/NOT/const(false) ops become dead but stay in
-                // the cloned body — DxirInterpreter tolerates dead nodes, and Stage B.3
-                // DCE will strip them) and rebind the terminator to origCond's clone.
-                val origCondId = BreakBearingWhile.detect(op)!!.origCond.id
-                val condBlock = op.regions[0].blocks.single()
-                val newCondRegion = builder.region {
-                    val regionNodeMap = HashMap(nodeMap)
-                    for (a in condBlock.args) {
-                        regionNodeMap[a.id] = arg(a.type, a.sharding)
-                    }
-                    for (n in condBlock.body) {
-                        regionNodeMap[n.id] = cloneNode(n, regionNodeMap, this as DxirEmitter, multiOut)
-                    }
-                    val newTerm = regionNodeMap[origCondId]
-                        ?: error(
-                            "applyBreakBearingConstantFoldPass: origCond id=$origCondId not " +
-                                "found in cond region body for WHILE id=${op.id}",
-                        )
-                    yields(newTerm)
-                }
-                val newBodyRegion = cloneRegion(op.regions[1], nodeMap, builder, multiOut)
-                val clonedInits = op.operands.map { init ->
-                    nodeMap[init.id]
-                        ?: error(
-                            "applyBreakBearingConstantFoldPass: init id=${init.id} for " +
-                                "WHILE id=${op.id} missing from nodeMap",
-                        )
-                }
-                builder.opMulti(
-                    OpKind.WHILE,
-                    clonedInits,
-                    op.types,
-                    regions = listOf(newCondRegion, newBodyRegion),
+            when (val klass = toRewrite[op.id] ?: return@rewriteFunction null) {
+                is BreakBearingWhile.BreakCondClass.Constant -> rewriteConstantBreak(
+                    op, klass, nodeMap, multiOut, builder,
+                )
+                BreakBearingWhile.BreakCondClass.LoopInvariant -> rewriteLoopInvariantBreak(
+                    op, nodeMap, multiOut, builder,
+                )
+                else -> error(
+                    "applyBreakBearingClosurePass: unexpected class ${klass::class.simpleName} " +
+                        "for WHILE id=${op.id} — pre-scan and rewrite must agree on which " +
+                        "classes are handled",
                 )
             }
         }
+    }
+
+    /**
+     * §0.4.127 — Constant arm. `alwaysBreaks=true` collapses the WHILE to its inits
+     * via `multiOut` (loop runs zero times); `alwaysBreaks=false` rebuilds the WHILE
+     * with the LAND-NOT wrapper dropped from the cond region, leaving a vanilla
+     * bounded WHILE for the C5–C9 corollaries to close downstream in the same pass.
+     */
+    private fun rewriteConstantBreak(
+        op: DxirOp,
+        klass: BreakBearingWhile.BreakCondClass.Constant,
+        nodeMap: MutableMap<Int, DxirNode>,
+        multiOut: MutableMap<Int, List<DxirNode>>,
+        builder: DxirBuilder,
+    ): DxirNode {
+        if (klass.alwaysBreaks) {
+            val perIndex = op.operands.map { init ->
+                nodeMap[init.id]
+                    ?: error(
+                        "applyBreakBearingClosurePass: init id=${init.id} for WHILE id=${op.id} " +
+                            "missing from nodeMap (broken SSA before fold)",
+                    )
+            }
+            multiOut[op.id] = perIndex
+            // Mirror the [applyC5Pass] convention: nodeMap[op.id] gets the index-0
+            // value (multiOut takes precedence for DxirOpResult refs at higher indices).
+            return perIndex[0]
+        }
+        val origCondId = BreakBearingWhile.detect(op)!!.origCond.id
+        val condBlock = op.regions[0].blocks.single()
+        val newCondRegion = builder.region {
+            val regionNodeMap = HashMap(nodeMap)
+            for (a in condBlock.args) {
+                regionNodeMap[a.id] = arg(a.type, a.sharding)
+            }
+            for (n in condBlock.body) {
+                regionNodeMap[n.id] = cloneNode(n, regionNodeMap, this as DxirEmitter, multiOut)
+            }
+            val newTerm = regionNodeMap[origCondId]
+                ?: error(
+                    "applyBreakBearingClosurePass: origCond id=$origCondId not found in cond " +
+                        "region body for WHILE id=${op.id}",
+                )
+            yields(newTerm)
+        }
+        val newBodyRegion = cloneRegion(op.regions[1], nodeMap, builder, multiOut)
+        val clonedInits = op.operands.map { init ->
+            nodeMap[init.id]
+                ?: error(
+                    "applyBreakBearingClosurePass: init id=${init.id} for WHILE id=${op.id} " +
+                        "missing from nodeMap",
+                )
+        }
+        return builder.opMulti(
+            OpKind.WHILE,
+            clonedInits,
+            op.types,
+            regions = listOf(newCondRegion, newBodyRegion),
+        )
+    }
+
+    /**
+     * §0.4.128 — LoopInvariant arm. The breakCond predicate doesn't depend on any
+     * cond block-arg, so it evaluates to the same value every iteration. Lift it
+     * into outer scope and emit `IF(breakCond, then=inits, else=vanillaWhile)` —
+     * the predicate runs once before the loop, then either short-circuits the loop
+     * (yields the inits) or runs the loop with the LAND-NOT wrapper dropped.
+     *
+     * Lifting walks `Pattern.breakCond` post-order and clones any cond-region
+     * intermediate ops into outer scope. Leaf references that are already
+     * outer-scope ([DxirParam], outer [DxirConst], outer [DxirOp]) resolve through
+     * the outer [nodeMap]; region-internal ops get fresh outer-scope ids via
+     * [cloneNode]. Block-arg references inside breakCond would violate the
+     * LoopInvariant classification — the walker errors out as a defensive sanity
+     * check on the classifier's contract.
+     */
+    private fun rewriteLoopInvariantBreak(
+        op: DxirOp,
+        nodeMap: MutableMap<Int, DxirNode>,
+        multiOut: MutableMap<Int, List<DxirNode>>,
+        builder: DxirBuilder,
+    ): DxirNode {
+        val pattern = BreakBearingWhile.detect(op)!!
+        val origCondId = pattern.origCond.id
+        val condBlock = op.regions[0].blocks.single()
+        val condBodyById = condBlock.body.associateBy { it.id }
+        val condBodyIds = condBodyById.keys
+
+        // Post-order walk over breakCond, collecting cond-region-internal ids that
+        // need cloning into outer scope. LinkedHashSet preserves insertion order so
+        // the subsequent clone loop emits ops bottom-up (operands before users).
+        val toClone = LinkedHashSet<Int>()
+        val visited = HashSet<Int>()
+        fun walk(n: DxirNode) {
+            if (!visited.add(n.id)) return
+            if (n is DxirBlockArg) {
+                error(
+                    "applyBreakBearingClosurePass: LoopInvariant breakCond reaches block-arg " +
+                        "id=${n.id} for WHILE id=${op.id} — classifier contract violated",
+                )
+            }
+            if (n.id !in condBodyIds) return  // outer-scope leaf, in nodeMap already
+            when (n) {
+                is DxirOp -> {
+                    for (operand in n.operands) walk(operand)
+                    toClone.add(n.id)
+                }
+                is DxirOpResult -> walk(n.source)
+                is DxirCall -> {
+                    for (arg in n.args) walk(arg)
+                    toClone.add(n.id)
+                }
+                is DxirConst -> toClone.add(n.id)
+                is DxirParam -> Unit
+                is DxirBlockArg -> Unit  // unreachable; handled above
+            }
+        }
+        walk(pattern.breakCond)
+
+        // Clone collected region-internal ops into outer scope in topological order.
+        for (id in toClone) {
+            val node = condBodyById[id]
+                ?: error(
+                    "applyBreakBearingClosurePass: id=$id was collected as region-internal " +
+                        "but not found in condBlock.body for WHILE id=${op.id}",
+                )
+            nodeMap[id] = cloneNode(node, nodeMap, builder as DxirEmitter, multiOut)
+        }
+
+        val liftedBreakCond = resolveClonedOperand(pattern.breakCond, nodeMap, op.id, multiOut)
+        val clonedInits = op.operands.map { init ->
+            resolveClonedOperand(init, nodeMap, op.id, multiOut)
+        }
+
+        // then-arm: zero iterations, yield the inits as-is.
+        val thenRegion = builder.region {
+            yields(*clonedInits.toTypedArray())
+        }
+        // else-arm: vanilla bounded WHILE (LAND-NOT wrapper dropped), then yield its
+        // results. Same shape as [rewriteConstantBreak]'s alwaysBreaks=false case.
+        val elseRegion = builder.region {
+            val newCondRegion = region {
+                val regionNodeMap = HashMap(nodeMap)
+                for (a in condBlock.args) {
+                    regionNodeMap[a.id] = arg(a.type, a.sharding)
+                }
+                for (n in condBlock.body) {
+                    regionNodeMap[n.id] = cloneNode(n, regionNodeMap, this as DxirEmitter, multiOut)
+                }
+                val newTerm = regionNodeMap[origCondId]
+                    ?: error(
+                        "applyBreakBearingClosurePass: origCond id=$origCondId not found in " +
+                            "cond region body for WHILE id=${op.id}",
+                    )
+                yields(newTerm)
+            }
+            val newBodyRegion = cloneRegion(op.regions[1], nodeMap, this as DxirEmitter, multiOut)
+            val newWhile = (this as DxirEmitter).opMulti(
+                OpKind.WHILE,
+                clonedInits,
+                op.types,
+                regions = listOf(newCondRegion, newBodyRegion),
+            )
+            val whileResults = (0 until op.types.size).map { newWhile.result(it) }
+            yields(*whileResults.toTypedArray())
+        }
+        return builder.ifOp(liftedBreakCond, op.types, thenRegion, elseRegion)
     }
 
     // ------------------------------------------------------------------------
@@ -2119,11 +2255,24 @@ object PhiCalculus {
         if (ret is DxirOpResult) {
             multiOut[ret.source.id]?.let { return it[ret.index] }
         }
-        return nodeMap[ret.id]
+        val mapped = nodeMap[ret.id]
             ?: error(
                 "PhiCalculus.rewriteFunction: return id=${ret.id} not in nodeMap " +
                     "(broken SSA after rewrite)",
             )
+        if (ret !is DxirOpResult) return mapped
+        // §0.4.128 — when a multi-result op is cloned verbatim (no multiOut) the
+        // mapped node IS the cloned multi-result DxirOp; route through .result(k)
+        // so DxirOpResult returns at index k>=1 yield the correct per-index result.
+        return when {
+            mapped is DxirOp -> mapped.result(ret.index)
+            ret.index == 0 -> mapped
+            else -> error(
+                "PhiCalculus.rewriteFunction: return id=${ret.id} index=${ret.index} on " +
+                    "non-Op clone (mapped=${mapped::class.simpleName}); only index 0 is " +
+                    "tolerated for non-Op clones (e.g., C5 collapse)",
+            )
+        }
     }
 
     /**
@@ -2254,10 +2403,24 @@ object PhiCalculus {
                 if (it is DxirOpResult) {
                     multiOut[it.source.id]?.let { repl -> return@map repl[it.index] }
                 }
-                regionNodeMap[it.id]
+                val mapped = regionNodeMap[it.id]
                     ?: error(
                         "PhiCalculus.cloneRegion: terminator id=${it.id} not in regionNodeMap",
                     )
+                if (it !is DxirOpResult) return@map mapped
+                // §0.4.128 — multi-result op cloned verbatim into the region: route
+                // through .result(k) so DxirOpResult yields the correct per-index
+                // value rather than collapsing to the source op (whose .type is
+                // types[0]). Mirrors [resolveClonedOperand]'s tail logic.
+                when {
+                    mapped is DxirOp -> mapped.result(it.index)
+                    it.index == 0 -> mapped
+                    else -> error(
+                        "PhiCalculus.cloneRegion: terminator id=${it.id} index=${it.index} on " +
+                            "non-Op clone (mapped=${mapped::class.simpleName}); only index 0 " +
+                            "is tolerated for non-Op clones",
+                    )
+                }
             }
             yields(*terms.toTypedArray())
         }

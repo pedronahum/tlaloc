@@ -651,6 +651,141 @@ class PhiCalculusTest {
         assertEquals(32f, out[0][0])
     }
 
+    // ---- §0.4.128 — D.3i Phase 3c: LoopInvariant breakCond lift -----------------
+
+    /**
+     * Helper: build a break-bearing WHILE primal whose breakCond is a function param
+     * (loop-invariant Bool predicate). Counter increments by 1 from 0 to [n]; body
+     * doubles the f32 carried each iteration. With `flag=true`, the loop runs zero
+     * times → result = `x`. With `flag=false`, the loop runs `n` times → result =
+     * `x · 2^n`.
+     */
+    private fun breakBearingWithLoopInvariantBreak(n: Int): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakLoopInv_$n") {
+            val x = param("x", f32s)
+            val flag = param("flag", boolS)
+            val nConst = const(n, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nConst, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(flag), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    @Test
+    fun breakBearingClosureLiftsLoopInvariantParamBreakCondToOuterIf() {
+        // breakCond = `flag` (function param). Lift produces an outer IF whose
+        // then-arm yields x and else-arm runs the (now-vanilla) WHILE which C5
+        // unrolls in the same singlePass iteration.
+        val original = breakBearingWithLoopInvariantBreak(n = 5)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(0, countOps(rewritten, OpKind.WHILE), "WHILE replaced by IF + (unrolled vanilla loop)")
+        assertEquals(1, countOps(rewritten, OpKind.IF), "Lift produces exactly one outer IF at top level")
+        // flag=true (encoded as 1f) → loop never runs → result = x.
+        val outFlagTrue = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(3f), floatArrayOf(1f)))
+        assertEquals(3f, outFlagTrue[0][0])
+        // flag=false (encoded as 0f) → loop runs 5 iters → result = 3 · 2^5 = 96.
+        val outFlagFalse = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(3f), floatArrayOf(0f)))
+        assertEquals(96f, outFlagFalse[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(3f), floatArrayOf(1f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(3f), floatArrayOf(0f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(-2f), floatArrayOf(0f)))
+    }
+
+    @Test
+    fun breakBearingClosureLiftsRegionInternalOpInBreakCond() {
+        // breakCond = `STEP(threshold)` where threshold is a region-internal const
+        // declared inside the cond region. Lifting must clone both the const and
+        // the STEP op into outer scope so the IF's predicate is well-formed.
+        val original = DxirBuilder.function("regionInternalLift") {
+            val x = param("x", f32s)
+            val n = const(4, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    // threshold is built inside the cond region — its id lives in
+                    // condBlock.body and must be lifted to outer scope by the pass.
+                    val threshold = const(0, i32s)
+                    val brkInner = op(OpKind.STEP, listOf(threshold), boolS)
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(0, countOps(rewritten, OpKind.WHILE))
+        assertEquals(1, countOps(rewritten, OpKind.IF))
+        // STEP(0) = 0 (false) → IF takes else branch → loop runs 4 iters → 5 · 2^4 = 80.
+        val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f)))
+        assertEquals(80f, out[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(0f)))
+    }
+
+    @Test
+    fun breakBearingClosureLeavesCounterOnlyBreakCondAlone() {
+        // breakCond depends on the counter only — Phase 3c doesn't handle this
+        // class. The pass must leave the WHILE intact (later D.3i phases will).
+        val original = DxirBuilder.function("counterOnlyBreak") {
+            val x = param("x", f32s)
+            val nConst = const(7, i32s)
+            val zero = const(0, i32s)
+            val cap = const(3, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nConst, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(args[1], cap), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(1, countOps(rewritten, OpKind.WHILE), "CounterOnly is not handled by Phase 3c — WHILE stays")
+        assertEquals(0, countOps(rewritten, OpKind.IF), "no IF emitted for CounterOnly")
+    }
+
     @Test
     fun breakBearingConstantFoldEnablesEndToEndGradThroughBreakBearingLoop() {
         // alwaysBreaks=false + C5 → straight-line dxir → DxirReverseTransform

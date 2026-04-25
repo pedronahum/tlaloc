@@ -39,6 +39,80 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.128 D.3i Phase 3c — LoopInvariant breakCond lift + cloneRegion / resolveReturn fix 2026-04-25
+
+§0.4.127's pass handled the two `Constant` arms; Phase 3c adds the LoopInvariant arm. When `BreakBearingWhile.classifyBreakCond` returns `LoopInvariant`, the predicate evaluates to the same value every iteration, so we lift it into outer scope and emit `IF(breakCond, then=inits, else=vanillaWhile)` — predicate runs once before the loop, then either short-circuits (yields the inits) or falls through to a vanilla bounded WHILE that the C5–C9 corollaries close in the same `singlePass` iteration. The pass is now `applyBreakBearingClosurePass` (renamed from `applyBreakBearingConstantFoldPass` per §0.4.127, since "constant fold" no longer captures the LoopInvariant lift).
+
+A latent bug surfaced: `cloneRegion` and `resolveReturn` in [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt) didn't properly index `DxirOpResult` terminators / returns when `multiOut` was empty — they returned the source op directly instead of routing through `.result(k)`. This was masked because no prior rewrite path put a multi-result op inside an IF region whose terminator referenced its higher-index results. Phase 3c is the first to do so (the IF's else-region yields both `whileResult(0)` and `whileResult(1)`), and the bug fired immediately during the second `singlePass` iteration when F1 cloned the IF verbatim.
+
+**The mechanism** in [PhiCalculus.kt:497-722](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L497-L722). The renamed `applyBreakBearingClosurePass` now dispatches via a typed `when` over `BreakCondClass`:
+
+```kotlin
+when (val klass = toRewrite[op.id] ?: return@rewriteFunction null) {
+    is BreakBearingWhile.BreakCondClass.Constant -> rewriteConstantBreak(...)
+    BreakBearingWhile.BreakCondClass.LoopInvariant -> rewriteLoopInvariantBreak(...)
+    else -> error(...)
+}
+```
+
+`rewriteLoopInvariantBreak` lifts breakCond bottom-up via a post-order walk over the cond region's body. Cond-region-internal ids reachable from `breakCond` get cloned into outer scope through `cloneNode`; outer-scope leaves (params, region-external constants/ops) resolve through the existing outer `nodeMap`. A `LinkedHashSet` preserves insertion order so the clone loop emits ops in topological order (operands before users). After lifting, the IF wraps the inits and a fresh vanilla WHILE built using the same shape as §0.4.127's `alwaysBreaks=false` path:
+
+```kotlin
+val thenRegion = builder.region {
+    yields(*clonedInits.toTypedArray())  // zero iterations
+}
+val elseRegion = builder.region {
+    val newCondRegion = region { /* drop LAND-NOT, yield origCond */ }
+    val newBodyRegion = cloneRegion(op.regions[1], nodeMap, this as DxirEmitter, multiOut)
+    val newWhile = (this as DxirEmitter).opMulti(OpKind.WHILE, clonedInits, op.types, ...)
+    yields(*(0 until op.types.size).map { newWhile.result(it) }.toTypedArray())
+}
+return builder.ifOp(liftedBreakCond, op.types, thenRegion, elseRegion)
+```
+
+The fix to `cloneRegion` and `resolveReturn` mirrors `resolveClonedOperand`'s tail logic: when the `mapped` value for a `DxirOpResult` is itself a `DxirOp`, route through `.result(operand.index)`; else require `index == 0` and tolerate the C5-collapse case.
+
+**Decisions worth flagging**:
+
+- **`cloneRegion` / `resolveReturn` bug fix is the right scope for this session.** The bug was load-bearing for Phase 3c — it's not a workaround. Without the fix, ANY rewrite that puts a multi-result op inside an IF region (Phase 3c is the first; future Phase 3d/3e could be more) would corrupt the IR. Fixing it now closes a class of latent failures, not just the one this session triggered. Mirrors §0.4.127's interpreter Bool extension — a small targeted gap closed because the new functionality exposed it.
+
+- **Pass renamed from `applyBreakBearingConstantFoldPass` to `applyBreakBearingClosurePass`.** The Constant arms (Phase 3b) are folds; the LoopInvariant arm (Phase 3c) is a lift / IF emission, not a fold. "Closure" captures both — these are paper-faithful closure rewrites for break-bearing WHILEs, parallel to how the C-family corollaries close vanilla bounded WHILEs. The §0.4.127 doc references will read fine in retrospect; this rename is documented in the §0.4.128 commit and the internal comment block at [PhiCalculus.kt:497](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L497).
+
+- **Walker errors loudly on block-arg references inside breakCond.** The classifier promises `LoopInvariant` means "no cond block-arg reached". If the walker encounters a `DxirBlockArg` while traversing the breakCond tree, that's a classifier-contract violation — we throw rather than silently producing a malformed lift. Mirrors how `DxirInterpreter.evalNode` errors on unbound `DxirBlockArg` references at [DxirInterpreter.kt:147](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt#L147).
+
+- **No `multiOut` populated for the LoopInvariant arm.** The new IF op IS a multi-result `DxirOp` with the right types — `nodeMap[op.id] = ifResult` lets the framework's `resolveClonedOperand` route `DxirOpResult` references through `.result(k)` cleanly. Populating `multiOut` would be redundant. Compare with the `alwaysBreaks=true` arm which DOES need `multiOut` because the WHILE collapses to a list of non-Op values (the inits), and `nodeMap[op.id]` can only hold one of them.
+
+- **The vanilla WHILE inside the else-region remains opaque to top-level C5–C9.** C5 walks `fn.body` only — it doesn't recurse into IF region bodies. So the nested WHILE in the LoopInvariant rewrite stays as a WHILE in the final IR (interpreter handles it correctly via `evalIf` → `evalWhile`). When the user runs `flag=false`, the interpreter executes the loop iteratively. A future pass (region-recursive C5/C6) could close it, but that's out of scope for Phase 3c — the LoopInvariant rewrite is already a correctness win even without the inner closure.
+
+- **End-to-end gradient through LoopInvariant break is gated on multi-result IF AD.** `DxirReverseTransform` v1 rejects multi-result ops (the IF that wraps a counter+carried WHILE is multi-result by nature). Phase 3c can't pin the gradient flow today; closing that gap is a separate D.3i / SCT concern. The numerical-equivalence pins still cover the rewrite end-to-end via the interpreter.
+
+- **Bool param input in tests is encoded as `1f` / `0f`.** The interpreter's Bool encoding uses Float (per §0.4.127's NOT-op + WHILE pred conventions). The test inputs `floatArrayOf(1f)` / `floatArrayOf(0f)` for the `flag` param map to true / false. This matches the §0.4.127 extension that lets the interpreter consume Kotlin `Boolean` constants — both encodings now flow correctly through evaluation.
+
+**Tests added** (+3 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.breakBearingClosureLiftsLoopInvariantParamBreakCondToOuterIf` — `breakCond = flag` (function param, `n = 5`). Pin: zero WHILE ops + exactly 1 IF at top level; `eval(x=3, flag=true) = 3` (zero iter); `eval(x=3, flag=false) = 96` (5 iter, `3 · 2^5`); numerical agreement at three sample inputs.
+- `PhiCalculusTest.breakBearingClosureLiftsRegionInternalOpInBreakCond` — `breakCond = STEP(threshold)` where `threshold = const(0)` is built INSIDE the cond region. Pin: lift correctly clones BOTH the const and the STEP into outer scope; `eval(x=5) = 80` (`STEP(0) = 0` → false → 4 iter unrolled to `5 · 2^4`).
+- `PhiCalculusTest.breakBearingClosureLeavesCounterOnlyBreakCondAlone` — `breakCond = STEP(SUB(args[counter], cap))`. Pin: WHILE intact (Phase 3c doesn't handle CounterOnly); zero IF emitted. Confirms the dispatcher's `else -> Unit` arm correctly skips this case.
+
+Full suite is green: **780 tests** (+3 over §0.4.127).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **D.3i Phase 3d — CarriedDependent runtime fallback.** The remaining classifier arm. Rewrite shape: keep the WHILE but ensure the LAND-NOT cond region is preserved (no closure) — essentially a no-op fold but with explicit annotation that "this loop must run with per-iteration breakCond eval". Alternatively (more interesting): emit a vanilla WHILE whose body explicitly tests breakCond on a separate predicate carry. Multi-session-tractable; shipping the no-op annotation arm + a structural pin is the minimum increment.
+2. **Multi-result IF in `DxirReverseTransform`** — would unblock end-to-end gradient pins for §0.4.128's LoopInvariant rewrite (and §0.4.127's alwaysBreaks=false case for multi-input gradients).
+3. **Multi-result COARSENED**.
+4. **`:benchmarks` Gradle module**.
+
+**Definition-of-done for §0.4.128 — met**:
+- `applyBreakBearingClosurePass` (renamed) dispatches Constant + LoopInvariant arms ✓
+- `rewriteLoopInvariantBreak` lifts breakCond into outer scope via post-order walk ✓
+- LoopInvariant rewrite emits `IF(breakCond, then=inits, else=vanillaWhile)` ✓
+- `cloneRegion` and `resolveReturn` properly index `DxirOpResult` terminators / returns ✓
+- Block-arg reference inside breakCond errors loudly (classifier-contract sanity check) ✓
+- 3 tests pin the lift, region-internal-op clone, and CounterOnly skip ✓
+- D.3i Phase 3d unblocked — CarriedDependent is the only remaining classifier arm ✓
+- Full suite stays green at 780 tests (+3) ✓
+
 #### 0.4.127 D.3i Phase 3b — Constant-classified break-bearing WHILE folds 2026-04-25
 
 §0.4.126 shipped the typed `BreakCondClass` classifier. Phase 3b lights up the trivially-resolved arms — both `Constant` cases — by wiring a new fold pass into `PhiCalculus.singlePass`. With `alwaysBreaks=true` the WHILE collapses to its inits (zero iterations); with `alwaysBreaks=false` the LAND-NOT wrapper drops from the cond region, exposing a vanilla bounded WHILE that the existing C5–C9 closures pick up in the same pass iteration. The `LoopInvariant` and `CounterOnly` / `CarriedDependent` arms remain for Phase 3c.
