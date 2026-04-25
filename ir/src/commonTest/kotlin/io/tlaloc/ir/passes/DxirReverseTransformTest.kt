@@ -271,6 +271,76 @@ class DxirReverseTransformTest {
     }
 
     @Test
+    fun gradientOfRank3BatchedMatmulEmitsBatchedTransposes() {
+        // §0.4.137 — rank-3 batched matmul flows through the same MatmulRule.
+        // Permutation should be [0, 2, 1] (preserve batch axis, swap last two).
+        val rank3 = DxirType(F32, listOf(2, 2, 2))
+        val primal = DxirBuilder.function("sum_bmm") {
+            val a = param("a", rank3)
+            val b = param("b", rank3)
+            val ab = op(OpKind.MATMUL, listOf(a, b), rank3)
+            val s = op(OpKind.SUM, listOf(ab), f32)
+            listOf(s)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        val transposes = grad.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.TRANSPOSE }
+        assertEquals(2, transposes.size, "expected exactly 2 TRANSPOSEs for rank-3 batched matmul")
+        for (t in transposes) {
+            assertEquals(listOf(0, 2, 1), t.attrs["permutation"], "rank-3 permutation should be [0, 2, 1]")
+        }
+        // Numerical pin: at A = ones, B = ones, both rank-3 [2, 2, 2], the gradient
+        // of sum(A @@ B) is a rank-3 tensor of size 2 (the K dim) at every cell.
+        // dA[b, m, k] = sum_n B[b, k, n]; for B = ones, this is N = 2.
+        val out = DxirInterpreter.evalFunction(
+            grad,
+            listOf(FloatArray(8) { 1f }, FloatArray(8) { 1f }),
+        )
+        assertEquals(2, out.size, "two gradient returns")
+        for (g in out) {
+            assertEquals(8, g.size, "gradient shape matches rank-3 input")
+            for (v in g) assertEquals(2f, v, "every cell should be 2 (N=2)")
+        }
+    }
+
+    @Test
+    fun gradientOfRank4BatchedMatmulEmitsTransposesWithMultiBatchPermutation() {
+        // §0.4.138 — rank-4 batched matmul: (B0, B1, M, K) × (B0, B1, K, N).
+        // The MatmulRule generalises to any rank ≥ 2; for rank 4 the permutation
+        // becomes [0, 1, 3, 2] (preserve B0, B1; swap last two).
+        val rank4 = DxirType(F32, listOf(2, 3, 2, 2))   // (B0=2, B1=3, M=2, K=2)
+        val rank4B = DxirType(F32, listOf(2, 3, 2, 2)) // (B0=2, B1=3, K=2, N=2)
+        val primal = DxirBuilder.function("sum_rank4_matmul") {
+            val a = param("a", rank4)
+            val b = param("b", rank4B)
+            val ab = op(OpKind.MATMUL, listOf(a, b), rank4)
+            val s = op(OpKind.SUM, listOf(ab), f32)
+            listOf(s)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        val transposes = grad.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.TRANSPOSE }
+        assertEquals(2, transposes.size, "expected exactly 2 TRANSPOSEs for rank-4 batched matmul")
+        for (t in transposes) {
+            assertEquals(
+                listOf(0, 1, 3, 2),
+                t.attrs["permutation"],
+                "rank-4 permutation should be [0, 1, 3, 2] — preserve both batch axes",
+            )
+        }
+        // Numerical pin: at A = ones, B = ones, both rank-4 (2, 3, 2, 2). For each
+        // (b0, b1) batch slice (2×2 matmul of ones × ones), dA[b0, b1, m, k] =
+        // sum_n B[b0, b1, k, n] = N = 2.
+        val out = DxirInterpreter.evalFunction(
+            grad,
+            listOf(FloatArray(2 * 3 * 2 * 2) { 1f }, FloatArray(2 * 3 * 2 * 2) { 1f }),
+        )
+        assertEquals(2, out.size)
+        for (g in out) {
+            assertEquals(2 * 3 * 2 * 2, g.size)
+            for (v in g) assertEquals(2f, v, "every cell of the gradient should be N = 2")
+        }
+    }
+
+    @Test
     fun returnedFunctionPassesValidation() {
         // SSA ref-integrity is checked in DxirFunction's init {} block; if the transform
         // emits dangling references the construction throws. This test pins that the

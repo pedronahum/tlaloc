@@ -39,6 +39,59 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.138 `MatmulRule` generalised to any rank ≥ 2 2026-04-25
+
+§0.4.137 extended `MatmulRule` to rank-2 / rank-3 with a hard-coded branch on rank. The §0.4.135 substrate already accepted any rank; the §0.4.136 TRANSPOSE accepted arbitrary permutations. This session widens the rule's rank gate from `rank in 2..3` to `rank ≥ 2` and computes the permutation / batch-dim list mechanically from the operand rank: `perm = [0..r-3] + [r-1, r-2]`, batch dims `= a.dims[0..r-3]`. Rank-4+ batched matmul gradients now flow end-to-end through `DxirReverseTransform.apply` against a hand-built rank-4 primal.
+
+The Tracer surface gains nothing here — `bmm` remains rank-3 only — because no rank-4+ `bmm` consumer has surfaced yet. The substrate path (hand-built dxir) is exercised directly via the new test.
+
+**The mechanism** in [Vjp.kt:245-285](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt#L245-L285):
+
+```kotlin
+val rank = a.type.rank
+require(rank >= 2 && b.type.rank == rank) { … }
+val m = a.type.dims[rank - 2]
+val k = a.type.dims[rank - 1]
+val n = b.type.dims[rank - 1]
+val batchDims = if (rank == 2) emptyList() else a.type.dims.subList(0, rank - 2)
+val perm = (0 until rank - 2).toList() + listOf(rank - 1, rank - 2)
+```
+
+For rank-2: `batchDims = []`, `perm = [1, 0]` (existing). For rank-3: `batchDims = [B]`, `perm = [0, 2, 1]` (§0.4.137). For rank-4: `batchDims = [B0, B1]`, `perm = [0, 1, 3, 2]`. The TRANSPOSE + MATMUL chain shape is unchanged — only the permutation list and the batch-dim prefix scale with rank.
+
+**Decisions worth flagging**:
+
+- **No `Tracer` surface change.** `bmm` (Rank-3) stays as the only batched-matmul tracer. Adding rank-4+ tracer surfaces (e.g., `Rank4`-receiver bmm overloads) would multiply API surface without a use case. The substrate is the natural test surface for now — hand-built dxir functions exercise the rank-4 path directly. When a benchmark or user demands rank-4+ batched matmul on the autograd side, the Tracer extension is mechanical.
+
+- **Test pin uses ones-input shortcut.** With `A = ones` and `B = ones` of shape `(B0, B1, M, K)` and `(B0, B1, K, N)` respectively, every batch's matmul yields a `(M, N)` matrix of `K`. Sum-reducing the rank-4 result gives a scalar; the gradient w.r.t. each input is a uniform value computable in closed form. For rank-3: `dA = N`. For rank-4: same per-element value `N`. The numerical pin `every value == 2f` (with N=2) confirms the rule emits the right shape AND the values flow correctly through the batched MATMUL substrate (§0.4.135) and rank-N TRANSPOSE (§0.4.136). The closed-form math is what makes the test diagnose-able if a future regression breaks the chain.
+
+- **Permutation pattern is a list comprehension.** `(0 until rank - 2).toList() + listOf(rank - 1, rank - 2)` — preserve the leading `r-2` axes (batch), then swap the last two (M/K vs K/M). Same shape regardless of rank. Mirrors how the §0.4.135 emitter and §0.4.136 interpreter reasoned about batch dims.
+
+- **Two tests, one for rank-3 (regression of §0.4.137), one for rank-4 (new).** §0.4.137's existing GradTest tests covered Tracer-side rank-3 bmm forward + gradient values. The new tests are at the dxir level — they exercise the AD pipeline's MATMUL handling with hand-built primals. Splitting along the "rank-3 still works after the rank gate widened" + "rank-4 newly works" axes pins both invariants independently.
+
+**Tests added** (+2 new) in [DxirReverseTransformTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt):
+
+- `DxirReverseTransformTest.gradientOfRank3BatchedMatmulEmitsBatchedTransposes` — hand-built rank-3 primal `sum(A @@ B)` with both inputs as rank-3 `(2, 2, 2)`. Pin: 2 TRANSPOSE ops in the gradient body, both with `permutation = [0, 2, 1]`. Numerical: at `A = B = ones`, every cell of both gradients equals `2` (N=2).
+- `DxirReverseTransformTest.gradientOfRank4BatchedMatmulEmitsTransposesWithMultiBatchPermutation` — rank-4 primal with shapes `(2, 3, 2, 2)`. Pin: 2 TRANSPOSE ops, both with `permutation = [0, 1, 3, 2]`. Numerical: every cell of both gradients equals `2`.
+
+Full suite is green: **821 tests** (+2 over §0.4.137).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending. Highest-impact remaining D.3i work; would unblock end-to-end gradient pins for §0.4.128's LoopInvariant rewrite.
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+3. **`:benchmarks` Gradle module** — structural, extract one perf probe.
+4. **Rank-4+ bmm on the Tracer surface** — natural follow-on if a use case surfaces.
+
+**Definition-of-done for §0.4.138 — met**:
+- `MatmulRule` accepts any rank ≥ 2 with arbitrary batch axes ✓
+- Permutation + batch-dim prefix computed from rank, no hard-coded branches ✓
+- Rank-3 path identical to §0.4.137 (regression-pinned) ✓
+- Rank-4 path exercised end-to-end via hand-built primal ✓
+- 2 new tests pin permutation shape + numerical values ✓
+- No `Tracer` surface or `OpKind` changes ✓
+- Full suite stays green at 821 tests (+2) ✓
+
 #### 0.4.137 Tracer `bmm` + batched `MatmulRule` 2026-04-25
 
 §0.4.135 shipped batched MATMUL at the substrate; §0.4.136 generalised TRANSPOSE to rank-N. Both prerequisites were structural: a tracer-surface batched-matmul and its gradient now have everything they need from the IR side. This session lights up the user-facing piece: `infix fun Tracer<Rank3<…>>.bmm(other)` evaluates `(B, M, K) × (B, K, N) → (B, M, N)` and registers the result as an `OpKind.MATMUL` tape entry, while `MatmulRule` extends to recognise rank-3 operands and emit `[0, 2, 1]`-permuted batched-TRANSPOSEs alongside batched-MATMULs.
