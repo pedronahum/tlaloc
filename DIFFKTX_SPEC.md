@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.133 Scatter-into-zeros peephole in the StableHLO emitter 2026-04-25
+
+§0.4.122's deferred-register listed a "Scatter-into-zeros pattern" entry under the StableHLO emitter — the common case from `:autograd`'s SCATTER bridge that needed an arm. This session ships the arm: a one-paragraph peephole in `emitScatterAdd` that recognises `BROADCAST(const(0))` as the base and elides the `stablehlo.add` from the inner reducer block (since `0 + x = x`). The peephole's effect is purely structural — the lowered MLIR no longer carries a dead `cur` SSA value plus an `add`-then-return pair; it emits a single `stablehlo.return upd` instead, matching the SCATTER (replace) substrate's body shape.
+
+The canonical pattern this closes is what [GatherRule.kt:489-523](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt#L489-L523) emits as the gradient of every GATHER: `SCATTER_ADD(BROADCAST(zero, arr.type), idx, upstream)`. Every gradient flow through a GATHER hits this shape, so the peephole fires on the most-common SCATTER_ADD in the codebase.
+
+**The mechanism** in [Emitter.kt:960-993](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L960-L993). Two changes:
+
+1. New private helper `isZeroBroadcastBase(node)` recognises both forms of "zero base" — `BROADCAST(const(0.0f))` (the scalar-broadcast form GatherRule emits) and `BROADCAST(const(FloatArray(zeros)))` (the rank-N const form §0.4.71's Capture fix supports). Returns true only when the operand structure is a compile-time-known zeros tensor.
+
+2. `emitScatterAdd` consults the helper at the body-emission site:
+
+```kotlin
+if (isZeroBroadcastBase(node.operands[0])) {
+    out.appendLine("$step   stablehlo.return $upd : $scalarT")
+} else {
+    val sum = synth()
+    out.appendLine("$step   $sum = stablehlo.add $cur, $upd : $scalarT")
+    out.appendLine("$step   stablehlo.return $sum : $scalarT")
+}
+```
+
+When the peephole fires, the `cur` SSA name becomes a parameter that's never read in the block — perfectly legal MLIR, and what `stablehlo-translate` accepts on round-trip.
+
+**Decisions worth flagging**:
+
+- **Peephole is at the emitter, not at IR rewrite level.** This optimisation could in principle live as an IR pass (rewrite `SCATTER_ADD(BROADCAST(zero), …)` → `SCATTER(BROADCAST(zero), …)`). Doing it at the emitter keeps the IR's semantic homogeneity — every SCATTER_ADD in the IR represents the same operation regardless of base. The peephole is purely a lowering choice that says "for this specific input shape, the simpler MLIR body is equivalent". Mirrors how XLA itself encodes optimisations: many MLIR passes match-and-rewrite at lowering time, not in the source IR.
+
+- **Scope to substrate `emitScatterAdd` only.** The general `emitScatter` path (line 789) also emits a body for `reduction = "add"`, and could in principle benefit from the same peephole. But that path runs on attr-driven SCATTER ops with explicit dim-numbers; checking the base operand is just as easy, but no current code path emits a zero-base SCATTER through that route. Adding the peephole there would be speculative — leave for if/when a use case surfaces.
+
+- **`isZeroBroadcastBase` is intentionally narrow.** It checks only two forms: `BROADCAST(DxirConst(Number == 0))` and `BROADCAST(DxirConst(FloatArray of all zeros))`. More elaborate "is this expression provably zero" detection (e.g., `MUL(x, const(0))`, transitive zero propagation) is out of scope for an emitter peephole. The narrow form covers the canonical GatherRule output, which is what produces ~100% of zero-base SCATTER_ADDs in practice.
+
+- **The optimisation doesn't change semantics.** `0 + x = x` is exact for both float arithmetic (no rounding for additive identity with zero) and integer arithmetic. The MLIR result is bit-identical to the pre-peephole form. Test 3 (`scatterAddWithNonZeroBaseStillEmitsAddBody`) is the load-bearing pin against an over-eager match: when the base isn't zero, the add body must stay.
+
+- **No new public API.** `isZeroBroadcastBase` is a private helper inside the `Emitter` class. The peephole's effect is only visible through the emitted MLIR string — no `OpKind`, no attrs, no dxir-level changes. The IR pipeline produces the same SCATTER_ADD ops as before.
+
+**Tests added** (+4 new):
+
+In [EmitterTest.kt](stablehlo/src/commonTest/kotlin/io/tlaloc/stablehlo/EmitterTest.kt) (string-inspection of emitted MLIR, +3):
+
+- `EmitterTest.scatterAddIntoZeroBroadcastEmitsReplaceBody` — SCATTER_ADD with `BROADCAST(const(0f))` base. Pin: the scatter block contains no `stablehlo.add`; the inner body is `stablehlo.return upd` directly.
+- `EmitterTest.scatterAddWithNonZeroBaseStillEmitsAddBody` — SCATTER_ADD with a function-param base. Pin: the scatter block keeps the `stablehlo.add cur, upd` body — peephole must NOT fire.
+- `EmitterTest.scatterAddIntoNonZeroBroadcastDoesNotTriggerPeephole` — SCATTER_ADD with `BROADCAST(const(1f))` base. Pin: peephole only matches zero values; the add body stays.
+
+In [RoundTripTest.kt](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) (real-translator validation, +1):
+
+- `RoundTripTest.scatterAddIntoZeroBroadcastRoundTrips` — same input shape as the EmitterTest's first test, validated through the bundled `stablehlo-translate`. Pin: the peephole'd MLIR (with the dead `cur` operand and elided add) still parses + lowers correctly.
+
+Full suite is green: **799 tests** (+4 over §0.4.132).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending. Highest-impact remaining D.3i work; would unblock end-to-end gradient pins for §0.4.128's LoopInvariant rewrite.
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+3. **Multi-result COARSENED**.
+4. **`:benchmarks` Gradle module**.
+5. **Batched MATMUL** at the interpreter — the StableHLO emitter already supports batching/contracting attrs; the interpreter side stays rank-2.
+
+**Definition-of-done for §0.4.133 — met**:
+- `isZeroBroadcastBase` private helper recognises canonical zero-broadcast bases ✓
+- `emitScatterAdd` elides the `stablehlo.add` body when the base is provably zero ✓
+- Emitter tests pin both positive (zero base) and negative (non-zero, non-zero broadcast) cases ✓
+- Round-trip test confirms the peephole'd MLIR validates through `stablehlo-translate` ✓
+- No `OpKind`, attrs, or public API surface added ✓
+- Optimisation is purely structural — semantics preserved ✓
+- Full suite stays green at 799 tests (+4) ✓
+
 #### 0.4.132 Multi-dim GATHER / SCATTER / SCATTER_ADD generalised to rank-N 2026-04-25
 
 §0.4.111, §0.4.112, and §0.4.114 closed the rank-2 row-indexing arms for the autograd-emitted GATHER, SCATTER_ADD, and SCATTER substrates respectively. §0.4.122 left rank-3+ as a deferred entry. This session generalises all three substrate paths (interpreter + StableHLO emitter) to any rank ≥ 1 — `GATHER(arr: rank-r, idx: scalar I32) → rank-(r-1)` selects the slice at axis-0 position `idx`; `SCATTER` and `SCATTER_ADD` write a rank-(r-1) value into that slice. The dim-numbers shapes for `stablehlo.gather` / `stablehlo.scatter` parametrise cleanly: `update_window_dims = (0 until r-1)`, `slice_sizes = [1] + dims.drop(1)`, the rest stay the same as the rank-2 case.

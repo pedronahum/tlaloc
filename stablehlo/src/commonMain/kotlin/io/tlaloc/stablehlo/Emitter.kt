@@ -957,16 +957,51 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             append(">")
         }
 
-        val cur = synth(); val upd = synth(); val sum = synth()
+        val cur = synth(); val upd = synth()
         out.appendLine(
             """$step$name = "stablehlo.scatter"($base, $idx, $value) <{scatter_dimension_numbers = $dimNumbers, unique_indices = true}> ({""",
         )
         out.appendLine("$step ^bb0($cur: $scalarT, $upd: $scalarT):")
-        out.appendLine("$step   $sum = stablehlo.add $cur, $upd : $scalarT")
-        out.appendLine("$step   stablehlo.return $sum : $scalarT")
+        if (isZeroBroadcastBase(node.operands[0])) {
+            // §0.4.133 — scatter-into-zeros peephole. SCATTER_ADD with a base of
+            // BROADCAST(const(0), …) (the canonical shape produced by [GatherRule]'s
+            // adjoint) is structurally equivalent to a replace-body scatter, since
+            // 0 + x = x. Emit `return upd` directly so the lowered MLIR matches the
+            // SCATTER (replace) substrate's body — gives XLA's optimiser a head start
+            // and removes a dead `cur` SSA value from the inner block.
+            out.appendLine("$step   stablehlo.return $upd : $scalarT")
+        } else {
+            val sum = synth()
+            out.appendLine("$step   $sum = stablehlo.add $cur, $upd : $scalarT")
+            out.appendLine("$step   stablehlo.return $sum : $scalarT")
+        }
         out.appendLine(
             "$step }) : (${baseType.toMlir()}, ${idxType.toMlir()}, ${valueType.toMlir()}) -> ${node.type.toMlir()}",
         )
+    }
+
+    /**
+     * §0.4.133 — recognise the scatter-into-zeros base pattern: `BROADCAST(const(0))`
+     * (the canonical shape [GatherRule] emits for the gradient of GATHER) or a
+     * literal rank-N const tensor where every element is zero. Returns true if the
+     * operand is a compile-time-known zero tensor.
+     *
+     * This is intentionally narrow — only the BROADCAST-of-scalar-zero shape and
+     * the FloatArray-of-zeros shape match. More elaborate "is zero" detection
+     * (e.g., zero literal arithmetic, transitive zero propagation) is out of
+     * scope for this emitter peephole.
+     */
+    private fun isZeroBroadcastBase(node: io.tlaloc.ir.DxirNode): Boolean {
+        if (node !is DxirOp) return false
+        if (node.op != OpKind.BROADCAST) return false
+        if (node.operands.size != 1) return false
+        val operand = node.operands[0]
+        if (operand !is io.tlaloc.ir.DxirConst) return false
+        return when (val v = operand.value) {
+            is Number -> v.toDouble() == 0.0
+            is FloatArray -> v.all { it == 0f }
+            else -> false
+        }
     }
 
     /**

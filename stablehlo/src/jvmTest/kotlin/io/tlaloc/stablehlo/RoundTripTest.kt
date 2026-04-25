@@ -951,6 +951,30 @@ class RoundTripTest {
         validate(DxirModule(listOf(fn)).toStablehlo(), "SCATTER_ADD rank-3 substrate")
     }
 
+    // §0.4.133 — scatter-into-zeros peephole's emitted MLIR must still round-trip.
+
+    @Test
+    fun scatterAddIntoZeroBroadcastRoundTrips() {
+        requireTranslateOrSkip()
+        // The canonical [GatherRule] adjoint shape: SCATTER_ADD into BROADCAST(0).
+        // After §0.4.133's peephole, the inner body becomes `return upd` (no add).
+        // Confirm the optimised MLIR still parses + lowers through stablehlo-translate.
+        val fn = DxirBuilder.function("g") {
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, listOf(4)))
+            val zeroScalar = const(0f, DxirType(F32, emptyList()))
+            val zeroBase = op(
+                OpKind.BROADCAST,
+                listOf(zeroScalar),
+                DxirType(F32, listOf(3, 4)),
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val y = op(OpKind.SCATTER_ADD, listOf(zeroBase, idx, v), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "SCATTER_ADD into BROADCAST(0) peephole")
+    }
+
     @Test
     fun embeddingRoundTripsRankOneIndices() {
         requireTranslateOrSkip()

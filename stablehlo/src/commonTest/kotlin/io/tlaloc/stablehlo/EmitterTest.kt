@@ -1033,6 +1033,92 @@ class EmitterTest {
         )
     }
 
+    // §0.4.133 — scatter-into-zeros peephole tests.
+
+    @Test
+    fun scatterAddIntoZeroBroadcastEmitsReplaceBody() {
+        // The canonical [GatherRule] adjoint shape: SCATTER_ADD whose base is
+        // BROADCAST(const(0), arr.type). 0 + x = x, so the emitter elides the
+        // add op and emits a `return upd` body — same shape as plain SCATTER.
+        val fn = DxirBuilder.function("g") {
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, listOf(4)))
+            val zeroScalar = const(0f, DxirType(F32, emptyList()))
+            val zeroBase = op(
+                OpKind.BROADCAST,
+                listOf(zeroScalar),
+                DxirType(F32, listOf(3, 4)),
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val y = op(OpKind.SCATTER_ADD, listOf(zeroBase, idx, v), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        // Body: return upd directly, no `stablehlo.add` inside the scatter block.
+        // Find the scatter block and check its body lines.
+        val scatterStart = mlir.indexOf("\"stablehlo.scatter\"")
+        assertTrue(scatterStart >= 0, "expected stablehlo.scatter in: $mlir")
+        val scatterEnd = mlir.indexOf("})", scatterStart)
+        val scatterBlock = mlir.substring(scatterStart, scatterEnd)
+        assertTrue(
+            !scatterBlock.contains("stablehlo.add"),
+            "peephole should elide add inside the scatter body: $scatterBlock",
+        )
+        assertTrue(
+            scatterBlock.contains("stablehlo.return"),
+            "scatter body must still terminate with return: $scatterBlock",
+        )
+    }
+
+    @Test
+    fun scatterAddWithNonZeroBaseStillEmitsAddBody() {
+        // Counter-test: when the base is NOT a zero broadcast (e.g., a function
+        // param), the peephole must NOT fire — the add body is required for
+        // correctness.
+        val fn = DxirBuilder.function("g") {
+            val base = param("b", DxirType(F32, listOf(3, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, listOf(4)))
+            val y = op(OpKind.SCATTER_ADD, listOf(base, idx, v), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        val scatterStart = mlir.indexOf("\"stablehlo.scatter\"")
+        val scatterEnd = mlir.indexOf("})", scatterStart)
+        val scatterBlock = mlir.substring(scatterStart, scatterEnd)
+        assertTrue(
+            scatterBlock.contains("stablehlo.add"),
+            "non-zero base must keep the add body: $scatterBlock",
+        )
+    }
+
+    @Test
+    fun scatterAddIntoNonZeroBroadcastDoesNotTriggerPeephole() {
+        // BROADCAST of a non-zero const (e.g., 1.0) must NOT trigger the peephole —
+        // 1 + x ≠ x, so the add body is semantically required.
+        val fn = DxirBuilder.function("g") {
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, listOf(4)))
+            val oneScalar = const(1f, DxirType(F32, emptyList()))
+            val oneBase = op(
+                OpKind.BROADCAST,
+                listOf(oneScalar),
+                DxirType(F32, listOf(3, 4)),
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val y = op(OpKind.SCATTER_ADD, listOf(oneBase, idx, v), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        val scatterStart = mlir.indexOf("\"stablehlo.scatter\"")
+        val scatterEnd = mlir.indexOf("})", scatterStart)
+        val scatterBlock = mlir.substring(scatterStart, scatterEnd)
+        assertTrue(
+            scatterBlock.contains("stablehlo.add"),
+            "non-zero broadcast must keep the add body: $scatterBlock",
+        )
+    }
+
     @Test
     fun batchNorm2dEmitsInferenceOp() {
         val fn = DxirBuilder.function("bn") {
