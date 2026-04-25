@@ -1,6 +1,7 @@
 package io.tlaloc.autograd
 
 import io.tlaloc.core.Rank2
+import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
@@ -714,4 +715,51 @@ infix fun <R : ShapeAtom, K : ShapeAtom, C : ShapeAtom> Tracer<Rank2<R, K>>.matm
     }
     val e = tape.op(OpKind.MATMUL, intArrayOf(id, other.id), intArrayOf(m, n), out)
     return Tracer<Rank2<R, C>>(tape, e)
+}
+
+/**
+ * §0.4.137 — batched matrix multiply for rank-3 inputs. `(B, M, K) × (B, K, N) → (B, M, N)`.
+ * Records as [OpKind.MATMUL] in the tape (the same op kind that the rank-2 matmul uses);
+ * §0.4.135's substrate handles both ranks, and §0.4.137's [MatmulRule] extension
+ * recognises the rank-3 shape on the reverse pass and emits batched-TRANSPOSE +
+ * batched-MATMUL contributions for each operand.
+ */
+infix fun <B : ShapeAtom, R : ShapeAtom, K : ShapeAtom, C : ShapeAtom>
+    Tracer<Rank3<B, R, K>>.bmm(
+    other: Tracer<Rank3<B, K, C>>,
+): Tracer<Rank3<B, R, C>> {
+    require(rank == 3 && other.rank == 3) { "bmm requires rank-3 tensors" }
+    val tape = sameTape(this, other)
+    val batch = dims[0]
+    val m = dims[1]
+    val k = dims[2]
+    require(other.dims[0] == batch) {
+        "bmm batch dim mismatch: ${dims.toList()} x ${other.dims.toList()}"
+    }
+    require(other.dims[1] == k) {
+        "bmm inner dim mismatch: ${dims.toList()} x ${other.dims.toList()}"
+    }
+    val n = other.dims[2]
+
+    val a = entry.value
+    val bArr = other.entry.value
+    val out = FloatArray(batch * m * n)
+    for (bb in 0 until batch) {
+        val aBase = bb * m * k
+        val bBase = bb * k * n
+        val outBase = bb * m * n
+        for (i in 0 until m) {
+            for (p in 0 until k) {
+                val aip = a[aBase + i * k + p]
+                if (aip == 0f) continue
+                val rowOff = outBase + i * n
+                val bOff = bBase + p * n
+                for (j in 0 until n) {
+                    out[rowOff + j] += aip * bArr[bOff + j]
+                }
+            }
+        }
+    }
+    val e = tape.op(OpKind.MATMUL, intArrayOf(id, other.id), intArrayOf(batch, m, n), out)
+    return Tracer<Rank3<B, R, C>>(tape, e)
 }

@@ -1802,6 +1802,113 @@ class GradTest {
         assertEquals(7f, secondCall.fourth.hostF32()[0], "second dC = a*b = 7")
     }
 
+    // §0.4.137 — tracer-surface `bmm` (rank-3 batched matmul) + batched MatmulRule.
+
+    @Test
+    fun bmmForwardComputesPerBatchSlices() {
+        // Batch 0: a0 = [[1, 2, 3], [4, 5, 6]] (2×3), b0 = [[1, 0], [0, 1], [1, 1]] (3×2).
+        //   a0 @ b0 = [[1+0+3, 0+2+3], [4+0+6, 0+5+6]] = [[4, 5], [10, 11]].
+        // Batch 1: a1 = [[1, 1, 1], [2, 2, 2]] (2×3), b1 = [[1, 1], [1, 1], [1, 1]] (3×2).
+        //   a1 @ b1 = [[3, 3], [6, 6]].
+        val vg = valueAndGrad2 { a: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, b: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>> ->
+            (a bmm b).sum()
+        }
+        val a = io.tlaloc.core.Tensors.f32Tensor3<Sym, Sym, Sym>(
+            2, 2, 3,
+            floatArrayOf(
+                1f, 2f, 3f, 4f, 5f, 6f,
+                1f, 1f, 1f, 2f, 2f, 2f,
+            ),
+        )
+        val b = io.tlaloc.core.Tensors.f32Tensor3<Sym, Sym, Sym>(
+            2, 3, 2,
+            floatArrayOf(
+                1f, 0f, 0f, 1f, 1f, 1f,
+                1f, 1f, 1f, 1f, 1f, 1f,
+            ),
+        )
+        val (value, _, _) = vg(a, b)
+        // sum(batch 0) = 4 + 5 + 10 + 11 = 30; sum(batch 1) = 3 + 3 + 6 + 6 = 18; total = 48.
+        assertEquals(48f, value)
+    }
+
+    @Test
+    fun bmmGradientPropagatesThroughBatchedMatmul() {
+        // For f(A, B) = sum(A @@ B), the gradients are:
+        //   dA = ones(B, M, N) @@ B^T_batched = ones-row times sum of B's columns per batch.
+        //   dB = A^T_batched @@ ones(B, M, N) = sum of A's rows per batch.
+        //
+        // With B=2, M=2, K=3, N=2:
+        //   - For batch 0 of dA (shape M×K): each row is sum of B's columns = sum of B's columns per batch.
+        //     B_0 = [[1,0],[0,1],[1,1]] → column-sum row = [1+0+1, 0+1+1] = [2, 2] (sum across cols).
+        //     But dA[i, j] = sum_n B^T[j, n] = sum_n B[n, j]. For B=batch 0:
+        //       dA_0[*, 0] = sum_n B_0[n, 0] = 1 + 0 + 1 = 2 (every row, column 0 of dA).
+        //       dA_0[*, 1] = sum_n B_0[n, 1] = 0 + 1 + 1 = 2.
+        //       dA_0[*, 2] = sum_n B_0[n, 2-out-of-range]. Wait, B is K×N=3×2; reading via B^T's [j,n]
+        //                   means dA's row r and column k = sum_n B[k, n]. For B_0, column-k sums:
+        //                     k=0: B_0[0, *] = 1+0 = 1.
+        //                     k=1: B_0[1, *] = 0+1 = 1.
+        //                     k=2: B_0[2, *] = 1+1 = 2.
+        //       So dA_0 = [[1, 1, 2], [1, 1, 2]] (every row == [1, 1, 2]).
+        //     For B=batch 1, B_1 = [[1,1],[1,1],[1,1]] → row-sums [2, 2, 2]; dA_1 = [[2,2,2],[2,2,2]].
+        //   - Similar analysis for dB.
+        val grad = grad2 { a: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, b: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>> ->
+            (a bmm b).sum()
+        }
+        val a = io.tlaloc.core.Tensors.f32Tensor3<Sym, Sym, Sym>(
+            2, 2, 3,
+            floatArrayOf(
+                1f, 2f, 3f, 4f, 5f, 6f,
+                1f, 1f, 1f, 2f, 2f, 2f,
+            ),
+        )
+        val b = io.tlaloc.core.Tensors.f32Tensor3<Sym, Sym, Sym>(
+            2, 3, 2,
+            floatArrayOf(
+                1f, 0f, 0f, 1f, 1f, 1f,
+                1f, 1f, 1f, 1f, 1f, 1f,
+            ),
+        )
+        val (dA, dB) = grad(a, b)
+        // dA[batch=0] = [[1, 1, 2], [1, 1, 2]]; dA[batch=1] = [[2, 2, 2], [2, 2, 2]].
+        assertContentEquals(
+            floatArrayOf(
+                1f, 1f, 2f, 1f, 1f, 2f,
+                2f, 2f, 2f, 2f, 2f, 2f,
+            ),
+            dA.hostF32(),
+        )
+        // dB[k, n] = sum over m of A[m, k]:
+        // For batch 0, A_0 = [[1,2,3],[4,5,6]], column-sums per k = [5, 7, 9].
+        //   dB_0[k, *] = [5, 5; 7, 7; 9, 9] (every column-n entry equals the k-sum).
+        // For batch 1, A_1 = [[1,1,1],[2,2,2]], column-sums per k = [3, 3, 3].
+        //   dB_1[k, *] = [3, 3; 3, 3; 3, 3].
+        assertContentEquals(
+            floatArrayOf(
+                5f, 5f, 7f, 7f, 9f, 9f,
+                3f, 3f, 3f, 3f, 3f, 3f,
+            ),
+            dB.hostF32(),
+        )
+    }
+
+    @Test
+    fun bmmRejectsBatchOrInnerDimMismatch() {
+        // Inner dim mismatch: a is (B, M, K) and b is (B, K', N) with K ≠ K'.
+        val a = io.tlaloc.core.Tensors.f32Tensor3<Sym, Sym, Sym>(
+            2, 2, 3,
+            FloatArray(12),
+        )
+        val bBadInner = io.tlaloc.core.Tensors.f32Tensor3<Sym, Sym, Sym>(
+            2, 4, 2,  // K'=4, but lhs K=3
+            FloatArray(16),
+        )
+        val tape = Tape()
+        val ta = tape.traceLeaf<io.tlaloc.core.Rank3<Sym, Sym, Sym>>(a)
+        val tb = tape.traceLeaf<io.tlaloc.core.Rank3<Sym, Sym, Sym>>(bBadInner)
+        kotlin.test.assertFailsWith<IllegalArgumentException> { ta bmm tb }
+    }
+
     @Test
     fun valueAndGrad3RejectsNonScalarOutput() {
         // The contract requires a scalar return. A rank-1 return must throw.

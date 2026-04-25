@@ -235,8 +235,18 @@ object VjpRegistry {
      * body-ops. This matches the MulRule / DivRule pattern — contrast with SumRule /
      * MeanRule which only read shape metadata and declare `emptySet()`.
      *
-     * Rank-2 only: batched MATMUL (rank > 2 + batching/contracting attrs) would need a
-     * rank-aware TRANSPOSE + batched MATMUL in [DxirInterpreter] and is deferred.
+     * §0.4.137 — extended from rank-2 to rank-2-or-3 batched. Rank-3 inputs follow
+     * the canonical batched-matmul convention (§0.4.135): `(B, M, K) × (B, K, N) →
+     * (B, M, N)`. The TRANSPOSE permutation becomes `[0, 2, 1]` (swap last two axes,
+     * preserve batch axis); the MATMUL stays the same op kind because §0.4.135's
+     * substrate already handles both ranks. dA and dB carry the same leading batch
+     * axis as the primal operands.
+     *
+     * Higher ranks (rank-4+ batched matmul with multiple batch axes) would extend
+     * the same pattern (`permutation = [0, 1, …, r-1, r-2]`, batch dims preserved
+     * elementwise). Deferred until a use case demands it; the §0.4.135 substrate
+     * accepts any rank ≥ 2 and the §0.4.136 TRANSPOSE accepts any permutation, so
+     * extending here is structurally unblocked.
      *
      * Declared before [rules] because Kotlin initialises `object` properties in source
      * order; a forward reference from `rules` to a later val fails to compile
@@ -247,28 +257,32 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
             val b = op.operands[1]
-            require(a.type.rank == 2 && b.type.rank == 2) {
-                "MatmulRule: rank-2 operands required, got ${a.type.dims} x ${b.type.dims}"
+            val rank = a.type.rank
+            require(rank in 2..3 && b.type.rank == rank) {
+                "MatmulRule: rank-2 or rank-3 operands required (matching ranks), got " +
+                    "${a.type.dims} x ${b.type.dims}"
             }
             val dtype = upstream.type.dtype
-            val m = a.type.dims[0]
-            val k = a.type.dims[1]
-            val n = b.type.dims[1]
-            val transposeAttrs = mapOf("permutation" to listOf(1, 0))
+            val m = a.type.dims[rank - 2]
+            val k = a.type.dims[rank - 1]
+            val n = b.type.dims[rank - 1]
+            val batchDims = if (rank == 3) listOf(a.type.dims[0]) else emptyList()
+            val perm = if (rank == 2) listOf(1, 0) else listOf(0, 2, 1)
+            val transposeAttrs = mapOf("permutation" to perm)
             val aT = builder.op(
                 OpKind.TRANSPOSE,
                 listOf(a),
-                DxirType(dtype, listOf(k, m)),
+                DxirType(dtype, batchDims + listOf(k, m)),
                 attrs = transposeAttrs,
             )
             val bT = builder.op(
                 OpKind.TRANSPOSE,
                 listOf(b),
-                DxirType(dtype, listOf(n, k)),
+                DxirType(dtype, batchDims + listOf(n, k)),
                 attrs = transposeAttrs,
             )
-            val dA = builder.op(OpKind.MATMUL, listOf(upstream, bT), DxirType(dtype, listOf(m, k)))
-            val dB = builder.op(OpKind.MATMUL, listOf(aT, upstream), DxirType(dtype, listOf(k, n)))
+            val dA = builder.op(OpKind.MATMUL, listOf(upstream, bT), DxirType(dtype, batchDims + listOf(m, k)))
+            val dB = builder.op(OpKind.MATMUL, listOf(aT, upstream), DxirType(dtype, batchDims + listOf(k, n)))
             return listOf(a to dA, b to dB)
         }
     }

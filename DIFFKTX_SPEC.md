@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.137 Tracer `bmm` + batched `MatmulRule` 2026-04-25
+
+§0.4.135 shipped batched MATMUL at the substrate; §0.4.136 generalised TRANSPOSE to rank-N. Both prerequisites were structural: a tracer-surface batched-matmul and its gradient now have everything they need from the IR side. This session lights up the user-facing piece: `infix fun Tracer<Rank3<…>>.bmm(other)` evaluates `(B, M, K) × (B, K, N) → (B, M, N)` and registers the result as an `OpKind.MATMUL` tape entry, while `MatmulRule` extends to recognise rank-3 operands and emit `[0, 2, 1]`-permuted batched-TRANSPOSEs alongside batched-MATMULs.
+
+**The mechanism**:
+
+[TracedOps.kt:719-762](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt#L719-L762) — `Tracer<Rank3<B, R, K>>.bmm` mirrors `matmul`'s shape exactly: validate dims, evaluate the forward into a `FloatArray` with a triple-nested loop offset by `aBase`/`bBase`/`outBase`, register the tape entry. The same `OpKind.MATMUL` tape entry kind is reused — §0.4.135's interpreter substrate handles both ranks, so no new op kind is needed.
+
+[Vjp.kt:245-280](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt#L245-L280) — `MatmulRule` becomes rank-aware: it extracts `m`, `k`, `n` from `dims[rank-2..rank-1]`, computes the batch dims (empty for rank-2, `[B]` for rank-3), and picks the permutation (`[1, 0]` for rank-2, `[0, 2, 1]` for rank-3). The TRANSPOSE + MATMUL chain shape is identical between ranks; only the dim-extraction and the permutation change:
+
+```kotlin
+val rank = a.type.rank
+require(rank in 2..3 && b.type.rank == rank) { … }
+val m = a.type.dims[rank - 2]
+val k = a.type.dims[rank - 1]
+val n = b.type.dims[rank - 1]
+val batchDims = if (rank == 3) listOf(a.type.dims[0]) else emptyList()
+val perm = if (rank == 2) listOf(1, 0) else listOf(0, 2, 1)
+val aT = builder.op(OpKind.TRANSPOSE, listOf(a), DxirType(dtype, batchDims + listOf(k, m)), …)
+val bT = builder.op(OpKind.TRANSPOSE, listOf(b), DxirType(dtype, batchDims + listOf(n, k)), …)
+val dA = builder.op(OpKind.MATMUL, listOf(upstream, bT), DxirType(dtype, batchDims + listOf(m, k)))
+val dB = builder.op(OpKind.MATMUL, listOf(aT, upstream), DxirType(dtype, batchDims + listOf(k, n)))
+```
+
+**Decisions worth flagging**:
+
+- **`bmm` reuses `OpKind.MATMUL` rather than introducing a new op kind.** §0.4.135's interpreter MATMUL already accepts rank-3 with the canonical batched shape, and the StableHLO emitter's no-attrs path emits the right `dot_general` attrs. The op-kind dispatch is shape-aware. Adding a new `OpKind.BMM` would duplicate code paths without semantic benefit. Mirrors how the rank-2 vs rank-3 GATHER (§0.4.132) shared a single op kind.
+
+- **Rank-2 vs rank-3 dispatch in `MatmulRule` is shape-driven, not op-kind-driven.** The rule reads `a.type.rank` to pick the gradient shape. This keeps the rule registry's dispatch table simple — `OpKind.MATMUL` always routes to `MatmulRule`, regardless of rank. A future rank-4+ extension would slot into the same rule with a wider permutation pattern.
+
+- **Higher ranks deferred but structurally unblocked.** For rank-N batched matmul (multiple batch axes), the permutation generalises to `[0, …, r-1, r-2]` (swap last two, preserve all prior). Both the substrate (§0.4.135) and TRANSPOSE (§0.4.136) accept any valid permutation, so extending MatmulRule to rank-4+ is a one-line change; deferred until a use case demands it.
+
+- **No new public API beyond `bmm`.** `bmm` is an extension function on `Tracer<Rank3>`. The signature uses `infix` (matching `matmul`'s convention) and four type parameters `<B, R, K, C>` for the four shape atoms. `Quadruple` from §0.4.134 isn't reused; the bmm result is a `Tracer<Rank3<B, R, C>>` directly.
+
+- **Gradient pin uses concrete arithmetic.** `bmmGradientPropagatesThroughBatchedMatmul` doesn't compare against autodiff approximations; it computes the expected gradient by hand from the chain rule and pins each element. Both `dA` and `dB` are pinned for two distinct batches, so a regression in either the rule's transpose permutation or the batched MATMUL math fires the test.
+
+**Tests added** (+3 new) in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+- `GradTest.bmmForwardComputesPerBatchSlices` — `(2, 2, 3) bmm (2, 3, 2)` → `(2, 2, 2)`. Pin: `(a bmm b).sum() = 48` (per-batch sums 30 + 18). Confirms forward semantics match the rank-3 batched-matmul convention.
+- `GradTest.bmmGradientPropagatesThroughBatchedMatmul` — same primal as above, gradient via `grad2 { a, b -> (a bmm b).sum() }`. Pin: dA = `[[1,1,2,1,1,2], [2,2,2,2,2,2]]` (per-batch), dB = `[[5,5,7,7,9,9], [3,3,3,3,3,3]]` (per-batch). Confirms the batched MatmulRule emits correct TRANSPOSE-MATMUL chains for both operands.
+- `GradTest.bmmRejectsBatchOrInnerDimMismatch` — `(2, 2, 3) bmm (2, 4, 2)` (K=3 vs K'=4). Pin: throws `IllegalArgumentException`.
+
+Full suite is green: **819 tests** (+3 over §0.4.136).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending. Highest-impact remaining D.3i work; would unblock end-to-end gradient pins for §0.4.128's LoopInvariant rewrite.
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+3. **Higher-rank batched MatmulRule** — natural follow-on to §0.4.137 if a use case for rank-4+ batched matmul surfaces.
+4. **`:benchmarks` Gradle module**.
+
+**Definition-of-done for §0.4.137 — met**:
+- `Tracer<Rank3<…>>.bmm` infix function evaluates batched matmul forward and registers an `OpKind.MATMUL` tape entry ✓
+- `MatmulRule` extended to handle rank-3 with `[0, 2, 1]` permutation and batched MATMUL contributions ✓
+- 3 new tests pin forward, gradient, and shape-mismatch rejection ✓
+- No new `OpKind`; tracer surface and rule both rank-dispatch internally ✓
+- §0.4.135's substrate + §0.4.136's TRANSPOSE generalisation are now end-to-end exercised through gradient flow ✓
+- Higher ranks deferred but structurally unblocked ✓
+- Full suite stays green at 819 tests (+3) ✓
+
 #### 0.4.136 DxirInterpreter TRANSPOSE generalised to rank-N 2026-04-25
 
 §0.4.135 shipped batched MATMUL at the interpreter + emitter no-attrs path. The natural follow-on for end-to-end batched-matmul gradient flow needs batched TRANSPOSE — `MatmulRule`'s gradient emits `TRANSPOSE(perm = [1, 0])` on each operand, so a future batched MatmulRule will emit `TRANSPOSE(perm = [0, 2, 1])`-style permutations to swap the last two axes per batch. The StableHLO emitter side already handles arbitrary permutations (via `intListAttr(node, "permutation")` at [Emitter.kt:1786-1804](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L1786-L1804)); this session closes the interpreter gap with a stride-based rank-N implementation.
