@@ -39,6 +39,78 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.151 Out-of-scope register refresh — 28 items shipped since §0.4.122 2026-04-25
+
+§0.4.108 was the second register snapshot; §0.4.122 was the third (after 13 sub-sections). §0.4.151 is the fourth: 28 sub-sections shipped between §0.4.123 and §0.4.150 (the largest gap to date), with the **D.3i closed-form closure for break-bearing WHILE** moving from "Pending; paper-faithful" to "every realistic operand kind covered" and the **`:benchmarks` Gradle module** moving from deferred to a 4-file substrate. This refresh updates the deferred snapshot accordingly and surfaces a fresh recommended-next list for what remains genuinely deferred.
+
+**Refreshed register (as of §0.4.150)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan. |
+| Tensor ops | Multi-dim GATHER/SCATTER (rank-3+) | Rank-1 covered §0.4.41–§0.4.42; rank-2 covered §0.4.111 / §0.4.114; rank-N covered §0.4.132. **Closed.** |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Synthesis-side gated on rank-1-only fast path; multi-session widening. Tracer-surface side covered. |
+| Tensor ops | Batched MATMUL | Rank-2 + rank-3 + rank-N covered §0.4.135 / §0.4.137 / §0.4.138. **Closed.** |
+| StableHLO emitter | Scatter-into-zeros pattern | Shipped §0.4.133. **Closed.** |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Region-internal CSE for WHILE | Phase 1 (IF) §0.4.118; Phase 2 (COARSENED nested fns) §0.4.119; WHILE shipped §0.4.129. **Closed.** |
+| PhiCalculus | Multi-result IF AD | Single-live-index Phase 1 (top-level) §0.4.139; Phase 2 (recursive nested single-result IF) §0.4.140; Phase 3 (nested MR IF, single-live-index) §0.4.144. **Multi-live-index gradAccum refactor** still pending. |
+| PhiCalculus | Multi-result COARSENED | Single-result covered §0.4.31; multi-result needs `gradAccum` per-(id, index) keying — same refactor as multi-live-index MR IF. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | Case-by-case for unusual nests. |
+| Control flow | Multi-block regions | Single-block today. |
+| Closure work | **D.3i closed-form closure** for LAND-composed WHILE | Phases 3a–3j shipped §0.4.123–§0.4.150. Every realistic operand-kind combination for `n` × `threshold` (Const / Param / Op / OpResult on each side, region-internal lift + outer-scope resolve) covered. **Multi-result IF AD Phase 4 — nested WHILE in branch** still pending (would unblock §0.4.128's gradient flow end-to-end). |
+| Infrastructure | `:benchmarks` Gradle module | Shipped §0.4.145; three inhabitants covering end-to-end / coarsening / SCT throughput; consolidation §0.4.148. **Closed**, future inhabitants are incremental. |
+| Benchmark ports | **HMC / CartPole / QWOP** | Paper's three remaining benchmarks; multi-session each. |
+| Tracer surface | `valueAndGrad3` / `grad3` (3-tensor inputs) | Shipped §0.4.134. **Closed.** |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.122 and §0.4.150** (28 sub-sections, six themed clusters):
+
+- **D.3i closed-form closure (Phases 3a–3j)** — §0.4.123–§0.4.150 bar the cluster tangents below. The detector substrate landed in §0.4.123–§0.4.126; counter / break-cond classification in §0.4.124 / §0.4.125 / §0.4.126; Constant-arm folds in §0.4.127; LoopInvariant lift in §0.4.128; CounterOnly arms across the operand-kind matrix in §0.4.131 (Const + Const) / §0.4.141 (symbolic-bound IF chain) / §0.4.142 (DxirOp threshold) / §0.4.143 (DxirOp n) / §0.4.149 (DxirOpResult threshold) / §0.4.150 (DxirOpResult n).
+- **Multi-result IF AD (Phases 1–3)** — §0.4.139 (top-level single-live-index) / §0.4.140 (recursive nested single-result IF) / §0.4.144 (nested MR IF, single-live-index).
+- **Region-internal CSE — Phase 3 (WHILE)** — §0.4.129. Closed the §0.4.118 / §0.4.119 series.
+- **`cseRegion` DxirOpResult terminator bug** — §0.4.130. Latent fix uncovered by the §0.4.128 LoopInvariant rewrite's MR IF output.
+- **Tracer surface widening** — §0.4.132 (multi-dim GATHER/SCATTER rank-N) / §0.4.133 (scatter-into-zeros emitter peephole) / §0.4.134 (`valueAndGrad3` / `grad3`) / §0.4.135 (batched MATMUL substrate) / §0.4.136 (rank-N TRANSPOSE) / §0.4.137 (Tracer `bmm` + batched MatmulRule) / §0.4.138 (MatmulRule rank ≥ 2).
+- **`:benchmarks` Gradle module** — §0.4.145 (substrate + first inhabitant) / §0.4.146 (second: coarsening throughput) / §0.4.147 (third: SCT throughput) / §0.4.148 (consolidation: extract `BenchmarkPrimals.kt`).
+
+**Decisions worth flagging**:
+
+- **D.3i closed-form closure is now structurally complete for CounterOnly.** The Phase 3a–3j series closed every realistic operand-kind combination on the FIR-side hoist's `STEP(SUB(n, args[counter]))` shape. The remaining D.3i piece is "nested WHILE in IF branch" — i.e., when §0.4.128's LoopInvariant rewrite's else-region carries a vanilla WHILE through to AD. That's Multi-result IF AD Phase 4, which the recommended-next list keeps surfacing as the headline gap. Phase 4 is multi-session because it requires either (a) coarsening the inner WHILE before AD reaches it (cross-pass change to `PhiCalculus.coarsenFunction` to recurse into IF regions) or (b) WHILE-aware AD inside `walkBranchReverse` (structurally bigger; needs reverse iteration semantics).
+
+- **Multi-live-index MR IF AD is the other multi-session arc.** §0.4.139 / §0.4.140 / §0.4.144 used a single-live-index policy to sidestep the `gradAccum: Map<Int, DxirNode>` → `Map<Pair<Int, Int>, DxirNode>` refactor. Per-index gradAccum would also unlock multi-result COARSENED (the §0.4.122 register's "multi-result COARSENED" deferred entry pointed at the same refactor). One refactor, two unlocked items — making it strictly more valuable than its scope suggests.
+
+- **`:benchmarks` substrate is Done.** Three inhabitants cover the three regression-prone phases (coarsening, SCT, end-to-end) at three n scales each. `BenchmarkPrimals.kt` (§0.4.148) consolidates the shared primal builder. Future inhabitants can ship one at a time as new shapes / paths surface; the substrate's structural goal is met.
+
+- **The deferred count went from ~22 (§0.4.122) to ~12 (§0.4.151).** Items closed entirely: multi-dim GATHER/SCATTER, batched MATMUL, scatter-into-zeros, region-internal CSE, valueAndGrad3, `:benchmarks`. Items partially closed: D.3i (Phases 3a–3j shipped, Phase 4 pending), MR IF AD (Phases 1–3 shipped, multi-live-index refactor pending), cross-rank broadcast (rank-3↔rank-1/2 closed §0.4.116/117). The remaining 12 items are dominated by multi-session arcs (HMC / CartPole / QWOP benchmark ports, diagnosticReporter migration, multi-live-index gradAccum) plus speculative ones (F64 tape, Rank-4+ constructors, cross-framework baselines).
+
+- **Naming convention shipped: `Phase 3X` for D.3i sub-arms.** §0.4.131 / §0.4.141 / §0.4.142 / §0.4.143 / §0.4.149 / §0.4.150 each picked a single-letter sub-arm label (3e / 3f / 3g / 3h / 3i / 3j). Future MR IF AD work follows the same pattern (Phases 1 / 2 / 3 in §0.4.139 / §0.4.140 / §0.4.144). The convention scales — Phase 4 nested WHILE would be the next number.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **841 tests** (unchanged from §0.4.150).
+
+**Recommended next pickup** (these are the items that justify multi-session focus):
+
+1. **Multi-result IF AD Phase 4 — nested WHILE in IF branch.** Unblocks §0.4.128's LoopInvariant rewrite's gradient flow end-to-end. Multi-session; the cleanest sub-phase to land first is region-recursive C5 (extend `applyC5Pass`'s pre-scan + rewrite to walk IF region bodies, not just `fn.body`).
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.** Unlocks BOTH Multi-result IF AD Phase 1+ and Multi-result COARSENED. The refactor is mechanical (every `gradAccum[id]` becomes `gradAccum[id to k]`) but widespread (~15-20 sites in `DxirReverseTransform.kt`).
+3. **Out-of-scope register cadence.** The register has fired four times now (§0.4.108 / §0.4.122 / §0.4.151 / future). Future refreshes should fire when an item moves from deferred to shipped (or vice versa) — not on a fixed cadence. The point of the register is to keep one canonical view of "what's outstanding"; refreshing it when the truth changes keeps it useful.
+
+Smaller items still on the table that could fire individually under a /loop cadence: Forward SCATTER from user code (FIR surface), Multi-block regions (control-flow widening), Rank-4+ tensor constructors (gated on use cases).
+
+**Definition-of-done for §0.4.151 — met**:
+- Deferred table refreshed to remove items shipped §0.4.123–§0.4.150 ✓
+- "Newly shipped" subsection points at each section that closed an item ✓
+- Recommended next pickup list updated to reflect the new tractable surface ✓
+- Register stays tabular per §0.4.108 / §0.4.122's organising principle ✓
+- Full suite stays green at 841 tests (unchanged) ✓
+
 #### 0.4.150 D.3i Phase 3j — `DxirOpResult` n support; closes the D.3i widening series 2026-04-25
 
 §0.4.149 (Phase 3i) widened the threshold side to accept `DxirOpResult`; the natural mirror was the n side. §0.4.150 closes the D.3i widening series symmetrically: every operand kind (`DxirConst`, `DxirParam`, `DxirOp`, `DxirOpResult`) is now supported for both `n` and `threshold` independently. With this Phase, the CounterOnly closure pipeline accepts the full Cartesian product of operand shapes for break-bearing WHILEs at the FIR-side hoist.
