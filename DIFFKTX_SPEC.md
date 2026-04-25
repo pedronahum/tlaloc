@@ -39,6 +39,64 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.100 Bridge-equivalence pin for rank-3 scalar broadcast — milestone 100 sub-section 2026-04-25
+
+**Centenary §0.4 sub-section milestone.** §0.4 has reached its 100th sub-section since the section opened in §0.4.1 (overnight session, 2026-04-20). The cumulative trail covers the K2 plugin, FIR-side `grad`/`valueAndGrad` lowering, dxir + StableHLO emission, the φ-calculus closure stack, three paper benchmark ports (BGDHyperOpt, HookeanSpring, Brachistochrone), and the broad ergonomic Tracer surface that now spans rank 0/1/2/3 with all directional operator combinations.
+
+**This session's deliverable** is a bridge-equivalence pin that completes the cross-rank coverage matrix matching §0.4.79 (scalar→rank-1), §0.4.86 (rank-1→rank-2 row), §0.4.88 (rank-1→rank-2 col): rank-3 scalar broadcast via tape vs. SCT.
+
+**One new test** in [DxirBridgeEquivalenceTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/DxirBridgeEquivalenceTest.kt): `rank3ScalarBroadcastMatchesTapeAndSctPaths`. Inputs: x = 2×2×2 tensor [1..8], c = 0.5.
+
+- **Tape path**: `valueAndGrad2 { x, c -> (x * c).sum() }` using §0.4.97's rank-3 scalar-broadcast operator.
+- **SCT path**: hand-rolled DxirFunction with `BROADCAST(c, broadcast_dimensions=[])` → `MUL(x, bcast)` → `SUM`. `DxirReverseTransform.apply` + `evalFunction` → (sctDx, sctDc).
+- **Assertions**: per-element equality on rank-3 grad_x (8 asserts) and rank-1 grad_c (1 assert).
+
+Together with §0.4.79/86/88, the bridge-equivalence pins now cover scalar↔rank-1, rank-1↔rank-2 (both row and col directions), and rank-3↔scalar — every BroadcastRule call site through which user-visible code can flow.
+
+**Decisions worth flagging**:
+
+- **Scalar input (`broadcast_dimensions = []`).** Exercises the same scalar-input path BroadcastRule short-circuited before §0.4.84. The general axis-aware path is exercised in §0.4.86/88 (rank-1 inputs); this rounds out the matrix at rank-3 receiver size.
+
+- **8-element shape `2×2×2`.** Smallest rank-3 with non-trivial broadcasting: catches off-by-one in stride math without ballooning the test data.
+
+- **Single test rather than four.** The non-commutative arithmetic semantics are already covered for rank-1/rank-2; one anchor test at rank-3 catches the rank-specific dispatch and stride code paths.
+
+- **Centenary-numbered milestone.** §0.4.100's number is incidental — picking a small, valuable test to mark the 100-section threshold rather than forcing a substantial "milestone session" that would have padded scope. Continued small-and-clean fits the §0.4 cadence the project has settled into.
+
+**Cumulative §0.4 trail through §0.4.100** (compressed):
+
+| Era | Sub-sections | Theme |
+|---|---|---|
+| §0.4.1–§0.4.4 | 4 | K2 plugin scaffold, FIR `grad`/`valueAndGrad` recognition, IR-rewrite handoff. |
+| §0.4.5–§0.4.10 | 6 | Stage A SCT reverse-mode AD; primal cloning; dxir-eval bridge. |
+| §0.4.11–§0.4.26 | 16 | Stage B (φ-calculus): F1/F3, C5–C9 closures, BGDHyperOpt closed-form mechanics. |
+| §0.4.27–§0.4.36 | 10 | Stage C: SOI identification, splitOnReuses, COARSENED splice, L sweep. |
+| §0.4.37–§0.4.50 | 14 | Stage D: Brachistochrone (S1–S4), HookeanSpring port, BGDHyperOpt source-level surface, raw-while + break-hoist. |
+| §0.4.51–§0.4.55 | 5 | D.3 closure, symbolic T, Int gradients; D.3ii break-hoist deferred after design discovery. |
+| §0.4.56–§0.4.74 | 19 | D.3ii-tape trilogy, capture / interpreter / emitter rank-N const fixes, Tracer surface (peek, scalar, sqrt..pow, constant, constantLike). |
+| §0.4.75–§0.4.93 | 19 | Broadcast surface buildout: scalar-rank, rank-1-rank-2, scalar-tracer, Float-literal LHS/RHS — all directional combinations. |
+| §0.4.94–§0.4.100 | 7 | Polish (diagnosticReporter recipe; Double/Int literal; unaryMinus; Rank-3 constructor + ops + bridge pin). |
+
+**Tests added** (+1 new):
+
+- `DxirBridgeEquivalenceTest.rank3ScalarBroadcastMatchesTapeAndSctPaths`
+
+Full suite is green: **680 tests** (+1 over §0.4.99). +44 sessions / +398 tests since §0.4.55 (the §0.4.55 starting count was ~282).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — paper-faithful break-bearing WHILE.
+2. **D.1i Symja `Simplify` on whole gradient expressions** — paper mechanism (ii) full form.
+3. **`diagnosticReporter` migration proper** — multi-step refactor per §0.4.94.
+4. **HMC / CartPole / QWOP benchmark ports** — paper's remaining benchmarks.
+5. **Public `Rank3` operator surface beyond scalar broadcast** — if a Tracer rank-3 use case emerges.
+
+**Definition-of-done for §0.4.100 — met**:
+- Tape and SCT paths for rank-3 scalar broadcast produce identical gradients across 8+1 elements ✓
+- Cross-rank bridge-equivalence coverage now spans scalar / rank-1 / rank-2 (row+col) / rank-3 ✓
+- Full suite green at 680 tests (+1) ✓
+- §0.4 reaches its 100th sub-section ✓
+
 #### 0.4.99 Round-trip pin: rank-3 captured scalar-broadcast through `stablehlo-translate` 2026-04-25
 
 Belt-and-braces follow-up to §0.4.97. Adds one round-trip test that takes a captured rank-3 lambda using scalar broadcast all the way through the pipeline: tape → Capture → DxirFunction → StableHLO → external `stablehlo-translate --serialize`. Pins that the rank-3 BROADCAST op shape (with `broadcast_dimensions = []` for scalar input) round-trips correctly through every layer.

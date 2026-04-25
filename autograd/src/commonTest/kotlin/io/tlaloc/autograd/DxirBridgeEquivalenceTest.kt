@@ -220,6 +220,50 @@ class DxirBridgeEquivalenceTest {
     // mis-evaluating.
 
     @Test
+    fun rank3ScalarBroadcastMatchesTapeAndSctPaths() {
+        // §0.4.100 — bridge-equivalence for rank-3 scalar broadcast. Mirrors
+        // §0.4.79 (scalar→rank-1) and §0.4.86/§0.4.88 (rank-1→rank-2).
+        // x: rank-3 [2, 2, 2], c: scalar. Build (x * c).sum() two ways:
+        //   * Tape: valueAndGrad2 lambda using §0.4.97's Tracer<Rank3>.times.
+        //   * SCT: hand-rolled DxirFunction with BROADCAST(c, broadcast_dims=[]) →
+        //     MUL → SUM → return.
+        // Cross-check both grad_x (8 elements) and grad_c (1 scalar). Pins
+        // that BroadcastRule's scalar-input arm and the interpreter's bridge
+        // SUM behave identically across rank tiers.
+        val f32_2x2x2 = DxirType(F32, listOf(2, 2, 2))
+        val primal = io.tlaloc.ir.DxirBuilder.function("x_times_c_sum_rank3") {
+            val x = param("x", f32_2x2x2)
+            val c = param("c", f32)
+            val bcast = op(
+                OpKind.BROADCAST,
+                listOf(c),
+                f32_2x2x2,
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val prod = op(OpKind.MUL, listOf(x, bcast), f32_2x2x2)
+            val out = op(OpKind.SUM, listOf(prod), f32)
+            listOf(out)
+        }
+        val gradFn = DxirReverseTransform.apply(primal)
+        val xInput = floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f)
+        val cInput = floatArrayOf(0.5f)
+        val sctOut = DxirInterpreter.evalFunction(gradFn, listOf(xInput, cInput))
+        val sctDx = sctOut[0]
+        val sctDc = sctOut[1][0]
+
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, c: Tracer<ScalarShape> ->
+            (x * c).sum()
+        }
+        val (_, tapeDx, tapeDc) = vg(
+            Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, xInput),
+            Tensors.f32Scalar(cInput[0]),
+        )
+        val tapeDxArr = tapeDx.hostF32()
+        for (i in 0 until 8) assertClose(tapeDxArr[i], sctDx[i], "rank-3 scalar-broadcast dx[$i]")
+        assertClose(tapeDc.hostF32()[0], sctDc, "rank-3 scalar-broadcast dc")
+    }
+
+    @Test
     fun colBroadcastMatchesTapeAndSctPaths() {
         // §0.4.88 — mirror of §0.4.86. The §0.4.87 column-broadcast records
         // BROADCAST with broadcast_dimensions = [0] (input dim 0 → output
