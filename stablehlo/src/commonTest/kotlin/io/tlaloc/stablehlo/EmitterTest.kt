@@ -808,6 +808,85 @@ class EmitterTest {
         assertTrue(mlir.contains("stablehlo.add"), mlir)
     }
 
+    // §0.4.112 — SCATTER_ADD substrate-shape lowering.
+
+    @Test
+    fun scatterAddRank1EmitsScatterWithAddBody() {
+        // Substrate shape: rank-1 base + scalar idx + scalar value (no attrs).
+        // Expect: stablehlo.scatter with `add` reduction body and no reshape ops
+        // (rank-0 scatter_indices + index_vector_dim=0 triggers implicit expansion).
+        val fn = DxirBuilder.function("g") {
+            val base = param("b", DxirType(F32, listOf(4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, emptyList()))
+            val y = op(OpKind.SCATTER_ADD, listOf(base, idx, v), DxirType(F32, listOf(4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("\"stablehlo.scatter\""), mlir)
+        assertTrue(mlir.contains("inserted_window_dims = [0]"), mlir)
+        assertTrue(mlir.contains("scatter_dims_to_operand_dims = [0]"), mlir)
+        assertTrue(mlir.contains("index_vector_dim = 0"), mlir)
+        // No update_window_dims for rank-1.
+        assertTrue(!mlir.contains("update_window_dims"), "rank-1 should have no update_window_dims: $mlir")
+        // Body computation is `add`.
+        assertTrue(mlir.contains("stablehlo.add"), "expected add body: $mlir")
+        assertTrue(mlir.contains("stablehlo.return"), mlir)
+        // No reshape — operands flow directly.
+        assertTrue(
+            !mlir.contains("stablehlo.reshape"),
+            "rank-1 scatter_add should not emit a reshape: $mlir",
+        )
+    }
+
+    @Test
+    fun scatterAddRank2EmitsRowUpdateShape() {
+        // Substrate shape: rank-2 base + scalar idx + rank-1 [N] value (no attrs).
+        // update_window_dims includes the inner axis (the value's rank-1 maps to it).
+        val fn = DxirBuilder.function("g") {
+            val base = param("b", DxirType(F32, listOf(3, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, listOf(4)))
+            val y = op(OpKind.SCATTER_ADD, listOf(base, idx, v), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        // update_window_dims indexes UPDATES' axes; for rank-1 updates (the row),
+        // the single window dim is axis 0 of updates → axis 1 of the operand.
+        assertTrue(mlir.contains("update_window_dims = [0]"), mlir)
+        assertTrue(mlir.contains("inserted_window_dims = [0]"), mlir)
+        assertTrue(mlir.contains("stablehlo.add"), mlir)
+        // The function signature line should reference the original tensor types.
+        assertTrue(
+            mlir.contains("(tensor<3x4xf32>, tensor<i32>, tensor<4xf32>) -> tensor<3x4xf32>"),
+            "expected scatter type signature for rank-2 substrate: $mlir",
+        )
+    }
+
+    @Test
+    fun scatterAddIgnoresInPlaceAttr() {
+        // §0.4.46's `in_place` attr is a synthesis-side hint; it must NOT leak into
+        // the emitted MLIR (stablehlo.scatter is functional, not in-place).
+        val fn = DxirBuilder.function("g") {
+            val b = param("b", DxirType(F32, listOf(4)))
+            val i = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, emptyList()))
+            listOf(
+                op(
+                    OpKind.SCATTER_ADD,
+                    listOf(b, i, v),
+                    DxirType(F32, listOf(4)),
+                    attrs = mapOf("in_place" to true),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            !mlir.contains("in_place"),
+            "in_place hint must not appear in emitted MLIR: $mlir",
+        )
+    }
+
     @Test
     fun batchNorm2dEmitsInferenceOp() {
         val fn = DxirBuilder.function("bn") {

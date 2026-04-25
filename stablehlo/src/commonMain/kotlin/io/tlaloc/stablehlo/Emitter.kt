@@ -258,6 +258,14 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 indicesType = node.operands[1].type,
                 updatesType = node.operands[2].type,
             )
+            OpKind.SCATTER_ADD -> emitScatterAdd(
+                step, name,
+                base = ops[0], idx = ops[1], value = ops[2],
+                node = node,
+                baseType = node.operands[0].type,
+                idxType = node.operands[1].type,
+                valueType = node.operands[2].type,
+            )
             OpKind.BATCHNORM -> emitBatchNorm(step, name, ops, node)
             OpKind.SPLIT -> emitSplit(step, node, ops[0], node.operands[0].type)
             OpKind.MANUAL_COMPUTATION -> emitManualComputation(step, name, ops, node)
@@ -858,6 +866,91 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine("$step   stablehlo.return $returnVal : $scalarT")
         out.appendLine(
             "$step }) : (${operandType.toMlir()}, ${indicesType.toMlir()}, ${updatesType.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * §0.4.112 — lowering for the `:autograd`-emitted [OpKind.SCATTER_ADD] substrate
+     * shape (`base[idx] += value`, no attrs). Two operand-rank slices are supported,
+     * matching the [DxirInterpreter] arms shipped in §0.4.45 + §0.4.111:
+     *
+     *  - rank-1: `base: tensor<NxF>, idx: scalar I32, value: scalar F`.
+     *  - rank-2: `base: tensor<MxNxF>, idx: scalar I32, value: tensor<NxF>`.
+     *
+     * Both operands flow into `stablehlo.scatter` directly with no reshape: with
+     * `index_vector_dim = 0` and a rank-0 `scatter_indices`, the StableHLO spec
+     * implicitly expands by a trailing 1-dim, and the rank arithmetic
+     * `rank(updates) == rank(scatter_indices_expanded) - 1 + size(update_window_dims)`
+     * collapses cleanly to `rank(value)`. The body computation is `stablehlo.add`
+     * (the "_ADD" in `SCATTER_ADD`). The general [emitScatter] path handles arbitrary
+     * stablehlo-style scatter; this path is dedicated to the substrate shape that
+     * `GatherRule` emits.
+     *
+     * The `in_place` attr (§0.4.46's destructive-mutation marker) is intentionally
+     * IGNORED here: stablehlo.scatter is functional, not in-place. The marker is a
+     * synthesis-side hint for the host-runtime path; emitting through StableHLO
+     * always produces a fresh tensor regardless.
+     */
+    private fun emitScatterAdd(
+        step: String,
+        name: String,
+        base: String,
+        idx: String,
+        value: String,
+        node: DxirOp,
+        baseType: DxirType,
+        idxType: DxirType,
+        valueType: DxirType,
+    ) {
+        require(baseType.rank == 1 || baseType.rank == 2) {
+            "SCATTER_ADD base must be rank-1 or rank-2 (substrate shape); got rank=${baseType.rank}"
+        }
+        require(idxType.isScalar && idxType.dtype == I32) {
+            "SCATTER_ADD idx must be scalar I32 (substrate shape); got $idxType"
+        }
+        val expectedValueRank = baseType.rank - 1
+        require(valueType.rank == expectedValueRank) {
+            "SCATTER_ADD value must be rank-$expectedValueRank for rank-${baseType.rank} base; got rank=${valueType.rank}"
+        }
+        require(node.type.dims == baseType.dims) {
+            "SCATTER_ADD result shape ${node.type.dims} must match base shape ${baseType.dims}"
+        }
+
+        val scalarT = "tensor<${mlirElementType(baseType.dtype)}>"
+
+        // Dimension numbers: scalar idx (rank-0) with index_vector_dim=0 triggers
+        // implicit trailing-1 expansion, so the effective scatter_indices rank is 1.
+        // `update_window_dims` indexes into UPDATES' axes (not operand's). For rank-2
+        // base, updates is rank-1 (the row), so the window dim is axis 0 of updates,
+        // which maps to operand axis 1 (since operand axis 0 is inserted via the
+        // index). For rank-1 base, updates is rank-0 (scalar) and there are no
+        // window dims at all.
+        val updateWindowDims = when (baseType.rank) {
+            1 -> emptyList()
+            else -> listOf(0)
+        }
+        val dimNumbers = buildString {
+            append("#stablehlo.scatter<")
+            val parts = mutableListOf<String>()
+            if (updateWindowDims.isNotEmpty()) {
+                parts += "update_window_dims = [${updateWindowDims.joinToString(", ")}]"
+            }
+            parts += "inserted_window_dims = [0]"
+            parts += "scatter_dims_to_operand_dims = [0]"
+            parts += "index_vector_dim = 0"
+            append(parts.joinToString(", "))
+            append(">")
+        }
+
+        val cur = synth(); val upd = synth(); val sum = synth()
+        out.appendLine(
+            """$step$name = "stablehlo.scatter"($base, $idx, $value) <{scatter_dimension_numbers = $dimNumbers, unique_indices = true}> ({""",
+        )
+        out.appendLine("$step ^bb0($cur: $scalarT, $upd: $scalarT):")
+        out.appendLine("$step   $sum = stablehlo.add $cur, $upd : $scalarT")
+        out.appendLine("$step   stablehlo.return $sum : $scalarT")
+        out.appendLine(
+            "$step }) : (${baseType.toMlir()}, ${idxType.toMlir()}, ${valueType.toMlir()}) -> ${node.type.toMlir()}",
         )
     }
 

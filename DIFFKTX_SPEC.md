@@ -39,6 +39,64 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.112 StableHLO emitter learns `OpKind.SCATTER_ADD` 2026-04-25
+
+§0.4.108's deferred entry "**StableHLO emitter | SCATTER_ADD widening** — `:core` SCATTER_ADD has no MLIR lowering yet" gets shipped. Until this session, any `DxirFunction` containing a substrate-shaped `SCATTER_ADD` op (the gradient shape `GatherRule` emits, per §0.4.45 / §0.4.111) hit the emitter's `else -> error("StableHLO lowering not yet implemented for ${node.op}")` branch — the autograd-side path through `DxirToIrSynthesis` to host Kotlin worked, but the StableHLO compilation path was stuck.
+
+**The mechanism** in [Emitter.kt](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt). New private `emitScatterAdd` is dispatched from the `OpKind.SCATTER_ADD` arm. It accepts the two substrate ranks shipped to date:
+
+- **rank-1 base** + scalar I32 idx + scalar value → rank-1 result. `update_window_dims = []`, `inserted_window_dims = [0]`, `scatter_dims_to_operand_dims = [0]`, `index_vector_dim = 0`.
+- **rank-2 base** + scalar I32 idx + rank-1 [N] value → rank-2 [M, N] result. `update_window_dims = [0]` (the single axis of the rank-1 updates, mapping to operand axis 1), `inserted_window_dims = [0]`, `scatter_dims_to_operand_dims = [0]`, `index_vector_dim = 0`.
+
+Both cases lower without any reshape: with `index_vector_dim = 0` and rank-0 `scatter_indices`, StableHLO's spec implicitly expands by a trailing-1 dim, and the rank arithmetic `rank(updates) == rank(scatter_indices_expanded) - 1 + size(update_window_dims)` resolves cleanly to the substrate's actual `value` rank (0 for rank-1 base, 1 for rank-2 base). The body computation is `stablehlo.add` (the "_ADD" in `SCATTER_ADD`).
+
+```kotlin
+private fun emitScatterAdd(
+    step: String, name: String,
+    base: String, idx: String, value: String,
+    node: DxirOp, baseType: DxirType, idxType: DxirType, valueType: DxirType,
+) {
+    require(baseType.rank == 1 || baseType.rank == 2) { ... }
+    require(idxType.isScalar && idxType.dtype == I32) { ... }
+    val expectedValueRank = baseType.rank - 1
+    require(valueType.rank == expectedValueRank) { ... }
+    val updateWindowDims = if (baseType.rank == 1) emptyList() else listOf(0)
+    // ... emit stablehlo.scatter with `add` body ...
+}
+```
+
+**Decisions worth flagging**:
+
+- **No reshape ops in the lowering.** The first attempt inserted explicit `stablehlo.reshape` ops promoting the scalar idx and scalar/row value to rank-1 / rank-2 update shapes. `stablehlo-translate` rejected the result because the rank arithmetic didn't match. The correct path uses StableHLO's implicit trailing-1 expansion of rank-0 `scatter_indices` when `index_vector_dim == rank(scatter_indices)`. The cleaner lowering (no reshape) emits exactly one `stablehlo.scatter` per SCATTER_ADD — minimal overhead and idiomatic StableHLO.
+- **`update_window_dims` indexes the updates tensor, not the operand.** A subtle but load-bearing detail: for rank-2 base + rank-1 updates, the single window dim is axis **0** of updates (which corresponds to operand axis 1, the inner dim). Initially I wrote `update_window_dims = [1]` (operand-axis indexing) and `stablehlo-translate` returned `Expects each element of update_window_dims to be in range [0, rank-of('updates')) i.e. [0, 1). got: 1.`. The fix was to index updates' axes; the operand-axis correspondence is implied by `inserted_window_dims = [0]` (axis 0 of operand is the indexed axis, so it's NOT in the window).
+- **`in_place` attr explicitly ignored.** §0.4.46's `in_place: true` marker is a synthesis-side hint for the host-runtime path's destructive mutation (saves a `FloatArray.copyOf`); StableHLO's scatter is functional and always returns a fresh tensor. The lowering doesn't read the attr; an explicit test pins that it doesn't leak into the emitted MLIR text.
+- **Substrate-shape vs. stablehlo-shape distinction.** `OpKind.SCATTER` (multi-dim, attr-driven) and `OpKind.SCATTER_ADD` (substrate-shape, no attrs) live in the same op-kind enum but have different emitter paths. The general `emitScatter` handles arbitrary `update_window_dims` / `inserted_window_dims` / etc. attrs supplied by the caller; `emitScatterAdd` is dedicated to the autograd substrate shape. Keeping them separate avoids tangling two abstractions in one function.
+
+**Tests added** (+5 new):
+
+- `EmitterTest.scatterAddRank1EmitsScatterWithAddBody` — rank-1 substrate emits `stablehlo.scatter` with `add` body and zero reshape ops.
+- `EmitterTest.scatterAddRank2EmitsRowUpdateShape` — rank-2 substrate emits `update_window_dims = [0]` plus the right type signature in the function line.
+- `EmitterTest.scatterAddIgnoresInPlaceAttr` — `in_place: true` doesn't appear in the emitted MLIR (it's synthesis-side only).
+- `RoundTripTest.scatterAddRank1SubstrateRoundTrips` — rank-1 SCATTER_ADD round-trips through `stablehlo-translate`. The strongest verification: the spec's rank arithmetic actually accepts our emitted shape.
+- `RoundTripTest.scatterAddRank2SubstrateRoundTrips` — same, for rank-2.
+
+Full suite is green: **724 tests** (+5 over §0.4.111).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Rank-2 GATHER follow-up B: SCATTER user write path** — extend §0.4.41's `OpKind.SCATTER` interpreter arm to rank-2 (mirror of §0.4.111's GATHER widening). Single-session.
+2. **Rank-2 GATHER follow-up D: StableHLO emitter for the substrate-shape GATHER** — analogous to §0.4.112 but for the read side. The substrate-shape `OpKind.GATHER` from `:autograd` doesn't carry the `offset_dims` etc. attrs the existing `emitGather` requires; needs a substrate-shape arm with implicit attrs.
+3. **Cross-rank broadcasting at synthesis surface** — generalise §0.4.84's reverse-side BROADCAST handling to `DxirToIrSynthesis`.
+4. **D.3i Phase 1 (LAND-composed break-bearing WHILE)** — multi-session arc opener; carve as scaffolding analogous to §0.4.103.
+
+**Definition-of-done for §0.4.112 — met**:
+- `emitScatterAdd` lands in Emitter.kt; `OpKind.SCATTER_ADD` dispatch fires from the main op switch ✓
+- Both rank-1 and rank-2 substrate shapes lower correctly through `stablehlo-translate` (round-trip pin) ✓
+- Three emitter unit tests + two round-trip tests pin the lowering shape and `in_place` separation ✓
+- `update_window_dims` correctness investigated and documented after the first attempt's failure ✓
+- No new public API beyond extending the existing OpKind dispatch ✓
+- Full suite stays green at 724 tests (+5) ✓
+
 #### 0.4.111 Rank-2 GATHER read path (row indexing) 2026-04-25
 
 §0.4.108's deferred-table line "**Tensor ops | Multi-dim GATHER/SCATTER** — Rank-1 covered §0.4.41–§0.4.42; rank-N+ pending" gets its first dent. This session lands the rank-2 read path: `GATHER(arr: rank-2 [M, N], idx: scalar I32) → rank-1 [N]` (row indexing) plus the matching gradient `SCATTER_ADD(base: rank-2 [M, N], idx: scalar I32, value: rank-1 [N]) → rank-2 [M, N]`. SCATTER (the user write path) and StableHLO emitter coverage are deliberately deferred to follow-up phases per §0.4.110's recommended-next note.
