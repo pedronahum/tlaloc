@@ -680,8 +680,8 @@ object PhiCalculus {
      *    isn't actually loop-invariant (the classifier should have routed this to
      *    [BreakBearingWhile.BreakCondClass.CarriedDependent], but a defensive check
      *    here keeps the lift sound).
-     *  - `n` is neither extractable from [Pattern.tripCountConst] (a region-external
-     *    [DxirConst]) nor populated as [Pattern.tripCountParam].
+     *  - `n` is a region-internal [DxirOp] whose subtree transitively references a
+     *    cond-region block-arg (defensive check, mirrors the threshold case).
      *  - BOTH `n` and `threshold` are concrete [DxirConst] — that's Phase 3e's case.
      *  - The threshold const is negative or non-integer (mirrors Phase 3e's checks).
      *
@@ -690,6 +690,10 @@ object PhiCalculus {
      * resolve through `nodeMap` directly, region-internal [DxirOp]s get their
      * dependency tree lifted into outer scope by [rewriteCounterOnlySymbolicBreak]
      * via [liftRegionInternalSubtree], mirroring §0.4.128's `rewriteLoopInvariantBreak`.
+     *
+     * §0.4.143 (Phase 3h) extends the same widening to `n` via the new
+     * [BreakBearingWhile.Pattern.tripCountOp] field — the dispatch is identical
+     * to the threshold path, just applied to the n operand.
      */
     private data class CounterOnlySymbolicShape(
         val nNode: DxirNode,
@@ -732,17 +736,32 @@ object PhiCalculus {
             else -> return null
         }
 
-        val nNode: DxirNode = pattern.tripCountParam ?: run {
-            // Concrete-int n: extract the original [DxirConst] node from origCond.
-            val origCondOp = pattern.origCond as? DxirOp ?: return null
-            if (origCondOp.op != OpKind.STEP) return null
-            val origSub = origCondOp.operands[0] as? DxirOp ?: return null
-            if (origSub.op != OpKind.SUB) return null
-            origSub.operands[0]
+        // §0.4.143 — n can be DxirParam (existing), DxirOp (new), or DxirConst
+        // (when neither tripCountParam nor tripCountOp is populated). For DxirConst
+        // we walk back through origCond to recover the actual node.
+        val nNode: DxirNode = pattern.tripCountParam
+            ?: pattern.tripCountOp
+            ?: run {
+                val origCondOp = pattern.origCond as? DxirOp ?: return null
+                if (origCondOp.op != OpKind.STEP) return null
+                val origSub = origCondOp.operands[0] as? DxirOp ?: return null
+                if (origSub.op != OpKind.SUB) return null
+                origSub.operands[0]
+            }
+        when (nNode) {
+            is DxirConst, is DxirParam -> Unit
+            is DxirOp -> {
+                // §0.4.143 — region-internal DxirOp n must be liftable; outer-scope
+                // resolves through nodeMap at rewrite time. Same scope discipline as
+                // §0.4.142's DxirOp threshold path.
+                if (nNode.id in condBodyIds &&
+                    !isRegionInternalSubtreeLiftable(nNode, condBodyIds)
+                ) return null
+            }
+            else -> return null
         }
-        if (nNode !is DxirConst && nNode !is DxirParam) return null
 
-        // Phase 3e handles both-concrete; Phase 3f/3g's contract is "at least one symbolic".
+        // Phase 3e handles both-concrete; Phase 3f/3g/3h's contract is "at least one symbolic".
         if (nNode is DxirConst && thresholdNode is DxirConst) return null
 
         return CounterOnlySymbolicShape(
@@ -827,9 +846,20 @@ object PhiCalculus {
         // nodes resolve through nodeMap to the cloned param in the new function;
         // outer-scope [DxirOp]s also resolve through nodeMap; §0.4.142 — region-internal
         // [DxirOp] thresholds get their dependency tree lifted via clone, mirroring
-        // §0.4.128's `rewriteLoopInvariantBreak`.
+        // §0.4.128's `rewriteLoopInvariantBreak`. §0.4.143 — same dispatch applies
+        // to `n`, which now also accepts [DxirOp] (region-internal liftable or
+        // outer-scope) per [BreakBearingWhile.Pattern.tripCountOp].
         val nClone: DxirNode = when (val n = shape.nNode) {
             is DxirConst -> builder.const(n.value, n.type, n.sharding)
+            is DxirOp -> if (n.id in condBodyIds) {
+                liftRegionInternalSubtree(n, condBlock, nodeMap, multiOut, builder, op.id)
+            } else {
+                nodeMap[n.id]
+                    ?: error(
+                        "applyBreakBearingClosurePass: outer-scope n op id=${n.id} for " +
+                            "WHILE id=${op.id} missing from nodeMap",
+                    )
+            }
             else -> nodeMap[n.id]
                 ?: error(
                     "applyBreakBearingClosurePass: n node id=${n.id} for WHILE id=${op.id} " +

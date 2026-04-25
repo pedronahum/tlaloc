@@ -39,6 +39,57 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.143 D.3i Phase 3h — DxirOp `n` (outer-scope + region-internal lift) 2026-04-25
+
+§0.4.142 (Phase 3g) widened the CounterOnly arm's `threshold` operand to accept `DxirOp` (outer-scope direct-resolve + region-internal lift). The natural mirror — extending the same widening to the `n` operand — was the §0.4.142 recommended-next #2: `BreakBearingWhile.extractStepCounter` only accepted `DxirConst | DxirParam` for `n`, so any code shape with `n = nParam · 3` or similar fell through detection entirely (Pattern.counterArgIdx came back null, the WHILE never even classified as CounterOnly). §0.4.143 closes that gap by adding a `tripCountOp: DxirOp?` field to `Pattern`/`CounterMatch` and routing it through the same Phase 3g lift dispatch in `rewriteCounterOnlySymbolicBreak`. With this Phase, `n` and `threshold` now accept the full `DxirConst | DxirParam | DxirOp` spread independently.
+
+**The mechanism** in [BreakBearingWhile.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt) and [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt):
+
+1. **`Pattern.tripCountOp: DxirOp?`** ([BreakBearingWhile.kt:48-58](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt#L48-L58)) — new field, mutually exclusive with `tripCountConst` / `tripCountParam`. Carries the actual `DxirOp` node when `n` is a scalar-typed operation.
+
+2. **`extractStepCounter` widening** ([BreakBearingWhile.kt:282-285](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt#L282-L285)) — adds a `DxirOp` arm that mirrors the `DxirParam` arm's scalar-type check and populates `tripCountOp`. Same convention as the threshold path: type discipline at extract time, scope discipline at rewrite time.
+
+3. **`computeCounterOnlySymbolicShape` n resolution** ([PhiCalculus.kt:735-756](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L735-L756)) — the n-resolution chain now reads `tripCountParam ?: tripCountOp ?: <walk-back-through-origCond-for-DxirConst>`. Same `isRegionInternalSubtreeLiftable` check applied to region-internal `DxirOp` n that §0.4.142 applied to threshold.
+
+4. **`rewriteCounterOnlySymbolicBreak` n dispatch** ([PhiCalculus.kt:854-873](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L854-L873)) — `nClone` now uses the same typed-when dispatch as `thresholdClone`. `DxirOp` with id in `condBodyIds` calls `liftRegionInternalSubtree`; outer-scope `DxirOp` resolves through `nodeMap[n.id]`. The lift helper is the §0.4.142 one — no changes needed since it's already operand-agnostic.
+
+**Decisions worth flagging**:
+
+- **Symmetric with Phase 3g.** The threshold and n operands are now structurally indistinguishable from the rewrite's perspective: both can be const, param, or op; both use the same scope-discipline dispatch. The only asymmetry is in the DxirConst case — n's DxirConst is recovered by walking back through `pattern.origCond`'s `STEP(SUB(n, args[counter]))` shape (since `tripCountConst` is just an Int, not the node), whereas threshold's DxirConst is read directly off `sub.operands[1]`. This walk-back is a quirk of the existing detector API; consolidating it would mean changing `tripCountConst` to also carry a `DxirNode` reference, which is broader scope than warranted here.
+
+- **`tripCountOp` is a new field, not a replacement.** I chose to add `tripCountOp: DxirOp?` parallel to `tripCountConst` / `tripCountParam` rather than introduce a unified `tripCountNode: DxirNode?` field. The parallel-field design preserves backward compatibility for callers (existing tests in [BreakBearingWhileTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/BreakBearingWhileTest.kt) that assert on `tripCountConst` / `tripCountParam` keep working). Mutual exclusivity is documented in `Pattern`'s doc-comment; consumers that need the actual node use a `tripCountParam ?: tripCountOp ?: <fallback>` chain (mirrored in `computeCounterOnlySymbolicShape`).
+
+- **Scalar-type check on `DxirOp` n matches the `DxirParam` path.** `extractStepCounter`'s `DxirParam` arm requires `nNode.type.isScalar`; the new `DxirOp` arm enforces the same. Non-scalar `n` would mean a tensor-valued bound, which makes no sense as a loop trip count.
+
+- **No detector test updates.** The `BreakBearingWhileTest` suite didn't have a test for `DxirOp` n today (since the detector previously rejected it). Adding such a test purely at the detector level would just pin the new path's existence — the more diagnostic test is the end-to-end Phase 3h test that exercises detector + classifier + rewrite + interpreter. So I added the new tests at the `PhiCalculusTest` level (where the existing Phase 3g tests live) and skipped a detector-level test. If a user surface ever needs the detector path independently, that test goes in then.
+
+- **The composition `n=nParam·3, threshold=cap` is a realistic FIR-side hoist shape.** Code like `while (i < n * 3)` translates to `n = MUL(nParam, 3)` either at function level or inside the cond region depending on the FIR pass. The outer-scope test pins the former; the region-internal test pins the latter. Together they cover the realistic spread.
+
+- **No new "Phase 3h" naming convention introduced.** I considered calling this "Phase 3g.2" since it's structurally a mirror of Phase 3g, but the lettering convention (3a, 3b, ..., 3g, 3h) is already established in the spec — incrementing keeps the naming uniform. The §0.4.142 recommended-next list anticipated this as a follow-on, just unnamed.
+
+**Tests added** (+2 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.breakBearingClosureRewritesOuterScopeOpNCounterOnly` — n = `MUL(nParam, 3)` outer-scope, threshold = const(5). Pin: 1 WHILE, 0 LAND. Numerical: `nParam=1 → 40` (3 iters), `nParam=4 → 320` (6 iters, threshold caps), `nParam=0 → 5` (0 iters).
+- `PhiCalculusTest.breakBearingClosureRewritesRegionInternalOpNCounterOnly` — same shape but the `MUL(nParam, 3)` lives inside the cond region. Phase 3h's lift pulls it into outer scope. Pin: same structural + numerical pins, plus `countOps(rewritten, OpKind.MUL) >= 1` to verify the lift actually landed.
+
+Full suite is green: **833 tests** (+2 over §0.4.142).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 3 — branch-body MR IF dispatch + nested-WHILE arm.** Still the headline gap.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor**.
+3. **`:benchmarks` Gradle module** — extract one perf probe.
+4. **D.3i CarriedDependent runtime arm** — the only break-cond classifier still falling through to the no-op fallback. Lower priority since the no-op path is correct (just suboptimal); a real arm would emit per-iteration break-cond evaluation in the body region.
+
+**Definition-of-done for §0.4.143 — met**:
+- `BreakBearingWhile.Pattern.tripCountOp` added, mutually exclusive with existing trip-count fields ✓
+- `extractStepCounter` accepts `DxirOp` n (scalar type required) ✓
+- `computeCounterOnlySymbolicShape` resolves n via the param/op/walk-back chain and applies the same `isRegionInternalSubtreeLiftable` check as for threshold ✓
+- `rewriteCounterOnlySymbolicBreak` dispatch on n type matches the threshold dispatch (lift if region-internal; nodeMap otherwise) ✓
+- 2 new tests pin both halves (outer-scope + region-internal) with concrete numerical + structural pins ✓
+- Existing Phase 3e/3f/3g tests still green (no regression on the const/param paths) ✓
+- Full suite stays green at 833 tests (+2) ✓
+
 #### 0.4.142 D.3i Phase 3g — DxirOp threshold (outer-scope + region-internal lift) 2026-04-25
 
 §0.4.141's Phase 3f narrowed the threshold-type acceptance to `DxirConst | DxirParam`, leaving `DxirOp` thresholds for a follow-on phase. §0.4.142 closes that gap: outer-scope `DxirOp` thresholds resolve through `nodeMap` directly (no extra lifting needed), and region-internal `DxirOp` thresholds get their dependency tree lifted into outer scope via a fresh helper that mirrors §0.4.128's `rewriteLoopInvariantBreak` walk + clone pattern. With this Phase, the CounterOnly arm now handles every realistic FIR-side hoist shape that produces a `STEP(SUB(args[counter], threshold))` break predicate — `threshold` can be a const, a function param, an outer-scope arithmetic expression, or a region-internal expression that's loop-invariant.

@@ -37,13 +37,15 @@ object BreakBearingWhile {
     /**
      * The recognised structural pattern. The first three fields ([whileOp], [origCond],
      * [breakCond]) are always non-null on a successful match. The trip-count fields
-     * ([counterArgIdx], [tripCountConst], [tripCountParam]) are populated when
-     * [origCond] matches the canonical `STEP(SUB(n, args[counterArgIdx]))` C5/C6 shape;
-     * otherwise they're null and consumers fall back to other detection paths.
+     * ([counterArgIdx], [tripCountConst], [tripCountParam], [tripCountOp]) are populated
+     * when [origCond] matches the canonical `STEP(SUB(n, args[counterArgIdx]))` C5/C6
+     * shape; otherwise they're null and consumers fall back to other detection paths.
      *
      * Trip count is mutually exclusive: at most one of [tripCountConst] / [tripCountParam]
-     * is non-null when [counterArgIdx] is set. A concrete-int bound flows through
-     * [tripCountConst]; a loop-invariant scalar param bound flows through [tripCountParam].
+     * / [tripCountOp] is non-null when [counterArgIdx] is set. A concrete-int bound flows
+     * through [tripCountConst]; a loop-invariant scalar param bound flows through
+     * [tripCountParam]; a scalar-typed [DxirOp] bound (added §0.4.143) flows through
+     * [tripCountOp] — region-internal liftable or outer-scope.
      */
     data class Pattern(
         val whileOp: DxirOp,
@@ -52,6 +54,7 @@ object BreakBearingWhile {
         val counterArgIdx: Int? = null,
         val tripCountConst: Int? = null,
         val tripCountParam: DxirParam? = null,
+        val tripCountOp: DxirOp? = null,
     )
 
     /**
@@ -148,6 +151,7 @@ object BreakBearingWhile {
             counterArgIdx = counter.argIdx,
             tripCountConst = counter.tripCountConst,
             tripCountParam = counter.tripCountParam,
+            tripCountOp = counter.tripCountOp,
         )
     }
 
@@ -236,9 +240,12 @@ object BreakBearingWhile {
      * across [PhiCalculus.detectSimpleLoop] and [PhiCalculus.detectAffineRecurrence].
      * Returns null if [node] doesn't match.
      *
-     * The bound `n` is recognised in two forms:
+     * The bound `n` is recognised in three forms:
      *  - [DxirConst] with a non-negative integer-valued numeric → `tripCountConst`.
      *  - [DxirParam] of scalar type → `tripCountParam` (loop-invariant symbolic bound).
+     *  - [DxirOp] of scalar type → `tripCountOp` (added §0.4.143; downstream phases
+     *    distinguish region-internal liftable from outer-scope by checking against
+     *    the cond-region body's id set).
      *
      * This helper is intentionally NOT shared with the existing PhiCalculus.kt
      * detectors — those run earlier in the pipeline and target slightly different
@@ -249,6 +256,7 @@ object BreakBearingWhile {
         val argIdx: Int,
         val tripCountConst: Int? = null,
         val tripCountParam: DxirParam? = null,
+        val tripCountOp: DxirOp? = null,
     )
 
     private fun extractStepCounter(
@@ -274,6 +282,10 @@ object BreakBearingWhile {
             is DxirParam -> {
                 if (!nNode.type.isScalar) return null
                 CounterMatch(argIdx = argIdx, tripCountParam = nNode)
+            }
+            is DxirOp -> {
+                if (!nNode.type.isScalar) return null
+                CounterMatch(argIdx = argIdx, tripCountOp = nNode)
             }
             else -> null
         }
