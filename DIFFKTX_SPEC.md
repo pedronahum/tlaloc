@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.147 Third `:benchmarks` inhabitant — SCT-only throughput sweep 2026-04-25
+
+§0.4.145 / §0.4.146 shipped the `:benchmarks` substrate plus end-to-end + coarsening probes. §0.4.146's recommended-next #4 called out "a SCT-only benchmark that times `DxirReverseTransform.apply` on a fixed-shape coarsened function (isolates the SCT cost from PhiCalculus's)". §0.4.147 lands that probe: [SctThroughputBenchmark.dxirReverseTransformSweepOverIterateN](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/SctThroughputBenchmark.kt) pre-coarsens the primal once outside the timing block, then sweeps `DxirReverseTransform.apply` at n = 5 / 10 / 20 and pins the gradient evaluates to the closed-form derivative `2^n` at `x = 3`. With three benchmarks shipped, the substrate now isolates each of the three regression-prone phases — coarsening (§0.4.146), SCT (§0.4.147), and end-to-end pipeline (§0.4.145) — so a perf regression surfaces at the scope it actually originated.
+
+**The mechanism** in [SctThroughputBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/SctThroughputBenchmark.kt):
+
+1. **`iterateNTimes(n)` helper** — copy of §0.4.145 / §0.4.146's helper; deliberate duplication per the substrate's "stay structurally close" principle.
+
+2. **Pre-coarsening outside the timing block** — for each `n`, run `PhiCalculus.apply` to remove the WHILE before timing SCT. Asserts `countOps(coarsened, OpKind.WHILE) == 0` as a sanity check (otherwise the SCT timing would conflate two phases).
+
+3. **`measureTimeMillis` around `DxirReverseTransform.apply`** — only the SCT call is timed. The numerical evaluation via `DxirInterpreter.evalFunction` happens after the timing block, so interpreter cost doesn't leak into the SCT measurement.
+
+4. **Triple result tuple** — `(sctMs, gradWhiles, gradEval)`. After the sweep, three assertion sets pin (a) gradient eval = 2^n at every n via `(1 shl n).toFloat()`, (b) gradient body has zero WHILEs, (c) per-iter ms timings via `println`.
+
+**Decisions worth flagging**:
+
+- **The numerical pin is the closed-form derivative, not just structural.** §0.4.146's coarsening probe pinned MUL count = n (a structural invariant). §0.4.147's pin is `gradOut[0][0] == (1 shl n).toFloat()` — i.e., the actual derivative value. This catches three classes of regression at once: (a) SCT producing the wrong gradient body, (b) interpreter mis-evaluating the gradient ops, (c) const-fold pass changing the gradient body's shape in a way that changes output. The structural MUL-count pin would only catch (c). Closed-form pins are stronger when the ground truth is known.
+
+- **No structural pin on gradient body op counts.** I considered also pinning the gradient body's MUL count, but: the const-fold passes inside `DxirReverseTransform.apply` (e.g., `MUL(1, c) → const(c)`) make the exact count sensitive to small implementation changes that don't affect correctness. The numerical pin is robust to const-fold, the MUL-count pin would not be. Skipping the structural pin keeps the test's diagnostic precision focused on what matters (correctness, not ops).
+
+- **Timing block is tight — only `DxirReverseTransform.apply`.** Pre-coarsening AND post-eval happen outside the timing block. This is the §0.4.147 probe's specific job: "what does the SCT pass cost in isolation?". §0.4.145's end-to-end probe answers "what does the full pipeline cost?", §0.4.146's coarsening probe answers "what does PhiCalculus.apply cost?". Three probes, three scopes — no overlap.
+
+- **Same n sweep as §0.4.146 (5, 10, 20).** Keeping the n values identical across coarsening + SCT probes means the per-iter timings are directly comparable: `[bench coarseningSweep] n=10 PhiCalculus.apply=1ms` vs `[bench sctSweep] n=10 DxirReverseTransform.apply=0ms` tells the reader which phase dominates at each scale. Diverging n values would prevent that comparison.
+
+- **`(1 shl n).toFloat()` for the expected closed form.** Integer-shift exponentiation is exact for n ≤ 30 (fits in an Int); the `.toFloat()` cast is exact for these magnitudes. At n = 20, the value is 1048576 — well within Float's 24-bit significand precision. If a future sweep extends to n ≥ 24, the cast loses precision and the pin would need a tolerance window — but at the current scales, exact equality is correct.
+
+- **`println` cluster placed AFTER all assertions.** If an assertion fails, the timings still print (assertEquals failures don't abort the test method's per-iter output, but they DO abort the for-loop after the failing assertion). Putting the prints last means a successful run prints all timings; a failing run shows which phase / scale broke. Mirrors §0.4.146's order.
+
+**Tests added** (+1 new) in [SctThroughputBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/SctThroughputBenchmark.kt):
+
+- `SctThroughputBenchmark.dxirReverseTransformSweepOverIterateN` — pre-coarsens `iterateNTimes(n)` for n = 5, 10, 20, then times `DxirReverseTransform.apply` for each. Asserts gradient eval = 32 / 1024 / 1048576 at x = 3 (= 2^5 / 2^10 / 2^20). Asserts gradient body has zero WHILEs at each n. Prints `[bench sctSweep] n=… DxirReverseTransform.apply=…ms grad@x=3=…`.
+
+Full suite is green: **839 tests** (+1 over §0.4.146).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 4 — nested WHILE in IF branch.** Still the headline gap.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.**
+3. **D.3i Phase 3i — region-internal SOIs (DxirOpResult/DxirCall) in CounterOnly threshold/n.**
+4. **`:benchmarks` consolidation — extract a shared `BenchmarkPrimals.kt`.** With three inhabitants now sharing `iterateNTimes`, the duplication is visible. A small shared utility would save ~50 lines without coupling the probes more than necessary.
+
+**Definition-of-done for §0.4.147 — met**:
+- New benchmark file in the `:benchmarks` module's jvmTest source set ✓
+- Pre-coarsening happens OUTSIDE the timing block (timing measures SCT only) ✓
+- Numerical pin uses the closed-form derivative (`2^n`) at three scales ✓
+- WHILE-absence pin on the gradient body ✓
+- Per-iter ms timings printed for visibility ✓
+- No new dependencies, no new system properties, no helper-sharing across benchmarks ✓
+- Full suite stays green at 839 tests (+1) ✓
+
 #### 0.4.146 Second `:benchmarks` inhabitant — coarsening throughput sweep 2026-04-25
 
 §0.4.145 shipped the `:benchmarks` Gradle module substrate with one end-to-end AD benchmark. The §0.4.145 recommended-next #4 called out a second inhabitant — "a coarsening-throughput probe that times PhiCalculus.apply on progressively larger primals (sanity-pin pre/post op counts, surface ms-per-iter)". §0.4.146 lands that probe: [CoarseningThroughputBenchmark.phiCalculusCoarseningSweepOverIterateN](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/CoarseningThroughputBenchmark.kt) sweeps `iterateNTimes(n)` at three representative scales (n = 5, 10, 20), times `PhiCalculus.apply` for each, and pins the post-coarsening MUL count exactly equals `n`. With two inhabitants, the `:benchmarks` module now has both an end-to-end pipeline probe (§0.4.145) and a coarsening-pass-only probe (§0.4.146) — together they let a /loop iteration spot-check the two most regression-prone parts of the AD substrate at three scales.
