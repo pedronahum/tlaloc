@@ -353,6 +353,30 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
  * BroadcastRule reverses it as `SUM(upstream, reduction_dims = [1])` →
  * rank-1 grad back to [col].
  */
+// §0.4.97 — rank-3 scalar-broadcast overloads. Same pattern as §0.4.78 but on
+// Tracer<Rank3<A, B, C>> receivers. Now that Tensors.f32Tensor3 exists, users
+// can construct rank-3 inputs and apply scalar operators directly.
+
+@kotlin.jvm.JvmName("plusScalarTracerRank3")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.plus(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this + broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("minusScalarTracerRank3")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.minus(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this - broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("timesScalarTracerRank3")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.times(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this * broadcastScalar(scalar)
+
+@kotlin.jvm.JvmName("divScalarTracerRank3")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.div(
+    scalar: Tracer<io.tlaloc.core.ScalarShape>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this / broadcastScalar(scalar)
+
 // §0.4.91 — reverse-order scalar-to-rank-1 broadcast operators. `scalar op row`
 // where scalar is LHS. Complements §0.4.77's rank-1-on-LHS overloads. Matters
 // for non-commutative ops (minus, div). Each overload uses `broadcastScalar`

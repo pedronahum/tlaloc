@@ -29,6 +29,26 @@ object Tensors {
         rows: Int,
         cols: Int,
     ): DTensor<Rank2<R, C>, F32> = f32Matrix(rows, cols, FloatArray(rows * cols))
+
+    /**
+     * §0.4.97 — rank-3 tensor constructor. Mirrors [f32Matrix] for one axis higher.
+     * Used wherever the user has a 3D tensor (a stack of matrices, or a sequence of
+     * rank-2 frames, or a single rank-3 conv-input chunk).
+     *
+     * The phantom shape is `Rank3<A, B, C>`; like [f32Matrix] the caller picks the
+     * branding axis types (typically all `Sym` when the dimensions aren't named).
+     */
+    fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> f32Tensor3(
+        d0: Int,
+        d1: Int,
+        d2: Int,
+        data: FloatArray,
+    ): DTensor<Rank3<A, B, C>, F32> {
+        require(data.size == d0 * d1 * d2) {
+            "data.size=${data.size} does not match d0*d1*d2=${d0 * d1 * d2}"
+        }
+        return DTensor(HostF32Storage(data.copyOf()), intArrayOf(d0, d1, d2), F32)
+    }
 }
 
 fun DTensor<*, F32>.hostF32(): FloatArray {

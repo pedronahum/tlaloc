@@ -798,6 +798,44 @@ class GradTest {
     }
 
     @Test
+    fun rank3PlusScalarTracerGivesBothGradients() {
+        // §0.4.97 — Rank-3 extension of §0.4.78's scalar broadcast. `f32Tensor3`
+        // constructor + Tracer<Rank3>.plus(Tracer<ScalarShape>) overload.
+        // x is a 2x2x2 tensor [[[1,2],[3,4]],[[5,6],[7,8]]]; scalar c = 10.
+        //   forward: every element + 10. sum = 36 + 80 = 116. value = 116.
+        //   grad_x = ones (8 elements). grad_c = 8 (= D0*D1*D2).
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, c: Tracer<ScalarShape> ->
+            (x + c).sum()
+        }
+        val (value, dx, dc) = vg(
+            Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f)),
+            Tensors.f32Scalar(10f),
+        )
+        assertEquals(116f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 8) assertEquals(1f, gx[i], "grad_x[$i]")
+        assertEquals(8f, dc.hostF32()[0], "grad_c = D0*D1*D2 = 8")
+    }
+
+    @Test
+    fun rank3TimesScalarTracerScalesEachElement() {
+        // f(x, c) = sum(x * c). x = 2x2x2 ones-like, c = 5.
+        //   forward: sum = 8 * 5 = 40. grad_x = c per element (5 each).
+        //   grad_c = sum(x) = 8 (since x is 8 ones).
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, c: Tracer<ScalarShape> ->
+            (x * c).sum()
+        }
+        val (value, dx, dc) = vg(
+            Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, FloatArray(8) { 1f }),
+            Tensors.f32Scalar(5f),
+        )
+        assertEquals(40f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 8) assertEquals(5f, gx[i])
+        assertEquals(8f, dc.hostF32()[0])
+    }
+
+    @Test
     fun rank2PlusScalarTracerGivesBothGradients() {
         // §0.4.78 — rank-2 extension of §0.4.77's scalar broadcast.
         // f(x, c) = sum(x + c) at x=[[1,2],[3,4]], c=5.

@@ -39,6 +39,55 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.97 Rank-3 tensor constructor + scalar-broadcast operators 2026-04-25
+
+Discovered while planning the §0.4.93 follow-up that `Rank3<A0, A1, A2> : Shape` already exists in `:core` — and so do `Rank4`/`Rank5`/`Rank6`. The "rank-3 broadcast operator set is gated on a public `Rank3` shape type" claim in §0.4.93 was wrong; the actual gap was the missing `Tensors.f32Tensor3` constructor. This session ships that constructor plus the four scalar-broadcast operators on `Tracer<Rank3<A, B, C>>`, mirroring §0.4.78's rank-2 set.
+
+**Two changes**:
+
+1. **[Tensors.kt](core/src/commonMain/kotlin/io/tlaloc/core/Tensors.kt)** — new `f32Tensor3<A, B, C>(d0, d1, d2, data)` constructor. Validates `data.size == d0*d1*d2`, defensively copies the array, returns `DTensor<Rank3<A, B, C>, F32>`. Same idiom as `f32Matrix`.
+
+2. **[TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt)** — four `Tracer<Rank3<A, B, C>>.{plus/minus/times/div}(Tracer<ScalarShape>)` operator overloads with `@JvmName-Rank3` suffixes. Each routes through the generic `broadcastScalar` (which is rank-agnostic) + the existing same-shape operator. No new VJP rule needed — §0.4.84's axis-aware BroadcastRule + §0.4.84's bridge-SUM arm already handle rank-N input via `reduction_dims` (defaults to all dims for the scalar case).
+
+**Two new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `rank3PlusScalarTracerGivesBothGradients` — `sum(x + c)` with x as a 2x2x2 tensor and c=10. value=116, grad_x=ones, grad_c=8 (=D0·D1·D2). Pins both the constructor and the operator.
+
+2. `rank3TimesScalarTracerScalesEachElement` — same shape, `sum(x * c)` at c=5 with x=ones. grad_x=5 per element, grad_c=8.
+
+**Decisions worth flagging**:
+
+- **The earlier "Rank3 doesn't exist" claim was wrong.** §0.4.93's spec note assumed the type was missing because the constructor was. Rectified here; future session readers don't need to re-check.
+
+- **Reverse-order overloads (`scalar op rank3`) NOT included this session.** §0.4.91/§0.4.92's pattern would extend by another four overloads (`Tracer<ScalarShape>.op(Tracer<Rank3<A, B, C>>)`). One-line each; deferred only because the test signal-per-overload ratio drops fast at this point. If a use case wants `2f - tensor3`, the §0.4.93's generic `Float.op(Tracer<S>)` handles it via `constantLike` already.
+
+- **No rank-3 + rank-1/rank-2 broadcast.** Cross-rank broadcasting between rank-3 and lower ranks (e.g. broadcasting a rank-2 plane across the leading axis of a rank-3 tensor) needs more tape-level machinery (compute correct broadcast_dimensions per shape pair). Filed as future work; rank-2 + rank-1 from §0.4.85/§0.4.87 covers the common 2D bias-add cases.
+
+- **Generic `broadcastScalar` already handles rank-3.** Made generic in §0.4.78 ("rank-1-specific to `Tracer<S>.broadcastScalar(scalar)`"); was forward-compatible with rank-3 from that point. Today's session confirmed the assumption holds.
+
+- **Tests use `2x2x2` shape.** Smallest non-trivial 3D — exercises the `D0*D1*D2 = 8` element count without making the test data unwieldy.
+
+**Tests added** (+2 new):
+
+- `GradTest.rank3PlusScalarTracerGivesBothGradients`
+- `GradTest.rank3TimesScalarTracerScalesEachElement`
+
+Full suite is green: **677 tests** (+2 over §0.4.96).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on grad expressions**.
+3. **`diagnosticReporter` migration proper** — multi-step refactor per §0.4.94.
+4. **Reverse-order rank-3 scalar broadcast** — `Tracer<ScalarShape>.op(Tracer<Rank3<A, B, C>>)`. Quick four-overload addition.
+5. **Rank-4+ tensor constructors and operators** — gated on actual call sites.
+
+**Definition-of-done for §0.4.97 — met**:
+- `Tensors.f32Tensor3` constructor lands in `:core` ✓
+- Four rank-3 scalar-broadcast operators with `@JvmName` ✓
+- Tests verify both forward value and both-side gradients ✓
+- Full suite green at 677 tests (+2) ✓
+
 #### 0.4.96 `unaryMinus` operator — `-tracer` works alongside the existing `neg()` method 2026-04-25
 
 Tiny but obvious surface gap: `+`, `-`, `*`, `/` were operators on `Tracer<S>`, but the unary-minus form needed an explicit `tracer.neg()` method call. Fixed by adding `operator fun <S : Shape> Tracer<S>.unaryMinus(): Tracer<S> = neg()` — pure delegation, no new tape op.
