@@ -26,6 +26,109 @@ class BreakBearingWhileTest {
     private fun findWhile(fn: io.tlaloc.ir.DxirFunction): DxirOp =
         fn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.WHILE }
 
+    // --- D.3i Phase 2 (§0.4.125) validation tests ---
+
+    @Test
+    fun rejectsNonZeroCounterInit() {
+        // §0.4.125 — when the counter init isn't `const(0)`, the counter fields
+        // get downgraded to null even though the structural LAND-NOT match holds.
+        val fn = DxirBuilder.function("nonZeroInit") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val nonZeroStart = const(2, i32s)  // breaks the init invariant
+            val w = whileOp(
+                inits = listOf(x, nonZeroStart),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(op(OpKind.STEP, listOf(args[0]), boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))
+        assertNotNull(pattern, "structural LAND-NOT match still succeeds")
+        assertNull(pattern.counterArgIdx, "non-zero init invalidates the counter extraction")
+        assertNull(pattern.tripCountConst)
+    }
+
+    @Test
+    fun rejectsNonStandardBackEdgeIncrement() {
+        // §0.4.125 — when the body's counter back-edge isn't `ADD(args[counterIdx],
+        // const(1))` (e.g., increment by 2 instead of 1), the counter fields downgrade.
+        val fn = DxirBuilder.function("incrTwo") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(op(OpKind.STEP, listOf(args[0]), boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(2, i32s)), i32s)  // +2 instead of +1
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))
+        assertNotNull(pattern, "structural LAND-NOT match still succeeds")
+        assertNull(pattern.counterArgIdx, "non-+1 increment invalidates the counter extraction")
+    }
+
+    @Test
+    fun rejectsBackEdgeReferencingDifferentArg() {
+        // §0.4.125 — when the counter back-edge's first operand isn't the counter's
+        // own block arg (e.g., `ADD(bodyArgs[0], const(1))` for counter at idx=1),
+        // the counter fields downgrade. Catches mis-wired loop bodies.
+        val fn = DxirBuilder.function("crossWiredBackEdge") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(op(OpKind.STEP, listOf(args[0]), boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    // Wire the counter slot's back-edge to args[0] (the f32 carried)
+                    // — semantically broken but structurally a valid ADD. Phase 2's
+                    // validation must catch this.
+                    val newI = op(OpKind.ADD, listOf(args[0], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))
+        assertNotNull(pattern, "structural LAND-NOT match still succeeds")
+        assertNull(pattern.counterArgIdx, "back-edge referencing wrong arg invalidates the counter extraction")
+    }
+
     @Test
     fun extractsConcreteTripCountAndCounterIndex() {
         // §0.4.124 — when origCond matches the canonical STEP(SUB(n, counter)) C5/C6

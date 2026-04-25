@@ -82,22 +82,56 @@ object BreakBearingWhile {
         val breakCond = notNode.operands[0]
 
         // §0.4.124 — when origCond matches the canonical C5/C6 shape
-        // `STEP(SUB(n, args[counterArgIdx]))`, populate the trip-count fields.
-        // Otherwise leave them null; future phases that need richer cond shapes
-        // can layer their own extractors on top.
+        // `STEP(SUB(n, args[counterArgIdx]))`, extract the counter info.
         val counter = extractStepCounter(origCond, condBlock.args)
-        return if (counter != null) {
-            Pattern(
-                whileOp = op,
-                origCond = origCond,
-                breakCond = breakCond,
-                counterArgIdx = counter.argIdx,
-                tripCountConst = counter.tripCountConst,
-                tripCountParam = counter.tripCountParam,
-            )
-        } else {
-            Pattern(whileOp = op, origCond = origCond, breakCond = breakCond)
+        if (counter == null) {
+            return Pattern(whileOp = op, origCond = origCond, breakCond = breakCond)
         }
+        // §0.4.125 — Phase 2: also validate the counter's initial value (`const(0)`)
+        // and the body's back-edge (`ADD(bodyArgs[counterArgIdx], const(1))`). If
+        // either check fails, downgrade to "structural LAND-NOT match only" by
+        // leaving the counter fields null. Closure consumers can rely on populated
+        // counter fields meaning all three Phase-1/2 invariants hold.
+        if (!validateCounterInitAndBackEdge(op, counter.argIdx)) {
+            return Pattern(whileOp = op, origCond = origCond, breakCond = breakCond)
+        }
+        return Pattern(
+            whileOp = op,
+            origCond = origCond,
+            breakCond = breakCond,
+            counterArgIdx = counter.argIdx,
+            tripCountConst = counter.tripCountConst,
+            tripCountParam = counter.tripCountParam,
+        )
+    }
+
+    /**
+     * §0.4.125 — Phase 2 validation. Confirm that:
+     *  - `whileOp.operands[counterArgIdx]` is `const(0)` (integer-valued).
+     *  - The body block's terminator at slot [counterArgIdx] is
+     *    `ADD(bodyArgs[counterArgIdx], const(1))` (the standard +=1 increment).
+     *
+     * Returns true when both invariants hold. Mirrors the same checks
+     * [PhiCalculus.detectSimpleLoop] and [PhiCalculus.detectAffineRecurrence]
+     * apply for the C5/C6 paths — keeping them in lockstep means the trip-count
+     * surface this detector produces is interoperable with the existing
+     * closure-pipeline expectations.
+     */
+    private fun validateCounterInitAndBackEdge(op: DxirOp, counterArgIdx: Int): Boolean {
+        val initNode = op.operands.getOrNull(counterArgIdx) as? DxirConst ?: return false
+        val initValue = (initNode.value as? Number)?.toDouble() ?: return false
+        if (initValue != 0.0) return false
+
+        val bodyBlock = op.regions[1].blocks.single()
+        val bodyArgs = bodyBlock.args
+        if (counterArgIdx !in bodyArgs.indices) return false
+        val backEdge = bodyBlock.terminator.getOrNull(counterArgIdx) as? DxirOp ?: return false
+        if (backEdge.op != OpKind.ADD) return false
+        if (backEdge.operands.size != 2) return false
+        if (backEdge.operands[0].id != bodyArgs[counterArgIdx].id) return false
+        val incrConst = backEdge.operands[1] as? DxirConst ?: return false
+        val incrValue = (incrConst.value as? Number)?.toDouble() ?: return false
+        return incrValue == 1.0
     }
 
     /**

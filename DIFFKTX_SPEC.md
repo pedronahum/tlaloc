@@ -39,6 +39,72 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.125 D.3i Phase 2 — counter init + back-edge validation 2026-04-25
+
+§0.4.124's Phase 1.5 extracted the counter index and trip-count bound from `origCond` when it matched the canonical `STEP(SUB(n, args[i]))` shape. But the WHILE op's CARRYING semantics weren't validated — a primal could pass Phase 1.5 with a counter init of `const(2)` (instead of 0) or a back-edge of `ADD(args[i], const(2))` (instead of +1). This session adds those two structural invariants. When either fails, the counter fields downgrade to null even though the LAND-NOT structural match still succeeds.
+
+**The mechanism** in [BreakBearingWhile.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt). A new private helper `validateCounterInitAndBackEdge(op, counterArgIdx)` runs after `extractStepCounter` succeeds. When it returns false, the detector still produces a `Pattern` with `whileOp` / `origCond` / `breakCond` populated but with the three counter fields null. Future closure consumers can rely on populated counter fields meaning all four invariants hold:
+
+1. The cond region's terminator is `LAND(_, NOT(_))`. (Phase 1)
+2. `origCond` is `STEP(SUB(n, args[counterArgIdx]))`. (Phase 1.5)
+3. `whileOp.operands[counterArgIdx]` is `const(0)`. (Phase 2)
+4. `bodyBlock.terminator[counterArgIdx]` is `ADD(bodyArgs[counterArgIdx], const(1))`. (Phase 2)
+
+```kotlin
+private fun validateCounterInitAndBackEdge(op: DxirOp, counterArgIdx: Int): Boolean {
+    val initNode = op.operands.getOrNull(counterArgIdx) as? DxirConst ?: return false
+    val initValue = (initNode.value as? Number)?.toDouble() ?: return false
+    if (initValue != 0.0) return false
+
+    val bodyBlock = op.regions[1].blocks.single()
+    val bodyArgs = bodyBlock.args
+    if (counterArgIdx !in bodyArgs.indices) return false
+    val backEdge = bodyBlock.terminator.getOrNull(counterArgIdx) as? DxirOp ?: return false
+    if (backEdge.op != OpKind.ADD) return false
+    if (backEdge.operands.size != 2) return false
+    if (backEdge.operands[0].id != bodyArgs[counterArgIdx].id) return false
+    val incrConst = backEdge.operands[1] as? DxirConst ?: return false
+    val incrValue = (incrConst.value as? Number)?.toDouble() ?: return false
+    return incrValue == 1.0
+}
+```
+
+**Decisions worth flagging**:
+
+- **Validation in lockstep with `detectSimpleLoop` / `detectAffineRecurrence`.** Both PhiCalculus detectors apply the same invariants (init=0, back-edge=ADD(args[i], const(1))). Mirroring the checks here keeps the trip-count surface this detector produces interoperable with the existing closure-pipeline expectations. When the three detectors converge on a stable shape, a future refactor can extract a common helper — but premature deduplication risks destabilising working production paths.
+
+- **Existing tests stay green via constructor defaults — and via use of canonical primals.** The four §0.4.123 tests + three §0.4.124 tests all build primals with `const(0)` init + `ADD(args[i], const(1))` back-edge (matching the detectSimpleLoop conventions), so they pass Phase 2 validation unchanged. The Pattern's three counter fields populate exactly as before.
+
+- **Negative cases scope to three orthogonal failures.** The new tests pin (a) non-zero init (`const(2)` instead of `const(0)`), (b) non-+1 increment (`const(2)` instead of `const(1)`), and (c) back-edge referencing the wrong block arg (`args[0]` instead of `args[counterArgIdx]`). Each test changes a single dimension of the structural shape; the detector's response is the same — counter fields downgrade to null while the LAND-NOT match itself still succeeds.
+
+- **No public API surface change beyond §0.4.124.** The existing `Pattern` data class shape stays. The new validation helper is private. The `extractStepCounter` helper from §0.4.124 also stays unchanged — it does the structural match without the carrying validation, which lets future consumers split the two checks if they ever want to know "match exists but isn't fully valid" separately. The current `detect` orchestrates both checks atomically.
+
+- **Phase 3 (closed-form computation) is now unblocked.** With counter fields populated meaning all four invariants hold, Phase 3's closed-form gradient computation has a fully-validated structural target. The remaining work for the actual closure: (1) determine the iteration `k*` at which `breakCond` first becomes true (Symja-backed for symbolic break conditions; concrete-loop unroll for closed-form ones); (2) emit a closed-form expression for the loop-carried result that uses `min(tripCount, k*)` as the effective trip count; (3) wire into PhiCalculus.coarsenFunction's WHILE handling. These steps are real session work; Phase 1+1.5+2 cleared the path.
+
+**Tests added** (+3 new) in [BreakBearingWhileTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/BreakBearingWhileTest.kt):
+
+- `BreakBearingWhileTest.rejectsNonZeroCounterInit` — counter init = `const(2)` instead of `const(0)`. Pattern returned with counter fields null. Pin: structural match still holds; closure-eligibility downgrades.
+- `BreakBearingWhileTest.rejectsNonStandardBackEdgeIncrement` — back-edge increment = `const(2)` instead of `const(1)`. Pattern returned with counter fields null.
+- `BreakBearingWhileTest.rejectsBackEdgeReferencingDifferentArg` — back-edge's first operand wired to `args[0]` (the f32 carried) instead of `args[counterArgIdx]`. Pattern returned with counter fields null. Catches mis-wired loop bodies.
+
+Full suite is green: **764 tests** (+3 over §0.4.124).
+
+**Recommended next pickup** (next /loop firing — D.3i Phase 3 main work):
+
+1. **D.3i Phase 3 — break-iteration computation.** With Phase 1/1.5/2 producing fully-validated patterns, Phase 3 can determine when `breakCond` first becomes true. For concrete-iteration-count loops with `breakCond` containing only loop-invariant operands and the counter, Symja can solve for the smallest `k` where `breakCond[i := k]` is true. For more complex break conditions (depending on the carried values), a runtime-computation arm flowing through the bridge is the fallback. Multi-session-tractable arc.
+2. **Multi-result COARSENED**.
+3. **`:benchmarks` Gradle module**.
+4. **HMC benchmark port — Phase 1**.
+
+**Definition-of-done for §0.4.125 — met**:
+- `validateCounterInitAndBackEdge` private helper lands ✓
+- Counter fields populate ONLY when all four invariants hold (Phase 1 + 1.5 + 2) ✓
+- Validation mirrors `detectSimpleLoop` / `detectAffineRecurrence`'s checks ✓
+- Three tests pin orthogonal failure modes (init, increment, cross-wired back-edge) ✓
+- All 7 existing tests still green (canonical primals satisfy Phase 2 unchanged) ✓
+- D.3i Phase 3 unblocked — closure consumers can rely on validated counter ↔ structural-shape coupling ✓
+- Full suite stays green at 764 tests (+3) ✓
+
 #### 0.4.124 D.3i Phase 1.5 — counter / trip-count extraction in `BreakBearingWhile.Pattern` 2026-04-25
 
 §0.4.123's Phase 1 detector recognised the `LAND(cond, NOT(break_cond))` shape and returned the split predicates verbatim — Phase 2's closure logic still had to re-parse `origCond` to find the counter index and trip-count bound. This session extends the detector to extract that semantic info during the structural match, so Phase 2 can consume a pre-validated `Pattern`.
