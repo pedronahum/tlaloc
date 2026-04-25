@@ -369,6 +369,148 @@ class DxirReverseTransformTest {
     }
 
     @Test
+    fun gradOfNestedMultiResultIfWithLiveIndexZeroFlowsCorrectly() {
+        // §0.4.144 — outer single-result IF whose then-arm contains a nested
+        // multi-result IF; only result(0) is live downstream of the inner IF.
+        // f(x) = if (x > 0) innerMrIf.result(0) else x
+        // innerMrIf cond = STEP(x - 5):
+        //   inner-then  yields (x², x³)
+        //   inner-else  yields (-x, x³)
+        // For x > 5: outer-then; inner-then; result(0) = x²; d/dx = 2x.
+        // For 0 < x ≤ 5: outer-then; inner-else; result(0) = -x; d/dx = -1.
+        // For x ≤ 0: outer-else; result = x; d/dx = 1.
+        val primal = DxirBuilder.function("nestedMrIfLive0") {
+            val x = param("x", f32)
+            val pOuter = op(OpKind.STEP, listOf(x), boolS)
+            val five = const(5f, f32)
+            val xMinus5 = op(OpKind.SUB, listOf(x, five), f32)
+            val pInner = op(OpKind.STEP, listOf(xMinus5), boolS)
+            val ifResult = ifOp(
+                cond = pOuter,
+                types = listOf(f32),
+                thenRegion = region {
+                    val negX = op(OpKind.NEG, listOf(x), f32)
+                    val xx = op(OpKind.MUL, listOf(x, x), f32)
+                    val xxx = op(OpKind.MUL, listOf(xx, x), f32)
+                    val innerIf = ifOp(
+                        cond = pInner,
+                        types = listOf(f32, f32),
+                        thenRegion = region { yields(xx, xxx) },
+                        elseRegion = region { yields(negX, xxx) },
+                    )
+                    yields(innerIf.result(0))
+                },
+                elseRegion = region { yields(x) },
+            )
+            listOf(ifResult)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        // x = 8 (outer-then; inner-then; d/dx of x² = 2x = 16).
+        val outA = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(8f)))
+        assertTrue(
+            kotlin.math.abs(outA[0][0] - 16f) < 1e-3f,
+            "expected 16 at x=8 (inner-then; d/dx of x² = 2x), got ${outA[0][0]}",
+        )
+        // x = 3 (outer-then; inner-else; d/dx of -x = -1).
+        val outB = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(3f)))
+        assertTrue(
+            kotlin.math.abs(outB[0][0] - (-1f)) < 1e-3f,
+            "expected -1 at x=3 (inner-else; d/dx of -x), got ${outB[0][0]}",
+        )
+        // x = -2 (outer-else; d/dx of x = 1).
+        val outC = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(-2f)))
+        assertTrue(
+            kotlin.math.abs(outC[0][0] - 1f) < 1e-3f,
+            "expected 1 at x=-2 (outer-else; d/dx of x), got ${outC[0][0]}",
+        )
+    }
+
+    @Test
+    fun gradOfNestedMultiResultIfWithLiveIndexOneFlowsCorrectly() {
+        // §0.4.144 — same shape as the live-index-0 test but the outer-then yields
+        // innerMrIf.result(1) instead. Both inner branches yield x³ at result(1),
+        // so within outer-then f = x³ regardless of inner predicate; d/dx = 3x².
+        val primal = DxirBuilder.function("nestedMrIfLive1") {
+            val x = param("x", f32)
+            val pOuter = op(OpKind.STEP, listOf(x), boolS)
+            val five = const(5f, f32)
+            val xMinus5 = op(OpKind.SUB, listOf(x, five), f32)
+            val pInner = op(OpKind.STEP, listOf(xMinus5), boolS)
+            val ifResult = ifOp(
+                cond = pOuter,
+                types = listOf(f32),
+                thenRegion = region {
+                    val negX = op(OpKind.NEG, listOf(x), f32)
+                    val xx = op(OpKind.MUL, listOf(x, x), f32)
+                    val xxx = op(OpKind.MUL, listOf(xx, x), f32)
+                    val innerIf = ifOp(
+                        cond = pInner,
+                        types = listOf(f32, f32),
+                        thenRegion = region { yields(xx, xxx) },
+                        elseRegion = region { yields(negX, xxx) },
+                    )
+                    yields(innerIf.result(1))
+                },
+                elseRegion = region { yields(x) },
+            )
+            listOf(ifResult)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        // x = 4 (outer-then; result(1) = x³; d/dx = 3x² = 48).
+        val outA = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(4f)))
+        assertTrue(
+            kotlin.math.abs(outA[0][0] - 48f) < 1e-2f,
+            "expected 48 at x=4 (d/dx of x³ = 3x²), got ${outA[0][0]}",
+        )
+        // x = 2 (outer-then; d/dx of x³ = 3x² = 12).
+        val outB = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(2f)))
+        assertTrue(
+            kotlin.math.abs(outB[0][0] - 12f) < 1e-3f,
+            "expected 12 at x=2, got ${outB[0][0]}",
+        )
+        // x = -1 (outer-else; d/dx of x = 1).
+        val outC = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(-1f)))
+        assertTrue(
+            kotlin.math.abs(outC[0][0] - 1f) < 1e-3f,
+            "expected 1 at x=-1 (outer-else), got ${outC[0][0]}",
+        )
+    }
+
+    @Test
+    fun gradOfNestedMultiResultIfWithMultipleLiveIndicesIsRejected() {
+        // §0.4.144 — a nested MR IF whose result(0) AND result(1) are both
+        // referenced downstream within the outer branch must be rejected, just
+        // like Phase 1's top-level multi-live-index rejection.
+        val primal = DxirBuilder.function("nestedMrIfMultiLive") {
+            val x = param("x", f32)
+            val pOuter = op(OpKind.STEP, listOf(x), boolS)
+            val ifResult = ifOp(
+                cond = pOuter,
+                types = listOf(f32),
+                thenRegion = region {
+                    val negX = op(OpKind.NEG, listOf(x), f32)
+                    val xx = op(OpKind.MUL, listOf(x, x), f32)
+                    val pInner = op(OpKind.STEP, listOf(x), boolS)
+                    val innerIf = ifOp(
+                        cond = pInner,
+                        types = listOf(f32, f32),
+                        thenRegion = region { yields(negX, xx) },
+                        elseRegion = region { yields(x, xx) },
+                    )
+                    // Reference both result(0) and result(1) — multi-live-index.
+                    val sum = op(OpKind.ADD, listOf(innerIf.result(0), innerIf.result(1)), f32)
+                    yields(sum)
+                },
+                elseRegion = region { yields(x) },
+            )
+            listOf(ifResult)
+        }
+        kotlin.test.assertFailsWith<IllegalStateException> {
+            DxirReverseTransform.apply(primal)
+        }
+    }
+
+    @Test
     fun gradOfMultiResultIfWithLiveIndexZeroFlowsCorrectly() {
         // §0.4.139 — multi-result IF where the function returns DxirOpResult(if, 0).
         // f(x) = (if (x > 0) -x else x).result(0). At x=2: then-arm picks -x = -2;

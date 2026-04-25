@@ -39,6 +39,59 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.144 Multi-result IF AD Phase 3 — nested MR IF with single-live-index 2026-04-25
+
+§0.4.139 (Phase 1) shipped the top-level multi-result IF AD with a single-live-index policy. §0.4.140 (Phase 2) shipped the recursive `walkBranchReverse` for nested *single-result* IFs. The natural follow-on is the union: nested *multi-result* IFs whose unique downstream-referenced result index can be detected per-block. §0.4.144 closes that gap with a block-local mirror of Phase 1's pre-scan plus a one-line dispatch update in step 3.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt):
+
+1. **`findIfLiveResultIndexInBlock(block, ifOp): Int?`** ([DxirReverseTransform.kt:887-916](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L887-L916)) — block-local mirror of [findIfLiveResultIndex] (§0.4.139). Walks `block.body + block.terminator` instead of `fn.body + fn.returns`. Same `DxirOpResult` / direct-`DxirOp` ref counting, same `referenced.singleOrNull()` return shape. The narrower scope is correct: when a nested IF lives inside a branch, its downstream consumers can ONLY be in the same outer block (SSA dominance prevents references from elsewhere); walking the whole function would over-walk without changing the result.
+
+2. **`walkBranchReverse` step 1 widening** ([DxirReverseTransform.kt:1361-1385](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1361-L1385)) — replaces the Phase 2 hard rejection of `n.isMultiResult` with a typed dispatch: nested ops still must be IFs (WHILE still errors), but multi-result IFs now get their live index computed via `findIfLiveResultIndexInBlock`. If the result is null (zero or >1 live indices), throw with a clear message; else stash the live index in a local `nestedIfLiveIndices` map.
+
+3. **`walkBranchReverse` step 3 dispatch** ([DxirReverseTransform.kt:1442-1455](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1442-L1455)) — the recursive `handleIfAdjoint` call now reads `nestedIfLiveIndices[n.id] ?: 0`. For single-result IFs the entry is unset and the default 0 is correct (terminator size 1, only valid index). For nested MR IFs the live index drives where in `block.terminator` step 2 seeds `gradAccum`, mirroring Phase 1's top-level dispatch exactly.
+
+**Decisions worth flagging**:
+
+- **Block-local pre-scan, not function-level.** The original `findIfLiveResultIndex` (§0.4.139) walks `fn.body + fn.returns` recursively. For nested IFs, that walk would still be correct (it'd find references in the right region thanks to SSA dominance), but conceptually noisy — it walks parts of the function that can't reference the nested IF. The block-local helper makes the scope explicit: "downstream of this nested IF" = "ops in the same outer block after it + the outer block's terminator". Mirrors how §0.4.142's `isRegionInternalSubtreeLiftable` made the threshold-subtree's scope explicit.
+
+- **Pre-scan is eager, not lazy.** `nestedIfLiveIndices` is populated during step 1 (the cloner) when each inner IF is first seen, NOT lazily during step 3's dispatch. Eager pre-scan matches Phase 1's pattern and gives a clean failure mode: if a nested MR IF has multiple live indices, step 1 throws BEFORE any clones land, so the gradient builder hasn't been polluted with partial work. Lazy pre-scan would mean the failure surfaces during step 3, after step 1 has already cloned several ops — partial state to clean up.
+
+- **`require(n.op == OpKind.IF)` stays unchanged.** Nested WHILE still errors with the same diagnostic. Phase 4 (WHILE in branch) would need WHILE-aware AD; the §0.4.128 LoopInvariant rewrite produces the §0.4.140 recommended-next nested-WHILE shape.
+
+- **`liveIdx = 0` default for single-result IFs.** When `n` is a single-result IF, `nestedIfLiveIndices[n.id]` is never set; step 3's `?: 0` falls back to 0, which equals `terminator.single()`'s slot. Backwards-compatible without scattering conditionals — the multi-result path is the new code; the single-result path is the index-0 special case.
+
+- **Error message for multi-live-index matches Phase 1's wording.** "current MR IF AD only supports the single-live-index case" is verbatim from Phase 1's top-level error, just with "nested" prefix added. The user-visible diagnostic for both shapes points at the same underlying limitation (per-index gradAccum refactor) — wording consistency makes it easier to cross-reference Phase 1's docs.
+
+- **Test design — three cases mirror Phase 1.** Live-index-0, live-index-1, and multi-live-index-rejection. The first two pin the per-index plumbing routes the seed correctly; the third pins the rejection with a clear failure mode. Symmetric with the §0.4.139 test surface: `gradOfMultiResultIfWithLiveIndexZeroFlowsCorrectly` / `gradOfMultiResultIfWithLiveIndexOneFlowsCorrectly` / `gradOfMultiResultIfWithMultipleLiveIndicesIsRejected` at the top level; `gradOfNestedMultiResultIfWith…` mirrors at the nested level.
+
+- **Outer single-result IF wraps the inner MR IF.** All three Phase 3 tests use a single-result outer IF (so Phase 1's top-level pre-scan doesn't fire) and exercise the inner MR IF nesting via the outer-then arm. This isolates the new code path: the outer IF flows through Phase 2's existing path, and the nested MR IF is the only Phase 3 surface exercised. A future test could put a nested MR IF inside another nested MR IF, but the same recursive logic handles it without further changes.
+
+**Tests added** (+3 new) in [DxirReverseTransformTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt):
+
+- `DxirReverseTransformTest.gradOfNestedMultiResultIfWithLiveIndexZeroFlowsCorrectly` — outer-then contains a nested MR IF `(types = [f32, f32])` whose result(0) is the only downstream-referenced index. Inner cond = `STEP(x - 5)`. Pin: at `x=8` → 16 (inner-then; `d/dx of x²`); at `x=3` → -1 (inner-else; `d/dx of -x`); at `x=-2` → 1 (outer-else).
+- `DxirReverseTransformTest.gradOfNestedMultiResultIfWithLiveIndexOneFlowsCorrectly` — same shape but result(1) is the live index. Both inner branches yield `x³` at result(1), so within outer-then, `f = x³` regardless of inner pred. Pin: at `x=4` → 48 (`3x²`), `x=2` → 12, `x=-1` → 1 (outer-else).
+- `DxirReverseTransformTest.gradOfNestedMultiResultIfWithMultipleLiveIndicesIsRejected` — outer-then references both result(0) AND result(1) of the inner MR IF. Pin: throws `IllegalStateException` (the new step-1 pre-scan rejection).
+
+Full suite is green: **836 tests** (+3 over §0.4.143).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 4 — nested WHILE in IF branch.** Would unblock §0.4.128's LoopInvariant rewrite's nested WHILE. Requires WHILE-aware AD; structurally bigger.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.** The other half of "Phase 3" — when both result indices are downstream-referenced. Multi-session structural change.
+3. **`:benchmarks` Gradle module** — extract one perf probe.
+4. **D.3i Phase 3i — region-internal SOIs in CounterOnly threshold/n.** A liftability extension for `DxirOpResult` / `DxirCall` that the current `isRegionInternalSubtreeLiftable` rejects.
+
+**Definition-of-done for §0.4.144 — met**:
+- `findIfLiveResultIndexInBlock` mirrors §0.4.139's helper at block scope ✓
+- `walkBranchReverse` step 1 accepts MR IF when its live index in the outer block is unique ✓
+- `nestedIfLiveIndices` carries the per-IF live index from step 1 → step 3 ✓
+- Step 3's recursive `handleIfAdjoint` call uses the tracked live index ✓
+- Multi-live-index nested MR IF rejected with a Phase-1-mirroring error message ✓
+- 3 new tests pin live-index-0, live-index-1, multi-live rejection ✓
+- §0.4.140's single-result nested IF path unchanged (existing 2 tests still green) ✓
+- Full suite stays green at 836 tests (+3) ✓
+
 #### 0.4.143 D.3i Phase 3h — DxirOp `n` (outer-scope + region-internal lift) 2026-04-25
 
 §0.4.142 (Phase 3g) widened the CounterOnly arm's `threshold` operand to accept `DxirOp` (outer-scope direct-resolve + region-internal lift). The natural mirror — extending the same widening to the `n` operand — was the §0.4.142 recommended-next #2: `BreakBearingWhile.extractStepCounter` only accepted `DxirConst | DxirParam` for `n`, so any code shape with `n = nParam · 3` or similar fell through detection entirely (Pattern.counterArgIdx came back null, the WHILE never even classified as CounterOnly). §0.4.143 closes that gap by adding a `tripCountOp: DxirOp?` field to `Pattern`/`CounterMatch` and routing it through the same Phase 3g lift dispatch in `rewriteCounterOnlySymbolicBreak`. With this Phase, `n` and `threshold` now accept the full `DxirConst | DxirParam | DxirOp` spread independently.

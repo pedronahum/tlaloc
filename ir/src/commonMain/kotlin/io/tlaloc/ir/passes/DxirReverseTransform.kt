@@ -884,6 +884,49 @@ object DxirReverseTransform {
         return referenced.singleOrNull()
     }
 
+    /**
+     * §0.4.144 — block-local mirror of [findIfLiveResultIndex]. Walks the given
+     * [block]'s body + terminator looking for downstream references to [ifOp]
+     * (via [DxirOpResult] or direct [DxirOp] ref). Returns the unique result
+     * index if exactly one is referenced, else null.
+     *
+     * Used by [walkBranchReverse] when accepting a nested multi-result IF as
+     * a branch-body op: the "downstream scope" relative to the inner IF is the
+     * outer branch's block, NOT the whole function. Walking the function would
+     * also pick up references inside the inner IF's own regions (which are
+     * region-internal to the inner IF, not downstream uses). Walking just the
+     * outer block is the correct scope and matches Phase 1's [findIfLiveResultIndex]
+     * shape exactly.
+     */
+    private fun findIfLiveResultIndexInBlock(
+        block: io.tlaloc.ir.DxirBlock,
+        ifOp: DxirOp,
+    ): Int? {
+        val ifId = ifOp.id
+        val referenced = HashSet<Int>()
+        fun checkRef(node: DxirNode) {
+            if (node is DxirOpResult && node.source.id == ifId) {
+                referenced += node.index
+            } else if (node is DxirOp && node.id == ifId) {
+                referenced += 0
+            }
+        }
+        fun walk(nodes: List<DxirNode>) {
+            for (n in nodes) {
+                if (n !is DxirOp) continue
+                if (n === ifOp) continue
+                for (o in n.operands) checkRef(o)
+                for (r in n.regions) for (b in r.blocks) {
+                    walk(b.body)
+                    for (term in b.terminator) checkRef(term)
+                }
+            }
+        }
+        walk(block.body)
+        for (term in block.terminator) checkRef(term)
+        return referenced.singleOrNull()
+    }
+
     private fun computeUsedByAdjoint(
         primal: DxirFunction,
         primalById: Map<Int, DxirNode>,
@@ -957,11 +1000,12 @@ object DxirReverseTransform {
      *     outer gradient body: `IF(pred, thenAdj, elseAdj)`. Missing-branch
      *     contributions become `const(0)`. Accumulate into the outer `gradAccum`.
      *
-     * Limitations (first cut, §0.4.23; relaxed in §0.4.139, §0.4.140):
-     *  - Multi-result IF: single-live-index only (§0.4.139).
+     * Limitations (first cut, §0.4.23; relaxed in §0.4.139, §0.4.140, §0.4.144):
+     *  - Multi-result IF: single-live-index only (§0.4.139 top-level; §0.4.144 nested).
      *  - Nested control flow in branch bodies: single-result IF supported via
-     *    recursive dispatch (§0.4.140); WHILE / multi-result IF still error.
-     *  - Branch bodies must not contain multi-result ops.
+     *    recursive dispatch (§0.4.140); nested multi-result IF supported via
+     *    block-local live-index analysis (§0.4.144); WHILE still errors.
+     *  - Branch bodies must not contain non-IF multi-result ops.
      *  - `usedByAdjoint` analysis isn't extended into branches — all branch body ops
      *    are unconditionally cloned into the gradient body.
      */
@@ -1315,9 +1359,12 @@ object DxirReverseTransform {
      * `gradAccum`).
      *
      * §0.4.140 — nested single-result IF in the branch body is supported via a
-     * recursive [handleIfAdjoint] dispatch in step 3. Nested WHILE / multi-result IF
-     * still error: those need WHILE-aware AD (Stage B) and per-index gradAccum
-     * (a future MR IF AD phase) respectively.
+     * recursive [handleIfAdjoint] dispatch in step 3. §0.4.144 — nested
+     * multi-result IF with a unique downstream-referenced result index (mirrors
+     * Phase 1's top-level rule for the inner case) is also supported. Nested
+     * WHILE still errors: that needs WHILE-aware AD (Stage B). Multi-live-index
+     * MR IF still errors: that needs the per-index gradAccum refactor that the
+     * top-level path also defers.
      */
     private fun walkBranchReverse(
         block: io.tlaloc.ir.DxirBlock,
@@ -1330,7 +1377,11 @@ object DxirReverseTransform {
         // Step 1: clone branch body ops into the outer builder. branchNodeMap starts as
         // a copy of outerNodeMap (so outer-scope refs resolve) and accumulates clones
         // for each branch body op.
+        //
+        // §0.4.144 — track per-inner-IF live indices for nested multi-result IFs. For
+        // single-result inner IFs the entry is unset and step 3 defaults to liveIdx=0.
         val branchNodeMap = HashMap<Int, DxirNode>(outerNodeMap)
+        val nestedIfLiveIndices = HashMap<Int, Int>()
         for (n in block.body) {
             when (n) {
                 is DxirConst -> {
@@ -1339,14 +1390,28 @@ object DxirReverseTransform {
                 is DxirOp -> {
                     if (n.hasRegions) {
                         // §0.4.140 — single-result nested IF is allowed; the reverse
-                        // walk in step 3 dispatches to [handleIfAdjoint] for it. Other
-                        // region-bearing ops still error: WHILE needs WHILE-aware AD
-                        // (Stage B's PhiCalculus pass should have coarsened it before
-                        // SCT), and multi-result IF in a branch needs the per-index
+                        // walk in step 3 dispatches to [handleIfAdjoint] for it.
+                        // §0.4.144 — multi-result nested IF is allowed when exactly
+                        // one of its result indices is referenced in the outer
+                        // branch's downstream scope (i.e., later body ops + the
+                        // branch's terminator). Other region-bearing shapes still
+                        // error: WHILE needs WHILE-aware AD (Stage B's PhiCalculus
+                        // pass should have coarsened it before SCT), and a nested
+                        // MR IF without a unique live index needs the per-index
                         // gradAccum refactor that the top-level path also defers.
-                        require(n.op == OpKind.IF && !n.isMultiResult) {
+                        require(n.op == OpKind.IF) {
                             "walkBranchReverse: nested control-flow op ${n.op} in IF branch " +
-                                "supports only single-result IF; got op=${n.op} multiResult=${n.isMultiResult}"
+                                "not yet supported; got op=${n.op}"
+                        }
+                        if (n.isMultiResult) {
+                            val nestedLiveIdx = findIfLiveResultIndexInBlock(block, n)
+                                ?: error(
+                                    "walkBranchReverse: nested multi-result IF id=${n.id} has " +
+                                        "more than one (or zero) result indices referenced " +
+                                        "downstream — current MR IF AD only supports the " +
+                                        "single-live-index case",
+                                )
+                            nestedIfLiveIndices[n.id] = nestedLiveIdx
                         }
                         // Mirror the top-level apply's "primal IF kept, not cloned" rule —
                         // [handleIfAdjoint] re-clones each branch's body during the recursive
@@ -1417,15 +1482,19 @@ object DxirReverseTransform {
                 continue
             }
             // §0.4.140 — nested single-result IF in a branch body: dispatch to the
-            // same [handleIfAdjoint] helper that the top-level walk uses. The branch's
-            // gradAccum + nodeMap stand in for the outer-* parameters; contributions
-            // accumulate into the BRANCH's gradAccum (not the function-level one),
-            // which is what the outer walkBranchReverse caller eventually returns.
+            // same [handleIfAdjoint] helper that the top-level walk uses. §0.4.144 —
+            // nested multi-result IF (single-live-index) routes through the same
+            // helper with `liveIdx = nestedIfLiveIndices[n.id]`, mirroring Phase 1's
+            // top-level dispatch. The branch's gradAccum + nodeMap stand in for the
+            // outer-* parameters; contributions accumulate into the BRANCH's gradAccum
+            // (not the function-level one), which is what the outer walkBranchReverse
+            // caller eventually returns.
             if (n.op == OpKind.IF) {
+                val nestedLiveIdx = nestedIfLiveIndices[n.id] ?: 0
                 handleIfAdjoint(
                     ifNode = n,
                     upstream = upstreamForN,
-                    liveIdx = 0,
+                    liveIdx = nestedLiveIdx,
                     outerGradAccum = gradAccum,
                     outerNodeMap = branchNodeMap,
                     primalById = primalById,
