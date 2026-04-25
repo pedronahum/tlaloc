@@ -240,9 +240,14 @@ object FirLambdaToDxirLowering {
      * branch's yielded value becomes the region's single terminator — resolved through
      * [lowerBlock]'s trailing expression.
      *
-     * Nested when-expressions (e.g., `if (a) if (b) … else … else …`) are rejected — the
-     * recursion would require emitting another IF inside a region, which [DxirEmitter]
-     * does not expose uniformly. Deferred to a follow-up if a benchmark demands it.
+     * §0.4.162 — nested when-expressions (if/when inside another region body, e.g.
+     * inside a WHILE body or inside another IF branch) are now supported. The
+     * dispatch on `emitter` (DxirBuilder vs DxirRegionBuilder) mirrors the pattern
+     * `PhiCalculus.cloneRegion` uses: both subclasses expose `region { … }` and
+     * `ifOp(…)` with the same signatures, but those aren't on the `DxirEmitter`
+     * interface, so we type-switch at call sites. Required by HMC Phase 3's
+     * numerical-stability mask `if (-Xβ_i > 80) -Xβ_i else log(1 + exp(-Xβ_i))`,
+     * which lives inside a `for`-loop body (lowered to a WHILE body region).
      */
     private fun lowerWhen(
         expr: FirWhenExpression,
@@ -265,28 +270,43 @@ object FirLambdaToDxirLowering {
                 "when-expression second branch must be the else arm (FirElseIfTrueCondition)",
             )
         }
-        val outer = emitter as? DxirBuilder
-            ?: throw LoweringException(
-                "nested if/when inside a branch not supported (B.4a scope)",
+        val pred = lowerPredicate(thenBranch.condition, env, emitter)
+        // Both DxirBuilder and DxirRegionBuilder expose `region { … }` with the same
+        // signature, but the method isn't on DxirEmitter. Build via a helper closure
+        // that dispatches on the runtime type.
+        fun emitterRegion(block: io.tlaloc.ir.DxirRegionBuilder.() -> Unit): DxirRegion = when (emitter) {
+            is DxirBuilder -> emitter.region(block)
+            is io.tlaloc.ir.DxirRegionBuilder -> emitter.region(block)
+            else -> throw LoweringException(
+                "lowerWhen: unsupported emitter type ${emitter::class.simpleName}",
             )
-        val pred = lowerPredicate(thenBranch.condition, env, outer)
-        val thenRegion: DxirRegion = outer.region {
+        }
+        val thenRegion: DxirRegion = emitterRegion {
             val node = lowerBlock(thenBranch.result, env, this)
             yields(node)
         }
-        val elseRegion: DxirRegion = outer.region {
+        val elseRegion: DxirRegion = emitterRegion {
             val node = lowerBlock(elseBranch.result, env, this)
             yields(node)
         }
-        // Result type is the then-branch's yield type. Mismatched branch types surface as
-        // an IF-shape validation failure in DxirFunction's init block, not here.
         val resultType = thenRegion.blocks.single().terminator.single().type
-        return outer.ifOp(
-            cond = pred,
-            types = listOf(resultType),
-            thenRegion = thenRegion,
-            elseRegion = elseRegion,
-        )
+        return when (emitter) {
+            is DxirBuilder -> emitter.ifOp(
+                cond = pred,
+                types = listOf(resultType),
+                thenRegion = thenRegion,
+                elseRegion = elseRegion,
+            )
+            is io.tlaloc.ir.DxirRegionBuilder -> emitter.ifOp(
+                cond = pred,
+                types = listOf(resultType),
+                thenRegion = thenRegion,
+                elseRegion = elseRegion,
+            )
+            else -> throw LoweringException(
+                "lowerWhen: unsupported emitter type ${emitter::class.simpleName}",
+            )
+        }
     }
 
     /**

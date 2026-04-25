@@ -39,6 +39,61 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.162 HMC Phase 3 mask form + nested if/when in WHILE-body lowering 2026-04-26
+
+§0.4.161's hand-off named HMC Phase 3 (numerical-stability mask + true nested loop) as the next pickup. The first-cut implementation hit an unexpected blocker: the FIR-side lowering's `lowerWhen` cast `emitter as DxirBuilder` and rejected `DxirRegionBuilder` with the deliberate scope-limit error "nested if/when inside a branch not supported (B.4a scope)". The mask `if (-Xβ_i > 80) -Xβ_i else log(1 + exp(-Xβ_i))` lives inside a `for`-loop body (lowered to a WHILE body region), so the IF's emitter is `DxirRegionBuilder` — outside the cast's accepted type. §0.4.162 widens `lowerWhen` to dispatch on the runtime emitter type (mirroring `PhiCalculus.cloneRegion`'s pattern), then lands the masked form of HMC Phase 2 with two test methods covering both the no-fire (moderate β) and fire (large-magnitude β) paths.
+
+**The mechanism**:
+
+1. **`lowerWhen` emitter widening** ([FirLambdaToDxirLowering.kt:247-300](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt#L247-L300)) — replaces the `emitter as? DxirBuilder` cast with a `when (emitter)` dispatch that handles both `DxirBuilder` and `DxirRegionBuilder`. Both subclasses expose `region { … }` and `ifOp(…)` with identical signatures, but those aren't on the `DxirEmitter` interface, so we dispatch at the call sites — same pattern PhiCalculus.cloneRegion uses for its emitter-typed branching. The pred lowering (`lowerPredicate`) and block lowering (`lowerBlock`) already accept any `DxirEmitter`, so they didn't change.
+
+2. **HMC Phase 3 masked form** ([HmcLogisticRegressionMaskedTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionMaskedTest.kt)) — extends §0.4.160's loop-form port with the per-record `val stable = if (negXb > 80.0f) negXb else (1.0f + negXb.exp()).log()` mask inside the WHILE body. The mask predicate `negXb > 80.0f` lowers to `STEP(SUB(negXb, 80f))` via `lowerComparison` (§0.4.24); the IF region itself is now lowerable in the WHILE body context after §0.4.162's emitter widening.
+
+3. **Two test methods covering both mask paths**:
+   - β = [0.5, 0.3] (moderate) — every record's `negXβ_i ∈ [-0.65, -0.20]`, mask predicate FALSE everywhere. Gradient must match §0.4.160's exactly (mask compiles + evaluates but never fires; finite-difference cross-check passes).
+   - β = [-200, 0] (large negative) — records 0/1/3 have `negXβ_i ∈ [100, 300]` (mask TRUE); record 2 has `negXβ_2 = -100` (mask FALSE). Mixed branches; verifies AD propagation through the IF for both paths.
+
+4. **Tolerance widened** for the large-β regime: §0.4.160's `1e-3 / 5e-3` (absolute / relative) becomes `1e-2 / 5e-2`. Large-magnitude `negXβ` accumulates more f32 noise through `exp` / `log`; the loosened tolerance still distinguishes the IR-transform-fired path from the broken-stub fallback.
+
+**Decisions worth flagging**:
+
+- **The blocker was hidden behind a catch-all warning.** §0.4.161 closed Phase 4b at the IR level (region-recursive C5 into WHILE bodies). I assumed Phase 3 would compose: WHILE body + IF inside it + scalar exp/log = should "just work". The first masked test instead returned the broken-stub sentinel `-1.0` for both β slots — meaning the K2 plugin's IR transform never fired. Without diagnostic output the silent failure looked like a numerical error; the actual cause was an FIR-lowering scope check. Adding a stderr diagnostic dump to the test harness surfaced "nested if/when inside a branch not supported (B.4a scope)" — a deliberate scope limit dating to the original Phase B.4a's design (per the FirLambdaToDxirLowering.kt comment).
+
+- **The fix is structurally trivial; the wait was discovery.** Once located, the cast widening is ~30 lines of mechanical code following PhiCalculus.cloneRegion's pattern. The interesting work was triangulating *what* failed. This is a recurring pattern worth noting for future similar blockers: when the analytic gradient lands on the broken-stub sentinel value, ALWAYS dump compile messages to stderr before debugging — the FIR phase's `LoweringException` path emits a clear diagnostic that tells you exactly what's missing.
+
+- **Diagnostic output stays out of the committed test.** I added a `result.messages` print to stderr while debugging, then removed it once the fix was in place. The pattern is reusable enough to warrant a helper, but each test's needs differ slightly (which messages to filter, where to print). Inline-add-and-remove is the right shape for a one-off triangulation.
+
+- **`lowerWhen` no longer fails on nested if-in-while OR if-in-if-in-anything.** The old comment claimed: "Nested when-expressions (e.g., `if (a) if (b) … else … else …`) are rejected — the recursion would require emitting another IF inside a region, which `DxirEmitter` does not expose uniformly." With §0.4.162, the recursion DOES work — the lowered IF inside an outer IF's branch region uses the same `DxirRegionBuilder` emitter, calls `lowerWhen` recursively, which dispatches to `emitter.region(…)` / `emitter.ifOp(…)` correctly. Future tests can exercise this; the change is functorial and shouldn't need additional support.
+
+- **`STEP(SUB(a, b))` is the comparison primitive used end-to-end.** Both the mask predicate and any future predicate of the form `a > b` / `a < b` route through this canonical form. No new ops needed; no new VJP rules needed (STEP's gradient is the Dirac delta, treated as zero in AD — its operand `SUB(a, b)` is differentiable, which routes contributions correctly).
+
+- **Two tests, not one.** The moderate-β test alone wouldn't prove the mask path actually works (the IF predicate is false everywhere). The large-negative-β test alone would have a wider tolerance band. Two together exercise both code paths and pin both behaviors. Following the §0.4.149 / §0.4.150 precedent of "multi-flag-value tests".
+
+- **The plan's HMC Phase 3 was estimated at "3-4 firings".** §0.4.158 (unblock) + §0.4.159 (Phase 1) + §0.4.160 (Phase 2) + §0.4.162 (Phase 3 mask half) = 4 firings. The remaining Phase 3 piece — true nested loop over features — needs a separate firing because that's its own widening (nested loop counters interacting with the existing GATHER `offset + i` lowering shape; multiplicative index arithmetic `i*d + j` is the suspected gap). Not exercised by §0.4.162.
+
+**Tests added** (+2 new) in [HmcLogisticRegressionMaskedTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionMaskedTest.kt):
+
+- `hmc U with mask gradient matches finite difference at moderate beta` — β=[0.5, 0.3]; mask never fires; gradient matches §0.4.160's; finite-difference cross-check passes at the same tolerance.
+- `hmc U with mask gradient matches finite difference at large negative beta` — β=[-200, 0]; mask fires for 3 of 4 records; mixed-branch AD verified at widened (1e-2 / 5e-2) tolerance.
+
+Full suite is green: **852 tests** (+2 over §0.4.161).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **HMC Phase 3 second half — true nested loop over features.** Split `Xβ_i = X[i,0]·β[0] + X[i,1]·β[1]` into `for (j in 0 until 2) { Xβ_i += X[i,j] · β[j] }`. May hit the suspected "multiplicative index arithmetic" gap (`packed[2 + j*4 + i]`); if so, checkpoint and pivot to a different layout or widen the index-arithmetic lowering.
+2. **Out-of-scope register refresh.** Long overdue. Many items closed across §0.4.151–§0.4.162 (D.3i widening series, MR IF AD Phases 1–4 + multi-live-index, `:benchmarks` substrate, HMC Phases 1+2+3-mask, region-recursive C5, scalar exp/log). Single-firing doc-only task.
+3. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155's substrate.
+4. **CartPole benchmark port.** Paper's RL benchmark; multi-session.
+
+**Definition-of-done for §0.4.162 — met**:
+- `lowerWhen` dispatches on `DxirEmitter` runtime type (DxirBuilder + DxirRegionBuilder) ✓
+- Comment on `lowerWhen` updated to reflect the §0.4.162 widening ✓
+- HMC masked-form test passes at β=[0.5, 0.3] (mask FALSE everywhere) ✓
+- HMC masked-form test passes at β=[-200, 0] (mask TRUE for 3 of 4 records) ✓
+- Tolerance widened to 1e-2 / 5e-2 for large-magnitude β regime ✓
+- Diagnostic harness pattern documented in decisions section ✓
+- Full suite stays green at 852 tests (+2) ✓
+
 #### 0.4.161 Phase 4b — region-recursive C5 into WHILE region bodies 2026-04-26
 
 §0.4.152 shipped region-recursive C5 into IF region bodies (Phase 4 first slice). The §0.4.156 register's recommended-next #3 named "Phase 4b — WHILE inside IF inside WHILE" as the natural follow-on widening, and §0.4.160's HMC Phase 2 hand-off flagged it as the prerequisite for HMC Phase 3 (numerical-stability mask + nested loop). §0.4.161 lands Phase 4b: `applyC5Pass`'s pre-scan and rewrite both walk into ALL region-bearing ops' regions, not just IF. The structural change collapses three previously-IF-specific code paths into a uniform region-bearing-op dispatch.
