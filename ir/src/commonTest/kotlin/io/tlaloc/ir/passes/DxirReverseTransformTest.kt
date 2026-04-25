@@ -1131,6 +1131,61 @@ class DxirReverseTransformTest {
         assertEquals(1, bodyMuls, "body region's MUL must survive (args from body block)")
     }
 
+    // --- §0.4.130: cseRegion DxirOpResult terminator latent bug fix ----------
+
+    @Test
+    fun cseRegionPreservesDxirOpResultIndexInTerminator() {
+        // §0.4.130 — the cseRegion terminator handler used to do a flat
+        // `innerById[term.id] ?: term` lookup, which for a DxirOpResult resolved to
+        // the source op (not .result(k)). With multi-result ops inside IF arms,
+        // that produced terminators whose type didn't match op.types[k] — the
+        // DxirFunction validator caught it as "terminator type ≠ op.types".
+        // Construct an IF whose then-arm yields `whileOp.result(1)` (i32 counter,
+        // not the f32 carried at index 0); §0.4.130's fix routes through .result(k).
+        val i32s = DxirType(io.tlaloc.core.I32, emptyList())
+        val fn = DxirBuilder.function("cseMrTerminator") {
+            val x = param("x", f32)
+            val pred = op(OpKind.STEP, listOf(x), boolS)
+            val ifResult = ifOp(
+                cond = pred,
+                types = listOf(i32s),
+                thenRegion = region {
+                    // Multi-result WHILE: types = [f32, i32], yields(f32, i32) per iter.
+                    val nBound = const(2, i32s)
+                    val zero = const(0, i32s)
+                    val w = whileOp(
+                        inits = listOf(x, zero),
+                        cond = { args ->
+                            val diff = op(OpKind.SUB, listOf(nBound, args[1]), i32s)
+                            yields(op(OpKind.STEP, listOf(diff), boolS))
+                        },
+                        body = { args ->
+                            val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32)), f32)
+                            val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                            yields(newX, newI)
+                        },
+                    )
+                    // Yield the i32 counter (index 1), NOT the f32 carried at index 0.
+                    // Pre-§0.4.130 the CSE rebuild collapsed this to `w` (DxirOp.type
+                    // = f32), failing IF validation: terminator type f32 ≠ op.types[0] i32.
+                    yields(w.result(1))
+                },
+                elseRegion = region {
+                    val zero = const(0, i32s)
+                    yields(zero)
+                },
+            )
+            listOf(ifResult)
+        }
+        val cseFn = DxirReverseTransform.applyCSE(fn)
+        // The post-CSE function must validate (would throw IllegalArgumentException
+        // pre-fix). Sanity: the IF op survives with the right shape.
+        val ifOpPost = cseFn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.IF }
+        assertEquals(listOf(i32s), ifOpPost.types, "IF result type preserved")
+        val thenTerminator = ifOpPost.regions[0].blocks.single().terminator.single()
+        assertEquals(i32s, thenTerminator.type, "then-arm terminator type matches op.types[0] = i32")
+    }
+
     // --- gradient_body with nested IF (§0.4.120) -----------------------------
 
     @Test

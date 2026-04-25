@@ -39,6 +39,43 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.130 Fix cseRegion DxirOpResult terminator bug 2026-04-25
+
+§0.4.129 documented a latent bug in `cseRegion` (and a sibling fix landed in `cloneRegion` / `resolveReturn` via §0.4.128): when a region's terminator references a `DxirOpResult` of a multi-result op, the terminator handler did `innerById[term.id] ?: term`, which for any `DxirOpResult` resolved to the SOURCE op's id (since `DxirOpResult.id == source.id`). The slot then collapsed to the rebuilt source op directly — type `source.types[0]`, regardless of which result index the terminator actually wanted. The `DxirFunction` validator caught this as a terminator type mismatch. This session fixes the bug and pins it with a direct `applyCSE` test.
+
+The fix is two lines in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt) — mirroring the §0.4.128 `cloneRegion` fix exactly: when the terminator slot is a `DxirOpResult` and the mapped value is a `DxirOp`, route through `mapped.result(term.index)` so the rebuilt slot gets the right per-index value. For non-`DxirOp` rebuilds (e.g., a C5-style collapse to a non-Op), tolerate index 0 only — same convention as `resolveClonedOperand`.
+
+**Decisions worth flagging**:
+
+- **Test calls `applyCSE` directly to trigger the bug.** No production path triggers it today: `applyCSE` only runs on gradient bodies built by `DxirReverseTransform.apply`, and AD rejects multi-result top-level ops (the §0.4.128 LoopInvariant rewrite produces the only multi-result IF in the codebase, and AD blocks it before CSE runs). The test reaches in via `applyCSE`'s `internal` visibility, mirroring §0.4.118's existing direct-call tests for region-internal CSE (`cseDeduplicatesOpsInsideIfBranch` etc.).
+
+- **No production behavior changed.** All 783 pre-§0.4.130 tests stay green — the fix only fires when the terminator type would otherwise mismatch, and no existing test produced that shape. The added test is the first to exercise the path. When the multi-result IF AD work eventually lands (§0.4.129's recommended-next #1), the fix will be load-bearing.
+
+- **The mirror with `cloneRegion` is intentional.** Both `cloneRegion` (PhiCalculus) and `cseRegion` (DxirReverseTransform) build new regions from existing ones, so they have parallel terminator-resolution responsibilities. Fixing them with the same shape (route through `.result(k)` for `DxirOpResult` whose mapped value is a `DxirOp`) keeps the two surfaces in lockstep — when the AD pipeline eventually consumes both, the same fix-classification means consumers don't need to learn two patterns.
+
+- **Test pins the index-1 case specifically.** Index 0 collapses degrade gracefully (`mapped.result(0) == mapped` for single-result ops; for multi-result, `result(0)` returns a `DxirOpResult(source, 0)` with type `types[0]`, which happens to match the unfixed flat lookup's outcome). The bug only manifests at index ≥ 1. The test yields `whileOp.result(1)` (the i32 counter slot of a multi-result WHILE inside an IF arm) precisely so the unfixed code would collapse to the f32-typed source op and trip validation.
+
+**Tests added** (+1 new) in [DxirReverseTransformTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt):
+
+- `DxirReverseTransformTest.cseRegionPreservesDxirOpResultIndexInTerminator` — IF whose then-arm contains a multi-result WHILE (`types = [f32, i32]`) and yields `whileOp.result(1)` (the i32 counter). Pin: post-`applyCSE` the IF op's then-region terminator type matches `op.types[0] = i32`, not `whileOp.type = f32` — the fix correctly routes through `.result(1)`.
+
+Full suite is green: **784 tests** (+1 over §0.4.129).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending. With cseRegion's bug fixed AND §0.4.129's WHILE region CSE in place, the gradient infrastructure is now better prepared to handle multi-result regions. The remaining work: relax the top-level rejection at [DxirReverseTransform.kt:114](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L114) for IF specifically + extend `handleIfAdjoint` to take a per-result-index upstream (the gradAccum refactor is the hard part).
+2. **D.3i Phase 3d — CarriedDependent runtime fallback** (small structural pin / annotation arm).
+3. **Multi-result COARSENED**.
+4. **`:benchmarks` Gradle module**.
+
+**Definition-of-done for §0.4.130 — met**:
+- `cseRegion` terminator handler routes `DxirOpResult` through `.result(k)` ✓
+- Mirrors §0.4.128's `cloneRegion` / `resolveReturn` fix shape ✓
+- Test triggers the bug at index-1 (the canonical fail point) ✓
+- Existing 783 tests still green (no regression on the index-0 path) ✓
+- Latent bug now closed; ready for multi-result IF AD to land safely ✓
+- Full suite stays green at 784 tests (+1) ✓
+
 #### 0.4.129 Region-internal CSE for WHILE 2026-04-25
 
 §0.4.118 / §0.4.119 wired CSE to recurse into IF region bodies and COARSENED nested functions, but explicitly skipped WHILE — the rationale being that WHILEs shouldn't survive SCT (the φ-pass coarsens them before reverse-transform). §0.4.128's LoopInvariant rewrite weakens that assumption: the rewrite produces an outer IF whose else-region contains a vanilla bounded WHILE, so multi-result region-bearing ops can now reach the gradient pipeline. This session lights up CSE for WHILE regions so future region-recursive closures (e.g., a future region-recursive C5 that unrolls the nested WHILE) can rely on dedup'd cond / body bodies.

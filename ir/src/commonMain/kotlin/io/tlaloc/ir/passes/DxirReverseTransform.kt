@@ -10,6 +10,7 @@ import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
+import io.tlaloc.ir.DxirOpResult
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.DxirType
@@ -523,7 +524,26 @@ object DxirReverseTransform {
                 if (newNode != null) newBody += newNode
                 if (nodeMutated) blockMutated = true
             }
-            val newTerminator = block.terminator.map { innerById[it.id] ?: it }
+            val newTerminator = block.terminator.map { term ->
+                val mapped = innerById[term.id] ?: return@map term
+                // §0.4.130 — DxirOpResult terminators must route through `.result(k)`
+                // when the source maps to a multi-result DxirOp. The pre-§0.4.130
+                // path returned the source op directly, collapsing all multi-result
+                // refs to index 0; that broke type validation when the terminator
+                // referenced a non-zero index (e.g., an MR WHILE inside an IF arm
+                // whose terminator yielded `whileOp.result(1)`). Mirrors the same
+                // fix in [PhiCalculus.cloneRegion] from §0.4.128.
+                if (term !is DxirOpResult) return@map mapped
+                when {
+                    mapped is DxirOp -> mapped.result(term.index)
+                    term.index == 0 -> mapped
+                    else -> error(
+                        "applyCSE: terminator id=${term.id} index=${term.index} on non-Op " +
+                            "rebuild (mapped=${mapped::class.simpleName}); only index 0 is " +
+                            "tolerated for non-Op rebuilds",
+                    )
+                }
+            }
             if (newTerminator.zip(block.terminator).any { (a, b) -> a !== b }) blockMutated = true
             if (blockMutated) anyMutated = true
             if (blockMutated) {
