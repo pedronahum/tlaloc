@@ -807,4 +807,125 @@ class DxirReverseTransformTest {
         }
         assertFailsWith<IllegalArgumentException> { DxirReverseTransform.apply(primal) }
     }
+
+    // --- Region-internal CSE (§0.4.118) -------------------------------------
+
+    @Test
+    fun cseDeduplicatesOpsInsideIfBranch() {
+        // Hand-build a function whose IF then-branch has two structurally-identical
+        // ADD ops. Pre-§0.4.118 the early-out skipped CSE entirely when ANY body op
+        // had regions; now CSE recurses into IF region bodies. The duplicate inside
+        // the branch should be deduplicated.
+        val pred = DxirType(io.tlaloc.core.Bool, emptyList())
+        val fn = DxirBuilder.function("ifInternalDup") {
+            val x = param("x", f32)
+            val p = op(OpKind.STEP, listOf(x), pred)
+            val ifResult = ifOp(
+                cond = p,
+                types = listOf(f32),
+                thenRegion = region {
+                    val a = op(OpKind.ADD, listOf(x, x), f32)
+                    val b = op(OpKind.ADD, listOf(x, x), f32)
+                    val sum = op(OpKind.ADD, listOf(a, b), f32)
+                    yields(sum)
+                },
+                elseRegion = region { yields(x) },
+            )
+            listOf(ifResult)
+        }
+        val cseFn = DxirReverseTransform.applyCSE(fn)
+        // Locate the IF op in the post-CSE body.
+        val ifOpPost = cseFn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.IF }
+        val thenBlock = ifOpPost.regions[0].blocks.single()
+        // Pre-CSE the then-block had 3 ADD ops (a, b, sum); post-CSE the duplicate
+        // ADD(x, x) should be merged → 2 ADD ops total in the branch.
+        val thenAdds = thenBlock.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD }
+        assertEquals(2, thenAdds, "duplicate ADD inside then-branch should be CSE'd")
+    }
+
+    @Test
+    fun cseDeduplicatesAcrossOuterToInnerScope() {
+        // Pin: an outer-scope op's canonical entry should be visible inside an IF
+        // region. If the outer body computes ADD(x, x) and the then-branch ALSO
+        // computes ADD(x, x), the inner ADD should dedup to the outer one.
+        val pred = DxirType(io.tlaloc.core.Bool, emptyList())
+        val fn = DxirBuilder.function("crossScopeDup") {
+            val x = param("x", f32)
+            val outerAdd = op(OpKind.ADD, listOf(x, x), f32)
+            val p = op(OpKind.STEP, listOf(x), pred)
+            val ifResult = ifOp(
+                cond = p,
+                types = listOf(f32),
+                thenRegion = region {
+                    val innerAdd = op(OpKind.ADD, listOf(x, x), f32) // dup of outerAdd
+                    val scaled = op(OpKind.MUL, listOf(innerAdd, x), f32)
+                    yields(scaled)
+                },
+                elseRegion = region { yields(x) },
+            )
+            // Use both the outer ADD and the IF to keep them live.
+            val combined = op(OpKind.ADD, listOf(outerAdd, ifResult), f32)
+            listOf(combined)
+        }
+        val cseFn = DxirReverseTransform.applyCSE(fn)
+        val ifOpPost = cseFn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.IF }
+        val thenBlock = ifOpPost.regions[0].blocks.single()
+        // The then-branch's ADD should now be dropped (deduped to outer canonical),
+        // leaving only the MUL.
+        val thenAdds = thenBlock.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD }
+        assertEquals(0, thenAdds, "inner ADD should dedup to outer canonical; got $thenAdds")
+        val thenMuls = thenBlock.body.filterIsInstance<DxirOp>().count { it.op == OpKind.MUL }
+        assertEquals(1, thenMuls)
+    }
+
+    @Test
+    fun cseDoesNotShareRegistrationsBetweenSiblingBranches() {
+        // The then-branch and else-branch are scope-isolated. An op registered in the
+        // then-branch must NOT be visible to the else-branch (they're different
+        // control-flow scopes; an else-branch op cannot reference a then-branch op).
+        // Both branches independently build ADD(x, x). The else-branch's ADD must
+        // survive — it can't be deduplicated to the then-branch's.
+        val pred = DxirType(io.tlaloc.core.Bool, emptyList())
+        val fn = DxirBuilder.function("siblingScope") {
+            val x = param("x", f32)
+            val p = op(OpKind.STEP, listOf(x), pred)
+            val ifResult = ifOp(
+                cond = p,
+                types = listOf(f32),
+                thenRegion = region {
+                    val tAdd = op(OpKind.ADD, listOf(x, x), f32)
+                    yields(tAdd)
+                },
+                elseRegion = region {
+                    val eAdd = op(OpKind.ADD, listOf(x, x), f32)
+                    yields(eAdd)
+                },
+            )
+            listOf(ifResult)
+        }
+        val cseFn = DxirReverseTransform.applyCSE(fn)
+        val ifOpPost = cseFn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.IF }
+        val thenBlock = ifOpPost.regions[0].blocks.single()
+        val elseBlock = ifOpPost.regions[1].blocks.single()
+        // Each branch must have its own ADD — they can't dedup across siblings.
+        assertEquals(1, thenBlock.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD })
+        assertEquals(1, elseBlock.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD })
+    }
+
+    @Test
+    fun csePreservesExistingTopLevelBehaviorWhenNoRegions() {
+        // Regression: a region-free function should still get top-level CSE applied.
+        // Pin §0.4.48's existing dedup behavior to ensure §0.4.118's restructure
+        // didn't break it.
+        val fn = DxirBuilder.function("noRegions") {
+            val x = param("x", f32)
+            val a = op(OpKind.ADD, listOf(x, x), f32)
+            val b = op(OpKind.ADD, listOf(x, x), f32)
+            val sum = op(OpKind.ADD, listOf(a, b), f32)
+            listOf(sum)
+        }
+        val cseFn = DxirReverseTransform.applyCSE(fn)
+        val adds = cseFn.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD }
+        assertEquals(2, adds, "duplicate ADD(x,x) should be merged at top level")
+    }
 }

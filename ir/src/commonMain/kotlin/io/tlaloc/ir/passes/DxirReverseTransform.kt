@@ -4,12 +4,14 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
+import io.tlaloc.ir.DxirBlock
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirParam
+import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 
@@ -300,20 +302,21 @@ object DxirReverseTransform {
      * become unreachable and are dropped by the following [dropUnreachableBody]
      * step.
      *
-     * Scope: single-result, region-free, scalar-or-rank-1 ops only. Multi-result
-     * and region-bearing ops (IF / WHILE / COARSENED) are kept verbatim — their
+     * §0.4.118 — extended to recurse into IF region bodies. Each branch's block
+     * gets its own scope-local CSE pass that inherits the outer canonical maps
+     * (so inner ops can dedup against outer-scope canonical entries) but doesn't
+     * leak its own registrations back. Block args are added to the inner scope
+     * only. COARSENED and WHILE region bodies remain skipped — their region
+     * shapes carry pre-computed gradient bodies (COARSENED) or aren't expected
+     * post-SCT (WHILE), so internal CSE has less leverage there.
+     *
+     * Scope: single-result ops only. Multi-result ops are kept verbatim — their
      * structural equivalence is subtler and not load-bearing for any benchmark
      * today. [SCATTER_ADD]'s `in_place` attr is preserved (two SCATTER_ADDs with
      * the same operands but different in-place tags would be an SSA use-graph
      * inconsistency; we shouldn't see that in practice).
      */
-    private fun applyCSE(fn: DxirFunction): DxirFunction {
-        // Region-bearing ops (IF / COARSENED / WHILE — the latter shouldn't survive
-        // SCT, but COARSENED and IF can) carry internal operand references inside
-        // their regions. Rewriting those references safely needs a recursive walk
-        // that preserves block-arg identity; deferred. For now, skip CSE entirely
-        // when any body op carries a region — conservative but correct.
-        if (fn.body.any { it is DxirOp && it.hasRegions }) return fn
+    internal fun applyCSE(fn: DxirFunction): DxirFunction {
         val byId = HashMap<Int, DxirNode>()
         for (p in fn.params) byId[p.id] = p
         // CSE consts too — adjoint emission produces many duplicate const literals
@@ -323,32 +326,59 @@ object DxirReverseTransform {
         val newBody = mutableListOf<DxirNode>()
         var mutated = false
         for (n in fn.body) {
-            when (n) {
-                is DxirConst -> {
-                    val key = n.value to n.type
-                    val existing = const2canon[key]
-                    if (existing != null) {
-                        byId[n.id] = existing
-                        mutated = true
-                    } else {
-                        const2canon[key] = n
-                        byId[n.id] = n
-                        newBody += n
-                    }
+            val (newNode, nodeMutated) = cseNode(n, byId, sig2canon, const2canon)
+            if (newNode != null) newBody += newNode
+            if (nodeMutated) mutated = true
+        }
+        if (!mutated) return fn
+        val newReturns = fn.returns.map { byId[it.id] ?: it }
+        return DxirFunction(fn.name, fn.params, newBody, newReturns, fn.meshes)
+    }
+
+    /**
+     * Process a single node under [byId] / [sig2canon] / [const2canon]. Returns the
+     * node to add to the surrounding body (or null if the node was deduplicated and
+     * should be dropped) and a `mutated` flag indicating whether the input was
+     * changed in any way (deduplicated, rebuilt with canonical operand refs, or
+     * had a region rewritten).
+     *
+     * The maps are mutated by this method: deduplicated entries are recorded in
+     * [byId]; canonical entries are registered in [sig2canon] / [const2canon].
+     * Callers that need to scope these maps to a sub-region should pass copies.
+     */
+    private fun cseNode(
+        n: DxirNode,
+        byId: HashMap<Int, DxirNode>,
+        sig2canon: HashMap<Triple<OpKind, List<Int>, Map<String, Any>>, DxirNode>,
+        const2canon: HashMap<Pair<Any, DxirType>, DxirConst>,
+    ): Pair<DxirNode?, Boolean> {
+        return when (n) {
+            is DxirConst -> {
+                val key = n.value to n.type
+                val existing = const2canon[key]
+                if (existing != null) {
+                    byId[n.id] = existing
+                    null to true
+                } else {
+                    const2canon[key] = n
+                    byId[n.id] = n
+                    n to false
                 }
-                is DxirOp -> {
-                    if (n.isMultiResult || n.hasRegions) {
-                        byId[n.id] = n
-                        newBody += n
-                        continue
-                    }
+            }
+            is DxirOp -> {
+                if (n.isMultiResult) {
+                    byId[n.id] = n
+                    n to false
+                } else if (n.hasRegions) {
+                    cseRegionBearingOp(n, byId, sig2canon, const2canon)
+                } else {
                     val canonicalOperands = n.operands.map { byId[it.id] ?: it }
                     val opIds = canonicalOperands.map { it.id }
                     val sig = Triple(n.op, opIds, n.attrs)
                     val existing = sig2canon[sig]
                     if (existing != null) {
                         byId[n.id] = existing
-                        mutated = true
+                        null to true
                     } else {
                         // Always rebuild with canonical operand references — even if
                         // operand ids are unchanged, the REFERENCES may now point to
@@ -366,19 +396,99 @@ object DxirReverseTransform {
                         )
                         sig2canon[sig] = rebuilt
                         byId[n.id] = rebuilt
-                        newBody += rebuilt
-                        if (rebuilt !== n) mutated = true
+                        rebuilt to (rebuilt !== n)
                     }
                 }
-                else -> {
-                    byId[n.id] = n
-                    newBody += n
-                }
+            }
+            else -> {
+                byId[n.id] = n
+                n to false
             }
         }
-        if (!mutated) return fn
-        val newReturns = fn.returns.map { byId[it.id] ?: it }
-        return DxirFunction(fn.name, fn.params, newBody, newReturns, fn.meshes)
+    }
+
+    /**
+     * §0.4.118 — region-bearing op CSE. For [OpKind.IF], recurse into each branch's
+     * region body using a scoped copy of the canonical maps. For [OpKind.COARSENED]
+     * and [OpKind.WHILE], keep the regions verbatim — both carry semantic baggage
+     * (pre-computed gradient bodies, control-flow back edges) that local CSE could
+     * accidentally invalidate. The op's IMMEDIATE operands (e.g., IF's predicate)
+     * are still canonicalized in all cases.
+     */
+    private fun cseRegionBearingOp(
+        n: DxirOp,
+        outerById: HashMap<Int, DxirNode>,
+        outerSig2canon: HashMap<Triple<OpKind, List<Int>, Map<String, Any>>, DxirNode>,
+        outerConst2canon: HashMap<Pair<Any, DxirType>, DxirConst>,
+    ): Pair<DxirNode?, Boolean> {
+        val canonicalOperands = n.operands.map { outerById[it.id] ?: it }
+        var mutated = canonicalOperands.zip(n.operands).any { (a, b) -> a !== b }
+
+        val newRegions = if (n.op == OpKind.IF) {
+            n.regions.map { region ->
+                val (newRegion, regionMutated) = cseRegion(
+                    region, outerById, outerSig2canon, outerConst2canon,
+                )
+                if (regionMutated) mutated = true
+                newRegion
+            }
+        } else {
+            n.regions
+        }
+
+        val rebuilt = if (mutated) {
+            DxirOp(
+                id = n.id,
+                op = n.op,
+                operands = canonicalOperands,
+                attrs = n.attrs,
+                types = n.types,
+                sharding = n.sharding,
+                regions = newRegions,
+            )
+        } else {
+            n
+        }
+        outerById[n.id] = rebuilt
+        return rebuilt to mutated
+    }
+
+    /**
+     * §0.4.118 — recursively CSE a region's blocks under a scope-local copy of the
+     * canonical maps. Block args are added to the inner scope so block-arg-rooted
+     * ops can be deduplicated within the block. Inner registrations don't leak
+     * back to the outer scope (different control-flow scope = different operand
+     * visibility).
+     */
+    private fun cseRegion(
+        region: DxirRegion,
+        outerById: Map<Int, DxirNode>,
+        outerSig2canon: HashMap<Triple<OpKind, List<Int>, Map<String, Any>>, DxirNode>,
+        outerConst2canon: HashMap<Pair<Any, DxirType>, DxirConst>,
+    ): Pair<DxirRegion, Boolean> {
+        var anyMutated = false
+        val newBlocks = region.blocks.map { block ->
+            val innerById = HashMap<Int, DxirNode>(outerById)
+            for (a in block.args) innerById[a.id] = a
+            val innerSig2canon = HashMap(outerSig2canon)
+            val innerConst2canon = HashMap(outerConst2canon)
+            val newBody = mutableListOf<DxirNode>()
+            var blockMutated = false
+            for (n in block.body) {
+                val (newNode, nodeMutated) = cseNode(n, innerById, innerSig2canon, innerConst2canon)
+                if (newNode != null) newBody += newNode
+                if (nodeMutated) blockMutated = true
+            }
+            val newTerminator = block.terminator.map { innerById[it.id] ?: it }
+            if (newTerminator.zip(block.terminator).any { (a, b) -> a !== b }) blockMutated = true
+            if (blockMutated) anyMutated = true
+            if (blockMutated) {
+                DxirBlock(args = block.args, body = newBody, terminator = newTerminator)
+            } else {
+                block
+            }
+        }
+        return (if (anyMutated) DxirRegion(newBlocks) else region) to anyMutated
     }
 
     /**

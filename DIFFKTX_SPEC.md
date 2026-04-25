@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.118 Region-internal CSE for IF branches 2026-04-25
+
+§0.4.108's deferred entry "PhiCalculus | Region-internal DCE/CSE — Top-level CSE shipped §0.4.48" gets its first phase shipped. Pre-§0.4.118, `DxirReverseTransform.applyCSE` early-out'd whenever ANY body op carried regions: a single IF in the body disabled CSE everywhere. This session lands recursive CSE into IF-region bodies, with COARSENED and WHILE deferred to follow-ups.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt). The original early-out is removed. `applyCSE` factors into three helpers:
+
+- `cseNode(n, byId, sig2canon, const2canon)` — processes a single node under the given canonicalization maps. Mutates the maps. Returns `(newNode | null, mutated)` where `null` means the node was deduplicated and should be dropped.
+- `cseRegionBearingOp(n, ...)` — for IF, recursively CSE each region's blocks; for COARSENED and WHILE, keep regions verbatim. The op's IMMEDIATE operands (e.g., IF's predicate) are still canonicalized for both cases.
+- `cseRegion(region, outerById, outerSig2canon, outerConst2canon)` — recursively process a region's blocks under SCOPE-LOCAL COPIES of the outer canonical maps. Block args extend the inner scope. Inner registrations don't leak to the outer scope (different control-flow scope = different operand visibility).
+
+```kotlin
+internal fun applyCSE(fn: DxirFunction): DxirFunction { ... }
+private fun cseNode(...): Pair<DxirNode?, Boolean> { ... }
+private fun cseRegionBearingOp(...): Pair<DxirNode?, Boolean> { ... }
+private fun cseRegion(...): Pair<DxirRegion, Boolean> { ... }
+```
+
+**Decisions worth flagging**:
+
+- **Map copies for scope isolation.** Each block recurses with a `HashMap` copy of the outer maps, populated with the block's own args. New entries the inner walk registers (in the local copy) don't propagate back to the outer. Without copies, sibling blocks would see each other's registrations — and ops in the else-branch would dedup to ops in the then-branch, which would be incorrect because cross-branch references can never resolve at runtime (the two branches are mutually exclusive). The new `cseDoesNotShareRegistrationsBetweenSiblingBranches` test pins this.
+
+- **Outer canonical entries ARE visible inside.** When the inner block dedupes, it sees the outer canonical maps as its starting state. So an inner `ADD(x, x)` matches an outer `ADD(x, x)` and references the outer canonical — that's a valid cross-scope reference (block bodies can reference outer-scope values). The new `cseDeduplicatesAcrossOuterToInnerScope` test pins this direction.
+
+- **COARSENED and WHILE deliberately skipped.** Both carry semantic baggage local CSE could break. COARSENED has a pre-computed `gradient_body` whose operand structure is load-bearing for `DxirReverseTransform.handleCoarsenedAdjoint`; rewriting its operand refs without coordinating with that code path would silently break the gradient splice. WHILE shouldn't appear post-SCT (it's coarsened by the φ-pass), and even if it did, body-region CSE would have to respect the cond/body distinction. Both surfaces are reasonable follow-ups; this phase targets the most-common case (IF) without coupling to the others.
+
+- **`applyCSE` exposed as `internal`.** The previous `private` visibility made it hard to write structurally-precise tests — the existing CSE coverage was indirect through `DxirReverseTransform.apply`'s output shape, which depends on every reverse rule's emission detail. With `internal` visibility, the new tests construct minimal IF primals and verify the post-CSE structure directly. The change is module-internal and doesn't affect public API.
+
+- **Skipping multi-result ops unchanged.** Multi-result ops (rare today; only WHILE produces them post-coarsening, and WHILE is otherwise gated) still flow through verbatim. Their structural equivalence is a separate widening; not gated on this change.
+
+- **Phase 1 covers IF only.** Phase 2 (when needed) would extend to COARSENED's gradient_body region and WHILE's cond/body regions. Each requires coordination with that op's adjoint handler so internal CSE doesn't break the splice contract. Carving as separate phases keeps the diff bounded and the testing precise.
+
+**Tests added** (+4 new):
+
+- `DxirReverseTransformTest.cseDeduplicatesOpsInsideIfBranch` — duplicate `ADD(x, x)` inside a then-branch gets merged. Pre-§0.4.118 the early-out skipped CSE; now the duplicate is removed (3 ADDs → 2 ADDs).
+- `DxirReverseTransformTest.cseDeduplicatesAcrossOuterToInnerScope` — an outer `ADD(x, x)` is the canonical entry visible to the inner block; the inner branch's own `ADD(x, x)` deduplicates to it. Post-CSE the inner ADD is gone (0 ADDs in branch body).
+- `DxirReverseTransformTest.cseDoesNotShareRegistrationsBetweenSiblingBranches` — both then and else branches each have their own `ADD(x, x)`. Sibling-scope isolation pin: each branch retains its own ADD (1 ADD each).
+- `DxirReverseTransformTest.csePreservesExistingTopLevelBehaviorWhenNoRegions` — regression pin: §0.4.48's region-free top-level CSE still works after the §0.4.118 restructure (3 ADDs → 2 ADDs).
+
+Full suite is green: **750 tests** (+4 over §0.4.117).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Region-internal CSE for COARSENED's gradient_body** — symmetric extension. Needs coordination with `handleCoarsenedAdjoint` to ensure operand-ref rewrites don't break the splice contract.
+2. **Region-internal CSE for WHILE cond/body regions** — completes the recursive CSE story. Lower priority because WHILE typically gets coarsened away pre-reverse.
+3. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE.
+4. **`gradient_body` with nested regions** — extend C.3b.3a SOI-coarsening for nested IF inside a coarsened SOI.
+
+**Definition-of-done for §0.4.118 — met**:
+- `applyCSE` recurses into IF region bodies via `cseRegion` + `cseNode` ✓
+- Scope isolation via map copies — sibling branches don't share registrations ✓
+- Outer canonical entries visible inside; inner registrations don't leak out ✓
+- COARSENED and WHILE explicitly skipped with documented rationale ✓
+- `applyCSE` exposed as `internal` for testability ✓
+- Four tests pin within-branch dedup, cross-scope outer-to-inner dedup, sibling isolation, and top-level regression ✓
+- Full suite stays green at 750 tests (+4) ✓
+
 #### 0.4.117 Rank-3 + rank-2 cross-rank broadcast on the batch axis 2026-04-25
 
 The symmetric follow-up to §0.4.116. Where §0.4.116 broadcast a rank-1 [C] across two leading axes (the inner-axis case), this session broadcasts a rank-2 [B, C] across one leading axis (the batch case). With both shipped, the §0.4.108 deferred entry "Rank-3↔rank-1/rank-2 cross-rank broadcast" is fully closed; the entry can be removed from the deferred table at the next register refresh.
