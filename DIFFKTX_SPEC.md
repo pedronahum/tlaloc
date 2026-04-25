@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.145 `:benchmarks` Gradle module substrate + first end-to-end AD benchmark 2026-04-25
+
+The `:benchmarks` Gradle module has been on the deferred register since §0.4.108 — perf probes today live inside the regular `:ir` test source set (e.g., [SymjaBakeoffTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/SymjaBakeoffTest.kt), [LSweepTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/LSweepTest.kt), [HookeanSpringTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HookeanSpringTest.kt)), which conflates correctness regression tests with timing-sensitive probes. §0.4.145 ships the substrate: a new `:benchmarks` module with a Kotlin Multiplatform layout matching `:autograd` / `:ir`, plus one inhabitant — `EndToEndAdBenchmark.adPipelineOnTenIterationLoop` — that times the full AD pipeline (PhiCalculus φ-calculus rewrite → DxirReverseTransform SCT → DxirInterpreter eval) on a hand-built 10-iteration WHILE primal `f(x) = x · 2^10` and pins `d/dx = 1024`.
+
+**The mechanism**:
+
+1. **`benchmarks/build.gradle.kts`** mirrors `:autograd`'s structure exactly: `kotlin.multiplatform` plugin, JVM target with JVM 17, `commonMain` depending on `:core` + `:ir`, `commonTest` with `kotlin("test")`, `jvmTest` with kotest. No new dependencies, no new system properties.
+
+2. **`settings.gradle.kts`** picks up `include(":benchmarks")` after the existing five modules.
+
+3. **`EndToEndAdBenchmark.kt`** ([benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/EndToEndAdBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/EndToEndAdBenchmark.kt)) constructs a primal whose shape matches `iterateConcreteN` from [PhiCalculusTest](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt): a 10-iteration WHILE loop that doubles a carried `x` each iter (`x` after `n` iters = `x · 2^n`). The benchmark runs `PhiCalculus.apply` (which C5-unrolls the WHILE) inside a `measureTimeMillis` block, then `DxirReverseTransform.apply` and `DxirInterpreter.evalFunction` to compute the gradient at `x = 3`. The numerical pin is `assertEquals(2^10 = 1024f, gradOut[0][0])`; per-phase timings print to stdout for visibility.
+
+**Decisions worth flagging**:
+
+- **Existing perf-style tests stay where they are.** I considered moving `LSweepTest` / `SymjaBakeoffTest` / `HookeanSpringTest` into `:benchmarks` so the new module hosts ALL perf probes. Three reasons against: (a) those tests are wired into the regular `:ir` and `:compiler-plugin` test suites and moving them would be a structural change with implicit semantics drift, (b) they have non-trivial setup (Symja engine init, kotlinc compile harness) that depends on existing module wiring, (c) the deferred-register entry's value is "have a place for new perf probes", not "consolidate existing ones". Future moves can happen incrementally; today's increment is the substrate + a fresh inhabitant.
+
+- **Module mirrors `:autograd`'s build.gradle.kts shape, not `:ir`'s.** `:ir` has a Symja dependency in `jvmMain` for the symbolic engine; `:benchmarks` doesn't need that — it consumes already-coarsened functions through `PhiCalculus.apply`. `:autograd`'s shape (no extra jvmMain deps, just the `:core` + (transitive) implementation deps) is the right minimum.
+
+- **`assertEquals` for correctness, `println` for timings.** Mirrors §0.4.106's IR-size delta harness convention: behaviour pinned by structured assertions, timing surfaced through stdout for human readers without locking in a budget. This decouples "is the AD pipeline correct" from "is it fast" — the latter is environment-sensitive and not a CI-blocker. A future enhancement could collect timings into a structured artifact (matching the §0.4.106 harness's `LSweepMetric` shape), but that's overhead beyond §0.4.145's substrate goal.
+
+- **No new system properties or feature flags.** The deferred-register entry doesn't require gating; the benchmark runs as part of `./gradlew check` like any other test. If a benchmark in this module ever needs to be conditionally skipped, that's the right time to add the conditional infrastructure — premature configuration would clutter the substrate before any client needs it.
+
+- **`measureTimeMillis` over `measureTimedValue`.** `kotlin.system.measureTimeMillis` is in the core stdlib and matches the existing benchmark probes ([SymjaBakeoffTest.kt:5](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/SymjaBakeoffTest.kt#L5)) — using it here keeps the codebase's perf-probe vocabulary uniform. `kotlin.time.measureTimedValue` is more precise but would introduce inconsistent diction.
+
+- **Test name `adPipelineOnTenIterationLoop` describes WHAT, not measures.** The name doesn't claim a budget or a timing — it describes the shape under test. A future regression that shifts timings doesn't change the test's contract; only a numerical-correctness regression does.
+
+- **One benchmark is enough for the substrate.** Adding more benchmarks now would muddle the message: the goal is "the module exists and works"; adding three or five benchmarks at once makes reviewer audit harder without proving anything new about the module's structure. Future iterations can land additional benchmarks one at a time.
+
+**Tests added** (+1 new) in [EndToEndAdBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/EndToEndAdBenchmark.kt):
+
+- `EndToEndAdBenchmark.adPipelineOnTenIterationLoop` — builds a 10-iteration WHILE primal, runs `PhiCalculus.apply` + `DxirReverseTransform.apply` + `DxirInterpreter.evalFunction(x=3)`, asserts gradient = 1024 (`d/dx of x · 2^10`). Prints `[bench iterateN AD] n=10 phaseMs(PhiCalculus.apply)=… grad=1024.0` for visibility.
+
+Full suite is green: **837 tests** (+1 over §0.4.144).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 4 — nested WHILE in IF branch.** Still the headline gap.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.**
+3. **D.3i Phase 3i — region-internal SOIs (DxirOpResult/DxirCall) in CounterOnly threshold/n.** Bounded but corner-case.
+4. **Second `:benchmarks` inhabitant** — e.g., a coarsening-throughput probe that times `PhiCalculus.apply` on progressively larger primals (sanity-pin pre/post op counts, surface ms-per-iter).
+
+**Definition-of-done for §0.4.145 — met**:
+- `:benchmarks` Gradle module exists with KMP layout matching `:autograd` ✓
+- `settings.gradle.kts` picks up the new module ✓
+- One end-to-end AD benchmark with concrete numerical pin ([2^10 = 1024](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/EndToEndAdBenchmark.kt)) ✓
+- No new dependencies, no new system properties ✓
+- `./gradlew build` runs the new test as part of the regular check task ✓
+- Existing perf-style tests left in place (no scope creep) ✓
+- Full suite stays green at 837 tests (+1) ✓
+
 #### 0.4.144 Multi-result IF AD Phase 3 — nested MR IF with single-live-index 2026-04-25
 
 §0.4.139 (Phase 1) shipped the top-level multi-result IF AD with a single-live-index policy. §0.4.140 (Phase 2) shipped the recursive `walkBranchReverse` for nested *single-result* IFs. The natural follow-on is the union: nested *multi-result* IFs whose unique downstream-referenced result index can be detected per-block. §0.4.144 closes that gap with a block-local mirror of Phase 1's pre-scan plus a one-line dispatch update in step 3.
