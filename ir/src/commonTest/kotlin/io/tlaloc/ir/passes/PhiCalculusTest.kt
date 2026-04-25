@@ -1387,6 +1387,79 @@ class PhiCalculusTest {
         assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(0f)))
     }
 
+    // ---- §0.4.150 — D.3i Phase 3j: CounterOnly with DxirOpResult n ----
+
+    /**
+     * Helper: break-bearing CounterOnly WHILE whose `n` is a `DxirOpResult` —
+     * `n = ifOp(flag, [i32, i32], thenYields(3, 99), elseYields(7, 99)).result(0)`
+     * computed at function body level. Mirrors
+     * [breakBearingCounterOnlyOpResultThreshold] but with the DxirOpResult role
+     * on `n` instead of `threshold`. With threshold = 10 (much larger than either
+     * branch's n value), the effective trip is bounded by `n_runtime`, so the
+     * flag value materially changes the iteration count.
+     */
+    private fun breakBearingCounterOnlyOpResultN(): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakCounterOnlyOpResultN") {
+            val x = param("x", f32s)
+            val flag = param("flag", boolS)
+            val cap = const(10, i32s)  // threshold = 10; effective trip dominated by n_runtime
+            val zero = const(0, i32s)
+            val multiIf = opMulti(
+                OpKind.IF,
+                listOf(flag),
+                listOf(i32s, i32s),
+                regions = listOf(
+                    region { yields(const(3, i32s), const(99, i32s)) },
+                    region { yields(const(7, i32s), const(99, i32s)) },
+                ),
+            )
+            val n = multiIf.result(0)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(args[1], cap), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    @Test
+    fun breakBearingClosureRewritesOpResultNCounterOnly() {
+        // n = multiIf.result(0); flag picks 3 vs 7. threshold = 10 (loose enough
+        // that effective trip is dominated by n_runtime).
+        // For flag=true (1.0):  n = 3; min(3, 11) = 3 iters; 5 · 2^3 = 40.
+        // For flag=false (0.0): n = 7; min(7, 11) = 7 iters; 5 · 2^7 = 640.
+        val original = breakBearingCounterOnlyOpResultN()
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(1, countOps(rewritten, OpKind.WHILE), "WHILE remains because effective bound is runtime IF")
+        assertEquals(0, countOps(rewritten, OpKind.LAND), "LAND-NOT closure must be removed")
+        // flag = true → n = 3 → 3 iters → 5 · 8 = 40.
+        val outA = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(1f)))
+        assertEquals(40f, outA[0][0])
+        // flag = false → n = 7 → 7 iters → 5 · 128 = 640.
+        val outB = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(0f)))
+        assertEquals(640f, outB[0][0])
+        // Numerical agreement against the unrewritten original at both flag values.
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(1f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(0f)))
+    }
+
     @Test
     fun breakBearingConstantFoldEnablesEndToEndGradThroughBreakBearingLoop() {
         // alwaysBreaks=false + C5 → straight-line dxir → DxirReverseTransform

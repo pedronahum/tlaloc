@@ -39,6 +39,64 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.150 D.3i Phase 3j — `DxirOpResult` n support; closes the D.3i widening series 2026-04-25
+
+§0.4.149 (Phase 3i) widened the threshold side to accept `DxirOpResult`; the natural mirror was the n side. §0.4.150 closes the D.3i widening series symmetrically: every operand kind (`DxirConst`, `DxirParam`, `DxirOp`, `DxirOpResult`) is now supported for both `n` and `threshold` independently. With this Phase, the CounterOnly closure pipeline accepts the full Cartesian product of operand shapes for break-bearing WHILEs at the FIR-side hoist.
+
+**Coverage matrix after §0.4.150**:
+
+| n \ threshold | `DxirConst` | `DxirParam` | `DxirOp` | `DxirOpResult` |
+|---|---|---|---|---|
+| `DxirConst` | Phase 3e (§0.4.131) — fold | Phase 3f (§0.4.141) — IF chain | Phase 3g (§0.4.142) — IF chain + lift | Phase 3i (§0.4.149) — IF chain + multi-result lift |
+| `DxirParam` | Phase 3f (§0.4.141) | Phase 3f (§0.4.141) | Phase 3g (§0.4.142) | Phase 3i (§0.4.149) |
+| `DxirOp` | Phase 3h (§0.4.143) | Phase 3h (§0.4.143) | Phase 3h + 3g | Phase 3h + 3i |
+| `DxirOpResult` | **Phase 3j (§0.4.150)** | **Phase 3j (§0.4.150)** | **Phase 3j + 3g (§0.4.150)** | **Phase 3j + 3i (§0.4.150)** |
+
+**The mechanism**:
+
+1. **`BreakBearingWhile.Pattern.tripCountOpResult: DxirOpResult?`** ([BreakBearingWhile.kt:48-67](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt#L48-L67)) — new field, mutually exclusive with the other three trip-count fields. Carries a multi-result op's `result(k)` when used as n.
+
+2. **`extractStepCounter` widening** ([BreakBearingWhile.kt:289-292](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt#L289-L292)) — adds a `DxirOpResult` arm that mirrors the `DxirOp` arm's scalar-type check and populates `tripCountOpResult`. Same convention as §0.4.143's `DxirOp` widening: type discipline at extract time, scope discipline at rewrite time.
+
+3. **`computeCounterOnlySymbolicShape` n resolution** ([PhiCalculus.kt:752-783](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L752-L783)) — the n-resolution chain is now `tripCountParam ?: tripCountOp ?: tripCountOpResult ?: <walk-back-through-origCond>`. The typed-when on `nNode` adds a `DxirOpResult` arm that runs the same `isRegionInternalSubtreeLiftable` check §0.4.149 added for the threshold side.
+
+4. **`rewriteCounterOnlySymbolicBreak` nClone dispatch** ([PhiCalculus.kt:887-906](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L887-L906)) — `nClone`'s typed-when now mirrors `thresholdClone`'s exactly: `DxirOpResult` arm lifts the source op (multi-result) via `liftRegionInternalSubtree` if region-internal, else resolves through `nodeMap[source.id]`, then wraps as `sourceClone.result(n.index)`.
+
+**Decisions worth flagging**:
+
+- **Symmetric with Phase 3i.** The threshold and n operands are now structurally indistinguishable from the rewrite's perspective: both can be const, param, op, or op-result; both use the same scope-discipline dispatch; both lift via the same `liftRegionInternalSubtree` helper. A future caller looking at `nClone` and `thresholdClone` sees the same structural pattern twice.
+
+- **`tripCountOpResult` is a NEW mutually-exclusive field.** I considered unifying `tripCountOp` and `tripCountOpResult` into a single `tripCountSymbolic: DxirNode?` field, but that would force every consumer to do its own typed dispatch. The explicit field design (parallel to `tripCountConst` / `tripCountParam` / `tripCountOp`) makes the four-way exclusivity legible to readers and lets the resolution chain in `computeCounterOnlySymbolicShape` short-circuit on the right kind without a runtime type check.
+
+- **Test design — different flag → different output.** My first attempt picked threshold = 2 with n branches yielding 3 vs 7. Both flag values gave the same output (3 iters either way) because threshold+1 = 3 capped both. That's not diagnostic — a flag-blind regression would still pass. I switched to threshold = 10, which is loose enough that the n value dominates: flag=true → 3 iters, flag=false → 7 iters. The test now distinguishes the two paths.
+
+- **Test mirrors §0.4.149's structure exactly.** Same outer-scope multi-result IF, same flag-driven branch selection, same `assertNumericallyAgree` against the unrewritten original. Side-by-side reading of the two tests makes the symmetry obvious; a maintainer touching either side sees the test scaffold for the other immediately.
+
+- **Coverage matrix is now complete for the realistic operand kinds.** `DxirCall` is the only uncovered case, but `cloneNode` itself errors on it (per the §0.4.149 doc) — supporting it would require a wider refactor. With Phase 3j shipped, the D.3i closure series for CounterOnly is closed for every realistic FIR-side hoist shape.
+
+**Tests added** (+1 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.breakBearingClosureRewritesOpResultNCounterOnly` — outer-scope multi-result IF whose `result(0)` (varies with flag: 3 vs 7) is the WHILE's `n`. threshold = 10 (loose). Pin: 1 WHILE post-rewrite, 0 LAND, gradient eval = 40 at flag=true (3 iters) / 640 at flag=false (7 iters). Numerical agreement against the unrewritten original at both flag values.
+
+Full suite is green: **841 tests** (+1 over §0.4.149).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 4 — nested WHILE in IF branch.** Still the headline gap; multi-session.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.** Multi-session structural.
+3. **Out-of-scope register refresh.** With the D.3i widening series closed (§0.4.131 / 3e through §0.4.150 / 3j), the deferred register's "D.3i closed-form closure" entry can move from "Pending; paper-faithful break-bearing WHILE" to a more nuanced "every realistic operand shape supported; nested WHILE / multi-live-index gradAccum still pending".
+4. **Fourth `:benchmarks` inhabitant** — different primal shape (multi-branch IF, affine recurrence).
+
+**Definition-of-done for §0.4.150 — met**:
+- `BreakBearingWhile.Pattern.tripCountOpResult` added, mutually exclusive with the other three trip-count fields ✓
+- `extractStepCounter` accepts `DxirOpResult` n (scalar type required) ✓
+- `computeCounterOnlySymbolicShape` n resolution checks `tripCountOpResult` and applies the same liftability discipline as for `DxirOp` ✓
+- `rewriteCounterOnlySymbolicBreak`'s nClone dispatch mirrors thresholdClone's exactly ✓
+- 1 new test pins outer-scope DxirOpResult n with concrete numerical values + numerical agreement ✓
+- Coverage matrix for n × threshold is now complete (every realistic operand kind × every realistic operand kind) ✓
+- §0.4.143 / §0.4.149 paths unchanged (existing 7 tests still green) ✓
+- Full suite stays green at 841 tests (+1) ✓
+
 #### 0.4.149 D.3i Phase 3i — `DxirOpResult` threshold support 2026-04-25
 
 §0.4.142 (Phase 3g) accepted `DxirOp` thresholds; §0.4.143 (Phase 3h) extended the same widening to `n`. The remaining sliver — `DxirOpResult` thresholds — was the "corner case" called out across §0.4.144 / §0.4.145 / §0.4.146 / §0.4.147 / §0.4.148's recommended-next lists. Realistic surface: a multi-result op's `result(k)` used directly as the break threshold (e.g., `if (i > someMultiOp.result(0)) break`). §0.4.149 closes this gap: `isRegionInternalSubtreeLiftable` and `liftRegionInternalSubtree` walk through `DxirOpResult` to its source's operands, and the rewrite's `thresholdClone` dispatch wraps the cloned source as `clonedSource.result(t.index)`.

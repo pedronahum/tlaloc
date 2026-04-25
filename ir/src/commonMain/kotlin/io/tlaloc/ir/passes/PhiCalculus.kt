@@ -749,8 +749,10 @@ object PhiCalculus {
         // §0.4.143 — n can be DxirParam (existing), DxirOp (new), or DxirConst
         // (when neither tripCountParam nor tripCountOp is populated). For DxirConst
         // we walk back through origCond to recover the actual node.
+        // §0.4.150 — n can also be DxirOpResult (a multi-result op's result(k)).
         val nNode: DxirNode = pattern.tripCountParam
             ?: pattern.tripCountOp
+            ?: pattern.tripCountOpResult
             ?: run {
                 val origCondOp = pattern.origCond as? DxirOp ?: return null
                 if (origCondOp.op != OpKind.STEP) return null
@@ -765,6 +767,15 @@ object PhiCalculus {
                 // resolves through nodeMap at rewrite time. Same scope discipline as
                 // §0.4.142's DxirOp threshold path.
                 if (nNode.id in condBodyIds &&
+                    !isRegionInternalSubtreeLiftable(nNode, condBodyIds)
+                ) return null
+            }
+            is DxirOpResult -> {
+                // §0.4.150 — region-internal DxirOpResult n requires the source op
+                // (multi-result) to be liftable. Outer-scope sources resolve through
+                // nodeMap at rewrite time. Mirrors §0.4.149's DxirOpResult threshold
+                // dispatch.
+                if (nNode.source.id in condBodyIds &&
                     !isRegionInternalSubtreeLiftable(nNode, condBodyIds)
                 ) return null
             }
@@ -872,6 +883,25 @@ object PhiCalculus {
                         "applyBreakBearingClosurePass: outer-scope n op id=${n.id} for " +
                             "WHILE id=${op.id} missing from nodeMap",
                     )
+            }
+            is DxirOpResult -> {
+                // §0.4.150 — DxirOpResult n: lift the source op (multi-result), then
+                // wrap as `clonedSource.result(n.index)`. Mirrors §0.4.149's
+                // DxirOpResult threshold dispatch.
+                val sourceClone: DxirNode = if (n.source.id in condBodyIds) {
+                    liftRegionInternalSubtree(n.source, condBlock, nodeMap, multiOut, builder, op.id)
+                } else {
+                    nodeMap[n.source.id]
+                        ?: error(
+                            "applyBreakBearingClosurePass: outer-scope n DxirOpResult source " +
+                                "id=${n.source.id} for WHILE id=${op.id} missing from nodeMap",
+                        )
+                }
+                require(sourceClone is DxirOp) {
+                    "applyBreakBearingClosurePass: n DxirOpResult's cloned source must be a " +
+                        "DxirOp (got ${sourceClone::class.simpleName}) for WHILE id=${op.id}"
+                }
+                sourceClone.result(n.index)
             }
             else -> nodeMap[n.id]
                 ?: error(
