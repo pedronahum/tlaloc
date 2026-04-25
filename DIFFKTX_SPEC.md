@@ -39,6 +39,57 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.140 Multi-result IF AD Phase 2 — recursive `walkBranchReverse` for nested single-result IF 2026-04-25
+
+§0.4.139 shipped Phase 1 of multi-result IF AD (single-live-index case at the top level). The §0.4.139 recommended-next list flagged Phase 2 — recursive `walkBranchReverse` that allows nested control flow inside an IF arm — as the highest-impact remaining D.3i work, since combined with §0.4.139 + §0.4.128's LoopInvariant rewrite it would unblock the end-to-end gradient flow that's been the headline gap. This session ships Phase 2 for the nested-single-result-IF case: the branch-body cloner accepts an inner IF, and the reverse-walk dispatch recursively calls [handleIfAdjoint] for it. Nested WHILE / multi-result IF inside a branch still error explicitly — those need WHILE-aware AD (Stage B) and the per-index gradAccum refactor respectively.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt):
+
+1. **`walkBranchReverse` step 1** ([DxirReverseTransform.kt:1322-1369](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1322-L1369)) — the region-bearing-op gate is now a typed dispatch: `n.op == OpKind.IF && !n.isMultiResult` is allowed (mapped to itself in `branchNodeMap`, mirroring the top-level `apply`'s "primal IF kept, not cloned" rule); other region-bearing shapes still throw with a clear diagnostic. The multi-result guard moved inside the non-region branch so it doesn't reject the IF before the IF check fires.
+
+2. **`walkBranchReverse` step 3** ([DxirReverseTransform.kt:1407-1423](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1407-L1423)) — when the reverse walker encounters `n.op == OpKind.IF` with a non-null `upstreamForN`, dispatch to [handleIfAdjoint] using the BRANCH's own `gradAccum` and `branchNodeMap` as the outer-* parameters. Contributions accumulate into the branch's gradAccum, which is what the outer `walkBranchReverse` caller eventually returns to its own caller (the outer `handleIfAdjoint`).
+
+3. **`handleIfAdjoint` outer-scope id fallback** ([DxirReverseTransform.kt:1000-1014](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1000-L1014)) — the per-id loop now resolves `id` via `primalById[id] ?: outerNodeMap[id] ?: continue`. The Phase 1 lookup only consulted `primalById`, which is built from `primal.params + primal.body` at the function's top level; that's correct for the top-level call but leaves region-internal ids of the OUTER branch (e.g., a `MUL(x, x)` defined in outer-then and referenced by the inner-else's terminator) as `null`, which silently dropped their gradient contributions. Falling back to `outerNodeMap` (the caller's `branchNodeMap`) keys those ids in. Ids that miss BOTH maps are branch-internal to one of the inner branches and remain skipped — their gradients are local to that branch.
+
+The recursive dispatch is the same `handleIfAdjoint` helper the top-level walk uses; no new helper, no new dispatch table. The existing per-branch IF-synthesis and `outerGradAccum` accumulation logic operate identically on the inner-IF case — they just see a smaller `outerNodeMap` (the outer branch's scope, not the function-level scope).
+
+**Decisions worth flagging**:
+
+- **The outer-scope fallback in `handleIfAdjoint` is the load-bearing fix.** Without it, the recursive call's `allIds` set still gets populated (thenAdjoints / elseAdjoints have entries for the outer branch's region-internal ids), but every region-internal id falls through `primalById[id] ?: continue` and gets dropped. The first failing test (`gradOfNestedIfInsideThenArmFlowsCorrectly`) demonstrated this at `x=3`: expected `2x = 6`, got `0` because the `xx = MUL(x, x)` contribution from inner-else never reached the outer-then's branchAccum, so the outer-then's reverse walk never fired the MUL VJP rule. The fallback re-routes that flow.
+
+- **Nested-WHILE rejection is explicit.** The require message names both the op and the `multiResult` flag so a future user-written WHILE-in-branch primal gets a clear diagnostic. WHILE inside a branch needs WHILE-aware AD: the closure of break-bearing WHILEs (D.3i) is itself partially shipped (§0.4.123–§0.4.131), and the AD pipeline currently rejects WHILE at the top level too. Phase 3 would either coarsen the WHILE before SCT (so it appears as COARSENED, which the existing branch-body COARSENED arm handles via [handleCoarsenedAdjoint]) or extend `walkBranchReverse` with a dedicated WHILE arm. Either path is a separate session.
+
+- **Multi-result IF inside a branch is also rejected.** Unifying the per-index gradAccum (which §0.4.139's "Multi-live-index MR IF AD" deferred) is a structural refactor; rejecting at the branch level for now matches the top-level gate and keeps Phase 2's scope tight.
+
+- **No change to the §0.4.139 single-live-index path.** The top-level call passes `primalById` as both the lookup map AND the type source via `primalById[id] ?: continue`. With the fallback, the top-level call's `outerNodeMap` is the function-level `nodeMap` — for top-level body ops it contains the cloned op, for outer-scope-untouched ids (whose `usedByAdjoint` is false) it contains the primal node. In all cases, the type matches the primal type. The fallback is purely additive; existing tests stay green.
+
+- **The recursive dispatch's `liveIdx = 0` is hard-coded.** Phase 2 only relaxes the SINGLE-result-IF nesting case; the require gate at step 1 enforces `!n.isMultiResult`. So an inner IF always has `types.size == 1` and the only valid live index is 0. When the per-index gradAccum refactor lands, this can lift to call-site computation of `liveIdx` (mirroring the top-level pre-scan in [DxirReverseTransform.kt:114-136](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L114-L136)).
+
+- **Nested IF in then-arm AND else-arm both pinned.** The two new tests independently cover then-arm-only nesting (test #1) and else-arm-only nesting (test #2). Symmetric coverage matters: a regression that only handled then-region recursion would pass test #1 but fail test #2. Mirrors how §0.4.120's outer-IF and §0.4.121's nested-IF tests both covered both arms.
+
+**Tests added** (+2 new) in [DxirReverseTransformTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt):
+
+- `DxirReverseTransformTest.gradOfNestedIfInsideThenArmFlowsCorrectly` — outer IF whose then-arm contains an inner IF: `f(x) = if (x>0) { if (-x>0) -x else x*x } else { x }`. Pin: at `x=3`, outer-then fires + inner-else fires (since `STEP(-3) = 0`), so `f = x²` and `d/dx = 2x = 6`. At `x=-2`, outer-else fires, so `f = x` and `d/dx = 1`. The first numerical pin exercises the recursive `handleIfAdjoint` call (inner-else's `xx = MUL(x, x)` contribution must propagate to the outer-then's reverse walk and through to `x`).
+- `DxirReverseTransformTest.gradOfNestedIfInsideElseArmFlowsCorrectly` — outer IF with nested IF in else-arm only: `f(x) = if (x>0) x else (if (-x>5) x*x else -x)`. Pin: three numerical points — `x=4` (outer-then; `d/dx of x = 1`), `x=-10` (outer-else + inner-then; `d/dx of x² = 2x = -20`), `x=-2` (outer-else + inner-else; `d/dx of -x = -1`). Symmetric with test #1 to cover the else-arm recursion path.
+
+Full suite is green: **826 tests** (+2 over §0.4.139).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 3 — branch-body MR IF dispatch + nested-WHILE arm.** Either extend the recursive dispatch to allow MR IF inside a branch (would need the per-index gradAccum refactor), or add a WHILE arm (would unblock the §0.4.128 LoopInvariant rewrite's nested WHILE).
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+3. **`:benchmarks` Gradle module** — extract one perf probe.
+4. **Multi-live-index MR IF AD — per-index gradAccum refactor**.
+
+**Definition-of-done for §0.4.140 — met**:
+- `walkBranchReverse` accepts nested single-result IF in step 1's body cloner ✓
+- Step 3's reverse-walk dispatch routes inner-IF to a recursive [handleIfAdjoint] call ✓
+- `handleIfAdjoint` falls back to `outerNodeMap` for region-internal outer-scope ids ✓
+- Nested WHILE / multi-result IF inside a branch still error with clear diagnostics ✓
+- 2 new tests pin nested IF in then-arm and else-arm with concrete numerical gradients ✓
+- §0.4.139's single-live-index top-level path unchanged ✓
+- Full suite stays green at 826 tests (+2) ✓
+
 #### 0.4.139 Multi-result IF AD — single-live-index case 2026-04-25
 
 Multi-result IF AD has been the headline deferred item across the §0.4.135 → §0.4.138 recommended-next lists. The full per-index gradAccum refactor is multi-session work; this session ships a tightly-scoped Phase 1 that handles the *single-live-index* case — a multi-result IF where exactly one of its result indices is referenced downstream. That covers the §0.4.128 LoopInvariant rewrite's typical shape (function returns `whileResult(0)` from inside the IF's else-region, other result indices unreferenced) plus user-written multi-output IFs whose other outputs are dead.

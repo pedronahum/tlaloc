@@ -271,6 +271,104 @@ class DxirReverseTransformTest {
     }
 
     @Test
+    fun gradOfNestedIfInsideThenArmFlowsCorrectly() {
+        // §0.4.140 — outer IF whose then-arm body contains a nested IF.
+        // f(x) = if (x > 0) { if (-x > 0) -x else x*x } else { x }
+        // For x > 0: outer-then fires. -x is negative, so STEP(-x) = 0 → inner-else
+        //   fires, yielding x*x. Therefore f(x) = x² for x > 0; d/dx = 2x.
+        // For x <= 0: outer-else fires, yielding x. Therefore f(x) = x for x <= 0;
+        //   d/dx = 1.
+        val primal = DxirBuilder.function("nestedIfInThen") {
+            val x = param("x", f32)
+            val pOuter = op(OpKind.STEP, listOf(x), boolS)
+            val negX = op(OpKind.NEG, listOf(x), f32)
+            val pInner = op(OpKind.STEP, listOf(negX), boolS)
+            val ifResult = ifOp(
+                cond = pOuter,
+                types = listOf(f32),
+                thenRegion = region {
+                    val xx = op(OpKind.MUL, listOf(x, x), f32)
+                    val innerIf = ifOp(
+                        cond = pInner,
+                        types = listOf(f32),
+                        thenRegion = region { yields(negX) },
+                        elseRegion = region { yields(xx) },
+                    )
+                    yields(innerIf)
+                },
+                elseRegion = region { yields(x) },
+            )
+            listOf(ifResult)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        // x = 3 (then-arm fires; STEP(-3) = 0 → else-of-inner fires; f = 9; d/dx = 2x = 6).
+        val outPos = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(3f)))
+        assertTrue(
+            kotlin.math.abs(outPos[0][0] - 6f) < 1e-3f,
+            "expected 6 at x=3 (inner else fires; d/dx of x² = 2x), got ${outPos[0][0]}",
+        )
+        // x = -2 (outer else; f = x; d/dx = 1).
+        val outNeg = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(-2f)))
+        assertTrue(
+            kotlin.math.abs(outNeg[0][0] - 1f) < 1e-3f,
+            "expected 1 at x=-2 (outer else; d/dx of x = 1), got ${outNeg[0][0]}",
+        )
+    }
+
+    @Test
+    fun gradOfNestedIfInsideElseArmFlowsCorrectly() {
+        // §0.4.140 — outer IF with nested IF in else-arm only.
+        // f(x) = if (x > 0) x else (if (-x > 5) x*x else -x)
+        // For x > 0: outer-then; f = x; d/dx = 1.
+        // For x <= 0: outer-else fires.
+        //   -x > 5 ↔ x < -5: inner-then fires; f = x*x; d/dx = 2x.
+        //   -x <= 5 ↔ x >= -5 (and x <= 0): inner-else; f = -x; d/dx = -1.
+        val primal = DxirBuilder.function("nestedIfInElse") {
+            val x = param("x", f32)
+            val pOuter = op(OpKind.STEP, listOf(x), boolS)
+            val negX = op(OpKind.NEG, listOf(x), f32)
+            val five = const(5f, f32)
+            val negXMinusFive = op(OpKind.SUB, listOf(negX, five), f32)
+            val pInner = op(OpKind.STEP, listOf(negXMinusFive), boolS)
+            val ifResult = ifOp(
+                cond = pOuter,
+                types = listOf(f32),
+                thenRegion = region { yields(x) },
+                elseRegion = region {
+                    val xx = op(OpKind.MUL, listOf(x, x), f32)
+                    val innerIf = ifOp(
+                        cond = pInner,
+                        types = listOf(f32),
+                        thenRegion = region { yields(xx) },
+                        elseRegion = region { yields(negX) },
+                    )
+                    yields(innerIf)
+                },
+            )
+            listOf(ifResult)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        // x = 4 (outer-then; d/dx of x = 1).
+        val outA = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(4f)))
+        assertTrue(
+            kotlin.math.abs(outA[0][0] - 1f) < 1e-3f,
+            "expected 1 at x=4 (outer-then; d/dx of x), got ${outA[0][0]}",
+        )
+        // x = -10 (outer-else; -x > 5; inner-then; d/dx of x² = 2x = -20).
+        val outB = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(-10f)))
+        assertTrue(
+            kotlin.math.abs(outB[0][0] - (-20f)) < 1e-3f,
+            "expected -20 at x=-10 (inner-then; d/dx of x² = 2x), got ${outB[0][0]}",
+        )
+        // x = -2 (outer-else; -x = 2 < 5; inner-else; d/dx of -x = -1).
+        val outC = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(-2f)))
+        assertTrue(
+            kotlin.math.abs(outC[0][0] - (-1f)) < 1e-3f,
+            "expected -1 at x=-2 (inner-else; d/dx of -x = -1), got ${outC[0][0]}",
+        )
+    }
+
+    @Test
     fun gradOfMultiResultIfWithLiveIndexZeroFlowsCorrectly() {
         // §0.4.139 — multi-result IF where the function returns DxirOpResult(if, 0).
         // f(x) = (if (x > 0) -x else x).result(0). At x=2: then-arm picks -x = -2;

@@ -957,9 +957,10 @@ object DxirReverseTransform {
      *     outer gradient body: `IF(pred, thenAdj, elseAdj)`. Missing-branch
      *     contributions become `const(0)`. Accumulate into the outer `gradAccum`.
      *
-     * Limitations (first cut, §0.4.23):
-     *  - Single-result IF only.
-     *  - Branch bodies must NOT contain nested control flow (no nested IF/WHILE).
+     * Limitations (first cut, §0.4.23; relaxed in §0.4.139, §0.4.140):
+     *  - Multi-result IF: single-live-index only (§0.4.139).
+     *  - Nested control flow in branch bodies: single-result IF supported via
+     *    recursive dispatch (§0.4.140); WHILE / multi-result IF still error.
      *  - Branch bodies must not contain multi-result ops.
      *  - `usedByAdjoint` analysis isn't extended into branches — all branch body ops
      *    are unconditionally cloned into the gradient body.
@@ -997,7 +998,18 @@ object DxirReverseTransform {
         allIds.addAll(elseAdjoints.keys)
 
         for (id in allIds) {
-            val primal = primalById[id] ?: continue
+            // §0.4.140 — for the recursive (nested-IF) call, [outerNodeMap] is the
+            // CALLER's branchNodeMap, which contains region-internal ids of the
+            // outer branch (e.g., a `MUL(x, x)` defined in the outer-then block and
+            // referenced by the inner-else's terminator). Those ids aren't in
+            // [primalById] (which is built from `primal.params + primal.body` at the
+            // function's top level only), but their gradient contributions still
+            // need to accumulate into the caller's gradAccum so the caller's reverse
+            // walk can route them through the outer branch's VJP rules. Fall back to
+            // [outerNodeMap] for the type lookup; ids that miss BOTH maps are
+            // branch-internal to one of the inner branches and skipped (their
+            // gradients are local to that branch).
+            val primal = primalById[id] ?: outerNodeMap[id] ?: continue
             // Skip constants — they have no gradient surface.
             if (primal is DxirConst) continue
             val primalType = primal.type
@@ -1302,8 +1314,10 @@ object DxirReverseTransform {
      * filtered out by the caller (only outer-scope ids contribute back to the outer
      * `gradAccum`).
      *
-     * The current implementation rejects nested IF/WHILE in the branch body — recursion
-     * into nested IFs is a §0.4.23+ extension.
+     * §0.4.140 — nested single-result IF in the branch body is supported via a
+     * recursive [handleIfAdjoint] dispatch in step 3. Nested WHILE / multi-result IF
+     * still error: those need WHILE-aware AD (Stage B) and per-index gradAccum
+     * (a future MR IF AD phase) respectively.
      */
     private fun walkBranchReverse(
         block: io.tlaloc.ir.DxirBlock,
@@ -1323,28 +1337,41 @@ object DxirReverseTransform {
                     branchNodeMap[n.id] = builder.const(n.value, n.type, n.sharding)
                 }
                 is DxirOp -> {
-                    require(!n.hasRegions) {
-                        "walkBranchReverse: nested control-flow op ${n.op} in IF branch " +
-                            "not yet supported (§0.4.23 first cut)"
-                    }
-                    require(!n.isMultiResult) {
-                        "walkBranchReverse: multi-result op ${n.op} in IF branch not yet supported"
-                    }
-                    // §0.4.36 — don't clone COARSENED into the grad body. The reverse-walk
-                    // dispatch (below) splices the stored gradient_body via
-                    // [handleCoarsenedAdjoint]; a cloned COARSENED would be orphaned in the
-                    // grad body (no downstream consumer of its result) and [DxirToIrSynthesis]
-                    // has no lowering arm for it, so it would cause synthesis to abort. Skip
-                    // cloning + keep branchNodeMap pointing at the original COARSENED so
-                    // handleCoarsenedAdjoint can read its attrs at reverse-walk time.
-                    if (n.op == OpKind.COARSENED) {
+                    if (n.hasRegions) {
+                        // §0.4.140 — single-result nested IF is allowed; the reverse
+                        // walk in step 3 dispatches to [handleIfAdjoint] for it. Other
+                        // region-bearing ops still error: WHILE needs WHILE-aware AD
+                        // (Stage B's PhiCalculus pass should have coarsened it before
+                        // SCT), and multi-result IF in a branch needs the per-index
+                        // gradAccum refactor that the top-level path also defers.
+                        require(n.op == OpKind.IF && !n.isMultiResult) {
+                            "walkBranchReverse: nested control-flow op ${n.op} in IF branch " +
+                                "supports only single-result IF; got op=${n.op} multiResult=${n.isMultiResult}"
+                        }
+                        // Mirror the top-level apply's "primal IF kept, not cloned" rule —
+                        // [handleIfAdjoint] re-clones each branch's body during the recursive
+                        // walk, so cloning the IF here would emit duplicate computation.
                         branchNodeMap[n.id] = n
                     } else {
-                        val clonedOperands = n.operands.map {
-                            branchNodeMap[it.id]
-                                ?: error("walkBranchReverse: operand id=${it.id} of branch op ${n.id} not in nodeMap")
+                        require(!n.isMultiResult) {
+                            "walkBranchReverse: multi-result op ${n.op} in IF branch not yet supported"
                         }
-                        branchNodeMap[n.id] = builder.op(n.op, clonedOperands, n.type, n.attrs)
+                        // §0.4.36 — don't clone COARSENED into the grad body. The reverse-walk
+                        // dispatch (below) splices the stored gradient_body via
+                        // [handleCoarsenedAdjoint]; a cloned COARSENED would be orphaned in the
+                        // grad body (no downstream consumer of its result) and [DxirToIrSynthesis]
+                        // has no lowering arm for it, so it would cause synthesis to abort. Skip
+                        // cloning + keep branchNodeMap pointing at the original COARSENED so
+                        // handleCoarsenedAdjoint can read its attrs at reverse-walk time.
+                        if (n.op == OpKind.COARSENED) {
+                            branchNodeMap[n.id] = n
+                        } else {
+                            val clonedOperands = n.operands.map {
+                                branchNodeMap[it.id]
+                                    ?: error("walkBranchReverse: operand id=${it.id} of branch op ${n.id} not in nodeMap")
+                            }
+                            branchNodeMap[n.id] = builder.op(n.op, clonedOperands, n.type, n.attrs)
+                        }
                     }
                 }
                 else -> error(
@@ -1382,6 +1409,23 @@ object DxirReverseTransform {
                 handleCoarsenedAdjoint(
                     coarsened = clonedCoarsened,
                     upstream = upstreamForN,
+                    outerGradAccum = gradAccum,
+                    outerNodeMap = branchNodeMap,
+                    primalById = primalById,
+                    builder = builder,
+                )
+                continue
+            }
+            // §0.4.140 — nested single-result IF in a branch body: dispatch to the
+            // same [handleIfAdjoint] helper that the top-level walk uses. The branch's
+            // gradAccum + nodeMap stand in for the outer-* parameters; contributions
+            // accumulate into the BRANCH's gradAccum (not the function-level one),
+            // which is what the outer walkBranchReverse caller eventually returns.
+            if (n.op == OpKind.IF) {
+                handleIfAdjoint(
+                    ifNode = n,
+                    upstream = upstreamForN,
+                    liveIdx = 0,
                     outerGradAccum = gradAccum,
                     outerNodeMap = branchNodeMap,
                     primalById = primalById,
