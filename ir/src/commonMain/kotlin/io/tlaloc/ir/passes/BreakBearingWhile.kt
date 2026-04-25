@@ -1,7 +1,10 @@
 package io.tlaloc.ir.passes
 
+import io.tlaloc.ir.DxirBlockArg
+import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
+import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.OpKind
 
 /**
@@ -30,14 +33,23 @@ import io.tlaloc.ir.OpKind
 object BreakBearingWhile {
 
     /**
-     * The recognised structural pattern. All three fields are non-null on a successful
-     * match. Future phases extend this with the closed-form coefficients (counter
-     * mapping, trip-count bound, etc.).
+     * The recognised structural pattern. The first three fields ([whileOp], [origCond],
+     * [breakCond]) are always non-null on a successful match. The trip-count fields
+     * ([counterArgIdx], [tripCountConst], [tripCountParam]) are populated when
+     * [origCond] matches the canonical `STEP(SUB(n, args[counterArgIdx]))` C5/C6 shape;
+     * otherwise they're null and consumers fall back to other detection paths.
+     *
+     * Trip count is mutually exclusive: at most one of [tripCountConst] / [tripCountParam]
+     * is non-null when [counterArgIdx] is set. A concrete-int bound flows through
+     * [tripCountConst]; a loop-invariant scalar param bound flows through [tripCountParam].
      */
     data class Pattern(
         val whileOp: DxirOp,
         val origCond: DxirNode,
         val breakCond: DxirNode,
+        val counterArgIdx: Int? = null,
+        val tripCountConst: Int? = null,
+        val tripCountParam: DxirParam? = null,
     )
 
     /**
@@ -65,10 +77,75 @@ object BreakBearingWhile {
         val notNode = terminator.operands[1] as? DxirOp ?: return null
         if (notNode.op != OpKind.NOT) return null
         if (notNode.operands.size != 1) return null
-        return Pattern(
-            whileOp = op,
-            origCond = terminator.operands[0],
-            breakCond = notNode.operands[0],
-        )
+
+        val origCond = terminator.operands[0]
+        val breakCond = notNode.operands[0]
+
+        // §0.4.124 — when origCond matches the canonical C5/C6 shape
+        // `STEP(SUB(n, args[counterArgIdx]))`, populate the trip-count fields.
+        // Otherwise leave them null; future phases that need richer cond shapes
+        // can layer their own extractors on top.
+        val counter = extractStepCounter(origCond, condBlock.args)
+        return if (counter != null) {
+            Pattern(
+                whileOp = op,
+                origCond = origCond,
+                breakCond = breakCond,
+                counterArgIdx = counter.argIdx,
+                tripCountConst = counter.tripCountConst,
+                tripCountParam = counter.tripCountParam,
+            )
+        } else {
+            Pattern(whileOp = op, origCond = origCond, breakCond = breakCond)
+        }
+    }
+
+    /**
+     * §0.4.124 — extract counter index + trip count bound from a node matching
+     * `STEP(SUB(n, args[counterArgIdx]))`, the canonical C5 / C6 cond shape used
+     * across [PhiCalculus.detectSimpleLoop] and [PhiCalculus.detectAffineRecurrence].
+     * Returns null if [node] doesn't match.
+     *
+     * The bound `n` is recognised in two forms:
+     *  - [DxirConst] with a non-negative integer-valued numeric → `tripCountConst`.
+     *  - [DxirParam] of scalar type → `tripCountParam` (loop-invariant symbolic bound).
+     *
+     * This helper is intentionally NOT shared with the existing PhiCalculus.kt
+     * detectors — those run earlier in the pipeline and target slightly different
+     * structural shapes (concrete-only for C5; broader for C6). Keeping the D.3i
+     * extraction in its own surface lets it evolve independently.
+     */
+    private data class CounterMatch(
+        val argIdx: Int,
+        val tripCountConst: Int? = null,
+        val tripCountParam: DxirParam? = null,
+    )
+
+    private fun extractStepCounter(
+        node: DxirNode,
+        condArgs: List<DxirBlockArg>,
+    ): CounterMatch? {
+        if (node !is DxirOp) return null
+        if (node.op != OpKind.STEP) return null
+        if (node.operands.size != 1) return null
+        val sub = node.operands[0] as? DxirOp ?: return null
+        if (sub.op != OpKind.SUB) return null
+        if (sub.operands.size != 2) return null
+        val nNode = sub.operands[0]
+        val counterArgRef = sub.operands[1]
+        val argIdx = condArgs.indexOfFirst { it.id == counterArgRef.id }
+        if (argIdx < 0) return null
+        return when (nNode) {
+            is DxirConst -> {
+                val v = (nNode.value as? Number)?.toDouble() ?: return null
+                if (v < 0.0 || v != v.toInt().toDouble()) return null
+                CounterMatch(argIdx = argIdx, tripCountConst = v.toInt())
+            }
+            is DxirParam -> {
+                if (!nNode.type.isScalar) return null
+                CounterMatch(argIdx = argIdx, tripCountParam = nNode)
+            }
+            else -> null
+        }
     }
 }

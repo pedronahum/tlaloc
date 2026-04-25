@@ -27,6 +27,106 @@ class BreakBearingWhileTest {
         fn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.WHILE }
 
     @Test
+    fun extractsConcreteTripCountAndCounterIndex() {
+        // §0.4.124 — when origCond matches the canonical STEP(SUB(n, counter)) C5/C6
+        // shape, the detector populates `counterArgIdx` + `tripCountConst`. Pin both.
+        val fn = DxirBuilder.function("breakLoopWithCounter") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)  // concrete trip-count bound
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    // origCond shape: STEP(SUB(n, args[1])) — counter arg at idx 1.
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(op(OpKind.STEP, listOf(args[0]), boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))
+        assertNotNull(pattern)
+        assertEquals(1, pattern.counterArgIdx, "counter is the second cond-arg (idx=1)")
+        assertEquals(7, pattern.tripCountConst, "trip-count bound = 7")
+        assertNull(pattern.tripCountParam, "concrete bound shouldn't populate the symbolic field")
+    }
+
+    @Test
+    fun extractsSymbolicTripCountParam() {
+        // §0.4.124 — when n is a function param (loop-invariant scalar), the
+        // detector populates `tripCountParam` instead of `tripCountConst`.
+        val fn = DxirBuilder.function("symbolicTripBreak") {
+            val x = param("x", f32s)
+            val nParam = param("n", i32s)  // symbolic trip-count bound
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nParam, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(op(OpKind.STEP, listOf(args[0]), boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))
+        assertNotNull(pattern)
+        assertEquals(1, pattern.counterArgIdx)
+        assertNull(pattern.tripCountConst, "symbolic bound shouldn't populate the concrete field")
+        assertNotNull(pattern.tripCountParam, "symbolic bound should populate tripCountParam")
+        assertEquals("n", pattern.tripCountParam!!.name)
+    }
+
+    @Test
+    fun leavesCounterFieldsNullWhenOrigCondShapeIsForeign() {
+        // origCond is `STEP(args[0])` — a STEP on a body arg directly, not the
+        // SUB(n, counter) form. The counter fields should stay null.
+        val fn = DxirBuilder.function("foreignCond") {
+            val x = param("x", f32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    // Non-canonical origCond shape.
+                    val origCond = op(OpKind.STEP, listOf(args[0]), boolS)
+                    val notBrk = op(OpKind.NOT, listOf(op(OpKind.STEP, listOf(args[1]), boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val pattern = BreakBearingWhile.detect(findWhile(fn))
+        assertNotNull(pattern, "LAND-NOT structural match still works")
+        assertNull(pattern.counterArgIdx, "non-canonical origCond should leave counterArgIdx null")
+        assertNull(pattern.tripCountConst)
+        assertNull(pattern.tripCountParam)
+    }
+
+    @Test
     fun detectsLandComposedBreakBearingWhile() {
         // Build a WHILE whose cond region is `LAND(STEP(SUB(n, counter)), NOT(STEP(args[0])))`.
         // The natural cond is `STEP(SUB(n, counter))`; the break cond is `STEP(args[0])`

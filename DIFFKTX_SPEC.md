@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.124 D.3i Phase 1.5 — counter / trip-count extraction in `BreakBearingWhile.Pattern` 2026-04-25
+
+§0.4.123's Phase 1 detector recognised the `LAND(cond, NOT(break_cond))` shape and returned the split predicates verbatim — Phase 2's closure logic still had to re-parse `origCond` to find the counter index and trip-count bound. This session extends the detector to extract that semantic info during the structural match, so Phase 2 can consume a pre-validated `Pattern`.
+
+**The mechanism** in [BreakBearingWhile.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt). The `Pattern` data class grew three optional fields:
+
+```kotlin
+data class Pattern(
+    val whileOp: DxirOp,
+    val origCond: DxirNode,
+    val breakCond: DxirNode,
+    val counterArgIdx: Int? = null,
+    val tripCountConst: Int? = null,
+    val tripCountParam: DxirParam? = null,
+)
+```
+
+A new private helper `extractStepCounter(node, condArgs)` matches the canonical `STEP(SUB(n, args[counterArgIdx]))` shape used across `PhiCalculus.detectSimpleLoop` (concrete-only, C5) and `PhiCalculus.detectAffineRecurrence` (concrete + symbolic, C6). The bound `n` is recognised in two forms:
+
+- `DxirConst` with non-negative integer value → `tripCountConst`.
+- `DxirParam` of scalar type → `tripCountParam` (loop-invariant symbolic bound, the C6 case).
+
+When the origCond doesn't match the canonical shape, all three fields stay `null` — the structural LAND-NOT match itself still succeeds, but consumers know to fall back to other detectors or skip the closure path.
+
+**Decisions worth flagging**:
+
+- **NOT shared with PhiCalculus.kt's existing detectors.** Both `detectSimpleLoop` and `detectAffineRecurrence` carry their own STEP-counter extraction inline, with slightly different validation rules (concrete-only for C5; broader for C6). Refactoring them to consume a shared helper risks destabilising working code paths that ship today's `tlaloc.soi.enabled` benchmarks. D.3i Phase 1.5's helper lives in `BreakBearingWhile.kt` so it can evolve independently as Phase 2 layers additional checks (initial-value validation, body-counter back-edge, break-iteration computation). When all three detectors converge on a stable shape, a future refactor can extract a common helper — but not today.
+
+- **Trip count is mutually exclusive at most one set.** When `counterArgIdx` is non-null, exactly one of `tripCountConst` / `tripCountParam` is non-null. The data-class default (both null) means "non-canonical origCond"; consumers can dispatch on this cleanly. Phase 2's closure logic will gate on `tripCountConst != null` for the concrete-T closed form and on `tripCountParam != null` for the symbolic-T variant.
+
+- **Parameter validation matches `extractTripCount` from PhiCalculus.kt.** Both check `value < 0.0 || v != v.toInt().toDouble()` to reject negative or fractional bounds, and require a scalar type for the symbolic case. Keeping the validation predicates in lockstep means the trip-count surface this detector produces is interoperable with the existing C5/C6 expectations.
+
+- **Phase 1.5 keeps Phase 1's bail-out semantics.** The structural LAND-NOT match still returns a `Pattern` even when the counter extraction fails — `counterArgIdx == null` is the signal. Phase 2 will branch on this: closure-eligible patterns (counter populated) get the closed-form treatment; structurally-LAND-NOT-but-non-canonical patterns can be flagged for the runtime-tape fallback or rejected outright depending on the policy that lands.
+
+- **No new public API beyond the existing `BreakBearingWhile` namespace.** The new fields are constructor-defaulted, so the §0.4.123 callers (the test) continue to compile unchanged. The `extractStepCounter` helper and `CounterMatch` data class are private — if a future phase wants to call them directly, they can be promoted.
+
+**Tests added** (+3 new) in [BreakBearingWhileTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/BreakBearingWhileTest.kt):
+
+- `BreakBearingWhileTest.extractsConcreteTripCountAndCounterIndex` — origCond = `STEP(SUB(const(7), args[1]))`. Pin: `counterArgIdx = 1`, `tripCountConst = 7`, `tripCountParam = null`.
+- `BreakBearingWhileTest.extractsSymbolicTripCountParam` — origCond = `STEP(SUB(param("n"), args[1]))`. Pin: `counterArgIdx = 1`, `tripCountConst = null`, `tripCountParam.name = "n"`.
+- `BreakBearingWhileTest.leavesCounterFieldsNullWhenOrigCondShapeIsForeign` — origCond = `STEP(args[0])` (no SUB wrapper). Pin: structural LAND-NOT match still succeeds (Pattern returned), but all three counter/trip-count fields are null.
+
+Full suite is green: **761 tests** (+3 over §0.4.123).
+
+**Recommended next pickup** (next /loop firing — D.3i Phase 2 proper):
+
+1. **D.3i Phase 2 — counter back-edge + initial-value validation.** With Phase 1.5's pattern enrichment in hand, Phase 2 can validate that the counter's initial value is `const(0)` and the body's back-edge for the counter slot is `ADD(args[counterArgIdx], const(1))` — same checks `detectSimpleLoop` does. This locks down the C5-shape break-bearing case as a fully-validated structural target. The actual closed-form computation (break-iteration formula, gradient via Symja) is Phase 3.
+2. **Multi-result COARSENED**.
+3. **`:benchmarks` Gradle module**.
+4. **HMC benchmark port — Phase 1**.
+
+**Definition-of-done for §0.4.124 — met**:
+- `Pattern` extended with `counterArgIdx` / `tripCountConst` / `tripCountParam` (all defaulted) ✓
+- `extractStepCounter` helper recognises both concrete-int and symbolic-param trip counts ✓
+- Trip-count fields are mutually exclusive when populated ✓
+- Existing 4 Phase-1 tests still green (constructor defaults preserve binary compat) ✓
+- Three new tests pin concrete extraction, symbolic extraction, and foreign-shape pass-through ✓
+- D.3i Phase 1.5 lays the groundwork for Phase 2's counter/trip-count validation ✓
+- Full suite stays green at 761 tests (+3) ✓
+
 #### 0.4.123 D.3i Phase 1 — structural detector for LAND-composed break-bearing WHILE 2026-04-25
 
 §0.4.108's deferred-register entry "Closure work | **D.3i closed-form closure** for LAND-composed WHILE — Pending; paper-faithful break-bearing WHILE" gets its first phase. D.3i is the multi-session arc that's been the headline candidate across the §0.4.118 → §0.4.122 recommended-next lists. This session opens the arc with a real, not placeholder, increment: a structural detector that recognises the FIR-side hoist shape `LAND(cond, NOT(break_cond))` in the WHILE's cond region.
