@@ -129,33 +129,156 @@ object PhiCalculus {
      * tensor surfaces emit.
      */
     fun simplifyReturns(fn: DxirFunction, engine: SymbolicEngine): DxirFunction {
-        // Lift + simplify each return expression. Any lift failure → bail out
-        // unchanged (preserves correctness even when a return contains a non-
-        // arithmetic op).
+        // §0.4.107 — D.1i Phase 4. Lift each return through `liftReturnWithLeaves`,
+        // which creates fresh Symja sentinel symbols for any DxirNode the engine's
+        // base `liftNode` doesn't recognise (SUM, MEAN, MATMUL, GATHER, EXP, LOG,
+        // ... and any DxirOpResult). Symja sees those sentinels as opaque variables
+        // and can still simplify the surrounding arithmetic — `MUL(SUM(x), 1)` lifts
+        // as `_leaf_<id> * 1`, simplifies to `_leaf_<id>`, and lowers back to the
+        // cloned SUM op.
+        val opaqueLeaves: MutableMap<String, DxirNode> = LinkedHashMap()
         val simplifiedExprs: List<SymExpr> = try {
-            fn.returns.map { engine.simplify(engine.liftNode(it)) }
+            fn.returns.map { ret ->
+                val lifted = liftReturnWithLeaves(ret, engine, opaqueLeaves)
+                engine.simplify(lifted)
+            }
         } catch (e: Throwable) {
             return fn
         }
         // Lower each simplified expression back to dxir under a freshly-built
         // function with new DxirParams (one per original param). The symbol map
-        // routes lifted free variables back to the new params by name.
+        // routes lifted free variables back to the new params by name AND to
+        // newly-cloned opaque-leaf subtrees by sentinel name. Only leaves the
+        // simplified output actually references get cloned — unused ones (e.g.,
+        // an opaque `MUL(SUM, 0)` collapsed to 0 by Simplify) leave no trace.
         return try {
             DxirBuilder.function(fn.name) {
                 val symbolMap = HashMap<String, DxirNode>()
+                val paramByName = HashMap<String, DxirNode>()
                 for (origParam in fn.params) {
                     val newParam = param(origParam.name, origParam.type)
                     symbolMap[origParam.name] = newParam
+                    paramByName[origParam.name] = newParam
+                }
+                val cloneCache = HashMap<Int, DxirNode>()
+                for ((sentinel, origNode) in opaqueLeaves) {
+                    val sentinelVar = engine.variable(sentinel)
+                    val referenced = simplifiedExprs.any { engine.containsVariable(it, sentinelVar) }
+                    if (!referenced) continue
+                    symbolMap[sentinel] = cloneOpaqueSubtree(origNode, this, paramByName, cloneCache)
                 }
                 simplifiedExprs.zip(fn.returns).map { (sym, origReturn) ->
                     engine.lowerToDxir(sym, origReturn.type, this, symbolMap)
                 }
             }
         } catch (e: Throwable) {
-            // Lowering failure (Symja produced an op the lower-half can't emit) →
-            // unchanged.
+            // Lowering failure (Symja produced an op the lower-half can't emit, or
+            // an opaque-leaf subtree fell outside the cloner's scope) → unchanged.
             fn
         }
+    }
+
+    /**
+     * Phase-4 lifter for `simplifyReturns`. Recurses through arithmetic ops
+     * (ADD/SUB/MUL/DIV/NEG/POW) using [SymbolicEngine] primitives; for everything
+     * else, registers an opaque sentinel symbol in [leafMap] and returns
+     * `engine.variable(sentinel)`. The sentinel name is `_simplify_leaf_<id>`,
+     * unique per node.id and unlikely to collide with any real param name.
+     *
+     * This is intentionally a private helper rather than a [SymbolicEngine] method
+     * because the opaque-leaf protocol is specific to `simplifyReturns`'s
+     * lift-and-clone-back pipeline; engines used elsewhere (PhiCalculus.apply's
+     * C5–C9 paths) carry their own [AffineRecurrencePattern.symOpaqueLeaves]
+     * machinery and shouldn't share implementation with this surface.
+     */
+    private fun liftReturnWithLeaves(
+        node: DxirNode,
+        engine: SymbolicEngine,
+        leafMap: MutableMap<String, DxirNode>,
+    ): SymExpr = when (node) {
+        is DxirParam -> engine.liftNode(node)
+        is DxirConst -> engine.liftNode(node)
+        is DxirOp -> when (node.op) {
+            OpKind.ADD -> engine.add(
+                liftReturnWithLeaves(node.operands[0], engine, leafMap),
+                liftReturnWithLeaves(node.operands[1], engine, leafMap),
+            )
+            OpKind.SUB -> engine.sub(
+                liftReturnWithLeaves(node.operands[0], engine, leafMap),
+                liftReturnWithLeaves(node.operands[1], engine, leafMap),
+            )
+            OpKind.MUL -> engine.mul(
+                liftReturnWithLeaves(node.operands[0], engine, leafMap),
+                liftReturnWithLeaves(node.operands[1], engine, leafMap),
+            )
+            OpKind.DIV -> engine.div(
+                liftReturnWithLeaves(node.operands[0], engine, leafMap),
+                liftReturnWithLeaves(node.operands[1], engine, leafMap),
+            )
+            OpKind.NEG -> engine.neg(liftReturnWithLeaves(node.operands[0], engine, leafMap))
+            OpKind.POW -> engine.pow(
+                liftReturnWithLeaves(node.operands[0], engine, leafMap),
+                liftReturnWithLeaves(node.operands[1], engine, leafMap),
+            )
+            else -> registerOpaqueLeaf(node, engine, leafMap)
+        }
+        else -> registerOpaqueLeaf(node, engine, leafMap)
+    }
+
+    private fun registerOpaqueLeaf(
+        node: DxirNode,
+        engine: SymbolicEngine,
+        leafMap: MutableMap<String, DxirNode>,
+    ): SymExpr {
+        val sentinel = "_simplify_leaf_${node.id}"
+        leafMap.putIfAbsent(sentinel, node)
+        return engine.variable(sentinel)
+    }
+
+    /**
+     * Clone an opaque-leaf subtree from the input function into [builder]'s scope.
+     * Handles single-result `DxirOp` (no regions), `DxirConst`, `DxirParam` (resolved
+     * via [paramByName]), and `DxirOpResult` (clone source + reindex). Multi-result
+     * ops, region-bearing ops (IF / WHILE), and unrecognised node kinds throw, which
+     * the outer [simplifyReturns] catches to bail out unchanged. This is deliberately
+     * narrower than [cloneNode] — the existing C5/C6 paths handle the more elaborate
+     * cases via their own machinery, while `simplifyReturns` only ever sees scalar
+     * gradient bodies whose opaque leaves are typically straight-line tensor ops.
+     */
+    private fun cloneOpaqueSubtree(
+        src: DxirNode,
+        builder: DxirBuilder,
+        paramByName: Map<String, DxirNode>,
+        cache: MutableMap<Int, DxirNode>,
+    ): DxirNode {
+        cache[src.id]?.let { return it }
+        val cloned: DxirNode = when (src) {
+            is DxirParam -> paramByName[src.name]
+                ?: error("simplifyReturns clone: param ${src.name} not present in new function's params")
+            is DxirConst -> builder.const(src.value, src.type, src.sharding)
+            is DxirOp -> {
+                require(src.regions.isEmpty()) {
+                    "simplifyReturns clone: opaque-leaf op ${src.op} carries regions; " +
+                        "outer simplifyReturns will catch this and bail out unchanged"
+                }
+                require(!src.isMultiResult) {
+                    "simplifyReturns clone: opaque-leaf op ${src.op} is multi-result; " +
+                        "outer simplifyReturns will catch this and bail out unchanged"
+                }
+                val clonedOperands = src.operands.map { cloneOpaqueSubtree(it, builder, paramByName, cache) }
+                builder.op(src.op, clonedOperands, src.type, src.attrs, src.sharding)
+            }
+            is DxirOpResult -> {
+                val clonedSource = cloneOpaqueSubtree(src.source, builder, paramByName, cache)
+                require(clonedSource is DxirOp) {
+                    "simplifyReturns clone: DxirOpResult source did not clone to a DxirOp"
+                }
+                clonedSource.result(src.index)
+            }
+            else -> error("simplifyReturns clone: cannot clone node kind ${src::class.simpleName}")
+        }
+        cache[src.id] = cloned
+        return cloned
     }
 
     fun apply(fn: DxirFunction, engine: SymbolicEngine? = null): DxirFunction {

@@ -66,9 +66,11 @@ class PhiCalculusSimplifyTest {
     }
 
     @Test
-    fun simplifyReturnsBailsOutWhenLiftFails() {
-        // f(x) = sum(x) — SUM is not in liftNode's supported set. The pass must
-        // return the original function unchanged rather than throwing.
+    fun simplifyReturnsKeepsOpaqueLeafIntact() {
+        // f(x) = sum(x). Phase 4 (§0.4.107) lifts SUM as an opaque sentinel, so the
+        // pass no longer bails out — it just returns a function whose body cones
+        // the SUM op verbatim. Pre-Phase-4 (§0.4.103) this test asserted the bail-out
+        // path; post-Phase-4 we assert the opaque-leaf round-trip preserves the op.
         val rank1 = DxirType(F32, listOf(4))
         val fn = DxirBuilder.function("sum_rank1") {
             val x = param("x", rank1)
@@ -76,7 +78,6 @@ class PhiCalculusSimplifyTest {
             listOf(s)
         }
         val out = PhiCalculus.simplifyReturns(fn, engine)
-        // Bailed: same body shape as the input (one SUM op).
         val ops = out.body.filterIsInstance<DxirOp>()
         assertEquals(1, ops.size)
         assertEquals(OpKind.SUM, ops.single().op)
@@ -176,5 +177,136 @@ class PhiCalculusSimplifyTest {
         assertEquals(2, out.size)
         assertEquals(7f, out[0][0])
         assertEquals(7f, out[1][0])
+    }
+
+    // ---------------------- Phase 4: opaque leaves ----------------------
+
+    @Test
+    fun simplifyCollapsesMulByOneAroundOpaqueLeaf() {
+        // f(x) = SUM(x) * 1. SUM is non-arithmetic; Phase 4 lifts it as an opaque
+        // sentinel. Symja sees `_leaf * 1` and simplifies to `_leaf`. Lower clones
+        // the original SUM in. Result: a body with only the SUM op (the MUL and
+        // const(1) are gone).
+        val rank1 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("sum_times_one") {
+            val x = param("x", rank1)
+            val s = op(OpKind.SUM, listOf(x), f32)
+            val one = const(1L, f32)
+            val out = op(OpKind.MUL, listOf(s, one), f32)
+            listOf(out)
+        }
+        val simplified = PhiCalculus.simplifyReturns(fn, engine)
+        val ops = simplified.body.filterIsInstance<DxirOp>()
+        assertEquals(1, ops.size, "MUL by 1 around opaque leaf should collapse to just the leaf")
+        assertEquals(OpKind.SUM, ops.single().op)
+    }
+
+    @Test
+    fun simplifyEliminatesOpaqueLeafUnderMulByZero() {
+        // f(x) = SUM(x) * 0. Symja folds `_leaf * 0` to `0`. The SUM is no longer
+        // referenced in the simplified output; the leaf is unused, so cloneOpaqueSubtree
+        // must NOT be invoked for it. Resulting body has just the const(0) and no SUM.
+        val rank1 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("sum_times_zero") {
+            val x = param("x", rank1)
+            val s = op(OpKind.SUM, listOf(x), f32)
+            val zero = const(0L, f32)
+            val out = op(OpKind.MUL, listOf(s, zero), f32)
+            listOf(out)
+        }
+        val simplified = PhiCalculus.simplifyReturns(fn, engine)
+        val ops = simplified.body.filterIsInstance<DxirOp>()
+        assertTrue(
+            ops.none { it.op == OpKind.SUM },
+            "SUM should be DCE'd because mul-by-zero made the leaf unreferenced; ops=${ops.map { it.op }}",
+        )
+    }
+
+    @Test
+    fun simplifySharesOpaqueLeafAcrossDuplicateUses() {
+        // f(x) = SUM(x) + SUM(x), where both ADD operands point to the SAME DxirOp
+        // (shared subexpression in the input). Both lift to the same sentinel name
+        // (keyed on node.id), so Symja sees `_leaf + _leaf` and folds to `2*_leaf`.
+        // The cloned SUM appears once in the output body.
+        val rank1 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("dup_sum") {
+            val x = param("x", rank1)
+            val s = op(OpKind.SUM, listOf(x), f32)
+            val out = op(OpKind.ADD, listOf(s, s), f32)
+            listOf(out)
+        }
+        val simplified = PhiCalculus.simplifyReturns(fn, engine)
+        val ops = simplified.body.filterIsInstance<DxirOp>()
+        // Body should contain exactly one SUM (from clone) plus one MUL (the 2*leaf).
+        // No ADD remains.
+        val sumCount = ops.count { it.op == OpKind.SUM }
+        val mulCount = ops.count { it.op == OpKind.MUL }
+        val addCount = ops.count { it.op == OpKind.ADD }
+        assertEquals(1, sumCount, "exactly one SUM (the cloned leaf); ops=${ops.map { it.op }}")
+        assertEquals(1, mulCount, "Symja should produce 2 * leaf; ops=${ops.map { it.op }}")
+        assertEquals(0, addCount, "the ADD(leaf, leaf) should fold; ops=${ops.map { it.op }}")
+    }
+
+    @Test
+    fun simplifyOpaqueLeafSelfReferenceRoundTrip() {
+        // f(x) = SUM(x). Pure leaf with no surrounding arithmetic. Pass must clone
+        // the SUM into the output unchanged. Pins the basic round-trip path.
+        val rank1 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("just_sum") {
+            val x = param("x", rank1)
+            val s = op(OpKind.SUM, listOf(x), f32)
+            listOf(s)
+        }
+        val simplified = PhiCalculus.simplifyReturns(fn, engine)
+        val ops = simplified.body.filterIsInstance<DxirOp>()
+        assertEquals(1, ops.size)
+        assertEquals(OpKind.SUM, ops.single().op)
+    }
+
+    @Test
+    fun simplifyMixesArithmeticAndOpaqueLeaves() {
+        // f(x, y) = SUM(x) * 1 + 0 * y. The SUM is opaque; the 0*y branch is pure
+        // arithmetic Symja folds away; the MUL-by-1 around SUM collapses. Result
+        // should be a body containing only the cloned SUM op.
+        val rank1 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("mixed") {
+            val x = param("x", rank1)
+            val y = param("y", f32)
+            val s = op(OpKind.SUM, listOf(x), f32)
+            val one = const(1L, f32)
+            val zero = const(0L, f32)
+            val left = op(OpKind.MUL, listOf(s, one), f32)
+            val right = op(OpKind.MUL, listOf(zero, y), f32)
+            val out = op(OpKind.ADD, listOf(left, right), f32)
+            listOf(out)
+        }
+        val simplified = PhiCalculus.simplifyReturns(fn, engine)
+        val ops = simplified.body.filterIsInstance<DxirOp>()
+        assertEquals(1, ops.size, "expected just the SUM after Symja folds the rest; ops=${ops.map { it.op }}")
+        assertEquals(OpKind.SUM, ops.single().op)
+    }
+
+    @Test
+    fun simplifyHandlesSymmetricallyShapedDistinctLeaves() {
+        // f(x, y) = SUM(x) + SUM(y). DIFFERENT SUM nodes (different ids) → different
+        // sentinels. Symja can't fold `_leafA + _leafB` (different variables), so the
+        // body retains both SUMs and the ADD. This pins the "different leaves stay
+        // separate" semantics — important to avoid accidentally over-simplifying when
+        // two leaf subtrees happen to have the same shape but different operands.
+        val rank1 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("two_sums") {
+            val x = param("x", rank1)
+            val y = param("y", rank1)
+            val sx = op(OpKind.SUM, listOf(x), f32)
+            val sy = op(OpKind.SUM, listOf(y), f32)
+            val out = op(OpKind.ADD, listOf(sx, sy), f32)
+            listOf(out)
+        }
+        val simplified = PhiCalculus.simplifyReturns(fn, engine)
+        val ops = simplified.body.filterIsInstance<DxirOp>()
+        val sumCount = ops.count { it.op == OpKind.SUM }
+        val addCount = ops.count { it.op == OpKind.ADD }
+        assertEquals(2, sumCount, "both distinct SUMs survive; ops=${ops.map { it.op }}")
+        assertEquals(1, addCount, "the ADD(sumX, sumY) survives; ops=${ops.map { it.op }}")
     }
 }

@@ -39,6 +39,80 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.107 D.1i Phase 4 — opaque-leaf widening completes the multi-session arc 2026-04-25
+
+The final D.1i phase. Phase 1 (§0.4.103) shipped the scaffolding pass, Phase 2 (§0.4.104) widened constants, Phase 3 (§0.4.105) wired it into the IR pipeline, Phase 3b (§0.4.106) harnessed IR-size deltas. Phase 4 closes the multi-session arc by extending `simplifyReturns` to lift gradient bodies that contain non-arithmetic ops (SUM, MEAN, MATMUL, GATHER, EXP, LOG, SCATTER, …) — the bodies tensor gradients actually produce.
+
+**The mechanism** in [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt). Three private helpers:
+
+- `liftReturnWithLeaves(node, engine, leafMap)` — recurses through arithmetic ops (ADD/SUB/MUL/DIV/NEG/POW) calling `engine.add` / `engine.mul` / etc.; for everything else (DxirOp with non-arithmetic kind, DxirOpResult, etc.) registers a sentinel symbol `_simplify_leaf_<id>` in `leafMap` and returns `engine.variable(sentinel)`. The sentinel name is keyed on `node.id`, so shared subexpressions in the input get the same sentinel and Symja can fold them.
+- `registerOpaqueLeaf(node, engine, leafMap)` — single sentinel-creation hook; uses `putIfAbsent` so multiple references to the same node id share one sentinel.
+- `cloneOpaqueSubtree(src, builder, paramByName, cache)` — recursive cloner for the leaf subtrees Phase 4 needs to splice into the new function. Handles single-result `DxirOp` (no regions), `DxirConst`, `DxirParam` (resolved through `paramByName`), `DxirOpResult` (clone source op + reindex). Multi-result or region-bearing ops throw, which `simplifyReturns`'s outer try/catch catches to bail out unchanged.
+
+**`simplifyReturns` flow** (revised):
+
+1. Walk each return through `liftReturnWithLeaves`, populating `opaqueLeaves: Map<sentinel, originalDxirNode>`.
+2. Run `engine.simplify` on each lifted form.
+3. Build the new function via `DxirBuilder.function`. For each registered sentinel, check `engine.containsVariable(simplified, engine.variable(sentinel))` — if any return references it, clone the leaf subtree into the new function and add to `symbolMap`. Unreferenced leaves (e.g., a SUM eliminated by `MUL(SUM, 0) → 0`) leave no trace.
+4. Lower each simplified expression through `engine.lowerToDxir(symbolMap)`. The symbolMap now contains both per-param entries (by name) and per-leaf entries (by sentinel name).
+
+**Decisions worth flagging**:
+
+- **DCE is automatic via reference checking.** When Symja folds `_leaf * 0 → 0`, the simplified output contains no reference to `_leaf`. `containsVariable` returns false, so `cloneOpaqueSubtree` is never invoked for that leaf — the underlying SUM op never appears in the new function. This is the single most useful Phase-4 gain: gradient bodies that multiply by zero (common in IF-branch gradients where one side has no contribution) get the dead computation removed for free, including the underlying tensor op. The IR-size harness from §0.4.106 didn't capture this benefit because its primals were arithmetic-only; it would surface in a benchmark with a tensor gradient body once we have such a benchmark wired through the simplify gate.
+
+- **Sentinel names key on `node.id`, not structural equivalence.** Two SUMs with identical operand subtrees but different ids get different sentinels. Symja therefore can't fold `SUM(x) + SUM(x)` when the two SUMs are separate nodes — only when they share a single node (shared subexpression in the input). This is a deliberate trade-off: structural equivalence checking would require a CSE-like pass, which is outside `simplifyReturns`'s scope. The existing top-level CSE pass (§0.4.48) does that work upstream, so by the time `simplifyReturns` runs, structurally-identical subtrees should already be unified.
+
+- **Cloner narrower than `cloneNode`.** The existing C5/C6 path's `cloneNode` handles regions, multi-result ops, and DxirCall via more elaborate machinery (region-aware nodeMap, multiOut arrays). `cloneOpaqueSubtree` is intentionally narrower — gradient bodies post-reverse-transform never have regions or DxirCalls in the leaf subtrees we're cloning. If a future surface puts a region-bearing op (IF / WHILE) in a gradient body's leaf position, the cloner's `require(src.regions.isEmpty())` triggers and `simplifyReturns` bails out — a safer failure mode than producing a half-cloned function.
+
+- **Phase 4 does not introduce a new `SymbolicEngine` interface method.** All the opaque-leaf logic lives inside `PhiCalculus.simplifyReturns` via private helpers. The engine's `liftNode` is still called for the primitive cases (DxirParam, DxirConst). This keeps the protocol localised to the one caller that needs it, which means `liftNode` itself doesn't grow a "with-leaves" mode that other engines (a future custom CAS) would need to implement.
+
+**The Phase-1 bail-out test was repurposed.** §0.4.103's `simplifyReturnsBailsOutWhenLiftFails` asserted that a `f(x) = SUM(x)` body returned the original function unchanged. With Phase 4 lifting SUM as an opaque leaf, the test now passes through the opaque-leaf round-trip — same observable result (one SUM op in the output body), different mechanism. The test was renamed to `simplifyReturnsKeepsOpaqueLeafIntact` to reflect what it now exercises.
+
+**Phase 4 test surface** in [PhiCalculusSimplifyTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/PhiCalculusSimplifyTest.kt) (+6 tests):
+
+1. `simplifyCollapsesMulByOneAroundOpaqueLeaf` — `SUM(x) * 1 → SUM(x)`. Pin: arithmetic-around-leaf simplification fires; output body has only the cloned SUM.
+2. `simplifyEliminatesOpaqueLeafUnderMulByZero` — `SUM(x) * 0 → 0`. Pin: unused leaves are DCE'd via the reference-checking path; SUM does not appear in output.
+3. `simplifySharesOpaqueLeafAcrossDuplicateUses` — `SUM(x) + SUM(x)` (shared node) → `2 * SUM(x)`. Pin: same-id leaves get the same sentinel and Symja folds them.
+4. `simplifyOpaqueLeafSelfReferenceRoundTrip` — `f = SUM(x)` round-trips identity. Pin: bare-leaf case clones unchanged.
+5. `simplifyMixesArithmeticAndOpaqueLeaves` — `SUM(x) * 1 + 0 * y → SUM(x)`. Pin: end-to-end mix of opaque + arithmetic with multi-arm cancellation.
+6. `simplifyHandlesSymmetricallyShapedDistinctLeaves` — `SUM(x) + SUM(y)` (different nodes) survives unchanged. Pin: different-id leaves DON'T get folded — protects against accidental over-simplification of structurally-similar distinct subtrees.
+
+**Updated multi-session plan** for D.1i:
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| 1 | `simplifyReturns` scaffolding + arithmetic-only first cut | Shipped §0.4.103 |
+| 2 | Widen `liftNode` for fractional Float constants (`realLiteral`) | Shipped §0.4.104 |
+| 3 | Wire into `TlalocIrGenerationExtension` behind opt-in property | Shipped §0.4.105 |
+| 3b | IR-size delta harness with pinned pre/post numbers + numerical correctness | Shipped §0.4.106 |
+| 4 | Opaque-leaf handling for non-arithmetic gradient ops via sentinel substitution + leaf-subtree cloning | **Shipped this session** |
+
+**D.1i is now complete as a multi-session piece.** All four originally-planned phases shipped; the §0.4.102 register entry "**D.1i Symja `Simplify` on whole gradient expressions**" can now be moved from "Pending" to "Shipped" in the next register refresh.
+
+**Tests added** (+6 new):
+
+- `PhiCalculusSimplifyTest.simplifyCollapsesMulByOneAroundOpaqueLeaf`
+- `PhiCalculusSimplifyTest.simplifyEliminatesOpaqueLeafUnderMulByZero`
+- `PhiCalculusSimplifyTest.simplifySharesOpaqueLeafAcrossDuplicateUses`
+- `PhiCalculusSimplifyTest.simplifyOpaqueLeafSelfReferenceRoundTrip`
+- `PhiCalculusSimplifyTest.simplifyMixesArithmeticAndOpaqueLeaves`
+- `PhiCalculusSimplifyTest.simplifyHandlesSymmetricallyShapedDistinctLeaves`
+
+(Plus one renamed: `simplifyReturnsBailsOutWhenLiftFails` → `simplifyReturnsKeepsOpaqueLeafIntact`.)
+
+Full suite is green: **705 tests** (+6 over §0.4.106).
+
+**Recommended next pickup** (next /loop firing): D.1i is complete. The natural next D.1i-adjacent direction is benchmarking the `tlaloc.simplify.enabled=true` path on a tensor-gradient benchmark (Brachistochrone has SUM ops in its gradient body — Phase 4 should now handle those without bailing out). But that's a benchmark / measurement piece, not a coding piece, and may be more useful to hold until a tensor-gradient benchmark surfaces a concrete IR-size win that motivates further widening. The next register-refresh session can move D.1i to Shipped and reconsider the deferred items in §0.4.102's table with fresh eyes.
+
+**Definition-of-done for §0.4.107 — met**:
+- `liftReturnWithLeaves` + `registerOpaqueLeaf` + `cloneOpaqueSubtree` private helpers land ✓
+- `simplifyReturns` walks lift → simplify → conditionally-clone → lower with opaque-leaf protocol ✓
+- Reference-checking via `containsVariable` ensures unreferenced leaves are DCE'd ✓
+- Six Phase-4 tests cover the key behaviors (collapse, eliminate, shared-fold, round-trip, mix, distinct) ✓
+- Existing 14 simplify tests + the renamed bail-out test still green ✓
+- D.1i multi-session arc closed — all four planned phases shipped ✓
+- Full suite green at 705 tests (+6) ✓
+
 #### 0.4.106 D.1i Phase 3b — IR-size delta harness reveals the reverse rules already do most of the work 2026-04-25
 
 §0.4.105's "recommended next pickup" called for a benchmark harness that records pre/post `body.size` numbers for `simplifyReturns` running on representative gradient bodies. This session lands that harness in [PhiCalculusSimplifyIrSizeTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/PhiCalculusSimplifyIrSizeTest.kt) and reports an honest finding: **on the small straight-line scalar primals the existing pipeline produces, the simplify pass adds little or no IR-size benefit because the reverse rules in `Vjp.kt` already emit tightly-folded gradient bodies**.
