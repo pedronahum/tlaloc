@@ -428,6 +428,61 @@ operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core
     inner: Tracer<io.tlaloc.core.Rank1<C>>,
 ): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this / broadcastInner(inner)
 
+// §0.4.117 — rank-3 + rank-2 cross-rank broadcast on the leading (batch) axis.
+// `broadcastBatch(matrix)` lifts a rank-2 [B, C] tracer to a rank-3 [A, B, C]
+// tracer where every [a, :, :] slice equals the matrix. Records BROADCAST with
+// `broadcast_dimensions = [1, 2]`: input dim 0 → output dim 1, input dim 1 →
+// output dim 2; output dim 0 is broadcast-inserted. §0.4.84's axis-aware
+// BroadcastRule reverses it as `SUM(upstream, reduction_dims = [0])` →
+// rank-2 grad back to the matrix input. Mirrors §0.4.116's `broadcastInner`
+// pattern, broadcasting over the outer axis instead of the inner.
+
+fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.broadcastBatch(
+    matrix: Tracer<Rank2<B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> {
+    require(dims[1] == matrix.dims[0]) {
+        "broadcastBatch: matrix row count ${matrix.dims[0]} doesn't match tensor dim 1 ${dims[1]}"
+    }
+    require(dims[2] == matrix.dims[1]) {
+        "broadcastBatch: matrix col count ${matrix.dims[1]} doesn't match tensor dim 2 ${dims[2]}"
+    }
+    val tape = sameTape(this, matrix)
+    val a = dims[0]
+    val b = dims[1]
+    val c = dims[2]
+    val matrixValues = matrix.entry.value
+    val sliceSize = b * c
+    val broadcasted = FloatArray(a * sliceSize) { idx -> matrixValues[idx % sliceSize] }
+    val e = tape.op(
+        OpKind.BROADCAST,
+        intArrayOf(matrix.id),
+        dims.copyOf(),
+        broadcasted,
+        attrs = mapOf("broadcast_dimensions" to listOf(1, 2)),
+    )
+    return Tracer<io.tlaloc.core.Rank3<A, B, C>>(tape, e)
+}
+
+@kotlin.jvm.JvmName("plusRank2BatchTracerRank3")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.plus(
+    matrix: Tracer<Rank2<B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this + broadcastBatch(matrix)
+
+@kotlin.jvm.JvmName("minusRank2BatchTracerRank3")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.minus(
+    matrix: Tracer<Rank2<B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this - broadcastBatch(matrix)
+
+@kotlin.jvm.JvmName("timesRank2BatchTracerRank3")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.times(
+    matrix: Tracer<Rank2<B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this * broadcastBatch(matrix)
+
+@kotlin.jvm.JvmName("divRank2BatchTracerRank3")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A, B, C>>.div(
+    matrix: Tracer<Rank2<B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = this / broadcastBatch(matrix)
+
 // §0.4.91 — reverse-order scalar-to-rank-1 broadcast operators. `scalar op row`
 // where scalar is LHS. Complements §0.4.77's rank-1-on-LHS overloads. Matters
 // for non-commutative ops (minus, div). Each overload uses `broadcastScalar`

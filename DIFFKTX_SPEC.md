@@ -39,6 +39,79 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.117 Rank-3 + rank-2 cross-rank broadcast on the batch axis 2026-04-25
+
+The symmetric follow-up to §0.4.116. Where §0.4.116 broadcast a rank-1 [C] across two leading axes (the inner-axis case), this session broadcasts a rank-2 [B, C] across one leading axis (the batch case). With both shipped, the §0.4.108 deferred entry "Rank-3↔rank-1/rank-2 cross-rank broadcast" is fully closed; the entry can be removed from the deferred table at the next register refresh.
+
+**The mechanism** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt). One new builder + four operators, mirroring §0.4.116:
+
+```kotlin
+fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<Rank3<A, B, C>>.broadcastBatch(
+    matrix: Tracer<Rank2<B, C>>,
+): Tracer<Rank3<A, B, C>> {
+    require(dims[1] == matrix.dims[0]) { ... }
+    require(dims[2] == matrix.dims[1]) { ... }
+    val a = dims[0]; val b = dims[1]; val c = dims[2]
+    val matrixValues = matrix.entry.value
+    val sliceSize = b * c
+    val broadcasted = FloatArray(a * sliceSize) { idx -> matrixValues[idx % sliceSize] }
+    val e = tape.op(
+        OpKind.BROADCAST,
+        intArrayOf(matrix.id),
+        dims.copyOf(),
+        broadcasted,
+        attrs = mapOf("broadcast_dimensions" to listOf(1, 2)),
+    )
+    return Tracer(tape, e)
+}
+
+@JvmName("plusRank2BatchTracerRank3") operator fun ... = this + broadcastBatch(matrix)
+@JvmName("minusRank2BatchTracerRank3") operator fun ... = this - broadcastBatch(matrix)
+@JvmName("timesRank2BatchTracerRank3") operator fun ... = this * broadcastBatch(matrix)
+@JvmName("divRank2BatchTracerRank3") operator fun ... = this / broadcastBatch(matrix)
+```
+
+**Decisions worth flagging**:
+
+- **`broadcast_dimensions = [1, 2]` is the spec contract.** Input dim 0 (the rank-2's row axis B) maps to output dim 1; input dim 1 (the rank-2's col axis C) maps to output dim 2; output dim 0 is broadcast-inserted. §0.4.84's BroadcastRule computes `reduce_dims = [0]` automatically, so the gradient back to `matrix` is `SUM(upstream, reduction_dims=[0])` — the partial sum across the batch axis. The interpreter's SUM arm handles arbitrary `reduction_dims` for any rank; no interpreter changes.
+
+- **Phantom-type alignment.** `Tracer<Rank2<B, C>>` constrains the matrix's two phantom-type axes to match the rank-3 receiver's middle and inner axes. So `Tracer<Rank3<A, B, C>>.plus(Tracer<Rank2<B, C>>)` works only when both shape atoms align — Kotlin's generic constraint catches mismatches at compile time. Compare with §0.4.116's inner-axis case, which constrains only the inner axis (`Rank1<C>` matching `Rank3<*, *, C>`).
+
+- **`@JvmName` disambiguates against §0.4.97's scalar overloads AND §0.4.116's inner-axis overloads.** After JVM erasure, all three `Tracer<Rank3<A,B,C>>.plus(...)` overloads collapse to `Tracer.plus(Tracer): Tracer`. The three coexist via:
+  - `@JvmName("plusScalarTracerRank3")` — §0.4.97's rank-3 + scalar.
+  - `@JvmName("plusRank1InnerTracerRank3")` — §0.4.116's rank-3 + rank-1 inner.
+  - `@JvmName("plusRank2BatchTracerRank3")` — this session's rank-3 + rank-2 batch.
+  Source-level overload resolution picks based on argument's compile-time shape type.
+
+- **No collision with hypothetical "rank-3 + rank-2 outer" overloads.** A future cross-rank broadcast for `Rank3<A, B, C>` + `Rank2<A, B>` (broadcasting the outer-pair matrix across the inner axis C) would produce JVM-erasure collisions at the source level — Kotlin can't pick between `Rank2<B, C>` and `Rank2<A, B>` overloads when all three atoms collapse to `Sym`. That direction will need a named builder (mirroring §0.4.87's `broadcastCol` decision); not shipping in this session.
+
+- **Closes the `Rank-3↔rank-1/rank-2 cross-rank broadcast` deferred entry.** With both inner-axis (§0.4.116) and batch-axis (§0.4.117) shipped, the natural cross-rank surface a user reaches for is covered. Outer-axis-only broadcasts (a rank-3 + rank-1 matching the leading axis A; a rank-3 + rank-2 matching axes A,B) remain less common and naturally require named builders due to the phantom-type ambiguity at `Sym`-collapsed call sites.
+
+**Tests added** (+4 new):
+
+- `GradTest.rank3PlusRank2BatchGivesBothGradients` — `(x + m).sum()` with x = 2×2×2 [1..8], m = 2×2 [10, 20, 30, 40]. Forward = 236, grad_x = ones, grad_m = 2 per element (one per batch).
+- `GradTest.rank3MinusRank2BatchFlipsGradSign` — non-commutative pin: `(x - m).sum()` produces grad_m = -2 per element (sign-flipped).
+- `GradTest.rank3TimesRank2BatchScalesPerSlice` — `(x * m).sum()` with x = ones, m = [2, 3, 4, 5]. grad_x replicates m across both batches.
+- `GradTest.rank3BatchBroadcastComposesWithInnerBroadcast` — `((x + m) * 2f).sum()`. Cross-rank batch + Float literal in one chain. Forward = 472, grad_x = 2 per element, grad_m = 4 per element.
+
+Full suite is green: **746 tests** (+4 over §0.4.116).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Region-internal DCE/CSE** — extend §0.4.48's top-level CSE into IF/WHILE region bodies. PhiCalculus piece.
+2. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE; carve as scaffolding analogous to §0.4.103.
+3. **Multi-result COARSENED** — extend §0.4.31. PhiCalculus piece.
+4. **`gradient_body` with nested regions** — extend the C.3b.3a SOI-coarsening surface.
+
+**Definition-of-done for §0.4.117 — met**:
+- `broadcastBatch` builder + four operators land on `Tracer<Rank3<A,B,C>>` ✓
+- `@JvmName` disambiguates against §0.4.97 (scalar) and §0.4.116 (rank-1 inner) overloads ✓
+- §0.4.84's axis-aware BroadcastRule handles the gradient unchanged ✓
+- Four tests pin forward / sign-flip / multiplicative / composition ✓
+- Composition test mixes rank-2 batch + Float literal + SUM in one expression ✓
+- Cross-rank rank-3 deferred entry now fully closed ✓
+- Full suite stays green at 746 tests (+4) ✓
+
 #### 0.4.116 Rank-3 + rank-1 cross-rank broadcast on the inner axis 2026-04-25
 
 §0.4.108's deferred entry "Tracer surface | Rank-3↔rank-1/rank-2 cross-rank broadcast — rank-3-scalar covered §0.4.97/§0.4.98; cross-rank deferred" gets its first dent. This session lands the rank-3 + rank-1 inner-axis form: a rank-3 [A, B, C] tensor combined with a rank-1 [C] vector that broadcasts over the leading two axes. Mirrors §0.4.85's row-broadcast pattern, generalised one rank up.
