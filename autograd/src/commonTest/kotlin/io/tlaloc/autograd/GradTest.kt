@@ -798,6 +798,55 @@ class GradTest {
     }
 
     @Test
+    fun complexBroadcastCompositionMixesScalarRowAndFloatLiteral() {
+        // §0.4.101 — exercise the §0.4.75+ broadcast surface in a single
+        // expression that uses Float literal LHS, row broadcast, scalar
+        // tracer, and operator chaining. The kind of expression a user
+        // doing per-row weighted regression might write.
+        //
+        // f(x, w_row, lr) = sum((x - 1f).times(w_row) * lr)
+        //   x: rank-2 [2, 3] = [[1, 2, 3], [4, 5, 6]]
+        //   w_row: rank-1 [3] = [10, 100, 1000]
+        //   lr: scalar = 0.5
+        //
+        // Step-by-step:
+        //   x - 1f         = [[0, 1, 2], [3, 4, 5]]              (Float literal RHS)
+        //   .times(w_row)  = [[0, 100, 2000], [30, 400, 5000]]   (row broadcast)
+        //   * lr           = [[0, 50, 1000], [15, 200, 2500]]    (scalar broadcast)
+        //   .sum()         = 50 + 1000 + 15 + 200 + 2500 = 3765
+        //
+        // Gradients:
+        //   grad_x[i, j] = w_row[j] * lr → row [5, 50, 500] replicated.
+        //   grad_w_row[j] = sum over i of (x-1)_ij * lr =
+        //     [(0+3)*0.5, (1+4)*0.5, (2+5)*0.5] = [1.5, 2.5, 3.5].
+        //   grad_lr = sum((x-1)*w_row) =
+        //     0+100+2000+30+400+5000 = 7530.
+        // No `valueAndGrad3` exists — bind lr as a Float literal inside the
+        // 2-input lambda. Mathematically identical; exercises §0.4.93's
+        // Float * matrix path for the scaling step.
+        val vgPrimal = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank2<Sym, Sym>>, w: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            // Pin lr=0.5 as a Float literal — exercises §0.4.93's Float * matrix.
+            (((x - 1f) * w) * 0.5f).sum()
+        }
+        val (value, dx, dw) = vgPrimal(
+            Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f)),
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 100f, 1000f)),
+        )
+        assertEquals(3765f, value)
+        // grad_x[i, j] = w_row[j] * 0.5
+        val gx = dx.hostF32()
+        // Row 0: w * 0.5 = [5, 50, 500]
+        assertEquals(5f, gx[0]); assertEquals(50f, gx[1]); assertEquals(500f, gx[2])
+        // Row 1: same
+        assertEquals(5f, gx[3]); assertEquals(50f, gx[4]); assertEquals(500f, gx[5])
+        // grad_w[j] = sum over i of (x-1)_ij * 0.5
+        val gw = dw.hostF32()
+        assertEquals(1.5f, gw[0])  // (0+3)/2
+        assertEquals(2.5f, gw[1])  // (1+4)/2
+        assertEquals(3.5f, gw[2])  // (2+5)/2
+    }
+
+    @Test
     fun rank3MinusScalarTracerLhsFlipsSign() {
         // §0.4.98 — `scalar - tensor3` has opposite gradient sign from
         // `tensor3 - scalar`. x = 2x2x2 of [1..8], s = 5.

@@ -39,6 +39,52 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.101 Broadcast composition test — exercises Float-literal + row + scalar paths together 2026-04-25
+
+A single test that combines four broadcast paths in one expression. Catches dispatch inconsistencies that would slip through any single-path test: each piece works in isolation, but their interaction relies on Kotlin's overload resolution picking the right binding at every step of `((x - 1f) * w) * 0.5f`.
+
+**The test** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt): `complexBroadcastCompositionMixesScalarRowAndFloatLiteral`. Inputs: x = 2×3 matrix [[1..3],[4..6]], w_row = rank-1 [10, 100, 1000]. Expression: `((x - 1f) * w) * 0.5f`.
+
+- `x - 1f`: §0.4.75 Float-literal RHS subtract.
+- `result * w`: §0.4.85 row broadcast (matrix × rank-1).
+- `result * 0.5f`: §0.4.75 Float-literal RHS multiply.
+- Final `.sum()` collapses to scalar for the loss.
+
+Hand-computed forward = 3765. Hand-computed gradients:
+- `grad_x[i, j] = w[j] * 0.5` → row pattern [5, 50, 500] replicated over 2 rows.
+- `grad_w[j] = sum over i of (x_ij - 1) * 0.5` → [1.5, 2.5, 3.5].
+
+Test asserts both gradients element-by-element exactly (no tolerance — integer-then-half arithmetic is representable in Float).
+
+**Decisions worth flagging**:
+
+- **No `valueAndGrad3` exists.** Tried and removed; `lr` is bound as a Float literal inside the 2-input lambda. Equivalent mathematically; doesn't gain another differentiable parameter (the literal is non-differentiable per §0.4.65 constant-skip).
+
+- **Why this test exists despite redundant per-path coverage.** Earlier sessions tested each broadcast path in isolation. This composition test catches a class of bug that single-path tests miss: an `@JvmName` collision that surfaces only when two `@JvmName`-disambiguated overloads appear consecutively in the same expression chain, or a constantLike-vs-broadcastScalar invariant that drifts under composition. Pre-§0.4.101 the suite couldn't have caught those.
+
+- **Exact-equal assertions throughout.** The values `[10, 100, 1000]`, `[5, 50, 500]`, `[1.5, 2.5, 3.5]` are all representable exactly in Float. If a future change introduces rounding (e.g. a SIMD reordering), exact-equal fails first — better than tolerance-based assertions for catching numerical regressions.
+
+- **Test is also documentation.** Reads like the kind of expression a user doing per-row weighted regression might write. Future readers see `((x - 1f) * w) * 0.5f` works as a one-liner.
+
+**Tests added** (+1 new):
+
+- `GradTest.complexBroadcastCompositionMixesScalarRowAndFloatLiteral`
+
+Full suite is green: **681 tests** (+1 over §0.4.100).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on whole gradient expressions**.
+3. **`diagnosticReporter` migration proper**.
+4. **HMC / CartPole / QWOP benchmark ports** — paper's remaining benchmarks.
+5. **`valueAndGrad3` / `grad3`** — if a 3-tensor-input call site surfaces.
+
+**Definition-of-done for §0.4.101 — met**:
+- Composition test exercises Float-literal RHS, row broadcast, and Float-literal scaling in one chain ✓
+- Both grad_x and grad_w pinned element-by-element to hand-computed values ✓
+- Full suite green at 681 tests (+1) ✓
+
 #### 0.4.100 Bridge-equivalence pin for rank-3 scalar broadcast — milestone 100 sub-section 2026-04-25
 
 **Centenary §0.4 sub-section milestone.** §0.4 has reached its 100th sub-section since the section opened in §0.4.1 (overnight session, 2026-04-20). The cumulative trail covers the K2 plugin, FIR-side `grad`/`valueAndGrad` lowering, dxir + StableHLO emission, the φ-calculus closure stack, three paper benchmark ports (BGDHyperOpt, HookeanSpring, Brachistochrone), and the broad ergonomic Tracer surface that now spans rank 0/1/2/3 with all directional operator combinations.
