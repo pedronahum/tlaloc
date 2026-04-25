@@ -39,6 +39,85 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.122 Out-of-scope register refresh — 7 items shipped since §0.4.108 2026-04-25
+
+§0.4.108 introduced the second register snapshot pattern; §0.4.122 is the third. Thirteen sub-sections (§0.4.109–§0.4.121) shipped between the two refreshes, closing seven items from the deferred table and partially closing one. This refresh updates the deferred snapshot accordingly.
+
+**Refreshed register (as of §0.4.121)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan. |
+| Tensor ops | Multi-dim GATHER/SCATTER (rank-3+) | Rank-1 covered §0.4.41–§0.4.42; rank-2 covered §0.4.111 (GATHER) + §0.4.114 (SCATTER); rank-3+ pending. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Synthesis-side gated on rank-1-only fast path; multi-session widening. Tracer-surface side covered. |
+| Tensor ops | Batched MATMUL | Rank-2 only at emitter + synthesis. |
+| StableHLO emitter | Scatter-into-zeros pattern | Common case from `:autograd`'s SCATTER bridge; needs an arm. (SCATTER_ADD widening shipped §0.4.112; this is a separate optimisation form.) |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Region-internal CSE for WHILE | Phase 1 (IF) and Phase 2 (COARSENED nested fns) shipped §0.4.118–§0.4.119; WHILE remains deferred (rarely survives SCT). |
+| PhiCalculus | Multi-result IF / multi-back-edge WHILE | Single-back-edge covered. |
+| PhiCalculus | Multi-result COARSENED | Single-result covered §0.4.31; multi-result needs `gradAccum` per-(id, index) keying. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | Case-by-case for unusual nests. |
+| Control flow | Multi-block regions | Single-block today. |
+| Closure work | **D.3i closed-form closure** for LAND-composed WHILE | Pending; paper-faithful break-bearing WHILE. |
+| Infrastructure | `:benchmarks` Gradle module | Perf probes live in-test. |
+| Benchmark ports | **HMC / CartPole / QWOP** | Paper's three remaining benchmarks; multi-session each. |
+| Tracer surface | `valueAndGrad3` / `grad3` (3-tensor inputs) | Two-input variants cover §0.4.81/§0.4.82's needs. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.108 and §0.4.121** (13 sub-sections):
+
+- **D.1i Symja Simplify** — already removed in §0.4.108 (referenced for completeness).
+- **PhiCalculus | Cache pruning** — shipped §0.4.109. CAS-version-mismatch + 30-day age pruning at `DiskCoarseningCache` instantiation.
+- **API completeness | Long literal LHS/RHS broadcast overloads** — shipped §0.4.110. Eight new operators close the literal-broadcast matrix.
+- **Tensor ops | Multi-dim GATHER (rank-2 read)** — partially shipped §0.4.111. Rank-2 row-indexing in DxirInterpreter + matching SCATTER_ADD gradient path.
+- **StableHLO emitter | SCATTER_ADD widening** — shipped §0.4.112. Substrate-shape rank-1 + rank-2 lowering through `stablehlo-translate`.
+- **StableHLO emitter | substrate-shape GATHER** — shipped §0.4.113. Matches the IR-substrate's no-attrs scalar-idx form to canonical stablehlo.gather attrs.
+- **Tensor ops | Multi-dim SCATTER (rank-2 write)** — partially shipped §0.4.114. Rank-2 row-replace in DxirInterpreter + matching emitter path.
+- **PhiCalculus | Recursive `splitOnReuses`** — shipped §0.4.115. Still-large fragments now recurse instead of falling back as large-leaf fallbacks.
+- **Tracer surface | Rank-3↔rank-1 cross-rank broadcast (inner axis)** — shipped §0.4.116. `broadcastInner` + 4 operators with `broadcast_dimensions = [2]`.
+- **Tracer surface | Rank-3↔rank-2 cross-rank broadcast (batch axis)** — shipped §0.4.117. `broadcastBatch` + 4 operators with `broadcast_dimensions = [1, 2]`. With §0.4.116 + §0.4.117, the cross-rank rank-3 deferred entry is fully closed.
+- **PhiCalculus | Region-internal CSE — Phase 1 (IF)** — shipped §0.4.118. `applyCSE` recurses into IF region bodies via `cseRegion` + `cseNode` factoring; sibling-branch scope isolation via map copies.
+- **PhiCalculus | Region-internal CSE — Phase 2 (COARSENED nested fns)** — shipped §0.4.119. CSE the `primal_body` and `gradient_body` DxirFunctions stored in COARSENED's attrs.
+- **PhiCalculus | gradient_body with nested IF** — shipped §0.4.120. `handleCoarsenedAdjoint` accepts top-level IF inside gradient_body via four new clone helpers.
+- **PhiCalculus | gradient_body with nested IF inside IF arm** — shipped §0.4.121. Recursive IF nesting inside another IF's arm.
+
+**Decisions worth flagging**:
+
+- **Most truly tractable single-session items have been shipped.** §0.4.109–§0.4.121 closed nearly every well-bounded deferred item. The remaining ones are either multi-session arcs (D.3i, HMC port, diagnosticReporter migration), structural infrastructure ones (`:benchmarks` Gradle module, sub-projecting), or speculative ones (cross-framework baselines, F64 tape, valueAndGrad3, Rank-4+ constructors — all gated on use cases that haven't surfaced).
+
+- **The next /loop iteration should pick a multi-session arc and carve a real Phase 1.** D.3i has been the headline candidate across the last 6+ refreshes. A real Phase 1 (per the §0.4.103 model) would be: read the paper §6 closure rules + `SoiIdentification.kt`'s WHILE handling, then ship a structural detector for the LAND(cond, NOT(break_cond)) pattern with at least one round-trip test that pins the detection (no behaviour change yet — but a real, not placeholder, detection function future phases will use).
+
+- **WHILE-related items remain a coherent cluster.** "Region-internal CSE for WHILE", "WHILE inside gradient_body", and "D.3i closed-form closure" are all about WHILE in different contexts. A future session that opens the D.3i arc could naturally close the first two as side-effects, since they all share the same recursive-handling pattern.
+
+- **The register's "still deferred" count went from ~28 (§0.4.108) to ~22 (§0.4.122).** Despite the 13 shipped sub-sections, several items have grown sub-bullets (e.g., Multi-dim GATHER/SCATTER now distinguishes rank-2 done / rank-3+ pending). The deferred count is converging slowly on the multi-session core.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **754 tests** (unchanged from §0.4.121).
+
+**Recommended next pickup** (these are the items that justify multi-session focus):
+
+1. **D.3i Phase 1 — LAND-composed break-bearing WHILE detector**. The most-impactful remaining piece; would naturally close several adjacent items.
+2. **Multi-result COARSENED**. Single-session-tractable if scoped to handleCoarsenedAdjoint changes only (deferring the primal-side widening).
+3. **`:benchmarks` Gradle module — extract one perf probe**. Structural; cheap if scoped tight.
+4. **HMC benchmark port — Phase 1**. Hardest control-flow benchmark; multi-session arc opener.
+
+Smaller items still on the table that could fire individually under a /loop cadence: rank-3+ GATHER/SCATTER widening, Scatter-into-zeros pattern arm, `valueAndGrad3` if a 3-tensor user surfaces. F64 tape and Rank-4+ constructors stay gated on use cases.
+
+**Definition-of-done for §0.4.122 — met**:
+- Deferred table refreshed to remove items shipped §0.4.109–§0.4.121 ✓
+- "Newly shipped" subsection points at each section that closed an item ✓
+- Recommended next pickup list updated to reflect the new tractable surface ✓
+- Register stays tabular per §0.4.108's organising principle ✓
+- Full suite stays green at 754 tests ✓
+
 #### 0.4.121 Nested IF inside IF arms in gradient_body 2026-04-25
 
 §0.4.120's recommended-next called this out as a "trivial follow-up": `cloneGradBlockNode` rejected region-bearing ops inside an IF arm with `require(!n.hasRegions)`. This session lifts that restriction for IF specifically, mirroring the §0.4.120 outer-IF support one level down. With both shipped, gradient bodies can now contain arbitrarily nested IFs.
