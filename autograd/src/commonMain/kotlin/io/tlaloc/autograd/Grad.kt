@@ -53,6 +53,47 @@ fun <S1 : Shape, S2 : Shape> grad2(
     return { a, b -> val t = vg(a, b); t.second to t.third }
 }
 
+/**
+ * §0.4.134 — value-and-gradient for a 3-tensor function `f: (S1, S2, S3) → scalar`.
+ * Returns a 4-tuple `(value, dA, dB, dC)` via [Quadruple] — Kotlin's stdlib stops
+ * at [Triple], so the 3-input variant introduces a small named 4-tuple parallel to
+ * how [valueAndGrad2] reused stdlib [Triple] for its 3-tuple result. Mechanics
+ * mirror [valueAndGrad2]: trace each input as a tape leaf, evaluate the lambda,
+ * require a scalar output, run reverse mode with seed `1f`, and unpack the
+ * gradients per leaf.
+ */
+fun <S1 : Shape, S2 : Shape, S3 : Shape> valueAndGrad3(
+    f: (Tracer<S1>, Tracer<S2>, Tracer<S3>) -> Tracer<ScalarShape>,
+): (DTensor<S1, F32>, DTensor<S2, F32>, DTensor<S3, F32>) -> Quadruple<Float, DTensor<S1, F32>, DTensor<S2, F32>, DTensor<S3, F32>> =
+    { a, b, c ->
+        val tape = Tape()
+        val ta = tape.traceLeaf<S1>(a)
+        val tb = tape.traceLeaf<S2>(b)
+        val tc = tape.traceLeaf<S3>(c)
+        val out = f(ta, tb, tc)
+        require(out.rank == 0) { "valueAndGrad3 expects scalar output, got rank ${out.rank}" }
+        val value = out.entry.value[0]
+        val grads = backward(tape, out.id, floatArrayOf(1f))
+        Quadruple(
+            value,
+            gradTensor<S1>(tape, grads, ta.id),
+            gradTensor<S2>(tape, grads, tb.id),
+            gradTensor<S3>(tape, grads, tc.id),
+        )
+    }
+
+/**
+ * §0.4.134 — gradient-only convenience for a 3-tensor scalar-valued function.
+ * Returns a [Triple] of the per-input gradients (drops the primal value). For the
+ * primal value alongside the gradients use [valueAndGrad3].
+ */
+fun <S1 : Shape, S2 : Shape, S3 : Shape> grad3(
+    f: (Tracer<S1>, Tracer<S2>, Tracer<S3>) -> Tracer<ScalarShape>,
+): (DTensor<S1, F32>, DTensor<S2, F32>, DTensor<S3, F32>) -> Triple<DTensor<S1, F32>, DTensor<S2, F32>, DTensor<S3, F32>> {
+    val vg = valueAndGrad3(f)
+    return { a, b, c -> val q = vg(a, b, c); Triple(q.second, q.third, q.fourth) }
+}
+
 // §0.4.81 — (DTensor, Float) convenience overloads. Internally wrap the Float
 // scalar as a `Tensors.f32Scalar(f)`-style DTensor, route through the existing
 // `valueAndGrad2` / `grad2`, and unwrap the scalar gradient back to Float at
@@ -126,4 +167,18 @@ fun gradWithScalars(
 ): (Float, Float) -> Pair<Float, Float> {
     val vg = valueAndGradWithScalars(f)
     return { a, b -> val t = vg(a, b); t.second to t.third }
+}
+
+/**
+ * §0.4.134 — generic 4-tuple. Kotlin's stdlib stops at [Triple]; [valueAndGrad3]
+ * needs a 4-slot return type for `(value, dA, dB, dC)`. Equivalent to [Pair]
+ * and [Triple] in shape — destructurable, and componentN-returning.
+ */
+data class Quadruple<out A, out B, out C, out D>(
+    val first: A,
+    val second: B,
+    val third: C,
+    val fourth: D,
+) {
+    override fun toString(): String = "($first, $second, $third, $fourth)"
 }

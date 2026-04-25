@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.134 `valueAndGrad3` / `grad3` Tracer surface for 3-tensor scalar functions 2026-04-25
+
+§0.4.122's deferred-register listed `valueAndGrad3` / `grad3` as "gated on a 3-tensor user". The user-facing pattern keeps surfacing in test code that wires up three differentiable inputs through a workaround (manually building one input as a Triple, or routing through `valueAndGrad2` with a paired tensor) — so this session ships the natural 3-tensor extension. Mechanics mirror §0.4.81's `valueAndGrad2` exactly: trace each input as a tape leaf, evaluate the lambda, require a scalar output, run reverse mode with seed `1f`, and unpack the gradients per leaf. Kotlin's stdlib stops at [Triple], so a small generic [Quadruple] data class lands alongside.
+
+**The mechanism** in [Grad.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Grad.kt):
+
+```kotlin
+fun <S1 : Shape, S2 : Shape, S3 : Shape> valueAndGrad3(
+    f: (Tracer<S1>, Tracer<S2>, Tracer<S3>) -> Tracer<ScalarShape>,
+): (DTensor<S1, F32>, DTensor<S2, F32>, DTensor<S3, F32>) ->
+    Quadruple<Float, DTensor<S1, F32>, DTensor<S2, F32>, DTensor<S3, F32>> = …
+
+fun <S1 : Shape, S2 : Shape, S3 : Shape> grad3(…) :
+    (…) -> Triple<DTensor<S1, F32>, DTensor<S2, F32>, DTensor<S3, F32>> = …
+
+data class Quadruple<out A, out B, out C, out D>(
+    val first: A, val second: B, val third: C, val fourth: D,
+)
+```
+
+`grad3` reuses [Triple] for the gradient-only return (3 inputs → 3 gradients fits a stdlib triple). `valueAndGrad3`'s "value + 3 gradients" needs 4 slots; `Quadruple` covers it. `valueAndGrad3` reuses `gradTensor` (the existing private helper at [Grad.kt:10](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Grad.kt#L10)) to unpack each gradient.
+
+**Decisions worth flagging**:
+
+- **`Quadruple` is a generic public data class.** A domain-specific `Grad3Result<S1, S2, S3>` would have been narrower but reads less naturally — destructuring with named accessors (`out.first`, `out.second`, …) parallels [Pair] / [Triple] conventions and keeps the API surface unsurprising. Future 4-slot returns elsewhere in the codebase can reuse it. The loop charter's "no new public API surfaces unless required" is satisfied here: the spec entry explicitly lists `valueAndGrad3` / `grad3`, and `Quadruple` is the minimal data structure that supports them.
+
+- **`grad3` returns Triple, not Quadruple.** Keeps the gradient-only return shape consistent with how `grad2` strips the value via `Pair`. The single-vs-multiple-tuple-class split is unfortunate ergonomically but matches what the stdlib already imposes — three values fit Triple cleanly, no need to inflate to Quadruple just for symmetry.
+
+- **No mixed-type variants like `valueAndGradWithThreeScalars`.** The `valueAndGradWithScalar` / `valueAndGradWithScalars` family at [Grad.kt:75-129](autograd/src/commonMain/kotlin/io/tlaloc/autograd/Grad.kt#L75-L129) ships ergonomic Float-input variants for 1-tensor-plus-scalar and 2-scalar combos. The 3-tensor case can mix ranks freely (the cross-rank test pins `Rank2 + Rank2 + ScalarShape`), so a Float-only variant would just duplicate functionality. Skip until the use case demands it.
+
+- **Loop charter's "cross-rank or composition test" requirement: covered.** The cross-rank test (`valueAndGrad3CrossRankMatrixVectorScalarInputs`) pins the realistic case of mixing Rank2/Rank2/Scalar through a `(W matmul x).sum() * c` chain — exactly the composition pattern §0.4.101 modeled.
+
+- **Reuse-across-calls test pins tape-state isolation.** Each call to the returned function builds a fresh `Tape()` (matching `valueAndGrad2`'s implementation). The test verifies two distinct invocations with different inputs produce independent results — guards against any future regression where state leaked between calls. Same shape as the §0.4.83-era reuse-pin tests.
+
+**Tests added** (+5 new) in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+- `GradTest.valueAndGrad3OnPureScalarTernarySumOfProducts` — `f(a, b, c) = a*b + c`. Pin: `f(2,3,5) = 11`; gradients `(b, a, 1) = (3, 2, 1)`.
+- `GradTest.grad3DropsValueAndReturnsTriple` — same `f` but via `grad3`. Pin: returns `Triple(dA, dB, dC) = (3, 2, 1)`.
+- `GradTest.valueAndGrad3CrossRankMatrixVectorScalarInputs` — `f(W, x, c) = sum(W matmul x) * c` with Rank2 / Rank2 / ScalarShape inputs. Pin: `f = 5`; `dW = 0.5*ones(2,2)`; `dx = [2, 3]`; `dc = 10`. Cross-rank composition pin per the loop charter.
+- `GradTest.valueAndGrad3ReuseAcrossCallsHasNoTapeBleed` — `f(a, b, c) = a*b*c` called twice with different inputs. Pin: each call independently produces the correct value + gradients; no tape state bleeds between calls.
+- `GradTest.valueAndGrad3RejectsNonScalarOutput` — lambda returns a rank-1 tensor (cast through `as` to bypass type checking). Pin: throws `IllegalArgumentException` with the contract message.
+
+Full suite is green: **804 tests** (+5 over §0.4.133).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending. Highest-impact remaining item; would unblock end-to-end gradient pins for §0.4.128's LoopInvariant rewrite.
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+3. **Multi-result COARSENED**.
+4. **Batched MATMUL at the interpreter** — emitter supports batching/contracting attrs already; interpreter still rank-2.
+5. **`:benchmarks` Gradle module**.
+
+**Definition-of-done for §0.4.134 — met**:
+- `valueAndGrad3` traces 3 inputs and returns a `Quadruple(value, dA, dB, dC)` ✓
+- `grad3` returns a `Triple(dA, dB, dC)` (drops the primal value) ✓
+- `Quadruple<A, B, C, D>` ships as a small public data class to support the 4-slot return ✓
+- 5 new tests pin numerical correctness, cross-rank composition, reuse, and contract violations ✓
+- No mixed-type variants like `valueAndGradWithThreeScalars` (deferred to use case) ✓
+- Full suite stays green at 804 tests (+5) ✓
+
 #### 0.4.133 Scatter-into-zeros peephole in the StableHLO emitter 2026-04-25
 
 §0.4.122's deferred-register listed a "Scatter-into-zeros pattern" entry under the StableHLO emitter — the common case from `:autograd`'s SCATTER bridge that needed an arm. This session ships the arm: a one-paragraph peephole in `emitScatterAdd` that recognises `BROADCAST(const(0))` as the base and elides the `stablehlo.add` from the inner reducer block (since `0 + x = x`). The peephole's effect is purely structural — the lowered MLIR no longer carries a dead `cur` SSA value plus an `add`-then-return pair; it emits a single `stablehlo.return upd` instead, matching the SCATTER (replace) substrate's body shape.

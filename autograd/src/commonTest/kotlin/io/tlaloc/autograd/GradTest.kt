@@ -1719,4 +1719,105 @@ class GradTest {
         assertEquals(16f, value, "x=0.5 · 2^5 = 16")
         assertEquals(32f, dx.hostF32()[0], "df/dx = 2^5 = 32")
     }
+
+    // §0.4.134 — `valueAndGrad3` / `grad3` for 3-tensor scalar-valued functions.
+
+    @Test
+    fun valueAndGrad3OnPureScalarTernarySumOfProducts() {
+        // f(a, b, c) = a*b + c. Gradients: df/da = b, df/db = a, df/dc = 1.
+        val vg = valueAndGrad3 { a: Tracer<ScalarShape>, b: Tracer<ScalarShape>, c: Tracer<ScalarShape> ->
+            a * b + c
+        }
+        val out = vg(
+            Tensors.f32Scalar(2f),
+            Tensors.f32Scalar(3f),
+            Tensors.f32Scalar(5f),
+        )
+        assertEquals(11f, out.first, "f(2,3,5) = 2*3 + 5 = 11")
+        assertEquals(3f, out.second.hostF32()[0], "df/da = b = 3")
+        assertEquals(2f, out.third.hostF32()[0], "df/db = a = 2")
+        assertEquals(1f, out.fourth.hostF32()[0], "df/dc = 1")
+    }
+
+    @Test
+    fun grad3DropsValueAndReturnsTriple() {
+        // grad3 mirrors grad2: drops the primal value, returns a Triple of grads.
+        // Same f as the valueAndGrad3 test → same gradients (3, 2, 1).
+        val g = grad3 { a: Tracer<ScalarShape>, b: Tracer<ScalarShape>, c: Tracer<ScalarShape> ->
+            a * b + c
+        }
+        val (dA, dB, dC) = g(
+            Tensors.f32Scalar(2f),
+            Tensors.f32Scalar(3f),
+            Tensors.f32Scalar(5f),
+        )
+        assertEquals(3f, dA.hostF32()[0])
+        assertEquals(2f, dB.hostF32()[0])
+        assertEquals(1f, dC.hostF32()[0])
+    }
+
+    @Test
+    fun valueAndGrad3CrossRankMatrixVectorScalarInputs() {
+        // §0.4.101's "cross-rank composition" pin pattern. f(W, x, c) = sum(W @ x.unsqueeze) * c
+        // — but unsqueeze isn't on the Tracer surface; reach the equivalent via
+        // (W matmul x_col).sum() * c, where x is a column matrix (Rank2 of shape [N, 1]).
+        // Concrete: W = [[1, 2], [3, 4]] (2x2), x = [[1], [1]] (2x1), c = 0.5.
+        // W@x = [[3], [7]], sum = 10, * c = 5.
+        // d/dW sum(W@x)*c = c * ones(2,1) @ x^T = 0.5 * [[1,1],[1,1]]
+        //                                       = [[0.5, 0.5], [0.5, 0.5]].
+        // d/dx sum(W@x)*c = c * W^T @ ones(2,1) = 0.5 * [[1,3],[2,4]] @ [[1],[1]]
+        //                                       = 0.5 * [[4],[6]] = [[2],[3]].
+        // d/dc sum(W@x)*c = sum(W@x) = 10.
+        val vg = valueAndGrad3 { w: Tracer<Rank2<Sym, Sym>>, x: Tracer<Rank2<Sym, Sym>>, c: Tracer<ScalarShape> ->
+            (w matmul x).sum() * c
+        }
+        val out = vg(
+            Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f)),
+            Tensors.f32Matrix<Sym, Sym>(2, 1, floatArrayOf(1f, 1f)),
+            Tensors.f32Scalar(0.5f),
+        )
+        assertEquals(5f, out.first, "f(W, x, c) = sum(W@x)*c = 10*0.5 = 5")
+        assertContentEquals(floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f), out.second.hostF32(), "dW")
+        assertContentEquals(floatArrayOf(2f, 3f), out.third.hostF32(), "dx")
+        assertEquals(10f, out.fourth.hostF32()[0], "dc = sum(W@x) = 10")
+    }
+
+    @Test
+    fun valueAndGrad3ReuseAcrossCallsHasNoTapeBleed() {
+        // Each call must build a fresh tape — no state leak between invocations.
+        val vg = valueAndGrad3 { a: Tracer<ScalarShape>, b: Tracer<ScalarShape>, c: Tracer<ScalarShape> ->
+            a * b * c
+        }
+        // f(a,b,c) = a*b*c. df/da = b*c, df/db = a*c, df/dc = a*b.
+        val firstCall = vg(Tensors.f32Scalar(2f), Tensors.f32Scalar(3f), Tensors.f32Scalar(5f))
+        assertEquals(30f, firstCall.first, "first: 2*3*5 = 30")
+        assertEquals(15f, firstCall.second.hostF32()[0], "first dA = b*c = 15")
+        assertEquals(10f, firstCall.third.hostF32()[0], "first dB = a*c = 10")
+        assertEquals(6f, firstCall.fourth.hostF32()[0], "first dC = a*b = 6")
+
+        val secondCall = vg(Tensors.f32Scalar(1f), Tensors.f32Scalar(7f), Tensors.f32Scalar(11f))
+        assertEquals(77f, secondCall.first, "second: 1*7*11 = 77")
+        assertEquals(77f, secondCall.second.hostF32()[0], "second dA = b*c = 77")
+        assertEquals(11f, secondCall.third.hostF32()[0], "second dB = a*c = 11")
+        assertEquals(7f, secondCall.fourth.hostF32()[0], "second dC = a*b = 7")
+    }
+
+    @Test
+    fun valueAndGrad3RejectsNonScalarOutput() {
+        // The contract requires a scalar return. A rank-1 return must throw.
+        val vg = valueAndGrad3 { a: Tracer<io.tlaloc.core.Rank1<Sym>>,
+                                 b: Tracer<io.tlaloc.core.Rank1<Sym>>,
+                                 c: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            // (a + b + c) is rank-1; not a scalar.
+            @Suppress("UNCHECKED_CAST")
+            (a + b + c) as Tracer<ScalarShape>
+        }
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            vg(
+                Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f)),
+                Tensors.f32Vector<Sym>(floatArrayOf(0f, 0f, 0f)),
+                Tensors.f32Vector<Sym>(floatArrayOf(0f, 0f, 0f)),
+            )
+        }
+    }
 }
