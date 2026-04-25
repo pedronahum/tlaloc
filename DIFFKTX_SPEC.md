@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.116 Rank-3 + rank-1 cross-rank broadcast on the inner axis 2026-04-25
+
+§0.4.108's deferred entry "Tracer surface | Rank-3↔rank-1/rank-2 cross-rank broadcast — rank-3-scalar covered §0.4.97/§0.4.98; cross-rank deferred" gets its first dent. This session lands the rank-3 + rank-1 inner-axis form: a rank-3 [A, B, C] tensor combined with a rank-1 [C] vector that broadcasts over the leading two axes. Mirrors §0.4.85's row-broadcast pattern, generalised one rank up.
+
+**The mechanism** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt). One new builder + four operators:
+
+```kotlin
+fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<Rank3<A, B, C>>.broadcastInner(
+    inner: Tracer<Rank1<C>>,
+): Tracer<Rank3<A, B, C>> {
+    require(dims[2] == inner.dims[0]) { ... }
+    val tape = sameTape(this, inner)
+    val a = dims[0]; val b = dims[1]; val c = dims[2]
+    val innerValues = inner.entry.value
+    val broadcasted = FloatArray(a * b * c) { idx -> innerValues[idx % c] }
+    val e = tape.op(
+        OpKind.BROADCAST,
+        intArrayOf(inner.id),
+        dims.copyOf(),
+        broadcasted,
+        attrs = mapOf("broadcast_dimensions" to listOf(2)),
+    )
+    return Tracer(tape, e)
+}
+
+@JvmName("plusRank1InnerTracerRank3") operator fun ... = this + broadcastInner(inner)
+@JvmName("minusRank1InnerTracerRank3") operator fun ... = this - broadcastInner(inner)
+@JvmName("timesRank1InnerTracerRank3") operator fun ... = this * broadcastInner(inner)
+@JvmName("divRank1InnerTracerRank3") operator fun ... = this / broadcastInner(inner)
+```
+
+**Decisions worth flagging**:
+
+- **`broadcast_dimensions = [2]` is the spec contract.** Input dim 0 (the rank-1 [C]) maps to output dim 2; dims 0 and 1 of the output are broadcast-inserted. §0.4.84's axis-aware `BroadcastRule` automatically computes `reduce_dims = [0, 1]` (the dimensions NOT in `broadcast_dimensions`), so the gradient back to `inner` is `SUM(upstream, reduction_dims=[0, 1])` — the partial sum across the leading two axes. The `DxirInterpreter`'s SUM arm already handles arbitrary `reduction_dims` for any rank; no interpreter change needed.
+
+- **`@JvmName` disambiguation against §0.4.97's rank-3-scalar overloads.** After JVM erasure, both `Tracer<Rank3<A,B,C>>.times(Tracer<ScalarShape>)` and the new `Tracer<Rank3<A,B,C>>.times(Tracer<Rank1<C>>)` collapse to `Tracer.times(Tracer): Tracer`. The existing scalar variants carry `@JvmName("timesScalarTracerRank3")`; the new rank-1-inner variants carry `@JvmName("timesRank1InnerTracerRank3")` (and analogues for the other three ops). Source-level overload resolution picks the right one based on the argument's compile-time type.
+
+- **Inner-axis broadcast first; rank-3 + rank-2 deferred.** The deferred entry mentions both rank-3 + rank-1 and rank-3 + rank-2 cross-rank; this session lands only the rank-1 form. The rank-2 form (rank-3 + rank-2 with `broadcast_dimensions = [1, 2]`) follows the same pattern and is a clean follow-up. Keeping scope tight per the loop charter — one Tracer-surface widening per session.
+
+- **Forward-side broadcast happens host-side.** The broadcasted FloatArray is constructed in Kotlin (`FloatArray(a*b*c) { idx -> innerValues[idx % c] }`) and stored as the tape entry's value. The IR-side BROADCAST op's interpreter arm only handles scalar-input broadcast (the §0.4.84 comment notes "general rank-K → rank-N broadcasting needs rank-aware indexing and is deferred"); the autograd path doesn't go through that arm because the tape carries the materialized value. The reverse path uses the bridge → BroadcastRule → SUM with reduction_dims, which IS rank-aware.
+
+- **Composition test follows the §0.4.101 model.** The loop charter requires "if a change touches the public Tracer surface, add a cross-rank or operator-composition test alongside the basic case". `rank3InnerBroadcastComposesWithScalarBroadcast` exercises `((x + v) * 0.5f).sum()` — three different broadcasts in one chain (rank-3+rank-1 cross-rank, scalar literal, then SUM). Catches dispatch ambiguity that single-op tests miss.
+
+**Tests added** (+4 new):
+
+- `GradTest.rank3PlusRank1InnerGivesBothGradients` — `(x + v).sum()` with x = 2×2×2 [1..8], v = [10, 20]. Forward = 156, grad_x = ones, grad_v = [4, 4].
+- `GradTest.rank3MinusRank1InnerFlipsGradSign` — non-commutative pin: `(x - v).sum()` produces grad_v = [-4, -4] (sign-flipped).
+- `GradTest.rank3TimesRank1InnerScalesElementsByInnerVector` — `(x * v).sum()` with x = ones, v = [3, 5]. grad_x has alternating values matching v[c] across the inner axis.
+- `GradTest.rank3InnerBroadcastComposesWithScalarBroadcast` — `((x + v) * 0.5f).sum()`. Cross-rank + Float-literal composition; grad_x = 0.5 per element, grad_v = [2, 2].
+
+Full suite is green: **742 tests** (+4 over §0.4.115).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Rank-3 + rank-2 cross-rank broadcast** — symmetric follow-up: `broadcast_dimensions = [1, 2]`, gradient via `SUM(upstream, reduction_dims=[0])`.
+2. **Region-internal DCE/CSE** — extend §0.4.48's top-level CSE into IF/WHILE region bodies. PhiCalculus piece.
+3. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE.
+4. **Multi-result COARSENED** — extend §0.4.31. PhiCalculus piece.
+
+**Definition-of-done for §0.4.116 — met**:
+- `broadcastInner` builder + four operators land on `Tracer<Rank3<A,B,C>>` ✓
+- `@JvmName` disambiguates against the existing rank-3-scalar overloads ✓
+- §0.4.84's axis-aware BroadcastRule handles the gradient unchanged ✓
+- Four tests pin forward / sign-flip / multiplicative / composition ✓
+- Composition test exercises cross-rank + Float-literal in one chain ✓
+- Full suite stays green at 742 tests (+4) ✓
+
 #### 0.4.115 Recursive `splitOnReuses` for large leaves 2026-04-25
 
 §0.4.108's deferred entry "PhiCalculus | Recursive `splitOnReuses` — One split covered §0.4.29" is shipped. Pre-§0.4.115, the C.2b split was one-shot: when a leaf was marked-large (subtreeSize > sizeLimit) and got partitioned around its most-reused free variable, fragments that remained > sizeLimit were left as large-leaf fallbacks. That left structurally-decomposable leaves un-decomposed when one round of partitioning wasn't enough.

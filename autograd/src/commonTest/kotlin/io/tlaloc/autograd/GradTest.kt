@@ -961,6 +961,110 @@ class GradTest {
         assertEquals(8f, dc.hostF32()[0])
     }
 
+    // §0.4.116 — rank-3 + rank-1 cross-rank broadcast (inner axis).
+
+    @Test
+    fun rank3PlusRank1InnerGivesBothGradients() {
+        // f(x, v) = sum(x + v.broadcastedToInner). x is 2x2x2 [1..8], v = [10, 20].
+        // For each [a, b, c]: x[a,b,c] + v[c]. Sum across all 8 elements:
+        //   row [0,0]: 1+10=11, 2+20=22         → 33
+        //   row [0,1]: 3+10=13, 4+20=24         → 37
+        //   row [1,0]: 5+10=15, 6+20=26         → 41
+        //   row [1,1]: 7+10=17, 8+20=28         → 45
+        //   total                               = 156
+        // grad_x = ones (8 elements; sum's grad is broadcast 1).
+        // grad_v = sum of upstream over axes [0, 1] = [4, 4]
+        //   (each v[c] is added into 4 output positions: 2 batches × 2 rows).
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, v: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x + v).sum()
+        }
+        val (value, dx, dv) = vg(
+            Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f)),
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 20f)),
+        )
+        assertEquals(156f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 8) assertEquals(1f, gx[i], "grad_x[$i]")
+        val gv = dv.hostF32()
+        assertEquals(4f, gv[0], "grad_v[0] = 4 (positions [a,b,0] sum)")
+        assertEquals(4f, gv[1], "grad_v[1] = 4 (positions [a,b,1] sum)")
+    }
+
+    @Test
+    fun rank3MinusRank1InnerFlipsGradSign() {
+        // Non-commutative pin: (x - v) reverses sign on grad_v.
+        // x = ones (2x2x2 = 8 ones), v = [10, 20].
+        // For each [a, b, c]: 1 - v[c]. sum = 4*(1-10) + 4*(1-20) = -36 + -76 = -112.
+        // grad_x = +1 per element (sum's grad).
+        // grad_v = -1 per upstream position summed over [0, 1] = [-4, -4].
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, v: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x - v).sum()
+        }
+        val (value, dx, dv) = vg(
+            Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, FloatArray(8) { 1f }),
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 20f)),
+        )
+        assertEquals(-112f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 8) assertEquals(1f, gx[i])
+        val gv = dv.hostF32()
+        assertEquals(-4f, gv[0], "grad_v[0]")
+        assertEquals(-4f, gv[1], "grad_v[1]")
+    }
+
+    @Test
+    fun rank3TimesRank1InnerScalesElementsByInnerVector() {
+        // f(x, v) = sum(x * v_broadcast). x = ones (8 elements), v = [3, 5].
+        // For each [a, b, c]: 1 * v[c]. sum = 4*3 + 4*5 = 32.
+        // grad_x = v[c] per element (3 at c=0, 5 at c=1).
+        // grad_v[c] = sum of x[a,b,c] over [a, b] = 4 each (since x is all ones).
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, v: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            (x * v).sum()
+        }
+        val (value, dx, dv) = vg(
+            Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, FloatArray(8) { 1f }),
+            Tensors.f32Vector<Sym>(floatArrayOf(3f, 5f)),
+        )
+        assertEquals(32f, value)
+        val gx = dx.hostF32()
+        // Layout: [a=0,b=0,c=0], [a=0,b=0,c=1], [a=0,b=1,c=0], [a=0,b=1,c=1], etc.
+        // c alternates: 0,1,0,1,0,1,0,1. So gx = [3, 5, 3, 5, 3, 5, 3, 5].
+        for (i in 0 until 8) {
+            val expected = if (i % 2 == 0) 3f else 5f
+            assertEquals(expected, gx[i], "grad_x[$i]")
+        }
+        val gv = dv.hostF32()
+        assertEquals(4f, gv[0], "grad_v[0]")
+        assertEquals(4f, gv[1], "grad_v[1]")
+    }
+
+    @Test
+    fun rank3InnerBroadcastComposesWithScalarBroadcast() {
+        // §0.4.101-style composition: cross-rank broadcasting + scalar broadcast in
+        // one expression. f(x, v, c) — well, we have valueAndGrad2 (2-input), so
+        // bind c as a scalar literal. f(x, v) = sum((x + v) * 0.5f) — adds the
+        // inner-broadcast vector then scales the whole tensor by a Float literal.
+        //
+        // x = 2x2x2 [1..8], v = [10, 20].
+        // (x + v) per element same as the first test → values [11, 22, 13, 24, 15, 26, 17, 28].
+        // * 0.5 → [5.5, 11, 6.5, 12, 7.5, 13, 8.5, 14]. sum = 78.
+        // grad_x: each element scales by 0.5 (the literal multiplier). So gx = 0.5 per element.
+        // grad_v[c]: sum of 0.5 over [a, b] = 4 * 0.5 = 2 each.
+        val vg = valueAndGrad2 { x: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>>, v: Tracer<io.tlaloc.core.Rank1<Sym>> ->
+            ((x + v) * 0.5f).sum()
+        }
+        val (value, dx, dv) = vg(
+            Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f)),
+            Tensors.f32Vector<Sym>(floatArrayOf(10f, 20f)),
+        )
+        assertEquals(78f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 8) assertEquals(0.5f, gx[i], "grad_x[$i]")
+        val gv = dv.hostF32()
+        assertEquals(2f, gv[0], "grad_v[0]")
+        assertEquals(2f, gv[1], "grad_v[1]")
+    }
+
     @Test
     fun rank2PlusScalarTracerGivesBothGradients() {
         // §0.4.78 — rank-2 extension of §0.4.77's scalar broadcast.
