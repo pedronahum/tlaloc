@@ -17,6 +17,21 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 
 /**
+ * §0.4.154 — gradient-accumulator key. The contribution that feeds back into a
+ * primal value is keyed by `(primal node id, result index)`. For single-result
+ * primal nodes (params, consts, single-result `DxirOp`) the index is always 0.
+ * For [DxirOpResult] (a multi-result op's result reference), the index is
+ * `node.index` and the id is `node.source.id`. Centralising this mapping in one
+ * extension keeps every gradAccum read / write at every call site (top-level,
+ * branch, COARSENED) consistent — and lets a future multi-live-index MR IF AD
+ * arm seed contributions at distinct indices without touching the substrate.
+ */
+private fun DxirNode.gradKey(): Pair<Int, Int> = when (this) {
+    is DxirOpResult -> source.id to index
+    else -> id to 0
+}
+
+/**
  * Source-code-transformation reverse-mode AD on a [DxirFunction]. Given a primal function
  * `f: P₁ × … × Pₙ → R` (R a single scalar), produces a gradient function whose returns are
  * the per-parameter gradients of `f`'s output. When [apply] is called with
@@ -201,13 +216,22 @@ object DxirReverseTransform {
             //        seed with const(1.0) for the standalone `grad` / `valueAndGrad` path. ---
             val seed: DxirNode = upstreamParam
                 ?: const(seedValueFor(ret.type.dtype), ret.type)
-            val gradAccum = HashMap<Int, DxirNode>()
-            gradAccum[ret.id] = seed
+            val gradAccum = HashMap<Pair<Int, Int>, DxirNode>()
+            gradAccum[ret.gradKey()] = seed
 
             // --- 3. Reverse walk: emit per-op adjoint contributions. ---
             for (n in primal.body.asReversed()) {
                 if (n !is DxirOp) continue
-                val upstream = gradAccum[n.id] ?: continue
+                // §0.4.154 — multi-result IFs route their upstream via the live index
+                // (single-live-index case for now). Single-result ops use index 0.
+                // Multi-live-index MR IF AD will widen this lookup to iterate the set
+                // of live indices; today's substrate keeps single-index behaviour.
+                val nLiveIdx = if (n.op == OpKind.IF && n.isMultiResult) {
+                    ifLiveIndices[n.id] ?: 0
+                } else {
+                    0
+                }
+                val upstream = gradAccum[n.id to nLiveIdx] ?: continue
 
                 // Special case: IF op (added §0.4.23). Per paper C2 — `d/dx(φ(a, b)) =
                 // φ(da/dx, db/dx)` — the gradient of an IF distributes through its
@@ -259,8 +283,9 @@ object DxirReverseTransform {
                     val primalOperand = n.operands[operandIdx]
                     // Constants have no gradient surface (they're literals).
                     if (primalById[primalOperand.id] is DxirConst) continue
-                    val existing = gradAccum[primalOperand.id]
-                    gradAccum[primalOperand.id] = when {
+                    val operandKey = primalOperand.gradKey()
+                    val existing = gradAccum[operandKey]
+                    gradAccum[operandKey] = when {
                         existing == null -> contribution
                         // §0.4.45 — SCATTER_ADD fusion: if the contribution is a
                         // SCATTER_ADD and we already have an accumulator, rewrite the
@@ -293,7 +318,7 @@ object DxirReverseTransform {
                 if (isIntegerDtype(p.type.dtype)) {
                     const(zeroValueFor(p.type.dtype), p.type)
                 } else {
-                    gradAccum[p.id] ?: const(zeroValueFor(p.type.dtype), p.type)
+                    gradAccum[p.gradKey()] ?: const(zeroValueFor(p.type.dtype), p.type)
                 }
             }
             if (includeForward) {
@@ -1013,7 +1038,7 @@ object DxirReverseTransform {
         ifNode: DxirOp,
         upstream: DxirNode,
         liveIdx: Int,
-        outerGradAccum: MutableMap<Int, DxirNode>,
+        outerGradAccum: MutableMap<Pair<Int, Int>, DxirNode>,
         outerNodeMap: Map<Int, DxirNode>,
         primalById: Map<Int, DxirNode>,
         builder: DxirBuilder,
@@ -1034,14 +1059,17 @@ object DxirReverseTransform {
         val thenAdjoints = walkBranchReverse(thenBlock, upstream, liveIdx, outerNodeMap, primalById, builder)
         val elseAdjoints = walkBranchReverse(elseBlock, upstream, liveIdx, outerNodeMap, primalById, builder)
 
-        // Combine per-branch adjoints into a synthesized IF for each outer-scope id.
+        // Combine per-branch adjoints into a synthesized IF for each outer-scope key.
         // LinkedHashSet preserves insertion order so the IF emission order is
-        // deterministic (helps test stability).
-        val allIds = LinkedHashSet<Int>()
-        allIds.addAll(thenAdjoints.keys)
-        allIds.addAll(elseAdjoints.keys)
+        // deterministic (helps test stability). §0.4.154 — keys are now
+        // `(id, resultIndex)` so contributions to distinct result indices of the
+        // same multi-result outer-scope op flow back through separate IF wrappers.
+        val allKeys = LinkedHashSet<Pair<Int, Int>>()
+        allKeys.addAll(thenAdjoints.keys)
+        allKeys.addAll(elseAdjoints.keys)
 
-        for (id in allIds) {
+        for (key in allKeys) {
+            val (id, idx) = key
             // §0.4.140 — for the recursive (nested-IF) call, [outerNodeMap] is the
             // CALLER's branchNodeMap, which contains region-internal ids of the
             // outer branch (e.g., a `MUL(x, x)` defined in the outer-then block and
@@ -1056,10 +1084,16 @@ object DxirReverseTransform {
             val primal = primalById[id] ?: outerNodeMap[id] ?: continue
             // Skip constants — they have no gradient surface.
             if (primal is DxirConst) continue
-            val primalType = primal.type
-            val thenAdj = thenAdjoints[id]
+            // §0.4.154 — for multi-result primal ops the gradient type at index `idx`
+            // is `types[idx]`, not `type` (which collapses to `types[0]`).
+            val primalType = if (primal is DxirOp && primal.isMultiResult) {
+                primal.types[idx]
+            } else {
+                primal.type
+            }
+            val thenAdj = thenAdjoints[key]
                 ?: builder.const(zeroValueFor(primalType.dtype), primalType)
-            val elseAdj = elseAdjoints[id]
+            val elseAdj = elseAdjoints[key]
                 ?: builder.const(zeroValueFor(primalType.dtype), primalType)
 
             val condIf = builder.ifOp(
@@ -1069,8 +1103,8 @@ object DxirReverseTransform {
                 elseRegion = builder.region { yields(elseAdj) },
             )
 
-            val existing = outerGradAccum[id]
-            outerGradAccum[id] = if (existing == null) condIf
+            val existing = outerGradAccum[key]
+            outerGradAccum[key] = if (existing == null) condIf
             else builder.op(OpKind.ADD, listOf(existing, condIf), primalType)
         }
     }
@@ -1104,7 +1138,7 @@ object DxirReverseTransform {
     private fun handleCoarsenedAdjoint(
         coarsened: DxirOp,
         upstream: DxirNode,
-        outerGradAccum: MutableMap<Int, DxirNode>,
+        outerGradAccum: MutableMap<Pair<Int, Int>, DxirNode>,
         outerNodeMap: Map<Int, DxirNode>,
         primalById: Map<Int, DxirNode>,
         builder: DxirBuilder,
@@ -1157,8 +1191,9 @@ object DxirReverseTransform {
             val primalOperand = coarsened.operands[i]
             // Constants have no gradient surface — skip.
             if (primalById[primalOperand.id] is DxirConst) continue
-            val existing = outerGradAccum[primalOperand.id]
-            outerGradAccum[primalOperand.id] = if (existing == null) contribution
+            val operandKey = primalOperand.gradKey()
+            val existing = outerGradAccum[operandKey]
+            outerGradAccum[operandKey] = if (existing == null) contribution
             else builder.op(OpKind.ADD, listOf(existing, contribution), contribution.type)
         }
     }
@@ -1373,7 +1408,7 @@ object DxirReverseTransform {
         outerNodeMap: Map<Int, DxirNode>,
         primalById: Map<Int, DxirNode>,
         builder: DxirBuilder,
-    ): MutableMap<Int, DxirNode> {
+    ): MutableMap<Pair<Int, Int>, DxirNode> {
         // Step 1: clone branch body ops into the outer builder. branchNodeMap starts as
         // a copy of outerNodeMap (so outer-scope refs resolve) and accumulates clones
         // for each branch body op.
@@ -1455,13 +1490,21 @@ object DxirReverseTransform {
                 "size=${block.terminator.size}"
         }
         val yieldNode = block.terminator[liveIdx]
-        val gradAccum = HashMap<Int, DxirNode>()
-        gradAccum[yieldNode.id] = upstream
+        val gradAccum = HashMap<Pair<Int, Int>, DxirNode>()
+        gradAccum[yieldNode.gradKey()] = upstream
 
         // Step 3: reverse walk through the branch body.
         for (n in block.body.asReversed()) {
             if (n !is DxirOp) continue
-            val upstreamForN = gradAccum[n.id] ?: continue
+            // §0.4.154 — same per-(id, idx) lookup pattern as the top-level walk.
+            // Branch-body multi-result IFs route via nestedIfLiveIndices; everything
+            // else is single-result and uses index 0.
+            val nLiveIdx = if (n.op == OpKind.IF && n.isMultiResult) {
+                nestedIfLiveIndices[n.id] ?: 0
+            } else {
+                0
+            }
+            val upstreamForN = gradAccum[n.id to nLiveIdx] ?: continue
             // §0.4.34 — COARSENED in a branch body: splice the gradient_body via the
             // same helper the outer reverse walk uses. Shared logic keeps the
             // gradient-through-coarsened semantics identical regardless of whether the
@@ -1514,8 +1557,9 @@ object DxirReverseTransform {
                 }
                 val primalOperand = n.operands[operandIdx]
                 if (primalById[primalOperand.id] is DxirConst) continue
-                val existing = gradAccum[primalOperand.id]
-                gradAccum[primalOperand.id] = if (existing == null) contribution
+                val operandKey = primalOperand.gradKey()
+                val existing = gradAccum[operandKey]
+                gradAccum[operandKey] = if (existing == null) contribution
                 else builder.op(OpKind.ADD, listOf(existing, contribution), contribution.type)
             }
         }

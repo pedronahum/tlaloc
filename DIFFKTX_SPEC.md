@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.154 Multi-live-index MR IF AD — `gradAccum` substrate refactor (Phase 5a) 2026-04-25
+
+§0.4.151 / §0.4.153's recommended-next #2: "Multi-live-index MR IF AD — per-index `gradAccum` refactor. Mechanical refactor (~15-20 sites in `DxirReverseTransform.kt`)." This is a multi-session arc. §0.4.154 lands Phase 5a — the substrate change. The gradient-accumulator data structure migrates from `Map<Int, DxirNode>` to `Map<Pair<Int, Int>, DxirNode>` (id × result-index) at every level (top-level, branch, COARSENED). Behavior is preserved because every existing call site routes through index 0, with the single exception of the ret-seeding site, which now correctly distinguishes result indices for multi-result-IF returns. Phase 5b will widen `findIfLiveResultIndex` to return a Set and have `handleIfAdjoint` dispatch over multi-live-index sets; Phase 5a is the prerequisite plumbing that lets 5b be a focused logical change.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt):
+
+1. **`DxirNode.gradKey()` extension** ([DxirReverseTransform.kt:19-32](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L19-L32)) — central mapping from a primal node to its `(id, index)` accumulator key. `DxirOpResult` → `(source.id, index)`; everything else (`DxirParam`, `DxirConst`, single-result `DxirOp`) → `(id, 0)`. Centralising the mapping in one private file-level extension keeps every gradAccum read / write at every call site (top-level, branch, COARSENED) consistent.
+
+2. **Top-level `gradAccum`** ([DxirReverseTransform.kt:217-218](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L217-L218)) — `HashMap<Int, DxirNode>` → `HashMap<Pair<Int, Int>, DxirNode>`. Seed: `gradAccum[ret.gradKey()] = seed` correctly routes a multi-result-IF return (where `ret = ifop.result(k)`) to `(ifop.id, k)` rather than the index-blind `ifop.id`. Reverse-walk lookup: `gradAccum[n.id to nLiveIdx]` where `nLiveIdx = ifLiveIndices[n.id] ?: 0` for multi-result IFs and `0` otherwise. Contribution accumulation: `gradAccum[primalOperand.gradKey()]` correctly routes a `DxirOpResult` operand reference back to its source-and-index. Param returns: `gradAccum[p.gradKey()]` (always `(p.id, 0)` since params are single-result).
+
+3. **`handleIfAdjoint` `outerGradAccum`** ([DxirReverseTransform.kt:1027-1090](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1027-L1090)) — signature changes to `MutableMap<Pair<Int, Int>, DxirNode>`. The per-branch merge loop iterates `LinkedHashSet<Pair<Int, Int>>` (was `LinkedHashSet<Int>`) and reads/writes `outerGradAccum[(id, idx)]`. The primal-type lookup gains an arm for multi-result outer-scope ops: `if (primal is DxirOp && primal.isMultiResult) primal.types[idx] else primal.type`. Single-result cases (today's only inhabitants) reduce to the old `primal.type`.
+
+4. **`handleCoarsenedAdjoint`** ([DxirReverseTransform.kt:1118-1183](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1118-L1183)) — same signature change for `outerGradAccum`. The per-operand contribution loop uses `primalOperand.gradKey()` for the accumulator key (a COARSENED whose operand is a multi-result op's result correctly routes the contribution to the indexed key).
+
+5. **`walkBranchReverse`** ([DxirReverseTransform.kt:1453-1528](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1453-L1528)) — return type `MutableMap<Int, DxirNode>` → `MutableMap<Pair<Int, Int>, DxirNode>`. Branch-internal gradAccum starts seeded at `yieldNode.gradKey()` with `upstream`. Reverse-walk lookup mirrors top-level: per-`n` live-index (for nested multi-result IFs via `nestedIfLiveIndices[n.id]`), default 0 for everything else. Contribution accumulation uses `primalOperand.gradKey()`.
+
+**Decisions worth flagging**:
+
+- **Phase 5a is substrate-only; Phase 5b lands the semantic widening.** Today every primal-IR shape rejected at the front door (`findIfLiveResultIndex` errors when more than one result index is live). Phase 5a makes the data structure ready to carry per-index entries; the front-door guard still rejects multi-live-index. Phase 5b widens that guard to `findIfLiveResultIndices: Set<Int>`, updates `handleIfAdjoint` / `walkBranchReverse` to seed at each live index, and adds tests for the multi-live-index case.
+
+- **Why a `Pair<Int, Int>` key, not a typed `data class GradKey(id, idx)`?** The `Pair`-based key reads cleanly at use sites (`gradAccum[(id, 0)]`, `gradAccum[primalOperand.gradKey()]`) and avoids one more data class to maintain. If a future maintenance pressure surfaces (e.g., misuse via swapped tuple positions), introducing a typed `data class` is a one-line change at the typealias site that propagates through. The cost of premature typing is more boilerplate today; the cost of late typing is a small refactor when the need is real.
+
+- **`gradKey` lives at file level, not inside `DxirReverseTransform`.** Two reasons. First, file-level visibility keeps the helper out of the autocomplete surface for `DxirNode` callers outside this file (it's a helper for SCT, not a general-purpose API). Second, the helper has zero dependence on `DxirReverseTransform`'s state — making it a member would unnecessarily couple it to the object lifetime. Mirrors how `:ir`'s other private file-level extensions are scoped (e.g., `BreakBearingWhile.kt`'s pattern matchers).
+
+- **Multi-result `primalType` lookup gains a defensive arm.** `handleIfAdjoint` previously read `primal.type` (which collapses to `types[0]`). For a multi-result outer-scope op with the live key at index ≥ 1, that would have been wrong — but no test exercised it because `findIfLiveResultIndex`'s single-live-index guard prevented the case from reaching `handleIfAdjoint`. The new arm `primal.types[idx]` correctly types the gradient at the indexed slot. This is semantically a fix-while-refactoring; existing single-live-index callers all hit `idx=0` and see identical behaviour.
+
+- **`outerGradAccum: MutableMap<Pair<Int, Int>, DxirNode>` propagates through the recursive `handleIfAdjoint` call chain (§0.4.140's nested-IF dispatch).** The recursive call passes the caller's `gradAccum` (a `Map<Pair<Int, Int>, DxirNode>` after this refactor) as `outerGradAccum`. Type-system uniformity falls out for free.
+
+- **No new tests; suite stays at 843.** Phase 5a is a substrate-only change. Behavior on every existing test is identical because every existing site keys at index 0 (or the seed site at `ret.gradKey()`, which equals `(ret.id, 0)` when `ret` is a single-result return — the existing case for every test). The Phase-5a verification IS the existing test suite passing unchanged: any structural error in the refactor (a missed call site, a wrong key type) would surface as a failing test or a compile error.
+
+- **The compile-clean outcome was the primary failure mode I was watching for.** A `gradAccum[id]` (Int key) lookup against `gradAccum: HashMap<Pair<Int, Int>, DxirNode>` would have been a Kotlin type error (no implicit Int → Pair coercion). The clean compile is evidence that every site was migrated; the green test suite is evidence that every migration preserves behaviour at index 0.
+
+**Tests added** (+0): pure substrate refactor. Suite: 843 (unchanged from §0.4.153).
+
+Full suite is green: **843 tests** (unchanged from §0.4.153).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 5b — semantic widening.** Replace `findIfLiveResultIndex: Int?` with `findIfLiveResultIndices: Set<Int>` (return all referenced indices, not just the singleton). Update top-level `apply`'s `ifLiveIndices: HashMap<Int, Set<Int>>`. Widen `handleIfAdjoint` to accept `Set<Int>` and seed `walkBranchReverse` at each live index (each gets its own `gradAccum[(yieldNode.gradKey().first, k)]` seed for k in liveIndices). Widen `walkBranchReverse` similarly. Add a test that exercises a multi-live-index MR IF (e.g., `let r0 = ifop.result(0); let r1 = ifop.result(1); return r0 + r1`).
+2. **Phase 5c — Multi-result COARSENED.** With Phase 5b's machinery in place, removing the `coarsened.types.size == 1` guard in `handleCoarsenedAdjoint` is a focused widening — the per-index gradAccum keys already accommodate it.
+3. **Phase 4b — WHILE inside IF inside WHILE.** Independent of Phase 5; widens §0.4.152's pre-scan + rewrite to also recurse into WHILE region bodies.
+4. **HMC benchmark port** — paper's hardest control-flow benchmark.
+
+**Definition-of-done for §0.4.154 — met**:
+- `DxirNode.gradKey(): Pair<Int, Int>` extension lands at file scope ✓
+- Top-level `apply`'s `gradAccum`, IF-dispatch upstream lookup, contribution accumulation, and param returns all key on `(id, idx)` ✓
+- `handleIfAdjoint`'s `outerGradAccum` signature + key iteration / lookup / accumulation use `Pair<Int, Int>` ✓
+- `handleCoarsenedAdjoint`'s `outerGradAccum` signature + key accumulation use `Pair<Int, Int>` ✓
+- `walkBranchReverse`'s return type, seed, lookup, and contribution accumulation all key on `(id, idx)` ✓
+- Multi-result `primalType` lookup gains a defensive `types[idx]` arm in `handleIfAdjoint` ✓
+- Full suite stays green at 843 tests (unchanged) ✓
+
 #### 0.4.153 Multi-result IF AD Phase 4 AD-side — end-to-end gradient through rewritten IF 2026-04-25
 
 §0.4.152 shipped the structural prerequisite (region-recursive C5: `applyC5Pass` now unrolls C5-eligible WHILEs that live inside an IF region). §0.4.152's recommended-next #1 framed the AD-side as an open question: "the question is whether existing `walkBranchReverse` already handles this or needs a new arm for 'unrolled-loop-shaped' IF branches". §0.4.153 answers it: **no `walkBranchReverse` change is needed**. The unrolled chain is a flat sequence of arithmetic ops (MUL / ADD / counter-step ADD on i32 — the latter dead by branch-yield analysis), and the existing branch-walk dispatch + `VjpRegistry` cover every op kind that survives the unroll. Multi-result IF AD Phase 4 — for the **WHILE-inside-IF-branch** shape that §0.4.152 widened C5 to cover — closes end-to-end at §0.4.153.
