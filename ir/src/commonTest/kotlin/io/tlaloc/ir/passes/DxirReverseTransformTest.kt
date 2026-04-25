@@ -316,6 +316,75 @@ class DxirReverseTransformTest {
     }
 
     @Test
+    fun gradOfWhileInIfBranchAfterPhiCalculusUnrollFlowsCorrectly() {
+        // §0.4.153 — Multi-result IF AD Phase 4 AD-side: end-to-end check that
+        // `PhiCalculus.apply` (region-recursive C5, §0.4.152) followed by
+        // `DxirReverseTransform.apply` produces a correct gradient.
+        //
+        // f(x) = if (x > 0) iterate3(x) else x
+        // After PhiCalculus.apply: F3 swaps branches (then-yield's id > else-yield's
+        // id under the canonical-order rule), then region-recursive C5 unrolls the
+        // WHILE inside what is now the else-region. The resulting IF has shape
+        // `if (NOT(x>0)) x else mulChain`.
+        // For x > 0: f = 8x; df/dx = 8.
+        // For x ≤ 0: f = x; df/dx = 1.
+        val i32 = DxirType(io.tlaloc.core.I32, emptyList())
+        val primal = DxirBuilder.function("ifWithInnerWhileAd") {
+            val x = param("x", f32)
+            val pOuter = op(OpKind.STEP, listOf(x), boolS)
+            val ifResult = ifOp(
+                cond = pOuter,
+                types = listOf(f32),
+                thenRegion = region {
+                    val nConst = const(3, i32)
+                    val zero = const(0, i32)
+                    val w = whileOp(
+                        inits = listOf(x, zero),
+                        cond = { args ->
+                            val diff = op(OpKind.SUB, listOf(nConst, args[1]), i32)
+                            val pred = op(OpKind.STEP, listOf(diff), boolS)
+                            yields(pred)
+                        },
+                        body = { args ->
+                            val two = const(2f, f32)
+                            val newX = op(OpKind.MUL, listOf(args[0], two), f32)
+                            val one = const(1, i32)
+                            val newI = op(OpKind.ADD, listOf(args[1], one), i32)
+                            yields(newX, newI)
+                        },
+                    )
+                    yields(w.result(0))
+                },
+                elseRegion = region { yields(x) },
+            )
+            listOf(ifResult)
+        }
+        val coarsened = PhiCalculus.apply(primal)
+        val grad = DxirReverseTransform.apply(coarsened)
+
+        // x = 3 → then-branch (post-F3 swap → else-of-rewritten = mulChain) fires;
+        // f(3) = 8·3 = 24; df/dx = 8.
+        val outPos = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(3f)))
+        assertTrue(
+            kotlin.math.abs(outPos[0][0] - 8f) < 1e-3f,
+            "expected df/dx = 8 at x=3 (8x branch fires), got ${outPos[0][0]}",
+        )
+        // x = -2 → then-branch (post-F3 swap → then-of-rewritten = identity) fires;
+        // f(-2) = -2; df/dx = 1.
+        val outNeg = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(-2f)))
+        assertTrue(
+            kotlin.math.abs(outNeg[0][0] - 1f) < 1e-3f,
+            "expected df/dx = 1 at x=-2 (identity branch fires), got ${outNeg[0][0]}",
+        )
+        // Boundary check at x=0: STEP(0) = 0 → identity branch; f(0) = 0; df/dx = 1.
+        val outZero = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(0f)))
+        assertTrue(
+            kotlin.math.abs(outZero[0][0] - 1f) < 1e-3f,
+            "expected df/dx = 1 at x=0 (identity branch fires), got ${outZero[0][0]}",
+        )
+    }
+
+    @Test
     fun gradOfNestedIfInsideElseArmFlowsCorrectly() {
         // §0.4.140 — outer IF with nested IF in else-arm only.
         // f(x) = if (x > 0) x else (if (-x > 5) x*x else -x)

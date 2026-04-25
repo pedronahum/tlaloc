@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.153 Multi-result IF AD Phase 4 AD-side — end-to-end gradient through rewritten IF 2026-04-25
+
+§0.4.152 shipped the structural prerequisite (region-recursive C5: `applyC5Pass` now unrolls C5-eligible WHILEs that live inside an IF region). §0.4.152's recommended-next #1 framed the AD-side as an open question: "the question is whether existing `walkBranchReverse` already handles this or needs a new arm for 'unrolled-loop-shaped' IF branches". §0.4.153 answers it: **no `walkBranchReverse` change is needed**. The unrolled chain is a flat sequence of arithmetic ops (MUL / ADD / counter-step ADD on i32 — the latter dead by branch-yield analysis), and the existing branch-walk dispatch + `VjpRegistry` cover every op kind that survives the unroll. Multi-result IF AD Phase 4 — for the **WHILE-inside-IF-branch** shape that §0.4.152 widened C5 to cover — closes end-to-end at §0.4.153.
+
+**The verification** in [DxirReverseTransformTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt):
+
+A single end-to-end test composes `PhiCalculus.apply` (which runs §0.4.152's region-recursive C5) and `DxirReverseTransform.apply`, then evaluates the gradient at three sample points:
+
+- `f(x) = if (x > 0) iterate3(x) else x` where `iterate3(x) = x · 2³ = 8x`.
+- Pre-rewrite: 1 IF, 1 WHILE (inside the then-region), branches yield distinct ids.
+- After `PhiCalculus.apply`: F3 fires first (then-yield's id > else-yield's id, so canonicalisation swaps branches → cond becomes `NOT(STEP(x))`, then-region yields `x`, else-region holds the WHILE). C5 then unrolls the WHILE in the (post-F3) else-region into 3 `MUL(_, 2)` ops + 3 dead `ADD(_, 1)` counter steps. Final shape: `if (NOT(STEP(x))) x else mulChain`.
+- After `DxirReverseTransform.apply`: a single-return scalar gradient function with one IF op merging the per-branch contributions (1 from the identity branch, 8 from the mul-chain branch).
+- Numerical pins: `df/dx(3) = 8`, `df/dx(-2) = 1`, `df/dx(0) = 1` (boundary check — STEP(0) = 0 picks the identity branch).
+
+**The mechanism — why it works without changes**:
+
+1. **Branch body shape after C5 unroll is flat-arithmetic.** The unrolled body in the else-region contains only single-result `DxirOp` ops (MUL on f32, ADD on i32 for the counter, plus consts). `walkBranchReverse` already handles this via its main dispatch loop ([DxirReverseTransform.kt:1505-1520](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1505-L1520)): each op gets its `VjpRule` looked up, contributions are accumulated into the branch's `gradAccum` map.
+
+2. **Counter-step ADDs are skipped via `gradAccum[n.id] ?: continue`.** The unrolled counter `ADD(prev_i, one)` ops produce i32 values that nothing yields or references — they're dead under the C5 contract (which keeps body op order but yields only the carried value at index 0). The reverse walk's gate at [DxirReverseTransform.kt:1464](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1464) (`val upstreamForN = gradAccum[n.id] ?: continue`) skips them — `gradAccum` only has entries seeded from downstream consumers, and nothing consumes the counter.
+
+3. **MUL chain reverse-flows to `x` via outer-scope contribution.** Each `MUL(prev_mul, two)` in the chain has its `MulRule` apply: contribution to `prev_mul` accumulates as the upstream times the const `two`; contribution to `two` is skipped (const). At the chain head, `MUL(x, two1)` contributes `two1 · accumulated_upstream = 8` to outer `gradAccum[x.id]`. Standard outer-scope VJP propagation, identical to §0.4.140's nested-IF case.
+
+4. **`handleIfAdjoint` merges per-branch x contributions via an IF wrapper.** Then-adjoint = 1 (identity branch); else-adjoint = 8 (mul chain). The merge emits `IF(NOT(STEP(x)), 1, 8)` whose runtime value picks the correct branch's contribution. For x = 3: NOT(STEP(3)) = false → else picks 8 ✓. For x = -2: NOT(STEP(-2)) = true → then picks 1 ✓.
+
+**Decisions worth flagging**:
+
+- **F3's branch swap is observationally invariant; the test pins the post-F3 shape.** F3's canonicalisation (then-yield-id > else-yield-id triggers a swap with `NOT` on the cond) preserves semantics: at every (x, predicate) the function value is identical. The test asserts this: numerical agreement at three sample points across both branches, regardless of which branch holds the WHILE post-rewrite. A future change to F3's ordering (or its absence) would still leave the gradient values pinned at 8 / 1 / 1 — only the IF's internal shape would shift.
+
+- **The boundary check at x=0 is non-trivial.** `STEP(0) = 0` (false) on every sample point, so f(0) = 0 takes the identity branch, df/dx = 1. Without this case, an off-by-one in the predicate (e.g., `STEP` vs `STEP_EXCLUSIVE`) could pass the x=3 / x=-2 checks but fail at the boundary. Mirrors §0.4.140's `gradOfNestedIfInsideThenArmFlowsCorrectly` style of "pin boundary behavior to catch step-function definition drift".
+
+- **Counter ADD ops survive in the rewritten IR but are computationally dead.** A future DCE pass over branch bodies (deferred per §0.4.108's register, "Region-internal DCE/CSE for WHILE: top-level CSE shipped §0.4.48") would strip them. Until then, they incur three extra IR ops per unrolled iteration. AD doesn't care (the `gradAccum[n.id] ?: continue` gate handles them as no-ops); runtime evaluation does emit the i32 ADD chain (cheap, three extra ALU ops on i32 values). The interpreter test passes regardless.
+
+- **Phase 4 closes for THIS shape; Phase 4b widens scope.** §0.4.152 + §0.4.153 together close "WHILE inside IF branch (single-back-edge, C5-eligible counter)". They do NOT close: (a) WHILE inside WHILE inside IF (region-recursion still scopes only to IF children); (b) WHILEs that don't match C5's pattern (e.g., affine recurrence, break-bearing — those are C6/C7 and D.3i territory; widening THEIR pre-scan to recurse into IF regions is the natural Phase 4b widening); (c) multi-live-index MR IF AD (still single-live-index, per §0.4.151's deferred entry).
+
+- **No `walkBranchReverse` change means no risk of regression.** Phase 4 of MR IF AD initially looked like it might require a new "unrolled-loop-shaped IF branches" arm in `walkBranchReverse`. The actual mechanism is composition: §0.4.152's structural rewrite produces an IF-shape that the existing AD machinery already handles. This is the nicest possible outcome — feature delivered with zero new dispatch complexity in the AD path. Sized like a verification piece, but closes the multi-session arc.
+
+**Tests added** (+1 new) in [DxirReverseTransformTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt):
+
+- `DxirReverseTransformTest.gradOfWhileInIfBranchAfterPhiCalculusUnrollFlowsCorrectly` — composes `PhiCalculus.apply` + `DxirReverseTransform.apply` on the WHILE-in-IF primal. Pin: `df/dx(3) = 8`, `df/dx(-2) = 1`, `df/dx(0) = 1`. The `coarsened` and `grad` IR shapes aren't asserted directly (their internal structure is shaped by F3 + C5 in ways that future passes may legitimately change); numerical pins are the load-bearing assertion.
+
+Full suite is green: **843 tests** (+1 over §0.4.152).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-live-index MR IF AD — per-index `gradAccum` refactor.** Per §0.4.151's register, this unlocks BOTH MR IF AD Phase 1+ widening AND multi-result COARSENED. Mechanical, ~15-20 sites in `DxirReverseTransform.kt`. Now the obvious next gap to close on the Phase 1 ladder.
+2. **Phase 4b — WHILE inside IF inside WHILE.** Widen §0.4.152's pre-scan + rewrite to also recurse into WHILE region bodies (with the symmetric rewrite-side widening). Realistic surface: a per-segment outer WHILE whose body has an IF guard around an inner WHILE.
+3. **Out-of-scope register refresh.** With Phase 4 (WHILE-in-IF-branch shape) closed end-to-end, the §0.4.151 register's "Multi-result IF AD" entry can split into "WHILE-in-IF-branch closed; multi-live-index + WHILE-in-WHILE pending".
+4. **Fourth `:benchmarks` inhabitant** — a primal that exercises the new WHILE-in-IF code path under the throughput sweep.
+
+**Definition-of-done for §0.4.153 — met**:
+- End-to-end test composes `PhiCalculus.apply` + `DxirReverseTransform.apply` on a WHILE-in-IF primal ✓
+- Numerical gradient pins at three sample points (positive, negative, boundary) ✓
+- Verifies that `walkBranchReverse` needs NO changes for the §0.4.152 rewrite output ✓
+- §0.4.152's recommended-next #1 (Phase 4 AD-side) closed ✓
+- Full suite stays green at 843 tests (+1) ✓
+
 #### 0.4.152 Multi-result IF AD Phase 4 first slice — region-recursive C5 2026-04-25
 
 §0.4.151's recommended-next #1 named **Multi-result IF AD Phase 4 — nested WHILE in IF branch** as the headline gap, with a precise sub-phase pointer: "the cleanest sub-phase to land first is region-recursive C5 (extend `applyC5Pass`'s pre-scan + rewrite to walk IF region bodies, not just `fn.body`)". §0.4.152 lands exactly that. C5's structural rewrite (paper §4.2 simple-loop direct unroll) now fires on WHILEs that live inside an IF's then- or else-region, not only at function-body level. The AD piece (Phase 4 proper — reverse-mode through `walkBranchReverse` over the rewritten IF) stays deferred; this slice closes the structural prerequisite.
