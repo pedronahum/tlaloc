@@ -369,7 +369,10 @@ object DxirReverseTransform {
                 if (n.isMultiResult) {
                     byId[n.id] = n
                     n to false
-                } else if (n.hasRegions) {
+                } else if (n.hasRegions || n.op == OpKind.COARSENED) {
+                    // §0.4.118 — IF regions get internal CSE; WHILE skips. §0.4.119 —
+                    // COARSENED has empty `regions` but stores `primal_body` /
+                    // `gradient_body` as DxirFunctions in attrs; recurse into those.
                     cseRegionBearingOp(n, byId, sig2canon, const2canon)
                 } else {
                     val canonicalOperands = n.operands.map { byId[it.id] ?: it }
@@ -409,11 +412,18 @@ object DxirReverseTransform {
 
     /**
      * §0.4.118 — region-bearing op CSE. For [OpKind.IF], recurse into each branch's
-     * region body using a scoped copy of the canonical maps. For [OpKind.COARSENED]
-     * and [OpKind.WHILE], keep the regions verbatim — both carry semantic baggage
-     * (pre-computed gradient bodies, control-flow back edges) that local CSE could
-     * accidentally invalidate. The op's IMMEDIATE operands (e.g., IF's predicate)
-     * are still canonicalized in all cases.
+     * region body using a scoped copy of the canonical maps. For [OpKind.WHILE],
+     * keep the regions verbatim — WHILE shouldn't survive SCT (the φ-pass coarsens
+     * it before reverse-transform), and even if it did, body-region CSE would have
+     * to respect the cond/body distinction. The op's IMMEDIATE operands (e.g.,
+     * IF's predicate) are still canonicalized in all cases.
+     *
+     * §0.4.119 — for [OpKind.COARSENED], the regions list is empty (the op stores
+     * its `primal_body` and `gradient_body` in attrs as full [DxirFunction]s, not
+     * as regions). Run [applyCSE] on each nested function so inner redundancy
+     * still gets deduplicated. `applyCSE` is idempotent (returns the same
+     * function reference when nothing changes), so re-running on already-CSE'd
+     * `gradient_body` produced by [DxirReverseTransform.apply] is a no-op.
      */
     private fun cseRegionBearingOp(
         n: DxirOp,
@@ -436,12 +446,39 @@ object DxirReverseTransform {
             n.regions
         }
 
+        val newAttrs: Map<String, Any> = if (n.op == OpKind.COARSENED) {
+            val rebuiltAttrs = HashMap(n.attrs)
+            var attrsMutated = false
+            (n.attrs["primal_body"] as? DxirFunction)?.let { primalBody ->
+                val csePrimal = applyCSE(primalBody)
+                if (csePrimal !== primalBody) {
+                    rebuiltAttrs["primal_body"] = csePrimal
+                    attrsMutated = true
+                }
+            }
+            (n.attrs["gradient_body"] as? DxirFunction)?.let { gradientBody ->
+                val cseGradient = applyCSE(gradientBody)
+                if (cseGradient !== gradientBody) {
+                    rebuiltAttrs["gradient_body"] = cseGradient
+                    attrsMutated = true
+                }
+            }
+            if (attrsMutated) {
+                mutated = true
+                rebuiltAttrs
+            } else {
+                n.attrs
+            }
+        } else {
+            n.attrs
+        }
+
         val rebuilt = if (mutated) {
             DxirOp(
                 id = n.id,
                 op = n.op,
                 operands = canonicalOperands,
-                attrs = n.attrs,
+                attrs = newAttrs,
                 types = n.types,
                 sharding = n.sharding,
                 regions = newRegions,

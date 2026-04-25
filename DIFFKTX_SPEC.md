@@ -39,6 +39,76 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.119 Region-internal CSE for COARSENED's nested functions 2026-04-25
+
+§0.4.118's Phase 1 of the deferred entry "Region-internal DCE/CSE" handled IF region bodies. This session ships Phase 2 — CSE of the [DxirFunction]s stored in [OpKind.COARSENED]'s attrs (`primal_body` and `gradient_body`). COARSENED is structurally unusual: it has `regions = emptyList()` even though it carries two complete nested functions in attrs. The Phase-1 dispatch (gated on `n.hasRegions`) skipped COARSENED entirely; this session adds it as a peer case.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt). Two coordinated changes:
+
+- `cseNode`'s dispatch now routes `n.op == OpKind.COARSENED` through `cseRegionBearingOp` even when `hasRegions = false`. The other branches (multi-result skip, single-result CSE) are unchanged.
+- `cseRegionBearingOp` grew an attrs-rebuild branch for COARSENED:
+
+```kotlin
+val newAttrs: Map<String, Any> = if (n.op == OpKind.COARSENED) {
+    val rebuiltAttrs = HashMap(n.attrs)
+    var attrsMutated = false
+    (n.attrs["primal_body"] as? DxirFunction)?.let { primalBody ->
+        val csePrimal = applyCSE(primalBody)
+        if (csePrimal !== primalBody) {
+            rebuiltAttrs["primal_body"] = csePrimal
+            attrsMutated = true
+        }
+    }
+    (n.attrs["gradient_body"] as? DxirFunction)?.let { gradientBody ->
+        val cseGradient = applyCSE(gradientBody)
+        if (cseGradient !== gradientBody) {
+            rebuiltAttrs["gradient_body"] = cseGradient
+            attrsMutated = true
+        }
+    }
+    if (attrsMutated) { mutated = true; rebuiltAttrs } else n.attrs
+} else n.attrs
+```
+
+The `applyCSE` recursion is naturally bounded by COARSENED nesting depth. `applyCSE` returns the input function reference unchanged when nothing was deduplicated, so re-running on already-CSE'd `gradient_body` (which `DxirReverseTransform.apply` produces) is a free no-op.
+
+**Decisions worth flagging**:
+
+- **Why COARSENED stores its inner functions in attrs, not regions.** Looking at `DxirBuilder.coarsened` (§0.4.31), the COARSENED op is intentionally `regions = emptyList()` with `primal_body` and `gradient_body` placed in the attrs map. This shape predates §0.4.118's region-CSE work. The natural consequence is that `n.hasRegions = false` for COARSENED, so Phase 1's region-recursion dispatch missed it. This session corrects that without touching the underlying op shape.
+
+- **`gradient_body` is already CSE'd at coarsen-time.** `DxirReverseTransform.apply` runs `applyCSE` as part of its pipeline before storing the result in `gradient_body`. So when the OUTER `applyCSE` walks a COARSENED op produced by the standard pipeline, the inner `applyCSE(gradientBody)` is idempotent — returns the same reference. The `csePrimal !== primalBody` reference check correctly detects the no-op case and skips the attrs rebuild. The path matters when a COARSENED op has been hand-built (test scaffolding) or post-modified — those bypass the standard `apply` pipeline.
+
+- **`primal_body` is NOT CSE'd at coarsen-time.** `coarsenRootLeaf` produces `primalBody` via `PhiCalculus.apply(fn, engine)`, which runs the φ-pass rewrites (F1/F2/F3/C1/C3/C5–C9) but not CSE. So pre-§0.4.119, a COARSENED op's `primal_body` could carry duplicate ADDs / MULs / etc. that no later pass would clean up. This session's outer `applyCSE` now reaches into `primal_body` and deduplicates, which:
+  - Reduces the size of the splice payload `handleCoarsenedAdjoint` clones during gradient computation.
+  - Doesn't change the gradient's mathematical content (the gradient_body was computed from the un-CSE'd primal, so the gradient's structure is unaffected; only the primal's storage size changes).
+
+- **`applyCSE` always rebuilds DxirOps even when only operand REFs change.** The existing CSE comment is explicit: *"Always rebuild with canonical operand references — even if operand ids are unchanged, the REFERENCES may now point to rebuilt ops in newBody rather than the originals."* This means `applyCSE` returning the SAME function reference is impossible whenever the body has any single-result op. The new idempotence test compares OP COUNTS rather than reference identity — pass 1 reduces 3 ADDs to 2, pass 2 keeps it at 2.
+
+- **Phase 2 keeps WHILE skipped.** WHILE shouldn't survive the φ-pass coarsening pre-reverse, so its absence from the CSE dispatch remains correct. If a future pipeline change makes WHILE reach `applyCSE`, extending the recursion to WHILE is a one-line change (`if (n.op == OpKind.IF) { ... }` → `if (n.op == OpKind.IF || n.op == OpKind.WHILE)`). Documented inline.
+
+**Tests added** (+2 new):
+
+- `DxirReverseTransformTest.cseAppliesToCoarsenedNestedFunctions` — hand-builds a COARSENED with a `primal_body` containing 3 ADDs (a duplicate pair plus the sum). Pre-CSE: 3 ADDs. Post-§0.4.119 CSE: 2 ADDs (duplicate merged). Pin: outer `applyCSE` reaches into the nested function.
+- `DxirReverseTransformTest.cseStructurallyConvergesOnAlreadyCsedCoarsenedNestedFunctions` — runs `applyCSE` twice. Both passes produce a COARSENED whose `primal_body` has the same 2-ADD shape. Pin: convergence (no spurious mutation cycles), even if function objects are rebuilt across passes.
+
+Full suite is green: **752 tests** (+2 over §0.4.118).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE; carve as scaffolding analogous to §0.4.103. Now that the smaller deferred items have been mostly cleared, this is the highest-impact remaining piece.
+2. **`gradient_body` with nested regions** — relax `handleCoarsenedAdjoint`'s `require(!n.hasRegions)` for IF specifically; recursive cloning needed.
+3. **Multi-result COARSENED** — extends §0.4.31's single-result COARSENED. Primal-side widening; needs `handleCoarsenedAdjoint` updates too.
+4. **`:benchmarks` Gradle module** — extract a perf probe; structural infrastructure.
+
+**Definition-of-done for §0.4.119 — met**:
+- `cseNode` dispatches COARSENED through `cseRegionBearingOp` even when `hasRegions = false` ✓
+- `cseRegionBearingOp` recursively CSEs `primal_body` and `gradient_body` DxirFunctions ✓
+- Reference-equality check skips the rebuild path when no inner function changed ✓
+- WHILE deliberately remains in the verbatim path with documented rationale ✓
+- Two tests pin inner CSE firing on hand-built COARSENED + idempotent convergence on second pass ✓
+- Existing 4 region-CSE tests still green (regression preserved) ✓
+- Full suite stays green at 752 tests (+2) ✓
+
 #### 0.4.118 Region-internal CSE for IF branches 2026-04-25
 
 §0.4.108's deferred entry "PhiCalculus | Region-internal DCE/CSE — Top-level CSE shipped §0.4.48" gets its first phase shipped. Pre-§0.4.118, `DxirReverseTransform.applyCSE` early-out'd whenever ANY body op carried regions: a single IF in the body disabled CSE everywhere. This session lands recursive CSE into IF-region bodies, with COARSENED and WHILE deferred to follow-ups.

@@ -913,6 +913,104 @@ class DxirReverseTransformTest {
     }
 
     @Test
+    fun cseAppliesToCoarsenedNestedFunctions() {
+        // §0.4.119 — COARSENED stores `primal_body` and `gradient_body` as
+        // DxirFunctions in attrs (NOT as regions). When applyCSE encounters a
+        // COARSENED op, it should also CSE those nested functions. Build a
+        // minimal COARSENED whose primal_body contains a duplicate ADD; verify
+        // the post-CSE COARSENED's primal_body has the duplicate removed.
+        val pred = DxirType(io.tlaloc.core.Bool, emptyList())
+        @Suppress("UNUSED_VARIABLE") val _pred = pred  // silence linter on unused boolS
+        // Build the inner primal_body with a redundant ADD pair.
+        val innerPrimal = DxirBuilder.function("inner_primal") {
+            val x = param("x", f32)
+            val a = op(OpKind.ADD, listOf(x, x), f32)
+            val b = op(OpKind.ADD, listOf(x, x), f32)
+            val sum = op(OpKind.ADD, listOf(a, b), f32)
+            listOf(sum)
+        }
+        // Hand-build a gradient_body shape that satisfies handleCoarsenedAdjoint's
+        // require: 1 + N params (upstream + N primal operands), N returns. Here
+        // primal has 1 operand (x), so 2 params (upstream, x), 1 return (the
+        // adjoint w.r.t. x).
+        val innerGrad = DxirBuilder.function("inner_grad") {
+            val upstream = param("upstream", f32)
+            val xPrim = param("x", f32)
+            val two = const(2f, f32)
+            val grad = op(OpKind.MUL, listOf(upstream, two), f32)
+            // dummy use of xPrim to keep ref-integrity
+            val _u = op(OpKind.ADD, listOf(grad, xPrim), f32)
+            listOf(_u)
+        }
+        // Outer fn that contains the COARSENED op.
+        val outer = DxirBuilder.function("outer") {
+            val x = param("x", f32)
+            val c = coarsened(
+                operands = listOf(x),
+                primalBody = innerPrimal,
+                gradientBody = innerGrad,
+                readsPrimalIndices = setOf(0),
+            )
+            listOf(c)
+        }
+        val outerPrimalBefore = (outer.body.first { it is DxirOp && (it as DxirOp).op == OpKind.COARSENED } as DxirOp)
+            .attrs["primal_body"] as io.tlaloc.ir.DxirFunction
+        val addsBefore = outerPrimalBefore.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD }
+        assertEquals(3, addsBefore, "pre-CSE primal_body should have 3 ADDs (a, b, sum)")
+
+        val cseOuter = DxirReverseTransform.applyCSE(outer)
+        val coarsenedPost = cseOuter.body.filterIsInstance<DxirOp>().single { it.op == OpKind.COARSENED }
+        val csedPrimal = coarsenedPost.attrs["primal_body"] as io.tlaloc.ir.DxirFunction
+        val addsAfter = csedPrimal.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD }
+        assertEquals(2, addsAfter, "post-CSE primal_body must have 2 ADDs (duplicate merged)")
+    }
+
+    @Test
+    fun cseStructurallyConvergesOnAlreadyCsedCoarsenedNestedFunctions() {
+        // Running applyCSE twice on the same outer function should converge: the
+        // second pass produces a function structurally equivalent to the first
+        // (same op counts in the COARSENED's nested primal_body). Pre-§0.4.119
+        // the pass would never recurse into COARSENED's attrs, so the inner
+        // duplicate ADD persisted; post-§0.4.119 the duplicate is gone after pass 1
+        // and stays gone after pass 2.
+        val innerPrimal = DxirBuilder.function("inner_primal") {
+            val x = param("x", f32)
+            val a = op(OpKind.ADD, listOf(x, x), f32)
+            val b = op(OpKind.ADD, listOf(x, x), f32)
+            val sum = op(OpKind.ADD, listOf(a, b), f32)
+            listOf(sum)
+        }
+        val innerGrad = DxirBuilder.function("inner_grad") {
+            val upstream = param("upstream", f32)
+            val xPrim = param("x", f32)
+            val two = const(2f, f32)
+            val grad = op(OpKind.MUL, listOf(upstream, two), f32)
+            val out = op(OpKind.ADD, listOf(grad, xPrim), f32)
+            listOf(out)
+        }
+        val outer = DxirBuilder.function("outer") {
+            val x = param("x", f32)
+            val c = coarsened(
+                operands = listOf(x),
+                primalBody = innerPrimal,
+                gradientBody = innerGrad,
+                readsPrimalIndices = setOf(0),
+            )
+            listOf(c)
+        }
+        val once = DxirReverseTransform.applyCSE(outer)
+        val twice = DxirReverseTransform.applyCSE(once)
+        // Both passes should yield the same op-count shape inside primal_body.
+        fun primalAddCount(fn: io.tlaloc.ir.DxirFunction): Int {
+            val coars = fn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.COARSENED }
+            val pb = coars.attrs["primal_body"] as io.tlaloc.ir.DxirFunction
+            return pb.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD }
+        }
+        assertEquals(2, primalAddCount(once), "after pass 1, primal_body has 2 ADDs (duplicate merged)")
+        assertEquals(2, primalAddCount(twice), "after pass 2, primal_body still has 2 ADDs (idempotent)")
+    }
+
+    @Test
     fun csePreservesExistingTopLevelBehaviorWhenNoRegions() {
         // Regression: a region-free function should still get top-level CSE applied.
         // Pin §0.4.48's existing dedup behavior to ensure §0.4.118's restructure
