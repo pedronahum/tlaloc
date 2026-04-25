@@ -39,6 +39,85 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.102 Out-of-scope register refresh + dynamic-loop pause 2026-04-25
+
+§0.4.68's "Out-of-scope register" snapshot has gone stale after ~30 sessions of work. This session ships an updated snapshot reflecting current status (everything between §0.4.69 and §0.4.101 has either shipped items off the register, narrowed them, or reframed them). It also marks an honest pause point in the dynamic-/loop-paced shipping cadence — the next genuinely valuable items all need substantial multi-session investment that the 5-min cadence isn't designed for.
+
+**Refreshed register (as of §0.4.101)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan. |
+| Tensor ops | Multi-dim GATHER/SCATTER | Rank-1 covered §0.4.41–§0.4.42; rank-N+ pending. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1 SUM-shaped covered. **Cross-rank broadcasting at the Tracer surface for the autograd path now works through §0.4.84/§0.4.85/§0.4.87; this remaining item is specifically the synthesis side.** |
+| Tensor ops | Batched MATMUL | Rank-2 only at emitter + synthesis. |
+| StableHLO emitter | SCATTER_ADD widening | `:core` SCATTER_ADD has no MLIR lowering yet. |
+| StableHLO emitter | Scatter-into-zeros pattern | `:autograd`'s SCATTER bridge common case; needs an arm. |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Region-internal DCE/CSE | Top-level CSE shipped §0.4.48. |
+| PhiCalculus | Multi-result IF / multi-back-edge WHILE | Single-back-edge covered. |
+| PhiCalculus | Multi-result COARSENED | Single-result covered §0.4.31. |
+| PhiCalculus | Recursive `splitOnReuses` | One split covered §0.4.29. |
+| PhiCalculus | Cache pruning | `tlaloc.cache.dir` grows unbounded. |
+| PhiCalculus | `gradient_body` with nested regions | Linear gradient bodies cover today. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | Case-by-case for unusual nests. |
+| Control flow | Multi-block regions | Single-block today. |
+| Closure work | **D.3i closed-form closure** for LAND-composed WHILE | Pending; paper-faithful break-bearing WHILE. |
+| Closure work | **D.1i Symja `Simplify` on whole gradient expressions** | Paper mechanism (ii) full form. §0.4.52 wired Symja into C6's path. |
+| Infrastructure | `:benchmarks` Gradle module | Perf probes live in-test. |
+| Benchmark ports | **HMC / CartPole / QWOP** | Paper's three remaining benchmarks; multi-session each. |
+| Tracer surface | `valueAndGrad3` / `grad3` (3-tensor inputs) | Two-input variants cover §0.4.81/§0.4.82's needs. |
+| Tracer surface | Rank-3↔rank-1/rank-2 cross-rank broadcast | rank-3-scalar covered §0.4.97/§0.4.98; cross-rank deferred. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+| API completeness | `Long` literal LHS/RHS broadcast overloads | Float/Double/Int land in §0.4.93/§0.4.95. |
+
+**Recently shipped between §0.4.68 and §0.4.101** (subset; see individual notes for detail):
+
+- All scalar-broadcast operator combinations (rank-0/1/2/3 × LHS/RHS × 4 ops; §0.4.77–§0.4.93, §0.4.97–§0.4.98).
+- Float / Double / Int literal broadcast in any position (§0.4.75 / §0.4.93 / §0.4.95).
+- Row / column broadcasting on the Tracer surface (§0.4.85 / §0.4.87 / §0.4.89 / §0.4.90).
+- `Tracer.peek()` / `.scalar` / `.constant` / `.constantLike` / `.unaryMinus` (§0.4.59 / §0.4.62 / §0.4.65 / §0.4.69 / §0.4.96).
+- Five unary math ops + `pow` on Tracer (§0.4.63 / §0.4.64).
+- `gradWithScalar` / `valueAndGradWithScalar` / `gradWithScalars` / `valueAndGradWithScalars` (§0.4.81 / §0.4.82).
+- Capture-side `FloatArray` const handling, attrs propagation, axis-aware BROADCAST reverse (§0.4.71–§0.4.73 / §0.4.80 / §0.4.84).
+- `Tensors.f32Tensor3` constructor (§0.4.97).
+- Bridge-equivalence pins for scalar / row / col / rank-3 broadcasting (§0.4.79 / §0.4.86 / §0.4.88 / §0.4.100).
+- Round-trip pins for captured rank-1 / rank-2 / rank-3 broadcasts through `stablehlo-translate` (§0.4.74 / §0.4.80 / §0.4.83 / §0.4.99).
+- Bool ops emission in StableHLO (§0.4.60 / §0.4.61).
+
+**Decisions worth flagging**:
+
+- **Stopping the dynamic-/loop iteration cadence here.** The /loop has been re-firing every ~5 minutes since §0.4.55, shipping 47 sub-sections of mostly small but legitimate work. The remaining queue (D.3i, D.1i, diagnosticReporter migration, benchmark ports) is multi-session; trying to fit those into the 5-min cadence would either pad scope or commit broken intermediate states. Better to pause cleanly and let the user pick the next direction with full attention.
+
+- **The pause is not "loop is broken".** When the user wakes up, restarting `/loop` with the same prompt — or with a more specific prompt scoped to a multi-session task — both work. This commit just exits the auto-loop without scheduling the next firing.
+
+- **Kept the register tabular.** The shipped/deferred split that §0.4.68 introduced was a useful organizing principle; refresh keeps it. Future refreshes are cheap when they fit naturally.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **681 tests** (unchanged from §0.4.101).
+
+**Recommended next pickup** (these are the items that justify multi-session focus):
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — paper-faithful break-bearing WHILE. 2+ sessions of φ-calculus design work.
+2. **D.1i Symja `Simplify` on whole gradient expressions** — paper mechanism (ii) full form. 1–2 sessions; some Symja API surface to learn.
+3. **`diagnosticReporter` migration proper** — 4-step refactor; recipe in §0.4.94.
+4. **HMC benchmark port** — paper's hardest control-flow benchmark; multi-session.
+5. **Cross-rank broadcasting at synthesis surface** — generalize §0.4.84's reverse for IR-side `DxirToIrSynthesis`.
+
+**Definition-of-done for §0.4.102 — met**:
+- Out-of-scope register refreshed to §0.4.101 state ✓
+- Tabular shipped vs. deferred lists kept aligned ✓
+- Recommended next pickups all rest at "multi-session" granularity ✓
+- Loop iteration paused cleanly ✓
+- Full suite stays green at 681 tests ✓
+
 #### 0.4.101 Broadcast composition test — exercises Float-literal + row + scalar paths together 2026-04-25
 
 A single test that combines four broadcast paths in one expression. Catches dispatch inconsistencies that would slip through any single-path test: each piece works in isolation, but their interaction relies on Kotlin's overload resolution picking the right binding at every step of `((x - 1f) * w) * 0.5f`.
