@@ -102,6 +102,14 @@ object DxirReverseTransform {
         require(ret.type.isScalar) {
             "DxirReverseTransform v1 requires a scalar return (got ${ret.type})"
         }
+        // §0.4.139 — multi-result IFs are allowed at the top level when exactly one
+        // result index is referenced downstream. The seed flows into `gradAccum[if.id]`
+        // (DxirOpResult.id == source.id), so the per-branch reverse walk needs to
+        // know which terminator slot to seed at. `findIfLiveResultIndex` returns the
+        // unique referenced index or null if multiple are referenced — that case
+        // would conflate per-index upstream contributions and is deferred until the
+        // full per-index gradAccum refactor (a future MR IF AD phase).
+        val ifLiveIndices = HashMap<Int, Int>()
         for (n in primal.body) {
             if (n is DxirOp) {
                 if (n.hasRegions) {
@@ -112,8 +120,17 @@ object DxirReverseTransform {
                             "Stage B's PhiCalculus pass before SCT)"
                     }
                 }
-                require(!n.isMultiResult) {
-                    "DxirReverseTransform v1 rejects multi-result ops (got ${n.op})"
+                if (n.isMultiResult) {
+                    require(n.op == OpKind.IF) {
+                        "DxirReverseTransform v1 rejects multi-result ops (got ${n.op})"
+                    }
+                    val liveIdx = findIfLiveResultIndex(primal, n)
+                        ?: error(
+                            "DxirReverseTransform v1: multi-result IF id=${n.id} has more " +
+                                "than one (or zero) result indices referenced downstream — " +
+                                "current MR IF AD only supports the single-live-index case",
+                        )
+                    ifLiveIndices[n.id] = liveIdx
                 }
             }
         }
@@ -198,7 +215,8 @@ object DxirReverseTransform {
                 // seeded at the branch's yield, then synthesize an IF that picks the
                 // appropriate per-branch adjoint based on the runtime predicate.
                 if (n.op == OpKind.IF) {
-                    handleIfAdjoint(n, upstream, gradAccum, nodeMap, primalById, this)
+                    val liveIdx = ifLiveIndices[n.id] ?: 0
+                    handleIfAdjoint(n, upstream, liveIdx, gradAccum, nodeMap, primalById, this)
                     continue
                 }
                 // §0.4.32 — COARSENED adjoint: splice the stored gradient_body into the
@@ -828,6 +846,44 @@ object DxirReverseTransform {
      * is on, then transitively closed through [DxirOp.operands] so every operand-reference
      * chain reaching a used node is itself cloneable.
      */
+    /**
+     * §0.4.139 — find the unique result index of [ifOp] that's referenced downstream
+     * in [fn]'s body or returns. Returns null when zero or multiple indices are
+     * referenced — both cases are handled by other phases (zero = dead op, deferred
+     * to DCE; multiple = needs per-index gradAccum, deferred). Used by the multi-
+     * result-IF AD entry-point validation in [apply].
+     *
+     * Mirrors the structural shape of [PhiCalculus.findReferencedCarried] but
+     * scoped to a single op (rather than a WHILE's all-result indices) and
+     * returning a unique-or-null result.
+     */
+    private fun findIfLiveResultIndex(fn: DxirFunction, ifOp: DxirOp): Int? {
+        val ifId = ifOp.id
+        val referenced = HashSet<Int>()
+        fun checkRef(node: DxirNode) {
+            if (node is DxirOpResult && node.source.id == ifId) {
+                referenced += node.index
+            } else if (node is DxirOp && node.id == ifId) {
+                // Direct ref to a multi-result op implicitly targets index 0.
+                referenced += 0
+            }
+        }
+        fun walk(nodes: List<DxirNode>) {
+            for (n in nodes) {
+                if (n !is DxirOp) continue
+                if (n === ifOp) continue
+                for (o in n.operands) checkRef(o)
+                for (r in n.regions) for (b in r.blocks) {
+                    walk(b.body)
+                    for (term in b.terminator) checkRef(term)
+                }
+            }
+        }
+        walk(fn.body)
+        for (r in fn.returns) checkRef(r)
+        return referenced.singleOrNull()
+    }
+
     private fun computeUsedByAdjoint(
         primal: DxirFunction,
         primalById: Map<Int, DxirNode>,
@@ -911,14 +967,15 @@ object DxirReverseTransform {
     private fun handleIfAdjoint(
         ifNode: DxirOp,
         upstream: DxirNode,
+        liveIdx: Int,
         outerGradAccum: MutableMap<Int, DxirNode>,
         outerNodeMap: Map<Int, DxirNode>,
         primalById: Map<Int, DxirNode>,
         builder: DxirBuilder,
     ) {
         require(ifNode.op == OpKind.IF) { "handleIfAdjoint: not an IF (got ${ifNode.op})" }
-        require(ifNode.types.size == 1) {
-            "handleIfAdjoint: only single-result IF supported (got ${ifNode.types.size} results)"
+        require(liveIdx in ifNode.types.indices) {
+            "handleIfAdjoint: liveIdx=$liveIdx out of bounds for ${ifNode.types.size}-result IF id=${ifNode.id}"
         }
         val predClone = outerNodeMap[ifNode.operands[0].id]
             ?: error("handleIfAdjoint: predicate id=${ifNode.operands[0].id} not in nodeMap")
@@ -926,8 +983,11 @@ object DxirReverseTransform {
         val thenBlock = ifNode.regions[0].blocks.single()
         val elseBlock = ifNode.regions[1].blocks.single()
 
-        val thenAdjoints = walkBranchReverse(thenBlock, upstream, outerNodeMap, primalById, builder)
-        val elseAdjoints = walkBranchReverse(elseBlock, upstream, outerNodeMap, primalById, builder)
+        // §0.4.139 — for multi-result IF (single-live-index case), seed each branch's
+        // reverse walk at terminator[liveIdx] rather than terminator.single(). For
+        // single-result IF, liveIdx is always 0 and the call is equivalent.
+        val thenAdjoints = walkBranchReverse(thenBlock, upstream, liveIdx, outerNodeMap, primalById, builder)
+        val elseAdjoints = walkBranchReverse(elseBlock, upstream, liveIdx, outerNodeMap, primalById, builder)
 
         // Combine per-branch adjoints into a synthesized IF for each outer-scope id.
         // LinkedHashSet preserves insertion order so the IF emission order is
@@ -1248,6 +1308,7 @@ object DxirReverseTransform {
     private fun walkBranchReverse(
         block: io.tlaloc.ir.DxirBlock,
         upstream: DxirNode,
+        liveIdx: Int,
         outerNodeMap: Map<Int, DxirNode>,
         primalById: Map<Int, DxirNode>,
         builder: DxirBuilder,
@@ -1293,7 +1354,15 @@ object DxirReverseTransform {
         }
 
         // Step 2: seed the per-branch gradAccum with `upstream` at the yield's id.
-        val yieldNode = block.terminator.single()
+        // §0.4.139 — for multi-result IF (single-live-index case), seed at the
+        // terminator slot corresponding to the live result index. For single-result
+        // IF, terminator has size 1 and liveIdx == 0 — equivalent to the
+        // pre-§0.4.139 `block.terminator.single()`.
+        require(liveIdx in block.terminator.indices) {
+            "walkBranchReverse: liveIdx=$liveIdx out of bounds for branch terminator " +
+                "size=${block.terminator.size}"
+        }
+        val yieldNode = block.terminator[liveIdx]
         val gradAccum = HashMap<Int, DxirNode>()
         gradAccum[yieldNode.id] = upstream
 

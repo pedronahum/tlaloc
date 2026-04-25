@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.139 Multi-result IF AD — single-live-index case 2026-04-25
+
+Multi-result IF AD has been the headline deferred item across the §0.4.135 → §0.4.138 recommended-next lists. The full per-index gradAccum refactor is multi-session work; this session ships a tightly-scoped Phase 1 that handles the *single-live-index* case — a multi-result IF where exactly one of its result indices is referenced downstream. That covers the §0.4.128 LoopInvariant rewrite's typical shape (function returns `whileResult(0)` from inside the IF's else-region, other result indices unreferenced) plus user-written multi-output IFs whose other outputs are dead.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt):
+
+1. **`findIfLiveResultIndex(fn, ifOp): Int?`** walks `fn.body + returns` and collects every result index of `ifOp` referenced via `DxirOpResult` or direct `DxirOp` ref. Returns the unique index or null. Mirrors `PhiCalculus.findReferencedCarried`'s shape.
+
+2. **Validation gate** at [DxirReverseTransform.kt:114](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L114) splits: top-level multi-result ops still reject *unless* the op is an IF and `findIfLiveResultIndex` returns a unique index. The validated live index gets stashed in `ifLiveIndices: Map<Int, Int>` for the reverse-walk dispatch.
+
+3. **`handleIfAdjoint` and `walkBranchReverse`** gain a `liveIdx` parameter. The branch reverse walk seeds `gradAccum[block.terminator[liveIdx].id] = upstream` instead of `gradAccum[terminator.single().id] = upstream`. For single-result IF, `liveIdx == 0` and `terminator.single()` collapses to the same node — backwards-compatible.
+
+The non-live result indices' adjoint contributions are correctly ignored: the upstream only seeds `gradAccum[terminator[liveIdx].id]`, so any branch body op that contributes to `terminator[!=liveIdx]` doesn't get an upstream → its `VjpRule.apply` never fires → no spurious gradient.
+
+**Decisions worth flagging**:
+
+- **Single-live-index is the common case, not a niche restriction.** A function whose return reaches an MR IF via `DxirOpResult(if, k)` references exactly one index. That's the §0.4.128 LoopInvariant rewrite shape: the function returns `w.result(0)` of the inner WHILE; the WHILE is wrapped in an IF that yields counter + carried; the function's return reaches the IF's `result(0)` only. Phase 1 unblocks every gradient-flow test that fits this shape.
+
+- **Multi-live-index is deferred to a per-index gradAccum refactor.** When two consumers reference `if.result(0)` and `if.result(1)`, both contributions accumulate into `gradAccum[if.id]` (since `DxirOpResult.id == source.id`). The current single-key-per-id design conflates them. Splitting `gradAccum` to `Pair<Int, Int>`-keyed (op-id × result-index) is a structural change touching every `gradAccum.put` / `.get` site — out of scope for one session. The validation explicitly errors on this case so users get a clear diagnostic.
+
+- **`require(n.isMultiResult ...)` reorder is structural.** The pre-§0.4.139 gate combined `hasRegions` + `isMultiResult` checks. The new gate keeps `hasRegions` requiring `IF` (unchanged) and only relaxes the `isMultiResult` check when the op is also an IF with a known live index. Other multi-result ops at top level still error — no looser policy.
+
+- **`liveIdx` defaults to 0 in single-result paths.** When the reverse walk encounters a single-result IF, `ifLiveIndices[n.id]` is unset and the lookup defaults to 0. `block.terminator[0]` for a single-result IF equals `block.terminator.single()`. Backwards-compatible without scattered conditionals — the multi-result path is the new code; the single-result path is the index-0 special case.
+
+- **Phase 1 does not unblock §0.4.128's gradient flow on its own.** The §0.4.128 LoopInvariant rewrite produces an IF whose else-region contains a vanilla bounded WHILE. `walkBranchReverse` still rejects nested control flow (the WHILE inside the branch). To close §0.4.128's gradient gap completely, Phase 2 would extend `walkBranchReverse` to recurse into nested control flow — separate session work. §0.4.139 is a structural prerequisite that pins the entry-point shape so Phase 2 has a clean substrate.
+
+- **`opMulti` is the test-side construction surface.** The DxirBuilder DSL's `ifOp` overload is single-result; for multi-result IF tests I use the lower-level `opMulti(OpKind.IF, ...)` constructor. The pattern matches what existing tests use for multi-result WHILE construction.
+
+**Tests added** (+3 new) in [DxirReverseTransformTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt):
+
+- `DxirReverseTransformTest.gradOfMultiResultIfWithLiveIndexZeroFlowsCorrectly` — `f(x) = (if (x>0) (-x, x²) else (x, x²)).result(0)`. Pin: `d/dx = -1` at `x=2` (then-arm yields `-x`); `d/dx = 1` at `x=-3` (else-arm yields `x`). The `result(1) = x²` slot's contribution is correctly ignored.
+- `DxirReverseTransformTest.gradOfMultiResultIfWithLiveIndexOneFlowsCorrectly` — same MR IF, function returns `result(1) = x²`. Pin: `d/dx = 10` at `x=5` and `d/dx = -6` at `x=-3` (i.e., `2x`). Confirms the live-index plumbing routes the seed to the correct terminator slot regardless of which index.
+- `DxirReverseTransformTest.gradOfMultiResultIfWithMultipleLiveIndicesIsRejected` — same MR IF but the function adds `result(0) + result(1)`. Pin: `DxirReverseTransform.apply` throws `IllegalStateException` with a message naming the IF op and the multiple-live-indices condition.
+
+Full suite is green: **824 tests** (+3 over §0.4.138).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 2 — recursive `walkBranchReverse`.** Allow nested control flow (IF / WHILE) inside an IF arm's body. Combined with §0.4.139 + §0.4.128's LoopInvariant rewrite, this unblocks the end-to-end gradient flow that's been the headline gap.
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+3. **`:benchmarks` Gradle module**.
+4. **Multi-live-index MR IF AD — per-index gradAccum refactor**.
+
+**Definition-of-done for §0.4.139 — met**:
+- `findIfLiveResultIndex` helper recognises `DxirOpResult` and direct `DxirOp` references ✓
+- Validation gate accepts MR IF only when exactly one result index is referenced ✓
+- `handleIfAdjoint` + `walkBranchReverse` thread `liveIdx` through the per-branch reverse walk ✓
+- 2 positive tests pin per-index gradient flow at `liveIdx = 0` and `liveIdx = 1` ✓
+- 1 negative test pins the multi-live-index rejection ✓
+- Single-result IF paths unchanged (backwards-compatible via `liveIdx = 0` default) ✓
+- Full suite stays green at 824 tests (+3) ✓
+
 #### 0.4.138 `MatmulRule` generalised to any rank ≥ 2 2026-04-25
 
 §0.4.137 extended `MatmulRule` to rank-2 / rank-3 with a hard-coded branch on rank. The §0.4.135 substrate already accepted any rank; the §0.4.136 TRANSPOSE accepted arbitrary permutations. This session widens the rule's rank gate from `rank in 2..3` to `rank ≥ 2` and computes the permutation / batch-dim list mechanically from the operand rank: `perm = [0..r-3] + [r-1, r-2]`, batch dims `= a.dims[0..r-3]`. Rank-4+ batched matmul gradients now flow end-to-end through `DxirReverseTransform.apply` against a hand-built rank-4 primal.
