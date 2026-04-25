@@ -527,10 +527,15 @@ object PhiCalculus {
                 is BreakBearingWhile.BreakCondClass.Constant,
                 BreakBearingWhile.BreakCondClass.LoopInvariant -> toRewrite[n.id] = klass
                 BreakBearingWhile.BreakCondClass.CounterOnly -> {
-                    // §0.4.131 — only handle the canonical `STEP(SUB(args[counter],
-                    // thresholdConst))` shape with a concrete origCond bound. Other
-                    // CounterOnly shapes fall through to later D.3i phases.
-                    if (computeCounterOnlyEffectiveTripCount(pattern) != null) {
+                    // §0.4.131 (Phase 3e) handles the both-concrete shape
+                    // `STEP(SUB(args[counter], thresholdConst))` with concrete origCond
+                    // bound; §0.4.141 (Phase 3f) extends to the symbolic case where at
+                    // least one of n / threshold is a region-external [DxirParam]. Other
+                    // CounterOnly shapes (region-internal symbolic, non-canonical operand
+                    // order) still fall through to later D.3i phases.
+                    if (computeCounterOnlyEffectiveTripCount(pattern) != null
+                        || computeCounterOnlySymbolicShape(pattern) != null
+                    ) {
                         toRewrite[n.id] = klass
                     }
                 }
@@ -547,9 +552,19 @@ object PhiCalculus {
                 BreakBearingWhile.BreakCondClass.LoopInvariant -> rewriteLoopInvariantBreak(
                     op, nodeMap, multiOut, builder,
                 )
-                BreakBearingWhile.BreakCondClass.CounterOnly -> rewriteCounterOnlyBreak(
-                    op, nodeMap, multiOut, builder,
-                )
+                BreakBearingWhile.BreakCondClass.CounterOnly -> {
+                    val pattern = BreakBearingWhile.detect(op)!!
+                    // Phase 3e gets first shot on the both-concrete shape (its
+                    // const-fold composes with C5 to unroll the WHILE downstream
+                    // in the same singlePass iteration); Phase 3f handles the
+                    // residual symbolic-bound cases that emit a runtime min via
+                    // an outer IF chain.
+                    if (computeCounterOnlyEffectiveTripCount(pattern) != null) {
+                        rewriteCounterOnlyBreak(op, nodeMap, multiOut, builder)
+                    } else {
+                        rewriteCounterOnlySymbolicBreak(op, nodeMap, multiOut, builder)
+                    }
+                }
                 else -> error(
                     "applyBreakBearingClosurePass: unexpected class ${klass::class.simpleName} " +
                         "for WHILE id=${op.id} — pre-scan and rewrite must agree on which " +
@@ -630,6 +645,160 @@ object PhiCalculus {
             val newN = const(effectiveTrip, counterType)
             val newSub = op(OpKind.SUB, listOf(newN, counterArg), counterType)
             val newStep = op(OpKind.STEP, listOf(newSub), boolType)
+            yields(newStep)
+        }
+        val newBodyRegion = cloneRegion(op.regions[1], nodeMap, builder, multiOut)
+        val clonedInits = op.operands.map { init ->
+            nodeMap[init.id]
+                ?: error(
+                    "applyBreakBearingClosurePass: init id=${init.id} for WHILE id=${op.id} " +
+                        "missing from nodeMap",
+                )
+        }
+        return builder.opMulti(
+            OpKind.WHILE,
+            clonedInits,
+            op.types,
+            regions = listOf(newCondRegion, newBodyRegion),
+        )
+    }
+
+    /**
+     * §0.4.141 — D.3i Phase 3f. Captures the canonical CounterOnly shape
+     * `breakCond = STEP(SUB(args[counterArgIdx], threshold))` when at least one of
+     * `n` / `threshold` is a region-external [DxirParam] — i.e., the cases where
+     * the effective trip count `min(n, threshold + 1)` can't be folded at compile
+     * time but CAN be emitted as a runtime IF chain in outer scope. Phase 3e's
+     * concrete-int shortcut handles the both-concrete case via const folding.
+     *
+     * Returns null when:
+     *  - The breakCond doesn't match the canonical `STEP(SUB(args[counter], threshold))`
+     *    shape, or [Pattern.counterArgIdx] is missing.
+     *  - `threshold` is neither a [DxirConst] nor a [DxirParam] (region-internal
+     *    [DxirOp]s aren't supported yet — they'd need a LoopInvariant-style lift).
+     *  - `n` is neither extractable from [Pattern.tripCountConst] (a region-external
+     *    [DxirConst]) nor populated as [Pattern.tripCountParam].
+     *  - BOTH `n` and `threshold` are concrete [DxirConst] — that's Phase 3e's case.
+     *  - The threshold const is negative or non-integer (mirrors Phase 3e's checks).
+     */
+    private data class CounterOnlySymbolicShape(
+        val nNode: DxirNode,
+        val thresholdNode: DxirNode,
+        val counterArgIdx: Int,
+        val counterType: io.tlaloc.ir.DxirType,
+        val boolType: io.tlaloc.ir.DxirType,
+    )
+
+    private fun computeCounterOnlySymbolicShape(
+        pattern: BreakBearingWhile.Pattern,
+    ): CounterOnlySymbolicShape? {
+        val counterArgIdx = pattern.counterArgIdx ?: return null
+        val condBlock = pattern.whileOp.regions[0].blocks.single()
+        val counterArgId = condBlock.args[counterArgIdx].id
+
+        val step = pattern.breakCond as? DxirOp ?: return null
+        if (step.op != OpKind.STEP) return null
+        if (step.operands.size != 1) return null
+        val sub = step.operands[0] as? DxirOp ?: return null
+        if (sub.op != OpKind.SUB) return null
+        if (sub.operands.size != 2) return null
+        if (sub.operands[0].id != counterArgId) return null
+        val thresholdNode = sub.operands[1]
+        if (thresholdNode !is DxirConst && thresholdNode !is DxirParam) return null
+        if (thresholdNode is DxirConst) {
+            val v = (thresholdNode.value as? Number)?.toDouble() ?: return null
+            if (v < 0.0 || v != v.toInt().toDouble()) return null
+        }
+
+        val nNode: DxirNode = pattern.tripCountParam ?: run {
+            // Concrete-int n: extract the original [DxirConst] node from origCond.
+            val origCondOp = pattern.origCond as? DxirOp ?: return null
+            if (origCondOp.op != OpKind.STEP) return null
+            val origSub = origCondOp.operands[0] as? DxirOp ?: return null
+            if (origSub.op != OpKind.SUB) return null
+            origSub.operands[0]
+        }
+        if (nNode !is DxirConst && nNode !is DxirParam) return null
+
+        // Phase 3e handles both-concrete; Phase 3f's contract is "at least one symbolic".
+        if (nNode is DxirConst && thresholdNode is DxirConst) return null
+
+        return CounterOnlySymbolicShape(
+            nNode = nNode,
+            thresholdNode = thresholdNode,
+            counterArgIdx = counterArgIdx,
+            counterType = pattern.whileOp.operands[counterArgIdx].type,
+            boolType = step.type,
+        )
+    }
+
+    /**
+     * §0.4.141 — D.3i Phase 3f. Symbolic-bound CounterOnly arm. The closed-form
+     * effective trip count `min(n, threshold + 1)` becomes a runtime `IF` chain
+     * lifted into outer scope:
+     *
+     * ```
+     * thresholdPlus1 = ADD(threshold, 1)
+     * cmp            = STEP(SUB(thresholdPlus1, n))   // 1 iff n < thresholdPlus1
+     * effectiveN     = IF(cmp, n, thresholdPlus1)     // picks min
+     * ```
+     *
+     * The rewritten WHILE's cond region terminator is `STEP(SUB(effectiveN, counter))`
+     * — the LAND-NOT closure wrapper is gone. C5 cannot unroll this WHILE downstream
+     * (its bound is no longer a compile-time int), so the WHILE remains for the
+     * interpreter to evaluate at runtime; the gain is structural — the closure is
+     * resolved into a vanilla bounded WHILE with a hoisted runtime bound.
+     */
+    private fun rewriteCounterOnlySymbolicBreak(
+        op: DxirOp,
+        nodeMap: MutableMap<Int, DxirNode>,
+        multiOut: MutableMap<Int, List<DxirNode>>,
+        builder: DxirBuilder,
+    ): DxirNode {
+        val pattern = BreakBearingWhile.detect(op)!!
+        val shape = computeCounterOnlySymbolicShape(pattern)
+            ?: error(
+                "applyBreakBearingClosurePass: rewriteCounterOnlySymbolicBreak called on " +
+                    "WHILE id=${op.id} but the symbolic CounterOnly shape no longer matches — " +
+                    "pre-scan and rewrite must agree",
+            )
+
+        // [DxirConst] nodes are reconstructed (no SSA-id dependency); [DxirParam]
+        // nodes are resolved through nodeMap to the cloned param in the new function.
+        val nClone: DxirNode = when (val n = shape.nNode) {
+            is DxirConst -> builder.const(n.value, n.type, n.sharding)
+            else -> nodeMap[n.id]
+                ?: error(
+                    "applyBreakBearingClosurePass: n node id=${n.id} for WHILE id=${op.id} " +
+                        "missing from nodeMap",
+                )
+        }
+        val thresholdClone: DxirNode = when (val t = shape.thresholdNode) {
+            is DxirConst -> builder.const(t.value, t.type, t.sharding)
+            else -> nodeMap[t.id]
+                ?: error(
+                    "applyBreakBearingClosurePass: threshold node id=${t.id} for WHILE id=${op.id} " +
+                        "missing from nodeMap",
+                )
+        }
+
+        val one = builder.const(1, shape.counterType)
+        val thresholdPlus1 = builder.op(OpKind.ADD, listOf(thresholdClone, one), shape.counterType)
+        val cmpSub = builder.op(OpKind.SUB, listOf(thresholdPlus1, nClone), shape.counterType)
+        val cmp = builder.op(OpKind.STEP, listOf(cmpSub), shape.boolType)
+        val effectiveN = builder.ifOp(
+            cond = cmp,
+            types = listOf(shape.counterType),
+            thenRegion = builder.region { yields(nClone) },
+            elseRegion = builder.region { yields(thresholdPlus1) },
+        )
+
+        val condBlock = op.regions[0].blocks.single()
+        val newCondRegion = builder.region {
+            val newArgs = condBlock.args.map { arg(it.type, it.sharding) }
+            val counterArg = newArgs[shape.counterArgIdx]
+            val newSub = op(OpKind.SUB, listOf(effectiveN, counterArg), shape.counterType)
+            val newStep = op(OpKind.STEP, listOf(newSub), shape.boolType)
             yields(newStep)
         }
         val newBodyRegion = cloneRegion(op.regions[1], nodeMap, builder, multiOut)

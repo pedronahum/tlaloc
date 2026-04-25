@@ -867,6 +867,195 @@ class PhiCalculusTest {
         assertEquals(1, countOps(rewritten, OpKind.WHILE), "non-canonical shape must leave WHILE intact")
     }
 
+    // ---- §0.4.141 — D.3i Phase 3f: CounterOnly arm with symbolic bound(s) ----
+
+    /**
+     * Helper: break-bearing CounterOnly WHILE with `n` carried via a function
+     * param (symbolic) and threshold as a concrete const. Body doubles the f32
+     * carried per iter; effective trip count = min(n_param, threshold + 1).
+     */
+    private fun breakBearingCounterOnlySymbolicN(threshold: Int): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakCounterOnlySymN_$threshold") {
+            val x = param("x", f32s)
+            val nParam = param("n", i32s)
+            val zero = const(0, i32s)
+            val cap = const(threshold, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nParam, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(args[1], cap), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    /**
+     * Helper: break-bearing CounterOnly WHILE with concrete `n` and threshold
+     * carried via a function param (symbolic). Mirrors [breakBearingCounterOnlySymbolicN]
+     * with the symbolic role swapped. Effective trip = min(n, threshold_param + 1).
+     */
+    private fun breakBearingCounterOnlySymbolicThreshold(n: Int): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakCounterOnlySymThresh_$n") {
+            val x = param("x", f32s)
+            val thresholdParam = param("threshold", i32s)
+            val nConst = const(n, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nConst, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(args[1], thresholdParam), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    /**
+     * Helper: break-bearing CounterOnly WHILE with both `n` and threshold carried
+     * via function params. Effective trip = min(n_param, threshold_param + 1).
+     */
+    private fun breakBearingCounterOnlyBothSymbolic(): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakCounterOnlyBothSym") {
+            val x = param("x", f32s)
+            val nParam = param("n", i32s)
+            val thresholdParam = param("threshold", i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nParam, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(args[1], thresholdParam), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    @Test
+    fun breakBearingClosureRewritesSymbolicNCounterOnly() {
+        // Symbolic n, concrete threshold = 3. Effective trip = min(n, 4).
+        val original = breakBearingCounterOnlySymbolicN(threshold = 3)
+        val rewritten = PhiCalculus.apply(original)
+        // C5 cannot unroll a runtime-IF bound; the WHILE remains, but the LAND-NOT
+        // closure is gone — replaced by a vanilla `STEP(SUB(effectiveN, counter))`.
+        assertEquals(1, countOps(rewritten, OpKind.WHILE), "WHILE remains because effective bound is runtime IF")
+        assertEquals(0, countOps(rewritten, OpKind.LAND), "LAND-NOT closure must be removed")
+        // n = 10 → min(10, 4) = 4 iters → 5 · 2^4 = 80.
+        val outA = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(10f)))
+        assertEquals(80f, outA[0][0])
+        // n = 3  → min(3, 4) = 3 iters → 5 · 2^3 = 40.
+        val outB = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(3f)))
+        assertEquals(40f, outB[0][0])
+        // n = 0  → min(0, 4) = 0 iters → 5 unchanged.
+        val outC = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(0f)))
+        assertEquals(5f, outC[0][0])
+        // Numerical agreement against the unrewritten original at the same inputs.
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(10f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(3f)))
+    }
+
+    @Test
+    fun breakBearingClosureRewritesSymbolicThresholdCounterOnly() {
+        // Concrete n = 7, symbolic threshold. Effective trip = min(7, threshold + 1).
+        val original = breakBearingCounterOnlySymbolicThreshold(n = 7)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(1, countOps(rewritten, OpKind.WHILE))
+        assertEquals(0, countOps(rewritten, OpKind.LAND))
+        // threshold = 2 → min(7, 3) = 3 iters → 5 · 2^3 = 40.
+        val outA = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(2f)))
+        assertEquals(40f, outA[0][0])
+        // threshold = 100 → min(7, 101) = 7 iters → 5 · 2^7 = 640.
+        val outB = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(100f)))
+        assertEquals(640f, outB[0][0])
+        // threshold = 0 → min(7, 1) = 1 iter → 5 · 2 = 10.
+        val outC = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(0f)))
+        assertEquals(10f, outC[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(2f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(100f)))
+    }
+
+    @Test
+    fun breakBearingClosureRewritesBothSymbolicCounterOnly() {
+        // Both symbolic. Effective trip = min(n, threshold + 1).
+        val original = breakBearingCounterOnlyBothSymbolic()
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(1, countOps(rewritten, OpKind.WHILE))
+        assertEquals(0, countOps(rewritten, OpKind.LAND))
+        // n = 5, threshold = 10 → min(5, 11) = 5 iters → 3 · 2^5 = 96.
+        val outA = DxirInterpreter.evalFunction(
+            rewritten,
+            listOf(floatArrayOf(3f), floatArrayOf(5f), floatArrayOf(10f)),
+        )
+        assertEquals(96f, outA[0][0])
+        // n = 10, threshold = 2 → min(10, 3) = 3 iters → 3 · 2^3 = 24.
+        val outB = DxirInterpreter.evalFunction(
+            rewritten,
+            listOf(floatArrayOf(3f), floatArrayOf(10f), floatArrayOf(2f)),
+        )
+        assertEquals(24f, outB[0][0])
+        // n = 0, threshold = 5 → min(0, 6) = 0 iters → 3 unchanged.
+        val outC = DxirInterpreter.evalFunction(
+            rewritten,
+            listOf(floatArrayOf(3f), floatArrayOf(0f), floatArrayOf(5f)),
+        )
+        assertEquals(3f, outC[0][0])
+        assertNumericallyAgree(
+            original,
+            rewritten,
+            listOf(floatArrayOf(3f), floatArrayOf(5f), floatArrayOf(10f)),
+        )
+        assertNumericallyAgree(
+            original,
+            rewritten,
+            listOf(floatArrayOf(3f), floatArrayOf(10f), floatArrayOf(2f)),
+        )
+    }
+
     @Test
     fun breakBearingConstantFoldEnablesEndToEndGradThroughBreakBearingLoop() {
         // alwaysBreaks=false + C5 → straight-line dxir → DxirReverseTransform

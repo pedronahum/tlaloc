@@ -39,6 +39,79 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.141 D.3i Phase 3f — symbolic-bound CounterOnly arm via outer IF chain 2026-04-25
+
+§0.4.131 shipped Phase 3e (CounterOnly arm with concrete `n` AND concrete threshold), explicitly deferring symbolic bounds with the note that they would need either a new scalar `MIN` op or "lowering through an `IF(STEP(SUB(thresholdPlus1, n)), n, thresholdPlus1)` chain". §0.4.141 adopts the IF-chain path: the closed-form `min(n, threshold + 1)` is emitted as a runtime IF in outer scope, and the rewritten WHILE's cond region terminator becomes `STEP(SUB(effectiveN, counter))`. The LAND-NOT closure wrapper is gone in all four shape combinations Phase 3e/3f together cover:
+
+| n | threshold | Phase | Effective bound |
+|---|---|---|---|
+| `DxirConst` | `DxirConst` | 3e (§0.4.131) | `const(min(n, threshold+1))` — C5 unrolls the WHILE downstream |
+| `DxirParam` | `DxirConst` | 3f (§0.4.141) | runtime IF chain — WHILE survives, evaluated by interpreter |
+| `DxirConst` | `DxirParam` | 3f (§0.4.141) | runtime IF chain — WHILE survives |
+| `DxirParam` | `DxirParam` | 3f (§0.4.141) | runtime IF chain — WHILE survives |
+
+**The mechanism** in [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt). Two new private helpers + one dispatch arm:
+
+1. **`CounterOnlySymbolicShape` data class** ([PhiCalculus.kt:670-676](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L670-L676)) carries the original-scope `nNode`, `thresholdNode`, `counterArgIdx`, and the i32/bool types — everything `rewriteCounterOnlySymbolicBreak` needs without re-parsing the WHILE.
+
+2. **`computeCounterOnlySymbolicShape(pattern)`** ([PhiCalculus.kt:678-720](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L678-L720)) validates the canonical `STEP(SUB(args[counter], threshold))` shape, accepts `threshold` as either `DxirConst` or `DxirParam`, resolves `n` from `pattern.tripCountParam` (symbolic) or by walking the origCond's `STEP(SUB(nNode, args[counter]))` shape (concrete). Returns null if BOTH are concrete (Phase 3e's case) or if either node is a region-internal `DxirOp` (deferred — would need LoopInvariant-style lifting).
+
+3. **`rewriteCounterOnlySymbolicBreak`** ([PhiCalculus.kt:737-799](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L737-L799)) emits the runtime min chain in outer scope:
+   ```kotlin
+   val one = builder.const(1, shape.counterType)
+   val thresholdPlus1 = builder.op(OpKind.ADD, listOf(thresholdClone, one), shape.counterType)
+   val cmpSub = builder.op(OpKind.SUB, listOf(thresholdPlus1, nClone), shape.counterType)
+   val cmp = builder.op(OpKind.STEP, listOf(cmpSub), shape.boolType)
+   val effectiveN = builder.ifOp(
+       cond = cmp,
+       types = listOf(shape.counterType),
+       thenRegion = builder.region { yields(nClone) },
+       elseRegion = builder.region { yields(thresholdPlus1) },
+   )
+   ```
+   The new cond region's terminator references `effectiveN` (an outer-scope SSA value) — same convention §0.4.131's tests already used when their helpers built `nConst` outside the WHILE and referenced it from inside the cond region.
+
+4. **Pre-scan** ([PhiCalculus.kt:529-541](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L529-L541)) accepts the WHILE for rewrite if EITHER shape extractor returns non-null. **Dispatch** ([PhiCalculus.kt:553-565](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L553-L565)) routes both-concrete to Phase 3e's helper and the symbolic cases to the new `rewriteCounterOnlySymbolicBreak`.
+
+**Decisions worth flagging**:
+
+- **Two-helper dispatch keeps Phase 3e's const-fold benefit intact.** Phase 3e computes `min(n, threshold+1)` as a Kotlin int, embeds it as a `DxirConst` in the new cond region's terminator, and lets C5's existing simple-loop pattern unroll the rewritten WHILE downstream in the same `singlePass` iteration. That's the optimal outcome — fewer ops at runtime, no IF chain. Phase 3f only fires when the bound can't be resolved at compile time. Routing both-concrete through Phase 3f's runtime path would lose this — the rewritten WHILE would carry a runtime IF for a value that's already known. Splitting the dispatch preserves Phase 3e's win.
+
+- **Region-external symbolic only.** `threshold` and `n` are accepted only when they're `DxirConst` (region-external in practice — both helpers reconstruct the const fresh) or `DxirParam` (function param, always region-external). Region-internal symbolic values (e.g., a `DxirOp` defined inside the cond region) need a LoopInvariant-style lift first, similar to §0.4.128's Phase 3c. That's a separate phase if a user surface ever produces it; today's FIR-side hoist for `while (i < n) { ...; if (i > threshold) break }` typically references function params, which Phase 3f handles directly.
+
+- **Rewritten WHILE remains in the IR.** With a runtime-IF bound, C5's pattern matcher (which requires a compile-time integer `n` for its unroll arm) doesn't fire. The interpreter executes the WHILE iteratively at runtime — the `effectiveN` is computed once before the loop, then the cond region's `STEP(SUB(effectiveN, counter))` evaluates each iteration like any vanilla bounded WHILE. The structural win is the closure resolution: the LAND-NOT wrapper is gone, the break-bearing closure is converted to a vanilla bound. Tests pin `assertEquals(0, countOps(rewritten, OpKind.LAND))` to verify this.
+
+- **`builder.const(1, counterType)` for the +1 in `thresholdPlus1`.** The `ADD(threshold, 1)` uses an i32 const `1` matching the counter's type. Mirrors the §0.4.131 test helper's `const(1, i32s)` for the back-edge increment — the convention is consistent across the closure pipeline.
+
+- **DxirConst clones via fresh emission, not nodeMap lookup.** When `nNode` or `thresholdNode` is a `DxirConst`, the rewrite emits `builder.const(n.value, n.type, n.sharding)` — a fresh const node. This works because consts have no SSA-id dependency: their value is fully captured by `value`/`type`/`sharding`. `DxirParam` clones go through `nodeMap[param.id]` (the standard cloned-param-in-new-function path) since params have function-scope identity that must be preserved. The two paths land in the same `nClone: DxirNode` slot, with no caller-side dispatch.
+
+- **`assertNumericallyAgree` for sanity.** Each test asserts both specific numerical values at concrete inputs AND structural agreement with the unrewritten original at multiple inputs. The unrewritten original evaluates the LAND-NOT closure each iteration; the rewritten version evaluates the IF chain once + the simpler STEP per-iter. The two should produce identical outputs at every input; the agreement test makes that contract explicit.
+
+**Tests added** (+3 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.breakBearingClosureRewritesSymbolicNCounterOnly` — symbolic `n` (param), concrete threshold = 3. Pin: 1 WHILE post-rewrite, 0 LAND. Numerical: `n=10 → 80`, `n=3 → 40`, `n=0 → 5` (no iterations).
+- `PhiCalculusTest.breakBearingClosureRewritesSymbolicThresholdCounterOnly` — concrete `n = 7`, symbolic threshold (param). Pin: same structural pins. Numerical: `threshold=2 → 40`, `threshold=100 → 640` (n caps), `threshold=0 → 10` (1 iter).
+- `PhiCalculusTest.breakBearingClosureRewritesBothSymbolicCounterOnly` — both `n` and threshold as params. Pin: same structural pins. Numerical: `(n=5, t=10) → 96`, `(n=10, t=2) → 24`, `(n=0, t=5) → 3` (no iterations).
+
+Full suite is green: **829 tests** (+3 over §0.4.140).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 3 — branch-body MR IF dispatch + nested-WHILE arm.** The headline gap that's been open across §0.4.139 / §0.4.140's recommended-next lists.
+2. **D.3i Phase 3g — region-internal symbolic CounterOnly.** When `threshold` or `n` is a `DxirOp` defined inside the cond region (e.g., `threshold = MUL(param, 2)`), the rewrite needs to lift the dependency tree like §0.4.128's `rewriteLoopInvariantBreak`.
+3. **Multi-live-index MR IF AD — per-index gradAccum refactor**.
+4. **`:benchmarks` Gradle module** — extract one perf probe.
+
+**Definition-of-done for §0.4.141 — met**:
+- `computeCounterOnlySymbolicShape` recognises `DxirConst` AND `DxirParam` for both `n` and `threshold` and rejects both-concrete (Phase 3e's case) ✓
+- `rewriteCounterOnlySymbolicBreak` emits a runtime `IF(cmp, n, thresholdPlus1)` chain in outer scope and a vanilla bounded WHILE referencing it ✓
+- Pre-scan accepts CounterOnly when EITHER concrete or symbolic shape matches ✓
+- Dispatch routes both-concrete to Phase 3e's const-fold helper and symbolic cases to the new helper ✓
+- 3 new tests pin the three symbolic combinations with concrete numerical values + numerical agreement against the unrewritten original ✓
+- LAND-NOT closure wrapper structurally removed in all rewritten cases ✓
+- Phase 3e behaviour unchanged (existing 4 tests still green) ✓
+- Full suite stays green at 829 tests (+3) ✓
+
 #### 0.4.140 Multi-result IF AD Phase 2 — recursive `walkBranchReverse` for nested single-result IF 2026-04-25
 
 §0.4.139 shipped Phase 1 of multi-result IF AD (single-live-index case at the top level). The §0.4.139 recommended-next list flagged Phase 2 — recursive `walkBranchReverse` that allows nested control flow inside an IF arm — as the highest-impact remaining D.3i work, since combined with §0.4.139 + §0.4.128's LoopInvariant rewrite it would unblock the end-to-end gradient flow that's been the headline gap. This session ships Phase 2 for the nested-single-result-IF case: the branch-body cloner accepts an inner IF, and the reverse-walk dispatch recursively calls [handleIfAdjoint] for it. Nested WHILE / multi-result IF inside a branch still error explicitly — those need WHILE-aware AD (Stage B) and the per-index gradAccum refactor respectively.
