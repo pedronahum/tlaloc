@@ -546,10 +546,20 @@ class DxirReverseTransformTest {
     }
 
     @Test
-    fun gradOfNestedMultiResultIfWithMultipleLiveIndicesIsRejected() {
-        // §0.4.144 — a nested MR IF whose result(0) AND result(1) are both
-        // referenced downstream within the outer branch must be rejected, just
-        // like Phase 1's top-level multi-live-index rejection.
+    fun gradOfNestedMultiResultIfWithMultipleLiveIndicesFlowsCorrectly() {
+        // §0.4.155 — Phase 5b: nested multi-live-index MR IF AD also lands. Phase 3
+        // (§0.4.144) rejected this shape inside an outer branch; Phase 5b accepts
+        // it via the same per-(id, idx) substrate, with `nestedIfLiveIndices` now
+        // a `Set<Int>` mirroring the top-level path.
+        //
+        // f(x) = if (x>0) {
+        //   let innerIf = if (x>0) yields(-x, x²) else yields(x, x²)
+        //   yields(innerIf.result(0) + innerIf.result(1))
+        // } else { yields(x) }
+        //
+        // For x > 0: outer-then; inner-then (also x > 0). innerIf yields (-x, x²).
+        //   sum = -x + x²; df/dx = -1 + 2x.
+        // For x ≤ 0: outer-else; f = x; df/dx = 1.
         val primal = DxirBuilder.function("nestedMrIfMultiLive") {
             val x = param("x", f32)
             val pOuter = op(OpKind.STEP, listOf(x), boolS)
@@ -566,7 +576,6 @@ class DxirReverseTransformTest {
                         thenRegion = region { yields(negX, xx) },
                         elseRegion = region { yields(x, xx) },
                     )
-                    // Reference both result(0) and result(1) — multi-live-index.
                     val sum = op(OpKind.ADD, listOf(innerIf.result(0), innerIf.result(1)), f32)
                     yields(sum)
                 },
@@ -574,9 +583,19 @@ class DxirReverseTransformTest {
             )
             listOf(ifResult)
         }
-        kotlin.test.assertFailsWith<IllegalStateException> {
-            DxirReverseTransform.apply(primal)
-        }
+        val grad = DxirReverseTransform.apply(primal)
+        // x = 3 (outer-then; inner-then): df/dx = -1 + 6 = 5.
+        val outA = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(3f)))
+        assertTrue(
+            kotlin.math.abs(outA[0][0] - 5f) < 1e-3f,
+            "expected df/dx = 5 at x=3 (outer-then; inner-then: -1 + 2x), got ${outA[0][0]}",
+        )
+        // x = -2 (outer-else): df/dx = 1.
+        val outB = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(-2f)))
+        assertTrue(
+            kotlin.math.abs(outB[0][0] - 1f) < 1e-3f,
+            "expected df/dx = 1 at x=-2 (outer-else: identity), got ${outB[0][0]}",
+        )
     }
 
     @Test
@@ -652,31 +671,54 @@ class DxirReverseTransformTest {
     }
 
     @Test
-    fun gradOfMultiResultIfWithMultipleLiveIndicesIsRejected() {
-        // §0.4.139 — multi-result IF where two consumers reference different result
-        // indices. Phase 1 doesn't handle the per-index gradAccum split, so the
-        // entry-point validation must reject. The error names the IF op id.
+    fun gradOfMultiResultIfWithMultipleLiveIndicesFlowsCorrectly() {
+        // §0.4.155 — Phase 5b: multi-live-index MR IF AD lands. Phase 1 (§0.4.139)
+        // rejected this shape; Phase 5b accepts it via the per-(id, idx) gradAccum
+        // substrate (§0.4.154). Both result(0) and result(1) are referenced
+        // downstream; their per-index upstream contributions seed the branch walk
+        // at distinct terminator slots.
+        //
+        // f(x) = ifop.result(0) + ifop.result(1)
+        //   where ifop = if (x>0) yields(-x, x²) else yields(x, x²)
+        // For x > 0:  f = -x + x²;  df/dx = -1 + 2x.
+        // For x ≤ 0:  f =  x + x²;  df/dx =  1 + 2x.
         val primal = DxirBuilder.function("ifMultiLive") {
             val x = param("x", f32)
             val pred = op(OpKind.STEP, listOf(x), boolS)
             val negX = op(OpKind.NEG, listOf(x), f32)
-            val twoX = op(OpKind.MUL, listOf(x, x), f32)
+            val xSquared = op(OpKind.MUL, listOf(x, x), f32)
             val ifOp = opMulti(
                 OpKind.IF,
                 listOf(pred),
                 listOf(f32, f32),
                 regions = listOf(
-                    region { yields(negX, twoX) },
-                    region { yields(x, twoX) },
+                    region { yields(negX, xSquared) },
+                    region { yields(x, xSquared) },
                 ),
             )
             // Reference BOTH result(0) and result(1) — multiple live indices.
             val sum = op(OpKind.ADD, listOf(ifOp.result(0), ifOp.result(1)), f32)
             listOf(sum)
         }
-        kotlin.test.assertFailsWith<IllegalStateException> {
-            DxirReverseTransform.apply(primal)
-        }
+        val grad = DxirReverseTransform.apply(primal)
+        // x = 4 (then-branch): df/dx = -1 + 8 = 7.
+        val outA = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(4f)))
+        assertTrue(
+            kotlin.math.abs(outA[0][0] - 7f) < 1e-3f,
+            "expected df/dx = 7 at x=4 (then-arm: -1 + 2x), got ${outA[0][0]}",
+        )
+        // x = 3 (then-branch): df/dx = -1 + 6 = 5.
+        val outB = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(3f)))
+        assertTrue(
+            kotlin.math.abs(outB[0][0] - 5f) < 1e-3f,
+            "expected df/dx = 5 at x=3 (then-arm: -1 + 2x), got ${outB[0][0]}",
+        )
+        // x = -3 (else-branch): df/dx = 1 + (-6) = -5.
+        val outC = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(-3f)))
+        assertTrue(
+            kotlin.math.abs(outC[0][0] - (-5f)) < 1e-3f,
+            "expected df/dx = -5 at x=-3 (else-arm: 1 + 2x), got ${outC[0][0]}",
+        )
     }
 
     @Test

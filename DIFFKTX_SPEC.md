@@ -39,6 +39,69 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.155 Multi-live-index MR IF AD — semantic widening (Phase 5b) 2026-04-25
+
+§0.4.154 landed the substrate (gradAccum keyed on `(id, index)`); Phase 5b lands the semantic widening that actually unlocks multi-live-index MR IF AD. `findIfLiveResultIndex: Int?` becomes `findIfLiveResultIndices: Set<Int>` (and the in-block variant); `handleIfAdjoint` and `walkBranchReverse` take `upstreams: Map<Int, DxirNode>` instead of `(upstream, liveIdx)`; the dispatch loops at every level collect per-live-index contributions and route them through the per-(id, index) gradAccum. Two latent bugs surfaced and got fixed in the same change: the body-cloning loop's `nodeMap[it.id]` lookup stripped `DxirOpResult` wrapping at both the top level and inside `walkBranchReverse`, conflating two operands referencing different result indices into the same primal-op reference and dropping contributions to result(k) for k > 0. Both call sites now route operand resolution through DxirOpResult-preserving logic.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt):
+
+1. **`findIfLiveResultIndices: Set<Int>`** ([DxirReverseTransform.kt:921-947](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L921-L947)) — drops the trailing `.singleOrNull()` and returns the full set of referenced indices. Empty set means dead op (caller errors); non-empty drives the per-index seeding chain.
+
+2. **`findIfLiveResultIndicesInBlock: Set<Int>`** ([DxirReverseTransform.kt:962-988](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L962-L988)) — same widening for the block-local nested-IF variant (§0.4.144's helper).
+
+3. **`apply`'s `ifLiveIndices: HashMap<Int, Set<Int>>`** ([DxirReverseTransform.kt:127-159](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L127-L159)) — every multi-result IF in the function body gets its full live-index set recorded. Empty set rejected with a "dead IF op should be DCE'd" message; non-empty is the dispatch's source of truth.
+
+4. **`apply`'s reverse-walk dispatch** ([DxirReverseTransform.kt:225-247](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L225-L247)) — IF dispatch builds `upstreams: Map<Int, DxirNode>` by collecting `gradAccum[n.id to k]` for each live `k`. Empty (no contributions to ANY live index) → the IF is dead in the gradient and we skip it. Otherwise dispatch to `handleIfAdjoint(n, upstreams, …)`.
+
+5. **`handleIfAdjoint(ifNode, upstreams, outerGradAccum, …)`** ([DxirReverseTransform.kt:1051-1105](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1051-L1105)) — signature changes from `(upstream, liveIdx)` to `(upstreams: Map<Int, DxirNode>)`. Two `require` checks: upstreams non-empty; every key in `ifNode.types.indices`. Each branch's `walkBranchReverse` is called with the same `upstreams` map; the per-branch result merging is unchanged (still iterates `LinkedHashSet<Pair<Int, Int>>` of all keys touched by either branch).
+
+6. **`walkBranchReverse(block, upstreams, …)`** ([DxirReverseTransform.kt:1407-1542](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1407-L1542)) — takes the same `upstreams: Map<Int, DxirNode>` and seeds the per-branch gradAccum at `block.terminator[k].gradKey()` for each `k`. When two indices yield the same SSA id (e.g., `yields(x, x)`), the seeded contributions ADD-merge naturally via the existing accumulator pattern. Nested-IF dispatch is unified with the top-level pattern: collect per-live-index upstreams, dispatch via `handleIfAdjoint(n, upstreamsForN, …)`. The old separate "single-result IF" / "multi-result IF" arms collapse into one.
+
+7. **`nestedIfLiveIndices: HashMap<Int, Set<Int>>`** ([DxirReverseTransform.kt:1419](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1419)) — Set-valued mirroring the top-level field. Each nested multi-result IF gets its full live-index set in the enclosing block recorded at clone time; the reverse walk consults it to build the per-index `upstreamsForN`.
+
+8. **`resolveCloneOperand` helper** ([DxirReverseTransform.kt:893-920](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L893-L920)) — preserves `DxirOpResult` wrapping in the top-level body-cloning loop. Without this, an operand `ifop.result(k)` would resolve via `nodeMap[ifop.id]` (= the primal multi-result IF), losing the index. The fix mirrors `PhiCalculus.cloneNode`'s `DxirOpResult` arm: resolve through nodeMap, then wrap with `.result(it.index)` if the source mapped to a `DxirOp`. The same fix is inlined in the phantom operand path ([DxirReverseTransform.kt:266-285](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L266-L285)) and in `walkBranchReverse`'s branch-body cloning ([DxirReverseTransform.kt:1487-1505](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1487-L1505)).
+
+**Decisions worth flagging**:
+
+- **Three operand-resolution sites; one helper extracted, two inlined.** The top-level body-cloning loop calls the named helper. The phantom-clone path (used when the op isn't in `usedByAdjoint`) inlines the same logic with an `?: it` fallback for ids not in nodeMap. The branch-body cloning in `walkBranchReverse` similarly inlines with explicit error reporting. Extracting one helper that handles all three contracts cleanly would require parameterizing over (a) error-on-missing vs fallback-to-source, (b) builder vs phantom emission. The inlined form keeps each site readable; deduplication is deferred until a fourth site appears.
+
+- **The `op.operands.associate` collapse was the load-bearing latent bug.** Even after the per-(id, idx) gradAccum substrate (§0.4.154), the cloned op's operand list had two references to the same primal multi-result IF. `op.operands.associate { it to upstream }` (the standard VJP-rule output shape) builds a `Map<DxirNode, DxirNode>`; a Map can't carry duplicate keys, so the second assignment clobbered the first. The fix preserves DxirOpResult identity, making the two cloned operands distinct objects (different indices → different keys in the associate map).
+
+- **The two converted tests were originally rejection assertions.** §0.4.139 / §0.4.144 both shipped `assertFailsWith` tests pinning the multi-live-index error path. With Phase 5b, those rejections become accept-and-compute-correctly. Both tests were rewritten to assert numerical gradients at three sample points (top-level: x=4 / x=3 / x=-3; nested: x=3 / x=-2). The renamed tests (`gradOf...FlowsCorrectly` instead of `gradOf...IsRejected`) reflect the new contract.
+
+- **Single-result IF dispatch goes through the same path.** `setOf(0)` for non-multi-result IFs makes the dispatch uniform: `upstreams = mapOf(0 to gradAccum[(if.id, 0)])`. The previous separate code path for single-result IFs (the `liveIdx = 0` default) merges into the multi-index path. This simplification deletes the old in-branch IF dispatch (which was a copy of the top-level dispatch with a different liveIdx default).
+
+- **The fix accidentally also unblocks "yields(x, x)" identity-yield.** A branch that yields the same SSA value at multiple terminator slots used to be blocked by `findIfLiveResultIndex.singleOrNull()` returning null when both indices were live. Now it works: the seeding loop seeds `gradAccum[x.gradKey()]` twice, and the existing `existing == null ? upstream : ADD(existing, upstream)` pattern correctly merges them. No test exercises this directly today, but the path is open.
+
+- **No new tests; tests count stays at 843.** The two converted "rejection" tests count as one each; net change is zero. The Phase-5b verification is the converted tests passing with the new positive assertions, plus the existing single-live-index tests (§0.4.139 / §0.4.144) all staying green — proof that the widening is backward-compatible for the single-index case.
+
+- **Multi-result COARSENED is one step closer.** `handleCoarsenedAdjoint` still has `require(coarsened.types.size == 1)`. With Phase 5b's machinery, that guard's removal becomes a focused widening — the `outerGradAccum` already carries per-(id, idx) entries; the splice would just emit per-result-index gradient bodies. Future Phase 5c.
+
+**Tests added** (+0 new; 2 converted): the two "rejected" tests now assert positive gradients.
+
+Full suite is green: **843 tests** (unchanged from §0.4.154, but two tests' assertions converted from `assertFailsWith` to numerical gradient pins).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 5c — Multi-result COARSENED.** Remove the single-result guard in `handleCoarsenedAdjoint`. The substrate from §0.4.154 plus the per-index dispatch from §0.4.155 makes this a focused widening: the cloned gradient_body emits per-result-index contributions; outerGradAccum's per-(id, idx) keys absorb them.
+2. **Out-of-scope register refresh.** With Phase 5b done, §0.4.151's "Multi-live-index gradAccum refactor still pending" entry can move to closed; "Multi-result COARSENED" splits into "single-result shipped, multi-result Phase 5c pending".
+3. **Phase 4b — WHILE inside IF inside WHILE.** Independent of Phase 5; widens §0.4.152's pre-scan + rewrite to also recurse into WHILE region bodies.
+4. **HMC benchmark port** — paper's hardest control-flow benchmark.
+
+**Definition-of-done for §0.4.155 — met**:
+- `findIfLiveResultIndex(es)` returns `Set<Int>` ✓
+- `findIfLiveResultIndex(es)InBlock` returns `Set<Int>` ✓
+- `apply`'s `ifLiveIndices: HashMap<Int, Set<Int>>` ✓
+- `walkBranchReverse`'s `nestedIfLiveIndices: HashMap<Int, Set<Int>>` ✓
+- `handleIfAdjoint(upstreams: Map<Int, DxirNode>)` signature change + per-key seeding ✓
+- `walkBranchReverse(upstreams: Map<Int, DxirNode>)` signature change + per-key seeding ✓
+- `resolveCloneOperand` helper preserves `DxirOpResult` wrapping in body cloning ✓
+- Phantom clone path + branch-body clone path also preserve `DxirOpResult` wrapping ✓
+- `gradOfMultiResultIfWithMultipleLiveIndicesFlowsCorrectly` (top-level) asserts numerical gradient at 3 points ✓
+- `gradOfNestedMultiResultIfWithMultipleLiveIndicesFlowsCorrectly` (nested) asserts numerical gradient at 2 points ✓
+- §0.4.139 / §0.4.144 single-live-index paths unchanged ✓
+- Full suite stays green at 843 tests ✓
+
 #### 0.4.154 Multi-live-index MR IF AD — `gradAccum` substrate refactor (Phase 5a) 2026-04-25
 
 §0.4.151 / §0.4.153's recommended-next #2: "Multi-live-index MR IF AD — per-index `gradAccum` refactor. Mechanical refactor (~15-20 sites in `DxirReverseTransform.kt`)." This is a multi-session arc. §0.4.154 lands Phase 5a — the substrate change. The gradient-accumulator data structure migrates from `Map<Int, DxirNode>` to `Map<Pair<Int, Int>, DxirNode>` (id × result-index) at every level (top-level, branch, COARSENED). Behavior is preserved because every existing call site routes through index 0, with the single exception of the ret-seeding site, which now correctly distinguishes result indices for multi-result-IF returns. Phase 5b will widen `findIfLiveResultIndex` to return a Set and have `handleIfAdjoint` dispatch over multi-live-index sets; Phase 5a is the prerequisite plumbing that lets 5b be a focused logical change.
