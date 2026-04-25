@@ -1061,6 +1061,58 @@ class DxirReverseTransformTest {
     }
 
     @Test
+    fun coarsenedWithNestedIfInsideIfArmClonesAndEvaluates() {
+        // §0.4.121 — handleCoarsenedAdjoint allows IF nested inside another IF's arm
+        // in gradient_body. Build a hand-crafted COARSENED whose gradient_body computes:
+        //   if (STEP(x)) { if (STEP(x)) upstream else upstream } else upstream
+        // All three branches yield `upstream`, so the nested IF is identity. The reverse
+        // pass must clone both IFs (outer + nested) into the gradient builder context.
+        val primalBody = DxirBuilder.function("inner_primal") {
+            val x = param("x", f32)
+            listOf(x)
+        }
+        val boolType = DxirType(io.tlaloc.core.Bool, emptyList())
+        val gradientBody = DxirBuilder.function("inner_grad") {
+            val upstream = param("upstream", f32)
+            val xPrim = param("x", f32)
+            val pred = op(OpKind.STEP, listOf(xPrim), boolType)
+            val outer = ifOp(
+                cond = pred,
+                types = listOf(f32),
+                thenRegion = region {
+                    // Nested IF inside the then-arm.
+                    val innerPred = op(OpKind.STEP, listOf(xPrim), boolType)
+                    val nested = ifOp(
+                        cond = innerPred,
+                        types = listOf(f32),
+                        thenRegion = region { yields(upstream) },
+                        elseRegion = region { yields(upstream) },
+                    )
+                    yields(nested)
+                },
+                elseRegion = region { yields(upstream) },
+            )
+            listOf(outer)
+        }
+        val outerFn = DxirBuilder.function("outer") {
+            val x = param("x", f32)
+            val c = coarsened(
+                operands = listOf(x),
+                primalBody = primalBody,
+                gradientBody = gradientBody,
+                readsPrimalIndices = setOf(0),
+            )
+            listOf(c)
+        }
+        // Pre-§0.4.121 this would throw at the inner-arm IF: "block op IF has regions
+        // (nested IF inside an IF arm not supported)". Post-§0.4.121 the recursive
+        // clone handles it.
+        val grad = DxirReverseTransform.apply(outerFn)
+        val out = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(3f)))
+        assertEquals(1f, out[0][0], "df/dx for identity primal should be 1, regardless of nested IF structure")
+    }
+
+    @Test
     fun csePreservesExistingTopLevelBehaviorWhenNoRegions() {
         // Regression: a region-free function should still get top-level CSE applied.
         // Pin §0.4.48's existing dedup behavior to ensure §0.4.118's restructure

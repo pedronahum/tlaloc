@@ -1134,9 +1134,11 @@ object DxirReverseTransform {
 
     /**
      * §0.4.120 — variant of [cloneGradNode] for nodes inside a region. Emits via the
-     * region builder rather than the function builder. Currently supports only
-     * straight-line ops inside a region (no nested IFs in gradient body's IF arms);
-     * extending to nested regions follows the same pattern when needed.
+     * region builder rather than the function builder. §0.4.121 — extended to support
+     * nested IF inside an IF arm by recursing into [cloneGradIfInRegion]. WHILE and
+     * COARSENED inside an arm still error with documented messages — those would
+     * require coordinating with the loop/closed-form contracts that this surface
+     * doesn't carry.
      */
     private fun cloneGradBlockNode(
         n: DxirNode,
@@ -1149,22 +1151,56 @@ object DxirReverseTransform {
                 "handleCoarsenedAdjoint: gradient_body block op ${n.op} is multi-result " +
                     "(not supported)"
             }
-            require(!n.hasRegions) {
-                "handleCoarsenedAdjoint: gradient_body block op ${n.op} has regions " +
-                    "(nested IF inside an IF arm not supported)"
+            if (n.hasRegions) {
+                require(n.op == OpKind.IF) {
+                    "handleCoarsenedAdjoint: gradient_body block op ${n.op} has regions but " +
+                        "only IF is supported (no WHILE/COARSENED inside gradient_body IF arms)"
+                }
+                cloneGradIfInRegion(n, gradNodeMap, regionBuilder)
+            } else {
+                val clonedOperands = n.operands.map {
+                    gradNodeMap[it.id]
+                        ?: error(
+                            "handleCoarsenedAdjoint: gradient_body block op id=${n.id} references " +
+                                "unknown id=${it.id}",
+                        )
+                }
+                regionBuilder.op(n.op, clonedOperands, n.type, n.attrs, n.sharding, emptyList())
             }
-            val clonedOperands = n.operands.map {
-                gradNodeMap[it.id]
-                    ?: error(
-                        "handleCoarsenedAdjoint: gradient_body block op id=${n.id} references " +
-                            "unknown id=${it.id}",
-                    )
-            }
-            regionBuilder.op(n.op, clonedOperands, n.type, n.attrs, n.sharding, emptyList())
         }
         else -> error(
             "handleCoarsenedAdjoint: unsupported gradient_body block node " +
                 "${n::class.simpleName} (id=${n.id})",
+        )
+    }
+
+    /**
+     * §0.4.121 — clone an IF op nested inside another IF's arm. Mirror of [cloneGradIf]
+     * but emits via [io.tlaloc.ir.DxirRegionBuilder] instead of [DxirBuilder]. Both
+     * builders share `region { ... }` and `ifOp(...)` surfaces, so the structure is
+     * identical; only the receiver differs.
+     */
+    private fun cloneGradIfInRegion(
+        n: DxirOp,
+        gradNodeMap: HashMap<Int, DxirNode>,
+        regionBuilder: io.tlaloc.ir.DxirRegionBuilder,
+    ): DxirNode {
+        val predClone = gradNodeMap[n.operands[0].id]
+            ?: error(
+                "handleCoarsenedAdjoint: nested IF predicate id=${n.operands[0].id} missing from gradNodeMap",
+            )
+        require(n.regions.size == 2) {
+            "handleCoarsenedAdjoint: nested IF must have exactly 2 regions; got ${n.regions.size}"
+        }
+        return regionBuilder.ifOp(
+            cond = predClone,
+            types = n.types,
+            thenRegion = regionBuilder.region {
+                cloneGradRegion(n.regions[0], gradNodeMap, this)
+            },
+            elseRegion = regionBuilder.region {
+                cloneGradRegion(n.regions[1], gradNodeMap, this)
+            },
         )
     }
 

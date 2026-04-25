@@ -39,6 +39,79 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.121 Nested IF inside IF arms in gradient_body 2026-04-25
+
+§0.4.120's recommended-next called this out as a "trivial follow-up": `cloneGradBlockNode` rejected region-bearing ops inside an IF arm with `require(!n.hasRegions)`. This session lifts that restriction for IF specifically, mirroring the §0.4.120 outer-IF support one level down. With both shipped, gradient bodies can now contain arbitrarily nested IFs.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt). `cloneGradBlockNode`'s region check changes from `require(!n.hasRegions)` to a dispatch:
+
+```kotlin
+if (n.hasRegions) {
+    require(n.op == OpKind.IF) {
+        "handleCoarsenedAdjoint: gradient_body block op ${n.op} has regions but " +
+            "only IF is supported (no WHILE/COARSENED inside gradient_body IF arms)"
+    }
+    cloneGradIfInRegion(n, gradNodeMap, regionBuilder)
+}
+```
+
+A new `cloneGradIfInRegion` helper mirrors `cloneGradIf` from §0.4.120 — same shape, same recursion through `cloneGradRegion`, but emits via `DxirRegionBuilder` instead of `DxirBuilder`. Both builders share `region { ... }` and `ifOp(...)` surfaces so the structure is identical; only the receiver type differs.
+
+```kotlin
+private fun cloneGradIfInRegion(
+    n: DxirOp,
+    gradNodeMap: HashMap<Int, DxirNode>,
+    regionBuilder: io.tlaloc.ir.DxirRegionBuilder,
+): DxirNode {
+    val predClone = gradNodeMap[n.operands[0].id] ?: error(...)
+    require(n.regions.size == 2) { ... }
+    return regionBuilder.ifOp(
+        cond = predClone,
+        types = n.types,
+        thenRegion = regionBuilder.region {
+            cloneGradRegion(n.regions[0], gradNodeMap, this)
+        },
+        elseRegion = regionBuilder.region {
+            cloneGradRegion(n.regions[1], gradNodeMap, this)
+        },
+    )
+}
+```
+
+**Decisions worth flagging**:
+
+- **Recursion depth bounded by gradient_body's structural depth.** `cloneGradRegion` calls `cloneGradBlockNode` which can call `cloneGradIfInRegion` which calls `cloneGradRegion` again. Each step descends into a region; recursion terminates when a region's ops are all straight-line. The recursion has the same depth as the gradient_body's nesting, which is bounded by source-level control-flow nesting in the primal.
+
+- **No code-duplication via DxirEmitter abstraction.** `cloneGradIf` (DxirBuilder) and `cloneGradIfInRegion` (DxirRegionBuilder) are near-identical, but the `DxirEmitter` interface they both implement doesn't expose `ifOp` or `region` — those are concrete-class methods. Lifting the abstraction to support polymorphic `ifOp`/`region` would require interface changes that ripple through the rest of the codebase. The two-helper duplication is the cheaper choice; the helpers are short enough that the cost is bounded.
+
+- **Outer + nested clone share `gradNodeMap`.** The outer `gradNodeMap` (passed by reference) accumulates entries as ops clone into the gradient builder. When `cloneGradRegion` recurses into a nested region, it COPIES `gradNodeMap` (per §0.4.120's scope-isolation rule); inner block-arg additions don't leak back. This means the inner region's body sees outer-scope nodes (`upstream`, primal operand clones, outer-scope ops) but inner block args stay local to their region. That's exactly the right scoping for IF: each branch sees the outer scope but is mutually exclusive with its sibling.
+
+- **WHILE inside gradient_body still errors.** The require in `cloneGradBlockNode` keeps the WHILE rejection. Loops in gradient bodies are produced by recursive coarsening (not yet implemented) or by hand-crafted scenarios; neither is in scope here. The error message points at the gap.
+
+- **No production pipeline produces nested-region gradient bodies today.** Same rationale as §0.4.120 — the standard coarsening pipeline produces straight-line gradient bodies. This change is defensive infrastructure for future widenings (e.g., a primal-side relaxation that lets COARSENED contain nested IF). The new test pins the path with a hand-built scenario.
+
+**Tests added** (+1 new):
+
+- `DxirReverseTransformTest.coarsenedWithNestedIfInsideIfArmClonesAndEvaluates` — hand-builds a COARSENED whose gradient_body contains `if (STEP(x)) { if (STEP(x)) upstream else upstream } else upstream`. Pre-§0.4.121 the inner IF would throw; post-§0.4.121 the recursive clone handles both levels. Numerical pin: at x=3, gradient of identity primal = 1.0.
+
+Full suite is green: **754 tests** (+1 over §0.4.120).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE; the most-impactful remaining piece. Carve as scaffolding analogous to §0.4.103.
+2. **Multi-result COARSENED** — primal-side widening; `handleCoarsenedAdjoint` gains multi-result support.
+3. **`:benchmarks` Gradle module** — extract a perf probe into its own module.
+4. **WHILE inside gradient_body** — extend `cloneGradBlockNode`/`cloneGradNode` to allow WHILE; would need coordinating with the loop / closed-form contracts.
+
+**Definition-of-done for §0.4.121 — met**:
+- `cloneGradIfInRegion` private helper lands; mirrors `cloneGradIf`'s structure ✓
+- `cloneGradBlockNode`'s region check dispatches to `cloneGradIfInRegion` for IF ✓
+- WHILE / COARSENED inside an IF arm still error with documented messages ✓
+- Recursion terminates on gradient_body's structural depth ✓
+- One test pins the round-trip on a hand-built nested-IF gradient body ✓
+- All existing tests still green (regression preserved) ✓
+- Full suite stays green at 754 tests (+1) ✓
+
 #### 0.4.120 `gradient_body` with nested IF in `handleCoarsenedAdjoint` 2026-04-25
 
 §0.4.108's deferred entry "PhiCalculus | `gradient_body` with nested regions — Linear gradient bodies cover today" gets a real increment. Pre-§0.4.120, `handleCoarsenedAdjoint` rejected any region-bearing op inside a COARSENED's `gradient_body` with `require(!n.hasRegions)`. This blocked future pipelines that might produce gradient bodies with control flow (e.g., a coarsening pass widened to handle IF-containing primals). This session relaxes the require for IF specifically, with recursive cloning into the outer gradient builder.
