@@ -39,6 +39,110 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.157 HMC benchmark port — planning doc (`docs/HMC_PORT_PLAN.md`) 2026-04-25
+
+§0.4.108's deferred register flagged HMC / CartPole / QWOP as the paper's three remaining benchmarks; §0.4.151 / §0.4.156 carried HMC forward as Phase 1 #4 ("paper's hardest control-flow benchmark, multi-session"). With Phase 1 #1 / #2 / #3 closed (§0.4.152–§0.4.156), HMC is the next big arc. §0.4.157 follows the §0.4.10 precedent (Stage B planning doc landed before Stage B implementation): the deliverable is `docs/HMC_PORT_PLAN.md`, scoping the multi-session HMC arc into three concrete phases with a named first-slice deliverable for the next firing.
+
+**The artifact** in [docs/HMC_PORT_PLAN.md](docs/HMC_PORT_PLAN.md):
+
+1. **Reference U(β) for logistic regression** — the OOPSLA paper's exact formula
+   `U(β) = β^T X^T (y - 1_n) - 1_n^T [log(1 + exp(-Xβ))] - β^T β / (2σ_β²)`. Sourced from
+   `docs/papers/coarsening-autodiff.txt:1259-1268`. The paper's three configurations
+   (n ∈ {100, 1000, 800}, d ∈ {1, 2, 3}) frame the eventual scale targets.
+
+2. **Tlaloc gap analysis** — a 12-row table mapping each sub-expression of U(β) to
+   the relevant op kind and current Tlaloc support status. **Two genuine blockers
+   identified**: (a) per-element-of-rank-1 IF mask for the numerical-stability
+   `if (-Xβ > 80) negXβ else log(1 + exp(negXβ))`; (b) WHILE inside WHILE for the
+   nested matrix-vector dot product. Both have known mitigations: stay in loop-form
+   to keep the IF as a scalar (a); land §0.4.156's Phase 4b (region-recursive C5 into
+   WHILE bodies) as a prerequisite (b).
+
+3. **Three-phase migration**:
+   - **Phase 1 (1 firing)** — straight-line port at small fixed n=4, d=2 using
+     tensor ops only (no loops, no IF). Verifies one β value against finite-differencing.
+     All required infrastructure (MATMUL, EXP, LOG, SUM, multi-dim GATHER) is shipped.
+   - **Phase 2 (2 firings)** — loop form with affine-recurrence accumulators (C6 should
+     match the linear back-edge). Adds for-loop body coverage; verifies same gradient
+     as Phase 1.
+   - **Phase 3 (3-4 firings)** — full paper-faithful U with inner-loop IF mask. Requires
+     §0.4.156's Phase 4b (WHILE-in-WHILE region recursion in C5).
+
+4. **Phase 1 first-slice** — concrete next-firing deliverable named: a single
+   `HmcLogisticRegressionTest.kt` in `compiler-plugin/src/test`, mirroring
+   `HookeanSpringTest`'s structure (K2JVMCompiler in-process + runtime grad eval +
+   analytic-gradient assertion at 1e-3 tolerance).
+
+5. **Out of scope** — HMC's leapfrog integration (pure Kotlin around `grad_U`, not
+   differentiable), Metropolis acceptance (probabilistic, no PRNG yet), CartPole /
+   QWOP (each a separate multi-session arc reusing this plan's three-phase pattern),
+   head-to-head harness (M9 exit criterion, gated on all 6 ports complete).
+
+**Decisions worth flagging**:
+
+- **Why a planning doc, not an implementation slice.** Per the rules-of-engagement
+  guidance "if a compiler-API surface fights back, checkpoint what works + flag the
+  blocker", the analogous wisdom for a multi-session arc opening is: don't start
+  implementing until the scope is clear. HMC has at least two genuine blockers
+  (per-element mask, WHILE-in-WHILE) plus several plumbing concerns; landing
+  `HmcLogisticRegressionTest.kt` Phase 1 in the same firing risks discovering a
+  Phase-2 blocker mid-implementation and getting stuck. Following the §0.4.10
+  precedent (Stage B's planning doc landed first; Stage B.0a / B.0b / B.1 / etc.
+  followed in subsequent sessions) is the right shape.
+
+- **Gap analysis names blockers, not just gaps.** The 12-row table flags ✅ /
+  🟡 / ⬜ for every U(β) sub-expression. Two rows are 🟡 (per-element mask,
+  WHILE-in-WHILE) — these are the genuine engineering risks the next firings
+  will hit. The remaining 10 rows are ✅ — meaning Phase 1 (straight-line) has
+  no infrastructure prerequisites. That's the green light for the first slice.
+
+- **Three phases, not one big port.** A monolithic "port HMC" item on the next
+  firing's todo would either run for the full multi-session estimate (3-4 firings)
+  or partially complete and leave an unclear handoff. Phasing it makes each
+  firing's deliverable bounded — Phase 1 is "straight-line correctness", Phase 2
+  is "loop-form coarsening", Phase 3 is "full paper-faithful + the new C5
+  widening". Each phase is independently usable as a regression test even if
+  later phases never land.
+
+- **Phase 3 explicitly depends on a §0.4.156 follow-up.** Phase 4b — region-
+  recursive C5 into WHILE bodies — is named as the prerequisite for HMC Phase 3.
+  This makes the dependency between coarsening machinery and benchmark ports
+  legible: a future firing that lands Phase 4b unblocks BOTH (a) HMC Phase 3
+  AND (b) any other multi-loop benchmark port. The plan calls this out
+  explicitly so the dependency isn't hidden.
+
+- **Out-of-scope section keeps the next firings honest.** Naming what's NOT in
+  scope (leapfrog, acceptance, CartPole, QWOP, head-to-head harness) prevents
+  scope creep when subsequent firings might be tempted to "just add" related
+  pieces. The plan's phase boundaries are deliberate.
+
+**Tests added** (+0): pure planning artifact. Suite: 844 (unchanged from §0.4.156).
+
+Full suite is green: **844 tests** (unchanged from §0.4.156).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **HMC Phase 1 — straight-line port** per `docs/HMC_PORT_PLAN.md` §"Phase 1 first-slice — concrete next firing". One new test file
+   `compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt` with
+   one method porting U(β) at n=4, d=2 using tensor ops only.
+2. **Phase 5c — Multi-result COARSENED.** Still on the cleanup list; the §0.4.155
+   substrate is in place. Could fire instead of HMC Phase 1 if the firing wants a
+   smaller, more focused win.
+3. **Out-of-scope register refresh.** Multi-live-index gradAccum closed; MR IF AD
+   Phase 4 closed for headline shape; HMC moved from "deferred" to "in progress
+   per §0.4.157 plan".
+4. **Phase 4b — WHILE inside IF inside WHILE.** Independent of HMC Phase 1; needed
+   for HMC Phase 3.
+
+**Definition-of-done for §0.4.157 — met**:
+- `docs/HMC_PORT_PLAN.md` lands with reference U(β) formula + gap analysis ✓
+- Three-phase migration named with per-phase deliverables and firing estimates ✓
+- Phase 1 first-slice concretely defined (file path + test method shape) ✓
+- Two blockers (per-element mask, WHILE-in-WHILE) identified and mitigated ✓
+- Phase 3 dependency on §0.4.156's Phase 4b made explicit ✓
+- Out-of-scope items enumerated to prevent scope creep ✓
+- Full suite stays green at 844 tests (unchanged) ✓
+
 #### 0.4.156 Fourth `:benchmarks` inhabitant — multi-branch IF AD pipeline 2026-04-25
 
 §0.4.155 unblocked multi-live-index MR IF AD (`ifop.result(0)` AND `ifop.result(1)` both flowing back through the gradient). The four existing `:benchmarks` inhabitants (§0.4.145 / §0.4.146 / §0.4.147 / §0.4.148) all share the same `iterateNTimes` WHILE-based primal at different scales — meaning a regression specific to the IF AD path could slip past every one of them. §0.4.156 widens the benchmark surface with a different IR shape: a multi-result IF whose two result indices both feed an outer ADD. Pre-§0.4.155 this primal hard-rejected at `findIfLiveResultIndex.singleOrNull()`; post-§0.4.155 it flows correctly through SCT.
