@@ -798,6 +798,26 @@ class GradTest {
     }
 
     @Test
+    fun rank3MinusScalarTracerLhsFlipsSign() {
+        // §0.4.98 — `scalar - tensor3` has opposite gradient sign from
+        // `tensor3 - scalar`. x = 2x2x2 of [1..8], s = 5.
+        //   forward: sum(5 - x_i) = sum([4,3,2,1,0,-1,-2,-3]) = 4. value=4.
+        //   grad_s = D0·D1·D2 = 8.
+        //   grad_x = -1 per element.
+        val vg = valueAndGrad2 { s: Tracer<ScalarShape>, x: Tracer<io.tlaloc.core.Rank3<Sym, Sym, Sym>> ->
+            (s - x).sum()
+        }
+        val (value, dScalar, dTensor) = vg(
+            Tensors.f32Scalar(5f),
+            Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f)),
+        )
+        assertEquals(4f, value)
+        assertEquals(8f, dScalar.hostF32()[0], "grad_s = D0·D1·D2 = 8")
+        val gx = dTensor.hostF32()
+        for (i in 0 until 8) assertEquals(-1f, gx[i])
+    }
+
+    @Test
     fun rank3PlusScalarTracerGivesBothGradients() {
         // §0.4.97 — Rank-3 extension of §0.4.78's scalar broadcast. `f32Tensor3`
         // constructor + Tracer<Rank3>.plus(Tracer<ScalarShape>) overload.

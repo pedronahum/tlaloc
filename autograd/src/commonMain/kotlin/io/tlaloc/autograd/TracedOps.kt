@@ -427,6 +427,31 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.d
     matrix: Tracer<Rank2<A, B>>,
 ): Tracer<Rank2<A, B>> = matrix.broadcastScalar(this) / matrix
 
+// §0.4.98 — reverse-order scalar-to-rank-3 broadcast operators. Same pattern
+// as §0.4.91/§0.4.92 but for rank-3 receivers. Lifts the scalar via the rank-3
+// receiver's broadcastScalar (rank-agnostic since §0.4.78) and applies the
+// existing same-shape operator.
+
+@kotlin.jvm.JvmName("plusRank3ScalarLhs")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.plus(
+    tensor: Tracer<io.tlaloc.core.Rank3<A, B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = tensor.broadcastScalar(this) + tensor
+
+@kotlin.jvm.JvmName("minusRank3ScalarLhs")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.minus(
+    tensor: Tracer<io.tlaloc.core.Rank3<A, B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = tensor.broadcastScalar(this) - tensor
+
+@kotlin.jvm.JvmName("timesRank3ScalarLhs")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.times(
+    tensor: Tracer<io.tlaloc.core.Rank3<A, B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = tensor.broadcastScalar(this) * tensor
+
+@kotlin.jvm.JvmName("divRank3ScalarLhs")
+operator fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.ScalarShape>.div(
+    tensor: Tracer<io.tlaloc.core.Rank3<A, B, C>>,
+): Tracer<io.tlaloc.core.Rank3<A, B, C>> = tensor.broadcastScalar(this) / tensor
+
 // §0.4.93 — Float-literal LHS broadcast. `0.5f * matrix`, `1f - row`, etc.
 // Closes the last corner of the scalar-op-tensor surface: §0.4.75 gave us
 // `tracer <op> Float`; these four give us `Float <op> tracer`. Generic over

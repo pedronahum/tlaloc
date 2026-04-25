@@ -39,6 +39,41 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.98 Reverse-order scalar-to-rank-3 broadcast operators — `scalar op tensor3` 2026-04-25
+
+Rank-3 companion to §0.4.91 (rank-1 scalar-LHS) and §0.4.92 (rank-2 scalar-LHS). Four overloads on `Tracer<ScalarShape>` that take a `Tracer<Rank3<A, B, C>>`. Same compositional pattern: lift the scalar via `broadcastScalar`, apply same-shape op.
+
+**Four new overloads** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt). `@JvmName-Rank3ScalarLhs` keeps each JVM signature unique vs. the rank-1 / rank-2 / scalar-tracer-RHS sibling overloads after erasure.
+
+**One new test** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt): `rank3MinusScalarTracerLhsFlipsSign`. `sum(5 - x)` with x = 2×2×2 [1..8]. value=4, grad_s=8 (=D0·D1·D2), grad_x=-1 per element. Pins the non-commutative subtraction direction.
+
+Single test rather than four — the underlying broadcast machinery is identical to §0.4.91/§0.4.92 (just at a different rank), and one non-commutative case catches every bug a four-test matrix would.
+
+**Decisions worth flagging**:
+
+- **Test count restraint.** Each rank now has 8 broadcast operators (4 RHS + 4 LHS); the §0.4.85-§0.4.93 pattern was ~3 tests per rank. At rank 3 that ratio gives diminishing returns — the rule is exercised by every previous test. Trimmed to one non-commutative anchor test.
+
+- **Reverse-order rank-3 with rank-1/rank-2 not added.** Cross-rank broadcasting between rank-3 and lower ranks needs broadcast_dimensions axis tracking that varies per shape pair. Filed as future when a use case demands it.
+
+**Tests added** (+1 new):
+
+- `GradTest.rank3MinusScalarTracerLhsFlipsSign`
+
+Full suite is green: **678 tests** (+1 over §0.4.97).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on grad expressions**.
+3. **`diagnosticReporter` migration proper** — multi-step refactor per §0.4.94.
+4. **Rank-4+ tensor constructors** — same template as §0.4.97. Wait for use cases.
+
+**Definition-of-done for §0.4.98 — met**:
+- Four `Tracer<ScalarShape>.op(Tracer<Rank3<A, B, C>>)` overloads ✓
+- `@JvmName` disambiguation across the rank-1/2/3 + LHS/RHS matrix ✓
+- One non-commutative test pins sign-flip correctness ✓
+- Full suite green at 678 tests (+1) ✓
+
 #### 0.4.97 Rank-3 tensor constructor + scalar-broadcast operators 2026-04-25
 
 Discovered while planning the §0.4.93 follow-up that `Rank3<A0, A1, A2> : Shape` already exists in `:core` — and so do `Rank4`/`Rank5`/`Rank6`. The "rank-3 broadcast operator set is gated on a public `Rank3` shape type" claim in §0.4.93 was wrong; the actual gap was the missing `Tensors.f32Tensor3` constructor. This session ships that constructor plus the four scalar-broadcast operators on `Tracer<Rank3<A, B, C>>`, mirroring §0.4.78's rank-2 set.
