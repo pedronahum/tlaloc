@@ -90,3 +90,29 @@ fun DScalar.sqrt(): DScalar = when (this) {
     is FloatScalar -> sqrt()
     is DoubleScalar -> sqrt()
 }
+
+// --- Scalar exp / log entries (§0.4.158) ---
+//
+// Scalar exp/log extensions mirror the sqrt pattern. `Float.exp()` / `Float.log()` /
+// `Double.exp()` / `Double.log()` resolve at FQN `io.tlaloc.core.exp` /
+// `io.tlaloc.core.log`; the FIR lowering maps each to `OpKind.EXP` / `OpKind.LOG`,
+// and the registered `ExpRule` / `LogRule` cover the gradient side. Synthesis was
+// already wired (`DxirToIrSynthesis.irExp` / `irLog` ship since §0.4.53). Needed by
+// HMC's logistic-regression port (`docs/HMC_PORT_PLAN.md` Phase 1) which writes
+// `(1.0f + (-xb).exp()).log()` element-by-element inside a scalar/loop body.
+fun Float.exp(): Float = kotlin.math.exp(this.toDouble()).toFloat()
+fun Double.exp(): Double = kotlin.math.exp(this)
+fun FloatScalar.exp(): FloatScalar = FloatScalar(v.exp())
+fun DoubleScalar.exp(): DoubleScalar = DoubleScalar(v.exp())
+fun DScalar.exp(): DScalar = when (this) {
+    is FloatScalar -> exp()
+    is DoubleScalar -> exp()
+}
+fun Float.log(): Float = kotlin.math.ln(this.toDouble()).toFloat()
+fun Double.log(): Double = kotlin.math.ln(this)
+fun FloatScalar.log(): FloatScalar = FloatScalar(v.log())
+fun DoubleScalar.log(): DoubleScalar = DoubleScalar(v.log())
+fun DScalar.log(): DScalar = when (this) {
+    is FloatScalar -> log()
+    is DoubleScalar -> log()
+}

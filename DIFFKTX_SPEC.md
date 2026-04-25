@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.158 HMC Phase 1 unblock — scalar `Float.exp()` / `Float.log()` plugin lowering 2026-04-26
+
+§0.4.157's plan named the HMC Phase 1 first slice as a straight-line tensor-op port (`MATMUL`-driven `Xβ`, etc.) targeting `compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt`. **Verifying the gap analysis against the actual plugin code uncovered three blockers** the planning session missed: (a) no `MATMUL` in `FirLambdaToDxirLowering.BINARY_OP_MAP` (only `+`/`-`/`*`/`/`); (b) no scalar `Float.exp()` / `Float.log()` extensions in `:core/DScalar.kt`; (c) consequently no plugin lowering of scalar exp/log even if the extensions existed. Per the rules-of-engagement guidance ("if a compiler-API surface fights back, checkpoint what works + flag the blocker"), §0.4.158 redirects the firing to the most surgical unblock for HMC Phase 1: scalar `exp` / `log`. The MATMUL gap shifts the plan: HMC Phase 1 is now scalar/loop form (what was originally Phase 2); MATMUL through the plugin is its own arc.
+
+**The mechanism**:
+
+1. **Scalar `exp` / `log` extensions** ([DScalar.kt:94-117](core/src/commonMain/kotlin/io/tlaloc/core/DScalar.kt#L94-L117)) — five entries each (Float, Double, FloatScalar, DoubleScalar, DScalar) mirroring §0.4.38's sqrt pattern. The Float / Double impls call `kotlin.math.exp` / `kotlin.math.ln` internally; the DScalar impl dispatches via `when` over the sealed hierarchy. FQNs land at `io.tlaloc.core.exp` and `io.tlaloc.core.log` (top-level extensions in package `io.tlaloc.core`, mirroring how `sqrt` and `relu` resolve).
+
+2. **`UNARY_OP_MAP` entries in plugin** ([FirLambdaToDxirLowering.kt:920-925](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt#L920-L925)) — `io.tlaloc.core.exp` → `OpKind.EXP`; `io.tlaloc.core.log` → `OpKind.LOG`. Two lines, mirrors how `io.tlaloc.core.sqrt` was wired in §0.4.38.
+
+3. **Synthesis is already covered.** `DxirToIrSynthesis.irExp` / `irLog` ship since §0.4.53 — they emit `IrCallImpl` to `kotlin.math.exp` / `kotlin.math.ln`. Confirmed by reading [DxirToIrSynthesis.kt:830-866](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L830-L866). No synthesis-side changes needed.
+
+4. **VJP rules already covered.** `Vjp.kt:595-596` registers `OpKind.EXP → ExpRule` and `OpKind.LOG → LogRule`. Confirmed working at the SCT path (§0.4.22 era).
+
+**Decisions worth flagging**:
+
+- **The plan's MATMUL claim was over-optimistic.** §0.4.157's gap-analysis table marked `MATMUL` as ✅ — that's true at the IR / Tracer level (`bmm` Tracer surface from §0.4.137; rank-2/3/N MATMUL emitter from §0.4.135 / §0.4.138). It is NOT true at the K2 plugin's lambda-lowering surface: `FirLambdaToDxirLowering.BINARY_OP_MAP` only knows `plus` / `minus` / `times` / `div`. The plan-as-written required either (a) extending the plugin's BINARY_OP_MAP to recognise `matmul` calls (multi-firing piece — the FQN path differs from primitive operators), or (b) using the IR-level Tracer harness instead of the plugin path. Neither was the intended Phase 1 deliverable.
+
+- **HMC Phase 1's scope shifts to scalar/loop form.** Without MATMUL through the plugin, the HMC port Phase 1 becomes: hard-code X / y as Float literals or pack into a rank-1 DTensor, decompose `Xβ` via nested loops + GATHER. This is what HookeanSpring + BGDHyperOpt did. Per the rules of engagement ("checkpoint, do not barrel"), I did NOT also write the new HmcLogisticRegressionTest.kt this firing — that's a clean next-firing piece now that scalar exp/log lowers correctly. The §0.4.157 plan's Phase 1 / Phase 2 split (straight-line tensor / loop form) collapses to one phase; what was Phase 3 (numerical-stability mask) becomes the new Phase 2.
+
+- **Three test methods, not one.** The existing scalar-sqrt unblock (§0.4.38) was tested implicitly via BrachistochroneTest (which uses `sqrt`). For exp/log, I went the other direction — a dedicated `ScalarExpLogTest.kt` with three focused methods. The third method (`HMC per-record term gradient matches analytic`) is the load-bearing one: it exercises `(1 + (-x).exp()).log()`, the exact inner per-record term in HMC's `log(1 + exp(-Xβ))` decomposition. This test is the canary that HMC Phase 1's primary primitive works through the plugin.
+
+- **`kotlin.math.ln`, not `kotlin.math.log`.** Kotlin's stdlib has `kotlin.math.log(x, base)` (two-arg) and `kotlin.math.ln(x)` (natural log, one-arg). The `:core/DScalar.kt` `Float.log()` extension wraps `kotlin.math.ln`. The synthesis side at §0.4.53 already uses `kotlin.math.ln` for `OpKind.LOG`, so the dispatch is consistent end-to-end. Naming the extension `log()` (not `ln()`) matches the existing tensor `ops.log` (which is also natural log) — the user-facing API stays uniform whether the operand is a scalar or tensor.
+
+- **Plan amendment, not plan deletion.** The §0.4.157 doc still describes the long-term arc correctly; only the Phase 1 / Phase 2 boundary shifts. A future register-refresh entry can update the plan inline, or the §0.4.159 entry (which lands the actual HMC port) can carry the amendment in its decisions section. I'm leaving §0.4.157 as-is — historical record of what the plan was when written, rather than retroactive rewriting.
+
+**Tests added** (+3 new) in [ScalarExpLogTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/ScalarExpLogTest.kt):
+
+- `scalar exp gradient matches analytic` — `f(x) = exp(x)`, `df/dx = exp(x)`. Pin at x=0.5 and x=-1.0.
+- `scalar log gradient matches analytic` — `f(x) = log(x)`, `df/dx = 1/x`. Pin at x=2.0 and x=0.5.
+- `HMC per-record term gradient matches analytic` — `f(x) = log(1 + exp(-x))`, `df/dx = -1/(1 + exp(x))`. Pin at x=0.0 (= -0.5), x=2.0 (≈ -0.1192), x=-1.0 (≈ -0.7311). Each test verifies the gradient is NOT the broken-stub sentinel `-1.0f` AND matches the analytic value.
+
+Full suite is green: **847 tests** (+3 over §0.4.157).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **HMC Phase 1 port (scalar / loop form).** With scalar exp/log unblocked, write
+   `compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt` that
+   ports U(β) at small fixed n=4, d=2 using straight-line scalar arithmetic for `Xβ`
+   (no for-loops yet — even simpler than HookeanSpring). Verifies gradient against
+   finite-difference at one β value.
+2. **Phase 5c — Multi-result COARSENED.** Still on the cleanup list; the §0.4.155
+   substrate is in place. Could fire instead of HMC Phase 1.
+3. **Out-of-scope register refresh.** Several deferred items closed across §0.4.151–§0.4.157:
+   D.3i widening (✓), MR IF AD Phase 4 for WHILE-in-IF (✓), multi-live-index gradAccum (✓),
+   `:benchmarks` substrate (✓). The register hasn't been refreshed since §0.4.151.
+4. **Phase 4b — WHILE inside IF inside WHILE.** Independent of HMC Phase 1; needed for HMC's
+   future loop-form (originally §0.4.157's Phase 2, now revised post-§0.4.158).
+
+**Definition-of-done for §0.4.158 — met**:
+- Scalar `exp` / `log` extensions in `:core/DScalar.kt` for Float / Double / FloatScalar / DoubleScalar / DScalar ✓
+- `FirLambdaToDxirLowering.UNARY_OP_MAP` adds `io.tlaloc.core.exp` and `io.tlaloc.core.log` entries ✓
+- `ScalarExpLogTest.kt` lands with 3 tests pinning analytic gradients ✓
+- HMC per-record term test confirms `(1 + (-x).exp()).log()` lowers + differentiates correctly ✓
+- Full suite stays green at 847 tests (+3) ✓
+
 #### 0.4.157 HMC benchmark port — planning doc (`docs/HMC_PORT_PLAN.md`) 2026-04-25
 
 §0.4.108's deferred register flagged HMC / CartPole / QWOP as the paper's three remaining benchmarks; §0.4.151 / §0.4.156 carried HMC forward as Phase 1 #4 ("paper's hardest control-flow benchmark, multi-session"). With Phase 1 #1 / #2 / #3 closed (§0.4.152–§0.4.156), HMC is the next big arc. §0.4.157 follows the §0.4.10 precedent (Stage B planning doc landed before Stage B implementation): the deliverable is `docs/HMC_PORT_PLAN.md`, scoping the multi-session HMC arc into three concrete phases with a named first-slice deliverable for the next firing.

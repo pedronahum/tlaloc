@@ -916,6 +916,12 @@ object FirLambdaToDxirLowering {
         // top-level-extension pattern as `relu`. Enables scalar `y.sqrt()` inside
         // `grad { y: Float -> ... }` bodies to route through OpKind.SQRT + SqrtRule.
         put("io.tlaloc.core.sqrt", OpKind.SQRT)
+        // §0.4.158 — :core scalar exp / log entries. Mirrors the sqrt pattern. Enables
+        // scalar `y.exp()` / `y.log()` inside `grad { y: Float -> ... }` bodies to route
+        // through OpKind.EXP / OpKind.LOG + ExpRule / LogRule. Needed by HMC's logistic-
+        // regression port for the `log(1 + exp(-Xβ))` per-record term.
+        put("io.tlaloc.core.exp", OpKind.EXP)
+        put("io.tlaloc.core.log", OpKind.LOG)
         // :core DTensor shape-preserving unary ops (io.tlaloc.core.ops package).
         put("io.tlaloc.core.ops.relu", OpKind.RELU)
         put("io.tlaloc.core.ops.neg", OpKind.NEG)
