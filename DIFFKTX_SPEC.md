@@ -39,6 +39,57 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.115 Recursive `splitOnReuses` for large leaves 2026-04-25
+
+§0.4.108's deferred entry "PhiCalculus | Recursive `splitOnReuses` — One split covered §0.4.29" is shipped. Pre-§0.4.115, the C.2b split was one-shot: when a leaf was marked-large (subtreeSize > sizeLimit) and got partitioned around its most-reused free variable, fragments that remained > sizeLimit were left as large-leaf fallbacks. That left structurally-decomposable leaves un-decomposed when one round of partitioning wasn't enough.
+
+**The change** in [SoiIdentification.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/SoiIdentification.kt). After `splitOnReuses` builds its two fragments, each fragment is checked against the size limit; if either is still markedLarge, the function recurses on it. Termination is guaranteed because each split strictly reduces op count (the empty-`pre`-or-empty-`post` guard fires before any split where progress isn't made), so the recursion is bounded by `leaf.directOps.size`.
+
+```kotlin
+val preFinal: List<SoiCandidate> = if (preCand.markedLarge) {
+    splitOnReuses(preNode, fn, chain, sizeLimit, sinkId) ?: listOf(preCand)
+} else listOf(preCand)
+val postFinal: List<SoiCandidate> = if (postCand.markedLarge) {
+    splitOnReuses(postNode, fn, chain, sizeLimit, sinkId) ?: listOf(postCand)
+} else listOf(postCand)
+return preFinal + postFinal
+```
+
+**Decisions worth flagging**:
+
+- **Recursion ceiling is recursive call's own pre/post-empty guard.** Every recursive call passes the same `chain` (the global DefUseChain over `fn`); the recursion only differs in the `leaf` parameter (the still-large fragment) and consequently in which ids count as "free vars" within that leaf. When a fragment's only viable pivot has all-ops dependent on it (`pre` would be empty), recursion correctly returns null and the caller falls back to the un-split fragment. This matches the paper's contract: split happens when it can make progress, otherwise leave the leaf as-is.
+
+- **Single-pivot cul-de-sac is not a bug.** A fragment with one free variable and ops all transitively depending on it cannot be partitioned. The recursion correctly bottoms out and the fragment stays large. The new test `splitOnReusesRecursesProducingMoreThanOneShotWouldHave` documents this — three fragments of sizes [1, 2, 3] with sizeLimit=2; the size-3 fragment can't be split further because every op in it depends on `x`. Recursion still made progress (the [1, 2] fragments came out of the original 6-op leaf), so the gain is real even when not every fragment fits.
+
+- **Existing test repurposed, not retained.** §0.4.29's `splitOnReusesBreaksLargeLeafAroundMostReusedFreeVar` previously asserted exactly 2 fragments, exercising the old one-shot semantics. With recursion, the same primal produces 3 fragments — the deeper invariant (split happens around the most-reused free var) is preserved; the surface invariant (count == 2) is now wrong. The test was rewritten to assert the new semantics: 3 fragments, all ≤ sizeLimit, no `markedLarge` survivors. This follows the §0.4.107 → §0.4.103 rename precedent.
+
+- **No new public API.** The change is internal to `SoiIdentification.splitOnReuses`. The `SoiCandidate` shape, `identifyWithSizeLimit`'s signature, and downstream consumers (`PhiCalculus.coarsenFunction`, the multi-SOI emission path) are unchanged. Recursion just produces a longer `sois` list when the input leaf decomposes further.
+
+- **No new dependencies.** The recursion uses the same `DefUseChain` instance throughout; chain re-use is safe because `fn` doesn't mutate during the split.
+
+**Tests added/repurposed** (+1 new, 1 rewritten):
+
+- `SoiIdentificationTest.splitOnReusesBreaksLargeLeafAroundMostReusedFreeVar` (rewritten) — same primal as §0.4.29's pin, but the assertion now requires 3 fragments (recursion produced an extra one from the still-large pre-partition), all ≤ sizeLimit, and no `markedLarge` survivors.
+- `SoiIdentificationTest.splitOnReusesRecursesProducingMoreThanOneShotWouldHave` (new) — pins recursion fires when one-shot would have left fragments > sizeLimit. Two-level structure: outer split partitions around `x`, inner recursion partitions around `y`. Documents that recursion can leave one cul-de-sac fragment if all ops transitively depend on the only available pivot (3 fragments, sizes [1, 2, 3]; the size-3 stays large).
+
+Full suite is green: **738 tests** (+1 over §0.4.114).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Tracer surface | Rank-3↔rank-1/rank-2 cross-rank broadcast** — extend §0.4.97/98's rank-3-scalar to cross-rank; user-facing API. Builds on the §0.4.85 row-broadcast pattern.
+2. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE; carve as scaffolding analogous to §0.4.103.
+3. **Region-internal DCE/CSE** — extend §0.4.48's top-level CSE into IF/WHILE region bodies. PhiCalculus piece.
+4. **Multi-result COARSENED** — extend §0.4.31. PhiCalculus piece.
+
+**Definition-of-done for §0.4.115 — met**:
+- `splitOnReuses` recurses on still-large fragments ✓
+- Termination provably bounded by op count (each step strictly reduces) ✓
+- Recursion preserves "no progress = return null" contract; caller falls back cleanly ✓
+- Existing §0.4.29 test repurposed to reflect new semantics; rewrite documented ✓
+- New recursion-specific test pins both the "recursion fires" and "cul-de-sac remains" cases ✓
+- No new public API surface ✓
+- Full suite stays green at 738 tests (+1) ✓
+
 #### 0.4.114 Rank-2 SCATTER user write path (row-replace) end-to-end 2026-04-25
 
 §0.4.111 added rank-2 GATHER (read row), §0.4.112 added SCATTER_ADD's StableHLO arm, §0.4.113 added substrate-shape GATHER's StableHLO arm. This session closes the symmetric gap on the SCATTER (user-write) side: rank-2 row-replace works end-to-end, both at the IR substrate (`DxirInterpreter`) and at the StableHLO emitter.

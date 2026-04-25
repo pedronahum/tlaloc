@@ -309,39 +309,82 @@ class SoiIdentificationTest {
 
     @Test
     fun splitOnReusesBreaksLargeLeafAroundMostReusedFreeVar() {
-        // Build: a large flat function with 10 body ops, all referencing x.
-        // L=3 forces the root (leaf, since no regions) to be marked large. With
-        // splitOnReuses, the single most-reused free var (x, used 10 times) is the
-        // pivot. But every op depends on x → pre is empty → split fails, falls back.
-        //
-        // Rework: build a mix where some early ops compute a value c NOT from x, and
-        // later ops depend on x + c. Pivot=x (most reused); pre = ops computing c;
-        // post = ops depending on x.
+        // §0.4.115 — splitOnReuses now recurses on still-large fragments. This
+        // primal's outer split partitions around `x` (most-reused free var,
+        // 2 uses vs y's 1): pre = {const 1, const 2, yOne, yTwo} (4 ops, > L=3 so
+        // markedLarge), post = {xOne, xTwo, xy} (3 ops, ≤ L). Recursion fires on
+        // pre, partitioning around `y` (its only free var): pre' = {const 1,
+        // const 2} (2 ops), post' = {yOne, yTwo} (2 ops). Both ≤ L, recursion
+        // terminates. Final SOI count = 3 (was 2 pre-§0.4.115).
         val fn = DxirBuilder.function("split") {
             val x = param("x", f32s)
             val y = param("y", f32s)
             val one = const(1f, f32s)
             val two = const(2f, f32s)
-            // "pre" partition (doesn't depend on x — depends on y):
             val yOne = op(OpKind.ADD, listOf(y, one), f32s)
             val yTwo = op(OpKind.MUL, listOf(yOne, two), f32s)
-            // "post" partition (depends on x):
             val xOne = op(OpKind.ADD, listOf(x, one), f32s)
             val xTwo = op(OpKind.MUL, listOf(xOne, two), f32s)
             val xy = op(OpKind.ADD, listOf(xTwo, yTwo), f32s)
             listOf(xy)
         }
-        // body: 4 consts/ops pre (const 1, const 2, yOne, yTwo) + 3 post (xOne, xTwo, xy) = 7 ops.
-        // L = 3 → root is marked large. splitOnReuses finds pivot among free vars
-        // {x (id=0), y (id=1)}. x has more uses (xOne, xTwo reference it; that's 2
-        // uses) vs y (yOne references it; 1 use). So x wins as pivot.
         val result = SoiIdentification.identifyWithSizeLimit(fn, sizeLimit = 3)
-        assertEquals(2, result.sois.size, "splitOnReuses must emit 2 fragment SOIs")
-        // Pre (doesn't depend on x): 2 consts + yOne + yTwo = 4 ops. Post: xOne + xTwo + xy = 3 ops.
-        val preFragment = result.sois.maxByOrNull { it.subtreeSize!! }!!
-        val postFragment = result.sois.minByOrNull { it.subtreeSize!! }!!
-        assertTrue(preFragment.subtreeSize!! >= postFragment.subtreeSize!!)
+        assertEquals(3, result.sois.size, "recursive splitOnReuses must emit 3 fragments")
+        // No fragment exceeds sizeLimit — recursion stopped because all are small enough.
+        assertTrue(
+            result.sois.all { it.subtreeSize!! <= 3 },
+            "post-recursion fragments must all be ≤ sizeLimit; got ${result.sois.map { it.subtreeSize }}",
+        )
+        // No fragment is markedLarge after recursion — recursion's own termination
+        // condition is "fragment is no longer markedLarge".
+        assertTrue(
+            result.sois.none { it.markedLarge },
+            "recursion must drive every fragment below the markedLarge threshold",
+        )
         // Sum of fragment sizes equals the original leaf's directOps count.
+        assertEquals(
+            fn.body.size,
+            result.sois.sumOf { it.subtreeSize!! },
+            "fragments must partition the original directOps (no ops dropped)",
+        )
+    }
+
+    @Test
+    fun splitOnReusesRecursesProducingMoreThanOneShotWouldHave() {
+        // §0.4.115 — recursion-specific test. Build a leaf where two levels of split
+        // can both make progress. The first split partitions around the most-reused
+        // free var; the recursive call on the still-large pre-fragment partitions
+        // around its own free var. Final fragment count is strictly more than the
+        // one-shot 2 fragments; a recursion-incapable post-fragment may remain
+        // large because its closure is everything (pre would be empty).
+        val fn = DxirBuilder.function("twoLevel") {
+            val x = param("x", f32s)
+            val y = param("y", f32s)
+            val one = const(1f, f32s)
+            // a-region (depends on y, not x)
+            val a1 = op(OpKind.ADD, listOf(y, one), f32s)
+            val a2 = op(OpKind.MUL, listOf(a1, one), f32s)
+            // b-region (depends on a + x)
+            val b1 = op(OpKind.ADD, listOf(a2, x), f32s)
+            val b2 = op(OpKind.MUL, listOf(b1, x), f32s)
+            // root: glues b-region + a-region
+            val r = op(OpKind.ADD, listOf(b2, a2), f32s)
+            listOf(r)
+        }
+        val result = SoiIdentification.identifyWithSizeLimit(fn, sizeLimit = 2)
+        // Recursion fired: > 2 fragments (the one-shot ceiling).
+        assertTrue(
+            result.sois.size >= 3,
+            "recursion must produce >= 3 fragments; got ${result.sois.size}: ${result.sois.map { it.subtreeSize }}",
+        )
+        // At least one fragment is now within the limit — recursion strictly
+        // reduced the max-fragment problem from "the original leaf is too big" to
+        // "some fragments are now small enough".
+        assertTrue(
+            result.sois.any { it.subtreeSize!! <= 2 },
+            "at least one fragment must now fit within sizeLimit; got ${result.sois.map { it.subtreeSize }}",
+        )
+        // Total op count preserved.
         assertEquals(
             fn.body.size,
             result.sois.sumOf { it.subtreeSize!! },

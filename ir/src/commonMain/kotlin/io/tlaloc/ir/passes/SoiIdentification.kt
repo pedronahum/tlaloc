@@ -330,11 +330,14 @@ object SoiIdentification {
             blockIndex = leaf.blockIndex,
         )
 
-        // Emit as SOI candidates. We DON'T re-run size checking on the fragments —
-        // the split is a one-shot attempt; if a fragment is still > sizeLimit, it
-        // flows through as a large-leaf fallback (same behavior as pre-split). C.2b's
-        // termination is guaranteed (each split strictly reduces op count; we don't
-        // split single-op nodes).
+        // Emit as SOI candidates. §0.4.115 — when a fragment is still markedLarge
+        // (subtreeSize > sizeLimit), recurse into splitOnReuses on it; the recursion
+        // strictly reduces op count each step, so termination is bounded by
+        // `leaf.directOps.size` (no infinite recursion is possible). Pre-§0.4.115 the
+        // pass was one-shot: still-large fragments flowed through as large-leaf
+        // fallbacks. Recursion lets bigger leaves with multiple distinct free
+        // variables decompose into more, smaller SOIs — the paper's `splitOnReuses`
+        // semantics applied to its full extent.
         fun buildCand(n: RegionTreeNode): SoiCandidate = SoiCandidate(
             node = n,
             sinkId = sinkId,
@@ -342,7 +345,15 @@ object SoiIdentification {
             subtreeSize = n.subtreeSize(),
             markedLarge = n.subtreeSize() > sizeLimit,
         )
-        return listOf(buildCand(preNode), buildCand(postNode))
+        val preCand = buildCand(preNode)
+        val postCand = buildCand(postNode)
+        val preFinal: List<SoiCandidate> = if (preCand.markedLarge) {
+            splitOnReuses(preNode, fn, chain, sizeLimit, sinkId) ?: listOf(preCand)
+        } else listOf(preCand)
+        val postFinal: List<SoiCandidate> = if (postCand.markedLarge) {
+            splitOnReuses(postNode, fn, chain, sizeLimit, sinkId) ?: listOf(postCand)
+        } else listOf(postCand)
+        return preFinal + postFinal
     }
 
     /**
