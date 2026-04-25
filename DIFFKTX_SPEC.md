@@ -39,6 +39,50 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.129 Region-internal CSE for WHILE 2026-04-25
+
+§0.4.118 / §0.4.119 wired CSE to recurse into IF region bodies and COARSENED nested functions, but explicitly skipped WHILE — the rationale being that WHILEs shouldn't survive SCT (the φ-pass coarsens them before reverse-transform). §0.4.128's LoopInvariant rewrite weakens that assumption: the rewrite produces an outer IF whose else-region contains a vanilla bounded WHILE, so multi-result region-bearing ops can now reach the gradient pipeline. This session lights up CSE for WHILE regions so future region-recursive closures (e.g., a future region-recursive C5 that unrolls the nested WHILE) can rely on dedup'd cond / body bodies.
+
+The change is two lines in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt):
+- Reorder `cseNode`'s dispatch so region-bearing ops route to `cseRegionBearingOp` *ahead* of the multi-result short-circuit. WHILE is both multi-result AND region-bearing; the previous order short-circuited at multi-result and never reached the region recursion.
+- Extend `cseRegionBearingOp`'s region-recursion gate from `n.op == OpKind.IF` to also include `n.op == OpKind.WHILE`. The existing `cseRegion` helper handles each block independently with its own scoped copy of the canonical maps, so cond / body regions of a WHILE never cross-pollute (they have distinct block-arg ids).
+
+**Decisions worth flagging**:
+
+- **The dispatch reorder is load-bearing.** The multi-result guard in `cseNode` was originally a "skip" — multi-result ops weren't deduplicated by signature, so they returned early. WHILE happens to be both multi-result and region-bearing; the early return blocked region recursion. Moving region-bearing ahead of multi-result lets WHILEs flow into `cseRegionBearingOp`, where the rebuild path correctly preserves `n.types` for multi-result reconstruction. The ordering change is structurally minimal but conceptually significant.
+
+- **Scope isolation between cond and body regions falls out of `cseRegion`'s existing design.** Each block gets its own `innerById` / `innerSig2canon` / `innerConst2canon` (copies of the outer maps). Block-args from cond and body have distinct ids, so an op rooted at `cond.args[0]` can't sig-match an op rooted at `body.args[0]`. The third test (`cseDoesNotShareCondAndBodyRegistrationsAcrossWhile`) pins this — both regions independently build `MUL(args[0], const(2f))` and both survive CSE.
+
+- **CSE is forward-looking — gated on a WHILE actually reaching `applyCSE`.** Today `applyCSE` only runs in `DxirReverseTransform.apply`, which validates that `fn.body` has no multi-result ops or non-IF region-bearing ops (it errors at [DxirReverseTransform.kt:114](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L114)). So WHILEs never reach CSE in the production flow. The tests call `applyCSE` directly to exercise the new path. When the AD pipeline grows multi-result IF support (the §0.4.128 recommended-next #2), the §0.4.128 LoopInvariant rewrite's nested WHILE will start flowing through `applyCSE` and benefit from this work.
+
+- **No latent bug fix bundled here.** §0.4.128 fixed `cloneRegion` and `resolveReturn`'s `DxirOpResult` handling — the same issue exists in `cseRegion`'s terminator path (line [DxirReverseTransform.kt:519](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L519)) but doesn't fire today because (a) `applyCSE` is gated on no multi-result ops, and (b) the multi-result short-circuit prevented multi-result terminators from being exercised. With my reorder, the bug is one step closer to firing — but only when a WHILE survives into AD's pipeline, which §0.4.128 hasn't unblocked yet. Documenting here as a known gap; the fix lands when the multi-result IF AD work unlocks the surface.
+
+- **Test design pins three independent concerns.** (1) Body-region dedup of a duplicate `MUL`. (2) Cond-region dedup of duplicate consts (and the cascade through SUB ops that reference them). (3) Cond / body scope isolation. Each test isolates one structural property; together they show the new path correctly handles WHILE regions without cross-contamination.
+
+**Tests added** (+3 new) in [DxirReverseTransformTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt):
+
+- `DxirReverseTransformTest.cseDeduplicatesOpsInsideWhileBodyRegion` — WHILE body computes `MUL(args[0], 2f)` twice. Pin: post-CSE the body has 1 MUL (duplicate merged).
+- `DxirReverseTransformTest.cseDeduplicatesConstsInsideWhileCondRegion` — WHILE cond region declares `const(5f)` twice and uses each in a SUB. Pin: post-CSE the cond region has 1 `const(5f)` AND the two SUBs collapse to 1 (operand canonicalisation cascades).
+- `DxirReverseTransformTest.cseDoesNotShareCondAndBodyRegistrationsAcrossWhile` — both cond and body regions independently build `MUL(args[0], 2f)`. Pin: each region keeps its own MUL (different block-arg scopes, no cross-region dedup).
+
+Full suite is green: **783 tests** (+3 over §0.4.128).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — would unblock end-to-end gradient pins for §0.4.128's LoopInvariant rewrite AND let §0.4.128's nested WHILE benefit from §0.4.129's CSE in the gradient pipeline. Multi-session arc; Phase 1 = relax the validation gate + `handleIfAdjoint` per-index dispatch.
+2. **D.3i Phase 3d — CarriedDependent runtime fallback** (small structural pin / annotation arm).
+3. **Multi-result COARSENED**.
+4. **`:benchmarks` Gradle module**.
+
+**Definition-of-done for §0.4.129 — met**:
+- `cseNode` dispatch reordered to route region-bearing ops ahead of multi-result short-circuit ✓
+- `cseRegionBearingOp`'s gate extended from IF-only to IF-or-WHILE ✓
+- Cond / body scope isolation preserved by `cseRegion`'s existing per-block scoping ✓
+- 3 tests pin body-dedup, cond-dedup with cascade, and scope isolation ✓
+- Latent `cseRegion` terminator bug for `DxirOpResult` documented as known gap ✓
+- Existing CSE tests still pass (no regression) ✓
+- Full suite stays green at 783 tests (+3) ✓
+
 #### 0.4.128 D.3i Phase 3c — LoopInvariant breakCond lift + cloneRegion / resolveReturn fix 2026-04-25
 
 §0.4.127's pass handled the two `Constant` arms; Phase 3c adds the LoopInvariant arm. When `BreakBearingWhile.classifyBreakCond` returns `LoopInvariant`, the predicate evaluates to the same value every iteration, so we lift it into outer scope and emit `IF(breakCond, then=inits, else=vanillaWhile)` — predicate runs once before the loop, then either short-circuits (yields the inits) or falls through to a vanilla bounded WHILE that the C5–C9 corollaries close in the same `singlePass` iteration. The pass is now `applyBreakBearingClosurePass` (renamed from `applyBreakBearingConstantFoldPass` per §0.4.127, since "constant fold" no longer captures the LoopInvariant lift).

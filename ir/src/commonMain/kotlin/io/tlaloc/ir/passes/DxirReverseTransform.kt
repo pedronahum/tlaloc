@@ -366,14 +366,17 @@ object DxirReverseTransform {
                 }
             }
             is DxirOp -> {
-                if (n.isMultiResult) {
+                if (n.hasRegions || n.op == OpKind.COARSENED) {
+                    // §0.4.118 — IF regions get internal CSE. §0.4.119 — COARSENED
+                    // has empty `regions` but stores `primal_body` / `gradient_body`
+                    // as DxirFunctions in attrs; recurse into those. §0.4.129 —
+                    // WHILE regions also get internal CSE (multi-result region-bearing
+                    // ops route here ahead of the multi-result short-circuit so their
+                    // cond / body bodies still benefit from dedup).
+                    cseRegionBearingOp(n, byId, sig2canon, const2canon)
+                } else if (n.isMultiResult) {
                     byId[n.id] = n
                     n to false
-                } else if (n.hasRegions || n.op == OpKind.COARSENED) {
-                    // §0.4.118 — IF regions get internal CSE; WHILE skips. §0.4.119 —
-                    // COARSENED has empty `regions` but stores `primal_body` /
-                    // `gradient_body` as DxirFunctions in attrs; recurse into those.
-                    cseRegionBearingOp(n, byId, sig2canon, const2canon)
                 } else {
                     val canonicalOperands = n.operands.map { byId[it.id] ?: it }
                     val opIds = canonicalOperands.map { it.id }
@@ -412,11 +415,15 @@ object DxirReverseTransform {
 
     /**
      * §0.4.118 — region-bearing op CSE. For [OpKind.IF], recurse into each branch's
-     * region body using a scoped copy of the canonical maps. For [OpKind.WHILE],
-     * keep the regions verbatim — WHILE shouldn't survive SCT (the φ-pass coarsens
-     * it before reverse-transform), and even if it did, body-region CSE would have
-     * to respect the cond/body distinction. The op's IMMEDIATE operands (e.g.,
-     * IF's predicate) are still canonicalized in all cases.
+     * region body using a scoped copy of the canonical maps. §0.4.129 — same
+     * recursion now also fires for [OpKind.WHILE]: the §0.4.128 LoopInvariant
+     * rewrite produces nested WHILEs inside IF arms, so the §0.4.118 assumption
+     * that "WHILE shouldn't survive SCT" no longer holds in every case.
+     * [cseRegion] processes each region's block with its own scoped copy of the
+     * canonical maps, so the cond / body regions of a WHILE never cross-pollute
+     * (their block args have distinct ids, and inner registrations don't leak
+     * back to outer scope). The op's IMMEDIATE operands are still canonicalized
+     * in all cases.
      *
      * §0.4.119 — for [OpKind.COARSENED], the regions list is empty (the op stores
      * its `primal_body` and `gradient_body` in attrs as full [DxirFunction]s, not
@@ -434,7 +441,7 @@ object DxirReverseTransform {
         val canonicalOperands = n.operands.map { outerById[it.id] ?: it }
         var mutated = canonicalOperands.zip(n.operands).any { (a, b) -> a !== b }
 
-        val newRegions = if (n.op == OpKind.IF) {
+        val newRegions = if (n.op == OpKind.IF || n.op == OpKind.WHILE) {
             n.regions.map { region ->
                 val (newRegion, regionMutated) = cseRegion(
                     region, outerById, outerSig2canon, outerConst2canon,

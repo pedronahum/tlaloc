@@ -1010,6 +1010,127 @@ class DxirReverseTransformTest {
         assertEquals(2, primalAddCount(twice), "after pass 2, primal_body still has 2 ADDs (idempotent)")
     }
 
+    // --- Region-internal CSE for WHILE (§0.4.129) ---------------------------
+
+    @Test
+    fun cseDeduplicatesOpsInsideWhileBodyRegion() {
+        // §0.4.129 — pre-§0.4.129 the dispatch in cseNode short-circuited multi-result
+        // ops (incl. WHILE) before reaching cseRegionBearingOp, so a WHILE's body
+        // never benefited from internal CSE. Now WHILE regions get the same recursion
+        // as IF regions. Build a WHILE whose body computes `MUL(args[0], 2)` twice;
+        // verify the duplicate is dedup'd inside the body region.
+        val fn = DxirBuilder.function("whileBodyDup") {
+            val x = param("x", f32)
+            val zero = const(0f, f32)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val n = const(3f, f32)
+                    val diff = op(OpKind.SUB, listOf(n, args[1]), f32)
+                    yields(op(OpKind.STEP, listOf(diff), boolS))
+                },
+                body = { args ->
+                    val two = const(2f, f32)
+                    val a = op(OpKind.MUL, listOf(args[0], two), f32)
+                    // Duplicate: same operands, same kind, same attrs.
+                    val b = op(OpKind.MUL, listOf(args[0], two), f32)
+                    val newX = op(OpKind.ADD, listOf(a, b), f32)
+                    val one = const(1f, f32)
+                    val newI = op(OpKind.ADD, listOf(args[1], one), f32)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val cseFn = DxirReverseTransform.applyCSE(fn)
+        val whilePost = cseFn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.WHILE }
+        val bodyBlock = whilePost.regions[1].blocks.single()
+        // Pre-CSE the body had 2 MUL ops; post-CSE only one survives.
+        val muls = bodyBlock.body.filterIsInstance<DxirOp>().count { it.op == OpKind.MUL }
+        assertEquals(1, muls, "duplicate MUL inside WHILE body should be CSE'd")
+    }
+
+    @Test
+    fun cseDeduplicatesConstsInsideWhileCondRegion() {
+        // §0.4.129 — the cond region also gets internal CSE. Build a WHILE whose
+        // cond region declares the same const twice; verify the dup is collapsed.
+        val fn = DxirBuilder.function("whileCondConstDup") {
+            val x = param("x", f32)
+            val zero = const(0f, f32)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val n1 = const(5f, f32)
+                    val n2 = const(5f, f32)  // duplicate const
+                    // Sig-different ops (one uses n1, one uses n2) but the CONSTs
+                    // themselves dedup → operand canonicalisation merges the SUBs too.
+                    val diffA = op(OpKind.SUB, listOf(n1, args[1]), f32)
+                    val diffB = op(OpKind.SUB, listOf(n2, args[1]), f32)
+                    val sum = op(OpKind.ADD, listOf(diffA, diffB), f32)
+                    yields(op(OpKind.STEP, listOf(sum), boolS))
+                },
+                body = { args ->
+                    val two = const(2f, f32)
+                    val newX = op(OpKind.MUL, listOf(args[0], two), f32)
+                    val one = const(1f, f32)
+                    val newI = op(OpKind.ADD, listOf(args[1], one), f32)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val cseFn = DxirReverseTransform.applyCSE(fn)
+        val whilePost = cseFn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.WHILE }
+        val condBlock = whilePost.regions[0].blocks.single()
+        // Pre-CSE: 2 const(5f). Post-CSE: 1 const(5f) (the other folded into the
+        // canonical entry; the SUB ops then sig-merge to a single SUB).
+        val consts = condBlock.body.filterIsInstance<io.tlaloc.ir.DxirConst>().count {
+            (it.value as? Number)?.toFloat() == 5f
+        }
+        assertEquals(1, consts, "duplicate const(5f) in cond region should be CSE'd")
+        val subs = condBlock.body.filterIsInstance<DxirOp>().count { it.op == OpKind.SUB }
+        assertEquals(1, subs, "post-CSE the two SUB(n, args[1]) collapse to one canonical SUB")
+    }
+
+    @Test
+    fun cseDoesNotShareCondAndBodyRegistrationsAcrossWhile() {
+        // §0.4.129 — the cond region and body region are scope-isolated — they have
+        // independent block args (different ids), so an op rooted at cond's args[0]
+        // can't dedup against an op rooted at body's args[0]. Build a WHILE where
+        // both regions independently compute MUL(args[0], 2); verify both survive.
+        val fn = DxirBuilder.function("whileScopeIsolation") {
+            val x = param("x", f32)
+            val zero = const(0f, f32)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    // cond region's MUL — uses cond args.
+                    val two = const(2f, f32)
+                    val scaled = op(OpKind.MUL, listOf(args[0], two), f32)
+                    val n = const(10f, f32)
+                    val diff = op(OpKind.SUB, listOf(n, scaled), f32)
+                    yields(op(OpKind.STEP, listOf(diff), boolS))
+                },
+                body = { args ->
+                    // body region's MUL — uses body args (different ids than cond's).
+                    val two = const(2f, f32)
+                    val newX = op(OpKind.MUL, listOf(args[0], two), f32)
+                    val one = const(1f, f32)
+                    val newI = op(OpKind.ADD, listOf(args[1], one), f32)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val cseFn = DxirReverseTransform.applyCSE(fn)
+        val whilePost = cseFn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.WHILE }
+        val condMuls = whilePost.regions[0].blocks.single().body.filterIsInstance<DxirOp>().count { it.op == OpKind.MUL }
+        val bodyMuls = whilePost.regions[1].blocks.single().body.filterIsInstance<DxirOp>().count { it.op == OpKind.MUL }
+        // Each region's MUL must survive — they reference different block args.
+        assertEquals(1, condMuls, "cond region's MUL must survive (args from cond block)")
+        assertEquals(1, bodyMuls, "body region's MUL must survive (args from body block)")
+    }
+
     // --- gradient_body with nested IF (§0.4.120) -----------------------------
 
     @Test
