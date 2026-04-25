@@ -435,6 +435,156 @@ class DxirInterpreterTest {
         }
     }
 
+    // ---- §0.4.136: rank-N TRANSPOSE -----------------------------------------
+
+    @Test
+    fun transposeRank3LastTwoAxesSwap() {
+        // Rank-3 (B=2, M=2, K=3) with permutation [0, 2, 1] → output (B, K, M) = (2, 3, 2).
+        // out[b, j, i] = in[b, i, j]. This is the canonical batched-transpose used by
+        // a future batched MatmulRule.
+        val inType = DxirType(F32, listOf(2, 2, 3))
+        val outType = DxirType(F32, listOf(2, 3, 2))
+        val fn = DxirBuilder.function("t3") {
+            val x = param("x", inType)
+            val t = op(
+                OpKind.TRANSPOSE,
+                listOf(x),
+                outType,
+                attrs = mapOf("permutation" to listOf(0, 2, 1)),
+            )
+            listOf(t)
+        }
+        // Batch 0: [[1, 2, 3], [4, 5, 6]]; expected transpose: [[1, 4], [2, 5], [3, 6]]
+        // Batch 1: [[7, 8, 9], [10, 11, 12]]; expected transpose: [[7, 10], [8, 11], [9, 12]]
+        val backing = floatArrayOf(
+            1f, 2f, 3f, 4f, 5f, 6f,
+            7f, 8f, 9f, 10f, 11f, 12f,
+        )
+        val out = DxirInterpreter.evalFunction(fn, listOf(backing))
+        assertEquals(
+            floatArrayOf(
+                1f, 4f, 2f, 5f, 3f, 6f,
+                7f, 10f, 8f, 11f, 9f, 12f,
+            ).toList(),
+            out[0].toList(),
+        )
+    }
+
+    @Test
+    fun transposeRank3GeneralPermutation() {
+        // Rank-3 (A=2, B=3, C=2) with permutation [2, 0, 1] → output (C, A, B) = (2, 2, 3).
+        // out[c, a, b] = in[a, b, c]. Tests the general (non-axis-swap) case.
+        val inType = DxirType(F32, listOf(2, 3, 2))
+        val outType = DxirType(F32, listOf(2, 2, 3))
+        val fn = DxirBuilder.function("t3perm") {
+            val x = param("x", inType)
+            val t = op(
+                OpKind.TRANSPOSE,
+                listOf(x),
+                outType,
+                attrs = mapOf("permutation" to listOf(2, 0, 1)),
+            )
+            listOf(t)
+        }
+        // in[a, b, c] indexed at row-major offset a*6 + b*2 + c.
+        // Use distinguishable values so we can pin per-element correctness.
+        val backing = FloatArray(12) { (it + 1).toFloat() }
+        // Manually compute expected: out[c, a, b] = in[a, b, c].
+        val expected = FloatArray(12)
+        for (c in 0 until 2) {
+            for (a in 0 until 2) {
+                for (b in 0 until 3) {
+                    val outOff = c * 6 + a * 3 + b
+                    val inOff = a * 6 + b * 2 + c
+                    expected[outOff] = backing[inOff]
+                }
+            }
+        }
+        val out = DxirInterpreter.evalFunction(fn, listOf(backing))
+        assertEquals(expected.toList(), out[0].toList())
+    }
+
+    @Test
+    fun transposeRank4LastTwoAxesSwap() {
+        // Rank-4 (D0=2, D1=2, M=2, K=2) with permutation [0, 1, 3, 2] →
+        // output (D0, D1, K, M). Two batch axes preserved; last two swapped.
+        // out[d0, d1, j, i] = in[d0, d1, i, j].
+        val inType = DxirType(F32, listOf(2, 2, 2, 2))
+        val outType = DxirType(F32, listOf(2, 2, 2, 2))
+        val fn = DxirBuilder.function("t4") {
+            val x = param("x", inType)
+            val t = op(
+                OpKind.TRANSPOSE,
+                listOf(x),
+                outType,
+                attrs = mapOf("permutation" to listOf(0, 1, 3, 2)),
+            )
+            listOf(t)
+        }
+        val backing = FloatArray(16) { (it + 1).toFloat() }
+        val expected = FloatArray(16)
+        for (d0 in 0 until 2) {
+            for (d1 in 0 until 2) {
+                for (j in 0 until 2) {
+                    for (i in 0 until 2) {
+                        val outOff = d0 * 8 + d1 * 4 + j * 2 + i
+                        val inOff = d0 * 8 + d1 * 4 + i * 2 + j
+                        expected[outOff] = backing[inOff]
+                    }
+                }
+            }
+        }
+        val out = DxirInterpreter.evalFunction(fn, listOf(backing))
+        assertEquals(expected.toList(), out[0].toList())
+    }
+
+    @Test
+    fun transposeRank2StillWorksAfterGeneralisation() {
+        // Sanity: the original rank-2 [1, 0] swap path still produces the same result
+        // after the rank-N rewrite. Pre-§0.4.136 this was a hard-coded fast path.
+        val inType = DxirType(F32, listOf(2, 3))
+        val outType = DxirType(F32, listOf(3, 2))
+        val fn = DxirBuilder.function("t2") {
+            val x = param("x", inType)
+            val t = op(
+                OpKind.TRANSPOSE,
+                listOf(x),
+                outType,
+                attrs = mapOf("permutation" to listOf(1, 0)),
+            )
+            listOf(t)
+        }
+        // [[1, 2, 3], [4, 5, 6]] transposed → [[1, 4], [2, 5], [3, 6]].
+        val out = DxirInterpreter.evalFunction(
+            fn,
+            listOf(floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f)),
+        )
+        assertEquals(
+            floatArrayOf(1f, 4f, 2f, 5f, 3f, 6f).toList(),
+            out[0].toList(),
+        )
+    }
+
+    @Test
+    fun transposeRejectsInvalidPermutation() {
+        // Permutation must be a valid 0..N-1 permutation. Length mismatch fails.
+        val inType = DxirType(F32, listOf(2, 3, 4))
+        val outType = DxirType(F32, listOf(2, 3, 4))
+        val fn = DxirBuilder.function("tBad") {
+            val x = param("x", inType)
+            val t = op(
+                OpKind.TRANSPOSE,
+                listOf(x),
+                outType,
+                attrs = mapOf("permutation" to listOf(0, 1)),  // length 2, not 3
+            )
+            listOf(t)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DxirInterpreter.evalFunction(fn, listOf(FloatArray(24)))
+        }
+    }
+
     @Test
     fun batchedMatmulRejectsBatchAxisMismatch() {
         // (B, M, K) x (B', K, N) with B != B' must fail loud.

@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.136 DxirInterpreter TRANSPOSE generalised to rank-N 2026-04-25
+
+§0.4.135 shipped batched MATMUL at the interpreter + emitter no-attrs path. The natural follow-on for end-to-end batched-matmul gradient flow needs batched TRANSPOSE — `MatmulRule`'s gradient emits `TRANSPOSE(perm = [1, 0])` on each operand, so a future batched MatmulRule will emit `TRANSPOSE(perm = [0, 2, 1])`-style permutations to swap the last two axes per batch. The StableHLO emitter side already handles arbitrary permutations (via `intListAttr(node, "permutation")` at [Emitter.kt:1786-1804](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L1786-L1804)); this session closes the interpreter gap with a stride-based rank-N implementation.
+
+**The mechanism** in [DxirInterpreter.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt):
+
+```kotlin
+val rank = inputType.rank
+require(perm.size == rank) { … }
+require(perm.toSet() == (0 until rank).toSet()) { … }
+val outputDims = perm.map { inputType.dims[it] }
+val inputStrides = …  // row-major
+val outputStrides = …  // row-major
+
+FloatArray(totalSize) { outFlat ->
+    var rem = outFlat
+    var inFlat = 0
+    for (k in 0 until rank) {
+        val idxK = rem / outputStrides[k]
+        rem -= idxK * outputStrides[k]
+        inFlat += idxK * inputStrides[perm[k]]
+    }
+    a[inFlat]
+}
+```
+
+The walk over output flat offset decomposes into multi-index via `outputStrides`, then accumulates the input flat offset using the permutation: output axis `k` corresponds to input axis `perm[k]`, so `idxK * inputStrides[perm[k]]` is the contribution from each axis. Each output element is computed in O(rank) time — same per-element complexity as the rank-2 fast path it replaces.
+
+Rank-0 / rank-1 inputs are an identity-copy short-circuit (the only valid permutation is `[]` or `[0]`). The original rank-2-only fast path is gone; the new uniform implementation handles `[1, 0]` correctly and is verified by `transposeRank2StillWorksAfterGeneralisation`.
+
+**Decisions worth flagging**:
+
+- **One uniform rank-N implementation, not a fast path + general fallback.** The original code was a tight rank-2 loop; the rank-N version's overhead per element is one extra multiplication/division per axis. For rank-2, that's identical work. For higher ranks, the per-element cost is strictly proportional to rank — no algorithmic difference. Keeping a separate rank-2 path would be premature optimisation.
+
+- **Strides computed once per call.** Both `inputStrides` and `outputStrides` are pre-computed before the `FloatArray(totalSize) { … }` loop. The hot inner loop only reads strides + does arithmetic. Mirrors how the rank-2 fast path computed `rows` / `cols` once.
+
+- **No StableHLO emitter changes.** The emitter's TRANSPOSE arm at [Emitter.kt:1786](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L1786) already emits `stablehlo.transpose %x, dims = [perm…]` for any rank with arbitrary permutation. The interpreter was the only piece tied to rank-2; closing the gap here aligns the two surfaces.
+
+- **No tracer-side changes.** `Tracer.matmul` still requires rank-2 operands, and `MatmulRule` only emits the `[1, 0]` permutation. Adding a `bmm` (batched matmul) tracer surface + a batched `MatmulRule` is now structurally unblocked — this session's TRANSPOSE generalisation is the prerequisite — but ships separately when a use case demands it.
+
+- **Permutation validation is strict.** Length must equal rank, and the permutation must cover `[0..rank-1]` exactly once. The rank-2 pre-§0.4.136 code only validated `permutation == [1, 0]`; the rank-N path properly rejects mis-sized or duplicate-element permutations. The new test `transposeRejectsInvalidPermutation` pins the length-mismatch case.
+
+**Tests added** (+5 new) in [DxirInterpreterTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirInterpreterTest.kt):
+
+- `DxirInterpreterTest.transposeRank3LastTwoAxesSwap` — `(2, 2, 3)` with `[0, 2, 1]` → `(2, 3, 2)`. Pin: per-batch transpose math, with two distinguishable batches each verified element-wise.
+- `DxirInterpreterTest.transposeRank3GeneralPermutation` — `(2, 3, 2)` with `[2, 0, 1]` → `(2, 2, 3)`. Pin: non-axis-swap general permutation; expected output computed in-line via the formula `out[c, a, b] = in[a, b, c]`.
+- `DxirInterpreterTest.transposeRank4LastTwoAxesSwap` — `(2, 2, 2, 2)` with `[0, 1, 3, 2]`. Pin: rank-4 batched matrix transpose with two batch axes preserved.
+- `DxirInterpreterTest.transposeRank2StillWorksAfterGeneralisation` — `(2, 3)` with `[1, 0]`. Sanity pin: the rank-2 path that the original code special-cased still computes correctly under the rank-N implementation.
+- `DxirInterpreterTest.transposeRejectsInvalidPermutation` — `(2, 3, 4)` with `permutation = [0, 1]` (length 2). Pin: throws `IllegalArgumentException` for the length mismatch.
+
+Full suite is green: **816 tests** (+5 over §0.4.135).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Tracer-surface `bmm` + batched MatmulRule** — now structurally unblocked by §0.4.135 + §0.4.136. The tracer surface gains a rank-3 batched matmul; `MatmulRule` extends to emit batched-TRANSPOSE + batched-MATMUL chains for the gradient. Mid-session-tractable since both substrate pieces are in place.
+2. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending.
+3. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+4. **`:benchmarks` Gradle module**.
+
+**Definition-of-done for §0.4.136 — met**:
+- `DxirInterpreter` TRANSPOSE accepts any rank with any valid permutation ✓
+- Rank-2 `[1, 0]` swap path produces identical results under the rank-N implementation ✓
+- 5 new tests pin rank-3 axis-swap, rank-3 general, rank-4 axis-swap, rank-2 sanity, invalid permutation ✓
+- No StableHLO emitter changes — the emitter side was already general ✓
+- No tracer / `MatmulRule` changes — those are the natural follow-on ✓
+- Full suite stays green at 816 tests (+5) ✓
+
 #### 0.4.135 Batched MATMUL at the interpreter + no-attrs emitter path 2026-04-25
 
 §0.4.122's deferred-register listed "Batched MATMUL — Rank-2 only at emitter + synthesis." The StableHLO emitter's *attrs-driven* path at [Emitter.kt:719-748](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L719-L748) already handles arbitrary batching/contracting dims, but the *no-attrs* convenience path required rank-2, and the [DxirInterpreter](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt) MATMUL arm was rank-2 only. This session lights up the canonical batched-matmul shape on both surfaces: `(B0..Bk, M, K) × (B0..Bk, K, N) → (B0..Bk, M, N)` for any rank ≥ 2. The interpreter loops over the flattened batch dimension; the emitter infers `batching_dims = [0..r-3]` and `contracting_dims = [r-1] x [r-2]` from the rank, mapping cleanly to `stablehlo.dot_general`.

@@ -274,28 +274,58 @@ object DxirInterpreter {
                 FloatArray(a.size) { (1.0 / (1.0 + kotlin.math.exp(-a[it].toDouble()))).toFloat() }
             }
             OpKind.TRANSPOSE -> {
-                // Narrow rank-2 swap only: permutation = [1, 0]. General rank-N stride-
-                // based transpose needs per-axis index arithmetic and isn't exercised by
-                // any currently-registered rule; deferred until one demands it.
+                // §0.4.136 — rank-N stride-based transpose. The original rank-2-only
+                // path covered all paths VjpRules emitted (MatmulRule's `[1, 0]` swap),
+                // but §0.4.135's batched-MATMUL substrate implies an eventual batched
+                // MatmulRule which would emit `[0, 2, 1]`-style permutations. The
+                // implementation below handles any valid permutation of any rank.
+                //
+                // Algorithm: the output element at multi-index (i_0, …, i_{N-1})
+                // corresponds to the input element at multi-index
+                // (j_0, …, j_{N-1}) where `j[perm[k]] = i_k`. Equivalently, walking
+                // the output in row-major order, the input flat offset accumulates
+                // `i_k * inputStrides[perm[k]]` per output axis `k`.
                 val a = evalNode(op.operands[0], env, multiResults)
                 val inputType = op.operands[0].type
                 val perm = (op.attrs["permutation"] as? List<*>)
                     ?.map { (it as Number).toInt() }
                     ?: emptyList()
-                require(inputType.rank == 2 && perm == listOf(1, 0)) {
-                    "DxirInterpreter: TRANSPOSE only supports rank-2 with permutation=[1, 0], " +
-                        "got rank=${inputType.rank} permutation=$perm"
+                val rank = inputType.rank
+                require(perm.size == rank) {
+                    "DxirInterpreter: TRANSPOSE permutation length ${perm.size} ≠ rank $rank"
                 }
-                val rows = inputType.dims[0]
-                val cols = inputType.dims[1]
-                require(a.size == rows * cols) {
-                    "DxirInterpreter: TRANSPOSE input size ${a.size} does not match rows*cols=${rows * cols}"
+                require(perm.toSet() == (0 until rank).toSet()) {
+                    "DxirInterpreter: TRANSPOSE permutation $perm must be a permutation of [0..${rank - 1}]"
                 }
-                // Output is [cols, rows]; out[c, r] = in[r, c].
-                FloatArray(rows * cols) { i ->
-                    val c = i / rows
-                    val r = i % rows
-                    a[r * cols + c]
+                val totalSize = if (rank == 0) 1 else inputType.dims.reduce(Int::times)
+                require(a.size == totalSize) {
+                    "DxirInterpreter: TRANSPOSE input size ${a.size} does not match shape ${inputType.dims}"
+                }
+                if (rank <= 1) {
+                    // Rank-0 / rank-1 transpose is the identity (only valid permutation
+                    // is `[0]` for rank-1, `[]` for rank-0). Return a copy to preserve
+                    // the "fresh array per node" invariant.
+                    a.copyOf()
+                } else {
+                    val outputDims = perm.map { inputType.dims[it] }
+                    // Row-major strides for input and output. `inputStrides[a]` is the
+                    // flat offset increment per unit step along input axis `a`.
+                    val inputStrides = IntArray(rank)
+                    inputStrides[rank - 1] = 1
+                    for (i in rank - 2 downTo 0) inputStrides[i] = inputStrides[i + 1] * inputType.dims[i + 1]
+                    val outputStrides = IntArray(rank)
+                    outputStrides[rank - 1] = 1
+                    for (i in rank - 2 downTo 0) outputStrides[i] = outputStrides[i + 1] * outputDims[i + 1]
+                    FloatArray(totalSize) { outFlat ->
+                        var rem = outFlat
+                        var inFlat = 0
+                        for (k in 0 until rank) {
+                            val idxK = rem / outputStrides[k]
+                            rem -= idxK * outputStrides[k]
+                            inFlat += idxK * inputStrides[perm[k]]
+                        }
+                        a[inFlat]
+                    }
                 }
             }
             OpKind.MATMUL -> {
