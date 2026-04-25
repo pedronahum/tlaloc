@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.120 `gradient_body` with nested IF in `handleCoarsenedAdjoint` 2026-04-25
+
+§0.4.108's deferred entry "PhiCalculus | `gradient_body` with nested regions — Linear gradient bodies cover today" gets a real increment. Pre-§0.4.120, `handleCoarsenedAdjoint` rejected any region-bearing op inside a COARSENED's `gradient_body` with `require(!n.hasRegions)`. This blocked future pipelines that might produce gradient bodies with control flow (e.g., a coarsening pass widened to handle IF-containing primals). This session relaxes the require for IF specifically, with recursive cloning into the outer gradient builder.
+
+**The mechanism** in [DxirReverseTransform.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt). The straight-line clone loop in `handleCoarsenedAdjoint` factored into a helper:
+
+```kotlin
+for (n in gradBody.body) {
+    val cloned = cloneGradNode(n, gradNodeMap, builder)
+    gradNodeMap[n.id] = cloned
+}
+```
+
+Three new private helpers handle the recursive case:
+
+- `cloneGradNode(n, gradNodeMap, builder)` — top-level dispatch. Handles DxirConst, single-result region-free DxirOp, and (new) IF via `cloneGradIf`.
+- `cloneGradIf(n, gradNodeMap, builder)` — clones an IF op by emitting `builder.ifOp(...)` with each region cloned via `cloneGradRegion`.
+- `cloneGradRegion(region, outerGradNodeMap, regionBuilder)` — copies the outer map, allocates fresh block args in the region builder, walks block body via `cloneGradBlockNode`, and yields canonical terminator nodes.
+- `cloneGradBlockNode(n, gradNodeMap, regionBuilder)` — variant of `cloneGradNode` that emits via the region builder. Currently supports only straight-line ops inside a region (no nested IFs in IF arms); extending follows the same pattern when needed.
+
+**Decisions worth flagging**:
+
+- **IF-only inside gradient_body, not arbitrary region-bearing ops.** WHILE inside a gradient_body would mean a loop in the gradient — the φ-pass coarsens loops away pre-reverse, so they shouldn't appear there. COARSENED inside a gradient_body would mean a recursive coarsening — out of scope for this phase. Relaxing only for IF matches the structural restriction of §0.4.23's branch reverse walk: `handleIfAdjoint` is the IF-specific peer of this work, and its existence already establishes IF as the supported region-bearing op surface in the reverse pipeline.
+
+- **Block args allocated fresh in the region builder.** Each cloned region's block args are NEW nodes with new ids; the inner `gradNodeMap` copy maps `oldArgId → newArg` for resolution within that region's body. This matches the semantics of `PhiCalculus.cloneRegion` from §0.4.31 — block args don't carry across clones; they're scope-local.
+
+- **Outer-scope ids resolved through the outer map.** The inner `cloneGradRegion` copies the outer `gradNodeMap` and ADDS its block args. Operand refs to outer-scope ids (the gradient_body's `upstream` param, `xPrim` param, or other body ops) resolve through this inherited map. Inner block-arg refs resolve through the new entries. Inner registrations don't leak back to the outer map.
+
+- **No nested IF inside IF arms (yet).** `cloneGradBlockNode` currently rejects region-bearing ops inside a region's body. Extending to nested-IF (IF inside an IF arm) would mean recursive `cloneGradRegion` calls — same pattern, extra recursion. Left out of this phase to keep the diff focused; the require message points at the gap.
+
+- **Single-result IF only.** Multi-result IF would need `DxirOpResult` cloning logic (handle the result-index part of the multi-result references). Not in scope.
+
+- **No production pipeline produces nested-region gradient_body today.** `coarsenRootLeaf` and `coarsenMultiSoi` both bail out on region-bearing primals, so their gradient bodies are straight-line. This change is defensive infrastructure for future widenings (e.g., a primal-side relaxation that lets COARSENED contain IF). The new test pins the path with a hand-built scenario; production exercises will follow if the pipeline grows.
+
+**Tests added** (+1 new):
+
+- `DxirReverseTransformTest.coarsenedWithIfInGradientBodyClonesAndEvaluates` — hand-builds a COARSENED whose gradient_body contains an `if (STEP(x) > 0) upstream else upstream` (identity IF). Pre-§0.4.120 this would throw at the `require(!n.hasRegions)` check; post-§0.4.120 it cleanly clones into the outer gradient builder. Numerical pin: at x=3 the gradient of identity is 1.0.
+
+Full suite is green: **753 tests** (+1 over §0.4.119).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE. The most-impactful remaining piece.
+2. **Multi-result COARSENED** — primal-side widening; `handleCoarsenedAdjoint` would need updates too.
+3. **`:benchmarks` Gradle module** — extract a perf probe into its own module.
+4. **Nested IF inside IF arms in gradient_body** — extend `cloneGradBlockNode`'s region-skip to allow recursive nesting; trivial follow-up to §0.4.120 if a use case appears.
+
+**Definition-of-done for §0.4.120 — met**:
+- `cloneGradNode` + `cloneGradIf` + `cloneGradRegion` + `cloneGradBlockNode` private helpers land ✓
+- IF inside gradient_body clones recursively into the outer gradient builder ✓
+- Block args allocated fresh per region; outer-scope refs resolved through inherited map copy ✓
+- WHILE / COARSENED inside gradient_body still error with documented messages ✓
+- One test pins the round-trip on a hand-built COARSENED with identity-IF gradient body ✓
+- Existing 6 region-CSE tests + all reverse-transform tests still green ✓
+- Full suite stays green at 753 tests (+1) ✓
+
 #### 0.4.119 Region-internal CSE for COARSENED's nested functions 2026-04-25
 
 §0.4.118's Phase 1 of the deferred entry "Region-internal DCE/CSE" handled IF region bodies. This session ships Phase 2 — CSE of the [DxirFunction]s stored in [OpKind.COARSENED]'s attrs (`primal_body` and `gradient_body`). COARSENED is structurally unusual: it has `regions = emptyList()` even though it carries two complete nested functions in attrs. The Phase-1 dispatch (gated on `n.hasRegions`) skipped COARSENED entirely; this session adds it as a peer case.

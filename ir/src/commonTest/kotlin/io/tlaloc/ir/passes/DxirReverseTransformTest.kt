@@ -1010,6 +1010,56 @@ class DxirReverseTransformTest {
         assertEquals(2, primalAddCount(twice), "after pass 2, primal_body still has 2 ADDs (idempotent)")
     }
 
+    // --- gradient_body with nested IF (§0.4.120) -----------------------------
+
+    @Test
+    fun coarsenedWithIfInGradientBodyClonesAndEvaluates() {
+        // §0.4.120 — handleCoarsenedAdjoint accepts IF inside gradient_body. Build a
+        // hand-crafted COARSENED whose gradient_body computes `if (true) upstream
+        // else upstream`, an identity-IF. The reverse pass must clone the IF into
+        // the outer gradient builder, and the resulting gradient must evaluate to
+        // upstream (= 1.0 for a unit primal seed).
+        // Primal body: just `x` (identity). Coarsened so it gets routed through
+        // handleCoarsenedAdjoint.
+        val primalBody = DxirBuilder.function("inner_primal") {
+            val x = param("x", f32)
+            listOf(x)
+        }
+        // Gradient body: (upstream, x) → if (true) upstream else upstream = upstream.
+        // Need a Bool predicate that's a function param or const. We'll use const(true).
+        val boolType = DxirType(io.tlaloc.core.Bool, emptyList())
+        val gradientBody = DxirBuilder.function("inner_grad") {
+            val upstream = param("upstream", f32)
+            val xPrim = param("x", f32)  // required by handleCoarsenedAdjoint's contract
+            // Bool predicate via STEP(xPrim) — we don't actually care which branch fires;
+            // both branches yield `upstream`, so the IF is identity on upstream.
+            val pred = op(OpKind.STEP, listOf(xPrim), boolType)
+            val ifResult = ifOp(
+                cond = pred,
+                types = listOf(f32),
+                thenRegion = region { yields(upstream) },
+                elseRegion = region { yields(upstream) },
+            )
+            listOf(ifResult)
+        }
+        val outer = DxirBuilder.function("outer") {
+            val x = param("x", f32)
+            val c = coarsened(
+                operands = listOf(x),
+                primalBody = primalBody,
+                gradientBody = gradientBody,
+                readsPrimalIndices = setOf(0),
+            )
+            listOf(c)
+        }
+        // Pre-§0.4.120 this would throw: "gradient_body op IF has regions (...not supported)".
+        // Post-§0.4.120 it cleanly clones the IF into the gradient.
+        val grad = DxirReverseTransform.apply(outer)
+        // Numerical check: f(x) = x → df/dx = 1.
+        val out = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(3f)))
+        assertEquals(1f, out[0][0], "df/dx for identity primal should be 1")
+    }
+
     @Test
     fun csePreservesExistingTopLevelBehaviorWhenNoRegions() {
         // Regression: a region-free function should still get top-level CSE applied.
