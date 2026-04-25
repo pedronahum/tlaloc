@@ -1186,6 +1186,34 @@ class GradTest {
     }
 
     @Test
+    fun unaryMinusOperatorMatchesNegMethod() {
+        // §0.4.96 — `-x` and `x.neg()` produce identical forward + backward
+        // results. The operator is a thin pass-through; no new tape op.
+        val xIn = Tensors.f32Vector<Sym>(floatArrayOf(5f, -3f, 2f))
+        val vgOp = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (-x).sum() }
+        val vgMethod = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> x.neg().sum() }
+        val (vO, dO) = vgOp(xIn)
+        val (vM, dM) = vgMethod(xIn)
+        assertEquals(vO, vM)
+        val dOArr = dO.hostF32()
+        val dMArr = dM.hostF32()
+        for (i in 0 until 3) assertEquals(dOArr[i], dMArr[i])
+    }
+
+    @Test
+    fun unaryMinusComposesInExpressions() {
+        // f(x) = sum((-x) * x) = sum(-x²). At x = [1, 2, 3]: forward = -14.
+        //   grad_x = -2x → [-2, -4, -6].
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> ((-x) * x).sum() }
+        val (value, dx) = vg(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(-14f, value)
+        val gx = dx.hostF32()
+        assertEquals(-2f, gx[0])
+        assertEquals(-4f, gx[1])
+        assertEquals(-6f, gx[2])
+    }
+
+    @Test
     fun negBackward() {
         val g = grad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> x.neg().sum() }
         val out = g(Tensors.f32Vector(floatArrayOf(5f, -3f, 2f)))

@@ -39,6 +39,50 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.96 `unaryMinus` operator — `-tracer` works alongside the existing `neg()` method 2026-04-25
+
+Tiny but obvious surface gap: `+`, `-`, `*`, `/` were operators on `Tracer<S>`, but the unary-minus form needed an explicit `tracer.neg()` method call. Fixed by adding `operator fun <S : Shape> Tracer<S>.unaryMinus(): Tracer<S> = neg()` — pure delegation, no new tape op.
+
+**One new operator** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt):
+
+```kotlin
+operator fun <S : Shape> Tracer<S>.unaryMinus(): Tracer<S> = neg()
+```
+
+**Two new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `unaryMinusOperatorMatchesNegMethod` — cross-check `(-x).sum()` against `x.neg().sum()` on x=[5, -3, 2]. Both paths produce identical forward and grad values. Pins the operator stays a thin pass-through.
+
+2. `unaryMinusComposesInExpressions` — `f(x) = sum((-x) * x)` at x=[1,2,3] yields value=-14, grad=[-2,-4,-6]. Verifies the operator chains through arithmetic and the grad math (-2x for f = -x²) is correct.
+
+**Decisions worth flagging**:
+
+- **Delegation only — no new VJP rule.** `unaryMinus` is `neg()` syntactically; the tape records the same `OpKind.NEG` op either way. No new dispatch needed.
+
+- **No `unaryPlus`.** Kotlin allows `+x` as an operator but it's almost never used in math — the only effect would be a no-op identity that allocates a Tracer wrapper. Skipped for surface-area discipline.
+
+- **Doesn't conflict with the §0.4.93+§0.4.95 Float/Double/Int LHS overloads.** `unaryMinus` has zero arguments and a different shape; Kotlin's overload resolution easily distinguishes.
+
+**Tests added** (+2 new):
+
+- `GradTest.unaryMinusOperatorMatchesNegMethod`
+- `GradTest.unaryMinusComposesInExpressions`
+
+Full suite is green: **675 tests** (+2 over §0.4.95).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on grad expressions**.
+3. **`diagnosticReporter` migration proper** — multi-step refactor per §0.4.94.
+4. **Rank-N (N≥3) broadcast operator set** — gated on a public `Rank3` shape type.
+
+**Definition-of-done for §0.4.96 — met**:
+- `Tracer<S>.unaryMinus()` operator lands ✓
+- Cross-check test pins parity with `neg()` ✓
+- Composition test verifies grad math through the operator ✓
+- Full suite green at 675 tests (+2) ✓
+
 #### 0.4.95 Double / Int literal broadcast overloads — `0.5 * matrix`, `x + 5`, etc. 2026-04-25
 
 Closes the §0.4.94 follow-up #4. §0.4.93 made Float literals work in any position (`0.5f * matrix`, `matrix * 0.5f`); this session extends the same pattern to `Double` and `Int` literals. Users no longer need an `f` suffix on every literal — `0.5 * matrix`, `x + 5`, `3 * row` all type-check and produce the correct gradients.

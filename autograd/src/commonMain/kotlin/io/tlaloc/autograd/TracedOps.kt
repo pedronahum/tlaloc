@@ -75,6 +75,14 @@ fun <S : Shape> Tracer<S>.neg(): Tracer<S> {
     return Tracer<S>(tape, e)
 }
 
+/**
+ * §0.4.96 — Kotlin unary-minus operator. Lets users write `-x` instead of
+ * `x.neg()`. Delegates straight to [neg]; no new tape op or rule. Closes a
+ * cosmetic gap where `+`, `-`, `*`, `/` were operators but the negation form
+ * needed an explicit method call.
+ */
+operator fun <S : Shape> Tracer<S>.unaryMinus(): Tracer<S> = neg()
+
 // §0.4.63 — elementwise unary math. The IR side (VjpRegistry) has had rules for
 // SQRT / EXP / LOG / TANH / SIGMOID / POW since §0.4.22, but the Tracer surface
 // exposed none of them — so a user writing `grad { x -> x.sqrt() }` would get
