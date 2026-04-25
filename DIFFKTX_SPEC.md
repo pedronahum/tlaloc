@@ -39,6 +39,74 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.109 `DiskCoarseningCache` prunes stale entries at startup 2026-04-25
+
+§0.4.108's deferred table flagged "PhiCalculus | Cache pruning | `tlaloc.cache.dir` grows unbounded." The §0.4.26 entry comment in `CoarseningCache.kt` already named the gap: *"old entries stick around until pruning lands, but won't be read."* This session lands pruning.
+
+**The mechanism** in [CoarseningCache.kt](ir/src/jvmMain/kotlin/io/tlaloc/ir/passes/CoarseningCache.kt). At [DiskCoarseningCache] instantiation — i.e., once per Gradle daemon compilation invocation — `pruneStaleEntries` sweeps the cache directory and deletes any `.dxir` file that meets either condition:
+
+- **CAS-version mismatch.** The on-disk filename embeds the CAS version (`<hash>-<casVersion>.dxir`); a toolchain bump (Symja upgrade, plugin version change, rewrite-rule edit) yields a new `casVersion`, and the old-suffix files become unreadable. Pruning matches the literal version-suffix string against the live `casVersion` field — anything else gets deleted.
+- **Mtime older than `maxAge`.** Default 30 days, per plan §5.4. Configurable via a new constructor parameter (`maxAge: Duration = DEFAULT_MAX_AGE`) primarily to enable deterministic tests; production callers take the default.
+
+```kotlin
+class DiskCoarseningCache(
+    private val baseDir: Path,
+    private val casVersion: String,
+    private val maxAge: Duration = DEFAULT_MAX_AGE,
+) : CoarseningCache {
+
+    init {
+        Files.createDirectories(baseDir)
+        pruneStaleEntries()
+    }
+
+    private fun pruneStaleEntries() { ... }
+    private fun isCasVersionMismatch(filename: String): Boolean { ... }
+    private fun isOlderThanCutoff(file: Path, cutoffMillis: Long): Boolean { ... }
+
+    companion object { val DEFAULT_MAX_AGE: Duration = Duration.ofDays(30) }
+}
+```
+
+**Decisions worth flagging**:
+
+- **Sweep at startup, not on every read.** The hot path (cache hits during compilation) stays cost-free. The walk runs once, amortised across the whole compiler invocation. Reading on every `get` would make every cache hit pay an `O(directory size)` cost — wrong shape for a feature whose job is to make compilation faster.
+
+- **Best-effort failure mode.** Pruning swallows IO errors on individual files (`runCatching { Files.deleteIfExists }`, try/catch on `Files.list`, try/catch on `Files.getLastModifiedTime`). A locked file, a permission-denied entry, or an mtime that can't be read must NOT block the cache from working. The opposite design — abort the whole cache on a partial-prune failure — would be hostile in environments with eventual-consistency filesystems or SELinux contexts. Rule per the loop charter: "every catch either re-throws or has a documented bail-out semantics that's correct" — these catches have documented best-effort semantics.
+
+- **Unrecognised-layout files are pruned, not preserved.** A `.dxir` file without a dash is malformed (the filename layout is `<hash>-<casVersion>.dxir`; both pieces are mandatory). The prune sweep treats those as stale (same as CAS-mismatch). Foreign non-`.dxir` files are left alone — the sweep only touches its own filename pattern.
+
+- **Two-level directory layout preserved.** Pruning walks `baseDir → prefixDirs (2-char) → entry files`. Empty prefix directories are NOT cleaned up by this pass — keeping them avoids race conditions where a concurrent `put` is creating the same prefix dir we'd be trying to delete. Per-prefix directories are cheap (hundreds of bytes each); reclaiming them is a separate optimisation if pressure ever matters.
+
+- **No new system property.** The deferred-register entry didn't ask for runtime tuning. Hard-coded 30-day default + constructor-parameter override is sufficient. If a CI environment ever wants tighter retention, the `tlaloc.cache.dir.max-age-days` property is a 4-line addition; we'll do it then, not now.
+
+**Tests added** (+5 new):
+
+- `CoarseningCacheTest.diskCachePrunesCasVersionMismatchAtStartup` — files with old CAS-version suffixes get deleted; same-version files survive.
+- `CoarseningCacheTest.diskCachePrunesEntriesOlderThanMaxAge` — 60-day-old entry pruned by default 30-day window.
+- `CoarseningCacheTest.diskCacheKeepsEntriesWithinMaxAge` — 10-day-old entry survives 30-day window. Pin: prune doesn't over-fire.
+- `CoarseningCacheTest.diskCacheCustomMaxAgeOverridesDefault` — 1-second `maxAge` deterministically prunes a backdated 5-second-old entry. Validates the constructor-parameter path.
+- `CoarseningCacheTest.diskCachePruneIsBestEffortAndDoesNotCrashOnUnrelatedFiles` — foreign `.txt` files survive; malformed `.dxir` files are pruned. Pin: prune sweep is robust to junk in the directory.
+
+Test mechanics use `java.nio.file.attribute.FileTime.from(Instant.now().minus(...))` to backdate mtimes deterministically — no real-time-elapsed dependency, no flakiness.
+
+Full suite is green: **710 tests** (+5 over §0.4.108).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Cross-rank broadcasting at synthesis surface** — the largest still-deferred IR-side piece, generalising §0.4.84's reverse-side BROADCAST handling to the IR-internal `DxirToIrSynthesis` path.
+2. **Multi-dim GATHER read side** — extend §0.4.41's rank-1 GATHER to rank-N (carve as a single-session phase if the surface area is too big).
+3. **`Long` literal LHS/RHS broadcast overloads** — small mechanical extension matching §0.4.93 / §0.4.95's Float/Double/Int patterns; quick win.
+4. **D.3i multi-session arc, Phase 1** — open the LAND-composed break-bearing WHILE work with a scaffolding session analogous to §0.4.103.
+
+**Definition-of-done for §0.4.109 — met**:
+- `pruneStaleEntries` lands in `DiskCoarseningCache.init`, runs once per instantiation ✓
+- CAS-version-mismatch + age-based dimensions both covered ✓
+- `maxAge` constructor parameter defaulted; existing callers (TlalocIrGenerationExtension) need no change ✓
+- Best-effort failure semantics documented inline + in the class KDoc ✓
+- Five tests pin the prune behavior across all branches (mismatch, age-old, age-fresh, custom maxAge, foreign files) ✓
+- Full suite stays green at 710 tests (+5) ✓
+
 #### 0.4.108 Out-of-scope register refresh — D.1i moves to Shipped 2026-04-25
 
 §0.4.102's register pre-dated the D.1i multi-session arc that landed in §0.4.103–§0.4.107. This refresh updates the snapshot to reflect that D.1i is now complete (all four planned phases shipped) and surfaces a fresh recommended-next list. The register itself stays tabular per §0.4.102's organising principle.
