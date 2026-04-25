@@ -539,6 +539,132 @@ class PhiCalculusTest {
         assertEquals(1, countOps(rewritten, OpKind.WHILE), "C5 must skip non-standard cond")
     }
 
+    // ---- §0.4.127 — D.3i Phase 3b: Constant breakCond fold --------------------
+
+    /**
+     * Helper: build a break-bearing WHILE primal whose break predicate is the literal
+     * [breakValue]. Mirrors [iterateConcreteN]'s shape but with cond region
+     * `LAND(STEP(SUB(n, counter)), NOT(const(breakValue)))`. The body multiplies the
+     * f32 carried by 2 each iteration. With `breakValue=true`, the loop runs zero
+     * times and the result is `x` unchanged. With `breakValue=false`, the LAND-NOT
+     * wrapper degenerates to the natural cond and the loop runs `n` times → `x · 2^n`.
+     */
+    private fun breakBearingWithConstantBreak(n: Int, breakValue: Boolean): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakConst${if (breakValue) "True" else "False"}_$n") {
+            val x = param("x", f32s)
+            val nConst = const(n, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nConst, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(const(breakValue, boolS)), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    @Test
+    fun breakBearingConstantFoldCollapsesAlwaysBreaksTrue() {
+        // alwaysBreaks=true → loop runs zero times → result = x unchanged. The WHILE
+        // op disappears entirely from the rewritten body; the unroll never fires.
+        val original = breakBearingWithConstantBreak(n = 5, breakValue = true)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(0, countOps(rewritten, OpKind.WHILE), "alwaysBreaks=true folds the WHILE away")
+        // x = 9 → 9 (zero iterations).
+        val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(9f)))
+        assertEquals(9f, out[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(9f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(0f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(-2.5f)))
+    }
+
+    @Test
+    fun breakBearingConstantFoldRewritesAlwaysBreaksFalseToVanillaLoopThenC5() {
+        // alwaysBreaks=false → cond region drops LAND-NOT → vanilla bounded WHILE
+        // with concrete trip-count 5 → C5 unrolls in the same singlePass iteration.
+        // End-to-end the WHILE disappears AND the result equals the unrolled chain.
+        val original = breakBearingWithConstantBreak(n = 5, breakValue = false)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(0, countOps(rewritten, OpKind.WHILE), "fold + C5 should eliminate the WHILE")
+        // x = 3 → 3 · 2^5 = 96.
+        val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(3f)))
+        assertEquals(96f, out[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(3f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(0f)))
+    }
+
+    @Test
+    fun breakBearingConstantFoldLeavesCarriedDependentBreakCondAlone() {
+        // breakCond depends on the f32 carried (args[0]) — classifies as
+        // CarriedDependent, NOT Constant. The fold pass must skip it; the WHILE
+        // stays put because no later pass closes a break-bearing WHILE either.
+        val original = DxirBuilder.function("carriedDepBreak") {
+            val x = param("x", f32s)
+            val nConst = const(7, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nConst, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(OpKind.STEP, listOf(args[0]), boolS)
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(1, countOps(rewritten, OpKind.WHILE), "CarriedDependent breakCond is not Constant — leave WHILE")
+        // Numerical agreement (sanity): with x=-1, STEP(args[0]) is 0, never breaks → loop runs all 7 iters → -1 · 2^7 = -128.
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(-1f)))
+    }
+
+    @Test
+    fun breakBearingConstantFoldLeavesVanillaWhileAlone() {
+        // Vanilla WHILE with no LAND-NOT cond — BreakBearingWhile.detect returns null
+        // so the fold pass skips. C5 then unrolls it normally.
+        val original = iterateConcreteN(4)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(0, countOps(rewritten, OpKind.WHILE), "C5 still fires on vanilla loops")
+        // x = 2 → 2 · 2^4 = 32. Confirms the fold pass didn't accidentally interfere.
+        val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(2f)))
+        assertEquals(32f, out[0][0])
+    }
+
+    @Test
+    fun breakBearingConstantFoldEnablesEndToEndGradThroughBreakBearingLoop() {
+        // alwaysBreaks=false + C5 → straight-line dxir → DxirReverseTransform
+        // produces the gradient. d/dx of x · 2^4 = 16. End-to-end pin: the fold pass
+        // unblocks gradient flow through what was a break-bearing WHILE.
+        val original = breakBearingWithConstantBreak(n = 4, breakValue = false)
+        val coarsened = PhiCalculus.apply(original)
+        assertEquals(0, countOps(coarsened, OpKind.WHILE))
+        val grad = DxirReverseTransform.apply(coarsened)
+        val gradOut = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(7f)))
+        assertEquals(1, gradOut.size)
+        assertEquals(16f, gradOut[0][0], "d/dx of x·16 = 16")
+    }
+
     @Test
     fun c5EnablesEndToEndGradThroughLoop() {
         // The Stage B.2 load-bearing test: grad { x -> iterate5(x) } should produce 32f

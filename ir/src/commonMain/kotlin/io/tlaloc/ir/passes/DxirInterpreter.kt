@@ -124,6 +124,12 @@ object DxirInterpreter {
                     // Scalar-valued const: splat the single value over the declared
                     // output shape. Canonical form for `const(1.0f, f32)` etc.
                     is Number -> FloatArray(size) { v.toFloat() }
+                    // Bool const encoded as Kotlin Boolean (the form
+                    // [BreakBearingWhile.classifyBreakCond] recognises for
+                    // [BreakBearingWhile.BreakCondClass.Constant]). Materialised as
+                    // 1f / 0f to match the interpreter's internal Bool encoding —
+                    // see `if (pred[0] == 0f) break` in [evalWhile].
+                    is Boolean -> FloatArray(size) { if (v) 1f else 0f }
                     // §0.4.72 — rank-N const whose value is a full FloatArray.
                     // Capture.kt (§0.4.71 fix) uses this form to carry the tape's
                     // cached rank-N leaf value through to the captured function.

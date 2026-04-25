@@ -39,6 +39,89 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.127 D.3i Phase 3b — Constant-classified break-bearing WHILE folds 2026-04-25
+
+§0.4.126 shipped the typed `BreakCondClass` classifier. Phase 3b lights up the trivially-resolved arms — both `Constant` cases — by wiring a new fold pass into `PhiCalculus.singlePass`. With `alwaysBreaks=true` the WHILE collapses to its inits (zero iterations); with `alwaysBreaks=false` the LAND-NOT wrapper drops from the cond region, exposing a vanilla bounded WHILE that the existing C5–C9 closures pick up in the same pass iteration. The `LoopInvariant` and `CounterOnly` / `CarriedDependent` arms remain for Phase 3c.
+
+**The mechanism** in [PhiCalculus.kt:497-583](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L497-L583). A new private function `applyBreakBearingConstantFoldPass(fn)` runs between the second `applyF1Pass` and the engine-backed C9/C8/C7/C6 block:
+
+```kotlin
+private fun applyBreakBearingConstantFoldPass(fn: DxirFunction): DxirFunction {
+    val toFold = HashMap<Int, BreakBearingWhile.BreakCondClass.Constant>()
+    for (n in fn.body) {
+        if (n !is DxirOp || n.op != OpKind.WHILE) continue
+        val pattern = BreakBearingWhile.detect(n) ?: continue
+        val klass = BreakBearingWhile.classifyBreakCond(pattern)
+            as? BreakBearingWhile.BreakCondClass.Constant ?: continue
+        toFold[n.id] = klass
+    }
+    if (toFold.isEmpty()) return fn
+
+    return rewriteFunction(fn) { op, nodeMap, multiOut, builder ->
+        val klass = toFold[op.id] ?: return@rewriteFunction null
+        if (klass.alwaysBreaks) {
+            val perIndex = op.operands.map { nodeMap[it.id]!! }
+            multiOut[op.id] = perIndex
+            perIndex[0]
+        } else {
+            // Re-clone the cond region but rebind the terminator to origCond.
+            ...
+        }
+    }
+}
+```
+
+The pre-scan collects WHILE op ids that pass §0.4.123/§0.4.124/§0.4.125's structural checks AND classify as `Constant` per §0.4.126. The rewrite callback then dispatches:
+
+- **`alwaysBreaks=true`**: `multiOut[op.id]` gets one slot per WHILE result, each pointing at the corresponding init operand's clone in the outer `nodeMap`. `nodeMap[op.id]` gets the index-0 init (mirroring `applyC5Pass`'s convention) so direct `DxirOp` references resolve correctly. Multi-result `DxirOpResult` consumers route through `multiOut`.
+- **`alwaysBreaks=false`**: builds a fresh cond region by walking the original cond block's body op-by-op (cloning into the new region's id space), then yielding the clone of `origCond` — drops the LAND/NOT/const(false) ops which become dead. The body region clones via the standard `cloneRegion` helper. The new WHILE keeps the same operand types and shape, so downstream consumers (C5/C6/etc.) see a textbook bounded WHILE.
+
+The interpreter learned to evaluate Bool consts encoded as Kotlin `Boolean` (in [DxirInterpreter.kt:127](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt#L127)) — the same encoding §0.4.126's classifier accepts. This was a one-line additive extension (mapping `true`→`1f`, `false`→`0f`) that aligns the interpreter with the IR's accepted scalar-Bool encodings; the pre-existing `Number` and `FloatArray` paths are untouched.
+
+**Decisions worth flagging**:
+
+- **Insertion point is between F1/F3/Distribute and the C5–C9 corollaries.** The fold pass needs WHILEs to exist (so it runs before C5 unrolls them) but can rely on outer IFs being canonicalised (so the F passes have already simplified the function's IF skeleton). Placing it just before the engine-backed C9/C8/C7/C6 means the `alwaysBreaks=false` case's rewritten vanilla WHILE flows through ALL the closure corollaries in the same `singlePass` iteration — no second iteration needed for the typical case.
+
+- **Pass is idempotent at the fixpoint.** After one fold, the rewritten cond region's terminator is `origCond` (no LAND), so `BreakBearingWhile.detect` returns null on it. The next `singlePass` iteration sees no break-bearing WHILEs to fold, so the pass becomes a no-op. The fixpoint check in `apply` then converges.
+
+- **Mirrors `applyC5Pass`'s `multiOut` convention.** The `alwaysBreaks=true` case is structurally identical to C5's "WHILE collapses to a list of values, one per result index". Reusing the `multiOut[op.id] = perIndex` + `nodeMap[op.id] = perIndex[0]` shape means the framework's existing `resolveClonedOperand` handles both cases uniformly — no new per-index dispatch logic.
+
+- **Dead LAND/NOT/const stays in the cloned cond body for the `alwaysBreaks=false` case.** Stripping them inline would require a second SSA scan inside the rewrite callback, and Stage B.3's planned DCE pass will strip them anyway. The `DxirInterpreter` tolerates dead body ops (it walks them but their results go unread once the terminator binds elsewhere). This matches the comment at [PhiCalculus.kt:1984](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1984): "Dead ops (cloned verbatim but never referenced by downstream) are tolerated".
+
+- **No new public API.** `applyBreakBearingConstantFoldPass` is a private member of `PhiCalculus`. The fold uses §0.4.126's existing `BreakBearingWhile.classifyBreakCond` public surface; nothing about the integration adds to the namespace. The interpreter's Boolean handling extends an existing private switch arm.
+
+- **`BreakBearingWhile.detect` is called twice per matched WHILE — once in pre-scan, once inside the rewrite callback to recover `origCond.id`.** The detector is a pure structural match (no allocation beyond the `Pattern` instance), so the duplication is cheap and keeps the rewrite callback self-contained without threading more state through `toFold`. If the detect cost ever becomes measurable, threading the pattern through is a one-line change.
+
+- **Constant breakCond is degenerate in production.** The FIR-side hoist produces breakCond as a STEP / LAND / comparison op tree, not a literal Boolean — so `BreakBearingWhile.BreakCondClass.Constant` rarely fires today. The pass's value is in being the *first* arm of D.3i Phase 3 to go end-to-end: it pins the integration shape (where in `singlePass`, how `multiOut` flows, how the cond region is rewritten) so Phase 3c's `LoopInvariant` arm can layer on without re-litigating the framework.
+
+**Tests added** (+5 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.breakBearingConstantFoldCollapsesAlwaysBreaksTrue` — `breakCond = const(true)`, `n = 5`. Pin: zero WHILE ops in rewritten body; `eval(x=9) = 9` (loop never executes). Numerical agreement with original at three sample inputs.
+- `PhiCalculusTest.breakBearingConstantFoldRewritesAlwaysBreaksFalseToVanillaLoopThenC5` — `breakCond = const(false)`, `n = 5`. Pin: WHILE eliminated (fold rewrites to vanilla, then C5 unrolls); `eval(x=3) = 3 · 2^5 = 96`. Confirms the cross-pass integration in a single `singlePass` iteration.
+- `PhiCalculusTest.breakBearingConstantFoldLeavesCarriedDependentBreakCondAlone` — `breakCond = STEP(args[0])` (depends on the f32 carried). Pin: 1 WHILE op stays in rewritten body (CarriedDependent isn't Constant); numerical agreement preserved.
+- `PhiCalculusTest.breakBearingConstantFoldLeavesVanillaWhileAlone` — vanilla WHILE without LAND-NOT cond. Pin: C5 still unrolls; `eval(x=2) = 2 · 2^4 = 32`. Confirms the fold pass doesn't disturb non-break-bearing loops.
+- `PhiCalculusTest.breakBearingConstantFoldEnablesEndToEndGradThroughBreakBearingLoop` — `breakCond = const(false)`, `n = 4`. Pin: after fold + C5 + DxirReverseTransform, gradient at `x=7` equals `16` (i.e., `d/dx of x · 2^4`). End-to-end gradient flow through what was a break-bearing loop — the load-bearing pin for §0.4.127's "this actually unblocks AD".
+
+Full suite is green: **777 tests** (+5 over §0.4.126).
+
+**Recommended next pickup** (next /loop firing — D.3i Phase 3c):
+
+1. **D.3i Phase 3c — LoopInvariant arm.** The runtime arm is the next-tractable case. Rewrite shape: emit an outer IF that branches on the (loop-invariant) breakCond — the `then` branch yields the inits (loop runs zero times), the `else` branch yields the loop with the LAND-NOT wrapper dropped (vanilla bounded WHILE eligible for C5–C9). Pin the rewrite shape + numerical equivalence at runtime values that exercise both arms.
+2. **Multi-result COARSENED**.
+3. **`:benchmarks` Gradle module**.
+4. **HMC benchmark port — Phase 1**.
+
+**Definition-of-done for §0.4.127 — met**:
+- `applyBreakBearingConstantFoldPass` lands as a private `PhiCalculus` pass ✓
+- Pass integrated into `singlePass` between F1 and the engine-backed corollaries ✓
+- `alwaysBreaks=true` arm collapses WHILE to inits via `multiOut` ✓
+- `alwaysBreaks=false` arm drops LAND-NOT wrapper, exposing vanilla WHILE for C5 ✓
+- Interpreter learns to evaluate Bool consts encoded as Kotlin `Boolean` ✓
+- Pass is idempotent (rewritten WHILE no longer matches `BreakBearingWhile.detect`) ✓
+- 5 tests pin both arms, two negative cases, and end-to-end AD flow ✓
+- D.3i Phase 3c unblocked — the integration framework shape is now established ✓
+- Full suite stays green at 777 tests (+5) ✓
+
 #### 0.4.126 D.3i Phase 3a — break-cond dependency classification 2026-04-25
 
 §0.4.125 closed Phase 2 with the four structural invariants of a break-bearing WHILE — fully-validated `Pattern`s now flow downstream with a known counter index and trip-count bound. Phase 3 is "break-iteration computation" — a multi-session arc that ultimately solves for the smallest `k` where `breakCond` first becomes true. This session ships Phase 3a: a typed dependency classifier that future closure phases dispatch on to pick the right break-iteration computation strategy.

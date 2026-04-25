@@ -303,6 +303,12 @@ object PhiCalculus {
         work = applyF1Pass(work)
         work = applyC3Pass(work)
         work = applyF1Pass(work)
+        // §0.4.127 — D.3i Phase 3b. Fold break-bearing WHILEs whose break predicate
+        // classifies as [BreakBearingWhile.BreakCondClass.Constant]: alwaysBreaks=true
+        // collapses the WHILE to its inits (zero iterations); alwaysBreaks=false drops
+        // the LAND-NOT wrapper from the cond region, exposing a vanilla bounded WHILE
+        // for the C5–C9 closures below to pick up in the same singlePass iteration.
+        work = applyBreakBearingConstantFoldPass(work)
         // Engine-backed corollaries first (most specific first per plan §4.13). When
         // fired, they replace WHILEs with closed-form expressions — including for
         // SYMBOLIC trip counts, which C5's direct unroll cannot handle. C5 is the
@@ -487,6 +493,92 @@ object PhiCalculus {
             }
             builder.ifOp(innerPred, op.types, pBranchOuter, qBranchOuter)
         }
+
+    // ------------------------------------------------------------------------
+    // §0.4.127 — D.3i Phase 3b. Constant-classified break-bearing WHILE folds.
+    //
+    // The FIR-side hoist for `while (cond) { ...; if (break_cond) break }` produces a
+    // WHILE whose cond region is `LAND(origCond, NOT(breakCond))` (per [OpKind.LAND]'s
+    // source comment). When [BreakBearingWhile.classifyBreakCond] returns a Constant
+    // class, the closure is fully resolved at compile time and we can rewrite the IR
+    // without invoking Symja or runtime evaluation:
+    //  - alwaysBreaks=true  → loop runs zero times; results = inits.
+    //  - alwaysBreaks=false → drop the LAND-NOT wrapper; cond region terminator
+    //    becomes origCond. The resulting vanilla bounded WHILE flows into the
+    //    standard C5–C9 closures inside the same [singlePass] iteration.
+    //
+    // Non-Constant classifications (LoopInvariant / CounterOnly / CarriedDependent)
+    // are handled by later D.3i phases and bypass this pass.
+    // ------------------------------------------------------------------------
+
+    private fun applyBreakBearingConstantFoldPass(fn: DxirFunction): DxirFunction {
+        // Pre-scan: only break-bearing WHILEs whose breakCond classifies as Constant.
+        // Foreign or non-Constant patterns are left for downstream phases.
+        val toFold = HashMap<Int, BreakBearingWhile.BreakCondClass.Constant>()
+        for (n in fn.body) {
+            if (n !is DxirOp) continue
+            if (n.op != OpKind.WHILE) continue
+            val pattern = BreakBearingWhile.detect(n) ?: continue
+            val klass = BreakBearingWhile.classifyBreakCond(pattern)
+                as? BreakBearingWhile.BreakCondClass.Constant ?: continue
+            toFold[n.id] = klass
+        }
+        if (toFold.isEmpty()) return fn
+
+        return rewriteFunction(fn) { op, nodeMap, multiOut, builder ->
+            val klass = toFold[op.id] ?: return@rewriteFunction null
+            if (klass.alwaysBreaks) {
+                // Zero-iteration collapse: every result resolves to its init operand.
+                val perIndex = op.operands.map { init ->
+                    nodeMap[init.id]
+                        ?: error(
+                            "applyBreakBearingConstantFoldPass: init id=${init.id} for " +
+                                "WHILE id=${op.id} missing from nodeMap (broken SSA before fold)",
+                        )
+                }
+                multiOut[op.id] = perIndex
+                // Mirror the [applyC5Pass] convention: nodeMap[op.id] gets the index-0
+                // value (multiOut takes precedence for DxirOpResult refs at higher indices).
+                perIndex[0]
+            } else {
+                // Drop the LAND-NOT wrapper from the cond region. We re-clone the cond
+                // body verbatim (the LAND/NOT/const(false) ops become dead but stay in
+                // the cloned body — DxirInterpreter tolerates dead nodes, and Stage B.3
+                // DCE will strip them) and rebind the terminator to origCond's clone.
+                val origCondId = BreakBearingWhile.detect(op)!!.origCond.id
+                val condBlock = op.regions[0].blocks.single()
+                val newCondRegion = builder.region {
+                    val regionNodeMap = HashMap(nodeMap)
+                    for (a in condBlock.args) {
+                        regionNodeMap[a.id] = arg(a.type, a.sharding)
+                    }
+                    for (n in condBlock.body) {
+                        regionNodeMap[n.id] = cloneNode(n, regionNodeMap, this as DxirEmitter, multiOut)
+                    }
+                    val newTerm = regionNodeMap[origCondId]
+                        ?: error(
+                            "applyBreakBearingConstantFoldPass: origCond id=$origCondId not " +
+                                "found in cond region body for WHILE id=${op.id}",
+                        )
+                    yields(newTerm)
+                }
+                val newBodyRegion = cloneRegion(op.regions[1], nodeMap, builder, multiOut)
+                val clonedInits = op.operands.map { init ->
+                    nodeMap[init.id]
+                        ?: error(
+                            "applyBreakBearingConstantFoldPass: init id=${init.id} for " +
+                                "WHILE id=${op.id} missing from nodeMap",
+                        )
+                }
+                builder.opMulti(
+                    OpKind.WHILE,
+                    clonedInits,
+                    op.types,
+                    regions = listOf(newCondRegion, newBodyRegion),
+                )
+            }
+        }
+    }
 
     // ------------------------------------------------------------------------
     // C5 — simple-loop closed-form: 𝔏^n_L d = f(φ_L(p, d)) ⇒ d_exit = f^[n](p)
