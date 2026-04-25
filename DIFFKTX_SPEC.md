@@ -39,6 +39,70 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.104 D.1i Phase 2 — `liftNode` widens for fractional Float consts 2026-04-25
+
+Phase 1 (§0.4.103) flagged a silent correctness bug: `SymjaEngine.liftNode` for `DxirConst` payloads called `n.toLong()`, which truncates fractional Float values — `0.5f.toLong() = 0L`, so `liftNode(const(0.5f))` produced `rational(0)` and Symja saw the gradient as multiplied by zero. Any gradient body containing fractional constants (MeanRule's `1/N`, scaled sums, etc.) would be silently mis-simplified to zero. Phase 1 sidestepped this by keeping its tests on integer constants only; Phase 2 fixes the root cause.
+
+**The fix** in [SymjaEngine.kt](ir/src/jvmMain/kotlin/io/tlaloc/ir/passes/SymjaEngine.kt):
+
+```kotlin
+private fun liftNumber(n: Number): SymExpr {
+    val d = n.toDouble()
+    if (d.isFinite()) {
+        val asLong = d.toLong()
+        if (asLong.toDouble() == d) return rational(asLong)
+    }
+    return realLiteral(d)
+}
+```
+
+The DxirConst arm of `liftNode` now delegates: `is DxirConst -> liftNumber(node.value as Number)`. The promotion logic preserves Phase 1's semantics for integer-valued payloads (Long, Int, Float-of-1.0, Double-of-2.0) — they round-trip through `Long` and lift as integer rationals, so Symja's integer-domain rules (`Times[1, x] → x`) still fire. Truly fractional values (0.5f, -0.25, 1.0/3.0) lift via `realLiteral`, preserving the actual numeric value through Symja's evaluator.
+
+**Why this matters**: the `lowerToDxir` half already handles real-number Symja results via `evalDouble()` + `toFloatLiteral`, so fractional consts round-trip cleanly. The lift was the only asymmetric half.
+
+**Phase 2 test surface** in [PhiCalculusSimplifyTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/PhiCalculusSimplifyTest.kt) (+4 tests):
+
+1. `simplifyDoesNotTruncateFractionalFloatConst` — `f(x) = 0.5 * x`. Pre-Phase-2 this collapsed to 0; now `f(4) = 2.0`. The strongest demonstration that Phase 2 fixes a real bug.
+2. `simplifyCollapsesMulByOneEvenWhenLiteralIsFloat` — `f(x) = 1.0f * x` still simplifies to `x`. Verifies the integer round-trip path for Float payloads — Phase 1's behavior is preserved when the payload happens to be integer-valued.
+3. `simplifyFoldsFractionalConstantArithmetic` — `f(x) = (0.5 + 0.5) * x`. Symja evaluates `Plus[0.5, 0.5] = 1.0`, then `Times[1.0, x]` stays as `1.*x` (real-domain Simplify is conservative — that's fine, the body doesn't grow).
+4. `simplifyHandlesNegativeFractionalConst` — `f(x) = -0.25 + x = 0.75` at `x=1`. Pre-Phase-2: `(-0.25f).toLong() = 0L`, body collapsed to `0 + x = x`, returning 1.0 instead of 0.75.
+
+**Decisions worth flagging**:
+
+- **Cutoff for "integer-valued" is the round-trip test, not the static type.** A Float payload of `1.0f` is integer-valued; a Long payload that exceeds 2^53 isn't (the Long → Double conversion would lose precision). The check `d.toLong().toDouble() == d` captures this in one line and produces the right Symja form for every legitimate `DxirConst` payload that fits in our F32/F64/I32/I64 dtypes.
+
+- **`lowerToDxir` needs no change.** It already collapses any Symja numeric kind (integer / rational / real) to a single concrete `DxirConst` via `evalDouble()`. Whatever lift produced — `rational(1)` or `realLiteral(0.5)` — comes back through `evalDouble() → 1.0` or `0.5` and emits a Float DxirConst. The simplification opportunity is upstream of lowering.
+
+- **Phase 2 stays narrow.** The fix is to one helper + 4 tests. Wiring into the IR pipeline (Phase 3) and opaque-leaf handling for non-arithmetic ops (Phase 4) remain pending. After this session, the pass is correct for any gradient body whose constants happen to be fractional Float — which now includes MeanRule outputs, scaled gradients, learning-rate-multiplied updates, and so on.
+
+**Updated multi-session plan** for D.1i:
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| 1 | `simplifyReturns` scaffolding + arithmetic-only first cut | Shipped §0.4.103 |
+| 2 | Widen `liftNode` for fractional Float constants (`realLiteral`); broaden test coverage | **Shipped this session** |
+| 3 | Wire into `TlalocIrGenerationExtension` behind `tlaloc.simplify.enabled` opt-in property; benchmark perf delta on Brachistochrone / HookeanSpring / BGDHyperOpt | Pending |
+| 4 | Opaque-leaf handling for non-arithmetic gradient ops (SUM, MEAN, MATMUL, GATHER) — extends to tensor gradient bodies; reuse the §0.4.52 `symOpaqueLeaves` mechanism | Pending |
+
+**Tests added** (+4 new):
+
+- `PhiCalculusSimplifyTest.simplifyDoesNotTruncateFractionalFloatConst`
+- `PhiCalculusSimplifyTest.simplifyCollapsesMulByOneEvenWhenLiteralIsFloat`
+- `PhiCalculusSimplifyTest.simplifyFoldsFractionalConstantArithmetic`
+- `PhiCalculusSimplifyTest.simplifyHandlesNegativeFractionalConst`
+
+Full suite is green: **689 tests** (+4 over §0.4.103).
+
+**Recommended next pickup** (next /loop firing should pick this up): D.1i Phase 3 — wire `simplifyReturns` into `TlalocIrGenerationExtension` behind a `tlaloc.simplify.enabled` opt-in property. The wiring shape: invoke `simplifyReturns(fn, engine)` on the gradient `DxirFunction` produced by `Capture.toDxirFunction` immediately before emission. Property check + benchmark hook (Brachistochrone / HookeanSpring) — measure forward-eval time and lowered-IR size delta. The bail-out semantics from Phase 1 mean the property-default-off case is a no-op; gating on a property keeps the change risk-bounded.
+
+**Definition-of-done for §0.4.104 — met**:
+- `liftNumber` helper lands; `liftNode` DxirConst arm delegates to it ✓
+- Fractional Float consts no longer truncate to zero ✓
+- Integer-valued Float / Double payloads still take the integer-rational path ✓
+- Four new tests pin Phase-2 coverage including the original truncation bug ✓
+- Multi-session phase plan updated with Phase 2 marked shipped ✓
+- Full suite green at 689 tests (+4) ✓
+
 #### 0.4.103 D.1i Phase 1 — `PhiCalculus.simplifyReturns` scaffolding pass 2026-04-25
 
 The user re-scoped the dynamic /loop to drive **D.1i Symja Simplify on whole gradient expressions** to completion. This session lands Phase 1: a minimal, end-to-end scaffolding pass that lifts → simplifies → lowers each return expression of a `DxirFunction`. Not yet wired into the IR pipeline; callers must invoke explicitly.

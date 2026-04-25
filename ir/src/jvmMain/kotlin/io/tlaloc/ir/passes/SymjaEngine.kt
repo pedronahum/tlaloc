@@ -168,6 +168,22 @@ class SymjaEngine : SymbolicEngine {
     // ------------------------------------------------------------------------
 
     /**
+     * Promote a [Number] DxirConst payload to its closest Symja form. Integer-valued
+     * payloads (Long/Int and Float/Double whose value round-trips through Long) lift to
+     * `rational` so Symja's integer-domain rules fire (`Times[1, x] → x`). Fractional
+     * Float/Double payloads lift to `realLiteral` to preserve precision (D.1i Phase 2 —
+     * §0.4.104).
+     */
+    private fun liftNumber(n: Number): SymExpr {
+        val d = n.toDouble()
+        if (d.isFinite()) {
+            val asLong = d.toLong()
+            if (asLong.toDouble() == d) return rational(asLong)
+        }
+        return realLiteral(d)
+    }
+
+    /**
      * First-cut [liftNode]. Handles the subtree shapes Stage B.0b's bake-off and Stage B.1's
      * F1/F2/F3/C1/C3 tests construct: scalar `DxirParam` / `DxirConst` / arithmetic
      * elementwise ops (ADD/SUB/MUL/DIV/NEG/POW). Every other op kind throws — a future
@@ -180,7 +196,7 @@ class SymjaEngine : SymbolicEngine {
             is io.tlaloc.ir.DxirConst -> {
                 val n = node.value as? Number
                     ?: error("SymjaEngine.liftNode: non-numeric const value ${node.value}")
-                rational(n.toLong())
+                liftNumber(n)
             }
             is io.tlaloc.ir.DxirOp -> when (node.op) {
                 io.tlaloc.ir.OpKind.ADD -> add(liftNode(node.operands[0]), liftNode(node.operands[1]))
