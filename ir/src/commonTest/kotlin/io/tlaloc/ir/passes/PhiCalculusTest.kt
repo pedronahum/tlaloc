@@ -748,15 +748,20 @@ class PhiCalculusTest {
         assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(0f)))
     }
 
-    @Test
-    fun breakBearingClosureLeavesCounterOnlyBreakCondAlone() {
-        // breakCond depends on the counter only — Phase 3c doesn't handle this
-        // class. The pass must leave the WHILE intact (later D.3i phases will).
-        val original = DxirBuilder.function("counterOnlyBreak") {
+    // ---- §0.4.131 — D.3i Phase 3e: CounterOnly arm with concrete threshold ----
+
+    /**
+     * Helper: build a break-bearing WHILE primal whose breakCond is the canonical
+     * CounterOnly shape `STEP(SUB(args[counterArgIdx], threshold))` (i.e., "break
+     * when counter > threshold"). The body doubles the f32 carried per iter.
+     * Effective trip count = min(n, threshold + 1).
+     */
+    private fun breakBearingCounterOnly(n: Int, threshold: Int): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakCounterOnly_${n}_$threshold") {
             val x = param("x", f32s)
-            val nConst = const(7, i32s)
+            val nConst = const(n, i32s)
             val zero = const(0, i32s)
-            val cap = const(3, i32s)
+            val cap = const(threshold, i32s)
             val w = whileOp(
                 inits = listOf(x, zero),
                 cond = { args ->
@@ -781,9 +786,85 @@ class PhiCalculusTest {
             )
             listOf(w.result(0))
         }
+
+    @Test
+    fun breakBearingClosureRewritesCounterOnlyWithBreakBeforeNaturalBound() {
+        // n = 10, threshold = 3. The break fires at counter > 3 (iter 4); effective
+        // trip count = min(10, 4) = 4. Loop runs 4 iters → 5 · 2^4 = 80.
+        val original = breakBearingCounterOnly(n = 10, threshold = 3)
         val rewritten = PhiCalculus.apply(original)
-        assertEquals(1, countOps(rewritten, OpKind.WHILE), "CounterOnly is not handled by Phase 3c — WHILE stays")
-        assertEquals(0, countOps(rewritten, OpKind.IF), "no IF emitted for CounterOnly")
+        assertEquals(0, countOps(rewritten, OpKind.WHILE), "fold + C5 should eliminate the WHILE")
+        // x = 5 → 5 · 2^4 = 80.
+        val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f)))
+        assertEquals(80f, out[0][0])
+        // Numerical agreement at multiple inputs.
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(0f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(-1.5f)))
+    }
+
+    @Test
+    fun breakBearingClosureRewritesCounterOnlyWithNaturalBoundBeforeBreak() {
+        // n = 3, threshold = 10. Natural bound exits before the break fires;
+        // effective trip count = min(3, 11) = 3. Loop runs 3 iters → 5 · 2^3 = 40.
+        val original = breakBearingCounterOnly(n = 3, threshold = 10)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(0, countOps(rewritten, OpKind.WHILE))
+        val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f)))
+        assertEquals(40f, out[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f)))
+    }
+
+    @Test
+    fun breakBearingClosureRewritesCounterOnlyWithThresholdZero() {
+        // n = 5, threshold = 0. Effective trip count = min(5, 1) = 1. Loop runs
+        // 1 iter (iter 0; at iter 1 counter > 0 so break fires). x · 2^1 = 14.
+        val original = breakBearingCounterOnly(n = 5, threshold = 0)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(0, countOps(rewritten, OpKind.WHILE))
+        val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(7f)))
+        assertEquals(14f, out[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(7f)))
+    }
+
+    @Test
+    fun breakBearingClosureLeavesNonCanonicalCounterOnlyAlone() {
+        // breakCond shape is CounterOnly but NOT the canonical
+        // `STEP(SUB(args[counter], thresholdConst))` form — instead it's
+        // `STEP(SUB(thresholdConst, args[counter]))` (operand order swapped).
+        // Phase 3e doesn't handle this shape today; the WHILE must stay intact.
+        val fn = DxirBuilder.function("nonCanonicalCounterOnly") {
+            val x = param("x", f32s)
+            val n = const(7, i32s)
+            val zero = const(0, i32s)
+            val cap = const(3, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(n, args[1]), i32s)),
+                        boolS,
+                    )
+                    // Swapped: SUB(threshold, counter) instead of SUB(counter, threshold).
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(cap, args[1]), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+        val rewritten = PhiCalculus.apply(fn)
+        assertEquals(1, countOps(rewritten, OpKind.WHILE), "non-canonical shape must leave WHILE intact")
     }
 
     @Test

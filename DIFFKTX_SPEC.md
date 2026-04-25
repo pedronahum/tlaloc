@@ -39,6 +39,76 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.131 D.3i Phase 3e — CounterOnly arm with concrete threshold 2026-04-25
+
+§0.4.127 / §0.4.128 closed the Constant + LoopInvariant arms of the break-bearing closure. §0.4.131 lights up the third typed-classifier arm: CounterOnly with a concrete-int threshold. The break predicate has the canonical shape `STEP(SUB(args[counterArgIdx], thresholdConst))` (i.e., "break when counter > threshold") and the natural bound `n` is a concrete int (`Pattern.tripCountConst`). Both bounds compose into a single effective trip count `min(n, threshold + 1)` — the rewrite emits a vanilla bounded WHILE with that bound and drops the LAND-NOT wrapper, so C5–C9 close it downstream in the same `singlePass` iteration.
+
+The remaining CounterOnly cases — symbolic threshold, swapped operand order in SUB, non-STEP root predicate — fall through to later D.3i phases. CarriedDependent is still handled by the no-op fallback (the WHILE remains as-is for runtime evaluation).
+
+**The mechanism** in [PhiCalculus.kt:553-666](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L553-L666). Two new private helpers + a dispatch extension:
+
+```kotlin
+private fun computeCounterOnlyEffectiveTripCount(pattern: Pattern): Int? {
+    val origN = pattern.tripCountConst ?: return null
+    val counterArgIdx = pattern.counterArgIdx ?: return null
+    val condBlock = pattern.whileOp.regions[0].blocks.single()
+    val counterArgId = condBlock.args[counterArgIdx].id
+    val step = pattern.breakCond as? DxirOp ?: return null
+    if (step.op != OpKind.STEP) return null
+    val sub = step.operands[0] as? DxirOp ?: return null
+    if (sub.op != OpKind.SUB) return null
+    if (sub.operands[0].id != counterArgId) return null
+    val thresholdConst = sub.operands[1] as? DxirConst ?: return null
+    // …integer-validity checks…
+    return minOf(origN, threshold + 1)
+}
+```
+
+`rewriteCounterOnlyBreak` then builds a fresh cond region with terminator `STEP(SUB(const(effectiveTrip), counterArg))`, clones the body verbatim via `cloneRegion`, and emits the rewritten WHILE. Its shape is identical to the §0.4.127 `alwaysBreaks=false` case — vanilla bounded WHILE — so C5's existing simple-loop pattern detector picks it up.
+
+The pre-scan in `applyBreakBearingClosurePass` only adds CounterOnly entries to `toRewrite` when `computeCounterOnlyEffectiveTripCount` returns non-null. Non-canonical CounterOnly shapes flow through unchanged — the rewrite never fires on them. The dispatch's `else` arm errors loudly: pre-scan and rewrite must agree.
+
+**Decisions worth flagging**:
+
+- **Symbolic threshold and symbolic origCond bound deferred.** Symbolic bounds need a runtime `min` — and dxir's `MIN` is a tensor reduction, not a scalar binary op. Computing `min(n_param, threshold + 1)` symbolically would need either (a) a new scalar `MIN` op (out of scope) or (b) lowering through an `IF(STEP(SUB(thresholdPlus1, n)), n, thresholdPlus1)` chain. Either path is real work; the concrete-int subset closes the most common case and lays the groundwork.
+
+- **Operand-order check is strict.** `STEP(SUB(args[counter], threshold))` is the "break when counter > threshold" shape — counter on operand[0], threshold on operand[1]. The mirror form `STEP(SUB(threshold, counter))` ("break when threshold > counter", i.e., break-on-low-counter) has different semantics: with counter starting at 0, it breaks immediately if threshold > 0, else never — that's a Constant-equivalent case that should fold via §0.4.127. Phase 3e leaves it alone; if the FIR-side hoist ever produces it, a follow-up phase can recognise + collapse to Constant.
+
+- **`min(n, threshold + 1)` not `min(n, threshold)`.** The break fires at iter `k > threshold`, so the first non-running iter is `threshold + 1`. The loop runs iters `0 .. threshold` inclusive, which is `threshold + 1` iterations. Off-by-one is the most common bug class here; the test pins the math at three concrete points (n=10/threshold=3 → 4 iter, n=3/threshold=10 → 3 iter, n=5/threshold=0 → 1 iter).
+
+- **Type discipline matches §0.4.124's `extractStepCounter`.** `thresholdConst` validation reuses the same predicates: `value < 0.0 || v != v.toInt().toDouble()` rejects negative or fractional thresholds. The new const for `effectiveTrip` is typed via `op.operands[counterArgIdx].type` (the counter's init type) — same convention as the original origCond's `n` const.
+
+- **Test rename: `breakBearingClosureLeavesCounterOnlyBreakCondAlone` → `breakBearingClosureLeavesNonCanonicalCounterOnlyAlone`.** The old §0.4.128 test verified that CounterOnly was UNHANDLED. Phase 3e handles the canonical CounterOnly shape; the test would now fail. The rename + structural change (swap SUB operand order to make it non-canonical) preserves the intent — "Phase 3e doesn't fire on shapes it can't handle". Mirrors the §0.4.107 → §0.4.103 rename pattern.
+
+- **No new dependency on Symja.** Phase 3e's structural recognition is purely IR-level pattern matching. Symja-backed CounterOnly closures (for symbolic bounds or non-canonical predicate shapes) would be Phase 3f; today's increment ships the integer-arithmetic-only subset, which is what the FIR-side hoist's typical `if (i > threshold) break` lowering produces.
+
+**Tests added** (+4 new, −1 renamed = net +3) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.breakBearingClosureRewritesCounterOnlyWithBreakBeforeNaturalBound` — `n = 10`, `threshold = 3`. Pin: 0 WHILE ops post-rewrite; `eval(x = 5) = 80` (`5 · 2^4`); numerical agreement at 3 sample inputs.
+- `PhiCalculusTest.breakBearingClosureRewritesCounterOnlyWithNaturalBoundBeforeBreak` — `n = 3`, `threshold = 10`. Pin: 0 WHILE ops; `eval(x = 5) = 40` (`5 · 2^3`).
+- `PhiCalculusTest.breakBearingClosureRewritesCounterOnlyWithThresholdZero` — `n = 5`, `threshold = 0` (edge case: 1-iter loop). Pin: 0 WHILE ops; `eval(x = 7) = 14` (`7 · 2^1`).
+- `PhiCalculusTest.breakBearingClosureLeavesNonCanonicalCounterOnlyAlone` — `STEP(SUB(threshold, counter))` (operand order swapped). Pin: WHILE intact; non-canonical shapes don't fire.
+- `PhiCalculusTest.breakBearingClosureLeavesCounterOnlyBreakCondAlone` (REMOVED) — the §0.4.128 test that verified Phase 3c skipped CounterOnly. Phase 3e now handles the canonical shape, so the test's premise is invalid. Replaced by `breakBearingClosureLeavesNonCanonicalCounterOnlyAlone` which pins the same "leaves WHILE alone" property for shapes Phase 3e can't handle.
+
+Full suite is green: **787 tests** (+3 net over §0.4.130).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending. With Phase 3e closed, three of four classifier arms are wired and the closure pipeline is mature. End-to-end gradient flow through §0.4.128's LoopInvariant rewrite remains gated on multi-result IF AD (the §0.4.130 work prepared the cseRegion infrastructure).
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm.** Needs either a scalar MIN op or an IF-of-STEP rewrite for the symbolic bound case. Probably a coupled change (introduce MIN or pattern around it).
+3. **Multi-result COARSENED**.
+4. **`:benchmarks` Gradle module**.
+
+**Definition-of-done for §0.4.131 — met**:
+- `computeCounterOnlyEffectiveTripCount` lands as a private helper ✓
+- `rewriteCounterOnlyBreak` emits a vanilla bounded WHILE with the composed bound ✓
+- Pre-scan only includes CounterOnly when the canonical shape matches ✓
+- C5 unrolls the rewritten WHILE in the same `singlePass` iteration (zero WHILEs post-rewrite) ✓
+- 4 new tests pin three concrete-bound configurations + the non-canonical-shape skip ✓
+- Test rename documented (§0.4.128's `breakBearingClosureLeavesCounterOnlyBreakCondAlone`) ✓
+- No Symja dependency added ✓
+- Full suite stays green at 787 tests (+3 net) ✓
+
 #### 0.4.130 Fix cseRegion DxirOpResult terminator bug 2026-04-25
 
 §0.4.129 documented a latent bug in `cseRegion` (and a sibling fix landed in `cloneRegion` / `resolveReturn` via §0.4.128): when a region's terminator references a `DxirOpResult` of a multi-result op, the terminator handler did `innerById[term.id] ?: term`, which for any `DxirOpResult` resolved to the SOURCE op's id (since `DxirOpResult.id == source.id`). The slot then collapsed to the rebuilt source op directly — type `source.types[0]`, regardless of which result index the terminator actually wanted. The `DxirFunction` validator caught this as a terminator type mismatch. This session fixes the bug and pins it with a direct `applyCSE` test.

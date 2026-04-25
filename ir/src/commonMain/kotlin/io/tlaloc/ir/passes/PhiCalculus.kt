@@ -526,7 +526,14 @@ object PhiCalculus {
             when (klass) {
                 is BreakBearingWhile.BreakCondClass.Constant,
                 BreakBearingWhile.BreakCondClass.LoopInvariant -> toRewrite[n.id] = klass
-                BreakBearingWhile.BreakCondClass.CounterOnly,
+                BreakBearingWhile.BreakCondClass.CounterOnly -> {
+                    // §0.4.131 — only handle the canonical `STEP(SUB(args[counter],
+                    // thresholdConst))` shape with a concrete origCond bound. Other
+                    // CounterOnly shapes fall through to later D.3i phases.
+                    if (computeCounterOnlyEffectiveTripCount(pattern) != null) {
+                        toRewrite[n.id] = klass
+                    }
+                }
                 BreakBearingWhile.BreakCondClass.CarriedDependent -> Unit
             }
         }
@@ -540,6 +547,9 @@ object PhiCalculus {
                 BreakBearingWhile.BreakCondClass.LoopInvariant -> rewriteLoopInvariantBreak(
                     op, nodeMap, multiOut, builder,
                 )
+                BreakBearingWhile.BreakCondClass.CounterOnly -> rewriteCounterOnlyBreak(
+                    op, nodeMap, multiOut, builder,
+                )
                 else -> error(
                     "applyBreakBearingClosurePass: unexpected class ${klass::class.simpleName} " +
                         "for WHILE id=${op.id} — pre-scan and rewrite must agree on which " +
@@ -547,6 +557,95 @@ object PhiCalculus {
                 )
             }
         }
+    }
+
+    /**
+     * §0.4.131 — D.3i Phase 3e helper. Recognise the canonical CounterOnly shape
+     * `breakCond = STEP(SUB(args[counterArgIdx], thresholdConst))` (i.e., "break
+     * when counter > threshold") and compute the resulting effective trip count.
+     *
+     * With counter starting at 0 and incrementing by 1, `breakCond` first becomes
+     * true at iteration `threshold + 1`. Combined with the original natural bound
+     * `n` (already validated as a concrete int by §0.4.124's [Pattern.tripCountConst]),
+     * the effective trip count is `min(n, threshold + 1)`.
+     *
+     * Returns null when (a) the breakCond doesn't match the canonical shape, (b)
+     * the threshold isn't a concrete non-negative int, or (c) the original bound
+     * `n` is symbolic ([Pattern.tripCountParam] is non-null) — symbolic-bound
+     * support requires a runtime `MIN` op which dxir doesn't carry today.
+     */
+    private fun computeCounterOnlyEffectiveTripCount(
+        pattern: BreakBearingWhile.Pattern,
+    ): Int? {
+        val origN = pattern.tripCountConst ?: return null
+        val counterArgIdx = pattern.counterArgIdx ?: return null
+        val condBlock = pattern.whileOp.regions[0].blocks.single()
+        val counterArgId = condBlock.args[counterArgIdx].id
+
+        val step = pattern.breakCond as? DxirOp ?: return null
+        if (step.op != OpKind.STEP) return null
+        if (step.operands.size != 1) return null
+        val sub = step.operands[0] as? DxirOp ?: return null
+        if (sub.op != OpKind.SUB) return null
+        if (sub.operands.size != 2) return null
+        if (sub.operands[0].id != counterArgId) return null
+        val thresholdConst = sub.operands[1] as? DxirConst ?: return null
+        val thresholdValue = (thresholdConst.value as? Number)?.toDouble() ?: return null
+        if (thresholdValue < 0.0 || thresholdValue != thresholdValue.toInt().toDouble()) return null
+        val threshold = thresholdValue.toInt()
+        return minOf(origN, threshold + 1)
+    }
+
+    /**
+     * §0.4.131 — CounterOnly arm. The break predicate has the canonical shape
+     * `STEP(SUB(args[counter], thresholdConst))` AND the natural bound `n` is a
+     * concrete integer. Both bounds compose into a single effective trip count
+     * `min(n, threshold + 1)`; this rewrite emits a vanilla bounded WHILE whose
+     * cond region terminator is `STEP(SUB(const(effectiveTrip), counterArg))` and
+     * leaves the body region unchanged. The C5–C9 corollaries close it downstream
+     * in the same [singlePass] iteration.
+     */
+    private fun rewriteCounterOnlyBreak(
+        op: DxirOp,
+        nodeMap: MutableMap<Int, DxirNode>,
+        multiOut: MutableMap<Int, List<DxirNode>>,
+        builder: DxirBuilder,
+    ): DxirNode {
+        val pattern = BreakBearingWhile.detect(op)!!
+        val effectiveTrip = computeCounterOnlyEffectiveTripCount(pattern)
+            ?: error(
+                "applyBreakBearingClosurePass: rewriteCounterOnlyBreak called on WHILE " +
+                    "id=${op.id} but the canonical CounterOnly shape no longer matches — " +
+                    "pre-scan and rewrite must agree",
+            )
+        val counterArgIdx = pattern.counterArgIdx!!
+        val counterType = op.operands[counterArgIdx].type
+        val condBlock = op.regions[0].blocks.single()
+        val condTerminator = condBlock.terminator.single() as DxirOp
+        val boolType = condTerminator.type
+
+        val newCondRegion = builder.region {
+            val newArgs = condBlock.args.map { arg(it.type, it.sharding) }
+            val counterArg = newArgs[counterArgIdx]
+            val newN = const(effectiveTrip, counterType)
+            val newSub = op(OpKind.SUB, listOf(newN, counterArg), counterType)
+            val newStep = op(OpKind.STEP, listOf(newSub), boolType)
+            yields(newStep)
+        }
+        val newBodyRegion = cloneRegion(op.regions[1], nodeMap, builder, multiOut)
+        val clonedInits = op.operands.map { init ->
+            nodeMap[init.id]
+                ?: error(
+                    "applyBreakBearingClosurePass: init id=${init.id} for WHILE id=${op.id} " +
+                        "missing from nodeMap",
+                )
+        }
+        return builder.opMulti(
+            OpKind.WHILE,
+            clonedInits,
+            op.types,
+            regions = listOf(newCondRegion, newBodyRegion),
+        )
     }
 
     /**
