@@ -407,6 +407,40 @@ operator fun <S : Shape> Float.minus(tracer: Tracer<S>): Tracer<S> = tracer.cons
 operator fun <S : Shape> Float.times(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this) * tracer
 operator fun <S : Shape> Float.div(tracer: Tracer<S>): Tracer<S>   = tracer.constantLike(this) / tracer
 
+// §0.4.95 — Double and Int literal broadcast overloads. Same compositional path
+// as §0.4.75 / §0.4.93's Float overloads — the literal is converted to Float
+// (the tape's native dtype) at the boundary, then routes through `constantLike`
+// + the existing same-shape operator. Lets users write `0.5 * matrix`,
+// `2 * row`, `x - 1` without an explicit `f` suffix on every literal.
+//
+// Both LHS and RHS forms ship together; otherwise the surface is asymmetric
+// (e.g. `matrix * 0.5` works but `0.5 * matrix` doesn't) and users hit
+// type-mismatch errors mid-expression.
+
+// --- Double ---
+
+operator fun <S : Shape> Tracer<S>.plus(scalar: Double): Tracer<S>  = this + constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.minus(scalar: Double): Tracer<S> = this - constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.times(scalar: Double): Tracer<S> = this * constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.div(scalar: Double): Tracer<S>   = this / constantLike(scalar.toFloat())
+
+operator fun <S : Shape> Double.plus(tracer: Tracer<S>): Tracer<S>  = tracer.constantLike(this.toFloat()) + tracer
+operator fun <S : Shape> Double.minus(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this.toFloat()) - tracer
+operator fun <S : Shape> Double.times(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this.toFloat()) * tracer
+operator fun <S : Shape> Double.div(tracer: Tracer<S>): Tracer<S>   = tracer.constantLike(this.toFloat()) / tracer
+
+// --- Int ---
+
+operator fun <S : Shape> Tracer<S>.plus(scalar: Int): Tracer<S>  = this + constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.minus(scalar: Int): Tracer<S> = this - constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.times(scalar: Int): Tracer<S> = this * constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.div(scalar: Int): Tracer<S>   = this / constantLike(scalar.toFloat())
+
+operator fun <S : Shape> Int.plus(tracer: Tracer<S>): Tracer<S>  = tracer.constantLike(this.toFloat()) + tracer
+operator fun <S : Shape> Int.minus(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this.toFloat()) - tracer
+operator fun <S : Shape> Int.times(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this.toFloat()) * tracer
+operator fun <S : Shape> Int.div(tracer: Tracer<S>): Tracer<S>   = tracer.constantLike(this.toFloat()) / tracer
+
 // §0.4.90 — reverse-order row-broadcast operators. `row + matrix`, `row - matrix`,
 // etc. where the rank-1 tracer is the LHS. Matters specifically for non-
 // commutative ops (minus, div) where argument order changes the math. Each

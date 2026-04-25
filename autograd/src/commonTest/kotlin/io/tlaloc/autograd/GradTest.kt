@@ -399,6 +399,41 @@ class GradTest {
     // upstream (via §0.4.84's axis-aware BroadcastRule).
 
     @Test
+    fun doubleLiteralBroadcastWorksForBothSides() {
+        // §0.4.95 — Double literals work in both LHS and RHS positions.
+        // f(x) = sum(x * 0.5).  At x = [2, 4, 8]: forward = 7. grad = [0.5, 0.5, 0.5].
+        val vgRhs = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (x * 0.5).sum() }
+        val (vR, dR) = vgRhs(Tensors.f32Vector(floatArrayOf(2f, 4f, 8f)))
+        assertEquals(7f, vR)
+        val drArr = dR.hostF32()
+        for (i in 0 until 3) assertEquals(0.5f, drArr[i])
+
+        // f(x) = sum(2.0 - x).  At x = [1, 2, 3]: forward = 1+0-1 = 0. grad = [-1, -1, -1].
+        val vgLhs = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (2.0 - x).sum() }
+        val (vL, dL) = vgLhs(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(0f, vL)
+        val dlArr = dL.hostF32()
+        for (i in 0 until 3) assertEquals(-1f, dlArr[i])
+    }
+
+    @Test
+    fun intLiteralBroadcastWorksForBothSides() {
+        // f(x) = sum(x + 5).  At x = [1, 2, 3]: forward = 6+7+8 = 21. grad = [1, 1, 1].
+        val vgRhs = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (x + 5).sum() }
+        val (vR, dR) = vgRhs(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(21f, vR)
+        val drArr = dR.hostF32()
+        for (i in 0 until 3) assertEquals(1f, drArr[i])
+
+        // f(x) = sum(3 * x).  At x = [1, 2, 3]: forward = 18. grad = [3, 3, 3].
+        val vgLhs = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (3 * x).sum() }
+        val (vL, dL) = vgLhs(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(18f, vL)
+        val dlArr = dL.hostF32()
+        for (i in 0 until 3) assertEquals(3f, dlArr[i])
+    }
+
+    @Test
     fun floatLiteralLhsMinusRowFlipsSignFromRowMinusFloat() {
         // §0.4.93 — `5f - row` is NOT the same as `row - 5f`. For row=[1,2,3]:
         //   row - 5f = [-4, -3, -2], sum = -9.

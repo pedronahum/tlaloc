@@ -39,6 +39,49 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.95 Double / Int literal broadcast overloads — `0.5 * matrix`, `x + 5`, etc. 2026-04-25
+
+Closes the §0.4.94 follow-up #4. §0.4.93 made Float literals work in any position (`0.5f * matrix`, `matrix * 0.5f`); this session extends the same pattern to `Double` and `Int` literals. Users no longer need an `f` suffix on every literal — `0.5 * matrix`, `x + 5`, `3 * row` all type-check and produce the correct gradients.
+
+**16 new operator overloads** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt) — Double × {LHS, RHS} × {plus, minus, times, div} and the same matrix for Int. Each delegates to `constantLike(value.toFloat())` + the existing same-shape operator. The literal is converted to Float at the boundary; the tape itself is F32-only.
+
+**Two new tests** in [GradTest.kt](autograd/src/commonTest/kotlin/io/tlaloc/autograd/GradTest.kt):
+
+1. `doubleLiteralBroadcastWorksForBothSides` — `x * 0.5` and `2.0 - x`. RHS multiplication scales grad by 0.5; LHS subtraction flips sign.
+2. `intLiteralBroadcastWorksForBothSides` — `x + 5` and `3 * x`. RHS addition leaves grad at 1; LHS multiplication scales grad by 3.
+
+Two tests instead of eight — the underlying machinery is identical to §0.4.93's Float path; the new overloads just toFloat() at the boundary. The tests pin the type-resolution path (literal type → which overload Kotlin picks) for both sides; the math is reused from §0.4.93's already-validated path.
+
+**Decisions worth flagging**:
+
+- **`.toFloat()` at the boundary, not at the constant leaf.** The conversion is purely syntactic — `5.toFloat()` is `5.0f`. Tape stays F32 (per §0.4.68 register; no F64 tape path). If a future F64 tape lands, these overloads would route through a separate `constantLikeDouble` helper; until then, narrowing at the boundary is correct.
+
+- **No `Long` overloads.** Int and Double are the canonical Kotlin literal types for "small integer" and "fractional"; Long literals (`5L`) are uncommon in math expressions. Adding them would mean 8 more overloads with negligible payoff. If a use case surfaces, the pattern is one line each.
+
+- **No `Number` parent overload.** Kotlin's operator dispatch is on static type, not runtime. `Number.plus(tracer)` would only fire when the LHS is statically `Number`, which requires explicit casting. A user writing `5 + x` (Int literal) wants the Int overload, not Number. So per-numeric-type overloads are the only working pattern.
+
+- **Operator overload count: now 16 + 16 = 32 across §0.4.93 / §0.4.95**. That's a lot of one-line surface, but the alternatives (rejecting Double / Int / Long literals; or adding implicit conversions) would be worse for users. Each overload IS a one-liner that delegates to the same underlying machinery.
+
+**Tests added** (+2 new):
+
+- `GradTest.doubleLiteralBroadcastWorksForBothSides`
+- `GradTest.intLiteralBroadcastWorksForBothSides`
+
+Full suite is green: **673 tests** (+2 over §0.4.94).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on grad expressions**.
+3. **`diagnosticReporter` migration proper** — multi-step refactor per §0.4.94's recipe.
+4. **Rank-N (N≥3) broadcast operator set** — gated on a public `Rank3` shape type.
+
+**Definition-of-done for §0.4.95 — met**:
+- Double LHS + RHS broadcast operators land (8 overloads) ✓
+- Int LHS + RHS broadcast operators land (8 overloads) ✓
+- Type-resolution tests verify Kotlin picks the right overload for each literal type ✓
+- Full suite green at 673 tests (+2) ✓
+
 #### 0.4.94 `diagnosticReporter` migration investigation — deferred (deeper than "cosmetic") 2026-04-25
 
 Investigated the long-pending `diagnosticReporter` migration item from the §0.4.68 register. Found that the assumption "cosmetic refactor" was wrong: both the deprecated `IrPluginContext.messageCollector` AND `createDiagnosticReporter(name: String): MessageCollector` are flagged for removal in Kotlin 2.2.x. The only non-deprecated path is `pluginContext.diagnosticReporter: IrDiagnosticReporter`, which is **factory-based** and requires each report site to anchor on an `IrDeclaration` / `IrElement` / `IrFile`.
