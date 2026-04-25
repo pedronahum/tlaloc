@@ -39,6 +39,53 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.146 Second `:benchmarks` inhabitant — coarsening throughput sweep 2026-04-25
+
+§0.4.145 shipped the `:benchmarks` Gradle module substrate with one end-to-end AD benchmark. The §0.4.145 recommended-next #4 called out a second inhabitant — "a coarsening-throughput probe that times PhiCalculus.apply on progressively larger primals (sanity-pin pre/post op counts, surface ms-per-iter)". §0.4.146 lands that probe: [CoarseningThroughputBenchmark.phiCalculusCoarseningSweepOverIterateN](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/CoarseningThroughputBenchmark.kt) sweeps `iterateNTimes(n)` at three representative scales (n = 5, 10, 20), times `PhiCalculus.apply` for each, and pins the post-coarsening MUL count exactly equals `n`. With two inhabitants, the `:benchmarks` module now has both an end-to-end pipeline probe (§0.4.145) and a coarsening-pass-only probe (§0.4.146) — together they let a /loop iteration spot-check the two most regression-prone parts of the AD substrate at three scales.
+
+**The mechanism** in [benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/CoarseningThroughputBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/CoarseningThroughputBenchmark.kt):
+
+1. **`iterateNTimes(n)` helper** — copy of §0.4.145's helper kept self-contained per the documented "stay structurally close" decision. Constructs a primal `f(x) = x · 2^n` via an n-iteration WHILE loop.
+
+2. **`countOps(fn, kind)` helper** — local counting helper, mirrors `PhiCalculusTest.countOps`. Counts top-level body ops of a given kind.
+
+3. **Sweep test** — for each `n in [5, 10, 20]`: build the primal, call `PhiCalculus.apply` inside `measureTimeMillis`, assert `countOps(rewritten, OpKind.WHILE) == 0` (sanity), record `(ms, mulCount)`. After the sweep, pin the MUL count at each n (5, 10, 20 respectively) and `println` per-iter timings.
+
+**Decisions worth flagging**:
+
+- **Helper duplication is intentional, not a code smell.** §0.4.145's `EndToEndAdBenchmark.iterateNTimes` is structurally identical, but `:benchmarks` deliberately doesn't share helpers across files. The substrate's role is to host probes that can evolve independently — sharing would couple them in ways that obscure each probe's specific scope (for example: if Phase 4 of MR IF AD lands a benchmark that needs a different counter encoding, having a shared helper would force both probes to migrate together). Future iterations can extract a small `BenchmarkPrimals.kt` if the duplication becomes painful, but at two probes it's not.
+
+- **Three scales, not five.** Sweeping at n = 5 / 10 / 20 hits three orders of magnitude differences in iteration count (2^5 = 32, 2^10 = 1024, 2^20 = 1M) without bloating per-iter timing dispersion. Adding n = 50 / 100 would push C5's compile-time unroll cost beyond what makes sense as a regression-test probe (the unroll work is O(n), so very large n trades signal for variance).
+
+- **No timing budget assertions.** The `assertEquals` checks pin only structural invariants (WHILE count, MUL count); the timings are printed but not asserted. Mirrors §0.4.106's harness convention and §0.4.145's framing — perf budgets are environment-sensitive and don't belong in a CI-blocking surface.
+
+- **`iterateNTimes` reused name from §0.4.145.** The helper has the same signature as §0.4.145's; the duplication makes the probe self-contained at the cost of two file-local copies. If a future probe needs a different shape (e.g., n nested IFs or n affine-recurrence iterations), it'll define its own helper rather than parameterising the existing one.
+
+- **Test name pins the kind of sweep, not its exact n values.** `phiCalculusCoarseningSweepOverIterateN` says "what shape" without locking in n = 5 / 10 / 20. If a future iteration extends the sweep to n = 50, the test name still makes sense; only the assertion list grows.
+
+- **Pin the MUL count exactly equals n.** C5's unroll produces exactly n MULs (one per iteration's `MUL(arg, two)` back-edge), regardless of CSE. Even if a future CSE pass collapses the constant `two` to a single shared node, the MUL ops themselves stay distinct (each has a different operand0 from the previous iter's result). The exact-match assertion is robust to const-dedup but tight enough to catch a regression in the unroll path.
+
+**Tests added** (+1 new) in [CoarseningThroughputBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/CoarseningThroughputBenchmark.kt):
+
+- `CoarseningThroughputBenchmark.phiCalculusCoarseningSweepOverIterateN` — runs `PhiCalculus.apply` on `iterateNTimes(n)` at n = 5, 10, 20. Asserts WHILE count = 0 at each n; pins MUL count = n at each n. Prints `[bench coarseningSweep] n=… PhiCalculus.apply=…ms muls=…`.
+
+Full suite is green: **838 tests** (+1 over §0.4.145).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 4 — nested WHILE in IF branch.** Still the headline gap.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.**
+3. **D.3i Phase 3i — region-internal SOIs (DxirOpResult/DxirCall) in CounterOnly threshold/n.**
+4. **Third `:benchmarks` inhabitant** — e.g., a SCT-only benchmark that times `DxirReverseTransform.apply` on a fixed-shape coarsened function (isolates the SCT cost from PhiCalculus's).
+
+**Definition-of-done for §0.4.146 — met**:
+- New benchmark file in the `:benchmarks` module's jvmTest source set ✓
+- Sweeps `iterateNTimes` at three representative n values ✓
+- Pins WHILE count = 0 + MUL count = n at each n ✓
+- Prints per-iter ms timings for visibility (no budget assertion) ✓
+- No new dependencies, no new system properties, no helper-sharing across benchmarks ✓
+- Full suite stays green at 838 tests (+1) ✓
+
 #### 0.4.145 `:benchmarks` Gradle module substrate + first end-to-end AD benchmark 2026-04-25
 
 The `:benchmarks` Gradle module has been on the deferred register since §0.4.108 — perf probes today live inside the regular `:ir` test source set (e.g., [SymjaBakeoffTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/SymjaBakeoffTest.kt), [LSweepTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/LSweepTest.kt), [HookeanSpringTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HookeanSpringTest.kt)), which conflates correctness regression tests with timing-sensitive probes. §0.4.145 ships the substrate: a new `:benchmarks` module with a Kotlin Multiplatform layout matching `:autograd` / `:ir`, plus one inhabitant — `EndToEndAdBenchmark.adPipelineOnTenIterationLoop` — that times the full AD pipeline (PhiCalculus φ-calculus rewrite → DxirReverseTransform SCT → DxirInterpreter eval) on a hand-built 10-iteration WHILE primal `f(x) = x · 2^10` and pins `d/dx = 1024`.
