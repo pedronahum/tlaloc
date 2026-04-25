@@ -1056,6 +1056,141 @@ class PhiCalculusTest {
         )
     }
 
+    // ---- §0.4.142 — D.3i Phase 3g: CounterOnly with DxirOp threshold ----
+
+    /**
+     * Helper: break-bearing CounterOnly WHILE whose threshold is an OUTER-SCOPE
+     * [DxirOp] — `cap = MUL(capParam, const(2))` defined at function body level
+     * and referenced from inside the cond region. Effective trip = min(n_const,
+     * cap_runtime + 1) where `cap_runtime = capParam · 2`.
+     */
+    private fun breakBearingCounterOnlyOuterScopeOpThreshold(n: Int): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakCounterOnlyOuterOpThresh_$n") {
+            val x = param("x", f32s)
+            val capParam = param("cap", i32s)
+            val nConst = const(n, i32s)
+            val zero = const(0, i32s)
+            val two = const(2, i32s)
+            val cap = op(OpKind.MUL, listOf(capParam, two), i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nConst, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(args[1], cap), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    /**
+     * Helper: break-bearing CounterOnly WHILE whose threshold is a REGION-INTERNAL
+     * [DxirOp] — `cap = MUL(capParam, const(2))` defined inside the cond region.
+     * Mirrors [breakBearingCounterOnlyOuterScopeOpThreshold] but with the MUL
+     * sitting inside the cond block's body instead of at function body level.
+     * Phase 3g lifts the MUL into outer scope so the runtime IF chain can reference
+     * it in the rewritten function's outer arithmetic.
+     */
+    private fun breakBearingCounterOnlyRegionInternalOpThreshold(n: Int): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("breakCounterOnlyRegInOpThresh_$n") {
+            val x = param("x", f32s)
+            val capParam = param("cap", i32s)
+            val nConst = const(n, i32s)
+            val zero = const(0, i32s)
+            val w = whileOp(
+                inits = listOf(x, zero),
+                cond = { args ->
+                    // `cap = capParam · 2` constructed INSIDE the cond region — the
+                    // MUL op's id lives in condBlock.body, so Phase 3g must lift its
+                    // dependency tree into outer scope before referencing it from
+                    // the runtime IF chain.
+                    val two = const(2, i32s)
+                    val cap = op(OpKind.MUL, listOf(capParam, two), i32s)
+                    val origCond = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(nConst, args[1]), i32s)),
+                        boolS,
+                    )
+                    val brkInner = op(
+                        OpKind.STEP,
+                        listOf(op(OpKind.SUB, listOf(args[1], cap), i32s)),
+                        boolS,
+                    )
+                    val notBrk = op(OpKind.NOT, listOf(brkInner), boolS)
+                    yields(op(OpKind.LAND, listOf(origCond, notBrk), boolS))
+                },
+                body = { args ->
+                    val newX = op(OpKind.MUL, listOf(args[0], const(2f, f32s)), f32s)
+                    val newI = op(OpKind.ADD, listOf(args[1], const(1, i32s)), i32s)
+                    yields(newX, newI)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    @Test
+    fun breakBearingClosureRewritesOuterScopeOpThresholdCounterOnly() {
+        // Concrete n = 8, threshold = capParam · 2 (outer-scope DxirOp).
+        // Effective trip = min(8, capParam · 2 + 1).
+        val original = breakBearingCounterOnlyOuterScopeOpThreshold(n = 8)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(1, countOps(rewritten, OpKind.WHILE), "WHILE remains because effective bound is runtime IF")
+        assertEquals(0, countOps(rewritten, OpKind.LAND), "LAND-NOT closure must be removed")
+        // capParam = 1 → cap = 2 → min(8, 3) = 3 iters → 5 · 2^3 = 40.
+        val outA = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(1f)))
+        assertEquals(40f, outA[0][0])
+        // capParam = 10 → cap = 20 → min(8, 21) = 8 iters → 5 · 2^8 = 1280.
+        val outB = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(10f)))
+        assertEquals(1280f, outB[0][0])
+        // capParam = 0 → cap = 0 → min(8, 1) = 1 iter → 5 · 2 = 10.
+        val outC = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(0f)))
+        assertEquals(10f, outC[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(1f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(10f)))
+    }
+
+    @Test
+    fun breakBearingClosureRewritesRegionInternalOpThresholdCounterOnly() {
+        // Concrete n = 8, threshold = capParam · 2 (region-internal DxirOp).
+        // Phase 3g lifts the MUL into outer scope before emitting the IF chain.
+        val original = breakBearingCounterOnlyRegionInternalOpThreshold(n = 8)
+        val rewritten = PhiCalculus.apply(original)
+        assertEquals(1, countOps(rewritten, OpKind.WHILE))
+        assertEquals(0, countOps(rewritten, OpKind.LAND))
+        // capParam = 1 → cap = 2 → min(8, 3) = 3 iters → 5 · 2^3 = 40.
+        val outA = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(1f)))
+        assertEquals(40f, outA[0][0])
+        // capParam = 10 → cap = 20 → min(8, 21) = 8 iters → 5 · 2^8 = 1280.
+        val outB = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(10f)))
+        assertEquals(1280f, outB[0][0])
+        // capParam = 0 → cap = 0 → min(8, 1) = 1 iter → 5 · 2 = 10.
+        val outC = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(5f), floatArrayOf(0f)))
+        assertEquals(10f, outC[0][0])
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(1f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(10f)))
+        // Structural sanity: post-rewrite, the cond region's MUL has been lifted to
+        // outer scope, so the function body now contains it (1 MUL: the lifted cap)
+        // alongside the new arithmetic ops emitted for the IF chain.
+        assertTrue(
+            countOps(rewritten, OpKind.MUL) >= 1,
+            "expected at least the lifted MUL in the rewritten function body",
+        )
+    }
+
     @Test
     fun breakBearingConstantFoldEnablesEndToEndGradThroughBreakBearingLoop() {
         // alwaysBreaks=false + C5 → straight-line dxir → DxirReverseTransform

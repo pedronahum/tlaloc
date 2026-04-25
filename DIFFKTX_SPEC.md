@@ -39,6 +39,59 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.142 D.3i Phase 3g — DxirOp threshold (outer-scope + region-internal lift) 2026-04-25
+
+§0.4.141's Phase 3f narrowed the threshold-type acceptance to `DxirConst | DxirParam`, leaving `DxirOp` thresholds for a follow-on phase. §0.4.142 closes that gap: outer-scope `DxirOp` thresholds resolve through `nodeMap` directly (no extra lifting needed), and region-internal `DxirOp` thresholds get their dependency tree lifted into outer scope via a fresh helper that mirrors §0.4.128's `rewriteLoopInvariantBreak` walk + clone pattern. With this Phase, the CounterOnly arm now handles every realistic FIR-side hoist shape that produces a `STEP(SUB(args[counter], threshold))` break predicate — `threshold` can be a const, a function param, an outer-scope arithmetic expression, or a region-internal expression that's loop-invariant.
+
+**The mechanism** in [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt). One new helper, plus surgical changes to two existing functions:
+
+1. **`isRegionInternalSubtreeLiftable(root, condBodyIds): Boolean`** ([PhiCalculus.kt:773-792](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L773-L792)) — pre-check used by `computeCounterOnlySymbolicShape`. Iterative DFS over `root`'s dependency tree; returns false on `DxirBlockArg` (carried-arg dep → not loop-invariant), `DxirOpResult` / `DxirCall` (out-of-scope shapes), and true otherwise. Outer-scope leaves (ids not in `condBodyIds`) are pruned without recursion since the rewrite resolves them via `nodeMap`.
+
+2. **`computeCounterOnlySymbolicShape` widened** ([PhiCalculus.kt:706-721](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L706-L721)) — the threshold-type check is now a typed `when`: `DxirConst` keeps Phase 3e's non-negative-int validation, `DxirParam` accepts unconditionally, `DxirOp` checks region-scope (region-internal subtrees go through `isRegionInternalSubtreeLiftable`; outer-scope `DxirOp`s accept directly), other shapes reject.
+
+3. **`rewriteCounterOnlySymbolicBreak` dispatch** ([PhiCalculus.kt:846-862](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L846-L862)) — same typed dispatch on threshold type. Region-internal `DxirOp`s call the new `liftRegionInternalSubtree`; outer-scope `DxirOp`s and `DxirParam`s resolve via `nodeMap[t.id]`. The `condBlock` lookup is now hoisted once at the top of the rewrite (was previously computed twice — once in the cond region builder, once implicitly via `op.regions[0]`).
+
+4. **`liftRegionInternalSubtree`** ([PhiCalculus.kt:899-955](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L899-L955)) — post-order walk over the cond region's body, collects ids reachable from `root`, emits clones via `cloneNode` in topological order. Errors on `DxirBlockArg` / `DxirOpResult` / `DxirCall` since the pre-check should have rejected such shapes; if any fires here it's a contract violation. Returns `nodeMap[root.id]` (the lifted root).
+
+**Decisions worth flagging**:
+
+- **Two-stage validation: pre-check + lift.** `isRegionInternalSubtreeLiftable` returns a `Boolean` (no IR mutation); `liftRegionInternalSubtree` errors loudly on the same conditions. The split keeps `computeCounterOnlySymbolicShape` purely structural (returns null on rejection, nothing else) while the lift gets to assume well-formed input. Mirrors how §0.4.131's Phase 3e `computeCounterOnlyEffectiveTripCount` returns null on rejection while `rewriteCounterOnlyBreak` errors on inconsistency.
+
+- **No shared helper with §0.4.128's `rewriteLoopInvariantBreak` lift.** The two walks have nearly-identical post-order shapes but subtly different error semantics (§0.4.128 errors on block-arg as a classifier-contract violation; §0.4.142 also errors but with a "pre-check should have rejected" message since it's defensive rather than load-bearing). I considered extracting a shared helper but the duplication is small (~30 lines) and the error semantics matter for debuggability — a shared helper would force one of the two to lose its specific message. The structural similarity is documented in the new helper's doc-comment for future readers; if a third caller needs the same walk, that's the right time to extract.
+
+- **`condBlock` hoisted to the top of the rewrite.** Previously the condBlock was computed twice (once inside the cond region builder via `op.regions[0]`; once implicitly via the cond block iteration). Hoisting it once at the top makes the dispatch cleaner and means `condBodyIds` is computed only once. No behaviour change; just structural hygiene.
+
+- **Outer-scope `DxirOp` resolution via `nodeMap` is the simpler half.** When the threshold is e.g. `cap = MUL(capParam, 2)` defined at function body level, `nodeMap[cap.id]` already contains the cloned MUL by the time the rewrite lambda fires for the WHILE (the function-level `rewriteFunction` iterates `fn.body` in order). No fresh emission needed. The two halves of Phase 3g (outer-scope direct-resolve vs region-internal lift) ship together because they share the same shape-extractor relaxation; carving them apart would be artificial.
+
+- **`liftRegionInternalSubtree` errors on `DxirOpResult` / `DxirCall`.** The pre-check rejects these subtree shapes; the lift errors if it ever sees them. Mirrors §0.4.128's `rewriteLoopInvariantBreak` walk which errors on block-arg for the same reason — the pre-check is the contract gate, the lift assumes the contract holds. A cleaner signal than silently ignoring + producing malformed IR.
+
+- **Test pin includes a structural sanity check.** `breakBearingClosureRewritesRegionInternalOpThresholdCounterOnly` asserts `countOps(rewritten, OpKind.MUL) >= 1` — confirming the lifted MUL appears in the rewritten function's outer body. Without the lift, the MUL would be orphaned (only referenced by the old cond region which was discarded), so a future regression that drops the lift would surface as "MUL count = 0" + numerical mismatch.
+
+- **Test choice — concrete n with symbolic-DxirOp threshold.** Both new tests use concrete n + DxirOp threshold rather than mixing with symbolic n. The Phase 3f tests already cover the symbolic-n axis; Phase 3g's contract is "threshold widened to DxirOp"; combining both axes would dilute the test's diagnostic power. If a regression breaks Phase 3g specifically, the new tests fire; Phase 3f tests stay green.
+
+**Tests added** (+2 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.breakBearingClosureRewritesOuterScopeOpThresholdCounterOnly` — concrete `n = 8`, threshold = outer-scope `MUL(capParam, 2)`. Pin: 1 WHILE post-rewrite, 0 LAND. Numerical: `capParam=1 → 40` (3 iters), `capParam=10 → 1280` (8 iters, n caps), `capParam=0 → 10` (1 iter).
+- `PhiCalculusTest.breakBearingClosureRewritesRegionInternalOpThresholdCounterOnly` — same as above but the `MUL(capParam, 2)` is constructed INSIDE the cond region. Phase 3g's lift moves it to outer scope before emitting the IF chain. Pin: same structural + numerical pins, plus `countOps(rewritten, OpKind.MUL) >= 1` to verify the lift actually landed.
+
+Full suite is green: **831 tests** (+2 over §0.4.141).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 3 — branch-body MR IF dispatch + nested-WHILE arm.** Still the headline gap.
+2. **D.3i CounterOnly with `DxirOp` n.** Mirror Phase 3g for the `n` operand. Requires extending `BreakBearingWhile.extractStepCounter` to accept `DxirOp` n and adding `tripCountNode: DxirNode?` to `Pattern`.
+3. **Multi-live-index MR IF AD — per-index gradAccum refactor**.
+4. **`:benchmarks` Gradle module** — extract one perf probe.
+
+**Definition-of-done for §0.4.142 — met**:
+- `computeCounterOnlySymbolicShape` accepts `DxirOp` thresholds (region-internal liftable + outer-scope) ✓
+- `isRegionInternalSubtreeLiftable` rejects subtrees with carried-arg deps or out-of-scope op shapes ✓
+- `liftRegionInternalSubtree` emits clones in topological order via `cloneNode`, errors loudly on contract violations ✓
+- `rewriteCounterOnlySymbolicBreak` dispatch routes each threshold shape correctly ✓
+- 2 new tests pin both halves (outer-scope + region-internal) with concrete numerical + structural pins ✓
+- §0.4.131's Phase 3e and §0.4.141's Phase 3f paths unchanged (existing 7 tests still green) ✓
+- Full suite stays green at 831 tests (+2) ✓
+
 #### 0.4.141 D.3i Phase 3f — symbolic-bound CounterOnly arm via outer IF chain 2026-04-25
 
 §0.4.131 shipped Phase 3e (CounterOnly arm with concrete `n` AND concrete threshold), explicitly deferring symbolic bounds with the note that they would need either a new scalar `MIN` op or "lowering through an `IF(STEP(SUB(thresholdPlus1, n)), n, thresholdPlus1)` chain". §0.4.141 adopts the IF-chain path: the closed-form `min(n, threshold + 1)` is emitted as a runtime IF in outer scope, and the rewritten WHILE's cond region terminator becomes `STEP(SUB(effectiveN, counter))`. The LAND-NOT closure wrapper is gone in all four shape combinations Phase 3e/3f together cover:
