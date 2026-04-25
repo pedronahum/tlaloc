@@ -39,6 +39,54 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.160 HMC Phase 2 port — loop form for `U(β)` at n=4, d=2 2026-04-26
+
+§0.4.157's plan estimated HMC Phase 2 at "2 firings" — refactor §0.4.159's straight-line port into `for (i in 0 until n)` accumulator loops, with the expectation that C5 (simple-loop direct unroll, concrete n) closes the resulting WHILE. §0.4.160 lands Phase 2 in **one firing** with no plumbing changes — the existing C5 multi-carry support (§0.4.39's widening) and BGDHyperOpt-style packed-input convention compose cleanly.
+
+**The mechanism** in [HmcLogisticRegressionLoopTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionLoopTest.kt):
+
+1. **Packed input convention** — single rank-1 DTensor of size 14 carrying `β[0..1]`, then `X[:,0]` (column-major, slots 2..5), then `X[:,1]` (slots 6..9), then `y` (slots 10..13). This mirrors BGDHyperOpt's packed approach (§0.4.49) but laid out column-major over X so every per-record GATHER inside the loop body resolves as `packed[offset + i]` (no `offset + i * stride` index arithmetic). The `xi0 = packed[2 + i]`, `xi1 = packed[6 + i]`, `yi = packed[10 + i]` lookups all match the §0.4.42 GATHER lowering's supported shape.
+
+2. **Two-accumulator WHILE** — `var sum1 = 0.0f; var sum2 = 0.0f; for (i in 0 until 4) { … }` lowers to a multi-carry WHILE with three slots: counter, sum1, sum2. C5 (§0.4.39's widening) unrolls multi-carry loops with concrete `n` by cloning the body 4 times and threading per-iteration values through the carried slots. The unrolled chain is straight-line dxir post-coarsening — same shape as §0.4.159's hand-written straight-line form, but produced automatically.
+
+3. **Finite-difference verification at β slots only** — the analytic gradient comes back at all 14 slots, but only `g[0]` and `g[1]` correspond to `∂U/∂β[0..1]`. Slots 2..13 are nonzero (the chain rule traces through them) and represent `∂U/∂X` and `∂U/∂y` — not the math target. The test perturbs only `cfg[0..1]` for finite-differencing and asserts on those two slots. Mixed absolute (1e-3) / relative (5e-3) tolerance, identical convention to §0.4.159 / HookeanSpring.
+
+**Decisions worth flagging**:
+
+- **Column-major X layout, not row-major.** Row-major (`packed[2 + i*2]`, `packed[2 + i*2 + 1]`) would have put X feature 0 / feature 1 adjacent per record. Column-major (`packed[2 + i]`, `packed[6 + i]`) keeps the GATHER index arithmetic at `offset + i` form — the only form §0.4.42's lowering definitely handles. BGDHyperOpt encodes the same pattern (`packed[1 + i]` for x, `packed[4 + i]` for y) and is the existing precedent for indexable-data-via-packed-input. A row-major `i*2` index would require `MUL` on the int counter which the plugin's int-arithmetic lowering may or may not handle cleanly; sidestepping that is the right call for Phase 2.
+
+- **Two accumulators in one loop, not two separate loops.** I considered split loops (one for `sum1`, one for `sum2`) since each would be a single-accumulator WHILE — the simplest C5 case. Rejected: the OOPSLA paper's `U(β)` description has the accumulators in one loop body (each iteration computes `Xβ_i` once and uses it for both `term1` and `term2`); a faithful port preserves that structure. C5's multi-carry support (§0.4.39) handles the two-slot case directly; no need to artificially split.
+
+- **One firing, not two.** §0.4.157's plan estimated Phase 2 at 2 firings, citing "the C6 match may need a closer look". The plan was conservative — Phase 2's body shape doesn't actually require C6 (the `(yi - 1) * xb` term has `xb` linear in `β` with coefficients that depend on `i` via `xi0`, `xi1`, `yi` — all loop-variant per the packed-input convention). C6 wouldn't have matched anyway. C5 (concrete `n`, direct unroll) handles loop-variant body shapes automatically. The plan's 2-firing estimate was based on the wrong closure target; with the right one (C5), Phase 2 is 1 firing.
+
+- **No new infrastructure.** Every pipeline piece — packed-input convention, multi-carry WHILE, GATHER with `offset + i`, scalar exp/log (§0.4.158) — was already in place. The Phase 2 firing is pure benchmark composition: existing primitives applied to the new shape. The "fast" outcome is the result of §0.4.151–§0.4.158's accumulated infrastructure work paying off.
+
+- **Phase 2 closes; Phase 3 awaits Phase 4b.** §0.4.157's plan had Phase 3 as the final HMC piece (numerical-stability mask + WHILE-inside-WHILE coarsening). Phase 3 still depends on §0.4.156's recommended-next "Phase 4b" (region-recursive C5 into WHILE bodies) for the inner-loop part of the matrix-vector dot product. Phase 2 with the column-major-packed convention sidesteps the nested-loop need by FLATTENING the matrix-vector dot product into per-record straight-line (`xi0 * b0 + xi1 * b1`) inside one outer loop. A more faithful Phase 2b could add a true nested loop over features — that becomes Phase 4b territory.
+
+- **The WHILE shape probably doesn't survive coarsening as a WHILE.** With concrete `n=4` and C5 firing, the post-coarsening IR has the unrolled chain + zero WHILEs in the function body. A future inhabitant of `:benchmarks` could pin this op-count delta empirically (similar to §0.4.146's CoarseningThroughputBenchmark for `iterateNTimes`). I did NOT add a benchmark this firing — Phase 2's DoD is "loop form correctness", not "coarsening throughput". A separate firing can pin the post-C5 op count if regression coverage warrants.
+
+**Tests added** (+1 new) in [HmcLogisticRegressionLoopTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionLoopTest.kt):
+
+- `hmc U loop form gradient matches finite difference at small fixed dataset` — packed input (14 slots) carrying β + X (column-major) + y. Two-accumulator `for (i in 0 until 4)` loop body. Finite-difference verification at packed[0..1] (β slots only). Same dataset and β as §0.4.159's straight-line test → same gradient. Mixed tolerance.
+
+Full suite is green: **849 tests** (+1 over §0.4.159).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **HMC Phase 3 — numerical-stability mask + nested loop.** Land §0.4.156's Phase 4b (region-recursive C5 into WHILE bodies) as a prerequisite, then port `if (-Xβ_i > 80) -Xβ_i else log(1 + exp(-Xβ_i))` per-record. Multi-firing.
+2. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155's substrate landed.
+3. **Out-of-scope register refresh.** Several deferred items closed across §0.4.151–§0.4.160: D.3i widening, MR IF AD Phase 4 for WHILE-in-IF, multi-live-index gradAccum, `:benchmarks` substrate, HMC Phases 1+2. The register hasn't been refreshed since §0.4.151 — overdue.
+4. **Phase 4b — WHILE inside IF inside WHILE.** Independent of HMC Phase 3 (but a prerequisite for it); region-recursive C5 widening over WHILE bodies. Multi-session.
+
+**Definition-of-done for §0.4.160 — met**:
+- `HmcLogisticRegressionLoopTest.kt` ports U(β) with `for (i in 0 until 4)` accumulator loop ✓
+- Two-accumulator WHILE matches C5's multi-carry shape (§0.4.39) ✓
+- Packed-input convention column-major over X for offset+i GATHER form ✓
+- Finite-difference verification at β slots [0..1] only, mixed tolerance ✓
+- Same dataset / β as §0.4.159's straight-line test for cross-port consistency ✓
+- HMC plan's Phase 2 DoD met ✓
+- Full suite stays green at 849 tests (+1) ✓
+
 #### 0.4.159 HMC Phase 1 port — straight-line `U(β)` for logistic regression at n=4, d=2 2026-04-26
 
 §0.4.158 unblocked scalar `Float.exp()` / `Float.log()`. With every primitive lowering correctly through the K2 plugin, §0.4.159 ports the OOPSLA paper's HMC kernel U(β) at the smallest viable scale (n=4 records, d=2 features) using straight-line scalar arithmetic. This closes Phase 1 of `docs/HMC_PORT_PLAN.md` (revised post-§0.4.158 to scalar/straight-line, since MATMUL through the plugin is its own arc). The benchmark surface now has Brachistochrone (§0.4.43), HookeanSpring (§0.4.47), BGDHyperOpt (§0.4.49 partial), and HMC (§0.4.159) ported through the K2 plugin — four of the paper's six benchmarks at compile-path-end-to-end.
