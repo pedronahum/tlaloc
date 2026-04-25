@@ -534,6 +534,86 @@ class PhiCalculusTest {
     }
 
     @Test
+    fun c5UnrollsInnerWhileNestedInsideOuterWhile() {
+        // §0.4.161 — Phase 4b: region-recursive C5 into WHILE region bodies.
+        // Outer WHILE with concrete n=4 BUT counter increment of 2 (disqualifies
+        // C5 on outer per `detectSimpleLoop`'s `incrConst.value == 1` requirement).
+        // Inner WHILE with concrete n=2 and simple multiplicative back-edge → C5
+        // fires on inner.
+        //
+        //   outer (n=4, counter += 2 → 2 iters):
+        //     inner (n=2, x_inner *= 2): x_inner final = 4x.
+        //     temp = inner.result(0) = 4x.
+        //     carry = carry + temp.
+        //     counter = counter + 2.
+        //   yield outer.result(0) = sum of `temp` over 2 outer iters = 8x.
+        val original = DxirBuilder.function("nestedWhile") {
+            val x = param("x", f32s)
+            val nOuter = const(4, i32s)
+            val zeroI = const(0, i32s)
+            val zeroF = const(0f, f32s)
+            val outerWhile = whileOp(
+                inits = listOf(zeroF, zeroI),  // [carry, counter]
+                cond = { args ->
+                    val diff = op(OpKind.SUB, listOf(nOuter, args[1]), i32s)
+                    val pred = op(OpKind.STEP, listOf(diff), boolS)
+                    yields(pred)
+                },
+                body = { args ->
+                    val nInner = const(2, i32s)
+                    val zeroI2 = const(0, i32s)
+                    val innerWhile = whileOp(
+                        inits = listOf(x, zeroI2),  // [x_inner, i]
+                        cond = { iargs ->
+                            val idiff = op(OpKind.SUB, listOf(nInner, iargs[1]), i32s)
+                            val ipred = op(OpKind.STEP, listOf(idiff), boolS)
+                            yields(ipred)
+                        },
+                        body = { iargs ->
+                            val twoF = const(2f, f32s)
+                            val newX = op(OpKind.MUL, listOf(iargs[0], twoF), f32s)
+                            val ione = const(1, i32s)
+                            val newI = op(OpKind.ADD, listOf(iargs[1], ione), i32s)
+                            yields(newX, newI)
+                        },
+                    )
+                    val temp = innerWhile.result(0)  // = 4x after inner unroll
+                    val newCarry = op(OpKind.ADD, listOf(args[0], temp), f32s)
+                    val twoI = const(2, i32s)  // increment by 2 — disqualifies C5 on outer
+                    val newCounter = op(OpKind.ADD, listOf(args[1], twoI), i32s)
+                    yields(newCarry, newCounter)
+                },
+            )
+            listOf(outerWhile.result(0))
+        }
+
+        // Pre-rewrite sanity: 2 WHILEs total (1 outer + 1 inner).
+        assertEquals(2, countOpsDeep(original, OpKind.WHILE), "pre: 2 WHILEs")
+
+        val rewritten = PhiCalculus.apply(original)
+
+        // Post-rewrite: outer survives (1 WHILE), inner unrolled (gone).
+        assertEquals(
+            1,
+            countOpsDeep(rewritten, OpKind.WHILE),
+            "post: only the outer WHILE survives; inner unrolled in place",
+        )
+        assertEquals(
+            1,
+            countOps(rewritten, OpKind.WHILE),
+            "the surviving WHILE is still at top level",
+        )
+
+        // Numerical agreement at x=1.5 → 8·1.5 = 12.
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(1.5f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(0.5f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(-2f)))
+
+        val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(1.5f)))
+        assertEquals(12f, out[0][0])
+    }
+
+    @Test
     fun c5DoesNotFireWhenBackEdgeDependsOnCounter() {
         // `f(x, n=3) = x + 0 + 1 + 2` (carried adds the counter each iter — back-edge
         // depends on counter, so C5 shouldn't fire). C5 leaves the WHILE in place.

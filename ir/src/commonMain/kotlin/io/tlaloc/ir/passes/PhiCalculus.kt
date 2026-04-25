@@ -1381,9 +1381,11 @@ object PhiCalculus {
      */
     private fun applyC5Pass(fn: DxirFunction): DxirFunction {
         // §0.4.152 — region-recursive pre-scan: detect C5-eligible WHILEs at top level
-        // AND inside IF region bodies (any depth). The rewrite handles both kinds via
-        // a single safeC5 map keyed on WHILE id. WHILE region bodies aren't recursed —
-        // a WHILE-inside-WHILE is its own multi-session arc (Phase 4b).
+        // AND inside IF region bodies. §0.4.161 — Phase 4b: the recursion now walks
+        // into ALL region-bearing ops' regions (IF and WHILE alike), so a safeC5
+        // WHILE nested inside another WHILE's body is discovered. The rewrite is
+        // similarly generalised: any region-bearing op with safeC5 descendants gets
+        // its regions rewritten, not just IF.
         val safeC5: Map<Int, SimpleLoopPattern> = HashMap<Int, SimpleLoopPattern>().apply {
             fun scan(nodes: List<DxirNode>) {
                 for (n in nodes) {
@@ -1394,7 +1396,9 @@ object PhiCalculus {
                             detectSimpleLoop(n, referencedIndices)?.let { this[n.id] = it }
                         }
                     }
-                    if (n.op == OpKind.IF) {
+                    // §0.4.161 — recurse into ALL region bodies, not just IF's. This
+                    // discovers a safeC5 WHILE inside an outer WHILE's body region.
+                    if (n.regions.isNotEmpty()) {
                         for (r in n.regions) for (b in r.blocks) scan(b.body)
                     }
                 }
@@ -1410,28 +1414,28 @@ object PhiCalculus {
                     op, pat, nodeMap, multiOut, builder as DxirEmitter,
                 )
             }
-            // (b) §0.4.152 — IF whose region descendants include a safeC5 WHILE.
-            // Build a replacement IF whose regions clone-or-rewrite each body op
-            // (recursing into nested IFs as needed). When neither (a) nor (b)
-            // matches, return null and the framework clones the op verbatim.
-            if (op.op != OpKind.IF) return@rewriteFunction null
-            if (!ifRegionsContainSafeC5(op, safeC5)) return@rewriteFunction null
-            val condClone = nodeMap[op.operands[0].id]
-                ?: error(
-                    "C5/Phase4: IF cond id=${op.operands[0].id} not in nodeMap " +
-                        "(broken SSA dominance)",
-                )
+            // (b) §0.4.152 / §0.4.161 — any region-bearing op whose region descendants
+            // include a safeC5 WHILE. Build a replacement op whose regions clone-or-
+            // rewrite each body op (recursing into nested region-bearing ops as needed).
+            // §0.4.161 widens this from IF-only (§0.4.152) to any region-bearing op
+            // (most importantly: WHILE, for the WHILE-inside-WHILE case).
+            if (!op.hasRegions) return@rewriteFunction null
+            if (!regionsContainSafeC5(op, safeC5)) return@rewriteFunction null
+            val operandClones = op.operands.map { o ->
+                resolveClonedOperand(o, nodeMap, op.id, multiOut)
+            }
             val newRegions = op.regions.map { region ->
                 rewriteRegionForC5(region, nodeMap, multiOut, builder, safeC5)
             }
-            (builder as DxirEmitter).opMulti(
-                OpKind.IF,
-                listOf(condClone),
-                op.types,
-                op.attrs,
-                op.sharding,
-                newRegions,
-            )
+            if (op.types.size == 1) {
+                (builder as DxirEmitter).op(
+                    op.op, operandClones, op.type, op.attrs, op.sharding, newRegions,
+                )
+            } else {
+                (builder as DxirEmitter).opMulti(
+                    op.op, operandClones, op.types, op.attrs, op.sharding, newRegions,
+                )
+            }
         }
     }
 
@@ -1477,12 +1481,14 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.152 — true iff any descendant op (in either region of [ifOp], at any
-     * nesting depth) is a [safeC5]-keyed WHILE. Used to decide whether the IF
-     * needs region-recursive C5 rewriting (else it's cloned verbatim).
+     * §0.4.152 / §0.4.161 — true iff any descendant op (in any region of [op], at any
+     * nesting depth) is a [safeC5]-keyed WHILE. Used to decide whether [op] needs
+     * region-recursive C5 rewriting (else it's cloned verbatim). §0.4.152 named this
+     * `ifRegionsContainSafeC5` and applied only to IF; §0.4.161's Phase 4b widens
+     * to all region-bearing ops (WHILE, IF, future region-bearing kinds).
      */
-    private fun ifRegionsContainSafeC5(
-        ifOp: DxirOp,
+    private fun regionsContainSafeC5(
+        op: DxirOp,
         safeC5: Map<Int, SimpleLoopPattern>,
     ): Boolean {
         fun walk(nodes: List<DxirNode>): Boolean {
@@ -1495,7 +1501,7 @@ object PhiCalculus {
             }
             return false
         }
-        for (r in ifOp.regions) for (b in r.blocks) {
+        for (r in op.regions) for (b in r.blocks) {
             if (walk(b.body)) return true
         }
         return false
@@ -1530,24 +1536,30 @@ object PhiCalculus {
                         unrollC5InEmitter(
                             n, safeC5[n.id]!!, regionNodeMap, multiOut, this as DxirEmitter,
                         )
-                    n is DxirOp && n.op == OpKind.IF && ifRegionsContainSafeC5(n, safeC5) -> {
-                        val condClone = regionNodeMap[n.operands[0].id]
-                            ?: error(
-                                "C5/Phase4: nested IF cond id=${n.operands[0].id} not in regionNodeMap",
-                            )
+                    // §0.4.161 — Phase 4b: any region-bearing op (IF or WHILE) with
+                    // safeC5 descendants gets its regions rewritten in place. Previously
+                    // (§0.4.152) this branch was IF-only. The unified arm uses
+                    // `resolveClonedOperand` for each operand so DxirOpResult inits
+                    // (e.g., a WHILE init that's `prevOp.result(k)`) preserve their
+                    // index correctly.
+                    n is DxirOp && n.hasRegions && regionsContainSafeC5(n, safeC5) -> {
+                        val operandClones = n.operands.map { o ->
+                            resolveClonedOperand(o, regionNodeMap, n.id, multiOut)
+                        }
                         val newRegions = n.regions.map { r ->
                             rewriteRegionForC5(
                                 r, regionNodeMap, multiOut, this as DxirEmitter, safeC5,
                             )
                         }
-                        (this as DxirEmitter).opMulti(
-                            OpKind.IF,
-                            listOf(condClone),
-                            n.types,
-                            n.attrs,
-                            n.sharding,
-                            newRegions,
-                        )
+                        if (n.types.size == 1) {
+                            (this as DxirEmitter).op(
+                                n.op, operandClones, n.type, n.attrs, n.sharding, newRegions,
+                            )
+                        } else {
+                            (this as DxirEmitter).opMulti(
+                                n.op, operandClones, n.types, n.attrs, n.sharding, newRegions,
+                            )
+                        }
                     }
                     else -> cloneNode(n, regionNodeMap, this as DxirEmitter, multiOut)
                 }

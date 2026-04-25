@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.161 Phase 4b — region-recursive C5 into WHILE region bodies 2026-04-26
+
+§0.4.152 shipped region-recursive C5 into IF region bodies (Phase 4 first slice). The §0.4.156 register's recommended-next #3 named "Phase 4b — WHILE inside IF inside WHILE" as the natural follow-on widening, and §0.4.160's HMC Phase 2 hand-off flagged it as the prerequisite for HMC Phase 3 (numerical-stability mask + nested loop). §0.4.161 lands Phase 4b: `applyC5Pass`'s pre-scan and rewrite both walk into ALL region-bearing ops' regions, not just IF. The structural change collapses three previously-IF-specific code paths into a uniform region-bearing-op dispatch.
+
+**The mechanism** in [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt):
+
+1. **Pre-scan** ([PhiCalculus.kt:1391-1402](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1391-L1402)) — the recursive `scan(nodes)` no longer guards on `n.op == OpKind.IF` before recursing into regions. It now walks any region-bearing op's regions: `if (n.regions.isNotEmpty()) { for (r in n.regions) for (b in r.blocks) scan(b.body) }`. A safeC5 WHILE nested inside another WHILE's body region is now discovered.
+
+2. **Predicate rename + widening** ([PhiCalculus.kt:1485-1502](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1485-L1502)) — `ifRegionsContainSafeC5(ifOp, …)` becomes `regionsContainSafeC5(op, …)`. The body is unchanged (it already recursed into all descendant region-bearing ops); only the parameter type and name shift. Mirrors the §0.4.155 pattern of widening a helper's scope without changing its inner walk.
+
+3. **Top-level rewrite** ([PhiCalculus.kt:1416-1438](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1416-L1438)) — the IF-only arm becomes any-region-bearing-op arm: `if (!op.hasRegions) return null; if (!regionsContainSafeC5(op, safeC5)) return null`. Operand cloning uses `resolveClonedOperand` (the existing helper that preserves DxirOpResult wrapping) for each operand — handles WHILE's N inits the same way it handled IF's single cond. The replacement-op emission picks `op.op` (was hard-coded IF), `op.types`, and dispatches on single-vs-multi-result.
+
+4. **`rewriteRegionForC5` in-region dispatch** ([PhiCalculus.kt:1531-1559](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1531-L1559)) — same widening as the top-level: `n is DxirOp && n.op == OpKind.IF && ifRegionsContainSafeC5(n, safeC5)` becomes `n is DxirOp && n.hasRegions && regionsContainSafeC5(n, safeC5)`. Operand cloning via `resolveClonedOperand`. Single/multi-result dispatch on `n.types.size`.
+
+**Decisions worth flagging**:
+
+- **One unified branch, not two parallel ones (IF vs WHILE).** I considered keeping the IF-specific arm and adding a parallel WHILE arm. Rejected: the bodies would be near-identical (clone operands, recurse-rewrite regions, emit replacement op of the same kind). A unified region-bearing-op arm reads cleaner and removes the future risk of a third region-bearing op kind needing a third copy. The IF-only check at §0.4.152 was `n.op == OpKind.IF && ifRegionsContainSafeC5(n, safeC5)`; §0.4.161's `n.hasRegions && regionsContainSafeC5(n, safeC5)` is strictly more general — IF and WHILE both `hasRegions`.
+
+- **`resolveClonedOperand` instead of plain `nodeMap[id]`.** §0.4.152's IF arm used `nodeMap[op.operands[0].id]` directly — fine for IF since cond is rarely a `DxirOpResult`. WHILE inits are more likely to be DxirOpResults (e.g., `prevWhile.result(0)` carrying a previous loop's output into the next). `resolveClonedOperand` (PhiCalculus.kt:3008) handles the DxirOpResult case correctly — same helper used by `cloneNode` for operand cloning. The shift to `resolveClonedOperand` retroactively fixes a latent bug in §0.4.152's IF arm too.
+
+- **Why the test uses counter increment ≠ 1 to disqualify C5 on the outer.** `detectSimpleLoop` (PhiCalculus.kt:1310) requires `incrConst.value == 1`. A counter that increments by 2 disqualifies the outer cleanly without affecting the inner. Tried two alternatives:
+  - Symbolic outer `n` — disqualifies via `nBound as? DxirConst`, but symbolic means a `DxirParam` of i32 type, and routing i32 params through `DxirInterpreter.evalFunction` (which takes `List<FloatArray>`) is ergonomically awkward in tests.
+  - Counter-dep back-edge — was rejected pre-§0.4.40 but is now ACCEPTED post-§0.4.40 (the per-iteration counter substitution handles it). So that's no longer a disqualifier.
+  
+  Increment ≠ 1 is the cleanest. The outer trip count is concrete (n=4 with counter += 2 → 2 effective iters) so the runtime semantics are clear; only C5's matcher is fooled.
+
+- **Test pins both structural and numerical agreement.** `countOpsDeep` checks the surviving WHILE count (1, the outer), and `countOps` confirms it's at top level. Numerical agreement at three sample points (x ∈ {1.5, 0.5, -2}) plus the concrete `f(1.5) = 12` pin make the test diagnostic for both regression flavors: a pure structural regression that breaks numerics fails the agreement check; a numerical regression that preserves structure fails the concrete pin.
+
+- **Multi-pass fixpoint can already handle WHILE-in-WHILE for SOME cases.** If the outer is also C5-eligible, fixpoint iteration unrolls the outer (cloning the inner WHILE multiple times into top-level), then a second pass unrolls each inner clone. Phase 4b's specific value is the case where the outer is NOT C5-eligible — a fixpoint can never strip the inner from the outer's body region. The §0.4.161 test exercises exactly this case.
+
+- **HMC Phase 3's prerequisite is now satisfied.** §0.4.160's recommended-next #1 (HMC Phase 3) named Phase 4b as the prerequisite for the inner-loop part of the matrix-vector dot product (the inner `Σ_j X[i,j] · β[j]` over features). With Phase 4b shipped, that nested-loop coarsening path is open.
+
+- **No PhiCalculus.apply test for the case where Phase 4b _doesn't_ fire.** If `regionsContainSafeC5` returns false, the rewrite returns null and the framework clones the op verbatim — same behavior as pre-§0.4.161. This negative case is implicitly covered by every existing test that doesn't have a WHILE-inside-WHILE; if the rewrite fired spuriously, those tests' op counts would change. Suite stays green confirms the negative case.
+
+**Tests added** (+1 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `c5UnrollsInnerWhileNestedInsideOuterWhile` — outer WHILE (n=4 concrete, counter += 2 → 2 iters; disqualified by C5 due to non-unit increment) with inner WHILE (n=2 concrete, simple multiplicative back-edge; C5-eligible). Pre: 2 WHILEs. Post: 1 WHILE (outer survives, inner unrolled). Numerical agreement at 3 sample points + concrete pin `f(1.5) = 12`.
+
+Full suite is green: **850 tests** (+1 over §0.4.160).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **HMC Phase 3** — numerical-stability mask + true nested loop. Now unblocked by §0.4.161. Use the §0.4.160 packed-input convention but split `Xβ_i` into a true inner loop over features `for (j in 0 until d)`. Add the `if (-Xβ_i > 80) -Xβ_i else log(1 + exp(-Xβ_i))` mask. Multi-firing.
+2. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155's substrate landed.
+3. **Out-of-scope register refresh.** Long overdue. Many items closed across §0.4.151–§0.4.161.
+4. **Recursive `splitOnReuses` / Cache pruning** — smaller cleanup items still on the deferred list.
+
+**Definition-of-done for §0.4.161 — met**:
+- `applyC5Pass` pre-scan recurses into all region-bearing ops' regions (not just IF) ✓
+- `ifRegionsContainSafeC5` renamed to `regionsContainSafeC5`; widened to all region-bearing ops ✓
+- Top-level rewrite handles any region-bearing op with safeC5 descendants ✓
+- `rewriteRegionForC5` in-region dispatch handles any region-bearing op with safeC5 descendants ✓
+- `resolveClonedOperand` replaces direct `nodeMap[id]` for operand cloning (handles DxirOpResult correctly) ✓
+- One new test pins WHILE-inside-WHILE with non-C5-eligible outer + C5-eligible inner ✓
+- Full suite stays green at 850 tests (+1) ✓
+
 #### 0.4.160 HMC Phase 2 port — loop form for `U(β)` at n=4, d=2 2026-04-26
 
 §0.4.157's plan estimated HMC Phase 2 at "2 firings" — refactor §0.4.159's straight-line port into `for (i in 0 until n)` accumulator loops, with the expectation that C5 (simple-loop direct unroll, concrete n) closes the resulting WHILE. §0.4.160 lands Phase 2 in **one firing** with no plumbing changes — the existing C5 multi-carry support (§0.4.39's widening) and BGDHyperOpt-style packed-input convention compose cleanly.
