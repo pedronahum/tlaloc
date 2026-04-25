@@ -39,6 +39,50 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.94 `diagnosticReporter` migration investigation — deferred (deeper than "cosmetic") 2026-04-25
+
+Investigated the long-pending `diagnosticReporter` migration item from the §0.4.68 register. Found that the assumption "cosmetic refactor" was wrong: both the deprecated `IrPluginContext.messageCollector` AND `createDiagnosticReporter(name: String): MessageCollector` are flagged for removal in Kotlin 2.2.x. The only non-deprecated path is `pluginContext.diagnosticReporter: IrDiagnosticReporter`, which is **factory-based** and requires each report site to anchor on an `IrDeclaration` / `IrElement` / `IrFile`.
+
+**What changed**: nothing in source behaviour — the `@Suppress("DEPRECATION")` stays put. The single change is an expanded comment in [TlalocIrGenerationExtension.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt) that records the investigation outcome and serves as the recipe for a future migration session.
+
+**The actual migration recipe** (now embedded in the source comment for future readers):
+
+1. **Declare IR-phase `KtDiagnosticFactory` instances** in `TlalocDiagnostics.kt` mirroring the existing FIR-phase factories (`LAMBDA_LOWERED`, `LAMBDA_UNSUPPORTED`). Each `mc.report(WARNING, msg, null)` call site becomes a specific factory invocation.
+
+2. **Add an `IrDiagnosticRenderer`** so the existing `"Tlaloc IR extension saw handoff …"` prefix that `TlalocPluginDiagnosticTest` asserts on still appears in the rendered message.
+
+3. **Rewrite every `mc.report(severity, message, null)` call** as `diagnosticReporter.at(currentFile).report(factory, args)`. Five call sites in the IR extension; the body of `generate(...)` would need to track `currentFile` from `moduleFragment.files`.
+
+4. **Update `TlalocPluginDiagnosticTest`'s assertion mechanism**. The test currently filters compile-time warnings off a `MessageCollector` hook. `KtDiagnostic` instances surface differently — likely needs to read off the same MessageCollector via the renderer's downstream emission path, but the assertion-on-substring style might need adjustment.
+
+**Why now**: the deprecation is a warning, not an error. Keeping the @Suppress lets the rest of §0.4.N sessions ship without rewriting the IR-phase diagnostic surface. The migration becomes a hard prerequisite only when a Kotlin version bump removes the deprecated paths entirely; until then, it's a queue item.
+
+**Decisions worth flagging**:
+
+- **Tried `createDiagnosticReporter("Tlaloc")` first** as a presumed drop-in replacement. Compiler immediately flagged it as also deprecated, so the "easy" path doesn't exist. Investigation result: pure-doc deliverable.
+
+- **Note in source vs. spec.** The recipe is in BOTH the source comment AND the §0.4.94 spec note because future migration session readers will look in either place. Source comment is canonical for "how to do it"; spec note is canonical for "why it isn't done yet."
+
+- **No new tests** — there's no behaviour change to test. The full suite stays at 671.
+
+**Tests added** (+0): pure doc / investigation session.
+
+Full suite is green: **671 tests** (unchanged from §0.4.93).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on grad expressions**.
+3. **`diagnosticReporter` migration proper** — now that the recipe is known, schedule the multi-step refactor when Kotlin's deprecation timeline forces it.
+4. **Double / Int literal LHS broadcast overloads** — small extension to §0.4.93 if call sites surface.
+5. **Rank-N (N≥3) broadcast operator set** — gated on a public `Rank3` shape type in `:core`.
+
+**Definition-of-done for §0.4.94 — met**:
+- Investigation completed; deprecation paths catalogued ✓
+- Migration recipe documented in both source and spec ✓
+- @Suppress annotation now references §0.4.94 instead of "tracked separately" ✓
+- Full suite stays green at 671 tests ✓
+
 #### 0.4.93 Float-literal LHS broadcast — `0.5f * matrix`, `1f - row`, etc. 2026-04-24
 
 Closes the last corner of the broadcast surface. §0.4.75 gave us `tracer op Float`; this session adds `Float op tracer` — the Float-on-LHS direction. Four generic `operator fun <S : Shape> Float.op(Tracer<S>): Tracer<S>` overloads, each lifting the literal via `constantLike(this)` and applying the same-shape operator. Works uniformly for scalar, rank-1, and rank-2 receivers.

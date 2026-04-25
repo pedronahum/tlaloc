@@ -43,12 +43,29 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
 
     @OptIn(UnsafeDuringIrConstructionAPI::class)
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
-        // IrPluginContext.messageCollector is deprecated in favour of `diagnosticReporter`
-        // (KT-78277). Migrating would require declaring IR-phase diagnostic factories + a
-        // renderer that preserves the "Tlaloc IR extension saw handoff …" prefix that the
-        // scaffolding test asserts on; that refactor is tracked separately and is a clean
-        // lift once the grad transform lands and the diagnostic surface stabilises. For
-        // now we keep the MessageCollector path and silence the deprecation locally.
+        // §0.4.94 — KT-78277 deprecation investigation. Both
+        // `IrPluginContext.messageCollector` AND `createDiagnosticReporter(name)` are
+        // deprecated as of Kotlin 2.2.x. The only non-deprecated path is
+        // `pluginContext.diagnosticReporter: IrDiagnosticReporter`, whose API is
+        // factory-based and requires anchoring each diagnostic to an `IrDeclaration`
+        // / `IrElement` / `IrFile`. Migrating means:
+        //   1. Declaring IR-phase `KtDiagnosticFactory` instances in `TlalocDiagnostics.kt`
+        //      mirroring the existing FIR-phase ones (LAMBDA_LOWERED, LAMBDA_UNSUPPORTED).
+        //   2. Adding an `IrDiagnosticRenderer` so the existing
+        //      "Tlaloc IR extension saw handoff …" prefix the scaffolding test
+        //      asserts on still appears in the rendered message.
+        //   3. Either rewriting every `mc.report(severity, message, null)` call as
+        //      `diagnosticReporter.at(currentFile).report(factory, args)`, OR adding
+        //      a thin `MessageCollector`-style adapter wrapping the new reporter.
+        //   4. Updating `TlalocPluginDiagnosticTest`'s assertion mechanism: the test
+        //      currently filters compile-time warnings off a MessageCollector hook;
+        //      the new path emits `KtDiagnostic` instances, which surface differently.
+        // Each of those four pieces is a session-or-more of work. The deprecation is
+        // a warning, not an error — keeping the @Suppress here lets the rest of §0.4.N
+        // sessions ship without rewriting the IR-phase diagnostic surface, and the
+        // plan above is the recipe for a future "diagnosticReporter migration" session
+        // when it becomes a hard prerequisite (e.g. a Kotlin version bump removes the
+        // deprecated paths entirely).
         @Suppress("DEPRECATION")
         val mc = pluginContext.messageCollector
         val synth = DxirToIrSynthesis(pluginContext)
