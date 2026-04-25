@@ -733,6 +733,16 @@ object PhiCalculus {
                     !isRegionInternalSubtreeLiftable(thresholdNode, condBodyIds)
                 ) return null
             }
+            is DxirOpResult -> {
+                // §0.4.149 — DxirOpResult threshold (e.g., a multi-result op's
+                // result(k) used directly as the break threshold). When the source
+                // op is region-internal, check the source's subtree for liftability;
+                // when it's outer-scope, accept directly (resolved via nodeMap at
+                // rewrite time). Same scope discipline as the DxirOp case above.
+                if (thresholdNode.source.id in condBodyIds &&
+                    !isRegionInternalSubtreeLiftable(thresholdNode, condBodyIds)
+                ) return null
+            }
             else -> return null
         }
 
@@ -782,9 +792,11 @@ object PhiCalculus {
      * routed to [BreakBearingWhile.BreakCondClass.CarriedDependent]; this check
      * defensively rejects such shapes regardless of how they were classified.
      *
-     * Also rejects [DxirOpResult] and [DxirCall] inside the subtree — their lift
-     * semantics need separate handling (multi-result regrouping; cross-function
-     * call boundaries) that's out of scope for Phase 3g's clean threshold lift.
+     * §0.4.149 — [DxirOpResult] is now accepted: the walker recurses into the
+     * source op's operands, treating the multi-result op as if it were a regular
+     * [DxirOp]. [cloneNode] handles the multi-result reconstruction via `opMulti`
+     * based on `node.types.size > 1`. [DxirCall] still rejects (cross-function
+     * call boundaries need separate handling).
      */
     private fun isRegionInternalSubtreeLiftable(
         root: DxirNode,
@@ -801,7 +813,8 @@ object PhiCalculus {
             when (n) {
                 is DxirOp -> n.operands.forEach { stack.addLast(it) }
                 is DxirConst -> Unit
-                is DxirOpResult, is DxirCall -> return false
+                is DxirOpResult -> n.source.operands.forEach { stack.addLast(it) }
+                is DxirCall -> return false
                 else -> Unit
             }
         }
@@ -877,6 +890,24 @@ object PhiCalculus {
                             "WHILE id=${op.id} missing from nodeMap",
                     )
             }
+            is DxirOpResult -> {
+                // §0.4.149 — lift the source op (multi-result), then wrap the
+                // cloned source as `result(t.index)` to recover the indexed ref.
+                val sourceClone: DxirNode = if (t.source.id in condBodyIds) {
+                    liftRegionInternalSubtree(t.source, condBlock, nodeMap, multiOut, builder, op.id)
+                } else {
+                    nodeMap[t.source.id]
+                        ?: error(
+                            "applyBreakBearingClosurePass: outer-scope threshold DxirOpResult " +
+                                "source id=${t.source.id} for WHILE id=${op.id} missing from nodeMap",
+                        )
+                }
+                require(sourceClone is DxirOp) {
+                    "applyBreakBearingClosurePass: threshold DxirOpResult's cloned source " +
+                        "must be a DxirOp (got ${sourceClone::class.simpleName}) for WHILE id=${op.id}"
+                }
+                sourceClone.result(t.index)
+            }
             else -> nodeMap[t.id]
                 ?: error(
                     "applyBreakBearingClosurePass: threshold node id=${t.id} for WHILE id=${op.id} " +
@@ -930,9 +961,16 @@ object PhiCalculus {
      * dispatch. Errors on [DxirBlockArg] because [computeCounterOnlySymbolicShape]'s
      * pre-check ([isRegionInternalSubtreeLiftable]) should have rejected any
      * subtree with carried-arg deps before reaching here.
+     *
+     * §0.4.149 — [DxirOpResult] is now walked through to its source's operands;
+     * the source op (multi-result) is added to `toClone` and `cloneNode` rebuilds
+     * it via `opMulti`. The DxirOpResult ref itself doesn't need a separate
+     * clone — `nodeMap[source.id]` after the lift holds the cloned multi-result
+     * op, and the caller wraps it as `clonedSource.result(index)` to recover the
+     * indexed reference.
      */
     private fun liftRegionInternalSubtree(
-        root: DxirOp,
+        root: DxirNode,
         condBlock: DxirBlock,
         nodeMap: MutableMap<Int, DxirNode>,
         multiOut: MutableMap<Int, List<DxirNode>>,
@@ -959,7 +997,14 @@ object PhiCalculus {
                     toClone.add(n.id)
                 }
                 is DxirConst -> toClone.add(n.id)
-                is DxirOpResult, is DxirCall -> error(
+                is DxirOpResult -> {
+                    // §0.4.149 — walk through to the source's operands; the
+                    // source's id (== n.id) gets added to toClone, and cloneNode
+                    // reconstructs it via opMulti for multi-result.
+                    for (operand in n.source.operands) walk(operand)
+                    toClone.add(n.id)
+                }
+                is DxirCall -> error(
                     "applyBreakBearingClosurePass: liftRegionInternalSubtree reached " +
                         "${n::class.simpleName} id=${n.id} for WHILE id=$contextOpId — " +
                         "pre-check should have rejected this subtree shape",

@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.149 D.3i Phase 3i — `DxirOpResult` threshold support 2026-04-25
+
+§0.4.142 (Phase 3g) accepted `DxirOp` thresholds; §0.4.143 (Phase 3h) extended the same widening to `n`. The remaining sliver — `DxirOpResult` thresholds — was the "corner case" called out across §0.4.144 / §0.4.145 / §0.4.146 / §0.4.147 / §0.4.148's recommended-next lists. Realistic surface: a multi-result op's `result(k)` used directly as the break threshold (e.g., `if (i > someMultiOp.result(0)) break`). §0.4.149 closes this gap: `isRegionInternalSubtreeLiftable` and `liftRegionInternalSubtree` walk through `DxirOpResult` to its source's operands, and the rewrite's `thresholdClone` dispatch wraps the cloned source as `clonedSource.result(t.index)`.
+
+**The mechanism** in [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt):
+
+1. **`isRegionInternalSubtreeLiftable`** ([PhiCalculus.kt:789-810](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L789-L810)) — the `DxirOpResult` arm changes from `return false` to `n.source.operands.forEach { stack.addLast(it) }`. Walking through to the source's operands treats the multi-result op as if it were a regular `DxirOp` for liftability purposes; subsequent visits short-circuit via the visited set keyed on `n.id` (which equals `source.id` per dxir's id convention).
+
+2. **`liftRegionInternalSubtree`** ([PhiCalculus.kt:836-855](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L836-L855)) — the `DxirOpResult` arm changes from `error(...)` to walking source operands AND adding the source's id to `toClone`. `cloneNode` rebuilds the multi-result source via `opMulti` (per its existing `node.types.size > 1` branch), then `nodeMap[source.id]` holds the cloned op. The caller wraps the result reference with `.result(index)`.
+
+3. **`computeCounterOnlySymbolicShape`** ([PhiCalculus.kt:730-739](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L730-L739)) — adds a `DxirOpResult` arm to the typed-when. Mirrors the `DxirOp` arm's scope check: if `thresholdNode.source.id` is in `condBodyIds`, run the liftability check on the threshold node (which walks through to source.operands). Otherwise (outer-scope source), accept directly.
+
+4. **`rewriteCounterOnlySymbolicBreak`** ([PhiCalculus.kt:870-887](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L870-L887)) — adds a `DxirOpResult` dispatch arm. Lifts the source op (multi-result) via `liftRegionInternalSubtree` if region-internal, else resolves through `nodeMap[source.id]`. Asserts the result is a `DxirOp` (multi-result reconstruction via `opMulti` is contract), then wraps as `sourceClone.result(t.index)` to recover the indexed reference. The arithmetic IF chain in the rewrite then operates on this wrapped reference like any other scalar threshold.
+
+**Decisions worth flagging**:
+
+- **Walking through `DxirOpResult` to source operands is the load-bearing change.** Before §0.4.149, both helpers rejected `DxirOpResult` outright. The fix in `isRegionInternalSubtreeLiftable` and `liftRegionInternalSubtree` is symmetric: same recursion shape, just with the DxirOpResult arm doing `walk source.operands` instead of `return false` / `error`. The visited set keyed on id naturally handles the "DxirOpResult.id == source.id" overlap — the source's clone happens once regardless of which entry triggers it.
+
+- **`DxirCall` still rejects.** §0.4.149 expands the supported subtree shapes by ONE node kind; `DxirCall` (cross-function call boundaries) needs separate handling because `cloneNode` itself errors on it ("PhiCalculus.cloneNode: DxirCall not supported in B.1"). Lifting a DxirCall would require a DxirCall-aware cloneNode arm, which is a wider refactor.
+
+- **Outer-scope DxirOpResult thresholds are also supported.** The `computeCounterOnlySymbolicShape` check is `if (source.id in condBodyIds && !liftable) return null` — i.e., reject only when the source IS region-internal AND liftability fails. For outer-scope sources (e.g., a multi-result op at function body level), we accept directly. The rewrite's dispatch handles both via the `if (t.source.id in condBodyIds) lift else nodeMap` branch. The realistic shape is the outer-scope case (a function-body-level multi-result op whose result is used as threshold); region-internal multi-result ops in cond regions are theoretically possible but rare.
+
+- **`require(sourceClone is DxirOp)` is a contract assertion, not a recoverable check.** `cloneNode` always returns a `DxirOp` for multi-result inputs (the `opMulti` branch). If a future change to `cloneNode` returns something else for multi-result, this require fires loudly with a diagnostic naming the actual class. Mirrors §0.4.142's defensive `require(...)` checks.
+
+- **Test pin uses `assertEquals` for both flag values.** `flag = true` → cap=2 → effective trip = 3 → 5·8 = 40. `flag = false` → cap=5 → effective trip = 6 → 5·64 = 320. Both numerical pins use the closed form (which the closure rewrite preserves) plus `assertNumericallyAgree` against the unrewritten original. The test confirms (a) the rewrite produces correct IR, (b) the IR evaluates to the right number, (c) the rewrite is observationally equivalent to the original at every flag value.
+
+- **Test uses an outer-scope multi-result IF as the threshold's source.** Realistic FIR shape — a function selects between two threshold values based on a flag, then the WHILE breaks at whichever value was picked. Region-internal multi-result threshold sources would require constructing a multi-result op inside the cond region, which is theoretically valid but rarely produced by the FIR-side hoist. Outer-scope test is the natural inhabitant; region-internal would be a follow-on pin if a use case surfaces.
+
+- **No `DxirOpResult` n support.** `BreakBearingWhile.extractStepCounter`'s `n` arm (added §0.4.143) accepts `DxirOp` but not `DxirOpResult`. Adding `DxirOpResult` n would parallel §0.4.143's tripCountOp field with a tripCountOpResult variant. That's a separate phase; §0.4.149 only widens the threshold side, mirroring how §0.4.142 widened threshold first and §0.4.143 followed up with n. A future "Phase 3j" can mirror this for n if a use case surfaces.
+
+**Tests added** (+1 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.breakBearingClosureRewritesOpResultThresholdCounterOnly` — outer-scope multi-result IF whose `result(0)` (varies with flag: 2 vs 5) is the WHILE's threshold. n = 8. Pin: 1 WHILE post-rewrite, 0 LAND, gradient eval = 40 at flag=true / 320 at flag=false. Numerical agreement against the unrewritten original at both flag values.
+
+Full suite is green: **840 tests** (+1 over §0.4.148).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 4 — nested WHILE in IF branch.** Still the headline gap.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.**
+3. **D.3i Phase 3j — `DxirOpResult` n support.** Mirror §0.4.149 for the n operand. Adds `tripCountOpResult` to `BreakBearingWhile.Pattern`.
+4. **Fourth `:benchmarks` inhabitant** — e.g., a different primal shape (multi-branch IF, or affine recurrence).
+
+**Definition-of-done for §0.4.149 — met**:
+- `isRegionInternalSubtreeLiftable` walks through `DxirOpResult` to source operands ✓
+- `liftRegionInternalSubtree` walks through `DxirOpResult` and adds source.id to `toClone` ✓
+- `computeCounterOnlySymbolicShape` accepts `DxirOpResult` thresholds with the same scope discipline as DxirOp ✓
+- `rewriteCounterOnlySymbolicBreak` dispatches `DxirOpResult` thresholds via lift + `result(index)` wrap ✓
+- 1 new test pins outer-scope DxirOpResult threshold with concrete numerical values + numerical agreement ✓
+- §0.4.142 / §0.4.143 paths unchanged (existing 6 tests still green) ✓
+- Full suite stays green at 840 tests (+1) ✓
+
 #### 0.4.148 `:benchmarks` consolidation — extract `BenchmarkPrimals.kt` 2026-04-25
 
 §0.4.145 / §0.4.146 / §0.4.147 each shipped a benchmark that included a copy of the same `iterateNTimes(n)` helper plus a local `countOps(fn, kind)` counter — three identical copies across [EndToEndAdBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/EndToEndAdBenchmark.kt), [CoarseningThroughputBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/CoarseningThroughputBenchmark.kt), [SctThroughputBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/SctThroughputBenchmark.kt). The §0.4.145 doc explicitly flagged the duplication choice as deliberate ("future iterations can extract a small `BenchmarkPrimals.kt` if the duplication becomes painful, but at two probes it's not"); §0.4.147's recommended-next #4 marked the threshold ("With three inhabitants now sharing `iterateNTimes`, the duplication is visible"). §0.4.148 lands the extraction: a new [BenchmarkPrimals.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt) `object` exposes `iterateNTimes` and `countOps` to all three benchmarks; each benchmark's local copies are removed.
