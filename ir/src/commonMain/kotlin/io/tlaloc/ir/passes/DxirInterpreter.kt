@@ -299,38 +299,58 @@ object DxirInterpreter {
                 }
             }
             OpKind.MATMUL -> {
-                // Rank-2 matmul only: (M,K) @ (K,N) → (M,N), row-major. Batched matmul
-                // (rank > 2 with batching/contracting attrs) is out of scope for the
-                // bridge today — MatmulRule never emits it.
+                // §0.4.135 — rank-2 (`(M,K) @ (K,N) → (M,N)`) plus rank-3+ batched
+                // (`(B0..Bk, M, K) @ (B0..Bk, K, N) → (B0..Bk, M, N)`). The batched
+                // path uses the canonical convention: all leading axes are batching
+                // dims; the last two are M/K (lhs) and K/N (rhs). Equivalent to MLIR
+                // `stablehlo.dot_general` with `batching_dims = [0..k]`,
+                // `contracting_dims = [k+2] x [k+1]`.
                 val aType = op.operands[0].type
                 val bType = op.operands[1].type
-                require(aType.rank == 2 && bType.rank == 2) {
-                    "DxirInterpreter: MATMUL requires rank-2 operands, got ${aType.dims} x ${bType.dims}"
+                require(aType.rank >= 2 && bType.rank >= 2) {
+                    "DxirInterpreter: MATMUL requires rank ≥ 2 operands, got ${aType.dims} x ${bType.dims}"
                 }
-                val m = aType.dims[0]
-                val k = aType.dims[1]
-                val kB = bType.dims[0]
-                val n = bType.dims[1]
+                require(aType.rank == bType.rank) {
+                    "DxirInterpreter: MATMUL operands must have matching ranks for canonical batched " +
+                        "shape; got ${aType.dims} x ${bType.dims}"
+                }
+                val r = aType.rank
+                val m = aType.dims[r - 2]
+                val k = aType.dims[r - 1]
+                val kB = bType.dims[r - 2]
+                val n = bType.dims[r - 1]
                 require(k == kB) {
                     "DxirInterpreter: MATMUL inner dim mismatch: ${aType.dims} x ${bType.dims}"
                 }
+                // Batch dims (axes 0..r-3) must agree elementwise.
+                for (axis in 0 until r - 2) {
+                    require(aType.dims[axis] == bType.dims[axis]) {
+                        "DxirInterpreter: MATMUL batch axis $axis mismatch: ${aType.dims} x ${bType.dims}"
+                    }
+                }
                 val a = evalNode(op.operands[0], env, multiResults)
                 val b = evalNode(op.operands[1], env, multiResults)
-                require(a.size == m * k) {
-                    "DxirInterpreter: MATMUL lhs size ${a.size} does not match m*k=${m * k}"
+                val batchSize = if (r == 2) 1 else aType.dims.subList(0, r - 2).reduce(Int::times)
+                require(a.size == batchSize * m * k) {
+                    "DxirInterpreter: MATMUL lhs size ${a.size} does not match batch*m*k=${batchSize * m * k}"
                 }
-                require(b.size == k * n) {
-                    "DxirInterpreter: MATMUL rhs size ${b.size} does not match k*n=${k * n}"
+                require(b.size == batchSize * k * n) {
+                    "DxirInterpreter: MATMUL rhs size ${b.size} does not match batch*k*n=${batchSize * k * n}"
                 }
-                val out = FloatArray(m * n)
-                for (i in 0 until m) {
-                    for (p in 0 until k) {
-                        val aip = a[i * k + p]
-                        if (aip == 0f) continue
-                        val rowOff = i * n
-                        val bOff = p * n
-                        for (j in 0 until n) {
-                            out[rowOff + j] += aip * b[bOff + j]
+                val out = FloatArray(batchSize * m * n)
+                for (batch in 0 until batchSize) {
+                    val aBase = batch * m * k
+                    val bBase = batch * k * n
+                    val outBase = batch * m * n
+                    for (i in 0 until m) {
+                        for (p in 0 until k) {
+                            val aip = a[aBase + i * k + p]
+                            if (aip == 0f) continue
+                            val rowOff = outBase + i * n
+                            val bOff = bBase + p * n
+                            for (j in 0 until n) {
+                                out[rowOff + j] += aip * b[bOff + j]
+                            }
                         }
                     }
                 }

@@ -342,4 +342,116 @@ class DxirInterpreterTest {
             "expected cap error message; got: ${ex.message}",
         )
     }
+
+    // ---- §0.4.135: batched MATMUL ------------------------------------------
+
+    @Test
+    fun batchedRank3MatmulComputesPerBatchSlices() {
+        // a: (B=2, M=2, K=3), b: (B=2, K=3, N=2). Per-batch matmul should produce
+        // a (2, 2, 2) result. Pin both batches to known slice values.
+        val aType = DxirType(F32, listOf(2, 2, 3))
+        val bType = DxirType(F32, listOf(2, 3, 2))
+        val outType = DxirType(F32, listOf(2, 2, 2))
+        val fn = DxirBuilder.function("bmm") {
+            val a = param("a", aType)
+            val b = param("b", bType)
+            val y = op(OpKind.MATMUL, listOf(a, b), outType)
+            listOf(y)
+        }
+        // Batch 0: a0 = [[1,2,3],[4,5,6]], b0 = [[1,0],[0,1],[1,1]] →
+        //   row 0 = [1+0+3, 0+2+3] = [4, 5]; row 1 = [4+0+6, 0+5+6] = [10, 11].
+        // Batch 1: a1 = [[1,1,1],[2,2,2]], b1 = [[1,1],[1,1],[1,1]] →
+        //   row 0 = [3, 3]; row 1 = [6, 6].
+        val aBacking = floatArrayOf(
+            // batch 0
+            1f, 2f, 3f, 4f, 5f, 6f,
+            // batch 1
+            1f, 1f, 1f, 2f, 2f, 2f,
+        )
+        val bBacking = floatArrayOf(
+            // batch 0
+            1f, 0f, 0f, 1f, 1f, 1f,
+            // batch 1
+            1f, 1f, 1f, 1f, 1f, 1f,
+        )
+        val out = DxirInterpreter.evalFunction(fn, listOf(aBacking, bBacking))
+        assertEquals(1, out.size)
+        assertEquals(8, out[0].size)
+        val expected = floatArrayOf(
+            // batch 0 result (2x2 row-major): [[4,5],[10,11]]
+            4f, 5f, 10f, 11f,
+            // batch 1 result: [[3,3],[6,6]]
+            3f, 3f, 6f, 6f,
+        )
+        assertEquals(expected.toList(), out[0].toList())
+    }
+
+    @Test
+    fun batchedMatmulAgreesWithRank2OnBatchSizeOne() {
+        // For B=1, the rank-3 batched form must agree with the rank-2 reference.
+        // Both produce the same per-batch slice (since there's only one batch).
+        val rank3A = DxirType(F32, listOf(1, 2, 3))
+        val rank3B = DxirType(F32, listOf(1, 3, 2))
+        val rank3Out = DxirType(F32, listOf(1, 2, 2))
+        val fnRank3 = DxirBuilder.function("bmm1") {
+            val a = param("a", rank3A)
+            val b = param("b", rank3B)
+            val y = op(OpKind.MATMUL, listOf(a, b), rank3Out)
+            listOf(y)
+        }
+        val rank2A = DxirType(F32, listOf(2, 3))
+        val rank2B = DxirType(F32, listOf(3, 2))
+        val rank2Out = DxirType(F32, listOf(2, 2))
+        val fnRank2 = DxirBuilder.function("mm") {
+            val a = param("a", rank2A)
+            val b = param("b", rank2B)
+            val y = op(OpKind.MATMUL, listOf(a, b), rank2Out)
+            listOf(y)
+        }
+        val aBacking = floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f)
+        val bBacking = floatArrayOf(1f, 0f, 0f, 1f, 1f, 1f)
+        val outRank3 = DxirInterpreter.evalFunction(fnRank3, listOf(aBacking, bBacking))
+        val outRank2 = DxirInterpreter.evalFunction(fnRank2, listOf(aBacking, bBacking))
+        assertEquals(outRank2[0].toList(), outRank3[0].toList())
+    }
+
+    @Test
+    fun batchedMatmulRejectsInnerDimMismatch() {
+        // (B, M, K) x (B, K', N) with K != K' must fail loud.
+        val aType = DxirType(F32, listOf(2, 2, 3))
+        val bType = DxirType(F32, listOf(2, 4, 2))   // K'=4, but lhs.K=3
+        val outType = DxirType(F32, listOf(2, 2, 2))
+        val fn = DxirBuilder.function("bmmBad") {
+            val a = param("a", aType)
+            val b = param("b", bType)
+            val y = op(OpKind.MATMUL, listOf(a, b), outType)
+            listOf(y)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DxirInterpreter.evalFunction(
+                fn,
+                listOf(FloatArray(2 * 2 * 3), FloatArray(2 * 4 * 2)),
+            )
+        }
+    }
+
+    @Test
+    fun batchedMatmulRejectsBatchAxisMismatch() {
+        // (B, M, K) x (B', K, N) with B != B' must fail loud.
+        val aType = DxirType(F32, listOf(2, 2, 3))
+        val bType = DxirType(F32, listOf(3, 3, 2))   // B'=3, lhs.B=2
+        val outType = DxirType(F32, listOf(2, 2, 2))
+        val fn = DxirBuilder.function("bmmBatchBad") {
+            val a = param("a", aType)
+            val b = param("b", bType)
+            val y = op(OpKind.MATMUL, listOf(a, b), outType)
+            listOf(y)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DxirInterpreter.evalFunction(
+                fn,
+                listOf(FloatArray(2 * 2 * 3), FloatArray(3 * 3 * 2)),
+            )
+        }
+    }
 }

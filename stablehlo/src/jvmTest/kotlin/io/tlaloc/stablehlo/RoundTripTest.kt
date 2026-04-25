@@ -951,6 +951,21 @@ class RoundTripTest {
         validate(DxirModule(listOf(fn)).toStablehlo(), "SCATTER_ADD rank-3 substrate")
     }
 
+    // §0.4.135 — no-attrs MATMUL of rank ≥ 3 emits canonical batched
+    // dot_general; verify the resulting MLIR still parses through stablehlo-translate.
+
+    @Test
+    fun matmulRank3BatchedNoAttrsRoundTrips() {
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("bmm") {
+            val a = param("a", DxirType(F32, listOf(2, 2, 3)))
+            val b = param("b", DxirType(F32, listOf(2, 3, 4)))
+            val c = op(OpKind.MATMUL, listOf(a, b), DxirType(F32, listOf(2, 2, 4)))
+            listOf(c)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "MATMUL rank-3 batched no-attrs")
+    }
+
     // §0.4.133 — scatter-into-zeros peephole's emitted MLIR must still round-trip.
 
     @Test

@@ -39,6 +39,99 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.135 Batched MATMUL at the interpreter + no-attrs emitter path 2026-04-25
+
+§0.4.122's deferred-register listed "Batched MATMUL — Rank-2 only at emitter + synthesis." The StableHLO emitter's *attrs-driven* path at [Emitter.kt:719-748](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L719-L748) already handles arbitrary batching/contracting dims, but the *no-attrs* convenience path required rank-2, and the [DxirInterpreter](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt) MATMUL arm was rank-2 only. This session lights up the canonical batched-matmul shape on both surfaces: `(B0..Bk, M, K) × (B0..Bk, K, N) → (B0..Bk, M, N)` for any rank ≥ 2. The interpreter loops over the flattened batch dimension; the emitter infers `batching_dims = [0..r-3]` and `contracting_dims = [r-1] x [r-2]` from the rank, mapping cleanly to `stablehlo.dot_general`.
+
+The autograd tracer surface and `MatmulRule` stay rank-2 — no production path emits a rank-3+ MATMUL today, so this session ships the substrate-side support that would let one work end-to-end if the tracer surface gains a `bmm` operator later. Same forward-looking pattern as the §0.4.132 GATHER/SCATTER rank-N generalisation.
+
+**The mechanism**:
+
+[DxirInterpreter.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt) — replaced the rank-2 `(M, K) × (K, N)` arm with a rank-aware loop:
+
+```kotlin
+val r = aType.rank
+val m = aType.dims[r - 2]
+val k = aType.dims[r - 1]
+val n = bType.dims[r - 1]
+// batch axes 0..r-3 must agree elementwise
+val batchSize = if (r == 2) 1 else aType.dims.subList(0, r - 2).reduce(Int::times)
+for (batch in 0 until batchSize) {
+    val aBase = batch * m * k
+    val bBase = batch * k * n
+    val outBase = batch * m * n
+    // …same triple-nested loop as the original rank-2 code, offset by aBase/bBase/outBase
+}
+```
+
+The rank-2 path falls through naturally with `batchSize = 1` and `aBase = bBase = outBase = 0`. The triple-nested element loop is otherwise unchanged from the original implementation.
+
+[Emitter.kt](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt) — the no-attrs branch now infers batching dims from the operand rank:
+
+```kotlin
+val r = aType.rank
+val batchPart = if (r == 2) "" else "batching_dims = [${(0 until r-2).joinToString(", ")}] x [...], "
+out.appendLine(
+    "$step$name = stablehlo.dot_general $a, $b, ${batchPart}" +
+        "contracting_dims = [${r - 1}] x [${r - 2}] " +
+        ": (${aType.toMlir()}, ${bType.toMlir()}) -> ${outType.toMlir()}",
+)
+```
+
+Rank-2 produces the existing `contracting_dims = [1] x [0]` form (no batching). Rank-3 produces `batching_dims = [0] x [0], contracting_dims = [2] x [1]`. Rank-4+ scales linearly.
+
+**Decisions worth flagging**:
+
+- **Operands must have matching ranks for the no-attrs path.** The convention is "all leading axes are batching dims" — a rank-3 lhs combined with a rank-2 rhs is structurally ambiguous (broadcast the rhs? squeeze the lhs?). The error message points users at the explicit-attrs path for mixed-rank cases. Mirrors how §0.4.132 required GATHER's value to be rank-(arr.rank-1) — the substrate sticks to the canonical shapes.
+
+- **Batch axis correspondence is positional, not by axis count.** The interpreter validates that for every axis 0..r-3, `aType.dims[axis] == bType.dims[axis]`. Failing this throws `IllegalArgumentException` with the full mismatched dims for diagnosis. There's no broadcasting of batch axes — the canonical shape is exact.
+
+- **No tracer-side `bmm` operator yet.** The §0.4.122 deferred entry listed "emitter + synthesis" as the gap; this session closes the substrate side. Adding a `Tracer<Rank3<…>>.bmm` (or equivalent) to autograd is a separate concern that would also touch `MatmulRule`'s gradient logic — for batched matmul, the gradient involves batched TRANSPOSE + batched MATMUL chains, which the §0.4.132 surrounding work doesn't fully prepare. Hold for a use case.
+
+- **`batchSize == 1` vs `rank == 2` short-circuit.** The interpreter's `if (r == 2) 1 else …` keeps the rank-2 fast path semantically identical to the pre-§0.4.135 code. For rank-3 with `B = 1` (synthetic batch-of-one), the result agrees numerically with the rank-2 reference (pinned by `batchedMatmulAgreesWithRank2OnBatchSizeOne`). This makes the rank-2 path a special case of the general loop, not a separate branch — easier to reason about than parallel implementations.
+
+- **Round-trip pin against `stablehlo-translate` confirms MLIR validity.** The emitted MLIR for rank-3 batched is `stablehlo.dot_general %0, %1, batching_dims = [0] x [0], contracting_dims = [2] x [1] : (...)`. The bundled translator parses + lowers this without error — the canonical batched-matmul attrs are the right MLIR shape.
+
+- **No new `OpKind` and no new attrs.** The MATMUL op carries the same operands and types; the rank determines the lowered dim-numbers. Attrs-driven path (lhs/rhs_contracting/batching_dims) stays for explicit-control cases. No public API surface beyond the now-accepted higher-rank shapes.
+
+**Tests added** (+7 new):
+
+In [DxirInterpreterTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirInterpreterTest.kt) (interpreter side, +4):
+
+- `DxirInterpreterTest.batchedRank3MatmulComputesPerBatchSlices` — `(2,2,3) × (2,3,2) → (2,2,2)`. Pin: each batch's slice is computed independently with the standard matmul math; full output `[4,5,10,11, 3,3,6,6]` matched.
+- `DxirInterpreterTest.batchedMatmulAgreesWithRank2OnBatchSizeOne` — `(1,2,3) × (1,3,2)` agrees with `(2,3) × (3,2)` for the same backing data. Pin: rank-3 with B=1 ≡ rank-2.
+- `DxirInterpreterTest.batchedMatmulRejectsInnerDimMismatch` — `(B,M,K) × (B,K',N)` with `K ≠ K'`. Pin: throws `IllegalArgumentException`.
+- `DxirInterpreterTest.batchedMatmulRejectsBatchAxisMismatch` — `(B,M,K) × (B',K,N)` with `B ≠ B'`. Pin: throws.
+
+In [EmitterTest.kt](stablehlo/src/commonTest/kotlin/io/tlaloc/stablehlo/EmitterTest.kt) (emitter string-inspection, +2):
+
+- `EmitterTest.matmulRank3WithoutAttrsLowersAsBatchedDotGeneral` — `(2,2,3) × (2,3,4)`. Pin: emitted MLIR contains `batching_dims = [0] x [0], contracting_dims = [2] x [1]`.
+- `EmitterTest.matmulRank4WithoutAttrsLowersAsTwoBatchAxesDotGeneral` — `(3,2,2,5) × (3,2,5,4)`. Pin: emitted MLIR contains `batching_dims = [0, 1] x [0, 1], contracting_dims = [3] x [2]`.
+
+In [RoundTripTest.kt](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) (real-translator validation, +1):
+
+- `RoundTripTest.matmulRank3BatchedNoAttrsRoundTrips` — same shape as the EmitterTest's rank-3 case, validated through the bundled `stablehlo-translate`. Pin: the emitted batched dot_general parses + lowers correctly.
+
+Full suite is green: **811 tests** (+7 over §0.4.134).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending. Highest-impact remaining item; would unblock end-to-end gradient pins for §0.4.128's LoopInvariant rewrite.
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+3. **Multi-result COARSENED**.
+4. **Tracer-surface `bmm` + batched MatmulRule** — the natural follow-on to §0.4.135 if a use case surfaces.
+5. **`:benchmarks` Gradle module**.
+
+**Definition-of-done for §0.4.135 — met**:
+- `DxirInterpreter` MATMUL accepts rank ≥ 2 with canonical batched shape ✓
+- `Emitter` no-attrs MATMUL path infers batching dims from operand rank ✓
+- 4 interpreter tests pin rank-3 forward semantics + rank-2 agreement + two rejection paths ✓
+- 2 emitter string-inspection tests pin the rank-3 + rank-4 dot_general shape ✓
+- 1 round-trip test confirms the rank-3 MLIR validates through `stablehlo-translate` ✓
+- No `OpKind`, attrs, or public API surface added ✓
+- Tracer surface + `MatmulRule` stay rank-2 (deferred to use-case-driven follow-on) ✓
+- Full suite stays green at 811 tests (+7) ✓
+
 #### 0.4.134 `valueAndGrad3` / `grad3` Tracer surface for 3-tensor scalar functions 2026-04-25
 
 §0.4.122's deferred-register listed `valueAndGrad3` / `grad3` as "gated on a 3-tensor user". The user-facing pattern keeps surfacing in test code that wires up three differentiable inputs through a workaround (manually building one input as a Triple, or routing through `valueAndGrad2` with a paired tensor) — so this session ships the natural 3-tensor extension. Mechanics mirror §0.4.81's `valueAndGrad2` exactly: trace each input as a tape leaf, evaluate the lambda, require a scalar output, run reverse mode with seed `1f`, and unpack the gradients per leaf. Kotlin's stdlib stops at [Triple], so a small generic [Quadruple] data class lands alongside.

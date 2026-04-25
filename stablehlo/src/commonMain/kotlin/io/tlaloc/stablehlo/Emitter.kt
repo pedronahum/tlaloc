@@ -704,13 +704,28 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         ).any { it in node.attrs }
 
         if (!explicit) {
-            // Default rank-2 path (pre-axis-aware behavior).
-            require(aType.rank == 2 && bType.rank == 2) {
-                "MATMUL without batching/contracting attrs requires rank-2 inputs; got ${aType.dims} x ${bType.dims}. " +
-                    "For higher ranks, supply lhs_contracting_dims / rhs_contracting_dims (and optional *_batching_dims)."
+            // §0.4.135 — canonical batched MATMUL convention: all leading axes are
+            // batching dims, and the last two are the M/K (lhs) / K/N (rhs) slot.
+            // Rank-2 falls through with no batching dims (the original path).
+            // Rank-3+ infers `batching_dims = [0..r-3]`, `contracting_dims = [r-1] x [r-2]`.
+            require(aType.rank >= 2 && bType.rank >= 2) {
+                "MATMUL without batching/contracting attrs requires rank ≥ 2 inputs; got ${aType.dims} x ${bType.dims}."
+            }
+            require(aType.rank == bType.rank) {
+                "MATMUL without batching/contracting attrs requires matching ranks for canonical " +
+                    "batched matmul; got ${aType.dims} x ${bType.dims}. For mixed ranks, supply " +
+                    "lhs_contracting_dims / rhs_contracting_dims explicitly."
+            }
+            val r = aType.rank
+            val batchPart = if (r == 2) {
+                ""
+            } else {
+                val batchDims = (0 until r - 2).joinToString(", ")
+                "batching_dims = [$batchDims] x [$batchDims], "
             }
             out.appendLine(
-                "$step$name = stablehlo.dot_general $a, $b, contracting_dims = [1] x [0] " +
+                "$step$name = stablehlo.dot_general $a, $b, ${batchPart}" +
+                    "contracting_dims = [${r - 1}] x [${r - 2}] " +
                     ": (${aType.toMlir()}, ${bType.toMlir()}) -> ${outType.toMlir()}",
             )
             return

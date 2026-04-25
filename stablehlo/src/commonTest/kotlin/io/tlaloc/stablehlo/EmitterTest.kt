@@ -181,6 +181,50 @@ class EmitterTest {
         )
     }
 
+    // §0.4.135 — no-attrs MATMUL with rank ≥ 3 follows the canonical batched
+    // matmul convention: leading axes are batching dims, last two are M/K vs K/N.
+
+    @Test
+    fun matmulRank3WithoutAttrsLowersAsBatchedDotGeneral() {
+        // (2, 2, 3) × (2, 3, 4) → (2, 2, 4): single batch axis [0], contracting [2] x [1].
+        val fn = DxirBuilder.function("bmm") {
+            val a = param("a", DxirType(F32, listOf(2, 2, 3)))
+            val b = param("b", DxirType(F32, listOf(2, 3, 4)))
+            val c = op(OpKind.MATMUL, listOf(a, b), DxirType(F32, listOf(2, 2, 4)))
+            listOf(c)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains(
+                "stablehlo.dot_general %0, %1, batching_dims = [0] x [0], contracting_dims = [2] x [1]",
+            ),
+            "expected canonical rank-3 batched dot_general; got: $mlir",
+        )
+        assertTrue(
+            mlir.contains("(tensor<2x2x3xf32>, tensor<2x3x4xf32>) -> tensor<2x2x4xf32>"),
+            mlir,
+        )
+    }
+
+    @Test
+    fun matmulRank4WithoutAttrsLowersAsTwoBatchAxesDotGeneral() {
+        // (3, 2, 2, 5) × (3, 2, 5, 4) → (3, 2, 2, 4): two batch axes [0, 1],
+        // contracting [3] x [2].
+        val fn = DxirBuilder.function("bmm4") {
+            val a = param("a", DxirType(F32, listOf(3, 2, 2, 5)))
+            val b = param("b", DxirType(F32, listOf(3, 2, 5, 4)))
+            val c = op(OpKind.MATMUL, listOf(a, b), DxirType(F32, listOf(3, 2, 2, 4)))
+            listOf(c)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains(
+                "stablehlo.dot_general %0, %1, batching_dims = [0, 1] x [0, 1], contracting_dims = [3] x [2]",
+            ),
+            "expected canonical rank-4 batched dot_general; got: $mlir",
+        )
+    }
+
     @Test
     fun moduleWrapsAllFunctions() {
         val fn1 = DxirBuilder.function("a") {
