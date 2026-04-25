@@ -241,6 +241,168 @@ class GatherTest {
         }
     }
 
+    // --- §0.4.111: rank-2 GATHER (row-indexing) -----------------------------
+
+    private val rank2_3x4 = DxirType(F32, listOf(3, 4))
+
+    @Test
+    fun rank2GatherReadsRowFromMatrix() {
+        // arr is a 3x4 matrix [[10..13], [20..23], [30..33]]. idx=1 picks the
+        // middle row → [20, 21, 22, 23].
+        val fn = DxirBuilder.function("rowGather") {
+            val arr = param("arr", rank2_3x4)
+            val idx = param("idx", i32s)
+            val g = op(OpKind.GATHER, listOf(arr, idx), DxirType(F32, listOf(4)))
+            listOf(g)
+        }
+        val out = DxirInterpreter.evalFunction(
+            fn,
+            listOf(
+                floatArrayOf(10f, 11f, 12f, 13f, 20f, 21f, 22f, 23f, 30f, 31f, 32f, 33f),
+                floatArrayOf(1f),
+            ),
+        )
+        assertEquals(1, out.size)
+        assertEquals(4, out[0].size)
+        assertEquals(floatArrayOf(20f, 21f, 22f, 23f).toList(), out[0].toList())
+    }
+
+    @Test
+    fun rank2GatherFirstAndLastRowsRoundTrip() {
+        // Boundary check: idx=0 and idx=N-1 both work. Pre-fix this would have
+        // failed the `arrType.rank == 1` precondition.
+        val fn = DxirBuilder.function("rowGatherBounds") {
+            val arr = param("arr", rank2_3x4)
+            val idx = param("idx", i32s)
+            val g = op(OpKind.GATHER, listOf(arr, idx), DxirType(F32, listOf(4)))
+            listOf(g)
+        }
+        val backing = floatArrayOf(
+            10f, 11f, 12f, 13f,
+            20f, 21f, 22f, 23f,
+            30f, 31f, 32f, 33f,
+        )
+        val firstRow = DxirInterpreter.evalFunction(fn, listOf(backing, floatArrayOf(0f)))
+        assertEquals(floatArrayOf(10f, 11f, 12f, 13f).toList(), firstRow[0].toList())
+        val lastRow = DxirInterpreter.evalFunction(fn, listOf(backing, floatArrayOf(2f)))
+        assertEquals(floatArrayOf(30f, 31f, 32f, 33f).toList(), lastRow[0].toList())
+    }
+
+    @Test
+    fun rank2GatherOutOfBoundsIsFailLoud() {
+        val fn = DxirBuilder.function("rowGather") {
+            val arr = param("arr", rank2_3x4)
+            val idx = param("idx", i32s)
+            val g = op(OpKind.GATHER, listOf(arr, idx), DxirType(F32, listOf(4)))
+            listOf(g)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DxirInterpreter.evalFunction(
+                fn,
+                listOf(FloatArray(12), floatArrayOf(7f)),
+            )
+        }
+    }
+
+    @Test
+    fun gradientOfRank2GatherIsOneHotRow() {
+        // f(arr, idx) = sum(arr[idx, :]). The gradient wrt arr is a 3x4 matrix
+        // whose row [idx] is all ones, others zero. Pin the GatherRule + rank-2
+        // SCATTER_ADD interpreter path together.
+        val rank1_4 = DxirType(F32, listOf(4))
+        val primal = DxirBuilder.function("rowSum") {
+            val arr = param("arr", rank2_3x4)
+            val idx = param("idx", i32s)
+            val row = op(OpKind.GATHER, listOf(arr, idx), rank1_4)
+            val s = op(OpKind.SUM, listOf(row), f32s)
+            listOf(s)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        // idx=1: expect grad_arr to have row 1 = [1,1,1,1], others 0.
+        val out = DxirInterpreter.evalFunction(
+            grad,
+            listOf(FloatArray(12), floatArrayOf(1f)),
+        )
+        val expected = floatArrayOf(
+            0f, 0f, 0f, 0f,
+            1f, 1f, 1f, 1f,
+            0f, 0f, 0f, 0f,
+        )
+        assertEquals(expected.toList(), out[0].toList())
+    }
+
+    @Test
+    fun gradientOfTwoRank2GathersAccumulatesPerRow() {
+        // f(arr, i0, i1) = sum(arr[i0, :]) + sum(arr[i1, :]). For distinct
+        // indices, two rows of grad_arr go to all ones; for matching indices,
+        // one row goes to all twos (gradAccum's outer ADD).
+        val rank1_4 = DxirType(F32, listOf(4))
+        val primal = DxirBuilder.function("twoRowSum") {
+            val arr = param("arr", rank2_3x4)
+            val i0 = param("i0", i32s)
+            val i1 = param("i1", i32s)
+            val r0 = op(OpKind.GATHER, listOf(arr, i0), rank1_4)
+            val r1 = op(OpKind.GATHER, listOf(arr, i1), rank1_4)
+            val s0 = op(OpKind.SUM, listOf(r0), f32s)
+            val s1 = op(OpKind.SUM, listOf(r1), f32s)
+            val total = op(OpKind.ADD, listOf(s0, s1), f32s)
+            listOf(total)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+
+        val distinct = DxirInterpreter.evalFunction(
+            grad,
+            listOf(FloatArray(12), floatArrayOf(0f), floatArrayOf(2f)),
+        )
+        val expectedDistinct = floatArrayOf(
+            1f, 1f, 1f, 1f,
+            0f, 0f, 0f, 0f,
+            1f, 1f, 1f, 1f,
+        )
+        assertEquals(expectedDistinct.toList(), distinct[0].toList())
+
+        val same = DxirInterpreter.evalFunction(
+            grad,
+            listOf(FloatArray(12), floatArrayOf(1f), floatArrayOf(1f)),
+        )
+        val expectedSame = floatArrayOf(
+            0f, 0f, 0f, 0f,
+            2f, 2f, 2f, 2f,
+            0f, 0f, 0f, 0f,
+        )
+        assertEquals(expectedSame.toList(), same[0].toList())
+    }
+
+    @Test
+    fun gradientOfScaledRank2GatherScalesEachOneHotElement() {
+        // f(arr, idx) = sum(arr[idx, :]) * 5. Gradient row should be [5,5,5,5]
+        // at idx, others zero. Exercises chain rule MulRule ∘ GatherRule on the
+        // rank-2 path.
+        val rank1_4 = DxirType(F32, listOf(4))
+        val primal = DxirBuilder.function("scaledRowSum") {
+            val arr = param("arr", rank2_3x4)
+            val idx = param("idx", i32s)
+            val five = const(5.0f, f32s)
+            val row = op(OpKind.GATHER, listOf(arr, idx), rank1_4)
+            val s = op(OpKind.SUM, listOf(row), f32s)
+            val out = op(OpKind.MUL, listOf(s, five), f32s)
+            listOf(out)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        val out = DxirInterpreter.evalFunction(
+            grad,
+            listOf(FloatArray(12), floatArrayOf(2f)),
+        )
+        val expected = floatArrayOf(
+            0f, 0f, 0f, 0f,
+            0f, 0f, 0f, 0f,
+            5f, 5f, 5f, 5f,
+        )
+        assertEquals(expected.toList(), out[0].toList())
+    }
+
+    // --- §0.4.41 helpers (rank-1 path) --------------------------------------
+
     @Test
     fun gradientOfGatherSquaredMatchesChainRule() {
         // f(arr, idx) = arr[idx]^2.  d/d(arr) = 2·arr[idx] · one-hot at idx.

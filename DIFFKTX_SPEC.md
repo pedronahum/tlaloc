@@ -39,6 +39,50 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.111 Rank-2 GATHER read path (row indexing) 2026-04-25
+
+§0.4.108's deferred-table line "**Tensor ops | Multi-dim GATHER/SCATTER** — Rank-1 covered §0.4.41–§0.4.42; rank-N+ pending" gets its first dent. This session lands the rank-2 read path: `GATHER(arr: rank-2 [M, N], idx: scalar I32) → rank-1 [N]` (row indexing) plus the matching gradient `SCATTER_ADD(base: rank-2 [M, N], idx: scalar I32, value: rank-1 [N]) → rank-2 [M, N]`. SCATTER (the user write path) and StableHLO emitter coverage are deliberately deferred to follow-up phases per §0.4.110's recommended-next note.
+
+**The mechanism**:
+
+- [DxirInterpreter.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt). The GATHER arm now branches on `arrType.rank`: rank-1 keeps the original `floatArrayOf(arr[i])` path; rank-2 reads row-major offset `i*cols .. i*cols+cols-1` into a fresh `FloatArray(cols)`. The SCATTER_ADD arm follows the same shape: rank-1 base + scalar value (existing) or rank-2 base + rank-1 value (new), where the value is added element-wise into the indexed row.
+- [Vjp.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt). `GatherRule` already constructed its zero-tensor and SCATTER_ADD using `arr.type` directly, so the structural shape generalises automatically — no algorithmic change needed. The session updates the rule's KDoc to document the rank-2 path and renames the misleading local `zeroRank1` to `zeroBase` (it was always whatever rank `arr` had).
+
+**Decisions worth flagging**:
+
+- **Row-indexing semantics, not stablehlo-style multi-dim gather.** A scalar I32 `idx` selects a single row; the result is `[N]`, not a sub-tensor with arbitrary slice sizes. This matches the mental model of `arr[i]` on a 2D matrix in user code (returning a 1D row) and keeps the substrate narrow enough to ship in one session. General multi-axis gather with `start_indices` tensor + `slice_sizes` per-axis remains deferred; no benchmark needs it today.
+- **SCATTER (user write path) intentionally not extended.** §0.4.110's note carved this out: "Multi-dim GATHER read side — extend §0.4.41's rank-1 GATHER to rank-N, separating the read path from SCATTER (which can ship in a follow-up)." The interpreter's `OpKind.SCATTER` arm still requires rank-1 base. SCATTER_ADD is extended because GatherRule's gradient path emits it; SCATTER is the user-side `arr[i] = v` write surface and has no FIR call site for rank-2 yet.
+- **No StableHLO emitter or DxirToIrSynthesis changes.** Those are the next two layers a rank-2 GATHER would need to traverse to reach a user's compiled program. Landing them in the same session would either introduce placeholders (stub MLIR generation) or balloon the diff. Each layer gets its own follow-up session.
+- **No Tracer surface change.** The autograd Tracer's `arr[i]` lowering doesn't emit rank-2 GATHER yet; that's a FIR-side piece that gates on multi-axis indexing surface decisions outside this scope. The substrate is now ready for it whenever a user surface lands.
+- **`expectedValueRank = baseType.rank - 1`.** SCATTER_ADD's value rank is always one less than the base's rank (a slice of one axis at a time). This is a clean invariant the new branch captures via a single `require`.
+
+**Tests added** (+6 new) in [GatherTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/GatherTest.kt):
+
+- `GatherTest.rank2GatherReadsRowFromMatrix` — 3×4 matrix; idx=1 picks middle row [20, 21, 22, 23]. Forward correctness pin.
+- `GatherTest.rank2GatherFirstAndLastRowsRoundTrip` — boundary pin: idx=0 and idx=N-1 both produce the right row.
+- `GatherTest.rank2GatherOutOfBoundsIsFailLoud` — idx=7 on a 3-row matrix raises `IllegalArgumentException`.
+- `GatherTest.gradientOfRank2GatherIsOneHotRow` — `f(arr) = sum(arr[idx, :])` produces a 3×4 grad with row [idx] = [1,1,1,1] and others zero. Pins GatherRule + rank-2 SCATTER_ADD interpreter integration.
+- `GatherTest.gradientOfTwoRank2GathersAccumulatesPerRow` — distinct indices produce two rows of 1s; matching indices produce one row of 2s. Pins gradAccum's outer-ADD accumulation.
+- `GatherTest.gradientOfScaledRank2GatherScalesEachOneHotElement` — `5 * sum(arr[idx, :])` produces a row of 5s. Pins MulRule ∘ GatherRule chain rule on the rank-2 path.
+
+Full suite is green: **719 tests** (+6 over §0.4.110).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Rank-2 GATHER follow-up A: StableHLO emitter** — lower rank-2 GATHER + SCATTER_ADD to MLIR. Allows rank-2 substrate to flow through to compiled IR.
+2. **Rank-2 GATHER follow-up B: SCATTER write path** — extend the user-side write path (`arr[i] = v`) to rank-2 in DxirInterpreter. The structural mirror of GATHER.
+3. **Cross-rank broadcasting at synthesis surface** — generalise §0.4.84's reverse-side BROADCAST handling to `DxirToIrSynthesis`; medium-impact IR-side piece.
+4. **D.3i Phase 1 (LAND-composed break-bearing WHILE)** — open the multi-session arc with a scaffolding phase analogous to §0.4.103.
+
+**Definition-of-done for §0.4.111 — met**:
+- DxirInterpreter GATHER accepts `arr: rank-1 | rank-2` with scalar I32 idx ✓
+- DxirInterpreter SCATTER_ADD accepts `(rank-1 base + scalar value)` or `(rank-2 base + rank-1 value)` ✓
+- GatherRule's existing structural shape works for rank-2 without changes; KDoc + local rename document the generalisation ✓
+- Six tests pin forward, boundaries, gradient, accumulation, chain-rule on the rank-2 path ✓
+- Existing 8 rank-1 GATHER tests stay green; no regression ✓
+- No new public API beyond accepting an additional shape on existing op kinds ✓
+- Full suite stays green at 719 tests (+6) ✓
+
 #### 0.4.110 `Long` literal LHS/RHS broadcast overloads 2026-04-25
 
 §0.4.108's deferred-table closing line ("Smaller items still in the table that could fire individually under a /loop cadence: ... `Long` literal broadcast overloads") drove this pickup. Float / Double / Int LHS+RHS broadcast operators landed in §0.4.75 / §0.4.93 / §0.4.95. Only `Long` was missing — users with literals naturally typed `Long` (config-driven counts, durations from `Duration.toMillis()`) had to write `.toFloat()` casts at every call site. This session lands the eight remaining overloads.

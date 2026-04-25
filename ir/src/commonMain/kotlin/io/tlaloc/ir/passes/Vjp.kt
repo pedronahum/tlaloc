@@ -461,11 +461,16 @@ object VjpRegistry {
     /**
      * §0.4.41 — d(arr[idx])/d(arr) is a one-hot vector at slot [idx] with value 1;
      * scaled by [upstream], the adjoint is `SCATTER(zeros_like(arr), idx, upstream)`.
+     * §0.4.111 — same shape generalises to rank-2 `arr`: d(arr[idx, :])/d(arr) is a
+     * matrix of zeros with row [idx] equal to `upstream` (rank-1). The structural
+     * BROADCAST → SCATTER_ADD chain works unchanged because every operand's type
+     * is derived from `arr.type` or `upstream`'s type.
+     *
      * The scalar `idx` operand is non-differentiable (Int), so no contribution
      * flows back to it.
      *
      * The adjoint is emitted as two ops: `BROADCAST(const(0), arr.type)` produces a
-     * rank-1 zero vector matching the primal array's shape, then `SCATTER` places
+     * zero tensor matching the primal array's shape, then `SCATTER_ADD` places
      * `upstream` at slot `idx`. When the same `arr` is gathered at multiple (or
      * identical) indices across the primal, `gradAccum`'s outer ADD accumulation
      * correctly sums the one-hot contributions elementwise.
@@ -501,7 +506,9 @@ object VjpRegistry {
                 else -> error("GatherRule: unsupported arr dtype ${arr.type.dtype}")
             }
             val zeroScalar = builder.const(zeroScalarValue, scalarDType)
-            val zeroRank1 = builder.op(
+            // §0.4.111 — name reflects the generalised shape: a zero tensor with the
+            // same rank/dims as `arr`, whether rank-1 or rank-2.
+            val zeroBase = builder.op(
                 OpKind.BROADCAST,
                 listOf(zeroScalar),
                 arr.type,
@@ -509,7 +516,7 @@ object VjpRegistry {
             )
             val scatterAdded = builder.op(
                 OpKind.SCATTER_ADD,
-                listOf(zeroRank1, idx, upstream),
+                listOf(zeroBase, idx, upstream),
                 arr.type,
             )
             return listOf(arr to scatterAdded)
