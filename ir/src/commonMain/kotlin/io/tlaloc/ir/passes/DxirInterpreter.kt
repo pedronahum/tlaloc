@@ -447,36 +447,59 @@ object DxirInterpreter {
                 }
             }
             OpKind.SCATTER -> {
-                // §0.4.41 — narrow S2 shape: SCATTER(base: rank-1, idx: scalar I32, value: scalar) → rank-1.
-                // Non-destructive: returns a copy of `base` with slot [idx] replaced by
-                // `value`. The "into zeros" variant used by GatherRule's adjoint is
-                // expressed as `SCATTER(BROADCAST(const(0), rank1), idx, value)` — one
-                // op kind, composed with BROADCAST at the emit site.
+                // §0.4.41 — original S2 shape: `SCATTER(base: rank-1, idx: scalar I32, value: scalar) → rank-1`.
+                // §0.4.114 — extended to `SCATTER(base: rank-2, idx: scalar I32, value: rank-1) → rank-2`,
+                // replacing row [idx] of `base` with `value`. Non-destructive: both
+                // ranks return a fresh copy. The "into zeros" variant used by
+                // GatherRule's adjoint is expressed as
+                // `SCATTER(BROADCAST(const(0), arr.type), idx, value)` — one op kind,
+                // composed with BROADCAST at the emit site.
                 require(op.operands.size == 3) {
                     "DxirInterpreter: SCATTER requires 3 operands (base, idx, value), got ${op.operands.size}"
                 }
                 val baseType = op.operands[0].type
                 val idxType = op.operands[1].type
                 val valueType = op.operands[2].type
-                require(baseType.rank == 1) {
-                    "DxirInterpreter: SCATTER base must be rank-1, got rank=${baseType.rank}"
+                require(baseType.rank == 1 || baseType.rank == 2) {
+                    "DxirInterpreter: SCATTER base must be rank-1 or rank-2, got rank=${baseType.rank}"
                 }
                 require(idxType.isScalar && idxType.dtype == io.tlaloc.core.I32) {
                     "DxirInterpreter: SCATTER idx must be scalar I32, got $idxType"
                 }
-                require(valueType.isScalar) {
-                    "DxirInterpreter: SCATTER value must be scalar, got $valueType"
+                val expectedValueRank = baseType.rank - 1
+                require(valueType.rank == expectedValueRank) {
+                    "DxirInterpreter: SCATTER value must be rank-${expectedValueRank} for " +
+                        "rank-${baseType.rank} base, got rank=${valueType.rank}"
                 }
                 val base = evalNode(op.operands[0], env, multiResults)
                 val idxArr = evalNode(op.operands[1], env, multiResults)
                 val value = evalNode(op.operands[2], env, multiResults)
                 val i = idxArr[0].toInt()
-                require(i in 0 until base.size) {
-                    "DxirInterpreter: SCATTER idx=$i out of bounds for rank-1 array of size ${base.size}"
+                when (baseType.rank) {
+                    1 -> {
+                        require(i in 0 until base.size) {
+                            "DxirInterpreter: SCATTER idx=$i out of bounds for rank-1 array of size ${base.size}"
+                        }
+                        val out = base.copyOf()
+                        out[i] = value[0]
+                        out
+                    }
+                    else -> {
+                        val rows = baseType.dims[0]
+                        val cols = baseType.dims[1]
+                        require(i in 0 until rows) {
+                            "DxirInterpreter: SCATTER idx=$i out of bounds for rank-2 array of shape " +
+                                "[$rows, $cols]"
+                        }
+                        require(value.size == cols) {
+                            "DxirInterpreter: SCATTER value size ${value.size} doesn't match base column " +
+                                "count $cols"
+                        }
+                        val out = base.copyOf()
+                        for (c in 0 until cols) out[i * cols + c] = value[c]
+                        out
+                    }
                 }
-                val out = base.copyOf()
-                out[i] = value[0]
-                out
             }
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)

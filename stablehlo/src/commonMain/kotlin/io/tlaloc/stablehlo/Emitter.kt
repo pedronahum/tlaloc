@@ -797,6 +797,24 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         indicesType: DxirType,
         updatesType: DxirType,
     ) {
+        // §0.4.114 — substrate-shape detection. The autograd-emitted SCATTER (§0.4.41,
+        // §0.4.114) carries scalar I32 idx + no attrs and means `arr[idx] = v` (rank-1)
+        // or `arr[idx, :] = row` (rank-2). Synthesize the canonical stablehlo.scatter
+        // attrs for those shapes; the general attr-driven path handles everything else.
+        val isSubstrateShape = "scatter_dims_to_operand_dims" !in node.attrs &&
+            indicesType.isScalar &&
+            indicesType.dtype == I32
+        if (isSubstrateShape) {
+            emitSubstrateScatter(
+                step, name, operand, scatterIndices, updates,
+                operandType = operandType,
+                indicesType = indicesType,
+                updatesType = updatesType,
+                outType = node.type,
+            )
+            return
+        }
+
         @Suppress("UNCHECKED_CAST")
         val updateWindowDims = (node.attrs["update_window_dims"] as? List<Int>) ?: emptyList()
         @Suppress("UNCHECKED_CAST")
@@ -951,6 +969,75 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine("$step   stablehlo.return $sum : $scalarT")
         out.appendLine(
             "$step }) : (${baseType.toMlir()}, ${idxType.toMlir()}, ${valueType.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * §0.4.114 — lowering for the autograd-emitted [OpKind.SCATTER] substrate shape
+     * (`base[idx] = value`, no attrs). Two operand-rank slices are supported,
+     * matching the [DxirInterpreter] arms shipped in §0.4.41 + §0.4.114:
+     *
+     *  - rank-1 base + scalar idx + scalar value → rank-1 result.
+     *  - rank-2 base + scalar idx + rank-1 [N] value → rank-2 [M, N] result (replaces
+     *    row [idx]).
+     *
+     * Same dimension-numbers shape as [emitScatterAdd]; the only difference is the
+     * body computation: SCATTER returns `upd` directly (replace semantics), whereas
+     * SCATTER_ADD adds `cur + upd`.
+     */
+    private fun emitSubstrateScatter(
+        step: String,
+        name: String,
+        base: String,
+        idx: String,
+        value: String,
+        operandType: DxirType,
+        indicesType: DxirType,
+        updatesType: DxirType,
+        outType: DxirType,
+    ) {
+        require(operandType.rank == 1 || operandType.rank == 2) {
+            "substrate SCATTER base must be rank-1 or rank-2; got rank=${operandType.rank}"
+        }
+        require(indicesType.isScalar && indicesType.dtype == I32) {
+            "substrate SCATTER idx must be scalar I32; got $indicesType"
+        }
+        val expectedValueRank = operandType.rank - 1
+        require(updatesType.rank == expectedValueRank) {
+            "substrate SCATTER value must be rank-$expectedValueRank for rank-${operandType.rank} base; got rank=${updatesType.rank}"
+        }
+        require(outType.dims == operandType.dims) {
+            "substrate SCATTER result shape ${outType.dims} must match base shape ${operandType.dims}"
+        }
+
+        val scalarT = "tensor<${mlirElementType(operandType.dtype)}>"
+
+        val updateWindowDims = when (operandType.rank) {
+            1 -> emptyList()
+            else -> listOf(0)
+        }
+        val dimNumbers = buildString {
+            append("#stablehlo.scatter<")
+            val parts = mutableListOf<String>()
+            if (updateWindowDims.isNotEmpty()) {
+                parts += "update_window_dims = [${updateWindowDims.joinToString(", ")}]"
+            }
+            parts += "inserted_window_dims = [0]"
+            parts += "scatter_dims_to_operand_dims = [0]"
+            parts += "index_vector_dim = 0"
+            append(parts.joinToString(", "))
+            append(">")
+        }
+
+        val cur = synth(); val upd = synth()
+        out.appendLine(
+            """$step$name = "stablehlo.scatter"($base, $idx, $value) <{scatter_dimension_numbers = $dimNumbers, unique_indices = true}> ({""",
+        )
+        out.appendLine("$step ^bb0($cur: $scalarT, $upd: $scalarT):")
+        // Replace semantics: return the update value, ignoring the current value.
+        out.appendLine("$step   stablehlo.return $upd : $scalarT")
+        out.appendLine(
+            "$step }) : (${operandType.toMlir()}, ${indicesType.toMlir()}, ${updatesType.toMlir()}) -> ${outType.toMlir()}",
         )
     }
 

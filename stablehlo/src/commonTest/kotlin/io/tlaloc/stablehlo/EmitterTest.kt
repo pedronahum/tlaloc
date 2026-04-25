@@ -808,6 +808,75 @@ class EmitterTest {
         assertTrue(mlir.contains("stablehlo.add"), mlir)
     }
 
+    // §0.4.114 — substrate-shape SCATTER lowering (no attrs, scalar I32 idx).
+
+    @Test
+    fun substrateScatterRank1EmitsReplaceBody() {
+        // `base: tensor<4xf32>, idx: tensor<i32>, v: tensor<f32>` → tensor<4xf32>.
+        // Replace semantics: body returns `upd` directly (no add).
+        val fn = DxirBuilder.function("s") {
+            val base = param("b", DxirType(F32, listOf(4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, emptyList()))
+            val y = op(OpKind.SCATTER, listOf(base, idx, v), DxirType(F32, listOf(4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("\"stablehlo.scatter\""), mlir)
+        assertTrue(mlir.contains("inserted_window_dims = [0]"), mlir)
+        assertTrue(mlir.contains("scatter_dims_to_operand_dims = [0]"), mlir)
+        assertTrue(mlir.contains("index_vector_dim = 0"), mlir)
+        assertTrue(!mlir.contains("update_window_dims"), "rank-1 should have no update_window_dims: $mlir")
+        // Replace body has no `stablehlo.add` — just `stablehlo.return`.
+        assertTrue(!mlir.contains("stablehlo.add"), "replace body must not contain add: $mlir")
+        assertTrue(mlir.contains("stablehlo.return"), mlir)
+    }
+
+    @Test
+    fun substrateScatterRank2EmitsRowReplaceShape() {
+        // `base: tensor<3x4xf32>, idx: tensor<i32>, v: tensor<4xf32>` → tensor<3x4xf32>.
+        val fn = DxirBuilder.function("s") {
+            val base = param("b", DxirType(F32, listOf(3, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, listOf(4)))
+            val y = op(OpKind.SCATTER, listOf(base, idx, v), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("update_window_dims = [0]"), mlir)
+        assertTrue(mlir.contains("inserted_window_dims = [0]"), mlir)
+        assertTrue(!mlir.contains("stablehlo.add"), "replace body must not contain add: $mlir")
+        assertTrue(
+            mlir.contains("(tensor<3x4xf32>, tensor<i32>, tensor<4xf32>) -> tensor<3x4xf32>"),
+            "expected scatter type signature for rank-2 substrate: $mlir",
+        )
+    }
+
+    @Test
+    fun generalScatterStillRoutesThroughAttrPath() {
+        // The substrate-shape detection only fires when there's no `scatter_dims_to_operand_dims`
+        // attr. A SCATTER with explicit attrs (the canonical multi-dim form) still routes
+        // through the original attr-driven path.
+        val fn = DxirBuilder.function("s") {
+            val operand = param("o", DxirType(F32, listOf(3)))
+            val idx = param("i", DxirType(io.tlaloc.core.I64, listOf(3, 1)))
+            val upd = param("u", DxirType(F32, listOf(3)))
+            val y = op(
+                OpKind.SCATTER, listOf(operand, idx, upd), DxirType(F32, listOf(3)),
+                attrs = mapOf(
+                    "inserted_window_dims" to listOf(0),
+                    "scatter_dims_to_operand_dims" to listOf(0),
+                    "index_vector_dim" to 1,
+                    "reduction" to "min",
+                ),
+            )
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        // The `min` reduction body fires (substrate would have been `replace`).
+        assertTrue(mlir.contains("stablehlo.minimum"), mlir)
+    }
+
     // §0.4.113 — substrate-shape GATHER lowering (no attrs, scalar I32 idx).
 
     @Test

@@ -401,6 +401,83 @@ class GatherTest {
         assertEquals(expected.toList(), out[0].toList())
     }
 
+    // --- §0.4.114: rank-2 SCATTER (row-replace user write path) -------------
+
+    @Test
+    fun rank2ScatterReplacesRowNonDestructively() {
+        // Replace row 1 of a 3x4 matrix with [99, 99, 99, 99]; other rows unchanged.
+        val rank1_4 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("rowScatter") {
+            val base = param("b", rank2_3x4)
+            val idx = param("i", i32s)
+            val v = param("v", rank1_4)
+            val s = op(OpKind.SCATTER, listOf(base, idx, v), rank2_3x4)
+            listOf(s)
+        }
+        val backing = floatArrayOf(
+            10f, 11f, 12f, 13f,
+            20f, 21f, 22f, 23f,
+            30f, 31f, 32f, 33f,
+        )
+        val out = DxirInterpreter.evalFunction(
+            fn,
+            listOf(backing, floatArrayOf(1f), floatArrayOf(99f, 99f, 99f, 99f)),
+        )
+        val expected = floatArrayOf(
+            10f, 11f, 12f, 13f,
+            99f, 99f, 99f, 99f,
+            30f, 31f, 32f, 33f,
+        )
+        assertEquals(expected.toList(), out[0].toList())
+    }
+
+    @Test
+    fun rank2ScatterFirstAndLastRowsRoundTrip() {
+        val rank1_4 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("rowScatter") {
+            val base = param("b", rank2_3x4)
+            val idx = param("i", i32s)
+            val v = param("v", rank1_4)
+            val s = op(OpKind.SCATTER, listOf(base, idx, v), rank2_3x4)
+            listOf(s)
+        }
+        val backing = FloatArray(12) // all zeros
+        val newRow = floatArrayOf(1f, 2f, 3f, 4f)
+
+        val firstReplaced = DxirInterpreter.evalFunction(
+            fn, listOf(backing, floatArrayOf(0f), newRow),
+        )
+        assertEquals(
+            floatArrayOf(1f, 2f, 3f, 4f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f).toList(),
+            firstReplaced[0].toList(),
+        )
+        val lastReplaced = DxirInterpreter.evalFunction(
+            fn, listOf(backing, floatArrayOf(2f), newRow),
+        )
+        assertEquals(
+            floatArrayOf(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 1f, 2f, 3f, 4f).toList(),
+            lastReplaced[0].toList(),
+        )
+    }
+
+    @Test
+    fun rank2ScatterOutOfBoundsIsFailLoud() {
+        val rank1_4 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("rowScatter") {
+            val base = param("b", rank2_3x4)
+            val idx = param("i", i32s)
+            val v = param("v", rank1_4)
+            val s = op(OpKind.SCATTER, listOf(base, idx, v), rank2_3x4)
+            listOf(s)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DxirInterpreter.evalFunction(
+                fn,
+                listOf(FloatArray(12), floatArrayOf(7f), floatArrayOf(0f, 0f, 0f, 0f)),
+            )
+        }
+    }
+
     // --- §0.4.41 helpers (rank-1 path) --------------------------------------
 
     @Test

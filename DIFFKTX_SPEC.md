@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.114 Rank-2 SCATTER user write path (row-replace) end-to-end 2026-04-25
+
+§0.4.111 added rank-2 GATHER (read row), §0.4.112 added SCATTER_ADD's StableHLO arm, §0.4.113 added substrate-shape GATHER's StableHLO arm. This session closes the symmetric gap on the SCATTER (user-write) side: rank-2 row-replace works end-to-end, both at the IR substrate (`DxirInterpreter`) and at the StableHLO emitter.
+
+**Two coordinated changes**:
+
+- [DxirInterpreter.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt). The SCATTER arm now branches on `baseType.rank`: rank-1 keeps the original `out[i] = value[0]` slot replace; rank-2 writes the entire row at offset `i*cols .. i*cols+cols-1` from a rank-1 value. The `expectedValueRank = baseType.rank - 1` invariant matches §0.4.111's SCATTER_ADD widening — the value is always one rank below the base.
+- [Emitter.kt](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt). The `emitScatter` dispatch picks up the same substrate-shape detection as §0.4.113's GATHER work: no `scatter_dims_to_operand_dims` attr + scalar I32 idx → route to a new `emitSubstrateScatter` that synthesizes the canonical attrs and emits a `replace`-semantics body (`stablehlo.return %upd` — no `add` for SCATTER, unlike SCATTER_ADD). The general attr-driven path is untouched for the canonical multi-dim form (the §0.4.41-S2 emitter test, the existing `min`/`max`/`mul` reductions).
+
+**Decisions worth flagging**:
+
+- **Row-replace, not arbitrary slice scatter.** A scalar I32 `idx` writes a full row; users who need finer-grained writes need the canonical attr-driven `OpKind.SCATTER`. This matches the mental model of `arr[i] = row` in user code (assigning a 1D row to a 2D matrix) and keeps the substrate narrow enough to ship in one session, paralleling §0.4.111's GATHER scoping.
+
+- **Emitter attribute mirror.** `emitSubstrateScatter` shares the dimension-numbers shape with `emitScatterAdd` from §0.4.112 — the only difference is the body computation: SCATTER returns `upd` directly, SCATTER_ADD returns `cur + upd`. Sharing the dim-number layout means any future widening (e.g., rank-3 base) extends both arms in lockstep.
+
+- **Substrate detection on `scatter_dims_to_operand_dims`.** The general path requires this attr to be present (`intListAttr(node, "scatter_dims_to_operand_dims")` errors otherwise), so its absence is a reliable substrate-shape marker. `emitGather` used `offset_dims` for the same reason; both are required-non-optional attrs in the general lowering.
+
+- **No Tracer surface change yet.** §0.4.108's deferred entry "Forward SCATTER from user code (`arr[i] = v`) — FIR surface piece; no concrete call site" is still pending. The substrate now supports it whenever a FIR-side surface lands. Until then, this work is preparatory for end-to-end user code, not user-facing yet.
+
+- **No new public API.** Both changes are internal: the interpreter's `OpKind.SCATTER` arm is private to `DxirInterpreter`, and `emitSubstrateScatter` is a private method of `StablehloEmitter`. The user-visible surface is unchanged.
+
+**Tests added** (+8 new):
+
+- `GatherTest.rank2ScatterReplacesRowNonDestructively` — replace row 1 of a 3×4 matrix; other rows unchanged.
+- `GatherTest.rank2ScatterFirstAndLastRowsRoundTrip` — boundary pin: idx=0 and idx=N-1 both write the right slot.
+- `GatherTest.rank2ScatterOutOfBoundsIsFailLoud` — idx=7 on a 3-row matrix raises `IllegalArgumentException`.
+- `EmitterTest.substrateScatterRank1EmitsReplaceBody` — rank-1 substrate emits canonical attrs + replace body (no `stablehlo.add`).
+- `EmitterTest.substrateScatterRank2EmitsRowReplaceShape` — rank-2 substrate emits `update_window_dims = [0]` and the right type signature.
+- `EmitterTest.generalScatterStillRoutesThroughAttrPath` — general attr-driven SCATTER (with `min` reduction) bypasses the substrate path; `stablehlo.minimum` survives.
+- `RoundTripTest.substrateScatterRank1SubstrateRoundTrips` — rank-1 substrate validates through `stablehlo-translate`.
+- `RoundTripTest.substrateScatterRank2SubstrateRoundTrips` — rank-2 substrate validates through `stablehlo-translate`.
+
+Full suite is green: **737 tests** (+8 over §0.4.113).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Cross-rank broadcasting at synthesis surface** — generalise §0.4.84's reverse-side BROADCAST handling to `DxirToIrSynthesis`; medium-impact IR-side piece.
+2. **Tracer surface | Rank-3↔rank-1/rank-2 cross-rank broadcast** — extend §0.4.97/98's rank-3-scalar to cross-rank; user-facing API.
+3. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE; carve as scaffolding analogous to §0.4.103.
+4. **Multi-result COARSENED** — extend §0.4.31's single-result COARSENED to multi-result; PhiCalculus piece.
+
+**Definition-of-done for §0.4.114 — met**:
+- DxirInterpreter SCATTER accepts rank-2 base + rank-1 value (row-replace) ✓
+- StableHLO emitter substrate-shape SCATTER lowers both rank-1 and rank-2 with replace body ✓
+- Both substrate forms round-trip through `stablehlo-translate` ✓
+- General attr-driven SCATTER path unchanged; `min` reduction test still green ✓
+- Eight tests pin interpreter forward / boundaries / OOB + emitter shape + round-trip ✓
+- No new public API beyond extending the existing OpKind dispatch ✓
+- Full suite stays green at 737 tests (+8) ✓
+
 #### 0.4.113 StableHLO emitter learns substrate-shape `OpKind.GATHER` 2026-04-25
 
 §0.4.112 added substrate-shape SCATTER_ADD lowering; this is the symmetric read-side piece. Until now, any `DxirFunction` containing the autograd-emitted GATHER (scalar I32 idx + no attrs, the shape produced by §0.4.41 + §0.4.111) hit `intListAttr(node, "offset_dims")` in `emitGather` and crashed with `op GATHER missing int-list attr 'offset_dims'`. The autograd-side path through `DxirToIrSynthesis` to host Kotlin worked, but any compilation that wanted to flow a substrate GATHER through StableHLO was stuck.
