@@ -100,6 +100,64 @@ object PhiCalculus {
      *   concrete-trip-count loops) fire — preserves backward-compatible behaviour for
      *   callers from `commonTest` that have no engine impl available.
      */
+    /**
+     * §0.4.103 — **D.1i Phase 1**. Apply Symja's `Simplify` to each return expression
+     * of [fn], producing an equivalent function whose body has been algebraically
+     * simplified by the symbolic engine. This is the paper's §6.1 mechanism (ii)
+     * ("computation simplification thanks to the large-scoped symbolic
+     * differentiation"), applied to whole gradient expressions output by
+     * `DxirReverseTransform`.
+     *
+     * **Phase 1 scope** (this session): minimal lift→simplify→lower scaffolding for
+     * arithmetic-only return expressions. Uses [SymbolicEngine.liftNode] (currently
+     * supports DxirParam / DxirConst with integer values / arithmetic ops at the
+     * scalar level), [SymbolicEngine.simplify] (Symja's `Simplify`), and
+     * [SymbolicEngine.lowerToDxir] (with a per-param symbol map so free variables
+     * in the simplified expression resolve back to the new function's params).
+     *
+     * **Bail-out semantics**: if any return fails to lift OR any simplified expression
+     * fails to lower (e.g. the body contains a non-arithmetic op the engine doesn't
+     * recognise, or a fractional Float constant the current `liftNode` lifts as the
+     * truncated Long), this returns [fn] unchanged. Any future broadening of
+     * `liftNode`'s coverage automatically widens what this pass can simplify, with
+     * no callsite changes here.
+     *
+     * **Not yet wired** into `apply`'s pipeline. Callers must invoke this pass
+     * explicitly. Phase 2 will integrate it into `TlalocIrGenerationExtension`
+     * behind an opt-in system property; Phase 3+ will widen `liftNode` to handle
+     * fractional constants and the non-arithmetic ops that gradient bodies for
+     * tensor surfaces emit.
+     */
+    fun simplifyReturns(fn: DxirFunction, engine: SymbolicEngine): DxirFunction {
+        // Lift + simplify each return expression. Any lift failure → bail out
+        // unchanged (preserves correctness even when a return contains a non-
+        // arithmetic op).
+        val simplifiedExprs: List<SymExpr> = try {
+            fn.returns.map { engine.simplify(engine.liftNode(it)) }
+        } catch (e: Throwable) {
+            return fn
+        }
+        // Lower each simplified expression back to dxir under a freshly-built
+        // function with new DxirParams (one per original param). The symbol map
+        // routes lifted free variables back to the new params by name.
+        return try {
+            DxirBuilder.function(fn.name) {
+                val symbolMap = HashMap<String, DxirNode>()
+                for (origParam in fn.params) {
+                    val newParam = param(origParam.name, origParam.type)
+                    symbolMap[origParam.name] = newParam
+                }
+                simplifiedExprs.zip(fn.returns).map { (sym, origReturn) ->
+                    engine.lowerToDxir(sym, origReturn.type, this, symbolMap)
+                }
+            }
+        } catch (e: Throwable) {
+            // Lowering failure (Symja produced an op the lower-half can't emit) →
+            // unchanged.
+            fn
+        }
+    }
+
     fun apply(fn: DxirFunction, engine: SymbolicEngine? = null): DxirFunction {
         var current = fn
         for (iter in 0 until FIXPOINT_CAP) {

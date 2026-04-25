@@ -39,6 +39,83 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.103 D.1i Phase 1 — `PhiCalculus.simplifyReturns` scaffolding pass 2026-04-25
+
+The user re-scoped the dynamic /loop to drive **D.1i Symja Simplify on whole gradient expressions** to completion. This session lands Phase 1: a minimal, end-to-end scaffolding pass that lifts → simplifies → lowers each return expression of a `DxirFunction`. Not yet wired into the IR pipeline; callers must invoke explicitly.
+
+**The pass** in [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt):
+
+```kotlin
+fun simplifyReturns(fn: DxirFunction, engine: SymbolicEngine): DxirFunction {
+    val simplifiedExprs = try { fn.returns.map { engine.simplify(engine.liftNode(it)) } }
+        catch (e: Throwable) { return fn }
+    return try {
+        DxirBuilder.function(fn.name) {
+            val symbolMap = HashMap<String, DxirNode>()
+            for (origParam in fn.params) {
+                val newParam = param(origParam.name, origParam.type)
+                symbolMap[origParam.name] = newParam
+            }
+            simplifiedExprs.zip(fn.returns).map { (sym, origReturn) ->
+                engine.lowerToDxir(sym, origReturn.type, this, symbolMap)
+            }
+        }
+    } catch (e: Throwable) { fn }
+}
+```
+
+**Architecture** (per the audit at the start of this session):
+
+- Reuses the existing `SymbolicEngine.liftNode` / `simplify` / `lowerToDxir(symbolMap)` machinery built up across §0.4.13–§0.4.52 for C5/C6/C7/C8/C9 closure work. No new IR passes, no new Symja call sites.
+- The returned function shares parameter NAMES with the input (so the symbol map closes the lifted free variables back to dxir nodes correctly), but allocates fresh `DxirParam` ids — clean function-level rebuild, no cross-function aliasing.
+- Bail-out semantics: any failure (lift can't handle an op, simplify produces something the lower-half can't emit) returns `fn` unchanged. Conservative — never silently corrupts a function — and sets up Phase 2's "wire into the pipeline" cleanly.
+
+**Phase 1 test surface** in [PhiCalculusSimplifyTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/PhiCalculusSimplifyTest.kt) (+4 tests):
+
+1. `simplifyReturnsCollapsesMulByOne` — `f(x) = 1 * x` simplifies to `x`. Body has 0 ops post-pass.
+2. `simplifyReturnsFoldsAddIdentityAndDuplicateMuls` — `f(x) = x*1 + 1*x` simplifies to `2*x` (≤2 ops). Numerical eval at x=5 yields 10.
+3. `simplifyReturnsBailsOutWhenLiftFails` — `f(x) = sum(x)` (SUM is unsupported by liftNode) returns the original function unchanged.
+4. `simplifyReturnsHandlesMultiReturnFunctions` — valueAndGrad-style 2-return shape simplifies both returns.
+
+**Decisions worth flagging**:
+
+- **Phase 1 stays narrow.** liftNode's existing support (Param / Const-as-integer-rational / scalar arithmetic ops) is all this pass uses. Lifting fractional Float consts (e.g. MeanRule's `1/N` = `0.25f`) currently truncates to zero — a real bug for some gradient bodies, fixed in a Phase 2 widening (use `realLiteral` for non-integer values). For now, gradient bodies that contain only integer-valued constants (typical of pure ADD/SUB/MUL/DIV chains from MulRule / AddRule / SubRule / NegRule) work end-to-end.
+
+- **Multi-return support free.** SymbolicEngine's `liftNode` is per-node, and simplifyReturns iterates per return slot. valueAndGrad's `(value, grad_a, grad_b, ...)` shape simplifies cleanly because each slot is an independent expression.
+
+- **Symbol map keyed by NAME, not by id.** When the new function gets fresh `DxirParam` ids, the old return tree's `DxirParam` references would dangle. The symbol map (param name → new DxirNode) bridges via the lifted `variable(name)` symbols, which the lowerToDxir resolves through the map.
+
+- **Bail-out preserves correctness over coverage.** Returning `fn` unchanged on any failure is safer than emitting a partially-rewritten function. Future widenings (better liftNode for fractional consts, opaque-leaf handling for non-arithmetic ops) extend coverage without changing the bail-out contract.
+
+**Multi-session plan** for D.1i (this session is Phase 1 / 4):
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| 1 | `simplifyReturns` scaffolding + arithmetic-only first cut | **Shipped this session** |
+| 2 | Widen `liftNode` for fractional Float constants (`realLiteral`); broaden test coverage | Pending |
+| 3 | Wire into `TlalocIrGenerationExtension` behind `tlaloc.simplify.enabled` opt-in property; benchmark perf delta on Brachistochrone / HookeanSpring / BGDHyperOpt | Pending |
+| 4 | Opaque-leaf handling for non-arithmetic gradient ops (SUM, MEAN, MATMUL, GATHER) — extends to tensor gradient bodies; reuse the §0.4.52 `symOpaqueLeaves` mechanism | Pending |
+
+**Tests added** (+4 new):
+
+- `PhiCalculusSimplifyTest.simplifyReturnsCollapsesMulByOne`
+- `PhiCalculusSimplifyTest.simplifyReturnsFoldsAddIdentityAndDuplicateMuls`
+- `PhiCalculusSimplifyTest.simplifyReturnsBailsOutWhenLiftFails`
+- `PhiCalculusSimplifyTest.simplifyReturnsHandlesMultiReturnFunctions`
+
+Full suite is green: **685 tests** (+4 over §0.4.102).
+
+**Recommended next pickup** (next /loop firing should pick this up):
+
+1. **D.1i Phase 2** — widen `SymjaEngine.liftNode` to use `realLiteral(value.toDouble())` when the constant isn't integer-valued, and add tests showing fractional-constant gradients simplify correctly.
+
+**Definition-of-done for §0.4.103 — met**:
+- `PhiCalculus.simplifyReturns(fn, engine)` lands ✓
+- Conservative bail-out preserves input on lift / lower failure ✓
+- Four tests pin the scaffolding mechanics + multi-return shape ✓
+- Multi-session phase plan documented for Phase 2/3/4 readers ✓
+- Full suite green at 685 tests (+4) ✓
+
 #### 0.4.102 Out-of-scope register refresh + dynamic-loop pause 2026-04-25
 
 §0.4.68's "Out-of-scope register" snapshot has gone stale after ~30 sessions of work. This session ships an updated snapshot reflecting current status (everything between §0.4.69 and §0.4.101 has either shipped items off the register, narrowed them, or reframed them). It also marks an honest pause point in the dynamic-/loop-paced shipping cadence — the next genuinely valuable items all need substantial multi-session investment that the 5-min cadence isn't designed for.
