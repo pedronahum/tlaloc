@@ -39,6 +39,60 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.159 HMC Phase 1 port — straight-line `U(β)` for logistic regression at n=4, d=2 2026-04-26
+
+§0.4.158 unblocked scalar `Float.exp()` / `Float.log()`. With every primitive lowering correctly through the K2 plugin, §0.4.159 ports the OOPSLA paper's HMC kernel U(β) at the smallest viable scale (n=4 records, d=2 features) using straight-line scalar arithmetic. This closes Phase 1 of `docs/HMC_PORT_PLAN.md` (revised post-§0.4.158 to scalar/straight-line, since MATMUL through the plugin is its own arc). The benchmark surface now has Brachistochrone (§0.4.43), HookeanSpring (§0.4.47), BGDHyperOpt (§0.4.49 partial), and HMC (§0.4.159) ported through the K2 plugin — four of the paper's six benchmarks at compile-path-end-to-end.
+
+**The mechanism** in [HmcLogisticRegressionTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt):
+
+1. **Hard-coded dataset** — X is a 4×2 matrix encoded as 8 Float literals inside the closure; y is a 4-vector encoded as `(y - 1_n) = [0, -1, 0, -1]` directly multiplied into the term1 sum (avoiding a separate y array). This sidesteps the MATMUL-through-plugin gap by decomposing `Xβ_i = X[i,0]·β[0] + X[i,1]·β[1]` per record as straight-line scalar arithmetic. No looping, no GATHER over X / y — just `β[0]` / `β[1]` extraction via the existing rank-1 GATHER path (§0.4.42).
+
+2. **U(β) decomposed**:
+   - `term1 = β^T X^T (y - 1_n)` becomes `0·xb0 + (-1)·xb1 + 0·xb2 + (-1)·xb3`. Sum-of-products with constant coefficients.
+   - `term2 = Σ_i log(1 + exp(-Xβ_i))` becomes 4 inline `(1.0f + (-xb_i).exp()).log()` calls summed. Each call exercises the §0.4.158 scalar exp/log lowering.
+   - `term3 = β^T β / (2σ²)` becomes `(b0² + b1²) / 2000.0f`. Pure scalar arithmetic.
+   - `U = term1 - term2 - term3`. Single Float return.
+
+3. **Verification via finite-difference cross-check** at β = [0.5, 0.3]. Central differences with ε = 1e-3, mixed absolute (1e-3) / relative (5e-3) tolerance — same convention as HookeanSpring's sigmoid-bearing primal cross-check. The output format `<analytic>=<fd>;<analytic>=<fd>;` is parsed by the test and each pair compared.
+
+4. **Sentinel-defeat assertion**: at least one of `(analytic, fd)` per slot must differ from the broken-stub sentinel `-1.0f`. Defends against a regression where the IR transform fails and the runtime tape's broken stub returns -1s — a pure pass-through would fail finite-differencing trivially, but the explicit sentinel check makes the failure mode explicit.
+
+**Decisions worth flagging**:
+
+- **Hard-coded X / y as scalar literals, not packed into a rank-1 DTensor.** §0.4.157's plan considered packing β / X / y together into a single rank-1 input (similar to BGDHyperOptTest's "packed" trick). The straight-line literal form is cleaner: no extra slot indexing, no per-position GATHER overhead, gradient comes out at exactly `[d_β[0], d_β[1]]`. This is `Phase 1` (smallest viable port) — packing or rank-2 X comes back when Phase 2 widens to loop form (where indexing into a rank-2 X via `X[i, j]` becomes natural).
+
+- **Term1's `0.0f * xb0` and `0.0f * xb2` survive in the IR.** Two of the four (y-1) coefficients are zero, so those products are dead computation. The IR's const-fold pass collapses `0 * x → 0` post-AD; `term1` simplifies to `-xb1 - xb3`. I did NOT manually optimize the source — keeping the formula in its faithful (y - 1_n) form makes the test legible against the paper formula. The downstream pipeline does the simplification automatically.
+
+- **One test method, one β value.** HookeanSpring has multiple methods sweeping configurations; HMC Phase 1 has exactly one — the smallest viable correctness check at n=4, d=2. A future Phase 1b could add a sweep over β values, but Phase 1's stated DoD is "verify gradient at one β value", which this test meets exactly. Adding more before Phase 2 (loop form) is over-investment.
+
+- **No PERF anchor in Phase 1.** HookeanSpring's `N=10 chain — measured timings` test ports the timing methodology; HMC could land an analogous one, but Phase 1 is correctness-first. The benchmark-port matrix that M9's exit criterion needs (paper-comparable timings) is far enough downstream that PERF anchors per benchmark add noise without yet pinning the right thing. Defer to Phase 2 / 3 or to the dedicated head-to-head harness (Phase 1 #7 of the priority ladder).
+
+- **The `(y - 1_n)` substitution is the load-bearing simplification.** The paper writes `β^T X^T y - β^T X^T 1_n` separately; combining them as `β^T X^T (y - 1_n)` is mathematically equivalent and avoids a stray dot product with `1_n`. A literal port of the paper's two-term form would compile too, but the combined form makes the gradient flow more obvious (one dot product per record, not two).
+
+- **Plan's Phase 1 is now closed.** §0.4.157's `docs/HMC_PORT_PLAN.md` Phase 1 deliverable was "a compiler-plugin test that ports U(β) at n=4, d=2 using straight-line tensor ops only (no loops; no IF). Verifies the gradient against finite-differencing at one β value." §0.4.158 amended that to "scalar/straight-line, not tensor" (because MATMUL doesn't lower through the plugin). §0.4.159 lands the amended deliverable. Phase 2 (loop form with C6/C7 closure) and Phase 3 (numerical-stability mask + region-recursive C5 prerequisite) remain ahead.
+
+**Tests added** (+1 new) in [HmcLogisticRegressionTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt):
+
+- `hmc U gradient matches finite difference at small fixed dataset` — full U(β) at fixed (X, y), test β = [0.5, 0.3], finite-difference cross-check at both slots with mixed tolerance. Gradient flow exercises: 8 scalar MULs (X·β), 4 ADDs (term1 sum-of-products), 4 NEGs + 4 EXPs + 4 ADDs + 4 LOGs (term2), 2 MULs + 1 ADD + 1 DIV (term3), 2 SUBs (U combination), plus 2 GATHERs (β[0], β[1]).
+
+Full suite is green: **848 tests** (+1 over §0.4.158).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **HMC Phase 2 — loop form.** Rewrite Phase 1's straight-line port using `for (i in 0 until 4)` accumulator loops mirroring HookeanSpring's `N=10 chain` test pattern. Each accumulator should match C6 (affine-recurrence closed form) so PhiCalculus closes the loop symbolically. Two firings per the plan estimate.
+2. **Phase 5c — Multi-result COARSENED.** Still on the cleanup list since §0.4.155 substrate landed.
+3. **Out-of-scope register refresh.** Several deferred items closed across §0.4.151–§0.4.158: D.3i widening (✓), MR IF AD Phase 4 for WHILE-in-IF (✓), multi-live-index gradAccum (✓), `:benchmarks` substrate (✓). The register hasn't been refreshed since §0.4.151.
+4. **Phase 4b — WHILE inside IF inside WHILE.** Independent of HMC Phase 2; needed for HMC's future Phase 3.
+
+**Definition-of-done for §0.4.159 — met**:
+- `HmcLogisticRegressionTest.kt` lands in `compiler-plugin/src/test/kotlin/io/tlaloc/plugin/` ✓
+- Ports U(β) at n=4, d=2 using straight-line scalar arithmetic + GATHER + EXP + LOG ✓
+- Verifies gradient against finite-difference at one β value ([0.5, 0.3]) ✓
+- Mixed absolute / relative tolerance matches HookeanSpring's sigmoid-bearing convention ✓
+- Sentinel-defeat assertion guards against broken-stub fallback ✓
+- §0.4.157 plan's Phase 1 DoD met ✓
+- Full suite stays green at 848 tests (+1) ✓
+
 #### 0.4.158 HMC Phase 1 unblock — scalar `Float.exp()` / `Float.log()` plugin lowering 2026-04-26
 
 §0.4.157's plan named the HMC Phase 1 first slice as a straight-line tensor-op port (`MATMUL`-driven `Xβ`, etc.) targeting `compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt`. **Verifying the gap analysis against the actual plugin code uncovered three blockers** the planning session missed: (a) no `MATMUL` in `FirLambdaToDxirLowering.BINARY_OP_MAP` (only `+`/`-`/`*`/`/`); (b) no scalar `Float.exp()` / `Float.log()` extensions in `:core/DScalar.kt`; (c) consequently no plugin lowering of scalar exp/log even if the extensions existed. Per the rules-of-engagement guidance ("if a compiler-API surface fights back, checkpoint what works + flag the blocker"), §0.4.158 redirects the firing to the most surgical unblock for HMC Phase 1: scalar `exp` / `log`. The MATMUL gap shifts the plan: HMC Phase 1 is now scalar/loop form (what was originally Phase 2); MATMUL through the plugin is its own arc.
