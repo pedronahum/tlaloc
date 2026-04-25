@@ -39,6 +39,50 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.156 Fourth `:benchmarks` inhabitant — multi-branch IF AD pipeline 2026-04-25
+
+§0.4.155 unblocked multi-live-index MR IF AD (`ifop.result(0)` AND `ifop.result(1)` both flowing back through the gradient). The four existing `:benchmarks` inhabitants (§0.4.145 / §0.4.146 / §0.4.147 / §0.4.148) all share the same `iterateNTimes` WHILE-based primal at different scales — meaning a regression specific to the IF AD path could slip past every one of them. §0.4.156 widens the benchmark surface with a different IR shape: a multi-result IF whose two result indices both feed an outer ADD. Pre-§0.4.155 this primal hard-rejected at `findIfLiveResultIndex.singleOrNull()`; post-§0.4.155 it flows correctly through SCT.
+
+**The mechanism**:
+
+1. **`BenchmarkPrimals.multiBranchIfPrimal()`** ([BenchmarkPrimals.kt:74-95](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt#L74-L95)) — fixed-shape primal: `f(x) = let r = if (x > 0) {x², 2x} else {-x, x} in r.result(0) + r.result(1)`. Closed-form derivative: `df/dx = 2x + 2` for `x > 0`, `df/dx = 0` for `x ≤ 0`. The `MUL(x, x)`, `MUL(2, x)`, and `NEG(x)` ops live at function-body level and are referenced as outer-scope yields from the IF's branches; the cancellation in the else branch (`d(-x + x)/dx = -1 + 1 = 0`) is a clean diagnostic for "did the gradient flow correctly through both indices?" — a rule that conflated indices would NOT produce the expected zero.
+
+2. **`MultiBranchIfBenchmark`** ([MultiBranchIfBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/MultiBranchIfBenchmark.kt)) — times the AD pipeline (`PhiCalculus.apply` + `DxirReverseTransform.apply`) on the multi-branch primal and pins gradients at four sample points: x = 5 → 12, x = 7 → 16, x = -3 → 0, x = 0 → 0 (boundary). The boundary case is non-trivial: STEP(0) = 0 picks the else branch, and the cancellation gradient must produce exactly 0 — a regression in the multi-live-index path that drops result(1)'s contribution would yield -1 (only the NEG'd contribution survives), failing this assertion loudly.
+
+**Decisions worth flagging**:
+
+- **Different primal shape from `iterateNTimes`, not a different scale.** §0.4.146 / §0.4.147 sweep n ∈ {5, 10, 20} on the same primal; §0.4.156 picks a structurally different IR (multi-result IF without WHILE) at one fixed shape. The "third or more callers" threshold for promotion to `BenchmarkPrimals` (§0.4.145's principle) doesn't apply here — the helper is added because the inhabitant is already a benchmark, not for sharing.
+
+- **Pin the boundary case (x=0) explicitly.** A regression that drops result(1) gradient at the else branch would yield `df/dx(-3) = -1` (NEG only) instead of 0, and `df/dx(0) = -1` instead of 0. Pinning x=0 — where STEP(0)=0 picks the else branch but the value is on the boundary — adds defensive coverage for "rule that handles negatives correctly but is wrong at zero". Mirrors the existing `gradOfWhileInIfBranchAfterPhiCalculusUnrollFlowsCorrectly` test's boundary discipline (§0.4.153).
+
+- **No PhiCalculus rewrite fires on this primal.** No WHILE means C5/C6/C7/C8/C9 don't trigger; F1 doesn't fire (yields differ); F3 doesn't fire (then-yield IS canonically smaller than else-yield in this construction); the IF survives as-is. The `phiMs` timing therefore measures the cost of the fixpoint loop with no productive rewrites — a proxy for "what does PhiCalculus.apply cost when nothing fires?". A regression that introduces unnecessary rewrites would surface here as a phiMs spike.
+
+- **Side-channel timing only; no perf budget pinned.** Mirrors §0.4.106's IR-size harness convention: `assertEquals` for behavioral correctness (the gradient values), `println` for human-visible timings. A future "perf budget" file (e.g., `BENCHMARK_BUDGETS.md`) could pin acceptable phiMs / sctMs ranges; today the benchmarks just print, leaving budget enforcement to whoever runs them.
+
+- **No regression on the existing three iterateN benchmarks.** §0.4.145–§0.4.147 still pass at their pinned numbers (1024 for n=10, etc.). §0.4.156 adds coverage; it doesn't replace.
+
+- **The `multiBranchIfPrimal` builder lives in `BenchmarkPrimals`, not the benchmark file.** §0.4.148 established the convention: shared primal builders live in `BenchmarkPrimals`, benchmark-specific construction lives in the benchmark file. With one caller today, the placement is borderline; it goes there because future benchmarks (e.g., a Phase-5c multi-result COARSENED probe) will likely want the same shape and would otherwise duplicate. Mirrors how `iterateNTimes` was extracted ahead of being needed by all three iterateN benchmarks.
+
+**Tests added** (+1 new) in [MultiBranchIfBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/MultiBranchIfBenchmark.kt):
+
+- `MultiBranchIfBenchmark.adPipelineOnMultiBranchIfPrimal` — fixed-shape multi-branch IF primal. Pre-rewrite structure pinned (1 IF, 0 WHILEs). Phi + SCT timings printed. Numerical gradient pinned at 4 sample points (x ∈ {5, 7, -3, 0}).
+
+Full suite is green: **844 tests** (+1 over §0.4.155).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 5c — Multi-result COARSENED.** Remove the `coarsened.types.size == 1` guard in `handleCoarsenedAdjoint`. With the §0.4.154/§0.4.155 substrate, this is a focused widening: the cloned `gradient_body` emits per-result-index contributions; outerGradAccum's per-(id, idx) keys absorb them.
+2. **Out-of-scope register refresh.** §0.4.151's "Multi-live-index gradAccum refactor" entry can move to closed; "Multi-result COARSENED" splits into "single-result shipped, multi-result Phase 5c pending"; "MR IF AD Phase 4" becomes a more nuanced "WHILE-in-IF closed; nested-WHILE-in-IF Phase 4b pending".
+3. **Phase 4b — WHILE inside IF inside WHILE.** Independent of Phase 5; widens §0.4.152's pre-scan + rewrite to also recurse into WHILE region bodies.
+4. **HMC benchmark port** — paper's hardest control-flow benchmark.
+
+**Definition-of-done for §0.4.156 — met**:
+- New `BenchmarkPrimals.multiBranchIfPrimal()` builder lands in the shared module ✓
+- New `MultiBranchIfBenchmark` class times the AD pipeline + pins 4 numerical gradient points ✓
+- Boundary case (x=0) explicitly covered ✓
+- File header doc-comments cross-reference the existing inhabitants ✓
+- Full suite stays green at 844 tests (+1) ✓
+
 #### 0.4.155 Multi-live-index MR IF AD — semantic widening (Phase 5b) 2026-04-25
 
 §0.4.154 landed the substrate (gradAccum keyed on `(id, index)`); Phase 5b lands the semantic widening that actually unlocks multi-live-index MR IF AD. `findIfLiveResultIndex: Int?` becomes `findIfLiveResultIndices: Set<Int>` (and the in-block variant); `handleIfAdjoint` and `walkBranchReverse` take `upstreams: Map<Int, DxirNode>` instead of `(upstream, liveIdx)`; the dispatch loops at every level collect per-live-index contributions and route them through the per-(id, index) gradAccum. Two latent bugs surfaced and got fixed in the same change: the body-cloning loop's `nodeMap[it.id]` lookup stripped `DxirOpResult` wrapping at both the top level and inside `walkBranchReverse`, conflating two operands referencing different result indices into the same primal-op reference and dropping contributions to result(k) for k > 0. Both call sites now route operand resolution through DxirOpResult-preserving logic.

@@ -62,4 +62,40 @@ object BenchmarkPrimals {
     /** Count top-level body ops of a given [kind] in [fn]. */
     fun countOps(fn: io.tlaloc.ir.DxirFunction, kind: OpKind): Int =
         fn.body.filterIsInstance<DxirOp>().count { it.op == kind }
+
+    /**
+     * §0.4.156 — multi-branch IF primal that exercises the §0.4.155 multi-live-index
+     * MR IF AD path. Shape:
+     * ```
+     * f(x) = let r = if (x > 0) {x*x, 2*x} else {-x, x}
+     *        in  r.result(0) + r.result(1)
+     * ```
+     * For `x > 0`: `r = (x², 2x)`, `sum = x² + 2x`, `df/dx = 2x + 2`.
+     * For `x ≤ 0`: `r = (-x, x)`, `sum = -x + x = 0`, `df/dx = -1 + 1 = 0`.
+     *
+     * Both `r.result(0)` and `r.result(1)` are referenced downstream — pre-§0.4.155
+     * this shape was hard-rejected by `findIfLiveResultIndex.singleOrNull()`. With
+     * Phase 5b's per-index gradAccum dispatch, the primal flows correctly through
+     * SCT and the gradient closes in expected per-branch closed forms.
+     */
+    fun multiBranchIfPrimal(): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("multiBranchIf") {
+            val x = param("x", f32)
+            val pred = op(OpKind.STEP, listOf(x), boolS)
+            val xSquared = op(OpKind.MUL, listOf(x, x), f32)
+            val two = const(2f, f32)
+            val twoX = op(OpKind.MUL, listOf(two, x), f32)
+            val negX = op(OpKind.NEG, listOf(x), f32)
+            val ifOp = opMulti(
+                OpKind.IF,
+                listOf(pred),
+                listOf(f32, f32),
+                regions = listOf(
+                    region { yields(xSquared, twoX) },
+                    region { yields(negX, x) },
+                ),
+            )
+            val sum = op(OpKind.ADD, listOf(ifOp.result(0), ifOp.result(1)), f32)
+            listOf(sum)
+        }
 }
