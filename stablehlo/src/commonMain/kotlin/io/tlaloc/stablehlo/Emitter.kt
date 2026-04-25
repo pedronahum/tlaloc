@@ -920,8 +920,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         idxType: DxirType,
         valueType: DxirType,
     ) {
-        require(baseType.rank == 1 || baseType.rank == 2) {
-            "SCATTER_ADD base must be rank-1 or rank-2 (substrate shape); got rank=${baseType.rank}"
+        require(baseType.rank >= 1) {
+            "SCATTER_ADD base must be rank ≥ 1 (substrate shape); got rank=${baseType.rank}"
         }
         require(idxType.isScalar && idxType.dtype == I32) {
             "SCATTER_ADD idx must be scalar I32 (substrate shape); got $idxType"
@@ -938,15 +938,12 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
 
         // Dimension numbers: scalar idx (rank-0) with index_vector_dim=0 triggers
         // implicit trailing-1 expansion, so the effective scatter_indices rank is 1.
-        // `update_window_dims` indexes into UPDATES' axes (not operand's). For rank-2
-        // base, updates is rank-1 (the row), so the window dim is axis 0 of updates,
-        // which maps to operand axis 1 (since operand axis 0 is inserted via the
-        // index). For rank-1 base, updates is rank-0 (scalar) and there are no
-        // window dims at all.
-        val updateWindowDims = when (baseType.rank) {
-            1 -> emptyList()
-            else -> listOf(0)
-        }
+        // `update_window_dims` indexes into UPDATES' axes (not operand's). For rank-r
+        // base, updates is rank-(r-1) (all dims except axis 0 of operand), so the
+        // window dims are 0..r-2 of updates — those map to operand axes 1..r-1
+        // (since operand axis 0 is inserted via the index). For rank-1 base, updates
+        // is rank-0 (scalar) and there are no window dims at all.
+        val updateWindowDims = (0 until expectedValueRank).toList()
         val dimNumbers = buildString {
             append("#stablehlo.scatter<")
             val parts = mutableListOf<String>()
@@ -996,8 +993,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         updatesType: DxirType,
         outType: DxirType,
     ) {
-        require(operandType.rank == 1 || operandType.rank == 2) {
-            "substrate SCATTER base must be rank-1 or rank-2; got rank=${operandType.rank}"
+        require(operandType.rank >= 1) {
+            "substrate SCATTER base must be rank ≥ 1; got rank=${operandType.rank}"
         }
         require(indicesType.isScalar && indicesType.dtype == I32) {
             "substrate SCATTER idx must be scalar I32; got $indicesType"
@@ -1012,10 +1009,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
 
         val scalarT = "tensor<${mlirElementType(operandType.dtype)}>"
 
-        val updateWindowDims = when (operandType.rank) {
-            1 -> emptyList()
-            else -> listOf(0)
-        }
+        // §0.4.132 — generalised to any rank ≥ 1. `update_window_dims` covers all
+        // axes of `updates` (rank r-1), since the indexed axis 0 of operand is
+        // inserted via the scalar index and not present in updates.
+        val updateWindowDims = (0 until expectedValueRank).toList()
         val dimNumbers = buildString {
             append("#stablehlo.scatter<")
             val parts = mutableListOf<String>()
@@ -1581,26 +1578,26 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         indicesType: DxirType,
         outType: DxirType,
     ) {
-        require(operandType.rank == 1 || operandType.rank == 2) {
-            "substrate GATHER operand must be rank-1 or rank-2; got rank=${operandType.rank}"
+        // §0.4.113 / §0.4.132 — substrate-shape GATHER for any rank ≥ 1: scalar I32
+        // index selects a slice along axis 0. Output is rank-(r-1) with shape
+        // `operandType.dims.drop(1)`. The canonical stablehlo.gather attrs are:
+        //   - offset_dims = (0 until r-1)            (all output axes are offsets)
+        //   - collapsed_slice_dims = [0]             (axis 0 is collapsed by indexing)
+        //   - start_index_map = [0]                  (single index targets axis 0)
+        //   - index_vector_dim = 0                   (scalar index)
+        //   - slice_sizes = [1, dim_1, …, dim_{r-1}] (window of size 1 on the
+        //     indexed axis, full extent on the rest)
+        require(operandType.rank >= 1) {
+            "substrate GATHER operand must be rank ≥ 1; got rank=${operandType.rank}"
         }
-        val expectedOutDims = when (operandType.rank) {
-            1 -> emptyList()
-            else -> listOf(operandType.dims[1])
-        }
+        val expectedOutDims = operandType.dims.drop(1)
         require(outType.dims == expectedOutDims) {
             "substrate GATHER output shape ${outType.dims} doesn't match expected " +
                 "$expectedOutDims for rank-${operandType.rank} operand ${operandType.dims}"
         }
 
-        val offsetDims = when (operandType.rank) {
-            1 -> emptyList()
-            else -> listOf(0)
-        }
-        val sliceSizes = when (operandType.rank) {
-            1 -> listOf(1)
-            else -> listOf(1, operandType.dims[1])
-        }
+        val offsetDims = (0 until operandType.rank - 1).toList()
+        val sliceSizes = listOf(1) + operandType.dims.drop(1)
 
         emitGatherOp(
             step = step,

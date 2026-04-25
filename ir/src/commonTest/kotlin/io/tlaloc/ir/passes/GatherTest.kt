@@ -506,4 +506,129 @@ class GatherTest {
             )
         }
     }
+
+    // --- §0.4.132: rank-3 GATHER / SCATTER / SCATTER_ADD (slice indexing) ---
+
+    private val rank3_2x2x3 = DxirType(F32, listOf(2, 2, 3))
+    private val rank2_2x3 = DxirType(F32, listOf(2, 3))
+
+    @Test
+    fun rank3GatherReadsSliceFromTensor() {
+        // arr is a 2×2×3 tensor:
+        //   slice 0 = [[1,2,3], [4,5,6]]
+        //   slice 1 = [[7,8,9], [10,11,12]]
+        // idx=1 picks the second slice → [7,8,9, 10,11,12] (rank-2 [2,3]).
+        val fn = DxirBuilder.function("rank3Gather") {
+            val arr = param("arr", rank3_2x2x3)
+            val idx = param("idx", i32s)
+            val g = op(OpKind.GATHER, listOf(arr, idx), rank2_2x3)
+            listOf(g)
+        }
+        val backing = floatArrayOf(
+            1f, 2f, 3f, 4f, 5f, 6f,           // slice 0
+            7f, 8f, 9f, 10f, 11f, 12f,        // slice 1
+        )
+        val sliceOne = DxirInterpreter.evalFunction(fn, listOf(backing, floatArrayOf(1f)))
+        assertEquals(1, sliceOne.size)
+        assertEquals(6, sliceOne[0].size)
+        assertEquals(floatArrayOf(7f, 8f, 9f, 10f, 11f, 12f).toList(), sliceOne[0].toList())
+        val sliceZero = DxirInterpreter.evalFunction(fn, listOf(backing, floatArrayOf(0f)))
+        assertEquals(floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f).toList(), sliceZero[0].toList())
+    }
+
+    @Test
+    fun rank3GatherOutOfBoundsIsFailLoud() {
+        val fn = DxirBuilder.function("rank3Gather") {
+            val arr = param("arr", rank3_2x2x3)
+            val idx = param("idx", i32s)
+            val g = op(OpKind.GATHER, listOf(arr, idx), rank2_2x3)
+            listOf(g)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            DxirInterpreter.evalFunction(
+                fn,
+                listOf(FloatArray(12), floatArrayOf(5f)),
+            )
+        }
+    }
+
+    @Test
+    fun rank3ScatterReplacesSliceInTensor() {
+        // base 2×2×3 tensor of zeros; SCATTER replaces slice 1 with value.
+        val fn = DxirBuilder.function("rank3Scatter") {
+            val base = param("base", rank3_2x2x3)
+            val idx = param("idx", i32s)
+            val v = param("v", rank2_2x3)
+            val s = op(OpKind.SCATTER, listOf(base, idx, v), rank3_2x2x3)
+            listOf(s)
+        }
+        val baseBacking = FloatArray(12)
+        val valueBacking = floatArrayOf(7f, 8f, 9f, 10f, 11f, 12f)
+        val out = DxirInterpreter.evalFunction(
+            fn,
+            listOf(baseBacking, floatArrayOf(1f), valueBacking),
+        )
+        assertEquals(1, out.size)
+        // Slice 0 stays zero; slice 1 = value.
+        val expected = floatArrayOf(
+            0f, 0f, 0f, 0f, 0f, 0f,           // slice 0
+            7f, 8f, 9f, 10f, 11f, 12f,        // slice 1 replaced
+        )
+        assertEquals(expected.toList(), out[0].toList())
+    }
+
+    @Test
+    fun rank3ScatterAddAccumulatesSliceInTensor() {
+        // base 2×2×3 of ones; SCATTER_ADD adds value into slice 0.
+        val fn = DxirBuilder.function("rank3ScatterAdd") {
+            val base = param("base", rank3_2x2x3)
+            val idx = param("idx", i32s)
+            val v = param("v", rank2_2x3)
+            val s = op(OpKind.SCATTER_ADD, listOf(base, idx, v), rank3_2x2x3)
+            listOf(s)
+        }
+        val baseBacking = FloatArray(12) { 1f }  // all ones
+        val valueBacking = floatArrayOf(0.5f, 1f, 1.5f, 2f, 2.5f, 3f)
+        val out = DxirInterpreter.evalFunction(
+            fn,
+            listOf(baseBacking, floatArrayOf(0f), valueBacking),
+        )
+        // Slice 0 = ones + value; slice 1 stays ones.
+        val expected = floatArrayOf(
+            1.5f, 2f, 2.5f, 3f, 3.5f, 4f,     // slice 0 += value
+            1f, 1f, 1f, 1f, 1f, 1f,           // slice 1 unchanged
+        )
+        assertEquals(expected.toList(), out[0].toList())
+    }
+
+    @Test
+    fun rank3GatherFollowedByScatterAddRoundTrips() {
+        // Read slice 0 via GATHER, write it back via SCATTER_ADD into a zero base.
+        // Result's slice 0 should equal the original input's slice 0.
+        val fn = DxirBuilder.function("gatherThenScatterAdd") {
+            val arr = param("arr", rank3_2x2x3)
+            val idx = param("idx", i32s)
+            val g = op(OpKind.GATHER, listOf(arr, idx), rank2_2x3)
+            val zeroScalar = const(0f, f32s)
+            val zeroBase = op(
+                OpKind.BROADCAST,
+                listOf(zeroScalar),
+                rank3_2x2x3,
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val sa = op(OpKind.SCATTER_ADD, listOf(zeroBase, idx, g), rank3_2x2x3)
+            listOf(sa)
+        }
+        val backing = floatArrayOf(
+            10f, 11f, 12f, 13f, 14f, 15f,
+            20f, 21f, 22f, 23f, 24f, 25f,
+        )
+        val out = DxirInterpreter.evalFunction(fn, listOf(backing, floatArrayOf(0f)))
+        // Slice 0 = original slice 0 of `backing`; slice 1 = zeros.
+        val expected = floatArrayOf(
+            10f, 11f, 12f, 13f, 14f, 15f,
+            0f, 0f, 0f, 0f, 0f, 0f,
+        )
+        assertEquals(expected.toList(), out[0].toList())
+    }
 }

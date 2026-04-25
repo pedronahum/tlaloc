@@ -909,6 +909,48 @@ class RoundTripTest {
         validate(DxirModule(listOf(fn)).toStablehlo(), "SCATTER_ADD rank-2 substrate")
     }
 
+    // §0.4.132 — substrate-shape GATHER / SCATTER / SCATTER_ADD must round-trip
+    // for any rank ≥ 1. These pin the rank-3 case (the next-step generalisation
+    // exercised by AD against rank-3 GATHER primals).
+
+    @Test
+    fun substrateGatherRank3SubstrateRoundTrips() {
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("g") {
+            val arr = param("a", DxirType(F32, listOf(2, 3, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val y = op(OpKind.GATHER, listOf(arr, idx), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "GATHER rank-3 substrate")
+    }
+
+    @Test
+    fun substrateScatterRank3SubstrateRoundTrips() {
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("g") {
+            val base = param("b", DxirType(F32, listOf(2, 3, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, listOf(3, 4)))
+            val y = op(OpKind.SCATTER, listOf(base, idx, v), DxirType(F32, listOf(2, 3, 4)))
+            listOf(y)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "SCATTER rank-3 substrate")
+    }
+
+    @Test
+    fun scatterAddRank3SubstrateRoundTrips() {
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("g") {
+            val base = param("b", DxirType(F32, listOf(2, 3, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val v = param("v", DxirType(F32, listOf(3, 4)))
+            val y = op(OpKind.SCATTER_ADD, listOf(base, idx, v), DxirType(F32, listOf(2, 3, 4)))
+            listOf(y)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "SCATTER_ADD rank-3 substrate")
+    }
+
     @Test
     fun embeddingRoundTripsRankOneIndices() {
         requireTranslateOrSkip()

@@ -39,6 +39,83 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.132 Multi-dim GATHER / SCATTER / SCATTER_ADD generalised to rank-N 2026-04-25
+
+§0.4.111, §0.4.112, and §0.4.114 closed the rank-2 row-indexing arms for the autograd-emitted GATHER, SCATTER_ADD, and SCATTER substrates respectively. §0.4.122 left rank-3+ as a deferred entry. This session generalises all three substrate paths (interpreter + StableHLO emitter) to any rank ≥ 1 — `GATHER(arr: rank-r, idx: scalar I32) → rank-(r-1)` selects the slice at axis-0 position `idx`; `SCATTER` and `SCATTER_ADD` write a rank-(r-1) value into that slice. The dim-numbers shapes for `stablehlo.gather` / `stablehlo.scatter` parametrise cleanly: `update_window_dims = (0 until r-1)`, `slice_sizes = [1] + dims.drop(1)`, the rest stay the same as the rank-2 case.
+
+**The mechanism**:
+
+[DxirInterpreter.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt) — collapsed the three `when (rank)` branches into a single computed-slice loop:
+
+```kotlin
+val outer = arrType.dims[0]
+val sliceSize = if (arrType.rank == 1) 1 else arrType.dims.drop(1).reduce(Int::times)
+require(i in 0 until outer) { … }
+require(arr.size == outer * sliceSize) { … }  // for GATHER
+FloatArray(sliceSize) { off -> arr[i * sliceSize + off] }
+```
+
+The same shape applies to SCATTER (`out[i*sliceSize + off] = value[off]`) and SCATTER_ADD (`out[i*sliceSize + off] += value[off]`). The `expectedValueRank = baseType.rank - 1` validation was already general; only the loop body needed unrolling.
+
+[Emitter.kt](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt) — same pattern. The dimension-numbers attrs become:
+
+```kotlin
+val updateWindowDims = (0 until expectedValueRank).toList()  // SCATTER_ADD / SCATTER
+val offsetDims = (0 until operandType.rank - 1).toList()     // GATHER
+val sliceSizes = listOf(1) + operandType.dims.drop(1)        // GATHER
+```
+
+`collapsed_slice_dims = [0]`, `inserted_window_dims = [0]`, `scatter_dims_to_operand_dims = [0]`, `start_index_map = [0]`, `index_vector_dim = 0` stay the same — all of them describe the indexed axis 0, which is single regardless of rank.
+
+**Decisions worth flagging**:
+
+- **The change is purely numerical-shape generalisation, not a new lowering arm.** The substrate's "scalar I32 index → axis-0 slice" semantics already encoded the indexed axis as 0 (single-axis indexing). Extending to higher rank just widens the slice. No new attrs or `OpKind` entries; no FIR-side changes. The interpreter and emitter happen to be the only surfaces that hard-coded the rank-1/2 split.
+
+- **`reduce(Int::times)` on an empty list is unsafe — guarded by an explicit `rank == 1` arm.** For rank-1 the slice size is conceptually 1 (a single scalar). The naive `dims.drop(1).reduce(Int::times)` on an empty list throws — `if (rank == 1) 1 else …` keeps the rank-1 path intact and the generalisation kicks in for rank ≥ 2. Same guard appears in three places.
+
+- **GatherRule's adjoint shape doesn't need any change.** [Vjp.kt:489-523](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt#L489-L523) emits `SCATTER_ADD(BROADCAST(zero, arr.type), idx, upstream)` with `arr.type` driving the rank. With the interpreter and emitter accepting rank-3 SCATTER_ADD, the adjoint chain works end-to-end for rank-3 GATHER primals — no rule-side changes needed.
+
+- **No new `OpKind`s and no new attrs.** The substrate is identified by the absence of `scatter_dims_to_operand_dims` in `node.attrs` (in the emitter) or by the rank-shape pattern (in the interpreter). Neither check changes — both still pass for rank-3.
+
+- **Round-trip pins through the bundled `stablehlo-translate`.** The three new tests in `RoundTripTest` exercise rank-3 GATHER, SCATTER, and SCATTER_ADD against the real translator. They prove the emitted MLIR's dim-numbers + slice-sizes attrs are syntactically and semantically valid in StableHLO 1.x.
+
+- **Multi-dim general stablehlo gather/scatter (multi-axis indexing) remains out of scope.** The substrate covers single-axis indexing (`arr[i, ...]`); MLIR's full gather supports `arr[i, j, k]` with index-vector tensors. No VjpRule emits that shape today — the closure deferral entry "Multi-dim GATHER/SCATTER (rank-3+)" is now closed for the substrate slice; the multi-axis form would be a separate entry if it ever lands.
+
+**Tests added** (+8 new):
+
+In [GatherTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/GatherTest.kt) (interpreter side, +5):
+
+- `GatherTest.rank3GatherReadsSliceFromTensor` — 2×2×3 tensor, idx=0 and idx=1. Pin: returns the correct rank-2 [2,3] slice.
+- `GatherTest.rank3GatherOutOfBoundsIsFailLoud` — idx=5 on a 2×2×3 tensor. Pin: throws `IllegalArgumentException`.
+- `GatherTest.rank3ScatterReplacesSliceInTensor` — write a 2×3 slice into a zero 2×2×3 base. Pin: slice 1 = value, slice 0 stays zero.
+- `GatherTest.rank3ScatterAddAccumulatesSliceInTensor` — add a 2×3 slice into a ones 2×2×3 base. Pin: slice 0 = ones + value, slice 1 unchanged.
+- `GatherTest.rank3GatherFollowedByScatterAddRoundTrips` — read slice 0 via GATHER, write back via SCATTER_ADD into a zero base. Pin: result's slice 0 matches the input's slice 0; slice 1 = zeros. Mirrors the AD chain shape.
+
+In [RoundTripTest.kt](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) (emitter side, +3):
+
+- `RoundTripTest.substrateGatherRank3SubstrateRoundTrips` — GATHER on a 2×3×4 operand → 3×4 output. Pin: emitted MLIR validates via `stablehlo-translate`.
+- `RoundTripTest.substrateScatterRank3SubstrateRoundTrips` — SCATTER on a 2×3×4 base, 3×4 value. Pin: round-trips.
+- `RoundTripTest.scatterAddRank3SubstrateRoundTrips` — SCATTER_ADD on a 2×3×4 base, 3×4 value. Pin: round-trips.
+
+Full suite is green: **795 tests** (+8 over §0.4.131).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF in `DxirReverseTransform`** — Phase 1 still pending. Would unblock end-to-end gradient pins for §0.4.128's LoopInvariant rewrite.
+2. **D.3i Phase 3f — symbolic-threshold CounterOnly arm**.
+3. **Multi-result COARSENED**.
+4. **`:benchmarks` Gradle module**.
+5. **Batched MATMUL** — rank-2 only at the emitter and synthesis sides; could be a follow-on rank-N generalisation similar to this session's GATHER/SCATTER work.
+
+**Definition-of-done for §0.4.132 — met**:
+- `DxirInterpreter` GATHER / SCATTER / SCATTER_ADD accept any rank ≥ 1 ✓
+- `Emitter` substrate-shape paths emit correct dim-numbers / slice-sizes for any rank ≥ 1 ✓
+- 5 interpreter tests pin rank-3 forward semantics including the `gather + scatter_add` AD-chain shape ✓
+- 3 emitter round-trip tests pin rank-3 MLIR generation against the real translator ✓
+- No new `OpKind`, attrs, or public API surface ✓
+- GatherRule's adjoint shape works end-to-end for rank-3 primals (driven by `arr.type`) ✓
+- Full suite stays green at 795 tests (+8) ✓
+
 #### 0.4.131 D.3i Phase 3e — CounterOnly arm with concrete threshold 2026-04-25
 
 §0.4.127 / §0.4.128 closed the Constant + LoopInvariant arms of the break-bearing closure. §0.4.131 lights up the third typed-classifier arm: CounterOnly with a concrete-int threshold. The break predicate has the canonical shape `STEP(SUB(args[counterArgIdx], thresholdConst))` (i.e., "break when counter > threshold") and the natural bound `n` is a concrete int (`Pattern.tripCountConst`). Both bounds compose into a single effective trip count `min(n, threshold + 1)` — the rewrite emits a vanilla bounded WHILE with that bound and drops the LAND-NOT wrapper, so C5–C9 close it downstream in the same `singlePass` iteration.

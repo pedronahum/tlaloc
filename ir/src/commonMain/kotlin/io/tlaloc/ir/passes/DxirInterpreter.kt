@@ -358,18 +358,19 @@ object DxirInterpreter {
             OpKind.GATHER -> {
                 // §0.4.41 — original S2 shape: `GATHER(arr: rank-1, idx: scalar I32) → scalar`.
                 // §0.4.111 — extended to `GATHER(arr: rank-2, idx: scalar I32) → rank-1`,
-                // selecting the row at row-major offset `idx`. General stablehlo-style
-                // gather (multi-dim `start_indices` tensor + `slice_sizes`) is still out of
-                // scope — no VjpRule emits that shape. `idx` out-of-bounds is a fail-loud
-                // runtime error; benchmark porters are expected to keep indices within
-                // `0 until arr.dims[0]`.
+                // selecting the row at row-major offset `idx`. §0.4.132 — generalised
+                // to any rank ≥ 1: `GATHER(arr: rank-r, idx: scalar I32) → rank-(r-1)`,
+                // selecting the slice at axis-0 position `idx` (row-major contiguous
+                // block of size `prod(arr.dims[1..])`). `idx` out-of-bounds is a
+                // fail-loud runtime error; benchmark porters are expected to keep
+                // indices within `0 until arr.dims[0]`.
                 require(op.operands.size == 2) {
                     "DxirInterpreter: GATHER requires 2 operands (arr, idx), got ${op.operands.size}"
                 }
                 val arrType = op.operands[0].type
                 val idxType = op.operands[1].type
-                require(arrType.rank == 1 || arrType.rank == 2) {
-                    "DxirInterpreter: GATHER arr must be rank-1 or rank-2, got rank=${arrType.rank}"
+                require(arrType.rank >= 1) {
+                    "DxirInterpreter: GATHER arr must be rank ≥ 1, got rank=${arrType.rank}"
                 }
                 require(idxType.isScalar && idxType.dtype == io.tlaloc.core.I32) {
                     "DxirInterpreter: GATHER idx must be scalar I32, got $idxType"
@@ -377,42 +378,32 @@ object DxirInterpreter {
                 val arr = evalNode(op.operands[0], env, multiResults)
                 val idxArr = evalNode(op.operands[1], env, multiResults)
                 val i = idxArr[0].toInt()
-                when (arrType.rank) {
-                    1 -> {
-                        require(i in 0 until arr.size) {
-                            "DxirInterpreter: GATHER idx=$i out of bounds for rank-1 array of size ${arr.size}"
-                        }
-                        floatArrayOf(arr[i])
-                    }
-                    else -> {
-                        // Rank-2 row-major: element [r, c] is stored at offset r*N + c.
-                        val rows = arrType.dims[0]
-                        val cols = arrType.dims[1]
-                        require(i in 0 until rows) {
-                            "DxirInterpreter: GATHER idx=$i out of bounds for rank-2 array of shape " +
-                                "[${arrType.dims[0]}, ${arrType.dims[1]}]"
-                        }
-                        require(arr.size == rows * cols) {
-                            "DxirInterpreter: GATHER rank-2 arr backing size ${arr.size} doesn't match " +
-                                "shape [$rows, $cols]"
-                        }
-                        FloatArray(cols) { c -> arr[i * cols + c] }
-                    }
+                val outer = arrType.dims[0]
+                val sliceSize = if (arrType.rank == 1) 1 else arrType.dims.drop(1).reduce(Int::times)
+                require(i in 0 until outer) {
+                    "DxirInterpreter: GATHER idx=$i out of bounds for rank-${arrType.rank} " +
+                        "array of shape ${arrType.dims}"
                 }
+                require(arr.size == outer * sliceSize) {
+                    "DxirInterpreter: GATHER rank-${arrType.rank} arr backing size ${arr.size} " +
+                        "doesn't match shape ${arrType.dims}"
+                }
+                FloatArray(sliceSize) { off -> arr[i * sliceSize + off] }
             }
             OpKind.SCATTER_ADD -> {
                 // §0.4.45 — original shape: `base[idx] += value` with rank-1 base + scalar value.
                 // §0.4.111 — extended to `base[idx, :] += value` with rank-2 base + rank-1 value
-                // (the gradient shape produced by GatherRule against a rank-2 GATHER). Other
-                // shapes still error.
+                // (the gradient shape produced by GatherRule against a rank-2 GATHER).
+                // §0.4.132 — generalised to any rank ≥ 1: `base[idx, ...] += value` where
+                // `value` is rank-(base.rank - 1) and matches the trailing slice shape.
                 require(op.operands.size == 3) {
                     "DxirInterpreter: SCATTER_ADD requires 3 operands (base, idx, value), got ${op.operands.size}"
                 }
                 val baseType = op.operands[0].type
                 val idxType = op.operands[1].type
                 val valueType = op.operands[2].type
-                require(baseType.rank == 1 || baseType.rank == 2) {
-                    "DxirInterpreter: SCATTER_ADD base must be rank-1 or rank-2, got rank=${baseType.rank}"
+                require(baseType.rank >= 1) {
+                    "DxirInterpreter: SCATTER_ADD base must be rank ≥ 1, got rank=${baseType.rank}"
                 }
                 require(idxType.isScalar && idxType.dtype == io.tlaloc.core.I32) {
                     "DxirInterpreter: SCATTER_ADD idx must be scalar I32, got $idxType"
@@ -426,48 +417,37 @@ object DxirInterpreter {
                 val idxArr = evalNode(op.operands[1], env, multiResults)
                 val value = evalNode(op.operands[2], env, multiResults)
                 val i = idxArr[0].toInt()
-                when (baseType.rank) {
-                    1 -> {
-                        require(i in 0 until base.size) {
-                            "DxirInterpreter: SCATTER_ADD idx=$i out of bounds for rank-1 array of size ${base.size}"
-                        }
-                        val out = base.copyOf()
-                        out[i] += value[0]
-                        out
-                    }
-                    else -> {
-                        val rows = baseType.dims[0]
-                        val cols = baseType.dims[1]
-                        require(i in 0 until rows) {
-                            "DxirInterpreter: SCATTER_ADD idx=$i out of bounds for rank-2 array of shape " +
-                                "[$rows, $cols]"
-                        }
-                        require(value.size == cols) {
-                            "DxirInterpreter: SCATTER_ADD value size ${value.size} doesn't match base column " +
-                                "count $cols"
-                        }
-                        val out = base.copyOf()
-                        for (c in 0 until cols) out[i * cols + c] += value[c]
-                        out
-                    }
+                val outer = baseType.dims[0]
+                val sliceSize = if (baseType.rank == 1) 1 else baseType.dims.drop(1).reduce(Int::times)
+                require(i in 0 until outer) {
+                    "DxirInterpreter: SCATTER_ADD idx=$i out of bounds for rank-${baseType.rank} " +
+                        "array of shape ${baseType.dims}"
                 }
+                require(value.size == sliceSize) {
+                    "DxirInterpreter: SCATTER_ADD value size ${value.size} doesn't match slice " +
+                        "size $sliceSize for rank-${baseType.rank} base of shape ${baseType.dims}"
+                }
+                val out = base.copyOf()
+                for (off in 0 until sliceSize) out[i * sliceSize + off] += value[off]
+                out
             }
             OpKind.SCATTER -> {
                 // §0.4.41 — original S2 shape: `SCATTER(base: rank-1, idx: scalar I32, value: scalar) → rank-1`.
                 // §0.4.114 — extended to `SCATTER(base: rank-2, idx: scalar I32, value: rank-1) → rank-2`,
-                // replacing row [idx] of `base` with `value`. Non-destructive: both
-                // ranks return a fresh copy. The "into zeros" variant used by
-                // GatherRule's adjoint is expressed as
-                // `SCATTER(BROADCAST(const(0), arr.type), idx, value)` — one op kind,
-                // composed with BROADCAST at the emit site.
+                // replacing row [idx] of `base` with `value`. §0.4.132 — generalised to
+                // any rank ≥ 1: `SCATTER(base: rank-r, idx: scalar I32, value: rank-(r-1)) → rank-r`,
+                // replacing the slice at axis-0 position `idx`. Non-destructive: returns
+                // a fresh copy. The "into zeros" variant used by GatherRule's adjoint
+                // is expressed as `SCATTER(BROADCAST(const(0), arr.type), idx, value)` —
+                // one op kind, composed with BROADCAST at the emit site.
                 require(op.operands.size == 3) {
                     "DxirInterpreter: SCATTER requires 3 operands (base, idx, value), got ${op.operands.size}"
                 }
                 val baseType = op.operands[0].type
                 val idxType = op.operands[1].type
                 val valueType = op.operands[2].type
-                require(baseType.rank == 1 || baseType.rank == 2) {
-                    "DxirInterpreter: SCATTER base must be rank-1 or rank-2, got rank=${baseType.rank}"
+                require(baseType.rank >= 1) {
+                    "DxirInterpreter: SCATTER base must be rank ≥ 1, got rank=${baseType.rank}"
                 }
                 require(idxType.isScalar && idxType.dtype == io.tlaloc.core.I32) {
                     "DxirInterpreter: SCATTER idx must be scalar I32, got $idxType"
@@ -481,31 +461,19 @@ object DxirInterpreter {
                 val idxArr = evalNode(op.operands[1], env, multiResults)
                 val value = evalNode(op.operands[2], env, multiResults)
                 val i = idxArr[0].toInt()
-                when (baseType.rank) {
-                    1 -> {
-                        require(i in 0 until base.size) {
-                            "DxirInterpreter: SCATTER idx=$i out of bounds for rank-1 array of size ${base.size}"
-                        }
-                        val out = base.copyOf()
-                        out[i] = value[0]
-                        out
-                    }
-                    else -> {
-                        val rows = baseType.dims[0]
-                        val cols = baseType.dims[1]
-                        require(i in 0 until rows) {
-                            "DxirInterpreter: SCATTER idx=$i out of bounds for rank-2 array of shape " +
-                                "[$rows, $cols]"
-                        }
-                        require(value.size == cols) {
-                            "DxirInterpreter: SCATTER value size ${value.size} doesn't match base column " +
-                                "count $cols"
-                        }
-                        val out = base.copyOf()
-                        for (c in 0 until cols) out[i * cols + c] = value[c]
-                        out
-                    }
+                val outer = baseType.dims[0]
+                val sliceSize = if (baseType.rank == 1) 1 else baseType.dims.drop(1).reduce(Int::times)
+                require(i in 0 until outer) {
+                    "DxirInterpreter: SCATTER idx=$i out of bounds for rank-${baseType.rank} " +
+                        "array of shape ${baseType.dims}"
                 }
+                require(value.size == sliceSize) {
+                    "DxirInterpreter: SCATTER value size ${value.size} doesn't match slice " +
+                        "size $sliceSize for rank-${baseType.rank} base of shape ${baseType.dims}"
+                }
+                val out = base.copyOf()
+                for (off in 0 until sliceSize) out[i * sliceSize + off] = value[off]
+                out
             }
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
