@@ -11,6 +11,7 @@ import io.tlaloc.autograd.sum
 import io.tlaloc.autograd.times
 import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
+import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
@@ -119,6 +120,24 @@ class RoundTripTest {
             name = "cap_scalar_bcast",
         )
         validate(DxirModule(listOf(rank1)).toStablehlo(), "capture rank-1 with scalar broadcast")
+    }
+
+    @Test
+    fun capturedRank3ScalarBroadcastRoundTripsThroughStablehloTranslate() {
+        // §0.4.99 — exercises §0.4.97's f32Tensor3 + rank-3 scalar-broadcast
+        // through the full Capture → emitter → stablehlo-translate pipeline.
+        // BroadcastRule's reverse for rank-3 emits SUM with `reduction_dims =
+        // [0, 1, 2]` (axis-aware path, §0.4.84); the emitter's
+        // `readReductionDims` defaults missing attrs to all-axes for the
+        // simple all-axis SUM that .sum() produces.
+        requireTranslateOrSkip()
+        val rank3 = capture2(
+            f = { x: Tracer<Rank3<Sym, Sym, Sym>>, c: Tracer<ScalarShape> -> (x * c).sum() },
+            a = Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, FloatArray(8) { (it + 1).toFloat() }),
+            b = Tensors.f32Scalar(0.5f),
+            name = "cap_rank3_scalar_bcast",
+        )
+        validate(DxirModule(listOf(rank3)).toStablehlo(), "capture rank-3 with scalar broadcast")
     }
 
     @Test

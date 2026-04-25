@@ -39,6 +39,41 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.99 Round-trip pin: rank-3 captured scalar-broadcast through `stablehlo-translate` 2026-04-25
+
+Belt-and-braces follow-up to §0.4.97. Adds one round-trip test that takes a captured rank-3 lambda using scalar broadcast all the way through the pipeline: tape → Capture → DxirFunction → StableHLO → external `stablehlo-translate --serialize`. Pins that the rank-3 BROADCAST op shape (with `broadcast_dimensions = []` for scalar input) round-trips correctly through every layer.
+
+**One new test** in [RoundTripTest.kt](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt): `capturedRank3ScalarBroadcastRoundTripsThroughStablehloTranslate`. Captures `(x * c).sum()` with x as a 2×2×2 tensor and c as a scalar, lowers to StableHLO, runs through `stablehlo-translate --serialize --target=1.0.0`. No assertions beyond "accepted as valid MLIR".
+
+This complements §0.4.80's rank-1 round-trip and §0.4.83's rank-2 round-trip. Together the three tests cover the full rank-1/2/3 captured-broadcast surface end-to-end.
+
+**Decisions worth flagging**:
+
+- **Used `(x * c).sum()` shape.** Exercises the full chain BROADCAST → MUL → SUM → func.return. A bare `x + c` would also work but produces no scalar output for the captured function's return type — `.sum()` collapses to scalar and gives a clean `tensor<f32>` return type.
+
+- **8-element rank-3 input.** Smallest non-trivial shape (`2×2×2`) — exercises rank-3 broadcasting without making the test data unwieldy.
+
+- **`Rank3` import added.** RoundTripTest already imported `Rank1`, `Rank2`, `ScalarShape`; adding `Rank3` keeps the file's import block organized.
+
+**Tests added** (+1 new):
+
+- `RoundTripTest.capturedRank3ScalarBroadcastRoundTripsThroughStablehloTranslate`
+
+Full suite is green: **679 tests** (+1 over §0.4.98).
+
+**Recommended next pickup**:
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE**.
+2. **D.1i Symja `Simplify` on grad expressions**.
+3. **`diagnosticReporter` migration proper** — multi-step refactor per §0.4.94.
+4. **Rank-4+ tensor constructors** — same template as §0.4.97. Wait for use cases.
+5. **HMC / CartPole / QWOP benchmark ports** — each is multi-session.
+
+**Definition-of-done for §0.4.99 — met**:
+- Captured rank-3 scalar-broadcast lambda round-trips through `stablehlo-translate --serialize` ✓
+- Test self-skips when binary unavailable, matching the rest of `RoundTripTest` ✓
+- Full suite green at 679 tests (+1) ✓
+
 #### 0.4.98 Reverse-order scalar-to-rank-3 broadcast operators — `scalar op tensor3` 2026-04-25
 
 Rank-3 companion to §0.4.91 (rank-1 scalar-LHS) and §0.4.92 (rank-2 scalar-LHS). Four overloads on `Tracer<ScalarShape>` that take a `Tracer<Rank3<A, B, C>>`. Same compositional pattern: lift the scalar via `broadcastScalar`, apply same-shape op.
