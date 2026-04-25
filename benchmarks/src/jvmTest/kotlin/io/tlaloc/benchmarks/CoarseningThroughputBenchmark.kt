@@ -1,10 +1,5 @@
 package io.tlaloc.benchmarks
 
-import io.tlaloc.core.F32
-import io.tlaloc.core.I32
-import io.tlaloc.ir.DxirBuilder
-import io.tlaloc.ir.DxirOp
-import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.passes.PhiCalculus
 import kotlin.system.measureTimeMillis
@@ -17,49 +12,15 @@ import kotlin.test.assertEquals
  * post-coarsening op counts so a future regression in the C5 unroll path
  * fires here before it surfaces in correctness tests.
  *
+ * §0.4.148 — `iterateNTimes` extracted to [BenchmarkPrimals]; this file
+ * now just times the φ-calculus pass around the shared primal.
+ *
  * Mirrors §0.4.145's [EndToEndAdBenchmark] convention: structured
  * `assertEquals` pins for behaviour, side-channel `println` for ms timings.
- * Together the two benchmarks let a /loop iteration spot-check the
- * coarsening throughput at three representative scales.
+ * Together the benchmarks let a /loop iteration spot-check the coarsening
+ * throughput at three representative scales.
  */
 class CoarseningThroughputBenchmark {
-
-    private val f32 = DxirType(F32, emptyList())
-    private val i32 = DxirType(I32, emptyList())
-    private val boolS = DxirType(io.tlaloc.core.Bool, emptyList())
-
-    /**
-     * Same shape as §0.4.145's helper but copied here to keep the benchmark
-     * self-contained — the `:benchmarks` module's role is to host probes that
-     * stay structurally close to the IR/AD substrate they exercise; sharing
-     * helpers across benchmarks would couple them in ways that obscure each
-     * probe's specific scope.
-     */
-    private fun iterateNTimes(n: Int): io.tlaloc.ir.DxirFunction =
-        DxirBuilder.function("iterate$n") {
-            val x = param("x", f32)
-            val nConst = const(n, i32)
-            val zero = const(0, i32)
-            val w = whileOp(
-                inits = listOf(x, zero),
-                cond = { args ->
-                    val diff = op(OpKind.SUB, listOf(nConst, args[1]), i32)
-                    val pred = op(OpKind.STEP, listOf(diff), boolS)
-                    yields(pred)
-                },
-                body = { args ->
-                    val two = const(2f, f32)
-                    val newX = op(OpKind.MUL, listOf(args[0], two), f32)
-                    val one = const(1, i32)
-                    val newI = op(OpKind.ADD, listOf(args[1], one), i32)
-                    yields(newX, newI)
-                },
-            )
-            listOf(w.result(0))
-        }
-
-    private fun countOps(fn: io.tlaloc.ir.DxirFunction, kind: OpKind): Int =
-        fn.body.filterIsInstance<DxirOp>().count { it.op == kind }
 
     @Test
     fun phiCalculusCoarseningSweepOverIterateN() {
@@ -72,13 +33,13 @@ class CoarseningThroughputBenchmark {
         val sweepNs = listOf(5, 10, 20)
         val results = mutableMapOf<Int, Pair<Long, Int>>()  // n → (ms, mulCount)
         for (n in sweepNs) {
-            val primal = iterateNTimes(n)
+            val primal = BenchmarkPrimals.iterateNTimes(n)
             var rewritten: io.tlaloc.ir.DxirFunction? = null
             val ms = measureTimeMillis {
                 rewritten = PhiCalculus.apply(primal)
             }
-            assertEquals(0, countOps(rewritten!!, OpKind.WHILE), "n=$n: WHILE should be unrolled")
-            val muls = countOps(rewritten!!, OpKind.MUL)
+            assertEquals(0, BenchmarkPrimals.countOps(rewritten!!, OpKind.WHILE), "n=$n: WHILE should be unrolled")
+            val muls = BenchmarkPrimals.countOps(rewritten!!, OpKind.MUL)
             results[n] = ms to muls
         }
         // Pin: MUL count tracks n exactly (one per unrolled iteration).

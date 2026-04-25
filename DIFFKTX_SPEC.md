@@ -39,6 +39,53 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.148 `:benchmarks` consolidation — extract `BenchmarkPrimals.kt` 2026-04-25
+
+§0.4.145 / §0.4.146 / §0.4.147 each shipped a benchmark that included a copy of the same `iterateNTimes(n)` helper plus a local `countOps(fn, kind)` counter — three identical copies across [EndToEndAdBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/EndToEndAdBenchmark.kt), [CoarseningThroughputBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/CoarseningThroughputBenchmark.kt), [SctThroughputBenchmark.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/SctThroughputBenchmark.kt). The §0.4.145 doc explicitly flagged the duplication choice as deliberate ("future iterations can extract a small `BenchmarkPrimals.kt` if the duplication becomes painful, but at two probes it's not"); §0.4.147's recommended-next #4 marked the threshold ("With three inhabitants now sharing `iterateNTimes`, the duplication is visible"). §0.4.148 lands the extraction: a new [BenchmarkPrimals.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt) `object` exposes `iterateNTimes` and `countOps` to all three benchmarks; each benchmark's local copies are removed.
+
+**The mechanism**:
+
+1. **`BenchmarkPrimals` object** ([BenchmarkPrimals.kt:27-73](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt#L27-L73)) — singleton holder for shared primal builders. Exposes the canonical `iterateNTimes(n)` plus the f32/i32/boolS type aliases. Includes a structural `countOps(fn, kind)` mirroring the helper duplicated in §0.4.146 / §0.4.147 (and matching `PhiCalculusTest.countOps`).
+
+2. **Per-benchmark cleanup** — each of the three existing benchmark files drops its local `iterateNTimes` + `countOps` + type-alias declarations. The benchmark methods now read `BenchmarkPrimals.iterateNTimes(n)` / `BenchmarkPrimals.countOps(...)` instead. File sizes shrink: EndToEndAdBenchmark from 75 → 47 lines, CoarseningThroughputBenchmark from 92 → 56 lines, SctThroughputBenchmark from 96 → 75 lines (some kept for the per-benchmark assertion details).
+
+3. **No test count change** — `:benchmarks` still has three test methods (one per benchmark class). The shared helper isn't a test itself; it's a compile-time-shared fixture.
+
+**Decisions worth flagging**:
+
+- **Object, not top-level functions.** I considered exporting `iterateNTimes` as a top-level function in the `io.tlaloc.benchmarks` package, but `BenchmarkPrimals.iterateNTimes(n)` reads more clearly at call sites — it signals "this comes from the benchmark fixture set", not "this is local". The `object` form also bundles the type aliases (`f32` / `i32` / `boolS`) consistently with the helper. Mirrors Kotlin standard-library style for fixture utilities (e.g., `Collections.emptyList()`).
+
+- **`countOps` belongs in `BenchmarkPrimals` too.** Two of the three benchmarks needed it; extracting only `iterateNTimes` would have left §0.4.146 + §0.4.147's local `countOps` copies in place — partial consolidation. Keeping both helpers in `BenchmarkPrimals` is cleaner. The third benchmark (§0.4.145's end-to-end) doesn't currently need `countOps` but pays no cost for the helper being available.
+
+- **Helpers stay narrowly scoped.** The doc-comment on `BenchmarkPrimals` calls out: "only primal builders and structural counters common to MULTIPLE benchmarks belong here". Benchmark-specific construction (e.g., a tracer-surface fixture, a shape that exercises a niche code path) stays in the benchmark's own file. The "stay structurally close" principle from §0.4.145 / §0.4.146 / §0.4.147 still applies — sharing widens only when duplication is observable across three or more callers.
+
+- **No structural changes to the benchmark files beyond import substitution.** Each benchmark's test method body is unchanged; only the helper section was deleted. This makes the diff trivially auditable: a reviewer can verify "did the test logic change?" with a single `git diff --color-words` view.
+
+- **Each existing §0.4.N's `iterateNTimes` doc-comment is kept on `BenchmarkPrimals.iterateNTimes`.** The shared helper's doc-comment cross-references §0.4.146 (post-coarsening: `n` MULs) and §0.4.147 (post-AD eval: `2^n`) so a future maintainer reading the helper sees what each benchmark pins about its output. Mirrors how `PhiCalculus.kt`'s helper functions cross-ref the pass that uses them.
+
+- **Test count stays at 839.** No tests added, no tests removed — the benchmark methods still exist and still execute. `bash scripts/count-tests.sh` reports 839 (same as §0.4.147). A consolidation that changed test count would suggest the extraction broke or duplicated something; the unchanged count confirms the refactor is purely structural.
+
+- **Reverse cross-references in the file headers.** Each of the three updated benchmark files has its existing `§0.4.145` / `§0.4.146` / `§0.4.147` header doc updated with a "§0.4.148 — `iterateNTimes` extracted to [BenchmarkPrimals]" note. Future readers of any benchmark file see the trail from this section back to its origin.
+
+**Tests added** (+0): pure consolidation. Suite: 839 (unchanged from §0.4.147).
+
+Full suite is green: **839 tests** (unchanged from §0.4.147).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 4 — nested WHILE in IF branch.** Still the headline gap.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.**
+3. **D.3i Phase 3i — region-internal SOIs (DxirOpResult/DxirCall) in CounterOnly threshold/n.**
+4. **Fourth `:benchmarks` inhabitant** — e.g., a different primal shape (affine-recurrence C6/C7 path, or a multi-branch IF) to extend coverage beyond the iterateNTimes substrate.
+
+**Definition-of-done for §0.4.148 — met**:
+- New `BenchmarkPrimals.kt` exposes `iterateNTimes` + `countOps` ✓
+- All three existing benchmarks dropped their local copies and call through `BenchmarkPrimals.…` ✓
+- No test methods added, removed, or renamed ✓
+- File header doc-comments updated to flag the §0.4.148 extraction ✓
+- Helpers stay narrowly scoped per the documented "three or more callers" threshold ✓
+- Full suite stays green at 839 tests (unchanged) ✓
+
 #### 0.4.147 Third `:benchmarks` inhabitant — SCT-only throughput sweep 2026-04-25
 
 §0.4.145 / §0.4.146 shipped the `:benchmarks` substrate plus end-to-end + coarsening probes. §0.4.146's recommended-next #4 called out "a SCT-only benchmark that times `DxirReverseTransform.apply` on a fixed-shape coarsened function (isolates the SCT cost from PhiCalculus's)". §0.4.147 lands that probe: [SctThroughputBenchmark.dxirReverseTransformSweepOverIterateN](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/SctThroughputBenchmark.kt) pre-coarsens the primal once outside the timing block, then sweeps `DxirReverseTransform.apply` at n = 5 / 10 / 20 and pins the gradient evaluates to the closed-form derivative `2^n` at `x = 3`. With three benchmarks shipped, the substrate now isolates each of the three regression-prone phases — coarsening (§0.4.146), SCT (§0.4.147), and end-to-end pipeline (§0.4.145) — so a perf regression surfaces at the scope it actually originated.
