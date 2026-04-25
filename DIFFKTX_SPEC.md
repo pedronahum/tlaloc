@@ -39,6 +39,84 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.123 D.3i Phase 1 — structural detector for LAND-composed break-bearing WHILE 2026-04-25
+
+§0.4.108's deferred-register entry "Closure work | **D.3i closed-form closure** for LAND-composed WHILE — Pending; paper-faithful break-bearing WHILE" gets its first phase. D.3i is the multi-session arc that's been the headline candidate across the §0.4.118 → §0.4.122 recommended-next lists. This session opens the arc with a real, not placeholder, increment: a structural detector that recognises the FIR-side hoist shape `LAND(cond, NOT(break_cond))` in the WHILE's cond region.
+
+**The mechanism** in [BreakBearingWhile.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/BreakBearingWhile.kt) (new file):
+
+```kotlin
+object BreakBearingWhile {
+    data class Pattern(
+        val whileOp: DxirOp,
+        val origCond: DxirNode,
+        val breakCond: DxirNode,
+    )
+
+    fun detect(op: DxirOp): Pattern? {
+        if (op.op != OpKind.WHILE) return null
+        if (op.regions.size != 2) return null
+        val condRegion = op.regions[0]
+        if (condRegion.blocks.size != 1) return null
+        val condBlock = condRegion.blocks.single()
+        if (condBlock.terminator.size != 1) return null
+        val terminator = condBlock.terminator.single() as? DxirOp ?: return null
+        if (terminator.op != OpKind.LAND) return null
+        if (terminator.operands.size != 2) return null
+        val notNode = terminator.operands[1] as? DxirOp ?: return null
+        if (notNode.op != OpKind.NOT) return null
+        if (notNode.operands.size != 1) return null
+        return Pattern(
+            whileOp = op,
+            origCond = terminator.operands[0],
+            breakCond = notNode.operands[0],
+        )
+    }
+}
+```
+
+The `Pattern` carries the WHILE op + the two split predicates (the natural cond from the loop's `while (cond)` source, and the break condition from the FIR-side `if (break_cond) break` hoist). Future phases (the actual closed-form closure) will consume these to produce the gradient.
+
+**Decisions worth flagging**:
+
+- **Phase 1 ships ONLY the detector — no rewrite, no gradient handling.** Per the loop charter's "carve a single coherent phase that lands a real increment — never a placeholder", Phase 1 is the pattern-recognition substrate that subsequent phases will plug into `PhiCalculus.coarsenFunction`'s WHILE path or `DxirReverseTransform`'s reverse walk. The detector is itself a real piece — it's referenced by 4 tests pinning detection on positive + negative cases — and unlocks the design space for follow-up phases.
+
+- **New file `BreakBearingWhile.kt` instead of growing `PhiCalculus.kt`.** PhiCalculus.kt is already 2500+ lines and carries the full coarsening + closure surface. Putting the D.3i detector in its own file signals it's a separable concern; Phase 2's closure logic will go in the same file as a peer to `detect`. The pattern matches §0.4.31's choice to put `coarsenFunction`-related code under one logical roof.
+
+- **Match is purely structural, not semantic.** The detector returns a match whenever the cond's terminator is `LAND(_, NOT(_))`. It does NOT validate that `origCond` is a STEP-counter shape, that `breakCond` is a clean predicate, or that the loop has a counter / trip-count bound. Those tighter checks belong to phases that consume the pattern; this detector's contract is "is the top-level cond an LAND with NOT on its second slot?". Keeping the match loose means D.3i Phase 2 can layer additional checks on top without reworking the core detection.
+
+- **No dependency on `detectAffineRecurrence` or `detectSimpleLoop`.** Those existing detectors target C5/C6 patterns (concrete trip counts, affine carried back-edges). D.3i is structurally orthogonal — the LAND wrapper is the new piece. Phase 2 will likely COMPOSE these detectors (e.g., "this is a break-bearing C5 loop"), but Phase 1 keeps the surface narrow so the composition can happen cleanly later.
+
+- **Negative-case tests are explicit.** The four tests cover the positive shape AND three failure modes: vanilla WHILE without LAND (the most common rejection), LAND with non-NOT second operand (catches a malformed hoist), and a non-WHILE op (catches dispatch errors). Future phases that add structural assertions inherit these as reusable scaffolding.
+
+**Tests added** (+4 new) in [BreakBearingWhileTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/BreakBearingWhileTest.kt):
+
+- `BreakBearingWhileTest.detectsLandComposedBreakBearingWhile` — positive: WHILE with `LAND(STEP(SUB(n, counter)), NOT(STEP(args[0])))` cond. Pattern returned with origCond + breakCond pointing at the right inner ops.
+- `BreakBearingWhileTest.rejectsVanillaWhileWithoutLand` — negative: standard simple-loop cond (just STEP). Returns null.
+- `BreakBearingWhileTest.rejectsLandWhereSecondOperandIsNotNot` — negative: LAND second operand is another STEP, not NOT. Returns null.
+- `BreakBearingWhileTest.rejectsNonWhileOp` — negative: IF op (or any non-WHILE). Returns null.
+
+Full suite is green: **758 tests** (+4 over §0.4.122).
+
+**Recommended next pickup** (next /loop firing — D.3i Phase 2):
+
+1. **D.3i Phase 2 — break-cond evaluation under closed-form closure.** The detector now lets Phase 2 consume `Pattern.breakCond` and integrate with `PhiCalculus.coarsenFunction` to produce a closed-form result that respects the early-termination semantics. Likely needs: (a) recognise that the WHILE's trip count becomes the MIN of (a) the natural trip-count bound and (b) the iteration at which break_cond becomes true; (b) emit a closed-form expression that captures this min via Symja or piecewise structure. Multi-session arc continuation.
+
+2. **Multi-result COARSENED** — primal-side widening that's been deferred since §0.4.31; needs `gradAccum` per-(id, index) keying and `handleCoarsenedAdjoint` updates.
+
+3. **`:benchmarks` Gradle module** — extract one perf probe into its own module.
+
+4. **HMC benchmark port — Phase 1**.
+
+**Definition-of-done for §0.4.123 — met**:
+- New file `BreakBearingWhile.kt` lands with `Pattern` data class + `detect` function ✓
+- Detector matches the canonical `LAND(cond, NOT(break_cond))` shape ✓
+- Detector rejects non-WHILE ops, vanilla WHILEs, and malformed LAND shapes ✓
+- Four tests pin both positive shape and three negative paths ✓
+- No new public API beyond the dedicated D.3i namespace ✓
+- D.3i multi-session arc opened with a real (not placeholder) Phase 1 deliverable ✓
+- Full suite stays green at 758 tests (+4) ✓
+
 #### 0.4.122 Out-of-scope register refresh — 7 items shipped since §0.4.108 2026-04-25
 
 §0.4.108 introduced the second register snapshot pattern; §0.4.122 is the third. Thirteen sub-sections (§0.4.109–§0.4.121) shipped between the two refreshes, closing seven items from the deferred table and partially closing one. This refresh updates the deferred snapshot accordingly.
