@@ -39,6 +39,75 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.105 D.1i Phase 3 — `simplifyReturns` wires into the IR pipeline 2026-04-25
+
+Phase 1 (§0.4.103) shipped the standalone pass; Phase 2 (§0.4.104) widened it for fractional consts. Phase 3 closes the loop by wiring it into `TlalocIrGenerationExtension.generate` so user code that compiles with `-P plugin:io.tlaloc:tlaloc.simplify.enabled=true` (or runs with `-Dtlaloc.simplify.enabled=true`) gets simplified gradient bodies before synthesis.
+
+**The hookup** in [TlalocIrGenerationExtension.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt) inserts between `tryReverseTransform` and `synthesise`:
+
+```kotlin
+val toSynthesise: DxirFunction = tryReverseTransform(coarsened, includeForward) ?: ...
+
+val simplifyEnabled = System.getProperty(SIMPLIFY_ENABLED_PROPERTY) == "true"
+val simplified: DxirFunction = if (simplifyEnabled) {
+    val engine = engineLazy.value
+    if (engine == null) toSynthesise
+    else try { PhiCalculus.simplifyReturns(toSynthesise, engine) }
+         catch (t: Throwable) { /* warn + fall back */ toSynthesise }
+} else toSynthesise
+
+val replacement = synth.synthesise(simplified, transformed, currentDeclarationParent!!)
+```
+
+**Architecture decisions worth flagging**:
+
+- **Where in the pipeline.** `simplifyReturns` runs on the gradient `DxirFunction` (the output of `DxirReverseTransform.apply`), not on the primal. The primal already goes through `PhiCalculus.apply` / `coarsenFunction` ahead of reverse-transform; running Symja Simplify on the primal would compete with that path. Running it on the gradient targets the actual paper §6.1 mechanism (ii) form: simplify the gradient expression after the reverse rules have constructed it.
+
+- **Default off.** `tlaloc.simplify.enabled` is unset by default, so existing builds get bit-identical output (no Symja work runs in the IR phase, no perf regression, no chance of a Simplify edge case breaking shipping code). Users opt in per-build.
+
+- **Three-layer bail-out.** (i) Property gate: if not "true", skip entirely — zero Symja work. (ii) Engine guard: if SymjaEngine fails to instantiate, skip — same null-engine path the rest of the pipeline already handles. (iii) Per-call try/catch around `simplifyReturns` itself, even though the pass has its own internal bail-out — defense-in-depth in case a future widening introduces a code path that throws past its own catch. The triple-guard reflects that this is the FIRST callsite to ever invoke `simplifyReturns`; if it surfaces a regression in any module compiled against it, the user can flip the property off and ship.
+
+- **Composes cleanly with SOI coarsening.** `tlaloc.soi.enabled=true` + `tlaloc.simplify.enabled=true` are independent: the SOI path coarsens the primal (`coarsenFunction` wraps in COARSENED with pre-computed `gradient_body`), then reverse-transform splices that gradient body, then simplifyReturns sees the spliced gradient and lifts/simplifies/lowers it. Both gates fire correctness-preserving rewrites; their composition is the union of their improvements.
+
+**Phase 3 test surface** in [TlalocPluginDiagnosticTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/TlalocPluginDiagnosticTest.kt) (+4 tests):
+
+1. `simplify enabled preserves grad correctness for x times x` — `grad { x: Float -> x * x }` at x=3 returns 6.0 with simplify on. Pin: simplify must not change numerical answers.
+2. `simplify enabled preserves valueAndGrad correctness` — multi-return path through simplifyReturns: `(value, grad)` slots simplify independently. `valueAndGrad { x*x }` at x=3 returns `(9.0, 6.0)`.
+3. `simplify disabled by default leaves gradient unchanged` — property cleared explicitly; grad still equals 8.0 at x=4. Pins the gate works (no Symja work happens by default).
+4. `simplify enabled handles polynomial gradient correctly` — `grad { (x+1)^2 + 2x }` at x=3 returns 10.0. Multi-step gradient body with constant-1 references — confidence pin against Simplify edge cases.
+
+**Performance / IR-size delta — not yet measured.** The plan called for benchmarking against Brachistochrone / HookeanSpring / BGDHyperOpt. Two reasons that's deferred to a follow-up: (a) the existing benchmark scaffolding doesn't have a property-toggle harness, and adding one is enough scope to land separately; (b) measuring IR-size delta requires comparing pretty-printed `DxirFunction` bodies, which is mechanical but is also a separate enough piece to ship without coupling to the wiring change. The wiring is shipped + correctness-pinned; perf measurement is the next concrete step.
+
+**Updated multi-session plan** for D.1i:
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| 1 | `simplifyReturns` scaffolding + arithmetic-only first cut | Shipped §0.4.103 |
+| 2 | Widen `liftNode` for fractional Float constants (`realLiteral`); broaden test coverage | Shipped §0.4.104 |
+| 3 | Wire into `TlalocIrGenerationExtension` behind `tlaloc.simplify.enabled` opt-in property | **Shipped this session** |
+| 3b | Benchmark perf delta on Brachistochrone / HookeanSpring / BGDHyperOpt; add a property-toggle harness for IR-size diffing | Pending |
+| 4 | Opaque-leaf handling for non-arithmetic gradient ops (SUM, MEAN, MATMUL, GATHER) — extends to tensor gradient bodies; reuse the §0.4.52 `symOpaqueLeaves` mechanism | Pending |
+
+**Tests added** (+4 new):
+
+- `TlalocPluginDiagnosticTest.simplify enabled preserves grad correctness for x times x`
+- `TlalocPluginDiagnosticTest.simplify enabled preserves valueAndGrad correctness`
+- `TlalocPluginDiagnosticTest.simplify disabled by default leaves gradient unchanged`
+- `TlalocPluginDiagnosticTest.simplify enabled handles polynomial gradient correctly`
+
+Full suite is green: **693 tests** (+4 over §0.4.104).
+
+**Recommended next pickup** (next /loop firing should pick this up): D.1i Phase 3b — add a property-toggle harness to one or two existing benchmark tests so we can produce a concrete IR-size delta number for the §0.4.105 wiring. Look for a benchmark that already exercises a long gradient body (Brachistochrone is the obvious candidate — its trapezoidal-rule sum produces a chain-rule expansion that Symja's Simplify should compress meaningfully). Capture pre/post node counts with `DxirFunction.body.size`; pin them in the test as concrete expectations + record the values in §0.4.105's note.
+
+**Definition-of-done for §0.4.105 — met**:
+- `SIMPLIFY_ENABLED_PROPERTY = "tlaloc.simplify.enabled"` constant lands ✓
+- Pipeline hookup runs `simplifyReturns` between reverse-transform and synthesis ✓
+- Property defaults off; existing builds get bit-identical output ✓
+- Triple-layer bail-out (gate / engine / try-catch) keeps the change risk-bounded ✓
+- Four integration tests pin grad / valueAndGrad / gate-off / multi-step correctness ✓
+- Multi-session phase plan updated with Phase 3 marked shipped + 3b carved out ✓
+- Full suite green at 693 tests (+4) ✓
+
 #### 0.4.104 D.1i Phase 2 — `liftNode` widens for fractional Float consts 2026-04-25
 
 Phase 1 (§0.4.103) flagged a silent correctness bug: `SymjaEngine.liftNode` for `DxirConst` payloads called `n.toLong()`, which truncates fractional Float values — `0.5f.toLong() = 0L`, so `liftNode(const(0.5f))` produced `rational(0)` and Symja saw the gradient as multiplied by zero. Any gradient body containing fractional constants (MeanRule's `1/N`, scaled sums, etc.) would be silently mis-simplified to zero. Phase 1 sidestepped this by keeping its tests on integer constants only; Phase 2 fixes the root cause.

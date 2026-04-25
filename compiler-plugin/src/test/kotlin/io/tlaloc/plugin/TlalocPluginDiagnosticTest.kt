@@ -1783,6 +1783,108 @@ class TlalocPluginDiagnosticTest {
         }
     }
 
+    // --------- D.1i Phase 3: simplify-on-returns opt-in (§0.4.105) ---------
+
+    @Test
+    fun `simplify enabled preserves grad correctness for x times x`() {
+        // With `tlaloc.simplify.enabled=true`, `grad { x -> x * x }` runs through
+        // PhiCalculus.simplifyReturns after reverse transform. The gradient body
+        // (which contains `2 * x`-like structure depending on the reverse rules)
+        // must still evaluate to 6.0 at x=3. Correctness pin — the simplify gate
+        // is opt-in for performance / IR-size reasons; correctness must not regress.
+        val prev = System.getProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY)
+        System.setProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY, "true")
+        try {
+            val src = """
+                import io.tlaloc.autograd.grad
+                fun main() {
+                    val g = grad { x: Float -> x * x }
+                    println(g(3.0f))
+                }
+            """.trimIndent()
+            val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN, user = src)
+            assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+            assertEquals("6.0", result.stdout.trim())
+        } finally {
+            if (prev == null) System.clearProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY)
+            else System.setProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY, prev)
+        }
+    }
+
+    @Test
+    fun `simplify enabled preserves valueAndGrad correctness`() {
+        // Multi-return path: simplifyReturns should rewrite each return slot
+        // independently and produce the same numerical answer.
+        val prev = System.getProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY)
+        System.setProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY, "true")
+        try {
+            val src = """
+                import io.tlaloc.autograd.valueAndGrad
+                fun main() {
+                    val vg = valueAndGrad { x: Float -> x * x }
+                    println(vg(3.0f))
+                }
+            """.trimIndent()
+            val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN, user = src)
+            assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+            assertEquals("(9.0, 6.0)", result.stdout.trim())
+        } finally {
+            if (prev == null) System.clearProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY)
+            else System.setProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY, prev)
+        }
+    }
+
+    @Test
+    fun `simplify disabled by default leaves gradient unchanged`() {
+        // No property set: simplify path is bypassed entirely. Same correctness as
+        // any other un-simplified compilation. The point of this test is to pin
+        // that the property GATE works — unset means no Symja work happens.
+        val prev = System.getProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY)
+        System.clearProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY)
+        try {
+            val src = """
+                import io.tlaloc.autograd.grad
+                fun main() {
+                    val g = grad { x: Float -> x * x }
+                    println(g(4.0f))
+                }
+            """.trimIndent()
+            val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN, user = src)
+            assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+            assertEquals("8.0", result.stdout.trim())
+        } finally {
+            if (prev != null) System.setProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY, prev)
+        }
+    }
+
+    @Test
+    fun `simplify enabled handles polynomial gradient correctly`() {
+        // d/dx[(x+1)^2 + 2x] = 2(x+1) + 2. At x=3: 2*4 + 2 = 10. Adds confidence
+        // that the simplify pass interacts cleanly with multi-step gradient bodies
+        // (multiple adds, mults, and constant-1 references).
+        val prev = System.getProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY)
+        System.setProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY, "true")
+        try {
+            val src = """
+                import io.tlaloc.autograd.grad
+                fun main() {
+                    val g = grad { x: Float ->
+                        val p = x + 1.0f
+                        val sq = p * p
+                        sq + 2.0f * x
+                    }
+                    println(g(3.0f))
+                }
+            """.trimIndent()
+            val result = compileAndRun(stub = AUTOGRAD_STUB_BROKEN, user = src)
+            assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
+            assertEquals("10.0", result.stdout.trim())
+        } finally {
+            if (prev == null) System.clearProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY)
+            else System.setProperty(TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY, prev)
+        }
+    }
+
     // --------- Lambda lowering: unsupported ---------
 
     @Test

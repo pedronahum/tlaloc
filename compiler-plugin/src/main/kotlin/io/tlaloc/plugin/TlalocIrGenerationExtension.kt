@@ -168,7 +168,33 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     return transformed
                 }
 
-                val replacement = synth.synthesise(toSynthesise, transformed, currentDeclarationParent!!)
+                // §0.4.105 — D.1i Phase 3. Optionally run PhiCalculus.simplifyReturns over
+                // the gradient function before synthesis. Gated on `tlaloc.simplify.enabled`
+                // (default off) and on the engine being available — null engine, property
+                // unset, or anything other than "true" all leave the gradient body
+                // unchanged. simplifyReturns has its own internal bail-out (returns the
+                // input fn on any lift / lower failure), so the pipeline stays correct
+                // for gradient bodies whose op set falls outside the lift surface.
+                val simplifyEnabled =
+                    System.getProperty(SIMPLIFY_ENABLED_PROPERTY) == "true"
+                val simplified: DxirFunction = if (simplifyEnabled) {
+                    val engine = engineLazy.value
+                    if (engine == null) toSynthesise
+                    else try {
+                        PhiCalculus.simplifyReturns(toSynthesise, engine)
+                    } catch (t: Throwable) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension: PhiCalculus.simplifyReturns threw on " +
+                                "'${fn.name}' (${t::class.simpleName}: ${t.message}); " +
+                                "synthesising the un-simplified gradient",
+                            null,
+                        )
+                        toSynthesise
+                    }
+                } else toSynthesise
+
+                val replacement = synth.synthesise(simplified, transformed, currentDeclarationParent!!)
                 if (replacement == null) {
                     mc.report(
                         CompilerMessageSeverity.WARNING,
@@ -282,6 +308,17 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
          * §0.4.36 for empirical findings.
          */
         const val SOI_SIZE_LIMIT_PROPERTY: String = "tlaloc.soi.size.limit"
+
+        /**
+         * §0.4.105 — D.1i Phase 3. System property toggling [PhiCalculus.simplifyReturns]
+         * over each gradient `DxirFunction` after [DxirReverseTransform.apply]. When set
+         * to "true", the IR extension lifts each return expression to a Symja `SymExpr`,
+         * runs `Simplify`, and lowers back. Unset / "false" / anything else: gradient
+         * body passes through unchanged. The pass has internal bail-out semantics, so a
+         * `true` setting is safe for gradient bodies outside the lift surface — they
+         * synthesise un-simplified rather than failing.
+         */
+        const val SIMPLIFY_ENABLED_PROPERTY: String = "tlaloc.simplify.enabled"
 
         /**
          * CAS version string per plan §3.2.2 — bumps invalidate cached entries. Tied to
