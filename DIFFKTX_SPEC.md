@@ -39,6 +39,68 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.106 D.1i Phase 3b — IR-size delta harness reveals the reverse rules already do most of the work 2026-04-25
+
+§0.4.105's "recommended next pickup" called for a benchmark harness that records pre/post `body.size` numbers for `simplifyReturns` running on representative gradient bodies. This session lands that harness in [PhiCalculusSimplifyIrSizeTest.kt](ir/src/jvmTest/kotlin/io/tlaloc/ir/passes/PhiCalculusSimplifyIrSizeTest.kt) and reports an honest finding: **on the small straight-line scalar primals the existing pipeline produces, the simplify pass adds little or no IR-size benefit because the reverse rules in `Vjp.kt` already emit tightly-folded gradient bodies**.
+
+**Empirical numbers (recorded in the test as `assertEquals` pins)**:
+
+| Primal | `body.size` pre-simplify | `body.size` post-simplify | Δ |
+|---|---|---|---|
+| `f(x) = x*x` (gradient = `2x`) | 1 (`add(x, x)`) | 2 (`const 2; mul(2, x)`) | **+1** |
+| `f(x) = x*x*x` (gradient = `3x²`) | 4 (chain of `add(add(x*x, x*x), x*x)`) | 4 (`const 3; const 2; pow(x, 2); mul(3, pow)`) | **0** |
+| `f(x) = (x+1)² + 2x` (gradient = `2x + 4`) | 5 (`(x+1) + (x+1) + 2`) | 4 (`const 2; const 2; add(2, x); mul(2, add)`) | **−1** |
+| `f(x) = 0.5 * x` (gradient = `0.5`) | 1 (`const 0.5`) | 1 (`const 0.5`) | **0** |
+| `f(x) = x` (gradient = `1`) | 1 (`const 1`) | 1 (`const 1`) | **0** |
+
+**What the data says**:
+
+- **The reverse rules in `Vjp.kt` already do significant constant folding.** `MulRule` for `d/dx[x*x]` doesn't emit `dy*x + x*dy` with `dy = 1` — it folds to a single `add(x, x)`. That's already the gradient `2x` expressed without any explicit constant. Symja Simplify rewrites it to `2*x`, which is semantically equivalent but lowers as `const 2.0` + `mul`, growing the body by one node.
+- **Symja's algebraic identities sometimes prefer `pow` over repeated `mul`.** `add(add(x*x, x*x), x*x)` is recognized as `3*x*x` and lowered as `3 * x^2`. Same node count (four), but the post form uses POW instead of repeated MUL — semantically cleaner for any future symbolic pass that walks the gradient body, but at runtime POW is more expensive than MUL.
+- **Genuine shrinkage shows up only when there's redundancy the reverse rule can't see.** `(x+1)² + 2x` reverse-emits `2 + 2*(x+1) = 2 + 2x + 2`, three independent additions. Simplify folds the constants and rewrites as `2*(2 + x)` — one node smaller. This is the only case in the harness where size strictly decreases.
+
+**What this means for the §0.4.105 wiring**:
+
+- **The opt-in default is the right call.** A property-gated pass that breaks even on simple cases shouldn't run unconditionally. Users who suspect their gradient bodies have redundancy that Symja can capture flip the property; everyone else gets bit-identical builds.
+- **The harness becomes a regression detector.** The pre and post numbers are pinned as `assertEquals`. Any future widening of the reverse rules (Phase 4's opaque-leaf handling, anything that touches `Vjp.kt`) or any Symja version bump will surface in this test if the size delta moves.
+- **The numerical-correctness pin is the strongest part of the harness.** `simplifyAgreesWithUnsimplifiedNumerically` runs both the un-simplified and simplified gradient through `DxirInterpreter.evalFunction` at a sample input; both must produce the expected analytical derivative. Any silent mis-simplification (the most dangerous failure mode) gets caught here.
+- **Real wins are deferred to Phase 4.** Tensor reductions, gather chains, and bodies with sums over loop trip counts are where chain-rule expansion creates the redundancy Symja's algebraic rules can compress meaningfully. Those need the opaque-leaf widening to come into Simplify's scope.
+
+**Decisions worth flagging**:
+
+- **Pinned the observed numbers, not aspirational ones.** It would be tempting to write `assertTrue(post < pre)` everywhere, but on these primals the inequality doesn't hold — and the test would fail. Pinning the actual numbers means the test asserts what is true today, not what we hoped would be true.
+- **Did not benchmark Brachistochrone / HookeanSpring / BGDHyperOpt.** §0.4.105's note suggested those as the larger-body candidates. Looking at how those tests are structured, they run end-to-end through the plugin and measure runtime values, not IR-size. Adding IR-size measurement to them would require a property-toggle harness that captures the `DxirFunction` between reverse-transform and synthesis, which is more invasive than the current shape allows. The unit-test harness here is the right granularity for iteration; running the full benchmarks under the property gate is a follow-up if Phase 4's wins justify the engineering.
+
+**Updated multi-session plan** for D.1i:
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| 1 | `simplifyReturns` scaffolding + arithmetic-only first cut | Shipped §0.4.103 |
+| 2 | Widen `liftNode` for fractional Float constants (`realLiteral`) | Shipped §0.4.104 |
+| 3 | Wire into `TlalocIrGenerationExtension` behind opt-in property | Shipped §0.4.105 |
+| 3b | IR-size delta harness with pinned pre/post numbers + numerical correctness | **Shipped this session** |
+| 4 | Opaque-leaf handling for non-arithmetic gradient ops (SUM, MEAN, MATMUL, GATHER) — extends to tensor gradient bodies; reuse the §0.4.52 `symOpaqueLeaves` mechanism | Pending |
+
+**Tests added** (+6 new):
+
+- `PhiCalculusSimplifyIrSizeTest.simplifyOfSquareGradient`
+- `PhiCalculusSimplifyIrSizeTest.simplifyOfCubeGradient`
+- `PhiCalculusSimplifyIrSizeTest.simplifyOfPolynomialGradient`
+- `PhiCalculusSimplifyIrSizeTest.simplifyOfFractionalConstantGradient`
+- `PhiCalculusSimplifyIrSizeTest.simplifyPreservesIdentityGradient`
+- `PhiCalculusSimplifyIrSizeTest.simplifyAgreesWithUnsimplifiedNumerically`
+
+Full suite is green: **699 tests** (+6 over §0.4.105).
+
+**Recommended next pickup** (next /loop firing should pick this up): D.1i Phase 4 — opaque-leaf handling for non-arithmetic gradient ops in `SymjaEngine.liftNode`. The current `liftNode` errors on any `OpKind` outside ADD/SUB/MUL/DIV/NEG/POW. Phase 4 introduces a `symOpaqueLeaves` map (mirroring §0.4.52's path for C6's gradient-of-iter rewrite) that lets `simplifyReturns` lift sub-expressions whose outer ops are unsupported by treating them as opaque variables for Simplify, then substituting them back during lower. The first concrete extension targets are SUM and MEAN — both reduction ops that appear in tensor gradient bodies, with semantics Simplify can leverage (a SUM over a constant simplifies to multiplication; a MEAN of a constant simplifies to the constant). After that, MATMUL and GATHER become cheap to add by analogy.
+
+**Definition-of-done for §0.4.106 — met**:
+- IR-size harness lands with pre/post numbers pinned as concrete expectations ✓
+- Numerical-correctness bundle test catches any silent mis-simplification ✓
+- Empirical finding ("reverse rules already do most folding") documented honestly ✓
+- Multi-session phase plan updated with 3b marked shipped ✓
+- Full suite green at 699 tests (+6) ✓
+
 #### 0.4.105 D.1i Phase 3 — `simplifyReturns` wires into the IR pipeline 2026-04-25
 
 Phase 1 (§0.4.103) shipped the standalone pass; Phase 2 (§0.4.104) widened it for fractional consts. Phase 3 closes the loop by wiring it into `TlalocIrGenerationExtension.generate` so user code that compiles with `-P plugin:io.tlaloc:tlaloc.simplify.enabled=true` (or runs with `-Dtlaloc.simplify.enabled=true`) gets simplified gradient bodies before synthesis.
