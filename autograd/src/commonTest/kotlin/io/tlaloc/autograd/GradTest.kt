@@ -434,6 +434,63 @@ class GradTest {
     }
 
     @Test
+    fun longLiteralBroadcastWorksForBothSides() {
+        // §0.4.110 — Long literals work in both LHS and RHS positions, matching
+        // the Int / Double / Float overloads. Useful when a literal is naturally
+        // typed Long (e.g., from a config that returns `Long` durations or counts).
+
+        // f(x) = sum(x + 5L).  At x = [1, 2, 3]: forward = 6+7+8 = 21. grad = [1, 1, 1].
+        val vgRhs = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (x + 5L).sum() }
+        val (vR, dR) = vgRhs(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(21f, vR)
+        val drArr = dR.hostF32()
+        for (i in 0 until 3) assertEquals(1f, drArr[i])
+
+        // f(x) = sum(3L * x).  At x = [1, 2, 3]: forward = 18. grad = [3, 3, 3].
+        val vgLhs = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (3L * x).sum() }
+        val (vL, dL) = vgLhs(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(18f, vL)
+        val dlArr = dL.hostF32()
+        for (i in 0 until 3) assertEquals(3f, dlArr[i])
+    }
+
+    @Test
+    fun longLiteralLhsMinusRowFlipsSignFromRowMinusLong() {
+        // Non-commutative direction parity check, mirroring §0.4.93's Float-LHS
+        // test: for row=[1,2,3], `10L - row` and `row - 10L` differ in sign.
+        //   row - 10L = [-9, -8, -7], sum = -24, grad_row = +1.
+        //   10L - row = [9, 8, 7], sum = 24, grad_row = -1.
+        val vgRhs = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (x - 10L).sum() }
+        val (vR, dR) = vgRhs(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(-24f, vR)
+        val drArr = dR.hostF32()
+        for (i in 0 until 3) assertEquals(1f, drArr[i])
+
+        val vgLhs = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> (10L - x).sum() }
+        val (vL, dL) = vgLhs(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(24f, vL)
+        val dlArr = dL.hostF32()
+        for (i in 0 until 3) assertEquals(-1f, dlArr[i])
+    }
+
+    @Test
+    fun longLiteralComposesWithFloatAndIntInOneExpression() {
+        // §0.4.101 cross-literal composition: a single expression mixes `Long`,
+        // `Float`, and `Int` literals in the same chain. Catches dispatch
+        // ambiguity that single-literal-type tests miss.
+        //
+        // f(x) = sum((x * 2L + 1f) * 3).  At x = [1, 2, 3]:
+        //   per-element: x*2L = [2, 4, 6]; +1f = [3, 5, 7]; *3 = [9, 15, 21].
+        //   sum = 45.
+        //   grad chain: d/dx = 2L * 3 = 6 per element.
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> ((x * 2L + 1f) * 3).sum() }
+        val (value, dx) = vg(Tensors.f32Vector(floatArrayOf(1f, 2f, 3f)))
+        assertEquals(45f, value)
+        val gx = dx.hostF32()
+        for (i in 0 until 3) assertEquals(6f, gx[i], "grad_x[$i]")
+    }
+
+    @Test
     fun floatLiteralLhsMinusRowFlipsSignFromRowMinusFloat() {
         // §0.4.93 — `5f - row` is NOT the same as `row - 5f`. For row=[1,2,3]:
         //   row - 5f = [-4, -3, -2], sum = -9.

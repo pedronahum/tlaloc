@@ -39,6 +39,57 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.110 `Long` literal LHS/RHS broadcast overloads 2026-04-25
+
+§0.4.108's deferred-table closing line ("Smaller items still in the table that could fire individually under a /loop cadence: ... `Long` literal broadcast overloads") drove this pickup. Float / Double / Int LHS+RHS broadcast operators landed in §0.4.75 / §0.4.93 / §0.4.95. Only `Long` was missing — users with literals naturally typed `Long` (config-driven counts, durations from `Duration.toMillis()`) had to write `.toFloat()` casts at every call site. This session lands the eight remaining overloads.
+
+**The implementation** in [TracedOps.kt](autograd/src/commonMain/kotlin/io/tlaloc/autograd/TracedOps.kt). Two banks of four operators each, mirroring the existing Int/Double/Float blocks verbatim — the overload bodies route through `constantLike(scalar.toFloat())` and the existing same-shape operators:
+
+```kotlin
+// --- Long --- (§0.4.110)
+operator fun <S : Shape> Tracer<S>.plus(scalar: Long): Tracer<S>  = this + constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.minus(scalar: Long): Tracer<S> = this - constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.times(scalar: Long): Tracer<S> = this * constantLike(scalar.toFloat())
+operator fun <S : Shape> Tracer<S>.div(scalar: Long): Tracer<S>   = this / constantLike(scalar.toFloat())
+
+operator fun <S : Shape> Long.plus(tracer: Tracer<S>): Tracer<S>  = tracer.constantLike(this.toFloat()) + tracer
+operator fun <S : Shape> Long.minus(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this.toFloat()) - tracer
+operator fun <S : Shape> Long.times(tracer: Tracer<S>): Tracer<S> = tracer.constantLike(this.toFloat()) * tracer
+operator fun <S : Shape> Long.div(tracer: Tracer<S>): Tracer<S>   = tracer.constantLike(this.toFloat()) / tracer
+```
+
+**Decisions worth flagging**:
+
+- **Long → Float at the boundary, same as Int.** Long values past 2^24 lose Float precision (the same boundary Int hits). Documented in the source comment alongside the operators. This matches the existing Int / Double / Float boundary semantics — every literal-broadcast overload shares the lossy-but-conventional Float promotion. A Long-typed scalar literal in user code is overwhelmingly going to be a small constant (count, factor, offset); the boundary is theoretical.
+
+- **No `@JvmName` annotations needed.** The Long overloads occupy a JVM-erased signature distinct from Int / Double / Float (the scalar parameter type is part of the JVM signature). The `@JvmName` machinery the rank-1/rank-2 cross-shape operators use (§0.4.85 / §0.4.87) is irrelevant here — primitive overload disambiguation is automatic.
+
+- **Composition test included per the loop charter.** Per the rule "if a change touches the public Tracer surface, add a cross-rank or operator-composition test alongside the basic case", `longLiteralComposesWithFloatAndIntInOneExpression` exercises `((x * 2L + 1f) * 3).sum()` — three different literal types in one chain. Catches dispatch ambiguity that single-literal-type tests miss (the §0.4.101 model).
+
+- **No public API surface added beyond what the deferred-register entry asked for.** The eight overloads are the entirety of the change. No new system property, no new constructor, no new module. The existing `Tracer<S>.plus(Float)` infrastructure already handles the actual math.
+
+**Tests added** (+3 new):
+
+- `GradTest.longLiteralBroadcastWorksForBothSides` — `(x + 5L).sum()` and `(3L * x).sum()` both produce expected forward values and per-element gradients.
+- `GradTest.longLiteralLhsMinusRowFlipsSignFromRowMinusLong` — non-commutative direction parity (`10L - x` ≠ `x - 10L`); pins gradient sign flip.
+- `GradTest.longLiteralComposesWithFloatAndIntInOneExpression` — three literal types in one chain; pins forward = 45 and grad = 6 per element at the sample input.
+
+Full suite is green: **713 tests** (+3 over §0.4.109).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Cross-rank broadcasting at synthesis surface** — generalise §0.4.84's reverse-side BROADCAST handling to the IR-internal `DxirToIrSynthesis` path. Larger, but doable in a single phase if scoped to scalar↔rank-1 only.
+2. **Multi-dim GATHER read side** — extend §0.4.41's rank-1 GATHER to rank-N, separating the read path from SCATTER (which can ship in a follow-up).
+3. **D.3i Phase 1** — open the LAND-composed break-bearing WHILE arc with a scaffolding phase analogous to §0.4.103.
+4. **`:benchmarks` Gradle module** — infrastructure pickup; carve as "extract one perf probe into its own module" rather than landing the whole benchmark suite.
+
+**Definition-of-done for §0.4.110 — met**:
+- Eight Long broadcast operators land in TracedOps.kt ✓
+- LHS + RHS coverage matches Int / Double / Float ✓
+- Three tests pin forward + gradient + composition behavior ✓
+- No new public API beyond the operators themselves ✓
+- Full suite stays green at 713 tests (+3) ✓
+
 #### 0.4.109 `DiskCoarseningCache` prunes stale entries at startup 2026-04-25
 
 §0.4.108's deferred table flagged "PhiCalculus | Cache pruning | `tlaloc.cache.dir` grows unbounded." The §0.4.26 entry comment in `CoarseningCache.kt` already named the gap: *"old entries stick around until pruning lands, but won't be read."* This session lands pruning.
