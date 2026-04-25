@@ -1380,54 +1380,205 @@ object PhiCalculus {
      * [rewriteFunction] framework (deferred). The counter result is always dropped.
      */
     private fun applyC5Pass(fn: DxirFunction): DxirFunction {
+        // §0.4.152 — region-recursive pre-scan: detect C5-eligible WHILEs at top level
+        // AND inside IF region bodies (any depth). The rewrite handles both kinds via
+        // a single safeC5 map keyed on WHILE id. WHILE region bodies aren't recursed —
+        // a WHILE-inside-WHILE is its own multi-session arc (Phase 4b).
         val safeC5: Map<Int, SimpleLoopPattern> = HashMap<Int, SimpleLoopPattern>().apply {
-            for (n in fn.body) {
-                if (n !is DxirOp) continue
-                if (n.op != OpKind.WHILE) continue
-                if (n.operands.size < 2) continue
-                val referencedIndices = findReferencedCarried(fn, n)
-                if (referencedIndices.isEmpty()) continue
-                val pattern = detectSimpleLoop(n, referencedIndices) ?: continue
-                this[n.id] = pattern
+            fun scan(nodes: List<DxirNode>) {
+                for (n in nodes) {
+                    if (n !is DxirOp) continue
+                    if (n.op == OpKind.WHILE && n.operands.size >= 2) {
+                        val referencedIndices = findReferencedCarried(fn, n)
+                        if (referencedIndices.isNotEmpty()) {
+                            detectSimpleLoop(n, referencedIndices)?.let { this[n.id] = it }
+                        }
+                    }
+                    if (n.op == OpKind.IF) {
+                        for (r in n.regions) for (b in r.blocks) scan(b.body)
+                    }
+                }
             }
+            scan(fn.body)
         }
         if (safeC5.isEmpty()) return fn
 
         return rewriteFunction(fn) { op, nodeMap, multiOut, builder ->
-            val pattern = safeC5[op.id] ?: return@rewriteFunction null
-            val bodyBlock = op.regions[1].blocks.single()
-            val bodyArgs = bodyBlock.args
-            // Track current values of ALL block args across iterations — the counter
-            // plus every user-carried. Body ops may read any of them.
-            val argValues: MutableMap<Int, DxirNode> = HashMap()
+            // (a) Top-level safeC5 WHILE — unroll in place.
+            safeC5[op.id]?.let { pat ->
+                return@rewriteFunction unrollC5InEmitter(
+                    op, pat, nodeMap, multiOut, builder as DxirEmitter,
+                )
+            }
+            // (b) §0.4.152 — IF whose region descendants include a safeC5 WHILE.
+            // Build a replacement IF whose regions clone-or-rewrite each body op
+            // (recursing into nested IFs as needed). When neither (a) nor (b)
+            // matches, return null and the framework clones the op verbatim.
+            if (op.op != OpKind.IF) return@rewriteFunction null
+            if (!ifRegionsContainSafeC5(op, safeC5)) return@rewriteFunction null
+            val condClone = nodeMap[op.operands[0].id]
+                ?: error(
+                    "C5/Phase4: IF cond id=${op.operands[0].id} not in nodeMap " +
+                        "(broken SSA dominance)",
+                )
+            val newRegions = op.regions.map { region ->
+                rewriteRegionForC5(region, nodeMap, multiOut, builder, safeC5)
+            }
+            (builder as DxirEmitter).opMulti(
+                OpKind.IF,
+                listOf(condClone),
+                op.types,
+                op.attrs,
+                op.sharding,
+                newRegions,
+            )
+        }
+    }
+
+    /**
+     * §0.4.152 — extract the per-WHILE C5 unroll body so it can run from either a
+     * top-level [DxirBuilder] context or a nested [DxirRegionBuilder] context. The
+     * unrolled iter clones land in [emitter]'s body; [multiOut] is populated with
+     * the per-result-index replacement list and the smallest referenced index is
+     * returned as the nominal node (multiOut takes precedence for `DxirOpResult`
+     * resolution).
+     */
+    private fun unrollC5InEmitter(
+        op: DxirOp,
+        pattern: SimpleLoopPattern,
+        nodeMap: MutableMap<Int, DxirNode>,
+        multiOut: MutableMap<Int, List<DxirNode>>,
+        emitter: DxirEmitter,
+    ): DxirNode {
+        val bodyBlock = op.regions[1].blocks.single()
+        val bodyArgs = bodyBlock.args
+        val argValues: MutableMap<Int, DxirNode> = HashMap()
+        for (i in op.operands.indices) {
+            argValues[bodyArgs[i].id] = nodeMap[op.operands[i].id]
+                ?: error("C5: init id=${op.operands[i].id} (arg $i) missing from nodeMap")
+        }
+        for (k in 0 until pattern.tripCount) {
+            val perIterMap = HashMap(nodeMap)
+            for ((argId, value) in argValues) perIterMap[argId] = value
+            for (n in bodyBlock.body) {
+                perIterMap[n.id] = cloneNode(n, perIterMap, emitter, multiOut)
+            }
             for (i in op.operands.indices) {
-                argValues[bodyArgs[i].id] = nodeMap[op.operands[i].id]
-                    ?: error("C5: init id=${op.operands[i].id} (arg $i) missing from nodeMap")
+                argValues[bodyArgs[i].id] = perIterMap[bodyBlock.terminator[i].id]
+                    ?: error("C5: back-edge arg=$i id missing after iter $k")
             }
-            for (k in 0 until pattern.tripCount) {
-                val perIterMap = HashMap(nodeMap)
-                for ((argId, value) in argValues) perIterMap[argId] = value
-                for (n in bodyBlock.body) {
-                    perIterMap[n.id] = cloneNode(n, perIterMap, builder as DxirEmitter, multiOut)
+        }
+        val perIndex = List(op.operands.size) { i ->
+            argValues[bodyArgs[i].id]
+                ?: error("C5: back-edge arg=$i id missing after unroll")
+        }
+        multiOut[op.id] = perIndex
+        return perIndex[pattern.referencedIndices.min()]
+    }
+
+    /**
+     * §0.4.152 — true iff any descendant op (in either region of [ifOp], at any
+     * nesting depth) is a [safeC5]-keyed WHILE. Used to decide whether the IF
+     * needs region-recursive C5 rewriting (else it's cloned verbatim).
+     */
+    private fun ifRegionsContainSafeC5(
+        ifOp: DxirOp,
+        safeC5: Map<Int, SimpleLoopPattern>,
+    ): Boolean {
+        fun walk(nodes: List<DxirNode>): Boolean {
+            for (n in nodes) {
+                if (n !is DxirOp) continue
+                if (n.id in safeC5) return true
+                for (r in n.regions) for (b in r.blocks) {
+                    if (walk(b.body)) return true
                 }
-                for (i in op.operands.indices) {
-                    argValues[bodyArgs[i].id] = perIterMap[bodyBlock.terminator[i].id]
-                        ?: error("C5: back-edge arg=$i id missing after iter $k")
+            }
+            return false
+        }
+        for (r in ifOp.regions) for (b in r.blocks) {
+            if (walk(b.body)) return true
+        }
+        return false
+    }
+
+    /**
+     * §0.4.152 — clone [region] into [parentEmitter], rewriting safeC5 WHILEs to
+     * unrolled chains and recursing into nested IFs that themselves contain safeC5
+     * WHILEs. Mirrors [cloneRegion]'s terminator handling for `DxirOpResult` /
+     * multi-result clones.
+     */
+    private fun rewriteRegionForC5(
+        region: DxirRegion,
+        outerNodeMap: MutableMap<Int, DxirNode>,
+        multiOut: MutableMap<Int, List<DxirNode>>,
+        parentEmitter: DxirEmitter,
+        safeC5: Map<Int, SimpleLoopPattern>,
+    ): DxirRegion {
+        require(region.blocks.size == 1) {
+            "rewriteRegionForC5: single-block regions only; got ${region.blocks.size}"
+        }
+        val origBlock = region.blocks.single()
+        val regionLambda: DxirRegionBuilder.() -> Unit = {
+            val regionNodeMap = HashMap(outerNodeMap)
+            for (a in origBlock.args) {
+                val newArg = arg(a.type, a.sharding)
+                regionNodeMap[a.id] = newArg
+            }
+            for (n in origBlock.body) {
+                val cloned: DxirNode = when {
+                    n is DxirOp && safeC5[n.id] != null ->
+                        unrollC5InEmitter(
+                            n, safeC5[n.id]!!, regionNodeMap, multiOut, this as DxirEmitter,
+                        )
+                    n is DxirOp && n.op == OpKind.IF && ifRegionsContainSafeC5(n, safeC5) -> {
+                        val condClone = regionNodeMap[n.operands[0].id]
+                            ?: error(
+                                "C5/Phase4: nested IF cond id=${n.operands[0].id} not in regionNodeMap",
+                            )
+                        val newRegions = n.regions.map { r ->
+                            rewriteRegionForC5(
+                                r, regionNodeMap, multiOut, this as DxirEmitter, safeC5,
+                            )
+                        }
+                        (this as DxirEmitter).opMulti(
+                            OpKind.IF,
+                            listOf(condClone),
+                            n.types,
+                            n.attrs,
+                            n.sharding,
+                            newRegions,
+                        )
+                    }
+                    else -> cloneNode(n, regionNodeMap, this as DxirEmitter, multiOut)
+                }
+                regionNodeMap[n.id] = cloned
+            }
+            val terms = origBlock.terminator.map {
+                if (it is DxirOpResult) {
+                    multiOut[it.source.id]?.let { repl -> return@map repl[it.index] }
+                }
+                val mapped = regionNodeMap[it.id]
+                    ?: error(
+                        "rewriteRegionForC5: terminator id=${it.id} not in regionNodeMap",
+                    )
+                if (it !is DxirOpResult) return@map mapped
+                when {
+                    mapped is DxirOp -> mapped.result(it.index)
+                    it.index == 0 -> mapped
+                    else -> error(
+                        "rewriteRegionForC5: terminator id=${it.id} index=${it.index} on " +
+                            "non-Op clone (mapped=${mapped::class.simpleName})",
+                    )
                 }
             }
-            // §0.4.51 — publish a per-result-index replacement list so DxirOpResult
-            // refs to any non-counter position resolve correctly. The list is sized
-            // to `op.operands.size`; the counter slot is filled with its own final
-            // value (rarely read, but keeps the list indexable by raw result index).
-            val perIndex = List(op.operands.size) { i ->
-                argValues[bodyArgs[i].id]
-                    ?: error("C5: back-edge arg=$i id missing after unroll")
-            }
-            multiOut[op.id] = perIndex
-            // The callback must return SOMETHING storable in nodeMap[op.id]; pick
-            // the smallest referenced index as the nominal value (multiOut takes
-            // precedence for DxirOpResult refs).
-            perIndex[pattern.referencedIndices.min()]
+            yields(*terms.toTypedArray())
+        }
+        return when (parentEmitter) {
+            is DxirBuilder -> parentEmitter.region(regionLambda)
+            is DxirRegionBuilder -> parentEmitter.region(regionLambda)
+            else -> error(
+                "rewriteRegionForC5: unsupported emitter type ${parentEmitter::class}",
+            )
         }
     }
 

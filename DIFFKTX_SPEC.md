@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.152 Multi-result IF AD Phase 4 first slice — region-recursive C5 2026-04-25
+
+§0.4.151's recommended-next #1 named **Multi-result IF AD Phase 4 — nested WHILE in IF branch** as the headline gap, with a precise sub-phase pointer: "the cleanest sub-phase to land first is region-recursive C5 (extend `applyC5Pass`'s pre-scan + rewrite to walk IF region bodies, not just `fn.body`)". §0.4.152 lands exactly that. C5's structural rewrite (paper §4.2 simple-loop direct unroll) now fires on WHILEs that live inside an IF's then- or else-region, not only at function-body level. The AD piece (Phase 4 proper — reverse-mode through `walkBranchReverse` over the rewritten IF) stays deferred; this slice closes the structural prerequisite.
+
+**The mechanism** in [PhiCalculus.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt):
+
+1. **Region-recursive pre-scan** ([PhiCalculus.kt:1382-1404](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1382-L1404)) — replaces the flat `for (n in fn.body)` walk with a recursive `scan(nodes)` that descends into IF region bodies (any depth). Each WHILE encountered runs the same `findReferencedCarried` + `detectSimpleLoop` pipeline as before; matches accumulate into the single `safeC5: Map<Int, SimpleLoopPattern>`. WHILE region bodies aren't recursed — WHILE-inside-WHILE is its own multi-session arc (Phase 4b).
+
+2. **`unrollC5InEmitter` extraction** ([PhiCalculus.kt:1437-1469](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1437-L1469)) — the per-WHILE unroll body (formerly inline in `applyC5Pass`'s rewrite callback) becomes a private helper that takes a `DxirEmitter`. Body-op clones land in whichever emitter is current — `DxirBuilder` for top-level unrolls, `DxirRegionBuilder` for unrolls inside an IF region. `multiOut` and the chosen replacement-index node are returned/published the same way as the prior inline form.
+
+3. **`ifRegionsContainSafeC5` predicate** ([PhiCalculus.kt:1475-1493](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1475-L1493)) — recursive walk over an IF op's two regions, returning true iff any descendant op (any depth) is a safeC5 WHILE. Used to gate the region-rewrite path: an IF whose regions contain only non-eligible ops takes the verbatim-clone fall-through, identical to pre-§0.4.152 behaviour.
+
+4. **`rewriteRegionForC5` helper** ([PhiCalculus.kt:1500-1565](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1500-L1565)) — clones a region into [parentEmitter], walking its block body and dispatching each op three ways: (a) safeC5 WHILE → `unrollC5InEmitter` inline; (b) IF-with-safeC5-descendants → recursive `rewriteRegionForC5` on each region (handles nested IFs); (c) anything else → `cloneNode` verbatim. Mirrors `cloneRegion`'s terminator handling for `DxirOpResult` / multi-result clones, including the §0.4.128 `mapped is DxirOp → mapped.result(it.index)` route for verbatim-cloned multi-result ops.
+
+5. **Top-level rewrite callback dispatch** ([PhiCalculus.kt:1410-1431](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L1410-L1431)) — gains a second arm: after the existing safeC5-WHILE-at-top-level case returns, if `op` is an IF whose regions contain a safeC5 WHILE, build a replacement IF via `opMulti(IF, [cond], op.types, op.attrs, op.sharding, newRegions)` where each `newRegion` is `rewriteRegionForC5`. The `opMulti` path is uniform for single- and multi-result IFs.
+
+**Decisions worth flagging**:
+
+- **Single-level recursion in pre-scan, full recursion in rewrite.** `scan(nodes)` recurses into every IF region body, so a WHILE three-IFs-deep is detected. `rewriteRegionForC5` likewise recurses on IF children. The asymmetry the implementation avoids: WHILE region bodies are NOT recursed for safeC5 candidates. A future Phase 4b would widen pre-scan to walk WHILE bodies too — but doing that without also widening the rewrite to be WHILE-aware would let `safeC5` accumulate ids that the rewrite never visits, producing dead entries. Keeping pre-scan and rewrite symmetric (both walk IFs only) keeps the invariant clean.
+
+- **`opMulti(IF, …)` replaces the `ifOp(...)` builder call for the rewritten IF.** `DxirBuilder.ifOp` and `DxirRegionBuilder.ifOp` are class-level methods, not `DxirEmitter` interface members. Since `applyC5Pass`'s callback receives `builder: DxirBuilder` but `rewriteRegionForC5`'s recursion passes `DxirEmitter` (which could be either), using `opMulti(OpKind.IF, …)` is the uniform path — `cloneNode` already does the same when cloning IFs verbatim ([PhiCalculus.kt:2813-2816](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L2813-L2816)). The resulting IF has identical types/attrs/sharding to the original, just with rewritten regions.
+
+- **`countOps` (shallow) vs. `countOpsDeep` (recursive) in tests.** [PhiCalculusTest.kt:26-27](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt#L26-L27)'s shallow `countOps` only walks `fn.body`, which would miss the unrolled MULs that now live inside the IF region. The new `countOpsDeep` ([PhiCalculusTest.kt:30-43](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt#L30-L43)) recurses into region bodies. Existing tests stay on `countOps` (top-level coverage); the §0.4.152 test uses both — `countOpsDeep` to verify the WHILE is gone everywhere, plain `countOps` to verify the unrolled MULs landed inside the IF region (top-level MUL count is 0).
+
+- **Numerical-equivalence is the load-bearing assertion.** Structural-only checks (zero WHILE, one IF) would pass even if the unroll wired the wrong intermediate value. `assertNumericallyAgree` at four (x, p) points — both branches active, signed and zero inputs — pins the output of the rewritten function against the original at concrete values. The concrete `f(3, true) = 24` / `f(3, false) = 3` checks add a third layer: a regression in the IF rewrite (e.g., swapping branches) would fail the numerical agreement; a regression in the unroll (e.g., wrong trip count) would fail the concrete output assertion.
+
+- **Phase 4 AD is NOT closed by §0.4.152.** Reverse-mode AD over the rewritten IF (which now has unrolled body ops in its branch instead of a multi-result WHILE) still needs `walkBranchReverse` to handle the unrolled chain. That's deferred; the structural prerequisite — getting the WHILE out of the IF region before AD reaches the IF — is what §0.4.152 closes. The §0.4.151 register's "Multi-result IF AD Phase 4 — nested WHILE in branch" entry stays open with a narrowed scope: structural rewrite shipped, AD pending.
+
+**Tests added** (+1 new) in [PhiCalculusTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/PhiCalculusTest.kt):
+
+- `PhiCalculusTest.c5UnrollsWhileNestedInIfThenBranch` — `f(x, p) = if (p) iterate3(x) else x` where `iterate3` is the canonical `iterateConcreteN(3)` shape (carried doubles each iter, counter increments). Pre-rewrite assertions: 1 IF + 1 WHILE (via `countOpsDeep`). Post-rewrite assertions: 0 WHILE deep, 1 IF (top-level), 0 MULs at top level (the 3 unrolled MULs live inside the IF then-region). Numerical: 4 `assertNumericallyAgree` pins (x ∈ {5, -2, 0} × p ∈ {true, false}); concrete `f(3, true) = 24` / `f(3, false) = 3`.
+
+Full suite is green: **842 tests** (+1 over §0.4.151).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Multi-result IF AD Phase 4 AD-side** — extend `walkBranchReverse` to handle the rewritten IF whose branch body contains an unrolled chain (no WHILE). The arithmetic chain reverses op-by-op; the question is whether existing `walkBranchReverse` already handles this or needs a new arm for "unrolled-loop-shaped" IF branches. Multi-session.
+2. **Multi-live-index MR IF AD — per-index gradAccum refactor.** Unlocks BOTH MR IF AD Phase 1+ and Multi-result COARSENED. Mechanical refactor, ~15-20 sites in `DxirReverseTransform.kt`.
+3. **Phase 4b — WHILE inside IF inside WHILE.** Widen the §0.4.152 pre-scan + rewrite to also recurse into WHILE region bodies (with the symmetric rewrite-side widening). Realistic surface: a per-segment outer WHILE whose body has an IF guard around an inner WHILE.
+4. **HMC benchmark port** — paper's hardest control-flow benchmark (multi-session).
+
+**Definition-of-done for §0.4.152 — met**:
+- `applyC5Pass` pre-scan recurses into IF region bodies (any depth) via `scan(nodes)` ✓
+- Per-WHILE unroll body extracted to `unrollC5InEmitter(op, pat, nodeMap, multiOut, emitter)` ✓
+- `ifRegionsContainSafeC5(op, safeC5)` predicate gates the IF-region-rewrite path ✓
+- `rewriteRegionForC5` clones a region with safeC5 WHILEs unrolled inline + recurses into nested IFs ✓
+- Top-level rewrite callback handles (a) WHILE → unroll, (b) IF-with-safeC5 → region rewrite ✓
+- 1 new test pins structural + numerical agreement; pre-§0.4.152 C5 tests still green ✓
+- Full suite stays green at 842 tests (+1) ✓
+
 #### 0.4.151 Out-of-scope register refresh — 28 items shipped since §0.4.122 2026-04-25
 
 §0.4.108 was the second register snapshot; §0.4.122 was the third (after 13 sub-sections). §0.4.151 is the fourth: 28 sub-sections shipped between §0.4.123 and §0.4.150 (the largest gap to date), with the **D.3i closed-form closure for break-bearing WHILE** moving from "Pending; paper-faithful" to "every realistic operand kind covered" and the **`:benchmarks` Gradle module** moving from deferred to a 4-file substrate. This refresh updates the deferred snapshot accordingly and surfaces a fresh recommended-next list for what remains genuinely deferred.

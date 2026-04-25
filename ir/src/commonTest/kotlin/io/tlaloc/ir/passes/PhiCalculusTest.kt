@@ -26,6 +26,24 @@ class PhiCalculusTest {
     private fun countOps(fn: io.tlaloc.ir.DxirFunction, kind: OpKind): Int =
         fn.body.filterIsInstance<DxirOp>().count { it.op == kind }
 
+    /**
+     * §0.4.152 — recursive variant: counts ops of [kind] anywhere in [fn], including
+     * inside region bodies (e.g., a WHILE nested in an IF then-region). Top-level
+     * C5 tests use [countOps] (shallow); region-recursive C5 tests use this.
+     */
+    private fun countOpsDeep(fn: io.tlaloc.ir.DxirFunction, kind: OpKind): Int {
+        var c = 0
+        fun walk(nodes: List<io.tlaloc.ir.DxirNode>) {
+            for (n in nodes) {
+                if (n !is DxirOp) continue
+                if (n.op == kind) c++
+                for (r in n.regions) for (b in r.blocks) walk(b.body)
+            }
+        }
+        walk(fn.body)
+        return c
+    }
+
     /** Assert two functions agree numerically at sample inputs. */
     private fun assertNumericallyAgree(
         a: io.tlaloc.ir.DxirFunction,
@@ -453,6 +471,66 @@ class PhiCalculusTest {
         val out = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(10f)))
         assertEquals(13f, out[0][0])
         assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(0f)))
+    }
+
+    @Test
+    fun c5UnrollsWhileNestedInIfThenBranch() {
+        // §0.4.152 — Multi-result IF AD Phase 4 first slice: region-recursive C5.
+        // f(x, p) = if (p) iterate3(x) else x   →  C5 must unroll the WHILE inside
+        // the then-region (3 iters of MUL by 2 → x · 2^3 = 8x). The IF itself stays.
+        val original = DxirBuilder.function("ifWithInnerWhile") {
+            val x = param("x", f32s)
+            val p = param("p", boolS)
+            val ifop = ifOp(
+                cond = p,
+                types = listOf(f32s),
+                thenRegion = region {
+                    val nConst = const(3, i32s)
+                    val zero = const(0, i32s)
+                    val w = whileOp(
+                        inits = listOf(x, zero),
+                        cond = { args ->
+                            val diff = op(OpKind.SUB, listOf(nConst, args[1]), i32s)
+                            val pred = op(OpKind.STEP, listOf(diff), boolS)
+                            yields(pred)
+                        },
+                        body = { args ->
+                            val two = const(2f, f32s)
+                            val newX = op(OpKind.MUL, listOf(args[0], two), f32s)
+                            val one = const(1, i32s)
+                            val newI = op(OpKind.ADD, listOf(args[1], one), i32s)
+                            yields(newX, newI)
+                        },
+                    )
+                    yields(w.result(0))
+                },
+                elseRegion = region { yields(x) },
+            )
+            listOf(ifop)
+        }
+        // Pre-rewrite sanity: the original has 1 IF, 1 WHILE (inside the IF then-region).
+        assertEquals(1, countOpsDeep(original, OpKind.IF))
+        assertEquals(1, countOpsDeep(original, OpKind.WHILE))
+
+        val rewritten = PhiCalculus.apply(original)
+
+        // Post-rewrite: WHILE is gone (unrolled into 3 MULs inside the IF then-region);
+        // IF survives. The MULs live inside the then-region, not at top level.
+        assertEquals(0, countOpsDeep(rewritten, OpKind.WHILE), "C5 must unroll the inner WHILE")
+        assertEquals(1, countOpsDeep(rewritten, OpKind.IF), "outer IF must survive")
+        assertEquals(0, countOps(rewritten, OpKind.MUL), "unrolled MULs land in the IF region, not top level")
+
+        // Numerical agreement at p=true (carry through the unroll → 8x) and p=false (x).
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(1f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(5f), floatArrayOf(0f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(-2f), floatArrayOf(1f)))
+        assertNumericallyAgree(original, rewritten, listOf(floatArrayOf(0f), floatArrayOf(1f)))
+
+        // Concrete: f(3, true) = 3·2^3 = 24; f(3, false) = 3.
+        val outTrue = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(3f), floatArrayOf(1f)))
+        assertEquals(24f, outTrue[0][0])
+        val outFalse = DxirInterpreter.evalFunction(rewritten, listOf(floatArrayOf(3f), floatArrayOf(0f)))
+        assertEquals(3f, outFalse[0][0])
     }
 
     @Test
