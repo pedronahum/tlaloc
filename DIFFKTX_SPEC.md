@@ -39,6 +39,76 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.108 Out-of-scope register refresh — D.1i moves to Shipped 2026-04-25
+
+§0.4.102's register pre-dated the D.1i multi-session arc that landed in §0.4.103–§0.4.107. This refresh updates the snapshot to reflect that D.1i is now complete (all four planned phases shipped) and surfaces a fresh recommended-next list. The register itself stays tabular per §0.4.102's organising principle.
+
+**Refreshed register (as of §0.4.107)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan. |
+| Tensor ops | Multi-dim GATHER/SCATTER | Rank-1 covered §0.4.41–§0.4.42; rank-N+ pending. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Tracer-surface side covered §0.4.84/§0.4.85/§0.4.87; synthesis side pending. |
+| Tensor ops | Batched MATMUL | Rank-2 only at emitter + synthesis. |
+| StableHLO emitter | SCATTER_ADD widening | `:core` SCATTER_ADD has no MLIR lowering yet. |
+| StableHLO emitter | Scatter-into-zeros pattern | `:autograd`'s SCATTER bridge common case; needs an arm. |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Region-internal DCE/CSE | Top-level CSE shipped §0.4.48. |
+| PhiCalculus | Multi-result IF / multi-back-edge WHILE | Single-back-edge covered. |
+| PhiCalculus | Multi-result COARSENED | Single-result covered §0.4.31. |
+| PhiCalculus | Recursive `splitOnReuses` | One split covered §0.4.29. |
+| PhiCalculus | Cache pruning | `tlaloc.cache.dir` grows unbounded. |
+| PhiCalculus | `gradient_body` with nested regions | Linear gradient bodies cover today. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | Case-by-case for unusual nests. |
+| Control flow | Multi-block regions | Single-block today. |
+| Closure work | **D.3i closed-form closure** for LAND-composed WHILE | Pending; paper-faithful break-bearing WHILE. |
+| Infrastructure | `:benchmarks` Gradle module | Perf probes live in-test. |
+| Benchmark ports | **HMC / CartPole / QWOP** | Paper's three remaining benchmarks; multi-session each. |
+| Tracer surface | `valueAndGrad3` / `grad3` (3-tensor inputs) | Two-input variants cover §0.4.81/§0.4.82's needs. |
+| Tracer surface | Rank-3↔rank-1/rank-2 cross-rank broadcast | rank-3-scalar covered §0.4.97/§0.4.98; cross-rank deferred. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+| API completeness | `Long` literal LHS/RHS broadcast overloads | Float/Double/Int land in §0.4.93/§0.4.95. |
+
+**Newly shipped between §0.4.102 and §0.4.107**:
+
+- **D.1i Symja `Simplify` on whole gradient expressions** — complete multi-session arc (§0.4.103–§0.4.107). Phase 1: `PhiCalculus.simplifyReturns` scaffolding (§0.4.103). Phase 2: fractional-Float-const lift (§0.4.104). Phase 3: opt-in plugin wiring via `tlaloc.simplify.enabled` (§0.4.105). Phase 3b: IR-size delta harness with pinned pre/post numbers (§0.4.106). Phase 4: opaque-leaf widening for non-arithmetic gradient ops via sentinel substitution + leaf-subtree cloning (§0.4.107). Suite grew from 681 → 705 tests across the arc.
+
+**Decisions worth flagging**:
+
+- **D.1i row moved off the deferred table.** The §0.4.102 entry "**D.1i Symja `Simplify` on whole gradient expressions** — Paper mechanism (ii) full form" is now realised end-to-end and gates behind the `tlaloc.simplify.enabled` system property. Future refresh sessions should not re-add it.
+
+- **D.3i remains the only headlined closure-work item.** The deferred table still flags D.3i (LAND-composed break-bearing WHILE) as the paper-faithful piece pending. After D.1i's pattern (multi-session arc with phases each shipping a clean increment), D.3i is the obvious next candidate for the same treatment when a session opens for it.
+
+- **Register cadence.** §0.4.102 introduced the tabular shipped-vs-deferred snapshot; §0.4.108 is the second refresh. Future refreshes should fire when an item moves from deferred to shipped (or vice versa) — not on a fixed cadence. The point of the register is to keep one canonical view of "what's outstanding"; refreshing it when the truth changes keeps it useful.
+
+**Tests added** (+0): pure doc / register session. Reading code paths checked against current state — D.1i's `simplifyReturns`, `liftReturnWithLeaves`, `cloneOpaqueSubtree` are all live in `PhiCalculus.kt`, and `tlaloc.simplify.enabled` is wired into `TlalocIrGenerationExtension.SIMPLIFY_ENABLED_PROPERTY`.
+
+Full suite is green: **705 tests** (unchanged from §0.4.107).
+
+**Recommended next pickup** (these are the items that justify multi-session focus):
+
+1. **D.3i PhiCalculus closure for LAND-composed WHILE** — paper-faithful break-bearing WHILE. 2+ sessions of φ-calculus design work.
+2. **`diagnosticReporter` migration proper** — 4-step refactor; recipe in §0.4.94.
+3. **HMC benchmark port** — paper's hardest control-flow benchmark; multi-session.
+4. **Cross-rank broadcasting at synthesis surface** — generalize §0.4.84's reverse for IR-side `DxirToIrSynthesis`.
+5. **Multi-dim GATHER/SCATTER** — extend rank-1 paths from §0.4.41–§0.4.42 to rank-N.
+
+Smaller items still in the table that could fire individually under a /loop cadence: bool-paths in plugin tests, `Long` literal broadcast overloads, F64 tape (if a use case surfaces), `:benchmarks` Gradle module, `valueAndGrad3` / `grad3` (when a 3-tensor user appears).
+
+**Definition-of-done for §0.4.108 — met**:
+- D.1i row removed from the deferred table ✓
+- "Newly shipped" subsection summarises the §0.4.103–§0.4.107 arc with section pointers ✓
+- Recommended next pickup updated to drop D.1i ✓
+- Register stays tabular, organising principle preserved ✓
+- Full suite stays green at 705 tests ✓
+
 #### 0.4.107 D.1i Phase 4 — opaque-leaf widening completes the multi-session arc 2026-04-25
 
 The final D.1i phase. Phase 1 (§0.4.103) shipped the scaffolding pass, Phase 2 (§0.4.104) widened constants, Phase 3 (§0.4.105) wired it into the IR pipeline, Phase 3b (§0.4.106) harnessed IR-size deltas. Phase 4 closes the multi-session arc by extending `simplifyReturns` to lift gradient bodies that contain non-arithmetic ops (SUM, MEAN, MATMUL, GATHER, EXP, LOG, SCATTER, …) — the bodies tensor gradients actually produce.
