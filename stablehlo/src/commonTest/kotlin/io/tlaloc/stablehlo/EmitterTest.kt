@@ -808,6 +808,83 @@ class EmitterTest {
         assertTrue(mlir.contains("stablehlo.add"), mlir)
     }
 
+    // §0.4.113 — substrate-shape GATHER lowering (no attrs, scalar I32 idx).
+
+    @Test
+    fun substrateGatherRank1EmitsCanonicalAttrs() {
+        // `arr: tensor<4xf32>, idx: tensor<i32>` → tensor<f32>. Substrate shape:
+        // no attrs on the DxirOp; the emitter synthesizes the canonical stablehlo.gather
+        // attrs.
+        val fn = DxirBuilder.function("g") {
+            val arr = param("a", DxirType(F32, listOf(4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val y = op(OpKind.GATHER, listOf(arr, idx), DxirType(F32, emptyList()))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("\"stablehlo.gather\""), mlir)
+        // No offset_dims for rank-1 substrate (scalar result).
+        assertTrue(mlir.contains("offset_dims = []"), mlir)
+        assertTrue(mlir.contains("collapsed_slice_dims = [0]"), mlir)
+        assertTrue(mlir.contains("start_index_map = [0]"), mlir)
+        assertTrue(mlir.contains("index_vector_dim = 0"), mlir)
+        assertTrue(mlir.contains("slice_sizes = array<i64: 1>"), mlir)
+        // Function signature should reference the original tensor types unchanged.
+        assertTrue(
+            mlir.contains("(tensor<4xf32>, tensor<i32>) -> tensor<f32>"),
+            "expected gather type signature for rank-1 substrate: $mlir",
+        )
+    }
+
+    @Test
+    fun substrateGatherRank2EmitsRowSliceAttrs() {
+        // `arr: tensor<3x4xf32>, idx: tensor<i32>` → tensor<4xf32>. The single offset
+        // axis is axis 0 of the rank-1 result; slice_sizes = [1, N].
+        val fn = DxirBuilder.function("g") {
+            val arr = param("a", DxirType(F32, listOf(3, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val y = op(OpKind.GATHER, listOf(arr, idx), DxirType(F32, listOf(4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("offset_dims = [0]"), mlir)
+        assertTrue(mlir.contains("collapsed_slice_dims = [0]"), mlir)
+        assertTrue(mlir.contains("start_index_map = [0]"), mlir)
+        assertTrue(mlir.contains("index_vector_dim = 0"), mlir)
+        assertTrue(mlir.contains("slice_sizes = array<i64: 1, 4>"), mlir)
+        assertTrue(
+            mlir.contains("(tensor<3x4xf32>, tensor<i32>) -> tensor<4xf32>"),
+            "expected gather type signature for rank-2 substrate: $mlir",
+        )
+    }
+
+    @Test
+    fun generalGatherStillRoutesThroughAttrPath() {
+        // The substrate-shape detection only fires when there are NO `offset_dims`
+        // attr. A GATHER with explicit attrs (the canonical multi-dim stablehlo
+        // form) still routes through the original attr-driven path, even when its
+        // indices happen to be a scalar.
+        val fn = DxirBuilder.function("g") {
+            val operand = param("o", DxirType(F32, listOf(10, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, listOf(3, 1)))
+            val y = op(
+                OpKind.GATHER, listOf(operand, idx), DxirType(F32, listOf(3, 4)),
+                attrs = mapOf(
+                    "offset_dims" to listOf(1),
+                    "collapsed_slice_dims" to listOf(0),
+                    "start_index_map" to listOf(0),
+                    "index_vector_dim" to 1,
+                    "slice_sizes" to listOf(1, 4),
+                ),
+            )
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        // The user-supplied index_vector_dim = 1 must survive (substrate would have set 0).
+        assertTrue(mlir.contains("index_vector_dim = 1"), mlir)
+        assertTrue(mlir.contains("slice_sizes = array<i64: 1, 4>"), mlir)
+    }
+
     // §0.4.112 — SCATTER_ADD substrate-shape lowering.
 
     @Test

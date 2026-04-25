@@ -1417,6 +1417,23 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         operandType: DxirType,
         indicesType: DxirType,
     ) {
+        // §0.4.113 — substrate-shape detection. The autograd-emitted GATHER (§0.4.41,
+        // §0.4.111) carries scalar I32 idx + no attrs and means `arr[idx]` (rank-1) or
+        // `arr[idx, :]` (rank-2). Synthesize the canonical stablehlo.gather attrs for
+        // those shapes; the general attr-driven path handles everything else.
+        val isSubstrateShape = "offset_dims" !in node.attrs &&
+            indicesType.isScalar &&
+            indicesType.dtype == I32
+        if (isSubstrateShape) {
+            emitSubstrateGather(
+                step, name, operand, startIndices,
+                operandType = operandType,
+                indicesType = indicesType,
+                outType = node.type,
+            )
+            return
+        }
+
         val offsetDims = intListAttr(node, "offset_dims")
         @Suppress("UNCHECKED_CAST")
         val collapsedSliceDims = (node.attrs["collapsed_slice_dims"] as? List<Int>) ?: emptyList()
@@ -1446,6 +1463,72 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             indexVectorDim = indexVectorDim,
             sliceSizes = sliceSizes,
             indicesAreSorted = indicesAreSorted,
+        )
+    }
+
+    /**
+     * §0.4.113 — lower the autograd-emitted [OpKind.GATHER] substrate shape (scalar
+     * I32 idx, no attrs) to `stablehlo.gather`. Two operand-rank slices are supported,
+     * matching the [DxirInterpreter] arms shipped in §0.4.41 + §0.4.111:
+     *
+     *  - rank-1 operand (`arr: tensor<NxF>`) → scalar result. Equivalent to `arr[idx]`.
+     *    `offset_dims = []`, `collapsed_slice_dims = [0]`, `slice_sizes = [1]`.
+     *  - rank-2 operand (`arr: tensor<MxNxF>`) → rank-1 result of length N.
+     *    Equivalent to `arr[idx, :]`. `offset_dims = [0]` (the single offset axis is
+     *    axis 0 of the rank-1 result), `collapsed_slice_dims = [0]`, `slice_sizes = [1, N]`.
+     *
+     * For both, `start_index_map = [0]` and `index_vector_dim = 0` (with rank-0
+     * `scatter_indices`, StableHLO's spec implicitly expands by a trailing-1 dim,
+     * so the effective indices rank becomes 1 — consistent with the rank arithmetic
+     * used by [emitScatterAdd] in §0.4.112).
+     *
+     * The general [emitGatherOp] path is reused; this method only synthesizes the
+     * canonical attrs for the substrate.
+     */
+    private fun emitSubstrateGather(
+        step: String,
+        name: String,
+        operand: String,
+        startIndices: String,
+        operandType: DxirType,
+        indicesType: DxirType,
+        outType: DxirType,
+    ) {
+        require(operandType.rank == 1 || operandType.rank == 2) {
+            "substrate GATHER operand must be rank-1 or rank-2; got rank=${operandType.rank}"
+        }
+        val expectedOutDims = when (operandType.rank) {
+            1 -> emptyList()
+            else -> listOf(operandType.dims[1])
+        }
+        require(outType.dims == expectedOutDims) {
+            "substrate GATHER output shape ${outType.dims} doesn't match expected " +
+                "$expectedOutDims for rank-${operandType.rank} operand ${operandType.dims}"
+        }
+
+        val offsetDims = when (operandType.rank) {
+            1 -> emptyList()
+            else -> listOf(0)
+        }
+        val sliceSizes = when (operandType.rank) {
+            1 -> listOf(1)
+            else -> listOf(1, operandType.dims[1])
+        }
+
+        emitGatherOp(
+            step = step,
+            name = name,
+            operand = operand,
+            startIndices = startIndices,
+            operandType = operandType,
+            indicesType = indicesType,
+            outType = outType,
+            offsetDims = offsetDims,
+            collapsedSliceDims = listOf(0),
+            startIndexMap = listOf(0),
+            indexVectorDim = 0,
+            sliceSizes = sliceSizes,
+            indicesAreSorted = false,
         )
     }
 

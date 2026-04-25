@@ -39,6 +39,65 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.113 StableHLO emitter learns substrate-shape `OpKind.GATHER` 2026-04-25
+
+§0.4.112 added substrate-shape SCATTER_ADD lowering; this is the symmetric read-side piece. Until now, any `DxirFunction` containing the autograd-emitted GATHER (scalar I32 idx + no attrs, the shape produced by §0.4.41 + §0.4.111) hit `intListAttr(node, "offset_dims")` in `emitGather` and crashed with `op GATHER missing int-list attr 'offset_dims'`. The autograd-side path through `DxirToIrSynthesis` to host Kotlin worked, but any compilation that wanted to flow a substrate GATHER through StableHLO was stuck.
+
+**The mechanism** in [Emitter.kt](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt). `emitGather` now branches on whether `offset_dims` is present in the op's attrs. Substrate-shape detection requires three conditions: no `offset_dims` attr, scalar indices, and I32 dtype. When all three hold, control routes to a new private `emitSubstrateGather` that synthesizes the canonical `stablehlo.gather` attrs:
+
+- **rank-1 operand** (`arr: tensor<NxF>`) → scalar result. `offset_dims = []`, `collapsed_slice_dims = [0]`, `start_index_map = [0]`, `index_vector_dim = 0`, `slice_sizes = [1]`.
+- **rank-2 operand** (`arr: tensor<MxNxF>`) → rank-1 [N] result. `offset_dims = [0]` (the single offset axis is axis 0 of the result), `collapsed_slice_dims = [0]`, `start_index_map = [0]`, `index_vector_dim = 0`, `slice_sizes = [1, N]`.
+
+The general attr-driven path is unchanged for canonical multi-dim GATHER (the §0.4.41-S2 emitter test case, the EMBEDDING-as-gather lowering, and any future user-supplied attrs). Both paths share `emitGatherOp` for the actual MLIR text emission.
+
+```kotlin
+private fun emitGather(...) {
+    val isSubstrateShape = "offset_dims" !in node.attrs &&
+        indicesType.isScalar &&
+        indicesType.dtype == I32
+    if (isSubstrateShape) {
+        emitSubstrateGather(...)
+        return
+    }
+    // ... existing attr-driven path unchanged ...
+}
+```
+
+**Decisions worth flagging**:
+
+- **Three-condition substrate detection.** Just checking `"offset_dims" !in node.attrs` would over-match: a future user could legitimately call `OpKind.GATHER` with partial attrs (e.g., supplying everything except `offset_dims` for some reason). Requiring scalar I32 indices alongside the missing attr matches the substrate's exact shape (the only thing both §0.4.41 and §0.4.111 ever produce) and leaves the general path open to any GATHER with rank-2+ indices or non-I32 indices. The test `generalGatherStillRoutesThroughAttrPath` pins this — a GATHER with all attrs explicitly set still flows through the original code, even when its indices are scalar-shaped.
+
+- **Rank-2 result `offset_dims = [0]`, not `[1]`.** The `offset_dims` list indexes the RESULT tensor's axes (which axes carry slice content), not the operand's. For rank-2 operand → rank-1 result, the result has only one axis (axis 0); that's where the slice content lives. Initially I almost wrote `[1]` (operand-axis indexing, mirroring the SCATTER_ADD note's reasoning); StableHLO's spec is the authority and `[0]` is correct.
+
+- **Does NOT touch SCATTER substrate.** §0.4.41's `OpKind.SCATTER` user-write path is still rank-1 only, and its StableHLO emitter arm (the existing `emitScatter`) requires the canonical attrs. The follow-up "SCATTER user write path rank-2" is still pending; it'd need both the `:autograd` substrate widening (the dxir interpreter already supports it via SCATTER_ADD's rank-2 path, but plain SCATTER doesn't) AND a substrate-shape detection in `emitScatter` analogous to this session's GATHER work. Out of scope here.
+
+- **No regression to existing GATHER tests.** The general attr-driven path still handles every existing test case. `gatherEmitsBasicCanonicalForm`, `gatherRoundTripsBasic`, `gatherRoundTripsMultiDimIndices`, EMBEDDING tests — all still green. The substrate-shape branch is purely additive; it captures a previously-erroring shape.
+
+**Tests added** (+5 new):
+
+- `EmitterTest.substrateGatherRank1EmitsCanonicalAttrs` — rank-1 substrate emits `offset_dims = []`, `collapsed_slice_dims = [0]`, `slice_sizes = array<i64: 1>`, with the right type signature.
+- `EmitterTest.substrateGatherRank2EmitsRowSliceAttrs` — rank-2 substrate emits `offset_dims = [0]` and `slice_sizes = array<i64: 1, 4>` for a 3×4 operand.
+- `EmitterTest.generalGatherStillRoutesThroughAttrPath` — explicit-attr GATHER bypasses the substrate path; the user-supplied `index_vector_dim = 1` survives intact.
+- `RoundTripTest.substrateGatherRank1SubstrateRoundTrips` — rank-1 substrate validates through `stablehlo-translate`. The rank arithmetic check confirms StableHLO accepts the synthesized attrs.
+- `RoundTripTest.substrateGatherRank2SubstrateRoundTrips` — rank-2 substrate validates through `stablehlo-translate`.
+
+Full suite is green: **729 tests** (+5 over §0.4.112).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Rank-2 SCATTER user write path** — extend §0.4.41's `OpKind.SCATTER` interpreter arm to rank-2 (mirror of §0.4.111's GATHER widening). The substrate side; emitter would land separately.
+2. **Cross-rank broadcasting at synthesis surface** — generalise §0.4.84's reverse-side BROADCAST handling to `DxirToIrSynthesis`.
+3. **D.3i Phase 1** — multi-session arc opener for LAND-composed break-bearing WHILE; carve as scaffolding analogous to §0.4.103.
+4. **Tracer surface | Rank-3↔rank-1/rank-2 cross-rank broadcast** — extends user-facing API; rank-3-scalar covered §0.4.97/98.
+
+**Definition-of-done for §0.4.113 — met**:
+- `emitSubstrateGather` lands; `emitGather` dispatch detects substrate shape via three conditions ✓
+- Both rank-1 and rank-2 substrate shapes round-trip through `stablehlo-translate` ✓
+- Three emitter unit tests + two round-trip tests pin the lowering shape and general-path preservation ✓
+- General attr-driven GATHER path unchanged; existing tests stay green ✓
+- No new public API beyond extending the existing OpKind dispatch ✓
+- Full suite stays green at 729 tests (+5) ✓
+
 #### 0.4.112 StableHLO emitter learns `OpKind.SCATTER_ADD` 2026-04-25
 
 §0.4.108's deferred entry "**StableHLO emitter | SCATTER_ADD widening** — `:core` SCATTER_ADD has no MLIR lowering yet" gets shipped. Until this session, any `DxirFunction` containing a substrate-shaped `SCATTER_ADD` op (the gradient shape `GatherRule` emits, per §0.4.45 / §0.4.111) hit the emitter's `else -> error("StableHLO lowering not yet implemented for ${node.op}")` branch — the autograd-side path through `DxirToIrSynthesis` to host Kotlin worked, but the StableHLO compilation path was stuck.

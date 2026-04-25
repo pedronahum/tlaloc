@@ -822,6 +822,34 @@ class RoundTripTest {
         validate(DxirModule(listOf(fn)).toStablehlo(), "GATHER 4D operand with multi-dim indices")
     }
 
+    // §0.4.113 — substrate-shape GATHER must round-trip through stablehlo-translate.
+    // Both rank-1 (`arr[idx]` → scalar) and rank-2 (`arr[idx, :]` → row) shapes
+    // are covered.
+
+    @Test
+    fun substrateGatherRank1SubstrateRoundTrips() {
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("g") {
+            val arr = param("a", DxirType(F32, listOf(4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val y = op(OpKind.GATHER, listOf(arr, idx), DxirType(F32, emptyList()))
+            listOf(y)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "GATHER rank-1 substrate")
+    }
+
+    @Test
+    fun substrateGatherRank2SubstrateRoundTrips() {
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("g") {
+            val arr = param("a", DxirType(F32, listOf(3, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, emptyList()))
+            val y = op(OpKind.GATHER, listOf(arr, idx), DxirType(F32, listOf(4)))
+            listOf(y)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "GATHER rank-2 substrate")
+    }
+
     // §0.4.112 — SCATTER_ADD substrate-shape lowering must round-trip through
     // stablehlo-translate. Both rank-1 (scalar value) and rank-2 (rank-1 row value)
     // shapes are exercised; pre-§0.4.112 the emitter would `error("not yet implemented")`
