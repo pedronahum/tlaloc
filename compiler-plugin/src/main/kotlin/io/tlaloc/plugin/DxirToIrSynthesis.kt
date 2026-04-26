@@ -93,11 +93,33 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val tensorTemplateParam: IrValueParameter?,
     )
 
+    /**
+     * §0.4.173 — names the FIRST gate that rejected the dxir during the most recent
+     * [synthesise] call. Set by [reject] / [cancelWith] at every tagged return-null
+     * site; cleared at the top of [synthesise]. Read by
+     * [TlalocIrGenerationExtension] when the call returns null so the WARNING text
+     * names the specific reason instead of the bare "DxirFunction falls outside the
+     * scalar-primitive synthesis scope" message that landed in §0.4.171's bisection.
+     * Mirrors the §0.4.169 → §0.4.172 diagnostic arc on the synthesis side.
+     */
+    var lastFailureReason: String? = null
+        private set
+
+    /** Tagged return-null helper — records [reason] before returning null. */
+    private fun <T> reject(reason: String): T? {
+        // Keep the FIRST reason (deepest gate) — later sites may pile on as the
+        // null bubbles up through the call chain; the first stamp is the actionable
+        // one.
+        if (lastFailureReason == null) lastFailureReason = reason
+        return null
+    }
+
     fun synthesise(
         fn: DxirFunction,
         originalCall: IrCall,
         parent: IrDeclarationParent,
     ): IrFunctionExpression? {
+        lastFailureReason = null
         // Harvest the rank-1 DTensor IrType from the call site if any DxirParam is rank-1.
         // The call's type is `FunctionN<P0, …, Pn-1, R>` — the first rank-1 F32 DxirParam's
         // IrType matches `transformed.type.arguments[paramIdx].typeOrNull`. We only support
@@ -105,23 +127,35 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // covered by §0.4.10). Multiple tensor shapes would require a per-node map.
         val firstTensorParamIdx = fn.params.indexOfFirst { isRank1F32(it.type) }
         val tensorIrType: IrType? = if (firstTensorParamIdx < 0) null else run {
-            val callType = originalCall.type as? IrSimpleType ?: return null
-            callType.arguments.getOrNull(firstTensorParamIdx)?.typeOrNull ?: return null
+            val callType = originalCall.type as? IrSimpleType
+                ?: return reject("call type ${originalCall.type} is not IrSimpleType")
+            callType.arguments.getOrNull(firstTensorParamIdx)?.typeOrNull
+                ?: return reject("rank-1 tensor param at idx=$firstTensorParamIdx has no type arg on call type")
         }
         // Reject any node whose rank is >1 or whose rank-1 dtype isn't F32. Rank-1 F32
         // and scalars are the full supported surface as of §0.4.10.
-        val nodeTypes: Sequence<DxirType> = sequence {
-            fn.params.forEach { yield(it.type) }
-            fn.body.forEach { yield(it.type) }
+        for (p in fn.params) {
+            if (!p.type.isScalar && !isRank1F32(p.type)) {
+                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1 F32 scope")
+            }
         }
-        for (t in nodeTypes) {
-            if (!t.isScalar && !isRank1F32(t)) return null
+        for (n in fn.body) {
+            if (!n.type.isScalar && !isRank1F32(n.type)) {
+                val opKind = (n as? DxirOp)?.op?.name ?: n::class.simpleName
+                return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1 F32 scope")
+            }
         }
 
         val context = SynthesisContext(tensorIrType = tensorIrType, tensorTemplateParam = null)
-        val paramIrTypes = fn.params.map { irTypeFor(it.type, context) ?: return null }
-        if (fn.returns.isEmpty() || fn.returns.size > 3) return null
-        val returnIrTypes = fn.returns.map { irTypeFor(it.type, context) ?: return null }
+        val paramIrTypes = fn.params.map {
+            irTypeFor(it.type, context) ?: return reject("no IrType for param '${it.name}' type=${it.type}")
+        }
+        if (fn.returns.isEmpty() || fn.returns.size > 3) {
+            return reject("returns.size=${fn.returns.size} outside [1, 3]")
+        }
+        val returnIrTypes = fn.returns.map {
+            irTypeFor(it.type, context) ?: return reject("no IrType for return id=${it.id} type=${it.type}")
+        }
 
         // N = 1 → scalar lambda returning R.  N ∈ {2, 3} → lambda returning Pair<…> /
         // Triple<…>, matching the surface signatures of grad2 / valueAndGrad /
@@ -129,9 +163,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // falls back to `null` so the IR extension keeps the original call.
         val boxedReturnType: IrType = when (returnIrTypes.size) {
             1 -> returnIrTypes.single()
-            2 -> pairClass()?.typeWith(returnIrTypes) ?: return null
-            3 -> tripleClass()?.typeWith(returnIrTypes) ?: return null
-            else -> return null
+            2 -> pairClass()?.typeWith(returnIrTypes) ?: return reject("kotlin.Pair class symbol not found")
+            3 -> tripleClass()?.typeWith(returnIrTypes) ?: return reject("kotlin.Triple class symbol not found")
+            else -> return reject("returnIrTypes.size=${returnIrTypes.size} outside [1, 3]")
         }
 
         val lambdaFun = pluginContext.irFactory.buildFun {
@@ -157,7 +191,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val tensorTemplateParam = if (firstTensorParamIdx >= 0) irParams[firstTensorParamIdx] else null
         val bodyContext = context.copy(tensorTemplateParam = tensorTemplateParam)
 
-        val body = buildBody(fn, lambdaFun, irParams, boxedReturnType, bodyContext) ?: return null
+        val body = buildBody(fn, lambdaFun, irParams, boxedReturnType, bodyContext)
+            ?: return reject(lastFailureReason ?: "buildBody aborted (no specific gate stamped)")
         lambdaFun.body = body
 
         val functionType = pluginContext.irBuiltIns.functionN(fn.params.size).symbol
@@ -197,11 +232,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             builder.irBlockBody {
                 for (node in fn.body) {
                     val expr: IrExpression = when (node) {
-                        is DxirConst -> irConstFor(node, context) ?: cancel()
-                        is DxirOp -> irOpFor(node, env, context) ?: cancel()
-                        else -> cancel()
+                        is DxirConst -> irConstFor(node, context)
+                            ?: cancelWith("irConstFor returned null for const id=${node.id} value=${node.value} type=${node.type}")
+                        is DxirOp -> irOpFor(node, env, context)
+                            ?: cancelWith("irOpFor returned null for ${node.op} id=${node.id} type=${node.type}")
+                        else -> cancelWith("body node id=${node.id} is unsupported kind ${node::class.simpleName}")
                     }
-                    val ty = irTypeFor(node.type, context) ?: cancel()
+                    val ty = irTypeFor(node.type, context)
+                        ?: cancelWith("no IrType for body node id=${node.id} type=${node.type}")
                     val v = irTemporary(
                         value = expr,
                         nameHint = "s${node.id}",
@@ -210,13 +248,16 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     env[node.id] = v
                 }
                 val returnExpr: IrExpression = when (fn.returns.size) {
-                    1 -> irGet(env[fn.returns.single().id] ?: cancel())
+                    1 -> irGet(env[fn.returns.single().id]
+                        ?: cancelWith("return id=${fn.returns.single().id} not in env"))
                     2, 3 -> {
-                        val elementDecls = fn.returns.map { env[it.id] ?: cancel() }
+                        val elementDecls = fn.returns.map {
+                            env[it.id] ?: cancelWith("return id=${it.id} not in env")
+                        }
                         val ctorSym = when (fn.returns.size) {
-                            2 -> pairConstructor() ?: cancel()
-                            3 -> tripleConstructor() ?: cancel()
-                            else -> cancel()
+                            2 -> pairConstructor() ?: cancelWith("kotlin.Pair constructor symbol not found")
+                            3 -> tripleConstructor() ?: cancelWith("kotlin.Triple constructor symbol not found")
+                            else -> cancelWith("returns.size=${fn.returns.size} reached the ctor switch unexpectedly")
                         }
                         val ctorCall = IrConstructorCallImpl.fromSymbolOwner(
                             startOffset = startOffset,
@@ -247,6 +288,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     private fun cancel(): Nothing = throw SynthesisAbort()
 
+    /** §0.4.173 — cancel after stamping [reason] so the caller's WARNING names the gate. */
+    private fun cancelWith(reason: String): Nothing {
+        if (lastFailureReason == null) lastFailureReason = reason
+        throw SynthesisAbort()
+    }
+
     private fun IrBuilderWithScope.irConstFor(node: DxirConst, context: SynthesisContext): IrExpression? {
         val ty = irTypeFor(node.type, context) ?: return null
         val v = node.value
@@ -269,14 +316,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? {
-        if (op.isMultiResult) return null
+        if (op.isMultiResult) return reject("op id=${op.id} ${op.op} is multi-result (types=${op.types})")
         // OpKind.IF is the only region-bearing op the synthesis scope accepts — emitted by
         // `DxirReverseTransform.handleIfAdjoint` (§0.4.23) with empty-body regions yielding
         // outer-scope adjoints. Primal-shape IFs with body ops in branches never survive to
         // synthesis (the reverse transform absorbs them via walkBranchReverse). Other
         // region-bearing ops (WHILE, MANUAL_COMPUTATION) still fall back.
         if (op.hasRegions) {
-            if (op.op != OpKind.IF) return null
+            if (op.op != OpKind.IF) return reject("op id=${op.id} ${op.op} has regions but isn't IF")
             return irIfOp(op, env, context)
         }
         // RELU and STEP don't lower to a stdlib operator; synthesise them from a primitive
@@ -299,7 +346,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
 
-        val operandDecls = op.operands.map { env[it.id] ?: return null }
+        val operandDecls = op.operands.mapIndexed { idx, o ->
+            env[o.id] ?: return reject(
+                "op id=${op.id} ${op.op} operand[$idx] id=${o.id} not in env " +
+                    "(grad body never declared it — likely a clone-time leak)",
+            )
+        }
         // §0.4.42 — rank-1 ADD/SUB/MUL/DIV route through `:core/ops` tensor operators
         // (`DTensor.plus` etc., declared in HostOps.kt) rather than the primitive
         // `Float.plus`. `gradAccum`'s outer ADD accumulation for rank-1 gradient
@@ -312,10 +364,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.MUL -> if (op.type.rank == 1) findTensorBinaryOp("times") else findBinaryOp("times", op.type, context)
             OpKind.DIV -> if (op.type.rank == 1) findTensorBinaryOp("div") else findBinaryOp("div", op.type, context)
             OpKind.NEG -> findUnaryOp("unaryMinus", op.type, context)
-            else -> return null
-        } ?: return null
+            else -> return reject("op id=${op.id} ${op.op} type=${op.type} has no synthesis arm")
+        } ?: return reject("no IR symbol for op id=${op.id} ${op.op} type=${op.type}")
 
-        val resultType = irTypeFor(op.type, context) ?: return null
+        val resultType = irTypeFor(op.type, context) ?: return reject(
+            "no IrType for result of op id=${op.id} ${op.op} type=${op.type}",
+        )
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,

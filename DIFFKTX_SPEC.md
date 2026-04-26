@@ -39,6 +39,74 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.173 Synthesis-side rejection diagnostics + post-coarsening / post-SCT dxir dumps; CartPole leak source pinpointed 2026-04-26
+
+§0.4.172 surfaced the SSA-validation gate ("`function grad_body_grad references unknown node ids: [52]`"). §0.4.173 closes the diagnostic arc on the **synthesis side** (the §0.4.171 second-tier "scalar-primitive synthesis scope" rejection) AND traces the actual leak source for the CartPole shape — a coarsening-introduced cross-IF reference.
+
+**Two-part landing this firing**:
+
+1. **Synthesis-side `lastFailureReason` machinery** ([DxirToIrSynthesis.kt:96-124](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L96-L124)) — `var lastFailureReason: String?` field stamped by `reject(...)` / `cancelWith(...)` at every tagged return-null site (top-level rank check, irTypeFor failures, return arity, Pair/Triple boxing, buildBody operand env miss, irOpFor multi-result / regions / unsupported op). [TlalocIrGenerationExtension.kt:192-204](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L192-L204) reads the field on synthesise-null and includes the reason in the WARNING text — replacing the bare "DxirFunction falls outside the scalar-primitive synthesis scope" message landed in §0.4.171's bisection. Mirrors §0.4.169's DxirReverseTransform-side improvement.
+
+2. **Post-coarsening + post-SCT dxir dumps on synthesis failure** ([TlalocIrGenerationExtension.kt:163-178, 198-202](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L163-L202)) — augments both warning paths (DxirReverseTransform-rejection and synthesis-scope rejection) with the relevant intermediate dxir state. The synthesis-failure path now reports BOTH the post-coarsening primal AND the post-SCT grad function, so a future investigation can scan both for the offending node without re-running probes.
+
+**The CartPole leak source** (the load-bearing finding): re-running the probe with the augmented diagnostics surfaced
+> `op id=53 MUL operand[1] id=57 not in env (grad body never declared it — likely a clone-time leak)`
+
+and the post-coarsening primal dump shows WHY:
+
+```
+%52 = if(%50) yields %47 (then) or %51=0 (else)
+%57 = if(%50) yields SUB(%53,%47) (then) or SUB(%53,0) (else)
+%63 = if(%50) yields {
+  block () { %58=SUB(%53,%47); %59=MUL(%58, %57); yield %59 }   ← %57 is OUTER IF
+  block () { ...; yield %62 }
+}
+```
+
+Coarsening's `distribute` rule rewrites `term * term` into a chain of IFs sharing the same predicate, where region-internal ops (e.g. `%59 = MUL(%58, %57)`) reference an OUTER IF as a primal forward operand. The cloning loop in [DxirReverseTransform.apply](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L185-L192) maps `nodeMap[primal-IF] = primal-IF` (skipping the deep clone), based on the assumption "the IF's id is referenced only by adjoint synthesis." That assumption holds for single-IF primals; coarsening's multi-IF chain breaks it. `walkBranchReverse` step 1 then emits the cloned MUL with `operand[1] = primal-%57` — a node that doesn't exist in the grad's id space. The grad allocator can later coincidentally allocate the SAME id (57) to a different op, producing an out-of-order forward reference.
+
+**The first-attempt fix and why it was reverted**: I tried deep-cloning the IF via [PhiCalculus.cloneNode](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/PhiCalculus.kt#L2956) — visibility relaxed to `internal`, the cloning loop's IF arm calls `cloneNode(n, nodeMap, this)`. **It resolved the SSA leak** (the cloned IF properly lives in the grad body with grad-allocated id, and downstream operand references resolve to it). But the deep-clone PUTS region body ops into the cloned IF's regions — and `irIfOp` rejects IFs with non-empty branch bodies ([DxirToIrSynthesis.kt:432](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L432)). The synthesis gate moved one layer down: from `MUL operand id not in env` to `irOpFor returned null for IF id=53`. **End-to-end CartPole still blocked**. Reverted the deep-clone (and the visibility relaxation) so the suite stays at 858; left a TODO comment block in the IF clone arm naming the leak + the two ways to close it.
+
+**Decisions worth flagging**:
+
+- **Two paths forward**, neither single-firing-sized:
+  1. **Lift region body ops to the grad's top level pre-clone**, leaving region terminators yielding outer-scope refs only. The IF stays empty-body (irIfOp accepts). Cost: a coarsening-aware lift pass before SCT. Plus PhiCalculus's `applyC5Pass` already does similar shape-rewriting; this might fit there.
+  2. **Widen `irIfOp` to lower IF-with-body-ops as `IrBlock` branches.** Each region's body becomes a sequence of `IrVariable` declarations + an `IrGet` of the terminator. Cost: a synthesis-side expansion. Not bounded by single-firing scope.
+  
+  Path (1) preserves synthesis's "empty IF body" invariant, which is structurally cleaner. Path (2) is more general but couples synthesis tighter to the post-coarsening shape. I'd start with (1).
+
+- **The §0.4.172 dump augmentation interacted differently with the CartPole shape than the original diagnosis suggested.** §0.4.172 reported `%49 = MUL ops=[%46, %52]` as the smoking gun. THIS firing's probe (the same primal source) reports `%53 MUL operand[1]=%57` instead. Likely the post-passes (CSE / constFold / DCE) compact differently between firings; what matters is the structural pattern, which is consistent: a top-level MUL emitted by MulRule references an id that's not declared earlier in the grad body. Both readings point at the same root cause.
+
+- **Diagnostic surface area now spans 5 firings (§0.4.169–§0.4.173).** That's a lot of platform work, but each firing's contribution is load-bearing for the next: §0.4.169 wired the DxirReverseTransform-side warning, §0.4.170 used it to identify the gate, §0.4.171 bisected with probes, §0.4.172 added the partial-function dump, §0.4.173 closes the synthesis-side gap AND surfaces the actual leak source. After this firing, every layer of the K2-plugin pipeline — from FIR-side dxir to post-coarsening to post-SCT to synthesis rejection — is dumpable on a single failure path. The next firing's debug arc opens with full visibility instead of "(gate violation)".
+
+- **Diagnostic helpers stay in production.** Pre-§0.4.169 the warnings were minimal so successful compiles stayed quiet. Post-§0.4.173 the warnings still only fire on FAILURE paths — every successful K2-plugin synthesis stays silent. The added text only appears when a port is broken; that's the inflection where the verbosity actively helps the developer.
+
+- **Probe deleted; finding preserved in this entry.** Per the §0.4.163/168/170/171/172 convention. The probe re-runs trivially when the next firing wants to verify a fix.
+
+- **PhiCalculus.cloneNode visibility was briefly relaxed and then reverted.** The first-attempt fix needed `internal` visibility on `cloneNode` / `cloneRegion` / `resolveClonedOperand`. Since the fix was reverted, I reverted the visibility too — the helpers stay `private`. A future firing implementing path (1) or (2) will likely re-relax these (or write a focused helper inline) — that's where the visibility belongs to land.
+
+**Tests added** (+0): probe landed and removed. Suite: 858 (unchanged from §0.4.172).
+
+Full suite is green: **858 tests** (unchanged from §0.4.172).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Path (1) — lift region body ops to top level pre-SCT.** Implement a coarsening-aware "lift" pass that walks IFs in the post-coarsening dxir and pulls region-internal ops up to the function body, replacing them with outer-scope references. The IF's regions then yield only top-level ids. Once that lands, DxirReverseTransform's existing IF-skip path works correctly (no leak), and `irIfOp`'s empty-body assumption holds. This is the single most CartPole-unblocking item.
+2. **Path (2) — widen `irIfOp`** as a fallback if path (1) proves too invasive. Lower IF-with-body-ops as `IrBlock` branches at synthesis time.
+3. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+4. **Out-of-scope register refresh.** Multiple items moved across §0.4.165–§0.4.173.
+
+**Definition-of-done for §0.4.173 — met**:
+- `DxirToIrSynthesis.lastFailureReason` field + `reject` / `cancelWith` helpers stamp every tagged synthesis gate ✓
+- `TlalocIrGenerationExtension` includes the reason in the synthesis-rejection WARNING ✓
+- Synthesis-rejection path also dumps the post-coarsening primal + post-SCT grad function ✓
+- DxirReverseTransform-rejection path also dumps the post-coarsening primal ✓
+- CartPole leak source pinpointed: coarsening's `distribute` rule introduces region-internal ops referencing OUTER-scope IFs as forward operands; existing IF-skip clone leaks them ✓
+- First-attempt fix (deep-clone IF) tried + reverted with TODO comment naming the next paths ✓
+- Probe deleted; findings preserved in this entry ✓
+- Two paths forward named with concrete scope ✓
+- Full suite stays green at 858 tests (unchanged) ✓
+
 #### 0.4.172 `DxirFunction.init` augments validation failures with a partial-state dump 2026-04-26
 
 §0.4.171 named "extend the diagnostic to dump the partially-built grad function on validation failure" as the load-bearing next step. §0.4.172 lands it. Two implementation iterations:

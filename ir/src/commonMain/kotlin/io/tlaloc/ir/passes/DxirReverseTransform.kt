@@ -189,6 +189,23 @@ object DxirReverseTransform {
                             // both would emit duplicate computation. Map to the primal
                             // node; the IF's id is referenced only by adjoint synthesis
                             // (which uses outerNodeMap[predicate] and primal regions).
+                            //
+                            // §0.4.173 — KNOWN LEAK: when coarsening's `distribute` rule
+                            // produces a region-internal op that references an OUTER-
+                            // scope IF as a primal operand (e.g., post-coarsening
+                            // CartPole: `%59 = MUL(%58, %57-OUTER-IF)` inside a sibling
+                            // IF's branch), `walkBranchReverse` step 1 emits the cloned
+                            // MUL with operand[1] = primal-%57. The grad's id allocator
+                            // can later hit that same id, producing an out-of-order
+                            // forward reference that buildBody rejects with
+                            // `op id=N MUL operand[idx] id=M not in env`. A first
+                            // attempt at this firing (§0.4.173) tried deep-cloning the
+                            // IF into the grad body via [PhiCalculus.cloneNode] — that
+                            // resolved the leak but surfaced a downstream gate
+                            // ([irIfOp] rejects IFs whose regions have non-empty body).
+                            // Closing the leak end-to-end requires either lifting region
+                            // body ops to top level OR widening synthesis to lower
+                            // IF-with-body-ops. Both are non-trivial; deferred.
                             n
                         } else {
                             op(

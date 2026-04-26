@@ -161,7 +161,19 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                 }
                 val toSynthesise: DxirFunction = tryReverseTransform(
                     coarsened, includeForward, mc, fn.name,
-                ) ?: return transformed
+                ) ?: run {
+                    // §0.4.173 — augment the §0.4.169 warning: also dump the post-
+                    // coarsening dxir so the next firing has full visibility into the
+                    // input that DxirReverseTransform rejected. Mirrors the
+                    // post-SCT dump landed below for the synthesis-scope rejection.
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc IR extension post-coarsening dxir for '${fn.name}':\n" +
+                            coarsened.pretty().trimEnd(),
+                        null,
+                    )
+                    return transformed
+                }
 
                 // §0.4.105 — D.1i Phase 3. Optionally run PhiCalculus.simplifyReturns over
                 // the gradient function before synthesis. Gated on `tlaloc.simplify.enabled`
@@ -191,10 +203,14 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
 
                 val replacement = synth.synthesise(simplified, transformed, currentDeclarationParent!!)
                 if (replacement == null) {
+                    val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
                     mc.report(
                         CompilerMessageSeverity.WARNING,
                         "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                            "DxirFunction falls outside the scalar-primitive synthesis scope",
+                            "DxirFunction falls outside the scalar-primitive synthesis scope " +
+                            "[$reason]\n" +
+                            "post-coarsening primal:\n${coarsened.pretty().trimEnd()}\n" +
+                            "post-SCT grad function:\n${simplified.pretty().trimEnd()}",
                         null,
                     )
                     return transformed
