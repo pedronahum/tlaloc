@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.164 Out-of-scope register refresh — 13 sub-sections shipped since §0.4.151 2026-04-26
+
+§0.4.151 was the fourth register snapshot; §0.4.164 is the fifth. 13 sub-sections shipped between §0.4.152 and §0.4.163 — a focused arc dominated by Multi-result IF AD Phase 4 + Multi-live-index gradAccum refactor + the HMC benchmark port (Phases 1, 2, 3 mask). Three FIR-side fixes (§0.4.158 / §0.4.162 / §0.4.163) surfaced and shipped along the way as HMC porting exposed gaps. This refresh updates the deferred snapshot accordingly and surfaces a fresh recommended-next list.
+
+**Refreshed register (as of §0.4.163)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Synthesis-side gated on rank-1-only fast path; multi-session widening. Tracer-surface side covered. |
+| Tensor ops | MATMUL through K2 plugin | Plugin's `BINARY_OP_MAP` only has `+`/`-`/`*`/`/`. Tracer + IR + emitter all support MATMUL (§0.4.135 / §0.4.137 / §0.4.138); plugin lambda-lowering doesn't recognize `matmul(...)` calls. Discovered §0.4.158. |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) | FIR-side lowering produces dxir; IR-phase synthesis (`DxirToIrSynthesis`) is partial. Some shapes (e.g., nested WHILE post-§0.4.163 ) silently fall back to runtime tape. **Headline Phase-2 blocker** per the priority ladder. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED | Single-result covered §0.4.31; multi-result still pending despite the §0.4.154/§0.4.155 substrate. Removing the `coarsened.types.size == 1` guard in `handleCoarsenedAdjoint` is the focused widening. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | IF-in-IF closed §0.4.140; IF-in-WHILE closed §0.4.162; WHILE-in-IF closed §0.4.152/§0.4.153; WHILE-in-WHILE closed §0.4.161 at the structural level but end-to-end gradient still has a downstream gap (§0.4.163 checkpoint). |
+| Control flow | Multi-block regions | Single-block today. |
+| Benchmark ports | **CartPole / QWOP** | Two of the paper's three remaining benchmarks. HMC Phases 1+2+3-mask shipped §0.4.159/§0.4.160/§0.4.162; **HMC Phase 3 nested-loop blocked** by the IR-side synthesis closure pending. Multi-session each. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.151 and §0.4.163** (13 sub-sections, four themed clusters):
+
+- **Multi-result IF AD Phase 4** — §0.4.152 (region-recursive C5 into IF region bodies) / §0.4.153 (AD-side end-to-end through the rewritten IF). Closes the WHILE-in-IF shape both structurally and through the gradient.
+- **Multi-live-index MR IF AD (Phases 5a + 5b)** — §0.4.154 (gradAccum substrate refactor: `Map<Int, DxirNode>` → `Map<Pair<Int, Int>, DxirNode>`) / §0.4.155 (semantic widening + DxirOpResult preservation in body cloning; two latent bugs fixed). Closes the multi-live-index gradAccum refactor that §0.4.108 / §0.4.122 / §0.4.151 had all flagged pending.
+- **HMC benchmark port (Phases 1 + 2 + 3-mask)** — §0.4.157 (planning doc) / §0.4.158 (scalar `Float.exp()` / `Float.log()` plugin lowering unblock) / §0.4.159 (Phase 1 straight-line port at n=4, d=2) / §0.4.160 (Phase 2 loop form) / §0.4.162 (Phase 3 mask form + lowerWhen DxirRegionBuilder dispatch) / §0.4.163 (FIR `collectMutatedTargets` excludes locally-declared vars; nested-loop checkpoint). Four of the paper's six benchmarks now ported through the K2 plugin (Brachistochrone, HookeanSpring, BGDHyperOpt partial, HMC at three phases). HMC Phase 3 nested-loop is checkpointed pending IR-side synthesis closure.
+- **Phase 4b — region-recursive C5 into WHILE region bodies** — §0.4.161. Generalises §0.4.152's IF-only widening to all region-bearing ops; collapses three previously-IF-specific code paths into uniform region-bearing-op dispatch.
+- **Fourth `:benchmarks` inhabitant** — §0.4.156 (multi-branch IF AD pipeline at fixed shape, exercising §0.4.155's multi-live-index path).
+
+**Decisions worth flagging**:
+
+- **The deferred count went from ~12 (§0.4.151) to ~16 (§0.4.164).** Three new items added to the register: MATMUL through K2 plugin (discovered §0.4.158); Plugin IR-side synthesis closure (named explicitly as a Phase-2 blocker); new control-flow-combination notes that track which combos closed and which remain (the table now distinguishes IF-in-IF / IF-in-WHILE / WHILE-in-IF / WHILE-in-WHILE for legibility). Items closed entirely: `:benchmarks` substrate (already), Multi-live-index gradAccum refactor, MR IF AD Phase 4 (WHILE-in-IF shape), region-internal CSE for WHILE (already), valueAndGrad3 (already). Items partially closed: HMC port (Phases 1+2+3-mask shipped, nested-loop pending), Multi-result COARSENED (substrate ready, single-line widening pending), Nested control-flow combinations (3 of 4 combos closed).
+
+- **Three FIR-side fixes shipped from one driving force.** §0.4.158 / §0.4.162 / §0.4.163 each surfaced from "I tried HMC Phase N and the K2 plugin didn't lower this shape". The diagnostic-stderr pattern (capture the result.messages and dump compile warnings on test failure) was firmly established at §0.4.162 and paid off at §0.4.163. Future K2-plugin debugging should default to that pattern.
+
+- **HMC Phase 3 nested-loop is the headline checkpoint of this refresh.** §0.4.163 closed three plumbing fixes (FIR-side) for the nested-loop port but discovered the IR-side synthesis can't handle the resulting nested-WHILE dxir. The deferred-register entry for "Plugin | IR-side synthesis closure" surfaces this as the next big piece. It's also the M3 exit criterion item from the Phase-2 priority ladder, so closing it satisfies BOTH the HMC Phase 3 nested-loop unblock AND the Phase-2 #1 blocker.
+
+- **Naming convention shipped: `Phase 5X` for multi-live-index sub-arcs.** §0.4.154 / §0.4.155 used 5a / 5b; future Phase 5c (multi-result COARSENED widening) follows. Mirrors the §0.4.131–§0.4.150 D.3i Phase 3X / §0.4.139–§0.4.144 MR IF AD Phase 1–3 / §0.4.152 Multi-result IF AD Phase 4 conventions.
+
+- **Register cadence.** §0.4.108 was the second refresh (~14 sub-sections gap); §0.4.122 the third (~14); §0.4.151 the fourth (~29); §0.4.164 the fifth (~13). The right cadence isn't fixed — fire when an item moves between deferred and shipped, OR when the deferred count starts drifting (becoming hard to scan at a glance). 16 rows is tractable; further drift should trigger another refresh.
+
+- **Three "control flow combinations" rows' status updated together.** Previously a single line "Nested control flow combinations | Case-by-case for unusual nests". Refreshed to enumerate the four combos (IF-in-IF, IF-in-WHILE, WHILE-in-IF, WHILE-in-WHILE) with per-combo close status. A reader can now see at a glance which are done and which aren't — more legible than "case by case".
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **852 tests** (unchanged from §0.4.163).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Plugin IR-side synthesis closure (§17 step 6)** — the headline Phase-2 blocker. Close it for the simplest unblocked shape first (single-result scalar primal, no nested control flow), then widen. Multi-session.
+2. **HMC Phase 3 nested-loop diagnostic** — focused investigation of where the post-§0.4.161 region-recursive C5 actually leaves the dxir (does fixpoint converge? does DxirReverseTransform reject?). May surface a focused fix that unblocks HMC Phase 3 + reveals what synthesis needs for nested WHILE.
+3. **Phase 5c — Multi-result COARSENED.** Single-line widening to remove the `coarsened.types.size == 1` guard in `handleCoarsenedAdjoint`. Substrate is ready since §0.4.155.
+4. **CartPole benchmark port — Phase 1.** Multi-session. Reuses HMC's three-phase plan structure (per `docs/HMC_PORT_PLAN.md`'s out-of-scope clause).
+
+**Definition-of-done for §0.4.164 — met**:
+- Deferred table refreshed to reflect §0.4.152–§0.4.163 closures ✓
+- Three new items added to track MATMUL-through-plugin, IR-side synthesis closure, and the per-combo control-flow status ✓
+- "Newly shipped" subsection groups §0.4.152–§0.4.163 into four themed clusters with section pointers ✓
+- Recommended next pickup updated to surface the IR-side synthesis closure as the Phase-2 priority ✓
+- Register stays tabular per §0.4.108 / §0.4.122 / §0.4.151's organising principle ✓
+- Full suite stays green at 852 tests (unchanged) ✓
+
 #### 0.4.163 FIR `collectMutatedTargets` excludes locally-declared vars; HMC Phase 3 nested-loop checkpoint 2026-04-26
 
 §0.4.162's hand-off named HMC Phase 3 second half (true nested for-loop over features) as the next pickup, flagging "multiplicative index arithmetic" as the suspected gap. The first attempt sidestepped that with a row-major X layout + running `var idx` counter, but immediately surfaced a different FIR-lowering bug: the K2 plugin's `collectMutatedTargets` reported a locally-declared `var xb = 0.0f` (inside the outer for-loop body) as a "carried var of the outer loop", because it doesn't distinguish locally-declared vars from outer-scope vars when recursing into nested-loop bodies. §0.4.163 fixes that bug. End-to-end gradient evaluation still doesn't reach finite-difference parity for the nested-loop primal — a downstream gate (PhiCalculus.apply's fixpoint or DxirReverseTransform's WHILE rejection) drops the dxir before synthesis. **This firing checkpoints the FIR fix as a clean win and flags the downstream gap explicitly.**
