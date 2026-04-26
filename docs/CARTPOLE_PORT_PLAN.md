@@ -1,6 +1,29 @@
 # CartPole Benchmark Port — Plan
 
-**Status:** Planning artifact (§0.4.165). Implementation has not started.
+**Status:** Implementation **2/3 phases complete** (§0.4.181 amendment); Phase 3 gated on Phase 0c (MATMUL through K2 plugin).
+
+**Ship state** (updated 2026-04-26):
+
+| Phase | Plan estimate | Actual | Closing entry |
+|---|---|---|---|
+| Phase 0a-1 — scalar sin/cos | 1 firing | 1 firing | §0.4.166 |
+| Phase 0a-2 — scalar abs | 1 firing | 1 firing | §0.4.167 |
+| Phase 0b — max/sign as IF chains | 1 firing | not needed (Phase 1 used direct IF) | n/a |
+| Phase 0c — plugin MATMUL | deferred | NOT DONE | pending |
+| Phase 1 — physics-only port | 1 firing | 6 firings (first attempt §0.4.168 hit downstream gate; closure via §0.4.169–§0.4.175 diagnostic + structural arc) | §0.4.175 |
+| Phase 2 — B=3 loop with state passing | 2 firings | 1 firing (regression test only; no new code) | §0.4.178 |
+| Phase 3 — NN + outer training loop | 4-5 firings | NOT DONE (gated on Phase 0c) | pending |
+| **CartPole-specific total (closed)** | **8-10 firings (Phases 0a + 1 + 2)** | **6 firings (165 + 166 + 167 + 168 + 175 + 178)** | |
+
+Plus **8 firings of platform work** (§0.4.169–§0.4.176) that closed Phase 2 #1 (Plugin IR-side synthesis closure) for the scalar-arithmetic surface — that work was discovered through the CartPole Phase 1 attempt (§0.4.168). Combined: 14 firings actually shipped for the closed phases vs. 10-12 originally planned. The plan estimate didn't budget the diagnostic + structural arc that surfaced from porting.
+
+**Phase 0b never landed** because Phase 1's source uses the direct `if (maxArg > 0.0f) maxArg else 0.0f` IF expression — no `max` / `sign` extension needed. Phase 0b stays in the plan as a future addition if a different CartPole-style port surfaces the need.
+
+**Phase 3 is gated on Phase 0c** (MATMUL through K2 plugin). Per the §0.4.180 register, Phase 0c is multi-session by itself because rank-2 MATMUL output requires synthesis-side widening (rank-2 IrType building, broadcast helpers, etc.) that today's synthesis surface (scalar + rank-1 F32) doesn't carry.
+
+The historical planning content below is preserved verbatim for reference.
+
+---
 
 **Target benchmark:** Deep-reinforcement-learning training of a cart-pole control system,
 per the OOPSLA 2021 paper §3 (`docs/papers/coarsening-autodiff.txt:247-360`) and §7.2.

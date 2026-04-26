@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.181 `docs/HMC_PORT_PLAN.md` + `docs/CARTPOLE_PORT_PLAN.md` ship-state amendments 2026-04-26
+
+§0.4.180's hand-off named `docs/*_PORT_PLAN.md` amendments as recommended-next #4 — pure doc work to update the plan documents' Status fields with actual ship state. §0.4.181 lands it.
+
+The §0.4.180 hand-off also named Phase 0c (Plugin MATMUL recognition) as recommended-next #1, BUT a closer look at the plumbing reveals Phase 0c is **multi-session, not single-firing**: the synthesis surface today supports scalar + rank-1 F32, while MATMUL produces rank-2 outputs. Lifting MATMUL through the K2 plugin requires synthesis-side rank-2 widening (rank-2 IrType building, broadcast helpers, broadcast-to-rank-2 lowering for MatmulRule emissions) — that's a structural expansion, not a §0.4.158-style mechanical port. The §0.4.180 estimate ("Single-firing IF the test target is rank-1 vector-matrix shapes; multi-session if Phase 3-ready full rank-2 widening") was correct in spirit but the rank-1 form doesn't exist in the current `:core/ops` API (the `matmul` infix is rank-2 × rank-2 → rank-2). Pivoted to the doc-amendment landing instead.
+
+**The amendments**:
+
+1. **[docs/HMC_PORT_PLAN.md](docs/HMC_PORT_PLAN.md)** — Status changed from "Planning artifact (§0.4.157). Implementation has not started." to "Implementation complete (§0.4.181 amendment)." Added a ship-state table:
+
+   | Phase | Plan estimate | Actual | Closing entry |
+   |---|---|---|---|
+   | Phase 1 — straight-line | 1 firing | 1 firing | §0.4.159 |
+   | Phase 2 — loop form | 2 firings | 1 firing | §0.4.160 |
+   | Phase 3 — nested loop + mask | 3-4 firings | 2 firings | §0.4.176 |
+   | **HMC-specific total** | **6-7 firings** | **4 firings** | |
+
+   Plus 5 firings of platform work that benefited HMC. **Combined: 9 firings actually shipped vs. 3-4 originally planned.** The plan estimate didn't budget the platform work the porting surfaced.
+
+2. **[docs/CARTPOLE_PORT_PLAN.md](docs/CARTPOLE_PORT_PLAN.md)** — Status changed to "Implementation 2/3 phases complete (§0.4.181 amendment); Phase 3 gated on Phase 0c (MATMUL through K2 plugin)." Added a ship-state table:
+
+   | Phase | Plan | Actual | Closing entry |
+   |---|---|---|---|
+   | Phase 0a-1 — scalar sin/cos | 1 firing | 1 firing | §0.4.166 |
+   | Phase 0a-2 — scalar abs | 1 firing | 1 firing | §0.4.167 |
+   | Phase 0b — max/sign as IF chains | 1 firing | **not needed** (Phase 1 used direct IF) | n/a |
+   | Phase 0c — plugin MATMUL | deferred | **NOT DONE** | pending |
+   | Phase 1 — physics-only | 1 firing | 6 firings | §0.4.175 |
+   | Phase 2 — B=3 loop | 2 firings | 1 firing | §0.4.178 |
+   | Phase 3 — NN + outer loop | 4-5 firings | **NOT DONE** | pending |
+   | **CartPole-specific (closed)** | **8-10 firings (Phases 0a + 1 + 2)** | **6 firings (165 + 166 + 167 + 168 + 175 + 178)** | |
+
+   Plus 8 firings of platform work (§0.4.169–§0.4.176). **Combined: 14 firings shipped for the closed phases vs. 10-12 originally planned.**
+
+3. **Both plans preserve the historical planning content verbatim** below the new "Ship state" section. A separator (`---`) divides the amendment from the original prose. Future readers see both: what was planned vs. what actually happened.
+
+**Decisions worth flagging**:
+
+- **The plan vs. actual gap is mostly platform work.** HMC's specific work (4 firings) BEAT the plan estimate (6-7). CartPole's specific work (6 firings) was longer than its specific estimate (8-10) but mostly because Phase 1 took 6 firings vs. estimated 1 — and 5 of those 6 were diagnostic + structural work (§0.4.169–§0.4.173) that benefited multiple ports. The plans were good at predicting the per-phase work; they didn't budget cross-port platform work.
+
+- **Phase 0b never landed but stayed planned.** CartPole Phase 1 used `if (maxArg > 0.0f) maxArg else 0.0f` directly — the Kotlin if-expression that the K2 plugin's existing `lowerWhen` already handles. No `max(a, b)` or `sign(x)` extension needed. Phase 0b stays in the plan as a future addition if a different port surfaces the need.
+
+- **Phase 0c is the next CartPole-unblocking work.** With Phase 1+2 shipped end-to-end, Phase 3 (NN forward + outer training loop) is the only remaining CartPole milestone. It's gated on plugin MATMUL recognition, which is multi-session because of the rank-2 synthesis widening. Worth tackling once the head-to-head harness lands (so we have working benchmarks to compare against without Phase 3).
+
+- **Doc-only firings are valuable.** §0.4.181 isn't the first (§0.4.10 was the original Stage B planning doc; §0.4.157 was HMC; §0.4.165 was CartPole; §0.4.108/122/151/164/177/180 were register refreshes). The pattern: when a planning doc's prose drifts from reality, a single-firing amendment that closes the gap is high-value. Future readers don't need to triangulate "the plan said X but the §0.4 entries say Y" — the plan now reflects Y.
+
+- **No `:ir` / `:compiler-plugin` code changes; no test count change.** Pure documentation.
+
+**Tests added** (+0): pure doc / planning amendment session.
+
+Full suite is green: **867 tests** (unchanged from §0.4.180).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Head-to-head harness scaffolding.** Three working K2-plugin benchmark ports (Brachistochrone, HookeanSpring, HMC) + CartPole Phase 1+2 + BGDHyperOpt's `:benchmarks` port = 4-5 working benchmarks. Even without Phase 0c, harnessing those 4-5 against PyTorch / JAX would surface M9-parity numbers. Multi-session by definition (per Phase-1 #7).
+2. **Phase 0c first slice — plugin MATMUL recognition + minimal rank-2 synthesis.** Multi-session: Plan as a 3-firing arc — (a) `BINARY_OP_MAP` entry + plugin-side recognition; (b) rank-2 IrType plumbing in `DxirToIrSynthesis`; (c) end-to-end test on a small NN-flavoured shape.
+3. **`liftIfRegionBodies` SAFE_LIFT_OPS widening** — small Phase 1 cleanup item; widens to include EXP / LOG / SQRT (NaN propagation rather than fault on unconsumed branch). Single-firing if a future port surfaces the need.
+4. **Out-of-scope register refresh** — sub-section count too low for another refresh now; defer until 5+ closures accumulate.
+
+**Definition-of-done for §0.4.181 — met**:
+- HMC plan Status updated to reflect "Implementation complete" with ship-state table ✓
+- CartPole plan Status updated to "2/3 phases complete; Phase 3 gated on Phase 0c" with ship-state table ✓
+- Both plans preserve historical content verbatim with a separator before the new section ✓
+- Phase 0c noted as multi-session (correcting §0.4.180's "single-firing IF" optimism) ✓
+- Plan-vs-actual gap analysis surfaces the "platform work was unbudgeted" pattern ✓
+- Suite stays at 867 tests (unchanged) ✓
+
 #### 0.4.180 Out-of-scope register refresh — Phase 5c + CartPole Phase 2 closed since §0.4.177 2026-04-26
 
 §0.4.177 was the sixth register snapshot; §0.4.180 is the seventh. Smaller-than-usual refresh — only 2 sub-sections (§0.4.178 + §0.4.179) closed since the previous, but both are LOAD-BEARING: Phase 5c was the **last major Phase-1 cleanup item from §0.4.164's deferred list**, and CartPole Phase 2 advanced the CartPole port to 2/3 phases shipped. The cadence is faster than the informal "every ~13 sub-sections" pattern (§0.4.108–§0.4.177 averaged ~13); the §0.4.179 hand-off named refresh as #1 because milestone closures ≠ sub-section count.

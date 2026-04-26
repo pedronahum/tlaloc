@@ -1,6 +1,21 @@
 # HMC Benchmark Port — Plan
 
-**Status:** Planning artifact (§0.4.157). Implementation has not started.
+**Status:** Implementation **complete** (§0.4.181 amendment).
+
+**Ship state** (updated 2026-04-26):
+
+| Phase | Plan estimate | Actual | Closing entry |
+|---|---|---|---|
+| Phase 1 — straight-line | 1 firing | 1 firing | §0.4.159 |
+| Phase 2 — loop form | 2 firings | 1 firing | §0.4.160 |
+| Phase 3 — nested loop + mask | 3-4 firings | 2 firings (mask half §0.4.162, nested-loop close §0.4.176) | §0.4.176 |
+| **HMC-specific total** | **6-7 firings** | **4 firings** | |
+
+Plus **5 firings of platform work** that benefited HMC's port: §0.4.158 (scalar exp/log unblock), §0.4.162 (lowerWhen DxirRegionBuilder dispatch), §0.4.163 (FIR collectMutatedTargets local-decl exclusion), §0.4.174 (PhiCalculus.liftIfRegionBodies), §0.4.175 (DxirReverseTransform deep-clone IF on empty regions). Combined: 9 firings actually shipped vs. 3-4 originally planned. The plan estimate didn't budget the platform work that the porting effort surfaced.
+
+The historical planning content below is preserved verbatim for reference.
+
+---
 
 **Target benchmark:** Hamiltonian Monte Carlo for Bayesian logistic regression, per
 the OOPSLA 2021 paper §7.2 (in `docs/papers/coarsening-autodiff.txt:1250-1268`).
