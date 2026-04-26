@@ -49,17 +49,18 @@ class DxirReverseTransformTest {
 
     @Test
     fun rejectsUnsupportedOp() {
-        // ABS has no registered VjpRule (no rule emits it and it's never exercised on
-        // the tape path today); expect IllegalStateException. The outer SUM keeps the
-        // scalar-return hard gate satisfied. When the reverse walk hits ABS after
-        // processing SUM (registered → BROADCAST), it throws. MATMUL was the canonical
-        // unregistered op in §0.4.8; it's registered now (§0.4.9), so the test needs
-        // a new placeholder — ABS is the natural pick among unary-elementwise ops with
-        // no rule.
+        // RSQRT has no registered VjpRule; expect IllegalStateException. The outer SUM
+        // keeps the scalar-return hard gate satisfied. When the reverse walk hits RSQRT
+        // after processing SUM (registered → BROADCAST), it throws.
+        //
+        // History: MATMUL was the canonical unregistered op in §0.4.8; registered §0.4.9.
+        // ABS replaced it but was registered §0.4.167 alongside CartPole's port. RSQRT is
+        // the next natural pick — unary-elementwise reciprocal square root with no
+        // present-day use case in our benchmarks.
         val vec = DxirType(F32, listOf(4))
-        val primal = DxirBuilder.function("uses_abs") {
+        val primal = DxirBuilder.function("uses_rsqrt") {
             val x = param("x", vec)
-            val y = op(OpKind.ABS, listOf(x), vec)
+            val y = op(OpKind.RSQRT, listOf(x), vec)
             val s = op(OpKind.SUM, listOf(y), f32)
             listOf(s)
         }

@@ -39,6 +39,64 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.167 CartPole Phase 0a-2 — `AbsRule` + scalar `Float.abs()` plugin lowering 2026-04-26
+
+§0.4.166 closed Phase 0a-1 (scalar sin/cos); §0.4.167 closes Phase 0a-2 (scalar abs). `OpKind.ABS` already existed in dxir but lacked a VJP rule, an interpreter arm, and any plugin/synthesis surface. §0.4.167 lands all five pieces simultaneously: `Float.abs()` extension in `:core`, `AbsRule` in Vjp.kt, interpreter arm in DxirInterpreter, `UNARY_OP_MAP` entry, `irAbs` synthesis arm. Plus updates §0.4.51's `rejectsUnsupportedOp` test to use `OpKind.RSQRT` (the next still-unregistered unary op) since ABS is no longer the canonical unregistered placeholder.
+
+**The mechanism**:
+
+1. **`AbsRule` in `:ir/passes/Vjp.kt`** ([Vjp.kt:343-377](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt#L343-L377)) — `d/dx |x| = sign(x)` via `STEP(x) - STEP(-x)`. STEP returns 1.0/0.0 in the operand's dtype (F32 for scalar Float, matching the convention `ReluRule` uses). The subtraction gives +1 / -1 / 0 at x>0 / x<0 / x=0. Multiplied by upstream for the contribution. **At x=0 the gradient is 0** — discontinuous adjoint at the non-differentiable point, following the standard AD convention (PyTorch / JAX agree on `sign(0) = 0`).
+
+2. **Interpreter arm in `DxirInterpreter.kt`** ([DxirInterpreter.kt:208-214](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt#L208-L214)) — element-wise `kotlin.math.abs(Float)`. Mirrors NEG.
+
+3. **Scalar extensions in `:core/DScalar.kt`** ([DScalar.kt:139-150](core/src/commonMain/kotlin/io/tlaloc/core/DScalar.kt#L139-L150)) — five entries (Float, Double, FloatScalar, DoubleScalar, DScalar). Float/Double impls call `kotlin.math.abs` directly.
+
+4. **`UNARY_OP_MAP` entry** ([FirLambdaToDxirLowering.kt:937-940](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt#L937-L940)) — `io.tlaloc.core.abs` → `OpKind.ABS`.
+
+5. **`irAbs` synthesis arm** ([DxirToIrSynthesis.kt:864-872](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L864-L872)) — emits `IrCall` to `kotlin.math.abs` via the existing `irUnaryMathCall` helper. Dispatch added at the synthesis op-routing site.
+
+6. **`rejectsUnsupportedOp` test updated** ([DxirReverseTransformTest.kt:50-69](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/DxirReverseTransformTest.kt#L50-L69)) — switches from `OpKind.ABS` (now registered) to `OpKind.RSQRT` (still no VjpRule, no use case). Comment block records the lineage MATMUL → ABS → RSQRT to keep future readers oriented.
+
+**Decisions worth flagging**:
+
+- **`STEP(x) - STEP(-x)` over IF chains.** The cleanest formulation of `sign(x)` in Tlaloc's dxir vocabulary. IF-chains (`if (x > 0) 1 else if (x < 0) -1 else 0`) would have produced equivalent semantics but with two regions per call; STEP-based form is straight-line scalar arithmetic. Downstream coarsening can't simplify IF-chains as easily as it folds STEP-based formulas. The cost: STEP appears twice in the gradient body for each ABS call. CSE deduplicates if the same x appears in multiple ABS calls.
+
+- **`sign(0) = 0` convention.** PyTorch, JAX, and TensorFlow all agree on this. Some AD libraries use `sign(0) = +1` (treating 0 as positive); we explicitly chose 0 because the STEP-based formulation gives it for free (`STEP(0) - STEP(-0) = 0 - 0 = 0`). Documented in the `AbsRule` doc-comment so a future reader doesn't accidentally flip it via convention drift.
+
+- **Three test methods covering all sign branches + a CartPole pattern + a composite case.** Test 1 pins the unit-level signature at three sample points (positive, negative, zero — the discontinuity). Test 2 (`CartPole loss-clip term`) pins a multi-`abs` expression with a concrete coefficient. Test 3 (`composite abs gradient`) verifies the chain rule through `(|x| - 1)²` — exercises gradients at two sign branches. Three tests are the right number for a primitive that has three meaningful regimes.
+
+- **`rejectsUnsupportedOp` migration was unavoidable but harmless.** Each time we register a previously-unsupported op, the canonical "unsupported" test needs a new placeholder. RSQRT (reciprocal sqrt) is the natural pick — common enough that readers recognize it, rare enough that no benchmark uses it yet. Future widening (Phase 0c MATMUL or others) won't affect RSQRT specifically.
+
+- **Phase 0a is now COMPLETE.** §0.4.166 + §0.4.167 together cover the original Phase 0a deliverables (sin / cos / abs). The CartPole plan's "1-2 firings" estimate matched: §0.4.166 + §0.4.167 = 2 firings. Phase 0b (`max` / `sign` as IF-chains) is the next prerequisite, then Phase 1 can attempt the physics-only port.
+
+- **No StableHLO emitter change for ABS.** ABS already had `stablehlo.abs` lowering ([Emitter.kt:152](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L152)); just hadn't been wired into the K2-plugin path. The §0.4.167 plumbing is purely on the FIR / VJP / synthesis side.
+
+**Tests added** (+3 new) in [ScalarAbsTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/ScalarAbsTest.kt):
+
+- `scalar abs gradient matches sign convention` — `f(x) = |x|`, `df/dx = sign(x)`. Pin at x ∈ {2.0, -3.0, 0.0}; the boundary case explicitly tests the `sign(0) = 0` convention.
+- `CartPole loss-clip term gradient matches analytic` — `f(x) = (2.4 - |x|) · (0.21 - |y|)` with `y = 0.5`. Pin gradient `0.29 · sign(x)` at three x values.
+- `composite abs gradient matches analytic` — `f(x) = (|x| - 1)²`, `df/dx = 2 · (|x| - 1) · sign(x)`. Pin at x ∈ {3.0, -2.0, 0.5}.
+
+Full suite is green: **858 tests** (+3 over §0.4.166).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 0b — `max(a, b)` / `sign(x)` lowered as IF-chains in FIR.** No new OpKinds; the lowering recognises `kotlin.math.max(a, b)` (or `:core.max(a, b)`) and produces an IF expression. The `sign` extension wraps `if (x > 0) 1.0f else (if (x < 0) -1.0f else 0.0f)`. Both are non-differentiable at boundaries; gradient flows through the chosen branch. Single-firing follow-up.
+2. **CartPole Phase 1 — physics-only port at one time step.** With Phase 0a complete, Phase 1 can land the per-time-step physics computation (everything from `rt` to `lt+1`) given a hard-coded action. Verifies against finite-differencing.
+3. **HMC Phase 3 nested-loop diagnostic** — focused investigation per §0.4.163's hand-off (still open).
+4. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open.
+
+**Definition-of-done for §0.4.167 — met**:
+- `Float.abs()` etc. extensions in `:core/DScalar.kt` ✓
+- `AbsRule` in `:ir/Vjp.kt` registered in `VjpRegistry.rules` (sign(x) = STEP(x) - STEP(-x)) ✓
+- Interpreter arm in `DxirInterpreter.kt` ✓
+- `FirLambdaToDxirLowering.UNARY_OP_MAP` adds `io.tlaloc.core.abs` ✓
+- `irAbs` arm in `DxirToIrSynthesis.kt` ✓
+- `rejectsUnsupportedOp` test updated to use RSQRT ✓
+- `ScalarAbsTest.kt` lands with 3 tests (unit + CartPole-pattern + composite) ✓
+- CartPole plan's Phase 0a-2 deliverable met; Phase 0a is now complete ✓
+- Full suite stays green at 858 tests (+3) ✓
+
 #### 0.4.166 CartPole Phase 0a — scalar `Float.sin()` / `Float.cos()` plugin lowering 2026-04-26
 
 §0.4.165's `docs/CARTPOLE_PORT_PLAN.md` named scalar trig as the Phase 0a first slice. §0.4.166 lands all 9 plan steps in one firing — direct mirror of §0.4.158's scalar exp/log pattern. Two new `OpKind` entries (`SIN`, `COS`), mutual VJP rules (`d/dx sin = cos`, `d/dx cos = -sin`), interpreter + StableHLO + plugin + synthesis arms, plus `ScalarSinCosTest.kt` with 3 tests pinning analytic gradients.

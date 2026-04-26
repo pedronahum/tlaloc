@@ -341,6 +341,31 @@ object VjpRegistry {
     }
 
     /**
+     * `d/dx(|x|) = sign(x)` with `sign(0) = 0`. §0.4.167 — primitive for CartPole's
+     * loss-clipping `(2.4 - |xt+1,0|)` and `(0.21 - |xt+1,2|)` per
+     * docs/CARTPOLE_PORT_PLAN.md Phase 0a-2.
+     *
+     * Implementation: `STEP(x) - STEP(-x)` evaluates to +1 / -1 / 0 at x>0 / x<0 / x=0.
+     * Both STEPs are typed in the operand's dtype (F32 for scalar Float), matching
+     * the convention `ReluRule` uses for `STEP(x)`. Multiplied by `upstream` to give
+     * the contribution. At x=0 the gradient is 0 — a discontinuous adjoint at the
+     * non-differentiable point, following the standard AD convention (PyTorch / JAX
+     * agree).
+     */
+    val AbsRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val stepPos = builder.op(OpKind.STEP, listOf(x), x.type)
+            val negX = builder.op(OpKind.NEG, listOf(x), x.type)
+            val stepNeg = builder.op(OpKind.STEP, listOf(negX), x.type)
+            val sign = builder.op(OpKind.SUB, listOf(stepPos, stepNeg), x.type)
+            val dx = builder.op(OpKind.MUL, listOf(upstream, sign), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
      * `d/dx(sin(x)) = cos(x)`. §0.4.166 — Trigonometric primitive for the CartPole
      * physics step. Mirrors ExpRule's "emit a fresh primal-shape op in the gradient
      * body" approach to avoid sharing the primal's result with the adjoint.
@@ -620,6 +645,7 @@ object VjpRegistry {
         OpKind.MUL to MulRule,
         OpKind.DIV to DivRule,
         OpKind.NEG to NegRule,
+        OpKind.ABS to AbsRule,
         OpKind.RELU to ReluRule,
         OpKind.SUM to SumRule,
         OpKind.MEAN to MeanRule,

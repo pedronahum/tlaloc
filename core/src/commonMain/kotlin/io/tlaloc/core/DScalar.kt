@@ -142,3 +142,19 @@ fun DScalar.cos(): DScalar = when (this) {
     is FloatScalar -> cos()
     is DoubleScalar -> cos()
 }
+
+// --- Scalar abs entries (§0.4.167) ---
+//
+// `Float.abs()` / `Double.abs()` resolve at FQN `io.tlaloc.core.abs`; the FIR
+// lowering maps each to `OpKind.ABS`, and `AbsRule` covers the gradient side
+// via `d/dx |x| = STEP(x) - STEP(-x)` (= sign(x), with sign(0) = 0). Required
+// by CartPole's loss-clipping `(2.4 - |xt+1,0|) · (0.21 - |xt+1,2|)` per
+// docs/CARTPOLE_PORT_PLAN.md Phase 0a-2.
+fun Float.abs(): Float = kotlin.math.abs(this)
+fun Double.abs(): Double = kotlin.math.abs(this)
+fun FloatScalar.abs(): FloatScalar = FloatScalar(v.abs())
+fun DoubleScalar.abs(): DoubleScalar = DoubleScalar(v.abs())
+fun DScalar.abs(): DScalar = when (this) {
+    is FloatScalar -> abs()
+    is DoubleScalar -> abs()
+}

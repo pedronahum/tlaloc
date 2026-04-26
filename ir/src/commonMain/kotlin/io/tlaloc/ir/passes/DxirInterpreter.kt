@@ -205,6 +205,13 @@ object DxirInterpreter {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { -a[it] }
             }
+            OpKind.ABS -> {
+                // §0.4.167 — element-wise absolute value. AbsRule's adjoint emits
+                // STEP(x) - STEP(-x) (= sign(x)); both STEPs route through this
+                // interpreter via the existing arm.
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { kotlin.math.abs(a[it]) }
+            }
             OpKind.STEP -> {
                 // step(x) = 1 if x > 0 else 0 — matches XLA's GT+select semantics at x=0.
                 val a = evalNode(op.operands[0], env, multiResults)

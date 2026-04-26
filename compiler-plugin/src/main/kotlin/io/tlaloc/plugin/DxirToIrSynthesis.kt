@@ -293,6 +293,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.EXP) return irExp(op, env, context)
         if (op.op == OpKind.SIN) return irSin(op, env, context)
         if (op.op == OpKind.COS) return irCos(op, env, context)
+        if (op.op == OpKind.ABS) return irAbs(op, env, context)
         if (op.op == OpKind.CAST) return irCast(op, env, context)
         if (op.op == OpKind.GATHER) return irGather(op, env, context)
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
@@ -863,6 +864,17 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("cos"))
+
+    /**
+     * §0.4.167 — `OpKind.ABS(x)` → `kotlin.math.abs(x)`. CartPole Phase 0a-2 primitive.
+     * Scalar-only (F32 / F64). AbsRule's adjoint emits `STEP(x) - STEP(-x)` — STEP
+     * is synthesised separately via [irStep]; no special handling needed here.
+     */
+    private fun IrBuilderWithScope.irAbs(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("abs"))
 
     private fun IrBuilderWithScope.irUnaryMathCall(
         op: DxirOp,

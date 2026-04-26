@@ -957,6 +957,10 @@ object FirLambdaToDxirLowering {
         // Phase 0a).
         put("io.tlaloc.core.sin", OpKind.SIN)
         put("io.tlaloc.core.cos", OpKind.COS)
+        // §0.4.167 — :core scalar abs entry. AbsRule and the synthesis arm `irAbs`
+        // ship in the same firing. Needed by CartPole's loss-clipping
+        // `(2.4 - |xt+1,0|) · (0.21 - |xt+1,2|)`.
+        put("io.tlaloc.core.abs", OpKind.ABS)
         // :core DTensor shape-preserving unary ops (io.tlaloc.core.ops package).
         put("io.tlaloc.core.ops.relu", OpKind.RELU)
         put("io.tlaloc.core.ops.neg", OpKind.NEG)
