@@ -39,6 +39,78 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.177 Out-of-scope register refresh — 12 sub-sections shipped since §0.4.164 2026-04-26
+
+§0.4.164 was the fifth register snapshot; §0.4.177 is the sixth. 12 sub-sections shipped between §0.4.165 and §0.4.176 — a focused arc dominated by the CartPole benchmark port (planning + Phase 0a primitives + Phase 1 close) and a 5-firing diagnostic + structural arc that closed Phase 2 #1 (Plugin IR-side synthesis closure) for the scalar-arithmetic surface. Two paper-benchmark ports closed end-to-end (CartPole Phase 1 with FD-validated gradient; HMC Phase 3 nested-loop). The deferred register loses 4 entries and gains explicit per-port granularity.
+
+**Refreshed register (as of §0.4.176)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Synthesis-side gated on rank-1-only fast path; multi-session widening. Tracer-surface side covered. |
+| Tensor ops | MATMUL through K2 plugin (Phase 0c) | Plugin's `BINARY_OP_MAP` only has `+`/`-`/`*`/`/`. Tracer + IR + emitter all support MATMUL (§0.4.135 / §0.4.137 / §0.4.138); plugin lambda-lowering doesn't recognize `matmul(...)` calls. **Shared blocker** for HMC Phase 3 matrix form AND CartPole Phase 3 NN. Discovered §0.4.158. |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) — DTensor / multi-result / MATMUL surface | **Substantively closed for scalar-arithmetic surface** at §0.4.175. Open: rank-1 DTensor unary ops, MATMUL through plugin (Phase 0c), multi-result outputs (grad2 / valueAndGrad2 widening), `irIfOp` with non-empty bodies (deferred from §0.4.174 lift). |
+| Plugin | `irIfOp` widening to lower IF-with-body-ops | Currently empty-body only. The §0.4.174 lift pass hoists safe arithmetic to top level so this gate doesn't fire on common shapes; non-safe-lift cases (DIV/SQRT/LOG in IF body) still hit it. Synthesis-side widening would lower each region as `IrBlock` branches with `IrVariable` decls + `IrGet` of terminator. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED (Phase 5c) | Single-result covered §0.4.31; multi-result still pending despite the §0.4.154/§0.4.155 substrate. Removing the `coarsened.types.size == 1` guard in `handleCoarsenedAdjoint` is the focused widening. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. |
+| PhiCalculus | `liftIfRegionBodies` widening of `SAFE_LIFT_OPS` | Currently total-functions-only. EXP/LOG/SQRT/DIV could be added with care (NaN propagation rather than fault on unconsumed branch). Widen as Phase-2 ports surface needs. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | All four primary combos closed: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.161 structural; §0.4.176 end-to-end via §0.4.174 lift + §0.4.175 deep-clone). |
+| Control flow | Multi-block regions | Single-block today. |
+| Benchmark ports | CartPole Phase 2 + Phase 3 | Phase 1 closed §0.4.175 (FD-validated gradient through K2 plugin). Phase 2 (loop over B time steps) follows HookeanSpring's N=10 chain pattern; Phase 3 (NN + outer training loop) gated on Phase 0c (MATMUL through plugin). 3-5 firings combined per `docs/CARTPOLE_PORT_PLAN.md`. |
+| Benchmark ports | QWOP | Last unported paper benchmark. Multi-session. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.165 and §0.4.176** (12 sub-sections, three themed clusters):
+
+- **CartPole benchmark port closure (§0.4.165 → §0.4.175)** — §0.4.165 (planning doc / 4-phase migration / 5 plumbing items flagged) / §0.4.166 (Phase 0a-1 — scalar `Float.sin()` / `Float.cos()` plugin lowering) / §0.4.167 (Phase 0a-2 — `AbsRule` + scalar `Float.abs()` plugin lowering) / §0.4.168 (Phase 1 first attempt + downstream gate; same wall as HMC Phase 3 nested-loop) / §0.4.175 (Phase 1 closes — FD-validated gradient through K2 plugin via §0.4.174 lift + §0.4.175 deep-clone). Five firings of CartPole-specific work; Phase 1 done with a regression test pinning correctness.
+
+- **Phase 2 #1 (Plugin IR-side synthesis closure) — diagnostic + structural arc (§0.4.169 → §0.4.176)** — §0.4.169 (`tryReverseTransform` warning surfaces exception message) / §0.4.170 (diagnostic dump identifies `DxirFunction.init` as the SSA-validation gate) / §0.4.171 (8-probe bisection + second-tier synthesis-scope gate surfaced) / §0.4.172 (`DxirFunction.init` augments validation failures with partial-state dump) / §0.4.173 (synthesis-side `lastFailureReason` machinery + post-coarsening / post-SCT dxir dumps; CartPole leak source pinpointed) / §0.4.174 (`PhiCalculus.liftIfRegionBodies` pre-SCT lift pass; CartPole compiles end-to-end but with 2.6× wrong gradient) / §0.4.175 (deep-clone IF in DxirReverseTransform on empty regions; CartPole gradient correctness fix) / §0.4.176 (HMC Phase 3 nested-loop port closes — second-port confirmation; pure regression-test landing). 8 firings of cross-cutting work that closed the Phase 2 #1 wall for the scalar-arithmetic surface AND unblocked two paper benchmarks.
+
+- **HMC port complete (§0.4.176)** — Phase 3 nested-loop test lands as a regression target, validating that the §0.4.174 + §0.4.175 fixes are not CartPole-specific. Combined with §0.4.157–§0.4.163's HMC work, all four HMC phases (1, 2, 3-mask, 3-nested) now ship through the K2 plugin with FD-validated β-slot gradients.
+
+**Decisions worth flagging**:
+
+- **Deferred count went from ~16 (§0.4.164) to ~17 (§0.4.177).** Items closed entirely: HMC Phase 3 nested-loop (was the headline checkpoint of §0.4.164's refresh), Plugin IR-side synthesis closure for scalar surface, CartPole Phase 1, Phase 0a (sin/cos/abs/exp/log all wired through). Items added: `irIfOp` widening for non-empty bodies (§0.4.174 surfaced as a follow-up), `liftIfRegionBodies` `SAFE_LIFT_OPS` widening (§0.4.174 follow-up). Items refined: "Plugin IR-side synthesis closure" entry now distinguishes scalar-arithmetic (closed) vs DTensor / multi-result / MATMUL (open).
+
+- **The diagnostic-improvement arc paid off.** §0.4.169–§0.4.173 spent 5 firings on platform diagnostics before the actual fix landed in §0.4.174. The pattern: each diagnostic firing narrowed the failure mode by one layer (warning text → validation gate → bisection probes → partial-state dump → post-pass dxir dumps), enabling the §0.4.174 fix to target the right structural issue. Multi-firing diagnostic arcs should be expected when the failure mode is structural and the codebase is multi-pass.
+
+- **Two-port confirmation is the right Phase-1-to-Phase-2-handoff signal.** A single port's success could be coincidence (the §0.4.174 work might have just patched CartPole's specific shape). HMC Phase 3 nested-loop hitting the same fix path with completely different control-flow (nested WHILE vs. multi-IF) confirms genuine progress on Phase 2 #1's structural surface. Future Phase-2 work should target this kind of cross-port validation.
+
+- **Phase 1 status (per the strict criterion).** Three of the six paper benchmarks fully ported through K2 plugin: Brachistochrone, HookeanSpring, HMC. CartPole Phase 1 partially ported (Phase 2/3 gated on Phase 0c MATMUL + Phase 2 plumbing). BGDHyperOpt has a `:benchmarks` port (§0.4.49) but not via the K2 plugin yet. QWOP is unported. The strict "Phase 1 done — coarsening at M9 parity" criterion (§0.4 entry pinning head-to-head numbers) requires either: (a) finishing the head-to-head harness against PyTorch / JAX on the existing 3 ported benchmarks, OR (b) extending to all 6 first. The harness work is item #7 on the priority ladder.
+
+- **The §0.4.174 + §0.4.175 fixes interact cleanly with the existing pipeline.** No regressions across 12 firings of integration testing. The lift pass's bail-out logic (whole-function unchanged when any IF has unsafe body op) keeps non-CartPole shapes at status quo; the deep-clone's empty-regions guard keeps non-lifted IFs at status quo. Both gates are conservative — widening either is a future task gated on a real use case.
+
+- **Naming convention for the refresh.** §0.4.108 (#2), §0.4.122 (#3), §0.4.151 (#4), §0.4.164 (#5), §0.4.177 (#6). Cadence: roughly every 13 sub-sections (§0.4.108→§0.4.122 = 14; §0.4.122→§0.4.151 = 29; §0.4.151→§0.4.164 = 13; §0.4.164→§0.4.177 = 13). The "every ~13 sub-sections" rhythm is informal but reliable; trigger the next refresh when (a) the deferred count drifts (gets hard to scan) OR (b) ~10-15 sub-sections close.
+
+- **`docs/CARTPOLE_PORT_PLAN.md` and `docs/HMC_PORT_PLAN.md` should be amended in a future doc-only firing.** The CartPole plan estimated 10-12 firings total; actual was 5 firings of CartPole-specific + 8 of platform = 13, which roughly matches. The HMC plan estimated 3-4 firings; actual was 5 of HMC-specific + 5 of platform = 10, roughly double the estimate. Plan estimates didn't budget the platform work that benchmark porting incidentally surfaces.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **864 tests** (unchanged from §0.4.176).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 5c — Multi-result COARSENED.** Long-deferred (since §0.4.155). Single-line widening to remove the `coarsened.types.size == 1` guard in `handleCoarsenedAdjoint`. Substrate ready. Single-firing.
+2. **Plugin MATMUL recognition (Phase 0c).** Shared blocker for HMC Phase 3 matrix form AND CartPole Phase 3 NN. Mirrors §0.4.158's exp/log pattern: add `BINARY_OP_MAP` entry + `irMatmul` synthesis arm + `MatmulRule` exists already. Single-firing.
+3. **CartPole Phase 2 — loop over B=3 time steps.** Should be a clean port with the pipeline working on both nested-WHILE (HMC) and multi-IF (CartPole) shapes. Mirrors HookeanSpring's N=10 chain pattern (§0.4.47).
+4. **Head-to-head harness scaffolding.** Even if benchmarks 4-6 aren't ported, harnessing the 3 working ones against PyTorch / JAX would surface the M9-parity numbers for the existing closures. Multi-session.
+
+**Definition-of-done for §0.4.177 — met**:
+- Deferred table refreshed to reflect §0.4.165–§0.4.176 closures ✓
+- Two new items added (irIfOp widening, SAFE_LIFT_OPS widening) ✓
+- "Newly shipped" subsection groups §0.4.165–§0.4.176 into three themed clusters with section pointers ✓
+- Recommended next pickup updated to surface Phase 5c + Phase 0c as the next single-firing wins ✓
+- Register stays tabular per the §0.4.108–§0.4.164 organising principle ✓
+- Full suite stays green at 864 tests (unchanged) ✓
+
 #### 0.4.176 HMC Phase 3 nested-loop port closes — same §0.4.174+§0.4.175 pipeline; second-port confirmation 2026-04-26
 
 §0.4.175's hand-off named HMC Phase 3 nested-loop as the next pickup with the hypothesis "the §0.4.174 lift pass + §0.4.175 deep-clone fix likely unblock it (same downstream gate pattern)." §0.4.176 lands it. **The hypothesis was correct, no additional fix needed** — the §0.4.163 deferred shape (true nested for-loop over features, `for (i) { var xb = 0; for (j) { xb += X[i,j] * β[j] } }`) compiles end-to-end through the K2 plugin's IR-side synthesis path and produces gradients that match finite-difference at the β slots within `1e-3` absolute / `5e-3` relative tolerance.
