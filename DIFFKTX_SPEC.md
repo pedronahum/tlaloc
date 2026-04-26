@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.178 CartPole Phase 2 closes — B=3 loop with state passing; FD-validated gradient through K2 plugin 2026-04-26
+
+§0.4.177's hand-off named CartPole Phase 2 as recommended-next #3 (between Phase 5c and the head-to-head harness). Per the priority ladder strict reading (lowest-numbered open Phase-1 item), CartPole port (item 5) is the active port to advance. §0.4.178 lands Phase 2: the per-step physics from §0.4.175 wrapped in a B=3 for-loop with 4 var state accumulators (x0/x1/x2/x3) + 1 var loss accumulator. Action `at` stays hard-coded (NN deferred to Phase 3, gated on Phase 0c MATMUL).
+
+**No code changes** — pure regression-test landing. The §0.4.174 lift + §0.4.175 deep-clone pipeline plus §0.4.39's multi-var for-loop lowering plus §0.4.161's region-recursive C5 (WHILE-in-WHILE-style if applicable) handle this shape natively.
+
+**The mechanism (carry-over)** — CartPole Phase 2's structural shape:
+
+- Outer `for (b in 0 until 3)` loop → WHILE with concrete trip count → C5 unrolls to straight-line at coarsening time.
+- 5 carried vars (x0/x1/x2/x3/lossSum) + counter = 6 carry slots; §0.4.39's multi-var for-loop lowering supports this.
+- Per-iteration physics body = §0.4.175's CartPole Phase 1 source verbatim, plus state update `xN = xnN`.
+- Final return = lossSum after B=3 iterations.
+
+Post-coarsening + lift + deep-clone, the dxir reduces to a flat ~3× unrolled scalar arithmetic chain with multi-IF post-distribute coarsening, exactly the shape that §0.4.175 closed.
+
+**Verification** in [CartPolePhase2Test.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/CartPolePhase2Test.kt):
+
+The B=3 loop source compiles end-to-end. The synthesised gradient at config `(at, x0, x1, x2, x3) = (0.5, 0.0, 0.1, 0.05, 0.02)` matches central-difference FD at all 5 slots within `1e-3` absolute / `5e-3` relative tolerance:
+- Slot 0 (action `at`): -0.022 — non-zero in Phase 2 (unlike Phase 1's exact 0) because `at` flows through `pt` → `x1` update → next-step `xn0` etc.
+- Slots 1-4 (initial state x0/x1/x2/x3): all non-trivial gradients reflecting the 3-step rollout's contribution to the accumulated loss.
+
+**Decisions worth flagging**:
+
+- **Zero code changes — third "pipeline-just-works" port in a row.** §0.4.176 (HMC Phase 3 nested-loop), §0.4.178 (CartPole Phase 2). The §0.4.174 + §0.4.175 fixes are now confirmed on three different shapes: nested-WHILE arithmetic (HMC), multi-IF arithmetic (CartPole Phase 1), and B-step state-carrying loop (CartPole Phase 2). The pipeline's structural surface for the scalar-arithmetic + bounded-loop class is solid.
+
+- **CartPole Phase 2's plan estimate was 2 firings; actual was 1.** The plan budgeted "1-2 firings" expecting some plumbing; the actual port required no new code because §0.4.174 + §0.4.175 had already done the hard work. Phase 2 ports to come (any benchmark with bounded loops + scalar arithmetic + IF) should follow this pattern: write the source, write the FD test, ship.
+
+- **CartPole port status: 2 of 3 phases shipped.** Phase 1 (§0.4.175). Phase 2 (§0.4.178). Phase 3 (NN + outer training loop) gated on Phase 0c (plugin MATMUL recognition) — that's the only remaining CartPole-specific work. Per the §0.4.165 plan's "10-12 firings total" estimate: §0.4.165 + §0.4.166 + §0.4.167 + §0.4.168 + §0.4.175 + §0.4.178 = 6 CartPole-specific firings + the §0.4.169-§0.4.176 platform work that benefited multiple ports. Total 14 firings ish — close to the upper bound, dominated by platform discovery rather than CartPole itself.
+
+- **Phase 1 status update.** Three of six paper benchmarks fully ported through K2 plugin: Brachistochrone, HookeanSpring, HMC. CartPole is at 2/3 phases (full port pending Phase 0c). BGDHyperOpt has a `:benchmarks` port (§0.4.49). QWOP unported. The strict "Phase 1 done — coarsening at M9 parity" criterion still requires either the head-to-head harness work OR all 6 benchmarks.
+
+- **Plan-vs-actual surprise: B=3 loop "just worked".** I expected potential issues with C5 unrolling on the 6-carry-slot WHILE (4 state vars + lossSum + counter), or with the multi-IF post-distribute interacting with the loop's accumulating state. Neither materialised. C5 fires; the lift pass handles each iteration's IFs uniformly; the deep-clone routes through nodeMap correctly across the unrolled steps. The pipeline is more robust to compositional variance than I anticipated.
+
+- **Test class structure mirrors §0.4.175's `CartPolePhase1Test` verbatim.** Same harness, same FD methodology, same tolerance pattern. Reusing the structure keeps test review cost low and the regression target consistent.
+
+**Tests added** (+1 in [CartPolePhase2Test.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/CartPolePhase2Test.kt)):
+
+- `cartpole phase2 gradient matches finite difference` — full CartPole Phase 2 source (B=3 loop + state passing); FD verification at all 5 input slots; mixed `1e-3` absolute / `5e-3` relative tolerance.
+
+Full suite is green: **865 tests** (+1 over §0.4.177).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 5c — Multi-result COARSENED widening.** Now the most-deferred Phase-1 cleanup item. Substrate ready since §0.4.155. Requires: (a) widen `validateCoarsenedShape` to allow K-result COARSENED with K + N gradient_body params; (b) widen `handleCoarsenedAdjoint` to dispatch on K upstreams; (c) update the reverse-walk dispatch to collect per-index upstreams; (d) add a hand-built multi-result COARSENED gradient test. Single-firing. Note: coarsening doesn't currently CREATE multi-result COARSENED ops — the widening prepares the substrate for future coarsening widening.
+2. **Phase 0c — Plugin MATMUL recognition.** Shared blocker for HMC matrix form + CartPole Phase 3 NN. Mirrors §0.4.158's exp/log pattern: add `BINARY_OP_MAP` entry + `irMatmul` synthesis arm + `MatmulRule` exists already. Bounded by current plugin synthesis surface (rank-1 F32 + scalar; rank-2 needs synthesis-side widening too).
+3. **Head-to-head harness scaffolding.** Even with 3-4 working ports, harnessing them against PyTorch / JAX would surface M9-parity numbers for the closed benchmarks and clarify the gap to the strict Phase-1-done criterion.
+4. **Out-of-scope register refresh.** Could fire after Phase 5c lands to keep momentum on cleanup.
+
+**Definition-of-done for §0.4.178 — met**:
+- CartPole Phase 2 regression test lands and PASSES with FD-validated gradients at all 5 slots ✓
+- Action `at` slot now has non-zero gradient (Phase 2 state passing exposes its loss contribution) ✓
+- No code changes in `:ir` or `:compiler-plugin` — pure regression-test landing on §0.4.174 + §0.4.175 + §0.4.39 + §0.4.161 ✓
+- Three-port confirmation (HMC Phase 3 nested + CartPole Phase 1 + CartPole Phase 2) for the §0.4.174 + §0.4.175 pipeline ✓
+- CartPole port now 2/3 phases shipped; Phase 3 sole remaining gate is Phase 0c MATMUL ✓
+- Full suite stays green at 865 tests (+1) ✓
+
 #### 0.4.177 Out-of-scope register refresh — 12 sub-sections shipped since §0.4.164 2026-04-26
 
 §0.4.164 was the fifth register snapshot; §0.4.177 is the sixth. 12 sub-sections shipped between §0.4.165 and §0.4.176 — a focused arc dominated by the CartPole benchmark port (planning + Phase 0a primitives + Phase 1 close) and a 5-firing diagnostic + structural arc that closed Phase 2 #1 (Plugin IR-side synthesis closure) for the scalar-arithmetic surface. Two paper-benchmark ports closed end-to-end (CartPole Phase 1 with FD-validated gradient; HMC Phase 3 nested-loop). The deferred register loses 4 entries and gains explicit per-port granularity.
