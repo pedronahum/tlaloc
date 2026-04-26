@@ -39,6 +39,61 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.171 Bisection of CartPole Phase 1 failure — second downstream gate surfaced 2026-04-26
+
+§0.4.170 named the gate from CartPole Phase 1 as `DxirFunction.init`'s "function grad_body_grad references unknown node ids: [52]" — but the visible dxir was truncated, so id 52's specific reference couldn't be pinned. §0.4.171 bisects with eight increasingly-CartPole-shaped probes (A through H) to find the smallest failing form. **None of the eight probes reproduces the "unknown node ids" failure**; the CartPole failure requires multiple components in interaction (a 5-GATHER + sin/cos + division + 2-abs + IF + squared composition we couldn't bisect down). However, two probes (F and H) surfaced a SECOND downstream gate that CartPole likely hits in addition to the first:
+
+> `Tlaloc IR extension kept original call for 'grad_body' — DxirFunction falls outside the scalar-primitive synthesis scope`
+
+This is the synthesis-side rejection ([TlalocIrGenerationExtension.kt:198-205](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L198-L205)) — `synth.synthesise(...)` returned null. So the CartPole port has TWO walls: (1) the "unknown node ids" SSA validation in `DxirFunction.init` after `DxirReverseTransform.apply` builds the grad function (the §0.4.170 finding), AND (2) the synthesis scope's rank-1-DTensor + scalar-primitive admissibility check.
+
+**The bisection** in `MinimalIfAbsProbeTest.kt` (added and removed):
+
+| Probe | Shape | DxirReverseTransform | Synthesis |
+|---|---|---|---|
+| A | `if (x>0) x else 0` | ✓ pass | ✓ pass |
+| B | `if (x>0) x.abs() else 0` | ✓ pass | ✓ pass |
+| C | `val a = x.abs(); if (a>0) a else 0` | ✓ pass | ✓ pass |
+| D | rank-1 GATHER + abs + IF | ✓ pass | ✓ pass |
+| E | rank-1 GATHER + arith + abs + IF | ✓ pass | ✓ pass |
+| F | rank-1 GATHER + 2-abs CartPole-loss-clip shape | ✓ pass | ⬜ **REJECTED** (scalar-primitive scope) |
+| G | rank-1 GATHER + sin/cos + abs + IF | ✓ pass | ✓ pass |
+| H | rank-1 GATHER + dead-division + sin/cos + 2-abs + IF | ✓ pass | ⬜ **REJECTED** (scalar-primitive scope) |
+
+**The two-abs-multiplication structure is the synthesis-scope trigger.** Both F (`(1.0f - a.abs()) * (1.0f - b.abs())`) and H (same shape, plus dead division) hit the synthesis rejection. G (with sin/cos but only ONE abs) passes synthesis. The synthesis check is rejecting some specific DxirFunction shape — likely the multi-input rank-1 grad function (when there are multiple GATHERs from the same packed input feeding distinct paths).
+
+**Decisions worth flagging**:
+
+- **The CartPole "unknown node ids" failure didn't reduce.** Eight progressively-CartPole-shaped probes all pass DxirReverseTransform's SSA validation. The failure requires the FULL CartPole composition. Probably an interaction of (a) all 5 GATHERs being live, (b) sin/cos used in a dead-code chain (rt/qt) AND a live-code chain (none in CartPole — sin/cos only in dead code), (c) ABS on derived values + IF with a multi-MUL predicate. Without the full grad-function dxir to scan for id 52's reference, the next firing's task is to extend the diagnostic to dump the full grad function, NOT to bisect further.
+
+- **The synthesis-scope gate is a second-tier blocker.** CartPole would hit it after DxirReverseTransform's "unknown node ids" gate is fixed. The diagnostic message is general ("DxirFunction falls outside the scalar-primitive synthesis scope") — not actionable without further investigation. Probably a check around `synthesise`'s eligibility rules: rank-1 grad functions, multi-GATHER inputs, multi-result outputs. Whatever the trigger, it'd be the NEXT failure mode after the unknown-id gate is fixed.
+
+- **Probes are an effective diagnostic methodology even when they don't fully reduce.** A through H gave us important negative information: minimal forms of "IF + abs + GATHER" all work. The CartPole failure isn't from any individual primitive — it's compositional. That rules out single-primitive bug hunts and points toward structural issues in the grad-function emission or synthesis eligibility.
+
+- **The probe test was deleted.** Per §0.4.163 / §0.4.168 / §0.4.170 convention. The findings live in this entry.
+
+- **Next firing's diagnostic improvement**: dump the full grad-function dxir on rejection. The current warning text shows the DxirReverseTransform input dxir (truncated). What's needed is the *output* dxir (the grad function's body) so we can find id 52's specific reference. Two ways: (a) modify `tryReverseTransform` to dump the partial grad function on validation failure (need to peek inside DxirReverseTransform's builder before validation runs); (b) add a diagnostic flag to DxirReverseTransform that's gated on a system property and bypasses the catch.
+
+**Tests added** (+0): probes landed and removed. Suite: 858 (unchanged from §0.4.170).
+
+Full suite is green: **858 tests** (unchanged from §0.4.170).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Diagnostic improvement: dump the partially-built grad function on validation failure.** The fix can be either inside `DxirReverseTransform.apply` (catch the validation exception, dump the in-progress builder body, rethrow) or via a new `applyUnsafe` variant that returns the un-validated function for inspection. With that, the CartPole failure's id 52 reference becomes visible.
+2. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+3. **Out-of-scope register refresh.** Multiple items closed since §0.4.164.
+4. **HMC Phase 3 nested-loop diagnostic** — the §0.4.169 warning text now applies to the §0.4.163 deferred test too. Re-running it might yield more dxir-visible failure context than CartPole's larger primal.
+
+**Definition-of-done for §0.4.171 — met**:
+- 8 minimal probes (A–H) constructed and tested ✓
+- Bisection results documented in a structured table ✓
+- "unknown node ids" failure NOT reproduced in any minimal probe ✓
+- A second downstream gate (synthesis scope rejection) surfaced via probes F and H ✓
+- Probe test deleted; findings preserved in §0.4 entry ✓
+- Next firing's diagnostic strategy explicitly named (dump grad function on validation failure) ✓
+- Full suite stays green at 858 tests (unchanged) ✓
+
 #### 0.4.170 Diagnostic dump of CartPole Phase 1 — gate is `DxirFunction.init`'s SSA validation 2026-04-26
 
 §0.4.169 wired the diagnostic; §0.4.170 uses it. Re-creating the CartPole Phase 1 test (deleted in §0.4.168 to avoid leaving red), capturing the new warning text in stderr surfaced the SPECIFIC failure:
