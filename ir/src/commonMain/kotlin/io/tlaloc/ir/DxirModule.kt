@@ -26,7 +26,18 @@ class DxirFunction(
             collectReferencedIds(body)
 
         val missing = referenced.filter { it !in declared }
-        require(missing.isEmpty()) { "function $name references unknown node ids: $missing" }
+        if (missing.isNotEmpty()) {
+            // §0.4.172 — augment the validation error with a partial-state dump
+            // (full body listing) so downstream diagnostics can find which op
+            // references the unknown id without re-running the build path.
+            // Multiple call sites construct DxirFunction directly (the post-passes
+            // dropUnreachableBody / applyCSE / applyConstFold in DxirReverseTransform);
+            // augmenting at the DxirFunction.init level catches them all uniformly.
+            throw IllegalArgumentException(
+                "function $name references unknown node ids: $missing\n" +
+                    renderBodyDump(name, params, body, returns),
+            )
+        }
 
         val meshNames = meshes.map { it.name }.toSet()
         val shardings = (params + body).mapNotNull { it.sharding }
@@ -213,6 +224,38 @@ class DxirFunction(
         }
         return refs
     }
+}
+
+/**
+ * §0.4.172 — pretty-print a [DxirFunction]'s in-progress params + body + returns
+ * as a flat listing for diagnostic dumps when validation fails. Used by
+ * [DxirFunction]'s init when the SSA-id check fails — letting the caller see
+ * which op references the unknown id without re-running the build path. Top-level
+ * private (rather than a member) so it can render the partial state without
+ * needing a fully-constructed [DxirFunction] instance.
+ */
+private fun renderBodyDump(
+    name: String,
+    params: List<DxirParam>,
+    body: List<DxirNode>,
+    returns: List<DxirNode>,
+): String = buildString {
+    appendLine("partial function dump: name=$name")
+    appendLine("params: ${params.map { "%${it.id}=${it.name}:${it.type}" }}")
+    appendLine("body (${body.size} ops):")
+    for (n in body) {
+        when (n) {
+            is DxirOp -> appendLine(
+                "  %${n.id} = ${n.op} ops=${n.operands.map { "%${it.id}" }} types=${n.types}",
+            )
+            is DxirConst -> appendLine("  %${n.id} = const ${n.value} : ${n.type}")
+            is DxirCall -> appendLine(
+                "  %${n.id} = call ${n.callee.name} args=${n.args.map { "%${it.id}" }}",
+            )
+            else -> appendLine("  %${n.id} = ${n::class.simpleName}")
+        }
+    }
+    appendLine("returns: ${returns.map { "%${it.id}" }}")
 }
 
 class DxirModule(

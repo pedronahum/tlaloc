@@ -39,6 +39,63 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.172 `DxirFunction.init` augments validation failures with a partial-state dump 2026-04-26
+
+§0.4.171 named "extend the diagnostic to dump the partially-built grad function on validation failure" as the load-bearing next step. §0.4.172 lands it. Two implementation iterations:
+
+1. **First attempt** — augment `DxirBuilder.function`'s catch block with a partial-state dump. **Didn't work**. Discovery: `DxirReverseTransform.apply`'s post-passes (`dropUnreachableBody`, `applyCSE`, `applyConstFold`) construct `DxirFunction(...)` directly, bypassing `DxirBuilder.function`. The validation exception fires from those direct constructions, never going through `DxirBuilder.function`'s catch. `tryReverseTransform` reported the unaugmented message.
+
+2. **Second attempt** — move the dump augmentation INTO `DxirFunction.init` itself. Catches all call sites uniformly. **Worked**.
+
+**The mechanism** in [DxirModule.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/DxirModule.kt):
+
+1. **`renderBodyDump` top-level helper** ([DxirModule.kt:230-258](ir/src/commonMain/kotlin/io/tlaloc/ir/DxirModule.kt#L230-L258)) — renders params + body + returns as a flat listing keyed by SSA id. Top-level (not a member) so it can render the partial state without needing a fully-constructed `DxirFunction`.
+
+2. **`DxirFunction.init` enhancement** ([DxirModule.kt:28-39](ir/src/commonMain/kotlin/io/tlaloc/ir/DxirModule.kt#L28-L39)) — replaces the bare `require(missing.isEmpty())` with an `if (missing.isNotEmpty())` block that throws `IllegalArgumentException` with the augmented message. The dump is included after the standard error text, separated by a newline.
+
+**The CartPole Phase 1 finding** (the load-bearing artefact of this firing): re-running the probe with the augmentation surfaced the missing op:
+
+```
+function grad_body_grad references unknown node ids: [52]
+partial function dump: name=grad_body_grad
+…
+  %49 = MUL ops=[%46, %52] types=[f32]
+```
+
+**`%49 = MUL(1.0, %52)` references id 52, which is never declared in the grad function's body.** This is a constructed gradient-emission bug — some VJP rule (or post-pass) emitted a MUL whose second operand `%52` was never added to the body's op list. The next firing can trace which emission site produces this MUL — likely a gradient contribution from one of the IF-AD or MulRule paths.
+
+**Decisions worth flagging**:
+
+- **The first-attempt fix didn't actually fire — but the diagnostic the second attempt surfaced is exactly what we needed.** Two-iteration diagnostic landings are a real cost, but they're worth absorbing when the second iteration's information is genuinely actionable. Without §0.4.172's dump, the next firing's debug session would have started from "we know id 52 is unknown but we don't know which op references it" and ended in another bisection rabbit hole. With it, the next firing starts from "%49 = MUL(1.0, %52); now figure out which emission emitted that MUL".
+
+- **The dump augments validation failures only.** The `if (missing.isNotEmpty())` block fires only when the SSA-id check fails. Other validation paths (mesh checks, control-flow shape checks) don't include the dump — adding it would balloon the message text for unrelated failures. The CartPole / HMC nested-loop failures all hit the SSA-id check; that's where the dump is targeted.
+
+- **`renderBodyDump` is a top-level private function, not a member.** Members would need a fully-constructed `DxirFunction`, which is what we're failing to construct. Top-level lets the helper render directly from the constructor's parameters before any validation runs.
+
+- **The dump format is intentionally compact.** Each op gets one line: `%id = OPKIND ops=[…] types=[…]`. No nesting, no region recursion. For the CartPole case the dump is ~57 ops; visibility through Gradle's stderr capture is the constraint. A future widening could add region-aware indentation if a region-internal failure surfaces — but for the SSA-validation case (which is body-flat), single-line-per-op is sufficient.
+
+- **Probe test deleted; suite stays at 858.** Per the §0.4.163 / §0.4.168 / §0.4.170 / §0.4.171 convention, diagnostic probes don't persist in the suite. The discovery lives in this entry; the next firing can recreate the probe.
+
+- **Two diagnostic firings was the right slice.** §0.4.169 wired the warning text. §0.4.171 used probes to confirm the failure was unique to CartPole's full composition. §0.4.172 lands the dump that surfaces the actual reference. Three firings of platform/diagnostic work to reach an actionable bug report — feels like a lot, but the alternative (deep-dive into DxirReverseTransform code path tracing without diagnostic improvements) would have been far longer and less reliable.
+
+**Tests added** (+0): probes landed and removed. Suite: 858 (unchanged from §0.4.171).
+
+Full suite is green: **858 tests** (unchanged from §0.4.171).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Find which emission site produces `%49 = MUL(1.0, %52)`.** Either: (a) read the §0.4.155-style operand-resolve sites in DxirReverseTransform and identify any path that emits a MUL with an unresolved operand reference; (b) run the probe locally with extra diagnostic output (e.g., a print at every `builder.op(...)` call). The MUL's first operand is `%46 = const 1.0` — likely the result of a `MUL(upstream, contribution)` where `contribution` was supposed to come from a specific VJP-rule emission but didn't.
+2. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+3. **Out-of-scope register refresh.** Multiple items closed since §0.4.164.
+
+**Definition-of-done for §0.4.172 — met**:
+- `renderBodyDump` top-level helper added to `DxirModule.kt` ✓
+- `DxirFunction.init` augments SSA-validation failures with the dump ✓
+- First-attempt fix (DxirBuilder.function catch) reverted; second-attempt fix preferred ✓
+- Probe re-run captured the dump showing `%49 = MUL ops=[%46, %52]` as the offending op ✓
+- Probe test deleted; finding preserved in §0.4 entry ✓
+- Full suite stays green at 858 tests (unchanged) ✓
+
 #### 0.4.171 Bisection of CartPole Phase 1 failure — second downstream gate surfaced 2026-04-26
 
 §0.4.170 named the gate from CartPole Phase 1 as `DxirFunction.init`'s "function grad_body_grad references unknown node ids: [52]" — but the visible dxir was truncated, so id 52's specific reference couldn't be pinned. §0.4.171 bisects with eight increasingly-CartPole-shaped probes (A through H) to find the smallest failing form. **None of the eight probes reproduces the "unknown node ids" failure**; the CartPole failure requires multiple components in interaction (a 5-GATHER + sin/cos + division + 2-abs + IF + squared composition we couldn't bisect down). However, two probes (F and H) surfaced a SECOND downstream gate that CartPole likely hits in addition to the first:
