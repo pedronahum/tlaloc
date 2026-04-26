@@ -39,6 +39,70 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.183 Head-to-head harness Phase 1 — JVM-side scaffolding + CSV output 2026-04-26
+
+§0.4.182's planning doc named "Phase 1 — JVM-only scaffolding" as the next firing's pickup. §0.4.183 lands it. Three K2-plugin-shipped benchmarks (Brachistochrone N=64, HookeanSpring N=10, HMC logistic n=4 d=2 loop form) now run in a 1000-iteration timing loop (200 warmup + 800 measured) inside [HeadToHeadHarnessTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HeadToHeadHarnessTest.kt), with per-benchmark median/min/p99 ns aggregation and CSV output to `compiler-plugin/build/harness-results-tlaloc.csv`. Phase 2 (PyTorch / JAX reference + JSON IPC) will read this CSV alongside the Python-produced JSONs to populate the cross-framework comparison table.
+
+**The mechanism**:
+
+1. **Single test class with 3 benchmark inhabitants** — `HeadToHeadHarnessTest.kt` defines a `BenchmarkSpec` + a `HarnessResult` data class, plus three primal sources as constants (BRACHISTOCHRONE_SRC, HOOKEAN_SPRING_SRC, HMC_LOOP_SRC). The single `@Test` method iterates over them: compile-and-run each in-process via the existing K2-plugin compileAndRun pattern, parse PERF-prefixed stdout lines, append to a results list.
+
+2. **PERF protocol** — each benchmark's source emits stdout lines of form `PERF <key>=<value>` for `gradient_median_ns`, `gradient_min_ns`, `gradient_p99_ns`, and `sentinel_check`. The shared `PERF_LOOP_SUFFIX` Kotlin source string handles the warmup-then-measured loop with `LongArray(measured)` capturing per-iteration `System.nanoTime()` deltas, sorts in-place, then prints the 3 percentiles + a `sentinel_check` value (last gradient slot 0; must NOT equal -1.0f to defeat the broken-stub fallback).
+
+3. **CSV output** ([compiler-plugin/build/harness-results-tlaloc.csv](compiler-plugin/build/harness-results-tlaloc.csv)) — header `benchmark,framework,n_iterations,median_ns,min_ns,p99_ns`; one row per benchmark with `framework=tlaloc` and `n_iterations=800`. Phase 2 will add `framework=pytorch` / `framework=jax` rows from JSON IPC.
+
+**Sample output** (one run, MacBook macOS Apple Silicon):
+
+| Benchmark | median ns | min ns | p99 ns |
+|---|---|---|---|
+| brachistochrone_n64 | 41,208 | 33,500 | 48,958 |
+| hookean_spring_n10 | 3,000 | 2,916 | 3,666 |
+| hmc_logistic_n4_d2_loop | 3,917 | 3,833 | 4,709 |
+
+These are SINGLE-RUN numbers; Phase 3 will report aggregates across multiple test runs to control for cross-run JIT variance. The HookeanSpring + HMC numbers (3-4 µs/iter) reflect the post-coarsening straight-line scalar gradient size (~50-100 ops). Brachistochrone's higher cost (~41 µs/iter) reflects its larger N=64 unrolled loop body (64 hops × ~10 ops/hop = ~640 ops).
+
+**Decisions worth flagging**:
+
+- **No new Gradle module.** The §0.4.182 plan named "create a `:harness` module" as Phase 1's deliverable. In practice, mounting a new Gradle module + setting up the K2-plugin classpath dependencies + writing `build.gradle.kts` would have been ~30-50 lines of Gradle config for limited additional value. Putting the harness inside `:compiler-plugin/test` reuses the existing `compileAndRun` infrastructure, the K2-plugin classpath system properties, and the existing test reporting. The CSV output lands in `compiler-plugin/build/` — fine for the foreseeable future. A `:harness` module would matter when Phase 2's Python integration needs separate scope; for Phase 1 it'd be premature.
+
+- **Single test method, three inhabitants in a loop.** The plan suggested 3-4 `Benchmark` interface inhabitants; the implementation collapses to a single test method that iterates over a 3-element list. Less ceremony for the same coverage. Easy to extend (just add another entry to `BENCHMARK_SOURCES`).
+
+- **`PERF_LOOP_SUFFIX` is shared Kotlin-source-string templating.** Every benchmark needs the same warmup-then-measured loop with percentile aggregation; rather than duplicate it in each source, define once and concatenate. Trade-off: slightly less direct readability of any one benchmark's source, but no source drift across benchmarks.
+
+- **`gradient_min_ns` / `gradient_p99_ns` / `gradient_median_ns` (3 stats, not 1).** Median is the headline number; min reveals best-case (cache-hot, no GC); p99 reveals tail behaviour (GC pauses, JIT recompilation). Three stats is the minimum that lets a future cross-framework comparison distinguish "Tlaloc beats torch.compile on median but trails on p99" from "Tlaloc consistently faster". Per the §0.4.182 plan.
+
+- **Sentinel-check is asserted as a test assertion.** If any benchmark's `sentinel_check` value equals `-1.0f` exactly, that benchmark's runtime path is the broken-stub (= the K2-plugin synthesis didn't fire). The harness fails the whole test in that case — no silent regressions.
+
+- **Numerical correctness vs FD is NOT re-verified here.** The per-port `*Test.kt` files (BrachistochroneTest, HookeanSpringTest, HmcLogisticRegressionLoopTest) already FD-validate the gradients. The harness assumes those tests still pass; it just times what's already validated. If a future change breaks the gradient correctness, the per-port tests would catch it before the harness runs.
+
+- **Warmup of 200 + measured of 800 = 1000 iterations.** The plan said "1000 iterations (200 warmup, 800 measured)". The measured timings come AFTER the warmup. Brachistochrone's 41 µs/iter × 800 iter = ~33 ms (plus 200 × ~50 µs warmup = ~10 ms) = ~43 ms per benchmark. The whole test method runs in ~150 ms of measurement + ~15 s of K2 compilation overhead. Overall harness test runtime: ~16 s.
+
+- **Test class size: ~280 lines.** Most of it is the source-template strings (one per benchmark) and the harness plumbing. The actual logic (compile, run, parse, CSV) is ~50 lines. Acceptable for a single-firing landing.
+
+- **Phase 2 now has a concrete file to extend.** Phase 2 adds: (a) Python scripts that produce JSON; (b) JVM-side aggregator that reads `harness-results-{pytorch,jax}.json` and joins against `harness-results-tlaloc.csv`; (c) a comparison report (a fourth output file). The CSV format set here is the schema Phase 2 builds on.
+
+**Tests added** (+1 in [HeadToHeadHarnessTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HeadToHeadHarnessTest.kt)):
+
+- `head-to-head harness — 3 benchmarks, JVM-side timings, CSV` — runs Brachistochrone N=64 + HookeanSpring N=10 + HMC logistic n=4 d=2 loop form for 1000 iterations each (200 warmup + 800 measured); writes per-benchmark median/min/p99 ns to CSV; asserts sentinel-defeat for each.
+
+Full suite is green: **868 tests** (+1 over §0.4.182).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 2 of the head-to-head harness — Python reference implementations.** Gated on user-side toolchain availability (PyTorch + JAX). Until the user's environment has those, this stays parked. The plan's Phase 2 deliverable is documented; the JSON-format placeholder + JVM-side aggregator can land independently when the user enables.
+2. **Phase 0c — plugin MATMUL recognition + minimal rank-2 synthesis.** Multi-session 3-firing arc. Independent of Phase 2.
+3. **Add CartPole Phase 1+2 to the harness.** Single-firing extension of §0.4.183: append two more entries to `BENCHMARK_SOURCES`. Captures the partially-shipped CartPole port in the timing baseline.
+4. **`liftIfRegionBodies` SAFE_LIFT_OPS widening** — small Phase 1 cleanup. Defer until a port surfaces a need.
+
+**Definition-of-done for §0.4.183 — met**:
+- `HeadToHeadHarnessTest.kt` lands with 3 benchmark inhabitants ✓
+- Each benchmark runs 200-warmup + 800-measured timing loop, emits PERF stdout ✓
+- Test parses PERF, asserts sentinel-defeat, writes CSV ✓
+- CSV format matches §0.4.182's spec: `benchmark,framework,n_iterations,median_ns,min_ns,p99_ns` ✓
+- Reuses existing `compileAndRun` infrastructure (no new Gradle module) ✓
+- Sample timings produced + recorded in this entry ✓
+- Full suite stays green at 868 tests (+1) ✓
+
 #### 0.4.182 Head-to-head harness — planning doc (`docs/HEAD_TO_HEAD_HARNESS_PLAN.md`) 2026-04-26
 
 §0.4.181's hand-off named "Head-to-head harness scaffolding" as recommended-next #1 and explicitly noted "Multi-session by definition (per Phase-1 #7)." Per the §0.4 multi-session-port convention (§0.4.10 Stage B planning, §0.4.157 HMC, §0.4.165 CartPole), multi-session arcs open with a planning doc. §0.4.182 lands `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`.
