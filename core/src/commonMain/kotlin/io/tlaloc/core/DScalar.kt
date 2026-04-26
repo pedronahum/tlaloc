@@ -116,3 +116,29 @@ fun DScalar.log(): DScalar = when (this) {
     is FloatScalar -> log()
     is DoubleScalar -> log()
 }
+
+// --- Scalar sin / cos entries (§0.4.166) ---
+//
+// Trigonometric scalar extensions follow the §0.4.158 pattern. `Float.sin()` /
+// `Float.cos()` resolve at FQN `io.tlaloc.core.sin` / `io.tlaloc.core.cos`; the
+// FIR lowering maps each to `OpKind.SIN` / `OpKind.COS`, and `SinRule` / `CosRule`
+// (mutual gradients: `d/dx sin = cos`, `d/dx cos = -sin`) cover the gradient
+// side. Synthesis emits `IrCall` to `kotlin.math.sin` / `kotlin.math.cos`.
+// Needed by CartPole's pole-angle physics step (per docs/CARTPOLE_PORT_PLAN.md
+// Phase 0a).
+fun Float.sin(): Float = kotlin.math.sin(this.toDouble()).toFloat()
+fun Double.sin(): Double = kotlin.math.sin(this)
+fun FloatScalar.sin(): FloatScalar = FloatScalar(v.sin())
+fun DoubleScalar.sin(): DoubleScalar = DoubleScalar(v.sin())
+fun DScalar.sin(): DScalar = when (this) {
+    is FloatScalar -> sin()
+    is DoubleScalar -> sin()
+}
+fun Float.cos(): Float = kotlin.math.cos(this.toDouble()).toFloat()
+fun Double.cos(): Double = kotlin.math.cos(this)
+fun FloatScalar.cos(): FloatScalar = FloatScalar(v.cos())
+fun DoubleScalar.cos(): DoubleScalar = DoubleScalar(v.cos())
+fun DScalar.cos(): DScalar = when (this) {
+    is FloatScalar -> cos()
+    is DoubleScalar -> cos()
+}

@@ -257,6 +257,17 @@ object DxirInterpreter {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { kotlin.math.exp(a[it].toDouble()).toFloat() }
             }
+            OpKind.SIN -> {
+                // §0.4.166 — element-wise sine. SinRule's adjoint emits a fresh COS;
+                // both ops route through this interpreter.
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { kotlin.math.sin(a[it].toDouble()).toFloat() }
+            }
+            OpKind.COS -> {
+                // §0.4.166 — element-wise cosine. CosRule's adjoint emits SIN.
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { kotlin.math.cos(a[it].toDouble()).toFloat() }
+            }
             OpKind.SQRT -> {
                 // Element-wise square root. `kotlin.math.sqrt` returns NaN for negative
                 // operands, matching IEEE semantics.

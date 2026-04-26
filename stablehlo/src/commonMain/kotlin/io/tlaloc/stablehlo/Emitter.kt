@@ -152,6 +152,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.ABS -> unary(step, name, "stablehlo.abs", ops[0], outType)
             OpKind.EXP -> unary(step, name, "stablehlo.exponential", ops[0], outType)
             OpKind.LOG -> unary(step, name, "stablehlo.log", ops[0], outType)
+            OpKind.SIN -> unary(step, name, "stablehlo.sine", ops[0], outType)
+            OpKind.COS -> unary(step, name, "stablehlo.cosine", ops[0], outType)
             OpKind.SQRT -> unary(step, name, "stablehlo.sqrt", ops[0], outType)
             OpKind.RSQRT -> unary(step, name, "stablehlo.rsqrt", ops[0], outType)
             OpKind.TANH -> unary(step, name, "stablehlo.tanh", ops[0], outType)

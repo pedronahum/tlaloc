@@ -10,6 +10,12 @@ enum class OpKind {
     // registry + tape + stablehlo lowerings in agreement on that x=0 behaviour.
     NEG, ABS, EXP, LOG, SQRT, RSQRT, TANH, SIGMOID, RELU, GELU, SILU, STEP,
 
+    // §0.4.166 — Trigonometric primitives. Added for the CartPole port (per
+    // docs/CARTPOLE_PORT_PLAN.md), whose physics step uses `sin(θ)` and `cos(θ)`
+    // for the pole's angular state. Mutual gradients: `d/dx sin = cos`,
+    // `d/dx cos = -sin`. Lowered to `stablehlo.sine` / `stablehlo.cosine`.
+    SIN, COS,
+
     // Boolean negation (Stage B.1 prerequisite for F3 canonicalisation per
     // docs/STAGE_B_PLAN.md §4.4 — F3 swaps an IF's then/else branches and wraps the
     // predicate in NOT to produce a canonical branch order). Operand + result are both

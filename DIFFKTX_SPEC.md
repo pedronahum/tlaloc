@@ -39,6 +39,67 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.166 CartPole Phase 0a — scalar `Float.sin()` / `Float.cos()` plugin lowering 2026-04-26
+
+§0.4.165's `docs/CARTPOLE_PORT_PLAN.md` named scalar trig as the Phase 0a first slice. §0.4.166 lands all 9 plan steps in one firing — direct mirror of §0.4.158's scalar exp/log pattern. Two new `OpKind` entries (`SIN`, `COS`), mutual VJP rules (`d/dx sin = cos`, `d/dx cos = -sin`), interpreter + StableHLO + plugin + synthesis arms, plus `ScalarSinCosTest.kt` with 3 tests pinning analytic gradients.
+
+**The mechanism**:
+
+1. **`OpKind.SIN` / `OpKind.COS`** ([OpKind.kt:11-16](ir/src/commonMain/kotlin/io/tlaloc/ir/OpKind.kt#L11-L16)) — added next to the elementwise unary group. Comment cross-references CartPole port plan + names the mutual-gradient property up front.
+
+2. **Scalar extensions in `:core/DScalar.kt`** ([DScalar.kt:120-135](core/src/commonMain/kotlin/io/tlaloc/core/DScalar.kt#L120-L135)) — five entries each (Float, Double, FloatScalar, DoubleScalar, DScalar), mirroring §0.4.158's exp/log pattern. FQNs land at `io.tlaloc.core.sin` and `io.tlaloc.core.cos` (top-level extensions in package `io.tlaloc.core`).
+
+3. **`SinRule` / `CosRule` in `:ir/passes/Vjp.kt`** ([Vjp.kt:343-378](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt#L343-L378)) — mutual cross-references: SinRule emits `MUL(upstream, COS(x))`; CosRule emits `NEG(MUL(upstream, SIN(x)))`. The NEG-after-MUL form (instead of MUL-with-NEG'd-sin) keeps the SIN op's structure unchanged for downstream CSE if multiple cos calls share the same x. Both rules registered in `VjpRegistry.rules` next to ExpRule / LogRule.
+
+4. **Interpreter arms in `DxirInterpreter.kt`** ([DxirInterpreter.kt:259-269](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirInterpreter.kt#L259-L269)) — element-wise `kotlin.math.sin` / `kotlin.math.cos` via Double-precision evaluation narrowed to Float. Same pattern as EXP / LOG.
+
+5. **StableHLO emitter arms in `:stablehlo/Emitter.kt`** ([Emitter.kt:155-156](stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt#L155-L156)) — single-line `unary(...)` calls emitting `stablehlo.sine` / `stablehlo.cosine`. The MLIR ops exist in StableHLO's spec; round-trip through `stablehlo-translate` should work without further glue (not exercised in this firing's tests; will be verified the first time a sin/cos primal hits the StableHLO emitter test surface).
+
+6. **`UNARY_OP_MAP` entries in plugin** ([FirLambdaToDxirLowering.kt:931-935](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt#L931-L935)) — `io.tlaloc.core.sin` → `OpKind.SIN`; `io.tlaloc.core.cos` → `OpKind.COS`. Two-line addition mirroring §0.4.158's exp/log additions.
+
+7. **`irSin` / `irCos` in `DxirToIrSynthesis.kt`** ([DxirToIrSynthesis.kt:849-862](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L849-L862)) — mirror `irExp` / `irLog`: emit `IrCallImpl` to `kotlin.math.sin` / `kotlin.math.cos` via the existing `irUnaryMathCall` helper. Dispatch added at line 293-294.
+
+**Decisions worth flagging**:
+
+- **`CosRule` chooses NEG-after-MUL over MUL-with-NEG'd-SIN.** Both produce the same value mathematically. NEG-after-MUL keeps `SIN(x)` as a clean op that downstream CSE can dedupe across multiple cos-of-same-x sites; MUL-with-NEG'd-SIN would interleave a NEG between SIN and the multiplication, creating a chain that's harder to spot as "same SIN(x) called twice". The CartPole physics step has multiple `sin(x_t,2)` and `cos(x_t,2)` calls of the same angle — CSE hits matter for the post-coarsening shape.
+
+- **Three test methods, including a CartPole-pattern term.** Tests 1 + 2 are unit-level (single-call, multiple sample points). Test 3 (`CartPole inertial term gradient matches analytic`) exercises the SIN result as a constant in the gradient w.r.t. the action `a` — verifies the AD chain doesn't accidentally route through SIN's argument (which is hard-coded `0.3f`). Mirrors §0.4.158's "HMC per-record term" test as the integration canary.
+
+- **One firing, not two.** `docs/CARTPOLE_PORT_PLAN.md`'s estimate was "1-2 firings". Landing both sin and cos together (rather than serially) made it 1 — they share the same files at every layer (OpKind enum, DScalar extensions, Vjp rules, interpreter, emitter, plugin map, synthesis), and their VJP rules cross-reference each other. Splitting them would have required two passes over each file. Same precedent as §0.4.158's exp+log paired landing.
+
+- **No StableHLO emitter test added.** §0.4.158 / §0.4.166 both add new ops to the StableHLO emitter without round-trip-validating them. The existing emitter test suite covers the major ops; sin/cos are simple unary lowerings that follow the same `unary(...)` helper as exp/log. A dedicated round-trip test should fire when sin/cos appear in a real CartPole port (Phase 1+) — keeps the test surface tied to actual use cases rather than speculative new-op coverage.
+
+- **CartPole Phase 0a-1 closes with this firing.** Phase 0a's plan named "1-2 firings" for "scalar sin / cos + AbsRule + plugin map entries". §0.4.166 ships sin / cos. Phase 0a-2 (the `AbsRule` + `Float.abs()` plugin lowering) is now the natural next CartPole prerequisite — opens up the `|x|` use in `lt+1 = (0.5 - max(0, (2.4 - |xt+1,0|)·…))²`.
+
+- **No SCT regression on existing tests.** Suite goes 852 → 855 (+3). All §0.4.158 ScalarExpLogTest tests still pass; all benchmark tests still pass; no flake. The change is strictly additive at every layer.
+
+**Tests added** (+3 new) in [ScalarSinCosTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/ScalarSinCosTest.kt):
+
+- `scalar sin gradient matches analytic` — `f(x) = sin(x)`, `df/dx = cos(x)`. Pin at x ∈ {0.5, π/4, -1.0}.
+- `scalar cos gradient matches analytic` — `f(x) = cos(x)`, `df/dx = -sin(x)`. Pin at x ∈ {0.5, 0.0, -1.0}.
+- `CartPole inertial term gradient matches analytic` — `f(a) = 9·a + 0.045·1.5²·sin(0.3)`, `df/da = 9` regardless of x or θ. Sanity check that SIN routes correctly when its argument is a constant w.r.t. the diff variable.
+
+Full suite is green: **855 tests** (+3 over §0.4.165).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 0a-2 — `AbsRule` + scalar `Float.abs()` plugin lowering.** `OpKind.ABS` exists in dxir; `AbsRule` is missing (per §0.4.51's `rejectsUnsupportedOp` test that uses ABS as the canonical unregistered op). Plus scalar `:core.abs` extension + plugin `UNARY_OP_MAP` entry. Single-firing follow-up.
+2. **CartPole Phase 0b — `max(a, b)` and `sign(x)` lowered as IF-chains in FIR.** No new OpKinds; just plugin recognition for the `kotlin.math.max(a, b)` and `:core.sign(x)` patterns.
+3. **HMC Phase 3 nested-loop diagnostic** — focused investigation per §0.4.163's hand-off (still open).
+4. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open.
+
+**Definition-of-done for §0.4.166 — met**:
+- `OpKind.SIN`, `OpKind.COS` added to `:ir/OpKind.kt` ✓
+- Scalar `sin` / `cos` extensions in `:core/DScalar.kt` for Float / Double / FloatScalar / DoubleScalar / DScalar ✓
+- `SinRule` / `CosRule` in `:ir/Vjp.kt` registered in `VjpRegistry.rules` ✓
+- Interpreter arms in `DxirInterpreter.kt` ✓
+- StableHLO emitter arms in `:stablehlo/Emitter.kt` ✓
+- `FirLambdaToDxirLowering.UNARY_OP_MAP` adds `io.tlaloc.core.sin` and `io.tlaloc.core.cos` entries ✓
+- `irSin` / `irCos` arms in `DxirToIrSynthesis.kt` ✓
+- `ScalarSinCosTest.kt` lands with 3 tests pinning analytic gradients ✓
+- CartPole Phase 0a-1 deliverable per `docs/CARTPOLE_PORT_PLAN.md` met ✓
+- Full suite stays green at 855 tests (+3) ✓
+
 #### 0.4.165 CartPole benchmark port — planning doc (`docs/CARTPOLE_PORT_PLAN.md`) 2026-04-26
 
 §0.4.164's recommended-next #1 (Plugin IR-side synthesis closure) is officially Phase-2 work and unblocks HMC Phase 3 nested-loop. Per the priority-ladder strict reading, the lowest-numbered open Phase-1 item is **#5 — CartPole benchmark port**, and per the §0.4.157 / §0.4.10 precedent multi-session arcs open with a planning doc. §0.4.165 lands `docs/CARTPOLE_PORT_PLAN.md`. The plan's headline finding: CartPole has **five new plumbing items** before Phase 1 can even attempt a port — substantially more than HMC's "all primitives shipped" starting point. Naming the prerequisites explicitly (Phase 0a / 0b / 0c) makes the multi-session arc legible.

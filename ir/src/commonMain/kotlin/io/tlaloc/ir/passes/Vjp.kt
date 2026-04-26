@@ -341,6 +341,39 @@ object VjpRegistry {
     }
 
     /**
+     * `d/dx(sin(x)) = cos(x)`. §0.4.166 — Trigonometric primitive for the CartPole
+     * physics step. Mirrors ExpRule's "emit a fresh primal-shape op in the gradient
+     * body" approach to avoid sharing the primal's result with the adjoint.
+     */
+    val SinRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val cosX = builder.op(OpKind.COS, listOf(x), x.type)
+            val dx = builder.op(OpKind.MUL, listOf(upstream, cosX), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
+     * `d/dx(cos(x)) = -sin(x)`. §0.4.166 — companion to SinRule. The negation is
+     * folded into the multiplication via NEG(MUL(upstream, sin(x))) rather than
+     * MUL(upstream, NEG(sin(x))) — both produce the same value; the former keeps
+     * the SIN op's structure unchanged for downstream CSE if multiple cos calls
+     * use the same x.
+     */
+    val CosRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val sinX = builder.op(OpKind.SIN, listOf(x), x.type)
+            val product = builder.op(OpKind.MUL, listOf(upstream, sinX), upstream.type)
+            val dx = builder.op(OpKind.NEG, listOf(product), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
      * `d/dx(sqrt(x)) = 1 / (2 · sqrt(x))`. For `x = 0` the adjoint is infinite (divide
      * by zero); follows IEEE semantics in the interpreter. Avoid this on primals where
      * `x` can reach zero at the differentiation point.
@@ -594,6 +627,8 @@ object VjpRegistry {
         OpKind.POW to PowRule,
         OpKind.EXP to ExpRule,
         OpKind.LOG to LogRule,
+        OpKind.SIN to SinRule,
+        OpKind.COS to CosRule,
         OpKind.SQRT to SqrtRule,
         OpKind.TANH to TanhRule,
         OpKind.SIGMOID to SigmoidRule,

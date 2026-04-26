@@ -952,6 +952,11 @@ object FirLambdaToDxirLowering {
         // regression port for the `log(1 + exp(-Xβ))` per-record term.
         put("io.tlaloc.core.exp", OpKind.EXP)
         put("io.tlaloc.core.log", OpKind.LOG)
+        // §0.4.166 — :core scalar sin / cos entries. Mirrors the §0.4.158 pattern.
+        // Needed by CartPole's pole-angle physics step (per docs/CARTPOLE_PORT_PLAN.md
+        // Phase 0a).
+        put("io.tlaloc.core.sin", OpKind.SIN)
+        put("io.tlaloc.core.cos", OpKind.COS)
         // :core DTensor shape-preserving unary ops (io.tlaloc.core.ops package).
         put("io.tlaloc.core.ops.relu", OpKind.RELU)
         put("io.tlaloc.core.ops.neg", OpKind.NEG)

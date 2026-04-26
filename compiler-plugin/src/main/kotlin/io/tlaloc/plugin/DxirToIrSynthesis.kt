@@ -291,6 +291,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.POW) return irPow(op, env, context)
         if (op.op == OpKind.LOG) return irLog(op, env, context)
         if (op.op == OpKind.EXP) return irExp(op, env, context)
+        if (op.op == OpKind.SIN) return irSin(op, env, context)
+        if (op.op == OpKind.COS) return irCos(op, env, context)
         if (op.op == OpKind.CAST) return irCast(op, env, context)
         if (op.op == OpKind.GATHER) return irGather(op, env, context)
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
@@ -843,6 +845,24 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("exp"))
+
+    /**
+     * §0.4.166 — `OpKind.SIN(x)` → `kotlin.math.sin(x)`. CartPole Phase 0a primitive.
+     * Scalar-only (F32 / F64). SinRule's adjoint emits `MUL(upstream, COS(x))`,
+     * which routes through this synthesis arm + irCos for the COS.
+     */
+    private fun IrBuilderWithScope.irSin(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("sin"))
+
+    /** §0.4.166 — `OpKind.COS(x)` → `kotlin.math.cos(x)`. Companion to [irSin]. */
+    private fun IrBuilderWithScope.irCos(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("cos"))
 
     private fun IrBuilderWithScope.irUnaryMathCall(
         op: DxirOp,
