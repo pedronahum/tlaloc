@@ -39,6 +39,64 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.176 HMC Phase 3 nested-loop port closes — same §0.4.174+§0.4.175 pipeline; second-port confirmation 2026-04-26
+
+§0.4.175's hand-off named HMC Phase 3 nested-loop as the next pickup with the hypothesis "the §0.4.174 lift pass + §0.4.175 deep-clone fix likely unblock it (same downstream gate pattern)." §0.4.176 lands it. **The hypothesis was correct, no additional fix needed** — the §0.4.163 deferred shape (true nested for-loop over features, `for (i) { var xb = 0; for (j) { xb += X[i,j] * β[j] } }`) compiles end-to-end through the K2 plugin's IR-side synthesis path and produces gradients that match finite-difference at the β slots within `1e-3` absolute / `5e-3` relative tolerance.
+
+**Why this matters for Phase 2 #1**: TWO independent paper-benchmark ports (CartPole Phase 1 + HMC Phase 3 nested-loop) now flow through the §0.4.174 lift + §0.4.175 deep-clone pipeline producing FD-validated gradients on different control-flow shapes:
+
+- **CartPole Phase 1**: scalar straight-line + multi-IF post-distribute coarsening + abs-clip max wrapped in IF.
+- **HMC Phase 3 nested**: nested WHILE-in-WHILE (region-recursive C5) + scalar exp/log + locally-declared inner-mutated `var` + multiplicative index arithmetic `j*4+i` for column-major X.
+
+That two-port confirmation is significant: a single port's success could be a coincidence; two completely different control-flow shapes hitting the same fix path means the §0.4.174 + §0.4.175 work is genuine progress on Phase 2 #1's structural surface, not a CartPole-specific patch.
+
+**The mechanism (carry-over from §0.4.174 + §0.4.175)** — no new code in `:ir` or `:compiler-plugin` this firing. The lift pass hoists post-coarsening IF region body ops to top level; the deep-clone fix replaces `nodeMap[primal-IF] = primal-IF` with a grad-scope IF when regions are empty; together they close the cross-IF reference leak that surfaced as either "unknown node ids" (§0.4.172) or "operand id not in env" (§0.4.173) and produced 2.6× wrong gradients on CartPole (§0.4.174 finding). HMC Phase 3 nested-loop hits the same gate pattern through the WHILE-coarsening output, so the same fix applies.
+
+**Verification** in [HmcNestedLoopTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcNestedLoopTest.kt):
+
+The full HMC Phase 3 nested-loop primal — column-major X layout, outer for-loop over n=4 records, inner for-loop over d=2 features mutating a locally-declared `xb`, sigmoid-bearing per-record term, β·β/2σ² regularizer — compiles end-to-end. The test asserts FD parity at the two β slots:
+- `∂U/∂β[0] ≈ -1.168` (test reports `-1.1681458`, hand-derived value matches).
+- `∂U/∂β[1] ≈ 0.535` (test reports `0.53513634`, sign + magnitude consistent with derivative of the same quadratic term).
+
+Other gradient slots (∂U/∂X / ∂U/∂y) are not the math target for this test (FD on each would require 12 more 2-point central-difference evaluations), but they all return non-sentinel values and have plausible signs — e.g. `∂U/∂y[0] = xb_0 = 0.65` matches `1.0 * 0.5 + 0.5 * 0.3 = 0.65` exactly.
+
+**Decisions worth flagging**:
+
+- **Zero code changes in this firing — pure regression-test landing.** The §0.4.174 + §0.4.175 work is the load-bearing fix; this firing's contribution is the second confirmation that two different shapes flow through the same path. The test serves as a regression target so any future change that breaks the nested-WHILE pipeline gets caught immediately.
+
+- **The §0.4.163 → §0.4.176 arc spans 13 firings.** §0.4.163 first attempted the nested-loop port and hit the downstream gate. The intervening firings (§0.4.164 through §0.4.176) shipped the diagnostic + structural work that ultimately closed it. The arc demonstrates the value of "checkpoint + flag, don't barrel forward" — landing the FIR fix in §0.4.163 even though the end-to-end test couldn't ship at the time meant the FIR work didn't need to be re-discovered.
+
+- **HMC's port plan was estimated at "3-4 firings" originally** (§0.4.157). Actual breakdown: §0.4.158 (scalar exp/log unblock) + §0.4.159 (Phase 1) + §0.4.160 (Phase 2 loop form) + §0.4.162 (Phase 3 mask half) + §0.4.163 (FIR fix; checkpointed) + ... + §0.4.176 (Phase 3 nested-loop closes). The total was 5 firings of HMC-specific work + 8 firings of upstream platform work that benefited multiple ports. Plan was right on the HMC-specific time but didn't budget the platform work.
+
+- **The two-port shipping pattern is THE Phase 1-to-Phase 2 transition signal.** Phase 1's loose criterion was "M9 parity"; the strict reading was "all six paper benchmarks ported." After §0.4.176, three of the six (Brachistochrone, HookeanSpring, HMC) are fully working through the K2 plugin, plus CartPole Phase 1 (one of three CartPole phases). BGDHyperOpt has its own port (§0.4.49). QWOP is the last unported benchmark. Phase 1 is "more closed" than at any prior firing — but the strict criterion (Phase 1 done = §0.4 entry "Phase 1 closed — coarsening at M9 parity" with head-to-head paper numbers) still requires the head-to-head harness work (Phase 1 #7).
+
+- **No diagnostic dumps fired during this firing's compilation.** The only WARNINGs are the existing pre-coarsening "saw handoff" + post-FIR "lambda lowered to dxir" success messages. No "kept original call" rejection, no "DxirReverseTransform rejected the dxir" exception. The §0.4.174 + §0.4.175 fixes interact cleanly with the C5/Coarsening/SCT stack on the nested-WHILE shape.
+
+- **Out-of-scope register refresh is officially overdue.** Items closed since the last refresh (§0.4.164): D.3i Phase 3 series, MR IF AD, region-recursive C5, `:benchmarks` substrate, HMC Phases 1/2/3-mask AND now Phase 3 nested-loop, scalar exp/log/sin/cos/abs, CartPole Phase 0a/0a-2, Phase 1 (FD-validated gradient), Phase 2 #1 (substantively closed for scalar surface). The next firing should refresh §0.4.164 to remove these from "deferred" and add new items as appropriate.
+
+- **The test mirrors the §0.4.163 `HmcLogisticRegressionLoopTest` shape** but with the inner for-loop. Same harness pattern (compileAndRun + sentinel-guarded FD comparison). Reusing the harness keeps test code review cost low.
+
+**Tests added** (+1 in [HmcNestedLoopTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcNestedLoopTest.kt)):
+
+- `hmc nested loop gradient matches finite difference at small fixed dataset` — full HMC Phase 3 nested-loop source; FD verification at the β slots; mixed `1e-3` absolute / `5e-3` relative tolerance.
+
+Full suite is green: **864 tests** (+1 over §0.4.175).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Out-of-scope register refresh.** Pure documentation work. The §0.4.164 register entries for "Plugin IR-side synthesis closure", "Multi-result IF AD Phase 4", "Multi-live-index MR IF AD", "Phase 5b" (multi-live-index nested MR IF AD), "Phase 0a–0a-2" (sin/cos/abs), "HMC port", and "CartPole port" are all outdated. Single-firing.
+2. **CartPole Phase 2 — loop over B=3 time steps.** Should follow HookeanSpring's N=10 chain pattern (§0.4.47). With the §0.4.174 + §0.4.175 pipeline working on both nested-WHILE (HMC) and multi-IF (CartPole) shapes, Phase 2 should be a clean port.
+4. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+5. **Plugin MATMUL recognition (Phase 0c).** Shared blocker for HMC Phase 3 (matrix form) and CartPole Phase 3 (NN). Single-firing follow-up to §0.4.158's plan amendment.
+
+**Definition-of-done for §0.4.176 — met**:
+- HMC Phase 3 nested-loop test lands and PASSES with FD-validated β-slot gradients ✓
+- Test mirrors §0.4.163's deferred shape verbatim (column-major X + inner loop) ✓
+- No code changes in `:ir` or `:compiler-plugin` — pure regression-test landing on §0.4.174 + §0.4.175 ✓
+- Two-port confirmation (CartPole Phase 1 + HMC Phase 3 nested-loop) for the §0.4.174 + §0.4.175 pipeline ✓
+- §0.4.163 → §0.4.176 13-firing arc explicitly closed ✓
+- Full suite stays green at 864 tests (+1) ✓
+
 #### 0.4.175 CartPole Phase 1 closes — deep-clone IF in DxirReverseTransform when regions are empty; gradient matches FD 2026-04-26
 
 §0.4.174 closed the structural wall (CartPole compiles end-to-end through K2 synthesis) but the synthesised gradient was 2.6× off (slot 1 = 0.0985 vs FD = 0.0374). §0.4.175 lands the correctness fix and closes the multi-firing CartPole port arc that opened with §0.4.165 (planning), passed through §0.4.166 (sin/cos), §0.4.167 (abs), §0.4.168 (first attempt + downstream gate), §0.4.169–§0.4.173 (diagnostics), and §0.4.174 (lift pass).
