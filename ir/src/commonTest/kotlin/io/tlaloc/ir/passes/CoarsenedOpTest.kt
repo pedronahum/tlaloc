@@ -94,15 +94,18 @@ class CoarsenedOpTest {
             val diff = op(OpKind.SUB, listOf(a, b), f32s)
             listOf(sum, diff)
         }
-        // Gradient body: (upstream, a, b) → (da). Just returns upstream for C.3b.1 shape
-        // validity; semantic correctness isn't exercised in interpreter tests.
+        // §0.4.179 — Phase 5c gradient_body shape for K=2, N=2: (u_sum, u_diff, a, b) → (da, db).
+        // Semantic correctness isn't exercised by the interpreter test (which only
+        // evaluates primal_body); only shape validity matters here.
         val grad = DxirBuilder.function("addsub_grad") {
-            val upstream = param("upstream", f32s)
+            val uSum = param("u_sum", f32s)
+            val uDiff = param("u_diff", f32s)
             val a = param("a", f32s)
             val b = param("b", f32s)
             val _ign = op(OpKind.ADD, listOf(a, b), f32s)
-            val _ign2 = op(OpKind.ADD, listOf(_ign, upstream), f32s)
-            listOf(upstream, upstream)
+            val _ign2 = op(OpKind.ADD, listOf(_ign, uSum), f32s)
+            val _ign3 = op(OpKind.ADD, listOf(_ign2, uDiff), f32s)
+            listOf(uSum, uDiff)
         }
         val outer = DxirBuilder.function("outer") {
             val a = param("a", f32s)
@@ -531,5 +534,108 @@ class CoarsenedOpTest {
         assertEquals(2, out.size, "valueAndGrad returns [forward, grad]")
         assertEquals(9f, out[0][0], "forward: 3*3 = 9")
         assertEquals(6f, out[1][0], "grad: 2*3 = 6")
+    }
+
+    // ------------------------------------------------------------------------
+    // §0.4.179 — Phase 5c: multi-result COARSENED gradient via handleCoarsenedAdjoint
+    // ------------------------------------------------------------------------
+
+    @Test
+    fun gradThroughMultiResultCoarsenedRoutesPerIndexUpstreams() {
+        // primal_body: (a, b) → (a + b, a - b).
+        //   ∂(a+b)/∂a = 1, ∂(a+b)/∂b = 1
+        //   ∂(a-b)/∂a = 1, ∂(a-b)/∂b = -1
+        // gradient_body: (u_sum, u_diff, a, b) → (da, db) where
+        //   da = u_sum + u_diff   (chain through both results' contribution to a)
+        //   db = u_sum - u_diff   (chain through both results' contribution to b)
+        // outer: f(a, b) = coarsened.result(0) + 2*coarsened.result(1)
+        //                = (a + b) + 2*(a - b) = 3a - b
+        // df/da = 3, df/db = -1.
+        val primal = DxirBuilder.function("addsub_primal") {
+            val a = param("a", f32s)
+            val b = param("b", f32s)
+            val sum = op(OpKind.ADD, listOf(a, b), f32s)
+            val diff = op(OpKind.SUB, listOf(a, b), f32s)
+            listOf(sum, diff)
+        }
+        val grad = DxirBuilder.function("addsub_grad") {
+            val uSum = param("u_sum", f32s)
+            val uDiff = param("u_diff", f32s)
+            val a = param("a", f32s)
+            val b = param("b", f32s)
+            // dummy reads of a/b to keep ref-integrity.
+            val _refA = op(OpKind.MUL, listOf(a, uSum), f32s)
+            val _refB = op(OpKind.MUL, listOf(b, uSum), f32s)
+            val da = op(OpKind.ADD, listOf(uSum, uDiff), f32s)
+            val db = op(OpKind.SUB, listOf(uSum, uDiff), f32s)
+            listOf(da, db)
+        }
+        val outer = DxirBuilder.function("f") {
+            val a = param("a", f32s)
+            val b = param("b", f32s)
+            val c = coarsened(
+                operands = listOf(a, b),
+                primalBody = primal,
+                gradientBody = grad,
+                readsPrimalIndices = setOf(0, 1),
+            )
+            // f = c.result(0) + 2 * c.result(1)
+            val two = const(2f, f32s)
+            val twoDiff = op(OpKind.MUL, listOf(two, c.result(1)), f32s)
+            val r = op(OpKind.ADD, listOf(c.result(0), twoDiff), f32s)
+            listOf(r)
+        }
+        val gradFn = DxirReverseTransform.apply(outer)
+        val out = DxirInterpreter.evalFunction(gradFn, listOf(floatArrayOf(5f), floatArrayOf(3f)))
+        assertEquals(2, out.size, "grad fn has 2 returns (one per outer param)")
+        assertEquals(3f, out[0][0], "df/da = 3 (1 from sum + 2*1 from diff)")
+        assertEquals(-1f, out[1][0], "df/db = -1 (1 from sum + 2*(-1) from diff)")
+    }
+
+    @Test
+    fun gradThroughMultiResultCoarsenedDeadIndexSeedsZero() {
+        // Verify Phase 5c's dead-index handling: when only ONE of K results is
+        // consumed downstream, the other index gets seeded with const(0) inside
+        // handleCoarsenedAdjoint. The gradient must still match the analytic
+        // single-result-consumed case.
+        //
+        // primal_body: (a) → (a + 1, a * 2)
+        // gradient_body: (u0, u1, a) → (u0 + 2 * u1)  (single operand: a)
+        // outer: f(a) = c.result(0)  (uses sum only; result(1) is dead)
+        //   f = a + 1, so df/da = 1.
+        // The dead u1 should be seeded with const(0), giving da = u0 + 2*0 = u0 = 1.
+        val primal = DxirBuilder.function("dead_idx_primal") {
+            val a = param("a", f32s)
+            val one = const(1f, f32s)
+            val sum = op(OpKind.ADD, listOf(a, one), f32s)
+            val two = const(2f, f32s)
+            val doubled = op(OpKind.MUL, listOf(a, two), f32s)
+            listOf(sum, doubled)
+        }
+        val grad = DxirBuilder.function("dead_idx_grad") {
+            val u0 = param("u0", f32s)
+            val u1 = param("u1", f32s)
+            val a = param("a", f32s)
+            val _refA = op(OpKind.MUL, listOf(a, u0), f32s)  // ref-integrity for a
+            val two = const(2f, f32s)
+            val twoU1 = op(OpKind.MUL, listOf(two, u1), f32s)
+            val da = op(OpKind.ADD, listOf(u0, twoU1), f32s)
+            listOf(da)
+        }
+        val outer = DxirBuilder.function("f") {
+            val a = param("a", f32s)
+            val c = coarsened(
+                operands = listOf(a),
+                primalBody = primal,
+                gradientBody = grad,
+                readsPrimalIndices = setOf(0),
+            )
+            // Only consume result(0).
+            listOf(c.result(0))
+        }
+        val gradFn = DxirReverseTransform.apply(outer)
+        val out = DxirInterpreter.evalFunction(gradFn, listOf(floatArrayOf(7f)))
+        assertEquals(1, out.size)
+        assertEquals(1f, out[0][0], "df/da = 1 (u1 seeded with 0 since result(1) is dead)")
     }
 }

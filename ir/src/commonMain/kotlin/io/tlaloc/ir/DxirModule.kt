@@ -99,19 +99,29 @@ class DxirFunction(
                 "function $name: COARSENED op id=${op.id} types[$i]=${op.types[i]} ≠ primal_body.returns[$i].type=${r.type}"
             }
         }
-        // Gradient body signature: (upstream, *primal_operands) → (d_operand_0, ...).
-        // Upstream is the gradient of the primal op's FIRST result (single-result scope
-        // for C.3b.1; multi-result coarsening is deferred).
-        require(gradient.params.size == 1 + op.operands.size) {
-            "function $name: COARSENED op id=${op.id} gradient_body.params count ${gradient.params.size} ≠ 1 + operand count ${op.operands.size}"
+        // §0.4.179 — Phase 5c: Gradient body signature widened to multi-result.
+        //   single-result (K=1): `(upstream, *primal_operands) → (d_operand_0, ...)` (= 1 + N params).
+        //   multi-result (K>1):  `(upstream_0, …, upstream_K-1, *primal_operands) → (d_operand_0, ...)` (= K + N params).
+        // The first K params are upstreams (one per result type, in order); the next N
+        // params are primal operands (positionally aligned with op.operands). N returns
+        // give per-operand gradient contributions. K==1 stays bit-exact equivalent to
+        // the §0.4.31 contract — single-result COARSENED tests don't change.
+        val k = op.types.size
+        require(gradient.params.size == k + op.operands.size) {
+            "function $name: COARSENED op id=${op.id} gradient_body.params count ${gradient.params.size} ≠ K + N (= $k + ${op.operands.size}) — K upstreams + N primal operands"
         }
-        require(gradient.params[0].type == op.types[0]) {
-            "function $name: COARSENED op id=${op.id} gradient_body.params[0] (upstream) type ${gradient.params[0].type} ≠ op.types[0] ${op.types[0]} (the primal result gradient type)"
+        for ((i, t) in op.types.withIndex()) {
+            require(gradient.params[i].type == t) {
+                "function $name: COARSENED op id=${op.id} gradient_body.params[$i] (upstream for result $i) type ${gradient.params[i].type} ≠ op.types[$i]=$t"
+            }
         }
         for ((i, operand) in op.operands.withIndex()) {
-            require(gradient.params[1 + i].type == operand.type) {
-                "function $name: COARSENED op id=${op.id} gradient_body.params[${1 + i}].type=${gradient.params[1 + i].type} ≠ operand[$i].type=${operand.type}"
+            require(gradient.params[k + i].type == operand.type) {
+                "function $name: COARSENED op id=${op.id} gradient_body.params[${k + i}] (primal operand $i) type=${gradient.params[k + i].type} ≠ operand[$i].type=${operand.type}"
             }
+        }
+        require(gradient.returns.size == op.operands.size) {
+            "function $name: COARSENED op id=${op.id} gradient_body.returns count ${gradient.returns.size} ≠ operand count ${op.operands.size}"
         }
         // Every index in reads_primal_indices must be a valid operand index.
         for (i in readsInt) require(i in op.operands.indices) {

@@ -135,16 +135,24 @@ object DxirReverseTransform {
                     }
                 }
                 if (n.isMultiResult) {
-                    require(n.op == OpKind.IF) {
+                    // §0.4.179 — Phase 5c: multi-result COARSENED accepted alongside
+                    // multi-result IF. handleCoarsenedAdjoint reads K upstreams from
+                    // the per-index gradAccum (§0.4.154 substrate) and seeds dead
+                    // indices with const(0). No live-index pre-check needed for
+                    // COARSENED — the dispatch in step 3 collects whichever indices
+                    // have accumulated contribution and skips the op entirely if none.
+                    require(n.op == OpKind.IF || n.op == OpKind.COARSENED) {
                         "DxirReverseTransform v1 rejects multi-result ops (got ${n.op})"
                     }
-                    val liveIndices = findIfLiveResultIndices(primal, n)
-                    require(liveIndices.isNotEmpty()) {
-                        "DxirReverseTransform: multi-result IF id=${n.id} has zero result " +
-                            "indices referenced downstream — the IF op is dead and should " +
-                            "be DCE'd before SCT"
+                    if (n.op == OpKind.IF) {
+                        val liveIndices = findIfLiveResultIndices(primal, n)
+                        require(liveIndices.isNotEmpty()) {
+                            "DxirReverseTransform: multi-result IF id=${n.id} has zero result " +
+                                "indices referenced downstream — the IF op is dead and should " +
+                                "be DCE'd before SCT"
+                        }
+                        ifLiveIndices[n.id] = liveIndices
                     }
-                    ifLiveIndices[n.id] = liveIndices
                 }
             }
         }
@@ -230,12 +238,28 @@ object DxirReverseTransform {
                                 n
                             }
                         } else {
-                            op(
-                                kind = n.op,
-                                operands = n.operands.map { resolveCloneOperand(it, nodeMap, n.id) },
-                                type = n.type,
-                                attrs = n.attrs,
-                            )
+                            // §0.4.179 — Phase 5c: dispatch on multi-result vs single-result.
+                            // Multi-result non-IF ops (today: only COARSENED) must be cloned
+                            // via opMulti() to preserve all types[]; using op() with
+                            // type=type[0] loses the higher-indexed result types and trips
+                            // `mappedSource.result(idx)` lookups downstream.
+                            val clonedOperands = n.operands.map { resolveCloneOperand(it, nodeMap, n.id) }
+                            if (n.isMultiResult) {
+                                opMulti(
+                                    kind = n.op,
+                                    operands = clonedOperands,
+                                    types = n.types,
+                                    attrs = n.attrs,
+                                    sharding = n.sharding,
+                                )
+                            } else {
+                                op(
+                                    kind = n.op,
+                                    operands = clonedOperands,
+                                    type = n.type,
+                                    attrs = n.attrs,
+                                )
+                            }
                         }
                     }
                     else -> error(
@@ -277,18 +301,30 @@ object DxirReverseTransform {
                     continue
                 }
 
-                // §0.4.154 — non-IF body ops are single-result; their upstream lives
-                // at index 0. Multi-result COARSENED still rejected by handleCoarsenedAdjoint.
-                val upstream = gradAccum[n.id to 0] ?: continue
                 // §0.4.32 — COARSENED adjoint: splice the stored gradient_body into the
                 // outer gradient function. Matches [handleIfAdjoint]'s structural role as
                 // a "special case bypassing the VjpRule contract" (the COARSENED op's
                 // gradient is precomputed + stored in attrs rather than derived from a
                 // static rule). See the doc-comment on [handleCoarsenedAdjoint].
+                //
+                // §0.4.179 — Phase 5c: collect per-result-index upstreams (mirror IF
+                // dispatch). Single-result COARSENED routes through index 0 (preserves
+                // pre-§0.4.179 behavior bit-exactly). Multi-result COARSENED collects
+                // every index that has accumulated contribution; indices with no
+                // downstream consumer are absent from `upstreams` and seeded with
+                // typed-zero inside [handleCoarsenedAdjoint].
                 if (n.op == OpKind.COARSENED) {
-                    handleCoarsenedAdjoint(n, upstream, gradAccum, nodeMap, primalById, this)
+                    val upstreams: Map<Int, DxirNode> = n.types.indices.mapNotNull { idx ->
+                        gradAccum[n.id to idx]?.let { idx to it }
+                    }.toMap()
+                    if (upstreams.isEmpty()) continue
+                    handleCoarsenedAdjoint(n, upstreams, gradAccum, nodeMap, primalById, this)
                     continue
                 }
+
+                // §0.4.154 — non-IF body ops are single-result; their upstream lives
+                // at index 0.
+                val upstream = gradAccum[n.id to 0] ?: continue
 
                 val rule = VjpRegistry[n.op] ?: error(
                     "DxirReverseTransform: no VJP rule registered for ${n.op}",
@@ -1229,7 +1265,7 @@ object DxirReverseTransform {
      */
     private fun handleCoarsenedAdjoint(
         coarsened: DxirOp,
-        upstream: DxirNode,
+        upstreams: Map<Int, DxirNode>,
         outerGradAccum: MutableMap<Pair<Int, Int>, DxirNode>,
         outerNodeMap: Map<Int, DxirNode>,
         primalById: Map<Int, DxirNode>,
@@ -1238,15 +1274,23 @@ object DxirReverseTransform {
         require(coarsened.op == OpKind.COARSENED) {
             "handleCoarsenedAdjoint: not a COARSENED op (got ${coarsened.op})"
         }
-        require(coarsened.types.size == 1) {
-            "handleCoarsenedAdjoint: only single-result COARSENED supported " +
-                "(got ${coarsened.types.size} results)"
+        require(upstreams.isNotEmpty()) {
+            "handleCoarsenedAdjoint: empty upstream map for COARSENED id=${coarsened.id}; " +
+                "the caller must supply at least one (result-index → upstream) pair"
+        }
+        require(upstreams.keys.all { it in coarsened.types.indices }) {
+            "handleCoarsenedAdjoint: upstream result-index out of bounds for ${coarsened.types.size}-" +
+                "result COARSENED id=${coarsened.id}; got keys=${upstreams.keys}"
         }
         val gradBody = coarsened.attrs["gradient_body"] as? io.tlaloc.ir.DxirFunction
             ?: error("handleCoarsenedAdjoint: COARSENED op id=${coarsened.id} missing gradient_body attr")
-        require(gradBody.params.size == 1 + coarsened.operands.size) {
+        // §0.4.179 — Phase 5c. Single-result preserved as the K=1 case (1 + N params).
+        // Multi-result uses K + N params: K upstreams (positional, one per result type)
+        // + N primal operands (positional, aligned with coarsened.operands).
+        val k = coarsened.types.size
+        require(gradBody.params.size == k + coarsened.operands.size) {
             "handleCoarsenedAdjoint: gradient_body param count ${gradBody.params.size} ≠ " +
-                "1 + ${coarsened.operands.size} (upstream + primal operands)"
+                "K + N (= $k + ${coarsened.operands.size}) (upstreams + primal operands)"
         }
         require(gradBody.returns.size == coarsened.operands.size) {
             "handleCoarsenedAdjoint: gradient_body return count ${gradBody.returns.size} ≠ " +
@@ -1254,15 +1298,22 @@ object DxirReverseTransform {
         }
 
         // Step 2: seed gradient-body param ids → outer nodes.
+        // §0.4.179 — Phase 5c: per-result-index upstream seeding. Indices NOT in
+        // [upstreams] (no consumer accumulated into that result) get a typed-zero
+        // const so the gradient_body's reverse walk sees a well-formed input even
+        // when only a subset of results contribute downstream gradient.
         val gradNodeMap = HashMap<Int, DxirNode>()
-        gradNodeMap[gradBody.params[0].id] = upstream
+        for (i in 0 until k) {
+            val u = upstreams[i] ?: builder.const(zeroValueFor(coarsened.types[i].dtype), coarsened.types[i])
+            gradNodeMap[gradBody.params[i].id] = u
+        }
         for (i in coarsened.operands.indices) {
             val operandClone = outerNodeMap[coarsened.operands[i].id]
                 ?: error(
                     "handleCoarsenedAdjoint: primal operand id=${coarsened.operands[i].id} " +
                         "missing from outerNodeMap (expected cloned or primal verbatim)",
                 )
-            gradNodeMap[gradBody.params[i + 1].id] = operandClone
+            gradNodeMap[gradBody.params[k + i].id] = operandClone
         }
 
         // Step 3: clone gradient_body.body into the outer gradient builder. §0.4.120 —
@@ -1645,9 +1696,13 @@ object DxirReverseTransform {
             // the branch's gradAccum (not the outer one).
             if (n.op == OpKind.COARSENED) {
                 val clonedCoarsened = branchNodeMap[n.id] as DxirOp
+                // §0.4.179 — Phase 5c. Branch-body COARSENED stays single-result for
+                // C.3b.3b2 (per [coarsenMultiSoi]'s `multi-result COARSENED in branch
+                // not supported` guard). Single-result → upstream lives at index 0;
+                // pass as a one-entry map.
                 handleCoarsenedAdjoint(
                     coarsened = clonedCoarsened,
-                    upstream = upstreamForN,
+                    upstreams = mapOf(0 to upstreamForN),
                     outerGradAccum = gradAccum,
                     outerNodeMap = branchNodeMap,
                     primalById = primalById,

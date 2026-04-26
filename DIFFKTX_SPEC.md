@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.179 Phase 5c — Multi-result COARSENED widening; gradient_body shape extended to K+N params 2026-04-26
+
+§0.4.178's hand-off named Phase 5c (multi-result COARSENED widening) as recommended-next #1 — long-deferred since §0.4.155's substrate landed. §0.4.179 lands it. The widening removes the `coarsened.types.size == 1` guard, generalizes `validateCoarsenedShape` to a K+N gradient_body contract, dispatches per-result-index upstreams through the same §0.4.154 substrate that powers the multi-live-index MR IF AD path, and adds two new multi-result-COARSENED gradient tests covering the well-formed and dead-index cases.
+
+**The mechanism** spans three files:
+
+1. **`validateCoarsenedShape`** ([DxirModule.kt:102-129](ir/src/commonMain/kotlin/io/tlaloc/ir/DxirModule.kt#L102-L129)) — generalizes the gradient_body shape from `1 + N params` to `K + N params` where K = `op.types.size`. Single-result COARSENED (K=1) is bit-exact equivalent to the §0.4.31 contract. Multi-result COARSENED requires K upstream params (one per result type, positional) followed by N primal-operand params. `gradient_body.returns.size == op.operands.size` (one return per primal operand, contract unchanged).
+
+2. **`handleCoarsenedAdjoint`** ([DxirReverseTransform.kt:1230-1335](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1230-L1335)) — signature changed from `upstream: DxirNode` to `upstreams: Map<Int, DxirNode>` mirroring [handleIfAdjoint]'s contract. Seeds gradient_body's first K params from the upstream map, with absent indices (no downstream consumer for that result) seeded with `const(zeroValueFor(...))`. Validation requires K + N params and N returns.
+
+3. **Reverse-walk dispatch + cloning** ([DxirReverseTransform.kt:135-149, 280-300, 240-260](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L135-L300)) — three coordinated changes:
+   - Top-level multi-result gate widens to accept `OpKind.IF || OpKind.COARSENED` (not just IF).
+   - Cloning loop dispatches on `n.isMultiResult`: multi-result non-IF ops (today: only COARSENED) go through `opMulti(...)` to preserve all `types[]`; single-result through `op(...)` (unchanged behavior).
+   - COARSENED dispatch in step 3 collects per-index upstreams from `gradAccum` (mirroring IF) instead of reading only `(n.id, 0)`. Skips the COARSENED entirely if no live indices have upstreams.
+
+The branch-body COARSENED arm in [walkBranchReverse](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1675-L1689) wraps its single upstream as `mapOf(0 to upstream)` since C.3b.3b2's coarsening guard `multi-result COARSENED in branch not supported` keeps branch-body COARSENED single-result.
+
+**Decisions worth flagging**:
+
+- **Backward compat**: every existing single-result COARSENED test passes unchanged (validateCoarsenedShape's K=1 case is bit-exact the pre-§0.4.179 contract; handleCoarsenedAdjoint with `mapOf(0 to upstream)` is structurally identical to the old `upstream`-positional version). The widening only adds capability; no semantics change for the K=1 path.
+
+- **One existing test required updating** ([CoarsenedOpTest.kt:99-108](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/CoarsenedOpTest.kt#L99-L108)) — the §0.4.31 multi-result COARSENED interpreter test (`coarsenedMultiResultDispatchesThroughMultiResultKey`) had a malformed gradient_body (1 upstream param for a 2-result COARSENED, slipping past the laxer pre-§0.4.179 validation). Updated to the K+N=4-param shape; the test still validates the same multi-result key dispatch through the interpreter.
+
+- **Coarsening doesn't currently CREATE multi-result COARSENED ops.** The substrate widening is forward-looking. `coarsenRootLeaf` (§0.4.33) and `coarsenMultiSoi` (§0.4.35) both produce single-result COARSENED. Future widening of those passes (e.g., to coarsen leaves with multiple consumed values) can now produce multi-result COARSENED that flows through the §0.4.179 path naturally — no further substrate work needed.
+
+- **Hand-built gradient tests are the verification surface** for now. [`gradThroughMultiResultCoarsenedRoutesPerIndexUpstreams`](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/CoarsenedOpTest.kt#L362-L407) constructs `(a, b) → (a+b, a-b)` primal + `(u_sum, u_diff, a, b) → (u_sum+u_diff, u_sum-u_diff)` gradient + outer `c.result(0) + 2*c.result(1) = 3a - b` consumer; verifies `df/da = 3` and `df/db = -1`. The dead-index test `gradThroughMultiResultCoarsenedDeadIndexSeedsZero` consumes only `c.result(0)` from a 2-result primal, verifying the absent `u1` is seeded with `const(0)` so the final gradient stays correct.
+
+- **Phase 5c was a one-firing landing despite touching three files.** The §0.4.155 multi-live-index gradAccum substrate was the pivot — once the per-(id, idx) keying landed, the COARSENED widening became "wire the existing pattern". Total churn: ~70 lines of code change + 2 new tests. The §0.4.155 → §0.4.179 architectural arc demonstrates the value of substrate-first refactors: the per-index keying took 3 firings (§0.4.154 + §0.4.155 + §0.4.156's fourth-benchmark validation) but enabled this firing's drop-in widening.
+
+- **Phase 5c is the last major Phase-1 cleanup item from §0.4.164's deferred list.** Outstanding cleanup items are smaller: `liftIfRegionBodies` `SAFE_LIFT_OPS` widening (§0.4.174 follow-up), `irIfOp` widening for non-empty bodies (§0.4.174 follow-up), recursive `splitOnReuses`, cache pruning. None of these block Phase-1 ports today; they're polish for when a use case surfaces.
+
+- **Out-of-scope register update is now overdue again.** With Phase 5c shipped + CartPole Phase 2 + HMC Phase 3 nested-loop, the §0.4.177 register has 3+ items closed since its sixth snapshot. The next firing should refresh.
+
+**Tests added** (+2 in [CoarsenedOpTest.kt](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/CoarsenedOpTest.kt)):
+
+- `gradThroughMultiResultCoarsenedRoutesPerIndexUpstreams` — constructs `(a, b) → (a+b, a-b)` primal with explicit per-index upstream gradient_body; outer consumes both results in `c.result(0) + 2*c.result(1)`; verifies `df/da = 3` and `df/db = -1`.
+- `gradThroughMultiResultCoarsenedDeadIndexSeedsZero` — outer consumes only one of two result indices; verifies the absent upstream is seeded with `const(0)` and the gradient still matches the analytic.
+
+Existing test updated: `coarsenedMultiResultDispatchesThroughMultiResultKey` — gradient_body widened from 1+N to K+N params (semantic behavior unchanged; the test only validates the interpreter's multi-result key dispatch).
+
+Full suite is green: **867 tests** (+2 over §0.4.178).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Out-of-scope register refresh.** Multiple items closed since §0.4.177 (CartPole Phase 2, Phase 5c). Single-firing.
+2. **Phase 0c — Plugin MATMUL recognition.** Mirrors §0.4.158's exp/log pattern: `BINARY_OP_MAP` entry + `irMatmul` synthesis arm + `MatmulRule` exists already. Note: bounded by the rank-1-or-scalar synthesis surface — rank-2 MATMUL outputs would still need synthesis-side widening.
+3. **CartPole Phase 3.** Gated on Phase 0c (NN forward pass uses MATMUL).
+4. **Head-to-head harness scaffolding.** Three working benchmark ports (Brachistochrone, HookeanSpring, HMC) + CartPole Phase 1+2 makes a 4-bench harness viable even without Phase 0c.
+
+**Definition-of-done for §0.4.179 — met**:
+- `validateCoarsenedShape` accepts K+N gradient_body params for multi-result COARSENED ✓
+- `handleCoarsenedAdjoint` signature changed to `upstreams: Map<Int, DxirNode>` ✓
+- Reverse-walk dispatch collects per-result-index upstreams; dead indices seed with const(0) ✓
+- Top-level multi-result gate widens to accept `IF || COARSENED` ✓
+- Cloning loop uses `opMulti` for multi-result non-IF ops to preserve all types[] ✓
+- Branch-body COARSENED arm in walkBranchReverse wraps single upstream as Map ✓
+- Existing single-result COARSENED tests pass unchanged ✓
+- 2 new tests cover multi-result gradient + dead-index seeding ✓
+- Full suite stays green at 867 tests (+2) ✓
+
 #### 0.4.178 CartPole Phase 2 closes — B=3 loop with state passing; FD-validated gradient through K2 plugin 2026-04-26
 
 §0.4.177's hand-off named CartPole Phase 2 as recommended-next #3 (between Phase 5c and the head-to-head harness). Per the priority ladder strict reading (lowest-numbered open Phase-1 item), CartPole port (item 5) is the active port to advance. §0.4.178 lands Phase 2: the per-step physics from §0.4.175 wrapped in a B=3 for-loop with 4 var state accumulators (x0/x1/x2/x3) + 1 var loss accumulator. Action `at` stays hard-coded (NN deferred to Phase 3, gated on Phase 0c MATMUL).
