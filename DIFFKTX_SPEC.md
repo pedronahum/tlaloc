@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.182 Head-to-head harness — planning doc (`docs/HEAD_TO_HEAD_HARNESS_PLAN.md`) 2026-04-26
+
+§0.4.181's hand-off named "Head-to-head harness scaffolding" as recommended-next #1 and explicitly noted "Multi-session by definition (per Phase-1 #7)." Per the §0.4 multi-session-port convention (§0.4.10 Stage B planning, §0.4.157 HMC, §0.4.165 CartPole), multi-session arcs open with a planning doc. §0.4.182 lands `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`.
+
+**The artifact** in [docs/HEAD_TO_HEAD_HARNESS_PLAN.md](docs/HEAD_TO_HEAD_HARNESS_PLAN.md):
+
+1. **Status / Target / Why** — frames the harness as Phase 1 #7 of the priority ladder + the §11.13 M9 exit-criterion artefact (the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" that pins six head-to-head numbers vs. the paper).
+
+2. **Ports available today (table)** — surveys 4 K2-plugin-shipped benchmarks (Brachistochrone, HookeanSpring, HMC, CartPole Phase 1+2), 1 partial (BGDHyperOpt via `:benchmarks` only), and 2 unported (CartPole Phase 3, QWOP). The harness can land Phase 1 with what's working today; doesn't require waiting for QWOP / Phase 0c.
+
+3. **Methodology** — N=1000 timing loop with 200 warmup, median/min/p99 ns reporting, JSON IPC for cross-framework comparison. Three confounders documented (JVM JIT warmup, Python framework-import cost, GC pauses).
+
+4. **Three-phase migration**:
+   - **Phase 1 (1 firing)** — JVM-only scaffolding. New `:harness` module with `Benchmark` interface + 3-4 inhabitants + CSV output. Bounded scope: no Python integration.
+   - **Phase 2 (1-2 firings, gated on toolchain)** — Python reference implementations using `torch.func.grad`+`torch.compile` and `jax.grad`+`jax.jit`. JSON IPC into JVM aggregator. The user has NOT authorized toolchain installs in the active /loop, so this phase waits for external Python availability.
+   - **Phase 3 (1 firing)** — the milestone-pinning §0.4 entry with the speedup table.
+
+5. **Out of scope** — multi-device, GPU, accelerator backends, model-loading latency, statistical significance beyond median/min/p99.
+
+6. **Why this plan is structured differently from HMC/CartPole** — HMC + CartPole port single benchmarks. The harness is multi-benchmark + cross-framework. Phase 1 (JVM) lands independently of Phase 2 (Python) toolchain availability.
+
+**Decisions worth flagging**:
+
+- **Path (a) vs path (b) decision crystallised.** The §0.4.180 register noted the choice between "(a) finish harness on existing 3-5 ports" and "(b) extend to all 6 first then run harness." This plan commits to path (a) — explicitly: "we get a published-comparable number on what's actually working today" without waiting for Phase 0c MATMUL + QWOP.
+
+- **No toolchain dependency for Phase 1.** §0.4.181's hand-off correctly observed Python isn't available in the active /loop. Phase 1's bounded scope (JVM-only timing) sidesteps that — the next firing can land it without Python.
+
+- **Phase 2 gating documented.** The plan explicitly says "The user has not authorized toolchain installs in the active /loop, so this phase is gated on the user installing PyTorch + JAX externally OR running in an environment where they're already available." Future firings respect this without ambiguity.
+
+- **The plan's Phase 1 estimate is 1 firing — same as HMC's Phase 1 / CartPole's Phase 1 estimate.** Both of those took longer than estimated due to platform discovery (HMC actual: 1 firing; CartPole actual: 6 firings). Phase 1 here is JVM-only timing scaffolding which is structurally simpler; the 1-firing estimate may hold.
+
+- **`:harness` as a NEW Gradle module.** The existing `:benchmarks` module is for IR-level perf (PhiCalculus + DxirReverseTransform + DxirInterpreter timings), not K2-plugin-end-to-end. The harness needs different scope: K2-plugin-compiled lambdas in a timing loop with cross-framework comparison. A new module keeps scope clean rather than overloading `:benchmarks`.
+
+- **No `:ir` / `:compiler-plugin` code changes.** Pure planning artefact, mirroring §0.4.10 / §0.4.157 / §0.4.165 / §0.4.181.
+
+- **The plan deliberately doesn't promise paper-parity numbers in Phase 3.** Phase 3's M9 exit criterion is "within 20% of paper's figures, >3× over torch.compile on at least three of six." If Phase 3 measurements come in below paper's reported speedups, the entry documents the gap rather than claiming parity. That's the honest reading of M9.
+
+**Tests added** (+0): pure planning artifact.
+
+Full suite is green: **867 tests** (unchanged from §0.4.181).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 1 of the head-to-head harness — JVM-side scaffolding.** Create the `:harness` module + `Benchmark` interface + 3 inhabitants (Brachistochrone, HookeanSpring, HMC) + CSV output. Single-firing per the plan estimate.
+2. **Phase 0c first slice — plugin MATMUL recognition + minimal rank-2 synthesis.** Multi-session 3-firing arc; the second-most natural follow-up after the harness Phase 1 lands.
+3. **`liftIfRegionBodies` SAFE_LIFT_OPS widening** — small Phase 1 cleanup; widen to include EXP/LOG/SQRT WITH careful NaN-propagation analysis (which makes it not really a single-firing item — defer until a port surfaces a need).
+4. **Out-of-scope register refresh** — defer until 5+ closures accumulate.
+
+**Definition-of-done for §0.4.182 — met**:
+- `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` lands with three-phase migration + ports-available table ✓
+- Plan structure mirrors HMC/CartPole conventions (Status / Target / Why / Three-phase / Out of scope / Phase 1 first-slice) ✓
+- Path (a) vs path (b) decision named explicitly: harness uses what's shipped today, doesn't wait for Phase 0c + QWOP ✓
+- Phase 2 gating on user-side Python toolchain availability documented ✓
+- Phase 3 deliverable named (the §0.4 entry "Phase 1 closed — coarsening at M9 parity") ✓
+- Suite stays at 867 tests (unchanged) ✓
+
 #### 0.4.181 `docs/HMC_PORT_PLAN.md` + `docs/CARTPOLE_PORT_PLAN.md` ship-state amendments 2026-04-26
 
 §0.4.180's hand-off named `docs/*_PORT_PLAN.md` amendments as recommended-next #4 — pure doc work to update the plan documents' Status fields with actual ship state. §0.4.181 lands it.
