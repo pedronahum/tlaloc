@@ -39,6 +39,75 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.180 Out-of-scope register refresh — Phase 5c + CartPole Phase 2 closed since §0.4.177 2026-04-26
+
+§0.4.177 was the sixth register snapshot; §0.4.180 is the seventh. Smaller-than-usual refresh — only 2 sub-sections (§0.4.178 + §0.4.179) closed since the previous, but both are LOAD-BEARING: Phase 5c was the **last major Phase-1 cleanup item from §0.4.164's deferred list**, and CartPole Phase 2 advanced the CartPole port to 2/3 phases shipped. The cadence is faster than the informal "every ~13 sub-sections" pattern (§0.4.108–§0.4.177 averaged ~13); the §0.4.179 hand-off named refresh as #1 because milestone closures ≠ sub-section count.
+
+**Refreshed register (as of §0.4.179)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Synthesis-side gated on rank-1-only fast path; multi-session widening. Tracer-surface side covered. |
+| Tensor ops | MATMUL through K2 plugin (Phase 0c) | Plugin's `BINARY_OP_MAP` only has `+`/`-`/`*`/`/`. Tracer + IR + emitter all support MATMUL (§0.4.135 / §0.4.137 / §0.4.138); plugin lambda-lowering doesn't recognize `matmul(...)` calls. **Shared blocker** for HMC Phase 3 matrix form AND CartPole Phase 3 NN. Discovered §0.4.158. |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) — DTensor / multi-result / MATMUL surface | **Substantively closed for scalar-arithmetic surface** at §0.4.175. Open: rank-1 DTensor unary ops, MATMUL through plugin (Phase 0c), multi-result outputs (grad2 / valueAndGrad2 widening), `irIfOp` with non-empty bodies (deferred from §0.4.174 lift). |
+| Plugin | `irIfOp` widening to lower IF-with-body-ops | Currently empty-body only. The §0.4.174 lift pass hoists safe arithmetic to top level so this gate doesn't fire on common shapes; non-safe-lift cases (DIV/SQRT/LOG in IF body) still hit it. Synthesis-side widening would lower each region as `IrBlock` branches with `IrVariable` decls + `IrGet` of terminator. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED — coarsening-side production | Substrate widening shipped §0.4.179. Consumer (`handleCoarsenedAdjoint`) accepts K+N gradient_body. **Open**: coarsening passes (`coarsenRootLeaf`, `coarsenMultiSoi`) still produce ONLY single-result COARSENED. Future widening: leaves with multiple consumed values can become multi-result COARSENED, which now has a clean route through the §0.4.179 path. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. |
+| PhiCalculus | `liftIfRegionBodies` widening of `SAFE_LIFT_OPS` | Currently total-functions-only. EXP/LOG/SQRT/DIV could be added with care (NaN propagation rather than fault on unconsumed branch). Widen as Phase-2 ports surface needs. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.161 structural; §0.4.176 end-to-end via §0.4.174 lift + §0.4.175 deep-clone). |
+| Control flow | Multi-block regions | Single-block today. |
+| Benchmark ports | CartPole Phase 3 only | Phases 1+2 closed (§0.4.175 + §0.4.178) with FD-validated gradients through K2 plugin. Phase 3 (NN forward + outer training loop) gated on Phase 0c (MATMUL through plugin). 2-3 firings remaining per `docs/CARTPOLE_PORT_PLAN.md`. |
+| Benchmark ports | QWOP | Last unported paper benchmark. Multi-session. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.178 and §0.4.179** (2 sub-sections, two themed clusters):
+
+- **CartPole Phase 2 closure (§0.4.178)** — pure regression-test landing on the §0.4.174 + §0.4.175 + §0.4.39 + §0.4.161 stack. B=3 loop with state passing (4 var state accumulators + 1 var loss accumulator). Action `at` flows through `pt` → `x1` update → next-step `xn0` etc. across the 3-step rollout, exposing the action's gradient as -0.022 (Phase 1 had it as exactly 0 because `at` didn't reach the loss).
+
+- **Phase 5c — Multi-result COARSENED widening (§0.4.179)** — the last major Phase-1 cleanup item from §0.4.164's deferred list. `validateCoarsenedShape` generalised from `1 + N` gradient_body params to `K + N` (K = result count). `handleCoarsenedAdjoint` signature widened to `upstreams: Map<Int, DxirNode>` mirroring `handleIfAdjoint`'s contract. Top-level multi-result gate accepts `IF || COARSENED`. Cloning loop dispatches on `isMultiResult` to use `opMulti`. Coarsening passes (`coarsenRootLeaf`/`coarsenMultiSoi`) still produce single-result COARSENED — the substrate widening is forward-looking; future widening of those passes can produce multi-result COARSENED that flows through the §0.4.179 path naturally. The deferred entry refines accordingly: "Multi-result COARSENED — coarsening-side production" replaces "Multi-result COARSENED (Phase 5c)".
+
+**Decisions worth flagging**:
+
+- **Deferred count went from ~17 (§0.4.177) to ~17 (§0.4.180) — same shape, ONE item refined.** Phase 5c moved from "consumer-side widening pending" to "coarsening-side production pending" (the consumer-side substrate is now ready). CartPole's entry shrank from "Phase 2 + Phase 3" to "Phase 3 only". Net deferred count unchanged but each remaining item is more precisely scoped.
+
+- **Cadence break: 2 sub-sections vs. the informal ~13 rhythm.** The previous refreshes (§0.4.108 / §0.4.122 / §0.4.151 / §0.4.164 / §0.4.177) averaged ~13 sub-sections between snapshots. §0.4.180's 2-sub-section gap is unusual but justified: Phase 5c closing the last major §0.4.164 cleanup item is a milestone-worthy event regardless of the sub-section count, AND the §0.4.179 hand-off explicitly recommended it. Future refreshes should still default to ~13 sub-sections; ad-hoc refreshes fire when a milestone closes.
+
+- **Phase-1 cleanup is structurally complete.** §0.4.164's "Opportunistic Phase-1 cleanup" list (Multi-result COARSENED, Region-internal DCE/CSE, Recursive `splitOnReuses`, Cache pruning, `gradient_body` with nested regions) — all five are either closed or have substrate ready. Multi-result COARSENED's coarsening-side production is the only one not strictly closed (it's pending coarsening pass widening, but that's not a Phase-1 blocker since today's coarsening produces single-result COARSENED that works).
+
+- **Phase 1 status (per the strict criterion).** Three of the six paper benchmarks fully ported through K2 plugin: Brachistochrone, HookeanSpring, HMC. CartPole 2/3 phases (Phase 1 + 2). BGDHyperOpt has a `:benchmarks` port but not via the K2 plugin yet. QWOP unported. To close Phase 1 strictly, either: (a) finish the head-to-head harness against PyTorch / JAX on the existing 3 ported benchmarks, OR (b) extend to all 6 via Phase 0c (MATMUL) → CartPole Phase 3 + BGDHyperOpt-via-plugin + QWOP. Option (a) is more bounded; option (b) is the strict reading.
+
+- **Two-firing arc (§0.4.178 + §0.4.179) shape.** Both are short, focused landings. §0.4.178 had no code changes (regression test only); §0.4.179 had ~70 LoC of structural change + 2 new tests + 1 existing test update. Together they ship one paper-benchmark phase + one structural widening — a rhythm worth maintaining when both directions have natural pickups.
+
+- **`docs/HMC_PORT_PLAN.md` and `docs/CARTPOLE_PORT_PLAN.md` are still due an amendment.** §0.4.177 named this; §0.4.180 doesn't land it. Future doc-only firing.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **867 tests** (unchanged from §0.4.179).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Plugin MATMUL recognition (Phase 0c).** Mirrors §0.4.158's exp/log pattern: add `BINARY_OP_MAP` entry for `kotlin.matmul` or `io.tlaloc.core.matmul` → `OpKind.MATMUL` + `irMatmul` synthesis arm + `MatmulRule` exists already. Bounded by current plugin synthesis surface (rank-1-or-scalar; rank-2 MATMUL outputs would still need synthesis-side widening for multi-rank tensor ops). Single-firing IF the test target is rank-1 vector-matrix shapes; multi-session if Phase 3-ready full rank-2 widening.
+2. **Head-to-head harness scaffolding.** Three working benchmark ports (Brachistochrone, HookeanSpring, HMC) + CartPole Phases 1 + 2 makes a 4-bench harness viable even without Phase 0c. This advances Phase-1 #7 directly.
+3. **CartPole Phase 3.** Multi-session; gated on Phase 0c.
+4. **`docs/*_PORT_PLAN.md` amendments.** Update the HMC + CartPole plans to reflect actual firing counts. Single-firing doc-only.
+
+**Definition-of-done for §0.4.180 — met**:
+- Deferred table refreshed to reflect §0.4.178 + §0.4.179 closures ✓
+- Phase 5c entry refined to "coarsening-side production" ✓
+- CartPole entry shrinks to "Phase 3 only" ✓
+- "Newly shipped" section names the 2 themed clusters ✓
+- Recommended-next surfaces Phase 0c + head-to-head as the natural next single/multi-firing wins ✓
+- Register stays tabular per the §0.4.108–§0.4.177 organising principle ✓
+- Full suite stays green at 867 tests (unchanged) ✓
+
 #### 0.4.179 Phase 5c — Multi-result COARSENED widening; gradient_body shape extended to K+N params 2026-04-26
 
 §0.4.178's hand-off named Phase 5c (multi-result COARSENED widening) as recommended-next #1 — long-deferred since §0.4.155's substrate landed. §0.4.179 lands it. The widening removes the `coarsened.types.size == 1` guard, generalizes `validateCoarsenedShape` to a K+N gradient_body contract, dispatches per-result-index upstreams through the same §0.4.154 substrate that powers the multi-live-index MR IF AD path, and adds two new multi-result-COARSENED gradient tests covering the well-formed and dead-index cases.
