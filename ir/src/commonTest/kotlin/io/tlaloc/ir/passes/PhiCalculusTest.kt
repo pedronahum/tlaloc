@@ -1649,4 +1649,180 @@ class PhiCalculusTest {
         assertEquals(1, gradOut.size, "single param → single gradient")
         assertEquals(32f, gradOut[0][0], "d/dx of x·32 = 32")
     }
+
+    // ---- §0.4.174 — liftIfRegionBodies pre-SCT region-body lift ---------------
+
+    /**
+     * Models the post-coarsening "distribute" shape that surfaced the §0.4.173 leak:
+     * an IF whose then-region has body ops `%t1 = SUB(%c, %x)` + `%t2 = MUL(%t1, %t1)`
+     * and yields `%t2`. After lifting, the body ops live at the function's top level
+     * (with fresh ids) and the IF's regions are empty, yielding the lifted ops.
+     * Numerical agreement: pre-lift and post-lift functions must compute the same
+     * result at every input.
+     */
+    @Test
+    fun liftHoistsRegionBodyOpsAndPreservesSemantics() {
+        // f(x, p) = if (p) (1 - x) * (1 - x) else 0
+        val original = DxirBuilder.function("liftSimple") {
+            val x = param("x", f32s)
+            val p = param("p", boolS)
+            val one = const(1.0f, f32s)
+            val zero = const(0.0f, f32s)
+            val ifop = ifOp(
+                cond = p,
+                types = listOf(f32s),
+                thenRegion = region {
+                    val t1 = op(OpKind.SUB, listOf(one, x), f32s)
+                    val t2 = op(OpKind.MUL, listOf(t1, t1), f32s)
+                    yields(t2)
+                },
+                elseRegion = region { yields(zero) },
+            )
+            listOf(ifop)
+        }
+        val lifted = PhiCalculus.liftIfRegionBodies(original)
+        // Structural: post-lift IF has empty body in both regions.
+        val ifOps = lifted.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.IF }
+        assertEquals(1, ifOps.size, "single IF after lift")
+        val ifNode = ifOps.single()
+        for (region in ifNode.regions) {
+            for (block in region.blocks) {
+                assertTrue(
+                    block.body.isEmpty(),
+                    "post-lift IF region body should be empty, got ${block.body.size} ops",
+                )
+            }
+        }
+        // The two body ops moved to top level: SUB + MUL.
+        assertEquals(1, countOps(lifted, OpKind.SUB), "SUB lifted to top level")
+        assertEquals(1, countOps(lifted, OpKind.MUL), "MUL lifted to top level")
+        // Numerical agreement at p=true (selects then) and p=false (selects else).
+        assertNumericallyAgree(
+            original, lifted,
+            listOf(floatArrayOf(0.3f), floatArrayOf(1.0f)),  // p=true → (1 - 0.3)² = 0.49
+        )
+        assertNumericallyAgree(
+            original, lifted,
+            listOf(floatArrayOf(0.3f), floatArrayOf(0.0f)),  // p=false → 0
+        )
+        assertNumericallyAgree(
+            original, lifted,
+            listOf(floatArrayOf(2.5f), floatArrayOf(1.0f)),  // p=true → (1 - 2.5)² = 2.25
+        )
+    }
+
+    /**
+     * The post-coarsening CartPole shape has TWO sibling IFs (predicate-shared) where
+     * the second's region body references the FIRST as a forward operand. The lift
+     * must hoist both IFs' body ops, AND the second IF's terminator must resolve to
+     * the lifted op (not the original region-internal id). Without this fix, post-
+     * lift the second IF's region would yield an undeclared id.
+     */
+    @Test
+    fun liftHandlesSiblingIfsWithCrossReference() {
+        // f(x, p) = (if (p) (1-x)*y1 else 0)  where y1 = (if (p) (1-x) else 0)
+        // Sibling IFs sharing predicate p. The second's then-body uses y1.
+        val original = DxirBuilder.function("liftSibling") {
+            val x = param("x", f32s)
+            val p = param("p", boolS)
+            val one = const(1.0f, f32s)
+            val zero = const(0.0f, f32s)
+            // First IF: y1 = if (p) (1-x) else 0
+            val y1 = ifOp(
+                cond = p,
+                types = listOf(f32s),
+                thenRegion = region {
+                    val t = op(OpKind.SUB, listOf(one, x), f32s)
+                    yields(t)
+                },
+                elseRegion = region { yields(zero) },
+            )
+            // Second IF: y2 = if (p) (1-x)*y1 else 0
+            val y2 = ifOp(
+                cond = p,
+                types = listOf(f32s),
+                thenRegion = region {
+                    val s = op(OpKind.SUB, listOf(one, x), f32s)
+                    val m = op(OpKind.MUL, listOf(s, y1), f32s)
+                    yields(m)
+                },
+                elseRegion = region { yields(zero) },
+            )
+            listOf(y2)
+        }
+        val lifted = PhiCalculus.liftIfRegionBodies(original)
+        // Both IFs survive but with empty regions.
+        val ifOps = lifted.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.IF }
+        assertEquals(2, ifOps.size, "two IFs preserved after lift")
+        for (i in ifOps) for (r in i.regions) for (b in r.blocks) {
+            assertTrue(b.body.isEmpty(), "post-lift IF region body should be empty")
+        }
+        // Three SUBs (one from y1's then, one from y2's then's local SUB) and one MUL.
+        // After lift these all live at top level.
+        assertEquals(2, countOps(lifted, OpKind.SUB), "two SUBs lifted (y1's + y2's)")
+        assertEquals(1, countOps(lifted, OpKind.MUL), "one MUL lifted (y2's body)")
+        // Numerical agreement.
+        assertNumericallyAgree(
+            original, lifted,
+            listOf(floatArrayOf(0.3f), floatArrayOf(1.0f)),  // p=true → (1-0.3)*(1-0.3) = 0.49
+        )
+        assertNumericallyAgree(
+            original, lifted,
+            listOf(floatArrayOf(0.3f), floatArrayOf(0.0f)),  // p=false → 0
+        )
+        assertNumericallyAgree(
+            original, lifted,
+            listOf(floatArrayOf(0.0f), floatArrayOf(1.0f)),  // p=true → 1*1 = 1
+        )
+    }
+
+    /**
+     * Bail-out: an IF body containing DIV is unsafe to lift (potential divide-by-zero
+     * if the predicate selects the other branch but the lifted DIV evaluates anyway).
+     * The pass returns the function unchanged.
+     */
+    @Test
+    fun liftBailsOutWhenIfBodyContainsUnsafeOp() {
+        val original = DxirBuilder.function("liftUnsafe") {
+            val x = param("x", f32s)
+            val p = param("p", boolS)
+            val one = const(1.0f, f32s)
+            val zero = const(0.0f, f32s)
+            val ifop = ifOp(
+                cond = p,
+                types = listOf(f32s),
+                thenRegion = region {
+                    val q = op(OpKind.DIV, listOf(one, x), f32s)  // unsafe
+                    yields(q)
+                },
+                elseRegion = region { yields(zero) },
+            )
+            listOf(ifop)
+        }
+        val result = PhiCalculus.liftIfRegionBodies(original)
+        // Unchanged.
+        assertEquals(0, countOps(result, OpKind.SUB))
+        // The IF's then-region body still contains the DIV.
+        val ifNode = result.body.filterIsInstance<DxirOp>().single { it.op == OpKind.IF }
+        assertEquals(1, ifNode.regions[0].blocks.single().body.size, "DIV stays in then-body")
+    }
+
+    /** No-op: a function whose IFs already have empty bodies returns identical. */
+    @Test
+    fun liftIsNoOpOnEmptyBodyIfs() {
+        val original = DxirBuilder.function("liftEmpty") {
+            val x = param("x", f32s)
+            val y = param("y", f32s)
+            val p = param("p", boolS)
+            val ifop = ifOp(
+                cond = p,
+                types = listOf(f32s),
+                thenRegion = region { yields(x) },
+                elseRegion = region { yields(y) },
+            )
+            listOf(ifop)
+        }
+        val result = PhiCalculus.liftIfRegionBodies(original)
+        assertTrue(result === original, "no-op should return the same instance")
+    }
 }

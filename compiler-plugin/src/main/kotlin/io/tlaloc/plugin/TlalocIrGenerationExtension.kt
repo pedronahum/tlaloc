@@ -159,17 +159,32 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     )
                     fn
                 }
+                // §0.4.174 — pre-SCT region-body lift. Coarsening's `distribute` rule
+                // can produce IFs whose region body ops reference OUTER-scope IFs as
+                // forward operands (`%59 = MUL(%58, %57-OUTER-IF)` inside a sibling
+                // IF's branch). DxirReverseTransform.apply's clone loop maps
+                // `nodeMap[primal-IF] = primal-IF` (skipping the deep clone), so
+                // walkBranchReverse step 1 emits a top-level cloned MUL whose
+                // `operand[1]` leaks the primal-IF id into the grad body's SSA.
+                // Lifting body ops to top level (where DxirReverseTransform's clone
+                // path rebuilds operands through nodeMap) closes the leak AND leaves
+                // the post-lift IF with empty regions, satisfying irIfOp's "branches
+                // yield outer-scope values only" gate. The pass bails out (no-op
+                // returns) when the function contains shapes that aren't safe to lift
+                // — see [PhiCalculus.liftIfRegionBodies].
+                val lifted: DxirFunction = PhiCalculus.liftIfRegionBodies(coarsened)
                 val toSynthesise: DxirFunction = tryReverseTransform(
-                    coarsened, includeForward, mc, fn.name,
+                    lifted, includeForward, mc, fn.name,
                 ) ?: run {
                     // §0.4.173 — augment the §0.4.169 warning: also dump the post-
-                    // coarsening dxir so the next firing has full visibility into the
-                    // input that DxirReverseTransform rejected. Mirrors the
-                    // post-SCT dump landed below for the synthesis-scope rejection.
+                    // coarsening + post-lift dxir so the next firing has full visibility
+                    // into the input that DxirReverseTransform rejected. §0.4.174 added
+                    // the post-lift dump.
                     mc.report(
                         CompilerMessageSeverity.WARNING,
                         "Tlaloc IR extension post-coarsening dxir for '${fn.name}':\n" +
-                            coarsened.pretty().trimEnd(),
+                            coarsened.pretty().trimEnd() + "\n" +
+                            "post-lift dxir:\n${lifted.pretty().trimEnd()}",
                         null,
                     )
                     return transformed
@@ -210,6 +225,7 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                             "DxirFunction falls outside the scalar-primitive synthesis scope " +
                             "[$reason]\n" +
                             "post-coarsening primal:\n${coarsened.pretty().trimEnd()}\n" +
+                            "post-lift dxir:\n${lifted.pretty().trimEnd()}\n" +
                             "post-SCT grad function:\n${simplified.pretty().trimEnd()}",
                         null,
                     )

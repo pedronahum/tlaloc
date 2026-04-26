@@ -282,6 +282,199 @@ object PhiCalculus {
         return cloned
     }
 
+    /**
+     * §0.4.174 — pre-SCT region-body lift pass. For each top-level [OpKind.IF] whose
+     * regions have non-empty branch bodies, lifts the region-internal ops to the
+     * function's top level just before the IF; the IF's regions are replaced with
+     * empty-body regions yielding the lifted version of each terminator.
+     *
+     * **Why**: §0.4.173 traced a CartPole-shape SSA leak — coarsening's `distribute`
+     * rule produces region-internal ops referencing OUTER-scope IFs as forward
+     * operands (`%59 = MUL(%58, %57-OUTER-IF)` inside a sibling IF's branch).
+     * [DxirReverseTransform.apply]'s cloning loop maps `nodeMap[primal-IF] = primal-IF`
+     * (skipping the deep clone), so [walkBranchReverse]'s step-1 emits a top-level
+     * cloned MUL whose `operand[1]` is the primal IF — leaking that primal id into
+     * the grad body's SSA. Lifting the body ops to top level routes them through the
+     * normal cloning path (which DOES rebuild operands through nodeMap), so the leak
+     * doesn't fire. Plus the post-lift IF has empty regions, satisfying
+     * [DxirToIrSynthesis.irIfOp]'s "branches yield outer-scope values only" gate.
+     *
+     * **Safety contract**: lifting is sound only when region body ops are total
+     * functions — no DIV, SQRT, LOG, EXP that could fault when evaluated in a branch
+     * the predicate doesn't select. This pass bails out (returns [fn] unchanged) if
+     * the function contains:
+     *
+     *  - Any non-IF region-bearing op (WHILE, MANUAL_COMPUTATION, COARSENED with
+     *    region attrs). Coarsening doesn't introduce these in the post-`distribute`
+     *    shape, so this is rare in practice.
+     *  - Any IF whose region body contains an op outside [SAFE_LIFT_OPS], a
+     *    multi-result op, or a nested region-bearing op. Conservative: a single
+     *    unsafe op disables the lift for the whole function rather than tracking
+     *    per-IF safety, since partial transforms can leave the function in an
+     *    inconsistent state.
+     *
+     * **Idempotent**: re-running the pass on an already-lifted function is a no-op
+     * (no IF has non-empty body to lift).
+     */
+    fun liftIfRegionBodies(fn: DxirFunction): DxirFunction {
+        if (!isLiftSafe(fn)) return fn
+        val anyLift = fn.body.any { n ->
+            n is DxirOp && n.op == OpKind.IF &&
+                n.regions.any { r -> r.blocks.any { it.body.isNotEmpty() } }
+        }
+        if (!anyLift) return fn
+        return DxirBuilder.function(fn.name) {
+            val nodeMap = HashMap<Int, DxirNode>()
+            for (p in fn.params) nodeMap[p.id] = param(p.name, p.type, p.sharding)
+            for (n in fn.body) {
+                val cloned = cloneTopLevelForLift(n, nodeMap, this)
+                nodeMap[n.id] = cloned
+            }
+            fn.returns.map { resolveLiftedRef(it, nodeMap) }
+        }
+    }
+
+    private val SAFE_LIFT_OPS: Set<OpKind> = setOf(
+        OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.NEG,
+        OpKind.STEP, OpKind.SIN, OpKind.COS, OpKind.ABS, OpKind.RELU,
+        OpKind.NOT, OpKind.LAND, OpKind.CAST,
+    )
+
+    private fun isLiftSafe(fn: DxirFunction): Boolean {
+        for (n in fn.body) {
+            if (n !is DxirOp) continue
+            if (n.op == OpKind.IF) {
+                if (!isIfLiftSafe(n)) return false
+            } else if (n.regions.isNotEmpty()) {
+                // Non-IF region-bearing op (WHILE, MANUAL_COMPUTATION, etc.). The
+                // lift pass doesn't touch these — bail out for the whole function.
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun isIfLiftSafe(ifOp: DxirOp): Boolean {
+        if (ifOp.regions.size != 2) return false
+        for (region in ifOp.regions) {
+            if (region.blocks.size != 1) return false
+            val block = region.blocks.single()
+            for (n in block.body) {
+                when (n) {
+                    is DxirConst -> {}
+                    is DxirOp -> {
+                        if (n.op !in SAFE_LIFT_OPS) return false
+                        if (n.hasRegions) return false
+                        if (n.isMultiResult) return false
+                    }
+                    else -> return false
+                }
+            }
+        }
+        return true
+    }
+
+    private fun resolveLiftedRef(node: DxirNode, nodeMap: Map<Int, DxirNode>): DxirNode {
+        val mapped = nodeMap[node.id]
+            ?: error("liftIfRegionBodies: id ${node.id} not in nodeMap")
+        if (node !is DxirOpResult) return mapped
+        return if (mapped is DxirOp) mapped.result(node.index) else mapped
+    }
+
+    private fun cloneTopLevelForLift(
+        n: DxirNode,
+        nodeMap: MutableMap<Int, DxirNode>,
+        builder: DxirBuilder,
+    ): DxirNode {
+        return when (n) {
+            is DxirConst -> builder.const(n.value, n.type, n.sharding)
+            is DxirOp -> {
+                val resolvedOperands = n.operands.map { resolveLiftedRef(it, nodeMap) }
+                val hasNonEmptyRegion = n.regions.any { r -> r.blocks.any { it.body.isNotEmpty() } }
+                if (n.op == OpKind.IF && hasNonEmptyRegion) {
+                    liftIfOpBody(n, resolvedOperands, nodeMap, builder)
+                } else if (n.regions.isNotEmpty()) {
+                    // Empty-body IF (or other region-bearing op already filtered by
+                    // isLiftSafe). Rebuild regions so terminators that reference outer
+                    // scope route through the new nodeMap.
+                    val rewrittenRegions = n.regions.map { region ->
+                        rewriteIfRegionForLift(region, nodeMap, builder)
+                    }
+                    if (n.types.size == 1) {
+                        builder.op(n.op, resolvedOperands, n.type, n.attrs, n.sharding, rewrittenRegions)
+                    } else {
+                        builder.opMulti(n.op, resolvedOperands, n.types, n.attrs, n.sharding, rewrittenRegions)
+                    }
+                } else {
+                    if (n.types.size == 1) {
+                        builder.op(n.op, resolvedOperands, n.type, n.attrs, n.sharding, emptyList())
+                    } else {
+                        builder.opMulti(n.op, resolvedOperands, n.types, n.attrs, n.sharding, emptyList())
+                    }
+                }
+            }
+            else -> error("liftIfRegionBodies: unsupported top-level node ${n::class.simpleName}")
+        }
+    }
+
+    private fun liftIfOpBody(
+        ifOp: DxirOp,
+        resolvedOperands: List<DxirNode>,
+        outerNodeMap: MutableMap<Int, DxirNode>,
+        builder: DxirBuilder,
+    ): DxirOp {
+        val newRegions = ifOp.regions.map { region ->
+            val block = region.blocks.single()
+            val regionMap = HashMap<Int, DxirNode>(outerNodeMap)
+            for (n in block.body) {
+                val lifted: DxirNode = when (n) {
+                    is DxirConst -> builder.const(n.value, n.type, n.sharding)
+                    is DxirOp -> {
+                        val operands = n.operands.map { resolveLiftedRef(it, regionMap) }
+                        builder.op(n.op, operands, n.type, n.attrs, n.sharding)
+                    }
+                    else -> error("liftIfOpBody: unexpected ${n::class.simpleName}")
+                }
+                regionMap[n.id] = lifted
+            }
+            builder.region {
+                val terms = block.terminator.map { resolveLiftedRef(it, regionMap) }
+                yields(*terms.toTypedArray())
+            }
+        }
+        return if (ifOp.types.size == 1) {
+            builder.op(OpKind.IF, resolvedOperands, ifOp.type, ifOp.attrs, ifOp.sharding, newRegions)
+        } else {
+            builder.opMulti(OpKind.IF, resolvedOperands, ifOp.types, ifOp.attrs, ifOp.sharding, newRegions)
+        }
+    }
+
+    /**
+     * Rebuild a region whose body is empty (single terminator using outer-scope refs).
+     * Block args are not supported — IFs don't take any (per dxir contract).
+     */
+    private fun rewriteIfRegionForLift(
+        region: DxirRegion,
+        outerNodeMap: Map<Int, DxirNode>,
+        builder: DxirBuilder,
+    ): DxirRegion {
+        require(region.blocks.size == 1) {
+            "liftIfRegionBodies: rewriteIfRegionForLift expects single-block region"
+        }
+        val block = region.blocks.single()
+        require(block.args.isEmpty()) {
+            "liftIfRegionBodies: IF regions don't take block args; got ${block.args.size}"
+        }
+        require(block.body.isEmpty()) {
+            "liftIfRegionBodies: this rewriter is for empty-body regions only " +
+                "(${block.body.size} body ops); use liftIfOpBody for non-empty bodies"
+        }
+        return builder.region {
+            val terms = block.terminator.map { resolveLiftedRef(it, outerNodeMap) }
+            yields(*terms.toTypedArray())
+        }
+    }
+
     fun apply(fn: DxirFunction, engine: SymbolicEngine? = null): DxirFunction {
         var current = fn
         for (iter in 0 until FIXPOINT_CAP) {
