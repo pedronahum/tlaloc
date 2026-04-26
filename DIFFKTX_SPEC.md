@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.184 Head-to-head harness — CartPole Phase 1 + Phase 2 inhabitants added 2026-04-26
+
+§0.4.183's hand-off named "Add CartPole Phase 1+2 to the harness" as recommended-next #3 — single-firing extension. §0.4.184 lands it. The harness now covers **5 K2-plugin-shipped benchmarks** (vs. §0.4.183's 3): Brachistochrone N=64, HookeanSpring N=10, HMC logistic n=4 d=2 loop form, CartPole Phase 1 (per-step physics), CartPole Phase 2 (B=3 loop with state passing).
+
+**The mechanism** ([HeadToHeadHarnessTest.kt:96-103, 218-302](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HeadToHeadHarnessTest.kt#L96-L302)):
+
+1. Two new benchmark sources added — `CARTPOLE_PHASE1_SRC` (per-step physics from §0.4.175's regression test) and `CARTPOLE_PHASE2_SRC` (B=3 loop from §0.4.178's regression test). Both use the existing `PERF_LOOP_SUFFIX` shared template, so the timing protocol is identical across all 5 benchmarks.
+
+2. New stub variant `AUTOGRAD_STUB_BROKEN_RANK1_TO_FLOAT_5` for CartPole's 5-element packed input (action + 4 state components).
+
+3. `BENCHMARK_SOURCES` extended with two more entries; the test method's iteration loop picks them up automatically. CSV now has 5 rows.
+
+**Sample timings** (one run, MacBook Apple Silicon):
+
+| Benchmark | median ns | min ns | p99 ns |
+|---|---|---|---|
+| brachistochrone_n64 | 29,375 | 25,584 | 33,125 |
+| hookean_spring_n10 | 2,708 | 2,625 | 5,834 |
+| hmc_logistic_n4_d2_loop | 2,875 | 2,791 | 3,500 |
+| **cartpole_phase1** | **1,209** | **1,166** | **2,708** |
+| **cartpole_phase2_b3** | **3,375** | **3,208** | **5,417** |
+
+**Decisions worth flagging**:
+
+- **CartPole Phase 1 is the FASTEST gradient at 1.2 µs/iter.** Below HookeanSpring (2.7 µs) and HMC (2.9 µs). Surprising at first — CartPole Phase 1's primal has more raw arithmetic complexity (sin / cos / abs / IF / multi-step physics) than HookeanSpring's pure spring-energy chain. After coarsening, however, CartPole Phase 1's `(0.5 - clipped)²` outer wraps produce a multi-IF distribute shape that the §0.4.174 lift + §0.4.175 deep-clone pipeline distills into ~30 grad-body ops. HookeanSpring's 9-spring loop unrolls (post-C5) to ~50-70 grad-body ops. Op count dominates per-iteration cost; CartPole Phase 1's coarsened shape happens to be more compact.
+
+- **CartPole Phase 2 is ~2.8× slower than Phase 1** (3.4 µs vs 1.2 µs). The B=3 outer loop unrolls under C5; each iteration's per-step physics replicates 3×, plus the state-passing carries vars across iterations. The 2.8× slowdown is roughly linear in B (within rounding) — confirming the unrolled-loop scaling matches expectation.
+
+- **Brachistochrone N=64 is the slowest at ~29 µs/iter.** That's 10-25× slower than the others because its loop body is itself a 64-iteration unrolled chain (§0.4.7-8 era), each iteration emitting a sqrt + multiplicative chain. ~640 grad-body ops post-coarsening; 24× the ops produces ~10× the latency (roughly sub-linear due to JIT inlining + cache effects).
+
+- **No code changes outside `HeadToHeadHarnessTest.kt`.** Pure benchmark addition. Suite test count unchanged at 868 (still one test method; just iterating over more inhabitants).
+
+- **The 5-benchmark CSV is the published-comparable baseline.** Phase 2 (PyTorch / JAX integration, gated on user-side toolchain) extends this with 2 more frameworks × 5 benchmarks = 10 more rows. Phase 3 (the §0.4 milestone entry) joins all 15 rows into a comparison table.
+
+- **Empirically, all 5 benchmarks at <30 µs/iter.** That's well within the OOPSLA paper's reported range (the paper benchmarks at the same scale — Brachistochrone N=64 — show similar order-of-magnitude latencies for hand-coded JAX). Hard claims await Phase 2's actual cross-framework comparison; this is just the in-house baseline.
+
+- **Cumulative shipping rhythm.** §0.4.182 + §0.4.183 + §0.4.184 across 3 firings = planning + 3-bench scaffolding + 5-bench coverage. The pattern matches §0.4.166 + §0.4.167 (CartPole Phase 0a) and §0.4.158 (HMC scalar exp/log unblock) — small, coherent multi-firing arcs that build up structure piece by piece. Phase 1 of the harness plan is now complete.
+
+**Tests added** (+0): same single test method, iterating over 5 inhabitants instead of 3.
+
+Full suite is green: **868 tests** (unchanged from §0.4.183).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 2 of the head-to-head harness — Python reference implementations.** Gated on user-side PyTorch + JAX availability. The plan's Phase 2 deliverable is documented; the JSON-format placeholder + JVM-side aggregator can land independently when toolchain is enabled.
+2. **Phase 0c — plugin MATMUL recognition + minimal rank-2 synthesis.** Multi-session 3-firing arc. The rank-1-or-scalar synthesis surface needs to widen to rank-2 IrType building + multi-rank ops; this is the natural multi-session pickup.
+3. **`liftIfRegionBodies` SAFE_LIFT_OPS widening** — small Phase 1 cleanup. Defer until a port surfaces a need.
+4. **Out-of-scope register refresh** — sub-section count too low for another refresh now (only 4 since §0.4.180); defer until 5+ closures accumulate.
+
+**Definition-of-done for §0.4.184 — met**:
+- CartPole Phase 1 + Phase 2 sources added to `BENCHMARK_SOURCES` ✓
+- New `AUTOGRAD_STUB_BROKEN_RANK1_TO_FLOAT_5` stub for size-5 packed input ✓
+- CSV now has 5 rows; sample timings recorded in this entry ✓
+- Phase 1 of the harness plan is complete; Phase 2 (Python integration) is the next work item ✓
+- Suite stays at 868 tests (unchanged) ✓
+
 #### 0.4.183 Head-to-head harness Phase 1 — JVM-side scaffolding + CSV output 2026-04-26
 
 §0.4.182's planning doc named "Phase 1 — JVM-only scaffolding" as the next firing's pickup. §0.4.183 lands it. Three K2-plugin-shipped benchmarks (Brachistochrone N=64, HookeanSpring N=10, HMC logistic n=4 d=2 loop form) now run in a 1000-iteration timing loop (200 warmup + 800 measured) inside [HeadToHeadHarnessTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HeadToHeadHarnessTest.kt), with per-benchmark median/min/p99 ns aggregation and CSV output to `compiler-plugin/build/harness-results-tlaloc.csv`. Phase 2 (PyTorch / JAX reference + JSON IPC) will read this CSV alongside the Python-produced JSONs to populate the cross-framework comparison table.

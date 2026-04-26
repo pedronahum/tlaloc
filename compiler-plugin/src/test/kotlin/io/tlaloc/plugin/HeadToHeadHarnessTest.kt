@@ -98,6 +98,11 @@ class HeadToHeadHarnessTest {
             BenchmarkSpec("brachistochrone_n64", AUTOGRAD_STUB_BROKEN_RANK1_TO_FLOAT_64) to BRACHISTOCHRONE_SRC,
             BenchmarkSpec("hookean_spring_n10", AUTOGRAD_STUB_BROKEN_RANK1_TO_FLOAT_10) to HOOKEAN_SPRING_SRC,
             BenchmarkSpec("hmc_logistic_n4_d2_loop", AUTOGRAD_STUB_BROKEN_RANK1_TO_FLOAT_14) to HMC_LOOP_SRC,
+            // §0.4.184 — CartPole inhabitants. Phase 1 = per-step physics with
+            // hard-coded action; Phase 2 = B=3 loop with state passing. Phase 3
+            // (NN + outer training loop) gated on Phase 0c MATMUL.
+            BenchmarkSpec("cartpole_phase1", AUTOGRAD_STUB_BROKEN_RANK1_TO_FLOAT_5) to CARTPOLE_PHASE1_SRC,
+            BenchmarkSpec("cartpole_phase2_b3", AUTOGRAD_STUB_BROKEN_RANK1_TO_FLOAT_5) to CARTPOLE_PHASE2_SRC,
         )
     }
 
@@ -214,6 +219,90 @@ $PERF_LOOP_SUFFIX
         }
     """.trimIndent()
 
+    private val CARTPOLE_PHASE1_SRC = """
+        import io.tlaloc.autograd.grad
+        import io.tlaloc.core.DTensor
+        import io.tlaloc.core.F32
+        import io.tlaloc.core.Rank1
+        import io.tlaloc.core.Sym
+        import io.tlaloc.core.Tensors
+        import io.tlaloc.core.abs
+        import io.tlaloc.core.cos
+        import io.tlaloc.core.hostF32
+        import io.tlaloc.core.sin
+        import io.tlaloc.core.ops.get
+        fun main() {
+            val g = grad { packed: DTensor<Rank1<Sym>, F32> ->
+                val at = packed[0]
+                val x0 = packed[1]
+                val x1 = packed[2]
+                val x2 = packed[3]
+                val x3 = packed[4]
+                val rt = 9.0f * at + 0.045f * x3 * x3 * x2.sin()
+                val cosX2 = x2.cos()
+                val qt = (9.8f * x2.sin() - rt * cosX2) / (0.65f - 0.4f * cosX2 * cosX2)
+                val pt = rt - 0.045f * qt * cosX2
+                val xn0 = x0 + 0.02f * x1
+                val xn2 = x2 + 0.02f * x3
+                val maxArg = (2.4f - xn0.abs()) * (0.21f - xn2.abs())
+                val clipped = if (maxArg > 0.0f) maxArg else 0.0f
+                val term = 0.5f - clipped
+                term * term
+            }
+            val cfg = floatArrayOf(0.5f, 0.0f, 0.1f, 0.05f, 0.02f)
+            val input = Tensors.f32Vector<Sym>(cfg)
+            var sink = 0.0f
+$PERF_LOOP_SUFFIX
+        }
+    """.trimIndent()
+
+    private val CARTPOLE_PHASE2_SRC = """
+        import io.tlaloc.autograd.grad
+        import io.tlaloc.core.DTensor
+        import io.tlaloc.core.F32
+        import io.tlaloc.core.Rank1
+        import io.tlaloc.core.Sym
+        import io.tlaloc.core.Tensors
+        import io.tlaloc.core.abs
+        import io.tlaloc.core.cos
+        import io.tlaloc.core.hostF32
+        import io.tlaloc.core.sin
+        import io.tlaloc.core.ops.get
+        fun main() {
+            val g = grad { packed: DTensor<Rank1<Sym>, F32> ->
+                val at = packed[0]
+                var x0 = packed[1]
+                var x1 = packed[2]
+                var x2 = packed[3]
+                var x3 = packed[4]
+                var lossSum = 0.0f
+                for (b in 0 until 3) {
+                    val rt = 9.0f * at + 0.045f * x3 * x3 * x2.sin()
+                    val cosX2 = x2.cos()
+                    val qt = (9.8f * x2.sin() - rt * cosX2) / (0.65f - 0.4f * cosX2 * cosX2)
+                    val pt = rt - 0.045f * qt * cosX2
+                    val xn0 = x0 + 0.02f * x1
+                    val xn1 = x1 + 0.02f * pt
+                    val xn2 = x2 + 0.02f * x3
+                    val xn3 = x3 + 0.02f * qt
+                    val maxArg = (2.4f - xn0.abs()) * (0.21f - xn2.abs())
+                    val clipped = if (maxArg > 0.0f) maxArg else 0.0f
+                    val term = 0.5f - clipped
+                    lossSum = lossSum + term * term
+                    x0 = xn0
+                    x1 = xn1
+                    x2 = xn2
+                    x3 = xn3
+                }
+                lossSum
+            }
+            val cfg = floatArrayOf(0.5f, 0.0f, 0.1f, 0.05f, 0.02f)
+            val input = Tensors.f32Vector<Sym>(cfg)
+            var sink = 0.0f
+$PERF_LOOP_SUFFIX
+        }
+    """.trimIndent()
+
     // ----- Harness plumbing -----------------------------------------------
 
     private fun parsePerfLines(stdout: String): Map<String, String> {
@@ -315,5 +404,17 @@ $PERF_LOOP_SUFFIX
         fun grad(f: (DTensor<Rank1<Sym>, F32>) -> Float):
                 (DTensor<Rank1<Sym>, F32>) -> DTensor<Rank1<Sym>, F32> =
             { _ -> DTensor(HostF32Storage(FloatArray(14) { -1.0f }), intArrayOf(14), F32) }
+    """.trimIndent()
+
+    private val AUTOGRAD_STUB_BROKEN_RANK1_TO_FLOAT_5 = """
+        package io.tlaloc.autograd
+        import io.tlaloc.core.DTensor
+        import io.tlaloc.core.F32
+        import io.tlaloc.core.HostF32Storage
+        import io.tlaloc.core.Rank1
+        import io.tlaloc.core.Sym
+        fun grad(f: (DTensor<Rank1<Sym>, F32>) -> Float):
+                (DTensor<Rank1<Sym>, F32>) -> DTensor<Rank1<Sym>, F32> =
+            { _ -> DTensor(HostF32Storage(FloatArray(5) { -1.0f }), intArrayOf(5), F32) }
     """.trimIndent()
 }
