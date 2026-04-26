@@ -15,6 +15,7 @@ import org.jetbrains.kotlin.backend.common.IrElementTransformerVoidWithContext
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
+import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrExpression
@@ -158,15 +159,9 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     )
                     fn
                 }
-                val toSynthesise: DxirFunction = tryReverseTransform(coarsened, includeForward) ?: run {
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
-                        "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                            "DxirReverseTransform rejected the dxir (gate violation)",
-                        null,
-                    )
-                    return transformed
-                }
+                val toSynthesise: DxirFunction = tryReverseTransform(
+                    coarsened, includeForward, mc, fn.name,
+                ) ?: return transformed
 
                 // §0.4.105 — D.1i Phase 3. Optionally run PhiCalculus.simplifyReturns over
                 // the gradient function before synthesis. Gated on `tlaloc.simplify.enabled`
@@ -238,12 +233,36 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
      * Runs [DxirReverseTransform.apply] guarded against its hard gates. Returns `null` if
      * the primal violates a gate (e.g., non-scalar return, regions, unsupported op kind);
      * the caller falls back to the original runtime call.
+     *
+     * §0.4.169 — emits a per-failure WARNING that surfaces the specific exception
+     * message (replacing the prior generic "(gate violation)" string). Two consecutive
+     * port attempts (§0.4.163 HMC nested-loop, §0.4.168 CartPole Phase 1) hit the
+     * downstream gate but couldn't pinpoint the failing op without exception text;
+     * the warning text now names which dxir node / op kind / require-string failed,
+     * enabling targeted fixes in subsequent firings.
      */
-    private fun tryReverseTransform(primal: DxirFunction, includeForward: Boolean): DxirFunction? = try {
+    private fun tryReverseTransform(
+        primal: DxirFunction,
+        includeForward: Boolean,
+        mc: MessageCollector,
+        fnName: String,
+    ): DxirFunction? = try {
         DxirReverseTransform.apply(primal, includeForward)
-    } catch (_: IllegalArgumentException) {
+    } catch (t: IllegalArgumentException) {
+        mc.report(
+            CompilerMessageSeverity.WARNING,
+            "Tlaloc IR extension kept original call for '$fnName' — DxirReverseTransform " +
+                "rejected the dxir (${t::class.simpleName}: ${t.message})",
+            null,
+        )
         null
-    } catch (_: IllegalStateException) {
+    } catch (t: IllegalStateException) {
+        mc.report(
+            CompilerMessageSeverity.WARNING,
+            "Tlaloc IR extension kept original call for '$fnName' — DxirReverseTransform " +
+                "rejected the dxir (${t::class.simpleName}: ${t.message})",
+            null,
+        )
         null
     }
 

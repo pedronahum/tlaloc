@@ -39,6 +39,55 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.169 `tryReverseTransform` warning surfaces the swallowed exception message 2026-04-26
+
+§0.4.168 named "improve `TlalocIrGenerationExtension.tryReverseTransform`'s warning to include the exception message" as the load-bearing first surgical step toward unblocking Phase 2 #1 (Plugin IR-side synthesis closure). §0.4.169 lands it. Two consecutive port firings (§0.4.163 HMC nested-loop, §0.4.168 CartPole Phase 1) hit the downstream gate but reported only the generic "(gate violation)" — pinpointing the failing op required either modifying production code mid-debug or deep-diving into `DxirReverseTransform.kt`'s require-strings to guess. The improved warning now includes the exception class + message text, naming the specific op kind / require-string that failed, enabling targeted fixes in subsequent firings without further plumbing.
+
+**The mechanism** in [TlalocIrGenerationExtension.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt):
+
+1. **`tryReverseTransform` signature change** ([TlalocIrGenerationExtension.kt:241-275](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L241-L275)) — adds `mc: MessageCollector` and `fnName: String` parameters. Both `IllegalArgumentException` and `IllegalStateException` catches now report a `WARNING` with text:
+   ```
+   Tlaloc IR extension kept original call for '<fnName>' — DxirReverseTransform
+   rejected the dxir (<ExceptionClassSimpleName>: <message>)
+   ```
+   The exception class name is included because the two exception types correspond to different gate categories: `IllegalArgumentException` (`require(...)` failures — primal-shape violations like multi-result-non-IF or non-scalar-return) vs `IllegalStateException` (`error(...)` failures — registry misses like "no VJP rule for ${n.op}"). Distinguishing them at warning-text level helps future diagnostic readers categorise the failure faster.
+
+2. **Caller simplification** ([TlalocIrGenerationExtension.kt:161-163](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L161-L163)) — the previous separate warning emission in the `?: run { … }` block is removed; `tryReverseTransform` now reports inline. The call site shrinks to `tryReverseTransform(coarsened, includeForward, mc, fn.name) ?: return transformed`. One less indirection for readers.
+
+3. **`MessageCollector` import added** ([TlalocIrGenerationExtension.kt:18](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L18)) — sibling of the existing `CompilerMessageSeverity` import. Single-line change.
+
+**Decisions worth flagging**:
+
+- **Inline the report rather than return a structured Result.** Considered returning `Result<DxirFunction, Exception>` from `tryReverseTransform` and letting the caller format the warning. Rejected: the caller only ever does one thing with the failure (report a warning + return null), so threading the exception through Result-monad style adds boilerplate for no win. Inline reporting keeps the function self-contained.
+
+- **Same warning shape for both exception classes.** Both `IllegalArgumentException` (gate-shape failures) and `IllegalStateException` (registry misses) get reported with the same text format. The exception class name in parentheses lets a reader categorise. A future iteration could split the warning text per category if the categories diverge in actionable advice; today's "rejected the dxir" applies uniformly.
+
+- **No dedicated test for this change.** The improvement is a pure diagnostic-text change — no behaviour change on success paths. The 858-test suite passes unchanged. Verifying the new warning text works requires intentionally tripping a gate, which is what §0.4.163 / §0.4.168 already documented (those were the discovery firings that motivated this change). The next firing that revisits HMC Phase 3 nested-loop or CartPole Phase 1 will see the improved warning text directly; that's the natural verification surface.
+
+- **Does NOT fix the underlying gate.** §0.4.169 closes only the diagnostic-improvement step. The actual gate-fix (figuring out what HMC nested-WHILE / CartPole physics-IF specifically trips) is the next firing. The improvement here is the platform for that work — without seeing the specific exception text, every gate-debug is a forensic exercise. With it, the next firing reads the warning and goes directly to the failing op kind / require-string.
+
+- **Diagnostic-stderr pattern from §0.4.162 / §0.4.163 still applies.** The stderr dump of compile messages (used by `HmcLogisticRegressionMaskedTest` etc.) was the means by which the generic "(gate violation)" warning was surfaced. With the improved warning text, the same stderr dump now shows the exception detail too — no change to the test-side machinery.
+
+- **Two firings of preparation, then the fix.** §0.4.169 is the diagnostic-platform step; the next firing surfaces and fixes the actual gate. This split keeps each firing's deliverable bounded — landing the diagnostic improvement plus the fix in a single firing would have ballooned the scope and risked the rules-of-engagement "checkpoint don't barrel" trip.
+
+**Tests added** (+0): pure diagnostic-text improvement. Suite: 858 (unchanged from §0.4.168).
+
+Full suite is green: **858 tests** (unchanged from §0.4.168).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 2 #1 step 2 — surface the actual gate, then fix it.** Re-run an HMC Phase 3 nested-loop or CartPole Phase 1 attempt; read the new warning text; identify the specific op kind / require-string that fails. Likely candidates given the dxir we saw: nested WHILE post-PhiCalculus (DxirReverseTransform requires WHILE-coarsened-before-SCT); a multi-result non-IF op (perhaps something that emerged from the C5 unroll); or a missing VjpRule for an op we forgot to register.
+2. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+3. **Out-of-scope register refresh.** Multiple items closed since §0.4.164. Could fold this into the next register refresh.
+4. **CartPole Phase 0b deferred** — `max(a, b)` / `sign(x)` lowering is not blocking Phase 1 (per §0.4.168's discovery); land it when CartPole Phase 3 needs it.
+
+**Definition-of-done for §0.4.169 — met**:
+- `tryReverseTransform` accepts `mc: MessageCollector` + `fnName: String` parameters ✓
+- Both exception catches report a WARNING with exception class + message text ✓
+- Caller's separate warning emission removed; signature simplified ✓
+- `MessageCollector` import added ✓
+- 858-test suite unchanged (no behaviour drift) ✓
+
 #### 0.4.168 CartPole Phase 1 hits the same downstream gate as HMC Phase 3 — Phase-2 priority confirmed 2026-04-26
 
 §0.4.165's plan named CartPole Phase 1 as "physics-only port at one time step with hard-coded action". Re-reading the plan source post-Phase-0a/§0.4.166/§0.4.167, the source uses scalar arithmetic + GATHER + sin/cos/abs + a single top-level IF — primitives all shipped. The plan's Phase 0b (general `max` / `sign` lowering) is needed only for Phase 3, not Phase 1. So Phase 1 should have been attemptable directly.
