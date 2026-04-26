@@ -39,6 +39,60 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.175 CartPole Phase 1 closes — deep-clone IF in DxirReverseTransform when regions are empty; gradient matches FD 2026-04-26
+
+§0.4.174 closed the structural wall (CartPole compiles end-to-end through K2 synthesis) but the synthesised gradient was 2.6× off (slot 1 = 0.0985 vs FD = 0.0374). §0.4.175 lands the correctness fix and closes the multi-firing CartPole port arc that opened with §0.4.165 (planning), passed through §0.4.166 (sin/cos), §0.4.167 (abs), §0.4.168 (first attempt + downstream gate), §0.4.169–§0.4.173 (diagnostics), and §0.4.174 (lift pass).
+
+**The mechanism** in [DxirReverseTransform.kt:185-235](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L185-L235):
+
+When the cloning loop encounters a primal IF whose regions are EMPTY (single-block each, no body ops, just terminators) — exactly the post-§0.4.174-lift shape — deep-clone the IF into the grad body. The cloning emits a fresh IF op via the function builder with: predicate resolved through `nodeMap`, regions rebuilt via `region { ... }` blocks yielding terminators that resolve outer-scope refs through `nodeMap`. `nodeMap[primal-IF.id]` is then the GRAD-body cloned IF, not the primal-IF reference.
+
+For IFs with non-empty regions (the lift didn't fire — unsafe op kinds, or function-level bail-out), keep the pre-§0.4.175 "don't clone" behavior so the §0.4.173 leak path still applies (deferred for those shapes; the next firing can either widen `SAFE_LIFT_OPS` in the lift pass or extend `irIfOp` to lower IF-with-body-ops as `IrBlock` branches).
+
+**Why this fixes the gradient bug**: §0.4.174's diagnosis traced the residual leak to a coincidence-collision — when `walkBranchReverse` step 1 emitted a cloned MUL whose `operand[1]` was the PRIMAL IF (since `nodeMap[primal-IF] = primal-IF`), the grad's `applyConstFold` could later canonicalize that operand to a DIFFERENT grad-body op that happened to share the primal-IF's id. With the deep-clone, primal-IF is consistently mapped to the grad-body cloned IF — `byId[X.id]` lookups in the post-passes resolve to the correct grad-scope op, and the spurious `-0.5` contribution disappears.
+
+**Verification** in [CartPolePhase1Test.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/CartPolePhase1Test.kt):
+
+The full CartPole Phase 1 source from `docs/CARTPOLE_PORT_PLAN.md` Phase 1 — five GATHERs from a rank-1 input, scalar arithmetic + sin/cos/abs/IF compositions, final loss `(0.5 - clipped)²` — compiles end-to-end through the K2 plugin. The synthesised gradient at config `(at, x0, x1, x2, x3) = (0.5, 0.0, 0.1, 0.05, 0.02)` matches central-difference FD with mixed `1e-3` absolute / `5e-3` relative tolerance across all 5 slots (slot 0 = exactly 0 since `at` doesn't reach the loss; slots 1-4 are non-trivial gradients through the abs+IF+max-clip composition).
+
+**Decisions worth flagging**:
+
+- **Empty-regions guard is the right scope.** Deep-cloning IFs with non-empty regions would re-introduce the §0.4.174-discovered `irIfOp` rejection (synthesis only accepts empty-body IFs). Gating on `regionsAllEmpty` lets the deep-clone fix benefit the lift-touched cases (which is what we want for CartPole + HMC + future ports) while leaving the unsafe-lift cases at status quo (a leak, but no NEW failure mode). Future widening can drop the gate when synthesis's IF lowering grows.
+
+- **The fix is small (~30 lines).** Most of the grunt work was done by §0.4.174's lift pass. The deep-clone is just a 4-line sequence: resolve predicate, rebuild empty regions yielding cloned terminators, emit IF via `op` / `opMulti`. All grade-body uses route through `nodeMap` cleanly because the clone is in the grad's id space.
+
+- **Cumulative pipeline view** of post-§0.4.174 + §0.4.175: (a) coarsening produces post-`distribute` IFs with body ops; (b) lift pass hoists body ops to top level, leaving IFs with empty regions yielding outer refs; (c) DxirReverseTransform's clone loop deep-clones the IF (since regions are empty), establishing `nodeMap[primal-IF] = grad-IF`; (d) walkBranchReverse processes the (empty) branch bodies normally; (e) handleIfAdjoint emits gradient IFs; (f) post-passes (CSE, constFold, DCE) operate on a clean grad body without primal-id leaks; (g) synthesis lowers each IF to `irIfThenElse` since regions are empty.
+
+- **Tests added: +1 regression test (CartPolePhase1Test).** This pins the full CartPole Phase 1 gradient correctness — a load-bearing assertion that the §0.4.174 + §0.4.175 pipeline produces correct gradients on a real benchmark shape. The existing 4 lift unit tests in `PhiCalculusTest` continue to verify forward correctness of the lift pass independently.
+
+- **Phase 2 #1 (Plugin IR-side synthesis closure) — substantively closed for the scalar-arithmetic surface.** The K2 plugin now generates correct StableHLO-compatible IR for scalar primals with `if (cond) x else y` patterns, scalar `sin/cos/abs/exp/log`, GATHER from rank-1 DTensor inputs, and `term * term`-style outer-MUL post-coarsening. HMC Phase 3 nested-loop and CartPole Phase 2/3 are now expected to flow through this path with minimal additional plumbing. The DTensor-tensor-op surface (multi-result, MATMUL etc.) still has its own gates — Phase 2 #1 isn't fully done yet, but the most common scalar-AD path is.
+
+- **Out-of-scope register refresh is now overdue.** Multiple items moved across §0.4.165–§0.4.175 (CartPole shipped, Phase 0a complete, lift pass landed, Phase 2 #1 substantively closed for scalar surface). The next firing should refresh the register entries so future investigations don't re-discover what's done.
+
+- **CartPole Phase 2/3 are now plausible single-session ports.** Phase 2 (loop over B=3 time steps) follows HookeanSpring's N=10 chain pattern (§0.4.47). Phase 3 (neural net + outer training loop) needs Phase 0c (plugin MATMUL), which is still open. The §0.4.165 plan's "10-12 firings total" estimate was overly conservative — with Phase 0c still pending, the remaining CartPole work is 3-5 firings (Phase 2: 1-2 firings; Phase 3: 2-3 firings + Phase 0c).
+
+**Tests added** (+1 in [CartPolePhase1Test.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/CartPolePhase1Test.kt)):
+
+- `cartpole phase1 gradient matches finite difference` — full CartPole Phase 1 source; FD verification at one configuration; mixed `1e-3` absolute / `5e-3` relative tolerance.
+
+Full suite is green: **863 tests** (+1 over §0.4.174).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **HMC Phase 3 nested-loop port.** §0.4.163 deferred this; the §0.4.174 lift pass + §0.4.175 deep-clone fix likely unblock it (same downstream gate pattern). Re-run §0.4.163's test under the new pipeline and see if it compiles + matches FD. Single-firing if straightforward.
+2. **Out-of-scope register refresh.** Multiple items moved; refresh §0.4.164 register and amend `docs/CARTPOLE_PORT_PLAN.md` (Phase 1 is done; estimate the remaining Phase 2/3 cost).
+3. **CartPole Phase 2 — loop over B=3 time steps.** With Phase 1 working, the loop-form port should be a HookeanSpring-pattern follow-up.
+4. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+5. **Plugin MATMUL recognition (Phase 0c).** Shared blocker for HMC Phase 3 (matrix form) and CartPole Phase 3 (NN). Single-firing follow-up to §0.4.158's plan amendment.
+
+**Definition-of-done for §0.4.175 — met**:
+- Deep-clone IF in DxirReverseTransform's cloning loop when regions are empty ✓
+- `nodeMap[primal-IF] = grad-cloned-IF` so downstream operand resolution doesn't leak primal ids ✓
+- CartPole Phase 1 regression test lands and PASSES with FD-validated gradients ✓
+- Empty-regions gate keeps backward compatibility for IFs the lift didn't process ✓
+- §0.4.169–§0.4.175 multi-firing arc on Phase 2 #1 (Plugin IR-side synthesis closure) substantively closes for scalar surface ✓
+- Full suite stays green at 863 tests (+1) ✓
+
 #### 0.4.174 `PhiCalculus.liftIfRegionBodies` pre-SCT lift pass; CartPole Phase 1 compiles end-to-end through synthesis 2026-04-26
 
 §0.4.173's hand-off named Path (1) — "lift region body ops to top level pre-SCT" — as the load-bearing CartPole-unblocker. §0.4.174 lands it. **CartPole Phase 1 now compiles end-to-end through the K2 plugin's IR-side synthesis path** — the Phase-2 #1 wall that blocked HMC Phase 3 nested-loop (§0.4.163) and CartPole Phase 1 (§0.4.168) is structurally cleared. **Caveat**: the synthesised gradient is numerically incorrect (slot 1 = 0.0985 vs FD = 0.0374, factor of 2.6× off), so the regression test that would pin correctness was deleted to keep the suite green; correctness fix is the §0.4.175 pickup.

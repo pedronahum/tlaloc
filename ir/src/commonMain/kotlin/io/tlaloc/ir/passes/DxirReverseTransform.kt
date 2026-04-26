@@ -183,30 +183,52 @@ object DxirReverseTransform {
                     is DxirConst -> const(n.value, n.type)
                     is DxirOp -> {
                         if (n.op == OpKind.IF) {
-                            // Don't clone the IF here — its regions reference outer-scope
-                            // SSA values that must resolve through nodeMap, but the inner
-                            // body is also re-cloned during [walkBranchReverse]. Cloning
-                            // both would emit duplicate computation. Map to the primal
-                            // node; the IF's id is referenced only by adjoint synthesis
-                            // (which uses outerNodeMap[predicate] and primal regions).
+                            // §0.4.175 — when the IF's regions are EMPTY (single-block
+                            // each, no body ops, just terminator), deep-clone the IF
+                            // into the grad body so downstream consumers that reference
+                            // it as a forward operand resolve to a grad-scope op rather
+                            // than leaking the primal id. This is safe + cheap because
+                            // PhiCalculus.liftIfRegionBodies (§0.4.174) hoists region
+                            // body ops to top level, leaving IFs with empty regions
+                            // yielding outer-scope refs only — exactly the shape this
+                            // arm handles.
                             //
-                            // §0.4.173 — KNOWN LEAK: when coarsening's `distribute` rule
-                            // produces a region-internal op that references an OUTER-
-                            // scope IF as a primal operand (e.g., post-coarsening
-                            // CartPole: `%59 = MUL(%58, %57-OUTER-IF)` inside a sibling
-                            // IF's branch), `walkBranchReverse` step 1 emits the cloned
-                            // MUL with operand[1] = primal-%57. The grad's id allocator
-                            // can later hit that same id, producing an out-of-order
-                            // forward reference that buildBody rejects with
-                            // `op id=N MUL operand[idx] id=M not in env`. A first
-                            // attempt at this firing (§0.4.173) tried deep-cloning the
-                            // IF into the grad body via [PhiCalculus.cloneNode] — that
-                            // resolved the leak but surfaced a downstream gate
-                            // ([irIfOp] rejects IFs whose regions have non-empty body).
-                            // Closing the leak end-to-end requires either lifting region
-                            // body ops to top level OR widening synthesis to lower
-                            // IF-with-body-ops. Both are non-trivial; deferred.
-                            n
+                            // §0.4.173 — KNOWN LEAK: when the lift pass DOESN'T fire (the
+                            // IF has body ops with unsafe op kinds like DIV, SQRT, LOG;
+                            // or the function has a non-IF region-bearing op that bails
+                            // out the whole function), regions stay non-empty and we
+                            // fall back to the pre-§0.4.175 "don't clone" path. The leak
+                            // persists for those shapes; the next firing can either widen
+                            // [SAFE_LIFT_OPS] or extend [irIfOp] to lower IF-with-body-ops
+                            // as `IrBlock` branches.
+                            val regionsAllEmpty = n.regions.all { region ->
+                                region.blocks.size == 1 && region.blocks.single().body.isEmpty()
+                            }
+                            if (regionsAllEmpty) {
+                                val predClone = resolveCloneOperand(n.operands[0], nodeMap, n.id)
+                                val clonedRegions = n.regions.map { region ->
+                                    val block = region.blocks.single()
+                                    region {
+                                        val terms = block.terminator.map {
+                                            resolveCloneOperand(it, nodeMap, n.id)
+                                        }
+                                        yields(*terms.toTypedArray())
+                                    }
+                                }
+                                if (n.types.size == 1) {
+                                    op(
+                                        OpKind.IF, listOf(predClone), n.type, n.attrs,
+                                        n.sharding, clonedRegions,
+                                    )
+                                } else {
+                                    opMulti(
+                                        OpKind.IF, listOf(predClone), n.types, n.attrs,
+                                        n.sharding, clonedRegions,
+                                    )
+                                }
+                            } else {
+                                n
+                            }
                         } else {
                             op(
                                 kind = n.op,
