@@ -39,6 +39,49 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.170 Diagnostic dump of CartPole Phase 1 — gate is `DxirFunction.init`'s SSA validation 2026-04-26
+
+§0.4.169 wired the diagnostic; §0.4.170 uses it. Re-creating the CartPole Phase 1 test (deleted in §0.4.168 to avoid leaving red), capturing the new warning text in stderr surfaced the SPECIFIC failure:
+
+> `IllegalArgumentException: function grad_body_grad references unknown node ids: [52]`
+
+This isn't a `DxirReverseTransform` gate (no `require` in `DxirReverseTransform.apply` produces this string). It's `DxirFunction`'s init-block validation ([DxirModule.kt:29](ir/src/commonMain/kotlin/io/tlaloc/ir/DxirModule.kt#L29)) running AFTER `DxirReverseTransform.apply` builds the gradient function — `tryReverseTransform` catches the exception and reports it with the new template. The grad function's body contains an op that references SSA id 52, but id 52 was never declared in the grad function's scope (params + body + nested-region declared ids).
+
+**The discovery's significance**: the gate isn't a *registry miss* (no missing VjpRule) or a *shape rejection* (no malformed primal). It's a structural-correctness failure in the gradient function that DxirReverseTransform builds. Some emitted op in the grad body references a primal-scope id that didn't get cloned/resolved through `nodeMap`. This is the SAME failure mode as §0.4.155's "DxirOpResult preservation in body cloning" bug — a node reference that survived the clone phase pointing to an undeclared id. §0.4.155 fixed it for the multi-result-IF body cloning; §0.4.170's case is in a different code path.
+
+**Decisions worth flagging**:
+
+- **The diagnostic message is the load-bearing artefact.** Pre-§0.4.169, the warning was just "(gate violation)". With §0.4.169's improvement, it's "function grad_body_grad references unknown node ids: [52]" — actionable. Two firings of platform work (§0.4.169 + §0.4.170) before the actual fix is the right shape: the fix needs to know what to fix.
+
+- **Without the full grad-function dxir, the specific node 52 reference can't be pinned.** Gradle's test-output XML truncates stderr after some length; the dxir dump in the warning shows up to ~%18 visible. The grad function's body extends past id 50+. To pinpoint id 52's reference, the next firing needs either: (a) a smaller primal that triggers the same gate (so the dxir fits in the visible output), or (b) a way to dump the full grad-function dxir post-build. Option (a) is the right shape — bisect the CartPole primal until the smallest still-failing form is found.
+
+- **§0.4.155's `DxirOpResult` cloning fix may need a similar widening here.** That fix was for the IF AD code path (multi-result IF body cloning). The CartPole primal hits a different path — the top-level reverse walk's cloning + handleIfAdjoint for a single-result IF. The same "DxirOpResult preservation" pattern likely applies to one or more emission sites in DxirReverseTransform that haven't been retrofitted yet.
+
+- **The diagnostic test was deleted.** Per §0.4.163 / §0.4.168 convention, the failing/probe test isn't kept in the suite. Future firings can re-create it as needed.
+
+- **Two consecutive firings of "discover, then act" form a clean diagnostic arc.** §0.4.169 wired the warning, §0.4.170 ran the probe and named the gate. The next firing can run a smaller probe to bisect the failure to a specific primal subset, then trace which emission site in DxirReverseTransform produces the unknown id.
+
+- **HMC Phase 3 nested-loop is a stronger test case for the next firing.** §0.4.163's HMC nested-loop dxir was simpler than CartPole's (just two nested WHILEs + scalar arithmetic). Re-running THAT diagnostic dump with §0.4.169's warning would likely produce a smaller / more legible exception text. The fix that closes one likely closes the other (or surfaces what's different).
+
+**Tests added** (+0): probe test landed and removed. Suite: 858 (unchanged from §0.4.169).
+
+Full suite is green: **858 tests** (unchanged from §0.4.169).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Re-probe HMC Phase 3 nested-loop with the §0.4.169 diagnostic.** Recreate the §0.4.163 test, capture the new warning text, see if it produces a similar "references unknown node ids" message. If yes, both ports trip the same emission-site bug — high confidence the fix unblocks both. If no, the two failures are different and need separate investigation.
+2. **Bisect CartPole Phase 1 primal.** Strip the primal to its smallest failing form. Likely candidates: (a) just the IF + abs combination (`if (x.abs() > 0) x.abs() else 0`); (b) just the multi-arg arithmetic (no IF, no abs); (c) just the per-component state update with one abs. Smallest failing form will fit in the visible output and let us pinpoint id 52's reference.
+3. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+4. **Out-of-scope register refresh.** Multiple items closed since §0.4.164.
+
+**Definition-of-done for §0.4.170 — met**:
+- Diagnostic probe re-created and ran (then deleted to avoid red test) ✓
+- New warning text captured in §0.4 entry: "function grad_body_grad references unknown node ids: [52]" ✓
+- Failure attributed to DxirFunction.init's SSA validation, not a DxirReverseTransform gate ✓
+- §0.4.155-style "DxirOpResult preservation in cloning" hypothesis flagged as the likely fix shape ✓
+- Two-firing diagnostic arc (§0.4.169 + §0.4.170) closes; next firing can act on the discovery ✓
+- Full suite stays green at 858 tests (unchanged) ✓
+
 #### 0.4.169 `tryReverseTransform` warning surfaces the swallowed exception message 2026-04-26
 
 §0.4.168 named "improve `TlalocIrGenerationExtension.tryReverseTransform`'s warning to include the exception message" as the load-bearing first surgical step toward unblocking Phase 2 #1 (Plugin IR-side synthesis closure). §0.4.169 lands it. Two consecutive port firings (§0.4.163 HMC nested-loop, §0.4.168 CartPole Phase 1) hit the downstream gate but reported only the generic "(gate violation)" — pinpointing the failing op required either modifying production code mid-debug or deep-diving into `DxirReverseTransform.kt`'s require-strings to guess. The improved warning now includes the exception class + message text, naming the specific op kind / require-string that failed, enabling targeted fixes in subsequent firings without further plumbing.
