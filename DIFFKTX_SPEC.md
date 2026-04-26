@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.165 CartPole benchmark port — planning doc (`docs/CARTPOLE_PORT_PLAN.md`) 2026-04-26
+
+§0.4.164's recommended-next #1 (Plugin IR-side synthesis closure) is officially Phase-2 work and unblocks HMC Phase 3 nested-loop. Per the priority-ladder strict reading, the lowest-numbered open Phase-1 item is **#5 — CartPole benchmark port**, and per the §0.4.157 / §0.4.10 precedent multi-session arcs open with a planning doc. §0.4.165 lands `docs/CARTPOLE_PORT_PLAN.md`. The plan's headline finding: CartPole has **five new plumbing items** before Phase 1 can even attempt a port — substantially more than HMC's "all primitives shipped" starting point. Naming the prerequisites explicitly (Phase 0a / 0b / 0c) makes the multi-session arc legible.
+
+**The artifact** in [docs/CARTPOLE_PORT_PLAN.md](docs/CARTPOLE_PORT_PLAN.md):
+
+1. **Reference forward pass** — the OOPSLA paper's CartPole equations (per-time-step physics: `at`, `rt`, `qt`, `pt`, state-update, loss `lt+1 = (0.5 - max(0, …))²`) sourced from `docs/papers/coarsening-autodiff.txt:247-360`.
+
+2. **Tlaloc gap analysis** — a 9-row table mapping each CartPole primitive to current Tlaloc support. **Five new ⬜ / 🟡 plumbing items** flagged: scalar `sin` / `cos`, `AbsRule`, binary `max(a, b)`, `sign(x)`, and the K2-plugin MATMUL-recognition gap (shared with HMC).
+
+3. **Four-phase migration** (was three for HMC; CartPole adds Phase 0):
+   - **Phase 0a (1-2 firings)** — scalar `sin` / `cos` + `AbsRule` + plugin map entries. Direct mirror of §0.4.158's pattern.
+   - **Phase 0b (1 firing)** — `max(a, b)` + `sign(x)` lowered as IF-chains in FIR. No new OpKinds.
+   - **Phase 0c** — plugin MATMUL recognition (shared with HMC; deferred to Phase 3).
+   - **Phase 1 (1 firing)** — physics-only port at one time step with hard-coded action `at`.
+   - **Phase 2 (2 firings)** — loop over B=3 time steps with carried state.
+   - **Phase 3 (4-5 firings)** — full neural-net + outer loop. Requires Phase 0c + IR-side synthesis closure.
+
+4. **Phase 0a first-slice** concretely defined — 9 numbered steps from `:core/DScalar.kt` extensions through `DxirToIrSynthesis` arms to a `ScalarSinCosTest.kt` mirroring `ScalarExpLogTest.kt`. Bounded to 1 firing.
+
+5. **Why this plan structures differently from HMC's** — explicit comparison: HMC's gap analysis named two 🟡 blockers with mitigations; CartPole's names five ⬜ / 🟡 items needing fresh implementation. Phase 0 makes those explicit so subsequent firings hit the prerequisites in the right order, rather than discovering them mid-implementation as HMC did with §0.4.158 / §0.4.162 / §0.4.163.
+
+**Decisions worth flagging**:
+
+- **Phase 0 is genuinely necessary, not over-planning.** With HMC, the first port slice was attemptable with shipped primitives. With CartPole, attempting Phase 1 directly would hit "scalar `sin()` not lowered" on the first compile. Naming the plumbing as Phase 0 sub-firings makes the unblock arc legible: 0a (sin/cos/abs) lands first, 0b (max/sign) second, 0c (MATMUL) deferred to Phase 3 because Phase 1 can sidestep it with a hard-coded action.
+
+- **`max(a, b)` and `sign(x)` lower as IF-chains, not new OpKinds.** Both are non-differentiable at boundary points (max at `a == b`, sign at 0); existing IF-AD machinery (§0.4.155 multi-live-index, §0.4.140 nested IF) handles the gradient flow correctly without needing a custom rule. Adding `OpKind.MAX_BINARY` / `OpKind.SIGN` would require new VJP rules, new interpreter arms, new emitter arms, new synthesis arms — significant surface for primitives that compose cleanly from existing IF + comparisons.
+
+- **The MATMUL-through-plugin gap is shared with HMC.** CartPole Phase 3 + HMC Phase 3 both need it; the §0.4.164 register surfaces it as a single deferred item. A future firing that closes this benefit BOTH ports simultaneously — making it strictly more valuable than its scope suggests.
+
+- **Total firing estimate is 10-12.** Per-phase: 2-3 (Phase 0) + 1 (Phase 1) + 2 (Phase 2) + 4-5 (Phase 3). The estimate is wider than HMC's 4-firing actual (§0.4.157–§0.4.160) because of Phase 0 and the larger neural-net surface.
+
+- **No code changes this firing.** Pure doc artifact, suite stays at 852. Mirrors §0.4.10 / §0.4.157 (Stage B + HMC planning docs).
+
+- **`docs/CARTPOLE_PORT_PLAN.md` is structured to be readable independently.** A future session opening CartPole work doesn't need to understand the HMC plan first — the gap analysis, three-phase migration, and Phase 0a first-slice are self-contained. The "why this plan structures differently from HMC's" section serves as the cross-reference for readers familiar with §0.4.157.
+
+**Tests added** (+0): pure planning artifact. Suite: 852 (unchanged from §0.4.164).
+
+Full suite is green: **852 tests** (unchanged from §0.4.164).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 0a — scalar `sin` / `cos` plumbing.** Per the plan's first-slice section: 9 numbered steps from `:core/DScalar.kt` extensions through `DxirToIrSynthesis` arms to a `ScalarSinCosTest.kt`. Bounded to 1 firing. Direct port of §0.4.158's pattern.
+2. **HMC Phase 3 nested-loop diagnostic** — focused investigation per §0.4.163's hand-off (still open).
+3. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open.
+4. **CartPole Phase 0a continuation** — `AbsRule` + `Float.abs()` plugin lowering. Could land same firing if Phase 0a sin/cos goes smoothly.
+
+**Definition-of-done for §0.4.165 — met**:
+- `docs/CARTPOLE_PORT_PLAN.md` lands with reference forward pass + 9-row gap analysis ✓
+- Four-phase migration (Phase 0 + 1 + 2 + 3) named with per-phase firing estimates ✓
+- Phase 0a first-slice concretely defined (9 numbered steps + test mirror) ✓
+- Five new plumbing items (sin/cos/abs/max/sign + MATMUL-through-plugin) identified ✓
+- "Why this plan differs from HMC's" cross-reference section ✓
+- Out-of-scope items enumerated ✓
+- Full suite stays green at 852 tests (unchanged) ✓
+
 #### 0.4.164 Out-of-scope register refresh — 13 sub-sections shipped since §0.4.151 2026-04-26
 
 §0.4.151 was the fourth register snapshot; §0.4.164 is the fifth. 13 sub-sections shipped between §0.4.152 and §0.4.163 — a focused arc dominated by Multi-result IF AD Phase 4 + Multi-live-index gradAccum refactor + the HMC benchmark port (Phases 1, 2, 3 mask). Three FIR-side fixes (§0.4.158 / §0.4.162 / §0.4.163) surfaced and shipped along the way as HMC porting exposed gaps. This refresh updates the deferred snapshot accordingly and surfaces a fresh recommended-next list.
