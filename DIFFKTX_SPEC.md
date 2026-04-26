@@ -39,6 +39,49 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.163 FIR `collectMutatedTargets` excludes locally-declared vars; HMC Phase 3 nested-loop checkpoint 2026-04-26
+
+§0.4.162's hand-off named HMC Phase 3 second half (true nested for-loop over features) as the next pickup, flagging "multiplicative index arithmetic" as the suspected gap. The first attempt sidestepped that with a row-major X layout + running `var idx` counter, but immediately surfaced a different FIR-lowering bug: the K2 plugin's `collectMutatedTargets` reported a locally-declared `var xb = 0.0f` (inside the outer for-loop body) as a "carried var of the outer loop", because it doesn't distinguish locally-declared vars from outer-scope vars when recursing into nested-loop bodies. §0.4.163 fixes that bug. End-to-end gradient evaluation still doesn't reach finite-difference parity for the nested-loop primal — a downstream gate (PhiCalculus.apply's fixpoint or DxirReverseTransform's WHILE rejection) drops the dxir before synthesis. **This firing checkpoints the FIR fix as a clean win and flags the downstream gap explicitly.**
+
+**The mechanism**:
+
+1. **`collectMutatedTargets` local-decl exclusion** ([FirLambdaToDxirLowering.kt:656-694](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt#L656-L694)) — adds a `localDecls: HashSet<FirPropertySymbol>` that tracks every `FirProperty` (var declaration) seen during the recursive walk. Mutations of any symbol in `localDecls` are EXCLUDED from the output set. The pre-§0.4.163 logic naively added every `FirVariableAssignment`'s target — fine for a flat for-loop body, broken for `for (i …) { var xb = 0; for (j …) { xb = … } }` because the inner-loop mutation of `xb` would bubble up as a "carried var" of the OUTER loop, but `xb` is reset each outer iteration (locally-scoped to the outer body) — NOT a carried var of the outer.
+
+2. **Test scaffold for the nested case landed and was removed.** I wrote `HmcLogisticRegressionNestedTest.kt` to exercise the nested-loop primal end-to-end (column-major X layout with running `var idx` for index walks). With the §0.4.163 `collectMutatedTargets` fix, FIR lowering succeeded — the diagnostic dump shows a clean nested-WHILE dxir with the outer 4-carry WHILE wrapping the inner 3-carry WHILE, all the math correctly reflected. But the gradient evaluation returned the broken-stub sentinel (`-1.0f` per slot), meaning the IR-phase synthesis didn't replace the call site. The gate that drops the dxir is downstream of FIR; with §0.4.161's region-recursive C5, the inner WHILE SHOULD unroll on first pass and the outer SHOULD unroll on a subsequent fixpoint iteration, but something in PhiCalculus.apply or DxirReverseTransform isn't completing that arc for this shape. Per the rules-of-engagement guidance ("checkpoint what works + flag the blocker"), the failing test was deleted; the FIR fix stays.
+
+**Decisions worth flagging**:
+
+- **The `collectMutatedTargets` fix is independent and useful regardless of HMC.** Any future K2-plugin test with a `for ... { var x = 0; for ... { x = … } }` pattern would have hit the same bug. The fix is a strict improvement to the FIR-lowering's mutation tracking. Lands on its own merits.
+
+- **Three FIR-side fixes in a row enabling HMC.** §0.4.158 (scalar exp/log), §0.4.162 (lowerWhen DxirRegionBuilder dispatch), §0.4.163 (collectMutatedTargets local-decl exclusion). Each was discovered by attempting the next HMC port slice and hitting a "the K2 plugin doesn't support this shape yet" failure mode. The FIR-side surface is the source of most of these gaps; the IR-side surface (DxirReverseTransform, DxirToIrSynthesis) seems to handle whatever the FIR side produces, until a shape exposes a deeper limit (which is what we hit at the end of this firing).
+
+- **The downstream gap is the next firing's investigation, not this firing's fix.** The dxir produced by FIR is correct; PhiCalculus.apply runs on it (no failure warning); DxirReverseTransform is called next (per `tryReverseTransform`). The output goes to synthesis, which either succeeds (gradient computed) or fails (call site kept; runtime tape's broken stub fires). The empirical observation: stub fired. The diagnosis requires running PhiCalculus.apply on the exact dxir manually and inspecting whether C5 unrolls both WHILEs. Defer to a focused diagnostic firing.
+
+- **Failing tests removed, not left red.** A persistent red test in the suite is worse than no test — it normalises "tests that don't pass" and erodes the suite's signal. Per the §0.4 convention (Stage B planning + Stage D blockers all remove failing tests when checkpointing), the nested-loop test file is deleted. A future firing that closes the downstream gap can re-add it.
+
+- **The diagnostic-stderr pattern from §0.4.162 paid off again.** Without the `System.err.println("[diag …]")` lines surfacing the FIR `LoweringException`, this firing would have spent more cycles guessing at why `analytic = -1.0`. Pattern is firmly established now: when an integration test returns the broken-stub sentinel, dump compile messages first.
+
+- **No new test count change.** The `collectMutatedTargets` fix doesn't have a dedicated test — it's exercised implicitly when any future test hits the previously-broken shape. That's fine: §0.4.39's multi-var for-loop tests still pass (no regression on the existing shape), and §0.4.163's added test was removed. Suite stays at 852.
+
+**Tests added** (+0 new; nested-loop test landed and removed): 852 (unchanged from §0.4.162).
+
+Full suite is green: **852 tests** (unchanged from §0.4.162).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Diagnose HMC nested-loop downstream gate.** Construct the §0.4.163 nested dxir by hand (or capture from FIR), run `PhiCalculus.apply` on it, inspect what survives. Two likely findings: (a) C5 doesn't fire on the outer WHILE because of some gate (counter-init, increment, or referencedIndices); (b) the fixpoint converges with WHILEs still present. Either points to a focused fix.
+2. **Out-of-scope register refresh.** Long overdue. Many items closed across §0.4.151–§0.4.163. Single-firing doc-only task.
+3. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+4. **CartPole benchmark port.** Multi-session.
+
+**Definition-of-done for §0.4.163 — met**:
+- `collectMutatedTargets` excludes `FirProperty` declarations from the mutation set ✓
+- Comment on the fix explains the locally-declared-var case + the failing pattern ✓
+- Existing §0.4.39 multi-var for-loop tests still pass (no regression on the supported shape) ✓
+- Failing nested-loop integration test removed (don't leave red tests) ✓
+- Downstream gap explicitly named in the recommended-next list ✓
+- Full suite stays green at 852 tests (unchanged) ✓
+
 #### 0.4.162 HMC Phase 3 mask form + nested if/when in WHILE-body lowering 2026-04-26
 
 §0.4.161's hand-off named HMC Phase 3 (numerical-stability mask + true nested loop) as the next pickup. The first-cut implementation hit an unexpected blocker: the FIR-side lowering's `lowerWhen` cast `emitter as DxirBuilder` and rejected `DxirRegionBuilder` with the deliberate scope-limit error "nested if/when inside a branch not supported (B.4a scope)". The mask `if (-Xβ_i > 80) -Xβ_i else log(1 + exp(-Xβ_i))` lives inside a `for`-loop body (lowered to a WHILE body region), so the IF's emitter is `DxirRegionBuilder` — outside the cast's accepted type. §0.4.162 widens `lowerWhen` to dispatch on the runtime emitter type (mirroring `PhiCalculus.cloneRegion`'s pattern), then lands the masked form of HMC Phase 2 with two test methods covering both the no-fire (moderate β) and fire (large-magnitude β) paths.

@@ -655,11 +655,21 @@ object FirLambdaToDxirLowering {
      */
     private fun collectMutatedTargets(statements: List<Any>): Set<FirPropertySymbol> {
         val out = LinkedHashSet<FirPropertySymbol>()
+        // §0.4.163 — track properties declared INSIDE the body so a mutation of one
+        // doesn't bubble up as a "carried var of the enclosing loop". Without this,
+        // `for (i …) { var xb = 0; for (j …) { xb = xb + … } }` reports `xb` as a
+        // mutation of the OUTER loop, but `xb` is locally-scoped to the outer body
+        // and reset each outer iteration — it is NOT a carried var of the outer.
+        val localDecls = HashSet<FirPropertySymbol>()
         fun visit(list: List<Any>) {
             for (stmt in list) {
                 when (stmt) {
+                    is FirProperty ->
+                        localDecls += stmt.symbol
                     is FirVariableAssignment ->
-                        resolveAssignmentTarget(stmt)?.let { out += it }
+                        resolveAssignmentTarget(stmt)?.let { sym ->
+                            if (sym !in localDecls) out += sym
+                        }
                     is FirBlock -> {
                         if (stmt.source?.kind == KtFakeSourceElementKind.DesugaredForLoop) {
                             // statements[1] is the FirWhileLoop; descend into its body,
