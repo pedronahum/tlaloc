@@ -39,6 +39,47 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.168 CartPole Phase 1 hits the same downstream gate as HMC Phase 3 — Phase-2 priority confirmed 2026-04-26
+
+§0.4.165's plan named CartPole Phase 1 as "physics-only port at one time step with hard-coded action". Re-reading the plan source post-Phase-0a/§0.4.166/§0.4.167, the source uses scalar arithmetic + GATHER + sin/cos/abs + a single top-level IF — primitives all shipped. The plan's Phase 0b (general `max` / `sign` lowering) is needed only for Phase 3, not Phase 1. So Phase 1 should have been attemptable directly.
+
+**The attempt + the wall**: I wrote `CartPolePhase1Test.kt` exercising the per-time-step physics with hard-coded `at` and 4 state components. FIR-side lowering succeeded — diagnostic dump showed clean dxir with all the expected ops (sin / cos / abs / div / mul / sub + the IF for clipping). DxirReverseTransform rejected with "(gate violation)" — same warning that blocked HMC Phase 3 nested-loop in §0.4.163. The failing test was deleted; the FIR side stays exercised by §0.4.166 / §0.4.167's primitive tests.
+
+**This is the second consecutive port attempt to hit the IR-side synthesis closure as a wall.** Both HMC Phase 3 nested-loop (§0.4.163) and CartPole Phase 1 (§0.4.168) produce correct dxir at the FIR phase but fail the post-coarsening DxirReverseTransform / synthesis chain. The §0.4.164 register's "Plugin | IR-side synthesis closure (§17 step 6)" entry is now the load-bearing Phase-2 blocker AND the prerequisite for two paper-benchmark ports. Closing it benefits HMC + CartPole + future ports simultaneously.
+
+**Decisions worth flagging**:
+
+- **Phase 0a's value persists.** §0.4.166 + §0.4.167 unblocked scalar sin / cos / abs at the FIR + VJP + interpreter + emitter + synthesis layers. Those primitives now lower correctly through the K2 plugin — verified by ScalarSinCosTest and ScalarAbsTest. The FIR-side dxir for CartPole Phase 1 is correct end-to-end. The wall is downstream of what Phase 0a was scoped to fix.
+
+- **The downstream gate's exact failure point isn't pinpointed yet.** `tryReverseTransform` in `TlalocIrGenerationExtension` swallows the specific exception message and reports a generic "(gate violation)". Two diagnostic improvements would help future investigations: (a) include the exception's `t.message` in the warning text; (b) add a dedicated debug-only mode that re-runs DxirReverseTransform without the catch so the stack surfaces. Neither was done this firing — out of scope per the rules-of-engagement guidance to checkpoint and flag rather than barrel forward.
+
+- **Same wall, two ports, strong signal.** §0.4.163 (HMC Phase 3 nested-loop) showed FIR-side success + downstream rejection. §0.4.168 (CartPole Phase 1) shows the same shape. The IR-side closure isn't a speculative future need; it's the active blocker for two of the four still-open Phase-1 benchmark ports. Per the strict priority-ladder reading, Phase 1 is "as closed as it can be" without Phase 2 #1 — making the case for switching to Phase 2 work despite the formal "Phase 1 done = M9 parity" criterion.
+
+- **No `:core` extensions added this firing.** The original Phase 0b plan had me adding `Float.sign()` and binary `max(a, b)` extensions. Phase 1 doesn't need them (the source can write the IF directly), so adding them now would be speculative. They land when Phase 3 makes them load-bearing.
+
+- **Failing test deleted, not red-checkpointed.** §0.4.163 deleted its failing test; §0.4.168 follows the same convention. A persistent red test in the suite normalises "tests that don't pass" — the suite stays at 858, all green. The §0.4 entry documents the discovery; that's the right place for the historical record.
+
+- **`docs/CARTPOLE_PORT_PLAN.md` should get an amendment.** The plan's Phase 1 estimate was "1 firing"; the actual outcome is "1 firing of investigation that flags the same downstream blocker". A future register-refresh entry can carry the amendment, OR §0.4.169+ can land it inline if it next addresses CartPole or HMC Phase 3.
+
+**Tests added** (+0): nested-loop test landed and removed; same convention as §0.4.163.
+
+Full suite is green: **858 tests** (unchanged from §0.4.167).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 2 #1 — Plugin IR-side synthesis closure (§17 step 6).** Now confirmed as the load-bearing blocker for two ports. The first surgical step: improve `TlalocIrGenerationExtension.tryReverseTransform`'s warning to include the exception message — gives future investigations the specific gate that's failing, replacing the generic "(gate violation)" with actionable detail. Single-firing.
+2. **Phase 2 #1 follow-on — fix whichever specific gate the improved warning surfaces.** Could be: an op kind without a VJP rule (DivRule? `kotlin.math.max` if Kotlin lowered it as builtin? something else); a multi-result constraint; an unsupported op-region shape. The fix scope depends on the diagnostic output.
+3. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
+4. **Out-of-scope register refresh.** Several items moved across §0.4.165–§0.4.168 (Phase 0a closed, two ports checkpointed). Could refresh now or after Phase 2 work.
+
+**Definition-of-done for §0.4.168 — met**:
+- CartPole Phase 1 attempted; FIR-side success confirmed via diagnostic dump ✓
+- Downstream gate violation in DxirReverseTransform documented ✓
+- Same-wall observation across §0.4.163 + §0.4.168 surfaced as Phase-2 priority signal ✓
+- Failing test removed (don't leave red) ✓
+- Phase 2 #1 explicitly named as the next priority despite Phase 1 not formally closed ✓
+- Full suite stays green at 858 tests (unchanged) ✓
+
 #### 0.4.167 CartPole Phase 0a-2 — `AbsRule` + scalar `Float.abs()` plugin lowering 2026-04-26
 
 §0.4.166 closed Phase 0a-1 (scalar sin/cos); §0.4.167 closes Phase 0a-2 (scalar abs). `OpKind.ABS` already existed in dxir but lacked a VJP rule, an interpreter arm, and any plugin/synthesis surface. §0.4.167 lands all five pieces simultaneously: `Float.abs()` extension in `:core`, `AbsRule` in Vjp.kt, interpreter arm in DxirInterpreter, `UNARY_OP_MAP` entry, `irAbs` synthesis arm. Plus updates §0.4.51's `rejectsUnsupportedOp` test to use `OpKind.RSQRT` (the next still-unregistered unary op) since ABS is no longer the canonical unregistered placeholder.
