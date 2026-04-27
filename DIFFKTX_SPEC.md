@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.195 Phase 0c-rectangular slice 3b-1 — `broadcastDims` runtime helper + scope decomposition 2026-04-27
+
+§0.4.194's hand-off named "Phase 0c-rectangular slice 3b: BROADCAST template via runtime dims helper" as the next pickup. **Originally scoped as one firing; this firing decomposes it into 3b-1 (now) and 3b-2 (next firing) after running the rectangular gradient test against the current code revealed the synthesis-side work is bigger than the runtime-helper landing alone.** §0.4.195 ships 3b-1: the `broadcastDims(v, dims)` runtime helper + 3 unit tests asserting its correctness. The synthesis-side wiring (BROADCAST IrType derivation + axis-to-param matching + `intArrayOf(param.dims[axis], …)` IR construction + outer signature fix for multi-shape param/return Pair lowering + matmul/transpose typeArgs as atomic atoms) is deferred to slice 3b-2.
+
+**The mechanism** in [HostOps.kt:174-194](core/src/commonMain/kotlin/io/tlaloc/core/ops/HostOps.kt#L174-L194):
+
+1. **`broadcastDims(v: Float, dims: IntArray): DTensor<S, F32>`** — generic in shape `S : Shape`, allocates a fresh `FloatArray(dims.fold(1, *)){ v }` storage and returns a DTensor with `dims = dims.copyOf()`. Mirrors `broadcastLike`'s output structurally, but lifts the shape source out of the template-DTensor channel. Empty dims yields a 1-element scalar-shaped DTensor (size = 1 by convention; matches `dims.fold(1, *)` semantics).
+
+2. **3 unit tests** in [HostOpsTest.kt](core/src/commonTest/kotlin/io/tlaloc/core/ops/HostOpsTest.kt):
+   - `broadcastDimsRectangularRank2` — asserts a `[2, 3]` shape produces 6 elements all equal to the value.
+   - `broadcastDimsCopiesDimsArray` — caller mutating their dims array post-call doesn't poison the tensor's dims.
+   - `broadcastDimsEmptyShapeYieldsScalarSized` — defensive: empty dims → size 1.
+
+**Why slice 3b decomposed**:
+
+I added a candidate rectangular MATMUL test (`Rank2RectangularMatmulGradientTest`) for the slice 3b end-to-end target — `grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<Sym, Lit<Int>>, b: Rank2<Lit<Int>, Lit<Long>>` (three distinct ShapeAtoms; first attempt at the test used user-defined ShapeAtom subclasses but ShapeAtom is sealed in `:core`, so the user-side compile failed — using existing classes `Sym` / `Lit<Int>` / `Lit<Long>` works). Running the test on the current `:compiler-plugin` HEAD surfaced a synthesis warning: *"kept original call for 'grad_body' — synthesised type … doesn't match call type … (forward-only scope)"* in [TlalocIrGenerationExtension.kt:241-249](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L241-L249). The mismatch traces to:
+
+- `paramIrTypes` is computed via `irTypeFor(it.type, context)` which falls back to `tensorIrType` (the FIRST tensor param's IrType) for all rank-2 F32 params. For multi-param surfaces with distinct shapes (rectangular), this collapses both params onto a's IrType. Call site expects `[a's IrType, b's IrType]` → outer signature mismatch.
+- `returnIrTypes` similarly falls back to `tensorIrType` for tensor returns. The Pair-return `Pair<dA, dB>` has component types `[a's IrType, b's IrType]` per gradient correspondence; current code yields `[a's, a's]`.
+- Even after fixing the outer signature, the inner `irMatmul` call sets `typeArguments[0..2]` to whole `Rank2<…>` IrTypes (bound-violating but erasure-equivalent for square). For rectangular this would cascade into nested `DTensor<Rank2<Rank2<…>, Rank2<…>>, F32>` IrTypes that the IR verifier rejects.
+- BROADCAST IrType derivation isn't wired (slice 3a derives only TRANSPOSE/MATMUL outputs). For the BROADCAST consumed by a return-MATMUL, the IrType must be back-propagated from the return type via solving the matmul shape equation.
+
+That's four distinct synthesis-side fixes, each independently testable but interlocking. Shipping any subset without the others would either (a) leave the synthesis still rejecting at the outer signature gate, or (b) advance past the outer gate but fail the IR verifier with nested-typeArgs corruption. Either way the rectangular test still fails. **Slice 3b-2 will land all four together** — bundled because the regression is binary (either rectangular gradients lower or they don't), and a partial landing buys nothing.
+
+**Decisions worth flagging**:
+
+- **`broadcastDims` ships now even though no synthesis call site emits it yet.** The helper has independent value: (a) it's testable in isolation (3 unit tests), (b) it's the runtime contract slice 3b-2 will target, and (c) shipping it now narrows slice 3b-2's diff to plugin-side changes only. Slice 3b-2 doesn't have to also touch `:core/ops`.
+
+- **Renaming over generalisation.** Considered widening `broadcastLike(v, template)` to optionally accept dims; rejected because the dual-channel API (template-OR-dims) muddies the contract. A separate helper is clearer.
+
+- **Empty-dims case.** I picked "size 1, scalar-shaped DTensor" rather than "throw". `Shape` includes `ScalarShape` (rank 0); the rule mirrors `DTensor.size`'s behavior (`if (dims.isEmpty()) 1 else dims.fold(1, *)`). Slice 3b-2 won't emit BROADCAST with empty dims (the SUM-adjoint path always has rank ≥ 1), but the defensive test pins the contract.
+
+- **Scope cap on slice 3b-2.** The four interlocking fixes above add up. I'll budget two firings if needed: 3b-2a (outer signature fix + matmul typeArgs as atomic atoms — the structural IrType-correctness pieces) and 3b-2b (BROADCAST IrType derivation + axis matching + runtime dims wiring + the rectangular regression test). If 3b-2a unblocks something interesting on its own (it might surface an unexpected error mode), I'll stop and re-plan. **Phase-1 cleanup item**: this decomposition should be reflected in the next "Recommended next pickup" list.
+
+- **Suite +3 to 876 tests.** All three new tests are HostOps-level — no plugin-side changes in this firing.
+
+**Tests added** (+3): `broadcastDimsRectangularRank2`, `broadcastDimsCopiesDimsArray`, `broadcastDimsEmptyShapeYieldsScalarSized`.
+
+Full suite is green: **876 tests** (+3 from §0.4.194).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 0c-rectangular slice 3b-2a: outer signature fix + atomic shape-atom typeArgs.** Two structural changes in `DxirToIrSynthesis.kt`:
+   - Replace `paramIrTypes`'s `irTypeFor(it.type, context)` with a per-param lookup from `paramIrTypeMap` (already populated since §0.4.193). Replace `returnIrTypes`'s tensorIrType fallback with a call-site decomposition: read `transformed.type.arguments[fn.params.size]` (the function's R), and if `fn.returns.size == 2` decompose Pair component types, etc.
+   - Replace `irMatmul`'s `typeArguments[0..2] = lhs/rhs whole-Rank2-IrType` with atomic-atom reads: dig into `lhsIrType.arguments[0].typeOrNull as IrSimpleType` (= the inner Rank2), then `.arguments[0/1].typeOrNull` (= R/K/C atoms). Same for `irTranspose`'s `[0, 1]` type-args. Square surfaces stay bit-exact equivalent because the atoms collapse to one (`Sym`).
+   - Verify the rectangular test fails on a NEW gate (BROADCAST IrType still missing → matmul cascades wrong). Document the exact next failure mode.
+
+2. **Phase 0c-rectangular slice 3b-2b: BROADCAST IrType derivation + axis-matching + runtime dims wiring + rectangular regression test.** Build the synthesise-time backward walk from returns to derive BROADCAST IrTypes. Match BROADCAST's inner-Rank2 shape atoms to params' inner-Rank2 atoms via structural type comparison; build the IR `intArrayOf(param.dims[axis], …)` expression at the irBroadcast call site; emit `broadcastDims` instead of `broadcastLike` when matching succeeds. Add the rectangular regression test (`grad { (a, b) -> (a matmul b).sum().toFloat() }`).
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **CartPole Phase 3 first attempt** — gated on slice 3b-2b (rectangular MATMUL closure).
+
+**Definition-of-done for §0.4.195 — met**:
+- `broadcastDims(v, dims)` shipped in `:core/ops/HostOps.kt` ✓
+- 3 unit tests in HostOpsTest pin the contract (rectangular shape, defensive copy, empty-dims) ✓
+- All 873 prior tests pass + 3 new = 876 ✓
+- Slice 3b-2a + 3b-2b plans named explicitly in "Recommended next pickup" ✓
+- The (failed) candidate rectangular MATMUL test is removed; slice 3b-2b will re-add it once the synthesis lowers correctly ✓
+
 #### 0.4.194 Phase 0c-rectangular slice 3a — op-result IrType derivation for TRANSPOSE / MATMUL 2026-04-27
 
 §0.4.193's hand-off named "Phase 0c-rectangular slice 3a: op-result IrType derivation for TRANSPOSE and MATMUL" as the next single-firing pickup. §0.4.194 lands it. `synthesise()` now runs a forward-pass body walk after populating per-param IrTypes; for each `OpKind.TRANSPOSE` it derives the swapped-shape result IrType, and for each `OpKind.MATMUL` it derives the LHS-first ⊕ RHS-last combined output IrType. Both go into `operandIrTypes`, so downstream consumers (the next op in the body, `buildBody`'s IrTemporary allocation, the return Pair construction once slice 3b lands) read the correct per-DxirNode IrType. Square surfaces are bit-exact equivalent to pre-§0.4.194; rectangular MATMUL still needs slice 3b (BROADCAST template selection via runtime dims helper) before the end-to-end test can ship.

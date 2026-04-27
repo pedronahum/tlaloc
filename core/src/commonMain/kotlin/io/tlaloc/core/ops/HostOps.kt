@@ -166,6 +166,33 @@ fun <S : Shape> broadcastLike(v: Float, template: DTensor<S, F32>): DTensor<S, F
 }
 
 /**
+ * §0.4.195 — Phase 0c-rectangular slice 3b-1. Scalar → rank-N uniform broadcast keyed
+ * by an explicit [dims] array rather than a runtime template DTensor. Mirrors
+ * [broadcastLike]'s output structurally — `DTensor<S, F32>` with `dims = dims.copyOf()`
+ * and `storage = FloatArray(prod(dims)) { v }` — but lifts the shape source out of the
+ * template-DTensor channel.
+ *
+ * **Why a separate helper.** [broadcastLike] requires the caller to pass a template
+ * DTensor whose `dims` already match the desired broadcast shape. For square-matrix
+ * gradient bodies the lambda's first tensor param consistently has the right shape
+ * (e.g., `Rank2<Sym, Sym>` → all axes share one dim), so [broadcastLike]'s template
+ * channel works. For rectangular gradient bodies (e.g., `Rank2<R, K> matmul Rank2<K, C>`
+ * yields BROADCAST target `Rank2<R, C>`), no single param has matching dims — the
+ * dims must be assembled from multiple params (`a.dims[0]`, `b.dims[1]`). Slice 3b-2
+ * will wire the K2 plugin to synthesize an `intArrayOf(a.dims[0], b.dims[1])` IR
+ * expression at the BROADCAST site and emit a call to this helper.
+ *
+ * Defensive: copies `dims` so callers retain ownership of their array. Empty dims
+ * produces a 1-element scalar-shaped DTensor (size = 1 by convention; `dims.fold(1)` →
+ * 1 for empty).
+ */
+fun <S : Shape> broadcastDims(v: Float, dims: IntArray): DTensor<S, F32> {
+    val n = if (dims.isEmpty()) 1 else dims.fold(1) { acc, d -> acc * d }
+    val out = FloatArray(n) { v }
+    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+}
+
+/**
  * §0.4.188 — DTensor → Float bridge for grad lambdas. The K2 plugin recognises
  * this call site (via FirLambdaToDxirLowering) as a no-op at the dxir level —
  * `DxirType(F32, [])` is the same whether the value flows through a DTensor

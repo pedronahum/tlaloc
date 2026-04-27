@@ -87,6 +87,29 @@ class HostOpsTest {
         val id = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 0f, 0f, 1f))
         assertContentEquals(a.hostF32(), (a matmul id).hostF32())
     }
+
+    @Test
+    fun broadcastDimsRectangularRank2() {
+        val out = broadcastDims<Rank2<Sym, Sym>>(2.5f, intArrayOf(2, 3))
+        assertContentEquals(intArrayOf(2, 3), out.dims)
+        assertContentEquals(FloatArray(6) { 2.5f }, out.hostF32())
+    }
+
+    @Test
+    fun broadcastDimsCopiesDimsArray() {
+        val dims = intArrayOf(3, 4)
+        val out = broadcastDims<Rank2<Sym, Sym>>(0f, dims)
+        dims[0] = 99
+        // Output's dims must remain (3, 4) — caller mutating their array doesn't poison the tensor.
+        assertContentEquals(intArrayOf(3, 4), out.dims)
+    }
+
+    @Test
+    fun broadcastDimsEmptyShapeYieldsScalarSized() {
+        val out = broadcastDims<io.tlaloc.core.ScalarShape>(7f, intArrayOf())
+        assertEquals(1, out.size)
+        assertContentEquals(floatArrayOf(7f), out.hostF32())
+    }
 }
 
 private typealias DTensorAlias = io.tlaloc.core.DTensor<Rank2<Sym, Sym>, io.tlaloc.core.F32>
