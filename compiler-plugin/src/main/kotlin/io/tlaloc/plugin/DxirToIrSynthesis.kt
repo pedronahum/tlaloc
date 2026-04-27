@@ -187,7 +187,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
             OpKind.SIN, OpKind.COS, OpKind.ABS,
-            OpKind.TANH, OpKind.SIGMOID -> {
+            OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN -> {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
             }
@@ -573,7 +573,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     OpKind.STEP, OpKind.RELU, OpKind.NEG,
                     OpKind.SQRT, OpKind.EXP, OpKind.LOG,
                     OpKind.SIN, OpKind.COS, OpKind.ABS,
-                    OpKind.TANH, OpKind.SIGMOID -> {
+                    OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] ?: continue
                         val operandId = n.operands[0].id
@@ -861,6 +861,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.MATMUL) return irMatmul(op, env, context)
         if (op.op == OpKind.TANH) return irTanh(op, env, context)
         if (op.op == OpKind.SIGMOID) return irSigmoid(op, env, context)
+        if (op.op == OpKind.SIGN) return irSign(op, env, context)
 
         val operandDecls = op.operands.mapIndexed { idx, o ->
             env[o.id] ?: return reject(
@@ -1188,6 +1189,31 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("sigmoid"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.204 — Phase 3 sixth slice. `OpKind.SIGN(x)` for tensor x → IrCall to
+     * `:core/ops/sign` (the DTensor extension). Mirrors [irTanh] / [irSigmoid].
+     * Scalar SIGN is rejected today (no Tlaloc scalar surface emits it).
+     */
+    private fun IrBuilderWithScope.irSign(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            return tensorUnaryCall(op, env, context, signTensorSymbol())
+        }
+        return null
+    }
+
+    private fun signTensorSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("sign"),
         )
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }

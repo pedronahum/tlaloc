@@ -16,6 +16,13 @@ enum class OpKind {
     // `d/dx cos = -sin`. Lowered to `stablehlo.sine` / `stablehlo.cosine`.
     SIN, COS,
 
+    // §0.4.204 — Elementwise sign function. Returns 1 / -1 / 0 for x>0 / x<0 / x=0.
+    // Added for the CartPole NN port: the policy output is `a = sign(tanh(...) - ε)`
+    // which discretises the action to {-1, +1}. Gradient is identically 0 (the
+    // function is non-differentiable at 0 and constant elsewhere); SignRule emits
+    // a zero const at x's shape.
+    SIGN,
+
     // Boolean negation (Stage B.1 prerequisite for F3 canonicalisation per
     // docs/STAGE_B_PLAN.md §4.4 — F3 swaps an IF's then/else branches and wraps the
     // predicate in NOT to produce a canonical branch order). Operand + result are both

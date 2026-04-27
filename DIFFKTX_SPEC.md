@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.204 CartPole Phase 3 sixth slice — tensor sign() primitive + SignRule (zero gradient) 2026-04-27
+
+§0.4.203's hand-off named "tensor sign()" as the next pickup. §0.4.204 lands it: the full vertical slice for tensor sign — `OpKind.SIGN`, `SignRule` (zero gradient), `DTensor.sign()` runtime helper, DxirInterpreter arm, FIR `:core.ops.sign` UNARY_OP_MAP entry, `irSign` synthesis arm + elementwise IrType propagation. Closes the second of two named-deferred items from §0.4.202's register (the other was `>3` grad-output cap, closed in §0.4.203). The remaining gaps for the full CartPole NN forward `sign(tanh(...) - ε)` are now just composition — every primitive is wired up.
+
+**The full vertical slice**:
+
+1. **`OpKind.SIGN`** added to [OpKind.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/OpKind.kt) with a comment noting the zero-gradient convention. Lives next to SIN/COS in the trigonometric primitives section.
+
+2. **`SignRule`** in [Vjp.kt](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/Vjp.kt:368) emits a zero const at x's shape:
+   ```kotlin
+   val zero = builder.const(floatLiteralForDtype(0.0, x.type.dtype), x.type)
+   return listOf(x to zero)
+   ```
+   `readsPrimalOperandIndices = emptySet()` (the gradient body doesn't dereference x's value). The downstream gradient accumulation correctly produces a zero-tensor for x.
+
+3. **`DTensor<S, F32>.sign()`** runtime helper in [HostOps.kt](core/src/commonMain/kotlin/io/tlaloc/core/ops/HostOps.kt). Three-way map: `+1 / -1 / 0` for `x > 0 / x < 0 / x = 0`. F32 only (matches the rest of the synthesis surface).
+
+4. **DxirInterpreter `OpKind.SIGN` arm** for the Stage A backend interpreter. Same three-way map; ensures the dxir-level gradient body executes correctly when the synthesis path is unavailable.
+
+5. **FIR mapping `:core.ops.sign` → `OpKind.SIGN`** in `UNARY_OP_MAP`. Single-line addition next to `:core.ops.tanh` etc.
+
+6. **`irSign` synthesis arm + dispatch** in DxirToIrSynthesis. Reuses the §0.4.200 `tensorUnaryCall` helper (which already handles operand IrType, type-arg threading, and result IrType derivation). Scalar SIGN rejected — no Tlaloc surface emits it scalarly today.
+
+7. **Forward + backward elementwise IrType propagation** extended to include SIGN. Single-line append to the existing `STEP/RELU/NEG/SQRT/EXP/LOG/SIN/COS/ABS/TANH/SIGMOID` lists in both `deriveResultIrType` (forward) and the backward MATMUL/elementwise solve loop.
+
+**Why SignRule emits zero gradient**: The sign function is non-differentiable at the origin (Dirac delta) and has zero derivative everywhere else. For practical AD — and CartPole's `a = sign(tanh(...) - ε)` action discretisation — the gradient through sign is zero. This means policy gradients flow through `tanh(...) - ε` only when downstream consumers don't pass through `sign()`; RL training mechanisms (REINFORCE, PPO, etc.) live above this layer and use stochastic gradients of the policy itself.
+
+**Tests added** (+3):
+
+1. `HostOpsTest.signMapsThreeWaysAtZeroPositiveAndNegative` — runtime helper correctness (positive/zero/negative/-0.0 mapping).
+2. `HostOpsTest.signPreservesShape` — shape preservation.
+3. `Rank2SignGradientTest.grad through sign is zero-tensor regardless of input` — first end-to-end tensor SIGN gradient through the K2 plugin. Asserts `grad { (X, W) -> (X matmul W).tanh().sign().sum().toFloat() }` produces `∂X = zeros(2, 3)` and `∂W = zeros(3, 4)` regardless of input values.
+
+**Decisions worth flagging**:
+
+- **Chose explicit `listOf(x to zero)` over empty-list shortcut.** Returning `emptyList()` from SignRule would leave x's gradient unaccumulated (defaulting to wherever the framework initialises grads). Explicit zero contribution is cleaner — the ADD-accumulate machinery handles it uniformly with every other rule.
+
+- **`Float.sign` collision avoided.** Kotlin's `kotlin.math.sign` is a `val Float.sign: Float` PROPERTY. The DTensor extension `fun DTensor<S, F32>.sign(): DTensor<S, F32>` is on a different receiver type so there's no collision. Scalar `Float.sign()` is intentionally NOT added — that'd shadow the stdlib property.
+
+- **stablehlo emitter not yet wired.** A real CartPole port through StableHLO will need `OpKind.SIGN` → `stablehlo.sign` lowering. Deferring until the StableHLO emission path is exercised by an actual port (no test surfaces it today; the tape / interpreter / synthesis paths cover the K2 plugin's gradient-through-grad surface).
+
+- **Zero-gradient design is reusable.** Future non-differentiable / point-discontinuous primitives (ROUND, FLOOR, CEIL, BUCKETIZE, etc.) can mirror SignRule's emit-zero pattern. Consistent with PyTorch's `sign().backward()` returning zeros (and JAX's `jnp.sign` behaving similarly).
+
+- **Suite +3 to 887.** The pattern of "1 vertical slice = 2-3 tests" continues from §0.4.198/§0.4.200/§0.4.201.
+
+Full suite is green: **887 tests** (+3 from §0.4.203).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 3 seventh slice — full NN forward chain test.** With sign + tanh + relu all wired, port `sign(tanh(((X · W1).relu() · W2).relu() · W3) - ε)` through grad. The gradient is zero (sign blocks it) but the forward path exercises the full primitive composition. If the test reveals a forward-path issue, that's a cleaner shape than digging through a non-zero gradient mismatch.
+
+2. **CartPole Phase 3 eighth slice (final) — outer training loop.** `while (loss > threshold) { ... apply gradient updates ... }` — gradient-bearing WHILE with closure-captured-state mutation. Multi-session structural item; needs careful design. Once landed, CartPole Phase 3 closes per `docs/CARTPOLE_PORT_PLAN.md`.
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **Phase 1 priority #1: Multi-result IF AD Phase 4** — multi-session structural. Lower priority while CartPole Phase 3 is unlocking compounding wins.
+
+**Definition-of-done for §0.4.204 — met**:
+- `OpKind.SIGN` enum entry ✓
+- `SignRule` registered + emits zero gradient ✓
+- `DTensor.sign()` runtime helper + 2 unit tests ✓
+- DxirInterpreter SIGN arm ✓
+- FIR `:core.ops.sign` → `OpKind.SIGN` UNARY_OP_MAP entry ✓
+- `irSign` synthesis arm + dispatch + elementwise propagation ✓
+- First end-to-end tensor SIGN gradient through K2 plugin (zero gradient verified) ✓
+- All 884 prior tests pass + 3 new = 887 ✓
+
 #### 0.4.203 CartPole Phase 3 fifth slice — `>3` grad-output cap lifted (Quadruple); first 4-grad-param 3-layer NN gradient 2026-04-27
 
 §0.4.202's hand-off named "CartPole Phase 3 fifth slice — `>3` grad-output cap" as the next pickup. §0.4.203 lands it: synthesise() now accepts `fn.returns.size in [1, 4]` and uses `io.tlaloc.autograd.Quadruple` (which has lived in `:autograd` since §0.4.134 for `valueAndGrad3`'s value+3-grad return) to box 4-component gradient outputs. The first end-to-end 4-grad-param NN gradient through the K2 plugin lands as a 3-layer chain `(((X · W1).relu() · W2).relu() · W3).sum()` with 5 distinct ShapeAtoms (Sym, Lit<Int>, Lit<Long>, Lit<Short>, Lit<Byte>) — analytic gradient verified within 1e-3 across all four params (2×3, 3×4, 4×5, 5×2 weights).

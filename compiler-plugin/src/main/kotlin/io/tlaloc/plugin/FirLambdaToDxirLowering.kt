@@ -1023,6 +1023,7 @@ object FirLambdaToDxirLowering {
         put("io.tlaloc.core.ops.neg", OpKind.NEG)
         put("io.tlaloc.core.ops.sigmoid", OpKind.SIGMOID)
         put("io.tlaloc.core.ops.tanh", OpKind.TANH)
+        put("io.tlaloc.core.ops.sign", OpKind.SIGN)
         put("io.tlaloc.core.ops.exp", OpKind.EXP)
         put("io.tlaloc.core.ops.log", OpKind.LOG)
         put("io.tlaloc.core.ops.sqrt", OpKind.SQRT)

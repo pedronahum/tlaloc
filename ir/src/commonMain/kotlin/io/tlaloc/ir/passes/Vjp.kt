@@ -366,6 +366,28 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.204 — CartPole Phase 3 sixth slice. `d/dx sign(x) = 0` everywhere
+     * except at the non-differentiable origin (where it's a Dirac delta).
+     * Practical AD convention: gradient is identically zero. SignRule emits a
+     * zero const at x's shape; [readsPrimalOperandIndices] = `emptySet()` since
+     * the gradient body doesn't dereference x's value.
+     *
+     * For CartPole's `a = sign(tanh(...) - ε)` discretisation, this means the
+     * loss gradient correctly stops at the action-discretisation boundary —
+     * the policy / weight gradients flow through `tanh(...) - ε` only when
+     * downstream consumers don't pass through `sign()`. Practical RL training
+     * mechanisms (REINFORCE, etc.) live above this layer.
+     */
+    val SignRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val zero = builder.const(floatLiteralForDtype(0.0, x.type.dtype), x.type)
+            return listOf(x to zero)
+        }
+    }
+
+    /**
      * `d/dx(sin(x)) = cos(x)`. §0.4.166 — Trigonometric primitive for the CartPole
      * physics step. Mirrors ExpRule's "emit a fresh primal-shape op in the gradient
      * body" approach to avoid sharing the primal's result with the adjoint.
@@ -655,6 +677,7 @@ object VjpRegistry {
         OpKind.LOG to LogRule,
         OpKind.SIN to SinRule,
         OpKind.COS to CosRule,
+        OpKind.SIGN to SignRule,
         OpKind.SQRT to SqrtRule,
         OpKind.TANH to TanhRule,
         OpKind.SIGMOID to SigmoidRule,

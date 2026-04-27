@@ -125,6 +125,22 @@ class HostOpsTest {
         val s = a.step()
         assertContentEquals(intArrayOf(3, 2), s.dims)
     }
+
+    @Test
+    fun signMapsThreeWaysAtZeroPositiveAndNegative() {
+        val a = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 0f, -1f, 0.5f, -0.0f, -100f))
+        val s = a.sign()
+        // 0f and -0f both map to 0; positives → 1, negatives → -1.
+        assertContentEquals(floatArrayOf(1f, 0f, -1f, 1f, 0f, -1f), s.hostF32())
+        assertContentEquals(intArrayOf(2, 3), s.dims)
+    }
+
+    @Test
+    fun signPreservesShape() {
+        val a = Tensors.f32Matrix<Sym, Sym>(4, 1, floatArrayOf(0.1f, -0.1f, 0.0f, 5.0f))
+        val s = a.sign()
+        assertContentEquals(intArrayOf(4, 1), s.dims)
+    }
 }
 
 private typealias DTensorAlias = io.tlaloc.core.DTensor<Rank2<Sym, Sym>, io.tlaloc.core.F32>

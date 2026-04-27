@@ -217,6 +217,21 @@ object DxirInterpreter {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { if (a[it] > 0f) 1f else 0f }
             }
+            OpKind.SIGN -> {
+                // §0.4.204 — sign(x) = +1 / -1 / 0 for x>0 / x<0 / x=0. Used by
+                // CartPole's policy `a = sign(tanh(...) - ε)`. SignRule emits a
+                // zero gradient for it (sign is non-differentiable at the origin
+                // and constant elsewhere); the runtime forward path is what this
+                // interpreter arm covers.
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) {
+                    when {
+                        a[it] > 0f -> 1f
+                        a[it] < 0f -> -1f
+                        else -> 0f
+                    }
+                }
+            }
             OpKind.NOT -> {
                 // Boolean negation; same 0f/1f encoding as STEP. NOT is the dxir
                 // primitive F3 emits when canonicalising an IF's branch order

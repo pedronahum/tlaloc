@@ -60,6 +60,27 @@ fun <S : Shape> DTensor<S, F32>.step(): DTensor<S, F32> {
     return DTensor(HostF32Storage(out), dims.copyOf(), F32)
 }
 
+/**
+ * §0.4.204 — CartPole Phase 3 sixth slice. Elementwise sign (signum) on a tensor:
+ * `+1` where x > 0, `-1` where x < 0, `0` at x = 0. Required by CartPole's NN
+ * forward `a = sign(tanh(...) - ε)` which discretises the action to {-1, +1}.
+ *
+ * The K2 plugin's [DxirToIrSynthesis.irSign] emits a call to this helper for
+ * `OpKind.SIGN` ops. `SignRule`'s gradient is identically 0 (sign is non-
+ * differentiable at the origin and constant elsewhere) — the policy / loss
+ * gradient correctly stops at the discretisation boundary.
+ */
+fun <S : Shape> DTensor<S, F32>.sign(): DTensor<S, F32> {
+    val v = hostF32()
+    val out = FloatArray(v.size)
+    for (i in v.indices) out[i] = when {
+        v[i] > 0f -> 1f
+        v[i] < 0f -> -1f
+        else -> 0f
+    }
+    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+}
+
 fun <S : Shape> DTensor<S, F32>.neg(): DTensor<S, F32> {
     val v = hostF32()
     val out = FloatArray(v.size)
