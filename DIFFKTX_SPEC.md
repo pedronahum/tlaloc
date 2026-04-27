@@ -39,6 +39,100 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.239 Paper-figures correction — `PAPER_SPEEDUPS` rewritten against Table 3; `HEAD_TO_HEAD_HARNESS_PLAN.md` had Brachistochrone↔HookeanSpring swapped 2026-04-27
+
+§0.4.238's hand-off named "polish that doesn't grow scope" or "wait for toolchain" as next options. Found a **real bug** while spot-checking `PAPER_SPEEDUPS` against the OOPSLA paper text in `docs/papers/coarsening-autodiff.txt`: the placeholder ranges in `aggregate.py` (and the matching table in `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3) had **Brachistochrone ↔ HookeanSpring numbers swapped** and a wrong CartPole range. §0.4.239 rewrites both against the verified Table 3 figures.
+
+**The bug** (inherited from §0.4.181's plan placeholder, propagated to §0.4.234's aggregator):
+
+| Benchmark | OLD (wrong) | NEW (Table 3 overall) | Source row |
+|---|---|---|---|
+| Brachistochrone | 4-11× | **1.79-2.51×** | Table 3 `Branchist.` overall col |
+| HookeanSpring | 1.05-1.12× | **4.09-11.02×** | Table 3 HookeanSpring overall col |
+| CartPole | 1.22-4.42× | **1.05-1.12×** | Table 3 CartPole overall col |
+| HMC | 2.3-3.6× | 2.27-3.56× | already close; tightened |
+| BGDHyperOpt | (unset) | **8.06-8.56×** | newly added |
+| QWOP | (unset) | unset | paper's QWOP measures actual physics game, not our synthetic |
+
+The Brachistochrone "4-11×" was actually HookeanSpring's overall speedup; HookeanSpring's "1.05-1.12×" was actually CartPole's overall speedup; CartPole's "1.22-4.42×" doesn't match anything in Table 3 cleanly. **The plan's Phase 3 table appears to have been written from memory rather than from the paper's actual figures.**
+
+**Why "Overall Time" not "Differentiation Time"**:
+
+Table 3 has two columns of speedups: differentiation-only and overall. The harness measures `DxirInterpreter.evalFunction(grad, inputs)` per-iteration cost — that's gradient evaluation, which in reverse-mode AD includes the embedded primal recomputation as part of the backward sweep. This maps closer to the paper's "Overall Time" (which includes both forward and backward) than to "Differentiation Time" (which artificially separates the halves due to the paper's library structure). Documented inline in `aggregate.py`'s `PAPER_SPEEDUPS` comment.
+
+**Files changed**:
+
+1. [`harness/python/aggregate.py`](harness/python/aggregate.py) — `PAPER_SPEEDUPS` dict rewritten with verified ranges from Table 3 overall column. Inline comment explains the methodology choice + cites the paper text location. BGDHyperOpt added (was missing); QWOP intentionally omitted with rationale (paper's QWOP measures actual game physics, not our synthetic primal).
+
+2. [`docs/HEAD_TO_HEAD_HARNESS_PLAN.md`](docs/HEAD_TO_HEAD_HARNESS_PLAN.md) — Phase 3 example table rewritten with corrected ranges. Updated header to clarify "vs Kotlin baseline" (the paper's measurement axis) instead of the misleading "vs torch.compile" framing in the original. Footer note flags the §0.4.239 correction.
+
+3. [`harness/python/test_data/pytorch_agreeing.json`](harness/python/test_data/pytorch_agreeing.json) — test fixture's Brachistochrone median_ns updated from 24000 to 6000 so the speedup ratio (2.00×) lands in the new band [1.43, 3.01] and the M9 verdict stays ✓. Without this update, the existing `test_with_pytorch_computes_speedup_and_m9_verdict` test would fail on the corrected ranges.
+
+4. [`harness/python/aggregate_test.py`](harness/python/aggregate_test.py) — test docstring + assertion updated for `2.00×` (vs old `8.00×`); inline comment cites the §0.4.239 correction.
+
+**Verification**:
+
+```
+$ python3 -m unittest harness.python.aggregate_test
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.259s
+OK
+
+$ tmpdir=...; aggregator output:
+| brachistochrone-compound-velocity-N5 | 3000 | 6000 | — | 2.00× | — | 1.79-2.51× | ✓ |
+| hookean-spring-scalar-N10 | 24000 | 26000 | — | 1.08× | — | 4.09-11.02× | ✗ |
+```
+
+The HookeanSpring 1.08× → ✗ is the discriminator working correctly: that speedup falls outside the new band [3.27, 13.22], so the M9 verdict correctly flags it. The OLD (wrong) range would have shown ✓ for HookeanSpring at 1.08× — which would have been a misleading green light at the M9 closure stage.
+
+**Decisions worth flagging**:
+
+- **The bug propagated through five §0.4 entries** (§0.4.181 plan → §0.4.225 entry's "Brachistochrone 4-11× → ✓" framing → §0.4.234 aggregator landing → §0.4.237 test fixture → §0.4.238 E2E test). Each one inherited the wrong numbers without anyone re-checking against the paper. **Lesson: when a number gets cited across multiple entries, source-of-truth verification shouldn't be assumed; check it explicitly when the chance arises.**
+
+- **CartPole's 1.22-4.42× was the most fictional.** Brachistochrone↔HookeanSpring is at least a "swap" — both numbers came from the paper, just assigned to the wrong benchmark. CartPole's 1.22-4.42× doesn't match any column of any benchmark in Table 3. Probably a mis-typed range from someone's notes. The corrected 1.05-1.12× is much tighter — and notably unflattering: CartPole was the paper's hardest benchmark to coarsen (the only one with a deep-NN training step inside the autodiff scope), and its measured speedup is small.
+
+- **HookeanSpring 4.09-11.02× makes Tlaloc's M9 bar harder, not easier.** Under the OLD (wrong) HookeanSpring range of 1.05-1.12×, ANY measurable speedup ≥1× would land Tlaloc in the band. Under the corrected 4.09-11.02× range, Tlaloc must actually deliver 4× or better via a native runtime. This bumps the bar for the eventual "Phase 1 closed" §0.4 entry.
+
+- **The §0.4.234 entry's text now contains historically incorrect arithmetic.** The entry said "8.00× within [3.2, 13.2] = [0.8 × 4, 1.2 × 11] → ✓" — that calculation used the wrong band. We don't backfill historical entries; the §0.4.239 entry above is the corrigendum, citing §0.4.234 as the propagation point.
+
+- **The aggregator's M9 verdict logic is unchanged.** The bug was purely in the data (PAPER_SPEEDUPS dict); the band-computation code (`m9_verdict()` function) was always correct. So this fix is data-only — no logic changes, no regressions in behaviour.
+
+- **Suite stays at 964 (the existing test still passes; only the fixture data + assertion changed).**
+
+**Files updated** (4):
+
+1. `harness/python/aggregate.py` — `PAPER_SPEEDUPS` dict + inline methodology note
+2. `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` — Phase 3 table corrected
+3. `harness/python/test_data/pytorch_agreeing.json` — fixture Brachistochrone median_ns 24000 → 6000
+4. `harness/python/aggregate_test.py` — assertion `8.00×` → `2.00×`; comment cites §0.4.239
+
+**Tests added** (+0): pure correction; existing 6 Python tests still pass with updated fixture.
+
+Full suite is green: **964 tests** (unchanged from §0.4.238).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 1 closure entry post-toolchain-install.** Now with corrected paper figures, the closure entry's table will use the right ranges from the start. 1 firing post-install.
+
+2. **IREE CPU runtime implementation.** Gated on user-side IREE install per §0.4.230's plan.
+
+3. **More cross-checks against the paper.** This firing audited Table 3; further audits could check the paper's Section 7.2 narrative against `aggregate.py`'s benchmark descriptions. Lower priority than catching another swap.
+
+4. **Polish that doesn't grow scope** — risk of busywork.
+
+5. **Out-of-scope register refresh #4** — §0.4.235 was 4 firings ago; another would land cleanly here.
+
+**Definition-of-done for §0.4.239 — met**:
+- All four files (aggregator, plan, fixture, test) updated with verified Table 3 ranges ✓
+- BGDHyperOpt added to PAPER_SPEEDUPS (was missing) ✓
+- QWOP explicitly omitted with rationale (paper's QWOP ≠ our synthetic) ✓
+- Methodology note inline (overall vs differentiation, harness measures gradient eval) ✓
+- All 6 Python tests pass ✓
+- JVM build green at 964 tests ✓
+- Plan footer flags the §0.4.239 correction so future readers see it ✓
+- Bug-propagation chain documented (§0.4.181 → §0.4.225 → §0.4.234 → §0.4.237 → §0.4.238) ✓
+
 #### 0.4.238 Harness E2E integration coverage — JVM dump → Python aggregator round-trip test 2026-04-27
 
 §0.4.237's hand-off named "more aggregator coverage" as a polish-risk option but flagged a specific gap worth closing: **integration coverage between the JVM dump and the Python aggregator.** The two halves have separate test suites but no test exercising the full pipeline end-to-end. §0.4.238 lands that bridge.

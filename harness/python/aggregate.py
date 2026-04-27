@@ -46,16 +46,32 @@ from typing import Any, Dict, List, Optional, Tuple
 # Format: {benchmark: (low, high)} — speedup over torch.compile.
 # ============================================================================
 
-# These are the paper's reported ranges. Our measurements should fall within
-# 20% of these (per §11.13's M9 exit criterion). Updated when the paper's
-# specific numbers are confirmed; conservative defaults below.
+# Paper-reported overall speedups per Table 3 of the OOPSLA 2021 paper
+# `coarsening-autodiff` (full text in `docs/papers/coarsening-autodiff.txt`).
+# Each range is (min, max) across the paper's 2 machines × 3 configs = 6
+# measurements per benchmark.
+#
+# We use the "Overall Time" column (not "Differentiation Time") because the
+# harness measures gradient evaluation latency — and reverse-mode AD's
+# gradient computation includes the embedded primal recomputation, which
+# maps closer to the paper's "Overall Time" than its "Differentiation Time"
+# (the latter is artificially smaller because the paper's library separates
+# the forward/backward halves).
+#
+# §0.4.239 corrected swapped Brachistochrone ↔ HookeanSpring numbers and a
+# wrong CartPole range that were inherited from the §0.4.181 plan's
+# placeholder table.
 PAPER_SPEEDUPS: Dict[str, Tuple[float, float]] = {
-    "brachistochrone-compound-velocity-N5": (4.0, 11.0),
-    "hookean-spring-scalar-N10": (1.05, 1.12),
-    "hmc-logistic-regression-n4-d2": (2.3, 3.6),
-    "cartpole-phase1-onestep": (1.22, 4.42),
-    # BGDHyperOpt and QWOP avatar-step don't have widely-known paper numbers
-    # in §7's primary tables; leave unset and report "—" in the table.
+    "bgd-hyperopt-outer-loop-K3":             (8.06, 8.56),    # Table 3 BGDHyperOpt overall
+    "brachistochrone-compound-velocity-N5":   (1.79, 2.51),    # Table 3 Branchist. overall
+    "cartpole-phase1-onestep":                (1.05, 1.12),    # Table 3 CartPole overall
+    "hmc-logistic-regression-n4-d2":          (2.27, 3.56),    # Table 3 HMC overall
+    "hookean-spring-scalar-N10":              (4.09, 11.02),   # Table 3 HookeanSpring overall
+    # QWOP: the paper's QWOP measures the actual physics-based game avatar-step
+    # (not Tlaloc's synthetic primal). The paper's Overall Time speedup
+    # (1.41-1.57×) is a different shape than what Tlaloc's `qwop-avatar-step`
+    # synthetic measures, so leave unset and report "—" rather than spurious
+    # comparison.
 }
 
 

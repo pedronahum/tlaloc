@@ -82,9 +82,10 @@ class AggregateTest(unittest.TestCase):
             })
             result = run_aggregate(tmp)
             self.assertEqual(0, result.returncode, msg=f"aggregator failed: {result.stderr}")
-            # Brachistochrone: tlaloc=3000ns, pytorch=24000ns → 8.00× speedup.
-            # Paper range 4-11×; 8.00 within ±20% band [3.2, 13.2] → M9 ✓.
-            self.assertIn("8.00×", result.stdout)
+            # Brachistochrone: tlaloc=3000ns, pytorch=6000ns → 2.00× speedup.
+            # Paper range (corrected per §0.4.239 from Table 3 overall): 1.79-2.51×.
+            # ±20% band → [1.43, 3.01]. 2.00 falls inside → M9 ✓.
+            self.assertIn("2.00×", result.stdout)
             self.assertIn("✓", result.stdout)
             # Numerical agreement passes (forward + gradient values match).
             self.assertIn("PyTorch: ✓", result.stdout)

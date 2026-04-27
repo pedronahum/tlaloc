@@ -5,9 +5,9 @@
     "gradientValues": [25.3125],
     "warmupIterations": 200,
     "measuredIterations": 800,
-    "medianNanos": 24000,
-    "minNanos": 22000,
-    "p99Nanos": 35000
+    "medianNanos": 6000,
+    "minNanos": 5500,
+    "p99Nanos": 9000
   },
   {
     "benchmark": "hookean-spring-scalar-N10",

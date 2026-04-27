@@ -89,16 +89,20 @@ The JVM aggregator in Phase 1 reads these JSON files (when present) and compares
 
 ### Phase 3 — Speedup vs paper's reported figures (1 firing)
 
-**Deliverable:** A §0.4 entry titled **"Phase 1 closed — coarsening at M9 parity"** that pins the 4-6 head-to-head numbers against the paper's reported speedups. Format:
+**Deliverable:** A §0.4 entry titled **"Phase 1 closed — coarsening at M9 parity"** that pins the 4-6 head-to-head numbers against the paper's reported speedups. Format (paper figures from Table 3 "Overall Time" column of `docs/papers/coarsening-autodiff.txt`):
 
 ```
-| Benchmark | Paper reported (× over torch.compile) | Tlaloc actual (× over torch.compile) | Pass M9? |
-|---|---|---|---|
-| Brachistochrone | 4-11× | <measured> | ✓/✗ |
-| HookeanSpring | 1.05-1.12× | <measured> | ✓/✗ |
-| HMC | 2.3-3.6× | <measured> | ✓/✗ |
-| CartPole | 1.22-4.42× | <measured> | ✓/✗ |
+| Benchmark       | Paper reported (overall, vs Kotlin baseline) | Tlaloc actual | Pass M9? |
+|-----------------|----------------------------------------------|---------------|----------|
+| BGDHyperOpt     | 8.06-8.56×                                   | <measured>    | ✓/✗      |
+| Brachistochrone | 1.79-2.51×                                   | <measured>    | ✓/✗      |
+| CartPole        | 1.05-1.12×                                   | <measured>    | ✓/✗      |
+| HMC             | 2.27-3.56×                                   | <measured>    | ✓/✗      |
+| HookeanSpring   | 4.09-11.02×                                  | <measured>    | ✓/✗      |
+| QWOP            | 1.41-1.57×                                   | <measured>    | ✓/✗      |
 ```
+
+(The earlier draft of this table had Brachistochrone ↔ HookeanSpring numbers swapped and a wrong CartPole range; corrected against the paper text in §0.4.239.)
 
 **Acceptance per §11.13's M9 exit criterion:** within 20% of paper's figures, >3× over torch.compile on at least three of six, f32-tolerance numerical match.
 
