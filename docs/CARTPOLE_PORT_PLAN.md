@@ -1,25 +1,29 @@
 # CartPole Benchmark Port — Plan
 
-**Status:** Implementation **2/3 phases complete** (§0.4.181 amendment); Phase 3 gated on Phase 0c (MATMUL through K2 plugin).
+**Status:** Implementation **2/3 phases complete** (§0.4.181 amendment, refreshed §0.4.191); Phase 3 gated on **rectangular MATMUL** in synthesis (square-MATMUL surface closed §0.4.187 + §0.4.189).
 
-**Ship state** (updated 2026-04-26):
+**Ship state** (updated 2026-04-27):
 
 | Phase | Plan estimate | Actual | Closing entry |
 |---|---|---|---|
 | Phase 0a-1 — scalar sin/cos | 1 firing | 1 firing | §0.4.166 |
 | Phase 0a-2 — scalar abs | 1 firing | 1 firing | §0.4.167 |
 | Phase 0b — max/sign as IF chains | 1 firing | not needed (Phase 1 used direct IF) | n/a |
-| Phase 0c — plugin MATMUL | deferred | NOT DONE | pending |
+| Phase 0c — plugin MATMUL (square) | deferred | **3 firings (slices a/b/c)** | §0.4.185 + §0.4.186 + §0.4.187 |
+| Phase 0c-followup — DTensor → Float bridge + irMatmul/irTranspose | not in original plan | **2 firings** | §0.4.188 + §0.4.189 |
+| Phase 0c-rectangular — per-operand IrType tracking | not in original plan | **NOT DONE** (multi-session) | pending |
 | Phase 1 — physics-only port | 1 firing | 6 firings (first attempt §0.4.168 hit downstream gate; closure via §0.4.169–§0.4.175 diagnostic + structural arc) | §0.4.175 |
 | Phase 2 — B=3 loop with state passing | 2 firings | 1 firing (regression test only; no new code) | §0.4.178 |
-| Phase 3 — NN + outer training loop | 4-5 firings | NOT DONE (gated on Phase 0c) | pending |
-| **CartPole-specific total (closed)** | **8-10 firings (Phases 0a + 1 + 2)** | **6 firings (165 + 166 + 167 + 168 + 175 + 178)** | |
+| Phase 3 — NN + outer training loop | 4-5 firings | **NOT DONE** (gated on Phase 0c-rectangular) | pending |
+| **CartPole-specific total (closed)** | **8-10 firings (Phases 0a + 1 + 2)** | **11 firings (165 + 166 + 167 + 168 + 175 + 178 + 185 + 186 + 187 + 188 + 189)** | |
 
-Plus **8 firings of platform work** (§0.4.169–§0.4.176) that closed Phase 2 #1 (Plugin IR-side synthesis closure) for the scalar-arithmetic surface — that work was discovered through the CartPole Phase 1 attempt (§0.4.168). Combined: 14 firings actually shipped for the closed phases vs. 10-12 originally planned. The plan estimate didn't budget the diagnostic + structural arc that surfaced from porting.
+Plus **8 firings of cross-cutting platform work** (§0.4.169–§0.4.176) that closed Phase 2 #1 (Plugin IR-side synthesis closure) for the scalar-arithmetic surface — discovered through the CartPole Phase 1 attempt (§0.4.168). Combined: **19 firings actually shipped** for the closed pieces vs. 10-12 originally planned. The plan didn't budget either the diagnostic + structural arc OR the Phase 0c slice fan-out.
 
 **Phase 0b never landed** because Phase 1's source uses the direct `if (maxArg > 0.0f) maxArg else 0.0f` IF expression — no `max` / `sign` extension needed. Phase 0b stays in the plan as a future addition if a different CartPole-style port surfaces the need.
 
-**Phase 3 is gated on Phase 0c** (MATMUL through K2 plugin). Per the §0.4.180 register, Phase 0c is multi-session by itself because rank-2 MATMUL output requires synthesis-side widening (rank-2 IrType building, broadcast helpers, etc.) that today's synthesis surface (scalar + rank-1 F32) doesn't carry.
+**Phase 0c is now SQUARE-MATRIX-CLOSED**: §0.4.185 wired Rank2/3 param recognition (FIR side); §0.4.186 widened `DxirToIrSynthesis` to accept rank-1/2/3 F32 + lowered rank-N F32 const through `broadcastLike`; §0.4.187 added `:core.ops.matmul` to `BINARY_OP_MAP`. §0.4.188 then landed the DTensor → Float bridge (via `:core.ops.toFloat` + `:core.ops.sum`) so lambda bodies can return Float computed from tensor intermediates. §0.4.189 added `irTranspose` + `irMatmul` synthesis arms, and verified the first end-to-end MATMUL gradient: `grad { a -> (a matmul a).sum().toFloat() }` on A=[[1,2],[3,4]] produces [[7,11],[9,13]] within `1e-3` tolerance.
+
+**Phase 3 is now gated on rectangular MATMUL**, NOT square. CartPole's NN forward (`a = sign(tanh(relu(relu(X·W1)W2)W3) - ε)`) uses rectangular weights (X is batch×4, W1 is 4×8, W2 is 8×4, W3 is 4×1). The current synthesis surface threads ONE shape parameter through `tensorIrType` — works for `Rank2<R, R>` square shapes but not for `Rank2<R, K> matmul Rank2<K, C>` where R, K, C are distinct. Per the §0.4.190 register, the rectangular-MATMUL widening is a multi-session item: extend `SynthesisContext` to carry per-operand IrTypes (likely a `Map<DxirNode.id, IrType>`); rewrite `irMatmul` / `irTranspose` to use per-operand types instead of the single `tensorIrType`.
 
 The historical planning content below is preserved verbatim for reference.
 

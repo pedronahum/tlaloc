@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.191 `docs/CARTPOLE_PORT_PLAN.md` amendment — Phase 0c square-matrix closure + rectangular gap named explicitly 2026-04-27
+
+§0.4.190's hand-off named "`docs/CARTPOLE_PORT_PLAN.md` amendment" as recommended-next #4 — single-firing doc-only update reflecting the Phase 0c square-matrix closure. §0.4.191 lands it. The plan's Status line + ship-state table now mirror reality: Phase 0c closed for the SQUARE surface across §0.4.185–§0.4.189 (5 firings, not the 1-firing-deferred original estimate); Phase 3 is now gated on a refined "Phase 0c-rectangular" item rather than the original "Phase 0c" lump.
+
+**The amendment** in [docs/CARTPOLE_PORT_PLAN.md:1-30](docs/CARTPOLE_PORT_PLAN.md#L1-L30):
+
+1. **Status line** changed from "Phase 3 gated on Phase 0c (MATMUL through K2 plugin)" to "Phase 3 gated on **rectangular MATMUL** in synthesis (square-MATMUL surface closed §0.4.187 + §0.4.189)". The change names the SPECIFIC remaining gap rather than the broad Phase 0c lump.
+
+2. **Ship-state table** gains three new rows:
+   - "Phase 0c — plugin MATMUL (square)" — shipped in 3 firings (§0.4.185 + §0.4.186 + §0.4.187) covering FIR-side Rank2/3 param recognition, synthesis-side rank-1/2/3 acceptance, and `:core.ops.matmul` BINARY_OP_MAP entry.
+   - "Phase 0c-followup — DTensor → Float bridge + irMatmul/irTranspose" — shipped in 2 firings (§0.4.188 + §0.4.189). NOT in the original plan; surfaced through the actual MATMUL gradient test.
+   - "Phase 0c-rectangular — per-operand IrType tracking" — multi-session, NOT done. The new explicit gap.
+
+3. **Total firing count updated**: 6 firings (165–178) + 5 Phase 0c slices = **11 firings** of CartPole-specific work for the closed pieces (vs. the original plan's 8-10 estimate). The plan now reflects this honestly.
+
+4. **New explanatory paragraph** after the table: "Phase 0c is now SQUARE-MATRIX-CLOSED" — narrates the §0.4.185–§0.4.189 arc for future readers. Plus a follow-up paragraph naming the rectangular-MATMUL widening (per-operand IrType tracking via a `Map<DxirNode.id, IrType>`) as the explicit Phase 3 prerequisite.
+
+**Decisions worth flagging**:
+
+- **The plan's "1-firing Phase 0c" estimate was off by 5×.** Original plan said "Phase 0c (deferred to a later phase OR shared with HMC): plugin MATMUL recognition." Actual: 3 substrate firings + 2 follow-up firings. The plan didn't anticipate the synthesis-side rank-2 widening + the DTensor → Float bridge as separate substrate pieces; they only surfaced through the actual MATMUL gradient attempt.
+
+- **The rectangular-MATMUL gap is now NAMED.** Pre-§0.4.191, "Phase 0c" was a single lump; post-§0.4.191 it's three items (square shipped, follow-up shipped, rectangular pending). Future readers see exactly what's left without reading the §0.4.185–§0.4.189 prose to triangulate.
+
+- **Phase-3 estimate stays at 4-5 firings**, but the gating is more precise. Old gate: "Phase 0c". New gate: "Phase 0c-rectangular (1-2 firings) + Phase 3 NN port (4-5 firings) = 5-7 firings to close CartPole".
+
+- **Plan doc structure unchanged below the Status section.** Only the head + ship-state table were amended. The historical planning prose stays verbatim; the separator pattern (`---`) preserves the §0.4.181 amendment convention.
+
+- **Mirrors §0.4.181's HMC plan amendment.** Same shape: Status line + ship-state table + brief explanatory prose + separator preserving the original. Doc-only firings have a consistent structure now (§0.4.181 + §0.4.190 + §0.4.191).
+
+- **No code changes; no test count change.** Pure documentation.
+
+- **`docs/HMC_PORT_PLAN.md` doesn't need an amendment this firing.** §0.4.181 already updated it for HMC's full closure; no new HMC firings since.
+
+**Tests added** (+0): pure planning artefact.
+
+Full suite is green: **872 tests** (unchanged from §0.4.190).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 0c-rectangular slice 1: per-operand IrType tracking scaffold.** Multi-session work begins by extending `SynthesisContext` to carry a `Map<Int, IrType>` (DxirNode id → IrType). Existing `tensorIrType` becomes the default for ranks not in the map. Single-firing scaffold; the second slice wires irMatmul/irTranspose to consult the map.
+2. **Phase 0c-rectangular slice 2: wire irMatmul/irTranspose to per-operand types.** Once the scaffold lands, this firing rewrites the rank-2 synthesis arms to use per-operand IrTypes. With slice 1 + 2 done, rectangular MATMUL works end-to-end.
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+4. **HMC plan re-amendment.** Lower priority; §0.4.181 still reflects current state since no new HMC firings.
+
+**Definition-of-done for §0.4.191 — met**:
+- `docs/CARTPOLE_PORT_PLAN.md` Status line updated to name "rectangular MATMUL" as the Phase-3 gate ✓
+- Ship-state table reflects §0.4.185–§0.4.189 closures ✓
+- Three new rows added: square Phase 0c, Phase 0c-followup, Phase 0c-rectangular ✓
+- Total firing count corrected from 6 to 11 for closed pieces ✓
+- Explanatory paragraph names §0.4.185–§0.4.189 substrate work ✓
+- Suite stays at 872 tests (unchanged) ✓
+
 #### 0.4.190 Out-of-scope register refresh — Phase 0c closed for square-matrix surface; head-to-head harness Phase 1 done 2026-04-27
 
 §0.4.180 was the seventh register snapshot; §0.4.190 is the eighth. 9 sub-sections shipped between §0.4.181 and §0.4.189 — a focused arc that closed Phase 0c (plugin MATMUL recognition) for the square-matrix surface AND landed Phase 1 of the head-to-head harness. Two related multi-session items moved from "deferred" to "shipped" or "substantively closed".
