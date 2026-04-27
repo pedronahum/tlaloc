@@ -39,6 +39,87 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.220 QWOP Phase 2 closure — full `avatarStepPrimal` integration test (12 WHILEs + 8 IFs end-to-end) FD-validated 2026-04-27
+
+§0.4.219's hand-off named "QWOP Phase 2 closure — full `avatarStepPrimal()` coarsened gradient integration test" as the next pickup. §0.4.220 lands it: ships `QwopAvatarStepIntegrationTest` exercising **all 12 top-level WHILEs and 8 IFs** of the QWOP synthetic primal simultaneously, with a finite-difference-validated gradient pin closing Phase 2.
+
+**The integration shape**:
+
+`Qwop.avatarStepPrimal()` chains 6 helpers across 5 phases — A through E — feeding 4 muscle inputs through 13 logical loops (12 visible at top-level after C5 unrolls the inner crossLimbCoupling WHILE) and 8 IF predicates, terminating in a 4-ADD reduction. Pre-§0.4.220 each helper had its own per-slice gradient pin (§0.4.211–§0.4.219); §0.4.220 validates that they **compose correctly** when wired together into a single primal.
+
+**The hand-traced forward at safe-input m\* = 0.1**:
+
+| Phase | Computation | Value |
+|-------|-------------|-------|
+| A | each muscle = 4 × 0.1 × 0.1 (no clamp at thresholds 1.0/1.5/1.8/2.0) | 0.04 |
+| B | coarseDist = 3 × 0.12 | 0.36 |
+| B | fineDist = 3 × 0.04 × 0.36 | 0.0432 |
+| C | coupling = 9 × 0.04 × 0.08 | 0.0288 |
+| C | friction = 3 × 0.0288² | 0.002488 |
+| D | legChain = 3 × 0.12 (no ground clamp) | 0.36 |
+| D | armChain = 3 × (0.04 + 0.002488) (no torque clamp) | 0.1275 |
+| E | torque = 3 × (0.36 + 0.1275) (no torque clamp) | 1.4625 |
+| E | energy = 3 × 1.4625 × 0.0432 (no energy clamp) | 0.1895 |
+| Final | combined4 = fineDist + friction + legChain + armChain + energy | ≈ 0.7227 |
+
+The chosen input m\* = 0.1 keeps every IF predicate's input well below its clamp threshold — ε = 0.01 perturbations don't flip any branch, making FD validation safe.
+
+**The test file** [`QwopAvatarStepIntegrationTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopAvatarStepIntegrationTest.kt) — 6 tests, all passing on first run:
+
+1. `primalStructure` — pins **12 top-level WHILEs + 0 top-level IFs**. Confirms the structural shape claimed in `Qwop.kt`'s docs.
+2. `forwardEvalAtSmallInputs` — at m\*=0.1: forward ≈ 0.7227 within 0.01 tolerance (absorbs f32 accumulation noise across 12 nested helper outputs).
+3. `coarseningDoesNotThrow` — observability pin. `PhiCalculus.apply` on the full 12-WHILE primal succeeds, and `evalFunction(coarsened, ...)` matches `evalFunction(primal, ...)` within 1e-2 — verifying that nested-coarsening + C5 unroll produces an equivalent function.
+4. `reverseTransformDoesNotThrow` — observability pin. `DxirReverseTransform.apply` on the full coarsened primal succeeds. The gradient function has 4 returns (one per muscle input).
+5. `gradientFiniteDifferenceValidated` — **the headline pin**. For each of the 4 muscle inputs, the analytical gradient agrees with central-difference FD `(f(x+ε) - f(x-ε)) / (2ε)` within **1% relative tolerance** (with a 1e-3 absolute floor). FD validation is the standard integration-test approach when closed-form gradient derivation is impractical.
+6. `gradientReturnsExpectedSignsAtSmallInputs` — sanity discriminator: at m\*=0.1 (all positive), every gradient should be positive (every Phase A muscle directly contributes positively to the final output). A sign-error in any per-slice routing would surface here.
+
+**Decisions worth flagging**:
+
+- **All 6 tests passed on the first run.** This is the structural validation that Phase 2 needed: the per-slice pins (§0.4.211–§0.4.219) didn't just work in isolation — they compose without bugs. The §0.4.212 lift pass + §0.4.176 nested coarsening + §0.4.214 MUL chain rule + §0.4.216/§0.4.217 IF gradient routing + §0.4.219 WHILE-in-WHILE all hold up at full-primal scale. **Phase 2 is structurally closed.**
+
+- **FD validation is the right tool for full-primal gradient correctness.** Hand-deriving the closed-form gradient of `avatarStepPrimal` (4 muscle inputs flowing through 13 nested helpers) is a multi-page calculation that's both error-prone to write and error-prone to maintain. Central-difference FD with a fixed safe-input point is precise enough to catch any per-slice gradient bug while being cheap to run and easy to read.
+
+- **The 1% relative tolerance is appropriately tight.** At ε = 0.01, central-difference FD has truncation error O(ε²) ≈ 1e-4 — which for gradients of magnitude O(1) gives ~1% relative noise. Tighter than 1% would risk false positives from f32 accumulation; looser than 1% would miss genuine bugs. 1% is the right band.
+
+- **The "all gradients positive" discriminator catches sign-routing bugs.** At m\* = 0.1 every input contributes positively to the final loss. A buggy gradient routing that flipped one sign would pass forward eval, pass FD validation **at the chosen point** (because FD also gives the wrong sign — both methods would agree on the bug), but would fail this discriminator. It's a cheap cross-check that catches a class of bugs FD alone misses.
+
+- **No bugs surfaced — but the test design accounts for the possibility.** Each test is independent: forward eval doesn't depend on coarsening, coarsening smoke doesn't depend on AD, AD smoke doesn't depend on FD validation. If any one stage had broken, the failure would have pointed at the specific stage rather than producing a cascade of red tests. Defensive design.
+
+- **Phase 2 is structurally closed, but Phase 1 (M9 head-to-head harness) is not.** Per the standing rules: "Phase 1 done = a §0.4 entry titled 'Phase 1 closed — coarsening at M9 parity' that pins the six head-to-head numbers against the paper." QWOP being functionally complete is necessary but not sufficient — the harness comparing Tlaloc vs PyTorch 2.x `compile` vs JAX `jit` on the six benchmarks (Brachistochrone, HookeanSpring, BGDHyperOpt, HMC, CartPole, QWOP) is the actual exit criterion. That work is the natural Phase 1 closure axis once Phase 2 firings stop.
+
+- **Suite +6 to 949**.
+
+**Tests added** (+6):
+
+1. `QwopAvatarStepIntegrationTest.primalStructure`
+2. `QwopAvatarStepIntegrationTest.forwardEvalAtSmallInputs`
+3. `QwopAvatarStepIntegrationTest.coarseningDoesNotThrow`
+4. `QwopAvatarStepIntegrationTest.reverseTransformDoesNotThrow`
+5. `QwopAvatarStepIntegrationTest.gradientFiniteDifferenceValidated`
+6. `QwopAvatarStepIntegrationTest.gradientReturnsExpectedSignsAtSmallInputs`
+
+Full suite is green: **949 tests** (+6 from §0.4.219).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Out-of-scope register refresh — QWOP Phase 2 CLOSED.** Per §0.4.207's pattern: when a multi-firing arc closes, write a register-refresh entry that updates §0.4 status. QWOP went from "deferred" (pre-§0.4.208) to "Phase 0a/0b shipped" (§0.4.209/§0.4.210) to "Phase 1 forward + Phase 2 first slice" (§0.4.211–§0.4.213) through eight per-slice pins (§0.4.214–§0.4.219) to "full integration FD-validated" (§0.4.220). All four CartPole phases + all of QWOP's Phase 2 are now structurally validated. The next axis is the M9 head-to-head harness: Phase 1 closure. 1 firing for the register refresh.
+
+2. **Phase 1 closure work — head-to-head harness scaffolding.** The exit criterion is "within 20% of paper's figures, >3× over torch.compile on at least three of six, f32-tolerance numerical match" on the six paper benchmarks. The harness needs (a) a Tlaloc-side throughput probe matching the paper's measurement methodology, (b) a Python reference run (gated on user-side toolchain). Phase 1 step (a) — Tlaloc-side timings + numerical baseline JSON — is doable in Tlaloc-only firings. Step (b) is gated on user-side Python setup. Multi-session.
+
+3. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking head-to-head harness.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.220 — met**:
+- Full `avatarStepPrimal()` integration test ships ✓
+- Forward eval pinned at hand-traced value (0.7227 ± 0.01) ✓
+- PhiCalculus.apply runs without error on the 12-WHILE primal ✓
+- DxirReverseTransform.apply runs without error on the coarsened primal ✓
+- Per-input FD-validated gradient (1% relative tolerance) ✓
+- Sign-routing sanity discriminator ✓
+- Suite +6 to 949 ✓
+- QWOP Phase 2 structurally closed; out-of-scope register refresh is the natural next pickup ✓
+
 #### 0.4.219 QWOP Phase 2 seventh slice — `crossLimbCouplingPrimal` pins **WHILE-in-WHILE coarsening + multi-input gradient** end-to-end 2026-04-27
 
 §0.4.218's hand-off named "QWOP Phase 2 seventh slice — WHILE-in-WHILE coarsening pin" as the next pickup. §0.4.219 lands it: exposes `Qwop.crossLimbCouplingPrimal()` and pins forward + coarsening smoke + multi-input gradient on the **only QWOP shape** that exercises §0.4.176's nested-loop coarsening surface.
