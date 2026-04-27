@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.186 Phase 0c slice (b) — `DxirToIrSynthesis` widens to rank-1/2/3 F32; rank-N const lowers through broadcastLike 2026-04-27
+
+§0.4.185 shipped Phase 0c slice (a) (FIR-side Rank2/3 param recognition) but left synthesis at rank-1-only. §0.4.186 widens synthesis: `isAcceptedTensorType` replaces the `isRank1F32` gate, `irBroadcast` accepts rank-1/2/3 outputs uniformly via `broadcastLike<S>`'s generic shape parameter, AND `irConstFor` routes non-scalar F32 consts (e.g., the rank-2 zero gradient `DxirReverseTransform` emits for an unused tensor param) through the same `broadcastLike` helper. The §0.4.185 `Rank2ParamLoweringTest` flips from "FIR success + synthesis fallback" to **end-to-end success**: `grad { a: DTensor<Rank2<R, C>, F32> -> 0.0f }` produces a real rank-2 zero-tensor through the K2-synthesised path.
+
+**The mechanism** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt):
+
+1. **`isAcceptedTensorType(type)`** ([DxirToIrSynthesis.kt:1031-1036](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L1031-L1036)) — new helper: `type.dtype == F32 && type.rank in 1..3`. Replaces `isRank1F32` at the synthesise() gate, the `firstTensorParamIdx` lookup, and the `irTypeFor` arm.
+
+2. **synthesise() gate widening** ([DxirToIrSynthesis.kt:128-149](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L128-L149)) — accepts rank-2/3 F32 in node + param types alongside scalars. Higher ranks (rank-4+) and non-F32 dtypes still fall back.
+
+3. **`irBroadcast` widening** ([DxirToIrSynthesis.kt:514-545](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L514-L545)) — drops the explicit `op.type.rank != 1` rejection in favor of `isAcceptedTensorType(op.type)`. The same `broadcastLike<S>(v, template)` call works for any rank because S is generic.
+
+4. **`irConstFor` rank-N path** ([DxirToIrSynthesis.kt:299-326](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L299-L326)) — when the const is non-scalar, route through `broadcastLike(scalarValue, template)` (taking the scalar Float value out of the const + the rank-N template from the synthesis context). IR has no literal rank-N const op; this is the workaround for the "unused tensor param → typed-zero const gradient" case `DxirReverseTransform.apply` emits.
+
+**The CONST-via-BROADCAST emission** is the load-bearing surprise. The §0.4.185 hand-off scoped slice (b) as "extend `irBroadcast` to rank-2"; in practice the test surfaced that `DxirReverseTransform` emits a rank-2 CONST node directly (not a BROADCAST emission) for the zero-gradient case. That const trips `irConstFor`'s "non-scalar reject" gate. Without the const-via-broadcast lowering in irConstFor, slice (b) would have only addressed the BROADCAST path. The fix in this firing is to lower BOTH paths uniformly via `broadcastLike` — any rank-N F32 value (whether emitted as CONST or BROADCAST) becomes a runtime call to `broadcastLike<S>`.
+
+**Verification** in [Rank2ParamLoweringTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2ParamLoweringTest.kt):
+
+The existing §0.4.185 test was inverted: now asserts end-to-end success (no "kept original call" warning), checks the gradient output's shape (rank-2: 6 elements for a 2×3 input), and confirms all values are exactly 0.0f (NOT the broken-stub -1.0 sentinel). The grad of `0.0f` w.r.t. `a` is the rank-2 zero-tensor, which the synthesised path now produces correctly.
+
+**Decisions worth flagging**:
+
+- **Slice (b) shipped in two phases of widening: gate + irBroadcast + irConstFor.** The hand-off named two pieces (gate, irBroadcast); the actual implementation needed three because the existing `DxirReverseTransform`'s typed-zero-const emission for unused tensor params is a direct const, not a BROADCAST. Either Phase 0c slice (b) needs to handle rank-N consts, OR `DxirReverseTransform` needs to emit BROADCAST instead of typed const for non-scalar zero gradients. The synthesis-side const-via-broadcast lowering is the more localised choice — keeps DxirReverseTransform unchanged, adds the lowering at the IR-emission layer where rank-N const → broadcastLike is structurally clean.
+
+- **`isAcceptedTensorType` replaces `isRank1F32` at all synthesise()-side gates.** This is the new "tensor-input acceptance" predicate; it's positively named (says what's accepted) rather than negatively (rejecting non-rank-1). Three call sites updated; future widening to rank-4+ would change the rank bound here.
+
+- **Rank-3 follows for free.** Adding rank-3 to the gate is a trivial extension because `broadcastLike<S>` is already generic. Tests only exercise rank-2 today — rank-3 lands as substrate. A future rank-3 use case (batched tensors, image stacks) gets the path without further synthesis-side changes.
+
+- **`isRank1F32` is preserved (line 1023) but no longer the gating predicate.** Other call sites still reference it; keeping for backward compatibility within the file. A follow-up cleanup could remove it.
+
+- **Phase 0c slice (c) — plugin MATMUL recognition — is the last piece.** Slices (a) + (b) close the rank-2 substrate (param recognition + synthesis support); slice (c) wires `BINARY_OP_MAP` for `:core.ops.matmul` + emits MATMUL through the synthesis. With slice (b) accepting rank-2 BROADCAST, MATMUL's gradient (which emits BROADCASTs to rank-2 outputs) should compose cleanly.
+
+- **No regressions across 869 tests.** The `isRank1F32` → `isAcceptedTensorType` substitution preserves existing rank-1 behaviour bit-exactly (rank-1 is in the accepted set). Scalar tests are unaffected.
+
+**Tests added** (+0): existing `Rank2ParamLoweringTest` updated to assert end-to-end success instead of synthesis fallback. Test count unchanged at 869.
+
+Full suite is green: **869 tests** (unchanged from §0.4.185).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 0c slice (c) — plugin MATMUL recognition.** Add `io.tlaloc.core.ops.matmul` to `BINARY_OP_MAP` + emit `OpKind.MATMUL` through synthesis. With slice (b)'s rank-2 BROADCAST in place, the gradient body should compose. Single-firing if MATMUL synthesis is straightforward (probably is — IR-side MATMUL was shipped §0.4.135).
+2. **Phase 2 of head-to-head harness** — Python reference implementations. Gated on user-side toolchain.
+3. **Out-of-scope register refresh** — could land after Phase 0c slice (c) closes the multi-session arc.
+
+**Definition-of-done for §0.4.186 — met**:
+- `isAcceptedTensorType` introduced; replaces `isRank1F32` at synthesise() gates ✓
+- `irBroadcast` accepts rank-1/2/3 F32 outputs uniformly ✓
+- `irConstFor` routes non-scalar F32 consts through `broadcastLike` ✓
+- `Rank2ParamLoweringTest` flipped to assert end-to-end success ✓
+- Phase 0c slice (b) closes rank-2 substrate; slice (c) is the MATMUL piece ✓
+- Full suite stays green at 869 tests (unchanged) ✓
+
 #### 0.4.185 Phase 0c slice (a) — Rank2 / Rank3 DTensor param recognition in FIR-side lowering 2026-04-27
 
 §0.4.184's hand-off named Phase 0c (plugin MATMUL recognition + minimal rank-2 synthesis) as the natural multi-session pickup. §0.4.185 lands the FIR-side first slice: `FirLambdaToDxirLowering.resolveParamType` now recognises `DTensor<Rank2<R, C>, F32>` and `DTensor<Rank3<R, C, D>, F32>` parameters, returning `DxirType(F32, [-1, -1])` and `DxirType(F32, [-1, -1, -1])` respectively. Synthesis-side widening (rank-2 IrType building, multi-rank BROADCAST / MATMUL lowering) is the next slice in the Phase 0c arc.

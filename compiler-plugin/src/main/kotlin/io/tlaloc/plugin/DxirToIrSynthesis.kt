@@ -125,24 +125,26 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // IrType matches `transformed.type.arguments[paramIdx].typeOrNull`. We only support
         // one distinct tensor IrType per function today (the single-rank-1-param case
         // covered by §0.4.10). Multiple tensor shapes would require a per-node map.
-        val firstTensorParamIdx = fn.params.indexOfFirst { isRank1F32(it.type) }
+        val firstTensorParamIdx = fn.params.indexOfFirst { isAcceptedTensorType(it.type) }
         val tensorIrType: IrType? = if (firstTensorParamIdx < 0) null else run {
             val callType = originalCall.type as? IrSimpleType
                 ?: return reject("call type ${originalCall.type} is not IrSimpleType")
             callType.arguments.getOrNull(firstTensorParamIdx)?.typeOrNull
-                ?: return reject("rank-1 tensor param at idx=$firstTensorParamIdx has no type arg on call type")
+                ?: return reject("tensor param at idx=$firstTensorParamIdx has no type arg on call type")
         }
-        // Reject any node whose rank is >1 or whose rank-1 dtype isn't F32. Rank-1 F32
-        // and scalars are the full supported surface as of §0.4.10.
+        // §0.4.186 — Phase 0c slice (b): widened from "scalar + rank-1 F32 only" to
+        // "scalar + rank-1/2/3 F32". The same `broadcastLike<S>` helper handles all
+        // accepted ranks via its generic shape parameter. Higher ranks + non-F32 dtypes
+        // still fall back.
         for (p in fn.params) {
-            if (!p.type.isScalar && !isRank1F32(p.type)) {
-                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1 F32 scope")
+            if (!p.type.isScalar && !isAcceptedTensorType(p.type)) {
+                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1-3 F32 scope")
             }
         }
         for (n in fn.body) {
-            if (!n.type.isScalar && !isRank1F32(n.type)) {
+            if (!n.type.isScalar && !isAcceptedTensorType(n.type)) {
                 val opKind = (n as? DxirOp)?.op?.name ?: n::class.simpleName
-                return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1 F32 scope")
+                return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1-3 F32 scope")
             }
         }
 
@@ -297,11 +299,33 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     private fun IrBuilderWithScope.irConstFor(node: DxirConst, context: SynthesisContext): IrExpression? {
         val ty = irTypeFor(node.type, context) ?: return null
         val v = node.value
-        // Rank-1 DxirConst lowering is not exercised by any gradient body the SCT
-        // transform emits today (SumRule's seed is scalar; MeanRule's `1/N` is scalar).
-        // Rejecting here keeps the scalar-const path honest — if a future rule needs
-        // rank-N constants, it grows a FloatArray-backed ctor call here.
-        if (!node.type.isScalar) return null
+        // §0.4.186 — Phase 0c slice (b): rank-1/2/3 F32 consts route through
+        // `broadcastLike(scalar, template)` since IR has no literal rank-N const op.
+        // This handles the "unused-tensor-param zero gradient" case in
+        // DxirReverseTransform (a Rank2 param whose gradient is the rank-2 zero const).
+        if (!node.type.isScalar) {
+            if (!isAcceptedTensorType(node.type)) return null
+            val scalarValue = (v as? Number)?.toFloat() ?: return null
+            val template = context.tensorTemplateParam ?: return null
+            val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
+            val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val helperSym = broadcastLikeSymbol() ?: return null
+            val scalarConst = IrConstImpl(
+                startOffset, endOffset,
+                pluginContext.irBuiltIns.floatType,
+                IrConstKind.Float, scalarValue,
+            )
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = tensorIrType,
+                symbol = helperSym,
+            )
+            call.typeArguments[0] = shapeTypeArg
+            call.arguments[0] = scalarConst
+            call.arguments[1] = irGet(template)
+            return call
+        }
         return when (node.type.dtype) {
             F32 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Float, v as Float)
             F64 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Double, v as Double)
@@ -524,12 +548,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? {
-        // Only narrow scalar-seed → rank-1 uniform broadcast. Dim values are irrelevant
-        // here (the sentinel flows through unread); rank is the thing we gate on.
+        // Scalar-seed → rank-1/2/3 uniform broadcast. Dim values are irrelevant here
+        // (the sentinel flows through unread); rank is gated by [isAcceptedTensorType].
+        // §0.4.186 — widened from rank-1-only to rank-1/2/3 because broadcastLike's
+        // generic shape parameter handles any rank uniformly.
         if (op.operands.size != 1) return null
         val operand = op.operands[0]
         if (!operand.type.isScalar) return null
-        if (op.type.dtype != F32 || op.type.rank != 1) return null
+        if (!isAcceptedTensorType(op.type)) return null
 
         val operandDecl = env[operand.id] ?: return null
         val template = context.tensorTemplateParam ?: return null
@@ -543,9 +569,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             symbol = helperSym,
         )
         // broadcastLike is `fun <S : Shape> broadcastLike(v: Float, template: DTensor<S, F32>)`.
-        // Thread the call-site shape (`Rank1<Sym>` etc.) through the single type argument so
-        // the IR verifier has a concrete S. fromSymbolOwner sizes `arguments` from the
-        // callee's parameter shape — 2 regulars, no dispatch receiver.
+        // Thread the call-site shape (`Rank1<Sym>`, `Rank2<R, C>`, etc.) through the single
+        // type argument so the IR verifier has a concrete S. fromSymbolOwner sizes
+        // `arguments` from the callee's parameter shape — 2 regulars, no dispatch receiver.
         call.typeArguments[0] = shapeTypeArg
         call.arguments[0] = irGet(operandDecl)
         call.arguments[1] = irGet(template)
@@ -1014,13 +1040,26 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
         }
         // Rank-1 F32: use the call-site-harvested IrType (preserves the source-level shape
-        // witness + any param/return type-arg machinery). Other shapes / dtypes are out of
-        // scope — callers receive `null` and fall back to the runtime tape path.
-        if (isRank1F32(type)) return context.tensorIrType
+        // witness + any param/return type-arg machinery). §0.4.186 — rank-2/3 F32 also
+        // route through the same call-site IrType: `broadcastLike<S>(v, template)` is
+        // generic over `S : Shape`, so passing the rank-2/3 template + its IrType
+        // produces a correctly-typed rank-2/3 result without any per-rank synthesis
+        // surface widening. Other shapes / dtypes are out of scope — callers receive
+        // `null` and fall back to the runtime tape path.
+        if (isAcceptedTensorType(type)) return context.tensorIrType
         return null
     }
 
     private fun isRank1F32(type: DxirType): Boolean = type.rank == 1 && type.dtype == F32
+
+    /**
+     * §0.4.186 — Phase 0c slice (b). Widens the synthesis-side acceptance from "rank-1
+     * F32 only" to "rank-1, rank-2, or rank-3 F32" so that gradient bodies for primals
+     * with rank-2/3 inputs can route through the existing `broadcastLike` helper. Higher
+     * ranks (rank-4+) and non-F32 dtypes still fall back to the runtime tape path.
+     */
+    private fun isAcceptedTensorType(type: DxirType): Boolean =
+        type.dtype == F32 && type.rank in 1..3
 
     /**
      * Resolves `io.tlaloc.core.ops.broadcastLike` — the top-level extension function that

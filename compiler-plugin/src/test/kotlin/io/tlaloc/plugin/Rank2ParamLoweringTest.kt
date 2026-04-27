@@ -11,30 +11,29 @@ import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSourceLocation
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler
 import org.jetbrains.kotlin.config.Services
+import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * §0.4.185 — Phase 0c first slice: confirms `FirLambdaToDxirLowering.resolveParamType`
- * recognises Rank2 DTensor parameters. Compiles a `grad { A: DTensor<Rank2<R, C>, F32> -> A.sum() }`
- * primal and asserts the FIR-side lowering produces a dxir function (visible in the
- * "Tlaloc lowered lambda to dxir" success warning).
+ * §0.4.185 + §0.4.186 — Phase 0c slices (a) + (b). FIR-side recognises Rank2/3 DTensor
+ * parameters; synthesis-side accepts rank-1/2/3 F32 in the grad function's nodes and
+ * routes BROADCAST ops through `broadcastLike<S>(v, template)` for any rank.
  *
- * **Synthesis-side widening is NOT in scope for this firing.** The grad function's
- * BROADCAST op (emitted by SumRule's gradient path on a rank-2 input) trips
- * [DxirToIrSynthesis.irBroadcast]'s rank-1-only gate, so the K2 plugin emits "kept
- * original call" and falls back to the runtime tape's broken stub. The test
- * therefore checks only the FIR-side success, not end-to-end gradient correctness
- * — that's the next Phase 0c slice.
+ * Slice (b) closes the rank-2 BROADCAST gap by widening the synthesise() gate +
+ * `irBroadcast` from rank-1-only to rank-1/2/3. The grad function for
+ * `grad { a: DTensor<Rank2<R, C>, F32> -> 0.0f }` emits `BROADCAST(const 0.0,
+ * a's-rank-2-shape)` (the zero-tensor gradient when the body doesn't reference `a`),
+ * which now lowers cleanly to `broadcastLike<Rank2<R, C>>(0.0f, a)` in IR.
+ *
+ * The test asserts end-to-end success: the K2-synthesised gradient produces a real
+ * rank-2 zero-tensor instead of falling back to the broken-stub sentinel.
  */
 class Rank2ParamLoweringTest {
 
     @Test
-    fun `rank2 DTensor param lowers through FIR with synthesis fallback`() {
-        // Minimal Rank2-input primal that the FIR side can lower: returns a constant
-        // (no rank-2 ops in the body that the plugin would need to recognise). The
-        // mere PRESENCE of the Rank2 param exercises `resolveParamType`'s new arm.
+    fun `rank2 DTensor param grad zero through synthesised path`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -47,49 +46,43 @@ class Rank2ParamLoweringTest {
                 val g = grad { a: DTensor<Rank2<Sym, Sym>, F32> -> 0.0f }
                 val input = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f))
                 val gradOut = g(input)
-                println(gradOut.hostF32()[0])
+                val flat = gradOut.hostF32()
+                println(flat.size)
+                for (v in flat) print("${'$'}v ")
+                println()
             }
         """.trimIndent()
         val result = compileAndRun(AUTOGRAD_STUB_BROKEN_RANK2_TO_FLOAT, src)
         assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
 
-        // Sanity: confirm the FIR-side lowering produced a dxir function.
-        // The "Tlaloc lowered lambda to dxir" warning fires only when
-        // FirLambdaToDxirLowering successfully produced a DxirFunction.
-        val firSucceeded = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING &&
-                "Tlaloc lowered lambda to dxir" in it.message
-        }
-        assertTrue(
-            firSucceeded,
-            "FIR-side lowering didn't produce dxir for the Rank2 param; " +
-                "warnings: ${result.messages.filter { it.severity == CompilerMessageSeverity.WARNING }
-                    .joinToString("\n--\n") { it.message }}",
-        )
-        // The dxir dump should reference the Rank2 input as `f32[-1,-1]` (two sentinel
-        // dims). Find the "saw handoff" warning and check.
-        val handoffWarning = result.messages
-            .filter { it.severity == CompilerMessageSeverity.WARNING }
-            .firstOrNull { "saw handoff" in it.message }
-        assertTrue(
-            handoffWarning != null,
-            "no 'saw handoff' warning — FirLambdaToDxirLowering didn't emit the dxir dump",
-        )
-        assertTrue(
-            handoffWarning!!.message.contains("f32[-1,-1]"),
-            "dxir dump didn't show f32[-1,-1] for the Rank2 param; got:\n${handoffWarning.message.lines().take(5).joinToString("\n")}",
-        )
-
-        // Synthesis is expected to fall back here (rank-2 BROADCAST in the grad body
-        // is outside the synthesis scope today). Just confirm the broken-stub
-        // sentinel fired — that's the documented behavior pending Phase 0c slice (b).
+        // Sanity: synthesis succeeded — no "kept original call" warning.
         val keptOriginal = result.messages.any {
             it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
         }
         assertTrue(
-            keptOriginal,
-            "synthesis surprisingly accepted the rank-2 grad body — Phase 0c slice (b) may already be done; review the §0.4 entry assumptions",
+            !keptOriginal,
+            "synthesis fell back unexpectedly; rank-2 BROADCAST should now lower per §0.4.186. " +
+                "Warnings: ${result.messages.filter { it.severity == CompilerMessageSeverity.WARNING }
+                    .joinToString("\n--\n") { it.message }}",
         )
+
+        // Output: flat size = 2*3 = 6 zeros (the grad of a constant body is the zero tensor).
+        val lines = result.stdout.trim().lines()
+        assertEquals(2, lines.size, "expected 2 stdout lines (size + values), got: ${result.stdout}")
+        assertEquals("6", lines[0], "rank-2 grad output should have size 6 (2×3)")
+        val values = lines[1].trim().split(" ").map { it.toFloat() }
+        assertEquals(6, values.size)
+        for ((i, v) in values.withIndex()) {
+            // grad of a constant body is zero everywhere; sentinel-defeated.
+            assertTrue(
+                abs(v) < 1e-6f,
+                "slot $i = $v expected 0.0 (grad of constant body)",
+            )
+            assertTrue(
+                abs(v + 1.0f) > 1e-6f,
+                "slot $i = $v matches broken-stub sentinel; synthesis didn't fire",
+            )
+        }
     }
 
     private fun pluginClasspath(): Array<String> = arrayOf(
