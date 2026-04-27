@@ -148,3 +148,28 @@ object QwopAvatarStepHarness : HeadToHeadBenchmark {
         floatArrayOf(0.1f), floatArrayOf(0.1f),
     )
 }
+
+/**
+ * §0.4.223 — second harness inhabitant: BGDHyperOpt outer loop (paper Fig. 6).
+ * First **paper benchmark** in the harness — moves the M9 critical path forward.
+ * Fixed inputs match §0.4.13's bake-off harness:
+ *   - `r = 0.01` (learning rate / hyperparameter being optimised)
+ *   - `Sxy = 111.2`, `Sx2 = 55.0`, `M = 5.0` (moments from xData=[1..5],
+ *     yData=[2.1, 3.9, 6.1, 8.0, 10.2] — the bake-off's reference dataset).
+ *   - `K = 3` (outer-loop iteration count).
+ *
+ * Closed-form forward at these inputs ≈ -1.6498 (per `bgdHyperOptOuterLoopReference`).
+ * Without a SymjaEngine, PhiCalculus.apply unrolls the constant-trip-count
+ * WHILE via C5 (vs C6's closed-form when an engine is attached).
+ */
+object BgdHyperOptHarness : HeadToHeadBenchmark {
+    private const val K = 3
+    override val name = "bgd-hyperopt-outer-loop-K3"
+    override fun primal() = BenchmarkPrimals.bgdHyperOptOuterLoopPrimal(K)
+    override fun fixedInputs() = listOf(
+        floatArrayOf(0.01f),    // r
+        floatArrayOf(111.2f),   // Sxy
+        floatArrayOf(55.0f),    // Sx2
+        floatArrayOf(5.0f),     // M
+    )
+}

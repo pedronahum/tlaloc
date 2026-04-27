@@ -39,6 +39,104 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.223 Head-to-head harness Phase 1 second slice — BGDHyperOpt outer loop is the first **paper benchmark** in the harness 2026-04-27
+
+§0.4.222's hand-off named "head-to-head harness Phase 1 second slice — add a `:benchmarks`-side BGDHyperOpt or HookeanSpring inhabitant" as the next pickup. §0.4.223 lands BGDHyperOpt — the first **paper benchmark** (OOPSLA 2021 Fig. 6) in the harness suite. This moves the M9 critical path forward: the harness now has both a synthetic full-pipeline test (QWOP avatar-step) AND a real paper-benchmark baseline (BGDHyperOpt outer loop).
+
+**Why BGDHyperOpt over HookeanSpring**:
+
+- **Already has a `:ir`-side primal builder** (`PhiCalculusBgdHyperOptTest.bgdHyperOptPrimal`) with FD-validated gradient pins. Lifting/copying it to `:benchmarks` is 30 lines vs HookeanSpring which would require constructing the chain primal from scratch.
+- **Tests a different coarsening axis from QWOP**. QWOP exercises C5 unroll on 12 nested helpers; BGDHyperOpt's single outer WHILE exercises affine-recurrence coarsening (C5 unroll without engine, C6 closed-form with SymjaEngine — the harness uses the no-engine path).
+- **The headline gradient is `df/dr`** — the meta-gradient that BGDHyperOpt's hyperparameter optimisation uses. Pinning this at the harness level catches any regression that affects the paper's reported behaviour.
+
+**The cross-module duplication**:
+
+The BGDHyperOpt primal builder originally lives in `:ir/src/jvmTest/kotlin/.../PhiCalculusBgdHyperOptTest.kt` as a `private fun`. Module dependency direction is `:benchmarks → :ir`, not the reverse — so `:benchmarks` cannot reach into `:ir`'s test source set. Lifting the primal builder requires either:
+1. Exposing it from `:ir/src/commonTest` (cross-module test dep — awkward).
+2. Duplicating ~30 lines into `BenchmarkPrimals.kt` (clean, self-contained).
+
+§0.4.223 picks option 2 with a TODO-style comment in `BenchmarkPrimals` flagging the duplication for future consolidation. The original `:ir` test stays unchanged (its `private fun` continues to work). When a third caller surfaces, lift to a public `:ir` API.
+
+**The new primal + reference** in [`BenchmarkPrimals.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt):
+
+```kotlin
+fun bgdHyperOptOuterLoopPrimal(K: Int): DxirFunction = ...   // (r, Sxy, Sx2, M) → w_final
+fun bgdHyperOptOuterLoopReference(r, Sxy, Sx2, M, K): Float  // closed-form Kotlin ref for FD validation
+```
+
+**The new harness inhabitant** in [`HeadToHeadHarness.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarness.kt):
+
+```kotlin
+object BgdHyperOptHarness : HeadToHeadBenchmark {
+    private const val K = 3
+    override val name = "bgd-hyperopt-outer-loop-K3"
+    override fun primal() = BenchmarkPrimals.bgdHyperOptOuterLoopPrimal(K)
+    override fun fixedInputs() = listOf(
+        floatArrayOf(0.01f),    // r
+        floatArrayOf(111.2f),   // Sxy
+        floatArrayOf(55.0f),    // Sx2
+        floatArrayOf(5.0f),     // M
+    )
+}
+```
+
+Fixed inputs from §0.4.13's bake-off harness: xData=[1..5], yData=[2.1, 3.9, 6.1, 8.0, 10.2] gives Sxy=111.2, Sx2=55, M=5. Picking r=0.01 + K=3 keeps the test fast while exercising a non-trivial unrolled chain.
+
+**The test file** [`HeadToHeadHarnessBgdHyperOptTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessBgdHyperOptTest.kt) — 2 tests, all passing:
+
+1. `bgdHyperOptHarnessRunsAndProducesBaseline` — runs `BgdHyperOptHarness.runBaseline(50, 100)` and pins:
+   - Forward value matches closed-form Kotlin reference within 1% relative tolerance.
+   - 4 gradient values returned (one per input: r, Sxy, Sx2, M).
+   - **`df/dr` FD-validated** against central-difference on the Kotlin reference (1% relative tolerance + 1e-3 absolute floor).
+   - All four gradients non-zero (sanity: outer-loop value depends on every input at the chosen point).
+   - Timing statistics ordered + GC-pause guard.
+   - Side-channel `println` reports forward + Kotlin reference + analytical/FD `df/dr` + median/min/p99 timings.
+
+2. `bgdHyperOptForwardMatchesReferenceAcrossMultipleR` — cross-`r` consistency pin: at r ∈ {0.001, 0.01, 0.05, 0.1}, harness forward eval matches the Kotlin reference. Catches input-routing bugs that would affect the harness path differently from the reference.
+
+**Decisions worth flagging**:
+
+- **The §0.4.223 firing landed BGDHyperOpt instead of HookeanSpring because the `:ir`-side primal builder gave us a 30-line copy vs a from-scratch construction.** HookeanSpring's chain primal is in `:compiler-plugin/src/test`, which has all the same module-dependency issues plus more. BGDHyperOpt was the cheaper structural cost.
+
+- **The paper-benchmark threshold matters for M9.** Phase 1 closure requires "the six head-to-head numbers against the paper" — synthetic tests like QWOP avatar-step don't count toward this metric (the paper doesn't pin a head-to-head number for "synthetic 12-WHILE primal"). BGDHyperOpt does. Each subsequent harness inhabitant that's a paper benchmark is a step toward a publishable §0.4 closure entry.
+
+- **`df/dr` is the meta-gradient.** BGDHyperOpt is the paper's "differentiate through the optimiser" benchmark — `r` is the SGD learning rate, and the outer-loop's gradient w.r.t. `r` is what drives the hyperparameter search. Pinning this at the harness level matters far more than pinning `df/dSxy` (which is just bookkeeping).
+
+- **Cross-r consistency test catches a class of bugs the single-point pin misses.** If the harness inhabitant accidentally uses a stale primal (e.g., from a different K), single-point forward eval might coincide with the reference at the chosen r, but multiple-r evaluation would surface the discrepancy.
+
+- **C5 unroll fires without SymjaEngine, confirmed by the test.** `PhiCalculus.apply(primal)` (no engine arg) successfully unrolls the BGDHyperOpt outer WHILE for K=3. The output gradient FD-validates against the Kotlin reference. C6 closed-form (engine-required) would produce a smaller dxir function but is not on the harness's path — that pathway is `:ir`-test-internal.
+
+- **Suite +2 to 953.**
+
+**Tests added** (+2):
+
+1. `HeadToHeadHarnessBgdHyperOptTest.bgdHyperOptHarnessRunsAndProducesBaseline`
+2. `HeadToHeadHarnessBgdHyperOptTest.bgdHyperOptForwardMatchesReferenceAcrossMultipleR`
+
+Full suite is green: **953 tests** (+2 from §0.4.222).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Head-to-head harness Phase 1 third slice — HookeanSpring inhabitant.** Construct the N=10 chain primal via `DxirBuilder` (paper's HookeanSpring is a chain of N hooke springs, structurally similar to `iterateNTimes` but with two coupled state variables — position + velocity). Adds the **second paper benchmark** to the harness. 1 firing.
+
+2. **Head-to-head harness Phase 1 fourth slice — additional `:benchmarks`-native primals (multiBranchIfPrimal as a microbenchmark inhabitant; iterateNTimes with varying n).** Lower priority than paper benchmarks, but adds throughput-comparison points. 1 firing.
+
+3. **Head-to-head harness Phase 1 fifth+ slice — K2-plugin-side inhabitants (Brachistochrone, HMC, CartPole).** Requires lifting the `compileAndRun` infrastructure from `:compiler-plugin/src/test` to a `:benchmarks`-accessible surface. Multi-session structural — likely 2-3 firings.
+
+4. **Head-to-head harness Phase 2 — Python references.** Gated on user-side toolchain.
+
+5. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** §11.13's headline gap. Genuinely deferred but not on the harness's critical path.
+
+**Definition-of-done for §0.4.223 — met**:
+- `bgdHyperOptOuterLoopPrimal(K)` + `bgdHyperOptOuterLoopReference(...)` lifted into `BenchmarkPrimals.kt` ✓
+- `BgdHyperOptHarness` inhabitant defined ✓
+- Forward + FD-validated `df/dr` baseline pinned ✓
+- All four gradients non-zero at chosen input point ✓
+- Cross-r consistency pinned at four r values ✓
+- Timing sanity ordered + GC-pause guard ✓
+- Suite +2 to 953 ✓
+- HookeanSpring (third slice) is the natural next pickup ✓
+
 #### 0.4.222 Head-to-head harness Phase 1 first slice — `HeadToHeadBenchmark` scaffold + QWOP avatar-step inhabitant 2026-04-27
 
 §0.4.221's hand-off named "Phase 1 closure work — head-to-head harness Phase 1 (Tlaloc-side)" as the next pickup. §0.4.222 lands the **first slice**: the JVM-side scaffold + the first inhabitant (QWOP avatar-step). Per `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`'s Phase 1 plan, this is the foundation — subsequent firings add inhabitants for the other five paper benchmarks.

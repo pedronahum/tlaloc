@@ -98,4 +98,79 @@ object BenchmarkPrimals {
             val sum = op(OpKind.ADD, listOf(ifOp.result(0), ifOp.result(1)), f32)
             listOf(sum)
         }
+
+    /**
+     * §0.4.223 — BGDHyperOpt outer-loop primal, mirrors `PhiCalculus.bgdHyperOptPrimal`
+     * in [PhiCalculusBgdHyperOptTest][io.tlaloc.ir.passes]. Duplicated here because
+     * `:benchmarks` cannot reach back into `:ir`'s test source set; the duplication is
+     * intentional and ~30 lines. Future consolidation: lift to a `:ir`/`:core`-side
+     * commonTest helper or expose the primal builder publicly from `:ir`.
+     *
+     * The signature is `(r, Sxy, Sx2, M) → w_final` with concrete `K` baked in.
+     * Mirrors the OOPSLA 2021 paper's Fig. 6a structure (lines 3-11) with the
+     * inner-for-loop d-computation pre-collapsed to scalar sums.
+     *
+     * The recurrence is `w_{k+1} = a · w_k + b` where:
+     *   - `a = 1 + 2r·Sx2/M`
+     *   - `b = -2r·Sxy/M`
+     *
+     * **Coarsening behaviour** (without a [io.tlaloc.ir.passes.SymbolicEngine]):
+     *   - C5 unrolls the constant-trip-count outer WHILE → flat ADD/MUL chain.
+     *   - With a SymjaEngine attached (`:ir`-test-internal), C6 produces the
+     *     closed-form `w_K = b · (a^K − 1)/(a − 1)` (O(1) ops vs C5's O(K) chain).
+     *   - The harness path uses the no-engine variant — closer to what the K2
+     *     plugin emits today.
+     *
+     * **Closed-form Kotlin reference** is provided as [bgdHyperOptOuterLoopReference]
+     * for FD validation in tests.
+     */
+    fun bgdHyperOptOuterLoopPrimal(K: Int): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("bgdOuterLoop") {
+            val r = param("r", f32)
+            val Sxy = param("Sxy", f32)
+            val Sx2 = param("Sx2", f32)
+            val M = param("M", f32)
+            val wInit = const(0f, f32)
+            val kBound = const(K.toFloat(), f32)
+            val kZero = const(0f, f32)
+            val w = whileOp(
+                inits = listOf(wInit, kZero),
+                cond = { args ->
+                    val diff = op(OpKind.SUB, listOf(kBound, args[1]), f32)
+                    val pred = op(OpKind.STEP, listOf(diff), boolS)
+                    yields(pred)
+                },
+                body = { args ->
+                    val carriedW = args[0]
+                    val counterArg = args[1]
+                    val one = const(1f, f32)
+                    val two = const(2f, f32)
+                    val twoR = op(OpKind.MUL, listOf(two, r), f32)
+                    val twoRSx2 = op(OpKind.MUL, listOf(twoR, Sx2), f32)
+                    val twoRSx2OverM = op(OpKind.DIV, listOf(twoRSx2, M), f32)
+                    val aExpr = op(OpKind.ADD, listOf(one, twoRSx2OverM), f32)
+                    val twoRSxy = op(OpKind.MUL, listOf(twoR, Sxy), f32)
+                    val twoRSxyOverM = op(OpKind.DIV, listOf(twoRSxy, M), f32)
+                    val bExpr = op(OpKind.NEG, listOf(twoRSxyOverM), f32)
+                    val aw = op(OpKind.MUL, listOf(aExpr, carriedW), f32)
+                    val newW = op(OpKind.ADD, listOf(aw, bExpr), f32)
+                    val counterIncr = const(1f, f32)
+                    val newK = op(OpKind.ADD, listOf(counterArg, counterIncr), f32)
+                    yields(newW, newK)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    /**
+     * §0.4.223 — Closed-form Kotlin reference for the BGDHyperOpt outer loop.
+     * Used by the harness baseline test for FD-validated gradient pins.
+     */
+    fun bgdHyperOptOuterLoopReference(r: Float, Sxy: Float, Sx2: Float, M: Float, K: Int): Float {
+        val a = 1f + 2f * r * Sx2 / M
+        val b = -2f * r * Sxy / M
+        var w = 0f
+        for (k in 0 until K) w = a * w + b
+        return w
+    }
 }
