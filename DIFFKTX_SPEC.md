@@ -39,6 +39,91 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.221 Out-of-scope register refresh — QWOP port complete; M9 head-to-head harness is the next Phase 1 axis 2026-04-27
+
+§0.4.207 was the tenth register snapshot; §0.4.221 is the eleventh. **13 sub-sections shipped between §0.4.208 and §0.4.220** — the entire QWOP port arc, from planning doc → synthetic-primal scaffold → forward-only first slice → AD pipeline self-containment fix → seven per-slice gradient pins → full integration FD-validated. **All six paper benchmarks (Brachistochrone, HookeanSpring, BGDHyperOpt, HMC, CartPole, QWOP) now have Tlaloc ports** — five through the K2 plugin path, QWOP through the `:benchmarks` direct DSL (synthetic primal honouring the paper's structural shape).
+
+**Refreshed register (as of §0.4.220)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Now the **bottleneck** for Phase 1 closure (M9 exit criterion: within 20% of paper's figures, >3× over `torch.compile` on at least three of six, f32 numerical match). Plan in `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`. Phase 2 (Python references) gated on user-side toolchain. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) — multi-result + rank-4+ surface | **Substantively closed for scalar + rank-1/2/3 F32 + square AND rectangular MATMUL + 4-grad-output Quadruple** at §0.4.203. Open: rank-4+ tensor ops, 5+ grad-output Pentuple/list (no port today exercises that), `irIfOp` with non-empty bodies. |
+| Plugin | `irIfOp` widening to lower IF-with-body-ops | Currently empty-body only. The §0.4.174 lift pass hoists safe arithmetic to top level; non-safe-lift cases (DIV/SQRT/LOG in IF body) still hit it. |
+| Plugin | `>4` grad-output cap in `synthesise()` | Synthesise rejects `fn.returns.size > 4`. 4-output via `Quadruple` shipped §0.4.203. 5+ outputs would need a `Pentuple` data class or list-typed wrapper. No port today exercises 5+. |
+| Plugin | `findTensorBinaryOp` overload-disambiguation | §0.4.206 added a defensive filter (parameter-type-based) since `:core/ops/times` now has two overloads. Future helper additions in `:core/ops` should mirror the disambiguation if a name shadows. |
+| Plugin | K2-plugin QWOP slice | QWOP shipped via `:benchmarks` direct DSL only (§0.4.209/§0.4.210/§0.4.220). A K2-plugin-side port would test the plugin's surface against the paper's hardest control-flow shape — but it's not on the M9 critical path since `:benchmarks` exercises the same dxir + coarsening + reverse-mode AD pipeline. Open if the plugin surfaces a gap that the direct-DSL path doesn't. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED — coarsening-side production | Substrate widening shipped §0.4.179. Open: coarsening passes still produce ONLY single-result COARSENED. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. CartPole's training loop (§0.4.206) and QWOP's avatar-step (§0.4.220) are both host-side Kotlin orchestration — they don't differentiate THROUGH the WHILE; they call the synthesised gradient repeatedly. Differentiating through a training WHILE remains genuinely deferred. |
+| PhiCalculus | `liftIfRegionBodies` widening of `SAFE_LIFT_OPS` | Currently total-functions-only. EXP/LOG/SQRT/DIV could be added with care (NaN propagation rather than fault on unconsumed branch). Widen as a port surfaces a need. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162 + §0.4.216/§0.4.217 multi-input variants); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.176 + §0.4.219 `:benchmarks` pin). |
+| Control flow | Multi-block regions | Single-block today. |
+| Control flow | Multi-result IF AD Phase 4 | Nested WHILE inside an IF branch. The headline §11.13 gap from M9. Not blocking the head-to-head harness if every benchmark is already ported (which they all are now). Still genuinely deferred. |
+| Tensor ops | StableHLO `OpKind.SIGN` emitter | §0.4.204 added the dxir + interpreter + plugin path; the StableHLO emitter (`stablehlo.sign`) is deferred until a real port through StableHLO surfaces the need. |
+| Tensor ops | `DTensor.minus(Float)` operator | §0.4.206 added `DTensor.times(Float)` for GD updates. `minus(Float)` would let the user write `weights - lr * grads` symmetrically. Not blocking any port; widen when symmetry surfaces a friction. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.208 and §0.4.220** (13 sub-sections, three themed clusters):
+
+- **QWOP planning + Phase 0 scaffold (§0.4.208 → §0.4.210)** — 3-firing arc setting up the synthetic QWOP primal. §0.4.208 shipped `docs/QWOP_PORT_PLAN.md` (Path 2: synthetic-not-reconstructed; structural shape matters, specific physics doesn't). §0.4.209 shipped Phase 0a (6 loops + 4 if-else). §0.4.210 widened to Phase 0b (13 loops + 8 if-else, paper's stated structural shape) by adding `crossLimbCoupling` (WHILE-in-WHILE), `frictionAccum` (squared-input MUL), `forwardKinematicsLeg/Arm` (IF-in-WHILE multi-input), `energyTorquePerJoint/Accumulator` (MUL-in-IF).
+
+- **`DxirReverseTransform.apply` self-containment fix (§0.4.211 → §0.4.212)** — Two-firing arc closing the §0.4.173 KNOWN LEAK. §0.4.211 shipped QWOP Phase 1 forward-only and **flagged** the AD bug per the /loop's "checkpoint, don't barrel forward" rule. §0.4.212 root-caused the bug (clone-and-rewrite leaks dangling primal-id references when an IF has non-empty region bodies — NOT a CSE bug as initially diagnosed) + fixed it by adding `liftIfRegionBodies` as a pre-pass inside `DxirReverseTransform.apply`. **Structural payoff**: AD pipeline is now self-contained for all callers, not just the K2 plugin path that explicitly invoked the lift step. Direct API consumers (`:benchmarks`, ad-hoc scripts) gain correct behaviour automatically.
+
+- **QWOP Phase 2 — eight per-slice gradient pins + full integration FD-validated (§0.4.213 → §0.4.220)** — 8-firing arc covering the full structural axis. §0.4.213 sumPositions (multi-input ADD constant grad), §0.4.214 sumFineSteps (MUL cross-operand), §0.4.215 frictionAccum (MUL self-operand factor-of-2), §0.4.216 forwardKinematicsLeg (lower-bound IF-in-WHILE multi-input), §0.4.217 forwardKinematicsArm (upper-bound IF-in-WHILE), §0.4.218 energyAccumulator (MUL-in-else-branch + upper-bound IF), §0.4.219 crossLimbCoupling (WHILE-in-WHILE coarsening + multi-input gradient), §0.4.220 full `avatarStepPrimal` integration test (12 WHILEs + 8 IFs end-to-end FD-validated). All eight per-slice pins compose without bugs at full-primal scale — the §0.4.212 lift pass + §0.4.176 nested coarsening + §0.4.214 MUL chain rule + §0.4.216/§0.4.217 IF gradient routing + §0.4.219 WHILE-in-WHILE all hold up.
+
+**Decisions worth flagging**:
+
+- **QWOP port complete: 13 firings vs original "multi-session" estimate.** Cleaner cadence than CartPole's 25-firing arc — QWOP benefited from CartPole's lessons (decompose by structural axis, not by code size; per-slice pins compose). The §0.4.211 checkpoint-and-flag pattern paid off cleanly: the bug surfaced got root-caused next firing rather than masked with a hack, and the fix turned out to be deeper-and-cleaner than the workaround would have been.
+
+- **All six paper benchmarks now ported.** Brachistochrone, HookeanSpring, HMC, CartPole, BGDHyperOpt through the K2 plugin path; QWOP through the `:benchmarks` direct DSL. Both paths exercise the same dxir + coarsening + reverse-mode AD pipeline — only difference is the front-end (Kotlin lambda → FIR lowering vs hand-built DxirBuilder). With six benchmarks shipped, **the M9 exit criterion's structural prerequisite is met**. What remains is the head-to-head harness comparing Tlaloc to PyTorch 2.x `compile` / JAX `jit` numerically and on throughput.
+
+- **Phase 1 closure is now harness-bound, not coarsening-bound.** Pre-§0.4.220, "Phase 1 done" was structurally distant — §11.13's M9 exit criterion required pinned head-to-head numbers, and three of the six benchmarks were either deferred (QWOP) or in-progress (CartPole/HMC). Post-§0.4.220, the critical path is: (a) write a Tlaloc-side throughput probe matching the paper's measurement methodology (single-firing, achievable in a Tlaloc-only setting); (b) pin Tlaloc's numerical baseline JSON (single-firing); (c) run Python references (gated on user-side toolchain — either user supplies, or we ship without Phase 2 of the harness).
+
+- **The §0.4.212 lift-pass-in-AD fix is the most reusable structural improvement of the QWOP arc.** Pre-fix, only the K2 plugin path got correct IF-in-WHILE gradient behaviour because it explicitly called `liftIfRegionBodies` first. Post-fix, every consumer of `DxirReverseTransform.apply` gets it for free. Future API surfaces (e.g., a QWOP K2-plugin-side port, or a debug harness) won't need to remember the lift step. **Self-contained pipelines beat caller-coordination contracts.**
+
+- **The §0.4.220 integration test design pattern is reusable.** Hand-traced forward at safe-input + per-input central-difference FD with 1% relative tolerance + sign-routing discriminator is the right shape for any future "full primal integration" test. Documented for any future port that needs a similar end-to-end pin (e.g., a future ResNet-18 forward+backward integration when M3 lands).
+
+- **Six paper benchmarks: 6/6 ported.** Brachistochrone (closed-form gradient), HookeanSpring (closed-form gradient), BGDHyperOpt (`:benchmarks` direct DSL), HMC (K2 plugin Phase 1+2+3), CartPole (K2 plugin Phase 0+1+2+3), QWOP (`:benchmarks` Phase 0a/0b/Phase 1/Phase 2). The ratio of K2-plugin to direct-DSL is 4:2; both paths produce structurally identical dxir for coarsening + AD purposes.
+
+- **One integration test pattern is now the norm: forward + coarsening smoke + reverse smoke + FD-validated gradient + sign discriminator.** Five tests + the structure pin = 6 tests per `<helper>Primal()` slice (the QWOP per-slice pattern). The full integration test (§0.4.220) used the same 6-test pattern — design predictability across slices and integrations.
+
+- **Cadence: 13 sub-sections — middle of the recent register cadence range.** §0.4.190 was 12 firings, §0.4.202 was 9, §0.4.207 was 5. QWOP's 13 reflects: 3 firings of planning + scaffold (§0.4.208–§0.4.210), 2 firings of bug surface + structural fix (§0.4.211–§0.4.212), 7 firings of per-slice pins (§0.4.213–§0.4.219), 1 firing of integration closure (§0.4.220). The structural-fix detour (§0.4.211–§0.4.212) is the only "unplanned" stretch; everything else followed the plan in `docs/QWOP_PORT_PLAN.md`.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **949 tests** (unchanged from §0.4.220).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 1 closure work — head-to-head harness Phase 1 (Tlaloc-side).** The exit criterion is "within 20% of paper's figures, >3× over torch.compile on at least three of six, f32-tolerance numerical match" on the six paper benchmarks. Phase 1 of the harness (Tlaloc-side throughput + numerical baseline JSON) is doable in Tlaloc-only firings — write a throughput probe matching the paper's measurement methodology, pin Tlaloc's numerical results for the six benchmarks. Multi-session (probably 3-5 firings).
+
+2. **Phase 2 of head-to-head harness — Python references.** Gated on user-side toolchain (PyTorch 2.x + JAX setup). When user supplies the Python environment, we run the references and compare. Single-firing once gated.
+
+3. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** The §11.13 headline gap from M9. Not on the harness's critical path since every benchmark is already ported, but still genuinely deferred. Multi-session structural item — likely 3-5 firings to ship.
+
+4. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per the deferred register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking the harness.
+
+5. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority while Phase 1 has open structural items.
+
+**Definition-of-done for §0.4.221 — met**:
+- Deferred table refreshed to reflect §0.4.208–§0.4.220 closures ✓
+- "Benchmark ports / QWOP" entry removed (CLOSED) ✓
+- New named items: K2-plugin QWOP slice (deferred), Multi-result IF AD Phase 4 (genuinely deferred but not on critical path) ✓
+- "Phase 2 of head-to-head harness" elevated to bottleneck-for-Phase-1-closure status ✓
+- "QWOP port complete; six paper benchmarks ported" surfaced as the headline closure ✓
+- Three themed clusters named (planning, AD self-containment fix, per-slice gradient pins) ✓
+- Recommended-next surfaces the head-to-head harness as the next Phase 1 axis ✓
+- Register stays tabular per the §0.4.108–§0.4.207 organising principle ✓
+- Full suite stays green at 949 tests (unchanged) ✓
+
 #### 0.4.220 QWOP Phase 2 closure — full `avatarStepPrimal` integration test (12 WHILEs + 8 IFs end-to-end) FD-validated 2026-04-27
 
 §0.4.219's hand-off named "QWOP Phase 2 closure — full `avatarStepPrimal()` coarsened gradient integration test" as the next pickup. §0.4.220 lands it: ships `QwopAvatarStepIntegrationTest` exercising **all 12 top-level WHILEs and 8 IFs** of the QWOP synthetic primal simultaneously, with a finite-difference-validated gradient pin closing Phase 2.
