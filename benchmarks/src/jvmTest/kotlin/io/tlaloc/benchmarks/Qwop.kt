@@ -178,6 +178,37 @@ object Qwop {
             listOf(acc)
         }
 
+    /**
+     * §0.4.215 — QWOP Phase 2 third slice: squared-input recurrence. Exercises
+     * the chain rule through MUL with **self**-operand — contrast to §0.4.214's
+     * `sumFineStepsPrimal` (chain rule through MUL with **cross**-operand).
+     *
+     * Wraps the same [frictionAccum] helper that Phase C of [avatarStepPrimal]
+     * uses. The recurrence is `acc += coupling * coupling` per iteration.
+     *
+     * Forward semantics (with default `nSteps = 3`):
+     * ```kotlin
+     * var acc = 0f
+     * for (i in 0 until 3) acc += coupling * coupling
+     * return acc   // = 3 * coupling^2
+     * ```
+     *
+     * Closed-form gradient is **linear in the input** (input-dependent and
+     * sign-preserving):
+     *   - `df/dcoupling = nSteps * 2 * coupling`
+     *
+     * Catches a class of bugs the §0.4.214 cross-operand test cannot:
+     * any "MUL gradient with shared operand" misrouting where the chain rule
+     * fails to sum both partials (would yield `nSteps × coupling` not
+     * `nSteps × 2 × coupling`).
+     */
+    fun frictionAccumPrimal(nSteps: Int = 3): DxirFunction =
+        DxirBuilder.function("qwopFrictionAccum") {
+            val coupling = param("coupling", f32)
+            val acc = frictionAccum(coupling, nSteps)
+            listOf(acc)
+        }
+
     fun avatarStepPrimal(): DxirFunction =
         DxirBuilder.function("qwopAvatarStep") {
             val mHip = param("mHip", f32)

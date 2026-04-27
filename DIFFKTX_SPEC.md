@@ -39,6 +39,84 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.215 QWOP Phase 2 third slice — `frictionAccumPrimal` coarsened single-loop test pins squared-input chain rule (MUL with **self**-operand) 2026-04-27
+
+§0.4.214's hand-off named "QWOP Phase 2 third slice — squared-input recurrence" as the next pickup. §0.4.215 lands it: exposes `Qwop.frictionAccumPrimal()` and pins forward + coarsening + linear-in-input gradient on the `acc += coupling × coupling` recurrence.
+
+**The discriminator factor of 2**:
+
+§0.4.214 covered MUL with **cross**-operand: `acc += shoulder × coarseDist`, ∂/∂shoulder = nSteps × coarseDist. §0.4.215 covers MUL with **self**-operand: `acc += coupling × coupling`, ∂/∂coupling = nSteps × **2** × coupling. The factor of 2 is the chain-rule signature for shared-operand MUL — both partials have to be summed, not just one.
+
+A common bug class in hand-coded AD systems: when MUL's two operands point at the same primal node, the implementation accumulates only one partial contribution to the gradient. That bug would yield `nSteps × coupling` (= 9 at coupling=3) instead of `nSteps × 2 × coupling` (= 18 at coupling=3). Tlaloc passes — but the regression-test bulwark now exists.
+
+**The new primal** in [`Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+```kotlin
+fun frictionAccumPrimal(nSteps: Int = 3): DxirFunction =
+    DxirBuilder.function("qwopFrictionAccum") {
+        val coupling = param("coupling", f32)
+        val acc = frictionAccum(coupling, nSteps)
+        listOf(acc)
+    }
+```
+
+Reuses the same `frictionAccum` helper that Phase C of `avatarStepPrimal` uses. Closed-form: `out = nSteps × coupling²`, ∂/∂coupling = `nSteps × 2 × coupling` — linear in `coupling`, sign-preserving.
+
+**The test file** [`QwopFrictionAccumTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopFrictionAccumTest.kt) — 5 tests, all passing:
+
+1. `primalStructure` — pins 1 WHILE + 0 IFs in the primal body.
+2. `forwardEval` — at coupling=3: result = 27.0 (= 3 × 3²).
+3. `phiCalculusUnrollsConstantTripCountWhile` — coarsened body has 0 top-level WHILEs.
+4. `gradientHasFactorOfTwo` — **the headline**. At coupling=3: ∂/∂coupling = 18.0 (= nSteps × 2 × coupling). Failure mode "9.0 instead of 18.0" is explicitly called out in the assertion message — pinpoints the chain-rule misrouting.
+5. `gradientScalesLinearly` — discriminator. At coupling=5: ∂=30; at coupling=10: ∂=60. Verifies the gradient scales **linearly** (not quadratically). Catches a bug where a quadratic gradient implementation `(nSteps × coupling²)` would coincidentally pass the single-point test at coupling=3 (where 18 ≠ 27 spots it, but proves the principle for any inputs).
+6. `gradientAtNegativeAndZeroInputs` — sign-preservation discriminator. At coupling=-2: ∂=-12 (negative, proving linear-not-absolute-value). At coupling=0: ∂=0.
+
+(Wait, that's 5 + 1 = 6 tests, let me recount — the file lists primalStructure, forwardEval, phiCalculusUnrollsConstantTripCountWhile, gradientHasFactorOfTwo, gradientScalesLinearly, gradientAtNegativeAndZeroInputs = 6 tests. Test count delta = 6.)
+
+**Decisions worth flagging**:
+
+- **The §0.4.213 → §0.4.214 → §0.4.215 progression covers the three core MUL chain-rule shapes**: (a) multi-input ADD with constant gradient (§0.4.213), (b) MUL with cross-operand input-dependent gradient (§0.4.214), (c) MUL with self-operand and the load-bearing factor-of-2 (§0.4.215). Together they form a "MUL chain rule" coverage triangle. Future Phase 2 sub-firings can stop adding pure-arithmetic recurrences and move to (d) IF-in-WHILE on QWOP shapes (`forwardKinematicsLeg`, `energyTorquePerJoint`, etc.).
+
+- **The `gradientScalesLinearly` test has structural value beyond a single-point pin.** Asserting `out(coupling=10) / out(coupling=5) = 2` catches any gradient implementation that's quadratic-shaped but happens to coincide with the linear value at one point. Distinguishes "got the right answer at this input" from "got the right gradient function shape".
+
+- **Naming convention is now solidified.** `Qwop.<helperName>Primal()` — the helper name comes verbatim from the private DSL helper. Files: `Qwop<HelperName>Test.kt`. This makes the next firings predictable: `forwardKinematicsLegPrimal`, `forwardKinematicsArmPrimal`, `energyTorquePerJointPrimal`, `energyAccumulatorPrimal`, `crossLimbCouplingPrimal`.
+
+- **Phase 2 progression is fast.** Three Phase 2 sub-firings landed in three loop iterations (§0.4.213, §0.4.214, §0.4.215) — each shipping one primal + one test file with 5–6 pins. The QWOP Phase 2 plan estimated 2–3 firings per slice; we're at one firing per slice for the simple shapes. Expect IF-containing slices (next pickup target) to take 1–2 firings each since the AD pipeline is now self-contained for IF (§0.4.212).
+
+- **Suite +6 to 913.** §0.4.213 added 5, §0.4.214 added 6, §0.4.215 adds 6.
+
+**Tests added** (+6):
+
+1. `QwopFrictionAccumTest.primalStructure`
+2. `QwopFrictionAccumTest.forwardEval`
+3. `QwopFrictionAccumTest.phiCalculusUnrollsConstantTripCountWhile`
+4. `QwopFrictionAccumTest.gradientHasFactorOfTwo`
+5. `QwopFrictionAccumTest.gradientScalesLinearly`
+6. `QwopFrictionAccumTest.gradientAtNegativeAndZeroInputs`
+
+Full suite is green: **913 tests** (+6 from §0.4.214).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 2 fourth slice — IF-in-WHILE on the kinematics path.** Expose `Qwop.forwardKinematicsLegPrimal()` (3 inputs hip/knee/ankle, ground-contact IF). First Phase 2 slice that combines hipUpdate's WHILE+IF shape with sumPositions's multi-input gradient routing. 1-2 firings. Likely finds the natural §0.4.212 lift-pass exercise on a larger-IF-body shape.
+
+2. **QWOP Phase 2 fifth slice — `forwardKinematicsArmPrimal`.** Similar to (1) but 2-input (shoulder, friction) with shoulder-torque-limit IF. Could be combined into one firing alongside (1).
+
+3. **QWOP Phase 2 sixth slice — WHILE-in-WHILE coarsening pin.** Expose `Qwop.crossLimbCouplingPrimal()`. Headline test for §0.4.176's WHILE-in-WHILE coarsening surface; 1-2 firings depending on coarsening behaviour.
+
+4. **QWOP Phase 2 closure — full `avatarStepPrimal()` coarsened gradient.** Exercises all 13 loops + 8 IFs simultaneously. 1-2 firings; potentially exposes new bugs.
+
+5. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking QWOP Phase 2.
+
+**Definition-of-done for §0.4.215 — met**:
+- Phase 2 third-slice primal exposed (`Qwop.frictionAccumPrimal()`) ✓
+- Forward + coarsening + linear-in-input gradient pins land ✓
+- Factor-of-2 chain-rule discriminator on at least one input value ✓
+- Linear-scaling discriminator (out(2x) / out(x) = 2) ships ✓
+- Sign-preservation pin (negative gradient at negative input) ✓
+- Suite +6 to 913 ✓
+- Phase 2 fourth slice (IF-in-WHILE forwardKinematicsLeg) is the natural next pickup ✓
+
 #### 0.4.214 QWOP Phase 2 second slice — `sumFineStepsPrimal` coarsened single-loop test pins **input-dependent** multiplicative-coupling gradient 2026-04-27
 
 §0.4.213's hand-off named "QWOP Phase 2 second slice — multiplicative-coupling single-loop primal" as the next pickup. §0.4.214 lands it: exposes `Qwop.sumFineStepsPrimal()` and pins forward + coarsening + input-dependent gradient on the `acc += shoulder × coarseDist` recurrence.
