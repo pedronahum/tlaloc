@@ -9,6 +9,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+// §0.4.212 — DxirReverseTransform.apply now fires `liftIfRegionBodies` as a pre-pass
+// (the §0.4.211 leak fix), so the AD-side gradient tests below land cleanly. The
+// forward-only tests from §0.4.211 stay as regression coverage.
+
 /**
  * §0.4.211 — QWOP Phase 1 first-slice forward-only test. First per-body-part
  * regression pin on the QWOP synthetic primal — **forward computation only**.
@@ -104,6 +108,46 @@ class QwopHipUpdateTest {
             0,
             BenchmarkPrimals.countOps(coarsened, OpKind.WHILE),
             "After PhiCalculus.apply, the constant-trip-count WHILE should be unrolled (no top-level WHILE)",
+        )
+    }
+
+    @Test
+    fun gradientOfHipUpdateAtNonClampingInput() {
+        // §0.4.212 — first AD-side gradient pin on QWOP. At mHip=2.0 (non-clamping),
+        // the closed-form derivative is `nSteps * dt = 4 * 0.1 = 0.4` since
+        // every iteration's IF takes the else-branch (state stays < maxAngle).
+        val primal = Qwop.hipUpdatePrimal()
+        val coarsened = PhiCalculus.apply(primal)
+        val grad = DxirReverseTransform.apply(coarsened)
+
+        val out = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(2.0f)))
+        assertTrue(
+            abs(out[0][0] - 0.4f) < 1e-3f,
+            "expected df/dmHip = 0.4 at mHip=2.0 (non-clamping), got ${out[0][0]}",
+        )
+    }
+
+    @Test
+    fun gradientOfHipUpdateAtClampingInput() {
+        // §0.4.212 — second AD-side gradient pin. At mHip=8.0, the trace is:
+        //   iter 0: state=0 → 0.8 (else-branch); contributes 0.1 to d(state)/dm
+        //   iter 1: state=0.8 → 1.6 (else-branch); contributes 0.1
+        //   iter 2: state=1.6 > 1.5 → THEN-branch yields const 1.5; gradient
+        //     resets to 0 (state is now constant w.r.t. muscle)
+        //   iter 3: state=1.5 NOT > 1.5 (STEP(0)=0) → else-branch yields
+        //     state + muscle*0.1 = 2.3; contributes 0.1 to d(state)/dm
+        // Final d(state[4])/dm = 0 + 0.1 = 0.1 (the iter 0/1 contributions are
+        // killed by the iter 2 clamp; iter 3 re-introduces a 0.1 dependency).
+        // Discriminator: a "no IF" implementation would give 4 * 0.1 = 0.4.
+        val primal = Qwop.hipUpdatePrimal()
+        val coarsened = PhiCalculus.apply(primal)
+        val grad = DxirReverseTransform.apply(coarsened)
+
+        val out = DxirInterpreter.evalFunction(grad, listOf(floatArrayOf(8.0f)))
+        assertTrue(
+            abs(out[0][0] - 0.1f) < 1e-3f,
+            "expected df/dmHip = 0.1 at mHip=8.0 (clamping at iter 2; iter 3 contributes 0.1), " +
+                "got ${out[0][0]}",
         )
     }
 }

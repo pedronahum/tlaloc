@@ -39,6 +39,75 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.212 QWOP Phase 1 — `liftIfRegionBodies` pre-pass in `DxirReverseTransform.apply` closes the §0.4.173 KNOWN LEAK; AD-side gradient pins land 2026-04-27
+
+§0.4.211's hand-off named "Investigate + fix the DxirReverseTransform CSE bug" as the next pickup. §0.4.212 lands the fix — and it turned out to be a different (deeper) issue than originally diagnosed. **The bug isn't in CSE; it's in `DxirReverseTransform.apply`'s clone-and-rewrite step**, which leaves dangling primal-id references when an IF has non-empty region bodies. CSE merely surfaced the bug via the `DxirFunction` constructor's `references unknown node ids` validation.
+
+**The root cause** documented as "KNOWN LEAK" at [DxirReverseTransform.kt:204-211](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L204-L211):
+
+The §0.4.175 deep-clone arm only fires when `regionsAllEmpty` holds (each IF region is single-block with empty body, just a yield). When body ops live inside region bodies (e.g., the `SUB(state, maxAngle)` predicate-computation chains in QWOP's coarsened-WHILE-unroll), the deep-clone is skipped — the primal IF is recorded as-is in `nodeMap`. Downstream grad-body ops that reference this primal IF as an operand serialise primal IDs into the grad body's top-level operand lists, but those primal IDs aren't declared in the grad body's top-level. Result: validation rejection.
+
+**The fix** at [DxirReverseTransform.kt:104-128](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L104-L128):
+
+Pre-pass `PhiCalculus.liftIfRegionBodies` inside `DxirReverseTransform.apply` so any consumer benefits — not just the K2 plugin path that already invoked it.
+
+```kotlin
+@Suppress("NAME_SHADOWING")
+val primal = PhiCalculus.liftIfRegionBodies(primal)
+```
+
+The lift pass is idempotent (returns the input unchanged when not safe to lift) and self-contained — making `DxirReverseTransform.apply` produce well-formed gradient functions regardless of whether the caller ran the lift step manually.
+
+**Why this is a real fix, not a workaround**:
+
+The KNOWN LEAK had been there since §0.4.173/§0.4.174/§0.4.175. The §0.4.174 lift pass was the structural fix; §0.4.175 added the deep-clone arm conditional on `regionsAllEmpty`. The two were paired — lift hoists body ops, deep-clone handles the resulting empty-region IFs. Pre-§0.4.212, only one caller (`TlalocIrGenerationExtension`) wired both. Direct API consumers (the `:benchmarks` tests, raw test code) bypassed lift, hitting the leak. §0.4.212 makes the AD pipeline self-contained: `DxirReverseTransform.apply` → lift → reverse-transform. All paths get correct behaviour.
+
+**The QWOP gradient pins** [`QwopHipUpdateTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopHipUpdateTest.kt) (2 new tests):
+
+1. `gradientOfHipUpdateAtNonClampingInput` — at mHip=2.0, `df/dmHip = 0.4` (= `nSteps × dt = 4 × 0.1`). Pinned to 1e-3 f32 tolerance.
+2. `gradientOfHipUpdateAtClampingInput` — at mHip=8.0, `df/dmHip = 0.1` (clamping at iter 2 kills upstream gradient; iter 3's else-branch re-introduces a 0.1 dependency since state[3]=1.5 is NOT > 1.5 by Tlaloc's STEP(0)=0 convention). Discriminator: a "no IF" implementation would yield 0.4.
+
+Note the §0.4.211 entry's claim of "mHip=8.0 → 0.3" was incorrect — re-derived as 0.1 above. Tlaloc's actual computation matches 0.1 within 1e-3.
+
+**Decisions worth flagging**:
+
+- **The fix could have been smaller (only the §0.4.175 deep-clone arm) but landing it in `DxirReverseTransform.apply` is broader and cleaner.** Calling `liftIfRegionBodies` upstream of the entire AD pipeline means any future caller gets it for free — including potential `:benchmarks` extensions, debugging harnesses, and ad-hoc test scripts. The `TlalocIrGenerationExtension` path can keep its explicit call (idempotent, costs nothing); pre-§0.4.212 consumers gain correct behaviour automatically.
+
+- **Idempotency of `liftIfRegionBodies` matters.** It was already idempotent by design (returns the input when `isLiftSafe(fn)` is false OR when no IF has region bodies). Calling it twice is safe; calling it on a function that's already lifted produces no rewrite. This made the fix a one-line addition.
+
+- **§0.4.211's gradient claim was wrong.** §0.4.211 documented "expected gradient at mHip=8.0 is 0.3"; my analytic re-derivation yields 0.1. Tlaloc's gradient matches 0.1 (1e-3 tolerance). Tlaloc was right — my arithmetic in the §0.4.211 entry was off. Lesson: don't ship an analytic claim until the test confirms it.
+
+- **All 894 prior tests pass after the fix.** No regression. The K2 plugin tests already explicitly call `liftIfRegionBodies` (line 184 of `TlalocIrGenerationExtension`), so re-running it inside `DxirReverseTransform.apply` is a no-op for them. The :benchmarks tests gain the lift pass automatically — no changes needed.
+
+- **CSE was the messenger, not the cause.** The §0.4.211 entry diagnosed the bug as "DxirReverseTransform's CSE pass produces an unknown-node-id reference". Investigation showed the broken reference was already in the clone-and-rewrite step's output; CSE just surfaced it via validation. The §0.4.212 fix is in the clone-and-rewrite step (specifically: lifting IF bodies BEFORE clone-and-rewrite ever runs). CSE itself is correct.
+
+- **Suite +2 to 896** (the 2 gradient-pin tests; the §0.4.211 forward-only tests stay).
+
+**Tests added** (+2):
+
+1. `QwopHipUpdateTest.gradientOfHipUpdateAtNonClampingInput` — first AD-side gradient pin on QWOP. mHip=2.0 → 0.4.
+2. `QwopHipUpdateTest.gradientOfHipUpdateAtClampingInput` — clamping-path discriminator. mHip=8.0 → 0.1.
+
+Full suite is green: **896 tests** (+2 from §0.4.211).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 1 closure** — gradient pins shipped. The hipUpdate primal exercises one body part's update step; Phase 2 widens to a coarsened single-loop test (mirrors HMC's Phase 2 pattern at the dxir level). 1-2 firings.
+
+2. **QWOP Phase 2 — single-loop coarsened test.** Per the plan: pick one of the 13 loops in `Qwop.avatarStepPrimal()`, exercise `PhiCalculus.apply` + verify the coarsened form has the expected reduced op count + gradient FD-validated. 2-3 firings.
+
+3. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking QWOP.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.212 — met**:
+- DxirReverseTransform CSE bug root-caused (it's not CSE; it's clone-and-rewrite's KNOWN LEAK from §0.4.173) ✓
+- Fix shipped: `liftIfRegionBodies` pre-pass in `DxirReverseTransform.apply` ✓
+- AD-side gradient pins on hipUpdate primal land (mHip=2.0 → 0.4, mHip=8.0 → 0.1) ✓
+- §0.4.211 entry's "gradient = 0.3 at mHip=8.0" claim corrected to 0.1 ✓
+- All 894 prior tests pass + 2 new = 896 ✓
+- QWOP Phase 1 unblocked; Phase 2 (single-loop coarsened test) is now the natural next pickup ✓
+
 #### 0.4.211 QWOP Phase 1 first slice (forward-only) — `hipUpdatePrimal` test surfaces DxirReverseTransform CSE bug on QWOP shape 2026-04-27
 
 §0.4.210's hand-off named "QWOP Phase 1 first slice — straight-line port of one body part" as the next pickup. §0.4.211 ships the **forward-only** half: a `Qwop.hipUpdatePrimal()` standalone primal + 3 tests verifying primal structure + forward eval at non-clamping (mHip=2.0 → 0.8) and clamping (mHip=8.0 → 2.3) inputs + PhiCalculus.apply succeeds. **The gradient half is blocked**: writing the test surfaced a real bug in `DxirReverseTransform`'s CSE pass when applied to the QWOP hipUpdate shape post-coarsening — the produced grad function references an undefined node id. Per the /loop's "checkpoint, don't barrel forward with a hack" rule, this firing ships the forward path + flags the AD bug as the QWOP Phase 1 next-firing target.

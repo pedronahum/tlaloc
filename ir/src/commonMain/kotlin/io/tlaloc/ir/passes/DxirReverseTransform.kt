@@ -110,6 +110,21 @@ object DxirReverseTransform {
             "DxirReverseTransform: includeForward + seedAsParam are incompatible — the " +
                 "COARSENED gradient_body signature doesn't accommodate a forward return"
         }
+        // §0.4.212 — Pre-pass `PhiCalculus.liftIfRegionBodies` to hoist safe arithmetic
+        // ops out of IF region bodies. Without this, IFs with non-empty regions (e.g.,
+        // SUB(state, maxAngle) inside a coarsened-WHILE-unroll's collision IF) survive
+        // into the clone-and-rewrite step. The §0.4.173 / §0.4.174 / §0.4.175 arc
+        // documented this as a "KNOWN LEAK" — the §0.4.175 deep-clone arm only fires
+        // when `regionsAllEmpty` holds. Pre-§0.4.212, only callers that explicitly
+        // ran `liftIfRegionBodies` first (the K2 plugin's `TlalocIrGenerationExtension`)
+        // got correct behaviour; direct consumers via `:benchmarks` (e.g., the
+        // QWOP `Qwop.hipUpdatePrimal` test surfaced in §0.4.211) hit the leak. Calling
+        // the lift pass here is idempotent (returns the input function unchanged when
+        // not safe to lift) and self-contained — making `DxirReverseTransform.apply`
+        // produce well-formed gradient functions regardless of whether the caller ran
+        // the lift step.
+        @Suppress("NAME_SHADOWING")
+        val primal = PhiCalculus.liftIfRegionBodies(primal)
         require(primal.returns.size == 1) {
             "DxirReverseTransform v1 requires exactly 1 return value (got ${primal.returns.size})"
         }
