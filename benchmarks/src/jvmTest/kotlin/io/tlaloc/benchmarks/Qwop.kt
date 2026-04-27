@@ -249,6 +249,49 @@ object Qwop {
             listOf(pos)
         }
 
+    /**
+     * §0.4.217 — QWOP Phase 2 fifth slice: **upper-bound IF** in WHILE — the
+     * symmetric counterpart of §0.4.216's [forwardKinematicsLegPrimal] (which
+     * tested a lower-bound ground-contact IF).
+     *
+     * Wraps the same [forwardKinematicsArm] helper that Phase D of
+     * [avatarStepPrimal] uses. The recurrence is:
+     *
+     * ```kotlin
+     * var swing = 0f
+     * for (seg in 0 until nSegs) {
+     *     val acc = swing + shoulder + friction
+     *     swing = if (acc > 4f) 4f else acc   // shoulder torque limit
+     * }
+     * return swing
+     * ```
+     *
+     * **Forward semantics** (default `nSegs = 3`, `maxSwing = 4f`):
+     *   - Sum ≤ 4/3 (and non-negative): every iter takes else, forward = nSegs × sum.
+     *   - Sum sufficiently negative: every iter takes else (acc never exceeds 4),
+     *     forward = nSegs × sum (negative).
+     *   - Sum > 4/3 → eventually clamps. Once clamped, stays clamped at 4f
+     *     (since 4 + positive > 4 always).
+     *
+     * **Gradient semantics**: the recurrence is monotonic in the input sum
+     * **once the sum is positive**. The final output's branch determines the
+     * gradient — if the last iteration takes the then-branch, gradient = 0
+     * (constant 4f kills upstream). If the last iteration takes else,
+     * gradient = nSegs per input (no clamping happened).
+     *
+     * **Discriminator power vs §0.4.216**: tests **upper-clamp** IF gradient
+     * routing. The IF predicate (`acc > 4f`) is in the **opposite direction**
+     * of §0.4.216's (`tip < 0f`), so the gradient-zeroing branch is the
+     * upper one (then-branch yields const-4f), not the lower one.
+     */
+    fun forwardKinematicsArmPrimal(nSegs: Int = 3): DxirFunction =
+        DxirBuilder.function("qwopForwardKinematicsArm") {
+            val shoulder = param("shoulder", f32)
+            val friction = param("friction", f32)
+            val swing = forwardKinematicsArm(shoulder, friction, nSegs)
+            listOf(swing)
+        }
+
     fun avatarStepPrimal(): DxirFunction =
         DxirBuilder.function("qwopAvatarStep") {
             val mHip = param("mHip", f32)
