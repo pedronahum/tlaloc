@@ -39,6 +39,91 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.228 Head-to-head harness Phase 1 closure — multi-inhabitant runner + CSV/JSON dump; one place to plug Phase 2 Python references in 2026-04-27
+
+§0.4.227's hand-off named "Head-to-head harness Phase 1 closure — multi-inhabitant runner + CSV/JSON dump" as the next pickup. §0.4.228 lands it. **The harness Phase 1 is now structurally complete** — six inhabitants (BGDHyperOpt + HookeanSpring + Brachistochrone + HMC + CartPole paper benchmarks + QWOP avatar-step synthetic), one runner that produces both paper-style CSV and full-numerical JSON dumps. Phase 2 (Python references) is gated only on user-side toolchain.
+
+**The runner**:
+
+```kotlin
+object HeadToHeadHarnessRunner {
+    val allInhabitants: List<HeadToHeadBenchmark> = listOf(
+        QwopAvatarStepHarness, BgdHyperOptHarness, HookeanSpringHarness,
+        BrachistochroneHarness, HmcLogisticRegressionHarness, CartPolePhase1Harness,
+    )
+
+    fun runAllAndDump(
+        warmup: Int = 200,
+        measured: Int = 800,
+        outputDir: java.io.File,
+    ): List<HeadToHeadResult>
+}
+```
+
+Iterates over all six inhabitants, runs each one's `runBaseline()`, dumps:
+- `<outputDir>/harness-results-tlaloc.csv` — paper-style format `benchmark,framework,n_iterations,median_ns,min_ns,p99_ns`. Mirrors the OOPSLA paper's per-framework performance tables.
+- `<outputDir>/harness-results-tlaloc.json` — JSON array of `HeadToHeadResult` objects with full numerical baseline (forward + per-input gradients + timing stats).
+
+**Why both formats**:
+
+CSV is what the paper uses for performance tables — exactly the right shape for plugging in PyTorch/JAX rows alongside Tlaloc's. JSON preserves the full numerical baseline (forward + gradients) needed for **f32-tolerance numerical match** — the second arm of M9's exit criterion alongside throughput. A single Python script reading both files can produce the cross-framework comparison table.
+
+**The test file** [`HeadToHeadHarnessAllTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessAllTest.kt) — 1 test, passing on first run:
+
+`runAllAndDumpProducesCsvAndJsonForAllInhabitants` — runs `runAllAndDump(20, 50, tempDir)` and pins:
+- 6 results returned, names match the expected six (BGDHyperOpt, HookeanSpring, Brachistochrone, HMC, CartPole, QWOP avatar-step).
+- Each result's forward + every gradient is finite (non-NaN, non-infinite).
+- Each result's timings are sane (positive, ordered min ≤ median ≤ p99, median < 100× min).
+- CSV exists with 7 lines (header + 6 data rows), header matches `benchmark,framework,n_iterations,median_ns,min_ns,p99_ns`, every row contains `,tlaloc,` and 6 fields, every benchmark name appears.
+- JSON exists, starts with `[`, ends with `]`, contains every benchmark name as a `"benchmark": "..."` key.
+- Tempdir cleaned up via `try { ... } finally { deleteRecursively() }`.
+
+**Decisions worth flagging**:
+
+- **The runner uses `Files.createTempDirectory` for isolated test output.** Avoids polluting `build/` from the test suite. A real measurement run (e.g., a `main` or Gradle task) would point `outputDir` at `build/` directly. The runner API accepts any `File`, so callers choose.
+
+- **Warmup/measured tunable per call.** Test uses 20/50 to keep the suite fast. A real Phase 2 measurement run would use defaults (200/800) — about 4 seconds per inhabitant on a typical laptop, ~25 seconds total for all six. Acceptable for a milestone-pinning measurement.
+
+- **JSON output reuses `HeadToHeadResult.toJsonString()` from §0.4.222.** No external dependencies, no new code paths. The runner's `writeJson` just wraps the per-result JSON in a JSON array with two-space indentation per object. Keep dependencies minimal until cross-framework parsing actually requires a real parser.
+
+- **The structural assertion that "all 6 forward values are finite + all gradients are finite + all timings are sane" is the right shape for a runner-level test.** Per-inhabitant correctness (specific forward values, FD-validated gradients) is already pinned by each inhabitant's individual test (`HeadToHeadHarnessQwopTest`, `HeadToHeadHarnessBgdHyperOptTest`, etc.). The runner test focuses on the *aggregation surface*: does the runner correctly enumerate all inhabitants? Does it produce parseable output? Does the CSV format match the paper-style schema? These are different concerns.
+
+- **Test uses 6 expected benchmark names as a set.** If a future inhabitant is added or a name changes, this test fails loudly with a clear diff. Better than asserting on the count alone.
+
+- **No new dependencies, no new modules.** Stays within `:benchmarks/src/jvmTest`. The §0.4.222 decision (`:benchmarks` extension over a new `:harness` module) continues to pay off — six inhabitants and a runner all live in the same source set with no build.gradle plumbing churn.
+
+- **Phase 1 is structurally closed.** Next firing should write the out-of-scope register refresh (§0.4.207/§0.4.221 pattern) that updates §0.4 status: "Phase 1 of head-to-head harness CLOSED; six paper-benchmark Tlaloc-side baselines pinned; Phase 2 Python references gated on user-side toolchain."
+
+- **Suite +1 to 962.** Single test added — the runner's coverage is intentionally one comprehensive integration test rather than per-aspect unit tests, since each inhabitant already has its own validation suite.
+
+**Tests added** (+1):
+
+1. `HeadToHeadHarnessAllTest.runAllAndDumpProducesCsvAndJsonForAllInhabitants`
+
+Full suite is green: **962 tests** (+1 from §0.4.227).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Out-of-scope register refresh — Harness Phase 1 CLOSED.** Per the §0.4.207 / §0.4.221 pattern: when a multi-firing arc closes (here, §0.4.222–§0.4.228 — seven firings closing the harness Phase 1 axis), write a register-refresh entry that updates §0.4 status. All six paper benchmarks now have Tlaloc-side baselines + a multi-inhabitant runner + CSV/JSON dump. Phase 2 (Python references) is the remaining gate, conditional on user-side toolchain. 1 firing.
+
+2. **Head-to-head harness Phase 2 — Python references.** Gated on user-side toolchain (PyTorch 2.x + JAX setup). When user supplies the Python environment, the comparison can run.
+
+3. **First runtime backend (Phase 2 #2 — IREE CPU).** Now that harness Phase 1 is closed and waiting on Phase 2's Python availability, IREE CPU runtime is a higher-priority axis. Once it ships, the harness re-runs against a native backend will give the actual head-to-head numbers (vs current `DxirInterpreter` baseline). This is also the M3 critical path.
+
+4. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** §11.13's headline gap. Genuinely deferred but not on any critical path.
+
+5. **Plugin IR-side synthesis closure (§17 step 6 widening).** Phase 2 #1 of the M1 critical path. Substantively closed at §0.4.203 for scalar + rank-1/2/3 + 4-grad-output Quadruple. Open: rank-4+ tensor ops, 5+ grad-output Pentuple. Lower priority while no port today exercises rank-4+.
+
+**Definition-of-done for §0.4.228 — met**:
+- `HeadToHeadHarnessRunner.allInhabitants` exposes the six inhabitants ✓
+- `runAllAndDump(warmup, measured, outputDir)` runs all six and writes both CSV + JSON ✓
+- CSV format matches paper-style `benchmark,framework,n_iterations,median_ns,min_ns,p99_ns` ✓
+- JSON preserves full numerical baseline (forward + gradients + timings) ✓
+- Test verifies 6 inhabitants, 7 CSV lines, all names present in both files ✓
+- All values finite + timings sane across all inhabitants ✓
+- Suite +1 to 962 ✓
+- Out-of-scope register refresh is the natural next pickup ✓
+
 #### 0.4.227 Head-to-head harness Phase 1 sixth slice — CartPole Phase 1 closes paper-benchmark coverage; first to use SIN/COS/ABS/IF 2026-04-27
 
 §0.4.226's hand-off named "Head-to-head harness Phase 1 sixth slice — CartPole inhabitant" as the next pickup. §0.4.227 lands it. **The harness now has all five paper benchmarks in Tlaloc-side scalar form** — BGDHyperOpt, HookeanSpring, Brachistochrone, HMC, CartPole — plus QWOP avatar-step (synthetic). **M9's paper-benchmark prerequisite is met.**

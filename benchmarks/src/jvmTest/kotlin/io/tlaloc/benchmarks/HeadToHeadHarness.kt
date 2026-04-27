@@ -242,6 +242,82 @@ object HmcLogisticRegressionHarness : HeadToHeadBenchmark {
 }
 
 /**
+ * §0.4.228 — Phase 1 closure: multi-inhabitant runner + CSV/JSON dump.
+ *
+ * Iterates over [allInhabitants] and runs each one's baseline, aggregating
+ * results into:
+ *   - `<outputDir>/harness-results-tlaloc.csv` — paper-style CSV with
+ *     `benchmark,framework,n_iterations,median_ns,min_ns,p99_ns` columns.
+ *     This is the format the head-to-head plan's Phase 2 Python references
+ *     will produce alongside, for cross-framework comparison.
+ *   - `<outputDir>/harness-results-tlaloc.json` — JSON array of full
+ *     [HeadToHeadResult] objects (forward + per-input gradients + timings).
+ *     Useful for numerical-correctness comparison across frameworks.
+ *
+ * **Why both formats**: CSV is what the paper uses for performance tables;
+ * JSON preserves the full numerical baseline (forward + gradients) needed
+ * for f32-tolerance numerical match against PyTorch / JAX.
+ */
+object HeadToHeadHarnessRunner {
+    val allInhabitants: List<HeadToHeadBenchmark> = listOf(
+        QwopAvatarStepHarness,
+        BgdHyperOptHarness,
+        HookeanSpringHarness,
+        BrachistochroneHarness,
+        HmcLogisticRegressionHarness,
+        CartPolePhase1Harness,
+    )
+
+    /**
+     * Run all inhabitants and dump results to the given directory.
+     * Returns the list of results so callers can also assert on them.
+     */
+    fun runAllAndDump(
+        warmup: Int = 200,
+        measured: Int = 800,
+        outputDir: java.io.File,
+    ): List<HeadToHeadResult> {
+        val results = allInhabitants.map { it.runBaseline(warmup, measured) }
+        outputDir.mkdirs()
+        writeCsv(results, java.io.File(outputDir, "harness-results-tlaloc.csv"))
+        writeJson(results, java.io.File(outputDir, "harness-results-tlaloc.json"))
+        return results
+    }
+
+    private fun writeCsv(results: List<HeadToHeadResult>, file: java.io.File) {
+        file.writeText(buildString {
+            append("benchmark,framework,n_iterations,median_ns,min_ns,p99_ns\n")
+            for (r in results) {
+                append(r.benchmark)
+                append(",tlaloc,")
+                append(r.measuredIterations)
+                append(",")
+                append(r.medianNanos)
+                append(",")
+                append(r.minNanos)
+                append(",")
+                append(r.p99Nanos)
+                append("\n")
+            }
+        })
+    }
+
+    private fun writeJson(results: List<HeadToHeadResult>, file: java.io.File) {
+        file.writeText(buildString {
+            append("[\n")
+            for ((i, r) in results.withIndex()) {
+                if (i > 0) append(",\n")
+                // Indent each object's lines by two spaces. toJsonString()
+                // produces a multi-line object; we wrap it in array brackets
+                // and re-indent without parsing.
+                append(r.toJsonString().lines().joinToString("\n") { "  $it" })
+            }
+            append("\n]\n")
+        })
+    }
+}
+
+/**
  * §0.4.227 — sixth harness inhabitant: CartPole Phase 1 (one-timestep reward).
  * Fifth and final **paper benchmark** — full M9 paper-benchmark coverage:
  * BGDHyperOpt + HookeanSpring + Brachistochrone + HMC + CartPole + QWOP.
