@@ -39,6 +39,97 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.235 Out-of-scope register refresh — Harness Phase 2 scripts shipped + aggregator + IREE plan; M9 closure waits on user-side toolchain 2026-04-27
+
+§0.4.229 was the twelfth register snapshot; §0.4.235 is the thirteenth. **5 sub-sections shipped between §0.4.230 and §0.4.234** — IREE CPU port plan + multi-result COARSENED substrate test + harness Phase 2 (PyTorch + JAX scripts + aggregator). **All structural prerequisites for M9 closure are now in the repo;** what remains is user-side toolchain availability for actual measurement.
+
+**The state-of-the-world clarification** (per the in-session question "is tlaloc working front to back, and is it faster?"):
+
+- **Front-to-back through the JVM interpreter: yes.** All six paper benchmarks have working primals + coarsening + reverse-mode AD + FD-validated correctness. The K2 plugin path lowers user-written `grad { ... }` lambdas to dxir for scalar + rank-1/2/3 tensor cases (§0.4.203).
+- **Cross-framework comparison: infrastructure ready, comparison not run.** Harness JSON+CSV dumps, PyTorch + JAX reference scripts, aggregator script all ship. Toolchain-gated; no actual numbers exist.
+- **Faster than PyTorch/JAX: unknown.** Tlaloc's current timing target is `DxirInterpreter` — JVM-side, not compiled native code. The IREE CPU runtime that would produce competitive numbers is planned (§0.4.230) but not implemented. The "Tlaloc beats torch.compile by 4-11×" framing in the harness's M9 verdict comes from the OOPSLA 2021 paper's reported figures — those measure a *coarsened-AD-with-native-codegen* implementation. We have the AD pipeline; we don't have the native codegen yet.
+
+**Refreshed register (as of §0.4.234)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch + JAX baselines (Phase 2 execution) | Both reference scripts (`run_pytorch.py`, `run_jax.py`) + aggregator (`aggregate.py`) ship pre-toolchain-install. **Execution is gated on user-side `pip install torch>=2.1` + `pip install jax jaxlib`.** Once installed, running both scripts + aggregator produces the comparison Markdown that becomes the body of the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity." |
+| Runtime | IREE CPU (M3 step 5) implementation | Plan in `docs/IREE_CPU_PORT_PLAN.md`. Gated on user-side IREE compiler + runtime install. Plan's Phase 1 first-slice (`:runtime-iree` module + JNI smoke test) is 1-2 firings post-install. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186. Rank-4+ unsupported (no use case yet). |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) — multi-result + rank-4+ surface | **Substantively closed for scalar + rank-1/2/3 F32 + square AND rectangular MATMUL + 4-grad-output Quadruple** at §0.4.203. Open: rank-4+ tensor ops, 5+ grad-output Pentuple/list (no port today exercises that), `irIfOp` with non-empty bodies. |
+| Plugin | `irIfOp` widening to lower IF-with-body-ops | Currently empty-body only. The §0.4.174 lift pass hoists safe arithmetic to top level; non-safe-lift cases (DIV/SQRT/LOG in IF body) still hit it. |
+| Plugin | `>4` grad-output cap in `synthesise()` | Synthesise rejects `fn.returns.size > 4`. 4-output via `Quadruple` shipped §0.4.203. 5+ outputs would need a `Pentuple` data class or list-typed wrapper. No port today exercises 5+. |
+| Plugin | `findTensorBinaryOp` overload-disambiguation | §0.4.206 added a defensive filter (parameter-type-based) since `:core/ops/times` now has two overloads. Future helper additions in `:core/ops` should mirror the disambiguation if a name shadows. |
+| Plugin | K2-plugin variants for harness inhabitants | All five paper benchmarks ported via `:benchmarks` direct-DSL only; K2-plugin variants would require lifting `compileAndRun` from `:compiler-plugin/src/test`. Not on M9 critical path since `:benchmarks` exercises the same dxir + coarsening + reverse-mode AD pipeline. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED — coarsening-side production | Substrate widening shipped §0.4.179; symmetric dead-index test at index 0 added §0.4.231. Open: coarsening passes still produce ONLY single-result COARSENED. **Forward-looking; no port today drives the need.** |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. CartPole's training loop (§0.4.206) and QWOP's avatar-step (§0.4.220) are both host-side Kotlin orchestration — they don't differentiate THROUGH the WHILE; they call the synthesised gradient repeatedly. Differentiating through a training WHILE remains genuinely deferred. |
+| PhiCalculus | `liftIfRegionBodies` widening of `SAFE_LIFT_OPS` | Currently total-functions-only. EXP/LOG/SQRT/DIV could be added with care. Widen as a port surfaces a need. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162 + §0.4.216/§0.4.217 multi-input variants); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.176 + §0.4.219). |
+| Control flow | Multi-block regions | Single-block today. |
+| Control flow | Multi-result IF AD Phase 4 | Nested WHILE inside an IF branch. The headline §11.13 gap was already closed at §0.4.152/§0.4.153 — the /loop priority ladder's listing as "headline gap" is stale. |
+| Tensor ops | StableHLO `OpKind.SIGN` emitter | §0.4.204 added the dxir + interpreter + plugin path; the StableHLO emitter (`stablehlo.sign`) is deferred until a real port through StableHLO surfaces the need. |
+| Tensor ops | `DTensor.minus(Float)` operator | §0.4.206 added `DTensor.times(Float)` for GD updates. `minus(Float)` would let the user write `weights - lr * grads` symmetrically. Not blocking any port; widen when symmetry surfaces a friction. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+| Harness | `BenchmarkPrimals` / `:ir`-test cross-module duplication | §0.4.223 noted that `bgdHyperOptOuterLoopPrimal` is duplicated between `:benchmarks/BenchmarkPrimals.kt` and `:ir/PhiCalculusBgdHyperOptTest.kt`. Lift to `:ir/commonTest` or expose a public `:ir` API when a third caller surfaces. |
+| Harness | JVM-side dump path uses tempdir | `HeadToHeadHarnessAllTest` writes to `Files.createTempDirectory(...)`. For the user's actual workflow (run JVM harness → run Python scripts → run aggregator), a Gradle task or `main()` that writes to `build/harness-results-tlaloc.json` directly would make `./gradlew dumpHarnessResults` a single-command alternative. 1 firing. |
+
+**Newly shipped between §0.4.230 and §0.4.234** (5 sub-sections, three themed clusters):
+
+- **IREE CPU port plan (§0.4.230)** — `docs/IREE_CPU_PORT_PLAN.md` documents the Phase 2 #2 deliverable (JNI bindings + single-device dispatch + smoke test) as a phased migration. Gated on user-side IREE install. Following the §0.4.181 (head-to-head harness) and §0.4.208 (QWOP) precedent: write the plan now so post-install firings have a concrete decomposed roadmap.
+
+- **Multi-result COARSENED substrate symmetric test (§0.4.231)** — added `gradThroughMultiResultCoarsenedDeadIndex0SeedsZero` mirroring the existing index-1-dead test with index 0 dead. Pins that `handleCoarsenedAdjoint`'s dead-index detection is symmetric. Honest scoping decision documented: don't widen `coarsenRootLeaf` / `coarsenMultiSoi` to PRODUCE multi-result COARSENED ops absent a driving port. Substrate is forward-ready; activation waits.
+
+- **Harness Phase 2 — Python references + aggregator (§0.4.232 → §0.4.234)** — three-firing arc that ships:
+  - §0.4.232: `harness/python/run_pytorch.py` (~265 lines) implementing all five paper benchmarks via `torch.func.grad` + `torch.compile` with the exact same fixed inputs and primal structural shape as Tlaloc's `BenchmarkPrimals`.
+  - §0.4.233: `harness/python/run_jax.py` mirroring the PyTorch port with `jnp` substitutions + `jax.block_until_ready` for synchronous timing.
+  - §0.4.234: `harness/python/aggregate.py` (stdlib only) reads all three JSON files (Tlaloc + PyTorch + JAX) and produces the unified Markdown comparison table with throughput, speedups, paper figures, M9 verdict, numerical agreement at f32 tolerance. Smoke-tested end-to-end with synthetic data.
+
+**Decisions worth flagging**:
+
+- **All Phase 2 prep work landed without violating the no-toolchain-install rule.** The Python scripts use `try: import ... except ImportError` guards so they parse via `ast.parse` without the libraries installed. The aggregator uses stdlib `json` only. The IREE plan is pure documentation. The /loop produced legitimate structural progress every firing without ever running `pip install`.
+
+- **The "Tlaloc is faster" question has an honest answer: not yet.** §0.4.235's clarification is worth pinning explicitly: the harness's current timing target (`DxirInterpreter`) is JVM-side interpreted code, not native. The §0.4.222 `HeadToHeadHarness.kt` header documents this trade-off; this register refresh elevates it to the deferred-table level so future readers don't get confused by the harness's existence into thinking M9 is closed.
+
+- **The /loop priority ladder remains stale.** Items 1–6 closed; cleanup items closed except multi-result COARSENED coarsening-side production (forward-looking, no port driving it); item 7 awaits toolchain; item 8 lands every few firings. This refresh doesn't change the prompt — only the user can — but it documents the gap so someone reading the spec knows what the loop is actually doing.
+
+- **Phase 1 closure entry will land as a 1-firing exercise post-toolchain-install.** Concrete steps: (1) `./gradlew :benchmarks:jvmTest --tests HeadToHeadHarnessAllTest` produces `build/harness-results-tlaloc.json`; (2) `python harness/python/run_pytorch.py` produces `build/harness-results-pytorch.json`; (3) `python harness/python/run_jax.py` produces `build/harness-results-jax.json`; (4) `python harness/python/aggregate.py` reads all three and prints the comparison Markdown; (5) write a §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" with the aggregator's Markdown as the body. Steps (2-3) require user-side toolchain. Step (1) requires the JVM-side dump path improvement (deferred-register entry above).
+
+- **Cadence: 5 sub-sections is on the lower end of recent register-refresh windows.** §0.4.221 = 13 firings (full QWOP arc), §0.4.207 = 5, §0.4.229 = 7, §0.4.235 = 5. The harness Phase 2 arc was tighter than QWOP because the per-firing work was uniform (write a Python script of ~250 lines with mostly mechanical translations).
+
+- **Out-of-scope register refresh is now a clear, recurring rhythm.** §0.4.207 closed CartPole; §0.4.221 closed QWOP; §0.4.229 closed harness Phase 1; §0.4.235 closes harness Phase 2. Every ~5–13 firings the register gets recalibrated. The pattern works.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **963 tests** (unchanged from §0.4.234).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **JVM-side dump-path improvement.** `HeadToHeadHarnessAllTest` currently writes to `Files.createTempDirectory(...)`. A small `HeadToHeadHarnessDump.kt` `main()` (or a `JavaExec` Gradle task) that writes to `build/harness-results-tlaloc.json` directly makes `./gradlew dumpHarnessResults` a single-command alternative — exactly what the user invokes to set up the cross-framework comparison. 1 firing.
+
+2. **Phase 1 closure entry post-toolchain-install.** Once the user installs PyTorch + JAX, runs both scripts + the aggregator, the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" lands. Body = aggregator's Markdown output. 1 firing post-install.
+
+3. **IREE CPU runtime implementation.** Gated on user-side IREE install per §0.4.230's plan.
+
+4. **Polish work that doesn't grow scope** — risk of busywork. Pick only when there's a genuine gap; multi-result COARSENED's substrate already has its symmetric coverage from §0.4.231.
+
+5. **Multi-result IF AD Phase 4 — already shipped** at §0.4.152/§0.4.153 per the line-1908 finding. The /loop's listing of this as a Phase 1 priority is stale.
+
+**Definition-of-done for §0.4.235 — met**:
+- Deferred table refreshed to reflect §0.4.230–§0.4.234 closures ✓
+- "PyTorch / JAX baselines (Phase 2 execution)" explicitly framed as toolchain-gated execution (scripts shipped pre-install) ✓
+- "IREE CPU runtime implementation" elevated to a named register entry alongside the plan ✓
+- "JVM-side dump path uses tempdir" added as a 1-firing improvement opportunity ✓
+- State-of-the-world clarification ("front-to-back yes; faster than PyTorch/JAX unknown until IREE lands") pinned at the top of the entry ✓
+- Three themed clusters named (IREE plan, COARSENED symmetric test, harness Phase 2 arc) ✓
+- Full suite stays green at 963 (unchanged) ✓
+
 #### 0.4.234 Cross-framework comparison aggregator — `harness/python/aggregate.py` produces unified comparison table 2026-04-27
 
 §0.4.233's hand-off named "Cross-framework comparison aggregator" as the next pickup. §0.4.234 lands it: `harness/python/aggregate.py` reads the three harness JSON files (Tlaloc + PyTorch + JAX) and produces a unified Markdown comparison table — the body of the future §0.4 entry titled "Phase 1 closed — coarsening at M9 parity."
