@@ -209,6 +209,46 @@ object Qwop {
             listOf(acc)
         }
 
+    /**
+     * §0.4.216 — QWOP Phase 2 fourth slice: IF-in-WHILE on the kinematics path.
+     * Combines [hipUpdatePrimal]'s IF-in-WHILE shape with [sumPositionsPrimal]'s
+     * multi-input gradient routing — the first Phase 2 slice that exercises both
+     * structural axes simultaneously.
+     *
+     * Wraps the same [forwardKinematicsLeg] helper that Phase D of
+     * [avatarStepPrimal] uses. The recurrence is:
+     *
+     * ```kotlin
+     * var pos = 0f
+     * for (seg in 0 until nSegs) {
+     *     val tip = pos + hip + knee + ankle
+     *     pos = if (tip < 0f) 0f else tip   // ground contact
+     * }
+     * return pos
+     * ```
+     *
+     * **Forward semantics** (with default `nSegs = 3`):
+     *   - When `hip + knee + ankle ≥ 0` (no clamping): `pos = nSegs × (hip + knee + ankle)`.
+     *   - When `hip + knee + ankle < 0` (all iterations clamp): `pos = 0`.
+     *
+     * **Gradient semantics** (binary-clamp shape — the recurrence is monotonic in
+     * the input sum, so it either always clamps or never clamps):
+     *   - Non-clamping: ∂/∂hip = ∂/∂knee = ∂/∂ankle = `nSegs` (constant).
+     *   - Clamping: ∂/∂hip = ∂/∂knee = ∂/∂ankle = `0` (the constant-zero then-branch
+     *     kills upstream gradient flow at every iteration).
+     *
+     * **Discriminator value**: distinguishes a "no IF" implementation (would always
+     * yield the non-clamping gradient) from correct branch-aware AD.
+     */
+    fun forwardKinematicsLegPrimal(nSegs: Int = 3): DxirFunction =
+        DxirBuilder.function("qwopForwardKinematicsLeg") {
+            val hip = param("hip", f32)
+            val knee = param("knee", f32)
+            val ankle = param("ankle", f32)
+            val pos = forwardKinematicsLeg(hip, knee, ankle, nSegs)
+            listOf(pos)
+        }
+
     fun avatarStepPrimal(): DxirFunction =
         DxirBuilder.function("qwopAvatarStep") {
             val mHip = param("mHip", f32)

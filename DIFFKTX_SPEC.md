@@ -39,6 +39,104 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.216 QWOP Phase 2 fourth slice — `forwardKinematicsLegPrimal` coarsened test pins **IF-in-WHILE multi-input** gradient routing 2026-04-27
+
+§0.4.215's hand-off named "QWOP Phase 2 fourth slice — IF-in-WHILE on the kinematics path" as the next pickup. §0.4.216 lands it: exposes `Qwop.forwardKinematicsLegPrimal()` and pins forward + coarsening + branch-aware multi-input gradient on the ground-contact recurrence.
+
+**Why this slice closes the structural gap**:
+
+§0.4.211/§0.4.212's `hipUpdate` covered IF-in-WHILE on **single-input**. §0.4.213/§0.4.214/§0.4.215 covered **multi-input** on **pure-arithmetic** primals (no IF). §0.4.216 is the first slice that combines **both axes**: 3-input IF-in-WHILE. This is the structural shape that makes QWOP Phase 2 actually differ from CartPole — multi-input branch-aware AD on a coarsened single-loop primal.
+
+**The forward-kinematics recurrence**:
+
+```kotlin
+var pos = 0f
+for (seg in 0 until nSegs) {
+    val tip = pos + hip + knee + ankle
+    pos = if (tip < 0f) 0f else tip   // ground contact
+}
+```
+
+The recurrence is **monotonic in the input sum**: if `hip + knee + ankle < 0`, the position never escapes 0; if `≥ 0`, it grows by the sum each iteration and never re-clamps. So the gradient shape is **binary**: either always-clamping (gradient = 0) or never-clamping (gradient = nSegs per input).
+
+**Forward semantics** (default `nSegs = 3`):
+- Non-clamping (sum ≥ 0): `pos = nSegs × (hip + knee + ankle)`.
+- Clamping (sum < 0): `pos = 0`.
+
+**Gradient semantics**:
+- Non-clamping: `∂/∂hip = ∂/∂knee = ∂/∂ankle = nSegs`.
+- Clamping: all three gradients = 0 (the constant-zero then-branch kills upstream gradient flow at every iteration).
+
+**The new primal** in [`Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+```kotlin
+fun forwardKinematicsLegPrimal(nSegs: Int = 3): DxirFunction =
+    DxirBuilder.function("qwopForwardKinematicsLeg") {
+        val hip = param("hip", f32)
+        val knee = param("knee", f32)
+        val ankle = param("ankle", f32)
+        val pos = forwardKinematicsLeg(hip, knee, ankle, nSegs)
+        listOf(pos)
+    }
+```
+
+**The test file** [`QwopForwardKinematicsLegTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopForwardKinematicsLegTest.kt) — 7 tests, all passing:
+
+1. `primalStructure` — pins 1 WHILE + 0 top-level IFs (the IF lives inside the WHILE region).
+2. `forwardEvalNonClamping` — at (1, 2, 3): pos = 18 (= 3 × 6).
+3. `forwardEvalClamping` — at (-1, -1, -1): pos = 0. Discriminator: a "no IF" forward would yield -9.
+4. `phiCalculusUnrollsConstantTripCountWhile` — coarsened body has 0 top-level WHILEs.
+5. `gradientNonClamping` — **the headline non-clamping pin**. At (1, 2, 3): grads = (3, 3, 3).
+6. `gradientClamping` — **the headline clamping pin**. At (-1, -1, -1): grads = (0, 0, 0). Discriminator: a "no IF" grad implementation would yield (3, 3, 3) here too.
+7. `gradientNonClampingAtZeroInputs` — boundary pin. At (0, 0, 0): grads = (3, 3, 3). Pins the **STEP(0) = 0** convention (predicate false at zero, so else-branch runs and gradient flows). A "STEP(0) = 1" convention would clamp here and yield 0.
+
+**Decisions worth flagging**:
+
+- **The two-branch gradient pin is the load-bearing test.** A single-point pin (only non-clamping or only clamping) would miss the structural axis we're testing. (3,3,3) at non-clamping + (0,0,0) at clamping is what discriminates branch-aware AD from any "always-non-clamping" or "always-clamping" approximation.
+
+- **STEP(0) = 0 contract is now pinned at the `:benchmarks` level.** The boundary case (0, 0, 0) — sum exactly zero — is structurally distinct from non-clamping or clamping: STEP(0) = 0 by Tlaloc convention, so the predicate is false (else-branch runs), the gradient flows, and ∂/∂param = nSegs. A future change to STEP(0) semantics would break this pin loudly.
+
+- **§0.4.212's lift pass continues to pay off.** Without the fix, this primal — an IF inside a WHILE region body, with 3 muscle inputs flowing into the IF's `tip` operand — would have surfaced the same §0.4.173 KNOWN LEAK that §0.4.211 hit. The lift pass + the §0.4.175 deep-clone arm now handle this shape transparently.
+
+- **The recurrence's monotonic-in-sum property simplifies the test design.** Because `pos += sum` is monotonic, we don't need elaborate trace tables to predict per-iter clamping behaviour — it's binary. This makes the gradient pin clean: no "clamping-at-iter-2-but-not-iter-3" arithmetic to reason about (vs hipUpdate's mHip=8 case in §0.4.212 that required careful re-derivation).
+
+- **Naming convention check**: `forwardKinematicsLegPrimal()` follows the established pattern (`<helperName>Primal()`). Continues §0.4.213/§0.4.214/§0.4.215's predictable surface — one new public function on `Qwop`, one new `Qwop<Helper>Test.kt`, 5–7 pins.
+
+- **Suite +7 to 920**. §0.4.215 was +6; §0.4.216 adds 7 because the IF-in-WHILE structural surface needs the extra boundary case.
+
+**Tests added** (+7):
+
+1. `QwopForwardKinematicsLegTest.primalStructure`
+2. `QwopForwardKinematicsLegTest.forwardEvalNonClamping`
+3. `QwopForwardKinematicsLegTest.forwardEvalClamping`
+4. `QwopForwardKinematicsLegTest.phiCalculusUnrollsConstantTripCountWhile`
+5. `QwopForwardKinematicsLegTest.gradientNonClamping`
+6. `QwopForwardKinematicsLegTest.gradientClamping`
+7. `QwopForwardKinematicsLegTest.gradientNonClampingAtZeroInputs`
+
+Full suite is green: **920 tests** (+7 from §0.4.215).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 2 fifth slice — `forwardKinematicsArmPrimal`.** Similar to §0.4.216 but 2-input (shoulder, friction) with an upper-bound IF (`if acc > maxSwing`) instead of a lower-bound (ground contact) IF. Tests upper-clamp IF gradient routing — the symmetric counterpart of §0.4.216's lower-clamp. 1 firing.
+
+2. **QWOP Phase 2 sixth slice — `energyTorquePerJointPrimal` or `energyAccumulatorPrimal`.** Both are 2-input IF-in-WHILE shapes. Could be combined with (1) into one larger firing depending on test volume.
+
+3. **QWOP Phase 2 seventh slice — WHILE-in-WHILE coarsening pin.** Expose `Qwop.crossLimbCouplingPrimal()`. Headline test for §0.4.176's WHILE-in-WHILE coarsening surface; 1-2 firings depending on coarsening behaviour. Likely the most structurally interesting Phase 2 slice remaining.
+
+4. **QWOP Phase 2 closure — full `avatarStepPrimal()` coarsened gradient.** Exercises all 13 loops + 8 IFs simultaneously. 1-2 firings; potentially exposes new bugs.
+
+5. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking QWOP Phase 2.
+
+**Definition-of-done for §0.4.216 — met**:
+- Phase 2 fourth-slice primal exposed (`Qwop.forwardKinematicsLegPrimal()`) ✓
+- IF-in-WHILE multi-input gradient routing pinned (both branches) ✓
+- Non-clamping gradient (3,3,3) at (1,2,3) ✓
+- Clamping gradient (0,0,0) at (-1,-1,-1) — the discriminator ✓
+- STEP(0) = 0 boundary pin via (0,0,0) ✓
+- Suite +7 to 920 ✓
+- Phase 2 fifth slice (`forwardKinematicsArmPrimal` upper-bound IF) is the natural next pickup ✓
+
 #### 0.4.215 QWOP Phase 2 third slice — `frictionAccumPrimal` coarsened single-loop test pins squared-input chain rule (MUL with **self**-operand) 2026-04-27
 
 §0.4.214's hand-off named "QWOP Phase 2 third slice — squared-input recurrence" as the next pickup. §0.4.215 lands it: exposes `Qwop.frictionAccumPrimal()` and pins forward + coarsening + linear-in-input gradient on the `acc += coupling × coupling` recurrence.
