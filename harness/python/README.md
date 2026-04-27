@@ -16,7 +16,7 @@ The JVM-side aggregator (`HeadToHeadHarnessAllTest` produces `harness-results-tl
 ## Files
 
 - `run_pytorch.py` — PyTorch reference (uses `torch.func.grad` + `torch.compile`).
-- `run_jax.py` — JAX reference. *Not yet shipped; planned next firing.*
+- `run_jax.py` — JAX reference (uses `jax.grad` + `jax.jit`).
 
 ## Pre-requisites (user-side; not auto-installed)
 
@@ -35,19 +35,27 @@ From the project root:
 # Run PyTorch baselines, write to build/.
 python harness/python/run_pytorch.py
 
+# Run JAX baselines, same output dir.
+python harness/python/run_jax.py
+
 # Run with custom warmup/measured counts.
 python harness/python/run_pytorch.py --warmup 500 --measured 2000
+python harness/python/run_jax.py --warmup 500 --measured 2000
 
-# Run without torch.compile (eager-mode timings).
+# Run without compilation (eager-mode timings).
 python harness/python/run_pytorch.py --no-compile
+python harness/python/run_jax.py --no-jit
 
 # Output goes to a custom directory.
 python harness/python/run_pytorch.py --output /tmp/harness-out/
+python harness/python/run_jax.py --output /tmp/harness-out/
 ```
 
 Output:
 - `build/harness-results-pytorch.json` — full numerical baseline (forward + gradients + timings) for every benchmark.
 - `build/harness-results-pytorch.csv` — paper-style CSV with `benchmark,framework=pytorch-compile,n_iterations,median_ns,min_ns,p99_ns` per row.
+- `build/harness-results-jax.json` — same shape, JAX values.
+- `build/harness-results-jax.csv` — paper-style CSV with `framework=jax-jit` rows.
 
 ## Benchmarks
 

@@ -39,6 +39,87 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.233 Head-to-head harness Phase 2 — JAX reference script ships; both Python references now in repo 2026-04-27
+
+§0.4.232's hand-off named "Write `harness/python/run_jax.py` — JAX port mirroring `run_pytorch.py`. Mostly mechanical." §0.4.233 lands it. **Both Python reference scripts now ship pre-toolchain-install.**
+
+**The new file**:
+
+[`harness/python/run_jax.py`](harness/python/run_jax.py) — JAX implementations of all five paper benchmarks, structurally identical to `run_pytorch.py`. JAX-specific idioms substituted in mechanically:
+
+| Concern | PyTorch (`run_pytorch.py`) | JAX (`run_jax.py`) |
+|---|---|---|
+| Tensor library | `torch` | `jax.numpy as jnp` |
+| Autodiff API | `torch.func.grad(fn, argnums=...)` | `jax.grad(fn, argnums=...)` |
+| Compilation | `torch.compile` | `jax.jit` |
+| Conditional | `torch.where(cond, a, b)` | `jnp.where(cond, a, b)` |
+| Element ops | `torch.exp/log/sin/cos/abs` | `jnp.exp/log/sin/cos/abs` |
+| Synchronization | (implicit) | `jax.block_until_ready(out)` |
+
+The only structural difference is JAX's explicit `block_until_ready`: JAX dispatches asynchronously by default, so the timing loop must wait for each call's result before measuring the next. Without it, the timing loop measures queue-add latency, not actual computation time. PyTorch's eager dispatch is synchronous, so no equivalent is needed.
+
+**Why `block_until_ready` matters for measurement parity**:
+
+A JAX timing loop without `block_until_ready` would produce numbers ~10–100× faster than the actual computation cost — the loop would queue 800 calls, then return, and only at the end would the runtime catch up. PyTorch's `torch.compile` produces synchronously-dispatched compiled functions; the equivalent measurement is implicit. This asymmetry is documented inline so future readers don't get confused by the different patterns.
+
+**The README update**:
+
+[`harness/python/README.md`](harness/python/README.md) updated to:
+1. Drop the "Not yet shipped" qualifier on `run_jax.py`.
+2. Add JAX-specific usage examples (`run_jax.py --no-jit`, `--warmup`, etc).
+3. Document that both scripts produce sibling JSON/CSV files (`harness-results-pytorch.{json,csv}` + `harness-results-jax.{json,csv}`) that the JVM-side aggregator will merge.
+
+**Decisions worth flagging**:
+
+- **JAX `argnums=tuple(range(n_inputs))` returns a tuple-of-gradients for multi-input primals.** PyTorch's `torch.func.grad` does the same. The wrapper pattern `if not isinstance(grads, tuple): grads = (grads,)` handles both single-input (returns scalar gradient) and multi-input (returns tuple) cases uniformly. Same code in both scripts.
+
+- **JAX has different default dtypes than PyTorch.** JAX 0.4+ defaults to `float32` (matching Tlaloc); older JAX defaulted to `float64`. The script uses `jnp.asarray(v, dtype=jnp.float32)` explicitly to guarantee parity. PyTorch's `torch.tensor(v, dtype=torch.float32, requires_grad=False)` is the same shape.
+
+- **The PyTorch+JAX output JSON files have identical structure.** Both produce a JSON array of `HeadToHeadResult` objects with the same fields (`benchmark`, `forwardValue`, `gradientValues`, `warmupIterations`, `measuredIterations`, `medianNanos`, `minNanos`, `p99Nanos`). The JVM-side aggregator (future firing) will read all three (`tlaloc.json`, `pytorch.json`, `jax.json`) and produce a unified comparison table.
+
+- **The CSV format is also unified across the three sources.** All three produce `benchmark,framework,n_iterations,median_ns,min_ns,p99_ns`. Tlaloc's framework column is `tlaloc`; PyTorch's is `pytorch-compile` (or `pytorch-eager` with `--no-compile`); JAX's is `jax-jit` (or `jax-eager` with `--no-jit`). A single `cat` of all three CSVs produces a 19-row file (1 header + 6 Tlaloc + 5 PyTorch + 5 JAX) ready for spreadsheet ingestion.
+
+- **CartPole's vestigial `pt` survives in the JAX port, mirroring the PyTorch port's mirror of Tlaloc's primal.** Same `# noqa: F841` comment as `run_pytorch.py`. JAX's autodiff DCE will produce `df/dat = 0` for the same reason.
+
+- **Both scripts are parseable without their toolchain installed.** `try: import jax ... except ImportError` is the same pattern as `run_pytorch.py`. The `main()` entrypoint detects missing toolchain and exits with a clear error.
+
+- **Suite stays at 963 (pure-scripting session)**.
+
+**Files added** (+1 + 1 update):
+
+1. `harness/python/run_jax.py` (~245 lines)
+2. `harness/python/README.md` (updated to remove "not yet shipped" qualifier and add JAX usage examples)
+
+**Tests added** (+0): pure scripting session; no new JVM tests.
+
+Full suite is green: **963 tests** (unchanged from §0.4.232).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Cross-framework comparison aggregator.** Now that all three reference paths exist (Tlaloc, PyTorch, JAX), the missing piece is a JVM-side or Python-side aggregator that reads all three JSON files and produces a unified comparison table:
+   - **Numerical agreement**: Tlaloc forward vs PyTorch forward vs JAX forward, with 1e-3 abs / 5e-3 rel tolerance flag per benchmark.
+   - **Throughput speedup**: Tlaloc median_ns / PyTorch median_ns + Tlaloc median_ns / JAX median_ns per benchmark.
+   - **Output**: a Markdown table or CSV that becomes the body of the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity".
+   The aggregator could ship as a Kotlin `:benchmarks` test (reads the JSON files, asserts cross-framework agreement, prints the comparison table) OR as a Python script (`harness/python/aggregate.py`). 1 firing.
+
+2. **Out-of-scope register refresh #3.** §0.4.221 + §0.4.229 are the recent register snapshots. With §0.4.230–§0.4.233 shipping the IREE plan + harness Phase 2 scripts, the deferred register has new "harness Phase 2 ready, awaiting toolchain" entries worth surfacing. 1 firing.
+
+3. **Polish work that doesn't grow scope.** Risk of busywork as documented in §0.4.231. Pick only when there's a genuine gap.
+
+4. **IREE CPU runtime implementation.** Gated on user-side IREE install per §0.4.230's plan.
+
+5. **Phase 1 closure entry (post-toolchain-run).** When user has installed PyTorch+JAX, runs both scripts, and the aggregator from (1) produces the comparison table, the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" can land. This is the final M9 milestone — gated on user-side toolchain availability.
+
+**Definition-of-done for §0.4.233 — met**:
+- `harness/python/run_jax.py` ships with all five paper benchmarks ✓
+- JAX port mirrors PyTorch port's structural shape; idioms substituted mechanically ✓
+- `block_until_ready` ensures timing measures actual computation, not queue overhead ✓
+- README updated to reflect both scripts shipped ✓
+- Output JSON + CSV format identical across `tlaloc`, `pytorch`, `jax` for cross-framework merge ✓
+- Script parseable without `jax` installed ✓
+- Suite stays at 963 (pure-scripting session) ✓
+- Cross-framework aggregator is the natural next pickup ✓
+
 #### 0.4.232 Head-to-head harness Phase 2 — PyTorch reference script + README ship pre-toolchain-install 2026-04-27
 
 §0.4.231's hand-off framed the gridlock state: Phase 1 structurally closed, Phase 2 forbidden by /loop rules until "Phase 1 closed — coarsening at M9 parity" entry exists, that entry needs Python-toolchain-gated head-to-head numbers. **The /loop can't trigger toolchain installs, but it CAN write the scripts that the user invokes post-install.** §0.4.232 ships the PyTorch reference under `harness/python/run_pytorch.py` + a usage README. Same pattern as §0.4.230's IREE plan: pre-toolchain artifact preparation.
