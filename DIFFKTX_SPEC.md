@@ -39,6 +39,94 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.238 Harness E2E integration coverage — JVM dump → Python aggregator round-trip test 2026-04-27
+
+§0.4.237's hand-off named "more aggregator coverage" as a polish-risk option but flagged a specific gap worth closing: **integration coverage between the JVM dump and the Python aggregator.** The two halves have separate test suites but no test exercising the full pipeline end-to-end. §0.4.238 lands that bridge.
+
+**The bug class this catches**:
+
+If someone changes `HeadToHeadResult.toJsonString()`'s field naming (e.g., `forwardValue` → `forward_value`):
+- `HeadToHeadHarnessQwopTest` / `HeadToHeadHarnessAllTest` still pass (they assert on JSON content via string `contains`, which is forgiving).
+- `aggregate_test.py` still passes (uses synthetic fixtures with the OLD shape).
+- **The aggregator silently fails when invoked against real JVM dumps post-toolchain-install.**
+
+This kind of bug is exactly the silent kind that tests should catch but won't unless something runs both halves together.
+
+**The new test** [`HeadToHeadHarnessE2ETest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessE2ETest.kt):
+
+```kotlin
+@Test
+fun jvmDumpRoundTripsThroughPythonAggregator() {
+    if (!isPython3Available()) {
+        println("[harness-e2e] python3 not available — skipping")
+        return
+    }
+    // Run the JVM-side dump.
+    HeadToHeadHarnessRunner.runAllAndDump(warmup=20, measured=50, outputDir=tmpDir)
+    // Invoke aggregate.py against the dump.
+    val proc = ProcessBuilder("python3", aggregator, "--input", tmpDir).start()
+    val stdout = ...; val exitCode = proc.waitFor()
+    assertEquals(0, exitCode)
+    // Assert every harness inhabitant name appears in the Markdown output.
+    for (name in expectedNames) assertTrue(stdout.contains(name))
+    // Pin the JSON-shape contract: forwardValue field must be present.
+    assertTrue(jsonFile.readText().contains("\"forwardValue\""))
+}
+```
+
+**Toolchain handling**: gracefully skips if `python3` isn't available on `PATH`. The `isPython3Available()` helper invokes `python3 --version` via `ProcessBuilder` and returns `false` on any exception. This respects the /loop's "no toolchain installs" rule — Tlaloc itself doesn't require Python; the test just opportunistically uses it when present.
+
+**Verification — test passes locally**:
+
+The local environment has `python3` available, so the test ran end-to-end:
+1. JVM dump produced `harness-results-tlaloc.json` (~6.5 KB) and `.csv` (~470 bytes) at warmup=20/measured=50 (~3 second runtime).
+2. Aggregator invocation returned exit 0.
+3. Stdout contained all six benchmark names + `—` cells.
+4. The pinned JSON-shape contract (`"forwardValue"` field) confirmed the aggregator's parser will work against real JVM dumps.
+
+**Decisions worth flagging**:
+
+- **The test is opportunistic, not mandatory.** Skipping when `python3` is absent means it doesn't fail in environments without Python. Most dev/CI environments have Python preinstalled; the test catches the bug class when present and degrades gracefully when absent. Better than failing the suite over a missing toolchain.
+
+- **`findAggregatePy()` walks up from the test's working directory.** The `:benchmarks` subproject runs tests from `$projectRoot/benchmarks`, so `harness/python/aggregate.py` is at `../harness/python/aggregate.py`. The walk-up loop tries up to 5 parent directories — handles cases where the test runs from various CWDs. Returns `null` if not found (rare; would only happen if someone deletes `harness/`).
+
+- **Small warmup/measured (20/50) keeps the test ~3 seconds.** Full default (200/800) is ~25 seconds, fine for a measurement run but too slow for the test suite. The full pipeline still exercises the same code paths; only the timing window is smaller. Numerical correctness is identical.
+
+- **The test pins the `forwardValue` field name explicitly.** The assertion `assertTrue(jsonText.contains("\"forwardValue\""))` is a structural check that a future renaming would fail. The README in `harness/python/` documents this field name as the contract; this test enforces it.
+
+- **No new Python deps; reuses the existing `aggregate.py`.** The Kotlin test shells out to the same `aggregate.py` the user invokes. No Python imports from Kotlin, no JNI, no separate parser.
+
+- **Suite +1 to 964.** The test is a new JUnit case alongside `HeadToHeadHarnessAllTest` (which uses tempdir-only without the Python step).
+
+- **The toolchain-skip pattern is reusable.** If the IREE CPU runtime ever lands and we want a similar JVM-side test that exercises `iree-compile` + `iree-run`, we'd use the same `isPython3Available()`-style guard with `iree-compile --version`. Pattern documented for future replication.
+
+**Tests added** (+1):
+
+1. `HeadToHeadHarnessE2ETest.jvmDumpRoundTripsThroughPythonAggregator`
+
+Full suite is green: **964 tests** (+1 from §0.4.237).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 1 closure entry post-toolchain-install.** Still the headline path. When user installs PyTorch + JAX + runs the four-command sequence, the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" lands. 1 firing post-install.
+
+2. **IREE CPU runtime implementation.** Gated on user-side IREE install per §0.4.230's plan.
+
+3. **Polish / coverage that doesn't grow scope.** Risk of busywork — the harness pipeline is now thoroughly tested (JVM-side smoke via `HeadToHeadHarnessAllTest`, Python-side aggregator via `aggregate_test.py`, integration via this firing's `HeadToHeadHarnessE2ETest`). Three layers of coverage; another would be redundant.
+
+4. **Out-of-scope register refresh #4** — §0.4.235 was 3 firings ago. Approaching the next refresh window but not yet.
+
+5. **Pause the /loop and wait for user-side action.** With three coverage layers + four-command workflow + IREE plan + cross-framework infrastructure all shipped, the loop has effectively built every prerequisite for M9 closure that doesn't require toolchain installs. Subsequent firings risk being pure busywork until either (a) user installs PyTorch+JAX+IREE, or (b) user updates the /loop priority ladder to redirect work.
+
+**Definition-of-done for §0.4.238 — met**:
+- `HeadToHeadHarnessE2ETest.kt` ships with 1 JUnit test ✓
+- Test gracefully skips when python3 is unavailable ✓
+- Test runs the full pipeline (JVM dump → JSON → Python aggregator → Markdown output) ✓
+- Pins JSON-shape contract (`forwardValue` field) explicitly ✓
+- Works locally with python3 present; ~3 seconds runtime ✓
+- Suite +1 to 964 ✓
+- Three-layer coverage (JVM smoke + Python aggregator + integration) is now in place ✓
+
 #### 0.4.237 Aggregator regression coverage — `harness/python/aggregate_test.py` + `test_data/` fixtures 2026-04-27
 
 §0.4.236's hand-off named "Phase 1 closure entry post-toolchain-install" or "IREE CPU implementation" — both toolchain-gated. Continuing the "pre-toolchain artifacts" thread, §0.4.237 lands stdlib-only test coverage for `harness/python/aggregate.py`. **The aggregator is the critical script that produces the §0.4 closure entry's body; without test coverage, a future regression could silently produce wrong results when the user runs the four-command workflow.**
