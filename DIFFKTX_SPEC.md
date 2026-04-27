@@ -39,6 +39,79 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.232 Head-to-head harness Phase 2 — PyTorch reference script + README ship pre-toolchain-install 2026-04-27
+
+§0.4.231's hand-off framed the gridlock state: Phase 1 structurally closed, Phase 2 forbidden by /loop rules until "Phase 1 closed — coarsening at M9 parity" entry exists, that entry needs Python-toolchain-gated head-to-head numbers. **The /loop can't trigger toolchain installs, but it CAN write the scripts that the user invokes post-install.** §0.4.232 ships the PyTorch reference under `harness/python/run_pytorch.py` + a usage README. Same pattern as §0.4.230's IREE plan: pre-toolchain artifact preparation.
+
+**The new files**:
+
+1. [`harness/python/run_pytorch.py`](harness/python/run_pytorch.py) — PyTorch implementations of all five paper benchmarks (BGDHyperOpt, HookeanSpring, Brachistochrone, HMC, CartPole) mirroring `BenchmarkPrimals` exactly: same fixed inputs, same primal structural shape, same constants. Uses `torch.func.grad` + `torch.compile` for gradient evaluation; times each benchmark over a warmup + measured iteration window; writes JSON + CSV in the same format as the JVM-side runner.
+
+2. [`harness/python/README.md`](harness/python/README.md) — usage doc for the user to invoke post-install. Documents pre-requisites, command-line usage, output format, and the per-benchmark numerical-agreement contract (1e-3 abs / 5e-3 rel for forward, 5e-3 rel + 1e-3 abs floor for gradient — per §11.13's "f32-tolerance numerical match").
+
+**The Python primal-equivalence contract**:
+
+Each PyTorch primal mirrors a Tlaloc `BenchmarkPrimals.<bench>Primal()` exactly:
+
+| Benchmark | Tlaloc form | PyTorch form | Inputs |
+|---|---|---|---|
+| BGDHyperOpt | dxir WHILE with `a*w + b` | Python loop with `torch.tensor` ops | `r=0.01, Sxy=111.2, Sx2=55.0, M=5.0, K=3` |
+| HookeanSpring | scalar Euler oscillator | scalar `torch` ops | `pInit=1, vInit=0, kSpring=1, N=10, dt=0.1` |
+| Brachistochrone | `v + v*y` ×N | `v + v*y` ×N | `y=0.5, N=5` |
+| HMC | manual-unrolled 4-iter logistic regression | manual-unrolled with `torch.exp/log` | `β=(0.5, 0.3)` |
+| CartPole | sin/cos/abs/IF one-step reward | `torch.where` for IF | `(at, x0, x1, x2, x3) = (0.5, 0, 0.1, 0.05, 0.02)` |
+
+QWOP avatar-step is **not** included — it's a synthetic primal with no paper number to compare against.
+
+**Decisions worth flagging**:
+
+- **The script is parseable without `torch` installed.** A `try: import torch ... except ImportError` guard means the file's `ast.parse` validates structurally even without the toolchain. The `main()` entrypoint detects missing `torch` and fails with a clear error message rather than crashing on the import. This means the syntax stays verifiable in CI even when the test environment doesn't have PyTorch.
+
+- **`torch.func.grad` + `torch.compile` is the standard PyTorch 2.x API for AD + compilation.** PyTorch 2.0+'s `torch.func.grad` (the functional autodiff API; equivalent to JAX's `jax.grad`) replaces the older `torch.autograd.grad` for stateless gradient evaluation. `torch.compile` traces + compiles the graph; first call is slow (compilation), subsequent calls hit the cache. The script uses the standard 200-warmup + 800-measured pattern so the compilation cost is amortized.
+
+- **CSV `framework=pytorch-compile` rows merge cleanly with Tlaloc's `framework=tlaloc` rows.** The runner can produce one big CSV by concatenating the two — a single comparison table with all framework rows. The `--no-compile` flag toggles to `framework=pytorch-eager` for a degenerate baseline.
+
+- **Numerical-equivalence contract documented in the README**, not enforced by tests yet. When the user runs the script and the JVM-side aggregator picks up both files, a follow-up §0.4 entry would compare them and flag any breaches. For pre-toolchain-install firings, the contract is a guarantee the script writer (this firing) makes; verification waits.
+
+- **Why PyTorch first, JAX next firing**: PyTorch is the more common toolchain in ML stacks; JAX has identical structural API but different idioms (`jax.numpy` vs `torch`, `jax.jit` vs `torch.compile`, `jax.grad` vs `torch.func.grad`). Splitting the firings keeps each one's review surface small (~250 lines vs ~500 for both at once). The JAX port is mostly mechanical given the PyTorch port — copy primals, swap imports.
+
+- **CartPole's vestigial `pt` survives in the PyTorch port.** The note `pt = ...  # noqa: F841 — vestigial DCE-test piece` explains why. Tlaloc's CartPole primal includes `pt` even though it's not in the return value (per §0.4.227); PyTorch's port mirrors this so the structural shape matches. PyTorch's autodiff DCE will produce `df/dat = 0` for the same reason Tlaloc's does.
+
+- **The /loop's no-toolchain-install rule is preserved.** This firing did not run `pip install torch`. The script is verified via `python3 -c "import ast; ast.parse(open(...).read())"` for structural validity, but execution is left to the user's post-install workflow.
+
+- **Suite stays at 963 (pure-doc/scripting session)**.
+
+**Files added** (+2):
+
+1. `harness/python/run_pytorch.py` (~265 lines)
+2. `harness/python/README.md` (~85 lines)
+
+**Tests added** (+0): pure scripting session; no new JVM tests.
+
+Full suite is green: **963 tests** (unchanged from §0.4.231).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Write `harness/python/run_jax.py`** — JAX port mirroring `run_pytorch.py`. Mostly mechanical: `jax.numpy` for tensor ops, `jax.grad` + `jax.jit` for AD + compilation, identical primals + inputs + JSON output format. 1 firing.
+
+2. **Cross-framework comparison entry** — once `run_jax.py` ships and the user runs both Python scripts post-install, the harness will have three JSON dumps: `tlaloc`, `pytorch`, `jax`. A `:benchmarks` test (or a Python aggregator) can read all three, compute speedup tables + numerical-agreement diffs, and produce the §0.4 "Phase 1 closed" entry. Multi-firing + toolchain-gated.
+
+3. **Out-of-scope register refresh #3** — §0.4.221 + §0.4.229 are recent register snapshots. A §0.4.233+ refresh could call out: (a) the /loop priority ladder is stale (cache pruning shipped, multi-result IF AD Phase 4 shipped, etc); (b) the `harness/python/` artifacts now exist; (c) the only blocking gate is user-side toolchain. Recommends the user update the loop prompt. 1 firing.
+
+4. **Polish work that doesn't grow scope** — more substrate-coverage tests, doc improvements. Risk of busywork; only fire when there's a genuine gap, not just to fill a firing.
+
+5. **IREE CPU runtime implementation** — gated on user-side IREE install per §0.4.230's plan.
+
+**Definition-of-done for §0.4.232 — met**:
+- `harness/python/run_pytorch.py` ships with all five paper benchmarks ✓
+- Each PyTorch primal mirrors Tlaloc's exact structural shape + fixed inputs ✓
+- JSON + CSV output format matches `HeadToHeadResult.toJsonString()` + `HeadToHeadHarnessRunner.runAllAndDump`'s CSV ✓
+- README documents pre-requisites, usage, numerical-agreement contract ✓
+- Script is parseable without `torch` installed (lazy import + ImportError guard) ✓
+- No toolchain install required to write or syntax-verify ✓
+- Suite stays at 963 (pure-scripting session) ✓
+- JAX port is the natural next firing ✓
+
 #### 0.4.231 Multi-result COARSENED substrate — symmetric dead-index-0 test pin 2026-04-27
 
 §0.4.230's hand-off named "Opportunistic cleanup" or "Multi-result COARSENED" as the next pickup. Reading the §0.4.179 entry's hand-off ("**Coarsening doesn't currently CREATE multi-result COARSENED ops** — substrate widening is forward-looking; no port today exercises that need") confirmed the structural-widening of `coarsenRootLeaf` / `coarsenMultiSoi` violates the loop's "Don't add features beyond what the task requires" rule absent a driving port. **What's appropriate this firing is a small symmetric-coverage test on the existing §0.4.179 substrate.**
