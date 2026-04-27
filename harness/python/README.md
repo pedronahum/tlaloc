@@ -17,6 +17,7 @@ The JVM-side aggregator (`HeadToHeadHarnessAllTest` produces `harness-results-tl
 
 - `run_pytorch.py` — PyTorch reference (uses `torch.func.grad` + `torch.compile`).
 - `run_jax.py` — JAX reference (uses `jax.grad` + `jax.jit`).
+- `aggregate.py` — cross-framework aggregator (stdlib only; no PyTorch / JAX needed).
 
 ## Pre-requisites (user-side; not auto-installed)
 
@@ -87,9 +88,33 @@ The /loop's no-toolchain-install rule blocks running these scripts during /loop 
 2. The Tlaloc-side primals serve as the reference for the Python ports; any structural divergence (e.g., wrong constant, wrong loop bound) is caught before the toolchain is even installed.
 3. Subsequent /loop firings post-install can focus on **comparison** (read the JSON files, compute the speedup table, write the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity") rather than re-implementing the primals.
 
+## Cross-framework aggregator
+
+`aggregate.py` produces the unified comparison Markdown table. It only requires Python stdlib — runs even if PyTorch+JAX aren't installed.
+
+```bash
+# Generate the comparison Markdown to stdout.
+python harness/python/aggregate.py
+
+# Write to a file AND stdout.
+python harness/python/aggregate.py --output build/harness-comparison.md
+
+# Strict mode: exit non-zero if any framework's gradient disagrees with
+# Tlaloc's beyond f32 tolerance (1e-3 abs / 5e-3 rel).
+python harness/python/aggregate.py --strict
+```
+
+The aggregator reads `build/harness-results-{tlaloc,pytorch,jax}.json` and produces a Markdown table covering:
+- **Throughput**: median nanoseconds per gradient eval, plus speedup ratios `Tlaloc/torch×` and `Tlaloc/jax×`.
+- **Paper figures**: the OOPSLA 2021 paper's reported speedups for benchmarks where they're known (Brachistochrone, HookeanSpring, HMC, CartPole). Cells show `—` for benchmarks not in the paper's primary tables.
+- **M9 verdict**: `✓` if Tlaloc's measured speedup over `torch.compile` is within 20% of the paper's range; `✗` otherwise; `—` if not measured or not in paper.
+- **Numerical agreement**: per-benchmark forward + gradient values across frameworks, with f32-tolerance flagging.
+
+The Tlaloc JSON is required (the JVM harness must have run); PyTorch and JAX JSONs are optional. If only Tlaloc results exist, the table shows "—" in the cross-framework cells.
+
 ## Cross-framework comparison entry
 
-When `harness-results-tlaloc.json`, `harness-results-pytorch.json`, and `harness-results-jax.json` all exist, a final aggregator computes the comparison table and lands a §0.4 entry. The format mirrors `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3:
+When `harness-results-tlaloc.json`, `harness-results-pytorch.json`, and `harness-results-jax.json` all exist, the `aggregate.py` output above becomes the body of the §0.4 entry. The format mirrors `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3:
 
 ```
 | Benchmark        | Paper (× over torch.compile) | Tlaloc actual | Pass M9? |
