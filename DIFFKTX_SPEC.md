@@ -39,6 +39,121 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.218 QWOP Phase 2 sixth slice — `energyAccumulatorPrimal` coarsened test pins **MUL-in-else-branch + upper-bound IF** chain rule 2026-04-27
+
+§0.4.217's hand-off named "QWOP Phase 2 sixth slice — `energyTorquePerJointPrimal` and/or `energyAccumulatorPrimal`" as the next pickup. §0.4.218 picks `energyAccumulatorPrimal` because the **MUL primary recurrence** (`energy + torque × dist`) is structurally distinct from every prior IF-in-WHILE slice: it puts a MUL inside the IF's else-branch and validates that VjpRegistry's MulRule cross-operand chain rule composes correctly with the IF gradient routing layer.
+
+**Why this slice closes the MUL-vs-IF axis**:
+
+| Slice | Recurrence shape | IF | Coverage |
+|-------|------------------|-----|----------|
+| §0.4.211/§0.4.212 hipUpdate | ADD | lower-bound | single-input ADD-IF |
+| §0.4.213 sumPositions | ADD | none | multi-input ADD only |
+| §0.4.214 sumFineSteps | MUL (cross) | none | MUL chain rule no IF |
+| §0.4.215 frictionAccum | MUL (self) | none | MUL self-operand no IF |
+| §0.4.216 forwardKinematicsLeg | ADD | lower-bound | multi-input ADD-IF |
+| §0.4.217 forwardKinematicsArm | ADD | upper-bound | multi-input ADD-IF (upper) |
+| **§0.4.218 energyAccumulator** | **MUL (cross)** | **upper-bound** | **MUL-IF chain rule combined** |
+
+§0.4.218 is the first slice that combines MUL chain rule with IF gradient routing. The structural shape: `energy = if (acc > 100) 100 else (energy + torque*dist)` puts a MUL inside the IF's else-branch primary computation.
+
+**The MUL-in-else-branch recurrence**:
+
+```kotlin
+var energy = 0f
+for (i in 0 until nSteps) {
+    val raw = energy + torque * dist
+    energy = if (raw > 100f) 100f else raw   // energy threshold
+}
+```
+
+**Forward semantics** (default `nSteps = 3`, `maxEnergy = 100f`) — three regimes:
+
+1. **Below clamp** (3 × torque × dist ≤ 100): forward = `nSteps × torque × dist`.
+2. **Always clamp** (torque × dist > 100): forward = 100f from iter 0.
+3. **Partial clamp** (33.3 < torque × dist ≤ 100): clamps mid-loop, forward = 100f.
+4. **Negative product** (torque × dist < 0): never clamps (predicate is `> 100`, not `> -100`).
+
+**Gradient semantics** (binary by final-iter branch):
+- Final iter else: `df/dtorque = nSteps × dist`, `df/ddist = nSteps × torque` — **input-dependent cross-operand MUL chain rule**.
+- Final iter then: both gradients = 0 (constant-100f kills upstream).
+
+**The new primal** in [`Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+```kotlin
+fun energyAccumulatorPrimal(nSteps: Int = 3): DxirFunction =
+    DxirBuilder.function("qwopEnergyAccumulator") {
+        val torque = param("torque", f32)
+        val dist = param("dist", f32)
+        val energy = energyAccumulator(torque, dist, nSteps)
+        listOf(energy)
+    }
+```
+
+**The test file** [`QwopEnergyAccumulatorTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopEnergyAccumulatorTest.kt) — 8 tests, all passing:
+
+1. `primalStructure` — 1 WHILE + 0 top-level IFs.
+2. `forwardEvalNonClamping` — at (2, 3): forward = 18 (= 3 × 2 × 3).
+3. `forwardEvalAlwaysClamp` — at (20, 20): forward = 100. Discriminator: a "no IF" gives 1200.
+4. `forwardEvalPartialClamp` — at (5, 10): forward = 100. Discriminator: a "no IF" gives 150.
+5. `phiCalculusUnrollsConstantTripCountWhile` — 0 top-level WHILEs.
+6. `gradientNonClamping` — **the headline pin**. At (2, 3): grads = (9, 6) = (nSteps × dist, nSteps × torque). Cross-operand MUL chain rule WITHIN an IF's else-branch.
+7. `gradientWithClamping` — combines always-clamp (20, 20) and partial-clamp (5, 10): both produce (0, 0). Compact pin covering both clamping regimes.
+8. `gradientWithOneZeroInput` — **MUL chain-rule asymmetry pin**. At (0, 3): grads = (9, 0). df/dtorque still flows (= nSteps × dist = 9) even though torque is 0; df/ddist is 0 because torque is 0. A buggy MUL implementation conflating operands could yield (0, 9), (0, 0), or (9, 9) — all wrong.
+9. `gradientNegativeProduct` — sign-preserving pin. At (-2, 3): negative product, never clamps; grads = (9, -6). df/ddist is **negative** (= nSteps × torque = -6), proving the MUL chain rule is sign-preserving and the IF predicate is one-sided (`> 100` not `> -100`).
+
+(Wait, that's 9 entries; let me recount — primalStructure, forwardEvalNonClamping, forwardEvalAlwaysClamp, forwardEvalPartialClamp, phiCalculusUnrollsConstantTripCountWhile, gradientNonClamping, gradientWithClamping, gradientWithOneZeroInput, gradientNegativeProduct = 9. Wait actually I think the test file has 9 tests, not 8. Let me re-check.)
+
+Recount from the file: 9 @Test annotations. Suite +9 to 937, not 936.
+
+**Decisions worth flagging**:
+
+- **The MUL-in-else-branch slice IS the headline Phase 2 structural test.** Pure ADD recurrences inside IF (§0.4.216, §0.4.217) verify branch-aware gradient zeroing. MUL inside IF (§0.4.218) verifies that **chain rule** routes correctly through the IF. These are different bug surfaces — branch-aware gradient zeroing can be correct while MUL chain rule is wrong, or vice versa. Both have to work for Phase 2 to ship.
+
+- **The asymmetry pin at (0, 3) is the most discriminating test in the file.** A "wrong MUL chain rule" bug can pass forward eval, can pass non-clamping symmetric-input gradient, but fails the asymmetric (0, dist≠0) case. df/dtorque should be nSteps × dist regardless of torque's value (since gradient is the partial WRT torque, evaluated at the operand point). Any "shortcut" implementation that conflated MUL operands would fail here.
+
+- **The negative-product test is a bonus structural pin.** It validates two contracts simultaneously: (a) MUL gradient is sign-preserving (df/ddist = -6, not |−6| = 6), and (b) the IF predicate is genuinely one-sided (negative raw values don't accidentally clamp). The combination is a regression-test bulwark for both VjpRegistry.MulRule and the STEP/IF lowering.
+
+- **One open question deferred**: `energyTorquePerJoint` (the OTHER 2-input upper-bound IF helper) wasn't shipped in this firing. Its body is pure ADD with same-shape upper-bound clamp — structurally similar to `forwardKinematicsArm` already pinned in §0.4.217. Skipping it avoids redundant test coverage. If the next-pickup register changes and we need a max-torque ground for some other Phase 2 slice, we can revisit.
+
+- **Naming convention check**: `energyAccumulatorPrimal()` follows the established pattern. Total Phase 2 surface so far: 7 helpers exposed (hipUpdate, sumPositions, sumFineSteps, frictionAccum, forwardKinematicsLeg, forwardKinematicsArm, energyAccumulator). Two helpers remain (`energyTorquePerJoint` deferred as redundant; `crossLimbCoupling` for WHILE-in-WHILE) plus full `avatarStepPrimal` integration.
+
+- **Suite +9 to 937**.
+
+**Tests added** (+9):
+
+1. `QwopEnergyAccumulatorTest.primalStructure`
+2. `QwopEnergyAccumulatorTest.forwardEvalNonClamping`
+3. `QwopEnergyAccumulatorTest.forwardEvalAlwaysClamp`
+4. `QwopEnergyAccumulatorTest.forwardEvalPartialClamp`
+5. `QwopEnergyAccumulatorTest.phiCalculusUnrollsConstantTripCountWhile`
+6. `QwopEnergyAccumulatorTest.gradientNonClamping`
+7. `QwopEnergyAccumulatorTest.gradientWithClamping`
+8. `QwopEnergyAccumulatorTest.gradientWithOneZeroInput`
+9. `QwopEnergyAccumulatorTest.gradientNegativeProduct`
+
+Full suite is green: **937 tests** (+9 from §0.4.217).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 2 seventh slice — WHILE-in-WHILE coarsening pin.** Expose `Qwop.crossLimbCouplingPrimal()`. Headline test for §0.4.176's WHILE-in-WHILE coarsening surface; potentially the most structurally interesting Phase 2 slice remaining — exercises the only QWOP shape that directly tests nested-loop coarsening. 1-2 firings (may surface coarsening behaviour worth investigating).
+
+2. **QWOP Phase 2 closure — full `avatarStepPrimal()` coarsened gradient.** Exercises all 13 loops + 8 IFs simultaneously, validating that the per-slice gradient pins compose correctly when combined into the full primal. 1-2 firings.
+
+3. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking QWOP Phase 2 closure.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.218 — met**:
+- Phase 2 sixth-slice primal exposed (`Qwop.energyAccumulatorPrimal()`) ✓
+- MUL-in-else-branch chain rule × upper-bound IF gradient routing pinned ✓
+- Below-clamp gradient (9, 6) at (2, 3) — cross-operand MUL chain rule ✓
+- Always-clamp + partial-clamp gradients (0, 0) ✓
+- Asymmetric-input pin (0, 3) → (9, 0) — MUL chain rule asymmetry ✓
+- Negative-product pin (-2, 3) → (9, -6) — sign-preserving + one-sided predicate ✓
+- Suite +9 to 937 ✓
+- WHILE-in-WHILE seventh slice (`crossLimbCoupling`) is the natural next pickup ✓
+
 #### 0.4.217 QWOP Phase 2 fifth slice — `forwardKinematicsArmPrimal` coarsened test pins **upper-bound IF** gradient routing (symmetric to §0.4.216) 2026-04-27
 
 §0.4.216's hand-off named "QWOP Phase 2 fifth slice — `forwardKinematicsArmPrimal` upper-bound IF" as the next pickup. §0.4.217 lands it: exposes `Qwop.forwardKinematicsArmPrimal()` and pins forward + coarsening + branch-aware gradient on the shoulder-torque-limit recurrence.

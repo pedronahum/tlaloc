@@ -292,6 +292,48 @@ object Qwop {
             listOf(swing)
         }
 
+    /**
+     * §0.4.218 — QWOP Phase 2 sixth slice: **MUL inside the else-branch** of
+     * an upper-bound IF. Combines the §0.4.214 cross-operand MUL chain rule
+     * with §0.4.217's upper-bound IF gradient routing — the first Phase 2
+     * slice that exercises both axes simultaneously.
+     *
+     * Wraps the same [energyAccumulator] helper that Phase E of
+     * [avatarStepPrimal] uses. The recurrence is:
+     *
+     * ```kotlin
+     * var energy = 0f
+     * for (i in 0 until nSteps) {
+     *     val raw = energy + torque * dist
+     *     energy = if (raw > 100f) 100f else raw   // energy threshold
+     * }
+     * return energy
+     * ```
+     *
+     * **Forward semantics** (default `nSteps = 3`, `maxEnergy = 100f`):
+     *   - Below clamp (3 × torque × dist ≤ 100): forward = `nSteps × torque × dist`.
+     *   - Always clamp (torque × dist > 100): forward = 100f from iter 0.
+     *   - Partial clamp (33.3 < torque × dist ≤ 100): clamps mid-loop, forward = 100f.
+     *   - Negative product: never clamps (predicate is `> 100`, not `> -100`).
+     *
+     * **Gradient semantics** (binary by final-iter branch):
+     *   - Final iter else: ∂/∂torque = `nSteps × dist`, ∂/∂dist = `nSteps × torque`
+     *     (cross-operand MUL chain rule, **input-dependent**).
+     *   - Final iter then: both gradients = 0.
+     *
+     * **Discriminator power vs §0.4.217**: `forwardKinematicsArmPrimal` had
+     * a pure-ADD body (`acc = swing + shoulder + friction`). §0.4.218
+     * replaces ADD with **MUL** in the else-branch's primary computation,
+     * exercising chain-rule routing through the IF for the first time.
+     */
+    fun energyAccumulatorPrimal(nSteps: Int = 3): DxirFunction =
+        DxirBuilder.function("qwopEnergyAccumulator") {
+            val torque = param("torque", f32)
+            val dist = param("dist", f32)
+            val energy = energyAccumulator(torque, dist, nSteps)
+            listOf(energy)
+        }
+
     fun avatarStepPrimal(): DxirFunction =
         DxirBuilder.function("qwopAvatarStep") {
             val mHip = param("mHip", f32)
