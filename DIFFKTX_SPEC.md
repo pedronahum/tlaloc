@@ -39,6 +39,60 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.193 Phase 0c-rectangular slice 2 — populate per-param IrTypes + wire irMatmul/irTranspose; first 2-arg plugin gradient test 2026-04-27
+
+§0.4.192's hand-off named "Phase 0c-rectangular slice 2: populate `operandIrTypes` + wire irMatmul/irTranspose to consult it. … Add a regression test for rectangular MATMUL: `grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<R, K>, b: Rank2<K, C>` and R ≠ K ≠ C. Single-firing if the call-site IrType walking is straightforward." Slice 2 lands the population + consumer wiring as planned, but **rectangular MATMUL itself does not ship in this firing** — see "Decisions worth flagging" below for the structural blockers slice 3 must close. Instead, the new regression coverage is a **2-arg SQUARE MATMUL gradient** — the first multi-param plugin gradient test in the suite, exercising the `Pair`-return synthesis path and validating that the call-site IrType walker produces correct per-param entries.
+
+**The mechanism** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt):
+
+1. **`synthesise()` now walks the call-site `Function<P0, …, Pn-1, R>` arguments** and, for each rank-2/3 F32 `DxirParam`, populates `operandIrTypes[paramId] = callType.arguments[paramIdx].typeOrNull`. The map is threaded into `SynthesisContext.operandIrTypes` and reaches every `irOpFor` call site.
+
+2. **`irTranspose` now reads operand[0]'s IrType via `irTypeForNode`** instead of `context.tensorIrType`. For 1-param surfaces (square) the two are identical; for n-param surfaces (n ≥ 2) the per-operand entry resolves the operand's specific shape. Type-args still reuse `operandShapeArg` for both R and C — slice 3 must derive the swapped-shape output IrType.
+
+3. **`irMatmul` reads both operand IrTypes via `irTypeForNode`**. typeArguments[0] (R) ← LHS shape, [2] (C) ← RHS shape, [1] (K, shared) ← LHS for consistency. Result type still `tensorIrType`; slice 3 will derive the combined-shape output (`Rank2<lhs.first, rhs.last>`).
+
+4. **New regression: [Rank2MatmulTwoParamGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2MatmulTwoParamGradientTest.kt)** — `grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a, b: Rank2<Sym, Sym>` (same shape, distinct DxirParams). For A = B = [[1,2],[3,4]]: ∂Σ(AB)/∂A = [[3,7],[3,7]] (column-sum of B replicated across rows of A); ∂Σ(AB)/∂B = [[4,4],[6,6]] (column-sum of A replicated across rows of B). Both verified within 1e-3.
+
+**Decisions worth flagging**:
+
+- **Why rectangular MATMUL doesn't ship in slice 2.** Two structural gaps:
+  - **Op-result IrType derivation is not wired.** `TRANSPOSE(a)` with operand IrType `Rank2<R, C>` should produce `Rank2<C, R>` as its result type, but slice 2 still uses `context.tensorIrType` (LHS's IrType) for the result. Constructing a swapped-arg `IrSimpleType` requires `IrSimpleTypeImpl` plumbing the existing code base hasn't needed yet. Slice 3.
+  - **BROADCAST template selection.** The gradient body for `(a matmul b).sum().toFloat()` emits `BROADCAST(1.0, target=Rank2<R, C>)` (SumRule's adjoint feed). The current `irBroadcast` uses `tensorTemplateParam` — the FIRST tensor param — as its template, which has dims `[R, K]`, not `[R, C]`. At runtime `broadcastLike(v, template)` allocates a FloatArray sized from `template.dims`, producing a Rank2 of WRONG shape `[R, K]`. Downstream `MATMUL(broadcast, bT)` then trips `matmul inner dim mismatch: [R, K] x [C, K]` (K ≠ C). Slice 3 must add a runtime helper that takes dims directly (e.g., `broadcastDims(v: Float, dims: IntArray)`) OR synthesize a fresh template from existing param dim accessors.
+
+- **The 2-arg SQUARE test is genuine new coverage.** Confirmed via "test passes on master" experiment: the existing `tensorIrType`-only path already handled multi-param SQUARE matmul (one shared shape, one IrType, all consistent). The plugin's `Pair`-return synthesis was working; what was missing was a *test* exercising it. Now there is one — the multi-param plugin gradient surface is locked in regression coverage.
+
+- **Substrate changes are bit-exact equivalent for SQUARE.** The new wiring (`irTypeForNode(operand)` instead of `tensorIrType`) is a no-op for 1-param surfaces (operand IS the only param, so `operandIrTypes[paramId]` equals `tensorIrType`). For n-param SQUARE surfaces (this firing's new test), all params share one shape so `operandIrTypes[a.id] == operandIrTypes[b.id] == tensorIrType` — also no behavioural change. The wiring matters only when params have distinct shapes (rectangular), which slice 3 will close.
+
+- **Why I didn't try to add the rectangular regression test as `@Disabled` or similar.** A `@Disabled` test in the suite is a docs-via-code commitment; the §0.4 entry already names slice 3 explicitly. The §0.4 hand-off log is the right hand-off mechanism — `@Disabled` would create maintenance overhead (test stub paths, gradle cache concerns) without adding tracking value.
+
+- **Slice 3 plan** (probably 2 firings):
+  - **Firing 3a:** Add a forward-pass body walk in `synthesise()` that derives op-result IrTypes for `OpKind.TRANSPOSE` and `OpKind.MATMUL` (and stores them in `operandIrTypes`). Construct fresh `IrSimpleType` instances using `IrSimpleTypeImpl` with rearranged arguments. Update `irTranspose`/`irMatmul` to use the derived result IrType for `call.type` (instead of `context.tensorIrType`). For non-derivable ops (BROADCAST) the fallback to `tensorIrType` remains.
+  - **Firing 3b:** Add `broadcastDims(v: Float, dims: IntArray): DTensor<S, F32>` to `:core/ops/HostOps.kt` and wire `irBroadcast` to emit it instead of `broadcastLike` for cases where the target shape can't be matched to any param's IrType. Add the rectangular regression test.
+
+- **Suite +1 to 873 tests.** New: `Rank2MatmulTwoParamGradientTest.2-arg grad of sum of A matmul B with shared shape matches analytic`.
+
+**Tests added** (+1):
+
+1. `Rank2MatmulTwoParamGradientTest.2-arg grad of sum of A matmul B with shared shape matches analytic` — first multi-param plugin gradient test.
+
+Full suite is green: **873 tests** (+1 from §0.4.192).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 0c-rectangular slice 3a: op-result IrType derivation for TRANSPOSE and MATMUL.** Add forward-pass body walk in `synthesise()` that computes per-DxirNode result IrTypes via `IrSimpleTypeImpl` substitution. TRANSPOSE: swap last-two type-args of operand. MATMUL: combine LHS first + RHS last. Store in `operandIrTypes`. Rewrite `irTranspose`/`irMatmul` to use the derived IrType for `call.type` (instead of `context.tensorIrType`). Don't add the rectangular test yet — slice 3b's BROADCAST helper is needed first. Single-firing.
+
+2. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+3. **CartPole Phase 3 first attempt** — gated on slice 3b (rectangular MATMUL closure).
+
+**Definition-of-done for §0.4.193 — met**:
+- `operandIrTypes` populated from call-site `Function<...>` arguments for each rank-2/3 F32 `DxirParam` ✓
+- `irTranspose` reads operand IrType via `irTypeForNode` ✓
+- `irMatmul` reads both operand IrTypes via `irTypeForNode` ✓
+- New 2-arg SQUARE MATMUL test asserts plugin-side multi-param `Pair`-return path works ✓
+- All 872 prior tests pass + 1 new test = 873 ✓
+- Slice 3a + 3b plans named explicitly in "Recommended next pickup" ✓
+
 #### 0.4.192 Phase 0c-rectangular slice 1 — `SynthesisContext.operandIrTypes` scaffold 2026-04-27
 
 §0.4.191's hand-off named "Phase 0c-rectangular slice 1: per-operand IrType tracking scaffold" as the next single-firing pickup. §0.4.192 lands it. `SynthesisContext` now carries a `Map<Int, IrType>` keyed by `DxirNode.id`, plus a new `irTypeForNode` helper that prefers the per-operand map and falls back to the call-site `tensorIrType` for unmapped nodes. Slice 1 ships the substrate WITHOUT populating the map yet — every existing call site consistently hits the fallback, so behavior is bit-exact equivalent to pre-§0.4.192. Slice 2 wires the populator (driven by call-site IrType arguments) and rewrites `irMatmul` / `irTranspose` to consult the map.

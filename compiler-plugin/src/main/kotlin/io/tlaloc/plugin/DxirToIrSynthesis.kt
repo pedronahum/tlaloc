@@ -156,6 +156,22 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             callType.arguments.getOrNull(firstTensorParamIdx)?.typeOrNull
                 ?: return reject("tensor param at idx=$firstTensorParamIdx has no type arg on call type")
         }
+        // §0.4.193 — Phase 0c-rectangular slice 2: populate per-param IrTypes from the
+        // call site's `Function<P0, …, Pn-1, R>` argument list. Each rank-2/3 F32
+        // DxirParam picks up its own specific IrType, so multi-param gradient bodies
+        // can later resolve operand IrTypes per-DxirNode.id rather than collapsing all
+        // tensor operands onto a single `tensorIrType`. For 1-param surfaces the map's
+        // sole entry equals `tensorIrType`; for n-param surfaces (n ≥ 2) entries differ
+        // when the params have distinct shapes.
+        val callType = originalCall.type as? IrSimpleType
+        val paramIrTypeMap = HashMap<Int, IrType>()
+        if (callType != null) {
+            for ((idx, p) in fn.params.withIndex()) {
+                if (!isAcceptedTensorType(p.type)) continue
+                val argType = callType.arguments.getOrNull(idx)?.typeOrNull ?: continue
+                paramIrTypeMap[p.id] = argType
+            }
+        }
         // §0.4.186 — Phase 0c slice (b): widened from "scalar + rank-1 F32 only" to
         // "scalar + rank-1/2/3 F32". The same `broadcastLike<S>` helper handles all
         // accepted ranks via its generic shape parameter. Higher ranks + non-F32 dtypes
@@ -172,7 +188,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
         }
 
-        val context = SynthesisContext(tensorIrType = tensorIrType, tensorTemplateParam = null)
+        val context = SynthesisContext(
+            tensorIrType = tensorIrType,
+            tensorTemplateParam = null,
+            operandIrTypes = paramIrTypeMap,
+        )
         val paramIrTypes = fn.params.map {
             irTypeFor(it.type, context) ?: return reject("no IrType for param '${it.name}' type=${it.type}")
         }
@@ -1109,8 +1129,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * §0.4.189 — `OpKind.TRANSPOSE(a)` → IrCall to `io.tlaloc.core.ops.transpose`
      * (the Rank2 extension declared in HostOps.kt). Used by `MatmulRule`'s
      * gradient emission for the dA = upstream · B^T and dB = A^T · upstream chain.
-     * Square-matrix-only today (the `tensorIrType` carries one shape parameter; a
-     * non-square TRANSPOSE would need per-operand IrType tracking).
+     *
+     * §0.4.193 — Phase 0c-rectangular slice 2: type-args now read from the operand's
+     * specific IrType via [irTypeForNode] rather than the call-site `tensorIrType`.
+     * For square-matrix surfaces the two are identical (one tensor IrType across all
+     * operands); for multi-param surfaces with per-operand IrTypes populated in
+     * `operandIrTypes`, `irTypeForNode` returns the operand-specific type. Slice 3
+     * still needs op-result IrType derivation (TRANSPOSE: input `Rank2<R, C>` →
+     * output `Rank2<C, R>`) before non-param operands (e.g., a TRANSPOSE feeding
+     * a downstream op) can resolve correctly.
      */
     private fun IrBuilderWithScope.irTranspose(
         op: DxirOp,
@@ -1123,22 +1150,22 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.type.rank != 2 || op.type.dtype != F32) return null
         val operandDecl = env[operand.id] ?: return null
         val sym = transposeSymbol() ?: return null
-        val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
-        val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val operandIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
+        val operandShapeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val resultIrType = context.tensorIrType ?: return null
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
-            type = tensorIrType,
+            type = resultIrType,
             symbol = sym,
         )
         // `fun <R, C> DTensor<Rank2<R, C>, F32>.transpose(): DTensor<Rank2<C, R>, F32>`:
-        // arguments[0] = extension receiver. The result type swaps R and C, but with
-        // sentinel dims they're indistinguishable; reuse `tensorIrType` for both.
-        // §0.4.189 only supports square-matrix shapes (R == C); rectangular needs
-        // per-operand IrType tracking.
+        // arguments[0] = extension receiver. Square case: both type-args reuse the
+        // operand's shape arg (R == C). Slice 3 will derive the swapped output type
+        // and feed an `output_shape_arg` distinct from the operand's.
         if (call.typeArguments.size >= 2) {
-            call.typeArguments[0] = shapeTypeArg
-            call.typeArguments[1] = shapeTypeArg
+            call.typeArguments[0] = operandShapeArg
+            call.typeArguments[1] = operandShapeArg
         }
         call.arguments[0] = irGet(operandDecl)
         return call
@@ -1146,8 +1173,20 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     /**
      * §0.4.189 — `OpKind.MATMUL(a, b)` → IrCall to `io.tlaloc.core.ops.matmul`
-     * (the Rank2 × Rank2 → Rank2 infix declared in HostOps.kt). Square-matrix-only
-     * today (R == K == C); rectangular shapes need per-operand IrType tracking.
+     * (the Rank2 × Rank2 → Rank2 infix declared in HostOps.kt).
+     *
+     * §0.4.193 — Phase 0c-rectangular slice 2: per-operand type-arg reading. LHS
+     * type-arg now derives from operand[0]'s IrType (via [irTypeForNode]); RHS
+     * type-arg derives from operand[1]'s. For square surfaces both are identical
+     * to `tensorIrType`. For rectangular surfaces with per-param `operandIrTypes`
+     * populated, LHS and RHS pick up the correct distinct shape args.
+     *
+     * Result type still uses `tensorIrType`; slice 3 will derive the output shape
+     * (combining LHS first type-arg + RHS last) so the generated MATMUL's call
+     * type matches the dxir-level rank-2 output. Until then non-param operands
+     * (TRANSPOSE results, BROADCAST results) fall back to `tensorIrType` and the
+     * rectangular surface still requires the BROADCAST template gap to close
+     * before it can ship end-to-end.
      */
     private fun IrBuilderWithScope.irMatmul(
         op: DxirOp,
@@ -1163,21 +1202,27 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val lhsDecl = env[lhs.id] ?: return null
         val rhsDecl = env[rhs.id] ?: return null
         val sym = matmulSymbol() ?: return null
-        val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
-        val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val lhsIrType = irTypeForNode(lhs, context) as? IrSimpleType ?: return null
+        val rhsIrType = irTypeForNode(rhs, context) as? IrSimpleType ?: return null
+        val lhsShapeArg = lhsIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val rhsShapeArg = rhsIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val resultIrType = context.tensorIrType ?: return null
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
-            type = tensorIrType,
+            type = resultIrType,
             symbol = sym,
         )
         // `infix fun <R, K, C> DTensor<Rank2<R, K>, F32>.matmul(other: DTensor<Rank2<K, C>, F32>):
         //  DTensor<Rank2<R, C>, F32>`: arguments[0] = receiver (LHS), arguments[1] = RHS.
-        // For square matrices R = K = C, so all three type args reuse the same shape.
+        // typeArguments[0] (R) ← LHS shape; typeArguments[2] (C) ← RHS shape;
+        // typeArguments[1] (K) shared between LHS/RHS — pick LHS for consistency.
+        // For square surfaces all three coincide; for rectangular they diverge once
+        // operand IrTypes are correctly populated for non-param nodes (slice 3).
         if (call.typeArguments.size >= 3) {
-            call.typeArguments[0] = shapeTypeArg
-            call.typeArguments[1] = shapeTypeArg
-            call.typeArguments[2] = shapeTypeArg
+            call.typeArguments[0] = lhsShapeArg
+            call.typeArguments[1] = lhsShapeArg
+            call.typeArguments[2] = rhsShapeArg
         }
         call.arguments[0] = irGet(lhsDecl)
         call.arguments[1] = irGet(rhsDecl)
