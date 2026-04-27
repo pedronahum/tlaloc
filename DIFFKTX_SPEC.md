@@ -39,6 +39,83 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.213 QWOP Phase 2 first slice — `sumPositionsPrimal` coarsened single-loop test pins multi-input gradient through pure-WHILE 2026-04-27
+
+§0.4.212's hand-off named "QWOP Phase 2 — single-loop coarsened test (pick one of the 13 loops in `Qwop.avatarStepPrimal`)" as the next pickup. §0.4.213 lands the **first slice** by exposing `Qwop.sumPositionsPrimal()` as a top-level [DxirFunction] and pinning forward + coarsening + multi-input gradient on the pure-WHILE no-IF accumulator.
+
+**Why `sumPositions` for the Phase 2 first slice**:
+
+- §0.4.211/§0.4.212's `hipUpdatePrimal` already covered the single-input WHILE+IF surface. Phase 2's natural next axis is contrast: a **pure-WHILE no-IF** primal, **multi-input** (3 args), with a **constant-input-independent gradient**. Choosing `sumPositions` from the existing 13-loop `avatarStepPrimal` set isolates one structural axis at a time.
+
+- The per-input gradient is exactly `nSteps` (= 3 by default) for all three inputs — no closed-form derivation surprises, no clamping arithmetic. This makes the test a clean discriminator between correct multi-input grad routing and any per-input misrouting bug.
+
+**The new primal** in [`Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+```kotlin
+fun sumPositionsPrimal(nSteps: Int = 3): DxirFunction =
+    DxirBuilder.function("qwopSumPositions") {
+        val hip = param("hip", f32)
+        val knee = param("knee", f32)
+        val ankle = param("ankle", f32)
+        val acc = sumPositions(hip, knee, ankle, nSteps)
+        listOf(acc)
+    }
+```
+
+Reuses the same `sumPositions` helper that Phase B of `avatarStepPrimal` uses — a single WHILE accumulating `acc += hip + knee + ankle` over `nSteps` iterations.
+
+**The test file** [`QwopSumPositionsTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopSumPositionsTest.kt) — 5 tests, all passing:
+
+1. `primalStructure` — pins 1 WHILE + 0 IFs in the primal body (sanity).
+2. `forwardEval` — at (hip=1, knee=2, ankle=3): result = 18.0 (= 3 × 6).
+3. `phiCalculusUnrollsConstantTripCountWhile` — coarsened body has 0 top-level WHILEs (C5 unroll fires).
+4. `gradientWrtAllThreeInputs` — **the headline**. After `PhiCalculus.apply` + `DxirReverseTransform.apply`, the gradient function evaluated at any input returns (3.0, 3.0, 3.0) in input order.
+5. `gradientIsInputIndependent` — re-evaluates at a wildly different input set (-7.5, 100.0, 0.001) and verifies the same constant-3.0 gradient. Discriminator: a "wrong gradient routing" implementation that leaks input values into the grad expression would fail.
+
+**Decisions worth flagging**:
+
+- **§0.4.212's lift-pass-in-`DxirReverseTransform.apply` fix paid off.** The benchmarks-side test invokes `DxirReverseTransform.apply(coarsened)` directly — pre-§0.4.212 this would have hit the KNOWN LEAK on any IF-containing primal, and would have had no test exercising the lift pass on a non-IF primal at all. Now the pure-WHILE no-IF path runs cleanly through the same self-contained pipeline as the IF-containing case.
+
+- **Multi-input gradient correctness is now pinned at the `:benchmarks` level.** Existing multi-input gradient tests live in `:ir`'s `DxirReverseTransformTest` (e.g., the partial-derivative test pair around line 950), but this is the first one running through the full `PhiCalculus.apply` → `DxirReverseTransform.apply` pipeline at the `:benchmarks` level on a QWOP-shape primal. Catches regressions that only surface when WHILE coarsening interacts with multi-input grad routing.
+
+- **The `gradientIsInputIndependent` test is structurally important, not redundant.** A test that only checks the gradient at one input set can't distinguish correct constant-gradient behaviour from incorrect input-dependent behaviour that happens to coincide at the chosen point. The two-point pin closes that gap.
+
+- **Constant-trip-count unroll keeps Phase 2 simple for now.** `nSteps = 3` is a `const(3, i32)` in the WHILE condition — C5 unrolls cleanly. Future Phase 2 sub-firings can widen to (a) parameterised trip count (C6/C7 territory), (b) WHILE-in-WHILE coarsening (the `crossLimbCoupling` shape), (c) IF-in-WHILE with multi-input (combine hipUpdate + sumPositions structural shapes). Each is one or two firings.
+
+- **No structural changes to coarsening / AD pipeline this firing.** Pure test-side addition + one new public primal function on the existing `Qwop` object. The §0.4.212 fix already did the structural work; §0.4.213 spends the dividend.
+
+- **Suite +5 to 901**.
+
+**Tests added** (+5):
+
+1. `QwopSumPositionsTest.primalStructure`
+2. `QwopSumPositionsTest.forwardEval`
+3. `QwopSumPositionsTest.phiCalculusUnrollsConstantTripCountWhile`
+4. `QwopSumPositionsTest.gradientWrtAllThreeInputs`
+5. `QwopSumPositionsTest.gradientIsInputIndependent`
+
+Full suite is green: **901 tests** (+5 from §0.4.212).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 2 second slice — multiplicative-coupling single-loop primal.** Expose `Qwop.sumFineStepsPrimal()` (the `acc += shoulder * coarseDist` recurrence). Different gradient shape: ∂/∂shoulder = nSteps × coarseDist, ∂/∂coarseDist = nSteps × shoulder — first input-dependent gradient on a coarsened QWOP primal. 1 firing.
+
+2. **QWOP Phase 2 third slice — squared-input recurrence.** Expose `Qwop.frictionAccumPrimal()` (`acc += coupling * coupling`). Gradient ∂/∂coupling = nSteps × 2 × coupling — exercises the chain rule through MUL with shared operands. 1 firing.
+
+3. **QWOP Phase 2 fourth slice — IF-in-WHILE on the kinematics path.** Expose `Qwop.forwardKinematicsLegPrimal()` or `Qwop.energyTorquePerJointPrimal()`. Combines hipUpdate's IF-in-WHILE shape with sumPositions's multi-input grad surface. 1-2 firings.
+
+4. **QWOP Phase 2 fifth slice — WHILE-in-WHILE coarsening pin.** Expose `Qwop.crossLimbCouplingPrimal()`. The headline structural test for §0.4.176's WHILE-in-WHILE coarsening surface; 1-2 firings depending on coarsening behaviour.
+
+5. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking QWOP Phase 2.
+
+**Definition-of-done for §0.4.213 — met**:
+- Phase 2 first-slice primal exposed (`Qwop.sumPositionsPrimal()`) ✓
+- Forward + coarsening + multi-input gradient pins land at `:benchmarks` level ✓
+- All three closed-form gradients (3.0, 3.0, 3.0) verified within 1e-3 tolerance ✓
+- Discriminator test (gradient stays constant at wildly-different inputs) ships ✓
+- Suite +5 to 901 ✓
+- Phase 2 second slice (multiplicative coupling) is the natural next pickup ✓
+
 #### 0.4.212 QWOP Phase 1 — `liftIfRegionBodies` pre-pass in `DxirReverseTransform.apply` closes the §0.4.173 KNOWN LEAK; AD-side gradient pins land 2026-04-27
 
 §0.4.211's hand-off named "Investigate + fix the DxirReverseTransform CSE bug" as the next pickup. §0.4.212 lands the fix — and it turned out to be a different (deeper) issue than originally diagnosed. **The bug isn't in CSE; it's in `DxirReverseTransform.apply`'s clone-and-rewrite step**, which leaves dangling primal-id references when an IF has non-empty region bodies. CSE merely surfaced the bug via the `DxirFunction` constructor's `references unknown node ids` validation.

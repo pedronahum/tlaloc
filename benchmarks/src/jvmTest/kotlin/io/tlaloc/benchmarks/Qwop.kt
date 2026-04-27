@@ -115,6 +115,39 @@ object Qwop {
             listOf(finalState)
         }
 
+    /**
+     * §0.4.213 — QWOP Phase 2 first slice: pure-WHILE no-IF single-loop primal.
+     *
+     * Wraps the same [sumPositions] helper that Phase B of [avatarStepPrimal]
+     * uses (the coarse distance accumulator). Standalone exposure here lets
+     * QWOP Phase 2's first slice pin the **multi-input** coarsened-gradient
+     * surface — a contrast to §0.4.211/§0.4.212's [hipUpdatePrimal] which
+     * exercised single-input WHILE+IF coarsening.
+     *
+     * Forward semantics (with default `nSteps = 3`):
+     * ```kotlin
+     * var acc = 0f
+     * for (i in 0 until 3) acc += hip + knee + ankle
+     * return acc   // = 3 * (hip + knee + ankle)
+     * ```
+     *
+     * Closed-form gradients are constant (independent of input values):
+     *   - `df/dhip = nSteps`
+     *   - `df/dknee = nSteps`
+     *   - `df/dankle = nSteps`
+     *
+     * Coarsening expectation: the WHILE has constant trip count → C5 unrolls
+     * it → 0 top-level WHILEs in the coarsened body, just an ADD chain.
+     */
+    fun sumPositionsPrimal(nSteps: Int = 3): DxirFunction =
+        DxirBuilder.function("qwopSumPositions") {
+            val hip = param("hip", f32)
+            val knee = param("knee", f32)
+            val ankle = param("ankle", f32)
+            val acc = sumPositions(hip, knee, ankle, nSteps)
+            listOf(acc)
+        }
+
     fun avatarStepPrimal(): DxirFunction =
         DxirBuilder.function("qwopAvatarStep") {
             val mHip = param("mHip", f32)
