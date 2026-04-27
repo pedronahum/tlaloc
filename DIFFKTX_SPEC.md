@@ -39,6 +39,52 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.192 Phase 0c-rectangular slice 1 — `SynthesisContext.operandIrTypes` scaffold 2026-04-27
+
+§0.4.191's hand-off named "Phase 0c-rectangular slice 1: per-operand IrType tracking scaffold" as the next single-firing pickup. §0.4.192 lands it. `SynthesisContext` now carries a `Map<Int, IrType>` keyed by `DxirNode.id`, plus a new `irTypeForNode` helper that prefers the per-operand map and falls back to the call-site `tensorIrType` for unmapped nodes. Slice 1 ships the substrate WITHOUT populating the map yet — every existing call site consistently hits the fallback, so behavior is bit-exact equivalent to pre-§0.4.192. Slice 2 wires the populator (driven by call-site IrType arguments) and rewrites `irMatmul` / `irTranspose` to consult the map.
+
+**The mechanism** in [DxirToIrSynthesis.kt:91-127](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L91-L127):
+
+1. **`SynthesisContext.operandIrTypes: Map<Int, IrType>` field** — defaults to `emptyMap()`. Carries per-operand `DxirNode.id → IrType` mappings for slice-2 use; slice 1 leaves it empty.
+
+2. **`irTypeForNode(node, context)` helper** — preferred lookup pattern: `context.operandIrTypes[node.id]?.let { return it } ?: irTypeFor(node.type, context)`. Centralises the "node-specific type, falling back to call-site type" logic in one place; slice-2 callers (irMatmul, irTranspose) will adopt this helper.
+
+3. **No call sites use the new helper yet.** Slice 1 is pure substrate. Existing `irMatmul` / `irTranspose` still consult `context.tensorIrType` directly; slice 2 will rewrite them.
+
+**Decisions worth flagging**:
+
+- **Default-empty map keeps slice 1 a pure no-op for existing tests.** Every existing call site reads `context.tensorIrType` directly; the map's existence doesn't change any code path. The 872-test suite passes unchanged. This is the right shape for a substrate landing — no behaviour change, but the field is now in place for slice 2 to populate without further refactors.
+
+- **Helper structure mirrors §0.4.155's `gradKey()` pattern.** Per-index gradient accumulation in `DxirReverseTransform` follows the same "centralise the lookup, default to a sensible fallback" pattern. The `irTypeForNode` helper is a node-level analogue at the synthesis layer.
+
+- **`Int` keys (DxirNode.id), not DxirNode references.** Two reasons: (a) DxirNode equality is reference-based, but synthesis resolves operands via id-keyed env maps (see lines 257-262); (b) DxirOpResult wraps a source DxirOp but has its own id; using ids lets us address the wrapper or the source uniformly. Slice 2 will use the id from `op.operands[k].id` directly.
+
+- **Slice 2 plan**: rewrite `synthesise()` to walk the call-site `IrSimpleType.arguments` and, for each `DxirParam` that's rank-2/3 F32, populate `operandIrTypes[paramId] = paramSpecificIrType`. Each grad-body op then reads its operand's IrType from the map. For rectangular MATMUL `Rank2<R,K> matmul Rank2<K,C>`, R, K, C produce three distinct IrTypes that thread through correctly. Estimated 1-2 firings.
+
+- **Phase 0c-rectangular's full scope is bigger than slice 1+2.** Slice 1 + 2 close the synthesis surface for rectangular shapes; the broader question is whether MatmulRule's emissions (TRANSPOSE producing rank-2 with swapped dims, MATMUL with three distinct shape atoms) preserve the right per-operand IrType chains through the gradient body. Likely yes (the dxir-level types already track this correctly via `op.types`), but slice 2 will be the first end-to-end test that exercises it.
+
+- **The `irTypeForNode` helper is private + unused at slice 1.** Kotlin's `unused` warnings might fire; will keep an eye on next compile output. Ideally the helper should be call-site-driven from slice 2. If unused warnings show up, suppress with `@Suppress("unused")` until slice 2 lands.
+
+- **No regressions across 872 tests.** The substrate is purely additive — adding a default-empty field + a helper that's not yet called.
+
+**Tests added** (+0): pure substrate session.
+
+Full suite is green: **872 tests** (unchanged from §0.4.191).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 0c-rectangular slice 2: populate `operandIrTypes` + wire irMatmul/irTranspose to consult it.** Rewrite `synthesise()` to derive per-`DxirParam` IrTypes from the call-site type arguments. Update `irMatmul` / `irTranspose` to use `irTypeForNode(operand)` instead of `context.tensorIrType`. Add a regression test for rectangular MATMUL: `grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<R, K>, b: Rank2<K, C>` and R ≠ K ≠ C. Single-firing if the call-site IrType walking is straightforward.
+2. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+3. **CartPole Phase 3 first attempt** — once slice 2 lands, the NN forward (rectangular weights) becomes plumbing-ready.
+
+**Definition-of-done for §0.4.192 — met**:
+- `SynthesisContext.operandIrTypes: Map<Int, IrType>` field added with `emptyMap()` default ✓
+- `irTypeForNode` helper centralises the per-operand-then-fallback lookup ✓
+- No call sites consume the map yet (slice 2 work) ✓
+- All 872 existing tests pass unchanged (substrate-only landing) ✓
+- Slice 2 plan named explicitly (call-site IrType walker + irMatmul/irTranspose rewrite) ✓
+- Full suite stays green at 872 tests (unchanged) ✓
+
 #### 0.4.191 `docs/CARTPOLE_PORT_PLAN.md` amendment — Phase 0c square-matrix closure + rectangular gap named explicitly 2026-04-27
 
 §0.4.190's hand-off named "`docs/CARTPOLE_PORT_PLAN.md` amendment" as recommended-next #4 — single-firing doc-only update reflecting the Phase 0c square-matrix closure. §0.4.191 lands it. The plan's Status line + ship-state table now mirror reality: Phase 0c closed for the SQUARE surface across §0.4.185–§0.4.189 (5 firings, not the 1-firing-deferred original estimate); Phase 3 is now gated on a refined "Phase 0c-rectangular" item rather than the original "Phase 0c" lump.

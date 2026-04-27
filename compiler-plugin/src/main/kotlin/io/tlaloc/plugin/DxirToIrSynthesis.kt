@@ -87,11 +87,35 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * template parameter (when one exists) through [irTypeFor] / [irOpFor] without
      * requiring every lowering arm to re-derive them. Scalar-only primals leave
      * [tensorIrType] and [tensorTemplateParam] null.
+     *
+     * §0.4.192 — Phase 0c-rectangular slice 1: [operandIrTypes] threads per-operand
+     * `DxirNode.id → IrType` so future rank-2 ops with non-uniform shapes (rectangular
+     * MATMUL: `Rank2<R, K> matmul Rank2<K, C>` produces `Rank2<R, C>` where R, K, C
+     * differ) can resolve each operand's specific IrType. The map is empty by default
+     * — when [tensorIrType] is set, callers fall back to it for any operand absent
+     * from the map. Slice 2 will populate it from the call-site IrType arguments and
+     * wire `irMatmul` / `irTranspose` to consult it instead of `tensorIrType`.
      */
     private data class SynthesisContext(
         val tensorIrType: IrType?,
         val tensorTemplateParam: IrValueParameter?,
+        val operandIrTypes: Map<Int, IrType> = emptyMap(),
     )
+
+    /**
+     * §0.4.192 — Phase 0c-rectangular slice 1 helper. Returns the IrType for a
+     * specific [DxirNode], preferring the per-operand map when present, falling back
+     * to the call-site `tensorIrType` for any rank-1/2/3 F32 type, and `null` for
+     * shapes outside the synthesis surface.
+     *
+     * Slice 1 doesn't populate the map yet (callers consistently fall back to
+     * `tensorIrType`); behavior is bit-exact equivalent to the pre-§0.4.192 path.
+     * Slice 2 wires the populator.
+     */
+    private fun irTypeForNode(node: io.tlaloc.ir.DxirNode, context: SynthesisContext): IrType? {
+        context.operandIrTypes[node.id]?.let { return it }
+        return irTypeFor(node.type, context)
+    }
 
     /**
      * §0.4.173 — names the FIRST gate that rejected the dxir during the most recent
