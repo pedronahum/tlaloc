@@ -220,3 +220,23 @@ object BrachistochroneHarness : HeadToHeadBenchmark {
         floatArrayOf(0.5f),    // y
     )
 }
+
+/**
+ * §0.4.226 — fifth harness inhabitant: HMC logistic-regression log-posterior.
+ * Fourth **paper benchmark** in the harness (after BGDHyperOpt, HookeanSpring,
+ * Brachistochrone). Mirrors `:compiler-plugin/src/test/.../HmcLogisticRegressionLoopTest.kt`'s
+ * Phase 2 loop form, ported as straight-line scalar dxir with the dataset
+ * baked in.
+ *
+ * Fixed inputs at β = (0.5, 0.3) — same as the K2-plugin port. Exercises
+ * EXP and LOG ops (first harness inhabitant to use these), composed with
+ * arithmetic.
+ */
+object HmcLogisticRegressionHarness : HeadToHeadBenchmark {
+    override val name = "hmc-logistic-regression-n4-d2"
+    override fun primal() = BenchmarkPrimals.hmcLogisticRegressionPrimal()
+    override fun fixedInputs() = listOf(
+        floatArrayOf(0.5f),    // b0
+        floatArrayOf(0.3f),    // b1
+    )
+}

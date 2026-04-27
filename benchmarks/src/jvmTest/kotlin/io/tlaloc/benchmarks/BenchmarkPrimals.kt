@@ -321,4 +321,118 @@ object BenchmarkPrimals {
         for (i in 0 until N) v = v + v * y
         return v
     }
+
+    /**
+     * §0.4.226 — HMC logistic-regression log-posterior primal. Mirrors the
+     * `:compiler-plugin/src/test/.../HmcLogisticRegressionLoopTest.kt`'s
+     * straight-line variant (Phase 2's loop is just a 4-iter unroll; we ship
+     * the unrolled form because dxir-builder doesn't have an ergonomic GATHER
+     * primitive for indexing into a constant data table by counter).
+     *
+     * The dataset (n=4, d=2) is baked into the dxir as constants:
+     *   X = [[1.0, 0.5], [0.5, 1.0], [-0.5, 1.5], [1.5, -0.5]]
+     *   y = [1, 0, 1, 0]
+     *
+     * Two scalar inputs: β = [b0, b1]. Computes the negative log-posterior:
+     *
+     * ```kotlin
+     * sum1 = sum2 = 0
+     * for i in 0..3:
+     *     xb = X[i][0] * b0 + X[i][1] * b1
+     *     sum1 += (y[i] - 1) * xb
+     *     sum2 += log(1 + exp(-xb))
+     * term3 = (b0² + b1²) / 2000   // weak Gaussian prior
+     * return sum1 - sum2 - term3
+     * ```
+     *
+     * **Why this primal**: HMC is the OOPSLA paper's hardest control-flow
+     * benchmark. Even the "Phase 2 loop form" sub-primal exercises the EXP
+     * and LOG ops — the **first** harness inhabitant to use these. Adds the
+     * fourth paper benchmark to the harness.
+     *
+     * **Coarsening behaviour**: straight-line dxir, no WHILE → no C5 unroll
+     * needed. PhiCalculus.apply is essentially identity here. Reverse-mode
+     * AD exercises the chain rule through EXP/LOG composed with arithmetic.
+     *
+     * **Future widening**: HMC Phase 3 adds a numerical-stability mask
+     * (`if xb > 0: term2 = log(1 + exp(-xb)) else: term2 = -xb + log(1 + exp(xb))`)
+     * — exercises the IF gradient routing axis on top of EXP/LOG. Not on the
+     * harness's critical path; defer until needed.
+     */
+    fun hmcLogisticRegressionPrimal(): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("hmcLogisticRegression") {
+            val b0 = param("b0", f32)
+            val b1 = param("b1", f32)
+
+            // Dataset (concretely baked in).
+            val xData = listOf(
+                listOf(1.0f, 0.5f),
+                listOf(0.5f, 1.0f),
+                listOf(-0.5f, 1.5f),
+                listOf(1.5f, -0.5f),
+            )
+            val yData = listOf(1.0f, 0.0f, 1.0f, 0.0f)
+
+            var sum1: io.tlaloc.ir.DxirNode = const(0f, f32)
+            var sum2: io.tlaloc.ir.DxirNode = const(0f, f32)
+            val one = const(1f, f32)
+
+            for (i in 0 until 4) {
+                val xi0 = const(xData[i][0], f32)
+                val xi1 = const(xData[i][1], f32)
+                val yi = const(yData[i], f32)
+
+                // xb = xi0 * b0 + xi1 * b1
+                val xi0b0 = op(OpKind.MUL, listOf(xi0, b0), f32)
+                val xi1b1 = op(OpKind.MUL, listOf(xi1, b1), f32)
+                val xb = op(OpKind.ADD, listOf(xi0b0, xi1b1), f32)
+
+                // sum1 += (yi - 1) * xb
+                val yiMinusOne = op(OpKind.SUB, listOf(yi, one), f32)
+                val term1 = op(OpKind.MUL, listOf(yiMinusOne, xb), f32)
+                sum1 = op(OpKind.ADD, listOf(sum1, term1), f32)
+
+                // sum2 += log(1 + exp(-xb))
+                val negXb = op(OpKind.NEG, listOf(xb), f32)
+                val expNegXb = op(OpKind.EXP, listOf(negXb), f32)
+                val onePlus = op(OpKind.ADD, listOf(one, expNegXb), f32)
+                val logOnePlus = op(OpKind.LOG, listOf(onePlus), f32)
+                sum2 = op(OpKind.ADD, listOf(sum2, logOnePlus), f32)
+            }
+
+            // term3 = (b0² + b1²) / 2000
+            val b0Sq = op(OpKind.MUL, listOf(b0, b0), f32)
+            val b1Sq = op(OpKind.MUL, listOf(b1, b1), f32)
+            val sumSq = op(OpKind.ADD, listOf(b0Sq, b1Sq), f32)
+            val twoThou = const(2000f, f32)
+            val term3 = op(OpKind.DIV, listOf(sumSq, twoThou), f32)
+
+            // result = sum1 - sum2 - term3
+            val sum1MinusSum2 = op(OpKind.SUB, listOf(sum1, sum2), f32)
+            val result = op(OpKind.SUB, listOf(sum1MinusSum2, term3), f32)
+            listOf(result)
+        }
+
+    /**
+     * §0.4.226 — Kotlin reference mirroring [hmcLogisticRegressionPrimal].
+     * Same hardcoded dataset; useful for FD-validated gradient pins.
+     */
+    fun hmcLogisticRegressionReference(b0: Float, b1: Float): Float {
+        val X = arrayOf(
+            floatArrayOf(1.0f, 0.5f),
+            floatArrayOf(0.5f, 1.0f),
+            floatArrayOf(-0.5f, 1.5f),
+            floatArrayOf(1.5f, -0.5f),
+        )
+        val y = floatArrayOf(1.0f, 0.0f, 1.0f, 0.0f)
+        var sum1 = 0f
+        var sum2 = 0f
+        for (i in 0 until 4) {
+            val xb = X[i][0] * b0 + X[i][1] * b1
+            sum1 += (y[i] - 1f) * xb
+            sum2 += kotlin.math.ln(1f + kotlin.math.exp(-xb))
+        }
+        val term3 = (b0 * b0 + b1 * b1) / 2000f
+        return sum1 - sum2 - term3
+    }
 }

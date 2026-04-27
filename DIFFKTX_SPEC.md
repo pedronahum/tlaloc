@@ -39,6 +39,117 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.226 Head-to-head harness Phase 1 fifth slice — HMC logistic regression is the fourth **paper benchmark** in the harness; first to use EXP+LOG 2026-04-27
+
+§0.4.225's hand-off named "Head-to-head harness Phase 1 fifth slice — HMC inhabitant" as the next pickup. §0.4.226 lands it. The harness now has **four paper benchmarks** (BGDHyperOpt, HookeanSpring, Brachistochrone, HMC) plus QWOP avatar-step (synthetic) — the M9 critical path is now over 80% covered.
+
+**The HMC log-posterior primal**:
+
+The K2-plugin port at `:compiler-plugin/src/test/.../HmcLogisticRegressionLoopTest.kt` uses rank-1 tensor + GATHER + `exp` + `log`. §0.4.226 ports the **straight-line scalar variant** of HMC's Phase 2 loop form:
+
+```kotlin
+// Dataset baked in: X (4×2 matrix), y (4-vector). β = (b0, b1) is the input.
+sum1 = sum2 = 0
+for i in 0..3:
+    xb = X[i][0] * b0 + X[i][1] * b1
+    sum1 += (y[i] - 1) * xb
+    sum2 += log(1 + exp(-xb))
+term3 = (b0² + b1²) / 2000   // weak Gaussian prior
+return sum1 - sum2 - term3   // negative log-posterior
+```
+
+The K2-plugin port uses a runtime loop with `packed[2 + i]` GATHER-from-tensor; we use **manual unrolling** with hard-coded constants. The dxir-builder DSL doesn't have an ergonomic GATHER primitive for indexing into a constant data table by counter, so manual unrolling is the cleanest path. The resulting dxir is straight-line (no top-level WHILE) — what coarsening would produce after C5 unroll anyway.
+
+**Why HMC is structurally distinct from prior harness inhabitants**:
+
+| Inhabitant | Recurrence | EXP/LOG | IF | Coarsening axis |
+|---|---|---|---|---|
+| QWOP avatar-step | 12 nested WHILEs + 8 IFs | no | yes | C5 unroll + nested + IF gradient |
+| BGDHyperOpt | 1 WHILE (3-iter) | no | no | C5 unroll |
+| HookeanSpring | 1 WHILE (10-iter) | no | no | C5 unroll + 2 coupled state vars |
+| Brachistochrone | 1 WHILE (5-iter) | no | no | C5 unroll |
+| **HMC** | **straight-line (4 iters unrolled)** | **YES** | no (Phase 2) | **EXP/LOG chain rule** |
+
+HMC is the **first** harness inhabitant to use EXP and LOG. The chain rule through `log(1 + exp(-xb))` with shared operand (`xb` flows into both `(y-1)*xb` AND the `log/exp` chain) is the discriminator-rich axis HMC adds.
+
+**The new primal + reference** in [`BenchmarkPrimals.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt):
+
+```kotlin
+fun hmcLogisticRegressionPrimal(): DxirFunction = ...   // hardcoded n=4, d=2 dataset
+fun hmcLogisticRegressionReference(b0: Float, b1: Float): Float
+```
+
+**The new harness inhabitant** in [`HeadToHeadHarness.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarness.kt):
+
+```kotlin
+object HmcLogisticRegressionHarness : HeadToHeadBenchmark {
+    override val name = "hmc-logistic-regression-n4-d2"
+    override fun primal() = BenchmarkPrimals.hmcLogisticRegressionPrimal()
+    override fun fixedInputs() = listOf(
+        floatArrayOf(0.5f),    // b0
+        floatArrayOf(0.3f),    // b1
+    )
+}
+```
+
+**The test file** [`HeadToHeadHarnessHmcTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessHmcTest.kt) — 2 tests, all passing:
+
+1. `hmcHarnessRunsAndProducesBaseline` — runs harness baseline at β=(0.5, 0.3) and pins:
+   - Forward matches Kotlin reference within 1% rel tol + 1e-3 absolute floor.
+   - 2 gradient values returned.
+   - Per-input FD validation at 1.5% rel tol + 1e-3 absolute floor — slightly looser than BGDHyperOpt's 1% to accommodate the EXP/LOG f32 path differences between Kotlin's `kotlin.math.exp/ln` and the dxir interpreter's EXP/LOG implementations.
+   - Both `df/db0` and `df/db1` non-zero (sanity).
+   - Timing min ≤ median ≤ p99 + GC-pause guard.
+
+2. `hmcForwardMatchesReferenceAcrossMultipleBeta` — cross-β consistency at four β configurations:
+   - `(0.5, 0.3)` baseline.
+   - `(0, 0)` origin: `xb = 0` for all `i`; `sum1 = 0`; `sum2 = 4·log(2) ≈ 2.77`; `prior = 0`; result ≈ -2.77.
+   - `(1, -1)` perturbed sign-mixed.
+   - `(-0.2, 0.5)` small negative b0.
+
+**Decisions worth flagging**:
+
+- **The compilation error gotcha: `var sum1 = const(0f, f32)` inferred `sum1: DxirConst`**, which broke `sum1 = op(...)` (returns `DxirOp`, not `DxirConst`). Fixed by explicit `var sum1: io.tlaloc.ir.DxirNode = ...` annotation. **Lesson**: when reassigning dxir-builder variables across `op()`/`const()` calls, type as the common parent `DxirNode` to avoid Kotlin inferring the narrower subtype from the initial RHS. Worth keeping in mind for future primal builders.
+
+- **EXP/LOG f32 noise tolerance: 1.5% relative.** Kotlin's `kotlin.math.exp(x)` (Java `Math.exp`) goes through the JVM's StrictMath/Math implementation; the dxir interpreter uses Kotlin's `kotlin.math.exp`/`kotlin.math.ln` directly. They should produce bit-identical results in practice, but the FD tolerance accommodates any path-dependent f32 rounding. Empirically the actual difference is tiny — 1.5% is generous.
+
+- **Origin case `(0, 0)` is the structural discriminator.** At b0=b1=0, every iteration's xb=0, so sum1=0, exp(-xb)=exp(0)=1, log(1+1)=log(2). All 4 iterations contribute exactly log(2) to sum2 → sum2=4·log(2). The prior term is 0. Result ≈ -2.77 = -4·ln(2). This is a clean closed-form pin that catches: (a) any constant misrouting (would change sum2's value), (b) any per-iteration accumulation bug (would break the equality across all 4 iters).
+
+- **Manual unrolling vs WHILE-with-counter-driven-GATHER.** The K2-plugin port uses `packed[2 + i]` to extract per-iter constants from a tensor, which works because the K2 plugin lowers GATHER. dxir-builder doesn't have an ergonomic GATHER primitive for "look up `i`-th element of constant array `c`". Manual unrolling produces dxir functionally equivalent to what coarsening would emit anyway. Trade-off: if the harness ever measures C5 unroll cost on HMC specifically, we'd need to add the WHILE-form variant. For Phase 1 baseline numbers, the unrolled form is sufficient.
+
+- **Phase 3 mask deferred.** The OOPSLA paper's HMC includes a numerical-stability mask (`if xb > 0: term2 = log(1 + exp(-xb)) else: term2 = -xb + log(1 + exp(xb))`). This adds an IF inside the loop body and would exercise IF gradient routing (already covered by QWOP avatar-step's per-slice pins). Not on Phase 1's critical path; defer until cross-framework comparison surfaces a need.
+
+- **Suite +2 to 959.**
+
+**Tests added** (+2):
+
+1. `HeadToHeadHarnessHmcTest.hmcHarnessRunsAndProducesBaseline`
+2. `HeadToHeadHarnessHmcTest.hmcForwardMatchesReferenceAcrossMultipleBeta`
+
+Full suite is green: **959 tests** (+2 from §0.4.225).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Head-to-head harness Phase 1 sixth slice — CartPole inhabitant.** Last paper benchmark to add. Existing K2-plugin ports at `:compiler-plugin/src/test/.../CartPolePhase{1,2,3}Test.kt`. CartPole Phase 1 is the cheapest port (one time step, scalar arithmetic). 1 firing. Adds the **fifth paper benchmark** to the harness — Phase 1 then has full six-benchmark coverage.
+
+2. **Head-to-head harness Phase 1 closure — register refresh + multi-inhabitant runner.** Once five paper benchmarks are in, write a `HeadToHeadHarnessAllTest` that runs all six inhabitants and produces a single CSV/JSON dump. This is the "run-everything" surface that Phase 2's Python comparison will plug into. 1 firing.
+
+3. **Head-to-head harness Phase 2 — Python references.** Gated on user-side toolchain.
+
+4. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** §11.13's headline gap. Genuinely deferred but not on the harness's critical path.
+
+5. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority while harness Phase 1 inhabitants complete. Once it ships, harness re-runs against a native backend will give actual head-to-head numbers.
+
+**Definition-of-done for §0.4.226 — met**:
+- Straight-line HMC log-posterior primal added to `BenchmarkPrimals.kt` ✓
+- Kotlin reference for FD validation ✓
+- `HmcLogisticRegressionHarness` inhabitant defined ✓
+- Forward + per-input FD-validated gradient pinned at β=(0.5, 0.3) ✓
+- Cross-β consistency at 4 configurations including `(0, 0)` closed-form discriminator ✓
+- First harness inhabitant to exercise EXP and LOG ✓
+- Suite +2 to 959 ✓
+- CartPole (sixth slice) is the natural next pickup ✓
+
 #### 0.4.225 Head-to-head harness Phase 1 fourth slice — Brachistochrone compound-velocity is the third **paper benchmark** in the harness 2026-04-27
 
 §0.4.224's hand-off named "Head-to-head harness Phase 1 fourth slice — Brachistochrone or HMC inhabitant" as the next pickup. §0.4.225 lands Brachistochrone (the cheaper option per the hand-off). The harness now has **three paper benchmarks** (BGDHyperOpt, HookeanSpring, Brachistochrone) plus QWOP avatar-step (synthetic) — over halfway to the M9 exit criterion's six-benchmark requirement.
