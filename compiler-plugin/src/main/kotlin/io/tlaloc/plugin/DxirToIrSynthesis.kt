@@ -178,6 +178,26 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 val rhsIr = operandIrTypes[op.operands[1].id] as? IrSimpleType ?: return null
                 deriveMatmulOutputDTensor(lhsIr, rhsIr)
             }
+            // §0.4.198 — Phase 3 first slice: forward-propagate IrTypes through
+            // elementwise unary ops (STEP / RELU / NEG / SQRT / EXP / LOG / SIN / COS /
+            // ABS) — for each, output IrType equals operand IrType. Required for
+            // gradient bodies that contain `STEP(matmul_output)` where matmul_output's
+            // IrType is derived but STEP's wasn't, leaving downstream MUL/BROADCAST
+            // without enough info to chain backward properly.
+            OpKind.STEP, OpKind.RELU, OpKind.NEG,
+            OpKind.SQRT, OpKind.EXP, OpKind.LOG,
+            OpKind.SIN, OpKind.COS, OpKind.ABS -> {
+                if (op.operands.size != 1) return null
+                operandIrTypes[op.operands[0].id]
+            }
+            // §0.4.198 — Forward-propagate through elementwise binary ops (ADD / SUB /
+            // MUL / DIV) — output equals either operand's IrType (they must agree
+            // shape-wise; the dxir guarantees that).
+            OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV -> {
+                if (op.operands.size != 2) return null
+                operandIrTypes[op.operands[0].id]
+                    ?: operandIrTypes[op.operands[1].id]
+            }
             else -> null
         }
     }
@@ -507,25 +527,60 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         while (changed) {
             changed = false
             for (n in fn.body.reversed()) {
-                if (n !is DxirOp || n.op != OpKind.MATMUL) continue
-                if (n.operands.size != 2) continue
-                val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
-                val lhsId = n.operands[0].id
-                val rhsId = n.operands[1].id
-                val lhsKnown = paramIrTypeMap[lhsId] as? IrSimpleType
-                val rhsKnown = paramIrTypeMap[rhsId] as? IrSimpleType
-                if (lhsKnown == null && rhsKnown != null) {
-                    val solved = deriveMissingMatmulLhsDTensor(outputIr, rhsKnown)
-                    if (solved != null) {
-                        paramIrTypeMap[lhsId] = solved
-                        changed = true
+                if (n !is DxirOp) continue
+                when (n.op) {
+                    OpKind.MATMUL -> {
+                        if (n.operands.size != 2) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val lhsId = n.operands[0].id
+                        val rhsId = n.operands[1].id
+                        val lhsKnown = paramIrTypeMap[lhsId] as? IrSimpleType
+                        val rhsKnown = paramIrTypeMap[rhsId] as? IrSimpleType
+                        if (lhsKnown == null && rhsKnown != null) {
+                            val solved = deriveMissingMatmulLhsDTensor(outputIr, rhsKnown)
+                            if (solved != null) {
+                                paramIrTypeMap[lhsId] = solved
+                                changed = true
+                            }
+                        } else if (rhsKnown == null && lhsKnown != null) {
+                            val solved = deriveMissingMatmulRhsDTensor(outputIr, lhsKnown)
+                            if (solved != null) {
+                                paramIrTypeMap[rhsId] = solved
+                                changed = true
+                            }
+                        }
                     }
-                } else if (rhsKnown == null && lhsKnown != null) {
-                    val solved = deriveMissingMatmulRhsDTensor(outputIr, lhsKnown)
-                    if (solved != null) {
-                        paramIrTypeMap[rhsId] = solved
-                        changed = true
+                    // §0.4.198 — Phase 3 first slice: backward propagate through
+                    // elementwise binary ops. For ADD/SUB/MUL/DIV all operands and
+                    // result share one IrType. If output known + one operand
+                    // unknown, the unknown's IrType = output's.
+                    OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV -> {
+                        if (n.operands.size != 2) continue
+                        val outputIr = paramIrTypeMap[n.id] ?: continue
+                        if (outputIr !is IrSimpleType) continue
+                        for (operand in n.operands) {
+                            if (paramIrTypeMap[operand.id] == null && isAcceptedTensorType(operand.type)) {
+                                paramIrTypeMap[operand.id] = outputIr
+                                changed = true
+                            }
+                        }
                     }
+                    // §0.4.198 — Backward propagate through elementwise unary ops
+                    // (STEP / RELU / NEG / SQRT / EXP / LOG / SIN / COS / ABS).
+                    // Output and operand share IrType; if output known + operand
+                    // unknown, operand = output.
+                    OpKind.STEP, OpKind.RELU, OpKind.NEG,
+                    OpKind.SQRT, OpKind.EXP, OpKind.LOG,
+                    OpKind.SIN, OpKind.COS, OpKind.ABS -> {
+                        if (n.operands.size != 1) continue
+                        val outputIr = paramIrTypeMap[n.id] ?: continue
+                        val operandId = n.operands[0].id
+                        if (paramIrTypeMap[operandId] == null && isAcceptedTensorType(n.operands[0].type)) {
+                            paramIrTypeMap[operandId] = outputIr
+                            changed = true
+                        }
+                    }
+                    else -> {}
                 }
             }
         }
@@ -815,12 +870,49 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         val operandDecl = env[op.operands[0].id] ?: return null
         val operandType = op.operands[0].type
+        // §0.4.198 — Phase 3 first slice: tensor STEP path. When the operand and
+        // result are rank-1/2/3 F32 (gradient bodies for tensor RELU primals via
+        // ReluRule's `STEP(x) * upstream` emission), call the `:core/ops/step`
+        // DTensor extension instead of synthesising a primitive `if (x > 0) 1 else 0`.
+        // Scalar STEP path unchanged.
+        if (isAcceptedTensorType(op.type) && isAcceptedTensorType(operandType)) {
+            val operandIrType = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
+            val operandShapeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val sym = stepTensorSymbol() ?: return null
+            val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: operandIrType
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = resultIrType,
+                symbol = sym,
+            )
+            // `fun <S : Shape> DTensor<S, F32>.step(): DTensor<S, F32>` — single
+            // shape type-arg (extension receiver's S), no regular args.
+            if (call.typeArguments.isNotEmpty()) {
+                call.typeArguments[0] = operandShapeArg
+            }
+            call.arguments[0] = irGet(operandDecl)
+            return call
+        }
         val condition = greaterThanZero(operandDecl, operandType, context) ?: return null
         if (op.type.dtype == Bool) return condition
         val ty = irTypeFor(op.type, context) ?: return null
         val one = zeroOrOneConst(op.type, one = true, context) ?: return null
         val zero = zeroOrOneConst(op.type, one = false, context) ?: return null
         return irIfThenElse(ty, condition, one, zero)
+    }
+
+    /**
+     * §0.4.198 — Resolves `io.tlaloc.core.ops.DTensor.step()` (the rank-1/2/3 F32
+     * elementwise Heaviside step extension). Used by [irStep] when `OpKind.STEP`
+     * has a tensor result type.
+     */
+    private fun stepTensorSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("step"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
     /**

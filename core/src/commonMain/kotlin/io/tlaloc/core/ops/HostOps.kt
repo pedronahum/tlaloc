@@ -43,6 +43,23 @@ fun <S : Shape> DTensor<S, F32>.relu(): DTensor<S, F32> {
     return DTensor(HostF32Storage(out), dims.copyOf(), F32)
 }
 
+/**
+ * §0.4.198 — Phase 3 first slice. Elementwise step (Heaviside) on a tensor:
+ * `1.0` where the element is strictly positive, `0.0` elsewhere (including
+ * exactly zero — matches the convention `ReluRule` / `AbsRule` use for STEP
+ * adjoints). Emitted by the K2 plugin's [DxirToIrSynthesis.irStep] when the
+ * dxir `OpKind.STEP` op has rank-1/2/3 F32 type, which happens in the gradient
+ * body of any `relu`-bearing rank-2/3 surface (CartPole NN forward's
+ * `relu(X · W)` chain produces RELU on a rank-2 tensor; ReluRule's adjoint
+ * emits STEP on the same shape).
+ */
+fun <S : Shape> DTensor<S, F32>.step(): DTensor<S, F32> {
+    val v = hostF32()
+    val out = FloatArray(v.size)
+    for (i in v.indices) out[i] = if (v[i] > 0f) 1f else 0f
+    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+}
+
 fun <S : Shape> DTensor<S, F32>.neg(): DTensor<S, F32> {
     val v = hostF32()
     val out = FloatArray(v.size)

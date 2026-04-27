@@ -110,6 +110,21 @@ class HostOpsTest {
         assertEquals(1, out.size)
         assertContentEquals(floatArrayOf(7f), out.hostF32())
     }
+
+    @Test
+    fun stepIsOneOnPositiveZeroOnNonPositive() {
+        val a = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 0f, -1f, 0.5f, -0.0f, 100f))
+        val s = a.step()
+        assertContentEquals(floatArrayOf(1f, 0f, 0f, 1f, 0f, 1f), s.hostF32())
+        assertContentEquals(intArrayOf(2, 3), s.dims)
+    }
+
+    @Test
+    fun stepPreservesShape() {
+        val a = Tensors.f32Matrix<Sym, Sym>(3, 2, FloatArray(6) { 1f })
+        val s = a.step()
+        assertContentEquals(intArrayOf(3, 2), s.dims)
+    }
 }
 
 private typealias DTensorAlias = io.tlaloc.core.DTensor<Rank2<Sym, Sym>, io.tlaloc.core.F32>

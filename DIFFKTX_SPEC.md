@@ -39,6 +39,84 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.198 CartPole Phase 3 first slice — tensor STEP synthesis + elementwise IrType propagation; first 1-layer NN gradient 2026-04-27
+
+§0.4.197's hand-off named "CartPole Phase 3 first slice" as the next pickup, with the recommendation to "start with the smallest gradient surface that exercises rectangular MATMUL". §0.4.198 lands it: `grad { (X, W) -> (X matmul W).relu().sum().toFloat() }` with `X: Rank2<Sym, Lit<Int>>, W: Rank2<Lit<Int>, Lit<Long>>` (rectangular weights) lowers end-to-end, and the gradient matches analytic for X=ones / W=mixed-sign within 1e-3. The new surface required:
+
+1. **Tensor STEP runtime helper** — `:core/ops/DTensor<S, F32>.step()` (1f where positive, 0f elsewhere; mirrors the §0.4.7 ReluRule's STEP semantics for a rank-1/2/3 F32 tensor).
+2. **Tensor STEP synthesis** — `irStep` dispatches by rank: scalar uses the existing `if (x > 0) 1 else 0` lowering; rank-1/2/3 emits an `IrCall` to `:core/ops/step`.
+3. **Elementwise IrType propagation** — both forward (in `deriveResultIrType`) and backward (in the matmul-solving fixpoint loop) extended to handle ADD/SUB/MUL/DIV (binary, output IrType = either operand's) and STEP/RELU/NEG/SQRT/EXP/LOG/SIN/COS/ABS (unary, output IrType = operand's). Without this propagation, the BROADCAST(scalar)→MUL(broadcast, STEP(matmul_output))→MATMUL chain in the relu gradient body left the BROADCAST's IrType unset, causing axis matching to fall back to `tensorIrType` (= X's, wrong shape) and runtime `elementwise shape mismatch: [2, 3] vs [2, 4]` at the MUL.
+
+**The mechanism** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt):
+
+1. **`stepTensorSymbol()`** resolves `:core/ops/step` (the new DTensor extension). Mirrors `transposeSymbol()` / `matmulSymbol()`.
+
+2. **`irStep` rank-dispatch** — checks `isAcceptedTensorType(op.type) && isAcceptedTensorType(operandType)`; if true, builds an `IrCall(stepTensorSymbol)` with `typeArguments[0] = operandShapeArg` (the operand's `Rank2<…>` IrType), arguments[0] = `irGet(operandDecl)`. Otherwise falls through to the scalar `irIfThenElse(condition, 1, 0)` path.
+
+3. **Forward elementwise propagation in `deriveResultIrType`**:
+   ```kotlin
+   OpKind.STEP, OpKind.RELU, OpKind.NEG,
+   OpKind.SQRT, OpKind.EXP, OpKind.LOG,
+   OpKind.SIN, OpKind.COS, OpKind.ABS -> {
+       if (op.operands.size != 1) return null
+       operandIrTypes[op.operands[0].id]
+   }
+   OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV -> {
+       if (op.operands.size != 2) return null
+       operandIrTypes[op.operands[0].id] ?: operandIrTypes[op.operands[1].id]
+   }
+   ```
+   Output IrType = operand IrType (or either operand's for binaries).
+
+4. **Backward elementwise propagation in the fixpoint loop** — when an op's output IrType is known but an operand's is unknown:
+   - For binary ops (ADD/SUB/MUL/DIV), set unknown operand IrType = output IrType.
+   - For unary ops (STEP/RELU/...), set operand IrType = output IrType.
+   This complements the forward propagation: forward feeds output from operands; backward feeds operands from output. Together they fully populate the gradient body's IrTypes for the linear+RELU NN case.
+
+**The new test** [Rank2LinearReluGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2LinearReluGradientTest.kt):
+
+`grad { (X, W) -> (X matmul W).relu().sum().toFloat() }` with `X = ones(2, 3)` and `W = [[1,-1,1,-1] × 3]` (3×4). Y = X·W has alternating ±3, so RELU keeps half the elements. Analytic:
+- step(Y) = `[[1,0,1,0],[1,0,1,0]]` (2×4 mask after RELU's STEP-adjoint)
+- ∂L/∂X = step(Y) · W^T = `[[2,2,2],[2,2,2]]` (each X-row contributes to 2 ones-positions in step(Y))
+- ∂L/∂W = X^T · step(Y) = `[[2,0,2,0]] × 3` (3×4)
+
+**Decisions worth flagging**:
+
+- **Why ADD/MUL/DIV/etc. backward propagation IS load-bearing.** The forward derivation of MUL's output requires BOTH operands' IrTypes; if one is missing it returns null. For the linear+relu gradient body's `MUL(broadcast, step_y)`, broadcast's IrType is unknown forward (operand is scalar) but step_y's IS known (forward-derived from y=MATMUL). The forward path can derive MUL's output via either-operand → step_y's IrType. Then backward propagation flows that output IrType BACK to broadcast (which was previously unset). Without backward propagation through MUL, the broadcast stays unset and axis matching falls back to the wrong tensorIrType.
+
+- **Same trick fixes RELU's gradient through arbitrary ops.** Adding tanh / sigmoid forward+backward derivation is now a one-line entry per op (the propagation rules are already structured; just add OpKinds to the `when` dispatch). When CartPole Phase 3 lands tensor `tanh` synthesis, it'll plug in cleanly.
+
+- **Tensor RELU forward path NOT needed in the gradient body.** ReluRule reads the relu's PRIMAL INPUT (matmul output) for STEP, not the relu output. So the forward MATMUL is preserved in the gradient body, but the forward RELU isn't (no rule reads it). Tensor RELU on the synthesis side would be needed for `valueAndGrad`-style surfaces that prepend the forward computation; not yet exercised, deferred.
+
+- **Forward derivation list of unary ops is broad on purpose.** Includes SQRT/EXP/LOG/SIN/COS/ABS even though those don't appear in the linear+relu gradient body. Pre-emptive: when CartPole Phase 0a primitives (sin/cos/abs from §0.4.166–§0.4.167) are exercised on rank-2 tensors, they'll just work without further synthesise() changes.
+
+- **Suite goes 877 → 880** (+3): 2 unit tests for `DTensor.step()` (correctness on positive/zero/negative inputs, shape preservation) + 1 integration test (`Rank2LinearReluGradientTest`).
+
+**Tests added** (+3):
+
+1. `HostOpsTest.stepIsOneOnPositiveZeroOnNonPositive` — runtime helper correctness.
+2. `HostOpsTest.stepPreservesShape` — shape preservation.
+3. `Rank2LinearReluGradientTest.grad of relu of A matmul B sum matches analytic` — first 1-layer NN gradient through K2 plugin.
+
+Full suite is green: **880 tests** (+3 from §0.4.197).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 3 second slice — 2-layer chain** with two rectangular MATMULs and a RELU between. `grad { (X, W1, W2) -> (relu(X matmul W1) matmul W2).sum().toFloat() }` exercises a deeper gradient chain. Will test whether the elementwise propagation correctly threads through the inner MATMUL output (which now has TWO consumers: STEP for the gradient and the second MATMUL for forward). If 3-arg `grad` (Triple-return) hasn't been exercised yet, this firing also tests that.
+
+2. **CartPole Phase 3 third slice — sigmoid / tanh widening.** Add `:core/ops/sigmoid` and `:core/ops/tanh` synthesis arms (the runtime extensions exist; only `irSigmoid`/`irTanh` need rank dispatch). Mirror the §0.4.198 step pattern. Required by CartPole's `tanh(...)` chain.
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **Phase 1 priority #1: Multi-result IF AD Phase 4** — multi-session structural. Lower priority while CartPole Phase 3 is unlocking compounding wins.
+
+**Definition-of-done for §0.4.198 — met**:
+- `DTensor<S, F32>.step()` runtime helper shipped + 2 unit tests ✓
+- `irStep` dispatches by rank; tensor path emits `:core/ops/step` IrCall ✓
+- Forward + backward elementwise IrType propagation in synthesise()'s walks ✓
+- First 1-layer NN gradient (rectangular MATMUL + tensor RELU) compiles and matches analytic ✓
+- All 877 prior tests pass + 3 new = 880 ✓
+
 #### 0.4.197 Phase 0c-rectangular CLOSED — BROADCAST IrType derivation + axis matching + runtime dims; first end-to-end rectangular MATMUL gradient 2026-04-27
 
 §0.4.196's hand-off named "Phase 0c-rectangular slice 3b-2b: BROADCAST IrType derivation + axis-matching + runtime dims wiring + rectangular regression test" as the next pickup. §0.4.197 lands all four. **Phase 0c-rectangular is now closed**: `grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<Sym, Lit<Int>>` and `b: Rank2<Lit<Int>, Lit<Long>>` (R ≠ K ≠ C) lowers end-to-end through the K2 plugin, computes the analytic gradient at runtime, and the new regression test verifies the result matches `[[4,4,4],[4,4,4]]` for ∂A and `[[5,5,5,5],[7,7,7,7],[9,9,9,9]]` for ∂B. The full Phase 0c arc spans §0.4.185–§0.4.197 (13 firings, square + rectangular surfaces).
