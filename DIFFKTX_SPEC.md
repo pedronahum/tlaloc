@@ -39,6 +39,80 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.214 QWOP Phase 2 second slice — `sumFineStepsPrimal` coarsened single-loop test pins **input-dependent** multiplicative-coupling gradient 2026-04-27
+
+§0.4.213's hand-off named "QWOP Phase 2 second slice — multiplicative-coupling single-loop primal" as the next pickup. §0.4.214 lands it: exposes `Qwop.sumFineStepsPrimal()` and pins forward + coarsening + input-dependent gradient on the `acc += shoulder × coarseDist` recurrence.
+
+**Why this is the right next slice**:
+
+§0.4.213 closed the multi-input grad surface but only on a constant-gradient primal (each ∂/∂param = 3, independent of input values). That can't catch a "chain rule through MUL with shared operand" misrouting bug. §0.4.214 introduces the **first input-dependent gradient** on a coarsened QWOP primal: ∂/∂shoulder depends on coarseDist's value, ∂/∂coarseDist depends on shoulder's value. The two gradients cross-reference inputs.
+
+**The new primal** in [`Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+```kotlin
+fun sumFineStepsPrimal(nSteps: Int = 3): DxirFunction =
+    DxirBuilder.function("qwopSumFineSteps") {
+        val shoulder = param("shoulder", f32)
+        val coarseDist = param("coarseDist", f32)
+        val acc = sumFineSteps(shoulder, coarseDist, nSteps)
+        listOf(acc)
+    }
+```
+
+Reuses the same `sumFineSteps` helper that Phase B of `avatarStepPrimal` uses — a single WHILE accumulating `acc += shoulder * coarseDist` over `nSteps` iterations. Closed-form: `out = nSteps × shoulder × coarseDist`, ∂/∂shoulder = `nSteps × coarseDist`, ∂/∂coarseDist = `nSteps × shoulder`.
+
+**The test file** [`QwopSumFineStepsTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopSumFineStepsTest.kt) — 6 tests, all passing:
+
+1. `primalStructure` — pins 1 WHILE + 0 IFs in the primal body.
+2. `forwardEval` — at (shoulder=2, coarseDist=4): result = 24.0 (= 3 × 2 × 4).
+3. `phiCalculusUnrollsConstantTripCountWhile` — coarsened body has 0 top-level WHILEs.
+4. `gradientIsInputDependent` — **the headline**. At (2, 4): ∂/∂shoulder = 12, ∂/∂coarseDist = 6.
+5. `gradientChangesWithInputs` — discriminator. At (5, 7): ∂/∂shoulder = 21, ∂/∂coarseDist = 15. Verifies the gradient actually responds to input values (catches input-leak bugs that left a constant-gradient implementation passing).
+6. `gradientAtNegativeAndZeroInputs` — edge cases. At (-3, 2): ∂/∂shoulder = 6, ∂/∂coarseDist = -9 (negative gradient!). At (0, 10): ∂/∂shoulder = 30, ∂/∂coarseDist = 0. Catches a class of bugs (`abs`/`square` accidentally applied) that would corrupt sign or magnitude.
+
+**Decisions worth flagging**:
+
+- **The §0.4.213 → §0.4.214 progression is exactly the contrast Phase 2 needs.** §0.4.213 = constant grad (3-input), §0.4.214 = input-dependent grad with cross-references between inputs (2-input MUL). Together they cover (a) ADD-only multi-input gradient routing, (b) MUL-with-shared-operand chain rule. Phase 2's third slice (squared-input recurrence) will exercise (c) MUL-with-self chain rule (`acc += x * x`).
+
+- **Negative + zero gradient pins are load-bearing, not redundant.** A "df/dcoarseDist = -9" pin distinguishes correct chain-rule routing from any bug where MUL's gradient takes the absolute value (or squared value) of the unused operand. Tlaloc passes — but the sign discriminator now has a regression-test bulwark.
+
+- **Naming consistency: `Qwop.<helperName>Primal()`.** §0.4.211's `hipUpdatePrimal()` set the convention for "expose Phase A helper as standalone primal". §0.4.213 followed with `sumPositionsPrimal()`. §0.4.214 continues with `sumFineStepsPrimal()`. The next firings will continue with `frictionAccumPrimal()`, `forwardKinematicsLegPrimal()`, etc.
+
+- **No structural changes to coarsening / AD pipeline this firing.** Pure test-side addition + one new public primal function. Each Phase 2 sub-firing produces (a) one new `Qwop.<helper>Primal()`, (b) one new `Qwop<Helper>Test.kt` with 4-6 pins.
+
+- **Suite +6 to 907**. (§0.4.213 was +5; §0.4.214 is +6 because the Phase 2 second-slice surface justifies one extra discriminator — the negative+zero-input gradient pin — that the constant-gradient §0.4.213 didn't need.)
+
+**Tests added** (+6):
+
+1. `QwopSumFineStepsTest.primalStructure`
+2. `QwopSumFineStepsTest.forwardEval`
+3. `QwopSumFineStepsTest.phiCalculusUnrollsConstantTripCountWhile`
+4. `QwopSumFineStepsTest.gradientIsInputDependent`
+5. `QwopSumFineStepsTest.gradientChangesWithInputs`
+6. `QwopSumFineStepsTest.gradientAtNegativeAndZeroInputs`
+
+Full suite is green: **907 tests** (+6 from §0.4.213).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 2 third slice — squared-input recurrence.** Expose `Qwop.frictionAccumPrimal()` (`acc += coupling * coupling`). Gradient ∂/∂coupling = `nSteps × 2 × coupling` — exercises the chain rule through MUL with **self**-operand (vs §0.4.214's cross-operand). 1 firing.
+
+2. **QWOP Phase 2 fourth slice — IF-in-WHILE on the kinematics path.** Expose `Qwop.forwardKinematicsLegPrimal()` or `Qwop.energyTorquePerJointPrimal()`. Combines hipUpdate's IF-in-WHILE shape with sumPositions's multi-input grad surface. 1-2 firings.
+
+3. **QWOP Phase 2 fifth slice — WHILE-in-WHILE coarsening pin.** Expose `Qwop.crossLimbCouplingPrimal()`. Headline test for §0.4.176's WHILE-in-WHILE coarsening surface; 1-2 firings depending on coarsening behaviour.
+
+4. **QWOP Phase 2 closure — full `avatarStepPrimal()` coarsened gradient.** Exercises all 13 loops + 8 IFs simultaneously. Multi-input, multi-shape gradient routing through the entire QWOP surface. 1-2 firings; potentially exposes new bugs.
+
+5. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking QWOP Phase 2.
+
+**Definition-of-done for §0.4.214 — met**:
+- Phase 2 second-slice primal exposed (`Qwop.sumFineStepsPrimal()`) ✓
+- Forward + coarsening + input-dependent gradient pins land ✓
+- Cross-input gradient correctness (∂/∂shoulder = nSteps × coarseDist, ∂/∂coarseDist = nSteps × shoulder) verified within 1e-3 ✓
+- Two-point input-dependence discriminator + negative/zero edge cases ship ✓
+- Suite +6 to 907 ✓
+- Phase 2 third slice (squared-input recurrence) is the natural next pickup ✓
+
 #### 0.4.213 QWOP Phase 2 first slice — `sumPositionsPrimal` coarsened single-loop test pins multi-input gradient through pure-WHILE 2026-04-27
 
 §0.4.212's hand-off named "QWOP Phase 2 — single-loop coarsened test (pick one of the 13 loops in `Qwop.avatarStepPrimal`)" as the next pickup. §0.4.213 lands the **first slice** by exposing `Qwop.sumPositionsPrimal()` as a top-level [DxirFunction] and pinning forward + coarsening + multi-input gradient on the pure-WHILE no-IF accumulator.

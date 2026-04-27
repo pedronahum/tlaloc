@@ -148,6 +148,36 @@ object Qwop {
             listOf(acc)
         }
 
+    /**
+     * §0.4.214 — QWOP Phase 2 second slice: multiplicative-coupling single-loop
+     * primal. First **input-dependent** gradient on a coarsened QWOP primal.
+     *
+     * Wraps the same [sumFineSteps] helper that Phase B of [avatarStepPrimal]
+     * uses. The recurrence is `acc += shoulder * coarseDist` per iteration.
+     *
+     * Forward semantics (with default `nSteps = 3`):
+     * ```kotlin
+     * var acc = 0f
+     * for (i in 0 until 3) acc += shoulder * coarseDist
+     * return acc   // = 3 * shoulder * coarseDist
+     * ```
+     *
+     * Closed-form gradients are **linear in the other input** (input-dependent,
+     * unlike [sumPositionsPrimal]'s constant gradient):
+     *   - `df/dshoulder = nSteps * coarseDist`
+     *   - `df/dcoarseDist = nSteps * shoulder`
+     *
+     * Coarsening expectation: same C5 unroll surface as [sumPositionsPrimal]
+     * — constant trip count → 0 top-level WHILEs in the coarsened body.
+     */
+    fun sumFineStepsPrimal(nSteps: Int = 3): DxirFunction =
+        DxirBuilder.function("qwopSumFineSteps") {
+            val shoulder = param("shoulder", f32)
+            val coarseDist = param("coarseDist", f32)
+            val acc = sumFineSteps(shoulder, coarseDist, nSteps)
+            listOf(acc)
+        }
+
     fun avatarStepPrimal(): DxirFunction =
         DxirBuilder.function("qwopAvatarStep") {
             val mHip = param("mHip", f32)
