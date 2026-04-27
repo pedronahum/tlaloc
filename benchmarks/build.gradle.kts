@@ -39,3 +39,29 @@ kotlin {
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
 }
+
+// §0.4.236 — `./gradlew :benchmarks:dumpHarnessResults` runs
+// `HeadToHeadHarnessMain.kt` against the jvmTest classpath, producing
+// `build/harness-results-tlaloc.{csv,json}` for the user's cross-framework
+// comparison workflow (Python references + `harness/python/aggregate.py`).
+tasks.register<JavaExec>("dumpHarnessResults") {
+    group = "verification"
+    description = "Run HeadToHeadHarnessMain to dump Tlaloc-side harness results to build/"
+    // The jvmTest compilation's classpath gives us everything: compiled main
+    // sources of dependencies, compiled test sources of :benchmarks itself,
+    // plus the test runtime libraries.
+    dependsOn("jvmTestClasses")
+    val jvmTest = kotlin.targets.getByName("jvm").compilations.getByName("test")
+    classpath = files(jvmTest.runtimeDependencyFiles) +
+        files(jvmTest.output.allOutputs) +
+        files(jvmTest.compileDependencyFiles)
+    mainClass.set("io.tlaloc.benchmarks.HeadToHeadHarnessMainKt")
+    // Pass through harness configuration env vars from the Gradle invoker.
+    environment(
+        "TLALOC_HARNESS_OUTPUT_DIR",
+        System.getenv("TLALOC_HARNESS_OUTPUT_DIR")
+            ?: layout.buildDirectory.get().asFile.absolutePath,
+    )
+    System.getenv("TLALOC_HARNESS_WARMUP")?.let { environment("TLALOC_HARNESS_WARMUP", it) }
+    System.getenv("TLALOC_HARNESS_MEASURED")?.let { environment("TLALOC_HARNESS_MEASURED", it) }
+}

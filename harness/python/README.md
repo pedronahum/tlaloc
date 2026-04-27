@@ -23,10 +23,32 @@ The JVM-side aggregator (`HeadToHeadHarnessAllTest` produces `harness-results-tl
 
 ```bash
 pip install torch>=2.1   # for run_pytorch.py
-pip install jax jaxlib   # for run_jax.py (when shipped)
+pip install jax jaxlib   # for run_jax.py
 ```
 
 Tlaloc's `/loop` does not authorize toolchain installs. These scripts ship in the repo as artifacts that the user invokes when their environment has the framework installed.
+
+## Full cross-framework workflow
+
+Once PyTorch and JAX are installed, the full comparison runs in four commands from the project root:
+
+```bash
+# 1. Tlaloc-side: Gradle task that runs HeadToHeadHarnessMain and writes
+#    benchmarks/build/harness-results-tlaloc.{json,csv}.
+./gradlew :benchmarks:dumpHarnessResults
+
+# 2. PyTorch-side: writes benchmarks/build/harness-results-pytorch.{json,csv}.
+python harness/python/run_pytorch.py --output benchmarks/build/
+
+# 3. JAX-side: writes benchmarks/build/harness-results-jax.{json,csv}.
+python harness/python/run_jax.py --output benchmarks/build/
+
+# 4. Aggregator reads all three; produces Markdown comparison table.
+python harness/python/aggregate.py --input benchmarks/build/ \
+    --output benchmarks/build/harness-comparison.md
+```
+
+The aggregator's Markdown output is what becomes the body of the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity."
 
 ## Usage
 

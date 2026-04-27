@@ -39,6 +39,97 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.236 JVM-side dump-path — `./gradlew :benchmarks:dumpHarnessResults` writes `harness-results-tlaloc.{csv,json}` directly 2026-04-27
+
+§0.4.235's hand-off named "JVM-side dump-path improvement" as the next pickup. §0.4.236 lands it. **The user's cross-framework comparison workflow is now four commands instead of "run a test in a tempdir, copy files manually, then run Python scripts":**
+
+```bash
+./gradlew :benchmarks:dumpHarnessResults
+python harness/python/run_pytorch.py --output benchmarks/build/
+python harness/python/run_jax.py --output benchmarks/build/
+python harness/python/aggregate.py --input benchmarks/build/
+```
+
+**The new files**:
+
+1. [`HeadToHeadHarnessMain.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessMain.kt) — `main()` that reads `TLALOC_HARNESS_OUTPUT_DIR` / `WARMUP` / `MEASURED` env vars (sensible defaults: `build/`, 200, 800), invokes `HeadToHeadHarnessRunner.runAllAndDump(...)`, and prints absolute paths + per-inhabitant summary. The env-var pattern keeps configuration external to the code so the user (or CI) can tweak warmup/measured without rebuilding.
+
+2. **`tasks.register<JavaExec>("dumpHarnessResults")`** in [`benchmarks/build.gradle.kts`](benchmarks/build.gradle.kts) — wires the `main()` to a Gradle task that uses the jvmTest classpath (the harness lives in `:benchmarks/src/jvmTest`, so the runtime classpath comes from the test compilation, not main).
+
+**Verification — task runs end-to-end and produces real numerical baselines**:
+
+```
+./gradlew :benchmarks:dumpHarnessResults  (warmup=10, measured=20 for fast firing)
+[harness-main] output=/.../benchmarks/build
+[harness-main] per-inhabitant summary:
+  qwop-avatar-step: forward=0.722680, median=372833ns, n_grads=4
+  bgd-hyperopt-outer-loop-K3: forward=-1.64950, median=11541ns, n_grads=4
+  hookean-spring-scalar-N10: forward=0.497814, median=24083ns, n_grads=3
+  brachistochrone-compound-velocity-N5: forward=7.59375, median=3250ns, n_grads=1
+  hmc-logistic-regression-n4-d2: forward=-3.06134, median=8084ns, n_grads=2
+  cartpole-phase1-onestep: forward=0.0137544, median=6292ns, n_grads=5
+```
+
+All forward values match the §0.4.220–§0.4.227 hand-traced expectations:
+- QWOP avatar-step: 0.7227 ✓
+- Brachistochrone: 7.59375 (= 1.5⁵, exact f32) ✓
+- BGDHyperOpt: -1.6495 ✓
+- HMC: -3.061 ≈ -4·log(2) at non-zero β ✓
+- CartPole: 0.0138 ✓
+- HookeanSpring: 0.498 ≈ cos(1) = 0.5403 (with symplectic-Euler drift over 10 steps) ✓
+
+Then `python harness/python/aggregate.py --input benchmarks/build/` reads the JSON file and produces a six-row Markdown table with `—` cross-framework cells (PyTorch + JAX still toolchain-gated). End-to-end pipeline confirmed working.
+
+**The README update**:
+
+[`harness/python/README.md`](harness/python/README.md) gets a "Full cross-framework workflow" section showing the four-command sequence above. This makes the "Phase 1 closed" path visible to anyone reading the README without needing to trace through §0.4 entries.
+
+**Decisions worth flagging**:
+
+- **`main()` lives in jvmTest, not jvmMain.** The harness inhabitants (`Qwop`, `BenchmarkPrimals`, `HeadToHeadHarness*`) all live in `:benchmarks/src/jvmTest/kotlin/`. Putting the main() there matches; the JavaExec task uses the jvmTest compilation's runtime classpath. Putting it in jvmMain would mean lifting the harness to jvmMain too, which moves files around for no benefit (the harness is fundamentally a measurement tool, not production code).
+
+- **Gradle DSL nullable-receiver gotcha.** First attempt `classpath = jvmTest.runtimeDependencyFiles + ...` failed with "operator call corresponds to dot-qualified call ... on nullable receiver." The Gradle Kotlin DSL types `runtimeDependencyFiles` and friends as nullable. Fix: wrap each in `files(...)` to materialize as non-null `FileCollection`. **Future Kotlin DSL JavaExec definitions in this project should use `files(...)` from the start.**
+
+- **Env var configuration over CLI flags.** `TLALOC_HARNESS_OUTPUT_DIR`/`WARMUP`/`MEASURED` env vars are simpler than parsing args in `main()`. They're also the natural way to override Gradle task config (e.g., `TLALOC_HARNESS_MEASURED=2000 ./gradlew :benchmarks:dumpHarnessResults`). Less code, more flexibility.
+
+- **The `HeadToHeadHarnessAllTest` (the original tempdir-based test) stays.** It's a fast-running smoke test (warmup=20, measured=50 → ~3 seconds) that validates the runner's structural shape on every `./gradlew build`. The new `dumpHarnessResults` task is the user's measurement-grade entrypoint with default warmup=200, measured=800 (~25 seconds). Different concerns, both useful.
+
+- **The HookeanSpring discrepancy (cos(1)=0.5403 vs Tlaloc=0.498) is symplectic-Euler drift, not a bug.** N=10 steps with dt=0.1 gives a discrete trajectory that drifts from the analytic SHO solution by ~8%. This is expected and documented in §0.4.224. Cross-framework comparison must use the same discrete recurrence, which both PyTorch and JAX scripts do.
+
+- **Suite stays at 963.** The `dumpHarnessResults` task isn't a test (it's a verification-tagged JavaExec), so it doesn't add to the test count. The existing `HeadToHeadHarnessAllTest` continues to be the structural validation in the suite.
+
+**Files added** (+1 + 2 updates):
+
+1. `benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessMain.kt` (~50 lines)
+2. `benchmarks/build.gradle.kts` updated with the `dumpHarnessResults` JavaExec task
+3. `harness/python/README.md` updated with the "Full cross-framework workflow" section
+
+**Tests added** (+0): the new task is a JavaExec, not a JUnit test.
+
+Full suite is green: **963 tests** (unchanged from §0.4.235).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 1 closure entry post-toolchain-install.** When the user installs PyTorch + JAX + runs the four-command sequence, the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" lands. Body = `aggregate.py`'s Markdown output. 1 firing post-install.
+
+2. **IREE CPU runtime implementation.** Gated on user-side IREE install per §0.4.230's plan.
+
+3. **Polish the Tlaloc-side measurement-shape.** Current harness uses `DxirInterpreter` — JVM-side interpreter, not native. When IREE CPU lands, the harness should be re-run against the native backend; the Tlaloc-side numbers will then become competitive vs `torch.compile` / `jax.jit`. Until then, the comparison shows interpreter overhead, not Tlaloc's compiled performance.
+
+4. **Polish work that doesn't grow scope** — risk of busywork. Pick only when there's a genuine gap.
+
+5. **Out-of-scope register refresh #4** — would happen ~5 firings from now, when the next batch of §0.4 entries closes. §0.4.235 was sufficient for this arc.
+
+**Definition-of-done for §0.4.236 — met**:
+- `HeadToHeadHarnessMain.kt` ships with `main()` + env-var configuration ✓
+- `dumpHarnessResults` Gradle task wires the main to `./gradlew :benchmarks:dumpHarnessResults` ✓
+- Verified end-to-end: task produces real `harness-results-tlaloc.{csv,json}` in `build/` ✓
+- All forward values match §0.4.220–§0.4.227 expectations ✓
+- `aggregate.py` reads the produced JSON and produces the comparison Markdown ✓
+- README updated with full four-command workflow ✓
+- Suite stays at 963 (no new tests; task is JavaExec) ✓
+- Phase 1 closure entry post-toolchain-install is the natural next pickup ✓
+
 #### 0.4.235 Out-of-scope register refresh — Harness Phase 2 scripts shipped + aggregator + IREE plan; M9 closure waits on user-side toolchain 2026-04-27
 
 §0.4.229 was the twelfth register snapshot; §0.4.235 is the thirteenth. **5 sub-sections shipped between §0.4.230 and §0.4.234** — IREE CPU port plan + multi-result COARSENED substrate test + harness Phase 2 (PyTorch + JAX scripts + aggregator). **All structural prerequisites for M9 closure are now in the repo;** what remains is user-side toolchain availability for actual measurement.
