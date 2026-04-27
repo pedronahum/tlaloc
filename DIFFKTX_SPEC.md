@@ -39,6 +39,82 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.207 Out-of-scope register refresh — CartPole Phase 3 CLOSED; CartPole port complete 2026-04-27
+
+§0.4.202 was the ninth register snapshot; §0.4.207 is the tenth. **5 sub-sections shipped between §0.4.203 and §0.4.206** — the final stretch of the CartPole Phase 3 arc. Three structural milestones moved from "deferred / in progress" to "CLOSED": the `>3` grad-output cap, tensor `sign()`, and Phase 3 itself. **CartPole port is now complete** — Phases 0a/0c (square + rectangular) + 1 + 2 + 3 all CLOSED across §0.4.165–§0.4.206 (25 firings).
+
+**Refreshed register (as of §0.4.206)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) — multi-result + rank-4+ surface | **Substantively closed for scalar + rank-1/2/3 F32 + square AND rectangular MATMUL + 4-grad-output Quadruple** at §0.4.203. Open: rank-4+ tensor ops, 5+ grad-output Pentuple/list (no port today exercises that), `irIfOp` with non-empty bodies. |
+| Plugin | `irIfOp` widening to lower IF-with-body-ops | Currently empty-body only. The §0.4.174 lift pass hoists safe arithmetic to top level; non-safe-lift cases (DIV/SQRT/LOG in IF body) still hit it. |
+| Plugin | `>4` grad-output cap in `synthesise()` | Synthesise rejects `fn.returns.size > 4` (was `> 3` pre-§0.4.203). 4-output via `Quadruple` shipped. 5+ outputs would need a `Pentuple` data class or list-typed wrapper. No port today exercises 5+. |
+| Plugin | `findTensorBinaryOp` overload-disambiguation | §0.4.206 added a defensive filter (parameter-type-based) since `:core/ops/times` now has two overloads. Future helper additions in `:core/ops` should mirror the disambiguation if a name shadows. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED — coarsening-side production | Substrate widening shipped §0.4.179. Open: coarsening passes still produce ONLY single-result COARSENED. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. The CartPole training loop (§0.4.206) is host-side Kotlin orchestration — it doesn't differentiate THROUGH the WHILE; it calls the synthesised gradient repeatedly. Differentiating through a training WHILE remains genuinely deferred. |
+| PhiCalculus | `liftIfRegionBodies` widening of `SAFE_LIFT_OPS` | Currently total-functions-only. EXP/LOG/SQRT/DIV could be added with care (NaN propagation rather than fault on unconsumed branch). Widen as a port surfaces a need. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.176). |
+| Control flow | Multi-block regions | Single-block today. |
+| Benchmark ports | QWOP | Last unported paper benchmark. Multi-session. |
+| Tensor ops | StableHLO `OpKind.SIGN` emitter | §0.4.204 added the dxir + interpreter + plugin path; the StableHLO emitter (`stablehlo.sign`) is deferred until a real port through StableHLO surfaces the need. |
+| Tensor ops | `DTensor.minus(Float)` operator | §0.4.206 added `DTensor.times(Float)` for GD updates. `minus(Float)` would let the user write `weights - lr * grads` symmetrically. Not blocking any port; widen when symmetry surfaces a friction. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.203 and §0.4.206** (4 sub-sections, one themed cluster):
+
+- **CartPole Phase 3 closure arc (§0.4.203 → §0.4.206)** — 4-firing arc closing the final pieces of CartPole's NN port. §0.4.203 lifted the `>3` grad-output cap via `Quadruple` boxing (`io.tlaloc.autograd.Quadruple` already lived in `:autograd` since §0.4.134 for `valueAndGrad3`); first 4-grad-param NN gradient through K2 plugin. §0.4.204 shipped tensor `sign()` as a full vertical slice (OpKind, SignRule with zero gradient, runtime helper, interpreter arm, FIR mapping, synthesis arm, elementwise propagation). §0.4.205 verified the full sign-tanh-relu-relu-matmul3 chain composes through the K2 plugin (passed on first try — strong signal that the eight Phase 3 sub-firings decomposed correctly). §0.4.206 closed the loop with the first GD training-loop test using the synthesised gradient, AND surfaced + fixed a `findTensorBinaryOp` overload-disambiguation bug introduced by the new `DTensor.times(Float)` helper.
+
+**Decisions worth flagging**:
+
+- **CartPole port complete: 25 firings vs original 8-10 estimate.** The ratio 2.5–3× over plan reflects: (a) 6 firings of unplanned Phase 0c-rectangular work (§0.4.192–§0.4.197); (b) 8 firings of Phase 3 sub-decomposition (§0.4.198–§0.4.205) where the original "4-5 firings" estimate didn't anticipate that each primitive would surface its own gate; (c) §0.4.206's training-loop slice. Not budget overrun — the plan was simply too coarse-grained. The decomposition pattern itself is now reusable: every future port slice that exercises a new primitive likely needs ~1 firing for the runtime helper, ~1 for the synthesis arm, ~1 for the IrType propagation extension, ~1 for an integration test.
+
+- **Two named-deferred items closed in 4 firings.** §0.4.202's register named "tensor sign()" and "`>3` grad-output cap" as deferred. §0.4.203 + §0.4.204 closed both. Naming items explicitly in the register made them findable; closing them was straightforward once the surrounding surface (Phase 3 first four slices) was in place.
+
+- **One regression caught + fixed in the same firing.** §0.4.206's `DTensor.times(Float)` helper silently broke `findTensorBinaryOp("times")` (overload ambiguity → `singleOrNull()` returned null). The training-loop test caught it on first run; the fix (parameter-type filter) is now defensive against future similar additions. Documented in the "Plugin" deferred row above as a meta-decision worth keeping in mind for any new `:core/ops` helper that shadows an existing name.
+
+- **The plugin path is now ML-port-ready.** Through §0.4.206, the K2 plugin can synthesize: rectangular MATMUL gradients with 4 grad params, RELU/TANH/SIGMOID/STEP/SIGN tensor primitives, FD-validated 1-hidden-layer NNs, full sign-tanh-relu-relu-matmul3 NN forward chains, and gradient-descent training loops. The remaining ML-port surface is largely "more of the same" (more activations, deeper chains, more shape atoms) — no structural blockers visible until QWOP's surface forces a new gate.
+
+- **Cadence: 5 sub-sections is shorter than §0.4.190 / §0.4.202's ~9-12.** Justified — the final Phase 3 stretch was a focused run. The previous register hand-offs covered broader arcs (Phase 0c, Phase 0c-rectangular). Phase 3's closure is one cluster.
+
+- **"Differentiating through a training loop" remains genuinely deferred.** §0.4.206's training loop is host-side Kotlin orchestration — calls the synthesised gradient repeatedly, applies updates outside the autograd boundary. PyTorch / JAX work the same way. The deferred item "WHILE inside `gradient_body`" stays open; no port today needs it (CartPole's RL outer loop is structurally identical to a supervised training loop in this respect).
+
+- **Six paper benchmarks status**: 5 of 6 ported through K2 plugin (Brachistochrone, HookeanSpring, HMC, CartPole — all 3 phases now — and BGDHyperOpt has `:benchmarks`-side port). QWOP is the last remaining paper benchmark, deferred multi-session. Phase 2 of head-to-head harness (Python references) gated on user-side toolchain — unchanged from §0.4.202.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **891 tests** (unchanged from §0.4.206).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 1 priority #1: Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** The headline gap from §11.13's M9 exit criterion. Now that CartPole port is complete (Phases 0/1/2/3), this is the next major Phase 1 piece. Multi-session structural item — likely 3-5 firings to ship.
+
+2. **QWOP benchmark port.** Last unported paper benchmark per the M9 exit criterion. CartPole's port arc revealed that each new port surfaces 1-2 new primitives + a structural blocker; QWOP's would likely follow the same pattern. Multi-session.
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority while Phase 1 has open structural items.
+
+**Definition-of-done for §0.4.207 — met**:
+- Deferred table refreshed to reflect §0.4.203–§0.4.206 closures ✓
+- "Tensor sign()" + "`>3` grad-output cap" entries removed (CLOSED) ✓
+- New named items: `>4` grad-output cap (when a port exercises 5+), `findTensorBinaryOp` overload-disambiguation (meta), StableHLO SIGN emitter (deferred), `DTensor.minus(Float)` (deferred) ✓
+- "Phase 3 (NN + outer training loop)" entry removed (CartPole CLOSED) ✓
+- "CartPole port complete" surfaced as the headline closure ✓
+- One themed cluster named (CartPole Phase 3 closure arc) ✓
+- Recommended-next surfaces Multi-result IF AD Phase 4 as the next major Phase 1 piece ✓
+- Register stays tabular per the §0.4.108–§0.4.202 organising principle ✓
+- Full suite stays green at 891 tests (unchanged) ✓
+
 #### 0.4.206 CartPole Phase 3 CLOSED — gradient-descent training loop with measurable loss decrease 2026-04-27
 
 §0.4.205's hand-off named "outer training loop" as the FINAL Phase 3 slice. §0.4.206 lands it: a 5-step gradient-descent training loop on a 3-layer NN (4 grad params, rectangular weights, tanh output) lowers and decreases the loss measurably from initial to final iteration. **CartPole Phase 3 CLOSED.** All three phases of the CartPole port (Phase 0/1/2/3) are now shipped per `docs/CARTPOLE_PORT_PLAN.md`.
