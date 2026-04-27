@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.231 Multi-result COARSENED substrate — symmetric dead-index-0 test pin 2026-04-27
+
+§0.4.230's hand-off named "Opportunistic cleanup" or "Multi-result COARSENED" as the next pickup. Reading the §0.4.179 entry's hand-off ("**Coarsening doesn't currently CREATE multi-result COARSENED ops** — substrate widening is forward-looking; no port today exercises that need") confirmed the structural-widening of `coarsenRootLeaf` / `coarsenMultiSoi` violates the loop's "Don't add features beyond what the task requires" rule absent a driving port. **What's appropriate this firing is a small symmetric-coverage test on the existing §0.4.179 substrate.**
+
+**The gap that prompted this firing**:
+
+§0.4.179 shipped the multi-result COARSENED substrate widening + 2 verification tests:
+1. `gradThroughMultiResultCoarsenedRoutesPerIndexUpstreams` — both indices of a 2-result COARSENED consumed downstream.
+2. `gradThroughMultiResultCoarsenedDeadIndexSeedsZero` — index **1** dead (only `c.result(0)` consumed).
+
+The dead-index detection in `handleCoarsenedAdjoint` ([DxirReverseTransform.kt:1230-1335](ir/src/commonMain/kotlin/io/tlaloc/ir/passes/DxirReverseTransform.kt#L1230-L1335)) iterates over result indices and seeds absent ones with `const(zeroValueFor(...))`. Symmetric in principle, but the existing tests only cover the **trailing** dead-index case (index 1 in a 2-result op). A dead **leading** index (index 0 with index 1 consumed) would exercise the same code path but with a different control-flow branch order — useful as a regression-test bulwark.
+
+**The new test** `gradThroughMultiResultCoarsenedDeadIndex0SeedsZero` in [`CoarsenedOpTest.kt`](ir/src/commonTest/kotlin/io/tlaloc/ir/passes/CoarsenedOpTest.kt):
+
+Same 2-result primal `(a) → (a + 1, a * 2)` and same gradient_body shape `(u0, u1, a) → (u0 + 2 * u1)` as the existing test, but the outer consumes `c.result(1)` instead of `c.result(0)`:
+- f(a) = a × 2, so df/da = 2.
+- The dead u0 is seeded with `const(0)`, giving da = 0 + 2 × u1 = 2 × 1 = 2.
+
+Both tests now pin the substrate's dead-index symmetry: dead-trailing (existing) AND dead-leading (new). Together they catch any "iterate from index 0" or "iterate from index K-1" bias that an asymmetric implementation might surface.
+
+**Decisions worth flagging**:
+
+- **Honest scoping decision: don't widen `coarsenRootLeaf` / `coarsenMultiSoi` without a driving port.** The §0.4.179 entry's note ("Coarsening doesn't currently CREATE multi-result COARSENED ops ... no use case driving it") still holds. Pre-emptively widening the production passes for a hypothetical future port violates the "Don't add features beyond what the task requires" rule. The substrate is forward-ready; activating it should wait until a port surfaces a multi-output leaf (e.g., a Phase 4+ port that returns multiple values from a coarsened SOI). The /loop's "fire only when one unblocks something on the list above" rule applies here.
+
+- **Symmetric coverage tests are cheap insurance for substrate-only landings.** §0.4.179's dead-index handling is symmetric by construction (the code iterates over `0 until K` with no special-case at index 0 or K-1), but the _test_ coverage was asymmetric (only index 1 tested). Adding the index-0 test is a 30-line cheap check that costs nothing if the substrate stays untouched, but catches a future regression that would specialize on a particular index. Cost/benefit favoring it.
+
+- **The /loop's priority ladder is stale.** Per the line-1908 finding in §0.4.208, items 1–6 are all closed; per §0.4.109, cache pruning is shipped; per §0.4.179, multi-result COARSENED substrate is shipped (only coarsening-side production remains, awaiting a driving port); per §0.4.228, the harness Phase 1 is structurally complete. The remaining gates are **toolchain-bound** (Python references for harness Phase 2; IREE compiler+runtime for first runtime backend). Until the user updates the /loop prompt to reflect this, each firing has to find work that fits within the listed priorities. Symmetric-coverage tests on shipped substrates are one such fit.
+
+- **The "do not start Phase 2" rule remains binding.** Even though Phase 1 is structurally closed (modulo toolchain), the literal /loop rule says do not start Phase 2 until "Phase 1 closed — coarsening at M9 parity" entry exists. That entry needs the head-to-head numbers, which need Phase 2 Python references, which need toolchain. So Phase 2 work is genuinely off-limits this loop. Ship-able firings stay within "polish the substrate / write planning artifacts / out-of-scope register refresh."
+
+- **Suite +1 to 963.**
+
+**Tests added** (+1):
+
+1. `CoarsenedOpTest.gradThroughMultiResultCoarsenedDeadIndex0SeedsZero`
+
+Full suite is green: **963 tests** (+1 from §0.4.230).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Wait for user-side toolchain.** With Phase 1 structurally closed and Phase 2 forbidden by the /loop rule, the loop has limited productive work to do. Toolchain-gated paths:
+   - Python (PyTorch+JAX) → unblocks harness Phase 2 → unblocks "Phase 1 closed" entry → unblocks Phase 2 work.
+   - IREE → unblocks runtime backend Phase 1 → improves harness measurements.
+
+2. **Polish work that doesn't grow scope.** Examples: more symmetric-coverage tests on existing substrates (similar to §0.4.231); doc improvements; planning artifact refinement. Each firing of polish should have bounded scope and not pre-empt future structural decisions. Risk: too much polish without driving structural change is busywork.
+
+3. **Out-of-scope register refresh — third in close succession.** §0.4.221 + §0.4.229 are recent register snapshots. A §0.4.232 register refresh could (a) explicitly call out the /loop priority ladder is stale and (b) recommend the user update the loop prompt. This is a doc move that surfaces the actual blocker (the loop's stale prompt) without violating any rules. 1 firing.
+
+4. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** Already shipped at §0.4.152/§0.4.153 per the line-1908 finding. The /loop's listing of this as a Phase 1 priority is stale; nothing structural to land here.
+
+5. **Multi-result COARSENED coarsening-side production.** Substrate ready (§0.4.179); no port driving it. Waiting on a use case.
+
+**Definition-of-done for §0.4.231 — met**:
+- Symmetric dead-index-0 test added to `CoarsenedOpTest` ✓
+- `gradThroughMultiResultCoarsenedDeadIndex0SeedsZero` passes on first run ✓
+- Test mirrors `gradThroughMultiResultCoarsenedDeadIndexSeedsZero`'s structure with index 0 dead instead of index 1 ✓
+- Confirms substrate's dead-index detection is symmetric (catches asymmetric-iteration regressions) ✓
+- Suite +1 to 963 ✓
+- §0.4.179's "no port today drives multi-result COARSENED coarsening-side production" framing reaffirmed; no premature production-side widening ✓
+
 #### 0.4.230 IREE CPU runtime port plan — `docs/IREE_CPU_PORT_PLAN.md` (Phase 2 step 5 planning artifact) 2026-04-27
 
 §0.4.229's hand-off named "First runtime backend (Phase 2 #2 — IREE CPU)" as the next pickup, with the framing "since the loop can't trigger Python toolchain installs, shifting focus to the M3 critical path is natural." §0.4.230 lands the **planning artifact** — `docs/IREE_CPU_PORT_PLAN.md` — without starting implementation, since IREE itself requires a toolchain install (forbidden by /loop rules until the user explicitly authorizes).

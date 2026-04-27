@@ -638,4 +638,52 @@ class CoarsenedOpTest {
         assertEquals(1, out.size)
         assertEquals(1f, out[0][0], "df/da = 1 (u1 seeded with 0 since result(1) is dead)")
     }
+
+    @Test
+    fun gradThroughMultiResultCoarsenedDeadIndex0SeedsZero() {
+        // §0.4.231 — mirror of [gradThroughMultiResultCoarsenedDeadIndexSeedsZero]
+        // but with index 0 dead instead of index 1. Validates that Phase 5c's
+        // dead-index detection is symmetric — neither dead-at-low-index nor
+        // dead-at-high-index is special-cased.
+        //
+        // primal_body: (a) → (a + 1, a * 2)        (same as the index-1-dead test)
+        // gradient_body: (u0, u1, a) → (u0 + 2 * u1)
+        // outer: f(a) = c.result(1)                 // result(0) is dead
+        //   f = a * 2, so df/da = 2.
+        // The dead u0 should be seeded with const(0), giving da = 0 + 2 * u1
+        //   = 0 + 2 * 1 = 2.
+        val primal = DxirBuilder.function("dead_idx0_primal") {
+            val a = param("a", f32s)
+            val one = const(1f, f32s)
+            val sum = op(OpKind.ADD, listOf(a, one), f32s)
+            val two = const(2f, f32s)
+            val doubled = op(OpKind.MUL, listOf(a, two), f32s)
+            listOf(sum, doubled)
+        }
+        val grad = DxirBuilder.function("dead_idx0_grad") {
+            val u0 = param("u0", f32s)
+            val u1 = param("u1", f32s)
+            val a = param("a", f32s)
+            val _refA = op(OpKind.MUL, listOf(a, u0), f32s)  // ref-integrity for a
+            val two = const(2f, f32s)
+            val twoU1 = op(OpKind.MUL, listOf(two, u1), f32s)
+            val da = op(OpKind.ADD, listOf(u0, twoU1), f32s)
+            listOf(da)
+        }
+        val outer = DxirBuilder.function("f") {
+            val a = param("a", f32s)
+            val c = coarsened(
+                operands = listOf(a),
+                primalBody = primal,
+                gradientBody = grad,
+                readsPrimalIndices = setOf(0),
+            )
+            // Only consume result(1) — result(0) is dead.
+            listOf(c.result(1))
+        }
+        val gradFn = DxirReverseTransform.apply(outer)
+        val out = DxirInterpreter.evalFunction(gradFn, listOf(floatArrayOf(7f)))
+        assertEquals(1, out.size)
+        assertEquals(2f, out[0][0], "df/da = 2 (u0 seeded with 0 since result(0) is dead)")
+    }
 }
