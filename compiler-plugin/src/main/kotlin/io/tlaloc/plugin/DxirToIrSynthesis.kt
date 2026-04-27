@@ -48,6 +48,8 @@ import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
 import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.types.IrType
+import org.jetbrains.kotlin.ir.types.IrTypeArgument
+import org.jetbrains.kotlin.ir.types.impl.buildSimpleType
 import org.jetbrains.kotlin.ir.types.typeOrNull
 import org.jetbrains.kotlin.ir.types.typeWith
 import org.jetbrains.kotlin.name.CallableId
@@ -118,6 +120,106 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
+     * §0.4.194 — Phase 0c-rectangular slice 3a. Returns a fresh `IrSimpleType` shaped
+     * like [original] but with [newArgs] substituted for `arguments`. Wraps Kotlin's
+     * [buildSimpleType] DSL so callers don't need to reach into the impl package.
+     * Used by [deriveResultIrType] to construct DTensor / Rank2 IrTypes with rearranged
+     * shape arguments for TRANSPOSE / MATMUL outputs.
+     */
+    private fun reshapeIrSimpleType(original: IrSimpleType, newArgs: List<IrTypeArgument>): IrSimpleType =
+        original.buildSimpleType { arguments = newArgs }
+
+    /**
+     * §0.4.194 — derive a `DxirOp`'s result IrType for the rectangular-shape ops:
+     * [OpKind.TRANSPOSE] swaps the inner Rank2's two type-args; [OpKind.MATMUL]
+     * combines LHS's first inner arg + RHS's last inner arg into a fresh Rank2.
+     * For other ops returns null — callers fall back to [SynthesisContext.tensorIrType]
+     * via [irTypeForNode].
+     *
+     * Operates only on rank-2 F32 surfaces (the slice-3a scope). The outer DTensor's
+     * second type-arg (F32) is preserved from the operand.
+     *
+     * Returns null when:
+     * - the dxir op isn't TRANSPOSE / MATMUL
+     * - operand IrTypes aren't `IrSimpleType` (e.g., type parameters slipping through)
+     * - the inner shape isn't a Rank2 with two type-args
+     * - any required type-arg lookup hits a non-`IrTypeProjection` (star projection,
+     *   etc.) — current Tlaloc surfaces don't emit those, but the guard keeps the
+     *   helper safe if a future call site does.
+     */
+    private fun deriveResultIrType(
+        op: DxirOp,
+        operandIrTypes: Map<Int, IrType>,
+        fallback: IrType?,
+    ): IrType? {
+        if (op.type.dtype != F32 || op.type.rank != 2) return null
+        return when (op.op) {
+            OpKind.TRANSPOSE -> {
+                if (op.operands.size != 1) return null
+                val operandIr = operandIrTypes[op.operands[0].id] ?: fallback
+                val operandSimple = operandIr as? IrSimpleType ?: return null
+                deriveTransposedDTensor(operandSimple)
+            }
+            OpKind.MATMUL -> {
+                if (op.operands.size != 2) return null
+                val lhsIr = (operandIrTypes[op.operands[0].id] ?: fallback) as? IrSimpleType ?: return null
+                val rhsIr = (operandIrTypes[op.operands[1].id] ?: fallback) as? IrSimpleType ?: return null
+                deriveMatmulOutputDTensor(lhsIr, rhsIr)
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * Given `DTensor<Rank2<R, C>, F32>` returns `DTensor<Rank2<C, R>, F32>`. Returns
+     * null if the input isn't shaped like a 2-arg DTensor whose first arg is a 2-arg
+     * Rank2.
+     */
+    private fun deriveTransposedDTensor(dtensor: IrSimpleType): IrSimpleType? {
+        if (dtensor.arguments.size != 2) return null
+        val rank2Outer = dtensor.arguments[0]
+        val rank2Type = rank2Outer.typeOrNull as? IrSimpleType ?: return null
+        if (rank2Type.arguments.size != 2) return null
+        val swappedRank2 = reshapeIrSimpleType(
+            rank2Type,
+            listOf(rank2Type.arguments[1], rank2Type.arguments[0]),
+        )
+        // Replace the outer DTensor's first type-arg with the swapped Rank2. Reuse the
+        // original `IrTypeArgument`'s variance by going through `buildSimpleType` →
+        // `arguments` whose entries are IrTypeArguments. Since we're swapping the type
+        // *inside* an existing projection, the cleanest path is to rebuild the
+        // projection via `makeTypeProjection(type, variance)`.
+        val originalProjection = rank2Outer as? org.jetbrains.kotlin.ir.types.IrTypeProjection
+        val newRank2Projection = if (originalProjection != null) {
+            org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(swappedRank2, originalProjection.variance)
+        } else {
+            org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(swappedRank2, org.jetbrains.kotlin.types.Variance.INVARIANT)
+        }
+        return reshapeIrSimpleType(dtensor, listOf(newRank2Projection, dtensor.arguments[1]))
+    }
+
+    /**
+     * Given LHS `DTensor<Rank2<R, K>, F32>` and RHS `DTensor<Rank2<K, C>, F32>` returns
+     * `DTensor<Rank2<R, C>, F32>`. The MATMUL output's outer DTensor layer is built
+     * from LHS (preserves its annotations / nullability); the inner Rank2 takes its
+     * first arg from LHS and its second arg from RHS. Returns null on shape mismatches.
+     */
+    private fun deriveMatmulOutputDTensor(lhs: IrSimpleType, rhs: IrSimpleType): IrSimpleType? {
+        if (lhs.arguments.size != 2 || rhs.arguments.size != 2) return null
+        val lhsRank2 = lhs.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        val rhsRank2 = rhs.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        if (lhsRank2.arguments.size != 2 || rhsRank2.arguments.size != 2) return null
+        val combinedRank2 = reshapeIrSimpleType(
+            lhsRank2,
+            listOf(lhsRank2.arguments[0], rhsRank2.arguments[1]),
+        )
+        val originalLhsProjection = lhs.arguments[0] as? org.jetbrains.kotlin.ir.types.IrTypeProjection
+        val variance = originalLhsProjection?.variance ?: org.jetbrains.kotlin.types.Variance.INVARIANT
+        val newRank2Projection = org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(combinedRank2, variance)
+        return reshapeIrSimpleType(lhs, listOf(newRank2Projection, lhs.arguments[1]))
+    }
+
+    /**
      * §0.4.173 — names the FIRST gate that rejected the dxir during the most recent
      * [synthesise] call. Set by [reject] / [cancelWith] at every tagged return-null
      * site; cleared at the top of [synthesise]. Read by
@@ -171,6 +273,21 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 val argType = callType.arguments.getOrNull(idx)?.typeOrNull ?: continue
                 paramIrTypeMap[p.id] = argType
             }
+        }
+        // §0.4.194 — Phase 0c-rectangular slice 3a: forward-pass derivation of result
+        // IrTypes for OpKind.TRANSPOSE / OpKind.MATMUL on rank-2 F32 surfaces. For
+        // each body op whose result IrType can be derived from its operands' IrTypes
+        // via shape arithmetic (TRANSPOSE swaps R↔C; MATMUL combines lhs.first +
+        // rhs.last), populate `paramIrTypeMap[op.id]` with a freshly-built
+        // `IrSimpleType`. Other body ops (BROADCAST, ADD, etc.) leave their entries
+        // unset; `irTypeForNode` falls back to `tensorIrType` for them — same as
+        // pre-§0.4.194. Square surfaces are bit-exact equivalent (TRANSPOSE swap on
+        // `Rank2<Sym, Sym>` yields the structurally same IrType; MATMUL combine
+        // with all params sharing one shape produces the same IrType).
+        for (n in fn.body) {
+            if (n !is DxirOp) continue
+            val derived = deriveResultIrType(n, paramIrTypeMap, tensorIrType) ?: continue
+            paramIrTypeMap[n.id] = derived
         }
         // §0.4.186 — Phase 0c slice (b): widened from "scalar + rank-1 F32 only" to
         // "scalar + rank-1/2/3 F32". The same `broadcastLike<S>` helper handles all
@@ -284,7 +401,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             ?: cancelWith("irOpFor returned null for ${node.op} id=${node.id} type=${node.type}")
                         else -> cancelWith("body node id=${node.id} is unsupported kind ${node::class.simpleName}")
                     }
-                    val ty = irTypeFor(node.type, context)
+                    // §0.4.194 — slice 3a: prefer the derived per-node IrType when one
+                    // was populated by `synthesise()`'s body walk (TRANSPOSE / MATMUL
+                    // outputs); fall back to `tensorIrType` for the rest. Square
+                    // surfaces remain bit-exact since the derived IrTypes are
+                    // structurally identical to the fallback.
+                    val ty = irTypeForNode(node, context)
                         ?: cancelWith("no IrType for body node id=${node.id} type=${node.type}")
                     val v = irTemporary(
                         value = expr,
@@ -1152,7 +1274,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val sym = transposeSymbol() ?: return null
         val operandIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
         val operandShapeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
-        val resultIrType = context.tensorIrType ?: return null
+        // §0.4.194 — slice 3a: result IrType derived in `synthesise()`'s body walk via
+        // [deriveResultIrType] / [deriveTransposedDTensor] (output Rank2's args are
+        // swapped). Falls back to `context.tensorIrType` for ops the derivation
+        // skipped (none today, but keeps the helper robust).
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: context.tensorIrType ?: return null
+        val resultRank2Arg = (resultIrType as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
+        val resultShapeArg = (resultRank2Arg as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
+            ?: operandShapeArg
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
@@ -1160,12 +1289,18 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             symbol = sym,
         )
         // `fun <R, C> DTensor<Rank2<R, C>, F32>.transpose(): DTensor<Rank2<C, R>, F32>`:
-        // arguments[0] = extension receiver. Square case: both type-args reuse the
-        // operand's shape arg (R == C). Slice 3 will derive the swapped output type
-        // and feed an `output_shape_arg` distinct from the operand's.
+        // arguments[0] = extension receiver. typeArguments[0] = R (operand's first
+        // inner Rank2 arg = `operandShapeArg` reading the OUTER Rank2 wrapper);
+        // typeArguments[1] = C (output's first inner Rank2 arg post-swap = same
+        // wrapper since `Sym` indistinguishability collapses both back to one in the
+        // square case). For genuinely rectangular Rank2<R, C> with distinct shape
+        // atoms, the existing wrapping with `operandShapeArg` for both type-args is
+        // the same bound-violating-but-runtime-erased pattern §0.4.189 used; the
+        // result's `IrCall.type` is what matters for downstream consumers and slice
+        // 3a derives that correctly via `deriveTransposedDTensor`.
         if (call.typeArguments.size >= 2) {
             call.typeArguments[0] = operandShapeArg
-            call.typeArguments[1] = operandShapeArg
+            call.typeArguments[1] = resultShapeArg
         }
         call.arguments[0] = irGet(operandDecl)
         return call
@@ -1206,7 +1341,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val rhsIrType = irTypeForNode(rhs, context) as? IrSimpleType ?: return null
         val lhsShapeArg = lhsIrType.arguments.firstOrNull()?.typeOrNull ?: return null
         val rhsShapeArg = rhsIrType.arguments.firstOrNull()?.typeOrNull ?: return null
-        val resultIrType = context.tensorIrType ?: return null
+        // §0.4.194 — slice 3a: result IrType derived in `synthesise()`'s body walk via
+        // [deriveMatmulOutputDTensor] (output Rank2 = LHS first ⊕ RHS last). For
+        // square the derived result is structurally identical to `tensorIrType`;
+        // for rectangular it carries the correct combined shape so downstream ops
+        // (in slice 3b) can resolve their operand IrTypes.
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: context.tensorIrType ?: return null
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,

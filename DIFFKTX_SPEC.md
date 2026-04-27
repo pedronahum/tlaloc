@@ -39,6 +39,68 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.194 Phase 0c-rectangular slice 3a — op-result IrType derivation for TRANSPOSE / MATMUL 2026-04-27
+
+§0.4.193's hand-off named "Phase 0c-rectangular slice 3a: op-result IrType derivation for TRANSPOSE and MATMUL" as the next single-firing pickup. §0.4.194 lands it. `synthesise()` now runs a forward-pass body walk after populating per-param IrTypes; for each `OpKind.TRANSPOSE` it derives the swapped-shape result IrType, and for each `OpKind.MATMUL` it derives the LHS-first ⊕ RHS-last combined output IrType. Both go into `operandIrTypes`, so downstream consumers (the next op in the body, `buildBody`'s IrTemporary allocation, the return Pair construction once slice 3b lands) read the correct per-DxirNode IrType. Square surfaces are bit-exact equivalent to pre-§0.4.194; rectangular MATMUL still needs slice 3b (BROADCAST template selection via runtime dims helper) before the end-to-end test can ship.
+
+**The mechanism** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt):
+
+1. **`buildSimpleType` adopted** — Kotlin's `IrSimpleType.buildSimpleType { arguments = … }` extension (from `org.jetbrains.kotlin.ir.types.impl`) is the canonical path for cloning an IrSimpleType with rearranged arguments. The new `reshapeIrSimpleType` helper wraps it.
+
+2. **`deriveResultIrType(op, operandIrTypes, fallback)`** — dispatches on `op.op`:
+   - `TRANSPOSE`: pulls operand[0]'s IrType (or fallback), unwraps the outer DTensor + inner Rank2, swaps Rank2's two arguments via `reshapeIrSimpleType`, rewraps in a fresh DTensor IrType via `makeTypeProjection` + `reshapeIrSimpleType`.
+   - `MATMUL`: pulls both operand IrTypes, takes inner Rank2's `arguments[0]` from LHS and `arguments[1]` from RHS to build the combined Rank2, rewraps via the LHS DTensor.
+   - All other ops: returns null, callers fall back to `tensorIrType` via `irTypeForNode`.
+
+3. **Forward-pass body walk in `synthesise()`** — after populating param IrTypes, iterates `fn.body` in SSA order. For each `DxirOp` whose result IrType derives from operand IrTypes, stores `paramIrTypeMap[op.id] = derived`. Since the loop walks ops in source order, MATMUL operands that are themselves TRANSPOSE results pick up the swapped Rank2 IrType correctly.
+
+4. **`irTranspose` + `irMatmul` `call.type` now uses `irTypeForNode(op, context)`** instead of `context.tensorIrType`. For square surfaces both are structurally identical; for rectangular the derived IrType has the correct combined / swapped Rank2.
+
+5. **`buildBody`'s IrTemporary uses `irTypeForNode(node, context)`** (was `irTypeFor(node.type, context)`). This is what lets per-op derived IrTypes propagate to downstream `irGet(env[id])` reads — the var's type is now the derived type rather than the unified `tensorIrType`.
+
+**Decisions worth flagging**:
+
+- **Forward-pass walk runs in `synthesise()` BEFORE `buildBody`.** This means `operandIrTypes` is fully populated when `irOpFor` / `irTypeForNode` queries arrive. Doing the derivation lazily inside `irOpFor` would require ensuring operands' derived types are already cached — fine but more fragile. The substrate-then-build sequencing matches how the rest of `synthesise()` works (params, return types, then `buildBody`).
+
+- **Square surfaces stay bit-exact equivalent.** TRANSPOSE on `Rank2<Sym, Sym>` swaps `[Sym, Sym]` → `[Sym, Sym]`, structurally identical. MATMUL combine takes LHS `[0]=Sym` ⊕ RHS `[1]=Sym` = `[Sym, Sym]`, also identical. The `buildSimpleType { arguments = … }` lambda always allocates a fresh IrSimpleType, but the IR verifier compares structurally (classifier + arguments + nullability), so type equality holds. Verified: full suite stays at 873 with no regressions.
+
+- **`irTranspose`'s typeArguments are now {operand.first, derivedResult.first}.** The current `transpose<R, C>` signature takes two ShapeAtom type params — pre-§0.4.194 we set both to `operandShapeArg`; post-§0.4.194 we set `[0] = operandShapeArg` (R), `[1] = resultShapeArg` (C from derived). For square they're the same; for rectangular they diverge correctly. Same bound-violating-but-erased pattern §0.4.189 documented (typeArgs 0/1 are technically `ShapeAtom` but the unwrapped value is a whole `Rank2<…>`); slice 3b's BROADCAST work doesn't change that. A future cleanup could break Rank2 down further when calling `transpose` / `matmul`, but it's cosmetic.
+
+- **`makeTypeProjection` reused for variance preservation.** When rewrapping the derived Rank2 inside a DTensor projection, the helper preserves the original projection's variance (`INVARIANT` for our generic surfaces) by reaching into `original.arguments[i] as? IrTypeProjection`. Star projections fall back to `INVARIANT`, but no Tlaloc surface emits those today.
+
+- **No new test added.** A pure-substrate firing — slice 3a's correctness is verified by the existing 873 tests passing. The rectangular regression test belongs in slice 3b (when BROADCAST is fixed and the end-to-end gradient is computable).
+
+- **Tested confidence in derived IrTypes.** I considered adding a unit test asserting `deriveResultIrType` produces the right IrType structure for synthetic IrSimpleTypes, but those would either: (a) require building IrSimpleTypes from scratch using the same `buildSimpleType` machinery (test-vs-impl tautology), or (b) require a full plugin-context fixture. The square-suite-still-passes confirmation gives stronger evidence that the derivation doesn't break existing surfaces.
+
+- **What slice 3b will need.** `irBroadcast` currently uses `tensorTemplateParam` (the FIRST tensor param) as the runtime template for `broadcastLike(v, template)`. For rectangular gradient bodies the BROADCAST target shape doesn't match any param's dims (e.g., `[R, C]` from `(a:[R,K] matmul b:[K,C]).sum()`). Slice 3b will:
+  1. Add `broadcastDims(v: Float, dims: IntArray): DTensor<S, F32>` to `:core/ops/HostOps.kt`. Generic in shape but takes an explicit dims array.
+  2. Synthesize a runtime `intArrayOf(...)` IR expression at the BROADCAST site that picks dims from existing tensor params (e.g., `intArrayOf(a.dims[0], b.dims[1])` for `[R, C]`). The derivation walks the BROADCAST's dxir target dims and matches each axis to a param's shape.
+  3. Wire `irBroadcast` to emit the new helper when no matching template exists.
+  4. Add the rectangular MATMUL regression test (`grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<R, K>, b: Rank2<K, C>` and R ≠ K ≠ C).
+
+- **Suite stays at 873 tests.** Pure substrate landing.
+
+**Tests added** (+0): pure substrate firing; correctness verified by existing 873 tests passing.
+
+Full suite is green: **873 tests** (unchanged from §0.4.193).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 0c-rectangular slice 3b: BROADCAST template via runtime dims helper.** Add `broadcastDims(v: Float, dims: IntArray): DTensor<S, F32>` to `:core/ops/HostOps.kt`. Wire `irBroadcast` to emit it when the target shape doesn't match any param's shape. Resolve target dims by walking the BROADCAST's dxir output dims and matching each to an existing param's shape axis (e.g., `[R, C]` ← `[a.dims[0], b.dims[1]]`). Add the rectangular MATMUL regression test. Possibly 1-2 firings depending on the dim-matching heuristic.
+
+2. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+3. **CartPole Phase 3 first attempt** — gated on slice 3b (rectangular MATMUL closure).
+
+**Definition-of-done for §0.4.194 — met**:
+- `reshapeIrSimpleType` helper wraps `buildSimpleType` for IrSimpleType cloning ✓
+- `deriveResultIrType` derives TRANSPOSE swap + MATMUL combine on rank-2 F32 ✓
+- Forward-pass body walk in `synthesise()` populates per-op derived IrTypes ✓
+- `irTranspose` / `irMatmul` use derived IrType for `call.type` via `irTypeForNode` ✓
+- `buildBody` IrTemporary uses `irTypeForNode` so derived types propagate ✓
+- All 873 existing tests pass unchanged (substrate-only landing) ✓
+- Slice 3b plan named explicitly (broadcastDims + rectangular regression test) ✓
+
 #### 0.4.193 Phase 0c-rectangular slice 2 — populate per-param IrTypes + wire irMatmul/irTranspose; first 2-arg plugin gradient test 2026-04-27
 
 §0.4.192's hand-off named "Phase 0c-rectangular slice 2: populate `operandIrTypes` + wire irMatmul/irTranspose to consult it. … Add a regression test for rectangular MATMUL: `grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<R, K>, b: Rank2<K, C>` and R ≠ K ≠ C. Single-firing if the call-site IrType walking is straightforward." Slice 2 lands the population + consumer wiring as planned, but **rectangular MATMUL itself does not ship in this firing** — see "Decisions worth flagging" below for the structural blockers slice 3 must close. Instead, the new regression coverage is a **2-arg SQUARE MATMUL gradient** — the first multi-param plugin gradient test in the suite, exercising the `Pair`-return synthesis path and validating that the call-site IrType walker produces correct per-param entries.
