@@ -369,6 +369,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.GATHER) return irGather(op, env, context)
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
+        if (op.op == OpKind.TRANSPOSE) return irTranspose(op, env, context)
+        if (op.op == OpKind.MATMUL) return irMatmul(op, env, context)
 
         val operandDecls = op.operands.mapIndexed { idx, o ->
             env[o.id] ?: return reject(
@@ -382,11 +384,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // contributions (e.g., multi-gather adjoints) hits this path. Scalar path
         // unchanged — `findBinaryOp` on a scalar `op.type` still resolves to the
         // primitive operator.
+        // §0.4.189 — extends the §0.4.42 rank-1-only `findTensorBinaryOp` special case
+        // to all `isAcceptedTensorType` ranks (1/2/3 F32). The same `:core/ops` tensor
+        // operators (`DTensor.plus` etc.) handle any rank uniformly, so the dispatch
+        // collapses to "tensor → findTensorBinaryOp; scalar → findBinaryOp".
         val symbol = when (op.op) {
-            OpKind.ADD -> if (op.type.rank == 1) findTensorBinaryOp("plus") else findBinaryOp("plus", op.type, context)
-            OpKind.SUB -> if (op.type.rank == 1) findTensorBinaryOp("minus") else findBinaryOp("minus", op.type, context)
-            OpKind.MUL -> if (op.type.rank == 1) findTensorBinaryOp("times") else findBinaryOp("times", op.type, context)
-            OpKind.DIV -> if (op.type.rank == 1) findTensorBinaryOp("div") else findBinaryOp("div", op.type, context)
+            OpKind.ADD -> if (isAcceptedTensorType(op.type)) findTensorBinaryOp("plus") else findBinaryOp("plus", op.type, context)
+            OpKind.SUB -> if (isAcceptedTensorType(op.type)) findTensorBinaryOp("minus") else findBinaryOp("minus", op.type, context)
+            OpKind.MUL -> if (isAcceptedTensorType(op.type)) findTensorBinaryOp("times") else findBinaryOp("times", op.type, context)
+            OpKind.DIV -> if (isAcceptedTensorType(op.type)) findTensorBinaryOp("div") else findBinaryOp("div", op.type, context)
             OpKind.NEG -> findUnaryOp("unaryMinus", op.type, context)
             else -> return reject("op id=${op.id} ${op.op} type=${op.type} has no synthesis arm")
         } ?: return reject("no IR symbol for op id=${op.id} ${op.op} type=${op.type}")
@@ -1071,6 +1077,101 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("broadcastLike"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.189 — `OpKind.TRANSPOSE(a)` → IrCall to `io.tlaloc.core.ops.transpose`
+     * (the Rank2 extension declared in HostOps.kt). Used by `MatmulRule`'s
+     * gradient emission for the dA = upstream · B^T and dB = A^T · upstream chain.
+     * Square-matrix-only today (the `tensorIrType` carries one shape parameter; a
+     * non-square TRANSPOSE would need per-operand IrType tracking).
+     */
+    private fun IrBuilderWithScope.irTranspose(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        val operand = op.operands[0]
+        if (operand.type.rank != 2 || operand.type.dtype != F32) return null
+        if (op.type.rank != 2 || op.type.dtype != F32) return null
+        val operandDecl = env[operand.id] ?: return null
+        val sym = transposeSymbol() ?: return null
+        val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
+        val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = tensorIrType,
+            symbol = sym,
+        )
+        // `fun <R, C> DTensor<Rank2<R, C>, F32>.transpose(): DTensor<Rank2<C, R>, F32>`:
+        // arguments[0] = extension receiver. The result type swaps R and C, but with
+        // sentinel dims they're indistinguishable; reuse `tensorIrType` for both.
+        // §0.4.189 only supports square-matrix shapes (R == C); rectangular needs
+        // per-operand IrType tracking.
+        if (call.typeArguments.size >= 2) {
+            call.typeArguments[0] = shapeTypeArg
+            call.typeArguments[1] = shapeTypeArg
+        }
+        call.arguments[0] = irGet(operandDecl)
+        return call
+    }
+
+    /**
+     * §0.4.189 — `OpKind.MATMUL(a, b)` → IrCall to `io.tlaloc.core.ops.matmul`
+     * (the Rank2 × Rank2 → Rank2 infix declared in HostOps.kt). Square-matrix-only
+     * today (R == K == C); rectangular shapes need per-operand IrType tracking.
+     */
+    private fun IrBuilderWithScope.irMatmul(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        val lhs = op.operands[0]
+        val rhs = op.operands[1]
+        if (lhs.type.rank != 2 || lhs.type.dtype != F32) return null
+        if (rhs.type.rank != 2 || rhs.type.dtype != F32) return null
+        if (op.type.rank != 2 || op.type.dtype != F32) return null
+        val lhsDecl = env[lhs.id] ?: return null
+        val rhsDecl = env[rhs.id] ?: return null
+        val sym = matmulSymbol() ?: return null
+        val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
+        val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = tensorIrType,
+            symbol = sym,
+        )
+        // `infix fun <R, K, C> DTensor<Rank2<R, K>, F32>.matmul(other: DTensor<Rank2<K, C>, F32>):
+        //  DTensor<Rank2<R, C>, F32>`: arguments[0] = receiver (LHS), arguments[1] = RHS.
+        // For square matrices R = K = C, so all three type args reuse the same shape.
+        if (call.typeArguments.size >= 3) {
+            call.typeArguments[0] = shapeTypeArg
+            call.typeArguments[1] = shapeTypeArg
+            call.typeArguments[2] = shapeTypeArg
+        }
+        call.arguments[0] = irGet(lhsDecl)
+        call.arguments[1] = irGet(rhsDecl)
+        return call
+    }
+
+    private fun transposeSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("transpose"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    private fun matmulSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("matmul"),
         )
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }

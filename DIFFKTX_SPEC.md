@@ -39,6 +39,68 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.189 First end-to-end MATMUL gradient — `irTranspose` + `irMatmul` synthesis arms + transpose runtime helper 2026-04-27
+
+§0.4.188's hand-off named "active matmul gradient end-to-end test" as a single-firing follow-up. §0.4.189 lands it. The test `grad { a: DTensor<Rank2<Sym, Sym>, F32> -> (a matmul a).sum().toFloat() }` produces the analytic ∂Σ(A·A)/∂A = A^T·1 + 1·A^T gradient — at A = [[1,2],[3,4]], the result is [[7,11],[9,13]]. **First end-to-end MATMUL gradient through the K2 plugin's IR-side path.**
+
+The test surfaced three missing pieces:
+1. **TRANSPOSE has no synthesis arm.** MatmulRule emits `TRANSPOSE(a)` to compute `A^T` for the gradient; synthesis rejected with "no synthesis arm".
+2. **MATMUL has no synthesis arm.** The grad function chains `MATMUL(broadcast_ones, A^T)` + `MATMUL(A^T, broadcast_ones)`; synthesis rejected.
+3. **Rank-2 ADD couldn't find an IR symbol.** The `findBinaryOp` lookup was rank-1-only special-cased; rank-2 fell into a scalar-typed `Float.plus` lookup that returned null.
+
+**Three coordinated changes** (in `:core` + `:compiler-plugin`):
+
+1. **`DTensor<Rank2<R, C>, F32>.transpose()` extension** in [HostOps.kt:181-198](core/src/commonMain/kotlin/io/tlaloc/core/ops/HostOps.kt#L181-L198) — runtime: row-major double-loop swap. The signature flips R and C in the shape type so downstream matmul chains stay correctly typed.
+
+2. **`irTranspose` + `irMatmul` synthesis arms** in [DxirToIrSynthesis.kt:1080-1180](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L1080-L1180). Both arms call `pluginContext.referenceFunctions(CallableId(io.tlaloc.core.ops, transpose|matmul))` to find the runtime symbol, thread the call-site shape arg through the type-arg slots, and pass operands as receiver + arguments. Square-matrix-only today (R == K == C); the `tensorIrType` carries one shape parameter, so non-square matmul/transpose would need per-operand IrType tracking.
+
+3. **Tensor binary-op dispatch widened** ([DxirToIrSynthesis.kt:380-394](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt#L380-L394)) — the rank-1-only special case for `findTensorBinaryOp` extends to all `isAcceptedTensorType` ranks (rank-1/2/3 F32). The same `:core/ops` tensor operators (`DTensor.plus` / `.minus` / `.times` / `.div`) handle any rank uniformly via their `<S : Shape>` generic; one-line gate update.
+
+**Verification** in [Rank2MatmulGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2MatmulGradientTest.kt):
+
+For A = [[1,2],[3,4]]:
+- ∂Σ/∂a = 2a + b + c = 2 + 2 + 3 = **7**
+- ∂Σ/∂b = 2c + a + d = 6 + 1 + 4 = **11**
+- ∂Σ/∂c = 2b + a + d = 4 + 1 + 4 = **9**
+- ∂Σ/∂d = 2d + b + c = 8 + 2 + 3 = **13**
+
+The test asserts the gradient matches [[7,11],[9,13]] within `1e-3` tolerance + sentinel-defeat. Synthesis succeeds (no "kept original call" warning).
+
+**Decisions worth flagging**:
+
+- **Square-matrix-only is the right scope for slice (c)-followup.** §0.4.187 + §0.4.188 + §0.4.189 together close the rank-2 surface for the SQUARE case. Rectangular shapes (M×K · K×N → M×N where M ≠ K ≠ N) require per-operand IrType tracking — the `tensorIrType` synthesis context carries only one shape parameter today. That's a separate widening, gated on a use case that needs rectangular matmul (likely CartPole Phase 3 NN with 4×8, 8×4, 4×1 weights).
+
+- **`transposeSymbol` and `matmulSymbol` are explicit `singleOrNull` lookups.** If `:core/ops` ever gets a second `transpose` or `matmul` overload, these would return null + synthesis would fall back. For now both helpers have one overload; matches the pattern of `broadcastLikeSymbol`.
+
+- **The existing rank-1 path is unchanged.** `isAcceptedTensorType` returns true for rank-1, so the dispatch routes to `findTensorBinaryOp` — same as the §0.4.42 rank-1 special case it replaces. No behaviour change for existing rank-1 tests.
+
+- **CartPole Phase 3 is now fully plumbing-ready FOR SQUARE NN.** The NN forward (`relu(relu(X·W1)W2)W3`) uses rectangular matmuls (X is batch×input, W1 is input×hidden, W2 is hidden×hidden, W3 is hidden×output). With square-only support, Phase 3 needs either: (a) per-operand IrType tracking widening, OR (b) hard-coded square-only NN for the first slice. The §0.4.165 plan estimated 4-5 firings for Phase 3; the rectangular-matmul widening might be the first slice, the actual NN test the second.
+
+- **First end-to-end MATMUL gradient is a structural milestone.** Phase 0c was originally planned as the "MATMUL through K2 plugin" item; with this firing the substrate for SQUARE matmul gradient is fully shipped. The remaining piece (rectangular shape tracking) is separate from the MatmulRule + TRANSPOSE + synthesis surface.
+
+- **No regressions across 872 tests.** The `findTensorBinaryOp` dispatch now routes rank-2/3 ADD/SUB/MUL/DIV through the existing tensor operators; the rank-1 path is unchanged.
+
+**Tests added** (+1 in [Rank2MatmulGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2MatmulGradientTest.kt)):
+
+- `grad of sum of A matmul A matches analytic` — first end-to-end MATMUL gradient. Verifies ∂Σ(A·A)/∂A at A=[[1,2],[3,4]] matches the analytic [[7,11],[9,13]] within `1e-3` tolerance through the full chain (FIR → coarsening → SCT → synthesis → IR → runtime).
+
+Full suite is green: **872 tests** (+1 over §0.4.188).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Per-operand IrType tracking for rectangular matmul.** The current `tensorIrType` context carries one shape parameter; rectangular matmul needs (M, K, N) — three distinct shape atoms, three IrType slots. Multi-session widening; gated on CartPole Phase 3's rectangular weights. Could land as a 1-firing scaffold (extend SynthesisContext with a per-operand IrType map keyed by DxirNode id) + a 1-firing wiring that uses it through irMatmul/irTranspose.
+2. **CartPole Phase 3 first slice.** With square MATMUL working, attempt the simplest NN shape (single hidden layer, square weights). Multi-session per `docs/CARTPOLE_PORT_PLAN.md`.
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+4. **Out-of-scope register refresh** — substantial drift since §0.4.180 (Phase 5c, 0c slices a/b/c, bridge, sum, matmul gradient).
+
+**Definition-of-done for §0.4.189 — met**:
+- `DTensor<Rank2<R, C>, F32>.transpose()` runtime helper added ✓
+- `irTranspose` + `irMatmul` synthesis arms wired in `irOpFor` dispatch ✓
+- Rank-2/3 ADD/SUB/MUL/DIV route through tensor operators (not scalar Float ops) ✓
+- First end-to-end MATMUL gradient verified at A = [[1,2],[3,4]] ↦ [[7,11],[9,13]] ✓
+- Square-matrix-only documented as a scope decision; rectangular widening is the next slice ✓
+- Full suite stays green at 872 tests (+1) ✓
+
 #### 0.4.188 DTensor → Float bridge + `:core.ops.sum` plugin recognition; first active rank-2 gradient 2026-04-27
 
 §0.4.187's hand-off named "DTensor → Float bridge" as the next single-firing pickup. §0.4.188 lands BOTH that bridge AND `:core.ops.sum` plugin recognition together, because they're co-dependent: the bridge can't be exercised meaningfully without a tensor op that produces a `DTensor<ScalarShape, F32>` (which `.sum()` does); SUM recognition can't be exercised without the bridge to terminate the lambda body in Float. Together they unblock the first **active rank-2 gradient** through the K2 plugin: `grad { a -> a.sum().toFloat() }` on a 2×3 rank-2 input produces a 2×3 ones tensor (∂Σa/∂a_kl = 1 for every k, l).

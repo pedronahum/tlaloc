@@ -189,6 +189,26 @@ fun <S : Shape> DTensor<S, F32>.mean(): DTensor<ScalarShape, F32> {
     return DTensor(HostF32Storage(floatArrayOf(acc / v.size)), intArrayOf(), F32)
 }
 
+/**
+ * §0.4.189 — rank-2 transpose. Used by the K2 plugin's synthesis-side lowering
+ * of [OpKind.TRANSPOSE] emitted by [io.tlaloc.ir.passes.VjpRegistry.MatmulRule].
+ * The signature flips R and C in the shape type so the result is correctly
+ * typed for downstream matmul chains.
+ */
+fun <R : ShapeAtom, C : ShapeAtom> DTensor<Rank2<R, C>, F32>.transpose(): DTensor<Rank2<C, R>, F32> {
+    require(rank == 2) { "transpose requires rank-2 tensor" }
+    val rows = dims[0]
+    val cols = dims[1]
+    val a = hostF32()
+    val out = FloatArray(cols * rows)
+    for (i in 0 until rows) {
+        for (j in 0 until cols) {
+            out[j * rows + i] = a[i * cols + j]
+        }
+    }
+    return DTensor(HostF32Storage(out), intArrayOf(cols, rows), F32)
+}
+
 infix fun <R : ShapeAtom, K : ShapeAtom, C : ShapeAtom> DTensor<Rank2<R, K>, F32>.matmul(
     other: DTensor<Rank2<K, C>, F32>,
 ): DTensor<Rank2<R, C>, F32> {
