@@ -39,6 +39,67 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.203 CartPole Phase 3 fifth slice — `>3` grad-output cap lifted (Quadruple); first 4-grad-param 3-layer NN gradient 2026-04-27
+
+§0.4.202's hand-off named "CartPole Phase 3 fifth slice — `>3` grad-output cap" as the next pickup. §0.4.203 lands it: synthesise() now accepts `fn.returns.size in [1, 4]` and uses `io.tlaloc.autograd.Quadruple` (which has lived in `:autograd` since §0.4.134 for `valueAndGrad3`'s value+3-grad return) to box 4-component gradient outputs. The first end-to-end 4-grad-param NN gradient through the K2 plugin lands as a 3-layer chain `(((X · W1).relu() · W2).relu() · W3).sum()` with 5 distinct ShapeAtoms (Sym, Lit<Int>, Lit<Long>, Lit<Short>, Lit<Byte>) — analytic gradient verified within 1e-3 across all four params (2×3, 3×4, 4×5, 5×2 weights).
+
+**The mechanism** — three small sites in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt):
+
+1. **`synthesise()` cap widened** from `if (fn.returns.size > 3) reject(...)` to `if (fn.returns.size > 4) reject(...)` with the rejection text bumped from `[1, 3]` to `[1, 4]`.
+
+2. **`returnIrTypes` decomposition extended to size 4** — `when (fn.returns.size) { 1 -> ...; 2, 3 -> ... }` becomes `2, 3, 4 -> ...`. The same call-site R decomposition (`callSiteR.arguments.mapNotNull { it.typeOrNull }`) handles 4 components without further plumbing — Quadruple's IrSimpleType has 4 type-args, same shape as Pair / Triple's 2 / 3.
+
+3. **`boxedReturnType` + `returnExpr` wrap with Quadruple** — both branches add a `4 -> ...` arm pointing at new `quadrupleClass()` / `quadrupleConstructor()` symbol lookups (mirror Pair / Triple, but `ClassId.fromString("io/tlaloc/autograd/Quadruple")` instead of `kotlin/Pair`).
+
+**The new test** [Rank2ThreeLayerNNGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2ThreeLayerNNGradientTest.kt):
+
+`grad { (X, W1, W2, W3) -> (((X · W1).relu() · W2).relu() · W3).sum().toFloat() }` with shapes:
+- X: `Rank2<Sym, Lit<Int>>` (2, 3)
+- W1: `Rank2<Lit<Int>, Lit<Long>>` (3, 4)
+- W2: `Rank2<Lit<Long>, Lit<Short>>` (4, 5)
+- W3: `Rank2<Lit<Short>, Lit<Byte>>` (5, 2)
+
+For all-ones inputs: y1=3, y1r=3, y2=12, y2r=12, y3=60, L=240. Analytic gradients (verified within 1e-3):
+- ∂X = (2, 3) of **40** (= sum of 4 cols × 10 = ones · y2 sum × hidden dim chain)
+- ∂W1 = (3, 4) of **20** (= 2 batch × 10 sum)
+- ∂W2 = (4, 5) of **12** (= 2 batch × 3 × 2 ∂y2 = 12 — initially miscalculated as 6, fixed when test surfaced the analytic error)
+- ∂W3 = (5, 2) of **24** (= 2 col-sums × 12 y2r)
+
+**Decisions worth flagging**:
+
+- **Quadruple was already there.** The §0.4.134 `valueAndGrad3` work added `data class Quadruple<A, B, C, D>` to `:autograd` with `componentN` for destructuring. Lifting the `>3` cap was a 3-line synthesise() widening + 2 new symbol lookups — total <30 lines of plugin code. The harder part was the 5 distinct shape atoms in the test, not the synthesise() change.
+
+- **Math error caught by the test.** Initially wrote `expectedW2 = 6f` (instead of 12) — got `dW2 slot 0 = 12.0 expected 6.0`. The K2 plugin's gradient was correct; my manual derivation slipped on the inner sum. This is the value of integration tests with explicit analytic checks: catches both gradient-implementation bugs AND analytic-derivation bugs.
+
+- **Five shape atoms is the boundary of clean type-naming.** `Sym, Lit<Int>, Lit<Long>, Lit<Short>, Lit<Byte>` covers the chain. For 6+ atoms (e.g., a 4-layer NN with bias terms) we'd need additional Lit<...> variants (Lit<Float>, Lit<Double>, Lit<Boolean>, Lit<Char>, Lit<String>) or new ShapeAtom subclasses in :core. Not a concern today; the rectangular surface scales to whatever `Lit<*>` types Kotlin permits.
+
+- **The test directly mirrors CartPole's NN structure** (without sign + tanh). CartPole's full forward `sign(tanh(relu(relu(X·W1)W2)W3) - ε)` is 4 weights, 2 hidden layers, 1 tanh, 1 sign, scalar ε. The §0.4.203 test exercises 4 weights, 2 hidden layers, 2 relus (no tanh / sign / ε). The remaining gaps are tensor `sign()` (deferred — name explicitly in §0.4.202 register) and the outer training loop (multi-session structural).
+
+- **Suite +1 to 884.** Just the new 3-layer NN integration test.
+
+**Tests added** (+1):
+
+1. `Rank2ThreeLayerNNGradientTest.grad of 3-layer relu net with 4 params matches analytic` — first 4-grad-param NN gradient through K2 plugin; exercises 5 distinct ShapeAtoms across the chain + Quadruple boxing.
+
+Full suite is green: **884 tests** (+1 from §0.4.202).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Tensor `sign()` function.** Per §0.4.202 register's named-deferred item. Add `OpKind.SIGN`, `SignRule` (gradient via `STEP(x) - STEP(-x)` per AbsRule's pattern, but for sign the adjoint is identically 0 except at the non-differentiable origin — so the gradient could be a const-zero broadcast for cleanliness, since CartPole's sign in `sign(tanh(...) - ε)` doesn't propagate gradient through it anyway), `:core/ops/DTensor.sign()` runtime helper, `irSign` synthesis arm, FIR `:core.ops.sign` UNARY_OP_MAP entry. Single firing.
+
+2. **CartPole Phase 3 sixth slice — full NN forward chain test.** Once tensor `sign()` lands, port `sign(tanh(((X · W1).relu() · W2).relu() · W3) - ε)` through grad. Last step before the outer training loop slice.
+
+3. **Outer training loop** (Phase 3 final slice, multi-session). `while (loss > threshold) { ... apply gradient updates ... }` — gradient-bearing WHILE with closure-captured-state mutation. Structural item; needs careful design.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.203 — met**:
+- `synthesise()` cap widened from 3 to 4 returns ✓
+- `quadrupleClass()` / `quadrupleConstructor()` symbol lookups added ✓
+- `returnIrTypes` decomposition + `boxedReturnType` + `buildBody`'s ctor switch all handle size 4 ✓
+- First end-to-end 4-grad-param NN gradient through K2 plugin (3-layer chain, 5 distinct ShapeAtoms) ✓
+- All 883 prior tests pass + 1 new = 884 ✓
+
 #### 0.4.202 Out-of-scope register refresh — Phase 0c-rectangular CLOSED + 4 Phase 3 slices shipped 2026-04-27
 
 §0.4.190 was the eighth register snapshot; §0.4.202 is the ninth. **12 sub-sections shipped between §0.4.191 and §0.4.201** — the most productive arc since the §0.4.169–§0.4.180 platform-work cluster. Two structural milestones moved from "deferred" to "shipped" or "in progress": Phase 0c-rectangular CLOSED, Phase 3 first four slices shipped. Plus a CARTPOLE_PORT_PLAN.md amendment (§0.4.191) that pre-emptively named the rectangular MATMUL gap that the rest of the arc closed.

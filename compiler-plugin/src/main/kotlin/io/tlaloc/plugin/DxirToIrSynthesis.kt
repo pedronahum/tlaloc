@@ -478,8 +478,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             paramIrTypeMap[p.id] ?: irTypeFor(p.type, context)
                 ?: return reject("no IrType for param '${p.name}' type=${p.type}")
         }
-        if (fn.returns.isEmpty() || fn.returns.size > 3) {
-            return reject("returns.size=${fn.returns.size} outside [1, 3]")
+        if (fn.returns.isEmpty() || fn.returns.size > 4) {
+            return reject("returns.size=${fn.returns.size} outside [1, 4]")
         }
         // §0.4.196 — Phase 0c-rectangular slice 3b-2a: returnIrTypes derive from the
         // call-site Function<P0, …, Pn-1, R>'s R argument. Decompose Pair / Triple
@@ -494,7 +494,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             val callSiteR = callType?.arguments?.getOrNull(fn.params.size)?.typeOrNull as? IrSimpleType
             val decomposed = when (fn.returns.size) {
                 1 -> callSiteR?.let { listOf<IrType>(it) }
-                2, 3 -> {
+                2, 3, 4 -> {
                     val components = callSiteR?.arguments?.mapNotNull { it.typeOrNull }
                     if (components != null && components.size == fn.returns.size) components else null
                 }
@@ -595,7 +595,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             1 -> returnIrTypes.single()
             2 -> pairClass()?.typeWith(returnIrTypes) ?: return reject("kotlin.Pair class symbol not found")
             3 -> tripleClass()?.typeWith(returnIrTypes) ?: return reject("kotlin.Triple class symbol not found")
-            else -> return reject("returnIrTypes.size=${returnIrTypes.size} outside [1, 3]")
+            // §0.4.203 — Phase 3 fifth slice: 4-grad-output surface uses
+            // `io.tlaloc.autograd.Quadruple` (which has lived in :autograd since
+            // §0.4.134 for valueAndGrad3's value+3-grad return). Lifts the
+            // pre-§0.4.203 cap that blocked CartPole's 4-weight NN gradient.
+            4 -> quadrupleClass()?.typeWith(returnIrTypes)
+                ?: return reject("io.tlaloc.autograd.Quadruple class symbol not found")
+            else -> return reject("returnIrTypes.size=${returnIrTypes.size} outside [1, 4]")
         }
 
         val lambdaFun = pluginContext.irFactory.buildFun {
@@ -689,13 +695,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 val returnExpr: IrExpression = when (fn.returns.size) {
                     1 -> irGet(env[fn.returns.single().id]
                         ?: cancelWith("return id=${fn.returns.single().id} not in env"))
-                    2, 3 -> {
+                    2, 3, 4 -> {
                         val elementDecls = fn.returns.map {
                             env[it.id] ?: cancelWith("return id=${it.id} not in env")
                         }
                         val ctorSym = when (fn.returns.size) {
                             2 -> pairConstructor() ?: cancelWith("kotlin.Pair constructor symbol not found")
                             3 -> tripleConstructor() ?: cancelWith("kotlin.Triple constructor symbol not found")
+                            // §0.4.203 — io.tlaloc.autograd.Quadruple ctor for 4-grad-output surface.
+                            4 -> quadrupleConstructor() ?: cancelWith("io.tlaloc.autograd.Quadruple constructor symbol not found")
                             else -> cancelWith("returns.size=${fn.returns.size} reached the ctor switch unexpectedly")
                         }
                         val ctorCall = IrConstructorCallImpl.fromSymbolOwner(
@@ -2045,11 +2053,24 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     private fun tripleClass(): IrClassSymbol? =
         pluginContext.referenceClass(ClassId.fromString("kotlin/Triple"))
 
+    /**
+     * §0.4.203 — `io.tlaloc.autograd.Quadruple<A, B, C, D>` (introduced §0.4.134
+     * for `valueAndGrad3`'s `(value, dA, dB, dC)` return). Used by
+     * [synthesise] when `fn.returns.size == 4` — typically a 4-grad-param surface
+     * (CartPole's full NN with X + W1 + W2 + W3) or a `valueAndGrad3` that
+     * synthesises through the plugin path.
+     */
+    private fun quadrupleClass(): IrClassSymbol? =
+        pluginContext.referenceClass(ClassId.fromString("io/tlaloc/autograd/Quadruple"))
+
     private fun pairConstructor(): IrConstructorSymbol? =
         pluginContext.referenceConstructors(ClassId.fromString("kotlin/Pair")).singleOrNull()
 
     private fun tripleConstructor(): IrConstructorSymbol? =
         pluginContext.referenceConstructors(ClassId.fromString("kotlin/Triple")).singleOrNull()
+
+    private fun quadrupleConstructor(): IrConstructorSymbol? =
+        pluginContext.referenceConstructors(ClassId.fromString("io/tlaloc/autograd/Quadruple")).singleOrNull()
 
     @Suppress("unused")
     private val dummyParam: DxirParam? = null
