@@ -39,6 +39,65 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.188 DTensor → Float bridge + `:core.ops.sum` plugin recognition; first active rank-2 gradient 2026-04-27
+
+§0.4.187's hand-off named "DTensor → Float bridge" as the next single-firing pickup. §0.4.188 lands BOTH that bridge AND `:core.ops.sum` plugin recognition together, because they're co-dependent: the bridge can't be exercised meaningfully without a tensor op that produces a `DTensor<ScalarShape, F32>` (which `.sum()` does); SUM recognition can't be exercised without the bridge to terminate the lambda body in Float. Together they unblock the first **active rank-2 gradient** through the K2 plugin: `grad { a -> a.sum().toFloat() }` on a 2×3 rank-2 input produces a 2×3 ones tensor (∂Σa/∂a_kl = 1 for every k, l).
+
+**Three coordinated changes**:
+
+1. **`DTensor<ScalarShape, F32>.toFloat()` extension** in [HostOps.kt:174-181](core/src/commonMain/kotlin/io/tlaloc/core/ops/HostOps.kt#L174-L181) — runtime: `hostF32()[0]`. The plugin recognises this FQN as a no-op at the dxir level (a scalar-shape DTensor and a primitive Float share `DxirType(F32, [])`).
+
+2. **`:core.ops.toFloat` special-case** in [FirLambdaToDxirLowering.kt:806-825](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt#L806-L825) — added BEFORE `BINARY_OP_MAP` dispatch. Returns the receiver's already-lowered `DxirNode` directly without emitting any op (no kind to insert; the value is already the right shape). Validates the receiver is scalar F32 to catch shape mismatches at compile time rather than runtime.
+
+3. **`:core.ops.sum`** added to `UNARY_OP_MAP` → `OpKind.SUM`. The existing result-type dispatch (`OpKind.SUM, OpKind.MEAN -> DxirType(operand.type.dtype, emptyList())`) already produces the correct scalar `DxirType` regardless of operand rank — the new entry is one line.
+
+**Verification** in [Rank2SumGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2SumGradientTest.kt):
+
+`grad { a: DTensor<Rank2<Sym, Sym>, F32> -> a.sum().toFloat() }` on a 2×3 input produces a 2×3 ones tensor. Test asserts:
+1. **Synthesis succeeds** (no "kept original call" warning).
+2. **Output size = 6** (2×3 elements).
+3. **All values are 1.0** (∂Σa/∂a_kl = 1 for every k, l).
+4. **Sentinel-defeated** (-1.0f → didn't fire).
+
+This is the **first active gradient through a rank-2 tensor op** in Tlaloc. Previous §0.4.185 / §0.4.186 / §0.4.187 tests verified only the zero-gradient case (constant body or dead-code matmul). The §0.4.188 test exercises the actual SumRule → BROADCAST(1.0, target) chain through synthesis's `broadcastLike<S>` lowering for a non-trivial rank-2 shape (2×3, distinguishing rows from columns).
+
+**Decisions worth flagging**:
+
+- **Bundled landing for two interlocked pieces.** The §0.4.187 hand-off named the bridge alone, but pure bridge without SUM recognition couldn't be tested (no way to produce DTensor<ScalarShape> in a lambda without sum). Bundling them is cleaner than landing dead substrate. This pattern matches §0.4.158's exp+log dual landing.
+
+- **toFloat as a no-op cast.** The plugin's UNARY_OP_MAP path always emits an op; the bridge needs to NOT emit (the receiver is already a scalar-typed dxir node). Special-cased before the OP_MAP dispatch (mirroring the §0.4.42 GATHER special-case for `:core.ops.get`).
+
+- **Active-gradient verification ≠ FD verification.** This test uses a known closed-form: ∂Σa/∂a_kl = 1 (the gradient of summing all elements). No need for finite-differencing — the analytic answer is "all ones". Future rank-2 gradient tests for less-trivial shapes (e.g., `a.sum() * a.sum()` → grad = 2·Σa·1) will use FD.
+
+- **`.toFloat()` chosen over `.scalarValue()` or `.f`.** `toFloat()` matches the existing `kotlin.Number.toFloat()` convention and reads naturally in the lambda body. The naming aligns with `DScalar.toFloat()` (already exists for non-DTensor scalar boxes).
+
+- **End-to-end MATMUL gradient is now reachable.** With sum + toFloat wired, primal lambdas can produce Float from arbitrary tensor expressions: `grad { a, b -> (a matmul b).sum().toFloat() }` (after `grad2`-style two-param lambdas land or after writing it as `grad { ab -> let a = ab.first; let b = ab.second; (a matmul b).sum().toFloat() }`). The MATMUL gradient via MatmulRule's `TRANSPOSE + MATMUL` would then synthesise through the rank-2 surface. Future test.
+
+- **CartPole Phase 3 unblock — confirmed.** The NN forward pass (matmul + relu + tanh + final scalar reduction) can now compile through the K2 plugin: matmuls via §0.4.187, scalar reductions via §0.4.188's sum, Float termination via toFloat. Phase 3's port is plumbing-ready (modulo any rank-3 batch dimension specifics).
+
+- **No regressions across 871 tests.** The new `:core.ops.sum` UNARY_OP_MAP entry only fires for explicit `.sum()` calls; existing tests don't use that pattern (they use scalar-Float accumulators in for-loops). The `:core.ops.toFloat` special-case only fires for explicit `.toFloat()` on DTensor scalars; doesn't affect primitive `Float.toFloat()`.
+
+**Tests added** (+1 in [Rank2SumGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2SumGradientTest.kt)):
+
+- `grad of sum on rank2 input is rank2 ones tensor` — first active rank-2 gradient through K2 plugin; verifies SumRule → BROADCAST(1.0, 2×3) → broadcastLike<Rank2<R,C>>(1.0, a) chain produces the correct 6-element ones tensor.
+
+Full suite is green: **871 tests** (+1 over §0.4.187).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 3 first attempt.** With Phase 0c substantively closed + the bridge in place, the NN forward pass is plumbing-ready. Multi-session per `docs/CARTPOLE_PORT_PLAN.md`'s 4-5 firing estimate. Start with the simplest NN shape (single-layer linear) before the full `relu(relu(X·W1)W2)W3` stack.
+2. **Phase 2 of head-to-head harness** — Python reference implementations. Gated on user-side toolchain.
+3. **Out-of-scope register refresh** — could land after CartPole Phase 3 closes; substantial drift since §0.4.180 (Phase 5c, 0c slices a/b/c, bridge, harness Phase 1).
+4. **Active matmul gradient end-to-end test.** A natural §0.4.188 follow-up: confirm `(a matmul b).sum().toFloat()` produces the correct gradients via TRANSPOSE + MATMUL chain. Single-firing.
+
+**Definition-of-done for §0.4.188 — met**:
+- `DTensor<ScalarShape, F32>.toFloat()` extension added to `:core` ✓
+- `:core.ops.toFloat` special-cased in FirLambdaToDxirLowering as a no-op cast ✓
+- `:core.ops.sum` wired into UNARY_OP_MAP ✓
+- First active rank-2 gradient (∂Σa/∂a = ones tensor) verified end-to-end ✓
+- CartPole Phase 3 unblock noted as plumbing-ready ✓
+- Full suite stays green at 871 tests (+1) ✓
+
 #### 0.4.187 Phase 0c slice (c) — plugin recognises `infix fun matmul`; closes the rank-2 surface 2026-04-27
 
 §0.4.186's hand-off named Phase 0c slice (c) — plugin MATMUL recognition — as the next single-firing pickup. §0.4.187 lands it. With slices (a) + (b) closing the rank-2 substrate (param recognition + synthesis-side acceptance via `broadcastLike`), wiring `io.tlaloc.core.ops.matmul` into `BINARY_OP_MAP` becomes a one-line addition + a regression test that confirms the FIR-side dispatch fires.

@@ -803,6 +803,32 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.188 — DTensor → Float bridge. `DTensor<ScalarShape, F32>.toFloat()`
+        // (in :core/ops/HostOps.kt) is a no-op at the dxir level: a scalar-shape
+        // DTensor and a primitive Float share `DxirType(F32, [])`. The plugin's
+        // dispatch returns the receiver's already-lowered value directly. Without
+        // this bridge, lambda bodies can't terminate in a Float computed from
+        // tensor intermediates (e.g., `a.sum().toFloat()` for active SUM
+        // gradient on rank-2 inputs, or future MATMUL-based primals). Special-
+        // cased here rather than added to UNARY_OP_MAP because no op kind is
+        // emitted — the dispatch returns the receiver expression as-is.
+        if (fqn == "io.tlaloc.core.ops.toFloat") {
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("toFloat call has no receiver")
+            val operand = lowerExpr(operandExpr, env, emitter)
+            if (!operand.type.isScalar) {
+                throw LoweringException(
+                    "toFloat receiver must be scalar (got ${operand.type})",
+                )
+            }
+            if (operand.type.dtype != F32) {
+                throw LoweringException(
+                    "toFloat receiver dtype must be F32 (got ${operand.type.dtype})",
+                )
+            }
+            return operand
+        }
+
         BINARY_OP_MAP[fqn]?.let { kind ->
             val lhsExpr = receiver(call)
                 ?: throw LoweringException("binary op '$fqn' has no receiver")
@@ -973,6 +999,16 @@ object FirLambdaToDxirLowering {
         // regression port for the `log(1 + exp(-Xβ))` per-record term.
         put("io.tlaloc.core.exp", OpKind.EXP)
         put("io.tlaloc.core.log", OpKind.LOG)
+        // §0.4.188 — `:core/ops/HostOps.kt`'s tensor SUM extension. The receiver is a
+        // `DTensor<S, F32>` of any rank; the result is `DTensor<ScalarShape, F32>`.
+        // The result-type dispatch above this map's lookup site special-cases SUM /
+        // MEAN to produce a scalar `DxirType` regardless of the operand's rank. With
+        // the §0.4.185 + §0.4.186 + §0.4.187 substrate (rank-2/3 param + synthesis +
+        // matmul), wiring SUM completes the active-gradient path for tensor-bearing
+        // primal lambdas — `grad { a -> a.sum().toFloat() }` on a rank-2 input now
+        // produces a rank-2 ones-tensor gradient (the BROADCAST(1.0, a's shape) from
+        // SumRule).
+        put("io.tlaloc.core.ops.sum", OpKind.SUM)
         // §0.4.166 — :core scalar sin / cos entries. Mirrors the §0.4.158 pattern.
         // Needed by CartPole's pole-angle physics step (per docs/CARTPOLE_PORT_PLAN.md
         // Phase 0a).

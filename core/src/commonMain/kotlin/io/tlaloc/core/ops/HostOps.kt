@@ -165,6 +165,15 @@ fun <S : Shape> broadcastLike(v: Float, template: DTensor<S, F32>): DTensor<S, F
     return DTensor(HostF32Storage(out), template.dims.copyOf(), F32)
 }
 
+/**
+ * §0.4.188 — DTensor → Float bridge for grad lambdas. The K2 plugin recognises
+ * this call site (via FirLambdaToDxirLowering) as a no-op at the dxir level —
+ * `DxirType(F32, [])` is the same whether the value flows through a DTensor
+ * wrapper or a primitive Float. Closes the last gap for end-to-end MATMUL /
+ * SUM-bearing gradient lambdas where the body must terminate in a Float.
+ */
+fun DTensor<ScalarShape, F32>.toFloat(): Float = hostF32()[0]
+
 fun <S : Shape> DTensor<S, F32>.sum(): DTensor<ScalarShape, F32> {
     val v = hostF32()
     var acc = 0f
