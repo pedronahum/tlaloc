@@ -922,6 +922,17 @@ object FirLambdaToDxirLowering {
         put("io.tlaloc.core.minus", OpKind.SUB)
         put("io.tlaloc.core.times", OpKind.MUL)
         put("io.tlaloc.core.div", OpKind.DIV)
+        // §0.4.187 — Phase 0c slice (c): plugin recognition for `infix fun matmul`
+        // (declared in :core/ops/HostOps.kt). The IR-side MATMUL was shipped at
+        // §0.4.135 / §0.4.137 / §0.4.138 (rank-2 → rank-2-or-3 batched → any rank ≥ 2).
+        // §0.4.185 + §0.4.186 closed Phase 0c slices (a) + (b) (Rank2/3 param
+        // recognition + synthesis-side rank-1/2/3 acceptance via broadcastLike). With
+        // both substrate pieces in place, MATMUL-bearing primal bodies now lower
+        // through the K2 plugin's BINARY_OP_MAP dispatch the same way ADD/SUB/MUL/DIV
+        // do — `lhs.type` for matmul is rank-2 with sentinel dims, the result type is
+        // also rank-2 with sentinel dims (same shape structurally), so the existing
+        // `type = lhs.type` dispatch produces the correct DxirType.
+        put("io.tlaloc.core.ops.matmul", OpKind.MATMUL)
     }
 
     // §0.4.40 — dtype-conversion calls. Maps receiver-only `Int.toFloat()` /

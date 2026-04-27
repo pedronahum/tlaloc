@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.187 Phase 0c slice (c) — plugin recognises `infix fun matmul`; closes the rank-2 surface 2026-04-27
+
+§0.4.186's hand-off named Phase 0c slice (c) — plugin MATMUL recognition — as the next single-firing pickup. §0.4.187 lands it. With slices (a) + (b) closing the rank-2 substrate (param recognition + synthesis-side acceptance via `broadcastLike`), wiring `io.tlaloc.core.ops.matmul` into `BINARY_OP_MAP` becomes a one-line addition + a regression test that confirms the FIR-side dispatch fires.
+
+**The mechanism** in [FirLambdaToDxirLowering.kt:902-924](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt#L902-L924):
+
+`BINARY_OP_MAP` gains one new entry — `"io.tlaloc.core.ops.matmul" -> OpKind.MATMUL`. The dispatch reuses the existing `BINARY_OP_MAP[fqn]?.let` arm (lines 806-818): receiver becomes `lhs`, single argument becomes `rhs`, emit `MATMUL` op with `type = lhs.type`. For matmul, `lhs.type` is rank-2 F32 with sentinel dims `[-1, -1]`; the result type is structurally the same (rank-2 F32 with sentinel dims), so the existing dispatch produces the correct `DxirType` without special-casing.
+
+**Verification** in [MatmulRecognitionTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/MatmulRecognitionTest.kt):
+
+`grad { a: DTensor<Rank2<Sym, Sym>, F32> -> val z = a matmul a; 0.0f }` compiles end-to-end. Test asserts:
+1. **`matmul(...)` appears in the FIR-side dxir dump** (the "saw handoff" warning) — confirms the BINARY_OP_MAP[matmul] lookup fired.
+2. **No "kept original call" warning** — synthesis accepts the dxir (rank-2 zero-grad lowers per §0.4.186).
+3. **Output is a 2×2 zero tensor** — gradient w.r.t. `a` is zero since the lambda returns `0.0f` regardless of `a`.
+
+The matmul in the body is dead-code from the loss's perspective (its result `z` is bound but discarded), but the FIR-side lowering still emits the MATMUL op. Post-coarsening DCE may prune it from the grad function; the test asserts only on the FIR-side dxir dump (pre-coarsening), where the MATMUL is guaranteed.
+
+**Decisions worth flagging**:
+
+- **One-line code change.** The substrate (slices a + b) was the heavy lift; slice (c) is mechanical wiring. This is the typical Phase-0 pattern: §0.4.158's exp/log + §0.4.166's sin/cos + §0.4.167's abs all followed the same shape — one BINARY/UNARY_OP_MAP entry once the surrounding op + rule + synthesis arm exist.
+
+- **End-to-end MATMUL gradient is NOT exercised here.** The lambda body's matmul is dead-code; the gradient w.r.t. `a` doesn't flow through MATMUL. To test ACTIVE matmul gradient (where the gradient flows through MatmulRule's `TRANSPOSE + MATMUL` emissions), the lambda body needs to PRODUCE a Float from a matmul result — which requires a `DTensor → Float` bridge in the K2 plugin (recognising `.hostF32()[0]`, or adding a `DTensor<ScalarShape, F32>.toFloat()` extension that the plugin lowers). That bridge is its own slice; the current test confirms only the FIR-side recognition wires through.
+
+- **Phase 0c is now SUBSTANTIVELY closed for the rank-2 surface.** Slices (a) shipping Rank2/3 param recognition (§0.4.185), (b) shipping rank-1/2/3 synthesis acceptance (§0.4.186), and (c) shipping MATMUL recognition (§0.4.187) means: any rank-2 primal with arithmetic + matmul + tensor-typed zero gradients now flows through the K2 plugin's IR-side path. The remaining gap (DTensor → Float bridge) is a separate piece of plumbing that doesn't require Phase 0c-style substrate work — it's a single FQN recognition like the existing UNARY_OP_MAP entries.
+
+- **CartPole Phase 3 is now plumbing-ready.** Phase 3's neural-net portion uses `X · W1` style matmuls. With Phase 0c slices (a) + (b) + (c) shipped, the only remaining Phase-3 prerequisite is the DTensor → Float bridge (so the lambda body can return a Float computed from intermediate tensor values). That's likely a single firing once a concrete CartPole Phase 3 attempt surfaces what bridge form is needed (likely `.toFloat()` extension on `DTensor<ScalarShape, F32>`).
+
+- **Test deliberately uses `Rank2<Sym, Sym>` (square matrix).** The signature of matmul is `Rank2<R, K> matmul Rank2<K, C> → Rank2<R, C>`. For `a matmul a`, R = K = C = Sym, so the type system is satisfied. A rectangular `Rank2<R, K>` × `Rank2<K, C>` test would require two distinct ShapeAtoms in the param type which the plugin's resolveParamType doesn't yet differentiate (sentinel dims collapse all atoms to the same `-1` value). Square is sufficient for slice (c)'s recognition test.
+
+- **No regressions across 870 tests.** The new `BINARY_OP_MAP` entry only fires for matmul calls; existing primitive-arithmetic dispatch is unaffected.
+
+**Tests added** (+1 in [MatmulRecognitionTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/MatmulRecognitionTest.kt)):
+
+- `matmul in lambda body lowers to dxir MATMUL op` — `grad { a: DTensor<Rank2<Sym, Sym>, F32> -> val z = a matmul a; 0.0f }` compiles end-to-end; `matmul(` appears in the FIR-side dxir dump; synthesis accepts the rank-2 zero-grad output (no fallback); gradient is the rank-2 zero-tensor (4 elements all 0.0f, sentinel-defeated).
+
+Full suite is green: **870 tests** (+1 over §0.4.186).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **DTensor → Float bridge.** Wire `:core/.../DTensor<ScalarShape, F32>.toFloat()` (add the extension to `:core` if missing) into the K2 plugin's UNARY_OP_MAP (or a sibling map). Without this bridge, lambda bodies can't terminate in a Float computed from tensor intermediates — the last gap for end-to-end MATMUL gradient through the plugin.
+2. **CartPole Phase 3 first attempt.** With Phase 0c substantively closed, Phase 3's NN forward pass should compile through the plugin (modulo the DTensor → Float bridge). Multi-session per `docs/CARTPOLE_PORT_PLAN.md`'s estimate (4-5 firings).
+3. **Phase 2 of head-to-head harness** — Python reference implementations. Gated on user-side toolchain.
+4. **Out-of-scope register refresh** — could land after slice (c)'s closure of Phase 0c is reflected.
+
+**Definition-of-done for §0.4.187 — met**:
+- `BINARY_OP_MAP` recognises `io.tlaloc.core.ops.matmul` → `OpKind.MATMUL` ✓
+- `MatmulRecognitionTest` confirms FIR-side dispatch fires (matmul in dxir dump) ✓
+- Synthesis accepts the rank-2 grad function (no "kept original call" warning) ✓
+- End-to-end output: 2×2 zero tensor, sentinel-defeated ✓
+- Phase 0c rank-2 surface substantively closed (slices a + b + c all shipped) ✓
+- Full suite stays green at 870 tests (+1) ✓
+
 #### 0.4.186 Phase 0c slice (b) — `DxirToIrSynthesis` widens to rank-1/2/3 F32; rank-N const lowers through broadcastLike 2026-04-27
 
 §0.4.185 shipped Phase 0c slice (a) (FIR-side Rank2/3 param recognition) but left synthesis at rank-1-only. §0.4.186 widens synthesis: `isAcceptedTensorType` replaces the `isRank1F32` gate, `irBroadcast` accepts rank-1/2/3 outputs uniformly via `broadcastLike<S>`'s generic shape parameter, AND `irConstFor` routes non-scalar F32 consts (e.g., the rank-2 zero gradient `DxirReverseTransform` emits for an unused tensor param) through the same `broadcastLike` helper. The §0.4.185 `Rank2ParamLoweringTest` flips from "FIR success + synthesis fallback" to **end-to-end success**: `grad { a: DTensor<Rank2<R, C>, F32> -> 0.0f }` produces a real rank-2 zero-tensor through the K2-synthesised path.
