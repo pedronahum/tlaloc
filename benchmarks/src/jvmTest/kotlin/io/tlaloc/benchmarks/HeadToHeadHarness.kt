@@ -201,3 +201,22 @@ object HookeanSpringHarness : HeadToHeadBenchmark {
         floatArrayOf(1.0f),    // kSpring
     )
 }
+
+/**
+ * §0.4.225 — fourth harness inhabitant: Brachistochrone compound-velocity
+ * primal. Single scalar input — adds input-cardinality-1 coverage to the
+ * harness (BGDHyperOpt: 4 inputs; HookeanSpring: 3; QWOP avatar-step: 4;
+ * Brachistochrone: 1).
+ *
+ * Fixed input `y = 0.5`:
+ *   - Forward: `(1 + 0.5)^5 = 1.5^5 = 7.59375` (exact in f32).
+ *   - Gradient: `5 · 1.5^4 = 5 · 5.0625 = 25.3125` (exact in f32).
+ */
+object BrachistochroneHarness : HeadToHeadBenchmark {
+    private const val N = 5
+    override val name = "brachistochrone-compound-velocity-N5"
+    override fun primal() = BenchmarkPrimals.brachistochroneCompoundVelocityPrimal(N)
+    override fun fixedInputs() = listOf(
+        floatArrayOf(0.5f),    // y
+    )
+}

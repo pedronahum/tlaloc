@@ -264,4 +264,61 @@ object BenchmarkPrimals {
         }
         return pos
     }
+
+    /**
+     * §0.4.225 — Brachistochrone **compound-velocity** primal. Mirrors the
+     * `:compiler-plugin/src/test/.../BrachistochroneTest.kt`'s "compound-velocity
+     * primal" test (`grad { y -> ... v = v + v * y over N iters ... }`).
+     *
+     * The recurrence is `v_{i+1} = v_i + v_i * y = v_i * (1 + y)`, so after
+     * N iterations: `v_N = (1 + y)^N`. Single scalar input.
+     *
+     * **Why this primal**: smallest paper-aligned scalar primal in the harness
+     * (single input, simple recurrence, closed-form gradient `N · (1 + y)^(N-1)`).
+     * Pairs well with BGDHyperOpt (4 inputs) and HookeanSpring (3 inputs) to
+     * give the harness coverage across input cardinality 1/3/4. The full
+     * Brachistochrone benchmark in the OOPSLA paper involves a sqrt-bearing
+     * energy descent integral; the compound-velocity is the simplest sub-
+     * primal that exercises the same WHILE-coarsening axis.
+     *
+     * **Coarsening behaviour**: constant trip count → C5 unrolls into an
+     * N-deep MUL chain.
+     */
+    fun brachistochroneCompoundVelocityPrimal(N: Int = 5): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("brachistochroneCompoundVelocity") {
+            val y = param("y", f32)
+            val one = const(1f, f32)
+            val zero = const(0f, f32)
+            val nBound = const(N.toFloat(), f32)
+            val w = whileOp(
+                inits = listOf(one, zero),
+                cond = { args ->
+                    val diff = op(OpKind.SUB, listOf(nBound, args[1]), f32)
+                    val pred = op(OpKind.STEP, listOf(diff), boolS)
+                    yields(pred)
+                },
+                body = { args ->
+                    val v = args[0]
+                    val counter = args[1]
+                    // v = v + v * y
+                    val vTimesY = op(OpKind.MUL, listOf(v, y), f32)
+                    val newV = op(OpKind.ADD, listOf(v, vTimesY), f32)
+                    val oneI = const(1f, f32)
+                    val newCounter = op(OpKind.ADD, listOf(counter, oneI), f32)
+                    yields(newV, newCounter)
+                },
+            )
+            listOf(w.result(0))
+        }
+
+    /**
+     * §0.4.225 — Closed-form Kotlin reference for [brachistochroneCompoundVelocityPrimal].
+     * Mirrors the recurrence step-by-step; useful for FD validation AND as a
+     * cross-check against the closed-form `(1 + y)^N`.
+     */
+    fun brachistochroneCompoundVelocityReference(y: Float, N: Int = 5): Float {
+        var v = 1f
+        for (i in 0 until N) v = v + v * y
+        return v
+    }
 }

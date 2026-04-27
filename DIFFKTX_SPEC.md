@@ -39,6 +39,107 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.225 Head-to-head harness Phase 1 fourth slice — Brachistochrone compound-velocity is the third **paper benchmark** in the harness 2026-04-27
+
+§0.4.224's hand-off named "Head-to-head harness Phase 1 fourth slice — Brachistochrone or HMC inhabitant" as the next pickup. §0.4.225 lands Brachistochrone (the cheaper option per the hand-off). The harness now has **three paper benchmarks** (BGDHyperOpt, HookeanSpring, Brachistochrone) plus QWOP avatar-step (synthetic) — over halfway to the M9 exit criterion's six-benchmark requirement.
+
+**The compound-velocity sub-primal**:
+
+The K2-plugin port at `:compiler-plugin/src/test/.../BrachistochroneTest.kt` has multiple primal variants. §0.4.225 ports the **simplest** one — "compound-velocity" — which mirrors:
+
+```kotlin
+val g = grad { y: Float ->
+    var v = 1.0f
+    for (i in 0 until N) {
+        v = v + v * y    // = v * (1 + y)
+    }
+    v
+}
+```
+
+After N iterations: `v_N = (1 + y)^N`. Closed-form gradient: `N · (1 + y)^(N-1)`. Single scalar input.
+
+**Why this primal over the sqrt-bearing one or the energy-accumulation one**:
+
+- **Closed-form forward AND gradient** — both `(1 + y)^N` and `N · (1 + y)^(N-1)` are exact in f32 at clean inputs. The harness pins both Tlaloc paths against `kotlin.math.pow` (closed form) AND the Kotlin recurrence reference. Two independent reference paths catch a class of bugs that single-reference tests miss.
+- **No new primitives** — only ADD, MUL, STEP. The dxir-builder DSL already supports these. No need to add SQRT plumbing (which the K2-plugin port's `compound-velocity` test path also doesn't use; it's the sqrt-bearing variant that needs it).
+- **Single scalar input** — adds input-cardinality-1 coverage to the harness. BGDHyperOpt has 4 inputs, HookeanSpring 3, QWOP 4; Brachistochrone is the first 1-input inhabitant. Useful for measuring per-input timing overhead.
+
+**The new primal + reference** in [`BenchmarkPrimals.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt):
+
+```kotlin
+fun brachistochroneCompoundVelocityPrimal(N: Int = 5): DxirFunction = ...
+fun brachistochroneCompoundVelocityReference(y: Float, N: Int = 5): Float
+```
+
+**The new harness inhabitant** in [`HeadToHeadHarness.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarness.kt):
+
+```kotlin
+object BrachistochroneHarness : HeadToHeadBenchmark {
+    override val name = "brachistochrone-compound-velocity-N5"
+    override fun primal() = BenchmarkPrimals.brachistochroneCompoundVelocityPrimal(N=5)
+    override fun fixedInputs() = listOf(floatArrayOf(0.5f))    // y
+}
+```
+
+At y=0.5, N=5: forward = 1.5^5 = 7.59375 (exact in f32); gradient = 5 × 1.5^4 = 25.3125 (exact in f32).
+
+**The test file** [`HeadToHeadHarnessBrachistochroneTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessBrachistochroneTest.kt) — 2 tests, all passing:
+
+1. `brachistochroneHarnessRunsAndProducesBaseline` — runs harness baseline and pins:
+   - Forward matches **both** closed-form `(1 + y)^N` (via `kotlin.math.pow`) AND step-by-step recurrence reference within 1e-3.
+   - Gradient matches closed-form `N · (1 + y)^(N-1)` within 1e-2.
+   - Gradient sign sanity: at y > -1, gradient is strictly positive.
+   - Timing min ≤ median ≤ p99 + GC-pause guard.
+
+2. `brachistochroneForwardAndGradientAcrossMultipleY` — cross-y consistency at five y values: `{0.0, 0.25, 0.5, -0.5, 1.0}`. Each verifies BOTH forward AND gradient against closed-form. Includes:
+   - `y = 0`: rest configuration; forward = 1; gradient = N (= 5).
+   - `y = -0.5`: large negative input; forward = 0.5^5 = 0.03125.
+   - `y = 1`: forward = 2^5 = 32; gradient = 80 (large discrete value).
+
+**Decisions worth flagging**:
+
+- **The two-reference-path approach is structurally important.** The harness pins Tlaloc against the closed form `(1 + y)^N` AND the step-by-step Kotlin recurrence. These should agree with each other AND with Tlaloc. If a primal-misrouting bug produced a different recurrence shape (e.g., `v = v * y` instead of `v = v + v * y`), the closed-form check might still happen to pass at one y value, but the per-iteration recurrence reference would catch it. Two refs ≠ one ref + redundancy; they catch different bug classes.
+
+- **At y=1, the harness exercises `2^5 = 32` and gradient `80` — the largest value of any harness inhabitant so far.** Useful as a stress-test discriminator for f32 precision at large outputs. Tlaloc passes within 1e-2 absolute tolerance.
+
+- **`kotlin.math.pow` is the cleanest closed-form reference.** Avoids hand-implementing exponentiation. F32 `(1.0 + y).pow(N).toFloat()` produces the correct value within Kotlin's f32 rounding.
+
+- **Input-cardinality coverage.** With Brachistochrone (1 input) joining BGDHyperOpt (4), HookeanSpring (3), and QWOP avatar-step (4), the harness covers 1/3/4-input shapes. This matters for timing comparison: `DxirInterpreter.evalFunction`'s per-call overhead has a fixed component (function setup) + per-input component (param binding). Single-input inhabitants like Brachistochrone establish the floor; multi-input inhabitants amortise it.
+
+- **The compound-velocity primal is structurally simpler than the K2-plugin port's energy-accumulation primal.** Energy-accumulation uses `ke = ke + 4*y` (constant per iter) — gradient is the constant N×4=40, regardless of y. Less discriminating. Compound-velocity has a y-dependent gradient (N·(1+y)^(N-1)) that exercises FD validation more meaningfully. Picked the discriminator-richer primal.
+
+- **Suite +2 to 957.**
+
+**Tests added** (+2):
+
+1. `HeadToHeadHarnessBrachistochroneTest.brachistochroneHarnessRunsAndProducesBaseline`
+2. `HeadToHeadHarnessBrachistochroneTest.brachistochroneForwardAndGradientAcrossMultipleY`
+
+Full suite is green: **957 tests** (+2 from §0.4.224).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Head-to-head harness Phase 1 fifth slice — HMC inhabitant.** The OOPSLA paper's hardest control-flow benchmark; existing K2-plugin port at `:compiler-plugin/src/test/.../HmcLogisticRegression*Test.kt` (3 files). HMC has multi-step recurrence + IF (control flow) — the structural shape exercises both the temporal loop axis (like HookeanSpring) AND the branch-aware AD axis (like QWOP avatar-step). Likely 1-2 firings to port a representative sub-primal via dxir-builder. Adds the **fourth paper benchmark** to the harness.
+
+2. **Head-to-head harness Phase 1 sixth slice — CartPole inhabitant.** Existing K2-plugin port at `:compiler-plugin/src/test/.../CartPolePhase{1,2,3}Test.kt`. Phase 1 is one time step — the cheapest port. Adds the **fifth paper benchmark**. 1 firing.
+
+3. **Head-to-head harness Phase 2 — Python references.** Once five paper benchmarks ship in Phase 1 (BGDHyperOpt + HookeanSpring + Brachistochrone + HMC + CartPole + QWOP-as-avatar-step), Phase 2 can run cross-framework comparison. Gated on user-side toolchain.
+
+4. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** §11.13's headline gap. Genuinely deferred but not on the harness's critical path.
+
+5. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority while harness Phase 1 inhabitants ship. Once it ships, harness re-runs against a native backend will give actual head-to-head numbers.
+
+**Definition-of-done for §0.4.225 — met**:
+- Compound-velocity primal lifted into `BenchmarkPrimals.kt` ✓
+- Kotlin recurrence reference shipped ✓
+- `BrachistochroneHarness` inhabitant defined ✓
+- Forward + closed-form gradient pinned at y=0.5 ✓
+- Cross-y consistency at five y values (BOTH forward AND gradient) ✓
+- Two independent reference paths (closed-form + step-by-step recurrence) cross-validate ✓
+- Suite +2 to 957 ✓
+- HMC (fifth slice) is the natural next pickup ✓
+
 #### 0.4.224 Head-to-head harness Phase 1 third slice — HookeanSpring scalar 1D oscillator is the second **paper benchmark** in the harness 2026-04-27
 
 §0.4.223's hand-off named "Head-to-head harness Phase 1 third slice — HookeanSpring inhabitant" as the next pickup. §0.4.224 lands it: a **scalar 1D harmonic oscillator** primal that hits HookeanSpring's structural shape (constant-trip-count WHILE with 2 coupled state variables — position + velocity) without needing the rank-1 tensor primitives the K2-plugin's existing `:compiler-plugin` port uses.
