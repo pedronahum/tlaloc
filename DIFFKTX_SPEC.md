@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.185 Phase 0c slice (a) — Rank2 / Rank3 DTensor param recognition in FIR-side lowering 2026-04-27
+
+§0.4.184's hand-off named Phase 0c (plugin MATMUL recognition + minimal rank-2 synthesis) as the natural multi-session pickup. §0.4.185 lands the FIR-side first slice: `FirLambdaToDxirLowering.resolveParamType` now recognises `DTensor<Rank2<R, C>, F32>` and `DTensor<Rank3<R, C, D>, F32>` parameters, returning `DxirType(F32, [-1, -1])` and `DxirType(F32, [-1, -1, -1])` respectively. Synthesis-side widening (rank-2 IrType building, multi-rank BROADCAST / MATMUL lowering) is the next slice in the Phase 0c arc.
+
+**The mechanism** in [FirLambdaToDxirLowering.kt:864-882](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt#L864-L882):
+
+The `when (shapeFqn)` arm previously had `ScalarShape -> emptyList()`, `Rank1 -> listOf(-1)`, `else -> return null`. Two new arms: `Rank2 -> listOf(-1, -1)` and `Rank3 -> listOf(-1, -1, -1)`. Sentinel-based dim values are unchanged from Rank1's pattern — no rule in [VjpRegistry] dereferences dim values on the synthesis-bound path (per §0.4.10's note); rank + dtype are the load-bearing fields.
+
+**Verification** in [Rank2ParamLoweringTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2ParamLoweringTest.kt):
+
+A minimal `grad { a: DTensor<Rank2<Sym, Sym>, F32> -> 0.0f }` primal compiles. The test asserts:
+1. **FIR-side success** — the "Tlaloc lowered lambda to dxir" warning fires, confirming `FirLambdaToDxirLowering` produced a `DxirFunction` for the Rank2-bearing primal.
+2. **Dxir dump shape** — the "saw handoff" warning's pretty-printed dxir shows `f32[-1,-1]` for the Rank2 param.
+3. **Synthesis fallback** — the "kept original call" warning fires (synthesis surface today supports only scalar + rank-1 F32; rank-2 BROADCAST etc. would trip), confirming the Phase 0c slice (b) gap is the documented next-step.
+
+The test uses a constant return `0.0f` rather than `a.sum()` because the K2 plugin's FIR-side lowering doesn't recognise `DTensor<...>.sum()` calls today — that's separate plumbing pending its own slice. The constant return exercises only the param-type-resolution path, which is what slice (a) ships.
+
+**Decisions worth flagging**:
+
+- **Tiny code change, focused test.** Two new lines in `resolveParamType` + one test class. The Phase 0c arc was correctly characterised in §0.4.184 as multi-session — slice (a) is the smallest meaningful piece that lands without surfacing the synthesis-side rank-2 widening.
+
+- **Why not also wire MATMUL into BINARY_OP_MAP?** That would be slice (a-followup): the FQN entry `io.tlaloc.core.ops.matmul` → `OpKind.MATMUL` is mechanical, but exercising it requires a Rank2-output reduction in the body, which the FIR side doesn't support yet (no `:core.ops.<reduction>` recognised today). Adding the BINARY_OP_MAP entry without an exerciser would be dead code; defer to a future slice that bundles plugin recognition + a usable end-to-end shape.
+
+- **Synthesis-side fallback is the documented slice-(a) behavior.** The test asserts both "FIR lowered lambda to dxir" AND "kept original call" warnings — those are what slice (a) produces by design. Slice (b) (rank-2 BROADCAST / SUM / unary lowering in `DxirToIrSynthesis`) closes the synthesis-fallback path. Slice (c) extends to MATMUL.
+
+- **No regression risk for existing rank-1 / scalar tests.** The `else -> return null` path is preserved for any shape that's neither ScalarShape nor Rank1/2/3. All existing benchmark ports (Brachistochrone, HookeanSpring, HMC, CartPole) use Rank1 inputs; their behavior is bit-exact unchanged.
+
+- **Rank3 included alongside Rank2.** Both are 1-line additions; bundling them avoids a second firing for the same surface area when Rank3 inputs surface (e.g., batched tensors, image-like shapes).
+
+- **Phase 0c plan amendment:** the §0.4.181 ship-state table for CartPole listed Phase 0c as "deferred". With slice (a) shipped, the entry now reads "slice (a) shipped §0.4.185; slices (b) + (c) pending". A future register refresh can update it.
+
+**Tests added** (+1 in [Rank2ParamLoweringTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2ParamLoweringTest.kt)):
+
+- `rank2 DTensor param lowers through FIR with synthesis fallback` — Rank2 grad lambda compiles; FIR-side dxir produced (warning); dxir dump shows `f32[-1,-1]`; synthesis falls back via "kept original call" warning.
+
+Full suite is green: **869 tests** (+1 over §0.4.184).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 0c slice (b)** — extend `DxirToIrSynthesis` to lower rank-2 BROADCAST / SUM emissions. Mirrors `irBroadcast`'s rank-1 pattern but threads rank-2 IrType through the synthesis context. Single-firing if scoped narrowly to the SumRule's BROADCAST shape; multi-session if widened to all rank-2 ops.
+2. **Phase 2 of head-to-head harness** — Python reference implementations. Gated on user-side toolchain.
+3. **Phase 0c slice (c)** — wire MATMUL into `BINARY_OP_MAP` and add `irMatmul` synthesis arm. Gated on slice (b) closing the rank-2 surface.
+4. **Out-of-scope register refresh** — could fire after Phase 0c slice (b) lands.
+
+**Definition-of-done for §0.4.185 — met**:
+- `resolveParamType` recognises Rank2 and Rank3 DTensor params with sentinel dims ✓
+- Test confirms FIR-side dxir production for a Rank2-input primal ✓
+- Test asserts the dxir dump's `f32[-1,-1]` shape ✓
+- Synthesis-side fallback documented as the expected slice-(a) behavior ✓
+- No regression on existing rank-1 / scalar tests ✓
+- Full suite stays green at 869 tests (+1) ✓
+
 #### 0.4.184 Head-to-head harness — CartPole Phase 1 + Phase 2 inhabitants added 2026-04-26
 
 §0.4.183's hand-off named "Add CartPole Phase 1+2 to the harness" as recommended-next #3 — single-firing extension. §0.4.184 lands it. The harness now covers **5 K2-plugin-shipped benchmarks** (vs. §0.4.183's 3): Brachistochrone N=64, HookeanSpring N=10, HMC logistic n=4 d=2 loop form, CartPole Phase 1 (per-step physics), CartPole Phase 2 (B=3 loop with state passing).

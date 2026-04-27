@@ -858,12 +858,22 @@ object FirLambdaToDxirLowering {
             // types as scalar. Rank1 gets a single sentinel `-1` — no rule in
             // [io.tlaloc.ir.passes.VjpRegistry] dereferences dim *values* on the
             // synthesis-bound path (§0.4.10 — SumRule reads `.dims` only for rank /
-            // identity), so a sentinel is enough here. Higher ranks / MeanRule-style
-            // `1/N` consts are deferred: they need a `Dim` sum-type upgrade or
-            // call-site concrete-dim threading which is Item 2-followup, not this slice.
+            // identity), so a sentinel is enough here.
+            //
+            // §0.4.185 — Rank2 + Rank3 entries: substrate addition for Phase 0c
+            // (plugin MATMUL recognition). FIR-side recognition unblocks lowering of
+            // `grad { A: DTensor<Rank2<R, K>, F32> -> ... }` style primals to dxir.
+            // Note that DxirToIrSynthesis today supports only scalar + rank-1 F32, so
+            // ANY rank-2/3 grad-body op (e.g., the BROADCAST emitted by SumRule on a
+            // rank-2 reduction) still trips synthesis-scope rejection — the runtime
+            // tape stub fires for end-to-end gradient calls. The FIR-side
+            // recognition lands here as the first slice; rank-2/3 synthesis-side
+            // widening is the next slice in the Phase 0c arc.
             val dims: List<Int> = when (shapeFqn) {
                 "io/tlaloc/core/ScalarShape" -> emptyList()
                 "io/tlaloc/core/Rank1" -> listOf(-1)
+                "io/tlaloc/core/Rank2" -> listOf(-1, -1)
+                "io/tlaloc/core/Rank3" -> listOf(-1, -1, -1)
                 else -> return null
             }
             return DxirType(dtype, dims)
