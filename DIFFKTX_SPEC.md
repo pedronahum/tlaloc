@@ -39,6 +39,76 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.190 Out-of-scope register refresh — Phase 0c closed for square-matrix surface; head-to-head harness Phase 1 done 2026-04-27
+
+§0.4.180 was the seventh register snapshot; §0.4.190 is the eighth. 9 sub-sections shipped between §0.4.181 and §0.4.189 — a focused arc that closed Phase 0c (plugin MATMUL recognition) for the square-matrix surface AND landed Phase 1 of the head-to-head harness. Two related multi-session items moved from "deferred" to "shipped" or "substantively closed".
+
+**Refreshed register (as of §0.4.189)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
+| Tensor ops | **Rectangular MATMUL through K2 plugin** | Square-only shipped §0.4.187 + §0.4.189. Rectangular (M ≠ K ≠ N) needs per-operand IrType tracking in SynthesisContext. **Prerequisite for CartPole Phase 3 NN**. |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) — multi-result + rank-4+ surface | **Substantively closed for scalar + rank-1/2/3 F32 + square MATMUL** at §0.4.189. Open: rank-4+ tensor ops, multi-result outputs (grad2 / valueAndGrad2 widening), `irIfOp` with non-empty bodies (deferred from §0.4.174 lift). |
+| Plugin | `irIfOp` widening to lower IF-with-body-ops | Currently empty-body only. The §0.4.174 lift pass hoists safe arithmetic to top level; non-safe-lift cases (DIV/SQRT/LOG in IF body) still hit it. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED — coarsening-side production | Substrate widening shipped §0.4.179. Open: coarsening passes still produce ONLY single-result COARSENED. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. |
+| PhiCalculus | `liftIfRegionBodies` widening of `SAFE_LIFT_OPS` | Currently total-functions-only. EXP/LOG/SQRT/DIV could be added with care (NaN propagation rather than fault on unconsumed branch). Widen as a port surfaces a need. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.176). |
+| Control flow | Multi-block regions | Single-block today. |
+| Benchmark ports | CartPole Phase 3 only | Phases 1+2 closed (§0.4.175 + §0.4.178). Phase 3 (NN forward + outer training loop) gated on **rectangular MATMUL** (above). 4-5 firings combined per `docs/CARTPOLE_PORT_PLAN.md`. |
+| Benchmark ports | QWOP | Last unported paper benchmark. Multi-session. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.181 and §0.4.189** (9 sub-sections, three themed clusters):
+
+- **Plan amendments + harness Phase 1 (§0.4.181 → §0.4.184)** — §0.4.181 (HMC + CartPole port plan ship-state amendments) / §0.4.182 (head-to-head harness planning doc) / §0.4.183 (harness Phase 1 JVM-side scaffolding + CSV) / §0.4.184 (CartPole Phase 1+2 added as harness inhabitants). Four firings. Phase 1 of the harness is done; Phase 2 (Python references) gated on user-side toolchain.
+
+- **Phase 0c MATMUL substrate (§0.4.185 → §0.4.187)** — three-firing arc closing the rank-2 surface in slices: (a) FIR-side Rank2/3 param recognition; (b) synthesis-side rank-1/2/3 acceptance via `broadcastLike` + rank-N const lowering; (c) plugin recognises `:core.ops.matmul`. Substrate work; no end-to-end MATMUL gradient yet.
+
+- **DTensor → Float bridge + first end-to-end MATMUL gradient (§0.4.188 → §0.4.189)** — §0.4.188 wires `:core.ops.sum` + `:core.ops.toFloat` as the bridge from DTensor expressions to Float-typed lambda body returns. §0.4.189 lands `irTranspose` + `irMatmul` synthesis arms + a `transpose` runtime helper, AND widens tensor binary-op dispatch to rank-1/2/3. The first end-to-end MATMUL gradient through the K2 plugin lands as `Rank2MatmulGradientTest`: `grad { a -> (a matmul a).sum().toFloat() }` produces the analytic [[7,11],[9,13]] for A=[[1,2],[3,4]] within `1e-3` tolerance.
+
+**Decisions worth flagging**:
+
+- **Deferred count went from ~17 (§0.4.180) to ~17 (§0.4.190) — same shape, two items refined.** "MATMUL through K2 plugin (Phase 0c)" → split into "Square MATMUL (shipped)" + "Rectangular MATMUL (deferred, prerequisite for CartPole Phase 3 NN)". "IR-side synthesis closure" entry refined to note rank-1/2/3 + square MATMUL closed. Net deferred items unchanged but the rectangular-matmul item is now an explicit deferred entry rather than a sub-bullet of "synthesis closure".
+
+- **Cadence: 9 sub-sections is the right rhythm.** Previous refreshes averaged ~13 sub-sections; this one's at 9. Shorter but justified by the substantive progress: Phase 0c closing for square-matrix surface AND head-to-head harness Phase 1 closing AND first MATMUL gradient — three related-but-distinct milestones in one cluster.
+
+- **Phase 1 status is unchanged.** Three of six paper benchmarks fully ported through K2 plugin (Brachistochrone, HookeanSpring, HMC). CartPole at 2/3 phases. BGDHyperOpt has `:benchmarks` port. QWOP unported. The strict M9 exit criterion (head-to-head numbers in a §0.4 entry "Phase 1 closed") is gated on Phase 2 of the harness (Python references) which is gated on user-side toolchain. Path (a) from §0.4.180's register stays viable: harness with the 4-5 K2-plugin-shipped benchmarks once Python is enabled.
+
+- **CartPole Phase 3 prerequisite is explicit.** "Rectangular MATMUL" is now a named deferred entry rather than a bulleted note inside CartPole's port. Future planning can directly target the prerequisite without forensic reading of multi-firing prose.
+
+- **`gradient_body` with nested regions** stays deferred. IF-in-gradient_body shipped §0.4.120 + §0.4.121; WHILE-in-gradient_body remains future work but no port today exercises that shape.
+
+- **The MATMUL gradient milestone (§0.4.189) is structurally significant.** It's the first end-to-end gradient through the K2 plugin's IR-side path that exercises the **non-elementwise-tensor-op** surface. Brachistochrone / HookeanSpring / HMC use only scalar arithmetic + GATHER + scalar reductions. CartPole Phase 1+2 add abs/sin/cos/IF in scalar form. The §0.4.189 test exercises a true tensor op (matmul) with its full gradient chain (TRANSPOSE + MATMUL + ADD + BROADCAST). This unblocks the entire ML-style port surface for square-matrix-shaped workloads.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **872 tests** (unchanged from §0.4.189).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Per-operand IrType tracking for rectangular matmul.** Multi-session widening: extend `SynthesisContext` to carry per-operand IrTypes (likely a `Map<DxirNode.id, IrType>`); rewrite `irMatmul` / `irTranspose` to use per-operand types instead of the single `tensorIrType`. Phase 1 (scaffold) likely 1 firing; Phase 2 (wire through irMatmul/irTranspose with rectangular test) 1 firing.
+2. **CartPole Phase 3 first slice.** Once rectangular matmul lands, attempt the simplest NN shape (single hidden layer with rectangular weights). Multi-session.
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+4. **`docs/CARTPOLE_PORT_PLAN.md` amendment.** Phase 0c is closed for square-matrix surface; the plan's "Phase 0c (deferred)" status is now stale. Single-firing doc-only update.
+
+**Definition-of-done for §0.4.190 — met**:
+- Deferred table refreshed to reflect §0.4.181–§0.4.189 closures ✓
+- "MATMUL through K2 plugin (Phase 0c)" split into "square (shipped)" + "rectangular (deferred)" ✓
+- Three themed clusters named (plan amendments + harness Phase 1; Phase 0c substrate; bridge + MATMUL gradient) ✓
+- Recommended-next surfaces rectangular matmul as the next single multi-session item ✓
+- Register stays tabular per the §0.4.108–§0.4.180 organising principle ✓
+- Full suite stays green at 872 tests (unchanged) ✓
+
 #### 0.4.189 First end-to-end MATMUL gradient — `irTranspose` + `irMatmul` synthesis arms + transpose runtime helper 2026-04-27
 
 §0.4.188's hand-off named "active matmul gradient end-to-end test" as a single-firing follow-up. §0.4.189 lands it. The test `grad { a: DTensor<Rank2<Sym, Sym>, F32> -> (a matmul a).sum().toFloat() }` produces the analytic ∂Σ(A·A)/∂A = A^T·1 + 1·A^T gradient — at A = [[1,2],[3,4]], the result is [[7,11],[9,13]]. **First end-to-end MATMUL gradient through the K2 plugin's IR-side path.**
