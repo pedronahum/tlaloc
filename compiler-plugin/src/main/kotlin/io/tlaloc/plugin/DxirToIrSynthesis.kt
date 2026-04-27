@@ -1006,10 +1006,46 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         val operandDecl = env[op.operands[0].id] ?: return null
+        // §0.4.199 — Phase 3 second slice: tensor RELU path. When result is rank-1/2/3
+        // F32, emit a call to `:core/ops/relu` (the DTensor extension); otherwise the
+        // existing scalar `if (x > 0) x else 0` lowering applies. Forward RELU is
+        // preserved in the gradient body when downstream rules read its output (e.g.,
+        // `MatmulRule` reading `relu(matmul1).matmul(W2)`'s LHS for the inner matmul's
+        // adjoint).
+        if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            val operandIrType = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
+            val operandShapeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val sym = reluTensorSymbol() ?: return null
+            val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: operandIrType
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = resultIrType,
+                symbol = sym,
+            )
+            if (call.typeArguments.isNotEmpty()) {
+                call.typeArguments[0] = operandShapeArg
+            }
+            call.arguments[0] = irGet(operandDecl)
+            return call
+        }
         val ty = irTypeFor(op.type, context) ?: return null
         val zero = zeroOrOneConst(op.type, one = false, context) ?: return null
         val condition = greaterThanZero(operandDecl, op.type, context) ?: return null
         return irIfThenElse(ty, condition, irGet(operandDecl), zero)
+    }
+
+    /**
+     * §0.4.199 — Resolves `io.tlaloc.core.ops.DTensor.relu()` (the rank-1/2/3 F32
+     * elementwise RELU extension). Used by [irRelu] when `OpKind.RELU` has a tensor
+     * result type.
+     */
+    private fun reluTensorSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("relu"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
     /**

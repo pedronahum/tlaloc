@@ -39,6 +39,89 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.199 CartPole Phase 3 second slice — tensor RELU synthesis + first 2-layer NN gradient (3-arg grad / Triple-return) 2026-04-27
+
+§0.4.198's hand-off named "CartPole Phase 3 second slice — 2-layer chain" as the next pickup. §0.4.199 lands it: `grad { (X, W1, W2) -> ((X matmul W1).relu() matmul W2).sum().toFloat() }` with `X: Rank2<Sym, Lit<Int>>, W1: Rank2<Lit<Int>, Lit<Long>>, W2: Rank2<Lit<Long>, Lit<Short>>` (four distinct shape atoms, three rectangular MATMULs in the gradient body) lowers end-to-end through the K2 plugin and the gradient matches analytic. Two new pieces:
+
+1. **Tensor RELU synthesis** — `irRelu` rank-dispatches: scalar uses the existing `if (x > 0) x else 0` lowering; rank-1/2/3 emits an `IrCall` to `:core/ops/relu` (the DTensor extension already exists in HostOps; FIR already maps `:core.ops.relu` → `OpKind.RELU` via UNARY_OP_MAP).
+2. **First 3-arg `grad` with Triple-return** — synthesise() supports up to 3 returns/params (the cap was already there from §0.4.4); §0.4.199 is the first test that actually exercises the 3-param path. The user-side `grad` stub takes 3 DTensor params and returns a Triple.
+
+**The mechanism** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt):
+
+1. **`irRelu` rank-dispatch** (mirrors §0.4.198's `irStep`):
+   ```kotlin
+   if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+       val operandIrType = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
+       val operandShapeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+       val sym = reluTensorSymbol() ?: return null
+       val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: operandIrType
+       // build IrCall to :core/ops/relu with typeArguments[0] = operandShapeArg.
+       // arguments[0] = irGet(operandDecl)
+   }
+   // scalar path unchanged
+   ```
+
+2. **`reluTensorSymbol()`** resolves `io.tlaloc.core.ops.relu` (the DTensor extension). The other relu functions (`Float.relu`, `Double.relu`, `FloatScalar.relu`, etc.) live in package `io.tlaloc.core` (different package), so `pluginContext.referenceFunctions(CallableId(package=io.tlaloc.core.ops, name=relu)).singleOrNull()` resolves uniquely.
+
+**Why tensor RELU is needed for the 2-layer chain.** In `((X · W1).relu() · W2).sum()`, the gradient body's structure is:
+- y1 = MATMUL(X, W1)  ← preserved (read by STEP for ReluRule's adjoint)
+- y1r = RELU(y1)      ← **preserved too** (read by MatmulRule for `dW2 = y1r^T · upstream_y2` and `du1r = upstream_y2 · W2^T`)
+- y2 = MATMUL(y1r, W2)  ← discarded after sum
+- ones broadcast over y2's shape
+- step_y1 = STEP(y1)
+- u1r = MATMUL(broadcast, W2^T)        ← upstream into y1r
+- dW2 = MATMUL(y1r^T, broadcast)        ← gradient wrt W2
+- u1 = MUL(u1r, step_y1)                ← upstream into y1 (after RELU)
+- dX = MATMUL(u1, W1^T)
+- dW1 = MATMUL(X^T, u1)
+- return (dX, dW1, dW2)
+
+The forward `RELU(y1)` IS in the gradient body — it's NOT pruned by SCT because `MatmulRule` reads `relu(matmul1)` as the LHS primal for the inner matmul's adjoint. So tensor RELU on the synthesis side is required. §0.4.198 deferred it; §0.4.199 lands it.
+
+**The new test** [Rank2TwoLayerNNGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2TwoLayerNNGradientTest.kt):
+
+`grad { (X, W1, W2) -> ((X matmul W1).relu() matmul W2).sum().toFloat() }` with X = ones(2, 3), W1 = `[[1,-1,1,-1] × 3]` (3×4), W2 = ones(4, 2). For these inputs:
+- y1 = `[[3,-3,3,-3] × 2]` (2×4); RELU clips negatives.
+- y1r = `[[3,0,3,0] × 2]`; y2 = `[[6,6],[6,6]]` (2×2).
+- L = sum(y2) = 24.
+
+Analytic gradients (verified within 1e-3):
+- ∂L/∂X = `[[4,4,4],[4,4,4]]` (2×3)
+- ∂L/∂W1 = `[[4,0,4,0] × 3]` (3×4) — even cols only, since RELU's mask kills odd cols
+- ∂L/∂W2 = `[[6,6],[0,0],[6,6],[0,0]]` (4×2) — alternating rows of 6s due to y1r's alternating zeros
+
+**Decisions worth flagging**:
+
+- **Triple-return surface was a "free" cap.** The synthesise() function's `boxedReturnType = tripleClass()?.typeWith(returnIrTypes)` branch has been there since §0.4.4 (when grad / grad2 / valueAndGrad / valueAndGrad2 were unified under one synthesiser). It just hadn't been exercised by a 3-param test. §0.4.199 is the first.
+
+- **Forward elementwise propagation was the load-bearing piece.** §0.4.198's forward derivation pass (added `STEP/RELU/NEG/SQRT/EXP/LOG/SIN/COS/ABS` and `ADD/SUB/MUL/DIV` to `deriveResultIrType`) means the 2-layer body's `y1r = RELU(y1)` IrType derives forward without any 3b-style backward solving. The chain `MATMUL → RELU → MATMUL → SUM` propagates IrTypes left-to-right, then BROADCAST gets resolved by the existing backward solver from the SUM/return IrTypes. No new propagation logic needed.
+
+- **No new runtime helper.** `:core/ops/DTensor.relu()` already exists; only the synthesis-side dispatch was missing. The diff is small.
+
+- **The 3-arg grad stub works because intrinsic recognition is name-based.** `TlalocIrGenerationExtension.INTRINSIC_NAMES` is `{"grad", "grad2", "valueAndGrad", "valueAndGrad2"}` — the plugin checks the function's package + name, not its signature. User-side stubs can declare `grad` with any arity; the plugin picks it up.
+
+- **Suite +1 to 881.** Just the new 2-layer NN integration test.
+
+**Tests added** (+1):
+
+1. `Rank2TwoLayerNNGradientTest.grad of 2-layer relu net matches analytic` — first 3-arg `grad` with Triple-return + first chained rectangular MATMUL with tensor RELU between layers.
+
+Full suite is green: **881 tests** (+1 from §0.4.198).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 3 third slice — sigmoid / tanh widening + 3-layer chain test.** Mirror the §0.4.199 pattern for `irSigmoid` / `irTanh` (rank-dispatch to `:core/ops/sigmoid` and `:core/ops/tanh` extensions). The CartPole NN forward uses tanh (`a = sign(tanh(relu(...)) - ε)`), so this is the next gap. Also widen `irNeg`/`irExp`/`irLog` similarly if their tensor versions exist in HostOps. Add a 3-layer chain regression test with at least one sigmoid/tanh activation. Single firing if the sigmoid/tanh DTensor extensions already exist (they should — `:core/ops/HostOps.kt` declared them around §0.4.50ish).
+
+2. **CartPole Phase 3 fourth slice — first FD-validated CartPole-style test.** Once activations widen, port a slice of the CartPole NN forward (e.g., 1 hidden layer + tanh + linear output) and verify against finite-differencing.
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.199 — met**:
+- `irRelu` dispatches by rank; tensor path emits `:core/ops/relu` IrCall ✓
+- First 3-arg `grad` with Triple-return passes ✓
+- First chained rectangular MATMUL with tensor RELU between layers ✓
+- All 880 prior tests pass + 1 new = 881 ✓
+
 #### 0.4.198 CartPole Phase 3 first slice — tensor STEP synthesis + elementwise IrType propagation; first 1-layer NN gradient 2026-04-27
 
 §0.4.197's hand-off named "CartPole Phase 3 first slice" as the next pickup, with the recommendation to "start with the smallest gradient surface that exercises rectangular MATMUL". §0.4.198 lands it: `grad { (X, W) -> (X matmul W).relu().sum().toFloat() }` with `X: Rank2<Sym, Lit<Int>>, W: Rank2<Lit<Int>, Lit<Long>>` (rectangular weights) lowers end-to-end, and the gradient matches analytic for X=ones / W=mixed-sign within 1e-3. The new surface required:
