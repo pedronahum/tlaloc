@@ -435,4 +435,134 @@ object BenchmarkPrimals {
         val term3 = (b0 * b0 + b1 * b1) / 2000f
         return sum1 - sum2 - term3
     }
+
+    /**
+     * §0.4.227 — CartPole Phase 1 primal: one-timestep cart-pole reward
+     * with a clip-at-zero IF. Mirrors the K2-plugin port at
+     * `:compiler-plugin/src/test/.../CartPolePhase1Test.kt` ported as scalar
+     * dxir (5 separate scalar inputs instead of a packed rank-1 tensor).
+     *
+     * Five scalar inputs: `at` (action), `x0` (cart pos), `x1` (cart vel),
+     * `x2` (pole angle), `x3` (pole angular vel).
+     *
+     * ```kotlin
+     * rt = 9.0 * at + 0.045 * x3² * sin(x2)
+     * cosX2 = cos(x2)
+     * qt = (9.8 * sin(x2) - rt * cosX2) / (0.65 - 0.4 * cosX2²)
+     * pt = rt - 0.045 * qt * cosX2          // computed but unused
+     * xn0 = x0 + 0.02 * x1
+     * xn2 = x2 + 0.02 * x3
+     * maxArg = (2.4 - |xn0|) * (0.21 - |xn2|)
+     * clipped = if (maxArg > 0) maxArg else 0
+     * term = 0.5 - clipped
+     * return term * term
+     * ```
+     *
+     * **Why this primal**: CartPole is the OOPSLA paper's RL benchmark; even
+     * Phase 1 (one-step reward) exercises **sin**, **cos**, **abs**, and **IF**
+     * — four ops that NO prior harness inhabitant uses. Adds the **fifth paper
+     * benchmark** to the harness — full M9 paper-benchmark coverage (BGDHyperOpt
+     * + HookeanSpring + Brachistochrone + HMC + CartPole + QWOP-as-avatar-step).
+     *
+     * **Note about `pt`**: it's computed but the return value doesn't depend on
+     * it. So the gradient w.r.t. `at` (which only feeds into `rt → qt → pt`)
+     * should be **zero**. This makes a sharp discriminator: any DCE bug or
+     * misrouted chain-rule that incorrectly accumulated gradient through the
+     * unused branch would surface as a non-zero `df/dat`.
+     */
+    fun cartPolePhase1Primal(): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("cartPolePhase1") {
+            val at = param("at", f32)
+            val x0 = param("x0", f32)
+            val x1 = param("x1", f32)
+            val x2 = param("x2", f32)
+            val x3 = param("x3", f32)
+
+            val nineConst = const(9.0f, f32)
+            val zero045 = const(0.045f, f32)
+            val nineEight = const(9.8f, f32)
+            val zero65 = const(0.65f, f32)
+            val zero4 = const(0.4f, f32)
+            val zero02 = const(0.02f, f32)
+            val twoPoint4 = const(2.4f, f32)
+            val zero21 = const(0.21f, f32)
+            val zero5 = const(0.5f, f32)
+
+            val sinX2 = op(OpKind.SIN, listOf(x2), f32)
+            val cosX2 = op(OpKind.COS, listOf(x2), f32)
+
+            // rt = 9 * at + 0.045 * x3 * x3 * sin(x2)
+            val nineAt = op(OpKind.MUL, listOf(nineConst, at), f32)
+            val x3Sq = op(OpKind.MUL, listOf(x3, x3), f32)
+            val zero045X3Sq = op(OpKind.MUL, listOf(zero045, x3Sq), f32)
+            val x3SqSinX2 = op(OpKind.MUL, listOf(zero045X3Sq, sinX2), f32)
+            val rt = op(OpKind.ADD, listOf(nineAt, x3SqSinX2), f32)
+
+            // qt = (9.8 * sin(x2) - rt * cosX2) / (0.65 - 0.4 * cosX2 * cosX2)
+            val nineEightSinX2 = op(OpKind.MUL, listOf(nineEight, sinX2), f32)
+            val rtCosX2 = op(OpKind.MUL, listOf(rt, cosX2), f32)
+            val qtNum = op(OpKind.SUB, listOf(nineEightSinX2, rtCosX2), f32)
+            val cosX2Sq = op(OpKind.MUL, listOf(cosX2, cosX2), f32)
+            val zero4CosX2Sq = op(OpKind.MUL, listOf(zero4, cosX2Sq), f32)
+            val qtDen = op(OpKind.SUB, listOf(zero65, zero4CosX2Sq), f32)
+            val qt = op(OpKind.DIV, listOf(qtNum, qtDen), f32)
+
+            // pt = rt - 0.045 * qt * cosX2 (computed but unused — DCE-test piece)
+            val zero045Qt = op(OpKind.MUL, listOf(zero045, qt), f32)
+            val zero045QtCosX2 = op(OpKind.MUL, listOf(zero045Qt, cosX2), f32)
+            @Suppress("UNUSED_VARIABLE")
+            val pt = op(OpKind.SUB, listOf(rt, zero045QtCosX2), f32)
+
+            // xn0 = x0 + 0.02 * x1
+            val zero02X1 = op(OpKind.MUL, listOf(zero02, x1), f32)
+            val xn0 = op(OpKind.ADD, listOf(x0, zero02X1), f32)
+
+            // xn2 = x2 + 0.02 * x3
+            val zero02X3 = op(OpKind.MUL, listOf(zero02, x3), f32)
+            val xn2 = op(OpKind.ADD, listOf(x2, zero02X3), f32)
+
+            // maxArg = (2.4 - |xn0|) * (0.21 - |xn2|)
+            val absXn0 = op(OpKind.ABS, listOf(xn0), f32)
+            val absXn2 = op(OpKind.ABS, listOf(xn2), f32)
+            val term1 = op(OpKind.SUB, listOf(twoPoint4, absXn0), f32)
+            val term2 = op(OpKind.SUB, listOf(zero21, absXn2), f32)
+            val maxArg = op(OpKind.MUL, listOf(term1, term2), f32)
+
+            // clipped = if (maxArg > 0) maxArg else 0
+            val zeroF = const(0f, f32)
+            val pred = op(OpKind.STEP, listOf(maxArg), boolS)
+            val clipped = op(
+                OpKind.IF,
+                listOf(pred),
+                f32,
+                regions = listOf(
+                    region { yields(maxArg) },
+                    region { yields(zeroF) },
+                ),
+            )
+
+            // term = 0.5 - clipped; return term * term
+            val term = op(OpKind.SUB, listOf(zero5, clipped), f32)
+            val result = op(OpKind.MUL, listOf(term, term), f32)
+            listOf(result)
+        }
+
+    /**
+     * §0.4.227 — Kotlin reference mirroring [cartPolePhase1Primal]. Useful for
+     * FD-validated gradient pins.
+     */
+    fun cartPolePhase1Reference(at: Float, x0: Float, x1: Float, x2: Float, x3: Float): Float {
+        val sinX2 = kotlin.math.sin(x2)
+        val cosX2 = kotlin.math.cos(x2)
+        val rt = 9.0f * at + 0.045f * x3 * x3 * sinX2
+        val qt = (9.8f * sinX2 - rt * cosX2) / (0.65f - 0.4f * cosX2 * cosX2)
+        @Suppress("UNUSED_VARIABLE")
+        val pt = rt - 0.045f * qt * cosX2   // computed but unused
+        val xn0 = x0 + 0.02f * x1
+        val xn2 = x2 + 0.02f * x3
+        val maxArg = (2.4f - kotlin.math.abs(xn0)) * (0.21f - kotlin.math.abs(xn2))
+        val clipped = if (maxArg > 0.0f) maxArg else 0.0f
+        val term = 0.5f - clipped
+        return term * term
+    }
 }

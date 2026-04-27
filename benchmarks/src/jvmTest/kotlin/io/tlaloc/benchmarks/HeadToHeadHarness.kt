@@ -240,3 +240,26 @@ object HmcLogisticRegressionHarness : HeadToHeadBenchmark {
         floatArrayOf(0.3f),    // b1
     )
 }
+
+/**
+ * §0.4.227 — sixth harness inhabitant: CartPole Phase 1 (one-timestep reward).
+ * Fifth and final **paper benchmark** — full M9 paper-benchmark coverage:
+ * BGDHyperOpt + HookeanSpring + Brachistochrone + HMC + CartPole + QWOP.
+ *
+ * First harness inhabitant to exercise SIN, COS, ABS, and IF (clip-at-zero).
+ *
+ * Fixed inputs `cfg = (0.5, 0.0, 0.1, 0.05, 0.02)` — same configuration as the
+ * K2-plugin port's FD test (§0.4.175). At this point the IF takes the
+ * non-clipped branch (maxArg ≈ 0.383 > 0).
+ */
+object CartPolePhase1Harness : HeadToHeadBenchmark {
+    override val name = "cartpole-phase1-onestep"
+    override fun primal() = BenchmarkPrimals.cartPolePhase1Primal()
+    override fun fixedInputs() = listOf(
+        floatArrayOf(0.5f),     // at
+        floatArrayOf(0.0f),     // x0
+        floatArrayOf(0.1f),     // x1
+        floatArrayOf(0.05f),    // x2
+        floatArrayOf(0.02f),    // x3
+    )
+}

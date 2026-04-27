@@ -39,6 +39,130 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.227 Head-to-head harness Phase 1 sixth slice — CartPole Phase 1 closes paper-benchmark coverage; first to use SIN/COS/ABS/IF 2026-04-27
+
+§0.4.226's hand-off named "Head-to-head harness Phase 1 sixth slice — CartPole inhabitant" as the next pickup. §0.4.227 lands it. **The harness now has all five paper benchmarks in Tlaloc-side scalar form** — BGDHyperOpt, HookeanSpring, Brachistochrone, HMC, CartPole — plus QWOP avatar-step (synthetic). **M9's paper-benchmark prerequisite is met.**
+
+**The CartPole Phase 1 primal**:
+
+The K2-plugin port at `:compiler-plugin/src/test/.../CartPolePhase1Test.kt` uses rank-1 tensor + GATHER on the packed (at, x0, x1, x2, x3) state. §0.4.227 ports the same one-timestep cart-pole reward as **5 separate scalar inputs**:
+
+```kotlin
+// 5 inputs: at (action), x0/x1 (cart), x2/x3 (pole)
+rt = 9.0 * at + 0.045 * x3² * sin(x2)
+cosX2 = cos(x2)
+qt = (9.8 * sin(x2) - rt * cosX2) / (0.65 - 0.4 * cosX2²)
+pt = rt - 0.045 * qt * cosX2          // computed but UNUSED in return
+xn0 = x0 + 0.02 * x1
+xn2 = x2 + 0.02 * x3
+maxArg = (2.4 - |xn0|) * (0.21 - |xn2|)
+clipped = if (maxArg > 0) maxArg else 0
+term = 0.5 - clipped
+return term * term
+```
+
+CartPole adds **four new ops** to the harness's coverage matrix — SIN, COS, ABS, and IF (clip-at-zero):
+
+| Inhabitant | ADD/SUB/MUL/DIV/NEG | EXP/LOG | SIN/COS | ABS | IF |
+|---|---|---|---|---|---|
+| QWOP avatar-step | yes | no | no | no | yes (multi) |
+| BGDHyperOpt | yes | no | no | no | no |
+| HookeanSpring | yes | no | no | no | no |
+| Brachistochrone | yes | no | no | no | no |
+| HMC | yes | yes | no | no | no |
+| **CartPole** | **yes** | **no** | **YES** | **YES** | **yes** |
+
+CartPole + HMC + QWOP collectively span every primitive op the harness needs to measure for cross-framework comparison.
+
+**The structural discriminator: `df/dat = 0`**:
+
+The action `at` only flows into the unused `pt` chain (`rt → qt → pt`; `pt` isn't in the return value). A DCE-aware reverse-mode AD should produce **exactly zero** for `df/dat`. Any misrouted chain rule that incorrectly accumulated gradient through the unused branch would surface here. Tlaloc's `df/dat` is `~0` within 1e-4 (effectively zero modulo f32 noise). This is a sharp test for **DCE correctness within reverse-mode AD** — different from the FD-validation pins on the other four inputs.
+
+**The new primal + reference** in [`BenchmarkPrimals.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt):
+
+```kotlin
+fun cartPolePhase1Primal(): DxirFunction = ...
+fun cartPolePhase1Reference(at, x0, x1, x2, x3): Float
+```
+
+**The new harness inhabitant** in [`HeadToHeadHarness.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarness.kt):
+
+```kotlin
+object CartPolePhase1Harness : HeadToHeadBenchmark {
+    override val name = "cartpole-phase1-onestep"
+    override fun primal() = BenchmarkPrimals.cartPolePhase1Primal()
+    override fun fixedInputs() = listOf(
+        floatArrayOf(0.5f),     // at
+        floatArrayOf(0.0f),     // x0
+        floatArrayOf(0.1f),     // x1
+        floatArrayOf(0.05f),    // x2
+        floatArrayOf(0.02f),    // x3
+    )
+}
+```
+
+**The test file** [`HeadToHeadHarnessCartPoleTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessCartPoleTest.kt) — 2 tests, all passing on first run:
+
+1. `cartPoleHarnessRunsAndProducesBaseline` — runs harness baseline at `cfg = (0.5, 0.0, 0.1, 0.05, 0.02)` and pins:
+   - Forward matches Kotlin reference within 1% rel tol + 1e-4 absolute floor.
+   - 5 gradient values returned.
+   - **`df/dat < 1e-4` strictly** — the DCE discriminator on the unused `pt` chain.
+   - Per-input FD validation for the four live inputs (x0, x1, x2, x3) at 3% rel tol + 1e-3 absolute floor (accommodates sin/cos/abs f32 path differences + IF branch eval).
+   - Timing min ≤ median ≤ p99 + GC-pause guard.
+
+2. `cartPoleForwardMatchesReferenceAcrossMultipleConfigs` — cross-cfg consistency at four configurations:
+   - Baseline `(0.5, 0.0, 0.1, 0.05, 0.02)`.
+   - Origin `(0, 0, 0, 0, 0)` — sin/cos/abs all evaluate to 0/1/0; predictable.
+   - **Clipped case** `(0.5, 3.0, 0.0, 0.0, 0.0)` — `xn0 = 3 > 2.4` → first factor of maxArg < 0 → maxArg < 0 → IF takes else-branch → clipped = 0 → term = 0.5 → result = 0.25. **Exercises the IF's else-branch**, complementing the baseline's then-branch.
+   - Mirror-symmetric `(-0.5, -0.1, 0.0, -0.05, 0.0)`.
+
+**Decisions worth flagging**:
+
+- **The `df/dat = 0` pin is the structural discriminator that justifies including the unused `pt` computation in the primal.** A simpler primal could have omitted `pt`, but keeping it tests that reverse-mode AD's dead-code elimination correctly identifies unused branches. The K2-plugin port has the same vestige; mirroring it preserves the structural axis.
+
+- **All five paper benchmarks in `:benchmarks` direct-DSL form land before the K2-plugin lift.** Originally the §0.4.181 plan suggested lifting `compileAndRun` from `:compiler-plugin/src/test` to enable K2-plugin ports as harness inhabitants. With §0.4.222–§0.4.227, the harness has full paper-benchmark coverage **without** needing that structural lift. The K2-plugin lift can land later if the cross-framework comparison needs to measure the K2 plugin's compilation overhead (it might, for fairness vs `torch.compile`); but Phase 1's "Tlaloc-side throughput + numerical baseline" is achievable with the direct-DSL ports alone.
+
+- **The clipped case in cross-cfg consistency exercises the IF's else-branch.** All other harness inhabitants either don't use IF (BGDHyperOpt, HookeanSpring, Brachistochrone, HMC) or only exercise its then-branch at fixed inputs (QWOP avatar-step's m\* = 0.1 stays away from clamps). CartPole's clipped case at `x0 = 3` is the first harness baseline that exercises the IF's else-branch — adds structural coverage at the cross-input consistency level.
+
+- **`kotlin.math.sin/cos/abs` for Float arguments is supported in Kotlin stdlib since 1.2.** No special imports needed; the Kotlin stdlib's `kotlin.math.*` package overloads sin/cos/abs for both Double and Float.
+
+- **The Kotlin reference uses `@Suppress("UNUSED_VARIABLE")` for `pt`.** Mirroring the dxir primal's vestigial `pt` ensures the reference's f32 computation order matches the dxir's exactly, even though the value itself doesn't contribute to the result. This avoids any divergence from "computing pt changes the f32 rounding state" — irrelevant for correctness but tidy for parity.
+
+- **Harness Phase 1 closure is in sight.** With six inhabitants (5 paper benchmarks + QWOP synthetic), the next firing can land a multi-inhabitant runner that produces a single CSV/JSON dump for Phase 2's cross-framework comparison. After that, Phase 1 is structurally ready for Python references whenever the user-side toolchain is available.
+
+- **Suite +2 to 961.**
+
+**Tests added** (+2):
+
+1. `HeadToHeadHarnessCartPoleTest.cartPoleHarnessRunsAndProducesBaseline`
+2. `HeadToHeadHarnessCartPoleTest.cartPoleForwardMatchesReferenceAcrossMultipleConfigs`
+
+Full suite is green: **961 tests** (+2 from §0.4.226).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Head-to-head harness Phase 1 closure — multi-inhabitant runner + CSV/JSON dump.** Write a `HeadToHeadHarnessAllTest` (or `HeadToHeadAllInhabitantsBenchmark`) that runs all six harness inhabitants and aggregates results into a single CSV (or JSON) dump under `build/`. This is the "run-everything" surface that Phase 2's Python comparison will plug into. 1 firing.
+
+2. **Out-of-scope register refresh — Harness Phase 1 substantively closed.** Per the §0.4.207/§0.4.221 pattern: when a multi-firing arc closes (here, §0.4.222–§0.4.228), write a register-refresh entry that updates §0.4 status. All six paper benchmarks now have Tlaloc-side baselines; Phase 2 (Python references) is the remaining piece, gated on user-side toolchain. 1 firing after the multi-runner ships.
+
+3. **Head-to-head harness Phase 2 — Python references.** Gated on user-side toolchain (PyTorch 2.x + JAX setup). When user supplies the Python environment, the comparison can run.
+
+4. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** §11.13's headline gap. Genuinely deferred; not on the harness's critical path.
+
+5. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority while harness Phase 1 has open work. Once it ships, the harness re-runs against a native backend will give actual head-to-head numbers (vs the current `DxirInterpreter` baseline).
+
+**Definition-of-done for §0.4.227 — met**:
+- CartPole Phase 1 primal added to `BenchmarkPrimals.kt` ✓
+- Kotlin reference for FD validation ✓
+- `CartPolePhase1Harness` inhabitant defined ✓
+- Forward + per-input FD-validated gradient (4 live inputs at 3% rel tol) ✓
+- **`df/dat ≈ 0` discriminator** for unused `pt` chain DCE ✓
+- Cross-cfg consistency at 4 configurations including a clipped case (IF else-branch) ✓
+- First harness inhabitant to use SIN/COS/ABS/IF ✓
+- All five paper benchmarks now in harness — full M9 paper-benchmark coverage ✓
+- Suite +2 to 961 ✓
+- Phase 1 multi-inhabitant runner (CSV/JSON dump) is the natural next pickup ✓
+
 #### 0.4.226 Head-to-head harness Phase 1 fifth slice — HMC logistic regression is the fourth **paper benchmark** in the harness; first to use EXP+LOG 2026-04-27
 
 §0.4.225's hand-off named "Head-to-head harness Phase 1 fifth slice — HMC inhabitant" as the next pickup. §0.4.226 lands it. The harness now has **four paper benchmarks** (BGDHyperOpt, HookeanSpring, Brachistochrone, HMC) plus QWOP avatar-step (synthetic) — the M9 critical path is now over 80% covered.
