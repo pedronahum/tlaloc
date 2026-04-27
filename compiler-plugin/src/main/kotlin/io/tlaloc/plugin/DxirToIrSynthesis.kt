@@ -310,14 +310,49 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             tensorTemplateParam = null,
             operandIrTypes = paramIrTypeMap,
         )
-        val paramIrTypes = fn.params.map {
-            irTypeFor(it.type, context) ?: return reject("no IrType for param '${it.name}' type=${it.type}")
+        // §0.4.196 — Phase 0c-rectangular slice 3b-2a: per-param paramIrTypes from the
+        // call-site populated map. For each tensor param, prefer `paramIrTypeMap[p.id]`
+        // (= the call site's specific IrType for that param); fall back to `irTypeFor`
+        // for scalars and edge cases. Pre-§0.4.196 every tensor param resolved to
+        // `tensorIrType` (= the FIRST tensor param's IrType) — wrong for multi-param
+        // surfaces with distinct shapes. Square surfaces remain bit-exact equivalent
+        // (one shared IrType across all params).
+        val paramIrTypes = fn.params.map { p ->
+            paramIrTypeMap[p.id] ?: irTypeFor(p.type, context)
+                ?: return reject("no IrType for param '${p.name}' type=${p.type}")
         }
         if (fn.returns.isEmpty() || fn.returns.size > 3) {
             return reject("returns.size=${fn.returns.size} outside [1, 3]")
         }
-        val returnIrTypes = fn.returns.map {
-            irTypeFor(it.type, context) ?: return reject("no IrType for return id=${it.id} type=${it.type}")
+        // §0.4.196 — Phase 0c-rectangular slice 3b-2a: returnIrTypes derive from the
+        // call-site Function<P0, …, Pn-1, R>'s R argument. Decompose Pair / Triple
+        // when fn.returns.size ∈ {2, 3} so each component picks up its true IrType
+        // independently rather than collapsing onto `tensorIrType`.
+        //
+        // For grad's Pair-return on multi-param SQUARE surfaces (both params share one
+        // shape), R = Pair<a's IrType, a's IrType> — same as the pre-§0.4.196 fallback.
+        // For RECTANGULAR (a: Rank2<R, K>, b: Rank2<K, C>), R = Pair<a's IrType,
+        // b's IrType> — distinct components, slice-3b-2a's first correctness win.
+        val returnIrTypes: List<IrType> = run {
+            val callSiteR = callType?.arguments?.getOrNull(fn.params.size)?.typeOrNull as? IrSimpleType
+            val decomposed = when (fn.returns.size) {
+                1 -> callSiteR?.let { listOf<IrType>(it) }
+                2, 3 -> {
+                    val components = callSiteR?.arguments?.mapNotNull { it.typeOrNull }
+                    if (components != null && components.size == fn.returns.size) components else null
+                }
+                else -> null
+            }
+            if (decomposed != null) {
+                decomposed
+            } else {
+                // Fallback for surfaces where call-site decomposition fails (no IrSimpleType,
+                // unexpected component count). Match historical behaviour via `irTypeFor`.
+                fn.returns.map { ret ->
+                    irTypeFor(ret.type, context)
+                        ?: return reject("no IrType for return id=${ret.id} type=${ret.type}")
+                }
+            }
         }
 
         // N = 1 → scalar lambda returning R.  N ∈ {2, 3} → lambda returning Pair<…> /
@@ -1273,15 +1308,22 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val operandDecl = env[operand.id] ?: return null
         val sym = transposeSymbol() ?: return null
         val operandIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
-        val operandShapeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        // §0.4.196 — slice 3b-2a: dig into the operand's outer DTensor → inner Rank2
+        // → atomic shape atom args. typeArguments[0] (R) ← operand's inner-Rank2.first;
+        // typeArguments[1] (C) ← operand's inner-Rank2.second. Pre-§0.4.196 set both
+        // to the WHOLE Rank2<…> IrType — bound-violating (transpose's R/C are typed
+        // `ShapeAtom`, not `Shape`) but tolerated by the IR verifier under erasure.
+        // Atomic atoms make the substituted return type structurally consistent
+        // with the dxir-derived result IrType (slice 3a's `deriveTransposedDTensor`).
+        val operandInnerRank2 = (operandIrType.arguments.firstOrNull()?.typeOrNull as? IrSimpleType) ?: return null
+        if (operandInnerRank2.arguments.size != 2) return null
+        val operandRowAtom = operandInnerRank2.arguments[0].typeOrNull ?: return null
+        val operandColAtom = operandInnerRank2.arguments[1].typeOrNull ?: return null
         // §0.4.194 — slice 3a: result IrType derived in `synthesise()`'s body walk via
         // [deriveResultIrType] / [deriveTransposedDTensor] (output Rank2's args are
         // swapped). Falls back to `context.tensorIrType` for ops the derivation
         // skipped (none today, but keeps the helper robust).
         val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: context.tensorIrType ?: return null
-        val resultRank2Arg = (resultIrType as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
-        val resultShapeArg = (resultRank2Arg as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
-            ?: operandShapeArg
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
@@ -1289,18 +1331,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             symbol = sym,
         )
         // `fun <R, C> DTensor<Rank2<R, C>, F32>.transpose(): DTensor<Rank2<C, R>, F32>`:
-        // arguments[0] = extension receiver. typeArguments[0] = R (operand's first
-        // inner Rank2 arg = `operandShapeArg` reading the OUTER Rank2 wrapper);
-        // typeArguments[1] = C (output's first inner Rank2 arg post-swap = same
-        // wrapper since `Sym` indistinguishability collapses both back to one in the
-        // square case). For genuinely rectangular Rank2<R, C> with distinct shape
-        // atoms, the existing wrapping with `operandShapeArg` for both type-args is
-        // the same bound-violating-but-runtime-erased pattern §0.4.189 used; the
-        // result's `IrCall.type` is what matters for downstream consumers and slice
-        // 3a derives that correctly via `deriveTransposedDTensor`.
+        // arguments[0] = extension receiver. typeArguments[0] = R (operand row atom),
+        // typeArguments[1] = C (operand col atom). After substitution, the return type
+        // is `DTensor<Rank2<C, R>, F32>` — matches `deriveTransposedDTensor`'s output.
         if (call.typeArguments.size >= 2) {
-            call.typeArguments[0] = operandShapeArg
-            call.typeArguments[1] = resultShapeArg
+            call.typeArguments[0] = operandRowAtom
+            call.typeArguments[1] = operandColAtom
         }
         call.arguments[0] = irGet(operandDecl)
         return call
@@ -1339,8 +1375,24 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val sym = matmulSymbol() ?: return null
         val lhsIrType = irTypeForNode(lhs, context) as? IrSimpleType ?: return null
         val rhsIrType = irTypeForNode(rhs, context) as? IrSimpleType ?: return null
-        val lhsShapeArg = lhsIrType.arguments.firstOrNull()?.typeOrNull ?: return null
-        val rhsShapeArg = rhsIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        // §0.4.196 — slice 3b-2a: dig into operand DTensor → inner Rank2 → atomic
+        // shape atoms. matmul's signature is `<R, K, C: ShapeAtom>`. typeArgs:
+        //   [0] = R (LHS row atom)
+        //   [1] = K (LHS col atom = RHS row atom — both must agree; we pick LHS's
+        //          for the IR call, with the IR verifier expected to substitute
+        //          consistently because the dxir guarantees lhs.col == rhs.row)
+        //   [2] = C (RHS col atom)
+        // Pre-§0.4.196 set all three to the WHOLE Rank2<…> IrType — bound-violating
+        // (R/K/C are typed `ShapeAtom`, not `Shape`) but tolerated by the IR verifier
+        // under generic erasure. Atomic atoms make the substituted return type
+        // structurally consistent with the dxir-derived result IrType (slice 3a's
+        // `deriveMatmulOutputDTensor`).
+        val lhsInnerRank2 = (lhsIrType.arguments.firstOrNull()?.typeOrNull as? IrSimpleType) ?: return null
+        val rhsInnerRank2 = (rhsIrType.arguments.firstOrNull()?.typeOrNull as? IrSimpleType) ?: return null
+        if (lhsInnerRank2.arguments.size != 2 || rhsInnerRank2.arguments.size != 2) return null
+        val rAtom = lhsInnerRank2.arguments[0].typeOrNull ?: return null
+        val kAtom = lhsInnerRank2.arguments[1].typeOrNull ?: return null
+        val cAtom = rhsInnerRank2.arguments[1].typeOrNull ?: return null
         // §0.4.194 — slice 3a: result IrType derived in `synthesise()`'s body walk via
         // [deriveMatmulOutputDTensor] (output Rank2 = LHS first ⊕ RHS last). For
         // square the derived result is structurally identical to `tensorIrType`;
@@ -1353,16 +1405,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             type = resultIrType,
             symbol = sym,
         )
-        // `infix fun <R, K, C> DTensor<Rank2<R, K>, F32>.matmul(other: DTensor<Rank2<K, C>, F32>):
-        //  DTensor<Rank2<R, C>, F32>`: arguments[0] = receiver (LHS), arguments[1] = RHS.
-        // typeArguments[0] (R) ← LHS shape; typeArguments[2] (C) ← RHS shape;
-        // typeArguments[1] (K) shared between LHS/RHS — pick LHS for consistency.
-        // For square surfaces all three coincide; for rectangular they diverge once
-        // operand IrTypes are correctly populated for non-param nodes (slice 3).
         if (call.typeArguments.size >= 3) {
-            call.typeArguments[0] = lhsShapeArg
-            call.typeArguments[1] = lhsShapeArg
-            call.typeArguments[2] = rhsShapeArg
+            call.typeArguments[0] = rAtom
+            call.typeArguments[1] = kAtom
+            call.typeArguments[2] = cAtom
         }
         call.arguments[0] = irGet(lhsDecl)
         call.arguments[1] = irGet(rhsDecl)

@@ -39,6 +39,100 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.196 Phase 0c-rectangular slice 3b-2a — outer signature fix + atomic-atom typeArgs in matmul/transpose 2026-04-27
+
+§0.4.195's hand-off named "Phase 0c-rectangular slice 3b-2a: outer signature fix + atomic shape-atom typeArgs" as the next single-firing pickup. §0.4.196 lands it. Two structural fixes in `synthesise()` + `irTranspose` + `irMatmul`: (a) `paramIrTypes` now reads per-param from `paramIrTypeMap` so multi-param surfaces with distinct shapes get correctly-typed function parameters; (b) `returnIrTypes` decomposes the call-site `Function<P0, …, Pn-1, R>`'s R argument (Pair / Triple components when `fn.returns.size ∈ {2, 3}`) so the synthesised lambda's return type matches the call site exactly; (c) `irTranspose` and `irMatmul` now read atomic ShapeAtom type-args (`R`, `K`, `C`) by digging into the operand's outer DTensor → inner Rank2 → `arguments[0/1].typeOrNull` instead of using the whole-Rank2 IrType as a bound-violating-but-erased substitution.
+
+**The mechanism** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt):
+
+1. **`paramIrTypes` per-param lookup.** Pre-§0.4.196:
+   ```kotlin
+   val paramIrTypes = fn.params.map { irTypeFor(it.type, context) ?: ... }
+   ```
+   `irTypeFor` returns `context.tensorIrType` for any rank-2/3 F32 type — collapsing all tensor params onto the FIRST tensor param's IrType. Post-§0.4.196:
+   ```kotlin
+   val paramIrTypes = fn.params.map { p ->
+       paramIrTypeMap[p.id] ?: irTypeFor(p.type, context) ?: ...
+   }
+   ```
+   `paramIrTypeMap` (populated since §0.4.193 from the call site's `Function<…>` arg list) carries the per-param specific IrType. For 1-param surfaces and multi-param SQUARE the map's value equals `tensorIrType` — no behavioural change. For RECTANGULAR (a: Rank2<R, K>, b: Rank2<K, C>) the second param now correctly resolves to b's IrType.
+
+2. **`returnIrTypes` from call-site R decomposition.** The synthesised lambda's IrFunctionType is `FunctionN<P0, …, Pn-1, R>` — the call site's R (decoded as `callType.arguments[fn.params.size]`) is the source of truth. Pre-§0.4.196 the code threaded each return through `irTypeFor(node.type, context)` which fell back to `tensorIrType` for tensor returns. For grad's Pair-return on rectangular, returns 0 and 1 collapsed onto a's IrType → outer signature mismatch with call site's `Pair<a's, b's>`. Post-§0.4.196:
+   ```kotlin
+   val callSiteR = callType?.arguments?.getOrNull(fn.params.size)?.typeOrNull as? IrSimpleType
+   val decomposed = when (fn.returns.size) {
+       1 -> callSiteR?.let { listOf<IrType>(it) }
+       2, 3 -> {
+           val components = callSiteR?.arguments?.mapNotNull { it.typeOrNull }
+           if (components?.size == fn.returns.size) components else null
+       }
+       else -> null
+   }
+   ```
+   Falls back to the historical per-node `irTypeFor` resolution if call-site decomposition fails (no IrSimpleType, unexpected component count) so non-tensor surfaces stay untouched.
+
+3. **Atomic-atom typeArgs in `irMatmul`.** `matmul<R: ShapeAtom, K: ShapeAtom, C: ShapeAtom>` — three type params bound to `ShapeAtom`. Pre-§0.4.196 set all three to whole `Rank2<…>` IrTypes (bound-violating: `Rank2` is a `Shape`, not a `ShapeAtom`). Tolerated by the IR verifier under generic erasure but cascades into nested-typeArgs corruption for rectangular. Post-§0.4.196 digs into operands' inner Rank2 args:
+   ```kotlin
+   val lhsInnerRank2 = (lhsIrType.arguments.firstOrNull()?.typeOrNull as? IrSimpleType) ?: return null
+   val rhsInnerRank2 = (rhsIrType.arguments.firstOrNull()?.typeOrNull as? IrSimpleType) ?: return null
+   val rAtom = lhsInnerRank2.arguments[0].typeOrNull ?: return null  // R
+   val kAtom = lhsInnerRank2.arguments[1].typeOrNull ?: return null  // K = LHS col = RHS row
+   val cAtom = rhsInnerRank2.arguments[1].typeOrNull ?: return null  // C
+   call.typeArguments[0..2] = [rAtom, kAtom, cAtom]
+   ```
+   For SQUARE all three collapse to `Sym` (operand's inner Rank2 args are `[Sym, Sym]`); for RECTANGULAR they are distinct atoms (e.g., `Sym, Lit<Int>, Lit<Long>`). The substituted return type matches `deriveMatmulOutputDTensor`'s output (slice 3a's machinery).
+
+4. **Atomic-atom typeArgs in `irTranspose`.** Same dig-into-inner-Rank2 pattern: `transpose<R: ShapeAtom, C: ShapeAtom>` gets `R` from operand's inner Rank2 first arg, `C` from operand's inner Rank2 second arg.
+
+**Diagnostic test confirmed the fix advances the rectangular gate**:
+
+I re-created `Rank2RectangularMatmulGradientTest` as a one-shot diagnostic — `grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<Sym, Lit<Int>>, b: Rank2<Lit<Int>, Lit<Long>>`. Pre-§0.4.196 it failed with WARNING "Tlaloc IR extension kept original call for 'grad_body' — synthesised type … doesn't match call type" (synthesis falling back to runtime tape at the outer signature gate). Post-§0.4.196 it advances:
+- compile: succeeds (exit code 0, no IR verifier rejection)
+- synthesis: produces a real IrFunction (no "kept original call" warning)
+- runtime: `IllegalArgumentException: matmul inner dim mismatch: [2, 3] x [4, 3]`
+
+The runtime exception traces to BROADCAST template selection: slice 3a's `irBroadcast` uses `tensorTemplateParam` (= a, with `dims=[2, 3]`) as the template, so the gradient's BROADCAST produces a `[2, 3]` tensor instead of the correct `[2, 4]`. Downstream `MATMUL(broadcast=[2,3], bT=[4,3])` then fails (inner dim 3 ≠ 4). This is **exactly** the gap slice 3b-2b will close via `broadcastDims` (shipped in §0.4.195) + axis-to-param matching + runtime `intArrayOf(a.dims[0], b.dims[1])` IR construction.
+
+The diagnostic test was deliberately not committed — keeping a failing test in the suite is a maintenance cost without commensurate value. Slice 3b-2b will re-add it as a real correctness assertion once the synthesis lowers correctly.
+
+**Decisions worth flagging**:
+
+- **All 876 existing tests pass after the four fixes.** Square surfaces (1-param, 2-param SQUARE) are bit-exact equivalent because:
+  - `paramIrTypeMap[paramId]` equals `tensorIrType` when all tensor params share one shape.
+  - Call-site R decomposition for `Pair<a's, a's>` yields `[a's, a's]` — same as the pre-§0.4.196 fallback.
+  - Atomic atoms for `Rank2<Sym, Sym>` yield `[Sym, Sym, Sym]` instead of `[Rank2<Sym,Sym>, Rank2<Sym,Sym>, Rank2<Sym,Sym>]`. Different IrCall typeArguments but the substituted return type is `DTensor<Rank2<Sym, Sym>, F32>` either way (the IrCall's explicit `call.type` overrides), and the IR verifier accepts both.
+
+- **No new test added.** Slice 3b-2a is a structural-correctness landing — its observable effect is "rectangular gradient bodies advance from synthesis-rejected to compile-clean-but-runtime-wrong." The right test is the rectangular regression in slice 3b-2b. Adding a square-only assertion of the new code paths (e.g., a test that `paramIrTypes[1]` differs from `paramIrTypes[0]` for a rectangular surface) would have to fully execute the gradient to be meaningful — same as 3b-2b's test.
+
+- **The fallback path in `returnIrTypes` matters.** I considered hard-erroring when call-site R decomposition fails, but the historical `irTypeFor`-based path covers cases where `callType` isn't an `IrSimpleType` (degenerate IR) or the Pair/Triple component count doesn't match `fn.returns.size` (synthesis-time invariant violation). Falling back keeps the change strictly additive — square surfaces never hit the new path's fallback because their R is always a well-formed IrSimpleType.
+
+- **Bound violation for atomic atoms.** `Rank2<Sym, Sym>`'s inner args are `Sym` instances — proper ShapeAtoms. ✓ For `Rank2<Lit<Int>, Lit<Long>>` the inner args are `Lit<Int>` and `Lit<Long>` — also proper ShapeAtoms. ✓ The pre-§0.4.196 bound violation (using `Rank2<…>` as a `ShapeAtom`-typed type-arg) is now closed; the new code's typeArgs are bound-correct.
+
+- **Slice 3b-2b plan.** Now squarely defined — the four interlocking fixes in §0.4.195's plan reduce to two:
+  - **BROADCAST IrType derivation.** Backward-propagate from returns: each return DxirNode's IrType = `returnIrTypes[i]` (already computed in `synthesise()`). For each MATMUL whose output IrType is a return + one operand IrType is unknown, solve the missing operand's IrType via the matmul shape equation. Iterate until fixpoint (one pass should suffice for our test).
+  - **Axis-matching + runtime dims wiring.** Match BROADCAST output's inner-Rank2 atoms to params' inner-Rank2 atoms via structural type equivalence. Build IR `intArrayOf(param0.dims[axis0], param1.dims[axis1])` expression. Emit `broadcastDims` (shipped in §0.4.195) at the BROADCAST site. Add the rectangular regression test as a real correctness assertion.
+
+**Tests added** (+0): pure structural-fix landing; correctness verified by 876 existing tests passing.
+
+Full suite is green: **876 tests** (unchanged from §0.4.195).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 0c-rectangular slice 3b-2b: BROADCAST IrType derivation + axis-matching + runtime dims wiring + rectangular regression test.** Build the synthesise-time backward walk from returns to derive BROADCAST IrTypes (single pass: for each return-MATMUL, solve the BROADCAST operand via matmul shape equation `output = lhs · rhs ⇒ broadcast_op[0].cols = rhs.rows`). Match BROADCAST's inner-Rank2 shape atoms to params' inner-Rank2 atoms via structural type comparison; build the IR `intArrayOf(param.dims[axis], …)` expression at the irBroadcast call site (need `referenceProperties` for `DTensor.dims` getter, `kotlin.IntArray.get` for `[axis]` indexing, and `kotlin.intArrayOf` vararg or rank-specific helpers); emit `broadcastDims` instead of `broadcastLike` when matching succeeds. Add the rectangular regression test (`grad { (a, b) -> (a matmul b).sum().toFloat() }` with `R ≠ K ≠ C`).
+
+2. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+3. **CartPole Phase 3 first attempt** — gated on slice 3b-2b (rectangular MATMUL closure).
+
+**Definition-of-done for §0.4.196 — met**:
+- `paramIrTypes` reads per-param from `paramIrTypeMap` ✓
+- `returnIrTypes` decomposes call-site `Function<…>`'s R into Pair / Triple components ✓
+- `irMatmul` typeArgs use atomic atoms (R, K, C) instead of whole Rank2s ✓
+- `irTranspose` typeArgs use atomic atoms (R, C) ✓
+- All 876 prior tests pass unchanged ✓
+- Diagnostic confirmed rectangular gradient advances from synthesis-rejected to compile-clean (next gate is runtime broadcast template) ✓
+- Slice 3b-2b plan named explicitly with the two remaining sub-pieces ✓
+
 #### 0.4.195 Phase 0c-rectangular slice 3b-1 — `broadcastDims` runtime helper + scope decomposition 2026-04-27
 
 §0.4.194's hand-off named "Phase 0c-rectangular slice 3b: BROADCAST template via runtime dims helper" as the next pickup. **Originally scoped as one firing; this firing decomposes it into 3b-1 (now) and 3b-2 (next firing) after running the rectangular gradient test against the current code revealed the synthesis-side work is bigger than the runtime-helper landing alone.** §0.4.195 ships 3b-1: the `broadcastDims(v, dims)` runtime helper + 3 unit tests asserting its correctness. The synthesis-side wiring (BROADCAST IrType derivation + axis-to-param matching + `intArrayOf(param.dims[axis], …)` IR construction + outer signature fix for multi-shape param/return Pair lowering + matmul/transpose typeArgs as atomic atoms) is deferred to slice 3b-2.
