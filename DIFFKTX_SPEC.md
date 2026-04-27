@@ -39,6 +39,102 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.219 QWOP Phase 2 seventh slice — `crossLimbCouplingPrimal` pins **WHILE-in-WHILE coarsening + multi-input gradient** end-to-end 2026-04-27
+
+§0.4.218's hand-off named "QWOP Phase 2 seventh slice — WHILE-in-WHILE coarsening pin" as the next pickup. §0.4.219 lands it: exposes `Qwop.crossLimbCouplingPrimal()` and pins forward + coarsening smoke + multi-input gradient on the **only QWOP shape** that exercises §0.4.176's nested-loop coarsening surface.
+
+**Why this slice closes the WHILE-in-WHILE axis**:
+
+§0.4.211–§0.4.218 covered seven slices on **flat WHILEs** (single-loop primals with optional inner IF). §0.4.219 is the first slice that puts a WHILE inside another WHILE's body region. The structural axis is fundamentally different: the outer's `inits`/`yields` carry the inner WHILE's result, and the gradient must flow back through both layers correctly.
+
+**The nested recurrence**:
+
+```kotlin
+var acc = 0f
+for (frame in 0 until nFrames) {
+    var innerAcc = 0f
+    for (j in 0 until nLimbs) {
+        innerAcc += hip * knee + knee * shoulder
+    }
+    acc += innerAcc
+}
+```
+
+Closed form (with `K = nFrames × nLimbs = 9` at defaults):
+- Forward: `acc = K × knee × (hip + shoulder)`.
+- ∂/∂hip = `K × knee`.
+- ∂/∂knee = `K × (hip + shoulder)`.
+- ∂/∂shoulder = `K × knee`.
+
+**Key insight**: the recurrence is symmetric in `hip` and `shoulder` (both appear only as `knee × X` in `innerAcc`'s body), so ∂/∂hip should always equal ∂/∂shoulder. This is a strong structural pin — any per-input asymmetry bug introduced by WHILE-in-WHILE gradient routing would surface here.
+
+**The new primal** in [`Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+```kotlin
+fun crossLimbCouplingPrimal(nFrames: Int = 3, nLimbs: Int = 3): DxirFunction =
+    DxirBuilder.function("qwopCrossLimbCoupling") {
+        val hip = param("hip", f32)
+        val knee = param("knee", f32)
+        val shoulder = param("shoulder", f32)
+        val acc = crossLimbCoupling(hip, knee, shoulder, nFrames, nLimbs)
+        listOf(acc)
+    }
+```
+
+**The test file** [`QwopCrossLimbCouplingTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopCrossLimbCouplingTest.kt) — 6 tests, all passing:
+
+1. `primalStructure` — pins **1 top-level WHILE** (the outer; inner lives inside the outer's body region, not at top-level — `BenchmarkPrimals.countOps` only counts top-level body ops).
+2. `forwardEval` — at (hip=2, knee=3, shoulder=4): forward = 162 (= 9 × 3 × 6).
+3. `phiCalculusOnNestedWhile` — observability pin. Verifies `PhiCalculus.apply` doesn't throw on the WHILE-in-WHILE primal AND that forward eval of the coarsened form matches the primal (162). Doesn't assert a specific WHILE count post-coarsening — that's an implementation choice §0.4.176 may evolve.
+4. `gradientAtPositiveInputs` — **the headline pin**. At (2, 3, 4): grads = (27, 54, 27) = (K × knee, K × (hip + shoulder), K × knee).
+5. `gradientWithZeroKnee` — **discriminator**. At (1, 0, 1): forward = 0, grads = (0, 18, 0). df/dknee = 18 still flows through BOTH MULs even though forward is 0 and other partials vanish. A buggy chain rule that short-circuited at zero would give df/dknee = 0.
+6. `gradientSymmetryHipShoulder` — symmetry pin at two input sets. df/dhip should always equal df/dshoulder by closed-form symmetry. Pinned at (1, 5, 7) → (45, 45) and at (-2, 3, 8) → (27, 27).
+
+**Decisions worth flagging**:
+
+- **`countOps` is top-level only — adjusted the structure assertion accordingly.** First attempt asserted "2 WHILEs" expecting both to be visible. The build pointed out `BenchmarkPrimals.countOps` filters `fn.body.filterIsInstance<DxirOp>()` — only top-level. The inner WHILE lives inside the outer's body region, so it's invisible. Fixed by asserting "1 top-level WHILE" + adding a doc comment explaining the recursion. No structural change to the primal or coarsening pipeline — the test was just structurally wrong.
+
+- **`phiCalculusReducesWhileCount` was the wrong shape for an observability pin.** Initial draft asserted `coarsenedWhileCount < 2` (the structural floor). But for WHILE-in-WHILE, the post-coarsening count could be 0 (full unroll), 1 (no coarsening), or 3+ (outer unrolls but inner survives in each copy). All three are valid pre-Phase-2-closure; what matters is the gradient correctness pin below. Replaced with `phiCalculusOnNestedWhile` that asserts (a) coarsening doesn't throw, (b) coarsened forward eval matches primal forward eval. This is the right contract for an observability pin on a still-evolving structural surface.
+
+- **The §0.4.212 lift pass + §0.4.176 nested coarsening compose cleanly.** Before this firing, there was a real risk that WHILE-in-WHILE would surface a coarsening or AD bug similar to the §0.4.173 KNOWN LEAK that §0.4.211 hit. The fact that all 6 tests pass on the first run (after fixing the test-side `countOps` mistake) confirms that the §0.4.212 self-contained AD pipeline + §0.4.176 nested coarsening + §0.4.214's MUL chain rule all work together correctly.
+
+- **The symmetry pin is the most discriminating test in the file.** Forward + headline gradient could pass with a routing bug that swapped grad outputs but coincidentally produced (27, 54, 27). The symmetry pin at TWO different input sets, asserting `out[0][0] == out[2][0]`, would fail any per-input asymmetry. That assertion holds — Tlaloc's WHILE-in-WHILE gradient routing is symmetric.
+
+- **Naming convention check**: `crossLimbCouplingPrimal()` follows the established pattern. Total Phase 2 surface so far: 8 helpers exposed (hipUpdate, sumPositions, sumFineSteps, frictionAccum, forwardKinematicsLeg, forwardKinematicsArm, energyAccumulator, crossLimbCoupling). One helper deferred (`energyTorquePerJoint`, structurally redundant with `forwardKinematicsArm`). The full `avatarStepPrimal` integration test is the natural next pickup.
+
+- **Suite +6 to 943**.
+
+**Tests added** (+6):
+
+1. `QwopCrossLimbCouplingTest.primalStructure`
+2. `QwopCrossLimbCouplingTest.forwardEval`
+3. `QwopCrossLimbCouplingTest.phiCalculusOnNestedWhile`
+4. `QwopCrossLimbCouplingTest.gradientAtPositiveInputs`
+5. `QwopCrossLimbCouplingTest.gradientWithZeroKnee`
+6. `QwopCrossLimbCouplingTest.gradientSymmetryHipShoulder`
+
+Full suite is green: **943 tests** (+6 from §0.4.218).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 2 closure — full `avatarStepPrimal()` coarsened gradient integration test.** Exercises all 13 loops + 8 IFs simultaneously, validating that the per-slice gradient pins (§0.4.211–§0.4.219) compose correctly when combined into the full primal. 1-2 firings; potentially exposes new bugs that only surface at the full-shape scale.
+
+2. **Out-of-scope register refresh — QWOP Phase 2 is essentially shipped.** Per §0.4.207's pattern: when a multi-firing arc closes, write a register-refresh entry that updates §0.4 status (move QWOP from "Phase 2 open" to "Phase 2 nearly closed; integration test pending") and flags Phase 1's M9 head-to-head harness as the next-up axis. 1 firing.
+
+3. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking QWOP Phase 2 closure.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.219 — met**:
+- Phase 2 seventh-slice primal exposed (`Qwop.crossLimbCouplingPrimal()`) ✓
+- WHILE-in-WHILE coarsening doesn't throw + coarsened forward matches primal ✓
+- Multi-input gradient through nested loops verified at closed form ✓
+- Headline gradient (27, 54, 27) at (2, 3, 4) ✓
+- Discriminator pin (df/dknee = 18 even when forward is 0) ✓
+- Symmetry pin (df/dhip = df/dshoulder) at two input sets ✓
+- Suite +6 to 943 ✓
+- Phase 2 closure (full `avatarStepPrimal` integration) is the natural next pickup ✓
+
 #### 0.4.218 QWOP Phase 2 sixth slice — `energyAccumulatorPrimal` coarsened test pins **MUL-in-else-branch + upper-bound IF** chain rule 2026-04-27
 
 §0.4.217's hand-off named "QWOP Phase 2 sixth slice — `energyTorquePerJointPrimal` and/or `energyAccumulatorPrimal`" as the next pickup. §0.4.218 picks `energyAccumulatorPrimal` because the **MUL primary recurrence** (`energy + torque × dist`) is structurally distinct from every prior IF-in-WHILE slice: it puts a MUL inside the IF's else-branch and validates that VjpRegistry's MulRule cross-operand chain rule composes correctly with the IF gradient routing layer.

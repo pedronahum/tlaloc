@@ -334,6 +334,53 @@ object Qwop {
             listOf(energy)
         }
 
+    /**
+     * §0.4.219 — QWOP Phase 2 seventh slice: **WHILE-in-WHILE** coarsening
+     * pin. Headline structural test for §0.4.176's nested-loop coarsening
+     * surface. The only QWOP helper that exercises this shape.
+     *
+     * Wraps the same [crossLimbCoupling] helper that Phase C of
+     * [avatarStepPrimal] uses. The recurrence is two nested WHILE loops —
+     * outer over time frames, inner over limb pairs:
+     *
+     * ```kotlin
+     * var acc = 0f
+     * for (frame in 0 until nFrames) {
+     *     var innerAcc = 0f
+     *     for (j in 0 until nLimbs) {
+     *         innerAcc += hip * knee + knee * shoulder
+     *     }
+     *     acc += innerAcc
+     * }
+     * return acc
+     * ```
+     *
+     * **Forward semantics** (default `nFrames = 3`, `nLimbs = 3`):
+     *   - innerAcc per outer iter = `nLimbs × (hip × knee + knee × shoulder)`
+     *     = `nLimbs × knee × (hip + shoulder)`
+     *   - acc = `nFrames × nLimbs × knee × (hip + shoulder)`
+     *
+     * **Closed-form gradients** (with K = nFrames × nLimbs = 9):
+     *   - df/dhip = `K × knee`
+     *   - df/dknee = `K × (hip + shoulder)`
+     *   - df/dshoulder = `K × knee`
+     *
+     * **Coarsening expectation**: both WHILEs have constant trip counts. C5
+     * should unroll the outer WHILE, producing nFrames copies of the body
+     * (each containing an inner WHILE), and recursively coarsen each inner
+     * WHILE. The exact post-coarsening structure depends on §0.4.176's
+     * recursion behaviour — this test pins **what coarsening actually
+     * produces** for a WHILE-in-WHILE shape.
+     */
+    fun crossLimbCouplingPrimal(nFrames: Int = 3, nLimbs: Int = 3): DxirFunction =
+        DxirBuilder.function("qwopCrossLimbCoupling") {
+            val hip = param("hip", f32)
+            val knee = param("knee", f32)
+            val shoulder = param("shoulder", f32)
+            val acc = crossLimbCoupling(hip, knee, shoulder, nFrames, nLimbs)
+            listOf(acc)
+        }
+
     fun avatarStepPrimal(): DxirFunction =
         DxirBuilder.function("qwopAvatarStep") {
             val mHip = param("mHip", f32)
