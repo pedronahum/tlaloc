@@ -193,6 +193,32 @@ fun <S : Shape> broadcastDims(v: Float, dims: IntArray): DTensor<S, F32> {
 }
 
 /**
+ * §0.4.197 — Phase 0c-rectangular slice 3b-2b. Rank-specific delegates for
+ * [broadcastDims]. The K2 plugin's `irBroadcast` path emits a call to
+ * `broadcastDimsRank{1, 2, 3}` with individual `Int` args (read from existing
+ * tensor params' dims via property-getter + IntArray.get IR calls) instead of
+ * synthesising an `IntArray` vararg expression. Each delegate just reassembles
+ * the IntArray and forwards to [broadcastDims], so the runtime semantics are
+ * identical.
+ *
+ * **Why per-rank delegates instead of a vararg helper.** Synthesising an
+ * `intArrayOf(vararg)` IR expression requires building an [IrVararg] node,
+ * whose plugin-facing constructor is gated behind an `IrElementConstructorIndicator`
+ * marker (the public surface of `IrSimpleTypeImplKt` doesn't expose a clean
+ * factory for it). Per-rank delegates sidestep the vararg synthesis entirely —
+ * each call is a regular `IrCall` with one `Float` + N `Int` arguments, which
+ * `IrCallImpl.fromSymbolOwner` handles natively.
+ */
+fun <S : Shape> broadcastDimsRank1(v: Float, d0: Int): DTensor<S, F32> =
+    broadcastDims(v, intArrayOf(d0))
+
+fun <S : Shape> broadcastDimsRank2(v: Float, d0: Int, d1: Int): DTensor<S, F32> =
+    broadcastDims(v, intArrayOf(d0, d1))
+
+fun <S : Shape> broadcastDimsRank3(v: Float, d0: Int, d1: Int, d2: Int): DTensor<S, F32> =
+    broadcastDims(v, intArrayOf(d0, d1, d2))
+
+/**
  * §0.4.188 — DTensor → Float bridge for grad lambdas. The K2 plugin recognises
  * this call site (via FirLambdaToDxirLowering) as a no-op at the dxir level —
  * `DxirType(F32, [])` is the same whether the value flows through a DTensor

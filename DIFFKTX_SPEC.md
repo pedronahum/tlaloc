@@ -39,6 +39,80 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.197 Phase 0c-rectangular CLOSED — BROADCAST IrType derivation + axis matching + runtime dims; first end-to-end rectangular MATMUL gradient 2026-04-27
+
+§0.4.196's hand-off named "Phase 0c-rectangular slice 3b-2b: BROADCAST IrType derivation + axis-matching + runtime dims wiring + rectangular regression test" as the next pickup. §0.4.197 lands all four. **Phase 0c-rectangular is now closed**: `grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<Sym, Lit<Int>>` and `b: Rank2<Lit<Int>, Lit<Long>>` (R ≠ K ≠ C) lowers end-to-end through the K2 plugin, computes the analytic gradient at runtime, and the new regression test verifies the result matches `[[4,4,4],[4,4,4]]` for ∂A and `[[5,5,5,5],[7,7,7,7],[9,9,9,9]]` for ∂B. The full Phase 0c arc spans §0.4.185–§0.4.197 (13 firings, square + rectangular surfaces).
+
+**The mechanism** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt) + [HostOps.kt:174-219](core/src/commonMain/kotlin/io/tlaloc/core/ops/HostOps.kt#L174-L219):
+
+1. **Rank-specific runtime delegates** in `:core/ops/HostOps.kt`. Added `broadcastDimsRank1(v: Float, d0: Int)`, `broadcastDimsRank2(v, d0, d1)`, `broadcastDimsRank3(v, d0, d1, d2)` — each forwards to the IntArray-taking [broadcastDims] (shipped in §0.4.195). Per-rank delegates sidestep the IR-level vararg synthesis (`IrVarargImpl`'s plugin-facing constructor is gated behind an `IrElementConstructorIndicator` marker that's awkward to call from a plugin); plain `IrCall` with N individual `Int` args is what `IrCallImpl.fromSymbolOwner` handles natively.
+
+2. **BROADCAST IrType derivation via backward-pass solving from returns.** After the existing forward TRANSPOSE/MATMUL derivation (slice 3a), `synthesise()` now:
+   - Pre-populates `paramIrTypeMap[returnNode.id] = returnIrTypes[i]` for each rank-2/3 F32 return.
+   - Iterates body in reverse to fixpoint: for each MATMUL whose output IrType is known + exactly one operand IrType is unknown, solves the missing operand via the matmul shape equation `output: Rank2<R, C> = lhs: Rank2<R, K> · rhs: Rank2<K, C>` ⇒ if LHS missing, `lhs = Rank2<output.first, rhs.first>`; if RHS missing, `rhs = Rank2<lhs.last, output.last>`. Two new helpers (`deriveMissingMatmulLhsDTensor`, `deriveMissingMatmulRhsDTensor`) construct fresh DTensor IrTypes via the §0.4.194 `reshapeIrSimpleType` machinery.
+
+3. **Critical fix: forward-walk fallback removed.** Pre-§0.4.197 `deriveResultIrType` fell back to `tensorIrType` (= the FIRST tensor param's IrType) whenever an operand wasn't yet in `paramIrTypeMap`. For SQUARE this was harmless. For RECTANGULAR it **poisoned downstream derivations**: the MATMUL `dB = MATMUL(aT, bc)` with bc=BROADCAST(unknown) would forward-derive its output IrType using `tensorIrType` for bc — producing `Rank2<Lit<Int>, Lit<Int>>` (wrong) instead of leaving the output unset for backward to fix. The wrong output then poisoned bc's solve via the matmul equation. Removing the fallback (require operand IrType in map) made forward derivation only fire when operands are TRULY known, leaving the rest for backward to compute correctly.
+
+4. **Axis-matching with same-axis preference.** New `matchBroadcastAxesToParams` walks the BROADCAST target's inner-Rank2 atoms and finds a `(param, axisIdx)` pair for each axis where `shapeAtomEquivalent(targetAtom, paramInner.arguments[axisIdx])` holds. Two-pass match: first pass prefers same-axis (target axis i ↔ param axis i) so SQUARE inputs `Rank2<Sym, Sym>` get `[a.dims[0], a.dims[1]]` not `[a.dims[0], a.dims[0]]`; second pass falls back to ANY-axis for rectangular cases where atoms appear at different positions across params (target axis 1 = `Lit<Long>` matches b's axis 1 even when same-axis a's axis 1 is `Lit<Int>`). Structural equivalence on shape atoms recursively compares classifiers + arguments, distinguishing `Lit<Int>` from `Lit<Long>` correctly.
+
+5. **`irBroadcast` chooses between two paths.** When `targetIrType` is derivable AND axis matching succeeds, emit `broadcastDimsRank{N}<S>(v, p0.dims[i0], …)` — the dims are read at runtime from the matched params via `IrCall(DTensor.dims getter)` + `IrCall(IntArray.get, axis)` per axis. When axis matching fails (no compatible param-axis pair), fall back to the existing `broadcastLike(v, tensorTemplateParam)` path (rank-1 sum-adjoint, square 2D, etc.).
+
+6. **`SynthesisContext.fnParams` + `irParams`** added so `irBroadcast` can synthesise `param.dims[axis]` IR expressions during body lowering. Threaded via `bodyContext = context.copy(fnParams = fn.params, irParams = irParams)`.
+
+7. **Helper symbol lookups**: `dtensorDimsGetter()` resolves `DTensor.dims` (a `val` constructor property → property getter), `intArrayGetSymbol()` resolves `kotlin.IntArray.get(Int): Int` (the operator member used by `intArr[i]`).
+
+**The new test** [Rank2RectangularMatmulGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2RectangularMatmulGradientTest.kt):
+
+`grad { (a, b) -> (a matmul b).sum().toFloat() }` with `a: Rank2<Sym, Lit<Int>>, b: Rank2<Lit<Int>, Lit<Long>>` and concrete shape `(2, 3, 4)` at runtime. For A = [[1,2,3],[4,5,6]] and B = all-ones (3×4):
+- ∂Σ(AB)/∂a_ik = Σ_j b_kj. With B all-ones, each row sum is 4. ∂A = [[4,4,4],[4,4,4]] (2×3). ✓
+- ∂Σ(AB)/∂b_kj = Σ_i a_ik. Column sums of A are [1+4=5, 2+5=7, 3+6=9]. ∂B = [[5,5,5,5],[7,7,7,7],[9,9,9,9]] (3×4). ✓
+
+The test asserts: synthesis didn't fall back ("kept original call" not in warnings), output dims are `[2, 3]` and `[3, 4]` (verifying BROADCAST → matmul produced the right shapes at runtime), and values match analytic within 1e-3.
+
+**Decisions worth flagging**:
+
+- **Per-rank delegates over IntArray vararg synthesis.** I considered synthesising `intArrayOf(d0, d1)` IR via `IrVargImpl` directly. Looking at the API (`IrVarargImpl(IrElementConstructorIndicator, …)`) the public constructor is gated behind a marker class meant for IR construction phases — awkward to call from a synthesis plugin, and the alternative path (route through `pluginContext.referenceFunctions(intArrayOf)` then build an IrVararg) would require ~20 lines of vararg-element bookkeeping. Per-rank delegates trade three additional 1-line methods in HostOps for zero IR-level vararg handling. Cleaner.
+
+- **Same-axis preference matters.** The first-match-wins approach broke `Rank2<Sym, Sym>` (both axes match (a, 0)). Two-pass match (prefer same-axis, fall back to any-axis) handles both square and rectangular without special-casing. The strategy generalises to rank-3+ if/when those cases ship.
+
+- **The forward-fallback removal was the harder bug.** I implemented backward IrType derivation first; the rectangular test still failed because `paramIrTypeMap[%9.id]` was wrongly forward-derived (with `tensorIrType` fallback) and the backward pass's `if (paramIrTypeMap[ret.id] == null)` skipped overriding it. I considered force-overriding returns instead of removing the fallback. Force-override would have been more aggressive and might mask a real upstream bug; removing the fallback keeps the contract explicit ("forward only derives when all operands are KNOWN") which is structurally cleaner.
+
+- **No regression in SQUARE surfaces.** Verified all 876 prior tests pass after the no-fallback change because: forward walk's MATMUL-output derivation now skips ops with unknown BROADCAST operands (e.g., `MATMUL(broadcast, aT)` in the square `(a matmul a).sum()` body). Those unset entries in `paramIrTypeMap` mean `irMatmul` / `irBroadcast` fall back to `irTypeForNode` → `tensorIrType` (= a's IrType for square, structurally correct since all shapes share). The square-case behavioural surface is unchanged.
+
+- **`Rank2<Sym, Sym>` matching produces `[a.dims[0], a.dims[1]]` correctly.** For the existing 2-arg square test (Rank2MatmulTwoParamGradientTest) BOTH params are `Rank2<Sym, Sym>` and the BROADCAST target is `Rank2<Sym, Sym>` — same-axis match against ANY param's IrType gives `(p, 0)` and `(p, 1)` for the two output axes. Result: `broadcastDimsRank2(v, p.dims[0], p.dims[1])` where p is the first matching param. Equivalent to broadcastLike(v, p) but routed via the new path.
+
+- **Test count goes 876 → 877.** Pure correctness landing — the rectangular regression test is the only addition.
+
+- **`Phase 0c-rectangular CLOSED`** in the entry title is deliberate. The `docs/CARTPOLE_PORT_PLAN.md` Phase 0c gate (named in §0.4.191's amendment) is now closed for both square AND rectangular surfaces. CartPole Phase 3 NN forward is now plumbing-ready — first slice can land.
+
+- **Out-of-scope register (per Phase 1 priority #8): refresh.** Phase 0c-rectangular moves from "deferred multi-session structural" to "shipped". Updating the register is a candidate next firing but lower priority than CartPole Phase 3 first slice.
+
+**Tests added** (+1):
+
+1. `Rank2RectangularMatmulGradientTest.2-arg grad of sum of A matmul B with rectangular shapes matches analytic` — first end-to-end R ≠ K ≠ C MATMUL gradient through the K2 plugin.
+
+Full suite is green: **877 tests** (+1 from §0.4.196).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 3 first slice** — now unblocked. Per `docs/CARTPOLE_PORT_PLAN.md`, Phase 3 ports the NN forward (rectangular weights). Start with the smallest gradient surface that exercises rectangular MATMUL (2-layer MLP with `Rank2<HiddenDim, InputDim> matmul Rank2<InputDim, BatchDim>` or similar) and verify FD-validated gradient. Multi-session work — first firing should pick a 1-layer linear regression with rectangular weight + MSE loss, get end-to-end gradient agreement.
+
+2. **Out-of-scope register refresh** — Phase 0c-rectangular moves from "Phase-1 cleanup deferred" to "shipped" in the register. Lower priority than (1).
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **Phase 1 priority #1: Multi-result IF AD Phase 4 (nested WHILE inside an IF branch)** — multi-session structural. Headline gap. Lower priority than (1) for the immediate firing since (1) closes a recently-shipped surface; multi-result IF is genuinely harder.
+
+**Definition-of-done for §0.4.197 — met**:
+- `broadcastDimsRank1`, `broadcastDimsRank2`, `broadcastDimsRank3` shipped in `:core/ops/HostOps.kt` ✓
+- BROADCAST IrType derivation via backward-pass MATMUL solve in `synthesise()` ✓
+- Forward-walk fallback removed (no `tensorIrType` poisoning) ✓
+- Axis-matching helper with same-axis preference ✓
+- `irBroadcast` emits `broadcastDimsRank{N}` when matching succeeds; falls back to `broadcastLike` otherwise ✓
+- First end-to-end R ≠ K ≠ C MATMUL gradient test passes — `[[4,4,4],[4,4,4]]` and `[[5,5,5,5],[7,7,7,7],[9,9,9,9]]` ✓
+- All 876 prior tests pass + 1 new = 877 ✓
+- Phase 0c-rectangular **CLOSED** ✓
+
 #### 0.4.196 Phase 0c-rectangular slice 3b-2a — outer signature fix + atomic-atom typeArgs in matmul/transpose 2026-04-27
 
 §0.4.195's hand-off named "Phase 0c-rectangular slice 3b-2a: outer signature fix + atomic shape-atom typeArgs" as the next single-firing pickup. §0.4.196 lands it. Two structural fixes in `synthesise()` + `irTranspose` + `irMatmul`: (a) `paramIrTypes` now reads per-param from `paramIrTypeMap` so multi-param surfaces with distinct shapes get correctly-typed function parameters; (b) `returnIrTypes` decomposes the call-site `Function<P0, …, Pn-1, R>`'s R argument (Pair / Triple components when `fn.returns.size ∈ {2, 3}`) so the synthesised lambda's return type matches the call site exactly; (c) `irTranspose` and `irMatmul` now read atomic ShapeAtom type-args (`R`, `K`, `C`) by digging into the operand's outer DTensor → inner Rank2 → `arguments[0/1].typeOrNull` instead of using the whole-Rank2 IrType as a bound-violating-but-erased substitution.

@@ -49,6 +49,7 @@ import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
 import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.types.IrType
 import org.jetbrains.kotlin.ir.types.IrTypeArgument
+import org.jetbrains.kotlin.ir.types.defaultType
 import org.jetbrains.kotlin.ir.types.impl.buildSimpleType
 import org.jetbrains.kotlin.ir.types.typeOrNull
 import org.jetbrains.kotlin.ir.types.typeWith
@@ -102,6 +103,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val tensorIrType: IrType?,
         val tensorTemplateParam: IrValueParameter?,
         val operandIrTypes: Map<Int, IrType> = emptyMap(),
+        // §0.4.197 — Phase 0c-rectangular slice 3b-2b: the function's tensor params
+        // are needed by `irBroadcast`'s axis-matching path so it can synthesise
+        // `param.dims[axis]` IR expressions when the BROADCAST target shape doesn't
+        // match the single `tensorTemplateParam`'s shape (rectangular case).
+        val fnParams: List<DxirParam> = emptyList(),
+        val irParams: List<IrValueParameter> = emptyList(),
     )
 
     /**
@@ -150,20 +157,25 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     private fun deriveResultIrType(
         op: DxirOp,
         operandIrTypes: Map<Int, IrType>,
-        fallback: IrType?,
+        @Suppress("UNUSED_PARAMETER") fallback: IrType?,
     ): IrType? {
         if (op.type.dtype != F32 || op.type.rank != 2) return null
         return when (op.op) {
             OpKind.TRANSPOSE -> {
                 if (op.operands.size != 1) return null
-                val operandIr = operandIrTypes[op.operands[0].id] ?: fallback
-                val operandSimple = operandIr as? IrSimpleType ?: return null
+                // §0.4.197 — Phase 0c-rectangular slice 3b-2b: require operand IrType
+                // explicitly in the map. Pre-§0.4.197 fell back to `tensorIrType` (=
+                // first tensor param's IrType) for ANY missing operand — which poisons
+                // rectangular MATMUL gradients because TRANSPOSE-of-an-unknown propagates
+                // a's IrType where the operand's actual IrType is different. Backward
+                // walk's solver fixes any remaining unknowns from the returns side.
+                val operandSimple = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
                 deriveTransposedDTensor(operandSimple)
             }
             OpKind.MATMUL -> {
                 if (op.operands.size != 2) return null
-                val lhsIr = (operandIrTypes[op.operands[0].id] ?: fallback) as? IrSimpleType ?: return null
-                val rhsIr = (operandIrTypes[op.operands[1].id] ?: fallback) as? IrSimpleType ?: return null
+                val lhsIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val rhsIr = operandIrTypes[op.operands[1].id] as? IrSimpleType ?: return null
                 deriveMatmulOutputDTensor(lhsIr, rhsIr)
             }
             else -> null
@@ -217,6 +229,130 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val variance = originalLhsProjection?.variance ?: org.jetbrains.kotlin.types.Variance.INVARIANT
         val newRank2Projection = org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(combinedRank2, variance)
         return reshapeIrSimpleType(lhs, listOf(newRank2Projection, lhs.arguments[1]))
+    }
+
+    /**
+     * §0.4.197 — Backward-pass solve for a MATMUL's missing LHS operand. Given the
+     * MATMUL's output IrType `Rank2<R, C>` and the known RHS IrType `Rank2<K, C>`,
+     * the missing LHS must be `Rank2<R, K>` (since output.first = lhs.first = R and
+     * lhs.last = rhs.first = K).
+     *
+     * Returns null on degenerate shapes (non-Rank2 inner, missing args). The output
+     * DTensor wrapper is reused for the solved LHS so projections / nullability /
+     * annotations stay consistent with the rest of the synthesised lambda.
+     */
+    private fun deriveMissingMatmulLhsDTensor(output: IrSimpleType, rhs: IrSimpleType): IrSimpleType? {
+        if (output.arguments.size != 2 || rhs.arguments.size != 2) return null
+        val outputRank2 = output.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        val rhsRank2 = rhs.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        if (outputRank2.arguments.size != 2 || rhsRank2.arguments.size != 2) return null
+        val solvedRank2 = reshapeIrSimpleType(
+            outputRank2,
+            listOf(outputRank2.arguments[0], rhsRank2.arguments[0]),
+        )
+        val originalOutputProjection = output.arguments[0] as? org.jetbrains.kotlin.ir.types.IrTypeProjection
+        val variance = originalOutputProjection?.variance ?: org.jetbrains.kotlin.types.Variance.INVARIANT
+        val newRank2Projection = org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(solvedRank2, variance)
+        return reshapeIrSimpleType(output, listOf(newRank2Projection, output.arguments[1]))
+    }
+
+    /**
+     * §0.4.197 — Backward-pass solve for a MATMUL's missing RHS operand. Given the
+     * MATMUL's output IrType `Rank2<R, C>` and the known LHS IrType `Rank2<R, K>`,
+     * the missing RHS must be `Rank2<K, C>` (since lhs.last = rhs.first = K and
+     * output.last = rhs.last = C).
+     */
+    private fun deriveMissingMatmulRhsDTensor(output: IrSimpleType, lhs: IrSimpleType): IrSimpleType? {
+        if (output.arguments.size != 2 || lhs.arguments.size != 2) return null
+        val outputRank2 = output.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        val lhsRank2 = lhs.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        if (outputRank2.arguments.size != 2 || lhsRank2.arguments.size != 2) return null
+        val solvedRank2 = reshapeIrSimpleType(
+            outputRank2,
+            listOf(lhsRank2.arguments[1], outputRank2.arguments[1]),
+        )
+        val originalOutputProjection = output.arguments[0] as? org.jetbrains.kotlin.ir.types.IrTypeProjection
+        val variance = originalOutputProjection?.variance ?: org.jetbrains.kotlin.types.Variance.INVARIANT
+        val newRank2Projection = org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(solvedRank2, variance)
+        return reshapeIrSimpleType(output, listOf(newRank2Projection, output.arguments[1]))
+    }
+
+    /**
+     * §0.4.197 — Structural equivalence on shape-atom IrTypes. Two atoms are
+     * equivalent when their classifiers match AND their type arguments recursively
+     * match. Used by [matchBroadcastAxesToParams] to identify which (param, axis)
+     * pair contributes each axis of a BROADCAST's target shape. `Sym` ≡ `Sym`,
+     * `Lit<Int>` ≡ `Lit<Int>` but ≠ `Lit<Long>`, etc.
+     */
+    private fun shapeAtomEquivalent(a: IrType?, b: IrType?): Boolean {
+        if (a == null || b == null) return false
+        if (a === b) return true
+        val aSimple = a as? IrSimpleType ?: return false
+        val bSimple = b as? IrSimpleType ?: return false
+        if (aSimple.classifier != bSimple.classifier) return false
+        if (aSimple.arguments.size != bSimple.arguments.size) return false
+        for (i in aSimple.arguments.indices) {
+            if (!shapeAtomEquivalent(aSimple.arguments[i].typeOrNull, bSimple.arguments[i].typeOrNull)) return false
+        }
+        return true
+    }
+
+    /**
+     * §0.4.197 — Match each axis of a BROADCAST's target Rank2 IrType to a
+     * (param, axisIdx) pair where the param's inner-Rank2 atom at `axisIdx` is
+     * structurally equivalent to the target axis atom. Returns null when ANY axis
+     * fails to find a matching param-axis (BROADCAST falls back to the runtime-
+     * tape path or `broadcastLike` template selection).
+     *
+     * Ambiguous matches (multiple params have an equivalent atom) pick the first
+     * match — this is correct for the structural derivation since two equivalent
+     * atoms will produce the same runtime dim value at the matched axis.
+     */
+    private fun matchBroadcastAxesToParams(
+        targetIr: IrSimpleType,
+        fnParams: List<DxirParam>,
+        irParams: List<IrValueParameter>,
+        paramIrTypeMap: Map<Int, IrType>,
+    ): List<Pair<IrValueParameter, Int>>? {
+        val innerRank2 = (targetIr.arguments.firstOrNull()?.typeOrNull as? IrSimpleType) ?: return null
+        if (innerRank2.arguments.size != 2 && innerRank2.arguments.size != 1 && innerRank2.arguments.size != 3) return null
+        val matched = mutableListOf<Pair<IrValueParameter, Int>>()
+        for ((targetAxisIdx, axisArg) in innerRank2.arguments.withIndex()) {
+            val targetAtom = axisArg.typeOrNull ?: return null
+            // §0.4.197 — Two-pass match. First pass prefers same-axis match (target
+            // axis i ↔ param axis i) so for SQUARE inputs (`Rank2<Sym, Sym>`) the
+            // dims come from `[a.dims[0], a.dims[1]]` not `[a.dims[0], a.dims[0]]`.
+            // Second pass falls back to ANY-axis match for the rectangular case
+            // where target's axis atoms appear at different positions across params
+            // (e.g., target axis 1 = `Lit<Long>` matches b's axis 1).
+            var found: Pair<IrValueParameter, Int>? = null
+            for ((paramIdx, p) in fnParams.withIndex()) {
+                val paramIr = paramIrTypeMap[p.id] as? IrSimpleType ?: continue
+                val paramInner = (paramIr.arguments.firstOrNull()?.typeOrNull as? IrSimpleType) ?: continue
+                if (targetAxisIdx < paramInner.arguments.size &&
+                    shapeAtomEquivalent(targetAtom, paramInner.arguments[targetAxisIdx].typeOrNull)
+                ) {
+                    found = irParams[paramIdx] to targetAxisIdx
+                    break
+                }
+            }
+            if (found == null) {
+                for ((paramIdx, p) in fnParams.withIndex()) {
+                    val paramIr = paramIrTypeMap[p.id] as? IrSimpleType ?: continue
+                    val paramInner = (paramIr.arguments.firstOrNull()?.typeOrNull as? IrSimpleType) ?: continue
+                    for ((axisIdx, paramAxisArg) in paramInner.arguments.withIndex()) {
+                        if (shapeAtomEquivalent(targetAtom, paramAxisArg.typeOrNull)) {
+                            found = irParams[paramIdx] to axisIdx
+                            break
+                        }
+                    }
+                    if (found != null) break
+                }
+            }
+            if (found == null) return null
+            matched += found
+        }
+        return matched
     }
 
     /**
@@ -354,6 +490,45 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 }
             }
         }
+        // §0.4.197 — Phase 0c-rectangular slice 3b-2b: backward-pass IrType derivation.
+        // Pre-populate `paramIrTypeMap` for each return DxirNode with its decomposed
+        // IrType from `returnIrTypes`, then iterate the body in reverse: for each
+        // MATMUL whose output IrType is known + exactly one operand IrType is unknown,
+        // solve the missing operand via the matmul shape equation
+        // `output: Rank2<R, C> = lhs: Rank2<R, K> · rhs: Rank2<K, C>`. Iterates to
+        // fixpoint (one pass usually suffices). Propagates BROADCAST IrTypes (which
+        // forward-derivation can't compute since BROADCAST's operand is scalar).
+        for ((i, ret) in fn.returns.withIndex()) {
+            if (paramIrTypeMap[ret.id] == null && isAcceptedTensorType(ret.type)) {
+                paramIrTypeMap[ret.id] = returnIrTypes[i]
+            }
+        }
+        var changed = true
+        while (changed) {
+            changed = false
+            for (n in fn.body.reversed()) {
+                if (n !is DxirOp || n.op != OpKind.MATMUL) continue
+                if (n.operands.size != 2) continue
+                val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                val lhsId = n.operands[0].id
+                val rhsId = n.operands[1].id
+                val lhsKnown = paramIrTypeMap[lhsId] as? IrSimpleType
+                val rhsKnown = paramIrTypeMap[rhsId] as? IrSimpleType
+                if (lhsKnown == null && rhsKnown != null) {
+                    val solved = deriveMissingMatmulLhsDTensor(outputIr, rhsKnown)
+                    if (solved != null) {
+                        paramIrTypeMap[lhsId] = solved
+                        changed = true
+                    }
+                } else if (rhsKnown == null && lhsKnown != null) {
+                    val solved = deriveMissingMatmulRhsDTensor(outputIr, lhsKnown)
+                    if (solved != null) {
+                        paramIrTypeMap[rhsId] = solved
+                        changed = true
+                    }
+                }
+            }
+        }
 
         // N = 1 → scalar lambda returning R.  N ∈ {2, 3} → lambda returning Pair<…> /
         // Triple<…>, matching the surface signatures of grad2 / valueAndGrad /
@@ -387,7 +562,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // rank-1 param only for this slice — multi-tensor callers would need a richer
         // template-selection strategy keyed by DxirType equality.
         val tensorTemplateParam = if (firstTensorParamIdx >= 0) irParams[firstTensorParamIdx] else null
-        val bodyContext = context.copy(tensorTemplateParam = tensorTemplateParam)
+        val bodyContext = context.copy(
+            tensorTemplateParam = tensorTemplateParam,
+            fnParams = fn.params,
+            irParams = irParams,
+        )
 
         val body = buildBody(fn, lambdaFun, irParams, boxedReturnType, bodyContext)
             ?: return reject(lastFailureReason ?: "buildBody aborted (no specific gate stamped)")
@@ -765,6 +944,55 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!isAcceptedTensorType(op.type)) return null
 
         val operandDecl = env[operand.id] ?: return null
+
+        // §0.4.197 — Phase 0c-rectangular slice 3b-2b: try axis-matching first.
+        // When the BROADCAST's target IrType has been derived (slice 3a forward
+        // pass for TRANSPOSE/MATMUL outputs OR slice 3b-2b's backward pass from
+        // returns) AND each axis of its inner Rank2 atoms structurally matches
+        // some `(param, axisIdx)` pair, build a `broadcastDimsRankN(v, p0.dims[i0],
+        // …, pN-1.dims[iN-1])` call that constructs the runtime dims fresh from
+        // the matched params. Falls back to the existing `broadcastLike(v,
+        // tensorTemplateParam)` path when matching fails — covers the rank-1
+        // sum-adjoint case where `tensorTemplateParam` is the rank-1 input itself.
+        val targetIrType = irTypeForNode(op, context) as? IrSimpleType
+        if (targetIrType != null && context.fnParams.isNotEmpty()) {
+            val axisMatches = matchBroadcastAxesToParams(
+                targetIrType,
+                context.fnParams,
+                context.irParams,
+                context.operandIrTypes,
+            )
+            if (axisMatches != null) {
+                val rank = axisMatches.size
+                val helperSym = broadcastDimsRankSymbol(rank) ?: return null
+                // Type-arg: the result IrType's inner Rank2 (or Rank1/Rank3) — the
+                // helper's `S : Shape` slot. We pass the WHOLE inner Shape (e.g.,
+                // Rank2<R, C>) rather than its individual atoms because
+                // `broadcastDimsRankN<S>(...)` has just one shape parameter.
+                val shapeTypeArg = targetIrType.arguments.firstOrNull()?.typeOrNull
+                    ?: return null
+                val call = IrCallImpl.fromSymbolOwner(
+                    startOffset = startOffset,
+                    endOffset = endOffset,
+                    type = targetIrType,
+                    symbol = helperSym,
+                )
+                if (call.typeArguments.isNotEmpty()) {
+                    call.typeArguments[0] = shapeTypeArg
+                }
+                call.arguments[0] = irGet(operandDecl)
+                for ((i, match) in axisMatches.withIndex()) {
+                    val (param, axisIdx) = match
+                    val dimExpr = irParamDimAccess(param, axisIdx) ?: return null
+                    call.arguments[i + 1] = dimExpr
+                }
+                return call
+            }
+        }
+
+        // Fallback: existing broadcastLike(v, template) path. Handles rank-1
+        // SumRule's adjoint + rank-2 SQUARE surfaces where the template param
+        // shares the target shape.
         val template = context.tensorTemplateParam ?: return null
         val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
         val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
@@ -783,6 +1011,87 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         call.arguments[0] = irGet(operandDecl)
         call.arguments[1] = irGet(template)
         return call
+    }
+
+    /**
+     * §0.4.197 — Resolves `io.tlaloc.core.ops.broadcastDimsRank{N}` for [rank] ∈ {1, 2, 3}.
+     * Each delegate takes a `Float` value + N individual `Int` dim args and
+     * forwards to the IntArray-taking [io.tlaloc.core.ops.broadcastDims].
+     */
+    private fun broadcastDimsRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
+        val name = when (rank) {
+            1 -> "broadcastDimsRank1"
+            2 -> "broadcastDimsRank2"
+            3 -> "broadcastDimsRank3"
+            else -> return null
+        }
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier(name),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.197 — Synthesise `param.dims[axis]` as an IR expression. Two-step IR call:
+     * (1) `param.dims` (DTensor's val constructor property → property getter call);
+     * (2) `IntArray.get(axis)` (primitive operator).
+     *
+     * Result type is `Int` — feeds `broadcastDimsRankN`'s individual `Int` args.
+     */
+    private fun IrBuilderWithScope.irParamDimAccess(
+        param: IrValueParameter,
+        axis: Int,
+    ): IrExpression? {
+        val dimsGetterSym = dtensorDimsGetter() ?: return null
+        val intArrayGetSym = intArrayGetSymbol() ?: return null
+        val intArrayType = pluginContext.referenceClass(ClassId.fromString("kotlin/IntArray"))
+            ?.defaultType ?: return null
+        val dimsCall = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = intArrayType,
+            symbol = dimsGetterSym,
+        )
+        dimsCall.arguments[0] = irGet(param)
+        val getCall = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = pluginContext.irBuiltIns.intType,
+            symbol = intArrayGetSym,
+        )
+        getCall.arguments[0] = dimsCall
+        getCall.arguments[1] = IrConstImpl(
+            startOffset, endOffset,
+            pluginContext.irBuiltIns.intType,
+            IrConstKind.Int, axis,
+        )
+        return getCall
+    }
+
+    /**
+     * §0.4.197 — Resolves the getter for `io.tlaloc.core.DTensor.dims` (a `val`
+     * constructor property on `DTensor<S, T>`).
+     */
+    private fun dtensorDimsGetter(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            classId = ClassId(FqName("io.tlaloc.core"), Name.identifier("DTensor")),
+            callableName = Name.identifier("dims"),
+        )
+        val prop = pluginContext.referenceProperties(callableId).singleOrNull() ?: return null
+        return prop.owner.getter?.symbol
+    }
+
+    /**
+     * §0.4.197 — Resolves `kotlin.IntArray.get(Int): Int` — the primitive operator
+     * for `intArr[i]` reads.
+     */
+    private fun intArrayGetSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            classId = ClassId.fromString("kotlin/IntArray"),
+            callableName = Name.identifier("get"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
     /**
