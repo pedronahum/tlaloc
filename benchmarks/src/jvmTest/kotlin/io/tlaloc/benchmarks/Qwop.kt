@@ -97,7 +97,28 @@ object Qwop {
             val coarseDist = sumPositions(hip, knee, ankle, nSteps = 3)
             val fineDist = sumFineSteps(shoulder, coarseDist, nSteps = 3)
 
-            listOf(fineDist)
+            // Phase C — cross-limb coupling: 3 loops (WHILE-in-WHILE + standalone),
+            // 0 if-else. Tests §0.4.176's WHILE-in-WHILE coarsening surface.
+            val coupling = crossLimbCoupling(hip, knee, shoulder, nFrames = 3, nLimbs = 3)
+            val friction = frictionAccum(coupling, nSteps = 3)
+
+            // Phase D — forward kinematics chain: 2 loops + 2 if-else (ground contact
+            // for legs; shoulder torque limit for arms).
+            val legChain = forwardKinematicsLeg(hip, knee, ankle, nSegs = 3)
+            val armChain = forwardKinematicsArm(shoulder, friction, nSegs = 3)
+
+            // Phase E — energy / damping: 2 loops + 2 if-else (max-torque per joint;
+            // energy threshold gating).
+            val torque = energyTorquePerJoint(legChain, armChain, nSteps = 3)
+            val energy = energyAccumulator(torque, fineDist, nSteps = 3)
+
+            // Final: combine all stages into one scalar loss-like output.
+            val combined1 = op(OpKind.ADD, listOf(fineDist, friction), f32)
+            val combined2 = op(OpKind.ADD, listOf(combined1, legChain), f32)
+            val combined3 = op(OpKind.ADD, listOf(combined2, armChain), f32)
+            val combined4 = op(OpKind.ADD, listOf(combined3, energy), f32)
+
+            listOf(combined4)
         }
 
     /**
@@ -224,6 +245,327 @@ object Qwop {
                 val one = const(1, i32)
                 val newI = op(OpKind.ADD, listOf(i, one), i32)
                 yields(newAcc, newI)
+            },
+        )
+        return w.result(0)
+    }
+
+    /**
+     * Phase 0b helper: cross-limb coupling via WHILE-in-WHILE. Outer loop
+     * over time frames; inner loop over limb pairs accumulates pairwise
+     * MUL coupling. **2 nested loops total** (1 outer + 1 inner; the inner
+     * is one logical loop running [nLimbs] times). Tests §0.4.176's
+     * WHILE-in-WHILE coarsening + reverse-mode AD surface.
+     *
+     * ```kotlin
+     * var acc = 0f
+     * for (frame in 0 until nFrames) {
+     *     for (j in 0 until nLimbs) {
+     *         acc += hip * knee + knee * shoulder // (mock pairwise coupling)
+     *     }
+     * }
+     * ```
+     */
+    private fun DxirBuilder.crossLimbCoupling(
+        hip: io.tlaloc.ir.DxirNode,
+        knee: io.tlaloc.ir.DxirNode,
+        shoulder: io.tlaloc.ir.DxirNode,
+        nFrames: Int,
+        nLimbs: Int,
+    ): io.tlaloc.ir.DxirNode {
+        val zero = const(0f, f32)
+        val zeroI = const(0, i32)
+        val nFramesConst = const(nFrames, i32)
+        val nLimbsConst = const(nLimbs, i32)
+        val outer = whileOp(
+            inits = listOf(zero, zeroI),
+            cond = { args ->
+                val diff = op(OpKind.SUB, listOf(nFramesConst, args[1]), i32)
+                val pred = op(OpKind.STEP, listOf(diff), boolS)
+                yields(pred)
+            },
+            body = { args ->
+                val acc = args[0]
+                val frame = args[1]
+                // Inner loop: accumulate pairwise coupling over [nLimbs] iterations.
+                val zeroInner = const(0f, f32)
+                val zeroIInner = const(0, i32)
+                val inner = whileOp(
+                    inits = listOf(zeroInner, zeroIInner),
+                    cond = { innerArgs ->
+                        val innerDiff = op(OpKind.SUB, listOf(nLimbsConst, innerArgs[1]), i32)
+                        val innerPred = op(OpKind.STEP, listOf(innerDiff), boolS)
+                        yields(innerPred)
+                    },
+                    body = { innerArgs ->
+                        val innerAcc = innerArgs[0]
+                        val j = innerArgs[1]
+                        val pair1 = op(OpKind.MUL, listOf(hip, knee), f32)
+                        val pair2 = op(OpKind.MUL, listOf(knee, shoulder), f32)
+                        val pairSum = op(OpKind.ADD, listOf(pair1, pair2), f32)
+                        val newInnerAcc = op(OpKind.ADD, listOf(innerAcc, pairSum), f32)
+                        val one = const(1, i32)
+                        val newJ = op(OpKind.ADD, listOf(j, one), i32)
+                        yields(newInnerAcc, newJ)
+                    },
+                )
+                val newAcc = op(OpKind.ADD, listOf(acc, inner.result(0)), f32)
+                val one = const(1, i32)
+                val newFrame = op(OpKind.ADD, listOf(frame, one), i32)
+                yields(newAcc, newFrame)
+            },
+        )
+        return outer.result(0)
+    }
+
+    /**
+     * Phase 0b helper: standalone friction accumulator. Single-level WHILE
+     * with squared-input recurrence — different shape than [sumPositions]'s
+     * pure ADD chain or [crossLimbCoupling]'s pairwise MUL pattern.
+     *
+     * ```kotlin
+     * var acc = 0f
+     * for (i in 0 until nSteps) acc += coupling * coupling
+     * ```
+     */
+    private fun DxirBuilder.frictionAccum(
+        coupling: io.tlaloc.ir.DxirNode,
+        nSteps: Int,
+    ): io.tlaloc.ir.DxirNode {
+        val zero = const(0f, f32)
+        val zeroI = const(0, i32)
+        val nConst = const(nSteps, i32)
+        val w = whileOp(
+            inits = listOf(zero, zeroI),
+            cond = { args ->
+                val diff = op(OpKind.SUB, listOf(nConst, args[1]), i32)
+                val pred = op(OpKind.STEP, listOf(diff), boolS)
+                yields(pred)
+            },
+            body = { args ->
+                val acc = args[0]
+                val i = args[1]
+                val sq = op(OpKind.MUL, listOf(coupling, coupling), f32)
+                val newAcc = op(OpKind.ADD, listOf(acc, sq), f32)
+                val one = const(1, i32)
+                val newI = op(OpKind.ADD, listOf(i, one), i32)
+                yields(newAcc, newI)
+            },
+        )
+        return w.result(0)
+    }
+
+    /**
+     * Phase 0b helper: forward kinematics chain for the leg, with a
+     * ground-contact IF inside the loop body. **1 loop + 1 if-else.**
+     *
+     * ```kotlin
+     * var pos = 0f
+     * for (seg in 0 until nSegs) {
+     *     val tip = pos + hip + knee + ankle
+     *     // ground contact: foot can't go below zero
+     *     pos = if (tip < 0f) 0f else tip
+     * }
+     * ```
+     */
+    private fun DxirBuilder.forwardKinematicsLeg(
+        hip: io.tlaloc.ir.DxirNode,
+        knee: io.tlaloc.ir.DxirNode,
+        ankle: io.tlaloc.ir.DxirNode,
+        nSegs: Int,
+    ): io.tlaloc.ir.DxirNode {
+        val zero = const(0f, f32)
+        val zeroI = const(0, i32)
+        val nConst = const(nSegs, i32)
+        val w = whileOp(
+            inits = listOf(zero, zeroI),
+            cond = { args ->
+                val diff = op(OpKind.SUB, listOf(nConst, args[1]), i32)
+                val pred = op(OpKind.STEP, listOf(diff), boolS)
+                yields(pred)
+            },
+            body = { args ->
+                val pos = args[0]
+                val seg = args[1]
+                val sum1 = op(OpKind.ADD, listOf(pos, hip), f32)
+                val sum2 = op(OpKind.ADD, listOf(sum1, knee), f32)
+                val tip = op(OpKind.ADD, listOf(sum2, ankle), f32)
+                // Ground contact: tip < 0 → ground (0); else use computed tip.
+                // STEP returns 1 if (-tip) > 0, i.e. tip < 0. Use STEP(-tip) as the predicate.
+                val negTip = op(OpKind.NEG, listOf(tip), f32)
+                val belowGroundPred = op(OpKind.STEP, listOf(negTip), boolS)
+                val zeroF = const(0f, f32)
+                val newPos = op(
+                    OpKind.IF,
+                    listOf(belowGroundPred),
+                    f32,
+                    regions = listOf(
+                        region { yields(zeroF) },
+                        region { yields(tip) },
+                    ),
+                )
+                val one = const(1, i32)
+                val newSeg = op(OpKind.ADD, listOf(seg, one), i32)
+                yields(newPos, newSeg)
+            },
+        )
+        return w.result(0)
+    }
+
+    /**
+     * Phase 0b helper: forward kinematics chain for the arm, with a
+     * shoulder-torque-limit IF inside the loop body. **1 loop + 1 if-else.**
+     *
+     * ```kotlin
+     * var swing = 0f
+     * for (seg in 0 until nSegs) {
+     *     val acc = swing + shoulder + friction
+     *     // torque limit: max swing magnitude is 4
+     *     swing = if (acc > 4f) 4f else acc
+     * }
+     * ```
+     */
+    private fun DxirBuilder.forwardKinematicsArm(
+        shoulder: io.tlaloc.ir.DxirNode,
+        friction: io.tlaloc.ir.DxirNode,
+        nSegs: Int,
+    ): io.tlaloc.ir.DxirNode {
+        val zero = const(0f, f32)
+        val zeroI = const(0, i32)
+        val nConst = const(nSegs, i32)
+        val w = whileOp(
+            inits = listOf(zero, zeroI),
+            cond = { args ->
+                val diff = op(OpKind.SUB, listOf(nConst, args[1]), i32)
+                val pred = op(OpKind.STEP, listOf(diff), boolS)
+                yields(pred)
+            },
+            body = { args ->
+                val swing = args[0]
+                val seg = args[1]
+                val sum1 = op(OpKind.ADD, listOf(swing, shoulder), f32)
+                val acc = op(OpKind.ADD, listOf(sum1, friction), f32)
+                val maxSwing = const(4f, f32)
+                val excess = op(OpKind.SUB, listOf(acc, maxSwing), f32)
+                val overLimitPred = op(OpKind.STEP, listOf(excess), boolS)
+                val newSwing = op(
+                    OpKind.IF,
+                    listOf(overLimitPred),
+                    f32,
+                    regions = listOf(
+                        region { yields(maxSwing) },
+                        region { yields(acc) },
+                    ),
+                )
+                val one = const(1, i32)
+                val newSeg = op(OpKind.ADD, listOf(seg, one), i32)
+                yields(newSwing, newSeg)
+            },
+        )
+        return w.result(0)
+    }
+
+    /**
+     * Phase 0b helper: per-joint torque update with max-torque IF.
+     * **1 loop + 1 if-else.**
+     *
+     * ```kotlin
+     * var torque = 0f
+     * for (i in 0 until nSteps) {
+     *     val raw = torque + leg + arm
+     *     // max-torque clamp
+     *     torque = if (raw > 8f) 8f else raw
+     * }
+     * ```
+     */
+    private fun DxirBuilder.energyTorquePerJoint(
+        leg: io.tlaloc.ir.DxirNode,
+        arm: io.tlaloc.ir.DxirNode,
+        nSteps: Int,
+    ): io.tlaloc.ir.DxirNode {
+        val zero = const(0f, f32)
+        val zeroI = const(0, i32)
+        val nConst = const(nSteps, i32)
+        val w = whileOp(
+            inits = listOf(zero, zeroI),
+            cond = { args ->
+                val diff = op(OpKind.SUB, listOf(nConst, args[1]), i32)
+                val pred = op(OpKind.STEP, listOf(diff), boolS)
+                yields(pred)
+            },
+            body = { args ->
+                val torque = args[0]
+                val i = args[1]
+                val sum1 = op(OpKind.ADD, listOf(torque, leg), f32)
+                val raw = op(OpKind.ADD, listOf(sum1, arm), f32)
+                val maxTorque = const(8f, f32)
+                val excess = op(OpKind.SUB, listOf(raw, maxTorque), f32)
+                val overPred = op(OpKind.STEP, listOf(excess), boolS)
+                val newTorque = op(
+                    OpKind.IF,
+                    listOf(overPred),
+                    f32,
+                    regions = listOf(
+                        region { yields(maxTorque) },
+                        region { yields(raw) },
+                    ),
+                )
+                val one = const(1, i32)
+                val newI = op(OpKind.ADD, listOf(i, one), i32)
+                yields(newTorque, newI)
+            },
+        )
+        return w.result(0)
+    }
+
+    /**
+     * Phase 0b helper: energy accumulator with energy-threshold IF.
+     * **1 loop + 1 if-else.**
+     *
+     * ```kotlin
+     * var energy = 0f
+     * for (i in 0 until nSteps) {
+     *     val raw = energy + torque * dist
+     *     // energy threshold: cap at 100
+     *     energy = if (raw > 100f) 100f else raw
+     * }
+     * ```
+     */
+    private fun DxirBuilder.energyAccumulator(
+        torque: io.tlaloc.ir.DxirNode,
+        dist: io.tlaloc.ir.DxirNode,
+        nSteps: Int,
+    ): io.tlaloc.ir.DxirNode {
+        val zero = const(0f, f32)
+        val zeroI = const(0, i32)
+        val nConst = const(nSteps, i32)
+        val w = whileOp(
+            inits = listOf(zero, zeroI),
+            cond = { args ->
+                val diff = op(OpKind.SUB, listOf(nConst, args[1]), i32)
+                val pred = op(OpKind.STEP, listOf(diff), boolS)
+                yields(pred)
+            },
+            body = { args ->
+                val energy = args[0]
+                val i = args[1]
+                val product = op(OpKind.MUL, listOf(torque, dist), f32)
+                val raw = op(OpKind.ADD, listOf(energy, product), f32)
+                val maxEnergy = const(100f, f32)
+                val excess = op(OpKind.SUB, listOf(raw, maxEnergy), f32)
+                val overPred = op(OpKind.STEP, listOf(excess), boolS)
+                val newEnergy = op(
+                    OpKind.IF,
+                    listOf(overPred),
+                    f32,
+                    regions = listOf(
+                        region { yields(maxEnergy) },
+                        region { yields(raw) },
+                    ),
+                )
+                val one = const(1, i32)
+                val newI = op(OpKind.ADD, listOf(i, one), i32)
+                yields(newEnergy, newI)
             },
         )
         return w.result(0)

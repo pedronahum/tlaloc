@@ -2,16 +2,16 @@
 
 **Status:** Planning — source-access dependency named; structural Tlaloc surface largely shipped.
 
-**Ship state** (initialised 2026-04-27 at §0.4.208; Phase 0a shipped §0.4.209):
+**Ship state** (initialised 2026-04-27 at §0.4.208; Phase 0a + 0b shipped §0.4.209 + §0.4.210):
 
 | Phase | Plan estimate | Status |
 |---|---|---|
 | Phase 0a — synthetic Qwop.kt scaffold (≤ paper's structural shape) | 1 firing | **CLOSED (§0.4.209)** |
-| Phase 0b — widen to 13 loops + 8 if-else (paper's structural shape) | 1-2 firings | not started |
+| Phase 0b — widen to 13 loops + 8 if-else (paper's structural shape) | 1-2 firings | **CLOSED (§0.4.210)** |
 | Phase 1 — straight-line port of one body part's update step | 1-2 firings | not started |
 | Phase 2 — single loop body coarsened (one of QWOP's 13 loops) | 2-3 firings | not started |
 | Phase 3 — full QWOP function (13 loops + many if-else, 2 SOIs per paper) | 3-5 firings | not started |
-| **QWOP-specific total** | **8-13 firings** | **1 firing shipped** |
+| **QWOP-specific total** | **8-13 firings** | **2 firings shipped** |
 
 ## Phase 0a structural choices (§0.4.209)
 

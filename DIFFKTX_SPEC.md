@@ -39,6 +39,66 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.210 QWOP Phase 0b — widen `Qwop.kt` to 13 loops + 8 if-else (paper's structural shape) 2026-04-27
+
+§0.4.209's hand-off named "QWOP Phase 0b — widen to 13 loops + 8 if-else" as the next pickup. §0.4.210 lands it. The synthetic `Qwop.avatarStepPrimal()` now matches the paper's stated structural claim: **13 WHILE loops + 8 IF branches** in a single primal function (~570 lines). Phase 0 (the source-acquisition / reconstruction strategy phase) is now CLOSED. Phase 1+ (per-body-part gradient tests, single-loop coarsening, full function port) can begin.
+
+**The widening** in [`benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+Five new helper functions on `DxirBuilder` add structural complexity to the avatar-step primal:
+
+1. **`crossLimbCoupling(hip, knee, shoulder, nFrames, nLimbs)`** — WHILE-in-WHILE: outer loop over time frames, inner loop over limb pairs accumulating MUL coupling. **2 nested WHILEs** in dxir. Tests §0.4.176's WHILE-in-WHILE coarsening surface.
+
+2. **`frictionAccum(coupling, nSteps)`** — single-level WHILE with `coupling² + acc` recurrence. **1 WHILE.** Different shape from `sumPositions`'s pure ADD chain or `sumFineSteps`'s multiplicative coupling.
+
+3. **`forwardKinematicsLeg(hip, knee, ankle, nSegs)`** — WHILE chain accumulating leg position with **ground-contact IF** inside the body (`pos < 0` → clamp to 0). **1 WHILE + 1 IF.**
+
+4. **`forwardKinematicsArm(shoulder, friction, nSegs)`** — WHILE chain for arm with **shoulder-torque-limit IF** (`acc > 4f` → clamp to 4). **1 WHILE + 1 IF.**
+
+5. **`energyTorquePerJoint(leg, arm, nSteps)`** — per-joint torque update with **max-torque IF** (`raw > 8f` → clamp). **1 WHILE + 1 IF.**
+
+6. **`energyAccumulator(torque, dist, nSteps)`** — energy update with **energy-threshold IF** (`raw > 100f` → clamp). **1 WHILE + 1 IF.**
+
+**Final loop / IF count breakdown** (per-dxir-op, accounting for repeated calls to `integrateMuscle`):
+- Phase A: 4 muscle-integration WHILEs × 1 IF each = **4 WHILEs + 4 IFs**
+- Phase B: `sumPositions` + `sumFineSteps` = **2 WHILEs**
+- Phase C: `crossLimbCoupling` outer + inner + `frictionAccum` = **3 WHILEs**
+- Phase D: `forwardKinematicsLeg` + `forwardKinematicsArm` = **2 WHILEs + 2 IFs**
+- Phase E: `energyTorquePerJoint` + `energyAccumulator` = **2 WHILEs + 2 IFs**
+
+Total: **13 WHILEs + 8 IFs**. Matches the paper's stated structural claim exactly.
+
+**Decisions worth flagging**:
+
+- **Phase 0b matches the paper's structural shape, not its specific physics.** The function name `qwopAvatarStep` is suggestive (limb names: hip, knee, ankle, shoulder, leg, arm; physics-inspired primitives: collision response, ground contact, torque limits, energy threshold), but the actual numerical relationships are synthetic. The paper claims 1.17-1.51× speedup from coarsening on QWOP; in Phase 1+ we can compare Tlaloc's coarsening on this synthetic to that range.
+
+- **WHILE-in-WHILE in Phase C is the most-deferred-until-Phase-3-arc structural piece.** §0.4.176 closed WHILE-in-WHILE end-to-end through HMC's Phase 3 nested-loop test, but no benchmark primal exercises it as routinely as `crossLimbCoupling` will once Phase 1+ tests fire. Useful coverage gain even before the gradient tests run.
+
+- **`grep "whileOp("` returns 10 source lines but dxir has 13 WHILEs.** The 4 calls to `integrateMuscle` each emit 1 WHILE → 4 WHILEs from 1 source line. The crossLimbCoupling outer + inner are 2 source lines → 2 WHILEs. The other 6 helpers (sumPositions, sumFineSteps, friction, leg, arm, torque, energy) are 1 source line + 1 WHILE each = 7 WHILEs. Total: 4 + 2 + 7 = 13. Per-dxir-op count is what matters for the paper-comparison.
+
+- **No tests added.** Phase 0b is pure structural scaffolding. Phase 1+ tests will exercise gradient correctness on the primal.
+
+- **Ship state**: Phase 0 (Phase 0a + 0b) is CLOSED. The QWOP_PORT_PLAN.md ship-state table updated. Phases 1-3 ahead.
+
+**Tests added** (+0): pure structural scaffolding firing.
+
+Full suite is green: **891 tests** (unchanged from §0.4.209).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 1 first slice — straight-line port of one body part's update step.** Per the plan: hand-computed gradient pinned to 1e-3 f32 tolerance for one of the muscle-integration steps, mirroring HMC's Phase 1 pattern. The dxir primal can be invoked via the runtime tape OR through DxirReverseTransform + DxirInterpreter. Pick the simpler verification path. 1-2 firings.
+
+2. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking QWOP.
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.210 — met**:
+- `Qwop.avatarStepPrimal` widened to 13 loops + 8 if-else per the plan ✓
+- 6 new helper functions: crossLimbCoupling (WHILE-in-WHILE), frictionAccum, forwardKinematicsLeg/Arm, energyTorquePerJoint/Accumulator ✓
+- WHILE-in-WHILE structural coverage added (§0.4.176 surface exercised) ✓
+- QWOP_PORT_PLAN.md ship-state updated to mark Phase 0b CLOSED ✓
+- Build green at 891 (no tests added — pure structural firing) ✓
+
 #### 0.4.209 QWOP Phase 0a — synthetic `Qwop.kt` scaffold (6 loops + 4 if-else) 2026-04-27
 
 §0.4.208's hand-off named "QWOP Phase 0 first slice — write Qwop.kt" as the next pickup. §0.4.209 lands it. The plan's Phase 0 first-slice spec called for ~225 lines / 13 ± 1 loops / 8 ± 2 if-else; in practice, hand-writing a 225-line dxir-builder primal in one firing is costly. **§0.4.209 ships Phase 0a (a structurally-faithful subset: 6 loops + 4 if-else, ~135 lines)** so follow-on firings can widen incrementally without rewriting the foundation. The plan was amended to split Phase 0 into Phase 0a (this firing) and Phase 0b (next firing or two; widen to the paper's full 13 loops / 8 if-else shape).
