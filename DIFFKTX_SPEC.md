@@ -39,6 +39,85 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.202 Out-of-scope register refresh — Phase 0c-rectangular CLOSED + 4 Phase 3 slices shipped 2026-04-27
+
+§0.4.190 was the eighth register snapshot; §0.4.202 is the ninth. **12 sub-sections shipped between §0.4.191 and §0.4.201** — the most productive arc since the §0.4.169–§0.4.180 platform-work cluster. Two structural milestones moved from "deferred" to "shipped" or "in progress": Phase 0c-rectangular CLOSED, Phase 3 first four slices shipped. Plus a CARTPOLE_PORT_PLAN.md amendment (§0.4.191) that pre-emptively named the rectangular MATMUL gap that the rest of the arc closed.
+
+**Refreshed register (as of §0.4.201)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) — multi-result + rank-4+ surface | **Substantively closed for scalar + rank-1/2/3 F32 + square AND rectangular MATMUL** at §0.4.197. Open: rank-4+ tensor ops, multi-result outputs (the 3-return cap that blocks 4-grad-param surfaces — see CartPole Phase 3), `irIfOp` with non-empty bodies. |
+| Plugin | `irIfOp` widening to lower IF-with-body-ops | Currently empty-body only. The §0.4.174 lift pass hoists safe arithmetic to top level; non-safe-lift cases (DIV/SQRT/LOG in IF body) still hit it. |
+| Plugin | `>3` grad-output cap in `synthesise()` | Synthesise rejects `fn.returns.size > 3`. Gates 4+ param `grad` lambdas (CartPole's full NN). Would need a `Quadruple`-style wrapper or list-typed return. Multi-session. |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED — coarsening-side production | Substrate widening shipped §0.4.179. Open: coarsening passes still produce ONLY single-result COARSENED. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. Stays deferred — CartPole Phase 3's outer training loop will be the first port to need this. |
+| PhiCalculus | `liftIfRegionBodies` widening of `SAFE_LIFT_OPS` | Currently total-functions-only. EXP/LOG/SQRT/DIV could be added with care (NaN propagation rather than fault on unconsumed branch). Widen as a port surfaces a need. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.176). |
+| Control flow | Multi-block regions | Single-block today. |
+| Benchmark ports | CartPole Phase 3 (NN + outer training loop) | First four slices shipped (§0.4.198–§0.4.201). Remaining: 3+ layer chain, tensor `sign()`, outer `while (loss > threshold)` training loop, `>3` grad-output cap. Multi-session. |
+| Benchmark ports | QWOP | Last unported paper benchmark. Multi-session. |
+| Tensor ops | Tensor `sign()` function | Not exposed as user-facing op. CartPole's `sign(tanh(...)) - ε` requires an `OpKind.SIGN` + `SignRule` + runtime helper. ~1-2 firings. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+
+**Newly shipped between §0.4.191 and §0.4.201** (12 sub-sections, three themed clusters):
+
+- **CartPole port plan amendment (§0.4.191)** — single-firing doc-only update reflecting the Phase 0c square-matrix closure + naming Phase 0c-rectangular as Phase 3's prerequisite.
+
+- **Phase 0c-rectangular arc (§0.4.192 → §0.4.197)** — 6-firing arc that closes rectangular MATMUL through the K2 plugin. Slices: (1) `SynthesisContext.operandIrTypes` substrate; (2) per-param IrType population + `irMatmul`/`irTranspose` operand wiring; (3a) op-result IrType derivation via `buildSimpleType` cloning for TRANSPOSE/MATMUL; (3b-1) `broadcastDims` runtime helper; (3b-2a) outer signature fix (`paramIrTypes` from per-param map; `returnIrTypes` from call-site R decomposition) + atomic-atom typeArgs in `irMatmul`/`irTranspose`; (3b-2b) backward IrType derivation from returns via matmul shape-equation solve + `matchBroadcastAxesToParams` axis-matching + `irBroadcast` rewiring + first end-to-end R ≠ K ≠ C MATMUL gradient test. Phase 0c-rectangular **CLOSED**.
+
+- **CartPole Phase 3 first four slices (§0.4.198 → §0.4.201)** — 4-firing arc that ships the synthesis surface for tensor activations + the FD-validation methodology. §0.4.198 tensor STEP + forward + backward elementwise IrType propagation through `STEP/RELU/NEG/SQRT/EXP/LOG/SIN/COS/ABS` (unary) + `ADD/SUB/MUL/DIV` (binary); §0.4.199 tensor RELU + first 3-arg `grad` / `Triple`-return; §0.4.200 tensor TANH/SIGMOID + the load-bearing axis-matched `irConstFor` fix (TanhRule's rank-2 `1.0` const was being broadcast against `tensorTemplateParam` instead of the matmul output shape); §0.4.201 first FD-validated NN gradient + plugin defensive fix for `callableId` crash on local IrFunctions.
+
+**Decisions worth flagging**:
+
+- **Deferred count went from 17 (§0.4.190) to 18 (§0.4.202)** — net +1 with one major item closing (Phase 0c-rectangular) and two new items naming themselves: (a) `>3` grad-output cap (a CartPole Phase 3 blocker that surfaced once 3-arg `grad` shipped in §0.4.199); (b) tensor `sign()` (named explicitly because the CartPole NN forward needs it). The "rectangular MATMUL" entry from §0.4.190 is removed (CLOSED).
+
+- **Cadence: 12 sub-sections is a long arc, but it's structurally one piece.** The Phase 0c-rectangular slices (192–197) decomposed naturally into 6 sub-firings because each slice surfaced the next gate (substrate → wiring → output IrType → broadcast IrType → axis matching). Trying to ship rectangular MATMUL as one big firing would have been brittle; the 6-slice decomposition kept each sub-firing single-meaning and let one firing's diagnostic shape the next firing's plan.
+
+- **"FD-validated" methodology now reusable.** §0.4.201's central-difference gradient check pattern can drop into any future Phase 3 / CartPole port slice. The 5e-2 tolerance is loose by design (f32 + tanh's nonlinearity); future tests with f64 could tighten to 1e-2.
+
+- **Plugin became more user-friendly via two defensive fixes.** §0.4.196's outer-signature fallback (degenerate IR / unexpected component count → match historical `irTypeFor` behaviour) and §0.4.201's `callableId` try/catch (skip local functions) are both in production use code, not just tests. The plugin's intrinsic-recognition path is now strictly "callable-name-based" without crashing on edge cases.
+
+- **Phase 1 (head-to-head harness) status: still 4 K2-plugin-shipped benchmarks** (Brachistochrone, HookeanSpring, HMC, CartPole 1+2). BGDHyperOpt has `:benchmarks` port. QWOP unported. Phase 2 of the harness (Python references) gated on user-side toolchain — unchanged from §0.4.190.
+
+- **CartPole Phase 3 status sharpened.** The §0.4.190 register said "Phase 3 deferred (gated on rectangular MATMUL)". §0.4.202 register says "Phase 3 in progress, 4/N slices shipped, remaining: 3+ layer chain, sign(), outer loop, >3-output cap". Materially different status — Phase 3 is no longer a single deferred item but a 4-firing-and-counting active arc.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **883 tests** (unchanged from §0.4.201).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 3 fifth slice — `>3` grad-output cap.** Deferred-table item that gates the full CartPole NN. Widen `synthesise()` to handle `fn.returns.size > 3` via a list-typed wrapper or a custom `Quadruple` data class in `:autograd`. Single-to-two firings depending on which approach. Once landed, a 4-grad-param NN test (X + W1 + W2 + W3) becomes shippable.
+
+2. **Tensor `sign()` function.** Add `OpKind.SIGN`, `SignRule` (`STEP(x) - STEP(-x)` per AbsRule's pattern), `:core/ops/DTensor.sign()` runtime helper, `irSign` synthesis arm, FIR `:core.ops.sign` UNARY_OP_MAP entry. Single firing; mirrors §0.4.198's tensor-STEP pattern.
+
+3. **CartPole Phase 3 sixth slice — 3-layer NN chain test.** Once (1) lands, port `((X · W1).relu() · W2).relu() · W3` with sum loss. 3 hidden layers + 2 relus + linear output. Mirror §0.4.199's 2-layer test.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+5. **Phase 1 priority #1: Multi-result IF AD Phase 4** — multi-session structural. Lower priority while CartPole Phase 3 is unlocking compounding wins.
+
+**Definition-of-done for §0.4.202 — met**:
+- Deferred table refreshed to reflect §0.4.191–§0.4.201 closures ✓
+- "Rectangular MATMUL" entry removed (CLOSED) ✓
+- "Phase 3 (NN + outer training loop)" reshaped from "deferred" to "in progress with named gaps" ✓
+- Two new items named: `>3` grad-output cap + tensor `sign()` ✓
+- CARTPOLE_PORT_PLAN.md ship-state table updated to reflect Phase 0c-rectangular CLOSED + Phase 3 progress ✓
+- Three themed clusters named (CartPole port plan amendment; Phase 0c-rectangular arc; Phase 3 first four slices) ✓
+- Recommended-next surfaces the `>3-output` cap + tensor `sign()` + 3-layer chain ✓
+- Register stays tabular per the §0.4.108–§0.4.190 organising principle ✓
+- Full suite stays green at 883 tests (unchanged) ✓
+
 #### 0.4.201 CartPole Phase 3 fourth slice — first FD-validated NN gradient + local-function plugin robustness fix 2026-04-27
 
 §0.4.200's hand-off named "CartPole Phase 3 fourth slice — first FD-validated CartPole-style test" as the next pickup. §0.4.201 lands it: a 1-hidden-layer NN forward `((X · W1).tanh() · W2).sum()` with rectangular weights (3 distinct ShapeAtoms), tanh activation, and central-difference finite-difference validation of the analytic gradient. Test result: analytic gradient agrees with FD within 5e-2 tolerance for non-symmetric inputs (X with mixed signs, W1 / W2 with various magnitudes). Plus a defensive plugin fix surfaced by writing the test.

@@ -1,8 +1,8 @@
 # CartPole Benchmark Port — Plan
 
-**Status:** Implementation **2/3 phases complete** (§0.4.181 amendment, refreshed §0.4.191); Phase 3 gated on **rectangular MATMUL** in synthesis (square-MATMUL surface closed §0.4.187 + §0.4.189).
+**Status:** Implementation **2/3 phases complete + Phase 3 in progress** (refreshed §0.4.202). Phase 0c-rectangular **CLOSED** (§0.4.197); Phase 3 has shipped its first four slices (§0.4.198–§0.4.201) — tensor STEP / RELU / TANH / SIGMOID synthesis, axis-matched broadcast helpers, FD-validated 1-hidden-layer NN. Remaining Phase 3 gaps: 3+ layer chains, tensor `sign()`, the outer `while (loss > threshold)` training loop, and a `>3` grad-output cap that blocks differentiating wrt 4 params (X, W1, W2, W3) simultaneously.
 
-**Ship state** (updated 2026-04-27):
+**Ship state** (updated 2026-04-27, register refresh §0.4.202):
 
 | Phase | Plan estimate | Actual | Closing entry |
 |---|---|---|---|
@@ -11,19 +11,33 @@
 | Phase 0b — max/sign as IF chains | 1 firing | not needed (Phase 1 used direct IF) | n/a |
 | Phase 0c — plugin MATMUL (square) | deferred | **3 firings (slices a/b/c)** | §0.4.185 + §0.4.186 + §0.4.187 |
 | Phase 0c-followup — DTensor → Float bridge + irMatmul/irTranspose | not in original plan | **2 firings** | §0.4.188 + §0.4.189 |
-| Phase 0c-rectangular — per-operand IrType tracking | not in original plan | **NOT DONE** (multi-session) | pending |
+| Phase 0c-rectangular — per-operand IrType tracking | not in original plan | **6 firings (slices 1 → 3b-2b)** — CLOSED | §0.4.192 → §0.4.197 |
 | Phase 1 — physics-only port | 1 firing | 6 firings (first attempt §0.4.168 hit downstream gate; closure via §0.4.169–§0.4.175 diagnostic + structural arc) | §0.4.175 |
 | Phase 2 — B=3 loop with state passing | 2 firings | 1 firing (regression test only; no new code) | §0.4.178 |
-| Phase 3 — NN + outer training loop | 4-5 firings | **NOT DONE** (gated on Phase 0c-rectangular) | pending |
-| **CartPole-specific total (closed)** | **8-10 firings (Phases 0a + 1 + 2)** | **11 firings (165 + 166 + 167 + 168 + 175 + 178 + 185 + 186 + 187 + 188 + 189)** | |
+| Phase 3 — NN + outer training loop | 4-5 firings | **In progress (4/N firings shipped)** — slices 1+2+3+4 closed; sign / 3-layer chain / outer loop / >3-output cap pending | §0.4.198 → §0.4.201 |
+| **CartPole-specific total (closed Phase 0a-c + 1 + 2 + Phase 3 slices 1-4)** | **8-10 firings** | **21 firings** (165 + 166 + 167 + 168 + 175 + 178 + 185 + 186 + 187 + 188 + 189 + 192 + 193 + 194 + 195 + 196 + 197 + 198 + 199 + 200 + 201) | |
 
-Plus **8 firings of cross-cutting platform work** (§0.4.169–§0.4.176) that closed Phase 2 #1 (Plugin IR-side synthesis closure) for the scalar-arithmetic surface — discovered through the CartPole Phase 1 attempt (§0.4.168). Combined: **19 firings actually shipped** for the closed pieces vs. 10-12 originally planned. The plan didn't budget either the diagnostic + structural arc OR the Phase 0c slice fan-out.
+Plus **8 firings of cross-cutting platform work** (§0.4.169–§0.4.176) that closed Phase 2 #1 (Plugin IR-side synthesis closure) for the scalar-arithmetic surface — discovered through the CartPole Phase 1 attempt (§0.4.168). Combined: **29 firings actually shipped** for the closed pieces + 4 Phase 3 sub-pieces vs. 10-12 originally planned. The plan didn't budget either the diagnostic + structural arc, the Phase 0c slice fan-out, OR the Phase 3 sub-fan-out.
 
 **Phase 0b never landed** because Phase 1's source uses the direct `if (maxArg > 0.0f) maxArg else 0.0f` IF expression — no `max` / `sign` extension needed. Phase 0b stays in the plan as a future addition if a different CartPole-style port surfaces the need.
 
-**Phase 0c is now SQUARE-MATRIX-CLOSED**: §0.4.185 wired Rank2/3 param recognition (FIR side); §0.4.186 widened `DxirToIrSynthesis` to accept rank-1/2/3 F32 + lowered rank-N F32 const through `broadcastLike`; §0.4.187 added `:core.ops.matmul` to `BINARY_OP_MAP`. §0.4.188 then landed the DTensor → Float bridge (via `:core.ops.toFloat` + `:core.ops.sum`) so lambda bodies can return Float computed from tensor intermediates. §0.4.189 added `irTranspose` + `irMatmul` synthesis arms, and verified the first end-to-end MATMUL gradient: `grad { a -> (a matmul a).sum().toFloat() }` on A=[[1,2],[3,4]] produces [[7,11],[9,13]] within `1e-3` tolerance.
+**Phase 0c-rectangular CLOSED §0.4.197**: 6-firing arc spanning slices 1 (substrate / `operandIrTypes` field), 2 (per-param IrType population + `irMatmul`/`irTranspose` operand wiring), 3a (TRANSPOSE/MATMUL output IrType derivation), 3b-1 (`broadcastDims` runtime helper), 3b-2a (outer signature fix + atomic-atom typeArgs), 3b-2b (BROADCAST IrType derivation via backward MATMUL solve + axis-matching + runtime dims wiring). The first end-to-end R ≠ K ≠ C MATMUL gradient (`grad { (a, b) -> (a matmul b).sum().toFloat() }`) lands in §0.4.197 with three distinct ShapeAtoms.
 
-**Phase 3 is now gated on rectangular MATMUL**, NOT square. CartPole's NN forward (`a = sign(tanh(relu(relu(X·W1)W2)W3) - ε)`) uses rectangular weights (X is batch×4, W1 is 4×8, W2 is 8×4, W3 is 4×1). The current synthesis surface threads ONE shape parameter through `tensorIrType` — works for `Rank2<R, R>` square shapes but not for `Rank2<R, K> matmul Rank2<K, C>` where R, K, C are distinct. Per the §0.4.190 register, the rectangular-MATMUL widening is a multi-session item: extend `SynthesisContext` to carry per-operand IrTypes (likely a `Map<DxirNode.id, IrType>`); rewrite `irMatmul` / `irTranspose` to use per-operand types instead of the single `tensorIrType`.
+**Phase 3 first four slices SHIPPED**:
+- §0.4.198 — tensor STEP synthesis + elementwise IrType propagation (forward + backward) + first 1-layer NN gradient (`grad { (X, W) -> (X matmul W).relu().sum().toFloat() }`).
+- §0.4.199 — tensor RELU synthesis + first 2-layer NN gradient with 3-arg `grad` / `Triple`-return.
+- §0.4.200 — tensor TANH/SIGMOID synthesis + axis-matched `irConstFor` (TanhRule's `1 - tanh²` rank-2 const fix) + first tanh gradient.
+- §0.4.201 — first FD-validated NN gradient (1-hidden-layer + tanh + central-difference validation) + plugin-side defensive fix for `callableId` crash on local IrFunctions.
+
+**Phase 3 remaining gaps** (deferred multi-session items):
+
+1. **`>3` grad-output cap.** `synthesise()` rejects `fn.returns.size > 3`. CartPole's NN has 4 weights (X + W1 + W2 + W3) which would need a `Quadruple` boxed return. Kotlin stdlib has no `Quadruple` — would need either a custom data class OR widening `synthesise()` to handle `n` returns via a list-typed wrapper. Multi-session.
+
+2. **3+ layer chain test.** Existing 2-layer chain (§0.4.199) covers `relu(matmul) → matmul`. CartPole's 3-layer NN with both relu activations + tanh on output is structurally similar but needs the `>3-output` cap fixed first to differentiate all 4 params. Single-firing once the cap lifts.
+
+3. **Tensor `sign()` function.** No `sign` op kind exists today. CartPole's outer chain `sign(tanh(...)) - ε` discretises the action. Would need: `OpKind.SIGN`, `SignRule` (gradient via STEP - STEP(-x), or zero everywhere except at non-differentiable origin), `:core/ops/DTensor.sign()` runtime helper, `irSign` synthesis arm. ~1-2 firings.
+
+4. **Outer training loop.** `while (loss > threshold) { ... apply gradient updates ... }` — Tlaloc's coarsening can't handle gradient-bearing WHILE loops where the body mutates lambda-captured state (closing over `W1` etc. and overwriting). The trainer pattern is gradient-descent step + recompute loss + check threshold. Multi-session structural item.
 
 The historical planning content below is preserved verbatim for reference.
 
