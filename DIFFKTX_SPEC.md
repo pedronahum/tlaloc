@@ -39,6 +39,64 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.209 QWOP Phase 0a — synthetic `Qwop.kt` scaffold (6 loops + 4 if-else) 2026-04-27
+
+§0.4.208's hand-off named "QWOP Phase 0 first slice — write Qwop.kt" as the next pickup. §0.4.209 lands it. The plan's Phase 0 first-slice spec called for ~225 lines / 13 ± 1 loops / 8 ± 2 if-else; in practice, hand-writing a 225-line dxir-builder primal in one firing is costly. **§0.4.209 ships Phase 0a (a structurally-faithful subset: 6 loops + 4 if-else, ~135 lines)** so follow-on firings can widen incrementally without rewriting the foundation. The plan was amended to split Phase 0 into Phase 0a (this firing) and Phase 0b (next firing or two; widen to the paper's full 13 loops / 8 if-else shape).
+
+**The new file** [`benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+- `Qwop.avatarStepPrimal()` returns a `DxirFunction` for the synthetic QWOP-shape avatar-step computation.
+- **Inputs**: 4 scalar `Float` muscle extensions (hip, knee, ankle, shoulder).
+- **Output**: 1 scalar `Float` distance traveled.
+- **Phase A** — 4 muscle-integration WHILEs, each containing a collision-response IF:
+  ```text
+  for (i in 0 until 4):
+      if (state > maxAngle):
+          state = maxAngle
+      else:
+          state = state + muscle * 0.1f
+  ```
+  Each loop exercises C5 unroll on a constant-trip-count WHILE + multi-result IF AD (§0.4.155 surface) for the per-iteration carried state.
+- **Phase B** — 2 distance-accumulation WHILEs:
+  - `sumPositions(hip, knee, ankle)` — pure ADD recurrence (C6/C7 surface).
+  - `sumFineSteps(shoulder, coarseDist)` — multiplicative coupling MUL + ADD recurrence (different shape than `sumPositions`'s pure ADD).
+- **Total**: 6 loops, 4 if-else, ~135 lines.
+
+**Decisions worth flagging**:
+
+- **DxirBuilder form (matches existing `BenchmarkPrimals` convention).** The plan's earlier "Inputs: DTensor<Rank1<Sym>, F32>" spec was for a user-code lambda style. In practice the dxir-builder approach is more direct for stress-testing Tlaloc's coarsening + reverse-mode AD pipeline without going through the K2 plugin's FIR-side recognition. The plan was amended in-place to capture this choice.
+
+- **4 scalar inputs vs 1 rank-1 input** — equivalent surface for the coarsening pipeline. A rank-1 input of length 4 decomposes to 4 scalar GATHERs anyway when the loop body indexes into it.
+
+- **Phase 0a is structurally-faithful, not paper-faithful.** The synthetic function exercises the structural primitives QWOP needs (multi-result IF inside a WHILE, affine-recurrence WHILEs, multiplicative-recurrence WHILEs) without trying to match QWOP's specific avatar physics. This is the Path 2 (synthetic, not reconstructed) decision from the plan's Phase 0 strategy.
+
+- **Compile-time error caught: `DxirBuilder.FunctionBuilder` doesn't exist.** First draft used `DxirBuilder.FunctionBuilder.integrateMuscle` as the receiver type; the actual class is just `DxirBuilder` (which implements `DxirEmitter`). Fixed via global rename.
+
+- **Phase 0b plan documented in the amended port plan.** Adds: +3 loops (cross-limb interaction WHILE-in-WHILE), +2 loops (forward kinematics chain accumulation), +2 loops (energy / damping per-joint update), +4 if-else (ground contact, torque limits, gait-phase, energy thresholding). Post-0b: 13 loops, 8 if-else — matches paper's structural claim.
+
+- **No tests added.** Phase 0a is pure structural scaffolding. Phase 1's first-slice test (per the plan: hand-computed gradient for one muscle's update step pinned to 1e-3 f32 tolerance) will be the first integration test.
+
+**Tests added** (+0): pure structural scaffolding firing.
+
+Full suite is green: **891 tests** (unchanged from §0.4.208).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 0b — widen to 13 loops + 8 if-else.** Per the amended plan's Phase 0b spec: add cross-limb interaction WHILE-in-WHILE (+3 loops), forward kinematics chain accumulation (+2), energy/damping per-joint update (+2), and 4 more if-else (ground contact, torque limits, gait-phase, energy thresholding). ~1-2 firings. Once landed, the synthetic QWOP-shape function matches the paper's stated structural claim.
+
+2. **QWOP Phase 1 first slice — straight-line port of one body part's update step.** Wait until Phase 0b closes (the full structure needs to be in place before testing per-body-part gradients). 1-2 firings.
+
+3. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural work; not blocking QWOP.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.209 — met**:
+- `Qwop.avatarStepPrimal` shipped as a structurally-faithful synthetic ✓
+- 6 loops + 4 if-else, ~135 lines ✓
+- Compiles cleanly into `:benchmarks/jvmTest` ✓
+- Plan amended with Phase 0a/0b split + structural choices captured ✓
+- All 891 prior tests pass unchanged ✓
+
 #### 0.4.208 QWOP benchmark port planning doc — `docs/QWOP_PORT_PLAN.md` 2026-04-27
 
 §0.4.207's hand-off named "Phase 1 priority #1: Multi-result IF AD Phase 4" as the next pickup, but inspecting the priority ladder against the §0.4.207 register revealed that priority #1–#5 + #8 are all CLOSED — Multi-result IF AD Phase 4 (WHILE-in-IF) shipped at §0.4.152 + §0.4.153, all four nested control-flow combinations (IF-in-IF, IF-in-WHILE, WHILE-in-IF, WHILE-in-WHILE) closed end-to-end, the four other paper benchmarks ported. **The only structural Phase 1 piece remaining is QWOP — priority #6.** §0.4.208 lands its planning doc.

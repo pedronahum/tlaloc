@@ -2,15 +2,66 @@
 
 **Status:** Planning — source-access dependency named; structural Tlaloc surface largely shipped.
 
-**Ship state** (initialised 2026-04-27 at §0.4.208):
+**Ship state** (initialised 2026-04-27 at §0.4.208; Phase 0a shipped §0.4.209):
 
 | Phase | Plan estimate | Status |
 |---|---|---|
-| Phase 0 — source acquisition / reconstruction strategy | 1-2 firings | **PLANNING (this doc)** |
+| Phase 0a — synthetic Qwop.kt scaffold (≤ paper's structural shape) | 1 firing | **CLOSED (§0.4.209)** |
+| Phase 0b — widen to 13 loops + 8 if-else (paper's structural shape) | 1-2 firings | not started |
 | Phase 1 — straight-line port of one body part's update step | 1-2 firings | not started |
 | Phase 2 — single loop body coarsened (one of QWOP's 13 loops) | 2-3 firings | not started |
 | Phase 3 — full QWOP function (13 loops + many if-else, 2 SOIs per paper) | 3-5 firings | not started |
-| **QWOP-specific total** | **7-12 firings** | **not started** |
+| **QWOP-specific total** | **8-13 firings** | **1 firing shipped** |
+
+## Phase 0a structural choices (§0.4.209)
+
+Per Path 2 (synthetic, not reconstructed) recommendation, §0.4.209 ships
+[`benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt`](../benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt) as
+a `DxirBuilder` primal builder (matching the existing `BenchmarkPrimals`
+convention rather than the user-code-lambda spec from this plan's earlier
+draft — the dxir-builder approach is more direct for stress-testing
+Tlaloc's coarsening + reverse-mode AD pipeline without going through the
+K2 plugin's FIR-side recognition).
+
+**Ship state of Phase 0a's `Qwop.avatarStepPrimal`**:
+
+- **Inputs**: 4 scalar `Float` muscle extensions (hip, knee, ankle, shoulder).
+  The plan's "DTensor<Rank1<Sym>, F32> of muscle extensions" was relaxed to
+  4 scalars — equivalent surface for the coarsening pipeline (a rank-1
+  input would decompose to 4 scalar GATHERs anyway).
+- **Output**: 1 scalar `Float` distance traveled.
+- **Lines**: ~135 (under the plan's 200-250 target; Phase 0b widens).
+- **Loops**: 6 — 4 muscle-integration WHILEs (Phase A) + 2 distance
+  accumulation WHILEs (Phase B).
+- **If-else branches**: 4 — one per muscle's collision-response inside the
+  Phase A WHILE bodies.
+- **Differentiable end-to-end**: yes — every primitive (ADD/SUB/MUL/STEP/IF
+  + WHILE w/ affine recurrence) is shipped per §0.4.207's register.
+
+**Why Phase 0a is smaller than the paper's stated 13 loops + 8 if-else**:
+the paper claims 225 lines / 13 loops / 8 if-else for QWOP's full function,
+and the plan's first-slice spec aligned with that. In practice, hand-writing
+a 225-line dxir-builder primal in one firing is costly without a lot of
+copy-paste; Phase 0a ships a structurally-faithful subset (each loop
+exercises C5 unroll + C6/C7 affine recurrence; each if-else is a multi-
+result-friendly IF that §0.4.155's machinery covers) that lets follow-on
+firings widen incrementally without rewriting the foundation.
+
+**Phase 0b plan**: widen to the paper's full structure by adding:
+- **+3 loops via cross-limb interaction**: a per-limb WHILE inside an outer
+  per-frame WHILE (WHILE-in-WHILE — exercises §0.4.176's surface).
+- **+2 loops for forward kinematics**: chain accumulation along
+  hip→knee→ankle and shoulder→elbow→wrist.
+- **+2 loops for energy / damping**: per-joint angular velocity update with
+  damping coefficient.
+- **+4 if-else branches**: ground contact (foot vs ground), torque limits
+  (max torque per joint), gait-phase dispatch (stance vs swing), energy
+  thresholding.
+
+Total post-0b: 13 loops, 8 if-else. Matches the paper's structural claim.
+
+**Phase 1+ deliverables remain as in the original plan** — straight-line
+gradient test, single-loop coarsened test, full FD-validated forward + grad.
 
 ---
 
