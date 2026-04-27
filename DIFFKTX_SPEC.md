@@ -39,6 +39,80 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.200 CartPole Phase 3 third slice — tensor TANH/SIGMOID synthesis + axis-matched irConstFor; first tanh gradient 2026-04-27
+
+§0.4.199's hand-off named "CartPole Phase 3 third slice — sigmoid / tanh widening" as the next pickup. §0.4.200 lands it: `grad { (X, W) -> (X matmul W).tanh().sum().toFloat() }` with rectangular `X: Rank2<Sym, Lit<Int>>, W: Rank2<Lit<Int>, Lit<Long>>` lowers end-to-end and the gradient matches the analytic `(1 - tanh(y)²) * upstream` chain within 1e-3.
+
+Three new pieces:
+
+1. **`irTanh` and `irSigmoid` synthesis arms** mirror §0.4.199's `irRelu` rank-dispatch: tensor TANH → IrCall to `:core/ops/tanh`; tensor SIGMOID → IrCall to `:core/ops/sigmoid`. Scalar TANH falls through to the existing `irUnaryMathCall(kotlin.math.tanh)` route. Scalar SIGMOID rejected (no Kotlin stdlib equivalent; not exercised by current Tlaloc surfaces).
+
+2. **`OpKind.TANH` and `OpKind.SIGMOID` dispatch entries in `irOpFor`** — single-line additions. The FIR-side mapping `:core.ops.tanh` / `:core.ops.sigmoid` → `OpKind.TANH` / `OpKind.SIGMOID` already existed; only the synthesis dispatch was missing.
+
+3. **`irConstFor` axis-matched broadcast** — the load-bearing fix. Pre-§0.4.200 `irConstFor` for non-scalar consts always emitted `broadcastLike(scalarValue, tensorTemplateParam)` — same template-based path that `irBroadcast` had pre-§0.4.197. For TanhRule's `1 - tanh²` adjoint chain on a rectangular MATMUL, the const-1.0 is shaped as the matmul output (e.g., `[2, 4]`) but `tensorTemplateParam` = X has shape `[2, 3]` — runtime fail with `elementwise shape mismatch: [2, 3] vs [2, 4]`. Now `irConstFor` first tries the same axis-matching path as `irBroadcast` (build `broadcastDimsRank{N}<S>(scalarValue, p0.dims[i0], …)`); falls back to the existing `broadcastLike(v, template)` only when axis matching fails (square surfaces, unused-tensor-param zero gradients).
+
+**The mechanism** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt):
+
+1. **`irTanh` rank-dispatch**:
+   ```kotlin
+   if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+       return tensorUnaryCall(op, env, context, tanhTensorSymbol())
+   }
+   return irUnaryMathCall(op, env, context, Name.identifier("tanh"))
+   ```
+
+2. **`irSigmoid`** — same pattern; scalar surfaces return null (rejected).
+
+3. **`tensorUnaryCall(op, env, context, symbol)`** — shared helper that builds an `IrCall(symbol)` with `typeArguments[0] = operandShapeArg`, `arguments[0] = irGet(operandDecl)`. Result IrType from `irTypeForNode(op, context)` (via the existing elementwise-propagation pipeline; TANH/SIGMOID added to the unary-propagation list).
+
+4. **Forward + backward elementwise propagation widened to TANH/SIGMOID** — single-line additions to the existing `STEP/RELU/NEG/SQRT/EXP/LOG/SIN/COS/ABS` lists in both `deriveResultIrType` (forward) and the backward MATMUL/elementwise solve loop (backward).
+
+5. **`irConstFor` axis-matching path** — the largest diff in this firing. Before falling back to the `broadcastLike(v, template)` path, attempt `matchBroadcastAxesToParams` on the const's IrType (resolved via `irTypeForNode` → backward propagation through SUB/MUL by elementwise rules). When matching succeeds, emit `broadcastDimsRank{N}<S>(scalarValue, p0.dims[i0], …)` — same construction as `irBroadcast`'s axis-matched path.
+
+**Why backward elementwise propagation reaches the const.** The TanhRule gradient body chain `MATMUL(X, W) → TANH → MUL(*, *) → SUB(one, tanhSq) → MUL(upstream, diff) → MATMUL`s. The forward walk derives matmul output IrType (from operand IrTypes) and propagates through TANH, MUL (binary, both operands known), giving `tanhSq` and `diff` known IrTypes. The const `one` is an OPERAND of `SUB`. Backward propagation through SUB (output known → operands set when unknown) writes `paramIrTypeMap[one.id]` = SUB's output IrType = matmul output IrType. Then `irConstFor` for `one` looks up `irTypeForNode(node, context)` → finds the entry → axis-matches against params → emits `broadcastDimsRank2(1.0f, X.dims[0], W.dims[1])`. Correct shape `[2, 4]`.
+
+**The new test** [Rank2TanhGradientTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2TanhGradientTest.kt):
+
+`grad { (X, W) -> (X matmul W).tanh().sum().toFloat() }` with X = ones(2, 3), W = `[[0.5, -0.5, 1.0, -1.0] × 3]` (3×4). Exercises both small (`s(3.0) ≈ 0.0099`) and bigger (`s(1.5) ≈ 0.181`) values of `s(z) = 1 - tanh(z)²`. Analytic:
+- ∂L/∂X = zeros (the symmetric ± layout of W cancels exactly).
+- ∂L/∂W = `[[2*s(1.5), 2*s(1.5), 2*s(3.0), 2*s(3.0)] × 3]` (3×4). Test verifies within 1e-3.
+
+**Decisions worth flagging**:
+
+- **The `irConstFor` axis match was the actual win.** The new `irTanh`/`irSigmoid` synthesis arms are mechanical (mirror §0.4.199's `irRelu`). The interesting fix was that `irConstFor`'s template fallback was wrong for any non-square activation gradient body — every rule that needs a per-dtype constant (TanhRule's `1`, SigmoidRule's `1`, AbsRule's potential `0.5`...) ran into the same misshapen-template bug. The matching was already implemented for `irBroadcast` (§0.4.197); this firing extends it to `irConstFor` with the same logic.
+
+- **Why scalar SIGMOID is rejected.** Kotlin's `kotlin.math` has no `sigmoid` function — only `tanh`. A scalar SIGMOID lowering would require either (a) synthesising `1f / (1f + exp(-x))` (multiple IR ops) or (b) routing through a `:core` extension. Neither is exercised today; deferring keeps this firing focused.
+
+- **Forward elementwise propagation is now broad.** The list `OpKind.STEP, OpKind.RELU, OpKind.NEG, OpKind.SQRT, OpKind.EXP, OpKind.LOG, OpKind.SIN, OpKind.COS, OpKind.ABS, OpKind.TANH, OpKind.SIGMOID` covers every unary op the synthesis surface accepts. Adding new unaries (e.g., GELU, SILU when those rules ship) will be a one-line append.
+
+- **No new runtime helpers.** `:core/ops/DTensor.tanh()` and `:core/ops/DTensor.sigmoid()` already exist in HostOps.kt (since §0.4.50ish). Only the synthesis-side dispatch was missing.
+
+- **Suite +1 to 882.** Just the new tanh integration test.
+
+**Tests added** (+1):
+
+1. `Rank2TanhGradientTest.grad of tanh of A matmul B sum matches analytic` — first end-to-end tensor TANH gradient through the K2 plugin; verifies both `irTanh` synthesis arm + `irConstFor` axis-matching for the rank-2 const-1.0 in TanhRule's adjoint.
+
+Full suite is green: **882 tests** (+1 from §0.4.199).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 3 fourth slice — first FD-validated CartPole-style test.** Build a slice of the actual CartPole NN forward (per `docs/CARTPOLE_PORT_PLAN.md`'s `a = sign(tanh(relu(...)) - ε)` chain) and verify against finite-differencing. The first FD-validated test is the inflection point from "synthesis primitives wired up" to "real CartPole". Even a simple shape (1 hidden layer + tanh + linear output, batch B=2) is enough to surface any remaining gaps. Multi-session if it surfaces blockers.
+
+2. **Out-of-scope register refresh** — Phase 0c-rectangular and Phase 3 first three slices (§0.4.197–§0.4.200) all moved from "deferred" to "shipped". Should refresh the register at `docs/CARTPOLE_PORT_PLAN.md` plus the in-spec out-of-scope reference. Lower priority than (1).
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **Phase 1 priority #1: Multi-result IF AD Phase 4** — multi-session structural. Lower priority while CartPole is unlocking compounding wins.
+
+**Definition-of-done for §0.4.200 — met**:
+- `irTanh` + `irSigmoid` synthesis arms with rank-dispatch ✓
+- `OpKind.TANH` / `OpKind.SIGMOID` dispatch in `irOpFor` ✓
+- Forward + backward elementwise IrType propagation extended to TANH/SIGMOID ✓
+- `irConstFor` axis-matched broadcast for non-scalar consts ✓
+- First end-to-end tensor TANH gradient through K2 plugin ✓
+- All 881 prior tests pass + 1 new = 882 ✓
+
 #### 0.4.199 CartPole Phase 3 second slice — tensor RELU synthesis + first 2-layer NN gradient (3-arg grad / Triple-return) 2026-04-27
 
 §0.4.198's hand-off named "CartPole Phase 3 second slice — 2-layer chain" as the next pickup. §0.4.199 lands it: `grad { (X, W1, W2) -> ((X matmul W1).relu() matmul W2).sum().toFloat() }` with `X: Rank2<Sym, Lit<Int>>, W1: Rank2<Lit<Int>, Lit<Long>>, W2: Rank2<Lit<Long>, Lit<Short>>` (four distinct shape atoms, three rectangular MATMULs in the gradient body) lowers end-to-end through the K2 plugin and the gradient matches analytic. Two new pieces:

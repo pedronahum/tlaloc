@@ -186,7 +186,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // without enough info to chain backward properly.
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
-            OpKind.SIN, OpKind.COS, OpKind.ABS -> {
+            OpKind.SIN, OpKind.COS, OpKind.ABS,
+            OpKind.TANH, OpKind.SIGMOID -> {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
             }
@@ -571,7 +572,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // unknown, operand = output.
                     OpKind.STEP, OpKind.RELU, OpKind.NEG,
                     OpKind.SQRT, OpKind.EXP, OpKind.LOG,
-                    OpKind.SIN, OpKind.COS, OpKind.ABS -> {
+                    OpKind.SIN, OpKind.COS, OpKind.ABS,
+                    OpKind.TANH, OpKind.SIGMOID -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] ?: continue
                         val operandId = n.operands[0].id
@@ -741,15 +743,58 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!node.type.isScalar) {
             if (!isAcceptedTensorType(node.type)) return null
             val scalarValue = (v as? Number)?.toFloat() ?: return null
-            val template = context.tensorTemplateParam ?: return null
-            val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
-            val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
-            val helperSym = broadcastLikeSymbol() ?: return null
             val scalarConst = IrConstImpl(
                 startOffset, endOffset,
                 pluginContext.irBuiltIns.floatType,
                 IrConstKind.Float, scalarValue,
             )
+
+            // §0.4.200 — Phase 3 third slice: try axis-matching first (mirrors
+            // §0.4.197's irBroadcast wiring). When the const's IrType has been
+            // derived (forward elementwise propagation from §0.4.198) AND each
+            // axis structurally matches some `(param, axisIdx)` pair, emit
+            // `broadcastDimsRank{N}<S>(scalarValue, p0.dims[i0], ...)`. For
+            // `tanh`/`sigmoid` gradient bodies the const-1.0 has the SAME shape
+            // as the matmul output, not the param shape; the
+            // `tensorTemplateParam` path was wrong for rectangular MATMUL +
+            // tanh / sigmoid surfaces.
+            val targetIrType = irTypeForNode(node, context) as? IrSimpleType
+            if (targetIrType != null && context.fnParams.isNotEmpty()) {
+                val axisMatches = matchBroadcastAxesToParams(
+                    targetIrType,
+                    context.fnParams,
+                    context.irParams,
+                    context.operandIrTypes,
+                )
+                if (axisMatches != null) {
+                    val rank = axisMatches.size
+                    val helperSym = broadcastDimsRankSymbol(rank) ?: return null
+                    val shapeTypeArg = targetIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+                    val call = IrCallImpl.fromSymbolOwner(
+                        startOffset = startOffset,
+                        endOffset = endOffset,
+                        type = targetIrType,
+                        symbol = helperSym,
+                    )
+                    if (call.typeArguments.isNotEmpty()) {
+                        call.typeArguments[0] = shapeTypeArg
+                    }
+                    call.arguments[0] = scalarConst
+                    for ((i, match) in axisMatches.withIndex()) {
+                        val (param, axisIdx) = match
+                        val dimExpr = irParamDimAccess(param, axisIdx) ?: return null
+                        call.arguments[i + 1] = dimExpr
+                    }
+                    return call
+                }
+            }
+
+            // Fallback: existing `broadcastLike(v, tensorTemplateParam)` path.
+            // Square surfaces and unused-tensor-param zero gradients rely on this.
+            val template = context.tensorTemplateParam ?: return null
+            val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
+            val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val helperSym = broadcastLikeSymbol() ?: return null
             val call = IrCallImpl.fromSymbolOwner(
                 startOffset = startOffset,
                 endOffset = endOffset,
@@ -806,6 +851,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
         if (op.op == OpKind.TRANSPOSE) return irTranspose(op, env, context)
         if (op.op == OpKind.MATMUL) return irMatmul(op, env, context)
+        if (op.op == OpKind.TANH) return irTanh(op, env, context)
+        if (op.op == OpKind.SIGMOID) return irSigmoid(op, env, context)
 
         val operandDecls = op.operands.mapIndexed { idx, o ->
             env[o.id] ?: return reject(
@@ -1044,6 +1091,95 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("relu"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.200 — Phase 3 third slice. `OpKind.TANH(x)` for tensor x → IrCall to
+     * `:core/ops/tanh` (the DTensor extension). Mirrors [irRelu] / [irStep] /
+     * [irSigmoid] rank-dispatch. Required by CartPole's `tanh(...)` chain in the
+     * NN forward (and by any tanh-bearing primal more broadly).
+     *
+     * No scalar fallback — the existing scalar `tanh` lowering route through
+     * `irUnaryMathCall(kotlin.math.tanh)` already handles scalar surfaces;
+     * `irTanh` is only invoked for tensor TANH ops via the §0.4.200 dispatch
+     * entry in [irOpFor].
+     */
+    private fun IrBuilderWithScope.irTanh(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            return tensorUnaryCall(op, env, context, tanhTensorSymbol())
+        }
+        // Scalar TANH falls through to irUnaryMathCall.
+        return irUnaryMathCall(op, env, context, Name.identifier("tanh"))
+    }
+
+    /**
+     * §0.4.200 — Phase 3 third slice. `OpKind.SIGMOID(x)` for tensor x → IrCall to
+     * `:core/ops/sigmoid` (the DTensor extension). Same pattern as [irTanh].
+     * Scalar SIGMOID has no `kotlin.math.sigmoid` (sigmoid is conventionally
+     * defined as `1 / (1 + exp(-x))`); for now we reject scalar SIGMOID since no
+     * Tlaloc surface emits it scalarly.
+     */
+    private fun IrBuilderWithScope.irSigmoid(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            return tensorUnaryCall(op, env, context, sigmoidTensorSymbol())
+        }
+        return null
+    }
+
+    /**
+     * §0.4.200 — Helper for tensor unary ops. Builds an `IrCall(symbol)` with the
+     * operand's shape arg threaded through `typeArguments[0]`. Result IrType
+     * derived via [irTypeForNode] (= operand IrType for unary ops, by the
+     * elementwise propagation in [deriveResultIrType]).
+     */
+    private fun IrBuilderWithScope.tensorUnaryCall(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+        symbol: IrSimpleFunctionSymbol?,
+    ): IrExpression? {
+        val operandDecl = env[op.operands[0].id] ?: return null
+        val sym = symbol ?: return null
+        val operandIrType = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
+        val operandShapeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: operandIrType
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = operandShapeArg
+        }
+        call.arguments[0] = irGet(operandDecl)
+        return call
+    }
+
+    private fun tanhTensorSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("tanh"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    private fun sigmoidTensorSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("sigmoid"),
         )
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
