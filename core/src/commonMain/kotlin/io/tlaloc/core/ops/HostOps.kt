@@ -36,6 +36,20 @@ operator fun <S : Shape> DTensor<S, F32>.times(other: DTensor<S, F32>): DTensor<
 operator fun <S : Shape> DTensor<S, F32>.div(other: DTensor<S, F32>): DTensor<S, F32> =
     elementwise(this, other) { x, y -> x / y }
 
+/**
+ * §0.4.206 — Scalar-multiply on a DTensor: `tensor * scalar` returns a fresh
+ * `DTensor<S, F32>` with the same shape and each element multiplied by [scalar].
+ * Required for vanilla gradient-descent updates (`W = W - lr * dW`) used by
+ * CartPole's outer training loop. Avoids the `broadcastLike(scalar, W) * dW`
+ * roundabout that would otherwise be needed for `lr * dW`.
+ */
+operator fun <S : Shape> DTensor<S, F32>.times(scalar: Float): DTensor<S, F32> {
+    val v = hostF32()
+    val out = FloatArray(v.size)
+    for (i in v.indices) out[i] = v[i] * scalar
+    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+}
+
 fun <S : Shape> DTensor<S, F32>.relu(): DTensor<S, F32> {
     val v = hostF32()
     val out = FloatArray(v.size)

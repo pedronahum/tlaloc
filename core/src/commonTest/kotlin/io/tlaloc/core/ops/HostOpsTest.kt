@@ -141,6 +141,23 @@ class HostOpsTest {
         val s = a.sign()
         assertContentEquals(intArrayOf(4, 1), s.dims)
     }
+
+    @Test
+    fun timesScalarMultipliesEachElement() {
+        val a = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))
+        val b = a * 0.5f
+        assertContentEquals(floatArrayOf(0.5f, 1f, 1.5f, 2f, 2.5f, 3f), b.hostF32())
+        assertContentEquals(intArrayOf(2, 3), b.dims)
+    }
+
+    @Test
+    fun timesScalarZeroProducesZeroTensor() {
+        // Use all-positive inputs to avoid `(-x) * 0 = -0` which assertContentEquals
+        // treats as distinct from +0.
+        val a = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(7f, 3f, 11f, 9f))
+        val b = a * 0f
+        assertContentEquals(FloatArray(4) { 0f }, b.hostF32())
+    }
 }
 
 private typealias DTensorAlias = io.tlaloc.core.DTensor<Rank2<Sym, Sym>, io.tlaloc.core.F32>

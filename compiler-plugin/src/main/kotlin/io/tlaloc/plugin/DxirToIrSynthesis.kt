@@ -1587,7 +1587,25 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(opName),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        // §0.4.206 — `:core/ops/times` has two overloads since this firing:
+        // `DTensor<S, F32>.times(other: DTensor<S, F32>)` (elementwise tensor)
+        // and `DTensor<S, F32>.times(scalar: Float)` (scalar-multiply). The
+        // `singleOrNull()` lookup that worked through §0.4.205 now returns
+        // null. Filter to the tensor-by-tensor overload (one regular param
+        // typed `DTensor<...>`). For other ops (`plus`, `minus`, `div`)
+        // there's still only one overload, so `singleOrNull()` returns the
+        // unique value after filtering.
+        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+            val params = sym.owner.parameters
+            // Must have exactly one regular parameter (no scalar overload).
+            val regular = params.filter { it.kind == IrParameterKind.Regular }
+            if (regular.size != 1) return@firstOrNull false
+            // The regular parameter must be a DTensor (not a primitive Float).
+            val paramType = regular[0].type as? IrSimpleType ?: return@firstOrNull false
+            paramType.classifier == pluginContext.referenceClass(
+                ClassId.fromString("io/tlaloc/core/DTensor")
+            )
+        }
     }
 
     /**

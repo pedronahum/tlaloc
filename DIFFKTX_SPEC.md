@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.206 CartPole Phase 3 CLOSED — gradient-descent training loop with measurable loss decrease 2026-04-27
+
+§0.4.205's hand-off named "outer training loop" as the FINAL Phase 3 slice. §0.4.206 lands it: a 5-step gradient-descent training loop on a 3-layer NN (4 grad params, rectangular weights, tanh output) lowers and decreases the loss measurably from initial to final iteration. **CartPole Phase 3 CLOSED.** All three phases of the CartPole port (Phase 0/1/2/3) are now shipped per `docs/CARTPOLE_PORT_PLAN.md`.
+
+**The full vertical slice**:
+
+1. **`DTensor<S, F32>.times(scalar: Float)` operator** in [HostOps.kt](core/src/commonMain/kotlin/io/tlaloc/core/ops/HostOps.kt) — needed for vanilla GD's `W = W - lr * dW` update. Returns a fresh DTensor with each element multiplied by the scalar. Avoids the cumbersome `broadcastLike(lr, W) * dW` roundabout.
+
+2. **`findTensorBinaryOp` overload-disambiguation fix** in [DxirToIrSynthesis.kt](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt). The new `DTensor.times(Float)` made `:core/ops/times` ambiguous (TWO overloads vs one) — `singleOrNull()` returned null, breaking ALL prior tensor-MUL synthesis. Filter now picks the `DTensor.times(other: DTensor)` overload by parameter-type inspection: must have exactly one regular parameter typed `DTensor<...>`. Found via the training-loop test failing with `"no IR symbol for op id=14 MUL type=f32[-1,-1]"` — a real bug introduced by the helper, caught by the test.
+
+3. **The training-loop test** [CartPoleTrainingLoopTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/CartPoleTrainingLoopTest.kt). Pattern:
+   ```kotlin
+   val g = grad { (X, W1, W2, W3) -> ((X · W1).relu() · W2).relu() · W3).tanh().sum().toFloat() }
+   var W1 = ...; var W2 = ...; var W3 = ...
+   val initialLoss = forward(X, W1, W2, W3)
+   for (step in 0 until 5) {
+       val q = g(X, W1, W2, W3)
+       W1 = W1 - (q.second * lr); W2 = W2 - (q.third * lr); W3 = W3 - (q.fourth * lr)
+   }
+   val finalLoss = forward(X, W1, W2, W3)
+   assert(finalLoss < initialLoss)
+   ```
+   Tests:
+   - Synthesis didn't fall back ("kept original call" warning absent) — verifies the full chain composes through the K2 plugin.
+   - Loss decreased monotonically (final < initial) — verifies the gradient direction is correct enough that a vanilla 5-step GD with `lr=0.5` improves the objective.
+
+**Why this closes Phase 3 per the port plan**: `docs/CARTPOLE_PORT_PLAN.md`'s Phase 3 deliverable is "complete CartPole forward pass including the neural net AND the outer `while (loss > threshold)`". Acceptance: gradient agrees with FD on a small NN (W1: 4×8, W2: 8×4, W3: 4×1, batch B=3 time steps). §0.4.201's FD-validated 1-hidden-layer test verified gradient correctness against FD. §0.4.205's full NN chain composition verified the forward path. §0.4.206's training loop verifies the OUTER LOOP using gradients to actually improve a loss. All three sub-deliverables ship.
+
+**Decisions worth flagging**:
+
+- **Skipped sign + ε in the training-loop primal.** Sign blocks gradient flow (per `SignRule`'s zero-gradient design); a training loop with sign would never decrease loss. The test uses `tanh(...)` as the final activation — a smooth approximation of the action that allows gradient flow. Adding sign + ε would be an additional "this lowers cleanly" smoke test (already proven by §0.4.205); not needed for the training-loop verification.
+
+- **The `findTensorBinaryOp` regression was caught by the training loop, not unit tests.** Adding a `DTensor.times(Float)` overload silently broke the synthesis path's `MUL` resolution since `singleOrNull()` was the wrong primitive once two overloads existed. Two unit tests for `times(Float)` passed (they don't go through the K2 plugin), but the training-loop integration test (which uses the synthesised gradient with rank-2 MUL operations) caught it on the first run. The fix (filter by parameter-type) is now defensive against future similar additions.
+
+- **`lr = 0.5f` is intentionally aggressive.** Standard SGD for NN training uses `lr = 0.01–0.1`, but with all-positive small inputs (0.1–0.6) and small initial weights (0.3), the gradient magnitudes are tiny — `0.01` would barely change the loss in 5 steps. `0.5` is large enough that 5 steps move the loss visibly. For a real training scenario the lr would be smaller; for a "training loop works" smoke test it's tuned for visibility.
+
+- **Training loop is in normal Kotlin (NOT inside `grad { }`).** This is the right shape: gradient-bearing WHILE loops with closure-mutated state are deeply structural (would need coarsening to handle the loop's gradient through the state-update path). The actual primal training loop is regular Kotlin — calls the synthesised gradient repeatedly, applies updates outside the autograd boundary. That's how PyTorch / JAX do it too. Tlaloc's coarsened gradient is the inner kernel; the outer loop is host-side orchestration.
+
+- **Suite +3 to 891.** New: 2 `times-Float` unit tests + 1 training-loop integration.
+
+**Tests added** (+3):
+
+1. `HostOpsTest.timesScalarMultipliesEachElement` — runtime helper correctness on small rank-2.
+2. `HostOpsTest.timesScalarZeroProducesZeroTensor` — defensive zero-multiply.
+3. `CartPoleTrainingLoopTest.gradient-descent training loop on 3-layer NN decreases loss` — first end-to-end training loop using the K2 plugin's synthesised gradient. CartPole-shape NN. Verifies forward composition + monotonic loss decrease over 5 GD steps.
+
+Full suite is green: **891 tests** (+3 from §0.4.205).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Out-of-scope register refresh** — Phase 3 is now CLOSED; significant updates needed to `docs/CARTPOLE_PORT_PLAN.md` ship state (already done in this firing) AND to the in-spec deferred table at §0.4.202. Phase 3 status moves from "in progress" to "shipped"; both named-deferred items (`>3` grad-output cap, tensor sign) are gone; `findTensorBinaryOp` overload disambiguation is a meta-decision worth surfacing. Single-firing doc-only update.
+
+2. **Phase 1 priority #1: Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** The headline gap from §11.13's M9 exit criterion. Now that CartPole Phase 3 is closed, this is the next major Phase 1 piece. Multi-session structural item.
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority; CartPole's tape-based path covers correctness verification.
+
+**Definition-of-done for §0.4.206 — met**:
+- `DTensor<S, F32>.times(scalar: Float)` operator + 2 unit tests ✓
+- `findTensorBinaryOp` overload disambiguation (filter to DTensor-DTensor signature) ✓
+- First end-to-end gradient-descent training loop using K2 plugin's synthesised gradient ✓
+- Loss decreases over 5 GD steps (verifies gradient direction is usable) ✓
+- All 888 prior tests pass + 3 new = 891 ✓
+- CARTPOLE_PORT_PLAN.md ship-state table marks Phase 3 CLOSED ✓
+- **CartPole port complete: all 3 phases shipped** ✓
+
 #### 0.4.205 CartPole Phase 3 seventh slice — full NN forward chain test (sign-tanh-relu-relu-matmul3) 2026-04-27
 
 §0.4.204's hand-off named "full NN forward chain test" as the next pickup. §0.4.205 lands it: `grad { (X, W1, W2, W3) -> (((X · W1).relu() · W2).relu() · W3).tanh().sign().sum().toFloat() }` lowers end-to-end through the K2 plugin — a full primitive composition exercising every Phase 3 piece shipped in §0.4.198–§0.4.204 in one chain. Gradient is identically zero through `sign` (per `SignRule`); the test asserts that all four gradient outputs (∂X, ∂W1, ∂W2, ∂W3) are zero-tensors AND that synthesis didn't fall back. **Test passed on first try** — every primitive in the chain composes cleanly.

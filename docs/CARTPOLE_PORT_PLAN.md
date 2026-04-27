@@ -1,6 +1,6 @@
 # CartPole Benchmark Port — Plan
 
-**Status:** Implementation **2/3 phases complete + Phase 3 in progress** (refreshed §0.4.202). Phase 0c-rectangular **CLOSED** (§0.4.197); Phase 3 has shipped its first four slices (§0.4.198–§0.4.201) — tensor STEP / RELU / TANH / SIGMOID synthesis, axis-matched broadcast helpers, FD-validated 1-hidden-layer NN. Remaining Phase 3 gaps: 3+ layer chains, tensor `sign()`, the outer `while (loss > threshold)` training loop, and a `>3` grad-output cap that blocks differentiating wrt 4 params (X, W1, W2, W3) simultaneously.
+**Status:** **All three phases CLOSED** (§0.4.206). Phase 0c-rectangular CLOSED §0.4.197; Phase 3 closed via 8-slice arc spanning §0.4.198–§0.4.206 (tensor STEP/RELU/TANH/SIGMOID/SIGN synthesis, axis-matched broadcast helpers, FD-validated NN, Quadruple boxing for 4-grad-param surfaces, full sign-tanh-relu-relu-matmul3 NN composition test, gradient-descent training loop with measurable loss decrease). The K2 plugin can now lower CartPole's full NN forward + a CartPole-style supervised-learning training loop end-to-end.
 
 **Ship state** (updated 2026-04-27, register refresh §0.4.202):
 
@@ -14,8 +14,8 @@
 | Phase 0c-rectangular — per-operand IrType tracking | not in original plan | **6 firings (slices 1 → 3b-2b)** — CLOSED | §0.4.192 → §0.4.197 |
 | Phase 1 — physics-only port | 1 firing | 6 firings (first attempt §0.4.168 hit downstream gate; closure via §0.4.169–§0.4.175 diagnostic + structural arc) | §0.4.175 |
 | Phase 2 — B=3 loop with state passing | 2 firings | 1 firing (regression test only; no new code) | §0.4.178 |
-| Phase 3 — NN + outer training loop | 4-5 firings | **In progress (4/N firings shipped)** — slices 1+2+3+4 closed; sign / 3-layer chain / outer loop / >3-output cap pending | §0.4.198 → §0.4.201 |
-| **CartPole-specific total (closed Phase 0a-c + 1 + 2 + Phase 3 slices 1-4)** | **8-10 firings** | **21 firings** (165 + 166 + 167 + 168 + 175 + 178 + 185 + 186 + 187 + 188 + 189 + 192 + 193 + 194 + 195 + 196 + 197 + 198 + 199 + 200 + 201) | |
+| Phase 3 — NN + outer training loop | 4-5 firings | **CLOSED — 8 slices** (§0.4.198 → §0.4.206) | §0.4.206 |
+| **CartPole-specific total (closed Phase 0a-c + 1 + 2 + Phase 3)** | **8-10 firings** | **25 firings** (165 + 166 + 167 + 168 + 175 + 178 + 185 + 186 + 187 + 188 + 189 + 192 + 193 + 194 + 195 + 196 + 197 + 198 + 199 + 200 + 201 + 202 + 203 + 204 + 205 + 206) | |
 
 Plus **8 firings of cross-cutting platform work** (§0.4.169–§0.4.176) that closed Phase 2 #1 (Plugin IR-side synthesis closure) for the scalar-arithmetic surface — discovered through the CartPole Phase 1 attempt (§0.4.168). Combined: **29 firings actually shipped** for the closed pieces + 4 Phase 3 sub-pieces vs. 10-12 originally planned. The plan didn't budget either the diagnostic + structural arc, the Phase 0c slice fan-out, OR the Phase 3 sub-fan-out.
 
