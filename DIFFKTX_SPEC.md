@@ -39,6 +39,76 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.208 QWOP benchmark port planning doc — `docs/QWOP_PORT_PLAN.md` 2026-04-27
+
+§0.4.207's hand-off named "Phase 1 priority #1: Multi-result IF AD Phase 4" as the next pickup, but inspecting the priority ladder against the §0.4.207 register revealed that priority #1–#5 + #8 are all CLOSED — Multi-result IF AD Phase 4 (WHILE-in-IF) shipped at §0.4.152 + §0.4.153, all four nested control-flow combinations (IF-in-IF, IF-in-WHILE, WHILE-in-IF, WHILE-in-WHILE) closed end-to-end, the four other paper benchmarks ported. **The only structural Phase 1 piece remaining is QWOP — priority #6.** §0.4.208 lands its planning doc.
+
+**The new plan** [docs/QWOP_PORT_PLAN.md](docs/QWOP_PORT_PLAN.md):
+
+Mirrors HMC's and CartPole's port-plan structure (Status / Reference / Tlaloc gap analysis / Three-phase migration / Phase 0 first-slice / Out of scope / Why-different-from-HMC), with one major addition: a **Phase 0 (source acquisition / reconstruction strategy)** that doesn't exist in HMC's or CartPole's plans. Reasons:
+
+1. **The paper's appendix doesn't include QWOP source.** Unlike HMC (closed-form `U(β)` from Eq. 1) and CartPole (NN forward + physics step from Figure 2c + Eq. 3.1), QWOP is described qualitatively only: "225-line function with 13 loops and many if-else statements, 1117-line unrolled, 2 SOIs after coarsening, 1.17-1.51× speedup."
+2. **Two paths forward**: (Path 1) reconstruct from public open-source QWOP ports (Bennett Foddy's 2008 game has many forks); (Path 2) write a synthetic QWOP-shape function that hits the same structural pattern (13 loops + many if-else, 225 lines) without trying to match QWOP's specific physics. **The plan recommends Path 2** — the paper's structural claims are what we're validating, not the specific physics; a synthetic structurally-faithful function is more tractable and isolates the testing surface to "does Tlaloc's coarsening handle a 225-line function with 13 loops".
+
+**Tlaloc gap analysis: no new primitives needed.** Every structural piece QWOP exercises is already shipped:
+- Per-step joint angle update (`ADD`/`MUL`) — §0.4.4
+- Trig (`SIN`/`COS`) — §0.4.166
+- `ABS` for damping — §0.4.167
+- Scalar `IF` for collision response — §0.4.140 + §0.4.155
+- Multi-branch IF chain — §0.4.141 + §0.4.156
+- C5 unroll / C6/C7 affine recurrence — shipped (multiple)
+- Nested control flow combinations — all four shipped end-to-end per §0.4.207's register
+
+**The genuine risk is cumulative complexity.** 13 loops + many if-else in a single function is structurally larger than any port currently shipped. Performance characteristics of `applyC5Pass` / `applyC6Pass` / `applyC7Pass` / `applyC8Pass` / `applyC9Pass` on a 225-line function with 13 nested loop sites are untested. Top-level CSE (§0.4.48) is O(n²) in node count for the worst case. Cache-key generation may produce excessively long keys. The plan explicitly defers these "possible runtime emergent issues" until Phase 2/3 actually exercises the surface.
+
+**Three-phase migration**:
+- Phase 0 (1-2 firings): write `:benchmarks/.../Qwop.kt` synthetic function, 225 ± 25 lines, 13 ± 1 loops, 8 ± 2 if-else branches.
+- Phase 1 (1-2 firings): straight-line port of one body part's update step + hand-computed gradient pinned to 1e-3 f32 tolerance.
+- Phase 2 (2-3 firings): one of QWOP's 13 loops as a coarsened `WHILE`, gradient FD-validated.
+- Phase 3 (3-5 firings): full 225-line function port, FD-validated end-to-end, coarsening produces ≤ 2 SOIs (per paper), speedup measured.
+
+Total: 7-12 firings.
+
+**Phase 0 first-slice = next firing's concrete deliverable**:
+- Write `benchmarks/src/jvmMain/kotlin/io/tlaloc/benchmarks/Qwop.kt` per the plan's specifications.
+- Add a Phase-0 amendment capturing the specific structural choices.
+- Verify `./gradlew build` is green.
+
+**Decisions worth flagging**:
+
+- **No new primitives needed for QWOP per the gap analysis.** This is significant — QWOP's structural challenge is cumulative, not primitive-specific. Each structural piece (13 loops, multi-branch IF chains, nested control flow) is individually proven; QWOP stress-tests their combination.
+
+- **QWOP is the rate-limiting structural piece for closing Phase 1.** Per §0.4.207's register, 5 of 6 paper benchmarks are ported. QWOP closing means: all six paper benchmarks ported → Phase 1 of the head-to-head harness Phase 1 (already shipped §0.4.181-§0.4.184) becomes a 6-benchmark surface → only the head-to-head Phase 2 (gated on user-side Python toolchain) remains for the formal "Phase 1 closed" entry.
+
+- **Path 2 (synthetic) trades fidelity for tractability.** Path 1 (reconstruct from open-source QWOP) might land a closer-to-paper port but has uncertain effort (3-5 firings just for reconstruction, possibly more for differentiability). Path 2 is more controlled. The §0.4 entry surfaces this tradeoff explicitly so future readers know the structural claims are matched but the specific physics aren't.
+
+- **Phase 0 explicit in the plan.** Unlike HMC / CartPole (where the paper's formulas drove the port directly), QWOP needs a "what are we porting" decision before "how do we port it" can begin. Naming Phase 0 as a separate phase prevents the source-acquisition question from being treated as pre-work — it's a genuine planning slice.
+
+- **No tests added.** Pure planning doc. Future Phase 0+ firings will add `Qwop.kt` + integration tests.
+
+**Tests added** (+0): pure planning session.
+
+Full suite is green: **891 tests** (unchanged from §0.4.207).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **QWOP Phase 0 first slice — write `Qwop.kt`.** Per the plan's Phase 0 first-slice spec: synthetic QWOP-shape function in `:benchmarks/src/jvmMain`, 225 ± 25 lines, 13 ± 1 loops, differentiable end-to-end. Verify `./gradlew build` green. Add a Phase-0 amendment to the plan capturing structural choices made.
+
+2. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per §0.4.207's register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. No port today exercises multi-result production but landing it now would close a long-deferred item. Multi-session structural work. Lower priority than (1).
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority while Phase 1 has open structural pieces (QWOP).
+
+**Definition-of-done for §0.4.208 — met**:
+- `docs/QWOP_PORT_PLAN.md` written ✓
+- Phase 0 (source acquisition / reconstruction) explicitly named as a phase ✓
+- Path 1 vs Path 2 tradeoff documented; Path 2 (synthetic) recommended ✓
+- Tlaloc gap analysis showing no new primitives needed ✓
+- Three-phase migration with firing estimates ✓
+- Phase 0 first-slice spec as next-firing concrete deliverable ✓
+- Build stays green (doc-only firing) ✓
+
 #### 0.4.207 Out-of-scope register refresh — CartPole Phase 3 CLOSED; CartPole port complete 2026-04-27
 
 §0.4.202 was the ninth register snapshot; §0.4.207 is the tenth. **5 sub-sections shipped between §0.4.203 and §0.4.206** — the final stretch of the CartPole Phase 3 arc. Three structural milestones moved from "deferred / in progress" to "CLOSED": the `>3` grad-output cap, tensor `sign()`, and Phase 3 itself. **CartPole port is now complete** — Phases 0a/0c (square + rectangular) + 1 + 2 + 3 all CLOSED across §0.4.165–§0.4.206 (25 firings).
