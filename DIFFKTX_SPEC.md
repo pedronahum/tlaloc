@@ -39,6 +39,100 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.222 Head-to-head harness Phase 1 first slice — `HeadToHeadBenchmark` scaffold + QWOP avatar-step inhabitant 2026-04-27
+
+§0.4.221's hand-off named "Phase 1 closure work — head-to-head harness Phase 1 (Tlaloc-side)" as the next pickup. §0.4.222 lands the **first slice**: the JVM-side scaffold + the first inhabitant (QWOP avatar-step). Per `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`'s Phase 1 plan, this is the foundation — subsequent firings add inhabitants for the other five paper benchmarks.
+
+**Why QWOP avatar-step as the first inhabitant**:
+
+- Most recently shipped (§0.4.220 integration test pinned forward = 0.7227 at m\* = 0.1; same input set used here ensures reproducibility across firings).
+- Largest primal in the suite — exercises the full pipeline (12 WHILEs + 8 IFs after coarsening).
+- `:benchmarks`-native, no `:compiler-plugin` test-classpath plumbing needed.
+- The §0.4.220 sign-routing discriminator gives a free correctness pin: at m\*=0.1 every gradient must be positive.
+
+**The new scaffold** in [`HeadToHeadHarness.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarness.kt):
+
+```kotlin
+interface HeadToHeadBenchmark {
+    val name: String
+    fun primal(): DxirFunction
+    fun fixedInputs(): List<FloatArray>
+    fun runBaseline(warmup: Int = 200, measured: Int = 800): HeadToHeadResult
+}
+
+data class HeadToHeadResult(
+    val benchmark: String,
+    val forwardValue: Float,
+    val gradientValues: List<Float>,
+    val warmupIterations: Int, val measuredIterations: Int,
+    val medianNanos: Long, val minNanos: Long, val p99Nanos: Long,
+) {
+    fun toJsonString(): String = ...   // minimal, no external deps
+}
+
+object QwopAvatarStepHarness : HeadToHeadBenchmark { ... }
+```
+
+The interface delegates the structural plumbing (PhiCalculus.apply → DxirReverseTransform.apply → forward eval → gradient eval → timing loop) to a default method in the interface. Each inhabitant only supplies `primal()` + `fixedInputs()`. JSON serialisation is minimal (string-templated, no Jackson/Gson dependency) — sufficient for Phase 2's cross-framework comparison.
+
+**The test file** [`HeadToHeadHarnessQwopTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessQwopTest.kt) — 2 tests, all passing:
+
+1. `qwopAvatarStepHarnessRunsAndProducesBaseline` — runs `QwopAvatarStepHarness.runBaseline(50, 100)` and pins:
+   - Forward value ≈ 0.7227 (matches §0.4.220's hand-traced expected value).
+   - 4 gradient values returned (one per muscle input).
+   - All four gradients positive (sign-routing sanity pin from §0.4.220).
+   - Timing statistics positive and ordered (`min ≤ median ≤ p99`).
+   - Median < 100× min — guards against GC pauses dominating the timing window.
+   - Side-channel `println` reports forward value + per-input gradients + median/min/p99 ns timings for /loop spot-checks.
+
+2. `headToHeadResultJsonRoundTrips` — structural smoke on JSON output. Verifies the JSON contains all expected top-level fields. Phase 2 will add a real parser for cross-framework comparison; Phase 1 just validates the serialiser produces parseable output.
+
+**Decisions worth flagging**:
+
+- **Bounded scope: ONE inhabitant for Phase 1's first slice.** The §0.4.181 plan suggested "3-4 inhabitants in one firing." That's optimistic — bringing in Brachistochrone, HookeanSpring, or HMC (all K2-plugin-side) requires lifting the `compileAndRun` test plumbing from `:compiler-plugin/src/test` to a public surface, which is a structural multi-firing task. QWOP is `:benchmarks`-native so it's a clean first slice without that detour. Subsequent firings add inhabitants per port.
+
+- **`:benchmarks`-extension instead of new `:harness` module.** The plan said "or a `:benchmarks` extension." `:harness` would need its own `build.gradle.kts`, separate test source set, and multi-module gradle plumbing. The `:benchmarks` extension uses existing infrastructure (`:benchmarks/src/jvmTest`), keeping the firing focused on the harness logic itself.
+
+- **`DxirInterpreter` as the timing target — explicitly noted as not native code.** Phase 1's purpose is to establish the measurement scaffold, not to compete with native runtimes. The interpreter overhead is real but reproducible; once M3's IREE CPU runtime ships, the harness re-runs against a native backend will give the actual head-to-head numbers. This trade-off is documented in the [HeadToHeadHarness.kt](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarness.kt) header comment so it doesn't need to be re-derived later.
+
+- **Warmup/measured tunable per call.** Default 200/800 per the plan's methodology. The test uses 50/100 to keep the suite fast (full 200/800 would add seconds of full-primal gradient eval). The harness itself supports both — `runBaseline()` is a stable public API.
+
+- **Sign-routing pin is free reuse.** §0.4.220 already established that all four gradients are positive at m\*=0.1. The harness test asserts the same, with no additional analytical work. Cross-test consistency makes future regressions easier to localize.
+
+- **JSON output is intentionally minimal.** No Jackson, no kotlinx.serialization, no kotlinx-json. `String.format("%.6g", ...)` + `buildString` produces structurally-valid JSON with 6 sig-fig precision (sufficient for f32 tolerance). Phase 2 will read these JSON files from the JVM side; if cross-framework parsing turns out to need a real parser, we add it then. **Don't add dependencies until they're needed.**
+
+- **Suite +2 to 951.** Modest test-count increase reflects the bounded scope.
+
+**Tests added** (+2):
+
+1. `HeadToHeadHarnessQwopTest.qwopAvatarStepHarnessRunsAndProducesBaseline`
+2. `HeadToHeadHarnessQwopTest.headToHeadResultJsonRoundTrips`
+
+Full suite is green: **951 tests** (+2 from §0.4.221).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Head-to-head harness Phase 1 second slice — add a `:benchmarks`-side BGDHyperOpt or HookeanSpring inhabitant.** Both have existing `:benchmarks` machinery (BGDHyperOpt per §0.4.49, HookeanSpring's primal can be reconstructed via DxirBuilder following §0.4.143's pattern). Either gives a second harness inhabitant with no `:compiler-plugin` plumbing. 1 firing.
+
+2. **Head-to-head harness Phase 1 third+ slice — K2-plugin-side inhabitants (Brachistochrone, HMC, CartPole).** Requires lifting the `compileAndRun` infrastructure from `:compiler-plugin/src/test` to a `:benchmarks`-accessible surface (or moving the harness inhabitants into `:compiler-plugin/src/test`). Multi-session structural — likely 2-3 firings.
+
+3. **Head-to-head harness Phase 2 — Python references.** Gated on user-side toolchain (PyTorch 2.x + JAX). Single firing once gated.
+
+4. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** §11.13's headline gap. Genuinely deferred but not on the harness's critical path.
+
+5. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority while Phase 1 has open structural items. Once it ships, the harness re-runs against a native backend will give the actual head-to-head numbers.
+
+**Definition-of-done for §0.4.222 — met**:
+- `HeadToHeadBenchmark` interface defined ✓
+- `HeadToHeadResult` data class with JSON serialisation ✓
+- One inhabitant (`QwopAvatarStepHarness`) shipped ✓
+- Baseline correctness pinned (forward + per-input gradients + sign discriminator) ✓
+- Timing sanity pinned (min/median/p99 ordered + median < 100× min) ✓
+- JSON serialisation structurally validated ✓
+- Side-channel println for /loop spot-checks ✓
+- Suite +2 to 951 ✓
+- Phase 1 second slice (BGDHyperOpt or HookeanSpring inhabitant) is the natural next pickup ✓
+
 #### 0.4.221 Out-of-scope register refresh — QWOP port complete; M9 head-to-head harness is the next Phase 1 axis 2026-04-27
 
 §0.4.207 was the tenth register snapshot; §0.4.221 is the eleventh. **13 sub-sections shipped between §0.4.208 and §0.4.220** — the entire QWOP port arc, from planning doc → synthetic-primal scaffold → forward-only first slice → AD pipeline self-containment fix → seven per-slice gradient pins → full integration FD-validated. **All six paper benchmarks (Brachistochrone, HookeanSpring, BGDHyperOpt, HMC, CartPole, QWOP) now have Tlaloc ports** — five through the K2 plugin path, QWOP through the `:benchmarks` direct DSL (synthetic primal honouring the paper's structural shape).
