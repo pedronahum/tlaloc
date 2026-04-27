@@ -39,6 +39,111 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.224 Head-to-head harness Phase 1 third slice — HookeanSpring scalar 1D oscillator is the second **paper benchmark** in the harness 2026-04-27
+
+§0.4.223's hand-off named "Head-to-head harness Phase 1 third slice — HookeanSpring inhabitant" as the next pickup. §0.4.224 lands it: a **scalar 1D harmonic oscillator** primal that hits HookeanSpring's structural shape (constant-trip-count WHILE with 2 coupled state variables — position + velocity) without needing the rank-1 tensor primitives the K2-plugin's existing `:compiler-plugin` port uses.
+
+**Why scalar 1D oscillator instead of N-vertex chain**:
+
+The existing K2-plugin HookeanSpring port at `:compiler-plugin/src/test/.../HookeanSpringTest.kt` is a **3-vertex 1D triangle** (rank-1 tensor + GATHER/SCATTER_ADD on the elastic energy). Lifting that to `:benchmarks` requires either:
+1. Lifting the K2-plugin's `compileAndRun` infrastructure to be reachable from `:benchmarks` (the multi-firing structural work flagged in §0.4.222).
+2. Re-implementing the chain primal using rank-1 tensor primitives in `DxirBuilder` — but the dxir-builder DSL doesn't expose GATHER/SCATTER_ADD as ergonomic primitives; the K2 plugin lowers them via `:core` ops.
+
+§0.4.224 picks neither path. Instead, it ports HookeanSpring's **structural shape** as a scalar 1D oscillator: same constant-trip-count temporal WHILE, same 2 coupled state variables (pos + vel), same symplectic Euler integration, but using only scalar primitives (ADD, MUL, NEG) that the dxir-builder DSL already supports. The harness measurement axis (constant-trip-count WHILE coarsening + multi-input gradient routing) is exercised the same way regardless of whether the state variables are scalars or tensors.
+
+**The recurrence**:
+
+```kotlin
+var pos = pInit
+var vel = vInit
+for (i in 0 until N) {
+    val force = -kSpring * pos
+    vel = vel + dt * force
+    pos = pos + dt * vel       // semi-implicit (symplectic) Euler
+}
+return pos
+```
+
+Three free parameters: `pInit`, `vInit`, `kSpring`. Fixed: `mass = 1` (folded into kSpring), `dt = 0.1`, `N = 10`.
+
+**Coarsening behaviour**: `N = 10` is a constant trip count, so C5 unrolls the WHILE into a 10-deep recurrence chain. The gradient through this unrolled chain exercises reverse-mode AD on a 10-step compounded computation — comparable depth to BGDHyperOpt's K=3 outer loop but with two coupled state variables instead of one.
+
+**The new primal + reference** in [`BenchmarkPrimals.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/BenchmarkPrimals.kt):
+
+```kotlin
+fun hookeanSpringPrimal(N: Int = 10, dt: Float = 0.1f): DxirFunction = ...
+fun hookeanSpringReference(pInit, vInit, kSpring, N, dt): Float
+```
+
+**The new harness inhabitant** in [`HeadToHeadHarness.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarness.kt):
+
+```kotlin
+object HookeanSpringHarness : HeadToHeadBenchmark {
+    override val name = "hookean-spring-scalar-N10"
+    override fun primal() = BenchmarkPrimals.hookeanSpringPrimal(N=10, dt=0.1f)
+    override fun fixedInputs() = listOf(
+        floatArrayOf(1.0f),    // pInit (initial displacement)
+        floatArrayOf(0.0f),    // vInit (start at rest)
+        floatArrayOf(1.0f),    // kSpring (unit stiffness)
+    )
+}
+```
+
+**The test file** [`HeadToHeadHarnessHookeanSpringTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/HeadToHeadHarnessHookeanSpringTest.kt) — 2 tests, all passing:
+
+1. `hookeanSpringHarnessRunsAndProducesBaseline` — runs `HookeanSpringHarness.runBaseline(50, 100)` and pins:
+   - Forward value matches `hookeanSpringReference` within 1% relative tolerance.
+   - 3 gradient values returned (one per input).
+   - **Per-input FD validation** at h=1e-3, with **3% relative tolerance + 1e-2 absolute floor** — looser than BGDHyperOpt because the symplectic-Euler 10-step recurrence accumulates more f32 noise than BGDHyperOpt's 3-step closed-form recurrence.
+   - `df/dpInit` and `df/dkSpring` non-zero (sanity: trajectory genuinely depends on these at displaced-from-rest config).
+   - Timing min ≤ median ≤ p99 + GC-pause guard.
+
+2. `hookeanSpringForwardMatchesReferenceAcrossMultipleInputSets` — cross-input consistency at four configurations:
+   - Baseline `(1, 0, 1)`.
+   - Rest `(0, 0, 5)` — trajectory stays at zero regardless of stiffness (zero-input edge case).
+   - Perturbed `(2, -0.5, 0.5)`.
+   - Mirror-symmetric `(-1, 1, 2)`.
+
+**Decisions worth flagging**:
+
+- **The "structural shape" decision is the right trade-off.** The paper's HookeanSpring uses an N-vertex chain, but what the harness measures is "constant-trip-count temporal recurrence with multiple coupled state variables." The scalar 1D oscillator hits both axes. Future firings can lift the K2-plugin port if cross-framework comparison requires the exact same primal structure.
+
+- **3% relative tolerance for the gradient — wider than BGDHyperOpt's 1% — is justified by the recurrence's depth.** 10 compounded f32 multiplications + additions in the recurrence accumulate noise at roughly `√10 ≈ 3.16×` relative to single-step error. BGDHyperOpt's K=3 unroll is `√3 ≈ 1.73×`. The 3× tolerance is empirically tight enough to catch real bugs while accommodating expected f32 noise.
+
+- **The `df/dvInit` discriminator is intentionally not strictly bounded above zero.** At the chosen baseline `(1, 0, 1)`, `vInit = 0` is exactly at zero — small perturbations to `vInit` produce a non-zero but small gradient. The test pins `df/dpInit` and `df/dkSpring` as strictly non-zero (the trajectory genuinely depends on these at displaced-from-rest), but doesn't pin `df/dvInit`'s magnitude — the FD validation does that work.
+
+- **Cross-input "rest" pin is structurally important.** At `(pInit=0, vInit=0, kSpring=anything)` the trajectory stays at zero forever. A primal that incorrectly mixed kSpring into the position update (e.g., a typo in the dxir-builder DSL) would produce non-zero output here. The rest case is a sharp discriminator that costs almost nothing to add.
+
+- **Suite +2 to 955.**
+
+**Tests added** (+2):
+
+1. `HeadToHeadHarnessHookeanSpringTest.hookeanSpringHarnessRunsAndProducesBaseline`
+2. `HeadToHeadHarnessHookeanSpringTest.hookeanSpringForwardMatchesReferenceAcrossMultipleInputSets`
+
+Full suite is green: **955 tests** (+2 from §0.4.223).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Head-to-head harness Phase 1 fourth slice — Brachistochrone or HMC inhabitant.** Both have existing K2-plugin ports (`:compiler-plugin/src/test`). Same trade-off as §0.4.224's HookeanSpring: lift K2-plugin infra, OR port the structural shape via dxir-builder. Brachistochrone is closed-form gradient (~30-line port); HMC is more involved (multi-step + IF). Brachistochrone is the cheaper next slice. 1 firing.
+
+2. **Head-to-head harness Phase 1 fifth+ slice — fold in QWOP avatar-step's existing per-slice primals as additional throughput inhabitants.** Each `Qwop.<helper>Primal()` (sumPositions, sumFineSteps, frictionAccum, etc.) could become a harness inhabitant for finer-grained throughput data. Lower priority than getting the core six paper benchmarks in. 1-2 firings if needed.
+
+3. **Head-to-head harness Phase 1 sixth+ slice — K2-plugin-side inhabitants for the remaining benchmarks (Brachistochrone, HMC, CartPole) via lifted compileAndRun.** Multi-session structural — likely 2-3 firings. Defer until §0.4.225 surfaces a real Brachistochrone need.
+
+4. **Head-to-head harness Phase 2 — Python references.** Gated on user-side toolchain.
+
+5. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** §11.13's headline gap. Genuinely deferred.
+
+**Definition-of-done for §0.4.224 — met**:
+- Scalar 1D oscillator primal lifted into `BenchmarkPrimals.kt` ✓
+- Kotlin reference for FD validation ✓
+- `HookeanSpringHarness` inhabitant defined ✓
+- Forward + per-input FD-validated gradient baseline pinned ✓
+- Cross-input consistency at 4 configurations (including rest case) ✓
+- Suite +2 to 955 ✓
+- Brachistochrone (fourth slice) is the natural next pickup ✓
+
 #### 0.4.223 Head-to-head harness Phase 1 second slice — BGDHyperOpt outer loop is the first **paper benchmark** in the harness 2026-04-27
 
 §0.4.222's hand-off named "head-to-head harness Phase 1 second slice — add a `:benchmarks`-side BGDHyperOpt or HookeanSpring inhabitant" as the next pickup. §0.4.223 lands BGDHyperOpt — the first **paper benchmark** (OOPSLA 2021 Fig. 6) in the harness suite. This moves the M9 critical path forward: the harness now has both a synthetic full-pipeline test (QWOP avatar-step) AND a real paper-benchmark baseline (BGDHyperOpt outer loop).

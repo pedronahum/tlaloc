@@ -173,4 +173,95 @@ object BenchmarkPrimals {
         for (k in 0 until K) w = a * w + b
         return w
     }
+
+    /**
+     * §0.4.224 — HookeanSpring **scalar 1D oscillator** primal. Mirrors the
+     * OOPSLA 2021 paper's HookeanSpring "N=10 chain — measured timings"
+     * shape: a constant-trip-count temporal simulation with **two coupled
+     * state variables** (position + velocity).
+     *
+     * The recurrence is symplectic (semi-implicit) Euler integration of an
+     * undamped harmonic oscillator with stiffness `kSpring` and unit mass:
+     *
+     * ```kotlin
+     * var pos = pInit
+     * var vel = vInit
+     * for (i in 0 until N) {
+     *     val force = -kSpring * pos
+     *     vel = vel + dt * force
+     *     pos = pos + dt * vel
+     * }
+     * return pos
+     * ```
+     *
+     * **Why scalar instead of multi-vertex chain**: the paper uses an N-vertex
+     * chain (rank-1 tensor primitives + GATHER/SCATTER_ADD). Lifting the
+     * existing K2-plugin port at `:compiler-plugin/src/test/.../HookeanSpringTest.kt`
+     * to `:benchmarks` requires rank-1 tensor support on the dxir-builder
+     * path, which is not available without the K2-plugin's `compileAndRun`
+     * infrastructure. The scalar 1D oscillator hits the same structural
+     * axis (constant-trip-count WHILE with 2 coupled state vars) without
+     * needing the rank-1 plumbing.
+     *
+     * **Coarsening behaviour**: the N=10 trip count is constant, so C5
+     * unrolls this WHILE into a 10-deep recurrence chain. The gradient
+     * through the unrolled recurrence is exercised by reverse-mode AD.
+     *
+     * **Fixed parameters**: `dt = 0.1` (large enough to drift visibly from
+     * exact SHO over N=10 steps, small enough to remain numerically stable),
+     * `mass = 1.0` (folded into kSpring's effective value). The user
+     * supplies the three free parameters: `pInit`, `vInit`, `kSpring`.
+     */
+    fun hookeanSpringPrimal(N: Int = 10, dt: Float = 0.1f): io.tlaloc.ir.DxirFunction =
+        DxirBuilder.function("hookeanSpringScalar") {
+            val pInit = param("pInit", f32)
+            val vInit = param("vInit", f32)
+            val kSpring = param("kSpring", f32)
+            val nBound = const(N.toFloat(), f32)
+            val zeroI = const(0f, f32)
+            val dtConst = const(dt, f32)
+            val w = whileOp(
+                inits = listOf(pInit, vInit, zeroI),
+                cond = { args ->
+                    val diff = op(OpKind.SUB, listOf(nBound, args[2]), f32)
+                    val pred = op(OpKind.STEP, listOf(diff), boolS)
+                    yields(pred)
+                },
+                body = { args ->
+                    val pos = args[0]
+                    val vel = args[1]
+                    val counter = args[2]
+                    // force = -kSpring * pos
+                    val negKpos = op(OpKind.MUL, listOf(kSpring, pos), f32)
+                    val force = op(OpKind.NEG, listOf(negKpos), f32)
+                    // vel = vel + dt * force
+                    val dtForce = op(OpKind.MUL, listOf(dtConst, force), f32)
+                    val newVel = op(OpKind.ADD, listOf(vel, dtForce), f32)
+                    // pos = pos + dt * newVel  (semi-implicit / symplectic Euler)
+                    val dtVel = op(OpKind.MUL, listOf(dtConst, newVel), f32)
+                    val newPos = op(OpKind.ADD, listOf(pos, dtVel), f32)
+                    // counter += 1
+                    val one = const(1f, f32)
+                    val newCounter = op(OpKind.ADD, listOf(counter, one), f32)
+                    yields(newPos, newVel, newCounter)
+                },
+            )
+            // Return final position (carried slot 0).
+            listOf(w.result(0))
+        }
+
+    /**
+     * §0.4.224 — Kotlin reference mirroring [hookeanSpringPrimal]'s recurrence.
+     * Used for FD-validated gradient pins in the harness test.
+     */
+    fun hookeanSpringReference(pInit: Float, vInit: Float, kSpring: Float, N: Int = 10, dt: Float = 0.1f): Float {
+        var pos = pInit
+        var vel = vInit
+        for (i in 0 until N) {
+            val force = -kSpring * pos
+            vel += dt * force
+            pos += dt * vel
+        }
+        return pos
+    }
 }

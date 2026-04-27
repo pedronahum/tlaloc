@@ -173,3 +173,31 @@ object BgdHyperOptHarness : HeadToHeadBenchmark {
         floatArrayOf(5.0f),     // M
     )
 }
+
+/**
+ * §0.4.224 — third harness inhabitant: HookeanSpring scalar 1D oscillator
+ * (paper structural shape: constant-trip-count WHILE with 2 coupled state
+ * variables). Second **paper benchmark** in the harness (after BGDHyperOpt).
+ *
+ * Fixed inputs at one displacement past rest:
+ *   - `pInit = 1.0` (initial displacement)
+ *   - `vInit = 0.0` (start at rest)
+ *   - `kSpring = 1.0` (unit stiffness; with mass=1, ω = 1 rad/s)
+ *
+ * After N=10 steps with dt=0.1, the discrete trajectory is a numerically-
+ * integrated approximation of `cos(t)` at `t = N·dt = 1.0`. Symplectic Euler
+ * has small drift from the exact value cos(1.0) ≈ 0.5403; the harness pins
+ * the discrete trajectory's value (matched between Tlaloc and Kotlin reference)
+ * rather than the exact analytical solution.
+ */
+object HookeanSpringHarness : HeadToHeadBenchmark {
+    private const val N = 10
+    private const val DT = 0.1f
+    override val name = "hookean-spring-scalar-N10"
+    override fun primal() = BenchmarkPrimals.hookeanSpringPrimal(N, DT)
+    override fun fixedInputs() = listOf(
+        floatArrayOf(1.0f),    // pInit
+        floatArrayOf(0.0f),    // vInit
+        floatArrayOf(1.0f),    // kSpring
+    )
+}
