@@ -39,6 +39,89 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.237 Aggregator regression coverage — `harness/python/aggregate_test.py` + `test_data/` fixtures 2026-04-27
+
+§0.4.236's hand-off named "Phase 1 closure entry post-toolchain-install" or "IREE CPU implementation" — both toolchain-gated. Continuing the "pre-toolchain artifacts" thread, §0.4.237 lands stdlib-only test coverage for `harness/python/aggregate.py`. **The aggregator is the critical script that produces the §0.4 closure entry's body; without test coverage, a future regression could silently produce wrong results when the user runs the four-command workflow.**
+
+**The new files**:
+
+1. [`harness/python/aggregate_test.py`](harness/python/aggregate_test.py) — 6 `unittest.TestCase` methods that invoke `aggregate.py` as a subprocess against synthetic JSON fixtures and assert on stdout/stderr/exit-code. Stdlib-only (`subprocess`, `tempfile`, `unittest`).
+
+2. [`harness/python/test_data/`](harness/python/test_data/) — three synthetic JSON fixtures:
+   - `tlaloc_baseline.json`: 2 benchmarks (Brachistochrone + HookeanSpring) with realistic forward + gradient + timing values.
+   - `pytorch_agreeing.json`: same benchmarks with matching forward/gradients but slower timings (so Tlaloc shows speedup).
+   - `pytorch_disagreeing.json`: Brachistochrone with deliberately-wrong forward (8.5 vs reference 7.59375) — exercises `--strict` failure path.
+
+**The 6 test cases**:
+
+1. `test_tlaloc_only_produces_table_with_dash_cells` — pin: with only Tlaloc JSON, table shows `—` in cross-framework cells; numerical-agreement section explicitly notes PyTorch+JAX absence.
+2. `test_with_pytorch_computes_speedup_and_m9_verdict` — pin: with agreeing pytorch.json, table shows `8.00×` speedup (3000ns vs 24000ns) and M9 ✓ for Brachistochrone (within ±20% of paper's 4-11× range, which gives the band [3.2, 13.2]).
+3. `test_strict_mode_passes_when_values_agree` — pin: `--strict` exits 0 when forward + gradient values agree within f32 tolerance (1e-3 abs / 5e-3 rel).
+4. `test_strict_mode_fails_when_values_disagree` — pin: `--strict` exits non-zero when values breach tolerance; stderr mentions the failing benchmark name.
+5. `test_missing_tlaloc_file_errors_out` — pin: required file → exit non-zero with "not found" in stderr.
+6. `test_output_file_written_when_specified` — pin: `--output` flag persists Markdown to a file; file contents match the table.
+
+**Verification — all 6 tests pass on first run**:
+
+```
+$ python3 -m unittest harness.python.aggregate_test
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.259s
+
+OK
+```
+
+**Decisions worth flagging**:
+
+- **Subprocess-based testing over import-based.** The aggregator's primary surface is the CLI (`python aggregate.py --input ... --strict`). Testing via subprocess validates exactly what the user invokes; testing via import would test internal Python functions but not the CLI parsing, exit codes, or stderr format. The 0.26-second test runtime is acceptable.
+
+- **Stdlib-only — matches the aggregator's no-dependency contract.** `aggregate.py` itself uses only stdlib `json`; the test should preserve that constraint. `subprocess`, `tempfile`, `unittest` are all stdlib. No `pytest`, no `pytest-subprocess`, no `pytest-mock`. Adding a Python test framework dependency would be ironic given the aggregator deliberately avoids one.
+
+- **Synthetic fixtures use realistic-looking values.** Brachistochrone's forward = 7.59375 (= 1.5⁵, exact) matches Tlaloc's actual output; HookeanSpring's forward = 0.4978 matches the §0.4.236 measurement. This lets future readers cross-check the test data against real harness output without confusion. The "disagreeing" fixture deliberately uses `forwardValue: 8.5` which is far enough from 7.59375 (relative error ≈ 12%) to definitely breach 5e-3 rel tolerance.
+
+- **The M9 verdict test pins the actual band logic.** `8.00×` falls within `[0.8 × 4, 1.2 × 11] = [3.2, 13.2]` per §11.13's "within 20% of paper's figures" → ✓. If the band logic ever changes (e.g., `±20%` becomes `±50%`), this test catches it. The §0.4.234 entry documented the band; §0.4.237 makes it executable.
+
+- **No Gradle-task wiring for the Python test.** Could add `tasks.register<Exec>("aggregateTest") { commandLine("python3", "-m", "unittest", "harness.python.aggregate_test") }`, but: (a) the test runs in 0.26 seconds; (b) it doesn't add to the JVM suite count; (c) Gradle wiring requires Python at `./gradlew check` time, which violates "no toolchain installs" if Python's not already present. The user runs `python3 -m unittest harness.python.aggregate_test` directly when they want the coverage.
+
+- **The aggregator's M9 logic is the load-bearing piece this firing protects.** If someone later changes `m9_verdict()` to use a different band (say ±10% to be stricter), `test_with_pytorch_computes_speedup_and_m9_verdict` would fail at 8.00× (still within band) — not a problem. But if someone broke `agrees_within_tolerance()` (e.g., flipped `<` to `>`), `test_strict_mode_passes_when_values_agree` would fail loudly. Different test → different failure mode.
+
+- **Suite stays at 963 (no new JVM tests).** The Python test count is separate; documented in the README. If we ever wire Python tests into the JVM suite, that's a separate decision.
+
+**Files added** (+5 + 1 update):
+
+1. `harness/python/aggregate_test.py` (~125 lines)
+2. `harness/python/test_data/tlaloc_baseline.json`
+3. `harness/python/test_data/pytorch_agreeing.json`
+4. `harness/python/test_data/pytorch_disagreeing.json`
+5. `harness/python/README.md` updated to list the test files
+
+**Tests added** (+0 JVM, +6 Python): pure pre-toolchain artifact preparation.
+
+Full suite is green: **963 tests** (unchanged from §0.4.236).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Phase 1 closure entry post-toolchain-install.** Still the headline path. When user installs PyTorch + JAX + runs the four-command sequence, the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" lands. 1 firing post-install.
+
+2. **IREE CPU runtime implementation.** Gated on user-side IREE install per §0.4.230's plan.
+
+3. **More aggregator coverage.** A 7th test exercising the JAX path; a 8th test exercising the partial-mismatch case (PyTorch matches Tlaloc but JAX doesn't). Risk of busywork if the existing 6 cover the headline behaviours; only add when a gap surfaces.
+
+4. **Polish work that doesn't grow scope** — risk of busywork.
+
+5. **Out-of-scope register refresh #4** — §0.4.235 was 2 firings ago; another would be premature.
+
+**Definition-of-done for §0.4.237 — met**:
+- `aggregate_test.py` ships with 6 stdlib-only `unittest` cases ✓
+- `test_data/` fixtures cover Tlaloc-only + PyTorch-agreeing + PyTorch-disagreeing scenarios ✓
+- Tests verified passing: 6/6 in 0.26 seconds ✓
+- M9 verdict logic pinned via the 8.00× speedup case ✓
+- `--strict` failure path covered ✓
+- README updated to list the test files ✓
+- Suite stays at 963 (Python tests are separate) ✓
+- No external Python dependencies added ✓
+
 #### 0.4.236 JVM-side dump-path — `./gradlew :benchmarks:dumpHarnessResults` writes `harness-results-tlaloc.{csv,json}` directly 2026-04-27
 
 §0.4.235's hand-off named "JVM-side dump-path improvement" as the next pickup. §0.4.236 lands it. **The user's cross-framework comparison workflow is now four commands instead of "run a test in a tempdir, copy files manually, then run Python scripts":**

@@ -1,0 +1,12 @@
+[
+  {
+    "benchmark": "brachistochrone-compound-velocity-N5",
+    "forwardValue": 8.5,
+    "gradientValues": [30.0],
+    "warmupIterations": 200,
+    "measuredIterations": 800,
+    "medianNanos": 24000,
+    "minNanos": 22000,
+    "p99Nanos": 35000
+  }
+]

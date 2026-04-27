@@ -18,6 +18,8 @@ The JVM-side aggregator (`HeadToHeadHarnessAllTest` produces `harness-results-tl
 - `run_pytorch.py` — PyTorch reference (uses `torch.func.grad` + `torch.compile`).
 - `run_jax.py` — JAX reference (uses `jax.grad` + `jax.jit`).
 - `aggregate.py` — cross-framework aggregator (stdlib only; no PyTorch / JAX needed).
+- `aggregate_test.py` — stdlib-only tests for `aggregate.py`. Run with `python3 -m unittest harness.python.aggregate_test`.
+- `test_data/` — synthetic JSON fixtures used by `aggregate_test.py`.
 
 ## Pre-requisites (user-side; not auto-installed)
 

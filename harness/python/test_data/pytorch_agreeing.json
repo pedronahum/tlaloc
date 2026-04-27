@@ -1,0 +1,22 @@
+[
+  {
+    "benchmark": "brachistochrone-compound-velocity-N5",
+    "forwardValue": 7.59375,
+    "gradientValues": [25.3125],
+    "warmupIterations": 200,
+    "measuredIterations": 800,
+    "medianNanos": 24000,
+    "minNanos": 22000,
+    "p99Nanos": 35000
+  },
+  {
+    "benchmark": "hookean-spring-scalar-N10",
+    "forwardValue": 0.4978,
+    "gradientValues": [0.5403, 0.6, 0.4],
+    "warmupIterations": 200,
+    "measuredIterations": 800,
+    "medianNanos": 26000,
+    "minNanos": 25000,
+    "p99Nanos": 30000
+  }
+]
