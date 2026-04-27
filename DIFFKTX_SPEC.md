@@ -39,6 +39,87 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.229 Out-of-scope register refresh — Head-to-head harness Phase 1 CLOSED; Phase 2 Python references is the only remaining M9 gate 2026-04-27
+
+§0.4.221 was the eleventh register snapshot; §0.4.229 is the twelfth. **7 sub-sections shipped between §0.4.222 and §0.4.228** — the entire head-to-head harness Phase 1 arc, from scaffold + first inhabitant → BGDHyperOpt → HookeanSpring → Brachistochrone → HMC → CartPole → multi-inhabitant runner with CSV/JSON dump. **The M9 paper-benchmark side of Phase 1 is now structurally complete** — six inhabitants in the harness (five paper benchmarks + QWOP avatar-step), one runner, paper-style CSV + full-numerical JSON output ready for Phase 2's Python references to plug into.
+
+**Refreshed register (as of §0.4.228)** — items still genuinely deferred:
+
+| Area | Item | Notes |
+|---|---|---|
+| Cross-framework | PyTorch / JAX baselines (Phase 2) | The **only remaining M9 gate**. Plan in `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2. Tlaloc-side CSV + JSON dumps shipped §0.4.228; Python references run alongside and produce matching JSON/CSV files. Cross-framework comparison in Phase 3 reads all three side-by-side. Gated on user-side PyTorch 2.x + JAX toolchain. |
+| Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
+| Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
+| Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
+| Plugin | Sub-projecting the plugin (§13) | Gated on stable public surface. |
+| Plugin | IR-side synthesis closure (§17 step 6) — multi-result + rank-4+ surface | **Substantively closed for scalar + rank-1/2/3 F32 + square AND rectangular MATMUL + 4-grad-output Quadruple** at §0.4.203. Open: rank-4+ tensor ops, 5+ grad-output Pentuple/list (no port today exercises that), `irIfOp` with non-empty bodies. |
+| Plugin | `irIfOp` widening to lower IF-with-body-ops | Currently empty-body only. The §0.4.174 lift pass hoists safe arithmetic to top level; non-safe-lift cases (DIV/SQRT/LOG in IF body) still hit it. |
+| Plugin | `>4` grad-output cap in `synthesise()` | Synthesise rejects `fn.returns.size > 4`. 4-output via `Quadruple` shipped §0.4.203. 5+ outputs would need a `Pentuple` data class or list-typed wrapper. No port today exercises 5+. |
+| Plugin | `findTensorBinaryOp` overload-disambiguation | §0.4.206 added a defensive filter (parameter-type-based) since `:core/ops/times` now has two overloads. Future helper additions in `:core/ops` should mirror the disambiguation if a name shadows. |
+| Plugin | K2-plugin variants for harness inhabitants | Phase 1 of the harness shipped all six inhabitants via `:benchmarks` direct-DSL. K2-plugin-side variants would require lifting `compileAndRun` from `:compiler-plugin/src/test`; not on the M9 critical path since `:benchmarks` exercises the same dxir + coarsening + reverse-mode AD pipeline. Open if a K2-plugin-specific compilation overhead measurement becomes interesting (e.g., for a fairness comparison vs `torch.compile`'s compilation time). |
+| Tape | F64 tape path | Tape stays F32-only; no use case. |
+| PhiCalculus | Multi-result COARSENED — coarsening-side production | Substrate widening shipped §0.4.179. Open: coarsening passes still produce ONLY single-result COARSENED. |
+| PhiCalculus | Fragment-SOI splicing | One COARSENED per branch covered §0.4.35. |
+| PhiCalculus | WHILE inside `gradient_body` | IF coverage shipped §0.4.120 + §0.4.121; WHILE adds loop semantics that the current handler doesn't carry. CartPole's training loop (§0.4.206) and QWOP's avatar-step (§0.4.220) are both host-side Kotlin orchestration — they don't differentiate THROUGH the WHILE; they call the synthesised gradient repeatedly. Differentiating through a training WHILE remains genuinely deferred. |
+| PhiCalculus | `liftIfRegionBodies` widening of `SAFE_LIFT_OPS` | Currently total-functions-only. EXP/LOG/SQRT/DIV could be added with care (NaN propagation rather than fault on unconsumed branch). Widen as a port surfaces a need. |
+| Control flow | `break` / `continue` beyond trailing-if-break | §0.4.50 + §0.4.56–§0.4.58 cover trailing-break + tape fallback. |
+| Control flow | `return` inside branches | Branch yields its trailing expression. |
+| Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162 + §0.4.216/§0.4.217 multi-input variants); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.176 + §0.4.219 `:benchmarks` pin). |
+| Control flow | Multi-block regions | Single-block today. |
+| Control flow | Multi-result IF AD Phase 4 | Nested WHILE inside an IF branch. The headline §11.13 gap from M9. Not blocking the head-to-head harness if every benchmark is already ported (which they all are now). Still genuinely deferred. |
+| Tensor ops | StableHLO `OpKind.SIGN` emitter | §0.4.204 added the dxir + interpreter + plugin path; the StableHLO emitter (`stablehlo.sign`) is deferred until a real port through StableHLO surfaces the need. |
+| Tensor ops | `DTensor.minus(Float)` operator | §0.4.206 added `DTensor.times(Float)` for GD updates. `minus(Float)` would let the user write `weights - lr * grads` symmetrically. Not blocking any port; widen when symmetry surfaces a friction. |
+| Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
+| Harness | `BenchmarkPrimals` / `:ir`-test cross-module duplication | §0.4.223 noted that `bgdHyperOptOuterLoopPrimal` is duplicated between `:benchmarks/BenchmarkPrimals.kt` and `:ir/PhiCalculusBgdHyperOptTest.kt`. The duplication is intentional (~30 lines, module dependency direction `:benchmarks → :ir`). Lift to `:ir/commonTest` or expose a public `:ir` API when a third caller surfaces. |
+
+**Newly shipped between §0.4.222 and §0.4.228** (7 sub-sections, three themed clusters):
+
+- **Harness scaffold + first inhabitant (§0.4.222)** — `HeadToHeadBenchmark` interface + `HeadToHeadResult` data class + minimal JSON serialisation + first inhabitant `QwopAvatarStepHarness` (synthetic full-pipeline test). The §0.4.181 plan suggested either a new `:harness` module or a `:benchmarks` extension; chose `:benchmarks` extension to avoid build.gradle plumbing churn. `DxirInterpreter` is the timing target — explicitly noted as JVM-side interpreter, not native code; once M3 IREE CPU runtime ships, the harness re-runs against a native backend will give actual head-to-head numbers.
+
+- **Five paper-benchmark inhabitants shipped one per firing (§0.4.223 → §0.4.227)** — BGDHyperOpt (§0.4.223; outer-loop affine recurrence with FD-validated `df/dr` meta-gradient), HookeanSpring (§0.4.224; scalar 1D oscillator with 2 coupled state vars; ported the structural shape rather than the K2-plugin's N-vertex chain to avoid rank-1 dxir-builder plumbing), Brachistochrone (§0.4.225; compound-velocity sub-primal; closed-form forward `(1+y)^N` + closed-form gradient `N·(1+y)^(N-1)` cross-validated against step-by-step recurrence), HMC (§0.4.226; logistic-regression log-posterior; first inhabitant to use EXP/LOG; manual-unrolled with hardcoded n=4 d=2 dataset), CartPole Phase 1 (§0.4.227; first to use SIN/COS/ABS/IF; structural `df/dat = 0` discriminator on unused `pt` chain). Each inhabitant adds different op-coverage and different input-cardinality (1/2/3/4/5 inputs across the suite).
+
+- **Multi-inhabitant runner + CSV/JSON dump (§0.4.228)** — `HeadToHeadHarnessRunner.runAllAndDump` aggregates all six inhabitants' baselines into paper-style CSV (`benchmark,framework,n_iterations,median_ns,min_ns,p99_ns`) and full-numerical JSON. The CSV format mirrors the OOPSLA paper's per-framework performance tables; the JSON preserves the full numerical baseline (forward + per-input gradients + timing stats) for f32-tolerance numerical-correctness comparison. One place for Phase 2 Python references to plug in.
+
+**Decisions worth flagging**:
+
+- **All five paper benchmarks landed via `:benchmarks` direct-DSL — without lifting `compileAndRun`.** The §0.4.181 plan suggested lifting the K2-plugin's test infrastructure to a public surface so harness inhabitants could share it; that turned out to be unnecessary. Each paper benchmark could be ported to scalar dxir-builder form mirroring the K2-plugin port's structural shape, without needing the rank-1 tensor / GATHER / SCATTER_ADD plumbing. This kept Phase 1's structural cost bounded (one firing per inhabitant) and avoided multi-firing infrastructure refactors.
+
+- **The harness's coverage matrix is genuinely complete for M9.** Op coverage spans ADD/SUB/MUL/DIV/NEG/STEP (every inhabitant) + EXP/LOG (HMC) + SIN/COS/ABS/IF (CartPole) + multi-WHILE/IF coarsening (QWOP). Input cardinality spans 1 (Brachistochrone) / 2 (HMC, HookeanSpring rest) / 3 (HookeanSpring full) / 4 (BGDHyperOpt, QWOP) / 5 (CartPole). Trip counts span N=3 (BGDHyperOpt, QWOP sub-primals) / N=5 (Brachistochrone) / N=10 (HookeanSpring) / N=4 unrolled (HMC, CartPole one-step). Together, the harness exercises every primitive op + every input-cardinality + every coarsening trip-count axis Phase 2's cross-framework comparison would need to discriminate.
+
+- **Phase 1 is structurally done; Phase 2 is gated only on toolchain.** §0.4.222's note "DxirInterpreter is the timing target — explicitly not native code" frames this: the harness's CURRENT measurements are interpreter overhead, not what M3's IREE CPU runtime will produce. But the **structural** prerequisites for M9 — Tlaloc-side numerical baselines, throughput statistics, paper-style CSV + numerical JSON — are all in place. Phase 2's Python references can run alongside whenever the user-side PyTorch+JAX toolchain becomes available; Phase 3 closure (the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" with the head-to-head numbers table) becomes a 1-firing landing once Phase 2 produces measurable numbers.
+
+- **The K2-plugin-variant deferred item is the cleanest framing of "what's NOT in the harness yet".** Every paper benchmark's `:compiler-plugin/src/test` test has a K2-plugin port; harness inhabitants are scalar dxir-builder ports of the same structural shapes. The K2-plugin path goes through extra compilation (FIR → dxir lowering, IR-phase synthesis); harness inhabitants skip that. For pure throughput comparison vs `torch.compile` / `jax.jit`, this is fine — those frameworks measure compiled-function execution, not compilation. For "compilation time" comparison, K2-plugin variants would matter; that's a separate axis.
+
+- **Cadence: 7 sub-sections — slightly above the recent register cadence range.** §0.4.221 was 13 (full QWOP arc); §0.4.207 was 5; §0.4.202 was 9; §0.4.190 was 12. The harness's 7 reflects: 1 firing scaffold (§0.4.222), 5 firings for one inhabitant each (§0.4.223–§0.4.227), 1 firing closure (§0.4.228). Tighter than CartPole's 25 or QWOP's 13 because the per-slice work was uniform (mostly mechanical: copy primal builder, write Kotlin reference, write FD test, ship). When a structural axis is bounded and decomposable, per-firing scope becomes predictable.
+
+- **Six paper benchmarks: 5/5 in harness + QWOP synthetic.** Brachistochrone (compound-velocity sub-primal), HookeanSpring (scalar 1D oscillator structural shape), BGDHyperOpt (outer-loop affine recurrence), HMC (n=4, d=2 logistic regression), CartPole Phase 1 (one-timestep reward), QWOP avatar-step (synthetic full pipeline). The K2-plugin path retains its own test files for each (full GATHER/SCATTER_ADD chains, multi-step CartPole Phase 2/3, rank-1 HookeanSpring chain) — those exercise the K2-plugin compilation surface, not measured by the harness's interpreter-based timing.
+
+**Tests added** (+0): pure doc / register session.
+
+Full suite is green: **962 tests** (unchanged from §0.4.228).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **First runtime backend (Phase 2 #2 — IREE CPU).** Harness Phase 1 closed; Phase 2 Python references are gated on user-side toolchain. Since the loop can't trigger Python toolchain installs (rules of engagement), shifting focus to the M3 critical path is natural. IREE CPU runtime + JNI bindings + single-device dispatch + end-to-end smoke test (lower a dxir function → StableHLO bytecode → IREE CPU → result). Multi-session structural work — likely 4-8 firings.
+
+2. **Plugin IR-side synthesis closure (Phase 2 #1 — §17 step 6 widening).** Substantively closed for scalar + rank-1/2/3 F32 + 4-grad-output Quadruple at §0.4.203. Open work: rank-4+ tensor ops, 5+ grad-output Pentuple/list. Lower priority since no port today exercises rank-4+; defer until a port surfaces a need.
+
+3. **Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** §11.13's headline gap from the original M9 plan. Genuinely deferred but not on the harness's critical path now that all benchmarks are ported. Multi-session structural work.
+
+4. **Head-to-head harness Phase 2 — Python references.** Gated on user-side toolchain. Becomes 1-firing landing once toolchain is available.
+
+5. **Opportunistic Phase 1 cleanup — multi-result COARSENED coarsening-side production.** Per the deferred register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; not blocking anything.
+
+**Definition-of-done for §0.4.229 — met**:
+- Deferred table refreshed to reflect §0.4.222–§0.4.228 closures ✓
+- "Cross-framework / PyTorch+JAX baselines" promoted from generic to "the only remaining M9 gate" ✓
+- "K2-plugin variants for harness inhabitants" added as a new named-deferred (replaces vague "K2-plugin-side inhabitants" hand-off) ✓
+- "Harness / cross-module duplication" added (§0.4.223's `BenchmarkPrimals` lift) ✓
+- Three themed clusters named (scaffold + first inhabitant; five paper benchmarks; multi-runner) ✓
+- Recommended-next surfaces IREE CPU runtime as the new highest-priority axis ✓
+- Register stays tabular per the §0.4.108–§0.4.221 organising principle ✓
+- Full suite stays green at 962 tests (unchanged) ✓
+
 #### 0.4.228 Head-to-head harness Phase 1 closure — multi-inhabitant runner + CSV/JSON dump; one place to plug Phase 2 Python references in 2026-04-27
 
 §0.4.227's hand-off named "Head-to-head harness Phase 1 closure — multi-inhabitant runner + CSV/JSON dump" as the next pickup. §0.4.228 lands it. **The harness Phase 1 is now structurally complete** — six inhabitants (BGDHyperOpt + HookeanSpring + Brachistochrone + HMC + CartPole paper benchmarks + QWOP avatar-step synthetic), one runner that produces both paper-style CSV and full-numerical JSON dumps. Phase 2 (Python references) is gated only on user-side toolchain.
