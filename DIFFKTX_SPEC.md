@@ -39,6 +39,60 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.205 CartPole Phase 3 seventh slice — full NN forward chain test (sign-tanh-relu-relu-matmul3) 2026-04-27
+
+§0.4.204's hand-off named "full NN forward chain test" as the next pickup. §0.4.205 lands it: `grad { (X, W1, W2, W3) -> (((X · W1).relu() · W2).relu() · W3).tanh().sign().sum().toFloat() }` lowers end-to-end through the K2 plugin — a full primitive composition exercising every Phase 3 piece shipped in §0.4.198–§0.4.204 in one chain. Gradient is identically zero through `sign` (per `SignRule`); the test asserts that all four gradient outputs (∂X, ∂W1, ∂W2, ∂W3) are zero-tensors AND that synthesis didn't fall back. **Test passed on first try** — every primitive in the chain composes cleanly.
+
+**The chain composition** (8 ops + scalar reduction):
+- 3 rectangular MATMULs — the Phase 0c-rectangular surface (§0.4.197)
+- 2 tensor RELUs — `irRelu` rank-dispatch (§0.4.199)
+- 1 tensor TANH — `irTanh` rank-dispatch (§0.4.200)
+- 1 tensor SIGN — `irSign` rank-dispatch (§0.4.204)
+- SUM + toFloat — DTensor → Float bridge (§0.4.188)
+
+Plus the substrate that makes it all work:
+- 5 distinct ShapeAtoms (Sym, Lit<Int>, Lit<Long>, Lit<Short>, Lit<Byte>) threading through the matmul chain (§0.4.197 axis matching)
+- `Quadruple` boxing for the 4-grad-param return (§0.4.203)
+- Forward + backward elementwise IrType propagation through TANH / SIGN / RELU (§0.4.198 substrate, extended in §0.4.200 / §0.4.204)
+- Per-param IrType population + atomic-atom typeArgs in matmul/transpose (§0.4.196)
+- Backward IrType derivation from returns via matmul shape-equation solve (§0.4.197)
+- Axis-matched `irBroadcast` + `irConstFor` (§0.4.197 + §0.4.200)
+
+**Decisions worth flagging**:
+
+- **Test passed on first try.** No iteration needed. This is the strongest possible signal that the eight Phase 3 sub-firings (§0.4.198–§0.4.204) decomposed correctly: each previous slice surfaced its own gate cleanly, the gates landed independently, and the composition just works. Nine firings (six small + slice-3a-3b setup + register refresh + this composition test) for the full Phase 3 chain — actual cost matches the original 4-5 firing estimate from `docs/CARTPOLE_PORT_PLAN.md`'s Phase 3 row, accounting for the substrate work.
+
+- **Gradient-is-zero is a forward-composition regression check, not a correctness probe.** Sign blocks gradient flow; the test verifies the FORWARD path compiled all the primitives correctly through the K2 plugin's IR-side synthesis. A non-zero ∂ would mean either (a) sign isn't blocking (SignRule bug) or (b) some other primitive failed to compose (synthesis regression). Either way, this test catches it.
+
+- **Skipped the `- ε` epsilon shift.** CartPole's full forward is `sign(tanh(...) - ε)`. Subtracting a scalar from a tensor requires explicit `broadcastLike(ε, template)` since `DTensor.minus(other: DTensor)` only takes a same-shape tensor. Adding the shift would be additive work — same gradient (zero through sign) but more user-side syntax. The chain shape `sign(tanh(((X · W1).relu() · W2).relu() · W3))` captures the structural test; the epsilon is plumbing. Future CartPole port slice can add it explicitly.
+
+- **No new synthesis pieces shipped.** Pure regression coverage on the existing surface. The interesting question this firing answered: "does the cumulative surface compose end-to-end?" — and the answer is yes, with no fixes needed.
+
+- **Suite +1 to 888.** The new `CartPoleNNChainTest`.
+
+**Tests added** (+1):
+
+1. `CartPoleNNChainTest.full sign-tanh-relu-relu-matmul3 chain lowers and gradient is zero` — first end-to-end CartPole-shape NN forward chain test through K2 plugin. Every Phase 3 primitive composed in one expression.
+
+Full suite is green: **888 tests** (+1 from §0.4.204).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 3 eighth slice — outer training loop (FINAL Phase 3 piece).** `while (loss > threshold) { ... apply gradient updates ... }` — gradient-bearing WHILE with closure-captured-state mutation. Multi-session structural item; needs careful design. Once landed, CartPole Phase 3 closes per `docs/CARTPOLE_PORT_PLAN.md`.
+
+2. **Out-of-scope register refresh** — Phase 3 first seven slices have all closed since §0.4.202's register. Next refresh would mark CartPole Phase 3 status as "near-complete" with the outer loop as the only remaining gap. Lower priority than (1).
+
+3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+4. **Phase 1 priority #1: Multi-result IF AD Phase 4** — multi-session structural. Lower priority while CartPole Phase 3 is finishing.
+
+**Definition-of-done for §0.4.205 — met**:
+- Full sign-tanh-relu-relu-matmul3 chain composes through K2 plugin ✓
+- 4-grad-param Quadruple-return verified end-to-end ✓
+- All four gradient outputs are zero-tensors (verifies sign-blocks-gradient design) ✓
+- Synthesis didn't fall back (verifies forward composition is clean) ✓
+- All 887 prior tests pass + 1 new = 888 ✓
+
 #### 0.4.204 CartPole Phase 3 sixth slice — tensor sign() primitive + SignRule (zero gradient) 2026-04-27
 
 §0.4.203's hand-off named "tensor sign()" as the next pickup. §0.4.204 lands it: the full vertical slice for tensor sign — `OpKind.SIGN`, `SignRule` (zero gradient), `DTensor.sign()` runtime helper, DxirInterpreter arm, FIR `:core.ops.sign` UNARY_OP_MAP entry, `irSign` synthesis arm + elementwise IrType propagation. Closes the second of two named-deferred items from §0.4.202's register (the other was `>3` grad-output cap, closed in §0.4.203). The remaining gaps for the full CartPole NN forward `sign(tanh(...) - ε)` are now just composition — every primitive is wired up.
