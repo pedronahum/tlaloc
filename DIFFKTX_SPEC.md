@@ -39,6 +39,81 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.211 QWOP Phase 1 first slice (forward-only) — `hipUpdatePrimal` test surfaces DxirReverseTransform CSE bug on QWOP shape 2026-04-27
+
+§0.4.210's hand-off named "QWOP Phase 1 first slice — straight-line port of one body part" as the next pickup. §0.4.211 ships the **forward-only** half: a `Qwop.hipUpdatePrimal()` standalone primal + 3 tests verifying primal structure + forward eval at non-clamping (mHip=2.0 → 0.8) and clamping (mHip=8.0 → 2.3) inputs + PhiCalculus.apply succeeds. **The gradient half is blocked**: writing the test surfaced a real bug in `DxirReverseTransform`'s CSE pass when applied to the QWOP hipUpdate shape post-coarsening — the produced grad function references an undefined node id. Per the /loop's "checkpoint, don't barrel forward with a hack" rule, this firing ships the forward path + flags the AD bug as the QWOP Phase 1 next-firing target.
+
+**The new primal** in [`Qwop.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/Qwop.kt):
+
+```kotlin
+fun hipUpdatePrimal(maxAngle: Float = 1.5f, nSteps: Int = 4): DxirFunction =
+    DxirBuilder.function("qwopHipUpdate") {
+        val mHip = param("mHip", f32)
+        val finalState = integrateMuscle(mHip, maxAngle, nSteps)
+        listOf(finalState)
+    }
+```
+
+Reuses the same `integrateMuscle` helper that the full `avatarStepPrimal` calls 4 times (once per muscle in Phase A). Standalone exposure here lets QWOP Phase 1 unit-test gradient correctness on one body part before tackling the full 13-loop avatar-step.
+
+**The test file** [`QwopHipUpdateTest.kt`](benchmarks/src/jvmTest/kotlin/io/tlaloc/benchmarks/QwopHipUpdateTest.kt):
+
+Three tests (all passing):
+1. `forwardEvalAtNonClampingInput` — at mHip=2.0, forward result is 0.8 (= 4 × 0.1 × 2.0, clean increment chain).
+2. `forwardEvalAtClampingInput` — at mHip=8.0, forward result is 2.3 (state grows 0 → 0.8 → 1.6 > 1.5 → clamps to 1.5 → +0.8 = 2.3). Discriminator: a "no IF" implementation would produce 3.2.
+3. `phiCalculusApplySucceedsOnHipUpdatePrimal` — verifies PhiCalculus.apply unrolls the constant-trip-count WHILE cleanly (post-pass, 0 top-level WHILEs).
+
+**The DxirReverseTransform CSE bug surfaced**:
+
+When `DxirReverseTransform.apply(coarsened)` runs on the unrolled hipUpdate, it throws:
+
+> `java.lang.IllegalArgumentException: function qwopHipUpdate_grad references unknown node ids: [16]`
+> `at io.tlaloc.ir.passes.DxirReverseTransform.applyCSE$ir(DxirReverseTransform.kt:466)`
+> `at io.tlaloc.ir.passes.DxirReverseTransform.apply(DxirReverseTransform.kt:419)`
+
+Partial body dump shows e.g. `%9 = STEP ops=[%16] types=[bool]` referencing node id 16, but node 16 is missing from the body. The CSE pass at `DxirReverseTransform.kt:466` is eliminating a node that's still referenced by a STEP operand. **This is a real bug in the AD pipeline, specific to the QWOP shape** (a coarsened WHILE producing multiple unrolled IF copies whose CSE deduplication misses an operand reference). Likely surfaces because:
+- C5 unrolls the constant-trip-count WHILE 4 times, producing 4 copies of the IF + collision-response chain.
+- DxirReverseTransform's reverse-mode AD synthesises a grad body that mirrors this 4× unrolled structure.
+- The CSE pass runs across the whole grad body. When it deduplicates a `SUB(state, maxAngle)` node (used in multiple iterations' STEP predicates), it must update the references in ALL consumers. The bug is one reference being missed.
+
+**Decisions worth flagging**:
+
+- **Checkpointing per the rules of engagement.** §0.4.211 was supposed to land Phase 1's gradient pin; it didn't because the surface fights back. The rule "If a compiler-API surface fights back, checkpoint what works + flag the blocker. Do NOT barrel forward with a hack" applies. Forward-only test ships, AD-side test is the next firing's clear target.
+
+- **The forward-only test is genuinely valuable.** Two-input pin (clamping vs non-clamping) verifies the IF executes correctly. Future AD-side test will validate gradient flow through the IF; the forward-side test verifies the IF's branch dispatch itself is correct. Together they discriminate three failure modes: (a) IF's predicate logic broken (forward fails at mHip=8.0); (b) gradient through then-branch broken (AD fails at mHip=8.0 specifically); (c) gradient through else-branch broken (AD fails at mHip=2.0).
+
+- **The CSE bug is QWOP-specific in surface, but likely a latent issue.** Coarsened-WHILE-with-IF-inside is a shape that the existing tests exercise (e.g., HMC Phase 3, CartPole's Phase 1). Why does QWOP trigger it? Likely: more IF + STEP ops in the coarsened body → higher chance of CSE-dedup collision → bug surfaces. Investigation should examine `applyCSE$ir`'s reference-update loop for missed operand cases.
+
+- **Not investigating the bug this firing.** The fix is genuinely structural — it touches `DxirReverseTransform`'s CSE pass which is shared by every benchmark's gradient computation. Hacking around it for QWOP would mask the issue. Filing it explicitly in this entry sets up the next firing for a focused investigation.
+
+- **Phase 1 progress despite the blocker.** The forward path is shipping correctly. The DxirReverseTransform bug is a single, localised issue — once fixed, the AD pin should drop into place via the test stub already documented in this entry's first version (mHip=2.0 → 0.4, mHip=8.0 → 0.3 expected gradients).
+
+**Tests added** (+3):
+
+1. `QwopHipUpdateTest.forwardEvalAtNonClampingInput` — pins forward result 0.8 at mHip=2.0.
+2. `QwopHipUpdateTest.forwardEvalAtClampingInput` — pins forward result 2.3 at mHip=8.0 (discriminates against "no IF" implementations).
+3. `QwopHipUpdateTest.phiCalculusApplySucceedsOnHipUpdatePrimal` — verifies coarsening pass unrolls the constant-trip-count WHILE.
+
+Full suite is green: **894 tests** (+3 from §0.4.210).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Investigate + fix the DxirReverseTransform CSE bug.** Per the /loop's "checkpoint" rule, this is now the highest-priority Phase 1 piece. Reproduce locally via `Qwop.hipUpdatePrimal()` → `PhiCalculus.apply` → `DxirReverseTransform.apply`. Examine `applyCSE$ir` at `DxirReverseTransform.kt:466` — the reference-update loop that misses an operand. Likely a one-firing fix once the missed code path is identified. Once fixed, expand `QwopHipUpdateTest` to add the AD-side gradient pins (mHip=2.0 → 0.4; mHip=8.0 → 0.3) — both pins are stubbed in the §0.4.211 entry's "What this test pins" section.
+
+2. **QWOP Phase 1 closure** — once (1) lands, expand the gradient pin to two-input discriminator (non-clamping + clamping both verified). 1 firing.
+
+3. **QWOP Phase 2 — single-loop coarsened test.** Per the plan, exercises one of the 13 loops via PhiCalculus.apply + verifies the coarsened form has the expected reduced op count + gradient FD-validated. 2-3 firings.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.211 — met (with checkpoint scope)**:
+- `Qwop.hipUpdatePrimal()` exposed as a top-level [DxirFunction] for testing ✓
+- 3 forward-only tests pass (structure + 2-input forward eval + PhiCalculus.apply) ✓
+- DxirReverseTransform CSE bug on QWOP shape clearly flagged with reproduction details ✓
+- QWOP Phase 1 closure path documented (next firing's clear target) ✓
+- All 891 prior tests pass + 3 new = 894 ✓
+- Per-rule checkpoint: forward path ships, AD-side blocker flagged, no barreling forward ✓
+
 #### 0.4.210 QWOP Phase 0b — widen `Qwop.kt` to 13 loops + 8 if-else (paper's structural shape) 2026-04-27
 
 §0.4.209's hand-off named "QWOP Phase 0b — widen to 13 loops + 8 if-else" as the next pickup. §0.4.210 lands it. The synthetic `Qwop.avatarStepPrimal()` now matches the paper's stated structural claim: **13 WHILE loops + 8 IF branches** in a single primal function (~570 lines). Phase 0 (the source-acquisition / reconstruction strategy phase) is now CLOSED. Phase 1+ (per-body-part gradient tests, single-loop coarsening, full function port) can begin.

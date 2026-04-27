@@ -80,6 +80,41 @@ object Qwop {
      *
      * Each distance loop is a separate WHILE accumulator.
      */
+    /**
+     * §0.4.211 — Phase 1 first-slice primal: single-muscle integration step
+     * exposed as a top-level [DxirFunction] for gradient-correctness pinning.
+     *
+     * Wraps the same [integrateMuscle] helper that the full [avatarStepPrimal]
+     * uses (Phase A's per-muscle WHILE + collision IF). Reused as a standalone
+     * primal here so QWOP Phase 1's first slice can FD- / hand-verify the
+     * gradient on one body part before the full 13-loop avatar-step is
+     * gradient-tested in Phase 2+.
+     *
+     * Forward semantics (with default `maxAngle=1.5`, `nSteps=4`):
+     * ```kotlin
+     * var state = 0f
+     * for (i in 0 until 4) {
+     *     if (state > 1.5f) state = 1.5f
+     *     else              state = state + muscle * 0.1f
+     * }
+     * return state
+     * ```
+     *
+     * Closed-form derivative (when no iteration triggers clamping):
+     *   `state = nSteps * dt * muscle = 0.4 * muscle`, so `df/dmuscle = 0.4`.
+     *
+     * For inputs where clamping triggers, the gradient becomes 0 at the
+     * iteration where `state > maxAngle` first holds — sub-gradient through
+     * the IF's `then`-branch (which yields the constant `maxAngle`, killing
+     * gradient flow through `state`).
+     */
+    fun hipUpdatePrimal(maxAngle: Float = 1.5f, nSteps: Int = 4): DxirFunction =
+        DxirBuilder.function("qwopHipUpdate") {
+            val mHip = param("mHip", f32)
+            val finalState = integrateMuscle(mHip, maxAngle, nSteps)
+            listOf(finalState)
+        }
+
     fun avatarStepPrimal(): DxirFunction =
         DxirBuilder.function("qwopAvatarStep") {
             val mHip = param("mHip", f32)
