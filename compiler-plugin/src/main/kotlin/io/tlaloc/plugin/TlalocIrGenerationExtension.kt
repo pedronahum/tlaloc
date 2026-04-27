@@ -92,7 +92,16 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
             override fun visitCall(expression: IrCall): IrExpression {
                 val transformed = super.visitCall(expression) as IrCall
                 val ownerFn = transformed.symbol.owner
-                val cid = ownerFn.callableId
+                // §0.4.201 — local functions (declared inside another function's
+                // body) lack a `callableId` and Kotlin's IR raises
+                // `IllegalStateException` from `getCallableIdImpl`. Skip them
+                // defensively rather than crash compilation: a local function
+                // can't be an io.tlaloc.autograd intrinsic anyway.
+                val cid = try {
+                    ownerFn.callableId
+                } catch (_: IllegalStateException) {
+                    return transformed
+                }
                 if (cid.className != null ||
                     cid.packageName.asString() != "io.tlaloc.autograd" ||
                     cid.callableName.asString() !in INTRINSIC_NAMES

@@ -39,6 +39,69 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.201 CartPole Phase 3 fourth slice — first FD-validated NN gradient + local-function plugin robustness fix 2026-04-27
+
+§0.4.200's hand-off named "CartPole Phase 3 fourth slice — first FD-validated CartPole-style test" as the next pickup. §0.4.201 lands it: a 1-hidden-layer NN forward `((X · W1).tanh() · W2).sum()` with rectangular weights (3 distinct ShapeAtoms), tanh activation, and central-difference finite-difference validation of the analytic gradient. Test result: analytic gradient agrees with FD within 5e-2 tolerance for non-symmetric inputs (X with mixed signs, W1 / W2 with various magnitudes). Plus a defensive plugin fix surfaced by writing the test.
+
+**The new test** [Rank2NNFiniteDifferenceTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/Rank2NNFiniteDifferenceTest.kt):
+
+`grad { (X, W1, W2) -> ((X matmul W1).tanh() matmul W2).sum().toFloat() }` with shapes `X: Rank2<Sym, Lit<Int>>` (2×3), `W1: Rank2<Lit<Int>, Lit<Long>>` (3×4), `W2: Rank2<Lit<Long>, Lit<Short>>` (4×2). Inputs use non-symmetric values (X = `[0.1, -0.2, 0.3, -0.4, 0.5, -0.6]`, W1 / W2 with similar mixed signs and varying magnitudes) so cancellations don't hide gradient bugs. The test:
+
+1. Computes analytic gradients via `g(X, W1, W2)` (the K2 plugin's synthesised gradient).
+2. Computes FD gradients per-element via central-difference perturbation: `(forward(theta + EPS·e_i) - forward(theta - EPS·e_i)) / (2·EPS)` with `EPS = 1e-3f`.
+3. Asserts `|analytic - FD| < 5e-2` per element.
+
+The forward function is defined inline in the test source (compiled normally by the K2 plugin without grad transformation; the synthesis only triggers on the actual `grad { ... }` call). FD perturbations re-allocate fresh DTensors at each call to keep semantics explicit.
+
+**The plugin robustness fix** in [TlalocIrGenerationExtension.kt:91-105](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocIrGenerationExtension.kt#L91-L105):
+
+Writing the FD test surfaced a real plugin bug. The first version had local helper functions inside `finiteDiff` (`mkX`, `mkW1`, `mkW2` factories that closed over the `xDims` / `w1Dims` / `w2Dims` outer args). Local IrFunctions lack a `callableId` and Kotlin's IR throws `IllegalStateException` from `AdditionalIrUtilsKt.getCallableIdImpl` when the plugin's `visitCall` transformer reaches `ownerFn.callableId`. Result: compile-time exception in any user code that has both Tlaloc plugin loaded AND a local function call. The plugin's intrinsic check should defensively skip local functions — they can't be `io.tlaloc.autograd.grad` etc. intrinsics anyway.
+
+Fix:
+```kotlin
+val cid = try {
+    ownerFn.callableId
+} catch (_: IllegalStateException) {
+    return transformed
+}
+```
+
+Three-line defensive try/catch around the `callableId` access. The transformer now skips local functions cleanly. The FD test ALSO works around it by lifting the helpers to top-level (moot once the plugin fix lands, but kept since top-level reads cleaner).
+
+**Decisions worth flagging**:
+
+- **5e-2 FD tolerance is deliberately loose.** Central-difference truncation error scales as `O(EPS²)` for smooth functions; with `EPS = 1e-3` the truncation error alone is `O(1e-6)`. But f32 round-off in the forward function (multiple matmuls + tanh) propagates errors of `O(1e-3..1e-2)` per gradient element. Tightening to 1e-2 might be feasible with f64, but f32 plus tanh's nonlinearity (and the chain `matmul → tanh → matmul → sum`) gives observed differences in the few-percent range. 5e-2 keeps the test robust against inevitable f32 noise without losing the diagnostic value of FD validation.
+
+- **The local-function fix is a real bug, not just test-induced.** Any user writing a Tlaloc-using app that calls *any* local function would hit it (e.g., a helper closure in main). The fix is non-breaking, defensive, and unblocks any future test that uses local functions for clarity.
+
+- **FD validation pattern unblocks subsequent CartPole port slices.** The pattern (analytic vs. central-difference per-element compare) is now reusable for any FD-validatable gradient — Phase 1 / Phase 3 of CartPole can lean on it for confidence beyond hand-derived analytic checks.
+
+- **Test exercises 4 distinct ShapeAtoms** (`Sym, Lit<Int>, Lit<Long>, Lit<Short>`), which is the maximum the prior tests reached. Forward elementwise propagation + backward MATMUL solving handle the entire chain without further plugin changes.
+
+- **Suite +1 to 883.** New: `Rank2NNFiniteDifferenceTest.1-hidden-layer NN gradient agrees with finite-differencing`.
+
+**Tests added** (+1):
+
+1. `Rank2NNFiniteDifferenceTest.1-hidden-layer NN gradient agrees with finite-differencing` — first FD-validated NN gradient through the K2 plugin.
+
+Full suite is green: **883 tests** (+1 from §0.4.200).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **CartPole Phase 1 port slice — physics-only step at one time step.** Per `docs/CARTPOLE_PORT_PLAN.md` §126's Phase 1 deliverable, port the cart-pole physics step-function (acceleration, angular update, etc.) gradient-validated. Lower-level than NN; verifies `sin / cos / abs / matmul / sum` together on a real physics primal. Multi-session item but the first slice should be tractable in 1-2 firings.
+
+2. **Out-of-scope register refresh** — Phase 0c-rectangular + Phase 3 first four slices (§0.4.197–§0.4.201) all moved from "deferred" to "shipped". Lower priority than (1).
+
+3. **3-layer chain test with mixed RELU + tanh activations** — would exercise the full CartPole NN forward shape `relu(...) → relu(...) → tanh(...) → linear`, expanding the §0.4.199 2-layer chain. Also lower priority than (1) since the FD-validated 1-hidden-layer test already proves the methodology.
+
+4. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
+
+**Definition-of-done for §0.4.201 — met**:
+- 1-hidden-layer NN with rectangular weights + tanh + FD validation passes ✓
+- Plugin transformer defensively handles local functions (no crash on `callableId`) ✓
+- All 882 prior tests pass + 1 new = 883 ✓
+- FD validation methodology established for subsequent CartPole port slices ✓
+
 #### 0.4.200 CartPole Phase 3 third slice — tensor TANH/SIGMOID synthesis + axis-matched irConstFor; first tanh gradient 2026-04-27
 
 §0.4.199's hand-off named "CartPole Phase 3 third slice — sigmoid / tanh widening" as the next pickup. §0.4.200 lands it: `grad { (X, W) -> (X matmul W).tanh().sum().toFloat() }` with rectangular `X: Rank2<Sym, Lit<Int>>, W: Rank2<Lit<Int>, Lit<Long>>` lowers end-to-end and the gradient matches the analytic `(1 - tanh(y)²) * upstream` chain within 1e-3.
