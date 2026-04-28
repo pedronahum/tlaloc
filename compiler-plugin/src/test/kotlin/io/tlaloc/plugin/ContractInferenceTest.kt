@@ -161,6 +161,120 @@ class ContractInferenceTest {
     }
 
     @Test
+    fun `Rank3 batched contract emits MATMUL with one batching axis`() {
+        // Layer 1.5 §0.4.242+ — rank-3 × rank-3 batched contraction
+        // (Batch, M, K) × (Batch, K, N) → (Batch, M, N). Shared names:
+        // {Batch (positions 0,0 → batching), Hidden (positions 2,1 →
+        // contracting)}. The plugin's emitContract partitions and emits
+        // MATMUL with lhs_batching_dims=[0], lhs_contracting_dims=[2],
+        // rhs_batching_dims=[0], rhs_contracting_dims=[1].
+        val result = compile(
+            stub = STUB_GRAD2_GENERIC,
+            user = """
+                import io.tlaloc.autograd.grad2
+                import io.tlaloc.core.Batch
+                import io.tlaloc.core.DTensor
+                import io.tlaloc.core.F32
+                import io.tlaloc.core.Hidden
+                import io.tlaloc.core.Named
+                import io.tlaloc.core.Rank3
+                import io.tlaloc.core.SeqLen
+                import io.tlaloc.core.Sym
+                import io.tlaloc.core.Vocab
+                import io.tlaloc.core.ops.contract
+                import io.tlaloc.core.ops.sum
+                fun main() {
+                    val g = grad2 {
+                        a: DTensor<Rank3<Named<Batch, Sym>, Named<SeqLen, Sym>, Named<Hidden, Sym>>, F32>,
+                        b: DTensor<Rank3<Named<Batch, Sym>, Named<Hidden, Sym>, Named<Vocab, Sym>>, F32> ->
+                        (a contract b).sum()
+                    }
+                    println(g)
+                }
+            """.trimIndent(),
+        )
+        val lowered = result.loweredMessages()
+        val unsupported = result.unsupportedMessages()
+        assertEquals(
+            1, lowered.size,
+            "expected 1 LAMBDA_LOWERED, got ${lowered.size}.\n" +
+                "unsupported reasons: $unsupported\n" +
+                "all messages:\n${result.renderMessages()}",
+        )
+        val dxir = lowered.single()
+        // Both params surface their full named-axis triples (Batch, SeqLen, Hidden) / (Batch, Hidden, Vocab).
+        assertContains(dxir, "%0: f32[-1@Batch,-1@SeqLen,-1@Hidden]")
+        assertContains(dxir, "%1: f32[-1@Batch,-1@Hidden,-1@Vocab]")
+        // Result type: (Batch [batching], SeqLen [lhs preserved], Vocab [rhs preserved]).
+        assertContains(dxir, "f32[-1@Batch,-1@SeqLen,-1@Vocab]")
+        // Plugin populates explicit attrs for the StableHLO emitter.
+        assertContains(dxir, "lhs_batching_dims=[0]")
+        assertContains(dxir, "rhs_batching_dims=[0]")
+        assertContains(dxir, "lhs_contracting_dims=[2]")
+        assertContains(dxir, "rhs_contracting_dims=[1]")
+        assertContains(dxir, "contracted_names=[Hidden]")
+        assertContains(dxir, "batching_names=[Batch]")
+    }
+
+    @Test
+    fun `Rank4 attention contract emits MATMUL with two batching axes`() {
+        // Layer 1.5 §0.4.242+ — rank-4 × rank-4 attention QK^T:
+        // (Batch, Heads, SeqLen, Dim) × (Batch, Heads, Dim, Vocab) →
+        // (Batch, Heads, SeqLen, Vocab). Shared names: {Batch (0,0 →
+        // batching), Heads (1,1 → batching), Dim (3,2 → contracting)}.
+        // We use Vocab as the second time axis stand-in to avoid
+        // SeqLen/SeqLen self-name conflict.
+        val result = compile(
+            stub = STUB_GRAD2_GENERIC,
+            user = """
+                import io.tlaloc.autograd.grad2
+                import io.tlaloc.core.Batch
+                import io.tlaloc.core.DTensor
+                import io.tlaloc.core.Dim
+                import io.tlaloc.core.F32
+                import io.tlaloc.core.Heads
+                import io.tlaloc.core.Named
+                import io.tlaloc.core.Rank4
+                import io.tlaloc.core.SeqLen
+                import io.tlaloc.core.Sym
+                import io.tlaloc.core.Vocab
+                import io.tlaloc.core.ops.contract
+                import io.tlaloc.core.ops.sum
+                fun main() {
+                    val g = grad2 {
+                        q: DTensor<Rank4<Named<Batch, Sym>, Named<Heads, Sym>, Named<SeqLen, Sym>, Named<Dim, Sym>>, F32>,
+                        kT: DTensor<Rank4<Named<Batch, Sym>, Named<Heads, Sym>, Named<Dim, Sym>, Named<Vocab, Sym>>, F32> ->
+                        (q contract kT).sum()
+                    }
+                    println(g)
+                }
+            """.trimIndent(),
+        )
+        val lowered = result.loweredMessages()
+        val unsupported = result.unsupportedMessages()
+        assertEquals(
+            1, lowered.size,
+            "expected 1 LAMBDA_LOWERED, got ${lowered.size}.\n" +
+                "unsupported reasons: $unsupported\n" +
+                "all messages:\n${result.renderMessages()}",
+        )
+        val dxir = lowered.single()
+        // Both params: rank-4 with full named axis quads.
+        assertContains(dxir, "%0: f32[-1@Batch,-1@Heads,-1@SeqLen,-1@Dim]")
+        assertContains(dxir, "%1: f32[-1@Batch,-1@Heads,-1@Dim,-1@Vocab]")
+        // Result type: (Batch, Heads [batching, lhs-position order], SeqLen [lhs preserved], Vocab [rhs preserved]).
+        assertContains(dxir, "f32[-1@Batch,-1@Heads,-1@SeqLen,-1@Vocab]")
+        // Two batching dims, one contracting dim.
+        assertContains(dxir, "lhs_batching_dims=[0, 1]")
+        assertContains(dxir, "rhs_batching_dims=[0, 1]")
+        assertContains(dxir, "lhs_contracting_dims=[3]")
+        assertContains(dxir, "rhs_contracting_dims=[2]")
+        assertContains(dxir, "contracted_names=[Dim]")
+        // Batching names are emitted in lhs-position order: Batch (axis 0), Heads (axis 1).
+        assertContains(dxir, "batching_names=[Batch, Heads]")
+    }
+
+    @Test
     fun `mixed named-and-positional contract is a type error`() {
         // Refined Option A v1 only accepts overloads where both operands
         // carry named axes. A mix (one named, one positional Sym) does not

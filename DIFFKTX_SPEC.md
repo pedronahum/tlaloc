@@ -39,6 +39,73 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.242 Layer 1.5 cleanup — Rank-3 batched + Rank-4 attention named contract; `emitContract` generalises to multi-shared-axis with batching/contracting partition; closes audit OQ-5 2026-04-28
+
+§0.4.241's hand-off named OQ-5 (rank-3 batched contraction) as a deferred follow-up. **User correction**: OQ-5 is load-bearing for Layer 2, not deferrable. Attention forward needs `(batch, heads, time, dim) × (batch, heads, dim, time') → (batch, heads, time, time')`, which is *rank-4* with two batching axes — leaving the hole would force the typed-step-boundary work to walk around a missing surface. §0.4.242 lands the cleanup as a Layer 1.5 commit before Layer 2 starts.
+
+**The cleanup, in scope**:
+
+1. **Plugin's `resolveParamType` extended to Rank4 / Rank5 / Rank6.** v1 only knew Rank1–Rank3. The axis-name walker already iterates `0 until rank` so it lifts named axes uniformly for any rank — only the FQN → rank lookup needed extension.
+
+2. **`emitContract` generalised from "exactly one shared axis" to multi-shared with batching/contracting partition.** The position-based rule: a shared name at *matching* dim positions is batching (preserved in output one-to-one); at *different* positions, contracting (summed over). Special-cased for rank-1 × rank-1 (the unique shared axis is contracting by convention — position-matching alone would mis-categorize it as batching).
+
+3. **Two new `contract` overloads in `core/ops/NamedOps.kt`**:
+   - `Rank3<Named<NameB, B>, Named<NameM, M>, Named<NameK, K>> contract Rank3<Named<NameB, B>, Named<NameK, K>, Named<NameN, N>> → Rank3<Named<NameB, B>, Named<NameM, M>, Named<NameN, N>>` (one batching axis).
+   - `Rank4<Named<NameB, B>, Named<NameH, H>, Named<NameT, T>, Named<NameD, D>> contract Rank4<Named<NameB, B>, Named<NameH, H>, Named<NameD, D>, Named<NameT2, T2>> → Rank4<Named<NameB, B>, Named<NameH, H>, Named<NameT, T>, Named<NameT2, T2>>` (two batching axes — attention QK^T exactly).
+
+   Each carries `@JvmName` to avoid type-erasure clashes with the existing rank-1/rank-2 overloads. Runtime bodies are nested loops over batch (× heads) calling the rank-2 matmul core; the plugin path inside `grad { }` lambdas emits a single batched `dot_general` with the right `*_batching_dims` / `*_contracting_dims` attrs.
+
+4. **Tests added** (+3): `Rank3 batched contract emits MATMUL with one batching axis`, `Rank4 attention contract emits MATMUL with two batching axes` (both in `:compiler-plugin/ContractInferenceTest`), and `namedAttentionRank4BatchedRoundTrips` in `:stablehlo/RoundTripTest` exercising the rank-4 batched MATMUL through `stablehlo-translate --serialize`.
+
+5. **`AttentionForwardExample.kt` rewritten to use the rank-4 surface as the headline.** Previously the example demoed rank-2 with a comment that rank-4 was a v2 enhancement; now the rank-4 type-level structure is the running example, exactly the shape a real transformer attention layer carries.
+
+**Decisions worth flagging**:
+
+- **Position-based partition over convention-based.** The natural alternatives for distinguishing batching from contracting were (a) "shared name at matching positions → batching, mismatched → contracting" (chosen) or (b) "trailing axes contract, leading axes batch by convention." The position-based rule generalises to non-matmul-style contractions (e.g. `Rank3<B, K, M> contract Rank3<B, N, K>` where K is at lhs[1] / rhs[2]) where convention-based would fail. The trade-off: rank-1 × rank-1 needs a special case because every position is "matching" by definition. Documented inline.
+
+- **Rank-1 × Rank-1 special case.** The unique shared axis at `lhs[0] = rhs[0]` would be categorised as batching under the position rule alone, leaving zero contracting axes. Hard-coded override: "if both operands are rank-1, the unique shared axis is contracting." Three sentences of code; documented in the lowering's KDoc.
+
+- **`@JvmName` annotations.** Every `contract` overload erases to `(DTensor, DTensor) → DTensor` at the JVM level; without distinct `@JvmName`s the four overloads (rank-1, rank-2, rank-3 batched, rank-4 attention) clash. Standard Kotlin pattern; doesn't affect Kotlin-source-level overload resolution.
+
+- **Result-axis ordering follows StableHLO convention.** `dot_general` outputs `[batching dims, lhs preserved, rhs preserved]` in order. The plugin's `emitContract` matches this — and the type-level overloads were declared with that same order on the LHS of the result type. Verified by the rank-4 test asserting result type `f32[-1@Batch,-1@Heads,-1@SeqLen,-1@Vocab]`.
+
+- **Rank-5+ remains future work.** OQ-5's resolution covers rank-3 + rank-4. Higher ranks (rank-5+ multi-axis contractions, multi-axis batching beyond rank-4) are deferred — but explicitly *not* on the critical path for any specific use case identified today. Layer 2 doesn't need them.
+
+**Files modified**:
+
+1. [`compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt`](compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt) — rank lookup extended to Rank4..Rank6; `emitContract` generalised with batching/contracting partition + rank-1 special case; new `batching_names` attr.
+2. [`core/src/commonMain/kotlin/io/tlaloc/core/ops/NamedOps.kt`](core/src/commonMain/kotlin/io/tlaloc/core/ops/NamedOps.kt) — `Rank3` + `Rank4` imports; two new overloads with runtime bodies + KDoc table.
+3. [`compiler-plugin/src/test/kotlin/io/tlaloc/plugin/ContractInferenceTest.kt`](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/ContractInferenceTest.kt) — two new tests for batched contraction shapes.
+4. [`stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt`](stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt) — rank-4 attention round-trip pin.
+5. [`examples/named-indices/AttentionForwardExample.kt`](examples/named-indices/AttentionForwardExample.kt) — rank-4 headline rewrite.
+6. [`examples/named-indices/README.md`](examples/named-indices/README.md) — table updated.
+7. [`docs/audits/named_indices_audit.md`](docs/audits/named_indices_audit.md) — OQ-5 marked RESOLVED.
+
+**Tests added** (+3): rank-3 batched + rank-4 attention plugin tests, rank-4 round-trip pin.
+
+Full suite is green: **995 tests** (was 992 at end of §0.4.241; +3).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Layer 2 — pattern recognition over named indices.** The original task's stated next step. With rank-4 attention now type-checkable, Layer 2's typed-step-boundary work has a complete substrate.
+
+2. **OQ-7 — read `IndexName.name` at FIR stage.** Plumb `FirSession` through `resolveParamType` to lift the singleton's `override val name` property instead of the simple class name. Cosmetic (cleaner SDY axis labels) but real.
+
+3. **OQ-4 — SDY tensor-axis-name anchoring.** Sidecar comments or custom MLIR attribute for tensor-side names in SDY-emitted MLIR.
+
+4. **Polish that doesn't grow scope** — risk of busywork.
+
+**Definition-of-done for §0.4.242 — met**:
+- Plugin recognises Rank4 (and Rank5/Rank6) types ✓
+- `emitContract` partitions shared axes by position into batching + contracting ✓
+- Rank-3 batched + rank-4 attention overloads ship with runtime bodies ✓
+- Rank-1 × rank-1 still works (special-cased) ✓
+- All 992 pre-existing tests still pass ✓
+- 3 new tests cover both new shapes + round-trip pin through stablehlo-translate ✓
+- Audit OQ-5 marked RESOLVED ✓
+- Attention example rewritten to use rank-4 as headline ✓
+- §0.4.242 entry written in canonical style ✓
+
 #### 0.4.241 Layer 1 named indices — `Named<N : IndexName, A : ShapeAtom>` + `axisNames` on `DxirType` + `contract` op via Refined Option A 2026-04-28
 
 §0.4.240 (Mac toolchain setup, see commit `746875b` for details — not a §0.4 entry by convention since it's tooling rather than design) landed the prerequisite toolchain. §0.4.241 lands **Layer 1** — the named-index foundation that nine downstream components depend on (per `docs/audits/named_indices_audit.md`'s scope statement). Five sub-milestones (N.0–N.4); audit closes the arc.

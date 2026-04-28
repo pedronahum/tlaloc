@@ -889,21 +889,38 @@ object FirLambdaToDxirLowering {
         call.dispatchReceiver ?: call.extensionReceiver
 
     /**
-     * Layer 1 §0.4.241+ — emit a [OpKind.MATMUL] (or [OpKind.DOT] for the
-     * rank-1 × rank-1 case) for a named-index `contract` call.
+     * Layer 1 §0.4.241+ + Layer 1.5 §0.4.242+ — emit a [OpKind.MATMUL] (or
+     * [OpKind.DOT] for the rank-1 × rank-1 case) for a named-index
+     * `contract` call.
      *
-     * Pre-condition: the call site reached us only because Kotlin's overload
-     * resolution succeeded, which means both operands carry named axes with
-     * exactly one shared [io.tlaloc.core.IndexName]. We re-derive that here
-     * by intersecting the operands' [io.tlaloc.ir.DxirType.axisNames] —
-     * both for defensive validation and because the lowering needs the
-     * actual axis *positions* to populate `lhs_contracting_dims` /
-     * `rhs_contracting_dims` for the StableHLO emitter.
+     * Pre-condition: the call site reached us only because Kotlin's
+     * overload resolution succeeded, which means both operands carry
+     * named axes with at least one shared [io.tlaloc.core.IndexName].
      *
-     * Throws [LoweringException] if the axis names somehow disagree with
-     * the overload-resolution post-condition; that path surfaces as a
-     * `NAMED_INDEX_MISMATCH` diagnostic via the existing failure handler
-     * in [lower].
+     * Layer 1.5 generalises the v1 "exactly one shared name" rule to
+     * support batched contractions:
+     *
+     * - **Batching axes**: shared names that appear at the *same dim
+     *   position* in both operands. These are preserved in the output one-
+     *   to-one (StableHLO `dot_general` batching dims).
+     * - **Contracting axes**: shared names that appear at *different dim
+     *   positions* in lhs vs rhs. Summed over and removed from the output
+     *   (StableHLO `dot_general` contracting dims). v1.5 still requires
+     *   exactly one contracting axis (the position-mismatch case).
+     *
+     * The position-based partition is the natural reading of the user's
+     * type-level overload: when the overload signature shares a type
+     * variable (`NameB` at lhs[0] = rhs[0]), the user is asserting "this
+     * is the same index"; when it shares it at different positions, "this
+     * gets summed."
+     *
+     * Result-axis ordering follows StableHLO convention: batching dims
+     * first (in lhs-position order), then lhs preserved, then rhs preserved
+     * — matches the type-level overloads' declared output shape.
+     *
+     * Throws [LoweringException] on any post-condition violation; that
+     * path surfaces as a `NAMED_INDEX_MISMATCH` diagnostic via the
+     * existing failure handler in [lower].
      */
     private fun emitContract(lhs: DxirNode, rhs: DxirNode, emitter: DxirEmitter): DxirNode {
         val lhsType = lhs.type
@@ -915,54 +932,90 @@ object FirLambdaToDxirLowering {
                 "contract requires both operands to carry named axes; got lhs=$lhsType rhs=$rhsType",
             )
         }
-        val sharedNames = lhsNames.filterNotNull().toSet()
-            .intersect(rhsNames.filterNotNull().toSet())
+        val lhsByName = lhsNames.withIndex().mapNotNull { (i, n) -> n?.let { it to i } }.toMap()
+        val rhsByName = rhsNames.withIndex().mapNotNull { (i, n) -> n?.let { it to i } }.toMap()
+        val sharedNames = lhsByName.keys.intersect(rhsByName.keys)
         if (sharedNames.isEmpty()) {
             throw LoweringException(
                 "contract operands share no named axis: lhs=$lhsNames rhs=$rhsNames",
             )
         }
-        if (sharedNames.size > 1) {
+
+        // Partition shared names by position alignment:
+        //   - same position  → batching axis (preserved in output)
+        //   - different pos  → contracting axis (summed over)
+        //
+        // Special case for rank-1 × rank-1: the unique shared axis MUST be
+        // contracting (no point in calling `contract` if there's nothing to
+        // sum). The position-based heuristic alone would misfire here —
+        // both operands have the axis at position 0, which would otherwise
+        // categorize as batching. This matches the user-facing semantics of
+        // the rank-1 `contract` overload (`Rank1<Named<K, _>> contract Rank1<Named<K, _>>: ScalarShape`).
+        val isRank1Pair = lhsType.rank == 1 && rhsType.rank == 1
+        val batchingNames = if (isRank1Pair) {
+            emptySet<String>()
+        } else {
+            sharedNames.filter { lhsByName[it] == rhsByName[it] }.toSet()
+        }
+        val contractingNames = sharedNames - batchingNames
+        if (contractingNames.size != 1) {
             throw LoweringException(
-                "contract supports exactly one shared named axis in v1 (got: $sharedNames)",
+                "contract supports exactly one contracting axis in v1.5 " +
+                    "(got contracting=$contractingNames batching=$batchingNames). " +
+                    "A shared name at the *same* dim position is batching; at *different* positions, contracting.",
             )
         }
-        val sharedName = sharedNames.single()
-        val lhsContractDim = lhsNames.indexOf(sharedName)
-        val rhsContractDim = rhsNames.indexOf(sharedName)
+        val contractingName = contractingNames.single()
+        val lhsContractDim = lhsByName.getValue(contractingName)
+        val rhsContractDim = rhsByName.getValue(contractingName)
 
-        // Build the result dims/axisNames by removing the shared axis from
-        // each operand and concatenating in lhs-then-rhs order — matches
-        // dot_general's batching/result conventions.
-        val resultDims = ArrayList<Int>(lhsType.rank + rhsType.rank - 2)
-        val resultNames = ArrayList<String?>(lhsType.rank + rhsType.rank - 2)
+        // Sort batching dims by lhs position to give a stable + emitter-
+        // friendly ordering. Rhs ordering follows the same name ordering.
+        val sortedBatching = batchingNames.sortedBy { lhsByName.getValue(it) }
+        val lhsBatchingDims = sortedBatching.map { lhsByName.getValue(it) }
+        val rhsBatchingDims = sortedBatching.map { rhsByName.getValue(it) }
+        val batchingPositionsLhs = lhsBatchingDims.toSet()
+        val batchingPositionsRhs = rhsBatchingDims.toSet()
+
+        // Build result dims + axisNames + preserved-name list.
+        // Output ordering: [batching dims (lhs order), lhs preserved, rhs preserved].
+        val resultDims = ArrayList<Int>(lhsType.rank + rhsType.rank - sharedNames.size - 1)
+        val resultNames = ArrayList<String?>(lhsType.rank + rhsType.rank - sharedNames.size - 1)
         val preservedNames = ArrayList<String>()
+        for (i in lhsBatchingDims) {
+            resultDims += lhsType.dims[i]
+            resultNames += lhsNames[i]
+            lhsNames[i]?.let { preservedNames += it }
+        }
         for (i in lhsNames.indices) {
             if (i == lhsContractDim) continue
+            if (i in batchingPositionsLhs) continue
             resultDims += lhsType.dims[i]
             resultNames += lhsNames[i]
             lhsNames[i]?.let { preservedNames += it }
         }
         for (i in rhsNames.indices) {
             if (i == rhsContractDim) continue
+            if (i in batchingPositionsRhs) continue
             resultDims += rhsType.dims[i]
             resultNames += rhsNames[i]
             rhsNames[i]?.let { preservedNames += it }
         }
         val resultAxisNames = if (resultNames.all { it == null }) emptyList() else resultNames.toList()
 
-        // Op kind: rank-1 × rank-1 produces a scalar; everything else is a
-        // matmul-shaped contraction. The emitter's MATMUL explicit path
-        // reads the four list attrs, so we always populate them.
-        val isDot = lhsType.rank == 1 && rhsType.rank == 1
+        // Op kind: rank-1 × rank-1 with no batching produces a scalar (DOT);
+        // everything else is matmul-shaped (MATMUL). The emitter's MATMUL
+        // explicit path reads the four list attrs, so we always populate them.
+        val isDot = lhsType.rank == 1 && rhsType.rank == 1 && batchingNames.isEmpty()
         val kind = if (isDot) OpKind.DOT else OpKind.MATMUL
         val attrs: Map<String, Any> = mapOf(
             "lhs_contracting_dims" to listOf(lhsContractDim),
             "rhs_contracting_dims" to listOf(rhsContractDim),
-            "lhs_batching_dims" to emptyList<Int>(),
-            "rhs_batching_dims" to emptyList<Int>(),
-            "contracted_names" to setOf(sharedName),
+            "lhs_batching_dims" to lhsBatchingDims,
+            "rhs_batching_dims" to rhsBatchingDims,
+            "contracted_names" to setOf(contractingName),
             "preserved_names" to preservedNames.toList(),
+            "batching_names" to sortedBatching.toList(),
         )
         val resultType = DxirType(lhsType.dtype, resultDims, resultAxisNames)
         return emitter.op(
@@ -1000,11 +1053,22 @@ object FirLambdaToDxirLowering {
             // tape stub fires for end-to-end gradient calls. The FIR-side
             // recognition lands here as the first slice; rank-2/3 synthesis-side
             // widening is the next slice in the Phase 0c arc.
+            // §0.4.242 — Rank4 / Rank5 / Rank6 added for Layer 1.5 (closes
+            // OQ-5: rank-3+ batched named contraction). The axis-name walker
+            // below already iterates `0 until rank` so it lifts named axes
+            // for any rank uniformly; the only required change here is the
+            // FQN → rank lookup. Synthesis-side acceptance for rank ≥ 4 is
+            // a separate concern (the rank-2/3 BROADCAST gate from §0.4.186
+            // remains the synthesis-side ceiling); FIR-stage recognition is
+            // sufficient for `LAMBDA_LOWERED` to fire on rank-4 grad bodies.
             val rank: Int = when (shapeFqn) {
                 "io/tlaloc/core/ScalarShape" -> 0
                 "io/tlaloc/core/Rank1" -> 1
                 "io/tlaloc/core/Rank2" -> 2
                 "io/tlaloc/core/Rank3" -> 3
+                "io/tlaloc/core/Rank4" -> 4
+                "io/tlaloc/core/Rank5" -> 5
+                "io/tlaloc/core/Rank6" -> 6
                 else -> return null
             }
             val dims: List<Int> = List(rank) { -1 }

@@ -772,6 +772,42 @@ class RoundTripTest {
     }
 
     @Test
+    fun namedAttentionRank4BatchedRoundTrips() {
+        // Layer 1.5 §0.4.242+ — rank-4 attention QK^T pattern with two
+        // batching dims (Batch, Heads) and one contracting dim (Dim).
+        // This is the use case the user flagged as load-bearing for Layer 2:
+        // a hole here would force the typed-step-boundary work to walk
+        // around a missing rank-4 named-contract surface.
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("attention_qkT") {
+            val q = param(
+                "q",
+                DxirType(F32, listOf(2, 8, 64, 64), listOf("Batch", "Heads", "SeqLen", "Dim")),
+            )
+            val kT = param(
+                "kT",
+                DxirType(F32, listOf(2, 8, 64, 64), listOf("Batch", "Heads", "Dim", "Vocab")),
+            )
+            val scores = op(
+                OpKind.MATMUL,
+                listOf(q, kT),
+                DxirType(F32, listOf(2, 8, 64, 64), listOf("Batch", "Heads", "SeqLen", "Vocab")),
+                attrs = mapOf(
+                    "lhs_contracting_dims" to listOf(3),
+                    "rhs_contracting_dims" to listOf(2),
+                    "lhs_batching_dims" to listOf(0, 1),
+                    "rhs_batching_dims" to listOf(0, 1),
+                    "contracted_names" to setOf("Dim"),
+                    "preserved_names" to listOf("SeqLen", "Vocab"),
+                    "batching_names" to listOf("Batch", "Heads"),
+                ),
+            )
+            listOf(scores)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "named attention QK^T (rank-4, 2 batching axes)")
+    }
+
+    @Test
     fun namedDotRank1RoundTrips() {
         // Layer 1 §0.4.241+ — rank-1 × rank-1 named contraction emits DOT.
         // Round-trip pin: the resulting `stablehlo.dot_general %a, %b,

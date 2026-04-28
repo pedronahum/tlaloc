@@ -3,18 +3,18 @@
 package io.tlaloc.examples.named_indices
 
 /**
- * Layer 1 §0.4.241+ — attention-block forward pass with named indices.
+ * Layer 1 §0.4.241+ + Layer 1.5 §0.4.242+ — attention-block forward pass
+ * with named indices.
  *
- * Demonstrates how named axes anchor a multi-step typed computation: each
- * tensor carries the semantic name of every axis (`Batch`, `SeqLen`,
- * `Heads`, `Dim`), so an experienced reader can tell at a glance what each
- * matmul contracts over without consulting the implementation.
+ * Demonstrates how named axes anchor a multi-step typed computation. As of
+ * Layer 1.5 (§0.4.242), Tlaloc's `contract` operator supports the full
+ * rank-4 attention shape with two batching axes (`Batch`, `Heads`) and a
+ * contracting axis (`Dim`) — the typed surface matches a transformer's
+ * attention layer exactly, no rank-2 simplification needed.
  *
- * v1 simplification: this example expresses just the QK^T attention-score
- * matrix (the first contraction in a transformer attention block), where
- * the named structure is most informative. The full softmax + V matmul
- * follow the same pattern but require op support that lives outside Layer
- * 1's scope (e.g. `softmax` over a named axis is a v2 enhancement).
+ * The full softmax + V matmul follow the same pattern but require op
+ * support that lives outside Layer 1's scope (e.g. `softmax` over a named
+ * axis is a v2 enhancement).
  *
  * Copy into a project that depends on `io.tlaloc:core` to run.
  */
@@ -24,70 +24,79 @@ import io.tlaloc.core.DTensor
 import io.tlaloc.core.Dim
 import io.tlaloc.core.F32
 import io.tlaloc.core.Heads
+import io.tlaloc.core.IndexName
 import io.tlaloc.core.Named
-import io.tlaloc.core.Rank2
+import io.tlaloc.core.Rank4
 import io.tlaloc.core.SeqLen
 import io.tlaloc.core.Sym
-import io.tlaloc.core.Tensors
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.ops.contract
 
 /**
- * Compute query × key^T for one head of one batch element.
+ * QK^T attention-score axis: an alias for the *key* sequence dimension to
+ * disambiguate from queries' [SeqLen] axis. (A self-name conflict —
+ * `(Batch, Heads, SeqLen, Dim) × (Batch, Heads, Dim, SeqLen)` — would not
+ * type-check because the contracting axis would also match positionally
+ * with the surviving query-side axis. Distinct names are the natural fix.)
+ */
+object KeySeqLen : IndexName {
+    override val name = "key_seq"
+}
+
+/**
+ * Attention-score forward pass: `softmax(QK^T / sqrt(d))` reduced to just
+ * the QK^T core (the other pieces are ops outside Layer 1's scope).
  *
- * Real transformer code carries the `Batch` and `Heads` axes through every
- * tensor and uses batched matmul to contract. Layer 1's v1 supports rank-2
- * × rank-2; rank-3 batched named contraction is a v1 follow-up
- * (tracked in the audit's open-issues section).
+ * Type-level structure:
  *
- * Returns the rank-2 attention-score matrix typed
- * `DTensor<Rank2<Named<SeqLen, Sym>, Named<SeqLen, Sym>>, F32>`. Both axes
- * carry the *same* name `SeqLen` (queries' positions and keys' positions);
- * v1 named-contract over a self-named axis isn't supported — for the full
- * pipeline you'd promote one axis to a distinct name like `KeySeqLen` to
- * disambiguate.
+ *     Q : (Batch, Heads, SeqLen, Dim)
+ *     K^T: (Batch, Heads, Dim,    KeySeqLen)
+ *     →    (Batch, Heads, SeqLen, KeySeqLen)
+ *
+ * Shared axes: Batch (positions 0,0 → batching), Heads (positions 1,1 →
+ * batching), Dim (positions 3,2 → contracting). The K2 plugin's lowering
+ * emits `stablehlo.dot_general` with `lhs_batching_dims = [0, 1]` and
+ * `lhs_contracting_dims = [3]` automatically.
  */
 fun attentionScores(
-    queries: DTensor<Rank2<Named<SeqLen, Sym>, Named<Dim, Sym>>, F32>,
-    keysTransposed: DTensor<Rank2<Named<Dim, Sym>, Named<SeqLen, Sym>>, F32>,
-): DTensor<Rank2<Named<SeqLen, Sym>, Named<SeqLen, Sym>>, F32> {
-    // Contract over the shared `Dim` axis: queries.axis-1 × keysTransposed.axis-0.
+    queries: DTensor<Rank4<Named<Batch, Sym>, Named<Heads, Sym>, Named<SeqLen, Sym>, Named<Dim, Sym>>, F32>,
+    keysTransposed: DTensor<Rank4<Named<Batch, Sym>, Named<Heads, Sym>, Named<Dim, Sym>, Named<KeySeqLen, Sym>>, F32>,
+): DTensor<Rank4<Named<Batch, Sym>, Named<Heads, Sym>, Named<SeqLen, Sym>, Named<KeySeqLen, Sym>>, F32> {
     return queries contract keysTransposed
 }
 
 fun main() {
-    // Single batch element, single head: 4 query positions × 8 features.
-    val queries: DTensor<Rank2<Named<SeqLen, Sym>, Named<Dim, Sym>>, F32> =
-        Tensors.f32Matrix<Named<SeqLen, Sym>, Named<Dim, Sym>>(
-            d0 = 4, d1 = 8,
-            data = FloatArray(4 * 8) { it.toFloat() / 32f },
-        )
+    val nb = 1
+    val nh = 2
+    val tq = 4
+    val tk = 4
+    val d = 8
 
-    // 8 features × 4 key positions (already transposed for the contraction).
-    val keysT: DTensor<Rank2<Named<Dim, Sym>, Named<SeqLen, Sym>>, F32> =
-        Tensors.f32Matrix<Named<Dim, Sym>, Named<SeqLen, Sym>>(
-            d0 = 8, d1 = 4,
-            data = FloatArray(8 * 4) { (it + 1).toFloat() / 32f },
+    val queries: DTensor<Rank4<Named<Batch, Sym>, Named<Heads, Sym>, Named<SeqLen, Sym>, Named<Dim, Sym>>, F32> =
+        DTensor(
+            io.tlaloc.core.HostF32Storage(FloatArray(nb * nh * tq * d) { it.toFloat() / 64f }),
+            intArrayOf(nb, nh, tq, d),
+            F32,
+        )
+    val keysT: DTensor<Rank4<Named<Batch, Sym>, Named<Heads, Sym>, Named<Dim, Sym>, Named<KeySeqLen, Sym>>, F32> =
+        DTensor(
+            io.tlaloc.core.HostF32Storage(FloatArray(nb * nh * d * tk) { (it + 1).toFloat() / 64f }),
+            intArrayOf(nb, nh, d, tk),
+            F32,
         )
 
     val scores = attentionScores(queries, keysT)
-    println("Attention scores dims: ${scores.dims.toList()}  (expected [4, 4])")
+    println("Attention scores dims: ${scores.dims.toList()}  (expected [$nb, $nh, $tq, $tk])")
     val flat = scores.hostF32()
-    for (q in 0 until scores.dims[0]) {
-        val row = (0 until scores.dims[1])
-            .joinToString("  ") { k -> "%.4f".format(flat[q * scores.dims[1] + k]) }
-        println("  q=$q  $row")
+    for (head in 0 until nh) {
+        println("--- head $head ---")
+        for (q in 0 until tq) {
+            val row = (0 until tk)
+                .joinToString("  ") { k ->
+                    val idx = head * tq * tk + q * tk + k
+                    "%.4f".format(flat[idx])
+                }
+            println("  q=$q  $row")
+        }
     }
-
-    // Type-system note: the Batch and Heads axes don't appear in this rank-2
-    // example, but a real implementation would carry them as outer axes:
-    //
-    //   val q: DTensor<Rank4<Named<Batch, ..>, Named<Heads, ..>,
-    //                        Named<SeqLen, ..>, Named<Dim, ..>>, F32>
-    //
-    // A v2 enhancement adds rank-3 / rank-4 batched named contraction. The
-    // audit's open-issues section in docs/audits/named_indices_audit.md
-    // tracks this.
-    @Suppress("UNUSED_VARIABLE")
-    val _typeSystemDocumentation = listOf(Batch.name, Heads.name)
 }

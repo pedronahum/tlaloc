@@ -9,7 +9,7 @@ project that depends on `io.tlaloc:core` to run.
 | File | Purpose |
 |------|---------|
 | [`NamedMatmulExample.kt`](NamedMatmulExample.kt) | Basic Rank-2 × Rank-2 named contraction over a shared `SeqLen` axis. |
-| [`AttentionForwardExample.kt`](AttentionForwardExample.kt) | Forward pass through an attention block typed with `Batch`, `SeqLen`, `Heads`, `Dim`. |
+| [`AttentionForwardExample.kt`](AttentionForwardExample.kt) | **Rank-4 QK^T** attention-score forward pass, two batching axes (`Batch`, `Heads`) + one contracting axis (`Dim`). Lands as of Layer 1.5 §0.4.242+. |
 | Shape-mismatch (below) | A program that **does not compile** because two operands carry disjoint named axes. |
 
 ## Shape-mismatch example (compile error by design)
