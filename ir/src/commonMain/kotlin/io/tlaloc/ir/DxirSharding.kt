@@ -1,6 +1,6 @@
 package io.tlaloc.ir
 
-import io.tlaloc.core.Mesh
+import io.tlaloc.core.MeshSpec
 import io.tlaloc.core.PartitionSpec
 import io.tlaloc.core.Spec
 
@@ -47,7 +47,7 @@ data class DxirSharding(
     }
 }
 
-fun Mesh.toDxir(): DxirMesh = DxirMesh(name, axes.map { DxirMeshAxis(it.name, it.size) })
+fun MeshSpec.toDxir(): DxirMesh = DxirMesh(name, axes.map { DxirMeshAxis(it.name, it.size) })
 
 fun PartitionSpec.toDxir(meshName: String): DxirSharding = DxirSharding(
     meshName = meshName,

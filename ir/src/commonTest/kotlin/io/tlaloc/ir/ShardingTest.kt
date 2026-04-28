@@ -1,7 +1,7 @@
 package io.tlaloc.ir
 
 import io.tlaloc.core.F32
-import io.tlaloc.core.Mesh
+import io.tlaloc.core.MeshSpec
 import io.tlaloc.core.Spec
 import io.tlaloc.core.partitionSpec
 import kotlin.test.Test
@@ -15,7 +15,7 @@ class ShardingTest {
 
     @Test
     fun meshConvertsFromCoreToDxir() {
-        val core = Mesh.of("data" to 8, "model" to 4, name = "m")
+        val core = MeshSpec.of("data" to 8, "model" to 4, name = "m")
         val dxir = core.toDxir()
         assertEquals("m", dxir.name)
         assertEquals(listOf(DxirMeshAxis("data", 8), DxirMeshAxis("model", 4)), dxir.axes)

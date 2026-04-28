@@ -7,7 +7,18 @@ data class MeshAxis(val name: String, val size: Int) {
     }
 }
 
-class Mesh(val name: String, val axes: List<MeshAxis>) {
+/**
+ * Runtime device-mesh specification — the *value-level* description of a
+ * cluster topology (name + axes + sizes). Used by sharding utilities and
+ * the IR's `DxirMesh` / `DxirSharding` layer.
+ *
+ * Layer 2 (§0.4.243+) introduces a parallel **phantom-typed** [Mesh]
+ * sealed interface for compile-time tracking of where a [BufferHandle]
+ * lives. The two are intentionally separate: [MeshSpec] is the runtime
+ * value; [Mesh] is the type-level placement marker. Renamed from `Mesh`
+ * → `MeshSpec` to free up the bare name for the phantom-typed marker.
+ */
+class MeshSpec(val name: String, val axes: List<MeshAxis>) {
 
     init {
         require(name.isNotEmpty()) { "mesh name must be non-empty" }
@@ -22,11 +33,11 @@ class Mesh(val name: String, val axes: List<MeshAxis>) {
 
     fun totalSize(): Int = axes.fold(1) { acc, a -> acc * a.size }
 
-    override fun toString(): String = "Mesh($name, [${axes.joinToString { "${it.name}=${it.size}" }}])"
+    override fun toString(): String = "MeshSpec($name, [${axes.joinToString { "${it.name}=${it.size}" }}])"
 
     companion object {
-        fun of(vararg axes: Pair<String, Int>, name: String = "default"): Mesh =
-            Mesh(name, axes.map { MeshAxis(it.first, it.second) })
+        fun of(vararg axes: Pair<String, Int>, name: String = "default"): MeshSpec =
+            MeshSpec(name, axes.map { MeshAxis(it.first, it.second) })
     }
 }
 
@@ -72,7 +83,7 @@ typealias PartitionSpec = List<Spec>
 
 fun partitionSpec(vararg specs: Spec): PartitionSpec = specs.toList()
 
-fun Mesh.validate(spec: PartitionSpec, tensorDims: IntArray) {
+fun MeshSpec.validate(spec: PartitionSpec, tensorDims: IntArray) {
     require(spec.size == tensorDims.size) {
         "PartitionSpec length ${spec.size} does not match tensor rank ${tensorDims.size}"
     }
