@@ -829,6 +829,26 @@ object FirLambdaToDxirLowering {
             return operand
         }
 
+        // Layer 1 §0.4.241+ — named-index contraction. `contract`'s result
+        // type structurally differs from its operands (the contracted axis is
+        // dropped), so it can't go through BINARY_OP_MAP's `type = lhs.type`
+        // dispatch. Special-cased here to inspect both operands' axisNames,
+        // derive the shared name + positions, and emit MATMUL/DOT with the
+        // right contracted_names + lhs_contracting_dims attrs. Kotlin's
+        // native overload resolution has already validated that the operands
+        // share a name in the type system — this lowering relies on that
+        // pre-condition (a contract call only reaches this site when the
+        // overload resolution succeeded, i.e. when there *is* a shared name).
+        if (fqn == "io.tlaloc.core.ops.contract") {
+            val lhsExpr = receiver(call)
+                ?: throw LoweringException("contract call has no receiver")
+            val lhs = lowerExpr(lhsExpr, env, emitter)
+            val rhsExpr = call.argumentList.arguments.firstOrNull()
+                ?: throw LoweringException("contract call missing rhs argument")
+            val rhs = lowerExpr(rhsExpr, env, emitter)
+            return emitContract(lhs, rhs, emitter)
+        }
+
         BINARY_OP_MAP[fqn]?.let { kind ->
             val lhsExpr = receiver(call)
                 ?: throw LoweringException("binary op '$fqn' has no receiver")
@@ -868,6 +888,91 @@ object FirLambdaToDxirLowering {
     private fun receiver(call: FirFunctionCall): FirExpression? =
         call.dispatchReceiver ?: call.extensionReceiver
 
+    /**
+     * Layer 1 §0.4.241+ — emit a [OpKind.MATMUL] (or [OpKind.DOT] for the
+     * rank-1 × rank-1 case) for a named-index `contract` call.
+     *
+     * Pre-condition: the call site reached us only because Kotlin's overload
+     * resolution succeeded, which means both operands carry named axes with
+     * exactly one shared [io.tlaloc.core.IndexName]. We re-derive that here
+     * by intersecting the operands' [io.tlaloc.ir.DxirType.axisNames] —
+     * both for defensive validation and because the lowering needs the
+     * actual axis *positions* to populate `lhs_contracting_dims` /
+     * `rhs_contracting_dims` for the StableHLO emitter.
+     *
+     * Throws [LoweringException] if the axis names somehow disagree with
+     * the overload-resolution post-condition; that path surfaces as a
+     * `NAMED_INDEX_MISMATCH` diagnostic via the existing failure handler
+     * in [lower].
+     */
+    private fun emitContract(lhs: DxirNode, rhs: DxirNode, emitter: DxirEmitter): DxirNode {
+        val lhsType = lhs.type
+        val rhsType = rhs.type
+        val lhsNames = lhsType.axisNames
+        val rhsNames = rhsType.axisNames
+        if (lhsNames.isEmpty() || rhsNames.isEmpty()) {
+            throw LoweringException(
+                "contract requires both operands to carry named axes; got lhs=$lhsType rhs=$rhsType",
+            )
+        }
+        val sharedNames = lhsNames.filterNotNull().toSet()
+            .intersect(rhsNames.filterNotNull().toSet())
+        if (sharedNames.isEmpty()) {
+            throw LoweringException(
+                "contract operands share no named axis: lhs=$lhsNames rhs=$rhsNames",
+            )
+        }
+        if (sharedNames.size > 1) {
+            throw LoweringException(
+                "contract supports exactly one shared named axis in v1 (got: $sharedNames)",
+            )
+        }
+        val sharedName = sharedNames.single()
+        val lhsContractDim = lhsNames.indexOf(sharedName)
+        val rhsContractDim = rhsNames.indexOf(sharedName)
+
+        // Build the result dims/axisNames by removing the shared axis from
+        // each operand and concatenating in lhs-then-rhs order — matches
+        // dot_general's batching/result conventions.
+        val resultDims = ArrayList<Int>(lhsType.rank + rhsType.rank - 2)
+        val resultNames = ArrayList<String?>(lhsType.rank + rhsType.rank - 2)
+        val preservedNames = ArrayList<String>()
+        for (i in lhsNames.indices) {
+            if (i == lhsContractDim) continue
+            resultDims += lhsType.dims[i]
+            resultNames += lhsNames[i]
+            lhsNames[i]?.let { preservedNames += it }
+        }
+        for (i in rhsNames.indices) {
+            if (i == rhsContractDim) continue
+            resultDims += rhsType.dims[i]
+            resultNames += rhsNames[i]
+            rhsNames[i]?.let { preservedNames += it }
+        }
+        val resultAxisNames = if (resultNames.all { it == null }) emptyList() else resultNames.toList()
+
+        // Op kind: rank-1 × rank-1 produces a scalar; everything else is a
+        // matmul-shaped contraction. The emitter's MATMUL explicit path
+        // reads the four list attrs, so we always populate them.
+        val isDot = lhsType.rank == 1 && rhsType.rank == 1
+        val kind = if (isDot) OpKind.DOT else OpKind.MATMUL
+        val attrs: Map<String, Any> = mapOf(
+            "lhs_contracting_dims" to listOf(lhsContractDim),
+            "rhs_contracting_dims" to listOf(rhsContractDim),
+            "lhs_batching_dims" to emptyList<Int>(),
+            "rhs_batching_dims" to emptyList<Int>(),
+            "contracted_names" to setOf(sharedName),
+            "preserved_names" to preservedNames.toList(),
+        )
+        val resultType = DxirType(lhsType.dtype, resultDims, resultAxisNames)
+        return emitter.op(
+            kind = kind,
+            operands = listOf(lhs, rhs),
+            type = resultType,
+            attrs = attrs,
+        )
+    }
+
     private fun resolveParamType(type: ConeKotlinType): DxirType? {
         val cid = type.classId ?: return null
         val fqn = cid.asString()
@@ -895,14 +1000,49 @@ object FirLambdaToDxirLowering {
             // tape stub fires for end-to-end gradient calls. The FIR-side
             // recognition lands here as the first slice; rank-2/3 synthesis-side
             // widening is the next slice in the Phase 0c arc.
-            val dims: List<Int> = when (shapeFqn) {
-                "io/tlaloc/core/ScalarShape" -> emptyList()
-                "io/tlaloc/core/Rank1" -> listOf(-1)
-                "io/tlaloc/core/Rank2" -> listOf(-1, -1)
-                "io/tlaloc/core/Rank3" -> listOf(-1, -1, -1)
+            val rank: Int = when (shapeFqn) {
+                "io/tlaloc/core/ScalarShape" -> 0
+                "io/tlaloc/core/Rank1" -> 1
+                "io/tlaloc/core/Rank2" -> 2
+                "io/tlaloc/core/Rank3" -> 3
                 else -> return null
             }
-            return DxirType(dtype, dims)
+            val dims: List<Int> = List(rank) { -1 }
+            // §0.4.241 — Layer 1 named-index lift. Walk the shape's type arguments
+            // and, where an atom is `Named<N, A>` (FQN `io/tlaloc/core/Named`),
+            // extract the IndexName subtype's simple class name as the axis name.
+            // For positional atoms (Sym, Lit, Mul, Add, ...) we record null. The
+            // resulting axisNames list is empty when no named atoms appeared, so
+            // pre-Layer-1 callers and tests stay byte-for-byte equivalent.
+            //
+            // v1 lifts the IndexName *class simple name* (e.g. `Batch` -> "Batch")
+            // rather than the singleton's `override val name` property. Reading the
+            // const initializer would require a FirSession plumbed through here,
+            // which is disproportionate plumbing for v1; downstream consumers that
+            // want the friendly name can recover it from the FQN. v2 will switch
+            // to reading the property — tracked as an open question in §18.
+            val axisNames: List<String?> = if (rank == 0) {
+                emptyList()
+            } else {
+                val shapeArgs = shapeType.typeArguments
+                val names = ArrayList<String?>(rank)
+                var anyNamed = false
+                for (i in 0 until rank) {
+                    val atomType = shapeArgs.getOrNull(i)?.type
+                    val atomFqn = atomType?.classId?.asString()
+                    if (atomFqn == "io/tlaloc/core/Named") {
+                        val nameArg = atomType.typeArguments.firstOrNull()?.type
+                        val nameClassId = nameArg?.classId
+                        val nameStr = nameClassId?.shortClassName?.asString()
+                        names += nameStr
+                        if (nameStr != null) anyNamed = true
+                    } else {
+                        names += null
+                    }
+                }
+                if (anyNamed) names else emptyList()
+            }
+            return DxirType(dtype, dims, axisNames)
         }
         return null
     }

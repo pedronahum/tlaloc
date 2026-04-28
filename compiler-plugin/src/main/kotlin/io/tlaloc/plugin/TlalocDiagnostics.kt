@@ -25,6 +25,17 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
+    /**
+     * Layer 1 (§0.4.241+) — fires when a binary tensor op's operands carry
+     * incompatible named-index structure: disjoint named axes that can neither
+     * contract nor broadcast, or a shared name with conflicting symbolic dims.
+     * The payload is the rendered offending mismatch (e.g. "expected Named<Batch, B>
+     * but got Named<SeqLen, T>").
+     */
+    val NAMED_INDEX_MISMATCH: KtDiagnosticFactory1<String> by warning1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
     override fun getRendererFactory(): BaseDiagnosticRendererFactory = TlalocRendererFactory
 }
 
@@ -43,6 +54,11 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
         map.put(
             TlalocErrors.LAMBDA_UNSUPPORTED,
             "Tlaloc could not lower lambda: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.NAMED_INDEX_MISMATCH,
+            "Tlaloc named-index mismatch: {0}",
             CommonRenderers.STRING,
         )
     }

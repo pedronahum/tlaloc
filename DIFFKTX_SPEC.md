@@ -39,6 +39,91 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.241 Layer 1 named indices — `Named<N : IndexName, A : ShapeAtom>` + `axisNames` on `DxirType` + `contract` op via Refined Option A 2026-04-28
+
+§0.4.240 (Mac toolchain setup, see commit `746875b` for details — not a §0.4 entry by convention since it's tooling rather than design) landed the prerequisite toolchain. §0.4.241 lands **Layer 1** — the named-index foundation that nine downstream components depend on (per `docs/audits/named_indices_audit.md`'s scope statement). Five sub-milestones (N.0–N.4); audit closes the arc.
+
+**Motivation**:
+
+§0.1 of the spec (line 18) commits "Mesh axis names live in the type system." Until §0.4.241, that promise was unfulfilled at the *tensor-axis* level: shape atoms (`Lit<N>`, `Sym(name)`, `Mul`, `Add`) carried position but no semantic name. Mesh axes had names (via `DxirMesh`/`DxirAxisRef`) but the connection was broken — a sharding spec referenced a mesh-axis string, not a tensor-axis identity. Layer 1 closes the gap: tensor axes can now carry first-class semantic names through the Kotlin type system, the K2 plugin, DXIR, and StableHLO emission. Future Layer 2+ work (sharding inference, contraction pattern recognition, tensor-logic syntax) builds on this substrate.
+
+**Sub-milestones (all shipped)**:
+
+- **N.0** — Type substrate. `IndexName` non-sealed interface + `Named<N : IndexName, A : ShapeAtom>` ShapeAtom in `core/Shape.kt`; `axisNames: List<String?> = emptyList()` field on `DxirType` with O(1) `init` validator; `CommonNames.kt` ships pre-defined singletons (Batch, SeqLen, Hidden, Heads, Dim, Vocab, Channel, Height, Width). +16 tests (6 in `:core`, 10 in `:ir`).
+
+- **N.1** — Plugin name resolution. `FirLambdaToDxirLowering.resolveParamType` walks shape type-args, recognises `io/tlaloc/core/Named` atoms, lifts the `IndexName` subtype's *simple class name* into `axisNames`. `NAMED_INDEX_MISMATCH` diagnostic factory wired (consumed in §0.4.241 only by failure paths inside `emitContract`; user-facing mismatches surface as native Kotlin type errors via Refined Option A — see below). +5 tests in `:compiler-plugin`.
+
+- **N.2** — `contract` operator + DXIR emission. New `core/ops/NamedOps.kt` with overloaded `contract` infix functions (rank-1×rank-1 → scalar, rank-2×rank-2 → matmul-shape). Plugin recognises `io.tlaloc.core.ops.contract` calls and emits `OpKind.MATMUL` (or `OpKind.DOT` for rank-1×rank-1) with `axisNames` populated on the result type and `lhs_contracting_dims` / `rhs_contracting_dims` / `contracted_names` / `preserved_names` attrs. +4 tests.
+
+- **N.3** — Emitter named-MATMUL path + round-trip pin. `stablehlo/Emitter.kt`'s `emitMatmul` gains a third path: when both operands' types carry `axisNames` AND no explicit `*_contracting_dims` attrs, derive contraction positions from the shared name. Existing explicit + implicit paths unchanged. Round-trip pins through `stablehlo-translate --serialize`: `namedMatmulExplicitAttrsRoundTrips`, `namedMatmulInferredAttrsRoundTrips`, `namedDotRank1RoundTrips`. +3 tests.
+
+- **N.4** — Examples + audit + this entry. `examples/named-indices/` ships `NamedMatmulExample.kt`, `AttentionForwardExample.kt`, and a README documenting the third (compile-error) example. Full audit at `docs/audits/named_indices_audit.md` covers all 9 audit items the original task listed.
+
+**Decisions worth flagging**:
+
+- **Refined Option A — Kotlin-native overloads instead of `FirExpressionResolutionExtension`.** The original task suggested plugin-driven contraction inference. Mid-implementation discovery (surfaced in chat before any code was committed): Kotlin's overload resolution + type unification is already powerful enough to enforce contraction correctness, *given* the right type-variable structure on the `contract` overloads. The signature `<NameM, NameK, NameN, M, K, N> Rank2<Named<NameM, M>, Named<NameK, K>>.contract(Rank2<Named<NameK, K>, Named<NameN, N>>): Rank2<Named<NameM, M>, Named<NameN, N>>` makes the shared `NameK` and `K` type variables the load-bearing carriers — Kotlin's checker unifies them across operands, and disjoint names produce native type-mismatch errors at the call site. **No new plugin extension surface.** The trade-off: a finite set of overloads (one per rank pair). v1 ships rank-1×rank-1 + rank-2×rank-2; rank-3 batched is OQ-5 in the audit. Documented in `core/ops/NamedOps.kt` KDoc + audit §10.2.
+
+- **Phantom-name singletons over annotations or synthetic FIR types.** Three options were on the table for representing `Named<NAME, DIM>` in Kotlin (no string-literal type args exist): (a) phantom-typed value class, (b) annotation, (c) synthetic FIR type via `FirSupertypeGenerationExtension`. Chosen (b/c-equivalent): non-sealed `interface IndexName { val name: String }` + `Named<N : IndexName, A : ShapeAtom> : ShapeAtom`. User-defined names are one-line `object Foo : IndexName` declarations. Annotation-based design rejected (annotations don't compose at type level for products of axes). Synthetic FIR design rejected as disproportionate (3+ weeks of K2 work for ergonomics that pure Kotlin types match). Documented in audit §10.1.
+
+- **`axisNames` on `DxirType`, not on per-op `attrs`.** The φ-calculus pass and `DxirReverseTransform` clone op `attrs` and `regions` verbatim and propagate `DxirType` references unchanged. Putting `axisNames` on the type means it rides through both passes for free — no per-pass code changes. The alternative (per-op attrs) would force every constructor of new ops to remember to copy + propagate the attr. Documented in audit §10.3.
+
+- **`IndexName.name` property is *not* read at FIR-stage.** The plugin lifts the `IndexName` subtype's *simple class name* (e.g. `Batch` → `"Batch"`), not the singleton's `override val name = "batch"` property. Reading the property would require plumbing a `FirSession` through `resolveParamType`; for v1 this was disproportionate. The simple-class-name approach is internally consistent — the same singleton always lifts to the same string — and the friendly name is recoverable downstream from the FQN. Tracked as audit OQ-7 for v2. Documented inline at `FirLambdaToDxirLowering.kt`'s `resolveParamType`.
+
+- **SDY tensor-axis-name anchoring deferred to v2.** SDY's MLIR format has no native slot for tensor-side axis names — its dim-shardings reference *mesh* axis names per dim *position*. A v2 design choice spans (a) sidecar comments, (b) custom MLIR attributes, or (c) accept that tensor-axis names live only at the Tlaloc internal IR boundary. Tracked as OQ-4. Layer 1 shipping without this anchoring is acceptable because: round-trip tests confirm the emitter produces dialect-valid `stablehlo.dot_general` with correct contracting-dim positions; the named-axis info is preserved in the type-system + DXIR, where every other downstream consumer (sharding inference, pattern recognition) operates.
+
+- **`DxirType` data-class signature change.** Adding `axisNames: List<String?> = emptyList()` is source-compatible (defaulted) but technically binary-incompatible. Verified during the pre-implementation scan: no on-disk caching of `DxirType`. The coarsening cache (§0.4.59+) keys on dxir subtree hash, not class layout — safe.
+
+- **BGDHyperOpt regression: not a regression.** Layer 1 doesn't touch the AD pipeline (`DxirReverseTransform`, `PhiCalculus`, `VjpRegistry`). The README's "1.27×" target is a §0.4.52 snapshot; current measurement on this hardware is 0.61× at T=50 M=3 (the test's actual hard assertion `[0.5, 200]` passes). The drift is environmental, not a Layer 1 effect. Discussed at length in audit §3.
+
+**Files added** (Layer-1 surface):
+
+1. `core/src/commonMain/kotlin/io/tlaloc/core/CommonNames.kt` — pre-defined `IndexName` singletons.
+2. `core/src/commonMain/kotlin/io/tlaloc/core/ops/NamedOps.kt` — `contract` overloads, runtime bodies.
+3. `core/src/commonTest/kotlin/io/tlaloc/core/NamedTest.kt` — type substrate smoke tests.
+4. `ir/src/commonTest/kotlin/io/tlaloc/ir/DxirTypeNamedAxesTest.kt` — verifier + pretty-print tests.
+5. `compiler-plugin/src/test/kotlin/io/tlaloc/plugin/NamedIndexResolutionTest.kt` — FIR-stage axis-name lift tests.
+6. `compiler-plugin/src/test/kotlin/io/tlaloc/plugin/ContractInferenceTest.kt` — `contract` lowering + Kotlin type-error pins.
+7. `examples/named-indices/{README.md, NamedMatmulExample.kt, AttentionForwardExample.kt}` — three documentation-grade examples.
+8. `docs/audits/named_indices_audit.md` — 9-section audit closing the arc.
+
+**Files modified**:
+
+1. `core/src/commonMain/kotlin/io/tlaloc/core/Shape.kt` — adds `IndexName` interface + `Named<N, A>` ShapeAtom.
+2. `ir/src/commonMain/kotlin/io/tlaloc/ir/DxirType.kt` — adds defaulted `axisNames` field + `init` validator + `axisNameOrNull` helper + `hasNamedAxes` getter + name-aware `toString`.
+3. `compiler-plugin/src/main/kotlin/io/tlaloc/plugin/FirLambdaToDxirLowering.kt` — `resolveParamType` lifts `Named<…>` atoms; new `emitContract` helper for `contract` calls.
+4. `compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocDiagnostics.kt` — adds `NAMED_INDEX_MISMATCH` factory + renderer.
+5. `stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt` — third `emitMatmul` path (named inference).
+6. `stablehlo/src/jvmTest/kotlin/io/tlaloc/stablehlo/RoundTripTest.kt` — three new round-trip tests for named MATMUL/DOT.
+
+**Tests added** (+28): 6 (`NamedTest`) + 10 (`DxirTypeNamedAxesTest`) + 5 (`NamedIndexResolutionTest`) + 4 (`ContractInferenceTest`) + 3 (`RoundTripTest` named-rows) = 28.
+
+Full suite is green: **992 tests** (was 964 pre-Layer-1).
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Layer 2 — pattern recognition over named indices.** Per the original task description, "named indices are the keystone for everything that follows": pattern recognition over DXIR can match on semantic structure once names are present. This is the next foundational layer.
+
+2. **OQ-5 — rank-3 batched named contraction.** The mechanical extension of N.2: a parallel `infix fun contract` for `Rank3<Named<B, _>, Named<M, _>, Named<K, _>>` × `Rank2<Named<K, _>, Named<N, _>> → Rank3<Named<B, _>, Named<M, _>, Named<N, _>>`. ~30 lines + a test case. Unblocks transformer attention's natural shape.
+
+3. **OQ-7 — read `IndexName.name` at FIR stage.** Plumb `FirSession` through `resolveParamType` to lift the singleton's `override val name` property instead of the simple class name. Aligns IR strings with user intent (e.g. `Batch.name = "batch"` instead of class-name `"Batch"`).
+
+4. **OQ-4 — SDY tensor-axis-name anchoring.** Sidecar comments or custom MLIR attribute for tensor-side names in SDY-emitted MLIR. Improves human readability of the emitted MLIR; no semantic change.
+
+5. **Out-of-scope register refresh #5.** §0.4.235 was 6 firings ago; another consolidation entry would land cleanly here.
+
+**Definition-of-done for §0.4.241 — met**:
+- `Named<N, A>` slots into `Rank1..Rank6` cleanly ✓
+- `DxirType.axisNames` carries names through DXIR; verifier rejects malformed inputs ✓
+- K2 plugin lifts `Named<…>` from typed Kotlin into `DxirType.axisNames` ✓
+- `contract` op emits `OpKind.MATMUL`/`DOT` with correct `*_contracting_dims` + `contracted_names` + `preserved_names` attrs ✓
+- Disjoint named axes produce native Kotlin compile errors (Refined Option A) ✓
+- StableHLO emitter accepts both explicit-attrs and named-inference paths; round-trip tests pass through `stablehlo-translate` ✓
+- BGDHyperOpt's existing test passes; AD pipeline untouched ✓
+- Pre-existing 964 tests still pass; +28 net Layer 1 tests, all green ✓
+- Three examples ship in `examples/named-indices/` ✓
+- Full audit at `docs/audits/named_indices_audit.md` covers all 9 audit items ✓
+- §0.4.241 entry written in canonical style ✓
+
 #### 0.4.239 Paper-figures correction — `PAPER_SPEEDUPS` rewritten against Table 3; `HEAD_TO_HEAD_HARNESS_PLAN.md` had Brachistochrone↔HookeanSpring swapped 2026-04-27
 
 §0.4.238's hand-off named "polish that doesn't grow scope" or "wait for toolchain" as next options. Found a **real bug** while spot-checking `PAPER_SPEEDUPS` against the OOPSLA paper text in `docs/papers/coarsening-autodiff.txt`: the placeholder ranges in `aggregate.py` (and the matching table in `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3) had **Brachistochrone ↔ HookeanSpring numbers swapped** and a wrong CartPole range. §0.4.239 rewrites both against the verified Table 3 figures.

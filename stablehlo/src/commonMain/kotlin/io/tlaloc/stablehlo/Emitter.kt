@@ -705,6 +705,37 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             "lhs_batching_dims", "rhs_batching_dims",
         ).any { it in node.attrs }
 
+        // Layer 1 §0.4.241+ — defensive named-inference path. When the
+        // operands' DxirType.axisNames are populated AND no explicit
+        // contracting/batching attrs were supplied (e.g. hand-built DXIR
+        // from a builder test), derive contracting dim positions from the
+        // shared axis name. The K2 plugin's contract lowering always sets
+        // the explicit attrs (see emitContract in FirLambdaToDxirLowering),
+        // so the production path goes through the explicit branch below;
+        // this branch exists for emitter-test ergonomics and as a forward
+        // compatibility hook for future builder APIs.
+        if (!explicit && aType.axisNames.isNotEmpty() && bType.axisNames.isNotEmpty()) {
+            val lhsNames = aType.axisNames
+            val rhsNames = bType.axisNames
+            val shared = lhsNames.filterNotNull().toSet()
+                .intersect(rhsNames.filterNotNull().toSet())
+            require(shared.size == 1) {
+                "named MATMUL inference requires exactly one shared axis name; " +
+                    "got lhs=$lhsNames rhs=$rhsNames shared=$shared. " +
+                    "For multi-axis or no-shared-axis contraction, supply " +
+                    "lhs_contracting_dims / rhs_contracting_dims explicitly."
+            }
+            val sharedName = shared.single()
+            val lhsContract = listOf(lhsNames.indexOf(sharedName))
+            val rhsContract = listOf(rhsNames.indexOf(sharedName))
+            out.appendLine(
+                "$step$name = stablehlo.dot_general $a, $b, " +
+                    "contracting_dims = [${lhsContract.joinToString(", ")}] x [${rhsContract.joinToString(", ")}] " +
+                    ": (${aType.toMlir()}, ${bType.toMlir()}) -> ${outType.toMlir()}",
+            )
+            return
+        }
+
         if (!explicit) {
             // §0.4.135 — canonical batched MATMUL convention: all leading axes are
             // batching dims, and the last two are the M/K (lhs) / K/N (rhs) slot.

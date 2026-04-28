@@ -720,6 +720,82 @@ class RoundTripTest {
     }
 
     @Test
+    fun namedMatmulExplicitAttrsRoundTrips() {
+        // Layer 1 §0.4.241+ — N.3 round-trip pin. The K2 plugin's `contract`
+        // lowering emits MATMUL ops with `axisNames` populated on operand +
+        // result types AND explicit `*_contracting_dims` attrs (so the
+        // existing emitter explicit-mode path fires). Confirm the resulting
+        // MLIR survives `stablehlo-translate --serialize` end-to-end.
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("contract_named") {
+            val a = param("a", DxirType(F32, listOf(8, 16), listOf("Batch", "SeqLen")))
+            val b = param("b", DxirType(F32, listOf(16, 32), listOf("SeqLen", "Hidden")))
+            val c = op(
+                OpKind.MATMUL,
+                listOf(a, b),
+                DxirType(F32, listOf(8, 32), listOf("Batch", "Hidden")),
+                attrs = mapOf(
+                    "lhs_contracting_dims" to listOf(1),
+                    "rhs_contracting_dims" to listOf(0),
+                    "lhs_batching_dims" to emptyList<Int>(),
+                    "rhs_batching_dims" to emptyList<Int>(),
+                    "contracted_names" to setOf("SeqLen"),
+                    "preserved_names" to listOf("Batch", "Hidden"),
+                ),
+            )
+            listOf(c)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "named MATMUL with explicit attrs")
+    }
+
+    @Test
+    fun namedMatmulInferredAttrsRoundTrips() {
+        // Layer 1 §0.4.241+ — N.3 defensive named-inference path. When a
+        // hand-built DXIR carries `axisNames` on both operands but omits the
+        // explicit `*_contracting_dims` attrs, the emitter's third path
+        // derives the contracting dim positions from the shared axis name.
+        // Round-trip pin: the inferred output is dialect-valid MLIR.
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("contract_named_inferred") {
+            val a = param("a", DxirType(F32, listOf(8, 16), listOf("Batch", "SeqLen")))
+            val b = param("b", DxirType(F32, listOf(16, 32), listOf("SeqLen", "Hidden")))
+            val c = op(
+                OpKind.MATMUL,
+                listOf(a, b),
+                DxirType(F32, listOf(8, 32), listOf("Batch", "Hidden")),
+                // No explicit *_contracting_dims; the emitter must infer from
+                // the shared "SeqLen" axis name.
+            )
+            listOf(c)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "named MATMUL with inferred attrs")
+    }
+
+    @Test
+    fun namedDotRank1RoundTrips() {
+        // Layer 1 §0.4.241+ — rank-1 × rank-1 named contraction emits DOT.
+        // Round-trip pin: the resulting `stablehlo.dot_general %a, %b,
+        // contracting_dims = [0] x [0]` survives serialization with
+        // axis-named operand types.
+        requireTranslateOrSkip()
+        val fn = DxirBuilder.function("dot_named") {
+            val a = param("a", DxirType(F32, listOf(64), listOf("SeqLen")))
+            val b = param("b", DxirType(F32, listOf(64), listOf("SeqLen")))
+            val c = op(
+                OpKind.DOT,
+                listOf(a, b),
+                DxirType(F32, emptyList()),  // scalar result
+                attrs = mapOf(
+                    "contracted_names" to setOf("SeqLen"),
+                    "preserved_names" to emptyList<String>(),
+                ),
+            )
+            listOf(c)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "named DOT rank-1")
+    }
+
+    @Test
     fun batchedMatmulRoundTrips() {
         requireTranslateOrSkip()
         // (2, 4, 3, 5) @ (2, 4, 5, 7) → (2, 4, 3, 7)
