@@ -18,3 +18,27 @@ version = "0.0.1-SNAPSHOT"
 tasks.register("test") {
     dependsOn(subprojects.map { it.tasks.named("check") })
 }
+
+// Round-trip tests in :stablehlo (and future :runtime-iree) shell out to
+// `stablehlo-translate`, `sdy-opt`, and `iree-compile`, resolving them via
+// /usr/bin/which against the inherited PATH. On Apple Silicon those binaries
+// live under /opt/homebrew/bin — which is on PATH for interactive shells (via
+// the brew shellenv line in ~/.zshrc) but NOT for non-interactive shells (CI,
+// Claude Code's tool harness, IDE-spawned gradle daemons). When PATH is
+// missing /opt/homebrew/bin the tests' assumeTrue(...) silently self-skip,
+// turning a real toolchain regression into a green build.
+//
+// Inject /opt/homebrew/bin into every Test task's environment when the dir
+// exists, so any way of invoking gradle (CLI, IDE, CI) gets the binaries.
+// No-op on Linux/Windows where the directory doesn't exist.
+subprojects {
+    tasks.withType<Test>().configureEach {
+        val brewBin = file("/opt/homebrew/bin")
+        if (brewBin.isDirectory) {
+            val currentPath = System.getenv("PATH") ?: ""
+            if (!currentPath.split(":").contains(brewBin.absolutePath)) {
+                environment("PATH", "${brewBin.absolutePath}:$currentPath")
+            }
+        }
+    }
+}
