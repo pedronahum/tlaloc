@@ -39,6 +39,63 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.244 JDK 17 → 21 unification — single toolchain across Tlaloc + vendored Maestro 2026-04-29
+
+Layer 2.5 prep: Tlaloc unifies on JDK 21 to match the vendored Maestro requirement (Maestro pins `JavaLanguageVersion.of(21)` in its root `build.gradle`).
+
+**Motivation**:
+
+§0.4.243 (Layer 2) shipped Tlaloc on JDK 17 + JVM_17 target. Layer 2.5 begins vendoring Netflix/maestro under `third-party/maestro/`, and Maestro requires JDK 21. Three options were on the table:
+
+1. **Keep Tlaloc on JDK 17, route Maestro through Gradle's per-module toolchain.** Both JDKs installed, Gradle picks per module. Works but doubles dev-environment surface (two JDKs, two symlinks, two upgrade rhythms).
+
+2. **Move Tlaloc to JDK 21.** Single toolchain. The runtime container image (`tlaloc-runtime:0.1.0`, ships in §0.4.245+) bundles Tlaloc jars and is JDK-21-based to match Maestro — having Tlaloc jars also at JDK 21 eliminates JVM-version mismatches inside that image.
+
+3. **Move Tlaloc to JDK 21 + drop JDK 17 entirely from the toolchain scripts.** Most aggressive; would require migration helper for users with existing JDK 17 setups.
+
+**Chosen**: option 2. Single JDK is simpler; `scripts/install-jdk21.sh` exists as a migration helper for users upgrading from §0.4.243-era JDK 17 setups. Pre-existing `openjdk@17` installs are untouched (coexistence is fine; JDK 17 just isn't required anymore).
+
+**Changes**:
+
+- All 7 module `build.gradle.kts` files: `JvmTarget.JVM_17` → `JvmTarget.JVM_21`. Added `kotlin { jvmToolchain(21) }` to each module so Java compileTasks align with Kotlin compileTasks. `:compiler-plugin`'s explicit `java { toolchain { languageVersion.of(17) } }` block flipped to 21.
+- `scripts/setup-mac-bootstrap.sh`: `JDK_FORMULA="openjdk@17"` → `openjdk@21`.
+- `scripts/setup-mac-userspace.sh`: same formula change + `java_home -v 17` → `java_home -v 21` in the `JAVA_HOME` line written to `~/.zshrc`.
+- `scripts/install-jdk21.sh` docstring updated: now positioned as a "migration helper for users upgrading from JDK 17 setups," not "alongside JDK 17."
+
+**Verification**:
+
+```
+$ ./gradlew test
+BUILD SUCCESSFUL in 15m 25s   # cold rebuild after toolchain bump
+
+# Aggregate counts:
+tests=1036 skipped=0 errors=0 failures=0
+# Pre-§0.4.244 baseline (commit 475043d, end of §0.4.243): 1036 tests
+# Net delta: 0 (toolchain bump only; no functional changes)
+```
+
+JDK 21 is API-compatible with JDK 17 for everything Tlaloc uses (Symja, Kotest, kotlinx-coroutines, Kotlin stdlib). No test changes required.
+
+**Decisions worth flagging**:
+
+- **`jvmToolchain(21)` per module + matching `JvmTarget.JVM_21`.** Without the toolchain declaration, Gradle's `compileJava` task defaulted to JDK 17 (matching the daemon's JVM) while `compileKotlin` targeted 21 — mismatch error. The toolchain DSL aligns both compile tasks at the module level.
+
+- **No bump to Kotlin / Gradle / Kotest versions.** Kotlin 2.2.20 already supports `JvmTarget.JVM_21`; no plugin upgrades required. Gradle 8.8 (project's wrapper version) handles JDK 21 toolchains natively.
+
+- **`scripts/install-jdk21.sh` retained.** The script's logic is now redundant for fresh installs (the bootstrap path covers JDK 21 directly), but it remains useful for §0.4.243-era users migrating; deleting it would break a workflow that just shipped two days ago.
+
+**Files modified** (10): 7 `build.gradle.kts` + 3 scripts.
+
+**Tests added** (+0): pure toolchain refresh.
+
+Full suite is green: **1036 tests**.
+
+**Recommended next pickup** (next /loop firing):
+
+1. **Layer 2.5.0 — vendoring substrate** (already underway, third-party/maestro/ cloned at commit 0150f2a7). `docs/vendoring.md` + `third-party/README.md` document the upgrade procedure.
+2. **Layer 2.5.3 — `SerializedBufferHandle`** (already underway in `:maestro/src/jvmMain/`). Tests pending.
+3. The remaining Layer 2.5 phases (L2.5.1 / L2.5.2 / L2.5.4 / L2.5.5) follow.
+
 #### 0.4.243 Layer 2 four-worlds taxonomy + typed BufferHandle protocol + Maestro step boundaries — `program {}` + `workflow {}` + content-addressed StableHLO artifact; new :maestro module; +41 tests, suite 995 → 1036 green 2026-04-28
 
 §0.4.242's hand-off named "Layer 2 — pattern recognition over named indices" as the next step. **User correction**: Layer 2 in the design is "four-worlds taxonomy + typed BufferHandle handles for Maestro step boundaries" — the structural backbone for everything downstream (cross-step Shardy, @Decoupled splits, differentiable workflows). §0.4.243 lands that as five sub-milestones (L2.0–L2.4); audit at `docs/audits/four_worlds_audit.md` covers the 12 audit items the original task listed.

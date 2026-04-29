@@ -5,15 +5,17 @@ plugins {
 }
 
 kotlin {
+    jvmToolchain(21)
+
     compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
+        jvmTarget.set(JvmTarget.JVM_21)
         freeCompilerArgs.addAll("-Xcontext-parameters")
     }
 }
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(17))
+        languageVersion.set(JavaLanguageVersion.of(21))
     }
 }
 

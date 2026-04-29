@@ -15,7 +15,7 @@
 # What this script does (and ONLY this):
 #   1. Installs Xcode Command Line Tools if missing.
 #   2. Installs Homebrew if missing.
-#   3. Symlinks the brew openjdk@17 keg into /Library/Java/JavaVirtualMachines/
+#   3. Symlinks the brew openjdk@21 keg into /Library/Java/JavaVirtualMachines/
 #      so /usr/libexec/java_home can find it. Optional — if skipped, the
 #      userspace script falls back to setting JAVA_HOME directly.
 #
@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-JDK_FORMULA="openjdk@17"
+JDK_FORMULA="openjdk@21"
 DO_JDK_SYMLINK=1
 
 while [[ $# -gt 0 ]]; do
@@ -88,7 +88,7 @@ banner "JDK system registration (optional, sudo)"
 if [[ "$DO_JDK_SYMLINK" != "1" ]]; then
   echo "  skipped (--skip-jdk-symlink). Userspace script will export JAVA_HOME directly."
 else
-  # We can only do this once openjdk@17 is actually installed via brew —
+  # We can only do this once openjdk@21 is actually installed via brew —
   # which the userspace script handles. So run it conditionally: if the keg
   # exists now, symlink; otherwise note that re-running this script after
   # the userspace script will pick it up.

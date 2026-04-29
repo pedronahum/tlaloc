@@ -27,7 +27,7 @@ set -euo pipefail
 
 # ---------- Configuration ----------
 
-JDK_FORMULA="openjdk@17"
+JDK_FORMULA="openjdk@21"
 PY_FORMULA="python@3.11"
 BAZELISK_FORMULA="bazelisk"
 
@@ -141,7 +141,7 @@ phase_brew() {
   fi
 
   # JAVA_HOME for shells started after this script.
-  ensure_path_line 'export JAVA_HOME="$(/usr/libexec/java_home -v 17 2>/dev/null || echo /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home)"'
+  ensure_path_line 'export JAVA_HOME="$(/usr/libexec/java_home -v 21 2>/dev/null || echo /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home)"'
   ensure_path_line 'export PATH="$JAVA_HOME/bin:$PATH"'
 
   echo
