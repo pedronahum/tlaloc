@@ -1,0 +1,23 @@
+dependencies {
+    implementation zipkinDep
+    implementation jacksonAnnotationsDep
+    implementation jacksonDatabindDep
+    implementation jakartaValidationDep
+
+    implementation project(':maestro-common')
+    implementation project(':maestro-flow')
+    implementation project(':maestro-database')
+    implementation project(':maestro-queue')
+    implementation project(':netflix-sel')
+
+    implementation spectatorApiDep
+
+    testImplementation flywayDep
+    testImplementation testcontainerDep
+    testImplementation postgresqlDep
+    testImplementation hikaricpDep
+    testImplementation mockitoCoreDep
+    testImplementation assertJCoreDep
+    testImplementation(testFixtures(project(':maestro-common')))
+    testImplementation(testFixtures(project(':maestro-database')))
+}

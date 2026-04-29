@@ -1,0 +1,413 @@
+/*
+ * Copyright 2025 Netflix, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
+ */
+package com.netflix.maestro.server.controllers;
+
+import static org.junit.Assert.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.netflix.maestro.AssertHelper;
+import com.netflix.maestro.MaestroBaseTest;
+import com.netflix.maestro.engine.dao.MaestroWorkflowDao;
+import com.netflix.maestro.engine.dao.MaestroWorkflowDeletionDao;
+import com.netflix.maestro.engine.db.PropertiesUpdate;
+import com.netflix.maestro.engine.params.ParamsManager;
+import com.netflix.maestro.engine.utils.WorkflowEnrichmentHelper;
+import com.netflix.maestro.engine.validations.DryRunValidator;
+import com.netflix.maestro.exceptions.InvalidWorkflowVersionException;
+import com.netflix.maestro.exceptions.MaestroBadRequestException;
+import com.netflix.maestro.exceptions.MaestroResourceConflictException;
+import com.netflix.maestro.exceptions.MaestroValidationException;
+import com.netflix.maestro.models.api.PaginationResult;
+import com.netflix.maestro.models.api.WorkflowCreateRequest;
+import com.netflix.maestro.models.api.WorkflowOverviewResponse;
+import com.netflix.maestro.models.api.WorkflowPropertiesUpdateRequest;
+import com.netflix.maestro.models.definition.Metadata;
+import com.netflix.maestro.models.definition.Properties;
+import com.netflix.maestro.models.definition.PropertiesSnapshot;
+import com.netflix.maestro.models.definition.Tag;
+import com.netflix.maestro.models.definition.TagList;
+import com.netflix.maestro.models.definition.User;
+import com.netflix.maestro.models.definition.Workflow;
+import com.netflix.maestro.models.definition.WorkflowDefinition;
+import com.netflix.maestro.models.timeline.WorkflowTimeline;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.function.Consumer;
+import org.junit.Before;
+import org.junit.Test;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mock;
+
+public class WorkflowControllerTest extends MaestroBaseTest {
+
+  @Mock private MaestroWorkflowDao mockWorkflowDao;
+  @Mock private MaestroWorkflowDeletionDao mockDeletionDao;
+  @Mock private User.UserBuilder callerBuilder;
+  @Mock private ParamsManager mockParamsManager;
+  @Mock private DryRunValidator mockDryRunValidator;
+  @Mock private WorkflowEnrichmentHelper workflowEnrichmentHelper;
+  private WorkflowController workflowController;
+
+  @Before
+  public void before() {
+    when(callerBuilder.build()).thenReturn(User.create("unittest_username@netflix.com"));
+    when(mockParamsManager.generateMergedWorkflowParams(any(), any()))
+        .thenReturn(new LinkedHashMap<>());
+    when(mockParamsManager.generateMergedStepParams(any(), any(), any(), any()))
+        .thenReturn(new LinkedHashMap<>());
+    this.workflowController =
+        new WorkflowController(
+            mockWorkflowDao,
+            mockDeletionDao,
+            callerBuilder,
+            mockDryRunValidator,
+            workflowEnrichmentHelper);
+  }
+
+  @Test
+  public void testAddWorkflow() {
+    testAddWorkflow(workflowController::addWorkflow);
+  }
+
+  private void testAddWorkflow(Consumer<WorkflowCreateRequest> consumer) {
+    WorkflowDefinition definition = mock(WorkflowDefinition.class);
+    Properties properties = mock(Properties.class);
+    Workflow mockWF = mock(Workflow.class);
+    when(mockWF.getId()).thenReturn("id");
+    when(definition.getWorkflow()).thenReturn(mockWF);
+    WorkflowCreateRequest request = mock(WorkflowCreateRequest.class);
+    when(request.getProperties()).thenReturn(properties);
+    when(request.getWorkflow()).thenReturn(mockWF);
+    when(request.getExtraInfo()).thenReturn(Collections.emptyMap());
+    when(properties.getOwner()).thenReturn(User.create("tester"));
+    when(mockWorkflowDao.addWorkflowDefinition(any(), any())).thenReturn(definition);
+    consumer.accept(request);
+    verify(properties, times(1)).setOwner(any());
+    verify(mockWorkflowDao, times(1)).addWorkflowDefinition(any(), any());
+    verify(mockDryRunValidator, times(1)).validate(any(), any());
+  }
+
+  @Test
+  public void testAddWorkflowYaml() {
+    testAddWorkflow(workflowController::addWorkflowYaml);
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testAddInvalidWorkflow() {
+    WorkflowCreateRequest request = mock(WorkflowCreateRequest.class);
+    when(request.getWorkflow())
+        .thenReturn(Workflow.builder().id("wf-id").steps(new ArrayList<>()).build());
+    Properties properties = mock(Properties.class);
+    when(request.getProperties()).thenReturn(properties);
+    when(mockWorkflowDao.addWorkflowDefinition(any(), any()))
+        .thenThrow(new IllegalArgumentException());
+    workflowController.addWorkflow(request);
+  }
+
+  @Test
+  public void testAddInvalidWorkflowWithPropertyTags() throws Exception {
+    WorkflowCreateRequest request =
+        loadObject("fixtures/api/sample-workflow-create-request.json", WorkflowCreateRequest.class);
+    Tag tag = Tag.create("some-tag");
+    request.getProperties().setTags(new TagList(Collections.singletonList(tag)));
+    AssertHelper.assertThrows(
+        "fail to add workflow with property tags",
+        MaestroValidationException.class,
+        "Cannot set workflow property tags (also known as dynamic tags) for workflow [sample-dag-test-9]. Please use addWorkflowTag endpoint for that.",
+        () -> workflowController.addWorkflow(request));
+  }
+
+  @Test
+  public void testInvalidExtraField() throws Exception {
+    WorkflowCreateRequest request =
+        loadObject("fixtures/api/sample-workflow-create-request.json", WorkflowCreateRequest.class);
+    request.add("workflow_id", "foo");
+    AssertHelper.assertThrows(
+        "cannot set reserved fields",
+        IllegalArgumentException.class,
+        "extra info [additional_meta, workflow_id] cannot contain any reserved keys",
+        () -> workflowController.addWorkflow(request));
+  }
+
+  @Test
+  public void testAddWorkflowWhileStillDeleting() {
+    WorkflowDefinition definition = mock(WorkflowDefinition.class);
+    Properties properties = mock(Properties.class);
+    Workflow mockWF = mock(Workflow.class);
+    when(mockWF.getId()).thenReturn("id");
+    when(definition.getWorkflow()).thenReturn(mockWF);
+    WorkflowCreateRequest request = mock(WorkflowCreateRequest.class);
+    when(request.getProperties()).thenReturn(properties);
+    when(request.getWorkflow()).thenReturn(mockWF);
+    when(request.getExtraInfo()).thenReturn(Collections.emptyMap());
+    when(properties.getOwner()).thenReturn(User.create("tester"));
+    when(mockDeletionDao.isDeletionInProgress(any())).thenReturn(true);
+
+    AssertHelper.assertThrows(
+        "cannot add a workflow, whose workflow id is still under deletion",
+        MaestroResourceConflictException.class,
+        "Cannot push a version for workflow [id] while the system is still deleting",
+        () -> workflowController.addWorkflow(request));
+  }
+
+  @Test
+  public void testUpdateProperties() {
+    WorkflowPropertiesUpdateRequest request = mock(WorkflowPropertiesUpdateRequest.class);
+    Properties properties = new Properties();
+    when(request.getProperties()).thenReturn(properties);
+    when(request.isResetRunStrategyRule()).thenReturn(false);
+    when(request.isResetWorkflowConcurrency()).thenReturn(false);
+    when(request.isResetStepConcurrency()).thenReturn(false);
+    workflowController.updateProperties("test-workflow-id", request);
+    verify(mockWorkflowDao, times(1))
+        .updateWorkflowProperties(
+            anyString(), any(User.class), eq(properties), any(PropertiesUpdate.class));
+  }
+
+  @Test
+  public void testResetProperties() throws Exception {
+    WorkflowPropertiesUpdateRequest request =
+        loadObject(
+            "fixtures/api/sample-workflow-properties-update-request-reset.json",
+            WorkflowPropertiesUpdateRequest.class);
+    workflowController.updateProperties("test-workflow-id", request);
+    verify(mockWorkflowDao, times(1))
+        .updateWorkflowProperties(
+            anyString(), any(User.class), any(Properties.class), any(PropertiesUpdate.class));
+  }
+
+  @Test
+  public void testAddWorkflowTag() {
+    Tag tagToBeAdded = Tag.create("new-tag");
+    tagToBeAdded.addAttribute("description", "test description");
+    workflowController.addWorkflowTag("test-workflow-id", tagToBeAdded);
+    verify(mockWorkflowDao, times(1))
+        .updateWorkflowProperties(
+            anyString(),
+            any(User.class),
+            ArgumentMatchers.argThat(
+                properties -> {
+                  TagList tagList = properties.getTags();
+                  if (tagList.getTags().size() != 1) {
+                    return false;
+                  }
+                  Tag tag = tagList.getTags().getFirst();
+                  boolean validTag = tag.getName().equals("new-tag");
+                  validTag = validTag && tag.getNamespace().equals(Tag.Namespace.PLATFORM);
+                  return validTag;
+                }),
+            any(PropertiesUpdate.class));
+  }
+
+  @Test
+  public void testDeleteWorkflowTag() {
+    String tagNameToBeDeleted = "new-tag";
+    workflowController.deleteWorkflowTag("test-workflow-id", tagNameToBeDeleted);
+    verify(mockWorkflowDao, times(1))
+        .updateWorkflowProperties(
+            anyString(),
+            any(User.class),
+            ArgumentMatchers.argThat(
+                properties -> {
+                  TagList tagList = properties.getTags();
+                  if (tagList.getTags().size() != 1) {
+                    return false;
+                  }
+                  return tagList.getTags().getFirst().getName().equals("new-tag");
+                }),
+            any(PropertiesUpdate.class));
+  }
+
+  @Test
+  public void testInvalidPropertiesChange() {
+    when(mockWorkflowDao.updateWorkflowProperties(
+            anyString(), any(User.class), any(Properties.class), any(PropertiesUpdate.class)))
+        .thenThrow(
+            new RuntimeException("BACKEND_ERROR - ERROR: failed to satisfy CHECK constraint"));
+
+    WorkflowPropertiesUpdateRequest request = mock(WorkflowPropertiesUpdateRequest.class);
+    when(request.getProperties()).thenReturn(mock(Properties.class));
+    when(request.isResetRunStrategyRule()).thenReturn(false);
+    when(request.isResetWorkflowConcurrency()).thenReturn(false);
+    when(request.isResetStepConcurrency()).thenReturn(false);
+    AssertHelper.assertThrows(
+        "fail to add a property for non-existing workflow",
+        MaestroBadRequestException.class,
+        "please check if there exists this workflow",
+        () -> workflowController.updateProperties("test-workflow-id", request));
+  }
+
+  @Test
+  public void testDeleteWorkflow() {
+    workflowController.deleteWorkflow("test-workflow");
+    verify(mockWorkflowDao, times(1)).deleteWorkflow(anyString(), any());
+  }
+
+  @Test
+  public void testGetWorkflowVersion() {
+    when(mockWorkflowDao.getWorkflowDefinition("test-workflow", "latest"))
+        .thenReturn(mock(WorkflowDefinition.class));
+    workflowController.getWorkflowVersion("test-workflow", "latest", false);
+    verify(mockWorkflowDao, times(1)).getWorkflowDefinition(anyString(), anyString());
+  }
+
+  @Test
+  public void testEnrichedGetWorkflowVersion() {
+    when(mockWorkflowDao.getWorkflowDefinition("test-workflow", "latest"))
+        .thenReturn(mock(WorkflowDefinition.class));
+    workflowController.getWorkflowVersion("test-workflow", "latest", true);
+    verify(mockWorkflowDao, times(1)).getWorkflowDefinition(anyString(), anyString());
+    verify(workflowEnrichmentHelper, times(1)).enrichWorkflowDefinition(any());
+  }
+
+  @Test
+  public void testGetLatestWorkflowPropertiesSnapshot() {
+    when(mockWorkflowDao.getWorkflowPropertiesSnapshot("test-workflow", "latest"))
+        .thenReturn(
+            PropertiesSnapshot.create(
+                "test-workflow", 12345L, User.create("tester"), new Properties()));
+    workflowController.getWorkflowPropertiesSnapshot("test-workflow", "latest");
+    verify(mockWorkflowDao, times(1)).getWorkflowPropertiesSnapshot(anyString(), anyString());
+  }
+
+  @Test
+  public void testGetWorkflowVersionError() {
+    when(mockWorkflowDao.getWorkflowDefinition("test-workflow", "latest"))
+        .thenThrow(new InvalidWorkflowVersionException("test-workflow", "latest"));
+    AssertHelper.assertThrows(
+        "fail to get an workflow version",
+        InvalidWorkflowVersionException.class,
+        "Invalid workflow version",
+        () -> workflowController.getWorkflowVersion("test-workflow", "latest", false));
+  }
+
+  @Test
+  public void testGetWorkflowOverview() {
+    when(mockWorkflowDao.getWorkflowOverview("test-workflow"))
+        .thenReturn(mock(WorkflowOverviewResponse.class));
+    workflowController.getWorkflowOverview("test-workflow");
+    verify(mockWorkflowDao, times(1)).getWorkflowOverview("test-workflow");
+  }
+
+  @Test
+  public void testGetWorkflowTimeline() {
+    when(mockWorkflowDao.getWorkflowTimeline("test-workflow"))
+        .thenReturn(mock(WorkflowTimeline.class));
+    workflowController.getWorkflowTimeline("test-workflow");
+    verify(mockWorkflowDao, times(1)).getWorkflowTimeline("test-workflow");
+  }
+
+  @Test
+  public void testGetPaginatedWorkflowVersionsWithExceptions() {
+    AssertHelper.assertThrows(
+        "first and last should not be provided at same time",
+        MaestroValidationException.class,
+        "Either first or last need to be provided, but not both",
+        () -> workflowController.getPaginatedWorkflowVersions("test-workflow", 20, 20, ""));
+    AssertHelper.assertThrows(
+        "first or last should be provided, cannot be null for both",
+        MaestroValidationException.class,
+        "Either first or last need to be provided, both cannot be null",
+        () -> workflowController.getPaginatedWorkflowVersions("test-workflow", null, null, ""));
+  }
+
+  @Test
+  public void testGetPaginatedWorkflowVersions() {
+    String workflowId = "test-workflow";
+    List<WorkflowDefinition> workflowDefinitions = new ArrayList<>();
+    long latestVersion = 6;
+    for (int i = 1; i <= latestVersion; ++i) {
+      WorkflowDefinition def = new WorkflowDefinition();
+      Metadata metadata = new Metadata();
+      metadata.setWorkflowVersionId((long) i);
+      def.setMetadata(metadata);
+      workflowDefinitions.add(def);
+    }
+    Collections.reverse(workflowDefinitions);
+    WorkflowDefinition latestWorkflowDefinition = workflowDefinitions.getFirst();
+    // Case 1: page forward without cursor.
+    when(mockWorkflowDao.scanWorkflowDefinition(workflowId, 0, 1))
+        .thenReturn(Collections.singletonList(latestWorkflowDefinition));
+    when(mockWorkflowDao.scanWorkflowDefinition(workflowId, latestVersion + 1, 20))
+        .thenReturn(workflowDefinitions);
+    // actual call
+    PaginationResult<WorkflowDefinition> result =
+        workflowController.getPaginatedWorkflowVersions(workflowId, 20, null, "");
+    // verify the pageInfo is correct
+    verifyPageInfo(result.getPageInfo(), false, false, "6", "1", 1L);
+    // verify the elements are correct
+    verifyWorkflowVersions(new int[] {6, 5, 4, 3, 2, 1}, result.getElements());
+
+    // Case 2: page backward without cursor
+    when(mockWorkflowDao.scanWorkflowDefinition(workflowId, 0, 1))
+        .thenReturn(Collections.singletonList(latestWorkflowDefinition));
+    when(mockWorkflowDao.scanWorkflowDefinition(workflowId, 21, 20))
+        .thenReturn(workflowDefinitions);
+    // actual call
+    result = workflowController.getPaginatedWorkflowVersions(workflowId, null, 20, "");
+    verifyPageInfo(result.getPageInfo(), false, false, "6", "1", 1L);
+    verifyWorkflowVersions(new int[] {6, 5, 4, 3, 2, 1}, result.getElements());
+
+    // Case 3: page forward with cursor
+    List<WorkflowDefinition> workflowDefinitions3 = new ArrayList<>();
+    for (int i = 3; i < 6; ++i) {
+      workflowDefinitions3.add(workflowDefinitions.get(i));
+    }
+    when(mockWorkflowDao.scanWorkflowDefinition(workflowId, 4, 3)).thenReturn(workflowDefinitions3);
+    result = workflowController.getPaginatedWorkflowVersions(workflowId, 3, null, "4");
+    verifyPageInfo(result.getPageInfo(), false, true, "3", "1", 4);
+    verifyWorkflowVersions(new int[] {3, 2, 1}, result.getElements());
+
+    // Case 4: page backward with cursor
+    List<WorkflowDefinition> workflowDefinitions4 = new ArrayList<>();
+    for (int i = 0; i < 3; ++i) {
+      workflowDefinitions4.add(workflowDefinitions.get(i));
+    }
+    when(mockWorkflowDao.scanWorkflowDefinition(workflowId, 7, 3)).thenReturn(workflowDefinitions4);
+    result = workflowController.getPaginatedWorkflowVersions(workflowId, null, 3, "3");
+    verifyPageInfo(result.getPageInfo(), true, false, "6", "4", 1);
+    verifyWorkflowVersions(new int[] {6, 5, 4}, result.getElements());
+  }
+
+  private void verifyPageInfo(
+      PaginationResult.PageInfo pageInfo,
+      boolean expectedHasNextPage,
+      boolean expectedHasPrevPage,
+      String expectedStartCursor,
+      String expectedEndCursor,
+      long expectedStartIndex) {
+    assertEquals("mismatch in has next page", expectedHasNextPage, pageInfo.isHasNextPage());
+    assertEquals(
+        "mismatch in has previous page", expectedHasPrevPage, pageInfo.isHasPreviousPage());
+    assertEquals("mismatch in start cursor", expectedStartCursor, pageInfo.getStartCursor());
+    assertEquals("mismatch in end cursor", expectedEndCursor, pageInfo.getEndCursor());
+    assertEquals("mismatch in start index", expectedStartIndex, (long) pageInfo.getStartIndex());
+  }
+
+  private void verifyWorkflowVersions(
+      int[] expectedVersions, List<WorkflowDefinition> definitions) {
+    for (int i = 0; i < expectedVersions.length; ++i) {
+      assertEquals(
+          expectedVersions[i], (long) definitions.get(i).getMetadata().getWorkflowVersionId());
+    }
+    assertEquals(expectedVersions.length, definitions.size());
+  }
+}

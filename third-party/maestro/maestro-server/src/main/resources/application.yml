@@ -1,0 +1,125 @@
+spring:
+  application:
+    name: maestro
+  autoconfigure:
+    exclude:
+      - com.netflix.maestro.engine.autoconfigure.AwsConfiguration
+      - io.awspring.cloud.autoconfigure.sns.SnsAutoConfiguration
+      - io.awspring.cloud.autoconfigure.sqs.SqsAutoConfiguration
+
+server:
+  port: 8080
+
+maestro:
+  queue: # check MaestroJobEvent class for queue id
+    properties:
+      1:
+        worker-num: 8
+        scan-interval: 5000
+      2:
+        worker-num: 12
+        scan-interval: 5000
+      3:
+        worker-num: 17
+        scan-interval: 5000
+      4:
+        worker-num: 3
+        scan-interval: 5000
+      5:
+        worker-num: 3
+        scan-interval: 30000
+        ownership-timeout: 125000 # larger than the deletion processor timeout
+  notifier:
+    type: noop
+  alerting:
+    type: noop
+  redis:
+    enabled: false
+  sel:
+    thread-num: 3
+    timeout-millis: 120000
+    stack-limit: 128
+    loop-limit: 25001
+    array-limit: 25001
+    length-limit: 10000
+    visit-limit: 100000000
+    memory-limit: 100000000
+  cluster:
+    name: test
+  # step database related action config
+  step-action:
+    action-timeout: 5000
+    check-interval: 500
+
+engine:
+  configs:
+    # database config
+    workflow-database-error-retries: 5
+    workflow-database-insert-batch-size: 32
+    workflow-database-rewrite-batched-inserts: true
+    workflow-database-login-timeout-seconds: 5
+    workflow-database-socket-timeout-seconds: 50
+    jdbc-username: root
+    jdbc-url: "jdbc:tc:postgresql:17:///maestro_local"
+    db-type: postgres
+    flyway-enabled: true
+    workflow-database-client-name: maestro-local
+    workflow-database-connection-pool-size-max: 8
+    workflow-database-connection-pool-idle-min: 8
+    workflow-database-connection-lifetime-max: 50000
+    workflow-database-connection-idle-timeout: 30000
+    # flow engine config
+    flow-engine-address: http://${spring.cloud.client.ip-address}:${server.port}
+    initial-maintenance-delay-millis: ${random.long[2000,5000]}
+    internal-worker-num: 80
+
+stepruntime:
+  env: test
+  foreach:
+    loop-batch-limit: 50
+    insert-batch-limit: 10
+    get-rollup-batch-limit: 100
+  subworkflow:
+    always-pass-down-param-names: []
+  http:
+    connection-timeout: 30000
+    send-timeout: 30000
+    max-response-size: 1048576 # 1 MB in bytes
+    # Empty list blocks all HTTP requests.
+    allow-list: []
+  job-template-cache:
+    cache-ttl: 60000  # in millis
+  # callback delay interval setting based on step instance status and step type.
+  callback-delay-config:
+    fixed-callback-delay-in-secs:
+      RUNNING:
+        default: 3
+      WAITING_FOR_PERMITS:
+        default: 15
+      WAITING_FOR_SIGNALS:
+        default: 5
+      PAUSED:
+        default: 5
+      FINISHING:
+        default: 5
+      NOT_CREATED:
+        default: 30
+  enable-tag-permit: true # enable tag permit only for postgres
+  tag-permit-task:
+    batch-size: 512
+    clean-up-interval: 60000
+    scan-interval: 30000
+
+triggers:
+  #time trigger configurations
+  time-trigger:
+    type: noop
+    trigger-batch-size: 10
+  #signal trigger configurations
+  signal-trigger:
+    type: noop
+
+logging:
+  level:
+    com:
+      netflix: INFO

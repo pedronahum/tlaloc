@@ -39,6 +39,67 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.245 Layer 2.5 substrate — vendored Netflix/maestro + SerializedBufferHandle + composite Gradle build 2026-04-29
+
+Layer 2.5 phases L2.5.0 + L2.5.3 land as a single checkpoint commit. The remaining phases (L2.5.1 / L2.5.2 / L2.5.4 / L2.5.5) build on this foundation.
+
+**L2.5.0 — vendoring substrate**:
+
+- `third-party/maestro/` — Netflix/maestro at commit `0150f2a78005cf135023de29e5f8e06fd592563d` (2026-04-09), copy-in-place vendoring (no submodule). Matches `pedronahum/maestro-actus`'s reference point. ~125k lines added; intentional cost documented in `third-party/README.md` and `docs/vendoring.md`.
+- `third-party/README.md` — vendoring philosophy + upgrade procedure summary + divergence policy (additive `maestro-tlaloc/` module + minimum step-type registration touches; nothing else).
+- `docs/vendoring.md` — full upgrade procedure with concrete `git`/`gradle` commands, "when to upgrade" trigger list, and current pin rationale.
+- `settings.gradle.kts` — `includeBuild("third-party/maestro") { name = "vendored-maestro" }`. The rename avoids collision with Tlaloc's existing `:maestro` module (both have root-level project name `maestro` upstream). Composite build means `./gradlew build` at the Tlaloc root drives both module trees; vendored Maestro tasks are reachable as `./gradlew :vendored-maestro:<task>` (will be exercised in L2.5.1).
+
+**L2.5.3 — SerializedBufferHandle**:
+
+- `maestro/src/jvmMain/kotlin/io/tlaloc/maestro/SerializedBufferHandle.kt` — typed cross-pod buffer-handle serialization. Wire format: `[MAGIC "TLAL"][VERSION u32][DESC_LEN u32][DESC UTF-8 JSON][PAYLOAD_LEN u32][PAYLOAD F32 little-endian]`. SHA-256 over the *payload bytes only* (header is provenance metadata; descriptor mismatches surface via per-field structural validation). v1 supports `file://`; `s3://` and `gs://` stubbed with `UnsupportedOperationException`.
+- `maestro/src/commonMain/kotlin/io/tlaloc/maestro/ProgramManifest.kt` — `TypeDescriptor.fromJson(json)` companion added so `SerializedBufferHandle` can deserialize the embedded descriptor without re-implementing the JSON parse.
+- `maestro/src/commonMain/kotlin/io/tlaloc/maestro/ManifestJsonParser.kt` — `parseTypeDescriptor()` exposed as `internal` for the `TypeDescriptor.fromJson` hook.
+- 13 new tests in `SerializedBufferHandleTest`: round-trip, retention (delete-after-read), type-mismatch rank/axis-names, mesh mismatch, hash-mismatch (corrupted payload), missing file, unsupported scheme, JSON round-trip, descriptor-must-match-tensor-dims.
+
+**Decisions worth flagging**:
+
+- **Copy-in-place vendoring over git submodule.** A submodule pointing at our own GitHub fork would be cleaner organizationally, but creating that fork is external infrastructure outside this layer's scope. Copy-in-place gives the same outcome inside the Tlaloc tree; upgrade procedure documented in `docs/vendoring.md`.
+
+- **Composite build via `includeBuild` with rename.** Maestro's root project name is `maestro` upstream, which collides with Tlaloc's `:maestro` module. `includeBuild("third-party/maestro") { name = "vendored-maestro" }` renames the included build's root so both coexist. Vendored Maestro tasks are reachable as `:vendored-maestro:<task>`.
+
+- **`SerializedBufferHandle` carries the materialized DTensor inside `HandleRef.payload` for the round-trip path.** Same v1 stub the in-memory `BufferHandle` uses (Layer 2's deferred OQ-Layer2-4). Layer 3 introduces a real device buffer pool.
+
+- **Two layers of mesh-protection.** Compile-time: `SerializedBufferHandle.write` requires the handle's `M` type parameter to match the `mesh` argument's `M` (`BufferHandle<T, Mesh0>` cannot be written with `mesh = Mesh1<DataAxis>()` — Kotlin's checker rejects). Runtime: `SerializedBufferHandle.read(expectedType, expectedMesh)` validates the carried `meshName` against the consumer's expected mesh class name. The runtime check is the safety net for the case where the consumer's typed declaration disagrees with the SerializedHandle's runtime metadata.
+
+- **Hand-rolled JSON over `kotlinx.serialization`.** Same rationale as `ProgramManifest` (Layer 2): schema is small + stable + internal; targeted parser is cheaper than a dependency.
+
+**Files added**:
+
+- `third-party/maestro/` (~125k lines) — vendored upstream.
+- `third-party/README.md`, `docs/vendoring.md` — vendoring docs.
+- `maestro/src/jvmMain/kotlin/io/tlaloc/maestro/SerializedBufferHandle.kt`.
+- `maestro/src/jvmTest/kotlin/io/tlaloc/maestro/SerializedBufferHandleTest.kt`.
+
+**Files modified**:
+
+- `settings.gradle.kts` — composite-build wiring.
+- `maestro/src/commonMain/kotlin/io/tlaloc/maestro/ProgramManifest.kt` — `TypeDescriptor.fromJson` companion.
+- `maestro/src/commonMain/kotlin/io/tlaloc/maestro/ManifestJsonParser.kt` — `parseTypeDescriptor()` internal accessor.
+
+**Tests added** (+13): `SerializedBufferHandleTest`.
+
+Full suite is green: **1049 tests** (was 1036 pre-§0.4.245).
+
+**Remaining Layer 2.5 phases**:
+
+- L2.5.1 — `maestro-tlaloc/` module + step-type registration (mirrors maestro-actus's pattern).
+- L2.5.2 — `TlalocRunner` real implementation + end-to-end test.
+- L2.5.4 — Seven sample workflows + their direct-JVM tests.
+- L2.5.5 — Container image + CI workflow + deprecation of L2 masquerade emitter + 14-section audit.
+
+**Definition-of-done for §0.4.245 — met**:
+- `third-party/maestro/` vendored at the pinned commit ✓
+- Vendoring docs (`third-party/README.md`, `docs/vendoring.md`) ✓
+- Composite Gradle build wired and verified (Tlaloc suite still 1049 green) ✓
+- `SerializedBufferHandle` with file:// producer/consumer + type/mesh/hash validation ✓
+- 13 new tests covering round-trip + every failure mode ✓
+
 #### 0.4.244 JDK 17 → 21 unification — single toolchain across Tlaloc + vendored Maestro 2026-04-29
 
 Layer 2.5 prep: Tlaloc unifies on JDK 21 to match the vendored Maestro requirement (Maestro pins `JavaLanguageVersion.of(21)` in its root `build.gradle`).

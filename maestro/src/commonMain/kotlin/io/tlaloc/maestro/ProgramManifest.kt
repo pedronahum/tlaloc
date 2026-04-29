@@ -90,6 +90,14 @@ data class TypeDescriptor(
             dims = t.dims,
             axisNames = if (t.axisNames.isEmpty()) emptyList() else t.axisNames.toList(),
         )
+
+        /**
+         * Parse a single [TypeDescriptor] JSON object (inverse of [toJson]).
+         * Layer 2.5 §0.4.244+ — needed by [io.tlaloc.maestro.SerializedBufferHandle]
+         * for cross-pod descriptor parsing.
+         */
+        fun fromJson(json: String): TypeDescriptor =
+            ManifestJsonParser(json).parseTypeDescriptor()
     }
 }
 

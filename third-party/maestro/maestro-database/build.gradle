@@ -1,0 +1,6 @@
+dependencies {
+    implementation project(':maestro-common')
+    implementation jacksonDatabindDep
+    api hikaricpDep
+    api flywayDep
+}

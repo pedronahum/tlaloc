@@ -1,0 +1,209 @@
+{
+  "properties": {
+    "owner": "tester",
+    "run_strategy": "parallel",
+    "step_concurrency": 20,
+    "alerting": {
+      "emails": [
+        "test+alertconfig_default1@netflix.com",
+        "${foo}+alertconfig_default2@netflix.com"
+      ],
+      "tct": {
+        "completed_by_hour": 1,
+        "tz": "UTC"
+      }
+    }
+  },
+  "workflow": {
+    "id": "sample-dag-test-10",
+    "name": "Test workflow 10",
+    "description": "Long description about this workflow",
+    "timeout": 100,
+    "tags": [
+      {
+        "name": "tester",
+        "namespace": "system"
+      },
+      "test",
+      {
+        "name": "foo"
+      }
+    ],
+    "params": {
+      "foo": {
+        "value": 3,
+        "type": "LONG"
+      },
+      "far": {
+        "expression": "return 100;",
+        "type": "LONG"
+      },
+      "bar": {
+        "value": 10,
+        "type": "LONG"
+      },
+      "bat": {
+        "value": "2",
+        "type": "STRING"
+      },
+      "baz": {
+        "expression": "'1800'",
+        "type": "STRING"
+      }
+    },
+    "steps": [
+      {
+        "step": {
+          "id": "job1",
+          "type": "Sleep",
+          "transition": {
+            "successors": {
+              "job.2": "true",
+              "job3": "true"
+            }
+          },
+          "tags": [
+            {
+              "name": "Sleep",
+              "namespace": "system"
+            },
+            "job1"
+          ],
+          "params": {
+            "sleep_seconds": {
+              "value": 1,
+              "type": "LONG"
+            }
+          },
+          "failure_mode": "ignore_failure",
+          "retry_policy": {
+            "error_retry_limit": 10,
+            "platform_retry_limit": 10,
+            "backoff": {
+              "error_retry_backoff_in_secs": 1,
+              "platform_retry_backoff_in_secs": 1,
+              "type": "FIXED_BACKOFF"
+            }
+          },
+          "signal_dependencies": [
+            {
+              "name": "signal_a",
+              "match_params": {
+                "_step_dependency_sub_type": {
+                  "param": {
+                    "value": "input_signal",
+                    "type": "STRING"
+                  },
+                  "operator": "="
+                },
+                "foo": {
+                  "param": {
+                    "value": "bar",
+                    "type": "STRING"
+                  },
+                  "operator": "="
+                }
+              }
+            },
+            {
+              "name": "signal_b",
+              "match_params": {
+                "key2": {
+                  "param": {
+                    "value": "value2",
+                    "type": "STRING"
+                  },
+                  "operator": "="
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "step": {
+          "id": "job.2",
+          "type": "Sleep",
+          "transition": {
+            "successors": {
+              "job4": "true"
+            }
+          },
+          "params": {
+            "param1": {
+              "expression": "sleep_seconds + '1';",
+              "type": "STRING"
+            },
+            "param2": {
+              "value": "${job1__sleep_seconds} + 1",
+              "type": "STRING"
+            },
+            "sleep_seconds": {
+              "expression": "job3__sleep_seconds + 1;",
+              "type": "LONG"
+            }
+          },
+          "failure_mode": "fail_after_running",
+          "retry_policy": {
+            "error_retry_limit": 10,
+            "platform_retry_limit": 10,
+            "backoff": {
+              "error_retry_backoff_in_secs": "${fat}",
+              "platform_retry_backoff_in_secs": 1,
+              "type": "FIXED_BACKOFF"
+            }
+          }
+        }
+      },
+      {
+        "step": {
+          "id": "job3",
+          "type": "Sleep",
+          "transition": {
+            "successors": {
+              "job4": "true",
+              "job.2": "true"
+            }
+          },
+          "params": {
+            "sleep_seconds": {
+              "value": 1,
+              "type": "LONG"
+            }
+          },
+          "timeout": "${bar}s",
+          "failure_mode": "fail_immediately",
+          "retry_policy": {
+            "error_retry_limit": "$foo",
+            "platform_retry_limit": "$bar",
+            "timeout_retry_limit": "$bat",
+            "backoff": {
+              "error_retry_backoff_in_secs": "${far}",
+              "error_retry_exponent": "${bat}",
+              "error_retry_limit_in_secs": "${baz}",
+              "platform_retry_backoff_in_secs": "${far}",
+              "platform_retry_exponent": "${bat}",
+              "platform_retry_limit_in_secs": "${baz}",
+              "timeout_retry_backoff_in_secs": "${far}",
+              "timeout_retry_exponent": "${bat}",
+              "timeout_retry_limit_in_secs": "${baz}",
+              "type": "EXPONENTIAL_BACKOFF"
+            }
+          }
+        }
+      },
+      {
+        "step": {
+          "id": "job4",
+          "type": "Sleep",
+          "params": {
+            "sleep_seconds": {
+              "value": 1,
+              "type": "LONG"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

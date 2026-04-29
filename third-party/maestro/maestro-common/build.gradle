@@ -1,0 +1,18 @@
+dependencies {
+    implementation jacksonDatabindDep
+    implementation jakartaInjectDep
+    implementation jakartaValidationDep
+    implementation jacksonYamlDep
+    implementation(cronutilsDep) {
+        exclude group: 'org.glassfish'
+    }
+
+    testImplementation junitDep
+    testImplementation bvalJsrDep
+    testImplementation assertJCoreDep
+
+    testFixturesImplementation junitDep
+    testFixturesImplementation jacksonDatabindDep
+    testFixturesImplementation mockitoCoreDep
+    testFixturesRuntimeOnly junitEngineDep
+}

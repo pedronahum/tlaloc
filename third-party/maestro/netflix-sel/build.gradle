@@ -1,0 +1,7 @@
+dependencies {
+  implementation jodaTimeDep
+  api slf4jApiDep
+
+  testImplementation junitDep
+  testRuntimeOnly junitEngineDep
+}

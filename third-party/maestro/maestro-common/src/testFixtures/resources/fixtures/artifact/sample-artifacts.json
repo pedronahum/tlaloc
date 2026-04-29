@@ -1,0 +1,177 @@
+{
+  "artifacts": {
+    "artifact1": {
+      "value": 1,
+      "foo": "bar"
+    },
+    "artifact2": {
+      "value": 2,
+      "foo": "baz",
+      "type": "DEFAULT"
+    },
+    "maestro_subworkflow": {
+      "subworkflow_id": "test-dag",
+      "subworkflow_version_id": 1,
+      "subworkflow_instance_id": 1,
+      "subworkflow_run_id": 1,
+      "subworkflow_uuid": "foo-bar",
+      "subworkflow_overview": {
+        "total_step_count": 1,
+        "step_overview": {
+          "RUNNING": 1
+        },
+        "rollup_overview": {
+          "total_leaf_count": 29,
+          "overview": {
+            "INITIALIZED": {
+              "cnt": 1
+            },
+            "SUCCEEDED": {
+              "cnt": 28
+            }
+          }
+        }
+      },
+      "type": "SUBWORKFLOW"
+    },
+    "maestro_foreach": {
+      "foreach_workflow_id": "inline-wf",
+      "foreach_identity": "foo",
+      "foreach_run_id": 5,
+      "run_policy": "RESTART_FROM_INCOMPLETE",
+      "run_id": 3,
+      "ancestor_iteration_count": 8,
+      "total_loop_count": 10,
+      "next_loop_index": 6,
+      "foreach_overview": {
+        "checkpoint": 4,
+        "stats": {
+          "CREATED": 1,
+          "SUCCEEDED": 2
+        },
+        "rollup": {
+          "total_leaf_count": 10,
+          "overview": {
+            "SUCCEEDED": {
+              "cnt": 10
+            }
+          }
+        },
+        "running_stats": {
+          "IN_PROGRESS": 2
+        },
+        "running_rollup": {
+          "total_leaf_count": 4,
+          "overview": {
+            "RUNNING": {
+              "cnt": 2,
+              "ref": {
+                "maestro_foreach_inline_123:1": [
+                  "4:sub-step2:1",
+                  "3:sub-step2:1"
+                ]
+              }
+            },
+            "SUCCEEDED": {
+              "cnt": 2
+            }
+          }
+        }
+      },
+      "type": "FOREACH"
+    },
+    "maestro_while": {
+      "loop_workflow_id": "inline-wf",
+      "loop_identity": "bar",
+      "loop_run_id": 1,
+      "run_policy": "START_FRESH_NEW_RUN",
+      "run_id": 1,
+      "first_iteration": 1,
+      "last_iteration": 5,
+      "last_status": "SUCCEEDED",
+      "last_overview": {
+        "total_step_count": 1,
+        "step_overview": {
+          "SUCCEEDED": {
+            "cnt": 1,
+            "steps": [
+              [
+                1,
+                1757544148571,
+                1757544148571
+              ]
+            ]
+          }
+        },
+        "rollup_overview": {
+          "total_leaf_count": 1,
+          "overview": {
+            "SUCCEEDED": {
+              "cnt": 1
+            }
+          }
+        }
+      },
+      "rollup": {
+        "total_leaf_count": 4,
+        "overview": {
+          "SUCCEEDED": {
+            "cnt": 4
+          }
+        }
+      },
+      "loop_param_values": {
+        "i": [
+          20200101,
+          20200102,
+          20200103,
+          20200104,
+          20200105,
+          20200106
+        ]
+      },
+      "type": "WHILE"
+    },
+    "maestro_dynamic_output": {
+      "signal_outputs": [{
+          "value": {
+            "name": {
+              "value": "demo_table",
+              "type": "STRING"
+            },
+            "timestamp": {
+              "value": 1536787990,
+              "type": "LONG"
+            }
+          },
+          "type": "MAP",
+          "evaluated_result": {
+            "name": "demo_table",
+            "timestamp": 1536787990
+          },
+          "evaluated_time": 1625871404000
+        }
+      ],
+      "info": {
+        "timestamp": 1609272999666,
+        "type": "LOG",
+        "level": "INFO",
+        "message": "sample info log"
+      },
+      "type": "DYNAMIC_OUTPUT"
+    },
+    "maestro_kubernetes": {
+      "job_id": "job-uuid-1",
+      "execution_script": "echo hello world",
+      "command": {
+        "app_name": "maestro",
+        "image": "test-image",
+        "entrypoint": "echo hello world",
+        "env": {},
+        "job_deduplication_key": "job-dedup-key-1"
+      },
+      "execution_output": "hello world\n",
+      "type": "KUBERNETES"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+[
+  {
+    "name": "out",
+    "params": {
+      "p1": {
+        "value": 1,
+        "type": "LONG"
+      },
+      "p2": {
+        "expression": "1+1",
+        "type": "STRING"
+      }
+    }
+  }
+]

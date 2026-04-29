@@ -1,0 +1,42 @@
+{
+  "definitions": {
+    "signal_a": {
+      "match_params": {
+        "foo": {
+          "value": "bar",
+          "operator": "="
+        },
+        "updated_by": {
+          "value": "tester",
+          "operator": "="
+        }
+      },
+      "join_keys": [
+        "updated_by"
+      ]
+    },
+    "signal_b": {
+      "match_params": {
+        "foo": {
+          "value": "bar",
+          "operator": "="
+        },
+        "posted_by": {
+          "value": "a",
+          "operator": "="
+        }
+      },
+      "join_keys": [
+        "posted_by"
+      ]
+    }
+  },
+  "condition": "245 > 123",
+  "dedup_expr": "return UUID.randomUUID().toString();",
+  "params": {
+    "foo": {
+      "value": "bar",
+      "type": "STRING"
+    }
+  }
+}

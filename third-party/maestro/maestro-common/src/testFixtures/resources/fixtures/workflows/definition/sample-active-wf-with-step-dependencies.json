@@ -1,0 +1,47 @@
+{
+  "properties_snapshot": {
+    "owner": "tester"
+  },
+  "is_active": true,
+  "activate_time": 1598399975650,
+  "activated_by": "demo",
+  "is_default": true,
+  "modify_time": 1598399975650,
+  "metadata": {
+    "workflow_id": "sample-active-wf-with-step-dependencies",
+    "create_time": 1598399975650,
+    "version_author": "demo"
+  },
+  "workflow": {
+    "id": "sample-active-wf-with-step-dependencies",
+    "steps": [
+      {
+        "step": {
+          "id": "job1",
+          "type": "NoOp",
+          "signal_dependencies": [
+            {
+              "name": "signal_a",
+              "match_params": {
+                "_step_dependency_sub_type": {
+                  "param": {
+                    "value": "input_signal",
+                    "type": "STRING"
+                  },
+                  "operator": "="
+                },
+                "foo": {
+                  "param": {
+                    "value": "bar",
+                    "type": "STRING"
+                  },
+                  "operator": "="
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

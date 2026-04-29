@@ -1,0 +1,62 @@
+{
+  "properties_snapshot": {
+    "owner": "tester"
+  },
+  "is_active": true,
+  "activate_time": 1598399975650,
+  "activated_by": "demo",
+  "is_default": true,
+  "modify_time": 1598399975650,
+  "metadata": {
+    "workflow_id": "sample-active-wf-with-signal-triggers",
+    "create_time": 1598399975650,
+    "version_author": "demo"
+  },
+  "workflow": {
+    "id": "sample-active-wf-with-signal-triggers",
+    "signal_triggers": [
+      {
+        "definitions": {
+          "signal_a": {
+            "match_params": {
+              "foo": {
+                "value": "bar",
+                "operator": "="
+              },
+              "posted_by": {
+                "value": "a",
+                "operator": "="
+              }
+            },
+            "join_keys": [
+              "updated_by"
+            ]
+          },
+          "signal_b": {
+            "match_params": {
+              "foo": {
+                "value": "bar",
+                "operator": "="
+              },
+              "posted_by": {
+                "value": "a",
+                "operator": "="
+              }
+            },
+            "join_keys": [
+              "updated_by"
+            ]
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "step": {
+          "id": "job1",
+          "type": "NoOp"
+        }
+      }
+    ]
+  }
+}

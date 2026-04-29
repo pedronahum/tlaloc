@@ -1,0 +1,19 @@
+dependencies {
+    implementation('io.awspring.cloud:spring-cloud-aws-starter-sns:3.+') {
+        exclude group: 'ch.qos.logback'
+    }
+    implementation('io.awspring.cloud:spring-cloud-aws-starter-sqs:3.+') {
+        exclude group: 'ch.qos.logback'
+    }
+    implementation('org.redisson:redisson:3.+')
+
+    implementation project(':maestro-common')
+    implementation project(':maestro-engine')
+    implementation project(':maestro-timetrigger')
+    implementation project(':maestro-signal')
+
+    testImplementation spectatorApiDep
+    testImplementation junitDep
+    testImplementation mockitoCoreDep
+    testImplementation(testFixtures(project(':maestro-common')))
+}
