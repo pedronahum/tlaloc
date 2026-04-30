@@ -1,0 +1,56 @@
+{
+  "properties": {
+    "owner": "tlaloc",
+    "run_strategy": "parallel_with_concurrency_limit",
+    "step_concurrency": 4
+  },
+  "workflow": {
+    "id": "sample-tlaloc-portfolio-wf",
+    "name": "Tlaloc foreach over training shards",
+    "description": "foreach loop launching one Tlaloc step per shard. Precursor to Layer 5's per-island inner loops — same shape as maestro-actus's sample-actus-portfolio-wf, but the per-shard step is a Tlaloc compute instead of a financial-contract simulation (L2.5.4 §0.4.248+).",
+    "params": {
+      "shards": {
+        "value": [0, 1, 2, 3],
+        "type": "LONG_ARRAY"
+      }
+    },
+    "steps": [
+      {
+        "step": {
+          "id": "shards.foreach",
+          "type": "foreach",
+          "transition": {},
+          "params": {
+            "loop_params": {
+              "shard_id": {
+                "value": "${shards}",
+                "type": "LONG_ARRAY"
+              }
+            }
+          },
+          "steps": [
+            {
+              "step": {
+                "id": "tlaloc.shard",
+                "type": "Tlaloc",
+                "transition": {},
+                "params": {
+                  "tlaloc": {
+                    "value": {
+                      "image": {"value": "tlaloc-runtime:0.1.0", "type": "STRING"},
+                      "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=shard;base64,", "type": "STRING"},
+                      "manifest_ref": {"value": "portfolio-shard-step", "type": "STRING"},
+                      "input_handle": {"value": "", "type": "STRING"},
+                      "output_handle_uri": {"value": "", "type": "STRING"}
+                    },
+                    "type": "MAP"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

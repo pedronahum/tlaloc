@@ -1,0 +1,38 @@
+{
+  "properties": {
+    "owner": "tlaloc",
+    "run_strategy": "sequential"
+  },
+  "workflow": {
+    "id": "sample-tlaloc-template-wf",
+    "name": "Reusable Tlaloc subworkflow template",
+    "description": "Subworkflow template invoked by sample-tlaloc-caller-wf. The template factors out a common Tlaloc compute pattern (input handle in → Tlaloc step → output handle out) so multiple parent workflows can reuse it without duplicating step JSON. Standard subworkflow-reuse pattern (L2.5.4 §0.4.248+).",
+    "params": {
+      "input_uri": {"value": "", "type": "STRING"},
+      "output_uri": {"value": "", "type": "STRING"},
+      "manifest_ref": {"value": "template-manifest-default", "type": "STRING"},
+      "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=template;base64,", "type": "STRING"}
+    },
+    "steps": [
+      {
+        "step": {
+          "id": "tlaloc.body",
+          "type": "Tlaloc",
+          "transition": {},
+          "params": {
+            "tlaloc": {
+              "value": {
+                "image": {"value": "tlaloc-runtime:0.1.0", "type": "STRING"},
+                "artifact_uri": {"value": "${artifact_uri}", "type": "STRING"},
+                "manifest_ref": {"value": "${manifest_ref}", "type": "STRING"},
+                "input_handle": {"value": "${input_uri}", "type": "STRING"},
+                "output_handle_uri": {"value": "${output_uri}", "type": "STRING"}
+              },
+              "type": "MAP"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

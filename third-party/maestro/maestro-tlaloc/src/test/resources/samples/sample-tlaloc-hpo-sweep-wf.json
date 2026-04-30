@@ -1,0 +1,77 @@
+{
+  "properties": {
+    "owner": "tlaloc",
+    "run_strategy": "parallel_with_concurrency_limit",
+    "step_concurrency": 8
+  },
+  "workflow": {
+    "id": "sample-tlaloc-hpo-sweep-wf",
+    "name": "Tlaloc nested foreach (hyperparameters × shards)",
+    "description": "Outer foreach over hyperparameters; inner foreach over shards. Each leaf step launches a Tlaloc compute. Precursor to Layer 6's `grad { workflow.run(hp) }` — when Layer 6 lands, the outer loop becomes differentiable; the shape demonstrated here remains the structural pattern (L2.5.4 §0.4.248+).",
+    "params": {
+      "learning_rates": {
+        "value": [0.001, 0.003, 0.01, 0.03],
+        "type": "DOUBLE_ARRAY"
+      },
+      "shards": {
+        "value": [0, 1, 2, 3],
+        "type": "LONG_ARRAY"
+      }
+    },
+    "steps": [
+      {
+        "step": {
+          "id": "hp.foreach",
+          "type": "foreach",
+          "transition": {},
+          "params": {
+            "loop_params": {
+              "lr": {
+                "value": "${learning_rates}",
+                "type": "DOUBLE_ARRAY"
+              }
+            }
+          },
+          "steps": [
+            {
+              "step": {
+                "id": "shards.foreach",
+                "type": "foreach",
+                "transition": {},
+                "params": {
+                  "loop_params": {
+                    "shard_id": {
+                      "value": "${shards}",
+                      "type": "LONG_ARRAY"
+                    }
+                  }
+                },
+                "steps": [
+                  {
+                    "step": {
+                      "id": "tlaloc.train",
+                      "type": "Tlaloc",
+                      "transition": {},
+                      "params": {
+                        "tlaloc": {
+                          "value": {
+                            "image": {"value": "tlaloc-runtime:0.1.0", "type": "STRING"},
+                            "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=train;base64,", "type": "STRING"},
+                            "manifest_ref": {"value": "hpo-train-step", "type": "STRING"},
+                            "input_handle": {"value": "", "type": "STRING"},
+                            "output_handle_uri": {"value": "", "type": "STRING"}
+                          },
+                          "type": "MAP"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

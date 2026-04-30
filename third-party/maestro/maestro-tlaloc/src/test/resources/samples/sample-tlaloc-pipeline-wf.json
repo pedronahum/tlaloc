@@ -1,0 +1,34 @@
+{
+  "properties": {
+    "owner": "tlaloc",
+    "run_strategy": "sequential"
+  },
+  "workflow": {
+    "id": "sample-tlaloc-pipeline-wf",
+    "name": "Tlaloc as a pipeline middle stage",
+    "description": "NoOp (data-prep) → Tlaloc (compute) → NoOp (publish). Demonstrates Tlaloc steps composing with non-Tlaloc steps in a linear pipeline. Canonical pattern for Tlaloc-on-Maestro deployments.",
+    "steps": [
+      {"step": {"id": "data.prep", "type": "NoOp", "transition": {"successors": {"tlaloc.compute": "true"}}}},
+      {
+        "step": {
+          "id": "tlaloc.compute",
+          "type": "Tlaloc",
+          "transition": {"successors": {"results.publish": "true"}},
+          "params": {
+            "tlaloc": {
+              "value": {
+                "image": {"value": "tlaloc-runtime:0.1.0", "type": "STRING"},
+                "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=pipeline;base64,", "type": "STRING"},
+                "manifest_ref": {"value": "pipeline-compute-step", "type": "STRING"},
+                "input_handle": {"value": "", "type": "STRING"},
+                "output_handle_uri": {"value": "", "type": "STRING"}
+              },
+              "type": "MAP"
+            }
+          }
+        }
+      },
+      {"step": {"id": "results.publish", "type": "NoOp", "transition": {}}}
+    ]
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "properties": {
+    "owner": "tlaloc",
+    "run_strategy": "sequential"
+  },
+  "workflow": {
+    "id": "sample-tlaloc-iterative-tuning-wf",
+    "name": "Tlaloc while-loop bisection over a hyperparameter",
+    "description": "Outer while loop launches successive Tlaloc steps with refined hyperparameter values, demonstrating the iterative pattern. Precursor to NAS — when search-space pruning algorithms land, this shape generalises (L2.5.4 §0.4.248+).",
+    "params": {
+      "max_iterations": {"value": 10, "type": "LONG"},
+      "lr_low": {"value": 0.0001, "type": "DOUBLE"},
+      "lr_high": {"value": 0.1, "type": "DOUBLE"}
+    },
+    "steps": [
+      {
+        "step": {
+          "id": "tuning.while",
+          "type": "while",
+          "transition": {},
+          "params": {
+            "iteration_count": {"value": "${max_iterations}", "type": "LONG"}
+          },
+          "steps": [
+            {
+              "step": {
+                "id": "tlaloc.evaluate",
+                "type": "Tlaloc",
+                "transition": {},
+                "params": {
+                  "tlaloc": {
+                    "value": {
+                      "image": {"value": "tlaloc-runtime:0.1.0", "type": "STRING"},
+                      "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=evaluate;base64,", "type": "STRING"},
+                      "manifest_ref": {"value": "iterative-evaluate-step", "type": "STRING"},
+                      "input_handle": {"value": "", "type": "STRING"},
+                      "output_handle_uri": {"value": "", "type": "STRING"}
+                    },
+                    "type": "MAP"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

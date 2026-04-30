@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.248 Layer 2.5.4 — Seven Tlaloc sample workflows + 11 parsing tests; typed-handoff is the keystone 2026-04-30
+
+Layer 2.5 phase 4. Eight workflow JSONs (the seven samples plus the template's caller; the template+caller pair counts as one logical sample per the L2.5 plan) shipped under `third-party/maestro/maestro-server/src/test/resources/samples/` with mirror copies in `maestro-tlaloc/src/test/resources/samples/` for the maestro-tlaloc test classpath.
+
+**Samples shipped**:
+
+| File | Pattern | Layer-N precursor |
+|------|---------|---|
+| `sample-tlaloc-program-wf.json` | NoOp → Tlaloc (single-step canary) | — |
+| `sample-tlaloc-pipeline-wf.json` | NoOp → Tlaloc → NoOp (linear pipeline) | — |
+| `sample-tlaloc-typed-handoff-wf.json` | Tlaloc → Tlaloc with `SerializedBufferHandle` (KEYSTONE) | The Tlaloc-unique proof — typed buffers cross step boundaries with structural validation, not opaque blobs. |
+| `sample-tlaloc-portfolio-wf.json` | foreach over training shards | Layer 5's per-island inner loops |
+| `sample-tlaloc-hpo-sweep-wf.json` | Nested foreach (HPO × shards) | Layer 6's `grad { workflow.run(hp) }` |
+| `sample-tlaloc-iterative-tuning-wf.json` | While-loop bisection over a hyperparameter | NAS / search-space pruning |
+| `sample-tlaloc-template-wf.json` + `sample-tlaloc-caller-wf.json` | Reusable subworkflow template + caller | Standard reuse pattern |
+
+All eight JSONs conform to Maestro's canonical workflow shape (validated by `TlalocSampleWorkflowsTest`'s 11 tests):
+- Top-level `properties` + `workflow` envelope
+- Every Tlaloc step has the canonical `params.tlaloc` block (image, artifact_uri, manifest_ref, input_handle, output_handle_uri)
+- The keystone typed-handoff sample's consumer step carries a structurally-correct `SerializedBufferHandle` JSON (uri / contentHash / typeDescriptor / manifestRef / meshName) in its input_handle field
+- Foreach/while/subworkflow nesting is correctly structured for Tlaloc inner steps to be discovered by Maestro's recursive parser
+
+**`TlalocSampleWorkflowsTest` (+11 tests)**:
+
+- Aggregate-level: all eight load from classpath, all have `owner=tlaloc` and ids matching their filenames, every Tlaloc step has the canonical params shape.
+- Per-sample-shape: program / pipeline have one Tlaloc step at the expected ID, typed-handoff has two Tlaloc steps, portfolio nests Tlaloc inside one foreach, hpo-sweep inside two nested foreaches, iterative-tuning inside a while loop, template+caller compose via subworkflow.
+- Keystone: typed-handoff's consumer-step input_handle parses as a complete `SerializedBufferHandle` JSON with all five fields and a typeDescriptor sub-object containing dtype/dims/axisNames.
+
+**Decisions worth flagging**:
+
+- **Sample copies in two locations.** The canonical home is `maestro-server/src/test/resources/samples/` (matching maestro-actus's pattern); copies in `maestro-tlaloc/src/test/resources/samples/` exist only so `TlalocSampleWorkflowsTest` can load them via the test classpath without depending on maestro-server's test artifacts. This is duplication but the alternative — wiring maestro-server's test resources into maestro-tlaloc's test classpath via Gradle config — is more invasive than the cost of 8 small JSONs being mirrored. The audit's vendoring-divergence section will list both locations as Tlaloc-owned.
+
+- **Pipeline sample uses NoOp instead of HTTP.** maestro-actus's analogue uses real HTTP steps (`sample-actus-pipeline-wf.json`). Tlaloc's pipeline sample uses NoOp on both ends because (a) HTTP requires a real endpoint to be useful, (b) the pipeline pattern is what's being demonstrated, not the prep/publish content. Real HTTP integrations are deployment-side concerns.
+
+- **Foreach / while / subworkflow shapes are static JSON.** v1 doesn't actually run these — they're shape-validated against Maestro's parser conventions. L2.5.5's CI step will exercise them against a live Maestro instance (or document why it doesn't, e.g. if the testcontainers-based path can't easily run foreach without real K8s).
+
+- **`<set-by-producer>` placeholder hash in typed-handoff.** The keystone sample's consumer-step input_handle JSON has `"contentHash":"<set-by-producer>"` because in a real workflow the producer step's runtime output would supply the actual hash dynamically. v1 documents the expected shape; the L2.5.5 CI integration test (or a future Layer-3 dispatcher) computes and substitutes the real hash at workflow execution time.
+
+**Files added** (16):
+
+- 8 JSON samples in `third-party/maestro/maestro-server/src/test/resources/samples/`.
+- 8 JSON copies in `third-party/maestro/maestro-tlaloc/src/test/resources/samples/`.
+- 1 test class: `TlalocSampleWorkflowsTest.java` (11 tests, 230+ lines).
+
+**Tests added** (+11): `TlalocSampleWorkflowsTest`. Combined Tlaloc + maestro-tlaloc = 1071.
+
+**Recommended next pickup** (Layer 2.5 closing):
+
+- **L2.5.5** — Runtime container image (Dockerfile, build.sh, multi-stage eclipse-temurin:21-jre-alpine), CI workflow at `.github/workflows/maestro-integration.yml`, deprecate Layer 2's `MaestroDescriptor.emit` masquerade emitter + `StubExecutor` with `@Deprecated`, 14-section audit at `docs/audits/maestro_first_class_audit.md`.
+
 #### 0.4.247 Layer 2.5.2 — TlalocRunner real body (wire-format validation + identity-transform copy) + 5 end-to-end tests 2026-04-30
 
 Layer 2.5 phase 2. Replaces L2.5.1's echo stub with a real `TlalocRunner` body that reads a `SerializedBufferHandle` JSON pointer, validates the on-disk binary wire format (magic / version / payload SHA-256), copies the input bytes to the consumer's `output_handle_uri`, and emits an OutputData JSON document containing the produced `SerializedBufferHandle`.

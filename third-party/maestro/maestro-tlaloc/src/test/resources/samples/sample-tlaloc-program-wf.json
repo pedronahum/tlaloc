@@ -1,0 +1,34 @@
+{
+  "properties": {
+    "owner": "tlaloc",
+    "run_strategy": "sequential"
+  },
+  "workflow": {
+    "id": "sample-tlaloc-program-wf",
+    "name": "Single-step Tlaloc program",
+    "description": "Runs one Tlaloc step end-to-end. The simplest viable Tlaloc workflow — used as the canary in the suite (L2.5.4 §0.4.248+).",
+    "steps": [
+      {"step": {"id": "job.1", "type": "NoOp", "transition": {"successors": {"tlaloc.invoke": "true"}}}},
+      {
+        "step": {
+          "id": "tlaloc.invoke",
+          "type": "Tlaloc",
+          "transition": {},
+          "retry_policy": {"error_retry_limit": 0},
+          "params": {
+            "tlaloc": {
+              "value": {
+                "image": {"value": "tlaloc-runtime:0.1.0", "type": "STRING"},
+                "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=test;base64,", "type": "STRING"},
+                "manifest_ref": {"value": "single-step-canary", "type": "STRING"},
+                "input_handle": {"value": "", "type": "STRING"},
+                "output_handle_uri": {"value": "", "type": "STRING"}
+              },
+              "type": "MAP"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

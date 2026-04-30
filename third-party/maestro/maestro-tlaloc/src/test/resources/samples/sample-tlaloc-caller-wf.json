@@ -1,0 +1,43 @@
+{
+  "properties": {
+    "owner": "tlaloc",
+    "run_strategy": "sequential"
+  },
+  "workflow": {
+    "id": "sample-tlaloc-caller-wf",
+    "name": "Caller workflow invoking the Tlaloc template subworkflow",
+    "description": "Pairs with sample-tlaloc-template-wf — invokes the template twice with different params. Demonstrates the subworkflow-reuse pattern: a single tested template body is composed into multiple parent workflows. The standard subworkflow shape from maestro-actus's sample-actus-caller-wf, adapted for Tlaloc (L2.5.4 §0.4.248+).",
+    "steps": [
+      {
+        "step": {
+          "id": "encode.subworkflow",
+          "type": "subworkflow",
+          "transition": {"successors": {"score.subworkflow": "true"}},
+          "params": {
+            "subworkflow_id": {"value": "sample-tlaloc-template-wf", "type": "STRING"},
+            "subworkflow_version": {"value": "active", "type": "STRING"},
+            "input_uri": {"value": "", "type": "STRING"},
+            "output_uri": {"value": "file:///tmp/tlaloc-handles/encode-output.bin", "type": "STRING"},
+            "manifest_ref": {"value": "encode-via-template", "type": "STRING"},
+            "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=encode;base64,", "type": "STRING"}
+          }
+        }
+      },
+      {
+        "step": {
+          "id": "score.subworkflow",
+          "type": "subworkflow",
+          "transition": {},
+          "params": {
+            "subworkflow_id": {"value": "sample-tlaloc-template-wf", "type": "STRING"},
+            "subworkflow_version": {"value": "active", "type": "STRING"},
+            "input_uri": {"value": "{\"uri\":\"file:///tmp/tlaloc-handles/encode-output.bin\",\"contentHash\":\"<from-encode>\",\"typeDescriptor\":{\"dtype\":\"f32\",\"dims\":[8,64],\"axisNames\":[\"Batch\",\"Hidden\"]},\"manifestRef\":\"encode-via-template\",\"meshName\":\"Mesh1\"}", "type": "STRING"},
+            "output_uri": {"value": "file:///tmp/tlaloc-handles/score-output.bin", "type": "STRING"},
+            "manifest_ref": {"value": "score-via-template", "type": "STRING"},
+            "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=score;base64,", "type": "STRING"}
+          }
+        }
+      }
+    ]
+  }
+}

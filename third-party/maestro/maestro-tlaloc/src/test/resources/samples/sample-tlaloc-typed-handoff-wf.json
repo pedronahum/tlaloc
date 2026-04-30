@@ -1,0 +1,57 @@
+{
+  "properties": {
+    "owner": "tlaloc",
+    "run_strategy": "sequential"
+  },
+  "workflow": {
+    "id": "sample-tlaloc-typed-handoff-wf",
+    "name": "Two Tlaloc steps with typed BufferHandle handoff (KEYSTONE)",
+    "description": "Producer Tlaloc step writes a SerializedBufferHandle to a content-addressed object-store URI; consumer Tlaloc step reads it via the same URI and validates the type / mesh / content hash before proceeding. The unique-to-Tlaloc proof: typed buffers cross step boundaries with full structural validation, not opaque blobs (L2.5.4 §0.4.248+).",
+    "params": {
+      "handle_dir": {
+        "value": "/tmp/tlaloc-handles",
+        "type": "STRING"
+      }
+    },
+    "steps": [
+      {
+        "step": {
+          "id": "tlaloc.encode",
+          "type": "Tlaloc",
+          "transition": {"successors": {"tlaloc.score": "true"}},
+          "params": {
+            "tlaloc": {
+              "value": {
+                "image": {"value": "tlaloc-runtime:0.1.0", "type": "STRING"},
+                "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=encode;base64,", "type": "STRING"},
+                "manifest_ref": {"value": "encode-step-bodyhash", "type": "STRING"},
+                "input_handle": {"value": "", "type": "STRING"},
+                "output_handle_uri": {"value": "file:///tmp/tlaloc-handles/encode-output.bin", "type": "STRING"}
+              },
+              "type": "MAP"
+            }
+          }
+        }
+      },
+      {
+        "step": {
+          "id": "tlaloc.score",
+          "type": "Tlaloc",
+          "transition": {},
+          "params": {
+            "tlaloc": {
+              "value": {
+                "image": {"value": "tlaloc-runtime:0.1.0", "type": "STRING"},
+                "artifact_uri": {"value": "data:application/x-tlaloc-stablehlo;sha256=score;base64,", "type": "STRING"},
+                "manifest_ref": {"value": "score-step-bodyhash", "type": "STRING"},
+                "input_handle": {"value": "{\"uri\":\"file:///tmp/tlaloc-handles/encode-output.bin\",\"contentHash\":\"<set-by-producer>\",\"typeDescriptor\":{\"dtype\":\"f32\",\"dims\":[8,64],\"axisNames\":[\"Batch\",\"Hidden\"]},\"manifestRef\":\"encode-step-bodyhash\",\"meshName\":\"Mesh1\"}", "type": "STRING"},
+                "output_handle_uri": {"value": "file:///tmp/tlaloc-handles/score-output.bin", "type": "STRING"}
+              },
+              "type": "MAP"
+            }
+          }
+        }
+      }
+    ]
+  }
+}
