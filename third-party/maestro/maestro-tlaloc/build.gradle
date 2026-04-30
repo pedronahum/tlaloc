@@ -3,8 +3,8 @@
 // Layer 2.5 §0.4.245+ — sibling integration module to maestro-kubernetes /
 // maestro-http / maestro-notebook, mirroring pedronahum/maestro-actus's
 // structure. Extends KubernetesStepRuntime to launch Tlaloc programs as
-// Kubernetes jobs; the container image (tlaloc-runtime, ships in §0.4.249+)
-// loads the content-addressed StableHLO body via the
+// Kubernetes jobs; the container image (tlaloc-runtime, built in
+// docker/build.sh) loads the content-addressed StableHLO body via the
 // io.tlaloc.maestro.SerializedBufferHandle protocol.
 
 dependencies {
@@ -18,4 +18,16 @@ dependencies {
     testImplementation mockitoCoreDep
     testImplementation spectatorApiDep
     testImplementation(testFixtures(project(':maestro-common')))
+}
+
+// Stage runtime jars + transitive deps under build/docker/libs/ so the
+// docker/Dockerfile can COPY them into the final image. Mirrors
+// maestro-actus's buildDockerContext task. Layer 2.5.5 §0.4.249+.
+tasks.register('buildDockerContext', Copy) {
+    description = 'Stages maestro-tlaloc jar + runtime dependencies under build/docker/libs/ for Dockerfile consumption.'
+    group = 'build'
+    dependsOn jar
+    from configurations.runtimeClasspath
+    from jar.archiveFile
+    into "${buildDir}/docker/libs"
 }

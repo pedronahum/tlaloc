@@ -3,27 +3,43 @@ package io.tlaloc.maestro
 /**
  * Layer 2 §0.4.243+ — in-process stub executor for [Workflow].
  *
- * The stub mimics the *contract* of Maestro's real Kubernetes-step
- * executor but skips the actual container launch + cluster dispatch.
- * Given an [Workflow] (in-memory), it walks the step DAG in composition
- * order, threads BufferHandles between steps, and returns the final output.
+ * # ⚠ Deprecated as of §0.4.249 (Layer 2.5.5)
  *
- * # What this is and isn't
+ * Layer 2.5 vendored Netflix/maestro and ships a real `TlalocStepRuntime`
+ * (Java) that drives Tlaloc-typed steps through Maestro's actual lifecycle.
+ * The in-process stub remains useful for unit tests that need to exercise
+ * a [Workflow] without booting a Maestro instance, but it's no longer the
+ * only option — vendored Maestro's `TlalocRunner` end-to-end test in
+ * `third-party/maestro/maestro-tlaloc/src/test/java/.../TlalocRunnerEndToEndTest.java`
+ * is the canonical replacement for "real-runtime-equivalent" coverage.
+ *
+ * Removal target: post-Layer-3 release once all in-flight tests have
+ * migrated.
+ *
+ * # What this is and isn't (original docs)
  *
  * - **Is**: a fixture that proves the workflow's step graph + shim
  *   functions compose correctly end-to-end. Useful in tests and as a
  *   "what would a real executor do" reference.
  * - **Isn't**: capable of consuming the JSON [MaestroDescriptor] directly.
  *   The shim functions are Kotlin closures (not serializable across the
- *   network); a real Maestro executor reads the descriptor's
- *   `tlaloc_artifact_uri`, downloads the StableHLO bytes, and dispatches
- *   them via `iree-compile` (Layer 3+). The stub takes the live
+ *   network); a real Maestro executor (Layer 2.5's `TlalocStepRuntime`)
+ *   reads the workflow's `params.tlaloc.artifact_uri`, downloads the
+ *   StableHLO bytes, and dispatches them. The stub takes the live
  *   [Workflow] object instead.
  *
  * Both paths exercise the same [Workflow]; the descriptor emission +
  * descriptor consumption are tested separately (see [MaestroDescriptor]
  * and `MaestroDescriptorTest`).
  */
+@Deprecated(
+    message =
+        "Layer 2 stub executor; replaced by vendored Maestro's TlalocStepRuntime + " +
+            "TlalocRunner in §0.4.246–§0.4.247. Useful for unit tests; new code should " +
+            "exercise workflows through vendored Maestro's test harnesses. Removal " +
+            "target: post-Layer-3 release.",
+    level = DeprecationLevel.WARNING,
+)
 class StubExecutor {
 
     /**

@@ -5,7 +5,28 @@ import java.util.Base64
 /**
  * Layer 2 §0.4.243+ — Maestro-compatible workflow descriptor emitter.
  *
- * # Conformance approach
+ * # ⚠ Deprecated as of §0.4.249 (Layer 2.5.5)
+ *
+ * Layer 2.5 vendors Netflix/maestro and registers `Tlaloc` as a real Maestro
+ * step type. The masquerade approach this object implements — emitting every
+ * Tlaloc step as `type: "Kubernetes"` because Maestro had no public extension
+ * API for custom step types — is replaced by direct `type: "Tlaloc"` steps
+ * served by `TlalocStepRuntime` inside the vendored Maestro tree.
+ *
+ * This object remains functional for one release cycle to give downstream
+ * users a migration window. New code should:
+ *
+ * - Author workflows directly with `"type": "Tlaloc"` step JSONs (see
+ *   `third-party/maestro/maestro-server/src/test/resources/samples/sample-tlaloc-*.json`
+ *   for templates).
+ * - Use `MaestroStep.body` (StableHLO bytes) + `MaestroStep.manifest` directly
+ *   when populating a workflow JSON's `params.tlaloc.artifact_uri` /
+ *   `manifest_ref` fields.
+ *
+ * Removal target: a future post-Layer-3 release once all in-flight workflows
+ * have migrated.
+ *
+ * # Original (deprecated) conformance approach
  *
  * Netflix Maestro publishes no JSON Schema and no protobuf for its
  * step-definition format — authority is the Java model classes
@@ -13,25 +34,13 @@ import java.util.Base64
  * plus 11 example workflow JSON files in `maestro-server/src/test/resources/samples/`.
  * Tlaloc's emitted descriptor conforms to that observed shape.
  *
- * Maestro defines exactly 9 step types — none of them is "Tlaloc". There
- * is no public extension API for registering custom step types. So every
- * Tlaloc step in the emitted descriptor is shaped as a **Kubernetes**
- * step (one of Maestro's 5 leaf executable types) with three Tlaloc-
- * specific params:
+ * Pre-Layer-2.5: Maestro defined exactly 9 step types, none of them
+ * "Tlaloc"; this emitter shaped every Tlaloc step as a **Kubernetes** step
+ * with three Tlaloc-specific params (`image`, `tlaloc_artifact_uri`,
+ * `tlaloc_manifest`).
  *
- * - `image`: the Tlaloc-runtime container image (e.g. `tlaloc-runtime:0.0.1`).
- *   Maestro's Kubernetes step launches this; the runtime image's
- *   entrypoint reads the artifact URI + manifest from its own params.
- * - `tlaloc_artifact_uri`: a `sha256:<hex>` URI pointing at the content-
- *   addressed StableHLO body (the manifest's [ProgramManifest.bodyHash]).
- *   v1 inlines the body as a base64-encoded `data:` URI; Layer 3 plugs in
- *   a real registry.
- * - `tlaloc_manifest`: the JSON-serialized [ProgramManifest], so the
- *   runtime image has the typed input/output descriptors at runtime.
- *
- * Reshard edges are emitted as synthetic Kubernetes steps with image
- * `tlaloc-reshard:0.0.1` between adjacent compute steps; their params
- * carry the source/target mesh names.
+ * Layer 2.5 removed the need for that masquerade by adding `TLALOC` as a
+ * first-class enum entry in `StepType.java` inside vendored Maestro.
  *
  * # Schema documented in docs/maestro_descriptor.md
  *
@@ -39,6 +48,14 @@ import java.util.Base64
  * with citations to the relevant Maestro Java model classes and example
  * workflows.
  */
+@Deprecated(
+    message =
+        "Layer 2 masquerade emitter; replaced by first-class Tlaloc step type in §0.4.246. " +
+            "Author workflows with `\"type\": \"Tlaloc\"` directly using the samples under " +
+            "third-party/maestro/maestro-server/src/test/resources/samples/sample-tlaloc-*.json. " +
+            "Removal target: post-Layer-3 release.",
+    level = DeprecationLevel.WARNING,
+)
 object MaestroDescriptor {
 
     /** Default Tlaloc runtime image. Overridable per-call. */

@@ -1,3 +1,8 @@
+@file:Suppress("DEPRECATION")
+// MaestroDescriptor and StubExecutor are deprecated as of §0.4.249 (Layer 2.5.5).
+// This test class keeps coverage on the deprecated surface during the migration
+// window — silencing the warnings is intentional and scoped to this file only.
+
 package io.tlaloc.maestro
 
 import io.tlaloc.autograd.relu

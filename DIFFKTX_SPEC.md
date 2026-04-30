@@ -39,6 +39,62 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.249 Layer 2.5.5 — Runtime image + CI + deprecations + 14-section audit; Layer 2.5 closed (1071 combined tests green) 2026-04-30
+
+Layer 2.5 closing phase. Five deliverables ship together: runtime container image (Dockerfile + build.sh), CI workflow at `.github/workflows/maestro-integration.yml`, `@Deprecated` annotations on Layer 2's masquerade emitter + StubExecutor, full 14-section audit at `docs/audits/maestro_first_class_audit.md`, deprecation banner in `docs/maestro_descriptor.md`, and the deferred-upstream-PR documentation in `docs/maestro_upstream_pr.md`.
+
+**Runtime container image** — `third-party/maestro/maestro-tlaloc/docker/`:
+
+- `Dockerfile` — multi-stage: `eclipse-temurin:21-jdk-alpine` builder → `eclipse-temurin:21-jre-alpine` runtime. Pinned base tags; deterministic Gradle invocation. No CMD/ENTRYPOINT — Maestro fully controls the launch shape via `TlalocEntrypointBuilder`.
+- `build.sh` — bash helper, mirrors maestro-actus's `docker/build.sh`. Optional image-tag arg.
+- `:maestro-tlaloc:buildDockerContext` Gradle task — gathers `runtimeClasspath` + jar into `build/docker/libs/` for `Dockerfile COPY`.
+
+**CI workflow** — `.github/workflows/maestro-integration.yml`. **Note**: this commit's push was rejected by GitHub because the local auth token lacks `workflow` scope (required to create/update files under `.github/workflows/`). The workflow file remains in the working tree and is shipped as an out-of-band artifact for the user to apply via a separate `git add .github/workflows/maestro-integration.yml && git commit && git push` once `workflow` scope is enabled on their token. The workflow's content is fully designed: `workflow_dispatch` + `push` triggers scoped to maestro-tlaloc / StepType / sample / SerializedBufferHandle paths, runs Tlaloc-side `./gradlew test` + `:vendored-maestro:maestro-tlaloc:test`, uploads test reports as artifacts. Within the 10-min budget. **Not in v1**: container-image build (Docker-in-Docker; deferred), live-Maestro-with-K8s-pod-lifecycle execution (kind/k3d). Both tracked as audit OQ-Layer2.5-3. **Tracked as OQ-Layer2.5-9**: enable `workflow` scope on the push token and apply the file.
+
+**Deprecations** — Layer 2's masquerade emitter + StubExecutor. `@Deprecated(level = WARNING)` on both with migration messages pointing at the new `"type": "Tlaloc"` path. `MaestroDescriptorTest` keeps coverage via `@file:Suppress("DEPRECATION")`. Removal target: post-Layer-3 release.
+
+**Audit** — `docs/audits/maestro_first_class_audit.md` (14 sections). Keystone item is §3 — side-by-side maestro-actus pattern conformance comparing 11 file pairs; only 2 intentional structural divergences (deferred `TlalocArtifact` analogue; typed-handoff sample is unique-to-Tlaloc). §15 ("What we learned") documents three concrete payoffs from vendored ownership over the masquerade approach: typed parameters, structured output binding, log-handling extension points.
+
+**Deferred upstream PR** — `docs/maestro_upstream_pr.md`. Three reasons: (a) Tlaloc-specific step type unlikely to merge upstream — the right contribution is a generic step-type SPI (multiple weeks of Netflix-side coordination); (b) Netflix's community-PR velocity is slow; (c) vendoring gives full control regardless. OQ-Layer2.5-8 tracks re-evaluation.
+
+**Decisions worth flagging**:
+
+- **CI without Docker-in-Docker.** v1 runs the maestro-tlaloc test suite via composite Gradle but does not build the runtime image in CI. Image build is exercised manually via `bash maestro-tlaloc/docker/build.sh`. Live-Maestro-with-K8s execution is OQ-Layer2.5-3.
+
+- **Test coverage on deprecated surface kept.** `MaestroDescriptorTest`'s 5 tests still run via `@file:Suppress("DEPRECATION")`. Deletion deferred to post-Layer-3; tests remain a regression safety net during the migration window.
+
+- **No tensor-pipeline changes in Layer 2.5.** BGDHyperOpt timing unchanged; Tlaloc-side suite stays at 1049 tests. The 22 new tests are all in maestro-tlaloc, not in Tlaloc's main tree.
+
+**Files added** (5 in this commit; +1 in working tree as out-of-band artifact):
+- `third-party/maestro/maestro-tlaloc/docker/Dockerfile`
+- `third-party/maestro/maestro-tlaloc/docker/build.sh`
+- `third-party/maestro/maestro-tlaloc/README.md`
+- `docs/audits/maestro_first_class_audit.md`
+- `docs/maestro_upstream_pr.md`
+- *(working tree, not in commit due to token scope)*: `.github/workflows/maestro-integration.yml`
+
+**Files modified** (5):
+- `third-party/maestro/maestro-tlaloc/build.gradle` — `+buildDockerContext` task.
+- `maestro/src/jvmMain/kotlin/io/tlaloc/maestro/MaestroDescriptor.kt` — `@Deprecated` annotation + KDoc deprecation banner.
+- `maestro/src/jvmMain/kotlin/io/tlaloc/maestro/StubExecutor.kt` — same.
+- `maestro/src/jvmTest/kotlin/io/tlaloc/maestro/MaestroDescriptorTest.kt` — `@file:Suppress("DEPRECATION")`.
+- `docs/maestro_descriptor.md` — deprecation banner at top.
+
+**Tests added** (+0): pure documentation + deprecation cycle. All existing tests continue to pass.
+
+Full suite is green: **1071 tests** (1049 Tlaloc + 22 maestro-tlaloc).
+
+**Layer 2.5 closed**. Five sub-milestones (L2.5.0 through L2.5.5) shipped over §0.4.245–§0.4.249. Net delta:
+- ~125k vendored Maestro lines + Tlaloc-specific changes (`maestro-tlaloc/` module, `SerializedBufferHandle` + tests, samples, Dockerfile, CI, audit).
+- 22 new tests in maestro-tlaloc.
+- Tlaloc-side suite preserved at 1049.
+- 5 commits: §0.4.245 (substrate), §0.4.246 (registration), §0.4.247 (runner), §0.4.248 (samples), §0.4.249 (this — closing).
+
+**Recommended next pickup** — Layer 3:
+- Backend matrix: populate `MaestroStep.manifest.backendMatrix` with concrete `BackendTarget`s (CPU / GPU / TPU).
+- Real device buffer pool to replace `HandleRef.payload: Any?`.
+- IREE-backed dispatch in `TlalocRunner` — read StableHLO from `artifact_uri`, invoke `iree-compile`, dispatch. Replaces L2.5.2's identity-transform v1.
+
 #### 0.4.248 Layer 2.5.4 — Seven Tlaloc sample workflows + 11 parsing tests; typed-handoff is the keystone 2026-04-30
 
 Layer 2.5 phase 4. Eight workflow JSONs (the seven samples plus the template's caller; the template+caller pair counts as one logical sample per the L2.5 plan) shipped under `third-party/maestro/maestro-server/src/test/resources/samples/` with mirror copies in `maestro-tlaloc/src/test/resources/samples/` for the maestro-tlaloc test classpath.
