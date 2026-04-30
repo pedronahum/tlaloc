@@ -20,6 +20,14 @@ public enum StepType {
   KUBERNETES("Kubernetes", true),
   /** HTTP/HTTPS step. */
   HTTP("Http", true),
+  /**
+   * Tlaloc step — first-class step type for io.tlaloc programs. Tlaloc step bodies are
+   * content-addressed StableHLO+SDY artifacts; the runtime image loads the body and dispatches
+   * via PJRT/IREE. Added by Layer 2.5 §0.4.245+ as the only Tlaloc-side modification to
+   * vendored Maestro outside the {@code maestro-tlaloc/} module (see {@code
+   * docs/audits/maestro_first_class_audit.md} when it lands).
+   */
+  TLALOC("Tlaloc", true),
   /** Join step. */
   JOIN("Join", false),
   /** foreach loop step. */

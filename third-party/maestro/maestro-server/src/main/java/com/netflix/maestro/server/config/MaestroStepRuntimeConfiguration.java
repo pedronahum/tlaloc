@@ -39,6 +39,9 @@ import com.netflix.maestro.engine.params.ParamsManager;
 import com.netflix.maestro.engine.stepruntime.HttpStepRuntime;
 import com.netflix.maestro.engine.stepruntime.KubernetesStepRuntime;
 import com.netflix.maestro.engine.stepruntime.NotebookStepRuntime;
+import com.netflix.maestro.engine.stepruntime.TlalocStepRuntime;
+import com.netflix.maestro.engine.tlaloc.TlalocEntrypointBuilder;
+import com.netflix.maestro.engine.tlaloc.TlalocParamsBuilder;
 import com.netflix.maestro.engine.steps.ForeachStepRuntime;
 import com.netflix.maestro.engine.steps.NoOpStepRuntime;
 import com.netflix.maestro.engine.steps.SleepStepRuntime;
@@ -105,6 +108,48 @@ public class MaestroStepRuntimeConfiguration {
             objectMapper,
             metrics);
     stepRuntimeMap.put(StepType.KUBERNETES, step);
+    return step;
+  }
+
+  // Tlaloc Layer 2.5 §0.4.245+ — first-class Tlaloc step type.
+  // Same DI shape as the kubernetes/notebook beans above. Lives here
+  // (not in a separate Spring config) because TlalocStepRuntime extends
+  // KubernetesStepRuntime and consumes the same KubernetesRuntimeExecutor /
+  // KubernetesCommandGenerator instances.
+  @Bean
+  public TlalocParamsBuilder tlalocParamsBuilder(
+      @Qualifier(Constants.MAESTRO_QUALIFIER) ObjectMapper objectMapper) {
+    LOG.info("Creating tlalocParamsBuilder within Spring boot...");
+    return new TlalocParamsBuilder(objectMapper);
+  }
+
+  @Bean
+  public TlalocEntrypointBuilder tlalocEntrypointBuilder(TlalocParamsBuilder paramsBuilder) {
+    LOG.info("Creating tlalocEntrypointBuilder within Spring boot...");
+    return new TlalocEntrypointBuilder(paramsBuilder);
+  }
+
+  @Bean
+  public TlalocStepRuntime tlaloc(
+      @Qualifier(STEP_RUNTIME_QUALIFIER) Map<StepType, StepRuntime> stepRuntimeMap,
+      KubernetesRuntimeExecutor runtimeExecutor,
+      KubernetesCommandGenerator commandGenerator,
+      JobTemplateManager jobTemplateManager,
+      OutputDataManager outputDataManager,
+      @Qualifier(Constants.MAESTRO_QUALIFIER) ObjectMapper objectMapper,
+      MaestroMetrics metrics,
+      TlalocEntrypointBuilder entrypointBuilder) {
+    LOG.info("Creating tlaloc step runtime within Spring boot...");
+    TlalocStepRuntime step =
+        new TlalocStepRuntime(
+            runtimeExecutor,
+            commandGenerator,
+            jobTemplateManager,
+            outputDataManager,
+            objectMapper,
+            metrics,
+            entrypointBuilder);
+    stepRuntimeMap.put(StepType.TLALOC, step);
     return step;
   }
 

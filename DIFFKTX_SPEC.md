@@ -39,6 +39,51 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.246 Layer 2.5.1 — maestro-tlaloc/ module + first-class Tlaloc step-type registration; +6 maestro-side tests, Tlaloc suite 1049 unchanged 2026-04-30
+
+Layer 2.5 phase 1. The masquerade approach from §0.4.243 is on the path to deprecation; this entry registers `Tlaloc` as a real Maestro step type sibling to `Kubernetes` / `Notebook` / `Titus`, mirroring `pedronahum/maestro-actus`'s pattern.
+
+**Changes inside `third-party/maestro/maestro-tlaloc/`** (additive — entirely new module, mirror of maestro-actus's structure):
+
+- `build.gradle` — declares deps on maestro-common / maestro-engine / maestro-kubernetes (since `TlalocStepRuntime` extends `KubernetesStepRuntime`).
+- `src/main/java/com/netflix/maestro/engine/stepruntime/TlalocStepRuntime.java` — extends `KubernetesStepRuntime`, overrides `customizePreLaunchCommand` to inject the Tlaloc shell command. Same shape as `ActusStepRuntime`.
+- `src/main/java/com/netflix/maestro/engine/tlaloc/TlalocRunner.java` — CLI `main(String[] args)` invoked inside the runtime container. v1 stub: deserializes JSON params, writes echo'd OutputData JSON. L2.5.2 wires real Tlaloc dispatch via `SerializedBufferHandle`.
+- `src/main/java/com/netflix/maestro/engine/tlaloc/TlalocEntrypointBuilder.java` — generates the `java -cp '/app/*' …TlalocRunner '<JSON>' '/tmp/maestro-tlaloc-output.json'` shell command. Single-quote escaping for safe JSON embedding.
+- `src/main/java/com/netflix/maestro/engine/tlaloc/TlalocParamsBuilder.java` — translates Maestro's typed `Map<String, Parameter>` into the JSON payload `TlalocRunner` consumes.
+- `src/main/java/com/netflix/maestro/engine/tlaloc/TlalocAttributeMapper.java` — naming bridge for Tlaloc-recognised keys (`artifact_uri` → `tlaloc_artifact_uri`, etc.).
+- `src/main/java/com/netflix/maestro/engine/tlaloc/TlalocCommand.java` — immutable `record` for `(entrypoint, artifactUri, manifestRef, stepName)`.
+- `src/main/resources/defaultparams/default-tlaloc-step-params.yaml` — Maestro-merged defaults.
+- `src/test/java/com/netflix/maestro/engine/tlaloc/TlalocStepTypeRegistrationTest.java` — 6 smoke tests (StepType registration, JSON round-trip, command record, attribute mapper).
+
+**Vendoring divergences (minimum touches outside `maestro-tlaloc/`)** — three files modified:
+
+- `third-party/maestro/settings.gradle` — `include 'maestro-tlaloc'` (1-line add).
+- `third-party/maestro/maestro-common/src/main/java/com/netflix/maestro/models/definition/StepType.java` — added `TLALOC("Tlaloc", true)` enum entry. ~6 lines (entry + Javadoc).
+- `third-party/maestro/maestro-server/src/main/java/com/netflix/maestro/server/config/MaestroStepRuntimeConfiguration.java` — 3 new `@Bean` factories (`tlalocParamsBuilder`, `tlalocEntrypointBuilder`, `tlaloc`) registering `TlalocStepRuntime` against `StepType.TLALOC`. ~50 lines + 3 import additions.
+
+These are the *only* modifications to vendored Maestro outside the `maestro-tlaloc/` module. The audit's "Vendoring divergence audit" (lands in §0.4.249) enumerates them.
+
+**Decisions worth flagging**:
+
+- **Lombok `LOG` (uppercase) field name.** Maestro's project-wide `lombok.config` sets `lombok.log.fieldName = LOG`. v1 of my `TlalocRunner` and `TlalocStepRuntime` initially used `log.info(...)` which broke compilation; trivial fix once the convention was discovered.
+
+- **`Parameter` vs `ParamDefinition`.** `StepRuntimeSummary.getParams()` returns `Map<String, Parameter>` (the runtime-evaluated params), not `Map<String, ParamDefinition>` (the schema). The runner-side code consumes evaluated values, so `Parameter` is the right type.
+
+- **No `TlalocArtifact` in v1.** `ActusStepRuntime` registers an `ActusArtifact` in the K8s step's pendingArtifacts map (line 78–80 of upstream). v1 of `TlalocStepRuntime` skips this — the runner's OutputData carries equivalent metadata. v2 may add a `TlalocArtifact` analogue if Maestro's artifact-collection flow needs structured artifact records for Tlaloc.
+
+- **L2.5.1 ships stubs.** The runner's v1 body just echoes params. Real dispatch (read `SerializedBufferHandle` from input URI, invoke Tlaloc's StableHLO body, write output handle) is L2.5.2 — the runner needs Tlaloc's runtime jars on its classpath, which lands when the container image build ships in L2.5.5.
+
+**Files added** (9 inside `maestro-tlaloc/`).
+
+**Files modified** (3 — minimum-touch vendoring divergences).
+
+**Tests added** (+6): `TlalocStepTypeRegistrationTest`. Tlaloc-side suite stays at 1049; combined Tlaloc + maestro-tlaloc = 1055.
+
+**Recommended next pickup** (Layer 2.5 continuation):
+- L2.5.2 — Real `TlalocRunner` body (read SerializedBufferHandle input, dispatch, write output).
+- L2.5.4 — Seven sample workflows + their direct-JVM end-to-end tests.
+- L2.5.5 — Runtime container image, CI workflow, deprecations on Layer-2 masquerade, 14-section audit at `docs/audits/maestro_first_class_audit.md`.
+
 #### 0.4.245 Layer 2.5 substrate — vendored Netflix/maestro + SerializedBufferHandle + composite Gradle build 2026-04-29
 
 Layer 2.5 phases L2.5.0 + L2.5.3 land as a single checkpoint commit. The remaining phases (L2.5.1 / L2.5.2 / L2.5.4 / L2.5.5) build on this foundation.

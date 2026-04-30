@@ -16,3 +16,8 @@ include 'maestro-extensions'
 include 'maestro-aws'
 include 'maestro-kubernetes'
 include 'maestro-http'
+
+// Tlaloc Layer 2.5 §0.4.245+ — first-class Tlaloc step type sibling to
+// maestro-kubernetes / maestro-http / maestro-notebook. Mirrors the
+// pattern from pedronahum/maestro-actus.
+include 'maestro-tlaloc'

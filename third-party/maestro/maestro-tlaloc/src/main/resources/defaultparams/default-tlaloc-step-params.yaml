@@ -1,0 +1,28 @@
+# Default parameters for Tlaloc step type (Layer 2.5 §0.4.245+).
+#
+# Mirrors the maestro-actus convention. Maestro merges these defaults into
+# every Tlaloc-typed step's params so workflows can omit the boilerplate
+# and only specify their own artifact_uri + manifest_ref.
+
+tlaloc:
+  value:
+    # The container image that loads + dispatches the Tlaloc artifact.
+    # v1 default — Layer 2.5.5 builds + pushes this image. Workflows can
+    # override per-step.
+    image: "tlaloc-runtime:0.1.0"
+
+    # Artifact URI scheme. v1 supports `file://` and `data:`; Layer 3+
+    # adds `oci://` against a real registry.
+    artifact_uri: ""
+
+    # Producer's ProgramManifest.bodyHash, for lineage / log correlation.
+    manifest_ref: ""
+
+    # Cross-pod input handle (JSON-serialized SerializedBufferHandle).
+    # Empty for source steps that don't consume from a producer.
+    input_handle: ""
+
+    # Where the runner writes the output SerializedBufferHandle.
+    # Maestro's downstream step picks this up as its `input_handle`.
+    output_handle_uri: ""
+  type: MAP

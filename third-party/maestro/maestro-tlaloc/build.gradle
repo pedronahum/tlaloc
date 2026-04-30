@@ -1,0 +1,21 @@
+// maestro-tlaloc — first-class Tlaloc step type for Maestro.
+//
+// Layer 2.5 §0.4.245+ — sibling integration module to maestro-kubernetes /
+// maestro-http / maestro-notebook, mirroring pedronahum/maestro-actus's
+// structure. Extends KubernetesStepRuntime to launch Tlaloc programs as
+// Kubernetes jobs; the container image (tlaloc-runtime, ships in §0.4.249+)
+// loads the content-addressed StableHLO body via the
+// io.tlaloc.maestro.SerializedBufferHandle protocol.
+
+dependencies {
+    implementation project(':maestro-common')
+    implementation project(':maestro-engine')
+    implementation project(':maestro-kubernetes')
+    implementation jacksonDatabindDep
+    api slf4jApiDep
+
+    testImplementation junitDep
+    testImplementation mockitoCoreDep
+    testImplementation spectatorApiDep
+    testImplementation(testFixtures(project(':maestro-common')))
+}
