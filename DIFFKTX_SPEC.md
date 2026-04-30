@@ -39,6 +39,34 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.250 Layer 3.0 — recognizer framework + FlashAttention recognizer 2026-04-30
+
+Layer 3 phase 0. Substrate for the algorithmic-transformation layer (pattern recognition + VJP coarsening + kernel templates + cost model). Sealed `RecognitionMatch` hierarchy + first recognizer (FlashAttention) + `recognizeAll` aggregator + `resolveLargestMatch` + 9 tests (1 positive + 4 adversarial + 4 sanity/aggregator).
+
+**New module** — `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/`:
+
+- `RecognitionMatch.kt` — sealed hierarchy: `FlashAttention` (populated), `RmsNorm` / `Rope` / `CrossEntropy` (stubs landing in L3.1). Each carries `ops: List<DxirOp>` + per-pattern structural metadata. Plus `RecognitionDiagnostic(pattern, reason, opId)` for near-miss reporting.
+- `FlashAttentionRecognizer.kt` — walks the function body, finds `OpKind.SOFTMAX` ops, traces back to find a MATMUL operand, forward to find a MATMUL consumer, validates Q/K/V aren't all the same tensor (rejects A·A^T·A self-contractions), emits `FlashAttention(qkMatmul, softmax, pvMatmul, qInput, kInput, vInput, scoreType, outputType)`.
+- `RecognizeAll.kt` — aggregator that calls each recognizer and runs `resolveLargestMatch` to strip overlapping smaller matches.
+
+**Decisions worth flagging**:
+
+- **No registry, no service-loader.** Pure functions + explicit `recognizeAll` aggregator listing each recognizer. Adding a pattern = new file + one line. Per spec's "100-line file, no build-system change" target.
+
+- **Near-miss diagnostics via optional `MutableList<RecognitionDiagnostic>?` parameter.** When non-null, recognizers append a structured record for each pre-filter trigger that didn't fully match. Test `adversarial2SoftmaxOperandNotMatmulRejectedWithDiagnostic` confirms the diagnostic surfaces "RELU vs MATMUL mismatch" when SOFTMAX consumes a RELU.
+
+- **Pre-filter on `OpKind.SOFTMAX`**, not MATMUL. SOFTMAX is rarer in graphs; SOFTMAX-anchored scanning is cheaper.
+
+- **Self-contraction rejection** (A·A^T·A explicit reject with diagnostic).
+
+- **`OpKind.SCALED_DOT_PRODUCT_ATTENTION` not matched by v1** — pre-fused users already have the structure downstream wants.
+
+**Files added** (5): 3 source files in `ir/recognizer/` + 1 test file (9 tests).
+
+**Tests added** (+9): `FlashAttentionRecognizerTest`. Tlaloc-side suite 1049 → 1058 (unchanged Tlaloc modules + 9 in `:ir`). Combined Tlaloc + maestro-tlaloc: 1071 → 1080.
+
+**Recommended next pickup**: L3.1 — three more recognizers (RMS norm, RoPE, cross-entropy).
+
 #### 0.4.249 Layer 2.5.5 — Runtime image + CI + deprecations + 14-section audit; Layer 2.5 closed (1071 combined tests green) 2026-04-30
 
 Layer 2.5 closing phase. Five deliverables ship together: runtime container image (Dockerfile + build.sh), CI workflow at `.github/workflows/maestro-integration.yml`, `@Deprecated` annotations on Layer 2's masquerade emitter + StubExecutor, full 14-section audit at `docs/audits/maestro_first_class_audit.md`, deprecation banner in `docs/maestro_descriptor.md`, and the deferred-upstream-PR documentation in `docs/maestro_upstream_pr.md`.
