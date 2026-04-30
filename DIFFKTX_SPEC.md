@@ -39,6 +39,47 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.247 Layer 2.5.2 — TlalocRunner real body (wire-format validation + identity-transform copy) + 5 end-to-end tests 2026-04-30
+
+Layer 2.5 phase 2. Replaces L2.5.1's echo stub with a real `TlalocRunner` body that reads a `SerializedBufferHandle` JSON pointer, validates the on-disk binary wire format (magic / version / payload SHA-256), copies the input bytes to the consumer's `output_handle_uri`, and emits an OutputData JSON document containing the produced `SerializedBufferHandle`.
+
+**Why identity-transform v1**:
+
+Real Tlaloc dispatch (parse the StableHLO body from `artifact_uri`, invoke PJRT/IREE, produce the computed output tensor, re-serialize) requires the runtime container image's full classpath: Tlaloc's `:maestro` Kotlin module + IREE/PJRT JNI bindings + the StableHLO interpreter. That ships in L2.5.5. The identity-transform v1 proves the wire-format end-to-end *without* needing the heavy runtime — the runner faithfully consumes a producer's serialized handle, validates it byte-for-byte, and emits a structurally-identical handle pointing at a copy. A real-dispatch v2 ships when the runtime image lands.
+
+**Changes**:
+
+- `TlalocRunner.main()` rewritten from echo stub to real body:
+  - Parse params JSON; extract `artifact_uri`, `manifest_ref`, `input_handle` JSON, `output_handle_uri`.
+  - If `input_handle` or `output_handle_uri` are empty, emit a no-op OutputData (source-step / metadata-only invocations).
+  - Otherwise: parse `input_handle` JSON, read the on-disk file, validate `[MAGIC=TLAL][VERSION=1][DESC_LEN][DESC bytes][PAYLOAD_LEN][PAYLOAD]` wire format, hash the payload bytes with SHA-256, compare against the handle's `contentHash`. Mismatches throw `IllegalStateException`.
+  - Identity-copy input bytes to `output_handle_uri`.
+  - Compose output `SerializedBufferHandle` JSON (same content hash since payload unchanged).
+  - Write OutputData JSON to the second arg path.
+- New `TlalocRunnerEndToEndTest` — 5 tests: identity-copy round-trip, no-op when input handle absent, content-hash-mismatch failure, bad-magic failure, arg-count-mismatch failure. All build the wire-format input bytes by hand (no dep on Tlaloc's Kotlin `:maestro` module — same approach maestro-actus's `ActusRunnerEndToEndTest` uses for direct-JVM invocation).
+
+**Decisions worth flagging**:
+
+- **No `io.tlaloc:maestro` on the runner's classpath in v1.** The runner re-implements wire-format validation in pure Java rather than calling Tlaloc's Kotlin `SerializedBufferHandle.read`. Two reasons: (a) keeps maestro-tlaloc's compile-time dependency surface tight, (b) defers composite-build dependency-substitution wiring (`io.tlaloc:maestro` ↔ Tlaloc's `:maestro` module) to L2.5.5 when the runtime image needs it for real. The wire format is small + stable; ~30 lines of Java mirror Tlaloc's Kotlin canonical implementation, both audited against the same `[MAGIC][VERSION][DESC_LEN][DESC][PAYLOAD_LEN][PAYLOAD]` schema documented in `SerializedBufferHandle.kt`.
+
+- **Identity-transform semantics, not real dispatch.** v1 proves the wire-format and runner-shell wiring; the StableHLO body in `artifact_uri` is not consumed (it's logged but not invoked). The OutputData document carries `"note": "v1 identity transform; real dispatch ships in L2.5.5"` for clarity.
+
+- **No-op fallthrough when handles are absent.** Source steps (no upstream input) and metadata-only steps (just register manifest references) need a path through the runner that doesn't require an input file. v1 short-circuits with `status: "ok", note: "no input_handle..."`.
+
+- **`runnerFailsOnBadMagicBytes` test takes 0.136s.** ~50× slower than the other tests because Java's `MessageDigest.getInstance("SHA-256")` initializes lazily on first use; the first test that exercises hash computation pays the JCA bootstrap cost. Subsequent tests reuse the warmed JCA. Not a Tlaloc concern.
+
+**Files modified** (1):
+- `third-party/maestro/maestro-tlaloc/src/main/java/com/netflix/maestro/engine/tlaloc/TlalocRunner.java` — rewritten from stub to real body.
+
+**Files added** (1):
+- `third-party/maestro/maestro-tlaloc/src/test/java/com/netflix/maestro/engine/tlaloc/TlalocRunnerEndToEndTest.java` — 5 direct-JVM tests.
+
+**Tests added** (+5): `TlalocRunnerEndToEndTest`. Tlaloc-side suite stays at 1049 unchanged; combined Tlaloc + maestro-tlaloc = 1060.
+
+**Recommended next pickup** (Layer 2.5 continuation):
+- L2.5.4 — Seven sample workflows + their direct-JVM end-to-end tests (typed-handoff is the keystone).
+- L2.5.5 — Runtime container image, CI workflow, deprecate L2 masquerade emitter + StubExecutor, 14-section audit.
+
 #### 0.4.246 Layer 2.5.1 — maestro-tlaloc/ module + first-class Tlaloc step-type registration; +6 maestro-side tests, Tlaloc suite 1049 unchanged 2026-04-30
 
 Layer 2.5 phase 1. The masquerade approach from §0.4.243 is on the path to deprecation; this entry registers `Tlaloc` as a real Maestro step type sibling to `Kubernetes` / `Notebook` / `Titus`, mirroring `pedronahum/maestro-actus`'s pattern.
