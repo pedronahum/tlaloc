@@ -39,6 +39,48 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.254 Layer 3.4a — Seven canonical device descriptors (cited specs) 2026-05-01
+
+Layer 3 phase 4, sub-phase a (of four). The substrate for the L3.4 cost model: a `DeviceDescriptor` data class plus the seven entries the cost model + downstream tile-fusion + KV-quant passes index into. Numbers are sourced from vendor datasheets / ISCA papers / cloud announcements; citations live alongside each descriptor in the source.
+
+**New module** — `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/cost/`:
+
+- `DeviceDescriptor.kt` — `data class DeviceDescriptor` with fields: `name` (matches `KernelTarget.arch`), `vendor`, `peakFlopsF32`, `peakFlopsBf16`, `peakFlopsFp8` (nullable for devices without native FP8), `hbmBandwidthBytesPerSec`, `hbmCapacityBytes`, `onChipSramBytes` (L2 / VMEM / SBUF — the relevant per-vendor analog), `smOrCoreCount`, `extras: Map<String, Any>` (vendor-specific knobs like `sparsity_factor`, `sparsecore_present`, `tf32_peak`). Plus a `peakBf16FlopsPerByte()` helper that gives the arithmetic-intensity threshold above which a kernel becomes compute-bound.
+
+- `DeviceDescriptors` object — the seven canonical entries:
+
+  | Name              | Vendor   | BF16 TFLOPs | HBM BW    | HBM        | SRAM     | Source                                                      |
+  |-------------------|----------|-------------|-----------|------------|----------|-------------------------------------------------------------|
+  | `h100`            | nvidia   | 989         | 3.35 TB/s | 80 GiB     | 50 MiB   | NVIDIA H100 datasheet, Jun 2023                             |
+  | `a100`            | nvidia   | 312         | 1.94 TB/s | 80 GiB     | 40 MiB   | NVIDIA Ampere whitepaper                                    |
+  | `tpu_v4`          | google   | 275         | 1.2 TB/s  | 32 GiB     | 128 MiB  | Jouppi et al., ISCA 2023 (arXiv 2304.01433)                 |
+  | `tpu_v5e`         | google   | 197         | 819 GB/s  | 16 GiB     | 48 MiB   | Google Cloud TPU v5e doc                                    |
+  | `tpu_v6e`         | google   | 926         | 1.6 TB/s  | 32 GiB     | 192 MiB  | Trillium announcement, May 2024                             |
+  | `trainium2`       | aws      | 660         | 2.9 TB/s  | 96 GiB     | 96 MiB   | AWS re:Invent 2024 Trainium2 session                        |
+  | `cpu_generic`     | tlaloc   | 20          | 300 GB/s  | 256 GiB    | 105 MiB  | rough roofline for contemporary 56-core server CPU          |
+
+  Plus `byName(name)` lookup that matches `KernelTarget.arch`.
+
+**Decisions worth flagging**:
+
+- **Flat schema, not per-vendor types.** Per-vendor `NvidiaDevice` / `GoogleDevice` would force the cost model to dispatch on type. A flat schema lets the model do `device.peakFlopsBf16 / device.hbmBandwidthBytesPerSec` uniformly. Vendor-specific knobs live in `extras`.
+
+- **One number per dtype family.** Vendors publish FP32, BF16/FP16 (collapsed — same tensor-core path), FP8 (where supported). Mixed-precision sustained TFLOPs (e.g. INT4, FP4) live in `extras` for now. Cost model v1 picks per `op.type.dtype`; FP8/INT4 dispatch lands in L3.4d alongside KV-quant.
+
+- **Sparsity factors in `extras`, not in the headline numbers.** NVIDIA publishes 1.98 PFLOPs FP8 with 2:4 structured sparsity, 989 GFLOPs without; we ship the *dense* peak in the main field and `"sparsity_factor": 2.0` in `extras`. Cost model can opt into sparse peaks when the recognizer gates on a sparse-mask attr.
+
+- **`peakBf16FlopsPerByte()` is the roofline knee.** A kernel with arithmetic intensity above this number is compute-bound on this device; below is memory-bound. The cost model uses this to score (kernel-call vs. decompose) — kernels that move significantly more bytes than they compute are bad picks for HBM-bandwidth-limited targets like H100. Test `arithmeticIntensityScalesWithHbmBandwidth` pins the relative ordering.
+
+- **CPU generic is intentionally rough.** Not tied to a specific Sapphire Rapids / Genoa SKU; the descriptor is the always-available decompose-only target. Refining to per-SKU CPU descriptors is a future-cost item.
+
+**Files added** (1 source + 1 test):
+- `ir/recognizer/cost/DeviceDescriptor.kt`
+- `ir/recognizer/cost/DeviceDescriptorTest.kt` (11 tests)
+
+**Tests added** (+11): seven canonical descriptors enumerated, per-vendor citation pins (H100 989 TFLOPs, A100 312 TFLOPs, TPU v4 275 TFLOPs, TPU v6e ~4.7× v5e), invariants (no-FP8 on A100, sparsecore on v6e, FP8 on Trainium2), arithmetic-intensity ordering, and a name-lookup roundtrip. Tlaloc-side suite 1093 → 1104 (unchanged Tlaloc modules + 11 in `:ir`). Combined Tlaloc + maestro-tlaloc: 1115 → 1126.
+
+**Recommended next pickup**: L3.4b — cost model proper (per-op FLOPs/byte estimator + per-fn aggregation + roofline-style time estimate consuming these descriptors).
+
 #### 0.4.253 Layer 3.3 — Kernel template registry + decompose fallback 2026-05-01
 
 Layer 3 phase 3. The downstream consumer of L3.2's coarsened envelopes lands: a per-(pattern, target) kernel template registry plus a decompose-fallback driver. After L3.3, every `OpKind.COARSENED` op produced by the L3.2 coarsener is either *annotated* with a [`KernelDescriptor`] for downstream `stablehlo.custom_call` emit, or *decomposed* by inlining its `primal_body` back into the outer function. Either way, the function passes through Tlaloc's existing IR validators unchanged.
