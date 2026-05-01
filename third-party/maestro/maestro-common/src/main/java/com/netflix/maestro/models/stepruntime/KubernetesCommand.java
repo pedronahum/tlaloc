@@ -30,6 +30,7 @@ import lombok.ToString;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonPropertyOrder(
     value = {
+      "accelerators",
       "app_name",
       "args",
       "command",
@@ -41,6 +42,7 @@ import lombok.ToString;
       "entrypoint",
       "env",
       "job_deduplication_key",
+      "node_selector",
       "owner_email"
     },
     alphabetic = true)
@@ -69,6 +71,25 @@ public class KubernetesCommand {
   private final Map<String, String> env;
   private final String jobDeduplicationKey;
   private final String ownerEmail;
+
+  /**
+   * Tlaloc divergence (Layer 3 §0.4.259+). K8s node selector labels for accelerator-aware
+   * scheduling — populated from {@code ProgramManifest.backendMatrix} + cluster capabilities by
+   * {@code TlalocPodSpecBuilder}. Null / empty for non-Tlaloc steps; downstream Maestro logic
+   * passes the map through to the K8s job spec without further interpretation.
+   *
+   * <p>Vendoring divergence approved as L3.6's one-edit-against-upstream per audit decision D4.
+   * Tracked as OQ-Layer3-4 if/when an upstream PR becomes the right path.
+   */
+  private final Map<String, String> nodeSelector;
+
+  /**
+   * Tlaloc divergence (Layer 3 §0.4.259+). Vendor + arch hints (e.g. {@code {"vendor":"nvidia",
+   * "arch":"h100"}}) recorded alongside the K8s command for downstream debugging + observability.
+   * Distinct from {@link #gpu} (a count) and {@link #nodeSelector} (label match) — this is the
+   * compile-time decision the {@code BackendTarget} row carried.
+   */
+  private final Map<String, String> accelerators;
 
   /** builder class for lombok and jackson. */
   @JsonPOJOBuilder(withPrefix = "")

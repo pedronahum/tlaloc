@@ -39,6 +39,69 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.259 Layer 3.6 — TlalocStepRuntime pod-spec construction (one vendoring divergence) 2026-05-01
+
+Layer 3 phase 6. The runtime side of the L3 pipeline lands: Tlaloc steps now translate the manifest's `backendMatrix` rows into Kubernetes pod-spec fields (nodeSelector + accelerator labels + GPU count) at job-launch time. One vendoring divergence inside `third-party/maestro/` extends Netflix's `KubernetesCommand` with two optional fields; everything else is additive.
+
+**Vendoring divergence** — `third-party/maestro/maestro-common/.../KubernetesCommand.java`:
+
+- `private final Map<String, String> nodeSelector` — K8s node-selector labels for accelerator-aware scheduling.
+- `private final Map<String, String> accelerators` — vendor + arch + kernel + KV-quant hints recorded for observability.
+
+Both fields are `@JsonInclude(NON_NULL)` — omitted entirely from JSON when unset. Vanilla Maestro consumers that don't know about Tlaloc see the unchanged JSON shape. Existing `KubernetesCommandTest` round-trip fixtures still pass without modification.
+
+**This is the one divergence-against-upstream approved as L3.6's edit-budget per audit decision D4.** Tracked as audit OQ-Layer3-4 if/when an upstream PR becomes the right path.
+
+**New files** in `third-party/maestro/maestro-tlaloc/.../tlaloc/`:
+
+- `BackendTargetRecord.java` — Java record mirror of the Kotlin `BackendTarget` data class (the §0.4.258 manifest entry). Lives in `maestro-tlaloc` so Jackson can deserialize the matrix JSON the runtime receives via the workflow params map. Fields exactly match the Kotlin shape — `vendor`, `arch`, `kernelName?`, `kvQuantDtype?`, `costMicroseconds?`.
+
+- `TlalocPodSpecBuilder.java` — translation pass. Two public methods:
+  - `pickTarget(matrixJson, clusterVendor, clusterArch): Optional<BackendTargetRecord>` — selection algorithm. Exact `(vendor, arch)` match wins; falls back to lowest-cost row matching vendor; finally to absolute lowest-cost. Empty matrix / malformed JSON → `Optional.empty()` (caller passes through).
+  - `applyBackendTarget(base, matrixJson, clusterVendor, clusterArch): KubernetesCommand` — composes the picked row onto the base command, populating `nodeSelector`, `accelerators`, and `gpu="1"` for accelerator targets (CPU targets keep `gpu=null`).
+
+  Per-vendor nodeSelector templates:
+
+  | Vendor   | Label key                           | Label value pattern    |
+  |----------|--------------------------------------|------------------------|
+  | nvidia   | `accelerator`                        | `nvidia-tesla-{arch}`  |
+  | amd      | `accelerator`                        | `amd-{arch}`           |
+  | google   | `cloud.google.com/gke-accelerator`   | `{arch}`               |
+  | aws      | `aws.amazon.com/neuron`              | `{arch}`               |
+  | tlaloc   | (no label — CPU runs on any node)    | (no label)             |
+
+**Modified file** — `TlalocStepRuntime.java`:
+
+Constructor extended with `TlalocPodSpecBuilder podSpecBuilder` + `String clusterVendor` + `String clusterArch`. `customizePreLaunchCommand` now: (a) builds the entrypoint command (existing path), then (b) reads the `tlaloc.backend_matrix` workflow param, (c) calls `podSpecBuilder.applyBackendTarget(...)` to merge nodeSelector/accelerators/gpu into the K8s command, then (d) sets the final command on the context. Log line widened to include cluster + accelerators map.
+
+**Decisions worth flagging**:
+
+- **One vendoring edit, narrowly scoped.** The vendored Maestro tree gains exactly two new fields on one class. Everything else is in `maestro-tlaloc/` (Tlaloc-specific, expected to diverge). Preserves the audit's "≤2 vendor edits per layer" envelope.
+
+- **Cluster vendor/arch via constructor injection.** v1 takes `clusterVendor` + `clusterArch` strings on the runtime. Production deployments wire them from a per-deployment env var or DI binding (e.g. `TLALOC_CLUSTER_VENDOR=nvidia` / `TLALOC_CLUSTER_ARCH=h100`). A richer cluster-config service (with multi-arch heterogeneous-cluster support) is L4+ scope.
+
+- **Best-effort selection.** When a workflow's matrix doesn't include the cluster's exact (vendor, arch), the builder picks the lowest-cost row that's at least vendor-compatible (e.g. workflow targeted H100 deployed on V100 → still launches on the V100 node, observability captures the mismatch via the `accelerators` map). When no vendor matches at all, picks the absolute lowest-cost row. Fail-soft, not fail-loud.
+
+- **No GPU count from cost model.** v1 emits `gpu="1"` for any non-CPU target. Multi-accelerator pods (e.g. 8×H100) need the cost model to carry a per-target memory pressure estimate — that's L4 scope. Today's v1 pod = single-accelerator-or-CPU.
+
+- **`@JsonInclude(NON_NULL)` on the new fields.** Critical for backward compat. A vanilla Netflix Maestro deployment that doesn't know about Tlaloc never sees the new fields in serialized commands. Test `existingFixturesStillRoundTripWithNewFields` pins this.
+
+- **`Map.of` doesn't accept null values.** Original implementation tried `Map.of("tlaloc", null)` for the CPU-skip case; failed at class-init time. Fixed by omitting `tlaloc` from `VENDOR_TEMPLATES` entirely — `null` lookup encodes "skip the nodeSelector emit." One-line fix; mechanical.
+
+- **JUnit 4, not JUnit 5.** The vendored Maestro test stack is JUnit 4 (assertion order is `(message, expected, actual)`). Two assertions in the new test were initially JUnit 5 style; corrected during integration. Worth noting because L3.7 examples might use JUnit 5 for their Kotlin-side tests — careful when adding tests inside `third-party/maestro/`.
+
+**Files added/modified** (3 source changes):
+- Modified: `third-party/maestro/maestro-common/.../KubernetesCommand.java` (2 new fields + property-order tweak)
+- New: `third-party/maestro/maestro-tlaloc/.../tlaloc/BackendTargetRecord.java`
+- New: `third-party/maestro/maestro-tlaloc/.../tlaloc/TlalocPodSpecBuilder.java`
+- Modified: `third-party/maestro/maestro-tlaloc/.../stepruntime/TlalocStepRuntime.java` (constructor extension, customize-launch wiring)
+- New: `third-party/maestro/maestro-common/.../KubernetesCommandTlalocFieldsTest.java` (4 tests)
+- New: `third-party/maestro/maestro-tlaloc/.../TlalocPodSpecBuilderTest.java` (15 tests)
+
+**Tests added** (+19): KubernetesCommand new-fields round-trip + null-omission + existing-fixture compat (4); TlalocPodSpecBuilder selection (exact match, case-insensitive, same-vendor fallback, no-vendor fallback, empty/null/malformed matrix) + apply mutation (NVIDIA H100 → nvidia-tesla-h100 label, Google TPU → cloud.google.com label, AWS Trainium → aws.amazon.com/neuron label, CPU skip), and BackendTargetRecord Jackson round-trip with both populated and null fields (15). Tlaloc-side suite 1137 (unchanged); maestro-tlaloc 22 → 37; maestro-common +4. Combined: 1170 → 1189.
+
+**Recommended next pickup**: L3.7 — examples + 17-section audit + `docs/xatlib_design.md` + `maestro-tlaloc/README.md` update + final L3 closure commit.
+
 #### 0.4.258 Layer 3.5 — Manifest extension: BackendTarget population 2026-05-01
 
 Layer 3 phase 5. Widens the §0.4.243 placeholder `ProgramManifest.backendMatrix: List<String>` into the structured `List<BackendTarget>` it was always meant to be, and ships a `populateBackendMatrix(fn, targets, kvQuant?)` helper that runs the L3 pipeline (recognize → coarsen → kernel-lower → KV-quant → cost) per target and projects the result into the per-target tuple.

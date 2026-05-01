@@ -16,8 +16,11 @@ import com.netflix.maestro.engine.params.OutputDataManager;
 import com.netflix.maestro.engine.templates.JobTemplateManager;
 import com.netflix.maestro.engine.tlaloc.TlalocCommand;
 import com.netflix.maestro.engine.tlaloc.TlalocEntrypointBuilder;
+import com.netflix.maestro.engine.tlaloc.TlalocPodSpecBuilder;
 import com.netflix.maestro.metrics.MaestroMetrics;
+import com.netflix.maestro.models.parameter.Parameter;
 import com.netflix.maestro.models.stepruntime.KubernetesCommand;
+import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -38,6 +41,15 @@ import lombok.extern.slf4j.Slf4j;
 public class TlalocStepRuntime extends KubernetesStepRuntime {
 
   private final TlalocEntrypointBuilder entrypointBuilder;
+  private final TlalocPodSpecBuilder podSpecBuilder;
+
+  /**
+   * Cluster's primary accelerator (vendor, arch). Configured at deployment time. v1 reads from
+   * {@code TLALOC_CLUSTER_VENDOR} / {@code TLALOC_CLUSTER_ARCH} env vars when not injected
+   * directly; production deployments may use a richer cluster-config service.
+   */
+  private final String clusterVendor;
+  private final String clusterArch;
 
   /** Constructor — args mirror {@link KubernetesStepRuntime}'s + the Tlaloc entrypoint builder. */
   public TlalocStepRuntime(
@@ -47,7 +59,10 @@ public class TlalocStepRuntime extends KubernetesStepRuntime {
       OutputDataManager outputDataManager,
       ObjectMapper objectMapper,
       MaestroMetrics metrics,
-      TlalocEntrypointBuilder entrypointBuilder) {
+      TlalocEntrypointBuilder entrypointBuilder,
+      TlalocPodSpecBuilder podSpecBuilder,
+      String clusterVendor,
+      String clusterArch) {
     super(
         runtimeExecutor,
         commandGenerator,
@@ -56,6 +71,9 @@ public class TlalocStepRuntime extends KubernetesStepRuntime {
         objectMapper,
         metrics);
     this.entrypointBuilder = entrypointBuilder;
+    this.podSpecBuilder = podSpecBuilder;
+    this.clusterVendor = clusterVendor == null ? "" : clusterVendor;
+    this.clusterArch = clusterArch == null ? "" : clusterArch;
   }
 
   @Override
@@ -65,20 +83,53 @@ public class TlalocStepRuntime extends KubernetesStepRuntime {
     TlalocCommand tlalocCommand = entrypointBuilder.generateTlalocRuntime(context);
 
     KubernetesCommand originalCommand = context.getCommand();
-    context.setCommand(
+    KubernetesCommand withEntrypoint =
         originalCommand.toBuilder()
             .command(new String[] {"/bin/sh", "-c"})
             .args(new String[] {tlalocCommand.entrypoint()})
-            .build());
+            .build();
+
+    // Layer 3 §0.4.259+: if the workflow params carry a Tlaloc backend
+    // matrix (populated by L3.5's `populateBackendMatrix`), translate
+    // the matched row into nodeSelector + accelerators + gpu before
+    // handing the command to Maestro.
+    String backendMatrixJson = lookupBackendMatrixJson(context);
+    KubernetesCommand finalCommand =
+        podSpecBuilder.applyBackendTarget(
+            withEntrypoint, backendMatrixJson, clusterVendor, clusterArch);
+
+    context.setCommand(finalCommand);
 
     LOG.info(
-        "Prepared Tlaloc step '{}' (artifact={}, manifest={})",
+        "Prepared Tlaloc step '{}' (artifact={}, manifest={}, cluster={}/{}, accelerators={})",
         tlalocCommand.stepName(),
         tlalocCommand.artifactUri(),
-        tlalocCommand.manifestRef());
+        tlalocCommand.manifestRef(),
+        clusterVendor,
+        clusterArch,
+        finalCommand.getAccelerators());
 
     // L2.5.4+ may add a TlalocArtifact analogous to ActusArtifact for
     // pendingArtifacts collection. v1 stub omits this; the runner's
     // OutputData carries the equivalent metadata.
+  }
+
+  /**
+   * Pull the {@code tlaloc.backend_matrix} string param out of the runtime summary. Mirrors the
+   * shape used by {@link TlalocEntrypointBuilder} for {@code artifact_uri} / {@code manifest_ref}.
+   * Returns {@code null} when no matrix is present (older workflows / pre-L3.5 producers); the
+   * pod-spec builder treats null as "no rows applicable; pass through unchanged."
+   */
+  @SuppressWarnings("unchecked")
+  private static String lookupBackendMatrixJson(KubernetesStepContext context) {
+    if (context.getRuntimeSummary() == null) return null;
+    Map<String, Parameter> params = context.getRuntimeSummary().getParams();
+    if (params == null) return null;
+    Parameter root = params.get("tlaloc");
+    if (root == null) return null;
+    Object v = root.getValue();
+    if (!(v instanceof Map<?, ?> m)) return null;
+    Object inner = ((Map<String, Object>) m).get("backend_matrix");
+    return inner == null ? null : String.valueOf(inner);
   }
 }
