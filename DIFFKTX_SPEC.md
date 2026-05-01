@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.252 Layer 3.2 — VJP coarsener registry + FlashAttention analytical backward 2026-05-01
+
+Layer 3 phase 2. The first downstream consumer of L3.0/L3.1's `RecognitionMatch` lands: a per-pattern coarsener that wraps each recognized sub-graph in a single `OpKind.COARSENED` op carrying the analytical primal + gradient bodies. Reuses the §0.4.31 COARSENED substrate (multi-result-capable, gradient-spliced by `DxirReverseTransform.handleCoarsenedAdjoint`) — no IR additions, only new pass code. FlashAttention is the v1 entry; RmsNorm / RoPE / CrossEntropy coarseners are scaffolded but deferred to subsequent §0.4.x phases.
+
+**New module** — `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/coarsener/`:
+
+- `PatternCoarsener.kt` — `fun interface PatternCoarsener` + `CoarsenedBundle` data class. The bundle carries everything the generic driver needs to splice a single-result COARSENED op: `absorbedOpIds`, `anchorOpId` (the op whose result the COARSENED replaces), `outerOperands`, `primalBody`, `gradientBody`, `readsPrimalIndices`. Lifts the φ-calculus coarsener's data shape into a reusable surface.
+
+- `VjpCoarsener.kt` — `coarsenRecognizedPatterns(fn, matches, coarseners)` driver + `defaultCoarseners` registry (one entry: `"FlashAttention"`). Walks `fn.body`, replaces each match's anchor op with a COARSENED, skips non-anchor absorbed ops, remaps consumers via a `nodeMap`. Plus a private `hasNoExternalConsumers` check (declines coarsening if any non-anchor absorbed op feeds a consumer outside the match — would lose that value) and an `internal computeGradientReads(gradientBody, numUpstreamParams)` helper duplicated from `PhiCalculus` (still package-private there).
+
+- `FlashAttentionCoarsener.kt` — `internal fun coarsenFlashAttention(match)` returning `CoarsenedBundle?`. `primal_body` is `(Q, K, V) → MATMUL → SOFTMAX → MATMUL → O`. `gradient_body` is the analytical VJP `(dO, Q, K, V) → (dQ, dK, dV)`:
+
+  ```
+  S = MATMUL(Q, K)              # recompute (cheaper than threading)
+  P = SOFTMAX(S, last_axis)
+  dV = MATMUL(P^T, dO)
+  dP = MATMUL(dO, V^T)
+  dS = MUL(SUB(dP, BROADCAST_back(SUM(MUL(P, dP), last_axis))), P)
+  dQ = MATMUL(dS, K^T)
+  dK = MATMUL(Q^T, dS)
+  ```
+
+  All ops are first-class DXIR — no custom-call shims. `reads_primal_indices = {0, 1, 2}` (gradient touches all three primal operands).
+
+**Decisions worth flagging**:
+
+- **Recompute S, P inside the gradient_body.** v1 doesn't thread softmax statistics out of the COARSENED. An optimization (expose `(O, log_sum_exp)` as a multi-result primal) saves one MATMUL + one SOFTMAX per backward but doubles the COARSENED's result arity; the simpler form ships first. Future `coarsenFlashAttentionWithStats` can land alongside without breaking the current entry.
+
+- **Operand-convention agnostic.** The recognizer doesn't enforce `Q · K^T` vs `Q · K`. Whatever the user wrote as `qkMatmul.operands` becomes `(Q, K)` in our primal; the gradient is consistent (the `K^T` we emit matches whatever the user fed in). This makes the coarsener correct for both pre-transposed-K and bare-K user code without branching.
+
+- **Single-result COARSENED only.** v1 limits each coarsened envelope to one tensor output. Patterns that produce multiple distinct outputs would need anchor-list + per-result consumer remap; deferred until a recognizer demands it.
+
+- **External-consumer guard.** The coarsener declines (returns the function unchanged) when any non-anchor absorbed op has a consumer outside the matched sub-graph. Test `externalConsumerOnSoftmaxBlocksCoarsening` pins this — a side-channel `SUM(softmax_probs)` blocks the rewrite. Without the guard, the side-channel value would silently disappear.
+
+- **Gradient body uses BROADCAST with `broadcast_dimensions`**, which `DxirInterpreter` doesn't yet support (only scalar→rank-N). Coarsened FlashAttention isn't interpreter-runnable in v1; downstream lowering (StableHLO emit / IREE) is what consumes it. Tests verify *structural* correctness only. L3.4's interpreter widening + StableHLO lowering close that gap.
+
+- **Skip on multi-result + region-bearing body ops in clone path.** The driver panics (rather than silently mishandling) on multi-result ops or DxirOpResult operands in the function being rewritten — would need result-index-aware nodeMap (cf. `PhiCalculus.cloneGradNode`). Not in v1's scope.
+
+- **Registry is a simple `Map<String, PatternCoarsener>`.** Adding RmsNorm coarsening = new file with `coarsenRmsNorm(match)` + one entry in `defaultCoarseners`. Per the L3 charter ("100-line file, no build-system change").
+
+**Files added** (3 source + 1 test):
+- `ir/recognizer/coarsener/PatternCoarsener.kt`
+- `ir/recognizer/coarsener/VjpCoarsener.kt`
+- `ir/recognizer/coarsener/FlashAttentionCoarsener.kt`
+- `ir/recognizer/coarsener/VjpCoarsenerTest.kt` (8 tests)
+
+**Tests added** (+8): structural rewrite (1 op replaces 3), primal/gradient signature match, `reads_primal_indices = {0, 1, 2}`, gradient-body op-kind histogram (5 MATMUL + 4 TRANSPOSE + 2 MUL + 1 SUM + 1 BROADCAST + 1 SUB + 1 SOFTMAX), pass-through on no match, decline on external consumer, decline on empty registry, and a roundtrip rebuild that re-validates the COARSENED via `DxirFunction.init`. Tlaloc-side suite 1075 → 1083 (unchanged Tlaloc modules + 8 in `:ir`). Combined Tlaloc + maestro-tlaloc: 1097 → 1105.
+
+**Recommended next pickup**: L3.3 — kernel template registry + decompose fallback (uses `OpKind.MANUAL_COMPUTATION` as the custom-call envelope; emits one entry per recognized pattern that doesn't have a vendor-fused kernel).
+
 #### 0.4.251 Layer 3.1 — RMS norm + RoPE + cross-entropy recognizers 2026-05-01
 
 Layer 3 phase 1. Three more pattern recognizers ship in the same shape laid down by L3.0's `FlashAttentionRecognizer` — pure functions over `DxirFunction`, anchor-op pre-filter + structural validation + optional near-miss diagnostics. `RecognitionMatch` subtypes `RmsNorm`, `Rope`, `CrossEntropy` are now populated; `recognizeAll` calls all four recognizers.
