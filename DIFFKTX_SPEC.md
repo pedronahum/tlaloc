@@ -39,6 +39,58 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.255 Layer 3.4b — Cost model (per-op FLOPs/bytes + roofline time) 2026-05-01
+
+Layer 3 phase 4, sub-phase b. Per-op FLOPs + bytes-moved estimator, per-function aggregator, and a roofline-style time estimator that consumes L3.4a's `DeviceDescriptor`s. Plus the headline COARSENED dispatch — annotated COARSENED ops (with a `kernel_descriptor` attr from L3.3) lower their `bytesMoved` to operands+output, modeling the canonical fused-attention benefit (intermediate `S` and `P` tensors don't round-trip to HBM).
+
+**New files** in `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/cost/`:
+
+- `CostEstimate.kt` — `data class CostEstimate(flops, bytesMoved)` with `arithmeticIntensity` derived field, `+` operator for aggregation, and `roofineSeconds(device, peakFlopsForDtype)` returning `max(flops/peak, bytes/bw)`. Plus `CostEstimate.ZERO` constant.
+
+- `CostModel.kt` — `estimateCost(fn): CostEstimate` (per-fn aggregator), `estimateOp(op): CostEstimate` (per-op single-shot), and `estimateRooflineMicros(fn, device): Double` (convenience wrapper that picks the dominant-dtype peak). Plus internal helpers `typeBytes`, `peakForDtype`, `dominantDeviceFlops`.
+
+**Per-op formulas** (textbook):
+
+| OpKind family             | FLOPs                                | Notes                                                |
+|---------------------------|--------------------------------------|------------------------------------------------------|
+| MATMUL `[..., M, K]·[..., K, N]` | `2·prod(batch)·M·K·N`         | Standard one-MAC-per-output count                    |
+| Elementwise binary        | N (output elements)                  | ADD, SUB, MUL, DIV, POW, LAND, NOT                   |
+| Elementwise unary cheap   | N                                    | NEG, ABS, SIGN, STEP                                 |
+| Elementwise unary medium  | 4·N – 8·N                            | EXP/LOG/SQRT/RSQRT (4), TANH/SIGMOID (6), SIN/COS (8)|
+| RELU/GELU/SILU            | 5·N                                  | Approximated polynomial                              |
+| Reductions                | input element count (≈ N − 1)        | SUM, MEAN, MAX, MIN, ARGMAX                          |
+| SOFTMAX / LOGSUMEXP       | 5·N                                  | max + sub + exp + sum + div per-element              |
+| RMSNORM / LAYERNORM / BATCHNORM | 5–8·N                          | Approximations                                       |
+| SCALED_DOT_PRODUCT_ATTENTION | `4·output_elements·middle_dim`    | Pre-fused; rough                                     |
+| Pure data movement        | 0                                    | TRANSPOSE, RESHAPE, BROADCAST, SLICE, GATHER, etc.  |
+| Control flow / sharding   | 0                                    | IF, WHILE, SHARD_CONSTRAINT, ALL_REDUCE, …           |
+| COARSENED                 | sum of primal_body op costs          | Bytes lowered when `kernel_descriptor` present       |
+
+**Per-op bytes** = sum of input tensor bytes + sum of output tensor bytes. Standard "every op reads its inputs once, writes its output once" model.
+
+**Decisions worth flagging**:
+
+- **COARSENED dispatch is the cost-model headline.** When a `kernel_descriptor` attr is set on the COARSENED, the cost model returns `(decompose_flops, operands_bytes + output_bytes)` — same compute, no intermediate-tensor traffic. Without the descriptor (or no kernel template registered), it returns the decompose-equivalent estimate (full intermediate traffic). This is what makes the (kernel-call vs. decompose) decision tractable. Test `coarsenedWithKernelDescriptorLowersBytesMoved` pins it.
+
+- **Approximate, not benchmark-faithful.** The model is a *relative* estimator (H100 vs A100, fused vs decomposed) — not a runtime predictor. Vendor-specific micro-models (cudnn dispatch overhead, TPU MXU utilization curves, NVLink effects) are out of v1 scope. This is fine for picking between targets and for cost-driven kernel-call decisions; it's not fine for absolute latency SLOs.
+
+- **One peak per dtype family.** F32 ops use `device.peakFlopsF32`; BF16/FP16/FP8 collapse onto `device.peakFlopsBf16`. This matches what vendors actually publish (a single tensor-core path peak per dtype family). Mixed-precision sustained TFLOPs would need finer-grained dispatch.
+
+- **Conv2D / CONV_TRANSPOSE2D placeholder.** Tlaloc's wedge audiences don't drive heavy conv work; the cost-model entry is `out_elements × 9 × 1` (3×3 kernel approximation). IREE/StableHLO cost models can override later.
+
+- **Collectives are zero-cost in v1.** Layer 4's sharding-aware cost model adds the per-collective network terms (NVLink, ICI, EFA). For now the collectives appear as data movement only.
+
+- **No per-iteration cost on IF/WHILE.** Estimating through control flow needs a frequency model (loop-trip-count attribute, branch probability). Out of v1; the L3.4 cost model is for straight-line bodies (which is what L3 recognizers + coarsener produce).
+
+**Files added** (2 source + 1 test):
+- `ir/recognizer/cost/CostEstimate.kt`
+- `ir/recognizer/cost/CostModel.kt`
+- `ir/recognizer/cost/CostModelTest.kt` (12 tests)
+
+**Tests added** (+12): canonical formulas (matmul = 2·m·k·n; batched matmul scales by batch product; elementwise = N FLOPs/element; reductions = input element count; softmax = 5·N; transpose/broadcast = 0 FLOPs), aggregation across multiple ops, COARSENED decompose-equivalence (no kernel) and fused-bytes-reduction (with kernel), arithmetic-intensity rises with fusion, roofline time orders devices correctly (H100 < A100 < CPU), and a zero-cost empty-function check. Tlaloc-side suite 1104 → 1116 (unchanged Tlaloc modules + 12 in `:ir`). Combined Tlaloc + maestro-tlaloc: 1126 → 1138.
+
+**Recommended next pickup**: L3.4c — tile fusion (elementwise chain detection + grouping markers, no IR rewrite yet — tile-loop synthesis is a post-L3 codegen concern).
+
 #### 0.4.254 Layer 3.4a — Seven canonical device descriptors (cited specs) 2026-05-01
 
 Layer 3 phase 4, sub-phase a (of four). The substrate for the L3.4 cost model: a `DeviceDescriptor` data class plus the seven entries the cost model + downstream tile-fusion + KV-quant passes index into. Numbers are sourced from vendor datasheets / ISCA papers / cloud announcements; citations live alongside each descriptor in the source.
