@@ -39,6 +39,47 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.256 Layer 3.4c — Tile fusion (elementwise chain identification + annotation) 2026-05-01
+
+Layer 3 phase 4, sub-phase c. Tile-fusion candidate identification — finds maximal connected sets of elementwise ops sharing an output shape (the unrecognized residue around L3.2's coarsened compounds) and annotates each candidate op with a `tile_group: <Int>` attr. Downstream codegen consumes the attr to choose tile-loop boundaries.
+
+**New files** in `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/fusion/`:
+
+- `TileFusion.kt` — `data class TileGroup(groupId, opIds, sharedShape)` + two entry points:
+  - `identifyTileGroups(fn): List<TileGroup>` — analysis only; returns groups of size ≥ 2.
+  - `annotateTileGroups(fn): DxirFunction` — analysis + IR rewrite; adds `tile_group: <Int>` attr to each candidate op.
+
+  Plus an internal `ELEMENTWISE_OP_KINDS` set covering the 21 op kinds eligible for tile fusion (ADD, SUB, MUL, DIV, POW, NEG, ABS, EXP, LOG, SQRT, RSQRT, TANH, SIGMOID, RELU, GELU, SILU, SIN, COS, SIGN, STEP, LAND, NOT).
+
+**Algorithm** — union-find. Mark each elementwise candidate as a singleton; for each producer→consumer edge where both sides are elementwise *and* share an output shape, union them. Components of size ≥ 2 become tile groups, indexed in body-order so the resulting `groupId`s are deterministic across runs.
+
+**What's NOT fused (by design, v1)**:
+
+- **Reductions in the middle of an elementwise chain.** Reductions (SUM, MEAN, MAX, MIN, ARGMAX, SOFTMAX, LOGSUMEXP) break the elementwise-shape invariant; tile-loop reduction needs a two-pass schedule that v1 doesn't synthesize. L3.4 closer / IREE backend can extend.
+- **Cross-COARSENED fusion.** Tile fusion walks the outer function's straight-line body; ops *inside* a `COARSENED` op's `primal_body` aren't visited. Each pattern's per-pattern coarsener owns its own internal fusion.
+- **Multi-result + region-bearing ops** are skipped wholesale. Same v1 substrate constraints as the L3.2 coarsener and L3.3 lowering pass.
+- **Cross-shape "broadcast fusion."** Two elementwise ops with different shapes can't share a tile (the inner kernel would need broadcast-aware indexing). Future-cost: shape-broadcast-aware tile groups.
+
+**Decisions worth flagging**:
+
+- **Annotation, not IR rewrite.** Tile groups become `tile_group: <Int>` attrs on the affected ops. The body shape is unchanged; downstream codegen reads the attr at lowering time. Rationale: an actual tile-loop synthesis would require a new `OpKind.TILED_LOOP` (out of scope) and would interact with shape inference + sharding propagation in non-obvious ways. Annotation keeps the change small + reversible (a downstream pass can ignore the attr to fall back to op-by-op codegen).
+
+- **Idempotent annotation.** Running `annotateTileGroups` twice produces the same `tile_group` ids in the same positions. Test `annotateTileGroupsIsIdempotent` pins this. Lets the pass run safely in a fixed-point pipeline alongside other annotators.
+
+- **Stable group IDs.** Groups are sorted by the body position of their first op, then renumbered 0..N. This makes tests reproducible across HashMap iteration-order changes (a JVM intrinsic that varies by Kotlin/JVM patch).
+
+- **Singletons not grouped.** `identifyTileGroups` returns groups of size ≥ 2 only. Singleton elementwise ops gain nothing from tiling on their own (no fused HBM read/write savings). Avoids attr pollution on plain unary ops.
+
+- **Existing attrs preserved.** Annotation merges the `tile_group` entry into the existing attrs map; doesn't drop user-supplied or pass-supplied attrs. Test `annotationLeavesNonCandidateAttrsAlone` pins this.
+
+**Files added** (1 source + 1 test):
+- `ir/recognizer/fusion/TileFusion.kt`
+- `ir/recognizer/fusion/TileFusionTest.kt` (10 tests)
+
+**Tests added** (+10): four-op chain → one group, singleton → no group, two shapes → two groups, reduction breaks chain (no group), matmul breaks chain (no group), annotation adds `tile_group` attr to each candidate, annotation preserves user-set attrs, two disjoint groups get distinct IDs, idempotency, empty-body baseline. Tlaloc-side suite 1116 → 1126 (unchanged Tlaloc modules + 10 in `:ir`). Combined Tlaloc + maestro-tlaloc: 1138 → 1148.
+
+**Recommended next pickup**: L3.4d — KV-quant (cast-insertion pass for FlashAttention K/V cache to int8/fp8, gated on the kernel descriptor's quantization-supported flag).
+
 #### 0.4.255 Layer 3.4b — Cost model (per-op FLOPs/bytes + roofline time) 2026-05-01
 
 Layer 3 phase 4, sub-phase b. Per-op FLOPs + bytes-moved estimator, per-function aggregator, and a roofline-style time estimator that consumes L3.4a's `DeviceDescriptor`s. Plus the headline COARSENED dispatch — annotated COARSENED ops (with a `kernel_descriptor` attr from L3.3) lower their `bytesMoved` to operands+output, modeling the canonical fused-attention benefit (intermediate `S` and `P` tensors don't round-trip to HBM).
