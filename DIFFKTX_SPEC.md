@@ -39,6 +39,37 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.251 Layer 3.1 — RMS norm + RoPE + cross-entropy recognizers 2026-05-01
+
+Layer 3 phase 1. Three more pattern recognizers ship in the same shape laid down by L3.0's `FlashAttentionRecognizer` — pure functions over `DxirFunction`, anchor-op pre-filter + structural validation + optional near-miss diagnostics. `RecognitionMatch` subtypes `RmsNorm`, `Rope`, `CrossEntropy` are now populated; `recognizeAll` calls all four recognizers.
+
+**New files** (3 source + 1 test) in `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/`:
+
+- `RmsNormRecognizer.kt` — anchors on `OpKind.RSQRT`. Match shape: `MUL(x, x) → MEAN → [ADD(eps)]? → RSQRT → MUL(x_orig, rsqrt)`. The optional `ADD(eps)` covers the stabilised variant. Validates the `MUL` operands are the *same* SSA id (the squared step), and that the final MUL re-uses the original `x`. Four near-miss diagnostics: RSQRT operand isn't MEAN/ADD; MEAN operand isn't MUL; MUL operands distinct (pairwise product, not square); RSQRT result isn't multiplied back by `x`.
+- `RopeRecognizer.kt` — anchors on `OpKind.SIN`. Match shape: paired `SIN`/`COS` consumed by *distinct* MULs that share an `ADD`/`SUB` recombination consumer. Three near-miss diagnostics: SIN with no COS in the function; SIN/COS with no MUL consumers; SIN-MUL and COS-MUL don't share an ADD/SUB consumer (rotation pair not formed). v2 will extend to multi-block frequency tables and per-element bit-trick variants.
+- `CrossEntropyRecognizer.kt` — anchors on `OpKind.LOG`. Match shape: `SOFTMAX(logits) → LOG → MUL(labels, logp) → SUM(loss)`. Validates the LOG operand is a SOFTMAX (rejects bare `LOG(x)` or `LOG(RELU(x))`), that LOG has a MUL consumer with a non-LOG operand (the labels tensor), and that MUL has a SUM consumer (the loss accumulation). Three near-miss diagnostics covering each of those steps. v1 doesn't match the stable `LogSumExp` form (`LOGSUMEXP(logits) - logits[label]`); a separate `recognizeLogSumExpCrossEntropy` could land later.
+- `RmsNormRopeCrossEntropyTest.kt` — 17 tests: 1 positive + 4 adversarial per pattern (3 patterns × 5 = 15 tests) + 1 with-epsilon RMS variant + 1 cross-recognizer aggregator test that wires up RMS norm + cross-entropy in the same function and confirms `recognizeAll` returns matches for both.
+
+**Files modified** (1):
+
+- `RecognizeAll.kt` — three additional dispatch lines (`recognizeRmsNorm`, `recognizeRope`, `recognizeCrossEntropy`) before the `resolveLargestMatch` call.
+
+**Decisions worth flagging**:
+
+- **One use-list builder per file, duplicated.** Each recognizer file contains its own ~10-line `buildUseListLocal*` private helper. Extracting to a shared internal helper saves ~30 lines but couples files; the current shape keeps each recognizer a self-contained 100–150-line unit per the L3.0 charter ("one file per pattern"). Trade-off accepted.
+
+- **Anchor-op selection is rarity-driven.** RSQRT, SIN, LOG are each rare enough in non-pattern graphs that the per-function scan stays cheap. Where the anchor op is shared across multiple recognizers (e.g. MUL would be), recognizers use the *distinguishing downstream op* instead.
+
+- **Diagnostic wording is asserted in tests.** Tests like `rmsNormAdversarial1RsqrtOperandNotMean` assert substring matches in the diagnostic `reason` field (`"expected MEAN"`). This pins the user-visible wording so refactors don't silently change diagnostic surface area. Any future wording change needs a test update.
+
+- **RoPE recognizer accepts both ADD and SUB recombination.** Real implementations vary on rotation direction. v1 doesn't try to disambiguate which is "real" RoPE — both shapes are valid rotations.
+
+- **No FlashAttention test churn.** L3.0 tests untouched; the 9 FlashAttention tests still pass alongside the new 17 recognizer tests.
+
+**Tests added** (+17): `RmsNormRopeCrossEntropyTest`. Tlaloc-side suite 1058 → 1075 (unchanged Tlaloc modules + 17 in `:ir`). Combined Tlaloc + maestro-tlaloc: 1080 → 1097.
+
+**Recommended next pickup**: L3.2 — VJP coarsener registry + FlashAttention analytical backward (the first per-pattern coarsened backward emitter, reusing `OpKind.COARSENED`).
+
 #### 0.4.250 Layer 3.0 — recognizer framework + FlashAttention recognizer 2026-04-30
 
 Layer 3 phase 0. Substrate for the algorithmic-transformation layer (pattern recognition + VJP coarsening + kernel templates + cost model). Sealed `RecognitionMatch` hierarchy + first recognizer (FlashAttention) + `recognizeAll` aggregator + `resolveLargestMatch` + 9 tests (1 positive + 4 adversarial + 4 sanity/aggregator).

@@ -32,7 +32,9 @@ fun recognizeAll(
 ): List<RecognitionMatch> {
     val all = mutableListOf<RecognitionMatch>()
     all += recognizeFlashAttention(fn, diagnostics)
-    // L3.1 plumbs RMS norm / RoPE / cross-entropy here.
+    all += recognizeRmsNorm(fn, diagnostics)
+    all += recognizeRope(fn, diagnostics)
+    all += recognizeCrossEntropy(fn, diagnostics)
     return resolveLargestMatch(all)
 }
 
