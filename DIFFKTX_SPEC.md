@@ -39,6 +39,46 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.253 Layer 3.3 — Kernel template registry + decompose fallback 2026-05-01
+
+Layer 3 phase 3. The downstream consumer of L3.2's coarsened envelopes lands: a per-(pattern, target) kernel template registry plus a decompose-fallback driver. After L3.3, every `OpKind.COARSENED` op produced by the L3.2 coarsener is either *annotated* with a [`KernelDescriptor`] for downstream `stablehlo.custom_call` emit, or *decomposed* by inlining its `primal_body` back into the outer function. Either way, the function passes through Tlaloc's existing IR validators unchanged.
+
+**New module** — `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/kernel/`:
+
+- `KernelTarget.kt` — `data class KernelTarget(vendor, arch)` with constants for the common targets (NVIDIA H100/H200/A100/L40S, AMD MI300X, Google TPU v4/v5e/v5p/v6e, AWS Trainium2, plus `tlaloc/cpu_generic` as the always-available decompose-only fallback). Free-form strings rather than enums — vendors ship new arches outside Tlaloc's release cadence.
+
+- `KernelDescriptor.kt` — `data class KernelDescriptor(kernelName, vendor, targetArch, customCallAttrs)`. The bridge between L3 pattern recognition and downstream lowering. `ATTR_KEY = "kernel_descriptor"` constant centralises the attribute name the L3.3 pass stashes the descriptor under.
+
+- `KernelTemplate.kt` — `fun interface KernelTemplate { fun pickFor(coarsened, target): KernelDescriptor? }`. Returns `null` to force the decompose path. Functional rather than `Map<KernelTarget, KernelDescriptor>` because per-target overrides commonly depend on the matched op's structure (e.g. flash-attn-v3 only when head-dim ≤ 256).
+
+- `FlashAttentionKernel.kt` — v1 entry. Maps NVIDIA H100/H200 → `flash_attn_v3` (Dao 2024), A100/L40S → `flash_attn_v2` (Dao 2023), MI300X → `flash_attn_amd`, TPU v4–v6e → `tpu_pallas_flash_attention`, Trainium2 → `nki_flash_attention`. Everything else returns `null` (decompose).
+
+- `KernelLowering.kt` — `lowerKernelChoice(fn, target, registry)` driver. Walks `fn.body`, looks up each COARSENED's pattern via `primal_body.name` (snake_case "_primal" suffix) → registry CamelCase key, then either rebuilds the COARSENED with `kernel_descriptor` added to attrs, or inlines `primal_body` directly into the outer body via `inlineCoarsenedPrimal`. The inliner maps primal-scope ids → outer-scope nodes, validates single-result + no-regions invariants, and sets `nodeMap[coarsenedOp.id] = inlinedReturn` so downstream consumers point at the new last MATMUL.
+
+**Decisions worth flagging**:
+
+- **Annotate, don't envelope.** The L3 plan said "custom-call envelopes via `OpKind.MANUAL_COMPUTATION` reuse." In Tlaloc today, `MANUAL_COMPUTATION` is reserved for Shardy's `sdy.manual_computation` (the existing emitter at `stablehlo/Emitter.kt:1131-1135` requires `in_shardings` / `out_shardings` / `manual_axes`). Reusing the op for kernel custom-calls would require extending the SDY emitter — out of L3.3 scope. Annotating the existing COARSENED with a `KernelDescriptor` attr achieves the same separation (pattern-recognized + kernel-tagged sub-graphs are distinguishable at lowering time) without an emitter change. **Tracked as audit OQ-Layer3-1**: "evaluate adding a dedicated `KERNEL_CALL` opkind once a second backend (IREE, Triton) needs the dispatch shape."
+
+- **Decompose returns the function to a "no-recognized-pattern" state.** After CPU_GENERIC lowering, the function holds the inlined `MATMUL → SOFTMAX → MATMUL`. Re-running `recognizeAll` on the decomposed result *will* re-recognize the same FlashAttention shape — by design. This means: the recognizer is idempotent, decompose is reversible (re-coarsening recovers the COARSENED), and lowering passes can choose to bail to the decompose path at any point without losing the structural information.
+
+- **Pattern-name lookup via primal_body.name.** The L3.2 coarsener names the primal body `"<pattern>_primal"` (e.g. `"flash_attention_primal"`). The L3.3 driver strips the suffix and matches case-insensitively + underscore-stripped against registry keys (`"FlashAttention"`). Cleaner than threading the recognizer's `patternName` through the COARSENED attrs separately. If a future pattern's primal name doesn't follow this convention, the lookup needs to fall through to an explicit `pattern_name` attr — accepted as a future-cost.
+
+- **No template registered = pass-through, not decompose.** The "no template" path leaves the COARSENED unchanged (vs. the "template returned `null`" path which decomposes). Rationale: a missing registry entry is most likely a configuration error, not "we tried and chose to decompose." Fail-loud-er-than-needed is the right default; users can pass `registry = emptyMap()` to opt into pass-through. Tested by `emptyRegistryForcesDecomposeOnEveryTarget`.
+
+- **Single-result COARSENED inline only.** v1 inliner panics on multi-result primal bodies, regions inside primal bodies, and `DxirOpResult` operands. The L3.2 coarsener doesn't produce any of those today, so the constraint is invisible; loosening will be needed when L3.4+ patterns come along.
+
+**Files added** (4 source + 1 test):
+- `ir/recognizer/kernel/KernelTarget.kt`
+- `ir/recognizer/kernel/KernelDescriptor.kt`
+- `ir/recognizer/kernel/KernelTemplate.kt`
+- `ir/recognizer/kernel/FlashAttentionKernel.kt`
+- `ir/recognizer/kernel/KernelLowering.kt`
+- `ir/recognizer/kernel/KernelLoweringTest.kt` (10 tests)
+
+**Tests added** (+10): annotate-path coverage (H100 → flash_attn_v3, A100 → v2, TPU_v5e → pallas), preservation of primal/gradient bodies + reads_primal_indices through annotation, decompose-path coverage (CPU_GENERIC → 3-op inline, unknown vendor → decompose, return remap), no-coarsened pass-through, empty-registry pass-through, and roundtrip rebuild that re-validates the annotated COARSENED. Tlaloc-side suite 1083 → 1093 (unchanged Tlaloc modules + 10 in `:ir`). Combined Tlaloc + maestro-tlaloc: 1105 → 1115.
+
+**Recommended next pickup**: L3.4 — cost model + 7 device descriptors (tpu_v4/v5e/v6e, a100, h100, trainium2, cpu_generic) + tile fusion + KV-quant. Cost model consumes [`KernelDescriptor`] + per-target memory bandwidth/FLOPs to score (kernel-call vs. decompose) per op.
+
 #### 0.4.252 Layer 3.2 — VJP coarsener registry + FlashAttention analytical backward 2026-05-01
 
 Layer 3 phase 2. The first downstream consumer of L3.0/L3.1's `RecognitionMatch` lands: a per-pattern coarsener that wraps each recognized sub-graph in a single `OpKind.COARSENED` op carrying the analytical primal + gradient bodies. Reuses the §0.4.31 COARSENED substrate (multi-result-capable, gradient-spliced by `DxirReverseTransform.handleCoarsenedAdjoint`) — no IR additions, only new pass code. FlashAttention is the v1 entry; RmsNorm / RoPE / CrossEntropy coarseners are scaffolded but deferred to subsequent §0.4.x phases.
