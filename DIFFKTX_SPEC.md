@@ -39,6 +39,50 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.258 Layer 3.5 — Manifest extension: BackendTarget population 2026-05-01
+
+Layer 3 phase 5. Widens the §0.4.243 placeholder `ProgramManifest.backendMatrix: List<String>` into the structured `List<BackendTarget>` it was always meant to be, and ships a `populateBackendMatrix(fn, targets, kvQuant?)` helper that runs the L3 pipeline (recognize → coarsen → kernel-lower → KV-quant → cost) per target and projects the result into the per-target tuple.
+
+**New file** — `maestro/src/commonMain/kotlin/io/tlaloc/maestro/BackendTarget.kt`:
+
+- `data class BackendTarget(vendor, arch, kernelName?, kvQuantDtype?, costMicroseconds?)` with hand-rolled `toJson()` / `fromJson()` matching the existing `ProgramManifest` parser style.
+- `kernelName` is null when L3.3 picked decompose; `kvQuantDtype` is null when KV-quant wasn't requested or wasn't supported on this target; `costMicroseconds` is null when the populator wasn't asked to compute it.
+
+**Modified files**:
+
+- `maestro/src/commonMain/kotlin/io/tlaloc/maestro/ProgramManifest.kt` — `backendMatrix: List<String>` → `List<BackendTarget>`. Default still `emptyList()`. Pre-L3.5 callers (every existing `Tlaloc.program { }` invocation) keep working — they just produce empty matrices.
+
+- `maestro/src/commonMain/kotlin/io/tlaloc/maestro/ManifestJsonParser.kt` — `readStringArray()` swap for `readBackendTargetArray()` on the `backendMatrix` field. New private helpers `readBackendTarget`, `readNullableString`, `readNullableDouble`. Parser stays hand-rolled per the §0.4.243 audit decision (small / stable / no kotlinx.serialization).
+
+**New file** — `maestro/src/jvmMain/kotlin/io/tlaloc/maestro/BackendMatrixPopulator.kt`:
+
+- `populateBackendMatrix(fn: DxirFunction, targets: List<KernelTarget>, kvQuant: KvQuantConfig? = null): List<BackendTarget>` — bridges the L3.0–L3.4 IR pipeline into the manifest schema. For each target: recognize once, coarsen once (target-independent), then per-target lower → KV-quant → cost-estimate. Returns one row per requested target, in the same order.
+
+**Decisions worth flagging**:
+
+- **Populator is opt-in, not automatic.** `Tlaloc.program { }` does NOT call the populator at trace time. Running the L3 pipeline per (vendor × arch × kv-quant) combo would balloon trace cost (every `program { }` would compile for ~7 targets). Callers that want a populated matrix invoke the populator explicitly and reassemble the manifest. **Tracked as audit OQ-Layer3-3**: "evaluate eager-population once a `BuildTargetSet` user-config primitive lands; today's lazy approach matches L2's tracing-is-fast philosophy."
+
+- **`MaestroStep` doesn't expose the captured DxirFunction.** L2's design treats StableHLO bytes + manifest as the public surface; the captured `DxirFunction` is internal. The populator therefore takes the function as a parameter (which today's callers must surface themselves). L3.6 / L3.7 will thread the captured function through `MaestroStep` for tooling that wants to populate without re-tracing.
+
+- **Best-effort KV-quant carries through to the matrix.** A user requesting FP8 across 7 targets gets `kvQuantDtype = "fp8_e4m3"` for the 3 that support it (H100, Trainium2, TPU v6e) and `null` for the 4 that don't (A100, MI300X, TPU v4/v5e/v5p). Test `populateWithFp8KvQuantAcceptsOnlyOnSupportingTargets` pins the per-target accept/decline behavior.
+
+- **Cost is roofline-style, in microseconds.** L3.4b's `estimateRooflineMicros` is what populates `costMicroseconds`. Per-target relative ordering is reliable; absolute predictions aren't. Test `costMicrosecondsOrdersByDevice` pins H100 < A100 < CPU.
+
+- **Backward compat for existing JSON.** Pre-L3.5 manifests serialised an empty `backendMatrix: []` (string array). Post-L3.5 manifests serialise an empty `backendMatrix: []` (object array). The two are JSON-identical — `[]` is `[]` regardless of element type. Legacy manifests that *don't* have an empty array (a hypothetical future case) would need a schema-version bump; today's JSON shape is `backendMatrix: []` for every existing test, so no migration needed.
+
+- **`@JvmName` on the BackendTarget array helper.** Kotlin's type erasure collapses `List<String>.toJsonStringArray()` and `List<BackendTarget>.toJsonBackendArray()` to the same JVM signature; `@JvmName` keeps both available.
+
+**Files added/modified** (3 source modifications + 2 source additions + 1 test):
+- New: `maestro/commonMain/io/tlaloc/maestro/BackendTarget.kt`
+- New: `maestro/jvmMain/io/tlaloc/maestro/BackendMatrixPopulator.kt`
+- Modified: `maestro/commonMain/io/tlaloc/maestro/ProgramManifest.kt` (one field type change, one JSON helper rename)
+- Modified: `maestro/commonMain/io/tlaloc/maestro/ManifestJsonParser.kt` (parser extension)
+- New: `maestro/jvmTest/io/tlaloc/maestro/BackendMatrixTest.kt` (11 tests)
+
+**Tests added** (+11): BackendTarget JSON round-trip (full + null fields), manifest round-trip with structured backendMatrix, empty-matrix backward compat, populator: empty target list, three-target row count + per-target tuple correctness, FP8 accept/decline matrix (H100 ✓, A100 ✗, Trainium2 ✓, TPU v5e ✗), INT8 universal accept, cost ordering, no-recognized-pattern still produces entries, and end-to-end populate → serialize → parse round-trip. Tlaloc-side suite 1137 (unchanged); Combined Tlaloc + maestro-tlaloc + maestro: 1159 → 1170. (The 11 new tests are in `maestro:jvmTest`.)
+
+**Recommended next pickup**: L3.6 — TlalocStepRuntime pod-spec construction (consume `BackendTarget` rows when scheduling Maestro Tlaloc steps onto K8s nodes; one vendoring divergence: extend KubernetesCommand with nodeSelector + accelerators).
+
 #### 0.4.257 Layer 3.4d — KV-cache quantization (metadata-only directive) 2026-05-01
 
 Layer 3 phase 4, sub-phase d (closing L3.4). KV-cache quantization annotation: walks recognized + lowered FlashAttention COARSENED ops and stamps a `kv_quant_config: KvQuantConfig` attr on each one whose kernel descriptor advertises support for the requested dtype. Best-effort — mismatches silently fall through with a structured diagnostic.

@@ -33,8 +33,14 @@ data class ProgramManifest(
     val bodyHash: String,
     /** Placeholder for Layer 4 cross-step Shardy propagation. v1: empty. */
     val shardingSpec: List<String> = emptyList(),
-    /** Placeholder for Layer 3 backend-target matrix. v1: empty. */
-    val backendMatrix: List<String> = emptyList(),
+    /**
+     * Layer 3 §0.4.258+ — per-(vendor, arch) compile-decision tuples
+     * recording what the L3 pipeline picked for each device target.
+     * Default empty for callers that haven't run the populator yet
+     * (`Tlaloc.program { }` from L2 produces an empty list; the L3.5
+     * `populateBackendMatrix` extends it).
+     */
+    val backendMatrix: List<BackendTarget> = emptyList(),
 ) {
     /** JSON serialization. v1 is hand-rolled; keep schema strictly stable. */
     fun toJson(): String = buildString {
@@ -45,7 +51,7 @@ data class ProgramManifest(
         append("\"meshRequirement\":").append(jsonString(meshRequirement)).append(',')
         append("\"bodyHash\":").append(jsonString(bodyHash)).append(',')
         append("\"shardingSpec\":").append(shardingSpec.toJsonStringArray()).append(',')
-        append("\"backendMatrix\":").append(backendMatrix.toJsonStringArray())
+        append("\"backendMatrix\":").append(backendMatrix.toJsonBackendArray())
         append("}")
     }
 
@@ -121,3 +127,7 @@ private fun List<TypeDescriptor>.toJsonArray(): String =
 
 private fun List<String>.toJsonStringArray(): String =
     joinToString(",", "[", "]") { jsonString(it) }
+
+@JvmName("toJsonBackendArray")
+private fun List<BackendTarget>.toJsonBackendArray(): String =
+    joinToString(",", "[", "]") { it.toJson() }
