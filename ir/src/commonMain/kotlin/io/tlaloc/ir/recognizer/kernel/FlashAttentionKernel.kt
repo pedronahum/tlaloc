@@ -30,26 +30,60 @@ package io.tlaloc.ir.recognizer.kernel
  * extension when the recognizer learns to detect `tril`-mask shape).
  */
 internal val FlashAttentionKernel: KernelTemplate = KernelTemplate { _, target ->
+    // Per-target supported_kv_dtypes (the [KvQuantDtype.nameTag] strings;
+    // the L3.4d KV-quant pass reads this attr to decide whether to
+    // annotate the COARSENED with a quantization directive).
     when (target) {
         KernelTarget.NVIDIA_H100,
         KernelTarget("nvidia", "h200") ->
-            KernelDescriptor("flash_attn_v3", "nvidia", target.arch ?: "h100")
+            KernelDescriptor(
+                "flash_attn_v3", "nvidia", target.arch ?: "h100",
+                customCallAttrs = mapOf(
+                    "supported_kv_dtypes" to listOf("f32", "bf16", "fp8_e4m3", "fp8_e5m2", "int8"),
+                ),
+            )
 
         KernelTarget.NVIDIA_A100,
         KernelTarget.NVIDIA_L40S ->
-            KernelDescriptor("flash_attn_v2", "nvidia", target.arch ?: "a100")
+            KernelDescriptor(
+                "flash_attn_v2", "nvidia", target.arch ?: "a100",
+                customCallAttrs = mapOf(
+                    "supported_kv_dtypes" to listOf("f32", "bf16", "int8"),
+                ),
+            )
 
         KernelTarget.AMD_MI300X ->
-            KernelDescriptor("flash_attn_amd", "amd", "mi300x")
+            KernelDescriptor(
+                "flash_attn_amd", "amd", "mi300x",
+                customCallAttrs = mapOf(
+                    "supported_kv_dtypes" to listOf("f32", "bf16", "int8"),
+                ),
+            )
 
         KernelTarget.GOOGLE_TPU_V4,
         KernelTarget.GOOGLE_TPU_V5E,
         KernelTarget.GOOGLE_TPU_V5P,
         KernelTarget.GOOGLE_TPU_V6E ->
-            KernelDescriptor("tpu_pallas_flash_attention", "google", target.arch ?: "tpu_v5e")
+            KernelDescriptor(
+                "tpu_pallas_flash_attention", "google", target.arch ?: "tpu_v5e",
+                customCallAttrs = mapOf(
+                    // TPU v6e adds FP8 (HBM3, sparsecore-coupled);
+                    // older v4/v5 stay BF16 + INT8.
+                    "supported_kv_dtypes" to if (target == KernelTarget.GOOGLE_TPU_V6E) {
+                        listOf("f32", "bf16", "fp8_e4m3", "int8")
+                    } else {
+                        listOf("f32", "bf16", "int8")
+                    },
+                ),
+            )
 
         KernelTarget.AWS_TRAINIUM2 ->
-            KernelDescriptor("nki_flash_attention", "aws", "trainium2")
+            KernelDescriptor(
+                "nki_flash_attention", "aws", "trainium2",
+                customCallAttrs = mapOf(
+                    "supported_kv_dtypes" to listOf("f32", "bf16", "fp8_e4m3", "int8"),
+                ),
+            )
 
         else -> null  // CPU_GENERIC + everything else: force decompose.
     }

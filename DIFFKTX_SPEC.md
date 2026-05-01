@@ -39,6 +39,54 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.257 Layer 3.4d — KV-cache quantization (metadata-only directive) 2026-05-01
+
+Layer 3 phase 4, sub-phase d (closing L3.4). KV-cache quantization annotation: walks recognized + lowered FlashAttention COARSENED ops and stamps a `kv_quant_config: KvQuantConfig` attr on each one whose kernel descriptor advertises support for the requested dtype. Best-effort — mismatches silently fall through with a structured diagnostic.
+
+**New module** — `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/quant/`:
+
+- `KvQuantConfig.kt` — `enum KvQuantDtype` (F32, BF16, FP8_E4M3, FP8_E5M2, INT8, INT4 with `bitsPerElement`), `enum KvScaleStrategy` (PER_TENSOR, PER_HEAD), `data class KvQuantConfig(dtype, scaleStrategy)` with `companion` defaults `FP8_PER_HEAD` (Hopper / FlashAttention-3 production default) and `INT8_PER_TENSOR` (cheap inference). `ATTR_KEY = "kv_quant_config"`.
+
+- `KvQuantApply.kt` — `applyKvQuant(fn, requested): DxirFunction` and `applyKvQuantWithDiagnostics(fn, requested): Pair<DxirFunction, List<KvQuantDiagnostic>>`. Walks each COARSENED, looks up its `kernel_descriptor`, checks `customCallAttrs["supported_kv_dtypes"]`, and either annotates or appends a diagnostic explaining why it declined.
+
+**Per-target KV-quant matrix** — `FlashAttentionKernel.kt` updated to advertise per-target supported dtypes via `customCallAttrs["supported_kv_dtypes"]`:
+
+| Target              | F32 | BF16 | FP8_E4M3 | FP8_E5M2 | INT8 |
+|---------------------|-----|------|----------|----------|------|
+| nvidia/h100, h200   | ✓   | ✓    | ✓        | ✓        | ✓    |
+| nvidia/a100, l40s   | ✓   | ✓    |          |          | ✓    |
+| amd/mi300x          | ✓   | ✓    |          |          | ✓    |
+| google/tpu_v4..v5p  | ✓   | ✓    |          |          | ✓    |
+| google/tpu_v6e      | ✓   | ✓    | ✓        |          | ✓    |
+| aws/trainium2       | ✓   | ✓    | ✓        |          | ✓    |
+| tlaloc/cpu_generic  | (no kernel — decompose; KV-quant is a no-op for this target) |
+
+**Decisions worth flagging**:
+
+- **Metadata-only directive, not a type-system change.** Tlaloc's `DType` enum has F32/F64/I32/I64/Bool — no native int8 / fp8. A type-system extension for low-precision dtypes (I8, FP8_E4M3, FP8_E5M2, FP4) would need to thread through the FIR plugin, the StableHLO emitter, the interpreter, and the manifest schema — multi-week work. KV-quant for v1 ships as a *codegen directive*: the COARSENED carries an attr telling the kernel custom-call "materialize K and V as `<dtype>` at runtime; perform on-the-fly dequantization inside the kernel." DXIR-level types stay F32. **Tracked as audit OQ-Layer3-2**: "introduce native I8 / FP8 dtypes once a pattern outside attention demands them in user-visible signatures."
+
+- **Best-effort, not enforced.** A user requesting FP8 KV cache on A100 (no native FP8) gets a silent skip with a diagnostic, not an error. Makes the pass safe to apply across heterogeneous targets in a single compile — the resulting function is correct on every target, just with KV quantization where supported. Test `a100DeclinesFp8AndProducesDiagnostic` pins the diagnostic shape.
+
+- **No primal_body type rewrite.** The pass annotates the COARSENED but doesn't rewrite the K and V tensor types inside the primal_body. Rationale: the primal_body is the decomposed-fallback path (used when the kernel custom-call isn't available); we want it to stay numerically identical to the unquantized form. The kernel-call path reads the attr and does its own quantization at the runtime boundary.
+
+- **Per-head scale strategy is metadata, not a DxirNode.** v1 doesn't materialize a `compute_scales` op in the graph — runtime computes scales online (or reads them from a side-channel manifest). A future pass could insert explicit scale tensors if a target needs them in-graph.
+
+- **No automatic dtype selection.** v1 callers explicitly pick the target dtype. A future cost-model-driven picker (using L3.4b's `CostEstimate` arithmetic intensity and the device's HBM capacity) could choose between FP8 / int8 / BF16 based on accuracy-budget + memory savings. For now: user knows best.
+
+- **Diagnostics included but not fail-loud.** The two-return variant `applyKvQuantWithDiagnostics` exposes per-COARSENED skip reasons. IDE tooling can surface "tried FP8 on A100, fell back to BF16 because flash_attn_v2 doesn't advertise FP8 KV support". The single-return `applyKvQuant` discards diagnostics for callers that don't need them.
+
+**Files added/modified** (3 source + 1 test):
+- New: `ir/recognizer/quant/KvQuantConfig.kt`
+- New: `ir/recognizer/quant/KvQuantApply.kt`
+- Modified: `ir/recognizer/kernel/FlashAttentionKernel.kt` (added `supported_kv_dtypes` to each descriptor's `customCallAttrs`)
+- New: `ir/recognizer/quant/KvQuantApplyTest.kt` (11 tests)
+
+**Tests added** (+11): per-target accept/decline (H100 FP8 ✓, A100 FP8 ✗, A100 INT8 ✓, Trainium2 FP8 ✓, v5e FP8 ✗ + INT8 ✓, v6e FP8 ✓), CPU decompose path → no COARSENED → no diagnostics, missing-kernel-descriptor → diagnostic + no annotation, no-COARSENED short-circuit, companion defaults, bitsPerElement table integrity. Tlaloc-side suite 1126 → 1137 (unchanged Tlaloc modules + 11 in `:ir`). Combined Tlaloc + maestro-tlaloc: 1148 → 1159.
+
+**L3.4 closed.** Four sub-milestones (L3.4a–d) shipped over §0.4.254–§0.4.257. Net delta: 7 device descriptors with cited specs, per-op cost model, tile-fusion candidate identification, KV-quant directive — all metadata + analysis, no IR-shape mutations beyond the attribute additions. Adds 44 tests (1093 → 1137 Tlaloc-side; 1115 → 1159 combined).
+
+**Recommended next pickup**: L3.5 — manifest extension (`ProgramManifest.backendMatrix`) to populate the per-(target, kernel, kv_quant) decision tuple downstream-consumable.
+
 #### 0.4.256 Layer 3.4c — Tile fusion (elementwise chain identification + annotation) 2026-05-01
 
 Layer 3 phase 4, sub-phase c. Tile-fusion candidate identification — finds maximal connected sets of elementwise ops sharing an output shape (the unrecognized residue around L3.2's coarsened compounds) and annotates each candidate op with a `tile_group: <Int>` attr. Downstream codegen consumes the attr to choose tile-loop boundaries.
