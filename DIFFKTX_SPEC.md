@@ -39,6 +39,45 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.261 Layer 4.1 — StableHLO emit for COARSENED + kernel_descriptor 2026-05-03
+
+Layer 4 phase 1. The first L4 deliverable: the StableHLO emitter consumes the L3.3 `KernelDescriptor` attr stashed on `OpKind.COARSENED` and produces a `stablehlo.custom_call` artifact. With this, the L3 pipeline's output becomes a StableHLO module a PJRT/IREE backend can lower and run end-to-end — no more "compile-time artefact" error reaching the emitter when the kernel-lowering pass picked a vendor-fused kernel.
+
+**Change shape** — single emit-path branch in `stablehlo/Emitter.kt`:
+
+The `OpKind.COARSENED` arm at `Emitter.kt:300-320` previously errored unconditionally. It now reads `attrs[KernelDescriptor.ATTR_KEY] as KernelDescriptor?`:
+
+- **Descriptor present** → emit `stablehlo.custom_call @<kernelName>(<operands>) {backend_config = "<encoded-attrs>", has_side_effect = false} : (<operandTypes>) -> <resultType>`.
+- **Descriptor absent** → keep the (slightly reworded) error path. A bare COARSENED reaching emit means the lowering chain (L3.2 coarsen → L3.3 `lowerKernelChoice`) neither annotated with a kernel nor decomposed. That's a compiler bug, not a user error; fail loud.
+
+Two new private helpers sit alongside `emitManualComputation`:
+
+- `emitCustomCall(...)` — builds the MLIR line. Multi-result COARSENED uses the `%name:N` lhs + tuple result-type pattern from `emitManualComputation` (none of L3 produces multi-result COARSENED today, but the shape is in place for L4.2's sharded variants).
+- `encodeBackendConfig(customCallAttrs)` — flattens the descriptor's `Map<String, Any>` into a deterministic `{key1 = v1, key2 = v2}` string, **alphabetically sorted by key**. Strings emit bare (v1 values are dtype tags like `f32`/`bf16`, not arbitrary text); lists become `[v1, v2, ...]`; numbers and booleans are bare. Empty map → `backend_config = ""`.
+
+**Representative emit** — H100 + the canonical `MATMUL → SOFTMAX → MATMUL` shape, post-recognize + coarsen + kernel-lower:
+
+```mlir
+%3 = stablehlo.custom_call @flash_attn_v3(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, fp8_e5m2, int8]}", has_side_effect = false} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
+```
+
+Other targets: `flash_attn_v2` (A100/L40S), `flash_attn_amd` (MI300X), `tpu_pallas_flash_attention` (TPU v4..v6e — v6e adds `fp8_e4m3` to `supported_kv_dtypes`), `nki_flash_attention` (Trainium2). CPU_GENERIC + unknown vendors decompose at L3.3 and never reach this branch.
+
+**Decisions worth flagging**:
+
+- **`backend_config` is a custom string encoding**, not protobuf or JSON. Different downstream backends (cuDNN, IREE, XLA-PJRT) parse this attr differently — the encoding is opaque to the framework. The deterministic alphabetic-key ordering exists so emitter tests can pin the exact string; downstream backends will consume whichever subset of attrs their pipeline cares about.
+
+- **Round-trip through `stablehlo-translate` deferred to a follow-up**, not bundled here. The aarch64 source build of `stablehlo-translate` + `sdy-opt` (via `scripts/setup-dgx-spark-userspace.sh`) is a separate uncertainty surface; bundling it would risk blocking L4.1 on a toolchain-build problem unrelated to the emit change. The existing `:stablehlo:jvmTest` `RoundTripTest` / `SdyRoundTripTest` will get a `CoarsenedCustomCallRoundTripTest` companion once the userspace tools are built.
+
+- **Sharding-aware variant deferred to L4.2.** The current emit treats the COARSENED as device-local; per the L3 closing audit §16, sharding-aware emit (`mesh_axes` plumbed through the kernel descriptor's `customCallAttrs` and emitted alongside `backend_config`) is a strict superset and gets its own commit.
+
+**Files added/modified** (1 modified + 1 new):
+
+- Modified: `stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt` — import for `KernelDescriptor`, the COARSENED branch swap, +2 private helpers.
+- New: `stablehlo/src/commonTest/kotlin/io/tlaloc/stablehlo/CoarsenedCustomCallTest.kt` — 12 tests covering the five vendor-fused kernels, the multi-arg type signature, the decompose-fallback-emits-no-`custom_call` path, the descriptor-missing error, the empty-attrs `backend_config = ""` shape, alphabetic key ordering, and the four scalar/list/bool/string value encodings.
+
+**Tests added** (+12): all green. Combined suite: **1201 tests** (1160 Tlaloc-side + 41 vendored-maestro).
+
 #### 0.4.260 Layer 3.7 — Examples + 17-section audit + design doc + Layer 3 closure 2026-05-02
 
 Layer 3 closing phase. Five deliverables ship together: 4 runnable Kotlin examples covering the four pillars of the L3 pipeline, the 17-section closing audit at `docs/audits/xatlib_kotlin_audit.md`, the narrative design doc at `docs/xatlib_design.md`, an updated `maestro-tlaloc/README.md` documenting the L3.6 pod-spec construction, and this closing spec entry that ties it all together.

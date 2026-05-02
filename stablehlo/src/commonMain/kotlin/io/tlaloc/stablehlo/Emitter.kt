@@ -20,6 +20,7 @@ import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.DxirSharding
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 
 fun DxirType.toMlir(): String {
     val elem = mlirElementType(dtype)
@@ -297,12 +298,26 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                     "coarsening pass should close this WHILE via C5/C6/C7/C8/C9 before " +
                     "emission (op id=${node.id})",
             )
-            OpKind.COARSENED -> error(
-                "StableHLO lowering for OpKind.COARSENED deferred — Stage C.3b.1's splice op " +
-                    "is a compile-time artefact consumed by the grad + synthesis passes before " +
-                    "emission. Reaching here means the coarsen → synthesis chain didn't inline " +
-                    "the op back to straight-line dxir (op id=${node.id})",
-            )
+            OpKind.COARSENED -> {
+                // Layer 4.1 §0.4.261 — when L3.3's kernel-lowering pass has
+                // attached a [KernelDescriptor] under [KernelDescriptor.ATTR_KEY],
+                // emit a `stablehlo.custom_call` consuming that descriptor.
+                // When the attr is absent the COARSENED is still a compile-time
+                // artefact (the splice op): reaching here means the coarsen →
+                // kernel-lowering chain neither annotated nor decomposed it,
+                // which is a compiler bug. Loud failure beats silent miscompile.
+                val descriptor = node.attrs[KernelDescriptor.ATTR_KEY] as? KernelDescriptor
+                if (descriptor != null) {
+                    emitCustomCall(step, name, ops, node, descriptor)
+                } else {
+                    error(
+                        "StableHLO lowering for OpKind.COARSENED requires a " +
+                            "'${KernelDescriptor.ATTR_KEY}' attr (set by L3.3 lowerKernelChoice) " +
+                            "or decomposition; reaching here means the coarsen → kernel-lowering " +
+                            "chain neither annotated nor decomposed this op (op id=${node.id})",
+                    )
+                }
+            }
             OpKind.GATHER -> emitGather(
                 step, name,
                 operand = ops[0], startIndices = ops[1],
@@ -1193,6 +1208,56 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             out.appendLine("${innerStep}sdy.return")
         }
         out.appendLine("$step} : ($operandTypes) -> $resultTypeMlir")
+    }
+
+    /**
+     * Layer 4.1 §0.4.261 — emit `stablehlo.custom_call` for a COARSENED op
+     * carrying a [KernelDescriptor]. The descriptor's `kernelName` becomes
+     * the call_target_name (`@<kernelName>`); `customCallAttrs` is encoded
+     * into the `backend_config` string (deterministic alphabetic key order
+     * so tests can pin the exact emitted text).
+     */
+    private fun emitCustomCall(
+        step: String,
+        name: String,
+        operandNames: List<String>,
+        node: DxirOp,
+        descriptor: KernelDescriptor,
+    ) {
+        val operandList = operandNames.joinToString(", ")
+        val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
+        val resultTypeMlir = if (node.isMultiResult) {
+            "(${node.types.joinToString(", ") { it.toMlir() }})"
+        } else {
+            node.type.toMlir()
+        }
+        val lhs = if (node.isMultiResult) "$name:${node.numResults}" else name
+        val backendConfig = encodeBackendConfig(descriptor.customCallAttrs)
+        out.appendLine(
+            "$step$lhs = stablehlo.custom_call @${descriptor.kernelName}($operandList) " +
+                "{backend_config = \"$backendConfig\", has_side_effect = false} : " +
+                "($operandTypes) -> $resultTypeMlir",
+        )
+    }
+
+    /**
+     * Encode [customCallAttrs] into the `backend_config` string body.
+     * Empty map produces an empty string. Keys are sorted alphabetically
+     * for deterministic emit. Strings are emitted bare (the v1 attrs in
+     * [KernelDescriptor] are dtype tags like `f32`/`bf16`, not arbitrary
+     * text); lists use `[v1, v2, ...]`; numbers and booleans are bare.
+     */
+    private fun encodeBackendConfig(customCallAttrs: Map<String, Any>): String {
+        if (customCallAttrs.isEmpty()) return ""
+        return customCallAttrs.entries
+            .sortedBy { it.key }
+            .joinToString(", ", "{", "}") { (k, v) -> "$k = ${encodeAttrValue(v)}" }
+    }
+
+    private fun encodeAttrValue(v: Any): String = when (v) {
+        is List<*> -> v.joinToString(", ", "[", "]") { encodeAttrValue(it!!) }
+        is Boolean, is Number, is String -> v.toString()
+        else -> error("unsupported customCallAttrs value type: ${v::class.simpleName}")
     }
 
     /**
