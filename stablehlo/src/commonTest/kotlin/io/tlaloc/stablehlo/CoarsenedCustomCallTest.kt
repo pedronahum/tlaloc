@@ -1,9 +1,15 @@
 package io.tlaloc.stablehlo
 
 import io.tlaloc.core.F32
+import io.tlaloc.ir.DxirAxisRef
 import io.tlaloc.ir.DxirBuilder
+import io.tlaloc.ir.DxirDimSharding
 import io.tlaloc.ir.DxirFunction
+import io.tlaloc.ir.DxirMesh
+import io.tlaloc.ir.DxirMeshAxis
+import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
+import io.tlaloc.ir.DxirSharding
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.coarsener.coarsenRecognizedPatterns
@@ -206,6 +212,137 @@ class CoarsenedCustomCallTest {
                 "backend_config = \"{dtype_tag = bf16, head_dim = 64, is_causal = false, " +
                     "supported_kv_dtypes = [f32, bf16, int8]}\"",
             ),
+            mlir,
+        )
+    }
+
+    // ---------- Layer 4.2 §0.4.262 — sharding-aware emit ----------
+
+    /**
+     * Rebuild [annotated] (post-`lowerKernelChoice`) with [coarsenedSharding]
+     * attached to its single COARSENED op. Used to construct sharded test
+     * shapes; the L3.3 lowering pass preserves `node.sharding`, but L3.2's
+     * coarsener doesn't *set* one, so tests inject it after annotation.
+     */
+    private val testMesh = DxirMesh("m", listOf(DxirMeshAxis("data", 8)))
+
+    private fun withCoarsenedSharding(
+        annotated: DxirFunction,
+        coarsenedSharding: DxirSharding,
+    ): DxirFunction = DxirBuilder.function(annotated.name) {
+        declareMesh(testMesh)
+        val nodeMap = HashMap<Int, DxirNode>()
+        for (p in annotated.params) nodeMap[p.id] = param(p.name, p.type, p.sharding)
+        for (n in annotated.body) {
+            if (n !is DxirOp) continue
+            val operands = n.operands.map { nodeMap[it.id]!! }
+            val sharding = if (n.op == OpKind.COARSENED) coarsenedSharding else n.sharding
+            nodeMap[n.id] = op(n.op, operands, n.type, n.attrs, sharding)
+        }
+        annotated.returns.map { nodeMap[it.id]!! }
+    }
+
+    private fun dataDimSharding(): DxirSharding = DxirSharding(
+        meshName = "m",
+        dimShardings = listOf(
+            DxirDimSharding(axes = listOf(DxirAxisRef.Full("data"))),
+            DxirDimSharding(axes = emptyList()), // dim 1 replicated
+        ),
+    )
+
+    @Test
+    fun shardedCoarsenedAttachesSdyShardingPerValue() {
+        val annotated = lowerKernelChoice(buildCoarsenedFn(), KernelTarget.NVIDIA_H100)
+        val sharded = withCoarsenedSharding(annotated, dataDimSharding())
+        val mlir = sharded.toStablehlo()
+        assertTrue(mlir.contains("stablehlo.custom_call @flash_attn_v3"), mlir)
+        // Canonical SDY op-level sharding form: per_value with one entry for
+        // the single result. The dim list mirrors toSdyAttr's `<@m, [...]>`.
+        assertTrue(
+            mlir.contains(
+                "sdy.sharding = #sdy.sharding_per_value<[<@m, [{\"data\"}, {}]>]>",
+            ),
+            mlir,
+        )
+    }
+
+    @Test
+    fun unshardedCoarsenedHasNoSdyShardingAttribute() {
+        // Regression guard for L4.1: when node.sharding is null, the
+        // emit must not introduce an sdy.sharding attribute (otherwise
+        // the L4.1 default emit would change shape on every kernel).
+        val mlir = emitFor(KernelTarget.NVIDIA_H100)
+        assertTrue(mlir.contains("stablehlo.custom_call"), mlir)
+        assertFalse(
+            mlir.contains("sdy.sharding"),
+            "unsharded COARSENED must not emit sdy.sharding: $mlir",
+        )
+    }
+
+    @Test
+    fun meshAxesViaCustomCallAttrsSerializesIntoBackendConfig() {
+        // The audit §16 calls out `mesh_axes` as the natural place to
+        // plumb SDY axis names into the kernel-API contract. Because
+        // customCallAttrs is `Map<String, Any>` and L4.1's encoder
+        // already handles `List<String>`, this is a free convention —
+        // the test pins it so future refactors don't accidentally hide
+        // mesh_axes behind a different key or encoding.
+        val registry = mapOf<String, KernelTemplate>(
+            "FlashAttention" to KernelTemplate { _, _ ->
+                KernelDescriptor(
+                    "sharded_attention", "tlaloc", "test",
+                    customCallAttrs = mapOf(
+                        "mesh_axes" to listOf("data", "model"),
+                    ),
+                )
+            },
+        )
+        val mlir = lowerKernelChoice(buildCoarsenedFn(), KernelTarget.CPU_GENERIC, registry)
+            .toStablehlo()
+        assertTrue(
+            mlir.contains("backend_config = \"{mesh_axes = [data, model]}\""),
+            mlir,
+        )
+    }
+
+    @Test
+    fun shardedCustomCallStillCarriesBackendConfigAndHasSideEffect() {
+        // Composition: backend_config (from descriptor.customCallAttrs)
+        // and sdy.sharding (from node.sharding) co-exist in the attribute
+        // dict. has_side_effect = false stays present.
+        val annotated = lowerKernelChoice(buildCoarsenedFn(), KernelTarget.NVIDIA_H100)
+        val sharded = withCoarsenedSharding(annotated, dataDimSharding())
+        val mlir = sharded.toStablehlo()
+        assertTrue(mlir.contains("backend_config ="), mlir)
+        assertTrue(mlir.contains("has_side_effect = false"), mlir)
+        assertTrue(mlir.contains("sdy.sharding ="), mlir)
+        // Single line — the three attrs are comma-separated inside one `{...}`.
+        assertTrue(
+            mlir.lines().any {
+                it.contains("backend_config") && it.contains("has_side_effect") &&
+                    it.contains("sdy.sharding")
+            },
+            "expected all three attrs on one custom_call line: $mlir",
+        )
+    }
+
+    @Test
+    fun replicatedOnlyShardingEmitsEmptyDimList() {
+        // Boundary: a sharding that's fully replicated on every dim.
+        // The SDY attr is still emitted (some passes treat the
+        // explicit replicated annotation as a hint), and the per_value
+        // wrapper still appears.
+        val replicated = DxirSharding(
+            meshName = "m",
+            dimShardings = listOf(
+                DxirDimSharding(axes = emptyList()),
+                DxirDimSharding(axes = emptyList()),
+            ),
+        )
+        val annotated = lowerKernelChoice(buildCoarsenedFn(), KernelTarget.NVIDIA_H100)
+        val mlir = withCoarsenedSharding(annotated, replicated).toStablehlo()
+        assertTrue(
+            mlir.contains("sdy.sharding = #sdy.sharding_per_value<[<@m, [{}, {}]>]>"),
             mlir,
         )
     }

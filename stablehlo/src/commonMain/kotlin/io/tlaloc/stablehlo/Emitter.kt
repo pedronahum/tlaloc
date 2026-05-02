@@ -1216,6 +1216,15 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * the call_target_name (`@<kernelName>`); `customCallAttrs` is encoded
      * into the `backend_config` string (deterministic alphabetic key order
      * so tests can pin the exact emitted text).
+     *
+     * Layer 4.2 §0.4.262 — when [node].sharding is non-null, attach
+     * `sdy.sharding = #sdy.sharding_per_value<[<...>]>` so the SDY
+     * propagation pass can carry shardings *across* the kernel boundary.
+     * Custom calls are opaque to propagation — without an explicit
+     * op-level sharding, propagation stops at the kernel and the result
+     * stays unsharded. The `per_value` form handles single-result and
+     * multi-result uniformly (multi-result COARSENED is reserved for
+     * future kernel shapes; today's L3 emits only single-result).
      */
     private fun emitCustomCall(
         step: String,
@@ -1233,9 +1242,16 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         }
         val lhs = if (node.isMultiResult) "$name:${node.numResults}" else name
         val backendConfig = encodeBackendConfig(descriptor.customCallAttrs)
+        val attrs = mutableListOf(
+            "backend_config = \"$backendConfig\"",
+            "has_side_effect = false",
+        )
+        node.sharding?.let { sharding ->
+            attrs += "sdy.sharding = #sdy.sharding_per_value<[${sharding.toSdyAttr()}]>"
+        }
         out.appendLine(
             "$step$lhs = stablehlo.custom_call @${descriptor.kernelName}($operandList) " +
-                "{backend_config = \"$backendConfig\", has_side_effect = false} : " +
+                "{${attrs.joinToString(", ")}} : " +
                 "($operandTypes) -> $resultTypeMlir",
         )
     }

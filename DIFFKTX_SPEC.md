@@ -39,6 +39,56 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.262 Layer 4.2 — Sharding-aware StableHLO emit for COARSENED 2026-05-03
+
+Layer 4 phase 2. Strict superset of L4.1. The `stablehlo.custom_call` emitted for an annotated COARSENED now carries an `sdy.sharding` op-level attribute when the COARSENED's `node.sharding` is non-null. Without this, custom calls are opaque to the SDY propagation pass and shardings stop at the kernel boundary; with it, propagation flows *across* the kernel and downstream ops inherit the result's sharding.
+
+**Change shape** — single helper edit in `stablehlo/Emitter.kt`:
+
+`emitCustomCall` builds its attribute dict as a `MutableList<String>` instead of a hardcoded two-attr line, and conditionally appends:
+
+```
+sdy.sharding = #sdy.sharding_per_value<[<@<mesh>, [...]>]>
+```
+
+when `node.sharding != null`. The `sharding_per_value` form is canonical SDY and handles single-result + multi-result uniformly (today's L3 emits only single-result COARSENED; the multi-result plumbing is in place for future kernel shapes — multi-input multi-output FA variants, fused QKV projections, etc).
+
+The unsharded path (`node.sharding == null`) emits exactly the L4.1 shape with no `sdy.sharding` attribute — the L4.1 tests are a strict regression guard.
+
+**Representative emit** — H100 with `node.sharding = <@m, [{"data"}, {}]>` (DP along the M dimension, dim_v replicated):
+
+```mlir
+%3 = stablehlo.custom_call @flash_attn_v3(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, fp8_e5m2, int8]}", has_side_effect = false, sdy.sharding = #sdy.sharding_per_value<[<@m, [{"data"}, {}]>]>} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
+```
+
+**`mesh_axes` via `customCallAttrs` is the kernel-API contract**, distinct from the SDY-level sharding. The audit §16 called out plumbing SDY axis names through `customCallAttrs`; that's free given L4.1's encoder (`Map<String, Any>` already handles `List<String>`). A dedicated test pins the convention so future refactors don't accidentally hide `mesh_axes` behind a different key. Two layers serve different consumers:
+
+- **`sdy.sharding` op-level attr** — read by SDY's propagation pass + downstream PJRT collective insertion. Tells the compiler what shape the value has on each device.
+- **`mesh_axes` inside `backend_config`** — read by the *kernel implementation* at runtime. Tells flash_attn_v3 (or whichever) which collective pattern to use internally (e.g., ring-attention along `model` axis for tensor-parallel head-dim).
+
+**Decisions worth flagging**:
+
+- **`sharding_per_value` even for single-result.** The alternative is `sdy.sharding = #sdy.sharding<...>` (the singular form). Both are valid SDY; `per_value` was chosen because it's the form `sdy_propagation` *outputs* on every annotated op, so emitting it on input keeps the dialect shape consistent across the propagation boundary. One less syntactic discontinuity for round-trip tests when those land.
+
+- **Operand shardings still flow through `sdy.sharding_constraint`**, not via per-operand attrs on the `custom_call`. The L3.6 pipeline already places `OpKind.SHARD_CONSTRAINT` ops at user-marked tensors; SDY propagates those forward. The custom_call op-level `sdy.sharding` is for the *output* — operand shardings are inherited from the value-flow upstream. If a future kernel needs explicit operand shardings (e.g., a kernel that demands a specific per-operand layout incompatible with propagation), that's a separate `sdy.sharding_per_value` on operands extension, deferred until a real kernel demands it.
+
+- **Multi-result COARSENED still deferred.** L3 produces only single-result COARSENED today; the `per_value` wrapper lets a multi-result variant land as a one-line change to the helper (extend the dim list to N entries) when a multi-result kernel ships.
+
+**Files modified** (1 modified + 1 modified):
+
+- Modified: `stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt` — `emitCustomCall` builds the attr list incrementally and conditionally appends `sdy.sharding` from `node.sharding`. The L4.1 docblock was extended with a §0.4.262 paragraph.
+- Modified: `stablehlo/src/commonTest/kotlin/io/tlaloc/stablehlo/CoarsenedCustomCallTest.kt` — five new tests under a "Layer 4.2 §0.4.262 — sharding-aware emit" header. Helpers `withCoarsenedSharding(annotated, sharding)` (rebuilds a function declaring the test mesh and re-attaching a sharding to the COARSENED) and `dataDimSharding()` (the canonical DP-along-dim-0 sharding used by three of the tests).
+
+**Tests added** (+5):
+
+1. `shardedCoarsenedAttachesSdyShardingPerValue` — H100 + `<@m, [{"data"}, {}]>` produces the canonical `#sdy.sharding_per_value<[<@m, [{"data"}, {}]>]>` attribute.
+2. `unshardedCoarsenedHasNoSdyShardingAttribute` — regression guard: L4.1 default emit must not introduce `sdy.sharding` when `node.sharding == null`.
+3. `meshAxesViaCustomCallAttrsSerializesIntoBackendConfig` — pins the kernel-API contract: `customCallAttrs = mapOf("mesh_axes" to listOf("data", "model"))` → `mesh_axes = [data, model]` inside `backend_config`.
+4. `shardedCustomCallStillCarriesBackendConfigAndHasSideEffect` — composition: all three attrs (`backend_config`, `has_side_effect`, `sdy.sharding`) co-exist on the same custom_call line.
+5. `replicatedOnlyShardingEmitsEmptyDimList` — boundary: fully-replicated sharding still emits `[{}, {}]` explicitly so consumers can distinguish "explicit replication" from "no annotation."
+
+All green. Combined suite: **1206 tests** (1165 Tlaloc-side + 41 vendored-maestro).
+
 #### 0.4.261 Layer 4.1 — StableHLO emit for COARSENED + kernel_descriptor 2026-05-03
 
 Layer 4 phase 1. The first L4 deliverable: the StableHLO emitter consumes the L3.3 `KernelDescriptor` attr stashed on `OpKind.COARSENED` and produces a `stablehlo.custom_call` artifact. With this, the L3 pipeline's output becomes a StableHLO module a PJRT/IREE backend can lower and run end-to-end — no more "compile-time artefact" error reaching the emitter when the kernel-lowering pass picked a vendor-fused kernel.
