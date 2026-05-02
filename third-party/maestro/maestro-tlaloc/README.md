@@ -23,20 +23,63 @@ maestro-tlaloc/
 │   └── build.sh            # docker build helper, mirrors maestro-actus
 ├── src/main/java/com/netflix/maestro/engine/
 │   ├── stepruntime/
-│   │   └── TlalocStepRuntime.java        # extends KubernetesStepRuntime
+│   │   └── TlalocStepRuntime.java        # extends KubernetesStepRuntime; pod-spec at launch (§0.4.259)
 │   └── tlaloc/
 │       ├── TlalocCommand.java            # immutable command record
 │       ├── TlalocAttributeMapper.java    # naming bridge
 │       ├── TlalocEntrypointBuilder.java  # generates K8s shell command
 │       ├── TlalocParamsBuilder.java      # Maestro params → JSON payload
-│       └── TlalocRunner.java             # CLI main() inside the container
+│       ├── TlalocRunner.java             # CLI main() inside the container
+│       ├── BackendTargetRecord.java      # Java mirror of Kotlin BackendTarget (§0.4.259)
+│       └── TlalocPodSpecBuilder.java     # backend-matrix → nodeSelector + accelerators (§0.4.259)
 ├── src/main/resources/defaultparams/
 │   └── default-tlaloc-step-params.yaml   # Maestro-merged defaults
 └── src/test/java/com/netflix/maestro/engine/tlaloc/
     ├── TlalocStepTypeRegistrationTest.java  # 6 smoke tests
     ├── TlalocRunnerEndToEndTest.java        # 5 e2e tests
-    └── TlalocSampleWorkflowsTest.java       # 11 sample-workflow parsing tests
+    ├── TlalocSampleWorkflowsTest.java       # 11 sample-workflow parsing tests
+    └── TlalocPodSpecBuilderTest.java        # 15 pod-spec selection + apply tests (§0.4.259)
 ```
+
+## Layer 3 §0.4.259+ pod-spec construction
+
+When a Tlaloc workflow's manifest carries a populated `backendMatrix`
+(via `populateBackendMatrix(...)` on the producer side), the
+`TlalocStepRuntime.customizePreLaunchCommand` reads the matrix and
+translates the row matching the cluster's `(vendor, arch)` into K8s
+pod-spec fields:
+
+- `nodeSelector` — vendor-specific label match (e.g.
+  `accelerator: nvidia-tesla-h100`,
+  `cloud.google.com/gke-accelerator: tpu_v5e`,
+  `aws.amazon.com/neuron: trainium2`).
+- `accelerators` — observability map carrying the picked
+  `vendor` / `arch` / `kernel` / `kv_quant_dtype` for log correlation.
+- `gpu` — defaulted to `"1"` for any non-CPU target (multi-accelerator
+  pods are L4+).
+
+Selection algorithm: exact `(vendor, arch)` match wins; falls back to
+lowest-cost row matching vendor; finally to absolute lowest-cost.
+Empty/malformed matrix → command passes through unchanged.
+
+Cluster `(vendor, arch)` is configured at deployment time via the
+runtime's constructor (`TlalocStepRuntime(..., String clusterVendor,
+String clusterArch)`); production deployments wire from a per-deployment
+env var or DI binding.
+
+### Vendoring divergence
+
+The `KubernetesCommand` class (in `maestro-common/`) gained two new
+fields in §0.4.259:
+
+- `nodeSelector: Map<String, String>` — K8s node-selector labels.
+- `accelerators: Map<String, String>` — vendor + arch + kernel + KV-quant
+  hints recorded for observability.
+
+Both fields are `@JsonInclude(NON_NULL)` — a vanilla Maestro consumer
+that doesn't know about Tlaloc never sees them in serialized commands.
+This is the one edit-against-upstream approved as L3.6's edit budget;
+tracked as audit OQ-Layer3-4.
 
 ## Sample workflows
 
@@ -95,5 +138,5 @@ to stage the runtime classpath under `build/docker/libs/`, then
 ./gradlew :maestro-tlaloc:test
 ```
 
-22 tests (6 step-type registration + 5 runner end-to-end + 11 sample
-workflow parsing). All passing as of §0.4.248.
+37 tests (6 step-type registration + 5 runner end-to-end + 11 sample
+workflow parsing + 15 pod-spec selection/apply). All passing as of §0.4.260.

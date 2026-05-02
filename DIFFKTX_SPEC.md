@@ -39,6 +39,88 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.260 Layer 3.7 — Examples + 17-section audit + design doc + Layer 3 closure 2026-05-02
+
+Layer 3 closing phase. Five deliverables ship together: 4 runnable Kotlin examples covering the four pillars of the L3 pipeline, the 17-section closing audit at `docs/audits/xatlib_kotlin_audit.md`, the narrative design doc at `docs/xatlib_design.md`, an updated `maestro-tlaloc/README.md` documenting the L3.6 pod-spec construction, and this closing spec entry that ties it all together.
+
+**Examples** — `examples/layer3/`:
+
+| File | Purpose |
+|------|---------|
+| `RecognizeAndCoarsenAttentionExample.kt` | Recognize + coarsen the canonical `MATMUL → SOFTMAX → MATMUL` shape into one `OpKind.COARSENED` op. Inspects the resulting envelope's `primal_body` / `gradient_body` / `reads_primal_indices`. |
+| `KernelLoweringMatrixExample.kt` | Lower the same coarsened attention across all seven device targets; tabulates which produce a fused-kernel custom-call vs decompose. |
+| `KvQuantHeterogeneousExample.kt` | Best-effort FP8 KV-quant across H100 / A100 / Trainium2 / TPU v5e — pins the user-visible accept/decline shape with structured diagnostics. |
+| `PopulateBackendMatrixExample.kt` | Run `populateBackendMatrix` end-to-end across all 7 targets, dump the cost-ordered matrix, show the JSON encoding the runtime side consumes. |
+
+Each example includes the expected console output as a comment so readers see the structural decisions without running the code.
+
+**Audit** — `docs/audits/xatlib_kotlin_audit.md` (17 sections + sign-off):
+
+1. Spec compliance (per-phase delivery vs §0.4.250–§0.4.259).
+2. Test coverage (1071 → 1189 combined; per-phase breakdown).
+3. Compatibility (manifest JSON, KubernetesCommand JSON, OpKind enum, DXIR substrate — all backward-compatible).
+4. Recognizer soundness — adversarial coverage matrix per recognizer (≥4 each, FA has 5).
+5. Coarsener invariants — five structural guarantees the COARSENED envelope satisfies.
+6. Cost model accuracy — calibrated for relative ordering, not absolute latency.
+7. Kernel template citations — datasheet sources for every per-target kernel name.
+8. KV-quant best-effort semantics — heterogeneous deployment as a first-class shape.
+9. BackendMatrix transport — JSON parser fidelity + Kotlin↔Java mirror correctness.
+10. Vendoring divergence audit — exactly one edit on `KubernetesCommand`.
+11. End-to-end traceability — worked example through all six pipeline stages.
+12. Performance — roofline-µs across the seven targets for a 64×64 attention forward.
+13. Code quality — per-pattern files 90–170 lines, no reflection, no magic numbers.
+14. Documentation — examples + audit + design doc + spec entries.
+15. Open issues — 7 OQs filed for `DIFFKTX_SPEC.md` §18 inclusion.
+16. Layer 4 prerequisite re-evaluation — what L3 unlocks.
+17. What we learned — process retrospective on the seven phases.
+
+The "What we learned" section captures seven concrete payoffs: per-phase commits stay tractable, reusing existing IR primitives won (COARSENED + annotation vs new opkinds), the "registry as a Map literal" pattern scales, best-effort beats fail-loud for heterogeneous deployment, hand-rolled JSON kept paying off, per-pattern recognizer files are the right granularity, and one vendoring divergence per layer is sustainable.
+
+**Design doc** — `docs/xatlib_design.md`:
+
+Narrative explanation of the algorithmic-transformation pipeline shape. Walks through why a separate transformation layer was needed, the five-stage pipeline (recognize → coarsen → kernel-lower → KV-quant + tile-fuse → populate matrix → pod-spec), the cost model's roofline derivation, and a "reading order for new contributors" pointing at 8 representative source files. Documents what L3 doesn't do (no StableHLO emit, no interpreter run, no live K8s) so reader expectations are calibrated.
+
+**maestro-tlaloc/README.md update**:
+
+Adds a "Layer 3 §0.4.259+ pod-spec construction" section explaining how `TlalocStepRuntime.customizePreLaunchCommand` reads the manifest's `backendMatrix` and translates the picked row into K8s pod-spec fields. Documents the vendor-specific nodeSelector templates (NVIDIA `accelerator: tesla-X`, Google `cloud.google.com/gke-accelerator: X`, AWS `aws.amazon.com/neuron: X`). Module-structure tree updated to include the two new files (`BackendTargetRecord`, `TlalocPodSpecBuilder`) and the new test file. Test count updated 22 → 37.
+
+**Decisions worth flagging**:
+
+- **Examples are documentation-grade, not in the test suite.** Mirrors the `examples/four-worlds/` and `examples/named-indices/` precedent: copy-paste runnable Kotlin files documenting the public surface. They aren't built/run by CI; that role is filled by the unit tests in `:ir` + `:maestro` + `maestro-tlaloc`. **Tracked as audit OQ-Layer3-8** if/when "examples must compile in CI" becomes the right bar.
+
+- **Audit format mirrors §0.4.249's `maestro_first_class_audit.md`.** 17 sections vs 14 (the new ones cover L3-specific concerns: recognizer adversarial coverage, cost model accuracy, kernel citation sources). Same "Sign-off" closing pattern.
+
+- **Design doc separate from spec entry.** The spec is a per-phase changelog (what shipped, when); the design doc is the persistent narrative (why the architecture is shaped this way). Both serve different reader profiles — the spec for someone tracking history, the design doc for someone joining the project.
+
+- **OQ-Layer3-X numbering hits 8.** All 8 open questions captured in the audit; spec §18 will reference back to the audit for full text. Numbering reserves room for L4 to file OQ-Layer4-1+.
+
+**Files added/modified** (1 modified + 6 new + 1 README update):
+- New: `examples/layer3/RecognizeAndCoarsenAttentionExample.kt`
+- New: `examples/layer3/KernelLoweringMatrixExample.kt`
+- New: `examples/layer3/KvQuantHeterogeneousExample.kt`
+- New: `examples/layer3/PopulateBackendMatrixExample.kt`
+- New: `examples/layer3/README.md`
+- New: `docs/audits/xatlib_kotlin_audit.md` (17-section audit + sign-off)
+- New: `docs/xatlib_design.md` (narrative design doc)
+- Modified: `third-party/maestro/maestro-tlaloc/README.md` (L3.6 pod-spec section + module-tree update)
+
+**Tests added** (+0): pure documentation + audit cycle. All existing tests continue to pass.
+
+Combined suite is green: **1189 tests** (1137 Tlaloc + 37 maestro-tlaloc + 4 maestro-common new + the rest of vendored Maestro).
+
+**Layer 3 closed.** Eight sub-milestones (L3.0 through L3.7) shipped over §0.4.250–§0.4.260 across two calendar days (2026-04-30 and 2026-05-01..02). Net delta:
+
+- 23 new files in `:ir` (`recognizer/`, `recognizer/coarsener/`, `recognizer/kernel/`, `recognizer/cost/`, `recognizer/fusion/`, `recognizer/quant/` subpackages).
+- 3 modified + 2 new files in `:maestro` (BackendTarget data class, populator helper, manifest extension).
+- 4 modified + 4 new files in `third-party/maestro/` (KubernetesCommand divergence + maestro-tlaloc additions).
+- 5 new files in `examples/layer3/` (4 examples + README).
+- 2 new docs (audit + design).
+- 11 spec entries (§0.4.250 through §0.4.260).
+- +118 tests (1071 → 1189 combined).
+- 8 audit OQs filed for §18 inclusion (OQ-Layer3-1..8).
+
+The next major work is L4 — sharding-aware kernel custom-calls + StableHLO emit for COARSENED + live runtime + cost-driven scheduling.
+
 #### 0.4.259 Layer 3.6 — TlalocStepRuntime pod-spec construction (one vendoring divergence) 2026-05-01
 
 Layer 3 phase 6. The runtime side of the L3 pipeline lands: Tlaloc steps now translate the manifest's `backendMatrix` rows into Kubernetes pod-spec fields (nodeSelector + accelerator labels + GPU count) at job-launch time. One vendoring divergence inside `third-party/maestro/` extends Netflix's `KubernetesCommand` with two optional fields; everything else is additive.
