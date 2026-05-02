@@ -150,7 +150,9 @@ Full suite green at HEAD: **1189 combined tests** (1148 Tlaloc-side + 37 maestro
 - **macOS** (Apple Silicon recommended) or **Linux**. Windows untested.
 - **External MLIR toolchains** for `:stablehlo` round-trip tests: `stablehlo-translate`, `sdy-opt`, `iree-compile`. Built from source via the bootstrap scripts; pinned to JAX 0.10.0's bundled commits.
 
-The bootstrap scripts handle Homebrew + Xcode CLT + JDK 21 + the MLIR build:
+The bootstrap scripts handle Homebrew/apt + JDK 21 + the MLIR build. Two parallel sets exist for the two supported dev environments:
+
+### macOS (Apple Silicon)
 
 ```bash
 # Stage 1 — admin / sudo (you must run; one-time):
@@ -165,6 +167,26 @@ Already on JDK 17? Use the migration helper:
 ```bash
 bash scripts/install-jdk21.sh    # adds openjdk@21 alongside an existing 17 install
 ```
+
+### NVIDIA DGX Spark (aarch64 / DGX OS)
+
+For the GB10 Grace-Blackwell workstation. Assumes DGX OS with NVIDIA drivers + CUDA already installed (which is the factory state):
+
+```bash
+# Stage 1 — admin / sudo (you must run; one-time, apt-based):
+bash scripts/setup-dgx-spark-bootstrap.sh
+
+# Stage 2 — userspace (sudo-free; ~30–90 min cold on Grace; faster warm):
+bash scripts/setup-dgx-spark-userspace.sh
+```
+
+If the DGX OS system Python already has PyTorch + CUDA wired (the typical factory state), skip the venv torch install and inherit:
+
+```bash
+bash scripts/setup-dgx-spark-userspace.sh --skip-torch    # uses --system-site-packages
+```
+
+The script verifies `nvidia-smi` works as a sanity gate before running. The MLIR builds (`stablehlo-translate`, `sdy-opt`) use the same JAX-0.10.0-pinned commits as the Mac scripts, so emitted MLIR text round-trips between the two environments without dialect-version skew.
 
 ## Quick start
 
