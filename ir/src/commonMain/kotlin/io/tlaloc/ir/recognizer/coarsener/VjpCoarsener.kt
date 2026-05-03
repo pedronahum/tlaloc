@@ -220,4 +220,5 @@ val defaultCoarseners: Map<String, PatternCoarsener> = mapOf(
     "FlashAttention" to PatternCoarsener { m -> coarsenFlashAttention(m as RecognitionMatch.FlashAttention) },
     "RmsNorm" to PatternCoarsener { m -> coarsenRmsNorm(m as RecognitionMatch.RmsNorm) },
     "Rope" to PatternCoarsener { m -> coarsenRope(m as RecognitionMatch.Rope) },
+    "CrossEntropy" to PatternCoarsener { m -> coarsenCrossEntropy(m as RecognitionMatch.CrossEntropy) },
 )
