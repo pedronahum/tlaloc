@@ -162,6 +162,86 @@ class EmitterTest {
         assertTrue(mlir.contains("stablehlo.divide"), mlir)
     }
 
+    // §0.4.274 — keep-dims (size-1 reduced axes preserved in the output)
+    // is detected by output-rank == input-rank. Real Llama / Mistral
+    // RMS-norm chains emit MEAN with keepdims; without this, the
+    // LlamaDecoder primal can't lower.
+
+    @Test
+    fun sumKeepDimsLowersToReduceThenBroadcast() {
+        val fn = DxirBuilder.function("f") {
+            val x = param("x", DxirType(F32, listOf(8, 64)))
+            val s = op(
+                OpKind.SUM, listOf(x),
+                DxirType(F32, listOf(8, 1)),  // keep-dims: rank preserved, reduced axis = 1
+                attrs = mapOf("reduction_dims" to listOf(1)),
+            )
+            listOf(s)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("stablehlo.reduce"), "expected reduce; got: $mlir")
+        assertTrue(
+            mlir.contains("(tensor<8x64xf32>, tensor<f32>) -> tensor<8xf32>"),
+            "expected reduce intermediate at rank-1 (drop-dims); got: $mlir",
+        )
+        assertTrue(
+            mlir.contains("stablehlo.broadcast_in_dim") &&
+                mlir.contains(": (tensor<8xf32>) -> tensor<8x1xf32>"),
+            "expected broadcast_in_dim re-inflating to keep-dims [8,1]; got: $mlir",
+        )
+    }
+
+    @Test
+    fun meanKeepDimsLowersToReduceDivideThenBroadcast() {
+        val fn = DxirBuilder.function("f") {
+            val x = param("x", DxirType(F32, listOf(8, 64)))
+            val m = op(
+                OpKind.MEAN, listOf(x),
+                DxirType(F32, listOf(8, 1)),  // keep-dims
+                attrs = mapOf("reduction_dims" to listOf(1)),
+            )
+            listOf(m)
+        }
+        val mlir = fn.toStablehlo()
+        // reduce + divide both happen on the dropped-dims intermediate
+        assertTrue(mlir.contains("stablehlo.reduce"), mlir)
+        assertTrue(
+            mlir.contains("stablehlo.constant dense<64.0> : tensor<8xf32>"),
+            "divisor at intermediate type missing; got: $mlir",
+        )
+        assertTrue(
+            mlir.contains("stablehlo.divide") && mlir.contains(": tensor<8xf32>"),
+            "divide should run at intermediate type; got: $mlir",
+        )
+        // then broadcast_in_dim re-inflates to keep-dims output
+        assertTrue(
+            mlir.contains("stablehlo.broadcast_in_dim") &&
+                mlir.contains(": (tensor<8xf32>) -> tensor<8x1xf32>"),
+            "expected broadcast_in_dim re-inflating to keep-dims [8,1]; got: $mlir",
+        )
+    }
+
+    @Test
+    fun reduceRejectsAmbiguousOutputRank() {
+        // Output rank that's neither drop-dims (input.rank - dims.size) nor
+        // input.rank (keep-dims) is a malformed reduce — surface a clear error
+        // rather than silent miscompile.
+        val fn = DxirBuilder.function("f") {
+            val x = param("x", DxirType(F32, listOf(8, 64, 16)))
+            val s = op(
+                OpKind.SUM, listOf(x),
+                DxirType(F32, listOf(8, 64)),  // rank 2: neither drop-dims (rank 1) nor keep-dims (rank 3)
+                attrs = mapOf("reduction_dims" to listOf(0, 2)),  // would drop to rank 1
+            )
+            listOf(s)
+        }
+        val ex = assertFailsWith<IllegalStateException> { fn.toStablehlo() }
+        assertTrue(
+            "reduce output rank" in ex.message.orEmpty(),
+            "expected rank-mismatch error; got: ${ex.message}",
+        )
+    }
+
     @Test
     fun matmulLowersToDotGeneralWithContractingDims() {
         val fn = DxirBuilder.function("mm") {

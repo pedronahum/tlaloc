@@ -626,6 +626,63 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         return DxirType(inputType.dtype, kept.map { inputType.dims[it] })
     }
 
+    /**
+     * Resolve the intermediate (post-`stablehlo.reduce`) shape, plus whether
+     * the caller wants keep-dims (size-1 reduced axes preserved in the output).
+     *
+     * § 0.4.274 — keep-dims is detected by [outputType] having the same rank
+     * as [inputType] (with the reduced axes as size 1). The recognized pattern
+     * for RmsNorm (`MUL → MEAN → ... → MUL`) emits the keepdims form, which
+     * is what real Llama / Mistral code does. Without this, the LlamaDecoder
+     * primal — and any other recognized RMS-norm chain — fails to lower.
+     */
+    private fun resolveReduceShape(
+        inputType: DxirType,
+        outputType: DxirType,
+        dims: List<Int>,
+    ): Pair<DxirType, Boolean> {
+        val dropped = reducedType(inputType, dims)
+        return when (outputType.rank) {
+            dropped.rank -> {
+                require(outputType.dims == dropped.dims) {
+                    "reduce output shape ${outputType.dims} does not match expected ${dropped.dims} for reducing dims=$dims from ${inputType.dims}"
+                }
+                dropped to false
+            }
+            inputType.rank -> {
+                val keepDimsExpected = inputType.dims.toMutableList().also { for (d in dims) it[d] = 1 }
+                require(outputType.dims == keepDimsExpected) {
+                    "keep-dims reduce output shape ${outputType.dims} does not match expected $keepDimsExpected for reducing dims=$dims from ${inputType.dims}"
+                }
+                dropped to true
+            }
+            else -> error(
+                "reduce output rank ${outputType.rank} must equal either drop-dims rank ${dropped.rank} or input rank ${inputType.rank}; output=${outputType.dims} input=${inputType.dims} dims=$dims",
+            )
+        }
+    }
+
+    /**
+     * Re-inflate a reduced (rank N-K) tensor back to the keep-dims (rank N)
+     * shape via `stablehlo.broadcast_in_dim`. Returns the SSA name of the
+     * inflated value.
+     */
+    private fun inflateKeepDims(
+        step: String,
+        name: String,
+        intermName: String,
+        intermType: DxirType,
+        outputType: DxirType,
+        inputRank: Int,
+        dims: List<Int>,
+    ) {
+        val keptAxes = (0 until inputRank).filter { it !in dims }
+        out.appendLine(
+            "$step$name = stablehlo.broadcast_in_dim $intermName, dims = [${keptAxes.joinToString(", ")}] " +
+                ": (${intermType.toMlir()}) -> ${outputType.toMlir()}",
+        )
+    }
+
     private fun emitReduce(
         step: String,
         name: String,
@@ -636,18 +693,19 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         initLiteral: String,
         dims: List<Int>,
     ) {
-        val expected = reducedType(inputType, dims)
-        require(expected.dims == outputType.dims) {
-            "reduce output shape ${outputType.dims} does not match expected ${expected.dims} for reducing dims=$dims from ${inputType.dims}"
-        }
+        val (intermType, keepDims) = resolveReduceShape(inputType, outputType, dims)
         val elem = mlirElementType(inputType.dtype)
         val scalarT = "tensor<$elem>"
         val init = synth()
+        val reduceTarget = if (keepDims) synth() else name
         out.appendLine("$step$init = stablehlo.constant dense<$initLiteral> : $scalarT")
         out.appendLine(
-            "$step$name = stablehlo.reduce($x init: $init) applies $reducer across dimensions = [${dims.joinToString(", ")}] " +
-                ": (${inputType.toMlir()}, $scalarT) -> ${outputType.toMlir()}",
+            "$step$reduceTarget = stablehlo.reduce($x init: $init) applies $reducer across dimensions = [${dims.joinToString(", ")}] " +
+                ": (${inputType.toMlir()}, $scalarT) -> ${intermType.toMlir()}",
         )
+        if (keepDims) {
+            inflateKeepDims(step, name, reduceTarget, intermType, outputType, inputType.rank, dims)
+        }
     }
 
     private fun emitReduceMean(
@@ -658,25 +716,28 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         outputType: DxirType,
         dims: List<Int>,
     ) {
-        val expected = reducedType(inputType, dims)
-        require(expected.dims == outputType.dims) {
-            "MEAN output shape ${outputType.dims} does not match expected ${expected.dims} for reducing dims=$dims from ${inputType.dims}"
-        }
+        val (intermType, keepDims) = resolveReduceShape(inputType, outputType, dims)
         val elem = mlirElementType(inputType.dtype)
         val scalarT = "tensor<$elem>"
+        val intermMlir = intermType.toMlir()
         val init = synth()
         val sumName = synth()
 
         out.appendLine("$step$init = stablehlo.constant dense<0.0> : $scalarT")
         out.appendLine(
             "$step$sumName = stablehlo.reduce($x init: $init) applies stablehlo.add across dimensions = [${dims.joinToString(", ")}] " +
-                ": (${inputType.toMlir()}, $scalarT) -> ${outputType.toMlir()}",
+                ": (${inputType.toMlir()}, $scalarT) -> $intermMlir",
         )
-        // divisor = product of reduced-dim sizes, emitted at output type (tensor or scalar)
+        // divisor = product of reduced-dim sizes, emitted at *intermediate* type
+        // (so the divide happens before keep-dims inflation when applicable)
         val n = dims.map { inputType.dims[it].toLong() }.fold(1L) { acc, d -> acc * d }.coerceAtLeast(1L)
         val divisor = synth()
-        out.appendLine("$step$divisor = stablehlo.constant dense<$n.0> : ${outputType.toMlir()}")
-        out.appendLine("$step$name = stablehlo.divide $sumName, $divisor : ${outputType.toMlir()}")
+        out.appendLine("$step$divisor = stablehlo.constant dense<$n.0> : $intermMlir")
+        val divTarget = if (keepDims) synth() else name
+        out.appendLine("$step$divTarget = stablehlo.divide $sumName, $divisor : $intermMlir")
+        if (keepDims) {
+            inflateKeepDims(step, name, divTarget, intermType, outputType, inputType.rank, dims)
+        }
     }
 
     /**
