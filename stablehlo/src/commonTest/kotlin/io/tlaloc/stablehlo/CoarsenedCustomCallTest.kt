@@ -104,6 +104,29 @@ class CoarsenedCustomCallTest {
     }
 
     @Test
+    fun gb10EmitsFlashAttnV3CustomCall() {
+        // GB10 is the dev-host (DGX Spark, Grace-Blackwell sm_100) target —
+        // it reuses the FA3 kernel name and the full fp8_e4m3 + fp8_e5m2
+        // KV-quant matrix. Pinned here so a registry edit that accidentally
+        // swaps it to cuDNN (or strips fp8_e5m2) is caught by the emitter
+        // tests, not just the recognizer-side KernelLoweringTest.
+        val mlir = emitFor(KernelTarget.NVIDIA_GB10)
+        assertTrue(mlir.contains("stablehlo.custom_call @flash_attn_v3"), mlir)
+        assertTrue(
+            mlir.contains("supported_kv_dtypes = [f32, bf16, fp8_e4m3, fp8_e5m2, int8]"),
+            mlir,
+        )
+    }
+
+    @Test
+    fun b100EmitsCudnnMultiHeadAttentionCustomCall() {
+        val mlir = emitFor(KernelTarget.NVIDIA_B100)
+        assertTrue(mlir.contains("stablehlo.custom_call @cudnn_multi_head_attention"), mlir)
+        // Conservative KV-quant set on cuDNN MHA — no fp8_e5m2.
+        assertTrue(mlir.contains("supported_kv_dtypes = [f32, bf16, fp8_e4m3, int8]"), mlir)
+    }
+
+    @Test
     fun customCallSyntaxIncludesOperandsAndTypeSignature() {
         val mlir = emitFor(KernelTarget.NVIDIA_H100)
         // Three operands (Q, K, V), single tensor result, type signature

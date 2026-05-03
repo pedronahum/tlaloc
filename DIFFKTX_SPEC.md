@@ -39,6 +39,34 @@
 
 This section is updated as milestones land. Everything below the "Shipped" list is aspirational.
 
+#### 0.4.263 Blackwell entries in FlashAttentionKernel registry 2026-05-03
+
+Tooling alignment after L4.2 surfaced the gap. The dev host is GB10 (Grace-Blackwell, sm_100), but `FlashAttentionKernel.kt` v1 (§0.4.253) covered only Hopper / Ampere / Ada / MI300X / TPU v4..v6e / Trainium2 — Blackwell SKUs fell through to `else -> null` and decomposed back to primitives. This phase adds three Blackwell entries so the L4.1+L4.2 emit pipeline produces a deployable artifact for the actual hardware.
+
+**Mapping** — Blackwell SKUs split by audience, not by die:
+
+| Target | Kernel | Why |
+|--------|--------|-----|
+| `nvidia/gb10` | `flash_attn_v3` | Grace-Blackwell Spark dev/edge SKU. Reuses FA3 (whose main branch added sm_100 backends) and inherits the full `fp8_e4m3 + fp8_e5m2` KV-quant matrix — the dev-host audience benefits from the richer KV-quant set. |
+| `nvidia/b100` | `cudnn_multi_head_attention` | Data-center Blackwell. cuDNN MHA is Nvidia's officially-supported fused-attention path on Blackwell GA. Conservative `supported_kv_dtypes = [f32, bf16, fp8_e4m3, int8]` (no `fp8_e5m2` — not in cuDNN's GA surface yet). |
+| `nvidia/b200` | `cudnn_multi_head_attention` | Same kernel as B100; shares the data-center production audience. |
+
+All three SKUs share SM_100 silicon, but Tlaloc's registry is indexed by `(vendor, arch)` and an arch string is a rough proxy for the *deployment audience*. Either Blackwell variant can be remapped in a follow-up if the literature shifts (e.g., FA4 ships with a stable cuDNN-equivalent surface, or cuDNN's Blackwell MHA picks up `fp8_e5m2`).
+
+**Cost-model entries deferred.** `DeviceDescriptors` (`ir/.../recognizer/cost/DeviceDescriptor.kt`) still lists exactly seven canonical descriptors (H100 / A100 / TPU v4..v6e / Trainium2 / CPU_GENERIC); `BackendMatrixPopulator.byName(target.arch)` returns `null` for the new Blackwell arches and the matrix entry's `costMicroseconds` field is `null`. That's a soft degradation — the kernel choice still works; only cost-driven scheduling skips Blackwell rows. A follow-up will add `B100`/`B200`/`GB10` `DeviceDescriptor`s once we settle on per-SKU BF16/FP8/HBM3e numbers from Nvidia's Blackwell datasheet (which has SKU-specific variation: GB10 ≠ B100 ≠ B200 on memory bandwidth and tensor-core peak).
+
+**Files modified** (2 modified):
+
+- `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/kernel/KernelTarget.kt` — three new companion constants (`NVIDIA_GB10`, `NVIDIA_B100`, `NVIDIA_B200`); doc comment lists them.
+- `ir/src/commonMain/kotlin/io/tlaloc/ir/recognizer/kernel/FlashAttentionKernel.kt` — `KernelTarget.NVIDIA_GB10` joins the H100/H200 arm (FA3); a new arm matches B100/B200 → cuDNN MHA. The kdoc table + a "Why GB10 ≠ B100/B200" section document the audience split.
+
+**Tests added** (+5):
+
+- `ir/src/commonTest/.../KernelLoweringTest.kt` (+3): `gb10PicksFlashAttnV3` (asserts kernel name, vendor, arch, and inherited `fp8_e5m2`), `b100PicksCudnnMultiHeadAttention` (asserts kernel name, conservative KV-quant set excludes `fp8_e5m2`), `b200PicksCudnnMultiHeadAttention` (asserts identical kernel-name choice as B100).
+- `stablehlo/src/commonTest/.../CoarsenedCustomCallTest.kt` (+2): `gb10EmitsFlashAttnV3CustomCall` (pins the emitted MLIR shape on the dev host's actual target — defends against a registry edit that swaps the GB10 entry to cuDNN), `b100EmitsCudnnMultiHeadAttentionCustomCall` (pins the data-center Blackwell emit shape).
+
+All green. Combined suite: **1211 tests** (1170 Tlaloc-side + 41 vendored-maestro).
+
 #### 0.4.262 Layer 4.2 — Sharding-aware StableHLO emit for COARSENED 2026-05-03
 
 Layer 4 phase 2. Strict superset of L4.1. The `stablehlo.custom_call` emitted for an annotated COARSENED now carries an `sdy.sharding` op-level attribute when the COARSENED's `node.sharding` is non-null. Without this, custom calls are opaque to the SDY propagation pass and shardings stop at the kernel boundary; with it, propagation flows *across* the kernel and downstream ops inherit the result's sharding.

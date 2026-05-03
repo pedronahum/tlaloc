@@ -92,6 +92,50 @@ class KernelLoweringTest {
     }
 
     @Test
+    fun gb10PicksFlashAttnV3() {
+        // GB10 (Grace-Blackwell Spark, sm_100) reuses FA3 — the kernel
+        // family Tlaloc's dev host actually consumes.
+        val fn = buildCoarsenedFn()
+        val lowered = lowerKernelChoice(fn, KernelTarget.NVIDIA_GB10)
+        val descriptor = lowered.body.filterIsInstance<DxirOp>()
+            .single().attrs[KernelDescriptor.ATTR_KEY] as? KernelDescriptor
+        assertNotNull(descriptor, "GB10 must attach a kernel descriptor")
+        assertEquals("flash_attn_v3", descriptor.kernelName)
+        assertEquals("nvidia", descriptor.vendor)
+        assertEquals("gb10", descriptor.targetArch)
+        @Suppress("UNCHECKED_CAST")
+        val kvDtypes = descriptor.customCallAttrs["supported_kv_dtypes"] as List<String>
+        assertTrue(kvDtypes.contains("fp8_e5m2"), "GB10 inherits FA3's full fp8_e5m2 KV-quant set")
+    }
+
+    @Test
+    fun b100PicksCudnnMultiHeadAttention() {
+        val fn = buildCoarsenedFn()
+        val lowered = lowerKernelChoice(fn, KernelTarget.NVIDIA_B100)
+        val descriptor = lowered.body.filterIsInstance<DxirOp>()
+            .single().attrs[KernelDescriptor.ATTR_KEY] as? KernelDescriptor
+        assertNotNull(descriptor)
+        assertEquals("cudnn_multi_head_attention", descriptor.kernelName)
+        assertEquals("b100", descriptor.targetArch)
+        @Suppress("UNCHECKED_CAST")
+        val kvDtypes = descriptor.customCallAttrs["supported_kv_dtypes"] as List<String>
+        // cuDNN MHA's GA surface omits fp8_e5m2 — conservative pick.
+        assertFalse(kvDtypes.contains("fp8_e5m2"), "cuDNN MHA must not advertise fp8_e5m2 in v1")
+        assertTrue(kvDtypes.contains("fp8_e4m3"))
+    }
+
+    @Test
+    fun b200PicksCudnnMultiHeadAttention() {
+        val fn = buildCoarsenedFn()
+        val lowered = lowerKernelChoice(fn, KernelTarget.NVIDIA_B200)
+        val descriptor = lowered.body.filterIsInstance<DxirOp>()
+            .single().attrs[KernelDescriptor.ATTR_KEY] as? KernelDescriptor
+        assertNotNull(descriptor)
+        assertEquals("cudnn_multi_head_attention", descriptor.kernelName)
+        assertEquals("b200", descriptor.targetArch)
+    }
+
+    @Test
     fun annotatedCoarsenedPreservesPrimalAndGradientBodies() {
         val fn = buildCoarsenedFn()
         val originalCo = fn.body.filterIsInstance<DxirOp>().single()

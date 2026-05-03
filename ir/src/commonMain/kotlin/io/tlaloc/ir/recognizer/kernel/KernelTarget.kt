@@ -13,7 +13,7 @@ package io.tlaloc.ir.recognizer.kernel
  *
  * # Common targets (string keys used across L3.3+ + L3.4 cost model)
  *
- * - `nvidia`: `h100`, `h200`, `a100`, `l40s`
+ * - `nvidia`: `h100`, `h200`, `a100`, `l40s`, `gb10`, `b100`, `b200`
  * - `amd`: `mi300x`, `mi355x`
  * - `google`: `tpu_v4`, `tpu_v5e`, `tpu_v5p`, `tpu_v6e`
  * - `aws`: `trainium2`, `trainium3`
@@ -33,6 +33,13 @@ data class KernelTarget(
         val NVIDIA_H100 = KernelTarget("nvidia", "h100")
         val NVIDIA_A100 = KernelTarget("nvidia", "a100")
         val NVIDIA_L40S = KernelTarget("nvidia", "l40s")
+        // Blackwell (sm_100). GB10 is the Grace-Blackwell Spark dev/edge
+        // SKU; B100/B200 are the data-center Blackwell SKUs. They share a
+        // die family (SM_100) but Tlaloc's kernel registry maps them to
+        // different fused kernels — see `FlashAttentionKernel.kt`.
+        val NVIDIA_GB10 = KernelTarget("nvidia", "gb10")
+        val NVIDIA_B100 = KernelTarget("nvidia", "b100")
+        val NVIDIA_B200 = KernelTarget("nvidia", "b200")
         val AMD_MI300X = KernelTarget("amd", "mi300x")
         val GOOGLE_TPU_V4 = KernelTarget("google", "tpu_v4")
         val GOOGLE_TPU_V5E = KernelTarget("google", "tpu_v5e")
