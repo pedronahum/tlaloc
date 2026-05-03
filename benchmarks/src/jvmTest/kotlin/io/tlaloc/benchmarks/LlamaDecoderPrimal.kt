@@ -187,7 +187,10 @@ object LlamaDecoderPrimal {
 
             // ---- Pre-attention RmsNorm (eps form) ---------------------------------
             val sq1 = op(OpKind.MUL, listOf(xIn, xIn), tH)
-            val mean1 = op(OpKind.MEAN, listOf(sq1), tHReduced)
+            val mean1 = op(
+                OpKind.MEAN, listOf(sq1), tHReduced,
+                attrs = mapOf("reduction_dims" to listOf(1)),  // last-axis keep-dims
+            )
             val mEps1 = op(OpKind.ADD, listOf(mean1, epsAttn), tHReduced)
             val rsq1 = op(OpKind.RSQRT, listOf(mEps1), tHReduced)
             val xNormAttn = op(OpKind.MUL, listOf(xIn, rsq1), tH)
@@ -217,7 +220,10 @@ object LlamaDecoderPrimal {
 
             // ---- Pre-MLP RmsNorm (eps form) ---------------------------------------
             val sq2 = op(OpKind.MUL, listOf(xAttn, xAttn), tH)
-            val mean2 = op(OpKind.MEAN, listOf(sq2), tHReduced)
+            val mean2 = op(
+                OpKind.MEAN, listOf(sq2), tHReduced,
+                attrs = mapOf("reduction_dims" to listOf(1)),  // last-axis keep-dims
+            )
             val mEps2 = op(OpKind.ADD, listOf(mean2, epsMlp), tHReduced)
             val rsq2 = op(OpKind.RSQRT, listOf(mEps2), tHReduced)
             val xNormMlp = op(OpKind.MUL, listOf(xAttn, rsq2), tH)
