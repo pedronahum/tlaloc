@@ -219,4 +219,5 @@ internal fun computeGradientReads(gradientBody: DxirFunction, numUpstreamParams:
 val defaultCoarseners: Map<String, PatternCoarsener> = mapOf(
     "FlashAttention" to PatternCoarsener { m -> coarsenFlashAttention(m as RecognitionMatch.FlashAttention) },
     "RmsNorm" to PatternCoarsener { m -> coarsenRmsNorm(m as RecognitionMatch.RmsNorm) },
+    "Rope" to PatternCoarsener { m -> coarsenRope(m as RecognitionMatch.Rope) },
 )
