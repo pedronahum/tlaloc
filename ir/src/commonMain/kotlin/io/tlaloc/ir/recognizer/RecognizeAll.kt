@@ -35,6 +35,7 @@ fun recognizeAll(
     all += recognizeRmsNorm(fn, diagnostics)
     all += recognizeRope(fn, diagnostics)
     all += recognizeCrossEntropy(fn, diagnostics)
+    all += recognizeSwiGLU(fn, diagnostics)
     return resolveLargestMatch(all)
 }
 

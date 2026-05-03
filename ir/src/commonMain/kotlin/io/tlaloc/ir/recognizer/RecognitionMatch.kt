@@ -91,6 +91,44 @@ sealed class RecognitionMatch {
     ) : RecognitionMatch() {
         override val patternName: String = "CrossEntropy"
     }
+
+    /**
+     * SwiGLU gated MLP activation. Layer 4 §0.4.267 — the canonical
+     * Llama / Mistral / PaLM MLP gate:
+     *
+     * ```
+     * gate_proj = MATMUL(x, W_gate)
+     * up_proj   = MATMUL(x, W_up)
+     * out       = SILU(gate_proj) · up_proj
+     * ```
+     *
+     * v1 matches the inner SwiGLU activation (two parallel matmuls + SILU
+     * + elementwise gating), not the surrounding `down_proj` matmul. The
+     * coarsener target is a fused `silu_mul_kernel` (one kernel launch +
+     * no `silu(gate)` materialisation in HBM). A future "TransformerMLP"
+     * recognizer can absorb the down-proj for cuBLASLt-style fused-MLP
+     * kernels.
+     *
+     * @property xInput the shared input tensor (operand of both MATMULs).
+     * @property wGate the gate-projection weight (the non-shared operand
+     *   of [ops]\[1]).
+     * @property wUp the up-projection weight (the non-shared operand of
+     *   [ops]\[2]).
+     * @property output the gating MUL's result (== [ops]\[3]).
+     * @property xType convenience: type of [xInput].
+     * @property outputType convenience: type of [output].
+     */
+    data class SwiGLU(
+        override val ops: List<DxirOp>,
+        val xInput: io.tlaloc.ir.DxirNode,
+        val wGate: io.tlaloc.ir.DxirNode,
+        val wUp: io.tlaloc.ir.DxirNode,
+        val output: io.tlaloc.ir.DxirNode,
+        val xType: DxirType,
+        val outputType: DxirType,
+    ) : RecognitionMatch() {
+        override val patternName: String = "SwiGLU"
+    }
 }
 
 /**
