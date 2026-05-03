@@ -255,8 +255,105 @@ object DeviceDescriptors {
         extras = mapOf("amx_enabled" to true),
     )
 
-    /** All seven canonical descriptors, in declaration order. */
-    val all: List<DeviceDescriptor> = listOf(H100, A100, TPU_V4, TPU_V5E, TPU_V6E, TRAINIUM2, CPU_GENERIC)
+    /**
+     * NVIDIA GB10 Grace-Blackwell Superchip (DGX Spark / Project DIGITS).
+     * Dev/edge target — the chip behind the workstation form factor that
+     * pairs a Grace CPU with a smaller Blackwell GPU + 128 GB of
+     * coherent LPDDR5X memory (not HBM3e — that's the key differentiator
+     * vs B100/B200, and what shapes the cost model's roofline on this
+     * SKU).
+     *
+     * Source: NVIDIA Project DIGITS / DGX Spark announcement, CES 2025.
+     * https://www.nvidia.com/en-us/products/workstations/dgx-spark/
+     *
+     * Numbers are derived from NVIDIA's headline "1 PFLOP FP4 AI" claim
+     * (= 1000 TFLOPs FP4 sparse → 500 TFLOPs dense → 250 TFLOPs FP8
+     * dense → 125 TFLOPs BF16 dense, applying the standard Blackwell
+     * 2× / 2× / 2× stepdown). Memory bandwidth and on-chip cache size
+     * are estimated at small-Blackwell ratios — refine when NVIDIA
+     * publishes detailed silicon specs.
+     */
+    val GB10 = DeviceDescriptor(
+        name = "gb10",
+        vendor = "nvidia",
+        peakFlopsF32 = 8e12,         // ~8 TFLOPs estimated; small Blackwell scales down from B100's ~30
+        peakFlopsBf16 = 125e12,      // 1 PFLOP FP4 sparse → 125 TFLOPs BF16 dense
+        peakFlopsFp8 = 250e12,       // 250 TFLOPs FP8 dense
+        hbmBandwidthBytesPerSec = 273e9,  // LPDDR5X-8533 quad-channel, ~273 GB/s (NVIDIA published)
+        hbmCapacityBytes = 128L * 1024 * 1024 * 1024,  // 128 GB unified LPDDR5X
+        onChipSramBytes = 40L * 1024 * 1024,  // estimated; small Blackwell L2
+        smOrCoreCount = 80,          // estimated; small Blackwell SM count (NVIDIA hasn't published exact)
+        extras = mapOf(
+            "sparsity_factor" to 2.0,
+            "memory_kind" to "lpddr5x",   // distinguishes from HBM3e parts
+        ),
+    )
+
+    /**
+     * NVIDIA B100 Tensor Core GPU (Blackwell, data-center, 700W TDP).
+     * The lower-power data-center Blackwell SKU; same memory subsystem
+     * as B200 but lower clocks/boost.
+     *
+     * Source: NVIDIA Blackwell Architecture Whitepaper, GTC March 2024.
+     * https://resources.nvidia.com/en-us-blackwell-architecture
+     *
+     * - FP32 (tensor core, no sparsity): ~30 TFLOPs (estimated from B100's
+     *   tensor-core scaling vs H100's 67; NVIDIA emphasizes BF16/FP8 over
+     *   FP32 for Blackwell)
+     * - BF16/FP16 (tensor core, dense): 1750 TFLOPs (3500 with 2:4 sparsity)
+     * - FP8 (tensor core, dense): 3500 TFLOPs (7000 with sparsity)
+     * - HBM3e: 8 TB/s, 192 GB (8× 24 GB stacks)
+     * - L2 (combined across both GPC chiplets): ~100 MB
+     * - SM count: 144 (combined across both chiplets, presented as one device)
+     * - TDP: 700W
+     */
+    val B100 = DeviceDescriptor(
+        name = "b100",
+        vendor = "nvidia",
+        peakFlopsF32 = 30e12,
+        peakFlopsBf16 = 1750e12,
+        peakFlopsFp8 = 3500e12,
+        hbmBandwidthBytesPerSec = 8e12,
+        hbmCapacityBytes = 192L * 1024 * 1024 * 1024,
+        onChipSramBytes = 100L * 1024 * 1024,
+        smOrCoreCount = 144,
+        extras = mapOf("sparsity_factor" to 2.0, "tdp_watts" to 700),
+    )
+
+    /**
+     * NVIDIA B200 Tensor Core GPU (Blackwell, data-center, 1000W TDP).
+     * The flagship Blackwell SKU. Same memory subsystem as B100; higher
+     * clocks/boost give ~28% more compute throughput.
+     *
+     * Source: NVIDIA Blackwell Architecture Whitepaper, GTC March 2024.
+     * https://resources.nvidia.com/en-us-blackwell-architecture
+     *
+     * - FP32 (tensor core, no sparsity): ~37 TFLOPs (estimated)
+     * - BF16/FP16 (tensor core, dense): 2250 TFLOPs (4500 with 2:4 sparsity)
+     * - FP8 (tensor core, dense): 4500 TFLOPs (9000 with sparsity)
+     * - HBM3e: 8 TB/s, 192 GB (same as B100)
+     * - L2: ~100 MB (same as B100)
+     * - SM count: 144 (same silicon as B100; B200 just clocks higher)
+     * - TDP: 1000W
+     */
+    val B200 = DeviceDescriptor(
+        name = "b200",
+        vendor = "nvidia",
+        peakFlopsF32 = 37e12,
+        peakFlopsBf16 = 2250e12,
+        peakFlopsFp8 = 4500e12,
+        hbmBandwidthBytesPerSec = 8e12,
+        hbmCapacityBytes = 192L * 1024 * 1024 * 1024,
+        onChipSramBytes = 100L * 1024 * 1024,
+        smOrCoreCount = 144,
+        extras = mapOf("sparsity_factor" to 2.0, "tdp_watts" to 1000),
+    )
+
+    /** All ten canonical descriptors, in declaration order. */
+    val all: List<DeviceDescriptor> = listOf(
+        H100, A100, TPU_V4, TPU_V5E, TPU_V6E, TRAINIUM2, CPU_GENERIC,
+        GB10, B100, B200,
+    )
 
     /** Lookup by name (matches `KernelTarget.arch`); null if not in v1. */
     fun byName(name: String): DeviceDescriptor? = all.firstOrNull { it.name == name }
