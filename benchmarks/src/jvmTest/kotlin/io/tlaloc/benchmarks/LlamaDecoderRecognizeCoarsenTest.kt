@@ -4,6 +4,7 @@ import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.coarsener.coarsenRecognizedPatterns
+import io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened
 import io.tlaloc.ir.recognizer.recognizeAll
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -106,5 +107,45 @@ class LlamaDecoderRecognizeCoarsenTest {
         val (_, coarsened) = buildAndCoarsen()
         val adds = coarsened.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.ADD }
         assertEquals(2, adds.size, "2 residual ADDs remain (RmsNorm eps ADDs absorbed)")
+    }
+
+    @Test
+    fun decomposeCoarsenedRemovesAllSixCoarsenedOpsFromLlamaDecoder() {
+        // IR-level pin for the §0.4.275 decomposeCoarsened pass on the full
+        // LlamaDecoder primal: every un-annotated COARSENED must inline
+        // back to its primal_body, so the post-decompose body holds zero
+        // COARSENED ops while preserving the 6 unrecognized matmuls and
+        // 2 residual ADDs from the outer body. The §0.4.276 emit test pins
+        // this indirectly (`no stablehlo.custom_call`); this test pins it
+        // directly at the IR level so a regression in DecomposeCoarsened
+        // surfaces here without needing the full emit pipeline.
+        val (_, coarsened) = buildAndCoarsen()
+        val coarsenedCount = coarsened.body.filterIsInstance<DxirOp>()
+            .count { it.op == OpKind.COARSENED }
+        assertEquals(6, coarsenedCount, "prerequisite: 6 COARSENED ops")
+
+        val decomposed = decomposeCoarsened(coarsened)
+        val ops = decomposed.body.filterIsInstance<DxirOp>()
+        assertEquals(
+            0, ops.count { it.op == OpKind.COARSENED },
+            "all 6 COARSENED ops must be inlined; got ${ops.filter { it.op == OpKind.COARSENED }.size}",
+        )
+        // 10 matmuls total post-decompose:
+        //   6 outer preserved (Q,K,V,O,down,lm_head — never absorbed)
+        // + 2 inlined from FlashAttention's primal_body (Q·K, P·V)
+        // + 2 inlined from SwiGLU's primal_body (gate, up)
+        // The 6-vs-10 jump is the structural signal that FlashAttention
+        // and SwiGLU re-expanded; if either coarsener stops absorbing
+        // those matmuls, this drops back to 6 here.
+        assertEquals(
+            10, ops.count { it.op == OpKind.MATMUL },
+            "expected 10 matmuls (6 outer + 2 from FlashAttention + 2 from SwiGLU)",
+        )
+        // ADDs in the decomposed body = 2 residuals + ADDs from inlined
+        // primal_bodies (RmsNorm eps ADD, RoPE recombine ADD, etc.). The
+        // exact count depends on each pattern's primal_body shape; pin
+        // only that we have AT LEAST the 2 residuals.
+        val addCount = ops.count { it.op == OpKind.ADD }
+        assertEquals(true, addCount >= 2, "expected ≥ 2 ADDs (residuals); got $addCount")
     }
 }
