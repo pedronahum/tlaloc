@@ -117,6 +117,24 @@ class LlamaDecoderStablehloEmitTest {
     }
 
     @Test
+    fun dumpsCpuBaselineMlirToBuildDir() {
+        // Side-effect test: writes the CPU baseline MLIR to
+        // benchmarks/build/llama-decoder-cpu-baseline.mlir for manual
+        // inspection (and for piping through iree-compile during Phase 3
+        // bring-up). Keeps a reproducible artifact path tied to the
+        // smoke gate so the file always reflects HEAD's emit output.
+        val mlir = cpuBaselineEmit()
+        val target = java.io.File("build/llama-decoder-cpu-baseline.mlir")
+        target.parentFile?.mkdirs()
+        target.writeText(mlir)
+        assertTrue(target.exists() && target.length() > 0, "MLIR dump file must exist + be non-empty")
+        // Also note that wrapping in a `module { }` may be needed for
+        // iree-compile; the function-level emit doesn't include it.
+        // If iree-compile fails on this file, prepend `module { ... }`.
+        println("[llama-decoder] CPU baseline MLIR written to ${target.absolutePath} (${mlir.length} chars)")
+    }
+
+    @Test
     fun emitIsDeterministicAcrossCalls() {
         // Pin determinism so byte-for-byte snapshot comparisons work for
         // Phase 4's regression-detection layer.
