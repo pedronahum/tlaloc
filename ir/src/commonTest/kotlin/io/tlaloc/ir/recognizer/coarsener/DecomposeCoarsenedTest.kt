@@ -2,6 +2,7 @@ package io.tlaloc.ir.recognizer.coarsener
 
 import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirBuilder
+import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirType
@@ -122,6 +123,53 @@ class DecomposeCoarsenedTest {
 
         val opCount = decomposed.body.filterIsInstance<DxirOp>().size
         assertEquals(8, opCount, "two RmsNorms × 4 ops each = 8 primitive ops")
+    }
+
+    @Test
+    fun decomposesEpsFormRmsNormCoarsenedCorrectly() {
+        // Eps-form RmsNorm has a 2-param primal_body (x, eps). The eps lives
+        // as a const in the outer function body and is passed as the
+        // COARSENED's second outer operand. After decomposeCoarsened inlines
+        // the primal_body, the inner ADD must reference the outer const,
+        // not a dangling param. Pins the multi-operand + outer-const path
+        // that the no-eps tests don't exercise.
+        val fn = DxirBuilder.function("rms_norm_eps") {
+            val x = param("x", xType)
+            val eps = const(1e-6f, mType)
+            val sq = op(OpKind.MUL, listOf(x, x), xType)
+            val mean = op(OpKind.MEAN, listOf(sq), mType)
+            val stabilised = op(OpKind.ADD, listOf(mean, eps), mType)
+            val r = op(OpKind.RSQRT, listOf(stabilised), mType)
+            val out = op(OpKind.MUL, listOf(x, r), xType)
+            listOf(out)
+        }
+        val coarsened = coarsenRecognizedPatterns(fn, recognizeAll(fn))
+        val coarsenedCount = coarsened.body.filterIsInstance<DxirOp>()
+            .count { it.op == OpKind.COARSENED }
+        assertEquals(1, coarsenedCount, "prerequisite: 1 COARSENED op")
+
+        val decomposed = decomposeCoarsened(coarsened)
+        val coarsenedAfter = decomposed.body.filterIsInstance<DxirOp>()
+            .count { it.op == OpKind.COARSENED }
+        assertEquals(0, coarsenedAfter, "COARSENED inlined")
+
+        // Eps-form primal_body: MUL → MEAN → ADD → RSQRT → MUL = 5 ops.
+        val opCount = decomposed.body.filterIsInstance<DxirOp>().size
+        assertEquals(5, opCount, "decomposed body should have 5 primal_body ops")
+
+        // The outer eps const must be cloned into the new function and
+        // wired into the inlined ADD — otherwise the inlined body would
+        // reference a dangling primal_body param.
+        val constsInBody = decomposed.body.filterIsInstance<DxirConst>()
+        assertEquals(1, constsInBody.size, "exactly one const cloned (the eps)")
+        val epsClone = constsInBody.single()
+        assertEquals(1e-6f, epsClone.value, "cloned const value preserved")
+        val addOp = decomposed.body.filterIsInstance<DxirOp>()
+            .single { it.op == OpKind.ADD }
+        assertTrue(
+            addOp.operands.any { it.id == epsClone.id },
+            "ADD must consume the cloned eps const; got operands=${addOp.operands.map { it.id }}",
+        )
     }
 
     @Test
