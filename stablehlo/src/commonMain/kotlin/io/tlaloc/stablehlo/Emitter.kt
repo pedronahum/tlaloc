@@ -160,12 +160,15 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.TANH -> unary(step, name, "stablehlo.tanh", ops[0], outType)
             OpKind.SIGMOID -> unary(step, name, "stablehlo.logistic", ops[0], outType)
 
-            // Elementwise binary
-            OpKind.ADD -> binary(step, name, "stablehlo.add", ops[0], ops[1], outType)
-            OpKind.SUB -> binary(step, name, "stablehlo.subtract", ops[0], ops[1], outType)
-            OpKind.MUL -> binary(step, name, "stablehlo.multiply", ops[0], ops[1], outType)
-            OpKind.DIV -> binary(step, name, "stablehlo.divide", ops[0], ops[1], outType)
-            OpKind.POW -> binary(step, name, "stablehlo.power", ops[0], ops[1], outType)
+            // Elementwise binary. §0.4.277 — operand shapes may differ from
+            // the result type (NumPy-style broadcast). StableHLO requires
+            // both operands to match the result type, so we inject an
+            // explicit `broadcast_in_dim` whenever an operand needs widening.
+            OpKind.ADD -> binary(step, name, "stablehlo.add", ops[0], ops[1], node.operands[0].type, node.operands[1].type, node.type)
+            OpKind.SUB -> binary(step, name, "stablehlo.subtract", ops[0], ops[1], node.operands[0].type, node.operands[1].type, node.type)
+            OpKind.MUL -> binary(step, name, "stablehlo.multiply", ops[0], ops[1], node.operands[0].type, node.operands[1].type, node.type)
+            OpKind.DIV -> binary(step, name, "stablehlo.divide", ops[0], ops[1], node.operands[0].type, node.operands[1].type, node.type)
+            OpKind.POW -> binary(step, name, "stablehlo.power", ops[0], ops[1], node.operands[0].type, node.operands[1].type, node.type)
 
             // Type conversion
             OpKind.CAST -> emitCast(step, name, ops[0], node.operands[0].type, node.type)
@@ -282,7 +285,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // once D.3i PhiCalculus closure lands — no more "add StableHLO arm"
             // prerequisite.
             OpKind.NOT -> unary(step, name, "stablehlo.not", ops[0], outType)
-            OpKind.LAND -> binary(step, name, "stablehlo.and", ops[0], ops[1], outType)
+            OpKind.LAND -> binary(step, name, "stablehlo.and", ops[0], ops[1], node.operands[0].type, node.operands[1].type, node.type)
             // Structured-control-flow ops: Stage B's coarsening pass closes IF / WHILE
             // regions into straight-line dxir before this emitter sees them. Lowering
             // either op directly to `stablehlo.if` / `stablehlo.while` is deferred
@@ -371,8 +374,55 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine("$step$name = $op $x : $type")
     }
 
-    private fun binary(step: String, name: String, op: String, a: String, b: String, type: String) {
-        out.appendLine("$step$name = $op $a, $b : $type")
+    private fun binary(
+        step: String,
+        name: String,
+        op: String,
+        a: String,
+        b: String,
+        aType: DxirType,
+        bType: DxirType,
+        resultType: DxirType,
+    ) {
+        val aFinal = broadcastIfNeeded(step, a, aType, resultType)
+        val bFinal = broadcastIfNeeded(step, b, bType, resultType)
+        out.appendLine("$step$name = $op $aFinal, $bFinal : ${resultType.toMlir()}")
+    }
+
+    /**
+     * §0.4.277 — Inject `stablehlo.broadcast_in_dim` if [operandType] doesn't
+     * match [resultType]. Returns the SSA name to use downstream (the original
+     * if no broadcast was needed; the broadcast result otherwise).
+     *
+     * v1: same-rank broadcast only — each input dim must equal the result dim
+     * or be 1. Different-rank broadcasts (NumPy's "prepend size-1 dims" rule)
+     * are out of scope; the recognized patterns + LlamaDecoderPrimal don't
+     * surface them.
+     */
+    private fun broadcastIfNeeded(
+        step: String,
+        operandName: String,
+        operandType: DxirType,
+        resultType: DxirType,
+    ): String {
+        if (operandType == resultType) return operandName
+        require(operandType.rank == resultType.rank) {
+            "broadcastIfNeeded: rank mismatch (operand=${operandType.dims} result=${resultType.dims}); " +
+                "different-rank broadcast not supported in v1"
+        }
+        for (i in 0 until operandType.rank) {
+            require(operandType.dims[i] == resultType.dims[i] || operandType.dims[i] == 1) {
+                "broadcastIfNeeded: dim $i operand=${operandType.dims[i]} vs result=${resultType.dims[i]} " +
+                    "is not broadcast-compatible (operand must match or be 1)"
+            }
+        }
+        val bcast = synth()
+        val dims = (0 until operandType.rank).joinToString(", ")  // identity mapping
+        out.appendLine(
+            "$step$bcast = stablehlo.broadcast_in_dim $operandName, dims = [$dims] : " +
+                "(${operandType.toMlir()}) -> ${resultType.toMlir()}",
+        )
+        return bcast
     }
 
     private fun emitRelu(step: String, name: String, x: String, type: DxirType) {

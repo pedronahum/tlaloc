@@ -59,6 +59,114 @@ class EmitterTest {
     }
 
     @Test
+    fun binaryWithBroadcastableOperandInjectsBroadcastInDim() {
+        // Result type [4] but operand a is [1] — broadcast injection picks
+        // up `a` and re-emits it as broadcast_in_dim before the add. `b`
+        // matches the result and is left alone. Surfaces in LlamaDecoder
+        // when MEAN's keep-dims [tokens, 1] result combines with [tokens, d]
+        // tensors via the elementwise tail of RmsNorm.
+        val r = DxirType(F32, listOf(4))
+        val s = DxirType(F32, listOf(1))
+        val fn = DxirBuilder.function("f") {
+            val a = param("a", s)
+            val b = param("b", r)
+            val c = op(OpKind.ADD, listOf(a, b), r)
+            listOf(c)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains("stablehlo.broadcast_in_dim %0, dims = [0] : (tensor<1xf32>) -> tensor<4xf32>"),
+            "expected broadcast_in_dim re-emitting %0 from [1] to [4]; got: $mlir",
+        )
+        // The add must consume the broadcast result, not the raw %0.
+        assertTrue(
+            mlir.contains("stablehlo.add %") && !mlir.contains("stablehlo.add %0,"),
+            "add must consume the broadcasted operand, not the raw [1]-shaped %0; got: $mlir",
+        )
+        assertTrue(mlir.contains(", %1 : tensor<4xf32>"), mlir)
+    }
+
+    @Test
+    fun binaryWithBothOperandsBroadcastableInjectsBothBroadcasts() {
+        // Result type [3, 4]; both operands need a broadcast: a is [1, 4]
+        // (row repeated across the 3 axis) and b is [3, 1] (col repeated
+        // across the 4 axis). Two distinct broadcast_in_dim ops must
+        // appear before the multiply.
+        val r = DxirType(F32, listOf(3, 4))
+        val sa = DxirType(F32, listOf(1, 4))
+        val sb = DxirType(F32, listOf(3, 1))
+        val fn = DxirBuilder.function("f") {
+            val a = param("a", sa)
+            val b = param("b", sb)
+            val c = op(OpKind.MUL, listOf(a, b), r)
+            listOf(c)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains("stablehlo.broadcast_in_dim %0, dims = [0, 1] : (tensor<1x4xf32>) -> tensor<3x4xf32>"),
+            "expected broadcast_in_dim widening %0 from [1,4] to [3,4]; got: $mlir",
+        )
+        assertTrue(
+            mlir.contains("stablehlo.broadcast_in_dim %1, dims = [0, 1] : (tensor<3x1xf32>) -> tensor<3x4xf32>"),
+            "expected broadcast_in_dim widening %1 from [3,1] to [3,4]; got: $mlir",
+        )
+        assertTrue(mlir.contains("stablehlo.multiply %") && mlir.contains(": tensor<3x4xf32>"), mlir)
+    }
+
+    @Test
+    fun binaryWithMatchingOperandsEmitsNoBroadcastInjection() {
+        // Same-shape operands hit the no-op path; emit must not mention
+        // broadcast_in_dim around the add. Pins the regression that
+        // §0.4.277 introduced the broadcast helper without breaking the
+        // existing same-shape lowering.
+        val mlir = singleOpFunction(OpKind.ADD, DxirType(F32, listOf(8, 16)))
+        // Existing keep-dims reduce paths emit broadcast_in_dim too, but
+        // singleOpFunction is just `add(param_a, param_b)`; no reduce.
+        assertTrue(!mlir.contains("broadcast_in_dim"), "no broadcast injection expected for same-shape add; got: $mlir")
+        assertTrue(mlir.contains("stablehlo.add %0, %1 : tensor<8x16xf32>"), mlir)
+    }
+
+    @Test
+    fun binaryRejectsRankMismatchedOperand() {
+        // v1 is same-rank only — different-rank operands (NumPy's
+        // "prepend size-1 dims" rule) fail loudly so a future generaliser
+        // can't silently miscompile.
+        val r = DxirType(F32, listOf(3, 4))
+        val s = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("f") {
+            val a = param("a", s)
+            val b = param("b", r)
+            val c = op(OpKind.ADD, listOf(a, b), r)
+            listOf(c)
+        }
+        val ex = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        assertTrue(
+            ex.message!!.contains("rank mismatch"),
+            "expected rank-mismatch require-message; got: ${ex.message}",
+        )
+    }
+
+    @Test
+    fun binaryRejectsIncompatibleDimOperand() {
+        // Same-rank but operand dim is neither equal to result nor 1 →
+        // not broadcast-compatible. Fails loudly with the offending dim
+        // index in the message so callers can localise the bug.
+        val r = DxirType(F32, listOf(4, 4))
+        val s = DxirType(F32, listOf(2, 4))
+        val fn = DxirBuilder.function("f") {
+            val a = param("a", s)
+            val b = param("b", r)
+            val c = op(OpKind.ADD, listOf(a, b), r)
+            listOf(c)
+        }
+        val ex = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        assertTrue(
+            ex.message!!.contains("dim 0") && ex.message!!.contains("not broadcast-compatible"),
+            "expected incompatible-dim require-message naming dim 0; got: ${ex.message}",
+        )
+    }
+
+    @Test
     fun emitsElementwiseUnaryOps() {
         val t = DxirType(F32, listOf(4))
         assertTrue(singleUnary(OpKind.NEG, t).contains("stablehlo.negate"))

@@ -33,6 +33,11 @@ kotlin {
             dependencies {
                 implementation(libs.kotest.assertions.core)
                 implementation(libs.kotest.runner.junit5)
+                // §0.4.274 — Phase 3 step 1 of the dual-track Llama-decoder
+                // benchmark plan needs :stablehlo emit coverage on the
+                // LlamaDecoderPrimal. Test-only dependency; the production
+                // :benchmarks code stays on :core + :ir.
+                implementation(project(":stablehlo"))
             }
         }
     }
