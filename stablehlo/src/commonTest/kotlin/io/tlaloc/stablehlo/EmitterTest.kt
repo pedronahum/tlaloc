@@ -167,6 +167,30 @@ class EmitterTest {
     }
 
     @Test
+    fun binaryRejectsDtypeMismatchedOperand() {
+        // §0.4.279 — `stablehlo.broadcast_in_dim` is shape-only; emitting
+        // `(tensor<NxF32>) -> tensor<NxF64>` is invalid MLIR. The
+        // broadcastIfNeeded helper guards against this with a
+        // load-bearing error rather than silently miscompiling. DXIR's
+        // elementwise-op contract should already enforce same-dtype on
+        // operand vs result, but a hand-built DxirOp via the public
+        // builder API can still violate it — this guard catches that.
+        val r = DxirType(io.tlaloc.core.F64, listOf(4))
+        val s = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("f") {
+            val a = param("a", s)
+            val b = param("b", r)
+            val c = op(OpKind.ADD, listOf(a, b), r)
+            listOf(c)
+        }
+        val ex = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        assertTrue(
+            ex.message!!.contains("dtype mismatch") && ex.message!!.contains("CAST"),
+            "expected dtype-mismatch require-message naming CAST as the fix; got: ${ex.message}",
+        )
+    }
+
+    @Test
     fun emitsElementwiseUnaryOps() {
         val t = DxirType(F32, listOf(4))
         assertTrue(singleUnary(OpKind.NEG, t).contains("stablehlo.negate"))

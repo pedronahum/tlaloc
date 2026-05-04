@@ -406,6 +406,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         resultType: DxirType,
     ): String {
         if (operandType == resultType) return operandName
+        require(operandType.dtype == resultType.dtype) {
+            "broadcastIfNeeded: dtype mismatch (operand=${operandType.dtype} result=${resultType.dtype}); " +
+                "stablehlo.broadcast_in_dim is shape-only — dtype must match. Insert an explicit CAST first."
+        }
         require(operandType.rank == resultType.rank) {
             "broadcastIfNeeded: rank mismatch (operand=${operandType.dims} result=${resultType.dims}); " +
                 "different-rank broadcast not supported in v1"
