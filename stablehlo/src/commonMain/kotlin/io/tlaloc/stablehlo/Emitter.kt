@@ -2043,6 +2043,18 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         require(bcastDims.size == inputType.rank) {
             "BROADCAST broadcast_dimensions length ${bcastDims.size} must equal input rank ${inputType.rank}"
         }
+        // §0.4.283 — StableHLO requires each broadcast_dimensions entry
+        // in [0, output rank) and the entries to be unique. Without these
+        // guards a malformed dxir silently emits invalid MLIR.
+        val outputRank = node.type.rank
+        bcastDims.forEach {
+            require(it in 0 until outputRank) {
+                "BROADCAST broadcast_dimensions entry $it out of range [0, $outputRank); got $bcastDims"
+            }
+        }
+        require(bcastDims.toSet().size == bcastDims.size) {
+            "BROADCAST broadcast_dimensions must be unique; got $bcastDims"
+        }
         out.appendLine(
             "$step$name = stablehlo.broadcast_in_dim $x, dims = [${bcastDims.joinToString(", ")}] " +
                 ": (${inputType.toMlir()}) -> ${node.type.toMlir()}",

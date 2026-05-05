@@ -1794,6 +1794,66 @@ class EmitterTest {
     }
 
     @Test
+    fun broadcastRejectsLengthMismatchedDims() {
+        // The existing length-vs-input-rank require: input is rank 2 but
+        // broadcast_dimensions has length 1, so the attr can't possibly
+        // map every input axis to an output axis.
+        val fn = DxirBuilder.function("f") {
+            val x = param("x", DxirType(F32, listOf(2, 3)))
+            val y = op(
+                OpKind.BROADCAST, listOf(x), DxirType(F32, listOf(4, 2, 3)),
+                attrs = mapOf("broadcast_dimensions" to listOf(1)),
+            )
+            listOf(y)
+        }
+        val ex = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        assertTrue(
+            ex.message!!.contains("must equal input rank"),
+            "expected length-mismatch require-message; got: ${ex.message}",
+        )
+    }
+
+    @Test
+    fun broadcastRejectsOutOfRangeDim() {
+        // §0.4.283 — output is rank 2 (valid dims 0, 1) but
+        // broadcast_dimensions points to dim 3. Must fail loudly rather
+        // than emit invalid MLIR.
+        val fn = DxirBuilder.function("f") {
+            val x = param("x", DxirType(F32, listOf(3)))
+            val y = op(
+                OpKind.BROADCAST, listOf(x), DxirType(F32, listOf(2, 3)),
+                attrs = mapOf("broadcast_dimensions" to listOf(3)),
+            )
+            listOf(y)
+        }
+        val ex = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        assertTrue(
+            ex.message!!.contains("out of range"),
+            "expected out-of-range require-message; got: ${ex.message}",
+        )
+    }
+
+    @Test
+    fun broadcastRejectsDuplicateDims() {
+        // §0.4.283 — input is rank 2; broadcast_dimensions has length 2
+        // (length OK) but both entries point to output dim 0. StableHLO
+        // requires unique target dims; emitter must fail loudly.
+        val fn = DxirBuilder.function("f") {
+            val x = param("x", DxirType(F32, listOf(2, 3)))
+            val y = op(
+                OpKind.BROADCAST, listOf(x), DxirType(F32, listOf(4, 5)),
+                attrs = mapOf("broadcast_dimensions" to listOf(0, 0)),
+            )
+            listOf(y)
+        }
+        val ex = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        assertTrue(
+            ex.message!!.contains("must be unique"),
+            "expected duplicate-dims require-message; got: ${ex.message}",
+        )
+    }
+
+    @Test
     fun concatLowersVariadicOperands() {
         val fn = DxirBuilder.function("f") {
             val a = param("a", DxirType(F32, listOf(2, 3)))
