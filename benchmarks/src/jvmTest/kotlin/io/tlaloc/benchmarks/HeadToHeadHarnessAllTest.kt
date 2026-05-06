@@ -108,7 +108,16 @@ class HeadToHeadHarnessAllTest {
                 "CSV header doesn't match the paper-style format",
             )
             for (line in csvLines.drop(1)) {
-                assertTrue(line.contains(",tlaloc,"), "CSV row should contain ',tlaloc,', got: $line")
+                // §0.4.293 — framework label renamed from "tlaloc" to
+                // "tlaloc-interpreter" to distinguish the JVM-interpreter path
+                // from "tlaloc-iree-cpu" / "tlaloc-iree-cuda" rows the
+                // LlamaDecoderIreeBenchmark produces. The default
+                // HeadToHeadResult.framework picks up "tlaloc-interpreter",
+                // so every existing inhabitant lands in this column.
+                assertTrue(
+                    line.contains(",tlaloc-interpreter,"),
+                    "CSV row should contain ',tlaloc-interpreter,', got: $line",
+                )
                 val parts = line.split(",")
                 assertEquals(6, parts.size, "CSV row should have 6 fields: $line")
             }

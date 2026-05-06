@@ -42,6 +42,15 @@ data class HeadToHeadResult(
     val medianNanos: Long,
     val minNanos: Long,
     val p99Nanos: Long,
+    /**
+     * Framework label used in the CSV's `framework` column. Defaults to
+     * `"tlaloc-interpreter"` — matches the historical CSV (was hardcoded as
+     * `"tlaloc"` pre-§0.4.293, renamed to make the JVM-interpreter path
+     * distinguishable from `"tlaloc-iree-cpu"` / `"tlaloc-iree-cuda"` rows
+     * the IREE-driven benchmarks emit. Aggregator-side filenames stay
+     * `harness-results-tlaloc.{csv,json}` for backward compatibility.
+     */
+    val framework: String = "tlaloc-interpreter",
 ) {
     /**
      * §0.4.222 — minimal JSON serialisation. No external deps; just enough
@@ -52,6 +61,7 @@ data class HeadToHeadResult(
     fun toJsonString(): String = buildString {
         append("{\n")
         append("  \"benchmark\": \"$benchmark\",\n")
+        append("  \"framework\": \"$framework\",\n")
         append("  \"forwardValue\": ${"%.6g".format(forwardValue)},\n")
         append("  \"gradientValues\": [")
         gradientValues.forEachIndexed { i, v ->
@@ -288,16 +298,12 @@ object HeadToHeadHarnessRunner {
         file.writeText(buildString {
             append("benchmark,framework,n_iterations,median_ns,min_ns,p99_ns\n")
             for (r in results) {
-                append(r.benchmark)
-                append(",tlaloc,")
-                append(r.measuredIterations)
-                append(",")
-                append(r.medianNanos)
-                append(",")
-                append(r.minNanos)
-                append(",")
-                append(r.p99Nanos)
-                append("\n")
+                append(r.benchmark); append(',')
+                append(r.framework); append(',')
+                append(r.measuredIterations); append(',')
+                append(r.medianNanos); append(',')
+                append(r.minNanos); append(',')
+                append(r.p99Nanos); append('\n')
             }
         })
     }

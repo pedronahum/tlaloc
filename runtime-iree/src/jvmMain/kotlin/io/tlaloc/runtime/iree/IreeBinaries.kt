@@ -17,6 +17,7 @@ object IreeBinaries {
 
     val ireeCompile: String? by lazy { resolve("iree-compile") }
     val ireeRunModule: String? by lazy { resolve("iree-run-module") }
+    val ireeBenchmarkModule: String? by lazy { resolve("iree-benchmark-module") }
 
     val available: Boolean
         get() = ireeCompile != null && ireeRunModule != null
