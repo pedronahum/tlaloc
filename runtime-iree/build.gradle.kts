@@ -18,6 +18,18 @@ kotlin {
     }
 
     sourceSets {
+        jvmMain {
+            dependencies {
+                // §0.4.287 — runOnIree bridge needs DType (:core), DxirFunction
+                // and DxirType (:ir), and the StableHLO emit pipeline
+                // (:stablehlo). The §0.4.284 subprocess facade was dep-free; the
+                // bridge is the layering boundary where IREE meets the rest of
+                // the Tlaloc compiler. Mirrors :stablehlo's commonMain deps.
+                implementation(project(":core"))
+                implementation(project(":ir"))
+                implementation(project(":stablehlo"))
+            }
+        }
         jvmTest {
             dependencies {
                 implementation(kotlin("test"))
