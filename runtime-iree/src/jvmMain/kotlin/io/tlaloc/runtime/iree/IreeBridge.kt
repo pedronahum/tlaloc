@@ -26,7 +26,11 @@ import io.tlaloc.stablehlo.toStablehlo
  *  - Compiles from scratch on every call. For repeated dispatch with fixed [fn],
  *    factor out the [IreeRuntime.compile] step yourself and cache the [IreeModule].
  */
-fun runOnIree(fn: DxirFunction, inputs: List<FloatArray>): List<FloatArray> {
+fun runOnIree(
+    fn: DxirFunction,
+    inputs: List<FloatArray>,
+    target: IreeTarget = IreeTarget.LlvmCpu,
+): List<FloatArray> {
     require(fn.params.size == inputs.size) {
         "runOnIree: param count ${fn.params.size} != input count ${inputs.size}"
     }
@@ -48,7 +52,7 @@ fun runOnIree(fn: DxirFunction, inputs: List<FloatArray>): List<FloatArray> {
     }
 
     val mlir = fn.toStablehlo("")
-    val module = IreeRuntime.compile(mlir)
+    val module = IreeRuntime.compile(mlir, target)
 
     val textualInputs = fn.params.zip(inputs).map { (p, arr) -> formatInput(p.type, arr) }
     val rawOutputs = IreeRuntime.invoke(module, function = fn.name, inputs = textualInputs)

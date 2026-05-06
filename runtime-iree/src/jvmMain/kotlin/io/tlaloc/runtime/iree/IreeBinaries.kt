@@ -21,6 +21,27 @@ object IreeBinaries {
     val available: Boolean
         get() = ireeCompile != null && ireeRunModule != null
 
+    /**
+     * Best-effort detector for whether NVIDIA CUDA dispatch is plausible on this host.
+     * `nvidia-smi -L` returning zero with a non-empty device listing is sufficient
+     * evidence to attempt CUDA compile + dispatch via [IreeTarget.Cuda]; if the
+     * subsequent `iree-run-module --device=cuda` invocation actually fails (driver
+     * mismatch, etc.) that surfaces as a real test failure rather than a silent skip.
+     */
+    val cudaAvailable: Boolean by lazy {
+        runCatching {
+            val pb = ProcessBuilder("nvidia-smi", "-L").redirectErrorStream(true)
+            val p = pb.start()
+            val finished = p.waitFor(5, TimeUnit.SECONDS)
+            if (!finished) {
+                p.destroyForcibly(); false
+            } else {
+                val out = p.inputStream.bufferedReader().readText().trim()
+                p.exitValue() == 0 && out.isNotEmpty()
+            }
+        }.getOrElse { false }
+    }
+
     private fun resolve(tool: String): String? {
         System.getenv("TLALOC_IREE_BIN")?.let { dir ->
             val candidate = Path.of(dir, tool)
