@@ -110,29 +110,37 @@ class RmsNormCoarsenerTest {
     }
 
     @Test
-    fun gradientBodyForEpsVariantReturnsZeroDeps() {
+    fun gradientBodyForEpsVariantEmitsAnalyticalDeps() {
+        // §0.4.292 — the prior "deps = const(0)" shortcut produced disagreement
+        // with PyTorch's torch.autograd.grad. Coarsener now emits the analytical
+        //   d_eps = -0.5 · r³ · SUM(dy · x, last-axis, keep-dims)
+        // which structurally is a MUL of (-0.5 broadcast) and (r³ · sum_dyx).
         val fn = buildRmsNormFnWithEps()
         val coarsened = coarsenRecognizedPatterns(fn, recognizeRmsNorm(fn))
         val co = coarsened.body.filterIsInstance<DxirOp>().single()
         val grad = co.attrs["gradient_body"] as DxirFunction
 
-        // With eps: signature is (dy, x, eps) → (dx, deps_zero).
+        // With eps: signature is (dy, x, eps) → (dx, d_eps).
         assertEquals(3, grad.params.size, "(dy, x, eps)")
         assertEquals(xType, grad.params[0].type)
         assertEquals(xType, grad.params[1].type)
         assertEquals(epsType, grad.params[2].type)
-        assertEquals(2, grad.returns.size, "(dx, deps_zero)")
+        assertEquals(2, grad.returns.size, "(dx, d_eps)")
         assertEquals(xType, grad.returns[0].type)
         assertEquals(epsType, grad.returns[1].type)
 
-        // Second return is a const-zero matching epsType; verify it's a
-        // DxirConst with zero value (structural, not numerical).
+        // Second return is now a MUL (the outermost -0.5 · (r³ · sum_dyx)), not a const.
         val depsRet = grad.returns[1]
         assertTrue(
-            depsRet is io.tlaloc.ir.DxirConst,
-            "deps gradient is a const (eps treated as a fixed hyperparameter)",
+            depsRet is DxirOp && depsRet.op == OpKind.MUL,
+            "d_eps should be the MUL closing the analytical chain, not a const-zero shortcut; got $depsRet",
         )
-        assertEquals(0.0f, (depsRet as io.tlaloc.ir.DxirConst).value)
+        assertEquals(epsType, depsRet.type)
+
+        // Pin the analytical structure: the gradient body should contain a SUM
+        // (over the dy · x reduction) in addition to the existing MEAN(s).
+        val sums = grad.body.filterIsInstance<DxirOp>().count { it.op == OpKind.SUM }
+        assertTrue(sums >= 1, "expected at least one SUM in the gradient body for d_eps's reduction")
     }
 
     @Test

@@ -122,43 +122,61 @@ class RopeCoarsenerTest {
 
     @Test
     fun gradientBodyForSubFormNegatesImagBranch() {
-        // SUB-form (cosMul-first) ⇒ d_x_imag = NEG(dy · sin). ADD-form
-        // ⇒ no NEG (both branches are bare MULs). Checking the NEG-count
-        // pins the sign-handling logic without requiring numerical eval.
+        // §0.4.292 — pre-fix this test counted total NEG ops in the gradient
+        // body (1 in SUB, 0 in ADD). Post-fix the d_theta arm contributes its
+        // own NEG ops (αSin's base `-sin·xR` term, plus a sign flip per recombine
+        // form), so the total NEG count is no longer a useful invariant. Pin
+        // the actual semantic instead: d_x_imag is wrapped in NEG iff SUB-form
+        // (cosMul-first), and d_theta is now an ADD-of-two-MULs structure
+        // (no longer a const-zero shortcut).
         val coSub = coarsenRecognizedPatterns(buildRopeFnSub(), recognizeRope(buildRopeFnSub()))
             .body.filterIsInstance<DxirOp>().single()
         val gradSub = coSub.attrs["gradient_body"] as DxirFunction
-        val negCountSub = gradSub.body.count { it is DxirOp && it.op == OpKind.NEG }
-        assertEquals(1, negCountSub, "SUB-form gradient must wrap d_x_imag in a NEG")
+        val dXImagSub = gradSub.returns[1]
+        assertTrue(
+            dXImagSub is DxirOp && dXImagSub.op == OpKind.NEG,
+            "SUB-form (cosMul-first) d_x_imag must be wrapped in a NEG; got $dXImagSub",
+        )
 
         val coAdd = coarsenRecognizedPatterns(buildRopeFnAdd(), recognizeRope(buildRopeFnAdd()))
             .body.filterIsInstance<DxirOp>().single()
         val gradAdd = coAdd.attrs["gradient_body"] as DxirFunction
-        val negCountAdd = gradAdd.body.count { it is DxirOp && it.op == OpKind.NEG }
-        assertEquals(0, negCountAdd, "ADD-form gradient has no NEG ops")
+        val dXImagAdd = gradAdd.returns[1]
+        assertTrue(
+            !(dXImagAdd is DxirOp && dXImagAdd.op == OpKind.NEG),
+            "ADD-form d_x_imag must not be a NEG (it is dy·sin directly); got $dXImagAdd",
+        )
 
-        // Last return (d_theta) is a const-zero in both forms.
+        // d_theta is now the analytical ADD-of-two-MULs structure: ADD(signedT1, signedT2)
+        // where signedT1 covers the `-sin(θ)·xR` chain-rule contribution and signedT2
+        // covers the `cos(θ)·xI` contribution. Both forms must produce a non-const,
+        // non-zero gradient body return.
         for (grad in listOf(gradSub, gradAdd)) {
             val dThetaRet = grad.returns[2]
             assertTrue(
-                dThetaRet is io.tlaloc.ir.DxirConst,
-                "d_theta is a const (theta treated as fixed positional embedding)",
+                dThetaRet is DxirOp && dThetaRet.op == OpKind.ADD,
+                "d_theta should combine the cos- and sin-chain-rule arms via ADD; got $dThetaRet",
             )
-            assertEquals(0.0f, (dThetaRet as io.tlaloc.ir.DxirConst).value)
         }
     }
 
     @Test
-    fun readsPrimalIndicesIncludesThetaOnly() {
+    fun readsPrimalIndicesIncludesAllThree() {
+        // §0.4.292 — pre-fix d_theta was a const(0), so x_real / x_imag flowed
+        // into the gradient only via dy (their values were never dereferenced
+        // inside the gradient body). Post-fix d_theta = dy · (-sin(θ)·xR +
+        // cos(θ)·xI) explicitly multiplies x_real and x_imag, so all three
+        // primal operand subgraphs now need to live in the gradient function
+        // for ref-integrity. computeGradientReads picks up the dependency.
         val fn = buildRopeFnSub()
         val coarsened = coarsenRecognizedPatterns(fn, recognizeRope(fn))
         val co = coarsened.body.filterIsInstance<DxirOp>().single()
 
         @Suppress("UNCHECKED_CAST")
         val reads = co.attrs["reads_primal_indices"] as Set<Int>
-        // Gradient body recomputes cos/sin from theta (param idx 2 in primal).
-        // x_real (idx 0) and x_imag (idx 1) flow into the gradient only via
-        // the upstream dy, so they don't appear in reads.
-        assertEquals(setOf(2), reads, "only theta is dereferenced; x_real/x_imag flow via dy")
+        assertEquals(
+            setOf(0, 1, 2), reads,
+            "all three operands (x_real, x_imag, theta) are dereferenced by d_theta + d_x_*'s recompute",
+        )
     }
 }

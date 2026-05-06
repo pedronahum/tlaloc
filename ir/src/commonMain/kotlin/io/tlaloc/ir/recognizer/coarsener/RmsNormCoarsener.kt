@@ -116,7 +116,8 @@ internal fun coarsenRmsNorm(
     if (addOp != null && epsNode == null) return null
     val epsType = epsNode?.type
     if (epsType != null && epsType.dtype != F32 && epsType.dtype != F64) {
-        // We emit a const-zero deps gradient; only F32/F64 are wired up.
+        // The d_eps `-0.5` constant only knows F32/F64; other dtypes (I32/I64/Bool)
+        // wouldn't make sense as an RmsNorm epsilon anyway.
         return null
     }
 
@@ -217,19 +218,42 @@ private fun buildRmsNormGradient(
     val dx = op(OpKind.MUL, listOf(dyMinusInner, r), xType)
 
     if (eps != null) {
-        // Eps treated as a fixed hyperparameter; gradient is structurally zero
-        // matching eps's type. A learnable-eps VJP requires reducing the
-        // per-position contribution across all outer axes, which depends on
-        // eps's actual shape — deferred until a caller needs it.
-        val zeroDeps = const(zeroValueFor(eps.type), eps.type)
-        listOf(dx, zeroDeps)
+        // d_eps = -0.5 · r³ · SUM(dy · x, last-axis, keep-dims). §0.4.292
+        // closed the prior shortcut (d_eps = const(0)) — emitting structural
+        // zero produced disagreement with PyTorch's torch.autograd.grad on any
+        // gradient consumer that asks for d_eps. Derivation:
+        //   y[k,j] = x[k,j] · r[k] where r[k] = rsqrt(mean(x²)[k] + eps[k])
+        //   ∂r[k]/∂eps[k] = -0.5 · r[k]³
+        //   ∂loss/∂eps[k] = sum_j dy[k,j] · x[k,j] · (-0.5 · r[k]³).
+        // v1 only handles eps.type == rsqrtType (eps broadcasts trivially across
+        // the dim axis); arbitrary eps shapes need an additional SUM-reduce
+        // and are deferred until a caller hits one.
+        require(eps.type == rsqrtType) {
+            "RmsNormCoarsener: eps gradient requires eps.type (${eps.type}) to match rsqrt " +
+                "output type ($rsqrtType); arbitrary eps shapes need a follow-up reduction step"
+        }
+        val rCubed = op(OpKind.MUL, listOf(rSquared, r), rsqrtType)
+        // SUM(dy · x) with the same reduction_dims as the forward MEAN —
+        // the dimension axes the forward MEAN collapses are the axes whose
+        // contribution to eps is summed in reverse.
+        val sumDyx = op(OpKind.SUM, listOf(dyx), rsqrtType, attrs = meanAttrs)
+        val scalarType = DxirType(eps.type.dtype, emptyList())
+        val negHalfValue: Any = when (eps.type.dtype) {
+            F32 -> -0.5f
+            F64 -> -0.5
+            else -> error("RmsNormCoarsener: unsupported eps dtype ${eps.type.dtype}")
+        }
+        val negHalf = const(negHalfValue, scalarType)
+        val negHalfBroadcast = op(
+            OpKind.BROADCAST,
+            listOf(negHalf),
+            rsqrtType,
+            attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+        )
+        val rCubedSum = op(OpKind.MUL, listOf(rCubed, sumDyx), rsqrtType)
+        val dEps = op(OpKind.MUL, listOf(negHalfBroadcast, rCubedSum), rsqrtType)
+        listOf(dx, dEps)
     } else {
         listOf(dx)
     }
-}
-
-private fun zeroValueFor(t: DxirType): Any = when (t.dtype) {
-    F32 -> 0.0f
-    F64 -> 0.0
-    else -> error("RmsNormCoarsener: unsupported eps dtype ${t.dtype}")
 }

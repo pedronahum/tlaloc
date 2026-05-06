@@ -30,6 +30,7 @@ fun runOnIree(
     fn: DxirFunction,
     inputs: List<FloatArray>,
     target: IreeTarget = IreeTarget.LlvmCpu,
+    timeoutSeconds: Long = 300L,
 ): List<FloatArray> {
     require(fn.params.size == inputs.size) {
         "runOnIree: param count ${fn.params.size} != input count ${inputs.size}"
@@ -52,10 +53,12 @@ fun runOnIree(
     }
 
     val mlir = fn.toStablehlo("")
-    val module = IreeRuntime.compile(mlir, target)
+    val module = IreeRuntime.compile(mlir, target, timeoutSeconds = timeoutSeconds)
 
     val textualInputs = fn.params.zip(inputs).map { (p, arr) -> formatInput(p.type, arr) }
-    val rawOutputs = IreeRuntime.invoke(module, function = fn.name, inputs = textualInputs)
+    val rawOutputs = IreeRuntime.invoke(
+        module, function = fn.name, inputs = textualInputs, timeoutSeconds = timeoutSeconds,
+    )
 
     require(rawOutputs.size == fn.returns.size) {
         "runOnIree: iree-run-module returned ${rawOutputs.size} results; expected ${fn.returns.size}"

@@ -25,7 +25,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   `(logits, labels)`.
  * - **`gradient_body`** — the analytical VJP that *replaces* the
  *   decomposed softmax-then-log gradient with the textbook fused form.
- *   Signature `(d_loss, logits, labels) → (d_logits, d_labels_zero)`.
+ *   Signature `(d_loss, logits, labels) → (d_logits, d_labels)`.
  *   The point of coarsening cross-entropy: forward + decomposed backward
  *   would compute SOFTMAX three times and propagate through LOG (which
  *   has its own numerical hazards near `softmax → 0`); the analytical
@@ -57,7 +57,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  * # (positive sign because the recognizer matches the un-negated form;
  * #  user code that wants NLL applies a NEG outside this envelope.)
  * d_logits = d_loss · (labels − softmax(logits))
- * d_labels = 0                               (labels are fixed targets)
+ * d_labels = d_loss · log(softmax(logits))    (§0.4.292; was 0 pre-fix)
  * ```
  *
  * The scalar `d_loss` is broadcast to `logits`'s shape via an explicit
@@ -83,10 +83,11 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   hoist `probs` into the COARSENED's payload as an additional primal
  *   return.
  *
- * - **Labels treated as a fixed target.** `d_labels = 0` mirrors the
- *   `d_eps = 0` / `d_theta = 0` treatment in RmsNorm + RoPE — a
- *   learnable-labels VJP would compute `d_labels = d_loss · log_softmax`
- *   but is rare in practice (labels are typically observed data).
+ * - **Labels gradient.** §0.4.292 closed the prior shortcut (`d_labels = 0`).
+ *   Tlaloc honours the math: `d_labels = d_loss · log(softmax(logits))`.
+ *   Callers who treat labels as observed data (the common case) can stop
+ *   gradient propagation themselves; the coarsener doesn't privilege that
+ *   choice. Mirrors the same fix in RmsNorm + RoPE.
  */
 internal fun coarsenCrossEntropy(
     match: RecognitionMatch.CrossEntropy,
@@ -202,10 +203,16 @@ private fun buildCrossEntropyGradient(
     // d_logits = d_loss · (labels − softmax(logits)).
     val dLogits = op(OpKind.MUL, listOf(dLossBroadcast, diff), logitsType)
 
-    // Labels treated as fixed targets; gradient is structurally zero
-    // matching labels' type. A learnable-labels VJP would emit
-    // d_labels = d_loss · log_softmax(logits) but is rare in practice.
-    val dLabels = const(zeroValueFor(labelsType), labelsType)
+    // d_labels = d_loss · log(softmax(logits)). The forward computes
+    // `loss = SUM(labels · log(softmax(logits)))`, so ∂loss/∂labels[i] is
+    // log(softmax(logits))[i] (= logp). §0.4.292 closed the prior shortcut
+    // (d_labels = 0) — emitting the structural zero produced bit-exact
+    // disagreement with PyTorch's torch.autograd.grad on tests that
+    // request labels' gradient. Tlaloc honours the math without
+    // privileging a "labels are observed data" assumption that callers
+    // can enforce themselves by stop_gradient'ing labels.
+    val logp = op(OpKind.LOG, listOf(probs), logitsType)
+    val dLabels = op(OpKind.MUL, listOf(dLossBroadcast, logp), labelsType)
 
     listOf(dLogits, dLabels)
 }

@@ -89,20 +89,33 @@ class CrossEntropyCoarsenerTest {
     }
 
     @Test
-    fun gradientBodyForLabelsReturnsZero() {
+    fun gradientBodyForLabelsIsDLossTimesLogSoftmax() {
+        // §0.4.292 — the prior shortcut "d_labels = const(0)" produced bit-exact
+        // disagreement with PyTorch's torch.autograd.grad. Coarsener now emits
+        // the analytical d_labels = d_loss · log(softmax(logits)).
+        //
+        // Structurally that's a MUL whose operands are (dLossBroadcast, logp),
+        // where logp = LOG(SOFTMAX(logits)). The probs/SOFTMAX are already
+        // recomputed for the d_logits arm and reused here.
         val fn = buildCrossEntropyFn()
         val coarsened = coarsenRecognizedPatterns(fn, recognizeCrossEntropy(fn))
         val co = coarsened.body.filterIsInstance<DxirOp>().single()
         val grad = co.attrs["gradient_body"] as DxirFunction
 
-        // Last return (d_labels) is a const-zero matching labelsType.
         val dLabelsRet = grad.returns[1]
         assertTrue(
-            dLabelsRet is io.tlaloc.ir.DxirConst,
-            "d_labels is a const (labels treated as fixed targets)",
+            dLabelsRet is DxirOp && dLabelsRet.op == OpKind.MUL,
+            "d_labels should be a MUL, not a const-zero shortcut; got $dLabelsRet",
         )
-        assertEquals(0.0f, (dLabelsRet as io.tlaloc.ir.DxirConst).value)
         assertEquals(labelsType, dLabelsRet.type)
+
+        // Pin the analytical structure: d_labels = MUL(dLossBroadcast, LOG(SOFTMAX(logits))).
+        // The body should contain at least one LOG (for the new d_labels arm) and the
+        // SOFTMAX is reused from the d_logits computation.
+        val logs = grad.body.filterIsInstance<DxirOp>().count { it.op == OpKind.LOG }
+        val softmaxes = grad.body.filterIsInstance<DxirOp>().count { it.op == OpKind.SOFTMAX }
+        assertTrue(logs >= 1, "expected at least one LOG in the gradient body for d_labels = log(softmax)")
+        assertTrue(softmaxes >= 1, "expected at least one SOFTMAX recompute in the gradient body")
     }
 
     @Test

@@ -24,7 +24,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   COARSENED op's three operands map positionally: `(x_real, x_imag,
  *   theta)` — `theta` is the angle, `cos`/`sin` are recomputed inside.
  * - **`gradient_body`** — the analytical VJP. Signature
- *   `(dy, x_real, x_imag, theta) → (d_x_real, d_x_imag, d_theta_zero)`.
+ *   `(dy, x_real, x_imag, theta) → (d_x_real, d_x_imag, d_theta)`.
  *   The rotation is orthogonal, so the Jacobian is the transposed
  *   rotation: `d_x_real = dy · cos`, `d_x_imag = ±dy · sin`. The sign on
  *   the imag branch flips with the recombination (SUB ⇒ negate the imag
@@ -65,8 +65,14 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  * d_x_imag = dy · sin
  * ```
  *
- * In all three cases `d_theta` is structurally zero — theta is a
- * positional argument, not a learnable parameter.
+ * §0.4.292 — `d_theta` is the analytical chain-rule contribution
+ * `d_theta = dy · ∂out/∂theta` where the partial expands per-form via
+ * the cos/sin chain rule. Pre-§0.4.292 this was a const-zero shortcut
+ * (under the rationale "theta is a positional argument, not a learnable
+ * parameter"); the shortcut produced bit-exact disagreement with PyTorch
+ * on consumers that bind theta to other operand slots (e.g. the
+ * LlamaDecoder primal binds theta to BOTH `x_imag` and `theta` so the
+ * `d_x_imag` arm covered only one of the four contributions).
  *
  * # Scope notes
  *
@@ -87,10 +93,9 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   the matched ops directly. Mismatched shapes would surface as a
  *   downstream type error at lowering, not here.
  *
- * - **Theta dtype.** `d_theta`'s const-zero only knows F32/F64. Other
- *   dtypes would need explicit zero-value constructors; deferred until a
- *   caller actually uses non-floating theta (unusual — positional
- *   embeddings are typically F32).
+ * - **Theta dtype.** `d_theta`'s analytical form via cos/sin chain rule
+ *   only makes sense for floating dtypes; the recognizer caller filter
+ *   declines non-F32/F64 theta upstream of this coarsener.
  */
 internal fun coarsenRope(
     match: RecognitionMatch.Rope,
@@ -217,8 +222,8 @@ private fun buildRopeGradient(
     recombineKind: OpKind,
 ): DxirFunction = DxirBuilder.function("rope_grad") {
     val dy = param("dy", recombineType)
-    @Suppress("UNUSED_VARIABLE") val xReal = param("x_real", xRealType)
-    @Suppress("UNUSED_VARIABLE") val xImag = param("x_imag", xImagType)
+    val xReal = param("x_real", xRealType)
+    val xImag = param("x_imag", xImagType)
     val theta = param("theta", thetaType)
 
     // Recompute cos and sin from theta.
@@ -240,17 +245,42 @@ private fun buildRopeGradient(
         else -> error("RopeCoarsener: unsupported recombine kind $recombineKind")
     }
 
-    // Theta treated as a fixed positional embedding; gradient is structurally
-    // zero matching theta's type. A learnable-theta VJP would compute
-    // d_theta = dy · ∂out/∂theta, which depends on the rotation form;
-    // deferred until a caller actually wants trainable positional embeddings.
-    val dTheta = const(zeroValueFor(theta.type), theta.type)
+    // d_theta from the cos/sin chain rule. §0.4.292 closed the prior shortcut
+    // (d_theta = const(0)) — emitting the structural zero produced disagreement
+    // with PyTorch's torch.autograd.grad on any consumer that asks for d_theta
+    // (e.g. the LlamaDecoder primal which binds theta to BOTH the `x_imag`
+    // operand AND the `theta` operand of this coarsener; the d_x_imag arm only
+    // covers the former, leaving the d/dθ-of-cos and d/dθ-of-sin contributions
+    // missing).
+    //
+    // Math: out = α · cos(θ)·xR + β · sin(θ)·xI for sign coefficients
+    // (α, β) ∈ {±1}² determined by recombineKind and cosMulFirstInRecombine.
+    //   ∂out/∂θ = -α · sin(θ)·xR + β · cos(θ)·xI
+    //   d_theta = dy · ∂out/∂θ = αSin · (-dy·sin(θ)·xR) + βCos · (dy·cos(θ)·xI)
+    // where (αSin, βCos) flip per the recombine form below.
+    //
+    // v1 limitation: thetaType must equal both xRealType and xImagType so the
+    // sum `T1 + T2` shapes match. Theta-broadcast forms (e.g. scalar theta) are
+    // deferred until a caller actually wants them; the recognizer guards this
+    // upstream (theta+sin and theta+cos both produce sinType/cosType matching
+    // recombineType in v1).
+    require(thetaType == xRealType && thetaType == xImagType) {
+        "RopeCoarsener: theta gradient v1 requires thetaType ($thetaType) " +
+            "to match xRealType ($xRealType) and xImagType ($xImagType)"
+    }
+    val xRealSinT = op(OpKind.MUL, listOf(dySin, xReal), xRealType)            // dy · sin(θ) · xR
+    val xImagCosT = op(OpKind.MUL, listOf(dyCos, xImag), xImagType)            // dy · cos(θ) · xI
+    // The base form's "−dy·sin(θ)·xR" component (αSin = +1 by default).
+    val negXRealSinT = op(OpKind.NEG, listOf(xRealSinT), xRealType)
+    // Apply the recombine-dependent sign flips. αSin flips only for (SUB && !cosFirst);
+    // βCos flips only for (SUB && cosFirst).
+    val signedT1 = if (recombineKind == OpKind.SUB && !cosMulFirstInRecombine) {
+        op(OpKind.NEG, listOf(negXRealSinT), xRealType)
+    } else negXRealSinT
+    val signedT2 = if (recombineKind == OpKind.SUB && cosMulFirstInRecombine) {
+        op(OpKind.NEG, listOf(xImagCosT), xImagType)
+    } else xImagCosT
+    val dTheta = op(OpKind.ADD, listOf(signedT1, signedT2), thetaType)
 
     listOf(dXReal, dXImag, dTheta)
-}
-
-private fun zeroValueFor(t: DxirType): Any = when (t.dtype) {
-    F32 -> 0.0f
-    F64 -> 0.0
-    else -> error("RopeCoarsener: unsupported theta dtype ${t.dtype}")
 }

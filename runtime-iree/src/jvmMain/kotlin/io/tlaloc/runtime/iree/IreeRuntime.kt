@@ -141,6 +141,11 @@ object IreeRuntime {
             "--module=${module.vmfbPath}",
             "--device=${module.target.device}",
             "--function=$function",
+            // §0.4.292 — disable the default 1024-element output truncation. Gradient
+            // tensors hit ~16 K elements; without this, parseOutput would see truncated
+            // (`...`-terminated) lines and fail with a precise "expected N got M"
+            // size mismatch — but on success the data would be silently wrong.
+            "--output_max_element_count=2147483647",
             "--flagfile=$flagfile",
         )
         val result = runProcess(args, stdin = null, timeoutSeconds = timeoutSeconds)
@@ -149,8 +154,20 @@ object IreeRuntime {
     }
 
     private fun runProcess(args: List<String>, stdin: String?, timeoutSeconds: Long): IreeProcessResult {
+        // Redirect stdout/stderr to temp files rather than reading them after waitFor.
+        // Without this, when a subprocess writes more than the OS pipe buffer (~64 KB
+        // on Linux) without anything draining the JVM-side pipe, the subprocess blocks
+        // on write and waitFor deadlocks. iree-run-module's textual gradient output for
+        // the LlamaDecoder backward (~116 KB across 13 tensors) hit this exact pattern
+        // (§0.4.292). Files bypass the pipe entirely.
+        val stdoutFile = Files.createTempFile("tlaloc-iree-stdout-", ".log")
+        val stderrFile = Files.createTempFile("tlaloc-iree-stderr-", ".log")
+        stdoutFile.toFile().deleteOnExit()
+        stderrFile.toFile().deleteOnExit()
+
         val pb = ProcessBuilder(args)
-        pb.redirectErrorStream(false)
+            .redirectOutput(stdoutFile.toFile())
+            .redirectError(stderrFile.toFile())
         val p = pb.start()
         if (stdin != null) p.outputStream.bufferedWriter().use { it.write(stdin) } else p.outputStream.close()
         val done = p.waitFor(timeoutSeconds, TimeUnit.SECONDS)
@@ -158,8 +175,8 @@ object IreeRuntime {
             p.destroyForcibly()
             error("${args.first()} timed out after ${timeoutSeconds}s")
         }
-        val stdout = p.inputStream.bufferedReader().readText()
-        val stderr = p.errorStream.bufferedReader().readText()
+        val stdout = Files.readString(stdoutFile)
+        val stderr = Files.readString(stderrFile)
         return IreeProcessResult(p.exitValue(), stdout, stderr)
     }
 
