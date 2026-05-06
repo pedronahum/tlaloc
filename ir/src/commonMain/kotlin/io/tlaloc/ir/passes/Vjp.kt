@@ -548,6 +548,45 @@ object VjpRegistry {
     }
 
     /**
+     * `y = transpose(x, perm)` where `y[I] = x[perm(I)]` (perm is the output→input
+     * axis mapping the :stablehlo emitter and MatmulRule both use). The adjoint is
+     * a transpose of upstream by the *inverse* permutation: `dx[J] = dy[invPerm(J)]`,
+     * i.e. `dx = transpose(dy, invPerm)`. For rank-2 axis swaps perm = [1,0] is its
+     * own inverse, but for general rank we compute invPerm explicitly.
+     *
+     * Until this rule landed, MatmulRule could *emit* TRANSPOSE in its VJP but no
+     * primal TRANSPOSE op could be differentiated — so any model that pre-transposed
+     * a tensor (e.g. K^T in attention) would fail at DxirReverseTransform with
+     * "no VJP rule registered for TRANSPOSE".
+     *
+     * [readsPrimalOperandIndices] = `emptySet()`: the rule only reads the primal's
+     * permutation attr (a structural concern), not the operand's value.
+     */
+    val TransposeRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            @Suppress("UNCHECKED_CAST")
+            val perm = (op.attrs["permutation"] as? List<Int>)
+                ?: error("TransposeRule: TRANSPOSE op is missing required 'permutation' attr")
+            require(perm.size == x.type.rank) {
+                "TransposeRule: permutation length ${perm.size} must equal operand rank ${x.type.rank}"
+            }
+            require(perm.toSortedSet() == (0 until perm.size).toSortedSet()) {
+                "TransposeRule: permutation $perm is not a valid permutation of [0..${perm.size - 1}]"
+            }
+            val invPerm = IntArray(perm.size).also { inv -> perm.forEachIndexed { i, p -> inv[p] = i } }.toList()
+            val dx = builder.op(
+                OpKind.TRANSPOSE,
+                listOf(upstream),
+                x.type,
+                attrs = mapOf("permutation" to invPerm),
+            )
+            return listOf(x to dx)
+        }
+    }
+
+    /**
      * §0.4.41 — d(arr[idx])/d(arr) is a one-hot vector at slot [idx] with value 1;
      * scaled by [upstream], the adjoint is `SCATTER(zeros_like(arr), idx, upstream)`.
      * §0.4.111 — same shape generalises to rank-2 `arr`: d(arr[idx, :])/d(arr) is a
@@ -682,6 +721,7 @@ object VjpRegistry {
         OpKind.TANH to TanhRule,
         OpKind.SIGMOID to SigmoidRule,
         OpKind.CAST to CastRule,
+        OpKind.TRANSPOSE to TransposeRule,
         OpKind.GATHER to GatherRule,
         OpKind.BROADCAST to BroadcastRule,
     )

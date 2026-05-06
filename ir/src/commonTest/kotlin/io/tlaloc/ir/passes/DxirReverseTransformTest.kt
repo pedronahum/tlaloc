@@ -1826,4 +1826,75 @@ class DxirReverseTransformTest {
         val adds = cseFn.body.filterIsInstance<DxirOp>().count { it.op == OpKind.ADD }
         assertEquals(2, adds, "duplicate ADD(x,x) should be merged at top level")
     }
+
+    // --- TransposeRule (rank-2 self-inverse + rank-3 non-trivial inverse) ---
+
+    @Test
+    fun gradOfTransposeRank2EmitsTransposeWithSamePermutation() {
+        // y = transpose(x, [1, 0]); loss = sum(y). Expected gradient body:
+        // upstream BROADCAST (rank-2 ones from SumRule) → TRANSPOSE([1,0]) of upstream → returned as dx.
+        // For rank-2 the inverse permutation [1,0] equals the forward permutation, so
+        // we additionally pin that the emitted permutation attr equals [1, 0].
+        val mat = DxirType(F32, listOf(2, 3))
+        val matT = DxirType(F32, listOf(3, 2))
+        val primal = DxirBuilder.function("sum_transpose") {
+            val x = param("x", mat)
+            val y = op(
+                OpKind.TRANSPOSE, listOf(x), matT,
+                attrs = mapOf("permutation" to listOf(1, 0)),
+            )
+            val s = op(OpKind.SUM, listOf(y), f32)
+            listOf(s)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        val transposes = grad.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.TRANSPOSE }
+        assertEquals(1, transposes.size, "expected exactly one TRANSPOSE in TRANSPOSE's gradient body")
+        assertEquals(listOf(1, 0), transposes.single().attrs["permutation"])
+        // The single returned gradient is rank-2 f32[2, 3], matching x's shape.
+        assertEquals(1, grad.returns.size)
+        assertEquals(mat, grad.returns.single().type)
+    }
+
+    @Test
+    fun gradOfTransposeRank3UsesInversePermutation() {
+        // perm = [2, 0, 1] sends (i,j,k) → output position (k,i,j) — i.e. y[a,b,c] = x[b,c,a].
+        // The inverse permutation is [1, 2, 0] (sanity-checked: composition with perm yields identity).
+        val rank3 = DxirType(F32, listOf(2, 3, 4))
+        val rank3T = DxirType(F32, listOf(4, 2, 3))
+        val primal = DxirBuilder.function("sum_transpose3") {
+            val x = param("x", rank3)
+            val y = op(
+                OpKind.TRANSPOSE, listOf(x), rank3T,
+                attrs = mapOf("permutation" to listOf(2, 0, 1)),
+            )
+            val s = op(OpKind.SUM, listOf(y), f32)
+            listOf(s)
+        }
+        val grad = DxirReverseTransform.apply(primal)
+        val transposes = grad.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.TRANSPOSE }
+        assertEquals(1, transposes.size)
+        assertEquals(listOf(1, 2, 0), transposes.single().attrs["permutation"])
+        assertEquals(1, grad.returns.size)
+        assertEquals(rank3, grad.returns.single().type, "dx must match the primal x's shape")
+    }
+
+    @Test
+    fun gradOfTransposeRejectsMissingPermutationAttr() {
+        // Defensive: TRANSPOSE without permutation cannot be differentiated. The
+        // :stablehlo emitter already rejects this on the forward side, but the rule
+        // must surface a load-bearing error rather than crashing with NPE inside
+        // DxirReverseTransform.
+        val mat = DxirType(F32, listOf(2, 2))
+        val primal = DxirBuilder.function("transpose_no_perm") {
+            val x = param("x", mat)
+            val y = op(OpKind.TRANSPOSE, listOf(x), mat)
+            val s = op(OpKind.SUM, listOf(y), f32)
+            listOf(s)
+        }
+        val ex = assertFailsWith<IllegalStateException> { DxirReverseTransform.apply(primal) }
+        assertTrue(
+            "permutation" in (ex.message ?: ""),
+            "expected error message to mention 'permutation'; got: ${ex.message}",
+        )
+    }
 }
