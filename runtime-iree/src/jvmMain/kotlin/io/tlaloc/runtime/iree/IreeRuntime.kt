@@ -77,6 +77,11 @@ object IreeRuntime {
      * Invokes `function` on `module` with `inputs` formatted as IREE textual values
      * (e.g. `"f32=2.0"`, `"4xf32=1.0,2.0,3.0,4.0"`). Returns the raw `result[i]:` lines'
      * type-and-value tail (e.g. `"f32=3"`).
+     *
+     * Inputs are passed via `--flagfile=<temp>` rather than inline `--input=...` args,
+     * so a llama-shaped invocation with ~100K floats per weight matrix doesn't bust the
+     * OS argv limit (`error=7, Argument list too long`). The flagfile is a JVM temp
+     * file with one `--input=<value>` line per input; deleteOnExit handles cleanup.
      */
     fun invoke(
         module: IreeModule,
@@ -87,13 +92,24 @@ object IreeRuntime {
         val bin = IreeBinaries.ireeRunModule
             ?: error("iree-run-module not resolved; set TLALOC_IREE_BIN or install via the dual-track plan's path A")
 
-        val args = buildList {
-            add(bin)
-            add("--module=${module.vmfbPath}")
-            add("--device=local-task")
-            add("--function=$function")
-            inputs.forEach { add("--input=$it") }
-        }
+        val flagfile = Files.createTempFile("tlaloc-iree-flagfile-", ".txt")
+        flagfile.toFile().deleteOnExit()
+        Files.writeString(
+            flagfile,
+            buildString {
+                for (input in inputs) {
+                    append("--input=").append(input).append('\n')
+                }
+            },
+        )
+
+        val args = listOf(
+            bin,
+            "--module=${module.vmfbPath}",
+            "--device=local-task",
+            "--function=$function",
+            "--flagfile=$flagfile",
+        )
         val result = runProcess(args, stdin = null, timeoutSeconds = timeoutSeconds)
         if (!result.ok) throw IreeRunException(function, inputs, result)
         return parseOutputs(result.stdout)
