@@ -1,4 +1,4 @@
-package io.tlaloc.benchmarks
+package io.tlaloc.runtime.iree
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -17,13 +17,17 @@ import java.nio.file.StandardOpenOption
  *
  * The total preamble (magic + version + HEADER_LEN + header) is padded to a
  * multiple of 64 bytes so the data section is aligned for `numpy.load` to mmap
- * efficiently. NumPy reads this back natively via `numpy.load(path)`.
+ * efficiently.
  *
- * Internal helper for the §0.4.289 IREE-vs-PyTorch agreement test —
- * dumps the synthesized LlamaDecoder inputs to disk so the Python reference
- * script can load them and compute its own loss against the same data.
+ * `iree-run-module` and `iree-benchmark-module` accept `--input=@<path>.npy`
+ * directly, which means a host that needs to dispatch with hundreds of MB of
+ * inputs (e.g. a medium-shaped LlamaDecoder forward) can sidestep the textual
+ * `<shape>xf32=v0,v1,…` form and the OS argv / flagfile-size limits that
+ * come with it. Used by both the §0.4.289+ PyTorch-comparison test (npy as
+ * the cross-language hand-off format) and the §0.4.294+ medium-config
+ * benchmark (npy as the input-marshalling format for IREE's tools).
  */
-internal object NpyWriter {
+object NpyWriter {
 
     fun writeFloat32(path: Path, data: FloatArray, shape: List<Int>) {
         val expected = if (shape.isEmpty()) 1 else shape.fold(1) { a, b -> a * b }

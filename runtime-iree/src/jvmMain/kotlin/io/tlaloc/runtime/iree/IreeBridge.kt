@@ -4,6 +4,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirType
 import io.tlaloc.stablehlo.toStablehlo
+import java.nio.file.Files
 
 /**
  * High-level bridge from a [DxirFunction] to IREE-CPU dispatch via [IreeRuntime].
@@ -31,6 +32,7 @@ fun runOnIree(
     inputs: List<FloatArray>,
     target: IreeTarget = IreeTarget.LlvmCpu,
     timeoutSeconds: Long = 300L,
+    useNpyInputs: Boolean = false,
 ): List<FloatArray> {
     require(fn.params.size == inputs.size) {
         "runOnIree: param count ${fn.params.size} != input count ${inputs.size}"
@@ -55,9 +57,25 @@ fun runOnIree(
     val mlir = fn.toStablehlo("")
     val module = IreeRuntime.compile(mlir, target, timeoutSeconds = timeoutSeconds)
 
-    val textualInputs = fn.params.zip(inputs).map { (p, arr) -> formatInput(p.type, arr) }
+    // §0.4.294 — for medium / large configs, the textual `<shape>xf32=v0,v1,…`
+    // form blows past flagfile-parse limits (medium = ~24 MB raw f32 → ~240 MB
+    // textual). When [useNpyInputs] is true, write each input to a temp `.npy`
+    // file (NPY 1.0 little-endian f32) and pass `--input=@<path>` instead.
+    // iree-run-module / iree-benchmark-module accept this directly.
+    val inputArgs: List<String> = if (useNpyInputs) {
+        val workDir = Files.createTempDirectory("tlaloc-iree-bridge-npy-")
+        workDir.toFile().deleteOnExit()
+        fn.params.zip(inputs).mapIndexed { i, (p, arr) ->
+            val target = workDir.resolve("input_${"%03d".format(i)}_${p.name}.npy")
+            NpyWriter.writeFloat32(target, arr, p.type.dims)
+            target.toFile().deleteOnExit()
+            "@$target"
+        }
+    } else {
+        fn.params.zip(inputs).map { (p, arr) -> formatInput(p.type, arr) }
+    }
     val rawOutputs = IreeRuntime.invoke(
-        module, function = fn.name, inputs = textualInputs, timeoutSeconds = timeoutSeconds,
+        module, function = fn.name, inputs = inputArgs, timeoutSeconds = timeoutSeconds,
     )
 
     require(rawOutputs.size == fn.returns.size) {

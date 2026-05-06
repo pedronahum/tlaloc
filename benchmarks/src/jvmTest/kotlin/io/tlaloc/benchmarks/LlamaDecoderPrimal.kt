@@ -110,6 +110,19 @@ data class LlamaDecoderConfig(
         )
 
         /**
+         * §0.4.294 — medium config that's the smallest CUDA-wins-by-X size on this
+         * GB10 Blackwell host. tokens=256, dModel=512, dFf=2048, vocab=2048. Total
+         * forward FLOPs ≈ 1.3 GFLOPs (dominated by the gate/up/down/lm_head matmuls
+         * at ~268 MFLOPs each), small enough that the inputs fit in ~24 MB of raw
+         * f32 (npy-marshalled). At tiny config, kernel-launch overhead dominates
+         * compute (CUDA loses to CPU); medium is where the speedup story emerges.
+         */
+        val medium = LlamaDecoderConfig(
+            batch = 1, seq = 256, dModel = 512, nHeads = 8, headDim = 64,
+            ffnMult = 4.0, vocab = 2048,
+        )
+
+        /**
          * Llama-3-8B-shaped (modulo single-head + no-GQA simplifications).
          * Defined here for Phase 4 measurement to import directly; not
          * exercised by Phase 2 tests (would push CI beyond ms-scale).

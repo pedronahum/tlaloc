@@ -1,6 +1,7 @@
 package io.tlaloc.benchmarks
 
 import io.tlaloc.runtime.iree.IreeBinaries
+import io.tlaloc.runtime.iree.NpyWriter
 import io.tlaloc.runtime.iree.runOnIree
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.Files

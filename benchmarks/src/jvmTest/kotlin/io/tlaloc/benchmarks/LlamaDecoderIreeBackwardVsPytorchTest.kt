@@ -6,6 +6,7 @@ import io.tlaloc.ir.recognizer.coarsener.coarsenRecognizedPatterns
 import io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened
 import io.tlaloc.ir.recognizer.recognizeAll
 import io.tlaloc.runtime.iree.IreeBinaries
+import io.tlaloc.runtime.iree.NpyWriter
 import io.tlaloc.runtime.iree.runOnIree
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.Files
