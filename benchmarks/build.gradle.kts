@@ -38,6 +38,11 @@ kotlin {
                 // LlamaDecoderPrimal. Test-only dependency; the production
                 // :benchmarks code stays on :core + :ir.
                 implementation(project(":stablehlo"))
+                // §0.4.286 — IREE compile probe of the LlamaDecoder MLIR:
+                // first-contact assertion that the CPU baseline pipeline
+                // produces valid IREE input (exit=0 from iree-compile via
+                // IreeRuntime.compile). Test-only dependency.
+                implementation(project(":runtime-iree"))
             }
         }
     }

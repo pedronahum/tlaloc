@@ -209,8 +209,17 @@ object LlamaDecoderPrimal {
             val qImag = op(OpKind.MUL, listOf(theta, sinT), tH)        // x_imag · sin (theta as proxy)
             val qRot = op(OpKind.SUB, listOf(qReal, qImag), tH)        // RoPE recombination
 
-            // ---- Attention: MATMUL(Q, K) → SOFTMAX → MATMUL(P, V) ------------------
-            val s = op(OpKind.MATMUL, listOf(qRot, k), tScores)
+            // ---- Attention: MATMUL(Q, K^T) → SOFTMAX → MATMUL(P, V) ----------------
+            // Tlaloc's MATMUL convention is `S = A · B` (contract last(A) × first(B)).
+            // Attention scores need Q · K^T, so K is pre-transposed here. The
+            // FlashAttention recognizer matches whatever the QK matmul's second operand
+            // is, so this transpose is captured as the K leaf input cleanly.
+            val tKt = DxirType(F32, listOf(d, tokens))
+            val kT = op(
+                OpKind.TRANSPOSE, listOf(k), tKt,
+                attrs = mapOf("permutation" to listOf(1, 0)),
+            )
+            val s = op(OpKind.MATMUL, listOf(qRot, kT), tScores)
             val p = op(OpKind.SOFTMAX, listOf(s), tScores)
             val attnOut = op(OpKind.MATMUL, listOf(p, vProj), tH)
 
