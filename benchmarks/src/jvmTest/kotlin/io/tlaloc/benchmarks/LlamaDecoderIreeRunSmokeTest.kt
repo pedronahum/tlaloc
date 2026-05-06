@@ -1,9 +1,5 @@
 package io.tlaloc.benchmarks
 
-import io.tlaloc.ir.DxirFunction
-import io.tlaloc.ir.recognizer.coarsener.coarsenRecognizedPatterns
-import io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened
-import io.tlaloc.ir.recognizer.recognizeAll
 import io.tlaloc.runtime.iree.IreeBinaries
 import io.tlaloc.runtime.iree.runOnIree
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -36,46 +32,6 @@ import kotlin.test.assertTrue
  */
 class LlamaDecoderIreeRunSmokeTest {
 
-    private fun cpuBaselinePipeline(): DxirFunction {
-        val raw = LlamaDecoderPrimal.build(LlamaDecoderConfig.tiny)
-        val coarsened = coarsenRecognizedPatterns(raw, recognizeAll(raw))
-        return decomposeCoarsened(coarsened)
-    }
-
-    /**
-     * Deterministic input synthesis keyed by the param's name (the LlamaDecoderPrimal
-     * builder picks stable names; see its `param("x_in", …)` etc. declarations):
-     *
-     *   - `labels` → one-hot per row at a random target token (a sane CE-loss target
-     *     distribution; otherwise the SUM(labels * log(probs)) term is meaningless),
-     *   - `eps_attn` / `eps_mlp` → standard RmsNorm epsilon 1e-5 broadcast,
-     *   - everything else (weights, activations, RoPE theta) → small Gaussian
-     *     ~N(0, 0.05²) so RmsNorm + softmax stay well-conditioned.
-     *
-     * Uses `java.util.Random` (its `nextGaussian` is deterministic by seed) so two
-     * calls with the same seed produce byte-identical FloatArrays — the determinism
-     * test depends on this.
-     */
-    private fun synthesizeInputs(seed: Long, fn: DxirFunction): List<FloatArray> {
-        val rng = java.util.Random(seed)
-        return fn.params.map { p ->
-            val n = p.type.elementCount.toInt()
-            when (p.name) {
-                "labels" -> {
-                    val arr = FloatArray(n)
-                    val (rows, cols) = p.type.dims
-                    for (i in 0 until rows) {
-                        val target = rng.nextInt(cols)
-                        arr[i * cols + target] = 1.0f
-                    }
-                    arr
-                }
-                "eps_attn", "eps_mlp" -> FloatArray(n) { 1e-5f }
-                else -> FloatArray(n) { (rng.nextGaussian() * 0.05).toFloat() }
-            }
-        }
-    }
-
     private fun requireIreeOrSkip() {
         assumeTrue(
             IreeBinaries.available,
@@ -88,8 +44,8 @@ class LlamaDecoderIreeRunSmokeTest {
     @Test
     fun llamaDecoderForwardProducesFiniteScalarLoss() {
         requireIreeOrSkip()
-        val fn = cpuBaselinePipeline()
-        val inputs = synthesizeInputs(seed = 42L, fn)
+        val fn = llamaCpuBaselinePipeline()
+        val inputs = llamaSynthesizeInputs(seed = 42L, fn)
 
         val outputs = runOnIree(fn, inputs)
 
@@ -103,9 +59,9 @@ class LlamaDecoderIreeRunSmokeTest {
     @Test
     fun llamaDecoderForwardIsDeterministicAcrossCalls() {
         requireIreeOrSkip()
-        val fn = cpuBaselinePipeline()
-        val inputs1 = synthesizeInputs(seed = 7L, fn)
-        val inputs2 = synthesizeInputs(seed = 7L, fn)
+        val fn = llamaCpuBaselinePipeline()
+        val inputs1 = llamaSynthesizeInputs(seed = 7L, fn)
+        val inputs2 = llamaSynthesizeInputs(seed = 7L, fn)
         // Sanity: identical inputs from the same seed.
         for (i in inputs1.indices) {
             assertTrue(
