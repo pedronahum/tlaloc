@@ -97,13 +97,18 @@ class LlamaDecoderComparisonMatrixTest {
         )
 
         // Pivot: matrix[mode][framework] = Row.
-        // §0.4.301 added `tlaloc-pjrt-xla-cuda` (Tlaloc-emitted StableHLO fed to
-        // PJRT-XLA backend, the §0.4.299 spike) to triangulate the IREE-vs-XLA gap.
+        //   §0.4.301 added `tlaloc-pjrt-xla-cuda` (Tlaloc-emitted StableHLO fed
+        //     to PJRT-XLA backend via the §0.4.299 Python spike).
+        //   §0.4.308 added `tlaloc-pjrt-ffm-cuda` — the same backend exercised
+        //     via the pure-Kotlin PjrtSession (no Python on the timing path).
+        //     Both rows are kept: the spike row is the historical "does this
+        //     work?" data point; the FFM row is the production-side number.
         val frameworks = listOf(
             "pytorch-cpu",
             "tlaloc-iree-cpu",
             "tlaloc-iree-cuda",
             "tlaloc-pjrt-xla-cuda",
+            "tlaloc-pjrt-ffm-cuda",
             "jax-gpu",
         )
         val modes = listOf("forward", "backward")

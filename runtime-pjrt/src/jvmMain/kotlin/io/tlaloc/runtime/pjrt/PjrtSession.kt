@@ -3,6 +3,7 @@ package io.tlaloc.runtime.pjrt
 import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.runtime.pjrt.ffm.PjrtApi
+import io.tlaloc.runtime.pjrt.ffm.PjrtBuffer
 import io.tlaloc.runtime.pjrt.ffm.PjrtClient
 import io.tlaloc.runtime.pjrt.ffm.PjrtDevice
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfm
@@ -165,6 +166,41 @@ class PjrtSession(
     /** Number of executables currently in the compile cache. Useful for
      * tests asserting cache hit/miss behaviour. */
     val cacheSize: Int get() = executableCache.size
+
+    // =========================================================================
+    // §0.4.308 — lower-level methods for benchmark loops.
+    //
+    // [runOn]'s FloatArray-in/out shape is convenient but pays host↔device
+    // transfer cost on every call (allocate input buffers, upload, allocate
+    // output buffers, download). For benchmarking we want to amortise that
+    // staging cost across many dispatches — pre-stage inputs once, time
+    // execute-only, drop outputs without copying back to host.
+    //
+    // [bufferFromHostF32] returns a [PjrtBuffer] the caller owns + closes;
+    // [executeOn] runs a cached executable against pre-staged input buffers
+    // and returns output buffers (caller closes after reading or discarding).
+    //
+    // Apples-to-apples with JAX's `arr.block_until_ready()` benchmark pattern
+    // (host buffers not allocated each iter; sync via PJRT's
+    // device-complete event which executeOn awaits internally).
+    // =========================================================================
+
+    /** Stage a host f32 buffer onto [device]. Caller owns the returned
+     * [PjrtBuffer] and must close it. */
+    fun bufferFromHostF32(data: FloatArray, dims: List<Int>): PjrtBuffer {
+        check(!closed) { "PjrtSession is closed" }
+        return client.bufferFromHostF32(device, data, dims)
+    }
+
+    /** Execute a previously-prepared (or first-time-compiled) executable
+     * against [stagedInputs]. Returns one [PjrtBuffer] per executable
+     * output; **caller must close each output** after use. */
+    fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> {
+        check(!closed) { "PjrtSession is closed" }
+        val mlir = fn.toStablehlo("")
+        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        return exec.execute(stagedInputs, device)
+    }
 
     override fun close() {
         if (closed) return

@@ -43,6 +43,10 @@ kotlin {
                 // produces valid IREE input (exit=0 from iree-compile via
                 // IreeRuntime.compile). Test-only dependency.
                 implementation(project(":runtime-iree"))
+                // §0.4.308 — pure-Kotlin PJRT-XLA-CUDA benchmark via
+                // PjrtSession (the FFM equivalent of the §0.4.299 Python
+                // spike script). Test-only dependency.
+                implementation(project(":runtime-pjrt"))
             }
         }
     }
@@ -50,6 +54,10 @@ kotlin {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // §0.4.308 — :benchmarks:jvmTest now exercises PjrtSession (FFM bindings
+    // via java.lang.foreign). Same flags `:runtime-pjrt` uses; both drop
+    // when we migrate to JDK 22.
+    jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED")
 }
 
 // §0.4.236 — `./gradlew :benchmarks:dumpHarnessResults` runs
