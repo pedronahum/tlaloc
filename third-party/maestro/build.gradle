@@ -34,13 +34,14 @@ allprojects {
 
     java {
         toolchain {
-            languageVersion = JavaLanguageVersion.of(21)
+            languageVersion = JavaLanguageVersion.of(25)
         }
     }
 
-    test {
-        jvmArgs += ["-Djava.security.manager=allow"]
-    }
+    // §0.4.311 — `-Djava.security.manager=allow` was removed: Security Manager
+    // is no longer supported on JDK 25 (JEP 486 finalised removal). Upstream
+    // Netflix/maestro still ships the flag for older JDKs; the vendored fork
+    // drops it for the JDK 25 unification.
 
     configurations.configureEach {
         resolutionStrategy {
@@ -100,6 +101,14 @@ configure(allprojects - project(':netflix-sel')) {
 
         testCompileOnly lombokDep
         testAnnotationProcessor lombokDep
+
+        // §0.4.311 — Gradle 9.x removed implicit junit-platform-launcher
+        // provisioning; tests using `useJUnitPlatform()` must now bring
+        // their own launcher onto the test runtime classpath. The vintage
+        // engine bridges JUnit 4 (`junitDep`) onto the JUnit Platform
+        // launcher Gradle's test executor expects.
+        testRuntimeOnly junitEngineDep
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     }
 }
 

@@ -17837,9 +17837,9 @@ tlaloc/
 
 ## 14. Tooling & Dev Setup
 
-- **Kotlin:** 2.2.x+ (K2 default, context parameters stable).
-- **Gradle:** 8.12+, configuration cache on.
-- **JDK:** 21 LTS for build; target bytecode 17.
+- **Kotlin:** 2.3.x+ (K2 default, context parameters stable).
+- **Gradle:** 9.5+, configuration cache on.
+- **JDK:** 25 LTS for build (bumped from 21 in §0.4.311 for stable FFM per JEP 454); target bytecode 25.
 - **MLIR/StableHLO:** pinned to a specific commit; updated quarterly.
 - **Testing:** Kotest (property-based), JUnit 5 for plugin tests, Robolectric for Android.
 - **Formatting:** ktlint + detekt, enforced in CI.

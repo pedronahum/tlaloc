@@ -8,6 +8,8 @@ import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrarAdapter
 
 @OptIn(ExperimentalCompilerApi::class)
 class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
+    override val pluginId: String = "io.tlaloc.plugin"
+
     override val supportsK2: Boolean = true
 
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {

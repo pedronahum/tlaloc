@@ -5,13 +5,13 @@ plugins {
 }
 
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(25)
 
     jvm {
         compilations.configureEach {
             compileTaskProvider.configure {
                 compilerOptions {
-                    jvmTarget.set(JvmTarget.JVM_21)
+                    jvmTarget.set(JvmTarget.JVM_25)
                 }
             }
         }
@@ -55,9 +55,9 @@ kotlin {
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     // §0.4.308 — :benchmarks:jvmTest now exercises PjrtSession (FFM bindings
-    // via java.lang.foreign). Same flags `:runtime-pjrt` uses; both drop
-    // when we migrate to JDK 22.
-    jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED")
+    // via java.lang.foreign). Same flag `:runtime-pjrt` uses; FFM became
+    // stable in JDK 22 (JEP 454) so `--enable-preview` was dropped at §0.4.311.
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
 
 // §0.4.236 — `./gradlew :benchmarks:dumpHarnessResults` runs

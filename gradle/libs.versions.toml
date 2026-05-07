@@ -1,5 +1,5 @@
 [versions]
-kotlin = "2.2.20"
+kotlin = "2.3.20"
 kotlinx-coroutines = "1.10.2"
 kotest = "5.9.1"
 # Stage B coarsening — symbolic engine. LGPL-3.0 (not Apache-2.0 as docs/STAGE_B_PLAN.md

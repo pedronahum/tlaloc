@@ -5,13 +5,13 @@ plugins {
 }
 
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(25)
 
     jvm {
         compilations.configureEach {
             compileTaskProvider.configure {
                 compilerOptions {
-                    jvmTarget.set(JvmTarget.JVM_21)
+                    jvmTarget.set(JvmTarget.JVM_25)
                 }
             }
         }
@@ -41,10 +41,9 @@ kotlin {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
-    // §0.4.303 — FFM bindings to libpjrt_c_api.so. JDK 21+ gates native
-    // downcalls behind `--enable-native-access`; FFM is preview status in
-    // JDK 21 so the API itself is unrestricted only with `--enable-preview`.
-    // Both flags drop when we migrate to JDK 22 (FFM stable) — the JDK
-    // bump is the §0.4.30N follow-up that simplifies this list.
-    jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED")
+    // §0.4.303 — FFM bindings to libpjrt_c_api.so. JDK 22+ gates native
+    // downcalls behind `--enable-native-access`. FFM became stable in JDK 22
+    // (JEP 454) so `--enable-preview` is no longer required as of the §0.4.311
+    // JDK 25 bump.
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
