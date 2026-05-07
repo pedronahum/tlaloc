@@ -10,16 +10,20 @@ import java.lang.foreign.Arena
  * Compile + dispatch target for [runOnPjrt]. Mirrors `IreeTarget` but for the
  * PJRT-XLA backend.
  *
- *   - [LlvmCpu] — XLA's `cpu` backend (LLVM-based codegen). Cheap to compile,
- *     useful for correctness checks / no-GPU hosts.
- *   - [Cuda]    — XLA's `cuda` backend on NVIDIA GPUs. The default; the
- *     plugin resolved by [PjrtBinaries] is `xla_cuda_plugin.so`.
+ *   - [LlvmCpu] — XLA's `cpu` backend (LLVM-based codegen). **Currently
+ *     unsupported on the FFM path** because OpenXLA does not ship a
+ *     standalone `pjrt_plugin_xla_cpu.so` artifact and JAX's CPU PJRT
+ *     impl is in-process Python. Plan: build a CPU PJRT plugin from XLA
+ *     source (`xla/pjrt/c/pjrt_c_api_cpu.{cc,h}`) as a separate
+ *     deliverable; the FFM bindings here are CPU/CUDA-agnostic and will
+ *     pick it up by setting `TLALOC_PJRT_PLUGIN_PATH` once it exists.
+ *   - [Cuda]    — XLA's `cuda` backend on NVIDIA GPUs. The v1 default;
+ *     the plugin resolved by [PjrtBinaries] is `xla_cuda_plugin.so`
+ *     (bundled with `pip install jax[cuda12]`).
  *
- * §0.4.305 — the underlying plugin is a single shared library that decides
- * its `platform_name` at Client_Create time. The same plugin .so serves both
- * targets (XLA's PJRT plugin can register for multiple backends). The enum
- * is kept in case future Tlaloc work needs separate plugins for CPU vs CUDA
- * (e.g. a TPU plugin), but v1 just uses the bundled CUDA plugin for both.
+ * The single-plugin model is XLA's design — each PJRT plugin .so registers
+ * for one platform string at Client_Create time. CPU + CUDA + TPU each
+ * needs its own plugin .so.
  */
 enum class PjrtTarget(val platform: String) {
     LlvmCpu(platform = "cpu"),
