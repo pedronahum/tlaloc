@@ -41,4 +41,10 @@ kotlin {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // §0.4.303 — FFM bindings to libpjrt_c_api.so. JDK 21+ gates native
+    // downcalls behind `--enable-native-access`; FFM is preview status in
+    // JDK 21 so the API itself is unrestricted only with `--enable-preview`.
+    // Both flags drop when we migrate to JDK 22 (FFM stable) — the JDK
+    // bump is the §0.4.30N follow-up that simplifies this list.
+    jvmArgs("--enable-preview", "--enable-native-access=ALL-UNNAMED")
 }
