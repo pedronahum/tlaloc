@@ -79,6 +79,7 @@ object IreeRuntime {
         stablehloMlir: String,
         target: IreeTarget = IreeTarget.LlvmCpu,
         timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
+        extraCompileFlags: List<String> = emptyList(),
     ): IreeModule {
         val bin = IreeBinaries.ireeCompile
             ?: error("iree-compile not resolved; set TLALOC_IREE_BIN or install via the dual-track plan's path A")
@@ -90,9 +91,15 @@ object IreeRuntime {
         Files.writeString(mlirPath, stablehloMlir)
         mlirPath.toFile().deleteOnExit()
 
+        // §0.4.300 — `extraCompileFlags` lets callers tune fusion / codegen
+        // knobs (e.g. `--iree-dispatch-creation-enable-aggressive-fusion=true`)
+        // without forking the IreeTarget enum. They land *after* the target's
+        // base flags so a caller can also override target-default flags if
+        // they really want to (last writer wins in iree-compile's flag parser).
         val args = buildList {
             add(bin)
             addAll(target.compileFlags)
+            addAll(extraCompileFlags)
             add("--iree-input-type=stablehlo")
             add(mlirPath.toString())
             add("-o"); add(vmfbPath.toString())
