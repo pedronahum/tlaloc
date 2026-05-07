@@ -96,11 +96,14 @@ class LlamaDecoderComparisonMatrixTest {
             "no `llama-decoder-medium-*` rows in $sources — nothing to aggregate.",
         )
 
-        // Pivot: matrix[mode][framework] = Row
+        // Pivot: matrix[mode][framework] = Row.
+        // §0.4.301 added `tlaloc-pjrt-xla-cuda` (Tlaloc-emitted StableHLO fed to
+        // PJRT-XLA backend, the §0.4.299 spike) to triangulate the IREE-vs-XLA gap.
         val frameworks = listOf(
             "pytorch-cpu",
             "tlaloc-iree-cpu",
             "tlaloc-iree-cuda",
+            "tlaloc-pjrt-xla-cuda",
             "jax-gpu",
         )
         val modes = listOf("forward", "backward")
