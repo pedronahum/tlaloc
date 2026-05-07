@@ -842,6 +842,55 @@ class PjrtApi internal constructor(
         }
     }
 
+    /**
+     * §0.4.309 — fast-path single-device execute that takes pre-allocated
+     * args / inner-args / inner-outputs / device-complete-events segments
+     * from the caller (typically a [io.tlaloc.runtime.pjrt.PjrtSession]'s
+     * long-lived arena). Saves ~10 µs/call vs [loadedExecExecuteSingleDevice]
+     * by avoiding `Arena.ofConfined()` create+close per dispatch.
+     *
+     * Caller responsibilities:
+     *   - [argsSegment] must be PJRT_LoadedExecutable_Execute_Args_LAYOUT-sized,
+     *     with `executable`, `options`, `argument_lists`, `num_devices=1`,
+     *     `output_lists`, `device_complete_events`, `execute_device` fields
+     *     pre-populated. Only `num_args` is set per call.
+     *   - [innerArgsSegment] is `nInputs * 8` bytes; caller fills with the
+     *     current PJRT_Buffer pointers per call.
+     *   - [innerOutputsSegment] is `nOutputs * 8` bytes; written by PJRT.
+     *   - [deviceCompleteEventSlot] is an 8-byte pointer slot (in args).
+     *
+     * Returns the [nOutputs] output PJRT_Buffer pointers, freshly populated.
+     * The device-complete event is awaited + destroyed before return.
+     */
+    internal fun executeReusable(
+        argsSegment: MemorySegment,
+        innerOutputsSegment: MemorySegment,
+        deviceCompleteEventSlot: MemorySegment,
+        nInputs: Int,
+        nOutputs: Int,
+    ): List<MemorySegment> {
+        // Set per-call num_args; everything else is pre-populated.
+        argsSegment.set(JAVA_LONG, PjrtFfm.OFF_Execute_NumArgs, nInputs.toLong())
+        // Zero out output pointers from any previous call.
+        for (i in 0 until nOutputs) innerOutputsSegment.set(ADDRESS, i * 8L, MemorySegment.NULL)
+        // Zero out the device-complete-event slot.
+        deviceCompleteEventSlot.set(ADDRESS, 0L, MemorySegment.NULL)
+
+        val errorPtr = execute.invokeExact(argsSegment) as MemorySegment
+        checkError(errorPtr)
+
+        val event = deviceCompleteEventSlot.get(ADDRESS, 0L)
+        if (event.address() != 0L) {
+            val eventFull = event.reinterpret(Long.MAX_VALUE)
+            awaitEvent(eventFull)
+            destroyEvent(eventFull)
+        }
+
+        return List(nOutputs) { i ->
+            innerOutputsSegment.get(ADDRESS, i * 8L).reinterpret(Long.MAX_VALUE)
+        }
+    }
+
     private fun awaitEvent(eventPtr: MemorySegment) {
         Arena.ofConfined().use { scoped ->
             val args = scoped.allocate(PjrtFfm.PJRT_Event_Await_Args_LAYOUT)

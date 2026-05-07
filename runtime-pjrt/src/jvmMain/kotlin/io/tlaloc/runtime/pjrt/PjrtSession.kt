@@ -8,6 +8,9 @@ import io.tlaloc.runtime.pjrt.ffm.PjrtClient
 import io.tlaloc.runtime.pjrt.ffm.PjrtDevice
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfm
 import io.tlaloc.runtime.pjrt.ffm.PjrtLoadedExecutable
+import java.lang.foreign.MemorySegment
+import java.lang.foreign.ValueLayout.ADDRESS
+import java.lang.foreign.ValueLayout.JAVA_LONG
 import io.tlaloc.stablehlo.toStablehlo
 import java.lang.foreign.Arena
 import java.nio.file.Path
@@ -96,6 +99,24 @@ class PjrtSession(
         ?: error("PJRT client has no addressable devices for $target")
 
     private val executableCache = ConcurrentHashMap<String, PjrtLoadedExecutable>()
+
+    /**
+     * §0.4.309 — pre-allocated execute context per cached executable.
+     * Holds the args struct + inner args/outputs arrays + options + event slot
+     * in the session arena so [executeOn] doesn't allocate-and-free a confined
+     * arena on each dispatch. Lazily built on first [executeOn] (we don't know
+     * the input count from the executable alone).
+     */
+    private class ExecuteContext(
+        val argsSegment: MemorySegment,
+        val innerArgsSegment: MemorySegment,
+        val innerOutputsSegment: MemorySegment,
+        val deviceCompleteEventSlot: MemorySegment,
+        val nInputs: Int,
+        val nOutputs: Int,
+    )
+
+    private val executeContextCache = ConcurrentHashMap<String, ExecuteContext>()
 
     @Volatile
     private var closed = false
@@ -194,12 +215,72 @@ class PjrtSession(
 
     /** Execute a previously-prepared (or first-time-compiled) executable
      * against [stagedInputs]. Returns one [PjrtBuffer] per executable
-     * output; **caller must close each output** after use. */
+     * output; **caller must close each output** after use.
+     *
+     * §0.4.309 — uses a pre-allocated [ExecuteContext] cached per executable
+     * so the per-call cost is the FFM downcall + GPU work, no per-call
+     * arena allocation.
+     */
     fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> {
         check(!closed) { "PjrtSession is closed" }
         val mlir = fn.toStablehlo("")
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
-        return exec.execute(stagedInputs, device)
+        val ctx = executeContextCache.computeIfAbsent(mlir) {
+            buildExecuteContext(exec, nInputs = stagedInputs.size)
+        }
+        require(ctx.nInputs == stagedInputs.size) {
+            "PjrtSession.executeOn: cached context expects ${ctx.nInputs} inputs but got ${stagedInputs.size}"
+        }
+
+        // Fill inner args with current input PJRT_Buffer pointers.
+        for ((i, buf) in stagedInputs.withIndex()) {
+            ctx.innerArgsSegment.set(ADDRESS, i * 8L, buf.bufferPtr)
+        }
+
+        val outputPtrs = api.executeReusable(
+            argsSegment = ctx.argsSegment,
+            innerOutputsSegment = ctx.innerOutputsSegment,
+            deviceCompleteEventSlot = ctx.deviceCompleteEventSlot,
+            nInputs = ctx.nInputs,
+            nOutputs = ctx.nOutputs,
+        )
+        return outputPtrs.map { PjrtBuffer(it, client) }
+    }
+
+    private fun buildExecuteContext(exec: PjrtLoadedExecutable, nInputs: Int): ExecuteContext {
+        val nOutputs = exec.numOutputs
+
+        // Allocate everything in the session arena.
+        val argsSegment = arena.allocate(PjrtFfm.PJRT_LoadedExecutable_Execute_Args_LAYOUT)
+        val optionsSegment = arena.allocate(PjrtFfm.PJRT_ExecuteOptions_LAYOUT)
+        val outerArgsSegment = arena.allocate(8)                                    // 1 ptr
+        val innerArgsSegment = arena.allocate((nInputs * 8).toLong())               // n ptrs
+        val outerOutputsSegment = arena.allocate(8)                                 // 1 ptr
+        val innerOutputsSegment = arena.allocate((nOutputs * 8).toLong())           // n ptrs
+        val deviceCompleteEventSlot = arena.allocate(8)                             // 1 ptr
+
+        // ExecuteOptions: only struct_size needed; rest stays zero.
+        optionsSegment.set(JAVA_LONG, PjrtFfm.OFF_ExecOpts_StructSize, PjrtFfm.SZ_ExecOpts)
+
+        // Wire up the pointer chain: args → outer → inner.
+        outerArgsSegment.set(ADDRESS, 0L, innerArgsSegment)
+        outerOutputsSegment.set(ADDRESS, 0L, innerOutputsSegment)
+
+        // Pre-populate args struct fields that don't change between calls.
+        argsSegment.set(JAVA_LONG, PjrtFfm.OFF_Execute_StructSize, PjrtFfm.SZ_Execute)
+        argsSegment.set(ADDRESS, PjrtFfm.OFF_Execute_Executable, exec.execPtr)
+        argsSegment.set(ADDRESS, PjrtFfm.OFF_Execute_Options, optionsSegment)
+        argsSegment.set(ADDRESS, PjrtFfm.OFF_Execute_ArgLists, outerArgsSegment)
+        argsSegment.set(JAVA_LONG, PjrtFfm.OFF_Execute_NumDevices, 1L)
+        // num_args set per call by executeReusable.
+        argsSegment.set(ADDRESS, PjrtFfm.OFF_Execute_OutputLists, outerOutputsSegment)
+        argsSegment.set(ADDRESS, PjrtFfm.OFF_Execute_DeviceCompleteEvents, deviceCompleteEventSlot)
+        argsSegment.set(ADDRESS, PjrtFfm.OFF_Execute_ExecuteDevice, device.devicePtr)
+
+        return ExecuteContext(
+            argsSegment, innerArgsSegment, innerOutputsSegment, deviceCompleteEventSlot,
+            nInputs, nOutputs,
+        )
     }
 
     override fun close() {
