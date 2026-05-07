@@ -543,6 +543,27 @@ class PjrtApi internal constructor(
         return String(bytes, Charsets.UTF_8)
     }
 
+    /** Normalise Tlaloc's StableHLO emit for XLA's MLIR import. Two
+     * transformations:
+     *   1. Rename the first `func.func @<sym>` to `func.func @main` — XLA's
+     *      pjrt-cuda compile pipeline requires the entry function to be
+     *      named `@main` (see error: "conversion requires module with `main`
+     *      function"). Tlaloc emits `func.func @<DxirFunction.name>`. The
+     *      regex is idempotent: if the function is already `@main`, this
+     *      rewrite is a no-op.
+     *   2. Wrap a bare `func.func` in `module @tlaloc_emit { … }` if the
+     *      input doesn't already start with a module declaration. Tlaloc's
+     *      `toStablehlo` produces function-only emits at the top level. */
+    private fun normaliseMlirForXla(text: String): String {
+        var trimmed = text.trim()
+        // Idempotent rename of first func.func @<sym> to @main.
+        trimmed = Regex("""func\.func\s+@\w+""").replaceFirst(trimmed, "func.func @main")
+        if (!trimmed.startsWith("module")) {
+            trimmed = "module @tlaloc_emit {\n$trimmed\n}\n"
+        }
+        return trimmed
+    }
+
     // =========================================================================
     // §0.4.304 — additional high-level methods on PjrtApi for compile / buffer /
     // execute. Called from PjrtClient methods below; kept on PjrtApi so the
@@ -594,7 +615,7 @@ class PjrtApi internal constructor(
      *     0x01                  — value 1
      */
     internal fun clientCompileMlir(clientPtr: MemorySegment, stablehloMlir: String, scratchArena: Arena): MemorySegment {
-        val mlirBytes = stablehloMlir.toByteArray(StandardCharsets.UTF_8)
+        val mlirBytes = normaliseMlirForXla(stablehloMlir).toByteArray(StandardCharsets.UTF_8)
         val codeSeg = scratchArena.allocate((mlirBytes.size + 1).toLong())
         for ((i, b) in mlirBytes.withIndex()) codeSeg.set(JAVA_BYTE, i.toLong(), b)
         codeSeg.set(JAVA_BYTE, mlirBytes.size.toLong(), 0)
