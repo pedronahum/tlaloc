@@ -129,6 +129,50 @@ sealed class RecognitionMatch {
     ) : RecognitionMatch() {
         override val patternName: String = "SwiGLU"
     }
+
+    /**
+     * Layer 4 §0.4.314 — the SwiGLU + down-projection fused MLP block,
+     * the canonical Llama / Mistral / PaLM transformer MLP:
+     *
+     * ```
+     * gate_proj = MATMUL(x, W_gate)
+     * up_proj   = MATMUL(x, W_up)
+     * silu_g    = SILU(gate_proj) · up_proj
+     * out       = MATMUL(silu_g, W_down)
+     * ```
+     *
+     * Strict superset of [SwiGLU] — same 4 ops plus the down-projection
+     * MATMUL. The two patterns claim overlapping op ids (the SwiGLU four),
+     * so [resolveLargestMatch] picks this one whenever it matches: the
+     * v2 compound use-case the §0.4.282 resolver was plumbed for.
+     *
+     * Exists for cuBLASLt-style fused-MLP kernels: the down-proj's
+     * `silu_g` materialisation is the heaviest tensor traffic in the
+     * SwiGLU path, and a fused kernel can avoid it by streaming silu_g
+     * straight into the down-proj's matmul accumulator.
+     *
+     * @property xInput the shared input tensor (operand of both gate
+     *   and up MATMULs).
+     * @property wGate the gate-projection weight.
+     * @property wUp the up-projection weight.
+     * @property wDown the down-projection weight (the non-silu_g operand
+     *   of the trailing MATMUL).
+     * @property output the down-projection MATMUL's result.
+     * @property xType convenience: type of [xInput].
+     * @property outputType convenience: type of [output].
+     */
+    data class TransformerMLP(
+        override val ops: List<DxirOp>,
+        val xInput: io.tlaloc.ir.DxirNode,
+        val wGate: io.tlaloc.ir.DxirNode,
+        val wUp: io.tlaloc.ir.DxirNode,
+        val wDown: io.tlaloc.ir.DxirNode,
+        val output: io.tlaloc.ir.DxirNode,
+        val xType: DxirType,
+        val outputType: DxirType,
+    ) : RecognitionMatch() {
+        override val patternName: String = "TransformerMLP"
+    }
 }
 
 /**

@@ -81,7 +81,7 @@ class LlamaDecoderCoarseningEmitDiagnosticTest {
         val coarsenedOps = coarsened.body.filterIsInstance<DxirOp>().count { it.op == OpKind.COARSENED }
         assertTrue(
             coarsenedOps >= 5,
-            "expected ≥5 COARSENED ops post-coarsen (RmsNorm×2 + RoPE + FlashAttention + SwiGLU + CrossEntropy); " +
+            "expected ≥5 COARSENED ops post-coarsen (RmsNorm×2 + RoPE + FlashAttention + TransformerMLP + CrossEntropy); " +
                 "got $coarsenedOps",
         )
 

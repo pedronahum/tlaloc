@@ -72,8 +72,9 @@ class LlamaDecoderStablehloEmitTest {
     @Test
     fun cpuBaselineEmitContainsExpectedStablehloOps() {
         val mlir = cpuBaselineEmit()
-        // Matmuls (Q/K/V/O/down/lm_head + attention's Q·K and P·V from inlined
-        // FlashAttention + SwiGLU's gate and up matmuls inlined → 6+2+2 = 10).
+        // Matmuls (Q/K/V/O/lm_head + attention's Q·K and P·V from inlined
+        // FlashAttention + TransformerMLP's gate, up, and down matmuls
+        // inlined → 5+2+3 = 10). §0.4.314 reshuffled the breakdown — same total.
         assertTrue(
             "stablehlo.dot_general" in mlir || "stablehlo.dot" in mlir,
             "expected matmul lowering",

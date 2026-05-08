@@ -35,6 +35,11 @@ fun recognizeAll(
     all += recognizeRmsNorm(fn, diagnostics)
     all += recognizeRope(fn, diagnostics)
     all += recognizeCrossEntropy(fn, diagnostics)
+    // Compound patterns (larger than their primitive supersets) come
+    // before the primitives they contain, so the resolver's stable-sort
+    // tie-break picks them when sizes happen to match. By size alone the
+    // §0.4.282 resolver already prefers them — listing first is doc.
+    all += recognizeTransformerMLP(fn, diagnostics)
     all += recognizeSwiGLU(fn, diagnostics)
     return resolveLargestMatch(all)
 }
@@ -47,12 +52,12 @@ fun recognizeAll(
  * (FlashAttention before RmsNorm before Rope before CrossEntropy —
  * matches `recognizeAll`'s call order).
  *
- * Layer 3 v1 has no compound patterns that contain other recognized
- * patterns (FlashAttention's MATMUL/SOFTMAX/MATMUL ops aren't separately
- * recognized by RmsNorm/RoPE/CrossEntropy), so this resolver is mostly
- * a no-op for v1. It's plumbed because v2 patterns (e.g.
- * "transformer-block" containing both FlashAttention and RmsNorm) will
- * need it.
+ * Layer 4 §0.4.314 — the first v2 compound (TransformerMLP, a strict
+ * superset of SwiGLU) lights up this resolver on production code: every
+ * Llama-style decoder MLP matches both TransformerMLP (5 ops) and the
+ * bare SwiGLU (4 ops) on the same SILU anchor, and the resolver picks
+ * the compound. Pre-§0.4.314, this function ran but no production
+ * patterns ever overlapped — the resolver was tested but dormant.
  */
 internal fun resolveLargestMatch(matches: List<RecognitionMatch>): List<RecognitionMatch> {
     if (matches.size < 2) return matches

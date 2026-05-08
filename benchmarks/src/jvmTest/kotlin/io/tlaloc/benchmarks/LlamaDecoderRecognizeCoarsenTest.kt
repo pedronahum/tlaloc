@@ -27,6 +27,15 @@ import kotlin.test.assertEquals
  * and one pre-MLP — so recognizeAll fires the RmsNorm recognizer twice.
  * Total matches: 6.
  *
+ * # §0.4.314 update — TransformerMLP supersedes SwiGLU here
+ *
+ * The TransformerMLP recognizer (§0.4.314) matches a strict superset of
+ * SwiGLU (SwiGLU + down-projection MATMUL), so on this primal it claims
+ * 5 ops vs SwiGLU's 4 over the same SILU anchor; resolveLargestMatch
+ * picks TransformerMLP. The total match count stays at 6 — the
+ * SwiGLU slot is now filled by TransformerMLP — but the pattern
+ * multiset, the absorbed-matmul count, and the primal-body name shift.
+ *
  * # Direct DXIR-level — not via grad{} plugin
  *
  * The plan's "via the grad{} plugin path" framing is skipped here.
@@ -54,7 +63,11 @@ class LlamaDecoderRecognizeCoarsenTest {
         assertEquals(2, patternCounts["RmsNorm"], "pre-attn + pre-MLP norms")
         assertEquals(1, patternCounts["Rope"])
         assertEquals(1, patternCounts["FlashAttention"])
-        assertEquals(1, patternCounts["SwiGLU"])
+        // §0.4.314 — TransformerMLP wins over the bare SwiGLU on this
+        // primal because the MLP block has a down-proj. The bare SwiGLU
+        // recognizer also matched, but resolveLargestMatch dropped it.
+        assertEquals(1, patternCounts["TransformerMLP"], "SwiGLU + down-proj absorbed")
+        assertEquals(null, patternCounts["SwiGLU"], "bare SwiGLU dropped by resolveLargestMatch")
         assertEquals(1, patternCounts["CrossEntropy"])
     }
 
@@ -80,23 +93,23 @@ class LlamaDecoderRecognizeCoarsenTest {
         assertEquals(2, nameCounts["rms_norm_primal"])
         assertEquals(1, nameCounts["rope_primal"])
         assertEquals(1, nameCounts["flash_attention_primal"])
-        assertEquals(1, nameCounts["swiglu_primal"])
+        // §0.4.314 — was `swiglu_primal`; TransformerMLP coarsener replaces it.
+        assertEquals(1, nameCounts["transformer_mlp_primal"])
         assertEquals(1, nameCounts["cross_entropy_primal"])
     }
 
     @Test
-    fun coarsenedFunctionPreservesSixUnrecognizedMatmuls() {
-        // Body matmuls after coarsening:
+    fun coarsenedFunctionPreservesFiveUnrecognizedMatmuls() {
+        // Body matmuls after coarsening (§0.4.314 update — TransformerMLP
+        // now absorbs the down-proj alongside the SwiGLU's gate/up):
         //   Q, K, V (3)        — projections; no recognizer matches plain QKV
         //   output projection  — post-attention
-        //   down projection    — post-SwiGLU
         //   LM head            — pre-CrossEntropy (CE absorbs SOFTMAX onward, not the matmul)
-        // = 6 matmuls. The attention's inner Q·K and P·V matmuls are
-        // absorbed by FlashAttention; SwiGLU's gate and up matmuls are
-        // absorbed by SwiGLU.
+        // = 5 matmuls. Pre-§0.4.314 this was 6 (the down projection was
+        // unrecognized); TransformerMLP's compound match now claims it.
         val (_, coarsened) = buildAndCoarsen()
         val matmuls = coarsened.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.MATMUL }
-        assertEquals(6, matmuls.size, "Q,K,V,O,down,lm_head matmuls remain after coarsening")
+        assertEquals(5, matmuls.size, "Q,K,V,O,lm_head matmuls remain after coarsening")
     }
 
     @Test
@@ -130,16 +143,17 @@ class LlamaDecoderRecognizeCoarsenTest {
             0, ops.count { it.op == OpKind.COARSENED },
             "all 6 COARSENED ops must be inlined; got ${ops.filter { it.op == OpKind.COARSENED }.size}",
         )
-        // 10 matmuls total post-decompose:
-        //   6 outer preserved (Q,K,V,O,down,lm_head — never absorbed)
+        // 10 matmuls total post-decompose (§0.4.314 — same total but
+        // different breakdown after TransformerMLP absorbed the down-proj):
+        //   5 outer preserved (Q,K,V,O,lm_head — never absorbed)
         // + 2 inlined from FlashAttention's primal_body (Q·K, P·V)
-        // + 2 inlined from SwiGLU's primal_body (gate, up)
+        // + 3 inlined from TransformerMLP's primal_body (gate, up, down)
         // The 6-vs-10 jump is the structural signal that FlashAttention
-        // and SwiGLU re-expanded; if either coarsener stops absorbing
-        // those matmuls, this drops back to 6 here.
+        // and TransformerMLP re-expanded; if either coarsener stops
+        // absorbing those matmuls, this drops back to 6 here.
         assertEquals(
             10, ops.count { it.op == OpKind.MATMUL },
-            "expected 10 matmuls (6 outer + 2 from FlashAttention + 2 from SwiGLU)",
+            "expected 10 matmuls (5 outer + 2 from FlashAttention + 3 from TransformerMLP)",
         )
         // ADDs in the decomposed body = 2 residuals + ADDs from inlined
         // primal_bodies (RmsNorm eps ADD, RoPE recombine ADD, etc.). The
