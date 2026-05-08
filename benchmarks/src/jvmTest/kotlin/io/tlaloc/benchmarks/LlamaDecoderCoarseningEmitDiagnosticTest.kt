@@ -117,4 +117,108 @@ class LlamaDecoderCoarseningEmitDiagnosticTest {
 
         println("[coarsening-emit-diag] backward: emitted custom_calls=$customCalls")
     }
+
+    /**
+     * §0.4.315 — structural-recognition coverage report. Answers the
+     * question: "what fraction of LlamaDecoder is structurally
+     * recognized as a known pattern?" Useful as a record across
+     * commits — a regression in coverage (recognizer stops matching
+     * a pattern it used to) shows up as a drop in the absorbed-ops
+     * count here.
+     *
+     * The recognition fraction is computed against the **forward** body
+     * because that's the canonical IR shape; the gradient body is
+     * derived from it and would double-count the same patterns. We
+     * count each [DxirOp] in the raw `LlamaDecoderPrimal.build` output;
+     * params and constants are excluded (they aren't computational
+     * ops in the recognized-vs-residue sense).
+     *
+     * # What's expected on the medium config (HEAD as of §0.4.315)
+     *
+     * 35 forward ops; 27 absorbed (77.1%) across 6 matches:
+     *   - TransformerMLP: 5 ops  (SwiGLU + down-proj)
+     *   - FlashAttention: 3 ops  (Q·K^T, softmax, P·V)
+     *   - RmsNorm × 2:    10 ops (square, reduce, eps-add, rsqrt, mul) × 2
+     *   - RoPE:           5 ops  (cos, sin, mul-cos, mul-sin, sub)
+     *   - CrossEntropy:   4 ops  (softmax + log + mul + reduce chain)
+     *
+     * Unrecognized residue (8 ops, 22.9%):
+     *   - MATMUL × 5: Q / K / V / O / lm_head projections
+     *   - ADD × 2:    post-attention + post-MLP residuals
+     *   - TRANSPOSE × 1: K^T for the attention scores
+     */
+    @Test
+    fun reportsStructuralRecognitionCoverageOnForward() {
+        val raw = LlamaDecoderPrimal.build(LlamaDecoderConfig.medium)
+        val matches = recognizeAll(raw)
+
+        // 1. Bucket recognized ops by pattern. Use absorbedOpIds-equivalent
+        //    semantics: every op in `match.ops` gets attributed to that
+        //    pattern. Same op can't be in two matches because
+        //    resolveLargestMatch already de-duped overlaps.
+        data class PatternCoverage(val pattern: String, val opIds: Set<Int>)
+        val absorbedByPattern = matches.map { m ->
+            PatternCoverage(m.patternName, m.ops.map { it.id }.toSet())
+        }
+        val absorbedOpIds = absorbedByPattern.flatMap { it.opIds }.toSet()
+        // Sanity: union size == sum of sizes (no overlaps).
+        assertEquals(
+            absorbedByPattern.sumOf { it.opIds.size }, absorbedOpIds.size,
+            "resolveLargestMatch should have produced non-overlapping matches",
+        )
+
+        // 2. Bucket the forward body's DxirOps by recognized vs residue.
+        //    Residue is grouped by OpKind for the report.
+        val allOps = raw.body.filterIsInstance<DxirOp>()
+        val residueOps = allOps.filter { it.id !in absorbedOpIds }
+        val residueByKind = residueOps.groupingBy { it.op }.eachCount()
+
+        // 3. Print the report. Single block so a `-i` grep can extract it.
+        println(
+            buildString {
+                appendLine("[coarsening-recognition-report]")
+                appendLine("  total forward ops:          ${allOps.size}")
+                appendLine("  absorbed by recognizers:    ${absorbedOpIds.size} (${pct(absorbedOpIds.size, allOps.size)})")
+                for (cov in absorbedByPattern.sortedByDescending { it.opIds.size }) {
+                    appendLine("    - ${cov.pattern.padEnd(18)} ${cov.opIds.size} ops")
+                }
+                appendLine("  unrecognized residue:       ${residueOps.size} (${pct(residueOps.size, allOps.size)})")
+                for ((kind, count) in residueByKind.entries.sortedByDescending { it.value }) {
+                    appendLine("    - ${kind.toString().padEnd(18)} $count ops")
+                }
+            },
+        )
+
+        // 4. Pin coverage so a regression in any recognizer shows up as
+        //    a numeric drop here. §0.4.315 baseline:
+        //    35 forward ops, 27 absorbed, 8 residue.
+        assertEquals(35, allOps.size, "raw forward body op count (params/consts excluded)")
+        assertEquals(27, absorbedOpIds.size, "recognized ops; drop = recognizer regression")
+        assertEquals(8, residueOps.size, "residue = unrecognized primitives")
+
+        // Pin the per-pattern absorbed-op counts so a coarsener that
+        // accidentally narrows its match scope surfaces here.
+        val absorbedByName = absorbedByPattern.associate { it.pattern to it.opIds.size }
+        assertEquals(5, absorbedByName["TransformerMLP"], "SwiGLU + down-proj = 5 ops")
+        assertEquals(3, absorbedByName["FlashAttention"], "Q·K, softmax, P·V")
+        assertEquals(5, absorbedByName["Rope"], "cos, sin, 2 muls, sub")
+        assertEquals(4, absorbedByName["CrossEntropy"], "softmax + log + mul + reduce chain")
+        // RmsNorm fires twice — sum of both occurrences.
+        val rmsNormTotal = absorbedByPattern.filter { it.pattern == "RmsNorm" }.sumOf { it.opIds.size }
+        assertEquals(10, rmsNormTotal, "RmsNorm × 2 occurrences × 5 ops each")
+
+        // Pin the residue shape — Q/K/V/O/lm_head matmuls + 2 residual
+        // ADDs + 1 attention transpose. If a coarsener starts absorbing
+        // these (e.g. a future "AttentionWithKt" recognizer absorbs the
+        // K^T transpose), the residue counts shift — update the asserts.
+        assertEquals(5, residueByKind[OpKind.MATMUL], "Q/K/V/O/lm_head projections")
+        assertEquals(2, residueByKind[OpKind.ADD], "post-attn + post-MLP residuals")
+        assertEquals(1, residueByKind[OpKind.TRANSPOSE], "K^T transpose for attention")
+    }
+
+    private fun pct(num: Int, denom: Int): String {
+        if (denom == 0) return "n/a"
+        val p = (num * 100.0) / denom
+        return "%.1f%%".format(p)
+    }
 }
