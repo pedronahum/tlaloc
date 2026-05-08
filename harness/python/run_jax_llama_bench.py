@@ -34,6 +34,7 @@ Toolchain pre-requisite (installed in §0.4.297):
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
 import time
@@ -123,15 +124,27 @@ def _time_loop(thunk, warmup_iters: int, min_time_seconds: float, max_iters: int
     for _ in range(warmup_iters):
         thunk()
 
-    times_ns: list[int] = []
-    deadline_ns = time.perf_counter_ns() + int(min_time_seconds * 1_000_000_000)
-    while True:
-        t0 = time.perf_counter_ns()
-        thunk()
-        t1 = time.perf_counter_ns()
-        times_ns.append(t1 - t0)
-        if time.perf_counter_ns() >= deadline_ns or len(times_ns) >= max_iters:
-            break
+    # §0.4.313 — disable GC during measurement so Python's generational
+    # collector doesn't insert variable-latency pauses into p99 readings.
+    # Tlaloc-side benches measure under steady-state JVM (no Python GC at
+    # all); the Python rows previously showed p99/median ≈ 3× from GC
+    # jitter alone. Re-enabled after the loop closes.
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        times_ns: list[int] = []
+        perf = time.perf_counter_ns
+        deadline_ns = perf() + int(min_time_seconds * 1_000_000_000)
+        while True:
+            t0 = perf()
+            thunk()
+            t1 = perf()
+            times_ns.append(t1 - t0)
+            if perf() >= deadline_ns or len(times_ns) >= max_iters:
+                break
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
     times_ns.sort()
     return {

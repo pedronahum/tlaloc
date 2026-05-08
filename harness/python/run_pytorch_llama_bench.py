@@ -39,6 +39,7 @@ Toolchain pre-requisite (already installed in §0.4.289):
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -133,15 +134,24 @@ def _time_loop(thunk, warmup_iters: int, min_time_seconds: float, max_iters: int
     for _ in range(warmup_iters):
         thunk()
 
-    times_ns: list[int] = []
-    deadline_ns = time.perf_counter_ns() + int(min_time_seconds * 1_000_000_000)
-    while True:
-        t0 = time.perf_counter_ns()
-        thunk()
-        t1 = time.perf_counter_ns()
-        times_ns.append(t1 - t0)
-        if time.perf_counter_ns() >= deadline_ns or len(times_ns) >= max_iters:
-            break
+    # §0.4.313 — disable GC during measurement so Python's generational
+    # collector doesn't insert variable-latency pauses into p99 readings.
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        times_ns: list[int] = []
+        perf = time.perf_counter_ns
+        deadline_ns = perf() + int(min_time_seconds * 1_000_000_000)
+        while True:
+            t0 = perf()
+            thunk()
+            t1 = perf()
+            times_ns.append(t1 - t0)
+            if perf() >= deadline_ns or len(times_ns) >= max_iters:
+                break
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
     times_ns.sort()
     return {
@@ -189,21 +199,28 @@ def main() -> int:
         n: torch.from_numpy(a.astype(np.float32)).requires_grad_(True)
         for n, a in arrs.items()
     }
-    grad_param_names = _expected_param_names()
+    # §0.4.313 — hoist the param-tensor list out of the timing loop. The
+    # previous `[grad_tensors[n] for n in grad_param_names]` rebuilt a 13-ref
+    # list per iter inside the thunk; that's a few µs of host overhead that
+    # the Tlaloc-FFM bench (and JAX) don't pay.
+    grad_param_list = [grad_tensors[n] for n in _expected_param_names()]
+
     def backward_thunk():
         loss = _llama_forward(grad_tensors)
         grads = torch.autograd.grad(
             loss,
-            [grad_tensors[n] for n in grad_param_names],
+            grad_param_list,
             retain_graph=False,
             create_graph=False,
             allow_unused=True,
         )
-        # Touch the first element of each grad to force materialisation —
-        # mirrors `iree-benchmark-module`'s end-of-iteration sync.
-        for g in grads:
-            if g is not None:
-                _ = g.detach()[..., 0].sum().item()
+        # §0.4.313 — sync only the first grad to mirror JAX / PJRT-XLA / Tlaloc-FFM
+        # (`grads[0].block_until_ready()` style). The previous loop over all 13
+        # grads added ~13× the marshalling overhead per iter — unfair vs the
+        # GPU rows which sync once. `.sum().item()` works for any grad shape
+        # (the first param is rank-2, not a scalar).
+        if grads[0] is not None:
+            _ = grads[0].detach().sum().item()
     backward_stats = _time_loop(
         backward_thunk,
         warmup_iters=args.warmup_iters,

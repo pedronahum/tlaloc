@@ -37,6 +37,7 @@ Toolchain pre-requisite (installed in §0.4.297):
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import re
 import sys
@@ -87,15 +88,24 @@ def _percentile(sorted_values: list[int], pct: float) -> int:
 def _time_loop(thunk, warmup_iters: int, min_time_seconds: float, max_iters: int = 100_000) -> dict:
     for _ in range(warmup_iters):
         thunk()
-    times_ns: list[int] = []
-    deadline_ns = time.perf_counter_ns() + int(min_time_seconds * 1_000_000_000)
-    while True:
-        t0 = time.perf_counter_ns()
-        thunk()
-        t1 = time.perf_counter_ns()
-        times_ns.append(t1 - t0)
-        if time.perf_counter_ns() >= deadline_ns or len(times_ns) >= max_iters:
-            break
+    # §0.4.313 — disable GC during measurement so Python's generational
+    # collector doesn't insert variable-latency pauses into p99 readings.
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        times_ns: list[int] = []
+        perf = time.perf_counter_ns
+        deadline_ns = perf() + int(min_time_seconds * 1_000_000_000)
+        while True:
+            t0 = perf()
+            thunk()
+            t1 = perf()
+            times_ns.append(t1 - t0)
+            if perf() >= deadline_ns or len(times_ns) >= max_iters:
+                break
+    finally:
+        if gc_was_enabled:
+            gc.enable()
     times_ns.sort()
     return {
         "n_iterations": len(times_ns),
@@ -163,14 +173,25 @@ def main() -> int:
     _bwd0 = bwd_loaded.execute(inputs_in_order)
     np.array(_bwd0[0])
 
+    # §0.4.313 — resolve sync function once outside the timing loop. The
+    # previous `if hasattr(out[0], "block_until_ready")` per call bought a
+    # branch + attribute lookup per iter; we know the answer is stable for
+    # this PJRT plugin once the first execute has succeeded.
+    def _make_sync_fn(sample_out):
+        if hasattr(sample_out, "block_until_ready"):
+            return lambda out: out[0].block_until_ready()
+        return lambda out: np.array(out[0])
+
+    sync_fwd = _make_sync_fn(_fwd0[0])
+    sync_bwd = _make_sync_fn(_bwd0[0])
+
     def forward_thunk():
         out = fwd_loaded.execute(inputs_in_order)
-        # Block by reading the first scalar (forces device sync).
-        out[0].block_until_ready() if hasattr(out[0], "block_until_ready") else np.array(out[0])
+        sync_fwd(out)
 
     def backward_thunk():
         out = bwd_loaded.execute(inputs_in_order)
-        out[0].block_until_ready() if hasattr(out[0], "block_until_ready") else np.array(out[0])
+        sync_bwd(out)
 
     forward_stats = _time_loop(forward_thunk, args.warmup_iters, args.min_time_seconds)
     backward_stats = _time_loop(backward_thunk, args.warmup_iters, args.min_time_seconds)
