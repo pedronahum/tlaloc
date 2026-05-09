@@ -170,15 +170,12 @@ class LlamaL3DecoderPrimalTest {
     }
 
     @Test
-    fun coarsenerDeclinesGqaWithTransposeInOuterChain() {
-        // The §0.4.322 coarsener declines when the K/V chain has a
-        // TRANSPOSE in `outerOps`. This model emits `K^T = TRANSPOSE(K_expanded)`
-        // before the QK matmul so the recognizer's outer chain is
-        // [TRANSPOSE, RESHAPE] — coarsener returns null.
-        //
-        // The recognizer match still survives. Downstream lowering then
-        // decomposes back to primitives. v3 will extend the coarsener
-        // to invert TRANSPOSE in the chain.
+    fun coarsensGqaOnLlamaL3WithKtTransposeInChain() {
+        // §0.4.324 — the v3 coarsener handles TRANSPOSE in K's outer
+        // chain, so the LlamaL3 model coarsens end-to-end. K's chain is
+        // [TRANSPOSE (K^T), RESHAPE (flatten)]; V's chain is [RESHAPE]
+        // only. The asymmetric per-side chains are processed
+        // independently — both succeed.
         val fn = LlamaL3DecoderPrimal.build(LlamaL3DecoderConfig.tiny)
         val matches = recognizeAll(fn)
         assertEquals(
@@ -188,19 +185,23 @@ class LlamaL3DecoderPrimalTest {
 
         val coarsened = coarsenRecognizedPatterns(fn, matches)
         val coarsenedOps = coarsened.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.COARSENED }
-        // Other patterns coarsen normally (RmsNorm, Rope, TransformerMLP/SwiGLU,
-        // CrossEntropy); GQA declines. Verify by scanning primal_body names.
         val primalNames = coarsenedOps.mapNotNull {
             (it.attrs["primal_body"] as? io.tlaloc.ir.DxirFunction)?.name
         }
         assertTrue(
-            primalNames.none { it == "gqa_primal" },
-            "GQA coarsener should have declined (TRANSPOSE in chain); got primals=$primalNames",
+            primalNames.any { it == "gqa_primal" },
+            "GQA coarsener should fire post-§0.4.324; got primals=$primalNames",
         )
-        // RmsNorm should still be coarsened (it's unaffected by the GQA scope).
         assertTrue(
             primalNames.any { it == "rms_norm_primal" },
-            "RmsNorm coarsener should have fired; got primals=$primalNames",
+            "RmsNorm should also coarsen; got primals=$primalNames",
+        )
+        // The full Llama-3 model now produces COARSENED for: GQA,
+        // RmsNorm × 2, RoPE, TransformerMLP, CrossEntropy. Pin the
+        // count as a sentinel.
+        assertEquals(
+            6, coarsenedOps.size,
+            "expected 6 COARSENED ops on tiny L3 (GQA + RmsNorm×2 + Rope + TransformerMLP + CrossEntropy); got ${primalNames}",
         )
     }
 }

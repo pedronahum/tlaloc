@@ -9,7 +9,8 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * §0.4.321 / §0.4.322 — GroupedQueryAttention analytical-backward coarsener.
+ * §0.4.321 / §0.4.322 / §0.4.324 — GroupedQueryAttention analytical-
+ * backward coarsener.
  *
  * # What this is
  *
@@ -18,35 +19,40 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  * expansion step) and produces a [CoarsenedBundle] carrying:
  *
  * - **`primal_body`** — `(Q, K_raw, V_raw) → O` recapitulating the
- *   matched forward op-by-op: replay the K/V expansion chain (one
- *   optional inner RESHAPE → BROADCAST → optional outer RESHAPE per
- *   side), then attention.
+ *   matched forward op-by-op: replay the K/V expansion chain (inner
+ *   RESHAPEs → BROADCAST → outer `{RESHAPE, TRANSPOSE}` ops per side),
+ *   then attention.
  * - **`gradient_body`** — analytical VJP. Signature
  *   `(dO, Q, K_raw, V_raw) → (dQ, dK_raw, dV_raw)`. The expanded-side
- *   gradients (`dK_expanded`, `dV_expanded`) come from the same
- *   FlashAttention chain rule; the expansion chain is then inverted
- *   step-by-step — outer RESHAPE inverse → BROADCAST adjoint
- *   (`SUM` with keepdims over the expansion axis) → inner RESHAPE
- *   inverse — to deliver gradients at the raw K / V shape.
+ *   gradients come from the same FlashAttention chain rule; the
+ *   expansion chain is inverted step-by-step — outer-op inverses
+ *   (RESHAPE to input shape, TRANSPOSE with inverse permutation) →
+ *   BROADCAST adjoint (`SUM` keepdims over the expansion axis) → inner
+ *   RESHAPE inverses — delivering gradients at the raw K / V shape.
  *
  * # Scope
  *
- * Two production shapes are coarsened, sharing the same logic:
+ * Three production shapes are coarsened, all sharing the same logic
+ * (per-side chains processed independently, can be asymmetric):
  *
- * - **MQA-canonical** (§0.4.321 v1): exactly one BROADCAST per side, no
- *   surrounding RESHAPE. `match.ops.size == 5`.
- * - **GQA-canonical** (§0.4.322 v2): one inner RESHAPE → BROADCAST →
- *   one outer RESHAPE per side, the PyTorch `repeat_kv` form used by
- *   Llama-3 / Mistral / Qwen-2. `match.ops.size == 9`.
+ * - **MQA-canonical** (§0.4.321): one BROADCAST per side, no surrounding
+ *   RESHAPE. `match.ops.size == 5`.
+ * - **GQA-canonical** (§0.4.322): one inner RESHAPE → BROADCAST →
+ *   one outer RESHAPE per side — PyTorch `repeat_kv`. `match.ops.size == 9`.
+ * - **GQA-with-K^T** (§0.4.324): the Llama-3 / Mistral attention layout
+ *   where K's outer chain has a trailing TRANSPOSE for `Q · K^T`. K side:
+ *   `[TRANSPOSE, RESHAPE]` outer; V side: `[RESHAPE]` outer. The
+ *   per-side chains are asymmetric and that's fine — each is processed
+ *   independently.
  *
- * Anything else — TRANSPOSE in the chain (the `Q · K^T` shape), more
- * than one outer/inner RESHAPE, asymmetric K vs V chains — is declined
- * (`return null`). The recognizer's match is left untouched so
- * downstream lowering decomposes back to primitives.
+ * The chain length is bounded (≤ 4 outer ops, ≤ 2 inner ops, all from
+ * the {RESHAPE, TRANSPOSE} set in outer / RESHAPE-only in inner) so the
+ * emitted gradient body stays tractable. Anything outside that envelope
+ * (rare-shape RESHAPEs, non-permutation TRANSPOSE attrs) declines.
  *
- * # Other v1+v2 limitations (mirroring [coarsenFlashAttention])
+ * # Other limitations (mirroring [coarsenFlashAttention])
  *
- * - rank ≥ 2 with consistent ranks across Q / K_expanded / V_expanded.
+ * - rank ≥ 2 with consistent ranks across Q / K_for_matmul / V_for_matmul.
  * - no causal mask, no scale factor.
  * - same broadcast attrs are reused unchanged when emitting primal and
  *   recomputing the forward in the gradient body.
@@ -183,10 +189,36 @@ private fun extractExpansionChain(
 }
 
 private fun isCoarsenableChain(chain: ExpansionChain): Boolean {
-    if (chain.outerOps.size > 1 || chain.innerOps.size > 1) return false
-    if (chain.outerOps.any { it.op != OpKind.RESHAPE }) return false
+    // Outer ops can be RESHAPE or TRANSPOSE (the §0.4.324 v3 widening
+    // for the `K^T` shape). Inner ops are RESHAPE-only — the size-1
+    // axis insertion before BROADCAST. Bound chain length to keep the
+    // emitted gradient body tractable; real GQA shapes don't go past
+    // these counts.
+    if (chain.outerOps.size > 4 || chain.innerOps.size > 2) return false
+    if (chain.outerOps.any { it.op != OpKind.RESHAPE && it.op != OpKind.TRANSPOSE }) return false
     if (chain.innerOps.any { it.op != OpKind.RESHAPE }) return false
+    // TRANSPOSE in the chain must carry a `permutation` attr; we'd
+    // need it to compute the inverse on the backward side.
+    if (chain.outerOps.any { it.op == OpKind.TRANSPOSE && it.attrs["permutation"] !is List<*> }) {
+        return false
+    }
     return true
+}
+
+/**
+ * Inverse of a permutation `p`: the permutation `q` such that
+ * `q[p[i]] = i` for all `i`. Used to invert a TRANSPOSE on the gradient
+ * side — the forward `TRANSPOSE(x, perm=p)` has adjoint
+ * `TRANSPOSE(dy, perm=inversePermutation(p))`.
+ */
+private fun inversePermutation(perm: List<Int>): List<Int> {
+    val inv = MutableList(perm.size) { 0 }
+    for (i in perm.indices) {
+        val j = perm[i]
+        require(j in perm.indices) { "permutation index $j out of bounds for length ${perm.size}" }
+        inv[j] = i
+    }
+    return inv
 }
 
 @Suppress("UNCHECKED_CAST")
@@ -212,9 +244,10 @@ private fun findSingleExpansionAxis(broadcast: DxirOp): Int? {
 
 /**
  * Apply the K/V forward expansion chain inside a [DxirBuilder.function]
- * scope: optional inner RESHAPE, then BROADCAST, then optional outer
- * RESHAPE. Each emitted op gets the SAME output type as the matched
- * original (we read the type off the chain ops directly).
+ * scope: optional inner RESHAPEs, then BROADCAST, then optional outer
+ * `{RESHAPE, TRANSPOSE}` ops. Each emitted op gets the SAME output type
+ * + attrs as the matched original — TRANSPOSE keeps its `permutation`
+ * unchanged on the forward side.
  */
 private fun DxirBuilder.applyExpansion(
     raw: DxirNode,
@@ -231,7 +264,11 @@ private fun DxirBuilder.applyExpansion(
     // outerOps walked matmul→broadcast, emitting walked-reverse replays
     // forward graph order (broadcast → matmul).
     for (outerOp in chain.outerOps.reversed()) {
-        cursor = op(OpKind.RESHAPE, listOf(cursor), outerOp.type)
+        cursor = when (outerOp.op) {
+            OpKind.RESHAPE -> op(OpKind.RESHAPE, listOf(cursor), outerOp.type)
+            OpKind.TRANSPOSE -> op(OpKind.TRANSPOSE, listOf(cursor), outerOp.type, attrs = outerOp.attrs)
+            else -> error("isCoarsenableChain should have filtered ${outerOp.op}")
+        }
     }
     return cursor
 }
@@ -252,9 +289,23 @@ private fun DxirBuilder.invertExpansion(
     rawType: DxirType,
 ): DxirNode {
     var cursor: DxirNode = dExpanded
+    // outerOps in walked order = closest-to-matmul first. The inverse
+    // chain processes them in the same order, undoing the LAST forward
+    // op first.
     for (outerOp in chain.outerOps) {
         val targetType = outerOp.operands.single().type
-        cursor = op(OpKind.RESHAPE, listOf(cursor), targetType)
+        cursor = when (outerOp.op) {
+            OpKind.RESHAPE -> op(OpKind.RESHAPE, listOf(cursor), targetType)
+            OpKind.TRANSPOSE -> {
+                @Suppress("UNCHECKED_CAST")
+                val perm = outerOp.attrs["permutation"] as List<Int>
+                op(
+                    OpKind.TRANSPOSE, listOf(cursor), targetType,
+                    attrs = mapOf("permutation" to inversePermutation(perm)),
+                )
+            }
+            else -> error("isCoarsenableChain should have filtered ${outerOp.op}")
+        }
     }
     val bcInputType = broadcast.operands.single().type
     cursor = op(

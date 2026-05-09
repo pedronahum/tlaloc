@@ -230,9 +230,10 @@ class GroupedQueryAttentionCoarsenerTest {
     }
 
     @Test
-    fun coarsenerDeclinesNonCanonicalChain() {
-        // Anything beyond MQA / GQA-canonical should be declined.
-        // Here: two outer RESHAPEs in a row on K.
+    fun coarsensWithTwoOuterReshapes() {
+        // §0.4.324 widening: outer chains up to 4 ops of {RESHAPE,
+        // TRANSPOSE} are now in scope. Two outer RESHAPEs in a row
+        // (a degenerate but well-formed chain) coarsens.
         val intermediate = DxirType(F32, listOf(hq, dim, tlen))   // arbitrary mid shape
         val fn = DxirBuilder.function("two_outer_reshapes") {
             val q = param("q", qType)
@@ -254,12 +255,76 @@ class GroupedQueryAttentionCoarsenerTest {
             listOf(out)
         }
         val matches = recognizeGroupedQueryAttention(fn)
-        // Recognizer's walkBackToExpansion accepts arbitrary RESHAPE/TRANSPOSE
-        // chains; it should fire here.
         assertEquals(1, matches.size, "recognizer accepts longer outer chains")
 
         val coarsened = coarsenRecognizedPatterns(fn, matches)
-        val coarsenedOps = coarsened.body.filterIsInstance<DxirOp>().count { it.op == OpKind.COARSENED }
-        assertEquals(0, coarsenedOps, "coarsener declines outer chain length > 1; recognizer match left as-is")
+        val coarsenedOps = coarsened.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.COARSENED }
+        assertEquals(1, coarsenedOps.size, "coarsener now handles two outer RESHAPEs")
+    }
+
+    @Test
+    fun coarsensGqaWithTransposeInOuterChain() {
+        // §0.4.324 — the Llama-3 / Mistral attention layout: K's outer
+        // chain has the `K^T` TRANSPOSE before the QK matmul. Asymmetric
+        // K vs V (V has just the canonical RESHAPE chain). Both fire.
+        val kFlatType = DxirType(F32, listOf(hq, tlen, dim))             // post-flatten K
+        val kTransposedType = DxirType(F32, listOf(hq, dim, tlen))       // K^T for Q · K^T
+
+        val fn = DxirBuilder.function("gqa_with_kt") {
+            val q = param("q", qType)
+            // K side: GQA-canonical chain plus a final TRANSPOSE.
+            val kRawT = param("k_raw", gqaRawType)
+            val vRawT = param("v_raw", gqaRawType)
+            val kUnsq = op(OpKind.RESHAPE, listOf(kRawT), gqaUnsqType)
+            val kBcast = op(
+                OpKind.BROADCAST, listOf(kUnsq), gqaBcastType,
+                attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2, 3)),
+            )
+            val kFlat = op(OpKind.RESHAPE, listOf(kBcast), kFlatType)
+            val kT = op(
+                OpKind.TRANSPOSE, listOf(kFlat), kTransposedType,
+                attrs = mapOf("permutation" to listOf(0, 2, 1)),
+            )
+            // V side: standard GQA-canonical (no transpose).
+            val vUnsq = op(OpKind.RESHAPE, listOf(vRawT), gqaUnsqType)
+            val vBcast = op(
+                OpKind.BROADCAST, listOf(vUnsq), gqaBcastType,
+                attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2, 3)),
+            )
+            val vFlat = op(OpKind.RESHAPE, listOf(vBcast), vExpandedType)
+            // Attention with K^T contracted: Q [hq, T, D] × K^T [hq, D, T] → [hq, T, T].
+            val qk = op(OpKind.MATMUL, listOf(q, kT), scoreType)
+            val sm = op(OpKind.SOFTMAX, listOf(qk), scoreType)
+            val out = op(OpKind.MATMUL, listOf(sm, vFlat), outType)
+            listOf(out)
+        }
+        val matches = recognizeGroupedQueryAttention(fn)
+        assertEquals(1, matches.size, "recognizer prerequisite")
+
+        val coarsened = coarsenRecognizedPatterns(fn, matches)
+        val ops = coarsened.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.COARSENED }
+        assertEquals(1, ops.size, "v3 coarsens TRANSPOSE-in-outer-chain shape")
+        val co = ops.single()
+        val grad = co.attrs["gradient_body"] as DxirFunction
+
+        // dK_raw should land at the raw K shape ([hKv2, T, D]) despite
+        // the TRANSPOSE in the outer chain. Pin via the gradient
+        // body's return type.
+        assertEquals(gqaRawType, grad.returns[1].type, "dK_raw at raw shape")
+        assertEquals(gqaRawType, grad.returns[2].type, "dV_raw at raw shape")
+
+        // Gradient body must contain a TRANSPOSE inverse on the K
+        // side. The forward TRANSPOSE has perm=[0, 2, 1]; the inverse
+        // TRANSPOSE in the gradient should also have perm [0, 2, 1]
+        // (self-inverse for swapping last two axes). Pin via attrs.
+        val gradOps = grad.body.filterIsInstance<DxirOp>()
+        // Two TRANSPOSEs are the FlashAttention chain rule's last-two
+        // swaps + one is the K-chain inverse + maybe more for V. Filter
+        // to the one that produces the K-flat shape (output of inverse).
+        val kFlatTransposes = gradOps.filter { it.op == OpKind.TRANSPOSE && it.type == kFlatType }
+        assertTrue(
+            kFlatTransposes.isNotEmpty(),
+            "expected at least one TRANSPOSE producing kFlatType (the chain inverse); got ${gradOps.map { it.op }}",
+        )
     }
 }
