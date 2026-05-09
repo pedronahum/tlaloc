@@ -224,4 +224,5 @@ val defaultCoarseners: Map<String, PatternCoarsener> = mapOf(
     "TransformerMLP" to PatternCoarsener { m -> coarsenTransformerMLP(m as RecognitionMatch.TransformerMLP) },
     "SwiGLU" to PatternCoarsener { m -> coarsenSwiGLU(m as RecognitionMatch.SwiGLU) },
     "LayerNorm" to PatternCoarsener { m -> coarsenLayerNorm(m as RecognitionMatch.LayerNorm) },
+    "GroupedQueryAttention" to PatternCoarsener { m -> coarsenGroupedQueryAttention(m as RecognitionMatch.GroupedQueryAttention) },
 )
