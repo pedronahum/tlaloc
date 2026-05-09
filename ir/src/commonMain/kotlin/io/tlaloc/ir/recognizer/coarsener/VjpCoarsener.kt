@@ -223,4 +223,5 @@ val defaultCoarseners: Map<String, PatternCoarsener> = mapOf(
     "CrossEntropy" to PatternCoarsener { m -> coarsenCrossEntropy(m as RecognitionMatch.CrossEntropy) },
     "TransformerMLP" to PatternCoarsener { m -> coarsenTransformerMLP(m as RecognitionMatch.TransformerMLP) },
     "SwiGLU" to PatternCoarsener { m -> coarsenSwiGLU(m as RecognitionMatch.SwiGLU) },
+    "LayerNorm" to PatternCoarsener { m -> coarsenLayerNorm(m as RecognitionMatch.LayerNorm) },
 )
