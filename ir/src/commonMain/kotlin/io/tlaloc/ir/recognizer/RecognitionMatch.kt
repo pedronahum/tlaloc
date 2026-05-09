@@ -68,6 +68,60 @@ sealed class RecognitionMatch {
     }
 
     /**
+     * §0.4.320 — Grouped/Multi-Query attention. Strict superset of
+     * [FlashAttention] in op count: matches a `MATMUL → SOFTMAX → MATMUL`
+     * chain whose K and V operands trace back through an explicit
+     * `BROADCAST` head-expansion step.
+     *
+     * Two production shapes both fit:
+     *
+     * - **MQA** (`H_kv = 1`): `K_raw[1,T,D] → BROADCAST → K_for_qk[H_q,T,D]`.
+     *   The size-1 head axis broadcasts naturally to `H_q`.
+     * - **GQA** (`1 < H_kv < H_q`): the canonical PyTorch
+     *   `repeat_kv(k, H_q / H_kv)` produces
+     *   `RESHAPE → BROADCAST → RESHAPE`, the recognizer accepts the
+     *   wrapping RESHAPEs around the BROADCAST and reports the same
+     *   `groupRatio = H_q / H_kv`.
+     *
+     * Either bracketing can also include a `TRANSPOSE` (the `Q·K^T`
+     * shape). When both [FlashAttention] and this pattern fire on the
+     * same softmax, the §0.4.282 resolver picks this one (more ops).
+     *
+     * # Out of scope (v1)
+     *
+     * - Implicit broadcasting at the matmul level (no explicit BROADCAST
+     *   op in the chain). Some frameworks lean on matmul broadcast
+     *   semantics to handle MQA without a materialised expansion step;
+     *   detecting that requires introspecting matmul operand types
+     *   rather than walking through a BROADCAST. Future work.
+     * - `CONCAT`-based head replication (`torch.cat([k]*group_ratio,
+     *   dim=-3)`). Equivalent semantically; different IR shape.
+     * - Coarsener (the v1 only adds the recognizer; coarsener follows
+     *   the §0.4.318 / §0.4.319 split).
+     */
+    data class GroupedQueryAttention(
+        override val ops: List<DxirOp>,
+        val qkMatmul: DxirOp,
+        val softmax: DxirOp,
+        val pvMatmul: DxirOp,
+        val qInput: io.tlaloc.ir.DxirNode,
+        /** K tensor before any expansion ops — the leaf input. */
+        val kRawInput: io.tlaloc.ir.DxirNode,
+        /** V tensor before any expansion ops — the leaf input. */
+        val vRawInput: io.tlaloc.ir.DxirNode,
+        /** The BROADCAST op that expanded K's head dim. */
+        val kBroadcast: DxirOp,
+        /** The BROADCAST op that expanded V's head dim. */
+        val vBroadcast: DxirOp,
+        /** `H_q / H_kv` — total expansion factor across the broadcast axis. ≥ 2. */
+        val groupRatio: Int,
+        val scoreType: DxirType,
+        val outputType: DxirType,
+    ) : RecognitionMatch() {
+        override val patternName: String = "GroupedQueryAttention"
+    }
+
+    /**
      * §0.4.318 — Layer norm without affine. Canonical decomposition:
      *
      * ```

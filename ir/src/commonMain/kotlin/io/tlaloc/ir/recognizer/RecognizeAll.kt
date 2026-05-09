@@ -44,6 +44,11 @@ fun recognizeAll(
     // §0.4.318 — SQRT+DIV-form LayerNorm. v1 doesn't overlap with
     // RmsNorm (different anchor op); a future RSQRT+MUL form would.
     all += recognizeLayerNorm(fn, diagnostics)
+    // §0.4.320 — GroupedQueryAttention is a strict superset of
+    // FlashAttention (same MATMUL/SOFTMAX/MATMUL anchor, plus the K and V
+    // BROADCAST expansion chains). When both fire on the same softmax,
+    // [resolveLargestMatch] picks GQA by op count.
+    all += recognizeGroupedQueryAttention(fn, diagnostics)
     return resolveLargestMatch(all)
 }
 
