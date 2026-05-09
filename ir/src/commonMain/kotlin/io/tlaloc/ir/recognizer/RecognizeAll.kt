@@ -41,6 +41,9 @@ fun recognizeAll(
     // §0.4.282 resolver already prefers them — listing first is doc.
     all += recognizeTransformerMLP(fn, diagnostics)
     all += recognizeSwiGLU(fn, diagnostics)
+    // §0.4.318 — SQRT+DIV-form LayerNorm. v1 doesn't overlap with
+    // RmsNorm (different anchor op); a future RSQRT+MUL form would.
+    all += recognizeLayerNorm(fn, diagnostics)
     return resolveLargestMatch(all)
 }
 

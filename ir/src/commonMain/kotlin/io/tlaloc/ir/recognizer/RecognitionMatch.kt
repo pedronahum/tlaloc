@@ -68,6 +68,38 @@ sealed class RecognitionMatch {
     }
 
     /**
+     * §0.4.318 — Layer norm without affine. Canonical decomposition:
+     *
+     * ```
+     * mean1 = MEAN(x)                  // keepdims, last axis
+     * sub   = SUB(x, mean1)            // centered (broadcast on size-1 axis)
+     * sq    = MUL(sub, sub)            // squared deviations
+     * mean2 = MEAN(sq)                 // variance, keepdims
+     * [eps  = ADD(mean2, eps_const)]   // optional stabiliser
+     * std   = SQRT(mean2 or eps)
+     * out   = DIV(sub, std)
+     * ```
+     *
+     * v1 anchors on `OpKind.SQRT` consumed by `DIV(centered, std)`. This
+     * doesn't overlap with [RmsNorm] (which anchors on RSQRT), so the
+     * §0.4.282 [resolveLargestMatch] doesn't kick in for v1. If a future
+     * RSQRT+MUL alternative form is added, RmsNorm's `MUL(x, x)` check
+     * would pass on a LayerNorm region (with `x = sub`); the resolver
+     * would then pick LayerNorm by op count (always larger by exactly
+     * the {mean1, sub} pair).
+     *
+     * v1 also doesn't recognise the optional affine `* gamma + beta`
+     * post-scale — same scope reasoning as [RmsNorm].
+     */
+    data class LayerNorm(
+        override val ops: List<DxirOp>,
+        val input: io.tlaloc.ir.DxirNode,
+        val output: io.tlaloc.ir.DxirNode,
+    ) : RecognitionMatch() {
+        override val patternName: String = "LayerNorm"
+    }
+
+    /**
      * Rotary positional embedding (RoPE) — sin/cos rotation pair. v1
      * stub — full structural match lands in L3.1.
      */
