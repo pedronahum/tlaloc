@@ -1,7 +1,6 @@
 package io.tlaloc.stablehlo
 
 import io.tlaloc.core.Bool
-import io.tlaloc.core.DType
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
@@ -21,20 +20,6 @@ import io.tlaloc.ir.DxirSharding
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
-
-fun DxirType.toMlir(): String {
-    val elem = mlirElementType(dtype)
-    return if (dims.isEmpty()) "tensor<$elem>"
-    else "tensor<${dims.joinToString("x")}x$elem>"
-}
-
-private fun mlirElementType(dtype: DType): String = when (dtype) {
-    is F32 -> "f32"
-    is F64 -> "f64"
-    is I32 -> "i32"
-    is I64 -> "i64"
-    is Bool -> "i1"
-}
 
 fun DxirModule.toStablehlo(): String = buildString {
     appendLine("module {")
@@ -121,25 +106,6 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             else -> error("non-numeric DxirConst value: $v (${v::class.simpleName})")
         }
         out.appendLine("$step$name = stablehlo.constant dense<$literal> : ${node.type.toMlir()}")
-    }
-
-    /**
-     * §0.4.73 — format a row-major `FloatArray` as an MLIR dense literal matching
-     * [dims]. Rank-1 produces `[1.0, 2.0, 3.0]`; rank-2 produces
-     * `[[1.0, 2.0], [3.0, 4.0]]`; rank-N is recursive. Matches the syntax
-     * `stablehlo-translate` consumes for `stablehlo.constant dense<...> : tensor<RxCxf32>`.
-     */
-    private fun denseFromArray(values: FloatArray, dims: List<Int>): String {
-        require(dims.isNotEmpty()) { "denseFromArray: empty dims (use the scalar arm instead)" }
-        if (dims.size == 1) return values.joinToString(prefix = "[", postfix = "]") { it.toString() }
-        val outer = dims[0]
-        val inner = dims.drop(1)
-        val chunkSize = values.size / outer
-        val chunks = (0 until outer).map { i ->
-            val slice = FloatArray(chunkSize) { j -> values[i * chunkSize + j] }
-            denseFromArray(slice, inner)
-        }
-        return chunks.joinToString(prefix = "[", postfix = "]")
     }
 
     private fun emitOp(step: String, node: DxirOp) {
@@ -2100,22 +2066,6 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 } +
                 "] : (${inputType.toMlir()}) -> ${node.type.toMlir()}",
         )
-    }
-
-    private fun negInfLiteral(dtype: DType): String = when (dtype) {
-        is F32 -> "0xFF800000"
-        is F64 -> "0xFFF0000000000000"
-        is I32 -> Int.MIN_VALUE.toString()
-        is I64 -> Long.MIN_VALUE.toString()
-        is Bool -> "false"
-    }
-
-    private fun posInfLiteral(dtype: DType): String = when (dtype) {
-        is F32 -> "0x7F800000"
-        is F64 -> "0x7FF0000000000000"
-        is I32 -> Int.MAX_VALUE.toString()
-        is I64 -> Long.MAX_VALUE.toString()
-        is Bool -> "true"
     }
 
     private fun synth(): String = "%s${nextSynth++}"
