@@ -37,6 +37,9 @@ kotlin {
                 implementation(kotlin("test"))
                 implementation(libs.kotest.assertions.core)
                 implementation(libs.kotest.runner.junit5)
+                // §0.4.344 — the backward-kernel oracle test registers
+                // DSL-emitted PTX from the :kptx production kernel library.
+                implementation(project(":kptx"))
             }
         }
     }

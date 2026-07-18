@@ -1,5 +1,7 @@
 package io.tlaloc.runtime.pjrt.kptx
 
+import io.tlaloc.kptx.KptxKernels
+import io.tlaloc.kptx.emitPtx
 import io.tlaloc.runtime.pjrt.PjrtBinaries
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfiRegistry
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfm
@@ -57,218 +59,16 @@ class KptxRmsNormBackwardKernelTest {
     private val cols = 512
     private val blockThreads = 256
 
-    // eps 1e-5f == 0x3727C5AC
-    private val bwdDxPtx = """
-        .version 7.0
-        .target sm_75
-        .address_size 64
+    // §0.4.344 — kernel text now sourced from the :kptx production
+    // library (KptxKernels.rmsNormBwdDx, block=256); this oracle test
+    // re-certifies the DSL transcription numerically on every run.
+    private val bwdDxPtx = KptxKernels.rmsNormBwdDx
+        .specialize(shapes = mapOf("block" to 256))
+        .emitPtx()
 
-        .visible .entry kptx_rms_norm_bwd_dx(
-            .param .u64 x_ptr,
-            .param .u64 w_ptr,
-            .param .u64 dy_ptr,
-            .param .u64 dx_ptr,
-            .param .u64 invr_ptr,
-            .param .u32 n_cols
-        )
-        {
-            .reg .pred %p<6>;
-            .reg .b32 %r<12>;
-            .reg .f32 %f<32>;
-            .reg .b64 %rd<36>;
-            .shared .align 4 .b8 sdata[1024];
-            .shared .align 4 .b8 sdata2[1024];
-
-            ld.param.u64 %rd1, [x_ptr];
-            ld.param.u64 %rd2, [w_ptr];
-            ld.param.u64 %rd3, [dy_ptr];
-            ld.param.u64 %rd4, [dx_ptr];
-            ld.param.u64 %rd5, [invr_ptr];
-            ld.param.u32 %r1, [n_cols];
-            cvta.to.global.u64 %rd6, %rd1;
-            cvta.to.global.u64 %rd7, %rd2;
-            cvta.to.global.u64 %rd8, %rd3;
-            cvta.to.global.u64 %rd9, %rd4;
-            cvta.to.global.u64 %rd10, %rd5;
-
-            mov.u32 %r2, %ctaid.x;
-            mov.u32 %r3, %tid.x;
-            mov.u32 %r4, %ntid.x;
-
-            // row base byte offset = row * n_cols * 4
-            mul.lo.u32 %r5, %r2, %r1;
-            mul.wide.u32 %rd11, %r5, 4;
-            add.s64 %rd12, %rd6, %rd11;    // x row
-            add.s64 %rd13, %rd8, %rd11;    // dy row
-            add.s64 %rd14, %rd9, %rd11;    // dx row
-
-            // strided accumulate: sumsq += x*x ; s += (dy*w)*x
-            mov.f32 %f1, 0f00000000;
-            mov.f32 %f2, 0f00000000;
-            mov.u32 %r6, %r3;
-        LOOP_ACC:
-            setp.ge.u32 %p1, %r6, %r1;
-            @%p1 bra ACC_DONE;
-            mul.wide.u32 %rd15, %r6, 4;
-            add.s64 %rd16, %rd12, %rd15;
-            ld.global.f32 %f3, [%rd16];
-            add.s64 %rd17, %rd13, %rd15;
-            ld.global.f32 %f4, [%rd17];
-            add.s64 %rd18, %rd7, %rd15;
-            ld.global.f32 %f5, [%rd18];
-            fma.rn.f32 %f1, %f3, %f3, %f1;
-            mul.f32 %f6, %f4, %f5;
-            fma.rn.f32 %f2, %f6, %f3, %f2;
-            add.u32 %r6, %r6, %r4;
-            bra LOOP_ACC;
-        ACC_DONE:
-
-            // sdata[tid] = sumsq partial, sdata2[tid] = s partial
-            mul.wide.u32 %rd19, %r3, 4;
-            mov.u64 %rd20, sdata;
-            add.s64 %rd21, %rd20, %rd19;
-            st.shared.f32 [%rd21], %f1;
-            mov.u64 %rd22, sdata2;
-            add.s64 %rd23, %rd22, %rd19;
-            st.shared.f32 [%rd23], %f2;
-            bar.sync 0;
-
-            // dual shared-memory tree reduction: stride = ntid/2 .. 1
-            shr.u32 %r7, %r4, 1;
-        RED_LOOP:
-            setp.eq.u32 %p2, %r7, 0;
-            @%p2 bra RED_DONE;
-            setp.ge.u32 %p3, %r3, %r7;
-            @%p3 bra RED_SKIP;
-            add.u32 %r8, %r3, %r7;
-            mul.wide.u32 %rd24, %r8, 4;
-            add.s64 %rd25, %rd20, %rd24;
-            ld.shared.f32 %f7, [%rd25];
-            ld.shared.f32 %f8, [%rd21];
-            add.f32 %f9, %f7, %f8;
-            st.shared.f32 [%rd21], %f9;
-            add.s64 %rd26, %rd22, %rd24;
-            ld.shared.f32 %f10, [%rd26];
-            ld.shared.f32 %f11, [%rd23];
-            add.f32 %f12, %f10, %f11;
-            st.shared.f32 [%rd23], %f12;
-        RED_SKIP:
-            bar.sync 0;
-            shr.u32 %r7, %r7, 1;
-            bra RED_LOOP;
-        RED_DONE:
-
-            // r = 1/sqrt(sumsq/n + eps); c = r^3 * (s/n)
-            ld.shared.f32 %f13, [%rd20];
-            ld.shared.f32 %f14, [%rd22];
-            cvt.rn.f32.u32 %f15, %r1;
-            div.rn.f32 %f16, %f13, %f15;
-            add.f32 %f17, %f16, 0f3727C5AC;
-            sqrt.rn.f32 %f18, %f17;
-            rcp.rn.f32 %f19, %f18;
-            mul.f32 %f20, %f19, %f19;
-            mul.f32 %f21, %f20, %f19;
-            div.rn.f32 %f22, %f14, %f15;
-            mul.f32 %f23, %f21, %f22;
-
-            // thread 0 writes inv_rms[row]
-            setp.ne.u32 %p4, %r3, 0;
-            @%p4 bra SKIP_INVR;
-            mul.wide.u32 %rd27, %r2, 4;
-            add.s64 %rd28, %rd10, %rd27;
-            st.global.f32 [%rd28], %f19;
-        SKIP_INVR:
-
-            // strided write: dx = (dy*w)*r - x*c
-            mov.u32 %r9, %r3;
-        LOOP_OUT:
-            setp.ge.u32 %p5, %r9, %r1;
-            @%p5 bra OUT_DONE;
-            mul.wide.u32 %rd29, %r9, 4;
-            add.s64 %rd30, %rd12, %rd29;
-            ld.global.f32 %f24, [%rd30];
-            add.s64 %rd31, %rd13, %rd29;
-            ld.global.f32 %f25, [%rd31];
-            add.s64 %rd32, %rd7, %rd29;
-            ld.global.f32 %f26, [%rd32];
-            mul.f32 %f27, %f25, %f26;
-            mul.f32 %f28, %f27, %f19;
-            mul.f32 %f29, %f24, %f23;
-            sub.f32 %f30, %f28, %f29;
-            add.s64 %rd33, %rd14, %rd29;
-            st.global.f32 [%rd33], %f30;
-            add.u32 %r9, %r9, %r4;
-            bra LOOP_OUT;
-        OUT_DONE:
-            ret;
-        }
-    """.trimIndent()
-
-    private val bwdDwPtx = """
-        .version 7.0
-        .target sm_75
-        .address_size 64
-
-        .visible .entry kptx_rms_norm_bwd_dw(
-            .param .u64 x_ptr,
-            .param .u64 dy_ptr,
-            .param .u64 invr_ptr,
-            .param .u64 dw_ptr,
-            .param .u32 n_rows,
-            .param .u32 n_cols
-        )
-        {
-            .reg .pred %p<3>;
-            .reg .b32 %r<10>;
-            .reg .f32 %f<8>;
-            .reg .b64 %rd<16>;
-
-            ld.param.u64 %rd1, [x_ptr];
-            ld.param.u64 %rd2, [dy_ptr];
-            ld.param.u64 %rd3, [invr_ptr];
-            ld.param.u64 %rd4, [dw_ptr];
-            ld.param.u32 %r1, [n_rows];
-            ld.param.u32 %r2, [n_cols];
-            cvta.to.global.u64 %rd5, %rd1;
-            cvta.to.global.u64 %rd6, %rd2;
-            cvta.to.global.u64 %rd7, %rd3;
-            cvta.to.global.u64 %rd8, %rd4;
-
-            // column j = ctaid * ntid + tid; guard j < n_cols
-            mov.u32 %r3, %ctaid.x;
-            mov.u32 %r4, %ntid.x;
-            mov.u32 %r5, %tid.x;
-            mad.lo.u32 %r6, %r3, %r4, %r5;
-            setp.ge.u32 %p1, %r6, %r2;
-            @%p1 bra DONE;
-
-            // dw_j = sum_i dy[i,j] * x[i,j] * inv_rms[i]
-            mov.f32 %f1, 0f00000000;
-            mov.u32 %r7, 0;
-        LOOP_ROWS:
-            setp.ge.u32 %p2, %r7, %r1;
-            @%p2 bra ROWS_DONE;
-            mad.lo.u32 %r8, %r7, %r2, %r6;
-            mul.wide.u32 %rd9, %r8, 4;
-            add.s64 %rd10, %rd5, %rd9;
-            ld.global.f32 %f2, [%rd10];
-            add.s64 %rd11, %rd6, %rd9;
-            ld.global.f32 %f3, [%rd11];
-            mul.wide.u32 %rd12, %r7, 4;
-            add.s64 %rd13, %rd7, %rd12;
-            ld.global.f32 %f4, [%rd13];
-            mul.f32 %f5, %f3, %f2;
-            fma.rn.f32 %f1, %f5, %f4, %f1;
-            add.u32 %r7, %r7, 1;
-            bra LOOP_ROWS;
-        ROWS_DONE:
-            mul.wide.u32 %rd14, %r6, 4;
-            add.s64 %rd15, %rd8, %rd14;
-            st.global.f32 [%rd15], %f1;
-        DONE:
-            ret;
-        }
-    """.trimIndent()
+    private val bwdDwPtx = KptxKernels.rmsNormBwdDw
+        .specialize()
+        .emitPtx()
 
     private val kptxMlir = """
         func.func @main(%arg0: tensor<${rows}x${cols}xf32>, %arg1: tensor<${cols}xf32>, %arg2: tensor<${rows}x${cols}xf32>) -> (tensor<${rows}x${cols}xf32>, tensor<${cols}xf32>) {

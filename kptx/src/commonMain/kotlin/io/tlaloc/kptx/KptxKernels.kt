@@ -1,0 +1,365 @@
+package io.tlaloc.kptx
+
+/**
+ * KPTX v2.7 (§0.4.344) — the production kernel library (plan task 15):
+ * the v1 hand-written kernels rewritten as [PtxKernelTemplate]s. This
+ * file is now the **single source** for the KPTX rms_norm family — the
+ * runtime/benchmark tests register `specialize(...).emitPtx()` output
+ * instead of hand-written strings, so the same GPU tests that pinned
+ * the v1 texts (§0.4.335/336 oracles + E2E) re-certify these
+ * transcriptions numerically on every run.
+ *
+ * The symbolic `block` shape sizes the shared-memory reduction scratch
+ * (`4·block` bytes per array) — the v1 texts hard-coded 1024 for the
+ * 256-thread launch; specializing at another block size now emits a
+ * consistent kernel instead of a silent smem overflow.
+ *
+ * Emitted text is canonical from birth: byte-stable under parse/emit
+ * (the v2 DoD) and ISA-clean by construction (every `inst()` was
+ * validated at build time). The §0.4.328–336 hand-written texts remain
+ * in [PtxRoundTripCorpus] as historical parser fixtures.
+ */
+object KptxKernels {
+
+    /**
+     * RMS-norm forward, eps-operand variant — the kernel the
+     * [io.tlaloc.ir.recognizer.kernel] RmsNormKernel template claims as
+     * `custom_call @kptx_rms_norm(x, eps[rows,1]) -> y` (§0.4.336).
+     * One CTA per token row, `block` threads: strided fma
+     * sum-of-squares, shared-memory tree reduction, `sqrt.rn`+`rcp.rn`
+     * normalizer, strided `out = x · r` writes. Launch signature:
+     * `(x_ptr, eps_ptr, out_ptr, n_cols)` — n_cols stays a runtime
+     * scalar (the registry's trailing-i32 marshalling, §0.4.330).
+     */
+    val rmsNormEps: PtxKernelTemplate = PtxKernelTemplate("kptx_rms_norm") { env ->
+        val block = env.shape("block")
+        val xPtr = param(".u64", "x_ptr")
+        val epsPtr = param(".u64", "eps_ptr")
+        val outPtr = param(".u64", "out_ptr")
+        val nColsP = param(".u32", "n_cols")
+
+        val p1 = pred(); val p2 = pred(); val p3 = pred()
+        val r = List(9) { r32() }                       // %r1..%r9
+        val f = List(14) { f32() }                      // %f1..%f14
+        val rd = List(21) { r64() }                     // %rd1..%rd21
+        val sdata = shared("sdata", sizeBytes = 4 * block)
+
+        inst("ld.param.u64", rd[0], mem(xPtr))
+        inst("ld.param.u64", rd[1], mem(epsPtr))
+        inst("ld.param.u64", rd[2], mem(outPtr))
+        inst("ld.param.u32", r[0], mem(nColsP))
+        inst("cvta.to.global.u64", rd[3], rd[0])
+        inst("cvta.to.global.u64", rd[4], rd[1])
+        inst("cvta.to.global.u64", rd[5], rd[2])
+        blank()
+        inst("mov.u32", r[1], ctaidX)
+        inst("mov.u32", r[2], tidX)
+        inst("mov.u32", r[3], ntidX)
+        blank()
+        comment("row base byte offset = row * n_cols * 4")
+        inst("mul.lo.u32", r[4], r[1], r[0])
+        inst("mul.wide.u32", rd[6], r[4], imm(4))
+        inst("add.s64", rd[7], rd[3], rd[6])
+        inst("add.s64", rd[8], rd[5], rd[6])
+        blank()
+        comment("strided sum of squares")
+        inst("mov.f32", f[0], imm("0f00000000"))
+        inst("mov.u32", r[5], r[2])
+        val loopSum = label("LOOP_SUM")
+        val sumDone = label("SUM_DONE")
+        place(loopSum)
+        inst("setp.ge.u32", p1, r[5], r[0])
+        inst("bra", sumDone, guard = p1)
+        inst("mul.wide.u32", rd[9], r[5], imm(4))
+        inst("add.s64", rd[10], rd[7], rd[9])
+        inst("ld.global.f32", f[1], mem(rd[10]))
+        inst("fma.rn.f32", f[0], f[1], f[1], f[0])
+        inst("add.u32", r[5], r[5], r[3])
+        inst("bra", loopSum)
+        place(sumDone)
+        blank()
+        inst("mul.wide.u32", rd[11], r[2], imm(4))
+        inst("mov.u64", rd[12], sdata)
+        inst("add.s64", rd[13], rd[12], rd[11])
+        inst("st.shared.f32", mem(rd[13]), f[0])
+        inst("bar.sync", imm(0))
+        blank()
+        comment("shared-memory tree reduction: stride = ntid/2 .. 1")
+        inst("shr.u32", r[6], r[3], imm(1))
+        val redLoop = label("RED_LOOP")
+        val redSkip = label("RED_SKIP")
+        val redDone = label("RED_DONE")
+        place(redLoop)
+        inst("setp.eq.u32", p2, r[6], imm(0))
+        inst("bra", redDone, guard = p2)
+        inst("setp.ge.u32", p3, r[2], r[6])
+        inst("bra", redSkip, guard = p3)
+        inst("add.u32", r[7], r[2], r[6])
+        inst("mul.wide.u32", rd[14], r[7], imm(4))
+        inst("add.s64", rd[15], rd[12], rd[14])
+        inst("ld.shared.f32", f[2], mem(rd[15]))
+        inst("ld.shared.f32", f[3], mem(rd[13]))
+        inst("add.f32", f[4], f[2], f[3])
+        inst("st.shared.f32", mem(rd[13]), f[4])
+        place(redSkip)
+        inst("bar.sync", imm(0))
+        inst("shr.u32", r[6], r[6], imm(1))
+        inst("bra", redLoop)
+        place(redDone)
+        blank()
+        comment("inv_rms = 1 / sqrt(sum/n + eps[row]); eps is the coarsener's")
+        comment("[rows, 1] operand, one value per token row")
+        inst("ld.shared.f32", f[5], mem(rd[12]))
+        inst("cvt.rn.f32.u32", f[6], r[0])
+        inst("div.rn.f32", f[7], f[5], f[6])
+        inst("mul.wide.u32", rd[16], r[1], imm(4))
+        inst("add.s64", rd[17], rd[4], rd[16])
+        inst("ld.global.f32", f[8], mem(rd[17]))
+        inst("add.f32", f[9], f[7], f[8])
+        inst("sqrt.rn.f32", f[10], f[9])
+        inst("rcp.rn.f32", f[11], f[10])
+        blank()
+        comment("strided write: out = x * inv_rms")
+        inst("mov.u32", r[8], r[2])
+        val loopOut = label("LOOP_OUT")
+        val outDone = label("OUT_DONE")
+        place(loopOut)
+        inst("setp.ge.u32", p1, r[8], r[0])
+        inst("bra", outDone, guard = p1)
+        inst("mul.wide.u32", rd[18], r[8], imm(4))
+        inst("add.s64", rd[19], rd[7], rd[18])
+        inst("ld.global.f32", f[12], mem(rd[19]))
+        inst("mul.f32", f[13], f[12], f[11])
+        inst("add.s64", rd[20], rd[8], rd[18])
+        inst("st.global.f32", mem(rd[20]), f[13])
+        inst("add.u32", r[8], r[8], r[3])
+        inst("bra", loopOut)
+        place(outDone)
+        inst("ret")
+    }
+
+    /**
+     * RMS-norm backward, dx half (§0.4.335 math): with
+     * `r = 1/sqrt(mean(x²)+eps)`, `s = Σ dy·w·x`, computes
+     * `dx = (dy·w)·r − x·r³·s/D` and writes `inv_rms[row] = r` for the
+     * dw kernel to consume. One CTA per row, dual shared-memory tree
+     * (two `4·block`-byte arrays). Launch signature:
+     * `(x_ptr, w_ptr, dy_ptr, dx_ptr, invr_ptr, n_cols)`.
+     */
+    val rmsNormBwdDx: PtxKernelTemplate = PtxKernelTemplate("kptx_rms_norm_bwd_dx") { env ->
+        val block = env.shape("block")
+        val xPtr = param(".u64", "x_ptr")
+        val wPtr = param(".u64", "w_ptr")
+        val dyPtr = param(".u64", "dy_ptr")
+        val dxPtr = param(".u64", "dx_ptr")
+        val invrPtr = param(".u64", "invr_ptr")
+        val nColsP = param(".u32", "n_cols")
+
+        val p1 = pred(); val p2 = pred(); val p3 = pred(); val p4 = pred(); val p5 = pred()
+        val r = List(9) { r32() }
+        val f = List(30) { f32() }
+        val rd = List(33) { r64() }
+        val sdata = shared("sdata", sizeBytes = 4 * block)
+        val sdata2 = shared("sdata2", sizeBytes = 4 * block)
+
+        inst("ld.param.u64", rd[0], mem(xPtr))
+        inst("ld.param.u64", rd[1], mem(wPtr))
+        inst("ld.param.u64", rd[2], mem(dyPtr))
+        inst("ld.param.u64", rd[3], mem(dxPtr))
+        inst("ld.param.u64", rd[4], mem(invrPtr))
+        inst("ld.param.u32", r[0], mem(nColsP))
+        inst("cvta.to.global.u64", rd[5], rd[0])
+        inst("cvta.to.global.u64", rd[6], rd[1])
+        inst("cvta.to.global.u64", rd[7], rd[2])
+        inst("cvta.to.global.u64", rd[8], rd[3])
+        inst("cvta.to.global.u64", rd[9], rd[4])
+        blank()
+        inst("mov.u32", r[1], ctaidX)
+        inst("mov.u32", r[2], tidX)
+        inst("mov.u32", r[3], ntidX)
+        blank()
+        comment("row base byte offset = row * n_cols * 4")
+        inst("mul.lo.u32", r[4], r[1], r[0])
+        inst("mul.wide.u32", rd[10], r[4], imm(4))
+        inst("add.s64", rd[11], rd[5], rd[10], comment = "x row")
+        inst("add.s64", rd[12], rd[7], rd[10], comment = "dy row")
+        inst("add.s64", rd[13], rd[8], rd[10], comment = "dx row")
+        blank()
+        comment("strided accumulate: sumsq += x*x ; s += (dy*w)*x")
+        inst("mov.f32", f[0], imm("0f00000000"))
+        inst("mov.f32", f[1], imm("0f00000000"))
+        inst("mov.u32", r[5], r[2])
+        val loopAcc = label("LOOP_ACC")
+        val accDone = label("ACC_DONE")
+        place(loopAcc)
+        inst("setp.ge.u32", p1, r[5], r[0])
+        inst("bra", accDone, guard = p1)
+        inst("mul.wide.u32", rd[14], r[5], imm(4))
+        inst("add.s64", rd[15], rd[11], rd[14])
+        inst("ld.global.f32", f[2], mem(rd[15]))
+        inst("add.s64", rd[16], rd[12], rd[14])
+        inst("ld.global.f32", f[3], mem(rd[16]))
+        inst("add.s64", rd[17], rd[6], rd[14])
+        inst("ld.global.f32", f[4], mem(rd[17]))
+        inst("fma.rn.f32", f[0], f[2], f[2], f[0])
+        inst("mul.f32", f[5], f[3], f[4])
+        inst("fma.rn.f32", f[1], f[5], f[2], f[1])
+        inst("add.u32", r[5], r[5], r[3])
+        inst("bra", loopAcc)
+        place(accDone)
+        blank()
+        comment("sdata[tid] = sumsq partial, sdata2[tid] = s partial")
+        inst("mul.wide.u32", rd[18], r[2], imm(4))
+        inst("mov.u64", rd[19], sdata)
+        inst("add.s64", rd[20], rd[19], rd[18])
+        inst("st.shared.f32", mem(rd[20]), f[0])
+        inst("mov.u64", rd[21], sdata2)
+        inst("add.s64", rd[22], rd[21], rd[18])
+        inst("st.shared.f32", mem(rd[22]), f[1])
+        inst("bar.sync", imm(0))
+        blank()
+        comment("dual shared-memory tree reduction: stride = ntid/2 .. 1")
+        inst("shr.u32", r[6], r[3], imm(1))
+        val redLoop = label("RED_LOOP")
+        val redSkip = label("RED_SKIP")
+        val redDone = label("RED_DONE")
+        place(redLoop)
+        inst("setp.eq.u32", p2, r[6], imm(0))
+        inst("bra", redDone, guard = p2)
+        inst("setp.ge.u32", p3, r[2], r[6])
+        inst("bra", redSkip, guard = p3)
+        inst("add.u32", r[7], r[2], r[6])
+        inst("mul.wide.u32", rd[23], r[7], imm(4))
+        inst("add.s64", rd[24], rd[19], rd[23])
+        inst("ld.shared.f32", f[6], mem(rd[24]))
+        inst("ld.shared.f32", f[7], mem(rd[20]))
+        inst("add.f32", f[8], f[6], f[7])
+        inst("st.shared.f32", mem(rd[20]), f[8])
+        inst("add.s64", rd[25], rd[21], rd[23])
+        inst("ld.shared.f32", f[9], mem(rd[25]))
+        inst("ld.shared.f32", f[10], mem(rd[22]))
+        inst("add.f32", f[11], f[9], f[10])
+        inst("st.shared.f32", mem(rd[22]), f[11])
+        place(redSkip)
+        inst("bar.sync", imm(0))
+        inst("shr.u32", r[6], r[6], imm(1))
+        inst("bra", redLoop)
+        place(redDone)
+        blank()
+        comment("r = 1/sqrt(sumsq/n + eps); c = r^3 * (s/n)")
+        inst("ld.shared.f32", f[12], mem(rd[19]))
+        inst("ld.shared.f32", f[13], mem(rd[21]))
+        inst("cvt.rn.f32.u32", f[14], r[0])
+        inst("div.rn.f32", f[15], f[12], f[14])
+        inst("add.f32", f[16], f[15], imm("0f3727C5AC"))
+        inst("sqrt.rn.f32", f[17], f[16])
+        inst("rcp.rn.f32", f[18], f[17])
+        inst("mul.f32", f[19], f[18], f[18])
+        inst("mul.f32", f[20], f[19], f[18])
+        inst("div.rn.f32", f[21], f[13], f[14])
+        inst("mul.f32", f[22], f[20], f[21])
+        blank()
+        comment("thread 0 writes inv_rms[row]")
+        val skipInvr = label("SKIP_INVR")
+        inst("setp.ne.u32", p4, r[2], imm(0))
+        inst("bra", skipInvr, guard = p4)
+        inst("mul.wide.u32", rd[26], r[1], imm(4))
+        inst("add.s64", rd[27], rd[9], rd[26])
+        inst("st.global.f32", mem(rd[27]), f[18])
+        place(skipInvr)
+        blank()
+        comment("strided write: dx = (dy*w)*r - x*c")
+        inst("mov.u32", r[8], r[2])
+        val loopOut = label("LOOP_OUT")
+        val outDone = label("OUT_DONE")
+        place(loopOut)
+        inst("setp.ge.u32", p5, r[8], r[0])
+        inst("bra", outDone, guard = p5)
+        inst("mul.wide.u32", rd[28], r[8], imm(4))
+        inst("add.s64", rd[29], rd[11], rd[28])
+        inst("ld.global.f32", f[23], mem(rd[29]))
+        inst("add.s64", rd[30], rd[12], rd[28])
+        inst("ld.global.f32", f[24], mem(rd[30]))
+        inst("add.s64", rd[31], rd[6], rd[28])
+        inst("ld.global.f32", f[25], mem(rd[31]))
+        inst("mul.f32", f[26], f[24], f[25])
+        inst("mul.f32", f[27], f[26], f[18])
+        inst("mul.f32", f[28], f[23], f[22])
+        inst("sub.f32", f[29], f[27], f[28])
+        inst("add.s64", rd[32], rd[13], rd[28])
+        inst("st.global.f32", mem(rd[32]), f[29])
+        inst("add.u32", r[8], r[8], r[3])
+        inst("bra", loopOut)
+        place(outDone)
+        inst("ret")
+    }
+
+    /**
+     * RMS-norm backward, dw half: `dw_j = Σ_i dy_ij·x_ij·inv_rms_i`,
+     * consuming the `inv_rms` vector [rmsNormBwdDx] produced (XLA
+     * sequences the two custom_calls via the data dependence). One
+     * thread per column. Launch signature:
+     * `(x_ptr, dy_ptr, invr_ptr, dw_ptr, n_rows, n_cols)`.
+     */
+    val rmsNormBwdDw: PtxKernelTemplate = PtxKernelTemplate("kptx_rms_norm_bwd_dw") { _ ->
+        val xPtr = param(".u64", "x_ptr")
+        val dyPtr = param(".u64", "dy_ptr")
+        val invrPtr = param(".u64", "invr_ptr")
+        val dwPtr = param(".u64", "dw_ptr")
+        val nRowsP = param(".u32", "n_rows")
+        val nColsP = param(".u32", "n_cols")
+
+        val p1 = pred(); val p2 = pred()
+        val r = List(8) { r32() }
+        val f = List(5) { f32() }
+        val rd = List(15) { r64() }
+
+        inst("ld.param.u64", rd[0], mem(xPtr))
+        inst("ld.param.u64", rd[1], mem(dyPtr))
+        inst("ld.param.u64", rd[2], mem(invrPtr))
+        inst("ld.param.u64", rd[3], mem(dwPtr))
+        inst("ld.param.u32", r[0], mem(nRowsP))
+        inst("ld.param.u32", r[1], mem(nColsP))
+        inst("cvta.to.global.u64", rd[4], rd[0])
+        inst("cvta.to.global.u64", rd[5], rd[1])
+        inst("cvta.to.global.u64", rd[6], rd[2])
+        inst("cvta.to.global.u64", rd[7], rd[3])
+        blank()
+        comment("column j = ctaid * ntid + tid; guard j < n_cols")
+        inst("mov.u32", r[2], ctaidX)
+        inst("mov.u32", r[3], ntidX)
+        inst("mov.u32", r[4], tidX)
+        inst("mad.lo.u32", r[5], r[2], r[3], r[4])
+        val done = label("DONE")
+        inst("setp.ge.u32", p1, r[5], r[1])
+        inst("bra", done, guard = p1)
+        blank()
+        comment("dw_j = sum_i dy[i,j] * x[i,j] * inv_rms[i]")
+        inst("mov.f32", f[0], imm("0f00000000"))
+        inst("mov.u32", r[6], imm(0))
+        val loopRows = label("LOOP_ROWS")
+        val rowsDone = label("ROWS_DONE")
+        place(loopRows)
+        inst("setp.ge.u32", p2, r[6], r[0])
+        inst("bra", rowsDone, guard = p2)
+        inst("mad.lo.u32", r[7], r[6], r[1], r[5])
+        inst("mul.wide.u32", rd[8], r[7], imm(4))
+        inst("add.s64", rd[9], rd[4], rd[8])
+        inst("ld.global.f32", f[1], mem(rd[9]))
+        inst("add.s64", rd[10], rd[5], rd[8])
+        inst("ld.global.f32", f[2], mem(rd[10]))
+        inst("mul.wide.u32", rd[11], r[6], imm(4))
+        inst("add.s64", rd[12], rd[6], rd[11])
+        inst("ld.global.f32", f[3], mem(rd[12]))
+        inst("mul.f32", f[4], f[2], f[1])
+        inst("fma.rn.f32", f[0], f[4], f[3], f[0])
+        inst("add.u32", r[6], r[6], imm(1))
+        inst("bra", loopRows)
+        place(rowsDone)
+        inst("mul.wide.u32", rd[13], r[5], imm(4))
+        inst("add.s64", rd[14], rd[7], rd[13])
+        inst("st.global.f32", mem(rd[14]), f[0])
+        place(done)
+        inst("ret")
+    }
+}

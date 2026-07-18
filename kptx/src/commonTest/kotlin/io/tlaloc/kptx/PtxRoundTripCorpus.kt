@@ -6,11 +6,12 @@ package io.tlaloc.kptx
  * every entry — this is the contract that makes the IR a lossless model
  * of the text and the emitter's format the single canonical style.
  *
- * Copies, not references: the originals live in other modules' test
- * sources (listed per entry). Task 15 inverts the dependency — the DSL
- * becomes the single source and the runtime tests consume emitted PTX.
- * Until then, drift between an original and its corpus copy is caught
- * by the corpus test failing to round-trip any *new* construct.
+ * §0.4.344 (task 15) inverted the dependency: the rms_norm family is
+ * now authored in [KptxKernels] (the DSL is the single source; runtime
+ * tests consume emitted PTX). These texts stay frozen as **historical
+ * parser fixtures** — the hand-written v1 style the parser must keep
+ * accepting byte-identically, independent of how the live kernels
+ * evolve.
  */
 internal object PtxRoundTripCorpus {
     /** §0.4.328 CudaDriverFfmSmokeTest.addOnePtx. */

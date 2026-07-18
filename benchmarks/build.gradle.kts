@@ -47,6 +47,9 @@ kotlin {
                 // PjrtSession (the FFM equivalent of the §0.4.299 Python
                 // spike script). Test-only dependency.
                 implementation(project(":runtime-pjrt"))
+                // §0.4.344 — KptxTestKernels registers DSL-emitted PTX from
+                // the :kptx production kernel library. Test-only dependency.
+                implementation(project(":kptx"))
             }
         }
     }

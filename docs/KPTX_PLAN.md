@@ -1,6 +1,6 @@
 # KPTX — Kotlin PTX kernel tier: plan of record
 
-**Status: v1 COMPLETE (§0.4.326–§0.4.337, 2026-07-18). v2 not started.**
+**Status: v1 + v2 COMPLETE (§0.4.326–§0.4.344, 2026-07-18). v3 not started.**
 
 KPTX is the escape-hatch tier below StableHLO — Tlaloc's analog of what
 Pallas is to JAX: hand-written PTX kernels, authored (eventually) in a
@@ -85,17 +85,35 @@ create_options; unified-memory reboot incident): benchmark sessions
 opt into a bounded preallocated pool via `PjrtClientOptions` —
 no-preallocate costs ~2× on dispatch-heavy loops.
 
-**v2 — the Kotlin DSL (tasks 9–15).** Value-type PTX IR + emitter;
-opcode-agnostic parser with byte-identical round-trip corpus;
-declarative ISA spec table validating an `inst("opcode.mods", ...)`
-escape hatch at the Kotlin call site; KernelScope builder DSL
-(one-call-one-instruction registers/predicates/control-flow/smem);
-symbolic-shape kernel signatures + specialization cache keyed
-(arch, shape env, template args); typed wrappers for mma.sync + warp
-intrinsics (WGMMA/TMA/tcgen05 deferred until needed); v1 kernels
-rewritten in the DSL and claiming coarse ops through the Layer-3 kernel
-registry. **DoD:** a kernel written in pure Kotlin executes inside an
-XLA executable; its emitted PTX is byte-stable under parse/emit.
+**v2 — the Kotlin DSL (tasks 9–15). SHIPPED §0.4.338–§0.4.344.**
+New `:kptx` module. Value-type PTX IR + canonical emitter — the IR
+models the text, opcodes stay uninterpreted strings, immediates keep
+exact spellings (§0.4.338); strict opcode-agnostic parser +
+byte-identical round-trip corpus of the five v1 kernels (§0.4.339);
+declarative ISA spec table — 21 instruction families as data, unknown
+bases refused (§0.4.340); KernelScope builder DSL — one call = one
+instruction, typed auto-numbered registers, `!p` guards, the `inst()`
+escape hatch validated at the Kotlin call site; DSL-written add_one
+emits byte-identical to the hand-written original (§0.4.341);
+symbolic-shape templates + specialization cache keyed (arch, shapes,
+args), equal keys → identical instance so the registry's identity-keyed
+JIT cache composes (§0.4.342); vector/fragment operands + typed
+mma.sync / shfl.sync / vote wrappers, GPU-proven (shfl warp reduction
+exact; mma.m16n8k16 fragment encoding accepted by the driver JIT;
+WGMMA/TMA/tcgen05 stay deferred) (§0.4.343); v1 kernels rewritten as
+`KptxKernels` templates — the DSL is the single source, runtime/bench
+tests register emitted PTX, and the §0.4.335/336/337 GPU oracles + E2E
+re-certify the transcriptions numerically (identical diffs to the
+hand-written texts) (§0.4.344).
+
+**v2 DoD — met:** kernels written in pure Kotlin execute inside
+XLA-compiled Tlaloc programs on the GB10 (rms_norm claimed by the
+recognizer pipeline, backward pair chained through the emitted
+program); emitted PTX is byte-stable under parse/emit. Backward
+*claiming* through the coarsened VJP remains the acknowledged v3-era
+design item (`handleCoarsenedAdjoint` inlines gradient_body — a
+claimable grad-side shape is needed first; the kernels themselves are
+claim-ready).
 
 **v3 — transpiler + polish (tasks 16–19).** PTX → Kotlin DSL
 transpiler; bootstrap-workflow demo (transpile an expert kernel, edit,
