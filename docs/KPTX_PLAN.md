@@ -1,6 +1,12 @@
 # KPTX — Kotlin PTX kernel tier: plan of record
 
-**Status: v1 + v2 COMPLETE (§0.4.326–§0.4.344, 2026-07-18). v3 not started.**
+**Status: ARC CLOSED — v1 + v2 + v3 COMPLETE (§0.4.326–§0.4.348, 2026-07-18).**
+Native-runtime go/no-go: **NO-GO today, conditional GO gated on kernel
+coverage** — see [KPTX_NATIVE_RUNTIME_DECISION.md](KPTX_NATIVE_RUNTIME_DECISION.md).
+Post-arc work continues as ordinary book-of-work items: growing the DSL
+kernel library toward the Llama coarse-op set (the decision gate), and
+the backward-claiming design (`handleCoarsenedAdjoint` inlines
+gradient_body; a claimable grad-side shape is the prerequisite).
 
 KPTX is the escape-hatch tier below StableHLO — Tlaloc's analog of what
 Pallas is to JAX: hand-written PTX kernels, authored (eventually) in a
@@ -115,11 +121,19 @@ design item (`handleCoarsenedAdjoint` inlines gradient_body — a
 claimable grad-side shape is needed first; the kernels themselves are
 claim-ready).
 
-**v3 — transpiler + polish (tasks 16–19).** PTX → Kotlin DSL
-transpiler; bootstrap-workflow demo (transpile an expert kernel, edit,
-benchmark) — the adoption artifact; optional debug/verification extras
-(occupancy report, deadlock beacons, differential symbolic execution);
-spec closure + the strategic go/no-go on the Glow-style native runtime.
+**v3 — transpiler + polish (tasks 16–19). SHIPPED §0.4.345–§0.4.348.**
+PTX → Kotlin DSL transpiler, self-verifying by construction (typed step
+list drives both the source printer and a replay executor; replay must
+emit byte-identical PTX before source is returned; golden add_one
+output frozen as compiled-in Kotlin) (§0.4.345); bootstrap-workflow
+demo — transpile the §0.4.331 expert kernel, hoist its baked eps into a
+template arg + make smem symbolic (~10 lines), verify bit-exact at
+eps=1e-5 / divergent at eps=0.1, benchmark both on the GB10 — the
+adoption artifact, executed live by its test (§0.4.346); resource +
+occupancy report with named limiting factors and honest
+virtual-register caveats (deadlock beacons + differential symex stay
+deferred until needed) (§0.4.347); spec closure + the native-runtime
+go/no-go decision (§0.4.348, see KPTX_NATIVE_RUNTIME_DECISION.md).
 
 ## Standing decisions
 
