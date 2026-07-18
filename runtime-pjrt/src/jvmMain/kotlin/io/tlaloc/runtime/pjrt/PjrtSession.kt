@@ -88,11 +88,18 @@ class PjrtSession(
     plugin: Path = PjrtBinaries.pluginPath
         ?: error("PJRT plugin not resolved; set TLALOC_PJRT_PLUGIN_PATH or `pip install jax[cuda12]`"),
     val target: PjrtTarget = PjrtTarget.Cuda,
+    /** §0.4.337 — allocator options for the underlying client. The
+     * env-resolved default (`preallocate=false`, fraction 0.5) is the
+     * unified-memory-safe choice (§0.4.333); benchmark sessions may opt
+     * into a bounded preallocated pool for allocation-latency-free
+     * dispatch (see [io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions]). */
+    options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions =
+        io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions.resolve(),
 ) : AutoCloseable {
 
     private val arena: Arena = Arena.ofShared()
     private val api: PjrtApi = PjrtFfm.load(plugin, arena)
-    private val client: PjrtClient = api.createClient()
+    private val client: PjrtClient = api.createClient(options)
 
     /** First addressable device — the "default" GPU for single-GPU hosts. */
     val device: PjrtDevice = client.addressableDevices().firstOrNull()

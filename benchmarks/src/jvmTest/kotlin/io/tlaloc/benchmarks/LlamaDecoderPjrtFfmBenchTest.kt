@@ -135,7 +135,13 @@ class LlamaDecoderPjrtFfmBenchTest {
 
         // Single PjrtSession holds the CUDA client + compile cache for both
         // forward and backward — one XLA-service init, one CUDA context.
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        // §0.4.337 — bounded preallocated pool (25% ≈ 32 GB, single client)
+        // restores the §0.4.308 measurement conditions under the §0.4.333
+        // unified-memory-safe defaults (no-preallocate costs ~2.3× here).
+        val benchOptions = io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions(
+            memoryFraction = 0.25f, preallocate = true,
+        )
+        PjrtSession(target = PjrtTarget.Cuda, options = benchOptions).use { session ->
             // Compile both upfront so the timing loops measure dispatch only.
             session.prepare(fwd)
             session.prepare(bwd)

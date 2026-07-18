@@ -103,12 +103,16 @@ class LlamaDecoderComparisonMatrixTest {
         //     via the pure-Kotlin PjrtSession (no Python on the timing path).
         //     Both rows are kept: the spike row is the historical "does this
         //     work?" data point; the FFM row is the production-side number.
+        //   §0.4.337 added `tlaloc-pjrt-kptx-cuda` — the FFM lane with the
+        //     recognizer-claimed KPTX rms_norm custom_calls inside (the
+        //     kernel-granularity overhead row; see LlamaDecoderKptxBenchTest).
         val frameworks = listOf(
             "pytorch-cpu",
             "tlaloc-iree-cpu",
             "tlaloc-iree-cuda",
             "tlaloc-pjrt-xla-cuda",
             "tlaloc-pjrt-ffm-cuda",
+            "tlaloc-pjrt-kptx-cuda",
             "jax-gpu",
         )
         val modes = listOf("forward", "backward")

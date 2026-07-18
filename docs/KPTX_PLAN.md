@@ -1,6 +1,6 @@
 # KPTX — Kotlin PTX kernel tier: plan of record
 
-**Status: spike PASSED (2026-07-18). v1 not started.**
+**Status: v1 COMPLETE (§0.4.326–§0.4.337, 2026-07-18). v2 not started.**
 
 KPTX is the escape-hatch tier below StableHLO — Tlaloc's analog of what
 Pallas is to JAX: hand-written PTX kernels, authored (eventually) in a
@@ -53,18 +53,37 @@ layouts from `openxla/xla` `pjrt_c_api.h` / `pjrt_c_api_gpu_extension.h`
 
 Tracked as session tasks #1–#19, strictly sequential. Summary:
 
-**v1 — launch plumbing, no DSL (tasks 1–8).** PjrtFfiRegistry
-production API; `CudaDriverFfm` (libcuda via FFM: cuModuleLoadData /
-cuLaunchKernel / cuFuncSetAttribute); XLA_FFI_CallFrame decoder
-(buffers, attrs, stream via XLA_FFI_Stream_Get); kernel launch registry
-(name → LaunchConfig, module cache); first hand-written `.ptx` kernel
-(rms_norm fwd) with decompose-path PJRT oracle; emitter typed-FFI
-upgrade (api_version=4 + `mhlo.backend_config` dict); backward kernel
-wired into coarsened VJP (analytical adjoints, per project rule);
-`tlaloc-pjrt-kptx-cuda` benchmark row. **DoD:** a hand-written PTX
-kernel runs inside an XLA-compiled Tlaloc program on the GB10,
-correctness pinned, overhead quantified vs the 2.51 ms/step
-PJRT-FFM-CUDA baseline.
+**v1 — launch plumbing, no DSL (tasks 1–8). SHIPPED §0.4.327–§0.4.337.**
+PjrtFfiRegistry production API (§0.4.327); `CudaDriverFfm` (§0.4.328);
+XLA_FFI_CallFrame decoder (§0.4.329); KptxKernelRegistry (§0.4.330);
+rms_norm fwd kernel vs XLA decompose-path oracle, max|diff| 4.77e-7
+(§0.4.331); emitter typed-FFI upgrade — api_version=4 + op-native
+`backend_config` dict, NOT the `mhlo.backend_config` spelling which
+arrives empty through the plugin's StableHLO import (§0.4.332);
+rms_norm backward — two chained kernels `bwd_dx → (dx, inv_rms)` /
+`bwd_dw(…, inv_rms) → dw`, sequenced by XLA via the data dependence,
+computing the coarsener's analytical VJP (dx 4.77e-7, dw 1.53e-5 vs
+oracle; d_eps stays on the decompose path, no const-zero shortcut)
+(§0.4.335); RmsNormKernel template — recognizer-driven claiming, the
+LlamaDecoder-medium forward emits 2 typed-FFI `@kptx_rms_norm`
+custom_calls and runs them E2E at max rel 1.8e-7 vs decompose
+(§0.4.336); `tlaloc-pjrt-kptx-cuda` benchmark row (§0.4.337).
+
+**v1 DoD — met, with the honest number:** same-run floor comparison on
+LlamaDecoder-medium fwd: kptx min 1177 µs vs decompose min 906 µs —
+**~135 µs per custom_call** floor cost (JVM host round-trip per
+execution + XLA fusion loss at rms_norm granularity). Medians are
+jitter-dominated (custom_call adds 0–1.2 ms/call run-dependent; the
+decompose lanes are stable in the same session). Two consequences
+feed forward: coarser kernels (attention, MLP — v2) amortize the
+round-trip; the jitter itself is primary input to the v3.4 Glow-style
+native-runtime go/no-go. Backward *claiming* is v2 task 15 by design —
+`handleCoarsenedAdjoint` inlines gradient_body, so no COARSENED op
+survives for a template to claim; the §0.4.335 kernels are the
+claim-ready implementation. Note §0.4.333 (memory-safety
+create_options; unified-memory reboot incident): benchmark sessions
+opt into a bounded preallocated pool via `PjrtClientOptions` —
+no-preallocate costs ~2× on dispatch-heavy loops.
 
 **v2 — the Kotlin DSL (tasks 9–15).** Value-type PTX IR + emitter;
 opcode-agnostic parser with byte-identical round-trip corpus;
