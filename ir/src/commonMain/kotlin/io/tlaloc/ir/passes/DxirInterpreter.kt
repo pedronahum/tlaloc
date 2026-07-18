@@ -425,18 +425,42 @@ object DxirInterpreter {
                 val bcastDims = (op.attrs["broadcast_dimensions"] as? List<*>)
                     ?.map { (it as Number).toInt() }
                     ?: emptyList()
-                // Only the narrow scalar → rank-N uniform case is needed by SumRule /
-                // MeanRule today. General rank-K → rank-N broadcasting (with non-empty
-                // broadcast_dimensions or a non-scalar input) needs rank-aware indexing
-                // and is deferred until a rule actually demands it.
+                // §0.4.359 — two supported shapes: scalar → rank-N uniform
+                // (SumRule/MeanRule) and equal-rank keepdims stretch (input dim
+                // is out dim or 1 — the Max/Min/Softmax rules' broadcast of a
+                // keepdims reduction back over the reduced axes). Anything else
+                // still fails loudly.
                 require(bcastDims.isEmpty()) {
                     "DxirInterpreter: BROADCAST with non-empty broadcast_dimensions=" +
-                        "$bcastDims not yet supported (only scalar → rank-N uniform)"
+                        "$bcastDims not yet supported"
                 }
-                require(a.size == 1) {
-                    "DxirInterpreter: scalar BROADCAST requires a size-1 input, got ${a.size}"
+                val inDims = op.operands[0].type.dims
+                val outDims = op.type.dims
+                when {
+                    a.size == 1 -> FloatArray(outSize) { a[0] }
+                    inDims.size == outDims.size && inDims.indices.all { inDims[it] == outDims[it] || inDims[it] == 1 } -> {
+                        val inStrides = IntArray(inDims.size)
+                        var st = 1
+                        for (k in inDims.indices.reversed()) { inStrides[k] = st; st *= inDims[k] }
+                        val outStrides = IntArray(outDims.size)
+                        st = 1
+                        for (k in outDims.indices.reversed()) { outStrides[k] = st; st *= outDims[k] }
+                        FloatArray(outSize) { flat ->
+                            var rem = flat
+                            var src = 0
+                            for (k in outDims.indices) {
+                                val coord = rem / outStrides[k]
+                                rem %= outStrides[k]
+                                if (inDims[k] != 1) src += coord * inStrides[k]
+                            }
+                            a[src]
+                        }
+                    }
+                    else -> error(
+                        "DxirInterpreter: BROADCAST ${inDims} -> ${outDims} unsupported " +
+                            "(scalar or equal-rank keepdims stretch only)",
+                    )
                 }
-                FloatArray(outSize) { a[0] }
             }
             OpKind.GATHER -> {
                 // §0.4.41 — original S2 shape: `GATHER(arr: rank-1, idx: scalar I32) → scalar`.
@@ -592,6 +616,82 @@ object DxirInterpreter {
             //   * `reduction_dims = [a, b, ...]` → sum over those axes in
             //     the input, preserving the remaining axes. Used by
             //     BroadcastRule's axis-aware reverse (§0.4.84).
+            // §0.4.359 — element-count-preserving relayout: row-major copy.
+            OpKind.RESHAPE -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                require(a.size == sizeOf(op.type)) {
+                    "DxirInterpreter: RESHAPE element count ${a.size} != ${sizeOf(op.type)}"
+                }
+                a.copyOf()
+            }
+            // §0.4.359 — axis-aware max/min reduction (the SUM skeleton with a
+            // different accumulator; keepdims and dropped-dims outputs have the
+            // same flat size, so op.type disambiguates for free).
+            OpKind.MAX, OpKind.MIN -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                @Suppress("UNCHECKED_CAST")
+                val reduceDims = (op.attrs["reduction_dims"] as? List<Int>)
+                    ?: (0 until op.operands[0].type.rank).toList()
+                val inputDims = op.operands[0].type.dims
+                val isMax = op.op == OpKind.MAX
+                if (reduceDims.size == inputDims.size || inputDims.isEmpty()) {
+                    var acc = if (isMax) Float.NEGATIVE_INFINITY else Float.POSITIVE_INFINITY
+                    for (x in a) acc = if (isMax) maxOf(acc, x) else minOf(acc, x)
+                    floatArrayOf(acc)
+                } else {
+                    val keepDims = (0 until inputDims.size).filter { it !in reduceDims }
+                    val outShape = keepDims.map { inputDims[it] }
+                    val outSize = if (outShape.isEmpty()) 1 else outShape.fold(1) { acc, d -> acc * d }
+                    val out = FloatArray(outSize) { if (isMax) Float.NEGATIVE_INFINITY else Float.POSITIVE_INFINITY }
+                    val inStrides = IntArray(inputDims.size)
+                    var st = 1
+                    for (k in inputDims.indices.reversed()) { inStrides[k] = st; st *= inputDims[k] }
+                    for (flat in a.indices) {
+                        var rem = flat
+                        var outIdx = 0
+                        var outStride = 1
+                        // project by dropping reduced axes (matches SUM's projection).
+                        val coords = IntArray(inputDims.size)
+                        for (k in inputDims.indices) { coords[k] = rem / inStrides[k]; rem %= inStrides[k] }
+                        for (k in keepDims.indices.reversed()) {
+                            outIdx += coords[keepDims[k]] * outStride
+                            outStride *= inputDims[keepDims[k]]
+                        }
+                        out[outIdx] = if (isMax) maxOf(out[outIdx], a[flat]) else minOf(out[outIdx], a[flat])
+                    }
+                    out
+                }
+            }
+            // §0.4.359 — numerically-stable softmax along the `axis` attr
+            // (default last), matching the emitter's max-subtracting lowering.
+            OpKind.SOFTMAX -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                val dims = op.operands[0].type.dims
+                val rank = dims.size
+                val axisRaw = (op.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
+                val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
+                val axisLen = dims[axis]
+                var inner = 1
+                for (k in axis + 1 until rank) inner *= dims[k]
+                var outer = 1
+                for (k in 0 until axis) outer *= dims[k]
+                val out = FloatArray(a.size)
+                for (o in 0 until outer) {
+                    for (i in 0 until inner) {
+                        val base = o * axisLen * inner + i
+                        var mx = Float.NEGATIVE_INFINITY
+                        for (j in 0 until axisLen) mx = maxOf(mx, a[base + j * inner])
+                        var sum = 0f
+                        for (j in 0 until axisLen) {
+                            val e = kotlin.math.exp((a[base + j * inner] - mx).toDouble()).toFloat()
+                            out[base + j * inner] = e
+                            sum += e
+                        }
+                        for (j in 0 until axisLen) out[base + j * inner] /= sum
+                    }
+                }
+                out
+            }
             OpKind.SUM -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 @Suppress("UNCHECKED_CAST")

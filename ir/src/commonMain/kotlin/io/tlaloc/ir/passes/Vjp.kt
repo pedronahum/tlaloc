@@ -280,6 +280,92 @@ object VjpRegistry {
         }
     }
 
+    /**
+     * §0.4.359 — `d/dx reshape(x)` = reshape the upstream back to x's
+     * shape (element-count-preserving relayout has an identity Jacobian
+     * under the row-major flat view). Gap flagged by the DiffKT
+     * comparison: RESHAPE was lowerable but undifferentiable.
+     */
+    val ReshapeRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val dx = builder.op(OpKind.RESHAPE, listOf(upstream), x.type)
+            return listOf(x to dx)
+        }
+    }
+
+    private fun reduceExtremumRule(kind: OpKind): VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            // Recompute the reduction (TanhRule convention) and broadcast it
+            // and the upstream back over the reduced axes. Keepdims and
+            // full-reduce shapes both flow through the interpreter's
+            // scalar/keepdims BROADCAST arms.
+            val yRe = builder.op(kind, listOf(x), op.type, attrs = op.attrs)
+            val bcast = mapOf("broadcast_dimensions" to emptyList<Int>())
+            val yB = builder.op(OpKind.BROADCAST, listOf(yRe), x.type, attrs = bcast)
+            val upB = builder.op(OpKind.BROADCAST, listOf(upstream), x.type, attrs = bcast)
+            // Indicator of the extremum: for MAX, yB - x ≥ 0 with equality
+            // exactly at maxima → 1 - sign(yB - x); MIN mirrors with x - yB.
+            // Tie convention: FULL upstream to every tied element (the
+            // JAX-select convention; PyTorch's amax splits evenly — both are
+            // valid subgradients, ours matches select(x == extremum, g, 0)).
+            val diff = if (kind == OpKind.MAX) {
+                builder.op(OpKind.SUB, listOf(yB, x), x.type)
+            } else {
+                builder.op(OpKind.SUB, listOf(x, yB), x.type)
+            }
+            val sgn = builder.op(OpKind.SIGN, listOf(diff), x.type)
+            val one = builder.const(floatLiteralForDtype(1.0, x.type.dtype), x.type)
+            val mask = builder.op(OpKind.SUB, listOf(one, sgn), x.type)
+            val dx = builder.op(OpKind.MUL, listOf(upB, mask), x.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /** §0.4.359 — max-reduction subgradient (see [reduceExtremumRule]). */
+    val MaxRule: VjpRule = reduceExtremumRule(OpKind.MAX)
+
+    /** §0.4.359 — min-reduction subgradient (see [reduceExtremumRule]). */
+    val MinRule: VjpRule = reduceExtremumRule(OpKind.MIN)
+
+    /**
+     * §0.4.359 — raw softmax adjoint: with `y = softmax(x, axis)`,
+     * `dx = y ⊙ (upstream − Σ_axis(upstream ⊙ y))`. Recomputes y
+     * (TanhRule convention); the inner sum keeps dims for the stretch
+     * broadcast back over the axis. Until now softmax differentiated
+     * only through coarsened pattern bodies — a bare softmax in a user
+     * lambda failed (flagged by the DiffKT comparison).
+     */
+    val SoftmaxRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val rank = x.type.rank
+            val axisRaw = (op.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
+            val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
+            val y = builder.op(OpKind.SOFTMAX, listOf(x), op.type, attrs = op.attrs)
+            val t = builder.op(OpKind.MUL, listOf(upstream, y), x.type)
+            val keepdimsType = DxirType(
+                x.type.dtype,
+                x.type.dims.mapIndexed { i, d -> if (i == axis) 1 else d },
+            )
+            val srow = builder.op(
+                OpKind.SUM, listOf(t), keepdimsType,
+                attrs = mapOf("reduction_dims" to listOf(axis)),
+            )
+            val sB = builder.op(
+                OpKind.BROADCAST, listOf(srow), x.type,
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val diff = builder.op(OpKind.SUB, listOf(upstream, sB), x.type)
+            val dx = builder.op(OpKind.MUL, listOf(y, diff), x.type)
+            return listOf(x to dx)
+        }
+    }
+
     val MatmulRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
@@ -745,6 +831,10 @@ object VjpRegistry {
         OpKind.SUM to SumRule,
         OpKind.MEAN to MeanRule,
         OpKind.MATMUL to MatmulRule,
+        OpKind.RESHAPE to ReshapeRule,
+        OpKind.MAX to MaxRule,
+        OpKind.MIN to MinRule,
+        OpKind.SOFTMAX to SoftmaxRule,
         OpKind.DOT to DotRule,
         OpKind.POW to PowRule,
         OpKind.EXP to ExpRule,
