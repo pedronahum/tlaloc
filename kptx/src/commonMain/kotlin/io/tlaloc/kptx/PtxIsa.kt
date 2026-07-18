@@ -47,11 +47,14 @@ fun regClassOf(name: String): IsaRegClass? {
 }
 
 /** Map a type suffix to the register class that holds values of it;
- * null means "no class check" (e.g. f64 — no v1 register bank). */
+ * null means "no class check" — f64 (no v1 bank) and, §0.4.357, the
+ * b-types: PTX `bN` is untyped bit storage, and b-typed instructions
+ * (`mov.b32 %f2, %r8` — pyptx's bit-preserving cross-class move) are
+ * class-agnostic by ISA semantics. u/s/f types stay class-checked. */
 internal fun classOfType(type: String): IsaRegClass? = when (type) {
     "f32" -> IsaRegClass.F32
-    "u32", "s32", "b32" -> IsaRegClass.R32
-    "u64", "s64", "b64" -> IsaRegClass.R64
+    "u32", "s32" -> IsaRegClass.R32
+    "u64", "s64" -> IsaRegClass.R64
     "pred" -> IsaRegClass.PRED
     else -> null
 }
@@ -125,17 +128,32 @@ val PTX_ISA: Map<String, IsaInstructionSpec> = listOf(
         mods = listOf(IsaModifierSlot(setOf("sync"))),
         operands = listOf(immOnly()),
     ),
+    // §0.4.357 — the optional v2/v4 slot covers vectorized ld/st
+    // (pyptx-style `ld.global.v4.f32 {%f0..%f3}, [addr]`); the data
+    // operand accepts a fragment vector alongside a scalar register.
     IsaInstructionSpec(
         "ld",
-        mods = listOf(IsaModifierSlot(setOf("param", "global", "shared"))),
+        mods = listOf(
+            IsaModifierSlot(setOf("param", "global", "shared")),
+            IsaModifierSlot(setOf("v2", "v4"), required = false),
+        ),
         types = listOf(ALL_TYPES),
-        operands = listOf(reg(), mem()),
+        operands = listOf(
+            IsaOperand(setOf(IsaOperandKind.REG, IsaOperandKind.VEC), IsaClassRule.FromType(0)),
+            mem(),
+        ),
     ),
     IsaInstructionSpec(
         "st",
-        mods = listOf(IsaModifierSlot(setOf("global", "shared"))),
+        mods = listOf(
+            IsaModifierSlot(setOf("global", "shared")),
+            IsaModifierSlot(setOf("v2", "v4"), required = false),
+        ),
         types = listOf(ALL_TYPES),
-        operands = listOf(mem(), reg()),
+        operands = listOf(
+            mem(),
+            IsaOperand(setOf(IsaOperandKind.REG, IsaOperandKind.VEC), IsaClassRule.FromType(0)),
+        ),
     ),
     IsaInstructionSpec(
         "cvta",
@@ -250,6 +268,33 @@ val PTX_ISA: Map<String, IsaInstructionSpec> = listOf(
         "shr",
         types = listOf(INT_TYPES),
         operands = listOf(reg(), reg(), regOrImm(IsaClassRule.Any)),
+    ),
+    // §0.4.357 — shifts + bitwise logicals (index math in pyptx kernels).
+    IsaInstructionSpec(
+        "shl",
+        types = listOf(INT_TYPES),
+        operands = listOf(reg(), reg(), regOrImm(IsaClassRule.Any)),
+    ),
+    IsaInstructionSpec(
+        "and",
+        types = listOf(setOf("b16", "b32", "b64", "pred")),
+        operands = listOf(reg(), reg(), regOrImm(IsaClassRule.Any)),
+    ),
+    IsaInstructionSpec(
+        "or",
+        types = listOf(setOf("b16", "b32", "b64", "pred")),
+        operands = listOf(reg(), reg(), regOrImm(IsaClassRule.Any)),
+    ),
+    IsaInstructionSpec(
+        "xor",
+        types = listOf(setOf("b16", "b32", "b64", "pred")),
+        operands = listOf(reg(), reg(), regOrImm(IsaClassRule.Any)),
+    ),
+    IsaInstructionSpec(
+        "rsqrt",
+        mods = listOf(IsaModifierSlot(setOf("approx"), required = true), IsaModifierSlot(setOf("ftz"), required = false)),
+        types = listOf(FLOAT_TYPES),
+        operands = listOf(reg(), reg()),
     ),
     IsaInstructionSpec(
         "setp",

@@ -135,10 +135,11 @@ private class PtxNormalizer(source: String) {
         expect("{")
 
         val body = ArrayList<PtxStmt>()
+        val rawRegs = ArrayList<Pair<String, Int>>() // prefix → count (coalesced later)
         while (true) {
             when (val t = peek() ?: fail("unterminated kernel body")) {
-                "}" -> { i++; return PtxKernel(name, params, canonicalizeBody(body)) }
-                ".reg" -> { i++; body.add(parseRegDecl()) }
+                "}" -> { i++; return PtxKernel(name, params, canonicalizeBody(rawRegs, body)) }
+                ".reg" -> { i++; parseRegDecl(rawRegs) }
                 ".shared" -> { i++; body.add(parseSharedDecl()) }
                 else -> {
                     if (t.startsWith(".")) fail("unsupported body directive `$t`")
@@ -153,22 +154,86 @@ private class PtxNormalizer(source: String) {
         }
     }
 
-    /** Canonical body shape: decls first (as parsed), one blank, then
-     * statements — the §0.4.338 emitter/KernelScope convention. */
-    private fun canonicalizeBody(body: List<PtxStmt>): List<PtxStmt> {
-        val decls = body.filter { it is PtxRegDecl || it is PtxSharedDecl }
-        val rest = body.filter { it !is PtxRegDecl && it !is PtxSharedDecl }
-        return if (decls.isEmpty()) rest else decls + PtxBlank + rest
+    /** Canonical body shape: coalesced register banks first (standard
+     * classes in pred/b32/f32/b64 order with canonical storage types,
+     * then custom prefixes in appearance order), shared decls, one
+     * blank, then statements — the §0.4.338 emitter/KernelScope
+     * convention. §0.4.357: pyptx-style declaration surfaces — single
+     * registers (`.reg .b64 %rd0;`), mixed storage types per class, and
+     * custom array banks (`%farr0_<4>`) — all coalesce here; declaring
+     * more registers than used is harmless PTX. */
+    private fun canonicalizeBody(rawRegs: List<Pair<String, Int>>, body: List<PtxStmt>): List<PtxStmt> {
+        val counts = LinkedHashMap<String, Int>()
+        for ((prefix, count) in rawRegs) {
+            counts[prefix] = maxOf(counts[prefix] ?: 0, count)
+        }
+        val standardOrder = listOf("%p", "%r", "%f", "%rd")
+        fun classPrefix(prefix: String): String = when (regClassOf(prefix + "0")) {
+            IsaRegClass.PRED -> "%p"
+            IsaRegClass.R32 -> "%r"
+            IsaRegClass.F32 -> "%f"
+            IsaRegClass.R64 -> "%rd"
+            null -> fail("register prefix `$prefix` has no recognizable class")
+        }
+        // Custom prefixes (`%farr0_<4>` pyptx array banks) rename into their
+        // standard class past its high-water mark — register names are
+        // kernel-local, so this is structure-preserving, and the canonical
+        // module then carries only the four standard prefixes the strict
+        // pipeline and transpiler speak.
+        val standardCounts = LinkedHashMap<String, Int>()
+        for (std in standardOrder) counts[std]?.let { standardCounts[std] = it }
+        val rename = HashMap<String, String>()
+        for ((prefix, count) in counts) {
+            if (prefix in standardOrder) continue
+            val std = classPrefix(prefix)
+            val base = standardCounts[std] ?: 0
+            for (idx in 0 until count) {
+                rename["$prefix$idx"] = "$std${base + idx}"
+            }
+            standardCounts[std] = base + count
+        }
+        fun rn(name: String): String = rename[name] ?: name
+        fun rewrite(stmt: PtxStmt): PtxStmt = when (stmt) {
+            is PtxInst -> stmt.copy(
+                operands = stmt.operands.map { op ->
+                    when (op) {
+                        is PtxReg -> PtxReg(rn(op.name))
+                        is PtxVec -> PtxVec(op.regs.map(::rn))
+                        is PtxMem -> if (op.base.startsWith("%")) PtxMem(rn(op.base), op.offset) else op
+                        else -> op
+                    }
+                },
+                guard = stmt.guard?.let { PtxGuard(rn(it.reg), it.negated) },
+            )
+            else -> stmt
+        }
+        fun canonicalType(std: String): String = when (std) {
+            "%p" -> ".pred"; "%r" -> ".b32"; "%f" -> ".f32"; else -> ".b64"
+        }
+        val decls = ArrayList<PtxStmt>()
+        for (std in standardOrder) {
+            standardCounts[std]?.let { decls.add(PtxRegDecl(canonicalType(std), std, it)) }
+        }
+        val shared = body.filterIsInstance<PtxSharedDecl>()
+        val rest = body.filter { it !is PtxRegDecl && it !is PtxSharedDecl }.map(::rewrite)
+        val all = decls + shared
+        return if (all.isEmpty()) rest else all + PtxBlank + rest
     }
 
-    private fun parseRegDecl(): PtxRegDecl {
+    private fun parseRegDecl(rawRegs: MutableList<Pair<String, Int>>) {
         val type = next()
         if (!type.startsWith(".")) fail("register type must start with `.`")
-        val spec = next() // %p<4> possibly split? `<` is not structural, so it stays one token
-        val m = Regex("""(%[a-z]+)<(\d+)>""").matchEntire(spec)
-            ?: fail("only `%prefix<count>` register declarations are supported, got `$spec`")
+        val spec = next()
         expect(";")
-        return PtxRegDecl(type, m.groupValues[1], m.groupValues[2].toInt())
+        val bank = Regex("""(%[A-Za-z][A-Za-z0-9_]*)<(\d+)>""").matchEntire(spec)
+        if (bank != null) {
+            rawRegs.add(bank.groupValues[1] to bank.groupValues[2].toInt())
+            return
+        }
+        // Single-register form: `%rd12` → prefix %rd, needs bank count 13.
+        val single = Regex("""(%[A-Za-z][A-Za-z0-9_]*?)(\d+)""").matchEntire(spec)
+            ?: fail("unsupported register declaration `$spec` (expected `%prefix<count>` or `%prefixN`)")
+        rawRegs.add(single.groupValues[1] to single.groupValues[2].toInt() + 1)
     }
 
     private fun parseSharedDecl(): PtxSharedDecl {

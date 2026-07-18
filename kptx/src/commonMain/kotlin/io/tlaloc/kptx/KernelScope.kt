@@ -151,6 +151,15 @@ class KernelScope internal constructor(private val name: String) {
     val ntidX: KReg = KReg("%ntid.x", IsaRegClass.R32)
     val ctaidX: KReg = KReg("%ctaid.x", IsaRegClass.R32)
     val nctaidX: KReg = KReg("%nctaid.x", IsaRegClass.R32)
+    // §0.4.357 — y/z dims (2-D/3-D grids, e.g. pyptx GEMM tiles).
+    val tidY: KReg = KReg("%tid.y", IsaRegClass.R32)
+    val ntidY: KReg = KReg("%ntid.y", IsaRegClass.R32)
+    val ctaidY: KReg = KReg("%ctaid.y", IsaRegClass.R32)
+    val nctaidY: KReg = KReg("%nctaid.y", IsaRegClass.R32)
+    val tidZ: KReg = KReg("%tid.z", IsaRegClass.R32)
+    val ntidZ: KReg = KReg("%ntid.z", IsaRegClass.R32)
+    val ctaidZ: KReg = KReg("%ctaid.z", IsaRegClass.R32)
+    val nctaidZ: KReg = KReg("%nctaid.z", IsaRegClass.R32)
 
     /** Declare a `.param`; declaration order is the launch ABI. */
     fun param(type: String, name: String): KParam {

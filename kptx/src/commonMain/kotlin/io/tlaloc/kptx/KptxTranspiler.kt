@@ -84,6 +84,10 @@ object KptxTranspiler {
     private val SPECIALS = mapOf(
         "%tid.x" to "tidX", "%ntid.x" to "ntidX",
         "%ctaid.x" to "ctaidX", "%nctaid.x" to "nctaidX",
+        "%tid.y" to "tidY", "%ntid.y" to "ntidY",
+        "%ctaid.y" to "ctaidY", "%nctaid.y" to "nctaidY",
+        "%tid.z" to "tidZ", "%ntid.z" to "ntidZ",
+        "%ctaid.z" to "ctaidZ", "%nctaid.z" to "nctaidZ",
     )
 
     private fun regIdent(name: String): Pair<IsaRegClass, Int> {
@@ -319,6 +323,8 @@ object KptxTranspiler {
             is OperandExpr.RegRef -> regs.getValue(op.ident)
             is OperandExpr.SpecialRef -> when (op.prop) {
                 "tidX" -> tidX; "ntidX" -> ntidX; "ctaidX" -> ctaidX; "nctaidX" -> nctaidX
+                "tidY" -> tidY; "ntidY" -> ntidY; "ctaidY" -> ctaidY; "nctaidY" -> nctaidY
+                "tidZ" -> tidZ; "ntidZ" -> ntidZ; "ctaidZ" -> ctaidZ; "nctaidZ" -> nctaidZ
                 else -> error("unknown special `$${op.prop}`")
             }
             is OperandExpr.Imm -> imm(op.text)
