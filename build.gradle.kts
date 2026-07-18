@@ -6,6 +6,22 @@ plugins {
 group = "io.tlaloc"
 version = "0.0.1-SNAPSHOT"
 
+// §0.4.355 — packaging: every consumable module publishes to Maven under
+// io.tlaloc:<module>:0.0.1-SNAPSHOT. `./gradlew publishToMavenLocal` is the
+// onboarding entry point (docs/GETTING_STARTED.md; examples/quickstart is a
+// standalone consumer project resolving from mavenLocal). :benchmarks is a
+// test harness, not a library — excluded. Maven Central release wiring
+// (signing, Sonatype) is a deliberate follow-up.
+allprojects {
+    group = "io.tlaloc"
+    version = "0.0.1-SNAPSHOT"
+}
+subprojects {
+    if (name != "benchmarks") {
+        apply(plugin = "maven-publish")
+    }
+}
+
 // §0.4.41 — make `./gradlew test` run every subproject's tests, not just those
 // where a `test` task exists at the subproject level. The root `test` lifecycle
 // task historically only picked up `:compiler-plugin:test` (the plain-JVM module);

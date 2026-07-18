@@ -4,6 +4,16 @@ plugins {
     alias(libs.plugins.kotlin.jvm)
 }
 
+// §0.4.355 — the KMP modules get publications from the multiplatform plugin
+// automatically; this plain-JVM module declares its own.
+publishing {
+    publications {
+        create<org.gradle.api.publish.maven.MavenPublication>("maven") {
+            from(components["java"])
+        }
+    }
+}
+
 kotlin {
     jvmToolchain(25)
 

@@ -210,7 +210,9 @@ cd tlaloc
 ./gradlew test
 ```
 
-Expected: ~1354 tests passing on the Tlaloc side. To exercise the vendored Maestro tree as well:
+**Consume it as a library** (pre-alpha, via mavenLocal): see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — `./gradlew publishToMavenLocal` publishes every module under `io.tlaloc:*`, and [examples/quickstart](examples/quickstart) is a standalone consumer project (own Gradle build, resolves from mavenLocal, applies the K2 plugin) whose `grad { }` call is rewritten into synthesized gradient code at compile time. `scripts/onboarding-smoke.sh` runs the whole loop.
+
+Expected: ~1448 tests passing on the Tlaloc side. To exercise the vendored Maestro tree as well:
 
 ```bash
 ./gradlew test :vendored-maestro:maestro-tlaloc:test
