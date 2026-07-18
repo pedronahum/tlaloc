@@ -142,6 +142,7 @@ class KernelScope internal constructor(private val name: String) {
     private val sharedDecls = ArrayList<PtxSharedDecl>()
     private val stmts = ArrayList<PtxStmt>()
     private val nextIndex = HashMap<IsaRegClass, Int>()
+    private val bankOverride = HashMap<IsaRegClass, Int>()
     private val labels = HashSet<String>()
     private val placed = HashSet<String>()
 
@@ -175,6 +176,31 @@ class KernelScope internal constructor(private val name: String) {
 
     /** Allocate the next 64-bit register (`%rd1`, …). */
     fun r64(): KReg = alloc(IsaRegClass.R64)
+
+    /**
+     * §0.4.345 — a handle to the **specific** register `<cls><index>`
+     * (`reg(IsaRegClass.F32, 13)` → `%f13`), bumping the class
+     * high-water mark without consuming allocator sequence. The
+     * transpiler uses this to keep an original kernel's register
+     * numbering; DSL-first kernels should prefer the [pred]/[r32]/
+     * [f32]/[r64] allocators.
+     */
+    fun reg(cls: IsaRegClass, index: Int): KReg {
+        require(index >= 1) { "register indices start at 1, got $index" }
+        val current = nextIndex.getOrPut(cls) { 1 }
+        if (index >= current) nextIndex[cls] = index + 1
+        return KReg("${cls.prefix}$index", cls)
+    }
+
+    /**
+     * §0.4.345 — force the `.reg` bank declaration for [cls] to at
+     * least `<count>`. Transpiler-fidelity control: a source kernel's
+     * decl count is authoritative even when it over-declares
+     * (`%f<16>` with `%f14` as the highest use).
+     */
+    fun bank(cls: IsaRegClass, count: Int) {
+        bankOverride[cls] = maxOf(bankOverride[cls] ?: 0, count)
+    }
 
     /** Declare a static shared-memory byte array. */
     fun shared(name: String, sizeBytes: Int, align: Int = 4): KSym {
@@ -244,7 +270,8 @@ class KernelScope internal constructor(private val name: String) {
             IsaRegClass.R64 to ".b64",
         )
         for ((cls, type) in declOrder) {
-            val next = nextIndex[cls] ?: continue
+            val next = maxOf(nextIndex[cls] ?: 0, bankOverride[cls] ?: 0)
+            if (next == 0) continue
             decls.add(PtxRegDecl(type, cls.prefix, next))
         }
         decls.addAll(sharedDecls)
