@@ -33,6 +33,11 @@ import os
 import time
 from typing import Callable, List, Tuple
 
+# GB10 is unified-memory: JAX's default 75% preallocation would pin ~90 GB
+# of system RAM per process (§0.4.333 reboot incident). Must be set before
+# `import jax` (first CUDA client init reads it).
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 # Lazy import — file parses without JAX installed (try/except + ast.parse).
 try:
     import jax

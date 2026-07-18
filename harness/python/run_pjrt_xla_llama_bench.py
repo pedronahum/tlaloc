@@ -39,12 +39,18 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import re
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
+
+# GB10 is unified-memory: JAX's default 75% preallocation would pin ~90 GB
+# of system RAM per process (§0.4.333 reboot incident). Must be set before
+# `import jax` (first CUDA client init reads it).
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 
 def _expected_param_names() -> list[str]:

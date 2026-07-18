@@ -148,6 +148,78 @@ object PjrtFfm {
         ADDRESS.withName("kv_try_get_user_arg"),
     )
 
+    /**
+     * §0.4.333 — `PJRT_NamedValue` (pjrt_c_api.h:229), the entry format for
+     * `PJRT_Client_Create_Args.create_options`. Hand-computed offsets
+     * (aarch64/x86_64 LP64):
+     *
+     *   struct_size      @ 0   (size_t)
+     *   extension_start  @ 8   (ptr)
+     *   name             @ 16  (ptr, not NUL-terminated on the read side)
+     *   name_size        @ 24  (size_t)
+     *   type             @ 32  (enum, i32; +4 bytes padding — the union that
+     *                           follows is 8-byte aligned)
+     *   value union      @ 40  (8 bytes: string ptr / i64 / i64* / f32 / bool)
+     *   value_size       @ 48  (size_t; 1 for scalar values per the header)
+     *
+     * total 56 bytes. Enum values from `PJRT_NamedValue_Type`:
+     * kString=0, kInt64=1, kInt64List=2, kFloat=3, kBool=4.
+     */
+    internal val PJRT_NamedValue_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
+        JAVA_LONG.withName("struct_size"),
+        ADDRESS.withName("extension_start"),
+        ADDRESS.withName("name"),
+        JAVA_LONG.withName("name_size"),
+        JAVA_INT.withName("type"),
+        MemoryLayout.paddingLayout(4),
+        JAVA_LONG.withName("value"),
+        JAVA_LONG.withName("value_size"),
+    )
+
+    internal const val PJRT_NAMED_VALUE_TYPE_FLOAT: Int = 3
+    internal const val PJRT_NAMED_VALUE_TYPE_BOOL: Int = 4
+
+    internal val OFF_NamedValue_StructSize: Long = PJRT_NamedValue_LAYOUT.byteOffset(groupElement("struct_size"))
+    internal val OFF_NamedValue_Name: Long = PJRT_NamedValue_LAYOUT.byteOffset(groupElement("name"))
+    internal val OFF_NamedValue_NameSize: Long = PJRT_NamedValue_LAYOUT.byteOffset(groupElement("name_size"))
+    internal val OFF_NamedValue_Type: Long = PJRT_NamedValue_LAYOUT.byteOffset(groupElement("type"))
+    internal val OFF_NamedValue_Value: Long = PJRT_NamedValue_LAYOUT.byteOffset(groupElement("value"))
+    internal val OFF_NamedValue_ValueSize: Long = PJRT_NamedValue_LAYOUT.byteOffset(groupElement("value_size"))
+    internal val SZ_NamedValue: Long = PJRT_NamedValue_LAYOUT.byteSize()
+
+    /**
+     * §0.4.333 — marshal [options] as a `PJRT_NamedValue[2]` array
+     * (`memory_fraction`: kFloat, `preallocate`: kBool) allocated in [arena].
+     * Returns the array segment to be stored in
+     * `PJRT_Client_Create_Args.create_options` (with `num_options = 2`).
+     * Extracted from [PjrtApi.createClient] so the byte layout is pinned by
+     * a GPU-less unit test.
+     */
+    internal fun marshalCreateOptions(arena: Arena, options: PjrtClientOptions): MemorySegment {
+        val array = arena.allocate(SZ_NamedValue * 2)
+
+        fun header(index: Int, name: String, type: Int): Long {
+            val base = index * SZ_NamedValue
+            val nameBytes = name.toByteArray(StandardCharsets.UTF_8)
+            val nameSeg = arena.allocate(nameBytes.size + 1L)
+            MemorySegment.copy(nameBytes, 0, nameSeg, JAVA_BYTE, 0L, nameBytes.size)
+            array.set(JAVA_LONG, base + OFF_NamedValue_StructSize, SZ_NamedValue)
+            array.set(ADDRESS, base + OFF_NamedValue_Name, nameSeg)
+            array.set(JAVA_LONG, base + OFF_NamedValue_NameSize, nameBytes.size.toLong())
+            array.set(JAVA_INT, base + OFF_NamedValue_Type, type)
+            array.set(JAVA_LONG, base + OFF_NamedValue_ValueSize, 1L)
+            return base
+        }
+
+        val fracBase = header(0, "memory_fraction", PJRT_NAMED_VALUE_TYPE_FLOAT)
+        array.set(ValueLayout.JAVA_FLOAT, fracBase + OFF_NamedValue_Value, options.memoryFraction)
+
+        val preallocBase = header(1, "preallocate", PJRT_NAMED_VALUE_TYPE_BOOL)
+        array.set(JAVA_BYTE, preallocBase + OFF_NamedValue_Value, if (options.preallocate) 1 else 0)
+
+        return array
+    }
+
     internal val PJRT_Client_Destroy_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
         JAVA_LONG.withName("struct_size"),
         ADDRESS.withName("extension_start"),
@@ -165,6 +237,8 @@ object PjrtFfm {
     // Field byte-offsets, computed once from each layout.
 
     internal val OFF_ClientCreate_StructSize: Long = PJRT_Client_Create_Args_LAYOUT.byteOffset(groupElement("struct_size"))
+    internal val OFF_ClientCreate_CreateOptions: Long = PJRT_Client_Create_Args_LAYOUT.byteOffset(groupElement("create_options"))
+    internal val OFF_ClientCreate_NumOptions: Long = PJRT_Client_Create_Args_LAYOUT.byteOffset(groupElement("num_options"))
     internal val OFF_ClientCreate_Client: Long = PJRT_Client_Create_Args_LAYOUT.byteOffset(groupElement("client"))
     internal val SZ_ClientCreate: Long = PJRT_Client_Create_Args_LAYOUT.byteSize()
 
@@ -444,6 +518,50 @@ object PjrtFfm {
 }
 
 /**
+ * §0.4.333 — GPU-client allocator options passed as `create_options` to
+ * `PJRT_Client_Create`.
+ *
+ * **Why this exists (the 2026-07-18 reboot incident).** With zero
+ * create_options the CUDA plugin defaults to `preallocate=true` +
+ * `memory_fraction=0.75`: at client create it `cuMemAlloc`s 75% of "device
+ * memory" up front for the BFCAllocator. On the GB10 device memory *is*
+ * system RAM (128 GB unified, CPU-coherent), so every client pinned a
+ * ~98 GB unswappable pool. A test run that created a handful of clients
+ * (each PjrtSession / spike test creates its own) stacked those pools,
+ * starved the OS of reclaimable memory, and hard-hung the machine — twice,
+ * with journald's last words being the moment a process opened the GPU.
+ *
+ * Defaults here: **no preallocation** (the BFC pool grows on demand and is
+ * released at client destroy) and a **0.5 fraction cap** so even a runaway
+ * program leaves half the machine to the OS. Overridable per-environment:
+ *
+ *   `TLALOC_PJRT_MEMORY_FRACTION` — float in (0, 1]
+ *   `TLALOC_PJRT_PREALLOCATE`     — "true" / "false"
+ *
+ * Discrete-GPU hosts (H100 etc.) can safely raise the fraction and turn
+ * preallocation back on for benchmark stability; on unified-memory hosts
+ * (GB10, Jetson) leave preallocation off.
+ */
+data class PjrtClientOptions(
+    val memoryFraction: Float,
+    val preallocate: Boolean,
+) {
+    init {
+        require(memoryFraction > 0f && memoryFraction <= 1f) {
+            "memoryFraction must be in (0, 1], got $memoryFraction"
+        }
+    }
+
+    companion object {
+        /** Resolve from env, falling back to the unified-memory-safe defaults. */
+        fun resolve(): PjrtClientOptions = PjrtClientOptions(
+            memoryFraction = System.getenv("TLALOC_PJRT_MEMORY_FRACTION")?.toFloat() ?: 0.5f,
+            preallocate = System.getenv("TLALOC_PJRT_PREALLOCATE")?.toBooleanStrict() ?: false,
+        )
+    }
+}
+
+/**
  * High-level handle wrapping a `PJRT_Api*`. Instances are produced by
  * [PjrtFfm.load]; [arena] is the lifetime owner.
  */
@@ -475,10 +593,17 @@ class PjrtApi internal constructor(
         pjrtApiPtr.get(ADDRESS, offset).reinterpret(Long.MAX_VALUE)
 
     /** Create a PJRT client (one per process / device family). Throws
-     * [PjrtRuntimeException] if the plugin returns a PJRT_Error*. */
-    fun createClient(): PjrtClient {
+     * [PjrtRuntimeException] if the plugin returns a PJRT_Error*.
+     *
+     * §0.4.333 — always passes [options] (default: env-resolved
+     * [PjrtClientOptions]) so the CUDA plugin's BFCAllocator never
+     * preallocates 75% of unified memory (the 2026-07-18 reboot incident;
+     * see [PjrtClientOptions] for the full story). */
+    fun createClient(options: PjrtClientOptions = PjrtClientOptions.resolve()): PjrtClient {
         val args = arena.allocate(PjrtFfm.PJRT_Client_Create_Args_LAYOUT)
         args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_StructSize, PjrtFfm.SZ_ClientCreate)
+        args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalCreateOptions(arena, options))
+        args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 2L)
         val errorPtr = clientCreate.invokeExact(args) as MemorySegment
         checkError(errorPtr)
         val clientPtr = args.get(ADDRESS, PjrtFfm.OFF_ClientCreate_Client).reinterpret(Long.MAX_VALUE)
