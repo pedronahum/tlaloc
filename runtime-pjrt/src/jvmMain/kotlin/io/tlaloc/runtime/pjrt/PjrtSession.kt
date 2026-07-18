@@ -181,6 +181,52 @@ class PjrtSession(
     }
 
     /**
+     * §0.4.354 — F64 twin of [runOn]: every param and return must be F64
+     * (mixed-dtype programs are a follow-up; the emitter already types
+     * `f64` tensors and XLA-CUDA executes them — GB10 f64 throughput is
+     * modest, but correctness-tier work like scientific kernels and
+     * gradient checks wants the precision).
+     */
+    fun runOnF64(fn: DxirFunction, inputs: List<DoubleArray>): List<DoubleArray> {
+        check(!closed) { "PjrtSession is closed" }
+        require(fn.params.size == inputs.size) {
+            "PjrtSession.runOnF64: param count ${fn.params.size} != input count ${inputs.size}"
+        }
+        for ((i, p) in fn.params.withIndex()) {
+            require(p.type.dtype == io.tlaloc.core.F64) {
+                "PjrtSession.runOnF64: param '${p.name}' dtype is ${p.type.dtype}; expected F64"
+            }
+            val expected = p.type.elementCount.toInt()
+            require(inputs[i].size == expected) {
+                "PjrtSession.runOnF64: param '${p.name}' expects size $expected but got ${inputs[i].size}"
+            }
+        }
+        for ((i, r) in fn.returns.withIndex()) {
+            require(r.type.dtype == io.tlaloc.core.F64) {
+                "PjrtSession.runOnF64: return[$i] dtype is ${r.type.dtype}; expected F64"
+            }
+        }
+
+        val mlir = fn.toStablehlo("")
+        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
+            client.bufferFromHostF64(device, arr, p.type.dims)
+        }
+        try {
+            val outputs = exec.execute(inputBuffers, device)
+            try {
+                return outputs.zip(fn.returns).map { (buf, ret) ->
+                    buf.toDoubleArray(ret.type.elementCount.toInt())
+                }
+            } finally {
+                outputs.forEach { it.close() }
+            }
+        } finally {
+            inputBuffers.forEach { it.close() }
+        }
+    }
+
+    /**
      * Force-compile [fn] now without dispatching. Useful for benchmark setup
      * where you want the compile cost outside the timing loop. Idempotent
      * (a second call with structurally identical [fn] is a no-op).
