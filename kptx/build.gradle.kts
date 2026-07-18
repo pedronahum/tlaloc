@@ -18,14 +18,18 @@ kotlin {
     }
 
     sourceSets {
-        jvmTest {
+        commonMain {
+            dependencies {}
+        }
+        commonTest {
             dependencies {
                 implementation(kotlin("test"))
+            }
+        }
+        jvmTest {
+            dependencies {
                 implementation(libs.kotest.assertions.core)
                 implementation(libs.kotest.runner.junit5)
-                // KPTX v2.1 (§0.4.338) — PtxIrDriverJitTest feeds IR-emitted
-                // PTX through the driver JIT.
-                implementation(project(":kptx"))
             }
         }
     }
@@ -33,7 +37,4 @@ kotlin {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
-    // KPTX v1.2 — FFM bindings to libcuda.so.1. Same native-access gate as
-    // :runtime-pjrt (JEP 454, stable since JDK 22).
-    jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
