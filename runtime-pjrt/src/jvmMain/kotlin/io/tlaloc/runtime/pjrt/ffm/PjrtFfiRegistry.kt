@@ -96,6 +96,16 @@ object PjrtFfiRegistry {
      * turns that into a clear Kotlin-side error before the native call. */
     private val registered = ConcurrentHashMap<Pair<Path, String>, FfiExecuteHandler>()
 
+    /** Plugin `PJRT_Api*` cache, with the underlying `libraryLookup` pinned
+     * in [registryArena]. **Load-bearing**: looking the plugin up through a
+     * short-lived arena dlcloses it on arena close — if that drops the
+     * dlopen refcount to zero, the plugin (and its static FFI registry,
+     * including every handler registered so far) is torn down, and the next
+     * load starts from an empty registry ("No FFI handler registered for
+     * …"). The registry therefore holds the plugin open for the process
+     * lifetime, matching the permanence of the registrations themselves. */
+    private val apiPtrCache = ConcurrentHashMap<Path, MemorySegment>()
+
     /** Dispatcher bound per registration: answers metadata queries, routes
      * genuine frames to the delegate. Must be a class with a plain virtual
      * method — the Linker binds it via a MethodHandle. */
@@ -126,16 +136,14 @@ object PjrtFfiRegistry {
     /** The PJRT extension types exposed by the plugin at [pluginPath], in
      * chain order. Diagnostic companion to [isGpuCustomCallSupported]. */
     fun extensionTypes(pluginPath: Path): List<Int> {
-        Arena.ofConfined().use { arena ->
-            val types = mutableListOf<Int>()
-            var ext = pjrtApiPtr(pluginPath, arena).get(ADDRESS, OFF_PJRT_API_EXTENSION_START)
-            while (ext.address() != 0L) {
-                val node = ext.reinterpret(64)
-                types += node.get(JAVA_INT, OFF_EXT_TYPE)
-                ext = node.get(ADDRESS, OFF_EXT_NEXT)
-            }
-            return types
+        val types = mutableListOf<Int>()
+        var ext = pjrtApiPtr(pluginPath).get(ADDRESS, OFF_PJRT_API_EXTENSION_START)
+        while (ext.address() != 0L) {
+            val node = ext.reinterpret(64)
+            types += node.get(JAVA_INT, OFF_EXT_TYPE)
+            ext = node.get(ADDRESS, OFF_EXT_NEXT)
         }
+        return types
     }
 
     /** Whether the plugin exposes `PJRT_Gpu_Custom_Call` — the precondition
@@ -173,7 +181,7 @@ object PjrtFfiRegistry {
 
     private fun registerNative(pluginPath: Path, name: String, handler: FfiExecuteHandler) {
         Arena.ofConfined().use { arena ->
-            val apiPtr = pjrtApiPtr(pluginPath, arena)
+            val apiPtr = pjrtApiPtr(pluginPath)
             var gpuExt: MemorySegment? = null
             var ext = apiPtr.get(ADDRESS, OFF_PJRT_API_EXTENSION_START)
             while (ext.address() != 0L) {
@@ -221,17 +229,19 @@ object PjrtFfiRegistry {
         }
     }
 
-    /** dlopen refcount bump on the (typically already-loaded) plugin —
-     * returns the same `PJRT_Api*` that [PjrtFfm.load] sees. */
-    private fun pjrtApiPtr(pluginPath: Path, arena: Arena): MemorySegment {
-        val lookup = SymbolLookup.libraryLookup(pluginPath, arena)
-        val getPjrtApi = PjrtFfm.LINKER.downcallHandle(
-            lookup.find("GetPjrtApi")
-                .orElseThrow { IllegalStateException("$pluginPath does not export GetPjrtApi") },
-            FunctionDescriptor.of(ADDRESS),
-        )
-        return (getPjrtApi.invokeExact() as MemorySegment).reinterpret(PjrtFfm.PJRT_API_OBSERVED_SIZE)
-    }
+    /** Returns the same `PJRT_Api*` that [PjrtFfm.load] sees, with the
+     * library pinned open in [registryArena] for the process lifetime (see
+     * [apiPtrCache] for why this must never use a short-lived arena). */
+    private fun pjrtApiPtr(pluginPath: Path): MemorySegment =
+        apiPtrCache.computeIfAbsent(pluginPath) { path ->
+            val lookup = SymbolLookup.libraryLookup(path, registryArena)
+            val getPjrtApi = PjrtFfm.LINKER.downcallHandle(
+                lookup.find("GetPjrtApi")
+                    .orElseThrow { IllegalStateException("$path does not export GetPjrtApi") },
+                FunctionDescriptor.of(ADDRESS),
+            )
+            (getPjrtApi.invokeExact() as MemorySegment).reinterpret(PjrtFfm.PJRT_API_OBSERVED_SIZE)
+        }
 
     /** Minimal PJRT_Error message read + destroy via [PjrtFfm]'s offset
      * table (mirrors PjrtApi.checkError, which is private to its class). */
