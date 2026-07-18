@@ -115,7 +115,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // Pure data movement — zero compute, captured under bytes.
     OpKind.TRANSPOSE, OpKind.BROADCAST, OpKind.RESHAPE,
     OpKind.SLICE, OpKind.GATHER, OpKind.SCATTER, OpKind.SCATTER_ADD,
-    OpKind.CONCAT, OpKind.SPLIT, OpKind.CAST -> 0.0
+    // §0.4.360 — PAD is data movement; WHERE/COMPARE are 1 op/element
+    // (folded into the elementwise bucket below by their users; kept at
+    // movement-cost here since they never dominate a kernel decision).
+    OpKind.CONCAT, OpKind.SPLIT, OpKind.CAST, OpKind.PAD, OpKind.WHERE, OpKind.COMPARE -> 0.0
 
     // Elementwise binary (one op per output element).
     OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW,

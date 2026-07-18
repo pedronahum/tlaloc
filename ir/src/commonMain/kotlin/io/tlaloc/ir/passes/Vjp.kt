@@ -366,6 +366,114 @@ object VjpRegistry {
         }
     }
 
+    /**
+     * §0.4.360 — `d/dx_i concat(x_1..x_n, dim)` = the upstream sliced back
+     * to each operand's window along `dimension`.
+     */
+    val ConcatRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val dim = (op.attrs["dimension"] as? Number)?.toInt() ?: 0
+            val rank = op.type.rank
+            var offset = 0
+            return op.operands.map { x ->
+                val len = x.type.dims[dim]
+                val starts = (0 until rank).map { if (it == dim) offset else 0 }
+                val limits = (0 until rank).map { if (it == dim) offset + len else op.type.dims[it] }
+                offset += len
+                val dx = builder.op(
+                    OpKind.SLICE, listOf(upstream), x.type,
+                    attrs = mapOf(
+                        "start_indices" to starts,
+                        "limit_indices" to limits,
+                        "strides" to List(rank) { 1 },
+                    ),
+                )
+                x to dx
+            }
+        }
+    }
+
+    /**
+     * §0.4.360 — `d/dx slice(x)` = the upstream zero-padded back into x's
+     * shape (SLICE's adjoint IS a pad). v1 requires unit strides — the
+     * strided adjoint needs interior padding, deferred until demanded.
+     */
+    val SliceRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            @Suppress("UNCHECKED_CAST")
+            val starts = op.attrs["start_indices"] as List<Int>
+            @Suppress("UNCHECKED_CAST")
+            val limits = op.attrs["limit_indices"] as List<Int>
+            @Suppress("UNCHECKED_CAST")
+            val strides = op.attrs["strides"] as List<Int>
+            require(strides.all { it == 1 }) {
+                "SliceRule: strided slices are not differentiable in v1 (needs interior padding)"
+            }
+            val dx = builder.op(
+                OpKind.PAD, listOf(upstream), x.type,
+                attrs = mapOf(
+                    "low" to starts,
+                    "high" to x.type.dims.indices.map { x.type.dims[it] - limits[it] },
+                ),
+            )
+            return listOf(x to dx)
+        }
+    }
+
+    /**
+     * §0.4.360 — `where(pred, a, b)`: d/da = upstream ⊙ mask,
+     * d/db = upstream ⊙ (1 − mask), mask = cast(pred). No contribution to
+     * pred (boolean routing carries no gradient).
+     */
+    val WhereRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val pred = op.operands[0]
+            val a = op.operands[1]
+            val b = op.operands[2]
+            val maskType = DxirType(upstream.type.dtype, pred.type.dims)
+            val mask = builder.op(OpKind.CAST, listOf(pred), maskType)
+            val da = builder.op(OpKind.MUL, listOf(upstream, mask), a.type)
+            val one = builder.const(floatLiteralForDtype(1.0, upstream.type.dtype), maskType)
+            val inv = builder.op(OpKind.SUB, listOf(one, mask), maskType)
+            val db = builder.op(OpKind.MUL, listOf(upstream, inv), b.type)
+            return listOf(a to da, b to db)
+        }
+    }
+
+    /** §0.4.360 — comparisons are piecewise-constant: zero gradient to both
+     * operands (the SignRule convention). */
+    val CompareRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> =
+            op.operands.map { x ->
+                x to builder.const(floatLiteralForDtype(0.0, x.type.dtype), x.type)
+            }
+    }
+
+    /** §0.4.360 — `d/dx pad(x)` = the upstream sliced back to x's window
+     * (PAD's adjoint IS a slice — the dual of [SliceRule]). */
+    val PadRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            @Suppress("UNCHECKED_CAST")
+            val low = op.attrs["low"] as List<Int>
+            val dx = builder.op(
+                OpKind.SLICE, listOf(upstream), x.type,
+                attrs = mapOf(
+                    "start_indices" to low,
+                    "limit_indices" to x.type.dims.indices.map { low[it] + x.type.dims[it] },
+                    "strides" to List(x.type.rank) { 1 },
+                ),
+            )
+            return listOf(x to dx)
+        }
+    }
+
     val MatmulRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
@@ -835,6 +943,11 @@ object VjpRegistry {
         OpKind.MAX to MaxRule,
         OpKind.MIN to MinRule,
         OpKind.SOFTMAX to SoftmaxRule,
+        OpKind.CONCAT to ConcatRule,
+        OpKind.SLICE to SliceRule,
+        OpKind.WHERE to WhereRule,
+        OpKind.COMPARE to CompareRule,
+        OpKind.PAD to PadRule,
         OpKind.DOT to DotRule,
         OpKind.POW to PowRule,
         OpKind.EXP to ExpRule,

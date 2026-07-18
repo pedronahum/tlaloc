@@ -145,6 +145,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.BROADCAST -> emitBroadcast(step, name, ops[0], node, node.operands[0].type)
             OpKind.CONCAT -> emitConcat(step, name, ops, node)
             OpKind.SLICE -> emitSlice(step, name, ops[0], node, node.operands[0].type)
+            // §0.4.360 — shape-plumbing activation.
+            OpKind.WHERE -> emitWhere(step, name, ops, node)
+            OpKind.COMPARE -> emitCompare(step, name, ops, node)
+            OpKind.PAD -> emitPad(step, name, ops[0], node, node.operands[0].type)
 
             // Composite lowerings
             OpKind.RELU -> emitRelu(step, name, ops[0], node.type)
@@ -2082,6 +2086,52 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine(
             "$step$name = stablehlo.broadcast_in_dim $x, dims = [${bcastDims.joinToString(", ")}] " +
                 ": (${inputType.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /** §0.4.360 — `stablehlo.select` over a Bool predicate tensor. */
+    private fun emitWhere(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val predMlir = node.operands[0].type.toMlir()
+        out.appendLine(
+            "$step$name = stablehlo.select ${ops[0]}, ${ops[1]}, ${ops[2]} : $predMlir, ${node.type.toMlir()}",
+        )
+    }
+
+    /** §0.4.360 — `stablehlo.compare` with the `direction` attr
+     * (EQ/NE/LT/LE/GT/GE); FLOAT vs SIGNED comparison type from the
+     * operand dtype (the emitStep spelling). Result is a Bool tensor. */
+    private fun emitCompare(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val dir = node.attrs["direction"] as? String
+            ?: error("COMPARE requires a `direction` attr (EQ/NE/LT/LE/GT/GE)")
+        require(dir in setOf("EQ", "NE", "LT", "LE", "GT", "GE")) {
+            "COMPARE: unknown direction `$dir`"
+        }
+        val inType = node.operands[0].type
+        val cmpSuffix = when (inType.dtype) {
+            is io.tlaloc.core.F32, is io.tlaloc.core.F64 -> "FLOAT"
+            else -> "SIGNED"
+        }
+        out.appendLine(
+            "$step$name = stablehlo.compare  $dir, ${ops[0]}, ${ops[1]},  $cmpSuffix : " +
+                "(${inType.toMlir()}, ${node.operands[1].type.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /** §0.4.360 — `stablehlo.pad` with zero padding value, edge-only
+     * (`low`/`high` List<Int> attrs; interior fixed at 0 in v1). */
+    private fun emitPad(step: String, name: String, x: String, node: DxirOp, inputType: DxirType) {
+        val low = intListAttr(node, "low")
+        val high = intListAttr(node, "high")
+        require(low.size == inputType.rank && high.size == inputType.rank) {
+            "PAD attr lengths must match input rank ${inputType.rank}"
+        }
+        val scalarMlir = "tensor<${mlirElementType(inputType.dtype)}>"
+        val zero = synth()
+        out.appendLine("$step$zero = stablehlo.constant dense<0.0> : $scalarMlir")
+        out.appendLine(
+            "$step$name = stablehlo.pad $x, $zero, low = [${low.joinToString(", ")}], " +
+                "high = [${high.joinToString(", ")}], interior = [${List(inputType.rank) { 0 }.joinToString(", ")}] : " +
+                "(${inputType.toMlir()}, $scalarMlir) -> ${node.type.toMlir()}",
         )
     }
 

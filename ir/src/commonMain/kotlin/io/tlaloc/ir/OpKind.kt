@@ -51,6 +51,21 @@ enum class OpKind {
     // Shape
     RESHAPE, TRANSPOSE, BROADCAST, CONCAT, SPLIT, SLICE, GATHER, SCATTER,
 
+    // §0.4.360 — shape-plumbing activation (the DiffKT-gap item 2 surface).
+    //
+    // WHERE(pred: Bool tensor, a, b) — elementwise select; the differentiable
+    // routing primitive (`stablehlo.select`). Gradients flow to a/b through the
+    // 0/1 mask; pred gets none.
+    //
+    // COMPARE(a, b) — elementwise comparison producing a Bool tensor; the
+    // `direction` attr is one of EQ/NE/LT/LE/GT/GE (`stablehlo.compare`'s
+    // spelling, one op kind instead of six). Non-differentiable (zero rule).
+    //
+    // PAD(x) — zero edge-padding with `low`/`high` List<Int> attrs
+    // (`stablehlo.pad`, interior fixed at 0 in v1). First-class both for users
+    // and because SLICE's adjoint IS a pad (and PAD's adjoint is a slice).
+    WHERE, COMPARE, PAD,
+
     // §0.4.45 — SCATTER_ADD(base: rank-1, idx: i32-scalar, value: scalar) → rank-1.
     // Output[k] = base[k] for k != idx, output[idx] = base[idx] + value. Semantically
     // equivalent to ADD(base, SCATTER(BROADCAST(0, base.type), idx, value)) but one op

@@ -616,6 +616,103 @@ object DxirInterpreter {
             //   * `reduction_dims = [a, b, ...]` → sum over those axes in
             //     the input, preserving the remaining axes. Used by
             //     BroadcastRule's axis-aware reverse (§0.4.84).
+            // §0.4.360 — shape-plumbing evals.
+            OpKind.CONCAT -> {
+                val parts = op.operands.map { evalNode(it, env, multiResults) }
+                val dim = (op.attrs["dimension"] as? Number)?.toInt() ?: 0
+                val dims0 = op.operands[0].type.dims
+                var outer = 1
+                for (k in 0 until dim) outer *= dims0[k]
+                var inner = 1
+                for (k in dim + 1 until dims0.size) inner *= dims0[k]
+                val axisLens = op.operands.map { it.type.dims[dim] }
+                val out = FloatArray(sizeOf(op.type))
+                var dst = 0
+                for (o in 0 until outer) {
+                    for ((pi, part) in parts.withIndex()) {
+                        val len = axisLens[pi] * inner
+                        val src = o * len
+                        part.copyInto(out, dst, src, src + len)
+                        dst += len
+                    }
+                }
+                out
+            }
+            OpKind.SLICE -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                val inDims = op.operands[0].type.dims
+                @Suppress("UNCHECKED_CAST")
+                val starts = op.attrs["start_indices"] as List<Int>
+                @Suppress("UNCHECKED_CAST")
+                val limits = op.attrs["limit_indices"] as List<Int>
+                @Suppress("UNCHECKED_CAST")
+                val strides = op.attrs["strides"] as List<Int>
+                val outDims = op.type.dims
+                val inStrides = IntArray(inDims.size)
+                var st = 1
+                for (k in inDims.indices.reversed()) { inStrides[k] = st; st *= inDims[k] }
+                val outStrides = IntArray(outDims.size)
+                st = 1
+                for (k in outDims.indices.reversed()) { outStrides[k] = st; st *= outDims[k] }
+                FloatArray(sizeOf(op.type)) { flat ->
+                    var rem = flat
+                    var src = 0
+                    for (k in outDims.indices) {
+                        val coord = rem / outStrides[k]
+                        rem %= outStrides[k]
+                        src += (starts[k] + coord * strides[k]) * inStrides[k]
+                    }
+                    a[src]
+                }
+            }
+            OpKind.WHERE -> {
+                val pred = evalNode(op.operands[0], env, multiResults)
+                val a = evalNode(op.operands[1], env, multiResults)
+                val b = evalNode(op.operands[2], env, multiResults)
+                FloatArray(a.size) { if (pred[it] != 0f) a[it] else b[it] }
+            }
+            OpKind.COMPARE -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                val b = evalNode(op.operands[1], env, multiResults)
+                val dir = op.attrs["direction"] as? String ?: error("COMPARE missing `direction` attr")
+                FloatArray(a.size) {
+                    val hit = when (dir) {
+                        "EQ" -> a[it] == b[it]
+                        "NE" -> a[it] != b[it]
+                        "LT" -> a[it] < b[it]
+                        "LE" -> a[it] <= b[it]
+                        "GT" -> a[it] > b[it]
+                        "GE" -> a[it] >= b[it]
+                        else -> error("COMPARE: unknown direction `$dir`")
+                    }
+                    if (hit) 1f else 0f
+                }
+            }
+            OpKind.PAD -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                val inDims = op.operands[0].type.dims
+                @Suppress("UNCHECKED_CAST")
+                val low = op.attrs["low"] as List<Int>
+                val outDims = op.type.dims
+                val inStrides = IntArray(inDims.size)
+                var st = 1
+                for (k in inDims.indices.reversed()) { inStrides[k] = st; st *= inDims[k] }
+                val outStrides = IntArray(outDims.size)
+                st = 1
+                for (k in outDims.indices.reversed()) { outStrides[k] = st; st *= outDims[k] }
+                val out = FloatArray(sizeOf(op.type))
+                for (flat in a.indices) {
+                    var rem = flat
+                    var dst = 0
+                    for (k in inDims.indices) {
+                        val coord = rem / inStrides[k]
+                        rem %= inStrides[k]
+                        dst += (coord + low[k]) * outStrides[k]
+                    }
+                    out[dst] = a[flat]
+                }
+                out
+            }
             // §0.4.359 — element-count-preserving relayout: row-major copy.
             OpKind.RESHAPE -> {
                 val a = evalNode(op.operands[0], env, multiResults)
