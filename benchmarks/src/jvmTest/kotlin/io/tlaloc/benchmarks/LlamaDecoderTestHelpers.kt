@@ -5,6 +5,8 @@ import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.ir.recognizer.coarsener.coarsenRecognizedPatterns
 import io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened
 import io.tlaloc.ir.recognizer.kernel.KernelTarget
+import io.tlaloc.ir.recognizer.kernel.KernelTemplate
+import io.tlaloc.ir.recognizer.kernel.defaultKernelTemplates
 import io.tlaloc.ir.recognizer.kernel.lowerKernelChoice
 import io.tlaloc.ir.recognizer.recognizeAll
 
@@ -44,10 +46,11 @@ internal fun llamaCpuBaselinePipeline(): DxirFunction {
 internal fun llamaKernelLoweredForwardPipeline(
     config: LlamaDecoderConfig,
     target: KernelTarget,
+    registry: Map<String, KernelTemplate> = defaultKernelTemplates,
 ): DxirFunction {
     val raw = LlamaDecoderPrimal.build(config)
     val coarsened = coarsenRecognizedPatterns(raw, recognizeAll(raw))
-    val lowered = lowerKernelChoice(coarsened, target)
+    val lowered = lowerKernelChoice(coarsened, target, registry)
     return decomposeCoarsened(lowered)
 }
 
@@ -59,11 +62,12 @@ internal fun llamaKernelLoweredForwardPipeline(
 internal fun llamaKernelLoweredBackwardPipeline(
     config: LlamaDecoderConfig,
     target: KernelTarget,
+    registry: Map<String, KernelTemplate> = defaultKernelTemplates,
 ): DxirFunction {
     val raw = LlamaDecoderPrimal.build(config)
     val coarsened = coarsenRecognizedPatterns(raw, recognizeAll(raw))
     val grad = DxirReverseTransform.apply(coarsened)
-    val lowered = lowerKernelChoice(grad, target)
+    val lowered = lowerKernelChoice(grad, target, registry)
     return decomposeCoarsened(lowered)
 }
 
