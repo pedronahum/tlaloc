@@ -88,6 +88,49 @@ internal object KptxTestKernels {
         )
     }
 
+    /** §0.4.358 — attention three-stage chain from the :kptx library. */
+    val attentionPtx = KptxKernels.attentionModule(block = 256).emitPtx()
+
+    private val registeredAttnPlugins = HashSet<Path>()
+
+    /** Register the `@kptx_attention` launch chain exactly once per JVM. */
+    @Synchronized
+    fun ensureAttentionRegistered(pluginPath: Path) {
+        if (!registeredAttnPlugins.add(pluginPath)) return
+        KptxKernelRegistry.registerKernelChain(
+            pluginPath,
+            "kptx_attention",
+            attentionPtx,
+            listOf(
+                KptxKernelRegistry.Stage(
+                    entryName = "kptx_attn_scores",
+                    grid = { args, _ -> KptxKernelRegistry.Dim3(args[0].dims[0].toInt()) },
+                    block = KptxKernelRegistry.Dim3(256),
+                    paramBuffers = { args, rets -> listOf(args[0], args[1], rets[1]) },
+                    trailingI32Params = { args, _ ->
+                        intArrayOf(args[0].dims[0].toInt(), args[0].dims[1].toInt())
+                    },
+                ),
+                KptxKernelRegistry.Stage(
+                    entryName = "kptx_attn_softmax",
+                    grid = { args, _ -> KptxKernelRegistry.Dim3(args[0].dims[0].toInt()) },
+                    block = KptxKernelRegistry.Dim3(256),
+                    paramBuffers = { _, rets -> listOf(rets[1]) },
+                    trailingI32Params = { args, _ -> intArrayOf(args[0].dims[0].toInt()) },
+                ),
+                KptxKernelRegistry.Stage(
+                    entryName = "kptx_attn_out",
+                    grid = { args, _ -> KptxKernelRegistry.Dim3(args[0].dims[0].toInt()) },
+                    block = KptxKernelRegistry.Dim3(256),
+                    paramBuffers = { args, rets -> listOf(rets[1], args[2], rets[0]) },
+                    trailingI32Params = { args, _ ->
+                        intArrayOf(args[0].dims[0].toInt(), args[0].dims[1].toInt())
+                    },
+                ),
+            ),
+        )
+    }
+
     private val registeredPlugins = HashSet<Path>()
 
     /** Register `@kptx_rms_norm` on [pluginPath] exactly once per JVM. */

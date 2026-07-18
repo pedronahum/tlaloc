@@ -2,6 +2,7 @@ package io.tlaloc.benchmarks
 
 import io.tlaloc.ir.recognizer.kernel.KernelTarget
 import io.tlaloc.ir.recognizer.kernel.KernelTemplate
+import io.tlaloc.ir.recognizer.kernel.AttentionKernel
 import io.tlaloc.ir.recognizer.kernel.CrossEntropyKernel
 import io.tlaloc.ir.recognizer.kernel.RmsNormKernel
 import io.tlaloc.ir.recognizer.kernel.RopeKernel
@@ -213,5 +214,63 @@ class LlamaDecoderKptxRmsNormE2ETest {
                 "loss kptx=${kptxOut[0][0]}, decompose=${decomposeOut[0][0]}, max rel=$maxRel",
         )
         assertTrue(maxRel <= 1e-3f, "kptx three-family forward diverges from decompose path: max rel $maxRel")
+    }
+
+    /** §0.4.358 — the medium decoder's FULL recognized coarse-op set
+     * claims at once (TransformerMLP decomposes by design — its matmuls
+     * stay cuBLASLt-tier): 2×rms_norm + 1×rope + 1×cross_entropy chain +
+     * 1×attention chain = five custom_calls, two of them multi-stage,
+     * in one XLA executable. */
+    @Test
+    fun kptxFourFamilyForwardAgreesWithDecomposePath() {
+        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        val pluginPath = PjrtBinaries.pluginPath!!
+        assumeTrue(PjrtFfiRegistry.isGpuCustomCallSupported(pluginPath), "no GPU custom-call extension — skipping.")
+
+        KptxTestKernels.ensureRmsNormRegistered(pluginPath)
+        KptxTestKernels.ensureRopeRegistered(pluginPath)
+        KptxTestKernels.ensureCrossEntropyRegistered(pluginPath)
+        KptxTestKernels.ensureAttentionRegistered(pluginPath)
+
+        val registry: Map<String, KernelTemplate> = mapOf(
+            "RmsNorm" to RmsNormKernel,
+            "Rope" to RopeKernel,
+            "CrossEntropy" to CrossEntropyKernel,
+            "FlashAttention" to AttentionKernel,
+        )
+        val kptxFn = llamaKernelLoweredForwardPipeline(
+            LlamaDecoderConfig.medium, KernelTarget.NVIDIA_GB10, registry,
+        )
+        val mlir = kptxFn.toStablehlo()
+        assertEquals(2, Regex("custom_call @kptx_rms_norm\\(").findAll(mlir).count())
+        assertEquals(1, Regex("custom_call @kptx_rope\\(").findAll(mlir).count())
+        assertEquals(1, Regex("custom_call @kptx_cross_entropy\\(").findAll(mlir).count())
+        assertEquals(1, Regex("custom_call @kptx_attention\\(").findAll(mlir).count())
+
+        val decomposeFn = llamaKernelLoweredForwardPipeline(
+            LlamaDecoderConfig.medium, KernelTarget.CPU_GENERIC, registry,
+        )
+        val inputs = llamaSynthesizeInputs(seed = 42L, fn = kptxFn)
+
+        val kptxOut: List<FloatArray>
+        val decomposeOut: List<FloatArray>
+        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+            kptxOut = session.runOn(kptxFn, inputs)
+            decomposeOut = session.runOn(decomposeFn, inputs)
+        }
+
+        var maxRel = 0f
+        for (o in kptxOut.indices) {
+            for (i in kptxOut[o].indices) {
+                val df = abs(kptxOut[o][i] - decomposeOut[o][i])
+                maxRel = max(maxRel, df / max(abs(decomposeOut[o][i]), 1e-6f))
+            }
+        }
+        println(
+            "[kptx-llama-e2e] LlamaDecoder-medium forward, 2×rms_norm + 1×rope + 1×ce + 1×attention inside: " +
+                "loss kptx=${kptxOut[0][0]}, decompose=${decomposeOut[0][0]}, max rel=$maxRel",
+        )
+        assertTrue(maxRel <= 1e-3f, "kptx four-family forward diverges from decompose path: max rel $maxRel")
     }
 }

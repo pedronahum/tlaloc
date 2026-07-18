@@ -19,6 +19,7 @@ class KptxKernelsTest {
         "rmsNormBwdDw" to KptxKernels.rmsNormBwdDw.specialize(),
         "rope" to KptxKernels.rope.specialize(),
         "crossEntropy" to KptxKernels.crossEntropyModule(block = 256),
+        "attention" to KptxKernels.attentionModule(block = 256),
     )
 
     @Test
