@@ -27,6 +27,9 @@ kotlin {
                 implementation(project(":core"))
                 implementation(project(":ir"))
                 implementation(project(":stablehlo"))
+                // KPTX v1.4 — kernel dispatch inside PJRT executables needs
+                // the CUDA driver bindings (cuModuleLoadData / cuLaunchKernel).
+                api(project(":runtime-cuda"))
             }
         }
         jvmTest {
