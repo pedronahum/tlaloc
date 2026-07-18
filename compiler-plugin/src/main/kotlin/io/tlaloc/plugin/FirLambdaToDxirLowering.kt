@@ -66,7 +66,11 @@ object FirLambdaToDxirLowering {
 
     sealed class Result {
         data class Success(val fn: DxirFunction) : Result()
-        data class Failure(val reason: String) : Result()
+        /** §0.4.353 — [namedIndex] classifies contract/named-axis violations
+         * so the checker can report them as error-severity
+         * [TlalocErrors.NAMED_INDEX_MISMATCH] instead of the generic
+         * (warning-severity, tape-fallback) [TlalocErrors.LAMBDA_UNSUPPORTED]. */
+        data class Failure(val reason: String, val namedIndex: Boolean = false) : Result()
     }
 
     fun lower(name: String, anonFn: FirAnonymousFunction): Result {
@@ -88,11 +92,15 @@ object FirLambdaToDxirLowering {
             }
             Result.Success(fn)
         } catch (e: LoweringException) {
-            Result.Failure(e.message ?: "unknown")
+            Result.Failure(e.message ?: "unknown", namedIndex = e is NamedIndexException)
         }
     }
 
-    private class LoweringException(message: String) : RuntimeException(message)
+    private open class LoweringException(message: String) : RuntimeException(message)
+
+    /** §0.4.353 — named-axis misuse (the user's type-level contract is
+     * inconsistent): reported as a compile ERROR, not a lowering fallback. */
+    private class NamedIndexException(message: String) : LoweringException(message)
 
     private fun lowerBlock(
         block: FirBlock,
@@ -928,7 +936,7 @@ object FirLambdaToDxirLowering {
         val lhsNames = lhsType.axisNames
         val rhsNames = rhsType.axisNames
         if (lhsNames.isEmpty() || rhsNames.isEmpty()) {
-            throw LoweringException(
+            throw NamedIndexException(
                 "contract requires both operands to carry named axes; got lhs=$lhsType rhs=$rhsType",
             )
         }
@@ -936,7 +944,7 @@ object FirLambdaToDxirLowering {
         val rhsByName = rhsNames.withIndex().mapNotNull { (i, n) -> n?.let { it to i } }.toMap()
         val sharedNames = lhsByName.keys.intersect(rhsByName.keys)
         if (sharedNames.isEmpty()) {
-            throw LoweringException(
+            throw NamedIndexException(
                 "contract operands share no named axis: lhs=$lhsNames rhs=$rhsNames",
             )
         }
@@ -959,7 +967,7 @@ object FirLambdaToDxirLowering {
         }
         val contractingNames = sharedNames - batchingNames
         if (contractingNames.size != 1) {
-            throw LoweringException(
+            throw NamedIndexException(
                 "contract supports exactly one contracting axis in v1.5 " +
                     "(got contracting=$contractingNames batching=$batchingNames). " +
                     "A shared name at the *same* dim position is batching; at *different* positions, contracting.",

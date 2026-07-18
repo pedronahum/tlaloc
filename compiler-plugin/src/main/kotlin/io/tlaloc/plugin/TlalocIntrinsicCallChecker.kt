@@ -1,5 +1,7 @@
 package io.tlaloc.plugin
 
+import io.tlaloc.ir.passes.DxirReverseTransform
+import io.tlaloc.ir.passes.validateDxirShapes
 import io.tlaloc.ir.pretty
 import org.jetbrains.kotlin.diagnostics.DiagnosticReporter
 import org.jetbrains.kotlin.diagnostics.reportOn
@@ -42,15 +44,44 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                     TlalocErrors.LAMBDA_LOWERED,
                     result.fn.pretty().trimEnd(),
                 )
+                // §0.4.353 — Meta-stage ergonomics: validate the lowered body
+                // NOW, so shape and differentiability failures are red
+                // squiggles at the call site instead of runtime surprises.
+                // (1) Conservative static shape check (silent on symbolic dims).
+                val shapeErrors = validateDxirShapes(result.fn)
+                for (err in shapeErrors) {
+                    reporter.reportOn(expression.source, TlalocErrors.TENSOR_SHAPE_MISMATCH, err)
+                }
+                // (2) The gradient this intrinsic requests, computed
+                // symbolically at check time. Scope: bodies the raw reverse
+                // transform handles directly (straight-line + IF). Loop-bearing
+                // bodies go through the runtime's PhiCalculus + Symja-engine
+                // coarsening pipeline (TlalocIrGenerationExtension §0.4.24/33)
+                // — running that per keystroke is not check-time material, so
+                // they keep their runtime backstop.
+                val hasLoopRegions = result.fn.body.any {
+                    it is io.tlaloc.ir.DxirOp && it.regions.isNotEmpty() && it.op != io.tlaloc.ir.OpKind.IF
+                }
+                if (shapeErrors.isEmpty() && !hasLoopRegions) {
+                    runCatching { DxirReverseTransform.apply(result.fn) }.onFailure { t ->
+                        reporter.reportOn(
+                            expression.source,
+                            TlalocErrors.NOT_DIFFERENTIABLE,
+                            t.message ?: t::class.simpleName ?: "unknown",
+                        )
+                    }
+                }
                 val src = expression.source
                 if (src != null) {
                     TlalocLoweringHandoff.record(src.startOffset, src.endOffset, result.fn)
                 }
             }
             is FirLambdaToDxirLowering.Result.Failure -> {
+                // §0.4.353 — named-axis misuse is a type error (error severity);
+                // everything else stays a warning (the runtime tape still runs it).
                 reporter.reportOn(
                     expression.source,
-                    TlalocErrors.LAMBDA_UNSUPPORTED,
+                    if (result.namedIndex) TlalocErrors.NAMED_INDEX_MISMATCH else TlalocErrors.LAMBDA_UNSUPPORTED,
                     result.reason,
                 )
             }

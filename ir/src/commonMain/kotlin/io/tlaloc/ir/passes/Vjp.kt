@@ -246,6 +246,40 @@ object VjpRegistry {
      * order; a forward reference from `rules` to a later val fails to compile
      * (§0.4.3 object-init trap — worth repeating in every new VjpRule).
      */
+    /**
+     * §0.4.353 — rank-1 dot product `s = Σ a_i·b_i` (OpKind.DOT, the
+     * `rank1 contract rank1` lowering): d s/d a = upstream ⊙ b,
+     * d s/d b = upstream ⊙ a (upstream is the scalar seed; MUL
+     * broadcasts scalar × vector). Contributions are typed with the
+     * *receiving* operand's DxirType so named axes accumulate onto the
+     * right parameter. Gap found by the §0.4.353 check-time
+     * differentiability probe — a grad over rank-1 contract previously
+     * failed only at runtime.
+     */
+    val DotRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            val b = op.operands[1]
+            require(a.type.rank == 1 && b.type.rank == 1) {
+                "DotRule: rank-1 operands required, got ${a.type.dims} x ${b.type.dims}"
+            }
+            // Scalar upstream broadcast to vector shape first (the SumRule
+            // convention — the interpreter's MUL is same-size only).
+            val upA = builder.op(
+                OpKind.BROADCAST, listOf(upstream), DxirType(upstream.type.dtype, a.type.dims),
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val upB = builder.op(
+                OpKind.BROADCAST, listOf(upstream), DxirType(upstream.type.dtype, b.type.dims),
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val da = builder.op(OpKind.MUL, listOf(upA, b), a.type)
+            val db = builder.op(OpKind.MUL, listOf(upB, a), b.type)
+            return listOf(a to da, b to db)
+        }
+    }
+
     val MatmulRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
@@ -711,6 +745,7 @@ object VjpRegistry {
         OpKind.SUM to SumRule,
         OpKind.MEAN to MeanRule,
         OpKind.MATMUL to MatmulRule,
+        OpKind.DOT to DotRule,
         OpKind.POW to PowRule,
         OpKind.EXP to ExpRule,
         OpKind.LOG to LogRule,
