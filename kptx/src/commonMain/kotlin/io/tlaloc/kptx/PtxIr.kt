@@ -124,3 +124,10 @@ data class PtxMem(val base: String, val offset: Int = 0) : PtxOperand
 /** A bare symbol operand: branch-target labels (`bra LOOP_SUM;`) and
  * address-of-shared (`mov.u64 %rd13, sdata;`). */
 data class PtxSym(val name: String) : PtxOperand
+
+/**
+ * §0.4.343 — a vector/fragment operand `{%f1, %f2, %f3, %f4}` (mma
+ * fragments, vector ld/st). Elements are register names including `%`;
+ * canonical spelling separates with `", "` like top-level operands.
+ */
+data class PtxVec(val regs: List<String>) : PtxOperand

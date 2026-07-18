@@ -57,7 +57,7 @@ internal fun classOfType(type: String): IsaRegClass? = when (type) {
 }
 
 /** Operand kind at the IR surface. */
-enum class IsaOperandKind { REG, IMM, MEM, SYM }
+enum class IsaOperandKind { REG, IMM, MEM, SYM, VEC }
 
 /** How to derive a REG operand's expected class. */
 sealed interface IsaClassRule {
@@ -108,6 +108,8 @@ private val ROUND = setOf("rn", "rz", "rm", "rp")
 
 private fun reg(rule: IsaClassRule = IsaClassRule.FromType(0)) =
     IsaOperand(setOf(IsaOperandKind.REG), rule)
+private fun vec(rule: IsaClassRule = IsaClassRule.FromType(0)) =
+    IsaOperand(setOf(IsaOperandKind.VEC), rule)
 private fun regOrImm(rule: IsaClassRule = IsaClassRule.FromType(0)) =
     IsaOperand(setOf(IsaOperandKind.REG, IsaOperandKind.IMM), rule)
 private fun mem() = IsaOperand(setOf(IsaOperandKind.MEM), IsaClassRule.Any)
@@ -219,6 +221,56 @@ val PTX_ISA: Map<String, IsaInstructionSpec> = listOf(
         types = listOf(ALL_TYPES, ALL_TYPES),
         operands = listOf(reg(IsaClassRule.FromType(0)), reg(IsaClassRule.FromType(1))),
     ),
+    // §0.4.343 — tensor-core matmul-accumulate. Type suffixes are
+    // d.a.b.c; a/b fragments hold packed halves in %r registers
+    // (f16/bf16 map to no class — the typed wrapper enforces %r), d/c
+    // fragments class-check per element via FromType.
+    IsaInstructionSpec(
+        "mma",
+        mods = listOf(
+            IsaModifierSlot(setOf("sync")),
+            IsaModifierSlot(setOf("aligned")),
+            IsaModifierSlot(setOf("m16n8k16", "m16n8k8", "m8n8k4")),
+            IsaModifierSlot(setOf("row", "col")),
+            IsaModifierSlot(setOf("row", "col")),
+        ),
+        types = listOf(
+            setOf("f32", "f16"),
+            setOf("f16", "bf16"),
+            setOf("f16", "bf16"),
+            setOf("f32", "f16"),
+        ),
+        operands = listOf(
+            vec(IsaClassRule.FromType(0)),
+            vec(IsaClassRule.FromType(1)),
+            vec(IsaClassRule.FromType(2)),
+            vec(IsaClassRule.FromType(3)),
+        ),
+    ),
+    // §0.4.343 — warp shuffle: shfl.sync.<mode>.b32 d, a, b, c, membermask.
+    IsaInstructionSpec(
+        "shfl",
+        mods = listOf(
+            IsaModifierSlot(setOf("sync")),
+            IsaModifierSlot(setOf("up", "down", "bfly", "idx")),
+        ),
+        types = listOf(setOf("b32")),
+        operands = listOf(reg(), reg(), regOrImm(IsaClassRule.Any), regOrImm(IsaClassRule.Any), regOrImm(IsaClassRule.Any)),
+    ),
+    // §0.4.343 — warp vote: vote.sync.<mode>.{pred|b32} d, p, membermask.
+    IsaInstructionSpec(
+        "vote",
+        mods = listOf(
+            IsaModifierSlot(setOf("sync")),
+            IsaModifierSlot(setOf("all", "any", "uni", "ballot")),
+        ),
+        types = listOf(setOf("pred", "b32")),
+        operands = listOf(
+            reg(),
+            reg(IsaClassRule.Fixed(IsaRegClass.PRED)),
+            regOrImm(IsaClassRule.Any),
+        ),
+    ),
 ).associateBy { it.base }
 
 /** Thrown by [validateIsa] when a module fails validation. */
@@ -273,26 +325,33 @@ fun validateInst(inst: PtxInst): List<String> {
             is PtxImm -> IsaOperandKind.IMM
             is PtxMem -> IsaOperandKind.MEM
             is PtxSym -> IsaOperandKind.SYM
+            is PtxVec -> IsaOperandKind.VEC
         }
         if (kind !in opSpec.kinds) {
             errors += "$at: operand $i has kind $kind; expected one of ${opSpec.kinds.sorted()}"
             continue
         }
-        if (op is PtxReg) {
-            val expected = when (val rule = opSpec.classRule) {
-                is IsaClassRule.Any -> null
-                is IsaClassRule.Fixed -> rule.cls
-                is IsaClassRule.FromType -> {
-                    val base = classOfType(types.getOrNull(rule.typeIndex) ?: "")
-                    if (wide && i == 0 && (base == IsaRegClass.R32)) IsaRegClass.R64 else base
-                }
+        val expected = when (val rule = opSpec.classRule) {
+            is IsaClassRule.Any -> null
+            is IsaClassRule.Fixed -> rule.cls
+            is IsaClassRule.FromType -> {
+                val base = classOfType(types.getOrNull(rule.typeIndex) ?: "")
+                if (wide && i == 0 && (base == IsaRegClass.R32)) IsaRegClass.R64 else base
             }
-            val actual = regClassOf(op.name)
+        }
+        fun checkReg(name: String, what: String) {
+            val actual = regClassOf(name)
             if (actual == null) {
-                errors += "$at: operand $i register `${op.name}` has no recognizable class"
+                errors += "$at: $what `$name` has no recognizable class"
             } else if (expected != null && actual != expected) {
-                errors += "$at: operand $i register `${op.name}` is ${actual.prefix}-class; expected ${expected.prefix}"
+                errors += "$at: $what `$name` is ${actual.prefix}-class; expected ${expected.prefix}"
             }
+        }
+        when (op) {
+            is PtxReg -> checkReg(op.name, "operand $i register")
+            // §0.4.343 — class rules apply per fragment element.
+            is PtxVec -> op.regs.forEach { checkReg(it, "operand $i fragment element") }
+            else -> {}
         }
     }
     return errors

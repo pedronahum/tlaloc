@@ -150,12 +150,46 @@ private class PtxParser(private val lines: List<String>) {
         val sp = rest.indexOf(' ')
         if (sp < 0) return PtxInst(rest, emptyList(), guard, comment)
         val opcode = rest.substring(0, sp)
-        val operands = rest.substring(sp + 1).split(", ").map { parseOperand(it) }
+        val operands = splitOperands(rest.substring(sp + 1)).map { parseOperand(it) }
         return PtxInst(opcode, operands, guard, comment)
+    }
+
+    /** Split on top-level `", "` — commas inside `{…}` fragment vectors
+     * (§0.4.343) belong to the vector, not the operand list. */
+    private fun splitOperands(s: String): List<String> {
+        val out = ArrayList<String>()
+        var depth = 0
+        var start = 0
+        var idx = 0
+        while (idx < s.length) {
+            when (s[idx]) {
+                '{' -> depth++
+                '}' -> depth--
+                ',' -> if (depth == 0) {
+                    if (idx + 1 >= s.length || s[idx + 1] != ' ') {
+                        i--; fail("operands must be separated by `, ` in `$s`")
+                    }
+                    out.add(s.substring(start, idx))
+                    idx++ // skip the space
+                    start = idx + 1
+                }
+            }
+            idx++
+        }
+        if (depth != 0) { i--; fail("unbalanced `{`/`}` in operands `$s`") }
+        out.add(s.substring(start))
+        return out
     }
 
     private fun parseOperand(s: String): PtxOperand = when {
         s.isEmpty() -> { i--; fail("empty operand") }
+        s.startsWith("{") && s.endsWith("}") -> {
+            val regs = s.substring(1, s.length - 1).split(", ")
+            if (regs.any { !it.startsWith("%") }) {
+                i--; fail("vector operand elements must be registers in `$s`")
+            }
+            PtxVec(regs)
+        }
         s.startsWith("[") && s.endsWith("]") -> {
             val inner = s.substring(1, s.length - 1)
             val plus = inner.indexOf('+')

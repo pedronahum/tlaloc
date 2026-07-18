@@ -99,5 +99,13 @@ private fun StringBuilder.emitOperand(op: PtxOperand) {
             if (op.offset != 0) append('+').append(op.offset)
             append(']')
         }
+        is PtxVec -> {
+            append('{')
+            for ((i, r) in op.regs.withIndex()) {
+                if (i != 0) append(", ")
+                append(r)
+            }
+            append('}')
+        }
     }
 }
