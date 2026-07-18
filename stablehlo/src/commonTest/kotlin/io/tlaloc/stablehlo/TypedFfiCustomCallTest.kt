@@ -52,6 +52,23 @@ class TypedFfiCustomCallTest {
         return lowerKernelChoice(buildCoarsenedFn(), KernelTarget.CPU_GENERIC, registry).toStablehlo()
     }
 
+    /** §0.4.351 — launch-chain scratch results: appended after the op's
+     * own result, XLA-owned, referenced by nothing; the op's value stays
+     * result #0 in every downstream reference. */
+    @Test
+    fun scratchResultsAppendToTheCustomCallResults() {
+        val mlir = emitWithDescriptor(
+            KernelDescriptor(
+                "kptx_chained", "tlaloc", "gb10", typedFfi = true,
+                scratchResults = listOf(listOf(8)),
+            ),
+        )
+        assertTrue(mlir.contains(":2 = stablehlo.custom_call @kptx_chained"), mlir)
+        assertTrue(mlir.contains("-> (tensor<8x4xf32>, tensor<8xf32>)"), mlir)
+        // The COARSENED's value feeds the function return as result #0.
+        assertTrue(Regex("return %\\d+#0").containsMatchIn(mlir), mlir)
+    }
+
     @Test
     fun typedFfiEmitsApiVersion4AndDictBackendConfig() {
         val mlir = emitWithDescriptor(

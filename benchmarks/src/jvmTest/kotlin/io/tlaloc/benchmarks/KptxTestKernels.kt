@@ -56,6 +56,38 @@ internal object KptxTestKernels {
         )
     }
 
+    /** §0.4.351 — CrossEntropy two-stage chain from the :kptx library. */
+    val crossEntropyPtx = KptxKernels.crossEntropyModule(block = 256).emitPtx()
+
+    private val registeredCePlugins = HashSet<Path>()
+
+    /** Register the `@kptx_cross_entropy` launch chain exactly once per JVM. */
+    @Synchronized
+    fun ensureCrossEntropyRegistered(pluginPath: Path) {
+        if (!registeredCePlugins.add(pluginPath)) return
+        KptxKernelRegistry.registerKernelChain(
+            pluginPath,
+            "kptx_cross_entropy",
+            crossEntropyPtx,
+            listOf(
+                KptxKernelRegistry.Stage(
+                    entryName = "kptx_cross_entropy_rows",
+                    grid = { args, _ -> KptxKernelRegistry.Dim3(args[0].dims[0].toInt()) },
+                    block = KptxKernelRegistry.Dim3(256),
+                    paramBuffers = { args, rets -> listOf(args[0], args[1], rets[1]) },
+                    trailingI32Params = { args, _ -> intArrayOf(args[0].dims[1].toInt()) },
+                ),
+                KptxKernelRegistry.Stage(
+                    entryName = "kptx_cross_entropy_sum",
+                    grid = { _, _ -> KptxKernelRegistry.Dim3(1) },
+                    block = KptxKernelRegistry.Dim3(256),
+                    paramBuffers = { _, rets -> listOf(rets[1], rets[0]) },
+                    trailingI32Params = { args, _ -> intArrayOf(args[0].dims[0].toInt()) },
+                ),
+            ),
+        )
+    }
+
     private val registeredPlugins = HashSet<Path>()
 
     /** Register `@kptx_rms_norm` on [pluginPath] exactly once per JVM. */

@@ -1316,12 +1316,24 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     ) {
         val operandList = operandNames.joinToString(", ")
         val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
-        val resultTypeMlir = if (node.isMultiResult) {
-            "(${node.types.joinToString(", ") { it.toMlir() }})"
-        } else {
-            node.type.toMlir()
+        // §0.4.351 — scratch results (multi-stage launch-chain intermediates,
+        // see KernelDescriptor.scratchResults) are appended after the op's
+        // own results. They are XLA-owned and referenced by nothing: the
+        // node's value stays result #0, pre-registered in the SSA map so
+        // downstream ops print `%name#0`.
+        val scratchTypes = descriptor.scratchResults.map { dims ->
+            if (dims.isEmpty()) "tensor<f32>" else "tensor<${dims.joinToString("x")}xf32>"
         }
-        val lhs = if (node.isMultiResult) "$name:${node.numResults}" else name
+        val allResultTypes = node.types.map { it.toMlir() } + scratchTypes
+        val resultTypeMlir = if (allResultTypes.size > 1) {
+            "(${allResultTypes.joinToString(", ")})"
+        } else {
+            allResultTypes.single()
+        }
+        val lhs = if (allResultTypes.size > 1) "$name:${allResultTypes.size}" else name
+        if (allResultTypes.size > 1) {
+            ssa[node.id] = List(node.numResults) { i -> "$name#$i" }
+        }
         val attrs = mutableListOf<String>()
         if (descriptor.typedFfi) {
             // KPTX v1.6 §0.4.332 — typed-FFI convention: api_version 4 with
