@@ -11,6 +11,7 @@ These files are documentation-grade — copy into a project that depends on
 |------|---------|
 | [`RecognizeAndCoarsenAttentionExample.kt`](RecognizeAndCoarsenAttentionExample.kt) | The smallest end-to-end loop — recognize a `MATMUL → SOFTMAX → MATMUL` shape, coarsen it into a single `OpKind.COARSENED` op carrying the analytical primal_body + gradient_body. |
 | [`KernelLoweringMatrixExample.kt`](KernelLoweringMatrixExample.kt) | Walks the seven canonical device targets and shows the per-target lowering decision (fused vendor kernel vs decompose). |
+| [`CustomCallTargetMatrixExample.kt`](CustomCallTargetMatrixExample.kt) | §0.4.325 — drives the kernel-lowering pipeline end-to-end and prints the emitted `stablehlo.custom_call` per target. Pairs with `JaxRejectsTlalocCustomCallMlirTest` (negative pin: JAX can't compile the GB10 artifact). |
 | [`KvQuantHeterogeneousExample.kt`](KvQuantHeterogeneousExample.kt) | Best-effort FP8 KV-quant across a heterogeneous deployment — H100 / Trainium2 accept, A100 / TPU v5e decline with a structured diagnostic. |
 | [`PopulateBackendMatrixExample.kt`](PopulateBackendMatrixExample.kt) | Run the L3.5 populator across all seven targets, dump the cost-ordered matrix as JSON. The format the runtime side (TlalocPodSpecBuilder) consumes. |
 

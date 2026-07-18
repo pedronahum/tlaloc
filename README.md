@@ -4,6 +4,10 @@
 
 > Pre-alpha. Built in the open; not yet packaged for consumption. See [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) §0.4 for the session-by-session ship log.
 
+## How it fits together
+
+Tlaloc is the **compiler**: Kotlin source → typed IR → StableHLO + per-target kernel decisions. [Netflix Maestro](https://github.com/Netflix/maestro) is the **orchestrator** that runs those compiled programs on Kubernetes. The contract between them is `ProgramManifest`: each `program { }` block produces a `MaestroStep` whose manifest carries a per-(vendor, arch) backend matrix — H100, TPU v5e, Trainium2, CPU fallback, each with its picked kernel and roofline cost. At job-launch time, vendored Maestro reads that matrix and lands the pod on matching hardware. You write Kotlin once; the manifest tells Maestro where to run it.
+
 ---
 
 ## Why
@@ -25,7 +29,7 @@ Tlaloc targets the gap Python frameworks leave open:
 - **Named indices** (Layer 1). `Named<N, A>` lets a tensor's axes carry symbolic names enforced at the type level: `contract(M_x_K, K_x_N)` only compiles when the shared axis name lines up.
 - **Sharding-typed.** Mesh axis names live in the type system. Users annotate a handful of tensors with partition specs; the compiler propagates shardings through the rest of the program and hands off to [Shardy](https://github.com/openxla/shardy)'s propagation passes. DP, TP, EP, ZeRO, and context parallelism are all the same mechanism.
 - **Four-worlds discipline** (Layer 2). `program { }` and `workflow { }` blocks live in `OrchestrationScope`; the body lambda's receiver is `KernelScope` — kernel-only ops compile, orchestration ops don't. `BufferHandle<T, M>` is the only thing that crosses a step boundary.
-- **First-class Maestro step type** (Layer 2.5). Vendored `third-party/maestro/`. Workflows declare `"type": "Tlaloc"` natively; `TlalocStepRuntime` launches a runtime container image and executes via `TlalocRunner`.
+- **First-class Maestro step type** (Layer 2.5). Vendored `third-party/maestro/`. Workflows declare `"type": "Tlaloc"` natively; `TlalocStepRuntime` reads the manifest's `backendMatrix`, builds K8s `nodeSelector` + accelerator hints from the matched row, and executes via `TlalocRunner` inside the runtime container.
 - **Pattern-recognition + per-target kernel registry** (Layer 3). Recognises FlashAttention / RMS norm / RoPE / cross-entropy. Per-(pattern, target) kernel selection across 7 device descriptors (NVIDIA H100/A100, AMD MI300X, Google TPU v4/v5e/v6e, AWS Trainium2). Best-effort KV-quant. Cost-model-driven backend matrix on every manifest.
 - **StableHLO + SDY emission.** We don't write CUDA. We lower to MLIR and let PJRT-backed runtimes (XLA, IREE) codegen.
 
@@ -115,16 +119,23 @@ The matrix becomes part of `ProgramManifest.backendMatrix`. At job-launch time, 
 | Layer 2   | Four worlds + `program { }` + `workflow { }` + `BufferHandle` + Maestro descriptor | shipped     | §0.4.243            |
 | Layer 2.5 | Vendored Maestro + first-class `Tlaloc` step type + `SerializedBufferHandle`     | shipped     | §0.4.249            |
 | Layer 3   | Pattern recognition + VJP coarsening + kernel registry + cost model + KV-quant + backend matrix + pod-spec | **shipped (closure)** | §0.4.260 |
-| Layer 4   | StableHLO emit for COARSENED + sharding-aware custom-calls + cost-driven scheduling + live runtime | not started | —          |
+| Layer 4.1 | StableHLO `custom_call` emit for COARSENED + `kernel_descriptor` lowering              | shipped     | §0.4.261            |
+| Layer 4.x | `:runtime-iree` (CPU + CUDA) + `:runtime-pjrt` (PJRT-XLA via pure-Kotlin FFM); LlamaDecoder forward+backward agrees with PyTorch + JAX on real GPUs | shipped (in flight)     | §0.4.284 → §0.4.324 |
+| Layer 4.5 | Cost-driven scheduling + live Maestro K8s integration end-to-end | not started | —          |
 
-Full suite green at HEAD: **1189 combined tests** (1148 Tlaloc-side + 37 maestro-tlaloc + 4 maestro-common new). See [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) §0.4 for every milestone, [docs/audits/](docs/audits/) for closing audits per layer, and [docs/xatlib_design.md](docs/xatlib_design.md) for the Layer 3 design narrative.
+Full suite green at HEAD: **1395 combined tests** (1354 Tlaloc-side + 37 maestro-tlaloc + 4 maestro-common new). See [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) §0.4 for every milestone, [docs/audits/](docs/audits/) for closing audits per layer, and [docs/xatlib_design.md](docs/xatlib_design.md) for the Layer 3 design narrative.
 
-### What's next (Layer 4)
+### What's landed in Layer 4 (in flight)
 
-- **StableHLO emit for `OpKind.COARSENED` + `kernel_descriptor`.** Materialize `stablehlo.custom_call @flash_attn_v3 {backend_config={...}}` from the L3-annotated COARSENED. Single emit-path change.
+- **StableHLO `custom_call` emit for COARSENED.** Materializes `stablehlo.custom_call @flash_attn_v3 {backend_config={...}}` from L3-annotated COARSENED ops (§0.4.261).
+- **Pattern-coarsener coverage.** RmsNorm, RoPE, CrossEntropy, SwiGLU, TransformerMLP, LayerNorm, and GroupedQueryAttention (MQA + GQA, including Llama-3 8B's `repeat_kv` shape) each ship analytical primal + gradient bodies.
+- **Two real runtimes.** `:runtime-iree` dispatches LlamaDecoder forward+backward on IREE-CPU and IREE-CUDA; `:runtime-pjrt` runs the same workload on PJRT-XLA-CUDA via pure-Kotlin FFM (no JNI, no Python in the dispatch path). Forward+backward agree with `torch.autograd.grad` at PyTorch-allclose tolerances.
+- **Comparison matrix on real hardware.** 6-row × 2-mode benchmark (Tlaloc-IREE-CPU/CUDA, Tlaloc-PJRT-FFM-CUDA, Tlaloc-PJRT-XLA-spike, PyTorch-CPU, JAX-GPU) on the LlamaDecoder. Tlaloc-PJRT-FFM-CUDA lands within ~7% of JAX-GPU.
+
+### What's still missing (Layer 4.5+)
+
 - **Sharding-aware kernel custom-calls.** Plumb SDY mesh axis names through the kernel descriptor's `customCallAttrs` so cross-device attention has a well-typed sharding.
 - **Cost-driven scheduling.** Today's `TlalocPodSpecBuilder` picks rows by `(vendor, arch)` exact match; an L4 scheduler can honor cluster availability + cost policy.
-- **Multi-pattern coarsening.** Adding `coarsenRmsNorm` / `coarsenRope` / `coarsenCrossEntropy` is each new file + one registry entry.
 - **Live K8s integration end-to-end.** Today's L3.6 pod-spec construction is unit-tested; L4 exercises it against a live Maestro instance.
 
 8 audit OQs filed during L3 closure track refinement work — see [`docs/audits/xatlib_kotlin_audit.md`](docs/audits/xatlib_kotlin_audit.md) §15.
@@ -139,13 +150,15 @@ Full suite green at HEAD: **1189 combined tests** (1148 Tlaloc-side + 37 maestro
 | [`stablehlo/`](stablehlo/)                          | StableHLO + Shardy emission; round-trip tests                                       |
 | [`compiler-plugin/`](compiler-plugin/)              | K2 plugin: FIR-to-DXIR lowering + IR-generation extension + synthesis               |
 | [`maestro/`](maestro/)                              | Layer 2 — `program { }` / `workflow { }` builders, `MaestroStep`, `BufferHandle`, `ProgramManifest` + `BackendTarget` (Layer 3.5) |
-| [`benchmarks/`](benchmarks/)                        | JMH benchmarks for the four ported papers (Brachistochrone / HookeanSpring / BGDHyperOpt / etc.) |
+| [`runtime-iree/`](runtime-iree/)                    | Layer 4 — `runOnIree(fn, inputs)` + `IreeRuntime` (CPU + CUDA); subprocess facade over `iree-compile` / `iree-run-module`            |
+| [`runtime-pjrt/`](runtime-pjrt/)                    | Layer 4 — `PjrtSession` + pure-Kotlin FFM bindings to OpenXLA's PJRT C API; in-process GPU dispatch with compile cache               |
+| [`benchmarks/`](benchmarks/)                        | JMH benchmarks for the four ported papers (Brachistochrone / HookeanSpring / BGDHyperOpt / etc.) + LlamaDecoder comparison matrix     |
 | [`third-party/maestro/`](third-party/maestro/)      | Vendored Netflix Maestro + Tlaloc-specific `maestro-tlaloc/` module (Layer 2.5/3.6)  |
 | [`examples/`](examples/)                            | Documentation-grade Kotlin snippets (four-worlds, named-indices, layer3)            |
 
 ## Requirements
 
-- **JDK 21** (since §0.4.244 — single-version unification with vendored Maestro).
+- **JDK 25 LTS** (bumped from 21 in §0.4.311 — stable FFM per JEP 454; dropped `--enable-preview` flag).
 - **Kotlin 2.x** (provided by Gradle wrapper; no host install needed).
 - **macOS** (Apple Silicon recommended) or **Linux**. Windows untested.
 - **External MLIR toolchains** for `:stablehlo` round-trip tests: `stablehlo-translate`, `sdy-opt`, `iree-compile`. Built from source via the bootstrap scripts; pinned to JAX 0.10.0's bundled commits.
@@ -197,7 +210,7 @@ cd tlaloc
 ./gradlew test
 ```
 
-Expected: ~1148 tests passing on the Tlaloc side. To exercise the vendored Maestro tree as well:
+Expected: ~1354 tests passing on the Tlaloc side. To exercise the vendored Maestro tree as well:
 
 ```bash
 ./gradlew test :vendored-maestro:maestro-tlaloc:test
@@ -230,7 +243,7 @@ bash scripts/count-tests.sh        # sums tests= across all JUnit XMLs after a t
 
 ## Build
 
-Single Gradle wrapper drives Tlaloc + vendored Maestro as a composite build. JDK 21 throughout.
+Single Gradle wrapper drives Tlaloc + vendored Maestro as a composite build. JDK 25 LTS throughout.
 
 ```bash
 ./gradlew test                                         # full Tlaloc-side suite (~30 s warm)

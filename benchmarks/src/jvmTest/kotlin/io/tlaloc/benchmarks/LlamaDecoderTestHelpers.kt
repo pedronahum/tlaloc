@@ -1,8 +1,11 @@
 package io.tlaloc.benchmarks
 
 import io.tlaloc.ir.DxirFunction
+import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.ir.recognizer.coarsener.coarsenRecognizedPatterns
 import io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened
+import io.tlaloc.ir.recognizer.kernel.KernelTarget
+import io.tlaloc.ir.recognizer.kernel.lowerKernelChoice
 import io.tlaloc.ir.recognizer.recognizeAll
 
 /**
@@ -15,6 +18,53 @@ internal fun llamaCpuBaselinePipeline(): DxirFunction {
     val raw = LlamaDecoderPrimal.build(LlamaDecoderConfig.tiny)
     val coarsened = coarsenRecognizedPatterns(raw, recognizeAll(raw))
     return decomposeCoarsened(coarsened)
+}
+
+/**
+ * §0.4.325 — kernel-lowering pipeline for [target]. Mirrors
+ * [llamaCpuBaselinePipeline] but inserts [lowerKernelChoice] between
+ * `coarsen` and `decomposeCoarsened`, so COARSENED ops whose pattern has
+ * a registered [io.tlaloc.ir.recognizer.kernel.KernelTemplate] entry for
+ * [target] are stamped with a `kernel_descriptor` attr instead of being
+ * inlined. The StableHLO emitter then materializes those into
+ * `stablehlo.custom_call @<kernelName>(...)` ops.
+ *
+ * Patterns without a kernel-template entry (today: everything except
+ * FlashAttention) still decompose — `lowerKernelChoice` leaves them as
+ * un-annotated COARSENED, then `decomposeCoarsened` inlines them. The
+ * resulting MLIR is a hybrid: one `custom_call` per recognized
+ * FlashAttention region, primitives elsewhere.
+ *
+ * @param config decoder config (tiny / medium / large).
+ * @param target device target whose kernel templates drive the per-COARSENED
+ *   decision. [KernelTarget.CPU_GENERIC] forces every COARSENED to decompose,
+ *   producing the same MLIR as [llamaCpuBaselinePipeline] (the default
+ *   production GPU path today).
+ */
+internal fun llamaKernelLoweredForwardPipeline(
+    config: LlamaDecoderConfig,
+    target: KernelTarget,
+): DxirFunction {
+    val raw = LlamaDecoderPrimal.build(config)
+    val coarsened = coarsenRecognizedPatterns(raw, recognizeAll(raw))
+    val lowered = lowerKernelChoice(coarsened, target)
+    return decomposeCoarsened(lowered)
+}
+
+/**
+ * §0.4.325 — backward-mode parallel of [llamaKernelLoweredForwardPipeline].
+ * Splices the gradient via [DxirReverseTransform] then runs the same
+ * lowerKernelChoice → decomposeCoarsened tail.
+ */
+internal fun llamaKernelLoweredBackwardPipeline(
+    config: LlamaDecoderConfig,
+    target: KernelTarget,
+): DxirFunction {
+    val raw = LlamaDecoderPrimal.build(config)
+    val coarsened = coarsenRecognizedPatterns(raw, recognizeAll(raw))
+    val grad = DxirReverseTransform.apply(coarsened)
+    val lowered = lowerKernelChoice(grad, target)
+    return decomposeCoarsened(lowered)
 }
 
 /**
