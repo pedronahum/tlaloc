@@ -20,12 +20,21 @@ package io.tlaloc.ir.recognizer.kernel
  * @property customCallAttrs additional vendor-specific attributes
  *   passed via `stablehlo.custom_call`'s `backend_config` (e.g.
  *   `softmax_scale`, `is_causal`, `head_dim`). Free-form map.
+ * @property typedFfi KPTX v1.6 (§0.4.332) — when true, StableHLO emit
+ *   targets XLA's **typed FFI** calling convention: the custom_call
+ *   carries `api_version = 4 : i32` and [customCallAttrs] are encoded
+ *   as an `mhlo.backend_config` *dictionary* attribute (typed FFI
+ *   requires a dict; the string `backend_config` form is the untyped
+ *   legacy convention). Set for kernels dispatched through the KPTX
+ *   launch registry (`KptxKernelRegistry`); default false preserves
+ *   the §0.4.261 emit byte-for-byte for existing targets.
  */
 data class KernelDescriptor(
     val kernelName: String,
     val vendor: String,
     val targetArch: String,
     val customCallAttrs: Map<String, Any> = emptyMap(),
+    val typedFfi: Boolean = false,
 ) {
     /**
      * Name of the attribute key the L3.3 lowering pass uses when

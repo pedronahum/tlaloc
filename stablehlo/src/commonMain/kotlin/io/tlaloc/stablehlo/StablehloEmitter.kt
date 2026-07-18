@@ -1322,11 +1322,25 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             node.type.toMlir()
         }
         val lhs = if (node.isMultiResult) "$name:${node.numResults}" else name
-        val backendConfig = encodeBackendConfig(descriptor.customCallAttrs)
-        val attrs = mutableListOf(
-            "backend_config = \"$backendConfig\"",
-            "has_side_effect = false",
-        )
+        val attrs = mutableListOf<String>()
+        if (descriptor.typedFfi) {
+            // KPTX v1.6 §0.4.332 — typed-FFI convention: api_version 4 with
+            // attrs as a `backend_config` *dictionary* attribute (StableHLO's
+            // canonical form for API_VERSION_TYPED_FFI; omitted when empty).
+            // XLA converts the dict into XLA_FFI_Attrs delivered to the
+            // registered handler's call frame. Note: NOT the JAX-lowering
+            // `mhlo.backend_config` discardable-attr spelling — the plugin's
+            // StableHLO import reads the dict from the op's own attr, and
+            // attrs sent via `mhlo.backend_config` arrive empty (verified
+            // against jaxlib 0.10.0 in KptxTypedFfiEmitDispatchTest).
+            attrs += "api_version = 4 : i32"
+            if (descriptor.customCallAttrs.isNotEmpty()) {
+                attrs += "backend_config = {${encodeTypedFfiConfig(descriptor.customCallAttrs)}}"
+            }
+        } else {
+            attrs += "backend_config = \"${encodeBackendConfig(descriptor.customCallAttrs)}\""
+        }
+        attrs += "has_side_effect = false"
         node.sharding?.let { sharding ->
             attrs += "sdy.sharding = #sdy.sharding_per_value<[${sharding.toSdyAttr()}]>"
         }
@@ -1355,6 +1369,38 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         is List<*> -> v.joinToString(", ", "[", "]") { encodeAttrValue(it!!) }
         is Boolean, is Number, is String -> v.toString()
         else -> error("unsupported customCallAttrs value type: ${v::class.simpleName}")
+    }
+
+    /**
+     * KPTX v1.6 §0.4.332 — encode [customCallAttrs] as the *body* of an
+     * `mhlo.backend_config` dictionary attribute for typed-FFI custom
+     * calls. Unlike [encodeBackendConfig]'s free-form string, dictionary
+     * values are typed MLIR attribute literals: ints are `: i64`, floats
+     * `: f32` (doubles `: f64`), strings quoted, booleans bare. XLA turns
+     * these into `XLA_FFI_Attrs` scalars/strings on the handler's call
+     * frame (decoded Kotlin-side by XlaFfi in :runtime-pjrt). Keys sorted
+     * alphabetically for deterministic emit, matching §0.4.261.
+     */
+    private fun encodeTypedFfiConfig(customCallAttrs: Map<String, Any>): String =
+        customCallAttrs.entries
+            .sortedBy { it.key }
+            .joinToString(", ") { (k, v) -> "$k = ${encodeTypedFfiValue(v)}" }
+
+    private fun encodeTypedFfiValue(v: Any): String = when (v) {
+        is Boolean -> v.toString()
+        is Int, is Long -> "$v : i64"
+        is Float -> "${mlirFloatLiteral(v.toString())} : f32"
+        is Double -> "${mlirFloatLiteral(v.toString())} : f64"
+        is String -> "\"$v\""
+        is List<*> -> v.joinToString(", ", "[", "]") { encodeTypedFfiValue(it!!) }
+        else -> error("unsupported typed-FFI customCallAttrs value type: ${v::class.simpleName}")
+    }
+
+    /** Kotlin renders exponents as `1.0E-5`; MLIR float literals use a
+     * lowercase `e`. Also guarantees a decimal point for whole values. */
+    private fun mlirFloatLiteral(s: String): String {
+        val lower = s.lowercase()
+        return if (lower.contains('.') || lower.contains('e')) lower else "$lower.0"
     }
 
     /**
