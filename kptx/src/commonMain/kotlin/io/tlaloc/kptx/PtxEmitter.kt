@@ -77,7 +77,9 @@ private fun StringBuilder.emitKernel(kernel: PtxKernel) {
                         emitOperand(op)
                     }
                 }
-                append(";\n")
+                append(';')
+                stmt.comment?.let { append("    // ").append(it) }
+                append('\n')
             }
             is PtxLabel -> append(stmt.name).append(":\n")
             is PtxComment -> append("    // ").append(stmt.text).append('\n')

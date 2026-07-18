@@ -81,12 +81,15 @@ data class PtxSharedDecl(val align: Int, val name: String, val sizeBytes: Int) :
 
 /**
  * One instruction: uninterpreted dotted [opcode], positional [operands],
- * optional [guard] predicate. `ret;` is `PtxInst("ret")`.
+ * optional [guard] predicate, optional trailing [comment]
+ * (`add.s64 %rd12, %rd6, %rd11;    // x row` — canonical separator is
+ * `;` + four spaces + `// `). `ret;` is `PtxInst("ret")`.
  */
 data class PtxInst(
     val opcode: String,
     val operands: List<PtxOperand> = emptyList(),
     val guard: PtxGuard? = null,
+    val comment: String? = null,
 ) : PtxStmt
 
 /** `@%p1` / `@!%p1` instruction guard. [reg] includes the `%`. */
