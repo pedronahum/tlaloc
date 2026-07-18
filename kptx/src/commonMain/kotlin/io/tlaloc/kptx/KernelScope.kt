@@ -186,7 +186,8 @@ class KernelScope internal constructor(private val name: String) {
      * [f32]/[r64] allocators.
      */
     fun reg(cls: IsaRegClass, index: Int): KReg {
-        require(index >= 1) { "register indices start at 1, got $index" }
+        // §0.4.352 — zero allowed: foreign kernels are often 0-based.
+        require(index >= 0) { "register index must be non-negative, got $index" }
         val current = nextIndex.getOrPut(cls) { 1 }
         if (index >= current) nextIndex[cls] = index + 1
         return KReg("${cls.prefix}$index", cls)
