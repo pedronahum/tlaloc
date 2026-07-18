@@ -28,6 +28,34 @@ internal object KptxTestKernels {
         .specialize(shapes = mapOf("block" to 256))
         .emitPtx()
 
+    /** §0.4.349 — RoPE forward from the :kptx library (SUB-form/cos-first,
+     * the shape [io.tlaloc.ir.recognizer.kernel.RopeKernel] claims). */
+    val ropePtx = KptxKernels.rope.specialize().emitPtx()
+
+    private val registeredRopePlugins = HashSet<Path>()
+
+    /** Register `@kptx_rope` on [pluginPath] exactly once per JVM. */
+    @Synchronized
+    fun ensureRopeRegistered(pluginPath: Path) {
+        if (!registeredRopePlugins.add(pluginPath)) return
+        KptxKernelRegistry.registerKernel(
+            pluginPath,
+            "kptx_rope",
+            KptxKernelRegistry.LaunchConfig(
+                ptx = ropePtx,
+                entryName = "kptx_rope",
+                grid = { args ->
+                    val n = args[0].dims.fold(1L) { a, d -> a * d }.toInt()
+                    KptxKernelRegistry.Dim3((n + 255) / 256)
+                },
+                block = KptxKernelRegistry.Dim3(256),
+                trailingI32Params = { args ->
+                    intArrayOf(args[0].dims.fold(1L) { a, d -> a * d }.toInt())
+                },
+            ),
+        )
+    }
+
     private val registeredPlugins = HashSet<Path>()
 
     /** Register `@kptx_rms_norm` on [pluginPath] exactly once per JVM. */

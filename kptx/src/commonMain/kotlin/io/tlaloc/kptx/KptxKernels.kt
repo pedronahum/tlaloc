@@ -295,6 +295,67 @@ object KptxKernels {
     }
 
     /**
+     * §0.4.349 — RoPE forward, the recognizer's SUB-form/cos-first
+     * recombination (the LlamaDecoder shape):
+     * `out = x_real·cos(θ) − x_imag·sin(θ)`, elementwise. Grid-stride
+     * one-thread-per-element; `n` (total elements) stays a runtime
+     * trailing-i32 scalar. Uses PTX's `cos.approx`/`sin.approx` — the
+     * only sin/cos PTX offers; at RoPE's angle magnitudes the approx
+     * error is ~1e-6 absolute, pinned against the XLA oracle by
+     * KptxRopeKernelTest. Launch signature:
+     * `(x_real_ptr, x_imag_ptr, theta_ptr, out_ptr, n)`.
+     */
+    val rope: PtxKernelTemplate = PtxKernelTemplate("kptx_rope") { _ ->
+        val xrPtr = param(".u64", "x_real_ptr")
+        val xiPtr = param(".u64", "x_imag_ptr")
+        val thPtr = param(".u64", "theta_ptr")
+        val outPtr = param(".u64", "out_ptr")
+        val nP = param(".u32", "n")
+
+        val p1 = pred()
+        val r = List(6) { r32() }
+        val f = List(8) { f32() }
+        val rd = List(13) { r64() }
+
+        inst("ld.param.u64", rd[0], mem(xrPtr))
+        inst("ld.param.u64", rd[1], mem(xiPtr))
+        inst("ld.param.u64", rd[2], mem(thPtr))
+        inst("ld.param.u64", rd[3], mem(outPtr))
+        inst("ld.param.u32", r[0], mem(nP))
+        inst("cvta.to.global.u64", rd[4], rd[0])
+        inst("cvta.to.global.u64", rd[5], rd[1])
+        inst("cvta.to.global.u64", rd[6], rd[2])
+        inst("cvta.to.global.u64", rd[7], rd[3])
+        blank()
+        comment("element index = ctaid * ntid + tid; guard idx < n")
+        inst("mov.u32", r[1], ctaidX)
+        inst("mov.u32", r[2], ntidX)
+        inst("mov.u32", r[3], tidX)
+        inst("mad.lo.u32", r[4], r[1], r[2], r[3])
+        val done = label("DONE")
+        inst("setp.ge.u32", p1, r[4], r[0])
+        inst("bra", done, guard = p1)
+        blank()
+        comment("out = x_real*cos(theta) - x_imag*sin(theta)")
+        inst("mul.wide.u32", rd[8], r[4], imm(4))
+        inst("add.s64", rd[9], rd[6], rd[8])
+        inst("ld.global.f32", f[0], mem(rd[9]), comment = "theta")
+        inst("cos.approx.f32", f[1], f[0])
+        inst("sin.approx.f32", f[2], f[0])
+        inst("add.s64", rd[10], rd[4], rd[8])
+        inst("ld.global.f32", f[3], mem(rd[10]), comment = "x_real")
+        inst("add.s64", rd[11], rd[5], rd[8])
+        inst("ld.global.f32", f[4], mem(rd[11]), comment = "x_imag")
+        inst("mul.f32", f[5], f[3], f[1])
+        inst("mul.f32", f[6], f[4], f[2])
+        inst("sub.f32", f[7], f[5], f[6])
+        inst("add.s64", rd[12], rd[7], rd[8])
+        inst("st.global.f32", mem(rd[12]), f[7])
+        place(done)
+        inst("ret")
+    }
+
+    /**
      * RMS-norm backward, dw half: `dw_j = Σ_i dy_ij·x_ij·inv_rms_i`,
      * consuming the `inv_rms` vector [rmsNormBwdDx] produced (XLA
      * sequences the two custom_calls via the data dependence). One

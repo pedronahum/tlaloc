@@ -201,6 +201,26 @@ val PTX_ISA: Map<String, IsaInstructionSpec> = listOf(
         types = listOf(FLOAT_TYPES),
         operands = listOf(reg(), reg()),
     ),
+    // §0.4.349 — PTX ships only the approx transcendentals (no .rn sin/cos
+    // instruction exists); the `approx` slot is required so the fast-math
+    // grade is visible at every call site.
+    IsaInstructionSpec(
+        "sin",
+        mods = listOf(IsaModifierSlot(setOf("approx")), IsaModifierSlot(setOf("ftz"), required = false)),
+        types = listOf(setOf("f32")),
+        operands = listOf(reg(), reg()),
+    ),
+    IsaInstructionSpec(
+        "cos",
+        mods = listOf(IsaModifierSlot(setOf("approx")), IsaModifierSlot(setOf("ftz"), required = false)),
+        types = listOf(setOf("f32")),
+        operands = listOf(reg(), reg()),
+    ),
+    IsaInstructionSpec(
+        "neg",
+        types = listOf(ALL_TYPES),
+        operands = listOf(reg(), reg()),
+    ),
     IsaInstructionSpec(
         "shr",
         types = listOf(INT_TYPES),

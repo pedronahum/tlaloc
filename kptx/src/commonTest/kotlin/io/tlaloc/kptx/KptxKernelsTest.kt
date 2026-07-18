@@ -17,6 +17,7 @@ class KptxKernelsTest {
         "rmsNormEps" to KptxKernels.rmsNormEps.specialize(shapes = mapOf("block" to 256)),
         "rmsNormBwdDx" to KptxKernels.rmsNormBwdDx.specialize(shapes = mapOf("block" to 256)),
         "rmsNormBwdDw" to KptxKernels.rmsNormBwdDw.specialize(),
+        "rope" to KptxKernels.rope.specialize(),
     )
 
     @Test
