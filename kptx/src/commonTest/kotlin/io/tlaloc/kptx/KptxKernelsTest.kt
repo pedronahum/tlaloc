@@ -18,6 +18,7 @@ class KptxKernelsTest {
         "rmsNormBwdDx" to KptxKernels.rmsNormBwdDx.specialize(shapes = mapOf("block" to 256)),
         "rmsNormBwdDw" to KptxKernels.rmsNormBwdDw.specialize(),
         "rope" to KptxKernels.rope.specialize(),
+        "crossEntropy" to KptxKernels.crossEntropyModule(block = 256),
     )
 
     @Test

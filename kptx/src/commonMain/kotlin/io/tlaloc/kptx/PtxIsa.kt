@@ -221,6 +221,31 @@ val PTX_ISA: Map<String, IsaInstructionSpec> = listOf(
         types = listOf(ALL_TYPES),
         operands = listOf(reg(), reg()),
     ),
+    // §0.4.350 — min/max plus the approx-only exp2/log2 transcendentals
+    // (like sin/cos, PTX offers no .rn variants; natural exp/log are
+    // ex2(x·log2e) / lg2(x)·ln2 with the constants spelled in hex).
+    IsaInstructionSpec(
+        "max",
+        types = listOf(ALL_TYPES),
+        operands = listOf(reg(), reg(), regOrImm()),
+    ),
+    IsaInstructionSpec(
+        "min",
+        types = listOf(ALL_TYPES),
+        operands = listOf(reg(), reg(), regOrImm()),
+    ),
+    IsaInstructionSpec(
+        "ex2",
+        mods = listOf(IsaModifierSlot(setOf("approx")), IsaModifierSlot(setOf("ftz"), required = false)),
+        types = listOf(setOf("f32")),
+        operands = listOf(reg(), reg()),
+    ),
+    IsaInstructionSpec(
+        "lg2",
+        mods = listOf(IsaModifierSlot(setOf("approx")), IsaModifierSlot(setOf("ftz"), required = false)),
+        types = listOf(setOf("f32")),
+        operands = listOf(reg(), reg()),
+    ),
     IsaInstructionSpec(
         "shr",
         types = listOf(INT_TYPES),

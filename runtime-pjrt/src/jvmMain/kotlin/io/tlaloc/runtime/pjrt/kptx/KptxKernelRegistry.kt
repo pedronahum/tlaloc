@@ -66,6 +66,29 @@ object KptxKernelRegistry {
         val trailingI32Params: (args: List<XlaFfi.Buffer>) -> IntArray = { IntArray(0) },
     )
 
+    /**
+     * §0.4.350 — one stage of a launch chain: entry symbol plus its own
+     * grid/block and **buffer selection**. Multi-stage custom_calls
+     * (e.g. cross-entropy's per-row pass then cross-row sum) launch
+     * their stages back-to-back on XLA's stream inside one handler
+     * dispatch — stream order sequences them, and intermediates live in
+     * extra XLA-owned custom_call *results* (never handler-allocated
+     * scratch: framework owns memory, per the standing decision).
+     *
+     * @param paramBuffers which frame buffers this stage's kernel
+     *   params reference, in kernel-signature order (`args` = operands,
+     *   `rets` = results incl. scratch results).
+     */
+    data class Stage(
+        val entryName: String,
+        val grid: (args: List<XlaFfi.Buffer>, rets: List<XlaFfi.Buffer>) -> Dim3,
+        val block: Dim3,
+        val sharedMemBytes: Int = 0,
+        val paramBuffers: (args: List<XlaFfi.Buffer>, rets: List<XlaFfi.Buffer>) -> List<XlaFfi.Buffer>,
+        val trailingI32Params: (args: List<XlaFfi.Buffer>, rets: List<XlaFfi.Buffer>) -> IntArray =
+            { _, _ -> IntArray(0) },
+    )
+
     private val driverArena: Arena = Arena.ofShared()
     private val cuda: CudaDriverFfm by lazy { CudaDriverFfm.load(driverArena) }
 
@@ -74,7 +97,7 @@ object KptxKernelRegistry {
      * live as long as the registration, i.e. the process. */
     private val functionCache = ConcurrentHashMap<Pair<Int, String>, MemorySegment>()
 
-    private val registered = ConcurrentHashMap<Pair<Path, String>, LaunchConfig>()
+    private val registered = ConcurrentHashMap<Pair<Path, String>, Pair<String, List<Stage>>>()
 
     /**
      * Registers [config] under custom-call target [name] on the PJRT
@@ -87,13 +110,36 @@ object KptxKernelRegistry {
      * (plugin, name) throws [IllegalStateException].
      */
     fun registerKernel(pluginPath: Path, name: String, config: LaunchConfig) {
+        registerKernelChain(
+            pluginPath, name, config.ptx,
+            listOf(
+                Stage(
+                    entryName = config.entryName,
+                    grid = { args, _ -> config.grid(args) },
+                    block = config.block,
+                    sharedMemBytes = config.sharedMemBytes,
+                    paramBuffers = { args, rets -> args + rets },
+                    trailingI32Params = { args, _ -> config.trailingI32Params(args) },
+                ),
+            ),
+        )
+    }
+
+    /**
+     * §0.4.350 — register a multi-stage launch chain under custom-call
+     * target [name]: all [stages]' entry symbols live in the one [ptx]
+     * module (the DSL's `ptxModule { }` emits multi-kernel modules);
+     * per dispatch, stages launch back-to-back on XLA's stream.
+     */
+    fun registerKernelChain(pluginPath: Path, name: String, ptx: String, stages: List<Stage>) {
+        require(stages.isNotEmpty()) { "KPTX kernel '$name': empty stage list" }
         val key = pluginPath to name
-        if (registered.putIfAbsent(key, config) != null) {
+        if (registered.putIfAbsent(key, ptx to stages) != null) {
             throw IllegalStateException("KPTX kernel '$name' is already registered for $pluginPath")
         }
         try {
             PjrtFfiRegistry.registerExecuteHandler(pluginPath, name) { framePtr ->
-                dispatch(name, config, framePtr)
+                dispatch(name, ptx, stages, framePtr)
             }
         } catch (t: Throwable) {
             registered.remove(key)
@@ -101,46 +147,53 @@ object KptxKernelRegistry {
         }
     }
 
-    private fun dispatch(name: String, config: LaunchConfig, framePtr: MemorySegment): MemorySegment {
+    private fun dispatch(
+        name: String,
+        ptx: String,
+        stages: List<Stage>,
+        framePtr: MemorySegment,
+    ): MemorySegment {
         val frame = XlaFfi.decode(framePtr)
         return try {
             val stream = frame.streamGet()
-            val function = functionCache.computeIfAbsent(System.identityHashCode(config.ptx) to config.entryName) {
-                val module = cuda.moduleLoadPtx(config.ptx)
-                val fn = cuda.moduleGetFunction(module, config.entryName)
-                if (config.sharedMemBytes > 48 * 1024) {
-                    cuda.funcSetAttribute(
-                        fn, cuda.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, config.sharedMemBytes,
+            for (stage in stages) {
+                val function = functionCache.computeIfAbsent(System.identityHashCode(ptx) to stage.entryName) {
+                    val module = cuda.moduleLoadPtx(ptx)
+                    val fn = cuda.moduleGetFunction(module, stage.entryName)
+                    if (stage.sharedMemBytes > 48 * 1024) {
+                        cuda.funcSetAttribute(
+                            fn, cuda.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, stage.sharedMemBytes,
+                        )
+                    }
+                    fn
+                }
+
+                Arena.ofConfined().use { scoped ->
+                    val buffers = stage.paramBuffers(frame.args, frame.rets)
+                    val scalars = stage.trailingI32Params(frame.args, frame.rets)
+                    val nParams = buffers.size + scalars.size
+                    val params = scoped.allocate(nParams * 8L)
+                    for ((i, buf) in buffers.withIndex()) {
+                        val slot = scoped.allocate(JAVA_LONG).also { it.set(JAVA_LONG, 0L, buf.dataAddress) }
+                        params.set(ADDRESS, i * 8L, slot)
+                    }
+                    for ((i, v) in scalars.withIndex()) {
+                        val slot = scoped.allocate(java.lang.foreign.ValueLayout.JAVA_INT).also {
+                            it.set(java.lang.foreign.ValueLayout.JAVA_INT, 0L, v)
+                        }
+                        params.set(ADDRESS, (buffers.size + i) * 8L, slot)
+                    }
+
+                    val grid = stage.grid(frame.args, frame.rets)
+                    cuda.launchKernel(
+                        function,
+                        grid.x, grid.y, grid.z,
+                        stage.block.x, stage.block.y, stage.block.z,
+                        stage.sharedMemBytes,
+                        stream,
+                        params,
                     )
                 }
-                fn
-            }
-
-            Arena.ofConfined().use { scoped ->
-                val buffers = frame.args + frame.rets
-                val scalars = config.trailingI32Params(frame.args)
-                val nParams = buffers.size + scalars.size
-                val params = scoped.allocate(nParams * 8L)
-                for ((i, buf) in buffers.withIndex()) {
-                    val slot = scoped.allocate(JAVA_LONG).also { it.set(JAVA_LONG, 0L, buf.dataAddress) }
-                    params.set(ADDRESS, i * 8L, slot)
-                }
-                for ((i, v) in scalars.withIndex()) {
-                    val slot = scoped.allocate(java.lang.foreign.ValueLayout.JAVA_INT).also {
-                        it.set(java.lang.foreign.ValueLayout.JAVA_INT, 0L, v)
-                    }
-                    params.set(ADDRESS, (buffers.size + i) * 8L, slot)
-                }
-
-                val grid = config.grid(frame.args)
-                cuda.launchKernel(
-                    function,
-                    grid.x, grid.y, grid.z,
-                    config.block.x, config.block.y, config.block.z,
-                    config.sharedMemBytes,
-                    stream,
-                    params,
-                )
             }
             MemorySegment.NULL
         } catch (t: Throwable) {
