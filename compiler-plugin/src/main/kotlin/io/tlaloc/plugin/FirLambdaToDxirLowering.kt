@@ -857,6 +857,60 @@ object FirLambdaToDxirLowering {
             return emitContract(lhs, rhs, emitter)
         }
 
+        // §0.4.364 — elementwise comparisons (the DiffKT-gap user surface).
+        // `a gt b` lowers to COMPARE(direction):Bool + CAST back to the
+        // operand dtype: the user-visible value is a 0/1 mask matching the
+        // :core host semantics, while XLA still sees a genuine tensor<xi1>
+        // through the intermediate. Can't go through BINARY_OP_MAP — the
+        // direction attr and the Bool intermediate don't fit its
+        // `type = lhs.type` single-op dispatch.
+        COMPARE_DIRECTION_MAP[fqn]?.let { direction ->
+            val lhsExpr = receiver(call)
+                ?: throw LoweringException("comparison '$fqn' has no receiver")
+            val lhs = lowerExpr(lhsExpr, env, emitter)
+            val rhsExpr = call.argumentList.arguments.firstOrNull()
+                ?: throw LoweringException("comparison '$fqn' missing rhs argument")
+            val rhs = lowerExpr(rhsExpr, env, emitter)
+            val cmp = emitter.op(
+                kind = OpKind.COMPARE,
+                operands = listOf(lhs, rhs),
+                type = DxirType(Bool, lhs.type.dims),
+                attrs = mapOf("direction" to direction),
+            )
+            return emitter.op(
+                kind = OpKind.CAST,
+                operands = listOf(cmp),
+                type = DxirType(lhs.type.dtype, lhs.type.dims),
+            )
+        }
+
+        // §0.4.364 — `where(pred, a, b)`: the differentiable routing
+        // primitive. The user-level pred is a 0/1 F32 mask; WHERE's IR
+        // contract wants Bool, so re-derive it via COMPARE(pred ≠ 0) —
+        // XLA folds the round-trip, and the interpreter's Bool encoding
+        // is the same 0f/1f floats either way.
+        if (fqn == "io.tlaloc.core.ops.where") {
+            val args = call.argumentList.arguments
+            if (args.size != 3) {
+                throw LoweringException("where requires 3 arguments (pred, a, b); got ${args.size}")
+            }
+            val pred = lowerExpr(args[0], env, emitter)
+            val a = lowerExpr(args[1], env, emitter)
+            val b = lowerExpr(args[2], env, emitter)
+            val zero = emitter.const(0.0f, pred.type)
+            val boolPred = emitter.op(
+                kind = OpKind.COMPARE,
+                operands = listOf(pred, zero),
+                type = DxirType(Bool, pred.type.dims),
+                attrs = mapOf("direction" to "NE"),
+            )
+            return emitter.op(
+                kind = OpKind.WHERE,
+                operands = listOf(boolPred, a, b),
+                type = a.type,
+            )
+        }
+
         BINARY_OP_MAP[fqn]?.let { kind ->
             val lhsExpr = receiver(call)
                 ?: throw LoweringException("binary op '$fqn' has no receiver")
@@ -1147,6 +1201,20 @@ object FirLambdaToDxirLowering {
     private fun ConeKotlinType.renderForError(): String =
         classId?.asFqNameString() ?: this::class.simpleName ?: "unknown"
 
+    /**
+     * §0.4.364 — `:core/ops` comparison FQN → COMPARE `direction` attr
+     * (stablehlo.compare's spelling). Consumed by the dedicated dispatch
+     * arm (COMPARE + CAST pair), not BINARY_OP_MAP.
+     */
+    private val COMPARE_DIRECTION_MAP: Map<String, String> = mapOf(
+        "io.tlaloc.core.ops.gt" to "GT",
+        "io.tlaloc.core.ops.ge" to "GE",
+        "io.tlaloc.core.ops.lt" to "LT",
+        "io.tlaloc.core.ops.le" to "LE",
+        "io.tlaloc.core.ops.eq" to "EQ",
+        "io.tlaloc.core.ops.ne" to "NE",
+    )
+
     private val BINARY_OP_MAP: Map<String, OpKind> = buildMap {
         for (t in listOf("Float", "Double", "Int", "Long")) {
             put("kotlin.$t.plus", OpKind.ADD)
@@ -1171,6 +1239,17 @@ object FirLambdaToDxirLowering {
         // also rank-2 with sentinel dims (same shape structurally), so the existing
         // `type = lhs.type` dispatch produces the correct DxirType.
         put("io.tlaloc.core.ops.matmul", OpKind.MATMUL)
+        // §0.4.364 — the :core/ops DTensor elementwise operators (HostOps.kt).
+        // Until now only matmul lowered from the tensor operator surface —
+        // `a * b` on same-shape DTensors hit "unsupported call". Elementwise
+        // `type = lhs.type` dispatch is exactly right for these. (The
+        // tensor×Float `times` overload shares this FQN; its scalar rhs now
+        // surfaces as a compile-time shape mismatch instead of the previous
+        // unsupported-call warning + runtime throw.)
+        put("io.tlaloc.core.ops.plus", OpKind.ADD)
+        put("io.tlaloc.core.ops.minus", OpKind.SUB)
+        put("io.tlaloc.core.ops.times", OpKind.MUL)
+        put("io.tlaloc.core.ops.div", OpKind.DIV)
     }
 
     // §0.4.40 — dtype-conversion calls. Maps receiver-only `Int.toFloat()` /

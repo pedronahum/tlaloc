@@ -109,6 +109,58 @@ private fun <S : Shape> DTensor<S, F32>.unary(f: (Float) -> Float): DTensor<S, F
     return DTensor(HostF32Storage(out), dims.copyOf(), F32)
 }
 
+/**
+ * §0.4.364 — elementwise comparisons producing a 0/1 F32 mask (the
+ * DiffKT-gap user surface for `grad {}` lambdas). The host surface stays
+ * all-F32 — there is no `DTensor<S, Bool>` host type; masks are 1f/0f,
+ * matching the IR's Bool encoding. The K2 plugin lowers these to
+ * `COMPARE(direction)` + `CAST` so the same lambda runs on XLA with a
+ * genuine `tensor<xi1>` intermediate. Non-differentiable (piecewise
+ * constant — CompareRule's zero adjoint), but fully differentiable
+ * *through* when routed with [where].
+ */
+infix fun <S : Shape> DTensor<S, F32>.gt(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(this, other) { x, y -> if (x > y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.ge(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(this, other) { x, y -> if (x >= y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.lt(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(this, other) { x, y -> if (x < y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.le(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(this, other) { x, y -> if (x <= y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.eq(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(this, other) { x, y -> if (x == y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.ne(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(this, other) { x, y -> if (x != y) 1f else 0f }
+
+/**
+ * §0.4.364 — elementwise select: `where(pred, a, b)[i] = if (pred[i] != 0)
+ * a[i] else b[i]`. [pred] is a 0/1 F32 mask (usually from [gt] and
+ * friends). The differentiable routing primitive: gradients flow to [a]
+ * where the mask holds and to [b] elsewhere (WhereRule); [pred] gets
+ * none. Lowered by the K2 plugin to `stablehlo.select` via
+ * `OpKind.WHERE`.
+ */
+fun <S : Shape> where(
+    pred: DTensor<S, F32>,
+    a: DTensor<S, F32>,
+    b: DTensor<S, F32>,
+): DTensor<S, F32> {
+    require(pred.dims.contentEquals(a.dims) && a.dims.contentEquals(b.dims)) {
+        "where shape mismatch: pred=${pred.dims.toList()} a=${a.dims.toList()} b=${b.dims.toList()}"
+    }
+    val p = pred.hostF32()
+    val av = a.hostF32()
+    val bv = b.hostF32()
+    val out = FloatArray(av.size)
+    for (i in out.indices) out[i] = if (p[i] != 0f) av[i] else bv[i]
+    return DTensor(HostF32Storage(out), a.dims.copyOf(), F32)
+}
+
 fun <S : Shape> DTensor<S, F32>.sigmoid(): DTensor<S, F32> =
     unary { x -> 1f / (1f + kotlin.math.exp(-x)) }
 

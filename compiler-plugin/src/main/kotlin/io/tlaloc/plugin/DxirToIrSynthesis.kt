@@ -159,7 +159,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         operandIrTypes: Map<Int, IrType>,
         @Suppress("UNUSED_PARAMETER") fallback: IrType?,
     ): IrType? {
-        if (op.type.dtype != F32 || op.type.rank != 2) return null
+        // §0.4.364 — COMPARE is Bool-typed at the IR level but its runtime
+        // value is the operands' F32 mask, so it propagates like elementwise.
+        if (op.type.rank != 2) return null
+        if (op.type.dtype != F32 && op.op != OpKind.COMPARE) return null
         return when (op.op) {
             OpKind.TRANSPOSE -> {
                 if (op.operands.size != 1) return null
@@ -198,6 +201,23 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[0].id]
                     ?: operandIrTypes[op.operands[1].id]
+            }
+            // §0.4.364 — comparison surface: COMPARE's runtime mask carries the
+            // operands' DTensor IrType; tensor CAST is a runtime identity; WHERE
+            // takes its branches' IrType.
+            OpKind.COMPARE -> {
+                if (op.operands.size != 2) return null
+                operandIrTypes[op.operands[0].id]
+                    ?: operandIrTypes[op.operands[1].id]
+            }
+            OpKind.CAST -> {
+                if (op.operands.size != 1) return null
+                operandIrTypes[op.operands[0].id]
+            }
+            OpKind.WHERE -> {
+                if (op.operands.size != 3) return null
+                operandIrTypes[op.operands[1].id]
+                    ?: operandIrTypes[op.operands[2].id]
             }
             else -> null
         }
@@ -456,7 +476,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
         }
         for (n in fn.body) {
-            if (!n.type.isScalar && !isAcceptedTensorType(n.type)) {
+            // §0.4.364 — Bool tensor nodes (COMPARE and its consumers) are in
+            // scope: the synthesis represents them as 0/1 F32 masks (see
+            // [irCompare] / [irWhere] / [irCast]'s tensor arm).
+            val boolTensorInScope = n.type.dtype == Bool && n.type.rank in 1..3
+            if (!n.type.isScalar && !isAcceptedTensorType(n.type) && !boolTensorInScope) {
                 val opKind = (n as? DxirOp)?.op?.name ?: n::class.simpleName
                 return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1-3 F32 scope")
             }
@@ -854,6 +878,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.COS) return irCos(op, env, context)
         if (op.op == OpKind.ABS) return irAbs(op, env, context)
         if (op.op == OpKind.CAST) return irCast(op, env, context)
+        if (op.op == OpKind.COMPARE) return irCompare(op, env, context)
+        if (op.op == OpKind.WHERE) return irWhere(op, env, context)
         if (op.op == OpKind.GATHER) return irGather(op, env, context)
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
@@ -1621,7 +1647,20 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         if (op.operands.size != 1) return null
-        if (!op.type.isScalar || !op.operands[0].type.isScalar) return null
+        // §0.4.364 — tensor CAST Bool→F32 (the comparison surface's mask
+        // materialisation) is an identity at runtime: synthesis represents
+        // Bool tensors as 0/1 F32 DTensors already ([irCompare] returns the
+        // :core mask directly), so the cast forwards the operand's value.
+        if (!op.type.isScalar) {
+            val src = op.operands[0].type
+            if (src.dims != op.type.dims) return null
+            if (!((src.dtype == Bool && op.type.dtype == F32) || src.dtype == op.type.dtype)) {
+                return null
+            }
+            val operandDecl = env[op.operands[0].id] ?: return null
+            return irGet(operandDecl)
+        }
+        if (!op.operands[0].type.isScalar) return null
         val operandDecl = env[op.operands[0].id] ?: return null
         val srcDtype = op.operands[0].type.dtype
         val dstDtype = op.type.dtype
@@ -1637,6 +1676,93 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // `Int.toFloat()` etc. have exactly one parameter — the dispatch receiver.
         call.arguments[0] = irGet(operandDecl)
         return call
+    }
+
+    /**
+     * §0.4.364 — `OpKind.COMPARE(a, b)` with a `direction` attr → IrCall to the
+     * matching `:core/ops` comparison extension (`gt`/`ge`/`lt`/`le`/`eq`/`ne`,
+     * HostOps.kt). The IR-level result is Bool; the runtime value is the 0/1 F32
+     * mask those extensions return — the synthesis-wide convention for Bool
+     * tensors (see [irCast]'s tensor arm and [irWhere]).
+     */
+    private fun IrBuilderWithScope.irCompare(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        val fnName = when (op.attrs["direction"] as? String) {
+            "GT" -> "gt"; "GE" -> "ge"; "LT" -> "lt"
+            "LE" -> "le"; "EQ" -> "eq"; "NE" -> "ne"
+            else -> return null
+        }
+        if (!isAcceptedTensorType(op.operands[0].type)) return null
+        val lhsDecl = env[op.operands[0].id] ?: return null
+        val rhsDecl = env[op.operands[1].id] ?: return null
+        val lhsIrType = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
+        val shapeArg = lhsIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val sym = coreOpsSymbol(fnName) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = lhsIrType,
+            symbol = sym,
+        )
+        // `infix fun <S : Shape> DTensor<S, F32>.gt(other): DTensor<S, F32>` —
+        // extension receiver at arguments[0], one regular param at [1].
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = shapeArg
+        }
+        call.arguments[0] = irGet(lhsDecl)
+        call.arguments[1] = irGet(rhsDecl)
+        return call
+    }
+
+    /**
+     * §0.4.364 — `OpKind.WHERE(pred, a, b)` → IrCall to
+     * `io.tlaloc.core.ops.where` (top-level, HostOps.kt). Emitted both by the
+     * forward lowering of user `where(...)` calls and by WhereRule's adjoint
+     * (which routes the upstream through the same mask). `pred`'s runtime value
+     * is the F32 mask per the Bool-as-F32 synthesis convention.
+     */
+    private fun IrBuilderWithScope.irWhere(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 3) return null
+        if (!isAcceptedTensorType(op.type)) return null
+        val predDecl = env[op.operands[0].id] ?: return null
+        val aDecl = env[op.operands[1].id] ?: return null
+        val bDecl = env[op.operands[2].id] ?: return null
+        val aIrType = (irTypeForNode(op.operands[1], context) as? IrSimpleType)
+            ?: (irTypeFor(op.type, context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = aIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val sym = coreOpsSymbol("where") ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = aIrType,
+            symbol = sym,
+        )
+        // `fun <S : Shape> where(pred, a, b)`: top-level, three regular params.
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = shapeArg
+        }
+        call.arguments[0] = irGet(predDecl)
+        call.arguments[1] = irGet(aDecl)
+        call.arguments[2] = irGet(bDecl)
+        return call
+    }
+
+    /** Resolves a uniquely-named top-level/extension function in `io.tlaloc.core.ops`. */
+    private fun coreOpsSymbol(name: String): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier(name),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
     /**
