@@ -29,10 +29,15 @@ reachable from `grad {}`, not new math. New-op families come after.
 
 ### Phase A — user-surface completion (IR is ready; lowering/synthesis work)
 
-- **A1. Axis-wise reductions**: `sum(dims, keepDims)` / `mean(dims)` /
-  `max(dims)` / `min(dims)` user ops → the existing `reduction_dims`-attr'd
-  IR. (DiffKT: `sum(axes, keepDims)`.) MeanRule today is full-reduce-only —
-  needs the keepdims arm.
+- **A1. Axis-wise reductions** ✅ (§0.4.366): `sum(dims, keepDims)` /
+  `mean(dims)` / `max(dims)` / `min(dims)` user ops → the existing
+  `reduction_dims`-attr'd IR, squeezed AND keepdims shapes, E2E through
+  `grad {}`. Landed along the way: MEAN interpreter arm, sentinel-safe
+  MeanRule (runtime-N graph), type-aware CSE in the reverse transform
+  (result types joined the dedup key — a latent wrong-shape bug), the
+  synthesis reduction/unsqueeze/stretch arms + backward IrType solve for
+  mixed-rank gradient bodies. v1 scope: 1–2 axes from `grad {}` (the
+  fixed-arity synthesis delegates); IR level is fully general.
 - **A2. Shape ops in lambdas**: `reshape`, `transpose(perm)`, `concat`,
   `slice`, `pad`, `stack` (sugar over CONCAT+RESHAPE), `squeeze`/`unsqueeze`
   (sugar over RESHAPE), `broadcastTo`. All have VJPs + evals + emitter

@@ -271,9 +271,20 @@ object DxirForwardTransform {
             OpKind.MAX, OpKind.MIN -> {
                 // Route the tangent through the extremum mask, then reduce.
                 // Ties get full weight (the VJP MaxRule convention).
+                // §0.4.366 — axis reductions that squeeze the reduced axes
+                // RESHAPE the primal output to the keepdims spelling first, so
+                // the interpreter's equal-rank stretch BROADCAST arm applies
+                // (mirrors VjpRegistry.reshapeToKeepdims).
                 val x = node.operands[0]
                 val bcast = mapOf("broadcast_dimensions" to emptyList<Int>())
-                val yB = b.op(OpKind.BROADCAST, listOf(v), x.type, attrs = bcast)
+                val rd = (node.attrs["reduction_dims"] as? List<*>)
+                    ?.map { (it as Number).toInt() }
+                    ?.takeIf { it.isNotEmpty() }
+                val vK = if (rd == null || v.type.isScalar || v.type.rank == x.type.rank) v else b.op(
+                    OpKind.RESHAPE, listOf(v),
+                    DxirType(ty.dtype, x.type.dims.mapIndexed { i, d -> if (i in rd) 1 else d }),
+                )
+                val yB = b.op(OpKind.BROADCAST, listOf(vK), x.type, attrs = bcast)
                 val diff = if (node.op == OpKind.MAX) {
                     b.op(OpKind.SUB, listOf(yB, vOps[0]), x.type)
                 } else {

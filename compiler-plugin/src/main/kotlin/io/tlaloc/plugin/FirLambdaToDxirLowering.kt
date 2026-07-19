@@ -22,6 +22,8 @@ import org.jetbrains.kotlin.fir.expressions.FirComparisonExpression
 import org.jetbrains.kotlin.fir.expressions.FirExpression
 import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirLiteralExpression
+import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
+import org.jetbrains.kotlin.fir.expressions.FirVarargArgumentsExpression
 import org.jetbrains.kotlin.types.ConstantValueKind
 import org.jetbrains.kotlin.fir.expressions.FirOperation
 import org.jetbrains.kotlin.fir.expressions.FirPropertyAccessExpression
@@ -925,6 +927,80 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.366 — axis-wise reductions (DiffKT parity, Phase A1):
+        // `x.sum(1)`, `x.mean(0, keepDims = true)`, `x.max(0, 1)`. The vararg
+        // axis arguments and the `keepDims` flag must be compile-time literals;
+        // they fold into the op's `reduction_dims` attr and its result
+        // [DxirType] here — the IR carries the exact reduced shape even though
+        // the host-side Kotlin return type erases to `Shape`. No-arg calls
+        // fall through to the UNARY_OP_MAP full-reduce arm below. There is
+        // deliberately no `keep_dims` attr: keepdims-vs-squeeze is expressed
+        // structurally by the result type (the emitter's `resolveReduceShape`
+        // and the interpreter both disambiguate by rank — the established
+        // §0.4.359 convention).
+        REDUCE_OP_MAP[fqn]?.let { kind ->
+            val args = call.argumentList.arguments
+            if (args.isNotEmpty()) {
+                val operandExpr = receiver(call)
+                    ?: throw LoweringException("reduction '$fqn' has no receiver")
+                val operand = lowerExpr(operandExpr, env, emitter)
+                val rank = operand.type.rank
+                val dims = mutableListOf<Int>()
+                var keepDims = false
+                for (arg in args) {
+                    when {
+                        arg is FirVarargArgumentsExpression ->
+                            for (e in arg.arguments) {
+                                dims += intLiteralArg(e) ?: throw LoweringException(
+                                    "reduction '$fqn' axis arguments must be integer literals",
+                                )
+                            }
+                        arg is FirNamedArgumentExpression -> {
+                            val inner = arg.expression
+                            if (inner is FirLiteralExpression && inner.kind == ConstantValueKind.Boolean) {
+                                keepDims = inner.value as Boolean
+                            } else {
+                                throw LoweringException(
+                                    "reduction '$fqn' keepDims must be a Boolean literal",
+                                )
+                            }
+                        }
+                        arg is FirLiteralExpression && arg.kind == ConstantValueKind.Boolean ->
+                            keepDims = arg.value as Boolean
+                        else -> {
+                            dims += intLiteralArg(arg) ?: throw LoweringException(
+                                "reduction '$fqn' axis arguments must be integer literals",
+                            )
+                        }
+                    }
+                }
+                if (dims.isEmpty()) {
+                    throw LoweringException("reduction '$fqn' requires at least one axis argument")
+                }
+                val normalized = dims.map { d ->
+                    val a = if (d < 0) d + rank else d
+                    if (a !in 0 until rank) {
+                        throw LoweringException("reduction '$fqn' axis $d out of range for rank $rank")
+                    }
+                    a
+                }.sorted()
+                if (normalized.toSet().size != normalized.size) {
+                    throw LoweringException("reduction '$fqn' has duplicate axes $dims")
+                }
+                val resultDims = if (keepDims) {
+                    operand.type.dims.mapIndexed { i, d -> if (i in normalized) 1 else d }
+                } else {
+                    operand.type.dims.filterIndexed { i, _ -> i !in normalized }
+                }
+                return emitter.op(
+                    kind = kind,
+                    operands = listOf(operand),
+                    type = DxirType(operand.type.dtype, resultDims),
+                    attrs = mapOf("reduction_dims" to normalized),
+                )
+            }
+        }
+
         UNARY_OP_MAP[fqn]?.let { kind ->
             val operandExpr = receiver(call)
                 ?: throw LoweringException("unary op '$fqn' has no receiver")
@@ -934,7 +1010,8 @@ object FirLambdaToDxirLowering {
             // second OP_MAP) matches the BINARY_OP_MAP convention: the receiver side
             // inspects only the `kind`, never the FQN itself.
             val resultType = when (kind) {
-                OpKind.SUM, OpKind.MEAN -> DxirType(operand.type.dtype, emptyList())
+                OpKind.SUM, OpKind.MEAN, OpKind.MAX, OpKind.MIN ->
+                    DxirType(operand.type.dtype, emptyList())
                 else -> operand.type
             }
             return emitter.op(
@@ -949,6 +1026,29 @@ object FirLambdaToDxirLowering {
 
     private fun receiver(call: FirFunctionCall): FirExpression? =
         call.dispatchReceiver ?: call.extensionReceiver
+
+    /**
+     * §0.4.366 — constant-fold an integer axis argument. Accepts a plain
+     * integer literal or the FIR spelling of a negative literal (`-1` resolves
+     * to `1.unaryMinus()` — a [FirFunctionCall] over a literal receiver).
+     * Returns null for anything non-constant; callers turn that into a
+     * [LoweringException] naming the reduction.
+     */
+    private fun intLiteralArg(expr: FirExpression): Int? {
+        if (expr is FirLiteralExpression && expr.value is Number) {
+            return (expr.value as Number).toInt()
+        }
+        if (expr is FirFunctionCall) {
+            val id = expr.calleeReference.toResolvedCallableSymbol()?.callableId
+            if (id?.callableName?.asString() == "unaryMinus") {
+                val rec = expr.dispatchReceiver ?: expr.extensionReceiver
+                if (rec is FirLiteralExpression && rec.value is Number) {
+                    return -(rec.value as Number).toInt()
+                }
+            }
+        }
+        return null
+    }
 
     /**
      * Layer 1 §0.4.241+ + Layer 1.5 §0.4.242+ — emit a [OpKind.MATMUL] (or
@@ -1320,8 +1420,26 @@ object FirLambdaToDxirLowering {
         put("io.tlaloc.core.ops.sqrt", OpKind.SQRT)
         // :core DTensor reductions (io.tlaloc.core.ops package). These collapse all
         // operand dims to scalar — special-cased in the unary-lowering arm above.
+        // §0.4.366 — mean/max/min join sum (mean's absence was an audit-flagged
+        // orphan: the dispatch arm handled MEAN but no FQN mapped to it).
         put("io.tlaloc.core.ops.sum", OpKind.SUM)
+        put("io.tlaloc.core.ops.mean", OpKind.MEAN)
+        put("io.tlaloc.core.ops.max", OpKind.MAX)
+        put("io.tlaloc.core.ops.min", OpKind.MIN)
     }
+
+    /**
+     * §0.4.366 — the axis-reduction user surface (Phase A1). Calls WITH axis
+     * arguments dispatch through the REDUCE_OP_MAP arm (literal axes →
+     * `reduction_dims` attr + exact result type); no-arg calls fall through
+     * to UNARY_OP_MAP's full-reduce-to-scalar arm.
+     */
+    private val REDUCE_OP_MAP: Map<String, OpKind> = mapOf(
+        "io.tlaloc.core.ops.sum" to OpKind.SUM,
+        "io.tlaloc.core.ops.mean" to OpKind.MEAN,
+        "io.tlaloc.core.ops.max" to OpKind.MAX,
+        "io.tlaloc.core.ops.min" to OpKind.MIN,
+    )
 
     private val PRIMITIVE_DTYPE_MAP: Map<String, DType> = mapOf(
         "kotlin/Float" to F32,

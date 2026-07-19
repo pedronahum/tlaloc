@@ -468,7 +468,7 @@ object DxirReverseTransform {
         // CSE consts too — adjoint emission produces many duplicate const literals
         // (e.g., const 2.0f in multiple SqrtRule adjoints). Signature = (value, type).
         val const2canon = HashMap<Pair<Any, DxirType>, DxirConst>()
-        val sig2canon = HashMap<Triple<OpKind, List<Int>, Map<String, Any>>, DxirNode>()
+        val sig2canon = HashMap<CseSig, DxirNode>()
         val newBody = mutableListOf<DxirNode>()
         var mutated = false
         for (n in fn.body) {
@@ -492,10 +492,26 @@ object DxirReverseTransform {
      * [byId]; canonical entries are registered in [sig2canon] / [const2canon].
      * Callers that need to scope these maps to a sub-region should pass copies.
      */
+    /**
+     * §0.4.366 — CSE signature. `types` is part of the key: two ops with
+     * identical (kind, operands, attrs) can still differ in RESULT TYPE —
+     * BROADCAST is the archetype (the same scalar seed splat to two different
+     * shapes carries `broadcast_dimensions=[]` both times). Pre-§0.4.366 the
+     * key was (kind, operands, attrs) only, and MeanRule's runtime-N `ones`
+     * broadcast deduplicated onto the rank-1 upstream splat — a wrong-shape
+     * gradient caught by the Phase A1 E2E test.
+     */
+    private data class CseSig(
+        val op: OpKind,
+        val operandIds: List<Int>,
+        val attrs: Map<String, Any>,
+        val types: List<DxirType>,
+    )
+
     private fun cseNode(
         n: DxirNode,
         byId: HashMap<Int, DxirNode>,
-        sig2canon: HashMap<Triple<OpKind, List<Int>, Map<String, Any>>, DxirNode>,
+        sig2canon: HashMap<CseSig, DxirNode>,
         const2canon: HashMap<Pair<Any, DxirType>, DxirConst>,
     ): Pair<DxirNode?, Boolean> {
         return when (n) {
@@ -526,7 +542,7 @@ object DxirReverseTransform {
                 } else {
                     val canonicalOperands = n.operands.map { byId[it.id] ?: it }
                     val opIds = canonicalOperands.map { it.id }
-                    val sig = Triple(n.op, opIds, n.attrs)
+                    val sig = CseSig(n.op, opIds, n.attrs, n.types)
                     val existing = sig2canon[sig]
                     if (existing != null) {
                         byId[n.id] = existing
@@ -581,7 +597,7 @@ object DxirReverseTransform {
     private fun cseRegionBearingOp(
         n: DxirOp,
         outerById: HashMap<Int, DxirNode>,
-        outerSig2canon: HashMap<Triple<OpKind, List<Int>, Map<String, Any>>, DxirNode>,
+        outerSig2canon: HashMap<CseSig, DxirNode>,
         outerConst2canon: HashMap<Pair<Any, DxirType>, DxirConst>,
     ): Pair<DxirNode?, Boolean> {
         val canonicalOperands = n.operands.map { outerById[it.id] ?: it }
@@ -653,7 +669,7 @@ object DxirReverseTransform {
     private fun cseRegion(
         region: DxirRegion,
         outerById: Map<Int, DxirNode>,
-        outerSig2canon: HashMap<Triple<OpKind, List<Int>, Map<String, Any>>, DxirNode>,
+        outerSig2canon: HashMap<CseSig, DxirNode>,
         outerConst2canon: HashMap<Pair<Any, DxirType>, DxirConst>,
     ): Pair<DxirRegion, Boolean> {
         var anyMutated = false

@@ -347,6 +347,233 @@ fun <S : Shape> DTensor<S, F32>.mean(): DTensor<ScalarShape, F32> {
 }
 
 /**
+ * §0.4.366 — axis-wise reduction engine (DiffKT parity, Phase A1: DiffKT's
+ * `sum(vararg axes: Int, keepDims: Boolean)` family). Reduces [x] over the
+ * axes in [dims] (negative axes count from the back), accumulating with [acc]
+ * from [init]; [finish] maps (accumulated, reducedElementCount) → output
+ * element (mean divides, sum/max/min pass through). `keepDims = true` keeps
+ * the reduced axes as size-1; `false` drops them (rank shrinks). Row-major
+ * stride walk, matching the dxir interpreter's SUM/MEAN/MAX/MIN evals so the
+ * host path and the IR path agree bit-for-bit on iteration order.
+ */
+private fun <S : Shape> reduceOver(
+    x: DTensor<S, F32>,
+    dims: IntArray,
+    keepDims: Boolean,
+    init: Float,
+    acc: (Float, Float) -> Float,
+    finish: (Float, Int) -> Float = { a, _ -> a },
+): DTensor<Shape, F32> {
+    val r = x.dims.size
+    require(dims.isNotEmpty()) { "reduceOver: empty axis list (use the no-arg full reduction)" }
+    val reduced = BooleanArray(r)
+    for (d in dims) {
+        val a = if (d < 0) d + r else d
+        require(a in 0 until r) { "reduceOver: axis $d out of range for rank $r" }
+        require(!reduced[a]) { "reduceOver: duplicate axis $d" }
+        reduced[a] = true
+    }
+    val keepShape = IntArray(r) { if (reduced[it]) 1 else x.dims[it] }
+    var n = 1
+    for (i in 0 until r) if (reduced[i]) n *= x.dims[i]
+    var outSize = 1
+    for (d in keepShape) outSize *= d
+    val inStrides = IntArray(r)
+    val outStrides = IntArray(r)
+    var si = 1
+    var so = 1
+    for (i in r - 1 downTo 0) {
+        inStrides[i] = si
+        si *= x.dims[i]
+        outStrides[i] = so
+        so *= keepShape[i]
+    }
+    val v = x.hostF32()
+    val out = FloatArray(outSize) { init }
+    for (li in v.indices) {
+        var rem = li
+        var oi = 0
+        for (i in 0 until r) {
+            val idx = rem / inStrides[i]
+            rem %= inStrides[i]
+            if (!reduced[i]) oi += idx * outStrides[i]
+        }
+        out[oi] = acc(out[oi], v[li])
+    }
+    for (i in out.indices) out[i] = finish(out[i], n)
+    val outDims = if (keepDims) keepShape else {
+        var k = 0
+        val squeezed = IntArray(r - dims.size)
+        for (i in 0 until r) if (!reduced[i]) squeezed[k++] = x.dims[i]
+        squeezed
+    }
+    return DTensor(HostF32Storage(out), outDims, F32)
+}
+
+/**
+ * §0.4.366 — axis-wise reductions, the DiffKT `sum(axes, keepDims)` user
+ * surface (Phase A1). The result's shape type is erased to [Shape]: the
+ * output dims depend on the runtime axis list, which Kotlin's phantom shape
+ * typing cannot express per-overload. Inside `grad {}` the K2 plugin computes
+ * the exact `DxirType` from the operand's dims and the constant axis
+ * arguments, so the IR stays precisely shaped; only the host-side Kotlin
+ * static type widens. The no-arg overloads above keep their `ScalarShape`.
+ */
+fun <S : Shape> DTensor<S, F32>.sum(vararg dims: Int, keepDims: Boolean = false): DTensor<Shape, F32> =
+    reduceOver(this, dims, keepDims, 0f, { a, b -> a + b })
+
+fun <S : Shape> DTensor<S, F32>.mean(vararg dims: Int, keepDims: Boolean = false): DTensor<Shape, F32> =
+    reduceOver(this, dims, keepDims, 0f, { a, b -> a + b }, { a, n -> a / n })
+
+fun <S : Shape> DTensor<S, F32>.max(vararg dims: Int, keepDims: Boolean = false): DTensor<Shape, F32> =
+    reduceOver(this, dims, keepDims, Float.NEGATIVE_INFINITY, { a, b -> if (b > a) b else a })
+
+fun <S : Shape> DTensor<S, F32>.min(vararg dims: Int, keepDims: Boolean = false): DTensor<Shape, F32> =
+    reduceOver(this, dims, keepDims, Float.POSITIVE_INFINITY, { a, b -> if (b < a) b else a })
+
+/** §0.4.366 — full-reduce extremum companions to [sum]/[mean] (DiffKT defaults `axes = allAxes`). */
+fun <S : Shape> DTensor<S, F32>.max(): DTensor<ScalarShape, F32> {
+    val v = hostF32()
+    require(v.isNotEmpty()) { "max: empty tensor" }
+    var m = Float.NEGATIVE_INFINITY
+    for (x in v) if (x > m) m = x
+    return DTensor(HostF32Storage(floatArrayOf(m)), intArrayOf(), F32)
+}
+
+fun <S : Shape> DTensor<S, F32>.min(): DTensor<ScalarShape, F32> {
+    val v = hostF32()
+    require(v.isNotEmpty()) { "min: empty tensor" }
+    var m = Float.POSITIVE_INFINITY
+    for (x in v) if (x < m) m = x
+    return DTensor(HostF32Storage(floatArrayOf(m)), intArrayOf(), F32)
+}
+
+/**
+ * §0.4.366 — fixed-arity synthesis delegates for the axis reductions, one per
+ * (kind, axis-count) pair. Same reason as [broadcastDimsRank1] (§0.4.197):
+ * the K2 synthesis cannot build `IrVararg` nodes, so `DxirToIrSynthesis`
+ * emits calls to these with plain `Int` + `Boolean` const arguments read off
+ * the dxir op's `reduction_dims` attr and result type. Runtime semantics are
+ * identical to the vararg user surface above.
+ */
+fun <S : Shape> sumOver1(x: DTensor<S, F32>, d0: Int, keepDims: Boolean): DTensor<Shape, F32> =
+    x.sum(d0, keepDims = keepDims)
+
+fun <S : Shape> sumOver2(x: DTensor<S, F32>, d0: Int, d1: Int, keepDims: Boolean): DTensor<Shape, F32> =
+    x.sum(d0, d1, keepDims = keepDims)
+
+fun <S : Shape> meanOver1(x: DTensor<S, F32>, d0: Int, keepDims: Boolean): DTensor<Shape, F32> =
+    x.mean(d0, keepDims = keepDims)
+
+fun <S : Shape> meanOver2(x: DTensor<S, F32>, d0: Int, d1: Int, keepDims: Boolean): DTensor<Shape, F32> =
+    x.mean(d0, d1, keepDims = keepDims)
+
+fun <S : Shape> maxOver1(x: DTensor<S, F32>, d0: Int, keepDims: Boolean): DTensor<Shape, F32> =
+    x.max(d0, keepDims = keepDims)
+
+fun <S : Shape> maxOver2(x: DTensor<S, F32>, d0: Int, d1: Int, keepDims: Boolean): DTensor<Shape, F32> =
+    x.max(d0, d1, keepDims = keepDims)
+
+fun <S : Shape> minOver1(x: DTensor<S, F32>, d0: Int, keepDims: Boolean): DTensor<Shape, F32> =
+    x.min(d0, keepDims = keepDims)
+
+fun <S : Shape> minOver2(x: DTensor<S, F32>, d0: Int, d1: Int, keepDims: Boolean): DTensor<Shape, F32> =
+    x.min(d0, d1, keepDims = keepDims)
+
+/**
+ * §0.4.366 — stretch broadcast: tile [x] (whose dims must each be 1 or equal
+ * the target) up to the target dims. This is the host twin of the dxir
+ * interpreter's keepdims-stretch BROADCAST arm — the shape the reduction
+ * VJP rules emit when un-reducing an upstream back over the reduced axes
+ * (`RESHAPE to keepdims` → `BROADCAST stretch to x.dims`). The splat helper
+ * [broadcastDims] fills a constant; this tiles a tensor — different op.
+ * Fixed-arity rank delegates below for the same IrVararg reason as
+ * [broadcastDimsRank1].
+ */
+private fun <S : Shape> stretchTo(x: DTensor<*, F32>, target: IntArray): DTensor<S, F32> {
+    val r = target.size
+    require(x.dims.size == r) {
+        "stretchTo: rank mismatch ${x.dims.toList()} vs ${target.toList()} (reshape to keepdims first)"
+    }
+    for (i in 0 until r) require(x.dims[i] == 1 || x.dims[i] == target[i]) {
+        "stretchTo: dim $i is ${x.dims[i]}, target ${target[i]} (must be 1 or equal)"
+    }
+    val inStrides = IntArray(r)
+    val outStrides = IntArray(r)
+    var si = 1
+    var so = 1
+    for (i in r - 1 downTo 0) {
+        inStrides[i] = si
+        si *= x.dims[i]
+        outStrides[i] = so
+        so *= target[i]
+    }
+    var outSize = 1
+    for (d in target) outSize *= d
+    val v = x.hostF32()
+    val out = FloatArray(outSize)
+    for (li in out.indices) {
+        var rem = li
+        var ii = 0
+        for (i in 0 until r) {
+            val idx = rem / outStrides[i]
+            rem %= outStrides[i]
+            ii += (if (x.dims[i] == 1) 0 else idx) * inStrides[i]
+        }
+        out[li] = v[ii]
+    }
+    return DTensor(HostF32Storage(out), target.copyOf(), F32)
+}
+
+fun <S : Shape> stretchToRank1(x: DTensor<*, F32>, d0: Int): DTensor<S, F32> =
+    stretchTo(x, intArrayOf(d0))
+
+fun <S : Shape> stretchToRank2(x: DTensor<*, F32>, d0: Int, d1: Int): DTensor<S, F32> =
+    stretchTo(x, intArrayOf(d0, d1))
+
+fun <S : Shape> stretchToRank3(x: DTensor<*, F32>, d0: Int, d1: Int, d2: Int): DTensor<S, F32> =
+    stretchTo(x, intArrayOf(d0, d1, d2))
+
+/**
+ * §0.4.366 — template-shaped stretch: tile [x] up to [template]'s runtime
+ * dims. The synthesis fallback when structural axis-matching against the
+ * function params fails (mirrors `broadcastLike(v, template)` for splats).
+ */
+fun <S : Shape> stretchLike(x: DTensor<*, F32>, template: DTensor<S, F32>): DTensor<S, F32> =
+    stretchTo(x, template.dims)
+
+/**
+ * §0.4.366 — insert size-1 axes at the given (result-indexed, ascending)
+ * positions. The host twin of the keepdims RESHAPE the reduction VJP rules
+ * emit (`upstream` at the squeezed shape → the keepdims spelling): axis
+ * POSITIONS are compile-time constants from `reduction_dims`, so the
+ * synthesis can bake them as Int consts without touching runtime dims —
+ * dims themselves may be symbolic sentinels at compile time. Fixed-arity
+ * variants for the usual IrVararg reason.
+ */
+private fun unsqueezeAxes(x: DTensor<*, F32>, axes: IntArray): IntArray {
+    val outRank = x.dims.size + axes.size
+    val out = IntArray(outRank)
+    var prev = -1
+    for (a in axes) {
+        require(a in 0 until outRank) { "unsqueezeAxes: axis $a out of range for result rank $outRank" }
+        require(a > prev) { "unsqueezeAxes: axes must be strictly ascending, got ${axes.toList()}" }
+        prev = a
+    }
+    var src = 0
+    for (i in 0 until outRank) {
+        out[i] = if (i in axes) 1 else x.dims[src++]
+    }
+    return out
+}
+
+fun <S : Shape> unsqueezeAxes1(x: DTensor<*, F32>, a0: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(x.hostF32().copyOf()), unsqueezeAxes(x, intArrayOf(a0)), F32)
+
+fun <S : Shape> unsqueezeAxes2(x: DTensor<*, F32>, a0: Int, a1: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(x.hostF32().copyOf()), unsqueezeAxes(x, intArrayOf(a0, a1)), F32)
+
+/**
  * §0.4.189 — rank-2 transpose. Used by the K2 plugin's synthesis-side lowering
  * of [OpKind.TRANSPOSE] emitted by [io.tlaloc.ir.passes.VjpRegistry.MatmulRule].
  * The signature flips R and C in the shape type so the result is correctly

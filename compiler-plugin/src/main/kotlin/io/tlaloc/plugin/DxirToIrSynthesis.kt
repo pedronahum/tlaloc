@@ -319,6 +319,34 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
+     * §0.4.366 — given `DTensor<RankN<A0…An-1>, F32>` and result-indexed
+     * [dropped] positions, returns `DTensor<RankM<kept atoms>, F32>` where
+     * M = N − |dropped|. The backward-pass solve for a keepdims-unsqueeze
+     * RESHAPE's operand: recovers the true squeezed rank so upstream
+     * scalar-splat BROADCASTs axis-match at the correct arity.
+     */
+    private fun deriveDroppedAxesDTensor(dtensor: IrSimpleType, dropped: List<Int>): IrSimpleType? {
+        if (dtensor.arguments.size != 2) return null
+        val inner = dtensor.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        val keptTypes = inner.arguments
+            .filterIndexed { i, _ -> i !in dropped }
+            .map { it.typeOrNull ?: return null }
+        if (keptTypes.size == inner.arguments.size || keptTypes.isEmpty()) return null
+        val rankClassName = when (keptTypes.size) {
+            1 -> "io/tlaloc/core/Rank1"
+            2 -> "io/tlaloc/core/Rank2"
+            3 -> "io/tlaloc/core/Rank3"
+            else -> return null
+        }
+        val rankClass = pluginContext.referenceClass(ClassId.fromString(rankClassName)) ?: return null
+        val newInner = rankClass.typeWith(keptTypes)
+        val variance = (dtensor.arguments[0] as? org.jetbrains.kotlin.ir.types.IrTypeProjection)?.variance
+            ?: org.jetbrains.kotlin.types.Variance.INVARIANT
+        val proj = org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(newInner, variance)
+        return reshapeIrSimpleType(dtensor, listOf(proj, dtensor.arguments[1]))
+    }
+
+    /**
      * §0.4.197 — Structural equivalence on shape-atom IrTypes. Two atoms are
      * equivalent when their classifiers match AND their type arguments recursively
      * match. Used by [matchBroadcastAxesToParams] to identify which (param, axis)
@@ -606,6 +634,43 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             changed = true
                         }
                     }
+                    // §0.4.366 — backward propagate through the axis-reduction
+                    // un-reduce chain (Phase A1). Stretch BROADCAST (equal rank):
+                    // the keepdims-shaped operand takes the output's IrType — the
+                    // size-1 axes' static atoms are cosmetically wrong but no
+                    // synthesis decision reads them; runtime dims come from the
+                    // unsqueeze helper. Scalar-splat BROADCAST operands stay
+                    // untouched (rank differs). Keepdims-unsqueeze RESHAPE: the
+                    // operand's TRUE squeezed rank is the output with the
+                    // inserted size-1 axes dropped — this is what lets the
+                    // scalar-splat BROADCAST further up the adjoint chain
+                    // axis-match at rank 1 instead of inheriting the call-site
+                    // rank-2 fallback and emitting a wrong-shaped splat.
+                    OpKind.BROADCAST -> {
+                        if (n.operands.size != 1) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val operand = n.operands[0]
+                        if (operand.type.rank != n.type.rank) continue
+                        if (paramIrTypeMap[operand.id] == null && isAcceptedTensorType(operand.type)) {
+                            paramIrTypeMap[operand.id] = outputIr
+                            changed = true
+                        }
+                    }
+                    OpKind.RESHAPE -> {
+                        if (n.operands.size != 1) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val operand = n.operands[0]
+                        if (paramIrTypeMap[operand.id] != null || !isAcceptedTensorType(operand.type)) continue
+                        val inserted = insertedUnitAxes(operand.type.dims, n.type.dims) ?: continue
+                        if (inserted.isEmpty()) {
+                            paramIrTypeMap[operand.id] = outputIr
+                            changed = true
+                            continue
+                        }
+                        val solved = deriveDroppedAxesDTensor(outputIr, inserted) ?: continue
+                        paramIrTypeMap[operand.id] = solved
+                        changed = true
+                    }
                     else -> {}
                 }
             }
@@ -888,6 +953,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.TANH) return irTanh(op, env, context)
         if (op.op == OpKind.SIGMOID) return irSigmoid(op, env, context)
         if (op.op == OpKind.SIGN) return irSign(op, env, context)
+        // §0.4.366 — reductions + the keepdims-unsqueeze RESHAPE (Phase A1).
+        if (op.op == OpKind.SUM || op.op == OpKind.MEAN ||
+            op.op == OpKind.MAX || op.op == OpKind.MIN
+        ) {
+            return irReduce(op, env, context)
+        }
+        if (op.op == OpKind.RESHAPE) return irReshape(op, env, context)
 
         val operandDecls = op.operands.mapIndexed { idx, o ->
             env[o.id] ?: return reject(
@@ -1264,7 +1336,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // generic shape parameter handles any rank uniformly.
         if (op.operands.size != 1) return null
         val operand = op.operands[0]
-        if (!operand.type.isScalar) return null
+        // §0.4.366 — equal-rank stretch arm (Phase A1): tile a keepdims-shaped
+        // tensor back over its size-1 axes — the un-reduce that the axis
+        // reduction VJP rules emit after their keepdims RESHAPE. Structural
+        // gate mirrors the interpreter's stretch arm (same rank, each operand
+        // dim 1 or equal). Dims are read at RUNTIME via `param.dims[i]`
+        // (axis-matching, sentinel-safe) or a same-shaped template — never
+        // baked from compile-time dims.
+        if (!operand.type.isScalar) return irBroadcastStretch(op, operand, env, context)
         if (!isAcceptedTensorType(op.type)) return null
 
         val operandDecl = env[operand.id] ?: return null
@@ -1286,7 +1365,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 context.irParams,
                 context.operandIrTypes,
             )
-            if (axisMatches != null) {
+            // §0.4.366 — the matched arity must equal the op's DXIR rank: for
+            // squeezed-reduction targets the static IrType can be the call-site
+            // fallback (a rank lie) and matching it would emit a wrong-shaped
+            // splat. The backward solver derives true ranks for the un-reduce
+            // chain; anything still mismatched falls through to the template
+            // path or rejects — never a silently wrong shape.
+            if (axisMatches != null && axisMatches.size == op.type.rank) {
                 val rank = axisMatches.size
                 val helperSym = broadcastDimsRankSymbol(rank) ?: return null
                 // Type-arg: the result IrType's inner Rank2 (or Rank1/Rank3) — the
@@ -1306,6 +1391,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 }
                 call.arguments[0] = irGet(operandDecl)
                 for ((i, match) in axisMatches.withIndex()) {
+                    // §0.4.366 — keepdims axes carry a CONCRETE 1 in the dxir
+                    // type (only symbolic dims are -1 sentinels); the static
+                    // atom the matcher found for such an axis is the call-site
+                    // fallback's — a lie whose param.dims access would fetch
+                    // the pre-reduction extent. Bake the 1 directly.
+                    if (op.type.dims[i] == 1) {
+                        call.arguments[i + 1] = intConst(1)
+                        continue
+                    }
                     val (param, axisIdx) = match
                     val dimExpr = irParamDimAccess(param, axisIdx) ?: return null
                     call.arguments[i + 1] = dimExpr
@@ -1355,6 +1449,294 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         )
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
+
+    /**
+     * §0.4.366 — the non-scalar half of [irBroadcast] (Phase A1): equal-rank
+     * stretch of a keepdims-shaped tensor over its size-1 axes. Primary path
+     * reuses [matchBroadcastAxesToParams] to read each target dim off a
+     * structurally-matching param at runtime (`stretchToRankN(x, p.dims[i]…)`);
+     * fallback is `stretchLike(x, template)` against the call-site template
+     * param (runtime-validated in the host op — a shape mismatch fails loudly,
+     * same looseness as the `broadcastLike` fallback above).
+     */
+    private fun IrBuilderWithScope.irBroadcastStretch(
+        op: DxirOp,
+        operand: io.tlaloc.ir.DxirNode,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (!isAcceptedTensorType(op.type) || !isAcceptedTensorType(operand.type)) return null
+        if (operand.type.rank != op.type.rank) return null
+        val ok = operand.type.dims.indices.all {
+            operand.type.dims[it] == op.type.dims[it] || operand.type.dims[it] == 1
+        }
+        if (!ok) return null
+        val operandDecl = env[operand.id] ?: return null
+        val targetIrType = irTypeForNode(op, context) as? IrSimpleType
+        if (targetIrType != null && context.fnParams.isNotEmpty()) {
+            val axisMatches = matchBroadcastAxesToParams(
+                targetIrType,
+                context.fnParams,
+                context.irParams,
+                context.operandIrTypes,
+            )
+            if (axisMatches != null && axisMatches.size == op.type.rank) {
+                val helperSym = stretchToRankSymbol(axisMatches.size) ?: return null
+                val shapeTypeArg = targetIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+                val call = IrCallImpl.fromSymbolOwner(
+                    startOffset = startOffset,
+                    endOffset = endOffset,
+                    type = targetIrType,
+                    symbol = helperSym,
+                )
+                if (call.typeArguments.isNotEmpty()) {
+                    call.typeArguments[0] = shapeTypeArg
+                }
+                call.arguments[0] = irGet(operandDecl)
+                for ((i, match) in axisMatches.withIndex()) {
+                    // Same keepdims-axis override as the splat path above.
+                    if (op.type.dims[i] == 1) {
+                        call.arguments[i + 1] = intConst(1)
+                        continue
+                    }
+                    val (param, axisIdx) = match
+                    call.arguments[i + 1] = irParamDimAccess(param, axisIdx) ?: return null
+                }
+                return call
+            }
+        }
+        val template = context.tensorTemplateParam ?: return null
+        val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
+        val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val helperSym = stretchLikeSymbol() ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = tensorIrType,
+            symbol = helperSym,
+        )
+        call.typeArguments[0] = shapeTypeArg
+        call.arguments[0] = irGet(operandDecl)
+        call.arguments[1] = irGet(template)
+        return call
+    }
+
+    /** §0.4.366 — resolves `io.tlaloc.core.ops.stretchToRank{N}` for rank ∈ {1, 2, 3}. */
+    private fun stretchToRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
+        val name = when (rank) {
+            1 -> "stretchToRank1"
+            2 -> "stretchToRank2"
+            3 -> "stretchToRank3"
+            else -> return null
+        }
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier(name),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /** §0.4.366 — resolves `io.tlaloc.core.ops.stretchLike`. */
+    private fun stretchLikeSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("stretchLike"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.366 — reductions in gradient bodies (Phase A1). Two arms:
+     * scalar result → the no-arg `:core/ops` extension (`.sum()`/`.mean()`/
+     * `.max()`/`.min()`) chained with `.toFloat()` (scalar dxir nodes ride
+     * as Kotlin `Float` locals); axis result → the fixed-arity
+     * `sumOver1/2`-family delegates with the axes baked as Int consts —
+     * compile-time constants from `reduction_dims`, never runtime dims,
+     * which may be symbolic sentinels. `keepDims` is derived structurally:
+     * result rank == operand rank. First consumers: MaxRule/MinRule's `yRe`
+     * recompute, and axis-reduction primal ops cloned into grad bodies.
+     */
+    private fun IrBuilderWithScope.irReduce(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        val operand = op.operands[0]
+        if (!isAcceptedTensorType(operand.type)) return null
+        val operandDecl = env[operand.id] ?: return null
+        val opName = when (op.op) {
+            OpKind.SUM -> "sum"
+            OpKind.MEAN -> "mean"
+            OpKind.MAX -> "max"
+            OpKind.MIN -> "min"
+            else -> return null
+        }
+        val rd = (op.attrs["reduction_dims"] as? List<*>)?.map { (it as Number).toInt() }
+            ?: emptyList()
+        val operandIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
+        val shapeTypeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        if (op.type.isScalar) {
+            val sym = reduceFullSymbol(opName) ?: return null
+            val toFloatSym = toFloatSymbol() ?: return null
+            val reduceCall = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = sym.owner.returnType,
+                symbol = sym,
+            )
+            if (reduceCall.typeArguments.isNotEmpty()) {
+                reduceCall.typeArguments[0] = shapeTypeArg
+            }
+            reduceCall.arguments[0] = irGet(operandDecl)
+            val castCall = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = pluginContext.irBuiltIns.floatType,
+                symbol = toFloatSym,
+            )
+            castCall.arguments[0] = reduceCall
+            return castCall
+        }
+        if (rd.isEmpty() || rd.size > 2) return null
+        val keep = op.type.rank == operand.type.rank
+        val sym = reduceOverSymbol(opName, rd.size) ?: return null
+        val resultIrType = irTypeForNode(op, context) ?: irTypeFor(op.type, context) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = shapeTypeArg
+        }
+        call.arguments[0] = irGet(operandDecl)
+        call.arguments[1] = intConst(rd[0])
+        if (rd.size == 2) {
+            call.arguments[2] = intConst(rd[1])
+            call.arguments[3] = boolConst(keep)
+        } else {
+            call.arguments[2] = boolConst(keep)
+        }
+        return call
+    }
+
+    /**
+     * §0.4.366 — RESHAPE in gradient bodies, scoped to the keepdims
+     * unsqueeze the axis-reduction rules emit: result dims must equal the
+     * operand dims with size-1 axes INSERTED. The inserted positions are
+     * structural compile-time facts (from `reduction_dims`), so they bake
+     * as Int consts without touching possibly-sentinel dim values. General
+     * relayout RESHAPE stays out of synthesis scope until Phase A2.
+     */
+    private fun IrBuilderWithScope.irReshape(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        val operand = op.operands[0]
+        if (!isAcceptedTensorType(operand.type) || op.type.dtype != F32) return null
+        val operandDecl = env[operand.id] ?: return null
+        if (op.type.dims == operand.type.dims) return irGet(operandDecl)
+        val inserted = insertedUnitAxes(operand.type.dims, op.type.dims) ?: return null
+        if (inserted.isEmpty() || inserted.size > 2) return null
+        val sym = unsqueezeSymbol(inserted.size) ?: return null
+        val resultIrType = irTypeForNode(op, context) ?: irTypeFor(op.type, context) ?: return null
+        val shapeTypeArg = (resultIrType as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
+            ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = shapeTypeArg
+        }
+        call.arguments[0] = irGet(operandDecl)
+        call.arguments[1] = intConst(inserted[0])
+        if (inserted.size == 2) call.arguments[2] = intConst(inserted[1])
+        return call
+    }
+
+    /**
+     * §0.4.366 — match [outDims] as [inDims] with size-1 axes inserted;
+     * returns the inserted positions (result-indexed, ascending) or null if
+     * the shapes don't relate that way. Ambiguity against input dims that are
+     * themselves 1 resolves greedily — any valid assignment is runtime-
+     * equivalent (the flat data is untouched either way).
+     */
+    private fun insertedUnitAxes(inDims: List<Int>, outDims: List<Int>): List<Int>? {
+        if (outDims.size < inDims.size) return null
+        val inserted = mutableListOf<Int>()
+        var i = 0
+        for (o in outDims.indices) {
+            if (i < inDims.size && outDims[o] == inDims[i]) {
+                i++
+                continue
+            }
+            if (outDims[o] == 1) {
+                inserted += o
+                continue
+            }
+            return null
+        }
+        return if (i == inDims.size) inserted else null
+    }
+
+    /**
+     * §0.4.366 — resolves the NO-ARG `:core/ops` reduction extension
+     * (`sum`/`mean`/`max`/`min`); these names also carry the vararg axis
+     * overloads, so filter to the overload with zero Regular parameters.
+     */
+    private fun reduceFullSymbol(name: String): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier(name),
+        )
+        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+            sym.owner.parameters.none { it.kind == IrParameterKind.Regular }
+        }
+    }
+
+    /** §0.4.366 — resolves `io.tlaloc.core.ops.{name}Over{axisCount}` (distinct names, no overloads). */
+    private fun reduceOverSymbol(name: String, axisCount: Int): IrSimpleFunctionSymbol? {
+        if (axisCount !in 1..2) return null
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("${name}Over$axisCount"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /** §0.4.366 — resolves `io.tlaloc.core.ops.unsqueezeAxes{N}` for N ∈ {1, 2}. */
+    private fun unsqueezeSymbol(count: Int): IrSimpleFunctionSymbol? {
+        if (count !in 1..2) return null
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("unsqueezeAxes$count"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /** §0.4.366 — resolves `io.tlaloc.core.ops.toFloat` (the scalar-DTensor → Float bridge). */
+    private fun toFloatSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("toFloat"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    private fun IrBuilderWithScope.intConst(v: Int): IrExpression = IrConstImpl(
+        startOffset, endOffset, pluginContext.irBuiltIns.intType, IrConstKind.Int, v,
+    )
+
+    private fun IrBuilderWithScope.boolConst(v: Boolean): IrExpression = IrConstImpl(
+        startOffset, endOffset, pluginContext.irBuiltIns.booleanType, IrConstKind.Boolean, v,
+    )
 
     /**
      * §0.4.197 — Synthesise `param.dims[axis]` as an IR expression. Two-step IR call:

@@ -849,6 +849,28 @@ object DxirInterpreter {
                     out
                 }
             }
+            // §0.4.366 — MEAN (Phase A1): the SUM arm divided by the reduced
+            // element count. Until now MEAN had no interpreter arm at all — it
+            // was unreachable from the user surface (no UNARY_OP_MAP entry) and
+            // MeanRule's adjoint never re-emits MEAN. The axis form reuses the
+            // SUM projection via a recursive eval of a synthetic SUM op with
+            // the same operands/attrs; divisor = product of reduced extents.
+            OpKind.MEAN -> {
+                val inputType = op.operands[0].type
+                @Suppress("UNCHECKED_CAST")
+                val reduceDims = (op.attrs["reduction_dims"] as? List<Int>) ?: emptyList()
+                val summed = evalOp(
+                    DxirOp(op.id, OpKind.SUM, op.operands, op.attrs, op.type),
+                    env,
+                    multiResults,
+                )
+                val n = if (reduceDims.isEmpty()) {
+                    if (inputType.dims.isEmpty()) 1 else inputType.dims.fold(1) { acc, d -> acc * d }
+                } else {
+                    reduceDims.fold(1) { acc, d -> acc * inputType.dims[d] }
+                }
+                FloatArray(summed.size) { summed[it] / n }
+            }
             else -> error("DxirInterpreter: op ${op.op} not in the bridge's supported set")
         }
     }

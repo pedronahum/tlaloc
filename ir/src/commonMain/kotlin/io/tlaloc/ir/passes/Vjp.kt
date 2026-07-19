@@ -173,9 +173,15 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
             val targetType = DxirType(upstream.type.dtype, x.type.dims)
+            // §0.4.366 — axis-aware arm (Phase A1): for `sum(dims)` the upstream
+            // has the reduced shape; RESHAPE it to the keepdims spelling (a
+            // no-op when the primal kept dims) so the interpreter's equal-rank
+            // stretch BROADCAST can un-reduce it over the reduced axes. The
+            // full-reduce path keeps the scalar-splat BROADCAST unchanged.
+            val up = reshapeToKeepdims(op, x, upstream, builder)
             val contribution = builder.op(
                 OpKind.BROADCAST,
-                listOf(upstream),
+                listOf(up),
                 targetType,
                 attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
             )
@@ -200,18 +206,43 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
-            val n = if (x.type.dims.isEmpty()) 1 else x.type.dims.fold(1) { acc, d -> acc * d }
-            val invN: Any = when (upstream.type.dtype) {
-                F32 -> 1.0f / n
-                F64 -> 1.0 / n
-                else -> error("MeanRule: unsupported dtype ${upstream.type.dtype}")
+            // §0.4.366 — axis-aware N (Phase A1): the divisor is the count of
+            // elements actually folded into each output cell — the product of
+            // the REDUCED extents only, not x's full element count.
+            val rd = reductionDimsOf(op)
+            val reducedExtents = rd?.map { x.type.dims[it] } ?: x.type.dims
+            val scaled = if (reducedExtents.all { it > 0 }) {
+                // Concrete dims: bake 1/N as a const (the fast path — all
+                // IR-level callers).
+                val n = if (reducedExtents.isEmpty()) 1 else reducedExtents.fold(1) { a, d -> a * d }
+                val invN: Any = when (upstream.type.dtype) {
+                    F32 -> 1.0f / n
+                    F64 -> 1.0 / n
+                    else -> error("MeanRule: unsupported dtype ${upstream.type.dtype}")
+                }
+                val invNConst = builder.const(invN, upstream.type)
+                builder.op(OpKind.MUL, listOf(upstream, invNConst), upstream.type)
+            } else {
+                // §0.4.366 — symbolic (sentinel) dims: the K2 plugin lowers
+                // grad-lambda shapes with -1 placeholders, so N cannot be baked
+                // at transform time (doing so produced 1/-1 = -1 — the g1
+                // E2E bug). Materialise N at RUNTIME with existing ops:
+                // ones(x) → the same reduction → N at upstream's shape → DIV.
+                val one: Any = if (upstream.type.dtype == F64) 1.0 else 1.0f
+                val ones = builder.op(
+                    OpKind.BROADCAST,
+                    listOf(builder.const(one, DxirType(upstream.type.dtype, emptyList()))),
+                    x.type,
+                    attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+                )
+                val nT = builder.op(OpKind.SUM, listOf(ones), op.type, attrs = op.attrs)
+                builder.op(OpKind.DIV, listOf(upstream, nT), upstream.type)
             }
-            val invNConst = builder.const(invN, upstream.type)
-            val scaled = builder.op(OpKind.MUL, listOf(upstream, invNConst), upstream.type)
+            val up = reshapeToKeepdims(op, x, scaled, builder)
             val targetType = DxirType(upstream.type.dtype, x.type.dims)
             val contribution = builder.op(
                 OpKind.BROADCAST,
-                listOf(scaled),
+                listOf(up),
                 targetType,
                 attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
             )
@@ -295,18 +326,59 @@ object VjpRegistry {
         }
     }
 
+    /**
+     * §0.4.366 — shared axis-reduction plumbing (Phase A1).
+     *
+     * [reductionDimsOf] reads the op's `reduction_dims` attr (absent/empty →
+     * null = full reduce). [reshapeToKeepdims] adapts a reduced-shape value
+     * (the upstream, or a recomputed reduction output) for the interpreter's
+     * equal-rank stretch BROADCAST: when the primal squeezed the reduced axes
+     * (`op.type.rank != x.rank`), RESHAPE to the keepdims spelling (size-1 at
+     * each reduced axis); when the primal kept dims, or was a full reduce to
+     * scalar (the scalar-splat BROADCAST arm), pass through unchanged.
+     */
+    private fun reductionDimsOf(op: DxirOp): List<Int>? =
+        (op.attrs["reduction_dims"] as? List<*>)
+            ?.map { (it as Number).toInt() }
+            ?.takeIf { it.isNotEmpty() }
+
+    private fun reshapeToKeepdims(
+        op: DxirOp,
+        x: DxirNode,
+        value: DxirNode,
+        builder: DxirBuilder,
+    ): DxirNode {
+        val rd = reductionDimsOf(op) ?: return value
+        // Scalar values (an attr-bearing reduce that covered every axis) take
+        // the scalar-splat BROADCAST arm directly — no reshape needed, and the
+        // synthesis's unsqueeze helper is tensor-only.
+        if (value.type.isScalar) return value
+        if (value.type.rank == x.type.rank) return value
+        val kd = DxirType(
+            value.type.dtype,
+            x.type.dims.mapIndexed { i, d -> if (i in rd) 1 else d },
+        )
+        return builder.op(OpKind.RESHAPE, listOf(value), kd)
+    }
+
     private fun reduceExtremumRule(kind: OpKind): VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
             // Recompute the reduction (TanhRule convention) and broadcast it
-            // and the upstream back over the reduced axes. Keepdims and
-            // full-reduce shapes both flow through the interpreter's
-            // scalar/keepdims BROADCAST arms.
+            // and the upstream back over the reduced axes. Full-reduce flows
+            // through the interpreter's scalar-splat BROADCAST arm; axis
+            // reductions RESHAPE to keepdims first (§0.4.366) so the
+            // equal-rank stretch arm applies whether the primal kept or
+            // squeezed the reduced axes.
             val yRe = builder.op(kind, listOf(x), op.type, attrs = op.attrs)
             val bcast = mapOf("broadcast_dimensions" to emptyList<Int>())
-            val yB = builder.op(OpKind.BROADCAST, listOf(yRe), x.type, attrs = bcast)
-            val upB = builder.op(OpKind.BROADCAST, listOf(upstream), x.type, attrs = bcast)
+            val yB = builder.op(
+                OpKind.BROADCAST, listOf(reshapeToKeepdims(op, x, yRe, builder)), x.type, attrs = bcast,
+            )
+            val upB = builder.op(
+                OpKind.BROADCAST, listOf(reshapeToKeepdims(op, x, upstream, builder)), x.type, attrs = bcast,
+            )
             // Indicator of the extremum: for MAX, yB - x ≥ 0 with equality
             // exactly at maxima → 1 - sign(yB - x); MIN mirrors with x - yB.
             // Tie convention: FULL upstream to every tied element (the
