@@ -150,7 +150,7 @@ object DxirForwardTransform {
                 )
                 b.op(OpKind.DIV, listOf(num, vOps[1]), ty)
             }
-            OpKind.MATMUL, OpKind.DOT -> {
+            OpKind.MATMUL, OpKind.DOT, OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D -> {
                 val (a, c) = node.operands
                 b.op(
                     OpKind.ADD,

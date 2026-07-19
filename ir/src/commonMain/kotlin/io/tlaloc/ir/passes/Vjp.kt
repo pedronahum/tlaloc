@@ -511,6 +511,106 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.362 — CONV2D adjoint (NCHW / OIHW, the [StablehloEmitter]
+     * layouts). The two classical results, expressed with existing ops:
+     *
+     * - `dX = conv_transpose(dY, W)`: [OpKind.CONV_TRANSPOSE2D] reads W's
+     *   OIHW dims under its IOHW layout — contracting over `o` and emitting
+     *   `i` for free — with `window_reversal` flipping the taps spatially,
+     *   `lhs_dilation = stride` undoing the stride, and padding solved
+     *   numerically so the output lands exactly back on X's shape.
+     * - `dW = conv(Xᵀ, dYᵀ)`: the batch↔feature transposed trick — X as
+     *   `[Ci, N, H, W]` against dY as `[Co, N, Ho, Wo]` (an OIHW kernel with
+     *   `o = Co`, `i = N`), `window_strides = rhs_dilation` and
+     *   `rhs_dilation = stride` swapped, original padding kept; the `[Ci,
+     *   Co, kh, kw]` result transposes back to OIHW.
+     *
+     * v1 scope: `lhs_dilation = [1, 1]` and groups = 1 on the primal
+     * (matching the interpreter); strides, padding, and rhs_dilation are
+     * fully general. CONV_TRANSPOSE2D's own adjoint is deferred — it only
+     * arises when a user differentiates *through* a transposed conv, and
+     * the derivation mirrors this one.
+     */
+    val Conv2dRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val wgt = op.operands[1]
+            val dtype = upstream.type.dtype
+
+            fun intPair(key: String, def: List<Int>): List<Int> =
+                (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+            val s = intPair("window_strides", listOf(1, 1))
+            val d = intPair("rhs_dilation", listOf(1, 1))
+            val lhsDil = intPair("lhs_dilation", listOf(1, 1))
+            require(lhsDil == listOf(1, 1)) {
+                "Conv2dRule: primal lhs_dilation must be [1, 1] in v1; got $lhsDil"
+            }
+            val p = (op.attrs["padding"] as? List<*>)
+                ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+                ?: listOf(listOf(0, 0), listOf(0, 0))
+
+            val (n, cIn, h, w) = x.type.dims
+            val cOut = wgt.type.dims[0]
+            val kh = wgt.type.dims[2]
+            val kw = wgt.type.dims[3]
+            val hOut = op.type.dims[2]
+            val wOut = op.type.dims[3]
+            val kEff = listOf((kh - 1) * d[0] + 1, (kw - 1) * d[1] + 1)
+
+            // dX: pad low = kEff−1−p_low; pad high solved so the transposed
+            // conv's output size is exactly the input's.
+            val dxPad = listOf(0, 1).map { axis ->
+                val inDim = x.type.dims[2 + axis]
+                val dilSize = (op.type.dims[2 + axis] - 1) * s[axis] + 1
+                val low = kEff[axis] - 1 - p[axis][0]
+                listOf(low, inDim - 1 + kEff[axis] - dilSize - low)
+            }
+            val dX = builder.op(
+                OpKind.CONV_TRANSPOSE2D, listOf(upstream, wgt), x.type,
+                attrs = mapOf(
+                    "window_strides" to listOf(1, 1),
+                    "padding" to dxPad,
+                    "lhs_dilation" to s,
+                    "rhs_dilation" to d,
+                    "window_reversal" to listOf(true, true),
+                ),
+            )
+
+            // dW: batch↔feature transposes, stride and rhs_dilation swap roles.
+            val swap = mapOf("permutation" to listOf(1, 0, 2, 3))
+            val xT = builder.op(
+                OpKind.TRANSPOSE, listOf(x), DxirType(dtype, listOf(cIn, n, h, w)), attrs = swap,
+            )
+            val upT = builder.op(
+                OpKind.TRANSPOSE, listOf(upstream),
+                DxirType(dtype, listOf(cOut, n, hOut, wOut)), attrs = swap,
+            )
+            // Padding high solved so the dW conv's output is exactly [kh, kw]:
+            // the primal's floor-division can leave unused input rows/cols
+            // (e.g. stride 2 over height 5), which the adjoint must crop —
+            // reusing the primal's padding high would overshoot.
+            val dwPad = listOf(0, 1).map { axis ->
+                val inDim = x.type.dims[2 + axis]
+                val kSpatial = wgt.type.dims[2 + axis]
+                val kEffDw = (op.type.dims[2 + axis] - 1) * s[axis] + 1
+                val low = p[axis][0]
+                listOf(low, (kSpatial - 1) * d[axis] + kEffDw - inDim - low)
+            }
+            val dWt = builder.op(
+                OpKind.CONV2D, listOf(xT, upT), DxirType(dtype, listOf(cIn, cOut, kh, kw)),
+                attrs = mapOf(
+                    "window_strides" to d,
+                    "padding" to dwPad,
+                    "rhs_dilation" to s,
+                ),
+            )
+            val dW = builder.op(OpKind.TRANSPOSE, listOf(dWt), wgt.type, attrs = swap)
+            return listOf(x to dX, wgt to dW)
+        }
+    }
+
+    /**
      * d(base^exp)/d(base) = exp · base^(exp-1)
      * d(base^exp)/d(exp)  = base^exp · ln(base)
      *
@@ -939,6 +1039,7 @@ object VjpRegistry {
         OpKind.SUM to SumRule,
         OpKind.MEAN to MeanRule,
         OpKind.MATMUL to MatmulRule,
+        OpKind.CONV2D to Conv2dRule,
         OpKind.RESHAPE to ReshapeRule,
         OpKind.MAX to MaxRule,
         OpKind.MIN to MinRule,

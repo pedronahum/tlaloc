@@ -922,12 +922,19 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         val padStr = padding.joinToString(", ") { "[${it.joinToString(", ")}]" }
         val lhsDilStr = lhsDilation.joinToString(", ")
         val rhsDilStr = rhsDilation.joinToString(", ")
+        // §0.4.362 — spatial kernel flip (the conv adjoint's dX needs it).
+        val reversal = (node.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
+        val reverseStr = if (reversal != null && reversal.any { it }) {
+            ", reverse = [${reversal.joinToString(", ")}]"
+        } else {
+            ""
+        }
 
         out.appendLine(
             "$step$name = stablehlo.convolution($lhs, $rhs) " +
                 "dim_numbers = [b, f, 0, 1]x${kernelLayout}->[b, f, 0, 1], " +
                 "window = {stride = [$strideStr], pad = [$padStr], " +
-                "lhs_dilate = [$lhsDilStr], rhs_dilate = [$rhsDilStr]} " +
+                "lhs_dilate = [$lhsDilStr], rhs_dilate = [$rhsDilStr]$reverseStr} " +
                 "{batch_group_count = $batchGroupCount : i64, " +
                 "feature_group_count = $featureGroupCount : i64} " +
                 ": (${lhsType.toMlir()}, ${rhsType.toMlir()}) -> ${node.type.toMlir()}",

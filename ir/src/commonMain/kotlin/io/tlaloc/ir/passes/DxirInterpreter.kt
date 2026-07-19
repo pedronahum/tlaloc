@@ -419,6 +419,11 @@ object DxirInterpreter {
                 }
                 out
             }
+            OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D -> {
+                val lhs = evalNode(op.operands[0], env, multiResults)
+                val rhs = evalNode(op.operands[1], env, multiResults)
+                evalConv2d(op, lhs, rhs)
+            }
             OpKind.BROADCAST -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 val outSize = sizeOf(op.type)
@@ -965,6 +970,113 @@ object DxirInterpreter {
             multiResults[multiResultKey(op.id, i)] = outputs[i]
         }
         return outputs[0]
+    }
+
+    /**
+     * §0.4.362 — general 2-D convolution matching `stablehlo.convolution`
+     * semantics for the layouts [StablehloEmitter] fixes: lhs NCHW
+     * `[b, f, 0, 1]`, kernel OIHW `[o, i, 0, 1]` for [OpKind.CONV2D] /
+     * IOHW `[i, o, 0, 1]` for [OpKind.CONV_TRANSPOSE2D], output NCHW.
+     *
+     * Honoured attrs: `window_strides` [sH, sW], `padding`
+     * [[top, bottom], [left, right]] (negative values crop, as in
+     * StableHLO), `lhs_dilation` (interior-dilates the input — the
+     * transposed-conv mechanism), `rhs_dilation` (à-trous kernel), and
+     * `window_reversal` [Bool, Bool] (spatially flips the kernel taps —
+     * what the conv adjoint needs). `feature_group_count` /
+     * `batch_group_count` must be 1 in v1.
+     *
+     * Reference implementation, deliberately direct: for every output
+     * element walk the kernel window, map each tap back through stride,
+     * dilation, and padding to an input coordinate, and skip taps that
+     * land in padding or between lhs-dilation holes.
+     */
+    private fun evalConv2d(op: DxirOp, lhs: FloatArray, rhs: FloatArray): FloatArray {
+        val lhsT = op.operands[0].type
+        val rhsT = op.operands[1].type
+        require(lhsT.rank == 4 && rhsT.rank == 4 && op.type.rank == 4) {
+            "DxirInterpreter: ${op.op} requires rank-4 lhs/kernel/output; got " +
+                "${lhsT.dims} / ${rhsT.dims} / ${op.type.dims}"
+        }
+        fun intPair(key: String, def: List<Int>): List<Int> =
+            (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+        val strides = intPair("window_strides", listOf(1, 1))
+        val lhsDil = intPair("lhs_dilation", listOf(1, 1))
+        val rhsDil = intPair("rhs_dilation", listOf(1, 1))
+        val reversal = (op.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
+            ?: listOf(false, false)
+        val padding = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+            ?: listOf(listOf(0, 0), listOf(0, 0))
+        val fgc = (op.attrs["feature_group_count"] as? Int) ?: 1
+        val bgc = (op.attrs["batch_group_count"] as? Int) ?: 1
+        require(fgc == 1 && bgc == 1) {
+            "DxirInterpreter: ${op.op} feature/batch groups unsupported in v1 (got $fgc/$bgc)"
+        }
+
+        val (nB, cIn, h, w) = lhsT.dims
+        // Kernel dims under the op's fixed layout.
+        val cOut: Int
+        val cKIn: Int
+        val kh = rhsT.dims[2]
+        val kw = rhsT.dims[3]
+        if (op.op == OpKind.CONV2D) {
+            cOut = rhsT.dims[0]; cKIn = rhsT.dims[1]
+        } else {
+            cKIn = rhsT.dims[0]; cOut = rhsT.dims[1]
+        }
+        require(cKIn == cIn) {
+            "DxirInterpreter: ${op.op} kernel input channels $cKIn ≠ lhs channels $cIn"
+        }
+
+        val hDil = (h - 1) * lhsDil[0] + 1
+        val wDil = (w - 1) * lhsDil[1] + 1
+        val kEffH = (kh - 1) * rhsDil[0] + 1
+        val kEffW = (kw - 1) * rhsDil[1] + 1
+        val hOut = (hDil + padding[0][0] + padding[0][1] - kEffH) / strides[0] + 1
+        val wOut = (wDil + padding[1][0] + padding[1][1] - kEffW) / strides[1] + 1
+        require(op.type.dims == listOf(nB, cOut, hOut, wOut)) {
+            "DxirInterpreter: ${op.op} output type ${op.type.dims} ≠ derived " +
+                "[$nB, $cOut, $hOut, $wOut]"
+        }
+
+        val out = FloatArray(nB * cOut * hOut * wOut)
+        var outIdx = 0
+        for (n in 0 until nB) {
+            for (o in 0 until cOut) {
+                for (y in 0 until hOut) {
+                    for (x in 0 until wOut) {
+                        var acc = 0.0
+                        for (i in 0 until cIn) {
+                            for (ky in 0 until kh) {
+                                // Tap position in the dilated+padded input space.
+                                val yDil = y * strides[0] + ky * rhsDil[0] - padding[0][0]
+                                if (yDil < 0 || yDil % lhsDil[0] != 0) continue
+                                val inY = yDil / lhsDil[0]
+                                if (inY >= h) continue
+                                val wKy = if (reversal[0]) kh - 1 - ky else ky
+                                for (kx in 0 until kw) {
+                                    val xDil = x * strides[1] + kx * rhsDil[1] - padding[1][0]
+                                    if (xDil < 0 || xDil % lhsDil[1] != 0) continue
+                                    val inX = xDil / lhsDil[1]
+                                    if (inX >= w) continue
+                                    val wKx = if (reversal[1]) kw - 1 - kx else kx
+                                    val wIdx = if (op.op == OpKind.CONV2D) {
+                                        ((o * cIn + i) * kh + wKy) * kw + wKx
+                                    } else {
+                                        ((i * cOut + o) * kh + wKy) * kw + wKx
+                                    }
+                                    acc += lhs[((n * cIn + i) * h + inY) * w + inX].toDouble() *
+                                        rhs[wIdx]
+                                }
+                            }
+                        }
+                        out[outIdx++] = acc.toFloat()
+                    }
+                }
+            }
+        }
+        return out
     }
 
     /**
