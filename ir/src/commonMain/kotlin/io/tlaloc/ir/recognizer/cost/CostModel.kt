@@ -107,6 +107,9 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
         op.type.elementCount.toDouble() * 9.0 * 1.0
     }
 
+    // §0.4.363 — window pooling: one compare/add per window tap per output.
+    OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> op.type.elementCount.toDouble() * 9.0
+
     OpKind.DOT -> {
         // Vector dot product [N] · [N] → scalar: 2N − 1 ≈ 2N.
         2.0 * op.operands[0].type.elementCount.toDouble()

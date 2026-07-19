@@ -424,6 +424,9 @@ object DxirInterpreter {
                 val rhs = evalNode(op.operands[1], env, multiResults)
                 evalConv2d(op, lhs, rhs)
             }
+            OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> {
+                evalPool2d(op, evalNode(op.operands[0], env, multiResults))
+            }
             OpKind.BROADCAST -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 val outSize = sizeOf(op.type)
@@ -434,10 +437,14 @@ object DxirInterpreter {
                 // (SumRule/MeanRule) and equal-rank keepdims stretch (input dim
                 // is out dim or 1 — the Max/Min/Softmax rules' broadcast of a
                 // keepdims reduction back over the reduced axes). Anything else
-                // still fails loudly.
-                require(bcastDims.isEmpty()) {
-                    "DxirInterpreter: BROADCAST with non-empty broadcast_dimensions=" +
-                        "$bcastDims not yet supported"
+                // still fails loudly. §0.4.363 — identity broadcast_dimensions
+                // [0..r-1] accepted as a stretch spelling: it is what the
+                // emitter's `stablehlo.broadcast_in_dim` requires for the same
+                // shape, so rules that must run on BOTH backends carry it.
+                val inRank = op.operands[0].type.rank
+                require(bcastDims.isEmpty() || bcastDims == (0 until inRank).toList()) {
+                    "DxirInterpreter: BROADCAST broadcast_dimensions=$bcastDims unsupported " +
+                        "(empty or identity [0..${inRank - 1}] only)"
                 }
                 val inDims = op.operands[0].type.dims
                 val outDims = op.type.dims
@@ -1072,6 +1079,69 @@ object DxirInterpreter {
                             }
                         }
                         out[outIdx++] = acc.toFloat()
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * §0.4.363 — 2-D window pooling over NCHW, matching
+     * `stablehlo.reduce_window` semantics: MAXPOOL2D reduces each window
+     * with max (padding taps contribute −∞, i.e. are skipped); AVGPOOL2D
+     * sums each window (padding taps contribute 0) and divides by the
+     * **full** window size kh·kw — the count_include_pad convention
+     * (PyTorch's AvgPool2d default), which is also what
+     * `reduce_window(add) × 1/(kh·kw)` produces on XLA.
+     *
+     * Attrs: `window` [kh, kw], `window_strides` (default = window — the
+     * classic non-overlapping pool), `padding` [[top, bottom], [left,
+     * right]] (default 0).
+     */
+    private fun evalPool2d(op: DxirOp, lhs: FloatArray): FloatArray {
+        val lhsT = op.operands[0].type
+        require(lhsT.rank == 4 && op.type.rank == 4) {
+            "DxirInterpreter: ${op.op} requires rank-4 NCHW input/output; got " +
+                "${lhsT.dims} / ${op.type.dims}"
+        }
+        fun intPair(key: String, def: List<Int>): List<Int> =
+            (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+        val window = intPair("window", emptyList())
+        require(window.size == 2) { "DxirInterpreter: ${op.op} needs `window` [kh, kw]; got $window" }
+        val strides = intPair("window_strides", window)
+        val padding = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+            ?: listOf(listOf(0, 0), listOf(0, 0))
+
+        val (nB, c, h, w) = lhsT.dims
+        val hOut = (h + padding[0][0] + padding[0][1] - window[0]) / strides[0] + 1
+        val wOut = (w + padding[1][0] + padding[1][1] - window[1]) / strides[1] + 1
+        require(op.type.dims == listOf(nB, c, hOut, wOut)) {
+            "DxirInterpreter: ${op.op} output type ${op.type.dims} ≠ derived [$nB, $c, $hOut, $wOut]"
+        }
+
+        val isMax = op.op == OpKind.MAXPOOL2D
+        val windowSize = window[0] * window[1]
+        val out = FloatArray(nB * c * hOut * wOut)
+        var outIdx = 0
+        for (n in 0 until nB) {
+            for (ch in 0 until c) {
+                val planeBase = (n * c + ch) * h * w
+                for (y in 0 until hOut) {
+                    for (x in 0 until wOut) {
+                        var acc = if (isMax) Double.NEGATIVE_INFINITY else 0.0
+                        for (ky in 0 until window[0]) {
+                            val inY = y * strides[0] + ky - padding[0][0]
+                            if (inY < 0 || inY >= h) continue
+                            for (kx in 0 until window[1]) {
+                                val inX = x * strides[1] + kx - padding[1][0]
+                                if (inX < 0 || inX >= w) continue
+                                val v = lhs[planeBase + inY * w + inX].toDouble()
+                                acc = if (isMax) maxOf(acc, v) else acc + v
+                            }
+                        }
+                        out[outIdx++] = if (isMax) acc.toFloat() else (acc / windowSize).toFloat()
                     }
                 }
             }

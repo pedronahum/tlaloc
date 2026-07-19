@@ -611,6 +611,120 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.363 — AVGPOOL2D adjoint: each input element receives
+     * `Σ dY/(kh·kw)` over every window containing it — exactly a
+     * transposed convolution of dY with a uniform `1/(kh·kw)` kernel.
+     * Channels fold into the batch dim (reshape `[N,C,·,·] →
+     * [N·C,1,·,·]`) so the single-channel splat kernel applies depthwise
+     * without grouped-conv support; padding is solved numerically as in
+     * [Conv2dRule]. Fully general strides/padding (count_include_pad —
+     * the interpreter's convention).
+     */
+    val AvgPool2dRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val dtype = upstream.type.dtype
+            fun intPair(key: String, def: List<Int>): List<Int> =
+                (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+            val k = intPair("window", emptyList())
+            require(k.size == 2) { "AvgPool2dRule: primal needs `window` [kh, kw]; got $k" }
+            val s = intPair("window_strides", k)
+            val p = (op.attrs["padding"] as? List<*>)
+                ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+                ?: listOf(listOf(0, 0), listOf(0, 0))
+
+            val (n, c, h, w) = x.type.dims
+            val hOut = op.type.dims[2]
+            val wOut = op.type.dims[3]
+
+            val upR = builder.op(
+                OpKind.RESHAPE, listOf(upstream), DxirType(dtype, listOf(n * c, 1, hOut, wOut)),
+            )
+            val kernel = builder.const(
+                floatLiteralForDtype(1.0 / (k[0] * k[1]), dtype),
+                DxirType(dtype, listOf(1, 1, k[0], k[1])),
+            )
+            val dxPad = listOf(0, 1).map { axis ->
+                val inDim = x.type.dims[2 + axis]
+                val dilSize = (op.type.dims[2 + axis] - 1) * s[axis] + 1
+                val low = k[axis] - 1 - p[axis][0]
+                listOf(low, inDim - 1 + k[axis] - dilSize - low)
+            }
+            val dxR = builder.op(
+                OpKind.CONV_TRANSPOSE2D, listOf(upR, kernel),
+                DxirType(dtype, listOf(n * c, 1, h, w)),
+                attrs = mapOf(
+                    "window_strides" to listOf(1, 1),
+                    "padding" to dxPad,
+                    "lhs_dilation" to s,
+                ),
+            )
+            val dX = builder.op(OpKind.RESHAPE, listOf(dxR), x.type)
+            return listOf(x to dX)
+        }
+    }
+
+    /**
+     * §0.4.363 — MAXPOOL2D adjoint via the upsample-and-mask
+     * formulation: recompute `y = maxpool(x)`, nearest-upsample y and dY
+     * back to x's shape (reshape → identity-dims stretch broadcast →
+     * reshape — emitter- and interpreter-legal), then
+     * `dx = where(x == U(y), U(dY), 0)`.
+     *
+     * v1 scope: the classic non-overlapping pool — `strides == window`,
+     * zero padding, spatial dims divisible by the window (PyTorch's
+     * `MaxPool2d(k)` default shape). Tie convention: full upstream to
+     * every within-window tie (the MaxRule/JAX-select convention; XLA's
+     * select_and_scatter picks a single winner — divergence exists only
+     * on exact float ties).
+     */
+    val MaxPool2dRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val dtype = upstream.type.dtype
+            fun intPair(key: String, def: List<Int>): List<Int> =
+                (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+            val k = intPair("window", emptyList())
+            require(k.size == 2) { "MaxPool2dRule: primal needs `window` [kh, kw]; got $k" }
+            val s = intPair("window_strides", k)
+            val p = (op.attrs["padding"] as? List<*>)
+                ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+                ?: listOf(listOf(0, 0), listOf(0, 0))
+            val (n, c, h, w) = x.type.dims
+            require(s == k && p.all { it == listOf(0, 0) } && h % k[0] == 0 && w % k[1] == 0) {
+                "MaxPool2dRule v1: strides == window, zero padding, and window-divisible " +
+                    "spatial dims required; got window=$k strides=$s padding=$p dims=${x.type.dims}"
+            }
+            val hOut = op.type.dims[2]
+            val wOut = op.type.dims[3]
+
+            // Nearest-upsample: [N,C,Ho,Wo] → [N,C,Ho,1,Wo,1] → stretch →
+            // [N,C,Ho,kh,Wo,kw] → [N,C,H,W]. Row-major flattening makes
+            // this exactly per-window replication.
+            val stretch = mapOf("broadcast_dimensions" to (0 until 6).toList())
+            val narrow6 = DxirType(dtype, listOf(n, c, hOut, 1, wOut, 1))
+            val wide6 = DxirType(dtype, listOf(n, c, hOut, k[0], wOut, k[1]))
+            fun upsample(src: DxirNode): DxirNode {
+                val r6 = builder.op(OpKind.RESHAPE, listOf(src), narrow6)
+                val b6 = builder.op(OpKind.BROADCAST, listOf(r6), wide6, attrs = stretch)
+                return builder.op(OpKind.RESHAPE, listOf(b6), x.type)
+            }
+
+            val yRe = builder.op(op.op, listOf(x), op.type, attrs = op.attrs)
+            val mask = builder.op(
+                OpKind.COMPARE, listOf(x, upsample(yRe)),
+                DxirType(io.tlaloc.core.Bool, x.type.dims),
+                attrs = mapOf("direction" to "EQ"),
+            )
+            val zero = builder.const(floatLiteralForDtype(0.0, dtype), x.type)
+            val dx = builder.op(OpKind.WHERE, listOf(mask, upsample(upstream), zero), x.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
      * d(base^exp)/d(base) = exp · base^(exp-1)
      * d(base^exp)/d(exp)  = base^exp · ln(base)
      *
@@ -1040,6 +1154,8 @@ object VjpRegistry {
         OpKind.MEAN to MeanRule,
         OpKind.MATMUL to MatmulRule,
         OpKind.CONV2D to Conv2dRule,
+        OpKind.AVGPOOL2D to AvgPool2dRule,
+        OpKind.MAXPOOL2D to MaxPool2dRule,
         OpKind.RESHAPE to ReshapeRule,
         OpKind.MAX to MaxRule,
         OpKind.MIN to MinRule,

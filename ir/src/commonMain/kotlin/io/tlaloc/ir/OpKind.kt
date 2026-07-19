@@ -48,6 +48,14 @@ enum class OpKind {
     // Linear algebra
     MATMUL, DOT, CONV2D, CONV_TRANSPOSE2D,
 
+    // §0.4.363 — 2-D window pooling (DiffKT-gap item 4, pooling half).
+    // NCHW, attrs: `window` [kh, kw], `window_strides` [sh, sw], `padding`
+    // [[top, bottom], [left, right]]. Lowered to `stablehlo.reduce_window`
+    // (max with -inf init / add with 0 init; AVGPOOL2D then divides by the
+    // FULL window size kh·kw, padding included — the count_include_pad
+    // convention, documented at the interpreter arm).
+    MAXPOOL2D, AVGPOOL2D,
+
     // Shape
     RESHAPE, TRANSPOSE, BROADCAST, CONCAT, SPLIT, SLICE, GATHER, SCATTER,
 

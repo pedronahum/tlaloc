@@ -205,6 +205,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 rhsType = node.operands[1].type,
                 kernelLayout = "[i, o, 0, 1]",
             )
+            // §0.4.363 — window pooling via stablehlo.reduce_window.
+            OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> emitReduceWindow(
+                step, name, ops[0], node, node.operands[0].type,
+            )
             OpKind.ARGMAX -> {
                 val axis = readAxis(node, node.operands[0].type.rank)
                 val refStr = emitArgmax(
@@ -893,6 +897,65 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 "contracting_dims = [${lhsContract.joinToString(", ")}] x [${rhsContract.joinToString(", ")}] " +
                 ": (${aType.toMlir()}, ${bType.toMlir()}) -> ${outType.toMlir()}",
         )
+    }
+
+    /**
+     * §0.4.363 — MAXPOOL2D / AVGPOOL2D as `stablehlo.reduce_window` in
+     * generic form (there is no compact sugar for reduce_window): max
+     * with −∞ init, add with 0 init; AVGPOOL2D follows with a splat
+     * multiply by 1/(kh·kw) — the count_include_pad convention pinned at
+     * the interpreter's [DxirInterpreter.evalPool2d].
+     */
+    private fun emitReduceWindow(
+        step: String,
+        name: String,
+        x: String,
+        node: DxirOp,
+        inputType: DxirType,
+    ) {
+        require(inputType.rank == 4 && node.type.rank == 4) {
+            "${node.op} requires rank-4 NCHW input/output; got ${inputType.dims} / ${node.type.dims}"
+        }
+        val window = intListAttr(node, "window")
+        require(window.size == 2) { "${node.op} needs `window` [kh, kw]; got $window" }
+        val strides = (node.attrs["window_strides"] as? List<*>)?.map { (it as Number).toInt() }
+            ?: window
+        val padding = (node.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+            ?: listOf(listOf(0, 0), listOf(0, 0))
+
+        val isMax = node.op == OpKind.MAXPOOL2D
+        val elem = mlirElementType(inputType.dtype)
+        val scalarT = "tensor<$elem>"
+        val initLit = if (isMax) negInfLiteral(inputType.dtype) else "0.0"
+        val reducer = if (isMax) "stablehlo.maximum" else "stablehlo.add"
+
+        val init = synth()
+        val a = synth(); val b = synth(); val r = synth()
+        val windowTarget = if (isMax) name else synth()
+        val padRows = "[[0, 0], [0, 0], [${padding[0][0]}, ${padding[0][1]}], " +
+            "[${padding[1][0]}, ${padding[1][1]}]]"
+        out.appendLine("$step$init = stablehlo.constant dense<$initLit> : $scalarT")
+        out.appendLine(
+            """$step$windowTarget = "stablehlo.reduce_window"($x, $init) <{""" +
+                "window_dimensions = array<i64: 1, 1, ${window[0]}, ${window[1]}>, " +
+                "window_strides = array<i64: 1, 1, ${strides[0]}, ${strides[1]}>, " +
+                "padding = dense<$padRows> : tensor<4x2xi64>}> ({",
+        )
+        out.appendLine("$step ^bb0($a: $scalarT, $b: $scalarT):")
+        out.appendLine("$step   $r = $reducer $a, $b : $scalarT")
+        out.appendLine("$step   stablehlo.return $r : $scalarT")
+        out.appendLine("$step}) : (${inputType.toMlir()}, $scalarT) -> ${node.type.toMlir()}")
+        if (!isMax) {
+            val inv = synth()
+            val invVal = 1.0 / (window[0] * window[1])
+            out.appendLine(
+                "$step$inv = stablehlo.constant dense<$invVal> : ${node.type.toMlir()}",
+            )
+            out.appendLine(
+                "$step$name = stablehlo.multiply $windowTarget, $inv : ${node.type.toMlir()}",
+            )
+        }
     }
 
     private fun emitConv2d(

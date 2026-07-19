@@ -125,8 +125,43 @@ object DxirForwardTransform {
             OpKind.SUB -> b.op(OpKind.SUB, listOf(t(node.operands[0]), t(node.operands[1])), ty)
             OpKind.NEG -> b.op(OpKind.NEG, listOf(t(node.operands[0])), ty)
             OpKind.SUM, OpKind.MEAN, OpKind.RESHAPE, OpKind.TRANSPOSE, OpKind.BROADCAST,
-            OpKind.SLICE, OpKind.PAD, OpKind.CONCAT ->
+            OpKind.SLICE, OpKind.PAD, OpKind.CONCAT, OpKind.AVGPOOL2D ->
                 b.op(node.op, node.operands.map { t(it) }, ty, node.attrs)
+
+            // §0.4.363 — maxpool tangent: route dx through the argmax mask,
+            // then window-sum via avgpool × kh·kw. Same v1 scope and tie
+            // convention as [VjpRegistry.MaxPool2dRule] (its KDoc has the
+            // derivation); ties sum, keeping the forward/reverse identity
+            // exact.
+            OpKind.MAXPOOL2D -> {
+                val x = node.operands[0]
+                val k = (node.attrs["window"] as? List<*>)?.map { (it as Number).toInt() }
+                    ?: error("MAXPOOL2D tangent: missing `window` attr")
+                val (n, c, h, w) = x.type.dims
+                val hOut = ty.dims[2]
+                val wOut = ty.dims[3]
+                val stretch = mapOf("broadcast_dimensions" to (0 until 6).toList())
+                val r6 = b.op(
+                    OpKind.RESHAPE, listOf(v), DxirType(ty.dtype, listOf(n, c, hOut, 1, wOut, 1)),
+                )
+                val b6 = b.op(
+                    OpKind.BROADCAST, listOf(r6),
+                    DxirType(ty.dtype, listOf(n, c, hOut, k[0], wOut, k[1])), attrs = stretch,
+                )
+                val yUp = b.op(OpKind.RESHAPE, listOf(b6), x.type)
+                val mask = b.op(
+                    OpKind.COMPARE, listOf(vOps[0], yUp),
+                    DxirType(io.tlaloc.core.Bool, x.type.dims),
+                    attrs = mapOf("direction" to "EQ"),
+                )
+                val zeroX = b.const(if (x.type.dtype == F64) 0.0 else 0.0f, x.type)
+                val masked = b.op(OpKind.WHERE, listOf(mask, t(x), zeroX), x.type)
+                val pooled = b.op(OpKind.AVGPOOL2D, listOf(masked), ty, node.attrs)
+                val scale = b.const(
+                    if (ty.dtype == F64) (k[0] * k[1]).toDouble() else (k[0] * k[1]).toFloat(), ty,
+                )
+                b.op(OpKind.MUL, listOf(pooled, scale), ty)
+            }
 
             // Bilinear: product rule.
             OpKind.MUL -> {
