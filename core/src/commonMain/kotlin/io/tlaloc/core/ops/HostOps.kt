@@ -574,6 +574,143 @@ fun <S : Shape> unsqueezeAxes2(x: DTensor<*, F32>, a0: Int, a1: Int): DTensor<S,
     DTensor(HostF32Storage(x.hostF32().copyOf()), unsqueezeAxes(x, intArrayOf(a0, a1)), F32)
 
 /**
+ * §0.4.367 — Phase A2a (DiffKT parity): the RESHAPE-family user surface.
+ * `squeeze(axis)` drops a size-1 axis, `unsqueeze(axis)` inserts one,
+ * `flatten()` collapses to rank-1, `reshape(vararg dims)` is the general
+ * element-count-preserving relayout (row-major; data is shared semantics —
+ * we copy for host-value simplicity). Result shape types erase to [Shape]
+ * for the same reason as the axis reductions (§0.4.366): the result dims
+ * depend on runtime arguments; inside `grad {}` the K2 plugin computes the
+ * exact `DxirType` from the literal arguments instead.
+ */
+fun <S : Shape> DTensor<S, F32>.squeeze(axis: Int): DTensor<Shape, F32> {
+    val a = if (axis < 0) axis + dims.size else axis
+    require(a in dims.indices) { "squeeze: axis $axis out of range for rank ${dims.size}" }
+    require(dims[a] == 1) { "squeeze: axis $axis has size ${dims[a]} (must be 1)" }
+    val out = IntArray(dims.size - 1)
+    var k = 0
+    for (i in dims.indices) if (i != a) out[k++] = dims[i]
+    return DTensor(HostF32Storage(hostF32().copyOf()), out, F32)
+}
+
+fun <S : Shape> DTensor<S, F32>.unsqueeze(axis: Int): DTensor<Shape, F32> {
+    val outRank = dims.size + 1
+    val a = if (axis < 0) axis + outRank else axis
+    require(a in 0 until outRank) { "unsqueeze: axis $axis out of range for result rank $outRank" }
+    return DTensor(HostF32Storage(hostF32().copyOf()), unsqueezeAxes(this, intArrayOf(a)), F32)
+}
+
+fun <S : Shape> DTensor<S, F32>.flatten(): DTensor<Shape, F32> {
+    val v = hostF32()
+    return DTensor(HostF32Storage(v.copyOf()), intArrayOf(v.size), F32)
+}
+
+fun <S : Shape> DTensor<S, F32>.reshape(vararg newDims: Int): DTensor<Shape, F32> {
+    val v = hostF32()
+    var n = 1
+    for (d in newDims) {
+        require(d > 0) { "reshape: dims must be positive, got ${newDims.toList()}" }
+        n *= d
+    }
+    require(n == v.size) {
+        "reshape: element count mismatch — ${dims.toList()} (${v.size}) vs ${newDims.toList()} ($n)"
+    }
+    return DTensor(HostF32Storage(v.copyOf()), newDims.copyOf(), F32)
+}
+
+/**
+ * §0.4.367 — general permutation transpose (DiffKT `transpose(axes)`).
+ * The no-arg rank-2 [transpose] above keeps its precise `Rank2<C, R>`
+ * shape typing; this vararg form handles any rank 1..3 with an erased
+ * result type. Row-major stride walk mirroring the dxir interpreter's
+ * TRANSPOSE arm.
+ */
+fun <S : Shape> DTensor<S, F32>.transpose(vararg perm: Int): DTensor<Shape, F32> {
+    val r = dims.size
+    require(perm.size == r) { "transpose: perm ${perm.toList()} must have length $r" }
+    val norm = IntArray(r) { i ->
+        val p = if (perm[i] < 0) perm[i] + r else perm[i]
+        require(p in 0 until r) { "transpose: axis ${perm[i]} out of range for rank $r" }
+        p
+    }
+    require(norm.toSet().size == r) { "transpose: ${perm.toList()} is not a permutation" }
+    val v = hostF32()
+    val outDims = IntArray(r) { dims[norm[it]] }
+    val inStrides = IntArray(r)
+    var st = 1
+    for (i in r - 1 downTo 0) { inStrides[i] = st; st *= dims[i] }
+    val outStrides = IntArray(r)
+    st = 1
+    for (i in r - 1 downTo 0) { outStrides[i] = st; st *= outDims[i] }
+    val out = FloatArray(v.size)
+    for (li in out.indices) {
+        var rem = li
+        var src = 0
+        for (i in 0 until r) {
+            val coord = rem / outStrides[i]
+            rem %= outStrides[i]
+            src += coord * inStrides[norm[i]]
+        }
+        out[li] = v[src]
+    }
+    return DTensor(HostF32Storage(out), outDims, F32)
+}
+
+/**
+ * §0.4.367 — fixed-arity synthesis delegates (the usual IrVararg reason).
+ * `squeezeAxes{N}` drops size-1 axes at result-computed positions (the
+ * adjoint of an unsqueeze); `reshapeToRank{N}` relayouts to explicit dims —
+ * the synthesis feeds each dim either as a baked const (concrete dxir dim)
+ * or a `param.dims[i]` runtime read (sentinel dim); `transposePerm{N}`
+ * carries the permutation attr's compile-time constants.
+ */
+fun <S : Shape> squeezeAxes1(x: DTensor<*, F32>, a0: Int): DTensor<S, F32> {
+    require(x.dims[a0] == 1) { "squeezeAxes1: axis $a0 has size ${x.dims[a0]}" }
+    val out = IntArray(x.dims.size - 1)
+    var k = 0
+    for (i in x.dims.indices) if (i != a0) out[k++] = x.dims[i]
+    return DTensor(HostF32Storage(x.hostF32().copyOf()), out, F32)
+}
+
+fun <S : Shape> squeezeAxes2(x: DTensor<*, F32>, a0: Int, a1: Int): DTensor<S, F32> {
+    require(a0 < a1) { "squeezeAxes2: axes must be ascending" }
+    require(x.dims[a0] == 1 && x.dims[a1] == 1) { "squeezeAxes2: axes must have size 1" }
+    val out = IntArray(x.dims.size - 2)
+    var k = 0
+    for (i in x.dims.indices) if (i != a0 && i != a1) out[k++] = x.dims[i]
+    return DTensor(HostF32Storage(x.hostF32().copyOf()), out, F32)
+}
+
+private fun reshapeTo(x: DTensor<*, F32>, target: IntArray): FloatArray {
+    val v = x.hostF32()
+    var n = 1
+    for (d in target) n *= d
+    require(n == v.size) {
+        "reshapeToRank: element count mismatch ${x.dims.toList()} vs ${target.toList()}"
+    }
+    return v.copyOf()
+}
+
+fun <S : Shape> reshapeToRank1(x: DTensor<*, F32>, d0: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(reshapeTo(x, intArrayOf(d0))), intArrayOf(d0), F32)
+
+fun <S : Shape> reshapeToRank2(x: DTensor<*, F32>, d0: Int, d1: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(reshapeTo(x, intArrayOf(d0, d1))), intArrayOf(d0, d1), F32)
+
+fun <S : Shape> reshapeToRank3(x: DTensor<*, F32>, d0: Int, d1: Int, d2: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(reshapeTo(x, intArrayOf(d0, d1, d2))), intArrayOf(d0, d1, d2), F32)
+
+fun <S : Shape> transposePerm2(x: DTensor<*, F32>, p0: Int, p1: Int): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return (x as DTensor<Shape, F32>).transpose(p0, p1) as DTensor<S, F32>
+}
+
+fun <S : Shape> transposePerm3(x: DTensor<*, F32>, p0: Int, p1: Int, p2: Int): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return (x as DTensor<Shape, F32>).transpose(p0, p1, p2) as DTensor<S, F32>
+}
+
+/**
  * §0.4.189 — rank-2 transpose. Used by the K2 plugin's synthesis-side lowering
  * of [OpKind.TRANSPOSE] emitted by [io.tlaloc.ir.passes.VjpRegistry.MatmulRule].
  * The signature flips R and C in the shape type so the result is correctly

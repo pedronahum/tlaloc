@@ -1348,6 +1348,31 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
         val operandDecl = env[operand.id] ?: return null
 
+        // §0.4.367 — all-concrete targets (user-literal reshape shapes and
+        // their splat seeds) need no structural matching at all: every dim
+        // bakes as a const. This also sidesteps rank-lying static types for
+        // concrete rank-changing chains (e.g. a splat to reshape(4)'s [4]).
+        if (op.type.dims.all { it > 0 }) {
+            val helperSym = broadcastDimsRankSymbol(op.type.rank) ?: return null
+            val anyIr = (irTypeForNode(op, context) ?: context.tensorIrType) as? IrSimpleType
+                ?: return null
+            val shapeTypeArg = anyIr.arguments.firstOrNull()?.typeOrNull ?: return null
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = anyIr,
+                symbol = helperSym,
+            )
+            if (call.typeArguments.isNotEmpty()) {
+                call.typeArguments[0] = shapeTypeArg
+            }
+            call.arguments[0] = irGet(operandDecl)
+            for (i in 0 until op.type.rank) {
+                call.arguments[i + 1] = intConst(op.type.dims[i])
+            }
+            return call
+        }
+
         // §0.4.197 — Phase 0c-rectangular slice 3b-2b: try axis-matching first.
         // When the BROADCAST's target IrType has been derived (slice 3a forward
         // pass for TRANSPOSE/MATMUL outputs OR slice 3b-2b's backward pass from
@@ -1391,13 +1416,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 }
                 call.arguments[0] = irGet(operandDecl)
                 for ((i, match) in axisMatches.withIndex()) {
-                    // §0.4.366 — keepdims axes carry a CONCRETE 1 in the dxir
-                    // type (only symbolic dims are -1 sentinels); the static
-                    // atom the matcher found for such an axis is the call-site
-                    // fallback's — a lie whose param.dims access would fetch
-                    // the pre-reduction extent. Bake the 1 directly.
-                    if (op.type.dims[i] == 1) {
-                        call.arguments[i + 1] = intConst(1)
+                    // §0.4.366/§0.4.367 — CONCRETE dxir dims (keepdims 1s,
+                    // user-literal reshape targets) bake directly as consts;
+                    // only -1 sentinels read a matched param's runtime dim.
+                    // The static atom the matcher found for a concrete axis
+                    // can be the call-site fallback's — a lie whose
+                    // param.dims access would fetch the wrong extent.
+                    if (op.type.dims[i] > 0) {
+                        call.arguments[i + 1] = intConst(op.type.dims[i])
                         continue
                     }
                     val (param, axisIdx) = match
@@ -1494,9 +1520,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 }
                 call.arguments[0] = irGet(operandDecl)
                 for ((i, match) in axisMatches.withIndex()) {
-                    // Same keepdims-axis override as the splat path above.
-                    if (op.type.dims[i] == 1) {
-                        call.arguments[i + 1] = intConst(1)
+                    // Same concrete-dim override as the splat path above.
+                    if (op.type.dims[i] > 0) {
+                        call.arguments[i + 1] = intConst(op.type.dims[i])
                         continue
                     }
                     val (param, axisIdx) = match
@@ -1640,25 +1666,60 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!isAcceptedTensorType(operand.type) || op.type.dtype != F32) return null
         val operandDecl = env[operand.id] ?: return null
         if (op.type.dims == operand.type.dims) return irGet(operandDecl)
-        val inserted = insertedUnitAxes(operand.type.dims, op.type.dims) ?: return null
-        if (inserted.isEmpty() || inserted.size > 2) return null
-        val sym = unsqueezeSymbol(inserted.size) ?: return null
         val resultIrType = irTypeForNode(op, context) ?: irTypeFor(op.type, context) ?: return null
         val shapeTypeArg = (resultIrType as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
             ?: return null
-        val call = IrCallImpl.fromSymbolOwner(
-            startOffset = startOffset,
-            endOffset = endOffset,
-            type = resultIrType,
-            symbol = sym,
-        )
-        if (call.typeArguments.isNotEmpty()) {
-            call.typeArguments[0] = shapeTypeArg
+        fun emit(sym: IrSimpleFunctionSymbol, ints: List<IrExpression>): IrExpression {
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = resultIrType,
+                symbol = sym,
+            )
+            if (call.typeArguments.isNotEmpty()) {
+                call.typeArguments[0] = shapeTypeArg
+            }
+            call.arguments[0] = irGet(operandDecl)
+            for ((i, e) in ints.withIndex()) call.arguments[i + 1] = e
+            return call
         }
-        call.arguments[0] = irGet(operandDecl)
-        call.arguments[1] = intConst(inserted[0])
-        if (inserted.size == 2) call.arguments[2] = intConst(inserted[1])
-        return call
+        // Unsqueeze arm (§0.4.366): result = operand with size-1 axes inserted.
+        val inserted = insertedUnitAxes(operand.type.dims, op.type.dims)
+        if (inserted != null && inserted.isNotEmpty() && inserted.size <= 2) {
+            val sym = unsqueezeSymbol(inserted.size) ?: return null
+            return emit(sym, inserted.map { intConst(it) })
+        }
+        // §0.4.367 — squeeze arm: result = operand with size-1 axes DROPPED
+        // (the adjoint of an unsqueeze, and the user `squeeze(axis)` primal).
+        val dropped = insertedUnitAxes(op.type.dims, operand.type.dims)
+        if (dropped != null && dropped.isNotEmpty() && dropped.size <= 2) {
+            val sym = squeezeAxesSymbol(dropped.size) ?: return null
+            return emit(sym, dropped.map { intConst(it) })
+        }
+        // §0.4.367 — general relayout (user `reshape(dims)` / `flatten` and
+        // their adjoints): rank-1..3 targets via `reshapeToRankN`. Concrete
+        // dims bake as consts; -1 sentinels read a structurally-matched
+        // param's runtime dim (the broadcast paths' rule).
+        if (op.type.rank !in 1..3) return null
+        val sym = reshapeToRankSymbol(op.type.rank) ?: return null
+        val allConcrete = op.type.dims.all { it > 0 }
+        val matches = if (allConcrete) null else {
+            val targetSimple = resultIrType as? IrSimpleType ?: return null
+            if (context.fnParams.isEmpty()) return null
+            val m = matchBroadcastAxesToParams(
+                targetSimple, context.fnParams, context.irParams, context.operandIrTypes,
+            )
+            if (m == null || m.size != op.type.rank) return null
+            m
+        }
+        val dimExprs = (0 until op.type.rank).map { i ->
+            if (op.type.dims[i] > 0) intConst(op.type.dims[i])
+            else {
+                val (param, axisIdx) = matches!![i]
+                irParamDimAccess(param, axisIdx) ?: return null
+            }
+        }
+        return emit(sym, dimExprs)
     }
 
     /**
@@ -1717,6 +1778,36 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("unsqueezeAxes$count"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /** §0.4.367 — resolves `io.tlaloc.core.ops.squeezeAxes{N}` for N ∈ {1, 2}. */
+    private fun squeezeAxesSymbol(count: Int): IrSimpleFunctionSymbol? {
+        if (count !in 1..2) return null
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("squeezeAxes$count"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /** §0.4.367 — resolves `io.tlaloc.core.ops.reshapeToRank{N}` for N ∈ {1, 2, 3}. */
+    private fun reshapeToRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
+        if (rank !in 1..3) return null
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("reshapeToRank$rank"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /** §0.4.367 — resolves `io.tlaloc.core.ops.transposePerm{N}` for N ∈ {2, 3}. */
+    private fun transposePermSymbol(rank: Int): IrSimpleFunctionSymbol? {
+        if (rank !in 2..3) return null
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("transposePerm$rank"),
         )
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
@@ -2436,9 +2527,40 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (op.operands.size != 1) return null
         val operand = op.operands[0]
-        if (operand.type.rank != 2 || operand.type.dtype != F32) return null
-        if (op.type.rank != 2 || op.type.dtype != F32) return null
+        if (operand.type.dtype != F32 || op.type.dtype != F32) return null
         val operandDecl = env[operand.id] ?: return null
+        // §0.4.367 — non-swap spellings (Phase A2a). Identity perms and rank-1
+        // transposes forward the operand; rank-2/3 general perms call the
+        // fixed-arity `transposePermN` with the attr's compile-time constants.
+        // The rank-2 swap (perm [1,0] or the attr-less MatmulRule emission)
+        // keeps the precisely-typed `.transpose()` path below.
+        val perm = (op.attrs["permutation"] as? List<*>)?.map { (it as Number).toInt() }
+        if (!isAcceptedTensorType(operand.type)) return null
+        if (operand.type.rank == 1 || (perm != null && perm == perm.indices.toList())) {
+            return irGet(operandDecl)
+        }
+        if (perm != null && perm != listOf(1, 0)) {
+            if (perm.size != operand.type.rank || op.type.rank != operand.type.rank) return null
+            val permSym = transposePermSymbol(perm.size) ?: return null
+            val opIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
+            val shapeTypeArg = opIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val resultIrType = irTypeForNode(op, context) ?: context.tensorIrType ?: return null
+            val permCall = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = resultIrType,
+                symbol = permSym,
+            )
+            if (permCall.typeArguments.isNotEmpty()) {
+                permCall.typeArguments[0] = shapeTypeArg
+            }
+            permCall.arguments[0] = irGet(operandDecl)
+            for ((i, p) in perm.withIndex()) {
+                permCall.arguments[i + 1] = intConst(p)
+            }
+            return permCall
+        }
+        if (operand.type.rank != 2 || op.type.rank != 2) return null
         val sym = transposeSymbol() ?: return null
         val operandIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
         // §0.4.196 — slice 3b-2a: dig into the operand's outer DTensor → inner Rank2
@@ -2553,7 +2675,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("transpose"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        // §0.4.367 — `transpose` gained the vararg-perm overload; the classic
+        // rank-2 swap path wants the no-arg extension (zero Regular params).
+        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+            sym.owner.parameters.none { it.kind == IrParameterKind.Regular }
+        }
     }
 
     private fun matmulSymbol(): IrSimpleFunctionSymbol? {

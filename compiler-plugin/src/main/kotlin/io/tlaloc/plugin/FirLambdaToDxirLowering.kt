@@ -927,6 +927,125 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.367 — shape ops (DiffKT parity, Phase A2a): the RESHAPE family
+        // (`squeeze(axis)` / `unsqueeze(axis)` / `flatten()` / `reshape(dims)`)
+        // and permutation `transpose(perm)` (no-arg = reverse all axes; the
+        // rank-2 `.transpose()` receiver spelling included). Axis positions
+        // and target dims are compile-time literals folded into the result
+        // DxirType (and TRANSPOSE's `permutation` attr) here. Flatten's
+        // result dim is the operand's element count — a product of possibly
+        // -1 sentinels, so any symbolic operand flattens to the rank-1
+        // sentinel [-1].
+        if (fqn in SHAPE_OP_SET) {
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("shape op '$fqn' has no receiver")
+            val operand = lowerExpr(operandExpr, env, emitter)
+            val rank = operand.type.rank
+            val args = call.argumentList.arguments
+            val intArgs = mutableListOf<Int>()
+            for (arg in args) {
+                when (arg) {
+                    is FirVarargArgumentsExpression ->
+                        for (e in arg.arguments) {
+                            intArgs += intLiteralArg(e) ?: throw LoweringException(
+                                "shape op '$fqn' arguments must be integer literals",
+                            )
+                        }
+                    else -> {
+                        intArgs += intLiteralArg(arg) ?: throw LoweringException(
+                            "shape op '$fqn' arguments must be integer literals",
+                        )
+                    }
+                }
+            }
+            when (fqn) {
+                "io.tlaloc.core.ops.squeeze" -> {
+                    if (intArgs.size != 1) throw LoweringException("squeeze takes exactly one axis")
+                    val a = intArgs[0].let { if (it < 0) it + rank else it }
+                    if (a !in 0 until rank) {
+                        throw LoweringException("squeeze axis ${intArgs[0]} out of range for rank $rank")
+                    }
+                    val d = operand.type.dims[a]
+                    if (d > 0 && d != 1) {
+                        throw LoweringException("squeeze axis $a has size $d (must be 1)")
+                    }
+                    val resultDims = operand.type.dims.filterIndexed { i, _ -> i != a }
+                    return emitter.op(
+                        kind = OpKind.RESHAPE,
+                        operands = listOf(operand),
+                        type = DxirType(operand.type.dtype, resultDims),
+                    )
+                }
+                "io.tlaloc.core.ops.unsqueeze" -> {
+                    if (intArgs.size != 1) throw LoweringException("unsqueeze takes exactly one axis")
+                    val outRank = rank + 1
+                    val a = intArgs[0].let { if (it < 0) it + outRank else it }
+                    if (a !in 0 until outRank) {
+                        throw LoweringException("unsqueeze axis ${intArgs[0]} out of range for result rank $outRank")
+                    }
+                    val resultDims = buildList {
+                        addAll(operand.type.dims)
+                        add(a, 1)
+                    }
+                    return emitter.op(
+                        kind = OpKind.RESHAPE,
+                        operands = listOf(operand),
+                        type = DxirType(operand.type.dtype, resultDims),
+                    )
+                }
+                "io.tlaloc.core.ops.flatten" -> {
+                    if (intArgs.isNotEmpty()) throw LoweringException("flatten takes no arguments")
+                    val n = if (operand.type.dims.any { it < 0 }) -1
+                    else operand.type.dims.fold(1) { acc, d -> acc * d }
+                    return emitter.op(
+                        kind = OpKind.RESHAPE,
+                        operands = listOf(operand),
+                        type = DxirType(operand.type.dtype, listOf(n)),
+                    )
+                }
+                "io.tlaloc.core.ops.reshape" -> {
+                    if (intArgs.isEmpty()) throw LoweringException("reshape requires target dims")
+                    if (intArgs.any { it <= 0 }) {
+                        throw LoweringException("reshape dims must be positive literals, got $intArgs")
+                    }
+                    if (operand.type.dims.all { it > 0 }) {
+                        val have = operand.type.dims.fold(1) { acc, d -> acc * d }
+                        val want = intArgs.fold(1) { acc, d -> acc * d }
+                        if (have != want) {
+                            throw LoweringException(
+                                "reshape element count mismatch: ${operand.type.dims} vs $intArgs",
+                            )
+                        }
+                    }
+                    return emitter.op(
+                        kind = OpKind.RESHAPE,
+                        operands = listOf(operand),
+                        type = DxirType(operand.type.dtype, intArgs.toList()),
+                    )
+                }
+                "io.tlaloc.core.ops.transpose" -> {
+                    val perm = if (intArgs.isEmpty()) (rank - 1 downTo 0).toList()
+                    else intArgs.map { p ->
+                        val a = if (p < 0) p + rank else p
+                        if (a !in 0 until rank) {
+                            throw LoweringException("transpose axis $p out of range for rank $rank")
+                        }
+                        a
+                    }
+                    if (perm.size != rank || perm.toSet().size != rank) {
+                        throw LoweringException("transpose perm $intArgs is not a rank-$rank permutation")
+                    }
+                    val resultDims = perm.map { operand.type.dims[it] }
+                    return emitter.op(
+                        kind = OpKind.TRANSPOSE,
+                        operands = listOf(operand),
+                        type = DxirType(operand.type.dtype, resultDims),
+                        attrs = mapOf("permutation" to perm),
+                    )
+                }
+            }
+        }
+
         // §0.4.366 — axis-wise reductions (DiffKT parity, Phase A1):
         // `x.sum(1)`, `x.mean(0, keepDims = true)`, `x.max(0, 1)`. The vararg
         // axis arguments and the `keepDims` flag must be compile-time literals;
@@ -1439,6 +1558,15 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.mean" to OpKind.MEAN,
         "io.tlaloc.core.ops.max" to OpKind.MAX,
         "io.tlaloc.core.ops.min" to OpKind.MIN,
+    )
+
+    /** §0.4.367 — the RESHAPE-family + transpose user surface (Phase A2a). */
+    private val SHAPE_OP_SET: Set<String> = setOf(
+        "io.tlaloc.core.ops.squeeze",
+        "io.tlaloc.core.ops.unsqueeze",
+        "io.tlaloc.core.ops.flatten",
+        "io.tlaloc.core.ops.reshape",
+        "io.tlaloc.core.ops.transpose",
     )
 
     private val PRIMITIVE_DTYPE_MAP: Map<String, DType> = mapOf(

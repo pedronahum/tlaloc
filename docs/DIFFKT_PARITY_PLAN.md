@@ -38,10 +38,24 @@ reachable from `grad {}`, not new math. New-op families come after.
   synthesis reduction/unsqueeze/stretch arms + backward IrType solve for
   mixed-rank gradient bodies. v1 scope: 1–2 axes from `grad {}` (the
   fixed-arity synthesis delegates); IR level is fully general.
-- **A2. Shape ops in lambdas**: `reshape`, `transpose(perm)`, `concat`,
-  `slice`, `pad`, `stack` (sugar over CONCAT+RESHAPE), `squeeze`/`unsqueeze`
-  (sugar over RESHAPE), `broadcastTo`. All have VJPs + evals + emitter
-  spellings already.
+- **A2. Shape ops in lambdas** — split by the sentinel-dims boundary:
+  - **A2a ✅ (§0.4.367)**: the RESHAPE family (`squeeze(axis)` /
+    `unsqueeze(axis)` / `flatten()` / `reshape(vararg dims)`) +
+    `transpose(vararg perm)` (and the no-arg rank-2 receiver spelling),
+    E2E through `grad {}`. Axis positions, perms, and user-literal dims
+    are compile-time constants — sentinel-safe. Uniform synthesis rule
+    landed: concrete dxir dims bake as consts, -1 sentinels read
+    axis-matched `param.dims` at runtime. `flatten` is IR-level-only for
+    gradients (its splat needs a rank-1 dim = PRODUCT of param dims —
+    deferred with A2b).
+  - **A2b (open)**: `concat`, `slice`, `stack`, `pad` (note: DiffKT has
+    no user-facing pad — ours would be a bonus), `broadcastTo`/`expand`,
+    `view`/indexing, `withChange`, `meld`/`split`, `stats`. Blocked on
+    runtime-extent adjoints: ConcatRule/SliceRule bake operand extents
+    into SLICE/PAD attrs, which are -1 sentinels inside `grad {}` — the
+    adjoints need either runtime-shaped slice ops (a `sliceLike` host
+    family + attr-free IR spelling) or SPLIT (which today is
+    emitter-only: no interpreter arm, no VJP, no forward arm).
 - **A3. NN ops in lambdas**: `softmax(axis)`, `logSoftmax` (compose
   LOGSUMEXP), `conv2d`, `maxPool`, `avgPool`. Synthesis arms call the
   interpreter-backed `:core` hosts (new host impls needed for conv/pool —
