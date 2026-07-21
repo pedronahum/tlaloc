@@ -68,18 +68,44 @@ reachable from `grad {}`, not new math. New-op families come after.
       `DxirForwardTransform` already passes BROADCAST tangents through with
       attrs. Certified: IR-level rank-2→3 gradient + rank-1→3 JVP⇄VJP
       cross-identity, E2E `Σ a.broadcastTo(3,2,2) + Σ b⊙b` (da=3, db=2b).
-      **DEFERRED — in-place size-1 stretch** (`[1,C]→[N,C]`, `[N,1]→[N,C]`):
-      its adjoint must sum over exactly the axes that were size-1 in the
-      operand and keep them as size-1, but which axes those are is unknowable
-      under the -1 sentinel dims of `grad {}` (BroadcastRule can't distinguish
-      a stretched size-1 axis from a matched axis). Needs a runtime-extent
-      "unbroadcast/sum-to-shape" adjoint: BroadcastRule would emit an
-      attr-free `SUM_TO(upstream, template=operand)` (new dxir op +
-      interpreter arm summing upstream down to `template`'s RUNTIME shape +
-      a `sumToLike(upstream, template)` host fn for synthesis) — the reverse
-      mirror of the existing `stretchLike`. Fail-loud today: the host op and
-      interpreter `require` the trailing dims to match, so a size-1-stretch
-      attempt errors rather than silently returning a wrong gradient.
+    - **in-place size-1 stretch ✅ (§0.4.373)** (`[1,C]→[N,C]`, `[N,1]→[N,C]`),
+      E2E through `grad {}` — the runtime-extent `SUM_TO` adjoint that closes the
+      deferral. The stretch adjoint must sum the upstream over exactly the axes
+      that were size-1 in the operand and KEEP them size-1, but which axes those
+      are is unknowable under the -1 sentinel dims of `grad {}` (BroadcastRule
+      can't tell a stretched size-1 axis from a matched one). Landed: a new
+      `OpKind.SUM_TO(value, template)` — NumPy unbroadcast reading the extent from
+      the `template` operand's ACTUAL runtime shape (template = shape source only,
+      values never read), the reverse mirror of the BROADCAST stretch. Full
+      RUNTIME-EXTENT-PATTERN wiring — interpreter arm (leading + size-1 aligned
+      axis reduce), emitter arm (`reduce(add)` + `reshape` re-inserting size-1
+      axes, axes derived from concrete emit-time dims), `DxirForwardTransform`
+      tangent (linear in `value`; template's VALUE clone passed, not its tangent),
+      `sumToLike(value, template)` host twin (mirror of `stretchLike`), and
+      synthesis `irSumTo` + `deriveResultIrType`/backward-solver arms (SUM_TO
+      IrType = template operand's). `BroadcastRule`'s empty-`reduceDims` branch
+      (equal-rank identity axis map) now emits `SUM_TO(upstream, input)` instead
+      of passing upstream through — true identity is the no-op case (SUM_TO reduces
+      nothing); its `readsPrimalOperandIndices` gains `0`. The primal path was
+      opened too: host `broadcastTo` + FIR now accept an operand size-1 axis as a
+      stretch (full `broadcast_in_dim` eval, not `v[i % n]` tiling); `irBroadcast`
+      synthesises the in-place-stretch primal broadcast (concrete `broadcastTo(N,C)`
+      target → `stretchToRankN` with baked const dims, sentinel operand dims
+      validated at runtime). Certified: IR-level SUM_TO interpreter pins (row/col
+      keepdim + leading + identity), in-place stretch gradient (dx keeps the
+      stretched axis size-1) both row and col, JVP⇄VJP cross-identity, and E2E
+      `Σ a.broadcastTo(3,2)⊙b.broadcastTo(3,2)` (da = Σ-over-stretched-axis, keepdim;
+      db = broadcast(a)). **Scoped-out — the MIXED case** (a simultaneous
+      rank-increase AND an aligned size-1 stretch, e.g. `[1,C]→[B,N,C]`): its
+      adjoint takes the non-empty-`reduceDims` SUM path which can't ALSO sum a
+      stretched aligned axis; the FIR guards it (fail-loud when the operand dim is
+      concretely detectable as size-1). **DEFERRED — 2nd-order through in-place
+      broadcast**: SUM_TO has no VjpRule, so `forward(reverse(f))` (an HVP) through
+      an in-place stretch errors loudly. Its reverse (broadcast the T-shaped
+      upstream back up to `value`'s runtime shape U) needs a runtime-extent
+      broadcast-to-template op (the mirror of SUM_TO — a `BROADCAST_LIKE(upstream,
+      template=value)` reading U from `value`'s runtime dims); 1st-order is this
+      slice.
     - **`concat`, `slice`, `stack`, `pad` (still deferred)**: blocked on
       runtime-extent adjoints — ConcatRule/SliceRule/PadRule bake operand
       extents into SLICE/PAD `start_indices`/`limit_indices`/`low`/`high`
@@ -308,7 +334,7 @@ UNARY/BINARY maps** → A5) · `tan atan` ❌ (C2) ·
 | `softmax(axis) / logSoftmax / logSoftmaxGrad` | 🟡 | SOFTMAX/LOGSUMEXP + VJPs exist → A3 |
 | `crossEntropyLoss / crossEntropyLossFromOneHot / nllLossFromOneHot` | ✅ | §0.4.370: `crossEntropyLoss`/`nllLoss` composed in FIR from logSoftmax, E2E through `grad {}` (CROSS_ENTROPY OpKind stays emitter-only) |
 | `embedding(table, indices, paddingIndex)` | 🟡 | §0.4.370: EmbeddingRule VjpRule + EMBEDDING_GRAD adjoint + interpreter + forward tangent, **IR-level only** (no `grad {}` FIR/synthesis arm yet); `paddingIndex` not modelled |
-| `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) — in-place size-1 stretch deferred (runtime-extent adjoint) |
+| `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) — mixed rank-increase+stretch + 2nd-order-through-broadcast deferred |
 | `transpose(axes) / leftTranspose / rightTranspose` | 🟡 | TRANSPOSE + VJP → A2 (left/right = sugar) |
 | `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |
 | `slice / view(index/range/axis) / withChange` (functional update) | 🟡 | SLICE/GATHER/SCATTER + VJPs → A2 (indexing + `withChange` = slice/scatter sugar) |

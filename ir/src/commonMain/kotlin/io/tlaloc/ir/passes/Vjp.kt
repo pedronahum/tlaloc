@@ -1210,7 +1210,13 @@ object VjpRegistry {
      * the sum). Neither requires reading the primal operand's cached value.
      */
     val BroadcastRule: VjpRule = object : VjpRule {
-        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        // §0.4.373 — the in-place size-1 stretch adjoint dereferences the primal
+        // input (operand 0) as SUM_TO's `template` operand (a shape source), so
+        // the input subgraph must be cloned into the gradient body. The scalar
+        // and rank-increasing SUM paths don't read it, but the declaration is
+        // static per rule — conservatively including 0 keeps the runtime-extent
+        // adjoint's operand live without affecting the other paths' correctness.
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val input = op.operands[0]
             @Suppress("UNCHECKED_CAST")
@@ -1229,9 +1235,19 @@ object VjpRegistry {
             val outputRank = op.type.rank
             val reduceDims = (0 until outputRank).filter { it !in broadcastDims }
             if (reduceDims.isEmpty()) {
-                // Degenerate: input and output have the same shape (broadcast is an
-                // identity). Upstream passes straight through.
-                return listOf(input to upstream)
+                // Equal-rank broadcast_dimensions (identity axis map). Either a
+                // TRUE identity (input shape == output shape) OR an in-place
+                // size-1 stretch (`[1,C]→[N,C]`, `[N,1]→[N,C]`): the adjoint must
+                // sum over exactly the axes that were size-1 in `input` and keep
+                // them size-1. Which axes those are is unknowable under the -1
+                // sentinel dims of `grad {}` (BroadcastRule can't tell a stretched
+                // size-1 axis from a matched one), so we defer the extent to
+                // runtime via SUM_TO(upstream, template=input): it reads `input`'s
+                // ACTUAL runtime shape and numpy-unbroadcasts. True identity is the
+                // no-op case (SUM_TO reduces nothing → passes upstream through).
+                // §0.4.373.
+                val contribution = builder.op(OpKind.SUM_TO, listOf(upstream, input), input.type)
+                return listOf(input to contribution)
             }
             val contribution = builder.op(
                 OpKind.SUM,

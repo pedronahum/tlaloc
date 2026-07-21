@@ -1236,16 +1236,31 @@ object FirLambdaToDxirLowering {
                         )
                     }
                     val offset = outRank - rank
-                    // Trailing target dims must match the operand's (no in-place
-                    // stretch). Only enforceable when the operand dim is concrete;
-                    // under sentinels the runtime host op / interpreter fail loudly.
+                    // §0.4.373 — trailing target dims must either MATCH the
+                    // operand (only enforceable when the operand dim is concrete)
+                    // or be an in-place size-1 stretch (operand dim == 1 → the
+                    // BroadcastRule adjoint sums the stretched axis via SUM_TO,
+                    // reading the extent at runtime). Under sentinels the runtime
+                    // host op / interpreter fail loudly on a genuine mismatch.
+                    // The MIXED case — a simultaneous rank-increase (offset > 0)
+                    // AND an aligned size-1 stretch — stays deferred: its adjoint
+                    // (the non-empty-reduceDims SUM path) can't ALSO sum a
+                    // stretched aligned axis, so guard it when concretely
+                    // detectable (see the DIFFKT_PARITY_PLAN A2b deferral note).
                     for (j in 0 until rank) {
                         val od = operand.type.dims[j]
-                        if (od > 0 && od != intArgs[offset + j]) {
+                        val target = intArgs[offset + j]
+                        if (od > 1 && od != target) {
                             throw LoweringException(
                                 "broadcastTo: operand dim $j = $od does not match target " +
-                                    "${intArgs[offset + j]} (in-place size-1 stretch unsupported in " +
-                                    "grad {}; only new leading axes)",
+                                    "$target (not an equal dim nor a size-1 stretch)",
+                            )
+                        }
+                        if (offset > 0 && od == 1 && target > 1) {
+                            throw LoweringException(
+                                "broadcastTo: simultaneous rank-increase and in-place size-1 " +
+                                    "stretch (axis $j: 1 -> $target) is unsupported in grad {} " +
+                                    "(deferred); split into reshape + broadcastTo",
                             )
                         }
                     }

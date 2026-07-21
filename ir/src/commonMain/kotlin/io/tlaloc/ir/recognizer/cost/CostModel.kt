@@ -141,6 +141,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
         inputElems
     }
 
+    // §0.4.373 — SUM_TO (numpy unbroadcast): one add per value element into
+    // the (smaller) template-shaped accumulator, like a reduction.
+    OpKind.SUM_TO -> op.operands[0].type.elementCount.toDouble()
+
     // Softmax = max + sub + exp + sum + div per element of the reduced
     // axis. ~5 FLOPs per input element, plus the reduction.
     OpKind.SOFTMAX, OpKind.LOGSUMEXP -> 5.0 * op.operands[0].type.elementCount.toDouble()

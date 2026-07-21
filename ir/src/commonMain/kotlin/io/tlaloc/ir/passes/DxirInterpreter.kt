@@ -926,6 +926,51 @@ object DxirInterpreter {
                     out
                 }
             }
+            // §0.4.373 — SUM_TO (numpy unbroadcast): reduce operand[0] (value,
+            // shape U) down to operand[1] (template, shape T) — the reverse
+            // mirror of BROADCAST's in-place size-1 stretch. Sum over the
+            // leading (U.rank − T.rank) axes AND over aligned axes where T == 1
+            // but U > 1, keeping those axes size-1. Template contributes SHAPE
+            // ONLY (its values are never evaluated — we read `.type.dims`).
+            OpKind.SUM_TO -> {
+                val value = evalNode(op.operands[0], env, multiResults)
+                val uDims = op.operands[0].type.dims
+                val tDims = op.operands[1].type.dims
+                val ru = uDims.size
+                val rt = tDims.size
+                require(rt <= ru) {
+                    "DxirInterpreter: SUM_TO template rank $rt exceeds value rank $ru"
+                }
+                val offset = ru - rt
+                for (i in 0 until rt) {
+                    require(tDims[i] == uDims[offset + i] || tDims[i] == 1) {
+                        "DxirInterpreter: SUM_TO template dim $i = ${tDims[i]} incompatible with " +
+                            "value axis ${offset + i} = ${uDims[offset + i]} (must be equal or 1)"
+                    }
+                }
+                var outSize = 1
+                for (d in tDims) outSize *= d
+                val out = FloatArray(outSize)
+                // Row-major strides.
+                val inStrides = IntArray(ru)
+                run { var s = 1; for (i in ru - 1 downTo 0) { inStrides[i] = s; s *= uDims[i] } }
+                val outStrides = IntArray(rt)
+                run { var s = 1; for (i in rt - 1 downTo 0) { outStrides[i] = s; s *= tDims[i] } }
+                for (flat in value.indices) {
+                    var rem = flat
+                    var outIdx = 0
+                    for (k in 0 until ru) {
+                        val coord = rem / inStrides[k]
+                        rem -= coord * inStrides[k]
+                        val tAxis = k - offset
+                        // Leading axes (tAxis < 0) and size-1-stretched aligned
+                        // axes (tDims == 1) fold into index 0 → summed.
+                        if (tAxis >= 0 && tDims[tAxis] != 1) outIdx += coord * outStrides[tAxis]
+                    }
+                    out[outIdx] += value[flat]
+                }
+                out
+            }
             // §0.4.366 — MEAN (Phase A1): the SUM arm divided by the reduced
             // element count. Until now MEAN had no interpreter arm at all — it
             // was unreachable from the user surface (no UNARY_OP_MAP entry) and

@@ -128,6 +128,11 @@ object DxirForwardTransform {
             OpKind.SLICE, OpKind.PAD, OpKind.CONCAT, OpKind.AVGPOOL2D ->
                 b.op(node.op, node.operands.map { t(it) }, ty, node.attrs)
 
+            // §0.4.373 — SUM_TO is linear in `value` (operand[0]); the template
+            // (operand[1]) contributes SHAPE ONLY, so its tangent is irrelevant —
+            // pass its primal VALUE clone (vOps[1]), never its tangent.
+            OpKind.SUM_TO -> b.op(OpKind.SUM_TO, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
+
             // §0.4.363 — maxpool tangent: route dx through the argmax mask,
             // then window-sum via avgpool × kh·kw. Same v1 scope and tie
             // convention as [VjpRegistry.MaxPool2dRule] (its KDoc has the

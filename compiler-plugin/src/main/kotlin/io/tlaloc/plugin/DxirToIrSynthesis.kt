@@ -223,6 +223,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 operandIrTypes[op.operands[1].id]
                     ?: operandIrTypes[op.operands[2].id]
             }
+            // §0.4.373 — SUM_TO's result shape IS the template operand's shape
+            // (operand[1]), so its IrType equals the template's. The value
+            // operand (operand[0]) is star-projected in `sumToLike`, so its exact
+            // IrType is irrelevant to synthesis.
+            OpKind.SUM_TO -> {
+                if (op.operands.size != 2) return null
+                operandIrTypes[op.operands[1].id]
+            }
             else -> null
         }
     }
@@ -661,6 +669,19 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             changed = true
                         }
                     }
+                    // §0.4.373 — SUM_TO's output shape equals its template
+                    // operand's shape (operand[1]). When the SUM_TO node's own
+                    // IrType is known (it's typically a returned gradient) but the
+                    // template operand's isn't yet, solve it as the output's.
+                    OpKind.SUM_TO -> {
+                        if (n.operands.size != 2) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val templateId = n.operands[1].id
+                        if (paramIrTypeMap[templateId] == null && isAcceptedTensorType(n.operands[1].type)) {
+                            paramIrTypeMap[templateId] = outputIr
+                            changed = true
+                        }
+                    }
                     OpKind.RESHAPE -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
@@ -966,6 +987,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         if (op.op == OpKind.RESHAPE) return irReshape(op, env, context)
         if (op.op == OpKind.SOFTMAX) return irSoftmax(op, env, context)
+        if (op.op == OpKind.SUM_TO) return irSumTo(op, env, context)
 
         val operandDecls = op.operands.mapIndexed { idx, o ->
             env[o.id] ?: return reject(
@@ -1499,12 +1521,40 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (!isAcceptedTensorType(op.type) || !isAcceptedTensorType(operand.type)) return null
         if (operand.type.rank != op.type.rank) return null
+        // §0.4.373 — a sentinel operand dim (≤ 0) can't be statically verified as
+        // a valid stretch target; accept it and let the host `stretchTo` validate
+        // at runtime (the same fail-loud looseness as the `stretchLike` fallback).
+        // This admits the in-place size-1 stretch primal (`broadcastTo([1,C]→
+        // [N,C])`) recomputed into a grad body, whose operand rides as -1 dims.
         val ok = operand.type.dims.indices.all {
-            operand.type.dims[it] == op.type.dims[it] || operand.type.dims[it] == 1
+            val od = operand.type.dims[it]
+            od <= 0 || od == op.type.dims[it] || od == 1
         }
         if (!ok) return null
         val operandDecl = env[operand.id] ?: return null
-        val targetIrType = irTypeForNode(op, context) as? IrSimpleType
+        val targetIrType = (irTypeForNode(op, context) ?: context.tensorIrType) as? IrSimpleType
+        // §0.4.373 — all-concrete target (a user-literal `broadcastTo(N, C)`):
+        // every target dim bakes as a const via `stretchToRankN`, no param
+        // matching needed — sentinel operand dims are validated at runtime by
+        // `stretchTo`. Mirrors the scalar-splat all-concrete fast path in
+        // [irBroadcast]. Un-reduce stretches (§0.4.366) keep SENTINEL targets
+        // (the param's shape) so they skip this and take the param-match path.
+        if (targetIrType != null && op.type.dims.all { it > 0 }) {
+            val helperSym = stretchToRankSymbol(op.type.rank)
+            val shapeTypeArg = targetIrType.arguments.firstOrNull()?.typeOrNull
+            if (helperSym != null && shapeTypeArg != null) {
+                val call = IrCallImpl.fromSymbolOwner(
+                    startOffset = startOffset,
+                    endOffset = endOffset,
+                    type = targetIrType,
+                    symbol = helperSym,
+                )
+                if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeTypeArg
+                call.arguments[0] = irGet(operandDecl)
+                for (i in 0 until op.type.rank) call.arguments[i + 1] = intConst(op.type.dims[i])
+                return call
+            }
+        }
         if (targetIrType != null && context.fnParams.isNotEmpty()) {
             val axisMatches = matchBroadcastAxesToParams(
                 targetIrType,
@@ -1573,6 +1623,50 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("stretchLike"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.373 — SUM_TO in gradient bodies: BroadcastRule's runtime-extent
+     * unbroadcast adjoint for the in-place size-1 stretch. Calls the host twin
+     * `sumToLike(value, template)`: `value` (operand[0]) is the upstream
+     * gradient at the broadcast output shape, `template` (operand[1]) is the
+     * primal broadcast input whose RUNTIME shape drives the reduction (its
+     * values are never read). Result IrType = the template's IrType (SUM_TO's
+     * output shape equals the template's), resolved via [irTypeForNode] —
+     * mirror of [irBroadcastStretch]'s `stretchLike` fallback.
+     */
+    private fun IrBuilderWithScope.irSumTo(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        val valueDecl = env[op.operands[0].id] ?: return null
+        val templateDecl = env[op.operands[1].id] ?: return null
+        val resultIrType = irTypeForNode(op, context) as? IrSimpleType
+            ?: irTypeForNode(op.operands[1], context) as? IrSimpleType
+            ?: return null
+        val shapeTypeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val helperSym = sumToLikeSymbol() ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = helperSym,
+        )
+        call.typeArguments[0] = shapeTypeArg
+        call.arguments[0] = irGet(valueDecl)
+        call.arguments[1] = irGet(templateDecl)
+        return call
+    }
+
+    /** §0.4.373 — resolves `io.tlaloc.core.ops.sumToLike`. */
+    private fun sumToLikeSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("sumToLike"),
         )
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }

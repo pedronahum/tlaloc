@@ -716,6 +716,50 @@ fun <S : Shape> stretchLike(x: DTensor<*, F32>, template: DTensor<S, F32>): DTen
     stretchTo(x, template.dims)
 
 /**
+ * §0.4.373 — numpy unbroadcast: reduce [value] down to [template]'s RUNTIME
+ * dims — the reverse mirror of [stretchLike]. This is the synthesis/plugin
+ * twin of the dxir interpreter's SUM_TO arm: BroadcastRule's adjoint for the
+ * in-place size-1 stretch (`[1,C]→[N,C]`, `[N,1]→[N,C]`) sums `value` over the
+ * leading (value.rank − template.rank) axes AND over every aligned axis where
+ * the template extent is 1 but `value`'s is > 1, keeping those axes size-1.
+ * Which axes were size-1-stretched is unknowable at compile time under the -1
+ * sentinel dims of `grad {}`, so the extent is read from [template]'s ACTUAL
+ * runtime shape here. [template] contributes SHAPE ONLY — its values are never
+ * read.
+ */
+fun <S : Shape> sumToLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DTensor<S, F32> {
+    val u = value.dims
+    val t = template.dims
+    val ru = u.size
+    val rt = t.size
+    require(rt <= ru) { "sumToLike: template rank $rt exceeds value rank $ru" }
+    val offset = ru - rt
+    for (i in 0 until rt) require(t[i] == u[offset + i] || t[i] == 1) {
+        "sumToLike: template dim $i = ${t[i]} incompatible with value axis ${offset + i} = ${u[offset + i]} (must be equal or 1)"
+    }
+    val inStrides = IntArray(ru)
+    run { var s = 1; for (i in ru - 1 downTo 0) { inStrides[i] = s; s *= u[i] } }
+    val outStrides = IntArray(rt)
+    run { var s = 1; for (i in rt - 1 downTo 0) { outStrides[i] = s; s *= t[i] } }
+    var outSize = 1
+    for (d in t) outSize *= d
+    val v = value.hostF32()
+    val out = FloatArray(outSize)
+    for (flat in v.indices) {
+        var rem = flat
+        var outIdx = 0
+        for (k in 0 until ru) {
+            val coord = rem / inStrides[k]
+            rem -= coord * inStrides[k]
+            val tAxis = k - offset
+            if (tAxis >= 0 && t[tAxis] != 1) outIdx += coord * outStrides[tAxis]
+        }
+        out[outIdx] += v[flat]
+    }
+    return DTensor(HostF32Storage(out), t.copyOf(), F32)
+}
+
+/**
  * §0.4.366 — insert size-1 axes at the given (result-indexed, ascending)
  * positions. The host twin of the keepdims RESHAPE the reduction VJP rules
  * emit (`upstream` at the squeezed shape → the keepdims spelling): axis
@@ -832,11 +876,11 @@ fun <S : Shape> DTensor<S, F32>.transpose(vararg perm: Int): DTensor<Shape, F32>
 /**
  * §0.4.371 — rank-increasing broadcast (DiffKT `broadcastTo`/`expand`, Phase
  * A2b). NumPy right-alignment: the receiver's axes map to the TRAILING axes of
- * [newDims]; the new leading axes are replicated. Trailing dims must match the
- * receiver exactly — in-place size-1 stretch (`[1,C]→[N,C]`) is NOT supported
- * (its `grad {}` adjoint needs the operand's runtime extent, a -1 sentinel).
- * Because the operand maps to the innermost (contiguous) axes, the output is
- * just the operand block tiled `prod(leading dims)` times: `out[i] = v[i % n]`.
+ * [newDims]; the new leading axes are replicated. §0.4.373 — in-place size-1
+ * stretch (`[1,C]→[N,C]`, `[N,1]→[N,C]`) is now supported too: an operand axis
+ * of extent 1 replicates across its (equal-position) target extent (full
+ * `stablehlo.broadcast_in_dim` semantics, matching the dxir interpreter's
+ * BROADCAST arm). A non-1 operand axis must match its target exactly.
  */
 fun <S : Shape> DTensor<S, F32>.broadcastTo(vararg newDims: Int): DTensor<Shape, F32> {
     val r = dims.size
@@ -844,15 +888,29 @@ fun <S : Shape> DTensor<S, F32>.broadcastTo(vararg newDims: Int): DTensor<Shape,
     require(outRank >= r) { "broadcastTo: target rank $outRank < operand rank $r (only new leading axes)" }
     for (d in newDims) require(d > 0) { "broadcastTo: dims must be positive, got ${newDims.toList()}" }
     val offset = outRank - r
-    for (j in 0 until r) require(dims[j] == newDims[offset + j]) {
-        "broadcastTo: operand dim $j = ${dims[j]} must match target ${newDims[offset + j]} " +
-            "(only new leading axes; in-place size-1 stretch unsupported)"
+    for (j in 0 until r) require(dims[j] == newDims[offset + j] || dims[j] == 1) {
+        "broadcastTo: operand dim $j = ${dims[j]} must match target ${newDims[offset + j]} or be a size-1 stretch"
     }
     val v = hostF32()
-    val n = v.size
+    // General broadcast_in_dim eval: operand axis j maps to output axis
+    // (offset + j); a size-1 operand axis contributes index 0 (replicates).
+    val inStrides = IntArray(r)
+    run { var s = 1; for (i in r - 1 downTo 0) { inStrides[i] = s; s *= dims[i] } }
+    val outStrides = IntArray(outRank)
+    run { var s = 1; for (i in outRank - 1 downTo 0) { outStrides[i] = s; s *= newDims[i] } }
     var outSize = 1
     for (d in newDims) outSize *= d
-    val out = FloatArray(outSize) { v[it % n] }
+    val out = FloatArray(outSize) { flat ->
+        var rem = flat
+        var src = 0
+        for (k in 0 until outRank) {
+            val coord = rem / outStrides[k]
+            rem -= coord * outStrides[k]
+            val j = k - offset
+            if (j >= 0 && dims[j] != 1) src += coord * inStrides[j]
+        }
+        v[src]
+    }
     return DTensor(HostF32Storage(out), newDims.copyOf(), F32)
 }
 

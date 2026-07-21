@@ -168,6 +168,12 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 step, name, ops[0], node.operands[0].type, node.type,
                 dims = readReductionDims(node, node.operands[0].type),
             )
+            // §0.4.373 — SUM_TO (numpy unbroadcast): reduce operand[0] to the
+            // template (operand[1]) shape. Reduce axes derived from the concrete
+            // operand dims (at emit time dims are concrete, never sentinels).
+            OpKind.SUM_TO -> emitSumTo(
+                step, name, ops[0], node.operands[0].type, node.operands[1].type,
+            )
             OpKind.MAX -> emitReduce(
                 step, name, ops[0], node.operands[0].type, node.type,
                 reducer = "stablehlo.maximum", initLiteral = negInfLiteral(node.operands[0].type.dtype),
@@ -765,6 +771,56 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine("$step$divTarget = stablehlo.divide $sumName, $divisor : $intermMlir")
         if (keepDims) {
             inflateKeepDims(step, name, divTarget, intermType, outputType, inputType.rank, dims)
+        }
+    }
+
+    /**
+     * §0.4.373 — SUM_TO (numpy unbroadcast): reduce [value] (shape U) down to
+     * [template]'s shape (T, T.rank ≤ U.rank, right-aligned). Reduce axes = the
+     * leading (U.rank − T.rank) axes ∪ the aligned axes where T == 1 but U > 1.
+     * Emitted as a `stablehlo.reduce(add)` over those axes (yielding the dropped
+     * shape) followed by a `stablehlo.reshape` re-inserting the size-1 axes to
+     * land exactly on T. Dims are concrete at emit time (never sentinels).
+     */
+    private fun emitSumTo(
+        step: String,
+        name: String,
+        x: String,
+        valueType: DxirType,
+        templateType: DxirType,
+    ) {
+        val u = valueType.dims
+        val t = templateType.dims
+        val ru = u.size
+        val rt = t.size
+        require(rt <= ru) { "SUM_TO template rank $rt exceeds value rank $ru" }
+        val offset = ru - rt
+        val reduceAxes = mutableListOf<Int>()
+        for (i in 0 until offset) reduceAxes.add(i)
+        for (i in 0 until rt) {
+            require(t[i] == u[offset + i] || t[i] == 1) {
+                "SUM_TO template dim $i = ${t[i]} incompatible with value axis ${offset + i} = ${u[offset + i]}"
+            }
+            if (t[i] == 1 && u[offset + i] != 1) reduceAxes.add(offset + i)
+        }
+        if (reduceAxes.isEmpty()) {
+            // True identity (T == U): pass the value through unchanged.
+            emitReshape(step, name, x, valueType, templateType)
+            return
+        }
+        val dropped = reducedType(valueType, reduceAxes)
+        val needReshape = dropped.dims != templateType.dims
+        val reduceTarget = if (needReshape) synth() else name
+        val elem = mlirElementType(valueType.dtype)
+        val scalarT = "tensor<$elem>"
+        val init = synth()
+        out.appendLine("$step$init = stablehlo.constant dense<0.0> : $scalarT")
+        out.appendLine(
+            "$step$reduceTarget = stablehlo.reduce($x init: $init) applies stablehlo.add across dimensions = [${reduceAxes.joinToString(", ")}] " +
+                ": (${valueType.toMlir()}, $scalarT) -> ${dropped.toMlir()}",
+        )
+        if (needReshape) {
+            emitReshape(step, name, reduceTarget, dropped, templateType)
         }
     }
 

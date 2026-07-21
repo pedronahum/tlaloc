@@ -59,6 +59,20 @@ enum class OpKind {
     // Shape
     RESHAPE, TRANSPOSE, BROADCAST, CONCAT, SPLIT, SLICE, GATHER, SCATTER,
 
+    // §0.4.373 — runtime-extent unbroadcast (the reverse mirror of BROADCAST's
+    // in-place size-1 stretch). SUM_TO(value, template) → template's shape:
+    // NumPy unbroadcast — sum `value` over the leading (value.rank −
+    // template.rank) axes AND over every aligned axis where template == 1 but
+    // value > 1 (keeping those axes size-1). The `template` operand contributes
+    // SHAPE ONLY — its values are never read. This is what BroadcastRule emits
+    // for the in-place size-1 stretch (`[1,C]→[N,C]`, `[N,1]→[N,C]`): which
+    // aligned axes were size-1-stretched is unknowable under the -1 sentinel
+    // dims of `grad {}`, so the adjoint reads the extent from the primal
+    // operand's ACTUAL runtime shape at execution instead of baking it as an
+    // attr. The host twin is `sumToLike(value, template)` (mirror of
+    // `stretchLike`).
+    SUM_TO,
+
     // §0.4.360 — shape-plumbing activation (the DiffKT-gap item 2 surface).
     //
     // WHERE(pred: Bool tensor, a, b) — elementwise select; the differentiable
