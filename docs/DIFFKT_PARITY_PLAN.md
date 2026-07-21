@@ -217,19 +217,25 @@ reachable from `grad {}`, not new math. New-op families come after.
     through WhereRule (full upstream to the larger/smaller/in-bounds operand,
     ties + boundaries route to `a` on the `>=`/`<=` equality). `clip`'s bounds
     are compile-time Float literals (new `floatLiteralArg` FIR helper).
-  - **A4b (open) — `outerProduct` grad{} E2E**: host op + FIR lowering
-    (`MATMUL(reshape(a, [n,1]), reshape(b, [1,m]))`) + IR-level gradient all
-    landed §0.4.369 and CERTIFIED (`DxirElementwiseMaxMinClipGradTest`), and
-    the runtime host path works. But `grad {}` **falls back to the tape**: the
-    forward reshapes synthesise fine, yet MatmulRule's adjoint emits
-    `TRANSPOSE([n,1]) → [1,n]`, and the reshape-introduced unit axis has no
-    param-sourced shape atom, so `irTranspose`'s IrType derivation returns null
-    (`irOpFor returned null for TRANSPOSE`). Fixing needs either a
-    `deriveResultIrType` arm that synthesises a `Lit<1>` atom for
-    reshape-created unit axes (so the downstream transpose resolves), or a
-    transpose-free lowering (broadcast-MUL) whose own rank-increasing-BROADCAST
-    synthesis + BroadcastRule un-broadcast are equally unproven at sentinel
-    dims. Same shape as A2a's `flatten` deferral — IR-level-only for gradients.
+  - **A4b ✅ (§0.4.375) — `outerProduct` grad{} E2E**: host op + FIR lowering
+    (`MATMUL(reshape(a, [n,1]), reshape(b, [1,m]))`) + IR-level gradient landed
+    §0.4.369; §0.4.375 closes the `grad {}` synthesis fallback. Root cause: the
+    reshape-created unit axis had no param-sourced shape atom, so MatmulRule's
+    adjoint `TRANSPOSE([n,1]) → [1,n]` could not derive an IrType
+    (`irOpFor returned null for TRANSPOSE`). Fix: a `deriveInsertedAxesDTensor`
+    helper that synthesises a placeholder `Lit<Int>` atom for reshape-created
+    unit axes, wired into TWO derivation sites — a FORWARD `deriveResultIrType`
+    RESHAPE arm (rank-increasing unit-axis insertion: types the `[n]→[n,1]` /
+    `[m]→[1,m]` reshapes so the downstream TRANSPOSE resolves) and a BACKWARD
+    RESHAPE-solver arm (the squeeze `[n,1]→[n]` / `[1,m]→[m]` on the way out:
+    re-inserts the unit axis so the MATMUL output IrType is known, letting the
+    existing MATMUL operand-solver fill the `[n,m]` scalar-seed's IrType). The
+    placeholder atom is never read for a runtime-dim decision — unsqueeze/squeeze
+    emit by axis position, and the seed-broadcast axis-matcher reads only the
+    param-sourced `n`/`m` atoms. CERTIFIED E2E (`OuterProductGradientTest`): the
+    grad{} params carry DISTINCT atoms (`n = Sym`, `m = Lit<Int>`) so the seed's
+    `[n,m]` shape resolves unambiguously; `∇ Σ outerProduct(a, b)` synthesises
+    with no fallback and matches `da_i = Σ_j b[j]`, `db_j = Σ_i a[i]`.
 - **A5. Binary-op broadcasting + orphaned lowerings** *(audit)*:
   implicit broadcasting on tensor binary ops (`broadcast(S1,S2)` — DiffKT
   broadcasts everywhere) and `Float×DTensor`/`DScalar×DTensor` mixing;
@@ -359,7 +365,7 @@ UNARY/BINARY maps** → A5) · `tan atan` ❌ (C2) ·
 | `stats()` = (mean, variance) | ❌ | 2-line sugar once A1 lands |
 | `matmul` (incl. generalized shape-block form) | ✅ | any rank ≥ 2 |
 | `innerProduct` | ✅ | DOT |
-| `outerProduct` | 🟡 | §0.4.369: host + FIR (matmul on unsqueezed) + IR-level grad ✅; grad{} E2E deferred (A4b: MatmulRule transpose of reshape-introduced unit axis) |
+| `outerProduct` | ✅ | §0.4.369: host + FIR (matmul on unsqueezed) + IR-level grad; §0.4.375: grad{} E2E (A4b — `Lit<Int>` placeholder atom for reshape-created unit axes types MatmulRule's transpose forward + squeeze backward) |
 | `matdiv` | ➖ | **sparse-only** in DiffKT (dense explicitly unsupported) → E |
 | `conv2d(hStride, vStride, Same/Valid/Explicit padding)` | ✅ | §0.4.362 **exceeds**: DiffKT has no groups/dilation, NHWC only |
 | `maxPool / avgPool / maxPoolWithIndices` | ✅ | §0.4.363 **exceeds**: DiffKT pooling is non-overlapping only (stride=window, divisibility required, no padding) → C4 reclassified beyond-parity |

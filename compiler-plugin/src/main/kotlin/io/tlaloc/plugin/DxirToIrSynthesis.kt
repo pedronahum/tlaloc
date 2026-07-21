@@ -238,6 +238,23 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[1].id]
             }
+            // §0.4.375 (Phase A4b) — RESHAPE that only INSERTS unit axes
+            // (rank-increasing, e.g. `outerProduct`'s `[n]→[n,1]` / `[m]→[1,m]`
+            // forward reshapes). The reshape-created size-1 axis carries no
+            // param-sourced atom, so [deriveInsertedAxesDTensor] fills it with a
+            // placeholder `Lit<Int>`; the operand's atoms fill the rest. This
+            // types the RESHAPE so the downstream TRANSPOSE (MatmulRule's adjoint)
+            // derives structurally instead of hitting `irOpFor returned null for
+            // TRANSPOSE`. Only unit-axis insertions qualify (`insertedUnitAxes`
+            // non-empty); rank-preserving / squeezing / general relayouts return
+            // null and fall back as before.
+            OpKind.RESHAPE -> {
+                if (op.operands.size != 1) return null
+                val operandIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val inserted = insertedUnitAxes(op.operands[0].type.dims, op.type.dims)
+                    ?.takeIf { it.isNotEmpty() } ?: return null
+                deriveInsertedAxesDTensor(operandIr, inserted, op.type.rank)
+            }
             else -> null
         }
     }
@@ -363,6 +380,63 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             ?: org.jetbrains.kotlin.types.Variance.INVARIANT
         val proj = org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(newInner, variance)
         return reshapeIrSimpleType(dtensor, listOf(proj, dtensor.arguments[1]))
+    }
+
+    /**
+     * §0.4.375 (Phase A4b) — inverse of [deriveDroppedAxesDTensor]: given a
+     * lower-rank `DTensor<RankM<…>, F32>` and result-indexed [inserted]
+     * unit-axis positions, returns `DTensor<RankN<…>, F32>` (N = M + |inserted|)
+     * carrying a placeholder `Lit<Int>` atom at each inserted position and the
+     * operand's atoms elsewhere. The reshape-created unit axes in
+     * `outerProduct`'s adjoint (`[n]→[n,1]` / `[m]→[1,m]` forward, and the
+     * `[n,1]→[n]` / `[1,m]→[m]` squeeze on the way out) carry no param-sourced
+     * shape atom, so the `Lit<Int>` placeholder lets the downstream
+     * TRANSPOSE/MATMUL derivations type structurally. The size-1 axis's static
+     * atom is never read for a runtime-dim decision — unsqueeze/squeeze emit by
+     * axis position, and the scalar-splat seed's shape is matched only against
+     * the param-sourced atoms (the distinct `n`/`m` markers), never the
+     * placeholder.
+     */
+    private fun deriveInsertedAxesDTensor(
+        dtensor: IrSimpleType,
+        inserted: List<Int>,
+        resultRank: Int,
+    ): IrSimpleType? {
+        if (dtensor.arguments.size != 2) return null
+        val inner = dtensor.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        val existing = inner.arguments.map { it.typeOrNull ?: return null }
+        if (existing.size + inserted.size != resultRank) return null
+        if (inserted.toSet().size != inserted.size) return null
+        if (inserted.any { it !in 0 until resultRank }) return null
+        val litAtom = litIntAtom() ?: return null
+        val insertedSet = inserted.toSet()
+        val newAtoms = ArrayList<IrType>(resultRank)
+        var srcIdx = 0
+        for (pos in 0 until resultRank) {
+            if (pos in insertedSet) {
+                newAtoms += litAtom
+            } else {
+                newAtoms += existing.getOrNull(srcIdx++) ?: return null
+            }
+        }
+        val rankClassName = when (resultRank) {
+            1 -> "io/tlaloc/core/Rank1"
+            2 -> "io/tlaloc/core/Rank2"
+            3 -> "io/tlaloc/core/Rank3"
+            else -> return null
+        }
+        val rankClass = pluginContext.referenceClass(ClassId.fromString(rankClassName)) ?: return null
+        val newInner = rankClass.typeWith(newAtoms)
+        val variance = (dtensor.arguments[0] as? org.jetbrains.kotlin.ir.types.IrTypeProjection)?.variance
+            ?: org.jetbrains.kotlin.types.Variance.INVARIANT
+        val proj = org.jetbrains.kotlin.ir.types.impl.makeTypeProjection(newInner, variance)
+        return reshapeIrSimpleType(dtensor, listOf(proj, dtensor.arguments[1]))
+    }
+
+    /** §0.4.375 — the placeholder `Lit<Int>` shape atom for reshape-created unit axes. */
+    private fun litIntAtom(): IrType? {
+        val litClass = pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/Lit")) ?: return null
+        return litClass.typeWith(listOf(pluginContext.irBuiltIns.intType))
     }
 
     /**
@@ -706,7 +780,23 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
                         val operand = n.operands[0]
                         if (paramIrTypeMap[operand.id] != null || !isAcceptedTensorType(operand.type)) continue
-                        val inserted = insertedUnitAxes(operand.type.dims, n.type.dims) ?: continue
+                        val inserted = insertedUnitAxes(operand.type.dims, n.type.dims)
+                        if (inserted == null) {
+                            // §0.4.375 (Phase A4b) — SQUEEZE adjoint: the operand has
+                            // MORE axes than the result (the reshape DROPPED unit axes,
+                            // e.g. `outerProduct`'s adjoint `[n,1]→[n]` / `[1,m]→[m]` on
+                            // the way out). Solve the operand's higher-rank IrType from
+                            // the returned lower-rank grad by re-inserting a `Lit<Int>`
+                            // at each dropped position (operand-indexed). This types the
+                            // MATMUL result feeding the reshape, which in turn lets the
+                            // MATMUL solver fill the scalar-seed's `[n,m]` IrType.
+                            val dropped = insertedUnitAxes(n.type.dims, operand.type.dims)
+                                ?.takeIf { it.isNotEmpty() } ?: continue
+                            val solved = deriveInsertedAxesDTensor(outputIr, dropped, operand.type.rank) ?: continue
+                            paramIrTypeMap[operand.id] = solved
+                            changed = true
+                            continue
+                        }
                         if (inserted.isEmpty()) {
                             paramIrTypeMap[operand.id] = outputIr
                             changed = true
