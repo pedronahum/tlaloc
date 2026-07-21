@@ -190,7 +190,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
             OpKind.SIN, OpKind.COS, OpKind.ABS,
-            OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN -> {
+            OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
+            // §0.4.368 — SOFTMAX is shape-preserving too (its output IrType
+            // equals its operand's), so it forward-propagates like the unary
+            // elementwise ops; the SoftmaxRule recomputes it in grad bodies.
+            OpKind.SOFTMAX -> {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
             }
@@ -625,7 +629,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     OpKind.STEP, OpKind.RELU, OpKind.NEG,
                     OpKind.SQRT, OpKind.EXP, OpKind.LOG,
                     OpKind.SIN, OpKind.COS, OpKind.ABS,
-                    OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN -> {
+                    OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
+                    OpKind.SOFTMAX -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] ?: continue
                         val operandId = n.operands[0].id
@@ -960,6 +965,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return irReduce(op, env, context)
         }
         if (op.op == OpKind.RESHAPE) return irReshape(op, env, context)
+        if (op.op == OpKind.SOFTMAX) return irSoftmax(op, env, context)
 
         val operandDecls = op.operands.mapIndexed { idx, o ->
             env[o.id] ?: return reject(
@@ -1582,6 +1588,52 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * result rank == operand rank. First consumers: MaxRule/MinRule's `yRe`
      * recompute, and axis-reduction primal ops cloned into grad bodies.
      */
+    /**
+     * §0.4.368 — SOFTMAX in gradient bodies (Phase A3). SoftmaxRule recomputes
+     * `y = SOFTMAX(x)` (the TanhRule convention) so a bare softmax in a user
+     * lambda produces a SOFTMAX node in the grad body. Calls the shape-
+     * preserving `:core/ops` host `.softmax(axis)` with the axis baked as an
+     * Int const (a compile-time attr fact — never a runtime dim). The rest of
+     * the softmax adjoint (SUM/BROADCAST-stretch/MUL/SUB) reuses the §0.4.366
+     * axis-reduction synthesis arms unchanged.
+     */
+    private fun IrBuilderWithScope.irSoftmax(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        val operand = op.operands[0]
+        if (!isAcceptedTensorType(operand.type) || op.type.dtype != F32) return null
+        val operandDecl = env[operand.id] ?: return null
+        val axis = (op.attrs["axis"] as? Number)?.toInt() ?: (operand.type.rank - 1)
+        val sym = softmaxSymbol() ?: return null
+        val opIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
+        val shapeTypeArg = opIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val resultIrType = irTypeForNode(op, context) ?: opIrType
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = shapeTypeArg
+        }
+        call.arguments[0] = irGet(operandDecl)
+        call.arguments[1] = intConst(axis)
+        return call
+    }
+
+    /** §0.4.368 — resolves the `io.tlaloc.core.ops.softmax(axis)` extension (one Regular param). */
+    private fun softmaxSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("softmax"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
     private fun IrBuilderWithScope.irReduce(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,
@@ -2345,18 +2397,43 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
-    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("ln"))
+    ): IrExpression? {
+        // §0.4.368 — tensor LOG dispatches to `:core/ops/log` (like irTanh);
+        // logSoftmax's grad body keeps a rank-2 LOG (`dw = log(softmax(x))`).
+        if (op.operands.size == 1 &&
+            isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)
+        ) {
+            return tensorUnaryCall(op, env, context, opsTensorSymbol("log"))
+        }
+        return irUnaryMathCall(op, env, context, Name.identifier("ln"))
+    }
 
     /**
      * §0.4.53 — `OpKind.EXP(x)` → `kotlin.math.exp(x)`. Mirrors [irLog]; kept here so
      * any future C6/C7 closed form that differentiates into an `exp` term has a
-     * synthesis path. Scalar-only (F32 / F64).
+     * synthesis path. §0.4.368 — tensor EXP dispatches to `:core/ops/exp`.
      */
     private fun IrBuilderWithScope.irExp(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
-    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("exp"))
+    ): IrExpression? {
+        if (op.operands.size == 1 &&
+            isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)
+        ) {
+            return tensorUnaryCall(op, env, context, opsTensorSymbol("exp"))
+        }
+        return irUnaryMathCall(op, env, context, Name.identifier("exp"))
+    }
+
+    /** §0.4.368 — resolves a single-overload `:core/ops` tensor unary extension by name. */
+    private fun opsTensorSymbol(name: String): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier(name),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
 
     /**
      * §0.4.166 — `OpKind.SIN(x)` → `kotlin.math.sin(x)`. CartPole Phase 0a primitive.

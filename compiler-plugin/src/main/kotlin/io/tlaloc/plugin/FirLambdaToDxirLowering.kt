@@ -859,6 +859,38 @@ object FirLambdaToDxirLowering {
             return emitContract(lhs, rhs, emitter)
         }
 
+        // §0.4.368 — NN ops (DiffKT parity, Phase A3): `softmax(axis)` and
+        // `logSoftmax(axis)` over a single axis (default last). Both are
+        // shape-preserving (unlike the reductions), so the result DxirType is
+        // the operand's; the axis folds into an `"axis"` Int attr (the
+        // emitter's readAxis requires Int, and the value is normalised
+        // non-negative here so the interpreter/VJP/emitter all agree).
+        // `logSoftmax` lowers to `LOG(SOFTMAX(x, axis))` — both ops carry full
+        // VJP + JVP rules, so the gradient flows through LogRule ∘ SoftmaxRule
+        // with no new AD math (LOGSUMEXP stays emitter-only).
+        if (fqn == "io.tlaloc.core.ops.softmax" || fqn == "io.tlaloc.core.ops.logSoftmax") {
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("$fqn has no receiver")
+            val operand = lowerExpr(operandExpr, env, emitter)
+            val rank = operand.type.rank
+            if (rank == 0) throw LoweringException("$fqn requires a tensor operand (got scalar)")
+            val rawAxis = call.argumentList.arguments.firstOrNull()?.let {
+                intLiteralArg(it) ?: throw LoweringException("$fqn axis must be an integer literal")
+            } ?: -1
+            val axis = if (rawAxis < 0) rawAxis + rank else rawAxis
+            if (axis !in 0 until rank) {
+                throw LoweringException("$fqn axis $rawAxis out of range for rank $rank")
+            }
+            val sm = emitter.op(
+                kind = OpKind.SOFTMAX,
+                operands = listOf(operand),
+                type = operand.type,
+                attrs = mapOf("axis" to axis),
+            )
+            return if (fqn == "io.tlaloc.core.ops.softmax") sm
+            else emitter.op(kind = OpKind.LOG, operands = listOf(sm), type = operand.type)
+        }
+
         // §0.4.364 — elementwise comparisons (the DiffKT-gap user surface).
         // `a gt b` lowers to COMPARE(direction):Bool + CAST back to the
         // operand dtype: the user-visible value is a 0/1 mask matching the

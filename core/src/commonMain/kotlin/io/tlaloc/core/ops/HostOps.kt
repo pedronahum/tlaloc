@@ -177,6 +177,75 @@ fun <S : Shape> DTensor<S, F32>.sqrt(): DTensor<S, F32> =
     unary { x -> kotlin.math.sqrt(x) }
 
 /**
+ * §0.4.368 — Phase A3 (DiffKT parity): `softmax(axis)` over a single axis
+ * (default last; negative axes count from the back). Numerically stable
+ * (subtract the per-slice max before exponentiating), row-major stride walk
+ * matching the dxir interpreter's SOFTMAX arm bit-for-bit so the host path
+ * and the IR path agree. Shape-preserving — the phantom shape witness [S]
+ * survives (unlike the axis reductions, which erase to [Shape]).
+ */
+fun <S : Shape> DTensor<S, F32>.softmax(axis: Int = -1): DTensor<S, F32> {
+    val r = dims.size
+    val a = if (axis < 0) axis + r else axis
+    require(a in 0 until r) { "softmax: axis $axis out of range for rank $r" }
+    val v = hostF32()
+    val axisLen = dims[a]
+    var inner = 1
+    for (k in a + 1 until r) inner *= dims[k]
+    var outer = 1
+    for (k in 0 until a) outer *= dims[k]
+    val out = FloatArray(v.size)
+    for (o in 0 until outer) {
+        for (i in 0 until inner) {
+            val base = o * axisLen * inner + i
+            var mx = Float.NEGATIVE_INFINITY
+            for (j in 0 until axisLen) mx = maxOf(mx, v[base + j * inner])
+            var sum = 0f
+            for (j in 0 until axisLen) {
+                val e = kotlin.math.exp(v[base + j * inner] - mx)
+                out[base + j * inner] = e
+                sum += e
+            }
+            for (j in 0 until axisLen) out[base + j * inner] /= sum
+        }
+    }
+    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+}
+
+/**
+ * §0.4.368 — `logSoftmax(axis)` = log(softmax(x, axis)), computed in the
+ * stable `x - max - log(Σ exp(x - max))` form (never materialises the
+ * softmax then logs it, which would lose precision in the tail). Inside
+ * `grad {}` the K2 plugin lowers this to `LOG(SOFTMAX(x, axis))` — both
+ * ops carry full VJP/JVP rules — so the gradient flows through the existing
+ * LogRule ∘ SoftmaxRule chain; this host body is the runtime twin.
+ */
+fun <S : Shape> DTensor<S, F32>.logSoftmax(axis: Int = -1): DTensor<S, F32> {
+    val r = dims.size
+    val a = if (axis < 0) axis + r else axis
+    require(a in 0 until r) { "logSoftmax: axis $axis out of range for rank $r" }
+    val v = hostF32()
+    val axisLen = dims[a]
+    var inner = 1
+    for (k in a + 1 until r) inner *= dims[k]
+    var outer = 1
+    for (k in 0 until a) outer *= dims[k]
+    val out = FloatArray(v.size)
+    for (o in 0 until outer) {
+        for (i in 0 until inner) {
+            val base = o * axisLen * inner + i
+            var mx = Float.NEGATIVE_INFINITY
+            for (j in 0 until axisLen) mx = maxOf(mx, v[base + j * inner])
+            var sum = 0f
+            for (j in 0 until axisLen) sum += kotlin.math.exp(v[base + j * inner] - mx)
+            val logSum = kotlin.math.ln(sum)
+            for (j in 0 until axisLen) out[base + j * inner] = v[base + j * inner] - mx - logSum
+        }
+    }
+    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+}
+
+/**
  * Scalar → rank-N uniform broadcast: produce a fresh `DTensor<S, F32>` shaped like
  * [template] whose every element equals [v]. Used by the IR-rewrite synthesis path to
  * lower `OpKind.BROADCAST` in gradient bodies emitted by [io.tlaloc.ir.passes.VjpRegistry.SumRule]

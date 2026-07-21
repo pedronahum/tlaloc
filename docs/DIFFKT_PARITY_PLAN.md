@@ -56,10 +56,17 @@ reachable from `grad {}`, not new math. New-op families come after.
     adjoints need either runtime-shaped slice ops (a `sliceLike` host
     family + attr-free IR spelling) or SPLIT (which today is
     emitter-only: no interpreter arm, no VJP, no forward arm).
-- **A3. NN ops in lambdas**: `softmax(axis)`, `logSoftmax` (compose
-  LOGSUMEXP), `conv2d`, `maxPool`, `avgPool`. Synthesis arms call the
-  interpreter-backed `:core` hosts (new host impls needed for conv/pool —
-  or route through `DxirInterpreter.evalFunction`-style helpers).
+- **A3. NN ops in lambdas** — split by wiring readiness:
+  - **A3a ✅ (§0.4.368)**: `softmax(axis)` + `logSoftmax(axis)` E2E through
+    `grad {}`. SOFTMAX was fully wired below the surface (interpreter,
+    emitter, VJP, JVP, cost) — only the host fn + FIR arm + `irSoftmax`
+    synthesis were missing. `logSoftmax` lowers to `LOG(SOFTMAX(x))` (both
+    fully-ruled ops; **LOGSUMEXP stays emitter-only** — no VJP/interp/JVP),
+    which also forced tensor `irLog`/`irExp` (were scalar-only).
+  - **A3b (open)**: `conv2d`/`maxPool`/`avgPool` in `grad {}` — needs new
+    `:core` host impls (conv/pool eval) AND a synthesis-scope widening to
+    rank-4 F32 (today's gate is rank 1..3). `embedding` VjpRule (op exists,
+    rule doesn't); `crossEntropyLoss`/`nllLoss` (compose from logSoftmax).
 - **A4. Elementwise binary max/min + clip + outerProduct**: named
   `maximum/minimum/clip` ops as sugar over the §0.4.364 where/compare
   surface (DiffKT has them first-class; we compose); `outerProduct` as
