@@ -760,6 +760,59 @@ fun <S : Shape> sumToLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DT
 }
 
 /**
+ * §0.4.374 — zero-pad-to-template: place [value] into a zero tensor of
+ * [template]'s RUNTIME dims at offset [low] per axis — the reverse mirror of
+ * [slice] and the synthesis/plugin twin of the dxir interpreter's PAD_TO arm.
+ * This is SliceRule's adjoint: the upstream gradient is zero-padded back into
+ * the sliced operand's window. The trailing pad per axis (`high[i] =
+ * template.dim[i] − low[i] − value.dim[i]`) reads [template]'s extent, which is
+ * a -1 sentinel at compile time under `grad {}`, so it is derived from the
+ * template's ACTUAL runtime shape here. [low] is a compile-time literal (the
+ * user's `slice` start offsets, 0 on the non-sliced axes). [template]
+ * contributes SHAPE ONLY — its values are never read.
+ */
+fun <S : Shape> padToLike(value: DTensor<*, F32>, template: DTensor<S, F32>, low: IntArray): DTensor<S, F32> {
+    val u = value.dims
+    val t = template.dims
+    val r = t.size
+    require(u.size == r) { "padToLike: value rank ${u.size} != template rank $r" }
+    require(low.size == r) { "padToLike: low size ${low.size} != rank $r" }
+    for (i in 0 until r) require(low[i] >= 0 && low[i] + u[i] <= t[i]) {
+        "padToLike: axis $i: low ${low[i]} + value ${u[i]} exceeds template ${t[i]}"
+    }
+    val inStrides = IntArray(r)
+    run { var s = 1; for (i in r - 1 downTo 0) { inStrides[i] = s; s *= u[i] } }
+    val outStrides = IntArray(r)
+    run { var s = 1; for (i in r - 1 downTo 0) { outStrides[i] = s; s *= t[i] } }
+    var outSize = 1
+    for (d in t) outSize *= d
+    val v = value.hostF32()
+    val out = FloatArray(outSize)
+    for (flat in v.indices) {
+        var rem = flat
+        var dst = 0
+        for (k in 0 until r) {
+            val coord = rem / inStrides[k]
+            rem -= coord * inStrides[k]
+            dst += (coord + low[k]) * outStrides[k]
+        }
+        out[dst] = v[flat]
+    }
+    return DTensor(HostF32Storage(out), t.copyOf(), F32)
+}
+
+/** §0.4.374 — fixed-arity `padToLike` shims (synthesis bakes the `low`
+ * offsets as Int consts, one per axis; mirror of the `stretchToRankN` family). */
+fun <S : Shape> padToLikeRank1(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int): DTensor<S, F32> =
+    padToLike(value, template, intArrayOf(l0))
+
+fun <S : Shape> padToLikeRank2(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int, l1: Int): DTensor<S, F32> =
+    padToLike(value, template, intArrayOf(l0, l1))
+
+fun <S : Shape> padToLikeRank3(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int, l1: Int, l2: Int): DTensor<S, F32> =
+    padToLike(value, template, intArrayOf(l0, l1, l2))
+
+/**
  * §0.4.366 — insert size-1 axes at the given (result-indexed, ascending)
  * positions. The host twin of the keepdims RESHAPE the reduction VJP rules
  * emit (`upstream` at the squeezed shape → the keepdims spelling): axis
@@ -912,6 +965,42 @@ fun <S : Shape> DTensor<S, F32>.broadcastTo(vararg newDims: Int): DTensor<Shape,
         v[src]
     }
     return DTensor(HostF32Storage(out), newDims.copyOf(), F32)
+}
+
+/**
+ * §0.4.374 — single-axis slice (DiffKT parity, Phase A2b): take elements
+ * `[start, end)` along [axis], all other axes full. `start`/`end`/`axis` are
+ * compile-time literals; the result shape equals the receiver's with `axis`'s
+ * extent replaced by `end − start`. This is the differentiable `slice`: its
+ * `grad {}` adjoint is [padToLike] (the upstream zero-padded back into the
+ * sliced window, reading the receiver's extent at runtime). Unit stride only.
+ */
+fun <S : Shape> DTensor<S, F32>.slice(start: Int, end: Int, axis: Int): DTensor<Shape, F32> {
+    val r = dims.size
+    val ax = if (axis < 0) axis + r else axis
+    require(ax in 0 until r) { "slice: axis $axis out of range for rank $r" }
+    require(start in 0..end && end <= dims[ax]) {
+        "slice: [$start, $end) out of range for axis $ax extent ${dims[ax]}"
+    }
+    val outDims = IntArray(r) { if (it == ax) end - start else dims[it] }
+    val inStrides = IntArray(r)
+    run { var s = 1; for (i in r - 1 downTo 0) { inStrides[i] = s; s *= dims[i] } }
+    val outStrides = IntArray(r)
+    run { var s = 1; for (i in r - 1 downTo 0) { outStrides[i] = s; s *= outDims[i] } }
+    var outSize = 1
+    for (d in outDims) outSize *= d
+    val v = hostF32()
+    val out = FloatArray(outSize) { flat ->
+        var rem = flat
+        var src = 0
+        for (k in 0 until r) {
+            val coord = rem / outStrides[k]
+            rem -= coord * outStrides[k]
+            src += (coord + if (k == ax) start else 0) * inStrides[k]
+        }
+        v[src]
+    }
+    return DTensor(HostF32Storage(out), outDims, F32)
 }
 
 /**

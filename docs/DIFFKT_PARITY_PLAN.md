@@ -106,15 +106,48 @@ reachable from `grad {}`, not new math. New-op families come after.
       broadcast-to-template op (the mirror of SUM_TO — a `BROADCAST_LIKE(upstream,
       template=value)` reading U from `value`'s runtime dims); 1st-order is this
       slice.
-    - **`concat`, `slice`, `stack`, `pad` (still deferred)**: blocked on
-      runtime-extent adjoints — ConcatRule/SliceRule/PadRule bake operand
-      extents into SLICE/PAD `start_indices`/`limit_indices`/`low`/`high`
-      attrs, which are -1 sentinels inside `grad {}`. Same runtime-extent
-      mechanism the size-1-stretch deferral needs (an attr-free,
-      template-shaped slice/scatter family — a `sliceLike` host family + a
-      dxir spelling whose bounds come from a template tensor's runtime dims),
-      or bring `SPLIT` up from emitter-only (add interpreter + VJP + forward
-      arms), since concat's adjoint is naturally a split.
+    - **`slice` ✅ (§0.4.374)** — single-axis `slice(start, end, axis)` E2E
+      through `grad {}` via the runtime-extent `PAD_TO` adjoint (the reduce/slice
+      mirror of §0.4.373's `SUM_TO`). SliceRule's adjoint zero-pads the upstream
+      back into the sliced window, but the trailing pad `high[i] = operand.dim[i]
+      − start[i] − upstream.dim[i]` reads the operand's extent — a -1 sentinel in
+      `grad {}`. New `OpKind.PAD_TO(value, template)` + attr `low`: place `value`
+      into a zero tensor of `template`'s shape at offset `low`, deriving `high`
+      from `template`'s ACTUAL runtime shape (`template` = shape-only, values
+      never read). Full runtime-extent wiring — CostModel/interpreter/emitter
+      (`emitPadTo`)/forward-tangent (linear in `value`, template's primal-value
+      clone) + host `padToLike(value, template, low)` (+ `padToLikeRank1/2/3`
+      fixed-arity shims, `low` baked as Int consts — mirror of `stretchToRankN`)
+      + synthesis `irPadTo`/`deriveResultIrType`/backward-solver arms (PAD_TO
+      IrType = template's). SliceRule now emits `PAD_TO(upstream, template=x,
+      low=start_indices)` (numerically identical to the old
+      `PAD(low, high=x.dim−limit)` on the concrete-dims IR path) with
+      `readsPrimalOperandIndices = {0}` to keep `x` cloned as the template. The
+      user surface: host `DTensor.slice(start, end, axis)` (unit stride, single
+      axis) + a FIR arm lowering it to `OpKind.SLICE` with explicit `slice_start/
+      slice_end/slice_axis` attrs (all user literals; the non-sliced axes'
+      `limit_indices` ride as sentinels but are never read — `irSlice` recovers
+      `(start, end, axis)` from the explicit attrs). Certified: IR-level PAD_TO
+      interpreter pins, the slice gradient (`da` = zero-padded upstream keeping
+      a's full shape, `db` = slice recomputed), the JVP⇄VJP cross-identity, and
+      E2E `grad { Σ a.slice(1,3,0) ⊙ b.slice(0,2,0) }`.
+    - **`concat`, `stack`, `pad` (still deferred)**: `concat`'s adjoint slices
+      the upstream into each operand's window — but the slice OFFSET is the
+      cumulative sum of PRIOR operands' RUNTIME extents along the axis and the
+      LENGTH is this operand's runtime extent, all sentinels. Needs a variadic
+      runtime-extent slice `SLICE_LIKE(upstream, thisTemplate, [priorTemplates…],
+      axis)` whose start = Σ prior templates' axis-dim (runtime) and length =
+      thisTemplate's axis-dim (runtime) — a strictly bigger build than `PAD_TO`:
+      variadic operands (the prior-template list grows with operand position),
+      variadic-operand host-call synthesis (an `IrVararg`, which the fixed-arity
+      `…RankN` shim trick sidesteps for `PAD_TO`/`SUM_TO` but can't here since the
+      count is data-dependent), AND a new user `concat(vararg tensors, axis)` FIR
+      arm lowering a variadic tensor-list call (new territory — every lowered op
+      so far takes a fixed operand count). Alternatively bring emitter-only
+      `SPLIT` up (interpreter + VJP + forward), since concat's adjoint is a split.
+      `stack` = unsqueeze + concat sugar (blocked on concat). `pad` as a user op
+      has no DiffKT analogue (skip). Sequence after a variadic-operand synthesis
+      path exists.
     - **`view`/indexing, `withChange`, `meld`/`split`, `stats`**: same
       runtime-extent boundary; sequenced after the mechanism above lands.
 - **A3. NN ops in lambdas** — split by wiring readiness:
@@ -337,7 +370,7 @@ UNARY/BINARY maps** → A5) · `tan atan` ❌ (C2) ·
 | `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) — mixed rank-increase+stretch + 2nd-order-through-broadcast deferred |
 | `transpose(axes) / leftTranspose / rightTranspose` | 🟡 | TRANSPOSE + VJP → A2 (left/right = sugar) |
 | `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |
-| `slice / view(index/range/axis) / withChange` (functional update) | 🟡 | SLICE/GATHER/SCATTER + VJPs → A2 (indexing + `withChange` = slice/scatter sugar) |
+| `slice / view(index/range/axis) / withChange` (functional update) | 🟡 | single-axis `slice(start,end,axis)` ✅ A2b (§0.4.374, runtime-extent `PAD_TO` adjoint), E2E through `grad {}`; multi-axis `view`/`withChange` scatter sugar still A2 |
 | `gather / scatter (axis, paddingIndex) / gatherAtIndices / scatterAtIndices` | 🟡 | Tlaloc GATHER/SCATTER are narrower (rank-1/scalar-index arms) — A2 needs the axis+list form |
 | `flip(axes)` | ❌ | C3 (REVERSE op; also cleans conv adjoint) |
 | `IntTensor / intTensorOf / Float64` | ✅ | I32/I64/F64 dtypes; DiffKT is F32-only + int tensors — Tlaloc exceeds on F64 |

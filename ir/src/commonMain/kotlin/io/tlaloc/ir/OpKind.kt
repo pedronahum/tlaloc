@@ -73,6 +73,21 @@ enum class OpKind {
     // `stretchLike`).
     SUM_TO,
 
+    // §0.4.374 — runtime-extent zero-pad-to-template (the reverse mirror of
+    // SLICE). PAD_TO(value, template) → template's shape, attr `low` (List<Int>,
+    // one per axis): place `value` into a zero tensor of the template's shape at
+    // offset `low` per axis; the trailing pad `high[i] = template.dim[i] −
+    // low[i] − value.dim[i]` is derived from the template's ACTUAL runtime shape,
+    // never baked as an attr. This is what SliceRule emits as `slice`'s adjoint:
+    // the upstream is zero-padded back into the sliced operand's window, but the
+    // operand's extent (needed for `high`) is a -1 sentinel under `grad {}`, so
+    // the extent is read from the primal operand's runtime shape at execution.
+    // `low` IS a compile-time literal (the user's `slice` start offsets, and 0
+    // on the non-sliced axes) so it rides as an attr. The `template` operand
+    // contributes SHAPE ONLY — its values are never read. Host twin:
+    // `padToLike(value, template, low)`.
+    PAD_TO,
+
     // §0.4.360 — shape-plumbing activation (the DiffKT-gap item 2 surface).
     //
     // WHERE(pred: Bool tensor, a, b) — elementwise select; the differentiable

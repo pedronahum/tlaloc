@@ -472,24 +472,30 @@ object VjpRegistry {
      * strided adjoint needs interior padding, deferred until demanded.
      */
     val SliceRule: VjpRule = object : VjpRule {
-        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        // §0.4.374 — the adjoint dereferences the primal input (operand 0) as
+        // PAD_TO's `template` operand (a shape source: `high` is derived from its
+        // runtime extent), so the input subgraph must be cloned into the gradient
+        // body.
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
             @Suppress("UNCHECKED_CAST")
             val starts = op.attrs["start_indices"] as List<Int>
             @Suppress("UNCHECKED_CAST")
-            val limits = op.attrs["limit_indices"] as List<Int>
-            @Suppress("UNCHECKED_CAST")
             val strides = op.attrs["strides"] as List<Int>
             require(strides.all { it == 1 }) {
                 "SliceRule: strided slices are not differentiable in v1 (needs interior padding)"
             }
+            // §0.4.374 — zero-pad the upstream back into x's window. The trailing
+            // pad per axis is `high[i] = x.dim[i] − start[i] − upstream.dim[i]`,
+            // which reads x's extent — a -1 SENTINEL under `grad {}`. PAD_TO reads
+            // that extent from x's ACTUAL runtime shape at execution instead of
+            // baking it as an attr (`low` = the user's slice starts, all literals).
+            // On the concrete-dims IR path this is numerically identical to the old
+            // PAD(low = starts, high = x.dim − limit) adjoint.
             val dx = builder.op(
-                OpKind.PAD, listOf(upstream), x.type,
-                attrs = mapOf(
-                    "low" to starts,
-                    "high" to x.type.dims.indices.map { x.type.dims[it] - limits[it] },
-                ),
+                OpKind.PAD_TO, listOf(upstream, x), x.type,
+                attrs = mapOf("low" to starts),
             )
             return listOf(x to dx)
         }

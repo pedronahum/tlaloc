@@ -145,6 +145,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // the (smaller) template-shaped accumulator, like a reduction.
     OpKind.SUM_TO -> op.operands[0].type.elementCount.toDouble()
 
+    // §0.4.374 — PAD_TO (zero-pad to template): one write per value element
+    // into the (larger) template-shaped output, like a copy.
+    OpKind.PAD_TO -> op.operands[0].type.elementCount.toDouble()
+
     // Softmax = max + sub + exp + sum + div per element of the reduced
     // axis. ~5 FLOPs per input element, plus the reduction.
     OpKind.SOFTMAX, OpKind.LOGSUMEXP -> 5.0 * op.operands[0].type.elementCount.toDouble()

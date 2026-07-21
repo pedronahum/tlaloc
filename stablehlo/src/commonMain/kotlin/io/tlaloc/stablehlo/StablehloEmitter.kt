@@ -174,6 +174,11 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.SUM_TO -> emitSumTo(
                 step, name, ops[0], node.operands[0].type, node.operands[1].type,
             )
+            // §0.4.374 — PAD_TO (zero-pad to template): the SLICE adjoint. `high`
+            // derived from the concrete template (operand[1] == node.type) dims.
+            OpKind.PAD_TO -> emitPadTo(
+                step, name, ops[0], node, node.operands[0].type,
+            )
             OpKind.MAX -> emitReduce(
                 step, name, ops[0], node.operands[0].type, node.type,
                 reducer = "stablehlo.maximum", initLiteral = negInfLiteral(node.operands[0].type.dtype),
@@ -2257,6 +2262,33 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine(
             "$step$name = stablehlo.pad $x, $zero, low = [${low.joinToString(", ")}], " +
                 "high = [${high.joinToString(", ")}], interior = [${List(inputType.rank) { 0 }.joinToString(", ")}] : " +
+                "(${inputType.toMlir()}, $scalarMlir) -> ${node.type.toMlir()}",
+        )
+    }
+
+    // §0.4.374 — PAD_TO: zero-pad `value` (inputType) into the template shape
+    // (node.type) at offset `low`; the trailing pad is derived from the concrete
+    // template dims (`high[i] = node.type.dim[i] − low[i] − value.dim[i]`) — at
+    // emit time dims are concrete, never sentinels.
+    private fun emitPadTo(step: String, name: String, x: String, node: DxirOp, inputType: DxirType) {
+        val low = intListAttr(node, "low")
+        val rank = inputType.rank
+        require(low.size == rank && node.type.rank == rank) {
+            "PAD_TO attr/rank mismatch: low=${low.size}, value rank=$rank, template rank=${node.type.rank}"
+        }
+        val high = (0 until rank).map { i ->
+            val h = node.type.dims[i] - low[i] - inputType.dims[i]
+            require(h >= 0) {
+                "PAD_TO axis $i: low ${low[i]} + value ${inputType.dims[i]} exceeds template ${node.type.dims[i]}"
+            }
+            h
+        }
+        val scalarMlir = "tensor<${mlirElementType(inputType.dtype)}>"
+        val zero = synth()
+        out.appendLine("$step$zero = stablehlo.constant dense<0.0> : $scalarMlir")
+        out.appendLine(
+            "$step$name = stablehlo.pad $x, $zero, low = [${low.joinToString(", ")}], " +
+                "high = [${high.joinToString(", ")}], interior = [${List(rank) { 0 }.joinToString(", ")}] : " +
                 "(${inputType.toMlir()}, $scalarMlir) -> ${node.type.toMlir()}",
         )
     }

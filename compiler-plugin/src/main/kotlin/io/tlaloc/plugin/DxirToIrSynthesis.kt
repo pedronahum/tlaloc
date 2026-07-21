@@ -231,6 +231,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[1].id]
             }
+            // §0.4.374 — PAD_TO's result shape IS the template operand's shape
+            // (operand[1]), so its IrType equals the template's — same shape-only
+            // template treatment as SUM_TO.
+            OpKind.PAD_TO -> {
+                if (op.operands.size != 2) return null
+                operandIrTypes[op.operands[1].id]
+            }
             else -> null
         }
     }
@@ -682,6 +689,18 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             changed = true
                         }
                     }
+                    // §0.4.374 — PAD_TO's output shape equals its template
+                    // (operand[1]); solve the template's IrType from the PAD_TO
+                    // node's own when it's a returned grad (mirror of SUM_TO).
+                    OpKind.PAD_TO -> {
+                        if (n.operands.size != 2) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val templateId = n.operands[1].id
+                        if (paramIrTypeMap[templateId] == null && isAcceptedTensorType(n.operands[1].type)) {
+                            paramIrTypeMap[templateId] = outputIr
+                            changed = true
+                        }
+                    }
                     OpKind.RESHAPE -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
@@ -988,6 +1007,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.RESHAPE) return irReshape(op, env, context)
         if (op.op == OpKind.SOFTMAX) return irSoftmax(op, env, context)
         if (op.op == OpKind.SUM_TO) return irSumTo(op, env, context)
+        if (op.op == OpKind.SLICE) return irSlice(op, env, context)
+        if (op.op == OpKind.PAD_TO) return irPadTo(op, env, context)
 
         val operandDecls = op.operands.mapIndexed { idx, o ->
             env[o.id] ?: return reject(
@@ -1667,6 +1688,111 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("sumToLike"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.374 — the primal `slice` recomputed into a gradient body (it survives
+     * when the sliced result feeds a downstream op, e.g. `slice(a) * b` — the
+     * MulRule reads it as the primal operand). Calls the host
+     * `x.slice(start, end, axis)` extension with (start, end, axis) recovered
+     * from the `slice_*` attrs the FIR lowering stamped (all user literals,
+     * sentinel-free). Result IrType = the SLICE node's own (resolved from the
+     * returned-gradient position or backward-propagated through the elementwise
+     * op that consumes it).
+     */
+    private fun IrBuilderWithScope.irSlice(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        val operand = op.operands[0]
+        if (!isAcceptedTensorType(operand.type) || op.type.dtype != F32) return null
+        val start = (op.attrs["slice_start"] as? Number)?.toInt() ?: return null
+        val end = (op.attrs["slice_end"] as? Number)?.toInt() ?: return null
+        val axis = (op.attrs["slice_axis"] as? Number)?.toInt() ?: return null
+        val operandDecl = env[operand.id] ?: return null
+        val operandIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
+        val shapeTypeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val resultIrType = irTypeForNode(op, context) as? IrSimpleType ?: return null
+        val sym = sliceSymbol() ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeTypeArg
+        call.arguments[0] = irGet(operandDecl)
+        call.arguments[1] = intConst(start)
+        call.arguments[2] = intConst(end)
+        call.arguments[3] = intConst(axis)
+        return call
+    }
+
+    /** §0.4.374 — resolves the `io.tlaloc.core.ops.slice(start, end, axis)` extension. */
+    private fun sliceSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("slice"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.374 — SliceRule's runtime-extent adjoint (`slice`'s dual). Calls the
+     * fixed-arity host `padToLikeRankN(value, template, l0..)`: `value`
+     * (operand[0]) is the upstream gradient at the slice-output shape, `template`
+     * (operand[1]) is the primal sliced operand whose RUNTIME shape drives the
+     * trailing pad (`high[i] = template.dim[i] − low[i] − value.dim[i]`; its
+     * values are never read). `low` is the user's slice start offsets (0 on the
+     * non-sliced axes) baked as Int consts — mirror of [irSumTo] and the
+     * `stretchToRankN` family. Result IrType = the template's (PAD_TO's output
+     * shape equals the template's).
+     */
+    private fun IrBuilderWithScope.irPadTo(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        val valueDecl = env[op.operands[0].id] ?: return null
+        val templateDecl = env[op.operands[1].id] ?: return null
+        @Suppress("UNCHECKED_CAST")
+        val low = (op.attrs["low"] as? List<Int>) ?: return null
+        val rank = op.type.rank
+        if (low.size != rank) return null
+        val resultIrType = irTypeForNode(op, context) as? IrSimpleType
+            ?: irTypeForNode(op.operands[1], context) as? IrSimpleType
+            ?: return null
+        val shapeTypeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val helperSym = padToLikeRankSymbol(rank) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = helperSym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeTypeArg
+        call.arguments[0] = irGet(valueDecl)
+        call.arguments[1] = irGet(templateDecl)
+        for (i in 0 until rank) call.arguments[i + 2] = intConst(low[i])
+        return call
+    }
+
+    /** §0.4.374 — resolves `io.tlaloc.core.ops.padToLikeRank{1,2,3}`. */
+    private fun padToLikeRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
+        val name = when (rank) {
+            1 -> "padToLikeRank1"
+            2 -> "padToLikeRank2"
+            3 -> "padToLikeRank3"
+            else -> return null
+        }
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier(name),
         )
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }

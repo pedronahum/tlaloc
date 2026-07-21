@@ -1097,6 +1097,47 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.374 — single-axis `slice(start, end, axis)` (DiffKT parity,
+        // Phase A2b). start/end/axis are compile-time literals: the result shape
+        // is the operand's with `axis`'s extent replaced by `end − start`; the
+        // non-sliced axes stay full (their `limit_indices` ride as the operand's
+        // -1 SENTINEL dims, but only the sliced axis's start/limit are ever read
+        // downstream — irSlice recovers (start, end, axis) from the explicit
+        // `slice_axis` attr, and SliceRule's PAD_TO adjoint reads the operand's
+        // full extent at runtime, never from these attrs).
+        if (fqn == "io.tlaloc.core.ops.slice") {
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("slice has no receiver")
+            val operand = lowerExpr(operandExpr, env, emitter)
+            val rank = operand.type.rank
+            val intArgs = call.argumentList.arguments.map { arg ->
+                intLiteralArg(arg) ?: throw LoweringException("slice args must be integer literals")
+            }
+            if (intArgs.size != 3) throw LoweringException("slice takes (start, end, axis)")
+            val (start, end, rawAxis) = intArgs
+            val axis = if (rawAxis < 0) rawAxis + rank else rawAxis
+            if (axis !in 0 until rank) throw LoweringException("slice axis $rawAxis out of range for rank $rank")
+            if (start < 0 || end < start) throw LoweringException("slice: invalid range [$start, $end)")
+            val od = operand.type.dims[axis]
+            if (od > 0 && end > od) throw LoweringException("slice: end $end exceeds axis $axis extent $od")
+            val resultDims = operand.type.dims.mapIndexed { i, d -> if (i == axis) end - start else d }
+            val starts = (0 until rank).map { if (it == axis) start else 0 }
+            val limits = (0 until rank).map { if (it == axis) end else operand.type.dims[it] }
+            return emitter.op(
+                kind = OpKind.SLICE,
+                operands = listOf(operand),
+                type = DxirType(operand.type.dtype, resultDims),
+                attrs = mapOf(
+                    "start_indices" to starts,
+                    "limit_indices" to limits,
+                    "strides" to List(rank) { 1 },
+                    "slice_axis" to axis,
+                    "slice_start" to start,
+                    "slice_end" to end,
+                ),
+            )
+        }
+
         // §0.4.367 — shape ops (DiffKT parity, Phase A2a): the RESHAPE family
         // (`squeeze(axis)` / `unsqueeze(axis)` / `flatten()` / `reshape(dims)`)
         // and permutation `transpose(perm)` (no-arg = reverse all axes; the

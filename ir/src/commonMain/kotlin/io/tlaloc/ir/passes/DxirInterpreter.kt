@@ -971,6 +971,44 @@ object DxirInterpreter {
                 }
                 out
             }
+            // §0.4.374 — PAD_TO (zero-pad to template): place operand[0] (value,
+            // shape U) into a zero tensor of operand[1] (template, shape T = op.type)
+            // at offset `low` per axis — the reverse mirror of SLICE. The trailing
+            // pad is derived from the template's shape (`high[i] = T[i] − low[i] −
+            // U[i]`), never an attr. Template contributes SHAPE ONLY (`.type.dims`).
+            OpKind.PAD_TO -> {
+                val value = evalNode(op.operands[0], env, multiResults)
+                val vDims = op.operands[0].type.dims
+                val tDims = op.type.dims
+                val r = tDims.size
+                require(vDims.size == r) {
+                    "DxirInterpreter: PAD_TO value rank ${vDims.size} != template rank $r"
+                }
+                @Suppress("UNCHECKED_CAST")
+                val low = op.attrs["low"] as List<Int>
+                require(low.size == r) { "DxirInterpreter: PAD_TO `low` size ${low.size} != rank $r" }
+                for (i in 0 until r) {
+                    require(low[i] >= 0 && low[i] + vDims[i] <= tDims[i]) {
+                        "DxirInterpreter: PAD_TO axis $i: low ${low[i]} + value ${vDims[i]} exceeds template ${tDims[i]}"
+                    }
+                }
+                val inStrides = IntArray(r)
+                run { var s = 1; for (i in r - 1 downTo 0) { inStrides[i] = s; s *= vDims[i] } }
+                val outStrides = IntArray(r)
+                run { var s = 1; for (i in r - 1 downTo 0) { outStrides[i] = s; s *= tDims[i] } }
+                val out = FloatArray(sizeOf(op.type))
+                for (flat in value.indices) {
+                    var rem = flat
+                    var dst = 0
+                    for (k in 0 until r) {
+                        val coord = rem / inStrides[k]
+                        rem -= coord * inStrides[k]
+                        dst += (coord + low[k]) * outStrides[k]
+                    }
+                    out[dst] = value[flat]
+                }
+                out
+            }
             // §0.4.366 — MEAN (Phase A1): the SUM arm divided by the reduced
             // element count. Until now MEAN had no interpreter arm at all — it
             // was unreachable from the user surface (no UNARY_OP_MAP entry) and
