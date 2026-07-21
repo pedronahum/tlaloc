@@ -891,6 +891,101 @@ object FirLambdaToDxirLowering {
             else emitter.op(kind = OpKind.LOG, operands = listOf(sm), type = operand.type)
         }
 
+        // §0.4.369 — Phase A4 (DiffKT parity): elementwise `maximum(a, b)` /
+        // `minimum(a, b)` as sugar over the §0.4.364 where/compare surface.
+        // `maximum` = WHERE(COMPARE(a, b, GE), a, b); `minimum` uses LE. The
+        // COMPARE result is Bool (WHERE's pred contract), so unlike the
+        // user-facing `where` (which re-derives Bool via `pred ≠ 0`) we feed
+        // the compare directly. Same-shape (elementwise); result type = a.type.
+        if (fqn == "io.tlaloc.core.ops.maximum" || fqn == "io.tlaloc.core.ops.minimum") {
+            val args = call.argumentList.arguments
+            if (args.size != 2) {
+                throw LoweringException("$fqn requires 2 arguments; got ${args.size}")
+            }
+            val a = lowerExpr(args[0], env, emitter)
+            val b = lowerExpr(args[1], env, emitter)
+            val direction = if (fqn == "io.tlaloc.core.ops.maximum") "GE" else "LE"
+            val cmp = emitter.op(
+                kind = OpKind.COMPARE,
+                operands = listOf(a, b),
+                type = DxirType(Bool, a.type.dims),
+                attrs = mapOf("direction" to direction),
+            )
+            return emitter.op(kind = OpKind.WHERE, operands = listOf(cmp, a, b), type = a.type)
+        }
+
+        // §0.4.369 — `clip(x, lo, hi)` = minimum(maximum(x, lo), hi). lo/hi are
+        // compile-time Float literals lowered to splat consts of x's shape
+        // (the const's sentinel-dim splat materialises in the gradient body via
+        // irConstFor's axis-matching against x — the recomputed COMPARE(x, lo)
+        // mask reads lo). Two COMPARE+WHERE pairs; the gradient is 1 inside
+        // [lo, hi] and 0 outside.
+        if (fqn == "io.tlaloc.core.ops.clip") {
+            val args = call.argumentList.arguments
+            if (args.size != 3) {
+                throw LoweringException("clip requires 3 arguments (x, lo, hi); got ${args.size}")
+            }
+            val x = lowerExpr(args[0], env, emitter)
+            val lo = floatLiteralArg(args[1])
+                ?: throw LoweringException("clip lo bound must be a Float literal")
+            val hi = floatLiteralArg(args[2])
+                ?: throw LoweringException("clip hi bound must be a Float literal")
+            if (lo > hi) throw LoweringException("clip: lo ($lo) must be ≤ hi ($hi)")
+            val loConst = emitter.const(lo, x.type)
+            val hiConst = emitter.const(hi, x.type)
+            val geCmp = emitter.op(
+                kind = OpKind.COMPARE,
+                operands = listOf(x, loConst),
+                type = DxirType(Bool, x.type.dims),
+                attrs = mapOf("direction" to "GE"),
+            )
+            val maxed = emitter.op(kind = OpKind.WHERE, operands = listOf(geCmp, x, loConst), type = x.type)
+            val leCmp = emitter.op(
+                kind = OpKind.COMPARE,
+                operands = listOf(maxed, hiConst),
+                type = DxirType(Bool, x.type.dims),
+                attrs = mapOf("direction" to "LE"),
+            )
+            return emitter.op(kind = OpKind.WHERE, operands = listOf(leCmp, maxed, hiConst), type = x.type)
+        }
+
+        // §0.4.369 — `outerProduct(a, b)` for rank-1 operands: the outer product
+        // a[n]⊗b[m] IS the matmul reshape(a,[n,1]) × reshape(b,[1,m]) → [n,m], so
+        // the gradient flows through MatmulRule ∘ ReshapeRule with no new AD
+        // math. Dims may be sentinels — the RESHAPE result types carry them and
+        // the synthesis reshape arm reads the axis-matched param dim. v1: rank-1
+        // ⊗ rank-1 only (higher ranks would need a batched/general contraction).
+        if (fqn == "io.tlaloc.core.ops.outerProduct") {
+            val args = call.argumentList.arguments
+            if (args.size != 2) {
+                throw LoweringException("outerProduct requires 2 arguments; got ${args.size}")
+            }
+            val a = lowerExpr(args[0], env, emitter)
+            val b = lowerExpr(args[1], env, emitter)
+            if (a.type.rank != 1 || b.type.rank != 1) {
+                throw LoweringException(
+                    "outerProduct v1 supports rank-1 ⊗ rank-1 only; got rank ${a.type.rank} ⊗ ${b.type.rank}",
+                )
+            }
+            val n = a.type.dims[0]
+            val m = b.type.dims[0]
+            val aU = emitter.op(
+                kind = OpKind.RESHAPE,
+                operands = listOf(a),
+                type = DxirType(F32, listOf(n, 1)),
+            )
+            val bU = emitter.op(
+                kind = OpKind.RESHAPE,
+                operands = listOf(b),
+                type = DxirType(F32, listOf(1, m)),
+            )
+            return emitter.op(
+                kind = OpKind.MATMUL,
+                operands = listOf(aU, bU),
+                type = DxirType(F32, listOf(n, m)),
+            )
+        }
+
         // §0.4.364 — elementwise comparisons (the DiffKT-gap user surface).
         // `a gt b` lowers to COMPARE(direction):Bool + CAST back to the
         // operand dtype: the user-visible value is a 0/1 mask matching the
@@ -1195,6 +1290,28 @@ object FirLambdaToDxirLowering {
                 val rec = expr.dispatchReceiver ?: expr.extensionReceiver
                 if (rec is FirLiteralExpression && rec.value is Number) {
                     return -(rec.value as Number).toInt()
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * §0.4.369 — constant-fold a Float scalar bound (clip's `lo`/`hi`).
+     * Accepts any numeric literal (Float/Double/Int spelling) and the negative
+     * literal form (`-1.0f` = `1.0f.unaryMinus()`). Returns null for anything
+     * non-constant; callers turn that into a [LoweringException].
+     */
+    private fun floatLiteralArg(expr: FirExpression): Float? {
+        if (expr is FirLiteralExpression && expr.value is Number) {
+            return (expr.value as Number).toFloat()
+        }
+        if (expr is FirFunctionCall) {
+            val id = expr.calleeReference.toResolvedCallableSymbol()?.callableId
+            if (id?.callableName?.asString() == "unaryMinus") {
+                val rec = expr.dispatchReceiver ?: expr.extensionReceiver
+                if (rec is FirLiteralExpression && rec.value is Number) {
+                    return -(rec.value as Number).toFloat()
                 }
             }
         }

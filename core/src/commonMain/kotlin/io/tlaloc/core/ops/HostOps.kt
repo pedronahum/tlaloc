@@ -161,6 +161,66 @@ fun <S : Shape> where(
     return DTensor(HostF32Storage(out), a.dims.copyOf(), F32)
 }
 
+/**
+ * §0.4.369 — Phase A4 (DiffKT parity): elementwise `maximum(a, b)` /
+ * `minimum(a, b)` — first-class in DiffKT, sugar in Tlaloc. Inside `grad {}`
+ * the K2 plugin lowers `maximum` to `WHERE(COMPARE(a, b, GE), a, b)` and
+ * `minimum` to `WHERE(COMPARE(a, b, LE), a, b)` — the §0.4.364 where/compare
+ * surface — so the gradient flows through WhereRule with no new AD math:
+ * full upstream to the larger (resp. smaller) operand, ties to the first
+ * (the `>=` / `<=` mask keeps `a`). This host body is the runtime twin. The
+ * shared phantom shape [S] requires same-shape operands (elementwise).
+ */
+fun <S : Shape> maximum(a: DTensor<S, F32>, b: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(a, b) { x, y -> if (x >= y) x else y }
+
+fun <S : Shape> minimum(a: DTensor<S, F32>, b: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(a, b) { x, y -> if (x <= y) x else y }
+
+/**
+ * §0.4.369 — `clip(x, lo, hi)` with compile-time Float scalar bounds =
+ * `minimum(maximum(x, lo), hi)`. Inside `grad {}` this composes as two
+ * COMPARE+WHERE pairs against `lo`/`hi` splat consts of `x`'s shape, so the
+ * gradient is exactly 1 where `lo ≤ x ≤ hi` and 0 outside (WhereRule routes
+ * upstream to `x` on the in-bounds mask and to the const bound — zero
+ * gradient — outside). Requires `lo ≤ hi`.
+ */
+fun <S : Shape> clip(x: DTensor<S, F32>, lo: Float, hi: Float): DTensor<S, F32> {
+    require(lo <= hi) { "clip: lo ($lo) must be ≤ hi ($hi)" }
+    return x.unary { v -> if (v < lo) lo else if (v > hi) hi else v }
+}
+
+/**
+ * §0.4.369 — `outerProduct(a, b)` for rank-1 operands: `out[i, j] = a[i]·b[j]`,
+ * result shape `[n, m]` (DiffKT's `concat(shapeA, shapeB)` specialised to
+ * rank-1 ⊗ rank-1). Inside `grad {}` the K2 plugin lowers this to
+ * `MATMUL(reshape(a, [n, 1]), reshape(b, [1, m]))` — the outer product IS a
+ * `[n,1]×[1,m]` matmul — so the gradient flows through MatmulRule ∘ ReshapeRule
+ * with no new AD math (`da_i = Σ_j upstream[i,j]·b[j]`, `db_j = Σ_i
+ * upstream[i,j]·a[i]`). v1 scope: rank-1 ⊗ rank-1 (the only ranks that compose
+ * cleanly through the existing rank-2 MATMUL synthesis arm). This host body is
+ * the runtime twin.
+ */
+fun <SA : Shape, SB : Shape> outerProduct(
+    a: DTensor<SA, F32>,
+    b: DTensor<SB, F32>,
+): DTensor<Shape, F32> {
+    require(a.dims.size == 1 && b.dims.size == 1) {
+        "outerProduct v1 requires rank-1 operands, got ${a.dims.toList()} ⊗ ${b.dims.toList()}"
+    }
+    val av = a.hostF32()
+    val bv = b.hostF32()
+    val n = av.size
+    val m = bv.size
+    val out = FloatArray(n * m)
+    for (i in 0 until n) {
+        val ai = av[i]
+        val rowOff = i * m
+        for (j in 0 until m) out[rowOff + j] = ai * bv[j]
+    }
+    return DTensor(HostF32Storage(out), intArrayOf(n, m), F32)
+}
+
 fun <S : Shape> DTensor<S, F32>.sigmoid(): DTensor<S, F32> =
     unary { x -> 1f / (1f + kotlin.math.exp(-x)) }
 

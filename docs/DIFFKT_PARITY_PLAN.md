@@ -67,10 +67,29 @@ reachable from `grad {}`, not new math. New-op families come after.
     `:core` host impls (conv/pool eval) AND a synthesis-scope widening to
     rank-4 F32 (today's gate is rank 1..3). `embedding` VjpRule (op exists,
     rule doesn't); `crossEntropyLoss`/`nllLoss` (compose from logSoftmax).
-- **A4. Elementwise binary max/min + clip + outerProduct**: named
-  `maximum/minimum/clip` ops as sugar over the §0.4.364 where/compare
-  surface (DiffKT has them first-class; we compose); `outerProduct` as
-  unsqueeze+broadcast-MUL sugar.
+- **A4. Elementwise binary max/min + clip + outerProduct** — split by the
+  synthesis-transpose boundary:
+  - **A4a ✅ (§0.4.369)**: `maximum(a, b)` / `minimum(a, b)` / `clip(x, lo, hi)`
+    E2E through `grad {}`. All sugar over the §0.4.364 where/compare surface —
+    `maximum` = `WHERE(COMPARE(a, b, GE), a, b)`, `minimum` uses LE, `clip` =
+    `minimum(maximum(x, lo), hi)` composed as two COMPARE+WHERE pairs against
+    `lo`/`hi` splat consts of `x`'s shape. No new VjpRule; the gradient flows
+    through WhereRule (full upstream to the larger/smaller/in-bounds operand,
+    ties + boundaries route to `a` on the `>=`/`<=` equality). `clip`'s bounds
+    are compile-time Float literals (new `floatLiteralArg` FIR helper).
+  - **A4b (open) — `outerProduct` grad{} E2E**: host op + FIR lowering
+    (`MATMUL(reshape(a, [n,1]), reshape(b, [1,m]))`) + IR-level gradient all
+    landed §0.4.369 and CERTIFIED (`DxirElementwiseMaxMinClipGradTest`), and
+    the runtime host path works. But `grad {}` **falls back to the tape**: the
+    forward reshapes synthesise fine, yet MatmulRule's adjoint emits
+    `TRANSPOSE([n,1]) → [1,n]`, and the reshape-introduced unit axis has no
+    param-sourced shape atom, so `irTranspose`'s IrType derivation returns null
+    (`irOpFor returned null for TRANSPOSE`). Fixing needs either a
+    `deriveResultIrType` arm that synthesises a `Lit<1>` atom for
+    reshape-created unit axes (so the downstream transpose resolves), or a
+    transpose-free lowering (broadcast-MUL) whose own rank-increasing-BROADCAST
+    synthesis + BroadcastRule un-broadcast are equally unproven at sentinel
+    dims. Same shape as A2a's `flatten` deferral — IR-level-only for gradients.
 - **A5. Binary-op broadcasting + orphaned lowerings** *(audit)*:
   implicit broadcasting on tensor binary ops (`broadcast(S1,S2)` — DiffKT
   broadcasts everywhere) and `Float×DTensor`/`DScalar×DTensor` mixing;
@@ -186,7 +205,7 @@ UNARY/BINARY maps** → A5) · `tan atan` ❌ (C2) ·
 | `stats()` = (mean, variance) | ❌ | 2-line sugar once A1 lands |
 | `matmul` (incl. generalized shape-block form) | ✅ | any rank ≥ 2 |
 | `innerProduct` | ✅ | DOT |
-| `outerProduct` | ❌ | sugar (broadcast-MUL or matmul on unsqueezed) → A4 |
+| `outerProduct` | 🟡 | §0.4.369: host + FIR (matmul on unsqueezed) + IR-level grad ✅; grad{} E2E deferred (A4b: MatmulRule transpose of reshape-introduced unit axis) |
 | `matdiv` | ➖ | **sparse-only** in DiffKT (dense explicitly unsupported) → E |
 | `conv2d(hStride, vStride, Same/Valid/Explicit padding)` | ✅ | §0.4.362 **exceeds**: DiffKT has no groups/dilation, NHWC only |
 | `maxPool / avgPool / maxPoolWithIndices` | ✅ | §0.4.363 **exceeds**: DiffKT pooling is non-overlapping only (stride=window, divisibility required, no padding) → C4 reclassified beyond-parity |
