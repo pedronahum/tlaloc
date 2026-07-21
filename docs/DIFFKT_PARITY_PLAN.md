@@ -180,9 +180,23 @@ reachable from `grad {}`, not new math. New-op families come after.
 
 ### Phase B — AD-mode parity
 
-- **B1. Forward-mode user intrinsics**: `jvp {}` / `valueAndJvp {}`
-  (DiffKT `forwardDerivative` / `primalAndForwardDerivative`) — the
-  §0.4.361 transform wired into GradIntrinsics + the plugin rewrite.
+- **B1. Forward-mode user intrinsics** ✅ (§0.4.372): `jvp {}` /
+  `valueAndJvp {}` (DiffKT `forwardDerivative` /
+  `primalAndForwardDerivative`) — the §0.4.361 `DxirForwardTransform`
+  wired into `GradIntrinsics` + the plugin rewrite, the missing user
+  surface for forward-mode AD. `jvp(f)` curries like `grad(f)`, returning
+  `(x, dx) → dy = J_f(x)·dx` in one forward pass (dual-number, not finite
+  differences); `valueAndJvp(f)` returns `(x, dx) → (y, dy)`. Wiring: the
+  transform already emits `jvp_f(x, dx) → (y, dy)`, so `valueAndJvp` is
+  that 2-return function boxed as `Pair`, and `jvp` is the same with the
+  primal returns dropped (full body kept — tangents depend on primal
+  values). The plugin branches to `DxirForwardTransform` before the
+  reverse coarsening pipeline (skipped — forward v1 is straight-line, so
+  a region-bearing body just falls back to the tape); the check-time
+  differentiability probe uses the forward transform for these. v1 scope:
+  single argument, straight-line bodies. Certified E2E through the K2
+  plugin (dy = 2⟨x,dx⟩ for Σx², the (y,dy) pair, Σexp(x)·dx). Multi-arg
+  `jvp2`/`valueAndJvp2` (params `(x1,x2,dx1,dx2)`) is a clean follow-up.
 - **B2. `jacobian` + `hessian` intrinsics**: jacobian via forward (wide) or
   reverse (tall) column/row assembly; hessian = forward-over-reverse
   (already pinned at IR level).

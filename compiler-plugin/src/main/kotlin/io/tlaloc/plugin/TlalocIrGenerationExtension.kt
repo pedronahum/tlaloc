@@ -3,6 +3,7 @@ package io.tlaloc.plugin
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.passes.CoarseningCache
 import io.tlaloc.ir.passes.DiskCoarseningCache
+import io.tlaloc.ir.passes.DxirForwardTransform
 import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.ir.passes.NoOpCoarseningCache
 import io.tlaloc.ir.passes.PhiCalculus
@@ -124,6 +125,74 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                 // gradients. Gate violations (multi-return, non-scalar return, regions,
                 // multi-result ops, unsupported OpKinds) fall back to the runtime tape.
                 val callableName = cid.callableName.asString()
+
+                // §0.4.372 — forward-mode intrinsics (Phase B1): route through
+                // DxirForwardTransform instead of the reverse pipeline. The
+                // transform rewrites f(x)->y into jvp_f(x, dx)->(y, dy). For
+                // `valueAndJvp` we synthesise both returns (boxed Pair<y, dy>);
+                // for `jvp` we drop the primal returns and synthesise dy alone.
+                // v1 scope = straight-line bodies (the transform errors loudly on
+                // regions), so we SKIP coarsening/lift entirely — a region-bearing
+                // body simply falls back to the runtime tape here.
+                if (callableName == "jvp" || callableName == "valueAndJvp") {
+                    val jvpFn: DxirFunction = try {
+                        DxirForwardTransform.apply(fn)
+                    } catch (t: Throwable) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "DxirForwardTransform failed (${t::class.simpleName}: ${t.message}); " +
+                                "falling back to the runtime tape\n${fn.pretty().trimEnd()}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    // jvp(f): keep only the tangent returns (the second half —
+                    // DxirForwardTransform emits values(m) ++ tangents(m)); the
+                    // full body stays (tangents depend on the primal values).
+                    val toSynthesise: DxirFunction = if (callableName == "jvp") {
+                        val m = fn.returns.size
+                        DxirFunction(
+                            jvpFn.name,
+                            jvpFn.params,
+                            jvpFn.body,
+                            jvpFn.returns.subList(m, jvpFn.returns.size),
+                            jvpFn.meshes,
+                        )
+                    } else {
+                        jvpFn
+                    }
+                    val replacement = synth.synthesise(toSynthesise, transformed, currentDeclarationParent!!)
+                    if (replacement == null) {
+                        val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "forward-transformed function falls outside the synthesis scope " +
+                                "[$reason]\npost-forward jvp function:\n${toSynthesise.pretty().trimEnd()}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    if (replacement.type != transformed.type) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "synthesised type ${replacement.type} doesn't match call type " +
+                                "${transformed.type}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc lowered '${callableName}' to forward-mode dxir:\n" +
+                            toSynthesise.pretty().trimEnd(),
+                        null,
+                    )
+                    return replacement
+                }
+
                 val includeForward = callableName == "valueAndGrad" || callableName == "valueAndGrad2"
 
                 // §0.4.24 — Stage B.4a. Run PhiCalculus.apply before SCT so IF/WHILE
@@ -342,6 +411,8 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
     companion object {
         private val INTRINSIC_NAMES: Set<String> = setOf(
             "grad", "grad2", "valueAndGrad", "valueAndGrad2",
+            // §0.4.372 — forward-mode (Phase B1).
+            "jvp", "valueAndJvp",
         )
 
         /**

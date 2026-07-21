@@ -37,3 +37,31 @@ fun <A, R> valueAndGrad(f: (A) -> R): (A) -> Pair<R, A> = { _ -> pluginMissing("
 /** Value and gradient of a scalar-valued function of two arguments. */
 fun <A, B, R> valueAndGrad2(f: (A, B) -> R): (A, B) -> Triple<R, A, B> =
     { _, _ -> pluginMissing("valueAndGrad2") }
+
+/**
+ * §0.4.372 — forward-mode AD user intrinsics (Phase B1), the missing user
+ * surface for the §0.4.361 [io.tlaloc.ir.passes.DxirForwardTransform] (whose
+ * reverse-mode twin, `grad`, has shipped since §0.4.355). DiffKT's
+ * `forwardDerivative` / `primalAndForwardDerivative`.
+ *
+ * The Tlaloc idiom curries like [grad]: `jvp(f)` returns a function of
+ * `(x, dx)` — the primal input and a tangent (perturbation direction) of the
+ * same type — producing the directional derivative `dy = J_f(x)·dx`, computed
+ * in ONE forward pass (dual-number semantics), NOT by finite differences.
+ * DiffKT spells the same thing as `jvp(x, v, f)` (all args at the call site);
+ * currying `f` first mirrors `grad` and lets the plugin lower the lambda body
+ * exactly as it does for reverse mode.
+ *
+ * [valueAndJvp] additionally returns the primal output `y` alongside `dy` —
+ * both fall out of the forward transform's `(x, dx) → (y, dy)` output for free.
+ *
+ * These are the no-plugin fallbacks (see [pluginMissing]); with the plugin the
+ * call is replaced wholesale by [io.tlaloc.ir.passes.DxirForwardTransform] +
+ * synthesis. v1 scope: single argument, straight-line bodies (the forward
+ * transform's scope — region-bearing bodies fall back to the tape).
+ */
+fun <A, R> jvp(f: (A) -> R): (A, A) -> R = { _, _ -> pluginMissing("jvp") }
+
+/** Primal value and directional derivative in one pass: `(x, dx) -> (y, dy)`. */
+fun <A, R> valueAndJvp(f: (A) -> R): (A, A) -> Pair<R, R> =
+    { _, _ -> pluginMissing("valueAndJvp") }

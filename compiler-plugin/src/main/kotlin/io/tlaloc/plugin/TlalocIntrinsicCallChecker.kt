@@ -1,5 +1,6 @@
 package io.tlaloc.plugin
 
+import io.tlaloc.ir.passes.DxirForwardTransform
 import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.ir.passes.validateDxirShapes
 import io.tlaloc.ir.pretty
@@ -20,7 +21,14 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
         "io.tlaloc.autograd.grad2",
         "io.tlaloc.autograd.valueAndGrad",
         "io.tlaloc.autograd.valueAndGrad2",
+        // §0.4.372 — forward-mode (Phase B1).
+        "io.tlaloc.autograd.jvp",
+        "io.tlaloc.autograd.valueAndJvp",
     )
+
+    /** §0.4.372 — the forward-mode intrinsics probe differentiability with the
+     * forward transform (JVP), not the reverse one. */
+    private val forwardIntrinsics: Set<String> = setOf("jvp", "valueAndJvp")
 
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirFunctionCall) {
@@ -63,7 +71,13 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                     it is io.tlaloc.ir.DxirOp && it.regions.isNotEmpty() && it.op != io.tlaloc.ir.OpKind.IF
                 }
                 if (shapeErrors.isEmpty() && !hasLoopRegions) {
-                    runCatching { DxirReverseTransform.apply(result.fn) }.onFailure { t ->
+                    val probe: () -> Unit =
+                        if (callableId.callableName.asString() in forwardIntrinsics) {
+                            { DxirForwardTransform.apply(result.fn) }
+                        } else {
+                            { DxirReverseTransform.apply(result.fn) }
+                        }
+                    runCatching { probe() }.onFailure { t ->
                         reporter.reportOn(
                             expression.source,
                             TlalocErrors.NOT_DIFFERENTIABLE,
