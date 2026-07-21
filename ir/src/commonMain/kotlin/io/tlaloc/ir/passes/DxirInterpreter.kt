@@ -433,45 +433,64 @@ object DxirInterpreter {
                 val bcastDims = (op.attrs["broadcast_dimensions"] as? List<*>)
                     ?.map { (it as Number).toInt() }
                     ?: emptyList()
-                // §0.4.359 — two supported shapes: scalar → rank-N uniform
-                // (SumRule/MeanRule) and equal-rank keepdims stretch (input dim
-                // is out dim or 1 — the Max/Min/Softmax rules' broadcast of a
-                // keepdims reduction back over the reduced axes). Anything else
-                // still fails loudly. §0.4.363 — identity broadcast_dimensions
-                // [0..r-1] accepted as a stretch spelling: it is what the
-                // emitter's `stablehlo.broadcast_in_dim` requires for the same
-                // shape, so rules that must run on BOTH backends carry it.
-                val inRank = op.operands[0].type.rank
-                require(bcastDims.isEmpty() || bcastDims == (0 until inRank).toList()) {
-                    "DxirInterpreter: BROADCAST broadcast_dimensions=$bcastDims unsupported " +
-                        "(empty or identity [0..${inRank - 1}] only)"
-                }
                 val inDims = op.operands[0].type.dims
                 val outDims = op.type.dims
-                when {
-                    a.size == 1 -> FloatArray(outSize) { a[0] }
-                    inDims.size == outDims.size && inDims.indices.all { inDims[it] == outDims[it] || inDims[it] == 1 } -> {
-                        val inStrides = IntArray(inDims.size)
-                        var st = 1
-                        for (k in inDims.indices.reversed()) { inStrides[k] = st; st *= inDims[k] }
-                        val outStrides = IntArray(outDims.size)
-                        st = 1
-                        for (k in outDims.indices.reversed()) { outStrides[k] = st; st *= outDims[k] }
-                        FloatArray(outSize) { flat ->
-                            var rem = flat
-                            var src = 0
-                            for (k in outDims.indices) {
-                                val coord = rem / outStrides[k]
-                                rem %= outStrides[k]
-                                if (inDims[k] != 1) src += coord * inStrides[k]
-                            }
-                            a[src]
+                // §0.4.359 — the EMPTY broadcast_dimensions form is polymorphic:
+                // a scalar seed splats to rank-N (SumRule/MeanRule), and a
+                // keepdims-shaped equal-rank input stretches by shape (many
+                // reduction VJP rules — Tanh/Max/Min/Softmax adjoints — emit the
+                // un-reduce with empty dims). §0.4.371 — the NON-empty form is
+                // full `stablehlo.broadcast_in_dim`: input axis j maps to output
+                // axis broadcast_dimensions[j]; a size-1 input axis stretches, an
+                // unlisted output axis is a NEW replicated axis (the
+                // rank-increasing broadcastTo). Matches the emitter's
+                // [emitBroadcast]. Empty+equal-rank folds into the general path
+                // via a synthesized identity mapping.
+                val effectiveDims = if (bcastDims.isEmpty() && a.size != 1 && inDims.size == outDims.size) {
+                    inDims.indices.toList()
+                } else {
+                    bcastDims
+                }
+                if (effectiveDims.isEmpty()) {
+                    require(a.size == 1) {
+                        "DxirInterpreter: BROADCAST with empty broadcast_dimensions requires a scalar " +
+                            "(size-1) input or an equal-rank keepdims input; got shape $inDims -> $outDims"
+                    }
+                    FloatArray(outSize) { a[0] }
+                } else {
+                    val bcastDims = effectiveDims
+                    require(bcastDims.size == inDims.size) {
+                        "DxirInterpreter: BROADCAST broadcast_dimensions length ${bcastDims.size} " +
+                            "must equal input rank ${inDims.size}"
+                    }
+                    require(bcastDims.all { it in outDims.indices } && bcastDims.toSet().size == bcastDims.size) {
+                        "DxirInterpreter: BROADCAST broadcast_dimensions=$bcastDims out of range / " +
+                            "not unique for output rank ${outDims.size}"
+                    }
+                    for (j in inDims.indices) {
+                        val od = outDims[bcastDims[j]]
+                        require(inDims[j] == od || inDims[j] == 1) {
+                            "DxirInterpreter: BROADCAST input dim $j = ${inDims[j]} cannot map to " +
+                                "output axis ${bcastDims[j]} = $od (must be equal or 1)"
                         }
                     }
-                    else -> error(
-                        "DxirInterpreter: BROADCAST ${inDims} -> ${outDims} unsupported " +
-                            "(scalar or equal-rank keepdims stretch only)",
-                    )
+                    val inStrides = IntArray(inDims.size)
+                    var st = 1
+                    for (k in inDims.indices.reversed()) { inStrides[k] = st; st *= inDims[k] }
+                    val outStrides = IntArray(outDims.size)
+                    st = 1
+                    for (k in outDims.indices.reversed()) { outStrides[k] = st; st *= outDims[k] }
+                    FloatArray(outSize) { flat ->
+                        var rem = flat
+                        var src = 0
+                        for (k in outDims.indices) {
+                            val coord = rem / outStrides[k]
+                            rem %= outStrides[k]
+                            val j = bcastDims.indexOf(k)
+                            if (j >= 0 && inDims[j] != 1) src += coord * inStrides[j]
+                        }
+                        a[src]
+                    }
                 }
             }
             OpKind.GATHER -> {

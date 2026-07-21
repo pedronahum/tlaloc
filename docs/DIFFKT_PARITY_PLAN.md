@@ -48,14 +48,49 @@ reachable from `grad {}`, not new math. New-op families come after.
     axis-matched `param.dims` at runtime. `flatten` is IR-level-only for
     gradients (its splat needs a rank-1 dim = PRODUCT of param dims —
     deferred with A2b).
-  - **A2b (open)**: `concat`, `slice`, `stack`, `pad` (note: DiffKT has
-    no user-facing pad — ours would be a bonus), `broadcastTo`/`expand`,
-    `view`/indexing, `withChange`, `meld`/`split`, `stats`. Blocked on
-    runtime-extent adjoints: ConcatRule/SliceRule bake operand extents
-    into SLICE/PAD attrs, which are -1 sentinels inside `grad {}` — the
-    adjoints need either runtime-shaped slice ops (a `sliceLike` host
-    family + attr-free IR spelling) or SPLIT (which today is
-    emitter-only: no interpreter arm, no VJP, no forward arm).
+  - **A2b (partial ✅ §0.4.371 — `broadcastTo` landed; the rest deferred)**:
+    - **`broadcastTo`/`expand` ✅ (§0.4.371)** — the *rank-increasing* form
+      (NumPy right-alignment: the operand maps to the TRAILING output axes,
+      new leading axes are replicated), E2E through `grad {}`. This is the
+      sentinel-clean corner of A2b: the FIR lowering derives
+      `broadcast_dimensions` as the right-aligned suffix `[outRank-rank ..
+      outRank-1]` — pure compile-time POSITIONS from ranks alone (dim VALUES
+      never consulted), so `BroadcastRule`'s adjoint (a SUM over the
+      COMPLEMENT = the new leading axes) reads no operand extent and is
+      sentinel-safe. Landed: the interpreter's BROADCAST arm generalized to
+      full `stablehlo.broadcast_in_dim` (input axis j → output axis
+      `broadcast_dimensions[j]`, size-1 stretch, new replicated axes),
+      subsuming the §0.4.359 scalar-splat + equal-rank keepdims-stretch cases
+      (the empty-`broadcast_dimensions` polymorphism is preserved: scalar seed
+      splats, equal-rank input stretches by shape); host `DTensor.broadcastTo`
+      (out[i] = v[i % n], since the operand rides the innermost axes); the FIR
+      `SHAPE_OP_SET` arm; emitter already handled general dims;
+      `DxirForwardTransform` already passes BROADCAST tangents through with
+      attrs. Certified: IR-level rank-2→3 gradient + rank-1→3 JVP⇄VJP
+      cross-identity, E2E `Σ a.broadcastTo(3,2,2) + Σ b⊙b` (da=3, db=2b).
+      **DEFERRED — in-place size-1 stretch** (`[1,C]→[N,C]`, `[N,1]→[N,C]`):
+      its adjoint must sum over exactly the axes that were size-1 in the
+      operand and keep them as size-1, but which axes those are is unknowable
+      under the -1 sentinel dims of `grad {}` (BroadcastRule can't distinguish
+      a stretched size-1 axis from a matched axis). Needs a runtime-extent
+      "unbroadcast/sum-to-shape" adjoint: BroadcastRule would emit an
+      attr-free `SUM_TO(upstream, template=operand)` (new dxir op +
+      interpreter arm summing upstream down to `template`'s RUNTIME shape +
+      a `sumToLike(upstream, template)` host fn for synthesis) — the reverse
+      mirror of the existing `stretchLike`. Fail-loud today: the host op and
+      interpreter `require` the trailing dims to match, so a size-1-stretch
+      attempt errors rather than silently returning a wrong gradient.
+    - **`concat`, `slice`, `stack`, `pad` (still deferred)**: blocked on
+      runtime-extent adjoints — ConcatRule/SliceRule/PadRule bake operand
+      extents into SLICE/PAD `start_indices`/`limit_indices`/`low`/`high`
+      attrs, which are -1 sentinels inside `grad {}`. Same runtime-extent
+      mechanism the size-1-stretch deferral needs (an attr-free,
+      template-shaped slice/scatter family — a `sliceLike` host family + a
+      dxir spelling whose bounds come from a template tensor's runtime dims),
+      or bring `SPLIT` up from emitter-only (add interpreter + VJP + forward
+      arms), since concat's adjoint is naturally a split.
+    - **`view`/indexing, `withChange`, `meld`/`split`, `stats`**: same
+      runtime-extent boundary; sequenced after the mechanism above lands.
 - **A3. NN ops in lambdas** — split by wiring readiness:
   - **A3a ✅ (§0.4.368)**: `softmax(axis)` + `logSoftmax(axis)` E2E through
     `grad {}`. SOFTMAX was fully wired below the surface (interpreter,
@@ -259,7 +294,7 @@ UNARY/BINARY maps** → A5) · `tan atan` ❌ (C2) ·
 | `softmax(axis) / logSoftmax / logSoftmaxGrad` | 🟡 | SOFTMAX/LOGSUMEXP + VJPs exist → A3 |
 | `crossEntropyLoss / crossEntropyLossFromOneHot / nllLossFromOneHot` | ✅ | §0.4.370: `crossEntropyLoss`/`nllLoss` composed in FIR from logSoftmax, E2E through `grad {}` (CROSS_ENTROPY OpKind stays emitter-only) |
 | `embedding(table, indices, paddingIndex)` | 🟡 | §0.4.370: EmbeddingRule VjpRule + EMBEDDING_GRAD adjoint + interpreter + forward tangent, **IR-level only** (no `grad {}` FIR/synthesis arm yet); `paddingIndex` not modelled |
-| `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | RESHAPE/BROADCAST + VJPs → A2 |
+| `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) — in-place size-1 stretch deferred (runtime-extent adjoint) |
 | `transpose(axes) / leftTranspose / rightTranspose` | 🟡 | TRANSPOSE + VJP → A2 (left/right = sugar) |
 | `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |
 | `slice / view(index/range/axis) / withChange` (functional update) | 🟡 | SLICE/GATHER/SCATTER + VJPs → A2 (indexing + `withChange` = slice/scatter sugar) |

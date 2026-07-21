@@ -830,6 +830,33 @@ fun <S : Shape> DTensor<S, F32>.transpose(vararg perm: Int): DTensor<Shape, F32>
 }
 
 /**
+ * §0.4.371 — rank-increasing broadcast (DiffKT `broadcastTo`/`expand`, Phase
+ * A2b). NumPy right-alignment: the receiver's axes map to the TRAILING axes of
+ * [newDims]; the new leading axes are replicated. Trailing dims must match the
+ * receiver exactly — in-place size-1 stretch (`[1,C]→[N,C]`) is NOT supported
+ * (its `grad {}` adjoint needs the operand's runtime extent, a -1 sentinel).
+ * Because the operand maps to the innermost (contiguous) axes, the output is
+ * just the operand block tiled `prod(leading dims)` times: `out[i] = v[i % n]`.
+ */
+fun <S : Shape> DTensor<S, F32>.broadcastTo(vararg newDims: Int): DTensor<Shape, F32> {
+    val r = dims.size
+    val outRank = newDims.size
+    require(outRank >= r) { "broadcastTo: target rank $outRank < operand rank $r (only new leading axes)" }
+    for (d in newDims) require(d > 0) { "broadcastTo: dims must be positive, got ${newDims.toList()}" }
+    val offset = outRank - r
+    for (j in 0 until r) require(dims[j] == newDims[offset + j]) {
+        "broadcastTo: operand dim $j = ${dims[j]} must match target ${newDims[offset + j]} " +
+            "(only new leading axes; in-place size-1 stretch unsupported)"
+    }
+    val v = hostF32()
+    val n = v.size
+    var outSize = 1
+    for (d in newDims) outSize *= d
+    val out = FloatArray(outSize) { v[it % n] }
+    return DTensor(HostF32Storage(out), newDims.copyOf(), F32)
+}
+
+/**
  * §0.4.367 — fixed-arity synthesis delegates (the usual IrVararg reason).
  * `squeezeAxes{N}` drops size-1 axes at result-computed positions (the
  * adjoint of an unsqueeze); `reshapeToRank{N}` relayouts to explicit dims —

@@ -1213,6 +1213,50 @@ object FirLambdaToDxirLowering {
                         attrs = mapOf("permutation" to perm),
                     )
                 }
+                "io.tlaloc.core.ops.broadcastTo" -> {
+                    // §0.4.371 — Phase A2b: rank-increasing broadcast (DiffKT
+                    // `broadcastTo`/`expand`, NumPy right-alignment). The operand's
+                    // `rank` axes map to the TRAILING axes of the target; the new
+                    // leading axes are replicated. `broadcast_dimensions` is the
+                    // right-aligned suffix [outRank-rank .. outRank-1] — pure
+                    // compile-time POSITIONS, so BroadcastRule's adjoint (a SUM over
+                    // the complement = the new leading axes) is sentinel-safe: it
+                    // never reads an operand extent. In-place size-1 stretch (e.g.
+                    // [1,C]→[N,C]) is deliberately NOT supported here — its adjoint
+                    // would need to know which operand axis was size-1, unknowable
+                    // under the -1 sentinel dims of `grad {}` (deferred, see plan).
+                    if (intArgs.isEmpty()) throw LoweringException("broadcastTo requires target dims")
+                    if (intArgs.any { it <= 0 }) {
+                        throw LoweringException("broadcastTo dims must be positive literals, got $intArgs")
+                    }
+                    val outRank = intArgs.size
+                    if (outRank < rank) {
+                        throw LoweringException(
+                            "broadcastTo target rank $outRank < operand rank $rank (only new leading axes)",
+                        )
+                    }
+                    val offset = outRank - rank
+                    // Trailing target dims must match the operand's (no in-place
+                    // stretch). Only enforceable when the operand dim is concrete;
+                    // under sentinels the runtime host op / interpreter fail loudly.
+                    for (j in 0 until rank) {
+                        val od = operand.type.dims[j]
+                        if (od > 0 && od != intArgs[offset + j]) {
+                            throw LoweringException(
+                                "broadcastTo: operand dim $j = $od does not match target " +
+                                    "${intArgs[offset + j]} (in-place size-1 stretch unsupported in " +
+                                    "grad {}; only new leading axes)",
+                            )
+                        }
+                    }
+                    val bcastDims = (0 until rank).map { offset + it }
+                    return emitter.op(
+                        kind = OpKind.BROADCAST,
+                        operands = listOf(operand),
+                        type = DxirType(operand.type.dtype, intArgs.toList()),
+                        attrs = mapOf("broadcast_dimensions" to bcastDims),
+                    )
+                }
             }
         }
 
@@ -1759,6 +1803,7 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.flatten",
         "io.tlaloc.core.ops.reshape",
         "io.tlaloc.core.ops.transpose",
+        "io.tlaloc.core.ops.broadcastTo",
     )
 
     private val PRIMITIVE_DTYPE_MAP: Map<String, DType> = mapOf(
