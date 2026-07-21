@@ -63,10 +63,56 @@ reachable from `grad {}`, not new math. New-op families come after.
     synthesis were missing. `logSoftmax` lowers to `LOG(SOFTMAX(x))` (both
     fully-ruled ops; **LOGSUMEXP stays emitter-only** — no VJP/interp/JVP),
     which also forced tensor `irLog`/`irExp` (were scalar-only).
-  - **A3b (open)**: `conv2d`/`maxPool`/`avgPool` in `grad {}` — needs new
-    `:core` host impls (conv/pool eval) AND a synthesis-scope widening to
-    rank-4 F32 (today's gate is rank 1..3). `embedding` VjpRule (op exists,
-    rule doesn't); `crossEntropyLoss`/`nllLoss` (compose from logSoftmax).
+  - **A3b ✅ (partial, §0.4.370)** — the two self-contained halves landed:
+    - **`embedding` VjpRule** ✅: EMBEDDING was wired below the surface
+      (emitter-as-gather + cost model) but had no reverse rule and no
+      interpreter arm. Added: an EMBEDDING interpreter arm (rank-2 table +
+      int index tensor → gathered rows), a fused [OpKind.EMBEDDING_GRAD]
+      adjoint op (interpreter arm: scatter-ADD each upstream row back to the
+      vocab slot its index selected, collisions summing — result type `[V,D]`
+      carries the dims, indices non-differentiable), the EmbeddingRule VjpRule
+      (mirrors GatherRule's fused scatter-add), and the EMBEDDING forward-mode
+      tangent (linear in the table). Certified IR-level: a hand-pinned
+      collision-summing dTable + the JVP⇄VJP cross-identity. **NOT reachable
+      from `grad {}`** (no FIR/synthesis arm) — IR-level only, like the pre-A3a
+      softmax state; EMBEDDING_GRAD's StableHLO scatter+add-region emission is
+      also deferred (interpreter arm suffices for the IR-level cert).
+    - **`crossEntropyLoss`/`nllLoss`** ✅ E2E through `grad {}`: composed in
+      FIR onto existing fully-ruled ops (no new VjpRule). `crossEntropyLoss` =
+      `NEG(SUM(MUL(oneHot, LOG(SOFTMAX(logits, -1)))))` (sum-reduction
+      convention — total of the per-sample cross-entropies), `nllLoss` skips
+      the softmax. `:core` host twins added (`crossEntropyLoss`/`nllLoss`,
+      both returning a scalar so the body ends in `.toFloat()`). Certified
+      E2E: both gradients synthesise with no fallback and match the analytic
+      references (CE: da = softmax·Σb − b, db = −logSoftmax; NLL: da = −b,
+      db = −a).
+  - **A3b (deferred) — `conv2d`/`maxPool`/`avgPool` in `grad {}`**: this is a
+    multi-§ architectural effort, NOT a clean scope widen. Blockers:
+    1. **Rank-6 gradient intermediates.** MaxPool2dRule's adjoint upsamples via
+       `reshape → identity-stretch BROADCAST → reshape` through **rank-6** shapes
+       (`[N,C,Ho,1,Wo,1] → [N,C,Ho,kh,Wo,kw]`). The synthesis scope gate
+       `isAcceptedTensorType` is rank 1..3; even widening to rank-4 (for the NCHW
+       conv/pool tensors themselves) does not admit the rank-6 nodes the maxpool
+       adjoint body contains. AvgPool2dRule + Conv2dRule stay rank≤4 but still
+       need the widen.
+    2. **Single-representative `context.tensorIrType`.** Synthesis maps every
+       accepted-tensor IrType to ONE call-site-harvested generic IrType (works
+       for rank-1..3 because `broadcastLike<S>` is `S`-generic and the shape
+       rides on runtime `.dims`). A conv/pool gradient body mixes rank-4 (x, dY,
+       W) and rank-6 (maxpool upsample) nodes — the single-IrType model needs
+       generalising before those bodies can be typed.
+    3. **Missing synthesis op arms + host twins.** No `irConv2d`/
+       `irConvTranspose2d`/`irMaxPool2d`/`irAvgPool2d` synthesis dispatch, no
+       `:core` host `conv2d`/`maxPool`/`avgPool` eval (the runtime twin AND what
+       synthesis calls back into), no FIR arms parsing the window/stride/padding
+       literal attrs. `irTranspose` handles only rank-2/3 perms — Conv2dRule's
+       adjoint uses 4-D transposes. The FORWARD/BACKWARD IrType solvers need
+       CONV2D/CONV_TRANSPOSE2D/MAXPOOL2D/AVGPOOL2D arms.
+    Recommended future sequencing: land avgpool first (rank≤4, linear adjoint,
+    no rank-6, no where/mask), then conv2d (needs the 4-perm transpose +
+    conv-transpose synthesis), then maxpool last (blocked on the rank-6 model +
+    the `context.tensorIrType` generalisation). `batchNorm` grad{} folds in here
+    too (BATCHNORM OpKind exists; VJP + surface unaudited).
 - **A4. Elementwise binary max/min + clip + outerProduct** — split by the
   synthesis-transpose boundary:
   - **A4a ✅ (§0.4.369)**: `maximum(a, b)` / `minimum(a, b)` / `clip(x, lo, hi)`
@@ -211,8 +257,8 @@ UNARY/BINARY maps** → A5) · `tan atan` ❌ (C2) ·
 | `maxPool / avgPool / maxPoolWithIndices` | ✅ | §0.4.363 **exceeds**: DiffKT pooling is non-overlapping only (stride=window, divisibility required, no padding) → C4 reclassified beyond-parity |
 | `batchNorm` (raw op, training-stats variant) | 🟡 | BATCHNORM OpKind exists; VJP + surface unaudited — fold into A3 |
 | `softmax(axis) / logSoftmax / logSoftmaxGrad` | 🟡 | SOFTMAX/LOGSUMEXP + VJPs exist → A3 |
-| `crossEntropyLoss / crossEntropyLossFromOneHot / nllLossFromOneHot` | 🟡 | CROSS_ENTROPY OpKind exists (no VjpRule); or compose from logSoftmax → A3 |
-| `embedding(table, indices, paddingIndex)` | 🟡 | EMBEDDING OpKind exists, **no VjpRule in registry** → A3 |
+| `crossEntropyLoss / crossEntropyLossFromOneHot / nllLossFromOneHot` | ✅ | §0.4.370: `crossEntropyLoss`/`nllLoss` composed in FIR from logSoftmax, E2E through `grad {}` (CROSS_ENTROPY OpKind stays emitter-only) |
+| `embedding(table, indices, paddingIndex)` | 🟡 | §0.4.370: EmbeddingRule VjpRule + EMBEDDING_GRAD adjoint + interpreter + forward tangent, **IR-level only** (no `grad {}` FIR/synthesis arm yet); `paddingIndex` not modelled |
 | `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | RESHAPE/BROADCAST + VJPs → A2 |
 | `transpose(axes) / leftTranspose / rightTranspose` | 🟡 | TRANSPOSE + VJP → A2 (left/right = sugar) |
 | `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |

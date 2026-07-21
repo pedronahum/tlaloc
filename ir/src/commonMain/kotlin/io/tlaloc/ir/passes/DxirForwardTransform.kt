@@ -299,6 +299,10 @@ object DxirForwardTransform {
                 OpKind.WHERE, listOf(vOps[0], t(node.operands[1]), t(node.operands[2])), ty,
             )
             OpKind.GATHER -> b.op(OpKind.GATHER, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
+            // §0.4.370 — EMBEDDING is linear in the table (a gather along the
+            // vocab axis): dY = EMBEDDING(dTable, indices). Indices carry no
+            // tangent (integer); the primal index clone vOps[1] rides through.
+            OpKind.EMBEDDING -> b.op(OpKind.EMBEDDING, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
             OpKind.CAST -> b.op(OpKind.CAST, listOf(t(node.operands[0])), ty)
 
             // Piecewise-constant / boolean: zero tangent.

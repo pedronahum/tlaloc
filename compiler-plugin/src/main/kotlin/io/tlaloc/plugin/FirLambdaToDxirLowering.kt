@@ -891,6 +891,49 @@ object FirLambdaToDxirLowering {
             else emitter.op(kind = OpKind.LOG, operands = listOf(sm), type = operand.type)
         }
 
+        // §0.4.370 — Phase A3b (DiffKT parity): the softmax cross-entropy and
+        // NLL losses, composed onto existing fully-ruled ops (no new VjpRule).
+        // `crossEntropyLoss(logits, oneHot)` = NEG(SUM(MUL(oneHot, LOG(SOFTMAX(
+        // logits, -1))))) — logSoftmax over the last (class) axis, one-hot
+        // weighted, negated, summed to a scalar (the sum-reduction convention).
+        // `nllLoss(logProbs, oneHot)` skips the softmax (logProbs is already
+        // log-normalised): NEG(SUM(MUL(oneHot, logProbs))). Both return a scalar
+        // so the lambda body terminates in `.toFloat()`.
+        if (fqn == "io.tlaloc.core.ops.crossEntropyLoss" || fqn == "io.tlaloc.core.ops.nllLoss") {
+            val args = call.argumentList.arguments
+            if (args.size != 2) {
+                throw LoweringException("$fqn requires 2 arguments (scores, oneHot); got ${args.size}")
+            }
+            val scores = lowerExpr(args[0], env, emitter)
+            val oneHot = lowerExpr(args[1], env, emitter)
+            val rank = scores.type.rank
+            if (rank == 0) throw LoweringException("$fqn requires a tensor operand (got scalar)")
+            // crossEntropyLoss runs logSoftmax over the class axis first; nllLoss
+            // takes the caller's already-log-normalised scores as-is.
+            val logProbs = if (fqn == "io.tlaloc.core.ops.crossEntropyLoss") {
+                val sm = emitter.op(
+                    kind = OpKind.SOFTMAX,
+                    operands = listOf(scores),
+                    type = scores.type,
+                    attrs = mapOf("axis" to rank - 1),
+                )
+                emitter.op(kind = OpKind.LOG, operands = listOf(sm), type = scores.type)
+            } else {
+                scores
+            }
+            val prod = emitter.op(kind = OpKind.MUL, operands = listOf(oneHot, logProbs), type = scores.type)
+            val summed = emitter.op(
+                kind = OpKind.SUM,
+                operands = listOf(prod),
+                type = DxirType(scores.type.dtype, emptyList()),
+            )
+            return emitter.op(
+                kind = OpKind.NEG,
+                operands = listOf(summed),
+                type = DxirType(scores.type.dtype, emptyList()),
+            )
+        }
+
         // §0.4.369 — Phase A4 (DiffKT parity): elementwise `maximum(a, b)` /
         // `minimum(a, b)` as sugar over the §0.4.364 where/compare surface.
         // `maximum` = WHERE(COMPARE(a, b, GE), a, b); `minimum` uses LE. The

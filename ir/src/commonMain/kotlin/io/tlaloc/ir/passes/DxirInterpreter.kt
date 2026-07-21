@@ -594,6 +594,64 @@ object DxirInterpreter {
                 for (off in 0 until sliceSize) out[i * sliceSize + off] = value[off]
                 out
             }
+            OpKind.EMBEDDING -> {
+                // §0.4.370 — EMBEDDING(table: rank-2 [V, D], indices: int rank-r)
+                // → [indices.dims ++ [D]]. Each output row out[p, :] = table[idx[p], :]
+                // for every flat index position p (a gather along the vocab axis).
+                require(op.operands.size == 2) {
+                    "DxirInterpreter: EMBEDDING requires 2 operands (table, indices), got ${op.operands.size}"
+                }
+                val tableType = op.operands[0].type
+                val idxType = op.operands[1].type
+                require(tableType.rank == 2) {
+                    "DxirInterpreter: EMBEDDING table must be rank-2 (V, D), got ${tableType.dims}"
+                }
+                require(idxType.dtype == io.tlaloc.core.I32 || idxType.dtype == io.tlaloc.core.I64) {
+                    "DxirInterpreter: EMBEDDING indices must be integer, got ${idxType.dtype}"
+                }
+                val table = evalNode(op.operands[0], env, multiResults)
+                val idx = evalNode(op.operands[1], env, multiResults)
+                val vocab = tableType.dims[0]
+                val embedDim = tableType.dims[1]
+                val positions = idx.size
+                val out = FloatArray(positions * embedDim)
+                for (p in 0 until positions) {
+                    val v = idx[p].toInt()
+                    require(v in 0 until vocab) {
+                        "DxirInterpreter: EMBEDDING index $v out of bounds for vocab $vocab"
+                    }
+                    for (d in 0 until embedDim) out[p * embedDim + d] = table[v * embedDim + d]
+                }
+                out
+            }
+            OpKind.EMBEDDING_GRAD -> {
+                // §0.4.370 — reverse of EMBEDDING w.r.t. the table.
+                // EMBEDDING_GRAD(indices: int rank-r, upstream: [indices.dims ++ [D]])
+                // → dTable [V, D]. Scatter-ADD each upstream row back to the vocab slot
+                // its index selected: dTable[idx[p], :] += upstream[p, :]. The result
+                // type [V, D] carries V and D (indices carry no gradient).
+                require(op.operands.size == 2) {
+                    "DxirInterpreter: EMBEDDING_GRAD requires 2 operands (indices, upstream), got ${op.operands.size}"
+                }
+                val vocab = op.type.dims[0]
+                val embedDim = op.type.dims[1]
+                val idx = evalNode(op.operands[0], env, multiResults)
+                val upstream = evalNode(op.operands[1], env, multiResults)
+                val positions = idx.size
+                require(upstream.size == positions * embedDim) {
+                    "DxirInterpreter: EMBEDDING_GRAD upstream size ${upstream.size} != positions " +
+                        "$positions * embedDim $embedDim"
+                }
+                val out = FloatArray(vocab * embedDim)
+                for (p in 0 until positions) {
+                    val v = idx[p].toInt()
+                    require(v in 0 until vocab) {
+                        "DxirInterpreter: EMBEDDING_GRAD index $v out of bounds for vocab $vocab"
+                    }
+                    for (d in 0 until embedDim) out[v * embedDim + d] += upstream[p * embedDim + d]
+                }
+                out
+            }
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)

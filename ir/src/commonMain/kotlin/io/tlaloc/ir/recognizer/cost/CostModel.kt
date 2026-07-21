@@ -162,6 +162,8 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     }
 
     OpKind.EMBEDDING -> op.type.elementCount.toDouble()
+    // §0.4.370 — embedding adjoint: one scatter-add per upstream element.
+    OpKind.EMBEDDING_GRAD -> op.operands[1].type.elementCount.toDouble()
     OpKind.CROSS_ENTROPY -> 5.0 * op.operands[0].type.elementCount.toDouble()
 
     // Control flow: structural, no per-op compute.

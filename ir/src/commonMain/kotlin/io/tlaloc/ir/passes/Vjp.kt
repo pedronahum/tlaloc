@@ -1166,6 +1166,35 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.370 — reverse of EMBEDDING (DiffKT-parity `embedding` gradient).
+     * `EMBEDDING(table, indices)` gathers `table[indices[p], :]` for each flat
+     * index position `p`; its adjoint w.r.t. `table` scatter-ADDs each upstream
+     * row back to the vocab slot its index selected:
+     * `dTable[indices[p], :] += upstream[p, :]`, summing collisions when the same
+     * vocab row is embedded at multiple positions. Expressed as the single fused
+     * [OpKind.EMBEDDING_GRAD] op (indices, upstream) → dTable, mirroring how
+     * [GatherRule] fuses its scatter-add adjoint.
+     *
+     * The `indices` operand is non-differentiable (integer), so no contribution
+     * flows to it. [readsPrimalOperandIndices] = `setOf(1)`: the idx operand's
+     * subgraph must be cloned into the gradient body (it is forwarded into the
+     * emitted EMBEDDING_GRAD), the same reason GatherRule marks its idx operand.
+     */
+    val EmbeddingRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val table = op.operands[0]
+            val indices = op.operands[1]
+            val dTable = builder.op(
+                OpKind.EMBEDDING_GRAD,
+                listOf(indices, upstream),
+                table.type,
+            )
+            return listOf(table to dTable)
+        }
+    }
+
+    /**
      * §0.4.77 — reverse of BROADCAST. When a lower-rank input is broadcast to a
      * higher-rank output, the gradient flowing back must be SUM-reduced across
      * the inserted dims to return to the input's shape.
@@ -1250,6 +1279,7 @@ object VjpRegistry {
         OpKind.CAST to CastRule,
         OpKind.TRANSPOSE to TransposeRule,
         OpKind.GATHER to GatherRule,
+        OpKind.EMBEDDING to EmbeddingRule,
         OpKind.BROADCAST to BroadcastRule,
     )
 

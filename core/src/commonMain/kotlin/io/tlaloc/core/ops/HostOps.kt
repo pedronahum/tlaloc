@@ -306,6 +306,50 @@ fun <S : Shape> DTensor<S, F32>.logSoftmax(axis: Int = -1): DTensor<S, F32> {
 }
 
 /**
+ * §0.4.370 — Phase A3b (DiffKT parity): `crossEntropyLoss(logits, oneHot)` =
+ * the sum-reduced softmax cross entropy. Equal to `-Σ oneHot ⊙ logSoftmax(logits)`
+ * over the last (class) axis, then summed over every position (the sum-reduction
+ * convention — the total of the per-sample cross-entropies). `oneHot` is a float
+ * one-hot (or soft) label tensor the same shape as `logits`. Inside `grad {}` the
+ * K2 plugin lowers this to `NEG(SUM(MUL(oneHot, LOG(SOFTMAX(logits, -1)))))` —
+ * every op fully-ruled — so the gradient flows with no new AD math; this host body
+ * is the runtime twin. Returns a scalar so it composes with `.toFloat()`.
+ */
+fun <S : Shape> crossEntropyLoss(
+    logits: DTensor<S, F32>,
+    oneHot: DTensor<S, F32>,
+): DTensor<ScalarShape, F32> {
+    val ls = logits.logSoftmax(-1).hostF32()
+    val oh = oneHot.hostF32()
+    require(ls.size == oh.size) {
+        "crossEntropyLoss: logits and oneHot must have the same element count (${ls.size} vs ${oh.size})"
+    }
+    var acc = 0f
+    for (i in ls.indices) acc -= oh[i] * ls[i]
+    return DTensor(HostF32Storage(floatArrayOf(acc)), intArrayOf(), F32)
+}
+
+/**
+ * §0.4.370 — `nllLoss(logProbs, oneHot)` = the negative-log-likelihood loss on
+ * already-log-normalised probabilities: `-Σ oneHot ⊙ logProbs`, summed over every
+ * position. The companion to [crossEntropyLoss] for when the caller has already
+ * applied `logSoftmax`. Inside `grad {}` it lowers to `NEG(SUM(MUL(oneHot, logProbs)))`.
+ */
+fun <S : Shape> nllLoss(
+    logProbs: DTensor<S, F32>,
+    oneHot: DTensor<S, F32>,
+): DTensor<ScalarShape, F32> {
+    val lp = logProbs.hostF32()
+    val oh = oneHot.hostF32()
+    require(lp.size == oh.size) {
+        "nllLoss: logProbs and oneHot must have the same element count (${lp.size} vs ${oh.size})"
+    }
+    var acc = 0f
+    for (i in lp.indices) acc -= oh[i] * lp[i]
+    return DTensor(HostF32Storage(floatArrayOf(acc)), intArrayOf(), F32)
+}
+
+/**
  * Scalar → rank-N uniform broadcast: produce a fresh `DTensor<S, F32>` shaped like
  * [template] whose every element equals [v]. Used by the IR-rewrite synthesis path to
  * lower `OpKind.BROADCAST` in gradient bodies emitted by [io.tlaloc.ir.passes.VjpRegistry.SumRule]

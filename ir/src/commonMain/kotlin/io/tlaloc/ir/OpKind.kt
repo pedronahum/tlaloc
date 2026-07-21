@@ -94,6 +94,15 @@ enum class OpKind {
     // Misc
     EMBEDDING, CROSS_ENTROPY, CAST,
 
+    // §0.4.370 — reverse of EMBEDDING w.r.t. its table (the DiffKT-parity
+    // embedding VjpRule's fused adjoint). EMBEDDING_GRAD(indices, upstream) →
+    // dTable [V, D]: scatter-ADD each upstream row upstream[p, :] back to vocab
+    // slot indices[p]. Result type [V, D] carries the vocab/embed dims; indices
+    // are non-differentiable so no gradient flows to them. Interpreter arm only
+    // in v1 (IR-level certification); the StableHLO emission via scatter+add
+    // region is deferred until `embedding` is reachable from `grad {}`.
+    EMBEDDING_GRAD,
+
     // Structured control flow (Stage B substrate per docs/STAGE_B_PLAN.md §3.1).
     //
     // IF: 1 boolean-scalar predicate operand + 2 regions [then, else]. Each region has a
