@@ -120,12 +120,14 @@ The matrix becomes part of `ProgramManifest.backendMatrix`. At job-launch time, 
 | Layer 2.5 | Vendored Maestro + first-class `Tlaloc` step type + `SerializedBufferHandle`     | shipped     | §0.4.249            |
 | Layer 3   | Pattern recognition + VJP coarsening + kernel registry + cost model + KV-quant + backend matrix + pod-spec | **shipped (closure)** | §0.4.260 |
 | Layer 4.1 | StableHLO `custom_call` emit for COARSENED + `kernel_descriptor` lowering              | shipped     | §0.4.261            |
-| Layer 4.x | `:runtime-iree` (CPU + CUDA) + `:runtime-pjrt` (PJRT-XLA via pure-Kotlin FFM); LlamaDecoder forward+backward agrees with PyTorch + JAX on real GPUs | shipped (in flight)     | §0.4.284 → §0.4.324 |
+| Layer 4.x | `:runtime-iree` (CPU + CUDA) + `:runtime-pjrt` (PJRT-XLA via pure-Kotlin FFM); LlamaDecoder forward+backward agrees with PyTorch + JAX on real GPUs | shipped     | §0.4.284 → §0.4.324 |
 | Layer 4.5 | Cost-driven scheduling + live Maestro K8s integration end-to-end | not started | —          |
+| KPTX arc  | Native PTX DSL + transpiler, v1–v3. Glow-style native runtime: NO-GO today, conditional GO gated on kernel coverage | closed      | §0.4.326 → §0.4.348 |
+| DiffKT parity | Op-surface + AD parity with [facebookresearch/diffkt](https://github.com/facebookresearch/diffkt): implicit broadcasting, shape templates, concat/stack, forward-mode intrinsics, NCHW conv + pooling | **active**  | [docs/DIFFKT_PARITY_PLAN.md](docs/DIFFKT_PARITY_PLAN.md) |
 
-Full suite green at HEAD: **1395 combined tests** (1354 Tlaloc-side + 37 maestro-tlaloc + 4 maestro-common new). See [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) §0.4 for every milestone, [docs/audits/](docs/audits/) for closing audits per layer, and [docs/xatlib_design.md](docs/xatlib_design.md) for the Layer 3 design narrative.
+Full suite green at HEAD: **1626 Tlaloc-side tests** — `bash scripts/count-tests.sh` after `./gradlew test` for the exact number. The §0.4 ship log in [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) ends at §0.4.263; from §0.4.264 onward the per-section record lives in the commit messages, and the active book of work is [docs/DIFFKT_PARITY_PLAN.md](docs/DIFFKT_PARITY_PLAN.md). See [docs/audits/](docs/audits/) for closing audits per layer and [docs/xatlib_design.md](docs/xatlib_design.md) for the Layer 3 design narrative.
 
-### What's landed in Layer 4 (in flight)
+### What's landed in Layer 4 (closed at §0.4.324)
 
 - **StableHLO `custom_call` emit for COARSENED.** Materializes `stablehlo.custom_call @flash_attn_v3 {backend_config={...}}` from L3-annotated COARSENED ops (§0.4.261).
 - **Pattern-coarsener coverage.** RmsNorm, RoPE, CrossEntropy, SwiGLU, TransformerMLP, LayerNorm, and GroupedQueryAttention (MQA + GQA, including Llama-3 8B's `repeat_kv` shape) each ship analytical primal + gradient bodies.
@@ -212,7 +214,7 @@ cd tlaloc
 
 **Consume it as a library** (pre-alpha, via mavenLocal): see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — `./gradlew publishToMavenLocal` publishes every module under `io.tlaloc:*`, and [examples/quickstart](examples/quickstart) is a standalone consumer project (own Gradle build, resolves from mavenLocal, applies the K2 plugin) whose `grad { }` call is rewritten into synthesized gradient code at compile time. `scripts/onboarding-smoke.sh` runs the whole loop.
 
-Expected: ~1448 tests passing on the Tlaloc side. To exercise the vendored Maestro tree as well:
+Expected: ~1626 tests passing on the Tlaloc side (`bash scripts/count-tests.sh` for the exact count). To exercise the vendored Maestro tree as well:
 
 ```bash
 ./gradlew test :vendored-maestro:maestro-tlaloc:test
@@ -248,7 +250,8 @@ bash scripts/count-tests.sh        # sums tests= across all JUnit XMLs after a t
 Single Gradle wrapper drives Tlaloc + vendored Maestro as a composite build. JDK 25 LTS throughout.
 
 ```bash
-./gradlew test                                         # full Tlaloc-side suite (~30 s warm)
+./gradlew test                                         # full Tlaloc-side suite: a few minutes when the
+                                                       # GPU smoke tests recompile real XLA, seconds when up-to-date
 ./gradlew :ir:jvmTest                                  # one module
 ./gradlew :compiler-plugin:test --tests "*BGDHyperOpt*"  # one benchmark
 ./gradlew :vendored-maestro:maestro-tlaloc:test        # vendored Maestro tests
