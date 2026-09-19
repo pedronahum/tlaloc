@@ -417,6 +417,246 @@ fun <S : Shape> nllLoss(
 }
 
 /**
+ * §0.4.384 — Phase A3b slice 1, the rank-4 substrate: the shared conv engine.
+ * NCHW input; the kernel reads OIHW `[Co, Ci, kh, kw]` when [transpose] is false
+ * and IOHW `[Ci, Co, kh, kw]` when true — the layouts the dxir interpreter's
+ * `evalConv2d` and the StableHLO emitter fix. This is a port of that eval, kept
+ * deliberately literal: same output-extent formula, same tap→input coordinate
+ * mapping, same tap skipping (padding edges, lhs-dilation holes), and the same
+ * `Double` accumulator walked in the same `i → ky → kx` order. Bit-exactness
+ * against the interpreter is the point — the K2 plugin synthesises `grad {}` conv
+ * gradients into calls on these twins, so the interpreted dxir stays a usable
+ * oracle for the generated host code.
+ *
+ * Attrs mirror the IR's one-for-one: `window_strides` [sH, sW], `padding`
+ * [[top, bottom], [left, right]] (negative values CROP, as in StableHLO),
+ * `lhs_dilation` (interior-dilates the input — the transposed-conv mechanism),
+ * `rhs_dilation` (à-trous kernel), `window_reversal` (spatially flips the kernel
+ * taps — what [io.tlaloc.ir.passes.VjpRegistry.Conv2dRule]'s `dX` needs).
+ * `feature_group_count` / `batch_group_count` are 1 in v1, as in the interpreter.
+ */
+private fun conv2dEngine(
+    lhs: DTensor<*, F32>,
+    rhs: DTensor<*, F32>,
+    transpose: Boolean,
+    strideH: Int,
+    strideW: Int,
+    lhsDilH: Int,
+    lhsDilW: Int,
+    rhsDilH: Int,
+    rhsDilW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+    revH: Boolean,
+    revW: Boolean,
+): DTensor<Shape, F32> {
+    val ld = lhs.dims
+    val rd = rhs.dims
+    val opName = if (transpose) "convTranspose2d" else "conv2d"
+    require(ld.size == 4 && rd.size == 4) {
+        "$opName: rank-4 NCHW lhs and rank-4 kernel required; got ${ld.toList()} / ${rd.toList()}"
+    }
+    require(
+        strideH > 0 && strideW > 0 && lhsDilH > 0 && lhsDilW > 0 && rhsDilH > 0 && rhsDilW > 0
+    ) {
+        "$opName: strides and dilations must be positive; got strides [$strideH, $strideW], " +
+            "lhs_dilation [$lhsDilH, $lhsDilW], rhs_dilation [$rhsDilH, $rhsDilW]"
+    }
+    val nB = ld[0]
+    val cIn = ld[1]
+    val h = ld[2]
+    val w = ld[3]
+    val kh = rd[2]
+    val kw = rd[3]
+    val cOut: Int
+    val cKIn: Int
+    if (transpose) {
+        cKIn = rd[0]
+        cOut = rd[1]
+    } else {
+        cOut = rd[0]
+        cKIn = rd[1]
+    }
+    require(cKIn == cIn) { "$opName: kernel input channels $cKIn ≠ lhs channels $cIn" }
+
+    val hDil = (h - 1) * lhsDilH + 1
+    val wDil = (w - 1) * lhsDilW + 1
+    val kEffH = (kh - 1) * rhsDilH + 1
+    val kEffW = (kw - 1) * rhsDilW + 1
+    val hOut = (hDil + padTop + padBottom - kEffH) / strideH + 1
+    val wOut = (wDil + padLeft + padRight - kEffW) / strideW + 1
+    require(hOut > 0 && wOut > 0) {
+        "$opName: derived output extents [$hOut, $wOut] are empty — window [$kh, $kw] with " +
+            "rhs_dilation [$rhsDilH, $rhsDilW] does not fit the padded, dilated input [$hDil, $wDil]"
+    }
+
+    val lv = lhs.hostF32()
+    val rv = rhs.hostF32()
+    val out = FloatArray(nB * cOut * hOut * wOut)
+    var outIdx = 0
+    for (n in 0 until nB) {
+        for (o in 0 until cOut) {
+            for (y in 0 until hOut) {
+                for (x in 0 until wOut) {
+                    var acc = 0.0
+                    for (i in 0 until cIn) {
+                        for (ky in 0 until kh) {
+                            // Tap position in the dilated+padded input space.
+                            val yDil = y * strideH + ky * rhsDilH - padTop
+                            if (yDil < 0 || yDil % lhsDilH != 0) continue
+                            val inY = yDil / lhsDilH
+                            if (inY >= h) continue
+                            val wKy = if (revH) kh - 1 - ky else ky
+                            for (kx in 0 until kw) {
+                                val xDil = x * strideW + kx * rhsDilW - padLeft
+                                if (xDil < 0 || xDil % lhsDilW != 0) continue
+                                val inX = xDil / lhsDilW
+                                if (inX >= w) continue
+                                val wKx = if (revW) kw - 1 - kx else kx
+                                val wIdx = if (transpose) {
+                                    ((i * cOut + o) * kh + wKy) * kw + wKx
+                                } else {
+                                    ((o * cIn + i) * kh + wKy) * kw + wKx
+                                }
+                                acc += lv[((n * cIn + i) * h + inY) * w + inX].toDouble() * rv[wIdx]
+                            }
+                        }
+                    }
+                    out[outIdx++] = acc.toFloat()
+                }
+            }
+        }
+    }
+    return DTensor(HostF32Storage(out), intArrayOf(nB, cOut, hOut, wOut), F32)
+}
+
+/**
+ * §0.4.384 — 2-D convolution, NCHW input against an OIHW `[Co, Ci, kh, kw]`
+ * kernel. The result erases to `DTensor<Shape, F32>`: its spatial extents are a
+ * runtime function of the input's and of stride/padding, which no static shape
+ * witness can carry — the convention `reshape`, `slice`, `concat` and
+ * `broadcastTo` follow.
+ *
+ * Two arities, and deliberately NO default parameter values: `conv2d(w)` is the
+ * plain valid conv (stride 1, no padding) and the 7-argument form takes the attrs
+ * POSITIONALLY in a fixed order — `(w, strideH, strideW, padTop, padBottom,
+ * padLeft, padRight)`, the same spelling as `slice(start, end, axis)`. Defaults
+ * would be a silent-wrongness trap here: K2 unwraps a named argument like
+ * `padTop = 1` to its bare literal BEFORE the plugin's FIR lowering sees the
+ * call, without reordering it into its parameter's position, so the lowering
+ * cannot tell `padTop = 1` from `strideH = 1` and would fold the padding into the
+ * stride. Arity is unambiguous, so an unwritable spelling is a compile error
+ * instead of a mis-folded attr.
+ */
+fun <S : Shape> DTensor<S, F32>.conv2d(w: DTensor<*, F32>): DTensor<Shape, F32> =
+    conv2dGeneral(this, w, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, false, false)
+
+@Suppress("LongParameterList")
+fun <S : Shape> DTensor<S, F32>.conv2d(
+    w: DTensor<*, F32>,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+): DTensor<Shape, F32> = conv2dGeneral(
+    this, w, strideH, strideW, 1, 1, 1, 1, padTop, padBottom, padLeft, padRight, false, false,
+)
+
+/**
+ * §0.4.384 — transposed 2-D convolution (the "deconvolution" / fractionally-strided
+ * conv), NCHW input against an IOHW `[Ci, Co, kh, kw]` kernel — note the channel
+ * order is the reverse of [conv2d]'s, because the op contracts over the kernel's
+ * FIRST axis and emits the second.
+ *
+ * [strideH]/[strideW] are the UPSAMPLING factor: they map onto the IR's
+ * `lhs_dilation` with `window_strides` left at `[1, 1]`, which is exactly how
+ * [io.tlaloc.ir.passes.VjpRegistry.Conv2dRule] spells `dX` and how StableHLO
+ * expresses a transposed conv. `padTop`/… are the IR's `padding` attr verbatim —
+ * applied to the dilated input, and NEGATIVE values crop (this is how the conv
+ * adjoint lands back on the primal input's exact extents). Same two-arity,
+ * no-defaults contract as [conv2d], for the same reason.
+ */
+fun <S : Shape> DTensor<S, F32>.convTranspose2d(w: DTensor<*, F32>): DTensor<Shape, F32> =
+    convTranspose2dGeneral(this, w, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, false, false)
+
+@Suppress("LongParameterList")
+fun <S : Shape> DTensor<S, F32>.convTranspose2d(
+    w: DTensor<*, F32>,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+): DTensor<Shape, F32> = convTranspose2dGeneral(
+    this, w, 1, 1, strideH, strideW, 1, 1, padTop, padBottom, padLeft, padRight, false, false,
+)
+
+/**
+ * §0.4.384 — fixed-arity synthesis delegates: every attr the dxir CONV2D /
+ * CONV_TRANSPOSE2D ops carry, as positional `Int`/`Boolean` arguments, with the
+ * result's shape witness `S` supplied by the caller (synthesis passes the derived
+ * IrType's shape argument). All attrs explicit and none defaulted because these
+ * are the calls [io.tlaloc.plugin.DxirToIrSynthesis] builds when it replays a conv
+ * gradient body — the attrs come straight off the dxir op, and a delegate that
+ * omitted one (say `lhs_dilation`, or `window_reversal`) would silently evaluate a
+ * different convolution. The usual IrVararg reason applies: synthesis builds
+ * positional `IrCall` arguments and cannot construct an array literal, so the
+ * attr lists arrive as scalars.
+ */
+@Suppress("LongParameterList")
+fun <S : Shape> conv2dGeneral(
+    x: DTensor<*, F32>,
+    w: DTensor<*, F32>,
+    strideH: Int,
+    strideW: Int,
+    lhsDilH: Int,
+    lhsDilW: Int,
+    rhsDilH: Int,
+    rhsDilW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+    revH: Boolean,
+    revW: Boolean,
+): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return conv2dEngine(
+        x, w, false, strideH, strideW, lhsDilH, lhsDilW, rhsDilH, rhsDilW,
+        padTop, padBottom, padLeft, padRight, revH, revW,
+    ) as DTensor<S, F32>
+}
+
+@Suppress("LongParameterList")
+fun <S : Shape> convTranspose2dGeneral(
+    x: DTensor<*, F32>,
+    w: DTensor<*, F32>,
+    strideH: Int,
+    strideW: Int,
+    lhsDilH: Int,
+    lhsDilW: Int,
+    rhsDilH: Int,
+    rhsDilW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+    revH: Boolean,
+    revW: Boolean,
+): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return conv2dEngine(
+        x, w, true, strideH, strideW, lhsDilH, lhsDilW, rhsDilH, rhsDilW,
+        padTop, padBottom, padLeft, padRight, revH, revW,
+    ) as DTensor<S, F32>
+}
+
+/**
  * Scalar → rank-N uniform broadcast: produce a fresh `DTensor<S, F32>` shaped like
  * [template] whose every element equals [v]. Used by the IR-rewrite synthesis path to
  * lower `OpKind.BROADCAST` in gradient bodies emitted by [io.tlaloc.ir.passes.VjpRegistry.SumRule]
@@ -1286,6 +1526,18 @@ fun <S : Shape> transposePerm2(x: DTensor<*, F32>, p0: Int, p1: Int): DTensor<S,
 fun <S : Shape> transposePerm3(x: DTensor<*, F32>, p0: Int, p1: Int, p2: Int): DTensor<S, F32> {
     @Suppress("UNCHECKED_CAST")
     return (x as DTensor<Shape, F32>).transpose(p0, p1, p2) as DTensor<S, F32>
+}
+
+/**
+ * §0.4.384 — the rank-4 permutation transpose, for the batch↔feature swap
+ * `[0,1,2,3] → [1,0,2,3]` that [io.tlaloc.ir.passes.VjpRegistry.Conv2dRule]'s
+ * `dW = conv(Xᵀ, dYᵀ)` trick emits on both sides. The vararg [transpose] above
+ * already walks any rank; this delegate exists for the usual IrVararg reason and
+ * to keep the permutation's compile-time constants positional.
+ */
+fun <S : Shape> transposePerm4(x: DTensor<*, F32>, p0: Int, p1: Int, p2: Int, p3: Int): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return (x as DTensor<Shape, F32>).transpose(p0, p1, p2, p3) as DTensor<S, F32>
 }
 
 /**

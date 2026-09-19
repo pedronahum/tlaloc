@@ -161,6 +161,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrType? {
         // §0.4.364 — COMPARE is Bool-typed at the IR level but its runtime
         // value is the operands' F32 mask, so it propagates like elementwise.
+        // §0.4.384 — rank-4 (NCHW conv/pool) surfaces derive separately: the
+        // rank-2 TRANSPOSE swap and MATMUL combine below do not generalise to a
+        // 4-permutation, and a conv output's spatial axes have no param-sourced
+        // atom to take at all.
+        if (op.type.rank == 4 && op.type.dtype == F32) {
+            return deriveResultIrTypeRank4(op, operandIrTypes)
+        }
         if (op.type.rank != 2) return null
         if (op.type.dtype != F32 && op.op != OpKind.COMPARE) return null
         return when (op.op) {
@@ -296,6 +303,71 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
+     * §0.4.384 — Phase A3b slice 1: rank-4 (NCHW) result-IrType derivation.
+     *
+     * - TRANSPOSE: permute the operand's four atoms by the `permutation` attr —
+     *   the batch↔feature swap `[1,0,2,3]` that Conv2dRule's `dW = conv(Xᵀ, dYᵀ)`
+     *   emits on both sides. The rank-2 [deriveTransposedDTensor] hard-codes the
+     *   R↔C swap and cannot express it.
+     * - CONV2D / CONV_TRANSPOSE2D: batch atom from the lhs, output-channel atom
+     *   from the kernel's FIRST axis for CONV2D (OIHW `[Co, Ci, kh, kw]`) and its
+     *   SECOND for CONV_TRANSPOSE2D (IOHW `[Ci, Co, kh, kw]` — the op contracts
+     *   over axis 0 and emits axis 1). Both spatial axes take placeholder
+     *   `Lit<Int>` atoms: their extents are a floor-division over runtime input
+     *   extents and kernel sizes, so no param-sourced atom stands for them. That
+     *   is §0.4.375's reasoning for a reshape-created unit axis and Phase A2b's
+     *   for a concat axis, and it is safe for the same reason — nothing reads a
+     *   placeholder for a runtime-dim decision: the conv host twins derive their
+     *   own output extents from the operands' runtime `dims`.
+     * - elementwise binaries/unaries: the same rank-agnostic propagation the
+     *   rank-2 arms do (the forward transform's conv product rule emits a rank-4
+     *   ADD of two convs; a relu/sum chain over a conv keeps propagating too).
+     *
+     * Pooling (MAXPOOL2D/AVGPOOL2D) follows the same shape once their slices land.
+     */
+    private fun deriveResultIrTypeRank4(op: DxirOp, operandIrTypes: Map<Int, IrType>): IrType? =
+        when (op.op) {
+            OpKind.TRANSPOSE -> {
+                if (op.operands.size != 1) return null
+                val perm = (op.attrs["permutation"] as? List<*>)?.map { (it as Number).toInt() }
+                    ?: return null
+                if (perm.size != 4 || perm.sorted() != listOf(0, 1, 2, 3)) return null
+                val operandIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val atoms = shapeAtomsOf(operandIr, 4) ?: return null
+                rebuildShapeAtoms(operandIr, perm.map { atoms[it] }, 4)
+            }
+            OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D -> {
+                if (op.operands.size != 2) return null
+                val lhsIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val rhsIr = operandIrTypes[op.operands[1].id] as? IrSimpleType ?: return null
+                val lhsAtoms = shapeAtomsOf(lhsIr, 4) ?: return null
+                val rhsAtoms = shapeAtomsOf(rhsIr, 4) ?: return null
+                val litAtom = litIntAtom() ?: return null
+                val cOutAxis = if (op.op == OpKind.CONV2D) 0 else 1
+                rebuildShapeAtoms(
+                    lhsIr,
+                    listOf(lhsAtoms[0], rhsAtoms[cOutAxis], litAtom, litAtom),
+                    4,
+                )
+            }
+            OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW -> {
+                if (op.operands.size != 2) return null
+                op.operands.firstOrNull { it.type.rank == op.type.rank }
+                    ?.let { operandIrTypes[it.id] }
+            }
+            OpKind.STEP, OpKind.RELU, OpKind.NEG,
+            OpKind.SQRT, OpKind.EXP, OpKind.LOG,
+            OpKind.SIN, OpKind.COS, OpKind.ABS,
+            OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
+            OpKind.SOFTMAX,
+            -> {
+                if (op.operands.size != 1) return null
+                operandIrTypes[op.operands[0].id]
+            }
+            else -> null
+        }
+
+    /**
      * Given `DTensor<Rank2<R, C>, F32>` returns `DTensor<Rank2<C, R>, F32>`. Returns
      * null if the input isn't shaped like a 2-arg DTensor whose first arg is a 2-arg
      * Rank2.
@@ -408,6 +480,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             1 -> "io/tlaloc/core/Rank1"
             2 -> "io/tlaloc/core/Rank2"
             3 -> "io/tlaloc/core/Rank3"
+            // §0.4.384 — Phase A3b slice 1: the NCHW conv/pool ranks.
+            4 -> "io/tlaloc/core/Rank4"
             else -> return null
         }
         val rankClass = pluginContext.referenceClass(ClassId.fromString(rankClassName)) ?: return null
@@ -479,6 +553,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             1 -> "io/tlaloc/core/Rank1"
             2 -> "io/tlaloc/core/Rank2"
             3 -> "io/tlaloc/core/Rank3"
+            // §0.4.384 — Phase A3b slice 1: the NCHW conv/pool ranks. Rank5/Rank6
+            // witnesses exist in `:core/Shape.kt` too; MaxPool2dRule's rank-6
+            // upsample intermediates are what will need them (still deferred on the
+            // single-representative `tensorIrType` generalisation).
+            4 -> "io/tlaloc/core/Rank4"
             else -> return null
         }
         val rankClass = pluginContext.referenceClass(ClassId.fromString(rankClassName)) ?: return null
@@ -649,7 +728,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // still fall back.
         for (p in fn.params) {
             if (!p.type.isScalar && !isAcceptedTensorType(p.type)) {
-                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1-3 F32 scope")
+                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1-4 F32 scope")
             }
         }
         for (n in fn.body) {
@@ -659,7 +738,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             val boolTensorInScope = n.type.dtype == Bool && n.type.rank in 1..3
             if (!n.type.isScalar && !isAcceptedTensorType(n.type) && !boolTensorInScope) {
                 val opKind = (n as? DxirOp)?.op?.name ?: n::class.simpleName
-                return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1-3 F32 scope")
+                return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1-4 F32 scope")
             }
         }
 
@@ -1256,6 +1335,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         if (op.op == OpKind.RESHAPE) return irReshape(op, env, context)
         if (op.op == OpKind.SOFTMAX) return irSoftmax(op, env, context)
+        // §0.4.384 — Phase A3b slice 1: the NCHW conv pair.
+        if (op.op == OpKind.CONV2D || op.op == OpKind.CONV_TRANSPOSE2D) return irConv(op, env, context)
         if (op.op == OpKind.SUM_TO) return irSumTo(op, env, context)
         if (op.op == OpKind.SLICE) return irSlice(op, env, context)
         if (op.op == OpKind.PAD_TO) return irPadTo(op, env, context)
@@ -2188,6 +2269,78 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
+     * §0.4.384 — Phase A3b slice 1: CONV2D / CONV_TRANSPOSE2D → the fixed-arity
+     * `:core/ops` twins (`conv2dGeneral` / `convTranspose2dGeneral`), which are
+     * bit-exact against the interpreter's `evalConv2d` (pinned by
+     * `DxirHostConvParityTest`).
+     *
+     * Every attr rides as a compile-time `Int`/`Boolean` const. That is sound here
+     * — and it is the whole reason forward-mode conv works while reverse-mode does
+     * not: a conv's OWN attrs (`window_strides`, `padding`, dilations) are literal
+     * facts the FIR folded off the user's call, so they survive `grad {}`'s -1
+     * sentinel dims unchanged. Conv2dRule's adjoint, by contrast, SOLVES its
+     * padding from the primal's extents, which are exactly the symbolic values; it
+     * now rejects them loudly rather than baking garbage.
+     *
+     * Groups have no host twin (v1 scope, matching the interpreter), so a
+     * `feature_group_count`/`batch_group_count` above 1 rejects and falls back to
+     * the runtime tape rather than silently convolving the wrong way.
+     */
+    private fun IrBuilderWithScope.irConv(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        if (!isAcceptedTensorType(op.type) || op.type.rank != 4) return null
+        val fgc = (op.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
+        val bgc = (op.attrs["batch_group_count"] as? Number)?.toInt() ?: 1
+        if (fgc != 1 || bgc != 1) {
+            return reject("op id=${op.id} ${op.op} has groups $fgc/$bgc — no host twin (v1 is groups = 1)")
+        }
+        val transposed = op.op == OpKind.CONV_TRANSPOSE2D
+        val sym = opsTensorSymbol(if (transposed) "convTranspose2dGeneral" else "conv2dGeneral") ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+
+        fun intPair(key: String): List<Int> {
+            val v = (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: return listOf(1, 1)
+            return if (v.size == 2) v else listOf(1, 1)
+        }
+        val strides = intPair("window_strides")
+        val lhsDil = intPair("lhs_dilation")
+        val rhsDil = intPair("rhs_dilation")
+        val rows = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+        val padTop = rows?.getOrNull(0)?.getOrNull(0) ?: 0
+        val padBottom = rows?.getOrNull(0)?.getOrNull(1) ?: 0
+        val padLeft = rows?.getOrNull(1)?.getOrNull(0) ?: 0
+        val padRight = rows?.getOrNull(1)?.getOrNull(1) ?: 0
+        val reversal = (op.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
+
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        call.arguments[0] = irGet(decls[0])
+        call.arguments[1] = irGet(decls[1])
+        val ints = listOf(
+            strides[0], strides[1],
+            lhsDil[0], lhsDil[1],
+            rhsDil[0], rhsDil[1],
+            padTop, padBottom, padLeft, padRight,
+        )
+        ints.forEachIndexed { i, v -> call.arguments[i + 2] = intConst(v) }
+        call.arguments[12] = boolConst(reversal?.getOrNull(0) ?: false)
+        call.arguments[13] = boolConst(reversal?.getOrNull(1) ?: false)
+        return call
+    }
+
+    /**
      * Phase A2b — `OpKind.CONCAT(a, b)` → an IrCall to `:core/ops concatPair(axis, a, b)`.
      *
      * Exactly two operands: the FIR folds an n-ary user `concat`/`stack` into a
@@ -2493,9 +2646,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.367 — resolves `io.tlaloc.core.ops.transposePerm{N}` for N ∈ {2, 3}. */
+    /**
+     * §0.4.367 — resolves `io.tlaloc.core.ops.transposePerm{N}` for N ∈ {2, 3}.
+     * §0.4.384 — N = 4 too, for the batch↔feature swap Conv2dRule's `dW` emits.
+     */
     private fun transposePermSymbol(rank: Int): IrSimpleFunctionSymbol? {
-        if (rank !in 2..3) return null
+        if (rank !in 2..4) return null
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("transposePerm$rank"),
@@ -3267,11 +3423,20 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     /**
      * §0.4.186 — Phase 0c slice (b). Widens the synthesis-side acceptance from "rank-1
      * F32 only" to "rank-1, rank-2, or rank-3 F32" so that gradient bodies for primals
-     * with rank-2/3 inputs can route through the existing `broadcastLike` helper. Higher
-     * ranks (rank-4+) and non-F32 dtypes still fall back to the runtime tape path.
+     * with rank-2/3 inputs can route through the existing `broadcastLike` helper.
+     *
+     * §0.4.384 — Phase A3b slice 1 widens once more, to rank 4: the NCHW conv/pool
+     * tensors. Rank 4 is safe to admit blanket-wide (rather than only for the conv
+     * kinds) because every rank-dispatching arm resolves a `…RankN` host delegate by
+     * name and returns null when it has no rank-4 entry — a missing delegate rejects
+     * the function and falls back to the runtime tape, exactly as before, so the widen
+     * cannot turn a rejection into wrong code. The `:core/ops` host ops that take a
+     * generic `S : Shape` (`broadcastLike`, `stretchLike`, the elementwise binaries,
+     * `sumToLike`, `padToLike`) read their runtime `dims` and are rank-agnostic
+     * already. Rank 5+ and non-F32 dtypes still fall back.
      */
     private fun isAcceptedTensorType(type: DxirType): Boolean =
-        type.dtype == F32 && type.rank in 1..3
+        type.dtype == F32 && type.rank in 1..4
 
     /**
      * Resolves `io.tlaloc.core.ops.broadcastLike` — the top-level extension function that

@@ -784,7 +784,9 @@ object VjpRegistry {
      * (matching the interpreter); strides, padding, and rhs_dilation are
      * fully general. CONV_TRANSPOSE2D's own adjoint is deferred — it only
      * arises when a user differentiates *through* a transposed conv, and
-     * the derivation mirrors this one.
+     * the derivation mirrors this one. §0.4.384: CONCRETE dims required —
+     * both adjoints solve their padding from extents, so a symbolic (-1)
+     * dim is rejected rather than silently mis-solved.
      */
     val Conv2dRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
@@ -800,6 +802,25 @@ object VjpRegistry {
             val lhsDil = intPair("lhs_dilation", listOf(1, 1))
             require(lhsDil == listOf(1, 1)) {
                 "Conv2dRule: primal lhs_dilation must be [1, 1] in v1; got $lhsDil"
+            }
+            // §0.4.384 — both adjoints solve their `padding` from the primal's
+            // EXTENTS (dxPad/dwPad below), so a -1 sentinel dim silently bakes
+            // arithmetic garbage: a stride-1 padding-1 conv over a symbolic input
+            // comes out `padding=[[-3,1],[-3,1]]` instead of `[[1,1],[1,1]]`, and
+            // nothing downstream rejects it — the interpreter, the emitter and the
+            // host twin all honour the attrs they are given, so the gradient is
+            // simply wrong. `grad {}` params are ALWAYS symbolic, so reverse-mode
+            // conv cannot reach user code until the adjoint carries its target
+            // extents at runtime (the PAD_TO / SUM_TO / SLICE_LIKE template
+            // pattern) instead of baking them. Fail loudly here rather than emit a
+            // plausible-looking wrong graph; forward mode is unaffected — the
+            // tangent rule replays the primal's own literal attrs.
+            val symbolic = (x.type.dims + wgt.type.dims + op.type.dims).any { it < 0 }
+            require(!symbolic) {
+                "Conv2dRule: the adjoint's padding is solved from concrete extents, but got " +
+                    "symbolic dims (x=${x.type.dims}, w=${wgt.type.dims}, y=${op.type.dims}). " +
+                    "A sentinel-safe (runtime-template) conv adjoint is the deferred A3b work; " +
+                    "differentiate conv in forward mode (jvp) meanwhile."
             }
             val p = (op.attrs["padding"] as? List<*>)
                 ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
@@ -873,7 +894,8 @@ object VjpRegistry {
      * [N·C,1,·,·]`) so the single-channel splat kernel applies depthwise
      * without grouped-conv support; padding is solved numerically as in
      * [Conv2dRule]. Fully general strides/padding (count_include_pad —
-     * the interpreter's convention).
+     * the interpreter's convention). §0.4.384: CONCRETE dims required, for
+     * the channel-folding reshape as well as the solved padding.
      */
     val AvgPool2dRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
@@ -884,6 +906,18 @@ object VjpRegistry {
                 (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
             val k = intPair("window", emptyList())
             require(k.size == 2) { "AvgPool2dRule: primal needs `window` [kh, kw]; got $k" }
+            // §0.4.384 — same sentinel hazard as [Conv2dRule], twice over: dxPad is
+            // solved from the primal's extents, AND the channel-folding RESHAPE bakes
+            // `n * c` / `hOut` / `wOut` as literal dims (under -1 sentinels `n * c`
+            // is 1, so the reshape silently claims a shape the data does not have).
+            val symbolic = (x.type.dims + op.type.dims).any { it < 0 }
+            require(!symbolic) {
+                "AvgPool2dRule: the adjoint's channel-folding reshape and its conv-transpose " +
+                    "padding are solved from concrete extents, but got symbolic dims " +
+                    "(x=${x.type.dims}, y=${op.type.dims}). A sentinel-safe (runtime-template) " +
+                    "adjoint is the deferred A3b work; differentiate avgpool in forward mode " +
+                    "(jvp) meanwhile."
+            }
             val s = intPair("window_strides", k)
             val p = (op.attrs["padding"] as? List<*>)
                 ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }

@@ -294,18 +294,77 @@ reachable from `grad {}`, not new math. New-op families come after.
     `Rank4`/`Rank5`/`Rank6` shape witnesses DO already exist in
     `:core/Shape.kt:73-81`, so the type level needs no new vocabulary, only new
     arms. Corrected order:
-    1. **rank-4 substrate** (the real first slice, and the only one that unblocks
-       the others): widen `isAcceptedTensorType` to rank 4 *for the conv/pool kinds
-       only* if that can be done without admitting rank-4 everywhere (the gate is
-       consulted by every arm, so a blanket widen needs a suite-wide check);
-       extend `rebuildShapeAtoms`/`shapeAtomsOf` to `Rank4`; add `:core` host
-       `conv2d` + `convTranspose2d` (NCHW, matching the interpreter's
-       `evalConv2d` semantics bit-for-bit) and the 4-D `transposePerm4`; add the
-       CONV2D/CONV_TRANSPOSE2D `deriveResultIrType` + backward-solver arms.
-    2. **conv2d user surface**: FIR arm parsing the window/stride/padding literal
-       attrs, `irConv2d`/`irConvTranspose2d` synthesis, E2E.
+    1. **rank-4 substrate ✅ (§0.4.384)** — landed. `isAcceptedTensorType` widened
+       to rank 1..4 **blanket**: the kind-scoped widen the plan hoped for is not
+       available (the gate takes only a `DxirType` and is consulted from 50+
+       sites), and blanket is safe because every rank-dispatching arm resolves a
+       `…RankN` host delegate by name and returns null when there is no rank-4
+       entry — a missing delegate still rejects and falls back to the tape, so the
+       widen cannot turn a rejection into wrong code (validated by the full suite).
+       `Rank4` added to both rank-class switches (`deriveDroppedAxesDTensor`,
+       `rebuildShapeAtoms`); `:core` gained the host `conv2d`/`convTranspose2d`
+       pair, the fixed-arity `conv2dGeneral`/`convTranspose2dGeneral` synthesis
+       delegates, `transposePerm4` and `Tensors.f32Tensor4`; synthesis gained
+       `deriveResultIrTypeRank4` (perm-general TRANSPOSE; the conv pair taking the
+       batch atom from the lhs, the channel atom from the kernel's OIHW/IOHW axis,
+       and `Lit<Int>` placeholders on both spatial axes; rank-agnostic elementwise
+       propagation) and the `irConv` emission arm. Note `deriveResultIrType` was
+       rank-2-ONLY at the top (`if (op.type.rank != 2) return null`), so rank 4
+       branches to its own helper and rank-1/3 behaviour is untouched.
+       Certified: the host twins are **bit-exact** against the interpreter's
+       `evalConv2d` (same Double accumulator, same `i → ky → kx` order) for every
+       attr spelling the adjoints emit, checked MECHANICALLY —
+       `DxirHostConvParityTest` runs the real `DxirReverseTransform` on three
+       losses (general-attr conv, plain conv, avgpool) and replays each
+       CONV2D / CONV_TRANSPOSE2D / rank-4 TRANSPOSE node through both engines, so
+       coverage follows the rules rather than pinning hand-written attrs.
+    2. **conv2d user surface — ✅ forward mode, ❌ reverse mode (§0.4.384)**: the
+       FIR arm landed (`io.tlaloc.core.ops.conv2d` / `.convTranspose2d`: literal
+       attrs folded onto the op, symbolic extents → -1 result dims, the
+       transposed spelling's user `stride` mapped to `lhs_dilation` with
+       `window_strides` at [1,1]). Conv now differentiates E2E in FORWARD mode:
+       `ConvForwardIntrinsicTest` runs `jvp`/`valueAndJvp` over rank-4 self-convs
+       (same-padded 3×3, stride-2 asymmetric-padded 4×4, and the 1-arg valid
+       conv) with no synthesis fallback, against an independent Double-precision
+       reference written from the definition — the first rank-4 tensor surface
+       the synthesis has ever accepted.
+       **Reverse mode is blocked on a finding that is NOT one of the four blockers
+       above.** `Conv2dRule` SOLVES its adjoint `padding` from the primal's
+       extents, and every `grad {}` param carries -1 sentinels, so the solve is
+       arithmetic garbage: a stride-1 padding-1 conv emits
+       `padding=[[-3,1],[-3,1]]` where the correct value is `[[1,1],[1,1]]`
+       (observed directly, by running the reverse transform over a sentinel-dim
+       conv loss). Nothing downstream rejects it — the interpreter, the emitter
+       and the host twins all faithfully honour the attrs they are handed — so the
+       gradient would have been silently WRONG. `AvgPool2dRule` is worse: its
+       channel-folding `RESHAPE` bakes `n * c`, which is **1** under sentinels.
+       Both rules now `require` concrete dims and fail loudly, and
+       `ConvForwardIntrinsicTest.reverseModeConvIsRejectedLoudlyNotSilentlyWrong`
+       pins that `grad { conv2d(…) }` is a compile ERROR (`NOT_DIFFERENTIABLE` is
+       error severity) instead of a wrong number at run time.
+       **So the real next slice is a sentinel-safe conv adjoint**, and the house
+       pattern already exists: PAD_TO / SUM_TO / SLICE_LIKE carry a runtime shape
+       TEMPLATE operand instead of baked extents. The conv adjoints need the same,
+       and the template is not currently an operand — `dX`'s target is `x`'s
+       extents, `dW`'s is `w`'s, and neither conv sees that tensor. That points at
+       fused adjoint ops (the `EMBEDDING_GRAD` precedent) taking a template
+       operand, each needing an interpreter arm, a host twin, a synthesis arm
+       (whose result IrType then IS the template's, exactly like PAD_TO — which
+       also dissolves blocker 2 for conv, since a conv body never mixes ranks) and
+       an emitter arm. The emitter arm is NOT optional here: §0.4.362's GPU
+       certification runs the conv gradient graph through real XLA, so switching
+       the rule's output without it would regress a shipped cert.
+       **API constraint discovered the hard way — applies to the pooling surfaces
+       too.** The host conv ops take their attrs POSITIONALLY, in two arities,
+       with NO default parameter values. K2 unwraps a named argument (`padTop = 1`)
+       to its bare literal before the FIR lowering sees the call and does NOT
+       reorder it into its parameter's position, so a name-based reading cannot
+       distinguish `padTop = 1` from `strideH = 1`; the first E2E run folded the
+       padding into the stride and silently produced a valid conv. Arity is
+       unambiguous, defaults are not.
     3. **avgPool** — cheap once (1) and (2) exist: a host twin + FIR arm +
-       synthesis arm, since its adjoint reuses conv-transpose.
+       synthesis arm, since its adjoint reuses conv-transpose. Now additionally
+       gated on the sentinel-safe adjoint above (its `RESHAPE` is the worse half).
     4. **maxPool last**: still blocked on rank-6 intermediates and the
        single-representative `context.tensorIrType` generalisation.
     `batchNorm` grad{} folds in here too (BATCHNORM OpKind exists; VJP + surface

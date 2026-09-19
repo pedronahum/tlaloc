@@ -936,6 +936,122 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.384 — Phase A3b: the conv user surface (NCHW, the layout the
+        // interpreter/emitter fix). `x.conv2d(w, …)` takes an OIHW
+        // `[Co, Ci, kh, kw]` kernel; `x.convTranspose2d(w, …)` takes IOHW
+        // `[Ci, Co, kh, kw]` — the reverse channel order, because the transposed
+        // op contracts over the kernel's first axis and emits its second.
+        //
+        // Every attr is a compile-time Int literal folded onto the op here, the
+        // way the reductions fold their axes: `window_strides`, `padding` as
+        // [[top, bottom], [left, right]], and — for the transposed spelling only
+        // — `lhs_dilation`. The user-facing `stride` of `convTranspose2d` is the
+        // UPSAMPLING factor, which in the IR is `lhs_dilation` with
+        // `window_strides` left at [1, 1]: the mapping Conv2dRule's `dX` and
+        // `stablehlo.convolution` both use.
+        //
+        // The result's spatial extents are a floor-division over the input's, so
+        // any symbolic operand dim (-1, which is what every `grad {}` /
+        // `jvp {}` param carries) makes the matching output dim symbolic too —
+        // `flatten`'s convention. Reverse-mode conv is NOT reachable from here
+        // yet: Conv2dRule solves its adjoint padding from concrete extents and
+        // rejects sentinels loudly (see its §0.4.384 guard). Forward mode works,
+        // because the tangent rule replays these same literal attrs.
+        if (fqn == "io.tlaloc.core.ops.conv2d" || fqn == "io.tlaloc.core.ops.convTranspose2d") {
+            val transposed = fqn == "io.tlaloc.core.ops.convTranspose2d"
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("$fqn has no receiver")
+            val x = lowerExpr(operandExpr, env, emitter)
+            if (x.type.rank != 4) {
+                throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
+            }
+            if (x.type.dtype != F32) {
+                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            }
+            // Two arities, matching the host surface: `conv2d(w)` (valid conv) and
+            // the 7-argument positional form. K2 unwraps a named argument to its
+            // bare expression BEFORE this lowering runs and does not reorder it
+            // into its parameter's position, so reading attrs by name would
+            // silently mis-fold (`padTop = 1` would land on `strideH`); arity is
+            // the only trustworthy signal here, and the host signature has no
+            // default values precisely so that no other spelling compiles.
+            val args = call.argumentList.arguments
+            val wExpr: FirExpression
+            val attrExprs: List<FirExpression>
+            when (args.size) {
+                1 -> {
+                    wExpr = args[0]
+                    attrExprs = emptyList()
+                }
+                7 -> {
+                    wExpr = args[0]
+                    attrExprs = args.drop(1)
+                }
+                else -> throw LoweringException(
+                    "$fqn takes (w) or (w, strideH, strideW, padTop, padBottom, padLeft, padRight); " +
+                        "got ${args.size} arguments",
+                )
+            }
+            val w = lowerExpr(
+                (wExpr as? FirNamedArgumentExpression)?.expression ?: wExpr, env, emitter,
+            )
+            if (w.type.rank != 4) {
+                throw LoweringException("$fqn requires a rank-4 kernel; got ${w.type}")
+            }
+            val attrLits = attrExprs.map { e ->
+                intLiteralArg((e as? FirNamedArgumentExpression)?.expression ?: e)
+                    ?: throw LoweringException("$fqn stride/padding arguments must be Int literals")
+            }
+            val strideH = attrLits.getOrNull(0) ?: 1
+            val strideW = attrLits.getOrNull(1) ?: 1
+            val padTop = attrLits.getOrNull(2) ?: 0
+            // The 1-argument form is the valid conv; the 7-argument form supplies
+            // all four sides. Mirrors the host defaults exactly.
+            val padBottom = attrLits.getOrNull(3) ?: padTop
+            val padLeft = attrLits.getOrNull(4) ?: padTop
+            val padRight = attrLits.getOrNull(5) ?: padTop
+            if (strideH <= 0 || strideW <= 0) {
+                throw LoweringException("$fqn strides must be positive; got [$strideH, $strideW]")
+            }
+            val xd = x.type.dims
+            val wd = w.type.dims
+            // Kernel input channels must be the receiver's channels — checkable
+            // only when both are concrete.
+            val kInAxis = if (transposed) 0 else 1
+            if (wd[kInAxis] > 0 && xd[1] > 0 && wd[kInAxis] != xd[1]) {
+                throw LoweringException(
+                    "$fqn kernel input channels ${wd[kInAxis]} ≠ receiver channels ${xd[1]} " +
+                        "(x=${xd.toList()}, w=${wd.toList()})",
+                )
+            }
+            // The user surface exposes no dilation, so `rhs_dilation` is [1,1] and
+            // the stride lands on `window_strides` (conv2d) or `lhs_dilation`
+            // (convTranspose2d) — the other stays [1,1].
+            val winStride = if (transposed) listOf(1, 1) else listOf(strideH, strideW)
+            val lhsDil = if (transposed) listOf(strideH, strideW) else listOf(1, 1)
+            fun outExtent(inDim: Int, kDim: Int, axis: Int): Int {
+                if (inDim <= 0 || kDim <= 0) return -1
+                val inDil = (inDim - 1) * lhsDil[axis] + 1
+                val pad = if (axis == 0) padTop + padBottom else padLeft + padRight
+                return (inDil + pad - kDim) / winStride[axis] + 1
+            }
+            val cOut = if (transposed) wd[1] else wd[0]
+            val attrs = buildMap<String, Any> {
+                put("window_strides", winStride)
+                put("padding", listOf(listOf(padTop, padBottom), listOf(padLeft, padRight)))
+                if (transposed) put("lhs_dilation", lhsDil)
+            }
+            return emitter.op(
+                kind = if (transposed) OpKind.CONV_TRANSPOSE2D else OpKind.CONV2D,
+                operands = listOf(x, w),
+                type = DxirType(
+                    x.type.dtype,
+                    listOf(xd[0], cOut, outExtent(xd[2], wd[2], 0), outExtent(xd[3], wd[3], 1)),
+                ),
+                attrs = attrs,
+            )
+        }
+
         // §0.4.369 — Phase A4 (DiffKT parity): elementwise `maximum(a, b)` /
         // `minimum(a, b)` as sugar over the §0.4.364 where/compare surface.
         // `maximum` = WHERE(COMPARE(a, b, GE), a, b); `minimum` uses LE. The

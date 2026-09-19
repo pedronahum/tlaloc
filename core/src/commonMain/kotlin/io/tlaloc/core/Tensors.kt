@@ -49,6 +49,25 @@ object Tensors {
         }
         return DTensor(HostF32Storage(data.copyOf()), intArrayOf(d0, d1, d2), F32)
     }
+
+    /**
+     * §0.4.384 — rank-4 tensor constructor, mirroring [f32Tensor3] for the NCHW
+     * conv/pool tensors and their OIHW/IOHW kernels (Phase A3b's rank-4
+     * substrate). Callers brand the axes as they do for the lower ranks —
+     * typically all `Sym`, since the conv spatial extents are runtime facts.
+     */
+    fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom, D : ShapeAtom> f32Tensor4(
+        d0: Int,
+        d1: Int,
+        d2: Int,
+        d3: Int,
+        data: FloatArray,
+    ): DTensor<Rank4<A, B, C, D>, F32> {
+        require(data.size == d0 * d1 * d2 * d3) {
+            "data.size=${data.size} does not match d0*d1*d2*d3=${d0 * d1 * d2 * d3}"
+        }
+        return DTensor(HostF32Storage(data.copyOf()), intArrayOf(d0, d1, d2, d3), F32)
+    }
 }
 
 fun DTensor<*, F32>.hostF32(): FloatArray {
