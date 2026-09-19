@@ -37,6 +37,32 @@ class DxirShapeValidationTest {
     }
 
     @Test
+    fun reportsNonBroadcastableRankDifferingMismatch() {
+        // Phase A5c — rank-differing operands are checked now (v1 skipped them),
+        // right-aligned: [2,3] vs [4] aligns 3 against 4 on the trailing axis.
+        val fn = DxirBuilder.function("bad") {
+            val a = param("a", DxirType(F32, listOf(2, 3)))
+            val v = param("v", DxirType(F32, listOf(4)))
+            listOf(op(OpKind.ADD, listOf(a, v), DxirType(F32, listOf(2, 3))))
+        }
+        val errors = validateDxirShapes(fn)
+        assertEquals(1, errors.size, errors.toString())
+        assertTrue(errors.single().contains("incompatible at dim 1"), errors.single())
+    }
+
+    @Test
+    fun staysSilentOnLegalRankExtension() {
+        // [3] against [2,3] is a legal broadcast (the rank-deficient operand gains a
+        // replicated leading axis), so it must not be reported.
+        val fn = DxirBuilder.function("ok") {
+            val m = param("m", DxirType(F32, listOf(2, 3)))
+            val v = param("v", DxirType(F32, listOf(3)))
+            listOf(op(OpKind.MUL, listOf(m, v), DxirType(F32, listOf(2, 3))))
+        }
+        assertEquals(emptyList(), validateDxirShapes(fn))
+    }
+
+    @Test
     fun dotGradientMatchesAnalytic() {
         // §0.4.353 — DotRule: s = a·b; ds/da = b, ds/db = a (seed 1).
         val vec = DxirType(F32, listOf(3))

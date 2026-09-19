@@ -25,17 +25,27 @@ private fun <S : Shape> elementwise(
     return DTensor(HostF32Storage(out), a.dims.copyOf(), F32)
 }
 
+/**
+ * The shape-preserving arithmetic operators. Kotlin resolves these (not the
+ * broadcasting `<S1, S2>` overloads in BroadcastOps.kt) whenever the two operands
+ * share a static shape type — but a shared static type does NOT imply shared
+ * runtime dims: `[N,1]` and `[N,C]` are both `Rank2<Sym, Lit<Int>>`. So these
+ * delegate to the same broadcasting walk and keep only the precise return witness;
+ * equal dims take its flat-zip fast path, and a genuinely mixed pair broadcasts
+ * instead of throwing. `elementwise`'s strict `require` survives for the
+ * comparisons below, which have no broadcasting surface yet.
+ */
 operator fun <S : Shape> DTensor<S, F32>.plus(other: DTensor<S, F32>): DTensor<S, F32> =
-    elementwise(this, other) { x, y -> x + y }
+    elementwiseBroadcast<S>(this, other) { x, y -> x + y }
 
 operator fun <S : Shape> DTensor<S, F32>.minus(other: DTensor<S, F32>): DTensor<S, F32> =
-    elementwise(this, other) { x, y -> x - y }
+    elementwiseBroadcast<S>(this, other) { x, y -> x - y }
 
 operator fun <S : Shape> DTensor<S, F32>.times(other: DTensor<S, F32>): DTensor<S, F32> =
-    elementwise(this, other) { x, y -> x * y }
+    elementwiseBroadcast<S>(this, other) { x, y -> x * y }
 
 operator fun <S : Shape> DTensor<S, F32>.div(other: DTensor<S, F32>): DTensor<S, F32> =
-    elementwise(this, other) { x, y -> x / y }
+    elementwiseBroadcast<S>(this, other) { x, y -> x / y }
 
 /**
  * §0.4.206 — Scalar-multiply on a DTensor: `tensor * scalar` returns a fresh

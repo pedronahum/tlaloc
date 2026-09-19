@@ -1113,10 +1113,20 @@ object FirLambdaToDxirLowering {
             }
             val lhs = lowerExpr(lhsExpr, env, emitter)
             val rhs = lowerExpr(rhsExpr, env, emitter)
+            // Phase A5c-2 — with implicit broadcasting the result of an elementwise
+            // binary is the NumPy broadcast of its two operand shapes, not `lhs`'s.
+            // Ranks are known even under `grad {}`'s -1 sentinels, so the result
+            // rank is exact; an extent is exact only when both aligned operand
+            // extents are concrete, and stays a sentinel otherwise.
+            val resultType = if (kind in ELEMENTWISE_BINARY_KINDS) {
+                broadcastResultType(lhs.type, rhs.type, fqn)
+            } else {
+                lhs.type
+            }
             return emitter.op(
                 kind = kind,
                 operands = listOf(lhs, rhs),
-                type = lhs.type,
+                type = resultType,
             )
         }
 
@@ -1533,6 +1543,62 @@ object FirLambdaToDxirLowering {
     /** True when [expr]'s resolved FIR type is `io.tlaloc.core.DTensor` (any shape / dtype args). */
     private fun isDTensorExpr(expr: FirExpression): Boolean =
         expr.resolvedType.classId?.asString() == "io/tlaloc/core/DTensor"
+
+    /**
+     * Phase A5c-2 — the NumPy broadcast of two operand shapes: right-aligned, each
+     * aligned pair equal or 1 on one side, the result taking the max of each pair, a
+     * rank-deficient operand gaining replicated leading axes.
+     *
+     * Sentinel-safe by construction. Under `grad {}` the operand dims are -1
+     * placeholders, but the RANKS come from the call-site type and are exact, so the
+     * result rank always is too. An extent is exact only when both aligned extents
+     * are concrete (or one is a literal 1 — keepdims axes and `Lit<Int>` atoms the
+     * user pinned); anything touching a sentinel stays a sentinel and is resolved at
+     * runtime by the host broadcasting op. Incompatible concrete extents are a
+     * [LoweringException] at the call site rather than a runtime shape error.
+     *
+     * Axis names follow the wider operand (the one whose rank equals the result's);
+     * a broadcast that would have to invent names for the new leading axes leaves
+     * them null, and an unnamed pair stays `emptyList()` so the type still compares
+     * equal to the unnamed types the rest of the pipeline builds.
+     */
+    private fun broadcastResultType(a: DxirType, b: DxirType, fqn: String): DxirType {
+        if (a.dims == b.dims) return a
+        if (a.dtype != b.dtype) {
+            throw LoweringException(
+                "'$fqn' operands have different dtypes (${a.dtype} vs ${b.dtype}); broadcasting is shape-only",
+            )
+        }
+        val r = maxOf(a.dims.size, b.dims.size)
+        val dims = (0 until r).map { k ->
+            val x = alignedDim(a.dims, k, r)
+            val y = alignedDim(b.dims, k, r)
+            when {
+                x == y -> x
+                x == 1 -> y
+                y == 1 -> x
+                x < 0 || y < 0 -> -1
+                else -> throw LoweringException(
+                    "'$fqn' operand shapes ${a.dims} and ${b.dims} are not broadcast-compatible " +
+                        "at result axis $k ($x vs $y, neither is 1)",
+                )
+            }
+        }
+        val wider = if (a.dims.size >= b.dims.size) a else b
+        val axisNames = if (wider.hasNamedAxes) {
+            val offset = r - wider.axisNames.size
+            List(r) { k -> if (k >= offset) wider.axisNames[k - offset] else null }
+        } else {
+            emptyList()
+        }
+        return DxirType(a.dtype, dims, axisNames)
+    }
+
+    /** Right-aligned axis [k] of [dims] within a rank-[rank] result: 1 for axes the operand lacks. */
+    private fun alignedDim(dims: List<Int>, k: Int, rank: Int): Int {
+        val i = k - (rank - dims.size)
+        return if (i < 0) 1 else dims[i]
+    }
 
     /**
      * Layer 1 §0.4.241+ + Layer 1.5 §0.4.242+ — emit a [OpKind.MATMUL] (or

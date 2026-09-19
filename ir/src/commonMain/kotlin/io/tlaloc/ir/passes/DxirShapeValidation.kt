@@ -14,10 +14,13 @@ import io.tlaloc.ir.OpKind
  * Checked in v1:
  * - `MATMUL`: lhs last dim vs rhs first dim (the Tlaloc contraction
  *   convention, `S = A · B` contracting last(A) × first(B)).
- * - Elementwise binaries (`ADD`/`SUB`/`MUL`/`DIV`/`POW`) at equal rank:
- *   a dim position where both sides are concrete, differ, and neither is
- *   1 (the emitter's broadcast rules cannot save it). Rank-differing
- *   operands are left to the emitter's broadcast machinery.
+ * - Elementwise binaries (`ADD`/`SUB`/`MUL`/`DIV`/`POW`): a right-aligned
+ *   axis position where both sides are concrete, differ, and neither is 1 —
+ *   the one case NumPy broadcasting cannot save either, so the interpreter,
+ *   the emitter's `broadcast_in_dim` injection and the host broadcasting ops
+ *   would all reject it at runtime. Phase A5c made these ops implicitly
+ *   broadcasting, which is what lets rank-differing operands be checked here
+ *   too (v1 skipped them and left them to an emitter that refused them).
  *
  * Consumed by the K2 checker (compile-time red squiggles,
  * `TENSOR_SHAPE_MISMATCH`) and usable as a library pass on
@@ -45,20 +48,30 @@ fun validateDxirShapes(fn: DxirFunction): List<String> = buildList {
             node.op in elementwise && node.operands.size == 2 -> {
                 val l = node.operands[0].type.dims
                 val r = node.operands[1].type.dims
-                if (l.size == r.size) {
-                    for (i in l.indices) {
-                        val a = l[i]
-                        val b = r[i]
-                        if (a > 0 && b > 0 && a != b && a != 1 && b != 1) {
-                            add(
-                                "${node.op} operand shapes are incompatible at dim $i: " +
-                                    "$l vs $r ($a ≠ $b, neither broadcastable)",
-                            )
-                            break
-                        }
+                // Phase A5c — the elementwise binaries broadcast implicitly, so the
+                // check is NumPy's, right-aligned: a rank-deficient operand is
+                // treated as having size-1 leading axes. (v1 only compared
+                // equal-rank pairs and left rank-differing ones to the emitter,
+                // which then refused them outright.)
+                val rank = maxOf(l.size, r.size)
+                for (k in 0 until rank) {
+                    val a = alignedDim(l, k, rank)
+                    val b = alignedDim(r, k, rank)
+                    if (a > 0 && b > 0 && a != b && a != 1 && b != 1) {
+                        add(
+                            "${node.op} operand shapes are incompatible at dim $k: " +
+                                "$l vs $r ($a ≠ $b, neither broadcastable)",
+                        )
+                        break
                     }
                 }
             }
         }
     }
+}
+
+/** Right-aligned axis [k] of [dims] within a rank-[rank] result: 1 for axes the operand lacks. */
+private fun alignedDim(dims: List<Int>, k: Int, rank: Int): Int {
+    val i = k - (rank - dims.size)
+    return if (i < 0) 1 else dims[i]
 }

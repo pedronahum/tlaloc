@@ -350,19 +350,73 @@ reachable from `grad {}`, not new math. New-op families come after.
     mixed scalar+ADD+DIV chain; plus the cross-identity. Emitter: the
     right-aligned `dims = [1]`, the empty-axis-map scalar splat, and the
     higher-rank refusal.
-  - **A5c-2 (pending) — the user surface.** What's left is everything above the
-    IR: `:core` broadcasting binary host ops (the shared `S` type param can't
-    express two shapes, so these need a two-shape signature returning the
-    broadcast shape), the FIR deriving the result type as `max(rank_a, rank_b)`
-    with sentinel dims (ranks are known under -1s, per §0.4.371's
-    right-alignment argument), and synthesis dispatching mixed-rank operands to
-    those host ops. The known hard part is IrType derivation for mixed-rank
-    operands: `deriveResultIrType`'s elementwise-binary arm takes
-    `operandIrTypes[0] ?: operandIrTypes[1]`, which is only correct when the
-    first operand is the bigger one — a broadcasting binary needs the result
-    IrType built from the max-rank operand's atoms (and A5c-1's repair shows the
-    solver silently falls back to `context.tensorIrType` when it can't, which is
-    a wrong-RANK splat rather than an error).
+  - **A5c-2 ✅ (§0.4.379) — the user surface.** `a + b` broadcasts, in source and
+    in `grad {}`:
+    - **`:core/ops/BroadcastOps.kt`** (a NEW FILE, deliberately — see below): the
+      `elementwiseBroadcast` walk (right-aligned strides, flat-zip fast path for
+      equal dims) behind `plusBroadcast` / `minusBroadcast` / `timesBroadcast` /
+      `divBroadcast` (star-projected operands + an explicit result-shape witness,
+      the `sumToLike` / `broadcastLike` convention), plus the DiffKT-parity
+      `<S1, S2>` operator overloads returning `DTensor<Shape, F32>`. The
+      shape-PRESERVING operators in HostOps.kt now delegate to the same walk and
+      keep only their precise witness, because **a shared static shape type does
+      not imply shared runtime dims** — `[N,1]` and `[N,C]` are both
+      `Rank2<Sym, Lit<Int>>`. The two overload sets must live in different files:
+      generics erase, so two `plus(DTensor, DTensor)` extensions in one facade
+      class are a platform declaration clash and `@JvmName` is unavailable in
+      commonMain. Kotlin's most-specific-wins resolution keeps picking the
+      shape-preserving one when the operands agree (pinned by a test that assigns
+      `a + b` to a `DTensor<Rank2<Sym, Sym>, F32>`).
+    - **FIR**: `broadcastResultType` — result rank `max(rank_a, rank_b)` (exact,
+      since ranks come from the call-site type even under sentinels), each extent
+      exact only when both aligned extents are concrete, sentinel otherwise;
+      incompatible concrete extents are a call-site `LoweringException` rather
+      than a runtime shape error.
+    - **Synthesis**: tensor ADD/SUB/MUL/DIV call the broadcasting host ops with the
+      witness threaded from the derived IrType; `deriveResultIrType` propagates
+      from a SAME-RANK operand only (falling back to a rank-deficient operand's
+      IrType yields a wrong-RANK splat, not an error: `mul(broadcast(1.0):[-1,-1],
+      v:[-1])` typed from `v` made the seed rank-1 and the gradient then called
+      `sumToLike([3], [2,3])`); the backward solver likewise propagates a result
+      IrType to same-rank operands only; `findTensorBinaryOp` now requires exactly
+      one type parameter so it cannot pick the `<S1, S2>` overloads.
+    - **The seed-shape problem** — the real discovery, and the reason this slice is
+      not just "add host ops". Synthesis resolves a scalar splat's target by
+      axis-matching its static IrType against the params, which is a GUESS that
+      broadcasting makes unsafe: two params can share atoms and differ at runtime,
+      and a rank-2 target can axis-match a rank-1 param's axis outright. Either way
+      the seed came out with the wrong shape. Fix: the scalar-seed `BROADCAST` gains
+      an optional second, SHAPE-ONLY template operand (the `SUM_TO` / `PAD_TO`
+      convention) whenever its target carries a sentinel, and synthesis then calls
+      `broadcastLike(v, template)` against the one value whose runtime shape IS the
+      target. `SumRule` and `MeanRule` emit it; `VjpRule` gains
+      `readsPrimalOperands(op)` so the template's clone is required per NODE rather
+      than per rule — a concrete-dims SUM must NOT drag its summed operand into the
+      gradient body (it would recompute it, and for a rank-changing node the
+      gradient scope cannot synthesise it at all, which is exactly how
+      `BroadcastToGradientTest` broke). The forward transform passes the template's
+      primal value clone, never its tangent.
+    Certified: 7 `:core` host tests (two-axis stretch, rank extension, rank-0 splat,
+    the resolution pin, the same-static-type/different-runtime-dims case, and the
+    incompatible-shape refusal), 3 E2E through `grad {}` (`[2,1] ⊙ [2,3]` with both
+    params statically `Rank2<Sym, Lit<Int>>`; `[3] ⊙ [2,3]` rank extension with
+    `dv` staying rank-1; a keepdims `[2,1] ⊙ [2,3]` intermediate), 2 IR pins for the
+    templated seed, 2 shape-validation pins (rank-differing mismatch reported,
+    legal rank extension silent).
+  - **A5c-3 (pending) — what broadcasting still does not cover.**
+    (i) `MaxRule` / `MinRule` / `SoftmaxRule` emit STRETCH broadcasts whose target
+    synthesis still resolves by axis-matching params — the same hazard class the
+    templated seed fixed, not yet templated (their operand is a correctly-ranked
+    tensor, so it only bites when params are shape-ambiguous).
+    (ii) The StableHLO emitter reads the splat target from the node type, so a
+    templated seed's template is emitted as a DEAD value — MLIR-legal and DCE'd by
+    XLA, but wasteful if a gradient body ever reaches the XLA path.
+    (iii) In sentinel-dims gradient bodies the templated seed costs one extra
+    evaluation of the summed node; a `dimsOf`-style shape-only host op would remove
+    it.
+    (iv) `DScalar × DTensor` mixing, and comparisons against a scalar literal
+    (`a gt 1.0f` — `COMPARE_DIRECTION_MAP` still lowers both sides verbatim, and
+    the comparison host ops still use the strict `elementwise`).
 
 ### Phase B — AD-mode parity
 
@@ -475,7 +529,7 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 
 | DiffKT | Tlaloc | Notes |
 |---|---|---|
-| `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 — tensor⊗tensor is **same-shape only**; `Float×DTensor` mixing on both operand orders ✅ A5a (§0.4.376). DiffKT broadcasts every binary op (`broadcast(S1,S2)`) → A5c; `DScalar×DTensor` still open |
+| `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 tensor⊗tensor; A5a (§0.4.376) `Float×DTensor` on both operand orders; **A5c (§0.4.378/379) full implicit broadcasting** — NumPy right-alignment in the interpreter, the emitter, the host ops and the adjoints, so `[N,1] ⊙ [N,C]` and `[C] ⊙ [N,C]` differentiate. `DScalar×DTensor` still open (A5c-3) |
 | `pow(Float/Int/DScalar/tensor-exponent)` | ✅ | A5b (§0.4.377): `:core/ops` host `pow` (tensor / Float / Int exponents) + FIR entries for `io.tlaloc.core.ops.pow` and `kotlin.math.pow` + a tensor synthesis arm; PowRule/interpreter/emitter/forward already shipped. `DScalar` exponent still open |
 | `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 |
 | `relu reluGrad sigmoid tanh exp ln sqrt abs` (tensor) | ✅ | `reluGrad` is public in DiffKT; ours is internal — fine |

@@ -203,10 +203,21 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // shape-wise; the dxir guarantees that). Phase A5b adds POW, which is
             // elementwise on the same two shape-agreeing operands once the FIR has
             // splatted a literal exponent.
+            // Phase A5c-2 — the operands need NOT agree any more: they broadcast. The
+            // result has the WIDER operand's shape, so only a SAME-RANK operand's
+            // IrType may stand in for it. Falling back to a rank-deficient operand
+            // (the pre-fix behaviour, and what taking operand[0] unconditionally
+            // amounts to when operand[0] is the narrow one) hands the result an
+            // IrType with FEWER axes than its dxir type has — and a wrong-rank
+            // IrType becomes a wrong-rank splat downstream rather than an error:
+            // `mul(broadcast(1.0):[-1,-1], v:[-1])` typed from `v` made the seed
+            // rank-1, so the gradient called `sumToLike([3], [2,3])`. Returning null
+            // leaves the node for the backward solver, which propagates a result
+            // IrType to same-rank operands only.
             OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW -> {
                 if (op.operands.size != 2) return null
-                operandIrTypes[op.operands[0].id]
-                    ?: operandIrTypes[op.operands[1].id]
+                op.operands.firstOrNull { it.type.rank == op.type.rank }
+                    ?.let { operandIrTypes[it.id] }
             }
             // §0.4.364 — comparison surface: COMPARE's runtime mask carries the
             // operands' DTensor IrType; tensor CAST is a runtime identity; WHERE
@@ -703,12 +714,20 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // result share one IrType. If output known + one operand
                     // unknown, the unknown's IrType = output's. Phase A5b adds POW
                     // (same shape-agreeing elementwise contract).
+                    // Phase A5c-2 — "share one IrType" now holds only for operands of
+                    // the SAME RANK as the result: a rank-deficient operand is
+                    // broadcast over new leading axes, so handing it the result's
+                    // IrType would claim axes it does not have. Those keep whatever
+                    // their own producers derive.
                     OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW -> {
                         if (n.operands.size != 2) continue
                         val outputIr = paramIrTypeMap[n.id] ?: continue
                         if (outputIr !is IrSimpleType) continue
                         for (operand in n.operands) {
-                            if (paramIrTypeMap[operand.id] == null && isAcceptedTensorType(operand.type)) {
+                            if (paramIrTypeMap[operand.id] == null &&
+                                isAcceptedTensorType(operand.type) &&
+                                operand.type.rank == n.type.rank
+                            ) {
                                 paramIrTypeMap[operand.id] = outputIr
                                 changed = true
                             }
@@ -1071,6 +1090,62 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
     }
 
+    /**
+     * Phase A5c-2 — the elementwise binaries that have a broadcasting host op in
+     * `:core/ops/BroadcastOps.kt`. POW is absent on purpose: its tensor spelling
+     * shares one shape parameter (`pow(other: DTensor<S, F32>)`), so it cannot be
+     * called with two different shapes and keeps its shape-preserving symbol.
+     */
+    private val TENSOR_BROADCAST_BINARY_KINDS: Set<OpKind> =
+        setOf(OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV)
+
+    /**
+     * Phase A5c-2 — tensor ADD/SUB/MUL/DIV → an IrCall to the matching
+     * `:core/ops` broadcasting binary (`plusBroadcast(a, b)`, …). Those take
+     * star-projected operands plus an explicit result-shape witness [R], which is
+     * threaded from the derived result IrType exactly as `broadcastLike` /
+     * `sumToLike` thread theirs.
+     *
+     * The witness comes from the node's own derived IrType, falling back to the
+     * WIDER operand's — the result of a broadcast has the max-rank operand's shape,
+     * which is why [deriveResultIrType]'s elementwise-binary arm propagates from the
+     * higher-rank operand rather than blindly from operand[0].
+     */
+    private fun IrBuilderWithScope.irBroadcastBinary(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        val name = when (op.op) {
+            OpKind.ADD -> "plusBroadcast"
+            OpKind.SUB -> "minusBroadcast"
+            OpKind.MUL -> "timesBroadcast"
+            OpKind.DIV -> "divBroadcast"
+            else -> return null
+        }
+        val sym = opsTensorSymbol(name) ?: return null
+        val lhsDecl = env[op.operands[0].id] ?: return null
+        val rhsDecl = env[op.operands[1].id] ?: return null
+        val wider = if (op.operands[0].type.rank >= op.operands[1].type.rank) op.operands[0] else op.operands[1]
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+            ?: (irTypeForNode(wider, context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = shapeArg
+        }
+        call.arguments[0] = irGet(lhsDecl)
+        call.arguments[1] = irGet(rhsDecl)
+        return call
+    }
+
     private fun IrBuilderWithScope.irOpFor(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,
@@ -1127,6 +1202,16 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SUM_TO) return irSumTo(op, env, context)
         if (op.op == OpKind.SLICE) return irSlice(op, env, context)
         if (op.op == OpKind.PAD_TO) return irPadTo(op, env, context)
+        // Phase A5c-2 — tensor ADD/SUB/MUL/DIV prefer the broadcasting host ops.
+        // Under `grad {}`'s -1 sentinel dims two operands with the SAME static shape
+        // can still be differently shaped at runtime (`[N,1]` and `[N,C]` are both
+        // `Rank2<Sym, Lit<Int>>`), and rank-differing operands have no same-`S`
+        // overload to call at all, so the shape-preserving `findTensorBinaryOp`
+        // symbols below are only a fallback. Equal runtime dims take the host op's
+        // flat-zip fast path, so nothing that worked before changes value or cost.
+        if (op.op in TENSOR_BROADCAST_BINARY_KINDS && isAcceptedTensorType(op.type)) {
+            irBroadcastBinary(op, env, context)?.let { return it }
+        }
 
         val operandDecls = op.operands.mapIndexed { idx, o ->
             env[o.id] ?: return reject(
@@ -1521,7 +1606,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // (the sentinel flows through unread); rank is gated by [isAcceptedTensorType].
         // §0.4.186 — widened from rank-1-only to rank-1/2/3 because broadcastLike's
         // generic shape parameter handles any rank uniformly.
-        if (op.operands.size != 1) return null
+        if (op.operands.size != 1 && op.operands.size != 2) return null
         val operand = op.operands[0]
         // §0.4.366 — equal-rank stretch arm (Phase A1): tile a keepdims-shaped
         // tensor back over its size-1 axes — the un-reduce that the axis
@@ -1534,6 +1619,22 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!isAcceptedTensorType(op.type)) return null
 
         val operandDecl = env[operand.id] ?: return null
+
+        // Phase A5c-2 — an explicit shape-only template operand (operand[1], which
+        // SumRule now attaches to a scalar seed) wins over every static guess below:
+        // its RUNTIME dims are the target's, and that is the only sound source once
+        // operands broadcast. Two params can share static atoms yet differ at runtime
+        // (`[2,1]` and `[2,3]` are both `Rank2<Sym, Lit<Int>>`), and a rank-2 target
+        // can axis-match a rank-1 param's axis outright — either way
+        // [matchBroadcastAxesToParams] picked a shape the seed does not have, and the
+        // wrong-shaped seed surfaced as a `sumToLike` / `elementwiseBroadcast`
+        // IllegalArgumentException at run time.
+        if (op.operands.size == 2) {
+            val templateDecl = env[op.operands[1].id] ?: return null
+            val templateIr = (irTypeForNode(op.operands[1], context) as? IrSimpleType)
+                ?: (context.tensorIrType as? IrSimpleType)
+            return irBroadcastLikeCall(operandDecl, templateDecl, templateIr)
+        }
 
         // §0.4.367 — all-concrete targets (user-literal reshape shapes and
         // their splat seeds) need no structural matching at all: every dim
@@ -1625,22 +1726,36 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // SumRule's adjoint + rank-2 SQUARE surfaces where the template param
         // shares the target shape.
         val template = context.tensorTemplateParam ?: return null
-        val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
-        val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        return irBroadcastLikeCall(operandDecl, template, context.tensorIrType as? IrSimpleType)
+    }
+
+    /**
+     * `broadcastLike(v, template)` — splat the scalar [valueDecl] over the RUNTIME
+     * shape of [templateDecl]. The callee is
+     * `fun <S : Shape> broadcastLike(v: Float, template: DTensor<S, F32>)`, so its
+     * single type argument is the template's shape and the call's type is the
+     * template's IrType; [resultIrType] supplies both. `fromSymbolOwner` sizes
+     * `arguments` from the callee's parameter shape — 2 regulars, no dispatch
+     * receiver. Shared by the explicit-template arm of [irBroadcast] (Phase A5c-2)
+     * and its param-template fallback.
+     */
+    private fun IrBuilderWithScope.irBroadcastLikeCall(
+        valueDecl: IrValueDeclaration,
+        templateDecl: IrValueDeclaration,
+        resultIrType: IrSimpleType?,
+    ): IrExpression? {
         val helperSym = broadcastLikeSymbol() ?: return null
+        val ty = resultIrType ?: return null
+        val shapeTypeArg = ty.arguments.firstOrNull()?.typeOrNull ?: return null
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
-            type = tensorIrType,
+            type = ty,
             symbol = helperSym,
         )
-        // broadcastLike is `fun <S : Shape> broadcastLike(v: Float, template: DTensor<S, F32>)`.
-        // Thread the call-site shape (`Rank1<Sym>`, `Rank2<R, C>`, etc.) through the single
-        // type argument so the IR verifier has a concrete S. fromSymbolOwner sizes
-        // `arguments` from the callee's parameter shape — 2 regulars, no dispatch receiver.
         call.typeArguments[0] = shapeTypeArg
-        call.arguments[0] = irGet(operandDecl)
-        call.arguments[1] = irGet(template)
+        call.arguments[0] = irGet(valueDecl)
+        call.arguments[1] = irGet(templateDecl)
         return call
     }
 
@@ -2510,10 +2625,17 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // Float is the RECEIVER, not a parameter — and picking that overload
         // synthesized a call whose receiver slot held a DTensor, which the JVM
         // then rejected at runtime (`DTensor cannot be cast to Number`).
+        //
+        // Phase A5c-2 — and exactly ONE type parameter. The broadcasting overloads
+        // (`<S1, S2> DTensor<S1, F32>.plus(other: DTensor<S2, F32>)` in
+        // BroadcastOps.kt) satisfy every other clause, but they return
+        // `DTensor<Shape, F32>`: the shape-preserving symbol is the one whose single
+        // `S` is shared by receiver, parameter and result.
         val dtensorClass = pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/DTensor"))
         fun isDTensor(type: IrType?) = (type as? IrSimpleType)?.classifier == dtensorClass
         return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
+            if (sym.owner.typeParameters.size != 1) return@firstOrNull false
             val regular = params.filter { it.kind == IrParameterKind.Regular }
             if (regular.size != 1) return@firstOrNull false
             val receiver = params.firstOrNull { it.kind == IrParameterKind.ExtensionReceiver }
@@ -2789,7 +2911,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return irUnaryMathCall(op, env, context, Name.identifier("exp"))
     }
 
-    /** §0.4.368 — resolves a single-overload `:core/ops` tensor unary extension by name. */
+    /**
+     * §0.4.368 — resolves a single-overload `:core/ops` callable by name: the tensor
+     * unary extensions (`tanh`, `sigmoid`, `log`, `neg`, …) and, since Phase A5c-2,
+     * the broadcasting binaries (`plusBroadcast`, `timesBroadcast`, …), which are
+     * top-level and uniquely named so `singleOrNull()` holds for both.
+     */
     private fun opsTensorSymbol(name: String): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),

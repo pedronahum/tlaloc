@@ -1146,7 +1146,11 @@ object DxirReverseTransform {
                 continue
             }
             val rule = VjpRegistry[n.op] ?: continue
-            for (i in rule.readsPrimalOperandIndices) {
+            // Phase A5c-2 — per-node, not the static property: SumRule/MeanRule only
+            // dereference operand 0 (as their scalar seed's shape template) when the
+            // target shape carries a sentinel, so a concrete-dims SUM does not drag
+            // its summed operand into the gradient body.
+            for (i in rule.readsPrimalOperands(n)) {
                 enqueue(n.operands[i].id)
             }
         }

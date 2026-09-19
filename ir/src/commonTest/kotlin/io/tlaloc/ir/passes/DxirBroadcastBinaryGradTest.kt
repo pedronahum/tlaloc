@@ -2,6 +2,7 @@ package io.tlaloc.ir.passes
 
 import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirBuilder
+import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import kotlin.math.abs
@@ -209,6 +210,63 @@ class DxirBroadcastBinaryGradTest {
             val want = -a.sumOf { (1.0 + it) / (b[j].toDouble() * b[j].toDouble()) }.toFloat()
             assertTrue(abs(out[2][j] - want) < 1e-4f, "db[$j] = ${out[2][j]}, want $want")
         }
+    }
+
+    /**
+     * A scalar seed splatted to a SYMBOLIC target shape carries that shape's node as
+     * a second, shape-only operand — synthesis reads the extents off it at runtime
+     * (`broadcastLike(v, template)`) instead of axis-matching static atoms against
+     * the params, which is a guess that broadcasting makes unsafe. A CONCRETE target
+     * must NOT get one: the template forces the summed node to be cloned into the
+     * gradient body, which recomputes it and, for a rank-changing node the gradient
+     * scope cannot synthesise, breaks synthesis outright.
+     */
+    @Test
+    fun scalarSeedCarriesAShapeTemplateOnlyUnderSentinelDims() {
+        val concrete = DxirBuilder.function("seed_concrete") {
+            val a = param("a", DxirType(F32, listOf(2, 3)))
+            val p = op(OpKind.MUL, listOf(a, a), DxirType(F32, listOf(2, 3)))
+            listOf(op(OpKind.SUM, listOf(p), scalar))
+        }
+        val concreteSeed = DxirReverseTransform.apply(concrete).body
+            .filterIsInstance<DxirOp>().single { it.op == OpKind.BROADCAST }
+        assertEquals(1, concreteSeed.operands.size, "a concrete-dims seed needs no runtime template")
+
+        val symbolic = DxirBuilder.function("seed_symbolic") {
+            val a = param("a", DxirType(F32, listOf(-1, -1)))
+            val p = op(OpKind.MUL, listOf(a, a), DxirType(F32, listOf(-1, -1)))
+            listOf(op(OpKind.SUM, listOf(p), scalar))
+        }
+        val symbolicGrad = DxirReverseTransform.apply(symbolic)
+        val symbolicSeed = symbolicGrad.body
+            .filterIsInstance<DxirOp>().single { it.op == OpKind.BROADCAST }
+        assertEquals(2, symbolicSeed.operands.size, "a sentinel-dims seed must carry its shape template")
+        val template = symbolicSeed.operands[1]
+        assertTrue(
+            template is DxirOp && template.op == OpKind.MUL,
+            "the template must be the summed primal node, got $template",
+        )
+        assertTrue(
+            symbolicGrad.body.any { it === template },
+            "the template must be CLONED into the gradient body, not left as a primal reference",
+        )
+    }
+
+    /** The interpreter reads a templated seed's shape from its own type and ignores the template. */
+    @Test
+    fun templatedSeedEvaluates() {
+        val t = DxirType(F32, listOf(2, 2))
+        val fn = DxirBuilder.function("templated_seed") {
+            val a = param("a", t)
+            val one = const(1.0f, scalar)
+            val seed = op(
+                OpKind.BROADCAST, listOf(one, a), t,
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            listOf(op(OpKind.MUL, listOf(seed, a), t))
+        }
+        val out = DxirInterpreter.evalFunction(fn, listOf(floatArrayOf(1f, 2f, 3f, 4f)))
+        assertEquals(listOf(1f, 2f, 3f, 4f), out[0].toList())
     }
 
     /** JVP⇄VJP cross-identity through the broadcasting multiply — each mode certifies the other. */

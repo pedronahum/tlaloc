@@ -124,9 +124,21 @@ object DxirForwardTransform {
             OpKind.ADD -> b.op(OpKind.ADD, listOf(t(node.operands[0]), t(node.operands[1])), ty)
             OpKind.SUB -> b.op(OpKind.SUB, listOf(t(node.operands[0]), t(node.operands[1])), ty)
             OpKind.NEG -> b.op(OpKind.NEG, listOf(t(node.operands[0])), ty)
-            OpKind.SUM, OpKind.MEAN, OpKind.RESHAPE, OpKind.TRANSPOSE, OpKind.BROADCAST,
+            OpKind.SUM, OpKind.MEAN, OpKind.RESHAPE, OpKind.TRANSPOSE,
             OpKind.SLICE, OpKind.PAD, OpKind.CONCAT, OpKind.AVGPOOL2D ->
                 b.op(node.op, node.operands.map { t(it) }, ty, node.attrs)
+
+            // BROADCAST is linear in its value (operand[0]). Phase A5c-2 lets a
+            // scalar-seed splat carry a second, SHAPE-ONLY template operand (the
+            // SUM_TO / PAD_TO convention) so synthesis reads the target extents off
+            // a real runtime value instead of guessing them from static atoms —
+            // so pass the template's primal VALUE clone, never its tangent.
+            OpKind.BROADCAST ->
+                if (node.operands.size == 2) {
+                    b.op(OpKind.BROADCAST, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
+                } else {
+                    b.op(OpKind.BROADCAST, listOf(t(node.operands[0])), ty, node.attrs)
+                }
 
             // §0.4.373 — SUM_TO is linear in `value` (operand[0]); the template
             // (operand[1]) contributes SHAPE ONLY, so its tangent is irrelevant —
