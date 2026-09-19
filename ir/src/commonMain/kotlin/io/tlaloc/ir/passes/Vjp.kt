@@ -3,6 +3,7 @@ package io.tlaloc.ir.passes
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.ir.DxirBuilder
+import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirType
@@ -76,19 +77,58 @@ object VjpRegistry {
 
     // --- Elementwise binary ---
 
-    /** d(a + b)/da = 1, d(a + b)/db = 1. Contribution is upstream itself for both. */
+    /**
+     * Phase A5c — unbroadcast an adjoint contribution back to the shape of the
+     * [operand] it belongs to.
+     *
+     * With implicit broadcasting the contribution is shaped like the RESULT (the
+     * operands broadcast against each other), while the gradient that accumulates
+     * onto an operand must be shaped like that operand: `d/da Σ(a ⊙ b)` with
+     * `a:[N,1]`, `b:[N,C]` is `[Σ_C upstream·b]` of shape `[N,1]`, not `[N,C]`.
+     * The un-broadcast is NumPy's reduce-over-replicated-axes, which is exactly
+     * `SUM_TO` (§0.4.373) reading the target extents from the operand's ACTUAL
+     * runtime shape — so it is correct under the -1 sentinel dims of `grad {}`,
+     * where which axes were size-1 (or which axes the operand lacked) is
+     * statically unknowable.
+     *
+     * Skipped when the shapes are PROVABLY identical: concrete-and-equal dims need
+     * no reduce, and a splat const's type is the shape it was splatted to, so its
+     * contribution is already right-sized. Both cases would be a runtime no-op
+     * anyway (`sumToLike` reduces nothing) — skipping them keeps the concrete-dims
+     * IR that the coarsener, the emitter tests and the pinned gradient tests walk
+     * byte-identical to pre-A5c. Anything else (differing dims, or any sentinel)
+     * takes the SUM_TO path, which is sound in both directions.
+     */
+    private fun unbroadcast(builder: DxirBuilder, contribution: DxirNode, operand: DxirNode): DxirNode {
+        val target = operand.type
+        if (contribution.type == target && (target.dims.all { it > 0 } || operand is DxirConst)) {
+            return contribution
+        }
+        return builder.op(OpKind.SUM_TO, listOf(contribution, operand), target)
+    }
+
+    /**
+     * d(a + b)/da = 1, d(a + b)/db = 1 — the upstream, un-broadcast to each
+     * operand's own shape (Phase A5c: the operands may broadcast against each
+     * other, so the upstream is result-shaped and each side needs its own reduce).
+     */
     val AddRule: VjpRule = object : VjpRule {
-        override val readsPrimalOperandIndices: Set<Int> = emptySet()
-        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder) =
-            listOf(op.operands[0] to upstream, op.operands[1] to upstream)
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder) = listOf(
+            op.operands[0] to unbroadcast(builder, upstream, op.operands[0]),
+            op.operands[1] to unbroadcast(builder, upstream, op.operands[1]),
+        )
     }
 
     /** d(a - b)/da = 1, d(a - b)/db = -1. */
     val SubRule: VjpRule = object : VjpRule {
-        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val negUp = builder.op(OpKind.NEG, listOf(upstream), upstream.type)
-            return listOf(op.operands[0] to upstream, op.operands[1] to negUp)
+            return listOf(
+                op.operands[0] to unbroadcast(builder, upstream, op.operands[0]),
+                op.operands[1] to unbroadcast(builder, negUp, op.operands[1]),
+            )
         }
     }
 
@@ -98,9 +138,14 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a0 = op.operands[0]
             val a1 = op.operands[1]
+            // Each product is result-shaped (the operands broadcast against each
+            // other), so each is un-broadcast to its own operand afterwards.
             val da = builder.op(OpKind.MUL, listOf(upstream, a1), upstream.type)
             val db = builder.op(OpKind.MUL, listOf(upstream, a0), upstream.type)
-            return listOf(a0 to da, a1 to db)
+            return listOf(
+                a0 to unbroadcast(builder, da, a0),
+                a1 to unbroadcast(builder, db, a1),
+            )
         }
     }
 
@@ -117,10 +162,15 @@ object VjpRegistry {
             val da = builder.op(OpKind.DIV, listOf(upstream, a1), upstream.type)
             // db = -upstream * a / (b * b)
             val bb = builder.op(OpKind.MUL, listOf(a1, a1), a1.type)
-            val aOverBB = builder.op(OpKind.DIV, listOf(a0, bb), a0.type)
+            // Phase A5c — `a / (b·b)` broadcasts a against b, so its shape is the
+            // RESULT's, not a's (identical when the operands already agree).
+            val aOverBB = builder.op(OpKind.DIV, listOf(a0, bb), op.type)
             val mul = builder.op(OpKind.MUL, listOf(upstream, aOverBB), upstream.type)
             val db = builder.op(OpKind.NEG, listOf(mul), mul.type)
-            return listOf(a0 to da, a1 to db)
+            return listOf(
+                a0 to unbroadcast(builder, da, a0),
+                a1 to unbroadcast(builder, db, a1),
+            )
         }
     }
 

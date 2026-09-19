@@ -787,6 +787,16 @@ fun <S : Shape> stretchLike(x: DTensor<*, F32>, template: DTensor<S, F32>): DTen
 fun <S : Shape> sumToLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DTensor<S, F32> {
     val u = value.dims
     val t = template.dims
+    // Phase A5c — identity fast path. The elementwise binary VjpRules now wrap
+    // every contribution whose shape is not PROVABLY its operand's in a SUM_TO
+    // (that is what makes them correct under `grad {}`'s -1 sentinel dims, where
+    // "provably" is never available), so at RUNTIME the shapes usually do match and
+    // there is nothing to reduce. Copy instead of walking the stride arithmetic —
+    // and copy rather than alias, because a contribution may feed an in-place
+    // accumulator downstream.
+    if (u.contentEquals(t)) {
+        return DTensor(HostF32Storage(value.hostF32().copyOf()), t.copyOf(), F32)
+    }
     val ru = u.size
     val rt = t.size
     require(rt <= ru) { "sumToLike: template rank $rt exceeds value rank $ru" }

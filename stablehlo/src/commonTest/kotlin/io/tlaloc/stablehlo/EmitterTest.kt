@@ -114,6 +114,39 @@ class EmitterTest {
     }
 
     @Test
+    fun binaryWithScalarOperandSplatsWithAnEmptyAxisMap() {
+        // Phase A5c — the rank-0 end of implicit broadcasting: a scalar operand
+        // against a [3,4] result splats through `broadcast_in_dim` with an EMPTY
+        // axis map (every result axis is a new replicated one). The rank-1
+        // right-alignment is pinned by
+        // [binaryRankDeficientOperandRightAlignsInsteadOfRejecting].
+        val r = DxirType(F32, listOf(3, 4))
+        val scalarFn = DxirBuilder.function("g") {
+            val s = param("s", DxirType(F32, emptyList()))
+            val b = param("b", r)
+            listOf(op(OpKind.MUL, listOf(s, b), r))
+        }
+        val scalarMlir = scalarFn.toStablehlo()
+        assertTrue(
+            scalarMlir.contains("stablehlo.broadcast_in_dim %0, dims = [] : (tensor<f32>) -> tensor<3x4xf32>"),
+            "expected an empty-axis-map splat for the scalar operand; got: $scalarMlir",
+        )
+    }
+
+    @Test
+    fun binaryWithHigherRankOperandIsRefused() {
+        // Broadcasting never DROPS axes: a [2,3,4] operand against a [3,4] result
+        // must fail loudly rather than emit an invalid broadcast_in_dim.
+        val r = DxirType(F32, listOf(3, 4))
+        val fn = DxirBuilder.function("f") {
+            val a = param("a", DxirType(F32, listOf(2, 3, 4)))
+            val b = param("b", r)
+            listOf(op(OpKind.ADD, listOf(a, b), r))
+        }
+        assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+    }
+
+    @Test
     fun binaryWithMatchingOperandsEmitsNoBroadcastInjection() {
         // Same-shape operands hit the no-op path; emit must not mention
         // broadcast_in_dim around the add. Pins the regression that
@@ -127,10 +160,16 @@ class EmitterTest {
     }
 
     @Test
-    fun binaryRejectsRankMismatchedOperand() {
-        // v1 is same-rank only — different-rank operands (NumPy's
-        // "prepend size-1 dims" rule) fail loudly so a future generaliser
-        // can't silently miscompile.
+    fun binaryRankDeficientOperandRightAlignsInsteadOfRejecting() {
+        // Was `binaryRejectsRankMismatchedOperand`: §0.4.277's v1 was same-rank
+        // only and refused this case loudly "so a future generaliser can't
+        // silently miscompile". Phase A5c IS that generaliser — implicit
+        // broadcasting on the elementwise binaries — so the refusal is replaced by
+        // an explicit pin of the emitted right-alignment: the rank-1 [4] operand
+        // maps its axis 0 to result axis 1 (`dims = [1]`), gaining a replicated
+        // leading axis. The surviving refusal is the OTHER direction (an operand
+        // of higher rank than the result — broadcasting never drops axes), pinned
+        // by [binaryWithHigherRankOperandIsRefused].
         val r = DxirType(F32, listOf(3, 4))
         val s = DxirType(F32, listOf(4))
         val fn = DxirBuilder.function("f") {
@@ -139,10 +178,14 @@ class EmitterTest {
             val c = op(OpKind.ADD, listOf(a, b), r)
             listOf(c)
         }
-        val ex = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        val mlir = fn.toStablehlo()
         assertTrue(
-            ex.message!!.contains("rank mismatch"),
-            "expected rank-mismatch require-message; got: ${ex.message}",
+            mlir.contains("stablehlo.broadcast_in_dim %0, dims = [1] : (tensor<4xf32>) -> tensor<3x4xf32>"),
+            "expected the rank-1 operand right-aligned onto result axis 1; got: $mlir",
+        )
+        assertTrue(
+            !mlir.contains("rank mismatch"),
+            "the v1 rank-mismatch refusal must be gone; got: $mlir",
         )
     }
 

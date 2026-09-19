@@ -379,10 +379,13 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * match [resultType]. Returns the SSA name to use downstream (the original
      * if no broadcast was needed; the broadcast result otherwise).
      *
-     * v1: same-rank broadcast only — each input dim must equal the result dim
-     * or be 1. Different-rank broadcasts (NumPy's "prepend size-1 dims" rule)
-     * are out of scope; the recognized patterns + LlamaDecoderPrimal don't
-     * surface them.
+     * v1 was same-rank only (each input dim equal to the result dim or 1).
+     * Phase A5c generalises it to NumPy right-alignment, which is what the
+     * elementwise binaries' implicit broadcasting needs: the operand's axis `j`
+     * maps to result axis `offset + j` where `offset = resultRank − operandRank`,
+     * a size-1 operand axis stretches, and the unlisted LEADING result axes are
+     * new replicated ones. An operand of HIGHER rank than the result is still
+     * refused — broadcasting never drops axes.
      */
     private fun broadcastIfNeeded(
         step: String,
@@ -395,18 +398,20 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             "broadcastIfNeeded: dtype mismatch (operand=${operandType.dtype} result=${resultType.dtype}); " +
                 "stablehlo.broadcast_in_dim is shape-only — dtype must match. Insert an explicit CAST first."
         }
-        require(operandType.rank == resultType.rank) {
-            "broadcastIfNeeded: rank mismatch (operand=${operandType.dims} result=${resultType.dims}); " +
-                "different-rank broadcast not supported in v1"
+        require(operandType.rank <= resultType.rank) {
+            "broadcastIfNeeded: operand rank ${operandType.dims} exceeds result rank ${resultType.dims}; " +
+                "broadcasting extends leading axes only (NumPy right-alignment)"
         }
+        val offset = resultType.rank - operandType.rank
         for (i in 0 until operandType.rank) {
-            require(operandType.dims[i] == resultType.dims[i] || operandType.dims[i] == 1) {
-                "broadcastIfNeeded: dim $i operand=${operandType.dims[i]} vs result=${resultType.dims[i]} " +
+            require(operandType.dims[i] == resultType.dims[offset + i] || operandType.dims[i] == 1) {
+                "broadcastIfNeeded: dim $i operand=${operandType.dims[i]} vs result=${resultType.dims[offset + i]} " +
                     "is not broadcast-compatible (operand must match or be 1)"
             }
         }
         val bcast = synth()
-        val dims = (0 until operandType.rank).joinToString(", ")  // identity mapping
+        // Right-aligned axis map: operand axis i → result axis offset + i.
+        val dims = (0 until operandType.rank).joinToString(", ") { "${it + offset}" }
         out.appendLine(
             "$step$bcast = stablehlo.broadcast_in_dim $operandName, dims = [$dims] : " +
                 "(${operandType.toMlir()}) -> ${resultType.toMlir()}",

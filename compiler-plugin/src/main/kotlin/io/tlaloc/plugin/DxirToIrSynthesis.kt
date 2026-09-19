@@ -765,6 +765,27 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             paramIrTypeMap[templateId] = outputIr
                             changed = true
                         }
+                        // Phase A5c — and to the VALUE operand too, but only when the
+                        // reduce is rank-preserving, i.e. the un-broadcast the binary
+                        // VjpRules now emit. There the value IS the result shape, so
+                        // the two share one IrType exactly as ADD/SUB/MUL/DIV do.
+                        // Without this the chain breaks: a MUL feeding a SUM_TO lost
+                        // its backward-solved IrType, its seed-BROADCAST operand fell
+                        // back to `context.tensorIrType` (the rank-2 param
+                        // representative) and splatted to the WRONG rank — the
+                        // g2 axis-reduction gradient then called
+                        // `times([2,2], [2])`. A rank-REDUCING SUM_TO (the genuine
+                        // broadcasting case: `[N,C] → [N]`) must NOT propagate: its
+                        // value really is bigger than the result, and its IrType
+                        // comes from its own operands instead.
+                        val valueId = n.operands[0].id
+                        if (paramIrTypeMap[valueId] == null &&
+                            isAcceptedTensorType(n.operands[0].type) &&
+                            n.operands[0].type.rank == n.type.rank
+                        ) {
+                            paramIrTypeMap[valueId] = outputIr
+                            changed = true
+                        }
                     }
                     // §0.4.374 — PAD_TO's output shape equals its template
                     // (operand[1]); solve the template's IrType from the PAD_TO

@@ -75,6 +75,102 @@ object DxirInterpreter {
         if (type.dims.isEmpty()) 1 else type.dims.fold(1) { acc, d -> acc * d }
 
     /**
+     * Phase A5c — elementwise binary evaluation with NumPy implicit broadcasting.
+     *
+     * The result shape is the op's own type; each operand right-aligns against it
+     * (operand axis `j` maps to result axis `outRank − inRank + j`), an operand axis
+     * of extent 1 stretches over the result axis, and axes the operand lacks are
+     * replicated. Every aligned pair must be equal, or 1 on the operand side — the
+     * same contract [validateDxirShapes] checks statically for equal-rank operands
+     * and the emitter's `broadcast_in_dim` injection enforces for XLA.
+     *
+     * EQUAL-shape operands take the flat zip the interpreter has always used: no
+     * stride arithmetic and no per-element index remap, so programs that evaluated
+     * before A5c are bit-identical (and just as fast). Only genuinely mixed shapes
+     * pay for the broadcast walk.
+     */
+    private fun binaryBroadcast(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+        f: (Float, Float) -> Float,
+    ): FloatArray {
+        val aNode = op.operands[0]
+        val bNode = op.operands[1]
+        val a = evalNode(aNode, env, multiResults)
+        val b = evalNode(bNode, env, multiResults)
+        val aDims = aNode.type.dims
+        val bDims = bNode.type.dims
+        if (aDims == bDims) {
+            require(a.size == b.size) {
+                "DxirInterpreter: ${op.op} operands have different sizes ${a.size} vs ${b.size}"
+            }
+            return FloatArray(a.size) { f(a[it], b[it]) }
+        }
+        val outDims = op.type.dims
+        val aStrides = broadcastStrides(op, aDims, outDims, a.size, 0)
+        val bStrides = broadcastStrides(op, bDims, outDims, b.size, 1)
+        val outStrides = IntArray(outDims.size)
+        run {
+            var s = 1
+            for (k in outDims.indices.reversed()) { outStrides[k] = s; s *= outDims[k] }
+        }
+        return FloatArray(sizeOf(op.type)) { flat ->
+            var rem = flat
+            var ia = 0
+            var ib = 0
+            for (k in outDims.indices) {
+                val coord = rem / outStrides[k]
+                rem -= coord * outStrides[k]
+                ia += coord * aStrides[k]
+                ib += coord * bStrides[k]
+            }
+            f(a[ia], b[ib])
+        }
+    }
+
+    /**
+     * Per-result-axis strides for one operand of a broadcasting binary op: the
+     * operand's own row-major strides right-aligned into the result rank, with 0 on
+     * the axes it lacks and on its size-1 axes (both replicate, so they never
+     * advance the flat index).
+     */
+    private fun broadcastStrides(
+        op: DxirOp,
+        inDims: List<Int>,
+        outDims: List<Int>,
+        inSize: Int,
+        operandIndex: Int,
+    ): IntArray {
+        val r = outDims.size
+        require(inDims.size <= r) {
+            "DxirInterpreter: ${op.op} operand $operandIndex rank ${inDims.size} exceeds result rank $r"
+        }
+        var expected = 1
+        for (d in inDims) expected *= d
+        require(expected == inSize) {
+            "DxirInterpreter: ${op.op} operand $operandIndex holds $inSize elements but its shape is $inDims"
+        }
+        val offset = r - inDims.size
+        val own = IntArray(inDims.size)
+        run {
+            var s = 1
+            for (k in inDims.indices.reversed()) { own[k] = s; s *= inDims[k] }
+        }
+        val strides = IntArray(r)
+        for (k in 0 until r) {
+            val ik = k - offset
+            if (ik < 0) continue
+            require(inDims[ik] == outDims[k] || inDims[ik] == 1) {
+                "DxirInterpreter: ${op.op} operand $operandIndex axis $ik = ${inDims[ik]} cannot " +
+                    "broadcast to result axis $k = ${outDims[k]} (must be equal or 1)"
+            }
+            if (inDims[ik] != 1) strides[k] = own[ik]
+        }
+        return strides
+    }
+
+    /**
      * Evaluates [node] against [env], producing a `FloatArray` whose length is derived
      * from the node's [DxirType] (params take their length from the env entry).
      *
@@ -169,38 +265,16 @@ object DxirInterpreter {
         multiResults: MutableMap<Long, FloatArray>,
     ): FloatArray {
         return when (op.op) {
-            OpKind.ADD -> {
-                val a = evalNode(op.operands[0], env, multiResults)
-                val b = evalNode(op.operands[1], env, multiResults)
-                require(a.size == b.size) {
-                    "DxirInterpreter: ADD operands have different sizes ${a.size} vs ${b.size}"
-                }
-                FloatArray(a.size) { a[it] + b[it] }
-            }
-            OpKind.SUB -> {
-                val a = evalNode(op.operands[0], env, multiResults)
-                val b = evalNode(op.operands[1], env, multiResults)
-                require(a.size == b.size) {
-                    "DxirInterpreter: SUB operands have different sizes ${a.size} vs ${b.size}"
-                }
-                FloatArray(a.size) { a[it] - b[it] }
-            }
-            OpKind.MUL -> {
-                val a = evalNode(op.operands[0], env, multiResults)
-                val b = evalNode(op.operands[1], env, multiResults)
-                require(a.size == b.size) {
-                    "DxirInterpreter: MUL operands have different sizes ${a.size} vs ${b.size}"
-                }
-                FloatArray(a.size) { a[it] * b[it] }
-            }
-            OpKind.DIV -> {
-                val a = evalNode(op.operands[0], env, multiResults)
-                val b = evalNode(op.operands[1], env, multiResults)
-                require(a.size == b.size) {
-                    "DxirInterpreter: DIV operands have different sizes ${a.size} vs ${b.size}"
-                }
-                FloatArray(a.size) { a[it] / b[it] }
-            }
+            // Phase A5c — the elementwise binaries evaluate with NumPy implicit
+            // broadcasting when their operand shapes DIFFER: operands right-align
+            // against the result shape, a size-1 axis stretches, a rank-deficient
+            // operand gains replicated leading axes. Equal-shape operands keep the
+            // flat zip they have always had (see [binaryBroadcast]), so every
+            // pre-A5c program evaluates bit-identically.
+            OpKind.ADD -> binaryBroadcast(op, env, multiResults) { x, y -> x + y }
+            OpKind.SUB -> binaryBroadcast(op, env, multiResults) { x, y -> x - y }
+            OpKind.MUL -> binaryBroadcast(op, env, multiResults) { x, y -> x * y }
+            OpKind.DIV -> binaryBroadcast(op, env, multiResults) { x, y -> x / y }
             OpKind.NEG -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { -a[it] }
@@ -256,13 +330,11 @@ object DxirInterpreter {
                 // routed through `kotlin.math.pow` (Double precision then truncated to
                 // Float) — both negative-base + non-integer-exp and zero^zero edge
                 // cases follow `kotlin.math.pow`'s definitions; document if a benchmark
-                // exposes a deviation.
-                val a = evalNode(op.operands[0], env, multiResults)
-                val b = evalNode(op.operands[1], env, multiResults)
-                require(a.size == b.size) {
-                    "DxirInterpreter: POW operands different sizes ${a.size} vs ${b.size}"
+                // exposes a deviation. Phase A5c routes it through the same
+                // broadcasting evaluator as ADD/SUB/MUL/DIV.
+                binaryBroadcast(op, env, multiResults) { x, y ->
+                    x.toDouble().pow(y.toDouble()).toFloat()
                 }
-                FloatArray(a.size) { a[it].toDouble().pow(b[it].toDouble()).toFloat() }
             }
             OpKind.LOG -> {
                 // Element-wise natural logarithm. Stage B.3 PowRule needs LOG for the

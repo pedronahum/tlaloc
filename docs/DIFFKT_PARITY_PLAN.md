@@ -299,21 +299,70 @@ reachable from `grad {}`, not new math. New-op families come after.
       `x.pow(2.0f)` → 2x.
     Still open in A5b's neighbourhood: `DScalar × DTensor` mixing and
     comparisons against a scalar literal (`a gt 1.0f`).
-  - **A5c (pending) — implicit tensor × tensor broadcasting**
-    (`broadcast(S1,S2)`; DiffKT broadcasts every binary op). Three layers
-    disagree today: the interpreter requires equal operand SIZES, the
-    emitter's `broadcastIfNeeded` is same-rank-only (operand dim == result dim
-    or 1), and AddRule/SubRule pass `upstream` straight through while
-    MulRule/DivRule type their adjoint products as `upstream.type` — so the
-    adjoints are wrong-shaped whenever operands differ. Sentinel-safe route:
-    FIR derives the result RANK as `max(rank_a, rank_b)` (ranks are known even
-    under -1 dims, per §0.4.371's right-alignment argument), the adjoints wrap
-    each contribution in the §0.4.373 runtime-extent `SUM_TO` (an identity when
-    the shapes already match, which is what makes it safe under sentinels), and
-    `broadcastIfNeeded` generalises to right-aligned rank extension. Also needs
-    broadcasting host binary ops — the shared `S` type param can't express two
-    different shapes — plus a synthesis dispatch + IrType arm for mixed-rank
-    operands. Likely two slices (IR level, then user surface).
+  - **A5c-1 ✅ (§0.4.378) — IR-level implicit broadcasting**
+    (`broadcast(S1,S2)`; DiffKT broadcasts every binary op). The three layers
+    that disagreed now agree on NumPy semantics — operands right-align against
+    the result, a size-1 axis stretches, a rank-deficient operand gains
+    replicated leading axes:
+    - **Interpreter**: ADD/SUB/MUL/DIV/POW evaluate through one
+      `binaryBroadcast` helper (per-result-axis strides, 0 on replicated axes).
+      EQUAL-shape operands keep the flat zip they always had, so pre-A5c
+      programs are bit-identical; only genuinely mixed shapes pay for the walk.
+      Incompatible aligned extents still `require`-fail.
+    - **Emitter**: `broadcastIfNeeded` generalises from same-rank-only to a
+      right-aligned axis map (`dims = [offset … outRank−1]`). §0.4.277's v1
+      refusal pin (`binaryRejectsRankMismatchedOperand`) is replaced by a pin of
+      the emitted right-alignment; the surviving refusal is the other direction
+      (an operand of HIGHER rank than the result — broadcasting never drops
+      axes).
+    - **VjpRules**: a shared `unbroadcast(contribution, operand)` wraps each
+      AddRule/SubRule/MulRule/DivRule contribution in `SUM_TO(…, operand)` —
+      NumPy's reduce-over-replicated-axes, reading the target extents from the
+      operand's ACTUAL runtime shape (§0.4.373), which is what makes it sound
+      under `grad {}`'s -1 sentinels where "which axes were size-1" is
+      statically unknowable. Skipped when the shapes are PROVABLY identical
+      (concrete-and-equal dims, or a splat const whose type is the shape it was
+      splatted to), so the concrete-dims IR the coarsener, the emitter tests and
+      the pinned gradient tests walk stays byte-identical. DivRule's `a/(b·b)`
+      term is now typed as the RESULT (it broadcasts `a` against `b`). PowRule
+      is untouched: after the A5a splat its operands always agree, and its
+      tensor-exponent spelling shares one shape param.
+    - **Forward transform**: needed NO change — MUL's product rule and DIV's
+      quotient rule already type every intermediate as the node's own result
+      type, so broadcasting operands make them correct as-is. Pinned by the
+      JVP⇄VJP cross-identity over a `[2,1] ⊙ [1,3]` chain.
+    - **`sumToLike`** gains an identity fast path (copy, not the stride walk):
+      the rules now emit SUM_TO wherever shapes aren't provably equal, so at
+      RUNTIME the shapes usually do match and there is nothing to reduce.
+    - **Synthesis** needed one repair, found by the suite: the backward IrType
+      solver propagated a SUM_TO's output only to its TEMPLATE, so a MUL feeding
+      one of the new SUM_TOs lost its backward-solved IrType, its seed-BROADCAST
+      operand fell back to `context.tensorIrType` (the rank-2 param
+      representative) and splatted to the wrong rank — `AxisReductionGradientTest`'s
+      g2 then called `times([2,2], [2])`. SUM_TO now also propagates to its
+      VALUE operand **when the reduce is rank-preserving** (exactly the
+      un-broadcast case, where value and result share a shape); a
+      rank-REDUCING SUM_TO must not, because its value really is bigger.
+    Certified IR-level (`DxirBroadcastBinaryGradTest`): interpreter pins for
+    `[3,1]⊙[1,4]`, `[3]⊙[2,3]`, rank-0⊙`[2,2]`, the equal-shape fast path
+    (DIV+POW) and the incompatible-extent refusal; gradients for the two-axis
+    stretch (`da[3,1]`, `db[1,4]`), rank extension (`dv[3]`, `dm[2,3]`) and a
+    mixed scalar+ADD+DIV chain; plus the cross-identity. Emitter: the
+    right-aligned `dims = [1]`, the empty-axis-map scalar splat, and the
+    higher-rank refusal.
+  - **A5c-2 (pending) — the user surface.** What's left is everything above the
+    IR: `:core` broadcasting binary host ops (the shared `S` type param can't
+    express two shapes, so these need a two-shape signature returning the
+    broadcast shape), the FIR deriving the result type as `max(rank_a, rank_b)`
+    with sentinel dims (ranks are known under -1s, per §0.4.371's
+    right-alignment argument), and synthesis dispatching mixed-rank operands to
+    those host ops. The known hard part is IrType derivation for mixed-rank
+    operands: `deriveResultIrType`'s elementwise-binary arm takes
+    `operandIrTypes[0] ?: operandIrTypes[1]`, which is only correct when the
+    first operand is the bigger one — a broadcasting binary needs the result
+    IrType built from the max-rank operand's atoms (and A5c-1's repair shows the
+    solver silently falls back to `context.tensorIrType` when it can't, which is
+    a wrong-RANK splat rather than an error).
 
 ### Phase B — AD-mode parity
 
