@@ -131,23 +131,68 @@ reachable from `grad {}`, not new math. New-op families come after.
       interpreter pins, the slice gradient (`da` = zero-padded upstream keeping
       a's full shape, `db` = slice recomputed), the JVP⇄VJP cross-identity, and
       E2E `grad { Σ a.slice(1,3,0) ⊙ b.slice(0,2,0) }`.
-    - **`concat`, `stack`, `pad` (still deferred)**: `concat`'s adjoint slices
-      the upstream into each operand's window — but the slice OFFSET is the
-      cumulative sum of PRIOR operands' RUNTIME extents along the axis and the
-      LENGTH is this operand's runtime extent, all sentinels. Needs a variadic
-      runtime-extent slice `SLICE_LIKE(upstream, thisTemplate, [priorTemplates…],
-      axis)` whose start = Σ prior templates' axis-dim (runtime) and length =
-      thisTemplate's axis-dim (runtime) — a strictly bigger build than `PAD_TO`:
-      variadic operands (the prior-template list grows with operand position),
-      variadic-operand host-call synthesis (an `IrVararg`, which the fixed-arity
-      `…RankN` shim trick sidesteps for `PAD_TO`/`SUM_TO` but can't here since the
-      count is data-dependent), AND a new user `concat(vararg tensors, axis)` FIR
-      arm lowering a variadic tensor-list call (new territory — every lowered op
-      so far takes a fixed operand count). Alternatively bring emitter-only
-      `SPLIT` up (interpreter + VJP + forward), since concat's adjoint is a split.
-      `stack` = unsqueeze + concat sugar (blocked on concat). `pad` as a user op
-      has no DiffKT analogue (skip). Sequence after a variadic-operand synthesis
-      path exists.
+    - **`concat` — IR level ✅ (§0.4.381), user surface pending.** The audit's
+      framing was half right: CONCAT's interpreter arm, variadic
+      `stablehlo.concatenate` emission (MLIR-round-trip-certified to 3 operands),
+      forward-mode tangent, cost arm and `ConcatRule` all already shipped in
+      §0.4.360, and the reverse transform already accumulates N contributions.
+      What was broken is that **`ConcatRule` is sentinel-unsafe**: it baked
+      `start_indices`/`limit_indices` from `x.type.dims[dim]`, which under
+      `grad {}` are -1, so it produced offsets of -1, -2, … — not a wrong answer
+      so much as a meaningless one. Fixed by the runtime-extent pattern the
+      plan called for:
+      - **New `OpKind.SLICE_LIKE(value, thisTemplate, priorTemplate₀…)`**, attr
+        `axis` → `thisTemplate`'s shape: the window along `axis` starting at
+        `Σⱼ priorTemplateⱼ.dims[axis]` and running for `thisTemplate.dims[axis]`,
+        other axes whole. Both bounds are read off the templates' ACTUAL runtime
+        shapes; templates contribute SHAPE ONLY. The `SUM_TO`/`PAD_TO` contract,
+        including "no VjpRule" (second-order through it errors, as it does for
+        those two).
+      - Arms: interpreter (outer/inner block copy, mirroring the CONCAT arm),
+        emitter (emit-time dims are concrete, so the bounds fold to literals and
+        it emits the same static `stablehlo.slice` as SLICE — the templates go
+        unreferenced in the MLIR, legal and DCE'd), forward transform (tangent of
+        the value, primal VALUE clones of every template), `CostModel` (the one
+        exhaustive `when` over OpKind in main sources — a new kind is a compile
+        error there until it has an arm).
+      - `ConcatRule` now branches: concrete dims keep the §0.4.360 static SLICEs
+        **byte-identically** (`DxirShapePlumbingTest` untouched), symbolic dims
+        emit `SLICE_LIKE(upstream, xᵢ, x₀…xᵢ₋₁, axis)`. Since it is variadic, the
+        static `readsPrimalOperandIndices` cannot express "all operands", so it
+        stays `emptySet()` and the per-node `readsPrimalOperands(op)` added in
+        A5c-2 is authoritative — all indices when symbolic (every operand is a
+        template), none when concrete (nothing is cloned, as before).
+      - Host twins: `sliceLikeStart` / `sliceLikeAfter{1,2,3}` — fixed-arity per
+        PRIOR count, because synthesis builds positional `IrCall` arguments and
+        cannot build an `IrVararg` (the documented reason for the whole `…RankN`
+        shim family). Bounded at 4 concat operands; a wider concat is slice 2's
+        concern.
+      Certified: interpreter pins for the window contract (start window, one
+      prior, two priors, a LEADING axis so the copy is not one contiguous run,
+      and the out-of-range refusal), the rule's concrete-vs-symbolic split
+      (static SLICEs with baked cumulative offsets vs SLICE_LIKE with every
+      template cloned into the body), the emitter's folded static slice, and the
+      JVP⇄VJP cross-identity through CONCAT — which CONCAT never had.
+    - **`concat`/`stack` user surface (pending, A2b-concat-2)**: `:core` host
+      `concat(axis, vararg tensors)` + a fixed-arity `concatPair` for synthesis
+      (the primal CONCAT node reaches the gradient body whenever the loss tail
+      reads it, e.g. `concat(…).sum()`, and synthesis cannot build an `IrVararg`
+      — so the FIR folds an n-ary user concat into a right-fold of BINARY
+      CONCATs, which is semantics-preserving, unbounded in n, and needs only
+      2-operand shims); the FIR arm flattening
+      `FirVarargArgumentsExpression` (precedent: the `SHAPE_OP_SET` and
+      `REDUCE_OP_MAP` arms already do this for `vararg Int` axes) with
+      sentinel-propagating result dims and redundant `concat_axis`/`concat_arity`
+      attrs for synthesis (the `slice_axis`/`slice_start`/`slice_end` trick);
+      `deriveResultIrType` + backward-solver arms for CONCAT and SLICE_LIKE
+      (SLICE has neither today — do not copy that omission); a `SLICE_LIKE`
+      synthesis arm; `stack` = unsqueeze (landed A2a) + the concat fold; and
+      `OpKind.CONCAT` in the tape's `Backward.kt` dispatch list (one line — the
+      tape is already N-ary and its dims are always concrete, so today's rule
+      would already work there).
+    - **`pad` as a user op** has no DiffKT analogue (skip). `PadRule` is also
+      sentinel-unsafe (`limit_indices` from `x.type.dims`) but unreachable without
+      a user `pad`.
     - **`view`/indexing, `withChange`, `meld`/`split`, `stats`**: same
       runtime-extent boundary; sequenced after the mechanism above lands.
 - **A3. NN ops in lambdas** — split by wiring readiness:

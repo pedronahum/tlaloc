@@ -1081,6 +1081,47 @@ object DxirInterpreter {
                 }
                 out
             }
+            // Phase A2b — SLICE_LIKE (CONCAT's adjoint): the window along `axis`
+            // starts at the sum of the PRIOR templates' axis extents and runs for
+            // `thisTemplate`'s, every other axis taken whole. Mirrors the CONCAT
+            // arm's outer/inner block copy: `outer` whole rows before the axis,
+            // `inner` contiguous elements after it, so each of the `outer` blocks
+            // contributes one contiguous run.
+            OpKind.SLICE_LIKE -> {
+                val value = evalNode(op.operands[0], env, multiResults)
+                val vDims = op.operands[0].type.dims
+                val tDims = op.operands[1].type.dims
+                val r = vDims.size
+                require(tDims.size == r) {
+                    "DxirInterpreter: SLICE_LIKE template rank ${tDims.size} != value rank $r"
+                }
+                val axis = (op.attrs["axis"] as? Number)?.toInt()
+                    ?: error("DxirInterpreter: SLICE_LIKE missing `axis` attr")
+                require(axis in 0 until r) { "DxirInterpreter: SLICE_LIKE axis $axis outside rank $r" }
+                val start = op.operands.drop(2).sumOf { it.type.dims[axis] }
+                val len = tDims[axis]
+                require(start >= 0 && start + len <= vDims[axis]) {
+                    "DxirInterpreter: SLICE_LIKE window [$start, ${start + len}) exceeds the value's " +
+                        "axis-$axis extent ${vDims[axis]}"
+                }
+                for (i in 0 until r) {
+                    require(i == axis || tDims[i] == vDims[i]) {
+                        "DxirInterpreter: SLICE_LIKE non-axis $i template ${tDims[i]} != value ${vDims[i]}"
+                    }
+                }
+                var outer = 1
+                for (k in 0 until axis) outer *= vDims[k]
+                var inner = 1
+                for (k in axis + 1 until r) inner *= vDims[k]
+                val out = FloatArray(outer * len * inner)
+                var dst = 0
+                for (o in 0 until outer) {
+                    val src = o * (vDims[axis] * inner) + start * inner
+                    value.copyInto(out, dst, src, src + len * inner)
+                    dst += len * inner
+                }
+                out
+            }
             // §0.4.366 — MEAN (Phase A1): the SUM arm divided by the reduced
             // element count. Until now MEAN had no interpreter arm at all — it
             // was unreachable from the user surface (no UNARY_OP_MAP entry) and

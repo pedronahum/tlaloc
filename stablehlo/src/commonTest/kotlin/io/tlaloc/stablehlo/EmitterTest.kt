@@ -147,6 +147,32 @@ class EmitterTest {
     }
 
     @Test
+    fun sliceLikeEmitsAStaticWindowSlice() {
+        // Phase A2b — SLICE_LIKE's bounds come from its templates' RUNTIME extents,
+        // but at emit time every dim is concrete, so they fold to literals and the
+        // op lowers to the same static `stablehlo.slice` the SLICE arm emits:
+        // a [2,5] value, a [2,3] window starting after a [2,2] prior on axis 1 →
+        // columns 2..4. The template params go unreferenced in the MLIR, which is
+        // legal (and DCE'd downstream).
+        val fn = DxirBuilder.function("f") {
+            val v = param("v", DxirType(F32, listOf(2, 5)))
+            val t = param("t", DxirType(F32, listOf(2, 3)))
+            val p = param("p", DxirType(F32, listOf(2, 2)))
+            listOf(
+                op(
+                    OpKind.SLICE_LIKE, listOf(v, t, p), DxirType(F32, listOf(2, 3)),
+                    attrs = mapOf("axis" to 1),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains("stablehlo.slice %0 [0:2, 2:5] : (tensor<2x5xf32>) -> tensor<2x3xf32>"),
+            mlir,
+        )
+    }
+
+    @Test
     fun binaryWithMatchingOperandsEmitsNoBroadcastInjection() {
         // Same-shape operands hit the no-op path; emit must not mention
         // broadcast_in_dim around the add. Pins the regression that

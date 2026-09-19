@@ -179,6 +179,14 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.PAD_TO -> emitPadTo(
                 step, name, ops[0], node, node.operands[0].type,
             )
+            // Phase A2b — SLICE_LIKE (CONCAT's adjoint): extract the window whose
+            // start is the sum of the prior templates' axis extents and whose length
+            // is `thisTemplate`'s. At emit time every dim is concrete, so the bounds
+            // fold to literals and this is an ordinary static `stablehlo.slice`. The
+            // template operands' SSA values go unreferenced here (they exist for the
+            // host path's runtime extents) — MLIR-legal, and DCE'd by XLA when
+            // nothing else uses them.
+            OpKind.SLICE_LIKE -> emitSliceLike(step, name, ops[0], node)
             OpKind.MAX -> emitReduce(
                 step, name, ops[0], node.operands[0].type, node.type,
                 reducer = "stablehlo.maximum", initLiteral = negInfLiteral(node.operands[0].type.dtype),
@@ -2334,6 +2342,44 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 starts.indices.joinToString(", ") { i ->
                     val stride = strides[i]
                     if (stride == 1) "${starts[i]}:${limits[i]}" else "${starts[i]}:${limits[i]}:$stride"
+                } +
+                "] : (${inputType.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * Phase A2b — `SLICE_LIKE(value, thisTemplate, priorTemplate…)`, the CONCAT
+     * adjoint: the window along attr `axis` starts at the sum of the prior
+     * templates' axis extents and runs for `thisTemplate`'s, with every other axis
+     * taken whole. Emit-time dims are always concrete, so both bounds fold to
+     * literals and this is the same static `stablehlo.slice` [emitSlice] emits —
+     * the templates exist for the host path, where the extents are only known at
+     * runtime.
+     */
+    private fun emitSliceLike(
+        step: String,
+        name: String,
+        x: String,
+        node: DxirOp,
+    ) {
+        val inputType = node.operands[0].type
+        val thisType = node.operands[1].type
+        val axis = intAttr(node, "axis")
+        require(axis in inputType.dims.indices) {
+            "SLICE_LIKE axis $axis outside the value's rank ${inputType.rank}"
+        }
+        require(thisType.rank == inputType.rank) {
+            "SLICE_LIKE template rank ${thisType.rank} must equal the value's ${inputType.rank}"
+        }
+        val start = node.operands.drop(2).sumOf { it.type.dims[axis] }
+        val len = thisType.dims[axis]
+        require(start >= 0 && start + len <= inputType.dims[axis]) {
+            "SLICE_LIKE window [$start, ${start + len}) exceeds the value's axis-$axis extent ${inputType.dims[axis]}"
+        }
+        out.appendLine(
+            "$step$name = stablehlo.slice $x [" +
+                inputType.dims.indices.joinToString(", ") { i ->
+                    if (i == axis) "$start:${start + len}" else "0:${inputType.dims[i]}"
                 } +
                 "] : (${inputType.toMlir()}) -> ${node.type.toMlir()}",
         )

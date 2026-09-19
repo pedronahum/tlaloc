@@ -150,6 +150,17 @@ object DxirForwardTransform {
             // (vOps[1]), never its tangent — same shape-only treatment as SUM_TO.
             OpKind.PAD_TO -> b.op(OpKind.PAD_TO, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
 
+            // Phase A2b — SLICE_LIKE is linear in `value` (operand[0]); EVERY
+            // template (operands[1..], variadic: `thisTemplate` then the priors)
+            // contributes SHAPE ONLY, so each takes its primal VALUE clone, never
+            // its tangent — the same shape-only treatment as SUM_TO/PAD_TO.
+            OpKind.SLICE_LIKE -> b.op(
+                OpKind.SLICE_LIKE,
+                listOf(t(node.operands[0])) + vOps.drop(1),
+                ty,
+                node.attrs,
+            )
+
             // §0.4.363 — maxpool tangent: route dx through the argmax mask,
             // then window-sum via avgpool × kh·kw. Same v1 scope and tie
             // convention as [VjpRegistry.MaxPool2dRule] (its KDoc has the

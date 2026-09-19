@@ -890,6 +890,86 @@ fun <S : Shape> padToLikeRank3(value: DTensor<*, F32>, template: DTensor<S, F32>
     padToLike(value, template, intArrayOf(l0, l1, l2))
 
 /**
+ * Phase A2b — the host twin of dxir `SLICE_LIKE`, i.e. CONCAT's adjoint: cut out
+ * of [value] the window along [axis] that starts after every one of [priors] and
+ * runs for [thisTemplate]'s extent, taking every other axis whole.
+ *
+ * Both bounds are read from the templates' ACTUAL runtime dims. That is the whole
+ * point: a concat operand's window offset is the cumulative sum of the PRIOR
+ * operands' runtime axis extents, which under `grad {}`'s -1 sentinel dims does not
+ * exist at compile time, so it cannot ride as an attr the way `slice`'s literal
+ * start/end do (cf. [padToLike], which bakes `low` because a slice offset IS a
+ * literal). The templates contribute SHAPE ONLY — their values are never read.
+ *
+ * [padToLike] puts a window back INTO a shape; this cuts one OUT of it.
+ */
+private fun <S : Shape> sliceWindow(
+    value: DTensor<*, F32>,
+    thisTemplate: DTensor<S, F32>,
+    axis: Int,
+    priors: List<DTensor<*, F32>>,
+): DTensor<S, F32> {
+    val v = value.dims
+    val t = thisTemplate.dims
+    val r = v.size
+    require(t.size == r) { "sliceWindow: template rank ${t.size} != value rank $r" }
+    require(axis in 0 until r) { "sliceWindow: axis $axis outside rank $r" }
+    val start = priors.sumOf { it.dims[axis] }
+    val len = t[axis]
+    require(start >= 0 && start + len <= v[axis]) {
+        "sliceWindow: window [$start, ${start + len}) exceeds the value's axis-$axis extent ${v[axis]}"
+    }
+    for (i in 0 until r) {
+        require(i == axis || t[i] == v[i]) {
+            "sliceWindow: non-axis $i template extent ${t[i]} != value extent ${v[i]}"
+        }
+    }
+    var outer = 1
+    for (k in 0 until axis) outer *= v[k]
+    var inner = 1
+    for (k in axis + 1 until r) inner *= v[k]
+    val src = value.hostF32()
+    val out = FloatArray(outer * len * inner)
+    var dst = 0
+    for (o in 0 until outer) {
+        val from = o * (v[axis] * inner) + start * inner
+        src.copyInto(out, dst, from, from + len * inner)
+        dst += len * inner
+    }
+    return DTensor(HostF32Storage(out), t.copyOf(), F32)
+}
+
+/** Fixed-arity `SLICE_LIKE` twins, one per PRIOR-template count — the usual
+ * IrVararg reason (see [broadcastDimsRank1]): synthesis builds positional
+ * `IrCall` arguments, so the operand count has to be in the callee's name. */
+fun <S : Shape> sliceLikeStart(value: DTensor<*, F32>, thisTemplate: DTensor<S, F32>, axis: Int): DTensor<S, F32> =
+    sliceWindow(value, thisTemplate, axis, emptyList())
+
+fun <S : Shape> sliceLikeAfter1(
+    value: DTensor<*, F32>,
+    thisTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = sliceWindow(value, thisTemplate, axis, listOf(prior0))
+
+fun <S : Shape> sliceLikeAfter2(
+    value: DTensor<*, F32>,
+    thisTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1))
+
+fun <S : Shape> sliceLikeAfter3(
+    value: DTensor<*, F32>,
+    thisTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2))
+
+/**
  * §0.4.366 — insert size-1 axes at the given (result-indexed, ascending)
  * positions. The host twin of the keepdims RESHAPE the reduction VJP rules
  * emit (`upstream` at the squeezed shape → the keepdims spelling): axis

@@ -149,6 +149,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // into the (larger) template-shaped output, like a copy.
     OpKind.PAD_TO -> op.operands[0].type.elementCount.toDouble()
 
+    // Phase A2b — SLICE_LIKE (runtime-extent window slice, CONCAT's adjoint):
+    // one write per output element, like a copy.
+    OpKind.SLICE_LIKE -> op.type.elementCount.toDouble()
+
     // Softmax = max + sub + exp + sum + div per element of the reduced
     // axis. ~5 FLOPs per input element, plus the reduction.
     OpKind.SOFTMAX, OpKind.LOGSUMEXP -> 5.0 * op.operands[0].type.elementCount.toDouble()

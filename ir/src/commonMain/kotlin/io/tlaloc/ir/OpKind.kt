@@ -88,6 +88,21 @@ enum class OpKind {
     // `padToLike(value, template, low)`.
     PAD_TO,
 
+    // Phase A2b — runtime-extent window slice (the adjoint half of CONCAT, and
+    // the reverse mirror of PAD_TO's "place into a window"). SLICE_LIKE(value,
+    // thisTemplate, priorTemplate₀, …, priorTemplateₖ₋₁) → thisTemplate's shape,
+    // attr `axis` (Int): extract from `value` the window along `axis` that starts
+    // at `Σⱼ priorTemplateⱼ.dims[axis]` and runs for `thisTemplate.dims[axis]`
+    // elements, taking every other axis whole. BOTH bounds are read from the
+    // templates' ACTUAL runtime shapes, never baked as attrs: this is what
+    // ConcatRule emits under `grad {}`, where an operand's window offset is the
+    // cumulative sum of the PRIOR operands' runtime axis extents and its length is
+    // its own — all -1 sentinels at transform time. With no prior templates the
+    // window starts at 0. Every template contributes SHAPE ONLY — its values are
+    // never read. Host twins: `sliceLikeStart(value, thisTemplate, axis)` and
+    // `sliceLikeAfter{1,2,3}(value, thisTemplate, prior…, axis)`.
+    SLICE_LIKE,
+
     // §0.4.360 — shape-plumbing activation (the DiffKT-gap item 2 surface).
     //
     // WHERE(pred: Bool tensor, a, b) — elementwise select; the differentiable

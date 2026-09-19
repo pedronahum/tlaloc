@@ -584,10 +584,34 @@ object VjpRegistry {
      * to each operand's window along `dimension`.
      */
     val ConcatRule: VjpRule = object : VjpRule {
+        // Phase A2b — variadic, so the static property cannot express "all
+        // operands"; [readsPrimalOperands] is authoritative (the reverse transform
+        // calls it). The symbolic branch below dereferences EVERY operand as a
+        // SLICE_LIKE shape template, so all of them must be cloned into the
+        // gradient body; the concrete branch dereferences none and keeps the
+        // pre-A2b behaviour of not cloning the concat's operands at all.
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun readsPrimalOperands(op: DxirOp): Set<Int> =
+            if (concatShapeIsSymbolic(op)) op.operands.indices.toSet() else emptySet()
+
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val dim = (op.attrs["dimension"] as? Number)?.toInt() ?: 0
             val rank = op.type.rank
+            // Phase A2b — SYMBOLIC dims: operand i's window starts at the cumulative
+            // sum of the PRIOR operands' runtime axis extents and runs for its own,
+            // and none of those extents exist at transform time (-1 sentinels under
+            // `grad {}`). Bake nothing: SLICE_LIKE reads both bounds off shape-only
+            // template operands at execution, the SUM_TO/PAD_TO convention.
+            if (concatShapeIsSymbolic(op)) {
+                return op.operands.mapIndexed { i, x ->
+                    x to builder.op(
+                        OpKind.SLICE_LIKE,
+                        listOf(upstream, x) + op.operands.take(i),
+                        x.type,
+                        attrs = mapOf("axis" to dim),
+                    )
+                }
+            }
             var offset = 0
             return op.operands.map { x ->
                 val len = x.type.dims[dim]
@@ -606,6 +630,15 @@ object VjpRegistry {
             }
         }
     }
+
+    /**
+     * Phase A2b — whether a CONCAT's window offsets are statically knowable. Any
+     * sentinel on the result or on an operand means no: the axis extents that
+     * [ConcatRule] would otherwise accumulate into `start_indices` are -1, and a
+     * baked offset of -1 is not a wrong answer so much as a meaningless one.
+     */
+    private fun concatShapeIsSymbolic(op: DxirOp): Boolean =
+        needsShapeTemplate(op.type) || op.operands.any { needsShapeTemplate(it.type) }
 
     /**
      * §0.4.360 — `d/dx slice(x)` = the upstream zero-padded back into x's
