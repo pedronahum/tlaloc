@@ -1834,6 +1834,18 @@ object FirLambdaToDxirLowering {
         put("io.tlaloc.core.ops.minus", OpKind.SUB)
         put("io.tlaloc.core.ops.times", OpKind.MUL)
         put("io.tlaloc.core.ops.div", OpKind.DIV)
+        // Phase A5b (DiffKT parity) — `pow`. POW has been fully ruled below the
+        // surface since Stage B.3 (PowRule incl. the integer-exponent CAST, the
+        // interpreter arm, `stablehlo.power` emission, the forward-mode tangent and
+        // synthesis's scalar `kotlin.math.pow` arm) but had no lowering entry, so
+        // it was an orphan. Both spellings map here: the `:core/ops` tensor
+        // extension (`a.pow(2.0f)` / `a.pow(b)`) and `kotlin.math.pow` on scalars
+        // (`x.pow(n)` inside a `grad { x: Float -> … }` body, which the scalar
+        // synthesis arm already handles). A literal exponent arrives as the
+        // mixed-rank case and is splatted by the Phase A5a arm, so the IR always
+        // sees the uniform two-operand POW PowRule expects.
+        put("io.tlaloc.core.ops.pow", OpKind.POW)
+        put("kotlin.math.pow", OpKind.POW)
     }
 
     /**
@@ -1843,7 +1855,7 @@ object FirLambdaToDxirLowering {
      * error rather than a broadcast.
      */
     private val ELEMENTWISE_BINARY_KINDS: Set<OpKind> =
-        setOf(OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV)
+        setOf(OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW)
 
     /**
      * Phase A5 — splat a rank-0 [scalar] over [type]'s shape.
@@ -1929,6 +1941,16 @@ object FirLambdaToDxirLowering {
         // ship in the same firing. Needed by CartPole's loss-clipping
         // `(2.4 - |xt+1,0|) · (0.21 - |xt+1,2|)`.
         put("io.tlaloc.core.abs", OpKind.ABS)
+        // Phase A5b (DiffKT parity) — the SCALAR tanh / sigmoid surface. Both were
+        // fully ruled at the IR level (TanhRule `1 − tanh²`, SigmoidRule `σ(1−σ)`,
+        // interpreter + emitter arms, forward tangents) and the tensor spellings
+        // `io.tlaloc.core.ops.tanh` / `.sigmoid` have mapped since §0.4.200, but
+        // `:core` had no scalar host fns, so `grad { x: Float -> x.tanh() }` was an
+        // orphan. Synthesis: scalar TANH already routes to `kotlin.math.tanh`;
+        // scalar SIGMOID resolves the new `io.tlaloc.core.sigmoid` (no stdlib
+        // equivalent exists).
+        put("io.tlaloc.core.tanh", OpKind.TANH)
+        put("io.tlaloc.core.sigmoid", OpKind.SIGMOID)
         // :core DTensor shape-preserving unary ops (io.tlaloc.core.ops package).
         put("io.tlaloc.core.ops.relu", OpKind.RELU)
         put("io.tlaloc.core.ops.neg", OpKind.NEG)

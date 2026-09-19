@@ -51,6 +51,16 @@ class HostOpsTest {
     }
 
     @Test
+    fun powElementwise() {
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(1f, 2f, 3f, 4f))
+        val exp = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(2f, 2f, 3f, 0.5f))
+        assertContentEquals(floatArrayOf(1f, 4f, 27f, 2f), a.pow(exp).hostF32())
+        assertContentEquals(floatArrayOf(1f, 4f, 9f, 16f), a.pow(2.0f).hostF32())
+        assertContentEquals(floatArrayOf(1f, 8f, 27f, 64f), a.pow(3).hostF32())
+        assertContentEquals(intArrayOf(1, 4), a.pow(2.0f).dims)
+    }
+
+    @Test
     fun shapeMismatchFailsFast() {
         val a = Tensors.f32Matrix<Sym, Sym>(2, 3, FloatArray(6))
         val b = Tensors.f32Matrix<Sym, Sym>(3, 2, FloatArray(6))

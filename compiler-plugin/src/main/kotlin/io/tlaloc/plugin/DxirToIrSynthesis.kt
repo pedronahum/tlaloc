@@ -200,8 +200,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
             // §0.4.198 — Forward-propagate through elementwise binary ops (ADD / SUB /
             // MUL / DIV) — output equals either operand's IrType (they must agree
-            // shape-wise; the dxir guarantees that).
-            OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV -> {
+            // shape-wise; the dxir guarantees that). Phase A5b adds POW, which is
+            // elementwise on the same two shape-agreeing operands once the FIR has
+            // splatted a literal exponent.
+            OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW -> {
                 if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[0].id]
                     ?: operandIrTypes[op.operands[1].id]
@@ -699,8 +701,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // §0.4.198 — Phase 3 first slice: backward propagate through
                     // elementwise binary ops. For ADD/SUB/MUL/DIV all operands and
                     // result share one IrType. If output known + one operand
-                    // unknown, the unknown's IrType = output's.
-                    OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV -> {
+                    // unknown, the unknown's IrType = output's. Phase A5b adds POW
+                    // (same shape-agreeing elementwise contract).
+                    OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW -> {
                         if (n.operands.size != 2) continue
                         val outputIr = paramIrTypeMap[n.id] ?: continue
                         if (outputIr !is IrSimpleType) continue
@@ -1071,7 +1074,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.RELU) return irRelu(op, env, context)
         if (op.op == OpKind.BROADCAST) return irBroadcast(op, env, context)
         if (op.op == OpKind.SQRT) return irSqrt(op, env, context)
-        if (op.op == OpKind.POW) return irPow(op, env, context)
+        // Phase A5b — a TENSOR POW joins the generic tensor-binary dispatch below
+        // (`:core/ops pow`, elementwise base^exp, resolved by findTensorBinaryOp
+        // exactly like ADD/SUB/MUL/DIV); [irPow] keeps the scalar `kotlin.math.pow`
+        // path it has had since §0.4.52.
+        if (op.op == OpKind.POW && !isAcceptedTensorType(op.type)) return irPow(op, env, context)
         if (op.op == OpKind.LOG) return irLog(op, env, context)
         if (op.op == OpKind.EXP) return irExp(op, env, context)
         if (op.op == OpKind.SIN) return irSin(op, env, context)
@@ -1136,6 +1143,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             } else {
                 findUnaryOp("unaryMinus", op.type, context)
             }
+            // Phase A5b — tensor POW. Only reached for accepted tensor types: the
+            // scalar case returned through [irPow] above.
+            OpKind.POW -> findTensorBinaryOp("pow")
             else -> return reject("op id=${op.id} ${op.op} type=${op.type} has no synthesis arm")
         } ?: return reject("no IR symbol for op id=${op.id} ${op.op} type=${op.type}")
 
@@ -1382,9 +1392,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     /**
      * §0.4.200 — Phase 3 third slice. `OpKind.SIGMOID(x)` for tensor x → IrCall to
      * `:core/ops/sigmoid` (the DTensor extension). Same pattern as [irTanh].
-     * Scalar SIGMOID has no `kotlin.math.sigmoid` (sigmoid is conventionally
-     * defined as `1 / (1 + exp(-x))`); for now we reject scalar SIGMOID since no
-     * Tlaloc surface emits it scalarly.
+     *
+     * Phase A5b — scalar SIGMOID now synthesises too, via the new
+     * `io.tlaloc.core.sigmoid` host extension ([irCoreScalarCall]). The §0.4.200
+     * rejection ("no Tlaloc surface emits it scalarly") stopped holding once the
+     * FIR grew the scalar `io.tlaloc.core.sigmoid` map entry; unlike TANH there is
+     * no `kotlin.math` equivalent to route to.
      */
     private fun IrBuilderWithScope.irSigmoid(
         op: DxirOp,
@@ -1395,7 +1408,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
             return tensorUnaryCall(op, env, context, sigmoidTensorSymbol())
         }
-        return null
+        return irCoreScalarCall(op, env, context, "sigmoid")
     }
 
     /**
@@ -2827,6 +2840,54 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             params.size == 1 && params[0].type == targetType
+        }
+    }
+
+    /**
+     * Phase A5b — the `io.tlaloc.core` sibling of [irUnaryMathCall]: an IrCall to a
+     * receiver-only scalar extension declared in `:core/DScalar.kt`
+     * (`Float.sigmoid()` / `Double.sigmoid()`) for a scalar-typed op. Needed for the
+     * ops with no `kotlin.math` equivalent; the five-overload set each `:core` scalar
+     * entry declares (Float, Double, FloatScalar, DoubleScalar, DScalar) is narrowed
+     * by [coreScalarSymbolFor] to the one whose extension receiver is the op's
+     * primitive dtype.
+     */
+    private fun IrBuilderWithScope.irCoreScalarCall(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+        name: String,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        if (!op.type.isScalar) return null
+        val operandDecl = env[op.operands[0].id] ?: return null
+        val ty = irTypeFor(op.type, context) ?: return null
+        val sym = coreScalarSymbolFor(op.type.dtype, Name.identifier(name)) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = ty,
+            symbol = sym,
+        )
+        call.arguments[0] = irGet(operandDecl)
+        return call
+    }
+
+    private fun coreScalarSymbolFor(dtype: DType, callable: Name): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core"),
+            callableName = callable,
+        )
+        val targetType = when (dtype) {
+            F32 -> pluginContext.irBuiltIns.floatType
+            F64 -> pluginContext.irBuiltIns.doubleType
+            else -> return null
+        }
+        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+            val params = sym.owner.parameters
+            params.size == 1 &&
+                params[0].kind == IrParameterKind.ExtensionReceiver &&
+                params[0].type == targetType
         }
     }
 

@@ -266,14 +266,39 @@ reachable from `grad {}`, not new math. New-op families come after.
     Not covered: `DScalar × DTensor` mixing (DiffKT's `timesScalar` on
     DScalar) and comparisons against a scalar (`a gt 1.0f` — the
     COMPARE_DIRECTION_MAP arm still lowers both sides verbatim).
-  - **A5b (pending) — orphaned lowerings.** The audit's list is partly stale:
-    tensor `mean`'s map entry landed with A1 (§0.4.366). Still orphaned:
-    scalar `tanh`/`sigmoid` — `:core/DScalar.kt` has NO scalar host fns for
-    them at all (only sqrt/exp/log/sin/cos/abs/relu), though synthesis already
-    routes scalar TANH to `kotlin.math.tanh` and rejects scalar SIGMOID;
-    tensor/scalar `pow` — POW is fully ruled below the surface (PowRule,
-    interpreter, emitter, forward transform, synthesis `irPow`) but has no
-    `:core` host op and no FIR entry, and `irPow` is scalar-only.
+  - **A5b ✅ (§0.4.377) — the orphaned lowerings.** The audit's list was partly
+    stale: tensor `mean`'s map entry landed with A1 (§0.4.366). The two real
+    orphans are now reachable from user code:
+    - **scalar `tanh` / `sigmoid`**: both were fully ruled at the IR level
+      (TanhRule `1 − tanh²`, SigmoidRule `σ(1−σ)`, interpreter + emitter arms,
+      forward tangents) and the TENSOR spellings have mapped since §0.4.200, but
+      `:core/DScalar.kt` declared no scalar host fns, so `UNARY_OP_MAP` had
+      nothing to map. Landed: the five-overload host set for each (Float, Double,
+      FloatScalar, DoubleScalar, DScalar — the exp/log §0.4.158 pattern), the two
+      map entries, and — because there is no `kotlin.math.sigmoid` — a new
+      `irCoreScalarCall`/`coreScalarSymbolFor` synthesis pair that resolves the
+      `io.tlaloc.core` extension whose receiver matches the op's primitive dtype
+      (the sibling of `irUnaryMathCall`, which does the same inside
+      `kotlin.math`). §0.4.200's explicit scalar-SIGMOID rejection is lifted;
+      scalar TANH needed no synthesis change (it already routed to
+      `kotlin.math.tanh`).
+    - **`pow`**: POW has been ruled below the surface since Stage B.3 (PowRule
+      incl. the I32/I64-exponent CAST, interpreter, `stablehlo.power`, forward
+      tangent, and synthesis's scalar `kotlin.math.pow` arm from §0.4.52) but
+      nothing lowered TO it. Landed: `:core/ops` host `pow` in DiffKT's three
+      spellings (tensor exponent, Float exponent, Int exponent; Double arithmetic
+      then F32, matching the interpreter arm bit-for-bit); `BINARY_OP_MAP` entries
+      for both `io.tlaloc.core.ops.pow` and `kotlin.math.pow`; POW added to
+      `ELEMENTWISE_BINARY_KINDS` so a literal exponent rides the A5a splat and the
+      IR always sees the uniform two-operand POW PowRule expects; a tensor POW
+      synthesis arm via the generic tensor-binary dispatch
+      (`findTensorBinaryOp("pow")`); and POW added to both IrType solvers'
+      elementwise-binary arms. Certified E2E: `a.pow(2.0f)` → 2a, `a.pow(3)` →
+      3a², `a.pow(b)` → (b·a^(b−1), a^b·ln a) — the exponent param's own partial,
+      which needs the tensor LOG and tensor POW arms together — and scalar
+      `x.pow(2.0f)` → 2x.
+    Still open in A5b's neighbourhood: `DScalar × DTensor` mixing and
+    comparisons against a scalar literal (`a gt 1.0f`).
   - **A5c (pending) — implicit tensor × tensor broadcasting**
     (`broadcast(S1,S2)`; DiffKT broadcasts every binary op). Three layers
     disagree today: the interpreter requires equal operand SIZES, the
@@ -391,16 +416,18 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 
 `+ - * / unaryMinus` ✅ · `abs sqrt exp ln sin cos relu` ✅ ·
 `compareTo`/`eq ne lt le gt ge` ✅ (Kotlin comparisons + IF lower today) ·
-`tanh sigmoid pow` 🟡 (IR + VJP exist; no `:core` scalar host fns and **not
-in the scalar UNARY/BINARY maps** → A5b) · `tan atan` ❌ (C2) ·
-`lgamma digamma polygamma` ❌ (C1) · `sigmoid(DScalar)` 🟡 (same A5b).
+`tanh sigmoid pow` ✅ A5b (§0.4.377 — the five-overload `:core` scalar host set
++ `UNARY_OP_MAP` entries; scalar SIGMOID synthesises via the new
+`irCoreScalarCall`, scalar TANH via `kotlin.math.tanh`, scalar POW via the
+`kotlin.math.pow` map entry) · `tan atan` ❌ (C2) ·
+`lgamma digamma polygamma` ❌ (C1) · `sigmoid(DScalar)` ✅ (same A5b).
 
 #### Tensor ops (top-level files + `Operations` interface)
 
 | DiffKT | Tlaloc | Notes |
 |---|---|---|
 | `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 — tensor⊗tensor is **same-shape only**; `Float×DTensor` mixing on both operand orders ✅ A5a (§0.4.376). DiffKT broadcasts every binary op (`broadcast(S1,S2)`) → A5c; `DScalar×DTensor` still open |
-| `pow(Float/Int/DScalar/tensor-exponent)` | 🟡 | POW + VjpRule + fwd rule all exist; no host op, no lowering entry → A5b |
+| `pow(Float/Int/DScalar/tensor-exponent)` | ✅ | A5b (§0.4.377): `:core/ops` host `pow` (tensor / Float / Int exponents) + FIR entries for `io.tlaloc.core.ops.pow` and `kotlin.math.pow` + a tensor synthesis arm; PowRule/interpreter/emitter/forward already shipped. `DScalar` exponent still open |
 | `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 |
 | `relu reluGrad sigmoid tanh exp ln sqrt abs` (tensor) | ✅ | `reluGrad` is public in DiffKT; ours is internal — fine |
 | `sin cos tan atan` (tensor) | ✅/❌ | sin/cos ✅; tan/atan ❌ → C2 (audit: **no** floor/ceil/round/atan2 in DiffKT — plan over-scoped C2; now ours-optional) |

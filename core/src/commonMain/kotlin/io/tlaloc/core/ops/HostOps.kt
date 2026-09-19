@@ -8,6 +8,7 @@ import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.hostF32
+import kotlin.math.pow
 
 private fun <S : Shape> elementwise(
     a: DTensor<S, F32>,
@@ -270,6 +271,27 @@ fun <S : Shape> DTensor<S, F32>.log(): DTensor<S, F32> =
 
 fun <S : Shape> DTensor<S, F32>.sqrt(): DTensor<S, F32> =
     unary { x -> kotlin.math.sqrt(x) }
+
+/**
+ * Phase A5b (DiffKT parity) — elementwise power. POW has been fully ruled below
+ * the surface since Stage B.3 (PowRule, the interpreter arm, `stablehlo.power`
+ * emission, the forward-mode tangent, and synthesis's scalar `kotlin.math.pow`
+ * arm) but had no host op and no FIR entry, so user code could never reach it.
+ * Three spellings, matching DiffKT's `pow(Float/Int/tensor-exponent)`: a tensor
+ * exponent (elementwise, same shape) and Float / Int exponents — the K2 plugin
+ * splats a literal exponent to the operand's shape, so the IR always sees the
+ * uniform two-operand POW that PowRule expects.
+ *
+ * Arithmetic goes through Double and back to F32, bit-for-bit the convention the
+ * dxir interpreter's POW arm uses, so the host and IR paths agree.
+ */
+fun <S : Shape> DTensor<S, F32>.pow(exp: DTensor<S, F32>): DTensor<S, F32> =
+    elementwise(this, exp) { a, b -> a.toDouble().pow(b.toDouble()).toFloat() }
+
+fun <S : Shape> DTensor<S, F32>.pow(exp: Float): DTensor<S, F32> =
+    unary { x -> x.toDouble().pow(exp.toDouble()).toFloat() }
+
+fun <S : Shape> DTensor<S, F32>.pow(exp: Int): DTensor<S, F32> = pow(exp.toFloat())
 
 /**
  * §0.4.368 — Phase A3 (DiffKT parity): `softmax(axis)` over a single axis

@@ -158,3 +158,35 @@ fun DScalar.abs(): DScalar = when (this) {
     is FloatScalar -> abs()
     is DoubleScalar -> abs()
 }
+
+// --- Scalar tanh / sigmoid entries (Phase A5b) ---
+//
+// DiffKT parity: TANH and SIGMOID were ruled at the IR level from Stage A/B on
+// (TanhRule `d/dx tanh = 1 − tanh²`, SigmoidRule `σ′ = σ(1−σ)`, interpreter +
+// emitter arms, forward-mode tangents) and the TENSOR surface has had
+// `:core/ops.tanh` / `.sigmoid` since §0.4.200 — but the scalar surface had
+// neither a host fn nor a FIR map entry, so `grad { x: Float -> x.tanh() }` was
+// unreachable. `Float.tanh()` / `Double.tanh()` resolve at FQN
+// `io.tlaloc.core.tanh`, which the FIR lowering maps to `OpKind.TANH`; synthesis
+// keeps emitting `kotlin.math.tanh` for the scalar path (the §0.4.158 exp/log
+// convention — the user-facing extension and the synthesised call need not be
+// the same symbol). `sigmoid` has no `kotlin.math` equivalent, so synthesis
+// resolves `io.tlaloc.core.sigmoid` itself; the formula matches the tensor host
+// op and the interpreter's SIGMOID arm exactly.
+fun Float.tanh(): Float = kotlin.math.tanh(this)
+fun Double.tanh(): Double = kotlin.math.tanh(this)
+fun FloatScalar.tanh(): FloatScalar = FloatScalar(v.tanh())
+fun DoubleScalar.tanh(): DoubleScalar = DoubleScalar(v.tanh())
+fun DScalar.tanh(): DScalar = when (this) {
+    is FloatScalar -> tanh()
+    is DoubleScalar -> tanh()
+}
+
+fun Float.sigmoid(): Float = 1f / (1f + kotlin.math.exp(-this))
+fun Double.sigmoid(): Double = 1.0 / (1.0 + kotlin.math.exp(-this))
+fun FloatScalar.sigmoid(): FloatScalar = FloatScalar(v.sigmoid())
+fun DoubleScalar.sigmoid(): DoubleScalar = DoubleScalar(v.sigmoid())
+fun DScalar.sigmoid(): DScalar = when (this) {
+    is FloatScalar -> sigmoid()
+    is DoubleScalar -> sigmoid()
+}
