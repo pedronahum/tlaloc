@@ -31,9 +31,8 @@ import kotlin.test.assertTrue
  *  j2 = valueAndJvp { … }                               the same, with the primal
  *  j3 = jvp { x → Σ conv(x, x, stride=2, pad=[1,0,1,1]) }  4×4 kernel, asymmetric
  *
- * Reverse mode is deliberately NOT part of this test — see
- * [reverseModeConvIsRejectedLoudlyNotSilentlyWrong] below and Conv2dRule's
- * §0.4.384 guard.
+ * Reverse mode lives in `ConvGradientTest` — it needed the §0.4.385 fused
+ * runtime-extent adjoint ops before `grad {}` could work at all.
  */
 class ConvForwardIntrinsicTest {
 
@@ -125,47 +124,6 @@ class ConvForwardIntrinsicTest {
         assertTrue(abs(vals.getValue("dy2") - wantDy1) < 1e-3f, "dy2=${vals["dy2"]} want $wantDy1")
         assertTrue(abs(vals.getValue("dy3") - wantDy3) < 1e-2f, "dy3=${vals["dy3"]} want $wantDy3")
         assertTrue(abs(vals.getValue("dy4") - wantDy4) < 1e-3f, "dy4=${vals["dy4"]} want $wantDy4")
-    }
-
-    /**
-     * Reverse-mode conv is a COMPILE ERROR, not a wrong gradient.
-     *
-     * Conv2dRule solves its adjoint `padding` from the primal's extents, and every
-     * `grad {}` param carries -1 sentinels, so the solved padding is arithmetic
-     * garbage (a stride-1 padding-1 conv comes out `[[-3,1],[-3,1]]` instead of
-     * `[[1,1],[1,1]]`) — and the interpreter, the emitter and the host twins all
-     * faithfully honour whatever attrs they are handed. §0.4.384 added the guard
-     * that turns that into a loud failure; this pins that it surfaces at the call
-     * site as `NOT_DIFFERENTIABLE` (error severity) rather than at run time, or
-     * worse, not at all.
-     */
-    @Test
-    fun reverseModeConvIsRejectedLoudlyNotSilentlyWrong() {
-        val src = """
-            import io.tlaloc.autograd.grad
-            import io.tlaloc.core.DTensor
-            import io.tlaloc.core.F32
-            import io.tlaloc.core.Rank4
-            import io.tlaloc.core.Sym
-            import io.tlaloc.core.Tensors
-            import io.tlaloc.core.ops.conv2d
-            import io.tlaloc.core.ops.sum
-            import io.tlaloc.core.ops.toFloat
-            fun main() {
-                val g = grad { x: DTensor<Rank4<Sym, Sym, Sym, Sym>, F32> ->
-                    x.conv2d(x, 1, 1, 1, 1, 1, 1).sum().toFloat()
-                }
-                val x = Tensors.f32Tensor4<Sym, Sym, Sym, Sym>(1, 1, 3, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f))
-                println("gx " + g(x).dims.toList())
-            }
-        """.trimIndent()
-        val result = compileAndRun(STUB, src)
-        val errors = result.messages.filter { it.severity == CompilerMessageSeverity.ERROR }
-        assertTrue(
-            errors.any { "Conv2dRule" in it.message && "symbolic dims" in it.message },
-            "expected the Conv2dRule sentinel guard as a compile error; got:\n" +
-                errors.joinToString("\n--\n") { it.message },
-        )
     }
 
     /**
@@ -289,7 +247,6 @@ class ConvForwardIntrinsicTest {
             package io.tlaloc.autograd
             import io.tlaloc.core.DTensor
             import io.tlaloc.core.F32
-            import io.tlaloc.core.HostF32Storage
             import io.tlaloc.core.Rank4
             import io.tlaloc.core.Sym
             fun jvp(f: (DTensor<Rank4<Sym, Sym, Sym, Sym>, F32>) -> Float):
@@ -298,9 +255,6 @@ class ConvForwardIntrinsicTest {
             fun valueAndJvp(f: (DTensor<Rank4<Sym, Sym, Sym, Sym>, F32>) -> Float):
                     (DTensor<Rank4<Sym, Sym, Sym, Sym>, F32>, DTensor<Rank4<Sym, Sym, Sym, Sym>, F32>) -> Pair<Float, Float> =
                 { _, _ -> Pair(-1.0f, -1.0f) }
-            fun grad(f: (DTensor<Rank4<Sym, Sym, Sym, Sym>, F32>) -> Float):
-                    (DTensor<Rank4<Sym, Sym, Sym, Sym>, F32>) -> DTensor<Rank4<Sym, Sym, Sym, Sym>, F32> =
-                { x -> DTensor(HostF32Storage(FloatArray(9) { -1.0f }), intArrayOf(1, 1, 3, 3), F32) }
         """.trimIndent()
     }
 }

@@ -224,6 +224,9 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 rhsType = node.operands[1].type,
                 kernelLayout = "[i, o, 0, 1]",
             )
+            // §0.4.385 — the fused conv adjoints (padding solved at emit time).
+            OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT ->
+                emitConvAdjoint(step, name, ops, node)
             // §0.4.363 — window pooling via stablehlo.reduce_window.
             OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> emitReduceWindow(
                 step, name, ops[0], node, node.operands[0].type,
@@ -1042,25 +1045,55 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         rhsType: DxirType,
         kernelLayout: String,   // "[o, i, 0, 1]" for CONV2D, "[i, o, 0, 1]" for CONV_TRANSPOSE2D
     ) {
-        require(lhsType.rank == 4) { "conv input must be rank-4 NCHW; got dims ${lhsType.dims}" }
-        require(rhsType.rank == 4) { "conv kernel must be rank-4; got dims ${rhsType.dims}" }
-        require(node.type.rank == 4) { "conv output must be rank-4; got dims ${node.type.dims}" }
-
         val strides = intListAttr(node, "window_strides")
         require(strides.size == 2) { "conv window_strides must be length 2; got $strides" }
+        // §0.4.362 — spatial kernel flip (the conv adjoint's dX needs it).
+        val reversal = (node.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
+        emitConvolution(
+            step, name, lhs, rhs,
+            lhsType = lhsType, rhsType = rhsType, outType = node.type,
+            kernelLayout = kernelLayout,
+            strides = strides,
+            padding = conv2dPadding(node),
+            lhsDilation = conv2dDilation(node, "lhs_dilation"),
+            rhsDilation = conv2dDilation(node, "rhs_dilation"),
+            reversal = reversal,
+            featureGroupCount = (node.attrs["feature_group_count"] as? Int) ?: 1,
+            batchGroupCount = (node.attrs["batch_group_count"] as? Int) ?: 1,
+        )
+    }
 
-        val padding = conv2dPadding(node)
-        val lhsDilation = conv2dDilation(node, "lhs_dilation")
-        val rhsDilation = conv2dDilation(node, "rhs_dilation")
-        val featureGroupCount = (node.attrs["feature_group_count"] as? Int) ?: 1
-        val batchGroupCount = (node.attrs["batch_group_count"] as? Int) ?: 1
+    /**
+     * §0.4.385 — the `stablehlo.convolution` line itself, with every window attr
+     * passed in rather than read off a [DxirOp]. [emitConv2d] supplies them from
+     * the node's attrs; [emitConvAdjoint] supplies the padding it has just SOLVED
+     * at emit time (and the dilations/stride/reversal the adjoint spelling needs).
+     */
+    private fun emitConvolution(
+        step: String,
+        name: String,
+        lhs: String,
+        rhs: String,
+        lhsType: DxirType,
+        rhsType: DxirType,
+        outType: DxirType,
+        kernelLayout: String,
+        strides: List<Int>,
+        padding: List<List<Int>>,
+        lhsDilation: List<Int>,
+        rhsDilation: List<Int>,
+        reversal: List<Boolean>?,
+        featureGroupCount: Int = 1,
+        batchGroupCount: Int = 1,
+    ) {
+        require(lhsType.rank == 4) { "conv input must be rank-4 NCHW; got dims ${lhsType.dims}" }
+        require(rhsType.rank == 4) { "conv kernel must be rank-4; got dims ${rhsType.dims}" }
+        require(outType.rank == 4) { "conv output must be rank-4; got dims ${outType.dims}" }
 
         val strideStr = strides.joinToString(", ")
         val padStr = padding.joinToString(", ") { "[${it.joinToString(", ")}]" }
         val lhsDilStr = lhsDilation.joinToString(", ")
         val rhsDilStr = rhsDilation.joinToString(", ")
-        // §0.4.362 — spatial kernel flip (the conv adjoint's dX needs it).
-        val reversal = (node.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
         val reverseStr = if (reversal != null && reversal.any { it }) {
             ", reverse = [${reversal.joinToString(", ")}]"
         } else {
@@ -1074,7 +1107,103 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 "lhs_dilate = [$lhsDilStr], rhs_dilate = [$rhsDilStr]$reverseStr} " +
                 "{batch_group_count = $batchGroupCount : i64, " +
                 "feature_group_count = $featureGroupCount : i64} " +
-                ": (${lhsType.toMlir()}, ${rhsType.toMlir()}) -> ${node.type.toMlir()}",
+                ": (${lhsType.toMlir()}, ${rhsType.toMlir()}) -> ${outType.toMlir()}",
+        )
+    }
+
+    /**
+     * §0.4.385 — the fused conv adjoints (see [io.tlaloc.ir.OpKind.CONV2D_DATA_ADJOINT]).
+     *
+     * Their padding is a function of the primal's extents, and at EMIT time those
+     * extents are concrete (the GPU path requires static shapes), so the very solve
+     * the interpreter and the host twins perform at runtime is performed here once
+     * — and what lands in the module is an ordinary `stablehlo.convolution`. The
+     * resulting MLIR is the same the pre-fusion rule produced, which is why
+     * §0.4.362's real-XLA certification still covers this path.
+     *
+     * The kernel adjoint emits its batch↔feature transposes EXPLICITLY rather than
+     * spelling the swap through `dim_numbers`: identical semantics to the other two
+     * engines and no reliance on output-dim-number subtleties. XLA folds the
+     * transposes into the convolution's layout.
+     */
+    private fun emitConvAdjoint(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val dataAdj = node.op == OpKind.CONV2D_DATA_ADJOINT
+        require(node.operands.size == 3) {
+            "${node.op} takes (upstream, kernel, xTemplate) or (x, upstream, wTemplate); " +
+                "got ${node.operands.size} operands"
+        }
+        val upType = if (dataAdj) node.operands[0].type else node.operands[1].type
+        val otherType = if (dataAdj) node.operands[1].type else node.operands[0].type
+        val upRef = if (dataAdj) ops[0] else ops[1]
+        val otherRef = if (dataAdj) ops[1] else ops[0]
+        val outType = node.type
+        require(upType.rank == 4 && otherType.rank == 4 && outType.rank == 4) {
+            "${node.op} requires rank-4 operands and result; got " +
+                "${upType.dims} / ${otherType.dims} / ${outType.dims}"
+        }
+        val s = intListAttr(node, "window_strides")
+        require(s.size == 2) { "${node.op} window_strides must be length 2; got $s" }
+        val d = conv2dDilation(node, "rhs_dilation")
+        val primalPad = conv2dPadding(node)
+        // operands[2] is the shape template: its extents are the result's, which
+        // `outType` already carries, so it contributes nothing to the MLIR.
+        val padding = (0..1).map { a ->
+            val dilSize = (upType.dims[2 + a] - 1) * s[a] + 1
+            val low: Int
+            val high: Int
+            if (dataAdj) {
+                val kEff = (otherType.dims[2 + a] - 1) * d[a] + 1
+                low = kEff - 1 - primalPad[a][0]
+                high = primalPad[a][0] + outType.dims[2 + a] - dilSize
+            } else {
+                low = primalPad[a][0]
+                high = (outType.dims[2 + a] - 1) * d[a] + dilSize - otherType.dims[2 + a] - low
+            }
+            listOf(low, high)
+        }
+
+        if (dataAdj) {
+            emitConvolution(
+                step, name, upRef, otherRef,
+                lhsType = upType, rhsType = otherType, outType = outType,
+                kernelLayout = "[i, o, 0, 1]",
+                strides = listOf(1, 1),
+                padding = padding,
+                lhsDilation = s,
+                rhsDilation = d,
+                reversal = listOf(true, true),
+            )
+            return
+        }
+
+        val swap = listOf(1, 0, 2, 3)
+        val xTType = DxirType(outType.dtype, swap.map { otherType.dims[it] })
+        val upTType = DxirType(outType.dtype, swap.map { upType.dims[it] })
+        val dwtType = DxirType(outType.dtype, swap.map { outType.dims[it] })
+        val xT = synth()
+        val upT = synth()
+        val dwt = synth()
+        out.appendLine(
+            "$step$xT = stablehlo.transpose $otherRef, dims = [1, 0, 2, 3] " +
+                ": (${otherType.toMlir()}) -> ${xTType.toMlir()}",
+        )
+        out.appendLine(
+            "$step$upT = stablehlo.transpose $upRef, dims = [1, 0, 2, 3] " +
+                ": (${upType.toMlir()}) -> ${upTType.toMlir()}",
+        )
+        emitConvolution(
+            step, dwt, xT, upT,
+            lhsType = xTType, rhsType = upTType, outType = dwtType,
+            kernelLayout = "[o, i, 0, 1]",
+            strides = d,
+            padding = padding,
+            lhsDilation = listOf(1, 1),
+            rhsDilation = s,
+            reversal = null,
+        )
+        out.appendLine(
+            "$step$name = stablehlo.transpose $dwt, dims = [1, 0, 2, 3] " +
+                ": (${dwtType.toMlir()}) -> ${outType.toMlir()}",
         )
     }
 

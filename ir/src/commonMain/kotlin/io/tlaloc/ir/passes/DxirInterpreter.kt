@@ -395,43 +395,7 @@ object DxirInterpreter {
                 val perm = (op.attrs["permutation"] as? List<*>)
                     ?.map { (it as Number).toInt() }
                     ?: emptyList()
-                val rank = inputType.rank
-                require(perm.size == rank) {
-                    "DxirInterpreter: TRANSPOSE permutation length ${perm.size} ≠ rank $rank"
-                }
-                require(perm.toSet() == (0 until rank).toSet()) {
-                    "DxirInterpreter: TRANSPOSE permutation $perm must be a permutation of [0..${rank - 1}]"
-                }
-                val totalSize = if (rank == 0) 1 else inputType.dims.reduce(Int::times)
-                require(a.size == totalSize) {
-                    "DxirInterpreter: TRANSPOSE input size ${a.size} does not match shape ${inputType.dims}"
-                }
-                if (rank <= 1) {
-                    // Rank-0 / rank-1 transpose is the identity (only valid permutation
-                    // is `[0]` for rank-1, `[]` for rank-0). Return a copy to preserve
-                    // the "fresh array per node" invariant.
-                    a.copyOf()
-                } else {
-                    val outputDims = perm.map { inputType.dims[it] }
-                    // Row-major strides for input and output. `inputStrides[a]` is the
-                    // flat offset increment per unit step along input axis `a`.
-                    val inputStrides = IntArray(rank)
-                    inputStrides[rank - 1] = 1
-                    for (i in rank - 2 downTo 0) inputStrides[i] = inputStrides[i + 1] * inputType.dims[i + 1]
-                    val outputStrides = IntArray(rank)
-                    outputStrides[rank - 1] = 1
-                    for (i in rank - 2 downTo 0) outputStrides[i] = outputStrides[i + 1] * outputDims[i + 1]
-                    FloatArray(totalSize) { outFlat ->
-                        var rem = outFlat
-                        var inFlat = 0
-                        for (k in 0 until rank) {
-                            val idxK = rem / outputStrides[k]
-                            rem -= idxK * outputStrides[k]
-                            inFlat += idxK * inputStrides[perm[k]]
-                        }
-                        a[inFlat]
-                    }
-                }
+                evalTranspose(inputType, perm, a)
             }
             OpKind.MATMUL -> {
                 // §0.4.135 — rank-2 (`(M,K) @ (K,N) → (M,N)`) plus rank-3+ batched
@@ -496,6 +460,9 @@ object DxirInterpreter {
                 val rhs = evalNode(op.operands[1], env, multiResults)
                 evalConv2d(op, lhs, rhs)
             }
+            // §0.4.385 — the fused conv adjoints (runtime-solved padding).
+            OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT ->
+                evalConvAdjoint(op, env, multiResults)
             OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> {
                 evalPool2d(op, evalNode(op.operands[0], env, multiResults))
             }
@@ -1275,6 +1242,62 @@ object DxirInterpreter {
     }
 
     /**
+     * §0.4.136 — rank-N stride-based transpose. The original rank-2-only path
+     * covered all paths VjpRules emitted (MatmulRule's `[1, 0]` swap), but
+     * §0.4.135's batched-MATMUL substrate implies an eventual batched MatmulRule
+     * which would emit `[0, 2, 1]`-style permutations. Handles any valid
+     * permutation of any rank.
+     *
+     * Algorithm: the output element at multi-index (i_0, …, i_{N-1}) corresponds
+     * to the input element at multi-index (j_0, …, j_{N-1}) where
+     * `j[perm[k]] = i_k`. Equivalently, walking the output in row-major order,
+     * the input flat offset accumulates `i_k * inputStrides[perm[k]]` per output
+     * axis `k`.
+     *
+     * §0.4.385 — lifted out of the TRANSPOSE arm so [evalConvAdjoint] can run the
+     * batch↔feature swap its kernel gradient needs without materialising
+     * throwaway TRANSPOSE nodes.
+     */
+    private fun evalTranspose(inputType: DxirType, perm: List<Int>, a: FloatArray): FloatArray {
+        val rank = inputType.rank
+        require(perm.size == rank) {
+            "DxirInterpreter: TRANSPOSE permutation length ${perm.size} ≠ rank $rank"
+        }
+        require(perm.toSet() == (0 until rank).toSet()) {
+            "DxirInterpreter: TRANSPOSE permutation $perm must be a permutation of [0..${rank - 1}]"
+        }
+        val totalSize = if (rank == 0) 1 else inputType.dims.reduce(Int::times)
+        require(a.size == totalSize) {
+            "DxirInterpreter: TRANSPOSE input size ${a.size} does not match shape ${inputType.dims}"
+        }
+        if (rank <= 1) {
+            // Rank-0 / rank-1 transpose is the identity (only valid permutation
+            // is `[0]` for rank-1, `[]` for rank-0). Return a copy to preserve
+            // the "fresh array per node" invariant.
+            return a.copyOf()
+        }
+        val outputDims = perm.map { inputType.dims[it] }
+        // Row-major strides for input and output. `inputStrides[a]` is the
+        // flat offset increment per unit step along input axis `a`.
+        val inputStrides = IntArray(rank)
+        inputStrides[rank - 1] = 1
+        for (i in rank - 2 downTo 0) inputStrides[i] = inputStrides[i + 1] * inputType.dims[i + 1]
+        val outputStrides = IntArray(rank)
+        outputStrides[rank - 1] = 1
+        for (i in rank - 2 downTo 0) outputStrides[i] = outputStrides[i + 1] * outputDims[i + 1]
+        return FloatArray(totalSize) { outFlat ->
+            var rem = outFlat
+            var inFlat = 0
+            for (k in 0 until rank) {
+                val idxK = rem / outputStrides[k]
+                rem -= idxK * outputStrides[k]
+                inFlat += idxK * inputStrides[perm[k]]
+            }
+            a[inFlat]
+        }
+    }
+
+    /**
      * §0.4.362 — general 2-D convolution matching `stablehlo.convolution`
      * semantics for the layouts [StablehloEmitter] fixes: lhs NCHW
      * `[b, f, 0, 1]`, kernel OIHW `[o, i, 0, 1]` for [OpKind.CONV2D] /
@@ -1293,27 +1316,45 @@ object DxirInterpreter {
      * dilation, and padding to an input coordinate, and skip taps that
      * land in padding or between lhs-dilation holes.
      */
-    private fun evalConv2d(op: DxirOp, lhs: FloatArray, rhs: FloatArray): FloatArray {
-        val lhsT = op.operands[0].type
-        val rhsT = op.operands[1].type
-        require(lhsT.rank == 4 && rhsT.rank == 4 && op.type.rank == 4) {
-            "DxirInterpreter: ${op.op} requires rank-4 lhs/kernel/output; got " +
-                "${lhsT.dims} / ${rhsT.dims} / ${op.type.dims}"
+    private fun evalConv2d(op: DxirOp, lhs: FloatArray, rhs: FloatArray): FloatArray =
+        conv2dCore(
+            op.op, op.operands[0].type, op.operands[1].type, op.type, op.attrs, lhs, rhs,
+        )
+
+    /**
+     * §0.4.385 — [evalConv2d]'s body, lifted so a caller can supply the operand and
+     * result types EXPLICITLY instead of reading them off a [DxirOp]. The fused conv
+     * adjoints need that: they run the transposed/strided conv whose padding they have
+     * just solved at runtime, and whose transposed operand types (the batch↔feature
+     * swap) exist nowhere in the graph as nodes of their own.
+     */
+    private fun conv2dCore(
+        kind: OpKind,
+        lhsT: DxirType,
+        rhsT: DxirType,
+        outT: DxirType,
+        attrs: Map<String, Any>,
+        lhs: FloatArray,
+        rhs: FloatArray,
+    ): FloatArray {
+        require(lhsT.rank == 4 && rhsT.rank == 4 && outT.rank == 4) {
+            "DxirInterpreter: $kind requires rank-4 lhs/kernel/output; got " +
+                "${lhsT.dims} / ${rhsT.dims} / ${outT.dims}"
         }
         fun intPair(key: String, def: List<Int>): List<Int> =
-            (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+            (attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
         val strides = intPair("window_strides", listOf(1, 1))
         val lhsDil = intPair("lhs_dilation", listOf(1, 1))
         val rhsDil = intPair("rhs_dilation", listOf(1, 1))
-        val reversal = (op.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
+        val reversal = (attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
             ?: listOf(false, false)
-        val padding = (op.attrs["padding"] as? List<*>)
+        val padding = (attrs["padding"] as? List<*>)
             ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
             ?: listOf(listOf(0, 0), listOf(0, 0))
-        val fgc = (op.attrs["feature_group_count"] as? Int) ?: 1
-        val bgc = (op.attrs["batch_group_count"] as? Int) ?: 1
+        val fgc = (attrs["feature_group_count"] as? Int) ?: 1
+        val bgc = (attrs["batch_group_count"] as? Int) ?: 1
         require(fgc == 1 && bgc == 1) {
-            "DxirInterpreter: ${op.op} feature/batch groups unsupported in v1 (got $fgc/$bgc)"
+            "DxirInterpreter: $kind feature/batch groups unsupported in v1 (got $fgc/$bgc)"
         }
 
         val (nB, cIn, h, w) = lhsT.dims
@@ -1322,13 +1363,13 @@ object DxirInterpreter {
         val cKIn: Int
         val kh = rhsT.dims[2]
         val kw = rhsT.dims[3]
-        if (op.op == OpKind.CONV2D) {
+        if (kind == OpKind.CONV2D) {
             cOut = rhsT.dims[0]; cKIn = rhsT.dims[1]
         } else {
             cKIn = rhsT.dims[0]; cOut = rhsT.dims[1]
         }
         require(cKIn == cIn) {
-            "DxirInterpreter: ${op.op} kernel input channels $cKIn ≠ lhs channels $cIn"
+            "DxirInterpreter: $kind kernel input channels $cKIn ≠ lhs channels $cIn"
         }
 
         val hDil = (h - 1) * lhsDil[0] + 1
@@ -1337,8 +1378,8 @@ object DxirInterpreter {
         val kEffW = (kw - 1) * rhsDil[1] + 1
         val hOut = (hDil + padding[0][0] + padding[0][1] - kEffH) / strides[0] + 1
         val wOut = (wDil + padding[1][0] + padding[1][1] - kEffW) / strides[1] + 1
-        require(op.type.dims == listOf(nB, cOut, hOut, wOut)) {
-            "DxirInterpreter: ${op.op} output type ${op.type.dims} ≠ derived " +
+        require(outT.dims == listOf(nB, cOut, hOut, wOut)) {
+            "DxirInterpreter: $kind output type ${outT.dims} ≠ derived " +
                 "[$nB, $cOut, $hOut, $wOut]"
         }
 
@@ -1363,7 +1404,7 @@ object DxirInterpreter {
                                     val inX = xDil / lhsDil[1]
                                     if (inX >= w) continue
                                     val wKx = if (reversal[1]) kw - 1 - kx else kx
-                                    val wIdx = if (op.op == OpKind.CONV2D) {
+                                    val wIdx = if (kind == OpKind.CONV2D) {
                                         ((o * cIn + i) * kh + wKy) * kw + wKx
                                     } else {
                                         ((i * cOut + o) * kh + wKy) * kw + wKx
@@ -1379,6 +1420,114 @@ object DxirInterpreter {
             }
         }
         return out
+    }
+
+    /**
+     * §0.4.385 — the fused conv adjoints (see [OpKind.CONV2D_DATA_ADJOINT]). Both
+     * solve the classical adjoint padding from the RUNTIME extents of their
+     * operands and their shape-only template, then delegate to [conv2dCore] — so
+     * there is still exactly one conv evaluator, and the sentinel-safety lives
+     * entirely in where the numbers come from.
+     *
+     * Per spatial axis, with `k` the kernel's spatial extent, `hOut` the
+     * upstream's, `H` the target's, `s` the primal `window_strides`, `d` the
+     * primal `rhs_dilation` and `p_low` the primal padding:
+     *
+     *   dX: kEff = (k−1)·d + 1,  dilSize = (hOut−1)·s + 1,
+     *       low = kEff − 1 − p_low,   high = p_low + H − dilSize
+     *   dW: low = p_low,   high = (k−1)·d + dilSize − H − p_low
+     *
+     * Algebraically these are the values Conv2dRule used to bake at TRANSFORM
+     * time; the difference is that `H` (and `k`, `hOut`) are read at execution,
+     * when they exist, instead of out of a type carrying -1 sentinels.
+     *
+     * The kernel gradient additionally fuses the batch↔feature transpose trick:
+     * `dW = (Xᵀ ⋆ dYᵀ)ᵀ` with stride and rhs_dilation swapping roles, so the
+     * result type is simply the kernel's and no rank-4 TRANSPOSE nodes are left
+     * in the gradient body for the synthesis to type.
+     */
+    private fun evalConvAdjoint(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val dataAdj = op.op == OpKind.CONV2D_DATA_ADJOINT
+        require(op.operands.size == 3) {
+            "DxirInterpreter: ${op.op} takes (upstream, kernel, xTemplate) or " +
+                "(x, upstream, wTemplate); got ${op.operands.size} operands"
+        }
+        // Operand order differs between the two: dX convolves the upstream with
+        // the kernel, dW convolves the input with the upstream.
+        val upNode = if (dataAdj) op.operands[0] else op.operands[1]
+        val otherNode = if (dataAdj) op.operands[1] else op.operands[0]
+        val upT = upNode.type
+        val otherT = otherNode.type
+        val outT = op.type
+        require(upT.rank == 4 && otherT.rank == 4 && outT.rank == 4) {
+            "DxirInterpreter: ${op.op} requires rank-4 operands and result; got " +
+                "${upT.dims} / ${otherT.dims} / ${outT.dims}"
+        }
+        val up = evalNode(upNode, env, multiResults)
+        val other = evalNode(otherNode, env, multiResults)
+        // operands[2] is the shape template: its VALUES are never read, and its
+        // extents are the result's, which `outT` already carries.
+
+        fun intPair(key: String, def: List<Int>): List<Int> =
+            (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+        val s = intPair("window_strides", listOf(1, 1))
+        val d = intPair("rhs_dilation", listOf(1, 1))
+        val primalPad = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+            ?: listOf(listOf(0, 0), listOf(0, 0))
+
+        val padding = (0..1).map { a ->
+            val dilSize = (upT.dims[2 + a] - 1) * s[a] + 1
+            if (dataAdj) {
+                // otherNode IS the kernel; the target is the primal input's extent.
+                val kEff = (otherT.dims[2 + a] - 1) * d[a] + 1
+                val low = kEff - 1 - primalPad[a][0]
+                listOf(low, primalPad[a][0] + outT.dims[2 + a] - dilSize)
+            } else {
+                // otherNode IS the primal input; the target is the kernel's extent.
+                val low = primalPad[a][0]
+                listOf(
+                    low,
+                    (outT.dims[2 + a] - 1) * d[a] + dilSize - otherT.dims[2 + a] - low,
+                )
+            }
+        }
+
+        return if (dataAdj) {
+            conv2dCore(
+                OpKind.CONV_TRANSPOSE2D, upT, otherT, outT,
+                mapOf(
+                    "window_strides" to listOf(1, 1),
+                    "padding" to padding,
+                    "lhs_dilation" to s,
+                    "rhs_dilation" to d,
+                    "window_reversal" to listOf(true, true),
+                ),
+                up, other,
+            )
+        } else {
+            val swap = listOf(1, 0, 2, 3)
+            val xT = evalTranspose(otherT, swap, other)
+            val upSwapped = evalTranspose(upT, swap, up)
+            val xTT = DxirType(outT.dtype, swap.map { otherT.dims[it] })
+            val upTT = DxirType(outT.dtype, swap.map { upT.dims[it] })
+            // [Ci, Co, kh, kw] — the kernel's shape with its channel axes swapped.
+            val dwtT = DxirType(outT.dtype, swap.map { outT.dims[it] })
+            val dwt = conv2dCore(
+                OpKind.CONV2D, xTT, upTT, dwtT,
+                mapOf(
+                    "window_strides" to d,
+                    "padding" to padding,
+                    "rhs_dilation" to s,
+                ),
+                xT, upSwapped,
+            )
+            evalTranspose(dwtT, swap, dwt)
+        }
     }
 
     /**

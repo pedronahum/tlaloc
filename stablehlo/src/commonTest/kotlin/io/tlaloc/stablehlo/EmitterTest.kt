@@ -996,6 +996,80 @@ class EmitterTest {
         assertTrue(mlir.contains("lhs_dilate = [2, 2]"), "upsampling via lhs_dilate missing: $mlir")
     }
 
+    /**
+     * §0.4.385 — the fused conv adjoints solve their padding at EMIT time, so the
+     * MLIR must carry the same numbers Conv2dRule used to bake (and that
+     * `PjrtConvSmokeTest` certifies against real XLA). Primal here is the
+     * general-attr conv: strides [2,1], padding [[1,0],[1,1]], rhs_dilation [1,2],
+     * x [2,2,5,4] ⋆ w [3,2,3,2] → y [2,3,2,4].
+     *
+     * dX: kEff = [3,3], dilSize = [(2−1)·2+1, (4−1)·1+1] = [3,4], so
+     *     low = kEff−1−p_low = [1,1] and high = p_low + H − dilSize = [1+5−3, 1+4−4] = [3,1].
+     */
+    @Test
+    fun convDataAdjointSolvesPaddingAtEmitTime() {
+        val fn = DxirBuilder.function("dx") {
+            val x = param("x", DxirType(F32, listOf(2, 2, 5, 4)))
+            val w = param("w", DxirType(F32, listOf(3, 2, 3, 2)))
+            val up = param("up", DxirType(F32, listOf(2, 3, 2, 4)))
+            val dx = op(
+                OpKind.CONV2D_DATA_ADJOINT, listOf(up, w, x), DxirType(F32, listOf(2, 2, 5, 4)),
+                attrs = mapOf(
+                    "window_strides" to listOf(2, 1),
+                    "padding" to listOf(listOf(1, 0), listOf(1, 1)),
+                    "rhs_dilation" to listOf(1, 2),
+                ),
+            )
+            listOf(dx)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("pad = [[1, 3], [1, 1]]"), "solved dX padding wrong: $mlir")
+        assertTrue(mlir.contains("lhs_dilate = [2, 1]"), "stride must land on lhs_dilate: $mlir")
+        assertTrue(mlir.contains("rhs_dilate = [1, 2]"), "primal rhs_dilation must carry over: $mlir")
+        assertTrue(mlir.contains("reverse = [true, true]"), "dX needs the tap flip: $mlir")
+        assertTrue(
+            mlir.contains("dim_numbers = [b, f, 0, 1]x[i, o, 0, 1]->[b, f, 0, 1]"),
+            "dX is a transposed conv (IOHW kernel): $mlir",
+        )
+        // One convolution, no transposes: the data adjoint is a single op.
+        assertEquals(1, mlir.split("stablehlo.convolution").size - 1, mlir)
+    }
+
+    /**
+     * §0.4.385 — the kernel adjoint: `low = p_low`, `high = (k−1)·d + dilSize − H − p_low`,
+     * which for this primal is [[1, (3−1)·1+3−5−1], [1, (2−1)·2+4−4−1]] = [[1,−1],[1,1]] —
+     * the negative high side being the crop that absorbs the stride-2 floor-division
+     * remainder over height 5. Stride and rhs_dilation SWAP roles, and the batch↔feature
+     * transposes are emitted explicitly around the convolution.
+     */
+    @Test
+    fun convKernelAdjointEmitsSwapConvSwapWithSolvedCrop() {
+        val fn = DxirBuilder.function("dw") {
+            val x = param("x", DxirType(F32, listOf(2, 2, 5, 4)))
+            val w = param("w", DxirType(F32, listOf(3, 2, 3, 2)))
+            val up = param("up", DxirType(F32, listOf(2, 3, 2, 4)))
+            val dw = op(
+                OpKind.CONV2D_KERNEL_ADJOINT, listOf(x, up, w), DxirType(F32, listOf(3, 2, 3, 2)),
+                attrs = mapOf(
+                    "window_strides" to listOf(2, 1),
+                    "padding" to listOf(listOf(1, 0), listOf(1, 1)),
+                    "rhs_dilation" to listOf(1, 2),
+                ),
+            )
+            listOf(dw)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("pad = [[1, -1], [1, 1]]"), "solved dW padding wrong: $mlir")
+        assertTrue(mlir.contains("stride = [1, 2]"), "primal rhs_dilation becomes the stride: $mlir")
+        assertTrue(mlir.contains("rhs_dilate = [2, 1]"), "primal stride becomes rhs_dilate: $mlir")
+        assertTrue(
+            mlir.contains("dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1]"),
+            "dW's inner conv reads an OIHW kernel: $mlir",
+        )
+        assertEquals(3, mlir.split("stablehlo.transpose").size - 1, "expected Xᵀ, dYᵀ and the swap back: $mlir")
+        assertEquals(1, mlir.split("stablehlo.convolution").size - 1, mlir)
+    }
+
     @Test
     fun argmaxEmitsIotaAndReduceWithBody() {
         val fn = DxirBuilder.function("am") {

@@ -657,6 +657,139 @@ fun <S : Shape> convTranspose2dGeneral(
 }
 
 /**
+ * §0.4.385 — the host twin of `OpKind.CONV2D_DATA_ADJOINT`: a 2-D conv's gradient
+ * w.r.t. its INPUT, fused into one op.
+ *
+ * Mathematically it is the lhs-dilated, tap-reversed transposed convolution of
+ * [upstream] against [kernel], padded so the result lands exactly on the primal
+ * input's extents. That padding is why the op exists at all: it is SOLVED from
+ * those extents, and under `grad {}` every extent in the graph is a -1 sentinel,
+ * so padding baked at transform time is arithmetic garbage that every consumer
+ * would faithfully honour. [xTemplate] therefore contributes SHAPE ONLY — its
+ * values are never read — and the solve happens here, at execution, against
+ * `dims` that are real:
+ *
+ *     kEff = (k−1)·d + 1        dilSize = (hOut−1)·s + 1
+ *     low  = kEff − 1 − p_low   high    = p_low + H − dilSize
+ *
+ * with `k` the kernel's spatial extent, `hOut` the upstream's, `H` the target's,
+ * `s` [strideH]/[strideW], `d` [rhsDilH]/[rhsDilW] and `p_low` [padTop]/[padLeft]
+ * — all read off the primal conv. Note only the primal's LOW padding is needed:
+ * its high side is already implicit in the upstream's runtime shape, since that
+ * shape is what the primal's floor-division produced.
+ *
+ * The result's shape witness is [xTemplate]'s `S` — not a guess, because the
+ * template IS the shape this op produces.
+ */
+@Suppress("LongParameterList")
+fun <S : Shape> conv2dDataAdjoint(
+    upstream: DTensor<*, F32>,
+    kernel: DTensor<*, F32>,
+    xTemplate: DTensor<S, F32>,
+    strideH: Int,
+    strideW: Int,
+    rhsDilH: Int,
+    rhsDilW: Int,
+    padTop: Int,
+    padLeft: Int,
+): DTensor<S, F32> {
+    val up = upstream.dims
+    val k = kernel.dims
+    val target = xTemplate.dims
+    val strides = intArrayOf(strideH, strideW)
+    val dil = intArrayOf(rhsDilH, rhsDilW)
+    val pLow = intArrayOf(padTop, padLeft)
+    fun solve(axis: Int): IntArray {
+        val kEff = (k[2 + axis] - 1) * dil[axis] + 1
+        val dilSize = (up[2 + axis] - 1) * strides[axis] + 1
+        val low = kEff - 1 - pLow[axis]
+        return intArrayOf(low, pLow[axis] + target[2 + axis] - dilSize)
+    }
+    val h = solve(0)
+    val w = solve(1)
+    val dx = conv2dEngine(
+        upstream, kernel, true,
+        1, 1, strideH, strideW, rhsDilH, rhsDilW,
+        h[0], h[1], w[0], w[1], true, true,
+    )
+    require(dx.dims.contentEquals(target)) {
+        "conv2dDataAdjoint: solved padding landed on ${dx.dims.toList()} but the template " +
+            "is ${target.toList()} (upstream ${up.toList()}, kernel ${k.toList()}, " +
+            "strides [$strideH, $strideW], rhs_dilation [$rhsDilH, $rhsDilW], " +
+            "primal padding low [$padTop, $padLeft])"
+    }
+    @Suppress("UNCHECKED_CAST")
+    return dx as DTensor<S, F32>
+}
+
+/**
+ * §0.4.385 — the host twin of `OpKind.CONV2D_KERNEL_ADJOINT`: a 2-D conv's gradient
+ * w.r.t. its KERNEL, fused into one op.
+ *
+ * This is the batch↔feature transposed trick — `dW = (Xᵀ ⋆ dYᵀ)ᵀ`, where X reads
+ * as `[Ci, N, H, W]` and dY as an OIHW kernel `[Co, N, Ho, Wo]` with `o = Co`,
+ * `i = N`, and the primal's stride and rhs_dilation SWAP roles — padded so the
+ * inner conv's result is exactly `[Ci, Co, kh, kw]`, then transposed back to
+ * OIHW. All three transposes are folded in here, so a gradient body needs no
+ * rank-4 TRANSPOSE nodes and the result's shape witness is simply
+ * [wTemplate]'s `S`. The padding solve, likewise read from runtime dims:
+ *
+ *     dilSize = (hOut−1)·s + 1
+ *     low     = p_low
+ *     high    = (k−1)·d + dilSize − H − p_low
+ *
+ * with `k` the target kernel's spatial extent and `H` the primal input's. The
+ * high side is the crop that absorbs the primal's floor-division remainder (a
+ * stride-2 conv over height 5 leaves an unused row), which is why it can be
+ * negative. [wTemplate] contributes SHAPE ONLY.
+ */
+@Suppress("LongParameterList")
+fun <S : Shape> conv2dKernelAdjoint(
+    x: DTensor<*, F32>,
+    upstream: DTensor<*, F32>,
+    wTemplate: DTensor<S, F32>,
+    strideH: Int,
+    strideW: Int,
+    rhsDilH: Int,
+    rhsDilW: Int,
+    padTop: Int,
+    padLeft: Int,
+): DTensor<S, F32> {
+    val xD = x.dims
+    val up = upstream.dims
+    val target = wTemplate.dims
+    val strides = intArrayOf(strideH, strideW)
+    val dil = intArrayOf(rhsDilH, rhsDilW)
+    val pLow = intArrayOf(padTop, padLeft)
+    fun solve(axis: Int): IntArray {
+        val dilSize = (up[2 + axis] - 1) * strides[axis] + 1
+        val low = pLow[axis]
+        return intArrayOf(low, (target[2 + axis] - 1) * dil[axis] + dilSize - xD[2 + axis] - low)
+    }
+    val h = solve(0)
+    val w = solve(1)
+    @Suppress("UNCHECKED_CAST")
+    val xT = (x as DTensor<Shape, F32>).transpose(1, 0, 2, 3)
+    @Suppress("UNCHECKED_CAST")
+    val upT = (upstream as DTensor<Shape, F32>).transpose(1, 0, 2, 3)
+    // [Ci, Co, kh, kw]: the target with its channel axes swapped.
+    val dwt = conv2dEngine(
+        xT, upT, false,
+        rhsDilH, rhsDilW, 1, 1, strideH, strideW,
+        h[0], h[1], w[0], w[1], false, false,
+    )
+    val dw = dwt.transpose(1, 0, 2, 3)
+    require(dw.dims.contentEquals(target)) {
+        "conv2dKernelAdjoint: solved padding landed on ${dw.dims.toList()} but the template " +
+            "is ${target.toList()} (x ${xD.toList()}, upstream ${up.toList()}, " +
+            "strides [$strideH, $strideW], rhs_dilation [$rhsDilH, $rhsDilW], " +
+            "primal padding low [$padTop, $padLeft])"
+    }
+    @Suppress("UNCHECKED_CAST")
+    return dw as DTensor<S, F32>
+}
+
+/**
  * Scalar → rank-N uniform broadcast: produce a fresh `DTensor<S, F32>` shaped like
  * [template] whose every element equals [v]. Used by the IR-rewrite synthesis path to
  * lower `OpKind.BROADCAST` in gradient bodies emitted by [io.tlaloc.ir.passes.VjpRegistry.SumRule]

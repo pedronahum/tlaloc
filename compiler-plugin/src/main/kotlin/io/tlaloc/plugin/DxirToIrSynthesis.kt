@@ -350,6 +350,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     4,
                 )
             }
+            OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT -> {
+                // §0.4.385 — the result IS the shape template's type (operand 2):
+                // each adjoint produces a gradient shaped like the primal tensor it
+                // differentiates w.r.t. No placeholder atoms needed, which is what
+                // makes the fused spelling strictly easier to type than the
+                // CONV_TRANSPOSE2D / TRANSPOSE chain it replaced.
+                if (op.operands.size != 3) return null
+                operandIrTypes[op.operands[2].id]
+            }
             OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW -> {
                 if (op.operands.size != 2) return null
                 op.operands.firstOrNull { it.type.rank == op.type.rank }
@@ -954,6 +963,21 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             changed = true
                         }
                     }
+                    // §0.4.385 — the fused conv adjoints: the result IS the shape
+                    // template (operand[2]), so solve the template from the node's
+                    // own when the adjoint is a returned grad (mirror of
+                    // SUM_TO/PAD_TO/SLICE_LIKE). Neither conv operand may inherit
+                    // it — the upstream carries the OUTPUT's shape and the other
+                    // operand is a different tensor again.
+                    OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT -> {
+                        if (n.operands.size != 3) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val templateId = n.operands[2].id
+                        if (paramIrTypeMap[templateId] == null && isAcceptedTensorType(n.operands[2].type)) {
+                            paramIrTypeMap[templateId] = outputIr
+                            changed = true
+                        }
+                    }
                     OpKind.RESHAPE -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
@@ -1337,6 +1361,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SOFTMAX) return irSoftmax(op, env, context)
         // §0.4.384 — Phase A3b slice 1: the NCHW conv pair.
         if (op.op == OpKind.CONV2D || op.op == OpKind.CONV_TRANSPOSE2D) return irConv(op, env, context)
+        // §0.4.385 — the fused conv adjoints (runtime-solved padding).
+        if (op.op == OpKind.CONV2D_DATA_ADJOINT || op.op == OpKind.CONV2D_KERNEL_ADJOINT) {
+            return irConvAdjoint(op, env, context)
+        }
         if (op.op == OpKind.SUM_TO) return irSumTo(op, env, context)
         if (op.op == OpKind.SLICE) return irSlice(op, env, context)
         if (op.op == OpKind.PAD_TO) return irPadTo(op, env, context)
@@ -2337,6 +2365,62 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         ints.forEachIndexed { i, v -> call.arguments[i + 2] = intConst(v) }
         call.arguments[12] = boolConst(reversal?.getOrNull(0) ?: false)
         call.arguments[13] = boolConst(reversal?.getOrNull(1) ?: false)
+        return call
+    }
+
+    /**
+     * §0.4.385 — the fused conv adjoints → `:core/ops conv2dDataAdjoint` /
+     * `conv2dKernelAdjoint`. Three tensor operands (the two conv operands plus the
+     * shape-only template) and six Int attrs — and every one of those attrs is a
+     * literal fact off the primal conv, so this arm reads no extent. The padding
+     * solve happens inside the host twin against runtime `dims`, which is the whole
+     * reason reverse-mode conv works under `grad {}`'s -1 sentinels at all.
+     *
+     * The result IrType is the TEMPLATE's, which is PAD_TO's trick and neither a
+     * derivation nor a guess: the template is by construction the tensor whose shape
+     * the adjoint produces. For conv that also dissolves the single-representative
+     * `tensorIrType` blocker — a conv gradient body never mixes ranks, so every
+     * rank-4 node takes its witness from a param.
+     */
+    private fun IrBuilderWithScope.irConvAdjoint(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 3) return null
+        if (!isAcceptedTensorType(op.type) || op.type.rank != 4) return null
+        val dataAdj = op.op == OpKind.CONV2D_DATA_ADJOINT
+        val sym = opsTensorSymbol(if (dataAdj) "conv2dDataAdjoint" else "conv2dKernelAdjoint")
+            ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+
+        fun intPair(key: String): List<Int> {
+            val v = (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: return listOf(1, 1)
+            return if (v.size == 2) v else listOf(1, 1)
+        }
+        val strides = intPair("window_strides")
+        val rhsDil = intPair("rhs_dilation")
+        val rows = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+        // Only the primal's LOW padding matters: the high side is implied by the
+        // upstream's runtime shape (the shape the primal's floor-division produced).
+        val padTop = rows?.getOrNull(0)?.getOrNull(0) ?: 0
+        val padLeft = rows?.getOrNull(1)?.getOrNull(0) ?: 0
+
+        val resultIrType = (irTypeForNode(op.operands[2], context) as? IrSimpleType)
+            ?: (irTypeForNode(op, context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        decls.forEachIndexed { i, decl -> call.arguments[i] = irGet(decl) }
+        val ints = listOf(strides[0], strides[1], rhsDil[0], rhsDil[1], padTop, padLeft)
+        ints.forEachIndexed { i, v -> call.arguments[i + 3] = intConst(v) }
         return call
     }
 

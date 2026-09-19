@@ -102,7 +102,12 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // (Tlaloc's wedge audiences don't drive conv heavy work). We ship
     // a placeholder that scales with output volume × in-channels × kernel
     // volume; real IREE/StableHLO cost models can override later.
-    OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D -> {
+    // §0.4.385 — the fused conv adjoints cost the same order as the conv they
+    // adjoint (the kernel one adds two transposes, which are pure data movement
+    // and already accounted under bytes).
+    OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D,
+    OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT,
+    -> {
         // Conservative: out_elements × in_channels × 9 (3×3 kernel).
         op.type.elementCount.toDouble() * 9.0 * 1.0
     }

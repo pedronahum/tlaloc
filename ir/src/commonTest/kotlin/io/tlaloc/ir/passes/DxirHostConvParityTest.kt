@@ -6,7 +6,9 @@ import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.Shape
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.ops.conv2d
+import io.tlaloc.core.ops.conv2dDataAdjoint
 import io.tlaloc.core.ops.conv2dGeneral
+import io.tlaloc.core.ops.conv2dKernelAdjoint
 import io.tlaloc.core.ops.convTranspose2d
 import io.tlaloc.core.ops.convTranspose2dGeneral
 import io.tlaloc.core.ops.transposePerm4
@@ -22,19 +24,20 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * §0.4.384 — Phase A3b slice 1: the `:core` host conv twins are BIT-EXACT against
- * the dxir interpreter's `evalConv2d`, for every attr spelling the conv/pool
- * ADJOINTS actually emit.
+ * §0.4.384 — Phase A3b: the `:core` host conv twins are BIT-EXACT against the dxir
+ * interpreter's conv evaluation, for every attr spelling the conv/pool ADJOINTS
+ * actually emit. §0.4.385 extended the walk to the fused adjoint ops
+ * ([OpKind.CONV2D_DATA_ADJOINT] / [OpKind.CONV2D_KERNEL_ADJOINT]) and their twins.
  *
  * The parity is checked mechanically rather than against hand-written attrs: each
  * test runs [DxirReverseTransform] on a real loss, walks the resulting gradient
- * graph for CONV2D / CONV_TRANSPOSE2D / rank-4 TRANSPOSE nodes, and replays each
- * node twice — once through the interpreter, once through the host twin with the
- * attrs read off the node. So the coverage follows the rules: when
- * [VjpRegistry.Conv2dRule] or [VjpRegistry.AvgPool2dRule] changes the attr
- * combination it emits, these tests start exercising the new spelling instead of
- * quietly pinning a stale one. Each test asserts it checked a non-zero number of
- * nodes, so a graph walk that finds nothing fails rather than passing vacuously.
+ * graph for every conv-family node, and replays each node twice — once through the
+ * interpreter, once through the host twin with the attrs read off the node. So the
+ * coverage follows the rules: when [VjpRegistry.Conv2dRule] or
+ * [VjpRegistry.AvgPool2dRule] changes the spelling it emits, these tests start
+ * exercising the new one instead of quietly pinning a stale one. Each test asserts
+ * WHICH kinds it checked, so a graph walk that finds nothing (or that silently
+ * stops finding a kind after a rule rewrite) fails rather than passing vacuously.
  *
  * Bit-exactness (not a tolerance) is the property under test: the K2 plugin
  * synthesises `grad {}` conv gradients into calls on these twins, and the
@@ -64,6 +67,7 @@ class DxirHostConvParityTest {
     private fun convFamilyNodes(fn: DxirFunction): List<DxirOp> =
         fn.body.filterIsInstance<DxirOp>().filter {
             it.op == OpKind.CONV2D || it.op == OpKind.CONV_TRANSPOSE2D ||
+                it.op == OpKind.CONV2D_DATA_ADJOINT || it.op == OpKind.CONV2D_KERNEL_ADJOINT ||
                 (it.op == OpKind.TRANSPOSE && it.type.rank == 4)
         }
 
@@ -109,6 +113,24 @@ class DxirHostConvParityTest {
                     )
                 }
             }
+            OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT -> {
+                // §0.4.385 — the fused adjoints. Only the primal's LOW padding
+                // reaches the host twin: the high side is implied by the
+                // upstream's runtime shape. The template operand is shape-only,
+                // but the probe still feeds it data so both engines see the same
+                // three operands.
+                val s = intPair(node.attrs, "window_strides", listOf(1, 1))
+                val d = intPair(node.attrs, "rhs_dilation", listOf(1, 1))
+                val p = paddingOf(node.attrs)
+                val a = tensor(inputs[0], node.operands[0].type.dims)
+                val b = tensor(inputs[1], node.operands[1].type.dims)
+                val tmpl = tensor(inputs[2], node.operands[2].type.dims)
+                if (node.op == OpKind.CONV2D_DATA_ADJOINT) {
+                    conv2dDataAdjoint(a, b, tmpl, s[0], s[1], d[0], d[1], p[0][0], p[1][0])
+                } else {
+                    conv2dKernelAdjoint(a, b, tmpl, s[0], s[1], d[0], d[1], p[0][0], p[1][0])
+                }
+            }
             else -> error("unexpected node kind ${node.op}")
         }
 
@@ -129,12 +151,15 @@ class DxirHostConvParityTest {
         return "no difference"
     }
 
-    /** Run the walk over [fn]'s gradient graph and return how many nodes were checked. */
-    private fun checkAdjointNodes(primal: DxirFunction, seed: Long): Int {
+    /**
+     * Run the walk over [fn]'s gradient body and return the kinds actually
+     * checked, so a test can assert its coverage rather than just a node count.
+     */
+    private fun checkAdjointNodes(primal: DxirFunction, seed: Long): List<OpKind> {
         val grads = DxirReverseTransform.apply(primal)
         val nodes = convFamilyNodes(grads)
         nodes.forEachIndexed { i, n -> assertTwinMatchesInterpreter(n, seed + i) }
-        return nodes.size
+        return nodes.map { it.op }
     }
 
     // ---- the primal losses whose adjoints are walked -----------------------
@@ -207,22 +232,41 @@ class DxirHostConvParityTest {
 
     @Test
     fun hostTwinsMatchInterpreterOnGeneralConvAdjoint() {
-        val checked = checkAdjointNodes(generalConvLossFn(), seed = 100)
-        // dX's reversed transposed conv, dW's stride-swapped conv with negative
-        // padding-high, and the two batch↔feature transposes around it.
-        assertTrue(checked >= 4, "expected ≥4 conv-family adjoint nodes, checked $checked")
+        val kinds = checkAdjointNodes(generalConvLossFn(), seed = 100)
+        // §0.4.385 — both fused adjoints, plus the primal conv the value stream
+        // keeps (MUL's adjoint reads it). The general attrs are what make the
+        // solved padding non-trivial: stride [2,1] means dX needs lhs_dilation
+        // [2,1] and dW a NEGATIVE crop, and rhs_dilation [1,2] means the kernel's
+        // effective width differs per axis.
+        assertCovers(
+            kinds,
+            listOf(OpKind.CONV2D, OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT),
+        )
     }
 
     @Test
     fun hostTwinsMatchInterpreterOnPlainConvAdjoint() {
-        val checked = checkAdjointNodes(plainConvLossFn(), seed = 200)
-        assertTrue(checked >= 4, "expected ≥4 conv-family adjoint nodes, checked $checked")
+        val kinds = checkAdjointNodes(plainConvLossFn(), seed = 200)
+        assertCovers(
+            kinds,
+            listOf(OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT),
+        )
     }
 
     @Test
     fun hostTwinsMatchInterpreterOnAvgPoolAdjoint() {
-        val checked = checkAdjointNodes(avgPoolLossFn(), seed = 300)
-        assertTrue(checked >= 1, "expected the avgpool adjoint's transposed conv, checked $checked")
+        val kinds = checkAdjointNodes(avgPoolLossFn(), seed = 300)
+        // AvgPool2dRule still emits the explicit lhs-dilated CONV_TRANSPOSE2D
+        // against a splat kernel — its own sentinel-safe rework belongs to the
+        // pooling slice. Pinned here so that slice inherits a certified twin.
+        assertCovers(kinds, listOf(OpKind.CONV_TRANSPOSE2D))
+    }
+
+    private fun assertCovers(actual: List<OpKind>, expected: List<OpKind>) {
+        assertTrue(
+            actual.containsAll(expected),
+            "expected the gradient body to exercise $expected; found $actual",
+        )
     }
 
     // ---- hand pins: the user-facing spellings, not just interpreter agreement

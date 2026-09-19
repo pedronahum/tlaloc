@@ -318,7 +318,7 @@ reachable from `grad {}`, not new math. New-op families come after.
        losses (general-attr conv, plain conv, avgpool) and replays each
        CONV2D / CONV_TRANSPOSE2D / rank-4 TRANSPOSE node through both engines, so
        coverage follows the rules rather than pinning hand-written attrs.
-    2. **conv2d user surface — ✅ forward mode, ❌ reverse mode (§0.4.384)**: the
+    2. **conv2d user surface ✅ (§0.4.384 forward, §0.4.385 reverse)**: the
        FIR arm landed (`io.tlaloc.core.ops.conv2d` / `.convTranspose2d`: literal
        attrs folded onto the op, symbolic extents → -1 result dims, the
        transposed spelling's user `stride` mapped to `lhs_dilation` with
@@ -328,32 +328,48 @@ reachable from `grad {}`, not new math. New-op families come after.
        conv) with no synthesis fallback, against an independent Double-precision
        reference written from the definition — the first rank-4 tensor surface
        the synthesis has ever accepted.
-       **Reverse mode is blocked on a finding that is NOT one of the four blockers
-       above.** `Conv2dRule` SOLVES its adjoint `padding` from the primal's
-       extents, and every `grad {}` param carries -1 sentinels, so the solve is
-       arithmetic garbage: a stride-1 padding-1 conv emits
-       `padding=[[-3,1],[-3,1]]` where the correct value is `[[1,1],[1,1]]`
+       **Reverse mode was blocked on a finding that is NOT one of the four
+       blockers above — now FIXED (§0.4.385).** `Conv2dRule` SOLVED its adjoint
+       `padding` from the primal's extents, and every `grad {}` param carries -1
+       sentinels, so the solve was arithmetic garbage: a stride-1 padding-1 conv
+       emitted `padding=[[-3,1],[-3,1]]` where the correct value is `[[1,1],[1,1]]`
        (observed directly, by running the reverse transform over a sentinel-dim
-       conv loss). Nothing downstream rejects it — the interpreter, the emitter
+       conv loss). Nothing downstream rejected it — the interpreter, the emitter
        and the host twins all faithfully honour the attrs they are handed — so the
-       gradient would have been silently WRONG. `AvgPool2dRule` is worse: its
-       channel-folding `RESHAPE` bakes `n * c`, which is **1** under sentinels.
-       Both rules now `require` concrete dims and fail loudly, and
-       `ConvForwardIntrinsicTest.reverseModeConvIsRejectedLoudlyNotSilentlyWrong`
-       pins that `grad { conv2d(…) }` is a compile ERROR (`NOT_DIFFERENTIABLE` is
-       error severity) instead of a wrong number at run time.
-       **So the real next slice is a sentinel-safe conv adjoint**, and the house
-       pattern already exists: PAD_TO / SUM_TO / SLICE_LIKE carry a runtime shape
-       TEMPLATE operand instead of baked extents. The conv adjoints need the same,
-       and the template is not currently an operand — `dX`'s target is `x`'s
-       extents, `dW`'s is `w`'s, and neither conv sees that tensor. That points at
-       fused adjoint ops (the `EMBEDDING_GRAD` precedent) taking a template
-       operand, each needing an interpreter arm, a host twin, a synthesis arm
-       (whose result IrType then IS the template's, exactly like PAD_TO — which
-       also dissolves blocker 2 for conv, since a conv body never mixes ranks) and
-       an emitter arm. The emitter arm is NOT optional here: §0.4.362's GPU
-       certification runs the conv gradient graph through real XLA, so switching
-       the rule's output without it would regress a shipped cert.
+       gradient would have been silently WRONG. §0.4.384's interim guard turned
+       that into a loud compile error; §0.4.385 removes the cause. `AvgPool2dRule`
+       has the same defect and STILL carries the guard: its channel-folding
+       `RESHAPE` bakes `n * c`, which is **1** under sentinels.
+       **The fix — two fused, runtime-extent adjoint ops**, following the house
+       pattern (PAD_TO / SUM_TO / SLICE_LIKE carry a shape TEMPLATE operand instead
+       of baked extents; `EMBEDDING_GRAD` is the fused-adjoint precedent):
+       `CONV2D_DATA_ADJOINT(upstream, kernel, xTemplate)` and
+       `CONV2D_KERNEL_ADJOINT(x, upstream, wTemplate)`. Each carries only the
+       primal's own literal attrs (`window_strides`, `padding`, `rhs_dilation`) and
+       solves the adjoint padding at EXECUTION time:
+       `dX: low = kEff−1−p_low, high = p_low + H − dilSize` and
+       `dW: low = p_low, high = (k−1)·d + dilSize − H − p_low` — algebraically
+       identical to the values the rule used to bake, verified over 2157
+       (extent, kernel, stride, dilation, padding) combinations before any code was
+       written. Only the primal's LOW padding is needed: its high side is already
+       implied by the upstream's runtime shape. The kernel adjoint also FUSES the
+       batch↔feature transpose trick, so the gradient body keeps no rank-4
+       TRANSPOSE nodes and each adjoint's result IrType is simply its template's —
+       which is what dissolves the single-representative `tensorIrType` blocker for
+       conv bodies (they never mix ranks). Every layer has an arm: interpreter
+       (`evalConvAdjoint`, over a lifted `conv2dCore` + `evalTranspose`), host twins
+       (`conv2dDataAdjoint` / `conv2dKernelAdjoint`, each asserting the solved conv
+       lands on its template), synthesis (`irConvAdjoint` + forward and backward
+       IrType arms), the cost model, and the emitter. The emitter arm was NOT
+       optional: §0.4.362's GPU cert runs the rule's gradient graph through real
+       XLA. It solves the padding from the concrete static dims at emit time, so
+       the MLIR is the same `stablehlo.convolution` the pre-fusion rule produced —
+       and that cert now covers the fused path (grads agree with the interpreter to
+       1.19e-7 on the GB10).
+       Still deferred: CONV_TRANSPOSE2D's own adjoint (differentiating *through* a
+       transposed conv), and the fused ops have neither a VjpRule nor a forward
+       tangent — as with `EMBEDDING_GRAD`, differentiating through a gradient body
+       that contains them fails loudly rather than silently.
        **API constraint discovered the hard way — applies to the pooling surfaces
        too.** The host conv ops take their attrs POSITIONALLY, in two arities,
        with NO default parameter values. K2 unwraps a named argument (`padTop = 1`)
@@ -362,9 +378,14 @@ reachable from `grad {}`, not new math. New-op families come after.
        distinguish `padTop = 1` from `strideH = 1`; the first E2E run folded the
        padding into the stride and silently produced a valid conv. Arity is
        unambiguous, defaults are not.
-    3. **avgPool** — cheap once (1) and (2) exist: a host twin + FIR arm +
-       synthesis arm, since its adjoint reuses conv-transpose. Now additionally
-       gated on the sentinel-safe adjoint above (its `RESHAPE` is the worse half).
+    3. **avgPool** — cheap now that (1) and (2) exist: a host twin + FIR arm +
+       synthesis arm. Its adjoint is a lhs-dilated CONV_TRANSPOSE2D against a
+       1/(kh·kw) splat kernel, so it needs the SAME runtime-template treatment
+       §0.4.385 gave conv (it still carries the loud sentinel guard) plus a
+       sentinel-safe spelling of its channel-folding `RESHAPE` — the reshape target
+       `n * c` is a product of two symbolic extents, so it needs a template operand
+       of its own (or a fused pooling adjoint, which is likely the cleaner answer
+       given the reshape only exists to dodge grouped-conv support).
     4. **maxPool last**: still blocked on rank-6 intermediates and the
        single-representative `context.tensorIrType` generalisation.
     `batchNorm` grad{} folds in here too (BATCHNORM OpKind exists; VJP + surface

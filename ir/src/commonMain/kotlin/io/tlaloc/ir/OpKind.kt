@@ -56,6 +56,37 @@ enum class OpKind {
     // convention, documented at the interpreter arm).
     MAXPOOL2D, AVGPOOL2D,
 
+    // §0.4.385 — the conv adjoints, fused and runtime-extent (Phase A3b).
+    // Both exist for one reason: the classical spellings SOLVE their `padding`
+    // from the primal's extents —
+    //   dX = CONV_TRANSPOSE2D(dY, W) with lhs_dilation = stride and
+    //        window_reversal, padding = [[kEff−1−p_low, p_low + H − dilSize], …]
+    //   dW = CONV2D(Xᵀ, dYᵀ) with window_strides = rhs_dilation and
+    //        rhs_dilation = stride, padding =
+    //        [[p_low, (k−1)·d + dilSize − H − p_low], …]
+    // where kEff and dilSize come from the kernel's and dY's spatial dims. Under
+    // `grad {}` every one of those extents is a -1 sentinel, so solving at
+    // TRANSFORM time bakes arithmetic garbage — `[[-3,1],[-3,1]]` where
+    // `[[1,1],[1,1]]` is correct for a stride-1 padding-1 conv — and nothing
+    // downstream objects: the interpreter, the emitter and the host twins all
+    // honour the attrs they are handed, so the gradient is silently wrong.
+    // These ops instead carry the tensor whose extents are the TARGET as a
+    // shape-only template operand (the PAD_TO / SUM_TO / SLICE_LIKE convention)
+    // and solve the padding at EXECUTION time from its runtime dims. Everything
+    // they do carry as attrs (`window_strides`, `padding`, `rhs_dilation`) is a
+    // literal fact off the primal conv, so it survives sentinels unchanged.
+    //
+    // CONV2D_DATA_ADJOINT(upstream, kernel, xTemplate) → dX at xTemplate's
+    // shape: the lhs-dilated, tap-reversed transposed conv.
+    // CONV2D_KERNEL_ADJOINT(x, upstream, wTemplate) → dW at wTemplate's shape:
+    // the batch↔feature transpose trick (Xᵀ ⋆ dYᵀ with stride and rhs_dilation
+    // swapping roles, transposed back), FUSED so the result type is simply the
+    // kernel's and no rank-4 TRANSPOSE nodes are left in the gradient body.
+    // In both, the template contributes SHAPE ONLY — its values are never read
+    // (dX's conv needs only dY and W; dW's needs only X and dY).
+    // Host twins: `conv2dDataAdjoint` / `conv2dKernelAdjoint`.
+    CONV2D_DATA_ADJOINT, CONV2D_KERNEL_ADJOINT,
+
     // Shape
     RESHAPE, TRANSPOSE, BROADCAST, CONCAT, SPLIT, SLICE, GATHER, SCATTER,
 
