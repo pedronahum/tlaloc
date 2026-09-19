@@ -7,6 +7,7 @@ import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
 import io.tlaloc.ir.DxirBuilder
+import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirEmitter
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirNode
@@ -39,6 +40,7 @@ import org.jetbrains.kotlin.fir.symbols.impl.FirValueParameterSymbol
 import org.jetbrains.kotlin.fir.types.ConeKotlinType
 import org.jetbrains.kotlin.fir.types.classId
 import org.jetbrains.kotlin.fir.types.coneType
+import org.jetbrains.kotlin.fir.types.resolvedType
 import org.jetbrains.kotlin.fir.types.type
 
 /**
@@ -1086,9 +1088,30 @@ object FirLambdaToDxirLowering {
         BINARY_OP_MAP[fqn]?.let { kind ->
             val lhsExpr = receiver(call)
                 ?: throw LoweringException("binary op '$fqn' has no receiver")
-            val lhs = lowerExpr(lhsExpr, env, emitter)
             val rhsExpr = call.argumentList.arguments.firstOrNull()
                 ?: throw LoweringException("binary op '$fqn' missing rhs argument")
+            // Phase A5 (DiffKT parity) — scalar × tensor mixing. `a * 2.0f` and
+            // `3.0f - a` share these FQNs with the tensor⊙tensor operators (the
+            // scalar overloads live in the same `io.tlaloc.core.ops` package), so
+            // the mixed case arrives here as one rank-0 and one rank-N operand.
+            // Lowering it verbatim leaves an ill-typed binary op — every consumer
+            // downstream requires matching operands (the interpreter's size check,
+            // the emitter's `broadcastIfNeeded`, and MulRule/DivRule, which type
+            // their adjoint products as `upstream.type`) — and synthesis then
+            // builds an IrCall passing a Float where a DTensor is expected.
+            // Splatting the scalar side to the tensor side's type makes the op
+            // well-typed with NO new op kind and NO new VjpRule: a literal splats
+            // to a shaped const (the §0.4.369 `clip` bound pattern), a computed
+            // rank-0 value splats through BROADCAST with an empty
+            // `broadcast_dimensions` (the §0.4.359 scalar-seed polymorphism), and
+            // the adjoint of a DIFFERENTIABLE scalar side falls out of
+            // BroadcastRule as the runtime-extent SUM_TO full reduce (§0.4.373).
+            // Operand order is preserved — `3.0f - a` is not `a - 3.0f`.
+            // MATMUL is excluded: its operands are rank ≥ 2 by contract.
+            if (kind in ELEMENTWISE_BINARY_KINDS) {
+                lowerScalarMixedBinary(kind, lhsExpr, rhsExpr, env, emitter)?.let { return it }
+            }
+            val lhs = lowerExpr(lhsExpr, env, emitter)
             val rhs = lowerExpr(rhsExpr, env, emitter)
             return emitter.op(
                 kind = kind,
@@ -1462,6 +1485,56 @@ object FirLambdaToDxirLowering {
     }
 
     /**
+     * Phase A5 — the mixed-rank arm of the [BINARY_OP_MAP] dispatch: one side is
+     * an F32 `DTensor`, the other a scalar. Returns the lowered op, or null when
+     * the call is not a scalar × tensor mix (so the caller's uniform path runs).
+     *
+     * Which side is the tensor is read off the FIR types rather than off lowered
+     * nodes, so the literal case can splat straight to a shaped const without
+     * first materialising — and then orphaning — a rank-0 const: the same IR shape
+     * the §0.4.369 `clip` arm produces for its Float bounds. A COMPUTED scalar
+     * side (a rank-0 value: a reduction result, a scalar param, a `val`) has no
+     * literal to fold, so it splats through [splatScalarTo]'s BROADCAST form.
+     *
+     * Sentinel-safe either way: the splat's target dims are the tensor operand's
+     * (possibly -1), and synthesis materialises them at runtime by axis-matching
+     * the params, so no dim value is ever baked.
+     */
+    private fun lowerScalarMixedBinary(
+        kind: OpKind,
+        lhsExpr: FirExpression,
+        rhsExpr: FirExpression,
+        env: MutableMap<Any, DxirNode>,
+        emitter: DxirEmitter,
+    ): DxirNode? {
+        val lhsIsTensor = isDTensorExpr(lhsExpr)
+        if (lhsIsTensor == isDTensorExpr(rhsExpr)) return null
+        val tensor = lowerExpr(if (lhsIsTensor) lhsExpr else rhsExpr, env, emitter)
+        val scalarExpr = if (lhsIsTensor) rhsExpr else lhsExpr
+        // A rank-0 DTensor operand (both sides scalar) or a non-F32 tensor needs no
+        // splat. Finish the uniform lowering here rather than returning null — the
+        // tensor side is already lowered, and letting the caller lower it again
+        // would emit it twice.
+        if (tensor.type.isScalar || tensor.type.dtype != F32) {
+            val scalarSide = lowerExpr(scalarExpr, env, emitter)
+            val operands = if (lhsIsTensor) listOf(tensor, scalarSide) else listOf(scalarSide, tensor)
+            return emitter.op(kind = kind, operands = operands, type = operands[0].type)
+        }
+        val literal = floatLiteralArg(scalarExpr)
+        val splat = if (literal != null) {
+            emitter.const(literal, tensor.type)
+        } else {
+            splatScalarTo(lowerExpr(scalarExpr, env, emitter), tensor.type, emitter)
+        }
+        val operands = if (lhsIsTensor) listOf(tensor, splat) else listOf(splat, tensor)
+        return emitter.op(kind = kind, operands = operands, type = tensor.type)
+    }
+
+    /** True when [expr]'s resolved FIR type is `io.tlaloc.core.DTensor` (any shape / dtype args). */
+    private fun isDTensorExpr(expr: FirExpression): Boolean =
+        expr.resolvedType.classId?.asString() == "io/tlaloc/core/DTensor"
+
+    /**
      * Layer 1 §0.4.241+ + Layer 1.5 §0.4.242+ — emit a [OpKind.MATMUL] (or
      * [OpKind.DOT] for the rank-1 × rank-1 case) for a named-index
      * `contract` call.
@@ -1754,14 +1827,50 @@ object FirLambdaToDxirLowering {
         // Until now only matmul lowered from the tensor operator surface —
         // `a * b` on same-shape DTensors hit "unsupported call". Elementwise
         // `type = lhs.type` dispatch is exactly right for these. (The
-        // tensor×Float `times` overload shares this FQN; its scalar rhs now
-        // surfaces as a compile-time shape mismatch instead of the previous
-        // unsupported-call warning + runtime throw.)
+        // scalar-mixing overloads — `a * 2.0f`, `3.0f - a` — share these FQNs
+        // and arrive as one rank-0 and one rank-N operand; the mixed-rank arm
+        // above splats the scalar side, per Phase A5.)
         put("io.tlaloc.core.ops.plus", OpKind.ADD)
         put("io.tlaloc.core.ops.minus", OpKind.SUB)
         put("io.tlaloc.core.ops.times", OpKind.MUL)
         put("io.tlaloc.core.ops.div", OpKind.DIV)
     }
+
+    /**
+     * Phase A5 — the [BINARY_OP_MAP] kinds whose operands must agree in shape,
+     * i.e. the ones the mixed-rank scalar-splat arm applies to. MATMUL is in the
+     * same map but contracts rank ≥ 2 operands, where a scalar side is a type
+     * error rather than a broadcast.
+     */
+    private val ELEMENTWISE_BINARY_KINDS: Set<OpKind> =
+        setOf(OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV)
+
+    /**
+     * Phase A5 — splat a rank-0 [scalar] over [type]'s shape.
+     *
+     * A compile-time constant splats to a shaped const (the §0.4.369 `clip`
+     * bound pattern — synthesis materialises it via `irConstFor`'s axis-matching
+     * against the params, so -1 sentinel dims are read at runtime, never baked).
+     * A computed rank-0 value splats through BROADCAST with an EMPTY
+     * `broadcast_dimensions`, the §0.4.359 scalar-seed polymorphism the §0.4.371
+     * generalisation preserved: the interpreter fills the output with the single
+     * input element, the emitter emits a scalar→shape `broadcast_in_dim`, and
+     * BroadcastRule's adjoint is the full reduce — emitted since §0.4.373 as the
+     * runtime-extent `SUM_TO`, which reads the target shape from its template
+     * operand at execution. Both forms are therefore sentinel-safe, and a
+     * differentiable scalar side gets a correct adjoint for free.
+     */
+    private fun splatScalarTo(scalar: DxirNode, type: DxirType, emitter: DxirEmitter): DxirNode =
+        if (scalar is DxirConst) {
+            emitter.const(scalar.value, type)
+        } else {
+            emitter.op(
+                kind = OpKind.BROADCAST,
+                operands = listOf(scalar),
+                type = type,
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+        }
 
     // §0.4.40 — dtype-conversion calls. Maps receiver-only `Int.toFloat()` /
     // `Long.toDouble()` / etc. to the target DType. These emit `OpKind.CAST` with

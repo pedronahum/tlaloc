@@ -1121,7 +1121,21 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.SUB -> if (isAcceptedTensorType(op.type)) findTensorBinaryOp("minus") else findBinaryOp("minus", op.type, context)
             OpKind.MUL -> if (isAcceptedTensorType(op.type)) findTensorBinaryOp("times") else findBinaryOp("times", op.type, context)
             OpKind.DIV -> if (isAcceptedTensorType(op.type)) findTensorBinaryOp("div") else findBinaryOp("div", op.type, context)
-            OpKind.NEG -> findUnaryOp("unaryMinus", op.type, context)
+            // Phase A5 — NEG was the one unary still routed unconditionally through
+            // [findUnaryOp], which is keyed on `dxirType.dtype` alone: for a
+            // TENSOR-typed NEG it resolved `kotlin.Float.unaryMinus` and then typed
+            // the call as the DTensor result, so codegen emitted `checkcast Number`
+            // → `floatValue` → `fneg` → `checkcast DTensor` — a ClassCastException
+            // the first time the gradient ran. Reachable from any tensor SUB
+            // (SubRule's `NEG(upstream)`), any tensor DIV (DivRule's `NEG(mul)`) and
+            // CosRule's `-sin(x)`; no E2E surface exercised it before scalar mixing
+            // landed. Mirrors the ADD/SUB/MUL/DIV dispatch directly above: tensor →
+            // the `:core/ops` DTensor extension, scalar → the primitive member.
+            OpKind.NEG -> if (isAcceptedTensorType(op.type)) {
+                opsTensorSymbol("neg")
+            } else {
+                findUnaryOp("unaryMinus", op.type, context)
+            }
             else -> return reject("op id=${op.id} ${op.op} type=${op.type} has no synthesis arm")
         } ?: return reject("no IR symbol for op id=${op.id} ${op.op} type=${op.type}")
 
@@ -2448,24 +2462,29 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(opName),
         )
-        // §0.4.206 — `:core/ops/times` has two overloads since this firing:
+        // §0.4.206 — `:core/ops/times` grew a second overload in that firing:
         // `DTensor<S, F32>.times(other: DTensor<S, F32>)` (elementwise tensor)
         // and `DTensor<S, F32>.times(scalar: Float)` (scalar-multiply). The
-        // `singleOrNull()` lookup that worked through §0.4.205 now returns
-        // null. Filter to the tensor-by-tensor overload (one regular param
-        // typed `DTensor<...>`). For other ops (`plus`, `minus`, `div`)
-        // there's still only one overload, so `singleOrNull()` returns the
-        // unique value after filtering.
+        // `singleOrNull()` lookup that worked through §0.4.205 then returned
+        // null, so this filters to the tensor-by-tensor overload.
+        //
+        // Phase A5 — all four ops now also carry the scalar-mixing overloads
+        // (`DTensor.plus(Float)` AND the scalar-on-the-left `Float.plus(DTensor)`),
+        // so the filter has to name the receiver too: an extension receiver typed
+        // `DTensor` plus exactly one regular parameter typed `DTensor`. Checking
+        // only the regular parameter matched `Float.minus(DTensor)` as well — its
+        // Float is the RECEIVER, not a parameter — and picking that overload
+        // synthesized a call whose receiver slot held a DTensor, which the JVM
+        // then rejected at runtime (`DTensor cannot be cast to Number`).
+        val dtensorClass = pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/DTensor"))
+        fun isDTensor(type: IrType?) = (type as? IrSimpleType)?.classifier == dtensorClass
         return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
-            // Must have exactly one regular parameter (no scalar overload).
             val regular = params.filter { it.kind == IrParameterKind.Regular }
             if (regular.size != 1) return@firstOrNull false
-            // The regular parameter must be a DTensor (not a primitive Float).
-            val paramType = regular[0].type as? IrSimpleType ?: return@firstOrNull false
-            paramType.classifier == pluginContext.referenceClass(
-                ClassId.fromString("io/tlaloc/core/DTensor")
-            )
+            val receiver = params.firstOrNull { it.kind == IrParameterKind.ExtensionReceiver }
+                ?: return@firstOrNull false
+            isDTensor(receiver.type) && isDTensor(regular[0].type)
         }
     }
 

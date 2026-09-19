@@ -42,13 +42,48 @@ operator fun <S : Shape> DTensor<S, F32>.div(other: DTensor<S, F32>): DTensor<S,
  * Required for vanilla gradient-descent updates (`W = W - lr * dW`) used by
  * CartPole's outer training loop. Avoids the `broadcastLike(scalar, W) * dW`
  * roundabout that would otherwise be needed for `lr * dW`.
+ *
+ * Phase A5 (DiffKT parity) completes the set: DiffKT mixes scalars into every
+ * binary op (`timesScalar` + `broadcast(S1, S2)`), so `a + 1.0f`, `a / 2.0f`
+ * and the scalar-on-the-left spellings `3.0f - a` / `2.0f * a` are all
+ * writable. The scalar-on-left forms matter for the non-commutative ops —
+ * `3.0f - a` is not `a - 3.0f` — and the K2 plugin preserves source operand
+ * order when it splats them (see `FirLambdaToDxirLowering`'s mixed-rank arm).
  */
-operator fun <S : Shape> DTensor<S, F32>.times(scalar: Float): DTensor<S, F32> {
-    val v = hostF32()
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = v[i] * scalar
-    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+private fun <S : Shape> elementwiseScalar(
+    a: DTensor<S, F32>,
+    b: Float,
+    f: (Float, Float) -> Float,
+): DTensor<S, F32> {
+    val av = a.hostF32()
+    val out = FloatArray(av.size)
+    for (i in av.indices) out[i] = f(av[i], b)
+    return DTensor(HostF32Storage(out), a.dims.copyOf(), F32)
 }
+
+operator fun <S : Shape> DTensor<S, F32>.plus(scalar: Float): DTensor<S, F32> =
+    elementwiseScalar(this, scalar) { x, y -> x + y }
+
+operator fun <S : Shape> DTensor<S, F32>.minus(scalar: Float): DTensor<S, F32> =
+    elementwiseScalar(this, scalar) { x, y -> x - y }
+
+operator fun <S : Shape> DTensor<S, F32>.times(scalar: Float): DTensor<S, F32> =
+    elementwiseScalar(this, scalar) { x, y -> x * y }
+
+operator fun <S : Shape> DTensor<S, F32>.div(scalar: Float): DTensor<S, F32> =
+    elementwiseScalar(this, scalar) { x, y -> x / y }
+
+operator fun <S : Shape> Float.plus(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwiseScalar(other, this) { x, y -> y + x }
+
+operator fun <S : Shape> Float.minus(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwiseScalar(other, this) { x, y -> y - x }
+
+operator fun <S : Shape> Float.times(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwiseScalar(other, this) { x, y -> y * x }
+
+operator fun <S : Shape> Float.div(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwiseScalar(other, this) { x, y -> y / x }
 
 fun <S : Shape> DTensor<S, F32>.relu(): DTensor<S, F32> {
     val v = hostF32()

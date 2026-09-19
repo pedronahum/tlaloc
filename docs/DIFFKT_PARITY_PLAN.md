@@ -236,12 +236,59 @@ reachable from `grad {}`, not new math. New-op families come after.
     grad{} params carry DISTINCT atoms (`n = Sym`, `m = Lit<Int>`) so the seed's
     `[n,m]` shape resolves unambiguously; `∇ Σ outerProduct(a, b)` synthesises
     with no fallback and matches `da_i = Σ_j b[j]`, `db_j = Σ_i a[i]`.
-- **A5. Binary-op broadcasting + orphaned lowerings** *(audit)*:
-  implicit broadcasting on tensor binary ops (`broadcast(S1,S2)` — DiffKT
-  broadcasts everywhere) and `Float×DTensor`/`DScalar×DTensor` mixing;
-  plus map entries for ops whose IR+VJP already exist but aren't
-  reachable: tensor/scalar `pow`, scalar `tanh`/`sigmoid`, tensor
-  `mean` (dispatch arm exists, map entry missing).
+- **A5. Binary-op broadcasting + orphaned lowerings** *(audit)* — split by
+  what the operand shapes require:
+  - **A5a ✅ (§0.4.376) — scalar × tensor mixing**, E2E through `grad {}`:
+    all four elementwise binaries with a `Float` on either side (`a * 2.0f`,
+    `a + 1.0f`, `3.0f - a`, `b / 2.0f`) plus a COMPUTED scalar side
+    (`a * b.sum().toFloat()`). Mechanism: the FIR splats the rank-0 operand to
+    the tensor operand's type, so the binary op is well-typed and every rule
+    that already ships applies — **no new op kind, no new VjpRule**. A literal
+    splats to a shaped const (the §0.4.369 `clip` bound pattern, so no dead
+    rank-0 const is left in the body); a computed rank-0 value splats through
+    BROADCAST with empty `broadcast_dimensions` (the §0.4.359 scalar-seed
+    polymorphism), whose adjoint is BroadcastRule's runtime-extent `SUM_TO`
+    full reduce (§0.4.373) — so a DIFFERENTIABLE scalar side is correct for
+    free (test 4: `db = Σa` flows back through the splat). Sentinel-safe: the
+    splat target dims are the tensor operand's (-1s included) and synthesis
+    materialises them by axis-matching params. Landed along the way: the eight
+    `:core` scalar-mixing operator overloads (`DTensor + - * / Float` and the
+    scalar-on-left `Float + - * / DTensor`, which the non-commutative pair
+    needs); `findTensorBinaryOp`'s overload filter had to start naming the
+    EXTENSION RECEIVER (a `Float.op(DTensor)` overload also has "exactly one
+    regular DTensor param", and picking it synthesized a call whose receiver
+    slot held a DTensor); and **tensor `NEG` synthesis was broken** —
+    `findUnaryOp` is keyed on `dxirType.dtype` alone, so a DTensor-typed NEG
+    resolved `kotlin.Float.unaryMinus` and the generated gradient threw
+    `ClassCastException` at run time. Reachable from any tensor SUB (SubRule's
+    `NEG(upstream)`), any tensor DIV (DivRule's `NEG(mul)`) and CosRule's
+    `-sin(x)`; no E2E surface had exercised it. Pre-existing, surfaced by A5a.
+    Not covered: `DScalar × DTensor` mixing (DiffKT's `timesScalar` on
+    DScalar) and comparisons against a scalar (`a gt 1.0f` — the
+    COMPARE_DIRECTION_MAP arm still lowers both sides verbatim).
+  - **A5b (pending) — orphaned lowerings.** The audit's list is partly stale:
+    tensor `mean`'s map entry landed with A1 (§0.4.366). Still orphaned:
+    scalar `tanh`/`sigmoid` — `:core/DScalar.kt` has NO scalar host fns for
+    them at all (only sqrt/exp/log/sin/cos/abs/relu), though synthesis already
+    routes scalar TANH to `kotlin.math.tanh` and rejects scalar SIGMOID;
+    tensor/scalar `pow` — POW is fully ruled below the surface (PowRule,
+    interpreter, emitter, forward transform, synthesis `irPow`) but has no
+    `:core` host op and no FIR entry, and `irPow` is scalar-only.
+  - **A5c (pending) — implicit tensor × tensor broadcasting**
+    (`broadcast(S1,S2)`; DiffKT broadcasts every binary op). Three layers
+    disagree today: the interpreter requires equal operand SIZES, the
+    emitter's `broadcastIfNeeded` is same-rank-only (operand dim == result dim
+    or 1), and AddRule/SubRule pass `upstream` straight through while
+    MulRule/DivRule type their adjoint products as `upstream.type` — so the
+    adjoints are wrong-shaped whenever operands differ. Sentinel-safe route:
+    FIR derives the result RANK as `max(rank_a, rank_b)` (ranks are known even
+    under -1 dims, per §0.4.371's right-alignment argument), the adjoints wrap
+    each contribution in the §0.4.373 runtime-extent `SUM_TO` (an identity when
+    the shapes already match, which is what makes it safe under sentinels), and
+    `broadcastIfNeeded` generalises to right-aligned rank extension. Also needs
+    broadcasting host binary ops — the shared `S` type param can't express two
+    different shapes — plus a synthesis dispatch + IrType arm for mixed-rank
+    operands. Likely two slices (IR level, then user surface).
 
 ### Phase B — AD-mode parity
 
@@ -344,16 +391,16 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 
 `+ - * / unaryMinus` ✅ · `abs sqrt exp ln sin cos relu` ✅ ·
 `compareTo`/`eq ne lt le gt ge` ✅ (Kotlin comparisons + IF lower today) ·
-`tanh sigmoid pow` 🟡 (IR + VJP exist; **not in the scalar
-UNARY/BINARY maps** → A5) · `tan atan` ❌ (C2) ·
-`lgamma digamma polygamma` ❌ (C1) · `sigmoid(DScalar)` 🟡 (same A5).
+`tanh sigmoid pow` 🟡 (IR + VJP exist; no `:core` scalar host fns and **not
+in the scalar UNARY/BINARY maps** → A5b) · `tan atan` ❌ (C2) ·
+`lgamma digamma polygamma` ❌ (C1) · `sigmoid(DScalar)` 🟡 (same A5b).
 
 #### Tensor ops (top-level files + `Operations` interface)
 
 | DiffKT | Tlaloc | Notes |
 |---|---|---|
-| `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 — **same-shape only**; DiffKT broadcasts every binary op (`broadcast(S1,S2)`) and mixes `DScalar×DTensor` / `Float×DTensor` (`timesScalar`) → **new A5** |
-| `pow(Float/Int/DScalar/tensor-exponent)` | 🟡 | POW + VjpRule + fwd rule all exist; no lowering entry → A5 |
+| `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 — tensor⊗tensor is **same-shape only**; `Float×DTensor` mixing on both operand orders ✅ A5a (§0.4.376). DiffKT broadcasts every binary op (`broadcast(S1,S2)`) → A5c; `DScalar×DTensor` still open |
+| `pow(Float/Int/DScalar/tensor-exponent)` | 🟡 | POW + VjpRule + fwd rule all exist; no host op, no lowering entry → A5b |
 | `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 |
 | `relu reluGrad sigmoid tanh exp ln sqrt abs` (tensor) | ✅ | `reluGrad` is public in DiffKT; ours is internal — fine |
 | `sin cos tan atan` (tensor) | ✅/❌ | sin/cos ✅; tan/atan ❌ → C2 (audit: **no** floor/ceil/round/atan2 in DiffKT — plan over-scoped C2; now ours-optional) |

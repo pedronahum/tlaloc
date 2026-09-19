@@ -30,6 +30,27 @@ class HostOpsTest {
     }
 
     @Test
+    fun scalarMixingTensorOnLeft() {
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(6f, 8f, 10f, 12f))
+        assertContentEquals(floatArrayOf(8f, 10f, 12f, 14f), (a + 2f).hostF32())
+        assertContentEquals(floatArrayOf(4f, 6f, 8f, 10f), (a - 2f).hostF32())
+        assertContentEquals(floatArrayOf(12f, 16f, 20f, 24f), (a * 2f).hostF32())
+        assertContentEquals(floatArrayOf(3f, 4f, 5f, 6f), (a / 2f).hostF32())
+        assertContentEquals(intArrayOf(1, 4), (a + 2f).dims)
+    }
+
+    @Test
+    fun scalarMixingScalarOnLeft() {
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(1f, 2f, 4f, 8f))
+        assertContentEquals(floatArrayOf(11f, 12f, 14f, 18f), (10f + a).hostF32())
+        // Non-commutative: the scalar-on-left spelling is not `a - 10f`.
+        assertContentEquals(floatArrayOf(9f, 8f, 6f, 2f), (10f - a).hostF32())
+        assertContentEquals(floatArrayOf(10f, 20f, 40f, 80f), (10f * a).hostF32())
+        assertContentEquals(floatArrayOf(10f, 5f, 2.5f, 1.25f), (10f / a).hostF32())
+        assertContentEquals(intArrayOf(1, 4), (10f - a).dims)
+    }
+
+    @Test
     fun shapeMismatchFailsFast() {
         val a = Tensors.f32Matrix<Sym, Sym>(2, 3, FloatArray(6))
         val b = Tensors.f32Matrix<Sym, Sym>(3, 2, FloatArray(6))
