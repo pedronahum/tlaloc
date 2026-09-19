@@ -281,6 +281,35 @@ reachable from `grad {}`, not new math. New-op families come after.
     conv-transpose synthesis), then maxpool last (blocked on the rank-6 model +
     the `context.tensorIrType` generalisation). `batchNorm` grad{} folds in here
     too (BATCHNORM OpKind exists; VJP + surface unaudited).
+    **§0.4.383 correction — that sequencing is wrong, verified against the code.**
+    `AvgPool2dRule` is NOT the cheap wedge: its adjoint is
+    `RESHAPE → CONV_TRANSPOSE2D(kernel = 1/(kh·kw) splat, lhs_dilation = stride,
+    padding derived from window/stride/padding) → RESHAPE`, i.e. avgpool needs
+    conv-transpose synthesis and a host twin exactly as conv2d does. There is no
+    cheap first op among the three; the enabling slice is the SHARED rank-4
+    substrate. Also verified while re-scoping: `:core` has no host
+    `conv2d`/`convTranspose2d`/`avgPool2d`/`maxPool2d` at all; synthesis has no arm
+    for any of the four OpKinds; `isAcceptedTensorType` is `F32 && rank in 1..3`;
+    and `rebuildShapeAtoms`/`deriveInsertedAxesDTensor` cap at `Rank3` — though
+    `Rank4`/`Rank5`/`Rank6` shape witnesses DO already exist in
+    `:core/Shape.kt:73-81`, so the type level needs no new vocabulary, only new
+    arms. Corrected order:
+    1. **rank-4 substrate** (the real first slice, and the only one that unblocks
+       the others): widen `isAcceptedTensorType` to rank 4 *for the conv/pool kinds
+       only* if that can be done without admitting rank-4 everywhere (the gate is
+       consulted by every arm, so a blanket widen needs a suite-wide check);
+       extend `rebuildShapeAtoms`/`shapeAtomsOf` to `Rank4`; add `:core` host
+       `conv2d` + `convTranspose2d` (NCHW, matching the interpreter's
+       `evalConv2d` semantics bit-for-bit) and the 4-D `transposePerm4`; add the
+       CONV2D/CONV_TRANSPOSE2D `deriveResultIrType` + backward-solver arms.
+    2. **conv2d user surface**: FIR arm parsing the window/stride/padding literal
+       attrs, `irConv2d`/`irConvTranspose2d` synthesis, E2E.
+    3. **avgPool** — cheap once (1) and (2) exist: a host twin + FIR arm +
+       synthesis arm, since its adjoint reuses conv-transpose.
+    4. **maxPool last**: still blocked on rank-6 intermediates and the
+       single-representative `context.tensorIrType` generalisation.
+    `batchNorm` grad{} folds in here too (BATCHNORM OpKind exists; VJP + surface
+    unaudited).
 - **A4. Elementwise binary max/min + clip + outerProduct** — split by the
   synthesis-transpose boundary:
   - **A4a ✅ (§0.4.369)**: `maximum(a, b)` / `minimum(a, b)` / `clip(x, lo, hi)`
