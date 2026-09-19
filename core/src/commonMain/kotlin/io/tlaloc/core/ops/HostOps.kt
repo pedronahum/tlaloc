@@ -970,6 +970,80 @@ fun <S : Shape> sliceLikeAfter3(
 ): DTensor<S, F32> = sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2))
 
 /**
+ * Phase A2b — the two-operand concat the K2 plugin synthesises with.
+ *
+ * Fixed arity on purpose: synthesis builds positional `IrCall` arguments and cannot
+ * construct an `IrVararg` (the documented reason the whole `…RankN` shim family
+ * exists), so the user-facing [concat] below folds n operands into a right-fold of
+ * these. Concat is associative along the axis, so the fold is semantics-preserving;
+ * it costs one extra pass per intermediate, which is the price of never needing a
+ * variadic call.
+ *
+ * Non-axis extents must agree and every operand must share the rank — the same
+ * contract the dxir interpreter's CONCAT arm and `stablehlo.concatenate` have.
+ */
+fun <R : Shape> concatPair(axis: Int, a: DTensor<*, F32>, b: DTensor<*, F32>): DTensor<R, F32> {
+    val ad = a.dims
+    val bd = b.dims
+    require(ad.size == bd.size) {
+        "concatPair: ranks differ (${ad.toList()} vs ${bd.toList()}); concat does not broadcast"
+    }
+    require(axis in ad.indices) { "concatPair: axis $axis outside rank ${ad.size}" }
+    for (i in ad.indices) {
+        require(i == axis || ad[i] == bd[i]) {
+            "concatPair: non-axis $i extents differ (${ad[i]} vs ${bd[i]})"
+        }
+    }
+    var outer = 1
+    for (k in 0 until axis) outer *= ad[k]
+    var inner = 1
+    for (k in axis + 1 until ad.size) inner *= ad[k]
+    val aRun = ad[axis] * inner
+    val bRun = bd[axis] * inner
+    val av = a.hostF32()
+    val bv = b.hostF32()
+    val out = FloatArray(outer * (aRun + bRun))
+    var dst = 0
+    for (o in 0 until outer) {
+        av.copyInto(out, dst, o * aRun, o * aRun + aRun)
+        dst += aRun
+        bv.copyInto(out, dst, o * bRun, o * bRun + bRun)
+        dst += bRun
+    }
+    val outDims = ad.copyOf().also { it[axis] = ad[axis] + bd[axis] }
+    return DTensor(HostF32Storage(out), outDims, F32)
+}
+
+/**
+ * Phase A2b (DiffKT parity) — concatenate [tensors] along [axis]. The result erases
+ * to `DTensor<Shape, F32>`: the concat axis's extent is a runtime SUM of the
+ * operands' extents, which no static shape witness can carry — the same convention
+ * `slice`, `reshape` and `broadcastTo` follow. Differentiable in `grad {}`: the
+ * adjoint gives each operand its window of the upstream via `SLICE_LIKE`, whose
+ * bounds are read off the operands' runtime shapes.
+ */
+fun concat(axis: Int, vararg tensors: DTensor<*, F32>): DTensor<Shape, F32> {
+    require(tensors.size >= 2) { "concat: needs at least 2 tensors, got ${tensors.size}" }
+    var acc: DTensor<Shape, F32> = concatPair(axis, tensors[0], tensors[1])
+    for (i in 2 until tensors.size) acc = concatPair(axis, acc, tensors[i])
+    return acc
+}
+
+/**
+ * Phase A2b (DiffKT parity) — `stack(axis, tensors)`: give each operand a new
+ * size-1 axis at [axis], then concatenate along it, so the result has rank
+ * `operand.rank + 1`. Pure sugar over [unsqueeze] + [concat], which is exactly how
+ * the K2 plugin lowers it.
+ */
+fun stack(axis: Int, vararg tensors: DTensor<*, F32>): DTensor<Shape, F32> {
+    require(tensors.size >= 2) { "stack: needs at least 2 tensors, got ${tensors.size}" }
+    val lifted = tensors.map { it.unsqueeze(axis) }
+    var acc: DTensor<Shape, F32> = concatPair(axis, lifted[0], lifted[1])
+    for (i in 2 until lifted.size) acc = concatPair(axis, acc, lifted[i])
+    return acc
+}
+
+/**
  * §0.4.366 — insert size-1 axes at the given (result-indexed, ascending)
  * positions. The host twin of the keepdims RESHAPE the reduction VJP rules
  * emit (`upstream` at the squeezed shape → the keepdims spelling): axis

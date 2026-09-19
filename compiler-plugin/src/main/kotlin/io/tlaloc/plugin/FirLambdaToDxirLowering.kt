@@ -1171,6 +1171,78 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // Phase A2b — `concat(axis, vararg tensors)` and `stack(axis, vararg
+        // tensors)` (DiffKT parity). Two things make these unlike every op lowered
+        // so far:
+        //
+        //  * the operand count is the USER's, so the call arrives with a
+        //    `FirVarargArgumentsExpression` to flatten (the `SHAPE_OP_SET` and
+        //    `REDUCE_OP_MAP` arms already do this for `vararg Int` axes);
+        //  * synthesis cannot build an `IrVararg` — the documented reason the whole
+        //    `…RankN` host-shim family exists — so an n-ary CONCAT node would be
+        //    unsynthesizable whenever it survived into a gradient body, which it
+        //    does for the ordinary `concat(…).sum()` loss tail. Concat is
+        //    associative along the axis, so the lowering folds n operands into a
+        //    right-fold of BINARY CONCATs: unbounded in n, and each node matches the
+        //    fixed-arity `concatPair` host op.
+        //
+        // `stack` is sugar and lowers as such: unsqueeze every operand at `axis`
+        // (a unit-axis RESHAPE, which synthesis has handled since §0.4.375) and then
+        // concat along it. Axis extents sum, so the result axis is a -1 sentinel
+        // whenever any operand's is; every other extent must agree.
+        if (fqn == "io.tlaloc.core.ops.concat" || fqn == "io.tlaloc.core.ops.stack") {
+            val isStack = fqn == "io.tlaloc.core.ops.stack"
+            val args = call.argumentList.arguments
+            if (args.isEmpty()) throw LoweringException("'$fqn' takes (axis, vararg tensors)")
+            val rawAxis = intLiteralArg(args[0])
+                ?: throw LoweringException("'$fqn' axis must be an Int literal")
+            val tensorExprs = mutableListOf<FirExpression>()
+            for (arg in args.drop(1)) {
+                if (arg is FirVarargArgumentsExpression) tensorExprs += arg.arguments else tensorExprs += arg
+            }
+            if (tensorExprs.size < 2) {
+                throw LoweringException("'$fqn' needs at least 2 tensors, got ${tensorExprs.size}")
+            }
+            var nodes = tensorExprs.map { lowerExpr(it, env, emitter) }
+            val operandRank = nodes[0].type.rank
+            val axis = if (rawAxis < 0) rawAxis + operandRank + (if (isStack) 1 else 0) else rawAxis
+            if (isStack) {
+                if (axis !in 0..operandRank) {
+                    throw LoweringException("stack axis $rawAxis out of range for result rank ${operandRank + 1}")
+                }
+                nodes = nodes.map { n ->
+                    val dims = (0..n.type.rank).map { i ->
+                        when {
+                            i == axis -> 1
+                            i < axis -> n.type.dims[i]
+                            else -> n.type.dims[i - 1]
+                        }
+                    }
+                    emitter.op(kind = OpKind.RESHAPE, operands = listOf(n), type = DxirType(n.type.dtype, dims))
+                }
+            }
+            val rank = nodes[0].type.rank
+            if (axis !in 0 until rank) throw LoweringException("'$fqn' axis $rawAxis out of range for rank $rank")
+            for (n in nodes) {
+                if (n.type.rank != rank) {
+                    throw LoweringException("'$fqn' operands must share a rank (${n.type.rank} vs $rank)")
+                }
+                if (n.type.dtype != nodes[0].type.dtype) {
+                    throw LoweringException("'$fqn' operands must share a dtype (${n.type.dtype} vs ${nodes[0].type.dtype})")
+                }
+            }
+            var acc = nodes[0]
+            for (i in 1 until nodes.size) {
+                acc = emitter.op(
+                    kind = OpKind.CONCAT,
+                    operands = listOf(acc, nodes[i]),
+                    type = concatResultType(acc.type, nodes[i].type, axis, fqn),
+                    attrs = mapOf("dimension" to axis),
+                )
+            }
+            return acc
+        }
+
         // §0.4.367 — shape ops (DiffKT parity, Phase A2a): the RESHAPE family
         // (`squeeze(axis)` / `unsqueeze(axis)` / `flatten()` / `reshape(dims)`)
         // and permutation `transpose(perm)` (no-arg = reverse all axes; the
@@ -1620,6 +1692,31 @@ object FirLambdaToDxirLowering {
     private fun alignedDim(dims: List<Int>, k: Int, rank: Int): Int {
         val i = k - (rank - dims.size)
         return if (i < 0) 1 else dims[i]
+    }
+
+    /**
+     * Phase A2b — the result type of a binary CONCAT along [axis]: the axis extents
+     * SUM and every other extent must agree. Sentinel-propagating like
+     * [broadcastResultType] — under `grad {}` the operands' extents are -1, so the
+     * sum is too, and the concat axis's runtime extent is recovered by the host
+     * `concatPair` (and, in the adjoint, by `SLICE_LIKE`'s templates). A concrete
+     * disagreement on a non-axis extent is a call-site [LoweringException] rather
+     * than a runtime shape error.
+     */
+    private fun concatResultType(a: DxirType, b: DxirType, axis: Int, fqn: String): DxirType {
+        val dims = a.dims.indices.map { i ->
+            val x = a.dims[i]
+            val y = b.dims[i]
+            if (i == axis) {
+                if (x <= 0 || y <= 0) -1 else x + y
+            } else {
+                if (x > 0 && y > 0 && x != y) {
+                    throw LoweringException("'$fqn' operands disagree on non-axis $i extent ($x vs $y)")
+                }
+                if (x <= 0 || y <= 0) -1 else x
+            }
+        }
+        return DxirType(a.dtype, dims)
     }
 
     /**

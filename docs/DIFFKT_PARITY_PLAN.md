@@ -173,23 +173,52 @@ reachable from `grad {}`, not new math. New-op families come after.
       (static SLICEs with baked cumulative offsets vs SLICE_LIKE with every
       template cloned into the body), the emitter's folded static slice, and the
       JVP⇄VJP cross-identity through CONCAT — which CONCAT never had.
-    - **`concat`/`stack` user surface (pending, A2b-concat-2)**: `:core` host
-      `concat(axis, vararg tensors)` + a fixed-arity `concatPair` for synthesis
-      (the primal CONCAT node reaches the gradient body whenever the loss tail
-      reads it, e.g. `concat(…).sum()`, and synthesis cannot build an `IrVararg`
-      — so the FIR folds an n-ary user concat into a right-fold of BINARY
-      CONCATs, which is semantics-preserving, unbounded in n, and needs only
-      2-operand shims); the FIR arm flattening
-      `FirVarargArgumentsExpression` (precedent: the `SHAPE_OP_SET` and
-      `REDUCE_OP_MAP` arms already do this for `vararg Int` axes) with
-      sentinel-propagating result dims and redundant `concat_axis`/`concat_arity`
-      attrs for synthesis (the `slice_axis`/`slice_start`/`slice_end` trick);
-      `deriveResultIrType` + backward-solver arms for CONCAT and SLICE_LIKE
-      (SLICE has neither today — do not copy that omission); a `SLICE_LIKE`
-      synthesis arm; `stack` = unsqueeze (landed A2a) + the concat fold; and
-      `OpKind.CONCAT` in the tape's `Backward.kt` dispatch list (one line — the
-      tape is already N-ary and its dims are always concrete, so today's rule
-      would already work there).
+    - **`concat`/`stack` user surface ✅ (§0.4.382).** `:core` gains
+      `concat(axis, vararg tensors)` and `stack(axis, vararg tensors)` (both
+      erasing to `DTensor<Shape, F32>` — the concat axis's extent is a runtime
+      SUM, which no static witness carries, the `slice`/`reshape`/`broadcastTo`
+      convention) over a fixed-arity `concatPair(axis, a, b)`.
+      - **The FIR folds an n-ary concat into a right-fold of BINARY CONCATs.**
+        Synthesis cannot build an `IrVararg` (the documented reason the whole
+        `…RankN` shim family exists), and the primal concat node DOES reach the
+        gradient body for the ordinary `concat(…).sum()` loss tail — so an n-ary
+        node would be unsynthesizable. Concat is associative along the axis, so
+        the fold is semantics-preserving and unbounded in n, and every node
+        matches the 2-operand host op. Cost: one extra pass per intermediate
+        (≈n/2× the data movement of a single n-ary concat); the true variadic
+        path is the optimization, not a correctness requirement.
+      - `stack` lowers as sugar: a unit-axis RESHAPE per operand (synthesizable
+        since §0.4.375) then the concat fold — rank n → n+1.
+      - The vararg FIR arm flattens `FirVarargArgumentsExpression` (the precedent
+        is the `SHAPE_OP_SET` / `REDUCE_OP_MAP` arms, which already do it for
+        `vararg Int` axes); `concatResultType` sums the axis extent,
+        sentinel-propagating, and makes a concrete non-axis disagreement a
+        call-site `LoweringException`.
+      - Synthesis: `irConcat` → `concatPair`; `irSliceLike` → the fixed-arity twin
+        selected by PRIOR-template count (`sliceLikeStart` / `sliceLikeAfter{1,2,3}`,
+        axis as an Int const). `deriveResultIrType` gains CONCAT (operand[0]'s atoms
+        with a placeholder `Lit<Int>` at the concat axis — §0.4.375's reasoning, and
+        safe for the same reason: nothing reads the placeholder for a runtime-dim
+        decision) and SLICE_LIKE (the `thisTemplate`'s IrType, the SUM_TO/PAD_TO
+        shape-only treatment); the backward solver propagates a SLICE_LIKE result to
+        its `thisTemplate` only — never to the value operand (the whole concat) or
+        the PRIOR templates (different windows). `deriveInsertedAxesDTensor` was
+        refactored onto a shared `rebuildShapeAtoms` rather than duplicated.
+      - The runtime tape is deliberately NOT wired: `Backward.kt`'s dispatch list is
+        only half of it — `TracedOps.kt` has no concat producer, so a tape could
+        never record one and the dispatch entry would be dead code. (An earlier
+        note here claimed one line would do it; that was wrong.) Consequence: for a
+        concat the K2 synthesis path is the ONLY path, so a synthesis rejection is a
+        hard failure rather than a slow fallback — hence the E2E no-fallback pins.
+      Certified: 3 E2E through the real K2 plugin with no tape fallback —
+      `Σ concat(1, a⊙2, b⊙3)` over a[2,2]/b[2,3] (da = 2s shape [2,2], db = 3s
+      shape [2,3]: each operand gets its OWN window back); a THREE-operand
+      `Σ concat(1, a, b, a)` where `a` feeds windows 0 and 2, so its two
+      SLICE_LIKE contributions accumulate and the third operand's prior template is
+      the first concat's result (an intermediate, not a param); and
+      `Σ stack(0, a⊙2, b⊙3)` landing on a rank-3 result from rank-2 operands.
+      Plus a `:core` host pin for the trailing-axis, leading-axis (non-contiguous
+      copy), 3-operand and `stack` cases and both refusals.
     - **`pad` as a user op** has no DiffKT analogue (skip). `PadRule` is also
       sentinel-unsafe (`limit_indices` from `x.type.dims`) but unreachable without
       a user `pad`.

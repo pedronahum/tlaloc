@@ -268,6 +268,29 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     ?.takeIf { it.isNotEmpty() } ?: return null
                 deriveInsertedAxesDTensor(operandIr, inserted, op.type.rank)
             }
+            // Phase A2b — CONCAT's result keeps every non-axis atom of operand[0]
+            // (the operands must agree off-axis) and takes a placeholder `Lit<Int>`
+            // at the concat axis: that extent is the SUM of the operands' runtime
+            // extents, which no param-sourced atom stands for. Exactly §0.4.375's
+            // reasoning for a reshape-created unit axis, and safe for the same
+            // reason — nothing reads the placeholder for a runtime-dim decision:
+            // `concatPair` computes the extent, and the adjoint's `SLICE_LIKE`
+            // reads its windows off template operands.
+            OpKind.CONCAT -> {
+                if (op.operands.size != 2) return null
+                val operandIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val axis = (op.attrs["dimension"] as? Number)?.toInt() ?: return null
+                val litAtom = litIntAtom() ?: return null
+                val atoms = shapeAtomsOf(operandIr, op.type.rank) ?: return null
+                rebuildShapeAtoms(operandIr, atoms.toMutableList().also { it[axis] = litAtom }, op.type.rank)
+            }
+            // Phase A2b — SLICE_LIKE's result shape IS its `thisTemplate`
+            // (operand[1]), the same shape-only-template treatment SUM_TO and
+            // PAD_TO get.
+            OpKind.SLICE_LIKE -> {
+                if (op.operands.size < 2) return null
+                operandIrTypes[op.operands[1].id]
+            }
             else -> null
         }
     }
@@ -415,10 +438,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         inserted: List<Int>,
         resultRank: Int,
     ): IrSimpleType? {
-        if (dtensor.arguments.size != 2) return null
-        val inner = dtensor.arguments[0].typeOrNull as? IrSimpleType ?: return null
-        val existing = inner.arguments.map { it.typeOrNull ?: return null }
-        if (existing.size + inserted.size != resultRank) return null
+        val existing = shapeAtomsOf(dtensor, resultRank - inserted.size) ?: return null
         if (inserted.toSet().size != inserted.size) return null
         if (inserted.any { it !in 0 until resultRank }) return null
         val litAtom = litIntAtom() ?: return null
@@ -432,7 +452,30 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 newAtoms += existing.getOrNull(srcIdx++) ?: return null
             }
         }
-        val rankClassName = when (resultRank) {
+        return rebuildShapeAtoms(dtensor, newAtoms, resultRank)
+    }
+
+    /**
+     * Phase A2b — the shape atoms of a `DTensor<RankN<A0…>, F32>` IrType, or null if
+     * [dtensor] is not shaped that way or does not carry exactly [rank] of them.
+     */
+    private fun shapeAtomsOf(dtensor: IrSimpleType, rank: Int): List<IrType>? {
+        if (dtensor.arguments.size != 2) return null
+        val inner = dtensor.arguments[0].typeOrNull as? IrSimpleType ?: return null
+        val atoms = inner.arguments.map { it.typeOrNull ?: return null }
+        return if (atoms.size == rank) atoms else null
+    }
+
+    /**
+     * Phase A2b — rebuild [dtensor]'s shape argument as `Rank{rank}<newAtoms…>`,
+     * keeping its dtype argument and its shape argument's variance. Shared by
+     * [deriveInsertedAxesDTensor] (§0.4.375, which INSERTS placeholder atoms) and the
+     * CONCAT arm (which REPLACES the concat axis's atom with one).
+     */
+    private fun rebuildShapeAtoms(dtensor: IrSimpleType, newAtoms: List<IrType>, rank: Int): IrSimpleType? {
+        if (dtensor.arguments.size != 2) return null
+        if (newAtoms.size != rank) return null
+        val rankClassName = when (rank) {
             1 -> "io/tlaloc/core/Rank1"
             2 -> "io/tlaloc/core/Rank2"
             3 -> "io/tlaloc/core/Rank3"
@@ -811,6 +854,20 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // node's own when it's a returned grad (mirror of SUM_TO).
                     OpKind.PAD_TO -> {
                         if (n.operands.size != 2) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val templateId = n.operands[1].id
+                        if (paramIrTypeMap[templateId] == null && isAcceptedTensorType(n.operands[1].type)) {
+                            paramIrTypeMap[templateId] = outputIr
+                            changed = true
+                        }
+                    }
+                    // Phase A2b — SLICE_LIKE's output shape is its `thisTemplate`
+                    // (operand[1]), so solve the template from the node's own when the
+                    // window is a returned grad (mirror of SUM_TO/PAD_TO). Neither the
+                    // value operand (strictly bigger: it is the whole concat) nor the
+                    // PRIOR templates (different windows again) may inherit it.
+                    OpKind.SLICE_LIKE -> {
+                        if (n.operands.size < 2) continue
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
                         val templateId = n.operands[1].id
                         if (paramIrTypeMap[templateId] == null && isAcceptedTensorType(n.operands[1].type)) {
@@ -1202,6 +1259,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SUM_TO) return irSumTo(op, env, context)
         if (op.op == OpKind.SLICE) return irSlice(op, env, context)
         if (op.op == OpKind.PAD_TO) return irPadTo(op, env, context)
+        // Phase A2b — concat and its runtime-extent window adjoint.
+        if (op.op == OpKind.CONCAT) return irConcat(op, env, context)
+        if (op.op == OpKind.SLICE_LIKE) return irSliceLike(op, env, context)
         // Phase A5c-2 — tensor ADD/SUB/MUL/DIV prefer the broadcasting host ops.
         // Under `grad {}`'s -1 sentinel dims two operands with the SAME static shape
         // can still be differently shaped at runtime (`[N,1]` and `[N,C]` are both
@@ -2124,6 +2184,83 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         call.arguments[0] = irGet(operandDecl)
         call.arguments[1] = intConst(axis)
+        return call
+    }
+
+    /**
+     * Phase A2b — `OpKind.CONCAT(a, b)` → an IrCall to `:core/ops concatPair(axis, a, b)`.
+     *
+     * Exactly two operands: the FIR folds an n-ary user `concat`/`stack` into a
+     * right-fold of binary CONCATs precisely so this arm never needs an `IrVararg`
+     * (which the plugin cannot build — the documented reason for the `…RankN` shim
+     * family). An IR-level n-ary CONCAT therefore has no synthesis path and falls
+     * back to the tape; `DxirShapePlumbingTest` and the emitter tests exercise those
+     * at the IR level, where they belong.
+     */
+    private fun IrBuilderWithScope.irConcat(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        if (!isAcceptedTensorType(op.type)) return null
+        val sym = opsTensorSymbol("concatPair") ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+        val axis = (op.attrs["dimension"] as? Number)?.toInt() ?: return null
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        call.arguments[0] = intConst(axis)
+        call.arguments[1] = irGet(decls[0])
+        call.arguments[2] = irGet(decls[1])
+        return call
+    }
+
+    /**
+     * Phase A2b — `OpKind.SLICE_LIKE(value, thisTemplate, priorTemplate…)` → the
+     * matching fixed-arity `:core/ops` twin (`sliceLikeStart` / `sliceLikeAfter{1,2,3}`),
+     * selected by the PRIOR-template count. The axis rides as an Int const; every
+     * extent is read off the templates at runtime, which is the whole point (a concat
+     * operand's window offset is the cumulative sum of the prior operands' runtime
+     * extents and does not exist at compile time). Bounded at 4 concat operands —
+     * the FIR's fold-to-binary means user code only ever needs one prior.
+     */
+    private fun IrBuilderWithScope.irSliceLike(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val priors = op.operands.size - 2
+        if (priors !in 0..3) return null
+        if (!isAcceptedTensorType(op.type)) return null
+        val name = when (priors) {
+            0 -> "sliceLikeStart"
+            1 -> "sliceLikeAfter1"
+            2 -> "sliceLikeAfter2"
+            else -> "sliceLikeAfter3"
+        }
+        val sym = opsTensorSymbol(name) ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+        val axis = (op.attrs["axis"] as? Number)?.toInt() ?: return null
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+            ?: (irTypeForNode(op.operands[1], context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        decls.forEachIndexed { i, decl -> call.arguments[i] = irGet(decl) }
+        call.arguments[decls.size] = intConst(axis)
         return call
     }
 

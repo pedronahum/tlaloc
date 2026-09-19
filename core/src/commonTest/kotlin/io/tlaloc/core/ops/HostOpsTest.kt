@@ -61,6 +61,31 @@ class HostOpsTest {
     }
 
     @Test
+    fun concatAndStackWindows() {
+        val a = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f))
+        val b = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(10f, 20f, 30f, 40f, 50f, 60f))
+        // Trailing axis: each of `a`'s rows is followed by `b`'s.
+        val c = concat(1, a, b)
+        assertContentEquals(intArrayOf(2, 5), c.dims)
+        assertContentEquals(
+            floatArrayOf(1f, 2f, 10f, 20f, 30f, 3f, 4f, 40f, 50f, 60f),
+            c.hostF32(),
+        )
+        // Leading axis: the copy is NOT one contiguous run.
+        val d = concat(0, a, Tensors.f32Matrix<Sym, Sym>(1, 2, floatArrayOf(7f, 8f)))
+        assertContentEquals(intArrayOf(3, 2), d.dims)
+        assertContentEquals(floatArrayOf(1f, 2f, 3f, 4f, 7f, 8f), d.hostF32())
+        // Three operands fold through the same pairwise path.
+        assertContentEquals(intArrayOf(2, 7), concat(1, a, b, a).dims)
+        // stack = unsqueeze each, then concat along the new axis.
+        val s = stack(0, a, a)
+        assertContentEquals(intArrayOf(2, 2, 2), s.dims)
+        assertContentEquals(floatArrayOf(1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f), s.hostF32())
+        assertFailsWith<IllegalArgumentException> { concat(1, a) }
+        assertFailsWith<IllegalArgumentException> { concat(0, a, b) }
+    }
+
+    @Test
     fun shapeMismatchFailsFast() {
         val a = Tensors.f32Matrix<Sym, Sym>(2, 3, FloatArray(6))
         val b = Tensors.f32Matrix<Sym, Sym>(3, 2, FloatArray(6))
