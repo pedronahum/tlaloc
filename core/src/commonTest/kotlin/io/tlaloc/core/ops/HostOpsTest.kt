@@ -206,6 +206,44 @@ class HostOpsTest {
         assertContentEquals(intArrayOf(2, 3), b.dims)
     }
 
+    /**
+     * §0.4.390 — training-mode batchNorm: per-channel statistics over the batch AND
+     * spatial extents, BIASED variance, then the per-channel affine. Pinned here
+     * because the plugin's `grad {}` path DESUGARS the call into primitives and so
+     * never executes this function — it is the plain-runtime twin, and the two have
+     * to agree by construction.
+     *
+     * Hand-computed, and each choice is load-bearing:
+     * - channel 0 = [1,2,3,4]: μ = 2.5, biased ν = (1.5²+0.5²+0.5²+1.5²)/4 = 1.25.
+     *   An UNBIASED variance (÷3) would give 1.6667 and a different 1/√(ν+eps), so
+     *   this pins the convention rather than just the shape of the formula.
+     * - channel 1 = [10,10,10,10]: ν = 0, so `eps` is the only thing keeping
+     *   1/√(ν+eps) finite — every element lands on β.
+     * - γ = [2,1] and β = [0,−1] are DISTINCT per channel, so a swapped
+     *   scale/offset changes the answer.
+     */
+    @Test
+    fun batchNormTrainingModeUsesBiasedVarianceAndPerChannelAffine() {
+        val x = Tensors.f32Tensor4<Sym, Sym, Sym, Sym>(
+            1, 2, 2, 2, floatArrayOf(1f, 2f, 3f, 4f, 10f, 10f, 10f, 10f),
+        )
+        val gamma = Tensors.f32Vector<Sym>(floatArrayOf(2f, 1f))
+        val beta = Tensors.f32Vector<Sym>(floatArrayOf(0f, -1f))
+        val eps = 1e-2f
+        val y = x.batchNorm(gamma, beta, eps)
+
+        assertContentEquals(intArrayOf(1, 2, 2, 2), y.dims)
+        val got = y.hostF32()
+        val invStd0 = 1.0 / kotlin.math.sqrt(1.25 + eps.toDouble())
+        floatArrayOf(1f, 2f, 3f, 4f).forEachIndexed { i, v ->
+            assertEquals(
+                ((v - 2.5f) * invStd0 * 2.0 + 0.0).toFloat(), got[i], 1e-5f, "channel 0 [$i]",
+            )
+        }
+        // channel 1: (10−10)/√(0+eps) · 1 + (−1) = −1 everywhere.
+        for (i in 0 until 4) assertEquals(-1f, got[4 + i], 1e-5f, "channel 1 [$i]")
+    }
+
     @Test
     fun timesScalarZeroProducesZeroTensor() {
         // Use all-positive inputs to avoid `(-x) * 0 = -0` which assertContentEquals

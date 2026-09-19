@@ -479,8 +479,45 @@ reachable from `grad {}`, not new math. New-op families come after.
     fallback. The per-op E2E tests each certify one layer against a hand-written
     reference; this is the first that puts them in sequence, which is where
     composition bugs live.
-    `batchNorm` grad{} folds in here too (BATCHNORM OpKind exists; VJP + surface
-    unaudited).
+    ✅ **§0.4.390 — `batchNorm` in `grad {}`, by DESUGARING rather than by a new
+    op.** The `BATCHNORM` OpKind that already existed is the INFERENCE form (five
+    operands: input, scale, offset, mean, variance) the Layer-3 recognizer emits for
+    fused kernels; training mode computes its statistics from the argument, so an
+    inference-form rule could never produce its gradient. Instead the FIR arm
+    desugars `x.batchNorm(scale, offset, eps)` into
+    `mean → sub → mul → mean → add(eps) → sqrt → div → mul(γ) → add(β)` (the
+    `maximum`/`clip` sugar pattern), which needs NO new VjpRule, interpreter arm,
+    host delegate or synthesis arm — every node already has a sentinel-safe adjoint.
+    Biased variance (`mean((x−μ)²)`, PyTorch's training-mode convention); NCHW with
+    the feature axis at 1; `scale`/`offset` are rank-1 `[C]` reshaped to `[1,C,1,1]`
+    so the broadcast aligns on the FEATURE axis (NumPy right-alignment of a bare
+    `[C]` against `[N,C,H,W]` would match C up with W).
+    **This also settles blocker 2 empirically, in the negative:** batchNorm's body
+    MIXES RANKS (rank-4 `x` against rank-1 `scale`/`offset`) and it synthesises
+    fine — the single-representative `tensorIrType` is only a FALLBACK, so per-node
+    derivation and the backward solver cover a mixed-rank body. What actually blocked
+    it was three narrow synthesis gaps, all pre-existing and all now widened:
+    `irReshape` capped at rank 3 (so `[C] → [1,C,1,1]` rejected), the
+    unsqueeze/squeeze shims capped at 2 axes (so that reshape AND its adjoint
+    rejected), `irReduce` rejected >2 axes (so `mean(0,2,3)` rejected), and `irSqrt`
+    was scalar-only — its own doc said tensor sqrt "would need
+    `io.tlaloc.core.ops.sqrt` and tensor-IrType threading", and that extension
+    already existed. New host shims: `reshapeToRank4`, `unsqueezeAxes3`,
+    `squeezeAxes3`, `{sum,mean,max,min}Over3`.
+    Certified: `BatchNormGradientTest` E2E through the real plugin, no tape fallback,
+    with TWO oracles because one is not enough — the primal value against an
+    independent Double implementation (which is what pins the wiring, since
+    `valueAndGrad2`'s value and gradients come from the same lowered graph and a
+    consistent mis-wiring such as swapped γ/β would agree with its own central
+    differences perfectly), then both gradients (rank-4 `dx` and rank-1 `ds`) against
+    FD. `HostOpsTest` pins the host twin's biased-variance convention and distinct
+    γ/β by hand.
+    **Trap worth recording:** the first version of that test used `Σ y` as the loss,
+    and `dx` came back all zeros — correctly. The sum of a batch-normalised tensor is
+    exactly `N·H·W·β` per channel, because the normalised values sum to zero by
+    construction, so `Σ y` is CONSTANT in `x` and central differences agree with a
+    zero gradient vacuously. The non-zero assertion is what caught it; the loss is now
+    `Σ y²`.
 - **A4. Elementwise binary max/min + clip + outerProduct** — split by the
   synthesis-transpose boundary:
   - **A4a ✅ (§0.4.369)**: `maximum(a, b)` / `minimum(a, b)` / `clip(x, lo, hi)`

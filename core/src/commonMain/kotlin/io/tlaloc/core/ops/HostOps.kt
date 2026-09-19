@@ -9,6 +9,7 @@ import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.hostF32
 import kotlin.math.pow
+import kotlin.math.sqrt
 
 private fun <S : Shape> elementwise(
     a: DTensor<S, F32>,
@@ -1118,6 +1119,93 @@ fun <S : Shape> maxPool2dGrad(
 }
 
 /**
+ * §0.4.390 — TRAINING-mode batch normalisation, NCHW with the feature axis at 1:
+ * per channel, subtract the mean and divide by the standard deviation computed
+ * over the batch AND spatial extents of this call, then apply the per-channel
+ * [scale] (γ) and [offset] (β).
+ *
+ * Two conventions worth stating because the AD path inherits both: the variance is
+ * BIASED (divide by `N·H·W`, i.e. `mean((x−μ)²)`, matching PyTorch's training-mode
+ * normalisation — the unbiased correction belongs only in the running-variance
+ * update, which is not this function's job), and the statistics come from the
+ * argument rather than from running estimates. That distinguishes it from
+ * `OpKind.BATCHNORM`, which is the INFERENCE form (five operands: input, scale,
+ * offset, mean, variance) that the Layer-3 recognizer emits for fused kernels.
+ *
+ * `grad {}` gets this without a VjpRule: the plugin's FIR lowering desugars the
+ * call into MEAN/SUB/MUL/ADD/SQRT/DIV nodes whose adjoints already exist and are
+ * sentinel-safe (the `maximum`/`clip` pattern). This host function is the
+ * plain-runtime twin of that desugaring and does the same arithmetic.
+ */
+fun <S : Shape> DTensor<S, F32>.batchNorm(
+    scale: DTensor<*, F32>,
+    offset: DTensor<*, F32>,
+): DTensor<Shape, F32> = batchNormGeneral(this, scale, offset, 1e-5f)
+
+fun <S : Shape> DTensor<S, F32>.batchNorm(
+    scale: DTensor<*, F32>,
+    offset: DTensor<*, F32>,
+    eps: Float,
+): DTensor<Shape, F32> = batchNormGeneral(this, scale, offset, eps)
+
+/** §0.4.390 — fixed-arity form with an explicit `eps`. Rank-4 NCHW only in v1. */
+fun <S : Shape> batchNormGeneral(
+    x: DTensor<*, F32>,
+    scale: DTensor<*, F32>,
+    offset: DTensor<*, F32>,
+    eps: Float,
+): DTensor<S, F32> {
+    val d = x.dims
+    require(d.size == 4) { "batchNorm: rank-4 NCHW input required; got ${d.toList()}" }
+    val nB = d[0]
+    val c = d[1]
+    val h = d[2]
+    val w = d[3]
+    require(
+        scale.dims.size == 1 && scale.dims[0] == c && offset.dims.size == 1 && offset.dims[0] == c
+    ) {
+        "batchNorm: scale/offset must be rank-1 [C=$c]; got " +
+            "${scale.dims.toList()} / ${offset.dims.toList()}"
+    }
+    val spatial = h * w
+    val count = (nB * spatial).toDouble()
+    require(count > 0.0) { "batchNorm: empty input ${d.toList()}" }
+    val v = x.hostF32()
+    val g = scale.hostF32()
+    val b = offset.hostF32()
+    val out = FloatArray(v.size)
+    for (ch in 0 until c) {
+        // μ over this channel's batch and spatial extents.
+        var sum = 0.0
+        for (n in 0 until nB) {
+            val base = (n * c + ch) * spatial
+            for (i in 0 until spatial) sum += v[base + i].toDouble()
+        }
+        val mean = sum / count
+        // Biased variance: mean((x − μ)²).
+        var sq = 0.0
+        for (n in 0 until nB) {
+            val base = (n * c + ch) * spatial
+            for (i in 0 until spatial) {
+                val e = v[base + i].toDouble() - mean
+                sq += e * e
+            }
+        }
+        val invStd = 1.0 / sqrt(sq / count + eps.toDouble())
+        val gamma = g[ch].toDouble()
+        val beta = b[ch].toDouble()
+        for (n in 0 until nB) {
+            val base = (n * c + ch) * spatial
+            for (i in 0 until spatial) {
+                out[base + i] = ((v[base + i].toDouble() - mean) * invStd * gamma + beta).toFloat()
+            }
+        }
+    }
+    @Suppress("UNCHECKED_CAST")
+    return DTensor<Shape, F32>(HostF32Storage(out), d.copyOf(), F32) as DTensor<S, F32>
+}
+
+/**
  * Scalar → rank-N uniform broadcast: produce a fresh `DTensor<S, F32>` shaped like
  * [template] whose every element equals [v]. Used by the IR-rewrite synthesis path to
  * lower `OpKind.BROADCAST` in gradient bodies emitted by [io.tlaloc.ir.passes.VjpRegistry.SumRule]
@@ -1420,6 +1508,28 @@ fun <S : Shape> minOver1(x: DTensor<S, F32>, d0: Int, keepDims: Boolean): DTenso
 
 fun <S : Shape> minOver2(x: DTensor<S, F32>, d0: Int, d1: Int, keepDims: Boolean): DTensor<Shape, F32> =
     x.min(d0, d1, keepDims = keepDims)
+
+/**
+ * §0.4.390 — the three-axis shims. A rank-4 NCHW surface needs them: reducing over
+ * the batch and both spatial axes (`mean(0, 2, 3)`, which is how training batchNorm
+ * takes its per-channel statistics) is a three-axis reduction, and the fixed-arity
+ * family stopped at two, so such a body fell out of synthesis scope.
+ */
+fun <S : Shape> sumOver3(
+    x: DTensor<S, F32>, d0: Int, d1: Int, d2: Int, keepDims: Boolean,
+): DTensor<Shape, F32> = x.sum(d0, d1, d2, keepDims = keepDims)
+
+fun <S : Shape> meanOver3(
+    x: DTensor<S, F32>, d0: Int, d1: Int, d2: Int, keepDims: Boolean,
+): DTensor<Shape, F32> = x.mean(d0, d1, d2, keepDims = keepDims)
+
+fun <S : Shape> maxOver3(
+    x: DTensor<S, F32>, d0: Int, d1: Int, d2: Int, keepDims: Boolean,
+): DTensor<Shape, F32> = x.max(d0, d1, d2, keepDims = keepDims)
+
+fun <S : Shape> minOver3(
+    x: DTensor<S, F32>, d0: Int, d1: Int, d2: Int, keepDims: Boolean,
+): DTensor<Shape, F32> = x.min(d0, d1, d2, keepDims = keepDims)
 
 /**
  * §0.4.366 — stretch broadcast: tile [x] (whose dims must each be 1 or equal
@@ -1776,6 +1886,14 @@ fun <S : Shape> unsqueezeAxes2(x: DTensor<*, F32>, a0: Int, a1: Int): DTensor<S,
     DTensor(HostF32Storage(x.hostF32().copyOf()), unsqueezeAxes(x, intArrayOf(a0, a1)), F32)
 
 /**
+ * §0.4.390 — three inserted unit axes: what `[C] → [1,C,1,1]` needs, i.e. how a
+ * per-channel parameter becomes broadcastable against an NCHW tensor. Without it a
+ * rank-4 body containing that reshape falls out of synthesis scope.
+ */
+fun <S : Shape> unsqueezeAxes3(x: DTensor<*, F32>, a0: Int, a1: Int, a2: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(x.hostF32().copyOf()), unsqueezeAxes(x, intArrayOf(a0, a1, a2)), F32)
+
+/**
  * §0.4.367 — Phase A2a (DiffKT parity): the RESHAPE-family user surface.
  * `squeeze(axis)` drops a size-1 axis, `unsqueeze(axis)` inserts one,
  * `flatten()` collapses to rank-1, `reshape(vararg dims)` is the general
@@ -1960,6 +2078,21 @@ fun <S : Shape> squeezeAxes2(x: DTensor<*, F32>, a0: Int, a1: Int): DTensor<S, F
     return DTensor(HostF32Storage(x.hostF32().copyOf()), out, F32)
 }
 
+/**
+ * §0.4.390 — the adjoint of [unsqueezeAxes3]: `[1,C,1,1] → [C]`, which is what the
+ * gradient of a per-channel parameter reshape needs.
+ */
+fun <S : Shape> squeezeAxes3(x: DTensor<*, F32>, a0: Int, a1: Int, a2: Int): DTensor<S, F32> {
+    require(a0 < a1 && a1 < a2) { "squeezeAxes3: axes must be ascending" }
+    require(x.dims[a0] == 1 && x.dims[a1] == 1 && x.dims[a2] == 1) {
+        "squeezeAxes3: axes must have size 1"
+    }
+    val out = IntArray(x.dims.size - 3)
+    var k = 0
+    for (i in x.dims.indices) if (i != a0 && i != a1 && i != a2) out[k++] = x.dims[i]
+    return DTensor(HostF32Storage(x.hostF32().copyOf()), out, F32)
+}
+
 private fun reshapeTo(x: DTensor<*, F32>, target: IntArray): FloatArray {
     val v = x.hostF32()
     var n = 1
@@ -1978,6 +2111,16 @@ fun <S : Shape> reshapeToRank2(x: DTensor<*, F32>, d0: Int, d1: Int): DTensor<S,
 
 fun <S : Shape> reshapeToRank3(x: DTensor<*, F32>, d0: Int, d1: Int, d2: Int): DTensor<S, F32> =
     DTensor(HostF32Storage(reshapeTo(x, intArrayOf(d0, d1, d2))), intArrayOf(d0, d1, d2), F32)
+
+/** §0.4.390 — rank-4 relayout, for the NCHW surfaces (conv/pool/batchNorm). */
+fun <S : Shape> reshapeToRank4(
+    x: DTensor<*, F32>, d0: Int, d1: Int, d2: Int, d3: Int,
+): DTensor<S, F32> =
+    DTensor(
+        HostF32Storage(reshapeTo(x, intArrayOf(d0, d1, d2, d3))),
+        intArrayOf(d0, d1, d2, d3),
+        F32,
+    )
 
 fun <S : Shape> transposePerm2(x: DTensor<*, F32>, p0: Int, p1: Int): DTensor<S, F32> {
     @Suppress("UNCHECKED_CAST")

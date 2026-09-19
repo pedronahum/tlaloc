@@ -1680,6 +1680,19 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
+     * §0.4.390 — resolves the DTensor `io.tlaloc.core.ops.sqrt` extension. Distinct
+     * package from the scalar `io.tlaloc.core.sqrt` on Float/Double that
+     * [sqrtSymbolFor] resolves, so the two never collide in `singleOrNull`.
+     */
+    private fun sqrtTensorSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("sqrt"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
      * §0.4.200 — Phase 3 third slice. `OpKind.TANH(x)` for tensor x → IrCall to
      * `:core/ops/tanh` (the DTensor extension). Mirrors [irRelu] / [irStep] /
      * [irSigmoid] rank-dispatch. Required by CartPole's `tanh(...)` chain in the
@@ -2695,7 +2708,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             castCall.arguments[0] = reduceCall
             return castCall
         }
-        if (rd.isEmpty() || rd.size > 2) return null
+        // §0.4.390 — up to three axes (see [reduceOverSymbol]): a rank-4 NCHW
+        // per-channel statistic reduces over the batch and both spatial axes.
+        if (rd.isEmpty() || rd.size > 3) return null
         val keep = op.type.rank == operand.type.rank
         val sym = reduceOverSymbol(opName, rd.size) ?: return null
         val resultIrType = irTypeForNode(op, context) ?: irTypeFor(op.type, context) ?: return null
@@ -2710,11 +2725,19 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         call.arguments[0] = irGet(operandDecl)
         call.arguments[1] = intConst(rd[0])
-        if (rd.size == 2) {
-            call.arguments[2] = intConst(rd[1])
-            call.arguments[3] = boolConst(keep)
-        } else {
-            call.arguments[2] = boolConst(keep)
+        // The axis consts are positional and `keepDims` last, matching the
+        // `{name}Over{N}` shim arities.
+        when (rd.size) {
+            1 -> call.arguments[2] = boolConst(keep)
+            2 -> {
+                call.arguments[2] = intConst(rd[1])
+                call.arguments[3] = boolConst(keep)
+            }
+            else -> {
+                call.arguments[2] = intConst(rd[1])
+                call.arguments[3] = intConst(rd[2])
+                call.arguments[4] = boolConst(keep)
+            }
         }
         return call
     }
@@ -2755,23 +2778,25 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return call
         }
         // Unsqueeze arm (§0.4.366): result = operand with size-1 axes inserted.
+        // §0.4.390 widened the cap to three: `[C] → [1,C,1,1]` is how a per-channel
+        // parameter becomes broadcastable against an NCHW tensor.
         val inserted = insertedUnitAxes(operand.type.dims, op.type.dims)
-        if (inserted != null && inserted.isNotEmpty() && inserted.size <= 2) {
+        if (inserted != null && inserted.isNotEmpty() && inserted.size <= 3) {
             val sym = unsqueezeSymbol(inserted.size) ?: return null
             return emit(sym, inserted.map { intConst(it) })
         }
         // §0.4.367 — squeeze arm: result = operand with size-1 axes DROPPED
         // (the adjoint of an unsqueeze, and the user `squeeze(axis)` primal).
         val dropped = insertedUnitAxes(op.type.dims, operand.type.dims)
-        if (dropped != null && dropped.isNotEmpty() && dropped.size <= 2) {
+        if (dropped != null && dropped.isNotEmpty() && dropped.size <= 3) {
             val sym = squeezeAxesSymbol(dropped.size) ?: return null
             return emit(sym, dropped.map { intConst(it) })
         }
         // §0.4.367 — general relayout (user `reshape(dims)` / `flatten` and
-        // their adjoints): rank-1..3 targets via `reshapeToRankN`. Concrete
+        // their adjoints): rank-1..4 targets via `reshapeToRankN`. Concrete
         // dims bake as consts; -1 sentinels read a structurally-matched
         // param's runtime dim (the broadcast paths' rule).
-        if (op.type.rank !in 1..3) return null
+        if (op.type.rank !in 1..4) return null
         val sym = reshapeToRankSymbol(op.type.rank) ?: return null
         val allConcrete = op.type.dims.all { it > 0 }
         val matches = if (allConcrete) null else {
@@ -2835,7 +2860,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     /** §0.4.366 — resolves `io.tlaloc.core.ops.{name}Over{axisCount}` (distinct names, no overloads). */
     private fun reduceOverSymbol(name: String, axisCount: Int): IrSimpleFunctionSymbol? {
-        if (axisCount !in 1..2) return null
+        // §0.4.390 — three axes too: `mean(0, 2, 3)` is how training batchNorm takes
+        // its per-channel statistics over an NCHW tensor.
+        if (axisCount !in 1..3) return null
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("${name}Over$axisCount"),
@@ -2843,9 +2870,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.366 — resolves `io.tlaloc.core.ops.unsqueezeAxes{N}` for N ∈ {1, 2}. */
+    /** §0.4.366 — resolves `io.tlaloc.core.ops.unsqueezeAxes{N}` for N ∈ {1, 2, 3}. */
     private fun unsqueezeSymbol(count: Int): IrSimpleFunctionSymbol? {
-        if (count !in 1..2) return null
+        // §0.4.390 — three inserted axes: `[C] → [1,C,1,1]`, the per-channel
+        // parameter reshape an NCHW batchNorm needs.
+        if (count !in 1..3) return null
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("unsqueezeAxes$count"),
@@ -2853,9 +2882,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.367 — resolves `io.tlaloc.core.ops.squeezeAxes{N}` for N ∈ {1, 2}. */
+    /** §0.4.367 — resolves `io.tlaloc.core.ops.squeezeAxes{N}` for N ∈ {1, 2, 3}. */
     private fun squeezeAxesSymbol(count: Int): IrSimpleFunctionSymbol? {
-        if (count !in 1..2) return null
+        // §0.4.390 — three dropped axes: the adjoint of `[C] → [1,C,1,1]`.
+        if (count !in 1..3) return null
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("squeezeAxes$count"),
@@ -2863,9 +2893,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.367 — resolves `io.tlaloc.core.ops.reshapeToRank{N}` for N ∈ {1, 2, 3}. */
+    /** §0.4.367 — resolves `io.tlaloc.core.ops.reshapeToRank{N}` for N ∈ {1, 2, 3, 4}. */
     private fun reshapeToRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
-        if (rank !in 1..3) return null
+        // §0.4.390 — rank 4 too, for the NCHW surfaces.
+        if (rank !in 1..4) return null
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("reshapeToRank$rank"),
@@ -2967,10 +2998,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     /**
      * `OpKind.SQRT(x)` → IrCall to `io.tlaloc.core.sqrt` (the Float / Double extension
-     * declared in `:core/DScalar.kt`). Scalar-only today — rank-1 tensor sqrt would
-     * need `io.tlaloc.core.ops.sqrt` (the DTensor extension) and tensor-IrType
-     * threading; the narrow scalar path is sufficient for the D.1b brachistochrone
-     * port that unblocks sqrt in scalar primal bodies.
+     * declared in `:core/DScalar.kt`) for a scalar, or to the `io.tlaloc.core.ops.sqrt`
+     * DTensor extension for a tensor.
+     *
+     * §0.4.390 — the tensor path. It was scalar-only ("the narrow scalar path is
+     * sufficient for the D.1b brachistochrone port"), so ANY tensor sqrt in a gradient
+     * body fell out of synthesis scope and silently dropped the whole function back to
+     * the runtime tape. Training batchNorm's `√(ν+eps)` is the first body to need it;
+     * the shape-preserving `DTensor<S, F32>.sqrt()` extension already existed, so this
+     * mirrors [irRelu]'s tensor arm rather than adding host surface.
      */
     private fun IrBuilderWithScope.irSqrt(
         op: DxirOp,
@@ -2978,8 +3014,25 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         if (op.operands.size != 1) return null
-        if (!op.type.isScalar) return null
         val operandDecl = env[op.operands[0].id] ?: return null
+        if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            val operandIrType = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
+            val operandShapeArg = operandIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val sym = sqrtTensorSymbol() ?: return null
+            val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: operandIrType
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = resultIrType,
+                symbol = sym,
+            )
+            if (call.typeArguments.isNotEmpty()) {
+                call.typeArguments[0] = operandShapeArg
+            }
+            call.arguments[0] = irGet(operandDecl)
+            return call
+        }
+        if (!op.type.isScalar) return null
         val ty = irTypeFor(op.type, context) ?: return null
         val sym = sqrtSymbolFor(op.type.dtype) ?: return null
         val call = IrCallImpl.fromSymbolOwner(

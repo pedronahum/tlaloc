@@ -1123,6 +1123,83 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.390 — Phase A3b: TRAINING-mode batch normalisation, DESUGARED into
+        // primitives here rather than given a first-class op — the `maximum`/`clip`
+        // pattern. `OpKind.BATCHNORM` already exists but it is the INFERENCE form
+        // (five operands: input, scale, offset, mean, variance) that the Layer-3
+        // recognizer emits for fused kernels; training mode computes the statistics
+        // from the argument, so its gradient needs the mean/variance dependencies
+        // that an inference-form rule could never produce.
+        //
+        // Desugaring is what makes `grad {}` work with NO new VjpRule, interpreter
+        // arm, host delegate or synthesis arm: every node below already has a
+        // sentinel-safe adjoint (MEAN via SUM_TO's runtime template, the elementwise
+        // binaries via A5c broadcasting, the unit-axis RESHAPEs since §0.4.375).
+        //
+        //   μ = mean(x, [0,2,3], keepdims)          ν = mean((x−μ)², [0,2,3], keepdims)
+        //   y = (x−μ)/√(ν+eps) · γ + β
+        //
+        // Biased variance (divide by N·H·W), matching PyTorch's training-mode
+        // normalisation and the host twin in `:core/ops`.
+        if (fqn == "io.tlaloc.core.ops.batchNorm") {
+            val args = call.argumentList.arguments
+            if (args.size != 2 && args.size != 3) {
+                throw LoweringException(
+                    "$fqn takes (scale, offset) or (scale, offset, eps); got ${args.size} arguments",
+                )
+            }
+            val operandExpr = receiver(call) ?: throw LoweringException("$fqn has no receiver")
+            val x = lowerExpr(operandExpr, env, emitter)
+            if (x.type.rank != 4) {
+                throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
+            }
+            if (x.type.dtype != F32) {
+                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            }
+            fun unwrap(e: FirExpression): FirExpression =
+                (e as? FirNamedArgumentExpression)?.expression ?: e
+            val scale = lowerExpr(unwrap(args[0]), env, emitter)
+            val offset = lowerExpr(unwrap(args[1]), env, emitter)
+            val eps = if (args.size == 3) {
+                floatLiteralArg(unwrap(args[2]))
+                    ?: throw LoweringException("$fqn eps must be a Float literal")
+            } else {
+                1e-5f
+            }
+            for ((paramName, t) in listOf("scale" to scale, "offset" to offset)) {
+                if (t.type.rank != 1) {
+                    throw LoweringException("$fqn $paramName must be rank-1 [C]; got ${t.type}")
+                }
+                if (t.type.dims[0] > 0 && x.type.dims[1] > 0 && t.type.dims[0] != x.type.dims[1]) {
+                    throw LoweringException(
+                        "$fqn $paramName has ${t.type.dims[0]} channels but the input has " +
+                            "${x.type.dims[1]}",
+                    )
+                }
+            }
+
+            // [C] → [1,C,1,1], a unit-axis RESHAPE, so the broadcast aligns on the
+            // FEATURE axis: NumPy right-alignment of a bare [C] against [N,C,H,W]
+            // would match C up with W.
+            val perChannel = DxirType(x.type.dtype, listOf(1, x.type.dims[1], 1, 1))
+            val scaleR = emitter.op(OpKind.RESHAPE, listOf(scale), perChannel)
+            val offsetR = emitter.op(OpKind.RESHAPE, listOf(offset), perChannel)
+            val reduceAxes = mapOf("reduction_dims" to listOf(0, 2, 3))
+            val mean = emitter.op(OpKind.MEAN, listOf(x), perChannel, attrs = reduceAxes)
+            val centred = emitter.op(OpKind.SUB, listOf(x, mean), x.type)
+            val squared = emitter.op(OpKind.MUL, listOf(centred, centred), x.type)
+            val variance = emitter.op(OpKind.MEAN, listOf(squared), perChannel, attrs = reduceAxes)
+            // eps splats to the variance's shape (not x's), so the ADD is same-shape;
+            // `splatLiteral` routes through a template BROADCAST under sentinels.
+            val varEps = emitter.op(
+                OpKind.ADD, listOf(variance, splatLiteral(eps, variance, emitter)), perChannel,
+            )
+            val std = emitter.op(OpKind.SQRT, listOf(varEps), perChannel)
+            val normalised = emitter.op(OpKind.DIV, listOf(centred, std), x.type)
+            val scaled = emitter.op(OpKind.MUL, listOf(normalised, scaleR), x.type)
+            return emitter.op(OpKind.ADD, listOf(scaled, offsetR), x.type)
+        }
+
         // §0.4.369 — Phase A4 (DiffKT parity): elementwise `maximum(a, b)` /
         // `minimum(a, b)` as sugar over the §0.4.364 where/compare surface.
         // `maximum` = WHERE(COMPARE(a, b, GE), a, b); `minimum` uses LE. The
