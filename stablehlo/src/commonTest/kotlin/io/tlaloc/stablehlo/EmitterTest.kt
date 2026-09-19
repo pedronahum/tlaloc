@@ -1148,6 +1148,74 @@ class EmitterTest {
         )
     }
 
+    /**
+     * §0.4.392 — the maxpool adjoint's expansion needs EXACT tiling, so an
+     * overlapping pool must fail loudly at emit with a message naming the
+     * restriction. The host and interpreter paths handle overlapping windows
+     * correctly (they invert the window per input element); this is an EMISSION
+     * limitation, not a semantic one, and the difference has to be obvious to
+     * whoever hits it rather than surfacing as a mask that silently routes gradient
+     * to the wrong input positions.
+     *
+     * The restriction is inherent, not an oversight: the all-ties convention (every
+     * within-window winner receives the full upstream, matching MaxRule and the
+     * interpreter) is not expressible over overlapping windows in StableHLO.
+     * `select_and_scatter` is the primitive built for this and it picks ONE winner
+     * per window; a transposed-conv spread of `dy` sums over covering windows but
+     * cannot apply the per-window `x == max(w)` mask, because with overlapping
+     * windows an input position belongs to several windows with different maxima.
+     * So the choice is "general strides on the GPU with backend-dependent ties" or
+     * "non-overlapping on the GPU with identical semantics everywhere" — and a
+     * gradient that differs between host and device is worse than a loud refusal,
+     * especially since exact ties are common after a relu.
+     */
+    @Test
+    fun maxPoolGradRefusesOverlappingWindowsAtEmitTime() {
+        val fn = DxirBuilder.function("mp_overlap") {
+            val x = param("x", DxirType(F32, listOf(1, 1, 4, 4)))
+            val up = param("up", DxirType(F32, listOf(1, 1, 3, 3)))
+            val y = param("y", DxirType(F32, listOf(1, 1, 3, 3)))
+            listOf(
+                op(
+                    OpKind.MAXPOOL2D_GRAD, listOf(up, x, y), DxirType(F32, listOf(1, 1, 4, 4)),
+                    attrs = mapOf(
+                        "window" to listOf(2, 2),
+                        "window_strides" to listOf(1, 1),
+                        "padding" to listOf(listOf(0, 0), listOf(0, 0)),
+                    ),
+                ),
+            )
+        }
+        val e = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        val msg = e.message ?: ""
+        assertTrue("non-overlapping" in msg, "error must name the restriction: $msg")
+        assertTrue("MAXPOOL2D_GRAD" in msg, "error must name the op: $msg")
+    }
+
+    /** §0.4.392 — same for a window that does not tile the input exactly. */
+    @Test
+    fun maxPoolGradRefusesNonDivisibleDimsAtEmitTime() {
+        val fn = DxirBuilder.function("mp_remainder") {
+            val x = param("x", DxirType(F32, listOf(1, 1, 5, 5)))
+            val up = param("up", DxirType(F32, listOf(1, 1, 2, 2)))
+            val y = param("y", DxirType(F32, listOf(1, 1, 2, 2)))
+            listOf(
+                op(
+                    OpKind.MAXPOOL2D_GRAD, listOf(up, x, y), DxirType(F32, listOf(1, 1, 5, 5)),
+                    attrs = mapOf(
+                        "window" to listOf(2, 2),
+                        "window_strides" to listOf(2, 2),
+                        "padding" to listOf(listOf(0, 0), listOf(0, 0)),
+                    ),
+                ),
+            )
+        }
+        val e = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        val msg = e.message ?: ""
+        assertTrue("window-divisible" in msg, "error must name the divisibility need: $msg")
+        assertTrue("remainder" in msg, "error should say the other engines cope: $msg")
+    }
+
     @Test
     fun argmaxEmitsIotaAndReduceWithBody() {
         val fn = DxirBuilder.function("am") {

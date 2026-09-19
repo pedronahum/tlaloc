@@ -470,6 +470,31 @@ reachable from `grad {}`, not new math. New-op families come after.
        The emitter arm earned its keep immediately: its first version typed the
        compare against the POOLED `y` instead of the upsampled one, which is invalid
        MLIR — the GPU cert caught it, no text pin would have.
+       ✅ **§0.4.392 — the emitter restriction investigated and CLOSED as inherent,
+       not as a TODO.** Question: should overlapping/padded maxpool gradients get a
+       GPU path via `stablehlo.select_and_scatter`? Answer: no, and the reason is
+       worth recording so this is not re-litigated. The all-ties convention (every
+       within-window winner receives the FULL upstream — matching MaxRule, the
+       interpreter, and the host twin) is not expressible over overlapping windows in
+       StableHLO. `select_and_scatter` is the primitive built for exactly this shape
+       of computation and it picks ONE winner per window. The other candidate, a
+       transposed-conv spread of `dy` (which is how `AVGPOOL2D_GRAD` emits, and which
+       does sum over covering windows), cannot apply the per-window `x == max(w)`
+       mask — with overlapping windows an input position belongs to several windows
+       with *different* maxima, so there is no single upsampled `y` to compare
+       against; that ambiguity is precisely why nearest-upsample-and-mask only works
+       when the windows tile. So the real choice is "general strides on the GPU with
+       backend-dependent tie behaviour" versus "non-overlapping on the GPU with
+       identical semantics on all three engines". A gradient that differs between
+       host and device is worse than a loud refusal — exact ties are common after a
+       relu, where whole windows of zeros tie — so the restriction stays. What
+       changed is that it is now PINNED rather than merely documented:
+       `EmitterTest.maxPoolGradRefusesOverlappingWindowsAtEmitTime` and
+       `…RefusesNonDivisibleDimsAtEmitTime` assert the emit-time failure names the op
+       and the restriction, and (for divisibility) that the message says the other
+       engines cope. Reopening this would mean changing the tie convention in
+       MaxRule, the interpreter and the host twin together — a semantics decision,
+       not an emitter task.
     5. **CONV_TRANSPOSE2D's own adjoint ✅ (§0.4.391)** — differentiating THROUGH a
        transposed conv (`grad { x, w -> x.convTranspose2d(w, 2, 2, …) }`, i.e. a
        deconvolution / fractionally-strided upsample) was a loud "no VJP rule
