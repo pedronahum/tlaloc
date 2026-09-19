@@ -1070,6 +1070,44 @@ class EmitterTest {
         assertEquals(1, mlir.split("stablehlo.convolution").size - 1, mlir)
     }
 
+    /**
+     * §0.4.386 — the fused avgpool adjoint expands into the MLIR the pre-fusion
+     * rule produced: fold channels into the batch dim, one lhs-dilated convolution
+     * against a `1/(kh·kw)` splat kernel (IOHW `[1,1,kh,kw]`, so a single-channel
+     * kernel applies depthwise without grouped-conv support), fold back. Primal:
+     * x [2,3,6,5], window [2,2], strides [2,2] → y [2,3,3,2] — a NON-divisible
+     * width, so the solved padding is asymmetric.
+     *
+     * dilSize = [(3−1)·2+1, (2−1)·2+1] = [5,3]; low = kh−1−p_low = [1,1];
+     * high = p_low + H − dilSize = [0+6−5, 0+5−3] = [1,2].
+     */
+    @Test
+    fun avgPoolGradExpandsToFoldedTransposedConv() {
+        val fn = DxirBuilder.function("ap") {
+            val x = param("x", DxirType(F32, listOf(2, 3, 6, 5)))
+            val up = param("up", DxirType(F32, listOf(2, 3, 3, 2)))
+            val dx = op(
+                OpKind.AVGPOOL2D_GRAD, listOf(up, x), DxirType(F32, listOf(2, 3, 6, 5)),
+                attrs = mapOf(
+                    "window" to listOf(2, 2),
+                    "window_strides" to listOf(2, 2),
+                    "padding" to listOf(listOf(0, 0), listOf(0, 0)),
+                ),
+            )
+            listOf(dx)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("pad = [[1, 1], [1, 2]]"), "solved avgpool padding wrong: $mlir")
+        assertTrue(mlir.contains("lhs_dilate = [2, 2]"), "the stride must land on lhs_dilate: $mlir")
+        assertTrue(mlir.contains("dense<0.25>"), "splat kernel must carry 1/(kh·kw): $mlir")
+        assertTrue(
+            mlir.contains("dim_numbers = [b, f, 0, 1]x[i, o, 0, 1]->[b, f, 0, 1]"),
+            "the folded conv is a transposed conv against an IOHW splat: $mlir",
+        )
+        assertEquals(2, mlir.split("stablehlo.reshape").size - 1, "fold and unfold: $mlir")
+        assertEquals(1, mlir.split("stablehlo.convolution").size - 1, mlir)
+    }
+
     @Test
     fun argmaxEmitsIotaAndReduceWithBody() {
         val fn = DxirBuilder.function("am") {

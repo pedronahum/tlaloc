@@ -837,66 +837,49 @@ object VjpRegistry {
      * §0.4.363 — AVGPOOL2D adjoint: each input element receives
      * `Σ dY/(kh·kw)` over every window containing it — exactly a
      * transposed convolution of dY with a uniform `1/(kh·kw)` kernel.
-     * Channels fold into the batch dim (reshape `[N,C,·,·] →
-     * [N·C,1,·,·]`) so the single-channel splat kernel applies depthwise
-     * without grouped-conv support; padding is solved numerically as in
-     * [Conv2dRule]. Fully general strides/padding (count_include_pad —
-     * the interpreter's convention). §0.4.384: CONCRETE dims required, for
-     * the channel-folding reshape as well as the solved padding.
+     * Fully general strides/padding (count_include_pad — the interpreter's
+     * convention, which divides by the FULL window).
+     *
+     * §0.4.386 — emitted as the fused [OpKind.AVGPOOL2D_GRAD] rather than the
+     * original `RESHAPE → CONV_TRANSPOSE2D → RESHAPE` channel-folding chain, for
+     * the same sentinel reason [Conv2dRule] gives: that chain solved its padding
+     * from the primal's extents AND baked `n * c` as a reshape target, both of
+     * which are arithmetic on -1s under `grad {}`. The fused op inverts the window
+     * at execution time and needs no channel fold at all — the adjoint is
+     * per-channel, so the depthwise-via-batch-folding trick (which only existed to
+     * dodge grouped-conv support) is unnecessary.
      */
     val AvgPool2dRule: VjpRule = object : VjpRule {
-        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        // §0.4.386 — the adjoint carries `x` as a shape-only template operand, so
+        // its producer must survive into the gradient body. (It was `emptySet()`
+        // while the rule only inspected `x.type`; a template OPERAND is a value
+        // reference as far as the clone walk is concerned, and omitting it here
+        // would leave the emitted node pointing at a primal id that collides with
+        // the grad builder's fresh ids — ref-integrity-valid, semantically wrong.)
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
-            val dtype = upstream.type.dtype
             fun intPair(key: String, def: List<Int>): List<Int> =
                 (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
             val k = intPair("window", emptyList())
             require(k.size == 2) { "AvgPool2dRule: primal needs `window` [kh, kw]; got $k" }
-            // §0.4.384 — same sentinel hazard as [Conv2dRule], twice over: dxPad is
-            // solved from the primal's extents, AND the channel-folding RESHAPE bakes
-            // `n * c` / `hOut` / `wOut` as literal dims (under -1 sentinels `n * c`
-            // is 1, so the reshape silently claims a shape the data does not have).
-            val symbolic = (x.type.dims + op.type.dims).any { it < 0 }
-            require(!symbolic) {
-                "AvgPool2dRule: the adjoint's channel-folding reshape and its conv-transpose " +
-                    "padding are solved from concrete extents, but got symbolic dims " +
-                    "(x=${x.type.dims}, y=${op.type.dims}). A sentinel-safe (runtime-template) " +
-                    "adjoint is the deferred A3b work; differentiate avgpool in forward mode " +
-                    "(jvp) meanwhile."
-            }
             val s = intPair("window_strides", k)
             val p = (op.attrs["padding"] as? List<*>)
                 ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
                 ?: listOf(listOf(0, 0), listOf(0, 0))
 
-            val (n, c, h, w) = x.type.dims
-            val hOut = op.type.dims[2]
-            val wOut = op.type.dims[3]
-
-            val upR = builder.op(
-                OpKind.RESHAPE, listOf(upstream), DxirType(dtype, listOf(n * c, 1, hOut, wOut)),
+            // §0.4.386 — one fused, runtime-extent op instead of the channel-folded
+            // `RESHAPE → CONV_TRANSPOSE2D(splat, lhs_dilation = stride, solved
+            // padding) → RESHAPE` chain. That chain read `x`'s and `y`'s EXTENTS at
+            // transform time in two places (the solved padding, and the reshape's
+            // `n * c` target — which under `grad {}`'s -1 sentinels is 1, so the
+            // reshape silently claimed a shape the data did not have). The fused op
+            // inverts the window at execution time instead, so all this rule passes
+            // down is the primal's own literal attrs and it reads no extent at all.
+            val dX = builder.op(
+                OpKind.AVGPOOL2D_GRAD, listOf(upstream, x), x.type,
+                attrs = mapOf("window" to k, "window_strides" to s, "padding" to p),
             )
-            val kernel = builder.const(
-                floatLiteralForDtype(1.0 / (k[0] * k[1]), dtype),
-                DxirType(dtype, listOf(1, 1, k[0], k[1])),
-            )
-            val dxPad = listOf(0, 1).map { axis ->
-                val inDim = x.type.dims[2 + axis]
-                val dilSize = (op.type.dims[2 + axis] - 1) * s[axis] + 1
-                val low = k[axis] - 1 - p[axis][0]
-                listOf(low, inDim - 1 + k[axis] - dilSize - low)
-            }
-            val dxR = builder.op(
-                OpKind.CONV_TRANSPOSE2D, listOf(upR, kernel),
-                DxirType(dtype, listOf(n * c, 1, h, w)),
-                attrs = mapOf(
-                    "window_strides" to listOf(1, 1),
-                    "padding" to dxPad,
-                    "lhs_dilation" to s,
-                ),
-            )
-            val dX = builder.op(OpKind.RESHAPE, listOf(dxR), x.type)
             return listOf(x to dX)
         }
     }

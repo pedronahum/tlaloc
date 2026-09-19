@@ -5,6 +5,8 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.Shape
 import io.tlaloc.core.hostF32
+import io.tlaloc.core.ops.avgPool2dGeneral
+import io.tlaloc.core.ops.avgPool2dGrad
 import io.tlaloc.core.ops.conv2d
 import io.tlaloc.core.ops.conv2dDataAdjoint
 import io.tlaloc.core.ops.conv2dGeneral
@@ -63,11 +65,12 @@ class DxirHostConvParityTest {
     private fun tensor(data: FloatArray, dims: List<Int>): DTensor<Shape, F32> =
         DTensor(HostF32Storage(data.copyOf()), dims.toIntArray(), F32)
 
-    /** The conv-family nodes in [fn]'s body — the ones the host twins must replay. */
+    /** The conv/pool-family nodes in [fn]'s body — the ones the host twins must replay. */
     private fun convFamilyNodes(fn: DxirFunction): List<DxirOp> =
         fn.body.filterIsInstance<DxirOp>().filter {
             it.op == OpKind.CONV2D || it.op == OpKind.CONV_TRANSPOSE2D ||
                 it.op == OpKind.CONV2D_DATA_ADJOINT || it.op == OpKind.CONV2D_KERNEL_ADJOINT ||
+                it.op == OpKind.AVGPOOL2D || it.op == OpKind.AVGPOOL2D_GRAD ||
                 (it.op == OpKind.TRANSPOSE && it.type.rank == 4)
         }
 
@@ -130,6 +133,32 @@ class DxirHostConvParityTest {
                 } else {
                     conv2dKernelAdjoint(a, b, tmpl, s[0], s[1], d[0], d[1], p[0][0], p[1][0])
                 }
+            }
+            OpKind.AVGPOOL2D -> {
+                // §0.4.386 — the primal twin, pinned here because count_include_pad
+                // (dividing by the FULL window, padding included) is a convention
+                // the two engines could easily disagree on.
+                val win = intPair(node.attrs, "window", emptyList())
+                val s = intPair(node.attrs, "window_strides", win)
+                val p = paddingOf(node.attrs)
+                assertEquals(2, win.size, "AVGPOOL2D without a `window` attr: ${node.attrs}")
+                avgPool2dGeneral(
+                    tensor(inputs[0], node.operands[0].type.dims),
+                    win[0], win[1], s[0], s[1], p[0][0], p[0][1], p[1][0], p[1][1],
+                )
+            }
+            OpKind.AVGPOOL2D_GRAD -> {
+                // §0.4.386 — the fused avgpool adjoint: window and strides ride as
+                // attrs, and only the LOW padding reaches the twin.
+                val win = intPair(node.attrs, "window", emptyList())
+                val s = intPair(node.attrs, "window_strides", win)
+                val p = paddingOf(node.attrs)
+                assertEquals(2, win.size, "AVGPOOL2D_GRAD without a `window` attr: ${node.attrs}")
+                avgPool2dGrad(
+                    tensor(inputs[0], node.operands[0].type.dims),
+                    tensor(inputs[1], node.operands[1].type.dims),
+                    win[0], win[1], s[0], s[1], p[0][0], p[1][0],
+                )
             }
             else -> error("unexpected node kind ${node.op}")
         }
@@ -256,10 +285,13 @@ class DxirHostConvParityTest {
     @Test
     fun hostTwinsMatchInterpreterOnAvgPoolAdjoint() {
         val kinds = checkAdjointNodes(avgPoolLossFn(), seed = 300)
-        // AvgPool2dRule still emits the explicit lhs-dilated CONV_TRANSPOSE2D
-        // against a splat kernel — its own sentinel-safe rework belongs to the
-        // pooling slice. Pinned here so that slice inherits a certified twin.
-        assertCovers(kinds, listOf(OpKind.CONV_TRANSPOSE2D))
+        // §0.4.386 — the avgpool adjoint is now the fused AVGPOOL2D_GRAD (the window
+        // inverted at runtime) instead of a channel-folded lhs-dilated
+        // CONV_TRANSPOSE2D against a 1/(kh·kw) splat kernel; the primal AVGPOOL2D
+        // rides along in the value stream (MUL's adjoint reads it). The loss keeps a
+        // NON-divisible width (5, window 2, stride 2) so the inversion has to handle
+        // a floor-division remainder rather than a clean tiling.
+        assertCovers(kinds, listOf(OpKind.AVGPOOL2D, OpKind.AVGPOOL2D_GRAD))
     }
 
     private fun assertCovers(actual: List<OpKind>, expected: List<OpKind>) {

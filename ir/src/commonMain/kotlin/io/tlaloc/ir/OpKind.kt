@@ -56,6 +56,26 @@ enum class OpKind {
     // convention, documented at the interpreter arm).
     MAXPOOL2D, AVGPOOL2D,
 
+    // §0.4.386 — AVGPOOL2D's adjoint, fused and runtime-extent (Phase A3b).
+    // AVGPOOL2D_GRAD(upstream, xTemplate) → dX at xTemplate's shape, attrs
+    // copied off the primal (`window`, `window_strides`, `padding`).
+    //
+    // The spelling this replaces was `RESHAPE([N,C,·,·] → [N·C,1,·,·]) →
+    // CONV_TRANSPOSE2D(1/(kh·kw) splat, lhs_dilation = stride, padding solved
+    // from the extents) → RESHAPE back`, which folds channels into the batch
+    // dim so a single-channel splat kernel applies depthwise without grouped-conv
+    // support. Both halves of that are sentinel-hostile: the solved padding AND
+    // the reshape's `n * c` target, which under -1 dims is 1 — a reshape that
+    // silently claims a shape the data does not have. Fusing removes the channel
+    // fold entirely (the adjoint is per-channel, so a direct window scatter needs
+    // no grouping trick) and leaves nothing but literal attrs.
+    //
+    // Semantics: `dX[n,c,iy,ix] = (Σ over the outputs whose window covers
+    // (iy,ix) of dY[n,c,y,x]) / (kh·kw)` — the count_include_pad mirror of the
+    // primal, which also divides by the FULL window. `xTemplate` contributes
+    // SHAPE ONLY; its values are never read. Host twin: `avgPool2dGrad`.
+    AVGPOOL2D_GRAD,
+
     // §0.4.385 — the conv adjoints, fused and runtime-extent (Phase A3b).
     // Both exist for one reason: the classical spellings SOLVE their `padding`
     // from the primal's extents —

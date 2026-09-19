@@ -790,6 +790,198 @@ fun <S : Shape> conv2dKernelAdjoint(
 }
 
 /**
+ * §0.4.386 — the host avgpool engine: a port of the dxir interpreter's
+ * `evalPool2d` AVGPOOL2D branch, kept deliberately literal so the host result is
+ * bit-exact against the interpreted dxir (same `Double` accumulator, same
+ * `n → c → y → x → ky → kx` order, same single Float conversion at the end).
+ *
+ * count_include_pad, the interpreter's convention: the sum divides by the FULL
+ * window `kh·kw`, padding included, so a window hanging off the edge is averaged
+ * over taps that were not there. That choice is what makes [avgPool2dGrad]'s
+ * uniform `1/(kh·kw)` spread the exact adjoint.
+ */
+private fun avgPool2dEngine(
+    x: DTensor<*, F32>,
+    windowH: Int,
+    windowW: Int,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+): DTensor<Shape, F32> {
+    val d = x.dims
+    require(d.size == 4) { "avgPool2d: rank-4 NCHW input required; got ${d.toList()}" }
+    require(windowH > 0 && windowW > 0 && strideH > 0 && strideW > 0) {
+        "avgPool2d: window and strides must be positive; got window [$windowH, $windowW], " +
+            "strides [$strideH, $strideW]"
+    }
+    val nB = d[0]
+    val c = d[1]
+    val h = d[2]
+    val w = d[3]
+    val hOut = (h + padTop + padBottom - windowH) / strideH + 1
+    val wOut = (w + padLeft + padRight - windowW) / strideW + 1
+    require(hOut > 0 && wOut > 0) {
+        "avgPool2d: derived output extents [$hOut, $wOut] are empty — window " +
+            "[$windowH, $windowW] does not fit the padded input [$h, $w]"
+    }
+    val v = x.hostF32()
+    val windowSize = windowH * windowW
+    val out = FloatArray(nB * c * hOut * wOut)
+    var outIdx = 0
+    for (n in 0 until nB) {
+        for (ch in 0 until c) {
+            val planeBase = (n * c + ch) * h * w
+            for (y in 0 until hOut) {
+                for (xo in 0 until wOut) {
+                    var acc = 0.0
+                    for (ky in 0 until windowH) {
+                        val inY = y * strideH + ky - padTop
+                        if (inY < 0 || inY >= h) continue
+                        for (kx in 0 until windowW) {
+                            val inX = xo * strideW + kx - padLeft
+                            if (inX < 0 || inX >= w) continue
+                            acc += v[planeBase + inY * w + inX].toDouble()
+                        }
+                    }
+                    out[outIdx++] = (acc / windowSize).toFloat()
+                }
+            }
+        }
+    }
+    return DTensor(HostF32Storage(out), intArrayOf(nB, c, hOut, wOut), F32)
+}
+
+/**
+ * §0.4.386 — 2-D average pooling, NCHW. Two arities and no default parameter
+ * values, for the reason documented on [conv2d]: K2 unwraps a named argument
+ * before the plugin's FIR lowering sees it and does not reorder it, so attrs must
+ * be positional to be unambiguous. `avgPool2d(windowH, windowW)` is the
+ * non-overlapping pool (strides default to the window — the interpreter's own
+ * default, and PyTorch's `AvgPool2d(k)` shape); the 8-argument form adds strides
+ * and all four padding sides. The result erases to `DTensor<Shape, F32>` like
+ * every other extent-changing host op.
+ */
+fun <S : Shape> DTensor<S, F32>.avgPool2d(windowH: Int, windowW: Int): DTensor<Shape, F32> =
+    avgPool2dGeneral(this, windowH, windowW, windowH, windowW, 0, 0, 0, 0)
+
+@Suppress("LongParameterList")
+fun <S : Shape> DTensor<S, F32>.avgPool2d(
+    windowH: Int,
+    windowW: Int,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+): DTensor<Shape, F32> = avgPool2dGeneral(
+    this, windowH, windowW, strideH, strideW, padTop, padBottom, padLeft, padRight,
+)
+
+/**
+ * §0.4.386 — fixed-arity synthesis delegate for `OpKind.AVGPOOL2D`, every attr
+ * explicit and positional (the usual IrVararg reason, and the result's shape
+ * witness `S` comes from the caller's derived IrType).
+ */
+@Suppress("LongParameterList")
+fun <S : Shape> avgPool2dGeneral(
+    x: DTensor<*, F32>,
+    windowH: Int,
+    windowW: Int,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return avgPool2dEngine(
+        x, windowH, windowW, strideH, strideW, padTop, padBottom, padLeft, padRight,
+    ) as DTensor<S, F32>
+}
+
+/**
+ * §0.4.386 — the host twin of `OpKind.AVGPOOL2D_GRAD`: each input element collects
+ * the upstream of every output window covering it, divided by the FULL window
+ * `kh·kw` (count_include_pad, mirroring [avgPool2dEngine]).
+ *
+ * The covering output is found by INVERTING the window rather than by solving a
+ * padding: for target row `iy` and tap `ky` it is `(iy + padTop − ky) / strideH`
+ * when that divides evenly and lands in range. So the only attrs are literal facts
+ * off the primal, [xTemplate] contributes SHAPE ONLY (its values are never read),
+ * and nothing needs an extent at compile time — which is the whole point, since
+ * under `grad {}` every extent is a -1 sentinel. Only the LOW padding participates:
+ * the high side is implied by the upstream's runtime shape, exactly as for
+ * [conv2dDataAdjoint].
+ */
+@Suppress("LongParameterList")
+fun <S : Shape> avgPool2dGrad(
+    upstream: DTensor<*, F32>,
+    xTemplate: DTensor<S, F32>,
+    windowH: Int,
+    windowW: Int,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padLeft: Int,
+): DTensor<S, F32> {
+    val up = upstream.dims
+    val target = xTemplate.dims
+    require(up.size == 4 && target.size == 4) {
+        "avgPool2dGrad: rank-4 NCHW upstream and template required; got " +
+            "${up.toList()} / ${target.toList()}"
+    }
+    require(windowH > 0 && windowW > 0 && strideH > 0 && strideW > 0) {
+        "avgPool2dGrad: window and strides must be positive; got window [$windowH, $windowW], " +
+            "strides [$strideH, $strideW]"
+    }
+    require(up[0] == target[0] && up[1] == target[1]) {
+        "avgPool2dGrad: upstream batch/channels [${up[0]}, ${up[1]}] ≠ target " +
+            "[${target[0]}, ${target[1]}]"
+    }
+    val nB = target[0]
+    val c = target[1]
+    val h = target[2]
+    val w = target[3]
+    val hOut = up[2]
+    val wOut = up[3]
+    val uv = upstream.hostF32()
+    val windowSize = windowH * windowW
+    val out = FloatArray(nB * c * h * w)
+    var outIdx = 0
+    for (n in 0 until nB) {
+        for (ch in 0 until c) {
+            val upBase = (n * c + ch) * hOut * wOut
+            for (iy in 0 until h) {
+                for (ix in 0 until w) {
+                    var acc = 0.0
+                    for (ky in 0 until windowH) {
+                        val dy = iy + padTop - ky
+                        if (dy < 0 || dy % strideH != 0) continue
+                        val y = dy / strideH
+                        if (y >= hOut) continue
+                        for (kx in 0 until windowW) {
+                            val dx = ix + padLeft - kx
+                            if (dx < 0 || dx % strideW != 0) continue
+                            val x = dx / strideW
+                            if (x >= wOut) continue
+                            acc += uv[upBase + y * wOut + x].toDouble()
+                        }
+                    }
+                    out[outIdx++] = (acc / windowSize).toFloat()
+                }
+            }
+        }
+    }
+    @Suppress("UNCHECKED_CAST")
+    return DTensor<Shape, F32>(HostF32Storage(out), target.copyOf(), F32) as DTensor<S, F32>
+}
+
+/**
  * Scalar → rank-N uniform broadcast: produce a fresh `DTensor<S, F32>` shaped like
  * [template] whose every element equals [v]. Used by the IR-rewrite synthesis path to
  * lower `OpKind.BROADCAST` in gradient bodies emitted by [io.tlaloc.ir.passes.VjpRegistry.SumRule]

@@ -1052,6 +1052,74 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.386 — Phase A3b: the avgpool user surface (NCHW). Two arities and
+        // no default parameter values, for the same reason as conv (K2 unwraps a
+        // named argument before this lowering runs and does not reorder it, so
+        // attrs must be positional to be unambiguous): `avgPool2d(kh, kw)` is the
+        // non-overlapping pool (strides default to the window, the interpreter's
+        // own convention) and the 8-argument form adds strides and all four
+        // padding sides. `window`/`window_strides`/`padding` fold onto the op as
+        // literal attrs; the result's spatial extents are a floor-division over
+        // the input's, so a symbolic input dim gives a symbolic output dim.
+        if (fqn == "io.tlaloc.core.ops.avgPool2d") {
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("$fqn has no receiver")
+            val x = lowerExpr(operandExpr, env, emitter)
+            if (x.type.rank != 4) {
+                throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
+            }
+            if (x.type.dtype != F32) {
+                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            }
+            val args = call.argumentList.arguments
+            if (args.size != 2 && args.size != 8) {
+                throw LoweringException(
+                    "$fqn takes (windowH, windowW) or (windowH, windowW, strideH, strideW, " +
+                        "padTop, padBottom, padLeft, padRight); got ${args.size} arguments",
+                )
+            }
+            val lits = args.map { e ->
+                intLiteralArg((e as? FirNamedArgumentExpression)?.expression ?: e)
+                    ?: throw LoweringException("$fqn arguments must be Int literals")
+            }
+            val windowH = lits[0]
+            val windowW = lits[1]
+            if (windowH <= 0 || windowW <= 0) {
+                throw LoweringException("$fqn window must be positive; got [$windowH, $windowW]")
+            }
+            // Strides default to the window (non-overlapping), matching both the
+            // interpreter's attr default and PyTorch's `AvgPool2d(k)`.
+            val strideH = lits.getOrNull(2) ?: windowH
+            val strideW = lits.getOrNull(3) ?: windowW
+            val padTop = lits.getOrNull(4) ?: 0
+            val padBottom = lits.getOrNull(5) ?: 0
+            val padLeft = lits.getOrNull(6) ?: 0
+            val padRight = lits.getOrNull(7) ?: 0
+            if (strideH <= 0 || strideW <= 0) {
+                throw LoweringException("$fqn strides must be positive; got [$strideH, $strideW]")
+            }
+            val xd = x.type.dims
+            fun outExtent(inDim: Int, k: Int, stride: Int, padLo: Int, padHi: Int): Int =
+                if (inDim <= 0) -1 else (inDim + padLo + padHi - k) / stride + 1
+            return emitter.op(
+                kind = OpKind.AVGPOOL2D,
+                operands = listOf(x),
+                type = DxirType(
+                    x.type.dtype,
+                    listOf(
+                        xd[0], xd[1],
+                        outExtent(xd[2], windowH, strideH, padTop, padBottom),
+                        outExtent(xd[3], windowW, strideW, padLeft, padRight),
+                    ),
+                ),
+                attrs = mapOf(
+                    "window" to listOf(windowH, windowW),
+                    "window_strides" to listOf(strideH, strideW),
+                    "padding" to listOf(listOf(padTop, padBottom), listOf(padLeft, padRight)),
+                ),
+            )
+        }
+
         // §0.4.369 — Phase A4 (DiffKT parity): elementwise `maximum(a, b)` /
         // `minimum(a, b)` as sugar over the §0.4.364 where/compare surface.
         // `maximum` = WHERE(COMPARE(a, b, GE), a, b); `minimum` uses LE. The

@@ -359,6 +359,21 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 3) return null
                 operandIrTypes[op.operands[2].id]
             }
+            OpKind.AVGPOOL2D -> {
+                // §0.4.386 — pooling keeps batch and channels and floors the spatial
+                // extents, so the first two atoms come from the input and the last
+                // two are placeholders (same reasoning as the conv pair).
+                if (op.operands.size != 1) return null
+                val lhsIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val lhsAtoms = shapeAtomsOf(lhsIr, 4) ?: return null
+                val litAtom = litIntAtom() ?: return null
+                rebuildShapeAtoms(lhsIr, listOf(lhsAtoms[0], lhsAtoms[1], litAtom, litAtom), 4)
+            }
+            OpKind.AVGPOOL2D_GRAD -> {
+                // §0.4.386 — the result IS the shape template's type (operand 1).
+                if (op.operands.size != 2) return null
+                operandIrTypes[op.operands[1].id]
+            }
             OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW -> {
                 if (op.operands.size != 2) return null
                 op.operands.firstOrNull { it.type.rank == op.type.rank }
@@ -978,6 +993,18 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             changed = true
                         }
                     }
+                    // §0.4.386 — AVGPOOL2D_GRAD's template is operand[1]; same
+                    // inversion (the upstream operand carries the OUTPUT's shape and
+                    // must not inherit the result's).
+                    OpKind.AVGPOOL2D_GRAD -> {
+                        if (n.operands.size != 2) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val templateId = n.operands[1].id
+                        if (paramIrTypeMap[templateId] == null && isAcceptedTensorType(n.operands[1].type)) {
+                            paramIrTypeMap[templateId] = outputIr
+                            changed = true
+                        }
+                    }
                     OpKind.RESHAPE -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
@@ -1365,6 +1392,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.CONV2D_DATA_ADJOINT || op.op == OpKind.CONV2D_KERNEL_ADJOINT) {
             return irConvAdjoint(op, env, context)
         }
+        // §0.4.386 — avgpool and its fused adjoint.
+        if (op.op == OpKind.AVGPOOL2D) return irAvgPool(op, env, context)
+        if (op.op == OpKind.AVGPOOL2D_GRAD) return irAvgPoolGrad(op, env, context)
         if (op.op == OpKind.SUM_TO) return irSumTo(op, env, context)
         if (op.op == OpKind.SLICE) return irSlice(op, env, context)
         if (op.op == OpKind.PAD_TO) return irPadTo(op, env, context)
@@ -2421,6 +2451,99 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         decls.forEachIndexed { i, decl -> call.arguments[i] = irGet(decl) }
         val ints = listOf(strides[0], strides[1], rhsDil[0], rhsDil[1], padTop, padLeft)
         ints.forEachIndexed { i, v -> call.arguments[i + 3] = intConst(v) }
+        return call
+    }
+
+    /**
+     * §0.4.386 — `OpKind.AVGPOOL2D` → `:core/ops avgPool2dGeneral`, the host twin
+     * that is bit-exact against the interpreter's `evalPool2d` (count_include_pad:
+     * the sum divides by the FULL window). The primal reaches a gradient body
+     * through the value stream, exactly as CONV2D does. All attrs are literals.
+     */
+    private fun IrBuilderWithScope.irAvgPool(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        if (!isAcceptedTensorType(op.type) || op.type.rank != 4) return null
+        val sym = opsTensorSymbol("avgPool2dGeneral") ?: return null
+        val decl = env[op.operands[0].id] ?: return null
+
+        fun intPair(key: String, def: List<Int>): List<Int> {
+            val v = (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: return def
+            return if (v.size == 2) v else def
+        }
+        val window = intPair("window", emptyList())
+        if (window.size != 2) return reject("op id=${op.id} AVGPOOL2D needs a `window` attr; got ${op.attrs}")
+        val strides = intPair("window_strides", window)
+        val rows = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType) ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        call.arguments[0] = irGet(decl)
+        val ints = listOf(
+            window[0], window[1], strides[0], strides[1],
+            rows?.getOrNull(0)?.getOrNull(0) ?: 0, rows?.getOrNull(0)?.getOrNull(1) ?: 0,
+            rows?.getOrNull(1)?.getOrNull(0) ?: 0, rows?.getOrNull(1)?.getOrNull(1) ?: 0,
+        )
+        ints.forEachIndexed { i, v -> call.arguments[i + 1] = intConst(v) }
+        return call
+    }
+
+    /**
+     * §0.4.386 — `OpKind.AVGPOOL2D_GRAD(upstream, xTemplate)` →
+     * `:core/ops avgPool2dGrad`. Same shape as [irConvAdjoint]: literal attrs only,
+     * the padding/extent question answered at runtime by inverting the window
+     * against the operands' real `dims`, and the result IrType taken from the
+     * shape template (operand 1) rather than derived.
+     */
+    private fun IrBuilderWithScope.irAvgPoolGrad(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        if (!isAcceptedTensorType(op.type) || op.type.rank != 4) return null
+        val sym = opsTensorSymbol("avgPool2dGrad") ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+
+        fun intPair(key: String, def: List<Int>): List<Int> {
+            val v = (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: return def
+            return if (v.size == 2) v else def
+        }
+        val window = intPair("window", emptyList())
+        if (window.size != 2) {
+            return reject("op id=${op.id} AVGPOOL2D_GRAD needs a `window` attr; got ${op.attrs}")
+        }
+        val strides = intPair("window_strides", window)
+        val rows = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+        val padTop = rows?.getOrNull(0)?.getOrNull(0) ?: 0
+        val padLeft = rows?.getOrNull(1)?.getOrNull(0) ?: 0
+
+        val resultIrType = (irTypeForNode(op.operands[1], context) as? IrSimpleType)
+            ?: (irTypeForNode(op, context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        decls.forEachIndexed { i, decl -> call.arguments[i] = irGet(decl) }
+        val ints = listOf(window[0], window[1], strides[0], strides[1], padTop, padLeft)
+        ints.forEachIndexed { i, v -> call.arguments[i + 2] = intConst(v) }
         return call
     }
 

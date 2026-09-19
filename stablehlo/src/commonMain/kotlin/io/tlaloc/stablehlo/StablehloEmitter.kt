@@ -231,6 +231,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> emitReduceWindow(
                 step, name, ops[0], node, node.operands[0].type,
             )
+            // §0.4.386 — the fused avgpool adjoint (padding solved at emit time).
+            OpKind.AVGPOOL2D_GRAD -> emitAvgPoolGrad(step, name, ops[0], node)
             OpKind.ARGMAX -> {
                 val axis = readAxis(node, node.operands[0].type.rank)
                 val refStr = emitArgmax(
@@ -1205,6 +1207,65 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             "$step$name = stablehlo.transpose $dwt, dims = [1, 0, 2, 3] " +
                 ": (${dwtType.toMlir()}) -> ${outType.toMlir()}",
         )
+    }
+
+    /**
+     * §0.4.386 — the fused avgpool adjoint, expanded into exactly the MLIR the
+     * pre-fusion rule produced: fold channels into the batch dim, one lhs-dilated
+     * `stablehlo.convolution` against a uniform `1/(kh·kw)` splat kernel (IOHW
+     * `[1,1,kh,kw]`, so a single-channel kernel applies depthwise without
+     * grouped-conv support), then fold back.
+     *
+     * Emit time is where the padding gets solved — the dims are concrete here,
+     * unlike at transform time under `grad {}` — with the same formula the
+     * interpreter and the host twin apply at runtime:
+     *
+     *     dilSize = (hOut−1)·s + 1,   low = kh − 1 − p_low,   high = p_low + H − dilSize
+     *
+     * Keeping this expansion rather than a `feature_group_count = C` depthwise
+     * convolution means the module uses only patterns §0.4.362/§0.4.363 already
+     * certified against real XLA. The value convention matches the interpreter's
+     * count_include_pad: the splat carries `1/(kh·kw)` for the FULL window.
+     */
+    private fun emitAvgPoolGrad(step: String, name: String, up: String, node: DxirOp) {
+        val upType = node.operands[0].type
+        val outType = node.type
+        require(upType.rank == 4 && outType.rank == 4) {
+            "${node.op} requires rank-4 NCHW upstream/result; got ${upType.dims} / ${outType.dims}"
+        }
+        val window = intListAttr(node, "window")
+        require(window.size == 2) { "${node.op} needs `window` [kh, kw]; got $window" }
+        val strides = intListAttr(node, "window_strides").let { if (it.size == 2) it else window }
+        val primalPad = conv2dPadding(node)
+        val (nB, c, h, w) = outType.dims
+        val hOut = upType.dims[2]
+        val wOut = upType.dims[3]
+        val padding = (0..1).map { a ->
+            val dilSize = (upType.dims[2 + a] - 1) * strides[a] + 1
+            val low = window[a] - 1 - primalPad[a][0]
+            listOf(low, primalPad[a][0] + outType.dims[2 + a] - dilSize)
+        }
+
+        val foldedT = DxirType(outType.dtype, listOf(nB * c, 1, hOut, wOut))
+        val kernelT = DxirType(outType.dtype, listOf(1, 1, window[0], window[1]))
+        val convT = DxirType(outType.dtype, listOf(nB * c, 1, h, w))
+        val folded = synth()
+        val kernel = synth()
+        val conv = synth()
+        emitReshape(step, folded, up, upType, foldedT)
+        val scale = mlirFloatLiteral((1.0f / (window[0] * window[1])).toString())
+        out.appendLine("$step$kernel = stablehlo.constant dense<$scale> : ${kernelT.toMlir()}")
+        emitConvolution(
+            step, conv, folded, kernel,
+            lhsType = foldedT, rhsType = kernelT, outType = convT,
+            kernelLayout = "[i, o, 0, 1]",
+            strides = listOf(1, 1),
+            padding = padding,
+            lhsDilation = strides,
+            rhsDilation = listOf(1, 1),
+            reversal = null,
+        )
+        emitReshape(step, name, conv, convT, outType)
     }
 
     private fun emitScatter(

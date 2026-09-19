@@ -378,16 +378,70 @@ reachable from `grad {}`, not new math. New-op families come after.
        distinguish `padTop = 1` from `strideH = 1`; the first E2E run folded the
        padding into the stride and silently produced a valid conv. Arity is
        unambiguous, defaults are not.
-    3. **avgPool** — cheap now that (1) and (2) exist: a host twin + FIR arm +
-       synthesis arm. Its adjoint is a lhs-dilated CONV_TRANSPOSE2D against a
-       1/(kh·kw) splat kernel, so it needs the SAME runtime-template treatment
-       §0.4.385 gave conv (it still carries the loud sentinel guard) plus a
-       sentinel-safe spelling of its channel-folding `RESHAPE` — the reshape target
-       `n * c` is a product of two symbolic extents, so it needs a template operand
-       of its own (or a fused pooling adjoint, which is likely the cleaner answer
-       given the reshape only exists to dodge grouped-conv support).
-    4. **maxPool last**: still blocked on rank-6 intermediates and the
-       single-representative `context.tensorIrType` generalisation.
+    3. **avgPool ✅ (§0.4.386)** — landed, and it turned out cheaper than expected
+       because the fused-adjoint pattern generalises: one new
+       `AVGPOOL2D_GRAD(upstream, xTemplate)` op replaces the whole
+       `RESHAPE → CONV_TRANSPOSE2D(1/(kh·kw) splat, lhs_dilation = stride, solved
+       padding) → RESHAPE` chain. That chain had TWO extent dependencies, and the
+       reshape was the worse one: its target baked `n * c`, which under sentinels is
+       **1**, so it claimed a shape the data did not have. The fused op needs no
+       channel fold at all — the adjoint is per-channel, and the
+       depthwise-via-batch-folding trick only ever existed to dodge grouped-conv
+       support. It INVERTS the window per input element (`y = (iy + padTop − ky) /
+       strideH` when that divides evenly and lands in range) instead of solving a
+       padding, so there is no solve to get wrong; attrs are the primal's literals,
+       count_include_pad is preserved (divide by the FULL `kh·kw`, matching the
+       primal), and only the LOW padding participates. Arms everywhere: interpreter
+       (`evalAvgPoolGrad`), host twins (`avgPool2d` 2 arities + `avgPool2dGeneral`
+       primal delegate, both bit-exact against `evalPool2d`; `avgPool2dGrad`),
+       synthesis (`irAvgPool`, `irAvgPoolGrad`, forward + backward IrType arms —
+       AVGPOOL2D keeps the input's batch/channel atoms and placeholders the spatial
+       ones, AVGPOOL2D_GRAD's result IS its template's), cost model, FIR arm, and
+       the emitter — which EXPANDS the fused op back into fold + lhs-dilated splat
+       convolution + unfold, i.e. exactly the MLIR §0.4.363 certified, rather than
+       introducing a `feature_group_count = C` depthwise conv.
+       `AvgPool2dRule.readsPrimalOperandIndices` widened `emptySet() → setOf(0)`:
+       the rule used to inspect only `x.type`, but a template OPERAND is a value
+       reference as far as the clone walk is concerned, and omitting it would leave
+       the emitted node pointing at a primal id that collides with the grad builder's
+       fresh ids (ref-integrity-valid, semantically wrong).
+       Certified: `AvgPoolGradientTest` E2E through the real plugin over four
+       spellings — non-overlapping 2×2, overlapping 3×3/stride-2/pad-1 over a
+       5×5 input (a floor-division remainder the inversion must crop), a chained
+       `relu(x).avgPool2d(…)` whose template is a forward-derived node, and
+       `Σ p²` over `p = avgPool2d(x)` whose loss READS the pooled value so the
+       primal AVGPOOL2D lands in the body's value stream (without it the primal
+       twin `avgPool2dGeneral` and its `irAvgPool` arm would ship unexercised —
+       the first three only ever reach AVGPOOL2D_GRAD) — all against a SCATTER
+       reference (spread each output's upstream over the taps that were in range,
+       divide by the full window) that transposes the primal loop rather than
+       inverting the window, so an off-by-one in either shows up. Plus
+       `AvgPoolAdjointSentinelSafetyTest` (2)
+       pinning that the body carries only literal attrs and that neither the RESHAPE
+       nor the CONV_TRANSPOSE2D reappears, an `EmitterTest` text pin on the solved
+       asymmetric padding `[[1,1],[1,2]]` and the fold/conv/unfold sequence, the
+       host↔interpreter bit-exact walk extended to BOTH the primal AVGPOOL2D and
+       the fused adjoint, and
+       `PjrtPoolingSmokeTest` on the GB10 (avgpool grad max|diff| 1.19e-7 vs the
+       interpreter). `DxirPoolingTest`'s FD + JVP⇄VJP oracles are unchanged and
+       green, so the fusion preserved values on concrete dims.
+    4. **maxPool — re-scoped by §0.4.386, no longer blocked on rank-6.** The plan
+       had this last, gated on rank-6 upsample intermediates and the
+       single-representative `tensorIrType` generalisation. The fused-adjoint pattern
+       dissolves both: a `MAXPOOL2D_GRAD(upstream, x)` op can compute the
+       upsample-and-mask directly — for each input element, find the covering
+       output windows, compare `x[i]` against the window max (recomputable from `x`
+       and the literal attrs inside the op), and accumulate the upstream of every
+       window it wins. No rank-6 RESHAPE/BROADCAST chain, so no rank-6 witnesses and
+       no mixed-rank body; and unlike the conv/avgpool templates, `x` here is a
+       VALUE operand (its elements are compared), not shape-only. The same rewrite
+       should also lift `MaxPool2dRule`'s v1 restriction (`strides == window`, zero
+       padding, window-divisible dims), since a direct scatter handles overlapping
+       and padded windows naturally — the restriction existed because the
+       nearest-upsample formulation cannot. Tie convention to preserve: full
+       upstream to every within-window tie (the MaxRule/JAX-select convention; XLA's
+       `select_and_scatter` picks one winner, so divergence remains possible on exact
+       float ties — document it, don't chase it).
     `batchNorm` grad{} folds in here too (BATCHNORM OpKind exists; VJP + surface
     unaudited).
 - **A4. Elementwise binary max/min + clip + outerProduct** — split by the

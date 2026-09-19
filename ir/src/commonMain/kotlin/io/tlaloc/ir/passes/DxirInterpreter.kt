@@ -466,6 +466,9 @@ object DxirInterpreter {
             OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> {
                 evalPool2d(op, evalNode(op.operands[0], env, multiResults))
             }
+            // §0.4.386 — the fused avgpool adjoint (runtime-extent).
+            OpKind.AVGPOOL2D_GRAD ->
+                evalAvgPoolGrad(op, evalNode(op.operands[0], env, multiResults))
             OpKind.BROADCAST -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 val outSize = sizeOf(op.type)
@@ -1586,6 +1589,77 @@ object DxirInterpreter {
                             }
                         }
                         out[outIdx++] = if (isMax) acc.toFloat() else (acc / windowSize).toFloat()
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * §0.4.386 — [OpKind.AVGPOOL2D_GRAD]: the adjoint of [evalPool2d]'s AVGPOOL2D
+     * branch, written as the mirror image of that gather. Each input element
+     * collects the upstream of every output window covering it, divided by the FULL
+     * window size `kh·kw` — the count_include_pad convention the primal uses, so a
+     * padded tap contributes to the denominator exactly as it does on the way in.
+     *
+     * The window is inverted rather than solved: for a target input row `iy` and tap
+     * `ky`, the covering output row is `(iy + padTop − ky) / strideH` when that
+     * divides evenly and lands in range. So nothing here needs the primal's extents
+     * as attrs — the upstream's runtime shape bounds the loop and the template's
+     * bounds the result — which is what makes the op safe under `grad {}`'s -1
+     * sentinels. Only the LOW padding participates, for the same reason as the conv
+     * adjoints: the high side is implied by the upstream's shape.
+     *
+     * Same accumulation discipline as the primal (Double, then one Float conversion)
+     * and the same loop order, so the host twin can be bit-exact against it.
+     */
+    private fun evalAvgPoolGrad(op: DxirOp, up: FloatArray): FloatArray {
+        val upT = op.operands[0].type
+        val outT = op.type
+        require(upT.rank == 4 && outT.rank == 4) {
+            "DxirInterpreter: ${op.op} requires rank-4 NCHW upstream/result; got " +
+                "${upT.dims} / ${outT.dims}"
+        }
+        fun intPair(key: String, def: List<Int>): List<Int> =
+            (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+        val window = intPair("window", emptyList())
+        require(window.size == 2) { "DxirInterpreter: ${op.op} needs `window` [kh, kw]; got $window" }
+        val strides = intPair("window_strides", window)
+        val padding = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+            ?: listOf(listOf(0, 0), listOf(0, 0))
+
+        val (nB, c, h, w) = outT.dims
+        val hOut = upT.dims[2]
+        val wOut = upT.dims[3]
+        require(upT.dims[0] == nB && upT.dims[1] == c) {
+            "DxirInterpreter: ${op.op} upstream batch/channels ${upT.dims.take(2)} ≠ " +
+                "target ${outT.dims.take(2)}"
+        }
+        val windowSize = window[0] * window[1]
+        val out = FloatArray(nB * c * h * w)
+        var outIdx = 0
+        for (n in 0 until nB) {
+            for (ch in 0 until c) {
+                val upBase = (n * c + ch) * hOut * wOut
+                for (iy in 0 until h) {
+                    for (ix in 0 until w) {
+                        var acc = 0.0
+                        for (ky in 0 until window[0]) {
+                            val dy = iy + padding[0][0] - ky
+                            if (dy < 0 || dy % strides[0] != 0) continue
+                            val y = dy / strides[0]
+                            if (y >= hOut) continue
+                            for (kx in 0 until window[1]) {
+                                val dx = ix + padding[1][0] - kx
+                                if (dx < 0 || dx % strides[1] != 0) continue
+                                val x = dx / strides[1]
+                                if (x >= wOut) continue
+                                acc += up[upBase + y * wOut + x].toDouble()
+                            }
+                        }
+                        out[outIdx++] = (acc / windowSize).toFloat()
                     }
                 }
             }
