@@ -976,8 +976,8 @@ object FirLambdaToDxirLowering {
             val hi = floatLiteralArg(args[2])
                 ?: throw LoweringException("clip hi bound must be a Float literal")
             if (lo > hi) throw LoweringException("clip: lo ($lo) must be ≤ hi ($hi)")
-            val loConst = emitter.const(lo, x.type)
-            val hiConst = emitter.const(hi, x.type)
+            val loConst = splatLiteral(lo, x, emitter)
+            val hiConst = splatLiteral(hi, x, emitter)
             val geCmp = emitter.op(
                 kind = OpKind.COMPARE,
                 operands = listOf(x, loConst),
@@ -1071,7 +1071,7 @@ object FirLambdaToDxirLowering {
             val pred = lowerExpr(args[0], env, emitter)
             val a = lowerExpr(args[1], env, emitter)
             val b = lowerExpr(args[2], env, emitter)
-            val zero = emitter.const(0.0f, pred.type)
+            val zero = splatLiteral(0.0f, pred, emitter)
             val boolPred = emitter.op(
                 kind = OpKind.COMPARE,
                 operands = listOf(pred, zero),
@@ -1532,13 +1532,35 @@ object FirLambdaToDxirLowering {
         }
         val literal = floatLiteralArg(scalarExpr)
         val splat = if (literal != null) {
-            emitter.const(literal, tensor.type)
+            splatLiteral(literal, tensor, emitter)
         } else {
-            splatScalarTo(lowerExpr(scalarExpr, env, emitter), tensor.type, emitter)
+            splatScalarTo(lowerExpr(scalarExpr, env, emitter), tensor, emitter)
         }
         val operands = if (lhsIsTensor) listOf(tensor, splat) else listOf(splat, tensor)
         return emitter.op(kind = kind, operands = operands, type = tensor.type)
     }
+
+    /**
+     * Phase A5c-3 — a literal splatted over [tensor]'s shape.
+     *
+     * Concrete dims bake a shaped const: synthesis materialises every extent as a
+     * const and there is nothing to guess. SYMBOLIC dims carry [tensor] as a
+     * shape-only BROADCAST template instead, because a shaped const has no runtime
+     * shape source of its own — synthesis would have to pick its extents by
+     * axis-matching static atoms against the params, and once operands broadcast that
+     * guess can land on the wrong param (`[3,3]` where the tensor is `[2,3]`).
+     */
+    private fun splatLiteral(value: Any, tensor: DxirNode, emitter: DxirEmitter): DxirNode =
+        if (tensor.type.dims.any { it <= 0 }) {
+            emitter.op(
+                kind = OpKind.BROADCAST,
+                operands = listOf(emitter.const(value, DxirType(tensor.type.dtype, emptyList())), tensor),
+                type = tensor.type,
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+        } else {
+            emitter.const(value, tensor.type)
+        }
 
     /** True when [expr]'s resolved FIR type is `io.tlaloc.core.DTensor` (any shape / dtype args). */
     private fun isDTensorExpr(expr: FirExpression): Boolean =
@@ -1924,28 +1946,30 @@ object FirLambdaToDxirLowering {
         setOf(OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW)
 
     /**
-     * Phase A5 — splat a rank-0 [scalar] over [type]'s shape.
+     * Phase A5 — splat a rank-0 [scalar] over [tensor]'s shape.
      *
-     * A compile-time constant splats to a shaped const (the §0.4.369 `clip`
-     * bound pattern — synthesis materialises it via `irConstFor`'s axis-matching
-     * against the params, so -1 sentinel dims are read at runtime, never baked).
-     * A computed rank-0 value splats through BROADCAST with an EMPTY
-     * `broadcast_dimensions`, the §0.4.359 scalar-seed polymorphism the §0.4.371
-     * generalisation preserved: the interpreter fills the output with the single
-     * input element, the emitter emits a scalar→shape `broadcast_in_dim`, and
-     * BroadcastRule's adjoint is the full reduce — emitted since §0.4.373 as the
-     * runtime-extent `SUM_TO`, which reads the target shape from its template
-     * operand at execution. Both forms are therefore sentinel-safe, and a
-     * differentiable scalar side gets a correct adjoint for free.
+     * A compile-time constant goes through [splatLiteral]. A computed rank-0 value
+     * splats through BROADCAST with an EMPTY `broadcast_dimensions`, the §0.4.359
+     * scalar-seed polymorphism the §0.4.371 generalisation preserved: the interpreter
+     * fills the output with the single input element, the emitter emits a
+     * scalar→shape `broadcast_in_dim`, and BroadcastRule's adjoint is the full reduce
+     * — emitted since §0.4.373 as the runtime-extent `SUM_TO`, which reads the target
+     * shape from its template operand at execution. A differentiable scalar side
+     * therefore gets a correct adjoint for free.
+     *
+     * Phase A5c-3 — [tensor] rides along as the BROADCAST's shape-only template in
+     * both forms, so synthesis reads the target extents off a real runtime value
+     * instead of axis-matching static atoms against the params. It is already a body
+     * node (the binary op's other operand), so the reference costs nothing.
      */
-    private fun splatScalarTo(scalar: DxirNode, type: DxirType, emitter: DxirEmitter): DxirNode =
+    private fun splatScalarTo(scalar: DxirNode, tensor: DxirNode, emitter: DxirEmitter): DxirNode =
         if (scalar is DxirConst) {
-            emitter.const(scalar.value, type)
+            splatLiteral(scalar.value, tensor, emitter)
         } else {
             emitter.op(
                 kind = OpKind.BROADCAST,
-                operands = listOf(scalar),
-                type = type,
+                operands = listOf(scalar, tensor),
+                type = tensor.type,
                 attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
             )
         }

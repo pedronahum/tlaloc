@@ -135,6 +135,57 @@ object VjpRegistry {
     private fun needsShapeTemplate(target: DxirType): Boolean = target.dims.any { it <= 0 }
 
     /**
+     * Phase A5c-3 — emit a `broadcast_dimensions = []` BROADCAST of [value] to
+     * [targetType], carrying [template] as a shape-only second operand whenever the
+     * target's extents are not statically known ([needsShapeTemplate]).
+     *
+     * Every adjoint that splats or un-reduces back to a primal shape goes through
+     * here, so the shape source is a value whose runtime dims ARE the target rather
+     * than synthesis's atom-matching guess. That guess is unsafe once operands
+     * broadcast, and doubly so for the STRETCH form: an un-reduce target is usually
+     * an intermediate's shape (`(v * m).max(1)`'s adjoint stretches back to the
+     * broadcast product), which no param need have — axis-matching a rank-2 target
+     * against a rank-1 param's axis produced `[3,3]` where `[2,3]` was meant.
+     *
+     * [template] must be a node the rule already dereferences (i.e. in its
+     * `readsPrimalOperandIndices`), so it is cloned into the gradient body anyway and
+     * the extra reference costs nothing. Rules whose operand is NOT otherwise read
+     * refine [VjpRule.readsPrimalOperands] per node instead — see [SumRule].
+     */
+    private fun broadcastTo(
+        builder: DxirBuilder,
+        value: DxirNode,
+        template: DxirNode,
+        targetType: DxirType,
+    ): DxirNode = builder.op(
+        OpKind.BROADCAST,
+        if (needsShapeTemplate(targetType)) listOf(value, template) else listOf(value),
+        targetType,
+        attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+    )
+
+    /**
+     * Phase A5c-3 — a literal splatted over [template]'s shape. Under SYMBOLIC dims
+     * this is a scalar const carried by a templated [broadcastTo], so synthesis reads
+     * the target extents off a real runtime value; a bare shaped const has no runtime
+     * shape source and synthesis would have to guess its extents by axis-matching
+     * static atoms against the params. Under CONCRETE dims — and for a scalar target,
+     * which needs no splat at all — this is exactly the plain shaped const it always
+     * was, so no pre-A5c IR changes shape.
+     */
+    private fun splatConst(builder: DxirBuilder, value: Any, template: DxirNode, targetType: DxirType): DxirNode =
+        if (needsShapeTemplate(targetType) && !targetType.isScalar) {
+            broadcastTo(
+                builder,
+                builder.const(value, DxirType(targetType.dtype, emptyList())),
+                template,
+                targetType,
+            )
+        } else {
+            builder.const(value, targetType)
+        }
+
+    /**
      * d(a + b)/da = 1, d(a + b)/db = 1 — the upstream, un-broadcast to each
      * operand's own shape (Phase A5c: the operands may broadcast against each
      * other, so the upstream is result-shaped and each side needs its own reduce).
@@ -264,24 +315,17 @@ object VjpRegistry {
             // stretch BROADCAST can un-reduce it over the reduced axes. The
             // full-reduce path keeps the scalar-splat BROADCAST unchanged.
             val up = reshapeToKeepdims(op, x, upstream, builder)
-            // Phase A5c-2 — a SCALAR seed splatted to x's shape carries x as a
-            // second, shape-only operand. Synthesis resolves a splat target by
-            // axis-matching the static IrType against the params, which is a guess
-            // that stops being safe once operands broadcast: two params sharing
-            // atoms can differ at runtime (`[2,1]` and `[2,3]` are both
-            // `Rank2<Sym, Lit<Int>>`), and a rank-2 target can match a rank-1
-            // param's axis outright — either way the seed came out with the wrong
-            // shape and the un-broadcast SUM_TO then threw. x is the one value
-            // whose runtime shape IS the target, exactly the SUM_TO/PAD_TO
-            // convention. The stretch form (axis reduce, `up` non-scalar) already
-            // carries a correctly-ranked operand, so it is left alone.
-            val operands = if (up.type.isScalar && needsShapeTemplate(targetType)) listOf(up, x) else listOf(up)
-            val contribution = builder.op(
-                OpKind.BROADCAST,
-                operands,
-                targetType,
-                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
-            )
+            // Phase A5c-2/A5c-3 — the seed carries `x` as a shape-only template
+            // whenever the target's extents are symbolic, in BOTH forms: the scalar
+            // splat (full reduce) and the equal-rank stretch (axis reduce). Synthesis
+            // resolves a splat/stretch target by axis-matching static IrType atoms
+            // against the params, which is a guess that stops being safe once operands
+            // broadcast: two params sharing atoms can differ at runtime (`[2,1]` and
+            // `[2,3]` are both `Rank2<Sym, Lit<Int>>`), and a rank-2 target can match
+            // a rank-1 param's axis outright — either way the seed came out with the
+            // wrong shape and the un-broadcast SUM_TO then threw. `x` is the one value
+            // whose runtime shape IS the target: the SUM_TO/PAD_TO convention.
+            val contribution = broadcastTo(builder, up, x, targetType)
             return listOf(x to contribution)
         }
     }
@@ -332,26 +376,17 @@ object VjpRegistry {
                 // ones(x) → the same reduction → N at upstream's shape → DIV.
                 val one: Any = if (upstream.type.dtype == F64) 1.0 else 1.0f
                 val seed = builder.const(one, DxirType(upstream.type.dtype, emptyList()))
-                val ones = builder.op(
-                    OpKind.BROADCAST,
-                    // Phase A5c-2 — x rides along as a shape-only template so the
-                    // splat reads its target extents at runtime (see SumRule).
-                    if (needsShapeTemplate(x.type)) listOf(seed, x) else listOf(seed),
-                    x.type,
-                    attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
-                )
+                // Phase A5c-2 — x rides along as a shape-only template so the splat
+                // reads its target extents at runtime (see [broadcastTo]).
+                val ones = broadcastTo(builder, seed, x, x.type)
                 val nT = builder.op(OpKind.SUM, listOf(ones), op.type, attrs = op.attrs)
                 builder.op(OpKind.DIV, listOf(upstream, nT), upstream.type)
             }
             val up = reshapeToKeepdims(op, x, scaled, builder)
             val targetType = DxirType(upstream.type.dtype, x.type.dims)
-            // Phase A5c-2 — a scalar seed carries x as a shape-only template (SumRule).
-            val contribution = builder.op(
-                OpKind.BROADCAST,
-                if (up.type.isScalar && needsShapeTemplate(targetType)) listOf(up, x) else listOf(up),
-                targetType,
-                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
-            )
+            // Phase A5c-2/3 — x is the shape template in both the splat and the
+            // stretch form (see [broadcastTo]).
+            val contribution = broadcastTo(builder, up, x, targetType)
             return listOf(x to contribution)
         }
     }
@@ -402,15 +437,11 @@ object VjpRegistry {
                 "DotRule: rank-1 operands required, got ${a.type.dims} x ${b.type.dims}"
             }
             // Scalar upstream broadcast to vector shape first (the SumRule
-            // convention — the interpreter's MUL is same-size only).
-            val upA = builder.op(
-                OpKind.BROADCAST, listOf(upstream), DxirType(upstream.type.dtype, a.type.dims),
-                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
-            )
-            val upB = builder.op(
-                OpKind.BROADCAST, listOf(upstream), DxirType(upstream.type.dtype, b.type.dims),
-                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
-            )
+            // convention). Phase A5c-3 — each splat carries its own operand as the
+            // shape template (see [broadcastTo]); both are already cloned by this
+            // rule, so the references are free.
+            val upA = broadcastTo(builder, upstream, a, DxirType(upstream.type.dtype, a.type.dims))
+            val upB = broadcastTo(builder, upstream, b, DxirType(upstream.type.dtype, b.type.dims))
             val da = builder.op(OpKind.MUL, listOf(upA, b), a.type)
             val db = builder.op(OpKind.MUL, listOf(upB, a), b.type)
             return listOf(a to da, b to db)
@@ -478,13 +509,13 @@ object VjpRegistry {
             // equal-rank stretch arm applies whether the primal kept or
             // squeezed the reduced axes.
             val yRe = builder.op(kind, listOf(x), op.type, attrs = op.attrs)
-            val bcast = mapOf("broadcast_dimensions" to emptyList<Int>())
-            val yB = builder.op(
-                OpKind.BROADCAST, listOf(reshapeToKeepdims(op, x, yRe, builder)), x.type, attrs = bcast,
-            )
-            val upB = builder.op(
-                OpKind.BROADCAST, listOf(reshapeToKeepdims(op, x, upstream, builder)), x.type, attrs = bcast,
-            )
+            // Phase A5c-3 — x is the shape template for both un-reduce stretches
+            // (see [broadcastTo]): under broadcasting the extremum's operand is often
+            // an intermediate whose shape no param has, so axis-matching the target
+            // against the params can pick the wrong extents. x is already cloned
+            // (`readsPrimalOperandIndices = setOf(0)`), so the reference is free.
+            val yB = broadcastTo(builder, reshapeToKeepdims(op, x, yRe, builder), x, x.type)
+            val upB = broadcastTo(builder, reshapeToKeepdims(op, x, upstream, builder), x, x.type)
             // Indicator of the extremum: for MAX, yB - x ≥ 0 with equality
             // exactly at maxima → 1 - sign(yB - x); MIN mirrors with x - yB.
             // Tie convention: FULL upstream to every tied element (the
@@ -496,7 +527,12 @@ object VjpRegistry {
                 builder.op(OpKind.SUB, listOf(x, yB), x.type)
             }
             val sgn = builder.op(OpKind.SIGN, listOf(diff), x.type)
-            val one = builder.const(floatLiteralForDtype(1.0, x.type.dtype), x.type)
+            // Phase A5c-3 — the 1.0 splat carries x as its shape template under
+            // symbolic dims: a shaped CONST has no runtime shape source, so synthesis
+            // materialises it by axis-matching static atoms against the params, and
+            // with broadcasting that guess can land on the wrong param (`[3,3]` where
+            // the mask belongs at `[2,3]`). Concrete dims keep the plain shaped const.
+            val one = splatConst(builder, floatLiteralForDtype(1.0, x.type.dtype), x, x.type)
             val mask = builder.op(OpKind.SUB, listOf(one, sgn), x.type)
             val dx = builder.op(OpKind.MUL, listOf(upB, mask), x.type)
             return listOf(x to dx)
@@ -534,10 +570,9 @@ object VjpRegistry {
                 OpKind.SUM, listOf(t), keepdimsType,
                 attrs = mapOf("reduction_dims" to listOf(axis)),
             )
-            val sB = builder.op(
-                OpKind.BROADCAST, listOf(srow), x.type,
-                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
-            )
+            // Phase A5c-3 — x is the shape template for the row-sum stretch
+            // (see [broadcastTo]); x is already cloned by this rule.
+            val sB = broadcastTo(builder, srow, x, x.type)
             val diff = builder.op(OpKind.SUB, listOf(upstream, sB), x.type)
             val dx = builder.op(OpKind.MUL, listOf(y, diff), x.type)
             return listOf(x to dx)
@@ -621,7 +656,10 @@ object VjpRegistry {
             val maskType = DxirType(upstream.type.dtype, pred.type.dims)
             val mask = builder.op(OpKind.CAST, listOf(pred), maskType)
             val da = builder.op(OpKind.MUL, listOf(upstream, mask), a.type)
-            val one = builder.const(floatLiteralForDtype(1.0, upstream.type.dtype), maskType)
+            // Phase A5c-3 — the 1.0 splat carries `pred` as its shape template under
+            // symbolic dims (see [broadcastTo]): a shaped const has no runtime shape
+            // source of its own.
+            val one = splatConst(builder, floatLiteralForDtype(1.0, upstream.type.dtype), pred, maskType)
             val inv = builder.op(OpKind.SUB, listOf(one, mask), maskType)
             val db = builder.op(OpKind.MUL, listOf(upstream, inv), b.type)
             return listOf(a to da, b to db)
@@ -1055,7 +1093,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
-            val two = builder.const(floatLiteralForDtype(2.0, x.type.dtype), x.type)
+            val two = splatConst(builder, floatLiteralForDtype(2.0, x.type.dtype), x, x.type)
             val sqrtX = builder.op(OpKind.SQRT, listOf(x), x.type)
             val denom = builder.op(OpKind.MUL, listOf(two, sqrtX), x.type)
             val dx = builder.op(OpKind.DIV, listOf(upstream, denom), upstream.type)
@@ -1073,7 +1111,7 @@ object VjpRegistry {
             val x = op.operands[0]
             val tanhX = builder.op(OpKind.TANH, listOf(x), x.type)
             val tanhSq = builder.op(OpKind.MUL, listOf(tanhX, tanhX), x.type)
-            val one = builder.const(floatLiteralForDtype(1.0, x.type.dtype), x.type)
+            val one = splatConst(builder, floatLiteralForDtype(1.0, x.type.dtype), x, x.type)
             val diff = builder.op(OpKind.SUB, listOf(one, tanhSq), x.type)
             val dx = builder.op(OpKind.MUL, listOf(upstream, diff), upstream.type)
             return listOf(x to dx)
@@ -1090,7 +1128,7 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
             val sigX = builder.op(OpKind.SIGMOID, listOf(x), x.type)
-            val one = builder.const(floatLiteralForDtype(1.0, x.type.dtype), x.type)
+            val one = splatConst(builder, floatLiteralForDtype(1.0, x.type.dtype), x, x.type)
             val oneMinusSig = builder.op(OpKind.SUB, listOf(one, sigX), x.type)
             val product = builder.op(OpKind.MUL, listOf(sigX, oneMinusSig), x.type)
             val dx = builder.op(OpKind.MUL, listOf(upstream, product), upstream.type)
@@ -1136,7 +1174,7 @@ object VjpRegistry {
                 else -> error("PowRule: unsupported exp dtype ${exp.type.dtype}")
             }
             // d/dbase = upstream · exp · base^(exp-1)
-            val one = builder.const(oneValue, exp.type)
+            val one = splatConst(builder, oneValue, exp, exp.type)
             val expMinus1 = builder.op(OpKind.SUB, listOf(exp, one), exp.type)
             val basePowerExpMinus1 = builder.op(OpKind.POW, listOf(base, expMinus1), op.type)
             val dBaseFactor = builder.op(OpKind.MUL, listOf(exp, basePowerExpMinus1), op.type)
@@ -1239,9 +1277,17 @@ object VjpRegistry {
      * must live in the gradient body", not strictly "values the rule dereferences"
      * — same as how [MulRule] marks both operands even though only the product's
      * derivative structure needs them.
+     *
+     * Phase A5c-3 — index 0 joins the set as well, but only per NODE: the zero base
+     * is a scalar splat to `arr`'s shape, so under symbolic dims it carries `arr` as
+     * a shape template (see [broadcastTo]). With concrete dims no template is
+     * emitted and `arr` stays uncloned, which is why [readsPrimalOperands] refines
+     * the static over-approximation.
      */
     val GatherRule: VjpRule = object : VjpRule {
-        override val readsPrimalOperandIndices: Set<Int> = setOf(1)
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun readsPrimalOperands(op: DxirOp): Set<Int> =
+            if (op.operands.isNotEmpty() && needsShapeTemplate(op.operands[0].type)) setOf(0, 1) else setOf(1)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             // §0.4.45 — emit SCATTER_ADD(zero_bcast, idx, upstream) instead of the
             // pre-§0.4.45 three-op chain BROADCAST + SCATTER + outer-ADD. When the
@@ -1261,13 +1307,9 @@ object VjpRegistry {
             }
             val zeroScalar = builder.const(zeroScalarValue, scalarDType)
             // §0.4.111 — name reflects the generalised shape: a zero tensor with the
-            // same rank/dims as `arr`, whether rank-1 or rank-2.
-            val zeroBase = builder.op(
-                OpKind.BROADCAST,
-                listOf(zeroScalar),
-                arr.type,
-                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
-            )
+            // same rank/dims as `arr`, whether rank-1 or rank-2. Phase A5c-3 — `arr`
+            // rides along as the shape template under symbolic dims.
+            val zeroBase = broadcastTo(builder, zeroScalar, arr, arr.type)
             val scatterAdded = builder.op(
                 OpKind.SCATTER_ADD,
                 listOf(zeroBase, idx, upstream),

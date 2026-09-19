@@ -182,6 +182,55 @@ class BroadcastBinaryGradientTest {
         )
     }
 
+    @Test
+    fun `grad through an axis max of a broadcast product`() {
+        val src = """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.Lit
+            import io.tlaloc.core.Rank1
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.max
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun dump(name: String, t: DTensor<*, F32>) {
+                println(name)
+                println(t.dims.toList().joinToString("x"))
+                for (v in t.hostF32()) print("" + v + " ")
+                println()
+            }
+            fun main() {
+                val g = grad { v: DTensor<Rank1<Sym>, F32>, m: DTensor<Rank2<Sym, Lit<Int>>, F32> ->
+                    ((v * m).max(1)).sum().toFloat()
+                }
+                val V = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f))
+                val M = Tensors.f32Matrix<Sym, Lit<Int>>(2, 3, floatArrayOf(10f, 20f, 30f, 40f, 50f, 60f))
+                val (dv, dm) = g(V, M)
+                dump("dv", dv); dump("dm", dm)
+            }
+        """.trimIndent()
+        // p = v ⊙ m = [[10,40,90],[40,100,180]] (broadcast), row maxima [90,180].
+        // MaxRule's mask is 1 at each row's argmax (column 2), so dp = [[0,0,1],[0,0,1]]:
+        //   dv[j] = Σ_k dp[k,j]·m[k,j] → [0, 0, 90]        SHAPE [3]
+        //   dm[k,j] = dp[k,j]·v[j]     → [[0,0,3],[0,0,3]] SHAPE [2,3]
+        // The un-reduce stretch targets p's shape — an INTERMEDIATE no param has, and
+        // one whose static atoms axis-match v (rank 1) as readily as m. Before the
+        // shape template it stretched to [3,3].
+        assertGradient(
+            STUB_R1_R2,
+            src,
+            want = mapOf(
+                "dv" to Grad(intArrayOf(3), listOf(0f, 0f, 90f)),
+                "dm" to Grad(intArrayOf(2, 3), listOf(0f, 0f, 3f, 0f, 0f, 3f)),
+            ),
+        )
+    }
+
     /** An expected gradient: its runtime shape (the un-broadcast contract) and its values. */
     private data class Grad(val dims: IntArray, val values: List<Float>) {
         override fun equals(other: Any?): Boolean =

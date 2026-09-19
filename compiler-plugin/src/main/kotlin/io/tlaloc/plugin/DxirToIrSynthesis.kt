@@ -1829,6 +1829,19 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 return call
             }
         }
+        // Phase A5c-3 — an explicit shape-only template operand (operand[1], which
+        // the un-reduce rules attach whenever the target carries a sentinel) wins
+        // over axis-matching the params: `stretchLike(x, template)` reads the target
+        // extents off a value whose runtime shape IS the target. Axis-matching is a
+        // guess from static atoms, and broadcasting made it unsafe — an un-reduce
+        // target is often an INTERMEDIATE's shape (`(v * m).max(1)`'s adjoint
+        // stretches back to the broadcast product), which no param need have.
+        if (op.operands.size == 2) {
+            val templateDecl = env[op.operands[1].id] ?: return null
+            val templateIr = (irTypeForNode(op.operands[1], context) as? IrSimpleType)
+                ?: (context.tensorIrType as? IrSimpleType)
+            return irStretchLikeCall(operandDecl, templateDecl, templateIr)
+        }
         if (targetIrType != null && context.fnParams.isNotEmpty()) {
             val axisMatches = matchBroadcastAxesToParams(
                 targetIrType,
@@ -1862,18 +1875,34 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
         }
         val template = context.tensorTemplateParam ?: return null
-        val tensorIrType = context.tensorIrType as? IrSimpleType ?: return null
-        val shapeTypeArg = tensorIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        return irStretchLikeCall(operandDecl, template, context.tensorIrType as? IrSimpleType)
+    }
+
+    /**
+     * `stretchLike(x, template)` — tile [valueDecl]'s size-1 axes out to the RUNTIME
+     * shape of [templateDecl]. The callee is
+     * `fun <S : Shape> stretchLike(x: DTensor<*, F32>, template: DTensor<S, F32>)`,
+     * so its single type argument and the call's type are both the template's shape
+     * and [resultIrType] supplies them. Shared by [irBroadcastStretch]'s
+     * explicit-template arm (Phase A5c-3) and its param-template fallback.
+     */
+    private fun IrBuilderWithScope.irStretchLikeCall(
+        valueDecl: IrValueDeclaration,
+        templateDecl: IrValueDeclaration,
+        resultIrType: IrSimpleType?,
+    ): IrExpression? {
         val helperSym = stretchLikeSymbol() ?: return null
+        val ty = resultIrType ?: return null
+        val shapeTypeArg = ty.arguments.firstOrNull()?.typeOrNull ?: return null
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
-            type = tensorIrType,
+            type = ty,
             symbol = helperSym,
         )
         call.typeArguments[0] = shapeTypeArg
-        call.arguments[0] = irGet(operandDecl)
-        call.arguments[1] = irGet(template)
+        call.arguments[0] = irGet(valueDecl)
+        call.arguments[1] = irGet(templateDecl)
         return call
     }
 

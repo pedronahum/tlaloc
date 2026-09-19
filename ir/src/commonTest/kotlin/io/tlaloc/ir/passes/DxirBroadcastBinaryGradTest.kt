@@ -252,6 +252,48 @@ class DxirBroadcastBinaryGradTest {
         )
     }
 
+    /**
+     * Phase A5c-3 — MAX's adjoint is the stretch-form case: its two un-reduce
+     * broadcasts and its mask `1.0` splat all target `x`'s shape, which under
+     * broadcasting is often an INTERMEDIATE no param has (`(v * m).max(1)`), so each
+     * carries `x` as a shape-only template. Under concrete dims none of them does:
+     * synthesis bakes every extent as a const and there is nothing to guess.
+     */
+    @Test
+    fun axisMaxAdjointTemplatesItsBroadcastsOnlyUnderSentinels() {
+        fun build(dims: List<Int>) = DxirBuilder.function("max_${dims.joinToString("_")}") {
+            val x = param("x", DxirType(F32, dims))
+            val mx = op(
+                OpKind.MAX, listOf(x), DxirType(F32, dims.dropLast(1)),
+                attrs = mapOf("reduction_dims" to listOf(1)),
+            )
+            listOf(op(OpKind.SUM, listOf(mx), scalar))
+        }
+        fun broadcasts(fn: io.tlaloc.ir.DxirFunction) =
+            fn.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.BROADCAST }
+
+        val concrete = broadcasts(DxirReverseTransform.apply(build(listOf(2, 3))))
+        assertTrue(concrete.isNotEmpty(), "MAX's adjoint must contain broadcasts")
+        assertTrue(
+            concrete.all { it.operands.size == 1 },
+            "concrete dims need no shape template: ${concrete.map { it.operands.size }}",
+        )
+
+        val symbolic = broadcasts(DxirReverseTransform.apply(build(listOf(-1, -1))))
+        assertTrue(symbolic.isNotEmpty(), "MAX's adjoint must contain broadcasts")
+        assertTrue(
+            symbolic.all { it.operands.size == 2 },
+            "every symbolic-dims broadcast in MAX's adjoint must carry a template: " +
+                symbolic.map { it.operands.size },
+        )
+        assertTrue(
+            symbolic.all { it.operands[1].type.dims == it.type.dims },
+            "each template's shape must BE the broadcast target (x for the un-reduce " +
+                "stretches and the mask splat, the max node for SUM's seed), got " +
+                symbolic.map { it.operands[1].type.dims to it.type.dims },
+        )
+    }
+
     /** The interpreter reads a templated seed's shape from its own type and ignores the template. */
     @Test
     fun templatedSeedEvaluates() {

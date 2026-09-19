@@ -403,17 +403,47 @@ reachable from `grad {}`, not new math. New-op families come after.
     `dv` staying rank-1; a keepdims `[2,1] ⊙ [2,3]` intermediate), 2 IR pins for the
     templated seed, 2 shape-validation pins (rank-differing mismatch reported,
     legal rank extension silent).
-  - **A5c-3 (pending) — what broadcasting still does not cover.**
-    (i) `MaxRule` / `MinRule` / `SoftmaxRule` emit STRETCH broadcasts whose target
-    synthesis still resolves by axis-matching params — the same hazard class the
-    templated seed fixed, not yet templated (their operand is a correctly-ranked
-    tensor, so it only bites when params are shape-ambiguous).
-    (ii) The StableHLO emitter reads the splat target from the node type, so a
-    templated seed's template is emitted as a DEAD value — MLIR-legal and DCE'd by
-    XLA, but wasteful if a gradient body ever reaches the XLA path.
-    (iii) In sentinel-dims gradient bodies the templated seed costs one extra
-    evaluation of the summed node; a `dimsOf`-style shape-only host op would remove
-    it.
+  - **A5c-3(i) ✅ (§0.4.380) — shape templates everywhere synthesis would
+    otherwise GUESS.** A5c-2 templated SumRule/MeanRule's scalar seed; the same
+    hazard covered every other shape synthesis resolves by axis-matching static
+    IrType atoms against the params. Two families, one mechanism:
+    - **Un-reduce stretches**: `SumRule` (axis form), `MeanRule`, `MaxRule` /
+      `MinRule` (both the recomputed-extremum stretch and the upstream stretch),
+      `SoftmaxRule` (the row-sum stretch), `DotRule` (both splats) and
+      `GatherRule` (the zero scatter base) now pass the node whose shape IS the
+      target as a shape-only second operand, and `irBroadcastStretch` prefers it
+      over axis-matching (`stretchLike(x, template)`, factored into
+      `irStretchLikeCall`). This matters more for the stretch than for the splat:
+      an un-reduce target is usually an INTERMEDIATE's shape — `(v * m).max(1)`'s
+      adjoint stretches back to the broadcast product, which no param has, and
+      axis-matching a rank-2 target produced `[3,3]` out of `v:[3]` and `m:[2,3]`.
+    - **Rule constants**: a shaped const has no runtime shape source at all, so
+      `MaxRule`/`MinRule`'s mask `1.0`, `WhereRule`'s `1.0`, `SqrtRule`'s `2.0`,
+      `TanhRule`'s and `SigmoidRule`'s `1.0` and `PowRule`'s exponent `1` go
+      through a new `splatConst` — a plain shaped const under concrete dims (so no
+      pre-A5c IR changes shape) and a templated splat under symbolic ones. Same on
+      the FIR side via `splatLiteral`: `clip`'s lo/hi bounds, `where`'s zero, and
+      the Phase A5a literal splat (`a * 2.0f`).
+    - All of it is gated on `needsShapeTemplate` (any dim ≤ 0), so concrete-dims
+      IR — every IR-level test, the emitter's MLIR, the coarsener's inputs — is
+      byte-identical. `GatherRule` needed the per-node `readsPrimalOperands`
+      refinement because it previously read only `idx`.
+    Certified: `((v * m).max(1)).sum()` E2E with `v:[3]`, `m:[2,3]` (dv = [0,0,90]
+    shape [3], dm = [[0,0,3],[0,0,3]] shape [2,3] — the argmax mask landing on the
+    right columns requires the stretch to hit `[2,3]`, not `[3,3]`), plus an IR pin
+    that MAX's adjoint broadcasts carry templates under sentinels and none under
+    concrete dims, each template's shape being exactly its broadcast target.
+  - **A5c-3 remainder (pending).**
+    (i) `SignRule` and `CompareRule` still emit bare shaped ZERO consts as their
+    (piecewise-constant) contributions, and neither reads its operand, so a
+    template would need the per-node clone refinement — their zero gradient can
+    still be guessed wrong under ambiguous params. The pooling rules' zero/kernel
+    consts are the same story and belong with A3b.
+    (ii) The StableHLO emitter reads a splat target from the node type, so a
+    templated broadcast's template is emitted as a DEAD value — MLIR-legal and
+    DCE'd by XLA, but wasteful if a gradient body ever reaches the XLA path.
+    (iii) Under sentinels a templated seed costs one extra evaluation of the
+    summed node; a `dimsOf`-style shape-only host op would remove it.
     (iv) `DScalar × DTensor` mixing, and comparisons against a scalar literal
     (`a gt 1.0f` — `COMPARE_DIRECTION_MAP` still lowers both sides verbatim, and
     the comparison host ops still use the strict `elementwise`).
