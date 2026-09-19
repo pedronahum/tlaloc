@@ -791,6 +791,200 @@ fun <S : Shape> conv2dKernelAdjoint(
 }
 
 /**
+ * §0.4.391 — the shared engine for the two transposed-conv adjoint twins. A port of
+ * the interpreter's `evalConvTransposeAdjoint`, kept literal so the host result is
+ * bit-exact against the interpreted dxir (same Double accumulator, same loop order,
+ * same single Float conversion).
+ *
+ * No padding solve is involved: the primal's tap maps input↔output through
+ * `yDil = yo·s + ky·d − p_low` with `yDil` a multiple of the lhs dilation, so
+ * inverting that one equation per tap absorbs the padding, both dilations, the
+ * strides and the kernel reversal together. Only the LOW padding is therefore
+ * needed, as in [conv2dDataAdjoint].
+ *
+ * [up] is the upstream and [other] the kernel (IOHW `[Ci, Co, kh, kw]`) when
+ * [dataAdj], or `x` when not.
+ */
+@Suppress("LongParameterList")
+private fun convTranspose2dAdjointEngine(
+    up: FloatArray,
+    other: FloatArray,
+    dataAdj: Boolean,
+    nB: Int,
+    cIn: Int,
+    h: Int,
+    w: Int,
+    cOut: Int,
+    hOut: Int,
+    wOut: Int,
+    kh: Int,
+    kw: Int,
+    strideH: Int,
+    strideW: Int,
+    lhsDilH: Int,
+    lhsDilW: Int,
+    rhsDilH: Int,
+    rhsDilW: Int,
+    padTop: Int,
+    padLeft: Int,
+    revH: Boolean,
+    revW: Boolean,
+): FloatArray = if (dataAdj) {
+    val out = FloatArray(nB * cIn * h * w)
+    var outIdx = 0
+    for (n in 0 until nB) {
+        for (i in 0 until cIn) {
+            for (iy in 0 until h) {
+                for (ix in 0 until w) {
+                    var acc = 0.0
+                    for (ky in 0 until kh) {
+                        val num = iy * lhsDilH + padTop - ky * rhsDilH
+                        if (num < 0 || num % strideH != 0) continue
+                        val yo = num / strideH
+                        if (yo >= hOut) continue
+                        val wKy = if (revH) kh - 1 - ky else ky
+                        for (kx in 0 until kw) {
+                            val num2 = ix * lhsDilW + padLeft - kx * rhsDilW
+                            if (num2 < 0 || num2 % strideW != 0) continue
+                            val xo = num2 / strideW
+                            if (xo >= wOut) continue
+                            val wKx = if (revW) kw - 1 - kx else kx
+                            val upBase = ((n * cOut) * hOut + yo) * wOut + xo
+                            for (o in 0 until cOut) {
+                                acc += up[upBase + o * hOut * wOut].toDouble() *
+                                    other[((i * cOut + o) * kh + wKy) * kw + wKx]
+                            }
+                        }
+                    }
+                    out[outIdx++] = acc.toFloat()
+                }
+            }
+        }
+    }
+    out
+} else {
+    val acc = DoubleArray(cIn * cOut * kh * kw)
+    for (n in 0 until nB) {
+        for (o in 0 until cOut) {
+            for (yo in 0 until hOut) {
+                for (xo in 0 until wOut) {
+                    val upVal = up[((n * cOut + o) * hOut + yo) * wOut + xo].toDouble()
+                    for (i in 0 until cIn) {
+                        for (ky in 0 until kh) {
+                            val yD = yo * strideH + ky * rhsDilH - padTop
+                            if (yD < 0 || yD % lhsDilH != 0) continue
+                            val inY = yD / lhsDilH
+                            if (inY >= h) continue
+                            val wKy = if (revH) kh - 1 - ky else ky
+                            for (kx in 0 until kw) {
+                                val xD = xo * strideW + kx * rhsDilW - padLeft
+                                if (xD < 0 || xD % lhsDilW != 0) continue
+                                val inX = xD / lhsDilW
+                                if (inX >= w) continue
+                                val wKx = if (revW) kw - 1 - kx else kx
+                                acc[((i * cOut + o) * kh + wKy) * kw + wKx] +=
+                                    upVal * other[((n * cIn + i) * h + inY) * w + inX].toDouble()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    FloatArray(acc.size) { acc[it].toFloat() }
+}
+
+/**
+ * §0.4.391 — the host twin of `OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT`: the gradient
+ * of a transposed convolution w.r.t. its INPUT. [xTemplate] contributes SHAPE ONLY.
+ * Attrs are the primal transposed conv's, all literals.
+ *
+ * Interpreter and host only — there is no StableHLO arm for this op, so a
+ * GPU-targeted build fails loudly at emit. See `OpKind`'s doc for the identities a
+ * future emitter arm would use.
+ */
+@Suppress("LongParameterList")
+fun <S : Shape> convTranspose2dDataAdjoint(
+    upstream: DTensor<*, F32>,
+    kernel: DTensor<*, F32>,
+    xTemplate: DTensor<S, F32>,
+    strideH: Int,
+    strideW: Int,
+    lhsDilH: Int,
+    lhsDilW: Int,
+    rhsDilH: Int,
+    rhsDilW: Int,
+    padTop: Int,
+    padLeft: Int,
+    revH: Boolean,
+    revW: Boolean,
+): DTensor<S, F32> {
+    val up = upstream.dims
+    val k = kernel.dims
+    val target = xTemplate.dims
+    require(up.size == 4 && k.size == 4 && target.size == 4) {
+        "convTranspose2dDataAdjoint: rank-4 NCHW upstream, IOHW kernel and template required; " +
+            "got ${up.toList()} / ${k.toList()} / ${target.toList()}"
+    }
+    require(up[0] == target[0] && k[0] == target[1] && k[1] == up[1]) {
+        "convTranspose2dDataAdjoint: channel/batch mismatch — upstream ${up.toList()}, " +
+            "kernel ${k.toList()}, x ${target.toList()}"
+    }
+    val dx = convTranspose2dAdjointEngine(
+        upstream.hostF32(), kernel.hostF32(), true,
+        target[0], target[1], target[2], target[3],
+        up[1], up[2], up[3], k[2], k[3],
+        strideH, strideW, lhsDilH, lhsDilW, rhsDilH, rhsDilW,
+        padTop, padLeft, revH, revW,
+    )
+    @Suppress("UNCHECKED_CAST")
+    return DTensor<Shape, F32>(HostF32Storage(dx), target.copyOf(), F32) as DTensor<S, F32>
+}
+
+/**
+ * §0.4.391 — the host twin of `OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT`: the gradient
+ * of a transposed convolution w.r.t. its IOHW KERNEL. [x] is a VALUE operand here (the
+ * gather reads it); [wTemplate] contributes shape only.
+ */
+@Suppress("LongParameterList")
+fun <S : Shape> convTranspose2dKernelAdjoint(
+    x: DTensor<*, F32>,
+    upstream: DTensor<*, F32>,
+    wTemplate: DTensor<S, F32>,
+    strideH: Int,
+    strideW: Int,
+    lhsDilH: Int,
+    lhsDilW: Int,
+    rhsDilH: Int,
+    rhsDilW: Int,
+    padTop: Int,
+    padLeft: Int,
+    revH: Boolean,
+    revW: Boolean,
+): DTensor<S, F32> {
+    val xd = x.dims
+    val up = upstream.dims
+    val target = wTemplate.dims
+    require(xd.size == 4 && up.size == 4 && target.size == 4) {
+        "convTranspose2dKernelAdjoint: rank-4 NCHW x, NCHW upstream and IOHW template " +
+            "required; got ${xd.toList()} / ${up.toList()} / ${target.toList()}"
+    }
+    require(up[0] == xd[0] && target[0] == xd[1] && target[1] == up[1]) {
+        "convTranspose2dKernelAdjoint: channel/batch mismatch — x ${xd.toList()}, " +
+            "upstream ${up.toList()}, kernel ${target.toList()}"
+    }
+    val dw = convTranspose2dAdjointEngine(
+        upstream.hostF32(), x.hostF32(), false,
+        xd[0], xd[1], xd[2], xd[3],
+        up[1], up[2], up[3], target[2], target[3],
+        strideH, strideW, lhsDilH, lhsDilW, rhsDilH, rhsDilW,
+        padTop, padLeft, revH, revW,
+    )
+    @Suppress("UNCHECKED_CAST")
+    return DTensor<Shape, F32>(HostF32Storage(dw), target.copyOf(), F32) as DTensor<S, F32>
+}
+
+/**
  * §0.4.386 — the host pooling engine: a port of the dxir interpreter's
  * `evalPool2d`, kept deliberately literal so the host result is bit-exact against
  * the interpreted dxir (same `Double` accumulator, same `n → c → y → x → ky → kx`

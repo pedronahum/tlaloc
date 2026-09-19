@@ -350,12 +350,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     4,
                 )
             }
-            OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT -> {
+            OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT,
+            OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT,
+            -> {
                 // §0.4.385 — the result IS the shape template's type (operand 2):
                 // each adjoint produces a gradient shaped like the primal tensor it
                 // differentiates w.r.t. No placeholder atoms needed, which is what
                 // makes the fused spelling strictly easier to type than the
-                // CONV_TRANSPOSE2D / TRANSPOSE chain it replaced.
+                // CONV_TRANSPOSE2D / TRANSPOSE chain it replaced. §0.4.391 — the
+                // transposed-conv adjoints share the contract exactly.
                 if (op.operands.size != 3) return null
                 operandIrTypes[op.operands[2].id]
             }
@@ -988,7 +991,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // SUM_TO/PAD_TO/SLICE_LIKE). Neither conv operand may inherit
                     // it — the upstream carries the OUTPUT's shape and the other
                     // operand is a different tensor again.
-                    OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT -> {
+                    OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT,
+                    OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT,
+                    -> {
                         if (n.operands.size != 3) continue
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
                         val templateId = n.operands[2].id
@@ -1398,6 +1403,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // §0.4.385 — the fused conv adjoints (runtime-solved padding).
         if (op.op == OpKind.CONV2D_DATA_ADJOINT || op.op == OpKind.CONV2D_KERNEL_ADJOINT) {
             return irConvAdjoint(op, env, context)
+        }
+        // §0.4.391 — the fused TRANSPOSED-conv adjoints (index inversion, no solve).
+        if (op.op == OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT ||
+            op.op == OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT
+        ) {
+            return irConvTransposeAdjoint(op, env, context)
         }
         // §0.4.386 — pooling and its fused adjoints. §0.4.389 covers maxpool too.
         if (op.op == OpKind.AVGPOOL2D || op.op == OpKind.MAXPOOL2D) return irPool(op, env, context)
@@ -2473,6 +2484,64 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         decls.forEachIndexed { i, decl -> call.arguments[i] = irGet(decl) }
         val ints = listOf(strides[0], strides[1], rhsDil[0], rhsDil[1], padTop, padLeft)
         ints.forEachIndexed { i, v -> call.arguments[i + 3] = intConst(v) }
+        return call
+    }
+
+    /**
+     * §0.4.391 — the fused TRANSPOSED-conv adjoints → `:core/ops
+     * convTranspose2dDataAdjoint` / `convTranspose2dKernelAdjoint`. Same shape as
+     * [irConvAdjoint], with two differences: the attr set is the transposed conv's
+     * (so `lhs_dilation` and `window_reversal` ride along too — the index inversion
+     * needs both), and there is no padding to solve, since the host twin inverts the
+     * primal's tap equation per element.
+     */
+    private fun IrBuilderWithScope.irConvTransposeAdjoint(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 3) return null
+        if (!isAcceptedTensorType(op.type) || op.type.rank != 4) return null
+        val dataAdj = op.op == OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT
+        val sym = opsTensorSymbol(
+            if (dataAdj) "convTranspose2dDataAdjoint" else "convTranspose2dKernelAdjoint",
+        ) ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+
+        fun intPair(key: String): List<Int> {
+            val v = (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: return listOf(1, 1)
+            return if (v.size == 2) v else listOf(1, 1)
+        }
+        val strides = intPair("window_strides")
+        val lhsDil = intPair("lhs_dilation")
+        val rhsDil = intPair("rhs_dilation")
+        val rows = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+        val padTop = rows?.getOrNull(0)?.getOrNull(0) ?: 0
+        val padLeft = rows?.getOrNull(1)?.getOrNull(0) ?: 0
+        val reversal = (op.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
+
+        val resultIrType = (irTypeForNode(op.operands[2], context) as? IrSimpleType)
+            ?: (irTypeForNode(op, context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        decls.forEachIndexed { i, decl -> call.arguments[i] = irGet(decl) }
+        val ints = listOf(
+            strides[0], strides[1],
+            lhsDil[0], lhsDil[1],
+            rhsDil[0], rhsDil[1],
+            padTop, padLeft,
+        )
+        ints.forEachIndexed { i, v -> call.arguments[i + 3] = intConst(v) }
+        call.arguments[11] = boolConst(reversal?.getOrNull(0) ?: false)
+        call.arguments[12] = boolConst(reversal?.getOrNull(1) ?: false)
         return call
     }
 

@@ -105,8 +105,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // §0.4.385 — the fused conv adjoints cost the same order as the conv they
     // adjoint (the kernel one adds two transposes, which are pure data movement
     // and already accounted under bytes).
+    // §0.4.391 — and the transposed-conv adjoints likewise.
     OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D,
     OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT,
+    OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT,
     -> {
         // Conservative: out_elements × in_channels × 9 (3×3 kernel).
         op.type.elementCount.toDouble() * 9.0 * 1.0

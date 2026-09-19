@@ -13,6 +13,8 @@ import io.tlaloc.core.ops.conv2dGeneral
 import io.tlaloc.core.ops.conv2dKernelAdjoint
 import io.tlaloc.core.ops.convTranspose2d
 import io.tlaloc.core.ops.convTranspose2dGeneral
+import io.tlaloc.core.ops.convTranspose2dDataAdjoint
+import io.tlaloc.core.ops.convTranspose2dKernelAdjoint
 import io.tlaloc.core.ops.maxPool2dGeneral
 import io.tlaloc.core.ops.maxPool2dGrad
 import io.tlaloc.core.ops.transposePerm4
@@ -72,6 +74,8 @@ class DxirHostConvParityTest {
         fn.body.filterIsInstance<DxirOp>().filter {
             it.op == OpKind.CONV2D || it.op == OpKind.CONV_TRANSPOSE2D ||
                 it.op == OpKind.CONV2D_DATA_ADJOINT || it.op == OpKind.CONV2D_KERNEL_ADJOINT ||
+                it.op == OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT ||
+                it.op == OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT ||
                 it.op == OpKind.AVGPOOL2D || it.op == OpKind.AVGPOOL2D_GRAD ||
                 it.op == OpKind.MAXPOOL2D || it.op == OpKind.MAXPOOL2D_GRAD ||
                 (it.op == OpKind.TRANSPOSE && it.type.rank == 4)
@@ -162,6 +166,30 @@ class DxirHostConvParityTest {
                     tensor(inputs[1], node.operands[1].type.dims),
                     win[0], win[1], s[0], s[1], p[0][0], p[1][0],
                 )
+            }
+            OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT -> {
+                // §0.4.391 — the transposed-conv adjoints carry the primal's full
+                // attr set, including `lhs_dilation` and `window_reversal`, because
+                // the index inversion needs both.
+                val s = intPair(node.attrs, "window_strides", listOf(1, 1))
+                val ld = intPair(node.attrs, "lhs_dilation", listOf(1, 1))
+                val rd = intPair(node.attrs, "rhs_dilation", listOf(1, 1))
+                val rev = reversalOf(node.attrs)
+                val p = paddingOf(node.attrs)
+                val a = tensor(inputs[0], node.operands[0].type.dims)
+                val b = tensor(inputs[1], node.operands[1].type.dims)
+                val tmpl = tensor(inputs[2], node.operands[2].type.dims)
+                if (node.op == OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT) {
+                    convTranspose2dDataAdjoint(
+                        a, b, tmpl, s[0], s[1], ld[0], ld[1], rd[0], rd[1],
+                        p[0][0], p[1][0], rev[0], rev[1],
+                    )
+                } else {
+                    convTranspose2dKernelAdjoint(
+                        a, b, tmpl, s[0], s[1], ld[0], ld[1], rd[0], rd[1],
+                        p[0][0], p[1][0], rev[0], rev[1],
+                    )
+                }
             }
             OpKind.MAXPOOL2D -> {
                 // §0.4.389 — the primal maxpool twin.
@@ -398,6 +426,47 @@ class DxirHostConvParityTest {
                 tensor(up, upT.dims), tensor(x, xT.dims), tensor(y, upT.dims),
                 2, 2, 2, 2, 0, 0,
             ).hostF32(),
+        )
+    }
+
+    /**
+     * §0.4.391 — a transposed-conv loss whose adjoints exercise the interesting
+     * attrs at once: `lhs_dilation` [2,2] (the upsampling mechanism, and the reason
+     * the index inversion has a divisibility test), symmetric padding, and an
+     * ASYMMETRIC `window_reversal` [true, false] so a swapped or dropped reversal
+     * flag cannot cancel out. x [1,2,3,3] → hDil = (3−1)·2+1 = 5, kEff = 2, so
+     * y = [1,3,6,6].
+     */
+    private fun convTransposeLossFn(): DxirFunction {
+        val xT = DxirType(F32, listOf(1, 2, 3, 3))
+        val wT = DxirType(F32, listOf(2, 3, 2, 2))
+        val yT = DxirType(F32, listOf(1, 3, 6, 6))
+        return DxirBuilder.function("convT_loss") {
+            val x = param("x", xT)
+            val w = param("w", wT)
+            val y = op(
+                OpKind.CONV_TRANSPOSE2D, listOf(x, w), yT,
+                attrs = mapOf(
+                    "window_strides" to listOf(1, 1),
+                    "lhs_dilation" to listOf(2, 2),
+                    "padding" to listOf(listOf(1, 1), listOf(1, 1)),
+                    "window_reversal" to listOf(true, false),
+                ),
+            )
+            val y2 = op(OpKind.MUL, listOf(y, y), yT)
+            listOf(op(OpKind.SUM, listOf(y2), scalar))
+        }
+    }
+
+    @Test
+    fun hostTwinsMatchInterpreterOnConvTransposeAdjoint() {
+        val kinds = checkAdjointNodes(convTransposeLossFn(), seed = 500)
+        assertCovers(
+            kinds,
+            listOf(
+                OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT,
+                OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT,
+            ),
         )
     }
 

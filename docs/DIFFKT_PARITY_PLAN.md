@@ -366,10 +366,10 @@ reachable from `grad {}`, not new math. New-op families come after.
        the MLIR is the same `stablehlo.convolution` the pre-fusion rule produced —
        and that cert now covers the fused path (grads agree with the interpreter to
        1.19e-7 on the GB10).
-       Still deferred: CONV_TRANSPOSE2D's own adjoint (differentiating *through* a
-       transposed conv), and the fused ops have neither a VjpRule nor a forward
+       Still deferred: the fused ops have neither a VjpRule nor a forward
        tangent — as with `EMBEDDING_GRAD`, differentiating through a gradient body
-       that contains them fails loudly rather than silently.
+       that contains them fails loudly rather than silently. (CONV_TRANSPOSE2D's
+       own adjoint, deferred here, landed in §0.4.391 — see item 5.)
        **API constraint discovered the hard way — applies to the pooling surfaces
        too.** The host conv ops take their attrs POSITIONALLY, in two arities,
        with NO default parameter values. K2 unwraps a named argument (`padTop = 1`)
@@ -470,6 +470,44 @@ reachable from `grad {}`, not new math. New-op families come after.
        The emitter arm earned its keep immediately: its first version typed the
        compare against the POOLED `y` instead of the upsampled one, which is invalid
        MLIR — the GPU cert caught it, no text pin would have.
+    5. **CONV_TRANSPOSE2D's own adjoint ✅ (§0.4.391)** — differentiating THROUGH a
+       transposed conv (`grad { x, w -> x.convTranspose2d(w, 2, 2, …) }`, i.e. a
+       deconvolution / fractionally-strided upsample) was a loud "no VJP rule
+       registered" even though the primal's FIR arm and host twin shipped in
+       §0.4.384 and forward mode already worked. Two more fused ops,
+       `CONV_TRANSPOSE2D_DATA_ADJOINT(upstream, kernel, xTemplate)` and
+       `CONV_TRANSPOSE2D_KERNEL_ADJOINT(x, upstream, wTemplate)`, structurally
+       §0.4.385's mirror — but SIMPLER in the one place that mattered: **no padding
+       solve at all**. The primal's tap maps input↔output through
+       `yDil = yo·s + ky·d − p_low` with `yDil` a multiple of the lhs dilation `L`,
+       so inverting that single equation per tap (`yo = (iy·L + p_low − ky·d) / s`,
+       kept only when it divides evenly and lands in range) absorbs the padding, both
+       dilations, the strides and the kernel reversal in one test. There is no
+       runtime solve to get wrong, which is a strictly better position than the conv
+       adjoints were in.
+       The formulas were verified against central differences in a standalone model
+       over six configurations BEFORE any Kotlin was written (lhs_dilation 1 and 2,
+       window_strides 1 and 2, rhs_dilation, reversal, asymmetric padding, and all
+       combined; worst error 1.1e-9), and `DxirConvTransposeVjpTest` re-pins the same
+       six in-tree against both directional central differences and the JVP⇄VJP
+       cross-identity (whose forward side uses only the bilinear product rule, so it
+       never touches the new index inversion).
+       **Scope: interpreter + host + synthesis, NO StableHLO arm.** A GPU-targeted
+       build of such a gradient fails loudly at emit — the `EMBEDDING_GRAD`
+       precedent, and no shipped cert regresses, because nothing could emit this
+       graph before (the rule did not exist). The emitting identities are known and
+       recorded on the OpKinds: `dX` = strided-slice (undilate by `L`) of
+       `CONV2D_DATA_ADJOINT(dy, kernel with axes 0/1 swapped)`, and `dW` = the swap
+       of `CONV2D_KERNEL_ADJOINT` over an interior-dilated `x` — the latter needs
+       interior `stablehlo.pad`, which the emitter's PAD arm does not do yet
+       ("interior fixed at 0 in v1"). That is the follow-up if GPU deconv gradients
+       are ever wanted.
+       Also certified: `ConvTransposeGradientTest` E2E through the real plugin for
+       both the stride-1 and the upsampling (`lhs_dilation` 2) spellings, all four
+       gradients against central differences, no tape fallback; and the
+       host↔interpreter bit-exact walk extended to both new kinds with an
+       asymmetric `window_reversal` [true, false] so a swapped or dropped flag cannot
+       cancel out.
     ✅ **§0.4.387 — composition certified.** `CnnBlockGradientTest` runs one
     `grad {}` body carrying conv → relu → avgPool → sum PLUS a skip term, so the
     gradient threads an AVGPOOL2D_GRAD into both conv adjoints with a RELU/STEP

@@ -834,6 +834,60 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.391 — CONV_TRANSPOSE2D adjoint: differentiating THROUGH a transposed
+     * conv (a deconvolution / fractionally-strided upsample), which until here was a
+     * loud "no VJP rule registered" even though the primal's FIR arm and host twin
+     * shipped in §0.4.384.
+     *
+     * Structurally [Conv2dRule]'s mirror — two fused ops, each carrying the tensor
+     * whose shape it produces as its last operand — but simpler in one important way:
+     * NO padding solve. A transposed conv's tap maps input↔output through
+     * `yDil = yo·s + ky·d − p_low` with `yDil` a multiple of the lhs dilation, so the
+     * adjoints invert that one equation per tap and keep it only when it divides
+     * evenly and lands in range. Padding, both dilations, the strides and the kernel
+     * reversal all fall out of that test, so everything this rule passes down is a
+     * literal attr off the primal and it reads no extent at all — sentinel-safe by
+     * construction, with no runtime solve to get wrong.
+     *
+     * Verified against central differences over six configurations (lhs_dilation 1
+     * and 2, window_strides 1 and 2, rhs_dilation, reversal, asymmetric padding, and
+     * all combined) before implementation.
+     *
+     * v1 scope: interpreter + host + synthesis. There is NO StableHLO arm, so a
+     * GPU-targeted build of such a gradient fails loudly at emit; the identities a
+     * future arm would use are recorded on the OpKinds and in the parity plan.
+     */
+    val ConvTranspose2dRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val wgt = op.operands[1]
+
+            fun intPair(key: String, def: List<Int>): List<Int> =
+                (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+            val primalAttrs = mapOf<String, Any>(
+                "window_strides" to intPair("window_strides", listOf(1, 1)),
+                "padding" to ((op.attrs["padding"] as? List<*>)
+                    ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+                    ?: listOf(listOf(0, 0), listOf(0, 0))),
+                "lhs_dilation" to intPair("lhs_dilation", listOf(1, 1)),
+                "rhs_dilation" to intPair("rhs_dilation", listOf(1, 1)),
+                "window_reversal" to ((op.attrs["window_reversal"] as? List<*>)
+                    ?.map { it as Boolean } ?: listOf(false, false)),
+            )
+            val dX = builder.op(
+                OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, listOf(upstream, wgt, x), x.type,
+                attrs = primalAttrs,
+            )
+            val dW = builder.op(
+                OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT, listOf(x, upstream, wgt), wgt.type,
+                attrs = primalAttrs,
+            )
+            return listOf(x to dX, wgt to dW)
+        }
+    }
+
+    /**
      * §0.4.363 — AVGPOOL2D adjoint: each input element receives
      * `Σ dY/(kh·kw)` over every window containing it — exactly a
      * transposed convolution of dY with a uniform `1/(kh·kw)` kernel.
@@ -1426,6 +1480,7 @@ object VjpRegistry {
         OpKind.MEAN to MeanRule,
         OpKind.MATMUL to MatmulRule,
         OpKind.CONV2D to Conv2dRule,
+        OpKind.CONV_TRANSPOSE2D to ConvTranspose2dRule,
         OpKind.AVGPOOL2D to AvgPool2dRule,
         OpKind.MAXPOOL2D to MaxPool2dRule,
         OpKind.RESHAPE to ReshapeRule,

@@ -463,6 +463,14 @@ object DxirInterpreter {
             // §0.4.385 — the fused conv adjoints (runtime-solved padding).
             OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT ->
                 evalConvAdjoint(op, env, multiResults)
+            // §0.4.391 — the fused TRANSPOSED-conv adjoints (index inversion, so no
+            // padding solve is needed at all).
+            OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT ->
+                evalConvTransposeAdjoint(
+                    op,
+                    evalNode(op.operands[0], env, multiResults),
+                    evalNode(op.operands[1], env, multiResults),
+                )
             OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> {
                 evalPool2d(op, evalNode(op.operands[0], env, multiResults))
             }
@@ -1537,6 +1545,138 @@ object DxirInterpreter {
                 xT, upSwapped,
             )
             evalTranspose(dwtT, swap, dwt)
+        }
+    }
+
+    /**
+     * §0.4.391 — the fused adjoints of [OpKind.CONV_TRANSPOSE2D].
+     *
+     * Where [evalConvAdjoint] has to SOLVE a padding so a convolution lands on a
+     * target extent, these need no solve: the primal's tap maps input↔output through
+     * `yDil = yo·s + ky·d − p_low` with `yDil` a multiple of the lhs dilation `L`, so
+     * inverting that single equation per tap —
+     * `yo = (iy·L + p_low − ky·d) / s`, kept only when it divides evenly and lands in
+     * `[0, hOut)` — absorbs the padding, both dilations, the strides and the kernel
+     * reversal in one step. `dX` scatters over input positions, `dW` gathers over
+     * output positions; both accumulate in Double with one Float conversion, and the
+     * kernel is read IOHW (`[Ci, Co, kh, kw]`) with `window_reversal` applied to the
+     * tap index exactly as the primal does.
+     *
+     * Operand order mirrors [evalConvAdjoint]: the upstream is operand 0 for the data
+     * adjoint and operand 1 for the kernel adjoint, and operand 2 is the tensor whose
+     * shape the result takes — shape-only for `dX`, a VALUE operand for `dW` (its
+     * gather reads `x`).
+     */
+    private fun evalConvTransposeAdjoint(op: DxirOp, first: FloatArray, second: FloatArray): FloatArray {
+        val dataAdj = op.op == OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT
+        require(op.operands.size == 3) {
+            "DxirInterpreter: ${op.op} takes (upstream, kernel, xTemplate) or " +
+                "(x, upstream, wTemplate); got ${op.operands.size} operands"
+        }
+        val up = if (dataAdj) first else second
+        val other = if (dataAdj) second else first
+        val upT = if (dataAdj) op.operands[0].type else op.operands[1].type
+        val otherT = if (dataAdj) op.operands[1].type else op.operands[0].type
+        val outT = op.type
+        require(upT.rank == 4 && otherT.rank == 4 && outT.rank == 4) {
+            "DxirInterpreter: ${op.op} requires rank-4 operands and result; got " +
+                "${upT.dims} / ${otherT.dims} / ${outT.dims}"
+        }
+        // x's type is the data adjoint's RESULT and the kernel adjoint's operand 0;
+        // the kernel is IOHW either way.
+        val xT = if (dataAdj) outT else otherT
+        val wT = if (dataAdj) otherT else outT
+        val nB = xT.dims[0]
+        val cIn = xT.dims[1]
+        val h = xT.dims[2]
+        val w = xT.dims[3]
+        val cOut = upT.dims[1]
+        val hOut = upT.dims[2]
+        val wOut = upT.dims[3]
+        val kh = wT.dims[2]
+        val kw = wT.dims[3]
+        require(upT.dims[0] == nB && wT.dims[0] == cIn && wT.dims[1] == cOut) {
+            "DxirInterpreter: ${op.op} operand mismatch — upstream ${upT.dims}, kernel " +
+                "${wT.dims}, x ${xT.dims} (expected batch $nB, Ci $cIn, Co $cOut)"
+        }
+
+        fun intPair(key: String, def: List<Int>): List<Int> =
+            (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+        val s = intPair("window_strides", listOf(1, 1))
+        val lhsDil = intPair("lhs_dilation", listOf(1, 1))
+        val rhsDil = intPair("rhs_dilation", listOf(1, 1))
+        val rev = (op.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
+            ?: listOf(false, false)
+        val padding = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+            ?: listOf(listOf(0, 0), listOf(0, 0))
+
+        return if (dataAdj) {
+            val out = FloatArray(nB * cIn * h * w)
+            var outIdx = 0
+            for (n in 0 until nB) {
+                for (i in 0 until cIn) {
+                    for (iy in 0 until h) {
+                        for (ix in 0 until w) {
+                            var acc = 0.0
+                            for (ky in 0 until kh) {
+                                val num = iy * lhsDil[0] + padding[0][0] - ky * rhsDil[0]
+                                if (num < 0 || num % s[0] != 0) continue
+                                val yo = num / s[0]
+                                if (yo >= hOut) continue
+                                val wKy = if (rev[0]) kh - 1 - ky else ky
+                                for (kx in 0 until kw) {
+                                    val num2 = ix * lhsDil[1] + padding[1][0] - kx * rhsDil[1]
+                                    if (num2 < 0 || num2 % s[1] != 0) continue
+                                    val xo = num2 / s[1]
+                                    if (xo >= wOut) continue
+                                    val wKx = if (rev[1]) kw - 1 - kx else kx
+                                    val upBase = ((n * cOut) * hOut + yo) * wOut + xo
+                                    for (o in 0 until cOut) {
+                                        acc += up[upBase + o * hOut * wOut].toDouble() *
+                                            other[((i * cOut + o) * kh + wKy) * kw + wKx]
+                                    }
+                                }
+                            }
+                            out[outIdx++] = acc.toFloat()
+                        }
+                    }
+                }
+            }
+            out
+        } else {
+            // Double accumulator, one Float conversion at the end — the same
+            // discipline as every other engine here, and what the host twin mirrors
+            // for bit-exactness.
+            val acc = DoubleArray(cIn * cOut * kh * kw)
+            for (n in 0 until nB) {
+                for (o in 0 until cOut) {
+                    for (yo in 0 until hOut) {
+                        for (xo in 0 until wOut) {
+                            val upVal = up[((n * cOut + o) * hOut + yo) * wOut + xo].toDouble()
+                            for (i in 0 until cIn) {
+                                for (ky in 0 until kh) {
+                                    val yD = yo * s[0] + ky * rhsDil[0] - padding[0][0]
+                                    if (yD < 0 || yD % lhsDil[0] != 0) continue
+                                    val inY = yD / lhsDil[0]
+                                    if (inY >= h) continue
+                                    val wKy = if (rev[0]) kh - 1 - ky else ky
+                                    for (kx in 0 until kw) {
+                                        val xD = xo * s[1] + kx * rhsDil[1] - padding[1][0]
+                                        if (xD < 0 || xD % lhsDil[1] != 0) continue
+                                        val inX = xD / lhsDil[1]
+                                        if (inX >= w) continue
+                                        val wKx = if (rev[1]) kw - 1 - kx else kx
+                                        acc[((i * cOut + o) * kh + wKy) * kw + wKx] +=
+                                            upVal * other[((n * cIn + i) * h + inY) * w + inX].toDouble()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            FloatArray(acc.size) { acc[it].toFloat() }
         }
     }
 

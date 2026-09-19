@@ -134,6 +134,40 @@ enum class OpKind {
     // Host twins: `conv2dDataAdjoint` / `conv2dKernelAdjoint`.
     CONV2D_DATA_ADJOINT, CONV2D_KERNEL_ADJOINT,
 
+    // §0.4.391 — CONV_TRANSPOSE2D's own adjoints (Phase A3b), so that
+    // differentiating THROUGH a transposed conv works: `grad { x, w ->
+    // x.convTranspose2d(w, …) }` was a loud "no VJP rule registered" until here,
+    // even though the primal's FIR arm and host twin shipped in §0.4.384.
+    //
+    //   CONV_TRANSPOSE2D_DATA_ADJOINT(upstream, kernel, xTemplate)   → dX
+    //   CONV_TRANSPOSE2D_KERNEL_ADJOINT(x, upstream, wTemplate)      → dW
+    //
+    // Attrs are the primal's own literals (`window_strides`, `padding`,
+    // `lhs_dilation`, `rhs_dilation`, `window_reversal`), so nothing here reads an
+    // extent and both are sentinel-safe by construction — the same property
+    // §0.4.385's conv adjoints were built for.
+    //
+    // Unlike those, these need NO padding solve at all. A transposed conv's tap
+    // maps input↔output through `yDil = yo·s + ky·d − p_low` with `yDil` a
+    // multiple of the lhs dilation `L`, so inverting that one equation per tap —
+    // `yo = (iy·L + p_low − ky·d) / s`, kept only when it divides evenly and lands
+    // in range — absorbs the padding, both dilations, the strides and the reversal
+    // in one step. Verified against central differences over six configurations
+    // (lhs_dilation 1 and 2, window_strides 1 and 2, rhs_dilation, reversal,
+    // asymmetric padding, and all combined) to ~1e-9 before any Kotlin was written.
+    // The templates are shape-only for dX and a VALUE operand for dW (its gather
+    // reads `x`), as with MAXPOOL2D_GRAD.
+    //
+    // Interpreter + host only in v1: there is NO StableHLO arm, so a GPU-targeted
+    // build fails loudly at emit ("lowering not yet implemented"), the
+    // EMBEDDING_GRAD precedent. No shipped cert regresses — nothing could emit
+    // this graph before, since the rule did not exist. The emitting identities are
+    // known and recorded in the plan: dX = strided-slice(undilate by L) of
+    // CONV2D_DATA_ADJOINT(dy, kernel with axes 0/1 swapped), and dW = the swap of
+    // CONV2D_KERNEL_ADJOINT over an interior-dilated x — the latter needs interior
+    // `stablehlo.pad`, which the emitter's PAD arm does not do yet.
+    CONV_TRANSPOSE2D_DATA_ADJOINT, CONV_TRANSPOSE2D_KERNEL_ADJOINT,
+
     // Shape
     RESHAPE, TRANSPOSE, BROADCAST, CONCAT, SPLIT, SLICE, GATHER, SCATTER,
 
