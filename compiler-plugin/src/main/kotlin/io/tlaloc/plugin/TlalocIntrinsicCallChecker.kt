@@ -21,14 +21,16 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
         "io.tlaloc.autograd.grad2",
         "io.tlaloc.autograd.valueAndGrad",
         "io.tlaloc.autograd.valueAndGrad2",
-        // §0.4.372 — forward-mode (Phase B1).
+        // §0.4.372 — forward-mode (Phase B1). §0.4.387 — its two-argument forms.
         "io.tlaloc.autograd.jvp",
         "io.tlaloc.autograd.valueAndJvp",
+        "io.tlaloc.autograd.jvp2",
+        "io.tlaloc.autograd.valueAndJvp2",
     )
 
     /** §0.4.372 — the forward-mode intrinsics probe differentiability with the
      * forward transform (JVP), not the reverse one. */
-    private val forwardIntrinsics: Set<String> = setOf("jvp", "valueAndJvp")
+    private val forwardIntrinsics: Set<String> = setOf("jvp", "valueAndJvp", "jvp2", "valueAndJvp2")
 
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirFunctionCall) {

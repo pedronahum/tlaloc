@@ -134,7 +134,14 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                 // v1 scope = straight-line bodies (the transform errors loudly on
                 // regions), so we SKIP coarsening/lift entirely — a region-bearing
                 // body simply falls back to the runtime tape here.
-                if (callableName == "jvp" || callableName == "valueAndJvp") {
+                // §0.4.387 — the two-argument forms (`jvp2`/`valueAndJvp2`) route
+                // through the same branch: the transform emits all primals then all
+                // tangents for any arity, and the tangent/value split below is
+                // `returns.size / 2`, so nothing here is arity-specific.
+                val forwardIntrinsic = callableName == "jvp" || callableName == "jvp2" ||
+                    callableName == "valueAndJvp" || callableName == "valueAndJvp2"
+                val tangentOnly = callableName == "jvp" || callableName == "jvp2"
+                if (forwardIntrinsic) {
                     val jvpFn: DxirFunction = try {
                         DxirForwardTransform.apply(fn)
                     } catch (t: Throwable) {
@@ -150,7 +157,7 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     // jvp(f): keep only the tangent returns (the second half —
                     // DxirForwardTransform emits values(m) ++ tangents(m)); the
                     // full body stays (tangents depend on the primal values).
-                    val toSynthesise: DxirFunction = if (callableName == "jvp") {
+                    val toSynthesise: DxirFunction = if (tangentOnly) {
                         val m = fn.returns.size
                         DxirFunction(
                             jvpFn.name,
@@ -411,8 +418,8 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
     companion object {
         private val INTRINSIC_NAMES: Set<String> = setOf(
             "grad", "grad2", "valueAndGrad", "valueAndGrad2",
-            // §0.4.372 — forward-mode (Phase B1).
-            "jvp", "valueAndJvp",
+            // §0.4.372 — forward-mode (Phase B1). §0.4.387 — its two-argument forms.
+            "jvp", "valueAndJvp", "jvp2", "valueAndJvp2",
         )
 
         /**

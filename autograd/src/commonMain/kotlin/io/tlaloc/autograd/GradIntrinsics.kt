@@ -65,3 +65,22 @@ fun <A, R> jvp(f: (A) -> R): (A, A) -> R = { _, _ -> pluginMissing("jvp") }
 /** Primal value and directional derivative in one pass: `(x, dx) -> (y, dy)`. */
 fun <A, R> valueAndJvp(f: (A) -> R): (A, A) -> Pair<R, R> =
     { _, _ -> pluginMissing("valueAndJvp") }
+
+/**
+ * §0.4.387 — forward mode for a two-argument function, the `grad2` of the
+ * forward pair and the follow-up §0.4.375 scoped out ("multi-arg `jvp2` is a
+ * clean follow-up: same pattern, more params"). The curried result takes the
+ * primals then the tangents — `(x, w, dx, dw) -> dy` — which is the parameter
+ * order [io.tlaloc.ir.passes.DxirForwardTransform] itself emits (all primals,
+ * then `d_`-prefixed tangents), so nothing has to be permuted on the way in.
+ *
+ * `dy` is the directional derivative along the tangent PAIR: for a bilinear
+ * `f` it is the product rule's sum, `∂f/∂x·dx + ∂f/∂w·dw`, in one forward pass.
+ * This is what makes forward-mode conv differentiable with a real `(x, w)`
+ * kernel rather than the self-convolution a single-argument `jvp` forces.
+ */
+fun <A, B, R> jvp2(f: (A, B) -> R): (A, B, A, B) -> R = { _, _, _, _ -> pluginMissing("jvp2") }
+
+/** Primal value and directional derivative for a two-argument function. */
+fun <A, B, R> valueAndJvp2(f: (A, B) -> R): (A, B, A, B) -> Pair<R, R> =
+    { _, _, _, _ -> pluginMissing("valueAndJvp2") }

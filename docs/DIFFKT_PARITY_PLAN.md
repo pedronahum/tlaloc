@@ -442,6 +442,15 @@ reachable from `grad {}`, not new math. New-op families come after.
        upstream to every within-window tie (the MaxRule/JAX-select convention; XLA's
        `select_and_scatter` picks one winner, so divergence remains possible on exact
        float ties — document it, don't chase it).
+    ✅ **§0.4.387 — composition certified.** `CnnBlockGradientTest` runs one
+    `grad {}` body carrying conv → relu → avgPool → sum PLUS a skip term, so the
+    gradient threads an AVGPOOL2D_GRAD into both conv adjoints with a RELU/STEP
+    mask between them, and `dx` accumulates TWO rank-4 contributions rather than
+    being one call's result. Central differences over all 68 parameters (±1e-3,
+    the 5e-2 tolerance `Rank2NNFiniteDifferenceTest` uses) agree, with no tape
+    fallback. The per-op E2E tests each certify one layer against a hand-written
+    reference; this is the first that puts them in sequence, which is where
+    composition bugs live.
     `batchNorm` grad{} folds in here too (BATCHNORM OpKind exists; VJP + surface
     unaudited).
 - **A4. Elementwise binary max/min + clip + outerProduct** — split by the
@@ -701,9 +710,20 @@ reachable from `grad {}`, not new math. New-op families come after.
   reverse coarsening pipeline (skipped — forward v1 is straight-line, so
   a region-bearing body just falls back to the tape); the check-time
   differentiability probe uses the forward transform for these. v1 scope:
-  single argument, straight-line bodies. Certified E2E through the K2
-  plugin (dy = 2⟨x,dx⟩ for Σx², the (y,dy) pair, Σexp(x)·dx). Multi-arg
-  `jvp2`/`valueAndJvp2` (params `(x1,x2,dx1,dx2)`) is a clean follow-up.
+  straight-line bodies. Certified E2E through the K2
+  plugin (dy = 2⟨x,dx⟩ for Σx², the (y,dy) pair, Σexp(x)·dx).
+  ✅ **§0.4.387 — the multi-arg follow-up landed**: `jvp2`/`valueAndJvp2`
+  with params `(x, w, dx, dw)` — primals then tangents, which is the order
+  `DxirForwardTransform` itself emits, so nothing permutes. The plumbing was
+  already arity-agnostic (the IR extension's forward branch splits returns at
+  `size / 2`), so this was surface + registration: the two `:autograd`
+  declarations, `INTRINSIC_NAMES`, and the checker's `intrinsicNames` /
+  `forwardIntrinsics`. What it UNBLOCKED is the interesting part — a
+  single-argument `jvp` cannot express a conv against a separate kernel, so
+  §0.4.384's forward cert had to differentiate a SELF-convolution `conv(x, x)`;
+  `Jvp2IntrinsicTest` now runs the genuine bilinear product rule over a real
+  `(x, w)` pair (plus `Σ(a⊙b)` as the plumbing check) against an independent
+  Double reference.
 - **B2. `jacobian` + `hessian` intrinsics**: jacobian via forward (wide) or
   reverse (tall) column/row assembly; hessian = forward-over-reverse
   (already pinned at IR level).
