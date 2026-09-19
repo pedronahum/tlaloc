@@ -13,6 +13,8 @@ import io.tlaloc.core.ops.conv2dGeneral
 import io.tlaloc.core.ops.conv2dKernelAdjoint
 import io.tlaloc.core.ops.convTranspose2d
 import io.tlaloc.core.ops.convTranspose2dGeneral
+import io.tlaloc.core.ops.maxPool2dGeneral
+import io.tlaloc.core.ops.maxPool2dGrad
 import io.tlaloc.core.ops.transposePerm4
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirFunction
@@ -71,6 +73,7 @@ class DxirHostConvParityTest {
             it.op == OpKind.CONV2D || it.op == OpKind.CONV_TRANSPOSE2D ||
                 it.op == OpKind.CONV2D_DATA_ADJOINT || it.op == OpKind.CONV2D_KERNEL_ADJOINT ||
                 it.op == OpKind.AVGPOOL2D || it.op == OpKind.AVGPOOL2D_GRAD ||
+                it.op == OpKind.MAXPOOL2D || it.op == OpKind.MAXPOOL2D_GRAD ||
                 (it.op == OpKind.TRANSPOSE && it.type.rank == 4)
         }
 
@@ -157,6 +160,33 @@ class DxirHostConvParityTest {
                 avgPool2dGrad(
                     tensor(inputs[0], node.operands[0].type.dims),
                     tensor(inputs[1], node.operands[1].type.dims),
+                    win[0], win[1], s[0], s[1], p[0][0], p[1][0],
+                )
+            }
+            OpKind.MAXPOOL2D -> {
+                // §0.4.389 — the primal maxpool twin.
+                val win = intPair(node.attrs, "window", emptyList())
+                val s = intPair(node.attrs, "window_strides", win)
+                val p = paddingOf(node.attrs)
+                assertEquals(2, win.size, "MAXPOOL2D without a `window` attr: ${node.attrs}")
+                maxPool2dGeneral(
+                    tensor(inputs[0], node.operands[0].type.dims),
+                    win[0], win[1], s[0], s[1], p[0][0], p[0][1], p[1][0], p[1][1],
+                )
+            }
+            OpKind.MAXPOOL2D_GRAD -> {
+                // §0.4.389 — the fused maxpool adjoint: three operands, because
+                // unlike avgpool it reads x's VALUES (to find the window winners)
+                // and takes the recomputed pooled y rather than recomputing it.
+                val win = intPair(node.attrs, "window", emptyList())
+                val s = intPair(node.attrs, "window_strides", win)
+                val p = paddingOf(node.attrs)
+                assertEquals(3, node.operands.size, "MAXPOOL2D_GRAD takes (upstream, x, y)")
+                assertEquals(2, win.size, "MAXPOOL2D_GRAD without a `window` attr: ${node.attrs}")
+                maxPool2dGrad(
+                    tensor(inputs[0], node.operands[0].type.dims),
+                    tensor(inputs[1], node.operands[1].type.dims),
+                    tensor(inputs[2], node.operands[2].type.dims),
                     win[0], win[1], s[0], s[1], p[0][0], p[1][0],
                 )
             }
@@ -292,6 +322,83 @@ class DxirHostConvParityTest {
         // NON-divisible width (5, window 2, stride 2) so the inversion has to handle
         // a floor-division remainder rather than a clean tiling.
         assertCovers(kinds, listOf(OpKind.AVGPOOL2D, OpKind.AVGPOOL2D_GRAD))
+    }
+
+    /**
+     * Maxpool loss: the classic non-overlapping pool MaxPool2dRule's v1 scope
+     * requires (strides == window, zero padding) over divisible dims, so the
+     * emitter's upsample expansion tiles exactly. `Σ y²` rather than `Σ y` so the
+     * adjoint's upstream is non-uniform and a mis-routed mask would show.
+     */
+    private fun maxPoolLossFn(): DxirFunction {
+        val xT = DxirType(F32, listOf(2, 3, 6, 6))
+        val yT = DxirType(F32, listOf(2, 3, 3, 3))
+        return DxirBuilder.function("maxpool_loss") {
+            val x = param("x", xT)
+            val y = op(
+                OpKind.MAXPOOL2D, listOf(x), yT,
+                attrs = mapOf("window" to listOf(2, 2), "window_strides" to listOf(2, 2)),
+            )
+            val y2 = op(OpKind.MUL, listOf(y, y), yT)
+            listOf(op(OpKind.SUM, listOf(y2), scalar))
+        }
+    }
+
+    @Test
+    fun hostTwinsMatchInterpreterOnMaxPoolAdjoint() {
+        val kinds = checkAdjointNodes(maxPoolLossFn(), seed = 400)
+        // §0.4.389 — the fused maxpool adjoint plus the recomputed primal MAXPOOL2D
+        // the rule materialises for its mask. The old spelling's rank-6
+        // RESHAPE/BROADCAST chain is gone, so there are no rank-4 TRANSPOSEs to
+        // replay either.
+        assertCovers(kinds, listOf(OpKind.MAXPOOL2D, OpKind.MAXPOOL2D_GRAD))
+    }
+
+    /**
+     * §0.4.389 — the TIE convention, pinned on both engines at once: every
+     * within-window winner receives the FULL upstream — not a share, and not a
+     * single arbitrary winner. `x = [[1,1],[2,2]]` under one 2×2 window gives
+     * `y = 2`, and BOTH 2s tie, so with upstream 7 the gradient is `[0,0,7,7]`.
+     * XLA's `select_and_scatter` would give `[0,0,7,0]` or `[0,0,0,7]`, which is
+     * exactly why the emitter expands to compare+select instead of to it.
+     *
+     * This test exists because the random-data walk above would never catch a
+     * divergence here: random floats essentially never tie. Exact ties are common
+     * in real nets (after a relu, whole windows of zeros tie), so an unpinned
+     * convention is a backend-dependent gradient waiting to happen.
+     */
+    @Test
+    fun maxPoolAdjointRoutesFullUpstreamToEveryTie() {
+        val upT = DxirType(F32, listOf(1, 1, 1, 1))
+        val xT = DxirType(F32, listOf(1, 1, 2, 2))
+        val fn = DxirBuilder.function("maxpool_tie") {
+            val up = param("up", upT)
+            val x = param("x", xT)
+            val y = param("y", upT)
+            listOf(
+                op(
+                    OpKind.MAXPOOL2D_GRAD, listOf(up, x, y), xT,
+                    attrs = mapOf(
+                        "window" to listOf(2, 2),
+                        "window_strides" to listOf(2, 2),
+                        "padding" to listOf(listOf(0, 0), listOf(0, 0)),
+                    ),
+                ),
+            )
+        }
+        val up = floatArrayOf(7f)
+        val x = floatArrayOf(1f, 1f, 2f, 2f)
+        val y = floatArrayOf(2f)
+        val want = floatArrayOf(0f, 0f, 7f, 7f)
+
+        assertContentEquals(want, DxirInterpreter.evalFunction(fn, listOf(up, x, y)).single())
+        assertContentEquals(
+            want,
+            maxPool2dGrad<Shape>(
+                tensor(up, upT.dims), tensor(x, xT.dims), tensor(y, upT.dims),
+                2, 2, 2, 2, 0, 0,
+            ).hostF32(),
+        )
     }
 
     private fun assertCovers(actual: List<OpKind>, expected: List<OpKind>) {

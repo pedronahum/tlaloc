@@ -1108,6 +1108,46 @@ class EmitterTest {
         assertEquals(1, mlir.split("stablehlo.convolution").size - 1, mlir)
     }
 
+    /**
+     * §0.4.389 — the fused maxpool adjoint expands into the upsample-and-mask MLIR
+     * the pre-fusion rule produced (and §0.4.363 certified on the GB10): both the
+     * pooled value and the upstream go `[N,C,Ho,Wo] → [N,C,Ho,1,Wo,1] →
+     * broadcast → [N,C,Ho,kh,Wo,kw] → [N,C,H,W]`, then `select(x == U(y), U(dY), 0)`.
+     *
+     * The rank-6 intermediates are fine in MLIR — it was the *dxir types* baking
+     * `n`/`c`/`Ho`/`Wo` under `grad {}`'s sentinels that made the old spelling
+     * unusable there, and emit time has concrete dims. Note the compare runs at
+     * x's shape, not the pooled one: `U(y)` is the upsampled value.
+     */
+    @Test
+    fun maxPoolGradExpandsToUpsampleAndMask() {
+        val fn = DxirBuilder.function("mp") {
+            val x = param("x", DxirType(F32, listOf(1, 2, 4, 4)))
+            val up = param("up", DxirType(F32, listOf(1, 2, 2, 2)))
+            val y = param("y", DxirType(F32, listOf(1, 2, 2, 2)))
+            val dx = op(
+                OpKind.MAXPOOL2D_GRAD, listOf(up, x, y), DxirType(F32, listOf(1, 2, 4, 4)),
+                attrs = mapOf(
+                    "window" to listOf(2, 2),
+                    "window_strides" to listOf(2, 2),
+                    "padding" to listOf(listOf(0, 0), listOf(0, 0)),
+                ),
+            )
+            listOf(dx)
+        }
+        val mlir = fn.toStablehlo()
+        assertEquals(4, mlir.split("stablehlo.reshape").size - 1, "two upsamples × (fold, unfold): $mlir")
+        assertEquals(2, mlir.split("stablehlo.broadcast_in_dim").size - 1, mlir)
+        assertTrue(mlir.contains("tensor<1x2x2x1x2x1xf32>"), "narrow rank-6 type missing: $mlir")
+        assertTrue(mlir.contains("tensor<1x2x2x2x2x2xf32>"), "wide rank-6 type missing: $mlir")
+        assertTrue(mlir.contains("stablehlo.compare  EQ"), mlir)
+        assertTrue(mlir.contains("stablehlo.select"), mlir)
+        assertTrue(
+            mlir.contains("(tensor<1x2x4x4xf32>, tensor<1x2x4x4xf32>) -> tensor<1x2x4x4xi1>"),
+            "the mask must compare at x's shape and produce i1: $mlir",
+        )
+    }
+
     @Test
     fun argmaxEmitsIotaAndReduceWithBody() {
         val fn = DxirBuilder.function("am") {

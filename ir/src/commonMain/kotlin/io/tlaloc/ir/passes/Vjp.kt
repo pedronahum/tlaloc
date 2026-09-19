@@ -885,24 +885,33 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.363 — MAXPOOL2D adjoint via the upsample-and-mask
-     * formulation: recompute `y = maxpool(x)`, nearest-upsample y and dY
-     * back to x's shape (reshape → identity-dims stretch broadcast →
-     * reshape — emitter- and interpreter-legal), then
-     * `dx = where(x == U(y), U(dY), 0)`.
+     * §0.4.363 — MAXPOOL2D adjoint: recompute `y = maxpool(x)`, then
+     * `dx = where(x == y_per_window, dY_per_window, 0)` — each input element
+     * receives the upstream of every window it wins.
      *
-     * v1 scope: the classic non-overlapping pool — `strides == window`,
-     * zero padding, spatial dims divisible by the window (PyTorch's
-     * `MaxPool2d(k)` default shape). Tie convention: full upstream to
-     * every within-window tie (the MaxRule/JAX-select convention; XLA's
-     * select_and_scatter picks a single winner — divergence exists only
-     * on exact float ties).
+     * §0.4.389 — emitted as the fused [OpKind.MAXPOOL2D_GRAD] instead of the
+     * original nearest-upsample-and-mask chain (`reshape → identity-dims stretch
+     * broadcast → reshape` on both `y` and `dY`, then COMPARE + WHERE). Those
+     * rank-6 intermediates are why the plan kept maxpool LAST: their types bake
+     * `n`/`c`/`Ho`/`Wo`, so under `grad {}`'s -1 sentinels the reshape targets are
+     * meaningless, and the synthesis has no rank-6 shape witness to type them with.
+     * Inverting the window per input element needs no upsample at all, so the body
+     * stays rank-4 and the result type is just `x`'s.
+     *
+     * v1 scope: the classic non-overlapping pool — `strides == window`, zero
+     * padding (PyTorch's `MaxPool2d(k)` default shape). Window-DIVISIBLE spatial
+     * dims are no longer required here (that check read extents); a remainder is
+     * handled correctly by the host and interpreter, and is rejected by the emitter
+     * alone, whose upsample expansion genuinely needs exact tiling.
+     *
+     * Tie convention: full upstream to every within-window tie (the MaxRule/JAX
+     * -select convention; XLA's `select_and_scatter` picks a single winner — which
+     * is why the emitter expands to compare+select rather than to it).
      */
     val MaxPool2dRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
-            val dtype = upstream.type.dtype
             fun intPair(key: String, def: List<Int>): List<Int> =
                 (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
             val k = intPair("window", emptyList())
@@ -911,34 +920,29 @@ object VjpRegistry {
             val p = (op.attrs["padding"] as? List<*>)
                 ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
                 ?: listOf(listOf(0, 0), listOf(0, 0))
-            val (n, c, h, w) = x.type.dims
-            require(s == k && p.all { it == listOf(0, 0) } && h % k[0] == 0 && w % k[1] == 0) {
-                "MaxPool2dRule v1: strides == window, zero padding, and window-divisible " +
-                    "spatial dims required; got window=$k strides=$s padding=$p dims=${x.type.dims}"
-            }
-            val hOut = op.type.dims[2]
-            val wOut = op.type.dims[3]
-
-            // Nearest-upsample: [N,C,Ho,Wo] → [N,C,Ho,1,Wo,1] → stretch →
-            // [N,C,Ho,kh,Wo,kw] → [N,C,H,W]. Row-major flattening makes
-            // this exactly per-window replication.
-            val stretch = mapOf("broadcast_dimensions" to (0 until 6).toList())
-            val narrow6 = DxirType(dtype, listOf(n, c, hOut, 1, wOut, 1))
-            val wide6 = DxirType(dtype, listOf(n, c, hOut, k[0], wOut, k[1]))
-            fun upsample(src: DxirNode): DxirNode {
-                val r6 = builder.op(OpKind.RESHAPE, listOf(src), narrow6)
-                val b6 = builder.op(OpKind.BROADCAST, listOf(r6), wide6, attrs = stretch)
-                return builder.op(OpKind.RESHAPE, listOf(b6), x.type)
+            // §0.4.389 — the v1 restriction that SURVIVES is literal-attr-only and
+            // therefore sentinel-safe: non-overlapping windows and no padding, which
+            // is what the emitter's upsample-and-mask expansion can express. The old
+            // `h % k[0] == 0 && w % k[1] == 0` divisibility half is GONE from here —
+            // it read extents, and under `grad {}` those are -1 (which is also what
+            // made this rule reject every symbolic maxpool, since `-1 % 2 == -1`).
+            // The host and interpreter handle a remainder correctly (inputs the
+            // truncated last window never covered simply get no gradient), and the
+            // emitter checks divisibility itself, where dims are concrete.
+            require(s == k && p.all { it == listOf(0, 0) }) {
+                "MaxPool2dRule v1: strides == window and zero padding required; " +
+                    "got window=$k strides=$s padding=$p"
             }
 
-            val yRe = builder.op(op.op, listOf(x), op.type, attrs = op.attrs)
-            val mask = builder.op(
-                OpKind.COMPARE, listOf(x, upsample(yRe)),
-                DxirType(io.tlaloc.core.Bool, x.type.dims),
-                attrs = mapOf("direction" to "EQ"),
+            // The pooled value, recomputed in the gradient body (the mask needs it),
+            // and passed to the fused op so no engine recomputes the window max —
+            // and so the emitter gets a ready SSA value instead of having to emit a
+            // second reduce_window.
+            val y = builder.op(op.op, listOf(x), op.type, attrs = op.attrs)
+            val dx = builder.op(
+                OpKind.MAXPOOL2D_GRAD, listOf(upstream, x, y), x.type,
+                attrs = mapOf("window" to k, "window_strides" to s, "padding" to p),
             )
-            val zero = builder.const(floatLiteralForDtype(0.0, dtype), x.type)
-            val dx = builder.op(OpKind.WHERE, listOf(mask, upsample(upstream), zero), x.type)
             return listOf(x to dx)
         }
     }

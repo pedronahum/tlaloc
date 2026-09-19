@@ -233,6 +233,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             )
             // §0.4.386 — the fused avgpool adjoint (padding solved at emit time).
             OpKind.AVGPOOL2D_GRAD -> emitAvgPoolGrad(step, name, ops[0], node)
+            // §0.4.389 — the fused maxpool adjoint (upsample-and-mask, expanded here).
+            OpKind.MAXPOOL2D_GRAD -> emitMaxPoolGrad(step, name, ops, node)
             OpKind.ARGMAX -> {
                 val axis = readAxis(node, node.operands[0].type.rank)
                 val refStr = emitArgmax(
@@ -1266,6 +1268,93 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             reversal = null,
         )
         emitReshape(step, name, conv, convT, outType)
+    }
+
+    /**
+     * §0.4.389 — the fused maxpool adjoint, expanded into the upsample-and-mask MLIR
+     * the pre-fusion rule produced (and §0.4.363 certified on the GB10):
+     * nearest-upsample both the pooled value and the upstream back to x's shape via
+     * `[N,C,Ho,Wo] → [N,C,Ho,1,Wo,1] → broadcast → [N,C,Ho,kh,Wo,kw] → [N,C,H,W]`,
+     * then `select(x == U(y), U(dY), 0)`. Row-major flattening makes that
+     * reshape/broadcast/reshape exactly per-window replication.
+     *
+     * Which is why it needs exact tiling — `strides == window`, zero padding, and
+     * `H == Ho·kh` / `W == Wo·kw` — and why those are checked HERE rather than in
+     * MaxPool2dRule: they are extent facts, and emit time is the first moment the
+     * extents exist. Under `grad {}` they are -1 sentinels, which is what made the
+     * rule's old `h % k[0] == 0` guard reject every symbolic maxpool. The host and
+     * interpreter invert the window instead and handle a remainder correctly (inputs
+     * the truncated last window never covered get no gradient), so a general-stride
+     * or padded maxpool gradient works there and fails loudly here.
+     *
+     * Deliberately NOT `stablehlo.select_and_scatter`, the canonical single-op
+     * spelling: it picks ONE winner per window, while every other engine routes the
+     * full upstream to every within-window tie. Exact ties are common after a relu,
+     * and the backends must not disagree.
+     */
+    private fun emitMaxPoolGrad(step: String, name: String, ops: List<String>, node: DxirOp) {
+        require(node.operands.size == 3) {
+            "${node.op} takes (upstream, x, y); got ${node.operands.size} operands"
+        }
+        val upType = node.operands[0].type
+        val xType = node.operands[1].type
+        val yType = node.operands[2].type
+        val outType = node.type
+        require(upType.rank == 4 && xType.rank == 4 && outType.rank == 4) {
+            "${node.op} requires rank-4 NCHW operands/result; got " +
+                "${upType.dims} / ${xType.dims} / ${outType.dims}"
+        }
+        val window = intListAttr(node, "window")
+        require(window.size == 2) { "${node.op} needs `window` [kh, kw]; got $window" }
+        val strides = intListAttr(node, "window_strides").let { if (it.size == 2) it else window }
+        val padding = conv2dPadding(node)
+        require(strides == window && padding.all { it == listOf(0, 0) }) {
+            "${node.op}: StableHLO emission needs the non-overlapping zero-padding pool — the " +
+                "upsample expansion cannot tile otherwise; got window=$window strides=$strides " +
+                "padding=$padding"
+        }
+        val (nB, c, h, w) = outType.dims
+        val hOut = upType.dims[2]
+        val wOut = upType.dims[3]
+        require(h == hOut * window[0] && w == wOut * window[1]) {
+            "${node.op}: StableHLO emission needs window-divisible spatial dims " +
+                "([$h, $w] vs [$hOut, $wOut] × $window); the host and interpreter paths handle " +
+                "a remainder, this expansion cannot"
+        }
+
+        val narrow = DxirType(outType.dtype, listOf(nB, c, hOut, 1, wOut, 1))
+        val wide = DxirType(outType.dtype, listOf(nB, c, hOut, window[0], wOut, window[1]))
+        val boolT = DxirType(Bool, outType.dims)
+        val dims6 = (0 until 6).joinToString(", ")
+
+        fun upsample(src: String, srcType: DxirType): String {
+            val r6 = synth()
+            val b6 = synth()
+            val back = synth()
+            emitReshape(step, r6, src, srcType, narrow)
+            out.appendLine(
+                "$step$b6 = stablehlo.broadcast_in_dim $r6, dims = [$dims6] " +
+                    ": (${narrow.toMlir()}) -> ${wide.toMlir()}",
+            )
+            emitReshape(step, back, b6, wide, outType)
+            return back
+        }
+
+        val uy = upsample(ops[2], yType)
+        val uup = upsample(ops[0], upType)
+        val mask = synth()
+        val zero = synth()
+        // Both compare operands are at x's shape: `uy` is the UPSAMPLED pooled
+        // value, so its type is `outType`, not the pooled `yType` it came from.
+        out.appendLine(
+            "$step$mask = stablehlo.compare  EQ, ${ops[1]}, $uy,  FLOAT : " +
+                "(${xType.toMlir()}, ${outType.toMlir()}) -> ${boolT.toMlir()}",
+        )
+        out.appendLine("$step$zero = stablehlo.constant dense<0.0> : ${outType.toMlir()}")
+        out.appendLine(
+            "$step$name = stablehlo.select $mask, $uup, $zero : " +
+                "${boolT.toMlir()}, ${outType.toMlir()}",
+        )
     }
 
     private fun emitScatter(

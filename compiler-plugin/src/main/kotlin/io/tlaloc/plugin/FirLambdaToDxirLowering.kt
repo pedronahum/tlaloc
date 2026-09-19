@@ -1052,16 +1052,19 @@ object FirLambdaToDxirLowering {
             )
         }
 
-        // §0.4.386 — Phase A3b: the avgpool user surface (NCHW). Two arities and
+        // §0.4.386 — Phase A3b: the pooling user surfaces (NCHW). Two arities and
         // no default parameter values, for the same reason as conv (K2 unwraps a
         // named argument before this lowering runs and does not reorder it, so
-        // attrs must be positional to be unambiguous): `avgPool2d(kh, kw)` is the
-        // non-overlapping pool (strides default to the window, the interpreter's
-        // own convention) and the 8-argument form adds strides and all four
-        // padding sides. `window`/`window_strides`/`padding` fold onto the op as
-        // literal attrs; the result's spatial extents are a floor-division over
-        // the input's, so a symbolic input dim gives a symbolic output dim.
-        if (fqn == "io.tlaloc.core.ops.avgPool2d") {
+        // attrs must be positional to be unambiguous): `avgPool2d(kh, kw)` /
+        // `maxPool2d(kh, kw)` is the non-overlapping pool (strides default to the
+        // window, the interpreter's own convention) and the 8-argument form adds
+        // strides and all four padding sides. §0.4.389 generalised this arm from
+        // avg-only to both kinds — they differ only in the OpKind they produce.
+        // `window`/`window_strides`/`padding` fold onto the op as literal attrs;
+        // the result's spatial extents are a floor-division over the input's, so a
+        // symbolic input dim gives a symbolic output dim.
+        if (fqn == "io.tlaloc.core.ops.avgPool2d" || fqn == "io.tlaloc.core.ops.maxPool2d") {
+            val isMax = fqn == "io.tlaloc.core.ops.maxPool2d"
             val operandExpr = receiver(call)
                 ?: throw LoweringException("$fqn has no receiver")
             val x = lowerExpr(operandExpr, env, emitter)
@@ -1102,7 +1105,7 @@ object FirLambdaToDxirLowering {
             fun outExtent(inDim: Int, k: Int, stride: Int, padLo: Int, padHi: Int): Int =
                 if (inDim <= 0) -1 else (inDim + padLo + padHi - k) / stride + 1
             return emitter.op(
-                kind = OpKind.AVGPOOL2D,
+                kind = if (isMax) OpKind.MAXPOOL2D else OpKind.AVGPOOL2D,
                 operands = listOf(x),
                 type = DxirType(
                     x.type.dtype,

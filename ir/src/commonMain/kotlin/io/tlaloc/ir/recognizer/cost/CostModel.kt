@@ -115,7 +115,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // §0.4.363 — window pooling: one compare/add per window tap per output.
     // §0.4.386 — AVGPOOL2D_GRAD is the same order of work spread the other way
     // (each output upstream lands on `window` input elements).
-    OpKind.MAXPOOL2D, OpKind.AVGPOOL2D, OpKind.AVGPOOL2D_GRAD ->
+    // §0.4.389 — MAXPOOL2D_GRAD likewise, plus an equality test per visited tap.
+    OpKind.MAXPOOL2D, OpKind.AVGPOOL2D,
+    OpKind.AVGPOOL2D_GRAD, OpKind.MAXPOOL2D_GRAD,
+    ->
         op.type.elementCount.toDouble() * 9.0
 
     OpKind.DOT -> {

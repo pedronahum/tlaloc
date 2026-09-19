@@ -790,18 +790,21 @@ fun <S : Shape> conv2dKernelAdjoint(
 }
 
 /**
- * §0.4.386 — the host avgpool engine: a port of the dxir interpreter's
- * `evalPool2d` AVGPOOL2D branch, kept deliberately literal so the host result is
- * bit-exact against the interpreted dxir (same `Double` accumulator, same
- * `n → c → y → x → ky → kx` order, same single Float conversion at the end).
+ * §0.4.386 — the host pooling engine: a port of the dxir interpreter's
+ * `evalPool2d`, kept deliberately literal so the host result is bit-exact against
+ * the interpreted dxir (same `Double` accumulator, same `n → c → y → x → ky → kx`
+ * order, same single Float conversion at the end). §0.4.389 generalised it from
+ * avg-only to both pooling kinds with an [isMax] flag, mirroring the interpreter's
+ * own single-`evalPool2d`-two-kinds structure.
  *
- * count_include_pad, the interpreter's convention: the sum divides by the FULL
- * window `kh·kw`, padding included, so a window hanging off the edge is averaged
- * over taps that were not there. That choice is what makes [avgPool2dGrad]'s
- * uniform `1/(kh·kw)` spread the exact adjoint.
+ * count_include_pad for the average branch, the interpreter's convention: the sum
+ * divides by the FULL window `kh·kw`, padding included, so a window hanging off
+ * the edge is averaged over taps that were not there. That choice is what makes
+ * [avgPool2dGrad]'s uniform `1/(kh·kw)` spread the exact adjoint.
  */
-private fun avgPool2dEngine(
+private fun pool2dEngine(
     x: DTensor<*, F32>,
+    isMax: Boolean,
     windowH: Int,
     windowW: Int,
     strideH: Int,
@@ -811,10 +814,11 @@ private fun avgPool2dEngine(
     padLeft: Int,
     padRight: Int,
 ): DTensor<Shape, F32> {
+    val opName = if (isMax) "maxPool2d" else "avgPool2d"
     val d = x.dims
-    require(d.size == 4) { "avgPool2d: rank-4 NCHW input required; got ${d.toList()}" }
+    require(d.size == 4) { "$opName: rank-4 NCHW input required; got ${d.toList()}" }
     require(windowH > 0 && windowW > 0 && strideH > 0 && strideW > 0) {
-        "avgPool2d: window and strides must be positive; got window [$windowH, $windowW], " +
+        "$opName: window and strides must be positive; got window [$windowH, $windowW], " +
             "strides [$strideH, $strideW]"
     }
     val nB = d[0]
@@ -824,7 +828,7 @@ private fun avgPool2dEngine(
     val hOut = (h + padTop + padBottom - windowH) / strideH + 1
     val wOut = (w + padLeft + padRight - windowW) / strideW + 1
     require(hOut > 0 && wOut > 0) {
-        "avgPool2d: derived output extents [$hOut, $wOut] are empty — window " +
+        "$opName: derived output extents [$hOut, $wOut] are empty — window " +
             "[$windowH, $windowW] does not fit the padded input [$h, $w]"
     }
     val v = x.hostF32()
@@ -836,17 +840,18 @@ private fun avgPool2dEngine(
             val planeBase = (n * c + ch) * h * w
             for (y in 0 until hOut) {
                 for (xo in 0 until wOut) {
-                    var acc = 0.0
+                    var acc = if (isMax) Double.NEGATIVE_INFINITY else 0.0
                     for (ky in 0 until windowH) {
                         val inY = y * strideH + ky - padTop
                         if (inY < 0 || inY >= h) continue
                         for (kx in 0 until windowW) {
                             val inX = xo * strideW + kx - padLeft
                             if (inX < 0 || inX >= w) continue
-                            acc += v[planeBase + inY * w + inX].toDouble()
+                            val e = v[planeBase + inY * w + inX].toDouble()
+                            acc = if (isMax) maxOf(acc, e) else acc + e
                         }
                     }
-                    out[outIdx++] = (acc / windowSize).toFloat()
+                    out[outIdx++] = if (isMax) acc.toFloat() else (acc / windowSize).toFloat()
                 }
             }
         }
@@ -899,8 +904,8 @@ fun <S : Shape> avgPool2dGeneral(
     padRight: Int,
 ): DTensor<S, F32> {
     @Suppress("UNCHECKED_CAST")
-    return avgPool2dEngine(
-        x, windowH, windowW, strideH, strideW, padTop, padBottom, padLeft, padRight,
+    return pool2dEngine(
+        x, false, windowH, windowW, strideH, strideW, padTop, padBottom, padLeft, padRight,
     ) as DTensor<S, F32>
 }
 
@@ -973,6 +978,137 @@ fun <S : Shape> avgPool2dGrad(
                         }
                     }
                     out[outIdx++] = (acc / windowSize).toFloat()
+                }
+            }
+        }
+    }
+    @Suppress("UNCHECKED_CAST")
+    return DTensor<Shape, F32>(HostF32Storage(out), target.copyOf(), F32) as DTensor<S, F32>
+}
+
+/**
+ * §0.4.389 — 2-D max pooling, NCHW. Same two-arity, no-defaults contract as
+ * [avgPool2d] and for the same reason (K2 unwraps named arguments before the
+ * plugin's FIR lowering sees them, so attrs must be positional to be
+ * unambiguous): `maxPool2d(windowH, windowW)` is the classic non-overlapping pool
+ * (strides default to the window, PyTorch's `MaxPool2d(k)` shape), and the
+ * 8-argument form adds strides and all four padding sides.
+ */
+fun <S : Shape> DTensor<S, F32>.maxPool2d(windowH: Int, windowW: Int): DTensor<Shape, F32> =
+    maxPool2dGeneral(this, windowH, windowW, windowH, windowW, 0, 0, 0, 0)
+
+@Suppress("LongParameterList")
+fun <S : Shape> DTensor<S, F32>.maxPool2d(
+    windowH: Int,
+    windowW: Int,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+): DTensor<Shape, F32> = maxPool2dGeneral(
+    this, windowH, windowW, strideH, strideW, padTop, padBottom, padLeft, padRight,
+)
+
+/** §0.4.389 — fixed-arity synthesis delegate for `OpKind.MAXPOOL2D`. */
+@Suppress("LongParameterList")
+fun <S : Shape> maxPool2dGeneral(
+    x: DTensor<*, F32>,
+    windowH: Int,
+    windowW: Int,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return pool2dEngine(
+        x, true, windowH, windowW, strideH, strideW, padTop, padBottom, padLeft, padRight,
+    ) as DTensor<S, F32>
+}
+
+/**
+ * §0.4.389 — the host twin of `OpKind.MAXPOOL2D_GRAD`: each input element receives
+ * the upstream of every output window it WINS, i.e. every window whose max it
+ * equals. Ties route the full upstream to every winner (the MaxRule/JAX-select
+ * convention) — deliberately not XLA's `select_and_scatter`, which picks a single
+ * winner and would make the GPU gradient disagree with the host one on exact ties,
+ * which are common after a relu.
+ *
+ * Like [avgPool2dGrad] this INVERTS the window per input element rather than
+ * nearest-upsampling the pooled value and the upstream back to x's shape and
+ * masking — the rank-6 formulation that kept maxpool out of `grad {}`, since those
+ * intermediates bake extents that are -1 sentinels there. Nothing here reads a
+ * compile-time extent.
+ *
+ * [y] is the pooled value `maxPool2d(x)`, supplied rather than recomputed (the rule
+ * materialises it in the gradient body). Unlike the conv/avgpool templates, [x] is
+ * a VALUE operand — its elements are compared against [y] — though its extents
+ * still come from runtime `dims`.
+ */
+@Suppress("LongParameterList")
+fun <S : Shape> maxPool2dGrad(
+    upstream: DTensor<*, F32>,
+    x: DTensor<*, F32>,
+    y: DTensor<*, F32>,
+    windowH: Int,
+    windowW: Int,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padLeft: Int,
+): DTensor<S, F32> {
+    val up = upstream.dims
+    val target = x.dims
+    require(up.size == 4 && target.size == 4 && y.dims.size == 4) {
+        "maxPool2dGrad: rank-4 NCHW upstream/x/y required; got " +
+            "${up.toList()} / ${target.toList()} / ${y.dims.toList()}"
+    }
+    require(windowH > 0 && windowW > 0 && strideH > 0 && strideW > 0) {
+        "maxPool2dGrad: window and strides must be positive; got window [$windowH, $windowW], " +
+            "strides [$strideH, $strideW]"
+    }
+    require(up[0] == target[0] && up[1] == target[1]) {
+        "maxPool2dGrad: upstream batch/channels [${up[0]}, ${up[1]}] ≠ x's " +
+            "[${target[0]}, ${target[1]}]"
+    }
+    val nB = target[0]
+    val c = target[1]
+    val h = target[2]
+    val w = target[3]
+    val hOut = up[2]
+    val wOut = up[3]
+    val uv = upstream.hostF32()
+    val xv = x.hostF32()
+    val yv = y.hostF32()
+    val out = FloatArray(nB * c * h * w)
+    var outIdx = 0
+    for (n in 0 until nB) {
+        for (ch in 0 until c) {
+            val plane = (n * c + ch) * h * w
+            val upPlane = (n * c + ch) * hOut * wOut
+            for (iy in 0 until h) {
+                for (ix in 0 until w) {
+                    val xe = xv[plane + iy * w + ix]
+                    var acc = 0.0
+                    for (ky in 0 until windowH) {
+                        val dy = iy + padTop - ky
+                        if (dy < 0 || dy % strideH != 0) continue
+                        val oy = dy / strideH
+                        if (oy >= hOut) continue
+                        for (kx in 0 until windowW) {
+                            val dx = ix + padLeft - kx
+                            if (dx < 0 || dx % strideW != 0) continue
+                            val ox = dx / strideW
+                            if (ox >= wOut) continue
+                            val wIdx = upPlane + oy * wOut + ox
+                            if (xe == yv[wIdx]) acc += uv[wIdx].toDouble()
+                        }
+                    }
+                    out[outIdx++] = acc.toFloat()
                 }
             }
         }

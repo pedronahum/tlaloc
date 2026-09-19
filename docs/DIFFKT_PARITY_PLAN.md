@@ -416,7 +416,8 @@ reachable from `grad {}`, not new math. New-op families come after.
        reference (spread each output's upstream over the taps that were in range,
        divide by the full window) that transposes the primal loop rather than
        inverting the window, so an off-by-one in either shows up. Plus
-       `AvgPoolAdjointSentinelSafetyTest` (2)
+       `PoolingAdjointSentinelSafetyTest` (§0.4.389 — renamed from
+       `AvgPoolAdjointSentinelSafetyTest`, now covering both pooling kinds, 4 tests)
        pinning that the body carries only literal attrs and that neither the RESHAPE
        nor the CONV_TRANSPOSE2D reappears, an `EmitterTest` text pin on the solved
        asymmetric padding `[[1,1],[1,2]]` and the fold/conv/unfold sequence, the
@@ -425,23 +426,50 @@ reachable from `grad {}`, not new math. New-op families come after.
        `PjrtPoolingSmokeTest` on the GB10 (avgpool grad max|diff| 1.19e-7 vs the
        interpreter). `DxirPoolingTest`'s FD + JVP⇄VJP oracles are unchanged and
        green, so the fusion preserved values on concrete dims.
-    4. **maxPool — re-scoped by §0.4.386, no longer blocked on rank-6.** The plan
-       had this last, gated on rank-6 upsample intermediates and the
-       single-representative `tensorIrType` generalisation. The fused-adjoint pattern
-       dissolves both: a `MAXPOOL2D_GRAD(upstream, x)` op can compute the
-       upsample-and-mask directly — for each input element, find the covering
-       output windows, compare `x[i]` against the window max (recomputable from `x`
-       and the literal attrs inside the op), and accumulate the upstream of every
-       window it wins. No rank-6 RESHAPE/BROADCAST chain, so no rank-6 witnesses and
-       no mixed-rank body; and unlike the conv/avgpool templates, `x` here is a
-       VALUE operand (its elements are compared), not shape-only. The same rewrite
-       should also lift `MaxPool2dRule`'s v1 restriction (`strides == window`, zero
-       padding, window-divisible dims), since a direct scatter handles overlapping
-       and padded windows naturally — the restriction existed because the
-       nearest-upsample formulation cannot. Tie convention to preserve: full
-       upstream to every within-window tie (the MaxRule/JAX-select convention; XLA's
-       `select_and_scatter` picks one winner, so divergence remains possible on exact
-       float ties — document it, don't chase it).
+    4. **maxPool ✅ (§0.4.389)** — landed, and the §0.4.386 re-scope held: the
+       rank-6 intermediates and the `tensorIrType` single-representative blocker
+       were both artefacts of the *spelling*, not of maxpool. `MAXPOOL2D_GRAD`
+       inverts the window per input element — for each input, find the covering
+       output windows, compare `x[i]` against that window's max, accumulate the
+       upstream of every window it wins — so the body is rank-4 throughout and the
+       result type is just `x`'s. Two deviations from the sketch worth recording:
+       it takes THREE operands `(upstream, x, y)` rather than two, because passing
+       the recomputed pooled `y` means no engine duplicates the max pass and the
+       emitter gets a ready SSA value instead of emitting a second `reduce_window`;
+       and `x` is a VALUE operand (its elements are compared), not the shape-only
+       template conv/avgpool use.
+       **The v1 restriction only PARTLY lifted.** Window-divisibility moved out of
+       the rule to EMIT time — it was the extent-reading half (`-1 % 2 == -1`, which
+       is what made the rule reject every symbolic maxpool), and the host and
+       interpreter handle a remainder correctly (inputs the truncated last window
+       never covered get no gradient). But `strides == window` and zero padding
+       REMAIN, as literal-attr checks in the rule: the emitter expands to the
+       nearest-upsample-and-mask MLIR §0.4.363 certified, and row-major
+       reshape/broadcast/reshape replication only tiles exactly for a
+       non-overlapping unpadded window. Overlapping or padded maxpool gradients
+       therefore work on the host and fail loudly at StableHLO emission. Lifting
+       that needs `stablehlo.select_and_scatter`, deliberately NOT used here: it
+       picks ONE winner per window while every other engine routes the full
+       upstream to every within-window tie, and exact ties are common after a relu
+       — a backend-dependent gradient is worse than a loud restriction.
+       Certified: `MaxPoolGradientTest` E2E through the real plugin over three
+       spellings — non-overlapping 2×2; `relu(x)` pooled, which is deliberately
+       tie-heavy (coarse-quantised data, so whole windows of exact zeros tie) and
+       would expose a single-winner policy; and 5×5 under a 2×2 window, where the
+       uncovered last row and column must get exactly zero — against a SCATTER
+       reference that takes each window's max and pays 1 to every tap equal to it.
+       `DxirHostConvParityTest` replays MAXPOOL2D and MAXPOOL2D_GRAD host↔interpreter
+       bit-exactly, and adds `maxPoolAdjointRoutesFullUpstreamToEveryTie`, which pins
+       the tie convention on BOTH engines with hand-built data (`x = [[1,1],[2,2]]`,
+       upstream 7 → `[0,0,7,7]`, not `[0,0,7,0]`) because random floats never tie and
+       so the walk above cannot cover it. `EmitterTest` pins the expansion's op counts
+       and the rank-6 type strings. `PjrtPoolingSmokeTest` on the GB10 now runs the
+       fused path: maxpool grad max|diff| **0.0** vs the interpreter (bit-identical —
+       the mask copies values, it does no arithmetic). `DxirPoolingTest`'s
+       `maxPoolGradientRoutesToArgmax` and FD/JVP oracles are unchanged and green.
+       The emitter arm earned its keep immediately: its first version typed the
+       compare against the POOLED `y` instead of the upsampled one, which is invalid
+       MLIR — the GPU cert caught it, no text pin would have.
     ✅ **§0.4.387 — composition certified.** `CnnBlockGradientTest` runs one
     `grad {}` body carrying conv → relu → avgPool → sum PLUS a skip term, so the
     gradient threads an AVGPOOL2D_GRAD into both conv adjoints with a RELU/STEP

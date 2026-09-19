@@ -56,6 +56,33 @@ enum class OpKind {
     // convention, documented at the interpreter arm).
     MAXPOOL2D, AVGPOOL2D,
 
+    // §0.4.389 — MAXPOOL2D's adjoint, fused (Phase A3b).
+    // MAXPOOL2D_GRAD(upstream, x, y) → dX at x's shape, attrs copied off the
+    // primal (`window`, `window_strides`, `padding`). `y` is the pooled value
+    // (MAXPOOL2D(x)), which the rule materialises as its own node so no engine
+    // recomputes the window max and the emitter gets a ready SSA value.
+    //
+    // The spelling this replaces is nearest-upsample-and-mask:
+    // `RESHAPE([N,C,Ho,Wo] → [N,C,Ho,1,Wo,1]) → BROADCAST → [N,C,Ho,kh,Wo,kw] →
+    // RESHAPE → [N,C,H,W]`, applied to both `y` and the upstream, then
+    // `WHERE(x == U(y), U(dY), 0)`. Those rank-6 intermediates are why the plan
+    // kept maxpool LAST: their types bake `n`, `c`, `Ho`, `Wo`, so under
+    // `grad {}`'s -1 sentinels the reshape targets are meaningless, and no rank-6
+    // shape witness exists for the synthesis to type them with (blocker: the
+    // single-representative `tensorIrType`). Computing the mask directly needs no
+    // upsample at all — invert the window per input element, as AVGPOOL2D_GRAD
+    // does — so the body stays rank-4 and the result type is simply `x`'s.
+    //
+    // Semantics: `dX[n,c,iy,ix] = Σ over the windows (y,x) covering (iy,ix) with
+    // x[n,c,iy,ix] == Y[n,c,y,x] of dY[n,c,y,x]`. Ties route the FULL upstream to
+    // EVERY within-window winner (the MaxRule/JAX-select convention the upsample
+    // spelling had); XLA's `select_and_scatter` picks a single winner instead,
+    // which is why the emitter expands to compare+select rather than to it —
+    // exact ties are common after a relu, and the backends must not disagree.
+    // Unlike the conv/avgpool templates, `x` here is a VALUE operand: its
+    // elements are compared against the window max. Host twin: `maxPool2dGrad`.
+    MAXPOOL2D_GRAD,
+
     // §0.4.386 — AVGPOOL2D's adjoint, fused and runtime-extent (Phase A3b).
     // AVGPOOL2D_GRAD(upstream, xTemplate) → dX at xTemplate's shape, attrs
     // copied off the primal (`window`, `window_strides`, `padding`).

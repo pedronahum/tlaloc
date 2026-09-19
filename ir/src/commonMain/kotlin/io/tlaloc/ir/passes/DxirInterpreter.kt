@@ -469,6 +469,13 @@ object DxirInterpreter {
             // §0.4.386 — the fused avgpool adjoint (runtime-extent).
             OpKind.AVGPOOL2D_GRAD ->
                 evalAvgPoolGrad(op, evalNode(op.operands[0], env, multiResults))
+            // §0.4.389 — the fused maxpool adjoint (window inverted, no upsample).
+            OpKind.MAXPOOL2D_GRAD -> evalMaxPoolGrad(
+                op,
+                evalNode(op.operands[0], env, multiResults),
+                evalNode(op.operands[1], env, multiResults),
+                evalNode(op.operands[2], env, multiResults),
+            )
             OpKind.BROADCAST -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 val outSize = sizeOf(op.type)
@@ -1660,6 +1667,87 @@ object DxirInterpreter {
                             }
                         }
                         out[outIdx++] = (acc / windowSize).toFloat()
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * §0.4.389 — [OpKind.MAXPOOL2D_GRAD]: the adjoint of [evalPool2d]'s MAXPOOL2D
+     * branch, computed by INVERTING the window per input element instead of
+     * nearest-upsampling the pooled value and the upstream back to x's shape and
+     * masking. Same semantics, no rank-6 intermediates — which is what kept
+     * maxpool out of `grad {}`: those intermediates bake `n`/`c`/`Ho`/`Wo` into
+     * their types, and under -1 sentinels there is nothing to bake.
+     *
+     * An input element wins a window iff it EQUALS that window's max, so every
+     * within-window tie receives the full upstream (the MaxRule/JAX-select
+     * convention). The comparison is exact Float equality on purpose: that is what
+     * the upsample-and-mask spelling did, and what the emitter's compare+select
+     * expansion does, so all three engines agree even on ties.
+     *
+     * `y` (operand 2) is the pooled value the rule materialised; reading it beats
+     * recomputing the max here. `x` (operand 1) is a VALUE operand, not the
+     * shape-only template the conv/avgpool adjoints take — its elements are
+     * compared — though its extents still come from the runtime dims.
+     */
+    private fun evalMaxPoolGrad(op: DxirOp, up: FloatArray, x: FloatArray, y: FloatArray): FloatArray {
+        require(op.operands.size == 3) {
+            "DxirInterpreter: ${op.op} takes (upstream, x, y); got ${op.operands.size} operands"
+        }
+        val upT = op.operands[0].type
+        val xT = op.operands[1].type
+        val outT = op.type
+        require(upT.rank == 4 && xT.rank == 4 && outT.rank == 4) {
+            "DxirInterpreter: ${op.op} requires rank-4 NCHW operands/result; got " +
+                "${upT.dims} / ${xT.dims} / ${outT.dims}"
+        }
+        require(xT.dims == outT.dims) {
+            "DxirInterpreter: ${op.op} result ${outT.dims} must be x's shape ${xT.dims}"
+        }
+        fun intPair(key: String, def: List<Int>): List<Int> =
+            (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def
+        val window = intPair("window", emptyList())
+        require(window.size == 2) { "DxirInterpreter: ${op.op} needs `window` [kh, kw]; got $window" }
+        val strides = intPair("window_strides", window)
+        val padding = (op.attrs["padding"] as? List<*>)
+            ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
+            ?: listOf(listOf(0, 0), listOf(0, 0))
+
+        val (nB, c, h, w) = outT.dims
+        val hOut = upT.dims[2]
+        val wOut = upT.dims[3]
+        require(upT.dims[0] == nB && upT.dims[1] == c) {
+            "DxirInterpreter: ${op.op} upstream batch/channels ${upT.dims.take(2)} ≠ " +
+                "target ${outT.dims.take(2)}"
+        }
+        val out = FloatArray(nB * c * h * w)
+        var outIdx = 0
+        for (n in 0 until nB) {
+            for (ch in 0 until c) {
+                val plane = (n * c + ch) * h * w
+                val upPlane = (n * c + ch) * hOut * wOut
+                for (iy in 0 until h) {
+                    for (ix in 0 until w) {
+                        val xv = x[plane + iy * w + ix]
+                        var acc = 0.0
+                        for (ky in 0 until window[0]) {
+                            val dy = iy + padding[0][0] - ky
+                            if (dy < 0 || dy % strides[0] != 0) continue
+                            val oy = dy / strides[0]
+                            if (oy >= hOut) continue
+                            for (kx in 0 until window[1]) {
+                                val dx = ix + padding[1][0] - kx
+                                if (dx < 0 || dx % strides[1] != 0) continue
+                                val ox = dx / strides[1]
+                                if (ox >= wOut) continue
+                                val wIdx = upPlane + oy * wOut + ox
+                                if (xv == y[wIdx]) acc += up[wIdx].toDouble()
+                            }
+                        }
+                        out[outIdx++] = acc.toFloat()
                     }
                 }
             }
