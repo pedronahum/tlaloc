@@ -1623,6 +1623,30 @@ object FirLambdaToDxirLowering {
                         attrs = mapOf("permutation" to perm),
                     )
                 }
+                "io.tlaloc.core.ops.flip" -> {
+                    // §0.4.396 — REVERSE (Phase C3): flip along the listed axes.
+                    // Axes are user literals (POSITIONS, never extents — the
+                    // `dimensions` attr is sentinel-safe by construction); the
+                    // result type is the operand's own, sentinel dims included,
+                    // because a flip moves elements without changing any extent.
+                    if (intArgs.isEmpty()) throw LoweringException("flip requires at least one axis")
+                    val axes = intArgs.map { ax ->
+                        val a = if (ax < 0) ax + rank else ax
+                        if (a !in 0 until rank) {
+                            throw LoweringException("flip axis $ax out of range for rank $rank")
+                        }
+                        a
+                    }
+                    if (axes.toSet().size != axes.size) {
+                        throw LoweringException("flip axes $intArgs must be distinct")
+                    }
+                    return emitter.op(
+                        kind = OpKind.REVERSE,
+                        operands = listOf(operand),
+                        type = DxirType(operand.type.dtype, operand.type.dims),
+                        attrs = mapOf("dimensions" to axes),
+                    )
+                }
                 "io.tlaloc.core.ops.broadcastTo" -> {
                     // §0.4.371 — Phase A2b: rank-increasing broadcast (DiffKT
                     // `broadcastTo`/`expand`, NumPy right-alignment). The operand's
@@ -2459,6 +2483,8 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.reshape",
         "io.tlaloc.core.ops.transpose",
         "io.tlaloc.core.ops.broadcastTo",
+        // §0.4.396 — REVERSE (flip along literal axes, Phase C3).
+        "io.tlaloc.core.ops.flip",
     )
 
     private val PRIMITIVE_DTYPE_MAP: Map<String, DType> = mapOf(

@@ -129,7 +129,9 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     }
 
     // Pure data movement — zero compute, captured under bytes.
-    OpKind.TRANSPOSE, OpKind.BROADCAST, OpKind.RESHAPE,
+    // §0.4.396 — REVERSE (flip) is an index inversion, the same movement-only
+    // cost shape as TRANSPOSE.
+    OpKind.TRANSPOSE, OpKind.REVERSE, OpKind.BROADCAST, OpKind.RESHAPE,
     OpKind.SLICE, OpKind.GATHER, OpKind.SCATTER, OpKind.SCATTER_ADD,
     // §0.4.360 — PAD is data movement; WHERE/COMPARE are 1 op/element
     // (folded into the elementwise bucket below by their users; kept at

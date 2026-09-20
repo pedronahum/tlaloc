@@ -124,7 +124,9 @@ object DxirForwardTransform {
             OpKind.ADD -> b.op(OpKind.ADD, listOf(t(node.operands[0]), t(node.operands[1])), ty)
             OpKind.SUB -> b.op(OpKind.SUB, listOf(t(node.operands[0]), t(node.operands[1])), ty)
             OpKind.NEG -> b.op(OpKind.NEG, listOf(t(node.operands[0])), ty)
-            OpKind.SUM, OpKind.MEAN, OpKind.RESHAPE, OpKind.TRANSPOSE,
+            // §0.4.396 — REVERSE (flip) is linear too: the tangent is the same
+            // flip of the operand tangent, `dimensions` attr carried verbatim.
+            OpKind.SUM, OpKind.MEAN, OpKind.RESHAPE, OpKind.TRANSPOSE, OpKind.REVERSE,
             OpKind.SLICE, OpKind.PAD, OpKind.CONCAT, OpKind.AVGPOOL2D ->
                 b.op(node.op, node.operands.map { t(it) }, ty, node.attrs)
 

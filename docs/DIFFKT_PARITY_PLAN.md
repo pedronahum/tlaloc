@@ -1000,8 +1000,41 @@ reachable from `grad {}`, not new math. New-op families come after.
     spellings through the real plugin with no tape fallback (scalar
     receiver ×2, bare `kotlin.math` ×1, tensor ×2); GPU smoke grads within
     2.3e-5 of the interpreter.
-- **C3. `REVERSE` (flip) op**: DiffKT `flip`; also lets the conv adjoint
-  drop its `window_reversal` special-casing eventually.
+- ✅ **C3. `REVERSE` (flip) op — DONE (§0.4.396)**: DiffKT `flip(axes)` as a
+  new OpKind with the full vertical, and the easiest gradient story in the
+  catalogue: REVERSE is an involution and SELF-ADJOINT (`dx = REVERSE(dy,
+  same axes)`, forward tangent likewise), and its `dimensions` attr is axis
+  POSITIONS only — no extent is ever read, so both rules are sentinel-safe
+  by construction with no SUM_TO/PAD_TO-style runtime-extent template.
+  - IR: OpKind + interpreter (per-axis index inversion on the
+    `evalTranspose` stride walk), CostModel movement-only bucket,
+    `ReverseRule` + the linear forward-tangent arm (both re-emit REVERSE
+    with the attr verbatim).
+  - Emitter: `stablehlo.reverse %x, dims = […]` pinned in `EmitterTest`
+    (plus empty/duplicate/out-of-range refusals); a flip loss in
+    `GradientEmissionCoverageTest`'s sweep; REVERSE in the round-trip list.
+    Real-XLA parse certified by `PjrtFlipSmokeTest` on the GB10 (forward +
+    gradient graphs, exact agreement with the interpreter) — the live
+    oracle, since `stablehlo-translate` is not on this machine's PATH.
+  - User surface: `:core/ops` `DTensor.flip(vararg axes)` (shape-preserving,
+    so the receiver's precise shape type survives; negative axes normalize)
+    + fixed-arity `flipAxes{1,2,3}` synthesis delegates (the usual IrVararg
+    reason). FIR: `flip` joins `SHAPE_OP_SET` (vararg-Int flattening arm);
+    result DxirType = operand's own, sentinels included. Synthesis:
+    `irReverse` → the delegate by axis count, axes as positional Int consts;
+    REVERSE in the shape-preserving unary lists of all three IrType solvers
+    (forward rank-2 + rank-4, backward fixpoint).
+  - Certified: interpreter pins (trailing axis, LEADING axis on a
+    non-square shape — the non-contiguous copy — both axes, involution);
+    `∇_a Σ flip(a)⊙b = flip(b)` with non-uniform upstream; JVP⇄VJP
+    cross-identity through `Σ tanh(flip(a)⊙b)`; E2E `grad {}` through the
+    real plugin on one AND two axes with no tape fallback; host pins with
+    refusals; GPU smoke. The runtime tape deliberately has no flip
+    producer (the §0.4.382 concat precedent) — synthesis is the only path.
+  - Still open (unchanged): re-expressing the conv adjoints'
+    `window_reversal` special-casing through REVERSE of the kernel's
+    spatial axes — noted in `OpKind.kt`, deliberately not attempted; the
+    fused adjoints stand certified as they are.
 - **C4. Item-4 tails** *(reclassified beyond-parity by the audit —
   DiffKT pooling is non-overlapping-only, conv has no groups/dilation)*:
   CONV_TRANSPOSE2D's own VJP, overlapping-window maxpool VJP
@@ -1097,7 +1130,7 @@ argument fallback) ·
 | `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |
 | `slice / view(index/range/axis) / withChange` (functional update) | 🟡 | single-axis `slice(start,end,axis)` ✅ A2b (§0.4.374, runtime-extent `PAD_TO` adjoint), E2E through `grad {}`; multi-axis `view`/`withChange` scatter sugar still A2 |
 | `gather / scatter (axis, paddingIndex) / gatherAtIndices / scatterAtIndices` | 🟡 | Tlaloc GATHER/SCATTER are narrower (rank-1/scalar-index arms) — A2 needs the axis+list form |
-| `flip(axes)` | ❌ | C3 (REVERSE op; also cleans conv adjoint) |
+| `flip(axes)` | ✅ | C3 (§0.4.396) — REVERSE op, self-adjoint + extent-free, E2E through `grad {}`; the conv-adjoint `window_reversal` cleanup stays open |
 | `IntTensor / intTensorOf / Float64` | ✅ | I32/I64/F64 dtypes; DiffKT is F32-only + int tensors — Tlaloc exceeds on F64 |
 | `Device (CPU/GPU per-tensor placement)` | ➖ | Tlaloc's backend story (PJRT/IREE) supersedes |
 | tracing/JIT package | ➖ | the entire Tlaloc compile pipeline is the superset |

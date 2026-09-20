@@ -409,6 +409,14 @@ object DxirInterpreter {
                     ?: emptyList()
                 evalTranspose(inputType, perm, a)
             }
+            OpKind.REVERSE -> {
+                // §0.4.396 — flip along the listed axes (stablehlo.reverse).
+                val a = evalNode(op.operands[0], env, multiResults)
+                val axes = (op.attrs["dimensions"] as? List<*>)
+                    ?.map { (it as Number).toInt() }
+                    ?: error("DxirInterpreter: REVERSE op is missing required 'dimensions' attr")
+                evalReverse(op.operands[0].type, axes, a)
+            }
             OpKind.MATMUL -> {
                 // §0.4.135 — rank-2 (`(M,K) @ (K,N) → (M,N)`) plus rank-3+ batched
                 // (`(B0..Bk, M, K) @ (B0..Bk, K, N) → (B0..Bk, M, N)`). The batched
@@ -1322,6 +1330,47 @@ object DxirInterpreter {
                 val idxK = rem / outputStrides[k]
                 rem -= idxK * outputStrides[k]
                 inFlat += idxK * inputStrides[perm[k]]
+            }
+            a[inFlat]
+        }
+    }
+
+    /**
+     * §0.4.396 — rank-N stride-based axis flip (REVERSE). The output element at
+     * multi-index (i_0, …, i_{N-1}) reads the input at (j_0, …, j_{N-1}) where
+     * `j_k = dims[k] − 1 − i_k` on flipped axes and `j_k = i_k` elsewhere.
+     * Shape-preserving, so input and output strides coincide; walking the
+     * output in row-major order, the flat input offset accumulates
+     * `j_k * strides[k]` per axis — the [evalTranspose] walk with an index
+     * inversion instead of an axis permutation.
+     */
+    private fun evalReverse(inputType: DxirType, axes: List<Int>, a: FloatArray): FloatArray {
+        val rank = inputType.rank
+        require(axes.isNotEmpty()) { "DxirInterpreter: REVERSE requires at least one axis" }
+        require(axes.toSet().size == axes.size) { "DxirInterpreter: REVERSE axes $axes must be distinct" }
+        for (ax in axes) {
+            require(ax in 0 until rank) {
+                "DxirInterpreter: REVERSE axis $ax out of range for rank $rank"
+            }
+        }
+        val totalSize = if (rank == 0) 1 else inputType.dims.reduce(Int::times)
+        require(a.size == totalSize) {
+            "DxirInterpreter: REVERSE input size ${a.size} does not match shape ${inputType.dims}"
+        }
+        val flipped = BooleanArray(rank).also { for (ax in axes) it[ax] = true }
+        val strides = IntArray(rank)
+        if (rank > 0) {
+            strides[rank - 1] = 1
+            for (i in rank - 2 downTo 0) strides[i] = strides[i + 1] * inputType.dims[i + 1]
+        }
+        return FloatArray(totalSize) { outFlat ->
+            var rem = outFlat
+            var inFlat = 0
+            for (k in 0 until rank) {
+                val idxK = rem / strides[k]
+                rem -= idxK * strides[k]
+                val srcK = if (flipped[k]) inputType.dims[k] - 1 - idxK else idxK
+                inFlat += srcK * strides[k]
             }
             a[inFlat]
         }

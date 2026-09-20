@@ -353,6 +353,28 @@ class RoundTripTest {
     }
 
     @Test
+    fun reverseRoundTrips() {
+        // §0.4.396 — REVERSE (flip): single axis, leading axis, both axes.
+        requireTranslateOrSkip()
+        val cases = listOf(
+            listOf(1),
+            listOf(0),
+            listOf(0, 1),
+        )
+        for (axes in cases) {
+            val fn = DxirBuilder.function("rev") {
+                val x = param("x", DxirType(F32, listOf(2, 3)))
+                val y = op(
+                    OpKind.REVERSE, listOf(x), DxirType(F32, listOf(2, 3)),
+                    attrs = mapOf("dimensions" to axes),
+                )
+                listOf(y)
+            }
+            validate(DxirModule(listOf(fn)).toStablehlo(), "REVERSE axes=$axes")
+        }
+    }
+
+    @Test
     fun broadcastRoundTrips() {
         requireTranslateOrSkip()
         val cases = listOf(

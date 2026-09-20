@@ -147,6 +147,9 @@ class GradientEmissionCoverageTest {
         ) { ps ->
             op(OpKind.TRANSPOSE, listOf(ps[0]), DxirType(F32, listOf(3, 2)), attrs = mapOf("permutation" to listOf(1, 0)))
         },
+        // §0.4.396 — REVERSE (flip): the self-adjoint VJP emits a second
+        // `stablehlo.reverse` with the same literal axes.
+        unaryLoss("flip", OpKind.REVERSE, listOf(2, 3), attrs = mapOf("dimensions" to listOf(0, 1))),
         // Masking.
         squaredSumLoss(
             "where_compare", listOf("x" to r2), r2,

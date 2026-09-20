@@ -288,6 +288,35 @@ class EmitterTest {
     }
 
     @Test
+    fun reverseEmitsPinnedSpelling() {
+        // §0.4.396 — REVERSE (flip) pins to `stablehlo.reverse` with the
+        // literal `dims` list; shape-preserving, so operand and result types
+        // coincide. A missing/empty/duplicate/out-of-range axis list fails
+        // loudly at emit rather than shipping a malformed op.
+        val t = DxirType(F32, listOf(2, 3))
+        fun rev(axes: List<Int>): String {
+            val fn = DxirBuilder.function("f") {
+                val a = param("a", t)
+                listOf(op(OpKind.REVERSE, listOf(a), t, attrs = mapOf("dimensions" to axes)))
+            }
+            return fn.toStablehlo()
+        }
+        assertTrue(
+            rev(listOf(0)).contains(
+                "stablehlo.reverse %0, dims = [0] : (tensor<2x3xf32>) -> tensor<2x3xf32>",
+            ),
+            "single-axis reverse spelling drifted:\n${rev(listOf(0))}",
+        )
+        assertTrue(
+            rev(listOf(0, 1)).contains("stablehlo.reverse %0, dims = [0, 1]"),
+            "two-axis reverse spelling drifted:\n${rev(listOf(0, 1))}",
+        )
+        assertFailsWith<IllegalArgumentException> { rev(emptyList()) }
+        assertFailsWith<IllegalArgumentException> { rev(listOf(0, 0)) }
+        assertFailsWith<IllegalArgumentException> { rev(listOf(2)) }
+    }
+
+    @Test
     fun emitsRankNFloatArrayConstAsNestedDenseLiteral() {
         // §0.4.73 — rank-N DxirConst carrying a FloatArray (the form produced by
         // §0.4.71's Capture fix) formats as a nested dense<...> literal matching

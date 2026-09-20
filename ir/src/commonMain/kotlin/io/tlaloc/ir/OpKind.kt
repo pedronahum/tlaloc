@@ -184,6 +184,20 @@ enum class OpKind {
     // Shape
     RESHAPE, TRANSPOSE, BROADCAST, CONCAT, SPLIT, SLICE, GATHER, SCATTER,
 
+    // §0.4.396 — REVERSE (DiffKT `flip`, Phase C3): reverse element order along
+    // the axes listed in the `dimensions` attr (List<Int>, compile-time user
+    // literals), all other axes untouched (`stablehlo.reverse`). Shape- and
+    // type-preserving. The op is an involution and SELF-ADJOINT: its VJP is
+    // REVERSE(upstream, same axes) and its forward tangent REVERSE(tangent,
+    // same axes) — flipping is linear and its permutation matrix is its own
+    // transpose. No extent is ever read (axis POSITIONS only), so both rules
+    // are sentinel-safe by construction with no runtime-extent template needed.
+    // NOTE (plan): the conv adjoints' `window_reversal` special-casing could
+    // eventually be re-expressed as an explicit REVERSE of the kernel's spatial
+    // axes; deliberately not attempted here — the fused adjoints are certified
+    // as they stand.
+    REVERSE,
+
     // §0.4.373 — runtime-extent unbroadcast (the reverse mirror of BROADCAST's
     // in-place size-1 stretch). SUM_TO(value, template) → template's shape:
     // NumPy unbroadcast — sum `value` over the leading (value.rank −

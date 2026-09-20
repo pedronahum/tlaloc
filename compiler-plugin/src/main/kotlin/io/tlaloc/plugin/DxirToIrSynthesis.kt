@@ -201,7 +201,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // §0.4.368 — SOFTMAX is shape-preserving too (its output IrType
             // equals its operand's), so it forward-propagates like the unary
             // elementwise ops; the SoftmaxRule recomputes it in grad bodies.
-            OpKind.SOFTMAX -> {
+            // §0.4.396 — REVERSE (flip) likewise: it permutes elements without
+            // touching any extent, so output IrType = operand IrType exactly.
+            OpKind.SOFTMAX, OpKind.REVERSE -> {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
             }
@@ -390,7 +392,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
             OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
-            OpKind.SOFTMAX,
+            // §0.4.396 — REVERSE is shape-preserving at any rank.
+            OpKind.SOFTMAX, OpKind.REVERSE,
             -> {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
@@ -901,11 +904,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // (STEP / RELU / NEG / SQRT / EXP / LOG / SIN / COS / ABS).
                     // Output and operand share IrType; if output known + operand
                     // unknown, operand = output.
+                    // §0.4.396 — REVERSE joins the shape-preserving set: its
+                    // operand and result share one IrType (a flip moves
+                    // elements, never extents).
                     OpKind.STEP, OpKind.RELU, OpKind.NEG,
                     OpKind.SQRT, OpKind.EXP, OpKind.LOG,
                     OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
                     OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
-                    OpKind.SOFTMAX -> {
+                    OpKind.SOFTMAX, OpKind.REVERSE -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] ?: continue
                         val operandId = n.operands[0].id
@@ -1400,6 +1406,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
         if (op.op == OpKind.TRANSPOSE) return irTranspose(op, env, context)
+        // §0.4.396 — REVERSE (flip along literal axes, Phase C3).
+        if (op.op == OpKind.REVERSE) return irReverse(op, env, context)
         if (op.op == OpKind.MATMUL) return irMatmul(op, env, context)
         if (op.op == OpKind.TANH) return irTanh(op, env, context)
         if (op.op == OpKind.SIGMOID) return irSigmoid(op, env, context)
@@ -3000,6 +3008,20 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
+    /**
+     * §0.4.396 — resolves `io.tlaloc.core.ops.flipAxes{N}` for N ∈ {1, 2, 3}
+     * (the fixed-arity delegates of the vararg `flip`; the usual IrVararg
+     * reason — see [transposePermSymbol]).
+     */
+    private fun flipAxesSymbol(count: Int): IrSimpleFunctionSymbol? {
+        if (count !in 1..3) return null
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("flipAxes$count"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
     /** §0.4.366 — resolves `io.tlaloc.core.ops.toFloat` (the scalar-DTensor → Float bridge). */
     private fun toFloatSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
@@ -3861,6 +3883,49 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * output `Rank2<C, R>`) before non-param operands (e.g., a TRANSPOSE feeding
      * a downstream op) can resolve correctly.
      */
+    /**
+     * §0.4.396 — `OpKind.REVERSE` → `flipAxes{N}(x, a0…)` (Phase C3). The
+     * `dimensions` attr is a compile-time user literal, so each axis rides as
+     * a positional Int const into the fixed-arity delegate selected by axis
+     * count — the `transposePerm{N}` pattern. Shape-preserving: the result
+     * IrType is the operand's own (both IrType solvers propagate it), and the
+     * delegate's `S` type-arg is the operand's shape argument.
+     */
+    private fun IrBuilderWithScope.irReverse(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        val operand = op.operands[0]
+        if (operand.type.dtype != F32 || op.type.dtype != F32) return null
+        if (!isAcceptedTensorType(operand.type)) return null
+        val operandDecl = env[operand.id] ?: return null
+        val axes = (op.attrs["dimensions"] as? List<*>)?.map { (it as Number).toInt() }
+            ?: return null
+        if (axes.isEmpty() || axes.toSet().size != axes.size) return null
+        if (axes.any { it !in 0 until operand.type.rank }) return null
+        if (op.type.rank != operand.type.rank) return null
+        val sym = flipAxesSymbol(axes.size) ?: return null
+        val opIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
+        val shapeTypeArg = opIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val resultIrType = irTypeForNode(op, context) ?: context.tensorIrType ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = shapeTypeArg
+        }
+        call.arguments[0] = irGet(operandDecl)
+        for ((i, a) in axes.withIndex()) {
+            call.arguments[i + 1] = intConst(a)
+        }
+        return call
+    }
+
     private fun IrBuilderWithScope.irTranspose(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,

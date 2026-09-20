@@ -157,6 +157,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // Shape ops
             OpKind.RESHAPE -> emitReshape(step, name, ops[0], node.operands[0].type, node.type)
             OpKind.TRANSPOSE -> emitTranspose(step, name, ops[0], node, node.operands[0].type)
+            // §0.4.396 — REVERSE (flip along literal axes, Phase C3).
+            OpKind.REVERSE -> emitReverse(step, name, ops[0], node, node.operands[0].type)
             OpKind.BROADCAST -> emitBroadcast(step, name, ops[0], node, node.operands[0].type)
             OpKind.CONCAT -> emitConcat(step, name, ops, node)
             OpKind.SLICE -> emitSlice(step, name, ops[0], node, node.operands[0].type)
@@ -2665,6 +2667,36 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         }
         out.appendLine(
             "$step$name = stablehlo.transpose $x, dims = [${perm.joinToString(", ")}] " +
+                ": (${inputType.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * §0.4.396 — REVERSE → `stablehlo.reverse %x, dims = […]` (Phase C3). The
+     * `dimensions` attr carries the user's literal axis positions; the op is
+     * shape-preserving, so operand and result types coincide and the pretty
+     * form's functional type spells both.
+     */
+    private fun emitReverse(
+        step: String,
+        name: String,
+        x: String,
+        node: DxirOp,
+        inputType: DxirType,
+    ) {
+        val axes = intListAttr(node, "dimensions")
+        require(axes.isNotEmpty()) { "REVERSE requires at least one axis in 'dimensions'" }
+        require(axes.toSet().size == axes.size) { "REVERSE axes $axes must be distinct" }
+        for (ax in axes) {
+            require(ax in 0 until inputType.rank) {
+                "REVERSE axis $ax out of range for rank ${inputType.rank}"
+            }
+        }
+        require(node.type.dims == inputType.dims) {
+            "REVERSE is shape-preserving; got ${inputType.dims} -> ${node.type.dims}"
+        }
+        out.appendLine(
+            "$step$name = stablehlo.reverse $x, dims = [${axes.joinToString(", ")}] " +
                 ": (${inputType.toMlir()}) -> ${node.type.toMlir()}",
         )
     }

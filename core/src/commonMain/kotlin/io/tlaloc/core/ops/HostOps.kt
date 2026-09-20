@@ -2180,6 +2180,64 @@ fun <S : Shape> DTensor<S, F32>.transpose(vararg perm: Int): DTensor<Shape, F32>
 }
 
 /**
+ * §0.4.396 — axis flip (DiffKT `flip`, Phase C3): reverse the element order
+ * along each listed axis, all other axes untouched. Shape-preserving, so the
+ * receiver's precise shape type survives. Negative axes count from the end;
+ * axes must be distinct. Row-major stride walk mirroring the dxir
+ * interpreter's REVERSE arm: the output element at multi-index (i_0, …,
+ * i_{N-1}) reads the input at `j_k = dims[k] − 1 − i_k` on flipped axes.
+ * Its `grad {}` adjoint is the same flip of the upstream (REVERSE is
+ * self-adjoint), so no runtime-extent template is involved anywhere.
+ */
+fun <S : Shape> DTensor<S, F32>.flip(vararg axes: Int): DTensor<S, F32> {
+    val r = dims.size
+    require(axes.isNotEmpty()) { "flip: needs at least one axis" }
+    val norm = BooleanArray(r)
+    for (ax in axes) {
+        val a = if (ax < 0) ax + r else ax
+        require(a in 0 until r) { "flip: axis $ax out of range for rank $r" }
+        require(!norm[a]) { "flip: axes ${axes.toList()} must be distinct" }
+        norm[a] = true
+    }
+    val v = hostF32()
+    val strides = IntArray(r)
+    var st = 1
+    for (i in r - 1 downTo 0) { strides[i] = st; st *= dims[i] }
+    val out = FloatArray(v.size) { flat ->
+        var rem = flat
+        var src = 0
+        for (k in 0 until r) {
+            val coord = rem / strides[k]
+            rem -= coord * strides[k]
+            src += (if (norm[k]) dims[k] - 1 - coord else coord) * strides[k]
+        }
+        v[src]
+    }
+    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+}
+
+/**
+ * §0.4.396 — fixed-arity synthesis delegates for [flip] (the usual IrVararg
+ * reason: synthesis cannot build an `IrVararg`, so each REVERSE node's literal
+ * `dimensions` attr rides as positional Int constants — the `transposePerm{N}`
+ * precedent exactly).
+ */
+fun <S : Shape> flipAxes1(x: DTensor<*, F32>, a0: Int): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return (x as DTensor<Shape, F32>).flip(a0) as DTensor<S, F32>
+}
+
+fun <S : Shape> flipAxes2(x: DTensor<*, F32>, a0: Int, a1: Int): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return (x as DTensor<Shape, F32>).flip(a0, a1) as DTensor<S, F32>
+}
+
+fun <S : Shape> flipAxes3(x: DTensor<*, F32>, a0: Int, a1: Int, a2: Int): DTensor<S, F32> {
+    @Suppress("UNCHECKED_CAST")
+    return (x as DTensor<Shape, F32>).flip(a0, a1, a2) as DTensor<S, F32>
+}
+
+/**
  * §0.4.371 — rank-increasing broadcast (DiffKT `broadcastTo`/`expand`, Phase
  * A2b). NumPy right-alignment: the receiver's axes map to the TRAILING axes of
  * [newDims]; the new leading axes are replicated. §0.4.373 — in-place size-1

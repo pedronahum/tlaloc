@@ -80,6 +80,26 @@ class HostOpsTest {
     }
 
     @Test
+    fun flipReversesAlongListedAxes() {
+        // §0.4.396 — Phase C3: trailing axis, LEADING axis (rows swap — not a
+        // contiguous flat reversal), both axes, negative-axis spelling, the
+        // involution, and both refusals.
+        val a = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))
+        assertContentEquals(floatArrayOf(3f, 2f, 1f, 6f, 5f, 4f), a.flip(1).hostF32())
+        assertContentEquals(floatArrayOf(4f, 5f, 6f, 1f, 2f, 3f), a.flip(0).hostF32())
+        assertContentEquals(floatArrayOf(6f, 5f, 4f, 3f, 2f, 1f), a.flip(0, 1).hostF32())
+        assertContentEquals(a.flip(1).hostF32(), a.flip(-1).hostF32())
+        assertContentEquals(a.hostF32(), a.flip(0, 1).flip(0, 1).hostF32())
+        assertContentEquals(intArrayOf(2, 3), a.flip(0).dims)
+        // Fixed-arity synthesis delegates route through the same walk.
+        assertContentEquals(a.flip(0).hostF32(), flipAxes1<Rank2<Sym, Sym>>(a, 0).hostF32())
+        assertContentEquals(a.flip(0, 1).hostF32(), flipAxes2<Rank2<Sym, Sym>>(a, 0, 1).hostF32())
+        assertFailsWith<IllegalArgumentException> { a.flip() }
+        assertFailsWith<IllegalArgumentException> { a.flip(2) }
+        assertFailsWith<IllegalArgumentException> { a.flip(0, 0) }
+    }
+
+    @Test
     fun concatAndStackWindows() {
         val a = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f))
         val b = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(10f, 20f, 30f, 40f, 50f, 60f))

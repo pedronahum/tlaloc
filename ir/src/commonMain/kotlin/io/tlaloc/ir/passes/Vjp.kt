@@ -1343,6 +1343,38 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.396 — `y = flip(x, axes)` (Phase C3, DiffKT `flip`). REVERSE is a
+     * permutation of the elements and an involution, so it is SELF-ADJOINT:
+     * `dx = REVERSE(dy, same axes)` — flipping is linear, its permutation
+     * matrix is symmetric, and applying the same flip to the upstream undoes
+     * the coordinate change exactly. The `dimensions` attr is a compile-time
+     * user literal (axis POSITIONS, never extents), so the rule reads nothing
+     * from any shape and is sentinel-safe by construction — no runtime-extent
+     * template needed, unlike SUM_TO/PAD_TO/SLICE_LIKE.
+     *
+     * [readsPrimalOperandIndices] = `emptySet()`: like [TransposeRule], only
+     * the structural attr is read, never the operand's value.
+     */
+    val ReverseRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val axes = (op.attrs["dimensions"] as? List<*>)?.map { (it as Number).toInt() }
+                ?: error("ReverseRule: REVERSE op is missing required 'dimensions' attr")
+            require(axes.isNotEmpty() && axes.toSet().size == axes.size && axes.all { it in 0 until x.type.rank }) {
+                "ReverseRule: axes $axes must be distinct and in range for rank ${x.type.rank}"
+            }
+            val dx = builder.op(
+                OpKind.REVERSE,
+                listOf(upstream),
+                x.type,
+                attrs = mapOf("dimensions" to axes),
+            )
+            return listOf(x to dx)
+        }
+    }
+
+    /**
      * §0.4.41 — d(arr[idx])/d(arr) is a one-hot vector at slot [idx] with value 1;
      * scaled by [upstream], the adjoint is `SCATTER(zeros_like(arr), idx, upstream)`.
      * §0.4.111 — same shape generalises to rank-2 `arr`: d(arr[idx, :])/d(arr) is a
@@ -1543,6 +1575,7 @@ object VjpRegistry {
         OpKind.SIGMOID to SigmoidRule,
         OpKind.CAST to CastRule,
         OpKind.TRANSPOSE to TransposeRule,
+        OpKind.REVERSE to ReverseRule,
         OpKind.GATHER to GatherRule,
         OpKind.EMBEDDING to EmbeddingRule,
         OpKind.BROADCAST to BroadcastRule,
