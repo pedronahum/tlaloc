@@ -1107,6 +1107,30 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.413 — Phase D2 v1: RNG_UNIFORM / RNG_NORMAL differentiate as
+     * CONSTANTS. A stateless draw is a pure function of its literal `key0`/
+     * `key1`/`dims` attrs — piecewise-constant in the key, with ZERO operands
+     * — so the reverse walk that reaches it with accumulated upstream has
+     * nothing to propagate to: the rule returns the empty contribution list
+     * (the [SignRule]/[CompareRule] zero-gradient convention, degenerate to
+     * arity 0). This is exactly what the reparameterization trick needs:
+     * `sample = loc + scale ⊙ ε`, ε = normal(key, dims), makes
+     * `d loss/d loc` and `d loss/d scale` flow through the ordinary ADD/MUL
+     * rules while ε itself contributes nothing. When a downstream rule reads
+     * the draw's VALUE (MulRule's `d scale = upstream ⊙ ε`), the RNG op is
+     * cloned into the gradient body via `usedByAdjoint` with its literal
+     * attrs intact — same key → same ε, deterministically, which is the
+     * reparameterization contract (pinned in DxirRngTest). §0.4.408's loud
+     * refusal is deliberately REPLACED by this arm; the refusal's spirit
+     * survives as the pinned-zero certs.
+     */
+    val RngDrawRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> =
+            emptyList()
+    }
+
+    /**
      * `d/dx(sin(x)) = cos(x)`. §0.4.166 — Trigonometric primitive for the CartPole
      * physics step. Mirrors ExpRule's "emit a fresh primal-shape op in the gradient
      * body" approach to avoid sharing the primal's result with the adjoint.
@@ -1826,11 +1850,14 @@ object VjpRegistry {
         // placement are each other's adjoints, with the priors riding along.
         OpKind.SLICE_LIKE to SliceLikeVjpRule,
         OpKind.PAD_LIKE to PadLikeRule,
-        // §0.4.408 — RNG_UNIFORM / RNG_NORMAL are DELIBERATELY absent: a
-        // stateless draw is piecewise-constant in its key and has no operands
-        // to propagate to, so a grad {} body containing one refuses with the
-        // generic "no VJP rule registered for RNG_*" (pinned in DxirRngTest).
-        // DiffKT's reparameterized-gradient story is Phase D2.
+        // §0.4.413 — Phase D2 v1: the §0.4.408 deliberate ABSENCE (loud
+        // refusal) flips to [RngDrawRule]'s zero-contribution arm — a draw
+        // is a constant of its literal key/dims attrs, so reparameterized
+        // gradients (loss through `loc + scale ⊙ ε`) flow through the
+        // ordinary ADD/MUL rules while ε contributes nothing (pinned in
+        // DxirRngTest, analytic + determinism + cross-identity).
+        OpKind.RNG_UNIFORM to RngDrawRule,
+        OpKind.RNG_NORMAL to RngDrawRule,
     )
 
     operator fun get(kind: OpKind): VjpRule? = rules[kind]

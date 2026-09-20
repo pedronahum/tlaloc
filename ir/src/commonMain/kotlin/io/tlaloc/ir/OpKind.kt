@@ -381,11 +381,16 @@ enum class OpKind {
     // `jax_threefry_partitionable=False`), so host and interpreter agree
     // bit-for-bit by construction.
     //
-    // NON-differentiable in this slice, deliberately: no VjpRule (a `grad {}`
-    // body containing one refuses "no VJP rule registered for RNG_*") and no
-    // forward tangent arm ("no tangent rule for RNG_*") — the draw is
-    // piecewise-constant in the key, and DiffKT's reparameterized-gradient
-    // story (gradients through loc/scale of sampled normals) is Phase D2.
+    // Differentiation (§0.4.413, Phase D2 v1 — flips §0.4.408's loud
+    // refusals): both ops differentiate as CONSTANTS. Reverse: RngDrawRule
+    // returns the empty contribution list (piecewise-constant in the key,
+    // zero operands — the SIGN/COMPARE zero-gradient convention at arity 0);
+    // forward: structural-zero (lazy-null) tangent. This is the
+    // reparameterization trick's contract — `sample = loc + scale ⊙ ε` lets
+    // d loss/d loc and d loss/d scale flow through ordinary ADD/MUL rules
+    // while ε contributes nothing — and when an adjoint READS ε (MulRule's
+    // d scale), the cloned RNG op re-draws from the SAME literal key attrs:
+    // deterministic, same key → same ε, pinned in DxirRngTest.
     //
     // NO StableHLO emission either: `stablehlo.rng_bit_generator`'s threefry
     // counter layout is XLA-internal and does NOT reproduce the JAX-style

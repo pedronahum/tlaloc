@@ -617,7 +617,16 @@ object DxirForwardTransform {
 
             // Piecewise-constant / boolean: structural zero tangent (null — the
             // lazy tangent() fallback emits a typed zero only when consumed).
-            OpKind.SIGN, OpKind.STEP, OpKind.COMPARE, OpKind.NOT, OpKind.LAND -> null
+            // §0.4.413 — Phase D2 v1: RNG draws join the list. A stateless
+            // draw is a constant of its literal key/dims attrs (zero
+            // operands, piecewise-constant in the key), so its tangent is
+            // structurally zero — which is exactly the reparameterization
+            // contract: jvp through `loc + scale ⊙ ε` carries d loc/d scale
+            // tangents while ε contributes none (pinned in DxirRngTest;
+            // flips §0.4.408's loud refusal).
+            OpKind.SIGN, OpKind.STEP, OpKind.COMPARE, OpKind.NOT, OpKind.LAND,
+            OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL,
+            -> null
 
             else -> error(
                 "DxirForwardTransform: no tangent rule for ${node.op} " +

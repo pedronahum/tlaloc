@@ -304,12 +304,17 @@ class GradientEmissionCoverageTest {
                 attrs = mapOf("window" to listOf(2, 2), "window_strides" to listOf(2, 2)),
             )
         },
-        // §0.4.408 — RNG_UNIFORM / RNG_NORMAL are EXCLUDED from this sweep,
-        // doubly by design: they have no VjpRule (a draw is non-differentiable
-        // in D1 — the reverse transform refuses by name, pinned in
-        // DxirRngTest) and no emission arm (the emitter refuses rather than
-        // fork the threefry stream via rng_bit_generator, pinned in
-        // EmitterTest.rngOpsRefuseEmissionLoudlyByName).
+        // §0.4.408/§0.4.413 — RNG_UNIFORM / RNG_NORMAL are EXCLUDED from
+        // this sweep by design. Since §0.4.413 they DO differentiate (the
+        // zero-contribution RngDrawRule + structural-zero tangent — the
+        // reparameterization arms, certified interpreter-side in
+        // DxirRngTest), but there is still no emission arm: the emitter
+        // refuses rather than fork the threefry stream via
+        // rng_bit_generator (pinned in
+        // EmitterTest.rngOpsRefuseEmissionLoudlyByName), and a
+        // reparameterized loss's gradient graph CONTAINS a cloned draw (the
+        // d-scale adjoint reads ε), so the sweep case joins only when the
+        // recorded explicit-threefry emission tail lands.
     )
 
     @Test

@@ -1697,9 +1697,9 @@ reachable from `grad {}`, not new math. New-op families come after.
     attr to equal the concrete result dims). Interpreter arms call the same
     `:core` kernels — host/interpreter bit-exact BY CONSTRUCTION and pinned
     in `DxirRngTest`. CostModel arms (threefry ≈ 26 flops/elem, Box-Muller
-    ≈ 64). NON-differentiable, deliberately: no VjpRule and no forward
-    tangent arm — both transforms refuse loudly by name (pinned; a draw is
-    piecewise-constant in its key, and reparameterized gradients are D2).
+    ≈ 64). NON-differentiable in D1, deliberately: both transforms refused
+    loudly by name (a draw is piecewise-constant in its key) — refusals
+    FLIPPED to the zero-gradient/zero-tangent arms in D2 v1 (§0.4.413).
   - Emitter: a DELIBERATE named refusal, adjudicated rather than spiked:
     `stablehlo.rng_bit_generator`'s threefry counter layout is XLA-internal
     and does not reproduce the JAX-classic stream these kernels pin — JAX
@@ -1717,9 +1717,39 @@ reachable from `grad {}`, not new math. New-op families come after.
     (JAX's approach — the only honest GPU path); FIR/`grad {}` surface for
     draws inside lambdas (D2-era); `permitReuse`/`DiffktRandom` wrapper
     sugar; cauchy/chiSquare (inverse-CDF sugar over uniform).
-- **D2. Reparameterized gradients**: gradients flow through loc/scale of
-  sampled normals (DiffKT's Gamma/Dirichlet implicit reparameterization is
-  the stretch goal — needs C1 first; C1 landed §0.4.402/405).
+- ✅ **D2 v1. Reparameterized gradients at IR level — DONE (§0.4.413)**:
+  random draws differentiate in both transforms with the correct (zero)
+  gradient in the key, unlocking the reparameterization trick
+  `sample = loc + scale ⊙ ε` — d loss/d loc and d loss/d scale flow through
+  the ordinary ADD/MUL rules while ε contributes nothing.
+  - Reverse: `RngDrawRule` returns the EMPTY contribution list (the
+    SIGN/COMPARE zero-gradient convention at arity 0 — a draw is
+    piecewise-constant in its literal key attrs with no operands to
+    propagate to). §0.4.408's loud refusal flipped; its spirit survives as
+    the pinned zero, with the draw ON the differentiable path so the walk
+    provably reaches it with accumulated upstream.
+  - Forward: structural-zero tangent (the §0.4.407 lazy-null convention,
+    same list as SIGN/STEP/COMPARE).
+  - The determinism half of the contract falls out of D1's literal-attr
+    design: when an adjoint READS ε (MulRule's `d scale = upstream ⊙ ε`),
+    the RNG op is cloned into the gradient body via `usedByAdjoint` with
+    its baked `key0`/`key1`/`dims`, so the gradient's re-draw is the SAME
+    stream — same key → same ε, pinned explicitly.
+  - Certified (`DxirRngTest`): grad of Σ (loc + scale⊙ε)² (odd length — the
+    end-pad counter lane rides through the cloned draw) against the
+    analytic oracle with ε recomputed host-side from the SAME key via
+    `normalFloats`; gradient evaluated twice bit-identical; zero gradient
+    in key pinned as `d x = u` bit-exact for Σ (u⊙x); jvp tangent = Σ ε⊙vx
+    with ε's zero tangent; JVP⇄VJP cross-identity through the reparam loss.
+  - **Deferred tails (recorded)**: the FIR/`grad {}` USER-SURFACE spelling —
+    lowering `normal(key0, key1, dims…)`/`uniform(…)` calls inside `grad {}`
+    lambdas to the zero-operand RNG ops (literal key words + dims in v1, the
+    K2 named-arg landmine; a `RandomKey`-typed lambda param is NOT v1) plus
+    the `irRngNormal`/`irRngUniform` synthesis delegates for cloned draws in
+    synthesised gradient bodies; GPU draws still gated on the D1
+    explicit-threefry emission tail (a reparameterized loss's GRADIENT graph
+    contains a cloned draw, so emission coverage joins only then);
+    Gamma/Dirichlet implicit reparameterization (the DiffKT stretch goal).
 
 ### Phase E — sparse (DiffKT `SparseFloatTensor` parity)
 
@@ -1896,7 +1926,8 @@ in substance (§0.4.366–397, §0.4.400/409 — remaining tails: A2's
 mixed rank-increase+stretch broadcast, `FloatScalar`-param boxing) →
 B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → C1–C3 ✅
 (§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; `grad {}`
-integral is B5-gated) → D1 ✅ (§0.4.408).
+integral is B5-gated) → D1 ✅ (§0.4.408) → D2 v1 ✅ (§0.4.413 — IR-level
+reparameterized gradients; FIR/`grad {}` spelling is the recorded tail).
 
 **Remaining, in recommended order:**
 1. **Ratification gates (Pedro)**: B5 custom derivatives
@@ -1905,9 +1936,11 @@ integral is B5-gated) → D1 ✅ (§0.4.408).
    per C5's recorded lowering shape); E sparse
    ([SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md) — recommended
    conditional no-go); F model layer (product decision, unchanged).
-2. **D2 reparameterized gradients** — its C1 prerequisite
-   (digamma/polygamma) landed §0.4.402/405; explicit-threefry StableHLO
-   emission is the recorded D1 tail to take first if GPU draws matter.
+2. **D2 tails** — the FIR/`grad {}` user-surface spelling for draws inside
+   lambdas + synthesis delegates (the v1 IR arms landed §0.4.413);
+   explicit-threefry StableHLO emission is the recorded D1 tail to take
+   first if GPU draws matter (the gradient graph of a reparameterized loss
+   contains a cloned draw, so both tails meet there).
 3. **Recorded tails on the books** (each its own §-sized slice when
    pulled): B3's multi-result COARSENED tangents + IF-inside-primal_body
    splice; A-phase tails above; C4's grouped/depthwise conv (beyond
