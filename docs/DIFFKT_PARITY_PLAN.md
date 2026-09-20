@@ -222,8 +222,9 @@ reachable from `grad {}`, not new math. New-op families come after.
     - **`pad` as a user op** has no DiffKT analogue (skip). `PadRule` is also
       sentinel-unsafe (`limit_indices` from `x.type.dims`) but unreachable without
       a user `pad`.
-    - **`view`/indexing, `withChange`, `meld`/`split`, `stats`**: same
+    - **`view`/indexing, `withChange`, `meld`/`split`**: same
       runtime-extent boundary; sequenced after the mechanism above lands.
+      (`stats` left this list — landed host-level in §0.4.397, A5c-3(iv).)
 - **A3. NN ops in lambdas** — split by wiring readiness:
   - **A3a ✅ (§0.4.368)**: `softmax(axis)` + `logSoftmax(axis)` E2E through
     `grad {}`. SOFTMAX was fully wired below the surface (interpreter,
@@ -858,7 +859,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     right columns requires the stretch to hit `[2,3]`, not `[3,3]`), plus an IR pin
     that MAX's adjoint broadcasts carry templates under sentinels and none under
     concrete dims, each template's shape being exactly its broadcast target.
-  - **A5c-3 remainder (pending).**
+  - **A5c-3 remainder.**
     (i) `SignRule` and `CompareRule` still emit bare shaped ZERO consts as their
     (piecewise-constant) contributions, and neither reads its operand, so a
     template would need the per-node clone refinement — their zero gradient can
@@ -869,9 +870,48 @@ reachable from `grad {}`, not new math. New-op families come after.
     DCE'd by XLA, but wasteful if a gradient body ever reaches the XLA path.
     (iii) Under sentinels a templated seed costs one extra evaluation of the
     summed node; a `dimsOf`-style shape-only host op would remove it.
-    (iv) `DScalar × DTensor` mixing, and comparisons against a scalar literal
-    (`a gt 1.0f` — `COMPARE_DIRECTION_MAP` still lowers both sides verbatim, and
-    the comparison host ops still use the strict `elementwise`).
+  - **A5c-3(iv) ✅ (§0.4.397) — the last scalar-mixing tails.** Four pieces:
+    - **Comparisons against a Float scalar** (`a gt 1.0f`, and the COMPUTED
+      spelling `a gt b.mean().toFloat()`), E2E through `grad {}`: the six
+      `:core` comparison overloads on the Float side (same 0/1 F32 mask
+      contract), and the §0.4.364 COMPARE arm splats a non-DTensor rhs exactly
+      like the A5a mixed-rank binary arm — a literal via `splatLiteral`
+      (templated under sentinels), a computed rank-0 side via `splatScalarTo`'s
+      BROADCAST — so COMPARE always sees two same-typed operands. The computed
+      side was indeed free. One synthesis repair fell out: `irCompare` resolved
+      its host op with the uniquely-named `coreOpsSymbol` lookup, which the new
+      overloads turned into `null` (two candidates) — it now uses
+      `findTensorBinaryOp`'s filter (DTensor receiver + one regular DTensor
+      param + one type param), the same overload-disambiguation A5a built for
+      the arithmetic ops. Certified: mask-routed `where(a gt 1.0f, a⊙a, b)`
+      analytic gradients, the computed-scalar variant (the mean path correctly
+      contributes ZERO through the piecewise-constant COMPARE), and a direct
+      multiplicative `(a le 0.5f) ⊙ b` mask, plus the six host pins.
+    - **`stats()`**: `(mean, variance)` host sugar over the full reductions,
+      variance BIASED (÷N — DiffKT's and `batchNormGeneral`'s §0.4.390
+      convention). HOST-LEVEL ONLY by design: a Pair-returning body has no
+      `grad {}` lowering (the loss contract is scalar) and DiffKT's `stats` is
+      a convenience, not a differentiation surface; a loss that needs the
+      pieces writes `x.mean()` / squared-deviation mean directly, which
+      differentiate today.
+    - **`DScalar × DTensor`** (DiffKT's `timesScalar` — its ONE scalar-mixing
+      `Operations` primitive; the other binaries mix through `Float`, which A5a
+      ships): `:core` host overloads `DTensor * DScalar` / `DScalar * DTensor`
+      landed, and the FIR needed NOTHING — the A5a mixed-rank arm fires off the
+      shared `io.tlaloc.core.ops.times` FQN and splats the rank-0 side. The
+      differentiable-scalar-PARAM form is certified E2E with a `Float` param
+      (`grad { a, s -> (a ⊙ s).Σ }` → `da = s`, `ds = Σa` through
+      BroadcastRule's full-reduce adjoint).
+    - **DEFERRED tail — `FloatScalar`-typed params**: the FIR lowers
+      `grad { a, s: FloatScalar -> a * s }` to the IDENTICAL dxir (pinned), but
+      synthesis cannot BOX the rank-0 gradient back into the returned pair's
+      `FloatScalar` slot, so the type guard keeps the original call (the
+      long-documented "DScalar boxing" fallback in
+      `TlalocIrGenerationExtension`). Closing it means synthesis-side
+      `FloatScalar(x)` construction + `.v` unwrap on entry for scalar-class
+      params generally (it predates this slice: an ALL-FloatScalar `grad {}`
+      falls back the same way). `DScalarMixingGradientTest` pins the fallback
+      and says exactly how to flip the pin when boxing lands.
 
 ### Phase B — AD-mode parity
 
@@ -1104,9 +1144,9 @@ argument fallback) ·
 
 | DiffKT | Tlaloc | Notes |
 |---|---|---|
-| `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 tensor⊗tensor; A5a (§0.4.376) `Float×DTensor` on both operand orders; **A5c (§0.4.378/379) full implicit broadcasting** — NumPy right-alignment in the interpreter, the emitter, the host ops and the adjoints, so `[N,1] ⊙ [N,C]` and `[C] ⊙ [N,C]` differentiate. `DScalar×DTensor` still open (A5c-3) |
+| `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 tensor⊗tensor; A5a (§0.4.376) `Float×DTensor` on both operand orders; **A5c (§0.4.378/379) full implicit broadcasting** — NumPy right-alignment in the interpreter, the emitter, the host ops and the adjoints, so `[N,1] ⊙ [N,C]` and `[C] ⊙ [N,C]` differentiate. `DScalar×DTensor` ✅ A5c-3(iv) (§0.4.397): host overloads both orders + Float-param `grad {}` E2E; `FloatScalar`-typed params still fall to the tape (synthesis DScalar boxing — deferred tail) |
 | `pow(Float/Int/DScalar/tensor-exponent)` | ✅ | A5b (§0.4.377): `:core/ops` host `pow` (tensor / Float / Int exponents) + FIR entries for `io.tlaloc.core.ops.pow` and `kotlin.math.pow` + a tensor synthesis arm; PowRule/interpreter/emitter/forward already shipped. `DScalar` exponent still open |
-| `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 |
+| `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 tensor⊗tensor; §0.4.397 Float-scalar rhs (`a gt 1.0f` + computed rank-0) E2E through `grad {}` |
 | `relu reluGrad sigmoid tanh exp ln sqrt abs` (tensor) | ✅ | `reluGrad` is public in DiffKT; ours is internal — fine |
 | `sin cos tan atan` (tensor) | ✅ | sin/cos ✅; tan/atan ✅ C2 (§0.4.395 — full vertical incl. `stablehlo.tan` / `atan2(x, 1)` emission certified on the GB10; audit: **no** floor/ceil/round/atan2 in DiffKT — those stay ours-optional) |
 | `lgamma digamma polygamma` (tensor) | ❌ | C1 (Dirichlet example + gamma reparam depend on them) |
@@ -1114,7 +1154,7 @@ argument fallback) ·
 | `sum(axes, keepDims)` | 🟡 | `reduction_dims` IR exists → A1 |
 | `mean()` | 🟡 | dispatch arm exists but **no map entry** — not reachable → A1 |
 | `FloatTensor.max/min(axes)` | ➖/🟡 | DiffKT only has these on **FloatTensor — not differentiable**; Tlaloc's MAX/MIN have VJPs → A1 exceeds parity |
-| `stats()` = (mean, variance) | ❌ | 2-line sugar once A1 lands |
+| `stats()` = (mean, variance) | ✅ | §0.4.397 host sugar, biased variance (÷N); host-level only — DiffKT's `stats` is a convenience, and a Pair-returning body has no `grad {}` lowering (loss contract is scalar) |
 | `matmul` (incl. generalized shape-block form) | ✅ | any rank ≥ 2 |
 | `innerProduct` | ✅ | DOT |
 | `outerProduct` | ✅ | §0.4.369: host + FIR (matmul on unsqueezed) + IR-level grad; §0.4.375: grad{} E2E (A4b — `Lit<Int>` placeholder atom for reshape-created unit axes types MatmulRule's transpose forward + squeeze backward) |

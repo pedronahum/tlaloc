@@ -3418,7 +3418,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val rhsDecl = env[op.operands[1].id] ?: return null
         val lhsIrType = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
         val shapeArg = lhsIrType.arguments.firstOrNull()?.typeOrNull ?: return null
-        val sym = coreOpsSymbol(fnName) ?: return null
+        // §0.4.397 — the comparisons gained Float-scalar overloads (`a gt 1.0f`,
+        // Phase A5c-3(iv)), so the uniquely-named `coreOpsSymbol` lookup would
+        // return null. The FIR arm splats a scalar side before the IR ever sees
+        // it, so synthesis always wants the tensor⊗tensor overload — exactly what
+        // [findTensorBinaryOp]'s filter (DTensor receiver, one regular DTensor
+        // param, one type parameter) selects.
+        val sym = findTensorBinaryOp(fnName) ?: return null
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,

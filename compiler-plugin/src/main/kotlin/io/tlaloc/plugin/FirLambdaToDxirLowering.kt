@@ -1308,7 +1308,26 @@ object FirLambdaToDxirLowering {
             val lhs = lowerExpr(lhsExpr, env, emitter)
             val rhsExpr = call.argumentList.arguments.firstOrNull()
                 ?: throw LoweringException("comparison '$fqn' missing rhs argument")
-            val rhs = lowerExpr(rhsExpr, env, emitter)
+            // §0.4.397 — Phase A5c-3(iv): a Float scalar side (`a gt 1.0f`, or a
+            // computed `b.mean().toFloat()`) splats over the tensor receiver's
+            // shape exactly like the A5a mixed-rank binary arm, so COMPARE always
+            // sees two same-typed operands. A literal folds straight to a shaped
+            // const (templated under sentinels via `splatLiteral`); a computed
+            // rank-0 value rides `splatScalarTo`'s BROADCAST, whose adjoint is
+            // moot here — COMPARE is piecewise constant — but keeps the node
+            // well-typed for the transform. The receiver is always the tensor
+            // side: these are `DTensor.gt(Float)` extensions, so only the rhs can
+            // be scalar.
+            val rhs = if (!isDTensorExpr(rhsExpr) && !lhs.type.isScalar && lhs.type.dtype == F32) {
+                val literal = floatLiteralArg(rhsExpr)
+                if (literal != null) {
+                    splatLiteral(literal, lhs, emitter)
+                } else {
+                    splatScalarTo(lowerExpr(rhsExpr, env, emitter), lhs, emitter)
+                }
+            } else {
+                lowerExpr(rhsExpr, env, emitter)
+            }
             val cmp = emitter.op(
                 kind = OpKind.COMPARE,
                 operands = listOf(lhs, rhs),

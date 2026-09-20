@@ -1,5 +1,6 @@
 package io.tlaloc.core.ops
 
+import io.tlaloc.core.DScalar
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
 import io.tlaloc.core.HostF32Storage
@@ -97,6 +98,26 @@ operator fun <S : Shape> Float.times(other: DTensor<S, F32>): DTensor<S, F32> =
 operator fun <S : Shape> Float.div(other: DTensor<S, F32>): DTensor<S, F32> =
     elementwiseScalar(other, this) { x, y -> y / x }
 
+/**
+ * §0.4.397 — Phase A5c-3(iv): `DScalar × DTensor` mixing, DiffKT's
+ * `timesScalar`. DiffKT's `Operations` interface carries exactly ONE
+ * scalar-mixing primitive — `timesScalar(left: DScalar, right: DTensor)` —
+ * surfaced as `DScalar * DTensor` and `DTensor * DScalar`; the other binaries
+ * mix through `Float` (which Tlaloc ships since Phase A5a above). These two
+ * overloads close that parity point at host level: the scalar side unwraps to
+ * its Float value (F32 host storage — DoubleScalar narrows, matching
+ * `DScalar.toFloat()`), and the walk is the same [elementwiseScalar]. Inside
+ * `grad {}` the K2 plugin's mixed-rank arm splats the rank-0 DScalar operand
+ * through the templated BROADCAST (the A5a computed-scalar path), so a
+ * DIFFERENTIABLE scalar factor gets BroadcastRule's full-reduce adjoint for
+ * free — `d s = Σ (∂loss/∂prod ⊙ a)`.
+ */
+operator fun <S : Shape> DTensor<S, F32>.times(scalar: DScalar): DTensor<S, F32> =
+    elementwiseScalar(this, scalar.toFloat()) { x, y -> x * y }
+
+operator fun <S : Shape> DScalar.times(other: DTensor<S, F32>): DTensor<S, F32> =
+    elementwiseScalar(other, this.toFloat()) { x, y -> y * x }
+
 fun <S : Shape> DTensor<S, F32>.relu(): DTensor<S, F32> {
     val v = hostF32()
     val out = FloatArray(v.size)
@@ -183,6 +204,32 @@ infix fun <S : Shape> DTensor<S, F32>.eq(other: DTensor<S, F32>): DTensor<S, F32
 
 infix fun <S : Shape> DTensor<S, F32>.ne(other: DTensor<S, F32>): DTensor<S, F32> =
     elementwise(this, other) { x, y -> if (x != y) 1f else 0f }
+
+/**
+ * §0.4.397 — Phase A5c-3(iv): comparisons against a Float scalar (`a gt 1.0f`),
+ * the last everyday DiffKT comparison spelling Tlaloc rejected. Same 0/1 F32
+ * mask contract as the tensor⊙tensor forms above; the scalar side is compared
+ * against every element. Inside `grad {}` the K2 plugin splats the scalar side
+ * over the tensor operand's shape (the Phase A5a literal-splat pattern), so the
+ * IR sees the uniform two-tensor COMPARE the §0.4.364 arm already lowers.
+ */
+infix fun <S : Shape> DTensor<S, F32>.gt(other: Float): DTensor<S, F32> =
+    elementwiseScalar(this, other) { x, y -> if (x > y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.ge(other: Float): DTensor<S, F32> =
+    elementwiseScalar(this, other) { x, y -> if (x >= y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.lt(other: Float): DTensor<S, F32> =
+    elementwiseScalar(this, other) { x, y -> if (x < y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.le(other: Float): DTensor<S, F32> =
+    elementwiseScalar(this, other) { x, y -> if (x <= y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.eq(other: Float): DTensor<S, F32> =
+    elementwiseScalar(this, other) { x, y -> if (x == y) 1f else 0f }
+
+infix fun <S : Shape> DTensor<S, F32>.ne(other: Float): DTensor<S, F32> =
+    elementwiseScalar(this, other) { x, y -> if (x != y) 1f else 0f }
 
 /**
  * §0.4.364 — elementwise select: `where(pred, a, b)[i] = if (pred[i] != 0)
@@ -1576,6 +1623,37 @@ fun <S : Shape> DTensor<S, F32>.mean(): DTensor<ScalarShape, F32> {
     var acc = 0f
     for (x in v) acc += x
     return DTensor(HostF32Storage(floatArrayOf(acc / v.size)), intArrayOf(), F32)
+}
+
+/**
+ * §0.4.397 — Phase A5c-3(iv): DiffKT's `stats()` — the `(mean, variance)`
+ * pair over all elements, thin sugar over the A1 full reductions. Variance is
+ * BIASED (divide by N, not N−1), matching both DiffKT's convention and the
+ * per-channel statistic `batchNormGeneral` takes (§0.4.390). Host-level only
+ * by design: DiffKT's `stats` is a convenience accessor, not a
+ * differentiation surface — a Pair-returning body has no `grad {}` lowering
+ * (the loss contract is scalar), and a loss that needs the pieces writes
+ * `x.mean()` and the squared-deviation mean directly, both of which
+ * differentiate today.
+ */
+fun <S : Shape> DTensor<S, F32>.stats(): Pair<DTensor<ScalarShape, F32>, DTensor<ScalarShape, F32>> {
+    val v = hostF32()
+    if (v.isEmpty()) {
+        val zero = { DTensor<ScalarShape, F32>(HostF32Storage(floatArrayOf(0f)), intArrayOf(), F32) }
+        return Pair(zero(), zero())
+    }
+    var acc = 0f
+    for (x in v) acc += x
+    val mu = acc / v.size
+    var sq = 0f
+    for (x in v) {
+        val d = x - mu
+        sq += d * d
+    }
+    return Pair(
+        DTensor(HostF32Storage(floatArrayOf(mu)), intArrayOf(), F32),
+        DTensor(HostF32Storage(floatArrayOf(sq / v.size)), intArrayOf(), F32),
+    )
 }
 
 /**

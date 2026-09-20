@@ -1,5 +1,8 @@
 package io.tlaloc.core.ops
 
+import io.tlaloc.core.DScalar
+import io.tlaloc.core.DoubleScalar
+import io.tlaloc.core.FloatScalar
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
@@ -155,6 +158,47 @@ class HostOpsTest {
     fun meanAverages() {
         val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(2f, 4f, 6f, 8f))
         assertContentEquals(floatArrayOf(5f), a.mean().hostF32())
+    }
+
+    @Test
+    fun compareAgainstFloatScalar() {
+        // §0.4.397 — Phase A5c-3(iv): `a gt 1.0f` and friends, the Float-side
+        // comparison overloads producing the same 0/1 F32 masks as the
+        // tensor⊙tensor forms.
+        val a = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(0.5f, 1.0f, 2.0f, -3.0f))
+        assertContentEquals(floatArrayOf(0f, 0f, 1f, 0f), (a gt 1.0f).hostF32())
+        assertContentEquals(floatArrayOf(0f, 1f, 1f, 0f), (a ge 1.0f).hostF32())
+        assertContentEquals(floatArrayOf(1f, 0f, 0f, 1f), (a lt 1.0f).hostF32())
+        assertContentEquals(floatArrayOf(1f, 1f, 0f, 1f), (a le 1.0f).hostF32())
+        assertContentEquals(floatArrayOf(0f, 1f, 0f, 0f), (a eq 1.0f).hostF32())
+        assertContentEquals(floatArrayOf(1f, 0f, 1f, 1f), (a ne 1.0f).hostF32())
+        assertContentEquals(intArrayOf(2, 2), (a gt 1.0f).dims)
+    }
+
+    @Test
+    fun statsReturnsMeanAndBiasedVariance() {
+        // §0.4.397 — DiffKT's stats(): (mean, variance), variance BIASED
+        // (divide by N — the §0.4.390 batchNorm convention).
+        // v = [2, 4, 6, 8]: mean = 5, var = (9 + 1 + 1 + 9)/4 = 5.
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(2f, 4f, 6f, 8f))
+        val (mu, variance) = a.stats()
+        assertContentEquals(floatArrayOf(5f), mu.hostF32())
+        assertContentEquals(floatArrayOf(5f), variance.hostF32())
+        assertContentEquals(intArrayOf(), mu.dims)
+        assertContentEquals(intArrayOf(), variance.dims)
+    }
+
+    @Test
+    fun dscalarTimesTensorBothOrders() {
+        // §0.4.397 — DiffKT `timesScalar` parity: DScalar × DTensor in both
+        // operand orders, DoubleScalar narrowing through toFloat().
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(1f, 2f, 3f, 4f))
+        val s: DScalar = FloatScalar(2.5f)
+        assertContentEquals(floatArrayOf(2.5f, 5f, 7.5f, 10f), (a * s).hostF32())
+        assertContentEquals(floatArrayOf(2.5f, 5f, 7.5f, 10f), (s * a).hostF32())
+        val d: DScalar = DoubleScalar(0.5)
+        assertContentEquals(floatArrayOf(0.5f, 1f, 1.5f, 2f), (a * d).hostF32())
+        assertContentEquals(intArrayOf(1, 4), (s * a).dims)
     }
 
     @Test
