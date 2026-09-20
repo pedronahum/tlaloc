@@ -27,11 +27,17 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
         "io.tlaloc.autograd.jvp2",
         "io.tlaloc.autograd.valueAndJvp2",
         // §0.4.394 — Phase B2: assembly intrinsics over the seeded transforms.
+        // §0.4.406 — their two-argument forms.
         "io.tlaloc.autograd.jacobian",
         "io.tlaloc.autograd.hessian",
-        // §0.4.398 — the seeded-cotangent user surface.
+        "io.tlaloc.autograd.jacobian2",
+        "io.tlaloc.autograd.hessian2",
+        // §0.4.398 — the seeded-cotangent user surface. §0.4.406 — its
+        // two-argument forms.
         "io.tlaloc.autograd.vjp",
         "io.tlaloc.autograd.valueAndVjp",
+        "io.tlaloc.autograd.vjp2",
+        "io.tlaloc.autograd.valueAndVjp2",
     )
 
     /** §0.4.372 — the forward-mode intrinsics probe differentiability with the
@@ -39,7 +45,7 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
      * assembles forward columns, so it probes the same way (its lambda returns
      * a TENSOR, which the reverse probe would reject outright). */
     private val forwardIntrinsics: Set<String> =
-        setOf("jvp", "valueAndJvp", "jvp2", "valueAndJvp2", "jacobian")
+        setOf("jvp", "valueAndJvp", "jvp2", "valueAndJvp2", "jacobian", "jacobian2")
 
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirFunctionCall) {
@@ -86,8 +92,8 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                     val probe: () -> Unit = when {
                         // §0.4.394 — `hessian` is forward-OVER-reverse, so the
                         // check-time probe composes both transforms exactly as
-                        // the IR extension will.
-                        name == "hessian" -> {
+                        // the IR extension will. §0.4.406 — `hessian2` likewise.
+                        name == "hessian" || name == "hessian2" -> {
                             { DxirForwardTransform.apply(DxirReverseTransform.apply(result.fn)) }
                         }
                         // §0.4.398 — the seeded-cotangent intrinsics probe the
@@ -95,11 +101,14 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                         // tensor, which the default probe's scalar gate would
                         // reject; seedAsParam is exactly what the IR extension
                         // runs, so the red squiggle matches the real lowering.
-                        name == "vjp" || name == "valueAndVjp" -> {
+                        // §0.4.406 — the two-argument spellings likewise (the
+                        // transform is arity-agnostic).
+                        name == "vjp" || name == "valueAndVjp" ||
+                            name == "vjp2" || name == "valueAndVjp2" -> {
                             {
                                 DxirReverseTransform.apply(
                                     result.fn,
-                                    includeForward = name == "valueAndVjp",
+                                    includeForward = name.startsWith("valueAnd"),
                                     seedAsParam = true,
                                 )
                             }

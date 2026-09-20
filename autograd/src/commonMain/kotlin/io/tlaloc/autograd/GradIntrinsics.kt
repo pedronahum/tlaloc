@@ -91,6 +91,25 @@ fun <A, R> valueAndVjp(f: (A) -> R): (A, R) -> Pair<R, A> =
     { _, _ -> pluginMissing("valueAndVjp") }
 
 /**
+ * §0.4.406 — the two-argument seeded-cotangent surface, closing the
+ * "multi-arg `vjp2`" tail §0.4.398 recorded. Follows the house
+ * primals-then-seeds order `grad2`/`jvp2` established: `vjp2(f)` returns
+ * `(x, w, ȳ) → (x̄, w̄)` — the pullback of a user-supplied cotangent `ȳ`
+ * (of `f`'s OUTPUT type, cotangent LAST) through `f` at `(x, w)`, both
+ * gradients from ONE reverse pass. The IR layer needed nothing new:
+ * `DxirReverseTransform(seedAsParam = true)` has emitted
+ * `(upstream, *params) → (*grads)` for arbitrary arity since §0.4.33 (it IS
+ * the COARSENED `gradient_body` signature) — the §0.4.398 plugin branch's
+ * param rotation and gates just generalise from 1 primal to 2.
+ */
+fun <A, B, R> vjp2(f: (A, B) -> R): (A, B, R) -> Pair<A, B> =
+    { _, _, _ -> pluginMissing("vjp2") }
+
+/** Primal value and both seeded pullbacks in one pass: `(x, w, ȳ) -> (y, x̄, w̄)`. */
+fun <A, B, R> valueAndVjp2(f: (A, B) -> R): (A, B, R) -> Triple<R, A, B> =
+    { _, _, _ -> pluginMissing("valueAndVjp2") }
+
+/**
  * §0.4.387 — forward mode for a two-argument function, the `grad2` of the
  * forward pair and the follow-up §0.4.375 scoped out ("multi-arg `jvp2` is a
  * clean follow-up: same pattern, more params"). The curried result takes the

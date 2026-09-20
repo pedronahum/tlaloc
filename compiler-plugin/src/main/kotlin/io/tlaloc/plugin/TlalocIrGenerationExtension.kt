@@ -29,6 +29,7 @@ import org.jetbrains.kotlin.ir.types.typeOrNull
 import org.jetbrains.kotlin.ir.types.typeWith
 import org.jetbrains.kotlin.ir.util.callableId
 import org.jetbrains.kotlin.name.CallableId
+import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 
@@ -242,23 +243,38 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                 // known — and stacks the [m, n] / [n, n] dense result. There is no
                 // runtime-tape fallback for these (the `concat` precedent): a failed
                 // synthesis keeps the original call, which throws pluginMissing loudly.
-                val assemblyIntrinsic = callableName == "jacobian" || callableName == "hessian"
+                // §0.4.406 — the two-argument forms `jacobian2` / `hessian2` ride the
+                // same branch: the transforms are arity-agnostic (all primals, then all
+                // tangents), so the generalisation is the gate (2 params), the harvested
+                // types (A, B from the call type's first two args), the override type
+                // (Function4 over primals ++ tangents; hessian2's seeded return is
+                // Pair<A, B> — the two gradient tangents, boxed exactly as synthesis
+                // boxes any 2-return function), and the assemble*2Forward helpers,
+                // which loop basis vectors on EACH input with a zero tangent on the
+                // other. hessian2 returns the FULL [(nx+nw), (nx+nw)] matrix over the
+                // concatenated flat input (blocks are runtime-sized under sentinels).
+                val assemblyIntrinsic = callableName == "jacobian" || callableName == "hessian" ||
+                    callableName == "jacobian2" || callableName == "hessian2"
                 if (assemblyIntrinsic) {
-                    if (fn.params.size != 1 || fn.returns.size != 1) {
+                    val arity = if (callableName.endsWith("2")) 2 else 1
+                    val isJacobian = callableName.startsWith("jacobian")
+                    if (fn.params.size != arity || fn.returns.size != 1) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                                "$callableName v1 scope is single-param single-return " +
+                                "$callableName v1 scope is $arity-param single-return " +
                                 "(got ${fn.params.size} params, ${fn.returns.size} returns)",
                             null,
                         )
                         return transformed
                     }
                     val callSiteType = transformed.type as? IrSimpleType
-                    val aType = callSiteType?.arguments?.getOrNull(0)?.typeOrNull
+                    val primalTypes = (0 until arity).map {
+                        callSiteType?.arguments?.getOrNull(it)?.typeOrNull
+                    }
                     val fArgType = transformed.arguments.getOrNull(0)?.type as? IrSimpleType
-                    val rType = fArgType?.arguments?.getOrNull(1)?.typeOrNull
-                    if (aType == null || rType == null) {
+                    val rType = fArgType?.arguments?.getOrNull(arity)?.typeOrNull
+                    if (primalTypes.any { it == null } || rType == null) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
@@ -268,8 +284,9 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         )
                         return transformed
                     }
+                    val primals = primalTypes.map { it!! }
                     val seeded: DxirFunction = try {
-                        if (callableName == "jacobian") {
+                        if (isJacobian) {
                             DxirForwardTransform.apply(fn)
                         } else {
                             DxirForwardTransform.apply(DxirReverseTransform.apply(fn))
@@ -278,7 +295,7 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                                "the seeded ${if (callableName == "jacobian") "forward" else "forward-over-reverse"} " +
+                                "the seeded ${if (isJacobian) "forward" else "forward-over-reverse"} " +
                                 "transform failed (${t::class.simpleName}: ${t.message})\n${fn.pretty().trimEnd()}",
                             null,
                         )
@@ -295,15 +312,23 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         seeded.returns.subList(half, seeded.returns.size),
                         seeded.meshes,
                     )
-                    // jvp(x, dx) → dy has f's return type; hvp(x, v) → H·v has x's.
-                    val seedRet = if (callableName == "jacobian") rType else aType
-                    val overrideType = pluginContext.irBuiltIns.functionN(2).symbol
-                        .typeWith(listOf(aType, aType, seedRet)) as? IrSimpleType
+                    // Seeded return type: jvp/jvp2's dy has f's return type; hvp's H·v
+                    // has x's; hvp2's two gradient tangents box as Pair<A, B>.
+                    val seedRet: org.jetbrains.kotlin.ir.types.IrType? = when {
+                        isJacobian -> rType
+                        arity == 1 -> primals[0]
+                        else -> pluginContext.referenceClass(ClassId.fromString("kotlin/Pair"))
+                            ?.typeWith(primals)
+                    }
+                    val overrideType: IrSimpleType? = seedRet?.let {
+                        pluginContext.irBuiltIns.functionN(2 * arity).symbol
+                            .typeWith(primals + primals + it)
+                    }
                     if (overrideType == null) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                                "could not build the seeded lambda's Function2 type",
+                                "could not build the seeded lambda's Function${2 * arity} type",
                             null,
                         )
                         return transformed
@@ -323,10 +348,11 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         )
                         return transformed
                     }
-                    val helperName = if (callableName == "jacobian") {
-                        "assembleJacobianForward"
-                    } else {
-                        "assembleHessianForward"
+                    val helperName = when (callableName) {
+                        "jacobian" -> "assembleJacobianForward"
+                        "hessian" -> "assembleHessianForward"
+                        "jacobian2" -> "assembleJacobian2Forward"
+                        else -> "assembleHessian2Forward"
                     }
                     val helperSym = pluginContext.referenceFunctions(
                         CallableId(FqName("io.tlaloc.autograd"), Name.identifier(helperName)),
@@ -346,13 +372,17 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         type = transformed.type,
                         symbol = helperSym,
                     )
-                    assembled.typeArguments[0] = aType
-                    if (assembled.typeArguments.size > 1) assembled.typeArguments[1] = rType
+                    // Helper type args mirror the declarations: assembleJacobian*Forward
+                    // takes the primals + R; assembleHessian*Forward takes the primals only.
+                    val helperTypeArgs = if (isJacobian) primals + rType else primals
+                    helperTypeArgs.forEachIndexed { i, t ->
+                        if (i < assembled.typeArguments.size) assembled.typeArguments[i] = t
+                    }
                     assembled.arguments[0] = seededLambda
                     mc.report(
                         CompilerMessageSeverity.WARNING,
                         "Tlaloc lowered '$callableName' to a seeded " +
-                            "${if (callableName == "jacobian") "forward" else "forward-over-reverse"} " +
+                            "${if (isJacobian) "forward" else "forward-over-reverse"} " +
                             "pass + runtime basis assembly:\n${tangentFn.pretty().trimEnd()}",
                         null,
                     )
@@ -375,19 +405,29 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                 // only), reordering the params list is a pure metadata rotation.
                 // No runtime-tape fallback (the `concat`/`jacobian` precedent): a
                 // failed synthesis keeps the original call → pluginMissing, loudly.
-                val vjpIntrinsic = callableName == "vjp" || callableName == "valueAndVjp"
+                // §0.4.406 — the two-argument forms `vjp2` / `valueAndVjp2` ride the
+                // same branch verbatim: `DxirReverseTransform(seedAsParam = true)` has
+                // emitted `(upstream, *params) → (*grads)` for ANY arity since §0.4.33
+                // (that IS the COARSENED gradient_body signature), the param rotation
+                // below is already arity-agnostic (`drop(1) + first()`), and the call
+                // site's own type is again the seeded function's type —
+                // Function3<A, B, R, Pair<A, B>> (Triple-returning for valueAndVjp2).
+                // Only the gate changes: 2 primal params for the "2" spellings.
+                val vjpIntrinsic = callableName == "vjp" || callableName == "valueAndVjp" ||
+                    callableName == "vjp2" || callableName == "valueAndVjp2"
                 if (vjpIntrinsic) {
-                    if (fn.params.size != 1 || fn.returns.size != 1) {
+                    val vjpArity = if (callableName.endsWith("2")) 2 else 1
+                    if (fn.params.size != vjpArity || fn.returns.size != 1) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                                "$callableName v1 scope is single-param single-return " +
+                                "$callableName v1 scope is $vjpArity-param single-return " +
                                 "(got ${fn.params.size} params, ${fn.returns.size} returns)",
                             null,
                         )
                         return transformed
                     }
-                    val includeValue = callableName == "valueAndVjp"
+                    val includeValue = callableName.startsWith("valueAnd")
                     val seededGrad: DxirFunction = try {
                         DxirReverseTransform.apply(
                             fn,
@@ -663,10 +703,12 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
             "grad", "grad2", "valueAndGrad", "valueAndGrad2",
             // §0.4.372 — forward-mode (Phase B1). §0.4.387 — its two-argument forms.
             "jvp", "valueAndJvp", "jvp2", "valueAndJvp2",
-            // §0.4.394 — Phase B2: the assembly intrinsics.
-            "jacobian", "hessian",
-            // §0.4.398 — the seeded-cotangent user surface.
-            "vjp", "valueAndVjp",
+            // §0.4.394 — Phase B2: the assembly intrinsics. §0.4.406 — their
+            // two-argument forms.
+            "jacobian", "hessian", "jacobian2", "hessian2",
+            // §0.4.398 — the seeded-cotangent user surface. §0.4.406 — its
+            // two-argument forms.
+            "vjp", "valueAndVjp", "vjp2", "valueAndVjp2",
         )
 
         /**

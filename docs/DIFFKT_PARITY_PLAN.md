@@ -1022,8 +1022,8 @@ reachable from `grad {}`, not new math. New-op families come after.
     threads the adjoint's exp recompute).
   - v1 scope: single-argument `f`, straight-line bodies, host F32. Still
     open in B2's neighbourhood: reverse-assembled (tall) Jacobians for
-    m ≪ n, and multi-arg `jacobian2`/`hessian2`. (The seeded-cotangent
-    user surface closed in §0.4.398 below.)
+    m ≪ n. (The seeded-cotangent user surface closed in §0.4.398 below;
+    multi-arg `jacobian2`/`hessian2` closed in §0.4.406 below.)
 - **B2 follow-up. `vjp` + `valueAndVjp` intrinsics ✅ (§0.4.398)** — the
   seeded-cotangent user surface (DiffKT's `vjp` / `primalAndPullback`, audit
   item 10): `vjp(f)` returns `(x, ȳ) → x̄`, the pullback of a USER-SUPPLIED
@@ -1068,7 +1068,67 @@ reachable from `grad {}`, not new math. New-op families come after.
   - v1 scope: single-argument `f`, straight-line single-return bodies
     (the seeded branch skips the coarsening pipeline, like B1's forward
     branch). Deferred tails: region-bearing bodies (fold into B3/B4's
-    region work), multi-arg `vjp2`.
+    region work); multi-arg `vjp2` closed in §0.4.406 below.
+- **B2 close-out. Multi-argument seeded/assembled intrinsics ✅ (§0.4.406)**
+  — `vjp2` / `valueAndVjp2` / `jacobian2` / `hessian2`, closing the
+  "multi-arg" tails §0.4.394 and §0.4.398 recorded, with ZERO IR-layer
+  changes: both underlying transforms were arity-agnostic all along
+  (`DxirReverseTransform(seedAsParam = true)` has emitted
+  `(upstream, *params) → (*grads)` for any arity since §0.4.33 — it IS the
+  COARSENED `gradient_body` signature — and `DxirForwardTransform` emits
+  all primals then all tangents for any arity/return count), so the slice
+  is surface + plugin-gate generalisation + two runtime assembly helpers.
+  - **Surfaces** (house currying, primals-then-seeds): `vjp2(f)` returns
+    `(x, w, ȳ) → Pair(x̄, w̄)` — cotangent LAST, one seeded reverse pass for
+    both gradients; `valueAndVjp2` → `Triple(y, x̄, w̄)` (the combined
+    `includeForward + seedAsParam` mode, which fell out freely as §0.4.398
+    predicted). `jacobian2(f)` returns `(x, w) → Pair(J_x [m, nx],
+    J_w [m, nw])` — the plugin synthesises `jvp2`'s tangent-only
+    `(x, w, dx, dw) → dy` ONCE and `assembleJacobian2Forward` loops basis
+    vectors on EACH input with a ZERO tangent on the other (separate blocks,
+    not one glued matrix — the caller usually wants exactly one).
+    `hessian2(f)` returns the FULL `[(nx+nw), (nx+nw)]` matrix over the
+    CONCATENATED row-major-flat input (blocks `[[H_xx, H_xw], [H_wx,
+    H_ww]]`): one matrix rather than a Quadruple of blocks because it
+    erases to the same `DTensor<Rank2<Sym, Sym>, F32>` as `hessian` —
+    `hessian2(f)(x, w) == hessian(g)(x ++ w)` by construction — and block
+    extents are runtime quantities under sentinels anyway. Its seeded pass
+    is forward-over-reverse of the TWO-return `grad2` body,
+    `hvp2(x, w, dx, dw) → (H_xx·dx + H_xw·dw, H_wx·dx + H_ww·dw)`, boxed
+    `Pair<A, B>` exactly as synthesis boxes any 2-return function;
+    `assembleHessian2Forward` writes exact full COLUMNS (no symmetry
+    assumption), `nx + nw` passes total.
+  - **Plugin**: the vjp branch's param rotation (`drop(1) + first()`) was
+    already arity-agnostic — only the gate changed (2 primals for the "2"
+    spellings; the call site's own type is again the seeded function's
+    type, so no `callTypeOverride`). The assembly branch generalises its
+    gate, harvests `(A, B)` from the call type's first two args and `R`
+    from the `f` argument, and builds `Function4<A, B, A, B, seedRet>` as
+    the override (`seedRet` = `R` for `jacobian2`, `Pair<A, B>` for
+    `hessian2`). Checker probes match the real lowering: `jacobian2`
+    forward, `hessian2` forward∘reverse, `vjp2`/`valueAndVjp2` seeded
+    reverse. No tape fallback (the `concat` precedent).
+  - Certified E2E (`MultiArgSeededIntrinsicTest`, the §0.4.394 pattern —
+    real plugin, REAL generic `:autograd` declarations, no stubs, "kept
+    original call" a hard failure): `vjp2` over `Σ(a⊙b)` at scalar ȳ = 2
+    AND the grad2-consistency identity at ȳ = 1; TENSOR-R `vjp2` over
+    `a⊙b` at NON-UNIFORM ȳ (x̄ = b⊙ȳ, w̄ = a⊙ȳ); the JVP⇄VJP inner-product
+    identity over BOTH slots (⟨ȳ, jvp2(a,b,va,vb)⟩ == ⟨ā,va⟩ + ⟨b̄,vb⟩,
+    both sides 2.75 numerically); `valueAndVjp2`'s true primal;
+    `jacobian2` over `a⊙b` (J_a = diag(b), J_b = diag(a)), a scalar body
+    (the two `[1, n]` rows), and a RECTANGULAR `a·Σb` (na=2, nb=3 — the
+    per-input column indexing pin); `hessian2` over `Σ(a⊙b)`
+    ([[0, I], [I, 0]]), `Σ(a⊙a⊙b)` (value-DEPENDENT H_aa = diag(2b),
+    H_ab = diag(2a)), and a rectangular `Σa·Σb` (5×5 block layout with
+    unequal extents). The concatenated-input cross-check against 1-arg
+    `hessian` stayed analytic (a user-code `slice`-based `g(z)` would ride
+    forward-over-PAD_LIKE — untested composition, not worth coupling this
+    cert to); the block-layout equality is pinned by construction of the
+    convention plus the rectangular analytic case.
+  - v1 scope matches the 1-arg forms: straight-line bodies, host F32,
+    2 arguments (3+ args would need `Function6`+ overrides and
+    `assemble*3Forward` helpers — same pattern, more params). Still open
+    in B2's neighbourhood: reverse-assembled (tall) Jacobians for m ≪ n.
 - **B4 enabler. The runtime-extent family closes under differentiation ✅
   (§0.4.399)** — VjpRules for SUM_TO and PAD_TO via their runtime-extent
   mirrors, closing §0.4.373's "2nd-order through in-place broadcast" deferral.
