@@ -4,6 +4,9 @@ import io.tlaloc.core.DScalar
 import io.tlaloc.core.DoubleScalar
 import io.tlaloc.core.FloatScalar
 import io.tlaloc.core.Rank2
+import io.tlaloc.core.digamma
+import io.tlaloc.core.lgamma
+import io.tlaloc.core.trigamma
 import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
 import io.tlaloc.core.hostF32
@@ -80,6 +83,32 @@ class HostOpsTest {
             assertEquals(a.hostF32()[i], roundTrip[i], 1e-5f, "atan(tan(x)) slot $i")
         }
         assertContentEquals(intArrayOf(1, 4), a.tan().dims)
+    }
+
+    @Test
+    fun lgammaDigammaTrigammaElementwise() {
+        // §0.4.402 — Phase C1 special functions: the tensor surface routes
+        // through the shared Double kernels in :core/SpecialFunctions.kt.
+        // Pins: lgamma(0.5) = ln √π, lgamma(1) = 0, ψ(1) = −γ, ψ₁(1) = π²/6.
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(0.5f, 1.0f, 2.5f, 4.0f))
+        val lg = a.lgamma().hostF32()
+        val dg = a.digamma().hostF32()
+        val tg = a.trigamma().hostF32()
+        assertEquals(0.5723649f, lg[0], 1e-6f, "lgamma(0.5) = ln √π")
+        assertEquals(0f, lg[1], 1e-7f, "lgamma(1)")
+        assertEquals(1.7917595f, lg[3], 1e-6f, "lgamma(4) = ln 6")
+        assertEquals(-0.5772157f, dg[1], 1e-6f, "ψ(1) = −γ")
+        assertEquals(-1.9635100f, dg[0], 1e-6f, "ψ(0.5) = −γ − 2 ln 2")
+        assertEquals(1.6449341f, tg[1], 1e-6f, "ψ₁(1) = π²/6")
+        assertEquals(4.9348022f, tg[0], 1e-6f, "ψ₁(0.5) = π²/2")
+        // Elementwise agreement with the scalar kernels on the remaining slots.
+        for (i in 0 until 4) {
+            val x = a.hostF32()[i].toDouble()
+            assertEquals(x.lgamma().toFloat(), lg[i], 1e-7f, "lgamma slot $i")
+            assertEquals(x.digamma().toFloat(), dg[i], 1e-7f, "digamma slot $i")
+            assertEquals(x.trigamma().toFloat(), tg[i], 1e-7f, "trigamma slot $i")
+        }
+        assertContentEquals(intArrayOf(1, 4), a.lgamma().dims)
     }
 
     @Test

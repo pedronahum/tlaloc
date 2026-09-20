@@ -11,8 +11,11 @@ import io.tlaloc.core.Rank2
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
+import io.tlaloc.core.digamma
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.hostI32
+import io.tlaloc.core.lgamma
+import io.tlaloc.core.trigamma
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -342,6 +345,21 @@ fun <S : Shape> DTensor<S, F32>.tan(): DTensor<S, F32> =
 
 fun <S : Shape> DTensor<S, F32>.atan(): DTensor<S, F32> =
     unary { x -> kotlin.math.atan(x.toDouble()).toFloat() }
+
+// §0.4.402 — Phase C1 special functions (DiffKT parity: its Dirichlet example
+// depends on these). Evaluation routes through the shared Double kernels in
+// `:core/SpecialFunctions.kt` (Lanczos g=7 lgamma; recurrence-to-asymptotic
+// digamma/trigamma) — the same functions the interpreter's LGAMMA/DIGAMMA/
+// TRIGAMMA arms call, so host and interpreter agree bit-for-bit. `trigamma`
+// is gradient machinery (∇ digamma bodies call it), not user parity surface.
+fun <S : Shape> DTensor<S, F32>.lgamma(): DTensor<S, F32> =
+    unary { x -> x.toDouble().lgamma().toFloat() }
+
+fun <S : Shape> DTensor<S, F32>.digamma(): DTensor<S, F32> =
+    unary { x -> x.toDouble().digamma().toFloat() }
+
+fun <S : Shape> DTensor<S, F32>.trigamma(): DTensor<S, F32> =
+    unary { x -> x.toDouble().trigamma().toFloat() }
 
 /**
  * Phase A5b (DiffKT parity) — elementwise power. POW has been fully ruled below

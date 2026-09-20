@@ -310,6 +310,19 @@ object DxirForwardTransform {
                 val denom = b.op(OpKind.ADD, listOf(one(ty), x2), ty)
                 b.op(OpKind.DIV, listOf(t(node.operands[0]), denom), ty)
             }
+            // §0.4.402 — Phase C1 special functions: d lgamma = ψ(x)·dx,
+            // d digamma = ψ₁(x)·dx — both read the primal OPERAND stream (the
+            // derivative is a different special function, never recoverable from
+            // the value stream). TRIGAMMA deliberately has NO tangent arm: its
+            // derivative is polygamma(2), out of C1's scope, so a TRIGAMMA in a
+            // forward-differentiated body hits the loud refusal below (pinned in
+            // DxirLgammaDigammaGradTest).
+            OpKind.LGAMMA -> b.op(
+                OpKind.MUL, listOf(b.op(OpKind.DIGAMMA, listOf(vOps[0]), ty), t(node.operands[0])), ty,
+            )
+            OpKind.DIGAMMA -> b.op(
+                OpKind.MUL, listOf(b.op(OpKind.TRIGAMMA, listOf(vOps[0]), ty), t(node.operands[0])), ty,
+            )
             OpKind.ABS -> b.op(
                 OpKind.MUL, listOf(b.op(OpKind.SIGN, listOf(vOps[0]), ty), t(node.operands[0])), ty,
             )

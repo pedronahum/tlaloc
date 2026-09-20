@@ -24,6 +24,18 @@ enum class OpKind {
     // `stablehlo.atan2(x, splat 1.0)`.
     TAN, ATAN,
 
+    // §0.4.402 — Phase C1 special functions (DiffKT parity; its Dirichlet example
+    // depends on lgamma/digamma). LGAMMA = ln|Γ(x)|, DIGAMMA = ψ(x) = (ln Γ)′,
+    // TRIGAMMA = ψ₁(x) = ψ′(x). Gradients: `d lgamma = digamma`, `d digamma =
+    // trigamma`; TRIGAMMA is INTERNAL gradient machinery only (no FIR entry, no
+    // VjpRule — its derivative is polygamma(2), out of C1's scope, and the
+    // refusal is pinned loud). Host/interpreter evaluate through the shared
+    // Double kernels in `:core/SpecialFunctions.kt` (Lanczos g=7;
+    // recurrence-to-asymptotic series). Lowered to `chlo.lgamma`,
+    // `chlo.digamma`, and `chlo.polygamma(splat 1.0, x)` — the GB10's XLA
+    // parses + legalizes CHLO (certified in PjrtLgammaDigammaSmokeTest).
+    LGAMMA, DIGAMMA, TRIGAMMA,
+
     // §0.4.204 — Elementwise sign function. Returns 1 / -1 / 0 for x>0 / x<0 / x=0.
     // Added for the CartPole NN port: the policy output is `a = sign(tanh(...) - ε)`
     // which discretises the action to {-1, +1}. Gradient is identically 0 (the

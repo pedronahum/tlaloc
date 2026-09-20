@@ -197,6 +197,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
             OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
+            OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             // §0.4.368 — SOFTMAX is shape-preserving too (its output IrType
             // equals its operand's), so it forward-propagates like the unary
@@ -415,6 +416,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
             OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
+            OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             // §0.4.396 — REVERSE is shape-preserving at any rank.
             OpKind.SOFTMAX, OpKind.REVERSE,
@@ -948,6 +950,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     OpKind.STEP, OpKind.RELU, OpKind.NEG,
                     OpKind.SQRT, OpKind.EXP, OpKind.LOG,
                     OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
+                    OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA,
                     OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
                     OpKind.SOFTMAX, OpKind.REVERSE -> {
                         if (n.operands.size != 1) continue
@@ -1459,6 +1462,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // §0.4.395 — Phase C2 trig tails (tensor via :core/ops, scalar via kotlin.math).
         if (op.op == OpKind.TAN) return irTan(op, env, context)
         if (op.op == OpKind.ATAN) return irAtan(op, env, context)
+        // §0.4.402 — Phase C1 special functions (tensor via :core/ops, scalar via
+        // the io.tlaloc.core extensions — no kotlin.math equivalent exists).
+        if (op.op == OpKind.LGAMMA) return irSpecialUnary(op, env, context, "lgamma")
+        if (op.op == OpKind.DIGAMMA) return irSpecialUnary(op, env, context, "digamma")
+        if (op.op == OpKind.TRIGAMMA) return irSpecialUnary(op, env, context, "trigamma")
         if (op.op == OpKind.ABS) return irAbs(op, env, context)
         if (op.op == OpKind.CAST) return irCast(op, env, context)
         if (op.op == OpKind.COMPARE) return irCompare(op, env, context)
@@ -3946,6 +3954,27 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return tensorUnaryCall(op, env, context, opsTensorSymbol("tan"))
         }
         return irUnaryMathCall(op, env, context, Name.identifier("tan"))
+    }
+
+    /**
+     * §0.4.402 — Phase C1 special functions: `OpKind.LGAMMA` / `DIGAMMA` /
+     * `TRIGAMMA`. Tensor operands dispatch to the `:core/ops` extension of the
+     * same [name]; scalars to the `io.tlaloc.core` five-overload extension via
+     * [irCoreScalarCall] (the §0.4.377 sigmoid path — none of these has a
+     * `kotlin.math` equivalent). TRIGAMMA reaches here only from gradient
+     * bodies: DIGAMMA's adjoint/tangent emit it, and it has no FIR entry.
+     */
+    private fun IrBuilderWithScope.irSpecialUnary(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+        name: String,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            return tensorUnaryCall(op, env, context, opsTensorSymbol(name))
+        }
+        return irCoreScalarCall(op, env, context, name)
     }
 
     /** §0.4.395 — `OpKind.ATAN(x)`. Companion to [irTan]; `kotlin.math.atan` exists. */

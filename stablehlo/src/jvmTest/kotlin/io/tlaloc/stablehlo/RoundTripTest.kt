@@ -258,6 +258,13 @@ class RoundTripTest {
             // §0.4.395 — TAN round-trips as `stablehlo.tan`; ATAN as the
             // constant + `stablehlo.atan2` pair.
             OpKind.TAN, OpKind.ATAN,
+            // §0.4.402 — LGAMMA / DIGAMMA / TRIGAMMA are deliberately EXCLUDED:
+            // they emit CHLO ops (`chlo.lgamma` / `chlo.digamma` /
+            // `chlo.polygamma`), and `stablehlo-translate --serialize` targets
+            // VHLO, which covers the stablehlo dialect only — CHLO is a
+            // decomposition input, not a serialization citizen. Their live
+            // oracle is PjrtLgammaDigammaSmokeTest on the GB10 (the real XLA
+            // parser + CHLO legalization), plus the EmitterTest text pins.
         )
         for (op in unaries) {
             val fn = DxirBuilder.function("f") {

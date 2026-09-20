@@ -1167,10 +1167,56 @@ reachable from `grad {}`, not new math. New-op families come after.
 
 ### Phase C — op families DiffKT has that the IR lacks
 
-- **C1. Special functions**: `LGAMMA`, `DIGAMMA`, `POLYGAMMA` (DiffKT ships
-  these; its Dirichlet example depends on them). Host: Lanczos/series impls;
-  emitter: `chlo.lgamma`/`chlo.digamma`; VJPs: `d lgamma = digamma`,
-  `d digamma = polygamma(1)`, `d polygamma(n) = polygamma(n+1)`.
+- ✅ **C1. Special functions — DONE (§0.4.402)**: `LGAMMA` and `DIGAMMA`,
+  tensor and scalar, full vertical; `TRIGAMMA` (= polygamma(1)) landed as an
+  INTERNAL op — DIGAMMA's adjoint/tangent emit it — with general
+  `POLYGAMMA(n)` deliberately out of scope (see deferred tail).
+  - Host: pure-Kotlin Double kernels in `:core/SpecialFunctions.kt` — Lanczos
+    g=7/n=9 lgamma with reflection below 0.5, digamma/trigamma by
+    recurrence-shift past 8 + Bernoulli asymptotic series, reflection on the
+    negative axis, exact floor-test pole detection. ONE source of truth:
+    `:ir` depends on `:core`, so the interpreter arms, the tensor host ops
+    and the five-overload scalar sets all call the same three functions —
+    host/interpreter agreement is by construction. Validated to ~1e-11
+    absolute against hand-pinned references (ψ(1)=−γ, ψ(0.5)=−γ−2ln2,
+    lgamma(0.5)=ln√π, ψ₁(1)=π²/6, the Γ/ψ/ψ₁ recurrences, reflection) and by
+    the derivative-chain central-difference oracle (lgamma′≡ψ, ψ′≡ψ₁).
+  - IR: three OpKinds; VjpRules LgammaRule `MUL(DIGAMMA(x), up)` and
+    DigammaRule `MUL(TRIGAMMA(x), up)` — fresh special-function node over the
+    cloned operand, values-only, sentinel-safe by construction; forward
+    tangents mirror them. TRIGAMMA REFUSES both transforms loudly by name
+    (pinned) — its derivative is polygamma(2), out of scope.
+  - Emitter: **the first CHLO emissions** — `chlo.lgamma %x : t -> t`,
+    `chlo.digamma`, and `"chlo.polygamma"(splat 1.0, x)` for TRIGAMMA. A
+    pre-wiring spike proved the GB10's XLA PJRT parses + legalizes CHLO
+    (values matched references to f32), so no refusal arm was needed;
+    `PjrtLgammaDigammaSmokeTest` certifies forwards + both gradient graphs on
+    the GPU (grads within 1e-5 of the interpreter). EmitterTest pins all
+    three spellings; lgamma+digamma losses joined
+    `GradientEmissionCoverageTest`'s sweep (the digamma loss covers the
+    polygamma emission). RoundTripTest EXCLUDES all three with the reason
+    pinned: `stablehlo-translate --serialize` targets VHLO, which does not
+    cover CHLO — the PJRT smoke is their live oracle.
+  - User surface: `:core/ops` tensor `lgamma()`/`digamma()` (+ `trigamma()`
+    as public gradient machinery — synthesised gradient bodies call it);
+    five-overload scalar sets; FIR `UNARY_OP_MAP` entries for
+    `io.tlaloc.core.{lgamma,digamma}` + `io.tlaloc.core.ops.{lgamma,digamma}`
+    (NO trigamma entry, NO `kotlin.math` spelling — none exists). Synthesis:
+    one `irSpecialUnary` arm — tensor via `opsTensorSymbol`, scalar via the
+    §0.4.377 `irCoreScalarCall` path (the first ops after sigmoid to need
+    it); all three kinds in the three IrType-solver unary lists.
+  - Certified: IR analytic pins with non-uniform upstream (`∇ₓ Σ lgamma(x)⊙w
+    = w⊙ψ(x)`, digamma twin), JVP⇄VJP cross-identity through
+    `Σ lgamma(digamma(x⊙w))` (both rules + TRIGAMMA chained), f32
+    central-difference cross-check through the interpreter; E2E `grad {}` ×4
+    (scalar lgamma/digamma — the digamma one pins that TRIGAMMA synthesises
+    despite having no FIR entry — and the tensor twins, no tape fallback);
+    host pins; GPU smoke.
+  - Deferred tail: general `POLYGAMMA(n)` (needs a polygamma(n) host kernel
+    family + `d polygamma(n) = polygamma(n+1)`; DiffKT's own examples use
+    only ψ and ψ₁, so parity pressure is low), and with it TRIGAMMA's own
+    VjpRule (second-order reverse through DIGAMMA — today it refuses loudly,
+    pinned in DxirLgammaDigammaGradTest).
 - **C2. Trig tails** ✅ **DONE, §0.4.395 (2026-09-20)**: `TAN` and `ATAN`,
   tensor AND scalar, full vertical — audit confirmed these are the only
   ones DiffKT has (no floor/ceil/round/atan2; those stay optional extras,
@@ -1298,7 +1344,9 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 `kotlin.math.pow` map entry) · `tan atan` ✅ C2 (§0.4.395 — five-overload
 scalar sets + `kotlin.math.tan`/`atan` map entries with the no-receiver
 argument fallback) ·
-`lgamma digamma polygamma` ❌ (C1) · `sigmoid(DScalar)` ✅ (same A5b).
+`lgamma digamma` ✅ C1 (§0.4.402 — five-overload scalar sets via the
+`irCoreScalarCall` path; `trigamma` public but internal-only, general
+`polygamma(n)` deferred) · `sigmoid(DScalar)` ✅ (same A5b).
 
 #### Tensor ops (top-level files + `Operations` interface)
 
@@ -1309,7 +1357,7 @@ argument fallback) ·
 | `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 tensor⊗tensor; §0.4.397 Float-scalar rhs (`a gt 1.0f` + computed rank-0) E2E through `grad {}` |
 | `relu reluGrad sigmoid tanh exp ln sqrt abs` (tensor) | ✅ | `reluGrad` is public in DiffKT; ours is internal — fine |
 | `sin cos tan atan` (tensor) | ✅ | sin/cos ✅; tan/atan ✅ C2 (§0.4.395 — full vertical incl. `stablehlo.tan` / `atan2(x, 1)` emission certified on the GB10; audit: **no** floor/ceil/round/atan2 in DiffKT — those stay ours-optional) |
-| `lgamma digamma polygamma` (tensor) | ❌ | C1 (Dirichlet example + gamma reparam depend on them) |
+| `lgamma digamma polygamma` (tensor) | ✅ | C1 (§0.4.402 — lgamma/digamma full vertical incl. the first CHLO emissions, GB10-certified; trigamma internal for DIGAMMA's adjoint; general polygamma(n) deferred) |
 | `sum()` full-reduce | ✅ | |
 | `sum(axes, keepDims)` | 🟡 | `reduction_dims` IR exists → A1 |
 | `mean()` | 🟡 | dispatch arm exists but **no map entry** — not reachable → A1 |
@@ -1343,7 +1391,7 @@ argument fallback) ·
 raw-op `gamma(alpha, randomKey)` participates in AD), `DiffktRandom`
 wrapper, `Wrapper.wrapRandomKey`. All ❌ → Phase D (D1 key+uniform+
 gaussian; D2 reparam; cauchy/chiSquare are inverse-CDF sugar over
-uniform; gamma reparam needs C1's digamma).
+uniform; gamma reparam needs C1's digamma — landed, §0.4.402).
 
 #### Sparse (`SparseFloatTensor` / `SparseRowFloatTensor`)
 

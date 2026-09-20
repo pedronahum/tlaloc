@@ -79,6 +79,14 @@ class GradientEmissionCoverageTest {
         // spelling never appears in the ADJOINT — only the primal emits it).
         unaryLoss("tan", OpKind.TAN, listOf(2, 3)),
         unaryLoss("atan", OpKind.ATAN, listOf(2, 3)),
+        // §0.4.402 — Phase C1 special functions: LgammaRule's adjoint emits a
+        // DIGAMMA (the `chlo.digamma` arm) and DigammaRule's a TRIGAMMA — so the
+        // digamma loss is also the `chlo.polygamma` emission's sweep coverage.
+        // The sweep's pseudo-random probes land in (−0.46, 0.46) with no exact
+        // integer, so the self-validation interpretation stays off the poles
+        // (reflection covers the negative values).
+        unaryLoss("lgamma", OpKind.LGAMMA, listOf(2, 3)),
+        unaryLoss("digamma", OpKind.DIGAMMA, listOf(2, 3)),
         unaryLoss("sqrt", OpKind.SQRT, listOf(2, 3)),
         unaryLoss("sign", OpKind.SIGN, listOf(2, 3)),
         // RELU is in the catalogue even though the INTERPRETER has no arm for it

@@ -2487,6 +2487,14 @@ object FirLambdaToDxirLowering {
         put("io.tlaloc.core.atan", OpKind.ATAN)
         put("kotlin.math.tan", OpKind.TAN)
         put("kotlin.math.atan", OpKind.ATAN)
+        // §0.4.402 — Phase C1 special functions: the SCALAR lgamma / digamma
+        // surface (`x.lgamma()`, the receiver spelling — no `kotlin.math`
+        // equivalent exists for either). TRIGAMMA deliberately has NO entry:
+        // it is internal gradient machinery (DIGAMMA's adjoint emits it), and
+        // mapping it would promise a differentiable surface whose own VjpRule
+        // (polygamma(2)) is out of C1's scope.
+        put("io.tlaloc.core.lgamma", OpKind.LGAMMA)
+        put("io.tlaloc.core.digamma", OpKind.DIGAMMA)
         // :core DTensor shape-preserving unary ops (io.tlaloc.core.ops package).
         put("io.tlaloc.core.ops.relu", OpKind.RELU)
         put("io.tlaloc.core.ops.neg", OpKind.NEG)
@@ -2496,6 +2504,9 @@ object FirLambdaToDxirLowering {
         // §0.4.395 — the TENSOR tan / atan spellings (:core/ops/HostOps.kt).
         put("io.tlaloc.core.ops.tan", OpKind.TAN)
         put("io.tlaloc.core.ops.atan", OpKind.ATAN)
+        // §0.4.402 — the TENSOR lgamma / digamma spellings (:core/ops/HostOps.kt).
+        put("io.tlaloc.core.ops.lgamma", OpKind.LGAMMA)
+        put("io.tlaloc.core.ops.digamma", OpKind.DIGAMMA)
         put("io.tlaloc.core.ops.exp", OpKind.EXP)
         put("io.tlaloc.core.ops.log", OpKind.LOG)
         put("io.tlaloc.core.ops.sqrt", OpKind.SQRT)

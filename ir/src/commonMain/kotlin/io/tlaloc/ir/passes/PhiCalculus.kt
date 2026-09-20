@@ -88,6 +88,7 @@ object PhiCalculus {
         OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT,
         OpKind.TANH, OpKind.SIGMOID, OpKind.RELU, OpKind.GELU, OpKind.SILU,
         OpKind.TAN, OpKind.ATAN,
+        OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA,
         OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW,
     )
 

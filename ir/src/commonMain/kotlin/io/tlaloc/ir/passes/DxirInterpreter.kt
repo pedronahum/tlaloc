@@ -9,6 +9,9 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirOpResult
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.DxirType
+import io.tlaloc.core.digamma
+import io.tlaloc.core.lgamma
+import io.tlaloc.core.trigamma
 import io.tlaloc.ir.OpKind
 import kotlin.math.pow
 
@@ -373,6 +376,22 @@ object DxirInterpreter {
                 // §0.4.395 — element-wise arctangent (Phase C2), range (−π/2, π/2).
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { kotlin.math.atan(a[it].toDouble()).toFloat() }
+            }
+            // §0.4.402 — Phase C1 special functions, through the shared Double
+            // kernels in `:core/SpecialFunctions.kt` (Lanczos g=7 lgamma;
+            // recurrence-to-asymptotic digamma/trigamma) — bit-for-bit the
+            // tensor host ops, which call the same functions.
+            OpKind.LGAMMA -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { a[it].toDouble().lgamma().toFloat() }
+            }
+            OpKind.DIGAMMA -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { a[it].toDouble().digamma().toFloat() }
+            }
+            OpKind.TRIGAMMA -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { a[it].toDouble().trigamma().toFloat() }
             }
             OpKind.SQRT -> {
                 // Element-wise square root. `kotlin.math.sqrt` returns NaN for negative

@@ -1177,6 +1177,41 @@ object VjpRegistry {
     }
 
     /**
+     * `d/dx(lgamma(x)) = ψ(x)` (digamma). §0.4.402 — Phase C1 special functions.
+     * The adjoint is a fresh DIGAMMA over the cloned primal operand — a
+     * different special function, so unlike TanhRule there is nothing to
+     * recompute from the primal's own value stream; it reads only the operand's
+     * VALUES, never its extents, so the rule is sentinel-safe by construction.
+     */
+    val LgammaRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val psi = builder.op(OpKind.DIGAMMA, listOf(x), x.type)
+            val dx = builder.op(OpKind.MUL, listOf(upstream, psi), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
+     * `d/dx(digamma(x)) = ψ₁(x)` (trigamma). §0.4.402 — companion to
+     * [LgammaRule]; TRIGAMMA is the internal op this rule exists to emit.
+     * TRIGAMMA itself deliberately has NO VjpRule (its derivative is
+     * polygamma(2), out of C1's scope) — second-order reverse through DIGAMMA
+     * fails loudly with "no VJP rule registered for TRIGAMMA", pinned in
+     * DxirLgammaDigammaGradTest.
+     */
+    val DigammaRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val psi1 = builder.op(OpKind.TRIGAMMA, listOf(x), x.type)
+            val dx = builder.op(OpKind.MUL, listOf(upstream, psi1), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
      * `d/dx(sqrt(x)) = 1 / (2 · sqrt(x))`. For `x = 0` the adjoint is infinite (divide
      * by zero); follows IEEE semantics in the interpreter. Avoid this on primals where
      * `x` can reach zero at the differentiation point.
@@ -1662,6 +1697,10 @@ object VjpRegistry {
         OpKind.COS to CosRule,
         OpKind.TAN to TanRule,
         OpKind.ATAN to AtanRule,
+        // §0.4.402 — Phase C1 special functions. TRIGAMMA is deliberately
+        // ABSENT: no rule (d trigamma = polygamma(2), out of C1's scope).
+        OpKind.LGAMMA to LgammaRule,
+        OpKind.DIGAMMA to DigammaRule,
         OpKind.SIGN to SignRule,
         OpKind.SQRT to SqrtRule,
         OpKind.TANH to TanhRule,

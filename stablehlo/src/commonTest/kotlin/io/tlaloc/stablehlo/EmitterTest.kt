@@ -330,6 +330,34 @@ class EmitterTest {
     }
 
     @Test
+    fun lgammaDigammaTrigammaEmitPinnedChloSpellings() {
+        // §0.4.402 — Phase C1 special functions lower through the CHLO dialect
+        // (StableHLO has none of them; XLA's PJRT compile path parses +
+        // legalizes CHLO — smoke-certified on the GB10). LGAMMA/DIGAMMA pin the
+        // unary-elementwise pretty form `chlo.op %x : t -> t`; TRIGAMMA pins
+        // `chlo.polygamma(splat 1.0, x)` in generic MLIR form, the spelling the
+        // smoke test certified.
+        val t = DxirType(F32, listOf(4))
+        val lg = singleUnary(OpKind.LGAMMA, t)
+        assertTrue(
+            lg.contains("chlo.lgamma %0 : tensor<4xf32> -> tensor<4xf32>"),
+            "expected the CHLO lgamma spelling: $lg",
+        )
+        val dg = singleUnary(OpKind.DIGAMMA, t)
+        assertTrue(
+            dg.contains("chlo.digamma %0 : tensor<4xf32> -> tensor<4xf32>"),
+            "expected the CHLO digamma spelling: $dg",
+        )
+        val tg = singleUnary(OpKind.TRIGAMMA, t)
+        assertTrue(tg.contains("dense<1.0>"), "missing the polygamma order-1 splat: $tg")
+        assertTrue(
+            Regex("\"chlo\\.polygamma\"\\(%s\\d+, %0\\) : \\(tensor<4xf32>, tensor<4xf32>\\) -> tensor<4xf32>")
+                .containsMatchIn(tg),
+            "expected trigamma to lower as chlo.polygamma(1, x): $tg",
+        )
+    }
+
+    @Test
     fun reverseEmitsPinnedSpelling() {
         // §0.4.396 — REVERSE (flip) pins to `stablehlo.reverse` with the
         // literal `dims` list; shape-preserving, so operand and result types

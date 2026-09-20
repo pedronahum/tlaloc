@@ -136,6 +136,16 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // line since atan2(y, 1) ≡ atan(y).
             OpKind.TAN -> unary(step, name, "stablehlo.tan", ops[0], outType)
             OpKind.ATAN -> emitAtan(step, name, ops[0], node.type)
+            // §0.4.402 — Phase C1 special functions, through the CHLO dialect:
+            // StableHLO has no lgamma/digamma but its sibling CHLO does, and the
+            // XLA PJRT compile path parses + legalizes CHLO (the same route JAX
+            // uses; certified against the GB10 in PjrtLgammaDigammaSmokeTest).
+            // CHLO unary elementwise assembly is `chlo.op %x : t -> t`. TRIGAMMA
+            // has no dedicated CHLO op and emits as `chlo.polygamma(splat 1.0, x)`
+            // — generic MLIR form, since only that spelling is smoke-certified.
+            OpKind.LGAMMA -> chloUnary(step, name, "chlo.lgamma", ops[0], outType)
+            OpKind.DIGAMMA -> chloUnary(step, name, "chlo.digamma", ops[0], outType)
+            OpKind.TRIGAMMA -> emitTrigamma(step, name, ops[0], node.type)
             OpKind.SQRT -> unary(step, name, "stablehlo.sqrt", ops[0], outType)
             OpKind.RSQRT -> unary(step, name, "stablehlo.rsqrt", ops[0], outType)
             OpKind.TANH -> unary(step, name, "stablehlo.tanh", ops[0], outType)
@@ -478,6 +488,22 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 "(${operandType.toMlir()}) -> ${resultType.toMlir()}",
         )
         return bcast
+    }
+
+    /** §0.4.402 — CHLO unary elementwise assembly carries both types: `chlo.op %x : t -> t`. */
+    private fun chloUnary(step: String, name: String, op: String, x: String, type: String) {
+        out.appendLine("$step$name = $op $x : $type -> $type")
+    }
+
+    private fun emitTrigamma(step: String, name: String, x: String, type: DxirType) {
+        // §0.4.402 — ψ₁(x) = polygamma(1, x). CHLO's polygamma takes the order n
+        // as a float TENSOR operand (n, x) — a splat 1.0 pins trigamma. Emitted
+        // in generic MLIR form ("chlo.polygamma"(...)), the spelling the GB10's
+        // XLA parser is smoke-certified to accept.
+        val one = synth()
+        val t = type.toMlir()
+        out.appendLine("$step$one = stablehlo.constant dense<1.0> : $t")
+        out.appendLine("$step$name = \"chlo.polygamma\"($one, $x) : ($t, $t) -> $t")
     }
 
     private fun emitAtan(step: String, name: String, x: String, type: DxirType) {

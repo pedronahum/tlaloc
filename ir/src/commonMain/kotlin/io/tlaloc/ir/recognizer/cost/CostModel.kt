@@ -150,6 +150,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // §0.4.395 — TAN ≈ sin/cos + divide; ATAN's polynomial approximation lands in
     // the same transcendental bucket.
     OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN -> 8.0 * op.type.elementCount.toDouble()
+    // §0.4.402 — the special functions are heavier than the trig bucket: the
+    // Lanczos lgamma is ~a dozen divides + two logs; digamma/trigamma pay a
+    // recurrence walk plus the asymptotic series.
+    OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA -> 24.0 * op.type.elementCount.toDouble()
 
     // Reductions over an axis (or all): N − 1 ≈ N adds per reduced
     // element.
