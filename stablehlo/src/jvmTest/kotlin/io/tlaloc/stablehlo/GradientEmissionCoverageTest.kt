@@ -150,6 +150,32 @@ class GradientEmissionCoverageTest {
         // §0.4.396 — REVERSE (flip): the self-adjoint VJP emits a second
         // `stablehlo.reverse` with the same literal axes.
         unaryLoss("flip", OpKind.REVERSE, listOf(2, 3), attrs = mapOf("dimensions" to listOf(0, 1))),
+        // §0.4.399 — the runtime-extent family: each op's adjoint is its mirror
+        // (SUM_TO ⇄ BROADCAST_LIKE, PAD_TO ⇄ SLICE_AT), so these four cases
+        // certify that a SECOND-ORDER reverse body — one containing the ops a
+        // first reverse pass emits — both differentiates and emits.
+        squaredSumLoss(
+            "sum_to", listOf("v" to r2, "t" to DxirType(F32, listOf(1, 3))), DxirType(F32, listOf(1, 3)),
+        ) { ps -> op(OpKind.SUM_TO, listOf(ps[0], ps[1]), DxirType(F32, listOf(1, 3))) },
+        squaredSumLoss(
+            "broadcast_like", listOf("u" to DxirType(F32, listOf(1, 3)), "t" to r2), r2,
+        ) { ps -> op(OpKind.BROADCAST_LIKE, listOf(ps[0], ps[1]), r2) },
+        squaredSumLoss(
+            "pad_to", listOf("u" to DxirType(F32, listOf(2)), "t" to DxirType(F32, listOf(4))), DxirType(F32, listOf(4)),
+        ) { ps ->
+            op(
+                OpKind.PAD_TO, listOf(ps[0], ps[1]), DxirType(F32, listOf(4)),
+                attrs = mapOf("low" to listOf(1)),
+            )
+        },
+        squaredSumLoss(
+            "slice_at", listOf("v" to DxirType(F32, listOf(4)), "t" to DxirType(F32, listOf(2))), DxirType(F32, listOf(2)),
+        ) { ps ->
+            op(
+                OpKind.SLICE_AT, listOf(ps[0], ps[1]), DxirType(F32, listOf(2)),
+                attrs = mapOf("low" to listOf(1)),
+            )
+        },
         // Masking.
         squaredSumLoss(
             "where_compare", listOf("x" to r2), r2,

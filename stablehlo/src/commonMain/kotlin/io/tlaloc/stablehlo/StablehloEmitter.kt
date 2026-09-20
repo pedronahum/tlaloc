@@ -191,11 +191,19 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.SUM_TO -> emitSumTo(
                 step, name, ops[0], node.operands[0].type, node.operands[1].type,
             )
+            // §0.4.399 — BROADCAST_LIKE (broadcast-to-template): SUM_TO's forward
+            // twin and VJP. Emit-time dims are concrete, so it folds to a static
+            // broadcast_in_dim; the template's SSA value goes unreferenced.
+            OpKind.BROADCAST_LIKE -> emitBroadcastLike(step, name, ops[0], node)
             // §0.4.374 — PAD_TO (zero-pad to template): the SLICE adjoint. `high`
             // derived from the concrete template (operand[1] == node.type) dims.
             OpKind.PAD_TO -> emitPadTo(
                 step, name, ops[0], node, node.operands[0].type,
             )
+            // §0.4.399 — SLICE_AT (window at a literal offset): PAD_TO's reverse
+            // mirror and VJP. The bounds fold to literals at emit time; the
+            // template's SSA value goes unreferenced.
+            OpKind.SLICE_AT -> emitSliceAt(step, name, ops[0], node)
             // Phase A2b — SLICE_LIKE (CONCAT's adjoint): extract the window whose
             // start is the sum of the prior templates' axis extents and whose length
             // is `thisTemplate`'s. At emit time every dim is concrete, so the bounds
@@ -2915,6 +2923,72 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             "$step$name = stablehlo.slice $x [" +
                 inputType.dims.indices.joinToString(", ") { i ->
                     if (i == axis) "$start:${start + len}" else "0:${inputType.dims[i]}"
+                } +
+                "] : (${inputType.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * §0.4.399 — `BROADCAST_LIKE(value, template)`, SUM_TO's forward twin and
+     * VJP: broadcast `value` up to the template's shape under NumPy
+     * right-alignment. Emit-time dims are always concrete, so it folds to a
+     * static `stablehlo.broadcast_in_dim` with the identity right-aligned axis
+     * map (value axis j → output axis `offset + j`) — the template's SSA value
+     * goes unreferenced (it exists for the host path's runtime extents),
+     * MLIR-legal and DCE'd downstream, the SLICE_LIKE precedent.
+     */
+    private fun emitBroadcastLike(
+        step: String,
+        name: String,
+        x: String,
+        node: DxirOp,
+    ) {
+        val u = node.operands[0].type.dims
+        val t = node.type.dims
+        val ru = u.size
+        val rt = t.size
+        require(ru <= rt) { "BROADCAST_LIKE value rank $ru exceeds template rank $rt" }
+        val offset = rt - ru
+        for (i in 0 until ru) {
+            require(u[i] == t[offset + i] || u[i] == 1) {
+                "BROADCAST_LIKE value dim $i = ${u[i]} incompatible with template axis ${offset + i} = ${t[offset + i]}"
+            }
+        }
+        val dims = (0 until ru).map { it + offset }
+        out.appendLine(
+            "$step$name = stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] " +
+                ": (${node.operands[0].type.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * §0.4.399 — `SLICE_AT(value, template)` + attr `low`, PAD_TO's reverse
+     * mirror and VJP: the window of the template's shape at literal offset
+     * `low` per axis. Emit-time dims are always concrete, so the bounds fold to
+     * literals and this is the same static `stablehlo.slice` [emitSlice] emits —
+     * the template's SSA value goes unreferenced, as with [emitSliceLike].
+     */
+    private fun emitSliceAt(
+        step: String,
+        name: String,
+        x: String,
+        node: DxirOp,
+    ) {
+        val inputType = node.operands[0].type
+        val low = intListAttr(node, "low")
+        val rank = inputType.rank
+        require(low.size == rank && node.type.rank == rank) {
+            "SLICE_AT attr/rank mismatch: low=${low.size}, value rank=$rank, template rank=${node.type.rank}"
+        }
+        for (i in 0 until rank) {
+            require(low[i] >= 0 && low[i] + node.type.dims[i] <= inputType.dims[i]) {
+                "SLICE_AT axis $i: low ${low[i]} + template ${node.type.dims[i]} exceeds value ${inputType.dims[i]}"
+            }
+        }
+        out.appendLine(
+            "$step$name = stablehlo.slice $x [" +
+                (0 until rank).joinToString(", ") { i ->
+                    "${low[i]}:${low[i] + node.type.dims[i]}"
                 } +
                 "] : (${inputType.toMlir()}) -> ${node.type.toMlir()}",
         )

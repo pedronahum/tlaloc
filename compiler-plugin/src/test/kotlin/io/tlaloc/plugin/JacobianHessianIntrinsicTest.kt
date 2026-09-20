@@ -137,6 +137,67 @@ class JacobianHessianIntrinsicTest {
         )
     }
 
+    /**
+     * §0.4.399 — second order THROUGH an in-place size-1 `broadcastTo` stretch,
+     * E2E. The hvp body is forward-over-reverse, so its reverse half emits the
+     * runtime-extent `SUM_TO` adjoint (§0.4.373) and the forward half threads a
+     * tangent through it — the composition the §0.4.373 DEFERRED note flagged.
+     * (The note blamed the missing SUM_TO VjpRule; that rule only gates
+     * REVERSE-over-reverse, pinned at IR level in
+     * `DxirRuntimeExtentClosureTest` — but this E2E surface was never pinned
+     * either, and it is the user-visible face of the same closure.)
+     *
+     *   f(x:[1,3]) = Σ (x.broadcastTo(2,3) ⊙ x.broadcastTo(2,3)) = 2·Σ_j x_j²
+     *   ∇f = 4x,  H = 4·I₃ over the flattened input.
+     */
+    @Test
+    fun `hessian through an in-place broadcastTo stretch`() {
+        val src = """
+            import io.tlaloc.autograd.hessian
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.HostF32Storage
+            import io.tlaloc.core.Lit
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.ops.broadcastTo
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun show(name: String, t: DTensor<*, *>) {
+                val data = (t.storage as HostF32Storage).data
+                println(name + " " + t.dims.joinToString("x") + " " + data.joinToString(","))
+            }
+            fun main() {
+                val hf = hessian { x: DTensor<Rank2<Sym, Lit<Int>>, F32> ->
+                    (x.broadcastTo(2, 3) * x.broadcastTo(2, 3)).sum().toFloat()
+                }
+                val X = Tensors.f32Matrix<Sym, Lit<Int>>(1, 3, floatArrayOf(1.0f, -2.0f, 0.5f))
+                show("hf", hf(X))
+            }
+        """.trimIndent()
+        val result = compileAndRun(src)
+        assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}")
+        val keptOriginal = result.messages.any {
+            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+        }
+        assertTrue(
+            !keptOriginal,
+            "synthesis fell back; hessian has no tape path so this is a hard failure. " +
+                "Warnings:\n${result.messages.filter { it.severity == CompilerMessageSeverity.WARNING }
+                    .joinToString("\n--\n") { it.message }}",
+        )
+        val line = result.stdout.trim().lines().single { it.startsWith("hf ") }
+        val parts = line.split(" ", limit = 3)
+        assertEquals("3x3", parts[1], "H dims")
+        val got = parts[2].split(",").map { it.toFloat() }
+        val want = listOf(4f, 0f, 0f, 0f, 4f, 0f, 0f, 0f, 4f)
+        for (i in want.indices) {
+            assertTrue(abs(got[i] - want[i]) < 1e-4f, "H[$i]=${got[i]} want ${want[i]} (got $got)")
+        }
+    }
+
     private fun pluginClasspath(): Array<String> = arrayOf(
         System.getProperty("tlaloc.plugin.jar") ?: error("tlaloc.plugin.jar not set"),
         System.getProperty("tlaloc.ir.jar") ?: error("tlaloc.ir.jar not set"),

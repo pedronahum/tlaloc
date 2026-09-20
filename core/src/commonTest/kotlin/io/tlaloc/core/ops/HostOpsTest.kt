@@ -281,6 +281,50 @@ class HostOpsTest {
         assertContentEquals(intArrayOf(4, 1), s.dims)
     }
 
+    /**
+     * §0.4.399 — `broadcastToLike`: the forward twin (and VJP) of `sumToLike`.
+     * Right-aligned NumPy broadcast up to the template's RUNTIME dims; the
+     * template contributes shape only. Equal-rank stretch, rank extension,
+     * identity, and the incompatible-axis refusal.
+     */
+    @Test
+    fun broadcastToLikeStretchesToTheTemplatesRuntimeShape() {
+        val t = Tensors.f32Matrix<Sym, Sym>(2, 3, FloatArray(6))
+        // Equal-rank stretch [1,3] → [2,3].
+        val row = Tensors.f32Matrix<Sym, Sym>(1, 3, floatArrayOf(1f, 2f, 3f))
+        assertContentEquals(floatArrayOf(1f, 2f, 3f, 1f, 2f, 3f), broadcastToLike(row, t).hostF32())
+        // Rank extension [3] → [2,3] (missing leading axis replicated).
+        val vec = Tensors.f32Vector<Sym>(floatArrayOf(4f, 5f, 6f))
+        assertContentEquals(floatArrayOf(4f, 5f, 6f, 4f, 5f, 6f), broadcastToLike(vec, t).hostF32())
+        // Identity fast path: same dims → copy.
+        val full = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))
+        assertContentEquals(full.hostF32(), broadcastToLike(full, t).hostF32())
+        // An aligned axis that is neither equal nor 1 refuses loudly.
+        val bad = Tensors.f32Matrix<Sym, Sym>(2, 2, FloatArray(4))
+        assertFailsWith<IllegalArgumentException> { broadcastToLike(bad, t) }
+    }
+
+    /**
+     * §0.4.399 — `sliceAtLike`: the reverse mirror (and VJP) of `padToLike`.
+     * Window of the template's RUNTIME dims at literal offset `low`; the
+     * template contributes shape only. Pins the padToLike ⇄ sliceAtLike
+     * round trip: slicing back out what was padded in recovers the value.
+     */
+    @Test
+    fun sliceAtLikeCutsTheWindowBackOut() {
+        val v = Tensors.f32Matrix<Sym, Sym>(3, 4, FloatArray(12) { it.toFloat() })
+        val t = Tensors.f32Matrix<Sym, Sym>(2, 2, FloatArray(4))
+        assertContentEquals(floatArrayOf(5f, 6f, 9f, 10f), sliceAtLike(v, t, intArrayOf(1, 1)).hostF32())
+        // Round trip with padToLike: pad a [2] into a [5] at low=1, slice it back.
+        val u = Tensors.f32Vector<Sym>(floatArrayOf(7f, -3f))
+        val big = Tensors.f32Vector<Sym>(FloatArray(5))
+        val padded = padToLike(u, big, intArrayOf(1))
+        assertContentEquals(floatArrayOf(0f, 7f, -3f, 0f, 0f), padded.hostF32())
+        assertContentEquals(u.hostF32(), sliceAtLike(padded, u, intArrayOf(1)).hostF32())
+        // A window that overruns the value refuses loudly.
+        assertFailsWith<IllegalArgumentException> { sliceAtLike(u, big, intArrayOf(0)) }
+    }
+
     @Test
     fun timesScalarMultipliesEachElement() {
         val a = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))

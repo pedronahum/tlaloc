@@ -1537,6 +1537,91 @@ object VjpRegistry {
         }
     }
 
+    /**
+     * §0.4.399 — the runtime-extent family closes under differentiation.
+     *
+     * SUM_TO's adjoint w.r.t. `value` broadcasts the upstream (shaped like the
+     * TEMPLATE) back up to `value`'s shape — but that shape is a -1 sentinel
+     * under `grad {}`, so the target extents cannot be baked. `BROADCAST_LIKE`
+     * reads them off the primal `value` operand's ACTUAL runtime shape (value
+     * becomes the shape-only template of its own adjoint — the same inversion
+     * BroadcastRule performs with SUM_TO). The template operand (a pure shape
+     * source, values never read) gets no contribution.
+     *
+     * `readsPrimalOperandIndices = setOf(0)`: the adjoint dereferences the
+     * primal `value` operand as BROADCAST_LIKE's template, so its subgraph
+     * must be cloned into the gradient body. Before this rule existed,
+     * reverse-mode THROUGH a gradient body — reverse-over-reverse, the one
+     * second-order composition forward-over-reverse (§0.4.394's hessian)
+     * cannot substitute for — failed loudly with "no VJP rule registered for
+     * SUM_TO".
+     */
+    val SumToRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val value = op.operands[0]
+            val dValue = builder.op(OpKind.BROADCAST_LIKE, listOf(upstream, value), value.type)
+            return listOf(value to dValue)
+        }
+    }
+
+    /**
+     * §0.4.399 — BROADCAST_LIKE's own VJP is the numpy unbroadcast back down to
+     * `value`'s runtime shape: `SUM_TO(upstream, template=value)`. Together with
+     * [SumToRule] the pair is closed — each op's adjoint is the other, so any
+     * order of differentiation through them terminates.
+     */
+    val BroadcastLikeRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val value = op.operands[0]
+            val dValue = builder.op(OpKind.SUM_TO, listOf(upstream, value), value.type)
+            return listOf(value to dValue)
+        }
+    }
+
+    /**
+     * §0.4.399 — PAD_TO's adjoint w.r.t. `value` cuts the upstream (shaped like
+     * the TEMPLATE) back down to `value`'s window: the extents are `value`'s
+     * runtime shape (-1 sentinels under `grad {}`, so `SLICE_AT` reads them off
+     * the primal `value` operand at execution) and the offset is the PAD_TO
+     * node's own `low` attr — already a literal, carried verbatim. SLICE_LIKE
+     * cannot express this (its offset is a SUM of prior templates' runtime
+     * extents along one axis; this one is a multi-axis literal), which is why
+     * SLICE_AT exists.
+     */
+    val PadToRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val value = op.operands[0]
+            val dValue = builder.op(
+                OpKind.SLICE_AT, listOf(upstream, value), value.type,
+                attrs = mapOf("low" to op.attrs["low"]!!),
+            )
+            return listOf(value to dValue)
+        }
+    }
+
+    /**
+     * §0.4.399 — SLICE_AT's own VJP zero-pads the upstream back into `value`'s
+     * window at the same literal `low`: `PAD_TO(upstream, template=value, low)`.
+     * The PAD_TO ⇄ SLICE_AT pair is closed under differentiation, like
+     * SUM_TO ⇄ BROADCAST_LIKE. (SLICE_LIKE stays without a rule: its window
+     * offset is a runtime SUM of prior templates' extents, which no literal
+     * `low` can carry — the documented remaining gap.)
+     */
+    val SliceAtRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val value = op.operands[0]
+            val dValue = builder.op(
+                OpKind.PAD_TO, listOf(upstream, value), value.type,
+                attrs = mapOf("low" to op.attrs["low"]!!),
+            )
+            return listOf(value to dValue)
+        }
+    }
+
     private val rules: Map<OpKind, VjpRule> = mapOf(
         OpKind.ADD to AddRule,
         OpKind.SUB to SubRule,
@@ -1579,6 +1664,12 @@ object VjpRegistry {
         OpKind.GATHER to GatherRule,
         OpKind.EMBEDDING to EmbeddingRule,
         OpKind.BROADCAST to BroadcastRule,
+        // §0.4.399 — the runtime-extent family's own rules: each pair is the
+        // other's adjoint, so reverse-mode composes to any order through them.
+        OpKind.SUM_TO to SumToRule,
+        OpKind.BROADCAST_LIKE to BroadcastLikeRule,
+        OpKind.PAD_TO to PadToRule,
+        OpKind.SLICE_AT to SliceAtRule,
     )
 
     operator fun get(kind: OpKind): VjpRule? = rules[kind]

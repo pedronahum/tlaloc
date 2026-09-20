@@ -1048,6 +1048,55 @@ object DxirInterpreter {
                 }
                 out
             }
+            // §0.4.399 — BROADCAST_LIKE (broadcast-to-template): stretch
+            // operand[0] (value, shape U) up to operand[1] (template, shape T)
+            // under NumPy right-alignment — the forward twin of SUM_TO and its
+            // VJP. Each aligned axis must be equal or size-1 in the value;
+            // missing leading axes are replicated. Template contributes SHAPE
+            // ONLY (its values are never evaluated — we read `.type.dims`).
+            OpKind.BROADCAST_LIKE -> {
+                val value = evalNode(op.operands[0], env, multiResults)
+                val uDims = op.operands[0].type.dims
+                val tDims = op.operands[1].type.dims
+                val ru = uDims.size
+                val rt = tDims.size
+                require(ru <= rt) {
+                    "DxirInterpreter: BROADCAST_LIKE value rank $ru exceeds template rank $rt"
+                }
+                val offset = rt - ru
+                for (i in 0 until ru) {
+                    require(uDims[i] == tDims[offset + i] || uDims[i] == 1) {
+                        "DxirInterpreter: BROADCAST_LIKE value dim $i = ${uDims[i]} incompatible with " +
+                            "template axis ${offset + i} = ${tDims[offset + i]} (must be equal or 1)"
+                    }
+                }
+                // Identity fast path: nothing to stretch, nothing to replicate.
+                if (uDims == tDims) {
+                    value.copyOf()
+                } else {
+                    val inStrides = IntArray(ru)
+                    run { var s = 1; for (i in ru - 1 downTo 0) { inStrides[i] = s; s *= uDims[i] } }
+                    val outStrides = IntArray(rt)
+                    run { var s = 1; for (i in rt - 1 downTo 0) { outStrides[i] = s; s *= tDims[i] } }
+                    var outSize = 1
+                    for (d in tDims) outSize *= d
+                    val out = FloatArray(outSize)
+                    for (flat in out.indices) {
+                        var rem = flat
+                        var src = 0
+                        for (k in 0 until rt) {
+                            val coord = rem / outStrides[k]
+                            rem -= coord * outStrides[k]
+                            val uAxis = k - offset
+                            // Leading axes (uAxis < 0) and size-1-stretched aligned
+                            // axes read the value's index 0.
+                            if (uAxis >= 0 && uDims[uAxis] != 1) src += coord * inStrides[uAxis]
+                        }
+                        out[flat] = value[src]
+                    }
+                    out
+                }
+            }
             // §0.4.374 — PAD_TO (zero-pad to template): place operand[0] (value,
             // shape U) into a zero tensor of operand[1] (template, shape T = op.type)
             // at offset `low` per axis — the reverse mirror of SLICE. The trailing
@@ -1083,6 +1132,44 @@ object DxirInterpreter {
                         dst += (coord + low[k]) * outStrides[k]
                     }
                     out[dst] = value[flat]
+                }
+                out
+            }
+            // §0.4.399 — SLICE_AT (window extraction at a literal offset): cut
+            // out of operand[0] (value, shape U) the window of operand[1]'s
+            // (template, shape T = op.type) runtime shape starting at `low` per
+            // axis — the reverse mirror of PAD_TO and its VJP. Template
+            // contributes SHAPE ONLY (`.type.dims`).
+            OpKind.SLICE_AT -> {
+                val value = evalNode(op.operands[0], env, multiResults)
+                val vDims = op.operands[0].type.dims
+                val tDims = op.type.dims
+                val r = tDims.size
+                require(vDims.size == r) {
+                    "DxirInterpreter: SLICE_AT value rank ${vDims.size} != template rank $r"
+                }
+                @Suppress("UNCHECKED_CAST")
+                val low = op.attrs["low"] as List<Int>
+                require(low.size == r) { "DxirInterpreter: SLICE_AT `low` size ${low.size} != rank $r" }
+                for (i in 0 until r) {
+                    require(low[i] >= 0 && low[i] + tDims[i] <= vDims[i]) {
+                        "DxirInterpreter: SLICE_AT axis $i: low ${low[i]} + template ${tDims[i]} exceeds value ${vDims[i]}"
+                    }
+                }
+                val inStrides = IntArray(r)
+                run { var s = 1; for (i in r - 1 downTo 0) { inStrides[i] = s; s *= vDims[i] } }
+                val outStrides = IntArray(r)
+                run { var s = 1; for (i in r - 1 downTo 0) { outStrides[i] = s; s *= tDims[i] } }
+                val out = FloatArray(sizeOf(op.type))
+                for (flat in out.indices) {
+                    var rem = flat
+                    var src = 0
+                    for (k in 0 until r) {
+                        val coord = rem / outStrides[k]
+                        rem -= coord * outStrides[k]
+                        src += (coord + low[k]) * inStrides[k]
+                    }
+                    out[flat] = value[src]
                 }
                 out
             }

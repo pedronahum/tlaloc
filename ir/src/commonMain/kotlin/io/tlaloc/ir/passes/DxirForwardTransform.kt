@@ -147,10 +147,22 @@ object DxirForwardTransform {
             // pass its primal VALUE clone (vOps[1]), never its tangent.
             OpKind.SUM_TO -> b.op(OpKind.SUM_TO, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
 
+            // §0.4.399 — BROADCAST_LIKE is linear in `value` (operand[0]); the
+            // template (operand[1]) contributes SHAPE ONLY, so pass its primal
+            // VALUE clone (vOps[1]), never its tangent — the SUM_TO treatment.
+            OpKind.BROADCAST_LIKE ->
+                b.op(OpKind.BROADCAST_LIKE, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
+
             // §0.4.374 — PAD_TO is linear in `value` (operand[0]); the template
             // (operand[1]) contributes SHAPE ONLY, so pass its primal VALUE clone
             // (vOps[1]), never its tangent — same shape-only treatment as SUM_TO.
             OpKind.PAD_TO -> b.op(OpKind.PAD_TO, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
+
+            // §0.4.399 — SLICE_AT is linear in `value` (operand[0]); the template
+            // (operand[1]) contributes SHAPE ONLY, so pass its primal VALUE clone
+            // (vOps[1]), never its tangent; `low` rides verbatim in the attrs.
+            OpKind.SLICE_AT ->
+                b.op(OpKind.SLICE_AT, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
 
             // Phase A2b — SLICE_LIKE is linear in `value` (operand[0]); EVERY
             // template (operands[1..], variadic: `thisTemplate` then the priors)

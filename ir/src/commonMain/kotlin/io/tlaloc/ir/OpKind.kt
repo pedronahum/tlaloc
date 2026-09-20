@@ -209,8 +209,25 @@ enum class OpKind {
     // dims of `grad {}`, so the adjoint reads the extent from the primal
     // operand's ACTUAL runtime shape at execution instead of baking it as an
     // attr. The host twin is `sumToLike(value, template)` (mirror of
-    // `stretchLike`).
+    // `stretchLike`). §0.4.399 — VjpRule: BROADCAST_LIKE(upstream,
+    // template=value), so reverse-mode differentiates THROUGH it.
     SUM_TO,
+
+    // §0.4.399 — runtime-extent broadcast-to-template: the forward twin of
+    // SUM_TO, and its VJP. BROADCAST_LIKE(value, template) → template's shape:
+    // NumPy right-aligned broadcast — `value`'s shape must be
+    // broadcast-compatible with the template's (each aligned axis equal or
+    // size-1; missing leading axes replicated), and `value` is stretched up to
+    // the template's ACTUAL runtime shape. The `template` operand contributes
+    // SHAPE ONLY — its values are never read. This is what SumToRule emits as
+    // SUM_TO's adjoint: the upstream (shaped like SUM_TO's template) must be
+    // broadcast back up to the value operand's shape, which is a -1 sentinel
+    // under `grad {}` — so the target extents are read from the primal value
+    // operand's runtime shape at execution. Its own VJP is SUM_TO(upstream,
+    // template=value): the pair is closed under differentiation to any order.
+    // Host twin: `broadcastToLike(value, template)` (rank-polymorphic mirror
+    // of `sumToLike`).
+    BROADCAST_LIKE,
 
     // §0.4.374 — runtime-extent zero-pad-to-template (the reverse mirror of
     // SLICE). PAD_TO(value, template) → template's shape, attr `low` (List<Int>,
@@ -224,8 +241,27 @@ enum class OpKind {
     // `low` IS a compile-time literal (the user's `slice` start offsets, and 0
     // on the non-sliced axes) so it rides as an attr. The `template` operand
     // contributes SHAPE ONLY — its values are never read. Host twin:
-    // `padToLike(value, template, low)`.
+    // `padToLike(value, template, low)`. §0.4.399 — VjpRule: SLICE_AT(upstream,
+    // template=value, low), so reverse-mode differentiates THROUGH it.
     PAD_TO,
+
+    // §0.4.399 — runtime-extent window extraction at a LITERAL offset: the
+    // reverse mirror of PAD_TO, and its VJP. SLICE_AT(value, template) →
+    // template's shape, attr `low` (List<Int>, one per axis): cut out of
+    // `value` the window of the template's ACTUAL runtime shape starting at
+    // offset `low` per axis. This is what PadToRule emits as PAD_TO's adjoint:
+    // the upstream (shaped like PAD_TO's template) must be sliced back down to
+    // the value operand's window, whose extents are -1 sentinels under
+    // `grad {}` — so they are read from the primal value operand's runtime
+    // shape at execution, while `low` (already a literal on the PAD_TO node)
+    // rides along verbatim. Differs from SLICE_LIKE, whose offset is the SUM
+    // of prior templates' runtime extents (a concat window); here the offset
+    // is a compile-time literal (a slice start). Its own VJP is
+    // PAD_TO(upstream, template=value, low): the pair is closed under
+    // differentiation to any order. The `template` operand contributes SHAPE
+    // ONLY — its values are never read. Host twin:
+    // `sliceAtLike(value, template, low)` (+ `sliceAtLikeRank{1,2,3}` shims).
+    SLICE_AT,
 
     // Phase A2b — runtime-extent window slice (the adjoint half of CONCAT, and
     // the reverse mirror of PAD_TO's "place into a window"). SLICE_LIKE(value,

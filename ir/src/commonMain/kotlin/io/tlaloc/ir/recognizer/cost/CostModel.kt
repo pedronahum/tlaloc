@@ -162,9 +162,17 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // the (smaller) template-shaped accumulator, like a reduction.
     OpKind.SUM_TO -> op.operands[0].type.elementCount.toDouble()
 
+    // §0.4.399 — BROADCAST_LIKE (runtime-extent broadcast-to-template, SUM_TO's
+    // forward twin and VJP): one write per output element, like a copy.
+    OpKind.BROADCAST_LIKE -> op.type.elementCount.toDouble()
+
     // §0.4.374 — PAD_TO (zero-pad to template): one write per value element
     // into the (larger) template-shaped output, like a copy.
     OpKind.PAD_TO -> op.operands[0].type.elementCount.toDouble()
+
+    // §0.4.399 — SLICE_AT (runtime-extent window at a literal offset, PAD_TO's
+    // reverse mirror and VJP): one write per output element, like a copy.
+    OpKind.SLICE_AT -> op.type.elementCount.toDouble()
 
     // Phase A2b — SLICE_LIKE (runtime-extent window slice, CONCAT's adjoint):
     // one write per output element, like a copy.

@@ -99,13 +99,16 @@ reachable from `grad {}`, not new math. New-op families come after.
       rank-increase AND an aligned size-1 stretch, e.g. `[1,C]→[B,N,C]`): its
       adjoint takes the non-empty-`reduceDims` SUM path which can't ALSO sum a
       stretched aligned axis; the FIR guards it (fail-loud when the operand dim is
-      concretely detectable as size-1). **DEFERRED — 2nd-order through in-place
-      broadcast**: SUM_TO has no VjpRule, so `forward(reverse(f))` (an HVP) through
-      an in-place stretch errors loudly. Its reverse (broadcast the T-shaped
-      upstream back up to `value`'s runtime shape U) needs a runtime-extent
-      broadcast-to-template op (the mirror of SUM_TO — a `BROADCAST_LIKE(upstream,
-      template=value)` reading U from `value`'s runtime dims); 1st-order is this
-      slice.
+      concretely detectable as size-1). **2nd-order through in-place broadcast —
+      CLOSED (§0.4.399)**: the missing piece was exactly the predicted
+      `BROADCAST_LIKE(upstream, template=value)` mirror op, landed there together
+      with VjpRules for the whole runtime-extent family (SUM_TO ⇄ BROADCAST_LIKE,
+      PAD_TO ⇄ SLICE_AT). One correction to this note's original wording: the
+      missing SUM_TO VjpRule never gated `forward(reverse(f))` — SUM_TO has
+      carried a forward tangent since this very slice, which is why §0.4.394's
+      hessian is forward-OVER-reverse; what errored loudly ("no VJP rule
+      registered for SUM_TO", verified at §0.4.398 HEAD) was REVERSE-mode over
+      any body containing a runtime-extent adjoint, i.e. reverse-over-reverse.
     - **`slice` ✅ (§0.4.374)** — single-axis `slice(start, end, axis)` E2E
       through `grad {}` via the runtime-extent `PAD_TO` adjoint (the reduce/slice
       mirror of §0.4.373's `SUM_TO`). SliceRule's adjoint zero-pads the upstream
@@ -146,8 +149,11 @@ reachable from `grad {}`, not new math. New-op families come after.
         `Σⱼ priorTemplateⱼ.dims[axis]` and running for `thisTemplate.dims[axis]`,
         other axes whole. Both bounds are read off the templates' ACTUAL runtime
         shapes; templates contribute SHAPE ONLY. The `SUM_TO`/`PAD_TO` contract,
-        including "no VjpRule" (second-order through it errors, as it does for
-        those two).
+        originally including "no VjpRule" — §0.4.399 gave SUM_TO and PAD_TO
+        their rules, and SLICE_LIKE is now the one member still without one
+        (its window offset is a runtime SUM of prior templates' extents, which
+        no literal-offset adjoint can carry — second-order through a concat
+        window still errors loudly).
       - Arms: interpreter (outer/inner block copy, mirroring the CONCAT arm),
         emitter (emit-time dims are concrete, so the bounds fold to literals and
         it emits the same static `stablehlo.slice` as SLICE — the templates go
@@ -1038,12 +1044,69 @@ reachable from `grad {}`, not new math. New-op families come after.
     (the seeded branch skips the coarsening pipeline, like B1's forward
     branch). Deferred tails: region-bearing bodies (fold into B3/B4's
     region work), multi-arg `vjp2`.
+- **B4 enabler. The runtime-extent family closes under differentiation ✅
+  (§0.4.399)** — VjpRules for SUM_TO and PAD_TO via their runtime-extent
+  mirrors, closing §0.4.373's "2nd-order through in-place broadcast" deferral.
+  The runtime-extent adjoint ops had no VjpRules, so REVERSE-mode over any
+  body containing one — which is what reverse-over-reverse IS, since the
+  first reverse pass emits them — failed loudly with "no VJP rule registered
+  for SUM_TO" (verified at §0.4.398 HEAD; forward-over-reverse never needed
+  the rules, which is why §0.4.394's hessian works — the original deferral
+  note misattributed that).
+  - **Two new ops, each an existing op's mirror**: `BROADCAST_LIKE(value,
+    template)` (NumPy right-aligned broadcast up to the template's ACTUAL
+    runtime shape — SUM_TO's forward twin) and `SLICE_AT(value, template)` +
+    attr `low` (the window of the template's runtime shape at a LITERAL
+    per-axis offset — PAD_TO's reverse mirror). Both follow the full
+    house runtime-extent pattern: template operand contributes SHAPE ONLY
+    (values never read); interpreter + CostModel + forward tangent (linear in
+    `value`, template's primal-VALUE clone passed, never its tangent);
+    emitter arms that FOLD to static ops at emit time (`broadcast_in_dim`
+    with the identity right-aligned axis map / the same static
+    `stablehlo.slice` SLICE emits — templates unreferenced in the MLIR, the
+    SLICE_LIKE precedent), EmitterTest pins + four new
+    GradientEmissionCoverageTest sweep cases; host twins `broadcastToLike`
+    (rank-polymorphic, no shims needed — no attrs to bake) and `sliceAtLike`
+    + `sliceAtLikeRank{1,2,3}` (the `padToLikeRankN` mirror); synthesis
+    `irBroadcastLike`/`irSliceAt` + `deriveResultIrType` and backward-solver
+    arms (result IrType = template's; the value operand must NOT inherit it —
+    smaller for BROADCAST_LIKE, bigger for SLICE_AT).
+  - **The rules pair up and CLOSE**: SumToRule = `BROADCAST_LIKE(upstream,
+    template=value)`, BroadcastLikeRule = `SUM_TO(upstream, template=value)`,
+    PadToRule = `SLICE_AT(upstream, template=value, low)` (the PAD_TO node's
+    own literal `low`, carried verbatim), SliceAtRule = `PAD_TO(upstream,
+    template=value, low)`. In every rule the primal `value` operand becomes
+    the SHAPE-ONLY template of its own adjoint (`readsPrimalOperandIndices =
+    {0}` — the BroadcastRule/SliceRule inversion), so differentiating any
+    number of times only alternates within a pair. Templates get no
+    contribution (typed zero — pure shape sources).
+  - **Still ruleless, deliberately**: SLICE_LIKE — its window offset is a
+    runtime SUM of prior templates' extents along the axis, which no
+    literal-`low` adjoint can express; second-order through a concat window
+    still errors loudly. (A PAD_LIKE with prior-template offsets is the shape
+    of the fix, sequenced when B4 demands it.)
+  - Certified: `DxirRuntimeExtentClosureTest` (interpreter pins for both new
+    ops incl. rank extension + identity fast paths and the out-of-range
+    refusal; reverse THROUGH SUM_TO / BROADCAST_LIKE / PAD_TO / SLICE_AT
+    scalar bodies with hand-pinned analytic gradients — the exact composition
+    that errored at HEAD; JVP⇄VJP cross-identities through BROADCAST_LIKE
+    and SLICE_AT; a third-order pin showing the pair alternates without
+    growing), the emitter pins + sweep cases above, `broadcastToLike`/
+    `sliceAtLike` host pins incl. the padToLike round-trip, and E2E
+    `hessian { Σ(x.broadcastTo(2,3) ⊙ x.broadcastTo(2,3)) }` = 4·I₃ through
+    the real plugin (the user-visible face of the closure — previously
+    unpinned).
 - **B3. Forward transform through regions**: IF/WHILE bodies + COARSENED
   (tangent of a coarsened op = forward transform of its `primal_body`) —
   mirrors reverse-mode's history.
 - **B4. Nesting matrix**: certify forward∘forward (2nd directional),
   reverse∘forward, reverse∘reverse against analytic references. DiffKT
-  supports arbitrary nesting; we've pinned one composition.
+  supports arbitrary nesting; we've pinned one composition. §0.4.399
+  removed reverse∘reverse's standing blocker (the runtime-extent adjoints'
+  missing VjpRules) — what remains is the composition plumbing itself
+  (the reverse transform takes a single scalar-return function, so nesting
+  needs the inner gradient body inlined/scalarized) plus SLICE_LIKE's
+  documented gap for concat windows.
 - **B5. User-defined custom derivatives**: a user-facing custom-VJP/JVP
   registration (DiffKT lets users supply derivatives for opaque functions;
   our coarsener `gradient_body` machinery is the internal analogue —
@@ -1209,7 +1272,7 @@ argument fallback) ·
 | `softmax(axis) / logSoftmax / logSoftmaxGrad` | 🟡 | SOFTMAX/LOGSUMEXP + VJPs exist → A3 |
 | `crossEntropyLoss / crossEntropyLossFromOneHot / nllLossFromOneHot` | ✅ | §0.4.370: `crossEntropyLoss`/`nllLoss` composed in FIR from logSoftmax, E2E through `grad {}` (CROSS_ENTROPY OpKind stays emitter-only) |
 | `embedding(table, indices, paddingIndex)` | 🟡 | §0.4.370: EmbeddingRule VjpRule + EMBEDDING_GRAD adjoint + interpreter + forward tangent, **IR-level only** (no `grad {}` FIR/synthesis arm yet); `paddingIndex` not modelled |
-| `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) — mixed rank-increase+stretch + 2nd-order-through-broadcast deferred |
+| `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) + 2nd-order-through-broadcast ✅ (§0.4.399, `BROADCAST_LIKE`) — mixed rank-increase+stretch still deferred |
 | `transpose(axes) / leftTranspose / rightTranspose` | 🟡 | TRANSPOSE + VJP → A2 (left/right = sugar) |
 | `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |
 | `slice / view(index/range/axis) / withChange` (functional update) | 🟡 | single-axis `slice(start,end,axis)` ✅ A2b (§0.4.374, runtime-extent `PAD_TO` adjoint), E2E through `grad {}`; multi-axis `view`/`withChange` scatter sugar still A2 |

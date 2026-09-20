@@ -173,6 +173,48 @@ class EmitterTest {
     }
 
     @Test
+    fun broadcastLikeEmitsAStaticBroadcastInDim() {
+        // §0.4.399 — BROADCAST_LIKE's target extents come from its template's
+        // RUNTIME shape, but at emit time every dim is concrete, so it folds to
+        // a static `broadcast_in_dim` with the identity right-aligned axis map:
+        // a [3] value against a [2,3] template maps its axis 0 to output axis 1.
+        // The template param goes unreferenced in the MLIR (legal, DCE'd).
+        val fn = DxirBuilder.function("f") {
+            val v = param("v", DxirType(F32, listOf(3)))
+            val t = param("t", DxirType(F32, listOf(2, 3)))
+            listOf(op(OpKind.BROADCAST_LIKE, listOf(v, t), DxirType(F32, listOf(2, 3))))
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains("stablehlo.broadcast_in_dim %0, dims = [1] : (tensor<3xf32>) -> tensor<2x3xf32>"),
+            mlir,
+        )
+    }
+
+    @Test
+    fun sliceAtEmitsAStaticWindowSlice() {
+        // §0.4.399 — SLICE_AT's window extents come from its template's RUNTIME
+        // shape and its offset from the literal `low` attr; at emit time both
+        // fold to the same static `stablehlo.slice` the SLICE arm emits: a [3,4]
+        // value, a [2,2] template at low=[1,1] → rows 1..2, cols 1..2.
+        val fn = DxirBuilder.function("f") {
+            val v = param("v", DxirType(F32, listOf(3, 4)))
+            val t = param("t", DxirType(F32, listOf(2, 2)))
+            listOf(
+                op(
+                    OpKind.SLICE_AT, listOf(v, t), DxirType(F32, listOf(2, 2)),
+                    attrs = mapOf("low" to listOf(1, 1)),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains("stablehlo.slice %0 [1:3, 1:3] : (tensor<3x4xf32>) -> tensor<2x2xf32>"),
+            mlir,
+        )
+    }
+
+    @Test
     fun binaryWithMatchingOperandsEmitsNoBroadcastInjection() {
         // Same-shape operands hit the no-op path; emit must not mention
         // broadcast_in_dim around the add. Pins the regression that

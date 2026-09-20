@@ -1929,6 +1929,56 @@ fun <S : Shape> sumToLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DT
 }
 
 /**
+ * §0.4.399 — broadcast-to-template: stretch [value] up to [template]'s RUNTIME
+ * dims under NumPy right-alignment — the forward twin (and VJP) of
+ * [sumToLike], and the synthesis/plugin twin of the dxir interpreter's
+ * BROADCAST_LIKE arm. Each aligned axis of [value] must equal the template's
+ * or be size-1; missing leading axes are replicated. This is SumToRule's
+ * adjoint: the upstream (shaped like SUM_TO's template) is broadcast back up
+ * to the value operand's shape, which is a -1 sentinel at compile time under
+ * `grad {}`, so the target extents are read from [template]'s ACTUAL runtime
+ * shape here. [template] contributes SHAPE ONLY — its values are never read.
+ * Rank-polymorphic like [sumToLike] (no `…RankN` shims needed: no attrs to
+ * bake), unlike the equal-rank-only [stretchLike].
+ */
+fun <S : Shape> broadcastToLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DTensor<S, F32> {
+    val u = value.dims
+    val t = template.dims
+    // Identity fast path — copy rather than alias (a contribution may feed an
+    // in-place accumulator downstream), the sumToLike convention.
+    if (u.contentEquals(t)) {
+        return DTensor(HostF32Storage(value.hostF32().copyOf()), t.copyOf(), F32)
+    }
+    val ru = u.size
+    val rt = t.size
+    require(ru <= rt) { "broadcastToLike: value rank $ru exceeds template rank $rt" }
+    val offset = rt - ru
+    for (i in 0 until ru) require(u[i] == t[offset + i] || u[i] == 1) {
+        "broadcastToLike: value dim $i = ${u[i]} incompatible with template axis ${offset + i} = ${t[offset + i]} (must be equal or 1)"
+    }
+    val inStrides = IntArray(ru)
+    run { var s = 1; for (i in ru - 1 downTo 0) { inStrides[i] = s; s *= u[i] } }
+    val outStrides = IntArray(rt)
+    run { var s = 1; for (i in rt - 1 downTo 0) { outStrides[i] = s; s *= t[i] } }
+    var outSize = 1
+    for (d in t) outSize *= d
+    val v = value.hostF32()
+    val out = FloatArray(outSize)
+    for (flat in out.indices) {
+        var rem = flat
+        var src = 0
+        for (k in 0 until rt) {
+            val coord = rem / outStrides[k]
+            rem -= coord * outStrides[k]
+            val uAxis = k - offset
+            if (uAxis >= 0 && u[uAxis] != 1) src += coord * inStrides[uAxis]
+        }
+        out[flat] = v[src]
+    }
+    return DTensor(HostF32Storage(out), t.copyOf(), F32)
+}
+
+/**
  * §0.4.374 — zero-pad-to-template: place [value] into a zero tensor of
  * [template]'s RUNTIME dims at offset [low] per axis — the reverse mirror of
  * [slice] and the synthesis/plugin twin of the dxir interpreter's PAD_TO arm.
@@ -1980,6 +2030,60 @@ fun <S : Shape> padToLikeRank2(value: DTensor<*, F32>, template: DTensor<S, F32>
 
 fun <S : Shape> padToLikeRank3(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int, l1: Int, l2: Int): DTensor<S, F32> =
     padToLike(value, template, intArrayOf(l0, l1, l2))
+
+/**
+ * §0.4.399 — window-at-literal-offset: cut out of [value] the window of
+ * [template]'s RUNTIME dims starting at [low] per axis — the reverse mirror
+ * (and VJP) of [padToLike], and the synthesis/plugin twin of the dxir
+ * interpreter's SLICE_AT arm. This is PadToRule's adjoint: the upstream
+ * (shaped like PAD_TO's template) is sliced back down to the value operand's
+ * window, whose extents are -1 sentinels at compile time under `grad {}`, so
+ * they are read from [template]'s ACTUAL runtime shape here; [low] is the
+ * PAD_TO node's own literal offset, carried verbatim. Differs from
+ * [sliceLikeStart]/[sliceLikeAfter1], whose offset is a runtime SUM of prior
+ * templates' extents along one axis. [template] contributes SHAPE ONLY — its
+ * values are never read.
+ */
+fun <S : Shape> sliceAtLike(value: DTensor<*, F32>, template: DTensor<S, F32>, low: IntArray): DTensor<S, F32> {
+    val u = value.dims
+    val t = template.dims
+    val r = t.size
+    require(u.size == r) { "sliceAtLike: value rank ${u.size} != template rank $r" }
+    require(low.size == r) { "sliceAtLike: low size ${low.size} != rank $r" }
+    for (i in 0 until r) require(low[i] >= 0 && low[i] + t[i] <= u[i]) {
+        "sliceAtLike: axis $i: low ${low[i]} + template ${t[i]} exceeds value ${u[i]}"
+    }
+    val inStrides = IntArray(r)
+    run { var s = 1; for (i in r - 1 downTo 0) { inStrides[i] = s; s *= u[i] } }
+    val outStrides = IntArray(r)
+    run { var s = 1; for (i in r - 1 downTo 0) { outStrides[i] = s; s *= t[i] } }
+    var outSize = 1
+    for (d in t) outSize *= d
+    val v = value.hostF32()
+    val out = FloatArray(outSize)
+    for (flat in out.indices) {
+        var rem = flat
+        var src = 0
+        for (k in 0 until r) {
+            val coord = rem / outStrides[k]
+            rem -= coord * outStrides[k]
+            src += (coord + low[k]) * inStrides[k]
+        }
+        out[flat] = v[src]
+    }
+    return DTensor(HostF32Storage(out), t.copyOf(), F32)
+}
+
+/** §0.4.399 — fixed-arity `sliceAtLike` shims (synthesis bakes the `low`
+ * offsets as Int consts, one per axis; mirror of the `padToLikeRankN` family). */
+fun <S : Shape> sliceAtLikeRank1(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int): DTensor<S, F32> =
+    sliceAtLike(value, template, intArrayOf(l0))
+
+fun <S : Shape> sliceAtLikeRank2(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int, l1: Int): DTensor<S, F32> =
+    sliceAtLike(value, template, intArrayOf(l0, l1))
+
+fun <S : Shape> sliceAtLikeRank3(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int, l1: Int, l2: Int): DTensor<S, F32> =
+    sliceAtLike(value, template, intArrayOf(l0, l1, l2))
 
 /**
  * Phase A2b — the host twin of dxir `SLICE_LIKE`, i.e. CONCAT's adjoint: cut out
