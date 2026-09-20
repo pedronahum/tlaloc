@@ -966,16 +966,27 @@ reachable from `grad {}`, not new math. New-op families come after.
       differentiable-scalar-PARAM form is certified E2E with a `Float` param
       (`grad { a, s -> (a ⊙ s).Σ }` → `da = s`, `ds = Σa` through
       BroadcastRule's full-reduce adjoint).
-    - **DEFERRED tail — `FloatScalar`-typed params**: the FIR lowers
-      `grad { a, s: FloatScalar -> a * s }` to the IDENTICAL dxir (pinned), but
-      synthesis cannot BOX the rank-0 gradient back into the returned pair's
-      `FloatScalar` slot, so the type guard keeps the original call (the
-      long-documented "DScalar boxing" fallback in
-      `TlalocIrGenerationExtension`). Closing it means synthesis-side
-      `FloatScalar(x)` construction + `.v` unwrap on entry for scalar-class
-      params generally (it predates this slice: an ALL-FloatScalar `grad {}`
-      falls back the same way). `DScalarMixingGradientTest` pins the fallback
-      and says exactly how to flip the pin when boxing lands.
+    - **`FloatScalar`-typed params ✅ (§0.4.414)** — the §0.4.397 pinned tail
+      closed: synthesis materialises a boxed-scalar param AS the call-site
+      value class (so the synthesised `FunctionN` type matches and the
+      type guard passes), unwraps it through ONE `.toFloat()` local at body
+      start (every downstream read site then sees the primitive exactly as
+      the Float-param twin), and boxes the returned rank-0 gradient back via
+      the value-class constructor — standalone and inside
+      Pair/Triple/Quadruple slots alike. The §0.4.397 pin in
+      `DScalarMixingGradientTest` flipped to a value-checked E2E (no tape
+      fallback; `da = s` splat, `ds = Σa` boxed, matching the Float twin
+      exactly), plus a `valueAndGrad2` cert (plain-Float value + tensor grad
+      untouched, `FloatScalar` grad in the third slot). Still deferred,
+      re-recorded: **`DScalar`-the-interface params** (dynamic dispatch — no
+      concrete constructor to box into; its classifier matches neither value
+      class so it falls to the guard as before) and **`DoubleScalar` E2E** —
+      the synthesis mechanism is precision-symmetric (`DoubleScalar` ↔ F64
+      wired), but no FIR-lowerable spelling exists today: the value-class
+      member `FloatScalar.toFloat` / `DoubleScalar.toFloat` FQNs are not in
+      the conversion maps (an ALL-boxed-scalar body still fails FIR-side) and
+      the mixed `DTensor(F32) ⊙ DoubleScalar` splat would need an F64→F32
+      CAST the A5a arm doesn't emit.
 
 ### Phase B — AD-mode parity
 
@@ -1821,7 +1832,7 @@ argument fallback) ·
 
 | DiffKT | Tlaloc | Notes |
 |---|---|---|
-| `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 tensor⊗tensor; A5a (§0.4.376) `Float×DTensor` on both operand orders; **A5c (§0.4.378/379) full implicit broadcasting** — NumPy right-alignment in the interpreter, the emitter, the host ops and the adjoints, so `[N,1] ⊙ [N,C]` and `[C] ⊙ [N,C]` differentiate. `DScalar×DTensor` ✅ A5c-3(iv) (§0.4.397): host overloads both orders + Float-param `grad {}` E2E; `FloatScalar`-typed params still fall to the tape (synthesis DScalar boxing — deferred tail) |
+| `plus minus times div unaryMinus` (elementwise) | ✅ | §0.4.364 tensor⊗tensor; A5a (§0.4.376) `Float×DTensor` on both operand orders; **A5c (§0.4.378/379) full implicit broadcasting** — NumPy right-alignment in the interpreter, the emitter, the host ops and the adjoints, so `[N,1] ⊙ [N,C]` and `[C] ⊙ [N,C]` differentiate. `DScalar×DTensor` ✅ A5c-3(iv) (§0.4.397): host overloads both orders + Float-param `grad {}` E2E; §0.4.414 closed the `FloatScalar`-param tail (boxed-scalar synthesis: `.toFloat()` unwrap on entry, value-class constructor on the gradient); `DScalar`-interface + `DoubleScalar` spellings still fall to the tape |
 | `pow(Float/Int/DScalar/tensor-exponent)` | ✅ | A5b (§0.4.377): `:core/ops` host `pow` (tensor / Float / Int exponents) + FIR entries for `io.tlaloc.core.ops.pow` and `kotlin.math.pow` + a tensor synthesis arm; PowRule/interpreter/emitter/forward already shipped. `DScalar` exponent still open |
 | `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 tensor⊗tensor; §0.4.397 Float-scalar rhs (`a gt 1.0f` + computed rank-0) E2E through `grad {}` |
 | `relu reluGrad sigmoid tanh exp ln sqrt abs` (tensor) | ✅ | `reluGrad` is public in DiffKT; ours is internal — fine |
@@ -1920,10 +1931,10 @@ story. Not blocking A–E.
 
 ## Suggested § sequencing
 
-**Position at §0.4.411 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
-in substance (§0.4.366–397, §0.4.400/409 — remaining tails: A2's
+**Position at §0.4.414 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
+in substance (§0.4.366–397, §0.4.400/409/414 — remaining tails: A2's
 `view`/`withChange`/`meld`/`split`, gather/scatter axis+list forms, the
-mixed rank-increase+stretch broadcast, `FloatScalar`-param boxing) →
+mixed rank-increase+stretch broadcast, `DScalar`-interface params) →
 B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → C1–C3 ✅
 (§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; `grad {}`
 integral is B5-gated) → D1 ✅ (§0.4.408) → D2 v1 ✅ (§0.4.413 — IR-level

@@ -785,6 +785,26 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 paramIrTypeMap[p.id] = argType
             }
         }
+        // §0.4.414 — Phase A5c-3(iv) tail: a grad{} param declared as the :core
+        // value class `FloatScalar` (`DoubleScalar` symmetrically) lowers to a plain
+        // F32/F64 scalar DxirParam (FirLambdaToDxirLowering's PRIMITIVE_DTYPE_MAP
+        // erases the box), but its CALL-SITE IrType is the boxed class — so the
+        // §0.4.397 pin saw identical dxir yet fell to the type-mismatch guard.
+        // Record such params here: they materialise AS the boxed type (keeping the
+        // synthesised FunctionN type equal to the call site's), get ONE `.toFloat()`
+        // unwrap local at body start ([buildBody]), and their returned rank-0
+        // gradient is boxed back through the value-class constructor. DScalar the
+        // INTERFACE stays deferred: no concrete constructor to box into at compile
+        // time — its classifier matches neither value class, so it keeps falling to
+        // the guard exactly as before.
+        val boxedScalarParams = HashMap<Int, IrType>()
+        if (callType != null) {
+            for ((idx, p) in fn.params.withIndex()) {
+                if (!p.type.isScalar) continue
+                val argType = callType.arguments.getOrNull(idx)?.typeOrNull ?: continue
+                if (isBoxedScalarType(argType, p.type.dtype)) boxedScalarParams[p.id] = argType
+            }
+        }
         // §0.4.194 — Phase 0c-rectangular slice 3a: forward-pass derivation of result
         // IrTypes for OpKind.TRANSPOSE / OpKind.MATMUL on rank-2 F32 surfaces. For
         // each body op whose result IrType can be derived from its operands' IrTypes
@@ -838,8 +858,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // `tensorIrType` (= the FIRST tensor param's IrType) — wrong for multi-param
         // surfaces with distinct shapes. Square surfaces remain bit-exact equivalent
         // (one shared IrType across all params).
+        // §0.4.414 — a boxed scalar param's IrType is the call-site value class
+        // (FloatScalar / DoubleScalar), NOT the primitive `irTypeFor` would give:
+        // the lambda's own parameter must carry the box so the function type
+        // matches. `paramIrTypeMap` stays untouched — body nodes reading the param
+        // see the UNWRAPPED local, whose primitive type comes from `irTypeFor`.
         val paramIrTypes = fn.params.map { p ->
-            paramIrTypeMap[p.id] ?: irTypeFor(p.type, context)
+            boxedScalarParams[p.id] ?: paramIrTypeMap[p.id] ?: irTypeFor(p.type, context)
                 ?: return reject("no IrType for param '${p.name}' type=${p.type}")
         }
         if (fn.returns.isEmpty() || fn.returns.size > 4) {
@@ -1178,7 +1203,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             irParams = irParams,
         )
 
-        val body = buildBody(fn, lambdaFun, irParams, boxedReturnType, bodyContext)
+        val body = buildBody(fn, lambdaFun, irParams, boxedReturnType, bodyContext, boxedScalarParams, returnIrTypes)
             ?: return reject(lastFailureReason ?: "buildBody aborted (no specific gate stamped)")
         lambdaFun.body = body
 
@@ -1200,6 +1225,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         irParams: List<IrValueParameter>,
         boxedReturnType: IrType,
         context: SynthesisContext,
+        boxedScalarParams: Map<Int, IrType> = emptyMap(),
+        returnIrTypes: List<IrType> = emptyList(),
     ): IrBlockBody? {
         val builder = DeclarationIrBuilder(
             pluginContext,
@@ -1213,10 +1240,25 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // `irGet` at each reference site keeps the tree node-disjoint even when the same dxir
         // value is referenced multiple times (e.g. `x * x`).
         val env = HashMap<Int, IrValueDeclaration>()
-        for ((i, p) in fn.params.withIndex()) env[p.id] = irParams[i]
 
         return try {
             builder.irBlockBody {
+                // §0.4.414 — boxed scalar params (FloatScalar / DoubleScalar) enter
+                // the body through ONE unwrap local (`val uN = s.toFloat()`), so
+                // every read site downstream sees the primitive exactly as the
+                // Float-param spelling does. Plain params bind directly, as ever.
+                for ((i, p) in fn.params.withIndex()) {
+                    val boxedTy = boxedScalarParams[p.id]
+                    if (boxedTy == null) {
+                        env[p.id] = irParams[i]
+                        continue
+                    }
+                    val unwrapped = irScalarUnbox(irParams[i], boxedTy, p.type, context)
+                        ?: cancelWith("no scalar unbox for boxed param '${p.name}' type=$boxedTy")
+                    val primTy = irTypeFor(p.type, context)
+                        ?: cancelWith("no primitive IrType for boxed param '${p.name}' type=${p.type}")
+                    env[p.id] = irTemporary(value = unwrapped, nameHint = "u${p.id}", irType = primTy)
+                }
                 for (node in fn.body) {
                     val expr: IrExpression = when (node) {
                         is DxirConst -> irConstFor(node, context)
@@ -1239,13 +1281,31 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     )
                     env[node.id] = v
                 }
+                // §0.4.414 — the mirror of the entry unwrap: a return slot whose
+                // declared (call-site) IrType is a boxed scalar class receives its
+                // rank-0 primitive gradient wrapped in the value-class constructor
+                // (`FloatScalar(g)`), both standalone and inside Pair/Triple/Quadruple.
+                fun returnElement(i: Int): IrExpression {
+                    val ret = fn.returns[i]
+                    val decl = env[ret.id] ?: cancelWith("return id=${ret.id} not in env")
+                    val target = returnIrTypes.getOrNull(i)
+                    if (target == null || !ret.type.isScalar || !isBoxedScalarType(target, ret.type.dtype)) {
+                        return irGet(decl)
+                    }
+                    val ctorSym = boxedScalarConstructor(target)
+                        ?: cancelWith("no constructor symbol for boxed scalar return type $target")
+                    val boxCall = IrConstructorCallImpl.fromSymbolOwner(
+                        startOffset = startOffset,
+                        endOffset = endOffset,
+                        type = target,
+                        constructorSymbol = ctorSym,
+                    )
+                    boxCall.arguments[0] = irGet(decl)
+                    return boxCall
+                }
                 val returnExpr: IrExpression = when (fn.returns.size) {
-                    1 -> irGet(env[fn.returns.single().id]
-                        ?: cancelWith("return id=${fn.returns.single().id} not in env"))
+                    1 -> returnElement(0)
                     2, 3, 4 -> {
-                        val elementDecls = fn.returns.map {
-                            env[it.id] ?: cancelWith("return id=${it.id} not in env")
-                        }
                         val ctorSym = when (fn.returns.size) {
                             2 -> pairConstructor() ?: cancelWith("kotlin.Pair constructor symbol not found")
                             3 -> tripleConstructor() ?: cancelWith("kotlin.Triple constructor symbol not found")
@@ -1262,8 +1322,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                         // Unified argument list: the caller owns positional `arguments[i]`.
                         // fromSymbolOwner sizes the list from the constructor's parameter
                         // shape (Pair/Triple have no dispatch receiver, just N regulars).
-                        elementDecls.forEachIndexed { i, decl ->
-                            ctorCall.arguments[i] = irGet(decl)
+                        for (i in fn.returns.indices) {
+                            ctorCall.arguments[i] = returnElement(i)
                         }
                         ctorCall
                     }
@@ -4612,6 +4672,82 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 val hasDispatch = candidate.parameters.any { it.kind == IrParameterKind.DispatchReceiver }
                 hasDispatch && regulars.isEmpty()
             }?.symbol
+    }
+
+    // ------------------------------------------------------------------
+    // §0.4.414 — boxed scalar params/returns (Phase A5c-3(iv) tail).
+    // ------------------------------------------------------------------
+
+    private fun floatScalarClass(): IrClassSymbol? =
+        pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/FloatScalar"))
+
+    private fun doubleScalarClass(): IrClassSymbol? =
+        pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/DoubleScalar"))
+
+    /**
+     * True when [irType] is the `:core` value class whose payload matches the
+     * DxirParam's erased [dtype] — `FloatScalar` ↔ F32, `DoubleScalar` ↔ F64.
+     * The dtype cross-check is what keeps the pair honest: a `DoubleScalar`
+     * call-site slot over an F32 dxir node (or vice versa) matches nothing and
+     * falls to the type guard rather than boxing the wrong precision.
+     * (`DoubleScalar` has no FIR-lowerable spelling today — see the plan — but
+     * the synthesis side is precision-symmetric by construction.)
+     */
+    private fun isBoxedScalarType(irType: IrType, dtype: DType): Boolean {
+        val classifier = (irType as? IrSimpleType)?.classifier ?: return false
+        return when (dtype) {
+            F32 -> classifier == floatScalarClass()
+            F64 -> classifier == doubleScalarClass()
+            else -> false
+        }
+    }
+
+    private fun boxedScalarConstructor(irType: IrType): IrConstructorSymbol? {
+        val classifier = (irType as? IrSimpleType)?.classifier ?: return null
+        val classId = when (classifier) {
+            floatScalarClass() -> "io/tlaloc/core/FloatScalar"
+            doubleScalarClass() -> "io/tlaloc/core/DoubleScalar"
+            else -> return null
+        }
+        return pluginContext.referenceConstructors(ClassId.fromString(classId)).singleOrNull()
+    }
+
+    /**
+     * The entry-side unwrap for a boxed scalar param: an IrCall to the value
+     * class's `toFloat()` / `toDouble()` member (chosen by the dxir dtype —
+     * for the matching precision it returns the payload `v` verbatim, see
+     * `:core/DScalar.kt`). Member resolution walks the class declarations the
+     * same way [findUnaryOp] does.
+     */
+    private fun IrBuilderWithScope.irScalarUnbox(
+        param: IrValueDeclaration,
+        boxedType: IrType,
+        scalarType: DxirType,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val cls = ((boxedType as? IrSimpleType)?.classifier as? IrClassSymbol)?.owner ?: return null
+        val memberName = when (scalarType.dtype) {
+            F32 -> "toFloat"
+            F64 -> "toDouble"
+            else -> return null
+        }
+        val sym = cls.declarations
+            .asSequence()
+            .filterIsInstance<IrSimpleFunction>()
+            .firstOrNull { candidate ->
+                candidate.name.asString() == memberName &&
+                    candidate.parameters.none { it.kind == IrParameterKind.Regular } &&
+                    candidate.parameters.any { it.kind == IrParameterKind.DispatchReceiver }
+            }?.symbol ?: return null
+        val ty = irTypeFor(scalarType, context) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = ty,
+            symbol = sym,
+        )
+        call.arguments[0] = irGet(param)
+        return call
     }
 
     private fun pairClass(): IrClassSymbol? =

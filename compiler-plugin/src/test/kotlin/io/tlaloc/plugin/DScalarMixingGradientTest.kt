@@ -28,13 +28,17 @@ import kotlin.test.assertTrue
  * `ds = Σa` is BroadcastRule's full-reduce adjoint, returned as the pair's
  * plain-Float second element.
  *
- * Test 2 PINS THE GAP for the `FloatScalar`-typed spelling: the `:core`
- * `DTensor.times(DScalar)` overload resolves and the FIR arm lowers it to the
- * IDENTICAL dxir (`%1: f32`, splat, mul, sum — pinned in the warning text),
- * but synthesis cannot box the rank-0 gradient back into a `FloatScalar`, so
- * the type guard keeps the original call (the documented "DScalar boxing"
- * fallback in TlalocIrGenerationExtension). When boxing lands, this pin fails
- * loudly and should be flipped into a value-checked E2E like test 1.
+ * Test 2 — §0.4.414 flipped the §0.4.397 pin: the `FloatScalar`-typed spelling
+ * now synthesises end-to-end. The `:core` `DTensor.times(DScalar)` overload
+ * lowers to the IDENTICAL dxir the Float spelling gets (`%1: f32`, splat, mul,
+ * sum); synthesis materialises the param AS `FloatScalar` (so the function
+ * type matches the call site), unwraps it once through `.toFloat()` at body
+ * start, and boxes the rank-0 gradient back via the value-class constructor —
+ * no tape fallback, gradients matching the Float-param twin exactly.
+ *
+ * Test 3 certifies the same surface through `valueAndGrad2`: the boxed
+ * gradient rides the Triple's third slot while the plain-Float value and the
+ * tensor gradient stay untouched.
  */
 class DScalarMixingGradientTest {
 
@@ -106,7 +110,7 @@ class DScalarMixingGradientTest {
     }
 
     @Test
-    fun `FloatScalar param spelling lowers to identical dxir but falls back on boxing`() {
+    fun `grad through DTensor times FloatScalar param synthesises with boxing`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -136,31 +140,95 @@ class DScalarMixingGradientTest {
         val result = compileAndRun(AUTOGRAD_STUB_FLOATSCALAR, src)
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
 
-        // The FIR half is DONE: the lowering must produce the same mixed dxir the
-        // Float spelling gets (rank-0 f32 param splatted over the tensor operand).
-        val loweredMixed = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING &&
-                "broadcast(%1, %0)" in it.message && "mul(%0," in it.message
-        }
-        assertTrue(
-            loweredMixed,
-            "expected the FloatScalar side to lower to the splat dxir. Messages:\n" +
-                result.messages.joinToString("\n--\n") { "${it.severity}: ${it.message}" },
-        )
-
-        // The synthesis half is NOT: boxing the rank-0 gradient back into a
-        // FloatScalar is unimplemented, so the type guard keeps the original call
-        // and the stub sentinel comes back. If this starts passing values through,
-        // the boxing landed — replace this pin with a value-checked E2E.
+        // §0.4.414 — no tape fallback: the boxed-scalar param synthesises.
         val keptOriginal = result.messages.any {
             it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
         }
         assertTrue(
-            keptOriginal,
-            "FloatScalar-param gradient synthesised! The DScalar boxing gap has been " +
-                "closed — flip this pin into a value-checked E2E (see test 1). Messages:\n" +
+            !keptOriginal,
+            "synthesis fell back; expected the FloatScalar-param gradient to lower. Warnings:\n${
+                result.messages.filter { it.severity == CompilerMessageSeverity.WARNING }
+                    .joinToString("\n--\n") { it.message }
+            }",
+        )
+
+        val lines = result.stdout.trim().lines()
+        assertEquals(4, lines.size, "expected 4 stdout lines, got: ${result.stdout}")
+        val da = lines[1].trim().split(" ").map { it.toFloat() }
+        val ds = lines[3].trim().toFloat()
+
+        // Identical analytics to the Float-param twin: da_i = s = 2.5; ds = Σa = 10,
+        // boxed back as FloatScalar(10) whose .v the harness prints.
+        assertEquals(4, da.size, "da size")
+        assertTrue(
+            da.any { it != -1.0f } || ds != -1.0f,
+            "stub sentinel returned — rewrite never fired. Messages:\n" +
                 result.messages.joinToString("\n--\n") { "${it.severity}: ${it.message}" },
         )
+        for (i in da.indices) {
+            assertTrue(abs(da[i] - 2.5f) < 1e-5f, "da[$i] = ${da[i]}, want 2.5. Stdout:\n${result.stdout}")
+        }
+        assertTrue(abs(ds - 10f) < 1e-5f, "ds.v = $ds, want 10 (= Σa). Stdout:\n${result.stdout}")
+    }
+
+    @Test
+    fun `valueAndGrad2 through DTensor times FloatScalar param boxes the gradient slot`() {
+        val src = """
+            import io.tlaloc.autograd.valueAndGrad2
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.FloatScalar
+            import io.tlaloc.core.Lit
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun main() {
+                val g = valueAndGrad2 { a: DTensor<Rank2<Sym, Lit<Int>>, F32>, s: FloatScalar ->
+                    (a * s).sum().toFloat()
+                }
+                val A = Tensors.f32Matrix<Sym, Lit<Int>>(2, 2, floatArrayOf(1f, 2f, 3f, 4f))
+                val (value, da, ds) = g(A, FloatScalar(2.5f))
+                println("value")
+                println(value)
+                println("da")
+                for (v in da.hostF32()) print("" + v + " ")
+                println()
+                println("ds")
+                println(ds.v)
+            }
+        """.trimIndent()
+        val result = compileAndRun(AUTOGRAD_STUB_VALUEANDGRAD2, src)
+        assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
+
+        val keptOriginal = result.messages.any {
+            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+        }
+        assertTrue(
+            !keptOriginal,
+            "synthesis fell back; expected the valueAndGrad2 FloatScalar surface to lower. Warnings:\n${
+                result.messages.filter { it.severity == CompilerMessageSeverity.WARNING }
+                    .joinToString("\n--\n") { it.message }
+            }",
+        )
+
+        val lines = result.stdout.trim().lines()
+        assertEquals(6, lines.size, "expected 6 stdout lines, got: ${result.stdout}")
+        val value = lines[1].trim().toFloat()
+        val da = lines[3].trim().split(" ").map { it.toFloat() }
+        val ds = lines[5].trim().toFloat()
+
+        // value = Σ (a ⊙ s) = 2.5 · 10 = 25 (the plain-Float first slot);
+        // da_i = 2.5; ds = Σa = 10 boxed as FloatScalar in the third slot.
+        assertTrue(abs(value - 25f) < 1e-5f, "value = $value, want 25. Stdout:\n${result.stdout}")
+        assertEquals(4, da.size, "da size")
+        for (i in da.indices) {
+            assertTrue(abs(da[i] - 2.5f) < 1e-5f, "da[$i] = ${da[i]}, want 2.5. Stdout:\n${result.stdout}")
+        }
+        assertTrue(abs(ds - 10f) < 1e-5f, "ds.v = $ds, want 10 (= Σa). Stdout:\n${result.stdout}")
     }
 
     private fun pluginClasspath(): Array<String> = arrayOf(
@@ -258,6 +326,25 @@ class DScalarMixingGradientTest {
                     (DTensor<Rank2<Sym, Lit<Int>>, F32>, FloatScalar) ->
                         Pair<DTensor<Rank2<Sym, Lit<Int>>, F32>, FloatScalar> =
                 { _, _ -> Pair(
+                    DTensor(HostF32Storage(FloatArray(4) { -1.0f }), intArrayOf(2, 2), F32),
+                    FloatScalar(-1.0f),
+                ) }
+        """.trimIndent()
+
+        private val AUTOGRAD_STUB_VALUEANDGRAD2 = """
+            package io.tlaloc.autograd
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.FloatScalar
+            import io.tlaloc.core.HostF32Storage
+            import io.tlaloc.core.Lit
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            fun valueAndGrad2(f: (DTensor<Rank2<Sym, Lit<Int>>, F32>, FloatScalar) -> Float):
+                    (DTensor<Rank2<Sym, Lit<Int>>, F32>, FloatScalar) ->
+                        Triple<Float, DTensor<Rank2<Sym, Lit<Int>>, F32>, FloatScalar> =
+                { _, _ -> Triple(
+                    -1.0f,
                     DTensor(HostF32Storage(FloatArray(4) { -1.0f }), intArrayOf(2, 2), F32),
                     FloatScalar(-1.0f),
                 ) }
