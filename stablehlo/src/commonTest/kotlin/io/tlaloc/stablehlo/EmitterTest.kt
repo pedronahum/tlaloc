@@ -611,6 +611,31 @@ class EmitterTest {
     }
 
     @Test
+    fun rngOpsRefuseEmissionLoudlyByName() {
+        // §0.4.408 — Phase D1: the RNG ops deliberately have no StableHLO
+        // arm. `stablehlo.rng_bit_generator`'s counter layout would not
+        // reproduce the host/interpreter threefry stream bit-for-bit, and a
+        // silent stream fork between engines is exactly what the stateless
+        // PRNG design exists to prevent. Explicit-threefry emission (JAX's
+        // own approach) is the recorded Phase D tail.
+        for (kind in listOf(OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL)) {
+            val fn = DxirBuilder.function("rng") {
+                listOf(
+                    op(
+                        kind, emptyList(), DxirType(F32, listOf(2, 3)),
+                        attrs = mapOf("key0" to 7, "key1" to 42, "dims" to listOf(2, 3)),
+                    ),
+                )
+            }
+            val ex = assertFailsWith<IllegalStateException> { fn.toStablehlo() }
+            assertTrue(
+                "$kind has no StableHLO emission" in ex.message.orEmpty(),
+                "expected a named RNG refusal; got: ${ex.message}",
+            )
+        }
+    }
+
+    @Test
     fun matmulLowersToDotGeneralWithContractingDims() {
         val fn = DxirBuilder.function("mm") {
             val a = param("a", DxirType(F32, listOf(2, 3)))

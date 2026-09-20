@@ -277,6 +277,12 @@ class GradientEmissionCoverageTest {
                 attrs = mapOf("window" to listOf(2, 2), "window_strides" to listOf(2, 2)),
             )
         },
+        // §0.4.408 — RNG_UNIFORM / RNG_NORMAL are EXCLUDED from this sweep,
+        // doubly by design: they have no VjpRule (a draw is non-differentiable
+        // in D1 — the reverse transform refuses by name, pinned in
+        // DxirRngTest) and no emission arm (the emitter refuses rather than
+        // fork the threefry stream via rng_bit_generator, pinned in
+        // EmitterTest.rngOpsRefuseEmissionLoudlyByName).
     )
 
     @Test

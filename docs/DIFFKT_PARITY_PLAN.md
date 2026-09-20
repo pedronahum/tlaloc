@@ -1544,12 +1544,57 @@ reachable from `grad {}`, not new math. New-op families come after.
 
 ### Phase D — random (DiffKT `RandomKey` parity)
 
-- **D1. Stateless PRNG**: key type + `split`, `uniform`, `normal` ops
-  (`stablehlo.rng_bit_generator` + box-muller or threefry, matching the
-  JAX-style counter-based design DiffKT mirrors); interpreter twin.
+- ✅ **D1. Stateless PRNG foundation — DONE (§0.4.408)**: `RandomKey` (two
+  32-bit words, the JAX convention; DiffKT's SHA-512 counter design replaced
+  by JAX's threefry, same statelessness contract) + `split(n)` + `foldIn` +
+  `uniform` / `normal` draws, host and interpreter.
+  - `:core/Random.kt` — ONE source of truth (the §0.4.402 SpecialFunctions
+    convention): `threefry2x32` at the reference 20-round schedule, validated
+    against the Random123 known-answer vectors; `threefryBits(key, n)` in
+    JAX's CLASSIC counter layout (split-halves over `iota(n)`, odd-n zero pad
+    at the END with the last output word dropped) — pinned bit-for-bit
+    against JAX 0.10 with `jax_threefry_partitionable=False` (vectors
+    generated on this machine from the iree venv's JAX install, including the
+    odd-n lanes where a wrong pad side shows first); `split` = bits over
+    `iota(2n)` reshaped to key pairs, `foldIn(data)` = the block function at
+    counter `(0, data)` — both JAX-exact. `uniformFloats` = the JAX mantissa
+    recipe (`bits >>> 9 | 0x3f800000`, bitcast to [1,2), subtract 1) —
+    JAX-exact to the bit. `normalFloats` = Box-Muller over one
+    `uniform(2n)` stream (radial half + angular half, `1−u` keeps the log
+    finite; sine partner discarded) — the one DOCUMENTED deviation from JAX
+    (which uses `√2·erfinv(2u−1)`): same distribution, different bits, chosen
+    because it validates against elementary identities. User surface: host
+    tensor wrappers `RandomKey.uniformVector/uniformMatrix/normalVector/
+    normalMatrix` (draws over the flat index space).
+  - IR: `RNG_UNIFORM` / `RNG_NORMAL` — zero-operand creation ops, attrs
+    `key0`/`key1`/`dims` all literal (no FIR lowering exists, so `grad {}`'s
+    -1 sentinels can never reach them; the interpreter REQUIRES the `dims`
+    attr to equal the concrete result dims). Interpreter arms call the same
+    `:core` kernels — host/interpreter bit-exact BY CONSTRUCTION and pinned
+    in `DxirRngTest`. CostModel arms (threefry ≈ 26 flops/elem, Box-Muller
+    ≈ 64). NON-differentiable, deliberately: no VjpRule and no forward
+    tangent arm — both transforms refuse loudly by name (pinned; a draw is
+    piecewise-constant in its key, and reparameterized gradients are D2).
+  - Emitter: a DELIBERATE named refusal, adjudicated rather than spiked:
+    `stablehlo.rng_bit_generator`'s threefry counter layout is XLA-internal
+    and does not reproduce the JAX-classic stream these kernels pin — JAX
+    itself never emits rng_bit_generator for threefry keys, it emits the
+    20-round block as explicit HLO ops precisely to keep streams
+    engine-independent. Shipping it would silently fork the random stream
+    between interpreter and GPU. Refusal pinned in `EmitterTest`;
+    `GradientEmissionCoverageTest` exclusion documented in place.
+  - Certified: Random123 KATs; JAX-generated layout pins for bits (n = 1, 5,
+    6, 7), uniform (bit-exact, even + odd), split(3), foldIn; split
+    independence + determinism; uniform range/moments and normal
+    mean/var/skew at a FIXED key (deterministic pins, no flake surface);
+    Box-Muller numpy-reference pins; interpreter-vs-host bit-exactness.
+  - **Deferred tails (recorded)**: explicit-threefry StableHLO emission
+    (JAX's approach — the only honest GPU path); FIR/`grad {}` surface for
+    draws inside lambdas (D2-era); `permitReuse`/`DiffktRandom` wrapper
+    sugar; cauchy/chiSquare (inverse-CDF sugar over uniform).
 - **D2. Reparameterized gradients**: gradients flow through loc/scale of
   sampled normals (DiffKT's Gamma/Dirichlet implicit reparameterization is
-  the stretch goal — needs C1 first).
+  the stretch goal — needs C1 first; C1 landed §0.4.402/405).
 
 ### Phase E — sparse (DiffKT `SparseFloatTensor` parity)
 
@@ -1644,9 +1689,12 @@ argument fallback) ·
 `floats/uniform/gaussian` + distributions: `cauchy`, `chiSquare`,
 `gamma` (with-rate/with-scale, **implicit reparameterization** — the
 raw-op `gamma(alpha, randomKey)` participates in AD), `DiffktRandom`
-wrapper, `Wrapper.wrapRandomKey`. All ❌ → Phase D (D1 key+uniform+
-gaussian; D2 reparam; cauchy/chiSquare are inverse-CDF sugar over
-uniform; gamma reparam needs C1's digamma — landed, §0.4.402).
+wrapper, `Wrapper.wrapRandomKey`. §0.4.408: key + `split` + `foldIn` +
+uniform/gaussian ✅ (D1, threefry-based host+interpreter; JAX-classic
+layout, not SHA-512 — same statelessness contract); `permitReuse` /
+distributions / `DiffktRandom` / reparam still ❌ → D2 (cauchy/chiSquare
+are inverse-CDF sugar over uniform; gamma reparam needs C1's digamma —
+landed, §0.4.402).
 
 #### Sparse (`SparseFloatTensor` / `SparseRowFloatTensor`)
 

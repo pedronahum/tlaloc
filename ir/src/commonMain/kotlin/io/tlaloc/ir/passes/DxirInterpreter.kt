@@ -9,10 +9,13 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirOpResult
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.DxirType
+import io.tlaloc.core.RandomKey
 import io.tlaloc.core.digamma
 import io.tlaloc.core.lgamma
+import io.tlaloc.core.normalFloats
 import io.tlaloc.core.polygamma
 import io.tlaloc.core.trigamma
+import io.tlaloc.core.uniformFloats
 import io.tlaloc.ir.OpKind
 import kotlin.math.pow
 
@@ -402,6 +405,28 @@ object DxirInterpreter {
                 val order = (op.attrs["order"] as? Number)?.toInt()
                     ?: error("POLYGAMMA is missing its integer 'order' attr")
                 FloatArray(a.size) { a[it].toDouble().polygamma(order).toFloat() }
+            }
+            // §0.4.408 — Phase D1 stateless PRNG draws: zero-operand creation
+            // ops whose stream is entirely determined by the `key0`/`key1` +
+            // `dims` attrs. Both arms call the SAME `:core/Random.kt` kernels
+            // the host tensor surface uses, so host and interpreter agree
+            // bit-for-bit by construction (asserted in DxirRngTest). The
+            // `dims` attr must equal the concrete result type's dims — these
+            // ops have no FIR lowering, so grad-{} -1 sentinels cannot occur.
+            OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL -> {
+                val k0 = (op.attrs["key0"] as? Number)?.toInt()
+                    ?: error("${op.op} is missing its integer 'key0' attr")
+                val k1 = (op.attrs["key1"] as? Number)?.toInt()
+                    ?: error("${op.op} is missing its integer 'key1' attr")
+                val dims = (op.attrs["dims"] as? List<*>)?.map {
+                    (it as? Number)?.toInt() ?: error("${op.op} 'dims' attr must be List<Int>")
+                } ?: error("${op.op} is missing its List<Int> 'dims' attr")
+                require(dims == op.type.dims) {
+                    "${op.op} 'dims' attr $dims disagrees with result type dims ${op.type.dims}"
+                }
+                val n = dims.fold(1) { acc, d -> acc * d }
+                val key = RandomKey(k0, k1)
+                if (op.op == OpKind.RNG_UNIFORM) uniformFloats(key, n) else normalFloats(key, n)
             }
             OpKind.SQRT -> {
                 // Element-wise square root. `kotlin.math.sqrt` returns NaN for negative

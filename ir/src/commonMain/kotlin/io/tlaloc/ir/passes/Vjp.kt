@@ -1823,6 +1823,11 @@ object VjpRegistry {
         // placement are each other's adjoints, with the priors riding along.
         OpKind.SLICE_LIKE to SliceLikeVjpRule,
         OpKind.PAD_LIKE to PadLikeRule,
+        // §0.4.408 — RNG_UNIFORM / RNG_NORMAL are DELIBERATELY absent: a
+        // stateless draw is piecewise-constant in its key and has no operands
+        // to propagate to, so a grad {} body containing one refuses with the
+        // generic "no VJP rule registered for RNG_*" (pinned in DxirRngTest).
+        // DiffKT's reparameterized-gradient story is Phase D2.
     )
 
     operator fun get(kind: OpKind): VjpRule? = rules[kind]

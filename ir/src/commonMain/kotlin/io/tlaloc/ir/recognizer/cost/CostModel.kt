@@ -158,6 +158,13 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // with an order-lengthened recurrence walk (shift threshold 10 + n).
     OpKind.POLYGAMMA -> 32.0 * op.type.elementCount.toDouble()
 
+    // §0.4.408 — Phase D1 stateless PRNG draws. One threefry-2x32 block is 20
+    // ARX rounds (~50 adds/rotates/xors) and yields TWO output words, so
+    // uniform pays ~25 integer ops + the mantissa bitcast per element; normal
+    // draws two uniforms and adds Box-Muller's log/sqrt/cos transcendentals.
+    OpKind.RNG_UNIFORM -> 26.0 * op.type.elementCount.toDouble()
+    OpKind.RNG_NORMAL -> 64.0 * op.type.elementCount.toDouble()
+
     // Reductions over an axis (or all): N − 1 ≈ N adds per reduced
     // element.
     OpKind.SUM, OpKind.MEAN, OpKind.MAX, OpKind.MIN, OpKind.ARGMAX -> {

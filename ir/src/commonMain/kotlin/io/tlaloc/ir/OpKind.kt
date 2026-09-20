@@ -369,6 +369,34 @@ enum class OpKind {
     // non-differentiable so no gradient flows to them.
     EMBEDDING_GRAD,
 
+    // §0.4.408 — Phase D1: stateless PRNG draws (DiffKT `RandomKey` parity).
+    // Zero-operand creation ops; attrs carry everything: `key0`/`key1` (Int —
+    // the two 32-bit words of the :core `RandomKey`) and `dims` (List<Int>,
+    // the concrete result extents, which must equal the result type's — these
+    // ops have no FIR lowering, so no -1 sentinel can ever reach them, and the
+    // literal-attr shape is the invariant that keeps it that way). The
+    // interpreter arms call the SAME `:core/Random.kt` kernels the host
+    // surface uses (`uniformFloats` / `normalFloats` — threefry-2x32 in JAX's
+    // classic counter layout, pinned bit-for-bit against JAX 0.10 with
+    // `jax_threefry_partitionable=False`), so host and interpreter agree
+    // bit-for-bit by construction.
+    //
+    // NON-differentiable in this slice, deliberately: no VjpRule (a `grad {}`
+    // body containing one refuses "no VJP rule registered for RNG_*") and no
+    // forward tangent arm ("no tangent rule for RNG_*") — the draw is
+    // piecewise-constant in the key, and DiffKT's reparameterized-gradient
+    // story (gradients through loc/scale of sampled normals) is Phase D2.
+    //
+    // NO StableHLO emission either: `stablehlo.rng_bit_generator`'s threefry
+    // counter layout is XLA-internal and does NOT reproduce the JAX-style
+    // split-halves stream these kernels pin (JAX itself never emits
+    // rng_bit_generator for threefry keys — it emits the 20-round block as
+    // explicit HLO ops precisely to keep the stream reproducible). Emitting
+    // it would silently fork the random stream between engines, so the
+    // emitter refuses loudly by name; the honest GPU path — emitting the
+    // threefry rounds as explicit stablehlo ops — is a recorded Phase D tail.
+    RNG_UNIFORM, RNG_NORMAL,
+
     // Structured control flow (Stage B substrate per docs/STAGE_B_PLAN.md §3.1).
     //
     // IF: 1 boolean-scalar predicate operand + 2 regions [then, else]. Each region has a

@@ -423,6 +423,26 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 outType = node.type,
             )
 
+            // §0.4.408 — Phase D1: a DELIBERATE refusal, not a gap.
+            // `stablehlo.rng_bit_generator`'s threefry counter layout is
+            // XLA-internal and does not reproduce the JAX-classic
+            // split-halves stream the host/interpreter kernels in
+            // `:core/Random.kt` pin bit-for-bit — JAX itself never emits
+            // rng_bit_generator for threefry keys, it emits the 20-round
+            // block as explicit HLO ops precisely to keep the stream
+            // engine-independent. Emitting it here would silently fork the
+            // random stream between the interpreter and the GPU, so the arm
+            // fails loudly instead; the honest GPU path (emitting the
+            // threefry rounds as explicit stablehlo ops, JAX's approach) is
+            // a recorded Phase D tail in docs/DIFFKT_PARITY_PLAN.md.
+            OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL -> error(
+                "${node.op} has no StableHLO emission (Phase D1): " +
+                    "stablehlo.rng_bit_generator's counter layout would not " +
+                    "reproduce the host/interpreter threefry stream bit-for-bit; " +
+                    "draw on host via :core RandomKey.uniform*/normal* instead " +
+                    "(explicit-threefry emission is a recorded Phase D tail)",
+            )
+
             else -> error("StableHLO lowering not yet implemented for ${node.op}")
         }
         // Most ops emit a single line whose result is the literal `%N` we named above.
