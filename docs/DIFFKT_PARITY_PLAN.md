@@ -11,7 +11,7 @@ supports that Tlaloc doesn't yet.
 | Reverse-mode AD (vjp/pullback) | ✅ `DxirReverseTransform` + runtime synthesis + compile-time probe |
 | Forward-mode AD (jvp/pushforward) | ✅ `DxirForwardTransform` (§0.4.361) + user intrinsics `jvp`/`valueAndJvp` (§0.4.372, B1) + 2-arg forms (§0.4.387) + regions/loops (§0.4.403, B3) + direct IF arm (§0.4.407) |
 | Higher-order (hessian-vector) | ✅ full nesting matrix certified at IR level (§0.4.401): fwd∘rev, fwd∘fwd, rev∘fwd, rev∘rev + a third-order spot check; fused-adjoint refusals pinned. User `hessian`/`hessian2` intrinsics §0.4.394/406 |
-| conv2d + gradients | ✅ §0.4.362; `grad {}` E2E §0.4.384–385; conv-transpose's own adjoint §0.4.391 + GPU emission §0.4.393 (groups/depthwise still deferred → C4) |
+| conv2d + gradients | ✅ §0.4.362; `grad {}` E2E §0.4.384–385; conv-transpose's own adjoint §0.4.391 + GPU emission §0.4.393; grouped/depthwise (feature_group_count) at IR level §0.4.429 — interpreter + CONV2D VJP/JVP + primal GPU emission; user surface deferred by name |
 | maxPool/avgPool + gradients | ✅ §0.4.363; `grad {}` E2E §0.4.386/389 (overlapping-maxpool GPU emission closed as INHERENT §0.4.392 — host/interpreter handle it, StableHLO cannot express the all-ties convention) |
 | select / comparisons in grad lambdas | ✅ §0.4.364 |
 | Elementwise tensor arithmetic in grad lambdas | ✅ §0.4.364 (`plus/minus/times/div`) |
@@ -1776,8 +1776,32 @@ reachable from `grad {}`, not new math. New-op families come after.
   ~~overlapping-window maxpool VJP GPU path~~ (closed as INHERENT §0.4.392 —
   `select_and_scatter` cannot express the all-ties convention; host and
   interpreter handle overlapping windows, emission refuses loudly).
-  Remaining: grouped/depthwise conv (feature_group_count > 1) — the only
-  live C4 item, and beyond DiffKT parity.
+  ~~grouped/depthwise conv (feature_group_count > 1)~~ — **landed at IR
+  level §0.4.429**, the §0.4.418 SPARSE_MATMUL precedent. The attr rides
+  StableHLO's own layout convention (kernel input-feature dim = Ci/g,
+  output-feature dim = full Co; depthwise = `g == Ci` falls out with no
+  arm of its own): interpreter `conv2dCore` grouped for BOTH conv kinds;
+  `Conv2dRule` rides the literal attr and the fused adjoints group-slice
+  their channels SYMMETRICALLY at execution time (dX: upstream/kernel
+  rows by Co/g → input channels by Ci/g; dW the mirror), each per-group
+  call being the fgc = 1 adjoint verbatim; forward tangent was already
+  attr-generic (the bilinear arm replays `node.attrs`); primal emission
+  already carried `feature_group_count` — certified against real XLA by
+  GPU smoke (grouped loss + JVP tangent graph, diff 5e-7/0.0). Oracles:
+  hand-computed 1×1 grouped conv on a quarter-integer grid, grouped ==
+  concat-of-per-group-ungrouped-convs equivalence (CONV2D, depthwise,
+  CONV_TRANSPOSE2D, general attrs), FD + JVP⇄VJP cross-identity, and
+  gradients' own slicing symmetry (`DxirGroupedConvTest`). **Named
+  §0.4.429 deferrals** (each refuses loudly, naming the attr): grouped
+  TRANSPOSED-conv VJP (`ConvTranspose2dRule` refuses at transform time;
+  the index-inversion eval would need the same per-group lift); grouped
+  ADJOINT emission (XLA spells grouped data-grad through a per-group
+  kernel reshuffle and grouped kernel-grad through `batch_group_count` —
+  neither attempted; interpreter handles groups, GPU reverse-mode
+  refuses); the USER SURFACE (host twins/`conv2d(..., groups)` FIR
+  arity/K2 synthesis — `irConv` still rejects fgc > 1 into the tape
+  fallback, whose host twins are groups-free, so nothing user-reachable
+  can convolve the wrong way).
 - ✅ **C5. `integral` — DONE (§0.4.411)** *(audit)*: Romberg quadrature with
   FTC-wired derivatives, as the scalar host surface it naturally is.
   - `:core/Integral.kt` (the §0.4.402 one-source-of-truth convention):
@@ -2032,7 +2056,7 @@ argument fallback) ·
 | `innerProduct` | ✅ | DOT |
 | `outerProduct` | ✅ | §0.4.369: host + FIR (matmul on unsqueezed) + IR-level grad; §0.4.375: grad{} E2E (A4b — `Lit<Int>` placeholder atom for reshape-created unit axes types MatmulRule's transpose forward + squeeze backward) |
 | `matdiv` | ➖ | **sparse-only** in DiffKT (dense explicitly unsupported) → E |
-| `conv2d(hStride, vStride, Same/Valid/Explicit padding)` | ✅ | §0.4.362 **exceeds**: DiffKT has no groups/dilation, NHWC only |
+| `conv2d(hStride, vStride, Same/Valid/Explicit padding)` | ✅ | §0.4.362 **exceeds**: DiffKT has no groups/dilation, NHWC only; grouped/depthwise at IR level §0.4.429 |
 | `maxPool / avgPool / maxPoolWithIndices` | ✅ | §0.4.363 **exceeds**: DiffKT pooling is non-overlapping only (stride=window, divisibility required, no padding) → C4 reclassified beyond-parity |
 | `batchNorm` (raw op, training-stats variant) | ✅ | §0.4.390 — training form differentiates in `grad {}` by FIR DESUGARING onto fully-ruled ops (the BATCHNORM OpKind stays the Layer-3 inference form) |
 | `softmax(axis) / logSoftmax / logSoftmaxGrad` | ✅ | A3a (§0.4.368) — `softmax(axis)` + `logSoftmax(axis)` E2E through `grad {}` (LOGSUMEXP stays emitter-only) |
@@ -2193,8 +2217,10 @@ audit's recommendations).
    identity ⟨u,Hv⟩ = ⟨v,Hu⟩.
 3. **Recorded tails on the books** (each its own §-sized slice when
    pulled): B3's multi-result COARSENED tangents + IF-inside-primal_body
-   splice; A-phase tails above; C4's grouped/depthwise conv (beyond
-   parity). (B2's reverse-assembled tall Jacobians closed §0.4.412.)
+   splice; A-phase tails above; C4's grouped-conv §0.4.429 named
+   deferrals (transposed-conv grouped VJP, grouped adjoint emission,
+   the user surface). (B2's reverse-assembled tall Jacobians closed
+   §0.4.412; grouped/depthwise conv landed at IR level §0.4.429.)
 
 Certification discipline per CLAUDE-memory: solo full-suite runs, count
 gate updated per §, GPU smokes for anything touching the emitter.

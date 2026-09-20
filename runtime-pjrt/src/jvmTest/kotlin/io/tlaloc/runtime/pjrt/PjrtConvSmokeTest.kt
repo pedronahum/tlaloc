@@ -79,4 +79,64 @@ class PjrtConvSmokeTest {
         assertTrue(lossDiff <= 1e-4f * maxOf(1f, abs(wantLoss)), "conv loss diverges: $lossDiff")
         assertTrue(gradDiff <= 1e-4f, "conv gradients diverge from interpreter: $gradDiff")
     }
+
+    /**
+     * §0.4.429 — grouped conv against real XLA: `feature_group_count = 2` rides
+     * onto the emitted convolution, and XLA is the independent oracle for the
+     * interpreter's new per-group semantics. The FORWARD-mode tangent graph runs
+     * too — every op in it is a primal grouped convolution (the bilinear product
+     * rule), which is exactly the emission surface; reverse mode stays off the
+     * GPU here because grouped ADJOINT emission is that section's named deferral.
+     */
+    @Test
+    fun groupedConvForwardAndJvpRunOnGpuAndMatchInterpreter() {
+        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+
+        val xT = DxirType(F32, listOf(1, 4, 5, 4))
+        val wT = DxirType(F32, listOf(6, 2, 3, 2))
+        val yT = DxirType(F32, listOf(1, 6, 2, 4))
+        val fn = DxirBuilder.function("grouped_conv_loss") {
+            val x = param("x", xT)
+            val w = param("w", wT)
+            val y = op(
+                OpKind.CONV2D, listOf(x, w), yT,
+                attrs = mapOf(
+                    "window_strides" to listOf(2, 1),
+                    "padding" to listOf(listOf(1, 0), listOf(1, 1)),
+                    "rhs_dilation" to listOf(1, 2),
+                    "feature_group_count" to 2,
+                ),
+            )
+            val y2 = op(OpKind.MUL, listOf(y, y), yT)
+            listOf(op(OpKind.SUM, listOf(y2), scalar))
+        }
+        val fwd = io.tlaloc.ir.passes.DxirForwardTransform.apply(fn)
+
+        val rng = java.util.Random(429)
+        val x = FloatArray(1 * 4 * 5 * 4) { rng.nextFloat() - 0.5f }
+        val w = FloatArray(6 * 2 * 3 * 2) { rng.nextFloat() - 0.5f }
+        val vx = FloatArray(x.size) { rng.nextFloat() - 0.5f }
+        val vw = FloatArray(w.size) { rng.nextFloat() - 0.5f }
+
+        val wantLoss = DxirInterpreter.evalFunction(fn, listOf(x, w)).single().single()
+        val wantTangent =
+            DxirInterpreter.evalFunction(fwd, listOf(x, w, vx, vw)).last().single()
+
+        val gotLoss: Float
+        val gotTangent: Float
+        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+            gotLoss = session.runOn(fn, listOf(x, w)).single().single()
+            gotTangent = session.runOn(fwd, listOf(x, w, vx, vw)).last().single()
+        }
+
+        val lossDiff = abs(gotLoss - wantLoss)
+        val tanDiff = abs(gotTangent - wantTangent)
+        println("[pjrt-grouped-conv] loss |diff|=$lossDiff, jvp |diff|=$tanDiff on GB10 vs interpreter")
+        assertTrue(lossDiff <= 1e-4f * maxOf(1f, abs(wantLoss)), "grouped conv loss diverges: $lossDiff")
+        assertTrue(
+            tanDiff <= 1e-3f * maxOf(1f, abs(wantTangent)),
+            "grouped conv jvp diverges from interpreter: $tanDiff",
+        )
+    }
 }

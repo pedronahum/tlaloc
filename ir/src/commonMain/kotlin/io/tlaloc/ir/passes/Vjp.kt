@@ -835,11 +835,16 @@ object VjpRegistry {
                 ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
                 ?: listOf(listOf(0, 0), listOf(0, 0))
 
-            val primalAttrs = mapOf<String, Any>(
-                "window_strides" to s,
-                "padding" to p,
-                "rhs_dilation" to d,
-            )
+            // §0.4.429 — feature_group_count rides verbatim: it is a compile-time
+            // literal off the primal (never dim-derived), and the fused adjoints
+            // group-slice their channels symmetrically at execution time.
+            val fgc = (op.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
+            val primalAttrs = buildMap<String, Any> {
+                put("window_strides", s)
+                put("padding", p)
+                put("rhs_dilation", d)
+                if (fgc != 1) put("feature_group_count", fgc)
+            }
             val dX = builder.op(
                 OpKind.CONV2D_DATA_ADJOINT, listOf(upstream, wgt, x), x.type, attrs = primalAttrs,
             )
@@ -879,6 +884,16 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
             val wgt = op.operands[1]
+
+            // §0.4.429 — grouped TRANSPOSED conv differentiates nowhere yet: the
+            // primal interprets and emits with groups, but its adjoints' per-group
+            // slicing is a recorded deferral. Refuse at transform time, by name.
+            val fgc = (op.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
+            require(fgc == 1) {
+                "ConvTranspose2dRule: feature_group_count $fgc unsupported — grouped " +
+                    "transposed-conv VJP is a §0.4.429 named deferral (groups ride only on " +
+                    "CONV2D's adjoints today)"
+            }
 
             fun intPair(key: String, def: List<Int>): List<Int> =
                 (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() } ?: def

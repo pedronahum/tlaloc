@@ -1791,8 +1791,16 @@ object DxirInterpreter {
      * StableHLO), `lhs_dilation` (interior-dilates the input — the
      * transposed-conv mechanism), `rhs_dilation` (à-trous kernel), and
      * `window_reversal` [Bool, Bool] (spatially flips the kernel taps —
-     * what the conv adjoint needs). `feature_group_count` /
-     * `batch_group_count` must be 1 in v1.
+     * what the conv adjoint needs).
+     *
+     * §0.4.429 — `feature_group_count` (default 1) is honoured with
+     * StableHLO's own layout convention: the kernel's input-feature dim
+     * carries `Ci / g` and its output-feature dim the FULL `Co`
+     * (divisible by g), so output channel `o` belongs to group
+     * `o / (Co/g)` and contracts only that group's `Ci / g` lhs
+     * channels. Depthwise (`g == Ci`, kernel `[C, 1, kh, kw]`) is the
+     * special case and needs no arm of its own. `batch_group_count`
+     * must still be 1 — nothing user-reachable sets it.
      *
      * Reference implementation, deliberately direct: for every output
      * element walk the kernel window, map each tap back through stride,
@@ -1834,10 +1842,12 @@ object DxirInterpreter {
         val padding = (attrs["padding"] as? List<*>)
             ?.map { row -> (row as List<*>).map { (it as Number).toInt() } }
             ?: listOf(listOf(0, 0), listOf(0, 0))
-        val fgc = (attrs["feature_group_count"] as? Int) ?: 1
-        val bgc = (attrs["batch_group_count"] as? Int) ?: 1
-        require(fgc == 1 && bgc == 1) {
-            "DxirInterpreter: $kind feature/batch groups unsupported in v1 (got $fgc/$bgc)"
+        val fgc = (attrs["feature_group_count"] as? Number)?.toInt() ?: 1
+        val bgc = (attrs["batch_group_count"] as? Number)?.toInt() ?: 1
+        require(fgc >= 1) { "DxirInterpreter: $kind feature_group_count must be ≥ 1; got $fgc" }
+        require(bgc == 1) {
+            "DxirInterpreter: $kind batch_group_count unsupported (got $bgc) — nothing " +
+                "user-reachable sets it"
         }
 
         val (nB, cIn, h, w) = lhsT.dims
@@ -1851,8 +1861,13 @@ object DxirInterpreter {
         } else {
             cKIn = rhsT.dims[0]; cOut = rhsT.dims[1]
         }
-        require(cKIn == cIn) {
-            "DxirInterpreter: $kind kernel input channels $cKIn ≠ lhs channels $cIn"
+        require(cIn % fgc == 0 && cOut % fgc == 0) {
+            "DxirInterpreter: $kind feature_group_count $fgc must divide lhs channels $cIn " +
+                "and output channels $cOut"
+        }
+        require(cKIn == cIn / fgc) {
+            "DxirInterpreter: $kind kernel input channels $cKIn ≠ lhs channels $cIn / " +
+                "groups $fgc"
         }
 
         val hDil = (h - 1) * lhsDil[0] + 1
@@ -1867,13 +1882,16 @@ object DxirInterpreter {
         }
 
         val out = FloatArray(nB * cOut * hOut * wOut)
+        val coutPerGroup = cOut / fgc
         var outIdx = 0
         for (n in 0 until nB) {
             for (o in 0 until cOut) {
+                // Group-local kernel channel `i` reads lhs channel `gBase + i`.
+                val gBase = (o / coutPerGroup) * cKIn
                 for (y in 0 until hOut) {
                     for (x in 0 until wOut) {
                         var acc = 0.0
-                        for (i in 0 until cIn) {
+                        for (i in 0 until cKIn) {
                             for (ky in 0 until kh) {
                                 // Tap position in the dilated+padded input space.
                                 val yDil = y * strides[0] + ky * rhsDil[0] - padding[0][0]
@@ -1888,12 +1906,12 @@ object DxirInterpreter {
                                     if (inX >= w) continue
                                     val wKx = if (reversal[1]) kw - 1 - kx else kx
                                     val wIdx = if (kind == OpKind.CONV2D) {
-                                        ((o * cIn + i) * kh + wKy) * kw + wKx
+                                        ((o * cKIn + i) * kh + wKy) * kw + wKx
                                     } else {
                                         ((i * cOut + o) * kh + wKy) * kw + wKx
                                     }
-                                    acc += lhs[((n * cIn + i) * h + inY) * w + inX].toDouble() *
-                                        rhs[wIdx]
+                                    acc += lhs[((n * cIn + gBase + i) * h + inY) * w + inX]
+                                        .toDouble() * rhs[wIdx]
                                 }
                             }
                         }
@@ -1980,26 +1998,38 @@ object DxirInterpreter {
             }
         }
 
-        return if (dataAdj) {
-            conv2dCore(
-                OpKind.CONV_TRANSPOSE2D, upT, otherT, outT,
-                mapOf(
-                    "window_strides" to listOf(1, 1),
-                    "padding" to padding,
-                    "lhs_dilation" to s,
-                    "rhs_dilation" to d,
-                    "window_reversal" to listOf(true, true),
-                ),
-                up, other,
-            )
-        } else {
+        fun dataPiece(
+            upST: DxirType,
+            upA: FloatArray,
+            kST: DxirType,
+            kA: FloatArray,
+            outST: DxirType,
+        ): FloatArray = conv2dCore(
+            OpKind.CONV_TRANSPOSE2D, upST, kST, outST,
+            mapOf(
+                "window_strides" to listOf(1, 1),
+                "padding" to padding,
+                "lhs_dilation" to s,
+                "rhs_dilation" to d,
+                "window_reversal" to listOf(true, true),
+            ),
+            upA, kA,
+        )
+
+        fun kernelPiece(
+            xST: DxirType,
+            xA: FloatArray,
+            upST: DxirType,
+            upA: FloatArray,
+            outST: DxirType,
+        ): FloatArray {
             val swap = listOf(1, 0, 2, 3)
-            val xT = evalTranspose(otherT, swap, other)
-            val upSwapped = evalTranspose(upT, swap, up)
-            val xTT = DxirType(outT.dtype, swap.map { otherT.dims[it] })
-            val upTT = DxirType(outT.dtype, swap.map { upT.dims[it] })
+            val xT = evalTranspose(xST, swap, xA)
+            val upSwapped = evalTranspose(upST, swap, upA)
+            val xTT = DxirType(outST.dtype, swap.map { xST.dims[it] })
+            val upTT = DxirType(outST.dtype, swap.map { upST.dims[it] })
             // [Ci, Co, kh, kw] — the kernel's shape with its channel axes swapped.
-            val dwtT = DxirType(outT.dtype, swap.map { outT.dims[it] })
+            val dwtT = DxirType(outST.dtype, swap.map { outST.dims[it] })
             val dwt = conv2dCore(
                 OpKind.CONV2D, xTT, upTT, dwtT,
                 mapOf(
@@ -2009,7 +2039,112 @@ object DxirInterpreter {
                 ),
                 xT, upSwapped,
             )
-            evalTranspose(dwtT, swap, dwt)
+            return evalTranspose(dwtT, swap, dwt)
+        }
+
+        val fgc = (op.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
+        if (fgc == 1) {
+            return if (dataAdj) {
+                dataPiece(upT, up, otherT, other, outT)
+            } else {
+                kernelPiece(otherT, other, upT, up, outT)
+            }
+        }
+
+        // §0.4.429 — grouped adjoints, by SYMMETRIC per-group channel slicing:
+        // dX's group g reads upstream channels [g·Co/g, (g+1)·Co/g) and kernel
+        // rows [g·Co/g, …) and writes input channels [g·Ci/g, …); dW's group g
+        // reads input channels [g·Ci/g, …) and upstream channels [g·Co/g, …) and
+        // writes kernel rows [g·Co/g, …). Each per-group call is the fgc == 1
+        // adjoint VERBATIM — the padding solve above is spatial-only and shared
+        // unchanged, and the inner conv never sees a group attr at all.
+        val co = upT.dims[1]
+        val ci = if (dataAdj) outT.dims[1] else otherT.dims[1]
+        require(co % fgc == 0 && ci % fgc == 0) {
+            "DxirInterpreter: ${op.op} feature_group_count $fgc must divide Co=$co and Ci=$ci"
+        }
+        val coG = co / fgc
+        val ciG = ci / fgc
+        val result = FloatArray(outT.dims.reduce(Int::times))
+        for (g in 0 until fgc) {
+            if (dataAdj) {
+                val upST = DxirType(upT.dtype, listOf(upT.dims[0], coG, upT.dims[2], upT.dims[3]))
+                val kST = DxirType(
+                    otherT.dtype,
+                    listOf(coG, otherT.dims[1], otherT.dims[2], otherT.dims[3]),
+                )
+                val outST = DxirType(
+                    outT.dtype,
+                    listOf(outT.dims[0], ciG, outT.dims[2], outT.dims[3]),
+                )
+                val piece = dataPiece(
+                    upST, sliceAxis(up, upT.dims, 1, g * coG, coG),
+                    kST, sliceAxis(other, otherT.dims, 0, g * coG, coG),
+                    outST,
+                )
+                writeAxisSlice(result, outT.dims, 1, g * ciG, ciG, piece)
+            } else {
+                val xST = DxirType(
+                    otherT.dtype,
+                    listOf(otherT.dims[0], ciG, otherT.dims[2], otherT.dims[3]),
+                )
+                val upST = DxirType(upT.dtype, listOf(upT.dims[0], coG, upT.dims[2], upT.dims[3]))
+                val outST = DxirType(
+                    outT.dtype,
+                    listOf(coG, outT.dims[1], outT.dims[2], outT.dims[3]),
+                )
+                val piece = kernelPiece(
+                    xST, sliceAxis(other, otherT.dims, 1, g * ciG, ciG),
+                    upST, sliceAxis(up, upT.dims, 1, g * coG, coG),
+                    outST,
+                )
+                writeAxisSlice(result, outT.dims, 0, g * coG, coG, piece)
+            }
+        }
+        return result
+    }
+
+    /**
+     * §0.4.429 — contiguous slice of [count] indices starting at [start] along
+     * [axis] of a row-major array with extents [dims]. The grouped conv adjoints
+     * are the only callers; both channel axes of every operand are axis 0 or 1,
+     * but the arithmetic is rank-generic.
+     */
+    private fun sliceAxis(
+        src: FloatArray,
+        dims: List<Int>,
+        axis: Int,
+        start: Int,
+        count: Int,
+    ): FloatArray {
+        var outer = 1
+        for (a in 0 until axis) outer *= dims[a]
+        var inner = 1
+        for (a in axis + 1 until dims.size) inner *= dims[a]
+        val out = FloatArray(outer * count * inner)
+        for (o in 0 until outer) {
+            val srcBase = (o * dims[axis] + start) * inner
+            src.copyInto(out, o * count * inner, srcBase, srcBase + count * inner)
+        }
+        return out
+    }
+
+    /** [sliceAxis]'s inverse: writes [piece] into [dst]'s slice at the same coordinates. */
+    private fun writeAxisSlice(
+        dst: FloatArray,
+        dims: List<Int>,
+        axis: Int,
+        start: Int,
+        count: Int,
+        piece: FloatArray,
+    ) {
+        var outer = 1
+        for (a in 0 until axis) outer *= dims[a]
+        var inner = 1
+        for (a in axis + 1 until dims.size) inner *= dims[a]
+        for (o in 0 until outer) {
+            val dstBase = (o * dims[axis] + start) * inner
+            piece.copyInto(dst, dstBase, o * count * inner, (o + 1) * count * inner)
         }
     }
 
@@ -2046,6 +2181,14 @@ object DxirInterpreter {
         require(upT.rank == 4 && otherT.rank == 4 && outT.rank == 4) {
             "DxirInterpreter: ${op.op} requires rank-4 operands and result; got " +
                 "${upT.dims} / ${otherT.dims} / ${outT.dims}"
+        }
+        // §0.4.429 — grouped TRANSPOSED-conv adjoints are a recorded deferral:
+        // ConvTranspose2dRule refuses fgc > 1 at transform time, and this guard is
+        // the defence in depth for hand-built graphs.
+        val fgcT = (op.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
+        require(fgcT == 1) {
+            "DxirInterpreter: ${op.op} feature_group_count $fgcT unsupported — grouped " +
+                "transposed-conv adjoints are a §0.4.429 named deferral"
         }
         // x's type is the data adjoint's RESULT and the kernel adjoint's operand 0;
         // the kernel is IOHW either way.

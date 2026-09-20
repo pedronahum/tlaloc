@@ -1415,8 +1415,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             lhsDilation = conv2dDilation(node, "lhs_dilation"),
             rhsDilation = conv2dDilation(node, "rhs_dilation"),
             reversal = reversal,
-            featureGroupCount = (node.attrs["feature_group_count"] as? Int) ?: 1,
-            batchGroupCount = (node.attrs["batch_group_count"] as? Int) ?: 1,
+            featureGroupCount = (node.attrs["feature_group_count"] as? Number)?.toInt() ?: 1,
+            batchGroupCount = (node.attrs["batch_group_count"] as? Number)?.toInt() ?: 1,
         )
     }
 
@@ -1485,6 +1485,18 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      */
     private fun emitConvAdjoint(step: String, name: String, ops: List<String>, node: DxirOp) {
         val dataAdj = node.op == OpKind.CONV2D_DATA_ADJOINT
+        // §0.4.429 — grouped adjoint EMISSION is a named deferral: XLA spells a
+        // grouped data-grad through a per-group kernel reshuffle ([O, I/g, kh, kw]
+        // reshaped and transposed into the transposed conv's grouped layout) and a
+        // grouped kernel-grad through batch_group_count, neither of which this
+        // adjoint spelling performs. Refusing loudly beats emitting a groups = 1
+        // convolution whose operand types no longer match. The interpreter handles
+        // groups by symmetric per-group channel slicing.
+        val fgcAdj = (node.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
+        require(fgcAdj == 1) {
+            "${node.op}: feature_group_count $fgcAdj unsupported in emission — grouped " +
+                "conv-adjoint emission is a §0.4.429 named deferral (interpreter handles groups)"
+        }
         require(node.operands.size == 3) {
             "${node.op} takes (upstream, kernel, xTemplate) or (x, upstream, wTemplate); " +
                 "got ${node.operands.size} operands"
@@ -1643,6 +1655,13 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      */
     private fun emitConvTransposeAdjoint(step: String, name: String, ops: List<String>, node: DxirOp) {
         val dataAdj = node.op == OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT
+        // §0.4.429 — same named deferral as emitConvAdjoint's; nothing produces
+        // these nodes with groups today (ConvTranspose2dRule refuses first).
+        val fgcAdj = (node.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
+        require(fgcAdj == 1) {
+            "${node.op}: feature_group_count $fgcAdj unsupported in emission — grouped " +
+                "conv-adjoint emission is a §0.4.429 named deferral"
+        }
         require(node.operands.size == 3) {
             "${node.op} takes (upstream, kernel, xTemplate) or (x, upstream, wTemplate); " +
                 "got ${node.operands.size} operands"

@@ -967,6 +967,60 @@ class EmitterTest {
         )
     }
 
+    /**
+     * §0.4.429 — grouped conv: `feature_group_count` rides onto the emitted
+     * `stablehlo.convolution` verbatim (the dimension_numbers already carry the
+     * layout; XLA does the per-group slicing). Kernel input-feature dim is Ci/g.
+     */
+    @Test
+    fun conv2dEmitsFeatureGroupCount() {
+        val fn = DxirBuilder.function("gc") {
+            val x = param("x", DxirType(F32, listOf(1, 4, 8, 8)))
+            val k = param("k", DxirType(F32, listOf(6, 2, 3, 3)))
+            val y = op(
+                OpKind.CONV2D, listOf(x, k), DxirType(F32, listOf(1, 6, 6, 6)),
+                attrs = mapOf(
+                    "window_strides" to listOf(1, 1),
+                    "feature_group_count" to 2,
+                ),
+            )
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("feature_group_count = 2 : i64"), mlir)
+        assertTrue(
+            mlir.contains("(tensor<1x4x8x8xf32>, tensor<6x2x3x3xf32>) -> tensor<1x6x6x6xf32>"),
+            mlir,
+        )
+    }
+
+    /**
+     * §0.4.429 — the named deferral: grouped adjoint EMISSION needs XLA's
+     * kernel-reshuffle / batch_group_count spellings and refuses loudly instead
+     * of emitting a groups = 1 convolution with mismatched operand types.
+     */
+    @Test
+    fun convAdjointEmissionRefusesGroupsByName() {
+        val fn = DxirBuilder.function("dx_grouped") {
+            val x = param("x", DxirType(F32, listOf(1, 4, 5, 5)))
+            val w = param("w", DxirType(F32, listOf(6, 2, 3, 3)))
+            val up = param("up", DxirType(F32, listOf(1, 6, 3, 3)))
+            val dx = op(
+                OpKind.CONV2D_DATA_ADJOINT, listOf(up, w, x), DxirType(F32, listOf(1, 4, 5, 5)),
+                attrs = mapOf(
+                    "window_strides" to listOf(1, 1),
+                    "feature_group_count" to 2,
+                ),
+            )
+            listOf(dx)
+        }
+        val e = assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        assertTrue(
+            e.message?.contains("feature_group_count") == true,
+            "the refusal must name the attr; got: ${e.message}",
+        )
+    }
+
     @Test
     fun conv2dRejectsWrongInputRank() {
         val fn = DxirBuilder.function("bad") {

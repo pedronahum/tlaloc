@@ -879,7 +879,10 @@ fun sparseMatmulValuesAdjoint(
  * `lhs_dilation` (interior-dilates the input — the transposed-conv mechanism),
  * `rhs_dilation` (à-trous kernel), `window_reversal` (spatially flips the kernel
  * taps — what [io.tlaloc.ir.passes.VjpRegistry.Conv2dRule]'s `dX` needs).
- * `feature_group_count` / `batch_group_count` are 1 in v1, as in the interpreter.
+ * `feature_group_count` / `batch_group_count` are 1 here: the interpreter grew a
+ * grouped arm in §0.4.429, but the host twins (and with them the `grad {}` /
+ * `jvp {}` synthesis surface) are part of that section's named deferral — the K2
+ * synthesis rejects grouped conv ops loudly rather than convolving the wrong way.
  */
 private fun conv2dEngine(
     lhs: DTensor<*, F32>,
