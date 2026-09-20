@@ -336,6 +336,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 3) return null
                 operandIrTypes[op.operands[2].id]
             }
+            // §0.4.419 — ZEROS_LIKE's result IS its template operand's type
+            // (operand[0]): the SUM_TO/PAD_TO shape-only-template treatment.
+            OpKind.ZEROS_LIKE -> {
+                if (op.operands.size != 1) return null
+                operandIrTypes[op.operands[0].id]
+            }
             else -> null
         }
     }
@@ -1569,6 +1575,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // §0.4.400 — Phase A3b: embedding and its fused scatter-add adjoint.
         if (op.op == OpKind.EMBEDDING) return irEmbedding(op, env, context)
         if (op.op == OpKind.EMBEDDING_GRAD) return irEmbeddingGrad(op, env, context)
+        // §0.4.419 — Phase E1c-pre: the param-addressed structural zero.
+        if (op.op == OpKind.ZEROS_LIKE) return irZerosLike(op, env, context)
         // §0.4.384 — Phase A3b slice 1: the NCHW conv pair.
         if (op.op == OpKind.CONV2D || op.op == OpKind.CONV_TRANSPOSE2D) return irConv(op, env, context)
         // §0.4.385 — the fused conv adjoints (runtime-solved padding).
@@ -2688,6 +2696,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * shape source under -1 sentinels. Requires exactly ONE index-typed param
      * — with several, the const's sentinel-dimmed DxirType cannot say which
      * one it zeroes.
+     *
+     * §0.4.419 — VESTIGIAL for param gradients: DxirReverseTransform now
+     * emits the structural zero as the param-addressed `OpKind.ZEROS_LIKE`
+     * (see [irZerosLike]), which has no ambiguity and no param-count gate.
+     * This path stays for any other producer of an anonymous integer zero
+     * const reaching a body (none known today).
      */
     private fun IrBuilderWithScope.irIndexZerosConst(
         node: DxirConst,
@@ -2710,6 +2724,42 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         )
         if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
         call.arguments[0] = irGet(paramDecl)
+        return call
+    }
+
+    /**
+     * §0.4.419 — Phase E1c-pre: `ZEROS_LIKE(template)` in `grad {}` bodies —
+     * the PARAM-ADDRESSED structural zero DxirReverseTransform now emits for a
+     * non-differentiable integer tensor param, materialised as
+     * `intZerosLike(<template's local>)` through the env like every other op
+     * operand. This is [irIndexZerosConst] with the ambiguity dissolved: the
+     * op's operand names its template directly, so ANY number of integer
+     * params per lambda synthesises (the singleOrNull gate there was the
+     * §0.4.400 one-integer-param restriction this slice exists to lift — a
+     * CSR sparse operand carries colIdx AND rowPtr). v1 scope = the index
+     * tensor types that need it (I32 rank-1/2, `isAcceptedIndexTensorType`);
+     * a float-templated ZEROS_LIKE has no emitter here yet and falls back.
+     */
+    private fun IrBuilderWithScope.irZerosLike(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        if (!isAcceptedIndexTensorType(op.type)) return null
+        val templateDecl = env[op.operands[0].id] ?: return null
+        val templateIr = (irTypeForNode(op.operands[0], context) as? IrSimpleType)
+            ?: (templateDecl.type as? IrSimpleType) ?: return null
+        val shapeArg = templateIr.arguments.firstOrNull()?.typeOrNull ?: return null
+        val sym = opsTensorSymbol("intZerosLike") ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = templateIr,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        call.arguments[0] = irGet(templateDecl)
         return call
     }
 

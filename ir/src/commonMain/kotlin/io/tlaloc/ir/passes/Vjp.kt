@@ -709,6 +709,23 @@ object VjpRegistry {
             }
     }
 
+    /**
+     * §0.4.419 — reverse of ZEROS_LIKE (the param-addressed structural zero):
+     * it creates a constant, so nothing flows anywhere — the template operand
+     * is shape-only and gets a zero contribution. That zero is spelled as
+     * ZEROS_LIKE on the template ITSELF (not an anonymous const, whose
+     * sentinel-dimmed type could not name its target — the very problem the
+     * op exists to solve), so the rule is closed under itself: reverse mode
+     * composes through gradient bodies containing it to any order.
+     */
+    val ZerosLikeRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val template = op.operands[0]
+            return listOf(template to builder.op(OpKind.ZEROS_LIKE, listOf(template), template.type))
+        }
+    }
+
     /** §0.4.360 — `d/dx pad(x)` = the upstream sliced back to x's window
      * (PAD's adjoint IS a slice — the dual of [SliceRule]). */
     val PadRule: VjpRule = object : VjpRule {
@@ -1905,6 +1922,8 @@ object VjpRegistry {
         OpKind.SLICE to SliceRule,
         OpKind.WHERE to WhereRule,
         OpKind.COMPARE to CompareRule,
+        // §0.4.419 — Phase E1c-pre: the param-addressed structural zero.
+        OpKind.ZEROS_LIKE to ZerosLikeRule,
         OpKind.PAD to PadRule,
         OpKind.DOT to DotRule,
         OpKind.POW to PowRule,

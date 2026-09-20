@@ -220,6 +220,15 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // twin and VJP. Emit-time dims are concrete, so it folds to a static
             // broadcast_in_dim; the template's SSA value goes unreferenced.
             OpKind.BROADCAST_LIKE -> emitBroadcastLike(step, name, ops[0], node)
+            // §0.4.419 — ZEROS_LIKE (param-addressed structural zero): emit-time
+            // dims are always concrete, so it folds to a static splat-zero
+            // constant of the template's type; the template's SSA value goes
+            // unreferenced (it exists for the host path's runtime extents),
+            // MLIR-legal and DCE'd downstream — the BROADCAST_LIKE precedent.
+            OpKind.ZEROS_LIKE -> {
+                val zeroLit = if (node.type.dtype is I32 || node.type.dtype is I64) "0" else "0.0"
+                out.appendLine("$step$name = stablehlo.constant dense<$zeroLit> : $outType")
+            }
             // §0.4.374 — PAD_TO (zero-pad to template): the SLICE adjoint. `high`
             // derived from the concrete template (operand[1] == node.type) dims.
             OpKind.PAD_TO -> emitPadTo(

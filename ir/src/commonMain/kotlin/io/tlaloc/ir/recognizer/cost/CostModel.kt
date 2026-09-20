@@ -182,6 +182,9 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // §0.4.399 — BROADCAST_LIKE (runtime-extent broadcast-to-template, SUM_TO's
     // forward twin and VJP): one write per output element, like a copy.
     OpKind.BROADCAST_LIKE -> op.type.elementCount.toDouble()
+    // §0.4.419 — ZEROS_LIKE (param-addressed structural zero): one write per
+    // output element; the template contributes shape only, never read.
+    OpKind.ZEROS_LIKE -> op.type.elementCount.toDouble()
 
     // §0.4.374 — PAD_TO (zero-pad to template): one write per value element
     // into the (larger) template-shaped output, like a copy.

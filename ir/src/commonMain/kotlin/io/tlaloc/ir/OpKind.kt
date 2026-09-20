@@ -322,6 +322,34 @@ enum class OpKind {
     // `padLikeAfter{1,2,3}(value, outTemplate, prior…, axis)`.
     PAD_LIKE,
 
+    // §0.4.419 — Phase E1c-pre: the PARAM-ADDRESSED structural zero.
+    // ZEROS_LIKE(template) → template's shape AND dtype, all zeros. The
+    // runtime-extent-family treatment (SUM_TO/PAD_TO/BROADCAST_LIKE): the
+    // template contributes SHAPE ONLY — its values are never read — and the
+    // extents are its ACTUAL runtime dims, so nothing extent-derived is baked.
+    //
+    // Why it exists: §0.4.54's structural zero (the gradient of a
+    // non-differentiable integer param) reached tensor land in §0.4.400 as an
+    // anonymous DxirConst(0) whose sentinel-dimmed DxirType cannot say WHICH
+    // param it zeroes — so the `grad {}` synthesis admitted exactly ONE
+    // integer-typed param per lambda and rejected several as ambiguous. A CSR
+    // sparse operand carries TWO integer params (colIdx, rowPtr), so Phase E1c
+    // cannot exist under that restriction. DxirReverseTransform now emits the
+    // structural zero as ZEROS_LIKE on the CLONED PARAM ITSELF: the zero names
+    // its param by construction, and any number of integer params is
+    // unambiguous. Dtype-generic in the IR (zeros of the template's dtype);
+    // the synthesis's v1 scope is the index-tensor case that needs it
+    // (`intZerosLike` host twin, I32 rank-1/2).
+    //
+    // Differentiation: it creates a constant, so no gradient flows anywhere —
+    // its VjpRule contributes nothing (the template is shape-only), and its
+    // forward tangent is ZEROS_LIKE of the same template (d/dx 0 = 0). Both
+    // arms exist so higher-order transforms compose THROUGH gradient bodies
+    // that contain it. Emission: emit-time dims are always concrete, so it
+    // folds to a static `stablehlo.constant dense<0>` with the template's SSA
+    // value unreferenced (the BROADCAST_LIKE/SLICE_LIKE precedent).
+    ZEROS_LIKE,
+
     // §0.4.360 — shape-plumbing activation (the DiffKT-gap item 2 surface).
     //
     // WHERE(pred: Bool tensor, a, b) — elementwise select; the differentiable

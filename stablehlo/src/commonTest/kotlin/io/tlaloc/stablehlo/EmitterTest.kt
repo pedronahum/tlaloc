@@ -697,6 +697,35 @@ class EmitterTest {
     }
 
     @Test
+    fun zerosLikeEmitsASplatZeroConstant() {
+        // §0.4.419 — ZEROS_LIKE (the param-addressed structural zero): its
+        // extents come from the template's RUNTIME shape, but at emit time
+        // every dim is concrete, so it folds to a static splat-zero constant
+        // of the template's type — integer literal for integer dtypes, float
+        // for float. The template's SSA value goes unreferenced (legal,
+        // DCE'd), the BROADCAST_LIKE/SLICE_LIKE precedent.
+        val i32 = io.tlaloc.core.I32
+        val intFn = DxirBuilder.function("zli") {
+            val t = param("t", DxirType(i32, listOf(4)))
+            listOf(op(OpKind.ZEROS_LIKE, listOf(t), DxirType(i32, listOf(4))))
+        }
+        val intMlir = intFn.toStablehlo()
+        assertTrue(
+            intMlir.contains("stablehlo.constant dense<0> : tensor<4xi32>"),
+            intMlir,
+        )
+        val floatFn = DxirBuilder.function("zlf") {
+            val t = param("t", DxirType(F32, listOf(2, 3)))
+            listOf(op(OpKind.ZEROS_LIKE, listOf(t), DxirType(F32, listOf(2, 3))))
+        }
+        val floatMlir = floatFn.toStablehlo()
+        assertTrue(
+            floatMlir.contains("stablehlo.constant dense<0.0> : tensor<2x3xf32>"),
+            floatMlir,
+        )
+    }
+
+    @Test
     fun matmulLowersToDotGeneralWithContractingDims() {
         val fn = DxirBuilder.function("mm") {
             val a = param("a", DxirType(F32, listOf(2, 3)))

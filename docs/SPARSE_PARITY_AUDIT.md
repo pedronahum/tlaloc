@@ -16,8 +16,18 @@ interpreter arms bit-exact against E1a, host twins `sparseMatmul` /
 ratified pinned emit refusal — certified against the dense MatmulRule on
 toDense'd operands, JVP⇄VJP, and forward-over-reverse HVP vs the dense twin;
 see §2's design-decision record below for the transposed-CSR mechanism the
-slice settled). E1c-pre/E1c (multi-integer-param structural zeros, then the
-`grad {}` surface) are next.
+slice settled).
+**E1c-pre landed §0.4.419** (`OpKind.ZEROS_LIKE(template)` — the
+PARAM-ADDRESSED structural zero, the runtime-extent-family treatment:
+DxirReverseTransform emits it on the cloned integer param ITSELF instead of
+an anonymous sentinel-dimmed const, so the zero names its param by
+construction and the §0.4.400 one-integer-param synthesis gate is LIFTED —
+any number of integer params per `grad {}` lambda lowers, certified E2E on a
+two-index-param embedding lambda with DIFFERENT index extents. Own VjpRule
+closed under itself + forward tangent, so higher-order transforms compose
+through gradient bodies containing it; emits as a static splat-zero constant,
+template SSA unreferenced). E1c (the `grad {}` sparse surface: the FIR arm +
+`irSparseMatmul` + E2E GNN-shaped cert) is next and is now unblocked.
 Companion to [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md) Phase E. Walked
 from a fresh shallow clone of `facebookresearch/diffkt` @ HEAD (2026-09-20):
 `kotlin/api/src/main/kotlin/org/diffkt/Sparse*.kt`, the JNI surface

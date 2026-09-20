@@ -424,9 +424,20 @@ object DxirReverseTransform {
             //        Float-typed dExp which doesn't type-check against an Int-typed param.
             //        When `includeForward`, prepend the cloned primal return so the caller
             //        can emit `valueAndGrad` / `valueAndGrad2` without re-running forward. ---
+            //        §0.4.419 — Phase E1c-pre: integer TENSOR params emit their
+            //        structural zero as ZEROS_LIKE on the cloned param itself, so
+            //        the zero NAMES its param (an anonymous const's sentinel-dimmed
+            //        type cannot — the reason `grad {}` synthesis was restricted to
+            //        one integer param per lambda from §0.4.400 until now). Scalar
+            //        integer params keep the plain const: a scalar carries no
+            //        sentinel extents, so there is nothing to address.
             val gradReturns = primal.params.map { p ->
                 if (isIntegerDtype(p.type.dtype)) {
-                    const(zeroValueFor(p.type.dtype), p.type)
+                    if (p.type.isScalar) {
+                        const(zeroValueFor(p.type.dtype), p.type)
+                    } else {
+                        op(OpKind.ZEROS_LIKE, listOf(nodeMap.getValue(p.id)), p.type)
+                    }
                 } else {
                     gradAccum[p.gradKey()] ?: const(zeroValueFor(p.type.dtype), p.type)
                 }

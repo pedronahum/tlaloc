@@ -1295,6 +1295,19 @@ object DxirInterpreter {
                     out
                 }
             }
+            // §0.4.419 — ZEROS_LIKE (the param-addressed structural zero): zeros
+            // of the template's shape and dtype. The template contributes SHAPE
+            // ONLY — its values are never evaluated (we read `.type.dims`), the
+            // BROADCAST_LIKE treatment. Integer dtypes ride the FloatArray value
+            // encoding like every other integer tensor here.
+            OpKind.ZEROS_LIKE -> {
+                require(op.operands.size == 1) {
+                    "DxirInterpreter: ZEROS_LIKE requires 1 operand (template), got ${op.operands.size}"
+                }
+                var size = 1
+                for (d in op.operands[0].type.dims) size *= d
+                FloatArray(size)
+            }
             // §0.4.374 — PAD_TO (zero-pad to template): place operand[0] (value,
             // shape U) into a zero tensor of operand[1] (template, shape T = op.type)
             // at offset `low` per axis — the reverse mirror of SLICE. The trailing

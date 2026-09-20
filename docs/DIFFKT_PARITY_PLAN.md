@@ -2022,11 +2022,16 @@ audit's recommendations).
 **Remaining, in recommended order:**
 1. **E sparse continuation** per
    [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)'s slicing (E1a landed
-   §0.4.417): E1b `SPARSE_MATMUL` + fused SDDMM values-adjoint (with the
-   pinned GPU emit refusal), then E1c-pre multi-integer-param structural
-   zeros, then E1c the `grad {}` surface. matdiv stays SKIPPED; row-sparse
-   gradients stay deferred to Phase F. F model layer remains a product
-   decision.
+   §0.4.417, E1b §0.4.418 — `SPARSE_MATMUL` + fused SDDMM values-adjoint
+   with the pinned GPU emit refusal, E1c-pre §0.4.419 — `ZEROS_LIKE`
+   param-addressed structural zeros lift the §0.4.400 one-integer-param
+   synthesis gate): E1c the `grad {}` sparse surface (FIR arm +
+   `irSparseMatmul` + E2E GNN-shaped cert) is next. matdiv stays SKIPPED;
+   row-sparse gradients stay deferred to Phase F. F model layer remains a
+   product decision. (Noted en passant §0.4.419: EMBEDDING_GRAD has no
+   forward tangent — fwd-over-rev hessians THROUGH an embedding gradient
+   body refuse loudly; a recorded tail alongside the multi-result COARSENED
+   tangents.)
 2. **D2 tails** — the FIR/`grad {}` user-surface spelling for draws inside
    lambdas + synthesis delegates (the v1 IR arms landed §0.4.413);
    explicit-threefry StableHLO emission is the recorded D1 tail to take

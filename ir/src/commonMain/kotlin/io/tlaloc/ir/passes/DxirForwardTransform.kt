@@ -598,6 +598,11 @@ object DxirForwardTransform {
                 b.op(OpKind.ADD, listOf(dU, dD), ty)
             }
 
+            // §0.4.419 — ZEROS_LIKE creates a constant, so its tangent is zeros
+            // of the same template (d/dx 0 = 0): another ZEROS_LIKE on the primal
+            // value clone. The template is shape-only, so it carries no tangent.
+            OpKind.ZEROS_LIKE -> b.op(OpKind.ZEROS_LIKE, listOf(vOps[0]), ty)
+
             OpKind.CAST -> b.op(OpKind.CAST, listOf(t(node.operands[0])), ty)
 
             // §0.4.415 — Phase B5: CHECK_SHAPE_LIKE is a value-identity with a
