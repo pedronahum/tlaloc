@@ -1,6 +1,7 @@
 package io.tlaloc.plugin
 
 import io.tlaloc.ir.DxirFunction
+import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.passes.CoarseningCache
 import io.tlaloc.ir.passes.DiskCoarseningCache
 import io.tlaloc.ir.passes.DxirForwardTransform
@@ -139,19 +140,39 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                 // transform rewrites f(x)->y into jvp_f(x, dx)->(y, dy). For
                 // `valueAndJvp` we synthesise both returns (boxed Pair<y, dy>);
                 // for `jvp` we drop the primal returns and synthesise dy alone.
-                // v1 scope = straight-line bodies (the transform errors loudly on
-                // regions), so we SKIP coarsening/lift entirely — a region-bearing
-                // body simply falls back to the runtime tape here.
                 // §0.4.387 — the two-argument forms (`jvp2`/`valueAndJvp2`) route
                 // through the same branch: the transform emits all primals then all
                 // tangents for any arity, and the tangent/value split below is
                 // `returns.size / 2`, so nothing here is arity-specific.
+                // §0.4.403 — Phase B3: region-bearing bodies coarsen FIRST, exactly
+                // as the reverse branch does below (PhiCalculus.apply + the §0.4.174
+                // region-body lift), so a WHILE-bearing `jvp {}` body reaches
+                // DxirForwardTransform as straight-line / COARSENED shapes instead
+                // of falling back to the runtime tape. Straight-line bodies skip
+                // the pipeline, keeping the §0.4.372 path byte-identical; anything
+                // the coarsening leaves region-bearing (e.g. an unclosable IF)
+                // still errors in the transform and falls back below.
                 val forwardIntrinsic = callableName == "jvp" || callableName == "jvp2" ||
                     callableName == "valueAndJvp" || callableName == "valueAndJvp2"
                 val tangentOnly = callableName == "jvp" || callableName == "jvp2"
                 if (forwardIntrinsic) {
+                    val fwdPrimal: DxirFunction = if (fn.body.any { it is DxirOp && it.regions.isNotEmpty() }) {
+                        val coarsenedFwd = try {
+                            cache.getOrCompute(fn) { PhiCalculus.apply(fn, engineLazy.value) }
+                        } catch (t: Throwable) {
+                            mc.report(
+                                CompilerMessageSeverity.WARNING,
+                                "Tlaloc IR extension: PhiCalculus.apply failed on '${fn.name}' " +
+                                    "(${t::class.simpleName}: ${t.message}); " +
+                                    "continuing with the raw primal",
+                                null,
+                            )
+                            fn
+                        }
+                        PhiCalculus.liftIfRegionBodies(coarsenedFwd)
+                    } else fn
                     val jvpFn: DxirFunction = try {
-                        DxirForwardTransform.apply(fn)
+                        DxirForwardTransform.apply(fwdPrimal)
                     } catch (t: Throwable) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,

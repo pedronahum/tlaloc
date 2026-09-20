@@ -1121,9 +1121,56 @@ reachable from `grad {}`, not new math. New-op families come after.
     `hessian { Σ(x.broadcastTo(2,3) ⊙ x.broadcastTo(2,3)) }` = 4·I₃ through
     the real plugin (the user-visible face of the closure — previously
     unpinned).
-- **B3. Forward transform through regions**: IF/WHILE bodies + COARSENED
-  (tangent of a coarsened op = forward transform of its `primal_body`) —
-  mirrors reverse-mode's history.
+- **B3. Forward transform through regions — v1 ✅ (§0.4.403)**: the
+  COARSENED forward arm + the plugin's forward branch coarsening, lifting
+  the straight-line gate that made every loop-bearing `jvp {}` fall back
+  to the tape. Mirrors reverse-mode's history, mechanism for mechanism.
+  - **The COARSENED forward arm** (`DxirForwardTransform`): the tangent
+    of a coarsened op is the forward transform of its stored
+    `primal_body`, spliced inline — the exact mirror image of
+    `handleCoarsenedAdjoint`, which splices `gradient_body`: the jvp
+    body's primal params seed from the cloned operand VALUES, its
+    tangent params from the operand tangents, and the tangent is read
+    off the spliced body's tangent return. The splice RECOMPUTES the
+    coarsened op's interior primal values (the outer value stream only
+    carries the fused result — the standard forward-mode recompute
+    trade); `apply` recursion handles a COARSENED nested inside a
+    primal_body. Multi-result COARSENED refuses loudly BY NAME up front
+    (the §0.4.392 refusal discipline), before the clone loop can fail on
+    an unrelated invariant.
+  - **The plugin's forward branch coarsens** (`TlalocIrGenerationExtension`):
+    region-bearing `jvp`/`jvp2`/`valueAndJvp`/`valueAndJvp2` bodies now
+    run `PhiCalculus.apply` (+ the §0.4.174 region-body lift) before
+    `DxirForwardTransform`, exactly as the reverse branch always has —
+    a WHILE-bearing body closes (C5 unroll / C6–C9 engine corollaries)
+    into shapes the transform handles. Straight-line bodies skip the
+    pipeline, keeping the §0.4.372 path byte-identical; anything the
+    coarsening leaves region-bearing still errors in the transform and
+    falls back to the tape. The FIR checker's forward probe now skips
+    IF-bearing bodies instead of red-squiggling shapes the extension can
+    lower (same reasoning as its loop gate: PhiCalculus per keystroke is
+    not check-time material).
+  - Certified (`DxirForwardCoarsenedTest`, IR): tangent(coarsened f) ==
+    tangent(decomposeCoarsened(f)) numerically — the decomposed body
+    takes the ordinary per-op tangent path, so `decomposeCoarsened` is a
+    free independent oracle — over a hand-built COARSENED (2a·da + da
+    analytic pin), a rank-1 two-operand product (multi-operand seeding +
+    non-scalar types through the splice), and a NESTED
+    COARSENED-inside-primal_body; the JVP⇄VJP cross-identity through a
+    `PhiCalculus.coarsenFunction` product (forward consumes primal_body,
+    reverse consumes gradient_body — two attrs, two transforms, one
+    number); the multi-result refusal pinned by message. E2E
+    (`JvpLoopIntrinsicTest`, real plugin): `jvp {}` AND `valueAndJvp {}`
+    over the Brachistochrone compound-velocity for-loop ((1+y)^5 via
+    `v = v + v·y`), previously "kept original call", now lowering with
+    no fallback — 5·(1+y)^4·dy pinned analytically and against a Double
+    central difference, sentinel-guarded.
+  - Deferred tails: the IF DIRECT forward arm (tangent-IF with the same
+    cond, per-branch forward-transformed regions) — IF-bearing bodies
+    are today served where PhiCalculus's F-rules/distribute close them,
+    and fall back otherwise; multi-result COARSENED tangents (needs
+    per-result tangent tracking in the splice); nesting through
+    region-bearing bodies stays with B4's recorded tail.
 - **B4. Nesting matrix ✅ DONE, §0.4.401 (2026-09-20)** — the full 2×2
   certified at IR level (`DxirNestingMatrixTest`), with **zero
   production-code changes**: both transforms already composed mechanically,

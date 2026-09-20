@@ -105,7 +105,19 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                             }
                         }
                         name in forwardIntrinsics -> {
-                            { DxirForwardTransform.apply(result.fn) }
+                            // §0.4.403 — Phase B3: the IR extension's forward branch
+                            // now runs the PhiCalculus coarsening pipeline on
+                            // region-bearing bodies, so probing the RAW forward
+                            // transform (which refuses regions) would red-squiggle
+                            // bodies the extension lowers. Loop regions never reach
+                            // here (hasLoopRegions gates above); IF-bearing bodies
+                            // skip the probe and keep their runtime backstop —
+                            // running PhiCalculus per keystroke is not check-time
+                            // material, same reasoning as the loop gate.
+                            val hasIfRegions = result.fn.body.any {
+                                it is io.tlaloc.ir.DxirOp && it.regions.isNotEmpty()
+                            }
+                            if (hasIfRegions) ({ }) else ({ DxirForwardTransform.apply(result.fn) })
                         }
                         else -> {
                             { DxirReverseTransform.apply(result.fn) }
