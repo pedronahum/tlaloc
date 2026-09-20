@@ -1,6 +1,16 @@
 # Sparse Parity Audit — Phase E1 (§0.4.410)
 
-**Status: AUDIT COMPLETE — scope decision awaiting Pedro's ratification.**
+**Status: RATIFIED (Pedro, 2026-09-20) — E1a→E1c GO, per the audit's own
+recommendations at every decision point: `matdiv` SKIPPED (a solver arrives
+as its own designed feature or never), GPU = pinned emit refusal for the E1b
+ops (the §0.4.408 RNG precedent), row-sparse embedding gradients deferred to
+Phase F. E1a landed §0.4.417** (`:core` `SparseTensor` — rank-2 CSR, `fromCoo`
+duplicate-summing construction, `toDense`, elementwise `plus`/`minus`/`times`
+union/intersection merges, sparse×dense elementwise `times`, counting-sort
+`transpose`, Double-accumulator SpMM and Gustavson SpGEMM — certified against
+dense references on seeded random patterns at densities 0/0.05/0.3/0.7).
+E1b (`SPARSE_MATMUL` + fused SDDMM values-adjoint) and E1c-pre/E1c
+(multi-integer-param structural zeros, then the `grad {}` surface) are next.
 Companion to [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md) Phase E. Walked
 from a fresh shallow clone of `facebookresearch/diffkt` @ HEAD (2026-09-20):
 `kotlin/api/src/main/kotlin/org/diffkt/Sparse*.kt`, the JNI surface

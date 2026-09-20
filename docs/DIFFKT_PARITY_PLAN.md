@@ -1811,7 +1811,34 @@ reachable from `grad {}`, not new math. New-op families come after.
 
 ### Phase E — sparse (DiffKT `SparseFloatTensor` parity)
 
-- **E1. Audit ✅ DONE (§0.4.410) — scope decision awaiting Pedro.** Full
+- **RATIFIED (Pedro, 2026-09-20): E1a→E1c GO** per the audit's recommended
+  answers at every decision point — `matdiv` SKIPPED, GPU = pinned emit
+  refusal for the E1b ops, row-sparse embedding gradients deferred to
+  Phase F.
+- **E1a ✅ DONE (§0.4.417) — the `:core` host CSR type.** `SparseTensor`
+  (rank-2 CSR: `values` F32 / `colIdx` I32 / `rowPtr` I32, canonical
+  strictly-increasing columns, loudly validated invariant), `fromCoo`
+  (sorted + duplicate-SUMMING construction, the scatter-add convention),
+  `toDense`, `nnz`; elementwise `plus`/`minus` (two-pointer UNION merge —
+  cancelled positions stay stored) and `times` (INTERSECTION merge),
+  sparse×dense elementwise `times` (the DiffKT zip case — structure
+  reused verbatim), `transpose` as an explicit counting-sort half-perm
+  (O(nnz + rows + cols), canonical output, involution pinned at the
+  representation level), SpMM (sparse `[N,C]` × dense `[C,D]` → dense,
+  per-row Double-accumulator buffer, the house reduction convention) and
+  SpGEMM (Gustavson row-wise accumulation into a Double row buffer with a
+  touched-column list — O(flops) + per-row sort, O(P) scratch, never an
+  O(rows·P) clear). Certified against dense references on seeded random
+  patterns at densities 0/0.05/0.3/0.7 (all-zero matrices and empty rows
+  included) on the quarter-integer grid for EXACT `assertContentEquals`
+  comparison; duplicate-summing, explicit-zero, union/intersection
+  structure, transpose-involution and validation-refusal pins. Host-level
+  only by design — no IR, no AD participation yet (that is E1b/E1c).
+  Landed along the way: a kotlinc codegen landmine — a Companion
+  `inline` function calling an outer-class `private` method emits a bad
+  `invokespecial` (VerifyError at class load); keep such helpers
+  self-contained (the VarHandle bug's family).
+- **E1. Audit ✅ DONE (§0.4.410).** Full
   audit in [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md), from a fresh
   shallow clone @ HEAD. Findings: DiffKT sparse is a CPU-only Eigen JNI
   shim (hierarchical-CSR `SparseFloatTensor` + row-sparse
@@ -1978,7 +2005,7 @@ story. Not blocking A–E.
 
 ## Suggested § sequencing
 
-**Position at §0.4.416 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
+**Position at §0.4.417 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
 in substance (§0.4.366–397, §0.4.400/409/414 — remaining tails: A2's
 `view`/`withChange`/`meld`/`split`, gather/scatter axis+list forms, the
 mixed rank-increase+stretch broadcast, `DScalar`-interface params) →
@@ -1988,13 +2015,18 @@ B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → B5 ✅ (§0.4.415
 (§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; the `grad {}`
 integral surface's B5 gate is now open, spelling still to land) → D1 ✅
 (§0.4.408) → D2 v1 ✅ (§0.4.413 — IR-level reparameterized gradients;
-FIR/`grad {}` spelling is the recorded tail).
+FIR/`grad {}` spelling is the recorded tail) → E1a ✅ (§0.4.417 — the
+`:core` host CSR `SparseTensor`; E ratified by Pedro 2026-09-20 per the
+audit's recommendations).
 
 **Remaining, in recommended order:**
-1. **Ratified next (Pedro, 2026-09-20)**: E sparse per
-   [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)'s E1a→E1c slicing
-   (matdiv SKIPPED; GPU = pinned emit refusal; row-sparse gradients
-   deferred to Phase F). F model layer remains a product decision.
+1. **E sparse continuation** per
+   [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)'s slicing (E1a landed
+   §0.4.417): E1b `SPARSE_MATMUL` + fused SDDMM values-adjoint (with the
+   pinned GPU emit refusal), then E1c-pre multi-integer-param structural
+   zeros, then E1c the `grad {}` surface. matdiv stays SKIPPED; row-sparse
+   gradients stay deferred to Phase F. F model layer remains a product
+   decision.
 2. **D2 tails** — the FIR/`grad {}` user-surface spelling for draws inside
    lambdas + synthesis delegates (the v1 IR arms landed §0.4.413);
    explicit-threefry StableHLO emission is the recorded D1 tail to take
