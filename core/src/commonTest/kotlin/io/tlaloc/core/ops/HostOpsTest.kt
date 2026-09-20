@@ -6,6 +6,7 @@ import io.tlaloc.core.FloatScalar
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.digamma
 import io.tlaloc.core.lgamma
+import io.tlaloc.core.polygamma
 import io.tlaloc.core.trigamma
 import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
@@ -109,6 +110,28 @@ class HostOpsTest {
             assertEquals(x.trigamma().toFloat(), tg[i], 1e-7f, "trigamma slot $i")
         }
         assertContentEquals(intArrayOf(1, 4), a.lgamma().dims)
+    }
+
+    @Test
+    fun polygammaElementwise() {
+        // §0.4.405 — the tensor polygamma(n) surface routes through the shared
+        // Double kernel. Pins: ψ₂(1) = −2ζ(3); n = 0 ≡ digamma and n = 1 ≡
+        // trigamma elementwise (the FIR normalisation invariant's host twin).
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(0.5f, 1.0f, 2.5f, 4.0f))
+        val p2 = a.polygamma(2).hostF32()
+        assertEquals(-2.4041138f, p2[1], 1e-5f, "ψ₂(1) = −2ζ(3)")
+        for (i in 0 until 4) {
+            val x = a.hostF32()[i].toDouble()
+            assertEquals(x.polygamma(2).toFloat(), p2[i], 1e-6f, "polygamma(2) slot $i")
+        }
+        assertContentEquals(a.digamma().hostF32(), a.polygamma(0).hostF32(), "polygamma(0) ≡ digamma")
+        // n = 1 runs the GENERAL series, not the trigamma kernel — agreement is
+        // ~1e-11 in Double (pinned hard in SpecialFunctionsTest), which an F32
+        // narrowing can still split by an ulp, hence tolerance not equality.
+        val p1 = a.polygamma(1).hostF32()
+        val tg = a.trigamma().hostF32()
+        for (i in 0 until 4) assertEquals(tg[i], p1[i], 1e-6f, "polygamma(1) vs trigamma slot $i")
+        assertContentEquals(intArrayOf(1, 4), a.polygamma(2).dims)
     }
 
     @Test

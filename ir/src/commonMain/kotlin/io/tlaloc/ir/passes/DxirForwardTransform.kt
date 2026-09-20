@@ -342,16 +342,36 @@ object DxirForwardTransform {
             // §0.4.402 — Phase C1 special functions: d lgamma = ψ(x)·dx,
             // d digamma = ψ₁(x)·dx — both read the primal OPERAND stream (the
             // derivative is a different special function, never recoverable from
-            // the value stream). TRIGAMMA deliberately has NO tangent arm: its
-            // derivative is polygamma(2), out of C1's scope, so a TRIGAMMA in a
-            // forward-differentiated body hits the loud refusal below (pinned in
-            // DxirLgammaDigammaGradTest).
+            // the value stream). §0.4.405 closed the ladder: d ψ₁ = ψ₂ =
+            // polygamma(2) and d ψ⁽ⁿ⁾ = ψ⁽ⁿ⁺¹⁾ (the order climbs by one, a
+            // literal attr), so forward mode — hessian's forward-over-reverse
+            // included — now reaches through TRIGAMMA-bearing gradient bodies.
             OpKind.LGAMMA -> b.op(
                 OpKind.MUL, listOf(b.op(OpKind.DIGAMMA, listOf(vOps[0]), ty), t(node.operands[0])), ty,
             )
             OpKind.DIGAMMA -> b.op(
                 OpKind.MUL, listOf(b.op(OpKind.TRIGAMMA, listOf(vOps[0]), ty), t(node.operands[0])), ty,
             )
+            OpKind.TRIGAMMA -> b.op(
+                OpKind.MUL,
+                listOf(
+                    b.op(OpKind.POLYGAMMA, listOf(vOps[0]), ty, mapOf("order" to 2)),
+                    t(node.operands[0]),
+                ),
+                ty,
+            )
+            OpKind.POLYGAMMA -> {
+                val order = (node.attrs["order"] as? Number)?.toInt()
+                    ?: error("POLYGAMMA is missing its integer 'order' attr")
+                b.op(
+                    OpKind.MUL,
+                    listOf(
+                        b.op(OpKind.POLYGAMMA, listOf(vOps[0]), ty, mapOf("order" to order + 1)),
+                        t(node.operands[0]),
+                    ),
+                    ty,
+                )
+            }
             OpKind.ABS -> b.op(
                 OpKind.MUL, listOf(b.op(OpKind.SIGN, listOf(vOps[0]), ty), t(node.operands[0])), ty,
             )

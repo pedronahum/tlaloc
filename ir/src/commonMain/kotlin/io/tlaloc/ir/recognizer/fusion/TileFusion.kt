@@ -70,7 +70,7 @@ internal val ELEMENTWISE_OP_KINDS: Set<OpKind> = setOf(
     OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT,
     OpKind.TANH, OpKind.SIGMOID, OpKind.RELU, OpKind.GELU, OpKind.SILU,
     OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.SIGN, OpKind.STEP,
-    OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA,
+    OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
     // Comparison + logical: also elementwise.
     OpKind.LAND, OpKind.NOT,
 )

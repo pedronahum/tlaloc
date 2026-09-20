@@ -197,7 +197,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
             OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
-            OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA,
+            OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             // §0.4.368 — SOFTMAX is shape-preserving too (its output IrType
             // equals its operand's), so it forward-propagates like the unary
@@ -417,7 +417,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
             OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
-            OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA,
+            OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             // §0.4.396 — REVERSE is shape-preserving at any rank.
             OpKind.SOFTMAX, OpKind.REVERSE,
@@ -951,7 +951,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     OpKind.STEP, OpKind.RELU, OpKind.NEG,
                     OpKind.SQRT, OpKind.EXP, OpKind.LOG,
                     OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
-                    OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA,
+                    OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
                     OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
                     OpKind.SOFTMAX, OpKind.REVERSE -> {
                         if (n.operands.size != 1) continue
@@ -1471,6 +1471,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.LGAMMA) return irSpecialUnary(op, env, context, "lgamma")
         if (op.op == OpKind.DIGAMMA) return irSpecialUnary(op, env, context, "digamma")
         if (op.op == OpKind.TRIGAMMA) return irSpecialUnary(op, env, context, "trigamma")
+        // §0.4.405 — general polygamma: the literal `order` attr rides as an
+        // extra Int const argument on the host call.
+        if (op.op == OpKind.POLYGAMMA) return irPolygamma(op, env, context)
         if (op.op == OpKind.ABS) return irAbs(op, env, context)
         if (op.op == OpKind.CAST) return irCast(op, env, context)
         if (op.op == OpKind.COMPARE) return irCompare(op, env, context)
@@ -4010,8 +4013,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * `TRIGAMMA`. Tensor operands dispatch to the `:core/ops` extension of the
      * same [name]; scalars to the `io.tlaloc.core` five-overload extension via
      * [irCoreScalarCall] (the §0.4.377 sigmoid path — none of these has a
-     * `kotlin.math` equivalent). TRIGAMMA reaches here only from gradient
-     * bodies: DIGAMMA's adjoint/tangent emit it, and it has no FIR entry.
+     * `kotlin.math` equivalent). TRIGAMMA reaches here from gradient bodies
+     * (DIGAMMA's adjoint/tangent emit it) and, since §0.4.405, from the user's
+     * `polygamma(1)` spelling, which the FIR normalises to the TRIGAMMA op.
      */
     private fun IrBuilderWithScope.irSpecialUnary(
         op: DxirOp,
@@ -4024,6 +4028,68 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return tensorUnaryCall(op, env, context, opsTensorSymbol(name))
         }
         return irCoreScalarCall(op, env, context, name)
+    }
+
+    /**
+     * §0.4.405 — `OpKind.POLYGAMMA(x)` with its literal `order` attr: the
+     * [irSpecialUnary] shape plus one trailing Int const argument. Tensor
+     * operands dispatch to `:core/ops/polygamma(n)`, scalars to the
+     * `io.tlaloc.core.polygamma(n)` extension (both are single positional-Int
+     * ops with no defaults — the K2 named-arg landmine). Reaches here both
+     * from user `polygamma(n ≥ 2)` bodies and from gradient bodies (TRIGAMMA's
+     * adjoint emits POLYGAMMA(2), POLYGAMMA(n)'s emits POLYGAMMA(n+1)).
+     */
+    private fun IrBuilderWithScope.irPolygamma(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 1) return null
+        val order = (op.attrs["order"] as? Number)?.toInt() ?: return null
+        if (isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            val call = tensorUnaryCall(op, env, context, opsTensorSymbol("polygamma"))
+                as? IrCallImpl ?: return null
+            call.arguments[1] = intConst(order)
+            return call
+        }
+        if (!op.type.isScalar) return null
+        val operandDecl = env[op.operands[0].id] ?: return null
+        val ty = irTypeFor(op.type, context) ?: return null
+        val sym = coreScalarIntArgSymbolFor(op.type.dtype, Name.identifier("polygamma")) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = ty,
+            symbol = sym,
+        )
+        call.arguments[0] = irGet(operandDecl)
+        call.arguments[1] = intConst(order)
+        return call
+    }
+
+    /**
+     * §0.4.405 — the `(receiver, Int)` sibling of [coreScalarSymbolFor]:
+     * resolves the `io.tlaloc.core` scalar extension of [callable] whose
+     * extension receiver matches the op's primitive dtype and whose single
+     * regular parameter is `Int` (the polygamma order).
+     */
+    private fun coreScalarIntArgSymbolFor(dtype: DType, callable: Name): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core"),
+            callableName = callable,
+        )
+        val targetType = when (dtype) {
+            F32 -> pluginContext.irBuiltIns.floatType
+            F64 -> pluginContext.irBuiltIns.doubleType
+            else -> return null
+        }
+        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+            val params = sym.owner.parameters
+            params.size == 2 &&
+                params[0].kind == IrParameterKind.ExtensionReceiver &&
+                params[0].type == targetType &&
+                params[1].type == pluginContext.irBuiltIns.intType
+        }
     }
 
     /** §0.4.395 — `OpKind.ATAN(x)`. Companion to [irTan]; `kotlin.math.atan` exists. */

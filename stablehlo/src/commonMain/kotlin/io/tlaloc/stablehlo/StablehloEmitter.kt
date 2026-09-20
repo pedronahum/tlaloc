@@ -145,7 +145,14 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // — generic MLIR form, since only that spelling is smoke-certified.
             OpKind.LGAMMA -> chloUnary(step, name, "chlo.lgamma", ops[0], outType)
             OpKind.DIGAMMA -> chloUnary(step, name, "chlo.digamma", ops[0], outType)
-            OpKind.TRIGAMMA -> emitTrigamma(step, name, ops[0], node.type)
+            OpKind.TRIGAMMA -> emitPolygamma(step, name, ops[0], node.type, order = 1)
+            // §0.4.405 — general polygamma: same generic-form spelling with the
+            // literal `order` attr splatted as the float order operand.
+            OpKind.POLYGAMMA -> emitPolygamma(
+                step, name, ops[0], node.type,
+                order = (node.attrs["order"] as? Number)?.toInt()
+                    ?: error("POLYGAMMA is missing its integer 'order' attr"),
+            )
             OpKind.SQRT -> unary(step, name, "stablehlo.sqrt", ops[0], outType)
             OpKind.RSQRT -> unary(step, name, "stablehlo.rsqrt", ops[0], outType)
             OpKind.TANH -> unary(step, name, "stablehlo.tanh", ops[0], outType)
@@ -502,15 +509,17 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine("$step$name = $op $x : $type -> $type")
     }
 
-    private fun emitTrigamma(step: String, name: String, x: String, type: DxirType) {
-        // §0.4.402 — ψ₁(x) = polygamma(1, x). CHLO's polygamma takes the order n
-        // as a float TENSOR operand (n, x) — a splat 1.0 pins trigamma. Emitted
-        // in generic MLIR form ("chlo.polygamma"(...)), the spelling the GB10's
-        // XLA parser is smoke-certified to accept.
-        val one = synth()
+    private fun emitPolygamma(step: String, name: String, x: String, type: DxirType, order: Int) {
+        // §0.4.402/§0.4.405 — ψ⁽ⁿ⁾(x) = polygamma(n, x). CHLO's polygamma takes
+        // the order n as a float TENSOR operand (n, x) — a splat n.0 pins the
+        // order (TRIGAMMA routes here with order = 1; the general POLYGAMMA op
+        // carries its literal `order` attr). Emitted in generic MLIR form
+        // ("chlo.polygamma"(...)), the spelling the GB10's XLA parser is
+        // smoke-certified to accept.
+        val n = synth()
         val t = type.toMlir()
-        out.appendLine("$step$one = stablehlo.constant dense<1.0> : $t")
-        out.appendLine("$step$name = \"chlo.polygamma\"($one, $x) : ($t, $t) -> $t")
+        out.appendLine("$step$n = stablehlo.constant dense<${order}.0> : $t")
+        out.appendLine("$step$name = \"chlo.polygamma\"($n, $x) : ($t, $t) -> $t")
     }
 
     private fun emitAtan(step: String, name: String, x: String, type: DxirType) {

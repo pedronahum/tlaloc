@@ -4,6 +4,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.ln
+import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.tan
 
@@ -25,9 +26,21 @@ import kotlin.math.tan
 //    Bernoulli terms through x⁻¹⁰; reflection ψ(x) = ψ(1−x) − π/tan(πx) for
 //    x < 0.5 (covers the whole negative axis away from the poles).
 //  - `trigamma` (ψ₁ = polygamma(1) — the INTERNAL op DIGAMMA's derivative
-//    needs; general polygamma(n) is deliberately out of C1's scope):
-//    recurrence ψ₁(x) = ψ₁(x+1) + 1/x², asymptotic ψ₁(x) ≈ 1/x + 1/(2x²) +
-//    Σ B₂ₙ/x²ⁿ⁺¹, reflection ψ₁(x) + ψ₁(1−x) = π²/sin²(πx).
+//    needs): recurrence ψ₁(x) = ψ₁(x+1) + 1/x², asymptotic ψ₁(x) ≈ 1/x +
+//    1/(2x²) + Σ B₂ₙ/x²ⁿ⁺¹, reflection ψ₁(x) + ψ₁(1−x) = π²/sin²(πx).
+//  - `polygamma` (§0.4.405 — ψ⁽ⁿ⁾ for general n ≥ 0, C1's recorded deferral):
+//    n = 0 delegates to `digamma`; n ≥ 1 runs the same scheme one derivative
+//    up per order — recurrence ψ⁽ⁿ⁾(x) = ψ⁽ⁿ⁾(x+1) − (−1)ⁿ·n!/xⁿ⁺¹ shifting
+//    past 10 + n (the truncated Bernoulli series' error term grows with n, so
+//    the shift threshold must too), then the n-times-differentiated digamma
+//    asymptotic ψ⁽ⁿ⁾(x) ≈ (−1)ⁿ⁻¹[(n−1)!/xⁿ + n!/(2xⁿ⁺¹) +
+//    Σₖ B₂ₖ·(2k+n−1)!/((2k)!·x²ᵏ⁺ⁿ)] through B₁₂, and on the negative axis
+//    the differentiated reflection (−1)ⁿ·ψ⁽ⁿ⁾(1−x) = ψ⁽ⁿ⁾(x) + π·dⁿcot(πx)/dxⁿ
+//    with dⁿcot(πx)/dxⁿ = πⁿ·Pₙ(cot πx), P₀(t) = t, Pₖ₊₁ = −(1+t²)·Pₖ′ (a
+//    small polynomial-coefficient recurrence). The n = 1 arm computes through
+//    this GENERAL scheme, not by delegation — SpecialFunctionsTest pins its
+//    agreement with the independent `trigamma` kernel to 1e-11, which is the
+//    hard validation of the differentiated-series derivation.
 //
 // Accuracy: ≤ ~1e-13 relative against reference values on the positive axis
 // (pinned in SpecialFunctionsTest to 1e-9, far past the 1e-6 the plan asks),
@@ -124,6 +137,83 @@ fun Double.trigamma(): Double {
     return acc + inv + 0.5 * inv2 + series
 }
 
+// §0.4.405 — B₂ through B₁₂, the Bernoulli coefficients of the polygamma
+// asymptotic series (one more term than digamma/trigamma carry: the series'
+// truncation error grows combinatorially with the order n, and B₁₂ plus the
+// order-dependent shift threshold keeps it ≤ ~1e-11 relative through n = 50).
+private val POLYGAMMA_BERNOULLI: DoubleArray = doubleArrayOf(
+    1.0 / 6.0, -1.0 / 30.0, 1.0 / 42.0, -1.0 / 30.0, 5.0 / 66.0, -691.0 / 2730.0,
+)
+
+/**
+ * ψ⁽ⁿ⁾(x) = dⁿ⁺¹/dxⁿ⁺¹ ln Γ(x) (polygamma of order [n]). §0.4.405 — C1's
+ * recorded deferral. n = 0 delegates to [digamma]; n ≥ 1 runs the
+ * recurrence-shift + differentiated Bernoulli asymptotic series, with the
+ * differentiated reflection formula (cot-derivative polynomial recurrence)
+ * covering the negative axis. Poles at 0, −1, −2, … return +∞ for odd n (the
+ * pole is even-order, both sides diverge up — the trigamma convention) and NaN
+ * for even n (odd-order pole, sign-indefinite — the digamma convention).
+ * Orders above 100 are refused: the series' factorial coefficients and the
+ * reflection polynomial's coefficients leave Double's precision regime there,
+ * and no honest value can be returned.
+ */
+fun Double.polygamma(n: Int): Double {
+    require(n >= 0) { "polygamma order must be ≥ 0; got $n" }
+    require(n <= 100) { "polygamma order must be ≤ 100 (Double-precision factorial regime); got $n" }
+    if (n == 0) return digamma()
+    var x = this
+    if (x.isNaN()) return Double.NaN
+    val signN = if (n % 2 == 0) 1.0 else -1.0 // (−1)ⁿ
+    if (x < 0.5) {
+        // Poles by the exact floor test (§0.4.402 lesson: sin/tan of π·integer
+        // is a rounding residue, never 0.0).
+        if (x == floor(x)) return if (n % 2 == 1) Double.POSITIVE_INFINITY else Double.NaN
+        // Reflection, differentiated n times from ψ(1−x) = ψ(x) + π·cot(πx):
+        //   (−1)ⁿ·ψ⁽ⁿ⁾(1−x) = ψ⁽ⁿ⁾(x) + π·dⁿcot(πx)/dxⁿ,
+        // with dⁿcot(πx)/dxⁿ = πⁿ·Pₙ(cot πx) and the polynomial recurrence
+        // P₀(t) = t, Pₖ₊₁ = −(1+t²)·Pₖ′ (dt/dx = −π(1+t²) chain rule).
+        var p = doubleArrayOf(0.0, 1.0) // P₀(t) = t
+        repeat(n) {
+            val q = DoubleArray(p.size + 1)
+            for (i in 1 until p.size) {
+                val d = i * p[i] // Pₖ′ coefficient of t^{i−1}
+                q[i - 1] -= d // −Pₖ′
+                q[i + 1] -= d // −t²·Pₖ′
+            }
+            p = q
+        }
+        val t = 1.0 / tan(PI * x)
+        var poly = 0.0
+        for (i in p.indices.reversed()) poly = poly * t + p[i]
+        return signN * (1.0 - x).polygamma(n) - PI.pow(n + 1) * poly
+    }
+    var factN = 1.0
+    for (i in 2..n) factN *= i // n!
+    val factNm1 = factN / n // (n−1)!
+    // Recurrence ψ⁽ⁿ⁾(x) = ψ⁽ⁿ⁾(x+1) − (−1)ⁿ·n!/xⁿ⁺¹, shifted past 10 + n:
+    // the first omitted series term is ~B₁₄·C(n+13,14)/T¹⁴ relative to the
+    // leading term, which the order-dependent threshold pins ≤ ~1e-11.
+    val threshold = 10.0 + n
+    var acc = 0.0
+    while (x < threshold) {
+        acc -= signN * factN / x.pow(n + 1)
+        x += 1.0
+    }
+    // ψ⁽ⁿ⁾(x) = (−1)ⁿ⁻¹[(n−1)!/xⁿ + n!/(2xⁿ⁺¹) + Σₖ B₂ₖ·(2k+n−1)!/((2k)!·x²ᵏ⁺ⁿ)]
+    val u = 1.0 / x
+    val u2 = u * u
+    var series = factNm1 * u.pow(n) + factN * 0.5 * u.pow(n + 1)
+    var c = factN * (n + 1) / 2.0 // c₁ = (n+1)!/2!
+    var upow = u.pow(n + 2) // u^{2k+n} at k = 1
+    for (k in 1..POLYGAMMA_BERNOULLI.size) {
+        series += POLYGAMMA_BERNOULLI[k - 1] * c * upow
+        val tk = 2 * k
+        c *= (tk + n + 1).toDouble() * (tk + n) / ((tk + 2).toDouble() * (tk + 1))
+        upow *= u2
+    }
+    return acc - signN * series
+}
+
 // --- Scalar lgamma / digamma five-overload sets (§0.4.402, Phase C1) ---
 //
 // The §0.4.377 pattern: `Float.lgamma()` / `Double.lgamma()` resolve at FQN
@@ -151,13 +241,28 @@ fun DScalar.digamma(): DScalar = when (this) {
 // Trigamma is GRADIENT MACHINERY, not user parity surface: it exists so that
 // DIGAMMA's adjoint/tangent synthesise (∇ digamma bodies contain TRIGAMMA
 // nodes, and the generated IR calls these public symbols from user modules).
-// It has NO FIR map entry — `trigamma` inside a `grad {}` body does not lower —
-// and TRIGAMMA itself has no VjpRule (its derivative is polygamma(2), which is
-// out of C1's scope; the refusal is pinned loud in DxirLgammaDigammaGradTest).
+// It has NO FIR map entry of its own — the user spelling for ψ₁ is
+// `polygamma(1)`, which the FIR normalises to the TRIGAMMA op (§0.4.405).
+// Since §0.4.405 TRIGAMMA also HAS a VjpRule/tangent arm (d ψ₁ = ψ₂ =
+// polygamma(2)) — second-order reverse through DIGAMMA composes.
 fun Float.trigamma(): Float = this.toDouble().trigamma().toFloat()
 fun FloatScalar.trigamma(): FloatScalar = FloatScalar(v.trigamma())
 fun DoubleScalar.trigamma(): DoubleScalar = DoubleScalar(v.trigamma())
 fun DScalar.trigamma(): DScalar = when (this) {
     is FloatScalar -> trigamma()
     is DoubleScalar -> trigamma()
+}
+
+// §0.4.405 — the polygamma(n) five-overload set. The order is a value
+// parameter host-side but a COMPILE-TIME Int literal inside `grad {}` (the FIR
+// folds it into the op: n = 0 → DIGAMMA, n = 1 → TRIGAMMA, n ≥ 2 →
+// POLYGAMMA with an `order` attr). Exactly one positional parameter and no
+// defaults — the K2 named-arg landmine: attr-bearing host ops must stay
+// positional-arity-disambiguated.
+fun Float.polygamma(n: Int): Float = this.toDouble().polygamma(n).toFloat()
+fun FloatScalar.polygamma(n: Int): FloatScalar = FloatScalar(v.polygamma(n))
+fun DoubleScalar.polygamma(n: Int): DoubleScalar = DoubleScalar(v.polygamma(n))
+fun DScalar.polygamma(n: Int): DScalar = when (this) {
+    is FloatScalar -> polygamma(n)
+    is DoubleScalar -> polygamma(n)
 }

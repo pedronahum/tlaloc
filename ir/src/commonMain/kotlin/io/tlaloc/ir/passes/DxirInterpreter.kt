@@ -11,6 +11,7 @@ import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.DxirType
 import io.tlaloc.core.digamma
 import io.tlaloc.core.lgamma
+import io.tlaloc.core.polygamma
 import io.tlaloc.core.trigamma
 import io.tlaloc.ir.OpKind
 import kotlin.math.pow
@@ -392,6 +393,15 @@ object DxirInterpreter {
             OpKind.TRIGAMMA -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { a[it].toDouble().trigamma().toFloat() }
+            }
+            // §0.4.405 — general polygamma: the order is a compile-time integer
+            // attr (n ≥ 2 by the FIR-normalisation invariant, though the shared
+            // kernel accepts any n in 0..100).
+            OpKind.POLYGAMMA -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                val order = (op.attrs["order"] as? Number)?.toInt()
+                    ?: error("POLYGAMMA is missing its integer 'order' attr")
+                FloatArray(a.size) { a[it].toDouble().polygamma(order).toFloat() }
             }
             OpKind.SQRT -> {
                 // Element-wise square root. `kotlin.math.sqrt` returns NaN for negative

@@ -87,6 +87,13 @@ class GradientEmissionCoverageTest {
         // (reflection covers the negative values).
         unaryLoss("lgamma", OpKind.LGAMMA, listOf(2, 3)),
         unaryLoss("digamma", OpKind.DIGAMMA, listOf(2, 3)),
+        // §0.4.405 — the ψ-ladder closes: TRIGAMMA's adjoint emits
+        // POLYGAMMA(2) and POLYGAMMA(n)'s emits POLYGAMMA(n+1), so these two
+        // losses sweep the order-splat `chlo.polygamma` emission at orders the
+        // §0.4.402 trigamma spelling never reached (2, 3 and 4). The negative
+        // pseudo-random probes ride the kernel's cot-polynomial reflection.
+        unaryLoss("trigamma", OpKind.TRIGAMMA, listOf(2, 3)),
+        unaryLoss("polygamma3", OpKind.POLYGAMMA, listOf(2, 3), attrs = mapOf("order" to 3)),
         unaryLoss("sqrt", OpKind.SQRT, listOf(2, 3)),
         unaryLoss("sign", OpKind.SIGN, listOf(2, 3)),
         // RELU is in the catalogue even though the INTERPRETER has no arm for it

@@ -15,6 +15,7 @@ import io.tlaloc.core.digamma
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.hostI32
 import io.tlaloc.core.lgamma
+import io.tlaloc.core.polygamma
 import io.tlaloc.core.trigamma
 import kotlin.math.pow
 import kotlin.math.sqrt
@@ -360,6 +361,13 @@ fun <S : Shape> DTensor<S, F32>.digamma(): DTensor<S, F32> =
 
 fun <S : Shape> DTensor<S, F32>.trigamma(): DTensor<S, F32> =
     unary { x -> x.toDouble().trigamma().toFloat() }
+
+// §0.4.405 — polygamma(n), C1's recorded deferral. The order is a value
+// parameter here but a compile-time Int literal inside `grad {}` (the FIR
+// folds it: 0 → DIGAMMA, 1 → TRIGAMMA, n ≥ 2 → POLYGAMMA + `order` attr).
+// One positional parameter, no defaults — the K2 named-arg landmine.
+fun <S : Shape> DTensor<S, F32>.polygamma(n: Int): DTensor<S, F32> =
+    unary { x -> x.toDouble().polygamma(n).toFloat() }
 
 /**
  * Phase A5b (DiffKT parity) — elementwise power. POW has been fully ruled below

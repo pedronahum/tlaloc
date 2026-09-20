@@ -390,6 +390,27 @@ class EmitterTest {
     }
 
     @Test
+    fun polygammaEmitsOrderSplatChloSpelling() {
+        // §0.4.405 — general POLYGAMMA carries its literal `order` attr as the
+        // float splat order operand: `"chlo.polygamma"(splat n.0, x)` in the
+        // generic MLIR form the §0.4.402 spike certified against the GB10's
+        // XLA (identical to TRIGAMMA's spelling but for the splat value).
+        val t = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("f") {
+            val a = param("a", t)
+            val b = op(OpKind.POLYGAMMA, listOf(a), t, attrs = mapOf("order" to 3))
+            listOf(b)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("dense<3.0>"), "missing the order-3 splat: $mlir")
+        assertTrue(
+            Regex("\"chlo\\.polygamma\"\\(%s\\d+, %0\\) : \\(tensor<4xf32>, tensor<4xf32>\\) -> tensor<4xf32>")
+                .containsMatchIn(mlir),
+            "expected polygamma(3) to lower as chlo.polygamma(3, x): $mlir",
+        )
+    }
+
+    @Test
     fun reverseEmitsPinnedSpelling() {
         // §0.4.396 — REVERSE (flip) pins to `stablehlo.reverse` with the
         // literal `dims` list; shape-preserving, so operand and result types

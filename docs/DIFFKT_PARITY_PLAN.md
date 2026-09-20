@@ -1267,7 +1267,7 @@ reachable from `grad {}`, not new math. New-op families come after.
 - ✅ **C1. Special functions — DONE (§0.4.402)**: `LGAMMA` and `DIGAMMA`,
   tensor and scalar, full vertical; `TRIGAMMA` (= polygamma(1)) landed as an
   INTERNAL op — DIGAMMA's adjoint/tangent emit it — with general
-  `POLYGAMMA(n)` deliberately out of scope (see deferred tail).
+  `POLYGAMMA(n)` deliberately out of scope then (closed by §0.4.405 below).
   - Host: pure-Kotlin Double kernels in `:core/SpecialFunctions.kt` — Lanczos
     g=7/n=9 lgamma with reflection below 0.5, digamma/trigamma by
     recurrence-shift past 8 + Bernoulli asymptotic series, reflection on the
@@ -1309,11 +1309,65 @@ reachable from `grad {}`, not new math. New-op families come after.
     (scalar lgamma/digamma — the digamma one pins that TRIGAMMA synthesises
     despite having no FIR entry — and the tensor twins, no tape fallback);
     host pins; GPU smoke.
-  - Deferred tail: general `POLYGAMMA(n)` (needs a polygamma(n) host kernel
-    family + `d polygamma(n) = polygamma(n+1)`; DiffKT's own examples use
-    only ψ and ψ₁, so parity pressure is low), and with it TRIGAMMA's own
-    VjpRule (second-order reverse through DIGAMMA — today it refuses loudly,
-    pinned in DxirLgammaDigammaGradTest).
+  - ~~Deferred tail: general `POLYGAMMA(n)`~~ **CLOSED, §0.4.405** — see the
+    entry below.
+- ✅ **C1 deferred tail — DONE (§0.4.405)**: general `POLYGAMMA(n)` +
+  TRIGAMMA's own VjpRule/tangent arm — the special-function family is now
+  CLOSED under differentiation (`d ψ⁽ⁿ⁾ = ψ⁽ⁿ⁺¹⁾` climbs the ladder to any
+  depth), flipping the §0.4.402 pinned TRIGAMMA refusal into positive
+  second/third-order certs.
+  - Host: `Double.polygamma(n)` in `:core/SpecialFunctions.kt` (shared by
+    interpreter/host/scalars as ever): n = 0 delegates to digamma; n ≥ 1 runs
+    recurrence-shift past 10 + n (the truncated-series error grows
+    combinatorially with n, so the threshold must too) into the
+    n-times-differentiated digamma asymptotic (Bernoulli terms through B₁₂,
+    factorial-ratio running products), with the differentiated reflection
+    (−1)ⁿψ⁽ⁿ⁾(1−x) = ψ⁽ⁿ⁾(x) + πⁿ⁺¹·Pₙ(cot πx) covering the negative axis
+    via the cot-derivative polynomial recurrence P₀ = t, Pₖ₊₁ = −(1+t²)Pₖ′.
+    Orders outside 0..100 refuse (Double factorial-precision regime). THE
+    validation pin: n = 1 through the general scheme agrees with the
+    independent §0.4.402 trigamma kernel to 1e-11 across asymptotic /
+    shift / reflection / near-pole probes; plus ψ₂(1) = −2ζ(3),
+    ψ₂(0.5) = −14ζ(3), ψ₃(1) = π⁴/15, ψ₃(0.5) = π⁴, ψ₄(1) = −24ζ(5),
+    reflection ψ₂(−0.5), the (−1)ⁿn!/xⁿ⁺¹ recurrences for n = 1..5, and the
+    n = 1..4 central-difference derivative chain. Pole convention: +∞ for odd
+    n (even-order pole), NaN for even n (sign-indefinite) — the
+    trigamma/digamma conventions generalised. Five-overload scalar set +
+    `:core/ops` tensor `polygamma(n: Int)` (one positional param, no
+    defaults — the K2 named-arg landmine).
+  - IR: ONE new OpKind, `POLYGAMMA`, with the order as a compile-time integer
+    `order` attr (in the CSE signature since §0.4.366, so ψ⁽ⁿ⁾/ψ⁽ⁿ⁺¹⁾ over
+    one operand never deduplicate). TRIGAMMA kept as-is (disturbs less: the
+    §0.4.402 DigammaRule/emitter/tests all stand), and the FIR NORMALISES
+    user `polygamma(0)/(1)` to DIGAMMA/TRIGAMMA so ψ₁ nodes CSE with the
+    ones digamma's adjoint emits — POLYGAMMA nodes carry order ≥ 2 by
+    invariant. TrigammaRule = `MUL(POLYGAMMA(2, x), up)`, PolygammaRule =
+    `MUL(POLYGAMMA(order+1, x), up)`; tangent arms mirror both (literal
+    attrs, never extents — sentinel-safe). Certified: analytic pins with
+    non-uniform upstream, JVP⇄VJP cross-identity, f32 central differences,
+    and the flipped refusal — rev∘rev AND fwd∘rev (the hessian composition)
+    through `Σ digamma(x)` both yield diag(ψ₂) HVPs that agree, plus a
+    third-order pin (`DxirPolygammaGradTest`; the §0.4.402 refusal test is
+    now a positive both-transforms pin).
+  - Emitter: POLYGAMMA emits `"chlo.polygamma"(splat n.0, x)` — the §0.4.402
+    trigamma spelling with the order splat generalised (one shared
+    `emitPolygamma` arm). EmitterTest pins the order-3 spelling; the
+    trigamma + polygamma(3) losses joined GradientEmissionCoverageTest (their
+    adjoints sweep orders 2 and 4); RoundTripTest exclusion comment extended
+    (CHLO is still not a VHLO serialization citizen). Live oracle
+    `PjrtPolygammaSmokeTest`: trigamma and ψ₂ losses + gradient graphs
+    (orders 1/2/3 in flight) compile and run on the GB10 within ~1.5e-6
+    relative of the interpreter — a REAL two-implementation cross-check,
+    since XLA legalizes polygamma through its own zeta-based scheme.
+  - User surface: FIR arm for `io.tlaloc.core{.ops,}.polygamma` (receiver +
+    one Int literal, the §0.4.369 clip-bounds discipline; named-arg unwrap
+    handled; 0..100 bound mirrored). Synthesis: `irPolygamma` — tensor via
+    the Int-arg `tensorUnaryCall` extension, scalar via the
+    `coreScalarIntArgSymbolFor` sibling of the §0.4.377 path; POLYGAMMA in
+    all three IrType-solver unary lists. E2E ×5 in
+    `PolygammaGradientTest`, no tape fallback: scalar orders 0/1/2 (the
+    normalisation pins: d polygamma(0) = ψ₁, d polygamma(1) = ψ₂,
+    d polygamma(2) = ψ₃) + tensor orders 1/2.
 - **C2. Trig tails** ✅ **DONE, §0.4.395 (2026-09-20)**: `TAN` and `ATAN`,
   tensor AND scalar, full vertical — audit confirmed these are the only
   ones DiffKT has (no floor/ceil/round/atan2; those stay optional extras,
@@ -1442,8 +1496,10 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 scalar sets + `kotlin.math.tan`/`atan` map entries with the no-receiver
 argument fallback) ·
 `lgamma digamma` ✅ C1 (§0.4.402 — five-overload scalar sets via the
-`irCoreScalarCall` path; `trigamma` public but internal-only, general
-`polygamma(n)` deferred) · `sigmoid(DScalar)` ✅ (same A5b).
+`irCoreScalarCall` path; `trigamma` public but internal-only) ·
+`polygamma(n)` ✅ C1 tail (§0.4.405 — five-overload set with the Int order;
+`grad {}` orders 0..100, n = 0/1 normalised to DIGAMMA/TRIGAMMA) ·
+`sigmoid(DScalar)` ✅ (same A5b).
 
 #### Tensor ops (top-level files + `Operations` interface)
 
@@ -1454,7 +1510,7 @@ argument fallback) ·
 | `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 tensor⊗tensor; §0.4.397 Float-scalar rhs (`a gt 1.0f` + computed rank-0) E2E through `grad {}` |
 | `relu reluGrad sigmoid tanh exp ln sqrt abs` (tensor) | ✅ | `reluGrad` is public in DiffKT; ours is internal — fine |
 | `sin cos tan atan` (tensor) | ✅ | sin/cos ✅; tan/atan ✅ C2 (§0.4.395 — full vertical incl. `stablehlo.tan` / `atan2(x, 1)` emission certified on the GB10; audit: **no** floor/ceil/round/atan2 in DiffKT — those stay ours-optional) |
-| `lgamma digamma polygamma` (tensor) | ✅ | C1 (§0.4.402 — lgamma/digamma full vertical incl. the first CHLO emissions, GB10-certified; trigamma internal for DIGAMMA's adjoint; general polygamma(n) deferred) |
+| `lgamma digamma polygamma` (tensor) | ✅ | C1 (§0.4.402 — lgamma/digamma full vertical incl. the first CHLO emissions, GB10-certified; trigamma internal for DIGAMMA's adjoint) + C1 tail (§0.4.405 — general polygamma(n) full vertical, family closed under differentiation) |
 | `sum()` full-reduce | ✅ | |
 | `sum(axes, keepDims)` | 🟡 | `reduction_dims` IR exists → A1 |
 | `mean()` | 🟡 | dispatch arm exists but **no map entry** — not reachable → A1 |

@@ -1286,6 +1286,41 @@ object FirLambdaToDxirLowering {
             return emitter.op(kind = OpKind.WHERE, operands = listOf(leCmp, maxed, hiConst), type = x.type)
         }
 
+        // §0.4.405 — `polygamma(n)`: ψ⁽ⁿ⁾, closing C1's recorded deferral. Both
+        // the tensor spelling (`io.tlaloc.core.ops.polygamma`, DTensor receiver)
+        // and the scalar one (`io.tlaloc.core.polygamma`, Float/Double receiver)
+        // land here. The order must be a compile-time Int literal (the
+        // §0.4.369 clip-bounds discipline: it folds into the op, it is not a
+        // runtime operand), and the FIR NORMALISES the low orders to the
+        // §0.4.402 canonical ops — polygamma(0) → DIGAMMA, polygamma(1) →
+        // TRIGAMMA (so ψ₁ nodes CSE with the ones DIGAMMA's adjoint emits) —
+        // leaving the POLYGAMMA op with the invariant order ≥ 2. The 0..100
+        // bound mirrors the shared kernel's Double-factorial-precision refusal.
+        if (fqn == "io.tlaloc.core.polygamma" || fqn == "io.tlaloc.core.ops.polygamma") {
+            val args = call.argumentList.arguments
+            if (args.size != 1) {
+                throw LoweringException("$fqn takes exactly one order argument; got ${args.size}")
+            }
+            val operandExpr = receiver(call) ?: throw LoweringException("$fqn has no receiver")
+            val operand = lowerExpr(operandExpr, env, emitter)
+            val orderExpr = (args[0] as? FirNamedArgumentExpression)?.expression ?: args[0]
+            val order = intLiteralArg(orderExpr)
+                ?: throw LoweringException("$fqn order must be an Int literal")
+            if (order < 0 || order > 100) {
+                throw LoweringException("$fqn order must be in 0..100; got $order")
+            }
+            return when (order) {
+                0 -> emitter.op(OpKind.DIGAMMA, listOf(operand), operand.type)
+                1 -> emitter.op(OpKind.TRIGAMMA, listOf(operand), operand.type)
+                else -> emitter.op(
+                    kind = OpKind.POLYGAMMA,
+                    operands = listOf(operand),
+                    type = operand.type,
+                    attrs = mapOf("order" to order),
+                )
+            }
+        }
+
         // §0.4.369 — `outerProduct(a, b)` for rank-1 operands: the outer product
         // a[n]⊗b[m] IS the matmul reshape(a,[n,1]) × reshape(b,[1,m]) → [n,m], so
         // the gradient flows through MatmulRule ∘ ReshapeRule with no new AD
@@ -2489,10 +2524,10 @@ object FirLambdaToDxirLowering {
         put("kotlin.math.atan", OpKind.ATAN)
         // §0.4.402 — Phase C1 special functions: the SCALAR lgamma / digamma
         // surface (`x.lgamma()`, the receiver spelling — no `kotlin.math`
-        // equivalent exists for either). TRIGAMMA deliberately has NO entry:
-        // it is internal gradient machinery (DIGAMMA's adjoint emits it), and
-        // mapping it would promise a differentiable surface whose own VjpRule
-        // (polygamma(2)) is out of C1's scope.
+        // equivalent exists for either). TRIGAMMA has no entry of its own: the
+        // user spelling for ψ₁ is `polygamma(1)`, whose dedicated arm (§0.4.405,
+        // above — the order is a literal argument, so it cannot ride this
+        // arity-1 map) normalises to the TRIGAMMA op.
         put("io.tlaloc.core.lgamma", OpKind.LGAMMA)
         put("io.tlaloc.core.digamma", OpKind.DIGAMMA)
         // :core DTensor shape-preserving unary ops (io.tlaloc.core.ops package).

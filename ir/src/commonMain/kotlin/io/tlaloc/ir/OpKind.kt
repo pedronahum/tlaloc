@@ -27,14 +27,24 @@ enum class OpKind {
     // §0.4.402 — Phase C1 special functions (DiffKT parity; its Dirichlet example
     // depends on lgamma/digamma). LGAMMA = ln|Γ(x)|, DIGAMMA = ψ(x) = (ln Γ)′,
     // TRIGAMMA = ψ₁(x) = ψ′(x). Gradients: `d lgamma = digamma`, `d digamma =
-    // trigamma`; TRIGAMMA is INTERNAL gradient machinery only (no FIR entry, no
-    // VjpRule — its derivative is polygamma(2), out of C1's scope, and the
-    // refusal is pinned loud). Host/interpreter evaluate through the shared
-    // Double kernels in `:core/SpecialFunctions.kt` (Lanczos g=7;
-    // recurrence-to-asymptotic series). Lowered to `chlo.lgamma`,
-    // `chlo.digamma`, and `chlo.polygamma(splat 1.0, x)` — the GB10's XLA
-    // parses + legalizes CHLO (certified in PjrtLgammaDigammaSmokeTest).
+    // trigamma`. Host/interpreter evaluate through the shared Double kernels in
+    // `:core/SpecialFunctions.kt` (Lanczos g=7; recurrence-to-asymptotic
+    // series). Lowered to `chlo.lgamma`, `chlo.digamma`, and
+    // `chlo.polygamma(splat 1.0, x)` — the GB10's XLA parses + legalizes CHLO
+    // (certified in PjrtLgammaDigammaSmokeTest).
     LGAMMA, DIGAMMA, TRIGAMMA,
+
+    // §0.4.405 — general polygamma ψ⁽ⁿ⁾(x), closing C1's recorded deferral. The
+    // order n rides as a compile-time integer `order` attr (n ≥ 2 by invariant:
+    // the FIR normalises the user's polygamma(0)/polygamma(1) to DIGAMMA /
+    // TRIGAMMA, and the gradient rules only ever emit order + 1 — TrigammaRule
+    // emits POLYGAMMA(2), PolygammaRule POLYGAMMA(order+1) — so the whole
+    // ψ-ladder differentiates to any depth). Interpreter/host share the
+    // `:core/SpecialFunctions.kt` polygamma kernel (recurrence past 10 + n +
+    // differentiated Bernoulli series + cot-derivative-polynomial reflection);
+    // lowered as `"chlo.polygamma"(splat n.0, x)` — the generic-form spelling
+    // §0.4.402's spike certified against the GB10's XLA.
+    POLYGAMMA,
 
     // §0.4.204 — Elementwise sign function. Returns 1 / -1 / 0 for x>0 / x<0 / x=0.
     // Added for the CartPole NN port: the policy output is `a = sign(tanh(...) - ε)`

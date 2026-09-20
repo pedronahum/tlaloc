@@ -1196,10 +1196,8 @@ object VjpRegistry {
     /**
      * `d/dx(digamma(x)) = ψ₁(x)` (trigamma). §0.4.402 — companion to
      * [LgammaRule]; TRIGAMMA is the internal op this rule exists to emit.
-     * TRIGAMMA itself deliberately has NO VjpRule (its derivative is
-     * polygamma(2), out of C1's scope) — second-order reverse through DIGAMMA
-     * fails loudly with "no VJP rule registered for TRIGAMMA", pinned in
-     * DxirLgammaDigammaGradTest.
+     * Until §0.4.405 TRIGAMMA had no rule of its own, so second-order reverse
+     * through DIGAMMA refused loudly; [TrigammaRule] closed that.
      */
     val DigammaRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
@@ -1207,6 +1205,44 @@ object VjpRegistry {
             val x = op.operands[0]
             val psi1 = builder.op(OpKind.TRIGAMMA, listOf(x), x.type)
             val dx = builder.op(OpKind.MUL, listOf(upstream, psi1), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
+     * `d/dx(ψ₁(x)) = ψ₂(x)` = polygamma(2). §0.4.405 — the rule that flips the
+     * §0.4.402 pinned refusal: second-order reverse through DIGAMMA (whose
+     * first adjoint emits TRIGAMMA) now composes instead of failing. The
+     * adjoint is a fresh POLYGAMMA(order = 2) over the cloned primal operand —
+     * values only, never extents, sentinel-safe by construction.
+     */
+    val TrigammaRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val psi2 = builder.op(OpKind.POLYGAMMA, listOf(x), x.type, attrs = mapOf("order" to 2))
+            val dx = builder.op(OpKind.MUL, listOf(upstream, psi2), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
+     * `d/dx(ψ⁽ⁿ⁾(x)) = ψ⁽ⁿ⁺¹⁾(x)`. §0.4.405 — the general polygamma rule: the
+     * adjoint climbs one rung of the ψ-ladder by re-emitting POLYGAMMA with
+     * `order + 1` (a LITERAL attr read off the primal op, never a shape — the
+     * §0.4.366 sentinel discipline is trivially satisfied), so reverse
+     * differentiation through the special-function family composes to ANY
+     * depth. The order attr is part of the CSE signature, so ψ⁽ⁿ⁾ and ψ⁽ⁿ⁺¹⁾
+     * nodes over the same operand never deduplicate onto each other.
+     */
+    val PolygammaRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val order = (op.attrs["order"] as? Number)?.toInt()
+                ?: error("POLYGAMMA is missing its integer 'order' attr")
+            val next = builder.op(OpKind.POLYGAMMA, listOf(x), x.type, attrs = mapOf("order" to order + 1))
+            val dx = builder.op(OpKind.MUL, listOf(upstream, next), upstream.type)
             return listOf(x to dx)
         }
     }
@@ -1761,10 +1797,12 @@ object VjpRegistry {
         OpKind.COS to CosRule,
         OpKind.TAN to TanRule,
         OpKind.ATAN to AtanRule,
-        // §0.4.402 — Phase C1 special functions. TRIGAMMA is deliberately
-        // ABSENT: no rule (d trigamma = polygamma(2), out of C1's scope).
+        // §0.4.402 — Phase C1 special functions; §0.4.405 closed the family
+        // under differentiation (d ψ⁽ⁿ⁾ = ψ⁽ⁿ⁺¹⁾ climbs the ladder forever).
         OpKind.LGAMMA to LgammaRule,
         OpKind.DIGAMMA to DigammaRule,
+        OpKind.TRIGAMMA to TrigammaRule,
+        OpKind.POLYGAMMA to PolygammaRule,
         OpKind.SIGN to SignRule,
         OpKind.SQRT to SqrtRule,
         OpKind.TANH to TanhRule,

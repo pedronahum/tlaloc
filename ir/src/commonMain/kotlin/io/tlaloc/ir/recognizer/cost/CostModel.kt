@@ -154,6 +154,9 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // Lanczos lgamma is ~a dozen divides + two logs; digamma/trigamma pay a
     // recurrence walk plus the asymptotic series.
     OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA -> 24.0 * op.type.elementCount.toDouble()
+    // §0.4.405 — general polygamma pays the same recurrence-plus-series scheme
+    // with an order-lengthened recurrence walk (shift threshold 10 + n).
+    OpKind.POLYGAMMA -> 32.0 * op.type.elementCount.toDouble()
 
     // Reductions over an axis (or all): N − 1 ≈ N adds per reduced
     // element.
