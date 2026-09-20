@@ -369,6 +369,69 @@ enum class OpKind {
     // non-differentiable so no gradient flows to them.
     EMBEDDING_GRAD,
 
+    // §0.4.418 — Phase E1b: sparse×dense matmul at IR level (DiffKT
+    // `SparseFloatTensor` parity per docs/SPARSE_PARITY_AUDIT.md §2, ratified
+    // 2026-09-20). No sparse dtype exists anywhere in the IR — the rank-2 CSR
+    // operand rides as its THREE dense component tensors (the audit's
+    // rejected-alternative reasoning: a first-class sparse dtype would touch
+    // the dims model, IrType atoms, CSE keys and every layer's assumptions).
+    //
+    // SPARSE_MATMUL(values [nnz] F32, colIdx [nnz] I32, rowPtr [N+1] I32,
+    // dense [C, D]) → dense [N, D]: the GNN kernel A · B with A the CSR
+    // [N, C]. N is read off rowPtr's RUNTIME extent (rowPtr has N+1 entries —
+    // the SUM_TO/PAD_TO runtime-extent house pattern) and C off the dense
+    // operand's own runtime shape; nothing extent-derived is ever baked as an
+    // attr, so the op is sentinel-safe by construction. The walk is E1a's
+    // `SparseTensor.matmul(dense)` SpMM bit-for-bit: per output row a Double
+    // accumulator collects `values[k] · dense[colIdx[k], :]` in increasing-k
+    // (= increasing-column, canonical CSR) order, then narrows to F32.
+    //
+    // attr `transposed = true` (absent = false) is the ADJOINT form
+    // SparseMatmulRule emits for d_dense = Aᵀ · upstream: the SAME three CSR
+    // components, operand 3 the [N, D] multiplicand, plus a FIFTH shape-only
+    // template operand (the primal dense operand, values never read) carrying
+    // the output row extent C — which no component's runtime shape can supply
+    // (rowPtr gives N, colIdx gives nnz) and which is a -1 sentinel under
+    // `grad {}`. Materialising transposed component tensors at RULE-BUILD
+    // time was rejected: a host transpose there reads extents that are
+    // sentinels at transform time (the conv-adjoint padding-solve failure
+    // mode §0.4.385 exists to avoid), while the attr keeps the transpose at
+    // EXECUTION time where the extents are real. The transposed walk scatters
+    // `values[k] · dense[row(k), :]` into output row colIdx[k], scanning
+    // source rows in order — per output element the SAME Double-add sequence
+    // as E1a's `transpose().matmul(dense)` (the canonical counting-sort
+    // transpose orders each output row's entries by source row), so it is
+    // bit-for-bit that spelling too, with no transpose ever materialised.
+    //
+    // colIdx/rowPtr are integer tensors: non-differentiable, structural-zero
+    // slots (§0.4.54/§0.4.400). NO StableHLO emission by ratified decision
+    // (audit GPU option 1, the §0.4.408 RNG precedent): StableHLO/XLA has no
+    // sparse types, per-row segments have irregular lengths (a faithful CSR
+    // SpMM needs a WHILE over rows or ELL-style max-degree padding — a
+    // DIFFERENT format with its own memory blowup on skewed degrees), and a
+    // densify-and-matmul fallback would be a silently-O(N²) behaviour fork
+    // (the §0.4.392 principle). The emitter refuses loudly by name.
+    SPARSE_MATMUL,
+
+    // §0.4.418 — SPARSE_MATMUL's fused values-adjoint (Phase E1b), the
+    // EMBEDDING_GRAD / CONV2D_*_ADJOINT fused-adjoint precedent.
+    // SPARSE_MATMUL_VALUES_ADJOINT(upstream [N, D], dense [C, D],
+    // colIdx [nnz] I32, rowPtr [N+1] I32) → d_values [nnz]: the SDDMM masked
+    // to the sparsity pattern — `d_values[k] = Σ_j upstream[row(k), j] ·
+    // dense[colIdx[k], j]` (Double accumulator per stored entry,
+    // increasing-j order). Only STORED positions get an adjoint entry: the
+    // structural zeros are not inputs, so no gradient exists for them — and
+    // the fusion is what keeps the adjoint O(nnz·D) instead of materialising
+    // the dense [N, C] outer product `upstream · denseᵀ` and re-masking it.
+    // nnz is colIdx's RUNTIME extent, N rowPtr's minus one — the
+    // runtime-extent pattern again; nothing extent-derived is baked. The
+    // formula is symmetric under swapping (upstream ↔ dense) TOGETHER with
+    // the index roles (row(k) ↔ colIdx[k]), which is exactly the transposed
+    // primal's values-adjoint — so SparseMatmulRule covers both forms with
+    // this one kind, operands swapped. Same ratified emit refusal as
+    // SPARSE_MATMUL. Host twin: `sparseMatmulValuesAdjoint`.
+    SPARSE_MATMUL_VALUES_ADJOINT,
+
     // §0.4.408 — Phase D1: stateless PRNG draws (DiffKT `RandomKey` parity).
     // Zero-operand creation ops; attrs carry everything: `key0`/`key1` (Int —
     // the two 32-bit words of the :core `RandomKey`) and `dims` (List<Int>,

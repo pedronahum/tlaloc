@@ -9,8 +9,15 @@ duplicate-summing construction, `toDense`, elementwise `plus`/`minus`/`times`
 union/intersection merges, sparse×dense elementwise `times`, counting-sort
 `transpose`, Double-accumulator SpMM and Gustavson SpGEMM — certified against
 dense references on seeded random patterns at densities 0/0.05/0.3/0.7).
-E1b (`SPARSE_MATMUL` + fused SDDMM values-adjoint) and E1c-pre/E1c
-(multi-integer-param structural zeros, then the `grad {}` surface) are next.
+**E1b landed §0.4.418** (`OpKind.SPARSE_MATMUL` + fused
+`SPARSE_MATMUL_VALUES_ADJOINT`, SparseMatmulRule + bilinear tangent,
+interpreter arms bit-exact against E1a, host twins `sparseMatmul` /
+`sparseMatmulTransposed` / `sparseMatmulValuesAdjoint`, CostModel, and the
+ratified pinned emit refusal — certified against the dense MatmulRule on
+toDense'd operands, JVP⇄VJP, and forward-over-reverse HVP vs the dense twin;
+see §2's design-decision record below for the transposed-CSR mechanism the
+slice settled). E1c-pre/E1c (multi-integer-param structural zeros, then the
+`grad {}` surface) are next.
 Companion to [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md) Phase E. Walked
 from a fresh shallow clone of `facebookresearch/diffkt` @ HEAD (2026-09-20):
 `kotlin/api/src/main/kotlin/org/diffkt/Sparse*.kt`, the JNI surface

@@ -12,6 +12,7 @@ import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
+import io.tlaloc.core.Sym
 import io.tlaloc.core.digamma
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.hostI32
@@ -662,6 +663,175 @@ fun <S : Shape> embeddingGrad(
  */
 fun <S : Shape> intZerosLike(t: DTensor<S, I32>): DTensor<S, I32> =
     DTensor(HostI32Storage(IntArray(t.size)), t.dims.copyOf(), I32)
+
+/**
+ * §0.4.418 — Phase E1b: loud validation of a CSR component triple, the E1a
+ * `SparseTensor` constructor's invariant minus the strictly-increasing-columns
+ * check (the SpMM/SDDMM walks are order-independent in the math; canonical
+ * inputs additionally get bit-for-bit parity with `SparseTensor.matmul`).
+ * Shared by the three sparse host twins below — the dxir interpreter's
+ * `validateCsrComponents` mirror, message-for-message.
+ */
+private fun validateCsrComponents(
+    opName: String,
+    nnz: Int,
+    colIdx: IntArray,
+    rowPtr: IntArray,
+    colBound: Int,
+) {
+    require(rowPtr.isNotEmpty()) { "$opName: rowPtr must have N+1 ≥ 1 entries" }
+    require(colIdx.size == nnz) {
+        "$opName: values ($nnz) and colIdx (${colIdx.size}) must be parallel"
+    }
+    require(rowPtr[0] == 0) { "$opName: rowPtr[0] must be 0, got ${rowPtr[0]}" }
+    require(rowPtr[rowPtr.size - 1] == nnz) {
+        "$opName: rowPtr[${rowPtr.size - 1}] must equal nnz=$nnz, got ${rowPtr[rowPtr.size - 1]}"
+    }
+    for (i in 1 until rowPtr.size) {
+        require(rowPtr[i] >= rowPtr[i - 1]) {
+            "$opName: rowPtr must be monotone non-decreasing: " +
+                "rowPtr[${i - 1}]=${rowPtr[i - 1]} > rowPtr[$i]=${rowPtr[i]}"
+        }
+    }
+    for (k in 0 until nnz) {
+        require(colIdx[k] in 0 until colBound) {
+            "$opName: colIdx[$k]=${colIdx[k]} out of range [0, $colBound)"
+        }
+    }
+}
+
+/**
+ * §0.4.418 — Phase E1b: the host twin of the dxir interpreter's SPARSE_MATMUL
+ * arm — sparse `[N, C]` (as CSR components) × dense `[C, D]` → dense `[N, D]`.
+ * `N` is read off [rowPtr]'s ACTUAL runtime extent (N+1 entries — the
+ * runtime-extent house pattern, which is what makes the eventual `grad {}`
+ * synthesis path sound under -1 sentinel dims), `C`/`D` off the dense
+ * operand's runtime dims. The walk is `SparseTensor.matmul(dense)` — and the
+ * interpreter arm — bit-for-bit: per output row a Double accumulator collects
+ * `values[k] · dense[colIdx[k], :]` in increasing-k order, then narrows.
+ */
+fun sparseMatmul(
+    values: DTensor<*, F32>,
+    colIdx: DTensor<*, I32>,
+    rowPtr: DTensor<*, I32>,
+    dense: DTensor<*, F32>,
+): DTensor<Rank2<Sym, Sym>, F32> {
+    require(dense.rank == 2) {
+        "sparseMatmul: dense operand must be rank-2 (C, D); got ${dense.dims.toList()}"
+    }
+    val v = values.hostF32()
+    val ci = colIdx.hostI32()
+    val rp = rowPtr.hostI32()
+    val b = dense.hostF32()
+    val c = dense.dims[0]
+    val d = dense.dims[1]
+    validateCsrComponents("sparseMatmul", v.size, ci, rp, c)
+    val n = rp.size - 1
+    val out = FloatArray(n * d)
+    val acc = DoubleArray(d)
+    for (i in 0 until n) {
+        acc.fill(0.0)
+        for (k in rp[i] until rp[i + 1]) {
+            val vk = v[k].toDouble()
+            val bOff = ci[k] * d
+            for (j in 0 until d) acc[j] += vk * b[bOff + j]
+        }
+        val rowOff = i * d
+        for (j in 0 until d) out[rowOff + j] = acc[j].toFloat()
+    }
+    return DTensor(HostF32Storage(out), intArrayOf(n, d), F32)
+}
+
+/**
+ * §0.4.418 — the `transposed = true` form's host twin: `Aᵀ · dense` over the
+ * SAME CSR components, `dense` here `[N, D]` (the upstream, in the adjoint
+ * use). [denseTemplate] contributes SHAPE ONLY — its values are never read
+ * (the SUM_TO / embeddingGrad template convention): its runtime leading dim
+ * is the output row extent `C`, which no component tensor's shape carries
+ * (rowPtr gives N, colIdx gives nnz) and which is a -1 sentinel under
+ * `grad {}`. The scatter walk (source rows in order) reproduces
+ * `SparseTensor.transpose().matmul(dense)` — and the interpreter's transposed
+ * arm — bit-for-bit: per output element the Double-add sequence is identical,
+ * because the canonical counting-sort transpose orders each output row's
+ * entries by source row.
+ */
+fun <S : Shape> sparseMatmulTransposed(
+    values: DTensor<*, F32>,
+    colIdx: DTensor<*, I32>,
+    rowPtr: DTensor<*, I32>,
+    dense: DTensor<*, F32>,
+    denseTemplate: DTensor<S, F32>,
+): DTensor<Rank2<Sym, Sym>, F32> {
+    require(dense.rank == 2) {
+        "sparseMatmulTransposed: dense operand must be rank-2 (N, D); got ${dense.dims.toList()}"
+    }
+    require(denseTemplate.rank == 2) {
+        "sparseMatmulTransposed: denseTemplate must be rank-2 (C, ·); got ${denseTemplate.dims.toList()}"
+    }
+    val v = values.hostF32()
+    val ci = colIdx.hostI32()
+    val rp = rowPtr.hostI32()
+    val u = dense.hostF32()
+    val d = dense.dims[1]
+    val n = rp.size - 1
+    val cOut = denseTemplate.dims[0]
+    require(dense.dims[0] == n) {
+        "sparseMatmulTransposed: dense operand has ${dense.dims[0]} rows but rowPtr implies N=$n"
+    }
+    validateCsrComponents("sparseMatmulTransposed", v.size, ci, rp, cOut)
+    val acc = DoubleArray(cOut * d)
+    for (i in 0 until n) {
+        val dOff = i * d
+        for (k in rp[i] until rp[i + 1]) {
+            val vk = v[k].toDouble()
+            val outOff = ci[k] * d
+            for (j in 0 until d) acc[outOff + j] += vk * u[dOff + j]
+        }
+    }
+    val out = FloatArray(cOut * d) { acc[it].toFloat() }
+    return DTensor(HostF32Storage(out), intArrayOf(cOut, d), F32)
+}
+
+/**
+ * §0.4.418 — the fused SDDMM values-adjoint's host twin, the dxir
+ * interpreter's SPARSE_MATMUL_VALUES_ADJOINT arm bit-for-bit:
+ * `d_values[k] = Σ_j upstream[row(k), j] · dense[colIdx[k], j]`, one
+ * Double-accumulated length-D dot per STORED entry — the structural zeros
+ * are not inputs, so no gradient exists for them and the result is exactly
+ * `[nnz]` (read off [colIdx]'s runtime extent, never baked).
+ */
+fun sparseMatmulValuesAdjoint(
+    upstream: DTensor<*, F32>,
+    dense: DTensor<*, F32>,
+    colIdx: DTensor<*, I32>,
+    rowPtr: DTensor<*, I32>,
+): DTensor<Rank1<Sym>, F32> {
+    require(dense.rank == 2) {
+        "sparseMatmulValuesAdjoint: dense operand must be rank-2 (C, D); got ${dense.dims.toList()}"
+    }
+    val up = upstream.hostF32()
+    val bv = dense.hostF32()
+    val ci = colIdx.hostI32()
+    val rp = rowPtr.hostI32()
+    val c = dense.dims[0]
+    val d = dense.dims[1]
+    validateCsrComponents("sparseMatmulValuesAdjoint", ci.size, ci, rp, c)
+    val n = rp.size - 1
+    require(up.size == n * d) {
+        "sparseMatmulValuesAdjoint: upstream size ${up.size} != N $n * D $d"
+    }
+    val out = FloatArray(ci.size)
+    for (i in 0 until n) {
+        val upOff = i * d
+        for (k in rp[i] until rp[i + 1]) {
+            val dOff = ci[k] * d
+            var acc = 0.0
+            for (j in 0 until d) acc += up[upOff + j].toDouble() * bv[dOff + j]
+            out[k] = acc.toFloat()
+        }
+    }
+    return DTensor(HostF32Storage(out), intArrayOf(ci.size), F32)
+}
 
 /**
  * §0.4.384 — Phase A3b slice 1, the rank-4 substrate: the shared conv engine.

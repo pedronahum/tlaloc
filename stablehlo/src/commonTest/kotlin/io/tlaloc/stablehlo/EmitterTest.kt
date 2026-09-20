@@ -657,6 +657,46 @@ class EmitterTest {
     }
 
     @Test
+    fun sparseMatmulOpsRefuseEmissionLoudlyByName() {
+        // §0.4.418 — Phase E1b (sparse): the RATIFIED v1 GPU position is a
+        // pinned loud refusal (docs/SPARSE_PARITY_AUDIT.md §2 "GPU" option 1,
+        // the §0.4.408 RNG precedent). StableHLO/XLA has no sparse types; a
+        // densify-and-matmul fallback would be a silent O(N²) behaviour fork
+        // (the §0.4.392 principle), so both sparse kinds fail by name instead.
+        val i32 = io.tlaloc.core.I32
+        val spmm = DxirBuilder.function("spmm") {
+            val v = param("v", DxirType(F32, listOf(2)))
+            val ci = param("ci", DxirType(i32, listOf(2)))
+            val rp = param("rp", DxirType(i32, listOf(3)))
+            val b = param("b", DxirType(F32, listOf(2, 2)))
+            listOf(op(OpKind.SPARSE_MATMUL, listOf(v, ci, rp, b), DxirType(F32, listOf(2, 2))))
+        }
+        val ex1 = assertFailsWith<IllegalStateException> { spmm.toStablehlo() }
+        assertTrue(
+            "SPARSE_MATMUL has no StableHLO emission" in ex1.message.orEmpty(),
+            "expected the named sparse-matmul refusal; got: ${ex1.message}",
+        )
+        val sddmm = DxirBuilder.function("sddmm") {
+            val up = param("up", DxirType(F32, listOf(2, 2)))
+            val b = param("b", DxirType(F32, listOf(2, 2)))
+            val ci = param("ci", DxirType(i32, listOf(2)))
+            val rp = param("rp", DxirType(i32, listOf(3)))
+            listOf(
+                op(
+                    OpKind.SPARSE_MATMUL_VALUES_ADJOINT,
+                    listOf(up, b, ci, rp),
+                    DxirType(F32, listOf(2)),
+                ),
+            )
+        }
+        val ex2 = assertFailsWith<IllegalStateException> { sddmm.toStablehlo() }
+        assertTrue(
+            "SPARSE_MATMUL_VALUES_ADJOINT has no StableHLO emission" in ex2.message.orEmpty(),
+            "expected the named values-adjoint refusal; got: ${ex2.message}",
+        )
+    }
+
+    @Test
     fun matmulLowersToDotGeneralWithContractingDims() {
         val fn = DxirBuilder.function("mm") {
             val a = param("a", DxirType(F32, listOf(2, 3)))

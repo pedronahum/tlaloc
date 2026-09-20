@@ -1596,6 +1596,79 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.418 — reverse of SPARSE_MATMUL (Phase E1b, DiffKT sparse parity —
+     * the sparse×dense matmul VJP the whole phase exists for; DiffKT itself
+     * has NO sparse VJP anywhere, so this is parity-plus).
+     *
+     * Forward primal `Y = A · B` over the CSR components (values, colIdx,
+     * rowPtr) of A [N, C] and dense B [C, D]:
+     *
+     * - `d_values` = the SDDMM masked to the sparsity pattern,
+     *   `d_values[k] = Σ_j upstream[row(k), j] · B[colIdx[k], j]`, emitted as
+     *   the single fused [OpKind.SPARSE_MATMUL_VALUES_ADJOINT] (the
+     *   EMBEDDING_GRAD fused-adjoint precedent — O(nnz·D), never the dense
+     *   [N, C] outer product re-masked).
+     * - `d_dense = Aᵀ · upstream`, emitted as SPARSE_MATMUL over the SAME
+     *   components with `transposed = true` and the primal dense operand
+     *   riding as the 5th SHAPE-ONLY template (its runtime leading dim is the
+     *   output row extent C, a -1 sentinel under `grad {}` that no component
+     *   tensor's shape carries). The transpose happens at EXECUTION time
+     *   inside the op's walk — materialising transposed component tensors at
+     *   rule-build time would read extents that are sentinels here, the
+     *   conv-adjoint padding-solve failure mode.
+     *
+     * A TRANSPOSED primal (`Y = Aᵀ · U`, the node this rule itself emits —
+     * reached when reverse mode differentiates THROUGH a gradient body) is
+     * the mirror image: `d_U = A · upstream` (the plain form, no template
+     * needed — its result extent N rides on rowPtr) and `d_values` the same
+     * SDDMM with (upstream ↔ dense) roles swapped, which the formula's
+     * symmetry (swap the tensors together with row(k) ↔ colIdx[k]) turns
+     * into the SAME op kind with swapped operands. The pair is thus closed
+     * under first-order reverse in both directions; the template operand of
+     * a transposed primal gets no contribution (shape-only).
+     *
+     * colIdx/rowPtr (operands 1, 2) are integer tensors: non-differentiable,
+     * structural-zero slots (§0.4.54/§0.4.400) — no contribution flows to
+     * them. [readsPrimalOperandIndices] = all of 0..3: every adjoint op
+     * dereferences the CSR components, and the dense operand feeds both the
+     * SDDMM and (as template) the transposed product.
+     */
+    val SparseMatmulRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1, 2, 3)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val transposed = (op.attrs["transposed"] as? Boolean) ?: false
+            val values = op.operands[0]
+            val colIdx = op.operands[1]
+            val rowPtr = op.operands[2]
+            val dense = op.operands[3]
+            val dValues = builder.op(
+                OpKind.SPARSE_MATMUL_VALUES_ADJOINT,
+                if (transposed) {
+                    listOf(dense, upstream, colIdx, rowPtr)
+                } else {
+                    listOf(upstream, dense, colIdx, rowPtr)
+                },
+                values.type,
+            )
+            val dDense = if (transposed) {
+                builder.op(
+                    OpKind.SPARSE_MATMUL,
+                    listOf(values, colIdx, rowPtr, upstream),
+                    dense.type,
+                )
+            } else {
+                builder.op(
+                    OpKind.SPARSE_MATMUL,
+                    listOf(values, colIdx, rowPtr, upstream, dense),
+                    dense.type,
+                    attrs = mapOf("transposed" to true),
+                )
+            }
+            return listOf(values to dValues, dense to dDense)
+        }
+    }
+
+    /**
      * §0.4.77 — reverse of BROADCAST. When a lower-rank input is broadcast to a
      * higher-rank output, the gradient flowing back must be SUM-reduced across
      * the inserted dims to return to the input's shape.
@@ -1856,6 +1929,9 @@ object VjpRegistry {
         OpKind.REVERSE to ReverseRule,
         OpKind.GATHER to GatherRule,
         OpKind.EMBEDDING to EmbeddingRule,
+        // §0.4.418 — Phase E1b: the sparse×dense matmul VJP (both the plain
+        // and the `transposed` adjoint form — see [SparseMatmulRule]).
+        OpKind.SPARSE_MATMUL to SparseMatmulRule,
         OpKind.BROADCAST to BroadcastRule,
         // §0.4.399 — the runtime-extent family's own rules: each pair is the
         // other's adjoint, so reverse-mode composes to any order through them.

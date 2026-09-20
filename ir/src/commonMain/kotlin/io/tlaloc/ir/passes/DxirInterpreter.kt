@@ -818,6 +818,116 @@ object DxirInterpreter {
                 }
                 out
             }
+            OpKind.SPARSE_MATMUL -> {
+                // §0.4.418 — Phase E1b: sparse [N, C] × dense [C, D] → dense
+                // [N, D] over CSR components (values, colIdx, rowPtr, dense).
+                // N is rowPtr's RUNTIME extent minus one (the runtime-extent
+                // house pattern — never the result type), C the dense
+                // operand's leading dim. The walk is E1a's
+                // `SparseTensor.matmul(dense)` bit-for-bit: per-row Double
+                // accumulator, increasing-k contraction order, narrowed once
+                // per row. With `transposed = true` (the SparseMatmulRule
+                // adjoint form) the SAME components compute Aᵀ · dense by
+                // scattering `values[k] · dense[row(k), :]` into output row
+                // colIdx[k] — per output element the same Double-add sequence
+                // as `transpose().matmul(dense)` (see OpKind) — with the
+                // output row extent C read off the 5th, SHAPE-ONLY template
+                // operand (values never evaluated).
+                val transposed = (op.attrs["transposed"] as? Boolean) ?: false
+                val wantOperands = if (transposed) 5 else 4
+                require(op.operands.size == wantOperands) {
+                    "DxirInterpreter: SPARSE_MATMUL (transposed=$transposed) requires $wantOperands operands " +
+                        "(values, colIdx, rowPtr, dense${if (transposed) ", denseTemplate" else ""}), " +
+                        "got ${op.operands.size}"
+                }
+                val denseDims = op.operands[3].type.dims
+                require(denseDims.size == 2) {
+                    "DxirInterpreter: SPARSE_MATMUL dense operand must be rank-2, got $denseDims"
+                }
+                val values = evalNode(op.operands[0], env, multiResults)
+                val colIdx = evalCsrIntOperand(op, 1, "colIdx", env, multiResults)
+                val rowPtr = evalCsrIntOperand(op, 2, "rowPtr", env, multiResults)
+                val dense = evalNode(op.operands[3], env, multiResults)
+                val d = denseDims[1]
+                val n = rowPtr.size - 1
+                if (!transposed) {
+                    val c = denseDims[0]
+                    validateCsrComponents("SPARSE_MATMUL", values.size, colIdx, rowPtr, c)
+                    val out = FloatArray(n * d)
+                    val acc = DoubleArray(d)
+                    for (i in 0 until n) {
+                        acc.fill(0.0)
+                        for (k in rowPtr[i] until rowPtr[i + 1]) {
+                            val v = values[k].toDouble()
+                            val bOff = colIdx[k] * d
+                            for (j in 0 until d) acc[j] += v * dense[bOff + j]
+                        }
+                        val rowOff = i * d
+                        for (j in 0 until d) out[rowOff + j] = acc[j].toFloat()
+                    }
+                    out
+                } else {
+                    val templateDims = op.operands[4].type.dims
+                    require(templateDims.size == 2) {
+                        "DxirInterpreter: transposed SPARSE_MATMUL denseTemplate must be rank-2, got $templateDims"
+                    }
+                    val cOut = templateDims[0]
+                    require(denseDims[0] == n) {
+                        "DxirInterpreter: transposed SPARSE_MATMUL dense operand has ${denseDims[0]} rows " +
+                            "but rowPtr implies N=$n"
+                    }
+                    validateCsrComponents("SPARSE_MATMUL(transposed)", values.size, colIdx, rowPtr, cOut)
+                    val acc = DoubleArray(cOut * d)
+                    for (i in 0 until n) {
+                        val dOff = i * d
+                        for (k in rowPtr[i] until rowPtr[i + 1]) {
+                            val v = values[k].toDouble()
+                            val outOff = colIdx[k] * d
+                            for (j in 0 until d) acc[outOff + j] += v * dense[dOff + j]
+                        }
+                    }
+                    FloatArray(cOut * d) { acc[it].toFloat() }
+                }
+            }
+            OpKind.SPARSE_MATMUL_VALUES_ADJOINT -> {
+                // §0.4.418 — Phase E1b: the SDDMM masked to the sparsity
+                // pattern, SPARSE_MATMUL's fused values-adjoint.
+                // (upstream [N, D], dense [C, D], colIdx, rowPtr) → [nnz]:
+                // d_values[k] = Σ_j upstream[row(k), j] · dense[colIdx[k], j],
+                // one Double-accumulated length-D dot per stored entry.
+                // nnz = colIdx's runtime extent, N = rowPtr's minus one.
+                require(op.operands.size == 4) {
+                    "DxirInterpreter: SPARSE_MATMUL_VALUES_ADJOINT requires 4 operands " +
+                        "(upstream, dense, colIdx, rowPtr), got ${op.operands.size}"
+                }
+                val denseDims = op.operands[1].type.dims
+                require(denseDims.size == 2) {
+                    "DxirInterpreter: SPARSE_MATMUL_VALUES_ADJOINT dense operand must be rank-2, got $denseDims"
+                }
+                val upstream = evalNode(op.operands[0], env, multiResults)
+                val dense = evalNode(op.operands[1], env, multiResults)
+                val colIdx = evalCsrIntOperand(op, 2, "colIdx", env, multiResults)
+                val rowPtr = evalCsrIntOperand(op, 3, "rowPtr", env, multiResults)
+                val c = denseDims[0]
+                val d = denseDims[1]
+                val n = rowPtr.size - 1
+                validateCsrComponents("SPARSE_MATMUL_VALUES_ADJOINT", colIdx.size, colIdx, rowPtr, c)
+                require(upstream.size == n * d) {
+                    "DxirInterpreter: SPARSE_MATMUL_VALUES_ADJOINT upstream size ${upstream.size} != " +
+                        "N $n * D $d"
+                }
+                val out = FloatArray(colIdx.size)
+                for (i in 0 until n) {
+                    val upOff = i * d
+                    for (k in rowPtr[i] until rowPtr[i + 1]) {
+                        val dOff = colIdx[k] * d
+                        var acc = 0.0
+                        for (j in 0 until d) acc += upstream[upOff + j].toDouble() * dense[dOff + j]
+                        out[k] = acc.toFloat()
+                    }
+                }
+                out
+            }
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -1495,6 +1605,67 @@ object DxirInterpreter {
             multiResults[multiResultKey(op.id, i)] = outputs[i]
         }
         return outputs[0]
+    }
+
+    /**
+     * §0.4.418 — Phase E1b: evaluate one CSR integer component operand
+     * (colIdx or rowPtr) to an IntArray. The single-buffer FloatArray storage
+     * (see the file top comment) holds integer dtypes as exact float-valued
+     * integers, so `.toInt()` recovers them losslessly for any index the
+     * tests or a real workload can reach.
+     */
+    private fun evalCsrIntOperand(
+        op: DxirOp,
+        index: Int,
+        name: String,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): IntArray {
+        val t = op.operands[index].type
+        require(t.dtype == io.tlaloc.core.I32 || t.dtype == io.tlaloc.core.I64) {
+            "DxirInterpreter: ${op.op} $name operand must be integer, got ${t.dtype}"
+        }
+        val raw = evalNode(op.operands[index], env, multiResults)
+        return IntArray(raw.size) { raw[it].toInt() }
+    }
+
+    /**
+     * §0.4.418 — Phase E1b: loud validation of a CSR component triple's
+     * invariant, the E1a `SparseTensor` constructor's checks minus the
+     * strictly-increasing-columns one (the SpMM/SDDMM walks are
+     * order-independent in the math; canonical inputs — the only kind E1a
+     * and the eventual E1c surface produce — additionally get bit-for-bit
+     * parity with `SparseTensor.matmul`, whose contraction order is the
+     * canonical one). The audit's `nonZeroIndices` trap is what a sparse op
+     * earns by trusting its own internals, so nothing here is skipped.
+     */
+    private fun validateCsrComponents(
+        opName: String,
+        nnz: Int,
+        colIdx: IntArray,
+        rowPtr: IntArray,
+        colBound: Int,
+    ) {
+        require(rowPtr.isNotEmpty()) { "DxirInterpreter: $opName rowPtr must have N+1 ≥ 1 entries" }
+        require(colIdx.size == nnz) {
+            "DxirInterpreter: $opName values (${nnz}) and colIdx (${colIdx.size}) must be parallel"
+        }
+        require(rowPtr[0] == 0) { "DxirInterpreter: $opName rowPtr[0] must be 0, got ${rowPtr[0]}" }
+        require(rowPtr[rowPtr.size - 1] == nnz) {
+            "DxirInterpreter: $opName rowPtr[${rowPtr.size - 1}] must equal nnz=$nnz, " +
+                "got ${rowPtr[rowPtr.size - 1]}"
+        }
+        for (i in 1 until rowPtr.size) {
+            require(rowPtr[i] >= rowPtr[i - 1]) {
+                "DxirInterpreter: $opName rowPtr must be monotone non-decreasing: " +
+                    "rowPtr[${i - 1}]=${rowPtr[i - 1]} > rowPtr[$i]=${rowPtr[i]}"
+            }
+        }
+        for (k in 0 until nnz) {
+            require(colIdx[k] in 0 until colBound) {
+                "DxirInterpreter: $opName colIdx[$k]=${colIdx[k]} out of range [0, $colBound)"
+            }
+        }
     }
 
     /**

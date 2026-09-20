@@ -462,6 +462,25 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                     "gradient bodies on host (the synthesis path) or the interpreter",
             )
 
+            // §0.4.418 — Phase E1b (sparse): a DELIBERATE refusal, not a gap —
+            // the RATIFIED v1 GPU position (docs/SPARSE_PARITY_AUDIT.md §2
+            // "GPU", option 1; the §0.4.408 RNG precedent). StableHLO/XLA has
+            // no sparse types; a faithful CSR SpMM over the component tensors
+            // needs either a WHILE over rows (defeats XLA) or ELL-style
+            // max-degree padding — a DIFFERENT storage format with its own
+            // memory blowup on skewed degree distributions — and a
+            // densify-and-matmul fallback would be correct but silently O(N²),
+            // a behaviour fork worse than a named restriction (the §0.4.392
+            // principle). This is DiffKT's own position (its sparse ops are
+            // CPU-only Eigen JNI), so parity is not reduced by refusing.
+            OpKind.SPARSE_MATMUL, OpKind.SPARSE_MATMUL_VALUES_ADJOINT -> error(
+                "${node.op} has no StableHLO emission (Phase E1b, the ratified GPU " +
+                    "refusal): StableHLO/XLA has no sparse types, and a densify fallback " +
+                    "would be a silent O(N²) behaviour fork; run sparse matmuls on host " +
+                    "(:core SparseTensor / the sparseMatmul* twins) or the interpreter " +
+                    "(ELL-padded emission is a recorded Phase E tail)",
+            )
+
             else -> error("StableHLO lowering not yet implemented for ${node.op}")
         }
         // Most ops emit a single line whose result is the literal `%N` we named above.

@@ -223,6 +223,24 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     OpKind.EMBEDDING -> op.type.elementCount.toDouble()
     // §0.4.370 — embedding adjoint: one scatter-add per upstream element.
     OpKind.EMBEDDING_GRAD -> op.operands[1].type.elementCount.toDouble()
+
+    // §0.4.418 — Phase E1b sparse×dense matmul: one MAC per stored entry per
+    // output column — 2·nnz·D FLOPs, the dense 2·N·C·D with the structural
+    // zeros skipped (nnz off the values operand, D off the dense operand's
+    // trailing dim). The `transposed` adjoint form does the same work
+    // scattered, so the formula covers both.
+    OpKind.SPARSE_MATMUL -> {
+        val nnz = op.operands[0].type.elementCount.toDouble()
+        val d = op.operands[3].type.dims.lastOrNull()?.toDouble() ?: 1.0
+        2.0 * nnz * d
+    }
+    // §0.4.418 — the fused SDDMM values-adjoint: one length-D dot per stored
+    // entry, 2·nnz·D FLOPs (nnz is the result's own extent).
+    OpKind.SPARSE_MATMUL_VALUES_ADJOINT -> {
+        val nnz = op.type.elementCount.toDouble()
+        val d = op.operands[1].type.dims.lastOrNull()?.toDouble() ?: 1.0
+        2.0 * nnz * d
+    }
     OpKind.CROSS_ENTROPY -> 5.0 * op.operands[0].type.elementCount.toDouble()
 
     // Control flow: structural, no per-op compute.

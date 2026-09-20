@@ -549,6 +549,55 @@ object DxirForwardTransform {
             // vocab axis): dY = EMBEDDING(dTable, indices). Indices carry no
             // tangent (integer); the primal index clone vOps[1] rides through.
             OpKind.EMBEDDING -> b.op(OpKind.EMBEDDING, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
+
+            // §0.4.418 — Phase E1b: SPARSE_MATMUL is bilinear in its two
+            // float slots (values = operand 0, dense = operand 3) — the
+            // audit's tangent: dY = SPARSE_MATMUL(d_values, …, dense) +
+            // SPARSE_MATMUL(values, …, d_dense). The integer CSR components
+            // colIdx/rowPtr (operands 1, 2) carry no tangent
+            // (structural-zero integer slots), and the `transposed` adjoint
+            // form's 5th operand is a SHAPE-ONLY template — every non-value
+            // slot takes its primal VALUE clone, so this one spelling covers
+            // both forms (the float value slots are 0 and 3 in each; attrs
+            // ride verbatim).
+            OpKind.SPARSE_MATMUL -> {
+                val dA = b.op(
+                    node.op,
+                    listOf(t(node.operands[0])) + vOps.drop(1),
+                    ty,
+                    node.attrs,
+                )
+                val dB = b.op(
+                    node.op,
+                    vOps.take(3) + listOf(t(node.operands[3])) + vOps.drop(4),
+                    ty,
+                    node.attrs,
+                )
+                b.op(OpKind.ADD, listOf(dA, dB), ty)
+            }
+
+            // §0.4.418 — the fused SDDMM values-adjoint is bilinear in
+            // (upstream, dense) = operands (0, 1); the integer components
+            // take their primal clones. This is what lets forward-over-
+            // reverse (an HVP through a sparse gradient body, which contains
+            // this op and the transposed SPARSE_MATMUL) compose — certified
+            // against the dense-matmul HVP in DxirSparseMatmulTest.
+            OpKind.SPARSE_MATMUL_VALUES_ADJOINT -> {
+                val dU = b.op(
+                    node.op,
+                    listOf(t(node.operands[0])) + vOps.drop(1),
+                    ty,
+                    node.attrs,
+                )
+                val dD = b.op(
+                    node.op,
+                    listOf(vOps[0], t(node.operands[1])) + vOps.drop(2),
+                    ty,
+                    node.attrs,
+                )
+                b.op(OpKind.ADD, listOf(dU, dD), ty)
+            }
+
             OpKind.CAST -> b.op(OpKind.CAST, listOf(t(node.operands[0])), ty)
 
             // §0.4.415 — Phase B5: CHECK_SHAPE_LIKE is a value-identity with a
