@@ -8,6 +8,11 @@ forward-mode = refuse-unless-jvpFn; the JVP⇄VJP debug oracle ships
 `customVjpJvp`/`customVjpJvp2`) LANDED at §0.4.416** — see §7 below for
 what the implementation taught that this design had not anticipated, and
 §8 for the forward-side decisions (recorded per the §0.4.383 precedent).
+**Close-out (§0.4.433):** B5 is complete; the two still-open tails —
+the `CHECK_SHAPE_LIKE` GPU emission (assert-then-alias; full disposition
+paragraph in the plan doc's consolidated list) and Candidate B on the
+serialized-dxir decision — are recorded in the plan doc's "Remaining
+tails" list. This design is a closed record.
 Companion to [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md) Phase B5.
 
 ## 1. What "custom derivatives" means, in both systems

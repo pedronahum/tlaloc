@@ -1,10 +1,13 @@
 # DiffKT Parity Plan
 
-**Status: ACTIVE (opened 2026-07-19, post-§0.4.364).** Goal per Pedro:
+**Status: BOOK OF WORK CLOSED (§0.4.433 close-out, 2026-09-20; opened
+2026-07-19, post-§0.4.364).** See "End-state at §0.4.433" below for what
+is complete, what is closed by ratified refusal, and the one consolidated
+remaining-tails list. Goal per Pedro:
 support everything [facebookresearch/diffkt](https://github.com/facebookresearch/diffkt)
 supports that Tlaloc doesn't yet.
 
-## Where parity already stands (opened at §0.4.359–364; markers kept current — last sweep §0.4.410)
+## Where parity already stands (opened at §0.4.359–364; markers kept current — last sweep §0.4.433)
 
 | DiffKT capability | Tlaloc status |
 |---|---|
@@ -19,6 +22,146 @@ supports that Tlaloc doesn't yet.
 | softmax/logsumexp/max/min reductions + VJPs | ✅ axis reductions in `grad {}` §0.4.366 (A1), softmax/logSoftmax §0.4.368 (A3a) — LOGSUMEXP stays emitter-only |
 | Compile-time shape checking (ShapeTyping plugin) | ✅ richer: named indices + `validateDxirShapes` + real reverse-transform probe at check time |
 | Float64 | ✅ PJRT path (§0.4.354) |
+
+## End-state at §0.4.433 — the close-out
+
+The book of work is CLOSED. Every phase this plan opened is complete,
+closed by a ratified refusal, or gated on a product decision that is
+Pedro's to make. The canonical end-of-book suite number is **1944**
+(clean-room certified at the close-out; the ladder from the §0.4.417
+sparse-arc opening ran 1850 → 1944 in sixteen sections, §0.4.417–432,
+all landed 2026-09-20).
+
+**COMPLETE:**
+- **Phase 0** audit (§0.4.365).
+- **Phase A** user surface (§0.4.366–397, 400, 409, 414, 427, 428 —
+  axis reductions, the shape-op families, softmax/NN ops, embedding
+  with paddingIndex + rank-2 batches, the full concrete scalar-param
+  family, `view`/`withChange`/`meld`).
+- **Phases B1–B4** (§0.4.372–412, 423, 424, 430 — `jvp`/`vjp`/
+  `jacobian{,2}`/`jacobianReverse{,2}`/`hessian{,2}`/`grad3`, the full
+  nesting matrix, fused-adjoint forward tangents, multi-result
+  COARSENED tangents + IF-bearing `primal_body` splices).
+- **Phase B5** custom derivatives (§0.4.415 reverse + §0.4.416 forward,
+  ratified; design record in
+  [CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md)).
+- **Phase C** op families (§0.4.395, 396, 402, 405, 411, 426, 429 —
+  tan/atan, flip, lgamma/digamma/polygamma, `integral` host + through
+  the B5 gate, grouped/depthwise conv at IR level).
+- **Phase D** random (§0.4.408, 413, 421, 422, 431, 432 — threefry-2x32
+  bit-pinned vs JAX, reparameterized gradients, draws inside `grad {}`,
+  explicit-threefry GPU emission, cauchy/exponential/chiSquare, runtime
+  RNG keys as operands).
+- **Phase E** sparse, per the ratified scope (§0.4.417–420 — `:core`
+  host CSR `SparseTensor`, `SPARSE_MATMUL` + fused SDDMM adjoint,
+  `ZEROS_LIKE` param-addressed zeros, the `grad {}` sparse surface;
+  [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)).
+
+**CLOSED BY RATIFIED REFUSAL** (decisions with papers, not tails — do
+not re-litigate without new evidence):
+- **sparse GPU emission** — the pinned emit refusal is the ratified E
+  scope; ELL-padded emission is the recorded route IF a consumer ever
+  forces the question.
+- **`matdiv`** — SKIPPED; a solver arrives as its own designed feature
+  or never (DiffKT's own is Eigen-JNI with `TODO()`s at its edges).
+- **`rng_bit_generator`** — never used; explicit-threefry emission
+  (§0.4.422, JAX's own approach) IS the design, not a stopgap.
+- **overlapping/padded maxpool GPU gradients** — INHERENT (§0.4.392):
+  StableHLO cannot express the all-ties convention;
+  `select_and_scatter` picks one winner and would fork the gradient by
+  backend.
+- **`DScalar`-INTERFACE `grad {}` params** — structural refusal by name
+  (§0.4.427); the concrete family (`Float`/`FloatScalar`/`DoubleScalar`)
+  lowers.
+
+**GATED ON PEDRO:** Phase F, the model/optimizer layer (Layer/
+Sequential/Trainable + Dense/Conv2d/pooling/BatchNorm/Embedding/
+Dropout/GRU + SGD/Adam/RMSprop/Momentum) — a product decision on
+whether it is in scope or superseded by Tlaloc's own module story; not
+blocking anything above. Row-sparse embedding gradients ride with it.
+
+### Remaining tails, consolidated (§0.4.433)
+
+Every still-open deferral in this document, in one place. Each is a
+named, loudly-refusing gap sized to its own § when a consumer asks;
+the per-phase entries below carry the mechanism detail.
+
+*Phase A:*
+- `split` inside `grad {}` — no `List<DTensor>` value model in the
+  lambda lowering; spell per-piece `view`/`slice` (§0.4.428).
+- multi-index `view(IntArray)` leading-index form; `withChange` beyond
+  rank 3 (the `padToLikeRank{1,2,3}` arity bound) (§0.4.428).
+- gather/scatter axis + index-list forms beyond the landed surface.
+- the MIXED broadcast — a simultaneous rank-increase AND aligned size-1
+  stretch in one op; the FIR fail-loud guard stands (§0.4.373).
+- reductions over >2 axes from `grad {}` (fixed-arity synthesis
+  delegates; IR level fully general) (§0.4.366).
+- embedding indices produced by in-lambda integer ARITHMETIC (params
+  only; the several-index-params half closed §0.4.419) (§0.4.409).
+- `DScalar × DTensor` mixing and comparisons against a scalar literal
+  (A5b neighbourhood).
+
+*Phase B:*
+- WHILE-bearing bodies through the COARSENED splice (IF closed
+  §0.4.430; WHILE refuses by name).
+- user (B5) multi-result `f` — unconstructible by
+  `validateCoarsenedShape`; PhiCalculus coarsening is its route in
+  (§0.4.430).
+- **B5 `CHECK_SHAPE_LIKE` GPU emission — stays deferred; disposition
+  recorded at the close-out.** The op is the runtime shape contract on
+  user `customVjp` gradient returns (assert the value's runtime dims
+  equal its template's, then alias the value through), and the emitter
+  refuses it by name because StableHLO has no assert. An emission would
+  have to spell assert-then-alias by hand — compare per-axis extents,
+  then either poison the failing arm (a NaN splat behind a select) or
+  trap through a `custom_call` — and every candidate either silently
+  forks host/device behaviour (a dropped or NaN-masked check is not the
+  interpreter's loud failure) or drags in a custom-call runtime
+  dependency the emitter has nowhere to declare. What it concretely
+  needs: an emission-strategy decision (poison vs trap), a
+  PjrtSession-visible failure channel, and a GPU cert that a VIOLATED
+  contract actually surfaces. Until then the pinned refusal IS the
+  correct behaviour: user gradient bodies are host/interpreter-certified
+  and a GPU run refuses loudly rather than running unchecked. (The KPTX
+  native-runtime decision, if ever reopened, is the natural vehicle for
+  the trap half.)
+- B5 Candidate B (registration-form API) — deferred on the
+  serialized-dxir decision (CUSTOM_DERIVATIVES_DESIGN.md §6).
+- 3-arg forward-assembled family (`jacobian3`/`hessian3`/`jvp3`/`vjp3`)
+  — the §0.4.406 pattern verbatim; pull when a consumer asks.
+- rev-over-rev THROUGH fused-adjoint gradient bodies — the B4 refusal
+  pins stand; the forward half closed §0.4.423, so second order
+  composes fwd-over-rev today.
+- n-th-order user intrinsics (`reverseDerivative{2..4}` spellings) — a
+  synthesis-surface question, not an IR one; the compositions they
+  would lower to are certified (§0.4.401).
+
+*Phase C:*
+- the INTEGRAL region op — runtime/tensor bounds via a
+  quadrature-over-body-VJP adjoint; the literal-bounds `grad {}` v1
+  stands (§0.4.426).
+- grouped-conv tails (§0.4.429; each refuses naming the attr):
+  transposed-conv grouped VJP, grouped adjoint EMISSION, the user
+  surface, `batch_group_count`.
+- conv `window_reversal` re-expression via REVERSE of the kernel's
+  spatial axes — noted in `OpKind.kt`, deliberately not attempted.
+
+*Phase D:*
+- the FIR surface for the runtime-key OPERAND form — `RandomKey`-typed
+  vals / lambda params / computed key words inside `grad {}`; the
+  §0.4.421 literal-only fallback stays the loud gate (§0.4.432).
+- an i32 host-buffer lane in `PjrtSession` (F32-only v1) — would let
+  high-bit runtime keys ride as executable inputs (§0.4.432).
+- `chiSquare`/`exponential` inside `grad {}` — the §0.4.431 cauchy
+  pattern extended; waiting on a use.
+- Gamma implicit reparameterization — the worked ∂z/∂α formula is on
+  file (§0.4.431, D3).
+- `permitReuse`/`DiffktRandom` wrapper sugar (D1 note).
+
+*Phase E:*
+- ELL-padded sparse GPU emission — behind the pinned refusal, only if
+  ratified anew.
+- row-sparse embedding gradients — a Phase F item.
 
 ## The gap list, prioritized
 
@@ -45,9 +188,10 @@ reachable from `grad {}`, not new math. New-op families come after.
     E2E through `grad {}`. Axis positions, perms, and user-literal dims
     are compile-time constants — sentinel-safe. Uniform synthesis rule
     landed: concrete dxir dims bake as consts, -1 sentinels read
-    axis-matched `param.dims` at runtime. `flatten` is IR-level-only for
-    gradients (its splat needs a rank-1 dim = PRODUCT of param dims —
-    deferred with A2b).
+    axis-matched `param.dims` at runtime. `flatten` was IR-level-only for
+    gradients until §0.4.428's `irReshape` flatten arm (any rank-1
+    relayout target reads its extent off the operand's runtime shape) —
+    CLOSED there.
   - **A2b (partial ✅ §0.4.371 — `broadcastTo` landed; the rest deferred)**:
     - **`broadcastTo`/`expand` ✅ (§0.4.371)** — the *rank-increasing* form
       (NumPy right-alignment: the operand maps to the TRAILING output axes,
@@ -342,9 +486,10 @@ reachable from `grad {}`, not new math. New-op families come after.
       collision E2E, padded + batched JVP⇄VJP cross-identities, emitter text
       pins + two new coverage-sweep cases + round-trip cases, and a padded GPU
       smoke (grad max|diff| 0.0, padded row exactly zero on the GB10).
-      Still deferred (re-recorded): several index-typed params in one lambda
-      (the structural-zero const cannot name which param it zeroes) and
-      indices produced by in-lambda integer arithmetic (params only).
+      Still deferred (re-recorded): indices produced by in-lambda integer
+      arithmetic (params only). The several-index-params half CLOSED at
+      §0.4.419 — `ZEROS_LIKE` names its param by construction, so any
+      number of integer params per lambda lowers.
     - **`crossEntropyLoss`/`nllLoss`** ✅ E2E through `grad {}`: composed in
       FIR onto existing fully-ruled ops (no new VjpRule). `crossEntropyLoss` =
       `NEG(SUM(MUL(oneHot, LOG(SOFTMAX(logits, -1)))))` (sum-reduction
@@ -354,8 +499,9 @@ reachable from `grad {}`, not new math. New-op families come after.
       E2E: both gradients synthesise with no fallback and match the analytic
       references (CE: da = softmax·Σb − b, db = −logSoftmax; NLL: da = −b,
       db = −a).
-  - **A3b (deferred) — `conv2d`/`maxPool`/`avgPool` in `grad {}`**: this is a
-    multi-§ architectural effort, NOT a clean scope widen. Blockers:
+  - **A3b ✅ (landed §0.4.384–386/389; the emission question closed §0.4.392) —
+    `conv2d`/`maxPool`/`avgPool` in `grad {}`**. The original blocker
+    analysis is kept below as history; every item resolves inline. Blockers:
     1. **Rank-6 gradient intermediates.** MaxPool2dRule's adjoint upsamples via
        `reshape → identity-stretch BROADCAST → reshape` through **rank-6** shapes
        (`[N,C,Ho,1,Wo,1] → [N,C,Ho,kh,Wo,kw]`). The synthesis scope gate
@@ -466,9 +612,11 @@ reachable from `grad {}`, not new math. New-op families come after.
        the MLIR is the same `stablehlo.convolution` the pre-fusion rule produced —
        and that cert now covers the fused path (grads agree with the interpreter to
        1.19e-7 on the GB10).
-       Still deferred: the fused ops have neither a VjpRule nor a forward
-       tangent — as with `EMBEDDING_GRAD`, differentiating through a gradient body
-       that contains them fails loudly rather than silently. (CONV_TRANSPOSE2D's
+       Still deferred at the time: the fused ops had neither a VjpRule nor a
+       forward tangent. The forward half CLOSED at §0.4.423 (the whole
+       fused-adjoint family carries tangent arms, so hessians compose
+       fwd-over-rev); rev-over-rev through such bodies stays a pinned loud
+       refusal (the B4 pins), on the consolidated tails list. (CONV_TRANSPOSE2D's
        own adjoint, deferred here, landed in §0.4.391 — see item 5.)
        **API constraint discovered the hard way — applies to the pooling surfaces
        too.** The host conv ops take their attrs POSITIONALLY, in two arities,
@@ -2052,11 +2200,29 @@ reachable from `grad {}`, not new math. New-op families come after.
   included) on the quarter-integer grid for EXACT `assertContentEquals`
   comparison; duplicate-summing, explicit-zero, union/intersection
   structure, transpose-involution and validation-refusal pins. Host-level
-  only by design — no IR, no AD participation yet (that is E1b/E1c).
+  only by design — no IR, no AD participation at this layer (that
+  arrived with E1b/E1c below).
   Landed along the way: a kotlinc codegen landmine — a Companion
   `inline` function calling an outer-class `private` method emits a bad
   `invokespecial` (VerifyError at class load); keep such helpers
   self-contained (the VarHandle bug's family).
+- **E1b ✅ DONE (§0.4.418) — `SPARSE_MATMUL` at IR level.**
+  `OpKind.SPARSE_MATMUL` + fused `SPARSE_MATMUL_VALUES_ADJOINT` (the
+  SDDMM stays fused to the pattern), `SparseMatmulRule` + bilinear
+  tangent, interpreter arms bit-exact against E1a, host twins, CostModel,
+  and the ratified pinned emit refusal. Certified against the dense
+  `MatmulRule` on `toDense`'d operands, JVP⇄VJP, fwd-over-rev HVP vs the
+  dense twin. Mechanism detail in
+  [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)'s status header + §2.
+- **E1c ✅ DONE (§0.4.419 pre + §0.4.420) — the `grad {}` sparse
+  surface; the ratified arc is COMPLETE.** §0.4.419: `OpKind.ZEROS_LIKE`
+  param-addressed structural zeros lift the §0.4.400 one-integer-param
+  synthesis gate. §0.4.420: `sparseMatmul(values, colIdx, rowPtr, dense)`
+  FIR front-end + synthesis arms for all three op spellings, certified
+  E2E through the K2 plugin on the GNN shape (four-param lambda, empty +
+  skewed rows, explicit stored zero, exact quarter-grid oracle). The arc
+  STOPS here by ratified scope — matdiv skipped, GPU the pinned refusal,
+  row-sparse embedding grads with Phase F.
 - **E1. Audit ✅ DONE (§0.4.410).** Full
   audit in [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md), from a fresh
   shallow clone @ HEAD. Findings: DiffKT sparse is a CPU-only Eigen JNI
@@ -2227,7 +2393,10 @@ story. Not blocking A–E.
 
 ## Suggested § sequencing
 
-**Position at §0.4.428 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
+**Position at §0.4.433 (2026-09-20) — the book is CLOSED; this section
+is kept as the historical sequencing record. The end-state and the one
+consolidated tails list live at the top of this document. Position as
+last swept at §0.4.428:** Phase 0 ✅ (§0.4.365) → Phase A ✅
 in substance (§0.4.366–397, §0.4.400/409/414/427 — the scalar-param family
 is closed: `Float`/`FloatScalar`/`DoubleScalar` lower, `DScalar`-interface
 refuses by name to the tape; §0.4.428 — A2's `view`/`withChange`/`meld`
@@ -2341,3 +2510,8 @@ audit's recommendations).
 
 Certification discipline per CLAUDE-memory: solo full-suite runs, count
 gate updated per §, GPU smokes for anything touching the emitter.
+
+The close-out (§0.4.433) supersedes the per-item deferral scatter above:
+"Remaining tails, consolidated" at the top of this document is the one
+authoritative list of what stays open, and the canonical end-of-book
+suite number is 1944.

@@ -41,15 +41,19 @@ receiving a gradient, and both integer zeros at their own extents (nnz=5 ≠
 N+1=4 — the §0.4.419 addressing under real CSR params). Per the ratified
 scope the arc now STOPS: matdiv stays skipped, GPU stays the pinned refusal,
 row-sparse embedding gradients stay a Phase F item.
+**Close-out (§0.4.433):** the arc's still-open tails (ELL-padded GPU
+emission behind the pinned refusal; row-sparse embedding gradients with
+Phase F) are consolidated in the plan doc's "Remaining tails" list; this
+audit is a closed record.
 Companion to [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md) Phase E. Walked
 from a fresh shallow clone of `facebookresearch/diffkt` @ HEAD (2026-09-20):
 `kotlin/api/src/main/kotlin/org/diffkt/Sparse*.kt`, the JNI surface
 (`external/Eigen.kt` → `cpp/ops/SparseOps.{h,cpp}` →
 `cpp/ops/Sparse/ArithmeticEigen.cpp`), the touchpoints in `Matmul.kt` /
 `Matdiv.kt` / `Combinators.kt` / `FloatTensorOperations.kt` /
-`Operations.kt`, and `SparseOpsTest.kt` / `SparseRowTest.kt`. This is a
-**docs-only** deliverable: nothing here is implemented, and the §-sized
-slicing at the end is a proposal, not a commitment.
+`Operations.kt`, and `SparseOpsTest.kt` / `SparseRowTest.kt`. This was a
+**docs-only** deliverable when written; the §-sized slicing at the end was
+subsequently ratified and executed as proposed (§0.4.417–420).
 
 ## 1. What DiffKT actually ships
 
