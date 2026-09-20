@@ -593,6 +593,66 @@ class CoarsenedOpTest {
     }
 
     @Test
+    fun gradThroughMultiResultCoarsenedProductConsumerKeepsResultIndicesDistinct() {
+        // §0.4.430 — regression for the result-index collapse the multi-result
+        // JVP⇄VJP cross-identity exposed: z = c0·c1 makes the MUL adjoint emit
+        // MUL(seed, %c#1) and MUL(seed, %c#0) — IDENTICAL (kind, operand-id,
+        // attrs, types) signatures under applyCSE's old bare-id operand key,
+        // since %c#0 and %c#1 share the source id. Pre-§0.4.430 the CSE merged
+        // them (and applyConstFold's MUL-by-1 arm then collapsed the survivor
+        // to the source op — result 0), so BOTH upstreams fed the gradient_body
+        // the same value. The §0.4.179 tests never built two same-signature
+        // ops over distinct result indices, which is how this survived.
+        //   primal (a, b) → (a + b², a·b);  z = c0·c1.
+        //   ∂z/∂a = c1 + c0·b;  ∂z/∂b = c1·2b + c0·a.
+        val primal = DxirBuilder.function("mr_primal") {
+            val a = param("a", f32s)
+            val b = param("b", f32s)
+            val bb = op(OpKind.MUL, listOf(b, b), f32s)
+            listOf(op(OpKind.ADD, listOf(a, bb), f32s), op(OpKind.MUL, listOf(a, b), f32s))
+        }
+        val gradBody = DxirBuilder.function("mr_gradient") {
+            val up0 = param("up0", f32s)
+            val up1 = param("up1", f32s)
+            val a = param("a", f32s)
+            val b = param("b", f32s)
+            val two = const(2f, f32s)
+            val da = op(OpKind.ADD, listOf(up0, op(OpKind.MUL, listOf(up1, b), f32s)), f32s)
+            val db = op(
+                OpKind.ADD,
+                listOf(
+                    op(OpKind.MUL, listOf(up0, op(OpKind.MUL, listOf(two, b), f32s)), f32s),
+                    op(OpKind.MUL, listOf(up1, a), f32s),
+                ),
+                f32s,
+            )
+            listOf(da, db)
+        }
+        val outer = DxirBuilder.function("f") {
+            val a = param("a", f32s)
+            val b = param("b", f32s)
+            val c = coarsened(
+                operands = listOf(a, b),
+                primalBody = primal,
+                gradientBody = gradBody,
+                readsPrimalIndices = setOf(0, 1),
+            )
+            listOf(op(OpKind.MUL, listOf(c.result(0), c.result(1)), f32s))
+        }
+        val gradFn = DxirReverseTransform.apply(outer)
+        // Quarter-integer grid — exact in f32.
+        for ((a, b) in listOf(1.5f to 0.5f, -0.75f to 2f, 0.25f to -1.5f)) {
+            val c0 = a + b * b
+            val c1 = a * b
+            val out = DxirInterpreter.evalFunction(
+                gradFn, listOf(floatArrayOf(a), floatArrayOf(b)),
+            )
+            assertEquals(c1 + c0 * b, out[0][0], "∂z/∂a at a=$a b=$b (upstream 0 vs 1 mixed?)")
+            assertEquals(c1 * 2f * b + c0 * a, out[1][0], "∂z/∂b at a=$a b=$b")
+        }
+    }
+
+    @Test
     fun gradThroughMultiResultCoarsenedDeadIndexSeedsZero() {
         // Verify Phase 5c's dead-index handling: when only ONE of K results is
         // consumed downstream, the other index gets seeded with const(0) inside

@@ -50,10 +50,14 @@ import io.tlaloc.ir.OpKind
  *
  * Straight-line bodies over the differentiable op set (the same
  * surface [VjpRegistry] + [DxirInterpreter] cover), plus — §0.4.403,
- * Phase B3 — single-result [OpKind.COARSENED] ops: their tangent is the
- * forward transform of the stored `primal_body`, spliced inline (the
- * mirror image of [DxirReverseTransform]'s `handleCoarsenedAdjoint`
- * consuming `gradient_body`). §0.4.407 — the IF direct forward arm:
+ * Phase B3 — [OpKind.COARSENED] ops: their tangent is the forward
+ * transform of the stored `primal_body`, spliced inline (the mirror
+ * image of [DxirReverseTransform]'s `handleCoarsenedAdjoint` consuming
+ * `gradient_body`). §0.4.430 widened the arm to MULTI-result COARSENED
+ * (per-result tangent tracking — one splice, m tangent returns) and the
+ * splice's clone loop to IF-bearing and multi-result spliced bodies, so
+ * an IF inside a `primal_body` now rides the recursion end to end.
+ * §0.4.407 — the IF direct forward arm:
  * [OpKind.IF] (single- AND multi-result) is handled in the walk itself.
  * The condition is piecewise-constant in the inputs, so its tangent is
  * structurally zero and the tangent of the IF is a SECOND IF over the
@@ -84,21 +88,20 @@ object DxirForwardTransform {
                         "PhiCalculus before the forward transform)",
                 )
             }
-        // §0.4.403 — the COARSENED forward arm is single-result only (matches
-        // decomposeCoarsened's v1 scope). Refuse multi-result loudly BEFORE the
-        // clone loop, which would otherwise fail on an unrelated invariant.
-        primal.body.filterIsInstance<DxirOp>()
-            .firstOrNull { it.op == OpKind.COARSENED && it.isMultiResult }?.let {
-                error(
-                    "DxirForwardTransform: multi-result COARSENED (id=${it.id}, " +
-                        "${it.numResults} results) is out of scope (single-result COARSENED " +
-                        "only; the multi-result splice needs per-result tangent tracking)",
-                )
-            }
+        // §0.4.430 — the §0.4.403 up-front multi-result COARSENED refusal is
+        // LIFTED: the walk below has a dedicated MR COARSENED arm with
+        // per-result tangent tracking (the recorded tail's exact ask).
 
         return DxirBuilder.function("${primal.name}_jvp") {
             val valueMap = HashMap<Int, DxirNode>()
             val tangentMap = HashMap<Int, DxirNode>()
+            // §0.4.430 — per-result tangents of a multi-result COARSENED: the
+            // splice yields one tangent node PER result index (they are m
+            // separate nodes, not one multi-result op, so resolveResult's
+            // re-wrap can't serve them). Keyed by the source op's id;
+            // tangent() reads index k for a DxirOpResult reference, index 0
+            // for a direct reference (the house implicit-index-0 convention).
+            val tangentResults = HashMap<Int, List<DxirNode>>()
 
             for (p in primal.params) {
                 valueMap[p.id] = param(p.name, p.type, p.sharding)
@@ -139,6 +142,9 @@ object DxirForwardTransform {
             )
 
             fun tangent(n: DxirNode): DxirNode {
+                tangentResults[n.id]?.let { per ->
+                    return per[(n as? DxirOpResult)?.index ?: 0]
+                }
                 val mapped = tangentMap[n.id] ?: return zeroLike(n.type)
                 return resolveResult(n, mapped)
             }
@@ -212,10 +218,30 @@ object DxirForwardTransform {
                                 "inside an IF branch is out of scope (only IF has a direct " +
                                 "forward arm; WHILE must be coarsened by PhiCalculus first)",
                         )
+                        // §0.4.430 — the multi-result COARSENED arm (§0.4.403's
+                        // recorded tail): the value side clones the op VERBATIM
+                        // (types + attrs ride, so primal_body/gradient_body
+                        // survive for downstream passes and the interpreter's
+                        // evalCoarsened), and the tangent side runs ONE splice
+                        // whose jvp body returns (y₁..yₘ, dy₁..dyₘ) — the m
+                        // tangent returns are tracked PER RESULT in
+                        // tangentResults, resolved by index at each consumption
+                        // site. Production coarseners emit single-result only
+                        // today (PhiCalculus.coarsenFunction bails on
+                        // multi-return primals), so this arm is the transform
+                        // CONTRACT, pinned synthetically in
+                        // DxirForwardCoarsenedTest.
+                        node.op == OpKind.COARSENED && node.isMultiResult -> {
+                            val vOperands = node.operands.map { value(it) }
+                            val v = opMulti(node.op, vOperands, node.types, node.attrs, node.sharding)
+                            valueMap[node.id] = v
+                            tangentResults[node.id] =
+                                coarsenedTangents(node, v, vOperands, ::tangent, this)
+                        }
                         node.isMultiResult -> error(
                             "DxirForwardTransform: multi-result ${node.op} (id=${node.id}, " +
-                                "${node.numResults} results) is out of scope (only IF may be " +
-                                "multi-result in the forward walk)",
+                                "${node.numResults} results) is out of scope (only IF and " +
+                                "COARSENED may be multi-result in the forward walk)",
                         )
                         else -> {
                             val vOperands = node.operands.map { value(it) }
@@ -672,93 +698,9 @@ object DxirForwardTransform {
             // stream doesn't carry (only the fused result `v` is visible) —
             // the standard forward-mode recompute trade. `apply` recursion
             // handles a COARSENED nested inside a primal_body; multi-result
-            // COARSENED is refused up front in [apply].
-            OpKind.COARSENED -> {
-                // §0.4.415 — Phase B5 (customVjp): REFUSE a USER-gradient node
-                // loudly. For a machine-coarsened node the auto-tangent below
-                // (forward transform of primal_body) agrees with gradient_body
-                // by construction; for a customVjp node they need not — the
-                // whole point of use case 3 (straight-through estimators,
-                // stopGradient) is a reverse adjoint that deliberately diverges
-                // from the primal's math. Silently auto-differentiating the
-                // primal would make jvp {} and grad {} DISAGREE over the same
-                // body (the §0.4.392 no-silent-fork principle), so forward mode
-                // refuses unless the user also supplies a jvpFn — the
-                // `tangent_body` attr (§0.4.416, the ratified
-                // refuse-unless-jvpFn policy's lifting half).
-                if (node.attrs["user_gradient"] == true && node.attrs["tangent_body"] == null) {
-                    error(
-                        "DxirForwardTransform: COARSENED id=${node.id} carries a USER-supplied " +
-                            "gradient (user_gradient attr — a customVjp call-form): forward mode " +
-                            "would auto-differentiate primal_body and silently disagree with the " +
-                            "user's reverse adjoint. Supply a jvpFn (customVjpJvp) or use " +
-                            "reverse mode (grad {} / vjp {})",
-                    )
-                }
-                // §0.4.416 — Phase B5 (customJvp / customVjpJvp): a USER
-                // tangent_body splices IN PLACE OF the auto-tangent — the
-                // user's jvpFn runs verbatim, exactly as the user's vjpFn does
-                // in reverse (the design doc's semantic-fork principle: each
-                // mode honours ITS body, never derives one from the other).
-                // Param convention: `(primals…, tangents…) → (dy)` — the same
-                // order this transform's own jvp emission uses (params then
-                // d_params), so the user's declared jvpFn signature IS the
-                // splice contract with no adapter. The tangent, like the
-                // reverse contributions, honours the runtime shape contract:
-                // statically concrete result types need nothing (the
-                // construction-time type check pinned them); sentinel-bearing
-                // ones wrap in CHECK_SHAPE_LIKE against the node's own value
-                // clone — the one template whose runtime dims the tangent
-                // must match. Machine-coarsened nodes (no user_gradient)
-                // never carry tangent_body and keep the auto path verbatim.
-                val userTangentBody = node.attrs["tangent_body"] as? DxirFunction
-                if (node.attrs["user_gradient"] == true && userTangentBody != null) {
-                    val nOps = node.operands.size
-                    require(userTangentBody.params.size == 2 * nOps) {
-                        "DxirForwardTransform: COARSENED id=${node.id} tangent_body has " +
-                            "${userTangentBody.params.size} params; expected 2·N (= ${2 * nOps}) " +
-                            "— (primals…, tangents…)"
-                    }
-                    val spliceMap = HashMap<Int, DxirNode>()
-                    for (i in 0 until nOps) {
-                        spliceMap[userTangentBody.params[i].id] = vOps[i]
-                        spliceMap[userTangentBody.params[nOps + i].id] = t(node.operands[i])
-                    }
-                    spliceForwardBody(node, userTangentBody, spliceMap, b)
-                    val tangentReturn = userTangentBody.returns.single()
-                    val userTangent = spliceMap[tangentReturn.id] ?: error(
-                        "DxirForwardTransform: COARSENED id=${node.id} tangent_body return " +
-                            "id=${tangentReturn.id} missing from splice map",
-                    )
-                    return if (ty.dims.all { it > 0 }) {
-                        userTangent
-                    } else {
-                        b.op(OpKind.CHECK_SHAPE_LIKE, listOf(userTangent, v), ty)
-                    }
-                }
-                val primalBody = node.attrs["primal_body"] as? DxirFunction
-                    ?: error(
-                        "DxirForwardTransform: COARSENED op id=${node.id} missing primal_body " +
-                            "attr — invariant violated by upstream coarsener",
-                    )
-                require(primalBody.params.size == node.operands.size) {
-                    "DxirForwardTransform: COARSENED id=${node.id} has ${node.operands.size} " +
-                        "operands but primal_body has ${primalBody.params.size} params"
-                }
-                val jvpBody = apply(primalBody)
-                val nOps = node.operands.size
-                val spliceMap = HashMap<Int, DxirNode>()
-                for (i in 0 until nOps) {
-                    spliceMap[jvpBody.params[i].id] = vOps[i]
-                    spliceMap[jvpBody.params[nOps + i].id] = t(node.operands[i])
-                }
-                spliceForwardBody(node, jvpBody, spliceMap, b)
-                val tangentReturn = jvpBody.returns[primalBody.returns.size]
-                spliceMap[tangentReturn.id] ?: error(
-                    "DxirForwardTransform: COARSENED id=${node.id} tangent return " +
-                        "id=${tangentReturn.id} missing from splice map",
-                )
-            }
+            // COARSENED takes its own walk arm (§0.4.430) and never reaches
+            // this dispatch — here it is always the .single() case.
+            OpKind.COARSENED -> coarsenedTangents(node, v, vOps, t, b).single()
 
             // Piecewise-constant / boolean: structural zero tangent (null — the
             // lazy tangent() fallback emits a typed zero only when consumed).
@@ -781,12 +723,153 @@ object DxirForwardTransform {
     }
 
     /**
-     * §0.4.416 — the straight-line inline splice both COARSENED tangent paths
-     * share: clone [body]'s ops into [b] with operand references resolved
-     * through [spliceMap] (pre-seeded with the param bindings). Used by the
-     * §0.4.403 auto path (body = `apply(primal_body)`) and the §0.4.416 user
-     * path (body = the user's `tangent_body`) — same scope rules: no regions,
-     * no multi-result.
+     * §0.4.430 — the COARSENED tangent computation both walk arms share,
+     * returning ONE tangent node PER result index. The single-result path
+     * (via [tangentOf]) takes `.single()`; the multi-result walk arm stores
+     * the whole list for per-index resolution — the §0.4.403 recorded tail's
+     * "per-result tangent tracking in the splice".
+     *
+     * §0.4.415 — Phase B5 (customVjp): REFUSE a USER-gradient node without a
+     * tangent_body loudly. For a machine-coarsened node the auto-tangent
+     * (forward transform of primal_body) agrees with gradient_body by
+     * construction; for a customVjp node they need not — the whole point of
+     * use case 3 (straight-through estimators, stopGradient) is a reverse
+     * adjoint that deliberately diverges from the primal's math. Silently
+     * auto-differentiating the primal would make jvp {} and grad {} DISAGREE
+     * over the same body (the §0.4.392 no-silent-fork principle), so forward
+     * mode refuses unless the user also supplies a jvpFn — the `tangent_body`
+     * attr (§0.4.416, the ratified refuse-unless-jvpFn policy's lifting half).
+     *
+     * §0.4.416 — Phase B5 (customJvp / customVjpJvp): a USER tangent_body
+     * splices IN PLACE OF the auto-tangent — the user's jvpFn runs verbatim,
+     * exactly as the user's vjpFn does in reverse (the design doc's
+     * semantic-fork principle: each mode honours ITS body, never derives one
+     * from the other). Param convention: `(primals…, tangents…) → (dy)` — the
+     * same order this transform's own jvp emission uses (params then
+     * d_params), so the user's declared jvpFn signature IS the splice contract
+     * with no adapter. The tangent, like the reverse contributions, honours
+     * the runtime shape contract: statically concrete result types need
+     * nothing (the construction-time type check pinned them); sentinel-bearing
+     * ones wrap in CHECK_SHAPE_LIKE against the node's own value clone — the
+     * one template whose runtime dims the tangent must match.
+     * Machine-coarsened nodes (no user_gradient) never carry tangent_body and
+     * keep the auto path verbatim. User tangent bodies stay single-result
+     * (validateCoarsenedShape refuses the construction; B5's recorded
+     * multi-result-f tail).
+     */
+    private fun coarsenedTangents(
+        node: DxirOp,
+        v: DxirNode,
+        vOps: List<DxirNode>,
+        t: (DxirNode) -> DxirNode,
+        b: DxirBuilder,
+    ): List<DxirNode> {
+        if (node.attrs["user_gradient"] == true && node.attrs["tangent_body"] == null) {
+            error(
+                "DxirForwardTransform: COARSENED id=${node.id} carries a USER-supplied " +
+                    "gradient (user_gradient attr — a customVjp call-form): forward mode " +
+                    "would auto-differentiate primal_body and silently disagree with the " +
+                    "user's reverse adjoint. Supply a jvpFn (customVjpJvp) or use " +
+                    "reverse mode (grad {} / vjp {})",
+            )
+        }
+        val userTangentBody = node.attrs["tangent_body"] as? DxirFunction
+        if (node.attrs["user_gradient"] == true && userTangentBody != null) {
+            check(!node.isMultiResult) {
+                // Defensive: validateCoarsenedShape already refuses this at
+                // construction (tangent_body requires a single-result node).
+                "DxirForwardTransform: COARSENED id=${node.id} carries a tangent_body " +
+                    "but has ${node.numResults} results — multi-result user f is " +
+                    "B5's recorded tail"
+            }
+            val ty = node.type
+            val nOps = node.operands.size
+            require(userTangentBody.params.size == 2 * nOps) {
+                "DxirForwardTransform: COARSENED id=${node.id} tangent_body has " +
+                    "${userTangentBody.params.size} params; expected 2·N (= ${2 * nOps}) " +
+                    "— (primals…, tangents…)"
+            }
+            val spliceMap = HashMap<Int, DxirNode>()
+            for (i in 0 until nOps) {
+                spliceMap[userTangentBody.params[i].id] = vOps[i]
+                spliceMap[userTangentBody.params[nOps + i].id] = t(node.operands[i])
+            }
+            spliceForwardBody(node, userTangentBody, spliceMap, b)
+            val tangentReturn = userTangentBody.returns.single()
+            val userTangent = resolveSpliced(tangentReturn, spliceMap) ?: error(
+                "DxirForwardTransform: COARSENED id=${node.id} tangent_body return " +
+                    "id=${tangentReturn.id} missing from splice map",
+            )
+            return listOf(
+                if (ty.dims.all { it > 0 }) {
+                    userTangent
+                } else {
+                    b.op(OpKind.CHECK_SHAPE_LIKE, listOf(userTangent, v), ty)
+                },
+            )
+        }
+        val primalBody = node.attrs["primal_body"] as? DxirFunction
+            ?: error(
+                "DxirForwardTransform: COARSENED op id=${node.id} missing primal_body " +
+                    "attr — invariant violated by upstream coarsener",
+            )
+        require(primalBody.params.size == node.operands.size) {
+            "DxirForwardTransform: COARSENED id=${node.id} has ${node.operands.size} " +
+                "operands but primal_body has ${primalBody.params.size} params"
+        }
+        val jvpBody = apply(primalBody)
+        val nOps = node.operands.size
+        val spliceMap = HashMap<Int, DxirNode>()
+        for (i in 0 until nOps) {
+            spliceMap[jvpBody.params[i].id] = vOps[i]
+            spliceMap[jvpBody.params[nOps + i].id] = t(node.operands[i])
+        }
+        spliceForwardBody(node, jvpBody, spliceMap, b)
+        // §0.4.430 — the jvp body's return layout is (y₁..yₘ, dy₁..dyₘ):
+        // read off ONE tangent per result index. Post-§0.4.407 a tangent
+        // return may be a [DxirOpResult] of a spliced multi-result IF, so
+        // resolution re-wraps the index through the cloned op.
+        val m = primalBody.returns.size
+        return (0 until m).map { k ->
+            val tangentReturn = jvpBody.returns[m + k]
+            resolveSpliced(tangentReturn, spliceMap) ?: error(
+                "DxirForwardTransform: COARSENED id=${node.id} tangent return " +
+                    "(result $k) id=${tangentReturn.id} missing from splice map",
+            )
+        }
+    }
+
+    /** Resolve a spliced-body reference through [spliceMap], re-wrapping a
+     * [DxirOpResult]'s index when the source cloned to a multi-result op —
+     * the splice-scope twin of the walk's `resolveResult` (§0.4.430). */
+    private fun resolveSpliced(n: DxirNode, spliceMap: Map<Int, DxirNode>): DxirNode? {
+        val mapped = spliceMap[n.id] ?: return null
+        return if (n is DxirOpResult && mapped is DxirOp && mapped.isMultiResult) {
+            mapped.result(n.index)
+        } else {
+            mapped
+        }
+    }
+
+    /**
+     * §0.4.416 — the inline splice both COARSENED tangent paths share: clone
+     * [body]'s ops into [b] with operand references resolved through
+     * [spliceMap] (pre-seeded with the param bindings). Used by the §0.4.403
+     * auto path (body = `apply(primal_body)`) and the §0.4.416 user path
+     * (body = the user's `tangent_body`).
+     *
+     * §0.4.430 — the clone loop widens beyond straight-line (the §0.4.407
+     * recorded tail): [OpKind.IF] clones through its own arm — branch body
+     * ops FLATTEN into the outer stream first (the same both-branches-
+     * evaluate trade the walk and `walkBranchReverse` make; recursion handles
+     * nested IFs), then the IF re-emits yield-only with cond and yields
+     * resolved through the map — so a spliced jvp body's value-IF/tangent-IF
+     * pairs (what `apply(primal_body)` produces for an IF-bearing primal)
+     * arrive in the outer function in exactly the empty-region shape
+     * [DxirToIrSynthesis.irIfOp] and the emitter accept. Region-free
+     * multi-result ops (a nested multi-result COARSENED, MR IF results) clone
+     * via `opMulti` with [DxirOpResult] references re-wrapped per index.
+     * Other region-bearing ops (WHILE) still refuse loudly by name.
      */
     private fun spliceForwardBody(
         node: DxirOp,
@@ -794,26 +877,65 @@ object DxirForwardTransform {
         spliceMap: HashMap<Int, DxirNode>,
         b: DxirBuilder,
     ) {
-        for (inner in body.body) {
+        fun resolve(ref: DxirNode, inner: DxirOp): DxirNode =
+            resolveSpliced(ref, spliceMap) ?: error(
+                "DxirForwardTransform: COARSENED id=${node.id} spliced body op " +
+                    "id=${inner.id} references unknown id=${ref.id} " +
+                    "(broken SSA in the spliced body?)",
+            )
+
+        fun cloneNode(inner: DxirNode) {
             when (inner) {
                 is DxirParam -> Unit
                 is DxirConst ->
                     spliceMap[inner.id] = b.const(inner.value, inner.type, inner.sharding)
-                is DxirOp -> {
-                    require(inner.regions.isEmpty() && !inner.isMultiResult) {
-                        "DxirForwardTransform: COARSENED id=${node.id} spliced body op " +
-                            "${inner.op} (id=${inner.id}) has regions or multiple " +
-                            "results — out of the splice scope"
-                    }
-                    val ops = inner.operands.map {
-                        spliceMap[it.id] ?: error(
-                            "DxirForwardTransform: COARSENED id=${node.id} spliced body op " +
-                                "id=${inner.id} references unknown id=${it.id} " +
-                                "(broken SSA in the spliced body?)",
+                is DxirOp -> when {
+                    inner.op == OpKind.IF -> {
+                        require(inner.regions.size == 2) {
+                            "DxirForwardTransform: COARSENED id=${node.id} spliced IF " +
+                                "id=${inner.id} must carry exactly 2 regions (then/else); " +
+                                "got ${inner.regions.size}"
+                        }
+                        val blocks = inner.regions.map { r ->
+                            r.blocks.singleOrNull() ?: error(
+                                "DxirForwardTransform: COARSENED id=${node.id} spliced IF " +
+                                    "id=${inner.id} regions must be single-block",
+                            )
+                        }
+                        for (blk in blocks) {
+                            require(blk.args.isEmpty()) {
+                                "DxirForwardTransform: COARSENED id=${node.id} spliced IF " +
+                                    "id=${inner.id} regions don't take block args; got " +
+                                    "${blk.args.size}"
+                            }
+                            for (bn in blk.body) cloneNode(bn)
+                        }
+                        val yieldVals = blocks.map { blk ->
+                            blk.terminator.map { resolve(it, inner) }
+                        }
+                        spliceMap[inner.id] = b.ifOp(
+                            cond = resolve(inner.operands[0], inner),
+                            types = inner.types,
+                            thenRegion = b.region { yields(*yieldVals[0].toTypedArray()) },
+                            elseRegion = b.region { yields(*yieldVals[1].toTypedArray()) },
                         )
                     }
-                    spliceMap[inner.id] =
-                        b.op(inner.op, ops, inner.type, inner.attrs, inner.sharding)
+                    inner.regions.isNotEmpty() -> error(
+                        "DxirForwardTransform: COARSENED id=${node.id} spliced body op " +
+                            "${inner.op} (id=${inner.id}) has regions — out of the splice " +
+                            "scope (only IF clones through the splice; WHILE must be " +
+                            "coarsened by PhiCalculus first)",
+                    )
+                    inner.isMultiResult -> {
+                        val ops = inner.operands.map { resolve(it, inner) }
+                        spliceMap[inner.id] =
+                            b.opMulti(inner.op, ops, inner.types, inner.attrs, inner.sharding)
+                    }
+                    else -> {
+                        val ops = inner.operands.map { resolve(it, inner) }
+                        spliceMap[inner.id] =
+                            b.op(inner.op, ops, inner.type, inner.attrs, inner.sharding)
+                    }
                 }
                 else -> error(
                     "DxirForwardTransform: unsupported node ${inner::class.simpleName} " +
@@ -821,5 +943,7 @@ object DxirForwardTransform {
                 )
             }
         }
+
+        for (inner in body.body) cloneNode(inner)
     }
 }

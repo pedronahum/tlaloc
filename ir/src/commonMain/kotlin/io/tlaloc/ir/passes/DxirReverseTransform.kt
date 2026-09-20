@@ -457,6 +457,27 @@ object DxirReverseTransform {
     }
 
     /**
+     * §0.4.430 — canonicalize a node REFERENCE through an id-keyed map while
+     * preserving a [DxirOpResult]'s index: `byId[ref.id]` maps a `%op#k`
+     * reference to the rebuilt SOURCE op, and returning that op directly
+     * collapses the reference to result 0 (the §0.4.130 terminator bug's
+     * operand-position twin — found by the multi-result COARSENED JVP⇄VJP
+     * cross-identity, where `MUL(seed, %c#1)`'s surviving operand folded to
+     * `%c` and the gradient read result 0's value). Every id-keyed
+     * canonicalization in the CSE / const-fold plumbing routes through here.
+     */
+    private fun canonicalRef(ref: DxirNode, byId: Map<Int, DxirNode>): DxirNode {
+        val mapped = byId[ref.id] ?: return ref
+        return if (ref is DxirOpResult && mapped is DxirOp && mapped.isMultiResult) {
+            // Same source instance → keep the original reference (preserves the
+            // mutated-flag / idempotency contract of the callers' `!==` checks).
+            if (mapped === ref.source) ref else mapped.result(ref.index)
+        } else {
+            mapped
+        }
+    }
+
+    /**
      * §0.4.48 — common sub-expression elimination on the gradient body. Adjoint
      * rules often emit structurally-identical ops: [MulRule] on `x*x` produces
      * two identical `MUL(upstream, x)` contributions (one per operand slot),
@@ -496,7 +517,7 @@ object DxirReverseTransform {
             if (nodeMutated) mutated = true
         }
         if (!mutated) return fn
-        val newReturns = fn.returns.map { byId[it.id] ?: it }
+        val newReturns = fn.returns.map { canonicalRef(it, byId) }
         return DxirFunction(fn.name, fn.params, newBody, newReturns, fn.meshes)
     }
 
@@ -522,10 +543,18 @@ object DxirReverseTransform {
      */
     private data class CseSig(
         val op: OpKind,
-        val operandIds: List<Int>,
+        // §0.4.430 — (id, resultIndex) pairs, not bare ids: `%c#0` and `%c#1`
+        // share an id, and a bare-id key merged `MUL(seed, %c#0)` with
+        // `MUL(seed, %c#1)` — two different values off the same multi-result
+        // source (the same result-identity discipline as the §0.4.366 types
+        // component).
+        val operandIds: List<Pair<Int, Int>>,
         val attrs: Map<String, Any>,
         val types: List<DxirType>,
     )
+
+    private fun operandKey(n: DxirNode): Pair<Int, Int> =
+        n.id to ((n as? DxirOpResult)?.index ?: 0)
 
     private fun cseNode(
         n: DxirNode,
@@ -559,8 +588,8 @@ object DxirReverseTransform {
                     byId[n.id] = n
                     n to false
                 } else {
-                    val canonicalOperands = n.operands.map { byId[it.id] ?: it }
-                    val opIds = canonicalOperands.map { it.id }
+                    val canonicalOperands = n.operands.map { canonicalRef(it, byId) }
+                    val opIds = canonicalOperands.map { operandKey(it) }
                     val sig = CseSig(n.op, opIds, n.attrs, n.types)
                     val existing = sig2canon[sig]
                     if (existing != null) {
@@ -619,7 +648,7 @@ object DxirReverseTransform {
         outerSig2canon: HashMap<CseSig, DxirNode>,
         outerConst2canon: HashMap<Pair<Any, DxirType>, DxirConst>,
     ): Pair<DxirNode?, Boolean> {
-        val canonicalOperands = n.operands.map { outerById[it.id] ?: it }
+        val canonicalOperands = n.operands.map { canonicalRef(it, outerById) }
         var mutated = canonicalOperands.zip(n.operands).any { (a, b) -> a !== b }
 
         val newRegions = if (n.op == OpKind.IF || n.op == OpKind.WHILE) {
@@ -796,7 +825,7 @@ object DxirReverseTransform {
                         !n.type.isScalar ||
                         (n.type.dtype != io.tlaloc.core.F32 && n.type.dtype != io.tlaloc.core.F64)
                     if (shouldOnlyRebuild) {
-                        val canonicalOperands = n.operands.map { byId[it.id] ?: it }
+                        val canonicalOperands = n.operands.map { canonicalRef(it, byId) }
                         val rebuilt = DxirOp(
                             id = n.id,
                             op = n.op,
@@ -818,8 +847,8 @@ object DxirReverseTransform {
                             val b = asFloatConst(n.operands[1])
                             when {
                                 a != null && b != null -> DxirConst(n.id, a * b, n.type)
-                                a == 1.0f -> byId[n.operands[1].id] ?: n.operands[1]
-                                b == 1.0f -> byId[n.operands[0].id] ?: n.operands[0]
+                                a == 1.0f -> canonicalRef(n.operands[1], byId)
+                                b == 1.0f -> canonicalRef(n.operands[0], byId)
                                 a == 0.0f || b == 0.0f -> DxirConst(n.id, 0.0f, n.type)
                                 else -> null
                             }
@@ -829,8 +858,8 @@ object DxirReverseTransform {
                             val b = asFloatConst(n.operands[1])
                             when {
                                 a != null && b != null -> DxirConst(n.id, a + b, n.type)
-                                a == 0.0f -> byId[n.operands[1].id] ?: n.operands[1]
-                                b == 0.0f -> byId[n.operands[0].id] ?: n.operands[0]
+                                a == 0.0f -> canonicalRef(n.operands[1], byId)
+                                b == 0.0f -> canonicalRef(n.operands[0], byId)
                                 else -> null
                             }
                         }
@@ -839,7 +868,7 @@ object DxirReverseTransform {
                             val b = asFloatConst(n.operands[1])
                             when {
                                 a != null && b != null -> DxirConst(n.id, a - b, n.type)
-                                b == 0.0f -> byId[n.operands[0].id] ?: n.operands[0]
+                                b == 0.0f -> canonicalRef(n.operands[0], byId)
                                 else -> null
                             }
                         }
@@ -848,7 +877,7 @@ object DxirReverseTransform {
                             val b = asFloatConst(n.operands[1])
                             when {
                                 a != null && b != null && b != 0.0f -> DxirConst(n.id, a / b, n.type)
-                                b == 1.0f -> byId[n.operands[0].id] ?: n.operands[0]
+                                b == 1.0f -> canonicalRef(n.operands[0], byId)
                                 else -> null
                             }
                         }
@@ -863,7 +892,7 @@ object DxirReverseTransform {
                     } else {
                         // Always rebuild with canonical operand references (see applyCSE
                         // for the "stale reference" reasoning).
-                        val canonicalOperands = n.operands.map { byId[it.id] ?: it }
+                        val canonicalOperands = n.operands.map { canonicalRef(it, byId) }
                         val rebuilt = DxirOp(
                             id = n.id,
                             op = n.op,
@@ -885,7 +914,7 @@ object DxirReverseTransform {
             }
         }
         if (!mutated) return fn
-        val newReturns = fn.returns.map { byId[it.id] ?: it }
+        val newReturns = fn.returns.map { canonicalRef(it, byId) }
         return DxirFunction(fn.name, fn.params, newBody, newReturns, fn.meshes)
     }
 

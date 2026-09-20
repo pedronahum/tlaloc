@@ -1487,14 +1487,39 @@ reachable from `grad {}`, not new math. New-op families come after.
     (so a rewrite silently closing the conditional cannot make the
     test vacuous), both branches + seed scaling pinned analytically
     and against a Double central difference, sentinel-guarded.
-  - Deferred tails: multi-result COARSENED tangents (needs per-result
-    tangent tracking in the splice); an IF *inside a COARSENED
-    primal_body* — the recursive `apply` handles it, but the splice's
-    clone loop still refuses region-bearing jvp-body ops (loud:
-    "has regions or multiple results — out of the splice scope"), so
-    widening the splice to empty-region IFs is the remaining step;
+  - ~~Deferred tails~~ **both closed §0.4.430 (2026-09-20)**:
+    **multi-result COARSENED tangents** — the walk grew a dedicated MR
+    arm (value side clones the op verbatim via `opMulti`, attrs riding;
+    tangent side runs ONE splice whose `(y₁..yₘ, dy₁..dyₘ)` returns are
+    tracked per result index in `tangentResults`, resolved per
+    `DxirOpResult` index at every consumption site) — production
+    coarseners still emit single-result only (`coarsenFunction` bails on
+    multi-return primals), so the pins are synthetic BY DESIGN: the
+    transform contract is the deliverable. **IF inside a COARSENED
+    primal_body** — the splice's clone loop widened to IF (branch bodies
+    flatten first, the IF re-emits yield-only — the emitter-compatible
+    shape, pinned) and to region-free multi-result ops (a nested MR
+    COARSENED clones via `opMulti`), with `DxirOpResult` references
+    re-wrapped per index (`resolveSpliced`). Certified in
+    `DxirForwardCoarsenedTest`: MR tangents against a hand-decomposed
+    equivalent + analytic quarter-integer pins; the JVP⇄VJP
+    cross-identity over z = c₀·c₁ (forward consumes `primal_body`,
+    `handleCoarsenedAdjoint` consumes `gradient_body` with K=2
+    upstreams); IF and MR-IF primal_bodies against the §0.4.407
+    top-level arm, analytic both branches, and reverse mask-math
+    gradient bodies; nested MR-COARSENED-inside-primal_body recursion.
+    The cross-identity EXPOSED a pre-existing reverse-side bug: the
+    CSE operand key was bare-id (so `MUL(seed, %c#0)` merged with
+    `MUL(seed, %c#1)` — same source id) and every id-keyed operand
+    canonicalization in `applyCSE`/`applyConstFold` collapsed a
+    `DxirOpResult` to its source op (result 0) — the §0.4.130
+    terminator bug's operand-position twin. Fixed via `canonicalRef`
+    (index-preserving resolution) + `(id, index)` CSE operand keys;
+    regression pinned reverse-only in `CoarsenedOpTest`
+    (`…ProductConsumerKeepsResultIndicesDistinct`). Still deferred:
     nesting through region-bearing bodies stays with B4's recorded
-    tail.
+    tail; user (B5) multi-result f remains unconstructible by
+    `validateCoarsenedShape` — its own recorded tail.
 - **B4. Nesting matrix ✅ DONE, §0.4.401 (2026-09-20)** — the full 2×2
   certified at IR level (`DxirNestingMatrixTest`), with **zero
   production-code changes**: both transforms already composed mechanically,
@@ -2216,11 +2241,12 @@ audit's recommendations).
    body) against central differences of the gradient AND the symmetry
    identity ⟨u,Hv⟩ = ⟨v,Hu⟩.
 3. **Recorded tails on the books** (each its own §-sized slice when
-   pulled): B3's multi-result COARSENED tangents + IF-inside-primal_body
-   splice; A-phase tails above; C4's grouped-conv §0.4.429 named
+   pulled): A-phase tails above; C4's grouped-conv §0.4.429 named
    deferrals (transposed-conv grouped VJP, grouped adjoint emission,
    the user surface). (B2's reverse-assembled tall Jacobians closed
-   §0.4.412; grouped/depthwise conv landed at IR level §0.4.429.)
+   §0.4.412; grouped/depthwise conv landed at IR level §0.4.429; B3's
+   multi-result COARSENED tangents + IF-inside-primal_body splice
+   closed §0.4.430.)
 
 Certification discipline per CLAUDE-memory: solo full-suite runs, count
 gate updated per §, GPU smokes for anything touching the emitter.
