@@ -4,19 +4,19 @@
 support everything [facebookresearch/diffkt](https://github.com/facebookresearch/diffkt)
 supports that Tlaloc doesn't yet.
 
-## Where parity already stands (closed §0.4.359–364)
+## Where parity already stands (opened at §0.4.359–364; markers kept current — last sweep §0.4.410)
 
 | DiffKT capability | Tlaloc status |
 |---|---|
 | Reverse-mode AD (vjp/pullback) | ✅ `DxirReverseTransform` + runtime synthesis + compile-time probe |
-| Forward-mode AD (jvp/pushforward) | ✅ `DxirForwardTransform` (§0.4.361) — **IR-level only, no user intrinsic yet** |
-| Higher-order (hessian-vector) | ✅ full nesting matrix certified at IR level (§0.4.401): fwd∘rev, fwd∘fwd, rev∘fwd, rev∘rev + a third-order spot check; fused-adjoint refusals pinned |
-| conv2d + gradients | ✅ §0.4.362 (groups + lhs-dilated primal VJP deferred) |
-| maxPool/avgPool + gradients | ✅ §0.4.363 (overlapping maxpool VJP deferred) |
+| Forward-mode AD (jvp/pushforward) | ✅ `DxirForwardTransform` (§0.4.361) + user intrinsics `jvp`/`valueAndJvp` (§0.4.372, B1) + 2-arg forms (§0.4.387) + regions/loops (§0.4.403, B3) + direct IF arm (§0.4.407) |
+| Higher-order (hessian-vector) | ✅ full nesting matrix certified at IR level (§0.4.401): fwd∘rev, fwd∘fwd, rev∘fwd, rev∘rev + a third-order spot check; fused-adjoint refusals pinned. User `hessian`/`hessian2` intrinsics §0.4.394/406 |
+| conv2d + gradients | ✅ §0.4.362; `grad {}` E2E §0.4.384–385; conv-transpose's own adjoint §0.4.391 + GPU emission §0.4.393 (groups/depthwise still deferred → C4) |
+| maxPool/avgPool + gradients | ✅ §0.4.363; `grad {}` E2E §0.4.386/389 (overlapping-maxpool GPU emission closed as INHERENT §0.4.392 — host/interpreter handle it, StableHLO cannot express the all-ties convention) |
 | select / comparisons in grad lambdas | ✅ §0.4.364 |
 | Elementwise tensor arithmetic in grad lambdas | ✅ §0.4.364 (`plus/minus/times/div`) |
-| reshape/transpose/concat/slice/pad/broadcast + VJPs | ✅ IR level (§0.4.359–360) — **user surface partial** |
-| softmax/logsumexp/max/min reductions + VJPs | ✅ IR level — **user surface partial** |
+| reshape/transpose/concat/slice/pad/broadcast + VJPs | ✅ IR level (§0.4.359–360) + user surface: reshape family/transpose §0.4.367, broadcastTo §0.4.371/373, slice §0.4.374, concat/stack §0.4.381–382, flip §0.4.396 (`view`/`withChange`/`meld`/`split` still open in A2) |
+| softmax/logsumexp/max/min reductions + VJPs | ✅ axis reductions in `grad {}` §0.4.366 (A1), softmax/logSoftmax §0.4.368 (A3a) — LOGSUMEXP stays emitter-only |
 | Compile-time shape checking (ShapeTyping plugin) | ✅ richer: named indices + `validateDxirShapes` + real reverse-transform probe at check time |
 | Float64 | ✅ PJRT path (§0.4.354) |
 
@@ -1392,10 +1392,28 @@ reachable from `grad {}`, not new math. New-op families come after.
     user-facing n-th-order intrinsics (`reverseDerivative{2..4}` spellings)
     are a synthesis-surface question, not an IR one — the IR compositions
     they'd lower to are what this slice certified.
-- **B5. User-defined custom derivatives**: a user-facing custom-VJP/JVP
-  registration (DiffKT lets users supply derivatives for opaque functions;
-  our coarsener `gradient_body` machinery is the internal analogue —
-  surface it).
+- **B5. User-defined custom derivatives — DESIGN DONE (§0.4.410), awaiting
+  Pedro's API ratification before any implementation.** Full design in
+  [CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md). Summary:
+  DiffKT's mechanism is emergent OO dispatch (subclass `ReverseTensor`,
+  override `backpropagate()` — the `customReverse` example); Tlaloc's
+  internal analogue is `OpKind.COARSENED` with `gradient_body` spliced by
+  `handleCoarsenedAdjoint` (+ the §0.4.403 forward `primal_body` splice),
+  so B5 = letting the USER construct such a node. Recommended v1: a
+  `customVjp(f, vjpFn)` intrinsic call-form lowering both lambdas to one
+  COARSENED node (`vjpFn`'s `(upstream, x)` order already matches the
+  `gradient_body` contract), with a `user_gradient` attr making the
+  forward transform REFUSE loudly unless a `jvpFn` is also supplied — the
+  §0.4.392 no-silent-fork principle, since the §0.4.403 forward splice
+  would otherwise auto-differentiate a primal whose reverse mode honours a
+  deliberately different user adjoint (straight-through estimators).
+  Checker: probe-lower both bodies + type pairing; shape contracts are
+  runtime asserts (the `conv2dDataAdjoint` template-assert precedent);
+  correctness gets an OPT-IN JVP⇄VJP debug oracle (automatic tangent vs
+  user adjoint — zero new math). One-§ v1; annotation-driven cross-module
+  registration (Candidate B) deferred on the serialized-dxir decision.
+  Open product questions (blocking): API spelling, forward-refusal policy,
+  debug-oracle inclusion — see the design doc's §6.
 
 ### Phase C — op families DiffKT has that the IR lacks
 
@@ -1569,9 +1587,12 @@ reachable from `grad {}`, not new math. New-op families come after.
     fused adjoints stand certified as they are.
 - **C4. Item-4 tails** *(reclassified beyond-parity by the audit —
   DiffKT pooling is non-overlapping-only, conv has no groups/dilation)*:
-  CONV_TRANSPOSE2D's own VJP, overlapping-window maxpool VJP
-  (select_and_scatter emission or one-hot decomposition),
-  grouped/depthwise conv (feature_group_count > 1).
+  ~~CONV_TRANSPOSE2D's own VJP~~ (landed §0.4.391, GPU emission §0.4.393);
+  ~~overlapping-window maxpool VJP GPU path~~ (closed as INHERENT §0.4.392 —
+  `select_and_scatter` cannot express the all-ties convention; host and
+  interpreter handle overlapping windows, emission refuses loudly).
+  Remaining: grouped/depthwise conv (feature_group_count > 1) — the only
+  live C4 item, and beyond DiffKT parity.
 - **C5. `integral`** *(audit)*: Romberg quadrature with FTC-wired
   forward/reverse derivatives (DiffKT `Integral.kt`).
 
@@ -1631,10 +1652,24 @@ reachable from `grad {}`, not new math. New-op families come after.
 
 ### Phase E — sparse (DiffKT `SparseFloatTensor` parity)
 
-- **E1. Audit-first**: DiffKT's sparse surface is narrow (COO float tensors,
-  sparse×dense matmul, aimed at GNN adjacency). Decide honest scope after
-  the audit; likely a `:core` sparse type + SPARSE_MATMUL op with CPU host
-  eval, GPU via scatter/gather composition.
+- **E1. Audit ✅ DONE (§0.4.410) — scope decision awaiting Pedro.** Full
+  audit in [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md), from a fresh
+  shallow clone @ HEAD. Findings: DiffKT sparse is a CPU-only Eigen JNI
+  shim (hierarchical-CSR `SparseFloatTensor` + row-sparse
+  `SparseRowFloatTensor` for embedding gradients), **primal-only** — its
+  ops `require(derivativeId == NoDerivativeID)`, gradients w.r.t. sparse
+  inputs come out DENSE, no sparse VJP exists anywhere — and partly broken
+  in DiffKT itself (`nonZeroIndices` is `TODO()` for every Eigen-produced
+  tensor, so chained sparse expressions throw). `matdiv` = SparseLU via
+  explicit inverse, sparse-only. **Recommendation: conditional no-go**
+  ("❌ by decision, audit on file") unless a real GNN/embedding workload
+  pulls it in — then the audit's E1a→E1c slicing applies (host CSR type
+  1 §; `SPARSE_MATMUL` + fused SDDMM values-adjoint 1–2 §; `grad {}`
+  surface gated on generalizing the §0.4.400 one-integer-param synthesis
+  restriction, ~2 §; GPU = pinned emit refusal, the §0.4.408 RNG
+  precedent). Decision points for Pedro: GNN workload reality, `matdiv`
+  skip, emit-refusal acceptability, row-sparse embedding grads deferred
+  to Phase F — see the audit doc's §4.
 
 ### Phase 0 — the audit (✅ DONE, §0.4.365, 2026-07-19)
 
@@ -1654,10 +1689,10 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 | DiffKT | Tlaloc | Notes |
 |---|---|---|
 | `reverseDerivative` / `primalAndReverseDerivative` (1/2-arg, List, n-th `reverseDerivative{1..4}`, `reverseDiff`) | ✅/🟡 | `grad {}` covers 1st-order; n-th-order nesting certified at IR level (§0.4.401), intrinsic spellings still open |
-| `forwardDerivative` (all arities, n-th, `forwardDiff`) / `primalAndForwardDerivative` | 🟡 | `DxirForwardTransform` §0.4.361; no user intrinsic → B1 |
-| `jvp` / `primalAndJvp` | 🟡 | same → B1 |
+| `forwardDerivative` (all arities, n-th, `forwardDiff`) / `primalAndForwardDerivative` | ✅ | `jvp {}` / `valueAndJvp {}` §0.4.372 (B1) + `jvp2`/`valueAndJvp2` §0.4.387; loop-bearing bodies §0.4.403, IF bodies §0.4.407 (B3) |
+| `jvp` / `primalAndJvp` | ✅ | same — §0.4.372/387 |
 | `vjp` / `primalAndVjp` / `primalAndPullback` (user-supplied cotangent, `vf(primal)` form) | ✅ | `vjp {}` / `valueAndVjp {}` §0.4.398 — seeded single-pass pullback, tensor-valued `f` |
-| Jacobian assembly | 🟡 | DiffKT has **no** jacobian intrinsic — `reverseDerivative(x, f: tensor→tensor)` identity-seeds and builds the full Jacobian (`identityGradientOfSameKind`). B2 = that seeding loop |
+| Jacobian assembly | ✅ | `jacobian`/`hessian` §0.4.394 (B2) + `jacobian2`/`hessian2` §0.4.406. DiffKT has **no** jacobian intrinsic — theirs is `reverseDerivative`'s identity-seeding loop; ours assembles seeded forward passes at runtime. Reverse-assembled (tall, m ≪ n) Jacobians still open |
 | `reverseDerivativeTransposed` | ❌ | transposed-Jacobian convention variant; fold into B2 |
 | Arbitrary nesting (fwd∘fwd, rev∘rev, …) | ✅/🟡 | full matrix certified at IR level + refusals pinned (§0.4.401); user-facing n-th-order intrinsic spellings still open |
 | `ifThenElse(cond, a, b)` (scalar + tensor, differentiable) | ✅ | `where` §0.4.364; scalar branches also via IF regions + coarsening |
@@ -1692,8 +1727,8 @@ argument fallback) ·
 | `sin cos tan atan` (tensor) | ✅ | sin/cos ✅; tan/atan ✅ C2 (§0.4.395 — full vertical incl. `stablehlo.tan` / `atan2(x, 1)` emission certified on the GB10; audit: **no** floor/ceil/round/atan2 in DiffKT — those stay ours-optional) |
 | `lgamma digamma polygamma` (tensor) | ✅ | C1 (§0.4.402 — lgamma/digamma full vertical incl. the first CHLO emissions, GB10-certified; trigamma internal for DIGAMMA's adjoint) + C1 tail (§0.4.405 — general polygamma(n) full vertical, family closed under differentiation) |
 | `sum()` full-reduce | ✅ | |
-| `sum(axes, keepDims)` | 🟡 | `reduction_dims` IR exists → A1 |
-| `mean()` | 🟡 | dispatch arm exists but **no map entry** — not reachable → A1 |
+| `sum(axes, keepDims)` | ✅ | A1 (§0.4.366) — `sum(dims, keepDims)`/`mean(dims)`/`max(dims)`/`min(dims)` E2E through `grad {}` (1–2 axes from `grad {}`; IR fully general) |
+| `mean()` | ✅ | A1 (§0.4.366) — map entry + MEAN interpreter arm + sentinel-safe MeanRule |
 | `FloatTensor.max/min(axes)` | ➖/🟡 | DiffKT only has these on **FloatTensor — not differentiable**; Tlaloc's MAX/MIN have VJPs → A1 exceeds parity |
 | `stats()` = (mean, variance) | ✅ | §0.4.397 host sugar, biased variance (÷N); host-level only — DiffKT's `stats` is a convenience, and a Pair-returning body has no `grad {}` lowering (loss contract is scalar) |
 | `matmul` (incl. generalized shape-block form) | ✅ | any rank ≥ 2 |
@@ -1702,13 +1737,13 @@ argument fallback) ·
 | `matdiv` | ➖ | **sparse-only** in DiffKT (dense explicitly unsupported) → E |
 | `conv2d(hStride, vStride, Same/Valid/Explicit padding)` | ✅ | §0.4.362 **exceeds**: DiffKT has no groups/dilation, NHWC only |
 | `maxPool / avgPool / maxPoolWithIndices` | ✅ | §0.4.363 **exceeds**: DiffKT pooling is non-overlapping only (stride=window, divisibility required, no padding) → C4 reclassified beyond-parity |
-| `batchNorm` (raw op, training-stats variant) | 🟡 | BATCHNORM OpKind exists; VJP + surface unaudited — fold into A3 |
-| `softmax(axis) / logSoftmax / logSoftmaxGrad` | 🟡 | SOFTMAX/LOGSUMEXP + VJPs exist → A3 |
+| `batchNorm` (raw op, training-stats variant) | ✅ | §0.4.390 — training form differentiates in `grad {}` by FIR DESUGARING onto fully-ruled ops (the BATCHNORM OpKind stays the Layer-3 inference form) |
+| `softmax(axis) / logSoftmax / logSoftmaxGrad` | ✅ | A3a (§0.4.368) — `softmax(axis)` + `logSoftmax(axis)` E2E through `grad {}` (LOGSUMEXP stays emitter-only) |
 | `crossEntropyLoss / crossEntropyLossFromOneHot / nllLossFromOneHot` | ✅ | §0.4.370: `crossEntropyLoss`/`nllLoss` composed in FIR from logSoftmax, E2E through `grad {}` (CROSS_ENTROPY OpKind stays emitter-only) |
 | `embedding(table, indices, paddingIndex)` | ✅ | §0.4.370 IR-level (EmbeddingRule + EMBEDDING_GRAD + interpreter + forward tangent) → §0.4.400 E2E through `grad {}` (host op + FIR arm + I32-index-param synthesis + scatter+add emission, GPU-smoked) → §0.4.409 `paddingIndex` (exact-zero rows + zero gradient, mask emission) and rank-2 `[B, N]` index batches E2E; indices are params only (no in-lambda index arithmetic), one index param per lambda |
-| `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) + 2nd-order-through-broadcast ✅ (§0.4.399, `BROADCAST_LIKE`) — mixed rank-increase+stretch still deferred |
-| `transpose(axes) / leftTranspose / rightTranspose` | 🟡 | TRANSPOSE + VJP → A2 (left/right = sugar) |
-| `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |
+| `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | ✅/🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) + 2nd-order-through-broadcast ✅ (§0.4.399, `BROADCAST_LIKE`) — mixed rank-increase+stretch still deferred |
+| `transpose(axes) / leftTranspose / rightTranspose` | ✅ | `transpose(vararg perm)` + no-arg rank-2 spelling E2E ✅ A2a (§0.4.367); left/right sugar spellings unlanded (trivial when wanted) |
+| `concat / stack / split / meld` | ✅/🟡 | `concat`/`stack` E2E ✅ §0.4.381–382 (runtime-extent `SLICE_LIKE` adjoint; 2nd order via `PAD_LIKE` §0.4.404); `split`/`meld` still open in A2 |
 | `slice / view(index/range/axis) / withChange` (functional update) | 🟡 | single-axis `slice(start,end,axis)` ✅ A2b (§0.4.374, runtime-extent `PAD_TO` adjoint), E2E through `grad {}`; multi-axis `view`/`withChange` scatter sugar still A2 |
 | `gather / scatter (axis, paddingIndex) / gatherAtIndices / scatterAtIndices` | 🟡 | Tlaloc GATHER/SCATTER are narrower (rank-1/scalar-index arms) — A2 needs the axis+list form |
 | `flip(axes)` | ✅ | C3 (§0.4.396) — REVERSE op, self-adjoint + extent-free, E2E through `grad {}`; the conv-adjoint `window_reversal` cleanup stays open |
@@ -1734,7 +1769,10 @@ landed, §0.4.402).
 COO-ish float tensors, ops actually implemented: `plus minus times
 transpose matmul matdiv` (matdiv = square-RHS solve, sparse-only).
 All ❌ → Phase E, audit-scoped as suspected: narrow GNN-adjacency
-surface, not a general sparse algebra.
+surface, not a general sparse algebra. **§0.4.410 — the deep E1 audit
+landed in [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)**: the surface
+is also primal-only (sparse ops `require(NoDerivativeID)`; gradients come
+out dense) and partly broken in DiffKT itself — see the Phase E entry.
 
 #### Model layer (`model/` package) — **new Phase F (product decision)**
 
@@ -1781,9 +1819,28 @@ story. Not blocking A–E.
 
 ## Suggested § sequencing
 
-§0.4.365 Phase 0 audit ✅ → §0.4.366+ Phase A (one § per slice, A1→A5) →
-Phase B (B1/B2 together, then B3, B4, B5) → C1–C3+C5 (C4 optional) →
-D → E → F (if ratified).
+**Position at §0.4.410 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
+in substance (§0.4.366–397, §0.4.400/409 — remaining tails: A2's
+`view`/`withChange`/`meld`/`split`, gather/scatter axis+list forms, the
+mixed rank-increase+stretch broadcast, `FloatScalar`-param boxing) →
+B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → C1–C3 ✅
+(§0.4.395/396/402/405) → D1 ✅ (§0.4.408).
+
+**Remaining, in recommended order:**
+1. **Ratification gates (Pedro)**: B5 custom derivatives
+   ([CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md) — one §
+   once the API is picked); E sparse
+   ([SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md) — recommended
+   conditional no-go); F model layer (product decision, unchanged).
+2. **C5 `integral`** — Romberg + FTC derivatives, self-contained, no
+   blocker.
+3. **D2 reparameterized gradients** — its C1 prerequisite
+   (digamma/polygamma) landed §0.4.402/405; explicit-threefry StableHLO
+   emission is the recorded D1 tail to take first if GPU draws matter.
+4. **Recorded tails on the books** (each its own §-sized slice when
+   pulled): B2's reverse-assembled tall Jacobians; B3's multi-result
+   COARSENED tangents + IF-inside-primal_body splice; A-phase tails above;
+   C4's grouped/depthwise conv (beyond parity).
 
 Certification discipline per CLAUDE-memory: solo full-suite runs, count
 gate updated per §, GPU smokes for anything touching the emitter.
