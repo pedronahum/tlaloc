@@ -30,11 +30,14 @@ import kotlin.math.abs
 //    dValue = dB·ḃ + dA·ȧ; a VJP as (ā, b̄) = (dA·v̄, dB·v̄).
 //  - Integrand parameters: d/dθ ∫ₐᵇ f(x; θ) dx = ∫ₐᵇ ∂f/∂θ dx
 //    (differentiation under the integral sign — fixed bounds, smooth f).
-//    At host level that is `integral(a, b) { x -> dfdTheta(x) }`, pinned in
-//    IntegralTest for one θ-family. A `grad {}`-integrable surface needs the
-//    f argument to survive lowering as a differentiable region, which is
-//    exactly B5's custom-derivative machinery (CUSTOM_DERIVATIVES_DESIGN.md,
-//    awaiting ratification) — the plan's C5 entry records the lowering shape.
+//    At host level that is `integralWithParamGrad` below (§0.4.426), the
+//    Leibniz sugar and the parameter-side twin of `integralWithBoundGrads`.
+//    The `grad {}`-integrable surface is B5's custom-derivative machinery
+//    (CUSTOM_DERIVATIVES_DESIGN.md, landed §0.4.415–416): the user spells
+//    the primal as a fixed-node quadrature and attaches the Leibniz adjoint
+//    via `customVjp`/`customVjpJvp` — certified E2E in the plugin's
+//    IntegralGradientTest. The reusable `integral(a, b) { f }` region-op
+//    spelling remains the plan's named C5 deferral.
 
 /**
  * Result of [rombergIntegrate]: the extrapolated value, the deepest
@@ -120,3 +123,27 @@ fun integralWithBoundGrads(
     f: (Double) -> Double,
 ): IntegralWithBoundGrads =
     IntegralWithBoundGrads(integral(a, b, f), -f(a), f(b))
+
+/**
+ * §0.4.426 — `∫ₐᵇ f(x; p) dx` with its parameter derivative wired by
+ * differentiation under the integral sign (Leibniz, fixed bounds):
+ * `dP = ∫ₐᵇ ∂f/∂p dx`, quadratured over the caller-supplied [dfdp] with the
+ * same Romberg kernel — analytic in the integrand, never differentiated
+ * through the tableau, the parameter-side twin of [integralWithBoundGrads].
+ * Scalar, so the one number serves forward mode (`dValue = dP·ṗ`) and
+ * reverse mode (`p̄ = dP·v̄`). The two quadratures run independently: the
+ * derivative integrand earns its own adaptive depth.
+ */
+data class IntegralWithParamGrad(
+    val value: Double,
+    val dP: Double,
+)
+
+/** Leibniz-wired parameter derivative alongside the Romberg value. */
+fun integralWithParamGrad(
+    a: Double,
+    b: Double,
+    f: (Double) -> Double,
+    dfdp: (Double) -> Double,
+): IntegralWithParamGrad =
+    IntegralWithParamGrad(integral(a, b, f), integral(a, b, dfdp))

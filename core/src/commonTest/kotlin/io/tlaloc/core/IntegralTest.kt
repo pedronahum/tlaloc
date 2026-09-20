@@ -123,4 +123,25 @@ class IntegralTest {
         assertClose(closedForm, quadOfPartial, 1e-10, "∫ ∂f/∂θ vs closed form")
         assertClose(quadOfPartial, fd, 1e-6, "central difference vs ∫ ∂f/∂θ")
     }
+
+    @Test
+    fun leibnizParamGradSugar() {
+        // §0.4.426 — integralWithParamGrad, the Leibniz sugar. Linear family
+        // f(x; a) = a·x² at a = 2 over [0, 1]: value = 2/3, and the task's
+        // own flagship oracle d/da ∫₀¹ a·x² dx = ∫₀¹ x² dx = 1/3.
+        val lin = integralWithParamGrad(0.0, 1.0, { x -> 2.0 * x * x }, { x -> x * x })
+        assertClose(2.0 / 3.0, lin.value, 1e-9, "∫₀¹ 2x² value")
+        assertClose(1.0 / 3.0, lin.dP, 1e-9, "d/da ∫₀¹ a·x² = 1/3")
+        // θ-family f(x; θ) = e^(−θx) at θ = 2 — the same closed forms the
+        // three-way pin above certifies, now through the sugar itself:
+        // value = (1 − e^(−2))/2, dP = ∫₀¹ −x·e^(−2x) dx = (3e^(−2) − 1)/4.
+        val theta = integralWithParamGrad(
+            0.0,
+            1.0,
+            { x -> exp(-2.0 * x) },
+            { x -> -x * exp(-2.0 * x) },
+        )
+        assertClose((1.0 - exp(-2.0)) / 2.0, theta.value, 1e-9, "θ-family value")
+        assertClose((3.0 * exp(-2.0) - 1.0) / 4.0, theta.dP, 1e-9, "θ-family dP")
+    }
 }

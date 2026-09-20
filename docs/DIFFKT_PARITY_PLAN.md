@@ -1774,6 +1774,29 @@ reachable from `grad {}`, not new math. New-op families come after.
     evaluations) + Leibniz parameter adjoints (quadrature over the body's
     own VJP w.r.t. captured params — the same tableau, adjoint integrand),
     forward tangent the mirror image. No plugin work forced into C5.
+  - ✅ **`grad {}` surface v1 — the customVjp route (§0.4.426)**: the open
+    gate used exactly as a USER would, which is its point. E2E
+    (`IntegralGradientTest`, compiler-plugin): `grad {}` through a
+    `customVjp` whose primal is a user-spelled fixed-node quadrature
+    (Simpson over {0, ½, 1}, exact for the x²-family — the quarter-integer
+    grid) and whose vjpFn is the Leibniz adjoint — d/da ∫₀¹ a·x² dx = 1/3
+    and d/da ∫₀¹ (a·x)² dx = 2a/3 pinned analytically, no fallback;
+    `customVjpJvp` supplies both bodies and the scalar JVP⇄VJP
+    cross-identity holds end to end (value a²/3, tangent dp·2a/3, grad
+    2a/3 — one analytic family, both modes, one number). Host side:
+    `integralWithParamGrad(a, b, f, dfdp)` (:core/Integral.kt) is the
+    Leibniz sugar — (value, dP) with dP = ∫ ∂f/∂p over the same Romberg
+    kernel, analytic in the integrand, the parameter-side twin of
+    `integralWithBoundGrads` — pinned against the a·x² and e^(−θx) closed
+    forms in IntegralTest. **NAMED DEFERRAL — the INTEGRAL region op**:
+    the reusable `integral(a, b) { f }` spelling above (Romberg over the
+    interpreted lowered body, adaptive depth, FTC bound adjoints, Leibniz
+    adjoint as a quadrature over the body's own VJP) stays open, because
+    B5 v1 REQUIRES lambda literals at the customVjp call site inside the
+    differentiated body — a library wrapper cannot exist under the
+    no-escape rule by design, so the region op waits on either a B5
+    restriction-loosening slice or a dedicated FIR recognition of
+    `integral` itself.
 
 ### Phase D — random (DiffKT `RandomKey` parity)
 
@@ -1933,7 +1956,7 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 | Arbitrary nesting (fwd∘fwd, rev∘rev, …) | ✅/🟡 | full matrix certified at IR level + refusals pinned (§0.4.401); user-facing n-th-order intrinsic spellings still open |
 | `ifThenElse(cond, a, b)` (scalar + tensor, differentiable) | ✅ | `where` §0.4.364; scalar branches also via IF regions + coarsening |
 | `Wrappable`/`Wrapper` (derivatives through user data structures; examples lean on this) | 🟡 | Tlaloc's K2 plugin lowers data-class params structurally — different mechanism, same end; certify in B5 |
-| `integral(a, b, f)` — Romberg quadrature with FTC-wired fwd/rev derivatives | ✅ | C5 §0.4.411 — `:core` host Romberg + `integralWithBoundGrads` FTC triple; `grad {}` surface recorded as B5-gated |
+| `integral(a, b, f)` — Romberg quadrature with FTC-wired fwd/rev derivatives | ✅ | C5 §0.4.411 — `:core` host Romberg + `integralWithBoundGrads` FTC triple; `grad {}` surface v1 §0.4.426 (customVjp route + `integralWithParamGrad` Leibniz sugar; INTEGRAL region op is the named deferral) |
 | `primal(x, f)`, `basePrimal`, `DerivativeID` plumbing | ➖ | runtime-tape bookkeeping; no analogue needed in a compile-time IR |
 
 #### Scalar math (`DScalar` surface)
@@ -2062,8 +2085,9 @@ mixed rank-increase+stretch broadcast, `DScalar`-interface params) →
 B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → B5 ✅ (§0.4.415
 `customVjp`/`customVjp2` + §0.4.416 `customJvp`/`customVjpJvp` and their
 2-arg forms, ratified 2026-09-20) → C1–C3 ✅
-(§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; the `grad {}`
-integral surface's B5 gate is now open, spelling still to land) → D1 ✅
+(§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; §0.4.426 — the
+`grad {}` surface v1 through the B5 gate, INTEGRAL region op deferred by
+name) → D1 ✅
 (§0.4.408) → D2 v1 ✅ (§0.4.413 — IR-level reparameterized gradients;
 FIR/`grad {}` spelling is the recorded tail) → E1a ✅ (§0.4.417 — the
 `:core` host CSR `SparseTensor`; E ratified by Pedro 2026-09-20 per the
