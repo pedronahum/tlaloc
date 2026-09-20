@@ -173,6 +173,38 @@ class EmitterTest {
     }
 
     @Test
+    fun padLikeEmitsAStaticPad() {
+        // §0.4.404 — PAD_LIKE is SLICE_LIKE's transpose: place the value into
+        // the outTemplate's shape at the window after the prior templates. At
+        // emit time every dim is concrete, so the offset (Σ priors' axis
+        // extents) and the trailing pad (outTemplate − offset − value) fold to
+        // literals and the op lowers to the same static `stablehlo.pad` the
+        // PAD_TO arm emits: a [2,3] value into a [2,7] outTemplate after a
+        // [2,2] prior on axis 1 → low = [0,2], high = [0,2]. The template
+        // params go unreferenced in the MLIR (legal, DCE'd downstream).
+        val fn = DxirBuilder.function("f") {
+            val v = param("v", DxirType(F32, listOf(2, 3)))
+            val t = param("t", DxirType(F32, listOf(2, 7)))
+            val p = param("p", DxirType(F32, listOf(2, 2)))
+            listOf(
+                op(
+                    OpKind.PAD_LIKE, listOf(v, t, p), DxirType(F32, listOf(2, 7)),
+                    attrs = mapOf("axis" to 1),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("stablehlo.pad %0, %"), mlir)
+        assertTrue(
+            mlir.contains(
+                "low = [0, 2], high = [0, 2], interior = [0, 0] : " +
+                    "(tensor<2x3xf32>, tensor<f32>) -> tensor<2x7xf32>",
+            ),
+            mlir,
+        )
+    }
+
+    @Test
     fun broadcastLikeEmitsAStaticBroadcastInDim() {
         // §0.4.399 — BROADCAST_LIKE's target extents come from its template's
         // RUNTIME shape, but at emit time every dim is concrete, so it folds to

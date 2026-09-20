@@ -303,8 +303,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
             // Phase A2b — SLICE_LIKE's result shape IS its `thisTemplate`
             // (operand[1]), the same shape-only-template treatment SUM_TO and
-            // PAD_TO get.
-            OpKind.SLICE_LIKE -> {
+            // PAD_TO get. §0.4.404 — PAD_LIKE identically: its result shape IS
+            // its `outTemplate` (operand[1]).
+            OpKind.SLICE_LIKE, OpKind.PAD_LIKE -> {
                 if (op.operands.size < 2) return null
                 operandIrTypes[op.operands[1].id]
             }
@@ -1050,7 +1051,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // window is a returned grad (mirror of SUM_TO/PAD_TO). Neither the
                     // value operand (strictly bigger: it is the whole concat) nor the
                     // PRIOR templates (different windows again) may inherit it.
-                    OpKind.SLICE_LIKE -> {
+                    // §0.4.404 — PAD_LIKE identically: its output shape is its
+                    // `outTemplate` (operand[1]); the value operand (strictly
+                    // smaller: one window of it) and the priors must not inherit.
+                    OpKind.SLICE_LIKE, OpKind.PAD_LIKE -> {
                         if (n.operands.size < 2) continue
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
                         val templateId = n.operands[1].id
@@ -1519,6 +1523,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // Phase A2b — concat and its runtime-extent window adjoint.
         if (op.op == OpKind.CONCAT) return irConcat(op, env, context)
         if (op.op == OpKind.SLICE_LIKE) return irSliceLike(op, env, context)
+        // §0.4.404 — SLICE_LIKE's own adjoint (second-order reverse bodies
+        // through a symbolic concat window).
+        if (op.op == OpKind.PAD_LIKE) return irPadLike(op, env, context)
         // Phase A5c-2 — tensor ADD/SUB/MUL/DIV prefer the broadcasting host ops.
         // Under `grad {}`'s -1 sentinel dims two operands with the SAME static shape
         // can still be differently shaped at runtime (`[N,1]` and `[N,C]` are both
@@ -3010,6 +3017,48 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             1 -> "sliceLikeAfter1"
             2 -> "sliceLikeAfter2"
             else -> "sliceLikeAfter3"
+        }
+        val sym = opsTensorSymbol(name) ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+        val axis = (op.attrs["axis"] as? Number)?.toInt() ?: return null
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+            ?: (irTypeForNode(op.operands[1], context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        decls.forEachIndexed { i, decl -> call.arguments[i] = irGet(decl) }
+        call.arguments[decls.size] = intConst(axis)
+        return call
+    }
+
+    /**
+     * §0.4.404 — `OpKind.PAD_LIKE(value, outTemplate, priorTemplate…)` → the
+     * matching fixed-arity `:core/ops` twin (`padLikeStart` / `padLikeAfter{1,2,3}`),
+     * selected by the PRIOR-template count — the [irSliceLike] shape exactly, since
+     * PAD_LIKE is SLICE_LIKE's transpose: the axis rides as an Int const; the offset
+     * and target extent are read off the templates at runtime (a concat window's
+     * offset is the cumulative sum of the prior operands' runtime extents and does
+     * not exist at compile time). Result IrType = the outTemplate's (operand[1]).
+     */
+    private fun IrBuilderWithScope.irPadLike(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val priors = op.operands.size - 2
+        if (priors !in 0..3) return null
+        if (!isAcceptedTensorType(op.type)) return null
+        val name = when (priors) {
+            0 -> "padLikeStart"
+            1 -> "padLikeAfter1"
+            2 -> "padLikeAfter2"
+            else -> "padLikeAfter3"
         }
         val sym = opsTensorSymbol(name) ?: return null
         val decls = op.operands.map { env[it.id] ?: return null }

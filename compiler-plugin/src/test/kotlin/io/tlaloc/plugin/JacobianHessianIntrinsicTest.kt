@@ -198,6 +198,66 @@ class JacobianHessianIntrinsicTest {
         }
     }
 
+    /**
+     * §0.4.404 — second order THROUGH a symbolic concat window, E2E. Under
+     * `grad {}`'s -1 sentinel dims the reverse half of the hvp body emits
+     * SLICE_LIKE windows (ConcatRule's symbolic branch), and the forward half
+     * threads a tangent through them — the user-visible face of the concat
+     * closure. (The hessian intrinsic is forward-OVER-reverse, so it rides
+     * SLICE_LIKE's forward tangent; the PAD_LIKE VjpRule this slice adds is
+     * what closes the REVERSE-over-reverse route, pinned at IR level in
+     * `DxirNestingMatrixTest`.)
+     *
+     *   f(x:[3]) = Σ concat(x, x)² = 2·Σx²  →  ∇f = 4x,  H = 4·I₃.
+     */
+    @Test
+    fun `hessian through a symbolic concat window`() {
+        val src = """
+            import io.tlaloc.autograd.hessian
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.HostF32Storage
+            import io.tlaloc.core.Rank1
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.ops.concat
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun show(name: String, t: DTensor<*, *>) {
+                val data = (t.storage as HostF32Storage).data
+                println(name + " " + t.dims.joinToString("x") + " " + data.joinToString(","))
+            }
+            fun main() {
+                val hf = hessian { x: DTensor<Rank1<Sym>, F32> ->
+                    val c = concat(0, x, x)
+                    (c * c).sum().toFloat()
+                }
+                val X = Tensors.f32Vector<Sym>(floatArrayOf(1.0f, -2.0f, 0.5f))
+                show("hf", hf(X))
+            }
+        """.trimIndent()
+        val result = compileAndRun(src)
+        assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}")
+        val keptOriginal = result.messages.any {
+            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+        }
+        assertTrue(
+            !keptOriginal,
+            "synthesis fell back; hessian has no tape path so this is a hard failure. " +
+                "Warnings:\n${result.messages.filter { it.severity == CompilerMessageSeverity.WARNING }
+                    .joinToString("\n--\n") { it.message }}",
+        )
+        val line = result.stdout.trim().lines().single { it.startsWith("hf ") }
+        val parts = line.split(" ", limit = 3)
+        assertEquals("3x3", parts[1], "H dims")
+        val got = parts[2].split(",").map { it.toFloat() }
+        val want = listOf(4f, 0f, 0f, 0f, 4f, 0f, 0f, 0f, 4f)
+        for (i in want.indices) {
+            assertTrue(abs(got[i] - want[i]) < 1e-4f, "H[$i]=${got[i]} want ${want[i]} (got $got)")
+        }
+    }
+
     private fun pluginClasspath(): Array<String> = arrayOf(
         System.getProperty("tlaloc.plugin.jar") ?: error("tlaloc.plugin.jar not set"),
         System.getProperty("tlaloc.ir.jar") ?: error("tlaloc.ir.jar not set"),

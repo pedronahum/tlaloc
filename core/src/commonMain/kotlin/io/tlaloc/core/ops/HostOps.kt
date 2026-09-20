@@ -2269,6 +2269,89 @@ fun <S : Shape> sliceLikeAfter3(
 ): DTensor<S, F32> = sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2))
 
 /**
+ * §0.4.404 — the host twin of dxir `PAD_LIKE`, i.e. SLICE_LIKE's transpose and
+ * VJP: place [value] into a zero tensor of [outTemplate]'s RUNTIME dims at the
+ * window along [axis] that starts after every one of [priors] (every other
+ * axis at 0).
+ *
+ * Both the offset and the target extent are read from the templates' ACTUAL
+ * runtime dims, for the same reason [sliceWindow] reads its bounds there: a
+ * concat window's offset is the cumulative sum of the PRIOR operands' runtime
+ * axis extents, which under `grad {}`'s -1 sentinel dims does not exist at
+ * compile time — so it cannot ride as a literal the way [padToLike]'s `low`
+ * does. The templates contribute SHAPE ONLY — their values are never read.
+ *
+ * [sliceWindow] cuts a window OUT of a shape; this puts one back INTO it.
+ */
+private fun <S : Shape> padWindow(
+    value: DTensor<*, F32>,
+    outTemplate: DTensor<S, F32>,
+    axis: Int,
+    priors: List<DTensor<*, F32>>,
+): DTensor<S, F32> {
+    val v = value.dims
+    val t = outTemplate.dims
+    val r = v.size
+    require(t.size == r) { "padWindow: outTemplate rank ${t.size} != value rank $r" }
+    require(axis in 0 until r) { "padWindow: axis $axis outside rank $r" }
+    val start = priors.sumOf { it.dims[axis] }
+    val len = v[axis]
+    require(start >= 0 && start + len <= t[axis]) {
+        "padWindow: window [$start, ${start + len}) exceeds the outTemplate's axis-$axis extent ${t[axis]}"
+    }
+    for (i in 0 until r) {
+        require(i == axis || t[i] == v[i]) {
+            "padWindow: non-axis $i outTemplate extent ${t[i]} != value extent ${v[i]}"
+        }
+    }
+    var outer = 1
+    for (k in 0 until axis) outer *= t[k]
+    var inner = 1
+    for (k in axis + 1 until r) inner *= t[k]
+    var outSize = 1
+    for (d in t) outSize *= d
+    val src = value.hostF32()
+    val out = FloatArray(outSize)
+    var from = 0
+    for (o in 0 until outer) {
+        val dst = o * (t[axis] * inner) + start * inner
+        src.copyInto(out, dst, from, from + len * inner)
+        from += len * inner
+    }
+    return DTensor(HostF32Storage(out), t.copyOf(), F32)
+}
+
+/** Fixed-arity `PAD_LIKE` twins, one per PRIOR-template count — the usual
+ * IrVararg reason (see [sliceLikeStart]): synthesis builds positional
+ * `IrCall` arguments, so the operand count has to be in the callee's name. */
+fun <S : Shape> padLikeStart(value: DTensor<*, F32>, outTemplate: DTensor<S, F32>, axis: Int): DTensor<S, F32> =
+    padWindow(value, outTemplate, axis, emptyList())
+
+fun <S : Shape> padLikeAfter1(
+    value: DTensor<*, F32>,
+    outTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = padWindow(value, outTemplate, axis, listOf(prior0))
+
+fun <S : Shape> padLikeAfter2(
+    value: DTensor<*, F32>,
+    outTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = padWindow(value, outTemplate, axis, listOf(prior0, prior1))
+
+fun <S : Shape> padLikeAfter3(
+    value: DTensor<*, F32>,
+    outTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = padWindow(value, outTemplate, axis, listOf(prior0, prior1, prior2))
+
+/**
  * Phase A2b — the two-operand concat the K2 plugin synthesises with.
  *
  * Fixed arity on purpose: synthesis builds positional `IrCall` arguments and cannot

@@ -192,6 +192,18 @@ object DxirForwardTransform {
                 node.attrs,
             )
 
+            // §0.4.404 — PAD_LIKE (SLICE_LIKE's transpose) is linear in `value`
+            // (operand[0]); EVERY template (operands[1..], variadic: the
+            // outTemplate then the priors) contributes SHAPE ONLY, so each
+            // takes its primal VALUE clone, never its tangent — the same
+            // shape-only treatment as SLICE_LIKE.
+            OpKind.PAD_LIKE -> b.op(
+                OpKind.PAD_LIKE,
+                listOf(t(node.operands[0])) + vOps.drop(1),
+                ty,
+                node.attrs,
+            )
+
             // §0.4.363 — maxpool tangent: route dx through the argmax mask,
             // then window-sum via avgpool × kh·kw. Same v1 scope and tie
             // convention as [VjpRegistry.MaxPool2dRule] (its KDoc has the

@@ -1649,9 +1649,9 @@ object VjpRegistry {
      * §0.4.399 — SLICE_AT's own VJP zero-pads the upstream back into `value`'s
      * window at the same literal `low`: `PAD_TO(upstream, template=value, low)`.
      * The PAD_TO ⇄ SLICE_AT pair is closed under differentiation, like
-     * SUM_TO ⇄ BROADCAST_LIKE. (SLICE_LIKE stays without a rule: its window
-     * offset is a runtime SUM of prior templates' extents, which no literal
-     * `low` can carry — the documented remaining gap.)
+     * SUM_TO ⇄ BROADCAST_LIKE. (SLICE_LIKE's window offset is a runtime SUM of
+     * prior templates' extents, which no literal `low` can carry — it gets its
+     * own mirror, [SliceLikeVjpRule]'s PAD_LIKE, §0.4.404.)
      */
     val SliceAtRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
@@ -1660,6 +1660,70 @@ object VjpRegistry {
             val dValue = builder.op(
                 OpKind.PAD_TO, listOf(upstream, value), value.type,
                 attrs = mapOf("low" to op.attrs["low"]!!),
+            )
+            return listOf(value to dValue)
+        }
+    }
+
+    /**
+     * §0.4.404 — SLICE_LIKE's adjoint, the last ruleless member of the
+     * runtime-extent family (the §0.4.399 deferral). `d/d value
+     * SLICE_LIKE(value, thisTemplate, priors…, axis)` places the upstream
+     * (shaped like the window) back into `value`'s extent at the window's
+     * offset — and that offset is `Σⱼ priorⱼ.dims[axis]`, a runtime SUM of the
+     * PRIOR templates' extents that no literal `low` (PAD_TO/SLICE_AT) can
+     * carry. `PAD_LIKE(upstream, outTemplate=value, same priors, axis)` reads
+     * it off the same shape-only templates at execution: the primal `value`
+     * becomes the outTemplate of its own adjoint (the §0.4.399 inversion), and
+     * the priors ride along verbatim. `thisTemplate` is NOT dereferenced — the
+     * upstream already carries the window's shape. Templates get no
+     * contribution (pure shape sources — typed zeros).
+     *
+     * Variadic, so the static property cannot express "value plus every
+     * prior"; [readsPrimalOperands] is authoritative (the ConcatRule
+     * precedent): index 0 (dereferenced as PAD_LIKE's outTemplate) plus every
+     * prior index 2.. — each must be cloned into the gradient body.
+     */
+    val SliceLikeVjpRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun readsPrimalOperands(op: DxirOp): Set<Int> =
+            setOf(0) + (2 until op.operands.size)
+
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val value = op.operands[0]
+            val dValue = builder.op(
+                OpKind.PAD_LIKE,
+                listOf(upstream, value) + op.operands.drop(2),
+                value.type,
+                attrs = mapOf("axis" to op.attrs["axis"]!!),
+            )
+            return listOf(value to dValue)
+        }
+    }
+
+    /**
+     * §0.4.404 — PAD_LIKE's own VJP cuts the upstream back out of the placed
+     * window: `SLICE_LIKE(upstream, thisTemplate=value, same priors, axis)`.
+     * The SLICE_LIKE ⇄ PAD_LIKE pair is closed under differentiation, like
+     * SUM_TO ⇄ BROADCAST_LIKE and PAD_TO ⇄ SLICE_AT — with it, EVERY
+     * runtime-extent adjoint op has a rule, and second order through a
+     * symbolic concat window composes. Same variadic clone contract as
+     * [SliceLikeVjpRule]: `value` (the window template of its own adjoint) and
+     * every prior are dereferenced; the outTemplate is not (the upstream
+     * carries its shape).
+     */
+    val PadLikeRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun readsPrimalOperands(op: DxirOp): Set<Int> =
+            setOf(0) + (2 until op.operands.size)
+
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val value = op.operands[0]
+            val dValue = builder.op(
+                OpKind.SLICE_LIKE,
+                listOf(upstream, value) + op.operands.drop(2),
+                value.type,
+                attrs = mapOf("axis" to op.attrs["axis"]!!),
             )
             return listOf(value to dValue)
         }
@@ -1717,6 +1781,10 @@ object VjpRegistry {
         OpKind.BROADCAST_LIKE to BroadcastLikeRule,
         OpKind.PAD_TO to PadToRule,
         OpKind.SLICE_AT to SliceAtRule,
+        // §0.4.404 — the family's last pair: a concat window and its
+        // placement are each other's adjoints, with the priors riding along.
+        OpKind.SLICE_LIKE to SliceLikeVjpRule,
+        OpKind.PAD_LIKE to PadLikeRule,
     )
 
     operator fun get(kind: OpKind): VjpRule? = rules[kind]

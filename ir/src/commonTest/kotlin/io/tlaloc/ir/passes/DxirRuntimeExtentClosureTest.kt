@@ -7,6 +7,7 @@ import io.tlaloc.ir.OpKind
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -25,8 +26,15 @@ import kotlin.test.assertTrue
  * with `value` becoming the SHAPE-ONLY template of its own adjoint (its runtime
  * dims are the target extents, unknowable under `grad {}`'s -1 sentinels), so
  * differentiating any number of times only ever alternates within the pair.
- * SLICE_LIKE stays ruleless: its window offset is a runtime SUM of prior
- * templates' extents, which no literal `low` can carry.
+ *
+ * §0.4.404 closes the last member: SLICE_LIKE's window offset is a runtime SUM
+ * of prior templates' extents, which no literal `low` could carry — so its
+ * adjoint is its own variadic transpose,
+ *   SLICE_LIKE(value, thisT, priors…, axis) ⇄ PAD_LIKE(upstream,
+ *   outTemplate=value, same priors, axis)
+ * with the priors riding along verbatim. Every runtime-extent adjoint op now
+ * has a rule, and second order through a symbolic concat window composes
+ * (flipped from a refusal to a positive cert in `DxirNestingMatrixTest`).
  */
 class DxirRuntimeExtentClosureTest {
 
@@ -324,6 +332,288 @@ class DxirRuntimeExtentClosureTest {
         assertTrue(
             abs(dot - tangent) < 1e-5,
             "JVP⇄VJP cross-identity broken through SLICE_AT: ⟨grad,v⟩=$dot vs tangent=$tangent",
+        )
+    }
+
+    /**
+     * §0.4.404 — PAD_LIKE is SLICE_LIKE's transpose: place the value into a
+     * zero tensor of the outTemplate's runtime shape at the window after the
+     * prior templates. Pin the value contract the way [DxirConcatGradTest]
+     * pins SLICE_LIKE's: start window, one prior, two priors accumulating, a
+     * LEADING axis (so the copy is not one contiguous run), and the
+     * out-of-range refusal.
+     */
+    @Test
+    fun padLikeInterpreterPins() {
+        // Trailing axis, window at the START (no priors): [2,2] → cols 0..1 of [2,5].
+        run {
+            val fn = DxirBuilder.function("pl_start") {
+                val v = param("v", DxirType(F32, listOf(2, 2)))
+                val t = param("t", DxirType(F32, listOf(2, 5)))
+                listOf(
+                    op(
+                        OpKind.PAD_LIKE, listOf(v, t), DxirType(F32, listOf(2, 5)),
+                        attrs = mapOf("axis" to 1),
+                    ),
+                )
+            }
+            val out = DxirInterpreter.evalFunction(
+                fn, listOf(floatArrayOf(1f, 2f, 3f, 4f), FloatArray(10)),
+            )[0]
+            assertEquals(listOf(1f, 2f, 0f, 0f, 0f, 3f, 4f, 0f, 0f, 0f), out.toList())
+        }
+        // Trailing axis, window AFTER one prior of extent 2: cols 2..3 of [2,5].
+        run {
+            val fn = DxirBuilder.function("pl_after1") {
+                val v = param("v", DxirType(F32, listOf(2, 2)))
+                val t = param("t", DxirType(F32, listOf(2, 5)))
+                val p = param("p", DxirType(F32, listOf(2, 2)))
+                listOf(
+                    op(
+                        OpKind.PAD_LIKE, listOf(v, t, p), DxirType(F32, listOf(2, 5)),
+                        attrs = mapOf("axis" to 1),
+                    ),
+                )
+            }
+            val out = DxirInterpreter.evalFunction(
+                fn, listOf(floatArrayOf(1f, 2f, 3f, 4f), FloatArray(10), FloatArray(4)),
+            )[0]
+            assertEquals(listOf(0f, 0f, 1f, 2f, 0f, 0f, 0f, 3f, 4f, 0f), out.toList())
+        }
+        // Two priors accumulate: [2,2] after extents 2 and 3 → cols 5..6 of [2,7].
+        run {
+            val fn = DxirBuilder.function("pl_after2") {
+                val v = param("v", DxirType(F32, listOf(2, 2)))
+                val t = param("t", DxirType(F32, listOf(2, 7)))
+                val p0 = param("p0", DxirType(F32, listOf(2, 2)))
+                val p1 = param("p1", DxirType(F32, listOf(2, 3)))
+                listOf(
+                    op(
+                        OpKind.PAD_LIKE, listOf(v, t, p0, p1), DxirType(F32, listOf(2, 7)),
+                        attrs = mapOf("axis" to 1),
+                    ),
+                )
+            }
+            val out = DxirInterpreter.evalFunction(
+                fn,
+                listOf(floatArrayOf(1f, 2f, 3f, 4f), FloatArray(14), FloatArray(4), FloatArray(6)),
+            )[0]
+            assertEquals(
+                listOf(0f, 0f, 0f, 0f, 0f, 1f, 2f, 0f, 0f, 0f, 0f, 0f, 3f, 4f),
+                out.toList(),
+            )
+        }
+        // LEADING axis (so the copy is not one contiguous run): [2,3] → rows 2..3 of [6,3].
+        run {
+            val fn = DxirBuilder.function("pl_axis0") {
+                val v = param("v", DxirType(F32, listOf(2, 3)))
+                val t = param("t", DxirType(F32, listOf(6, 3)))
+                val p = param("p", DxirType(F32, listOf(2, 3)))
+                listOf(
+                    op(
+                        OpKind.PAD_LIKE, listOf(v, t, p), DxirType(F32, listOf(6, 3)),
+                        attrs = mapOf("axis" to 0),
+                    ),
+                )
+            }
+            val v = FloatArray(6) { (it + 1).toFloat() }
+            val out = DxirInterpreter.evalFunction(fn, listOf(v, FloatArray(18), FloatArray(6)))[0]
+            assertEquals(18, out.size)
+            for (i in 0 until 18) {
+                val want = if (i in 6..11) (i - 5).toFloat() else 0f
+                assertEquals(want, out[i], "out[$i]")
+            }
+        }
+        // A window that does not fit fails loudly rather than writing past the end.
+        run {
+            val fn = DxirBuilder.function("pl_bad") {
+                val v = param("v", DxirType(F32, listOf(2, 4)))
+                val t = param("t", DxirType(F32, listOf(2, 5)))
+                val p = param("p", DxirType(F32, listOf(2, 2)))
+                listOf(
+                    op(
+                        OpKind.PAD_LIKE, listOf(v, t, p), DxirType(F32, listOf(2, 5)),
+                        attrs = mapOf("axis" to 1),
+                    ),
+                )
+            }
+            assertFailsWith<IllegalArgumentException> {
+                DxirInterpreter.evalFunction(fn, listOf(FloatArray(8), FloatArray(10), FloatArray(4)))
+            }
+        }
+    }
+
+    /**
+     * §0.4.404 — THE closure pin for the last pair: reverse-mode THROUGH a
+     * SLICE_LIKE — the exact composition §0.4.399 left refusing with "no VJP
+     * rule registered for SLICE_LIKE". A SLICE_LIKE-containing scalar body is
+     * precisely the shape of a gradient body over a symbolic concat, so this
+     * is the reverse-over-reverse mechanism minus the composition plumbing.
+     *
+     * h(v[2,5], t[2,3], p[2,2], w[2,3]) = Σ (SLICE_LIKE(v, t, p, axis=1) ⊙ w)
+     * — the window is v's cols 2..4:
+     *   dv[i,j] = w[i,j−2] for j ∈ 2..4, else 0 — PAD_LIKE(upstream·w,
+     *             outTemplate=v, prior=p, axis=1), shape [2,5]
+     *   dw[i,k] = v[i,k+2]
+     *   dt = dp = 0 — the templates are pure shape sources.
+     */
+    @Test
+    fun reverseThroughSliceLike() {
+        val fn = DxirBuilder.function("slicelike_body") {
+            val v = param("v", DxirType(F32, listOf(2, 5)))
+            val t = param("t", DxirType(F32, listOf(2, 3)))
+            val p = param("p", DxirType(F32, listOf(2, 2)))
+            val w = param("w", DxirType(F32, listOf(2, 3)))
+            val s = op(
+                OpKind.SLICE_LIKE, listOf(v, t, p), DxirType(F32, listOf(2, 3)),
+                attrs = mapOf("axis" to 1),
+            )
+            val m = op(OpKind.MUL, listOf(s, w), DxirType(F32, listOf(2, 3)))
+            listOf(op(OpKind.SUM, listOf(m), scalar))
+        }
+        val grad = DxirReverseTransform.apply(fn)
+        assertTrue(
+            grad.body.filterIsInstance<io.tlaloc.ir.DxirOp>().any { it.op == OpKind.PAD_LIKE },
+            "SliceLikeVjpRule's PAD_LIKE adjoint must land in the gradient body",
+        )
+        val v = FloatArray(10) { it.toFloat() }
+        val w = floatArrayOf(0.5f, -1.5f, 2f, 3f, -0.25f, 1f)
+        val out = DxirInterpreter.evalFunction(grad, listOf(v, FloatArray(6), FloatArray(4), w))
+        assertEquals(10, out[0].size, "dv must be padded back up to v's [2,5]")
+        for (i in 0 until 2) for (j in 0 until 5) {
+            val want = if (j >= 2) w[i * 3 + (j - 2)] else 0f
+            assertTrue(
+                abs(out[0][i * 5 + j] - want) < 1e-6f,
+                "dv[$i,$j] = ${out[0][i * 5 + j]}, want $want",
+            )
+        }
+        assertTrue(out[1].all { abs(it) < 1e-6f }, "dt must be zero; got ${out[1].toList()}")
+        assertTrue(out[2].all { abs(it) < 1e-6f }, "dp must be zero; got ${out[2].toList()}")
+        for (i in 0 until 2) for (k in 0 until 3) {
+            val want = v[i * 5 + k + 2]
+            assertTrue(
+                abs(out[3][i * 3 + k] - want) < 1e-6f,
+                "dw[$i,$k] = ${out[3][i * 3 + k]}, want $want",
+            )
+        }
+    }
+
+    /**
+     * §0.4.404 — the pair's other half: reverse-mode THROUGH a PAD_LIKE, whose
+     * adjoint is SLICE_LIKE again — one more differentiation stays inside the
+     * pair. h(u[2], t[5], p[1], w[5]) = Σ (PAD_LIKE(u, t, p, axis=0) ⊙ w)
+     * = u₀·w₁ + u₁·w₂:
+     *   du = [w₁, w₂] — SLICE_LIKE(upstream·w, thisTemplate=u, prior=p)
+     *   dw = [0, u₀, u₁, 0, 0];  dt = dp = 0.
+     */
+    @Test
+    fun reverseThroughPadLike() {
+        val fn = DxirBuilder.function("padlike_body") {
+            val u = param("u", DxirType(F32, listOf(2)))
+            val t = param("t", DxirType(F32, listOf(5)))
+            val p = param("p", DxirType(F32, listOf(1)))
+            val w = param("w", DxirType(F32, listOf(5)))
+            val pd = op(
+                OpKind.PAD_LIKE, listOf(u, t, p), DxirType(F32, listOf(5)),
+                attrs = mapOf("axis" to 0),
+            )
+            val m = op(OpKind.MUL, listOf(pd, w), DxirType(F32, listOf(5)))
+            listOf(op(OpKind.SUM, listOf(m), scalar))
+        }
+        val grad = DxirReverseTransform.apply(fn)
+        assertTrue(
+            grad.body.filterIsInstance<io.tlaloc.ir.DxirOp>().any { it.op == OpKind.SLICE_LIKE },
+            "PadLikeRule's SLICE_LIKE adjoint must land in the gradient body",
+        )
+        val u = floatArrayOf(3f, -4f)
+        val w = floatArrayOf(10f, 20f, 30f, 40f, 50f)
+        val out = DxirInterpreter.evalFunction(grad, listOf(u, FloatArray(5), FloatArray(1), w))
+        assertTrue(abs(out[0][0] - 20f) < 1e-6f && abs(out[0][1] - 30f) < 1e-6f, out[0].toList().toString())
+        assertTrue(out[1].all { abs(it) < 1e-6f }, "dt must be zero; got ${out[1].toList()}")
+        assertTrue(out[2].all { abs(it) < 1e-6f }, "dp must be zero; got ${out[2].toList()}")
+        val wantDw = floatArrayOf(0f, 3f, -4f, 0f, 0f)
+        assertTrue(wantDw.indices.all { abs(out[3][it] - wantDw[it]) < 1e-6f }, out[3].toList().toString())
+    }
+
+    /** §0.4.404 — JVP⇄VJP cross-identity through SLICE_LIKE (the new VJP against the Phase A2b tangent). */
+    @Test
+    fun sliceLikeJvpVjpCrossIdentity() {
+        val fn = DxirBuilder.function("sl_chain") {
+            val v = param("v", DxirType(F32, listOf(2, 5)))
+            val t = param("t", DxirType(F32, listOf(2, 3)))
+            val p = param("p", DxirType(F32, listOf(2, 2)))
+            val w = param("w", DxirType(F32, listOf(2, 3)))
+            val s = op(
+                OpKind.SLICE_LIKE, listOf(v, t, p), DxirType(F32, listOf(2, 3)),
+                attrs = mapOf("axis" to 1),
+            )
+            val m = op(OpKind.MUL, listOf(s, w), DxirType(F32, listOf(2, 3)))
+            listOf(op(OpKind.SUM, listOf(m), scalar))
+        }
+        val v = FloatArray(10) { (it * 0.21f) - 0.9f }
+        val t = FloatArray(6)
+        val p = FloatArray(4)
+        val w = FloatArray(6) { (it * 0.11f) - 0.3f }
+        val vv = FloatArray(10) { (it * 0.031f) - 0.12f }
+        val vt = FloatArray(6) { 0.19f * it } // shape-only operands: must not matter
+        val vp = FloatArray(4) { 0.27f * it }
+        val vw = FloatArray(6) { (it * 0.023f) - 0.07f }
+
+        val grads = DxirInterpreter.evalFunction(DxirReverseTransform.apply(fn), listOf(v, t, p, w))
+        var dot = 0.0
+        for (i in 0 until 10) dot += grads[0][i].toDouble() * vv[i]
+        for (i in 0 until 6) dot += grads[1][i].toDouble() * vt[i]
+        for (i in 0 until 4) dot += grads[2][i].toDouble() * vp[i]
+        for (i in 0 until 6) dot += grads[3][i].toDouble() * vw[i]
+
+        val jvp = DxirInterpreter.evalFunction(
+            DxirForwardTransform.apply(fn), listOf(v, t, p, w, vv, vt, vp, vw),
+        )
+        val tangent = jvp[1].single().toDouble()
+        assertTrue(
+            abs(dot - tangent) < 1e-5,
+            "JVP⇄VJP cross-identity broken through SLICE_LIKE: ⟨grad,v⟩=$dot vs tangent=$tangent",
+        )
+    }
+
+    /** §0.4.404 — JVP⇄VJP cross-identity through PAD_LIKE. */
+    @Test
+    fun padLikeJvpVjpCrossIdentity() {
+        val fn = DxirBuilder.function("pl_chain") {
+            val u = param("u", DxirType(F32, listOf(2, 3)))
+            val t = param("t", DxirType(F32, listOf(2, 7)))
+            val p = param("p", DxirType(F32, listOf(2, 2)))
+            val w = param("w", DxirType(F32, listOf(2, 7)))
+            val pd = op(
+                OpKind.PAD_LIKE, listOf(u, t, p), DxirType(F32, listOf(2, 7)),
+                attrs = mapOf("axis" to 1),
+            )
+            val m = op(OpKind.MUL, listOf(pd, w), DxirType(F32, listOf(2, 7)))
+            listOf(op(OpKind.SUM, listOf(m), scalar))
+        }
+        val u = FloatArray(6) { (it * 0.17f) - 0.4f }
+        val t = FloatArray(14)
+        val p = FloatArray(4)
+        val w = FloatArray(14) { (it * 0.09f) - 0.5f }
+        val vu = FloatArray(6) { (it * 0.041f) - 0.1f }
+        val vt = FloatArray(14) { 0.13f * it } // shape-only operands: must not matter
+        val vp = FloatArray(4) { 0.29f * it }
+        val vw = FloatArray(14) { (it * 0.019f) - 0.06f }
+
+        val grads = DxirInterpreter.evalFunction(DxirReverseTransform.apply(fn), listOf(u, t, p, w))
+        var dot = 0.0
+        for (i in 0 until 6) dot += grads[0][i].toDouble() * vu[i]
+        for (i in 0 until 14) dot += grads[1][i].toDouble() * vt[i]
+        for (i in 0 until 4) dot += grads[2][i].toDouble() * vp[i]
+        for (i in 0 until 14) dot += grads[3][i].toDouble() * vw[i]
+
+        val jvp = DxirInterpreter.evalFunction(
+            DxirForwardTransform.apply(fn), listOf(u, t, p, w, vu, vt, vp, vw),
+        )
+        val tangent = jvp[1].single().toDouble()
+        assertTrue(
+            abs(dot - tangent) < 1e-5,
+            "JVP⇄VJP cross-identity broken through PAD_LIKE: ⟨grad,v⟩=$dot vs tangent=$tangent",
         )
     }
 

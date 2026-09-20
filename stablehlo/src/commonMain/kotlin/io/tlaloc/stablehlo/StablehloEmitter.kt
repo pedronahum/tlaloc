@@ -230,6 +230,13 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // host path's runtime extents) — MLIR-legal, and DCE'd by XLA when
             // nothing else uses them.
             OpKind.SLICE_LIKE -> emitSliceLike(step, name, ops[0], node)
+            // §0.4.404 — PAD_LIKE (SLICE_LIKE's transpose and VJP): place the
+            // value into the outTemplate's shape at the window after the prior
+            // templates. At emit time every dim is concrete, so both the offset
+            // and the trailing pad fold to literals and this is an ordinary
+            // static `stablehlo.pad` — the template operands' SSA values go
+            // unreferenced (the SLICE_LIKE precedent), MLIR-legal and DCE'd.
+            OpKind.PAD_LIKE -> emitPadLike(step, name, ops[0], node)
             OpKind.MAX -> emitReduce(
                 step, name, ops[0], node.operands[0].type, node.type,
                 reducer = "stablehlo.maximum", initLiteral = negInfLiteral(node.operands[0].type.dtype),
@@ -3024,6 +3031,62 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                     if (i == axis) "$start:${start + len}" else "0:${inputType.dims[i]}"
                 } +
                 "] : (${inputType.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * §0.4.404 — `PAD_LIKE(value, outTemplate, priorTemplate…)` + attr `axis`,
+     * SLICE_LIKE's transpose and VJP: place `value` into a zero tensor of the
+     * outTemplate's shape at the window along `axis` that starts after the
+     * prior templates' extents. Emit-time dims are always concrete, so the
+     * offset (`low[axis]` = Σ priors' axis extents, 0 elsewhere) and trailing
+     * pad (`high[i] = outTemplate.dim[i] − low[i] − value.dim[i]`) fold to
+     * literals and this is the same static `stablehlo.pad` [emitPadTo] emits —
+     * the templates exist for the host path, where the extents are only known
+     * at runtime, and their SSA values go unreferenced here (MLIR-legal,
+     * DCE'd; the [emitSliceLike] precedent).
+     */
+    private fun emitPadLike(
+        step: String,
+        name: String,
+        x: String,
+        node: DxirOp,
+    ) {
+        val inputType = node.operands[0].type
+        val outType = node.operands[1].type
+        val axis = intAttr(node, "axis")
+        val rank = inputType.rank
+        require(axis in 0 until rank) {
+            "PAD_LIKE axis $axis outside the value's rank $rank"
+        }
+        require(outType.rank == rank) {
+            "PAD_LIKE outTemplate rank ${outType.rank} must equal the value's $rank"
+        }
+        val start = node.operands.drop(2).sumOf { it.type.dims[axis] }
+        require(start >= 0 && start + inputType.dims[axis] <= outType.dims[axis]) {
+            "PAD_LIKE window [$start, ${start + inputType.dims[axis]}) exceeds the outTemplate's " +
+                "axis-$axis extent ${outType.dims[axis]}"
+        }
+        for (i in 0 until rank) {
+            require(i == axis || outType.dims[i] == inputType.dims[i]) {
+                "PAD_LIKE non-axis $i outTemplate ${outType.dims[i]} != value ${inputType.dims[i]}"
+            }
+        }
+        val low = (0 until rank).map { i -> if (i == axis) start else 0 }
+        val high = (0 until rank).map { i ->
+            val h = node.type.dims[i] - low[i] - inputType.dims[i]
+            require(h >= 0) {
+                "PAD_LIKE axis $i: low ${low[i]} + value ${inputType.dims[i]} exceeds outTemplate ${node.type.dims[i]}"
+            }
+            h
+        }
+        val scalarMlir = "tensor<${mlirElementType(inputType.dtype)}>"
+        val zero = synth()
+        out.appendLine("$step$zero = stablehlo.constant dense<0.0> : $scalarMlir")
+        out.appendLine(
+            "$step$name = stablehlo.pad $x, $zero, low = [${low.joinToString(", ")}], " +
+                "high = [${high.joinToString(", ")}], interior = [${List(rank) { 0 }.joinToString(", ")}] : " +
+                "(${inputType.toMlir()}, $scalarMlir) -> ${node.type.toMlir()}",
         )
     }
 

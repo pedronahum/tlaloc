@@ -27,9 +27,10 @@ import io.tlaloc.core.Sym
  *  - `hessian`: forward-over-reverse, `hvp_f(x, v) → H·v` — the composition
  *    pinned at IR level since §0.4.361 (the reverse transform's gradient body
  *    is straight-line, and every runtime-extent adjoint op — SUM_TO, PAD_TO,
- *    SLICE_LIKE — carries a forward tangent even though it has no VjpRule,
- *    which is exactly why the Hessian is forward-OVER-reverse and not
- *    reverse-over-reverse) —
+ *    SLICE_LIKE — has carried a forward tangent from birth, which is why the
+ *    Hessian could be forward-OVER-reverse long before those ops had VjpRules
+ *    of their own; §0.4.399/§0.4.404 later closed the reverse-over-reverse
+ *    route too) —
  * then wraps it in [assembleJacobianForward] / [assembleHessianForward],
  * which loop over the standard basis at RUNTIME (where the actual extents are
  * known) and stack the resulting columns/rows. Cost: n passes of the seeded

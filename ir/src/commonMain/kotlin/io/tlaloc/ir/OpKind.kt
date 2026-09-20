@@ -288,7 +288,29 @@ enum class OpKind {
     // window starts at 0. Every template contributes SHAPE ONLY — its values are
     // never read. Host twins: `sliceLikeStart(value, thisTemplate, axis)` and
     // `sliceLikeAfter{1,2,3}(value, thisTemplate, prior…, axis)`.
+    // §0.4.404 — VjpRule: PAD_LIKE(upstream, outTemplate=value, same priors,
+    // axis), so reverse-mode differentiates THROUGH it (second order through a
+    // symbolic concat window).
     SLICE_LIKE,
+
+    // §0.4.404 — runtime-extent window placement at a prior-template offset:
+    // SLICE_LIKE's transpose, and its VJP. PAD_LIKE(value, outTemplate,
+    // priorTemplate₀, …, priorTemplateₖ₋₁) → outTemplate's shape, attr `axis`
+    // (Int): place `value` into a zero tensor of outTemplate's ACTUAL runtime
+    // shape at offset `Σⱼ priorTemplateⱼ.dims[axis]` along `axis` (every other
+    // axis at 0). This is what SliceLikeRule emits as SLICE_LIKE's adjoint:
+    // the upstream (shaped like the concat window) must be zero-padded back
+    // into the concatenated value's extent at the window's offset — and that
+    // offset is a runtime SUM of the PRIOR templates' axis extents, which no
+    // literal `low` can carry (the reason PAD_TO/SLICE_AT could not serve and
+    // SLICE_LIKE stayed ruleless from §0.4.399 until now). Its own VJP is
+    // SLICE_LIKE(upstream, thisTemplate=value, same priors, axis): the pair is
+    // closed under differentiation to any order, like SUM_TO ⇄ BROADCAST_LIKE
+    // and PAD_TO ⇄ SLICE_AT. Every template contributes SHAPE ONLY — its
+    // values are never read. With no prior templates the window sits at 0.
+    // Host twins: `padLikeStart(value, outTemplate, axis)` and
+    // `padLikeAfter{1,2,3}(value, outTemplate, prior…, axis)`.
+    PAD_LIKE,
 
     // §0.4.360 — shape-plumbing activation (the DiffKT-gap item 2 surface).
     //

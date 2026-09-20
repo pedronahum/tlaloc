@@ -40,9 +40,10 @@ import kotlin.test.assertTrue
  *   cell: the first reverse pass emits those adjoint ops into its gradient
  *   body, and reverse-over-reverse must differentiate THROUGH them.
  * - **reverse∘reverse refusals** — gradient bodies containing fused adjoint
- *   ops with no VjpRule (MAXPOOL2D_GRAD, EMBEDDING_GRAD) and the
- *   symbolic-concat SLICE_LIKE (§0.4.399's documented remaining gap) fail
- *   loudly, naming the offending op.
+ *   ops with no VjpRule (MAXPOOL2D_GRAD, EMBEDDING_GRAD) fail loudly, naming
+ *   the offending op. (The symbolic-concat SLICE_LIKE was pinned here as the
+ *   third refusal until §0.4.404's PAD_LIKE closed it — that pin is now the
+ *   positive cert below.)
  *
  * Every passing cell is pinned against a hand-derived analytic reference AND
  * against `forward(reverse(f))` on the same point — all four routes to the
@@ -302,13 +303,18 @@ class DxirNestingMatrixTest {
     }
 
     @Test
-    fun reverseOverReverseRefusesSymbolicConcatSliceLike() {
-        // §0.4.399's deliberately-remaining gap, pinned as a loud contract:
-        // under sentinel dims ConcatRule emits SLICE_LIKE, whose window
-        // offset is a runtime sum of prior templates' extents — no
-        // literal-low adjoint can express it, so it has no VjpRule and the
-        // second reverse pass must refuse naming it. (A PAD_LIKE with
-        // prior-template offsets is the recorded shape of the fix.)
+    fun reverseOverReverseThroughSymbolicConcatSliceLike() {
+        // FLIPPED at §0.4.404 from `reverseOverReverseRefusesSymbolicConcatSliceLike`:
+        // this was §0.4.399's deliberately-remaining gap, pinned as a loud
+        // refusal — under sentinel dims ConcatRule emits SLICE_LIKE, whose
+        // window offset is a runtime sum of prior templates' extents that no
+        // literal-low adjoint could express, so the second reverse pass failed
+        // with "no VJP rule registered for SLICE_LIKE". The recorded fix shape
+        // (a PAD_LIKE with prior-template offsets) is now real: the second
+        // pass composes, and SliceLikeVjpRule's PAD_LIKE (same priors, the
+        // primal value as its own outTemplate) lands in the second gradient
+        // body. Sentinel dims mean the interpreter cannot run THIS graph, so
+        // the numeric half of the cert is the concrete twin below.
         val symT = DxirType(F32, listOf(-1))
         val fn = DxirBuilder.function("sym_concat") {
             val x = param("x", symT)
@@ -317,13 +323,61 @@ class DxirNestingMatrixTest {
             listOf(op(OpKind.SUM, listOf(m), scalar))
         }
         val g = DxirReverseTransform.apply(fn)
-        val e = assertFailsWith<IllegalStateException> {
-            DxirReverseTransform.apply(g, seedAsParam = true)
-        }
         assertTrue(
-            "SLICE_LIKE" in (e.message ?: ""),
-            "refusal must name SLICE_LIKE; got: ${e.message}",
+            g.body.filterIsInstance<DxirOp>().any { it.op == OpKind.SLICE_LIKE },
+            "precondition: the first reverse pass emits SLICE_LIKE windows for the symbolic concat",
         )
+        val rr = DxirReverseTransform.apply(g, seedAsParam = true)
+        val padLikes = rr.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.PAD_LIKE }
+        assertTrue(
+            padLikes.isNotEmpty(),
+            "SliceLikeVjpRule's PAD_LIKE adjoint must land in the second gradient body",
+        )
+        // The pair alternates without growing: each PAD_LIKE carries exactly
+        // its SLICE_LIKE's priors (0 for the first window, 1 for the second).
+        assertEquals(
+            listOf(0, 1),
+            padLikes.map { it.operands.size - 2 }.sorted(),
+            "each window's adjoint must carry the same prior count as its SLICE_LIKE",
+        )
+    }
+
+    @Test
+    fun reverseOverReverseSliceLikeWindowsNumericTwin() {
+        // The numeric half of the flipped pin above: the same gradient-shaped
+        // SLICE_LIKE-bearing body ConcatRule's symbolic branch emits, hand-built
+        // with CONCRETE dims so the interpreter can run it. g(x:[2]) is ∇f for
+        // f = Σ concat(x, x)² = 2·Σx²: c = x⊕x, s = c + c (= 2c per window's
+        // upstream), dx = SLICE_LIKE(s, x) + SLICE_LIKE(s, x, prior=x) = 4x.
+        // The seeded pullback of g IS the HVP: R(g, seedAsParam)(v, x) =
+        // vᵀ∂(4x)/∂x = 4v — and it walks straight through SliceLikeVjpRule's
+        // PAD_LIKE, the §0.4.399-era "no VJP rule" refusal.
+        val xT = DxirType(F32, listOf(2))
+        val cT = DxirType(F32, listOf(4))
+        val g = DxirBuilder.function("concat_grad_shaped") {
+            val x = param("x", xT)
+            val c = op(OpKind.CONCAT, listOf(x, x), cT, attrs = mapOf("dimension" to 0))
+            val s = op(OpKind.ADD, listOf(c, c), cT)
+            val w0 = op(OpKind.SLICE_LIKE, listOf(s, x), xT, attrs = mapOf("axis" to 0))
+            val w1 = op(OpKind.SLICE_LIKE, listOf(s, x, x), xT, attrs = mapOf("axis" to 0))
+            listOf(op(OpKind.ADD, listOf(w0, w1), xT))
+        }
+        // Sanity: g really is ∇f = 4x.
+        val x = floatArrayOf(1.2f, -0.7f)
+        val gOut = DxirInterpreter.evalFunction(g, listOf(x))
+        for (i in 0 until 2) {
+            assertTrue(abs(gOut[0][i] - 4f * x[i]) <= 1e-5f, "g(x)[$i] = ${gOut[0][i]}, want ${4f * x[i]}")
+        }
+        val rr = DxirReverseTransform.apply(g, seedAsParam = true)
+        assertTrue(
+            rr.body.filterIsInstance<DxirOp>().any { it.op == OpKind.PAD_LIKE },
+            "the pullback of a SLICE_LIKE window must be a PAD_LIKE placement",
+        )
+        val v = floatArrayOf(3f, -0.25f)
+        val out = DxirInterpreter.evalFunction(rr, listOf(v, x))
+        var maxAbs = 0f
+        for (i in 0 until 2) maxAbs = maxOf(maxAbs, abs(out[0][i] - 4f * v[i]))
+        assertTrue(maxAbs <= 1e-5f, "rev∘rev through SLICE_LIKE diverges from 4v: max|diff|=$maxAbs")
     }
 
     // ------------------------------------------------------------ third order

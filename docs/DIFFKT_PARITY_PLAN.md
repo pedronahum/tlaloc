@@ -150,10 +150,10 @@ reachable from `grad {}`, not new math. New-op families come after.
         other axes whole. Both bounds are read off the templates' ACTUAL runtime
         shapes; templates contribute SHAPE ONLY. The `SUM_TO`/`PAD_TO` contract,
         originally including "no VjpRule" — §0.4.399 gave SUM_TO and PAD_TO
-        their rules, and SLICE_LIKE is now the one member still without one
-        (its window offset is a runtime SUM of prior templates' extents, which
-        no literal-offset adjoint can carry — second-order through a concat
-        window still errors loudly).
+        their rules, and §0.4.404 closed SLICE_LIKE too via `PAD_LIKE`, its
+        variadic transpose (the offset is a runtime SUM of prior templates'
+        extents, which no literal-offset adjoint could carry — the reason it
+        outlived the §0.4.399 pairs).
       - Arms: interpreter (outer/inner block copy, mirroring the CONCAT arm),
         emitter (emit-time dims are concrete, so the bounds fold to literals and
         it emits the same static `stablehlo.slice` as SLICE — the templates go
@@ -1105,11 +1105,11 @@ reachable from `grad {}`, not new math. New-op families come after.
     {0}` — the BroadcastRule/SliceRule inversion), so differentiating any
     number of times only alternates within a pair. Templates get no
     contribution (typed zero — pure shape sources).
-  - **Still ruleless, deliberately**: SLICE_LIKE — its window offset is a
-    runtime SUM of prior templates' extents along the axis, which no
-    literal-`low` adjoint can express; second-order through a concat window
-    still errors loudly. (A PAD_LIKE with prior-template offsets is the shape
-    of the fix, sequenced when B4 demands it.)
+  - **Still ruleless, deliberately** *(closed at §0.4.404 — see the next
+    entry)*: SLICE_LIKE — its window offset is a runtime SUM of prior
+    templates' extents along the axis, which no literal-`low` adjoint can
+    express; second-order through a concat window still errored loudly. (A
+    PAD_LIKE with prior-template offsets was the recorded shape of the fix.)
   - Certified: `DxirRuntimeExtentClosureTest` (interpreter pins for both new
     ops incl. rank extension + identity fast paths and the out-of-range
     refusal; reverse THROUGH SUM_TO / BROADCAST_LIKE / PAD_TO / SLICE_AT
@@ -1121,6 +1121,56 @@ reachable from `grad {}`, not new math. New-op families come after.
     `hessian { Σ(x.broadcastTo(2,3) ⊙ x.broadcastTo(2,3)) }` = 4·I₃ through
     the real plugin (the user-visible face of the closure — previously
     unpinned).
+- **B4 follow-through. Second order through a symbolic concat window ✅
+  (§0.4.404)** — `OpKind.PAD_LIKE`, the VjpRule SLICE_LIKE was left without
+  at §0.4.399, exactly the recorded fix shape: SLICE_LIKE's window offset is
+  a runtime SUM of its PRIOR templates' extents, inexpressible as a literal
+  `low`, so its adjoint is its own variadic transpose —
+  `PAD_LIKE(value, outTemplate, priorTemplate₀…)` + attr `axis`: place
+  `value` into a zero tensor of the outTemplate's ACTUAL runtime shape at
+  offset `Σⱼ priorⱼ.dims[axis]` along `axis` (other axes at 0). Same
+  prior-template convention (templates contribute SHAPE ONLY, values never
+  read), same fixed-arity synthesis shims.
+  - **The rules pair up and CLOSE, like the §0.4.399 pairs**:
+    SliceLikeVjpRule = `PAD_LIKE(upstream, outTemplate=value, same priors,
+    axis)`; PadLikeRule = `SLICE_LIKE(upstream, thisTemplate=value, same
+    priors, axis)`. Both are variadic, so the static
+    `readsPrimalOperandIndices` cannot express "value plus every prior" —
+    the per-node `readsPrimalOperands` hook is authoritative (`{0} ∪ {2..}`;
+    the ConcatRule precedent): the primal value becomes the shape template
+    of its own adjoint and every prior is cloned into the gradient body,
+    while operand[1] is never dereferenced (the upstream carries its shape).
+    With this, EVERY runtime-extent adjoint op has a rule; the remaining
+    rev∘rev refusals (MAXPOOL2D_GRAD, EMBEDDING_GRAD) are fused-adjoint
+    design choices, not runtime-extent gaps.
+  - **Full house wiring**: OpKind + CostModel arm + interpreter arm (the
+    SLICE_LIKE outer/inner block copy inverted, into a zeroed buffer, with
+    the same loud out-of-range refusal) + emitter `emitPadLike` (emit-time
+    dims are concrete, so the offset and trailing pad fold to literals and
+    it emits the same static `stablehlo.pad` as PAD_TO; templates
+    unreferenced in the MLIR, DCE'd — EmitterTest pin) + forward tangent
+    (linear in value; every template rides as its primal-VALUE clone) + host
+    twins `padLikeStart` / `padLikeAfter{1,2,3}` over a shared `padWindow`
+    (fixed-arity per PRIOR count — the IrVararg reason) + synthesis
+    `irPadLike` (twin selected by prior count, axis as an Int const) + both
+    IrType solvers (result IrType = the outTemplate's, operand[1]; neither
+    the value — strictly smaller, one window — nor the priors may inherit).
+  - Certified: PAD_LIKE interpreter pins (start window, one prior, two
+    priors accumulating, LEADING axis, out-of-range refusal — the SLICE_LIKE
+    suite mirrored); analytic reverse THROUGH SLICE_LIKE and THROUGH
+    PAD_LIKE with hand-pinned gradients incl. zero template gradients;
+    JVP⇄VJP cross-identities through both; **the flipped pin** —
+    `DxirNestingMatrixTest`'s `reverseOverReverseRefusesSymbolicConcatSliceLike`
+    became `…ThroughSymbolicConcatSliceLike`: rev∘rev over the symbolic
+    concat now composes, each window's PAD_LIKE carrying its SLICE_LIKE's
+    exact prior count, plus a concrete-dims numeric twin (the same
+    gradient-shaped SLICE_LIKE body hand-built, seeded pullback = 4v = Hv);
+    two new GradientEmissionCoverageTest sweep cases (slice_like / pad_like
+    primals: second-order reverse bodies differentiate AND emit); host pins
+    incl. the sliceLike ⇄ padLike round trip; and E2E
+    `hessian { Σ concat(x, x)² }` = 4·I₃ through the real plugin — verified
+    green at §0.4.403 HEAD too (forward-over-reverse rides SLICE_LIKE's
+    tangent and never needed the rule), pinned now as the user-visible face.
 - **B3. Forward transform through regions — v1 ✅ (§0.4.403)**: the
   COARSENED forward arm + the plugin's forward branch coarsening, lifting
   the straight-line gate that made every loop-bearing `jvp {}` fall back
@@ -1195,12 +1245,12 @@ reachable from `grad {}`, not new math. New-op families come after.
     concrete-dims concat (ConcatRule's static-SLICE branch → SliceRule:
     works; the gap is symbolic-only).
   - **rev∘rev refusals pinned loud** (the §0.4.392 precedent): gradient
-    bodies carrying MAXPOOL2D_GRAD, EMBEDDING_GRAD, or the symbolic-concat
-    SLICE_LIKE fail with "no VJP rule registered for <op>", asserted by
-    name. The fused conv/pool/embedding adjoints stay VjpRule-less by
-    design (their second derivative would need the adjoint-of-adjoint
-    expansion B5/C-era work can decide on); SLICE_LIKE keeps §0.4.399's
-    recorded PAD_LIKE fix shape.
+    bodies carrying MAXPOOL2D_GRAD or EMBEDDING_GRAD fail with "no VJP rule
+    registered for <op>", asserted by name. The fused conv/pool/embedding
+    adjoints stay VjpRule-less by design (their second derivative would need
+    the adjoint-of-adjoint expansion B5/C-era work can decide on). The third
+    refusal originally pinned here — the symbolic-concat SLICE_LIKE — was
+    closed at §0.4.404 (PAD_LIKE) and its pin flipped to a positive cert.
   - **Third order** ✅ for free: F(F(R(Σx⁴)))(x, u, v, 0) = 24·x⊙u⊙v pinned.
   - Deferred tails: nesting through region-bearing bodies rides on B3
     (forward-v1 refuses regions before any composition question arises);

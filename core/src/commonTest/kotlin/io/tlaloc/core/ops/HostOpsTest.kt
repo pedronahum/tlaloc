@@ -354,6 +354,36 @@ class HostOpsTest {
         assertFailsWith<IllegalArgumentException> { sliceAtLike(u, big, intArrayOf(0)) }
     }
 
+    /**
+     * §0.4.404 — `padLikeStart`/`padLikeAfter1`: the host twins of PAD_LIKE,
+     * SLICE_LIKE's transpose (and VJP). The window offset is the sum of the
+     * PRIOR templates' runtime axis extents — never a literal — and the
+     * templates contribute shape only. Pins the sliceLike ⇄ padLike round
+     * trip: placing a window back where it was cut from recovers it.
+     */
+    @Test
+    fun padLikePlacesTheWindowAfterThePriors() {
+        // No priors: the window sits at the start of the outTemplate's axis.
+        val v = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f))
+        val t = Tensors.f32Matrix<Sym, Sym>(2, 5, FloatArray(10))
+        assertContentEquals(
+            floatArrayOf(1f, 2f, 0f, 0f, 0f, 3f, 4f, 0f, 0f, 0f),
+            padLikeStart(v, t, 1).hostF32(),
+        )
+        // One prior of axis extent 2: the window lands at columns 2..3.
+        val p = Tensors.f32Matrix<Sym, Sym>(2, 2, FloatArray(4))
+        assertContentEquals(
+            floatArrayOf(0f, 0f, 1f, 2f, 0f, 0f, 0f, 3f, 4f, 0f),
+            padLikeAfter1(v, t, p, 1).hostF32(),
+        )
+        // Round trip with sliceLikeAfter1: cut the placed window back out.
+        val placed = padLikeAfter1(v, t, p, 1)
+        assertContentEquals(v.hostF32(), sliceLikeAfter1(placed, v, p, 1).hostF32())
+        // A window that overruns the outTemplate refuses loudly.
+        val wide = Tensors.f32Matrix<Sym, Sym>(2, 4, FloatArray(8))
+        assertFailsWith<IllegalArgumentException> { padLikeAfter1(wide, t, p, 1) }
+    }
+
     @Test
     fun timesScalarMultipliesEachElement() {
         val a = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))

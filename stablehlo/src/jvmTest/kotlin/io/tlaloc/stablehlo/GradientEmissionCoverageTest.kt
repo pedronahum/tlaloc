@@ -195,6 +195,30 @@ class GradientEmissionCoverageTest {
                 attrs = mapOf("low" to listOf(1)),
             )
         },
+        // §0.4.404 — the family's last pair (SLICE_LIKE ⇄ PAD_LIKE, the
+        // symbolic-concat windows): a second-order reverse body containing
+        // either must both differentiate (each op's adjoint is the other,
+        // priors riding along) and emit (a static slice / pad at emit time).
+        squaredSumLoss(
+            "slice_like",
+            listOf("v" to DxirType(F32, listOf(2, 5)), "t" to r2, "p" to DxirType(F32, listOf(2, 2))),
+            r2,
+        ) { ps ->
+            op(
+                OpKind.SLICE_LIKE, listOf(ps[0], ps[1], ps[2]), r2,
+                attrs = mapOf("axis" to 1),
+            )
+        },
+        squaredSumLoss(
+            "pad_like",
+            listOf("u" to r2, "t" to DxirType(F32, listOf(2, 7)), "p" to DxirType(F32, listOf(2, 2))),
+            DxirType(F32, listOf(2, 7)),
+        ) { ps ->
+            op(
+                OpKind.PAD_LIKE, listOf(ps[0], ps[1], ps[2]), DxirType(F32, listOf(2, 7)),
+                attrs = mapOf("axis" to 1),
+            )
+        },
         // Masking.
         squaredSumLoss(
             "where_compare", listOf("x" to r2), r2,

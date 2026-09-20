@@ -1238,6 +1238,49 @@ object DxirInterpreter {
                 }
                 out
             }
+            // §0.4.404 — PAD_LIKE (SLICE_LIKE's transpose, and its VJP): place
+            // operand[0] (value) into a zero tensor of operand[1]'s
+            // (outTemplate, shape T = op.type) runtime shape at the window
+            // along `axis` that starts at the sum of the PRIOR templates'
+            // (operands[2..]) axis extents, every other axis at 0. Mirrors the
+            // SLICE_LIKE arm's outer/inner block copy, inverted: each of the
+            // `outer` blocks contributes one contiguous run INTO the zeroed
+            // output. Templates contribute SHAPE ONLY (`.type.dims`).
+            OpKind.PAD_LIKE -> {
+                val value = evalNode(op.operands[0], env, multiResults)
+                val vDims = op.operands[0].type.dims
+                val tDims = op.operands[1].type.dims
+                val r = vDims.size
+                require(tDims.size == r) {
+                    "DxirInterpreter: PAD_LIKE outTemplate rank ${tDims.size} != value rank $r"
+                }
+                val axis = (op.attrs["axis"] as? Number)?.toInt()
+                    ?: error("DxirInterpreter: PAD_LIKE missing `axis` attr")
+                require(axis in 0 until r) { "DxirInterpreter: PAD_LIKE axis $axis outside rank $r" }
+                val start = op.operands.drop(2).sumOf { it.type.dims[axis] }
+                val len = vDims[axis]
+                require(start >= 0 && start + len <= tDims[axis]) {
+                    "DxirInterpreter: PAD_LIKE window [$start, ${start + len}) exceeds the outTemplate's " +
+                        "axis-$axis extent ${tDims[axis]}"
+                }
+                for (i in 0 until r) {
+                    require(i == axis || tDims[i] == vDims[i]) {
+                        "DxirInterpreter: PAD_LIKE non-axis $i outTemplate ${tDims[i]} != value ${vDims[i]}"
+                    }
+                }
+                var outer = 1
+                for (k in 0 until axis) outer *= tDims[k]
+                var inner = 1
+                for (k in axis + 1 until r) inner *= tDims[k]
+                val out = FloatArray(sizeOf(op.type))
+                var src = 0
+                for (o in 0 until outer) {
+                    val dst = o * (tDims[axis] * inner) + start * inner
+                    value.copyInto(out, dst, src, src + len * inner)
+                    src += len * inner
+                }
+                out
+            }
             // §0.4.366 — MEAN (Phase A1): the SUM arm divided by the reduced
             // element count. Until now MEAN had no interpreter arm at all — it
             // was unreachable from the user surface (no UNARY_OP_MAP entry) and
