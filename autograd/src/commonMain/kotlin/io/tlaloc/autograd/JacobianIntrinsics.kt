@@ -51,6 +51,36 @@ fun <A, R> hessian(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
     { _ -> pluginMissing("hessian") }
 
 /**
+ * §0.4.412 — the REVERSE-assembled (tall) Jacobian, closing the m ≪ n tail
+ * §0.4.394 recorded. Same contract as [jacobian] — `(x) → J` with
+ * `J[i, j] = ∂yᵢ/∂xⱼ` over the ROW-MAJOR FLATTENED input and output, shape
+ * `[m, n]`, erased to `DTensor<Rank2<Sym, Sym>, F32>` — but assembled from
+ * the OTHER seeded pass: the plugin synthesises the §0.4.398 seeded reverse
+ * pullback `vjp_f(x, ȳ) → x̄` (one Jacobian ROW per output-basis cotangent
+ * `eᵢ`) instead of the forward `jvp_f(x, dx) → dy` (one COLUMN per
+ * input-basis tangent).
+ *
+ * Cost: `m + 1` passes — ONE eager primal evaluation of `f` itself (the
+ * output extent `m` and dims are runtime quantities unknowable before `y`
+ * exists, and a basis cotangent needs `y`'s shape to be built at all),
+ * then `m` seeded reverse passes — versus [jacobian]'s `n` forward passes.
+ * Pick this spelling when the output is much smaller than the input
+ * (m ≪ n, DiffKT's `reverseDerivative` regime); pick [jacobian] when
+ * n ≪ m. The choice is the caller's: both extents are runtime quantities
+ * under `grad {}`'s -1 sentinel dims, so no compile-time heuristic could
+ * honestly compare them.
+ *
+ * A `Float`-returning `f` degenerates to the `[1, n]` gradient row (the
+ * unit cotangent is `grad`'s own seed).
+ *
+ * v1 scope matches [jacobian]: single-argument `f`, straight-line bodies,
+ * host F32. No runtime-tape fallback — a failed synthesis keeps this body,
+ * which throws loudly (see [pluginMissing]).
+ */
+fun <A, R> jacobianReverse(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
+    { _ -> pluginMissing("jacobianReverse") }
+
+/**
  * §0.4.406 — the two-argument Jacobian, closing the "multi-arg
  * `jacobian2`" tail §0.4.394 recorded. `jacobian2(f)` returns
  * `(x, w) → Pair(J_x, J_w)` where `J_x[i, j] = ∂yᵢ/∂xⱼ` (shape `[m, nx]`)
@@ -155,6 +185,59 @@ fun <A> assembleHessianForward(hvp: (A, A) -> A): (A) -> DTensor<Rank2<Sym, Sym>
             for (j in 0 until n) out[i * n + j] = row[j]
         }
         DTensor(HostF32Storage(out), intArrayOf(n, n), F32)
+    }
+
+/**
+ * Runtime row assembly for [jacobianReverse] — the target of the plugin
+ * rewrite, not user API. Takes TWO functions: the ORIGINAL user lambda `f`
+ * (passed through verbatim by the plugin — its eager host execution is the
+ * primal), and the synthesised seeded reverse pullback `vjp(x, ȳ) → x̄`.
+ * The primal runs ONCE to learn the output extent `m` and dims — a basis
+ * cotangent `eᵢ` cannot be built without `y`'s shape, and no static type
+ * carries it — then each of the `m` pullback passes writes `x̄ = Jᵀeᵢ`
+ * into row `i` of the `[m, n]` result. A `Float` primal value means the
+ * scalar degenerate: `m = 1`, the cotangent is the unit seed `1.0f`.
+ */
+fun <A, R> assembleJacobianReverse(
+    f: (A) -> R,
+    vjp: (A, R) -> A,
+): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
+    { x ->
+        val (xData, _) = hostF32DataOf(x, "jacobianReverse input")
+        val n = xData.size
+        require(n > 0) { "jacobianReverse: input tensor has zero elements — the column count is undefined" }
+        val y = f(x)
+        val scalarOut = y is Float
+        val yDims: IntArray
+        val m: Int
+        if (scalarOut) {
+            yDims = IntArray(0)
+            m = 1
+        } else {
+            val (yData, dims) = hostF32DataOf(y, "jacobianReverse primal output")
+            yDims = dims
+            m = yData.size
+            require(m > 0) { "jacobianReverse: output tensor has zero elements — the row count is undefined" }
+        }
+        val out = FloatArray(m * n)
+        for (i in 0 until m) {
+            val cot: R = if (scalarOut) {
+                @Suppress("UNCHECKED_CAST")
+                (1.0f as R)
+            } else {
+                val basis = FloatArray(m)
+                basis[i] = 1.0f
+                @Suppress("UNCHECKED_CAST")
+                (DTensor<Shape, F32>(HostF32Storage(basis), yDims.copyOf(), F32) as R)
+            }
+            val xbar = vjp(x, cot)
+            val row = hostF32DataOf(xbar, "jacobianReverse pullback").first
+            require(row.size == n) {
+                "jacobianReverse: pullback size ${row.size} does not match input size $n"
+            }
+            for (j in 0 until n) out[i * n + j] = row[j]
+        }
+        DTensor(HostF32Storage(out), intArrayOf(m, n), F32)
     }
 
 /**

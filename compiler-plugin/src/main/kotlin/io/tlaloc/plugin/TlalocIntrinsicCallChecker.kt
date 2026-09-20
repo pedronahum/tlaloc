@@ -32,6 +32,8 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
         "io.tlaloc.autograd.hessian",
         "io.tlaloc.autograd.jacobian2",
         "io.tlaloc.autograd.hessian2",
+        // §0.4.412 — the reverse-assembled (tall) Jacobian.
+        "io.tlaloc.autograd.jacobianReverse",
         // §0.4.398 — the seeded-cotangent user surface. §0.4.406 — its
         // two-argument forms.
         "io.tlaloc.autograd.vjp",
@@ -103,8 +105,13 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                         // runs, so the red squiggle matches the real lowering.
                         // §0.4.406 — the two-argument spellings likewise (the
                         // transform is arity-agnostic).
+                        // §0.4.412 — `jacobianReverse` assembles seeded reverse
+                        // pullbacks, so it probes exactly like `vjp` (its lambda
+                        // may return a tensor; seedAsParam is what the IR
+                        // extension runs).
                         name == "vjp" || name == "valueAndVjp" ||
-                            name == "vjp2" || name == "valueAndVjp2" -> {
+                            name == "vjp2" || name == "valueAndVjp2" ||
+                            name == "jacobianReverse" -> {
                             {
                                 DxirReverseTransform.apply(
                                     result.fn,

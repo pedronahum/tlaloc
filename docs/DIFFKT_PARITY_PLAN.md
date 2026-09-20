@@ -1053,10 +1053,10 @@ reachable from `grad {}`, not new math. New-op families come after.
     `(Σx)²` (rank-one, all 2s — the tangent threads the reverse body's
     un-reduce broadcast), and `Σ exp(x)` (value-DEPENDENT diag — the tangent
     threads the adjoint's exp recompute).
-  - v1 scope: single-argument `f`, straight-line bodies, host F32. Still
-    open in B2's neighbourhood: reverse-assembled (tall) Jacobians for
-    m ≪ n. (The seeded-cotangent user surface closed in §0.4.398 below;
-    multi-arg `jacobian2`/`hessian2` closed in §0.4.406 below.)
+  - v1 scope: single-argument `f`, straight-line bodies, host F32. (The
+    seeded-cotangent user surface closed in §0.4.398 below; multi-arg
+    `jacobian2`/`hessian2` closed in §0.4.406 below; reverse-assembled
+    (tall) Jacobians for m ≪ n closed in §0.4.412 below.)
 - **B2 follow-up. `vjp` + `valueAndVjp` intrinsics ✅ (§0.4.398)** — the
   seeded-cotangent user surface (DiffKT's `vjp` / `primalAndPullback`, audit
   item 10): `vjp(f)` returns `(x, ȳ) → x̄`, the pullback of a USER-SUPPLIED
@@ -1160,8 +1160,48 @@ reachable from `grad {}`, not new math. New-op families come after.
     convention plus the rectangular analytic case.
   - v1 scope matches the 1-arg forms: straight-line bodies, host F32,
     2 arguments (3+ args would need `Function6`+ overrides and
-    `assemble*3Forward` helpers — same pattern, more params). Still open
-    in B2's neighbourhood: reverse-assembled (tall) Jacobians for m ≪ n.
+    `assemble*3Forward` helpers — same pattern, more params). B2's last
+    neighbour — reverse-assembled (tall) Jacobians for m ≪ n — closed in
+    §0.4.412 below.
+- **B2 tall tail. `jacobianReverse` intrinsic ✅ (§0.4.412)** — the
+  reverse-assembled (tall) Jacobian, the m ≪ n tail recorded at §0.4.394:
+  same `[m, n]` row-major-flat contract as `jacobian`, assembled from the
+  OTHER seeded pass — the §0.4.398 seeded reverse pullback
+  `vjp_f(x, ȳ) → x̄` is exactly one Jacobian ROW per output-basis
+  cotangent, so `assembleJacobianReverse` loops `ȳ = eᵢ` over the OUTPUT
+  basis (DiffKT's `reverseDerivative` regime).
+  - **The shape problem and its honest solve**: the output extent `m` and
+    dims are runtime quantities unknowable before `y` exists — a basis
+    cotangent needs `y`'s shape to be BUILT at all — so the helper takes
+    the ORIGINAL user lambda too (the plugin passes it through verbatim;
+    its eager host execution IS the primal) and runs it once. Cost:
+    `m + 1` passes (one primal + m pullbacks) versus `jacobian`'s n
+    forward passes. The pick between the two spellings stays the
+    CALLER'S: both extents are runtime quantities under the -1 sentinel
+    dims, so no compile-time heuristic could honestly compare them —
+    explicit intrinsic, no auto-pick.
+  - **Plugin**: mirrors the assembly branch over the vjp branch's
+    transform — seeded reverse (`seedAsParam = true`, no includeForward),
+    the §0.4.398 param rotation, synthesised under
+    `callTypeOverride = Function2<A, R, A>` (the call site's own type is
+    the 1-param ASSEMBLED function), then one IrCall to
+    `assembleJacobianReverse(f, vjp)`. Checker probes the seeded reverse,
+    exactly what the extension runs. No tape fallback (the `concat`
+    precedent). Scalar-R needed NO special casing: a `Float`-returning
+    `f` synthesises with a Float-typed upstream (certified since
+    §0.4.406's scalar-ȳ `vjp2`) and degenerates to the `[1, n]` row at a
+    unit cotangent.
+  - Certified E2E (`JacobianReverseIntrinsicTest`, the §0.4.394 pattern —
+    real plugin, REAL generic `:autograd` declarations, no stubs, "kept
+    original call" a hard failure): `x ⊙ x` (diag(2x)) AGREEING ENTRYWISE
+    with forward-assembled `jacobian` over the same body (the
+    cross-assembly oracle — different seeded transforms, same matrix);
+    the scalar-R `[1, n]` gradient row; and a genuinely TALL
+    `concat(0, x, x)` (J = [I; I], `[2n, n]` — row indexing through
+    ConcatRule's symbolic SLICE_LIKE adjoints).
+  - v1 scope matches `jacobian`: single-argument `f`, straight-line
+    bodies, host F32 (a `jacobianReverse2` would be the §0.4.406 pattern
+    verbatim if ever pulled).
 - **B4 enabler. The runtime-extent family closes under differentiation ✅
   (§0.4.399)** — VjpRules for SUM_TO and PAD_TO via their runtime-extent
   mirrors, closing §0.4.373's "2nd-order through in-place broadcast" deferral.
@@ -1723,7 +1763,7 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 | `forwardDerivative` (all arities, n-th, `forwardDiff`) / `primalAndForwardDerivative` | ✅ | `jvp {}` / `valueAndJvp {}` §0.4.372 (B1) + `jvp2`/`valueAndJvp2` §0.4.387; loop-bearing bodies §0.4.403, IF bodies §0.4.407 (B3) |
 | `jvp` / `primalAndJvp` | ✅ | same — §0.4.372/387 |
 | `vjp` / `primalAndVjp` / `primalAndPullback` (user-supplied cotangent, `vf(primal)` form) | ✅ | `vjp {}` / `valueAndVjp {}` §0.4.398 — seeded single-pass pullback, tensor-valued `f` |
-| Jacobian assembly | ✅ | `jacobian`/`hessian` §0.4.394 (B2) + `jacobian2`/`hessian2` §0.4.406. DiffKT has **no** jacobian intrinsic — theirs is `reverseDerivative`'s identity-seeding loop; ours assembles seeded forward passes at runtime. Reverse-assembled (tall, m ≪ n) Jacobians still open |
+| Jacobian assembly | ✅ | `jacobian`/`hessian` §0.4.394 (B2) + `jacobian2`/`hessian2` §0.4.406 + reverse-assembled (tall, m ≪ n) `jacobianReverse` §0.4.412. DiffKT has **no** jacobian intrinsic — theirs is `reverseDerivative`'s identity-seeding loop, which is exactly `jacobianReverse`'s output-basis loop; the forward spellings assemble seeded forward passes at runtime |
 | `reverseDerivativeTransposed` | ❌ | transposed-Jacobian convention variant; fold into B2 |
 | Arbitrary nesting (fwd∘fwd, rev∘rev, …) | ✅/🟡 | full matrix certified at IR level + refusals pinned (§0.4.401); user-facing n-th-order intrinsic spellings still open |
 | `ifThenElse(cond, a, b)` (scalar + tensor, differentiable) | ✅ | `where` §0.4.364; scalar branches also via IF regions + coarsening |
@@ -1869,9 +1909,9 @@ integral is B5-gated) → D1 ✅ (§0.4.408).
    (digamma/polygamma) landed §0.4.402/405; explicit-threefry StableHLO
    emission is the recorded D1 tail to take first if GPU draws matter.
 3. **Recorded tails on the books** (each its own §-sized slice when
-   pulled): B2's reverse-assembled tall Jacobians; B3's multi-result
-   COARSENED tangents + IF-inside-primal_body splice; A-phase tails above;
-   C4's grouped/depthwise conv (beyond parity).
+   pulled): B3's multi-result COARSENED tangents + IF-inside-primal_body
+   splice; A-phase tails above; C4's grouped/depthwise conv (beyond
+   parity). (B2's reverse-assembled tall Jacobians closed §0.4.412.)
 
 Certification discipline per CLAUDE-memory: solo full-suite runs, count
 gate updated per §, GPU smokes for anything touching the emitter.

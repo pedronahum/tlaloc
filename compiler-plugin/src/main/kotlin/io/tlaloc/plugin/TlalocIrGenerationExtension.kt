@@ -393,6 +393,120 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     return assembled
                 }
 
+                // §0.4.412 — the REVERSE-assembled (tall) Jacobian, the m ≪ n tail
+                // §0.4.394 recorded. Same shape as the assembly branch above but over
+                // the OTHER seeded pass: `jacobianReverse` synthesises the §0.4.398
+                // seeded reverse pullback `vjp_f(x, ȳ) → x̄` (one Jacobian ROW per
+                // output-basis cotangent) and hands it to assembleJacobianReverse,
+                // which loops the OUTPUT basis at runtime. The output extent m and
+                // dims are unknowable before y exists — a basis cotangent needs y's
+                // shape to be built at all — so the helper takes the ORIGINAL user
+                // lambda too (passed through verbatim; its eager host execution IS
+                // the primal) and runs it once: m + 1 passes versus jacobian's n.
+                // Like the assembly branch, the call site's own type is the 1-param
+                // ASSEMBLED function, so the seeded lambda synthesises under an
+                // explicit callTypeOverride — Function2<A, R, A>, the pullback's
+                // true type (the vjp branch below needs none because its call site
+                // IS the seeded type). No runtime-tape fallback (the `concat`
+                // precedent): a failed synthesis keeps the original call →
+                // pluginMissing, loudly.
+                if (callableName == "jacobianReverse") {
+                    if (fn.params.size != 1 || fn.returns.size != 1) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "jacobianReverse v1 scope is 1-param single-return " +
+                                "(got ${fn.params.size} params, ${fn.returns.size} returns)",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val callSiteType = transformed.type as? IrSimpleType
+                    val aType = callSiteType?.arguments?.getOrNull(0)?.typeOrNull
+                    val fArg = transformed.arguments.getOrNull(0)
+                    val rType = (fArg?.type as? IrSimpleType)?.arguments?.getOrNull(1)?.typeOrNull
+                    if (aType == null || rType == null || fArg == null) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "could not harvest the input/output IrTypes from the " +
+                                "jacobianReverse call site (call type ${transformed.type})",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val seededGrad: DxirFunction = try {
+                        DxirReverseTransform.apply(fn, seedAsParam = true)
+                    } catch (t: Throwable) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "the seeded reverse transform failed " +
+                                "(${t::class.simpleName}: ${t.message})\n${fn.pretty().trimEnd()}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    // (upstream, x) → (x, ȳ): rotate the upstream param to the back
+                    // (the §0.4.398 metadata rotation — synthesis resolves body
+                    // references by node id, params are positional metadata only).
+                    val pullback = DxirFunction(
+                        seededGrad.name,
+                        seededGrad.params.drop(1) + seededGrad.params.first(),
+                        seededGrad.body,
+                        seededGrad.returns,
+                        seededGrad.meshes,
+                    )
+                    val overrideType = pluginContext.irBuiltIns.functionN(2).symbol
+                        .typeWith(listOf(aType, rType, aType))
+                    val seededLambda = synth.synthesise(
+                        pullback, transformed, currentDeclarationParent!!,
+                        callTypeOverride = overrideType,
+                    )
+                    if (seededLambda == null) {
+                        val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "seeded pullback falls outside the synthesis scope " +
+                                "[$reason]\npullback function:\n${pullback.pretty().trimEnd()}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val helperSym = pluginContext.referenceFunctions(
+                        CallableId(FqName("io.tlaloc.autograd"), Name.identifier("assembleJacobianReverse")),
+                    ).singleOrNull()
+                    if (helperSym == null) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "io.tlaloc.autograd.assembleJacobianReverse not resolvable " +
+                                "on the compile classpath",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val assembled = IrCallImpl.fromSymbolOwner(
+                        startOffset = transformed.startOffset,
+                        endOffset = transformed.endOffset,
+                        type = transformed.type,
+                        symbol = helperSym,
+                    )
+                    listOf(aType, rType).forEachIndexed { i, t ->
+                        if (i < assembled.typeArguments.size) assembled.typeArguments[i] = t
+                    }
+                    assembled.arguments[0] = fArg
+                    assembled.arguments[1] = seededLambda
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc lowered 'jacobianReverse' to a seeded reverse pullback + " +
+                            "runtime output-basis assembly:\n${pullback.pretty().trimEnd()}",
+                        null,
+                    )
+                    return assembled
+                }
+
                 // §0.4.398 — the seeded-cotangent intrinsics (audit item 10): `vjp` is
                 // grad{} generalised to TENSOR-valued f — the pullback of a
                 // user-supplied cotangent ȳ (of f's OUTPUT type) through f at x, in ONE
@@ -710,6 +824,8 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
             // §0.4.394 — Phase B2: the assembly intrinsics. §0.4.406 — their
             // two-argument forms.
             "jacobian", "hessian", "jacobian2", "hessian2",
+            // §0.4.412 — the reverse-assembled (tall) Jacobian.
+            "jacobianReverse",
             // §0.4.398 — the seeded-cotangent user surface. §0.4.406 — its
             // two-argument forms.
             "vjp", "valueAndVjp", "vjp2", "valueAndVjp2",
