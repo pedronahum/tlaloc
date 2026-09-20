@@ -125,6 +125,14 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.RSQRT -> unary(step, name, "stablehlo.rsqrt", ops[0], outType)
             OpKind.TANH -> unary(step, name, "stablehlo.tanh", ops[0], outType)
             OpKind.SIGMOID -> unary(step, name, "stablehlo.logistic", ops[0], outType)
+            // §0.4.393 — SIGN was the one user-reachable kind with no emitter arm:
+            // `ops.sign` is in the FIR unary map, and the MAX/MIN reduction rule
+            // builds its extremum indicator as `1 - sign(y − x)`, so `grad { x.max(0)
+            // .sum() }` could not be emitted. StableHLO's `sign` matches the
+            // interpreter's ±1/0 convention; the only divergence is the sign bit of
+            // zero for a −0.0 input (spec: −0.0, interpreter: 0.0), which is
+            // unobservable here since every consumer compares or subtracts it.
+            OpKind.SIGN -> unary(step, name, "stablehlo.sign", ops[0], outType)
 
             // Elementwise binary. §0.4.277 — operand shapes may differ from
             // the result type (NumPy-style broadcast). StableHLO requires
@@ -227,6 +235,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // §0.4.385 — the fused conv adjoints (padding solved at emit time).
             OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT ->
                 emitConvAdjoint(step, name, ops, node)
+            // §0.4.393 — the fused transposed-conv adjoints, via the
+            // conv-of-the-dilated-input identity.
+            OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT ->
+                emitConvTransposeAdjoint(step, name, ops, node)
             // §0.4.363 — window pooling via stablehlo.reduce_window.
             OpKind.MAXPOOL2D, OpKind.AVGPOOL2D -> emitReduceWindow(
                 step, name, ops[0], node, node.operands[0].type,
@@ -1151,45 +1163,94 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         val primalPad = conv2dPadding(node)
         // operands[2] is the shape template: its extents are the result's, which
         // `outType` already carries, so it contributes nothing to the MLIR.
-        val padding = (0..1).map { a ->
-            val dilSize = (upType.dims[2 + a] - 1) * s[a] + 1
-            val low: Int
-            val high: Int
-            if (dataAdj) {
-                val kEff = (otherType.dims[2 + a] - 1) * d[a] + 1
-                low = kEff - 1 - primalPad[a][0]
-                high = primalPad[a][0] + outType.dims[2 + a] - dilSize
-            } else {
-                low = primalPad[a][0]
-                high = (outType.dims[2 + a] - 1) * d[a] + dilSize - otherType.dims[2 + a] - low
-            }
-            listOf(low, high)
-        }
-
         if (dataAdj) {
-            emitConvolution(
-                step, name, upRef, otherRef,
-                lhsType = upType, rhsType = otherType, outType = outType,
-                kernelLayout = "[i, o, 0, 1]",
-                strides = listOf(1, 1),
-                padding = padding,
-                lhsDilation = s,
-                rhsDilation = d,
-                reversal = listOf(true, true),
+            emitDataAdjointConvolution(
+                step, name, upRef, otherRef, upType, otherType, outType, s, d, primalPad,
             )
             return
         }
+        emitKernelAdjointExpansion(
+            step, name, otherRef, upRef, otherType, upType, outType, s, d, primalPad,
+        )
+    }
 
+    /**
+     * §0.4.393 — the solved-padding, lhs-dilated, tap-reversed transposed
+     * convolution that IS a forward conv's data adjoint. Lifted out of
+     * [emitConvAdjoint] so the transposed-conv adjoints can reuse it: there the
+     * primal is `conv(dilate(x, L), swap01(w))`, so this runs against the DILATED
+     * shape ([outType] = the dilated input's) and the caller slices the dilation
+     * back out afterwards.
+     *
+     * The solve, per spatial axis, with `hOut` the upstream's extent and `H` the
+     * target's: `dilSize = (hOut−1)·s + 1`, `kEff = (k−1)·d + 1`,
+     * `low = kEff − 1 − p_low`, `high = p_low + H − dilSize`.
+     */
+    private fun emitDataAdjointConvolution(
+        step: String,
+        name: String,
+        upRef: String,
+        kernelRef: String,
+        upType: DxirType,
+        kernelType: DxirType,
+        outType: DxirType,
+        strides: List<Int>,
+        rhsDil: List<Int>,
+        primalPad: List<List<Int>>,
+    ) {
+        val padding = (0..1).map { a ->
+            val dilSize = (upType.dims[2 + a] - 1) * strides[a] + 1
+            val kEff = (kernelType.dims[2 + a] - 1) * rhsDil[a] + 1
+            val low = kEff - 1 - primalPad[a][0]
+            listOf(low, primalPad[a][0] + outType.dims[2 + a] - dilSize)
+        }
+        emitConvolution(
+            step, name, upRef, kernelRef,
+            lhsType = upType, rhsType = kernelType, outType = outType,
+            kernelLayout = "[i, o, 0, 1]",
+            strides = listOf(1, 1),
+            padding = padding,
+            lhsDilation = strides,
+            rhsDilation = rhsDil,
+            reversal = listOf(true, true),
+        )
+    }
+
+    /**
+     * §0.4.393 — the transpose/conv/transpose expansion that IS a forward conv's
+     * kernel adjoint, lifted out of [emitConvAdjoint] for the same reason.
+     * [outType] is the final OIHW kernel shape; the inner convolution produces it
+     * with the channel axes swapped. Solve per axis: `dilSize = (hOut−1)·s + 1`,
+     * `low = p_low`, `high = (k−1)·d + dilSize − H − p_low`, where `k` is the
+     * target kernel's spatial extent and `H` the primal input's.
+     */
+    private fun emitKernelAdjointExpansion(
+        step: String,
+        name: String,
+        xRef: String,
+        upRef: String,
+        xType: DxirType,
+        upType: DxirType,
+        outType: DxirType,
+        strides: List<Int>,
+        rhsDil: List<Int>,
+        primalPad: List<List<Int>>,
+    ) {
+        val padding = (0..1).map { a ->
+            val dilSize = (upType.dims[2 + a] - 1) * strides[a] + 1
+            val low = primalPad[a][0]
+            listOf(low, (outType.dims[2 + a] - 1) * rhsDil[a] + dilSize - xType.dims[2 + a] - low)
+        }
         val swap = listOf(1, 0, 2, 3)
-        val xTType = DxirType(outType.dtype, swap.map { otherType.dims[it] })
+        val xTType = DxirType(outType.dtype, swap.map { xType.dims[it] })
         val upTType = DxirType(outType.dtype, swap.map { upType.dims[it] })
         val dwtType = DxirType(outType.dtype, swap.map { outType.dims[it] })
         val xT = synth()
         val upT = synth()
         val dwt = synth()
         out.appendLine(
-            "$step$xT = stablehlo.transpose $otherRef, dims = [1, 0, 2, 3] " +
-                ": (${otherType.toMlir()}) -> ${xTType.toMlir()}",
+            "$step$xT = stablehlo.transpose $xRef, dims = [1, 0, 2, 3] " +
+                ": (${xType.toMlir()}) -> ${xTType.toMlir()}",
         )
         out.appendLine(
             "$step$upT = stablehlo.transpose $upRef, dims = [1, 0, 2, 3] " +
@@ -1199,15 +1260,124 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             step, dwt, xT, upT,
             lhsType = xTType, rhsType = upTType, outType = dwtType,
             kernelLayout = "[o, i, 0, 1]",
-            strides = d,
+            strides = rhsDil,
             padding = padding,
             lhsDilation = listOf(1, 1),
-            rhsDilation = s,
+            rhsDilation = strides,
             reversal = null,
         )
         out.appendLine(
             "$step$name = stablehlo.transpose $dwt, dims = [1, 0, 2, 3] " +
                 ": (${dwtType.toMlir()}) -> ${outType.toMlir()}",
+        )
+    }
+
+    /**
+     * §0.4.393 — the fused TRANSPOSED-conv adjoints (`CONV_TRANSPOSE2D_DATA_ADJOINT`
+     * / `_KERNEL_ADJOINT`).
+     *
+     * The interpreter and host twins invert the primal's tap equation per element,
+     * which StableHLO has no primitive for, so emission goes through the identity
+     * that a transposed conv IS a forward conv of the dilated input:
+     *
+     *     convT(x, w; s, L, d, p) ≡ conv(dilate(x, L), swap01(w); s, d, p)
+     *
+     * which reduces both adjoints to pieces this emitter already has:
+     * - `dX` = strided-slice( [emitDataAdjointConvolution] of `dy` against
+     *   `swap01(w)`, stride `L` ). The data adjoint lands on the DILATED shape, and
+     *   every L-th element of an interior-dilated tensor is the original value, so a
+     *   strided slice undoes the dilation — the intervening positions are the
+     *   inserted zeros, which the data gradient only ever contributes to spuriously.
+     * - `dW` = `swap01`( [emitKernelAdjointExpansion] over `dilate(x, L)` and `dy` ).
+     *   The kernel adjoint produces the gradient w.r.t. the FORWARD conv's OIHW
+     *   kernel, so one channel swap maps it back to the IOHW layout `convT` uses.
+     *
+     * `window_reversal` is REJECTED here. With a reversed primal the data side would
+     * need `!r` and the kernel side a compensating flip, and that identity is
+     * unverified; nothing user-reachable sets it (`convTranspose2d`'s FIR arm never
+     * emits the attr, and the host sugar passes `false`), while the interpreter and
+     * host twins handle any reversal. Failing loudly beats shipping a
+     * plausible-looking wrong kernel — the §0.4.389 maxpool emitter note is the same
+     * call.
+     */
+    private fun emitConvTransposeAdjoint(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val dataAdj = node.op == OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT
+        require(node.operands.size == 3) {
+            "${node.op} takes (upstream, kernel, xTemplate) or (x, upstream, wTemplate); " +
+                "got ${node.operands.size} operands"
+        }
+        val upType = if (dataAdj) node.operands[0].type else node.operands[1].type
+        val otherType = if (dataAdj) node.operands[1].type else node.operands[0].type
+        val upRef = if (dataAdj) ops[0] else ops[1]
+        val otherRef = if (dataAdj) ops[1] else ops[0]
+        val outType = node.type
+        require(upType.rank == 4 && otherType.rank == 4 && outType.rank == 4) {
+            "${node.op} requires rank-4 operands and result; got " +
+                "${upType.dims} / ${otherType.dims} / ${outType.dims}"
+        }
+        val s = intListAttr(node, "window_strides")
+        require(s.size == 2) { "${node.op} window_strides must be length 2; got $s" }
+        val lhsDil = conv2dDilation(node, "lhs_dilation")
+        val rhsDil = conv2dDilation(node, "rhs_dilation")
+        val primalPad = conv2dPadding(node)
+        val rev = (node.attrs["window_reversal"] as? List<*>)?.map { it as Boolean }
+        require(rev == null || rev.none { it }) {
+            "${node.op}: StableHLO emission does not support window_reversal $rev — the " +
+                "convolution identity it is built on would need !r on the data side and a " +
+                "compensating flip on the kernel side, which is unverified. The interpreter " +
+                "and host twins handle any reversal."
+        }
+
+        // x's extents: the data adjoint's RESULT is x; for the kernel adjoint x is
+        // operand 0. The IOHW kernel is operand 1 for dX and the result for dW.
+        val xType = if (dataAdj) outType else otherType
+        val wType = if (dataAdj) otherType else outType
+        val hDil = (xType.dims[2] - 1) * lhsDil[0] + 1
+        val wDil = (xType.dims[3] - 1) * lhsDil[1] + 1
+        val dilType = DxirType(outType.dtype, listOf(xType.dims[0], xType.dims[1], hDil, wDil))
+        // swap01 of the IOHW kernel: [Ci, Co, kh, kw] → OIHW [Co, Ci, kh, kw].
+        val swappedType = DxirType(
+            outType.dtype,
+            listOf(wType.dims[1], wType.dims[0], wType.dims[2], wType.dims[3]),
+        )
+
+        if (dataAdj) {
+            val wSwapped = synth()
+            out.appendLine(
+                "$step$wSwapped = stablehlo.transpose $otherRef, dims = [1, 0, 2, 3] " +
+                    ": (${wType.toMlir()}) -> ${swappedType.toMlir()}",
+            )
+            val conv = synth()
+            emitDataAdjointConvolution(
+                step, conv, upRef, wSwapped, upType, swappedType, dilType, s, rhsDil, primalPad,
+            )
+            // Undo the dilation: take every lhsDil-th element of each spatial axis.
+            val dims = dilType.dims
+            out.appendLine(
+                "$step$name = stablehlo.slice $conv [" +
+                    dims.indices.joinToString(", ") { i ->
+                        val stride = if (i >= 2) lhsDil[i - 2] else 1
+                        if (stride == 1) "0:${dims[i]}" else "0:${dims[i]}:$stride"
+                    } +
+                    "] : (${dilType.toMlir()}) -> ${outType.toMlir()}",
+            )
+            return
+        }
+
+        val xDil = synth()
+        emitPadLine(
+            step, xDil, otherRef, otherType, dilType,
+            low = List(4) { 0 },
+            high = List(4) { 0 },
+            interior = listOf(0, 0, lhsDil[0] - 1, lhsDil[1] - 1),
+        )
+        val dk = synth()
+        emitKernelAdjointExpansion(
+            step, dk, xDil, upRef, dilType, upType, swappedType, s, rhsDil, primalPad,
+        )
+        out.appendLine(
+            "$step$name = stablehlo.transpose $dk, dims = [1, 0, 2, 3] " +
+                ": (${swappedType.toMlir()}) -> ${outType.toMlir()}",
         )
     }
 
@@ -2491,23 +2661,42 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         inputType: DxirType,
     ) {
         val bcastDims = intListAttr(node, "broadcast_dimensions")
-        require(bcastDims.size == inputType.rank) {
-            "BROADCAST broadcast_dimensions length ${bcastDims.size} must equal input rank ${inputType.rank}"
+        // §0.4.393 — honour §0.4.359's polymorphic EMPTY form, which the interpreter
+        // implements and whose comment already claimed this function matched it. It
+        // did not: empty dims + equal rank + non-scalar input is the reduction
+        // adjoints' "un-reduce stretch" ([N,1] → [N,K], emitted by the Max/Min/Tanh/
+        // Softmax rules via `broadcastTo`), and the length check below rejected it,
+        // so none of those gradients could be emitted at all. Mirroring the
+        // interpreter's rule exactly — identity mapping in that case, empty
+        // otherwise — keeps the two engines in agreement instead of one silently
+        // supporting a form the other refuses.
+        val inDims = inputType.dims
+        val outDims = node.type.dims
+        val inSize = if (inDims.isEmpty()) 1 else inDims.reduce(Int::times)
+        val effectiveDims = if (bcastDims.isEmpty() && inSize != 1 && inDims.size == outDims.size) {
+            inDims.indices.toList()
+        } else {
+            bcastDims
+        }
+        require(effectiveDims.size == inputType.rank) {
+            "BROADCAST broadcast_dimensions length ${effectiveDims.size} must equal input rank " +
+                "${inputType.rank} (shape ${inputType.dims} -> ${node.type.dims}); the empty form " +
+                "requires a scalar input or an equal-rank keepdims input"
         }
         // §0.4.283 — StableHLO requires each broadcast_dimensions entry
         // in [0, output rank) and the entries to be unique. Without these
         // guards a malformed dxir silently emits invalid MLIR.
         val outputRank = node.type.rank
-        bcastDims.forEach {
+        effectiveDims.forEach {
             require(it in 0 until outputRank) {
-                "BROADCAST broadcast_dimensions entry $it out of range [0, $outputRank); got $bcastDims"
+                "BROADCAST broadcast_dimensions entry $it out of range [0, $outputRank); got $effectiveDims"
             }
         }
-        require(bcastDims.toSet().size == bcastDims.size) {
-            "BROADCAST broadcast_dimensions must be unique; got $bcastDims"
+        require(effectiveDims.toSet().size == effectiveDims.size) {
+            "BROADCAST broadcast_dimensions must be unique; got $effectiveDims"
         }
         out.appendLine(
-            "$step$name = stablehlo.broadcast_in_dim $x, dims = [${bcastDims.joinToString(", ")}] " +
+            "$step$name = stablehlo.broadcast_in_dim $x, dims = [${effectiveDims.joinToString(", ")}] " +
                 ": (${inputType.toMlir()}) -> ${node.type.toMlir()}",
         )
     }
@@ -2548,13 +2737,32 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         require(low.size == inputType.rank && high.size == inputType.rank) {
             "PAD attr lengths must match input rank ${inputType.rank}"
         }
-        val scalarMlir = "tensor<${mlirElementType(inputType.dtype)}>"
+        emitPadLine(step, name, x, inputType, node.type, low, high, List(inputType.rank) { 0 })
+    }
+
+    /**
+     * One `stablehlo.pad`, with the syntax in a single place: [emitPad] (outer
+     * padding only, interior fixed at 0) and §0.4.393's transposed-conv adjoints
+     * (which need a genuine INTERIOR pad to dilate `x` by `lhs_dilation`) both go
+     * through here.
+     */
+    private fun emitPadLine(
+        step: String,
+        name: String,
+        x: String,
+        inType: DxirType,
+        outType: DxirType,
+        low: List<Int>,
+        high: List<Int>,
+        interior: List<Int>,
+    ) {
+        val scalarMlir = "tensor<${mlirElementType(inType.dtype)}>"
         val zero = synth()
         out.appendLine("$step$zero = stablehlo.constant dense<0.0> : $scalarMlir")
         out.appendLine(
             "$step$name = stablehlo.pad $x, $zero, low = [${low.joinToString(", ")}], " +
-                "high = [${high.joinToString(", ")}], interior = [${List(inputType.rank) { 0 }.joinToString(", ")}] : " +
-                "(${inputType.toMlir()}, $scalarMlir) -> ${node.type.toMlir()}",
+                "high = [${high.joinToString(", ")}], interior = [${interior.joinToString(", ")}] : " +
+                "(${inType.toMlir()}, $scalarMlir) -> ${outType.toMlir()}",
         )
     }
 

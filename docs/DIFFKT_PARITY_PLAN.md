@@ -517,22 +517,73 @@ reachable from `grad {}`, not new math. New-op families come after.
        six in-tree against both directional central differences and the JVP⇄VJP
        cross-identity (whose forward side uses only the bilinear product rule, so it
        never touches the new index inversion).
-       **Scope: interpreter + host + synthesis, NO StableHLO arm.** A GPU-targeted
-       build of such a gradient fails loudly at emit — the `EMBEDDING_GRAD`
-       precedent, and no shipped cert regresses, because nothing could emit this
-       graph before (the rule did not exist). The emitting identities are known and
-       recorded on the OpKinds: `dX` = strided-slice (undilate by `L`) of
-       `CONV2D_DATA_ADJOINT(dy, kernel with axes 0/1 swapped)`, and `dW` = the swap
-       of `CONV2D_KERNEL_ADJOINT` over an interior-dilated `x` — the latter needs
-       interior `stablehlo.pad`, which the emitter's PAD arm does not do yet
-       ("interior fixed at 0 in v1"). That is the follow-up if GPU deconv gradients
-       are ever wanted.
+       **Scope at the time: interpreter + host + synthesis, no StableHLO arm** — a
+       GPU-targeted build failed loudly at emit, the `EMBEDDING_GRAD` precedent, and
+       no shipped cert regressed because nothing could emit that graph before. The
+       emitting identities were recorded rather than left as a mystery, and
+       **§0.4.393 implemented them**: `dX` = strided-slice (undilate by `L`) of the
+       conv data adjoint against the channel-swapped kernel, `dW` = the channel swap
+       of the conv kernel adjoint over an interior-dilated `x` (which needed the
+       emitter's PAD to grow a real `interior` field — it had been hardcoded to
+       zeros). Only `window_reversal` is still rejected at emit, for the reason given
+       in §0.4.393.
        Also certified: `ConvTransposeGradientTest` E2E through the real plugin for
        both the stride-1 and the upsampling (`lhs_dilation` 2) spellings, all four
        gradients against central differences, no tape fallback; and the
        host↔interpreter bit-exact walk extended to both new kinds with an
        asymmetric `window_reversal` [true, false] so a swapped or dropped flag cannot
        cancel out.
+    6. **GPU emission completed for the arc ✅ (§0.4.393).** Auditing "which
+       OpKinds can a `grad {}` body contain that the emitter cannot lower" turned up
+       exactly three gaps, and the worst one was not on any list:
+       - `SIGN` — the only user-reachable kind with no emitter arm. `ops.sign` is in
+         the FIR unary map AND the MAX/MIN reduction rule builds its extremum
+         indicator as `1 − sign(y − x)`, so `grad { x.max(1).sum() }` lowered and
+         synthesised but could not be emitted. One line (`stablehlo.sign`); the only
+         divergence from the interpreter is the sign bit of zero for a −0.0 input,
+         which no consumer observes.
+       - `BROADCAST` with EMPTY `broadcast_dimensions` at equal rank — a DIVERGENCE,
+         not a missing arm, and the more serious find. §0.4.359 made that form
+         polymorphic in the interpreter (a scalar splat OR the equal-rank "un-reduce
+         stretch" `[N,1] → [N,K]`) and its comment claimed the emitter matched; the
+         emitter still required `dims.size == inputRank` and rejected the stretch. So
+         EVERY reduction adjoint that un-reduces — Max, Min, Tanh, Softmax — was
+         unemittable, and nothing caught it because no GPU test ran a reduction
+         gradient through XLA. Fixed by mirroring the interpreter's rule exactly
+         (identity dims in that case). **The lesson is the reason this is written
+         down: the OpKind-level audit found `SIGN` but could not find this one — only
+         running a real gradient graph through the emitter did. An audit of kinds is
+         not an audit of configurations.**
+       - the two `CONV_TRANSPOSE2D_*_ADJOINT` kinds from §0.4.391, via the identity
+         recorded there. `emitPad` grew a real `interior` field (hardcoded zeros
+         until now) for the dilation, and the conv-adjoint expansions were lifted
+         into `emitDataAdjointConvolution` / `emitKernelAdjointExpansion` so both
+         conv directions share one padding solve instead of two copies.
+       `window_reversal` is still rejected at emit for the deconv adjoints: with a
+       reversed primal the data side needs `!r` and the kernel side a compensating
+       flip, and that identity is unverified. Nothing user-reachable sets the attr,
+       and the interpreter and host twins handle any reversal, so it fails loudly.
+       Certified: `PjrtConvTransposeSmokeTest` (2) on the GB10 against the
+       interpreter — deconv loss + both gradients at 6.0e-8, and the max-reduction
+       gradient (the SIGN + un-reduce-stretch path) bit-identical at 0.0 — plus four
+       `EmitterTest` text pins: the swap/conv/strided-slice sequence, the interior
+       pad, `stablehlo.sign`, and the identity-dims stretch. One pin is deliberately
+       counter-intuitive and says so: the inner convolution's `lhs_dilate` is `[1,1]`
+       and NOT the primal's `[2,2]`, because the identity dilates `x` explicitly and
+       undoes it with the slice.
+       And because the BROADCAST gap is exactly the kind a per-op test misses,
+       `GradientEmissionCoverageTest` now sweeps the whole differentiable surface:
+       20 primal losses (elementwise unaries, max/min/mean reductions, softmax,
+       matmul, concat/slice/pad/reshape/transpose, where+compare, and all four
+       conv/pool kinds) are reverse-transformed, run through the interpreter to
+       prove the catalogue graph is well-formed, and then required to EMIT. Adding a
+       rule or an op without an emitter arm now fails this test instead of failing
+       only on the first user who targets a GPU. Its exclusions are documented
+       inline (EMBEDDING unreachable, overlapping maxpool inherent, deconv
+       `window_reversal` unverified, SILU/GELU sub-user-surface).
+       Remaining GPU gaps after this: overlapping/padded maxpool gradients (closed as
+       inherent, item 4) and `EMBEDDING_GRAD` (unreachable — `embedding` has no FIR
+       arm, so no `grad {}` body can contain one).
     ✅ **§0.4.387 — composition certified.** `CnnBlockGradientTest` runs one
     `grad {}` body carrying conv → relu → avgPool → sum PLUS a skip term, so the
     gradient threads an AVGPOOL2D_GRAD into both conv adjoints with a RELU/STEP

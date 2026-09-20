@@ -897,11 +897,11 @@ private fun convTranspose2dAdjointEngine(
 /**
  * §0.4.391 — the host twin of `OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT`: the gradient
  * of a transposed convolution w.r.t. its INPUT. [xTemplate] contributes SHAPE ONLY.
- * Attrs are the primal transposed conv's, all literals.
  *
- * Interpreter and host only — there is no StableHLO arm for this op, so a
- * GPU-targeted build fails loudly at emit. See `OpKind`'s doc for the identities a
- * future emitter arm would use.
+ * Attrs are the primal transposed conv's, all literals. The StableHLO emitter also
+ * has an arm (§0.4.393), reached through the conv-of-the-dilated-input identity
+ * rather than this index inversion, and it rejects `window_reversal` — which this
+ * twin handles, as does the interpreter.
  */
 @Suppress("LongParameterList")
 fun <S : Shape> convTranspose2dDataAdjoint(

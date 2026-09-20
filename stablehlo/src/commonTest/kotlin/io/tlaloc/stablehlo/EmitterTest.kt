@@ -1216,6 +1216,143 @@ class EmitterTest {
         assertTrue("remainder" in msg, "error should say the other engines cope: $msg")
     }
 
+    /**
+     * §0.4.393 — the transposed-conv DATA adjoint emits through the
+     * `convT(x,w) ≡ conv(dilate(x,L), swap01(w))` identity: swap the kernel's channel
+     * axes, run the §0.4.385 data-adjoint convolution against the DILATED shape, then
+     * take every L-th element to undo the dilation.
+     *
+     * Primal: x [1,2,3,3] ⋆ IOHW w [2,3,2,2], lhs_dilation [2,2], padding 1 → y
+     * [1,3,6,6]. So hDil = (3−1)·2+1 = 5, and the convolution must land on 5×5
+     * before the stride-2 slice brings it back to 3×3. Its solved padding is
+     * `dilSize = (6−1)·1+1 = 6`, `kEff = 2` → `low = 2−1−1 = 0`,
+     * `high = 1+5−6 = 0`.
+     */
+    @Test
+    fun convTransposeDataAdjointEmitsSwapConvStridedSlice() {
+        val fn = DxirBuilder.function("ct_dx") {
+            val x = param("x", DxirType(F32, listOf(1, 2, 3, 3)))
+            val w = param("w", DxirType(F32, listOf(2, 3, 2, 2)))
+            val up = param("up", DxirType(F32, listOf(1, 3, 6, 6)))
+            val dx = op(
+                OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, listOf(up, w, x),
+                DxirType(F32, listOf(1, 2, 3, 3)),
+                attrs = mapOf(
+                    "window_strides" to listOf(1, 1),
+                    "lhs_dilation" to listOf(2, 2),
+                    "padding" to listOf(listOf(1, 1), listOf(1, 1)),
+                ),
+            )
+            listOf(dx)
+        }
+        val mlir = fn.toStablehlo()
+        // Kernel swap IOHW [2,3,2,2] → OIHW [3,2,2,2].
+        assertTrue(
+            mlir.contains("tensor<2x3x2x2xf32>) -> tensor<3x2x2x2xf32>"),
+            "kernel channel swap missing: $mlir",
+        )
+        // `lhs_dilate` is [1,1] here, NOT the primal's [2,2]: the identity dilates x
+        // explicitly, so the inner convolution is an ordinary one over the dilated
+        // tensor and the dilation is undone by the strided slice below. (Worth
+        // pinning, because "the primal's lhs_dilation should ride along" is the
+        // intuitive and wrong expectation.)
+        assertTrue(mlir.contains("lhs_dilate = [1, 1]"), "inner conv must not re-dilate: $mlir")
+        assertTrue(mlir.contains("pad = [[0, 0], [0, 0]]"), "solved padding wrong: $mlir")
+        assertTrue(mlir.contains("reverse = [true, true]"), "a data adjoint flips the taps: $mlir")
+        // The undilating strided slice: 5 → 3 at stride 2 on both spatial axes.
+        assertTrue(mlir.contains("0:5:2, 0:5:2"), "strided undilate missing: $mlir")
+        assertTrue(
+            mlir.contains("(tensor<1x2x5x5xf32>) -> tensor<1x2x3x3xf32>"),
+            "slice must go dilated 5×5 → 3×3: $mlir",
+        )
+    }
+
+    /**
+     * §0.4.393 — the transposed-conv KERNEL adjoint: interior-pad `x` by
+     * `lhs_dilation` (this is the first use of a non-zero `interior` in the emitter —
+     * `emitPad` hardcoded zeros), run the §0.4.385 kernel-adjoint expansion over it,
+     * then swap the channel axes back to IOHW.
+     *
+     * Same primal as above: x dilates 3×3 → 5×5, and the kernel adjoint's solve is
+     * `dilSize = 6`, `low = p_low = 1`, `high = (2−1)·1 + 6 − 5 − 1 = 1`, which lands
+     * the inner conv on exactly kh=kw=2.
+     */
+    @Test
+    fun convTransposeKernelAdjointEmitsInteriorPadConvSwap() {
+        val fn = DxirBuilder.function("ct_dw") {
+            val x = param("x", DxirType(F32, listOf(1, 2, 3, 3)))
+            val w = param("w", DxirType(F32, listOf(2, 3, 2, 2)))
+            val up = param("up", DxirType(F32, listOf(1, 3, 6, 6)))
+            val dw = op(
+                OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT, listOf(x, up, w),
+                DxirType(F32, listOf(2, 3, 2, 2)),
+                attrs = mapOf(
+                    "window_strides" to listOf(1, 1),
+                    "lhs_dilation" to listOf(2, 2),
+                    "padding" to listOf(listOf(1, 1), listOf(1, 1)),
+                ),
+            )
+            listOf(dw)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains("interior = [0, 0, 1, 1]"),
+            "x must be interior-dilated by lhs_dilation−1: $mlir",
+        )
+        assertTrue(
+            mlir.contains("(tensor<1x2x3x3xf32>, tensor<f32>) -> tensor<1x2x5x5xf32>"),
+            "the interior pad must go 3×3 → 5×5: $mlir",
+        )
+        assertTrue(mlir.contains("pad = [[1, 1], [1, 1]]"), "solved dW padding wrong: $mlir")
+        // Four transposes: the kernel-adjoint expansion's two operand swaps and its
+        // result swap, plus this arm's final OIHW → IOHW swap back.
+        assertEquals(4, mlir.split("stablehlo.transpose").size - 1, mlir)
+        assertEquals(1, mlir.split("stablehlo.convolution").size - 1, mlir)
+    }
+
+    /**
+     * §0.4.393 — `stablehlo.sign`. SIGN was the one user-reachable kind with no
+     * emitter arm: the MAX/MIN reduction rule builds its extremum indicator as
+     * `1 − sign(y − x)`, so `grad { x.max(1).sum() }` could be lowered and
+     * synthesised but never emitted.
+     */
+    @Test
+    fun signEmitsStablehloSign() {
+        val fn = DxirBuilder.function("sgn") {
+            val x = param("x", DxirType(F32, listOf(2, 3)))
+            listOf(op(OpKind.SIGN, listOf(x), DxirType(F32, listOf(2, 3))))
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("stablehlo.sign"), mlir)
+    }
+
+    /**
+     * §0.4.393 — the EMPTY `broadcast_dimensions` form with an equal-rank,
+     * non-scalar input is the reduction adjoints' "un-reduce stretch"
+     * (`[N,1] → [N,K]`, emitted by the Max/Min/Tanh/Softmax rules). §0.4.359
+     * documented the interpreter's polymorphic handling and claimed the emitter
+     * matched; it did not, and rejected the form outright, so none of those
+     * gradients were emittable. Identity dims is the correct spelling.
+     */
+    @Test
+    fun broadcastWithEmptyDimsAndEqualRankStretchesByShape() {
+        val fn = DxirBuilder.function("stretch") {
+            val v = param("v", DxirType(F32, listOf(2, 1)))
+            val t = param("t", DxirType(F32, listOf(2, 3)))
+            listOf(
+                op(
+                    OpKind.BROADCAST, listOf(v, t), DxirType(F32, listOf(2, 3)),
+                    attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains("dims = [0, 1]") && mlir.contains("(tensor<2x1xf32>) -> tensor<2x3xf32>"),
+            "equal-rank empty-dims broadcast must stretch by identity: $mlir",
+        )
+    }
+
     @Test
     fun argmaxEmitsIotaAndReduceWithBody() {
         val fn = DxirBuilder.function("am") {

@@ -853,9 +853,9 @@ object VjpRegistry {
      * and 2, window_strides 1 and 2, rhs_dilation, reversal, asymmetric padding, and
      * all combined) before implementation.
      *
-     * v1 scope: interpreter + host + synthesis. There is NO StableHLO arm, so a
-     * GPU-targeted build of such a gradient fails loudly at emit; the identities a
-     * future arm would use are recorded on the OpKinds and in the parity plan.
+     * All three engines have an arm; the emitter goes through the
+     * conv-of-the-dilated-input identity rather than the index inversion (§0.4.393)
+     * and rejects `window_reversal`, which nothing user-reachable sets.
      */
     val ConvTranspose2dRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)

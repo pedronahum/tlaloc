@@ -158,14 +158,19 @@ enum class OpKind {
     // The templates are shape-only for dX and a VALUE operand for dW (its gather
     // reads `x`), as with MAXPOOL2D_GRAD.
     //
-    // Interpreter + host only in v1: there is NO StableHLO arm, so a GPU-targeted
-    // build fails loudly at emit ("lowering not yet implemented"), the
-    // EMBEDDING_GRAD precedent. No shipped cert regresses — nothing could emit
-    // this graph before, since the rule did not exist. The emitting identities are
-    // known and recorded in the plan: dX = strided-slice(undilate by L) of
-    // CONV2D_DATA_ADJOINT(dy, kernel with axes 0/1 swapped), and dW = the swap of
-    // CONV2D_KERNEL_ADJOINT over an interior-dilated x — the latter needs interior
-    // `stablehlo.pad`, which the emitter's PAD arm does not do yet.
+    // All three engines have an arm. The interpreter and host twins invert the tap
+    // equation directly; the emitter cannot (StableHLO has no primitive for it) and
+    // instead goes through §0.4.393's identity
+    //     convT(x, w; s, L, d, p) ≡ conv(dilate(x, L), swap01(w); s, d, p)
+    // composing pieces that already existed: dX = strided-slice (undilate by L) of
+    // CONV2D_DATA_ADJOINT against the channel-swapped kernel, dW = the channel swap
+    // of CONV2D_KERNEL_ADJOINT over an interior-dilated x. Certified against real
+    // XLA on the GB10 (grads 6.0e-8 vs the interpreter).
+    // Emitter scope limit: `window_reversal` is rejected there. With a reversed
+    // primal the data side would need `!r` and the kernel side a compensating flip,
+    // and that identity is unverified — nothing user-reachable sets the attr, and
+    // the interpreter and host twins handle any reversal, so it fails loudly rather
+    // than shipping a plausible-looking wrong kernel.
     CONV_TRANSPOSE2D_DATA_ADJOINT, CONV_TRANSPOSE2D_KERNEL_ADJOINT,
 
     // Shape
