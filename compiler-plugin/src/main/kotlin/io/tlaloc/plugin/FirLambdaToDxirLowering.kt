@@ -150,7 +150,7 @@ object FirLambdaToDxirLowering {
             // splices it at each application site) instead of lowering it —
             // there is no dxir VALUE for a function. A trailing binding is the
             // lambda's return, i.e. the function ESCAPES: refuse loudly.
-            if (init is FirFunctionCall && resolveCustomVjpArity(init) != null) {
+            if (init is FirFunctionCall && resolveCustomDerivativeForm(init) != null) {
                 if (stmt.isVar) {
                     throw LoweringException(
                         "customVjp result must be bound to a `val`, not a `var` (v1)",
@@ -784,11 +784,12 @@ object FirLambdaToDxirLowering {
             "${callableId.packageName.asString()}.${callableId.callableName.asString()}"
         }
 
-        // §0.4.415 — Phase B5 (customVjp): the APPLICATION of a
+        // §0.4.415 — Phase B5 (customVjp; §0.4.416 widened to all six
+        // custom-derivative spellings): the APPLICATION of a
         // derivative-attached function. `f(x)` on a lambda-typed value resolves
         // to `kotlin.FunctionN.invoke`; when the receiver is a recorded
-        // customVjp-bound local val (`val f = customVjp(g, vjpFn); f(x)`) or
-        // the customVjp call-form itself applied in place
+        // custom-derivative-bound local val (`val f = customVjp(g, vjpFn);
+        // f(x)`) or the call-form itself applied in place
         // (`customVjp(g, vjpFn)(x)`), splice ONE OpKind.COARSENED node here.
         // Any OTHER invoke falls through to the generic unsupported-call throw
         // exactly as before.
@@ -796,25 +797,25 @@ object FirLambdaToDxirLowering {
             classId?.asFqNameString()?.startsWith("kotlin.Function") == true
         ) {
             val recv = call.dispatchReceiver ?: call.extensionReceiver
-            val customVjpCall: FirFunctionCall? = when (recv) {
-                is FirFunctionCall -> recv.takeIf { resolveCustomVjpArity(it) != null }
+            val customDerivCall: FirFunctionCall? = when (recv) {
+                is FirFunctionCall -> recv.takeIf { resolveCustomDerivativeForm(it) != null }
                 is FirPropertyAccessExpression ->
                     (recv.calleeReference.toResolvedCallableSymbol() as? FirPropertySymbol)
                         ?.let { customVjpDefsTl.get()[it] }
                 else -> null
             }
-            if (customVjpCall != null) {
-                return emitCustomVjpApplication(
-                    customVjpCall, call.argumentList.arguments, env, emitter,
+            if (customDerivCall != null) {
+                return emitCustomDerivativeApplication(
+                    customDerivCall, call.argumentList.arguments, env, emitter,
                 )
             }
         }
-        // A customVjp call-form reached as a plain EXPRESSION (not a property
-        // initializer, not an invoke receiver) is being used as a first-class
-        // value — the deserialized-body problem the design doc's §2 rules out
-        // of v1. Refuse loudly by name.
-        if (resolveCustomVjpArity(call) != null) {
-            throw customVjpEscape("the customVjp(…) expression")
+        // A custom-derivative call-form reached as a plain EXPRESSION (not a
+        // property initializer, not an invoke receiver) is being used as a
+        // first-class value — the deserialized-body problem the design doc's
+        // §2 rules out of v1. Refuse loudly by name.
+        resolveCustomDerivativeForm(call)?.let { form ->
+            throw customVjpEscape("the ${form.name}(…) expression")
         }
 
         // §0.4.40 — dtype-changing receiver-only conversions (`Int.toFloat()`,
@@ -2328,29 +2329,53 @@ object FirLambdaToDxirLowering {
     // `user_gradient = true` (the forward transform's refusal key, and
     // handleCoarsenedAdjoint's cue to wrap the returns in runtime shape
     // asserts).
+    //
+    // §0.4.416 — the forward side (design doc Candidate C): `customJvp(f,
+    // jvpFn)` attaches a USER tangent instead — `tangent_body` `(x…, dx…) →
+    // (dy)`, the user's declared (primals…, tangents…) parameter order again
+    // being the splice contract verbatim (DxirForwardTransform's own
+    // params-then-d_params emission order) — and `customVjpJvp(f, vjpFn,
+    // jvpFn)` attaches BOTH bodies, flipping both refusals. The six spellings
+    // share one lowering arm; which bodies a form carries decides which attrs
+    // land on the node.
     // ------------------------------------------------------------------
 
-    /** Per-lowering registry: local `val`s bound to a customVjp call-form.
+    /** Per-lowering registry: local `val`s bound to a custom-derivative
+     * call-form (customVjp/customJvp/customVjpJvp + 2-arg spellings).
      * Thread-local because [lower] runs per checker call site; save/restored
      * around each lowering for re-entrancy. */
     private val customVjpDefsTl: ThreadLocal<MutableMap<FirPropertySymbol, FirFunctionCall>> =
         ThreadLocal.withInitial { HashMap() }
 
-    /** 1 for `io.tlaloc.autograd.customVjp`, 2 for `customVjp2`, null otherwise. */
-    private fun resolveCustomVjpArity(call: FirFunctionCall): Int? {
+    /** §0.4.416 — one of the six custom-derivative call-form spellings:
+     * [arity] primal args, and which user bodies the form carries. */
+    private data class CustomDerivativeForm(
+        val name: String,
+        val arity: Int,
+        val hasVjp: Boolean,
+        val hasJvp: Boolean,
+    )
+
+    /** The [CustomDerivativeForm] for an `io.tlaloc.autograd.custom*` call,
+     * null for anything else. */
+    private fun resolveCustomDerivativeForm(call: FirFunctionCall): CustomDerivativeForm? {
         val cid = call.calleeReference.toResolvedCallableSymbol()?.callableId ?: return null
         if (cid.classId != null) return null
         if (cid.packageName.asString() != "io.tlaloc.autograd") return null
-        return when (cid.callableName.asString()) {
-            "customVjp" -> 1
-            "customVjp2" -> 2
+        return when (val name = cid.callableName.asString()) {
+            "customVjp" -> CustomDerivativeForm(name, 1, hasVjp = true, hasJvp = false)
+            "customVjp2" -> CustomDerivativeForm(name, 2, hasVjp = true, hasJvp = false)
+            "customJvp" -> CustomDerivativeForm(name, 1, hasVjp = false, hasJvp = true)
+            "customJvp2" -> CustomDerivativeForm(name, 2, hasVjp = false, hasJvp = true)
+            "customVjpJvp" -> CustomDerivativeForm(name, 1, hasVjp = true, hasJvp = true)
+            "customVjpJvp2" -> CustomDerivativeForm(name, 2, hasVjp = true, hasJvp = true)
             else -> null
         }
     }
 
     private fun customVjpEscape(what: String) = LoweringException(
-        "the function returned by customVjp ('$what') escapes the lambda: v1 requires the " +
-            "customVjp result to be APPLIED within the same lambda body (binding it to a " +
+        "the derivative-attached function ('$what') escapes the lambda: v1 requires the " +
+            "customVjp/customJvp/customVjpJvp result to be APPLIED within the same lambda body (binding it to a " +
             "local val and applying that val later is supported; passing it to another " +
             "function, re-binding it, or returning it is not — a first-class " +
             "function-with-derivative value is the deferred Candidate B territory of " +
@@ -2358,49 +2383,64 @@ object FirLambdaToDxirLowering {
     )
 
     /**
-     * Splice one customVjp application: lower the applied operands in the
-     * OUTER env, recursively lower both lambda literals (diagnosing WHICH body
-     * failed — the design doc's §3 checker requirement, surfaced through the
-     * probe-lowering diagnostics), validate the attr contract, and emit the
-     * COARSENED node.
+     * Splice one custom-derivative application: lower the applied operands in
+     * the OUTER env, recursively lower every lambda literal the form carries
+     * (diagnosing WHICH body failed — the design doc's §3 checker
+     * requirement, surfaced through the probe-lowering diagnostics), validate
+     * the attr contract, and emit the COARSENED node. §0.4.416 — the six
+     * spellings share this arm: `vjpFn` becomes `gradient_body`, `jvpFn`
+     * becomes `tangent_body`, and the attrs a node carries are exactly the
+     * bodies its form supplies.
      */
-    private fun emitCustomVjpApplication(
+    private fun emitCustomDerivativeApplication(
         call: FirFunctionCall,
         appliedArgs: List<FirExpression>,
         env: MutableMap<Any, DxirNode>,
         emitter: DxirEmitter,
     ): DxirNode {
-        val n = resolveCustomVjpArity(call)
-            ?: throw LoweringException("emitCustomVjpApplication: not a customVjp call")
-        val name = if (n == 1) "customVjp" else "customVjp2"
+        val form = resolveCustomDerivativeForm(call)
+            ?: throw LoweringException("emitCustomDerivativeApplication: not a custom-derivative call")
+        val n = form.arity
+        val name = form.name
+        val expectedArgs = 1 + (if (form.hasVjp) 1 else 0) + (if (form.hasJvp) 1 else 0)
+        val signature = buildString {
+            append("(f")
+            if (form.hasVjp) append(", vjpFn")
+            if (form.hasJvp) append(", jvpFn")
+            append(")")
+        }
         val args = call.argumentList.arguments
-        if (args.size != 2) {
-            throw LoweringException("$name takes exactly (f, vjpFn); got ${args.size} arguments")
+        if (args.size != expectedArgs) {
+            throw LoweringException("$name takes exactly $signature; got ${args.size} arguments")
         }
         // Named-or-positional: unlike the positional-only attr APIs (the K2
         // named-arg landmine), FIR at CHECK time still carries
         // FirNamedArgumentExpression wrappers WITH their names, so
         // `customVjp(vjpFn = …, f = …)` resolves by name here, never by slot.
-        var fExpr: FirExpression? = null
-        var vjpExpr: FirExpression? = null
+        val positionalSlots: List<String> = buildList {
+            add("f")
+            if (form.hasVjp) add("vjpFn")
+            if (form.hasJvp) add("jvpFn")
+        }
+        val exprBySlot = HashMap<String, FirExpression>()
         for ((i, arg) in args.withIndex()) {
             if (arg is FirNamedArgumentExpression) {
-                when (arg.name.asString()) {
-                    "f" -> fExpr = arg.expression
-                    "vjpFn" -> vjpExpr = arg.expression
-                    else -> throw LoweringException("$name: unknown named argument '${arg.name}'")
+                val slot = arg.name.asString()
+                if (slot !in positionalSlots) {
+                    throw LoweringException("$name: unknown named argument '${arg.name}'")
                 }
+                exprBySlot[slot] = arg.expression
             } else {
-                if (i == 0) fExpr = arg else vjpExpr = arg
+                exprBySlot[positionalSlots[i]] = arg
             }
         }
-        val fLambda = (fExpr as? FirAnonymousFunctionExpression)?.anonymousFunction
-            ?: throw LoweringException(
-                "$name: `f` must be a lambda literal at the call site " +
-                    "(v1 — the FIR lowering walks source bodies)",
-            )
-        val vjpLambda = (vjpExpr as? FirAnonymousFunctionExpression)?.anonymousFunction
-            ?: throw LoweringException("$name: `vjpFn` must be a lambda literal at the call site (v1)")
+        fun lambdaFor(slot: String): FirAnonymousFunction =
+            (exprBySlot[slot] as? FirAnonymousFunctionExpression)?.anonymousFunction
+                ?: throw LoweringException(
+                    "$name: `$slot` must be a lambda literal at the call site " +
+                        "(v1 — the FIR lowering walks source bodies)",
+                )
+        val fLambda = lambdaFor("f")
 
         val operands = appliedArgs.map {
             lowerExpr((it as? FirNamedArgumentExpression)?.expression ?: it, env, emitter)
@@ -2416,12 +2456,6 @@ object FirLambdaToDxirLowering {
         } catch (e: LoweringException) {
             throw LoweringException("$name primal body (f): ${e.message}")
         }
-        val vjpBody = try {
-            lowerInnerLambda("${name}_vjp", vjpLambda, env, pairReturn = n == 2)
-        } catch (e: LoweringException) {
-            throw LoweringException("$name adjoint body (vjpFn): ${e.message}")
-        }
-
         // The COARSENED attr contract, validated where violation is still a
         // named compile diagnostic instead of a transform-time surprise.
         if (primalBody.params.size != n) {
@@ -2430,36 +2464,91 @@ object FirLambdaToDxirLowering {
         if (primalBody.returns.size != 1) {
             throw LoweringException("$name: f must be single-return (v1 — multi-result COARSENED is reverse-only and has no forward story)")
         }
-        if (vjpBody.params.size != n + 1) {
-            throw LoweringException(
-                "$name: vjpFn must take (upstream${", x".repeat(n)}); got ${vjpBody.params.size} params",
-            )
-        }
-        if (vjpBody.returns.size != n) {
-            throw LoweringException(
-                "$name: vjpFn must return $n gradient(s); got ${vjpBody.returns.size}",
-            )
-        }
         for (i in 0 until n) {
             checkCustomVjpTypesAgree(name, "applied argument $i vs f's param $i", operands[i].type, primalBody.params[i].type)
-            checkCustomVjpTypesAgree(name, "vjpFn param ${i + 1} vs f's param $i", vjpBody.params[i + 1].type, primalBody.params[i].type)
-            checkCustomVjpTypesAgree(name, "vjpFn return $i vs f's param $i", vjpBody.returns[i].type, primalBody.params[i].type)
         }
-        checkCustomVjpTypesAgree(
-            name, "vjpFn's upstream param vs f's return",
-            vjpBody.params[0].type, primalBody.returns.single().type,
-        )
+
+        val vjpBody: DxirFunction? = if (form.hasVjp) {
+            val body = try {
+                lowerInnerLambda("${name}_vjp", lambdaFor("vjpFn"), env, pairReturn = n == 2)
+            } catch (e: LoweringException) {
+                throw LoweringException("$name adjoint body (vjpFn): ${e.message}")
+            }
+            if (body.params.size != n + 1) {
+                throw LoweringException(
+                    "$name: vjpFn must take (upstream${", x".repeat(n)}); got ${body.params.size} params",
+                )
+            }
+            if (body.returns.size != n) {
+                throw LoweringException(
+                    "$name: vjpFn must return $n gradient(s); got ${body.returns.size}",
+                )
+            }
+            for (i in 0 until n) {
+                checkCustomVjpTypesAgree(name, "vjpFn param ${i + 1} vs f's param $i", body.params[i + 1].type, primalBody.params[i].type)
+                checkCustomVjpTypesAgree(name, "vjpFn return $i vs f's param $i", body.returns[i].type, primalBody.params[i].type)
+            }
+            checkCustomVjpTypesAgree(
+                name, "vjpFn's upstream param vs f's return",
+                body.params[0].type, primalBody.returns.single().type,
+            )
+            body
+        } else {
+            null
+        }
+
+        // §0.4.416 — the user tangent: jvpFn's declared (primals…, tangents…)
+        // parameter order IS DxirForwardTransform's splice contract (its own
+        // params-then-d_params emission order), so the adapter is the
+        // identity for every arity; the single return is dy.
+        val jvpBody: DxirFunction? = if (form.hasJvp) {
+            val body = try {
+                lowerInnerLambda("${name}_jvp", lambdaFor("jvpFn"), env, pairReturn = false)
+            } catch (e: LoweringException) {
+                throw LoweringException("$name tangent body (jvpFn): ${e.message}")
+            }
+            if (body.params.size != 2 * n) {
+                throw LoweringException(
+                    "$name: jvpFn must take (${(0 until n).joinToString { "x$it" }}, " +
+                        "${(0 until n).joinToString { "dx$it" }}); got ${body.params.size} params",
+                )
+            }
+            if (body.returns.size != 1) {
+                throw LoweringException(
+                    "$name: jvpFn must return exactly the result tangent; got ${body.returns.size} returns",
+                )
+            }
+            for (i in 0 until n) {
+                checkCustomVjpTypesAgree(name, "jvpFn param $i (primal) vs f's param $i", body.params[i].type, primalBody.params[i].type)
+                checkCustomVjpTypesAgree(name, "jvpFn param ${n + i} (tangent) vs f's param $i", body.params[n + i].type, primalBody.params[i].type)
+            }
+            checkCustomVjpTypesAgree(
+                name, "jvpFn's return (dy) vs f's return",
+                body.returns.single().type, primalBody.returns.single().type,
+            )
+            body
+        } else {
+            null
+        }
 
         return emitter.op(
             kind = OpKind.COARSENED,
             operands = operands,
             type = primalBody.returns.single().type,
-            attrs = mapOf(
-                "primal_body" to primalBody,
-                "gradient_body" to vjpBody,
-                "reads_primal_indices" to computeVjpReads(vjpBody),
-                "user_gradient" to true,
-            ),
+            attrs = buildMap {
+                put("primal_body", primalBody)
+                if (vjpBody != null) put("gradient_body", vjpBody)
+                if (jvpBody != null) put("tangent_body", jvpBody)
+                // Reverse is the reads consumer (its splice dereferences the
+                // cloned primal operands); a jvp-only node keeps the honest
+                // analogue — jvpFn's PRIMAL-half uses — so the attr contract
+                // stays uniform.
+                put(
+                    "reads_primal_indices",
+                    if (vjpBody != null) computeVjpReads(vjpBody) else computeJvpPrimalReads(jvpBody!!, n),
+                )
+                put("user_gradient", true)
+            },
         )
     }
 
@@ -2500,6 +2589,33 @@ object FirLambdaToDxirLowering {
             val idx = paramIds.indexOf(r.id)
             if (idx >= 1) reads += idx - 1
         }
+        return reads
+    }
+
+    /**
+     * §0.4.416 — `reads_primal_indices` for a customJvp-ONLY node: jvpFn's
+     * PRIMAL-half param uses (params[0 until n] are the primals; a reference
+     * to params[i], i < n, marks operand index i). Reverse mode refuses such
+     * nodes before ever consuming the set, but the COARSENED attr contract
+     * requires it, and the honest value is the analogue of [computeVjpReads].
+     */
+    private fun computeJvpPrimalReads(jvpBody: DxirFunction, n: Int): Set<Int> {
+        val paramIds = jvpBody.params.map { it.id }
+        val reads = LinkedHashSet<Int>()
+        fun mark(id: Int) {
+            val idx = paramIds.indexOf(id)
+            if (idx in 0 until n) reads += idx
+        }
+        fun scanOp(op: DxirOp) {
+            for (operand in op.operands) mark(operand.id)
+            for (region in op.regions) {
+                for (block in region.blocks) {
+                    for (bodyNode in block.body) if (bodyNode is DxirOp) scanOp(bodyNode)
+                }
+            }
+        }
+        for (node in jvpBody.body) if (node is DxirOp) scanOp(node)
+        for (r in jvpBody.returns) mark(r.id)
         return reads
     }
 

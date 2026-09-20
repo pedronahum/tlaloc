@@ -1443,8 +1443,9 @@ reachable from `grad {}`, not new math. New-op families come after.
     user-facing n-th-order intrinsics (`reverseDerivative{2..4}` spellings)
     are a synthesis-surface question, not an IR one — the IR compositions
     they'd lower to are what this slice certified.
-- **B5. User-defined custom derivatives — v1 DONE (§0.4.415; ratified by
-  Pedro 2026-09-20 with the design doc's recommended answers).** Full
+- **B5. User-defined custom derivatives — DONE (§0.4.415 reverse +
+  §0.4.416 forward; ratified by Pedro 2026-09-20 with the design doc's
+  recommended answers).** Full
   design + implementation record in
   [CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md) (§7 holds
   what v1 taught). Shipped: `io.tlaloc.autograd.customVjp` / `customVjp2`
@@ -1477,10 +1478,39 @@ reachable from `grad {}`, not new math. New-op families come after.
   - **Debug oracle shipped**: `checkCustomVjp` (JVP⇄VJP inner-product
     identity via central differences; pure host, opt-in, fails
     straight-through estimators by design) — green/red certified.
-  - Recorded tails: `customJvp`/`customVjpJvp`; GPU emission of user
-    gradient bodies; multi-result `f`; non-const captures; Candidate B
-    (serialized-dxir); the seeded branches (`vjp {}` etc.) don't yet run
-    the decompose step — they fall back loudly.
+  - **§0.4.416 — the forward side (Candidate C) DONE**:
+    `io.tlaloc.autograd.customJvp` / `customJvp2` /
+    `customVjpJvp` / `customVjpJvp2` (the same host-stub asymmetry: all
+    return `f`). One shared FIR arm lowers whichever bodies a form
+    carries; `jvpFn`'s declared `(primals…, tangents…) → dy` order IS
+    `DxirForwardTransform`'s own params-then-d_params emission order, so
+    the splice adapter is the identity at every arity (`tangent_body`
+    attr, validated at COARSENED construction: 2·N params typed like the
+    operands twice over, single return typed like the result;
+    `gradient_body` becomes optional ONLY for the customJvp-only shape).
+    The forward transform's COARSENED arm splices `tangent_body` verbatim
+    for user nodes — machine nodes keep the §0.4.403 auto-tangent
+    byte-identically — wrapping sentinel-typed tangents in
+    `CHECK_SHAPE_LIKE` against the node's own value clone (the forward
+    twin of the reverse contract). Both refusals now mirror:
+    customVjp-only still refuses `jvp {}` naming `user_gradient`;
+    customJvp-only refuses `grad {}` naming `customJvp` (IR pin + E2E
+    compile-time ERROR). `customVjpJvp` flips both — and each mode runs
+    ITS body, pinned with deliberately INCONSISTENT bodies (grad → vjpFn's
+    5, jvp → jvpFn's 3, math says 2x) and with CONSISTENT ones through the
+    JVP⇄VJP cross-identity E2E (⟨∇f, v⟩ = jvp(x, v), tensor path).
+    hessian (forward-over-reverse) composes THROUGH a customVjpJvp node —
+    the tangent splice fires inside the reverse-produced body on the
+    cloned COARSENED — certified at IR level AND E2E (H = 2I over the
+    sentinel tensor path). Plumbing: the jvp and hessian/assembly plugin
+    branches now run `decomposeCoarsened` before synthesis whenever a
+    COARSENED survived (the §0.4.415 grad-branch treatment; no-op on
+    every pre-B5 path), which is also what lets machine-COARSENED forward
+    bodies reach synthesis.
+  - Recorded tails: GPU emission of user gradient bodies; multi-result
+    `f`; non-const captures; Candidate B (serialized-dxir); the seeded
+    branches (`vjp {}` / `jacobianReverse`) don't yet run the decompose
+    step — they fall back loudly.
 
 ### Phase C — op families DiffKT has that the IR lacks
 
@@ -1948,12 +1978,13 @@ story. Not blocking A–E.
 
 ## Suggested § sequencing
 
-**Position at §0.4.415 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
+**Position at §0.4.416 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
 in substance (§0.4.366–397, §0.4.400/409/414 — remaining tails: A2's
 `view`/`withChange`/`meld`/`split`, gather/scatter axis+list forms, the
 mixed rank-increase+stretch broadcast, `DScalar`-interface params) →
-B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → B5 v1 ✅ (§0.4.415
-— `customVjp`/`customVjp2`, ratified 2026-09-20) → C1–C3 ✅
+B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → B5 ✅ (§0.4.415
+`customVjp`/`customVjp2` + §0.4.416 `customJvp`/`customVjpJvp` and their
+2-arg forms, ratified 2026-09-20) → C1–C3 ✅
 (§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; the `grad {}`
 integral surface's B5 gate is now open, spelling still to land) → D1 ✅
 (§0.4.408) → D2 v1 ✅ (§0.4.413 — IR-level reparameterized gradients;

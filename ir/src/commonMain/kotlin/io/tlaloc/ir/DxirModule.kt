@@ -67,15 +67,67 @@ class DxirFunction(
      * positionally with that function's params, and its result types must align
      * with the primal's returns. [attrs["gradient_body"]] + [attrs["reads_primal_indices"]]
      * are required at construction time — C.3b.2 consumes both during reverse-mode.
+     *
+     * §0.4.416 — Phase B5: the ONE exception to the gradient_body requirement
+     * is a customJvp-only node (`user_gradient = true` with a `tangent_body`
+     * and no gradient_body) — forward-differentiable via the tangent splice;
+     * reverse mode refuses it loudly by name. A `tangent_body`, when present,
+     * is validated against its own contract: `(primals…, tangents…) → (dy)`,
+     * single-result, param types matching the operands twice over.
      */
     private fun validateCoarsenedShape(op: DxirOp) {
         val primal = op.attrs["primal_body"]
         require(primal is DxirFunction) {
             "function $name: COARSENED op id=${op.id} requires `primal_body` attr of type DxirFunction; got ${primal?.let { it::class.simpleName }}"
         }
+        // §0.4.416 — Phase B5: a USER node may carry a `tangent_body` (the
+        // customJvp / customVjpJvp call-forms). Its contract mirrors
+        // DxirForwardTransform's own emission order: params are
+        // (primal_0 … primal_N-1, tangent_0 … tangent_N-1), positionally
+        // typed like the operands twice over, with ONE return typed like the
+        // (single) result — the user's jvpFn signature IS the splice
+        // contract, exactly as vjpFn's (upstream, x…) is the reverse one.
+        val tangent = op.attrs["tangent_body"]
+        if (tangent != null) {
+            require(tangent is DxirFunction) {
+                "function $name: COARSENED op id=${op.id} `tangent_body` attr must be a DxirFunction; got ${tangent::class.simpleName}"
+            }
+            require(op.attrs["user_gradient"] == true) {
+                "function $name: COARSENED op id=${op.id} carries `tangent_body` without `user_gradient` — only user call-forms (customJvp/customVjpJvp) attach tangents; machine coarsening derives them from primal_body"
+            }
+            require(op.types.size == 1) {
+                "function $name: COARSENED op id=${op.id} carries `tangent_body` but has ${op.types.size} results — the tangent splice is single-result only (matches the forward transform's COARSENED scope)"
+            }
+            require(tangent.params.size == 2 * op.operands.size) {
+                "function $name: COARSENED op id=${op.id} tangent_body.params count ${tangent.params.size} ≠ 2·N (= 2·${op.operands.size}) — (primals…, tangents…)"
+            }
+            for ((i, operand) in op.operands.withIndex()) {
+                require(tangent.params[i].type == operand.type) {
+                    "function $name: COARSENED op id=${op.id} tangent_body.params[$i] (primal $i) type=${tangent.params[i].type} ≠ operand[$i].type=${operand.type}"
+                }
+                require(tangent.params[op.operands.size + i].type == operand.type) {
+                    "function $name: COARSENED op id=${op.id} tangent_body.params[${op.operands.size + i}] (tangent $i) type=${tangent.params[op.operands.size + i].type} ≠ operand[$i].type=${operand.type}"
+                }
+            }
+            require(tangent.returns.size == 1) {
+                "function $name: COARSENED op id=${op.id} tangent_body must return exactly the result tangent; got ${tangent.returns.size} returns"
+            }
+            require(tangent.returns.single().type == op.types.single()) {
+                "function $name: COARSENED op id=${op.id} tangent_body return type ${tangent.returns.single().type} ≠ result type ${op.types.single()}"
+            }
+        }
+        // §0.4.416 — a customJvp-only node (user_gradient + tangent_body, NO
+        // gradient_body) is CONSTRUCTIBLE: forward-differentiable via the
+        // tangent splice, reverse mode refuses it loudly by name in
+        // handleCoarsenedAdjoint (the mirror of the customVjp forward
+        // refusal). Every other COARSENED still requires its gradient_body
+        // at construction, exactly as since §0.4.31.
         val gradient = op.attrs["gradient_body"]
-        require(gradient is DxirFunction) {
-            "function $name: COARSENED op id=${op.id} requires `gradient_body` attr of type DxirFunction; got ${gradient?.let { it::class.simpleName }}"
+        val customJvpOnly = gradient == null && op.attrs["user_gradient"] == true && tangent != null
+        if (!customJvpOnly) {
+            require(gradient is DxirFunction) {
+                "function $name: COARSENED op id=${op.id} requires `gradient_body` attr of type DxirFunction; got ${gradient?.let { it::class.simpleName }}"
+            }
         }
         val reads = op.attrs["reads_primal_indices"]
         require(reads is Set<*> && reads.all { it is Int }) {
@@ -99,6 +151,10 @@ class DxirFunction(
                 "function $name: COARSENED op id=${op.id} types[$i]=${op.types[i]} ≠ primal_body.returns[$i].type=${r.type}"
             }
         }
+        // Every index in reads_primal_indices must be a valid operand index.
+        for (i in readsInt) require(i in op.operands.indices) {
+            "function $name: COARSENED op id=${op.id} reads_primal_indices contains out-of-range index $i (operand count=${op.operands.size})"
+        }
         // §0.4.179 — Phase 5c: Gradient body signature widened to multi-result.
         //   single-result (K=1): `(upstream, *primal_operands) → (d_operand_0, ...)` (= 1 + N params).
         //   multi-result (K>1):  `(upstream_0, …, upstream_K-1, *primal_operands) → (d_operand_0, ...)` (= K + N params).
@@ -106,6 +162,8 @@ class DxirFunction(
         // params are primal operands (positionally aligned with op.operands). N returns
         // give per-operand gradient contributions. K==1 stays bit-exact equivalent to
         // the §0.4.31 contract — single-result COARSENED tests don't change.
+        if (customJvpOnly) return
+        check(gradient is DxirFunction) // established above for every non-customJvp-only node
         val k = op.types.size
         require(gradient.params.size == k + op.operands.size) {
             "function $name: COARSENED op id=${op.id} gradient_body.params count ${gradient.params.size} ≠ K + N (= $k + ${op.operands.size}) — K upstreams + N primal operands"
@@ -122,10 +180,6 @@ class DxirFunction(
         }
         require(gradient.returns.size == op.operands.size) {
             "function $name: COARSENED op id=${op.id} gradient_body.returns count ${gradient.returns.size} ≠ operand count ${op.operands.size}"
-        }
-        // Every index in reads_primal_indices must be a valid operand index.
-        for (i in readsInt) require(i in op.operands.indices) {
-            "function $name: COARSENED op id=${op.id} reads_primal_indices contains out-of-range index $i (operand count=${op.operands.size})"
         }
     }
 
@@ -446,9 +500,10 @@ class DxirBuilder private constructor() : DxirEmitter {
     fun coarsened(
         operands: List<DxirNode>,
         primalBody: DxirFunction,
-        gradientBody: DxirFunction,
+        gradientBody: DxirFunction?,
         readsPrimalIndices: Set<Int>,
         userGradient: Boolean = false,
+        tangentBody: DxirFunction? = null,
     ): DxirOp {
         val types = primalBody.returns.map { it.type }
         require(types.isNotEmpty()) { "COARSENED op requires primal_body with at least one return" }
@@ -459,11 +514,18 @@ class DxirBuilder private constructor() : DxirEmitter {
         // deliberately divergent user adjoint — the §0.4.392 no-silent-fork
         // principle) and handleCoarsenedAdjoint wraps its returns in runtime
         // shape asserts (CHECK_SHAPE_LIKE).
+        // §0.4.416 — `tangentBody` attaches a USER forward tangent (the
+        // customJvp / customVjpJvp call-forms): `(primals…, tangents…) → (dy)`,
+        // spliced by DxirForwardTransform's COARSENED arm in place of the
+        // auto-tangent. `gradientBody = null` is legal ONLY for the
+        // customJvp-only shape (userGradient + tangentBody) — reverse mode
+        // then refuses loudly by name; validateCoarsenedShape enforces this.
         val attrs: Map<String, Any> = buildMap {
             put("primal_body", primalBody)
-            put("gradient_body", gradientBody)
+            if (gradientBody != null) put("gradient_body", gradientBody)
             put("reads_primal_indices", readsPrimalIndices)
             if (userGradient) put("user_gradient", true)
+            if (tangentBody != null) put("tangent_body", tangentBody)
         }
         return DxirOp(
             id = allocateId(),

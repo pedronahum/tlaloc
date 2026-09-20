@@ -36,8 +36,8 @@ import kotlin.random.Random
  * **Forward mode refuses**: `jvp {}` over a body containing a `customVjp`
  * application errors loudly naming `user_gradient` — auto-differentiating
  * `f`'s primal would silently disagree with a deliberately divergent user
- * adjoint (the ratified refuse-unless-jvpFn policy; `customVjpJvp` is the
- * recorded tail that lifts it).
+ * adjoint (the ratified refuse-unless-jvpFn policy; [customVjpJvp] — landed
+ * §0.4.416 — lifts it by supplying both bodies).
  *
  * **Host-stub asymmetry vs [grad]**: without the plugin (or outside any
  * differentiated context) `customVjp` does NOT throw [pluginMissing] — it
@@ -56,6 +56,58 @@ fun <A, R> customVjp(f: (A) -> R, vjpFn: (R, A) -> A): (A) -> R = f
  * directly at the return position (`Pair(da, db)` or `da to db`).
  */
 fun <A, B, R> customVjp2(f: (A, B) -> R, vjpFn: (R, A, B) -> Pair<A, B>): (A, B) -> R = f
+
+/**
+ * §0.4.416 — Phase B5, the forward twin (Candidate C of
+ * docs/CUSTOM_DERIVATIVES_DESIGN.md): `customJvp(f, jvpFn)` attaches a
+ * USER-written forward-mode tangent to `f`. Inside a `jvp {}` /
+ * `valueAndJvp {}` body, applying the returned function runs `f` in the value
+ * stream while forward mode splices `jvpFn` — verbatim, with NO fallback to
+ * auto-differentiating `f` — as the tangent. `jvpFn(x, dx)` receives the
+ * primal argument and its incoming tangent and must return `dy` shaped like
+ * `f`'s result (asserted at runtime under symbolic dims). The parameter order
+ * `(primals…, tangents…)` is exactly `DxirForwardTransform`'s own emission
+ * order, so the declared signature IS the splice contract.
+ *
+ * **Reverse mode refuses**: `grad {}` over a body containing a customJvp-only
+ * application errors loudly naming `customJvp` — the exact mirror of
+ * [customVjp]'s forward refusal, and the same principle: silently
+ * auto-differentiating `f`'s primal would disagree with a deliberately
+ * divergent user tangent. Supply both bodies via [customVjpJvp] to
+ * differentiate in either mode.
+ *
+ * The host stub returns `f` itself, the [customVjp] asymmetry: applying the
+ * primal is the right plain-Kotlin meaning; only the tangent attachment needs
+ * the compiler.
+ */
+fun <A, R> customJvp(f: (A) -> R, jvpFn: (A, A) -> R): (A) -> R = f
+
+/**
+ * §0.4.416 — the two-argument [customJvp]: `jvpFn(a, b, da, db)` returns the
+ * single result tangent `dy` (primals first, then tangents — the
+ * `DxirForwardTransform` emission order for any arity).
+ */
+fun <A, B, R> customJvp2(f: (A, B) -> R, jvpFn: (A, B, A, B) -> R): (A, B) -> R = f
+
+/**
+ * §0.4.416 — BOTH user derivatives on one function: `vjpFn` is spliced by
+ * reverse mode exactly as in [customVjp], `jvpFn` by forward mode exactly as
+ * in [customJvp] — flipping both refusals, so the returned function
+ * differentiates in `grad {}`/`vjp {}` AND `jvp {}`/`hessian` alike. The two
+ * bodies are the user's SEPARATE assertions (the design doc's semantic-fork
+ * principle made explicit): each mode runs ITS body verbatim and neither is
+ * derived from — or checked against — the other. When both are meant to
+ * agree, [checkCustomVjp] is the opt-in oracle for the vjp side against `f`'s
+ * own math.
+ */
+fun <A, R> customVjpJvp(f: (A) -> R, vjpFn: (R, A) -> A, jvpFn: (A, A) -> R): (A) -> R = f
+
+/** §0.4.416 — the two-argument [customVjpJvp]. */
+fun <A, B, R> customVjpJvp2(
+    f: (A, B) -> R,
+    vjpFn: (R, A, B) -> Pair<A, B>,
+    jvpFn: (A, B, A, B) -> R,
+): (A, B) -> R = f
 
 /**
  * §0.4.415 — the result of [checkCustomVjp]: both sides of the JVP⇄VJP

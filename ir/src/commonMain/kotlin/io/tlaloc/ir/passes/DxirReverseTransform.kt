@@ -1335,6 +1335,21 @@ object DxirReverseTransform {
             "handleCoarsenedAdjoint: upstream result-index out of bounds for ${coarsened.types.size}-" +
                 "result COARSENED id=${coarsened.id}; got keys=${upstreams.keys}"
         }
+        // §0.4.416 — Phase B5 (customJvp): a USER node carrying a tangent_body
+        // but NO gradient_body is forward-only. REFUSE loudly by name — the
+        // exact mirror of DxirForwardTransform's customVjp refusal: silently
+        // auto-differentiating primal_body here would make grad {} disagree
+        // with the user's deliberately-supplied forward tangent (the §0.4.392
+        // no-silent-fork principle, both directions).
+        if (coarsened.attrs["gradient_body"] == null && coarsened.attrs["user_gradient"] == true) {
+            error(
+                "handleCoarsenedAdjoint: COARSENED id=${coarsened.id} carries a USER-supplied " +
+                    "tangent but no gradient (user_gradient attr — a customJvp call-form): " +
+                    "reverse mode would auto-differentiate primal_body and silently disagree " +
+                    "with the user's forward tangent. Supply a vjpFn (customVjpJvp) or use " +
+                    "forward mode (jvp {})",
+            )
+        }
         val gradBody = coarsened.attrs["gradient_body"] as? io.tlaloc.ir.DxirFunction
             ?: error("handleCoarsenedAdjoint: COARSENED op id=${coarsened.id} missing gradient_body attr")
         // §0.4.179 — Phase 5c. Single-result preserved as the K=1 case (1 + N params).

@@ -584,18 +584,58 @@ object DxirForwardTransform {
                 // from the primal's math. Silently auto-differentiating the
                 // primal would make jvp {} and grad {} DISAGREE over the same
                 // body (the §0.4.392 no-silent-fork principle), so forward mode
-                // refuses unless the user also supplies a jvpFn — Candidate C's
-                // `tangent_body` attr, spliced by this same arm once it lands
-                // (a recorded Phase B5 tail; the ratified refuse-unless-jvpFn
-                // policy).
+                // refuses unless the user also supplies a jvpFn — the
+                // `tangent_body` attr (§0.4.416, the ratified
+                // refuse-unless-jvpFn policy's lifting half).
                 if (node.attrs["user_gradient"] == true && node.attrs["tangent_body"] == null) {
                     error(
                         "DxirForwardTransform: COARSENED id=${node.id} carries a USER-supplied " +
                             "gradient (user_gradient attr — a customVjp call-form): forward mode " +
                             "would auto-differentiate primal_body and silently disagree with the " +
-                            "user's reverse adjoint. Supply a jvpFn (customVjpJvp, a recorded " +
-                            "Phase B5 tail) or use reverse mode (grad {} / vjp {})",
+                            "user's reverse adjoint. Supply a jvpFn (customVjpJvp) or use " +
+                            "reverse mode (grad {} / vjp {})",
                     )
+                }
+                // §0.4.416 — Phase B5 (customJvp / customVjpJvp): a USER
+                // tangent_body splices IN PLACE OF the auto-tangent — the
+                // user's jvpFn runs verbatim, exactly as the user's vjpFn does
+                // in reverse (the design doc's semantic-fork principle: each
+                // mode honours ITS body, never derives one from the other).
+                // Param convention: `(primals…, tangents…) → (dy)` — the same
+                // order this transform's own jvp emission uses (params then
+                // d_params), so the user's declared jvpFn signature IS the
+                // splice contract with no adapter. The tangent, like the
+                // reverse contributions, honours the runtime shape contract:
+                // statically concrete result types need nothing (the
+                // construction-time type check pinned them); sentinel-bearing
+                // ones wrap in CHECK_SHAPE_LIKE against the node's own value
+                // clone — the one template whose runtime dims the tangent
+                // must match. Machine-coarsened nodes (no user_gradient)
+                // never carry tangent_body and keep the auto path verbatim.
+                val userTangentBody = node.attrs["tangent_body"] as? DxirFunction
+                if (node.attrs["user_gradient"] == true && userTangentBody != null) {
+                    val nOps = node.operands.size
+                    require(userTangentBody.params.size == 2 * nOps) {
+                        "DxirForwardTransform: COARSENED id=${node.id} tangent_body has " +
+                            "${userTangentBody.params.size} params; expected 2·N (= ${2 * nOps}) " +
+                            "— (primals…, tangents…)"
+                    }
+                    val spliceMap = HashMap<Int, DxirNode>()
+                    for (i in 0 until nOps) {
+                        spliceMap[userTangentBody.params[i].id] = vOps[i]
+                        spliceMap[userTangentBody.params[nOps + i].id] = t(node.operands[i])
+                    }
+                    spliceForwardBody(node, userTangentBody, spliceMap, b)
+                    val tangentReturn = userTangentBody.returns.single()
+                    val userTangent = spliceMap[tangentReturn.id] ?: error(
+                        "DxirForwardTransform: COARSENED id=${node.id} tangent_body return " +
+                            "id=${tangentReturn.id} missing from splice map",
+                    )
+                    return if (ty.dims.all { it > 0 }) {
+                        userTangent
+                    } else {
+                        b.op(OpKind.CHECK_SHAPE_LIKE, listOf(userTangent, v), ty)
+                    }
                 }
                 val primalBody = node.attrs["primal_body"] as? DxirFunction
                     ?: error(
@@ -613,33 +653,7 @@ object DxirForwardTransform {
                     spliceMap[jvpBody.params[i].id] = vOps[i]
                     spliceMap[jvpBody.params[nOps + i].id] = t(node.operands[i])
                 }
-                for (inner in jvpBody.body) {
-                    when (inner) {
-                        is DxirParam -> Unit
-                        is DxirConst ->
-                            spliceMap[inner.id] = b.const(inner.value, inner.type, inner.sharding)
-                        is DxirOp -> {
-                            require(inner.regions.isEmpty() && !inner.isMultiResult) {
-                                "DxirForwardTransform: COARSENED id=${node.id} jvp body op " +
-                                    "${inner.op} (id=${inner.id}) has regions or multiple " +
-                                    "results — out of the splice scope"
-                            }
-                            val ops = inner.operands.map {
-                                spliceMap[it.id] ?: error(
-                                    "DxirForwardTransform: COARSENED id=${node.id} jvp body op " +
-                                        "id=${inner.id} references unknown id=${it.id} " +
-                                        "(broken SSA in primal_body?)",
-                                )
-                            }
-                            spliceMap[inner.id] =
-                                b.op(inner.op, ops, inner.type, inner.attrs, inner.sharding)
-                        }
-                        else -> error(
-                            "DxirForwardTransform: unsupported node ${inner::class.simpleName} " +
-                                "in COARSENED id=${node.id} jvp body",
-                        )
-                    }
-                }
+                spliceForwardBody(node, jvpBody, spliceMap, b)
                 val tangentReturn = jvpBody.returns[primalBody.returns.size]
                 spliceMap[tangentReturn.id] ?: error(
                     "DxirForwardTransform: COARSENED id=${node.id} tangent return " +
@@ -664,6 +678,49 @@ object DxirForwardTransform {
                 "DxirForwardTransform: no tangent rule for ${node.op} " +
                     "(widen the transform, don't guess)",
             )
+        }
+    }
+
+    /**
+     * §0.4.416 — the straight-line inline splice both COARSENED tangent paths
+     * share: clone [body]'s ops into [b] with operand references resolved
+     * through [spliceMap] (pre-seeded with the param bindings). Used by the
+     * §0.4.403 auto path (body = `apply(primal_body)`) and the §0.4.416 user
+     * path (body = the user's `tangent_body`) — same scope rules: no regions,
+     * no multi-result.
+     */
+    private fun spliceForwardBody(
+        node: DxirOp,
+        body: DxirFunction,
+        spliceMap: HashMap<Int, DxirNode>,
+        b: DxirBuilder,
+    ) {
+        for (inner in body.body) {
+            when (inner) {
+                is DxirParam -> Unit
+                is DxirConst ->
+                    spliceMap[inner.id] = b.const(inner.value, inner.type, inner.sharding)
+                is DxirOp -> {
+                    require(inner.regions.isEmpty() && !inner.isMultiResult) {
+                        "DxirForwardTransform: COARSENED id=${node.id} spliced body op " +
+                            "${inner.op} (id=${inner.id}) has regions or multiple " +
+                            "results — out of the splice scope"
+                    }
+                    val ops = inner.operands.map {
+                        spliceMap[it.id] ?: error(
+                            "DxirForwardTransform: COARSENED id=${node.id} spliced body op " +
+                                "id=${inner.id} references unknown id=${it.id} " +
+                                "(broken SSA in the spliced body?)",
+                        )
+                    }
+                    spliceMap[inner.id] =
+                        b.op(inner.op, ops, inner.type, inner.attrs, inner.sharding)
+                }
+                else -> error(
+                    "DxirForwardTransform: unsupported node ${inner::class.simpleName} " +
+                        "in COARSENED id=${node.id} spliced body",
+                )
+            }
         }
     }
 }

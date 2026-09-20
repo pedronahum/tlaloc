@@ -191,7 +191,7 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     // jvp(f): keep only the tangent returns (the second half —
                     // DxirForwardTransform emits values(m) ++ tangents(m)); the
                     // full body stays (tangents depend on the primal values).
-                    val toSynthesise: DxirFunction = if (tangentOnly) {
+                    val toSynthesiseRaw: DxirFunction = if (tangentOnly) {
                         val m = fn.returns.size
                         DxirFunction(
                             jvpFn.name,
@@ -202,6 +202,36 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         )
                     } else {
                         jvpFn
+                    }
+                    // §0.4.416 — Phase B5 (customJvp): the forward transform's
+                    // COARSENED arm clones the node as the VALUE stream (its
+                    // tangent came from the tangent_body / primal_body splice),
+                    // so a `jvp {}` body containing a custom-derivative
+                    // call-form reaches synthesis with a COARSENED in it —
+                    // which synthesis has no arm for. The tangent splice
+                    // already happened, so what remains is pure value
+                    // recomputation: decomposeCoarsened inlines `primal_body`
+                    // in place, exactly the §0.4.415 grad-branch treatment.
+                    // No-op when no COARSENED survived (every §0.4.372/403
+                    // straight-line path, byte-identical).
+                    val toSynthesise: DxirFunction = if (
+                        toSynthesiseRaw.body.any { it is DxirOp && it.op == io.tlaloc.ir.OpKind.COARSENED }
+                    ) {
+                        try {
+                            io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened(toSynthesiseRaw)
+                        } catch (t: Throwable) {
+                            mc.report(
+                                CompilerMessageSeverity.WARNING,
+                                "Tlaloc IR extension: decomposeCoarsened failed on the jvp of " +
+                                    "'${fn.name}' (${t::class.simpleName}: ${t.message}); " +
+                                    "synthesising with the COARSENED intact (synthesis will " +
+                                    "reject it loudly)",
+                                null,
+                            )
+                            toSynthesiseRaw
+                        }
+                    } else {
+                        toSynthesiseRaw
                     }
                     val replacement = synth.synthesise(toSynthesise, transformed, currentDeclarationParent!!)
                     if (replacement == null) {
@@ -309,13 +339,38 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     // the assembly loop wants only the tangent half (the full body stays —
                     // tangents depend on the primal values).
                     val half = seeded.returns.size / 2
-                    val tangentFn = DxirFunction(
+                    val tangentFnRaw = DxirFunction(
                         seeded.name,
                         seeded.params,
                         seeded.body,
                         seeded.returns.subList(half, seeded.returns.size),
                         seeded.meshes,
                     )
+                    // §0.4.416 — Phase B5: `hessian` composes forward OVER
+                    // reverse, and a customVjpJvp COARSENED can survive BOTH
+                    // transforms (the reverse clone for value recomputation,
+                    // then the forward value clone) into the seeded body —
+                    // decompose it before synthesis, the same treatment as the
+                    // grad and jvp branches. No-op on every pre-B5 path.
+                    val tangentFn: DxirFunction = if (
+                        tangentFnRaw.body.any { it is DxirOp && it.op == io.tlaloc.ir.OpKind.COARSENED }
+                    ) {
+                        try {
+                            io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened(tangentFnRaw)
+                        } catch (t: Throwable) {
+                            mc.report(
+                                CompilerMessageSeverity.WARNING,
+                                "Tlaloc IR extension: decomposeCoarsened failed on the seeded " +
+                                    "body of '${fn.name}' (${t::class.simpleName}: ${t.message}); " +
+                                    "synthesising with the COARSENED intact (synthesis will " +
+                                    "reject it loudly)",
+                                null,
+                            )
+                            tangentFnRaw
+                        }
+                    } else {
+                        tangentFnRaw
+                    }
                     // Seeded return type: jvp/jvp2's dy has f's return type; hvp's H·v
                     // has x's; hvp2's two gradient tangents box as Pair<A, B>.
                     val seedRet: org.jetbrains.kotlin.ir.types.IrType? = when {

@@ -4,8 +4,10 @@
 four §6 questions — Candidate A call-form named `customVjp`/`customVjp2`;
 forward-mode = refuse-unless-jvpFn; the JVP⇄VJP debug oracle ships
 (`io.tlaloc.autograd.checkCustomVjp`); Candidate B deferred. v1 LANDED at
-§0.4.415** — see §7 below for what the implementation taught that this
-design had not anticipated (recorded per the §0.4.383 precedent).
+§0.4.415; the forward side (Candidate C — `customJvp`/`customJvp2`/
+`customVjpJvp`/`customVjpJvp2`) LANDED at §0.4.416** — see §7 below for
+what the implementation taught that this design had not anticipated, and
+§8 for the forward-side decisions (recorded per the §0.4.383 precedent).
 Companion to [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md) Phase B5.
 
 ## 1. What "custom derivatives" means, in both systems
@@ -132,11 +134,14 @@ worse discoverability of failure (action at a distance when the annotation
 is misspelled). Recommendation: land A first; B rides on a later
 "serialized dxir in artifacts" decision.
 
-### Candidate C — `customJvp` / the forward side
+### Candidate C — `customJvp` / the forward side (LANDED §0.4.416)
 
 `customJvp(f, jvpFn)` with `jvpFn: (A, A) -> R` (primal, tangent → tangent)
-is the forward twin. It is NOT required for v1 — but the forward
-SEMANTICS question it answers IS v1-blocking; see §4.
+is the forward twin. It was NOT required for v1 — but the forward
+SEMANTICS question it answers WAS v1-blocking; see §4. Landed at §0.4.416
+together with the combined `customVjpJvp(f, vjpFn, jvpFn)` and both 2-arg
+spellings; see §8 for the as-built record (param convention, the reverse
+mirror refusal, the pipeline decompose steps).
 
 ## 3. What the FIR checker can verify at compile time
 
@@ -219,8 +224,10 @@ pins. No emitter work (COARSENED is decomposed/spliced before codegen —
 pre-existing invariant).
 
 **One § each, later**: `customJvp` + the combined `customVjpJvp` (flips
-the forward refusal); the debug cross-check helper if not folded into v1;
-multi-result `f` reverse-only.
+the forward refusal) — LANDED §0.4.416, all four spellings in one § since
+the 2-arg widening proved purely mechanical (§8); the debug cross-check
+helper if not folded into v1 (it was — §0.4.415); multi-result `f`
+reverse-only.
 
 **Multi-§, explicitly deferred**: Candidate B annotations (same-module),
 cross-module (needs the serialized-dxir decision), `Wrappable`-style
@@ -294,8 +301,55 @@ slots (rides the FloatScalar boxing tail from §0.4.397).
   operands of different runtime extents with a swapping vjpFn — the
   mismatch no static type can see).
 
-**Recorded tails**: `customJvp` / `customVjpJvp` (`tangent_body`, flips the
-forward refusal); GPU emission of user gradient bodies; multi-result `f`
-(reverse-only); non-const captures; Candidate B; `vjp {}`/`jacobianReverse`
-over customVjp bodies (the decompose step currently runs on the `grad`
-branch only — the seeded branches fall back loudly to `pluginMissing`).
+**Recorded tails** (post-§0.4.416): GPU emission of user gradient bodies;
+multi-result `f` (reverse-only); non-const captures; Candidate B;
+`vjp {}`/`jacobianReverse` over custom-derivative bodies (the decompose
+step runs on the `grad`, `jvp`, and `jacobian`/`hessian` branches — the
+seeded-cotangent branches still fall back loudly to `pluginMissing`).
+
+## 8. What the forward side (§0.4.416) decided and taught
+
+- **The `tangent_body` param convention**, left open by §2's Candidate C
+  sketch: `(primal_0 … primal_N-1, tangent_0 … tangent_N-1) → (dy)` —
+  DxirForwardTransform's OWN emission order (params then d_params), so the
+  user's declared `jvpFn` signature IS the splice contract with an identity
+  adapter at every arity, the exact analogue of vjpFn's `(upstream, x…)`.
+  `customJvp2`'s `jvpFn: (A, B, A, B) -> R` returns the single result
+  tangent directly — no Pair unboxing anywhere on the forward side, which
+  is why the 2-arg widening was purely mechanical and all four spellings
+  landed in one § (the §0.4.406 arity-agnosticism, again).
+- **Construction-time validation**: `validateCoarsenedShape` checks a
+  present `tangent_body` (2·N params typed like the operands twice over,
+  single return typed like the single result, `user_gradient` required —
+  machine coarsening never stores tangents), and `gradient_body` becomes
+  optional for EXACTLY the customJvp-only shape (`user_gradient` +
+  `tangent_body`, nothing else).
+- **The mirror refusal**: reverse mode over a customJvp-only node refuses
+  loudly naming `customJvp` in `handleCoarsenedAdjoint` — the same
+  no-silent-fork sentence as the forward refusal, pointing at
+  `customVjpJvp` / `jvp {}`. Since the `grad` checker probe runs the
+  reverse transform, `grad {}` over a customJvp body fails the BUILD
+  (`NOT_DIFFERENTIABLE` is error-severity), the §0.4.415 symmetry.
+- **The forward shape contract is the reverse one mirrored**: a
+  sentinel-typed user tangent wraps in `CHECK_SHAPE_LIKE` against the
+  node's own value clone (the one template whose runtime dims dy must
+  match); statically concrete types skip the wrap — their extents were
+  already pinned by the construction-time type equality.
+- **Semantic fork, explicit**: `customVjpJvp`'s two bodies are SEPARATE
+  assertions. Certified with deliberately INCONSISTENT bodies (vjpFn = 5·u,
+  jvpFn = 3·dt, primal math = 2x — three different answers, each mode
+  pinned to ITS own) and with CONSISTENT bodies through the JVP⇄VJP
+  cross-identity E2E on the tensor path.
+- **hessian composes through a customVjpJvp node** — the open question in
+  the §5 slicing. forward-over-reverse meets the COARSENED **again** inside
+  the reverse-produced body (the §7 value-recomputation clone carries all
+  attrs), and the forward arm splices `tangent_body` there — certified at
+  IR level (H·v of Σ c(x)² = 12x²·v through the mid-gradient-body splice)
+  and E2E (`hessian` of Σ x² over the sentinel tensor path = 2I).
+- **Two more pipeline decompose steps**: the §7 "COARSENED survives into
+  the function being synthesised" story applies to the forward branches
+  too — the forward transform clones the node as the VALUE stream — so the
+  plugin's `jvp`/`valueAndJvp` and `jacobian`/`hessian` branches now run
+  `decomposeCoarsened` before synthesis when a COARSENED survived (no-op
+  otherwise, byte-identical pre-B5). This incidentally opens synthesis to
+  machine-COARSENED forward bodies that previously fell back.
