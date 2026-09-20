@@ -1593,8 +1593,39 @@ reachable from `grad {}`, not new math. New-op families come after.
   interpreter handle overlapping windows, emission refuses loudly).
   Remaining: grouped/depthwise conv (feature_group_count > 1) — the only
   live C4 item, and beyond DiffKT parity.
-- **C5. `integral`** *(audit)*: Romberg quadrature with FTC-wired
-  forward/reverse derivatives (DiffKT `Integral.kt`).
+- ✅ **C5. `integral` — DONE (§0.4.411)** *(audit)*: Romberg quadrature with
+  FTC-wired derivatives, as the scalar host surface it naturally is.
+  - `:core/Integral.kt` (the §0.4.402 one-source-of-truth convention):
+    `rombergIntegrate(a, b, maxDepth = 16, tol = 1e-8, f)` — Richardson-
+    extrapolated trapezoid tableau, two live rows, odd-nodes-only refinement,
+    mixed absolute/relative early exit — returning `RombergResult(value,
+    depth, converged)` (non-convergence is REPORTED, not thrown); `integral`
+    Double + Float sugar; `integralWithBoundGrads` = (value, dA, dB) with the
+    bound derivatives wired ANALYTICALLY by the fundamental theorem of
+    calculus (dA = −f(a), dB = f(b) — two evaluations, no differentiation
+    through the quadrature loop; scalar, so the same numbers serve JVP and
+    VJP). Reversed bounds need no special case (every formula is linear in
+    b − a).
+  - Certified (`IntegralTest`): closed forms ∫₀¹x² = 1/3 (depth-2 exact,
+    1e-12), ∫₀^π sin = 2, ∫₁ᵉ 1/x = 1, steep ∫₀¹e^(−50x) (all 1e-9);
+    Float surface 1e-6; orientation + empty-interval pins; convergence
+    behavior pinned through `RombergResult` (x² early-exits at depth 2,
+    the steep case needs depth ≥ 5, and starved of depth it reports
+    `converged = false` with the best diagonal); FTC wiring vs central
+    differences OF THE QUADRATURE ITSELF (tol-1e-12 inner quadratures keep
+    FD noise below the 2h denominator); parameter-derivative contract
+    d/dθ ∫ f(x;θ) dx = ∫ ∂f/∂θ dx three ways (central difference /
+    quadrature of ∂f/∂θ / closed form) for f(x;θ) = e^(−θx).
+  - **`grad {}` surface is B5-gated (recorded)**: the `f` argument is an
+    opaque Kotlin lambda to the FIR lowering, so a grad{}-integrable
+    `integral` op is exactly a custom-derivative citizen
+    ([CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md), awaiting
+    ratification). Lowering shape once B5 lands: an INTEGRAL region op whose
+    body is the lowered `f`, primal = Romberg over interpreted body
+    evaluations, VJP = FTC bound adjoints (−f(a)·v̄, f(b)·v̄ via two body
+    evaluations) + Leibniz parameter adjoints (quadrature over the body's
+    own VJP w.r.t. captured params — the same tableau, adjoint integrand),
+    forward tangent the mirror image. No plugin work forced into C5.
 
 ### Phase D — random (DiffKT `RandomKey` parity)
 
@@ -1697,7 +1728,7 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 | Arbitrary nesting (fwd∘fwd, rev∘rev, …) | ✅/🟡 | full matrix certified at IR level + refusals pinned (§0.4.401); user-facing n-th-order intrinsic spellings still open |
 | `ifThenElse(cond, a, b)` (scalar + tensor, differentiable) | ✅ | `where` §0.4.364; scalar branches also via IF regions + coarsening |
 | `Wrappable`/`Wrapper` (derivatives through user data structures; examples lean on this) | 🟡 | Tlaloc's K2 plugin lowers data-class params structurally — different mechanism, same end; certify in B5 |
-| `integral(a, b, f)` — Romberg quadrature with FTC-wired fwd/rev derivatives | ❌ | genuinely novel; **new C5** |
+| `integral(a, b, f)` — Romberg quadrature with FTC-wired fwd/rev derivatives | ✅ | C5 §0.4.411 — `:core` host Romberg + `integralWithBoundGrads` FTC triple; `grad {}` surface recorded as B5-gated |
 | `primal(x, f)`, `basePrimal`, `DerivativeID` plumbing | ➖ | runtime-tape bookkeeping; no analogue needed in a compile-time IR |
 
 #### Scalar math (`DScalar` surface)
@@ -1819,25 +1850,25 @@ story. Not blocking A–E.
 
 ## Suggested § sequencing
 
-**Position at §0.4.410 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
+**Position at §0.4.411 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
 in substance (§0.4.366–397, §0.4.400/409 — remaining tails: A2's
 `view`/`withChange`/`meld`/`split`, gather/scatter axis+list forms, the
 mixed rank-increase+stretch broadcast, `FloatScalar`-param boxing) →
 B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → C1–C3 ✅
-(§0.4.395/396/402/405) → D1 ✅ (§0.4.408).
+(§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; `grad {}`
+integral is B5-gated) → D1 ✅ (§0.4.408).
 
 **Remaining, in recommended order:**
 1. **Ratification gates (Pedro)**: B5 custom derivatives
    ([CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md) — one §
-   once the API is picked); E sparse
+   once the API is picked; also unlocks the `grad {}` `integral` surface
+   per C5's recorded lowering shape); E sparse
    ([SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md) — recommended
    conditional no-go); F model layer (product decision, unchanged).
-2. **C5 `integral`** — Romberg + FTC derivatives, self-contained, no
-   blocker.
-3. **D2 reparameterized gradients** — its C1 prerequisite
+2. **D2 reparameterized gradients** — its C1 prerequisite
    (digamma/polygamma) landed §0.4.402/405; explicit-threefry StableHLO
    emission is the recorded D1 tail to take first if GPU draws matter.
-4. **Recorded tails on the books** (each its own §-sized slice when
+3. **Recorded tails on the books** (each its own §-sized slice when
    pulled): B2's reverse-assembled tall Jacobians; B3's multi-result
    COARSENED tangents + IF-inside-primal_body splice; A-phase tails above;
    C4's grouped/depthwise conv (beyond parity).
