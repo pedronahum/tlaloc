@@ -26,11 +26,17 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
         "io.tlaloc.autograd.valueAndJvp",
         "io.tlaloc.autograd.jvp2",
         "io.tlaloc.autograd.valueAndJvp2",
+        // §0.4.394 — Phase B2: assembly intrinsics over the seeded transforms.
+        "io.tlaloc.autograd.jacobian",
+        "io.tlaloc.autograd.hessian",
     )
 
     /** §0.4.372 — the forward-mode intrinsics probe differentiability with the
-     * forward transform (JVP), not the reverse one. */
-    private val forwardIntrinsics: Set<String> = setOf("jvp", "valueAndJvp", "jvp2", "valueAndJvp2")
+     * forward transform (JVP), not the reverse one. §0.4.394 — `jacobian`
+     * assembles forward columns, so it probes the same way (its lambda returns
+     * a TENSOR, which the reverse probe would reject outright). */
+    private val forwardIntrinsics: Set<String> =
+        setOf("jvp", "valueAndJvp", "jvp2", "valueAndJvp2", "jacobian")
 
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirFunctionCall) {
@@ -73,12 +79,21 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                     it is io.tlaloc.ir.DxirOp && it.regions.isNotEmpty() && it.op != io.tlaloc.ir.OpKind.IF
                 }
                 if (shapeErrors.isEmpty() && !hasLoopRegions) {
-                    val probe: () -> Unit =
-                        if (callableId.callableName.asString() in forwardIntrinsics) {
+                    val name = callableId.callableName.asString()
+                    val probe: () -> Unit = when {
+                        // §0.4.394 — `hessian` is forward-OVER-reverse, so the
+                        // check-time probe composes both transforms exactly as
+                        // the IR extension will.
+                        name == "hessian" -> {
+                            { DxirForwardTransform.apply(DxirReverseTransform.apply(result.fn)) }
+                        }
+                        name in forwardIntrinsics -> {
                             { DxirForwardTransform.apply(result.fn) }
-                        } else {
+                        }
+                        else -> {
                             { DxirReverseTransform.apply(result.fn) }
                         }
+                    }
                     runCatching { probe() }.onFailure { t ->
                         reporter.reportOn(
                             expression.source,

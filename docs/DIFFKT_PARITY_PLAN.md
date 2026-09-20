@@ -903,9 +903,57 @@ reachable from `grad {}`, not new math. New-op families come after.
   `Jvp2IntrinsicTest` now runs the genuine bilinear product rule over a real
   `(x, w)` pair (plus `Σ(a⊙b)` as the plumbing check) against an independent
   Double reference.
-- **B2. `jacobian` + `hessian` intrinsics**: jacobian via forward (wide) or
-  reverse (tall) column/row assembly; hessian = forward-over-reverse
-  (already pinned at IR level).
+- **B2. `jacobian` + `hessian` intrinsics ✅ (§0.4.394)** — dense derivative
+  assembly, with ZERO IR-layer changes: the whole slice is user surface +
+  plugin dispatch, because both seeded single-pass functions already existed.
+  - **The mechanism — synthesise the seeded pass once, assemble at runtime.**
+    A dense Jacobian's row/column COUNT is a runtime quantity under
+    `grad {}`'s -1 sentinel dims, so the assembly loop cannot live in the
+    synthesised IR. Instead the plugin synthesises the 2-param seeded lambda
+    (`jacobian`: the §0.4.361 forward transform's `jvp(x, dx) → dy`,
+    tangent-only; `hessian`: forward-OVER-reverse `hvp(x, v) → H·v` — the
+    composition pinned at IR level since §0.4.361, and forward-over-reverse
+    rather than reverse-over-reverse precisely because the runtime-extent
+    adjoint ops carry forward tangents but no VjpRules) and hands it to a
+    runtime helper in `:autograd` (`assembleJacobianForward` /
+    `assembleHessianForward`) that loops over the input's standard basis
+    where the actual extents are known, stacking `[m, n]` columns / `[n, n]`
+    rows. DiffKT does the same identity-seeding loop inside
+    `reverseDerivative`; the cost (n seeded passes) is the classic dense
+    trade.
+  - **Result typing**: `J[i, j] = ∂yᵢ/∂xⱼ` over the ROW-MAJOR FLATTENED
+    input/output (any input rank — the basis is built on flat data), erased
+    to `DTensor<Rank2<Sym, Sym>, F32>` (no static witness carries the
+    runtime extents — the `concat` convention). A `Float`-returning `f`
+    degenerates to the `[1, n]` gradient row.
+  - **The one synthesis change — `callTypeOverride`.** `synthesise` types
+    params/returns from the call site's `FunctionN<…>` type args, but an
+    assembly call site's own type is the 1-param ASSEMBLED function while
+    the lambda being synthesised takes `(x, seed)`. The extension builds the
+    seeded lambda's true `Function2<A, A, R>` type (A from the intrinsic
+    call's type, R from the `f` argument's type) and passes it through; the
+    original call keeps supplying source offsets only.
+  - **No tape fallback** (the `concat` precedent): a synthesis rejection
+    keeps the original call, which throws `pluginMissing` loudly at first
+    invocation. The FIR checker probes `jacobian` with the forward transform
+    (its lambda returns a TENSOR, which the reverse probe would reject) and
+    `hessian` with the composed forward∘reverse, so failures are red
+    squiggles at the call site.
+  - Certified E2E (`JacobianHessianIntrinsicTest`, real plugin, no stubs —
+    the REAL generic `:autograd` declarations resolve off the classpath, so
+    the shipped surface itself is what's certified): `jacobian` over
+    `x ⊙ x` (diag), `x · Σx` (non-diagonal — the A5a computed-scalar splat
+    under the forward transform, tangent through BOTH product-rule factors),
+    `(x ⊙ x).sum()` (the `[1, n]` row), and a RANK-2 input (the row-major
+    flatten pin, `[4, 4]` from `[2, 2]`); `hessian` over `Σx²` (2I),
+    `(Σx)²` (rank-one, all 2s — the tangent threads the reverse body's
+    un-reduce broadcast), and `Σ exp(x)` (value-DEPENDENT diag — the tangent
+    threads the adjoint's exp recompute).
+  - v1 scope: single-argument `f`, straight-line bodies, host F32. Still
+    open in B2's neighbourhood: the seeded-cotangent user surface
+    (`vjp`/`primalAndPullback`, audit item 10 — `DxirReverseTransform`'s
+    `seedAsParam` mode exists but is scalar-return-gated), reverse-assembled
+    (tall) Jacobians for m ≪ n, and multi-arg `jacobian2`/`hessian2`.
 - **B3. Forward transform through regions**: IF/WHILE bodies + COARSENED
   (tangent of a coarsened op = forward transform of its `primal_body`) —
   mirrors reverse-mode's history.

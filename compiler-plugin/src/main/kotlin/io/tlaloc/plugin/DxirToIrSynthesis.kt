@@ -704,10 +704,21 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return null
     }
 
+    /**
+     * @param callTypeOverride §0.4.394 — Phase B2. When non-null, the
+     *   `FunctionN<P0, …, Pn-1, R>` type used to harvest per-param and return
+     *   IrTypes, INSTEAD of [originalCall]'s own type. The assembly intrinsics
+     *   (`jacobian` / `hessian`) synthesise a 2-param seeded lambda
+     *   (`jvp(x, dx)` / `hvp(x, v)`) at a call site whose own type is the
+     *   1-param assembled function — the caller builds the seeded lambda's
+     *   true function type and passes it here. [originalCall] still supplies
+     *   source offsets.
+     */
     fun synthesise(
         fn: DxirFunction,
         originalCall: IrCall,
         parent: IrDeclarationParent,
+        callTypeOverride: IrSimpleType? = null,
     ): IrFunctionExpression? {
         lastFailureReason = null
         // Harvest the rank-1 DTensor IrType from the call site if any DxirParam is rank-1.
@@ -717,7 +728,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // covered by §0.4.10). Multiple tensor shapes would require a per-node map.
         val firstTensorParamIdx = fn.params.indexOfFirst { isAcceptedTensorType(it.type) }
         val tensorIrType: IrType? = if (firstTensorParamIdx < 0) null else run {
-            val callType = originalCall.type as? IrSimpleType
+            val callType = callTypeOverride ?: originalCall.type as? IrSimpleType
                 ?: return reject("call type ${originalCall.type} is not IrSimpleType")
             callType.arguments.getOrNull(firstTensorParamIdx)?.typeOrNull
                 ?: return reject("tensor param at idx=$firstTensorParamIdx has no type arg on call type")
@@ -729,7 +740,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // tensor operands onto a single `tensorIrType`. For 1-param surfaces the map's
         // sole entry equals `tensorIrType`; for n-param surfaces (n ≥ 2) entries differ
         // when the params have distinct shapes.
-        val callType = originalCall.type as? IrSimpleType
+        val callType = callTypeOverride ?: originalCall.type as? IrSimpleType
         val paramIrTypeMap = HashMap<Int, IrType>()
         if (callType != null) {
             for ((idx, p) in fn.params.withIndex()) {

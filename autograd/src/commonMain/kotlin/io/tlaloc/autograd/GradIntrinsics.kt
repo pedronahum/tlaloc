@@ -18,7 +18,7 @@ package io.tlaloc.autograd
  * For plugin-free scalar work, the [Tracer]-tape API
  * ([gradWithScalars], [valueAndGradWithScalars]) remains available.
  */
-private fun pluginMissing(name: String): Nothing = throw IllegalStateException(
+internal fun pluginMissing(name: String): Nothing = throw IllegalStateException(
     "Tlaloc: `$name { }` requires the Tlaloc K2 compiler plugin, which rewrites this call at " +
         "compile time. Add `io.tlaloc:compiler-plugin` to kotlinCompilerPluginClasspath " +
         "(docs/GETTING_STARTED.md), or use the Tracer-tape API (io.tlaloc.autograd.gradWithScalars) " +

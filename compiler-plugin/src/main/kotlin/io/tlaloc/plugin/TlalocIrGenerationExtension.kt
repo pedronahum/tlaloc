@@ -20,8 +20,16 @@ import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrExpression
+import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
+import org.jetbrains.kotlin.ir.expressions.impl.fromSymbolOwner
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
+import org.jetbrains.kotlin.ir.types.IrSimpleType
+import org.jetbrains.kotlin.ir.types.typeOrNull
+import org.jetbrains.kotlin.ir.types.typeWith
 import org.jetbrains.kotlin.ir.util.callableId
+import org.jetbrains.kotlin.name.CallableId
+import org.jetbrains.kotlin.name.FqName
+import org.jetbrains.kotlin.name.Name
 
 /**
  * Session-4 IR phase. Walks every [IrCall] in the module fragment; for each call whose
@@ -198,6 +206,136 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         null,
                     )
                     return replacement
+                }
+
+                // §0.4.394 — Phase B2: the assembly intrinsics. `jacobian` synthesises
+                // the forward transform's seeded `jvp(x, dx) → dy`; `hessian` composes
+                // forward-OVER-reverse into `hvp(x, v) → H·v` (the HVP composition
+                // pinned at IR level since §0.4.361 — the runtime-extent adjoint ops
+                // carry forward tangents but no VjpRules, which is exactly why the
+                // Hessian is not reverse-over-reverse). The seeded 2-param lambda is
+                // synthesised with an explicit callTypeOverride (the call site's own
+                // type is the 1-param ASSEMBLED function) and handed to the matching
+                // io.tlaloc.autograd.assemble*Forward helper, which loops over the
+                // input's standard basis at RUNTIME — where the actual extents are
+                // known — and stacks the [m, n] / [n, n] dense result. There is no
+                // runtime-tape fallback for these (the `concat` precedent): a failed
+                // synthesis keeps the original call, which throws pluginMissing loudly.
+                val assemblyIntrinsic = callableName == "jacobian" || callableName == "hessian"
+                if (assemblyIntrinsic) {
+                    if (fn.params.size != 1 || fn.returns.size != 1) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "$callableName v1 scope is single-param single-return " +
+                                "(got ${fn.params.size} params, ${fn.returns.size} returns)",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val callSiteType = transformed.type as? IrSimpleType
+                    val aType = callSiteType?.arguments?.getOrNull(0)?.typeOrNull
+                    val fArgType = transformed.arguments.getOrNull(0)?.type as? IrSimpleType
+                    val rType = fArgType?.arguments?.getOrNull(1)?.typeOrNull
+                    if (aType == null || rType == null) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "could not harvest the input/output IrTypes from the " +
+                                "$callableName call site (call type ${transformed.type})",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val seeded: DxirFunction = try {
+                        if (callableName == "jacobian") {
+                            DxirForwardTransform.apply(fn)
+                        } else {
+                            DxirForwardTransform.apply(DxirReverseTransform.apply(fn))
+                        }
+                    } catch (t: Throwable) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "the seeded ${if (callableName == "jacobian") "forward" else "forward-over-reverse"} " +
+                                "transform failed (${t::class.simpleName}: ${t.message})\n${fn.pretty().trimEnd()}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    // Tangent-only: DxirForwardTransform emits values(m) ++ tangents(m);
+                    // the assembly loop wants only the tangent half (the full body stays —
+                    // tangents depend on the primal values).
+                    val half = seeded.returns.size / 2
+                    val tangentFn = DxirFunction(
+                        seeded.name,
+                        seeded.params,
+                        seeded.body,
+                        seeded.returns.subList(half, seeded.returns.size),
+                        seeded.meshes,
+                    )
+                    // jvp(x, dx) → dy has f's return type; hvp(x, v) → H·v has x's.
+                    val seedRet = if (callableName == "jacobian") rType else aType
+                    val overrideType = pluginContext.irBuiltIns.functionN(2).symbol
+                        .typeWith(listOf(aType, aType, seedRet)) as? IrSimpleType
+                    if (overrideType == null) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "could not build the seeded lambda's Function2 type",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val seededLambda = synth.synthesise(
+                        tangentFn, transformed, currentDeclarationParent!!,
+                        callTypeOverride = overrideType,
+                    )
+                    if (seededLambda == null) {
+                        val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "seeded function falls outside the synthesis scope " +
+                                "[$reason]\nseeded function:\n${tangentFn.pretty().trimEnd()}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val helperName = if (callableName == "jacobian") {
+                        "assembleJacobianForward"
+                    } else {
+                        "assembleHessianForward"
+                    }
+                    val helperSym = pluginContext.referenceFunctions(
+                        CallableId(FqName("io.tlaloc.autograd"), Name.identifier(helperName)),
+                    ).singleOrNull()
+                    if (helperSym == null) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "io.tlaloc.autograd.$helperName not resolvable on the compile classpath",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val assembled = IrCallImpl.fromSymbolOwner(
+                        startOffset = transformed.startOffset,
+                        endOffset = transformed.endOffset,
+                        type = transformed.type,
+                        symbol = helperSym,
+                    )
+                    assembled.typeArguments[0] = aType
+                    if (assembled.typeArguments.size > 1) assembled.typeArguments[1] = rType
+                    assembled.arguments[0] = seededLambda
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc lowered '$callableName' to a seeded " +
+                            "${if (callableName == "jacobian") "forward" else "forward-over-reverse"} " +
+                            "pass + runtime basis assembly:\n${tangentFn.pretty().trimEnd()}",
+                        null,
+                    )
+                    return assembled
                 }
 
                 val includeForward = callableName == "valueAndGrad" || callableName == "valueAndGrad2"
@@ -420,6 +558,8 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
             "grad", "grad2", "valueAndGrad", "valueAndGrad2",
             // §0.4.372 — forward-mode (Phase B1). §0.4.387 — its two-argument forms.
             "jvp", "valueAndJvp", "jvp2", "valueAndJvp2",
+            // §0.4.394 — Phase B2: the assembly intrinsics.
+            "jacobian", "hessian",
         )
 
         /**
