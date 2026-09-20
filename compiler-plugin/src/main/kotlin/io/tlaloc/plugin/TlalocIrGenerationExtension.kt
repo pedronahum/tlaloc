@@ -465,31 +465,43 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                 // IS the seeded type). No runtime-tape fallback (the `concat`
                 // precedent): a failed synthesis keeps the original call →
                 // pluginMissing, loudly.
-                if (callableName == "jacobianReverse") {
-                    if (fn.params.size != 1 || fn.returns.size != 1) {
+                // §0.4.424 — the two-argument form `jacobianReverse2` rides the same
+                // branch: the seeded reverse transform and the §0.4.398 param rotation
+                // are arity-agnostic, so the generalisation is the gate (2 params),
+                // the harvested primal types (A, B from the call type's first two
+                // args), the override type (Function3<A, B, R, Pair<A, B>> — the
+                // 2-return pullback boxes as Pair exactly as vjp2's does), and the
+                // assembleJacobianReverse2 helper, which writes each pullback pass's
+                // (x̄, w̄) into row i of BOTH per-argument blocks.
+                if (callableName == "jacobianReverse" || callableName == "jacobianReverse2") {
+                    val jrArity = if (callableName.endsWith("2")) 2 else 1
+                    if (fn.params.size != jrArity || fn.returns.size != 1) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                                "jacobianReverse v1 scope is 1-param single-return " +
+                                "$callableName v1 scope is $jrArity-param single-return " +
                                 "(got ${fn.params.size} params, ${fn.returns.size} returns)",
                             null,
                         )
                         return transformed
                     }
                     val callSiteType = transformed.type as? IrSimpleType
-                    val aType = callSiteType?.arguments?.getOrNull(0)?.typeOrNull
+                    val jrPrimalTypes = (0 until jrArity).map {
+                        callSiteType?.arguments?.getOrNull(it)?.typeOrNull
+                    }
                     val fArg = transformed.arguments.getOrNull(0)
-                    val rType = (fArg?.type as? IrSimpleType)?.arguments?.getOrNull(1)?.typeOrNull
-                    if (aType == null || rType == null || fArg == null) {
+                    val rType = (fArg?.type as? IrSimpleType)?.arguments?.getOrNull(jrArity)?.typeOrNull
+                    if (jrPrimalTypes.any { it == null } || rType == null || fArg == null) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "could not harvest the input/output IrTypes from the " +
-                                "jacobianReverse call site (call type ${transformed.type})",
+                                "$callableName call site (call type ${transformed.type})",
                             null,
                         )
                         return transformed
                     }
+                    val jrPrimals = jrPrimalTypes.map { it!! }
                     val seededGrad: DxirFunction = try {
                         DxirReverseTransform.apply(fn, seedAsParam = true)
                     } catch (t: Throwable) {
@@ -512,8 +524,25 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         seededGrad.returns,
                         seededGrad.meshes,
                     )
-                    val overrideType = pluginContext.irBuiltIns.functionN(2).symbol
-                        .typeWith(listOf(aType, rType, aType))
+                    // The pullback's return: x̄ at arity 1; the Pair-boxed (x̄, w̄)
+                    // at arity 2 (synthesis boxes 2 returns as kotlin.Pair).
+                    val pbReturn: org.jetbrains.kotlin.ir.types.IrType? = if (jrArity == 1) {
+                        jrPrimals[0]
+                    } else {
+                        pluginContext.referenceClass(ClassId.fromString("kotlin/Pair"))
+                            ?.typeWith(jrPrimals)
+                    }
+                    if (pbReturn == null) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "could not build the seeded pullback's return type",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val overrideType = pluginContext.irBuiltIns.functionN(jrArity + 1).symbol
+                        .typeWith(jrPrimals + rType + pbReturn)
                     val seededLambda = synth.synthesise(
                         pullback, transformed, currentDeclarationParent!!,
                         callTypeOverride = overrideType,
@@ -529,14 +558,16 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         )
                         return transformed
                     }
+                    val jrHelperName =
+                        if (jrArity == 1) "assembleJacobianReverse" else "assembleJacobianReverse2"
                     val helperSym = pluginContext.referenceFunctions(
-                        CallableId(FqName("io.tlaloc.autograd"), Name.identifier("assembleJacobianReverse")),
+                        CallableId(FqName("io.tlaloc.autograd"), Name.identifier(jrHelperName)),
                     ).singleOrNull()
                     if (helperSym == null) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                                "io.tlaloc.autograd.assembleJacobianReverse not resolvable " +
+                                "io.tlaloc.autograd.$jrHelperName not resolvable " +
                                 "on the compile classpath",
                             null,
                         )
@@ -548,14 +579,14 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                         type = transformed.type,
                         symbol = helperSym,
                     )
-                    listOf(aType, rType).forEachIndexed { i, t ->
+                    (jrPrimals + rType).forEachIndexed { i, t ->
                         if (i < assembled.typeArguments.size) assembled.typeArguments[i] = t
                     }
                     assembled.arguments[0] = fArg
                     assembled.arguments[1] = seededLambda
                     mc.report(
                         CompilerMessageSeverity.WARNING,
-                        "Tlaloc lowered 'jacobianReverse' to a seeded reverse pullback + " +
+                        "Tlaloc lowered '$callableName' to a seeded reverse pullback + " +
                             "runtime output-basis assembly:\n${pullback.pretty().trimEnd()}",
                         null,
                     )
@@ -656,7 +687,8 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     return replacement
                 }
 
-                val includeForward = callableName == "valueAndGrad" || callableName == "valueAndGrad2"
+                val includeForward = callableName == "valueAndGrad" || callableName == "valueAndGrad2" ||
+                    callableName == "valueAndGrad3"
 
                 // §0.4.24 — Stage B.4a. Run PhiCalculus.apply before SCT so IF/WHILE
                 // primals are coarsened ahead of the reverse transform. For IF-only
@@ -906,13 +938,17 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
     companion object {
         private val INTRINSIC_NAMES: Set<String> = setOf(
             "grad", "grad2", "valueAndGrad", "valueAndGrad2",
+            // §0.4.424 — the three-argument reverse spellings (the transform and
+            // synthesis were arity-agnostic all along; the gate is the surface).
+            "grad3", "valueAndGrad3",
             // §0.4.372 — forward-mode (Phase B1). §0.4.387 — its two-argument forms.
             "jvp", "valueAndJvp", "jvp2", "valueAndJvp2",
             // §0.4.394 — Phase B2: the assembly intrinsics. §0.4.406 — their
             // two-argument forms.
             "jacobian", "hessian", "jacobian2", "hessian2",
-            // §0.4.412 — the reverse-assembled (tall) Jacobian.
-            "jacobianReverse",
+            // §0.4.412 — the reverse-assembled (tall) Jacobian. §0.4.424 — its
+            // two-argument form.
+            "jacobianReverse", "jacobianReverse2",
             // §0.4.398 — the seeded-cotangent user surface. §0.4.406 — its
             // two-argument forms.
             "vjp", "valueAndVjp", "vjp2", "valueAndVjp2",

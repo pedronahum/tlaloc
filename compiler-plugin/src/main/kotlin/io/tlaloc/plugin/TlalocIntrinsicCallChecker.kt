@@ -21,6 +21,9 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
         "io.tlaloc.autograd.grad2",
         "io.tlaloc.autograd.valueAndGrad",
         "io.tlaloc.autograd.valueAndGrad2",
+        // §0.4.424 — the three-argument reverse spellings.
+        "io.tlaloc.autograd.grad3",
+        "io.tlaloc.autograd.valueAndGrad3",
         // §0.4.372 — forward-mode (Phase B1). §0.4.387 — its two-argument forms.
         "io.tlaloc.autograd.jvp",
         "io.tlaloc.autograd.valueAndJvp",
@@ -32,8 +35,10 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
         "io.tlaloc.autograd.hessian",
         "io.tlaloc.autograd.jacobian2",
         "io.tlaloc.autograd.hessian2",
-        // §0.4.412 — the reverse-assembled (tall) Jacobian.
+        // §0.4.412 — the reverse-assembled (tall) Jacobian. §0.4.424 — its
+        // two-argument form.
         "io.tlaloc.autograd.jacobianReverse",
+        "io.tlaloc.autograd.jacobianReverse2",
         // §0.4.398 — the seeded-cotangent user surface. §0.4.406 — its
         // two-argument forms.
         "io.tlaloc.autograd.vjp",
@@ -109,9 +114,11 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                         // pullbacks, so it probes exactly like `vjp` (its lambda
                         // may return a tensor; seedAsParam is what the IR
                         // extension runs).
+                        // §0.4.424 — `jacobianReverse2` likewise (the transform
+                        // is arity-agnostic).
                         name == "vjp" || name == "valueAndVjp" ||
                             name == "vjp2" || name == "valueAndVjp2" ||
-                            name == "jacobianReverse" -> {
+                            name == "jacobianReverse" || name == "jacobianReverse2" -> {
                             {
                                 DxirReverseTransform.apply(
                                     result.fn,

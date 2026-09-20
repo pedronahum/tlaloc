@@ -1170,10 +1170,12 @@ reachable from `grad {}`, not new math. New-op families come after.
     cert to); the block-layout equality is pinned by construction of the
     convention plus the rectangular analytic case.
   - v1 scope matches the 1-arg forms: straight-line bodies, host F32,
-    2 arguments (3+ args would need `Function6`+ overrides and
-    `assemble*3Forward` helpers — same pattern, more params). B2's last
-    neighbour — reverse-assembled (tall) Jacobians for m ≪ n — closed in
-    §0.4.412 below.
+    2 arguments (3+-arg forms of the FORWARD-assembled family — `jacobian3`,
+    `hessian3`, `jvp3`, `vjp3` — would need `Function6`+ overrides and
+    `assemble*3Forward` helpers — same pattern, more params; the REVERSE
+    spellings `grad3`/`valueAndGrad3` and `jacobianReverse2` landed in
+    §0.4.424 below). B2's last neighbour — reverse-assembled (tall)
+    Jacobians for m ≪ n — closed in §0.4.412 below.
 - **B2 tall tail. `jacobianReverse` intrinsic ✅ (§0.4.412)** — the
   reverse-assembled (tall) Jacobian, the m ≪ n tail recorded at §0.4.394:
   same `[m, n]` row-major-flat contract as `jacobian`, assembled from the
@@ -1212,7 +1214,40 @@ reachable from `grad {}`, not new math. New-op families come after.
     ConcatRule's symbolic SLICE_LIKE adjoints).
   - v1 scope matches `jacobian`: single-argument `f`, straight-line
     bodies, host F32 (a `jacobianReverse2` would be the §0.4.406 pattern
-    verbatim if ever pulled).
+    verbatim if ever pulled — pulled in §0.4.424 below).
+- **B2 arity tail. `jacobianReverse2` + the 3-arg reverse spellings ✅
+  (§0.4.424)** — the two "mechanical" arity tails, and they were exactly
+  that. `grad3`/`valueAndGrad3` needed ZERO plugin-path changes beyond the
+  name gates: the reverse transform emits `(*params) → (*grads)` for any
+  arity (§0.4.33) and synthesis boxes 3 returns as `Triple` / 4 as
+  `Quadruple` (§0.4.203, and §0.4.420's 4-param sparse `grad {}` is the
+  standing proof at arity 4) — the whole slice is the two generic
+  `:autograd` declarations (coexisting with the §0.4.134 Tracer-tape
+  `grad3` overloads exactly as the `grad2` pair does — lambda parameter
+  types disambiguate), the `INTRINSIC_NAMES`/checker entries, and the
+  `includeForward` gate learning `valueAndGrad3`. `jacobianReverse2` is
+  the §0.4.412 branch generalised the way §0.4.406 generalised the
+  assembly branch: gate 2 params, harvest `A, B` from the call type's
+  first two args, `callTypeOverride = Function3<A, B, R, Pair<A, B>>`
+  (the 2-return pullback boxes as `Pair`, `vjp2`'s precedent), helper
+  `assembleJacobianReverse2(f, vjp2)` — one eager primal for `m`, then
+  each output-basis pullback pass writes row `i` of BOTH per-argument
+  blocks (`J_x [m, nx]`, `J_w [m, nw]`, `jacobian2`'s Pair-of-blocks
+  convention) — `m + 1` passes versus `jacobian2`'s `nx + nw`.
+  - Certified E2E (`ThreeArgIntrinsicTest`, the §0.4.412 harness — real
+    plugin, REAL generic `:autograd` declarations, no stubs, "kept
+    original call" a hard failure): `grad3`/`valueAndGrad3` over
+    `Σ(a⊙b⊙c)` on a quarter-integer grid (`∇a = b⊙c` etc., value 9.25,
+    all exact); `jacobianReverse2` over `x ⊙ w` (`J_x = diag(w)`,
+    `J_w = diag(x)`) AGREEING ENTRYWISE with forward-assembled
+    `jacobian2` (the cross-assembly oracle); the scalar-R degenerate
+    (`Σ(x⊙w)` → the two `[1, n]` rows off a Float unit cotangent); and
+    the genuinely TALL, RECTANGULAR `concat(0, x, w)` (nx=2, nw=3,
+    m=5: `J_x = [I₂; 0]`, `J_w = [0; I₃]` — per-argument row indexing
+    through ConcatRule's symbolic SLICE_LIKE adjoints).
+  - Still open (recorded above at §0.4.406): 3-arg forms of the
+    forward-assembled family (`jacobian3`/`hessian3`/`jvp3`/`vjp3`) —
+    same pattern, `Function6`+ overrides, pull when a consumer asks.
 - **B4 enabler. The runtime-extent family closes under differentiation ✅
   (§0.4.399)** — VjpRules for SUM_TO and PAD_TO via their runtime-extent
   mirrors, closing §0.4.373's "2nd-order through in-place broadcast" deferral.
@@ -1874,11 +1909,11 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 
 | DiffKT | Tlaloc | Notes |
 |---|---|---|
-| `reverseDerivative` / `primalAndReverseDerivative` (1/2-arg, List, n-th `reverseDerivative{1..4}`, `reverseDiff`) | ✅/🟡 | `grad {}` covers 1st-order; n-th-order nesting certified at IR level (§0.4.401), intrinsic spellings still open |
+| `reverseDerivative` / `primalAndReverseDerivative` (1/2-arg, List, n-th `reverseDerivative{1..4}`, `reverseDiff`) | ✅/🟡 | `grad {}` covers 1st-order at arities 1–3 (`grad3`/`valueAndGrad3` §0.4.424; synthesis is arity-agnostic, proven to 4 by the sparse surface §0.4.420); n-th-order nesting certified at IR level (§0.4.401), intrinsic spellings still open |
 | `forwardDerivative` (all arities, n-th, `forwardDiff`) / `primalAndForwardDerivative` | ✅ | `jvp {}` / `valueAndJvp {}` §0.4.372 (B1) + `jvp2`/`valueAndJvp2` §0.4.387; loop-bearing bodies §0.4.403, IF bodies §0.4.407 (B3) |
 | `jvp` / `primalAndJvp` | ✅ | same — §0.4.372/387 |
 | `vjp` / `primalAndVjp` / `primalAndPullback` (user-supplied cotangent, `vf(primal)` form) | ✅ | `vjp {}` / `valueAndVjp {}` §0.4.398 — seeded single-pass pullback, tensor-valued `f` |
-| Jacobian assembly | ✅ | `jacobian`/`hessian` §0.4.394 (B2) + `jacobian2`/`hessian2` §0.4.406 + reverse-assembled (tall, m ≪ n) `jacobianReverse` §0.4.412. DiffKT has **no** jacobian intrinsic — theirs is `reverseDerivative`'s identity-seeding loop, which is exactly `jacobianReverse`'s output-basis loop; the forward spellings assemble seeded forward passes at runtime |
+| Jacobian assembly | ✅ | `jacobian`/`hessian` §0.4.394 (B2) + `jacobian2`/`hessian2` §0.4.406 + reverse-assembled (tall, m ≪ n) `jacobianReverse` §0.4.412 + `jacobianReverse2` §0.4.424. DiffKT has **no** jacobian intrinsic — theirs is `reverseDerivative`'s identity-seeding loop, which is exactly `jacobianReverse`'s output-basis loop; the forward spellings assemble seeded forward passes at runtime |
 | `reverseDerivativeTransposed` | ❌ | transposed-Jacobian convention variant; fold into B2 |
 | Arbitrary nesting (fwd∘fwd, rev∘rev, …) | ✅/🟡 | full matrix certified at IR level + refusals pinned (§0.4.401); user-facing n-th-order intrinsic spellings still open |
 | `ifThenElse(cond, a, b)` (scalar + tensor, differentiable) | ✅ | `where` §0.4.364; scalar branches also via IF regions + coarsening |

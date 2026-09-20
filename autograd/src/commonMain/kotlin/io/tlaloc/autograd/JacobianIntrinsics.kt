@@ -81,6 +81,30 @@ fun <A, R> jacobianReverse(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
     { _ -> pluginMissing("jacobianReverse") }
 
 /**
+ * §0.4.424 — the two-argument REVERSE-assembled Jacobian, the §0.4.412
+ * pattern at [jacobian2]'s arity (the "would be the §0.4.406 pattern
+ * verbatim if ever pulled" deferral, pulled). `jacobianReverse2(f)` returns
+ * `(x, w) → Pair(J_x [m, nx], J_w [m, nw])` — the SAME per-argument block
+ * convention as [jacobian2] — but assembled from the seeded reverse
+ * pullback `vjp2_f(x, w, ȳ) → (x̄, w̄)`: each output-basis cotangent `eᵢ`
+ * yields row `i` of BOTH blocks in ONE reverse pass.
+ *
+ * Cost: `m + 1` passes (one eager primal to learn `m` and `y`'s dims, then
+ * `m` pullbacks) versus [jacobian2]'s `nx + nw` forward passes. Pick this
+ * spelling when `m ≪ nx + nw`; the choice stays the CALLER'S (both extents
+ * are runtime quantities under `grad {}`'s -1 sentinel dims). A
+ * `Float`-returning `f` degenerates to the two `[1, n]` gradient rows.
+ *
+ * v1 scope matches [jacobianReverse]: straight-line bodies, host F32. No
+ * runtime-tape fallback — a failed synthesis keeps this body, which throws
+ * loudly (see [pluginMissing]).
+ */
+fun <A, B, R> jacobianReverse2(
+    f: (A, B) -> R,
+): (A, B) -> Pair<DTensor<Rank2<Sym, Sym>, F32>, DTensor<Rank2<Sym, Sym>, F32>> =
+    { _, _ -> pluginMissing("jacobianReverse2") }
+
+/**
  * §0.4.406 — the two-argument Jacobian, closing the "multi-arg
  * `jacobian2`" tail §0.4.394 recorded. `jacobian2(f)` returns
  * `(x, w) → Pair(J_x, J_w)` where `J_x[i, j] = ∂yᵢ/∂xⱼ` (shape `[m, nx]`)
@@ -238,6 +262,71 @@ fun <A, R> assembleJacobianReverse(
             for (j in 0 until n) out[i * n + j] = row[j]
         }
         DTensor(HostF32Storage(out), intArrayOf(m, n), F32)
+    }
+
+/**
+ * Runtime row assembly for [jacobianReverse2] — the target of the plugin
+ * rewrite, not user API. The [assembleJacobianReverse] mechanism at arity 2:
+ * takes the ORIGINAL user lambda `f` (its eager host execution is the primal,
+ * run ONCE to learn the output extent `m` and dims) and the synthesised
+ * seeded reverse pullback `vjp2(x, w, ȳ) → (x̄, w̄)`; each of the `m`
+ * pullback passes writes `x̄` into row `i` of `J_x` (`[m, nx]`) and `w̄`
+ * into row `i` of `J_w` (`[m, nw]`). A `Float` primal value means the
+ * scalar degenerate: `m = 1`, the cotangent is the unit seed `1.0f`.
+ */
+fun <A, B, R> assembleJacobianReverse2(
+    f: (A, B) -> R,
+    vjp: (A, B, R) -> Pair<A, B>,
+): (A, B) -> Pair<DTensor<Rank2<Sym, Sym>, F32>, DTensor<Rank2<Sym, Sym>, F32>> =
+    { x, w ->
+        val (xData, _) = hostF32DataOf(x, "jacobianReverse2 input x")
+        val (wData, _) = hostF32DataOf(w, "jacobianReverse2 input w")
+        val nx = xData.size
+        val nw = wData.size
+        require(nx > 0 && nw > 0) {
+            "jacobianReverse2: an input tensor has zero elements — the column count is undefined"
+        }
+        val y = f(x, w)
+        val scalarOut = y is Float
+        val yDims: IntArray
+        val m: Int
+        if (scalarOut) {
+            yDims = IntArray(0)
+            m = 1
+        } else {
+            val (yData, dims) = hostF32DataOf(y, "jacobianReverse2 primal output")
+            yDims = dims
+            m = yData.size
+            require(m > 0) {
+                "jacobianReverse2: output tensor has zero elements — the row count is undefined"
+            }
+        }
+        val outX = FloatArray(m * nx)
+        val outW = FloatArray(m * nw)
+        for (i in 0 until m) {
+            val cot: R = if (scalarOut) {
+                @Suppress("UNCHECKED_CAST")
+                (1.0f as R)
+            } else {
+                val basis = FloatArray(m)
+                basis[i] = 1.0f
+                @Suppress("UNCHECKED_CAST")
+                (DTensor<Shape, F32>(HostF32Storage(basis), yDims.copyOf(), F32) as R)
+            }
+            val (xbar, wbar) = vjp(x, w, cot)
+            val rowX = hostF32DataOf(xbar, "jacobianReverse2 x-pullback").first
+            val rowW = hostF32DataOf(wbar, "jacobianReverse2 w-pullback").first
+            require(rowX.size == nx && rowW.size == nw) {
+                "jacobianReverse2: pullback sizes (${rowX.size}, ${rowW.size}) do not match " +
+                    "input sizes ($nx, $nw)"
+            }
+            for (j in 0 until nx) outX[i * nx + j] = rowX[j]
+            for (j in 0 until nw) outW[i * nw + j] = rowW[j]
+        }
+        Pair(
+            DTensor(HostF32Storage(outX), intArrayOf(m, nx), F32),
+            DTensor(HostF32Storage(outW), intArrayOf(m, nw), F32),
+        )
     }
 
 /**
