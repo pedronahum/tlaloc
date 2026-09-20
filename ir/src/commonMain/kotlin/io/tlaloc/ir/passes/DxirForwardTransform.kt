@@ -2,11 +2,14 @@ package io.tlaloc.ir.passes
 
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
+import io.tlaloc.core.I32
+import io.tlaloc.core.I64
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
+import io.tlaloc.ir.DxirOpResult
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
@@ -50,21 +53,37 @@ import io.tlaloc.ir.OpKind
  * Phase B3 — single-result [OpKind.COARSENED] ops: their tangent is the
  * forward transform of the stored `primal_body`, spliced inline (the
  * mirror image of [DxirReverseTransform]'s `handleCoarsenedAdjoint`
- * consuming `gradient_body`). Region-bearing ops (IF/WHILE) still error
- * loudly — their direct forward arms ride a B3 follow-up; the K2
- * plugin's forward branch coarsens them away first (PhiCalculus), which
- * is how loop-bearing `jvp {}` bodies reach this transform as
- * straight-line or COARSENED shapes.
+ * consuming `gradient_body`). §0.4.407 — the IF direct forward arm:
+ * [OpKind.IF] (single- AND multi-result) is handled in the walk itself.
+ * The condition is piecewise-constant in the inputs, so its tangent is
+ * structurally zero and the tangent of the IF is a SECOND IF over the
+ * SAME cloned condition whose branches yield the tangents of the primal
+ * branches' yields (paper C2, `d/dx φ(a, b) = φ(da/dx, db/dx)` — the
+ * forward twin of `handleIfAdjoint`). Branch body ops are FLATTENED
+ * into the outer forward stream (both branches evaluate; the IFs only
+ * select), the same unconditional-hoist trade the reverse side has made
+ * since §0.4.23's `walkBranchReverse` — and the resulting empty-region,
+ * yield-only IF pair is exactly the shape [DxirToIrSynthesis.irIfOp]
+ * and the emitter already accept from reverse-mode adjoints. WHILE and
+ * other region-bearing ops still error loudly; the K2 plugin's forward
+ * branch coarsens them away first (PhiCalculus), which is how
+ * loop-bearing `jvp {}` bodies reach this transform as straight-line /
+ * COARSENED / IF shapes.
  */
 object DxirForwardTransform {
 
     fun apply(primal: DxirFunction): DxirFunction {
-        primal.body.filterIsInstance<DxirOp>().firstOrNull { it.regions.isNotEmpty() }?.let {
-            error(
-                "DxirForwardTransform: region-bearing op ${it.op} (id=${it.id}) is out of v1 " +
-                    "scope (straight-line bodies only; forward-mode coarsening lands separately)",
-            )
-        }
+        // §0.4.407 — IF now has a direct forward arm (handled in the walk below);
+        // every OTHER region-bearing op (WHILE, MANUAL_COMPUTATION) still refuses
+        // loudly — the plugin's PhiCalculus coarsening is their route in.
+        primal.body.filterIsInstance<DxirOp>()
+            .firstOrNull { it.regions.isNotEmpty() && it.op != OpKind.IF }?.let {
+                error(
+                    "DxirForwardTransform: region-bearing op ${it.op} (id=${it.id}) is out of " +
+                        "scope (only IF has a direct forward arm; WHILE must be coarsened by " +
+                        "PhiCalculus before the forward transform)",
+                )
+            }
         // §0.4.403 — the COARSENED forward arm is single-result only (matches
         // decomposeCoarsened's v1 scope). Refuse multi-result loudly BEFORE the
         // clone loop, which would otherwise fail on an unrelated invariant.
@@ -88,53 +107,158 @@ object DxirForwardTransform {
                 tangentMap[p.id] = param("d_${p.name}", p.type, p.sharding)
             }
 
-            fun value(n: DxirNode): DxirNode = valueMap[n.id]
-                ?: error("DxirForwardTransform: no value for id=${n.id}")
+            // §0.4.407 — [DxirOpResult] shares its source op's id (MLIR's `%op#k`),
+            // so a reference to result k of a multi-result node (today: only the MR
+            // IF this slice admits) resolves the SOURCE through the map and re-wraps
+            // the index. Single-result references pass through untouched.
+            fun resolveResult(n: DxirNode, mapped: DxirNode): DxirNode =
+                if (n is DxirOpResult && mapped is DxirOp && mapped.isMultiResult) {
+                    mapped.result(n.index)
+                } else {
+                    mapped
+                }
 
+            fun value(n: DxirNode): DxirNode = resolveResult(
+                n,
+                valueMap[n.id] ?: error("DxirForwardTransform: no value for id=${n.id}"),
+            )
+
+            // §0.4.407 — integer dtypes get a REAL typed zero: the MR-IF tangent
+            // arm yields a tangent for EVERY result index, and coarsened-unroll
+            // shapes carry integer loop counters through MR IFs, so a Float-boxed
+            // zero under an integer type would be malformed.
             fun zeroLike(t: DxirType): DxirNode = const(
                 when (t.dtype) {
                     F32 -> 0.0f
                     F64 -> 0.0
+                    I32 -> 0
+                    I64 -> 0L
                     else -> 0.0f
                 },
                 t,
             )
 
-            fun tangent(n: DxirNode): DxirNode = tangentMap[n.id] ?: zeroLike(n.type)
+            fun tangent(n: DxirNode): DxirNode {
+                val mapped = tangentMap[n.id] ?: return zeroLike(n.type)
+                return resolveResult(n, mapped)
+            }
 
-            for (node in primal.body) {
+            // §0.4.407 — the walk is a recursive local function so the IF arm can
+            // FLATTEN branch bodies into the outer forward stream (both branches
+            // evaluate; the emitted IFs only select) — the same unconditional-hoist
+            // trade `walkBranchReverse` (§0.4.23) and `liftIfOpBody` (§0.4.174)
+            // already make on the reverse side, and the only shape whose IFs
+            // survive to [DxirToIrSynthesis.irIfOp] (empty-region, yield-only).
+            fun processNode(node: DxirNode) {
                 when (node) {
                     is DxirParam -> Unit
                     is DxirConst -> {
                         valueMap[node.id] = const(node.value, node.type, node.sharding)
                         // Structural zero tangent — resolved lazily by tangent().
                     }
-                    is DxirOp -> {
-                        val vOperands = node.operands.map { value(it) }
-                        val v = op(node.op, vOperands, node.type, node.attrs, node.sharding)
-                        valueMap[node.id] = v
-                        tangentMap[node.id] = tangentOf(node, v, vOperands, ::tangent, this)
+                    is DxirOp -> when {
+                        node.op == OpKind.IF -> {
+                            // The IF direct forward arm. The condition is
+                            // piecewise-constant (zero tangent, value cloned); the
+                            // tangent of the IF is a SECOND IF over the SAME cloned
+                            // condition whose branches yield the tangents of the
+                            // primal branches' yields — paper C2's
+                            // `d/dx φ(a, b) = φ(da/dx, db/dx)`, forward twin of
+                            // `handleIfAdjoint`. Multi-result IFs ride the same
+                            // code: the tangent IF mirrors the primal's index
+                            // layout one-to-one (`types` verbatim, one tangent
+                            // yield per terminator slot).
+                            require(node.regions.size == 2) {
+                                "DxirForwardTransform: IF id=${node.id} must carry exactly " +
+                                    "2 regions (then/else); got ${node.regions.size}"
+                            }
+                            val blocks = node.regions.map { r ->
+                                r.blocks.singleOrNull() ?: error(
+                                    "DxirForwardTransform: IF id=${node.id} regions must be " +
+                                        "single-block",
+                                )
+                            }
+                            for (blk in blocks) {
+                                require(blk.args.isEmpty()) {
+                                    "DxirForwardTransform: IF regions don't take block args; " +
+                                        "IF id=${node.id} has ${blk.args.size}"
+                                }
+                                require(blk.terminator.size == node.types.size) {
+                                    "DxirForwardTransform: IF id=${node.id} branch yields " +
+                                        "${blk.terminator.size} values for ${node.types.size} " +
+                                        "result types"
+                                }
+                            }
+                            // Flatten branch bodies (recursion handles nested IFs).
+                            for (blk in blocks) for (inner in blk.body) processNode(inner)
+                            val vCond = value(node.operands[0])
+                            val vYields = blocks.map { blk -> blk.terminator.map { value(it) } }
+                            valueMap[node.id] = ifOp(
+                                cond = vCond,
+                                types = node.types,
+                                thenRegion = region { yields(*vYields[0].toTypedArray()) },
+                                elseRegion = region { yields(*vYields[1].toTypedArray()) },
+                            )
+                            val dYields = blocks.map { blk -> blk.terminator.map { tangent(it) } }
+                            tangentMap[node.id] = ifOp(
+                                cond = vCond,
+                                types = node.types,
+                                thenRegion = region { yields(*dYields[0].toTypedArray()) },
+                                elseRegion = region { yields(*dYields[1].toTypedArray()) },
+                            )
+                        }
+                        node.regions.isNotEmpty() -> error(
+                            "DxirForwardTransform: region-bearing op ${node.op} (id=${node.id}) " +
+                                "inside an IF branch is out of scope (only IF has a direct " +
+                                "forward arm; WHILE must be coarsened by PhiCalculus first)",
+                        )
+                        node.isMultiResult -> error(
+                            "DxirForwardTransform: multi-result ${node.op} (id=${node.id}, " +
+                                "${node.numResults} results) is out of scope (only IF may be " +
+                                "multi-result in the forward walk)",
+                        )
+                        else -> {
+                            val vOperands = node.operands.map { value(it) }
+                            val v = op(node.op, vOperands, node.type, node.attrs, node.sharding)
+                            valueMap[node.id] = v
+                            // §0.4.407 — piecewise-constant ops return null: their
+                            // tangent is a STRUCTURAL zero resolved lazily by
+                            // tangent(), not an eagerly-emitted const. An IF
+                            // predicate's STEP/COMPARE used to leave a dead
+                            // `const 0.0 : bool` in every jvp body — unemittable
+                            // by the synthesis (irConstFor has no Bool arm) and
+                            // never consumed by anything.
+                            tangentOf(node, v, vOperands, ::tangent, this)?.let {
+                                tangentMap[node.id] = it
+                            }
+                        }
                     }
                     else -> error("DxirForwardTransform: unsupported body node $node")
                 }
             }
+
+            for (node in primal.body) processNode(node)
 
             primal.returns.map { value(it) } + primal.returns.map { tangent(it) }
         }
     }
 
     /** Emit the tangent of [node] given its primal-value clone [v] and
-     * cloned operand values [vOps]; [t] resolves operand tangents. */
+     * cloned operand values [vOps]; [t] resolves operand tangents. Returns
+     * null for piecewise-constant ops — a STRUCTURAL zero the caller must
+     * NOT store, so the lazy tangent() fallback materialises a typed zero
+     * only if something actually consumes it (§0.4.407 — an eagerly-emitted
+     * `const 0.0 : bool` for an IF predicate's STEP was dead weight the
+     * synthesis could not emit). */
     private fun tangentOf(
         node: DxirOp,
         v: DxirNode,
         vOps: List<DxirNode>,
         t: (DxirNode) -> DxirNode,
         b: DxirBuilder,
-    ): DxirNode {
+    ): DxirNode? {
         val ty = node.type
         fun one(x: DxirType): DxirNode = b.const(if (x.dtype == F64) 1.0 else 1.0f, x)
-        fun zero(): DxirNode = b.const(if (ty.dtype == F64) 0.0 else 0.0f, ty)
 
         return when (node.op) {
             // Linear: the op is its own tangent rule.
@@ -491,8 +615,9 @@ object DxirForwardTransform {
                 )
             }
 
-            // Piecewise-constant / boolean: zero tangent.
-            OpKind.SIGN, OpKind.STEP, OpKind.COMPARE, OpKind.NOT, OpKind.LAND -> zero()
+            // Piecewise-constant / boolean: structural zero tangent (null — the
+            // lazy tangent() fallback emits a typed zero only when consumed).
+            OpKind.SIGN, OpKind.STEP, OpKind.COMPARE, OpKind.NOT, OpKind.LAND -> null
 
             else -> error(
                 "DxirForwardTransform: no tangent rule for ${node.op} " +

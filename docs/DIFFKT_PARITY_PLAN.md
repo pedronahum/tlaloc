@@ -1231,7 +1231,8 @@ reachable from `grad {}`, not new math. New-op families come after.
     `hessian { Σ concat(x, x)² }` = 4·I₃ through the real plugin — verified
     green at §0.4.403 HEAD too (forward-over-reverse rides SLICE_LIKE's
     tangent and never needed the rule), pinned now as the user-visible face.
-- **B3. Forward transform through regions — v1 ✅ (§0.4.403)**: the
+- **B3. Forward transform through regions — v1 ✅ (§0.4.403), IF direct
+  arm ✅ (§0.4.407)**: the
   COARSENED forward arm + the plugin's forward branch coarsening, lifting
   the straight-line gate that made every loop-bearing `jvp {}` fall back
   to the tape. Mirrors reverse-mode's history, mechanism for mechanism.
@@ -1275,12 +1276,53 @@ reachable from `grad {}`, not new math. New-op families come after.
     `v = v + v·y`), previously "kept original call", now lowering with
     no fallback — 5·(1+y)^4·dy pinned analytically and against a Double
     central difference, sentinel-guarded.
-  - Deferred tails: the IF DIRECT forward arm (tangent-IF with the same
-    cond, per-branch forward-transformed regions) — IF-bearing bodies
-    are today served where PhiCalculus's F-rules/distribute close them,
-    and fall back otherwise; multi-result COARSENED tangents (needs
-    per-result tangent tracking in the splice); nesting through
-    region-bearing bodies stays with B4's recorded tail.
+  - **The IF direct forward arm ✅ (§0.4.407)** — B3's recorded tail,
+    closed. The tangent of an IF is a SECOND IF over the SAME cloned
+    condition (piecewise-constant — zero tangent) whose branches yield
+    the tangents of the primal branches' yields: paper C2's
+    `d/dx φ(a, b) = φ(da/dx, db/dx)`, the forward twin of
+    `handleIfAdjoint`. Branch bodies FLATTEN into the outer forward
+    stream (both branches evaluate, the IFs only select) — the same
+    unconditional-hoist trade `walkBranchReverse` has made since
+    §0.4.23, and the only IF shape that survives to
+    `DxirToIrSynthesis.irIfOp` and the emitter (empty-region,
+    yield-only; the reverse adjoints' exact shape, so no synthesis or
+    emitter change). **Multi-result IFs SUPPORTED**, not refused: the
+    tangent IF mirrors the primal's index layout one-to-one (`types`
+    verbatim, one tangent yield per terminator slot), with
+    `DxirOpResult`-aware value/tangent resolution and typed integer
+    zeros (I32/I64) for non-differentiable slots. Nested IFs recurse.
+    Piecewise-constant tangents (SIGN/STEP/COMPARE/NOT/LAND) became
+    STRUCTURAL nulls resolved lazily — the eager `const 0.0 : bool`
+    they used to leave for every IF predicate was dead weight the
+    synthesis could not emit (the actual reason `jvp {}` over if/else
+    would still have fallen back). The FIR checker's forward probe now
+    probes IF-bearing bodies (the §0.4.403 skip lifted; only loops
+    nested inside IF branches keep the runtime backstop). Certified
+    (`DxirForwardIfTest`, IR): analytic pins + central differences on
+    BOTH sides of the branch; the JVP⇄VJP cross-identity against
+    `handleIfAdjoint` on the same IF bodies (the strongest oracle —
+    two different derivative encodings, one number); the post-lift
+    yield-only shape pinned to emit exactly value-IF + tangent-IF,
+    both empty-region; an unsafe-branch-op (SQRT) body staying finite
+    on the else side (flattening's NaN confined to the discarded
+    yield); nested-IF recursion; the multi-live-index MR IF against
+    the reverse §0.4.155 walk; and forward-over-reverse THROUGH an
+    IF-bearing gradient body (the `hessian {}` composition — refused
+    wholesale before this slice). E2E (`JvpIfIntrinsicTest`): `jvp {}`
+    and `valueAndJvp {}` over `if (x > 0f) x * x else -x` lower with
+    no "kept original call", the lowered dxir pinned to CARRY the IF
+    (so a rewrite silently closing the conditional cannot make the
+    test vacuous), both branches + seed scaling pinned analytically
+    and against a Double central difference, sentinel-guarded.
+  - Deferred tails: multi-result COARSENED tangents (needs per-result
+    tangent tracking in the splice); an IF *inside a COARSENED
+    primal_body* — the recursive `apply` handles it, but the splice's
+    clone loop still refuses region-bearing jvp-body ops (loud:
+    "has regions or multiple results — out of the splice scope"), so
+    widening the splice to empty-region IFs is the remaining step;
+    nesting through region-bearing bodies stays with B4's recorded
+    tail.
 - **B4. Nesting matrix ✅ DONE, §0.4.401 (2026-09-20)** — the full 2×2
   certified at IR level (`DxirNestingMatrixTest`), with **zero
   production-code changes**: both transforms already composed mechanically,

@@ -114,19 +114,19 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                             }
                         }
                         name in forwardIntrinsics -> {
-                            // §0.4.403 — Phase B3: the IR extension's forward branch
-                            // now runs the PhiCalculus coarsening pipeline on
-                            // region-bearing bodies, so probing the RAW forward
-                            // transform (which refuses regions) would red-squiggle
-                            // bodies the extension lowers. Loop regions never reach
-                            // here (hasLoopRegions gates above); IF-bearing bodies
-                            // skip the probe and keep their runtime backstop —
-                            // running PhiCalculus per keystroke is not check-time
-                            // material, same reasoning as the loop gate.
-                            val hasIfRegions = result.fn.body.any {
-                                it is io.tlaloc.ir.DxirOp && it.regions.isNotEmpty()
+                            // §0.4.407 — the forward transform carries the IF direct
+                            // arm now, so IF-bearing bodies are probed like any other
+                            // (the §0.4.403 skip is lifted). The only remaining gate
+                            // is a loop region NESTED inside an IF branch —
+                            // hasLoopRegions above sees only the top level, and those
+                            // bodies keep their runtime backstop (PhiCalculus per
+                            // keystroke is not check-time material, same reasoning as
+                            // the top-level loop gate).
+                            if (hasNestedNonIfRegions(result.fn.body)) {
+                                ({ })
+                            } else {
+                                ({ DxirForwardTransform.apply(result.fn) })
                             }
-                            if (hasIfRegions) ({ }) else ({ DxirForwardTransform.apply(result.fn) })
                         }
                         else -> {
                             { DxirReverseTransform.apply(result.fn) }
@@ -167,4 +167,15 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
 
     private fun unwrap(expr: FirExpression): FirExpression =
         if (expr is FirNamedArgumentExpression) expr.expression else expr
+
+    /** §0.4.407 — true when any op in [nodes] (recursing through IF branch
+     * bodies) carries regions and is NOT an IF: a WHILE nested inside an IF
+     * branch, the one region shape the raw forward transform still refuses
+     * and the extension's PhiCalculus pipeline may yet lower. */
+    private fun hasNestedNonIfRegions(nodes: List<io.tlaloc.ir.DxirNode>): Boolean = nodes.any { n ->
+        n is io.tlaloc.ir.DxirOp && (
+            (n.regions.isNotEmpty() && n.op != io.tlaloc.ir.OpKind.IF) ||
+                n.regions.any { r -> r.blocks.any { b -> hasNestedNonIfRegions(b.body) } }
+            )
+    }
 }

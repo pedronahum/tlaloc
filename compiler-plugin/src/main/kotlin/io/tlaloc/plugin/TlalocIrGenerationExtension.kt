@@ -150,9 +150,13 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                 // region-body lift), so a WHILE-bearing `jvp {}` body reaches
                 // DxirForwardTransform as straight-line / COARSENED shapes instead
                 // of falling back to the runtime tape. Straight-line bodies skip
-                // the pipeline, keeping the §0.4.372 path byte-identical; anything
-                // the coarsening leaves region-bearing (e.g. an unclosable IF)
-                // still errors in the transform and falls back below.
+                // the pipeline, keeping the §0.4.372 path byte-identical. §0.4.407 —
+                // an IF that survives the coarsening (PhiCalculus's F-rules keep
+                // genuine two-branch conditionals) no longer errors: the transform's
+                // IF direct forward arm lowers it, so `jvp {}` over a Kotlin
+                // if/else stops falling back; only shapes the transform still
+                // refuses (e.g. a WHILE nested inside an IF branch that the
+                // pipeline could not close) error and fall back below.
                 val forwardIntrinsic = callableName == "jvp" || callableName == "jvp2" ||
                     callableName == "valueAndJvp" || callableName == "valueAndJvp2"
                 val tangentOnly = callableName == "jvp" || callableName == "jvp2"
