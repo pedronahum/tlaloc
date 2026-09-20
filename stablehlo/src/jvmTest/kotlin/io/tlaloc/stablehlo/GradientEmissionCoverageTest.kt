@@ -322,17 +322,22 @@ class GradientEmissionCoverageTest {
                 attrs = mapOf("window" to listOf(2, 2), "window_strides" to listOf(2, 2)),
             )
         },
-        // §0.4.408/§0.4.413 — RNG_UNIFORM / RNG_NORMAL are EXCLUDED from
-        // this sweep by design. Since §0.4.413 they DO differentiate (the
-        // zero-contribution RngDrawRule + structural-zero tangent — the
-        // reparameterization arms, certified interpreter-side in
-        // DxirRngTest), but there is still no emission arm: the emitter
-        // refuses rather than fork the threefry stream via
-        // rng_bit_generator (pinned in
-        // EmitterTest.rngOpsRefuseEmissionLoudlyByName), and a
-        // reparameterized loss's gradient graph CONTAINS a cloned draw (the
-        // d-scale adjoint reads ε), so the sweep case joins only when the
-        // recorded explicit-threefry emission tail lands.
+        // §0.4.422 — the RNG exclusion LIFTS: explicit-threefry emission
+        // landed (EmitterTest.rngOpsEmitExplicitThreefry structural pins;
+        // PjrtRngSmokeTest GPU bit-exactness), so the reparameterized loss —
+        // whose gradient graph CONTAINS a cloned draw (the d-scale adjoint
+        // reads ε) — now joins the sweep like any other surface.
+        squaredSumLoss(
+            "rng_reparam", listOf("loc" to DxirType(F32, listOf(4)), "scale" to DxirType(F32, listOf(4))),
+            DxirType(F32, listOf(4)),
+        ) { ps ->
+            val eps = op(
+                OpKind.RNG_NORMAL, emptyList(), DxirType(F32, listOf(4)),
+                attrs = mapOf("key0" to 42, "key1" to 7, "dims" to listOf(4)),
+            )
+            val se = op(OpKind.MUL, listOf(ps[1], eps), DxirType(F32, listOf(4)))
+            op(OpKind.ADD, listOf(ps[0], se), DxirType(F32, listOf(4)))
+        },
     )
 
     @Test

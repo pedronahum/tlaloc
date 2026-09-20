@@ -437,21 +437,24 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // `stablehlo.rng_bit_generator`'s threefry counter layout is
             // XLA-internal and does not reproduce the JAX-classic
             // split-halves stream the host/interpreter kernels in
-            // `:core/Random.kt` pin bit-for-bit — JAX itself never emits
-            // rng_bit_generator for threefry keys, it emits the 20-round
-            // block as explicit HLO ops precisely to keep the stream
-            // engine-independent. Emitting it here would silently fork the
-            // random stream between the interpreter and the GPU, so the arm
-            // fails loudly instead; the honest GPU path (emitting the
-            // threefry rounds as explicit stablehlo ops, JAX's approach) is
-            // a recorded Phase D tail in docs/DIFFKT_PARITY_PLAN.md.
-            OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL -> error(
-                "${node.op} has no StableHLO emission (Phase D1): " +
-                    "stablehlo.rng_bit_generator's counter layout would not " +
-                    "reproduce the host/interpreter threefry stream bit-for-bit; " +
-                    "draw on host via :core RandomKey.uniform*/normal* instead " +
-                    "(explicit-threefry emission is a recorded Phase D tail)",
-            )
+            // §0.4.422 — the honest GPU RNG path: the §0.4.408 refusal flips
+            // to EXPLICIT-THREEFRY emission, JAX's own approach (JAX never
+            // emits rng_bit_generator for threefry keys — its counter layout
+            // is XLA-internal and would fork the stream; it emits the
+            // 20-round block as explicit HLO ops precisely to keep the
+            // stream engine-independent). Every input is a compile-time
+            // literal (key words + dims ride as attrs), so the whole graph
+            // is static integer ARX ops: the BIT stream is exact on any
+            // backend by construction. Uniform draws are therefore
+            // BIT-EXACT against `:core/Random.kt` (integer ops + the
+            // bitcast mantissa trick + one exact subtract). Normal draws
+            // reproduce the host's Box-Muller formula in the same f64
+            // intermediates, but f64 log/cos are correctly-rounded-ish
+            // library calls that differ at ≤1 ulp between the JVM and
+            // libdevice — so the BITS layer is exact while the final f32
+            // narrowing can differ by an ulp; certified at tight tolerance,
+            // never bit-pinned (see PjrtRngSmokeTest).
+            OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL -> emitRngDraw(step, name, node)
 
             // §0.4.415 — Phase B5 (customVjp): a DELIBERATE refusal, not a gap.
             // CHECK_SHAPE_LIKE is the runtime assert `handleCoarsenedAdjoint`
@@ -574,6 +577,192 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     /** §0.4.402 — CHLO unary elementwise assembly carries both types: `chlo.op %x : t -> t`. */
     private fun chloUnary(step: String, name: String, op: String, x: String, type: String) {
         out.appendLine("$step$name = $op $x : $type -> $type")
+    }
+
+    /**
+     * §0.4.422 — explicit-threefry RNG emission (the honest GPU path; the
+     * §0.4.408 rng_bit_generator refusal's recorded resolution). The draw's
+     * key words and dims are literal attrs, so the whole graph is STATIC:
+     * counters are an iota, the Threefry-2x32 key schedule and per-round
+     * injection constants fold to Kotlin Int arithmetic at emit time
+     * (wrapping Int add ≡ i32 add), and the 20 ARX rounds emit as
+     * add/shift/or/xor over `tensor<half×i32>` — `:core/Random.kt`'s
+     * [threefryBits] transcribed op for op, including the odd-n end-pad
+     * lane whose counter reads 0 and whose output word is sliced away.
+     */
+    private fun emitRngDraw(step: String, name: String, node: DxirOp) {
+        val k0 = (node.attrs["key0"] as? Number)?.toInt()
+            ?: error("${node.op} is missing its integer 'key0' attr")
+        val k1 = (node.attrs["key1"] as? Number)?.toInt()
+            ?: error("${node.op} is missing its integer 'key1' attr")
+        val dims = node.type.dims
+        require(dims.isNotEmpty() && dims.all { it > 0 }) {
+            "${node.op} emission requires concrete positive dims; got $dims " +
+                "(the FIR front-end's literal-only contract guarantees this)"
+        }
+        val n = dims.fold(1) { acc, d -> acc * d }
+        val flat = if (node.op == OpKind.RNG_UNIFORM) {
+            emitThreefryUniform(step, k0, k1, n)
+        } else {
+            emitBoxMullerNormal(step, k0, k1, n)
+        }
+        // Uniform naming: the node's own %name binds via a (possibly
+        // identity) reshape from the flat draw to the declared type.
+        out.appendLine(
+            "$step$name = stablehlo.reshape $flat : (tensor<${n}xf32>) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * The uniform [0, 1) core: [threefryBits] + the [uniformFloats] mantissa
+     * trick, returning the SSA name of a flat `tensor<n×f32>`. Bit-exact
+     * against the host kernel on every backend: integer ops only, then one
+     * bitcast into [1, 2) and one exact subtract.
+     */
+    private fun emitThreefryUniform(step: String, k0: Int, k1: Int, n: Int): String {
+        val odd = n % 2
+        val padded = n + odd
+        val half = padded / 2
+        val i32h = "tensor<${half}xi32>"
+        // Emit-time splat cache: the rotation amounts repeat across the five
+        // round groups; one constant per distinct value keeps the MLIR tight.
+        val splats = HashMap<Int, String>()
+        fun splat(v: Int): String = splats.getOrPut(v) {
+            val s = synth()
+            out.appendLine("$step$s = stablehlo.constant dense<$v> : $i32h")
+            s
+        }
+        // Counters: c0 = iota(half); c1 = c0 + half, with an odd n's END-PAD
+        // lane (the single lane whose c1 would equal n) reading counter 0 —
+        // exactly `threefryBits`'s `if (c1 < n) c1 else 0`.
+        val c0 = synth()
+        out.appendLine("$step$c0 = stablehlo.iota dim = 0 : $i32h")
+        var c1 = synth()
+        out.appendLine("$step$c1 = stablehlo.add $c0, ${splat(half)} : $i32h")
+        if (odd == 1) {
+            val mask = synth()
+            val lits = (0 until half).joinToString(", ") { if (it < half - 1) "true" else "false" }
+            out.appendLine("$step$mask = stablehlo.constant dense<[$lits]> : tensor<${half}xi1>")
+            val sel = synth()
+            out.appendLine("$step$sel = stablehlo.select $mask, $c1, ${splat(0)} : tensor<${half}xi1>, $i32h")
+            c1 = sel
+        }
+        // Key schedule + 20 ARX rounds, the Random123 reference schedule.
+        val ks2 = k0 xor k1 xor 0x1BD11BDA
+        var x0 = synth()
+        out.appendLine("$step$x0 = stablehlo.add $c0, ${splat(k0)} : $i32h")
+        var x1 = synth()
+        out.appendLine("$step$x1 = stablehlo.add $c1, ${splat(k1)} : $i32h")
+        val rotEven = intArrayOf(13, 15, 26, 6)
+        val rotOdd = intArrayOf(17, 29, 16, 24)
+        for (i in 0 until 5) {
+            val rots = if (i % 2 == 0) rotEven else rotOdd
+            for (r in rots) {
+                val a = synth()
+                out.appendLine("$step$a = stablehlo.add $x0, $x1 : $i32h")
+                x0 = a
+                val shl = synth()
+                out.appendLine("$step$shl = stablehlo.shift_left $x1, ${splat(r)} : $i32h")
+                val shr = synth()
+                out.appendLine("$step$shr = stablehlo.shift_right_logical $x1, ${splat(32 - r)} : $i32h")
+                val rot = synth()
+                out.appendLine("$step$rot = stablehlo.or $shl, $shr : $i32h")
+                val xr = synth()
+                out.appendLine("$step$xr = stablehlo.xor $rot, $x0 : $i32h")
+                x1 = xr
+            }
+            // Key injection after each group — the constants fold at emit
+            // time (Kotlin's wrapping Int add is i32 add).
+            val (inj0, inj1) = when (i % 3) {
+                0 -> k1 to ks2 + (i + 1)
+                1 -> ks2 to k0 + (i + 1)
+                else -> k0 to k1 + (i + 1)
+            }
+            val j0 = synth()
+            out.appendLine("$step$j0 = stablehlo.add $x0, ${splat(inj0)} : $i32h")
+            x0 = j0
+            val j1 = synth()
+            out.appendLine("$step$j1 = stablehlo.add $x1, ${splat(inj1)} : $i32h")
+            x1 = j1
+        }
+        // [y0…, y1…] concatenation, odd-n tail word dropped.
+        val cat = synth()
+        out.appendLine(
+            "$step$cat = stablehlo.concatenate $x0, $x1, dim = 0 : ($i32h, $i32h) -> tensor<${padded}xi32>",
+        )
+        var bits = cat
+        if (odd == 1) {
+            val sl = synth()
+            out.appendLine(
+                "$step$sl = stablehlo.slice $cat [0:$n] : (tensor<${padded}xi32>) -> tensor<${n}xi32>",
+            )
+            bits = sl
+        }
+        // bits → [0, 1): top 23 bits as mantissa, OR the exponent of 1.0f,
+        // bitcast into [1, 2), subtract 1. All exact.
+        val i32n = "tensor<${n}xi32>"
+        val f32n = "tensor<${n}xf32>"
+        val nine = synth()
+        out.appendLine("$step$nine = stablehlo.constant dense<9> : $i32n")
+        val mant = synth()
+        out.appendLine("$step$mant = stablehlo.shift_right_logical $bits, $nine : $i32n")
+        val expBits = synth()
+        out.appendLine("$step$expBits = stablehlo.constant dense<1065353216> : $i32n")
+        val orv = synth()
+        out.appendLine("$step$orv = stablehlo.or $mant, $expBits : $i32n")
+        val bc = synth()
+        out.appendLine("$step$bc = stablehlo.bitcast_convert $orv : ($i32n) -> $f32n")
+        val onef = synth()
+        out.appendLine("$step$onef = stablehlo.constant dense<1.0> : $f32n")
+        val u = synth()
+        out.appendLine("$step$u = stablehlo.subtract $bc, $onef : $f32n")
+        return u
+    }
+
+    /**
+     * [normalFloats] transcribed: Box-Muller over one uniform(2n) stream
+     * (first half radial, second half angular, the sine partner discarded),
+     * in the SAME f64 intermediates the host uses. The bit stream and the
+     * uniforms are exact; f64 log/cos differ from the JVM's at ≤1 ulp, so
+     * the narrowed f32 result is certified at tolerance, never bit-pinned.
+     */
+    private fun emitBoxMullerNormal(step: String, k0: Int, k1: Int, n: Int): String {
+        val u = emitThreefryUniform(step, k0, k1, 2 * n)
+        val f32n = "tensor<${n}xf32>"
+        val f322n = "tensor<${2 * n}xf32>"
+        val f64n = "tensor<${n}xf64>"
+        val u1 = synth()
+        out.appendLine("$step$u1 = stablehlo.slice $u [0:$n] : ($f322n) -> $f32n")
+        val u2 = synth()
+        out.appendLine("$step$u2 = stablehlo.slice $u [$n:${2 * n}] : ($f322n) -> $f32n")
+        val u1d = synth()
+        out.appendLine("$step$u1d = stablehlo.convert $u1 : ($f32n) -> $f64n")
+        val u2d = synth()
+        out.appendLine("$step$u2d = stablehlo.convert $u2 : ($f32n) -> $f64n")
+        val oned = synth()
+        out.appendLine("$step$oned = stablehlo.constant dense<1.0> : $f64n")
+        val omu = synth()
+        out.appendLine("$step$omu = stablehlo.subtract $oned, $u1d : $f64n")
+        val lg = synth()
+        out.appendLine("$step$lg = stablehlo.log $omu : $f64n")
+        val m2 = synth()
+        out.appendLine("$step$m2 = stablehlo.constant dense<-2.0> : $f64n")
+        val pr = synth()
+        out.appendLine("$step$pr = stablehlo.multiply $lg, $m2 : $f64n")
+        val rr = synth()
+        out.appendLine("$step$rr = stablehlo.sqrt $pr : $f64n")
+        val twoPi = synth()
+        // Kotlin's `2.0 * PI` exactly.
+        out.appendLine("$step$twoPi = stablehlo.constant dense<6.283185307179586> : $f64n")
+        val th = synth()
+        out.appendLine("$step$th = stablehlo.multiply $u2d, $twoPi : $f64n")
+        val cs = synth()
+        out.appendLine("$step$cs = stablehlo.cosine $th : $f64n")
+        val zd = synth()
+        out.appendLine("$step$zd = stablehlo.multiply $rr, $cs : $f64n")
+        val z = synth()
+        out.appendLine("$step$z = stablehlo.convert $zd : ($f64n) -> $f32n")
+        return z
     }
 
     private fun emitPolygamma(step: String, name: String, x: String, type: DxirType, order: Int) {

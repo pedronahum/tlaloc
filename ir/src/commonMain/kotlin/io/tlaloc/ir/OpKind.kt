@@ -483,14 +483,18 @@ enum class OpKind {
     // d scale), the cloned RNG op re-draws from the SAME literal key attrs:
     // deterministic, same key → same ε, pinned in DxirRngTest.
     //
-    // NO StableHLO emission either: `stablehlo.rng_bit_generator`'s threefry
-    // counter layout is XLA-internal and does NOT reproduce the JAX-style
-    // split-halves stream these kernels pin (JAX itself never emits
-    // rng_bit_generator for threefry keys — it emits the 20-round block as
-    // explicit HLO ops precisely to keep the stream reproducible). Emitting
-    // it would silently fork the random stream between engines, so the
-    // emitter refuses loudly by name; the honest GPU path — emitting the
-    // threefry rounds as explicit stablehlo ops — is a recorded Phase D tail.
+    // Emission (§0.4.422 — flips the §0.4.408 refusal): EXPLICIT-threefry,
+    // JAX's own approach — never `stablehlo.rng_bit_generator`, whose
+    // XLA-internal counter layout does NOT reproduce the JAX-style
+    // split-halves stream these kernels pin and would silently fork the
+    // random stream between engines. The key words and dims are literal
+    // attrs, so the emitted graph is static: iota counters, the 20 ARX
+    // rounds as add/shift/or/xor over i32, the key schedule folded at emit
+    // time. Uniform draws are BIT-EXACT against the host kernels on any
+    // backend (integer ops + the bitcast mantissa trick — GPU-certified in
+    // PjrtRngSmokeTest); normal draws run Box-Muller in the same f64
+    // intermediates as the host but their log/cos are backend libm calls,
+    // so they certify at tolerance, never bit-pinned.
     RNG_UNIFORM, RNG_NORMAL,
 
     // §0.4.415 — Phase B5 (customVjp): runtime shape assert on a USER-supplied

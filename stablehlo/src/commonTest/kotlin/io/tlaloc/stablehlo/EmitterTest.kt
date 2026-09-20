@@ -611,28 +611,67 @@ class EmitterTest {
     }
 
     @Test
-    fun rngOpsRefuseEmissionLoudlyByName() {
-        // §0.4.408 — Phase D1: the RNG ops deliberately have no StableHLO
-        // arm. `stablehlo.rng_bit_generator`'s counter layout would not
-        // reproduce the host/interpreter threefry stream bit-for-bit, and a
-        // silent stream fork between engines is exactly what the stateless
-        // PRNG design exists to prevent. Explicit-threefry emission (JAX's
-        // own approach) is the recorded Phase D tail.
-        for (kind in listOf(OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL)) {
-            val fn = DxirBuilder.function("rng") {
-                listOf(
-                    op(
-                        kind, emptyList(), DxirType(F32, listOf(2, 3)),
-                        attrs = mapOf("key0" to 7, "key1" to 42, "dims" to listOf(2, 3)),
-                    ),
-                )
-            }
-            val ex = assertFailsWith<IllegalStateException> { fn.toStablehlo() }
-            assertTrue(
-                "$kind has no StableHLO emission" in ex.message.orEmpty(),
-                "expected a named RNG refusal; got: ${ex.message}",
+    fun rngOpsEmitExplicitThreefry() {
+        // §0.4.422 — the §0.4.408 refusal's recorded resolution: the RNG ops
+        // emit the Threefry-2x32 block as EXPLICIT integer ops (JAX's own
+        // approach — never `rng_bit_generator`, whose XLA-internal counter
+        // layout would fork the stream between engines). Structural pins:
+        // the iota counter, the 20 ARX rounds (20 rotate-or's, 20 xors), the
+        // key-schedule parity constant folded with the literal key words
+        // (ks2 = 7 ^ 42 ^ 0x1BD11BDA), the mantissa trick (>>9, |0x3F800000,
+        // bitcast, -1), and NO rng_bit_generator anywhere. Bit-level
+        // agreement with the host kernel is certified GPU-side in
+        // PjrtRngSmokeTest; these pins keep the SHAPE of the emission honest.
+        val fn = DxirBuilder.function("rng") {
+            listOf(
+                op(
+                    OpKind.RNG_UNIFORM, emptyList(), DxirType(F32, listOf(2, 3)),
+                    attrs = mapOf("key0" to 7, "key1" to 42, "dims" to listOf(2, 3)),
+                ),
             )
         }
+        val mlir = fn.toStablehlo()
+        assertTrue("rng_bit_generator" !in mlir, "must never emit rng_bit_generator:\n$mlir")
+        assertTrue("stablehlo.iota dim = 0 : tensor<3xi32>" in mlir, mlir)
+        val ks2 = 7 xor 42 xor 0x1BD11BDA
+        assertTrue("dense<$ks2> : tensor<3xi32>" in mlir, "key-schedule parity constant missing:\n$mlir")
+        assertEquals(20, Regex("stablehlo\\.xor ").findAll(mlir).count(), "20 ARX rounds:\n$mlir")
+        assertEquals(20, Regex("stablehlo\\.shift_left ").findAll(mlir).count(), "20 rotations:\n$mlir")
+        assertTrue("stablehlo.shift_right_logical" in mlir, mlir)
+        assertTrue("dense<1065353216> : tensor<6xi32>" in mlir, "exponent-of-1.0f OR mask missing:\n$mlir")
+        assertTrue("stablehlo.bitcast_convert" in mlir, mlir)
+        assertTrue("-> tensor<2x3xf32>" in mlir, "final reshape to the declared dims missing:\n$mlir")
+
+        // Normal: Box-Muller over uniform(2n) in f64 — log/sqrt/cosine over
+        // tensor<nxf64>, the two half-slices, and the f64→f32 narrowing.
+        val nfn = DxirBuilder.function("rngn") {
+            listOf(
+                op(
+                    OpKind.RNG_NORMAL, emptyList(), DxirType(F32, listOf(4)),
+                    attrs = mapOf("key0" to 1, "key1" to 2, "dims" to listOf(4)),
+                ),
+            )
+        }
+        val nmlir = nfn.toStablehlo()
+        assertTrue("rng_bit_generator" !in nmlir, nmlir)
+        assertTrue("stablehlo.slice" in nmlir && "[0:4]" in nmlir && "[4:8]" in nmlir, nmlir)
+        assertTrue("stablehlo.log" in nmlir && "stablehlo.sqrt" in nmlir && "stablehlo.cosine" in nmlir, nmlir)
+        assertTrue("dense<6.283185307179586> : tensor<4xf64>" in nmlir, "2π f64 constant missing:\n$nmlir")
+        assertTrue("(tensor<4xf64>) -> tensor<4xf32>" in nmlir, "f64→f32 narrowing missing:\n$nmlir")
+
+        // Odd n: the end-pad lane — a bool mask zeroes the last counter and
+        // the padded tail word is sliced away.
+        val ofn = DxirBuilder.function("rngo") {
+            listOf(
+                op(
+                    OpKind.RNG_UNIFORM, emptyList(), DxirType(F32, listOf(5)),
+                    attrs = mapOf("key0" to 3, "key1" to 9, "dims" to listOf(5)),
+                ),
+            )
+        }
+        val omlir = ofn.toStablehlo()
+        assertTrue("dense<[true, true, false]> : tensor<3xi1>" in omlir, "odd-n end-pad mask missing:\n$omlir")
+        assertTrue("[0:5] : (tensor<6xi32>) -> tensor<5xi32>" in omlir, "odd-n tail slice missing:\n$omlir")
     }
 
     @Test

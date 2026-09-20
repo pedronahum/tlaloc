@@ -2043,11 +2043,22 @@ audit's recommendations).
    new `io.tlaloc.core.ops` twins `rng{Uniform,Normal}{Vector,Matrix}` —
    the same `:core/Random.kt` kernels as host and interpreter, bit-exact
    (E2E: reparameterized loss with cloned same-stream ε, deterministic
-   across calls; linear uniform pin EXACT). Remaining D tails:
-   explicit-threefry StableHLO emission (the honest GPU RNG path), and
-   lifting the literal-only key restriction (RandomKey-typed lambda
-   params / computed key words — needs runtime key operands on the
-   creation ops, a design of its own).
+   across calls; linear uniform pin EXACT).
+   **Explicit-threefry StableHLO emission — DONE §0.4.422.** The §0.4.408
+   emit refusal flips: RNG_UNIFORM/RNG_NORMAL emit the Threefry-2x32
+   block as explicit integer ops (iota counters, 20 ARX rounds, key
+   schedule folded at emit time from the literal attrs — JAX's own
+   approach, never rng_bit_generator). GPU-certified on the GB10
+   (PjrtRngSmokeTest): uniform draws BIT-EXACT against the host kernels
+   on raw f32 bits (even/odd end-pad lane/rank-2, three keys); normal
+   draws (Box-Muller in the host's own f64 intermediates) at tolerance —
+   the bits layer is exact, backend libm log/cos is not a bit contract
+   (measured 0.0 diff on the GB10 regardless); the reparameterized
+   GRADIENT graph (containing a cloned draw) compiles and runs on GPU at
+   0.0 vs the interpreter, and GradientEmissionCoverageTest's RNG
+   exclusion is LIFTED. Remaining D tail: lifting the literal-only key
+   restriction (RandomKey-typed lambda params / computed key words —
+   needs runtime key operands on the creation ops, a design of its own).
 3. **Recorded tails on the books** (each its own §-sized slice when
    pulled): B3's multi-result COARSENED tangents + IF-inside-primal_body
    splice; A-phase tails above; C4's grouped/depthwise conv (beyond
