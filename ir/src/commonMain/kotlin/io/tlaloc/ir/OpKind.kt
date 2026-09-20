@@ -497,6 +497,29 @@ enum class OpKind {
     // PjrtRngSmokeTest); normal draws run Box-Muller in the same f64
     // intermediates as the host but their log/cos are backend libm calls,
     // so they certify at tolerance, never bit-pinned.
+    //
+    // Runtime-key operand form (§0.4.432 — lifts §0.4.421's literal-only
+    // restriction at the IR level): as an ALTERNATIVE to the zero-operand
+    // literal-attr form, the ops accept exactly TWO operands — scalar I32
+    // key words — with `key0`/`key1` attrs ABSENT (the forms are exclusive;
+    // carrying both is refused). The `dims` attr stays literal in BOTH
+    // forms: the result SHAPE must be static (the type system and emitter
+    // demand concrete extents), but the STREAM need not be — a runtime key
+    // is an ordinary SSA value. Interpreter: key operands are read at
+    // execution time (an Int-carrying DxirConst is read verbatim; any other
+    // node rides the F32 value domain, guarded to |key| < 2^24 with a loud
+    // named refusal beyond it). Differentiation: keys are integers, hence
+    // non-differentiable — the existing arms already treat draws as
+    // constants regardless of form (RngDrawRule's empty contribution list,
+    // the forward transform's structural-zero tangent), and a cloned draw
+    // drags its key operand clones into the gradient body through the
+    // ordinary usedByAdjoint transitive walk: same key SSA values → same
+    // stream. Emission: the key splats broadcast from the rank-0 SSA values
+    // and the key schedule (ks2 = k0 ^ k1 ^ 0x1BD11BDA, the five injection
+    // adds) EMITS as i32 ops instead of folding — the ARX rounds are
+    // identical, so the bit stream stays exact on any backend. The FIR
+    // surface (RandomKey-typed vals / lambda params inside grad{}) is the
+    // recorded remaining tail — see docs/DIFFKT_PARITY_PLAN.md Phase D.
     RNG_UNIFORM, RNG_NORMAL,
 
     // §0.4.415 — Phase B5 (customVjp): runtime shape assert on a USER-supplied

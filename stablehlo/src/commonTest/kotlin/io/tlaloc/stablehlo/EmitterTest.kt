@@ -8,6 +8,7 @@ import io.tlaloc.autograd.relu
 import io.tlaloc.autograd.sum
 import io.tlaloc.autograd.times
 import io.tlaloc.core.F32
+import io.tlaloc.core.I32
 import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.ScalarShape
@@ -672,6 +673,92 @@ class EmitterTest {
         val omlir = ofn.toStablehlo()
         assertTrue("dense<[true, true, false]> : tensor<3xi1>" in omlir, "odd-n end-pad mask missing:\n$omlir")
         assertTrue("[0:5] : (tensor<6xi32>) -> tensor<5xi32>" in omlir, "odd-n tail slice missing:\n$omlir")
+    }
+
+    @Test
+    fun rngRuntimeKeyOperandsEmitBroadcastsAndKeySchedule() {
+        // §0.4.432 — the runtime-key operand form: the two scalar-I32 key
+        // SSA values broadcast from rank-0 to the counter width, and the key
+        // schedule EMITS instead of folding — ks2's two xors ride on top of
+        // the 20 ARX xors, the 0x1BD11BDA parity constant appears RAW, and
+        // no key word is baked as a constant anywhere. The ARX core and the
+        // mantissa trick are byte-identical to the attr form's.
+        val keyT = DxirType(I32, emptyList())
+        val fn = DxirBuilder.function("rngrt") {
+            val k0 = param("k0", keyT)
+            val k1 = param("k1", keyT)
+            listOf(
+                op(
+                    OpKind.RNG_UNIFORM, listOf(k0, k1), DxirType(F32, listOf(6)),
+                    attrs = mapOf("dims" to listOf(6)),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue("rng_bit_generator" !in mlir, "must never emit rng_bit_generator:\n$mlir")
+        assertEquals(
+            2,
+            Regex("stablehlo\\.broadcast_in_dim %\\d+, dims = \\[\\] : \\(tensor<i32>\\) -> tensor<3xi32>")
+                .findAll(mlir).count(),
+            "both rank-0 key words must broadcast to counter width:\n$mlir",
+        )
+        assertTrue(
+            "dense<${0x1BD11BDA}> : tensor<3xi32>" in mlir,
+            "the UNFOLDED 0x1BD11BDA parity constant must appear:\n$mlir",
+        )
+        assertEquals(
+            22, Regex("stablehlo\\.xor ").findAll(mlir).count(),
+            "20 ARX xors + 2 emitted key-schedule xors:\n$mlir",
+        )
+        assertTrue("stablehlo.iota dim = 0 : tensor<3xi32>" in mlir, mlir)
+        assertTrue("dense<1065353216> : tensor<6xi32>" in mlir, "mantissa trick unchanged:\n$mlir")
+
+        // Normal rides the same core: uniform(2n) broadcasts the keys to
+        // tensor<4xi32> (half of 8) before Box-Muller.
+        val nfn = DxirBuilder.function("rngrtn") {
+            val k0 = param("k0", keyT)
+            val k1 = param("k1", keyT)
+            listOf(
+                op(
+                    OpKind.RNG_NORMAL, listOf(k0, k1), DxirType(F32, listOf(4)),
+                    attrs = mapOf("dims" to listOf(4)),
+                ),
+            )
+        }
+        val nmlir = nfn.toStablehlo()
+        assertTrue("(tensor<i32>) -> tensor<4xi32>" in nmlir, "normal's key broadcasts missing:\n$nmlir")
+        assertTrue("stablehlo.log" in nmlir && "stablehlo.cosine" in nmlir, nmlir)
+    }
+
+    @Test
+    fun rngKeyFormsAreExclusiveAndArityChecked() {
+        // §0.4.432 — the two key forms are exclusive and the arity is 0 or
+        // 2, nothing else: loud named refusals, not silent misreads.
+        val keyT = DxirType(I32, emptyList())
+        val one = DxirBuilder.function("rngbad1") {
+            val k0 = param("k0", keyT)
+            listOf(
+                op(
+                    OpKind.RNG_UNIFORM, listOf(k0), DxirType(F32, listOf(2)),
+                    attrs = mapOf("dims" to listOf(2)),
+                ),
+            )
+        }
+        val e1 = assertFailsWith<IllegalStateException> { one.toStablehlo() }
+        assertTrue("takes 0 operands" in e1.message!!, "unexpected message: ${e1.message}")
+
+        val both = DxirBuilder.function("rngbad2") {
+            val k0 = param("k0", keyT)
+            val k1 = param("k1", keyT)
+            listOf(
+                op(
+                    OpKind.RNG_UNIFORM, listOf(k0, k1), DxirType(F32, listOf(2)),
+                    attrs = mapOf("key0" to 1, "key1" to 2, "dims" to listOf(2)),
+                ),
+            )
+        }
+        val e2 = assertFailsWith<IllegalArgumentException> { both.toStablehlo() }
+        assertTrue("exclusive" in e2.message!!, "unexpected message: ${e2.message}")
     }
 
     @Test

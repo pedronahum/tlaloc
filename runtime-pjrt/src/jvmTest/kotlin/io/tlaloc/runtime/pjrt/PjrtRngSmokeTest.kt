@@ -1,6 +1,7 @@
 package io.tlaloc.runtime.pjrt
 
 import io.tlaloc.core.F32
+import io.tlaloc.core.I32
 import io.tlaloc.core.RandomKey
 import io.tlaloc.core.normalFloats
 import io.tlaloc.core.uniformFloats
@@ -101,6 +102,95 @@ class PjrtRngSmokeTest {
             for (i in 0 until 4) maxDiff = maxOf(maxDiff, abs(got[i] - want[i]))
             println("[pjrt-rng] normal max|diff|=$maxDiff vs host Box-Muller on GB10")
             assertTrue(maxDiff <= 1e-5f, "normal draws diverge beyond libm ulps: $maxDiff")
+        }
+    }
+
+    @Test
+    fun runtimeKeyOperandUniformBitExactOnGpu() {
+        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+
+        // §0.4.432 — the runtime-key operand form with keys as EXECUTABLE
+        // INPUTS: f32 scalar params CAST to i32 in-graph (PjrtSession's
+        // host-buffer lane is F32-only v1 — an i32 lane is the recorded
+        // tail), so XLA cannot constant-fold the key schedule: the emitted
+        // broadcast/xor/add key path actually runs on device. Keys stay
+        // strictly below 2^24 so the f32 input lane carries them exactly.
+        // Bit-exact vs the host kernel: integer ops cannot round, whichever
+        // engine computes them. Odd dims exercise the end-pad lane through
+        // the runtime-key path too.
+        val keyF = DxirType(F32, emptyList())
+        val keyI = DxirType(I32, emptyList())
+        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+            for ((dims, key) in listOf(
+                listOf(6) to RandomKey(42, 7),
+                listOf(5) to RandomKey(1234567, 891011),
+            )) {
+                val n = dims.fold(1) { a, d -> a * d }
+                val fn = DxirBuilder.function("rng_rtk") {
+                    val k0f = param("k0", keyF)
+                    val k1f = param("k1", keyF)
+                    val k0 = op(OpKind.CAST, listOf(k0f), keyI)
+                    val k1 = op(OpKind.CAST, listOf(k1f), keyI)
+                    listOf(
+                        op(
+                            OpKind.RNG_UNIFORM, listOf(k0, k1), DxirType(F32, dims),
+                            attrs = mapOf("dims" to dims),
+                        ),
+                    )
+                }
+                val want = uniformFloats(key, n)
+                val got = session.runOn(
+                    fn,
+                    listOf(floatArrayOf(key.k0.toFloat()), floatArrayOf(key.k1.toFloat())),
+                ).single()
+                for (i in 0 until n) {
+                    assertTrue(
+                        got[i].toRawBits() == want[i].toRawBits(),
+                        "runtime-key uniform dims=$dims key=$key lane $i: GPU ${got[i]} " +
+                            "(0x${got[i].toRawBits().toUInt().toString(16)}) != host ${want[i]} " +
+                            "(0x${want[i].toRawBits().toUInt().toString(16)}) — the bit stream forked",
+                    )
+                }
+            }
+            println("[pjrt-rng] runtime-key uniform draws BIT-EXACT vs host threefry on GB10")
+        }
+    }
+
+    @Test
+    fun constOperandHighBitKeysBitExactOnGpu() {
+        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+
+        // §0.4.432 — high-bit key words cannot ride the F32 input lane; as
+        // scalar I32 CONST operands they still exercise the operand-form
+        // emission (rank-0 broadcasts + the EMITTED key schedule — XLA may
+        // fold it, but the graph's integer math must be right either way)
+        // and must reproduce the host stream bit-for-bit.
+        val keyI = DxirType(I32, emptyList())
+        val key = RandomKey(0x7FFFFFFF, -0x1235ABCD)
+        val dims = listOf(6)
+        val fn = DxirBuilder.function("rng_hbk") {
+            val k0 = const(key.k0, keyI)
+            val k1 = const(key.k1, keyI)
+            listOf(
+                op(
+                    OpKind.RNG_UNIFORM, listOf(k0, k1), DxirType(F32, dims),
+                    attrs = mapOf("dims" to dims),
+                ),
+            )
+        }
+        val want = uniformFloats(key, 6)
+        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+            val got = session.runOn(fn, emptyList()).single()
+            for (i in 0 until 6) {
+                assertTrue(
+                    got[i].toRawBits() == want[i].toRawBits(),
+                    "high-bit const-key uniform lane $i: GPU ${got[i]} != host ${want[i]} — " +
+                        "the bit stream forked",
+                )
+            }
+            println("[pjrt-rng] high-bit const-operand keys BIT-EXACT vs host threefry on GB10")
         }
     }
 

@@ -1912,7 +1912,9 @@ reachable from `grad {}`, not new math. New-op families come after.
   - IR: `RNG_UNIFORM` / `RNG_NORMAL` — zero-operand creation ops, attrs
     `key0`/`key1`/`dims` all literal (no FIR lowering exists, so `grad {}`'s
     -1 sentinels can never reach them; the interpreter REQUIRES the `dims`
-    attr to equal the concrete result dims). Interpreter arms call the same
+    attr to equal the concrete result dims). (§0.4.432 later adds the
+    ALTERNATIVE two-operand scalar-I32 runtime-key form — see item 2 below;
+    `dims` stays literal in both.) Interpreter arms call the same
     `:core` kernels — host/interpreter bit-exact BY CONSTRUCTION and pinned
     in `DxirRngTest`. CostModel arms (threefry ≈ 26 flops/elem, Box-Muller
     ≈ 64). NON-differentiable in D1, deliberately: both transforms refused
@@ -2281,9 +2283,36 @@ audit's recommendations).
    (measured 0.0 diff on the GB10 regardless); the reparameterized
    GRADIENT graph (containing a cloned draw) compiles and runs on GPU at
    0.0 vs the interpreter, and GradientEmissionCoverageTest's RNG
-   exclusion is LIFTED. Remaining D tail: lifting the literal-only key
-   restriction (RandomKey-typed lambda params / computed key words —
-   needs runtime key operands on the creation ops, a design of its own).
+   exclusion is LIFTED.
+   **Runtime-key operand form — DONE §0.4.432 (IR/interpreter/emitter;
+   the FIR surface is the remaining tail).** The creation ops accept an
+   ALTERNATIVE form: exactly two scalar-I32 operands carrying the key
+   words, `key0`/`key1` attrs absent (the forms are exclusive, both-at-
+   once and any other arity refused by name), `dims` still a literal
+   attr in both forms — the shape must be static, the stream need not
+   be. Interpreter reads keys at execution time (an Int-carrying const
+   verbatim — exact for any 32-bit word; anything else through the F32
+   value domain guarded STRICTLY to |key| < 2^24, since 2^24+1 rounds
+   INTO the domain — beyond it a loud named refusal). Differentiation
+   needed NO new arms: keys are integers, RngDrawRule's empty
+   contribution list and the forward structural-zero tangent already
+   ignore operands, integer key params take the §0.4.54 typed-zero
+   gradient, and a cloned draw drags its key operand clones through the
+   ordinary usedByAdjoint transitive walk — same key SSA values, same
+   stream, pinned bit-exact in DxirRngTest. Emission: key splats
+   broadcast from the rank-0 SSA values and the key schedule EMITS
+   (ks2's two xors over the raw 0x1BD11BDA constant, the five injection
+   adds) instead of folding; the ARX core is untouched and the attr
+   form's MLIR is byte-identical to §0.4.422's. GPU-certified on the
+   GB10 (PjrtRngSmokeTest): keys as EXECUTABLE INPUTS (f32 scalars CAST
+   to i32 in-graph — XLA cannot fold the schedule) BIT-EXACT vs the
+   host kernels including the odd end-pad lane; high-bit keys as I32
+   const operands BIT-EXACT too. Remaining D tails, recorded: (a) the
+   FIR surface — RandomKey-typed vals / lambda params / computed key
+   words inside `grad {}` lowering to the operand form (the §0.4.421
+   literal-only fallback stays the loud gate until then); (b) an i32
+   host-buffer lane in PjrtSession (F32-only v1), which would let
+   high-bit runtime keys ride as executable inputs rather than consts.
 
 2a. **Fused-adjoint forward tangents — DONE §0.4.423.** The whole family
    joins forward mode: EMBEDDING_GRAD (linear in upstream), the four

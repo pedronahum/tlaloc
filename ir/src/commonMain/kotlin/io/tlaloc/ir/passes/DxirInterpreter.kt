@@ -82,6 +82,43 @@ object DxirInterpreter {
         if (type.dims.isEmpty()) 1 else type.dims.fold(1) { acc, d -> acc * d }
 
     /**
+     * §0.4.432 — resolve a runtime RNG key word from operand [idx] of [op].
+     * The operand must be a scalar I32. An Int-carrying [DxirConst] is read
+     * VERBATIM — no float round-trip, exact for any 32-bit word (the
+     * interpreter's FloatArray const materialisation would round beyond
+     * 2^24). Every other node evaluates through this interpreter's F32 value
+     * domain, which carries integers exactly only below 2^24 — the guard is
+     * STRICT (|key| < 2^24): 2^24 + 1 rounds INTO 2^24 under f32, so an
+     * inclusive bound would silently accept a corrupted key word. Beyond the
+     * domain the refusal names the honest alternatives; the StableHLO
+     * emission path carries high-bit runtime keys exactly (i32 SSA values,
+     * nothing rounds).
+     */
+    private fun scalarKeyWord(
+        op: DxirOp,
+        idx: Int,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): Int {
+        val node = op.operands[idx]
+        require(node.type.isScalar && node.type.dtype == io.tlaloc.core.I32) {
+            "${op.op} key operand $idx must be a scalar I32; got ${node.type}"
+        }
+        (node as? DxirConst)?.value?.let { v ->
+            if (v is Int) return v
+        }
+        val f = evalNode(node, env, multiResults).single()
+        val k = f.toInt()
+        require(k.toFloat() == f && kotlin.math.abs(k) < (1 shl 24)) {
+            "${op.op} key operand $idx evaluated to $f, which the interpreter's F32 " +
+                "value domain cannot carry as an exact 32-bit key word (integral " +
+                "|key| < 2^24 required); use the literal-attr form, an Int const " +
+                "operand, or the StableHLO path for high-bit runtime keys"
+        }
+        return k
+    }
+
+    /**
      * Phase A5c — elementwise binary evaluation with NumPy implicit broadcasting.
      *
      * The result shape is the op's own type; each operand right-aligns against it
@@ -406,28 +443,52 @@ object DxirInterpreter {
                     ?: error("POLYGAMMA is missing its integer 'order' attr")
                 FloatArray(a.size) { a[it].toDouble().polygamma(order).toFloat() }
             }
-            // §0.4.408 — Phase D1 stateless PRNG draws: zero-operand creation
-            // ops whose stream is entirely determined by the `key0`/`key1` +
-            // `dims` attrs. Both arms call the SAME `:core/Random.kt` kernels
-            // the host tensor surface uses, so host and interpreter agree
-            // bit-for-bit by construction (asserted in DxirRngTest). The
-            // `dims` attr must equal the concrete result type's dims — the
-            // §0.4.421 FIR lowering is literal-only by contract, so the type's
-            // dims come from the same literals and grad-{} -1 sentinels still
-            // cannot occur here.
+            // §0.4.408 — Phase D1 stateless PRNG draws: creation ops whose
+            // stream is determined by two key words + the `dims` attr. Both
+            // arms call the SAME `:core/Random.kt` kernels the host tensor
+            // surface uses, so host and interpreter agree bit-for-bit by
+            // construction (asserted in DxirRngTest). The `dims` attr must
+            // equal the concrete result type's dims — the shape is static in
+            // BOTH key forms, so grad-{} -1 sentinels still cannot occur here.
+            //
+            // §0.4.432 — the runtime-key operand form: two scalar-I32
+            // operands carry the key words (attrs absent, the forms are
+            // exclusive), read at execution time via [scalarKeyWord]. An
+            // Int-carrying DxirConst is read verbatim (exact for any 32-bit
+            // word); any other node rides this interpreter's F32 value
+            // domain, guarded to |key| < 2^24 with a loud named refusal —
+            // the StableHLO path carries high-bit runtime keys exactly.
             OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL -> {
-                val k0 = (op.attrs["key0"] as? Number)?.toInt()
-                    ?: error("${op.op} is missing its integer 'key0' attr")
-                val k1 = (op.attrs["key1"] as? Number)?.toInt()
-                    ?: error("${op.op} is missing its integer 'key1' attr")
                 val dims = (op.attrs["dims"] as? List<*>)?.map {
                     (it as? Number)?.toInt() ?: error("${op.op} 'dims' attr must be List<Int>")
                 } ?: error("${op.op} is missing its List<Int> 'dims' attr")
                 require(dims == op.type.dims) {
                     "${op.op} 'dims' attr $dims disagrees with result type dims ${op.type.dims}"
                 }
+                val key = when (op.operands.size) {
+                    0 -> {
+                        val k0 = (op.attrs["key0"] as? Number)?.toInt()
+                            ?: error("${op.op} is missing its integer 'key0' attr")
+                        val k1 = (op.attrs["key1"] as? Number)?.toInt()
+                            ?: error("${op.op} is missing its integer 'key1' attr")
+                        RandomKey(k0, k1)
+                    }
+                    2 -> {
+                        require("key0" !in op.attrs && "key1" !in op.attrs) {
+                            "${op.op} carries both key operands and key0/key1 attrs — the " +
+                                "literal-attr and runtime-operand key forms are exclusive"
+                        }
+                        RandomKey(
+                            scalarKeyWord(op, 0, env, multiResults),
+                            scalarKeyWord(op, 1, env, multiResults),
+                        )
+                    }
+                    else -> error(
+                        "${op.op} takes 0 operands (literal key0/key1 attrs) or 2 " +
+                            "(scalar I32 runtime key words); got ${op.operands.size}",
+                    )
+                }
                 val n = dims.fold(1) { acc, d -> acc * d }
-                val key = RandomKey(k0, k1)
                 if (op.op == OpKind.RNG_UNIFORM) uniformFloats(key, n) else normalFloats(key, n)
             }
             OpKind.SQRT -> {

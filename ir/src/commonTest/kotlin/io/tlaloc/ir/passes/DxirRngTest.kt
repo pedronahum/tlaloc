@@ -1,6 +1,7 @@
 package io.tlaloc.ir.passes
 
 import io.tlaloc.core.F32
+import io.tlaloc.core.I32
 import io.tlaloc.core.RandomKey
 import io.tlaloc.core.normalFloats
 import io.tlaloc.core.uniformFloats
@@ -182,6 +183,130 @@ class DxirRngTest {
         val second = DxirInterpreter.evalFunction(grad, listOf(loc, scale))
         assertContentEquals(first[0], second[0], "d loc must be bit-identical across runs")
         assertContentEquals(first[1], second[1], "d scale must be bit-identical across runs")
+    }
+
+    // --- §0.4.432 — the runtime-key operand form: RNG_UNIFORM/RNG_NORMAL
+    // with two scalar-I32 key operands (dims still a literal attr). The
+    // interpreter reads the key words at execution time; the pin everywhere
+    // is bit-equality with the attr form / the host kernel at the SAME key. ---
+
+    private val keyT = DxirType(I32, emptyList())
+
+    @Test
+    fun operandFormDrawsMatchAttrFormBitExact() {
+        // Keys arrive as scalar I32 PARAMS — genuinely runtime values the
+        // op cannot see at build time. Same key → the SAME stream as the
+        // attr form, bit-for-bit (both call `:core/Random.kt`).
+        val r6 = DxirType(F32, listOf(6))
+        val ufn = DxirBuilder.function("rng_rtk_u") {
+            val k0 = param("k0", keyT)
+            val k1 = param("k1", keyT)
+            listOf(op(OpKind.RNG_UNIFORM, listOf(k0, k1), r6, attrs = mapOf("dims" to listOf(6))))
+        }
+        val uout = DxirInterpreter.evalFunction(ufn, listOf(floatArrayOf(7f), floatArrayOf(42f)))
+        assertContentEquals(uniformFloats(key, 6), uout[0], "operand-form uniform must match host/attr stream")
+
+        // Odd length: the end-pad counter lane rides the operand form too.
+        val r5 = DxirType(F32, listOf(5))
+        val nfn = DxirBuilder.function("rng_rtk_n") {
+            val k0 = param("k0", keyT)
+            val k1 = param("k1", keyT)
+            listOf(op(OpKind.RNG_NORMAL, listOf(k0, k1), r5, attrs = mapOf("dims" to listOf(5))))
+        }
+        val nout = DxirInterpreter.evalFunction(nfn, listOf(floatArrayOf(7f), floatArrayOf(42f)))
+        assertContentEquals(normalFloats(key, 5), nout[0], "operand-form normal must match host/attr stream")
+    }
+
+    @Test
+    fun operandFormConstKeysCarryHighBitsExactly() {
+        // An Int-carrying DxirConst key operand is read VERBATIM — no float
+        // round-trip — so high-bit key words survive the interpreter exactly
+        // (the FloatArray value domain would round anything beyond 2^24).
+        val hk = RandomKey(0x7FFFFFFF, -0x1235ABCD)
+        val r4 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("rng_rtk_hb") {
+            val k0 = const(hk.k0, keyT)
+            val k1 = const(hk.k1, keyT)
+            listOf(op(OpKind.RNG_UNIFORM, listOf(k0, k1), r4, attrs = mapOf("dims" to listOf(4))))
+        }
+        val out = DxirInterpreter.evalFunction(fn, emptyList())
+        assertContentEquals(uniformFloats(hk, 4), out[0], "high-bit const key words must be exact")
+    }
+
+    @Test
+    fun interpreterRefusesKeyWordsOutsideF32Domain() {
+        // A non-const runtime key rides the interpreter's F32 value domain,
+        // which carries integers exactly only STRICTLY below 2^24 (2^24 + 1
+        // rounds INTO 2^24, so the inclusive bound would silently corrupt a
+        // key). Beyond it: a loud named refusal, not a wrong stream.
+        val r2 = DxirType(F32, listOf(2))
+        val fn = DxirBuilder.function("rng_rtk_bad") {
+            val k0 = param("k0", keyT)
+            val k1 = param("k1", keyT)
+            listOf(op(OpKind.RNG_UNIFORM, listOf(k0, k1), r2, attrs = mapOf("dims" to listOf(2))))
+        }
+        val ex = assertFailsWith<IllegalArgumentException> {
+            DxirInterpreter.evalFunction(fn, listOf(floatArrayOf((1 shl 24).toFloat()), floatArrayOf(1f)))
+        }
+        assertTrue(
+            ex.message!!.contains("F32 value domain"),
+            "unexpected message: ${ex.message}",
+        )
+    }
+
+    @Test
+    fun reverseGradientThroughOperandFormKeys() {
+        // loss = Σ (u(k0, k1) ⊙ x) with the keys as scalar I32 params. The
+        // reverse walk must (a) contribute NOTHING through the draw (keys
+        // are integers — RngDrawRule's empty list), (b) hand the integer key
+        // params their §0.4.54 typed-zero gradients, and (c) re-draw the
+        // SAME stream in the gradient body: the cloned draw's key OPERANDS
+        // ride the usedByAdjoint transitive walk, so d x = u bit-exact.
+        val r4 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("rng_rtk_grad") {
+            val x = param("x", r4)
+            val k0 = param("k0", keyT)
+            val k1 = param("k1", keyT)
+            val u = op(OpKind.RNG_UNIFORM, listOf(k0, k1), r4, attrs = mapOf("dims" to listOf(4)))
+            val p = op(OpKind.MUL, listOf(u, x), r4)
+            listOf(op(OpKind.SUM, listOf(p), scalar))
+        }
+        val grad = DxirReverseTransform.apply(fn)
+        val x = floatArrayOf(0.5f, -1f, 2f, 0.25f)
+        val out = DxirInterpreter.evalFunction(grad, listOf(x, floatArrayOf(7f), floatArrayOf(42f)))
+        assertContentEquals(
+            uniformFloats(key, 4), out[0],
+            "d x must be the draw re-drawn from the CLONED key operands (bit-exact)",
+        )
+        assertContentEquals(floatArrayOf(0f), out[1], "integer key param takes the typed-zero gradient")
+        assertContentEquals(floatArrayOf(0f), out[2], "integer key param takes the typed-zero gradient")
+    }
+
+    @Test
+    fun forwardTangentThroughOperandFormIsZero() {
+        // jvp of Σ (z(k0, k1) ⊙ x): the draw's tangent stays the structural
+        // zero in the operand form too, so the surviving term is Σ ε ⊙ vx.
+        val r4 = DxirType(F32, listOf(4))
+        val fn = DxirBuilder.function("rng_rtk_jvp") {
+            val x = param("x", r4)
+            val k0 = const(key.k0, keyT)
+            val k1 = const(key.k1, keyT)
+            val z = op(OpKind.RNG_NORMAL, listOf(k0, k1), r4, attrs = mapOf("dims" to listOf(4)))
+            val p = op(OpKind.MUL, listOf(z, x), r4)
+            listOf(op(OpKind.SUM, listOf(p), scalar))
+        }
+        val jvp = DxirForwardTransform.apply(fn)
+        val x = floatArrayOf(0.5f, -1f, 2f, 0.25f)
+        val vx = floatArrayOf(0.11f, -0.23f, 0.37f, -0.41f)
+        val out = DxirInterpreter.evalFunction(jvp, listOf(x, vx))
+        val eps = normalFloats(key, 4)
+        var expected = 0f
+        for (i in 0 until 4) expected += eps[i] * vx[i]
+        val tangent = out[1].single()
+        assertTrue(
+            abs(expected - tangent) < 1e-6f,
+            "operand-form tangent must be Σ ε⊙vx: $expected vs $tangent",
+        )
     }
 
     @Test

@@ -590,15 +590,60 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * [threefryBits] transcribed op for op, including the odd-n end-pad
      * lane whose counter reads 0 and whose output word is sliced away.
      */
+    /**
+     * §0.4.432 — a threefry key word as the emission sees it: either a
+     * compile-time literal Int (the §0.4.408 zero-operand attr form — folds
+     * into splat constants and emit-time key-schedule arithmetic, exactly as
+     * before) or a rank-0 `tensor<i32>` SSA value (the runtime-key operand
+     * form — splats via `broadcast_in_dim` and the key schedule EMITS as
+     * i32 ops). Inside [emitThreefryUniform] the Dyn arm is re-used at
+     * counter width after broadcasting; the two meanings never mix because
+     * the rank-0 → half-width conversion happens exactly once, up front.
+     */
+    private sealed interface RngKeyWord {
+        data class Lit(val v: Int) : RngKeyWord
+        data class Dyn(val ssa: String) : RngKeyWord
+    }
+
+    /**
+     * Resolve a draw's two key words: 0 operands → literal `key0`/`key1`
+     * attrs (§0.4.408); 2 operands → scalar-I32 SSA values (§0.4.432). The
+     * forms are exclusive — an op carrying both is refused, as is any other
+     * arity. The `dims` attr stays literal in both forms: the result shape
+     * must be static, the stream need not be.
+     */
+    private fun rngKeyWords(node: DxirOp): Pair<RngKeyWord, RngKeyWord> = when (node.operands.size) {
+        0 -> {
+            val k0 = (node.attrs["key0"] as? Number)?.toInt()
+                ?: error("${node.op} is missing its integer 'key0' attr")
+            val k1 = (node.attrs["key1"] as? Number)?.toInt()
+                ?: error("${node.op} is missing its integer 'key1' attr")
+            RngKeyWord.Lit(k0) to RngKeyWord.Lit(k1)
+        }
+        2 -> {
+            require("key0" !in node.attrs && "key1" !in node.attrs) {
+                "${node.op} carries both key operands and key0/key1 attrs — the " +
+                    "literal-attr and runtime-operand key forms are exclusive"
+            }
+            for ((i, o) in node.operands.withIndex()) {
+                require(o.type.isScalar && o.type.dtype == I32) {
+                    "${node.op} key operand $i must be a scalar I32; got ${o.type}"
+                }
+            }
+            RngKeyWord.Dyn(ref(node.operands[0])) to RngKeyWord.Dyn(ref(node.operands[1]))
+        }
+        else -> error(
+            "${node.op} takes 0 operands (literal key0/key1 attrs) or 2 " +
+                "(scalar I32 runtime key words); got ${node.operands.size}",
+        )
+    }
+
     private fun emitRngDraw(step: String, name: String, node: DxirOp) {
-        val k0 = (node.attrs["key0"] as? Number)?.toInt()
-            ?: error("${node.op} is missing its integer 'key0' attr")
-        val k1 = (node.attrs["key1"] as? Number)?.toInt()
-            ?: error("${node.op} is missing its integer 'key1' attr")
+        val (k0, k1) = rngKeyWords(node)
         val dims = node.type.dims
         require(dims.isNotEmpty() && dims.all { it > 0 }) {
             "${node.op} emission requires concrete positive dims; got $dims " +
-                "(the FIR front-end's literal-only contract guarantees this)"
+                "(the shape is static in BOTH key forms — dims ride as literal attrs)"
         }
         val n = dims.fold(1) { acc, d -> acc * d }
         val flat = if (node.op == OpKind.RNG_UNIFORM) {
@@ -618,8 +663,16 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * trick, returning the SSA name of a flat `tensor<n×f32>`. Bit-exact
      * against the host kernel on every backend: integer ops only, then one
      * bitcast into [1, 2) and one exact subtract.
+     *
+     * §0.4.432 — key words arrive as [RngKeyWord]s. Literal words fold into
+     * splat constants and emit-time key-schedule arithmetic (byte-identical
+     * to the §0.4.422 emission — the attr form's MLIR does not change);
+     * runtime words broadcast from their rank-0 SSA values once, and the
+     * key schedule (ks2's xors, the five injection `+ (i+1)` adds) EMITS as
+     * the same i32 ops the :core kernel computes in Kotlin. The ARX rounds
+     * are untouched either way, so the bit stream stays exact.
      */
-    private fun emitThreefryUniform(step: String, k0: Int, k1: Int, n: Int): String {
+    private fun emitThreefryUniform(step: String, key0: RngKeyWord, key1: RngKeyWord, n: Int): String {
         val odd = n % 2
         val padded = n + odd
         val half = padded / 2
@@ -632,6 +685,35 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             out.appendLine("$step$s = stablehlo.constant dense<$v> : $i32h")
             s
         }
+        // §0.4.432 — inside this function a Dyn word holds a HALF-WIDTH SSA
+        // name; `atHalf` converts an incoming rank-0 runtime key exactly once.
+        fun atHalf(k: RngKeyWord): RngKeyWord = when (k) {
+            is RngKeyWord.Lit -> k
+            is RngKeyWord.Dyn -> {
+                val b = synth()
+                out.appendLine(
+                    "$step$b = stablehlo.broadcast_in_dim ${k.ssa}, dims = [] : " +
+                        "(tensor<i32>) -> $i32h",
+                )
+                RngKeyWord.Dyn(b)
+            }
+        }
+        fun kwName(k: RngKeyWord): String = when (k) {
+            is RngKeyWord.Lit -> splat(k.v)
+            is RngKeyWord.Dyn -> k.ssa
+        }
+        // Wrapping Int add IS i32 add, so a literal word folds; a runtime
+        // word emits the add against a splat of the literal addend.
+        fun kwPlus(k: RngKeyWord, c: Int): RngKeyWord = when (k) {
+            is RngKeyWord.Lit -> RngKeyWord.Lit(k.v + c)
+            is RngKeyWord.Dyn -> {
+                val a = synth()
+                out.appendLine("$step$a = stablehlo.add ${k.ssa}, ${splat(c)} : $i32h")
+                RngKeyWord.Dyn(a)
+            }
+        }
+        val kw0 = atHalf(key0)
+        val kw1 = atHalf(key1)
         // Counters: c0 = iota(half); c1 = c0 + half, with an odd n's END-PAD
         // lane (the single lane whose c1 would equal n) reading counter 0 —
         // exactly `threefryBits`'s `if (c1 < n) c1 else 0`.
@@ -648,11 +730,21 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             c1 = sel
         }
         // Key schedule + 20 ARX rounds, the Random123 reference schedule.
-        val ks2 = k0 xor k1 xor 0x1BD11BDA
+        // ks2 = k0 ^ k1 ^ 0x1BD11BDA folds when both words are literal;
+        // otherwise it emits as the same two xors.
+        val ks2: RngKeyWord = if (kw0 is RngKeyWord.Lit && kw1 is RngKeyWord.Lit) {
+            RngKeyWord.Lit(kw0.v xor kw1.v xor 0x1BD11BDA)
+        } else {
+            val x01 = synth()
+            out.appendLine("$step$x01 = stablehlo.xor ${kwName(kw0)}, ${kwName(kw1)} : $i32h")
+            val parity = synth()
+            out.appendLine("$step$parity = stablehlo.xor $x01, ${splat(0x1BD11BDA)} : $i32h")
+            RngKeyWord.Dyn(parity)
+        }
         var x0 = synth()
-        out.appendLine("$step$x0 = stablehlo.add $c0, ${splat(k0)} : $i32h")
+        out.appendLine("$step$x0 = stablehlo.add $c0, ${kwName(kw0)} : $i32h")
         var x1 = synth()
-        out.appendLine("$step$x1 = stablehlo.add $c1, ${splat(k1)} : $i32h")
+        out.appendLine("$step$x1 = stablehlo.add $c1, ${kwName(kw1)} : $i32h")
         val rotEven = intArrayOf(13, 15, 26, 6)
         val rotOdd = intArrayOf(17, 29, 16, 24)
         for (i in 0 until 5) {
@@ -671,18 +763,19 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 out.appendLine("$step$xr = stablehlo.xor $rot, $x0 : $i32h")
                 x1 = xr
             }
-            // Key injection after each group — the constants fold at emit
-            // time (Kotlin's wrapping Int add is i32 add).
+            // Key injection after each group — literal constants fold at emit
+            // time (Kotlin's wrapping Int add is i32 add); runtime words emit
+            // the `+ (i+1)` add via kwPlus before the injection itself.
             val (inj0, inj1) = when (i % 3) {
-                0 -> k1 to ks2 + (i + 1)
-                1 -> ks2 to k0 + (i + 1)
-                else -> k0 to k1 + (i + 1)
+                0 -> kw1 to kwPlus(ks2, i + 1)
+                1 -> ks2 to kwPlus(kw0, i + 1)
+                else -> kw0 to kwPlus(kw1, i + 1)
             }
             val j0 = synth()
-            out.appendLine("$step$j0 = stablehlo.add $x0, ${splat(inj0)} : $i32h")
+            out.appendLine("$step$j0 = stablehlo.add $x0, ${kwName(inj0)} : $i32h")
             x0 = j0
             val j1 = synth()
-            out.appendLine("$step$j1 = stablehlo.add $x1, ${splat(inj1)} : $i32h")
+            out.appendLine("$step$j1 = stablehlo.add $x1, ${kwName(inj1)} : $i32h")
             x1 = j1
         }
         // [y0…, y1…] concatenation, odd-n tail word dropped.
@@ -726,7 +819,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * uniforms are exact; f64 log/cos differ from the JVM's at ≤1 ulp, so
      * the narrowed f32 result is certified at tolerance, never bit-pinned.
      */
-    private fun emitBoxMullerNormal(step: String, k0: Int, k1: Int, n: Int): String {
+    private fun emitBoxMullerNormal(step: String, k0: RngKeyWord, k1: RngKeyWord, n: Int): String {
         val u = emitThreefryUniform(step, k0, k1, 2 * n)
         val f32n = "tensor<${n}xf32>"
         val f322n = "tensor<${2 * n}xf32>"
