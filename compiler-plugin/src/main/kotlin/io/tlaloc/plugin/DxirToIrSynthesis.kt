@@ -3354,9 +3354,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * Exactly two operands: the FIR folds an n-ary user `concat`/`stack` into a
      * right-fold of binary CONCATs precisely so this arm never needs an `IrVararg`
      * (which the plugin cannot build — the documented reason for the `…RankN` shim
-     * family). An IR-level n-ary CONCAT therefore has no synthesis path and falls
-     * back to the tape; `DxirShapePlumbingTest` and the emitter tests exercise those
-     * at the IR level, where they belong.
+     * family). An IR-level n-ary CONCAT therefore has no synthesis path (and no
+     * tape fallback exists for concat, so a rejection here is a hard "kept original
+     * call" — which user code can never hit, since the FIR only ever builds binary
+     * nodes); `DxirShapePlumbingTest` and the emitter tests exercise the variadic
+     * form at the IR level, where it belongs. Its ADJOINT is a different story:
+     * ConcatRule is variadic, so [irSliceLike]/[irPadLike] accept up to 7 priors
+     * (§0.4.425) for gradient bodies over hand-built variadic CONCATs.
      */
     private fun IrBuilderWithScope.irConcat(
         op: DxirOp,
@@ -3385,12 +3389,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     /**
      * Phase A2b — `OpKind.SLICE_LIKE(value, thisTemplate, priorTemplate…)` → the
-     * matching fixed-arity `:core/ops` twin (`sliceLikeStart` / `sliceLikeAfter{1,2,3}`),
+     * matching fixed-arity `:core/ops` twin (`sliceLikeStart` / `sliceLikeAfter{1..7}`),
      * selected by the PRIOR-template count. The axis rides as an Int const; every
      * extent is read off the templates at runtime, which is the whole point (a concat
      * operand's window offset is the cumulative sum of the prior operands' runtime
-     * extents and does not exist at compile time). Bounded at 4 concat operands —
-     * the FIR's fold-to-binary means user code only ever needs one prior.
+     * extents and does not exist at compile time). Bounded at 8 concat operands
+     * (§0.4.425, from 4) — a bound that only an IR-level VARIADIC concat can reach:
+     * the FIR's fold-to-binary means user `concat`/`stack` of ANY arity only ever
+     * needs one prior, so user code never sees this ceiling at all.
      */
     private fun IrBuilderWithScope.irSliceLike(
         op: DxirOp,
@@ -3398,14 +3404,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         val priors = op.operands.size - 2
-        if (priors !in 0..3) return null
+        if (priors !in 0..7) return null
         if (!isAcceptedTensorType(op.type)) return null
-        val name = when (priors) {
-            0 -> "sliceLikeStart"
-            1 -> "sliceLikeAfter1"
-            2 -> "sliceLikeAfter2"
-            else -> "sliceLikeAfter3"
-        }
+        val name = if (priors == 0) "sliceLikeStart" else "sliceLikeAfter$priors"
         val sym = opsTensorSymbol(name) ?: return null
         val decls = op.operands.map { env[it.id] ?: return null }
         val axis = (op.attrs["axis"] as? Number)?.toInt() ?: return null
@@ -3427,7 +3428,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     /**
      * §0.4.404 — `OpKind.PAD_LIKE(value, outTemplate, priorTemplate…)` → the
-     * matching fixed-arity `:core/ops` twin (`padLikeStart` / `padLikeAfter{1,2,3}`),
+     * matching fixed-arity `:core/ops` twin (`padLikeStart` / `padLikeAfter{1..7}`),
      * selected by the PRIOR-template count — the [irSliceLike] shape exactly, since
      * PAD_LIKE is SLICE_LIKE's transpose: the axis rides as an Int const; the offset
      * and target extent are read off the templates at runtime (a concat window's
@@ -3440,14 +3441,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         val priors = op.operands.size - 2
-        if (priors !in 0..3) return null
+        if (priors !in 0..7) return null
         if (!isAcceptedTensorType(op.type)) return null
-        val name = when (priors) {
-            0 -> "padLikeStart"
-            1 -> "padLikeAfter1"
-            2 -> "padLikeAfter2"
-            else -> "padLikeAfter3"
-        }
+        val name = if (priors == 0) "padLikeStart" else "padLikeAfter$priors"
         val sym = opsTensorSymbol(name) ?: return null
         val decls = op.operands.map { env[it.id] ?: return null }
         val axis = (op.attrs["axis"] as? Number)?.toInt() ?: return null

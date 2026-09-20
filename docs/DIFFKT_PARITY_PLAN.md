@@ -168,11 +168,26 @@ reachable from `grad {}`, not new math. New-op families come after.
         stays `emptySet()` and the per-node `readsPrimalOperands(op)` added in
         A5c-2 is authoritative — all indices when symbolic (every operand is a
         template), none when concrete (nothing is cloned, as before).
-      - Host twins: `sliceLikeStart` / `sliceLikeAfter{1,2,3}` — fixed-arity per
+      - Host twins: `sliceLikeStart` / `sliceLikeAfter{1..7}` — fixed-arity per
         PRIOR count, because synthesis builds positional `IrCall` arguments and
         cannot build an `IrVararg` (the documented reason for the whole `…RankN`
-        shim family). Bounded at 4 concat operands; a wider concat is slice 2's
-        concern.
+        shim family). **The 4-operand bound was lifted to 8 in §0.4.425**, and
+        the audit there settled where the ceiling actually lived: NOT on the
+        user surface — the FIR's fold-to-binary is arity-generic, so a user
+        `concat`/`stack` of ANY width only ever produces binary CONCAT nodes
+        whose SLICE_LIKE adjoints carry at most ONE prior template (certified
+        by the five-operand mixed-extent E2E in `ConcatGradientTest`, widths
+        2,3,2,3,2 with distinct prime coefficients, per-operand analytic sums)
+        — but solely in the `irSliceLike`/`irPadLike` twin-selection guard,
+        which only an IR-level hand-built VARIADIC CONCAT's gradient body can
+        reach. Both families were extended in lockstep (`padLikeAfter{4..7}`
+        too: SLICE_LIKE's VJP is PAD_LIKE with the SAME priors, so the pair's
+        bounds must move together to stay closed under differentiation), with
+        host pins at the new range's endpoints (4 and 7 priors, cumulative
+        offsets 10 and 28 over eight width-1..8 segments, the sliceLike ⇄
+        padLike round trip at 7, and the overrun refusal). An arity-generic
+        respelling was REJECTED: it would need list-building IR the synthesis
+        cannot construct — the same IrVararg wall, one layer up.
       Certified: interpreter pins for the window contract (start window, one
       prior, two priors, a LEADING axis so the copy is not one contiguous run,
       and the out-of-range refusal), the rule's concrete-vs-symbolic split

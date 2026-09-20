@@ -42,6 +42,9 @@ import kotlin.test.assertTrue
  *   test 2  Σ concat(1, a, b, a)      a appears TWICE, so its two windows accumulate
  *                                       → da = 2s [2,2], db = 1s [2,3]
  *   test 3  Σ stack(0, a⊙2, b⊙3)      a, b [2,2] → [2,2,2] → da = 2s, db = 3s
+ *   test 4  Σ concat(1, a⊙2, b⊙3, a⊙5, b⊙7, a⊙11)   FIVE operands (§0.4.425): four
+ *                                       binary CONCAT nodes, windows of widths
+ *                                       2,3,2,3,2 → da = 18s [2,2], db = 10s [2,3]
  */
 class ConcatGradientTest {
 
@@ -72,6 +75,30 @@ class ConcatGradientTest {
             want = mapOf(
                 "da" to Grad(intArrayOf(2, 2), listOf(2f, 2f, 2f, 2f)),
                 "db" to Grad(intArrayOf(2, 3), listOf(1f, 1f, 1f, 1f, 1f, 1f)),
+            ),
+        )
+    }
+
+    @Test
+    fun `grad through a five-operand concat with mixed runtime extents`() {
+        // §0.4.425 — the fold-to-binary is ARITY-GENERIC: five operands become four
+        // binary CONCAT nodes, so every SLICE_LIKE in the gradient body has at most
+        // ONE prior template no matter how wide the user concat is — the old
+        // "bounded at 4 operands" ceiling lived only in the sliceLikeAfter{N} twin
+        // family, which user code never reaches. Windows have DIFFERENT runtime
+        // extents (widths 2,3,2,3,2 along axis 1) and distinct prime coefficients,
+        // so a window returned to the wrong operand or at the wrong offset shows up
+        // in the per-operand analytic sums: da = (2+5+11)s, db = (3+7)s.
+        val src = body(
+            "concat(1, a * 2.0f, b * 3.0f, a * 5.0f, b * 7.0f, a * 11.0f).sum().toFloat()",
+            "concat",
+            intArrayOf(2, 3),
+        )
+        assertGradient(
+            src,
+            want = mapOf(
+                "da" to Grad(intArrayOf(2, 2), List(4) { 18f }),
+                "db" to Grad(intArrayOf(2, 3), List(6) { 10f }),
             ),
         )
     }

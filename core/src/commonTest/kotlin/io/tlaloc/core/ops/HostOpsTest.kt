@@ -407,6 +407,48 @@ class HostOpsTest {
         assertFailsWith<IllegalArgumentException> { padLikeAfter1(wide, t, p, 1) }
     }
 
+    /**
+     * §0.4.425 — the extended `sliceLikeAfter{4..7}` / `padLikeAfter{4..7}`
+     * twins: the window offset is the RUNTIME sum of up to seven prior
+     * templates' axis extents (an 8-operand IR-level CONCAT's last window).
+     * Every prior has a DIFFERENT extent, so a miscounted or reordered sum
+     * lands visibly off; the templates contribute shape only. Pins the
+     * endpoints of the new range (4 and 7 priors), the sliceLike ⇄ padLike
+     * round trip at 7, and the overrun refusal.
+     */
+    @Test
+    fun sliceLikeAfterManyPriorsSumsTheirRuntimeExtents() {
+        // Eight segments of widths 1..8 along axis 1: value [2, 36], values 0..71.
+        val v = Tensors.f32Matrix<Sym, Sym>(2, 36, FloatArray(72) { it.toFloat() })
+        val p = (1..7).map { Tensors.f32Matrix<Sym, Sym>(2, it, FloatArray(2 * it)) }
+        // After priors 1+2+3+4 = 10: the width-5 window is columns 10..14.
+        val t5 = Tensors.f32Matrix<Sym, Sym>(2, 5, FloatArray(10))
+        assertContentEquals(
+            floatArrayOf(10f, 11f, 12f, 13f, 14f, 46f, 47f, 48f, 49f, 50f),
+            sliceLikeAfter4(v, t5, p[0], p[1], p[2], p[3], 1).hostF32(),
+        )
+        // After priors 1+2+…+7 = 28: the width-8 window is columns 28..35.
+        val t8 = Tensors.f32Matrix<Sym, Sym>(2, 8, FloatArray(16))
+        val w = sliceLikeAfter7(v, t8, p[0], p[1], p[2], p[3], p[4], p[5], p[6], 1)
+        assertContentEquals(
+            FloatArray(16) { if (it < 8) 28f + it else 56f + it },
+            w.hostF32(),
+        )
+        // Round trip with padLikeAfter7: place the window back at columns 28..35
+        // of a zero [2, 36] (outTemplate = v, shape only), cut it back out, and
+        // nothing outside the window is nonzero.
+        val placed = padLikeAfter7(w, v, p[0], p[1], p[2], p[3], p[4], p[5], p[6], 1)
+        assertContentEquals(
+            w.hostF32(),
+            sliceLikeAfter7(placed, t8, p[0], p[1], p[2], p[3], p[4], p[5], p[6], 1).hostF32(),
+        )
+        assertEquals(w.hostF32().sum(), placed.hostF32().sum())
+        // A prior set whose sum overruns the value's axis refuses loudly.
+        assertFailsWith<IllegalArgumentException> {
+            sliceLikeAfter7(v, t8, p[1], p[1], p[2], p[3], p[4], p[5], p[6], 1)
+        }
+    }
+
     @Test
     fun timesScalarMultipliesEachElement() {
         val a = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f))

@@ -297,7 +297,8 @@ enum class OpKind {
     // its own — all -1 sentinels at transform time. With no prior templates the
     // window starts at 0. Every template contributes SHAPE ONLY — its values are
     // never read. Host twins: `sliceLikeStart(value, thisTemplate, axis)` and
-    // `sliceLikeAfter{1,2,3}(value, thisTemplate, prior…, axis)`.
+    // `sliceLikeAfter{1..7}(value, thisTemplate, prior…, axis)` (§0.4.425
+    // lifted the twin family from 3 priors to 7).
     // §0.4.404 — VjpRule: PAD_LIKE(upstream, outTemplate=value, same priors,
     // axis), so reverse-mode differentiates THROUGH it (second order through a
     // symbolic concat window).
@@ -319,7 +320,8 @@ enum class OpKind {
     // and PAD_TO ⇄ SLICE_AT. Every template contributes SHAPE ONLY — its
     // values are never read. With no prior templates the window sits at 0.
     // Host twins: `padLikeStart(value, outTemplate, axis)` and
-    // `padLikeAfter{1,2,3}(value, outTemplate, prior…, axis)`.
+    // `padLikeAfter{1..7}(value, outTemplate, prior…, axis)` (§0.4.425
+    // lifted the twin family from 3 priors to 7, in lockstep with SLICE_LIKE's).
     PAD_LIKE,
 
     // §0.4.419 — Phase E1c-pre: the PARAM-ADDRESSED structural zero.

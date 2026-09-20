@@ -2547,7 +2547,11 @@ private fun <S : Shape> sliceWindow(
 
 /** Fixed-arity `SLICE_LIKE` twins, one per PRIOR-template count — the usual
  * IrVararg reason (see [broadcastDimsRank1]): synthesis builds positional
- * `IrCall` arguments, so the operand count has to be in the callee's name. */
+ * `IrCall` arguments, so the operand count has to be in the callee's name.
+ * §0.4.425 lifted the family from 3 priors to 7 (an 8-operand IR-level
+ * CONCAT); the user-facing [concat]'s fold-to-binary never needs more than
+ * ONE prior, so the wider twins serve only hand-built variadic CONCAT nodes
+ * differentiated through the plugin. */
 fun <S : Shape> sliceLikeStart(value: DTensor<*, F32>, thisTemplate: DTensor<S, F32>, axis: Int): DTensor<S, F32> =
     sliceWindow(value, thisTemplate, axis, emptyList())
 
@@ -2574,6 +2578,54 @@ fun <S : Shape> sliceLikeAfter3(
     prior2: DTensor<*, F32>,
     axis: Int,
 ): DTensor<S, F32> = sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2))
+
+fun <S : Shape> sliceLikeAfter4(
+    value: DTensor<*, F32>,
+    thisTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    prior3: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2, prior3))
+
+fun <S : Shape> sliceLikeAfter5(
+    value: DTensor<*, F32>,
+    thisTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    prior3: DTensor<*, F32>,
+    prior4: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2, prior3, prior4))
+
+fun <S : Shape> sliceLikeAfter6(
+    value: DTensor<*, F32>,
+    thisTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    prior3: DTensor<*, F32>,
+    prior4: DTensor<*, F32>,
+    prior5: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> =
+    sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2, prior3, prior4, prior5))
+
+fun <S : Shape> sliceLikeAfter7(
+    value: DTensor<*, F32>,
+    thisTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    prior3: DTensor<*, F32>,
+    prior4: DTensor<*, F32>,
+    prior5: DTensor<*, F32>,
+    prior6: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> =
+    sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2, prior3, prior4, prior5, prior6))
 
 /**
  * §0.4.404 — the host twin of dxir `PAD_LIKE`, i.e. SLICE_LIKE's transpose and
@@ -2630,7 +2682,10 @@ private fun <S : Shape> padWindow(
 
 /** Fixed-arity `PAD_LIKE` twins, one per PRIOR-template count — the usual
  * IrVararg reason (see [sliceLikeStart]): synthesis builds positional
- * `IrCall` arguments, so the operand count has to be in the callee's name. */
+ * `IrCall` arguments, so the operand count has to be in the callee's name.
+ * §0.4.425 lifted the family from 3 priors to 7, mirroring the `SLICE_LIKE`
+ * twins — the pair must stay closed under differentiation (SLICE_LIKE's VJP
+ * is PAD_LIKE with the SAME priors), so the two bounds move together. */
 fun <S : Shape> padLikeStart(value: DTensor<*, F32>, outTemplate: DTensor<S, F32>, axis: Int): DTensor<S, F32> =
     padWindow(value, outTemplate, axis, emptyList())
 
@@ -2657,6 +2712,54 @@ fun <S : Shape> padLikeAfter3(
     prior2: DTensor<*, F32>,
     axis: Int,
 ): DTensor<S, F32> = padWindow(value, outTemplate, axis, listOf(prior0, prior1, prior2))
+
+fun <S : Shape> padLikeAfter4(
+    value: DTensor<*, F32>,
+    outTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    prior3: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = padWindow(value, outTemplate, axis, listOf(prior0, prior1, prior2, prior3))
+
+fun <S : Shape> padLikeAfter5(
+    value: DTensor<*, F32>,
+    outTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    prior3: DTensor<*, F32>,
+    prior4: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> = padWindow(value, outTemplate, axis, listOf(prior0, prior1, prior2, prior3, prior4))
+
+fun <S : Shape> padLikeAfter6(
+    value: DTensor<*, F32>,
+    outTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    prior3: DTensor<*, F32>,
+    prior4: DTensor<*, F32>,
+    prior5: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> =
+    padWindow(value, outTemplate, axis, listOf(prior0, prior1, prior2, prior3, prior4, prior5))
+
+fun <S : Shape> padLikeAfter7(
+    value: DTensor<*, F32>,
+    outTemplate: DTensor<S, F32>,
+    prior0: DTensor<*, F32>,
+    prior1: DTensor<*, F32>,
+    prior2: DTensor<*, F32>,
+    prior3: DTensor<*, F32>,
+    prior4: DTensor<*, F32>,
+    prior5: DTensor<*, F32>,
+    prior6: DTensor<*, F32>,
+    axis: Int,
+): DTensor<S, F32> =
+    padWindow(value, outTemplate, axis, listOf(prior0, prior1, prior2, prior3, prior4, prior5, prior6))
 
 /**
  * Phase A2b — the two-operand concat the K2 plugin synthesises with.
