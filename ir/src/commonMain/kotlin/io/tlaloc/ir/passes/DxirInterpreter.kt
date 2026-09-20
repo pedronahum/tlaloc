@@ -1073,6 +1073,24 @@ object DxirInterpreter {
                     out
                 }
             }
+            // §0.4.415 — Phase B5 (customVjp): runtime shape assert on a USER
+            // gradient_body return. Value-identity after requiring the value's
+            // dims equal the template's — the template (operand[1]) contributes
+            // SHAPE ONLY and is never evaluated. A mismatch is the user's vjpFn
+            // violating the VJP shape contract; fail loudly, never accumulate a
+            // silently wrong-shaped d_operand (design doc §4.1).
+            OpKind.CHECK_SHAPE_LIKE -> {
+                val value = evalNode(op.operands[0], env, multiResults)
+                val vDims = op.operands[0].type.dims
+                val tDims = op.operands[1].type.dims
+                require(vDims == tDims) {
+                    "DxirInterpreter: CHECK_SHAPE_LIKE failed — customVjp gradient_body " +
+                        "returned shape $vDims for an operand of shape $tDims (the user vjpFn " +
+                        "violates the VJP shape contract: each d_operand must match its " +
+                        "operand's shape)"
+                }
+                value
+            }
             // §0.4.373 — SUM_TO (numpy unbroadcast): reduce operand[0] (value,
             // shape U) down to operand[1] (template, shape T) — the reverse
             // mirror of BROADCAST's in-place size-1 stretch. Sum over the

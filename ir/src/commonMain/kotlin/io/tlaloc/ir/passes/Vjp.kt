@@ -1470,6 +1470,23 @@ object VjpRegistry {
     }
 
     /**
+     * §0.4.415 — Phase B5 (customVjp): CHECK_SHAPE_LIKE is a value-identity
+     * carrying a runtime dims assert (a USER gradient_body's shape contract),
+     * so its adjoint is the upstream passed straight through to the value
+     * operand: the check guarantees the value's runtime shape equals the
+     * template's (= the CHECK result's), so the upstream is right-shaped by
+     * construction, and the template (shape only) gets no gradient. Registered
+     * so a SECOND reverse pass — rev∘custom nesting over a spliced user
+     * gradient body — differentiates through the assert instead of dying on
+     * "no VJP rule registered".
+     */
+    val CheckShapeLikeRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> =
+            listOf(op.operands[0] to upstream)
+    }
+
+    /**
      * §0.4.41 — d(arr[idx])/d(arr) is a one-hot vector at slot [idx] with value 1;
      * scaled by [upstream], the adjoint is `SCATTER(zeros_like(arr), idx, upstream)`.
      * §0.4.111 — same shape generalises to rank-2 `arr`: d(arr[idx, :])/d(arr) is a
@@ -1858,6 +1875,9 @@ object VjpRegistry {
         // DxirRngTest, analytic + determinism + cross-identity).
         OpKind.RNG_UNIFORM to RngDrawRule,
         OpKind.RNG_NORMAL to RngDrawRule,
+        // §0.4.415 — Phase B5: the customVjp shape assert is a value-identity;
+        // see [CheckShapeLikeRule] (rev∘custom nesting needs it ruled).
+        OpKind.CHECK_SHAPE_LIKE to CheckShapeLikeRule,
     )
 
     operator fun get(kind: OpKind): VjpRule? = rules[kind]

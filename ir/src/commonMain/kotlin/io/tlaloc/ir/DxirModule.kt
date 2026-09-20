@@ -448,14 +448,23 @@ class DxirBuilder private constructor() : DxirEmitter {
         primalBody: DxirFunction,
         gradientBody: DxirFunction,
         readsPrimalIndices: Set<Int>,
+        userGradient: Boolean = false,
     ): DxirOp {
         val types = primalBody.returns.map { it.type }
         require(types.isNotEmpty()) { "COARSENED op requires primal_body with at least one return" }
-        val attrs: Map<String, Any> = mapOf(
-            "primal_body" to primalBody,
-            "gradient_body" to gradientBody,
-            "reads_primal_indices" to readsPrimalIndices,
-        )
+        // §0.4.415 — Phase B5: `userGradient = true` marks a COARSENED whose
+        // gradient_body is USER-supplied (the customVjp call-form) rather than
+        // machine-derived. DxirForwardTransform refuses such nodes loudly (the
+        // §0.4.403 auto-tangent of primal_body would silently disagree with a
+        // deliberately divergent user adjoint — the §0.4.392 no-silent-fork
+        // principle) and handleCoarsenedAdjoint wraps its returns in runtime
+        // shape asserts (CHECK_SHAPE_LIKE).
+        val attrs: Map<String, Any> = buildMap {
+            put("primal_body", primalBody)
+            put("gradient_body", gradientBody)
+            put("reads_primal_indices", readsPrimalIndices)
+            if (userGradient) put("user_gradient", true)
+        }
         return DxirOp(
             id = allocateId(),
             op = OpKind.COARSENED,

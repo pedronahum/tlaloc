@@ -1151,6 +1151,16 @@ object DxirReverseTransform {
                 if (reads != null) {
                     for (v in reads) if (v is Int) enqueue(n.operands[v].id)
                 }
+                // §0.4.415 — Phase B5 (customVjp): a USER gradient_body's returns
+                // are wrapped in CHECK_SHAPE_LIKE(contribution, operandClone) by
+                // [handleCoarsenedAdjoint] whenever shapes aren't statically
+                // decidable, so EVERY operand may be dereferenced as a shape
+                // template regardless of whether the user's vjpFn reads it —
+                // enqueue them all, or the wrap would reference an un-cloned
+                // primal node (a leaked id in the gradient body's SSA).
+                if (n.attrs["user_gradient"] == true) {
+                    for (operand in n.operands) enqueue(operand.id)
+                }
                 continue
             }
             val rule = VjpRegistry[n.op] ?: continue
@@ -1368,8 +1378,20 @@ object DxirReverseTransform {
         }
 
         // Step 4: map each gradient_body return → primal operand contribution.
+        // §0.4.415 — Phase B5 (customVjp): a USER-supplied gradient_body
+        // (`user_gradient = true`) is the user's assertion, not a machine
+        // derivation, so each of its returns must honour the VJP shape contract
+        // — d_operand shaped like its operand — before accumulation (design doc
+        // §4.1; the `conv2dDataAdjoint` template-assert precedent). Statically
+        // concrete-and-equal shapes need nothing; concrete-and-UNEQUAL shapes
+        // fail the transform right here (loud, and check-time visible through
+        // the intrinsic checker's probe); anything sentinel-bearing — which is
+        // every `grad {}` body — wraps in a CHECK_SHAPE_LIKE whose interpreter
+        // arm / host twin (`checkShapeLike`) asserts the RUNTIME dims at
+        // execution. Machine-built gradient bodies stay byte-identical.
+        val userGradient = coarsened.attrs["user_gradient"] == true
         for (i in gradBody.returns.indices) {
-            val contribution = gradNodeMap[gradBody.returns[i].id]
+            var contribution = gradNodeMap[gradBody.returns[i].id]
                 ?: error(
                     "handleCoarsenedAdjoint: gradient_body.returns[$i] id=" +
                         "${gradBody.returns[i].id} missing from gradNodeMap",
@@ -1377,6 +1399,30 @@ object DxirReverseTransform {
             val primalOperand = coarsened.operands[i]
             // Constants have no gradient surface — skip.
             if (primalById[primalOperand.id] is DxirConst) continue
+            if (userGradient) {
+                val cDims = contribution.type.dims
+                val oDims = primalOperand.type.dims
+                val bothConcrete = cDims.all { it > 0 } && oDims.all { it > 0 }
+                if (bothConcrete && cDims != oDims) {
+                    error(
+                        "handleCoarsenedAdjoint: customVjp gradient_body return $i has shape " +
+                            "$cDims but its operand has shape $oDims — the user vjpFn violates " +
+                            "the VJP shape contract (each d_operand must match its operand's shape)",
+                    )
+                }
+                if (!bothConcrete || contribution.type != primalOperand.type) {
+                    val operandClone = gradNodeMap[gradBody.params[k + i].id]
+                        ?: error(
+                            "handleCoarsenedAdjoint: operand clone for CHECK_SHAPE_LIKE " +
+                                "missing (index $i)",
+                        )
+                    contribution = builder.op(
+                        OpKind.CHECK_SHAPE_LIKE,
+                        listOf(contribution, operandClone),
+                        primalOperand.type,
+                    )
+                }
+            }
             val operandKey = primalOperand.gradKey()
             val existing = outerGradAccum[operandKey]
             outerGradAccum[operandKey] = if (existing == null) contribution

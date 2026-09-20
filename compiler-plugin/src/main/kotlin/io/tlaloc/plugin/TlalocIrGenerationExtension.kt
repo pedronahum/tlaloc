@@ -676,6 +676,38 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     return transformed
                 }
 
+                // §0.4.415 — Phase B5 (customVjp): a COARSENED node can now SURVIVE
+                // into the gradient function. Pre-B5 it never did — a machine
+                // coarsening wraps the WHOLE body, so nothing downstream consumes
+                // its result and no adjoint dereferences it. A customVjp node sits
+                // MID-BODY (`f(x).sum()`), and under `grad {}`'s sentinels the
+                // reduction adjoints carry their operand as a runtime shape
+                // template, so the reverse transform clones the COARSENED into the
+                // gradient body — where synthesis has no arm for it. The gradient
+                // splice already happened (handleCoarsenedAdjoint consumed
+                // `gradient_body` during the transform), so what remains is purely
+                // the VALUE recomputation: decomposeCoarsened inlines `primal_body`
+                // in place, exactly its Layer-4 CPU-baseline job. No-op when no
+                // COARSENED survived (every pre-B5 path, byte-identical).
+                val decomposed: DxirFunction = if (
+                    toSynthesise.body.any { it is DxirOp && it.op == io.tlaloc.ir.OpKind.COARSENED }
+                ) {
+                    try {
+                        io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened(toSynthesise)
+                    } catch (t: Throwable) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension: decomposeCoarsened failed on '${fn.name}' " +
+                                "(${t::class.simpleName}: ${t.message}); synthesising with the " +
+                                "COARSENED intact (synthesis will reject it loudly)",
+                            null,
+                        )
+                        toSynthesise
+                    }
+                } else {
+                    toSynthesise
+                }
+
                 // §0.4.105 — D.1i Phase 3. Optionally run PhiCalculus.simplifyReturns over
                 // the gradient function before synthesis. Gated on `tlaloc.simplify.enabled`
                 // (default off) and on the engine being available — null engine, property
@@ -687,9 +719,9 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     System.getProperty(SIMPLIFY_ENABLED_PROPERTY) == "true"
                 val simplified: DxirFunction = if (simplifyEnabled) {
                     val engine = engineLazy.value
-                    if (engine == null) toSynthesise
+                    if (engine == null) decomposed
                     else try {
-                        PhiCalculus.simplifyReturns(toSynthesise, engine)
+                        PhiCalculus.simplifyReturns(decomposed, engine)
                     } catch (t: Throwable) {
                         mc.report(
                             CompilerMessageSeverity.WARNING,
@@ -698,9 +730,9 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                                 "synthesising the un-simplified gradient",
                             null,
                         )
-                        toSynthesise
+                        decomposed
                     }
-                } else toSynthesise
+                } else decomposed
 
                 val replacement = synth.synthesise(simplified, transformed, currentDeclarationParent!!)
                 if (replacement == null) {

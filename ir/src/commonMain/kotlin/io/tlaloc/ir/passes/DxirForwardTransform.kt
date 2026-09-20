@@ -551,6 +551,16 @@ object DxirForwardTransform {
             OpKind.EMBEDDING -> b.op(OpKind.EMBEDDING, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
             OpKind.CAST -> b.op(OpKind.CAST, listOf(t(node.operands[0])), ty)
 
+            // §0.4.415 — Phase B5: CHECK_SHAPE_LIKE is a value-identity with a
+            // runtime dims assert (customVjp's user-gradient shape contract).
+            // Linear in its value operand, so the tangent is the same check
+            // over the value's tangent against the same (cloned) template —
+            // reached when hessian composes forward OVER a reverse body that
+            // spliced a user gradient. The template contributes shape only and
+            // carries no tangent.
+            OpKind.CHECK_SHAPE_LIKE ->
+                b.op(OpKind.CHECK_SHAPE_LIKE, listOf(t(node.operands[0]), vOps[1]), ty)
+
             // §0.4.403 — Phase B3: the COARSENED forward arm. The tangent of a
             // coarsened op is the forward transform of its stored `primal_body`,
             // spliced inline: the jvp body's primal params seed from the cloned
@@ -565,6 +575,28 @@ object DxirForwardTransform {
             // handles a COARSENED nested inside a primal_body; multi-result
             // COARSENED is refused up front in [apply].
             OpKind.COARSENED -> {
+                // §0.4.415 — Phase B5 (customVjp): REFUSE a USER-gradient node
+                // loudly. For a machine-coarsened node the auto-tangent below
+                // (forward transform of primal_body) agrees with gradient_body
+                // by construction; for a customVjp node they need not — the
+                // whole point of use case 3 (straight-through estimators,
+                // stopGradient) is a reverse adjoint that deliberately diverges
+                // from the primal's math. Silently auto-differentiating the
+                // primal would make jvp {} and grad {} DISAGREE over the same
+                // body (the §0.4.392 no-silent-fork principle), so forward mode
+                // refuses unless the user also supplies a jvpFn — Candidate C's
+                // `tangent_body` attr, spliced by this same arm once it lands
+                // (a recorded Phase B5 tail; the ratified refuse-unless-jvpFn
+                // policy).
+                if (node.attrs["user_gradient"] == true && node.attrs["tangent_body"] == null) {
+                    error(
+                        "DxirForwardTransform: COARSENED id=${node.id} carries a USER-supplied " +
+                            "gradient (user_gradient attr — a customVjp call-form): forward mode " +
+                            "would auto-differentiate primal_body and silently disagree with the " +
+                            "user's reverse adjoint. Supply a jvpFn (customVjpJvp, a recorded " +
+                            "Phase B5 tail) or use reverse mode (grad {} / vjp {})",
+                    )
+                }
                 val primalBody = node.attrs["primal_body"] as? DxirFunction
                     ?: error(
                         "DxirForwardTransform: COARSENED op id=${node.id} missing primal_body " +

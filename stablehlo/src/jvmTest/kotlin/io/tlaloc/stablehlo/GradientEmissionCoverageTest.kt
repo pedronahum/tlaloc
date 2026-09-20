@@ -39,6 +39,14 @@ import kotlin.test.assertTrue
  *   contain one. Listed because the sweep's first run reported them as "no VJP
  *   rule" and that reads like a gap rather than what it is: an op that only exists
  *   below the user surface.
+ * - `customVjp` gradient bodies / `CHECK_SHAPE_LIKE` (§0.4.415, Phase B5) — a
+ *   DOCUMENTED EXCLUSION, not an oversight: a user-gradient splice wraps its
+ *   returns in the CHECK_SHAPE_LIKE runtime assert, which the emitter refuses
+ *   loudly by name (pinned in `EmitterTest.checkShapeLikeRefusesEmissionLoudlyByName`)
+ *   because StableHLO has no assert and silently dropping the check would fork
+ *   host/device behaviour. customVjp gradients are host/interpreter-certified in
+ *   v1; the honest GPU path is a recorded Phase B5 tail in
+ *   docs/CUSTOM_DERIVATIVES_DESIGN.md.
  */
 class GradientEmissionCoverageTest {
 

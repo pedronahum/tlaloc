@@ -444,6 +444,24 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                     "(explicit-threefry emission is a recorded Phase D tail)",
             )
 
+            // §0.4.415 — Phase B5 (customVjp): a DELIBERATE refusal, not a gap.
+            // CHECK_SHAPE_LIKE is the runtime assert `handleCoarsenedAdjoint`
+            // wraps around a USER-supplied gradient_body's returns. StableHLO
+            // has no assert primitive; emitting the op as a silent value alias
+            // would DROP the check on GPU while the host/interpreter enforce
+            // it — a behaviour fork between engines, the exact failure mode
+            // the RNG refusal above exists to prevent. customVjp gradient
+            // bodies are host/interpreter-certified in v1; GPU emission of
+            // user gradient bodies (assert-then-alias with a real runtime
+            // check, or a shape-proof that elides it) is a recorded Phase B5
+            // tail in docs/CUSTOM_DERIVATIVES_DESIGN.md.
+            OpKind.CHECK_SHAPE_LIKE -> error(
+                "${node.op} has no StableHLO emission (Phase B5): the customVjp " +
+                    "user-gradient shape assert cannot be expressed in StableHLO, and " +
+                    "silently dropping it would fork host/device behaviour; run customVjp " +
+                    "gradient bodies on host (the synthesis path) or the interpreter",
+            )
+
             else -> error("StableHLO lowering not yet implemented for ${node.op}")
         }
         // Most ops emit a single line whose result is the literal `%N` we named above.

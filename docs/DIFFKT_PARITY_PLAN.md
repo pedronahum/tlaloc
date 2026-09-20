@@ -1443,28 +1443,44 @@ reachable from `grad {}`, not new math. New-op families come after.
     user-facing n-th-order intrinsics (`reverseDerivative{2..4}` spellings)
     are a synthesis-surface question, not an IR one — the IR compositions
     they'd lower to are what this slice certified.
-- **B5. User-defined custom derivatives — DESIGN DONE (§0.4.410), awaiting
-  Pedro's API ratification before any implementation.** Full design in
-  [CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md). Summary:
-  DiffKT's mechanism is emergent OO dispatch (subclass `ReverseTensor`,
-  override `backpropagate()` — the `customReverse` example); Tlaloc's
-  internal analogue is `OpKind.COARSENED` with `gradient_body` spliced by
-  `handleCoarsenedAdjoint` (+ the §0.4.403 forward `primal_body` splice),
-  so B5 = letting the USER construct such a node. Recommended v1: a
-  `customVjp(f, vjpFn)` intrinsic call-form lowering both lambdas to one
-  COARSENED node (`vjpFn`'s `(upstream, x)` order already matches the
-  `gradient_body` contract), with a `user_gradient` attr making the
-  forward transform REFUSE loudly unless a `jvpFn` is also supplied — the
-  §0.4.392 no-silent-fork principle, since the §0.4.403 forward splice
-  would otherwise auto-differentiate a primal whose reverse mode honours a
-  deliberately different user adjoint (straight-through estimators).
-  Checker: probe-lower both bodies + type pairing; shape contracts are
-  runtime asserts (the `conv2dDataAdjoint` template-assert precedent);
-  correctness gets an OPT-IN JVP⇄VJP debug oracle (automatic tangent vs
-  user adjoint — zero new math). One-§ v1; annotation-driven cross-module
-  registration (Candidate B) deferred on the serialized-dxir decision.
-  Open product questions (blocking): API spelling, forward-refusal policy,
-  debug-oracle inclusion — see the design doc's §6.
+- **B5. User-defined custom derivatives — v1 DONE (§0.4.415; ratified by
+  Pedro 2026-09-20 with the design doc's recommended answers).** Full
+  design + implementation record in
+  [CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md) (§7 holds
+  what v1 taught). Shipped: `io.tlaloc.autograd.customVjp` / `customVjp2`
+  — Candidate A call-forms whose host stubs simply apply `f` (documented
+  asymmetry vs `grad`'s `pluginMissing` — the primal IS the right
+  plain-Kotlin meaning; only the derivative attachment needs the plugin).
+  The FIR arm lowers both lambda literals and emits ONE `COARSENED` with
+  `primal_body`/`gradient_body`/`reads_primal_indices` (computed from
+  vjpFn's actual param uses) + `user_gradient = true`; `vjpFn`'s
+  `(upstream, x…)` order IS `handleCoarsenedAdjoint`'s contract, and
+  `customVjp2`'s trailing `Pair(dA, dB)`/`dA to dB` unboxes to the
+  2-return convention. Assign-then-apply within the body works; escapes
+  (re-binding, passing out) refuse loudly by name, as do non-const
+  captures (literal-initialised local `val`s inline).
+  - **Reverse mode splices the USER body verbatim** — certified by a
+    deliberately NON-mathematical `3·upstream` vjpFn E2E (scalar + tensor;
+    composition would give `2x`) plus `customVjp2` (7/11), stopGradient
+    sugar (∇ Σ x·sg(x) = x), a captured-val case, and rev∘custom nesting
+    at IR level. Two new pipeline pieces: a surviving mid-body COARSENED in
+    the gradient function decomposes (`decomposeCoarsened`) before
+    synthesis, and each user contribution wraps in the new
+    `OpKind.CHECK_SHAPE_LIKE` runtime shape assert (interpreter arm + host
+    `checkShapeLike` + synthesis arm + identity VjpRule + forward tangent
+    arm; transform-time failure when shapes are concrete; emitter REFUSES
+    it by name — pinned — so customVjp gradients are
+    host/interpreter-certified in v1).
+  - **Forward mode refuses** (`user_gradient` unless `tangent_body`): IR
+    pin + E2E — `jvp {}` over a customVjp body is a compile-time ERROR
+    naming `user_gradient` (the §0.4.392 no-silent-fork principle).
+  - **Debug oracle shipped**: `checkCustomVjp` (JVP⇄VJP inner-product
+    identity via central differences; pure host, opt-in, fails
+    straight-through estimators by design) — green/red certified.
+  - Recorded tails: `customJvp`/`customVjpJvp`; GPU emission of user
+    gradient bodies; multi-result `f`; non-const captures; Candidate B
+    (serialized-dxir); the seeded branches (`vjp {}` etc.) don't yet run
+    the decompose step — they fall back loudly.
 
 ### Phase C — op families DiffKT has that the IR lacks
 
@@ -1670,8 +1686,9 @@ reachable from `grad {}`, not new math. New-op families come after.
   - **`grad {}` surface is B5-gated (recorded)**: the `f` argument is an
     opaque Kotlin lambda to the FIR lowering, so a grad{}-integrable
     `integral` op is exactly a custom-derivative citizen
-    ([CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md), awaiting
-    ratification). Lowering shape once B5 lands: an INTEGRAL region op whose
+    ([CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md) — B5 v1
+    landed §0.4.415, so the gate is open; the integral spelling itself is
+    still its own slice). Lowering shape now that B5 landed: an INTEGRAL region op whose
     body is the lowered `f`, primal = Romberg over interpreted body
     evaluations, VJP = FTC bound adjoints (−f(a)·v̄, f(b)·v̄ via two body
     evaluations) + Leibniz parameter adjoints (quadrature over the body's
@@ -1931,22 +1948,22 @@ story. Not blocking A–E.
 
 ## Suggested § sequencing
 
-**Position at §0.4.414 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
+**Position at §0.4.415 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
 in substance (§0.4.366–397, §0.4.400/409/414 — remaining tails: A2's
 `view`/`withChange`/`meld`/`split`, gather/scatter axis+list forms, the
 mixed rank-increase+stretch broadcast, `DScalar`-interface params) →
-B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → C1–C3 ✅
-(§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; `grad {}`
-integral is B5-gated) → D1 ✅ (§0.4.408) → D2 v1 ✅ (§0.4.413 — IR-level
-reparameterized gradients; FIR/`grad {}` spelling is the recorded tail).
+B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → B5 v1 ✅ (§0.4.415
+— `customVjp`/`customVjp2`, ratified 2026-09-20) → C1–C3 ✅
+(§0.4.395/396/402/405) → C5 ✅ (§0.4.411 — host surface; the `grad {}`
+integral surface's B5 gate is now open, spelling still to land) → D1 ✅
+(§0.4.408) → D2 v1 ✅ (§0.4.413 — IR-level reparameterized gradients;
+FIR/`grad {}` spelling is the recorded tail).
 
 **Remaining, in recommended order:**
-1. **Ratification gates (Pedro)**: B5 custom derivatives
-   ([CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md) — one §
-   once the API is picked; also unlocks the `grad {}` `integral` surface
-   per C5's recorded lowering shape); E sparse
-   ([SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md) — recommended
-   conditional no-go); F model layer (product decision, unchanged).
+1. **Ratified next (Pedro, 2026-09-20)**: E sparse per
+   [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)'s E1a→E1c slicing
+   (matdiv SKIPPED; GPU = pinned emit refusal; row-sparse gradients
+   deferred to Phase F). F model layer remains a product decision.
 2. **D2 tails** — the FIR/`grad {}` user-surface spelling for draws inside
    lambdas + synthesis delegates (the v1 IR arms landed §0.4.413);
    explicit-threefry StableHLO emission is the recorded D1 tail to take

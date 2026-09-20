@@ -136,7 +136,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // §0.4.360 — PAD is data movement; WHERE/COMPARE are 1 op/element
     // (folded into the elementwise bucket below by their users; kept at
     // movement-cost here since they never dominate a kernel decision).
-    OpKind.CONCAT, OpKind.SPLIT, OpKind.CAST, OpKind.PAD, OpKind.WHERE, OpKind.COMPARE -> 0.0
+    // §0.4.415 — CHECK_SHAPE_LIKE is a value-identity (a runtime dims assert
+    // around a customVjp user gradient): no compute, no movement of its own.
+    OpKind.CONCAT, OpKind.SPLIT, OpKind.CAST, OpKind.PAD, OpKind.WHERE, OpKind.COMPARE,
+    OpKind.CHECK_SHAPE_LIKE -> 0.0
 
     // Elementwise binary (one op per output element).
     OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW,

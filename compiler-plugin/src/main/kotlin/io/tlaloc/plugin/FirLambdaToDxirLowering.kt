@@ -11,12 +11,14 @@ import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirEmitter
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirNode
+import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import org.jetbrains.kotlin.KtFakeSourceElementKind
 import org.jetbrains.kotlin.fir.declarations.FirAnonymousFunction
 import org.jetbrains.kotlin.fir.declarations.FirProperty
+import org.jetbrains.kotlin.fir.expressions.FirAnonymousFunctionExpression
 import org.jetbrains.kotlin.fir.expressions.FirBlock
 import org.jetbrains.kotlin.fir.expressions.FirBreakExpression
 import org.jetbrains.kotlin.fir.expressions.FirComparisonExpression
@@ -79,6 +81,10 @@ object FirLambdaToDxirLowering {
 
     fun lower(name: String, anonFn: FirAnonymousFunction): Result {
         val env = HashMap<Any, DxirNode>()
+        // §0.4.415 — Phase B5: a fresh per-lowering registry of local vals bound
+        // to `customVjp(f, vjpFn)` call-forms (save/restore for re-entrancy).
+        val previousDefs = customVjpDefsTl.get()
+        customVjpDefsTl.set(HashMap())
         return try {
             val fn = DxirBuilder.function(name) {
                 for (firParam in anonFn.valueParameters) {
@@ -97,6 +103,8 @@ object FirLambdaToDxirLowering {
             Result.Success(fn)
         } catch (e: LoweringException) {
             Result.Failure(e.message ?: "unknown", namedIndex = e is NamedIndexException)
+        } finally {
+            customVjpDefsTl.set(previousDefs)
         }
     }
 
@@ -136,9 +144,26 @@ object FirLambdaToDxirLowering {
         is FirProperty -> {
             val init = stmt.initializer
                 ?: throw LoweringException("${if (stmt.isVar) "var" else "val"} '${stmt.name}' has no initializer")
-            val node = lowerExpr(init, env, emitter)
-            env[stmt.symbol] = node
-            if (isLast) node else null
+            // §0.4.415 — Phase B5: `val f = customVjp(g, vjpFn)` binds a
+            // derivative-attached function, not a tensor value. Record the
+            // call-form against the symbol (the invoke arm in [lowerCall]
+            // splices it at each application site) instead of lowering it —
+            // there is no dxir VALUE for a function. A trailing binding is the
+            // lambda's return, i.e. the function ESCAPES: refuse loudly.
+            if (init is FirFunctionCall && resolveCustomVjpArity(init) != null) {
+                if (stmt.isVar) {
+                    throw LoweringException(
+                        "customVjp result must be bound to a `val`, not a `var` (v1)",
+                    )
+                }
+                if (isLast) throw customVjpEscape(stmt.name.asString())
+                customVjpDefsTl.get()[stmt.symbol] = init
+                null
+            } else {
+                val node = lowerExpr(init, env, emitter)
+                env[stmt.symbol] = node
+                if (isLast) node else null
+            }
         }
         is FirVariableAssignment -> {
             val targetSym = resolveAssignmentTarget(stmt)
@@ -230,6 +255,13 @@ object FirLambdaToDxirLowering {
     ): DxirNode {
         val sym = expr.calleeReference.toResolvedCallableSymbol()
             ?: throw LoweringException("unresolved property access")
+        // §0.4.415 — Phase B5: a customVjp-bound val referenced as a VALUE
+        // (rather than as an invoke receiver, which [lowerCall] intercepts
+        // before its arguments lower) means the derivative-attached function
+        // ESCAPES the lambda — out of v1 scope, refuse loudly by name.
+        if (sym is FirPropertySymbol && customVjpDefsTl.get().containsKey(sym)) {
+            throw customVjpEscape(sym.name.asString())
+        }
         return when (sym) {
             is FirValueParameterSymbol -> env[sym]
             is FirPropertySymbol -> env[sym]
@@ -750,6 +782,39 @@ object FirLambdaToDxirLowering {
             "${classId.asFqNameString()}.${callableId.callableName.asString()}"
         } else {
             "${callableId.packageName.asString()}.${callableId.callableName.asString()}"
+        }
+
+        // §0.4.415 — Phase B5 (customVjp): the APPLICATION of a
+        // derivative-attached function. `f(x)` on a lambda-typed value resolves
+        // to `kotlin.FunctionN.invoke`; when the receiver is a recorded
+        // customVjp-bound local val (`val f = customVjp(g, vjpFn); f(x)`) or
+        // the customVjp call-form itself applied in place
+        // (`customVjp(g, vjpFn)(x)`), splice ONE OpKind.COARSENED node here.
+        // Any OTHER invoke falls through to the generic unsupported-call throw
+        // exactly as before.
+        if (callableId.callableName.asString() == "invoke" &&
+            classId?.asFqNameString()?.startsWith("kotlin.Function") == true
+        ) {
+            val recv = call.dispatchReceiver ?: call.extensionReceiver
+            val customVjpCall: FirFunctionCall? = when (recv) {
+                is FirFunctionCall -> recv.takeIf { resolveCustomVjpArity(it) != null }
+                is FirPropertyAccessExpression ->
+                    (recv.calleeReference.toResolvedCallableSymbol() as? FirPropertySymbol)
+                        ?.let { customVjpDefsTl.get()[it] }
+                else -> null
+            }
+            if (customVjpCall != null) {
+                return emitCustomVjpApplication(
+                    customVjpCall, call.argumentList.arguments, env, emitter,
+                )
+            }
+        }
+        // A customVjp call-form reached as a plain EXPRESSION (not a property
+        // initializer, not an invoke receiver) is being used as a first-class
+        // value — the deserialized-body problem the design doc's §2 rules out
+        // of v1. Refuse loudly by name.
+        if (resolveCustomVjpArity(call) != null) {
+            throw customVjpEscape("the customVjp(…) expression")
         }
 
         // §0.4.40 — dtype-changing receiver-only conversions (`Int.toFloat()`,
@@ -2246,6 +2311,322 @@ object FirLambdaToDxirLowering {
             type = resultType,
             attrs = attrs,
         )
+    }
+
+    // ------------------------------------------------------------------
+    // §0.4.415 — Phase B5: the customVjp(f, vjpFn) call-form (the ratified
+    // Candidate A of docs/CUSTOM_DERIVATIVES_DESIGN.md). On meeting an
+    // APPLICATION of the call-form inside the body being lowered, both lambda
+    // literals are recursively lowered and ONE OpKind.COARSENED node is
+    // emitted whose attr contract matches PhiCalculus.coarsenFunction's
+    // bit-for-bit (handleCoarsenedAdjoint's expectations are the ground
+    // truth): `primal_body` (x…) → (y), `gradient_body` (upstream, x…) →
+    // (d_x…) — the user's declared (upstream, x) parameter order already IS
+    // the splice contract, so the 1-arg adapter is the identity and
+    // customVjp2's Pair return unboxes to the 2-return convention — plus
+    // `reads_primal_indices` computed from vjpFn's ACTUAL param uses and
+    // `user_gradient = true` (the forward transform's refusal key, and
+    // handleCoarsenedAdjoint's cue to wrap the returns in runtime shape
+    // asserts).
+    // ------------------------------------------------------------------
+
+    /** Per-lowering registry: local `val`s bound to a customVjp call-form.
+     * Thread-local because [lower] runs per checker call site; save/restored
+     * around each lowering for re-entrancy. */
+    private val customVjpDefsTl: ThreadLocal<MutableMap<FirPropertySymbol, FirFunctionCall>> =
+        ThreadLocal.withInitial { HashMap() }
+
+    /** 1 for `io.tlaloc.autograd.customVjp`, 2 for `customVjp2`, null otherwise. */
+    private fun resolveCustomVjpArity(call: FirFunctionCall): Int? {
+        val cid = call.calleeReference.toResolvedCallableSymbol()?.callableId ?: return null
+        if (cid.classId != null) return null
+        if (cid.packageName.asString() != "io.tlaloc.autograd") return null
+        return when (cid.callableName.asString()) {
+            "customVjp" -> 1
+            "customVjp2" -> 2
+            else -> null
+        }
+    }
+
+    private fun customVjpEscape(what: String) = LoweringException(
+        "the function returned by customVjp ('$what') escapes the lambda: v1 requires the " +
+            "customVjp result to be APPLIED within the same lambda body (binding it to a " +
+            "local val and applying that val later is supported; passing it to another " +
+            "function, re-binding it, or returning it is not — a first-class " +
+            "function-with-derivative value is the deferred Candidate B territory of " +
+            "docs/CUSTOM_DERIVATIVES_DESIGN.md)",
+    )
+
+    /**
+     * Splice one customVjp application: lower the applied operands in the
+     * OUTER env, recursively lower both lambda literals (diagnosing WHICH body
+     * failed — the design doc's §3 checker requirement, surfaced through the
+     * probe-lowering diagnostics), validate the attr contract, and emit the
+     * COARSENED node.
+     */
+    private fun emitCustomVjpApplication(
+        call: FirFunctionCall,
+        appliedArgs: List<FirExpression>,
+        env: MutableMap<Any, DxirNode>,
+        emitter: DxirEmitter,
+    ): DxirNode {
+        val n = resolveCustomVjpArity(call)
+            ?: throw LoweringException("emitCustomVjpApplication: not a customVjp call")
+        val name = if (n == 1) "customVjp" else "customVjp2"
+        val args = call.argumentList.arguments
+        if (args.size != 2) {
+            throw LoweringException("$name takes exactly (f, vjpFn); got ${args.size} arguments")
+        }
+        // Named-or-positional: unlike the positional-only attr APIs (the K2
+        // named-arg landmine), FIR at CHECK time still carries
+        // FirNamedArgumentExpression wrappers WITH their names, so
+        // `customVjp(vjpFn = …, f = …)` resolves by name here, never by slot.
+        var fExpr: FirExpression? = null
+        var vjpExpr: FirExpression? = null
+        for ((i, arg) in args.withIndex()) {
+            if (arg is FirNamedArgumentExpression) {
+                when (arg.name.asString()) {
+                    "f" -> fExpr = arg.expression
+                    "vjpFn" -> vjpExpr = arg.expression
+                    else -> throw LoweringException("$name: unknown named argument '${arg.name}'")
+                }
+            } else {
+                if (i == 0) fExpr = arg else vjpExpr = arg
+            }
+        }
+        val fLambda = (fExpr as? FirAnonymousFunctionExpression)?.anonymousFunction
+            ?: throw LoweringException(
+                "$name: `f` must be a lambda literal at the call site " +
+                    "(v1 — the FIR lowering walks source bodies)",
+            )
+        val vjpLambda = (vjpExpr as? FirAnonymousFunctionExpression)?.anonymousFunction
+            ?: throw LoweringException("$name: `vjpFn` must be a lambda literal at the call site (v1)")
+
+        val operands = appliedArgs.map {
+            lowerExpr((it as? FirNamedArgumentExpression)?.expression ?: it, env, emitter)
+        }
+        if (operands.size != n) {
+            throw LoweringException(
+                "$name-derived function takes $n argument(s); got ${operands.size}",
+            )
+        }
+
+        val primalBody = try {
+            lowerInnerLambda("${name}_primal", fLambda, env, pairReturn = false)
+        } catch (e: LoweringException) {
+            throw LoweringException("$name primal body (f): ${e.message}")
+        }
+        val vjpBody = try {
+            lowerInnerLambda("${name}_vjp", vjpLambda, env, pairReturn = n == 2)
+        } catch (e: LoweringException) {
+            throw LoweringException("$name adjoint body (vjpFn): ${e.message}")
+        }
+
+        // The COARSENED attr contract, validated where violation is still a
+        // named compile diagnostic instead of a transform-time surprise.
+        if (primalBody.params.size != n) {
+            throw LoweringException("$name: f takes ${primalBody.params.size} params; expected $n")
+        }
+        if (primalBody.returns.size != 1) {
+            throw LoweringException("$name: f must be single-return (v1 — multi-result COARSENED is reverse-only and has no forward story)")
+        }
+        if (vjpBody.params.size != n + 1) {
+            throw LoweringException(
+                "$name: vjpFn must take (upstream${", x".repeat(n)}); got ${vjpBody.params.size} params",
+            )
+        }
+        if (vjpBody.returns.size != n) {
+            throw LoweringException(
+                "$name: vjpFn must return $n gradient(s); got ${vjpBody.returns.size}",
+            )
+        }
+        for (i in 0 until n) {
+            checkCustomVjpTypesAgree(name, "applied argument $i vs f's param $i", operands[i].type, primalBody.params[i].type)
+            checkCustomVjpTypesAgree(name, "vjpFn param ${i + 1} vs f's param $i", vjpBody.params[i + 1].type, primalBody.params[i].type)
+            checkCustomVjpTypesAgree(name, "vjpFn return $i vs f's param $i", vjpBody.returns[i].type, primalBody.params[i].type)
+        }
+        checkCustomVjpTypesAgree(
+            name, "vjpFn's upstream param vs f's return",
+            vjpBody.params[0].type, primalBody.returns.single().type,
+        )
+
+        return emitter.op(
+            kind = OpKind.COARSENED,
+            operands = operands,
+            type = primalBody.returns.single().type,
+            attrs = mapOf(
+                "primal_body" to primalBody,
+                "gradient_body" to vjpBody,
+                "reads_primal_indices" to computeVjpReads(vjpBody),
+                "user_gradient" to true,
+            ),
+        )
+    }
+
+    /** Structural agreement: dtype and rank must match; extents only where
+     * both are concrete (under `grad {}` they are -1 sentinels, resolved —
+     * and asserted — at runtime by CHECK_SHAPE_LIKE / `checkShapeLike`). */
+    private fun checkCustomVjpTypesAgree(name: String, what: String, a: DxirType, b: DxirType) {
+        if (a.dtype != b.dtype || a.rank != b.rank ||
+            a.dims.zip(b.dims).any { (x, y) -> x > 0 && y > 0 && x != y }
+        ) {
+            throw LoweringException("$name: $what disagree ($a vs $b)")
+        }
+    }
+
+    /**
+     * The `reads_primal_indices` attr, computed from vjpFn's ACTUAL param
+     * uses — a param with no uses is not a read (the §0.4.386-style clone
+     * discipline). Mirrors `PhiCalculus.computeGradientReads` exactly:
+     * params[0] is the upstream; params[i ≥ 1] are the primal operands, so a
+     * reference to params[i] marks operand index i − 1.
+     */
+    private fun computeVjpReads(vjpBody: DxirFunction): Set<Int> {
+        val paramIds = vjpBody.params.map { it.id }
+        val reads = LinkedHashSet<Int>()
+        fun scanOp(op: DxirOp) {
+            for (operand in op.operands) {
+                val idx = paramIds.indexOf(operand.id)
+                if (idx >= 1) reads += idx - 1
+            }
+            for (region in op.regions) {
+                for (block in region.blocks) {
+                    for (bodyNode in block.body) if (bodyNode is DxirOp) scanOp(bodyNode)
+                }
+            }
+        }
+        for (node in vjpBody.body) if (node is DxirOp) scanOp(node)
+        for (r in vjpBody.returns) {
+            val idx = paramIds.indexOf(r.id)
+            if (idx >= 1) reads += idx - 1
+        }
+        return reads
+    }
+
+    /**
+     * Recursively lower a customVjp lambda literal into its own
+     * [DxirFunction]. The inner scope starts fresh — customVjp bodies are
+     * spliced into OTHER functions by id-remapped cloning, so free references
+     * to outer nodes would be broken SSA — with ONE exception: a captured
+     * outer local whose lowered value is a compile-time constant
+     * ([DxirConst]) is re-emitted inline (see [CapturingEnv]); any other
+     * capture refuses loudly naming the v1 restriction.
+     *
+     * [pairReturn] (customVjp2's vjpFn): the trailing `Pair(dA, dB)` /
+     * `dA to dB` unboxes into the gradient_body's 2-return convention — the
+     * same seam synthesis's Pair boxing runs forwards, run backwards.
+     */
+    private fun lowerInnerLambda(
+        name: String,
+        anonFn: FirAnonymousFunction,
+        outerEnv: Map<Any, DxirNode>,
+        pairReturn: Boolean,
+    ): DxirFunction = DxirBuilder.function(name) {
+        val env: MutableMap<Any, DxirNode> = CapturingEnv(outerEnv, this)
+        for (firParam in anonFn.valueParameters) {
+            val ct = firParam.returnTypeRef.coneType
+            val paramType = resolveParamType(ct)
+                ?: throw LoweringException(
+                    "lambda param '${firParam.name}' has unsupported type ${ct.renderForError()}",
+                )
+            env[firParam.symbol] = param(firParam.name.asString(), paramType)
+        }
+        val body = anonFn.body ?: throw LoweringException("lambda has no body")
+        if (pairReturn) {
+            lowerPairReturningBlock(body, env, this)
+        } else {
+            listOf(lowerBlock(body, env, this))
+        }
+    }
+
+    /**
+     * §0.4.415 — the customVjp capture story (design doc §4.4): an inner
+     * lambda referencing an outer local resolves through the OUTER env, but
+     * only a [DxirConst]-valued binding (a literal-initialised `val`) can
+     * cross the splice boundary — it is re-emitted inline in the inner
+     * builder, so the inner function stays self-contained. Anything else
+     * (a computed value, a tensor, a lambda param) refuses loudly: a
+     * non-const capture would have to become an extra COARSENED operand WITH
+     * a gradient slot the user's vjpFn does not return — deferred.
+     */
+    private class CapturingEnv(
+        private val outerEnv: Map<Any, DxirNode>,
+        private val builder: DxirBuilder,
+    ) : HashMap<Any, DxirNode>() {
+        override fun get(key: Any): DxirNode? {
+            super.get(key)?.let { return it }
+            val outer = outerEnv[key] ?: return null
+            if (outer is DxirConst) {
+                val clone = builder.const(outer.value, outer.type)
+                put(key, clone)
+                return clone
+            }
+            val rendered = (key as? FirPropertySymbol)?.name?.asString()
+                ?: (key as? FirValueParameterSymbol)?.name?.asString()
+                ?: key.toString()
+            throw LoweringException(
+                "customVjp lambda captures '$rendered', whose value is not a compile-time " +
+                    "constant — v1 supports capturing literal-initialised local vals only; " +
+                    "pass computed or tensor values as explicit arguments instead",
+            )
+        }
+    }
+
+    /**
+     * customVjp2's vjpFn body: every statement lowers normally except the
+     * trailing expression, which must be a direct `Pair(dA, dB)` construction
+     * (or the `dA to dB` spelling) — its two components become the
+     * gradient_body's two returns.
+     */
+    private fun lowerPairReturningBlock(
+        block: FirBlock,
+        env: MutableMap<Any, DxirNode>,
+        emitter: DxirEmitter,
+    ): List<DxirNode> {
+        val statements = block.statements
+        if (statements.isEmpty()) throw LoweringException("empty lambda body")
+        for (stmt in statements.dropLast(1)) {
+            lowerStatement(stmt, env, emitter, isLast = false)
+        }
+        var lastExpr: Any = statements.last()
+        while (true) {
+            lastExpr = when (val cur = lastExpr) {
+                is FirReturnExpression -> cur.result
+                is FirBlock -> if (cur.statements.size == 1) cur.statements[0] else break
+                else -> break
+            }
+        }
+        val pairCall = lastExpr as? FirFunctionCall
+            ?: throw LoweringException(
+                "customVjp2's vjpFn must end in `Pair(dA, dB)` (or `dA to dB`) at the " +
+                    "return position; got ${lastExpr::class.simpleName}",
+            )
+        val cid = pairCall.calleeReference.toResolvedCallableSymbol()?.callableId
+        val isPairCtor = cid?.classId?.asFqNameString() == "kotlin.Pair"
+        val isToInfix = cid?.classId == null &&
+            cid?.packageName?.asString() == "kotlin" &&
+            cid.callableName.asString() == "to"
+        val components: List<FirExpression> = when {
+            isPairCtor -> {
+                val a = pairCall.argumentList.arguments
+                if (a.size != 2) {
+                    throw LoweringException("Pair construction with ${a.size} arguments (expected 2)")
+                }
+                a.map { (it as? FirNamedArgumentExpression)?.expression ?: it }
+            }
+            isToInfix -> {
+                val recvE = pairCall.dispatchReceiver ?: pairCall.extensionReceiver
+                    ?: throw LoweringException("`to` has no receiver")
+                val rhs = pairCall.argumentList.arguments.firstOrNull()
+                    ?: throw LoweringException("`to` is missing its right-hand side")
+                listOf(recvE, rhs)
+            }
+            else -> throw LoweringException(
+                "customVjp2's vjpFn must construct its Pair(dA, dB) directly at the return " +
+                    "position (got a call to '${cid?.callableName}')",
+            )
+        }
+        return components.map { lowerExpr(it, env, emitter) }
     }
 
     private fun resolveParamType(type: ConeKotlinType): DxirType? {

@@ -2076,6 +2076,27 @@ fun <S : Shape> stretchLike(x: DTensor<*, F32>, template: DTensor<S, F32>): DTen
  * runtime shape here. [template] contributes SHAPE ONLY — its values are never
  * read.
  */
+/**
+ * §0.4.415 — Phase B5 (customVjp): the host twin of the dxir
+ * `CHECK_SHAPE_LIKE` op — a value-identity that ASSERTS the user vjpFn's
+ * returned gradient has its operand's runtime shape before it is accumulated.
+ * [template] is the customVjp operand the contribution belongs to and
+ * contributes SHAPE ONLY (its values are never read). Under `grad {}`'s -1
+ * sentinel dims the contract is undecidable at compile time, so this is where
+ * a wrong-shaped user adjoint fails LOUDLY instead of silently corrupting the
+ * gradient (design doc §4.1; the `conv2dDataAdjoint` template-assert
+ * precedent). The value passes through as a re-wrapped view — no copy, its
+ * storage is the user body's freshly computed tensor.
+ */
+fun <S : Shape> checkShapeLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DTensor<S, F32> {
+    require(value.dims.contentEquals(template.dims)) {
+        "checkShapeLike: customVjp gradient body returned shape ${value.dims.toList()} for an " +
+            "operand of shape ${template.dims.toList()} — the user vjpFn violates the VJP shape " +
+            "contract (each d_operand must match its operand's shape)"
+    }
+    return DTensor(value.storage, value.dims, F32)
+}
+
 fun <S : Shape> sumToLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DTensor<S, F32> {
     val u = value.dims
     val t = template.dims

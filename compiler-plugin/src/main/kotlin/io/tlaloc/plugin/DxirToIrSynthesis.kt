@@ -254,6 +254,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[1].id]
             }
+            // §0.4.415 — Phase B5: CHECK_SHAPE_LIKE's result shape IS its
+            // template operand's shape (operand[1] — the customVjp operand
+            // whose gradient the checked value is), the SUM_TO treatment.
+            OpKind.CHECK_SHAPE_LIKE -> {
+                if (op.operands.size != 2) return null
+                operandIrTypes[op.operands[1].id]
+            }
             // §0.4.374 — PAD_TO's result shape IS the template operand's shape
             // (operand[1]), so its IrType equals the template's — same shape-only
             // template treatment as SUM_TO.
@@ -1580,6 +1587,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return irPoolGrad(op, env, context)
         }
         if (op.op == OpKind.SUM_TO) return irSumTo(op, env, context)
+        // §0.4.415 — Phase B5: the customVjp user-gradient runtime shape assert.
+        if (op.op == OpKind.CHECK_SHAPE_LIKE) return irCheckShapeLike(op, env, context)
         // §0.4.399 — the runtime-extent family's own adjoints (SUM_TO ⇄
         // BROADCAST_LIKE, PAD_TO ⇄ SLICE_AT): second-order reverse bodies.
         if (op.op == OpKind.BROADCAST_LIKE) return irBroadcastLike(op, env, context)
@@ -2373,6 +2382,50 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("sumToLike"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull()
+    }
+
+    /**
+     * §0.4.415 — Phase B5 (customVjp): CHECK_SHAPE_LIKE in gradient bodies —
+     * the runtime assert `handleCoarsenedAdjoint` wraps around a USER
+     * gradient_body's returns. Calls the host twin `checkShapeLike(value,
+     * template)`: `value` (operand[0]) is the user vjpFn's returned
+     * d_operand, `template` (operand[1]) is the customVjp operand whose
+     * RUNTIME shape it must match (shape only — values never read). The host
+     * op fails loudly on a violation and passes the value through otherwise.
+     * Result IrType = the template's, the [irSumTo] shape exactly.
+     */
+    private fun IrBuilderWithScope.irCheckShapeLike(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        val valueDecl = env[op.operands[0].id] ?: return null
+        val templateDecl = env[op.operands[1].id] ?: return null
+        val resultIrType = irTypeForNode(op, context) as? IrSimpleType
+            ?: irTypeForNode(op.operands[1], context) as? IrSimpleType
+            ?: return null
+        val shapeTypeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val helperSym = checkShapeLikeSymbol() ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = helperSym,
+        )
+        call.typeArguments[0] = shapeTypeArg
+        call.arguments[0] = irGet(valueDecl)
+        call.arguments[1] = irGet(templateDecl)
+        return call
+    }
+
+    /** §0.4.415 — resolves `io.tlaloc.core.ops.checkShapeLike`. */
+    private fun checkShapeLikeSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("checkShapeLike"),
         )
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }

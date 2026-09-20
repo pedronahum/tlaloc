@@ -402,6 +402,26 @@ enum class OpKind {
     // threefry rounds as explicit stablehlo ops — is a recorded Phase D tail.
     RNG_UNIFORM, RNG_NORMAL,
 
+    // §0.4.415 — Phase B5 (customVjp): runtime shape assert on a USER-supplied
+    // gradient_body return. CHECK_SHAPE_LIKE(value, template) → value verbatim,
+    // after asserting value's runtime dims equal template's. The `template`
+    // operand is the COARSENED primal operand the contribution accumulates onto
+    // (SHAPE ONLY — its values are never read); `value` is the user vjpFn's
+    // returned d_operand. Emitted by `handleCoarsenedAdjoint` around each
+    // gradient_body return of a `user_gradient = true` COARSENED whose shapes
+    // are not statically decidable (under `grad {}`'s -1 sentinels they never
+    // are): a machine-built gradient_body honours the shape contract by
+    // construction, but a user body is the user's assertion, and a silently
+    // wrong-shaped d_x is the failure mode the design doc's §4.1 names. Both
+    // concrete shapes at transform time skip the op (equal) or fail the
+    // transform loudly (unequal). Host twin `checkShapeLike`; interpreter arm
+    // asserts and passes through. NO StableHLO emission by design (the RNG
+    // refusal precedent): StableHLO has no assert, and silently dropping the
+    // check on GPU would fork host/device behaviour — customVjp gradient
+    // bodies are host/interpreter-certified in v1, with GPU emission of user
+    // gradient bodies a recorded Phase B5 tail.
+    CHECK_SHAPE_LIKE,
+
     // Structured control flow (Stage B substrate per docs/STAGE_B_PLAN.md §3.1).
     //
     // IF: 1 boolean-scalar predicate operand + 2 regions [then, else]. Each region has a

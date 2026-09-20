@@ -1,7 +1,11 @@
 # Custom Derivatives Design — Phase B5 (§0.4.410)
 
-**Status: DESIGN ONLY — the API shape is a PRODUCT decision awaiting
-Pedro's ratification. Nothing in this document is implemented.**
+**Status: RATIFIED (Pedro, 2026-09-20) with the recommended answers to all
+four §6 questions — Candidate A call-form named `customVjp`/`customVjp2`;
+forward-mode = refuse-unless-jvpFn; the JVP⇄VJP debug oracle ships
+(`io.tlaloc.autograd.checkCustomVjp`); Candidate B deferred. v1 LANDED at
+§0.4.415** — see §7 below for what the implementation taught that this
+design had not anticipated (recorded per the §0.4.383 precedent).
 Companion to [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md) Phase B5.
 
 ## 1. What "custom derivatives" means, in both systems
@@ -223,12 +227,75 @@ cross-module (needs the serialized-dxir decision), `Wrappable`-style
 data-structure params (the §0.4.365 audit's B5 note), scalar/`DScalar`
 slots (rides the FloatScalar boxing tail from §0.4.397).
 
-## 6. Open product questions for Pedro (blocking implementation)
+## 6. Open product questions for Pedro (RESOLVED — ratified 2026-09-20)
 
-1. API spelling: Candidate A call-form (recommended) — name bikeshed
-   (`customVjp` / `withCustomVjp` / `customGrad`)?
-2. Forward-mode policy for user nodes: refuse-unless-jvpFn (recommended)
-   or auto-differentiate-primal with a documented divergence?
-3. Ship the JVP⇄VJP debug oracle helper in v1?
-4. Is same-module Candidate B worth its § before the cross-module story
-   exists, or does A cover the demand?
+1. API spelling: **Candidate A call-form, named `customVjp` / `customVjp2`.**
+2. Forward-mode policy for user nodes: **refuse-unless-jvpFn** — the
+   `user_gradient = true` attr on user-built COARSENED nodes makes
+   `DxirForwardTransform` refuse loudly by name unless a `tangent_body`
+   (Candidate C's `jvpFn`, a recorded tail) is also present.
+3. Debug oracle: **ships in v1** as `io.tlaloc.autograd.checkCustomVjp` —
+   pure host math (central differences of `f` vs the user's `vjpFn` in the
+   inner-product identity), no plugin, no IR; opt-in, and expected to FAIL
+   for straight-through estimators by design.
+4. Candidate B: **deferred** on the serialized-dxir decision, as recommended.
+
+## 7. What v1 (§0.4.415) taught — corrections and decisions this design left open
+
+- **The shape-contract check (§4.1) landed as a thin check op**,
+  `OpKind.CHECK_SHAPE_LIKE(value, template)` — a value-identity that asserts
+  the value's RUNTIME dims equal the template's. `handleCoarsenedAdjoint`
+  wraps each `gradient_body` return of a `user_gradient` node: statically
+  concrete-and-equal shapes skip the wrap, concrete-and-UNEQUAL ones fail
+  the TRANSFORM loudly (check-time visible through the intrinsic probes),
+  and anything sentinel-bearing — every `grad {}` body — gets the runtime
+  op. Interpreter arm + host twin `checkShapeLike` + synthesis arm +
+  `CheckShapeLikeRule` (identity VJP, so rev∘custom nests through it) + a
+  forward tangent arm (hessian composes over it). Machine-coarsened bodies
+  stay byte-identical — they honour the contract by construction.
+  **Deliberate non-emission**: the emitter REFUSES `CHECK_SHAPE_LIKE` by
+  name (the RNG-refusal precedent — StableHLO has no assert, and silently
+  dropping the check would fork host/device behaviour). customVjp gradient
+  bodies are host/interpreter-certified in v1; the honest GPU story is a
+  recorded tail.
+- **§2's "the plugin's existing COARSENED handling applies" was too
+  optimistic**: a customVjp COARSENED sits MID-BODY, and under `grad {}`'s
+  sentinels the reduction adjoints carry their operand as a runtime shape
+  template — so the reverse transform CLONES the COARSENED into the
+  gradient function, where synthesis has no arm. Machine coarsening never
+  hit this (it wraps the WHOLE body; nothing consumes the node's result).
+  Fix: `TlalocIrGenerationExtension` runs `decomposeCoarsened` (the Layer-4
+  CPU-baseline pass, exactly its job) over the gradient function when a
+  COARSENED survived — the gradient splice already happened, so what
+  remains is pure value recomputation. Correspondingly,
+  `computeUsedByAdjoint` marks ALL of a user node's operands used (each may
+  be dereferenced as a CHECK template).
+- **Capture (§4.4) is narrower than "whatever Capture.kt supports"** —
+  that file is the runtime TAPE tracer, not FIR closure capture, which
+  never existed for lambda-external values. v1 supports capturing outer
+  local `val`s whose lowered value is a compile-time constant (re-emitted
+  inline in the inner body); any other capture refuses loudly naming the
+  restriction (a non-const capture would need an extra COARSENED operand
+  WITH a gradient slot the user's vjpFn does not return — deferred).
+- **Escape (§2) includes re-binding**: `val g = f` refuses with the same
+  named diagnostic as passing `f` out — any reference to a customVjp-bound
+  val outside the invoke-receiver position is an escape. Named arguments
+  resolve by NAME at the FIR checker stage (the K2 unwrap landmine bites
+  the IR stage, not FIR), so `customVjp(vjpFn = …, f = …)` is safe.
+- **The v1 cert list all landed**: the 3·upstream non-mathematical vjpFn
+  E2E (scalar + tensor, no fallback), `customVjp2`'s Pair unboxing (7/11
+  E2E), stopGradient sugar E2E (∇ Σ x·sg(x) = x), a captured literal val
+  E2E, rev∘custom nesting at IR level (the second reverse differentiates
+  the spliced user ops), the forward refusal (IR pin + a compile-time E2E
+  ERROR naming `user_gradient` — `NOT_DIFFERENTIABLE` is error-severity, so
+  `jvp {}` over a customVjp body fails the BUILD), the escape refusal, and
+  the shape assert at all four layers (transform-time, interpreter, host
+  `checkShapeLike`, and an E2E runtime failure via two same-static-type
+  operands of different runtime extents with a swapping vjpFn — the
+  mismatch no static type can see).
+
+**Recorded tails**: `customJvp` / `customVjpJvp` (`tangent_body`, flips the
+forward refusal); GPU emission of user gradient bodies; multi-result `f`
+(reverse-only); non-const captures; Candidate B; `vjp {}`/`jacobianReverse`
+over customVjp bodies (the decompose step currently runs on the `grad`
+branch only — the seeded branches fall back loudly to `pluginMissing`).

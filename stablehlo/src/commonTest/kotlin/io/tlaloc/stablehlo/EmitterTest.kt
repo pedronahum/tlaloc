@@ -636,6 +636,27 @@ class EmitterTest {
     }
 
     @Test
+    fun checkShapeLikeRefusesEmissionLoudlyByName() {
+        // §0.4.415 — Phase B5 (customVjp): CHECK_SHAPE_LIKE is the runtime
+        // assert wrapped around a USER gradient_body's returns. StableHLO has
+        // no assert primitive, and emitting the op as a silent value alias
+        // would DROP the check on GPU while the host/interpreter enforce it —
+        // the RNG-refusal reasoning verbatim. customVjp gradient bodies are
+        // host/interpreter-certified in v1; the honest GPU story is a recorded
+        // Phase B5 tail.
+        val fn = DxirBuilder.function("chk") {
+            val v = param("v", DxirType(F32, listOf(3)))
+            val t = param("t", DxirType(F32, listOf(3)))
+            listOf(op(OpKind.CHECK_SHAPE_LIKE, listOf(v, t), DxirType(F32, listOf(3))))
+        }
+        val ex = assertFailsWith<IllegalStateException> { fn.toStablehlo() }
+        assertTrue(
+            "CHECK_SHAPE_LIKE has no StableHLO emission" in ex.message.orEmpty(),
+            "expected the named customVjp shape-assert refusal; got: ${ex.message}",
+        )
+    }
+
+    @Test
     fun matmulLowersToDotGeneralWithContractingDims() {
         val fn = DxirBuilder.function("mm") {
             val a = param("a", DxirType(F32, listOf(2, 3)))
