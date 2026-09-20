@@ -1932,9 +1932,11 @@ reachable from `grad {}`, not new math. New-op families come after.
     mean/var/skew at a FIXED key (deterministic pins, no flake surface);
     Box-Muller numpy-reference pins; interpreter-vs-host bit-exactness.
   - **Deferred tails (recorded)**: explicit-threefry StableHLO emission
-    (JAX's approach — the only honest GPU path); FIR/`grad {}` surface for
-    draws inside lambdas (D2-era); `permitReuse`/`DiffktRandom` wrapper
-    sugar; cauchy/chiSquare (inverse-CDF sugar over uniform).
+    (JAX's approach — the only honest GPU path) — DONE §0.4.422;
+    FIR/`grad {}` surface for draws inside lambdas (D2-era) — DONE
+    §0.4.421; `permitReuse`/`DiffktRandom` wrapper sugar;
+    cauchy/chiSquare (inverse-CDF sugar over uniform) — DONE §0.4.431
+    (D3 below).
 - ✅ **D2 v1. Reparameterized gradients at IR level — DONE (§0.4.413)**:
   random draws differentiate in both transforms with the correct (zero)
   gradient in the key, unlocking the reparameterization trick
@@ -1968,6 +1970,61 @@ reachable from `grad {}`, not new math. New-op families come after.
     explicit-threefry emission tail (a reparameterized loss's GRADIENT graph
     contains a cloned draw, so emission coverage joins only then);
     Gamma/Dirichlet implicit reparameterization (the DiffKT stretch goal).
+- ✅ **D3. Distributions — cauchy / exponential / chiSquare — DONE
+  (§0.4.431)**: the DiffKT `random/` distribution draws, landed as PURE
+  ELEMENTWISE TRANSFORMS of the D1 streams — no new randomness primitive,
+  no new OpKind (the recorded compositional design: a draw-then-transform
+  graph differentiates as a constant automatically through the D2
+  zero-gradient RNG arms, and emits to GPU through §0.4.422's explicit
+  threefry for free).
+  - `:core/Random.kt`: `cauchyFloats` = the quantile transform
+    `tan(π(u − ½))` over one `uniformFloats` stream (f32 centre/scale,
+    tangent through Double — deliberately arm-for-arm the
+    RNG_UNIFORM → SUB → MUL → TAN composition, so host and lowered draws
+    are bit-identical on the same JVM); `exponentialFloats` =
+    `−ln(1 − u)` (unit rate; `1 − u ∈ (0, 1]` keeps the log finite, the
+    Box-Muller guard); `chiSquareFloats(key, n, dof)` = the DEFINITION,
+    sum of `dof` squared normals over one `normalFloats(n·dof)` stream in
+    contiguous row-major blocks with pinned f32 left-to-right
+    accumulation — definitional rather than quantile because the χ²
+    inverse CDF has no elementary form, and the sum-of-squares IS the
+    hand-checkable oracle for any integer dof. Tensor wrappers:
+    `cauchy/exponential/chiSquare` × `Vector/Matrix`.
+  - `grad {}` surface: the cauchy spellings ride the SAME §0.4.421
+    literal-key FIR arm and lower COMPOSITIONALLY to
+    RNG_UNIFORM → SUB ½ → MUL π → TAN (splat consts are compile-time
+    literals, not dim-derived; dims literal by the arm's own v1
+    contract). REJECTED alternative: dedicated RNG_CAUCHY/RNG_CHISQ
+    OpKinds — every new kind needs interpreter/VJP/JVP/emitter/cost arms
+    for zero expressive gain, and the composition inherits all of them
+    for free.
+  - Certified: numpy-reference pins over the pinned (7,42) threefry
+    stream at the Box-Muller 1e-5 convention (even + odd n — the odd
+    lane rides the end-pad counter path) PLUS bit-exact
+    composition-contract pins (the transform applied in-test to the
+    pinned base stream); moment sanity at a fixed key (cauchy sample
+    MEDIAN — the mean does not exist; exponential mean/var; χ²(4)
+    mean/var); wrapper/determinism pins; E2E `grad {}` cert
+    (RngGradientTest): ∇ Σ (c⊙x) hands back the draw BIT-EXACT against
+    host `cauchyFloats`, no fallback warning.
+  - **Named deferrals (recorded)**: (1) `chiSquare`/`exponential` inside
+    `grad {}` — chiSquare needs a reshape-[n,dof]-then-axis-SUM synthesis
+    in the FIR arm (the host block layout already matches it);
+    exponential needs only SUB/LOG/NEG — both are the §0.4.431 cauchy
+    pattern extended, waiting on a use. (2) **Gamma implicit
+    reparameterization** (the DiffKT stretch): for `z ~ Gamma(α, 1)`,
+    `∂z/∂α = −(∂F/∂α)(z; α) / p(z; α)` by the implicit-function theorem
+    on the CDF `F(z; α) = P(α, z)` (the regularized lower incomplete
+    gamma), where `p(z; α) = z^{α−1} e^{−z} / Γ(α)` and `∂P/∂α` needs the
+    α-derivative of the incomplete gamma — computable from C1's
+    lgamma/digamma (landed §0.4.402/405) via the standard series/continued
+    -fraction split (Boost's `gamma_p_derivative` route) or a small
+    quadrature; the SAMPLER itself (Marsaglia–Tsang squeeze over normal +
+    uniform streams) is rejection-based, so the draw is NOT a fixed
+    elementwise transform of a pinned stream — landing it honestly needs
+    the sampler + the derivative + a CDF-oracle certification lane, a
+    §-sized slice of its own. (3) `DiffktRandom`/`permitReuse` wrapper
+    sugar (inherited from D1's ledger).
 
 ### Phase E — sparse (DiffKT `SparseFloatTensor` parity)
 
@@ -2105,10 +2162,13 @@ argument fallback) ·
 raw-op `gamma(alpha, randomKey)` participates in AD), `DiffktRandom`
 wrapper, `Wrapper.wrapRandomKey`. §0.4.408: key + `split` + `foldIn` +
 uniform/gaussian ✅ (D1, threefry-based host+interpreter; JAX-classic
-layout, not SHA-512 — same statelessness contract); `permitReuse` /
-distributions / `DiffktRandom` / reparam still ❌ → D2 (cauchy/chiSquare
-are inverse-CDF sugar over uniform; gamma reparam needs C1's digamma —
-landed, §0.4.402).
+layout, not SHA-512 — same statelessness contract); reparam ✅ (D2,
+§0.4.413/421); `cauchy`/`chiSquare` (+ exponential, beyond parity) ✅ D3
+(§0.4.431, elementwise transforms of the D1 streams — cauchy also inside
+`grad {}` compositionally); gamma implicit reparam a NAMED deferral with
+the worked formula (D3's ledger — the Marsaglia–Tsang sampler is
+rejection-based, a §-slice of its own); `permitReuse` / `DiffktRandom`
+wrapper sugar still ❌ (D1 ledger).
 
 #### Sparse (`SparseFloatTensor` / `SparseRowFloatTensor`)
 
@@ -2246,7 +2306,9 @@ audit's recommendations).
    the user surface). (B2's reverse-assembled tall Jacobians closed
    §0.4.412; grouped/depthwise conv landed at IR level §0.4.429; B3's
    multi-result COARSENED tangents + IF-inside-primal_body splice
-   closed §0.4.430.)
+   closed §0.4.430; D's cauchy/exponential/chiSquare distributions
+   closed §0.4.431 — D3, gamma implicit reparam the remaining named
+   deferral with the worked formula on file.)
 
 Certification discipline per CLAUDE-memory: solo full-suite runs, count
 gate updated per §, GPU smokes for anything touching the emitter.

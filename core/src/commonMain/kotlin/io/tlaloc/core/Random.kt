@@ -185,6 +185,78 @@ fun normalFloats(key: RandomKey, n: Int): FloatArray {
 }
 
 // ---------------------------------------------------------------------------
+// §0.4.431 — Phase D distributions (DiffKT `random/` parity: cauchy /
+// chiSquare, plus the exponential the chi-square family factors through).
+//
+// Every distribution here is a PURE ELEMENTWISE TRANSFORM of the D1 streams —
+// no new randomness primitives, no new IR OpKinds. That is the recorded
+// compositional design: a draw-then-transform graph differentiates as a
+// constant automatically (the D2 zero-gradient RNG arms absorb any upstream),
+// and emits to GPU through §0.4.422's explicit threefry for free. The
+// arithmetic below deliberately MIRRORS the IR arms the composition lowers
+// to (f32 SUB/MUL, `kotlin.math.tan(double).toFloat()` — the §0.4.395 TAN
+// arm), so a lowered draw and a host draw are bit-identical on the same JVM.
+// ---------------------------------------------------------------------------
+
+/**
+ * [n] standard-Cauchy f32 draws via the quantile (inverse-CDF) transform:
+ * `x = tan(π · (u − ½))` over one [uniformFloats] stream. `u ∈ [0, 1)` maps
+ * to angle `[−π/2, π/2)`; `u = ½` (an exact f32 multiple of 2⁻²³, so it does
+ * occur) lands exactly on tan(0) = 0, and the pole at −π/2 is never hit
+ * exactly but nearby mantissas produce the honest heavy tail (finite-but-huge
+ * in Double, never ±∞ — the TAN arm's IEEE note). Centring and scaling are
+ * f32, the tangent goes through Double — bit-for-bit the composition
+ * RNG_UNIFORM → SUB ½ → MUL π → TAN that the `grad {}` lowering emits.
+ */
+fun cauchyFloats(key: RandomKey, n: Int): FloatArray {
+    val u = uniformFloats(key, n)
+    return FloatArray(n) {
+        val centred = u[it] - 0.5f
+        val scaled = centred * PI.toFloat()
+        kotlin.math.tan(scaled.toDouble()).toFloat()
+    }
+}
+
+/**
+ * [n] unit-rate exponential f32 draws via the quantile transform:
+ * `x = −ln(1 − u)`. `1 − u ∈ (0, 1]` keeps the log finite (u < 1 exactly,
+ * the same guard [normalFloats] leans on), and `u = 0` gives exactly 0 —
+ * the distribution's support edge, honestly included. The log runs in
+ * Double over the f32 complement, mirroring the LOG arm convention.
+ */
+fun exponentialFloats(key: RandomKey, n: Int): FloatArray {
+    val u = uniformFloats(key, n)
+    return FloatArray(n) {
+        val complement = 1.0f - u[it]
+        (-ln(complement.toDouble())).toFloat()
+    }
+}
+
+/**
+ * [n] chi-square f32 draws with [dof] degrees of freedom, by the DEFINITION:
+ * the sum of [dof] squared standard normals. One [normalFloats] stream of
+ * `n · dof` draws, laid out row-major — output element `i` consumes the
+ * contiguous block `z[i·dof … i·dof+dof−1]` (the layout a future
+ * reshape-[n, dof]-then-axis-sum `grad {}` lowering would read), squared and
+ * accumulated in f32 left to right (the pinned accumulation order).
+ * Definitional rather than quantile-based because the χ² inverse CDF has no
+ * elementary form — the sum-of-squares IS the hand-checkable oracle, exact
+ * over any pinned normal stream for any positive integer [dof].
+ */
+fun chiSquareFloats(key: RandomKey, n: Int, dof: Int): FloatArray {
+    require(dof >= 1) { "chiSquareFloats: dof must be >= 1, got $dof" }
+    val z = normalFloats(key, n * dof)
+    return FloatArray(n) { i ->
+        var acc = 0f
+        for (j in 0 until dof) {
+            val v = z[i * dof + j]
+            acc += v * v
+        }
+        acc
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Host tensor surface (this slice's whole user surface: draws materialise on
 // host; RNG inside grad {} bodies is Phase D2).
 // ---------------------------------------------------------------------------
@@ -210,3 +282,37 @@ fun <R : ShapeAtom, C : ShapeAtom> RandomKey.normalMatrix(
     cols: Int,
 ): DTensor<Rank2<R, C>, F32> =
     DTensor(HostF32Storage(normalFloats(this, rows * cols)), intArrayOf(rows, cols), F32)
+
+/** Standard-Cauchy rank-1 host tensor of [n] draws (§0.4.431). */
+fun <A : ShapeAtom> RandomKey.cauchyVector(n: Int): DTensor<Rank1<A>, F32> =
+    DTensor(HostF32Storage(cauchyFloats(this, n)), intArrayOf(n), F32)
+
+/** Standard-Cauchy rank-2 host tensor, drawn over the flat index space. */
+fun <R : ShapeAtom, C : ShapeAtom> RandomKey.cauchyMatrix(
+    rows: Int,
+    cols: Int,
+): DTensor<Rank2<R, C>, F32> =
+    DTensor(HostF32Storage(cauchyFloats(this, rows * cols)), intArrayOf(rows, cols), F32)
+
+/** Unit-rate exponential rank-1 host tensor of [n] draws (§0.4.431). */
+fun <A : ShapeAtom> RandomKey.exponentialVector(n: Int): DTensor<Rank1<A>, F32> =
+    DTensor(HostF32Storage(exponentialFloats(this, n)), intArrayOf(n), F32)
+
+/** Unit-rate exponential rank-2 host tensor, drawn over the flat index space. */
+fun <R : ShapeAtom, C : ShapeAtom> RandomKey.exponentialMatrix(
+    rows: Int,
+    cols: Int,
+): DTensor<Rank2<R, C>, F32> =
+    DTensor(HostF32Storage(exponentialFloats(this, rows * cols)), intArrayOf(rows, cols), F32)
+
+/** Chi-square([dof]) rank-1 host tensor of [n] draws (§0.4.431). */
+fun <A : ShapeAtom> RandomKey.chiSquareVector(n: Int, dof: Int): DTensor<Rank1<A>, F32> =
+    DTensor(HostF32Storage(chiSquareFloats(this, n, dof)), intArrayOf(n), F32)
+
+/** Chi-square([dof]) rank-2 host tensor, drawn over the flat index space. */
+fun <R : ShapeAtom, C : ShapeAtom> RandomKey.chiSquareMatrix(
+    rows: Int,
+    cols: Int,
+    dof: Int,
+): DTensor<Rank2<R, C>, F32> =
+    DTensor(HostF32Storage(chiSquareFloats(this, rows * cols, dof)), intArrayOf(rows, cols), F32)

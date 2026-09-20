@@ -1,6 +1,7 @@
 package io.tlaloc.plugin
 
 import io.tlaloc.core.RandomKey
+import io.tlaloc.core.cauchyFloats
 import io.tlaloc.core.normalFloats
 import io.tlaloc.core.uniformFloats
 import java.io.ByteArrayOutputStream
@@ -136,6 +137,65 @@ class RngGradientTest {
         assertEquals(6, dx.size, "dx size")
         for (i in 0 until 6) {
             assertTrue(dx[i] == u[i], "dx[$i] = ${dx[i]} must be BIT-EXACT u[$i] = ${u[i]}")
+        }
+    }
+
+    @Test
+    fun `grad through a literal-key cauchy draw lowers compositionally`() {
+        // §0.4.431 — the Phase D distribution design E2E: `cauchyVector`
+        // lowers as RNG_UNIFORM → SUB ½ → MUL π → TAN (no new OpKind), the
+        // draw-then-transform graph differentiates as a constant, and the
+        // linear-loss gradient hands back the draw itself. The oracle is the
+        // strongest available: `:core`'s `cauchyFloats` mirrors the lowered
+        // arms operation for operation on the same JVM, so d x = c BIT-EXACT.
+        val src = """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.RandomKey
+            import io.tlaloc.core.Rank1
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.cauchyVector
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun main() {
+                val g = grad { x: DTensor<Rank1<Sym>, F32> ->
+                    val c = RandomKey(11, 5).cauchyVector<Sym>(3)
+                    (c * x).sum().toFloat()
+                }
+                val dx = g(Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f)))
+                println("dx")
+                for (v in dx.hostF32()) print("" + v + " ")
+                println()
+            }
+        """.trimIndent()
+        val result = compileAndRun(AUTOGRAD_STUB, src)
+        assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
+        val keptOriginal = result.messages.any {
+            it.severity == CompilerMessageSeverity.WARNING &&
+                ("kept original call" in it.message || "could not lower lambda" in it.message)
+        }
+        assertTrue(
+            !keptOriginal,
+            "synthesis fell back; the literal-key cauchy draw must lower (Phase D distributions). " +
+                "Warnings:\n${result.messages.filter { it.severity == CompilerMessageSeverity.WARNING }
+                    .joinToString("\n--\n") { it.message }}",
+        )
+        val want = cauchyFloats(RandomKey(11, 5), 3)
+        val lines = result.stdout.trim().lines()
+        assertEquals(2, lines.size, "expected 2 stdout lines, got: ${result.stdout}")
+        assertEquals("dx", lines[0].trim())
+        val dx = lines[1].trim().split(" ").map { it.toFloat() }
+        assertEquals(3, dx.size, "dx size")
+        assertTrue(dx.any { it != -1.0f }, "stub sentinel returned — rewrite never fired")
+        for (i in 0 until 3) {
+            assertTrue(
+                dx[i] == want[i],
+                "dx[$i] = ${dx[i]} must be BIT-EXACT cauchyFloats[$i] = ${want[i]}",
+            )
         }
     }
 

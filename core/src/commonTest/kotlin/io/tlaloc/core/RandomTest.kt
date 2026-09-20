@@ -210,6 +210,161 @@ class RandomTest {
         }
     }
 
+    // -- 4b. §0.4.431 distributions (cauchy / exponential / chiSquare) -------
+    //
+    // Two oracles per distribution: (a) reference pins computed independently
+    // in numpy float64/float32 over the SAME threefry stream (transcendental
+    // libm differences are ~1 ulp, hence 1e-5-relative rather than bit-exact
+    // — the normalBoxMullerReferencePins convention); (b) the transform
+    // applied in THIS test to the pinned base stream, bit-exact, so the draw
+    // provably IS the documented composition of the D1 kernels.
+
+    private fun assertClose(want: FloatArray, got: FloatArray, tolScale: Float, label: String) {
+        assertEquals(want.size, got.size, "$label size")
+        for (i in want.indices) {
+            val tol = tolScale * maxOf(1f, abs(want[i]))
+            assertTrue(abs(got[i] - want[i]) < tol, "$label[$i] = ${got[i]}, want ${want[i]}")
+        }
+    }
+
+    @Test
+    fun cauchyQuantileTransformPins() {
+        // numpy reference: tan(pi * (u - 1/2)) with f32 centring/scaling over
+        // the pinned uniform stream for key (7,42) — even and odd n (the odd
+        // lane rides the end-pad counter path through the base stream).
+        assertClose(
+            floatArrayOf(
+                -0.07544064521789551f, -0.40740060806274414f, -0.6191755533218384f,
+                0.2158869206905365f, -0.6117090582847595f, -2.1036055088043213f,
+            ),
+            cauchyFloats(key, 6),
+            1e-5f,
+            "cauchy6",
+        )
+        assertClose(
+            floatArrayOf(
+                -0.07544064521789551f, -0.40740060806274414f, -1.335739016532898f,
+                0.2158869206905365f, -0.6117090582847595f,
+            ),
+            cauchyFloats(key, 5),
+            1e-5f,
+            "cauchy5",
+        )
+        // Bit-exact composition contract: the draw IS tan(π(u − ½)) over the
+        // same uniform stream, arm for arm (f32 centre/scale, Double tan).
+        val u = uniformFloats(key, 6)
+        val byHand = FloatArray(6) {
+            kotlin.math.tan(((u[it] - 0.5f) * kotlin.math.PI.toFloat()).toDouble()).toFloat()
+        }
+        assertContentEquals(byHand, cauchyFloats(key, 6), "cauchy must be the exact composition")
+    }
+
+    @Test
+    fun exponentialQuantileTransformPins() {
+        assertClose(
+            floatArrayOf(
+                0.6463244557380676f, 0.47297683358192444f, 0.22885660827159882f,
+                0.8385897874832153f, 0.3934171199798584f,
+            ),
+            exponentialFloats(key, 5),
+            1e-5f,
+            "exp5",
+        )
+        val u = uniformFloats(key, 5)
+        val byHand = FloatArray(5) { (-kotlin.math.ln((1.0f - u[it]).toDouble())).toFloat() }
+        assertContentEquals(byHand, exponentialFloats(key, 5), "exponential must be the exact composition")
+        for (v in exponentialFloats(key, 1000)) {
+            assertTrue(v >= 0f, "exponential draw $v out of [0, ∞)")
+        }
+    }
+
+    @Test
+    fun chiSquareIsTheSumOfSquaredNormals() {
+        // numpy reference pins, n=3 dof=2 and n=2 dof=3 (same 6-normal base
+        // stream, regrouped — pins distinguish the block layout).
+        assertClose(
+            floatArrayOf(0.6015214920043945f, 3.6531028747558594f, 5.904162883758545f),
+            chiSquareFloats(key, 3, 2),
+            1e-4f,
+            "chisq_3x2",
+        )
+        assertClose(
+            floatArrayOf(0.9410799145698547f, 9.217707633972168f),
+            chiSquareFloats(key, 2, 3),
+            1e-4f,
+            "chisq_2x3",
+        )
+        // Bit-exact definition: contiguous dof-blocks of the SAME normal
+        // stream, squared, f32 left-to-right accumulation.
+        val z = normalFloats(key, 6)
+        val byHand = FloatArray(3) { i ->
+            var acc = 0f
+            for (j in 0 until 2) acc += z[i * 2 + j] * z[i * 2 + j]
+            acc
+        }
+        assertContentEquals(byHand, chiSquareFloats(key, 3, 2), "chiSquare must be the exact definition")
+        for (v in chiSquareFloats(key, 500, 4)) {
+            assertTrue(v >= 0f, "chi-square draw $v out of [0, ∞)")
+        }
+    }
+
+    @Test
+    fun distributionMomentsAtFixedKey() {
+        val momentKey = RandomKey(2026, 920)
+        // Cauchy has NO mean — the sanity statistic is the sample median
+        // (odd n → the exact middle order statistic). Actual: 0.0028017.
+        val c = cauchyFloats(momentKey, 20_001).sortedArray()
+        val median = c[c.size / 2]
+        assertTrue(abs(median) < 0.02f, "cauchy median $median too far from 0")
+        // Exponential(1): mean 1, var 1. Actual: 1.000532 / 0.989457.
+        val e = exponentialFloats(momentKey, 20_000)
+        var eSum = 0.0
+        for (v in e) eSum += v
+        val eMean = eSum / e.size
+        var eM2 = 0.0
+        for (v in e) {
+            val d = v - eMean
+            eM2 += d * d
+        }
+        eM2 /= e.size
+        assertTrue(abs(eMean - 1.0) < 2e-2, "exponential mean $eMean too far from 1")
+        assertTrue(abs(eM2 - 1.0) < 5e-2, "exponential var $eM2 too far from 1")
+        // χ²(4): mean 4, var 8. Actual: 3.995723 / 7.712023.
+        val x = chiSquareFloats(momentKey, 5_000, 4)
+        var xSum = 0.0
+        for (v in x) xSum += v
+        val xMean = xSum / x.size
+        var xM2 = 0.0
+        for (v in x) {
+            val d = v - xMean
+            xM2 += d * d
+        }
+        xM2 /= x.size
+        assertTrue(abs(xMean - 4.0) < 5e-2, "chi-square(4) mean $xMean too far from 4")
+        assertTrue(abs(xM2 - 8.0) < 0.5, "chi-square(4) var $xM2 too far from 8")
+    }
+
+    @Test
+    fun distributionTensorWrappers() {
+        val cv = key.cauchyVector<Sym>(4)
+        assertContentEquals(intArrayOf(4), cv.dims)
+        assertContentEquals(cauchyFloats(key, 4), cv.hostF32())
+        val cm = key.cauchyMatrix<Sym, Sym>(2, 3)
+        assertContentEquals(intArrayOf(2, 3), cm.dims)
+        assertContentEquals(cauchyFloats(key, 6), cm.hostF32())
+        val ev = key.exponentialVector<Sym>(4)
+        assertContentEquals(exponentialFloats(key, 4), ev.hostF32())
+        val em = key.exponentialMatrix<Sym, Sym>(2, 2)
+        assertContentEquals(exponentialFloats(key, 4), em.hostF32())
+        val xv = key.chiSquareVector<Sym>(3, 2)
+        assertContentEquals(chiSquareFloats(key, 3, 2), xv.hostF32())
+        val xm = key.chiSquareMatrix<Sym, Sym>(2, 2, 3)
+        assertContentEquals(intArrayOf(2, 2), xm.dims)
+        assertContentEquals(chiSquareFloats(key, 4, 3), xm.hostF32())
+        // Determinism rides the pure-function design — same key, same draw.
+        assertContentEquals(cv.hostF32(), key.cauchyVector<Sym>(4).hostF32())
+    }
+
     // -- 5. Host tensor surface ----------------------------------------------
 
     @Test

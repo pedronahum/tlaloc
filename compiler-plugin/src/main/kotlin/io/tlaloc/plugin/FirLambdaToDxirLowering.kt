@@ -1114,9 +1114,21 @@ object FirLambdaToDxirLowering {
         // would mis-fold — the host signatures have no defaults so only the
         // positional arity compiles naturally.
         run {
-            val rngKind = when (fqn) {
-                "io.tlaloc.core.uniformVector", "io.tlaloc.core.uniformMatrix" -> OpKind.RNG_UNIFORM
-                "io.tlaloc.core.normalVector", "io.tlaloc.core.normalMatrix" -> OpKind.RNG_NORMAL
+            // §0.4.431 — the cauchy spellings ride the SAME literal-key arm as
+            // uniform/normal, but lower COMPOSITIONALLY (the recorded Phase D
+            // distribution design): RNG_UNIFORM → SUB ½ → MUL π → TAN, no new
+            // OpKind. The draw-then-transform graph differentiates as a
+            // constant automatically (the D2 zero-gradient RNG arms absorb
+            // upstream through TanRule's chain) and emits via §0.4.422's
+            // explicit threefry for free. The ½/π consts are compile-time
+            // literals — NOT dim-derived — and the dims here are literal by
+            // this arm's own v1 contract, so no sentinel can reach them.
+            val cauchy = fqn == "io.tlaloc.core.cauchyVector" || fqn == "io.tlaloc.core.cauchyMatrix"
+            val rngKind = when {
+                fqn == "io.tlaloc.core.uniformVector" || fqn == "io.tlaloc.core.uniformMatrix" ||
+                    cauchy -> OpKind.RNG_UNIFORM
+                fqn == "io.tlaloc.core.normalVector" || fqn == "io.tlaloc.core.normalMatrix" ->
+                    OpKind.RNG_NORMAL
                 else -> null
             }
             if (rngKind != null) {
@@ -1157,12 +1169,28 @@ object FirLambdaToDxirLowering {
                     if (d <= 0) throw LoweringException("$fqn dims must be positive; got $d")
                     d
                 }
-                return emitter.op(
+                val draw = emitter.op(
                     kind = rngKind,
                     operands = emptyList(),
                     attrs = mapOf("key0" to keyLits[0], "key1" to keyLits[1], "dims" to dims),
                     type = DxirType(F32, dims),
                 )
+                if (!cauchy) return draw
+                // The quantile transform, arm-for-arm what `:core`'s
+                // `cauchyFloats` computes: f32 centring/scaling, TAN through
+                // Double — a lowered draw and a host draw are bit-identical.
+                val ty = draw.type
+                val centred = emitter.op(
+                    kind = OpKind.SUB,
+                    operands = listOf(draw, splatLiteral(0.5f, draw, emitter)),
+                    type = ty,
+                )
+                val scaled = emitter.op(
+                    kind = OpKind.MUL,
+                    operands = listOf(centred, splatLiteral(kotlin.math.PI.toFloat(), draw, emitter)),
+                    type = ty,
+                )
+                return emitter.op(kind = OpKind.TAN, operands = listOf(scaled), type = ty)
             }
         }
 
