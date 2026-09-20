@@ -26,8 +26,21 @@ any number of integer params per `grad {}` lambda lowers, certified E2E on a
 two-index-param embedding lambda with DIFFERENT index extents. Own VjpRule
 closed under itself + forward tangent, so higher-order transforms compose
 through gradient bodies containing it; emits as a static splat-zero constant,
-template SSA unreferenced). E1c (the `grad {}` sparse surface: the FIR arm +
-`irSparseMatmul` + E2E GNN-shaped cert) is next and is now unblocked.
+template SSA unreferenced).
+**E1c landed §0.4.420 — the ratified sparse arc is COMPLETE.** The `grad {}`
+sparse surface: `sparseMatmul(values, colIdx, rowPtr, dense)` FIR front-end
+(result N copied only when concrete, -1 symbolic otherwise — the
+conv/flatten convention), synthesis arms for all three op spellings (plain →
+`sparseMatmul` host twin, transposed 5-operand → `sparseMatmulTransposed<S>`
+with the template's shape as its type arg, SDDMM → `sparseMatmulValuesAdjoint`)
+plus the placeholder-`Lit<Int>`-for-N result-atom derivations. Certified E2E
+through the K2 plugin on the GNN shape: a FOUR-param lambda (values, colIdx,
+rowPtr, dense) with empty row + skewed row + explicit stored zero, linear and
+nonlinear-recompute losses, exact quarter-grid hand oracle, the stored zero
+receiving a gradient, and both integer zeros at their own extents (nnz=5 ≠
+N+1=4 — the §0.4.419 addressing under real CSR params). Per the ratified
+scope the arc now STOPS: matdiv stays skipped, GPU stays the pinned refusal,
+row-sparse embedding gradients stay a Phase F item.
 Companion to [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md) Phase E. Walked
 from a fresh shallow clone of `facebookresearch/diffkt` @ HEAD (2026-09-20):
 `kotlin/api/src/main/kotlin/org/diffkt/Sparse*.kt`, the JNI surface

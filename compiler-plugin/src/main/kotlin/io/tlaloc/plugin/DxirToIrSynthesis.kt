@@ -342,6 +342,41 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
             }
+            // §0.4.420 — Phase E1c: SPARSE_MATMUL's result atoms. Plain form
+            // (4 operands) → [N, D]: N has NO param-sourced atom (rowPtr is
+            // [N+1] — an extent one off from any param's) so it takes a
+            // placeholder `Lit<Int>` (the §0.4.375/CONCAT reasoning: nothing
+            // reads the placeholder for a runtime-dim decision — the host twin
+            // derives N from rowPtr's runtime extent); D comes from the dense
+            // operand's second atom. Transposed form (5 operands) → [C, D]:
+            // C from the shape-only template's FIRST atom (the reason the
+            // template operand exists), D from the multiplicand's second.
+            OpKind.SPARSE_MATMUL -> when (op.operands.size) {
+                4 -> {
+                    val denseIr = operandIrTypes[op.operands[3].id] as? IrSimpleType ?: return null
+                    val denseAtoms = shapeAtomsOf(denseIr, 2) ?: return null
+                    val litAtom = litIntAtom() ?: return null
+                    rebuildShapeAtoms(denseIr, listOf(litAtom, denseAtoms[1]), 2)
+                }
+                5 -> {
+                    val multIr = operandIrTypes[op.operands[3].id] as? IrSimpleType ?: return null
+                    val templateIr = operandIrTypes[op.operands[4].id] as? IrSimpleType ?: return null
+                    val multAtoms = shapeAtomsOf(multIr, 2) ?: return null
+                    val templateAtoms = shapeAtomsOf(templateIr, 2) ?: return null
+                    rebuildShapeAtoms(templateIr, listOf(templateAtoms[0], multAtoms[1]), 2)
+                }
+                else -> null
+            }
+            // §0.4.420 — the fused SDDMM values-adjoint → [nnz]: nnz IS
+            // colIdx's (operand 2's) atom; the F32 classifier comes from the
+            // upstream operand's IrType.
+            OpKind.SPARSE_MATMUL_VALUES_ADJOINT -> {
+                if (op.operands.size != 4) return null
+                val upstreamIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val colIdxIr = operandIrTypes[op.operands[2].id] as? IrSimpleType ?: return null
+                val colIdxAtoms = shapeAtomsOf(colIdxIr, 1) ?: return null
+                rebuildShapeAtoms(upstreamIr, listOf(colIdxAtoms[0]), 1)
+            }
             else -> null
         }
     }
@@ -1577,6 +1612,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.EMBEDDING_GRAD) return irEmbeddingGrad(op, env, context)
         // §0.4.419 — Phase E1c-pre: the param-addressed structural zero.
         if (op.op == OpKind.ZEROS_LIKE) return irZerosLike(op, env, context)
+        // §0.4.420 — Phase E1c: the sparse matmul family in grad{} bodies.
+        if (op.op == OpKind.SPARSE_MATMUL) return irSparseMatmul(op, env, context)
+        if (op.op == OpKind.SPARSE_MATMUL_VALUES_ADJOINT) {
+            return irSparseMatmulValuesAdjoint(op, env, context)
+        }
         // §0.4.384 — Phase A3b slice 1: the NCHW conv pair.
         if (op.op == OpKind.CONV2D || op.op == OpKind.CONV_TRANSPOSE2D) return irConv(op, env, context)
         // §0.4.385 — the fused conv adjoints (runtime-solved padding).
@@ -2760,6 +2800,71 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         )
         if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
         call.arguments[0] = irGet(templateDecl)
+        return call
+    }
+
+    /**
+     * §0.4.420 — Phase E1c: `SPARSE_MATMUL` in `grad {}` bodies — the primal
+     * (and its recompute under a nonlinear loss) AND the `transposed = true`
+     * adjoint form SparseMatmulRule emits for `d_dense = Aᵀ · upstream`. The
+     * plain 4-operand form lowers to the host twin `sparseMatmul(values,
+     * colIdx, rowPtr, dense)` (no type params — its params are
+     * star-projected, extents all read at runtime, the reason the whole
+     * family is sound under -1 sentinels); the 5-operand transposed form to
+     * `sparseMatmulTransposed<S>(…, denseTemplate)`, whose single type param
+     * is the SHAPE-ONLY template's shape (carrying the output row extent C
+     * that no CSR component's runtime shape can supply).
+     */
+    private fun IrBuilderWithScope.irSparseMatmul(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val transposed = (op.attrs["transposed"] as? Boolean) ?: false
+        val arity = if (transposed) 5 else 4
+        if (op.operands.size != arity) return null
+        val operandDecls = op.operands.map { env[it.id] ?: return null }
+        val resultIrType = irTypeForNode(op, context) as? IrSimpleType ?: return null
+        val sym = opsTensorSymbol(if (transposed) "sparseMatmulTransposed" else "sparseMatmul")
+            ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (transposed) {
+            val templateIr = (irTypeForNode(op.operands[4], context) as? IrSimpleType)
+                ?: (operandDecls[4].type as? IrSimpleType) ?: return null
+            val shapeArg = templateIr.arguments.firstOrNull()?.typeOrNull ?: return null
+            if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        }
+        for ((i, decl) in operandDecls.withIndex()) call.arguments[i] = irGet(decl)
+        return call
+    }
+
+    /**
+     * §0.4.420 — Phase E1c: the fused SDDMM values-adjoint in `grad {}`
+     * bodies → the host twin `sparseMatmulValuesAdjoint(upstream, dense,
+     * colIdx, rowPtr)` (no type params). Only STORED positions get an adjoint
+     * entry — the result is [nnz], colIdx's extent at runtime.
+     */
+    private fun IrBuilderWithScope.irSparseMatmulValuesAdjoint(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 4) return null
+        val operandDecls = op.operands.map { env[it.id] ?: return null }
+        val resultIrType = irTypeForNode(op, context) as? IrSimpleType ?: return null
+        val sym = opsTensorSymbol("sparseMatmulValuesAdjoint") ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        for ((i, decl) in operandDecls.withIndex()) call.arguments[i] = irGet(decl)
         return call
     }
 

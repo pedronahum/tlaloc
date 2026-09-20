@@ -1046,6 +1046,49 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.420 — Phase E1c (DiffKT sparse parity): `sparseMatmul(values,
+        // colIdx, rowPtr, dense)` — the front-end for the §0.4.418
+        // SPARSE_MATMUL wiring (interpreter/SparseMatmulRule/bilinear
+        // tangent/host twins; GPU = the ratified pinned emit refusal). The CSR
+        // operand rides as its three dense components: values [nnz] F32
+        // differentiable, colIdx [nnz] / rowPtr [N+1] I32 non-differentiable
+        // structural-zero slots whose gradients are the §0.4.419
+        // param-addressed ZEROS_LIKE — the two-integer-param shape this
+        // lambda carries is exactly what E1c-pre exists to admit. The result
+        // is [N, D]: N derives from rowPtr's extent MINUS ONE, so it is
+        // copied only when concrete and goes -1 symbolic otherwise (the
+        // conv/flatten convention — a sentinel must never enter arithmetic);
+        // D is COPIED from the dense operand's dim slot, sentinels propagate.
+        if (fqn == "io.tlaloc.core.ops.sparseMatmul") {
+            val args = call.argumentList.arguments
+            if (args.size != 4) {
+                throw LoweringException("$fqn requires 4 arguments (values, colIdx, rowPtr, dense); got ${args.size}")
+            }
+            val values = lowerExpr(args[0], env, emitter)
+            val colIdx = lowerExpr(args[1], env, emitter)
+            val rowPtr = lowerExpr(args[2], env, emitter)
+            val dense = lowerExpr(args[3], env, emitter)
+            if (values.type.rank != 1 || values.type.dtype != F32) {
+                throw LoweringException("$fqn values must be a rank-1 F32 tensor; got ${values.type}")
+            }
+            if (colIdx.type.rank != 1 || colIdx.type.dtype != I32) {
+                throw LoweringException("$fqn colIdx must be a rank-1 I32 tensor; got ${colIdx.type}")
+            }
+            if (rowPtr.type.rank != 1 || rowPtr.type.dtype != I32) {
+                throw LoweringException("$fqn rowPtr must be a rank-1 I32 tensor; got ${rowPtr.type}")
+            }
+            if (dense.type.rank != 2 || dense.type.dtype != F32) {
+                throw LoweringException("$fqn dense must be a rank-2 F32 tensor; got ${dense.type}")
+            }
+            val rpExtent = rowPtr.type.dims[0]
+            val n = if (rpExtent > 0) rpExtent - 1 else -1
+            return emitter.op(
+                kind = OpKind.SPARSE_MATMUL,
+                operands = listOf(values, colIdx, rowPtr, dense),
+                type = DxirType(F32, listOf(n, dense.type.dims[1])),
+            )
+        }
+
         // §0.4.384 — Phase A3b: the conv user surface (NCHW, the layout the
         // interpreter/emitter fix). `x.conv2d(w, …)` takes an OIHW
         // `[Co, Ci, kh, kw]` kernel; `x.convTranspose2d(w, …)` takes IOHW

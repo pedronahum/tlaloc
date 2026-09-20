@@ -2020,14 +2020,16 @@ FIR/`grad {}` spelling is the recorded tail) → E1a ✅ (§0.4.417 — the
 audit's recommendations).
 
 **Remaining, in recommended order:**
-1. **E sparse continuation** per
-   [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)'s slicing (E1a landed
-   §0.4.417, E1b §0.4.418 — `SPARSE_MATMUL` + fused SDDMM values-adjoint
-   with the pinned GPU emit refusal, E1c-pre §0.4.419 — `ZEROS_LIKE`
-   param-addressed structural zeros lift the §0.4.400 one-integer-param
-   synthesis gate): E1c the `grad {}` sparse surface (FIR arm +
-   `irSparseMatmul` + E2E GNN-shaped cert) is next. matdiv stays SKIPPED;
-   row-sparse gradients stay deferred to Phase F. F model layer remains a
+1. **Phase E sparse — COMPLETE (§0.4.417–420)** per
+   [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md)'s ratified slicing:
+   E1a the `:core` host CSR `SparseTensor` (§0.4.417), E1b `SPARSE_MATMUL`
+   + fused SDDMM values-adjoint with the pinned GPU emit refusal
+   (§0.4.418), E1c-pre `ZEROS_LIKE` param-addressed structural zeros
+   lifting the §0.4.400 one-integer-param synthesis gate (§0.4.419), E1c
+   the `grad {}` sparse surface with the GNN-shaped E2E cert (§0.4.420).
+   The arc STOPS here by ratified scope: matdiv SKIPPED, GPU = pinned
+   refusal (ELL-padded emission is the recorded tail), row-sparse
+   embedding gradients deferred to Phase F. F model layer remains a
    product decision. (Noted en passant §0.4.419: EMBEDDING_GRAD has no
    forward tangent — fwd-over-rev hessians THROUGH an embedding gradient
    body refuse loudly; a recorded tail alongside the multi-result COARSENED
