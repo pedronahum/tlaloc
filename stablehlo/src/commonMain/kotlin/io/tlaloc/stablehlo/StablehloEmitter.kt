@@ -121,6 +121,13 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.LOG -> unary(step, name, "stablehlo.log", ops[0], outType)
             OpKind.SIN -> unary(step, name, "stablehlo.sine", ops[0], outType)
             OpKind.COS -> unary(step, name, "stablehlo.cosine", ops[0], outType)
+            // §0.4.395 — Phase C2 trig tails. `stablehlo.tan` is a first-class op
+            // (StableHLO ≥ 1.7 moved it in from CHLO; certified against the
+            // GB10's XLA in PjrtTanAtanSmokeTest). StableHLO has no unary atan,
+            // so ATAN emits as `atan2(x, splat 1.0)` — exact on the whole real
+            // line since atan2(y, 1) ≡ atan(y).
+            OpKind.TAN -> unary(step, name, "stablehlo.tan", ops[0], outType)
+            OpKind.ATAN -> emitAtan(step, name, ops[0], node.type)
             OpKind.SQRT -> unary(step, name, "stablehlo.sqrt", ops[0], outType)
             OpKind.RSQRT -> unary(step, name, "stablehlo.rsqrt", ops[0], outType)
             OpKind.TANH -> unary(step, name, "stablehlo.tanh", ops[0], outType)
@@ -444,6 +451,15 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 "(${operandType.toMlir()}) -> ${resultType.toMlir()}",
         )
         return bcast
+    }
+
+    private fun emitAtan(step: String, name: String, x: String, type: DxirType) {
+        // §0.4.395 — atan(x) = atan2(x, 1.0). StableHLO ships atan2 but no unary
+        // atan; the x2 = 1 splat pins quadrant I/IV, where atan2(y, 1) ≡ atan(y)
+        // exactly (including ±0.0 and ±∞ per IEEE atan2 semantics).
+        val one = synth()
+        out.appendLine("$step$one = stablehlo.constant dense<1.0> : ${type.toMlir()}")
+        out.appendLine("$step$name = stablehlo.atan2 $x, $one : ${type.toMlir()}")
     }
 
     private fun emitRelu(step: String, name: String, x: String, type: DxirType) {

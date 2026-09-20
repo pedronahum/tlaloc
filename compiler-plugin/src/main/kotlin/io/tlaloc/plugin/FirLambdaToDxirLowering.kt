@@ -1760,7 +1760,12 @@ object FirLambdaToDxirLowering {
         }
 
         UNARY_OP_MAP[fqn]?.let { kind ->
+            // §0.4.395 — the operand is the receiver for the extension spellings
+            // (`x.tan()`), or the sole positional argument for the top-level
+            // `kotlin.math` spellings (`tan(x)` — no receiver at all). Every
+            // UNARY_OP_MAP entry is arity-1, so the fallback is unambiguous.
             val operandExpr = receiver(call)
+                ?: call.argumentList.arguments.singleOrNull()
                 ?: throw LoweringException("unary op '$fqn' has no receiver")
             val operand = lowerExpr(operandExpr, env, emitter)
             // Reductions collapse all operand dims to scalar — every other unary op is
@@ -2402,12 +2407,24 @@ object FirLambdaToDxirLowering {
         // equivalent exists).
         put("io.tlaloc.core.tanh", OpKind.TANH)
         put("io.tlaloc.core.sigmoid", OpKind.SIGMOID)
+        // §0.4.395 — Phase C2 trig tails: the SCALAR tan / atan surface, in both
+        // the `:core` receiver spelling (`x.tan()`, the §0.4.166 sin/cos pattern)
+        // and the bare `kotlin.math` spelling (`tan(x)` — a top-level one-arg
+        // call, which the UNARY arm's argument fallback below now accepts; the
+        // §0.4.377 `kotlin.math.pow` precedent for mapping stdlib FQNs directly).
+        put("io.tlaloc.core.tan", OpKind.TAN)
+        put("io.tlaloc.core.atan", OpKind.ATAN)
+        put("kotlin.math.tan", OpKind.TAN)
+        put("kotlin.math.atan", OpKind.ATAN)
         // :core DTensor shape-preserving unary ops (io.tlaloc.core.ops package).
         put("io.tlaloc.core.ops.relu", OpKind.RELU)
         put("io.tlaloc.core.ops.neg", OpKind.NEG)
         put("io.tlaloc.core.ops.sigmoid", OpKind.SIGMOID)
         put("io.tlaloc.core.ops.tanh", OpKind.TANH)
         put("io.tlaloc.core.ops.sign", OpKind.SIGN)
+        // §0.4.395 — the TENSOR tan / atan spellings (:core/ops/HostOps.kt).
+        put("io.tlaloc.core.ops.tan", OpKind.TAN)
+        put("io.tlaloc.core.ops.atan", OpKind.ATAN)
         put("io.tlaloc.core.ops.exp", OpKind.EXP)
         put("io.tlaloc.core.ops.log", OpKind.LOG)
         put("io.tlaloc.core.ops.sqrt", OpKind.SQRT)

@@ -362,6 +362,18 @@ object DxirInterpreter {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { kotlin.math.cos(a[it].toDouble()).toFloat() }
             }
+            OpKind.TAN -> {
+                // §0.4.395 — element-wise tangent (Phase C2). TanRule's adjoint
+                // recomputes TAN through this same arm (1 + tan²). IEEE at the
+                // poles: tan(π/2 ± ε) is finite-but-huge in Double, ±∞ never.
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { kotlin.math.tan(a[it].toDouble()).toFloat() }
+            }
+            OpKind.ATAN -> {
+                // §0.4.395 — element-wise arctangent (Phase C2), range (−π/2, π/2).
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { kotlin.math.atan(a[it].toDouble()).toFloat() }
+            }
             OpKind.SQRT -> {
                 // Element-wise square root. `kotlin.math.sqrt` returns NaN for negative
                 // operands, matching IEEE semantics.

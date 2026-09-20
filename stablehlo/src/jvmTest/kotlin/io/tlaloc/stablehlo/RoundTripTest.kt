@@ -255,6 +255,9 @@ class RoundTripTest {
         val unaries = listOf(
             OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG,
             OpKind.SQRT, OpKind.RSQRT, OpKind.TANH, OpKind.SIGMOID, OpKind.RELU, OpKind.STEP,
+            // §0.4.395 — TAN round-trips as `stablehlo.tan`; ATAN as the
+            // constant + `stablehlo.atan2` pair.
+            OpKind.TAN, OpKind.ATAN,
         )
         for (op in unaries) {
             val fn = DxirBuilder.function("f") {

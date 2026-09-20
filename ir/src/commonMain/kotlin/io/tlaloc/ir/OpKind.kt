@@ -16,6 +16,14 @@ enum class OpKind {
     // `d/dx cos = -sin`. Lowered to `stablehlo.sine` / `stablehlo.cosine`.
     SIN, COS,
 
+    // §0.4.395 — Phase C2 trig tails (DiffKT parity; the audit pinned TAN/ATAN as
+    // the ONLY missing trig ops — DiffKT has no floor/ceil/round/atan2). Gradients:
+    // `d/dx tan = 1 + tan²(x)` (= sec²; the tan-recompute form keeps the rule
+    // sentinel-safe and lets CSE share the primal's TAN), `d/dx atan = 1/(1 + x²)`.
+    // Lowered to `stablehlo.tan` and — since StableHLO has no unary atan — to
+    // `stablehlo.atan2(x, splat 1.0)`.
+    TAN, ATAN,
+
     // §0.4.204 — Elementwise sign function. Returns 1 / -1 / 0 for x>0 / x<0 / x=0.
     // Added for the CartPole NN port: the policy output is `a = sign(tanh(...) - ε)`
     // which discretises the action to {-1, +1}. Gradient is identically 0 (the

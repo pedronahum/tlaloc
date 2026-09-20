@@ -283,6 +283,15 @@ fun <S : Shape> DTensor<S, F32>.log(): DTensor<S, F32> =
 fun <S : Shape> DTensor<S, F32>.sqrt(): DTensor<S, F32> =
     unary { x -> kotlin.math.sqrt(x) }
 
+// §0.4.395 — Phase C2 trig tails (DiffKT parity: `tan`/`atan` are the only trig
+// ops DiffKT has that Tlaloc lacked). Double-precision evaluation before the F32
+// narrow, bit-for-bit the interpreter's TAN/ATAN arm convention.
+fun <S : Shape> DTensor<S, F32>.tan(): DTensor<S, F32> =
+    unary { x -> kotlin.math.tan(x.toDouble()).toFloat() }
+
+fun <S : Shape> DTensor<S, F32>.atan(): DTensor<S, F32> =
+    unary { x -> kotlin.math.atan(x.toDouble()).toFloat() }
+
 /**
  * Phase A5b (DiffKT parity) — elementwise power. POW has been fully ruled below
  * the surface since Stage B.3 (PowRule, the interpreter arm, `stablehlo.power`

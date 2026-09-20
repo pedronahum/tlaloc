@@ -190,3 +190,29 @@ fun DScalar.sigmoid(): DScalar = when (this) {
     is FloatScalar -> sigmoid()
     is DoubleScalar -> sigmoid()
 }
+
+// --- Scalar tan / atan entries (§0.4.395, Phase C2) ---
+//
+// The trig tails: DiffKT's audit (§0.4.365) pinned TAN and ATAN as the only trig
+// ops it has that Tlaloc lacked (no floor/ceil/round/atan2 there). Same five-overload
+// pattern as §0.4.166 sin/cos: `Float.tan()` / `Double.tan()` resolve at FQN
+// `io.tlaloc.core.tan` / `.atan`, the FIR lowering maps each to `OpKind.TAN` /
+// `OpKind.ATAN`, and `TanRule` (`1 + tan²`) / `AtanRule` (`1/(1+x²)`) cover the
+// gradient side. Synthesis emits `IrCall` to `kotlin.math.tan` / `kotlin.math.atan`
+// (both exist in the stdlib, so no `irCoreScalarCall` detour is needed).
+fun Float.tan(): Float = kotlin.math.tan(this.toDouble()).toFloat()
+fun Double.tan(): Double = kotlin.math.tan(this)
+fun FloatScalar.tan(): FloatScalar = FloatScalar(v.tan())
+fun DoubleScalar.tan(): DoubleScalar = DoubleScalar(v.tan())
+fun DScalar.tan(): DScalar = when (this) {
+    is FloatScalar -> tan()
+    is DoubleScalar -> tan()
+}
+fun Float.atan(): Float = kotlin.math.atan(this.toDouble()).toFloat()
+fun Double.atan(): Double = kotlin.math.atan(this)
+fun FloatScalar.atan(): FloatScalar = FloatScalar(v.atan())
+fun DoubleScalar.atan(): DoubleScalar = DoubleScalar(v.atan())
+fun DScalar.atan(): DScalar = when (this) {
+    is FloatScalar -> atan()
+    is DoubleScalar -> atan()
+}

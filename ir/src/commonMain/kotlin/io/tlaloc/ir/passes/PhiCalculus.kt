@@ -87,6 +87,7 @@ object PhiCalculus {
     private val DISTRIBUTABLE_OPS: Set<OpKind> = setOf(
         OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT,
         OpKind.TANH, OpKind.SIGMOID, OpKind.RELU, OpKind.GELU, OpKind.SILU,
+        OpKind.TAN, OpKind.ATAN,
         OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW,
     )
 

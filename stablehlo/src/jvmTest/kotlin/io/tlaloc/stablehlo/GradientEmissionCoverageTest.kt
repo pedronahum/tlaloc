@@ -77,6 +77,11 @@ class GradientEmissionCoverageTest {
         // Elementwise unaries whose adjoints are elementwise.
         unaryLoss("tanh", OpKind.TANH, listOf(2, 3)),
         unaryLoss("sigmoid", OpKind.SIGMOID, listOf(2, 3)),
+        // §0.4.395 — the Phase C2 trig tails: TanRule's adjoint recomputes TAN
+        // (the `stablehlo.tan` arm), AtanRule's divides by 1 + x² (the atan2
+        // spelling never appears in the ADJOINT — only the primal emits it).
+        unaryLoss("tan", OpKind.TAN, listOf(2, 3)),
+        unaryLoss("atan", OpKind.ATAN, listOf(2, 3)),
         unaryLoss("sqrt", OpKind.SQRT, listOf(2, 3)),
         unaryLoss("sign", OpKind.SIGN, listOf(2, 3)),
         // RELU is in the catalogue even though the INTERPRETER has no arm for it

@@ -61,6 +61,25 @@ class HostOpsTest {
     }
 
     @Test
+    fun tanAtanElementwise() {
+        // §0.4.395 — Phase C2 trig tails: elementwise tan/atan, and the
+        // round-trip atan(tan(x)) = x on (−π/2, π/2).
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 4, floatArrayOf(0f, 0.5f, -1.0f, 1.2f))
+        val t = a.tan().hostF32()
+        val at = a.atan().hostF32()
+        for (i in 0 until 4) {
+            val x = a.hostF32()[i].toDouble()
+            assertEquals(kotlin.math.tan(x).toFloat(), t[i], 1e-6f, "tan slot $i")
+            assertEquals(kotlin.math.atan(x).toFloat(), at[i], 1e-6f, "atan slot $i")
+        }
+        val roundTrip = a.tan().atan().hostF32()
+        for (i in 0 until 4) {
+            assertEquals(a.hostF32()[i], roundTrip[i], 1e-5f, "atan(tan(x)) slot $i")
+        }
+        assertContentEquals(intArrayOf(1, 4), a.tan().dims)
+    }
+
+    @Test
     fun concatAndStackWindows() {
         val a = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f))
         val b = Tensors.f32Matrix<Sym, Sym>(2, 3, floatArrayOf(10f, 20f, 30f, 40f, 50f, 60f))

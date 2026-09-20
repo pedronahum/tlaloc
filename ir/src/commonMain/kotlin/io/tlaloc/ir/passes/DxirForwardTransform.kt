@@ -283,6 +283,19 @@ object DxirForwardTransform {
                 listOf(b.op(OpKind.MUL, listOf(b.op(OpKind.SIN, listOf(vOps[0]), ty), t(node.operands[0])), ty)),
                 ty,
             )
+            // §0.4.395 — Phase C2 trig tails. TAN reads its own value stream
+            // (y = tan(x), dy = (1 + y²)·dx — the TanhRule-style recompute-free
+            // form); ATAN reads the operand (dy = dx / (1 + x²)).
+            OpKind.TAN -> {
+                val y2 = b.op(OpKind.MUL, listOf(v, v), ty)
+                val sec2 = b.op(OpKind.ADD, listOf(one(ty), y2), ty)
+                b.op(OpKind.MUL, listOf(sec2, t(node.operands[0])), ty)
+            }
+            OpKind.ATAN -> {
+                val x2 = b.op(OpKind.MUL, listOf(vOps[0], vOps[0]), ty)
+                val denom = b.op(OpKind.ADD, listOf(one(ty), x2), ty)
+                b.op(OpKind.DIV, listOf(t(node.operands[0]), denom), ty)
+            }
             OpKind.ABS -> b.op(
                 OpKind.MUL, listOf(b.op(OpKind.SIGN, listOf(vOps[0]), ty), t(node.operands[0])), ty,
             )

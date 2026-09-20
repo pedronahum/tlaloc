@@ -971,9 +971,35 @@ reachable from `grad {}`, not new math. New-op families come after.
   these; its Dirichlet example depends on them). Host: Lanczos/series impls;
   emitter: `chlo.lgamma`/`chlo.digamma`; VJPs: `d lgamma = digamma`,
   `d digamma = polygamma(1)`, `d polygamma(n) = polygamma(n+1)`.
-- **C2. Trig tails**: `TAN`, `ATAN` — audit confirmed these are the only
+- **C2. Trig tails** ✅ **DONE, §0.4.395 (2026-09-20)**: `TAN` and `ATAN`,
+  tensor AND scalar, full vertical — audit confirmed these are the only
   ones DiffKT has (no floor/ceil/round/atan2; those stay optional extras,
   not parity items).
+  - Two new OpKinds with every engine armed: interpreter (`kotlin.math`
+    through Double, the house convention), CostModel (the SIN/COS
+    transcendental bucket), TileFusion/PhiCalculus elementwise sets.
+  - VjpRules: TanRule `d tan = (1 + tan²x)·up` (tan-recompute form — CSEs
+    with the primal's TAN, reads no extents) and AtanRule
+    `d atan = up/(1 + x²)`; the `1` splats ride `splatConst` so both are
+    sentinel-safe. Forward tangents: TAN reads its own value stream
+    (`(1 + y²)·dx`), ATAN the operand (`dx/(1 + x²)`).
+  - Emitter: `stablehlo.tan` is accepted by the GB10's XLA (certified in
+    `PjrtTanAtanSmokeTest` — the fallback divide(sine, cosine) spelling was
+    never needed); ATAN emits `stablehlo.atan2(x, splat 1.0)` since StableHLO
+    has no unary atan. Both pinned in `EmitterTest`, both losses in
+    `GradientEmissionCoverageTest`'s sweep, both in the round-trip list.
+  - User surface: `:core/ops` tensor `tan()`/`atan()` + the five-overload
+    scalar sets (§0.4.377 pattern); FIR `UNARY_OP_MAP` entries for all four
+    Tlaloc FQNs AND `kotlin.math.tan`/`atan` — the top-level stdlib
+    spellings have no receiver, so the UNARY arm grew a single-argument
+    fallback. Synthesis: `irTan`/`irAtan` (tensor via `opsTensorSymbol`,
+    scalar via `kotlin.math`), both kinds in all three IrType-solver
+    elementwise lists.
+  - Certified: IR-level analytic pins with non-uniform upstream + the
+    JVP⇄VJP cross-identity through `atan(tan(x)⊙w)`; five E2E `grad {}`
+    spellings through the real plugin with no tape fallback (scalar
+    receiver ×2, bare `kotlin.math` ×1, tensor ×2); GPU smoke grads within
+    2.3e-5 of the interpreter.
 - **C3. `REVERSE` (flip) op**: DiffKT `flip`; also lets the conv adjoint
   drop its `window_reversal` special-casing eventually.
 - **C4. Item-4 tails** *(reclassified beyond-parity by the audit —
@@ -1036,7 +1062,9 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 `tanh sigmoid pow` ✅ A5b (§0.4.377 — the five-overload `:core` scalar host set
 + `UNARY_OP_MAP` entries; scalar SIGMOID synthesises via the new
 `irCoreScalarCall`, scalar TANH via `kotlin.math.tanh`, scalar POW via the
-`kotlin.math.pow` map entry) · `tan atan` ❌ (C2) ·
+`kotlin.math.pow` map entry) · `tan atan` ✅ C2 (§0.4.395 — five-overload
+scalar sets + `kotlin.math.tan`/`atan` map entries with the no-receiver
+argument fallback) ·
 `lgamma digamma polygamma` ❌ (C1) · `sigmoid(DScalar)` ✅ (same A5b).
 
 #### Tensor ops (top-level files + `Operations` interface)
@@ -1047,7 +1075,7 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 | `pow(Float/Int/DScalar/tensor-exponent)` | ✅ | A5b (§0.4.377): `:core/ops` host `pow` (tensor / Float / Int exponents) + FIR entries for `io.tlaloc.core.ops.pow` and `kotlin.math.pow` + a tensor synthesis arm; PowRule/interpreter/emitter/forward already shipped. `DScalar` exponent still open |
 | `eq ne lt le gt ge` (tensor masks) | ✅ | §0.4.364 |
 | `relu reluGrad sigmoid tanh exp ln sqrt abs` (tensor) | ✅ | `reluGrad` is public in DiffKT; ours is internal — fine |
-| `sin cos tan atan` (tensor) | ✅/❌ | sin/cos ✅; tan/atan ❌ → C2 (audit: **no** floor/ceil/round/atan2 in DiffKT — plan over-scoped C2; now ours-optional) |
+| `sin cos tan atan` (tensor) | ✅ | sin/cos ✅; tan/atan ✅ C2 (§0.4.395 — full vertical incl. `stablehlo.tan` / `atan2(x, 1)` emission certified on the GB10; audit: **no** floor/ceil/round/atan2 in DiffKT — those stay ours-optional) |
 | `lgamma digamma polygamma` (tensor) | ❌ | C1 (Dirichlet example + gamma reparam depend on them) |
 | `sum()` full-reduce | ✅ | |
 | `sum(axes, keepDims)` | 🟡 | `reduction_dims` IR exists → A1 |

@@ -145,7 +145,9 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT -> 4.0 * op.type.elementCount.toDouble()
     OpKind.TANH, OpKind.SIGMOID -> 6.0 * op.type.elementCount.toDouble()
     OpKind.RELU, OpKind.GELU, OpKind.SILU -> 5.0 * op.type.elementCount.toDouble()
-    OpKind.SIN, OpKind.COS -> 8.0 * op.type.elementCount.toDouble()
+    // §0.4.395 — TAN ≈ sin/cos + divide; ATAN's polynomial approximation lands in
+    // the same transcendental bucket.
+    OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN -> 8.0 * op.type.elementCount.toDouble()
 
     // Reductions over an axis (or all): N − 1 ≈ N adds per reduced
     // element.

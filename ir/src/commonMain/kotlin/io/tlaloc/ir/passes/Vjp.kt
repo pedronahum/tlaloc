@@ -1140,6 +1140,43 @@ object VjpRegistry {
     }
 
     /**
+     * `d/dx(tan(x)) = 1 + tan²(x)` (= sec²(x)). §0.4.395 — Phase C2 trig tail.
+     * The tan-recompute form (rather than `1/cos²`) mirrors TanhRule: the fresh
+     * TAN over the cloned primal operand CSEs with the primal's own TAN node,
+     * reads no extents (sentinel-safe), and the `1` splat rides the §0.4.380
+     * shape-template machinery via [splatConst].
+     */
+    val TanRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val tanX = builder.op(OpKind.TAN, listOf(x), x.type)
+            val tanSq = builder.op(OpKind.MUL, listOf(tanX, tanX), x.type)
+            val one = splatConst(builder, floatLiteralForDtype(1.0, x.type.dtype), x, x.type)
+            val sec2 = builder.op(OpKind.ADD, listOf(one, tanSq), x.type)
+            val dx = builder.op(OpKind.MUL, listOf(upstream, sec2), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
+     * `d/dx(atan(x)) = 1 / (1 + x²)`. §0.4.395 — companion to TanRule. Bounded in
+     * (0, 1], so numerically benign everywhere; the denominator reads only the
+     * primal operand's values, never its extents.
+     */
+    val AtanRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val xSq = builder.op(OpKind.MUL, listOf(x, x), x.type)
+            val one = splatConst(builder, floatLiteralForDtype(1.0, x.type.dtype), x, x.type)
+            val denom = builder.op(OpKind.ADD, listOf(one, xSq), x.type)
+            val dx = builder.op(OpKind.DIV, listOf(upstream, denom), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
      * `d/dx(sqrt(x)) = 1 / (2 · sqrt(x))`. For `x = 0` the adjoint is infinite (divide
      * by zero); follows IEEE semantics in the interpreter. Avoid this on primals where
      * `x` can reach zero at the differentiation point.
@@ -1498,6 +1535,8 @@ object VjpRegistry {
         OpKind.LOG to LogRule,
         OpKind.SIN to SinRule,
         OpKind.COS to CosRule,
+        OpKind.TAN to TanRule,
+        OpKind.ATAN to AtanRule,
         OpKind.SIGN to SignRule,
         OpKind.SQRT to SqrtRule,
         OpKind.TANH to TanhRule,

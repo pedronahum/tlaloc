@@ -196,7 +196,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // without enough info to chain backward properly.
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
-            OpKind.SIN, OpKind.COS, OpKind.ABS,
+            OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             // §0.4.368 — SOFTMAX is shape-preserving too (its output IrType
             // equals its operand's), so it forward-propagates like the unary
@@ -388,7 +388,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
-            OpKind.SIN, OpKind.COS, OpKind.ABS,
+            OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             OpKind.SOFTMAX,
             -> {
@@ -903,7 +903,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // unknown, operand = output.
                     OpKind.STEP, OpKind.RELU, OpKind.NEG,
                     OpKind.SQRT, OpKind.EXP, OpKind.LOG,
-                    OpKind.SIN, OpKind.COS, OpKind.ABS,
+                    OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
                     OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
                     OpKind.SOFTMAX -> {
                         if (n.operands.size != 1) continue
@@ -1389,6 +1389,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.EXP) return irExp(op, env, context)
         if (op.op == OpKind.SIN) return irSin(op, env, context)
         if (op.op == OpKind.COS) return irCos(op, env, context)
+        // §0.4.395 — Phase C2 trig tails (tensor via :core/ops, scalar via kotlin.math).
+        if (op.op == OpKind.TAN) return irTan(op, env, context)
+        if (op.op == OpKind.ATAN) return irAtan(op, env, context)
         if (op.op == OpKind.ABS) return irAbs(op, env, context)
         if (op.op == OpKind.CAST) return irCast(op, env, context)
         if (op.op == OpKind.COMPARE) return irCompare(op, env, context)
@@ -3624,6 +3627,38 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("cos"))
+
+    /**
+     * §0.4.395 — `OpKind.TAN(x)`: tensor operands dispatch to `:core/ops/tan`
+     * (the [irLog]/[irExp] pattern — TanRule's adjoint keeps a same-rank TAN
+     * recompute in the gradient body), scalars to `kotlin.math.tan`.
+     */
+    private fun IrBuilderWithScope.irTan(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size == 1 &&
+            isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)
+        ) {
+            return tensorUnaryCall(op, env, context, opsTensorSymbol("tan"))
+        }
+        return irUnaryMathCall(op, env, context, Name.identifier("tan"))
+    }
+
+    /** §0.4.395 — `OpKind.ATAN(x)`. Companion to [irTan]; `kotlin.math.atan` exists. */
+    private fun IrBuilderWithScope.irAtan(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size == 1 &&
+            isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)
+        ) {
+            return tensorUnaryCall(op, env, context, opsTensorSymbol("atan"))
+        }
+        return irUnaryMathCall(op, env, context, Name.identifier("atan"))
+    }
 
     /**
      * §0.4.167 — `OpKind.ABS(x)` → `kotlin.math.abs(x)`. CartPole Phase 0a-2 primitive.

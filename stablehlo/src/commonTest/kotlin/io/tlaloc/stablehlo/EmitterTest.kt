@@ -273,6 +273,21 @@ class EmitterTest {
     }
 
     @Test
+    fun tanAndAtanEmitPinnedSpellings() {
+        // §0.4.395 — TAN is a first-class `stablehlo.tan` (the trailing-space
+        // match keeps a hypothetical tanh mis-emission from passing); ATAN has
+        // no unary StableHLO op and pins to `atan2(x, splat 1.0)`.
+        val t = DxirType(F32, listOf(4))
+        assertTrue(singleUnary(OpKind.TAN, t).contains("stablehlo.tan %"))
+        val atan = singleUnary(OpKind.ATAN, t)
+        assertTrue(atan.contains("dense<1.0>"), "missing the atan2 splat-one operand: $atan")
+        assertTrue(
+            Regex("stablehlo\\.atan2 %0, %s\\d+").containsMatchIn(atan),
+            "expected atan(x) to lower as atan2(x, 1.0): $atan",
+        )
+    }
+
+    @Test
     fun emitsRankNFloatArrayConstAsNestedDenseLiteral() {
         // §0.4.73 — rank-N DxirConst carrying a FloatArray (the form produced by
         // §0.4.71's Capture fix) formats as a nested dense<...> literal matching
