@@ -157,7 +157,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     private fun deriveResultIrType(
         op: DxirOp,
         operandIrTypes: Map<Int, IrType>,
-        @Suppress("UNUSED_PARAMETER") fallback: IrType?,
+        // §0.4.421 — no longer unused: the zero-operand RNG arm has no operand
+        // IrType to rebuild from, so it borrows the surface's representative
+        // tensor IrType as the classifier/dtype base for its all-literal atoms.
+        fallback: IrType?,
     ): IrType? {
         // §0.4.364 — COMPARE is Bool-typed at the IR level but its runtime
         // value is the operands' F32 mask, so it propagates like elementwise.
@@ -376,6 +379,22 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 val colIdxIr = operandIrTypes[op.operands[2].id] as? IrSimpleType ?: return null
                 val colIdxAtoms = shapeAtomsOf(colIdxIr, 1) ?: return null
                 rebuildShapeAtoms(upstreamIr, listOf(colIdxAtoms[0]), 1)
+            }
+            // §0.4.421 — Phase D2 tail: the zero-operand RNG draws. Every
+            // extent is a compile-time literal baked in the `dims` attr, so
+            // NO axis has a param-sourced atom — all take placeholder
+            // `Lit<Int>` atoms (the §0.4.375/CONCAT reasoning: nothing reads
+            // a placeholder for a runtime-dim decision; the host twin bakes
+            // the same literals as plain Int arguments). With zero operands
+            // there is no operand IrType to rebuild from, so the surface's
+            // representative tensor IrType supplies the classifier/dtype.
+            OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL -> {
+                if (op.operands.isNotEmpty()) return null
+                val rank = op.type.rank
+                if (rank !in 1..2) return null
+                val base = fallback as? IrSimpleType ?: return null
+                val litAtom = litIntAtom() ?: return null
+                rebuildShapeAtoms(base, List(rank) { litAtom }, rank)
             }
             else -> null
         }
@@ -1617,6 +1636,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SPARSE_MATMUL_VALUES_ADJOINT) {
             return irSparseMatmulValuesAdjoint(op, env, context)
         }
+        // §0.4.421 — Phase D2 tail: the zero-operand RNG draws in grad{} bodies.
+        if (op.op == OpKind.RNG_UNIFORM || op.op == OpKind.RNG_NORMAL) {
+            return irRngDraw(op, context)
+        }
         // §0.4.384 — Phase A3b slice 1: the NCHW conv pair.
         if (op.op == OpKind.CONV2D || op.op == OpKind.CONV_TRANSPOSE2D) return irConv(op, env, context)
         // §0.4.385 — the fused conv adjoints (runtime-solved padding).
@@ -2800,6 +2823,51 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         )
         if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
         call.arguments[0] = irGet(templateDecl)
+        return call
+    }
+
+    /**
+     * §0.4.421 — Phase D2 tail: RNG_UNIFORM / RNG_NORMAL in `grad {}` bodies —
+     * the primal draw, and its CLONE in the gradient body when an adjoint
+     * reads ε (MulRule's `d scale = upstream ⊙ ε` — the §0.4.413
+     * reparameterization contract: the clone carries the same literal
+     * key0/key1/dims attrs, so the gradient's ε is a fresh evaluation of the
+     * SAME stream). Zero operands; everything replays from attrs as plain Int
+     * const arguments to the `io.tlaloc.core.ops` twins
+     * `rng{Uniform,Normal}{Vector,Matrix}` — the same `:core/Random.kt`
+     * kernels the host surface and the interpreter call, bit-for-bit. Baking
+     * the attr ints as consts is CORRECT here, not a sentinel-dims violation:
+     * they are compile-time literals by the FIR arm's v1 contract, never
+     * dim-derived values.
+     */
+    private fun IrBuilderWithScope.irRngDraw(
+        op: DxirOp,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.isNotEmpty()) return null
+        val k0 = (op.attrs["key0"] as? Number)?.toInt() ?: return null
+        val k1 = (op.attrs["key1"] as? Number)?.toInt() ?: return null
+        val dims = (op.attrs["dims"] as? List<*>)?.map { (it as? Number)?.toInt() ?: return null }
+            ?: return null
+        if (dims.size !in 1..2 || dims.any { it <= 0 }) return null
+        val resultIrType = irTypeForNode(op, context) as? IrSimpleType ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val name = when (op.op) {
+            OpKind.RNG_UNIFORM -> if (dims.size == 1) "rngUniformVector" else "rngUniformMatrix"
+            else -> if (dims.size == 1) "rngNormalVector" else "rngNormalMatrix"
+        }
+        val sym = opsTensorSymbol(name) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        val intTy = pluginContext.irBuiltIns.intType
+        for ((i, v) in (listOf(k0, k1) + dims).withIndex()) {
+            call.arguments[i] = IrConstImpl(startOffset, endOffset, intTy, IrConstKind.Int, v)
+        }
         return call
     }
 

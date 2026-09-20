@@ -11,14 +11,17 @@ import io.tlaloc.core.Rank2
 import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
+import io.tlaloc.core.RandomKey
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.Sym
 import io.tlaloc.core.digamma
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.hostI32
 import io.tlaloc.core.lgamma
+import io.tlaloc.core.normalFloats
 import io.tlaloc.core.polygamma
 import io.tlaloc.core.trigamma
+import io.tlaloc.core.uniformFloats
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -663,6 +666,32 @@ fun <S : Shape> embeddingGrad(
  */
 fun <S : Shape> intZerosLike(t: DTensor<S, I32>): DTensor<S, I32> =
     DTensor(HostI32Storage(IntArray(t.size)), t.dims.copyOf(), I32)
+
+// ---------------------------------------------------------------------------
+// §0.4.421 — Phase D2 tail: the synthesis twins of the zero-operand RNG ops
+// (RNG_UNIFORM / RNG_NORMAL). The `grad {}` FIR front-end bakes the draw's
+// literal key words and dims onto the op as attrs (the §0.4.408 design), and
+// the synthesis replays them here as plain Int arguments — same
+// `:core/Random.kt` kernels the host tensor surface and the interpreter call,
+// so all three paths agree bit-for-bit by construction. The phantom shape S
+// is caller-asserted from literal dims, exactly like `Tensors.f32Vector<A>`.
+// ---------------------------------------------------------------------------
+
+/** Uniform [0, 1) rank-1 draw of [n] floats from the literal key words. */
+fun <S : Shape> rngUniformVector(key0: Int, key1: Int, n: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(uniformFloats(RandomKey(key0, key1), n)), intArrayOf(n), F32)
+
+/** Uniform [0, 1) rank-2 draw over the flat index space. */
+fun <S : Shape> rngUniformMatrix(key0: Int, key1: Int, rows: Int, cols: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(uniformFloats(RandomKey(key0, key1), rows * cols)), intArrayOf(rows, cols), F32)
+
+/** Standard-normal rank-1 draw of [n] floats from the literal key words. */
+fun <S : Shape> rngNormalVector(key0: Int, key1: Int, n: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(normalFloats(RandomKey(key0, key1), n)), intArrayOf(n), F32)
+
+/** Standard-normal rank-2 draw over the flat index space. */
+fun <S : Shape> rngNormalMatrix(key0: Int, key1: Int, rows: Int, cols: Int): DTensor<S, F32> =
+    DTensor(HostF32Storage(normalFloats(RandomKey(key0, key1), rows * cols)), intArrayOf(rows, cols), F32)
 
 /**
  * §0.4.418 — Phase E1b: loud validation of a CSR component triple, the E1a

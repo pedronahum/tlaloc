@@ -411,8 +411,10 @@ object DxirInterpreter {
             // `dims` attrs. Both arms call the SAME `:core/Random.kt` kernels
             // the host tensor surface uses, so host and interpreter agree
             // bit-for-bit by construction (asserted in DxirRngTest). The
-            // `dims` attr must equal the concrete result type's dims — these
-            // ops have no FIR lowering, so grad-{} -1 sentinels cannot occur.
+            // `dims` attr must equal the concrete result type's dims — the
+            // §0.4.421 FIR lowering is literal-only by contract, so the type's
+            // dims come from the same literals and grad-{} -1 sentinels still
+            // cannot occur here.
             OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL -> {
                 val k0 = (op.attrs["key0"] as? Number)?.toInt()
                     ?: error("${op.op} is missing its integer 'key0' attr")

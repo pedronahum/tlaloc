@@ -1089,6 +1089,76 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.421 — Phase D2 tail: draws inside `grad {}` lambdas — the
+        // FIR front-end for the §0.4.408/413 zero-operand RNG ops. The user
+        // spelling is the existing host surface (`RandomKey(k0,
+        // k1).normalVector<Sym>(n)` and its uniform/matrix siblings); the
+        // lowering folds everything onto the op as literal attrs, so the
+        // draw's stream is fully determined at compile time and the reverse
+        // transform's clone re-draws the SAME ε in the gradient body (the
+        // §0.4.413 reparameterization contract). v1 is LITERAL-ONLY by
+        // recorded design: the receiver must be a direct `RandomKey(k0lit,
+        // k1lit)` constructor call and the dims must be Int literals — a
+        // RandomKey-typed value, param, or computed key word refuses loudly
+        // here and the lambda falls back (pinned; lifting it means threading
+        // runtime key words through a creation op, a design of its own). The
+        // conv-arm K2 landmine applies: named arguments are unwrapped in
+        // source order, never reordered, so out-of-order named spellings
+        // would mis-fold — the host signatures have no defaults so only the
+        // positional arity compiles naturally.
+        run {
+            val rngKind = when (fqn) {
+                "io.tlaloc.core.uniformVector", "io.tlaloc.core.uniformMatrix" -> OpKind.RNG_UNIFORM
+                "io.tlaloc.core.normalVector", "io.tlaloc.core.normalMatrix" -> OpKind.RNG_NORMAL
+                else -> null
+            }
+            if (rngKind != null) {
+                val isMatrix = fqn.endsWith("Matrix")
+                val recv = receiver(call)
+                    ?: throw LoweringException("$fqn has no receiver")
+                val keyCall = recv as? FirFunctionCall
+                    ?: throw LoweringException(
+                        "$fqn receiver must be a direct RandomKey(k0, k1) constructor call with Int " +
+                            "literals in v1 (a RandomKey-typed value or param does not lower yet); " +
+                            "got ${recv::class.simpleName}",
+                    )
+                val keyId = keyCall.calleeReference.toResolvedCallableSymbol()?.callableId
+                val isKeyCtor = keyId?.packageName?.asString() == "io.tlaloc.core" &&
+                    keyId.className?.asString() == "RandomKey"
+                if (!isKeyCtor) {
+                    throw LoweringException(
+                        "$fqn receiver must be a direct RandomKey(k0, k1) constructor call in v1; " +
+                            "got a call to ${keyId?.asSingleFqName()}",
+                    )
+                }
+                val keyArgs = keyCall.argumentList.arguments
+                if (keyArgs.size != 2) {
+                    throw LoweringException("$fqn RandomKey receiver takes (k0, k1); got ${keyArgs.size} arguments")
+                }
+                val keyLits = keyArgs.map { e ->
+                    intLiteralArg((e as? FirNamedArgumentExpression)?.expression ?: e)
+                        ?: throw LoweringException("$fqn RandomKey words must be Int literals in v1")
+                }
+                val args = call.argumentList.arguments
+                val wantArity = if (isMatrix) 2 else 1
+                if (args.size != wantArity) {
+                    throw LoweringException("$fqn takes $wantArity dim argument(s); got ${args.size}")
+                }
+                val dims = args.map { e ->
+                    val d = intLiteralArg((e as? FirNamedArgumentExpression)?.expression ?: e)
+                        ?: throw LoweringException("$fqn dims must be Int literals in v1")
+                    if (d <= 0) throw LoweringException("$fqn dims must be positive; got $d")
+                    d
+                }
+                return emitter.op(
+                    kind = rngKind,
+                    operands = emptyList(),
+                    attrs = mapOf("key0" to keyLits[0], "key1" to keyLits[1], "dims" to dims),
+                    type = DxirType(F32, dims),
+                )
+            }
+        }
+
         // §0.4.384 — Phase A3b: the conv user surface (NCHW, the layout the
         // interpreter/emitter fix). `x.conv2d(w, …)` takes an OIHW
         // `[Co, Ci, kh, kw]` kernel; `x.convTranspose2d(w, …)` takes IOHW

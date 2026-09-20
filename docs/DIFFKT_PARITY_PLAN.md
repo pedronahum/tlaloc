@@ -2034,11 +2034,20 @@ audit's recommendations).
    forward tangent — fwd-over-rev hessians THROUGH an embedding gradient
    body refuse loudly; a recorded tail alongside the multi-result COARSENED
    tangents.)
-2. **D2 tails** — the FIR/`grad {}` user-surface spelling for draws inside
-   lambdas + synthesis delegates (the v1 IR arms landed §0.4.413);
-   explicit-threefry StableHLO emission is the recorded D1 tail to take
-   first if GPU draws matter (the gradient graph of a reparameterized loss
-   contains a cloned draw, so both tails meet there).
+2. **D2 `grad {}` surface — DONE §0.4.421.** The existing host spellings
+   (`RandomKey(k0, k1).normalVector<Sym>(n)` / uniform / matrix siblings)
+   lower to the zero-operand RNG ops inside `grad {}` lambdas (FIR arm:
+   receiver must be a DIRECT literal `RandomKey(k0, k1)` constructor call,
+   dims Int literals — the recorded v1 contract; anything else falls back
+   loudly, pinned), and the synthesis replays the literal attrs through
+   new `io.tlaloc.core.ops` twins `rng{Uniform,Normal}{Vector,Matrix}` —
+   the same `:core/Random.kt` kernels as host and interpreter, bit-exact
+   (E2E: reparameterized loss with cloned same-stream ε, deterministic
+   across calls; linear uniform pin EXACT). Remaining D tails:
+   explicit-threefry StableHLO emission (the honest GPU RNG path), and
+   lifting the literal-only key restriction (RandomKey-typed lambda
+   params / computed key words — needs runtime key operands on the
+   creation ops, a design of its own).
 3. **Recorded tails on the books** (each its own §-sized slice when
    pulled): B3's multi-result COARSENED tangents + IF-inside-primal_body
    splice; A-phase tails above; C4's grouped/depthwise conv (beyond
