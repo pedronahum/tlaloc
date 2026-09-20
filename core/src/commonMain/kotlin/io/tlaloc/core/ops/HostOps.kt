@@ -3093,6 +3093,164 @@ fun <S : Shape> DTensor<S, F32>.slice(start: Int, end: Int, axis: Int): DTensor<
 }
 
 /**
+ * §0.4.428 — `view(range, axis)` (DiffKT parity, the A2 indexing-sugar tail):
+ * the contiguous-range view of one axis, all other axes full. Pure sugar over
+ * [slice] — `view(a..b, axis) == slice(a, b + 1, axis)` — with DiffKT's
+ * inclusive-range spelling. The axis survives (rank is preserved); the
+ * single-index overload below drops it. Differentiable in `grad {}` through
+ * the same SLICE lowering and PAD_TO adjoint as `slice`.
+ */
+fun <S : Shape> DTensor<S, F32>.view(range: IntRange, axis: Int): DTensor<Shape, F32> {
+    val r = dims.size
+    val ax = if (axis < 0) axis + r else axis
+    require(ax in 0 until r) { "view: axis $axis out of range for rank $r" }
+    require(!range.isEmpty()) { "view: empty range $range" }
+    return slice(range.first, range.last + 1, ax)
+}
+
+/**
+ * §0.4.428 — `view(index, axis)`: pick one index along [axis] and DROP the
+ * axis (DiffKT's indexing view — the result has rank `r − 1`). Sugar over
+ * [slice] + [squeeze]. Its `grad {}` adjoint routes the upstream into the
+ * indexed window and zeros elsewhere (the slice adjoint after the unit-axis
+ * reshape restores the receiver's rank).
+ */
+fun <S : Shape> DTensor<S, F32>.view(index: Int, axis: Int): DTensor<Shape, F32> {
+    val r = dims.size
+    val ax = if (axis < 0) axis + r else axis
+    require(ax in 0 until r) { "view: axis $axis out of range for rank $r" }
+    require(index in 0 until dims[ax]) {
+        "view: index $index out of range for axis $ax extent ${dims[ax]}"
+    }
+    return slice(index, index + 1, ax).squeeze(ax)
+}
+
+/**
+ * §0.4.428 — `withChange(range, axis, replacement)`: the FUNCTIONAL update
+ * (DiffKT parity, A2) — a copy of the receiver with the contiguous window
+ * `[range.first, range.last]` along [axis] replaced by [replacement] (same
+ * rank; the window's shape). The receiver is untouched. Inside `grad {}` the
+ * K2 plugin lowers this as `x + PAD_TO(replacement − slice(x), template = x)`
+ * — every piece an existing fully-ruled op, so the adjoint routes the
+ * upstream's window to `replacement` and zeros that window in `d_x` with no
+ * new IR: the PAD_TO ⇄ SLICE_AT pair (§0.4.399) does the bookkeeping.
+ */
+fun <S : Shape> DTensor<S, F32>.withChange(
+    range: IntRange,
+    axis: Int,
+    replacement: DTensor<*, F32>,
+): DTensor<Shape, F32> {
+    val r = dims.size
+    val ax = if (axis < 0) axis + r else axis
+    require(ax in 0 until r) { "withChange: axis $axis out of range for rank $r" }
+    require(!range.isEmpty()) { "withChange: empty range $range" }
+    val start = range.first
+    val end = range.last + 1
+    require(start >= 0 && end <= dims[ax]) {
+        "withChange: window [$start, $end) out of range for axis $ax extent ${dims[ax]}"
+    }
+    val rd = replacement.dims
+    require(rd.size == r) { "withChange: replacement rank ${rd.size} != receiver rank $r" }
+    for (i in 0 until r) {
+        val want = if (i == ax) end - start else dims[i]
+        require(rd[i] == want) {
+            "withChange: replacement shape ${rd.toList()} != window shape at axis $i (want $want)"
+        }
+    }
+    val out = hostF32().copyOf()
+    val rv = replacement.hostF32()
+    var run = 1
+    for (i in ax + 1 until r) run *= dims[i]
+    var outer = 1
+    for (i in 0 until ax) outer *= dims[i]
+    var src = 0
+    for (o in 0 until outer) {
+        for (j in start until end) {
+            val dst = (o * dims[ax] + j) * run
+            rv.copyInto(out, dst, src, src + run)
+            src += run
+        }
+    }
+    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+}
+
+/**
+ * §0.4.428 — `withChange(index, axis, replacement)`: replace the single
+ * `view(index, axis)` slice — [replacement] has rank `r − 1` (the view's
+ * shape). Sugar over [unsqueeze] + the range overload above.
+ */
+fun <S : Shape> DTensor<S, F32>.withChange(
+    index: Int,
+    axis: Int,
+    replacement: DTensor<*, F32>,
+): DTensor<Shape, F32> {
+    val r = dims.size
+    val ax = if (axis < 0) axis + r else axis
+    require(ax in 0 until r) { "withChange: axis $axis out of range for rank $r" }
+    require(index in 0 until dims[ax]) {
+        "withChange: index $index out of range for axis $ax extent ${dims[ax]}"
+    }
+    require(replacement.dims.size == r - 1) {
+        "withChange: replacement rank ${replacement.dims.size} != ${r - 1} (the view(index) shape)"
+    }
+    return withChange(index..index, ax, replacement.unsqueeze(ax))
+}
+
+/**
+ * §0.4.428 — `meld(tensors…)` (DiffKT parity, A2): flatten every operand
+ * row-major and concatenate the flats into one rank-1 tensor of the total
+ * element count. The inverse of [split]. Inside `grad {}` this is pure sugar
+ * — RESHAPE-to-rank-1 per operand + the binary-CONCAT fold — so each
+ * operand's gradient is its window of the upstream reshaped back to its own
+ * shape (SLICE_LIKE + the reshape adjoint, both existing rules).
+ */
+fun meld(vararg tensors: DTensor<*, F32>): DTensor<Shape, F32> {
+    require(tensors.isNotEmpty()) { "meld: needs at least 1 tensor" }
+    var n = 0
+    val flats = tensors.map { it.hostF32() }
+    for (v in flats) n += v.size
+    val out = FloatArray(n)
+    var k = 0
+    for (v in flats) {
+        v.copyInto(out, k)
+        k += v.size
+    }
+    return DTensor(HostF32Storage(out), intArrayOf(n), F32)
+}
+
+/**
+ * §0.4.428 — `split(shapes)` (DiffKT parity, A2): cut the receiver's
+ * row-major data into consecutive tensors of the given shapes, which must
+ * consume every element exactly. The inverse of [meld]. HOST-LEVEL ONLY:
+ * a `List<DTensor>`-valued expression has no value model in the `grad {}`
+ * lambda lowering, so the differentiable spelling stays `view`/`slice`
+ * per piece (recorded as a named deferral in the parity plan).
+ */
+fun DTensor<*, F32>.split(shapes: List<IntArray>): List<DTensor<Shape, F32>> {
+    require(shapes.isNotEmpty()) { "split: needs at least 1 shape" }
+    val v = hostF32()
+    var total = 0
+    val sizes = shapes.map { s ->
+        var n = 1
+        for (d in s) {
+            require(d > 0) { "split: dims must be positive, got ${s.toList()}" }
+            n *= d
+        }
+        total += n
+        n
+    }
+    require(total == v.size) {
+        "split: shapes consume $total elements, tensor has ${v.size}"
+    }
+    var k = 0
+    return shapes.mapIndexed { i, s ->
+        val piece = v.copyOfRange(k, k + sizes[i])
+        k += sizes[i]
+        DTensor(HostF32Storage(piece), s.copyOf(), F32)
+    }
+}
+
+/**
  * §0.4.367 — fixed-arity synthesis delegates (the usual IrVararg reason).
  * `squeezeAxes{N}` drops size-1 axes at result-computed positions (the
  * adjoint of an unsqueeze); `reshapeToRank{N}` relayouts to explicit dims —

@@ -1791,6 +1791,204 @@ object FirLambdaToDxirLowering {
             return acc
         }
 
+        // §0.4.428 — `view(index-or-range, axis)` (DiffKT parity, the A2
+        // indexing-sugar tail). The range form is `slice` verbatim; the
+        // single-index form slices the unit window and drops the axis with a
+        // RESHAPE (the squeeze spelling synthesis has handled since §0.4.367).
+        // Both forms are literal-only — index/range/axis are compile-time
+        // constants, never dim-derived — so the -1 sentinel discipline holds
+        // by construction.
+        if (fqn == "io.tlaloc.core.ops.view") {
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("view has no receiver")
+            val operand = lowerExpr(operandExpr, env, emitter)
+            val rank = operand.type.rank
+            val args = call.argumentList.arguments
+            if (args.size != 2) throw LoweringException("view takes (index-or-range, axis)")
+            val rawAxis = intLiteralArg(args[1])
+                ?: throw LoweringException("view axis must be an Int literal")
+            val axis = if (rawAxis < 0) rawAxis + rank else rawAxis
+            if (axis !in 0 until rank) {
+                throw LoweringException("view axis $rawAxis out of range for rank $rank")
+            }
+            val range = intRangeLiteralArg(args[0])
+            if (range != null) {
+                val (start, end) = range
+                return emitSingleAxisSlice(operand, start, end, axis, "view", emitter)
+            }
+            val index = intLiteralArg(args[0])
+                ?: throw LoweringException("view takes an Int or IntRange literal index")
+            if (rank < 2) {
+                throw LoweringException(
+                    "view(index, axis) on a rank-$rank operand would produce a rank-0 tensor; " +
+                        "unsupported in grad {} — use view(index..index, axis) or slice",
+                )
+            }
+            val sliced = emitSingleAxisSlice(operand, index, index + 1, axis, "view", emitter)
+            val resultDims = sliced.type.dims.filterIndexed { i, _ -> i != axis }
+            return emitter.op(
+                kind = OpKind.RESHAPE,
+                operands = listOf(sliced),
+                type = DxirType(operand.type.dtype, resultDims),
+            )
+        }
+
+        // §0.4.428 — `withChange(index-or-range, axis, replacement)`: the
+        // functional window update (DiffKT parity, A2). No new IR: the primal
+        // lowers as `x + PAD_TO(replacement − slice(x), template = x)`, so
+        //
+        //   d_x           = upstream − PAD_TO(SLICE_AT(upstream)) = upstream
+        //                   with the window ZEROED (the replaced window's
+        //                   values never reach the loss through x),
+        //   d_replacement = SLICE_AT(upstream)   (the window itself),
+        //
+        // falling out of SliceRule/PadToRule/SliceAtRule composition — the
+        // §0.4.399 PAD_TO ⇄ SLICE_AT closure used in a PRIMAL for the first
+        // time. The window offset `low` is the user's literal start (the
+        // PAD_TO convention); the trailing extents are read off x's runtime
+        // shape at execution, never baked. REJECTED: a concat(head, r, tail)
+        // spelling — the tail window's start is `dims[axis] − …`, a
+        // dim-derived value the sentinel discipline forbids as an attr.
+        if (fqn == "io.tlaloc.core.ops.withChange") {
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("withChange has no receiver")
+            val x = lowerExpr(operandExpr, env, emitter)
+            val rank = x.type.rank
+            val args = call.argumentList.arguments
+            if (args.size != 3) {
+                throw LoweringException("withChange takes (index-or-range, axis, replacement)")
+            }
+            if (rank !in 1..3) {
+                throw LoweringException(
+                    "withChange is supported for ranks 1..3 (the padToLikeRank family bound), got rank $rank",
+                )
+            }
+            val rawAxis = intLiteralArg(args[1])
+                ?: throw LoweringException("withChange axis must be an Int literal")
+            val axis = if (rawAxis < 0) rawAxis + rank else rawAxis
+            if (axis !in 0 until rank) {
+                throw LoweringException("withChange axis $rawAxis out of range for rank $rank")
+            }
+            val range = intRangeLiteralArg(args[0])
+            val indexForm = range == null
+            val (start, end) = range ?: run {
+                val i = intLiteralArg(args[0])
+                    ?: throw LoweringException("withChange takes an Int or IntRange literal index")
+                i to i + 1
+            }
+            if (start < 0 || end <= start) {
+                throw LoweringException("withChange: invalid window [$start, $end)")
+            }
+            val od = x.type.dims[axis]
+            if (od > 0 && end > od) {
+                throw LoweringException("withChange: window end $end exceeds axis $axis extent $od")
+            }
+            var replacement = lowerExpr(args[2], env, emitter)
+            if (replacement.type.dtype != x.type.dtype) {
+                throw LoweringException(
+                    "withChange: replacement dtype ${replacement.type.dtype} != receiver dtype ${x.type.dtype}",
+                )
+            }
+            if (indexForm) {
+                if (replacement.type.rank != rank - 1) {
+                    throw LoweringException(
+                        "withChange(index): replacement must have rank ${rank - 1} " +
+                            "(the view(index) shape), got ${replacement.type.rank}",
+                    )
+                }
+                val lifted = (0 until rank).map { i ->
+                    when {
+                        i == axis -> 1
+                        i < axis -> replacement.type.dims[i]
+                        else -> replacement.type.dims[i - 1]
+                    }
+                }
+                replacement = emitter.op(
+                    kind = OpKind.RESHAPE,
+                    operands = listOf(replacement),
+                    type = DxirType(replacement.type.dtype, lifted),
+                )
+            } else if (replacement.type.rank != rank) {
+                throw LoweringException(
+                    "withChange(range): replacement must have rank $rank (the window shape), " +
+                        "got ${replacement.type.rank}",
+                )
+            }
+            val windowDims = List(rank) { i -> if (i == axis) end - start else x.type.dims[i] }
+            for (i in 0 until rank) {
+                val w = windowDims[i]
+                val rd = replacement.type.dims[i]
+                if (w > 0 && rd > 0 && w != rd) {
+                    throw LoweringException(
+                        "withChange: replacement extent $rd disagrees with window extent $w at axis $i",
+                    )
+                }
+            }
+            val mergedDims = List(rank) { i ->
+                if (windowDims[i] > 0) windowDims[i] else replacement.type.dims[i]
+            }
+            val window = emitSingleAxisSlice(x, start, end, axis, "withChange", emitter)
+            val delta = emitter.op(
+                kind = OpKind.SUB,
+                operands = listOf(replacement, window),
+                type = DxirType(x.type.dtype, mergedDims),
+            )
+            val padded = emitter.op(
+                kind = OpKind.PAD_TO,
+                operands = listOf(delta, x),
+                type = x.type,
+                attrs = mapOf("low" to List(rank) { if (it == axis) start else 0 }),
+            )
+            return emitter.op(kind = OpKind.ADD, operands = listOf(x, padded), type = x.type)
+        }
+
+        // §0.4.428 — `meld(vararg tensors)` (DiffKT parity, A2): flatten every
+        // operand to rank-1 (flatten's convention — any symbolic operand
+        // flattens to the [-1] sentinel) and fold the flats through binary
+        // CONCATs along axis 0, exactly the concat arm's shape. Pure sugar:
+        // each operand's adjoint is its SLICE_LIKE window reshaped back to the
+        // operand's own shape by the RESHAPE adjoint.
+        if (fqn == "io.tlaloc.core.ops.meld") {
+            val tensorExprs = mutableListOf<FirExpression>()
+            for (arg in call.argumentList.arguments) {
+                if (arg is FirVarargArgumentsExpression) tensorExprs += arg.arguments else tensorExprs += arg
+            }
+            if (tensorExprs.size < 2) {
+                throw LoweringException("meld needs at least 2 tensors in grad {}, got ${tensorExprs.size}")
+            }
+            val flats = tensorExprs.map { e ->
+                val node = lowerExpr(e, env, emitter)
+                if (node.type.rank == 1) {
+                    node
+                } else {
+                    val n = if (node.type.dims.any { it < 0 }) -1
+                    else node.type.dims.fold(1) { acc, d -> acc * d }
+                    emitter.op(
+                        kind = OpKind.RESHAPE,
+                        operands = listOf(node),
+                        type = DxirType(node.type.dtype, listOf(n)),
+                    )
+                }
+            }
+            for (f in flats) {
+                if (f.type.dtype != flats[0].type.dtype) {
+                    throw LoweringException(
+                        "meld operands must share a dtype (${f.type.dtype} vs ${flats[0].type.dtype})",
+                    )
+                }
+            }
+            var acc = flats[0]
+            for (i in 1 until flats.size) {
+                acc = emitter.op(
+                    kind = OpKind.CONCAT,
+                    operands = listOf(acc, flats[i]),
+                    type = concatResultType(acc.type, flats[i].type, 0, fqn),
+                    attrs = mapOf("dimension" to 0),
+                )
+            }
+            return acc
+        }
+
         // §0.4.367 — shape ops (DiffKT parity, Phase A2a): the RESHAPE family
         // (`squeeze(axis)` / `unsqueeze(axis)` / `flatten()` / `reshape(dims)`)
         // and permutation `transpose(perm)` (no-arg = reverse all axes; the
@@ -2119,6 +2317,64 @@ object FirLambdaToDxirLowering {
             }
         }
         return null
+    }
+
+    /**
+     * §0.4.428 — constant-fold an IntRange literal (`a..b`, `a until b`,
+     * `a..<b`) into `(start, endExclusive)`. The operands must themselves be
+     * integer literals (negative spellings included, via [intLiteralArg]).
+     * Returns null for anything else — callers fall through to the Int-literal
+     * form or raise a [LoweringException] naming the surface.
+     */
+    private fun intRangeLiteralArg(expr: FirExpression): Pair<Int, Int>? {
+        if (expr !is FirFunctionCall) return null
+        val name = expr.calleeReference.toResolvedCallableSymbol()
+            ?.callableId?.callableName?.asString() ?: return null
+        if (name != "rangeTo" && name != "until" && name != "rangeUntil") return null
+        val rec = expr.dispatchReceiver ?: expr.extensionReceiver ?: return null
+        val lo = intLiteralArg(rec) ?: return null
+        val hiArg = expr.argumentList.arguments.singleOrNull() ?: return null
+        val hi = intLiteralArg(hiArg) ?: return null
+        return lo to (if (name == "rangeTo") hi + 1 else hi)
+    }
+
+    /**
+     * §0.4.428 — the single-axis SLICE emission `view`/`withChange` share with
+     * the §0.4.374 `slice` arm: `[start, end)` along [axis], every other axis
+     * full. Validates the literal window against the axis extent where that
+     * extent is concrete; sentinel extents are checked at execution by the
+     * host `slice`.
+     */
+    private fun emitSingleAxisSlice(
+        operand: DxirNode,
+        start: Int,
+        end: Int,
+        axis: Int,
+        surface: String,
+        emitter: DxirEmitter,
+    ): DxirNode {
+        val rank = operand.type.rank
+        if (start < 0 || end < start) {
+            throw LoweringException("$surface: invalid range [$start, $end)")
+        }
+        val od = operand.type.dims[axis]
+        if (od > 0 && end > od) {
+            throw LoweringException("$surface: end $end exceeds axis $axis extent $od")
+        }
+        val resultDims = operand.type.dims.mapIndexed { i, d -> if (i == axis) end - start else d }
+        return emitter.op(
+            kind = OpKind.SLICE,
+            operands = listOf(operand),
+            type = DxirType(operand.type.dtype, resultDims),
+            attrs = mapOf(
+                "start_indices" to (0 until rank).map { if (it == axis) start else 0 },
+                "limit_indices" to (0 until rank).map { if (it == axis) end else operand.type.dims[it] },
+                "strides" to List(rank) { 1 },
+                "slice_axis" to axis,
+                "slice_start" to start,
+                "slice_end" to end,
+            ),
+        )
     }
 
     /**

@@ -15,7 +15,7 @@ supports that Tlaloc doesn't yet.
 | maxPool/avgPool + gradients | ✅ §0.4.363; `grad {}` E2E §0.4.386/389 (overlapping-maxpool GPU emission closed as INHERENT §0.4.392 — host/interpreter handle it, StableHLO cannot express the all-ties convention) |
 | select / comparisons in grad lambdas | ✅ §0.4.364 |
 | Elementwise tensor arithmetic in grad lambdas | ✅ §0.4.364 (`plus/minus/times/div`) |
-| reshape/transpose/concat/slice/pad/broadcast + VJPs | ✅ IR level (§0.4.359–360) + user surface: reshape family/transpose §0.4.367, broadcastTo §0.4.371/373, slice §0.4.374, concat/stack §0.4.381–382, flip §0.4.396 (`view`/`withChange`/`meld`/`split` still open in A2) |
+| reshape/transpose/concat/slice/pad/broadcast + VJPs | ✅ IR level (§0.4.359–360) + user surface: reshape family/transpose §0.4.367, broadcastTo §0.4.371/373, slice §0.4.374, concat/stack §0.4.381–382, flip §0.4.396, `view`/`withChange`/`meld` §0.4.428 (`split` host-level §0.4.428; its `grad {}` spelling is a named deferral — no `List<DTensor>` value model in the lambda lowering) |
 | softmax/logsumexp/max/min reductions + VJPs | ✅ axis reductions in `grad {}` §0.4.366 (A1), softmax/logSoftmax §0.4.368 (A3a) — LOGSUMEXP stays emitter-only |
 | Compile-time shape checking (ShapeTyping plugin) | ✅ richer: named indices + `validateDxirShapes` + real reverse-transform probe at check time |
 | Float64 | ✅ PJRT path (§0.4.354) |
@@ -243,8 +243,30 @@ reachable from `grad {}`, not new math. New-op families come after.
     - **`pad` as a user op** has no DiffKT analogue (skip). `PadRule` is also
       sentinel-unsafe (`limit_indices` from `x.type.dims`) but unreachable without
       a user `pad`.
-    - **`view`/indexing, `withChange`, `meld`/`split`**: same
-      runtime-extent boundary; sequenced after the mechanism above lands.
+    - **`view`/indexing, `withChange`, `meld`/`split`** ✅ §0.4.428 — pure
+      sugar over the landed runtime-extent family, no new IR anywhere:
+      `view(range, axis)` IS the §0.4.374 SLICE; `view(index, axis)` slices
+      the unit window and drops the axis with the squeeze RESHAPE;
+      `withChange(index-or-range, axis, r)` lowers as
+      `x + PAD_TO(r − slice(x), template = x)` — the §0.4.399
+      PAD_TO ⇄ SLICE_AT closure used in a PRIMAL for the first time, so
+      `d_x` = upstream with the window zeroed and `d_r` = the upstream's
+      window fall out of existing rules (REJECTED: a concat(head, r, tail)
+      spelling — the tail's start is `dims[axis] − …`, a dim-derived attr
+      the sentinel discipline forbids); `meld` = flatten-per-operand + the
+      binary-CONCAT fold. The one synthesis addition: `irReshape` grew a
+      flatten arm — ANY rank-1 relayout target is row-major `flatten()`,
+      whose extent the host reads off the operand's runtime shape, so a
+      product-of-sentinels element count needs no per-axis param match
+      (this also un-gaps user `flatten()` of a symbolic rank ≥ 2 tensor in
+      surviving primals). E2E certs: view range/index, withChange row +
+      row-range (window-zeroed `d_x`, exact `d_r`), meld routing at mixed
+      ranks — all analytic, no-fallback pinned. Host certs incl. `split` ⇄
+      `meld` roundtrip. Named deferrals: `split` in `grad {}` (no
+      `List<DTensor>` value model in the lambda lowering — spell per-piece
+      `view`/`slice` instead); the multi-index `view(IntArray)` leading-
+      index form (chainable as repeated `view(i, 0)` when wanted);
+      `withChange` beyond rank 3 (the `padToLikeRank{1,2,3}` arity bound).
       (`stats` left this list — landed host-level in §0.4.397, A5c-3(iv).)
 - **A3. NN ops in lambdas** — split by wiring readiness:
   - **A3a ✅ (§0.4.368)**: `softmax(axis)` + `logSoftmax(axis)` E2E through
@@ -2018,8 +2040,8 @@ argument fallback) ·
 | `embedding(table, indices, paddingIndex)` | ✅ | §0.4.370 IR-level (EmbeddingRule + EMBEDDING_GRAD + interpreter + forward tangent) → §0.4.400 E2E through `grad {}` (host op + FIR arm + I32-index-param synthesis + scatter+add emission, GPU-smoked) → §0.4.409 `paddingIndex` (exact-zero rows + zero gradient, mask emission) and rank-2 `[B, N]` index batches E2E; indices are params only (no in-lambda index arithmetic), one index param per lambda |
 | `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | ✅/🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) + 2nd-order-through-broadcast ✅ (§0.4.399, `BROADCAST_LIKE`) — mixed rank-increase+stretch still deferred |
 | `transpose(axes) / leftTranspose / rightTranspose` | ✅ | `transpose(vararg perm)` + no-arg rank-2 spelling E2E ✅ A2a (§0.4.367); left/right sugar spellings unlanded (trivial when wanted) |
-| `concat / stack / split / meld` | ✅/🟡 | `concat`/`stack` E2E ✅ §0.4.381–382 (runtime-extent `SLICE_LIKE` adjoint; 2nd order via `PAD_LIKE` §0.4.404); `split`/`meld` still open in A2 |
-| `slice / view(index/range/axis) / withChange` (functional update) | 🟡 | single-axis `slice(start,end,axis)` ✅ A2b (§0.4.374, runtime-extent `PAD_TO` adjoint), E2E through `grad {}`; multi-axis `view`/`withChange` scatter sugar still A2 |
+| `concat / stack / split / meld` | ✅ | `concat`/`stack` E2E ✅ §0.4.381–382 (runtime-extent `SLICE_LIKE` adjoint; 2nd order via `PAD_LIKE` §0.4.404); `meld` E2E ✅ §0.4.428 (flatten + CONCAT fold); `split` host-level ✅ §0.4.428 — its `grad {}` spelling is a named deferral (no `List<DTensor>` value model in the lambda lowering) |
+| `slice / view(index/range/axis) / withChange` (functional update) | ✅ | single-axis `slice(start,end,axis)` ✅ A2b (§0.4.374, runtime-extent `PAD_TO` adjoint); `view(index/range, axis)` + `withChange(index/range, axis, r)` E2E ✅ §0.4.428 (withChange = `x + PAD_TO(r − slice(x), x)`, the PAD_TO ⇄ SLICE_AT closure in a primal; rank ≤ 3, the `padToLikeRank` bound); multi-index `view(IntArray)` deferred by name (repeated `view(i, 0)` spells it) |
 | `gather / scatter (axis, paddingIndex) / gatherAtIndices / scatterAtIndices` | 🟡 | Tlaloc GATHER/SCATTER are narrower (rank-1/scalar-index arms) — A2 needs the axis+list form |
 | `flip(axes)` | ✅ | C3 (§0.4.396) — REVERSE op, self-adjoint + extent-free, E2E through `grad {}`; the conv-adjoint `window_reversal` cleanup stays open |
 | `IntTensor / intTensorOf / Float64` | ✅ | I32/I64/F64 dtypes; DiffKT is F32-only + int tensors — Tlaloc exceeds on F64 |
@@ -2094,11 +2116,13 @@ story. Not blocking A–E.
 
 ## Suggested § sequencing
 
-**Position at §0.4.427 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
+**Position at §0.4.428 (2026-09-20):** Phase 0 ✅ (§0.4.365) → Phase A ✅
 in substance (§0.4.366–397, §0.4.400/409/414/427 — the scalar-param family
 is closed: `Float`/`FloatScalar`/`DoubleScalar` lower, `DScalar`-interface
-refuses by name to the tape; remaining tails: A2's
-`view`/`withChange`/`meld`/`split`, gather/scatter axis+list forms, the
+refuses by name to the tape; §0.4.428 — A2's `view`/`withChange`/`meld`
+sugar E2E + host `split` (named deferrals: `split` in `grad {}`,
+multi-index `view(IntArray)`, `withChange` beyond rank 3); remaining
+tails: gather/scatter axis+list forms, the
 mixed rank-increase+stretch broadcast) →
 B1–B4 ✅ (§0.4.372/387/394/398/401/403/404/406/407) → B5 ✅ (§0.4.415
 `customVjp`/`customVjp2` + §0.4.416 `customJvp`/`customVjpJvp` and their

@@ -2559,6 +2559,17 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return call
     }
 
+    /** §0.4.428 — resolves the no-arg `io.tlaloc.core.ops.flatten()` extension. */
+    private fun flattenSymbol(): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("flatten"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull { sym ->
+            sym.owner.parameters.none { it.kind == IrParameterKind.Regular }
+        }
+    }
+
     /** §0.4.374 — resolves the `io.tlaloc.core.ops.slice(start, end, axis)` extension. */
     private fun sliceSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
@@ -3584,6 +3595,37 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!isAcceptedTensorType(operand.type) || op.type.dtype != F32) return null
         val operandDecl = env[operand.id] ?: return null
         if (op.type.dims == operand.type.dims) return irGet(operandDecl)
+        // §0.4.428 — flatten arm: ANY rank-1 relayout target is the row-major
+        // `flatten()` (a reshape to rank-1 is the identity on the flat data),
+        // and the host extension reads the result's one extent off the
+        // operand's RUNTIME shape — so a symbolic element count (a product of
+        // -1 sentinels no single `param.dims[i]` read can express, which the
+        // general-relayout arm below must refuse) needs no per-axis param
+        // match at all. This is how `meld`'s per-operand flatten synthesizes,
+        // and it closes the same gap for a user `flatten()` of a symbolic
+        // rank ≥ 2 tensor surviving into a gradient body.
+        if (op.type.rank == 1) {
+            val flattenSym = flattenSymbol()
+            if (flattenSym != null) {
+                val operandIrType = irTypeForNode(operand, context) as? IrSimpleType
+                val receiverShapeArg = operandIrType?.arguments?.firstOrNull()?.typeOrNull
+                val callType = (irTypeForNode(op, context) as? IrSimpleType)
+                    ?: (flattenSym.owner.returnType as? IrSimpleType)
+                if (callType != null && receiverShapeArg != null) {
+                    val call = IrCallImpl.fromSymbolOwner(
+                        startOffset = startOffset,
+                        endOffset = endOffset,
+                        type = callType,
+                        symbol = flattenSym,
+                    )
+                    if (call.typeArguments.isNotEmpty()) {
+                        call.typeArguments[0] = receiverShapeArg
+                    }
+                    call.arguments[0] = irGet(operandDecl)
+                    return call
+                }
+            }
+        }
         val resultIrType = irTypeForNode(op, context) ?: irTypeFor(op.type, context) ?: return null
         val shapeTypeArg = (resultIrType as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
             ?: return null
