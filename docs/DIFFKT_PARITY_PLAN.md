@@ -2030,10 +2030,10 @@ audit's recommendations).
    The arc STOPS here by ratified scope: matdiv SKIPPED, GPU = pinned
    refusal (ELL-padded emission is the recorded tail), row-sparse
    embedding gradients deferred to Phase F. F model layer remains a
-   product decision. (Noted en passant §0.4.419: EMBEDDING_GRAD has no
-   forward tangent — fwd-over-rev hessians THROUGH an embedding gradient
-   body refuse loudly; a recorded tail alongside the multi-result COARSENED
-   tangents.)
+   product decision. (The §0.4.419 en-passant finding — EMBEDDING_GRAD had
+   no forward tangent, so fwd-over-rev hessians through embedding gradient
+   bodies refused — CLOSED §0.4.423, which gave the whole fused-adjoint
+   family tangent arms; see item 2a below.)
 2. **D2 `grad {}` surface — DONE §0.4.421.** The existing host spellings
    (`RandomKey(k0, k1).normalVector<Sym>(n)` / uniform / matrix siblings)
    lower to the zero-operand RNG ops inside `grad {}` lambdas (FIR arm:
@@ -2059,6 +2059,22 @@ audit's recommendations).
    exclusion is LIFTED. Remaining D tail: lifting the literal-only key
    restriction (RandomKey-typed lambda params / computed key words —
    needs runtime key operands on the creation ops, a design of its own).
+
+2a. **Fused-adjoint forward tangents — DONE §0.4.423.** The whole family
+   joins forward mode: EMBEDDING_GRAD (linear in upstream), the four
+   conv adjoints (bilinear in operands 0/1 — d f(a,b) = f(da,b) +
+   f(a,db), shape-only template riding as its clone), AVGPOOL2D_GRAD
+   (linear), MAXPOOL2D_GRAD (linear in upstream; the tie mask locally
+   constant, the maxpool subgradient convention), SCATTER_ADD (linear in
+   base and value). Second order now composes THROUGH gradient bodies of
+   embedding/conv/pool/gather losses — hessians of those surfaces were
+   unreachable before (the transform refused loudly). Certified
+   (DxirFusedAdjointTangentTest): hand-exact HVPs for embedding
+   (2·count⊙v), avgpool (window-sum/8), maxpool (2·v at each argmax,
+   exact zeros elsewhere, shuffled-grid inputs), gather (2·v on the
+   gathered row, exact zeros elsewhere); conv (both adjoints in one
+   body) against central differences of the gradient AND the symmetry
+   identity ⟨u,Hv⟩ = ⟨v,Hu⟩.
 3. **Recorded tails on the books** (each its own §-sized slice when
    pulled): B3's multi-result COARSENED tangents + IF-inside-primal_body
    splice; A-phase tails above; C4's grouped/depthwise conv (beyond

@@ -93,10 +93,10 @@ class DxirZerosLikeTest {
         // containing ZEROS_LIKE ops — the transform must not reject the op
         // (the tangent arm exists) and the structural zeros' tangents must be
         // zeros at their params' own extents. The loss here is x²-shaped in
-        // the FLOAT param with the integer params riding as pass-throughs
-        // (EMBEDDING_GRAD has no forward tangent yet — a recorded tail — so
-        // the loss avoids embedding; the ZEROS_LIKE returns appear for the
-        // integer params regardless, which is exactly what this pins).
+        // the FLOAT param with the integer params riding as pass-throughs, so
+        // the pin isolates ZEROS_LIKE itself (embedding-containing hessians
+        // are §0.4.423's DxirFusedAdjointTangentTest; the ZEROS_LIKE returns
+        // appear for the integer params regardless, which is what this pins).
         val fn = DxirBuilder.function("quad_loss") {
             val x = param("x", DxirType(F32, listOf(3)))
             val idxA = param("idxA", DxirType(I32, listOf(4)))

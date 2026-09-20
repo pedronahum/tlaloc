@@ -603,6 +603,51 @@ object DxirForwardTransform {
             // value clone. The template is shape-only, so it carries no tangent.
             OpKind.ZEROS_LIKE -> b.op(OpKind.ZEROS_LIKE, listOf(vOps[0]), ty)
 
+            // §0.4.423 — the fused-adjoint family joins forward mode, closing
+            // SECOND order over gradient bodies that contain them (hessian =
+            // fwd-over-rev, and a conv/pool/embedding/gather loss's gradient
+            // body is made of exactly these kinds — until now the transform
+            // refused and hessians through those surfaces were unreachable).
+            //
+            // The conv adjoints are BILINEAR in operands (0, 1) — which one is
+            // the upstream and which the primal tensor differs by kind
+            // (DATA_ADJOINT(up, w, t) vs KERNEL_ADJOINT(x, up, t)), but the
+            // tangent doesn't care: d f(a, b) = f(da, b) + f(a, db). Operand 2
+            // is the SHAPE-ONLY template, riding as its value clone in every
+            // term. Attrs (strides/padding/dilation) replay verbatim.
+            OpKind.CONV2D_DATA_ADJOINT, OpKind.CONV2D_KERNEL_ADJOINT,
+            OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT, OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT,
+            -> {
+                val dA = b.op(node.op, listOf(t(node.operands[0]), vOps[1], vOps[2]), ty, node.attrs)
+                val dB = b.op(node.op, listOf(vOps[0], t(node.operands[1]), vOps[2]), ty, node.attrs)
+                b.op(OpKind.ADD, listOf(dA, dB), ty)
+            }
+
+            // §0.4.423 — AVGPOOL2D_GRAD(upstream, template) is LINEAR in the
+            // upstream; the template contributes shape only.
+            OpKind.AVGPOOL2D_GRAD ->
+                b.op(node.op, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
+
+            // §0.4.423 — MAXPOOL2D_GRAD(upstream, x, y) is LINEAR in the
+            // upstream; x and y feed the tie mask, which is locally CONSTANT
+            // (the same measure-zero-kink convention as maxpool's own
+            // subgradient — a tangent on x that flips an argmax is exactly a
+            // point where the derivative doesn't exist).
+            OpKind.MAXPOOL2D_GRAD ->
+                b.op(node.op, listOf(t(node.operands[0]), vOps[1], vOps[2]), ty, node.attrs)
+
+            // §0.4.423 — EMBEDDING_GRAD(indices, upstream, tableTemplate) is
+            // LINEAR in the upstream: the scatter-add pattern is fixed by the
+            // integer indices (no tangent) and the template is shape-only.
+            // `padding_index` rides in the attrs.
+            OpKind.EMBEDDING_GRAD ->
+                b.op(node.op, listOf(vOps[0], t(node.operands[1]), vOps[2]), ty, node.attrs)
+
+            // §0.4.423 — SCATTER_ADD(base, idx, value) is LINEAR in base AND
+            // value (it IS an add); the scalar I32 idx carries no tangent.
+            OpKind.SCATTER_ADD ->
+                b.op(node.op, listOf(t(node.operands[0]), vOps[1], t(node.operands[2])), ty)
+
             OpKind.CAST -> b.op(OpKind.CAST, listOf(t(node.operands[0])), ty)
 
             // §0.4.415 — Phase B5: CHECK_SHAPE_LIKE is a value-identity with a
