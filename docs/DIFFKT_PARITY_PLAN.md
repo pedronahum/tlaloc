@@ -10,7 +10,7 @@ supports that Tlaloc doesn't yet.
 |---|---|
 | Reverse-mode AD (vjp/pullback) | ✅ `DxirReverseTransform` + runtime synthesis + compile-time probe |
 | Forward-mode AD (jvp/pushforward) | ✅ `DxirForwardTransform` (§0.4.361) — **IR-level only, no user intrinsic yet** |
-| Higher-order (hessian-vector) | ✅ pinned `forward(reverse(f))`; other nestings untested |
+| Higher-order (hessian-vector) | ✅ full nesting matrix certified at IR level (§0.4.401): fwd∘rev, fwd∘fwd, rev∘fwd, rev∘rev + a third-order spot check; fused-adjoint refusals pinned |
 | conv2d + gradients | ✅ §0.4.362 (groups + lhs-dilated primal VJP deferred) |
 | maxPool/avgPool + gradients | ✅ §0.4.363 (overlapping maxpool VJP deferred) |
 | select / comparisons in grad lambdas | ✅ §0.4.364 |
@@ -1124,14 +1124,42 @@ reachable from `grad {}`, not new math. New-op families come after.
 - **B3. Forward transform through regions**: IF/WHILE bodies + COARSENED
   (tangent of a coarsened op = forward transform of its `primal_body`) —
   mirrors reverse-mode's history.
-- **B4. Nesting matrix**: certify forward∘forward (2nd directional),
-  reverse∘forward, reverse∘reverse against analytic references. DiffKT
-  supports arbitrary nesting; we've pinned one composition. §0.4.399
-  removed reverse∘reverse's standing blocker (the runtime-extent adjoints'
-  missing VjpRules) — what remains is the composition plumbing itself
-  (the reverse transform takes a single scalar-return function, so nesting
-  needs the inner gradient body inlined/scalarized) plus SLICE_LIKE's
-  documented gap for concat windows.
+- **B4. Nesting matrix ✅ DONE, §0.4.401 (2026-09-20)** — the full 2×2
+  certified at IR level (`DxirNestingMatrixTest`), with **zero
+  production-code changes**: both transforms already composed mechanically,
+  and the "composition plumbing" the §0.4.399 note anticipated turned out
+  to be two one-liners, not machinery.
+  - **fwd∘fwd** ✅: the second application re-tangents the jvp's params
+    (`x, d_x` → `x, d_x, d_x, d_d_x`) and splits its returns again; with
+    the last tangent seeded zero, return 4 is the bilinear form
+    `d²f(x)[u,v] = uᵀHv`. Pinned on Σx³ (= 6·Σx⊙u⊙v) and, basis-seeded on
+    the §0.4.394 hessian body Σ exp(x), entrywise against BOTH the analytic
+    diag(exp x) and fwd∘rev HVP columns.
+  - **rev∘fwd** ✅: the plumbing is a RETURN PROJECTION — same params, same
+    body, tangent return only — after which the jvp is a legal scalar-return
+    reverse input. `∇ₓ⟨∇f, v⟩ = Hv` pinned analytically and numerically
+    equal to the fwd∘rev HVP (the cross-oracle).
+  - **rev∘rev** ✅ where §0.4.399 predicted: the seeded pullback of the
+    gradient function IS the HVP — `R(R(f), seedAsParam)(v, x) = vᵀ∂(∇f)/∂x
+    = Hv`, no scalarization step at all. Certified over Σx³, over an
+    equal-rank size-1 stretch (the first reverse pass emits SUM_TO, the
+    second differentiates through it via BROADCAST_LIKE — the §0.4.399
+    closure exercised end to end, body-op pinned), and over a
+    concrete-dims concat (ConcatRule's static-SLICE branch → SliceRule:
+    works; the gap is symbolic-only).
+  - **rev∘rev refusals pinned loud** (the §0.4.392 precedent): gradient
+    bodies carrying MAXPOOL2D_GRAD, EMBEDDING_GRAD, or the symbolic-concat
+    SLICE_LIKE fail with "no VJP rule registered for <op>", asserted by
+    name. The fused conv/pool/embedding adjoints stay VjpRule-less by
+    design (their second derivative would need the adjoint-of-adjoint
+    expansion B5/C-era work can decide on); SLICE_LIKE keeps §0.4.399's
+    recorded PAD_LIKE fix shape.
+  - **Third order** ✅ for free: F(F(R(Σx⁴)))(x, u, v, 0) = 24·x⊙u⊙v pinned.
+  - Deferred tails: nesting through region-bearing bodies rides on B3
+    (forward-v1 refuses regions before any composition question arises);
+    user-facing n-th-order intrinsics (`reverseDerivative{2..4}` spellings)
+    are a synthesis-surface question, not an IR one — the IR compositions
+    they'd lower to are what this slice certified.
 - **B5. User-defined custom derivatives**: a user-facing custom-VJP/JVP
   registration (DiffKT lets users supply derivatives for opaque functions;
   our coarsener `gradient_body` machinery is the internal analogue —
@@ -1248,13 +1276,13 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 
 | DiffKT | Tlaloc | Notes |
 |---|---|---|
-| `reverseDerivative` / `primalAndReverseDerivative` (1/2-arg, List, n-th `reverseDerivative{1..4}`, `reverseDiff`) | ✅/🟡 | `grad {}` covers 1st-order; n-th-order = nesting (B4) |
+| `reverseDerivative` / `primalAndReverseDerivative` (1/2-arg, List, n-th `reverseDerivative{1..4}`, `reverseDiff`) | ✅/🟡 | `grad {}` covers 1st-order; n-th-order nesting certified at IR level (§0.4.401), intrinsic spellings still open |
 | `forwardDerivative` (all arities, n-th, `forwardDiff`) / `primalAndForwardDerivative` | 🟡 | `DxirForwardTransform` §0.4.361; no user intrinsic → B1 |
 | `jvp` / `primalAndJvp` | 🟡 | same → B1 |
 | `vjp` / `primalAndVjp` / `primalAndPullback` (user-supplied cotangent, `vf(primal)` form) | ✅ | `vjp {}` / `valueAndVjp {}` §0.4.398 — seeded single-pass pullback, tensor-valued `f` |
 | Jacobian assembly | 🟡 | DiffKT has **no** jacobian intrinsic — `reverseDerivative(x, f: tensor→tensor)` identity-seeds and builds the full Jacobian (`identityGradientOfSameKind`). B2 = that seeding loop |
 | `reverseDerivativeTransposed` | ❌ | transposed-Jacobian convention variant; fold into B2 |
-| Arbitrary nesting (fwd∘fwd, rev∘rev, …) | 🟡 | one composition pinned (HVP) → B4 |
+| Arbitrary nesting (fwd∘fwd, rev∘rev, …) | ✅/🟡 | full matrix certified at IR level + refusals pinned (§0.4.401); user-facing n-th-order intrinsic spellings still open |
 | `ifThenElse(cond, a, b)` (scalar + tensor, differentiable) | ✅ | `where` §0.4.364; scalar branches also via IF regions + coarsening |
 | `Wrappable`/`Wrapper` (derivatives through user data structures; examples lean on this) | 🟡 | Tlaloc's K2 plugin lowers data-class params structurally — different mechanism, same end; certify in B5 |
 | `integral(a, b, f)` — Romberg quadrature with FTC-wired fwd/rev derivatives | ❌ | genuinely novel; **new C5** |
