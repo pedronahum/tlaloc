@@ -869,6 +869,24 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             for ((idx, p) in fn.params.withIndex()) {
                 if (!p.type.isScalar) continue
                 val argType = callType.arguments.getOrNull(idx)?.typeOrNull ?: continue
+                // §0.4.427 — the DScalar INTERFACE param refuses BY NAME instead
+                // of falling to the anonymous type-mismatch guard. The refusal is
+                // structural, not a missing feature: the lambda's function type
+                // fixes the param slot to the interface, so the concrete class of
+                // the value that will flow at the RETURNED function's call sites
+                // is unknowable here — there is no constructor to box the
+                // gradient into at compile time (a `when`-dispatch would need
+                // runtime information the synthesised body never sees). The tape
+                // fallback handles the dynamic case; the message names the two
+                // spellings that lower.
+                if ((argType as? IrSimpleType)?.classifier == dScalarInterface()) {
+                    return reject(
+                        "param '${p.name}' is typed as the DScalar INTERFACE — dynamic dispatch has " +
+                            "no concrete value class to box a gradient into at compile time; spell the " +
+                            "param as FloatScalar (F32) or DoubleScalar (F64) to lower through the plugin " +
+                            "(the runtime tape handles the DScalar spelling)",
+                    )
+                }
                 if (isBoxedScalarType(argType, p.type.dtype)) boxedScalarParams[p.id] = argType
             }
         }
@@ -4949,6 +4967,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     // ------------------------------------------------------------------
     // §0.4.414 — boxed scalar params/returns (Phase A5c-3(iv) tail).
     // ------------------------------------------------------------------
+
+    /** §0.4.427 — the sealed super-interface, matched only to refuse it by name. */
+    private fun dScalarInterface(): IrClassSymbol? =
+        pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/DScalar"))
 
     private fun floatScalarClass(): IrClassSymbol? =
         pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/FloatScalar"))

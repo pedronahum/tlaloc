@@ -828,6 +828,13 @@ object FirLambdaToDxirLowering {
             val operandExpr = receiver(call)
                 ?: throw LoweringException("cast '$fqn' has no receiver")
             val operand = lowerExpr(operandExpr, env, emitter)
+            // §0.4.427 — identity casts collapse at lowering. The boxed-scalar
+            // members (`FloatScalar.toFloat()`, `DoubleScalar.toDouble()`) are
+            // identities at the dxir level: PRIMITIVE_DTYPE_MAP already erased
+            // the box, so the receiver IS the primitive. Returning it directly
+            // keeps an all-boxed-scalar body's dxir identical to the primitive
+            // spelling's (the §0.4.414 invariant).
+            if (operand.type.dtype == targetDtype) return operand
             return emitter.op(
                 kind = OpKind.CAST,
                 operands = listOf(operand),
@@ -3064,9 +3071,28 @@ object FirLambdaToDxirLowering {
         if (scalar is DxirConst) {
             splatLiteral(scalar.value, tensor, emitter)
         } else {
+            // §0.4.427 — cross-precision float scalars (the §0.4.414-recorded
+            // `DTensor(F32) ⊙ DoubleScalar` gap) get an explicit CAST to the
+            // tensor's dtype before the splat, so the BROADCAST's operand and
+            // result dtypes agree. Float-to-float only: an integer scalar
+            // splatting into a float tensor keeps failing downstream exactly
+            // as before rather than silently gaining differentiable width.
+            val aligned = if (
+                scalar.type.dtype != tensor.type.dtype &&
+                (scalar.type.dtype == F32 || scalar.type.dtype == F64) &&
+                (tensor.type.dtype == F32 || tensor.type.dtype == F64)
+            ) {
+                emitter.op(
+                    kind = OpKind.CAST,
+                    operands = listOf(scalar),
+                    type = DxirType(tensor.type.dtype, emptyList()),
+                )
+            } else {
+                scalar
+            }
             emitter.op(
                 kind = OpKind.BROADCAST,
-                operands = listOf(scalar, tensor),
+                operands = listOf(aligned, tensor),
                 type = tensor.type,
                 attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
             )
@@ -3089,6 +3115,21 @@ object FirLambdaToDxirLowering {
         put("kotlin.Double.toFloat", F32)
         put("kotlin.Double.toInt", I32)
         put("kotlin.Double.toLong", I64)
+        // §0.4.427 — the boxed-scalar conversion members (`:core/DScalar.kt`).
+        // PRIMITIVE_DTYPE_MAP erases the box on params, so the receiver of
+        // `s.toFloat()` / `s.toDouble()` is already a primitive dxir node:
+        // matching precision collapses to identity in the dispatch arm above,
+        // cross-precision emits a real CAST (whose VJP is the reverse cast —
+        // see Vjp.CastRule's float arm). The DScalar-interface spellings are
+        // included because the MEMBER's target dtype is static even when the
+        // receiver's concrete class is not: the erased receiver node carries
+        // the precision, and `toFloat`/`toDouble` name the destination.
+        put("io.tlaloc.core.FloatScalar.toFloat", F32)
+        put("io.tlaloc.core.FloatScalar.toDouble", F64)
+        put("io.tlaloc.core.DoubleScalar.toFloat", F32)
+        put("io.tlaloc.core.DoubleScalar.toDouble", F64)
+        put("io.tlaloc.core.DScalar.toFloat", F32)
+        put("io.tlaloc.core.DScalar.toDouble", F64)
     }
 
     private val UNARY_OP_MAP: Map<String, OpKind> = buildMap {

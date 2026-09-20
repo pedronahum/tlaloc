@@ -1401,18 +1401,27 @@ object VjpRegistry {
 
     /**
      * §0.4.40 — `CAST` is emitted by the FIR lowering for dtype conversions like
-     * `i.toFloat()` (where `i` is the loop counter). The operand is typically an
-     * Int counter or a concrete-constant post-C5-unroll; either way it's not a
-     * differentiable surface. Contribution is empty — no adjoint flows back to the
-     * cast's operand. If future work needs Float→Int or Float→Double conversions
-     * WITH gradient flow (i.e., both sides are differentiable), this rule must be
-     * generalised to emit an identity-or-reverse-cast contribution; today no
-     * benchmark needs that.
+     * `i.toFloat()` (where `i` is the loop counter). An Int/Long/Bool operand is
+     * not a differentiable surface: contribution stays empty (the reverse
+     * transform's zero-init covers the slot — the §0.4.419 integer-operand
+     * exception to the analytical-adjoint rule).
+     *
+     * §0.4.427 — the FLOAT→FLOAT arm this rule's own §0.4.40 note anticipated:
+     * a precision cast (F32↔F64, the `DoubleScalar` grad{}-param path) is the
+     * identity map on values, so its adjoint is the reverse cast of upstream
+     * back to the operand's dtype. Emitted only when BOTH sides are float —
+     * float→int truncation stays contribution-free (piecewise-constant).
      */
     val CastRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
-        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder) =
-            emptyList<Pair<DxirNode, DxirNode>>()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val srcF = x.type.dtype == io.tlaloc.core.F32 || x.type.dtype == io.tlaloc.core.F64
+            val dstF = op.type.dtype == io.tlaloc.core.F32 || op.type.dtype == io.tlaloc.core.F64
+            if (!srcF || !dstF) return emptyList()
+            val back = builder.op(OpKind.CAST, listOf(upstream), x.type)
+            return listOf(x to back)
+        }
     }
 
     /**
