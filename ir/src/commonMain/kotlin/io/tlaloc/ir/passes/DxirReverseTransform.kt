@@ -41,8 +41,11 @@ private fun DxirNode.gradKey(): Pair<Int, Int> = when (this) {
  * This is the SCT baseline (§11.8.1 Stage A) — the prerequisite for the coarsening pass
  * in Stage B. It is intentionally narrow:
  *
- * - **Single scalar return only.** Vector / tensor outputs would require an explicit
- *   upstream-cotangent parameter (rather than the implicit 1.0 seed embedded here).
+ * - **Single scalar return only** on the default (const-1.0-seed) path. Vector / tensor
+ *   outputs require an explicit upstream-cotangent parameter — which is exactly what
+ *   `seedAsParam = true` provides (§0.4.398): with a caller-supplied seed the reverse walk
+ *   is seed-agnostic, so the single return may be any type and the transform is a true
+ *   pullback `(ȳ, x) → x̄`.
  * - **Straight-line bodies only.** Ops carrying nested regions (e.g. `MANUAL_COMPUTATION`,
  *   future `If`/`While`) are rejected — handling them is the φ-calculus pass in Stage B.
  * - **Single-result body ops only.** Multi-result ops (e.g. `SPLIT`, `ARGMAX`) need
@@ -98,18 +101,16 @@ object DxirReverseTransform {
      *   `(upstream, *primal_params) → (*grads)`, which is what
      *   [OpKind.COARSENED]'s `gradient_body` attribute expects. When false (default),
      *   the seed is `const(1.0)` — the existing `grad` / `valueAndGrad` behaviour.
-     *   Mutually exclusive with `includeForward` (a COARSENED gradient_body never
-     *   emits a forward value).
+     *   §0.4.398 — no longer mutually exclusive with `includeForward`: the combined
+     *   mode `(upstream, *primal_params) → (y, *grads)` is the `valueAndVjp` shape
+     *   (a COARSENED gradient_body still never passes both, but the seeded-cotangent
+     *   user surface needs the primal value alongside the pullback).
      */
     fun apply(
         primal: DxirFunction,
         includeForward: Boolean = false,
         seedAsParam: Boolean = false,
     ): DxirFunction {
-        require(!(includeForward && seedAsParam)) {
-            "DxirReverseTransform: includeForward + seedAsParam are incompatible — the " +
-                "COARSENED gradient_body signature doesn't accommodate a forward return"
-        }
         // §0.4.212 — Pre-pass `PhiCalculus.liftIfRegionBodies` to hoist safe arithmetic
         // ops out of IF region bodies. Without this, IFs with non-empty regions (e.g.,
         // SUB(state, maxAngle) inside a coarsened-WHILE-unroll's collision IF) survive
@@ -129,8 +130,15 @@ object DxirReverseTransform {
             "DxirReverseTransform v1 requires exactly 1 return value (got ${primal.returns.size})"
         }
         val ret = primal.returns.single()
-        require(ret.type.isScalar) {
-            "DxirReverseTransform v1 requires a scalar return (got ${ret.type})"
+        // §0.4.398 — the scalar gate applies only to the const-1.0-seed path: a unit
+        // seed is meaningful only for a scalar objective. With `seedAsParam` the
+        // upstream param takes the primal return's type VERBATIM (tensor allowed) and
+        // the walk below is seed-agnostic — every VjpRule already handles tensor
+        // upstreams (that is how interior ops' adjoints flow under `grad {}`); the
+        // final op's upstream being a tensor rather than const(1.0) changes nothing.
+        require(seedAsParam || ret.type.isScalar) {
+            "DxirReverseTransform v1 requires a scalar return (got ${ret.type}) — " +
+                "tensor-returning primals need seedAsParam (the vjp pullback form)"
         }
         // §0.4.139 — multi-result IFs are allowed at the top level. The seed flows
         // into `gradAccum[(if.id, k)]` for each result index `k` referenced

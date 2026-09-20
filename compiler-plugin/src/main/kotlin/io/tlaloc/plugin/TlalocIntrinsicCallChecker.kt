@@ -29,6 +29,9 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
         // §0.4.394 — Phase B2: assembly intrinsics over the seeded transforms.
         "io.tlaloc.autograd.jacobian",
         "io.tlaloc.autograd.hessian",
+        // §0.4.398 — the seeded-cotangent user surface.
+        "io.tlaloc.autograd.vjp",
+        "io.tlaloc.autograd.valueAndVjp",
     )
 
     /** §0.4.372 — the forward-mode intrinsics probe differentiability with the
@@ -86,6 +89,20 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                         // the IR extension will.
                         name == "hessian" -> {
                             { DxirForwardTransform.apply(DxirReverseTransform.apply(result.fn)) }
+                        }
+                        // §0.4.398 — the seeded-cotangent intrinsics probe the
+                        // SEEDED reverse transform: their lambda may return a
+                        // tensor, which the default probe's scalar gate would
+                        // reject; seedAsParam is exactly what the IR extension
+                        // runs, so the red squiggle matches the real lowering.
+                        name == "vjp" || name == "valueAndVjp" -> {
+                            {
+                                DxirReverseTransform.apply(
+                                    result.fn,
+                                    includeForward = name == "valueAndVjp",
+                                    seedAsParam = true,
+                                )
+                            }
                         }
                         name in forwardIntrinsics -> {
                             { DxirForwardTransform.apply(result.fn) }

@@ -990,10 +990,54 @@ reachable from `grad {}`, not new math. New-op families come after.
     un-reduce broadcast), and `Σ exp(x)` (value-DEPENDENT diag — the tangent
     threads the adjoint's exp recompute).
   - v1 scope: single-argument `f`, straight-line bodies, host F32. Still
-    open in B2's neighbourhood: the seeded-cotangent user surface
-    (`vjp`/`primalAndPullback`, audit item 10 — `DxirReverseTransform`'s
-    `seedAsParam` mode exists but is scalar-return-gated), reverse-assembled
-    (tall) Jacobians for m ≪ n, and multi-arg `jacobian2`/`hessian2`.
+    open in B2's neighbourhood: reverse-assembled (tall) Jacobians for
+    m ≪ n, and multi-arg `jacobian2`/`hessian2`. (The seeded-cotangent
+    user surface closed in §0.4.398 below.)
+- **B2 follow-up. `vjp` + `valueAndVjp` intrinsics ✅ (§0.4.398)** — the
+  seeded-cotangent user surface (DiffKT's `vjp` / `primalAndPullback`, audit
+  item 10): `vjp(f)` returns `(x, ȳ) → x̄`, the pullback of a USER-SUPPLIED
+  cotangent `ȳ` (of `f`'s OUTPUT type) through `f` at `x` in ONE reverse
+  pass — `grad {}` generalised to tensor-valued `f` (`grad(f)` ≡ `vjp(f)`
+  at the unit seed of a scalar `f`; a dense Jacobian is `m` calls of it
+  over the output basis, the loop `jacobian` runs for you).
+  - **The IR layer already had the function — two gates hid it.**
+    `DxirReverseTransform.apply(seedAsParam = true)` (§0.4.33's COARSENED
+    `gradient_body` machinery) has produced `(upstream, *params) → (*grads)`
+    for 60+ sections, but its scalar-return gate predates the insight that
+    the reverse walk is SEED-AGNOSTIC: with a caller-supplied seed the
+    upstream param takes the primal return's type VERBATIM (tensor allowed),
+    and every VjpRule already handles tensor upstreams — that is how
+    interior ops' adjoints flow under `grad {}`. The gate now applies only
+    to the const-1.0 path (a unit seed is only meaningful for a scalar
+    objective). The second gate — `includeForward` + `seedAsParam` declared
+    "incompatible" — was a fact about the COARSENED caller, not the math;
+    lifted, the combined mode `(upstream, x) → (y, x̄)` is exactly
+    `valueAndVjp`.
+  - **Simpler than `jacobian`, by construction**: no runtime assembly
+    helper (the synthesised seeded pass IS the replacement — one seeded
+    pass, no basis loop) and no `callTypeOverride` (the call site's own
+    type IS the 2-param seeded function type, `Function2<A, R, A>`). The
+    only seam is parameter ORDER — the transform emits the upstream first,
+    the declared surface takes `(x, ȳ)` — and synthesis resolves body
+    references by node id (params are positional metadata), so the plugin
+    rotates the params list and synthesises directly. No tape fallback
+    (the `concat`/`jacobian` precedent); the FIR checker probes with
+    `seedAsParam = true` so tensor-returning bodies are checked with
+    exactly what the IR extension runs.
+  - Certified E2E (`VjpIntrinsicTest`, real plugin, real generic
+    `:autograd` declarations, no stubs): `vjp` over `x ⊙ x` at a
+    NON-UNIFORM `ȳ` (x̄ = 2·x⊙ȳ — a unit-seed impostor cannot pass), the
+    grad-consistency identity (`vjp` at `ȳ = 1` == `grad` for `Σx²`), the
+    JVP⇄VJP inner-product identity ⟨ȳ, jvp(x, v)⟩ == ⟨vjp(x, ȳ), v⟩
+    computed numerically in the user program, and `valueAndVjp` returning
+    the true primal alongside the same pullback. IR-level pins in
+    `CoarsenFunctionTest` (tensor-return pullback evaluated by the
+    interpreter; the combined value+pullback mode; the default path still
+    refusing tensor returns).
+  - v1 scope: single-argument `f`, straight-line single-return bodies
+    (the seeded branch skips the coarsening pipeline, like B1's forward
+    branch). Deferred tails: region-bearing bodies (fold into B3/B4's
+    region work), multi-arg `vjp2`.
 - **B3. Forward transform through regions**: IF/WHILE bodies + COARSENED
   (tangent of a coarsened op = forward transform of its `primal_body`) —
   mirrors reverse-mode's history.
@@ -1119,7 +1163,7 @@ Legend: ✅ full parity (user surface + gradients) · 🟡 IR-level only
 | `reverseDerivative` / `primalAndReverseDerivative` (1/2-arg, List, n-th `reverseDerivative{1..4}`, `reverseDiff`) | ✅/🟡 | `grad {}` covers 1st-order; n-th-order = nesting (B4) |
 | `forwardDerivative` (all arities, n-th, `forwardDiff`) / `primalAndForwardDerivative` | 🟡 | `DxirForwardTransform` §0.4.361; no user intrinsic → B1 |
 | `jvp` / `primalAndJvp` | 🟡 | same → B1 |
-| `vjp` / `primalAndVjp` / `primalAndPullback` (user-supplied cotangent, `vf(primal)` form) | 🟡 | reverse transform takes unit seed today; expose seeded pullback → B1/B2 |
+| `vjp` / `primalAndVjp` / `primalAndPullback` (user-supplied cotangent, `vf(primal)` form) | ✅ | `vjp {}` / `valueAndVjp {}` §0.4.398 — seeded single-pass pullback, tensor-valued `f` |
 | Jacobian assembly | 🟡 | DiffKT has **no** jacobian intrinsic — `reverseDerivative(x, f: tensor→tensor)` identity-seeds and builds the full Jacobian (`identityGradientOfSameKind`). B2 = that seeding loop |
 | `reverseDerivativeTransposed` | ❌ | transposed-Jacobian convention variant; fold into B2 |
 | Arbitrary nesting (fwd∘fwd, rev∘rev, …) | 🟡 | one composition pinned (HVP) → B4 |

@@ -67,6 +67,30 @@ fun <A, R> valueAndJvp(f: (A) -> R): (A, A) -> Pair<R, R> =
     { _, _ -> pluginMissing("valueAndJvp") }
 
 /**
+ * §0.4.398 — the seeded-cotangent user surface (DiffKT's `vjp` /
+ * `primalAndPullback`, audit item 10): reverse mode generalised to
+ * TENSOR-valued `f`. `vjp(f)` returns `(x, ȳ) → x̄` — the pullback of a
+ * user-supplied cotangent `ȳ` (of `f`'s OUTPUT type) through `f` at `x`,
+ * computed in ONE reverse pass. `grad(f)` is exactly `vjp(f)` with `ȳ` fixed
+ * to the unit seed of a scalar `f`; conversely a full Jacobian is `n` calls
+ * of `vjp` over the output basis (which is what [jacobian] loops for you).
+ *
+ * Unlike [jacobian] there is no runtime assembly helper: the synthesised
+ * seeded pass IS the replacement — the plugin runs
+ * `DxirReverseTransform(seedAsParam = true)` over the lambda, whose output
+ * signature `(upstream, x) → x̄` is reordered to the declared `(x, ȳ)`.
+ *
+ * These are the no-plugin fallbacks (see [pluginMissing]); like `jacobian`
+ * there is no runtime-tape path — a failed synthesis is a loud error at
+ * first call. v1 scope: single argument, straight-line bodies, single return.
+ */
+fun <A, R> vjp(f: (A) -> R): (A, R) -> A = { _, _ -> pluginMissing("vjp") }
+
+/** Primal value and seeded pullback in one pass: `(x, ȳ) -> (y, x̄)`. */
+fun <A, R> valueAndVjp(f: (A) -> R): (A, R) -> Pair<R, A> =
+    { _, _ -> pluginMissing("valueAndVjp") }
+
+/**
  * §0.4.387 — forward mode for a two-argument function, the `grad2` of the
  * forward pair and the follow-up §0.4.375 scoped out ("multi-arg `jvp2` is a
  * clean follow-up: same pattern, more params"). The curried result takes the

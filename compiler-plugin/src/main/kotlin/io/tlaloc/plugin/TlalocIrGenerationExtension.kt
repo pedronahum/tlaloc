@@ -338,6 +338,90 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     return assembled
                 }
 
+                // §0.4.398 — the seeded-cotangent intrinsics (audit item 10): `vjp` is
+                // grad{} generalised to TENSOR-valued f — the pullback of a
+                // user-supplied cotangent ȳ (of f's OUTPUT type) through f at x, in ONE
+                // reverse pass. The reverse transform's seedAsParam mode (§0.4.33's
+                // COARSENED gradient_body machinery) already produces exactly this
+                // function — `(upstream, x) → x̄` — and §0.4.398 lifted its
+                // scalar-return gate, so unlike `jacobian` there is NO runtime helper
+                // and NO callTypeOverride: the call site's own type IS the 2-param
+                // seeded function type, Function2<A, R, A> (Pair<R, A>-returning for
+                // `valueAndVjp`, which rides the same transform's includeForward mode).
+                // The only seam is parameter ORDER: the transform emits the upstream
+                // first, the declared surface takes `(x, ȳ)` — and since synthesis
+                // resolves body references by node id (params are positional metadata
+                // only), reordering the params list is a pure metadata rotation.
+                // No runtime-tape fallback (the `concat`/`jacobian` precedent): a
+                // failed synthesis keeps the original call → pluginMissing, loudly.
+                val vjpIntrinsic = callableName == "vjp" || callableName == "valueAndVjp"
+                if (vjpIntrinsic) {
+                    if (fn.params.size != 1 || fn.returns.size != 1) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "$callableName v1 scope is single-param single-return " +
+                                "(got ${fn.params.size} params, ${fn.returns.size} returns)",
+                            null,
+                        )
+                        return transformed
+                    }
+                    val includeValue = callableName == "valueAndVjp"
+                    val seededGrad: DxirFunction = try {
+                        DxirReverseTransform.apply(
+                            fn,
+                            includeForward = includeValue,
+                            seedAsParam = true,
+                        )
+                    } catch (t: Throwable) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "the seeded reverse transform failed " +
+                                "(${t::class.simpleName}: ${t.message})\n${fn.pretty().trimEnd()}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    // (upstream, x) → (x, ȳ): rotate the upstream param to the back.
+                    val pullback = DxirFunction(
+                        seededGrad.name,
+                        seededGrad.params.drop(1) + seededGrad.params.first(),
+                        seededGrad.body,
+                        seededGrad.returns,
+                        seededGrad.meshes,
+                    )
+                    val replacement = synth.synthesise(pullback, transformed, currentDeclarationParent!!)
+                    if (replacement == null) {
+                        val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "seeded pullback falls outside the synthesis scope " +
+                                "[$reason]\npullback function:\n${pullback.pretty().trimEnd()}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    if (replacement.type != transformed.type) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — " +
+                                "synthesised type ${replacement.type} doesn't match call type " +
+                                "${transformed.type}",
+                            null,
+                        )
+                        return transformed
+                    }
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc lowered '$callableName' to a seeded reverse pullback:\n" +
+                            pullback.pretty().trimEnd(),
+                        null,
+                    )
+                    return replacement
+                }
+
                 val includeForward = callableName == "valueAndGrad" || callableName == "valueAndGrad2"
 
                 // §0.4.24 — Stage B.4a. Run PhiCalculus.apply before SCT so IF/WHILE
@@ -560,6 +644,8 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
             "jvp", "valueAndJvp", "jvp2", "valueAndJvp2",
             // §0.4.394 — Phase B2: the assembly intrinsics.
             "jacobian", "hessian",
+            // §0.4.398 — the seeded-cotangent user surface.
+            "vjp", "valueAndVjp",
         )
 
         /**

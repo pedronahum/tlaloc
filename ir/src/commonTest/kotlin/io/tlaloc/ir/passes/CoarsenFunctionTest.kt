@@ -349,18 +349,56 @@ class CoarsenFunctionTest {
         assertSame(fn, coarsened, "empty-branch IF should pass through unchanged")
     }
 
+    // §0.4.398 — the combined includeForward + seedAsParam mode (the `valueAndVjp`
+    // shape) replaced the historical exclusivity pin: signature
+    // `(upstream, *primal_params) → (y, *grads)`.
     @Test
-    fun reverseTransformSeedAsParamDisallowsIncludeForward() {
+    fun reverseTransformSeedAsParamWithIncludeForwardYieldsValueAndPullback() {
         val fn = DxirBuilder.function("sq") {
             val a = param("a", f32s)
             val r = op(OpKind.MUL, listOf(a, a), f32s)
             listOf(r)
         }
+        val vAndVjp = DxirReverseTransform.apply(fn, includeForward = true, seedAsParam = true)
+        assertEquals(2, vAndVjp.params.size)
+        assertEquals("__upstream__", vAndVjp.params[0].name)
+        assertEquals(2, vAndVjp.returns.size, "returns = (y, d_a)")
+        // At upstream=2, a=3: y = 9, d_a = 2·upstream·a = 12.
+        val out = DxirInterpreter.evalFunction(
+            vAndVjp,
+            listOf(floatArrayOf(2f), floatArrayOf(3f)),
+        )
+        assertEquals(9f, out[0][0], "forward value")
+        assertEquals(12f, out[1][0], "seeded pullback")
+    }
+
+    // §0.4.398 — with a caller-supplied seed the reverse walk is seed-agnostic, so
+    // the scalar-return gate lifts: a TENSOR-returning primal is a true pullback
+    // `(ȳ, x) → x̄`. f(x) = x ⊙ x, so x̄ = 2·x ⊙ ȳ element-wise.
+    @Test
+    fun reverseTransformSeedAsParamAcceptsTensorReturn() {
+        val f32v3 = DxirType(F32, listOf(3))
+        val fn = DxirBuilder.function("sqv") {
+            val x = param("x", f32v3)
+            val r = op(OpKind.MUL, listOf(x, x), f32v3)
+            listOf(r)
+        }
+        val vjpFn = DxirReverseTransform.apply(fn, seedAsParam = true)
+        assertEquals(2, vjpFn.params.size)
+        assertEquals(f32v3, vjpFn.params[0].type, "upstream takes the primal RETURN type")
+        val out = DxirInterpreter.evalFunction(
+            vjpFn,
+            listOf(floatArrayOf(1f, 10f, 100f), floatArrayOf(1f, 2f, 3f)),
+        )
+        // x̄ = 2·x⊙ȳ = [2·1·1, 2·2·10, 2·3·100].
+        assertEquals(listOf(2f, 40f, 600f), out[0].toList())
+        // The default path still refuses a tensor return — the const-1.0 seed is
+        // only meaningful for a scalar objective.
         try {
-            DxirReverseTransform.apply(fn, includeForward = true, seedAsParam = true)
-            kotlin.test.fail("expected IllegalArgumentException — includeForward + seedAsParam incompatible")
+            DxirReverseTransform.apply(fn)
+            kotlin.test.fail("expected IllegalArgumentException — tensor return without seedAsParam")
         } catch (e: IllegalArgumentException) {
-            assertTrue(e.message!!.contains("incompatible"), "unexpected error: ${e.message}")
+            assertTrue(e.message!!.contains("seedAsParam"), "unexpected error: ${e.message}")
         }
     }
 }
