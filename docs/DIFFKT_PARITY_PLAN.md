@@ -238,8 +238,9 @@ reachable from `grad {}`, not new math. New-op families come after.
     synthesis were missing. `logSoftmax` lowers to `LOG(SOFTMAX(x))` (both
     fully-ruled ops; **LOGSUMEXP stays emitter-only** — no VJP/interp/JVP),
     which also forced tensor `irLog`/`irExp` (were scalar-only).
-  - **A3b ✅ (§0.4.370 IR-level; §0.4.400 embedding E2E)** — the two
-    self-contained halves landed, then embedding got its front-end:
+  - **A3b ✅ (§0.4.370 IR-level; §0.4.400 embedding E2E; §0.4.409
+    paddingIndex + rank-2 batches)** — the two self-contained halves landed,
+    then embedding got its front-end, then its recorded tails:
     - **`embedding` VjpRule** ✅: EMBEDDING was wired below the surface
       (emitter-as-gather + cost model) but had no reverse rule and no
       interpreter arm. Added: an EMBEDDING interpreter arm (rank-2 table +
@@ -275,6 +276,38 @@ reachable from `grad {}`, not new math. New-op families come after.
       fallback. Deferred: `paddingIndex`, rank-2 index batches (host surface is
       rank-1), and indices produced by in-lambda integer arithmetic (params
       only).
+      **§0.4.409 — the recorded embedding tails close: `paddingIndex` + rank-2
+      index batches.** `paddingIndex` is an optional Int-literal `padding_index`
+      attr on EMBEDDING (negative/absent = none, canonicalised at FIR so
+      `embedding(t, i)` and `embedding(t, i, -1)` CSE alike); positions whose
+      index equals it produce EXACT-zero output rows and scatter nothing back
+      (EmbeddingRule forwards the attr onto EMBEDDING_GRAD; the forward tangent
+      already replayed `node.attrs`, so padded tangents are zero for free —
+      pinned by the padded JVP⇄VJP cross-identity). Emission: the primal masks
+      the gathered rows with compare-EQ + broadcast + select (XLA CLAMPS
+      out-of-bounds gathers, so the select — not the gather — is what zeroes
+      the row), the adjoint masks the UPSTREAM rows before the scatter (adding
+      a zero row is a numeric no-op in-bounds; XLA drops out-of-bounds scatter
+      updates — exact zero either way over the splat-zero base). Rank-2
+      `[B, N]` batches: host `embedding` overloads (`@JvmName` dodges erasure;
+      arity — never default params — disambiguates the padded spellings, the
+      K2 named-arg landmine), FIR arm widened to rank 1..2 indices with dims
+      still COPIED, `isAcceptedIndexTensorType` → I32 rank 1..2, and the
+      EMBEDDING_GRAD emitter generalised from its v1 rank-1 contract to rank-r
+      indices (`update_window_dims = [r]`, `index_vector_dim = r` — the
+      §0.4.400 rejection test flipped to a positive pin). Synthesis resolves
+      the grown overload sets by arity + the indices param's `Rank{r}`
+      classifier (`embeddingHostSymbol`/`embeddingGradHostSymbol` — the
+      `singleOrNull` CallableId lookup no longer suffices). Certified: host ↔
+      interpreter bit-exact for padded + batched twins, padded-row EXACT-zero
+      + collision-still-sums analytic pins at every level (host, interpreter,
+      E2E `grad {}` linear + embedding-recomputing nonlinear), a cross-batch
+      collision E2E, padded + batched JVP⇄VJP cross-identities, emitter text
+      pins + two new coverage-sweep cases + round-trip cases, and a padded GPU
+      smoke (grad max|diff| 0.0, padded row exactly zero on the GB10).
+      Still deferred (re-recorded): several index-typed params in one lambda
+      (the structural-zero const cannot name which param it zeroes) and
+      indices produced by in-lambda integer arithmetic (params only).
     - **`crossEntropyLoss`/`nllLoss`** ✅ E2E through `grad {}`: composed in
       FIR onto existing fully-ruled ops (no new VjpRule). `crossEntropyLoss` =
       `NEG(SUM(MUL(oneHot, LOG(SOFTMAX(logits, -1)))))` (sum-reduction
@@ -1672,7 +1705,7 @@ argument fallback) ·
 | `batchNorm` (raw op, training-stats variant) | 🟡 | BATCHNORM OpKind exists; VJP + surface unaudited — fold into A3 |
 | `softmax(axis) / logSoftmax / logSoftmaxGrad` | 🟡 | SOFTMAX/LOGSUMEXP + VJPs exist → A3 |
 | `crossEntropyLoss / crossEntropyLossFromOneHot / nllLossFromOneHot` | ✅ | §0.4.370: `crossEntropyLoss`/`nllLoss` composed in FIR from logSoftmax, E2E through `grad {}` (CROSS_ENTROPY OpKind stays emitter-only) |
-| `embedding(table, indices, paddingIndex)` | ✅ | §0.4.370 IR-level (EmbeddingRule + EMBEDDING_GRAD + interpreter + forward tangent) → §0.4.400 E2E through `grad {}` (host op + FIR arm + I32-index-param synthesis + scatter+add emission, GPU-smoked); `paddingIndex` not modelled, indices rank-1 params only |
+| `embedding(table, indices, paddingIndex)` | ✅ | §0.4.370 IR-level (EmbeddingRule + EMBEDDING_GRAD + interpreter + forward tangent) → §0.4.400 E2E through `grad {}` (host op + FIR arm + I32-index-param synthesis + scatter+add emission, GPU-smoked) → §0.4.409 `paddingIndex` (exact-zero rows + zero gradient, mask emission) and rank-2 `[B, N]` index batches E2E; indices are params only (no in-lambda index arithmetic), one index param per lambda |
 | `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) + 2nd-order-through-broadcast ✅ (§0.4.399, `BROADCAST_LIKE`) — mixed rank-increase+stretch still deferred |
 | `transpose(axes) / leftTranspose / rightTranspose` | 🟡 | TRANSPOSE + VJP → A2 (left/right = sugar) |
 | `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |

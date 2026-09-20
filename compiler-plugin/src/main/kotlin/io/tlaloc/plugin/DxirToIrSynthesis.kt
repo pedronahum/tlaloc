@@ -311,14 +311,17 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
             // §0.4.400 — EMBEDDING [V,D] ⊗ [N] → [N,D]: the position atom from
             // the indices' Rank1, the feature atom from the table's Rank2 —
-            // both param-sourced, no placeholder needed.
+            // both param-sourced, no placeholder needed. §0.4.409 — rank-2
+            // index batches too: [V,D] ⊗ [B,N] → [B,N,D].
             OpKind.EMBEDDING -> {
                 if (op.operands.size != 2) return null
+                val idxRank = op.operands[1].type.rank
+                if (idxRank !in 1..2) return null
                 val tableIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
                 val idxIr = operandIrTypes[op.operands[1].id] as? IrSimpleType ?: return null
                 val tableAtoms = shapeAtomsOf(tableIr, 2) ?: return null
-                val idxAtoms = shapeAtomsOf(idxIr, 1) ?: return null
-                rebuildShapeAtoms(tableIr, listOf(idxAtoms[0], tableAtoms[1]), 2)
+                val idxAtoms = shapeAtomsOf(idxIr, idxRank) ?: return null
+                rebuildShapeAtoms(tableIr, idxAtoms + listOf(tableAtoms[1]), idxRank + 1)
             }
             // §0.4.400 — EMBEDDING_GRAD's result IS its shape template's type
             // (operand[2], the primal table): the SUM_TO/PAD_TO treatment.
@@ -2600,10 +2603,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     /**
      * §0.4.400 — EMBEDDING in `grad {}` bodies (the primal, and its recompute
      * when the embedded rows feed a nonlinear consumer): `embedding(table,
-     * indices)` in `:core/ops`. The host signature is `<V, D, N>` — vocab and
-     * feature atoms from the table's Rank2, the position atom from the indices'
-     * Rank1 — so all three type-args are dug out of the operand IrTypes the
-     * way [irMatmul] digs `<R, K, C>`.
+     * indices)` in `:core/ops`. The rank-1 host signature is `<V, D, N>` —
+     * vocab and feature atoms from the table's Rank2, the position atom from
+     * the indices' Rank1 — dug out of the operand IrTypes the way [irMatmul]
+     * digs `<R, K, C>`. §0.4.409 — the overload set grew: rank-2 `[B, N]`
+     * index batches (`<V, D, B, N>`) and the arity-3 `paddingIndex` spellings
+     * (the `padding_index` attr replayed as an Int literal argument);
+     * [embeddingHostSymbol] picks the overload by arity + indices rank.
      */
     private fun IrBuilderWithScope.irEmbedding(
         op: DxirOp,
@@ -2611,30 +2617,69 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         if (op.operands.size != 2) return null
+        val idxRank = op.operands[1].type.rank
+        if (idxRank !in 1..2) return null
         val tableDecl = env[op.operands[0].id] ?: return null
         val idxDecl = env[op.operands[1].id] ?: return null
         val tableIr = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
         val idxIr = irTypeForNode(op.operands[1], context) as? IrSimpleType ?: return null
         val tableAtoms = shapeAtomsOf(tableIr, 2) ?: return null
-        val idxAtoms = shapeAtomsOf(idxIr, 1) ?: return null
+        val idxAtoms = shapeAtomsOf(idxIr, idxRank) ?: return null
         val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
-            ?: rebuildShapeAtoms(tableIr, listOf(idxAtoms[0], tableAtoms[1]), 2)
+            ?: rebuildShapeAtoms(tableIr, idxAtoms + listOf(tableAtoms[1]), idxRank + 1)
             ?: return null
-        val sym = opsTensorSymbol("embedding") ?: return null
+        val paddingIndex = op.attrs["padding_index"] as? Int
+        val argCount = if (paddingIndex != null) 3 else 2
+        val sym = embeddingHostSymbol(argCount, idxRank) ?: return null
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
             type = resultIrType,
             symbol = sym,
         )
-        if (call.typeArguments.size == 3) {
-            call.typeArguments[0] = tableAtoms[0] // V
-            call.typeArguments[1] = tableAtoms[1] // D
-            call.typeArguments[2] = idxAtoms[0]   // N
+        // <V, D> then the index atoms (N, or B then N).
+        val typeArgs = listOf(tableAtoms[0], tableAtoms[1]) + idxAtoms
+        if (call.typeArguments.size == typeArgs.size) {
+            for (i in typeArgs.indices) call.typeArguments[i] = typeArgs[i]
         }
         call.arguments[0] = irGet(tableDecl)
         call.arguments[1] = irGet(idxDecl)
+        if (paddingIndex != null) call.arguments[2] = intConst(paddingIndex)
         return call
+    }
+
+    /**
+     * §0.4.409 — resolves the `io.tlaloc.core.ops.embedding` overload with
+     * [paramCount] regular params whose indices param (slot 1) carries a
+     * `Rank[idxRank]` shape argument. The overload set erasure-clashes on the
+     * JVM (`@JvmName` disambiguates there), so the Kotlin-name lookup returns
+     * all four symbols and the shape classifier is the only sound picker.
+     */
+    private fun embeddingHostSymbol(paramCount: Int, idxRank: Int): IrSimpleFunctionSymbol? {
+        val rankClass = pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/Rank$idxRank"))
+            ?: return null
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("embedding"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull { sym ->
+            val regulars = sym.owner.parameters.filter { it.kind == IrParameterKind.Regular }
+            if (regulars.size != paramCount) return@singleOrNull false
+            val idxIr = regulars.getOrNull(1)?.type as? IrSimpleType ?: return@singleOrNull false
+            val shapeArg = idxIr.arguments.firstOrNull()?.typeOrNull as? IrSimpleType
+            shapeArg?.classifier == rankClass
+        }
+    }
+
+    /** §0.4.409 — resolves the `embeddingGrad` overload by arity (3 = plain, 4 = padded). */
+    private fun embeddingGradHostSymbol(paramCount: Int): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier("embeddingGrad"),
+        )
+        return pluginContext.referenceFunctions(callableId).singleOrNull { sym ->
+            sym.owner.parameters.count { it.kind == IrParameterKind.Regular } == paramCount
+        }
     }
 
     /**
@@ -2659,7 +2704,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             ?: (irTypeForNode(op.operands[2], context) as? IrSimpleType)
             ?: return null
         val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
-        val sym = opsTensorSymbol("embeddingGrad") ?: return null
+        // §0.4.409 — the `padding_index` attr EmbeddingRule forwards from the
+        // primal picks the 4-arg padded twin (padded positions scatter nothing).
+        val paddingIndex = op.attrs["padding_index"] as? Int
+        val sym = embeddingGradHostSymbol(if (paddingIndex != null) 4 else 3) ?: return null
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
@@ -2670,6 +2718,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         call.arguments[0] = irGet(upstreamDecl)
         call.arguments[1] = irGet(idxDecl)
         call.arguments[2] = irGet(templateDecl)
+        if (paddingIndex != null) call.arguments[3] = intConst(paddingIndex)
         return call
     }
 
@@ -4280,13 +4329,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         type.dtype == F32 && type.rank in 1..4
 
     /**
-     * §0.4.400 — the integer INDEX tensor scope: `embedding`'s rank-1 I32 index
-     * vector, flowing through a `grad {}` lambda as a non-differentiable param.
-     * Kept deliberately narrow (I32 rank-1, the only shape the host `embedding`
-     * accepts) — the general integer-tensor synthesis story stays out of scope.
+     * §0.4.400 — the integer INDEX tensor scope: `embedding`'s I32 index
+     * tensors, flowing through a `grad {}` lambda as non-differentiable params.
+     * §0.4.409 widened rank-1 to rank 1..2 (the `[B, N]` batch spelling the
+     * host `embedding` now accepts). Still deliberately narrow — the general
+     * integer-tensor synthesis story stays out of scope.
      */
     private fun isAcceptedIndexTensorType(type: DxirType): Boolean =
-        type.dtype == I32 && type.rank == 1
+        type.dtype == I32 && type.rank in 1..2
 
     /**
      * Resolves `io.tlaloc.core.ops.broadcastLike` — the top-level extension function that

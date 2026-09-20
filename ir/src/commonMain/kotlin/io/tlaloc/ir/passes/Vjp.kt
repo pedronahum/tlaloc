@@ -1542,10 +1542,13 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val table = op.operands[0]
             val indices = op.operands[1]
+            // §0.4.409 — the primal's attrs (the optional `padding_index`) ride
+            // onto the fused adjoint: padded positions must scatter nothing.
             val dTable = builder.op(
                 OpKind.EMBEDDING_GRAD,
                 listOf(indices, upstream, table),
                 table.type,
+                attrs = op.attrs,
             )
             return listOf(table to dTable)
         }

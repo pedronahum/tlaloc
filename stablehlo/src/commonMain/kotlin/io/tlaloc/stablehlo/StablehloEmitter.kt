@@ -392,6 +392,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.EMBEDDING -> emitEmbedding(
                 step, name,
                 table = ops[0], indices = ops[1],
+                node = node,
                 tableType = node.operands[0].type,
                 indicesType = node.operands[1].type,
                 outType = node.type,
@@ -2626,6 +2627,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         name: String,
         table: String,
         indices: String,
+        node: DxirOp,
         tableType: DxirType,
         indicesType: DxirType,
         outType: DxirType,
@@ -2643,10 +2645,17 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 "(indices ${indicesType.dims} ++ [$embedDim])"
         }
 
+        // §0.4.409 — optional `padding_index` attr: gather to a temp, then zero
+        // the padded positions' rows with compare + select. XLA clamps
+        // out-of-bounds gather indices, so a paddingIndex outside the vocab
+        // still gathers SOMETHING — the select is what makes the row zero.
+        val paddingIndex = (node.attrs["padding_index"] as? Int) ?: -1
+        val gathered = if (paddingIndex >= 0) synth() else name
+
         // Canonical embedding-as-gather attrs.
         emitGatherOp(
             step = step,
-            name = name,
+            name = gathered,
             operand = table,
             startIndices = indices,
             operandType = tableType,
@@ -2659,15 +2668,57 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             sliceSizes = listOf(1, embedDim),
             indicesAreSorted = false,
         )
+        if (paddingIndex >= 0) {
+            emitPaddingRowMask(
+                step, name,
+                indices = indices, indicesType = indicesType,
+                masked = gathered, maskedType = outType,
+                paddingIndex = paddingIndex,
+            )
+        }
+    }
+
+    /**
+     * §0.4.409 — the shared padding mask: `select(indices == paddingIndex, 0, x)`
+     * with the predicate broadcast from the indices' shape onto [maskedType]
+     * (whose leading axes ARE the index axes — both EMBEDDING's output and
+     * EMBEDDING_GRAD's upstream have shape `indices.dims ++ [D]`). Writes the
+     * masked value to [name].
+     */
+    private fun emitPaddingRowMask(
+        step: String,
+        name: String,
+        indices: String,
+        indicesType: DxirType,
+        masked: String,
+        maskedType: DxirType,
+        paddingIndex: Int,
+    ) {
+        val idxMlir = indicesType.toMlir()
+        val boolIdxMlir = DxirType(Bool, indicesType.dims).toMlir()
+        val boolOutMlir = DxirType(Bool, maskedType.dims).toMlir()
+        val outMlir = maskedType.toMlir()
+        val bcastDims = (0 until indicesType.rank).joinToString(", ")
+        val padC = synth(); val pred = synth(); val predB = synth(); val zeros = synth()
+        out.appendLine("$step$padC = stablehlo.constant dense<$paddingIndex> : $idxMlir")
+        out.appendLine(
+            "$step$pred = stablehlo.compare  EQ, $indices, $padC,  SIGNED : ($idxMlir, $idxMlir) -> $boolIdxMlir",
+        )
+        out.appendLine(
+            "$step$predB = stablehlo.broadcast_in_dim $pred, dims = [$bcastDims] : ($boolIdxMlir) -> $boolOutMlir",
+        )
+        out.appendLine("$step$zeros = stablehlo.constant dense<0.0> : $outMlir")
+        out.appendLine("$step$name = stablehlo.select $predB, $zeros, $masked : $boolOutMlir, $outMlir")
     }
 
     /**
      * §0.4.400 — EMBEDDING's fused scatter-add adjoint, deferred by §0.4.370 and
      * closed here: `stablehlo.scatter` with an ADD computation region over a
-     * splat-zero `[V, D]` base. Rank-1 `[N]` indices with
-     * `index_vector_dim = 1` (== indices rank, the implicit trailing-1 form the
-     * SCATTER_ADD arm already uses for its scalar index); each `[N, D]` upstream
-     * row is a window over operand axis 1 (`update_window_dims = [1]`) landing
+     * splat-zero `[V, D]` base. Rank-r indices with
+     * `index_vector_dim = r` (== indices rank, the implicit trailing-1 form the
+     * SCATTER_ADD arm already uses for its scalar index; §0.4.409 generalised
+     * the v1 rank-1 contract to any r ≥ 1); each `[…, D]` upstream
+     * row is a window over operand axis 1 (`update_window_dims = [r]`) landing
      * at the vocab slot its index selects (`inserted_window_dims = [0]`,
      * `scatter_dims_to_operand_dims = [0]`). Collisions are the POINT — the same
      * vocab row embedded at several positions must accumulate — so
@@ -2690,24 +2741,47 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         require(indicesType.dtype is I32 || indicesType.dtype is I64) {
             "EMBEDDING_GRAD indices must be integer (I32 or I64); got ${indicesType.dtype}"
         }
-        require(indicesType.rank == 1) {
-            "EMBEDDING_GRAD indices must be rank-1; got ${indicesType.dims}"
+        // §0.4.409 — indices rank generalised from the v1 rank-1 contract to any
+        // rank r ≥ 1 (the host surface ships rank-1 and rank-2): every index
+        // axis is a scatter dim, the trailing upstream axis is the window.
+        val idxRank = indicesType.rank
+        require(idxRank >= 1) {
+            "EMBEDDING_GRAD indices must be at least rank-1; got ${indicesType.dims}"
         }
         val embedDim = outType.dims[1]
-        require(upstreamType.dims == listOf(indicesType.dims[0], embedDim)) {
+        require(upstreamType.dims == indicesType.dims + listOf(embedDim)) {
             "EMBEDDING_GRAD upstream shape ${upstreamType.dims} does not match expected " +
-                "[${indicesType.dims[0]}, $embedDim] (indices ${indicesType.dims} ++ [$embedDim])"
+                "${indicesType.dims + listOf(embedDim)} (indices ${indicesType.dims} ++ [$embedDim])"
+        }
+
+        // §0.4.409 — optional `padding_index` attr: zero the padded positions'
+        // upstream rows BEFORE the scatter. Scatter-adding a zero row is a
+        // numeric no-op (in-bounds paddingIndex), and XLA drops out-of-bounds
+        // scatter updates (out-of-vocab paddingIndex) — either way the padded
+        // vocab row's gradient stays exactly zero over the splat-zero base.
+        val paddingIndex = (node.attrs["padding_index"] as? Int) ?: -1
+        val scatterUpstream = if (paddingIndex >= 0) {
+            val masked = synth()
+            emitPaddingRowMask(
+                step, masked,
+                indices = indices, indicesType = indicesType,
+                masked = upstream, maskedType = upstreamType,
+                paddingIndex = paddingIndex,
+            )
+            masked
+        } else {
+            upstream
         }
 
         val zeros = synth()
         out.appendLine("$step$zeros = stablehlo.constant dense<0.0> : ${outType.toMlir()}")
 
         val scalarT = "tensor<${mlirElementType(outType.dtype)}>"
-        val dimNumbers = "#stablehlo.scatter<update_window_dims = [1], inserted_window_dims = [0], " +
-            "scatter_dims_to_operand_dims = [0], index_vector_dim = 1>"
+        val dimNumbers = "#stablehlo.scatter<update_window_dims = [$idxRank], inserted_window_dims = [0], " +
+            "scatter_dims_to_operand_dims = [0], index_vector_dim = $idxRank>"
         val cur = synth(); val upd = synth(); val sum = synth()
         out.appendLine(
-            """$step$name = "stablehlo.scatter"($zeros, $indices, $upstream) <{scatter_dimension_numbers = $dimNumbers}> ({""",
+            """$step$name = "stablehlo.scatter"($zeros, $indices, $scatterUpstream) <{scatter_dimension_numbers = $dimNumbers}> ({""",
         )
         out.appendLine("$step ^bb0($cur: $scalarT, $upd: $scalarT):")
         out.appendLine("$step   $sum = stablehlo.add $cur, $upd : $scalarT")

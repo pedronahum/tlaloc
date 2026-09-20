@@ -1196,9 +1196,11 @@ class EmitterTest {
     }
 
     @Test
-    fun embeddingGradRejectsRankTwoIndices() {
-        // v1 pins the rank-1 positions contract the host surface has.
-        val fn = DxirBuilder.function("bad") {
+    fun embeddingGradRankTwoIndicesEmitScatterWithBatchWindow() {
+        // §0.4.409 — the v1 rank-1 restriction fell with the host surface's
+        // [B, N] batch spelling: every index axis is a scatter dim, the
+        // trailing upstream axis the window, so r = 2 shifts both dim numbers.
+        val fn = DxirBuilder.function("eg2") {
             val idx = param("i", DxirType(io.tlaloc.core.I32, listOf(2, 3)))
             val up = param("u", DxirType(F32, listOf(2, 3, 4)))
             val template = param("t", DxirType(F32, listOf(10, 4)))
@@ -1209,7 +1211,88 @@ class EmitterTest {
             )
             listOf(y)
         }
-        assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("\"stablehlo.scatter\""), mlir)
+        assertTrue(mlir.contains("update_window_dims = [2]"), mlir)
+        assertTrue(mlir.contains("inserted_window_dims = [0]"), mlir)
+        assertTrue(mlir.contains("index_vector_dim = 2"), mlir)
+        assertTrue(mlir.contains("stablehlo.add"), mlir)
+        assertTrue(!mlir.contains("unique_indices"), "collisions must accumulate: $mlir")
+        assertTrue(mlir.contains("(tensor<10x4xf32>, tensor<2x3xi32>, tensor<2x3x4xf32>) -> tensor<10x4xf32>"), mlir)
+    }
+
+    @Test
+    fun embeddingWithPaddingIndexMasksGatheredRows() {
+        // §0.4.409 — `padding_index` attr: gather, then compare + select zeroes
+        // the padded positions' rows (XLA clamps out-of-bounds gathers, so the
+        // select is what makes the row zero — the gather alone cannot).
+        val fn = DxirBuilder.function("ep") {
+            val table = param("t", DxirType(F32, listOf(10, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, listOf(3)))
+            val y = op(
+                OpKind.EMBEDDING, listOf(table, idx), DxirType(F32, listOf(3, 4)),
+                attrs = mapOf("padding_index" to 7),
+            )
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("\"stablehlo.gather\""), mlir)
+        assertTrue(mlir.contains("stablehlo.constant dense<7> : tensor<3xi32>"), mlir)
+        assertTrue(
+            mlir.contains("stablehlo.compare  EQ,") && mlir.contains("SIGNED : (tensor<3xi32>, tensor<3xi32>) -> tensor<3xi1>"),
+            mlir,
+        )
+        assertTrue(mlir.contains("stablehlo.broadcast_in_dim") && mlir.contains("(tensor<3xi1>) -> tensor<3x4xi1>"), mlir)
+        assertTrue(mlir.contains("stablehlo.select"), mlir)
+        assertTrue(mlir.contains("stablehlo.constant dense<0.0> : tensor<3x4xf32>"), mlir)
+    }
+
+    @Test
+    fun embeddingWithoutPaddingIndexEmitsNoMask() {
+        // The unpadded spelling must stay the §0.4.400 bare gather — no compare,
+        // no select.
+        val fn = DxirBuilder.function("e") {
+            val table = param("t", DxirType(F32, listOf(10, 4)))
+            val idx = param("i", DxirType(io.tlaloc.core.I32, listOf(3)))
+            val y = op(OpKind.EMBEDDING, listOf(table, idx), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(!mlir.contains("stablehlo.compare"), mlir)
+        assertTrue(!mlir.contains("stablehlo.select"), mlir)
+    }
+
+    @Test
+    fun embeddingGradWithPaddingIndexMasksUpstreamBeforeScatter() {
+        // §0.4.409 — the padded adjoint zeroes the padded positions' upstream
+        // rows BEFORE the scatter: adding a zero row is a numeric no-op, so the
+        // padded vocab row stays exactly zero over the splat-zero base.
+        val fn = DxirBuilder.function("egp") {
+            val idx = param("i", DxirType(io.tlaloc.core.I32, listOf(3)))
+            val up = param("u", DxirType(F32, listOf(3, 4)))
+            val template = param("t", DxirType(F32, listOf(10, 4)))
+            val y = op(
+                OpKind.EMBEDDING_GRAD,
+                listOf(idx, up, template),
+                DxirType(F32, listOf(10, 4)),
+                attrs = mapOf("padding_index" to 2),
+            )
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("stablehlo.constant dense<2> : tensor<3xi32>"), mlir)
+        assertTrue(mlir.contains("stablehlo.compare  EQ,"), mlir)
+        assertTrue(mlir.contains("(tensor<3xi1>) -> tensor<3x4xi1>"), mlir)
+        assertTrue(mlir.contains("stablehlo.select"), mlir)
+        assertTrue(mlir.contains("stablehlo.constant dense<0.0> : tensor<3x4xf32>"), mlir)
+        // The scatter itself is unchanged — and the select must land BEFORE it.
+        assertTrue(mlir.contains("\"stablehlo.scatter\""), mlir)
+        assertTrue(
+            mlir.indexOf("stablehlo.select") < mlir.indexOf("\"stablehlo.scatter\""),
+            "the padding mask must be applied to the updates, before the scatter: $mlir",
+        )
+        assertTrue(mlir.contains("update_window_dims = [1]"), mlir)
+        assertTrue(!mlir.contains("unique_indices"), mlir)
     }
 
     @Test

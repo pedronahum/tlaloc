@@ -63,6 +63,15 @@ object Tensors {
     fun <A : ShapeAtom> i32Vector(data: IntArray): DTensor<Rank1<A>, I32> =
         DTensor(HostI32Storage(data.copyOf()), intArrayOf(data.size), I32)
 
+    /**
+     * §0.4.409 — rank-2 I32 tensor constructor: the batched `[B, N]` index
+     * matrices `embedding` takes. Mirrors [f32Matrix] with [HostI32Storage].
+     */
+    fun <A : ShapeAtom, B : ShapeAtom> i32Matrix(rows: Int, cols: Int, data: IntArray): DTensor<Rank2<A, B>, I32> {
+        require(data.size == rows * cols) { "data.size=${data.size} does not match rows*cols=${rows * cols}" }
+        return DTensor(HostI32Storage(data.copyOf()), intArrayOf(rows, cols), I32)
+    }
+
     fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom, D : ShapeAtom> f32Tensor4(
         d0: Int,
         d1: Int,

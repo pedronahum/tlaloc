@@ -176,6 +176,33 @@ class GradientEmissionCoverageTest {
                 listOf(op(OpKind.SUM, listOf(y2), scalar))
             }
         },
+        // §0.4.409 — the padded spelling: both the primal's gather mask and the
+        // adjoint's pre-scatter update mask (compare + select) must emit, with
+        // a collision among the NON-padded positions so the add region still
+        // carries weight.
+        Case("embedding_padded") {
+            DxirBuilder.function("embedding_padded") {
+                val table = param("table", DxirType(F32, listOf(3, 2)))
+                val idx = const(floatArrayOf(0f, 1f, 0f, 2f), DxirType(io.tlaloc.core.I32, listOf(4)))
+                val y = op(
+                    OpKind.EMBEDDING, listOf(table, idx), DxirType(F32, listOf(4, 2)),
+                    attrs = mapOf("padding_index" to 1),
+                )
+                val y2 = op(OpKind.MUL, listOf(y, y), DxirType(F32, listOf(4, 2)))
+                listOf(op(OpKind.SUM, listOf(y2), scalar))
+            }
+        },
+        // §0.4.409 — the [B, N] batch spelling: the r = 2 scatter dim numbers,
+        // with a collision ACROSS batch rows.
+        Case("embedding_batched") {
+            DxirBuilder.function("embedding_batched") {
+                val table = param("table", DxirType(F32, listOf(3, 2)))
+                val idx = const(floatArrayOf(0f, 1f, 2f, 0f), DxirType(io.tlaloc.core.I32, listOf(2, 2)))
+                val y = op(OpKind.EMBEDDING, listOf(table, idx), DxirType(F32, listOf(2, 2, 2)))
+                val y2 = op(OpKind.MUL, listOf(y, y), DxirType(F32, listOf(2, 2, 2)))
+                listOf(op(OpKind.SUM, listOf(y2), scalar))
+            }
+        },
         // §0.4.399 — the runtime-extent family: each op's adjoint is its mirror
         // (SUM_TO ⇄ BROADCAST_LIKE, PAD_TO ⇄ SLICE_AT), so these four cases
         // certify that a SECOND-ORDER reverse body — one containing the ops a

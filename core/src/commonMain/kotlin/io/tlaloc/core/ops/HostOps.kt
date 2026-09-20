@@ -8,6 +8,7 @@ import io.tlaloc.core.HostI32Storage
 import io.tlaloc.core.I32
 import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
+import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
@@ -518,8 +519,70 @@ fun <V : ShapeAtom, D : ShapeAtom, N : ShapeAtom> embedding(
     table: DTensor<Rank2<V, D>, F32>,
     indices: DTensor<Rank1<N>, I32>,
 ): DTensor<Rank2<N, D>, F32> {
-    require(table.rank == 2) { "embedding: table must be rank-2 (V, D); got ${table.dims.toList()}" }
     require(indices.rank == 1) { "embedding: indices must be rank-1; got ${indices.dims.toList()}" }
+    val out = embeddingGather(table, indices, paddingIndex = -1)
+    return DTensor(HostF32Storage(out), intArrayOf(indices.dims[0], table.dims[1]), F32)
+}
+
+/**
+ * §0.4.409 — DiffKT's `embedding(table, indices, paddingIndex)`: positions whose
+ * index equals [paddingIndex] produce EXACT-zero output rows (and, through the
+ * padded `embeddingGrad` twin, contribute zero gradient to the table). A
+ * negative [paddingIndex] means "none" — the -1 sentinel the IR's optional
+ * `padding_index` attr uses. Padded positions skip the bounds check too, so a
+ * paddingIndex outside the vocab is legal (it can never gather).
+ *
+ * Positional-arity disambiguation on purpose: NO default parameter value on
+ * [paddingIndex] — K2 unwraps named args to bare literals without reordering,
+ * so attr-bearing host ops must disambiguate by arity alone.
+ */
+fun <V : ShapeAtom, D : ShapeAtom, N : ShapeAtom> embedding(
+    table: DTensor<Rank2<V, D>, F32>,
+    indices: DTensor<Rank1<N>, I32>,
+    paddingIndex: Int,
+): DTensor<Rank2<N, D>, F32> {
+    require(indices.rank == 1) { "embedding: indices must be rank-1; got ${indices.dims.toList()}" }
+    val out = embeddingGather(table, indices, paddingIndex)
+    return DTensor(HostF32Storage(out), intArrayOf(indices.dims[0], table.dims[1]), F32)
+}
+
+/**
+ * §0.4.409 — the rank-2 index batch `[B, N]` → `[B, N, D]`. Same row-major
+ * gather walk as the rank-1 spelling (the flat position order IS the batch
+ * order), so the dxir interpreter's rank-agnostic EMBEDDING arm stays the
+ * bit-exact oracle. `@JvmName` dodges the erasure clash with the rank-1
+ * overload (both erase to `embedding(DTensor, DTensor)`); Kotlin-side the name
+ * stays `embedding`, which is what the FIR arm and user code see.
+ */
+@JvmName("embeddingBatch")
+fun <V : ShapeAtom, D : ShapeAtom, B : ShapeAtom, N : ShapeAtom> embedding(
+    table: DTensor<Rank2<V, D>, F32>,
+    indices: DTensor<Rank2<B, N>, I32>,
+): DTensor<Rank3<B, N, D>, F32> {
+    require(indices.rank == 2) { "embedding: indices must be rank-2 (B, N); got ${indices.dims.toList()}" }
+    val out = embeddingGather(table, indices, paddingIndex = -1)
+    return DTensor(HostF32Storage(out), intArrayOf(indices.dims[0], indices.dims[1], table.dims[1]), F32)
+}
+
+/** §0.4.409 — rank-2 index batch with [paddingIndex]; see the rank-1 padded overload. */
+@JvmName("embeddingBatchPadded")
+fun <V : ShapeAtom, D : ShapeAtom, B : ShapeAtom, N : ShapeAtom> embedding(
+    table: DTensor<Rank2<V, D>, F32>,
+    indices: DTensor<Rank2<B, N>, I32>,
+    paddingIndex: Int,
+): DTensor<Rank3<B, N, D>, F32> {
+    require(indices.rank == 2) { "embedding: indices must be rank-2 (B, N); got ${indices.dims.toList()}" }
+    val out = embeddingGather(table, indices, paddingIndex)
+    return DTensor(HostF32Storage(out), intArrayOf(indices.dims[0], indices.dims[1], table.dims[1]), F32)
+}
+
+/** Shared flat gather walk — the dxir interpreter's EMBEDDING arm, bit-for-bit. */
+private fun embeddingGather(
+    table: DTensor<*, F32>,
+    indices: DTensor<*, I32>,
+    paddingIndex: Int,
+): FloatArray {
+    require(table.rank == 2) { "embedding: table must be rank-2 (V, D); got ${table.dims.toList()}" }
     val t = table.hostF32()
     val idx = indices.hostI32()
     val vocab = table.dims[0]
@@ -528,12 +591,13 @@ fun <V : ShapeAtom, D : ShapeAtom, N : ShapeAtom> embedding(
     val out = FloatArray(positions * embedDim)
     for (p in 0 until positions) {
         val v = idx[p]
+        if (paddingIndex >= 0 && v == paddingIndex) continue // exact-zero row
         require(v in 0 until vocab) {
             "embedding: index $v at position $p out of bounds for vocab $vocab"
         }
         for (d in 0 until embedDim) out[p * embedDim + d] = t[v * embedDim + d]
     }
-    return DTensor(HostF32Storage(out), intArrayOf(positions, embedDim), F32)
+    return out
 }
 
 /**
@@ -551,6 +615,20 @@ fun <S : Shape> embeddingGrad(
     upstream: DTensor<*, F32>,
     indices: DTensor<*, I32>,
     tableTemplate: DTensor<S, F32>,
+): DTensor<S, F32> = embeddingGrad(upstream, indices, tableTemplate, -1)
+
+/**
+ * §0.4.409 — the padded reverse twin: positions whose index equals
+ * [paddingIndex] are SKIPPED by the scatter walk entirely, so the padded vocab
+ * row's gradient stays exactly zero (and a paddingIndex outside the vocab is
+ * legal — nothing is ever scattered there). Negative [paddingIndex] = none.
+ * Arity-disambiguated from the 3-arg twin — no default parameter values.
+ */
+fun <S : Shape> embeddingGrad(
+    upstream: DTensor<*, F32>,
+    indices: DTensor<*, I32>,
+    tableTemplate: DTensor<S, F32>,
+    paddingIndex: Int,
 ): DTensor<S, F32> {
     require(tableTemplate.rank == 2) {
         "embeddingGrad: tableTemplate must be rank-2 (V, D); got ${tableTemplate.dims.toList()}"
@@ -566,6 +644,7 @@ fun <S : Shape> embeddingGrad(
     val out = FloatArray(vocab * embedDim)
     for (p in 0 until positions) {
         val v = idx[p]
+        if (paddingIndex >= 0 && v == paddingIndex) continue // padded rows carry no gradient
         require(v in 0 until vocab) {
             "embeddingGrad: index $v at position $p out of bounds for vocab $vocab"
         }

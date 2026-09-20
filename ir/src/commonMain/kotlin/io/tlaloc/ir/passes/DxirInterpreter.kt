@@ -764,9 +764,15 @@ object DxirInterpreter {
                 val vocab = tableType.dims[0]
                 val embedDim = tableType.dims[1]
                 val positions = idx.size
+                // §0.4.409 — optional `padding_index` attr (-1 / absent = none):
+                // positions whose index equals it produce EXACT-zero rows and
+                // skip the bounds check (a paddingIndex outside the vocab is
+                // legal — it can never gather).
+                val paddingIndex = (op.attrs["padding_index"] as? Int) ?: -1
                 val out = FloatArray(positions * embedDim)
                 for (p in 0 until positions) {
                     val v = idx[p].toInt()
+                    if (paddingIndex >= 0 && v == paddingIndex) continue
                     require(v in 0 until vocab) {
                         "DxirInterpreter: EMBEDDING index $v out of bounds for vocab $vocab"
                     }
@@ -797,9 +803,14 @@ object DxirInterpreter {
                     "DxirInterpreter: EMBEDDING_GRAD upstream size ${upstream.size} != positions " +
                         "$positions * embedDim $embedDim"
                 }
+                // §0.4.409 — `padding_index` attr: padded positions are skipped
+                // by the scatter walk, so the padded vocab row's gradient stays
+                // exactly zero (mirrors the padded EMBEDDING arm above).
+                val paddingIndex = (op.attrs["padding_index"] as? Int) ?: -1
                 val out = FloatArray(vocab * embedDim)
                 for (p in 0 until positions) {
                     val v = idx[p].toInt()
+                    if (paddingIndex >= 0 && v == paddingIndex) continue
                     require(v in 0 until vocab) {
                         "DxirInterpreter: EMBEDDING_GRAD index $v out of bounds for vocab $vocab"
                     }

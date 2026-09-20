@@ -124,6 +124,106 @@ class DxirHostEmbeddingParityTest {
     }
 
     @Test
+    fun hostPaddedEmbeddingMatchesInterpreterArmBitExact() {
+        // §0.4.409 — padding_index = 0 with a collision on slot 2: padded
+        // positions produce exact-zero rows on both paths, bit-for-bit.
+        val idxData = floatArrayOf(0f, 2f, 0f, 2f, 1f)
+        val fn = DxirBuilder.function("embed_pad_fwd") {
+            val table = param("table", DxirType(F32, listOf(3, 2)))
+            val idx = const(idxData, DxirType(I32, listOf(5)))
+            listOf(
+                op(
+                    OpKind.EMBEDDING, listOf(table, idx), DxirType(F32, listOf(5, 2)),
+                    attrs = mapOf("padding_index" to 0),
+                ),
+            )
+        }
+        val tableData = floatArrayOf(0.3f, -1.2f, 2.1f, 0.7f, 1.6f, -0.4f)
+        val want = DxirInterpreter.evalFunction(fn, listOf(tableData)).single()
+
+        val got = embedding(
+            Tensors.f32Matrix<Sym, Sym>(3, 2, tableData),
+            Tensors.i32Vector<Sym>(intArrayOf(0, 2, 0, 2, 1)),
+            0,
+        )
+        assertContentEquals(want, got.hostF32(), "host padded embedding diverges from the interpreter arm")
+        assertTrue(got.hostF32()[0] == 0f && got.hostF32()[1] == 0f, "padded position must be exact zero")
+
+        // The padded reverse twin against the interpreter's padded scatter arm.
+        val upData = floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f)
+        val gradFn = DxirBuilder.function("embed_pad_grad") {
+            val up = param("up", DxirType(F32, listOf(5, 2)))
+            val template = param("t", DxirType(F32, listOf(3, 2)))
+            val idx = const(idxData, DxirType(I32, listOf(5)))
+            listOf(
+                op(
+                    OpKind.EMBEDDING_GRAD, listOf(idx, up, template), DxirType(F32, listOf(3, 2)),
+                    attrs = mapOf("padding_index" to 0),
+                ),
+            )
+        }
+        val wantD = DxirInterpreter.evalFunction(gradFn, listOf(upData, tableData)).single()
+        val gotD = embeddingGrad(
+            upstream = DTensor<Rank2<Sym, Sym>, F32>(HostF32Storage(upData.copyOf()), intArrayOf(5, 2), F32),
+            indices = Tensors.i32Vector<Sym>(intArrayOf(0, 2, 0, 2, 1)),
+            tableTemplate = Tensors.f32Matrix<Sym, Sym>(3, 2, tableData),
+            paddingIndex = 0,
+        )
+        assertContentEquals(wantD, gotD.hostF32(), "host padded embeddingGrad diverges from the interpreter arm")
+        // Analytic: row 0 (padded) EXACT zero; row 1 ← position 4; row 2 ←
+        // positions 1 and 3 (the collision still sums).
+        assertContentEquals(
+            floatArrayOf(0f, 0f, 9f, 10f, 3f + 7f, 4f + 8f),
+            gotD.hostF32(),
+            "padded scatter-add diverges from the analytic pin",
+        )
+    }
+
+    @Test
+    fun hostRankTwoEmbeddingMatchesInterpreterArmBitExact() {
+        // §0.4.409 — [B=2, N=2] index batch → [2, 2, D], with a collision
+        // across batch rows (slot 1 in both).
+        val idxData = floatArrayOf(1f, 0f, 2f, 1f)
+        val fn = DxirBuilder.function("embed_batch_fwd") {
+            val table = param("table", DxirType(F32, listOf(3, 2)))
+            val idx = const(idxData, DxirType(I32, listOf(2, 2)))
+            listOf(op(OpKind.EMBEDDING, listOf(table, idx), DxirType(F32, listOf(2, 2, 2))))
+        }
+        val tableData = floatArrayOf(0.3f, -1.2f, 2.1f, 0.7f, 1.6f, -0.4f)
+        val want = DxirInterpreter.evalFunction(fn, listOf(tableData)).single()
+
+        val got = embedding(
+            Tensors.f32Matrix<Sym, Sym>(3, 2, tableData),
+            Tensors.i32Matrix<Sym, Sym>(2, 2, intArrayOf(1, 0, 2, 1)),
+        )
+        assertContentEquals(want, got.hostF32(), "host batched embedding diverges from the interpreter arm")
+        assertContentEquals(listOf(2, 2, 2), got.dims.toList())
+
+        // The (rank-agnostic) reverse twin over the batched upstream.
+        val upData = floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f)
+        val gradFn = DxirBuilder.function("embed_batch_grad") {
+            val up = param("up", DxirType(F32, listOf(2, 2, 2)))
+            val template = param("t", DxirType(F32, listOf(3, 2)))
+            val idx = const(idxData, DxirType(I32, listOf(2, 2)))
+            listOf(op(OpKind.EMBEDDING_GRAD, listOf(idx, up, template), DxirType(F32, listOf(3, 2))))
+        }
+        val wantD = DxirInterpreter.evalFunction(gradFn, listOf(upData, tableData)).single()
+        val gotD = embeddingGrad(
+            upstream = Tensors.f32Tensor3<Sym, Sym, Sym>(2, 2, 2, upData.copyOf()),
+            indices = Tensors.i32Matrix<Sym, Sym>(2, 2, intArrayOf(1, 0, 2, 1)),
+            tableTemplate = Tensors.f32Matrix<Sym, Sym>(3, 2, tableData),
+        )
+        assertContentEquals(wantD, gotD.hostF32(), "host batched embeddingGrad diverges from the interpreter arm")
+        // Analytic: slot 0 ← flat position 1; slot 1 ← flat positions 0 and 3
+        // (the cross-batch collision); slot 2 ← flat position 2.
+        assertContentEquals(
+            floatArrayOf(3f, 4f, 1f + 7f, 2f + 8f, 5f, 6f),
+            gotD.hostF32(),
+            "cross-batch collision sum diverges from the analytic pin",
+        )
+    }
+
+    @Test
     fun intZerosLikeShapesOffTheTemplate() {
         val z = intZerosLike(Tensors.i32Vector<Lit<Int>>(intArrayOf(7, 1, 3)))
         assertContentEquals(intArrayOf(0, 0, 0), z.hostI32())

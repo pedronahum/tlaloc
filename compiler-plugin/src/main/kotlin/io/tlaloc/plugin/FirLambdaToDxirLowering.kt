@@ -944,23 +944,39 @@ object FirLambdaToDxirLowering {
         // untouched — nothing is baked. The indices param is non-differentiable;
         // DxirReverseTransform types its gradient slot as a structural integer
         // zero (§0.4.54) which the synthesis materialises via `intZerosLike`.
+        // §0.4.409 — two widenings: an optional third argument (DiffKT's
+        // `paddingIndex`, an Int literal folded onto the op as the
+        // `padding_index` attr — arity disambiguates the overloads, never
+        // default parameter values), and rank-2 `[B, N]` index batches
+        // (result `[B, N, D]`; dims still COPIED, sentinels propagate).
         if (fqn == "io.tlaloc.core.ops.embedding") {
             val args = call.argumentList.arguments
-            if (args.size != 2) {
-                throw LoweringException("$fqn requires 2 arguments (table, indices); got ${args.size}")
+            if (args.size !in 2..3) {
+                throw LoweringException("$fqn requires 2 or 3 arguments (table, indices[, paddingIndex]); got ${args.size}")
             }
             val table = lowerExpr(args[0], env, emitter)
             val indices = lowerExpr(args[1], env, emitter)
             if (table.type.rank != 2 || table.type.dtype != F32) {
                 throw LoweringException("$fqn table must be a rank-2 F32 tensor; got ${table.type}")
             }
-            if (indices.type.rank != 1 || indices.type.dtype != I32) {
-                throw LoweringException("$fqn indices must be a rank-1 I32 tensor; got ${indices.type}")
+            if (indices.type.rank !in 1..2 || indices.type.dtype != I32) {
+                throw LoweringException("$fqn indices must be a rank-1 or rank-2 I32 tensor; got ${indices.type}")
+            }
+            val attrs: Map<String, Any> = if (args.size == 3) {
+                val e = args[2]
+                val pad = intLiteralArg((e as? FirNamedArgumentExpression)?.expression ?: e)
+                    ?: throw LoweringException("$fqn paddingIndex must be an Int literal")
+                // A negative literal is the "none" sentinel — canonicalise to no
+                // attr so `embedding(t, i)` and `embedding(t, i, -1)` CSE alike.
+                if (pad >= 0) mapOf("padding_index" to pad) else emptyMap()
+            } else {
+                emptyMap()
             }
             return emitter.op(
                 kind = OpKind.EMBEDDING,
                 operands = listOf(table, indices),
-                type = DxirType(F32, listOf(indices.type.dims[0], table.type.dims[1])),
+                attrs = attrs,
+                type = DxirType(F32, indices.type.dims + listOf(table.type.dims[1])),
             )
         }
 
