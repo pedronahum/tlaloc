@@ -1153,6 +1153,26 @@ class RoundTripTest {
     }
 
     @Test
+    fun embeddingGradRoundTripsScatterAddRegion() {
+        requireTranslateOrSkip()
+        // §0.4.400 — EmbeddingRule's fused adjoint: the scatter+add-region
+        // emission over a splat-zero base, with an I32 index CONST so the
+        // integer dense-literal spelling round-trips too.
+        val fn = DxirBuilder.function("eg") {
+            val up = param("u", DxirType(F32, listOf(4, 8)))
+            val template = param("t", DxirType(F32, listOf(10, 8)))
+            val idx = const(floatArrayOf(0f, 2f, 0f, 7f), DxirType(io.tlaloc.core.I32, listOf(4)))
+            val y = op(
+                OpKind.EMBEDDING_GRAD,
+                listOf(idx, up, template),
+                DxirType(F32, listOf(10, 8)),
+            )
+            listOf(y)
+        }
+        validate(DxirModule(listOf(fn)).toStablehlo(), "EMBEDDING_GRAD scatter+add region")
+    }
+
+    @Test
     fun convTranspose2dRoundTripsUpsampling() {
         requireTranslateOrSkip()
         // 2× upsampling via transposed conv. Input (1, 16, 8, 8), kernel (16, 8, 3, 3) [i, o, Kh, Kw].

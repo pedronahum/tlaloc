@@ -58,6 +58,26 @@ internal fun denseFromArray(values: FloatArray, dims: List<Int>): String {
 }
 
 /**
+ * §0.4.400 — [denseFromArray]'s integer twin: format a row-major [FloatArray]
+ * (the dxir const carrier — integer consts store their values in the same
+ * float-width view the interpreter uses) as an INTEGER dense literal. Without
+ * this, an I32 index const (`embedding`'s gradient graphs clone them) would
+ * print `[0.0, 2.0]` against `tensor<2xi32>` — invalid MLIR.
+ */
+internal fun denseIntFromArray(values: FloatArray, dims: List<Int>): String {
+    require(dims.isNotEmpty()) { "denseIntFromArray: empty dims (use the scalar arm instead)" }
+    if (dims.size == 1) return values.joinToString(prefix = "[", postfix = "]") { it.toLong().toString() }
+    val outer = dims[0]
+    val inner = dims.drop(1)
+    val chunkSize = values.size / outer
+    val chunks = (0 until outer).map { i ->
+        val slice = FloatArray(chunkSize) { j -> values[i * chunkSize + j] }
+        denseIntFromArray(slice, inner)
+    }
+    return chunks.joinToString(prefix = "[", postfix = "]")
+}
+
+/**
  * MLIR bit-pattern literal for `-Inf` / `Int.MIN` / `false` for the given
  * [dtype]. Used as the identity element for MAX-style reductions.
  */

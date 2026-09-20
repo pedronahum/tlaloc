@@ -314,12 +314,15 @@ enum class OpKind {
     EMBEDDING, CROSS_ENTROPY, CAST,
 
     // §0.4.370 — reverse of EMBEDDING w.r.t. its table (the DiffKT-parity
-    // embedding VjpRule's fused adjoint). EMBEDDING_GRAD(indices, upstream) →
-    // dTable [V, D]: scatter-ADD each upstream row upstream[p, :] back to vocab
-    // slot indices[p]. Result type [V, D] carries the vocab/embed dims; indices
-    // are non-differentiable so no gradient flows to them. Interpreter arm only
-    // in v1 (IR-level certification); the StableHLO emission via scatter+add
-    // region is deferred until `embedding` is reachable from `grad {}`.
+    // embedding VjpRule's fused adjoint). §0.4.400 — grew a third operand:
+    // EMBEDDING_GRAD(indices, upstream, tableTemplate) → dTable [V, D]:
+    // scatter-ADD each upstream row upstream[p, :] back to vocab slot
+    // indices[p]. The template joins the SUM_TO/PAD_TO shape-only-operand
+    // family — its VALUES are never read (the interpreter and emitter size the
+    // result off the concrete result type), but under `grad {}`'s -1 sentinel
+    // dims it is the only sound source of the vocab extent, so the synthesis
+    // forwards it to the host twin `embeddingGrad`. Indices are
+    // non-differentiable so no gradient flows to them.
     EMBEDDING_GRAD,
 
     // Structured control flow (Stage B substrate per docs/STAGE_B_PLAN.md §3.1).

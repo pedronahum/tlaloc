@@ -936,6 +936,34 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // §0.4.400 — Phase A3b (DiffKT parity): `embedding(table, indices)` — the
+        // front-end for the §0.4.370 EMBEDDING wiring (interpreter/emitter/
+        // EmbeddingRule/forward tangent). Rank-2 F32 table gathered by a rank-1
+        // I32 index vector → rank-2 [N, D]. The result dims are COPIED from the
+        // operands' dim slots (indices' N, table's D), so -1 sentinels propagate
+        // untouched — nothing is baked. The indices param is non-differentiable;
+        // DxirReverseTransform types its gradient slot as a structural integer
+        // zero (§0.4.54) which the synthesis materialises via `intZerosLike`.
+        if (fqn == "io.tlaloc.core.ops.embedding") {
+            val args = call.argumentList.arguments
+            if (args.size != 2) {
+                throw LoweringException("$fqn requires 2 arguments (table, indices); got ${args.size}")
+            }
+            val table = lowerExpr(args[0], env, emitter)
+            val indices = lowerExpr(args[1], env, emitter)
+            if (table.type.rank != 2 || table.type.dtype != F32) {
+                throw LoweringException("$fqn table must be a rank-2 F32 tensor; got ${table.type}")
+            }
+            if (indices.type.rank != 1 || indices.type.dtype != I32) {
+                throw LoweringException("$fqn indices must be a rank-1 I32 tensor; got ${indices.type}")
+            }
+            return emitter.op(
+                kind = OpKind.EMBEDDING,
+                operands = listOf(table, indices),
+                type = DxirType(F32, listOf(indices.type.dims[0], table.type.dims[1])),
+            )
+        }
+
         // §0.4.384 — Phase A3b: the conv user surface (NCHW, the layout the
         // interpreter/emitter fix). `x.conv2d(w, …)` takes an OIHW
         // `[Co, Ci, kh, kw]` kernel; `x.convTranspose2d(w, …)` takes IOHW

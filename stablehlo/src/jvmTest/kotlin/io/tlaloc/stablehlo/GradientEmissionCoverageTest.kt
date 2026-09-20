@@ -28,9 +28,6 @@ import kotlin.test.assertTrue
  * rather than masquerading as an emitter gap.
  *
  * Deliberately NOT in the catalogue, with reasons:
- * - `EMBEDDING` — its adjoint `EMBEDDING_GRAD` has no emitter arm by design
- *   (scatter+add region, deferred), and `embedding` has no FIR arm either, so no
- *   `grad {}` body can contain one. Unreachable, not a gap.
  * - overlapping or padded `MAXPOOL2D` — the all-ties convention is not expressible
  *   over overlapping windows in StableHLO (§0.4.392); `EmitterTest` pins that this
  *   fails loudly. The non-overlapping case IS covered below.
@@ -150,6 +147,20 @@ class GradientEmissionCoverageTest {
         // §0.4.396 — REVERSE (flip): the self-adjoint VJP emits a second
         // `stablehlo.reverse` with the same literal axes.
         unaryLoss("flip", OpKind.REVERSE, listOf(2, 3), attrs = mapOf("dimensions" to listOf(0, 1))),
+        // §0.4.400 — EMBEDDING: its EMBEDDING_GRAD adjoint (scatter+add region,
+        // deferred at §0.4.370, landed with the `grad {}` front-end) now emits.
+        // The index vector rides as a const (a param would draw this sweep's
+        // fractional test data), with a collision so the scatter-add region is
+        // semantically load-bearing, not just syntactically present.
+        Case("embedding") {
+            DxirBuilder.function("embedding") {
+                val table = param("table", DxirType(F32, listOf(3, 2)))
+                val idx = const(floatArrayOf(0f, 2f, 0f, 1f), DxirType(io.tlaloc.core.I32, listOf(4)))
+                val y = op(OpKind.EMBEDDING, listOf(table, idx), DxirType(F32, listOf(4, 2)))
+                val y2 = op(OpKind.MUL, listOf(y, y), DxirType(F32, listOf(4, 2)))
+                listOf(op(OpKind.SUM, listOf(y2), scalar))
+            }
+        },
         // §0.4.399 — the runtime-extent family: each op's adjoint is its mirror
         // (SUM_TO ⇄ BROADCAST_LIKE, PAD_TO ⇄ SLICE_AT), so these four cases
         // certify that a SECOND-ORDER reverse body — one containing the ops a

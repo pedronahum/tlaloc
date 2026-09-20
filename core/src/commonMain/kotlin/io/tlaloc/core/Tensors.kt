@@ -56,6 +56,13 @@ object Tensors {
      * substrate). Callers brand the axes as they do for the lower ranks —
      * typically all `Sym`, since the conv spatial extents are runtime facts.
      */
+    /**
+     * §0.4.400 — rank-1 I32 tensor constructor: the index vectors `embedding`
+     * takes. Mirrors [f32Vector] with [HostI32Storage] behind it.
+     */
+    fun <A : ShapeAtom> i32Vector(data: IntArray): DTensor<Rank1<A>, I32> =
+        DTensor(HostI32Storage(data.copyOf()), intArrayOf(data.size), I32)
+
     fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom, D : ShapeAtom> f32Tensor4(
         d0: Int,
         d1: Int,
@@ -74,6 +81,15 @@ fun DTensor<*, F32>.hostF32(): FloatArray {
     val s = storage
     require(s is HostF32Storage) {
         "operation requires HostF32Storage, got ${s::class.simpleName}"
+    }
+    return s.data
+}
+
+/** §0.4.400 — [hostF32]'s I32 twin, for `embedding`'s index vectors. */
+fun DTensor<*, I32>.hostI32(): IntArray {
+    val s = storage
+    require(s is HostI32Storage) {
+        "operation requires HostI32Storage, got ${s::class.simpleName}"
     }
     return s.data
 }

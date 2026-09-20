@@ -102,7 +102,15 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // matching the declared type's dims. Rank-0 literal goes through
             // the Float/Double arms above because the scalar capture path uses
             // `e.value[0]` directly; FloatArray here is strictly rank ≥ 1.
-            is FloatArray -> denseFromArray(v, node.type.dims)
+            // §0.4.400 — integer-typed rank-N consts (embedding index vectors in
+            // gradient graphs) format as integer literals; the FloatArray is just
+            // the dxir const carrier.
+            is FloatArray ->
+                if (node.type.dtype is I32 || node.type.dtype is I64) {
+                    denseIntFromArray(v, node.type.dims)
+                } else {
+                    denseFromArray(v, node.type.dims)
+                }
             else -> error("non-numeric DxirConst value: $v (${v::class.simpleName})")
         }
         out.appendLine("$step$name = stablehlo.constant dense<$literal> : ${node.type.toMlir()}")
@@ -363,6 +371,15 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 tableType = node.operands[0].type,
                 indicesType = node.operands[1].type,
                 outType = node.type,
+            )
+            // §0.4.400 — the shape template (operand 2) is deliberately not
+            // referenced: the concrete result type already carries [V, D] here.
+            OpKind.EMBEDDING_GRAD -> emitEmbeddingGrad(
+                step, name,
+                indices = ops[0], upstream = ops[1],
+                node = node,
+                indicesType = node.operands[0].type,
+                upstreamType = node.operands[1].type,
             )
             OpKind.SCALED_DOT_PRODUCT_ATTENTION -> emitSdpa(
                 step, name,
@@ -2579,6 +2596,62 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             indexVectorDim = indicesType.rank,      // scalar index per position
             sliceSizes = listOf(1, embedDim),
             indicesAreSorted = false,
+        )
+    }
+
+    /**
+     * §0.4.400 — EMBEDDING's fused scatter-add adjoint, deferred by §0.4.370 and
+     * closed here: `stablehlo.scatter` with an ADD computation region over a
+     * splat-zero `[V, D]` base. Rank-1 `[N]` indices with
+     * `index_vector_dim = 1` (== indices rank, the implicit trailing-1 form the
+     * SCATTER_ADD arm already uses for its scalar index); each `[N, D]` upstream
+     * row is a window over operand axis 1 (`update_window_dims = [1]`) landing
+     * at the vocab slot its index selects (`inserted_window_dims = [0]`,
+     * `scatter_dims_to_operand_dims = [0]`). Collisions are the POINT — the same
+     * vocab row embedded at several positions must accumulate — so
+     * `unique_indices` is left unset and the region body is a real add, never
+     * the §0.4.133 return-upd peephole (which is only sound for unique indices).
+     */
+    private fun emitEmbeddingGrad(
+        step: String,
+        name: String,
+        indices: String,
+        upstream: String,
+        node: DxirOp,
+        indicesType: DxirType,
+        upstreamType: DxirType,
+    ) {
+        val outType = node.type
+        require(outType.rank == 2) {
+            "EMBEDDING_GRAD result must be rank-2 (vocab, dim); got ${outType.dims}"
+        }
+        require(indicesType.dtype is I32 || indicesType.dtype is I64) {
+            "EMBEDDING_GRAD indices must be integer (I32 or I64); got ${indicesType.dtype}"
+        }
+        require(indicesType.rank == 1) {
+            "EMBEDDING_GRAD indices must be rank-1; got ${indicesType.dims}"
+        }
+        val embedDim = outType.dims[1]
+        require(upstreamType.dims == listOf(indicesType.dims[0], embedDim)) {
+            "EMBEDDING_GRAD upstream shape ${upstreamType.dims} does not match expected " +
+                "[${indicesType.dims[0]}, $embedDim] (indices ${indicesType.dims} ++ [$embedDim])"
+        }
+
+        val zeros = synth()
+        out.appendLine("$step$zeros = stablehlo.constant dense<0.0> : ${outType.toMlir()}")
+
+        val scalarT = "tensor<${mlirElementType(outType.dtype)}>"
+        val dimNumbers = "#stablehlo.scatter<update_window_dims = [1], inserted_window_dims = [0], " +
+            "scatter_dims_to_operand_dims = [0], index_vector_dim = 1>"
+        val cur = synth(); val upd = synth(); val sum = synth()
+        out.appendLine(
+            """$step$name = "stablehlo.scatter"($zeros, $indices, $upstream) <{scatter_dimension_numbers = $dimNumbers}> ({""",
+        )
+        out.appendLine("$step ^bb0($cur: $scalarT, $upd: $scalarT):")
+        out.appendLine("$step   $sum = stablehlo.add $cur, $upd : $scalarT")
+        out.appendLine("$step   stablehlo.return $sum : $scalarT")
+        out.appendLine(
+            "$step }) : (${outType.toMlir()}, ${indicesType.toMlir()}, ${upstreamType.toMlir()}) -> ${outType.toMlir()}",
         )
     }
 

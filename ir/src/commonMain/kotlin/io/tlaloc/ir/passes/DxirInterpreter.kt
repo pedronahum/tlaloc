@@ -722,12 +722,17 @@ object DxirInterpreter {
             }
             OpKind.EMBEDDING_GRAD -> {
                 // §0.4.370 — reverse of EMBEDDING w.r.t. the table.
-                // EMBEDDING_GRAD(indices: int rank-r, upstream: [indices.dims ++ [D]])
-                // → dTable [V, D]. Scatter-ADD each upstream row back to the vocab slot
-                // its index selected: dTable[idx[p], :] += upstream[p, :]. The result
-                // type [V, D] carries V and D (indices carry no gradient).
-                require(op.operands.size == 2) {
-                    "DxirInterpreter: EMBEDDING_GRAD requires 2 operands (indices, upstream), got ${op.operands.size}"
+                // EMBEDDING_GRAD(indices: int rank-r, upstream: [indices.dims ++ [D]],
+                // tableTemplate: [V, D]) → dTable [V, D]. Scatter-ADD each upstream
+                // row back to the vocab slot its index selected:
+                // dTable[idx[p], :] += upstream[p, :]. The result type [V, D] carries
+                // V and D (indices carry no gradient). §0.4.400 — the template
+                // (operand 2) is SHAPE-ONLY for the `grad {}` synthesis path, where
+                // -1 sentinel dims hide V; here the concrete result type already
+                // carries the extents, so the template is deliberately NOT evaluated.
+                require(op.operands.size == 3) {
+                    "DxirInterpreter: EMBEDDING_GRAD requires 3 operands (indices, upstream, tableTemplate), " +
+                        "got ${op.operands.size}"
                 }
                 val vocab = op.type.dims[0]
                 val embedDim = op.type.dims[1]

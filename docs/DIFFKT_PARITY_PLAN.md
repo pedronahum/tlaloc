@@ -238,7 +238,8 @@ reachable from `grad {}`, not new math. New-op families come after.
     synthesis were missing. `logSoftmax` lowers to `LOG(SOFTMAX(x))` (both
     fully-ruled ops; **LOGSUMEXP stays emitter-only** — no VJP/interp/JVP),
     which also forced tensor `irLog`/`irExp` (were scalar-only).
-  - **A3b ✅ (partial, §0.4.370)** — the two self-contained halves landed:
+  - **A3b ✅ (§0.4.370 IR-level; §0.4.400 embedding E2E)** — the two
+    self-contained halves landed, then embedding got its front-end:
     - **`embedding` VjpRule** ✅: EMBEDDING was wired below the surface
       (emitter-as-gather + cost model) but had no reverse rule and no
       interpreter arm. Added: an EMBEDDING interpreter arm (rank-2 table +
@@ -248,10 +249,32 @@ reachable from `grad {}`, not new math. New-op families come after.
       carries the dims, indices non-differentiable), the EmbeddingRule VjpRule
       (mirrors GatherRule's fused scatter-add), and the EMBEDDING forward-mode
       tangent (linear in the table). Certified IR-level: a hand-pinned
-      collision-summing dTable + the JVP⇄VJP cross-identity. **NOT reachable
-      from `grad {}`** (no FIR/synthesis arm) — IR-level only, like the pre-A3a
-      softmax state; EMBEDDING_GRAD's StableHLO scatter+add-region emission is
-      also deferred (interpreter arm suffices for the IR-level cert).
+      collision-summing dTable + the JVP⇄VJP cross-identity.
+      **§0.4.400 — `embedding` reaches `grad {}` E2E**, closing both §0.4.370
+      deferrals. Front-end: `:core` host `embedding(table, indices)` (`[V,D]` ⊗
+      rank-1 I32 `[N]` → `[N,D]`, bit-exact vs the interpreter arm per
+      `DxirHostEmbeddingParityTest`) + FIR arm + `irEmbedding`/`irEmbeddingGrad`
+      synthesis calling the host twin `embeddingGrad(upstream, indices,
+      tableTemplate)`. Two design points: (a) EMBEDDING_GRAD grew a THIRD
+      operand — the primal table as a shape-only template (the SUM_TO/PAD_TO
+      convention), because under -1 sentinels the template's runtime dims are
+      the only sound source of the vocab extent for the host call; (b) the I32
+      index vector flows through the lambda as the first integer tensor PARAM
+      the synthesis accepts (`isAcceptedIndexTensorType`, I32 rank-1) — its
+      gradient slot is §0.4.54's structural integer zero, materialised as
+      `intZerosLike(indices)` (requires a unique index-typed param; several
+      would be ambiguous and reject). The scatter+add-region emission also
+      landed (`stablehlo.scatter` over a splat-zero base, real add region — no
+      `unique_indices`, no return-upd peephole, collisions must accumulate) with
+      integer dense-literal const support, EmitterTest pins, the
+      GradientEmissionCoverageTest exclusion removed (a collision-bearing
+      embedding case swept instead), and `PjrtEmbeddingSmokeTest` XLA-verified
+      on the GB10 (gradient bit-identical at 0.0). E2E cert: linear loss
+      (dT rows = index counts, unselected vocab row EXACT zeros) and a
+      nonlinear loss whose grad body RECOMPUTES the embedding, no tape
+      fallback. Deferred: `paddingIndex`, rank-2 index batches (host surface is
+      rank-1), and indices produced by in-lambda integer arithmetic (params
+      only).
     - **`crossEntropyLoss`/`nllLoss`** ✅ E2E through `grad {}`: composed in
       FIR onto existing fully-ruled ops (no new VjpRule). `crossEntropyLoss` =
       `NEG(SUM(MUL(oneHot, LOG(SOFTMAX(logits, -1)))))` (sum-reduction
@@ -590,7 +613,9 @@ reachable from `grad {}`, not new math. New-op families come after.
        `window_reversal` unverified, SILU/GELU sub-user-surface).
        Remaining GPU gaps after this: overlapping/padded maxpool gradients (closed as
        inherent, item 4) and `EMBEDDING_GRAD` (unreachable — `embedding` has no FIR
-       arm, so no `grad {}` body can contain one).
+       arm, so no `grad {}` body can contain one). *(§0.4.400 closed the
+       EMBEDDING_GRAD gap: scatter+add-region emission landed with the `grad {}`
+       front-end, the sweep exclusion is gone, and the emission is GPU-smoked.)*
     ✅ **§0.4.387 — composition certified.** `CnnBlockGradientTest` runs one
     `grad {}` body carrying conv → relu → avgPool → sum PLUS a skip term, so the
     gradient threads an AVGPOOL2D_GRAD into both conv adjoints with a RELU/STEP
@@ -1271,7 +1296,7 @@ argument fallback) ·
 | `batchNorm` (raw op, training-stats variant) | 🟡 | BATCHNORM OpKind exists; VJP + surface unaudited — fold into A3 |
 | `softmax(axis) / logSoftmax / logSoftmaxGrad` | 🟡 | SOFTMAX/LOGSUMEXP + VJPs exist → A3 |
 | `crossEntropyLoss / crossEntropyLossFromOneHot / nllLossFromOneHot` | ✅ | §0.4.370: `crossEntropyLoss`/`nllLoss` composed in FIR from logSoftmax, E2E through `grad {}` (CROSS_ENTROPY OpKind stays emitter-only) |
-| `embedding(table, indices, paddingIndex)` | 🟡 | §0.4.370: EmbeddingRule VjpRule + EMBEDDING_GRAD adjoint + interpreter + forward tangent, **IR-level only** (no `grad {}` FIR/synthesis arm yet); `paddingIndex` not modelled |
+| `embedding(table, indices, paddingIndex)` | ✅ | §0.4.370 IR-level (EmbeddingRule + EMBEDDING_GRAD + interpreter + forward tangent) → §0.4.400 E2E through `grad {}` (host op + FIR arm + I32-index-param synthesis + scatter+add emission, GPU-smoked); `paddingIndex` not modelled, indices rank-1 params only |
 | `reshape / flatten(startDim) / squeeze / unsqueeze / expand / broadcastTo` | 🟡 | reshape/squeeze/unsqueeze/flatten/transpose ✅ A2a (§0.4.367); `broadcastTo`/`expand` rank-increasing ✅ A2b (§0.4.371) + in-place size-1 stretch ✅ A2b (§0.4.373, runtime-extent `SUM_TO` adjoint) + 2nd-order-through-broadcast ✅ (§0.4.399, `BROADCAST_LIKE`) — mixed rank-increase+stretch still deferred |
 | `transpose(axes) / leftTranspose / rightTranspose` | 🟡 | TRANSPOSE + VJP → A2 (left/right = sugar) |
 | `concat / stack / split / meld` | 🟡 | CONCAT/SPLIT + VJPs → A2 (`meld` = flatten-and-concat sugar; inverse `split`) |

@@ -1061,6 +1061,84 @@ class EmitterTest {
     }
 
     @Test
+    fun embeddingGradEmitsScatterWithAddRegionOverZeros() {
+        // §0.4.400 — EmbeddingRule's fused adjoint: indices (3,) + upstream (3, 4)
+        // + shape template (10, 4) -> dTable (10, 4), as a scatter with a REAL add
+        // region over a splat-zero base. Collisions must accumulate, so neither
+        // `unique_indices` nor the return-upd peephole may appear.
+        val fn = DxirBuilder.function("eg") {
+            val idx = param("i", DxirType(io.tlaloc.core.I32, listOf(3)))
+            val up = param("u", DxirType(F32, listOf(3, 4)))
+            val template = param("t", DxirType(F32, listOf(10, 4)))
+            val y = op(
+                OpKind.EMBEDDING_GRAD,
+                listOf(idx, up, template),
+                DxirType(F32, listOf(10, 4)),
+            )
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("\"stablehlo.scatter\""), mlir)
+        assertTrue(mlir.contains("stablehlo.constant dense<0.0> : tensor<10x4xf32>"), mlir)
+        assertTrue(mlir.contains("update_window_dims = [1]"), mlir)
+        assertTrue(mlir.contains("inserted_window_dims = [0]"), mlir)
+        assertTrue(mlir.contains("scatter_dims_to_operand_dims = [0]"), mlir)
+        assertTrue(mlir.contains("index_vector_dim = 1"), mlir)
+        assertTrue(mlir.contains("stablehlo.add"), mlir)
+        assertTrue(!mlir.contains("unique_indices"), "collisions must accumulate: $mlir")
+        assertTrue(mlir.contains("(tensor<10x4xf32>, tensor<3xi32>, tensor<3x4xf32>) -> tensor<10x4xf32>"), mlir)
+    }
+
+    @Test
+    fun embeddingGradRejectsRankTwoIndices() {
+        // v1 pins the rank-1 positions contract the host surface has.
+        val fn = DxirBuilder.function("bad") {
+            val idx = param("i", DxirType(io.tlaloc.core.I32, listOf(2, 3)))
+            val up = param("u", DxirType(F32, listOf(2, 3, 4)))
+            val template = param("t", DxirType(F32, listOf(10, 4)))
+            val y = op(
+                OpKind.EMBEDDING_GRAD,
+                listOf(idx, up, template),
+                DxirType(F32, listOf(10, 4)),
+            )
+            listOf(y)
+        }
+        assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+    }
+
+    @Test
+    fun embeddingGradRejectsUpstreamShapeMismatch() {
+        val fn = DxirBuilder.function("bad") {
+            val idx = param("i", DxirType(io.tlaloc.core.I32, listOf(3)))
+            val up = param("u", DxirType(F32, listOf(3, 5)))  // wrong: D is 4
+            val template = param("t", DxirType(F32, listOf(10, 4)))
+            val y = op(
+                OpKind.EMBEDDING_GRAD,
+                listOf(idx, up, template),
+                DxirType(F32, listOf(10, 4)),
+            )
+            listOf(y)
+        }
+        assertFailsWith<IllegalArgumentException> { fn.toStablehlo() }
+    }
+
+    @Test
+    fun integerConstsEmitIntegerDenseLiterals() {
+        // §0.4.400 — an I32 index const (a gradient graph's cloned indices) must
+        // print integer literals against its i32 tensor type, not the float
+        // spelling of the dxir const carrier.
+        val fn = DxirBuilder.function("ic") {
+            val table = param("t", DxirType(F32, listOf(10, 4)))
+            val idx = const(floatArrayOf(0f, 2f, 0f), DxirType(io.tlaloc.core.I32, listOf(3)))
+            val y = op(OpKind.EMBEDDING, listOf(table, idx), DxirType(F32, listOf(3, 4)))
+            listOf(y)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("stablehlo.constant dense<[0, 2, 0]> : tensor<3xi32>"), mlir)
+        assertTrue(!mlir.contains("0.0, 2.0"), mlir)
+    }
+
+    @Test
     fun convTranspose2dUsesFlippedKernelLayout() {
         val fn = DxirBuilder.function("ct") {
             val x = param("x", DxirType(F32, listOf(1, 16, 16, 16)))

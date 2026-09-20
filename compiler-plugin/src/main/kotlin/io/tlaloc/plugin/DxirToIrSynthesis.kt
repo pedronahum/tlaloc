@@ -307,6 +307,23 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size < 2) return null
                 operandIrTypes[op.operands[1].id]
             }
+            // §0.4.400 — EMBEDDING [V,D] ⊗ [N] → [N,D]: the position atom from
+            // the indices' Rank1, the feature atom from the table's Rank2 —
+            // both param-sourced, no placeholder needed.
+            OpKind.EMBEDDING -> {
+                if (op.operands.size != 2) return null
+                val tableIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val idxIr = operandIrTypes[op.operands[1].id] as? IrSimpleType ?: return null
+                val tableAtoms = shapeAtomsOf(tableIr, 2) ?: return null
+                val idxAtoms = shapeAtomsOf(idxIr, 1) ?: return null
+                rebuildShapeAtoms(tableIr, listOf(idxAtoms[0], tableAtoms[1]), 2)
+            }
+            // §0.4.400 — EMBEDDING_GRAD's result IS its shape template's type
+            // (operand[2], the primal table): the SUM_TO/PAD_TO treatment.
+            OpKind.EMBEDDING_GRAD -> {
+                if (op.operands.size != 3) return null
+                operandIrTypes[op.operands[2].id]
+            }
             else -> null
         }
     }
@@ -754,7 +771,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val paramIrTypeMap = HashMap<Int, IrType>()
         if (callType != null) {
             for ((idx, p) in fn.params.withIndex()) {
-                if (!isAcceptedTensorType(p.type)) continue
+                // §0.4.400 — index tensor params (embedding's rank-1 I32 indices)
+                // harvest their call-site IrType too: `irTypeFor` has no fallback
+                // for integer tensors, so the call site is their only source.
+                if (!isAcceptedTensorType(p.type) && !isAcceptedIndexTensorType(p.type)) continue
                 val argType = callType.arguments.getOrNull(idx)?.typeOrNull ?: continue
                 paramIrTypeMap[p.id] = argType
             }
@@ -779,8 +799,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // accepted ranks via its generic shape parameter. Higher ranks + non-F32 dtypes
         // still fall back.
         for (p in fn.params) {
-            if (!p.type.isScalar && !isAcceptedTensorType(p.type)) {
-                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1-4 F32 scope")
+            // §0.4.400 — rank-1 I32 index params (embedding indices) are in scope
+            // as non-differentiable pass-throughs.
+            if (!p.type.isScalar && !isAcceptedTensorType(p.type) && !isAcceptedIndexTensorType(p.type)) {
+                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1-4 F32 / rank-1 I32 scope")
             }
         }
         for (n in fn.body) {
@@ -788,6 +810,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // scope: the synthesis represents them as 0/1 F32 masks (see
             // [irCompare] / [irWhere] / [irCast]'s tensor arm).
             val boolTensorInScope = n.type.dtype == Bool && n.type.rank in 1..3
+            // §0.4.400 — rank-1 I32 body nodes are in scope: the integer zero
+            // const the reverse transform returns for a non-differentiable
+            // index param (materialised via `intZerosLike`).
+            if (isAcceptedIndexTensorType(n.type)) continue
             if (!n.type.isScalar && !isAcceptedTensorType(n.type) && !boolTensorInScope) {
                 val opKind = (n as? DxirOp)?.op?.name ?: n::class.simpleName
                 return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1-4 F32 scope")
@@ -852,7 +878,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // fixpoint (one pass usually suffices). Propagates BROADCAST IrTypes (which
         // forward-derivation can't compute since BROADCAST's operand is scalar).
         for ((i, ret) in fn.returns.withIndex()) {
-            if (paramIrTypeMap[ret.id] == null && isAcceptedTensorType(ret.type)) {
+            // §0.4.400 — index-typed returns (the integer zero gradient of an
+            // embedding-indices param) take their decomposed call-site IrType
+            // too: `irTypeFor` has no integer-tensor fallback.
+            if (paramIrTypeMap[ret.id] == null &&
+                (isAcceptedTensorType(ret.type) || isAcceptedIndexTensorType(ret.type))
+            ) {
                 paramIrTypeMap[ret.id] = returnIrTypes[i]
             }
         }
@@ -1248,6 +1279,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     private fun IrBuilderWithScope.irConstFor(node: DxirConst, context: SynthesisContext): IrExpression? {
+        // §0.4.400 — the integer zero const the reverse transform returns for a
+        // non-differentiable index param must be handled BEFORE the irTypeFor
+        // gate below: integer tensor types have no `irTypeFor` fallback, so the
+        // legacy first line would reject them unseen.
+        if (!node.type.isScalar && isAcceptedIndexTensorType(node.type)) {
+            return irIndexZerosConst(node, context)
+        }
         val ty = irTypeFor(node.type, context) ?: return null
         val v = node.value
         // §0.4.186 — Phase 0c slice (b): rank-1/2/3 F32 consts route through
@@ -1443,6 +1481,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         if (op.op == OpKind.RESHAPE) return irReshape(op, env, context)
         if (op.op == OpKind.SOFTMAX) return irSoftmax(op, env, context)
+        // §0.4.400 — Phase A3b: embedding and its fused scatter-add adjoint.
+        if (op.op == OpKind.EMBEDDING) return irEmbedding(op, env, context)
+        if (op.op == OpKind.EMBEDDING_GRAD) return irEmbeddingGrad(op, env, context)
         // §0.4.384 — Phase A3b slice 1: the NCHW conv pair.
         if (op.op == OpKind.CONV2D || op.op == OpKind.CONV_TRANSPOSE2D) return irConv(op, env, context)
         // §0.4.385 — the fused conv adjoints (runtime-solved padding).
@@ -2502,6 +2543,115 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         call.arguments[0] = irGet(operandDecl)
         call.arguments[1] = intConst(axis)
+        return call
+    }
+
+    /**
+     * §0.4.400 — the integer zero const the reverse transform returns for a
+     * non-differentiable index param (§0.4.54's typed zero, reaching tensor
+     * land for the first time). Materialised as `intZerosLike(param)` on the
+     * function's index-typed param, whose RUNTIME dims are the only sound
+     * shape source under -1 sentinels. Requires exactly ONE index-typed param
+     * — with several, the const's sentinel-dimmed DxirType cannot say which
+     * one it zeroes.
+     */
+    private fun IrBuilderWithScope.irIndexZerosConst(
+        node: DxirConst,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if ((node.value as? Number)?.toDouble() != 0.0) return null
+        val match = context.fnParams.withIndex()
+            .filter { (_, p) -> isAcceptedIndexTensorType(p.type) }
+            .singleOrNull() ?: return null
+        val paramDecl = context.irParams.getOrNull(match.index) ?: return null
+        val paramIr = (irTypeForNode(match.value, context) as? IrSimpleType)
+            ?: (paramDecl.type as? IrSimpleType) ?: return null
+        val shapeArg = paramIr.arguments.firstOrNull()?.typeOrNull ?: return null
+        val sym = opsTensorSymbol("intZerosLike") ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = paramIr,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        call.arguments[0] = irGet(paramDecl)
+        return call
+    }
+
+    /**
+     * §0.4.400 — EMBEDDING in `grad {}` bodies (the primal, and its recompute
+     * when the embedded rows feed a nonlinear consumer): `embedding(table,
+     * indices)` in `:core/ops`. The host signature is `<V, D, N>` — vocab and
+     * feature atoms from the table's Rank2, the position atom from the indices'
+     * Rank1 — so all three type-args are dug out of the operand IrTypes the
+     * way [irMatmul] digs `<R, K, C>`.
+     */
+    private fun IrBuilderWithScope.irEmbedding(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        val tableDecl = env[op.operands[0].id] ?: return null
+        val idxDecl = env[op.operands[1].id] ?: return null
+        val tableIr = irTypeForNode(op.operands[0], context) as? IrSimpleType ?: return null
+        val idxIr = irTypeForNode(op.operands[1], context) as? IrSimpleType ?: return null
+        val tableAtoms = shapeAtomsOf(tableIr, 2) ?: return null
+        val idxAtoms = shapeAtomsOf(idxIr, 1) ?: return null
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+            ?: rebuildShapeAtoms(tableIr, listOf(idxAtoms[0], tableAtoms[1]), 2)
+            ?: return null
+        val sym = opsTensorSymbol("embedding") ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.size == 3) {
+            call.typeArguments[0] = tableAtoms[0] // V
+            call.typeArguments[1] = tableAtoms[1] // D
+            call.typeArguments[2] = idxAtoms[0]   // N
+        }
+        call.arguments[0] = irGet(tableDecl)
+        call.arguments[1] = irGet(idxDecl)
+        return call
+    }
+
+    /**
+     * §0.4.400 — EMBEDDING_GRAD → `:core/ops embeddingGrad(upstream, indices,
+     * tableTemplate)`: EmbeddingRule's fused scatter-add adjoint. The dxir
+     * operand order is (indices, upstream, template) — the §0.4.370 contract
+     * plus the shape template — while the host twin leads with the upstream
+     * (the [sumToLike] value-then-template convention). The template's RUNTIME
+     * dims size the result (`[V, D]` is all -1 sentinels here), so the host
+     * call forwards the cloned table operand as-is; its values are never read.
+     */
+    private fun IrBuilderWithScope.irEmbeddingGrad(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 3) return null
+        val idxDecl = env[op.operands[0].id] ?: return null
+        val upstreamDecl = env[op.operands[1].id] ?: return null
+        val templateDecl = env[op.operands[2].id] ?: return null
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+            ?: (irTypeForNode(op.operands[2], context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val sym = opsTensorSymbol("embeddingGrad") ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        call.arguments[0] = irGet(upstreamDecl)
+        call.arguments[1] = irGet(idxDecl)
+        call.arguments[2] = irGet(templateDecl)
         return call
     }
 
@@ -3984,6 +4134,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      */
     private fun isAcceptedTensorType(type: DxirType): Boolean =
         type.dtype == F32 && type.rank in 1..4
+
+    /**
+     * §0.4.400 — the integer INDEX tensor scope: `embedding`'s rank-1 I32 index
+     * vector, flowing through a `grad {}` lambda as a non-differentiable param.
+     * Kept deliberately narrow (I32 rank-1, the only shape the host `embedding`
+     * accepts) — the general integer-tensor synthesis story stays out of scope.
+     */
+    private fun isAcceptedIndexTensorType(type: DxirType): Boolean =
+        type.dtype == I32 && type.rank == 1
 
     /**
      * Resolves `io.tlaloc.core.ops.broadcastLike` — the top-level extension function that

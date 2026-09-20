@@ -4,11 +4,15 @@ import io.tlaloc.core.DScalar
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
 import io.tlaloc.core.HostF32Storage
+import io.tlaloc.core.HostI32Storage
+import io.tlaloc.core.I32
+import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.hostF32
+import io.tlaloc.core.hostI32
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -472,6 +476,87 @@ fun <S : Shape> nllLoss(
     for (i in lp.indices) acc -= oh[i] * lp[i]
     return DTensor(HostF32Storage(floatArrayOf(acc)), intArrayOf(), F32)
 }
+
+/**
+ * §0.4.400 — Phase A3b (DiffKT parity): `embedding(table, indices)` gathers
+ * `table[indices[p], :]` for each index position — the rank-2 `[V, D]` table
+ * against a rank-1 `[N]` I32 index vector, producing `[N, D]`. Row-major walk
+ * matching the dxir interpreter's EMBEDDING arm bit-for-bit (same bounds check,
+ * same gather order) so the host path and the IR path agree. The phantom result
+ * shape is `Rank2<N, D>`: the position atom from the indices, the feature atom
+ * from the table. Inside `grad {}` the K2 plugin lowers this to
+ * [io.tlaloc.ir.OpKind.EMBEDDING]; the §0.4.370 EmbeddingRule provides the
+ * reverse (a fused scatter-add), for which [embeddingGrad] is the runtime twin.
+ */
+fun <V : ShapeAtom, D : ShapeAtom, N : ShapeAtom> embedding(
+    table: DTensor<Rank2<V, D>, F32>,
+    indices: DTensor<Rank1<N>, I32>,
+): DTensor<Rank2<N, D>, F32> {
+    require(table.rank == 2) { "embedding: table must be rank-2 (V, D); got ${table.dims.toList()}" }
+    require(indices.rank == 1) { "embedding: indices must be rank-1; got ${indices.dims.toList()}" }
+    val t = table.hostF32()
+    val idx = indices.hostI32()
+    val vocab = table.dims[0]
+    val embedDim = table.dims[1]
+    val positions = idx.size
+    val out = FloatArray(positions * embedDim)
+    for (p in 0 until positions) {
+        val v = idx[p]
+        require(v in 0 until vocab) {
+            "embedding: index $v at position $p out of bounds for vocab $vocab"
+        }
+        for (d in 0 until embedDim) out[p * embedDim + d] = t[v * embedDim + d]
+    }
+    return DTensor(HostF32Storage(out), intArrayOf(positions, embedDim), F32)
+}
+
+/**
+ * §0.4.400 — [embedding]'s reverse twin: scatter-ADD each upstream row back to
+ * the vocab slot its index selected, `dTable[indices[p], :] += upstream[p, :]`,
+ * collisions summing when the same vocab row was embedded at multiple
+ * positions. The runtime twin of the dxir interpreter's EMBEDDING_GRAD arm,
+ * bit-for-bit. [tableTemplate] contributes SHAPE ONLY — its values are never
+ * read (the SUM_TO / conv2dDataAdjoint template convention): under `grad {}`'s
+ * -1 sentinel dims the vocab extent is unknowable at compile time, so the
+ * template's ACTUAL runtime dims size the result. Unselected vocab rows stay
+ * exactly zero.
+ */
+fun <S : Shape> embeddingGrad(
+    upstream: DTensor<*, F32>,
+    indices: DTensor<*, I32>,
+    tableTemplate: DTensor<S, F32>,
+): DTensor<S, F32> {
+    require(tableTemplate.rank == 2) {
+        "embeddingGrad: tableTemplate must be rank-2 (V, D); got ${tableTemplate.dims.toList()}"
+    }
+    val vocab = tableTemplate.dims[0]
+    val embedDim = tableTemplate.dims[1]
+    val idx = indices.hostI32()
+    val up = upstream.hostF32()
+    val positions = idx.size
+    require(up.size == positions * embedDim) {
+        "embeddingGrad: upstream size ${up.size} != positions $positions * embedDim $embedDim"
+    }
+    val out = FloatArray(vocab * embedDim)
+    for (p in 0 until positions) {
+        val v = idx[p]
+        require(v in 0 until vocab) {
+            "embeddingGrad: index $v at position $p out of bounds for vocab $vocab"
+        }
+        for (d in 0 until embedDim) out[v * embedDim + d] += up[p * embedDim + d]
+    }
+    return DTensor(HostF32Storage(out), tableTemplate.dims.copyOf(), F32)
+}
+
+/**
+ * §0.4.400 — the zero "gradient" of an integer tensor param. `grad {}` on a
+ * lambda with a non-differentiable I32 param (embedding indices) still returns
+ * one gradient per param; the reverse transform types the integer slot as a
+ * structural zero (§0.4.54), and the synthesis materialises it with this —
+ * shaped like the param at RUNTIME, since its static dims are -1 sentinels.
+ */
+fun <S : Shape> intZerosLike(t: DTensor<S, I32>): DTensor<S, I32> =
+    DTensor(HostI32Storage(IntArray(t.size)), t.dims.copyOf(), I32)
 
 /**
  * §0.4.384 — Phase A3b slice 1, the rank-4 substrate: the shared conv engine.

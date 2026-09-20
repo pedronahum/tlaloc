@@ -1450,22 +1450,30 @@ object VjpRegistry {
      * row back to the vocab slot its index selected:
      * `dTable[indices[p], :] += upstream[p, :]`, summing collisions when the same
      * vocab row is embedded at multiple positions. Expressed as the single fused
-     * [OpKind.EMBEDDING_GRAD] op (indices, upstream) → dTable, mirroring how
-     * [GatherRule] fuses its scatter-add adjoint.
+     * [OpKind.EMBEDDING_GRAD] op (indices, upstream, tableTemplate) → dTable,
+     * mirroring how [GatherRule] fuses its scatter-add adjoint.
+     *
+     * §0.4.400 — the primal table rides along as a SHAPE-ONLY template operand
+     * (the SUM_TO/PAD_TO convention): under `grad {}`'s -1 sentinel dims the
+     * result type's vocab extent is unknowable at compile time, and the
+     * template's runtime dims are the only sound source for the synthesis's
+     * host twin `embeddingGrad(upstream, indices, tableTemplate)`. Its values
+     * are never read by the interpreter or emitter.
      *
      * The `indices` operand is non-differentiable (integer), so no contribution
-     * flows to it. [readsPrimalOperandIndices] = `setOf(1)`: the idx operand's
-     * subgraph must be cloned into the gradient body (it is forwarded into the
-     * emitted EMBEDDING_GRAD), the same reason GatherRule marks its idx operand.
+     * flows to it. [readsPrimalOperandIndices] = `setOf(0, 1)`: both the idx
+     * subgraph (forwarded into the emitted EMBEDDING_GRAD, the same reason
+     * GatherRule marks its idx operand) and the table subgraph (the shape
+     * template) must be cloned into the gradient body.
      */
     val EmbeddingRule: VjpRule = object : VjpRule {
-        override val readsPrimalOperandIndices: Set<Int> = setOf(1)
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val table = op.operands[0]
             val indices = op.operands[1]
             val dTable = builder.op(
                 OpKind.EMBEDDING_GRAD,
-                listOf(indices, upstream),
+                listOf(indices, upstream, table),
                 table.type,
             )
             return listOf(table to dTable)

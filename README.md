@@ -125,7 +125,7 @@ The matrix becomes part of `ProgramManifest.backendMatrix`. At job-launch time, 
 | KPTX arc  | Native PTX DSL + transpiler, v1–v3. Glow-style native runtime: NO-GO today, conditional GO gated on kernel coverage | closed      | §0.4.326 → §0.4.348 |
 | DiffKT parity | Op-surface + AD parity with [facebookresearch/diffkt](https://github.com/facebookresearch/diffkt): implicit broadcasting, shape templates, concat/stack, forward-mode intrinsics, NCHW conv + pooling | **active**  | [docs/DIFFKT_PARITY_PLAN.md](docs/DIFFKT_PARITY_PLAN.md) |
 
-Full suite green at HEAD: **1694 Tlaloc-side tests** — `bash scripts/count-tests.sh` after `./gradlew test` for the exact number. The §0.4 ship log in [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) ends at §0.4.263; from §0.4.264 onward the per-section record lives in the commit messages, and the active book of work is [docs/DIFFKT_PARITY_PLAN.md](docs/DIFFKT_PARITY_PLAN.md). See [docs/audits/](docs/audits/) for closing audits per layer and [docs/xatlib_design.md](docs/xatlib_design.md) for the Layer 3 design narrative.
+Full suite green at HEAD: **1705 Tlaloc-side tests** — `bash scripts/count-tests.sh` after `./gradlew test` for the exact number. The §0.4 ship log in [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) ends at §0.4.263; from §0.4.264 onward the per-section record lives in the commit messages, and the active book of work is [docs/DIFFKT_PARITY_PLAN.md](docs/DIFFKT_PARITY_PLAN.md). See [docs/audits/](docs/audits/) for closing audits per layer and [docs/xatlib_design.md](docs/xatlib_design.md) for the Layer 3 design narrative.
 
 ### What's landed in Layer 4 (closed at §0.4.324)
 
@@ -214,7 +214,7 @@ cd tlaloc
 
 **Consume it as a library** (pre-alpha, via mavenLocal): see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — `./gradlew publishToMavenLocal` publishes every module under `io.tlaloc:*`, and [examples/quickstart](examples/quickstart) is a standalone consumer project (own Gradle build, resolves from mavenLocal, applies the K2 plugin) whose `grad { }` call is rewritten into synthesized gradient code at compile time. `scripts/onboarding-smoke.sh` runs the whole loop.
 
-Expected: ~1694 tests passing on the Tlaloc side (`bash scripts/count-tests.sh` for the exact count). To exercise the vendored Maestro tree as well:
+Expected: ~1705 tests passing on the Tlaloc side (`bash scripts/count-tests.sh` for the exact count). To exercise the vendored Maestro tree as well:
 
 ```bash
 ./gradlew test :vendored-maestro:maestro-tlaloc:test

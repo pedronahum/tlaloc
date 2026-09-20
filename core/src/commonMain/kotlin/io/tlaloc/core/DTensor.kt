@@ -15,6 +15,17 @@ class HostF64Storage(val data: DoubleArray) : TensorStorage {
     override fun release() = Unit
 }
 
+/**
+ * §0.4.400 — host storage for integer tensors. The first user is `embedding`'s
+ * index operand (a `DTensor<Rank1<N>, I32>` of vocab slots): indices are DATA
+ * at the host level, not shape, so they need a real storage class rather than
+ * the float view the dxir interpreter uses internally.
+ */
+class HostI32Storage(val data: IntArray) : TensorStorage {
+    override val sizeBytes: Long get() = data.size.toLong() * I32.sizeBytes
+    override fun release() = Unit
+}
+
 class DTensor<S : Shape, T : DType>(
     val storage: TensorStorage,
     val dims: IntArray,
