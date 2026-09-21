@@ -28,6 +28,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.Shape
 import io.tlaloc.core.hostF32
+import io.tlaloc.core.hostI32
 import io.tlaloc.autograd.Tracer
 import io.tlaloc.autograd.captureN
 import io.tlaloc.ir.DxirFunction
@@ -43,6 +44,10 @@ class StepResult(
      * Gradients w.r.t. the model INPUTS, positionally. The reverse transform
      * returns one gradient per captured param — inputs included — so these come
      * for free; useful for adversarial/saliency work, ignorable for training.
+     * §0.4.442 — an INTEGER input (an embedding-index batch) is
+     * non-differentiable by dtype: its slot is the transform's §0.4.419
+     * ZEROS_LIKE structural zero, surfaced here as an F32 all-zeros tensor of
+     * the input's shape — expected, not a bug.
      */
     val inputGradients: List<DTensor<*, F32>>,
 )
@@ -68,7 +73,7 @@ class CapturedStep internal constructor(
     val parameterKeys: List<String>,
     val inputCount: Int,
 ) {
-    fun run(model: Trainable<*>, inputs: List<DTensor<*, F32>>): StepResult {
+    fun run(model: Trainable<*>, inputs: List<DTensor<*, *>>): StepResult {
         require(inputs.size == inputCount) {
             "CapturedStep.run: captured for $inputCount input(s), got ${inputs.size}"
         }
@@ -77,7 +82,7 @@ class CapturedStep internal constructor(
         require(keys == parameterKeys) {
             "CapturedStep.run: model structure changed — captured keys $parameterKeys, got $keys; re-capture"
         }
-        val values = inputs.map { it.hostF32() } + params.map { it.tensor.hostF32() }
+        val values = inputs.map { hostValues(it) } + params.map { it.tensor.hostF32() }
         val outs = DxirInterpreter.evalFunction(gradient, values)
 
         fun tensorAt(outIndex: Int, paramIndex: Int): DTensor<*, F32> {
@@ -104,7 +109,7 @@ class CapturedStep internal constructor(
  */
 fun <M> capture(
     model: M,
-    inputs: List<DTensor<*, F32>>,
+    inputs: List<DTensor<*, *>>,
     name: String = "model",
     lossFn: (Tracer<Shape>) -> Tracer<*>,
 ): CapturedStep where M : Layer, M : Trainable<M> {
@@ -140,7 +145,33 @@ fun <M> capture(
  */
 fun <M> valueAndGradients(
     model: M,
-    inputs: List<DTensor<*, F32>>,
+    inputs: List<DTensor<*, *>>,
     lossFn: (Tracer<Shape>) -> Tracer<*>,
 ): StepResult where M : Layer, M : Trainable<M> =
     capture(model, inputs, lossFn = lossFn).run(model, inputs)
+
+/**
+ * §0.4.442 — the interpreter environment is float-typed for every dtype (its
+ * EMBEDDING arms read indices via `toInt()`): an I32 input binds as its
+ * float-encoded values, exact below 2²⁴ (the trace leaf asserted the cap; the
+ * per-step re-bind asserts it again — new step, new indices).
+ */
+private fun hostValues(t: DTensor<*, *>): FloatArray = when (t.dtype) {
+    F32 -> {
+        @Suppress("UNCHECKED_CAST")
+        (t as DTensor<*, F32>).hostF32()
+    }
+    io.tlaloc.core.I32 -> {
+        @Suppress("UNCHECKED_CAST")
+        val ints = (t as DTensor<*, io.tlaloc.core.I32>).hostI32()
+        FloatArray(ints.size) { i ->
+            val v = ints[i]
+            require(v > -16_777_216 && v < 16_777_216) {
+                "CapturedStep.run: I32 input value $v at position $i exceeds the float-encoding " +
+                    "exactness cap 2^24"
+            }
+            v.toFloat()
+        }
+    }
+    else -> error("CapturedStep.run: unsupported input dtype ${t.dtype.name} (F32 and I32 only)")
+}

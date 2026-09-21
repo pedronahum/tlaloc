@@ -692,7 +692,9 @@ fun <S : Shape> Tracer<*>.reshape(newDims: IntArray): Tracer<S> {
     require(size == expected) {
         "reshape: element count $size does not match product of dims ${newDims.toList()} ($expected)"
     }
-    val e = tape.op(OpKind.RESHAPE, intArrayOf(id), newDims.copyOf(), entry.value.copyOf())
+    // §0.4.442 — dtype-preserving: a reshape of an I32 index leaf stays
+    // I32-typed in the captured graph (EmbeddingBag's rank-2 index flatten).
+    val e = tape.op(OpKind.RESHAPE, intArrayOf(id), newDims.copyOf(), entry.value.copyOf(), dtype = entry.dtype)
     return Tracer<Shape>(tape, e) as Tracer<S>
 }
 
@@ -1055,4 +1057,173 @@ infix fun <B : ShapeAtom, R : ShapeAtom, K : ShapeAtom, C : ShapeAtom>
     }
     val e = tape.op(OpKind.MATMUL, intArrayOf(id, other.id), intArrayOf(batch, m, n), out)
     return Tracer<Rank3<B, R, C>>(tape, e)
+}
+
+// §0.4.442 — F6: the embedding-family TRACE spellings (MODEL_LAYER_PLAN.md
+// gap-table rows F6). EMBEDDING's forward routes through the certified `:core`
+// host twin (the §0.4.409 paddingIndex arity-disambiguated form — the same
+// engine the EmbeddingRule gradient body's runtime twin mirrors); SLICE and
+// CONCAT are host copy walks mirroring the DxirInterpreter's arms bit-for-bit.
+// The attrs are EXACTLY the interpreter's spellings, so `Tape.toDxirFunction`
+// reproduces the ops in the captured graph and `DxirReverseTransform` routes
+// them through EmbeddingRule (fused EMBEDDING_GRAD dense scatter — the ratified
+// §2.7 dense v1), SliceRule and ConcatRule. No gradient math here — the
+// transform owns it.
+
+/**
+ * §0.4.442 — embedding lookup: the receiver is the rank-2 `[V, D]` F32 table,
+ * [indices] a rank-1 `[N]` or rank-2 `[B, N]` I32 leaf (traced through
+ * `captureN`'s dtype dispatch), result `[N, D]` / `[B, N, D]`. Records
+ * [OpKind.EMBEDDING] with operands (table, indices) and the optional
+ * `padding_index` attr (recorded only when ≥ 0 — absent = none, the
+ * interpreter's own reading); positions whose index equals [paddingIndex]
+ * produce EXACT-zero output rows and, through the fused EMBEDDING_GRAD the
+ * EmbeddingRule emits (primal attrs riding along, §0.4.409), contribute
+ * exactly zero gradient to the table.
+ *
+ * The indices operand is non-differentiable by DTYPE: its captured param is
+ * I32-typed, so the reverse transform returns the §0.4.419 ZEROS_LIKE
+ * structural zero for it — expected, not a bug.
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.embedding(indices: Tracer<*>, paddingIndex: Int = -1): Tracer<S> {
+    require(rank == 2) {
+        "embedding: table must be rank-2 [V, D]; got ${dims.toList()}"
+    }
+    require(dtype == io.tlaloc.core.F32) {
+        "embedding: table must be F32; got ${dtype.name}"
+    }
+    require(indices.dtype == io.tlaloc.core.I32) {
+        "embedding: indices must be an I32 tracer (an integer leaf — trace the index " +
+            "tensor as DTensor<*, I32>); got ${indices.dtype.name}"
+    }
+    require(indices.rank == 1 || indices.rank == 2) {
+        "embedding: indices must be rank-1 [N] or rank-2 [B, N]; got ${indices.dims.toList()}"
+    }
+    val tape = sameTape(this, indices)
+    val idxInts = IntArray(indices.size) { indices.entry.value[it].toInt() }
+    val tableD = toDTensor() as io.tlaloc.core.DTensor<Rank2<io.tlaloc.core.Sym, io.tlaloc.core.Sym>, io.tlaloc.core.F32>
+    val out: io.tlaloc.core.DTensor<*, io.tlaloc.core.F32> =
+        if (indices.rank == 1) {
+            io.tlaloc.core.ops.embedding(
+                tableD,
+                io.tlaloc.core.DTensor<io.tlaloc.core.Rank1<io.tlaloc.core.Sym>, io.tlaloc.core.I32>(
+                    io.tlaloc.core.HostI32Storage(idxInts), indices.dims.copyOf(), io.tlaloc.core.I32,
+                ),
+                paddingIndex,
+            )
+        } else {
+            io.tlaloc.core.ops.embedding(
+                tableD,
+                io.tlaloc.core.DTensor<Rank2<io.tlaloc.core.Sym, io.tlaloc.core.Sym>, io.tlaloc.core.I32>(
+                    io.tlaloc.core.HostI32Storage(idxInts), indices.dims.copyOf(), io.tlaloc.core.I32,
+                ),
+                paddingIndex,
+            )
+        }
+    val e = tape.op(
+        OpKind.EMBEDDING,
+        intArrayOf(id, indices.id),
+        out.dims.copyOf(),
+        out.hostF32(),
+        attrs = if (paddingIndex >= 0) mapOf("padding_index" to paddingIndex) else emptyMap(),
+    )
+    return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
+/**
+ * §0.4.442 — contiguous slice `[start, end)` along [axis] (stride 1 — the only
+ * form `SliceRule` v1 differentiates; its reverse is the zero-PAD back to the
+ * operand's extent). Records [OpKind.SLICE] with the interpreter's full-rank
+ * attr spelling: `start_indices` / `limit_indices` / `strides`, one entry per
+ * axis, the untouched axes running `[0, dim)` at stride 1. Forward is the
+ * interpreter's own strided copy walk. Dtype-preserving, like [reshape].
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.slice(start: Int, end: Int, axis: Int): Tracer<S> {
+    require(rank >= 1 && axis in 0 until rank) {
+        "slice: axis $axis out of range for rank $rank (dims ${dims.toList()})"
+    }
+    require(start in 0 until dims[axis] && end in (start + 1)..dims[axis]) {
+        "slice: [start=$start, end=$end) invalid for axis $axis of extent ${dims[axis]}"
+    }
+    val outDims = dims.copyOf().also { it[axis] = end - start }
+    var inner = 1
+    for (k in axis + 1 until rank) inner *= dims[k]
+    val axisLen = dims[axis]
+    val sliceLen = end - start
+    var outer = 1
+    for (k in 0 until axis) outer *= dims[k]
+    val v = entry.value
+    val out = FloatArray(outer * sliceLen * inner)
+    var dst = 0
+    for (o in 0 until outer) {
+        val base = (o * axisLen + start) * inner
+        v.copyInto(out, dst, base, base + sliceLen * inner)
+        dst += sliceLen * inner
+    }
+    val e = tape.op(
+        OpKind.SLICE,
+        intArrayOf(id),
+        outDims,
+        out,
+        attrs = mapOf(
+            "start_indices" to List(rank) { if (it == axis) start else 0 },
+            "limit_indices" to List(rank) { if (it == axis) end else dims[it] },
+            "strides" to List(rank) { 1 },
+        ),
+        dtype = entry.dtype,
+    )
+    return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
+/**
+ * §0.4.442 — concatenation of [parts] along [axis] (every part the same rank
+ * and extents outside [axis]). Records [OpKind.CONCAT] with the interpreter's
+ * `dimension` attr and one operand per part; `ConcatRule` reverses it as one
+ * SLICE per operand. Forward is the interpreter's own outer-major copy walk.
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> concat(parts: List<Tracer<*>>, axis: Int): Tracer<S> {
+    require(parts.isNotEmpty()) { "concat: at least one part required" }
+    val first = parts[0]
+    val tape = parts.fold(first.tape) { t, p ->
+        require(p.tape === t) { "concat: parts come from different tapes" }
+        t
+    }
+    val rank = first.rank
+    require(rank >= 1 && axis in 0 until rank) {
+        "concat: axis $axis out of range for rank $rank (dims ${first.dims.toList()})"
+    }
+    for (p in parts) {
+        require(p.rank == rank) { "concat: rank mismatch ${p.dims.toList()} vs ${first.dims.toList()}" }
+        for (k in 0 until rank) {
+            require(k == axis || p.dims[k] == first.dims[k]) {
+                "concat: dim $k mismatch ${p.dims.toList()} vs ${first.dims.toList()} (only axis $axis may differ)"
+            }
+        }
+    }
+    val outDims = first.dims.copyOf().also { it[axis] = parts.sumOf { p -> p.dims[axis] } }
+    var outer = 1
+    for (k in 0 until axis) outer *= first.dims[k]
+    var inner = 1
+    for (k in axis + 1 until rank) inner *= first.dims[k]
+    val out = FloatArray(outer * outDims[axis] * inner)
+    var dst = 0
+    for (o in 0 until outer) {
+        for (p in parts) {
+            val len = p.dims[axis] * inner
+            val src = o * len
+            p.entry.value.copyInto(out, dst, src, src + len)
+            dst += len
+        }
+    }
+    val e = tape.op(
+        OpKind.CONCAT,
+        IntArray(parts.size) { parts[it].id },
+        outDims,
+        out,
+        attrs = mapOf("dimension" to axis),
+    )
+    return Tracer<Shape>(tape, e) as Tracer<S>
 }

@@ -26,7 +26,11 @@ fun Tape.toDxirFunction(
         val returns = ArrayList<DxirNode>(returnIds.size)
 
         for (e in entries) {
-            val type = DxirType(F32, e.dims.toList())
+            // §0.4.442 — the entry's dtype (F32 everywhere pre-F6; I32 for an
+            // embedding-index leaf) stamps the reproduced node's DxirType, so
+            // an integer leaf comes out an integer-typed param and the reverse
+            // transform's §0.4.419 arm hands back its ZEROS_LIKE.
+            val type = DxirType(e.dtype, e.dims.toList())
             val node: DxirNode = when {
                 e.id in paramIdSet -> param("p${e.id}", type)
                 // §0.4.71 — non-param leaves are constants. Pre-§0.4.71 this
@@ -95,16 +99,27 @@ fun <S : Shape> capture(
  *
  * The caller owns the semantics of the position list (which slots are model inputs
  * vs. parameters); `:nn`'s capture step builds exactly that bookkeeping on top.
+ *
+ * §0.4.442 — the input list is dtype-heterogeneous: an [io.tlaloc.core.I32]
+ * tensor (an embedding-index batch) traces through [traceLeafI32] into an
+ * I32-typed leaf/param, whose gradient the reverse transform returns as the
+ * §0.4.419 ZEROS_LIKE structural zero. Every other dtype refuses loudly.
  */
 @Suppress("UNCHECKED_CAST")
 fun captureN(
-    inputs: List<DTensor<*, F32>>,
+    inputs: List<DTensor<*, *>>,
     name: String = "traced",
     f: (List<Tracer<Shape>>) -> Tracer<*>,
 ): DxirFunction {
     require(inputs.isNotEmpty()) { "captureN: at least one input tensor is required" }
     val tape = Tape()
-    val leaves = inputs.map { tape.traceLeaf(it as DTensor<Shape, F32>) }
+    val leaves = inputs.map {
+        when (it.dtype) {
+            F32 -> tape.traceLeaf(it as DTensor<Shape, F32>)
+            io.tlaloc.core.I32 -> tape.traceLeafI32(it as DTensor<Shape, io.tlaloc.core.I32>)
+            else -> error("captureN: unsupported leaf dtype ${it.dtype.name} (F32 and I32 only)")
+        }
+    }
     val out = f(leaves)
     require(out.tape === tape) {
         "captureN: the result tracer does not belong to this capture's tape — " +

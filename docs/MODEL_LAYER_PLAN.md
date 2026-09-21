@@ -815,3 +815,117 @@ determinism per key and `withKey` re-keying pinned against the stream.
 (above); `BatchNormTrainingV1` (running mean/var EMAs with Bessel's
 correction — DiffKT ships V2 as the default; V1 waits for a consumer);
 F0's standing deferral list unchanged.
+
+### F6 — §0.4.442: Embedding and EmbeddingBag — the index rides I32, the scatter stays dense
+
+**What landed.** The gap table's F6 TRACE spellings in `TracedOps.kt` —
+`embedding(indices, paddingIndex)` (EMBEDDING over (table, indices), the
+optional `padding_index` attr recorded only when ≥ 0, forward via the
+§0.4.409 `:core` host twins at index rank 1 and 2), `slice(start, end,
+axis)` (SLICE, the interpreter's full-rank
+`start_indices`/`limit_indices`/`strides` attr spelling, stride-1 —
+the only form SliceRule v1 differentiates) and `concat(parts, axis)`
+(CONCAT, attr `dimension`) — plus `EmbeddingLayers.kt` in `:nn`. Zero
+gradient math, zero `Backward.kt` changes, zero rule changes: the
+§0.4.370/409 EmbeddingRule (fused EMBEDDING_GRAD dense scatter — the
+ratified §2.7 dense v1) and SliceRule/ConcatRule were already waiting.
+
+- **The dtype plumbing the slice named as in-scope** (F0 §4.0.5 revised
+  for the compiler route): `TapeEntry` gains `dtype: DType = F32` — the
+  value cache stays a FloatArray for every dtype (the interpreter's own
+  float-encoded environment; its EMBEDDING arms read indices via
+  `toInt()`), and what the dtype governs is the `DxirType` that
+  `Tape.toDxirFunction` stamps on the reproduced node. An I32 index
+  leaf (`traceLeafI32`, float-encoding asserted exact below 2²⁴ —
+  landmine 4 made loud) therefore comes out an I32-TYPED `DxirParam`,
+  the interpreter's EMBEDDING arm accepts the captured graph, and
+  `DxirReverseTransform` returns the §0.4.419 ZEROS_LIKE structural
+  zero for it — non-differentiable by DTYPE, no `isConstant` flag, no
+  float-encoded-constant workaround (the value-tape's F0 §4.0.5 note is
+  MOOT on the compiler route). `captureN` takes `List<DTensor<*, *>>`
+  and dispatches F32/I32 leaves; `capture`/`CapturedStep.run` bind I32
+  inputs float-encoded (re-asserting the 2²⁴ cap per re-bind — new
+  step, new indices); RESHAPE and SLICE are dtype-preserving (the
+  rank-2 index flatten stays I32 in the captured graph).
+- **`Embedding`** (DiffKT `Embedding(numEmbeddings, embeddingSize,
+  random)`, table `gaussian()` under the F2 key discipline): `forward`
+  requires an I32 input tracer — trace-time, mirroring DiffKT's
+  `IllegalArgumentException` on a non-IntTensor — and gathers rank-1
+  `[N] → [N, D]` or rank-2 `[B, N] → [B, N, D]`. `paddingIndex` is the
+  RECORDED Tlaloc extra (absent from DiffKT's layer, present in the
+  `:core` §0.4.409 substrate): exact-zero rows forward, exactly-zero
+  table-row gradient (the attr rides the primal onto EMBEDDING_GRAD).
+- **`EmbeddingBag`** (DiffKT's exact source shape): `forwardBags(
+  indices, bagOffsets, params)` = flatten → embed → per bag
+  `slice(start, end, 0)` → `Reduction.reduce` → `concat`, offsets
+  linear into the flattened indices, LAST bag runs to the end.
+  `Reduction` is DiffKT's sealed companion class with the one member
+  DiffKT implements: `Sum` = `sum(0, keepDims = true)`, spelled
+  SUM(axes=[0]) + keepdims RESHAPE. The single-input `Layer.forward`
+  REFUSES exactly like DiffKT's vararg `invoke` throws;
+  `withOffsets(bagOffsets)` is the Layer view for ONE bag structure —
+  honest under the F1 caching contract, since offsets are SLICE attrs
+  and a different bag structure is a different captured graph anyway.
+
+**Design decisions, with rejections.**
+
+- **Indices as I32-typed PARAMS, never baked constants.** REJECTED:
+  recording indices as float-encoded `isConstant` leaves (the
+  value-tape's pre-amendment plan) — a constant bakes the batch into
+  the graph, killing `CapturedStep` re-binding (pinned: one capture,
+  two index batches, both hand-exact); and the I32 param is what makes
+  the interpreter's EMBEDDING dtype require pass and the transform's
+  §0.4.419 arm fire.
+- **`bagOffsets` as a host IntArray, not a traced tensor.** DiffKT
+  takes an IntTensor but reads it host-side to drive the slice loop —
+  offsets shape the GRAPH (slice attrs), they are not data flowing
+  through it. REJECTED: tracing them — a slice bound cannot be a
+  runtime value in the captured form.
+- **Empty bags refuse** (`start == end`): our SLICE spelling requires a
+  positive extent; DiffKT's `slice` would admit the empty bag and Sum
+  would produce a zero row. Recorded NARROWING, loud not silent.
+- **`hostValues` dispatch in `Training.kt`** rather than widening
+  `hostF32` — the F32/I32 encoding decision is the capture layer's, not
+  the tensor substrate's.
+
+**Oracle story.** All `==`, quarter grid, through `valueAndGradients`:
+collision-count gradients (`dTable[v,:] = count(v)` under `Σout`) and
+the weighted form (`dTable[v,:] = Σ_{idx[p]=v} c[p,:]` under
+`Σ(out⊙c)` — discriminating positions the count cannot); paddingIndex
+rows exactly zero BOTH directions (forward rows through the captured
+primal — the interpreter reading `padding_index` off the graph — and
+the padded row's gradient); the trace-vs-hand-built-DXIR oracle TWICE
+(EMBEDDING→SUM with the hand-built I32 param, and SLICE×2→CONCAT→MUL→
+SUM — both routes through the SAME transform, elementwise equal, both
+against hand values), with the ROUTE PIN asserting the captured index
+param's dtype IS I32; EmbeddingBag Sum hand-exact (bags [0,2),[2,3),
+[3,end) with per-bag upstream rows scattering into the right table
+rows); the rank-2 flatten (dtype-preserving RESHAPE witnessed by the
+rank-2-shaped structural-zero input gradient); the full
+Embedding→Flatten→Dense Sequential chain (table gradient arriving
+THROUGH the dense weights, `dTable[v,:]` = scattered `wᵀ` rows);
+re-bind on a held `CapturedStep`; companion draws bit-exact under the
+key discipline; the 2²⁴ cap, the non-I32 refuse, and the DiffKT-parity
+Layer-form EmbeddingBag refuse all pinned loud.
+
+**Deferred, by name — ROW-SPARSE embedding gradients (§2.7 stands,
+dense v1 ratified), with the worked design recorded:** a post-hoc
+dense→CSR conversion of the transform's output is NOT the feature (it
+pays the dense materialisation the option exists to avoid) — the
+honest form is a `rowSparseGradients` lane where (1) the per-step
+sparsity pattern (sorted unique touched vocab rows + per-position row
+map) is computed HOST-SIDE from the indices at bind time in
+`CapturedStep.run` — indices are runtime values, so the pattern is
+per-step and never belongs in the captured graph, exactly like
+SPARSE_MATMUL's component-operand convention (§0.4.418) — and (2) the
+graph emits a compact `[touched, D]` scatter (an EMBEDDING_GRAD
+variant taking the position→compact-row map as an I32 operand; the
+existing EMBEDDING_GRAD walk with a remapped vocab extent is the
+implementation) whose result `run` wraps with the host pattern into
+the Phase-E CSR `SparseTensor` over `[V, D]`; certified against the
+dense gradient's nonzero rows, plus a sparse SGD row-update on the
+optimizer side. Blocked on nothing, sized ~1 §, taken when a consumer
+(the F8 training loop at real vocab sizes) asks. Also deferred:
+EmbeddingBag Mean/Max (unimplemented in DiffKT — parity is Sum; F0's
+standing item), empty bags (the recorded narrowing above), and F0's
+standing deferral list unchanged.

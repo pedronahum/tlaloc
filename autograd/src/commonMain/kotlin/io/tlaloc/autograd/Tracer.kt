@@ -5,6 +5,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.Shape
 import io.tlaloc.core.hostF32
+import io.tlaloc.core.hostI32
 
 class Tracer<S : Shape> internal constructor(
     internal val tape: Tape,
@@ -14,6 +15,13 @@ class Tracer<S : Shape> internal constructor(
     val dims: IntArray get() = entry.dims
     val rank: Int get() = entry.dims.size
     val size: Int get() = entry.size
+
+    /**
+     * §0.4.442 — the tracer's element dtype ([io.tlaloc.core.F32] for every
+     * pre-F6 spelling; [io.tlaloc.core.I32] for an integer index leaf). Ops
+     * that care — `embedding`'s index operand — check it at trace time.
+     */
+    val dtype: io.tlaloc.core.DType get() = entry.dtype
 
     fun toDTensor(): DTensor<S, F32> =
         DTensor(HostF32Storage(entry.value.copyOf()), dims.copyOf(), F32)
@@ -57,6 +65,30 @@ val Tracer<io.tlaloc.core.ScalarShape>.scalar: Float
 
 internal fun <S : Shape> Tape.traceLeaf(value: DTensor<S, F32>): Tracer<S> {
     val entry = leaf(dims = value.dims.copyOf(), value = value.hostF32().copyOf())
+    return Tracer(this, entry)
+}
+
+/**
+ * §0.4.442 — the I32 leaf, the embedding-index entry point. The tape's value
+ * cache is FloatArray-typed for every dtype (see [TapeEntry.dtype]), so the
+ * integers are float-encoded here — exact below 2²⁴, and the require makes the
+ * cap loud instead of silently rounding a big vocab id. The leaf's dtype rides
+ * to `Tape.toDxirFunction`, which stamps the reproduced `DxirParam` I32-typed:
+ * the interpreter's EMBEDDING arm demands an integer index operand, and
+ * `DxirReverseTransform` returns the §0.4.419 ZEROS_LIKE structural zero for
+ * an integer param — non-differentiable by DTYPE, no `isConstant` flag needed.
+ */
+internal fun Tape.traceLeafI32(value: DTensor<*, io.tlaloc.core.I32>): Tracer<Shape> {
+    val ints = value.hostI32()
+    val encoded = FloatArray(ints.size) { i ->
+        val v = ints[i]
+        require(v > -16_777_216 && v < 16_777_216) {
+            "traceLeafI32: index $v at position $i exceeds the float-encoding exactness cap 2^24 " +
+                "(the tape's value cache is float-typed — F0 §4.0.5 landmine 4)"
+        }
+        v.toFloat()
+    }
+    val entry = leaf(dims = value.dims.copyOf(), value = encoded, dtype = io.tlaloc.core.I32)
     return Tracer(this, entry)
 }
 
