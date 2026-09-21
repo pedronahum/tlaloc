@@ -108,6 +108,45 @@ class PjrtSessionSmokeTest {
         }
     }
 
+    /**
+     * §0.4.467 (H1c) — the keyed front door. A serving loop names its program
+     * with `DecodeGraphSpec.executableCacheKey` (modelHash / kind / bucket /
+     * dtypes) instead of re-emitting StableHLO on every lookup, and this pins
+     * the two properties that makes safe:
+     *
+     *  - a REPEATED key lowers ONCE ([PjrtSession.keyedLoweringCount] stays 1)
+     *    and lands on the same executable, and the answers still agree with
+     *    the interpreter;
+     *  - two DIFFERENT keys over the SAME program share one executable —
+     *    the key front-runs the emission, it does not fork the compile cache.
+     *    (A bucket ladder warmed twice under different model hashes must not
+     *    hold two copies of an identical graph in device memory.)
+     */
+    @Test
+    fun aRepeatedCacheKeyLowersOnceAndStillAgreesWithTheInterpreter() {
+        assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        val fn = scalarAffine()
+        val key = "tlaloc-decode-v1/sha256:deadbeef/decode/b1/c16/t1/dtF32/kvF32"
+        PjrtSession().use { session ->
+            val first = session.runOn(fn, listOf(floatArrayOf(2.0f)), cacheKey = key)
+            assertEquals(1, session.keyedLoweringCount, "first keyed call lowers once")
+            assertEquals(1, session.cacheSize)
+            assertCloseToInterpreter(fn, listOf(floatArrayOf(2.0f)), first)
+
+            val second = session.runOn(fn, listOf(floatArrayOf(5.0f)), cacheKey = key)
+            assertEquals(1, session.keyedLoweringCount, "a repeated key must not lower again")
+            assertEquals(1, session.cacheSize, "and must not compile again")
+            assertCloseToInterpreter(fn, listOf(floatArrayOf(5.0f)), second)
+
+            // A second key over the same program: one more lowering, but the
+            // MLIR is identical so the executable cache does not grow.
+            session.runOn(fn, listOf(floatArrayOf(1.0f)), cacheKey = "$key/other")
+            assertEquals(2, session.keyedLoweringCount)
+            assertEquals(1, session.cacheSize, "identical programs share one executable")
+        }
+    }
+
     @Test
     fun prepareDoesNotDispatch() {
         assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")

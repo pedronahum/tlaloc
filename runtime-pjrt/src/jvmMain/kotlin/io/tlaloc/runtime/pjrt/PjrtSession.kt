@@ -157,13 +157,40 @@ class PjrtSession(
     private var closed = false
 
     /**
+     * §0.4.467 (H1c) — the CHEAP FRONT DOOR to the compile cache.
+     *
+     * The back-stop key is the emitted StableHLO text, which is correct
+     * (structurally identical programs hash together) but costs a full
+     * re-emission of the program on every lookup. At decode rates that is the
+     * one thing a cache is supposed to avoid. A caller that can name its
+     * program with a short string — `DecodeGraphSpec.executableCacheKey`,
+     * which is `modelHash / kind / bucket / dtypes` — passes it as `cacheKey`
+     * and the emission happens ONCE per key.
+     *
+     * The contract on that string is absolute: **the key must fully determine
+     * the program.** On a hit nothing is re-emitted, so there is no place to
+     * notice that a key was reused for a different graph — which is exactly
+     * why `executableCacheKey` carries a content-addressed model hash rather
+     * than a friendly name.
+     */
+    private val keyedMlir = ConcurrentHashMap<String, String>()
+
+    private fun lower(fn: DxirFunction, cacheKey: String?): String =
+        if (cacheKey == null) fn.toStablehlo("") else keyedMlir.computeIfAbsent(cacheKey) { fn.toStablehlo("") }
+
+    /** Number of distinct caller-supplied cache keys seen. Tests assert that a
+     *  repeated key does not re-emit. */
+    val keyedLoweringCount: Int get() = keyedMlir.size
+
+    /**
      * Compile [fn] (or fetch from cache) and execute against [inputs]. Returns
      * one [FloatArray] per [DxirFunction.returns], sized by `return.type.elementCount`.
      *
      * The cache key is the StableHLO MLIR text [fn.toStablehlo] produces —
-     * structurally identical DxirFunctions hit the same cache slot.
+     * structurally identical DxirFunctions hit the same cache slot. Pass
+     * [cacheKey] to skip the re-emission on a hit; see [keyedMlir].
      */
-    fun runOn(fn: DxirFunction, inputs: List<FloatArray>): List<FloatArray> {
+    fun runOn(fn: DxirFunction, inputs: List<FloatArray>, cacheKey: String? = null): List<FloatArray> {
         check(!closed) { "PjrtSession is closed" }
         require(fn.params.size == inputs.size) {
             "PjrtSession.runOn: param count ${fn.params.size} != input count ${inputs.size}"
@@ -184,7 +211,7 @@ class PjrtSession(
             }
         }
 
-        val mlir = fn.toStablehlo("")
+        val mlir = lower(fn, cacheKey)
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
         require(exec.numOutputs == fn.returns.size) {
             "PjrtSession.runOn: PJRT executable reports numOutputs=${exec.numOutputs}; " +
@@ -314,10 +341,14 @@ class PjrtSession(
      * Force-compile [fn] now without dispatching. Useful for benchmark setup
      * where you want the compile cost outside the timing loop. Idempotent
      * (a second call with structurally identical [fn] is a no-op).
+     *
+     * §0.4.467 (H1c) — [cacheKey] is the serving-side warm-up path: a plugin
+     * walks `DecodeBucketPolicy.allBuckets` at startup and prepares one
+     * executable per bucket, so the first real request never pays a compile.
      */
-    fun prepare(fn: DxirFunction) {
+    fun prepare(fn: DxirFunction, cacheKey: String? = null) {
         check(!closed) { "PjrtSession is closed" }
-        val mlir = fn.toStablehlo("")
+        val mlir = lower(fn, cacheKey)
         executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
     }
 
@@ -434,6 +465,7 @@ class PjrtSession(
         closed = true
         executableCache.values.forEach { runCatching { it.close() } }
         executableCache.clear()
+        keyedMlir.clear()
         runCatching { client.close() }
         runCatching { arena.close() }
     }

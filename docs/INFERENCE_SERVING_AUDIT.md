@@ -263,3 +263,152 @@ input lanes, so the smoke rides `slotMapping` as an I32 const.
 **Still open in H1**: gap-list item 3 (decode-graph shape contract +
 bucketing). Item 2's write half is closed; its training-side vectorized
 gather/scatter tail remains an AD-surface item, not an inference one.
+
+### H1c — the decode-graph shape contract and bucketing (§0.4.467)
+
+Gap-list item 3, and the piece that makes the plugin's **compile story** real.
+H1a gave the paged read and H1b the paged write; what was missing was the
+*signature* a serving loop calls and the rule that turns a dynamic batch into a
+static one. **No new op kind** — hence no new AD refusal, no new renderer arm,
+no gradient math. This slice is a contract, a policy, and the oracles that hold
+them to it.
+
+**Placement.** `ir/.../inference/` (`DecodeGraphSpec.kt`,
+`DecodeBucketPolicy.kt`), not `:runtime-pjrt`. The contract is expressed in
+`DxirType`, and its consumers are graph construction, the emitter's shape
+checks, the `:maestro` manifest and the PJRT executable cache — all of which
+already depend on `:ir`, and only the last of which is JVM-only. REJECTED: a
+new `:inference` module (two files and a circular pull on `:ir`, for no
+isolation) and `:core` (no `DxirType` there).
+
+**The signature**, static per bucket, `T = 1` for decode and the bucket's
+context width for prefill:
+
+```
+  in   tokenIds [B,T] I32 · positions [B,T] I32 · blockTables [B,maxBlocksPerSeq] I32
+       seqLens [B] I32 · slotMapping [B*T] I32 · (key,value) pools × numLayers
+  out  logits [B,T,V] · the same pools, updated
+```
+
+**Prefill is COVERED, not deferred**: it is the same contract with a longer
+token axis — `DecodeGraphKind.PREFILL`, pinned by a test asserting that every
+non-token-axis type is byte-identical to the decode spec's. What stays deferred
+by name is H1a's prefill *attention form* (the ragged `[numTokens, …]` shape);
+prefill rides the dense FlashAttention path meanwhile, as vLLM's own TPU
+backend does.
+
+**Decisions, and what they rejected.**
+- **Token ids in, not embeddings.** REJECTED: a `[B,T,hiddenSize]` entry point
+  — it ships `B·T·hidden` floats across PCIe every step instead of `B·T` ints,
+  for a table that is already a device weight. Speculative decoding and
+  multimodal prefixes do want one; that is a **named deferral**, and a sibling
+  spec rather than a mode flag on this one.
+- **Pools as ordinary in/out operands**, `(key, value)` per layer ascending, so
+  the graph is functional end to end (H1b's decision) and XLA's buffer donation
+  then makes it free — `donationPairs` names the aliases for H3 to wire.
+  REJECTED: a stateful side-channel resource, which costs every pass a memory
+  model and buys nothing here.
+- **`positions` is an operand, not derived from `seqLens`.** For a padded row
+  there is no correct position to derive, so the convention states one instead
+  of computing a lie.
+- **Sampling stays host-side in v1**: each sampling config would otherwise fork
+  the executable cache on an axis that has nothing to do with shape.
+- **Weights are graph CONSTANTS**, which is why the cache key carries a model
+  hash — pinned by building the end-to-end test graph that way.
+
+**The bucketing policy.** Two independent ladders, multiplied: batch = powers
+of two to `maxBatch` with the cap appended, context = powers of two from 16,
+each **aligned up to a whole number of pages**, with the aligned cap appended.
+Page alignment is load-bearing: a context bucket names `maxBlocksPerSeq =
+context / blockSize`, and a bucket that is not a whole number of pages would
+make that width a rounding decision taken twice by two layers. REJECTED: a
+single fused "total token" ladder (decode is not token-budgeted — a 1×4096 and
+a 64×64 request are not interchangeable); a 1.25× geometric ladder (halves the
+padding waste, triples the executable count, and every executable is a startup
+compile and a slot of device memory); and rounding DOWN with a second pass,
+which recreates the partial-batch shape the ladder exists to avoid. Over-cap
+requests are **REFUSED BY NAME, never clamped** — clamping a context request
+silently truncates a sequence's history, which is a wrong answer dressed as a
+slow one, and the scheduler is the only layer that can split it.
+
+**The padding convention, and its one real decision.** Padding rows carry
+`slotMapping = -1` (H1b drops the write), `tokenIds = 0`, `positions = 0`,
+`blockTables = 0` (page 0, the conventional scratch page — it must be an
+*allocated* page so the gather stays in bounds), and **`seqLens = 1`, never 0**.
+That last one is the whole reason this section exists: `seqLens = 0` masks
+every context lane to −Inf and the softmax becomes `0/0 = NaN` in the
+gather-composed emission, while the interpreter takes a `len == 0` early-out
+and leaves zeros — H1a's emitter already names this as the single shape where
+the two disagree. A padding convention routing through it would make every
+padded batch differ between oracle and device, and would seed NaN into a buffer
+any later fused cross-row reduction would spread into the *real* rows. REJECTED:
+teaching the emission the interpreter's zero arm, which puts a branch in every
+sequence's hot path to serve a row that is thrown away.
+
+**The invariant, and exactly what is claimed.** Every op in the contract is
+row-independent along the batch axis (per-position embedding, per-sequence
+paged attention, disjoint cache writes, a logits projection that contracts
+hidden and never batch), so row *r* of the output is a function of row *r* of
+the input and the weights — and not of `B`. Therefore, **in the reference
+interpreter, a batch of 3 run in a bucket-4 graph is BIT-IDENTICAL on rows 0–2,
+and produces a bit-identical pool, against the same batch in a bucket-3 graph**
+— pinned elementwise with `==`, and again with the *context* bucket widened
+(bucket (4,8) vs (3,4)), where the extra block-table entries are all scratch
+page and the mask must make them contribute exactly nothing.
+
+What is **NOT** claimed: bit-identity on device. Two buckets are two compiled
+executables and XLA may tile a `[4,H]×[H,V]` matmul differently from `[3,H]`;
+a different tiling is a different accumulation order and float addition is not
+associative. The honest device claim is the house GPU-vs-host floor, **~4e-5,
+never pinned tighter than 1e-4**, and the measurement belongs on the real Llama
+decode step in **H3**, where "the same logits" has a top-1 consequence worth
+reporting — not on a toy. Stating the reason rather than pinning a floor on a
+5-token vocabulary is the honest version of this line.
+
+**The executable-cache key.** `tlaloc-decode-v1 / modelHash / kind / bB / cC /
+tT / dtype / kvDtype`, and it is now a real front door: `PjrtSession.runOn` and
+`prepare` take an optional `cacheKey`, and on a hit the StableHLO is **not
+re-emitted**. REJECTED: keying on the emitted MLIR text alone, which is what
+the session did — correct (structurally identical programs hash together) but
+it pays a full re-emission per lookup, which at decode rates is the one thing a
+cache exists to avoid; it stays as the back-stop *behind* the key, so two
+different keys over an identical program still share one executable. REJECTED:
+`DxirFunction` identity — a plugin that rebuilds its graph per request, which
+is the obvious thing to write, would miss every time.
+
+**Oracles.** (1) The padding-invariant pin, elementwise `==` on logits and both
+pools, across batch buckets and across context buckets. (2) An **end-to-end
+mini decode graph** — H1a and H1b composed into a real step (`embed → q/k/v
+projections → KV_CACHE_WRITE ×2 → PAGED_ATTENTION → lm head → logits`),
+`verifySignature`-checked against the contract on every build so the contract
+cannot drift from the code, and agreeing with an independent hand walk that
+touches none of the kinds under test: with `seqLens = 1` the softmax is exactly
+`exp(0)/exp(0) = 1.0`, so attention returns the just-written V and the step
+collapses to a chain of small matmuls. The pool is poisoned at 1000+ so a write
+that never landed is three orders of magnitude off, not epsilon. (3) The
+padding row is **inert**: exactly the three real slots changed, and scratch page
+0 — which the padded row's block table names and which it therefore *read* — is
+byte-for-byte untouched. (4) A bucket-selection suite: exactly-on-boundary takes
+that bucket and not the next, one-past takes the next, selection is covering /
+monotone / minimal over the whole legal domain, over-cap and empty-step refuse
+by name, and a hand-written ladder gets no discount on the invariants. (5) GPU:
+`PjrtSessionSmokeTest` pins the keyed cache path on real XLA on the GB10 — a
+repeated key lowers once, still agrees with the interpreter, and two keys over
+one program share one executable.
+
+**Sensitivity check.** The invariant pins were deliberately mutated before
+being trusted (a changed padded token id, and a padding slot of 0 instead of
+−1): both oracles failed, then passed again on revert.
+
+**Named deferrals from this slice**: the embeddings entry point (speculative
+decoding / multimodal); the device-side padding-invariant measurement (H3, on
+the real decode step); RoPE, which the mini graph declares as a `positions`
+input and does not consume, because it needs H2's rotary tables; warm-up
+scheduling across `allBuckets` (the API is there, the policy of *which* buckets
+a deployment actually compiles at startup is a tuning question with no answer
+yet); and a manifest field carrying the spec, so the artifact states its own
+bucket ladder — H3, where the manifest is written.
+
+**H1 is now CLOSED**: gap-list items 1 (paged attention), 2's write half (cache
+write) and 3 (contract + bucketing) are all landed. Next is **H2** — safetensors
+→ `DTensor` weight ingestion and Llama decode-graph parity vs the HF reference.
