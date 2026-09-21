@@ -1,17 +1,25 @@
 # TPU readiness audit — Tlaloc vs TorchTPU (2026-09-21)
 
-**Status: PHASE G RATIFIED (Pedro, 2026-09-21) with the local/hardware
-split** — the arc certifies only what its machine can prove: G1 (bf16)
-+ G2a (TPU bring-up, local half) + G3a (collectives/Shardy/multi-host
-design) run on the GB10 now, with SPLIT deletion ratified alongside
-(DONE §0.4.454, §5 below);
-G2b (TPU execution), G4 (distributed trainer) and G5 (Pallas/Mosaic
-kernels) are GATED ON HARDWARE — a Cloud TPU VM Pedro provisions
-(v5e/v6e spot suffices). The running record lands in §5 below. Researched 2026-09-21 against the TorchTPU
+**Status: PHASE G — THE LOCAL ARC IS COMPLETE (§0.4.454–462, all landed
+2026-09-21); THE HARDWARE HALF IS GATED, NOT STARTED.** Ratified by
+Pedro 2026-09-21 with the local/hardware split, and the split held: the
+arc certified only what a GB10 CUDA box can prove — SPLIT deletion
+(§0.4.454), G1a–G1d bf16 end-to-end through `:core`/IR/real XLA/`:nn`
+(§0.4.455–458), G2a TPU bring-up's local half (§0.4.459), G3a
+ALL_REDUCE + SHARD_CONSTRAINT un-demoted (§0.4.460) and G3a-2 the
+multi-host design + Maestro seam (§0.4.461). **No TPU-execution and no
+multi-host-run claim exists anywhere in this repo.** G2b (TPU
+execution), G4 (distributed trainer) and G5 (Pallas/Mosaic kernels)
+await a Cloud TPU VM Pedro provisions (v5e/v6e spot suffices);
+[TPU_BRINGUP.md](TPU_BRINGUP.md) is the next session's script. The
+canonical arc-close suite number is **2119** (§0.4.462 clean-room,
+`test jvmTest --rerun`, zero failures, CUDA smokes EXECUTED and the 5
+TPU smokes skipping by design). The running record and the ARC STATE
+land in §5 below. Researched 2026-09-21 against the TorchTPU
 announcement (Google, April 2026 — the PyTorch-native TPU stack that
 will replace PyTorch/XLA) and the OpenXLA PJRT plugin ecosystem.
 
-## What TorchTPU is
+## 1. What TorchTPU is
 
 Eager-first PyTorch on TPU via the PrivateUse1 device extension: three
 eager modes (debug / strict / fused — fused auto-fuses for a claimed
@@ -23,7 +31,7 @@ precompiled kernel library, public repo, vLLM/TorchTitan integration;
 TPU 8 generation. Sources: the Google Developers Blog TorchTPU post,
 PyTorch/XLA plugin docs, the OpenXLA PJRT plugin RFC, libtpu on PyPI.
 
-## The strategic good news
+## 2. The strategic good news
 
 1. **The TPU on-ramp already exists in Tlaloc's architecture.** libtpu
    ships a standard PJRT C API plugin (`pjrt_c_api_tpu_plugin.so`, on
@@ -35,34 +43,117 @@ PyTorch/XLA plugin docs, the OpenXLA PJRT plugin RFC, libtpu on PyPI.
    RNG emission (§0.4.422) is TPU-portable by construction (pure
    StableHLO integer ops; the bit stream cannot fork).
 
-## Weaknesses, ranked
+## 3. Weaknesses, ranked — swept at the local-arc close (§0.4.462)
 
-1. **BF16 (critical).** TPUs are bf16-first; Tlaloc is F32/F64 with the
-   BF16 host-representation design open since §0.4.354. Without bf16
-   end-to-end (DType, host storage, `bf16` emission, casts,
-   mixed-precision accumulation), TPU numbers will be uncompetitive.
-2. **TPU plugin bring-up unproven.** Architecturally free, practically
-   untested: the hand-encoded minimal `CompileOptionsProto`, the
-   ExecuteOptions struct layout, memory kinds, and donation semantics
-   are certified against the CUDA plugin only. Needs `PjrtTarget.Tpu` +
-   a Cloud TPU VM smoke lane (no local TPU hardware exists — a
-   cloud/CI story is required).
-3. **Collectives/multi-host half-alive.** `ALL_REDUCE` /
-   `SHARD_CONSTRAINT` neither interpret nor differentiate (see
-   [AD_SINGLE_ENGINE_AUDIT.md](AD_SINGLE_ENGINE_AUDIT.md) finding C);
-   Shardy round-trip suites skip locally; no multi-host PJRT
-   initialization; no DDP/FSDP equivalent over the Phase F trainer.
-4. **No TPU custom-kernel lane.** KPTX is PTX — N/A on TPU. Named
-   refusal for now; the eventual route is Mosaic-style kernels behind
-   `stablehlo.custom_call`, structurally the KPTX claiming design.
-5. **Bounded dynamism.** Tlaloc recompiles per shape with session
-   caching (classic XLA behavior); TorchTPU is investing here. Track,
-   don't chase yet.
-6. **No eager device mode — by design.** Tlaloc's answer is
+The ranking below is the ORIGINAL 2026-09-21 audit ordering, each row
+re-stated at the close of the local arc. The original text is kept
+(struck through in prose, not markup) so the arc's starting position
+stays legible; **AT THE CLOSE** is what is true at HEAD.
+
+1. ~~**BF16 (critical).**~~ → **LANDED, WITH MEASURED FLOORS
+   (§0.4.455–458; G1a–G1d).** *Was:* TPUs are bf16-first; Tlaloc is
+   F32/F64 with the BF16 host-representation design open since
+   §0.4.354; without bf16 end-to-end (DType, host storage, `bf16`
+   emission, casts, mixed-precision accumulation), TPU numbers will be
+   uncompetitive. **AT THE CLOSE:** all five named pieces exist.
+   `BF16` is a first-class `DType` with `HostBf16Storage(ShortArray)`
+   of raw upper-16-bit f32 patterns and XLA/Eigen-matching RNE
+   narrowing (§0.4.455); the IR carries bf16 end to end — interpreter
+   (the stated compute-in-f32-snap-at-the-op-boundary convention),
+   `CastRule`'s straight-through adjoint, `bf16` StableHLO emission
+   with every f32 assumption enumerated (§0.4.456); real XLA on the
+   GB10 certifies BOTH native `PJRT_Buffer_Type_BF16` buffers (2
+   bytes/element on device — not silently widened f32) and the
+   cast-at-boundary shape (§0.4.457); and `:nn` ships
+   `Precision.MIXED_BF16` — f32 master weights, bf16 compute, f32 loss
+   and gradients, no loss scaler (§0.4.458). **The floors, measured,
+   not asserted:** device f32→bf16 narrowing is BIT-EXACT vs the host
+   RNE helper on a 19-lane sweep (ties both directions, one-ulp
+   neighbours, signed zeros, overflow→inf, subnormal flush); bf16
+   matmul+add on native buffers is BIT-EXACT vs the interpreter on
+   bf16-exact lanes; the bf16 REVERSE graph's one honest divergence is
+   0.0028125 on the pinned lane — exactly the snap error, bounded at
+   one bf16 ulp (2⁻⁸ relative), the recorded tolerance for graphs whose
+   narrowings XLA can elide; mixed-precision on GPU holds loss
+   BIT-EQUAL with gradients inside the derived R·2⁻⁸·scale floor (R =
+   25 bf16 ops counted on the graph), and the exact lane is bit-exact
+   for loss AND every gradient; the host forward envelope is DERIVED
+   (|ΔL| ≤ (1/n)Σ Δyᵢ(2(Aᵢ+|tᵢ|)+Δyᵢ)) and measured 2.1e-4 against a
+   bound of 0.163. **Two findings that outlive the slice:** XLA-CUDA
+   FOLDS an f32→bf16→f32 convert pair to identity (so only a
+   single-convert program measures the device), and it rounds a bf16
+   dot's output AT THE OP BOUNDARY (the 257-tie discriminator answered
+   256, matching the interpreter's per-op-snap convention, not
+   fused-f32's 258). Both are XLA-CUDA measurements and are listed for
+   TPU re-measurement in [TPU_BRINGUP.md](TPU_BRINGUP.md). Remaining:
+   bf16 CONSTANTS (spell `CAST(f32 const)`), bf16 RNG draws (refused by
+   name — the threefry mantissa trick is a binary32 bit-stream
+   contract; draw at f32 and cast), f32 trace-time constants inside a
+   bf16 region, and mixed coverage beyond the Dense-MLP family.
+2. **TPU plugin bring-up: the LOCAL HALF DONE, EXECUTION STILL
+   UNPROVEN (§0.4.459; G2a).** *Was:* architecturally free, practically
+   untested — `CompileOptionsProto`, ExecuteOptions layout, memory
+   kinds and donation certified against the CUDA plugin only.
+   **AT THE CLOSE:** `PjrtTarget.Tpu` exists with libtpu-shaped plugin
+   resolution (the tpu-name gate keeps a CUDA host's generic
+   `TLALOC_PJRT_PLUGIN_PATH` out of the TPU lane, unit-pinned both
+   ways); the §0.4.333 create-options are PLATFORM-GATED (they are the
+   GPU allocator's knobs — a Tpu client passes `create_options = NULL`,
+   and both cross-wirings refuse by name, including the one that would
+   revive the reboot incident); the 6-byte `CompileOptionsProto` is
+   re-verified field-by-field against openxla/xla main and structurally
+   decoded by a local pin; `PJRT_ExecuteOptions` is ruled header ABI,
+   not backend ABI. `PjrtTpuSmokeTest` (5 tests) is WRITTEN and SKIPS
+   CLEANLY here by design; `PjrtTpuLocalCertTest` (7 tests) runs green
+   everywhere. **This row does not close without hardware** — memory
+   kinds, donation semantics, libtpu's accepted option set, and the TPU
+   tiled bf16 buffer size are all still RECORDED UNKNOWNS, enumerated
+   as G2b's six questions in the runbook.
+3. ~~**Collectives/multi-host half-alive.**~~ → **ALL_REDUCE COMPLETE;
+   MULTI-HOST DESIGNED + MARSHALLED (§0.4.460, §0.4.461; G3a,
+   G3a-2).** *Was:* `ALL_REDUCE`/`SHARD_CONSTRAINT` neither interpret
+   nor differentiate (audit finding C), Shardy suites skip locally, no
+   multi-host PJRT init, no DDP/FSDP equivalent. **AT THE CLOSE:** both
+   kinds are UN-DEMOTED and out of `DemotedOpKinds` (which is now
+   LAYERNORM + SDPA only). ALL_REDUCE-sum has a shared attr parser, an
+   interpreter arm on the stated SPMD replicated-value semantics, a
+   `stablehlo.all_reduce` region emission, and a `VjpRule` resting on
+   the proved fact that all-reduce-sum is SELF-ADJOINT — the gradient
+   is the same all_reduce on the upstream, pinned structurally and
+   numerically; SHARD_CONSTRAINT is a value identity with layout
+   metadata, so its identity adjoint/tangent are honest. Multi-host:
+   [MULTIHOST_DESIGN.md](MULTIHOST_DESIGN.md) is the authority (the
+   create-option NamedValues vs kv-store-callback distinction verified
+   against openxla/xla main; **there is no `coordinator_address`
+   option**), `PjrtClientOptions` marshals `node_id`/`num_nodes` with
+   the single-node bytes pinned BYTE-IDENTICAL to §0.4.333, multi-node
+   client creation REFUSES BY NAME without kv-store callbacks, and
+   `TlalocPodSpecBuilder.buildPodGroup` expands one manifest into N
+   rank-carrying pods. **What is NOT claimed:** no multi-device
+   ALL_REDUCE execution (G4c), no multi-host run (needs 2+ hosts), no
+   DDP/FSDP trainer (G4e). The Shardy skip is no longer silent — the
+   `sdy-opt` gate and its build-from-source provisioning are documented
+   in the runbook, with the recorded gap that plain ops carrying a
+   `DxirSharding` get no per-op `sdy.sharding` attr.
+4. **No TPU custom-kernel lane — UNCHANGED, now a DESIGNED slice.**
+   KPTX is PTX, N/A on TPU. The named refusal stands; G5 was upgraded
+   from deferral to designed slice by the §3a amendment (Mosaic/Pallas
+   kernels behind `stablehlo.custom_call`, claimed by the existing
+   recognizers). Nothing was built this arc.
+5. **Bounded dynamism — UNCHANGED, deliberately.** Tlaloc recompiles
+   per shape with session caching (classic XLA behavior); TorchTPU is
+   investing here. Tracked, not chased.
+6. **No eager device mode — UNCHANGED, by design.** Tlaloc's answer is
    compile-first with readable reverse source (the north star), stated
-   deliberately rather than by omission.
+   deliberately rather than by omission. The arc reinforced it: every
+   new op and dtype either RENDERS in `KotlinSourceRenderer` or
+   REFUSES BY NAME there (verified by grep at the close — SHARD_CONSTRAINT
+   renders as identity, ALL_REDUCE refuses because rendering ×|group|
+   would bake a distribution fact into host math, bf16 refuses because
+   host bf16 math is compute-in-f32 and the readable reverse of a bf16
+   program is the f32 graph between its casts).
 
-## Amendments from the TorchTPU talk deep-dive (2026-09-21, Pedro's ask)
+## 3a. Amendments from the TorchTPU talk deep-dive (2026-09-21, Pedro's ask)
 
 Researched against the PyTorch Conference NA 2026 material, the
 Helion-on-TPU PyTorch post, and Ray's TorchTrainer multi-slice PR.
@@ -98,7 +189,7 @@ the MegaScale-equivalent env wiring), layered UNDER Maestro; the
 natural seam is TlalocPodSpecBuilder emitting multi-host pod groups
 carrying the G3 runtime's init env.
 
-## Phase G proposal (awaiting ratification; amended per the above)
+## 4. Phase G (RATIFIED 2026-09-21; the shape the arc actually ran)
 
 G1 bf16 end-to-end → G2 TPU PJRT plugin bring-up + Cloud TPU smoke/CI
 lane → G3 the intra-job coordinator (collectives differentiable or
@@ -109,6 +200,116 @@ Pallas/Mosaic-generated kernels behind `custom_call` with
 recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
+
+### ARC STATE (§0.4.462, the close-out) — read this first
+
+**THE LOCAL HALF IS COMPLETE. THE HARDWARE HALF IS GATED, NOT STARTED.**
+
+Nine sections, one day (2026-09-21), suite **2044 → 2119**:
+
+| § | Slice | What it closed | Suite |
+| --- | --- | --- | --- |
+| 0.4.454 | G slice 1 | `OpKind.SPLIT` deleted (unreachable; per-piece SLICE is the spelling) | 2044 |
+| 0.4.455 | G1a | bf16 foundation in `:core` — `DType`, `HostBf16Storage`, RNE | 2044 → 2056 |
+| 0.4.456 | G1b | bf16 through the IR — interpreter, `CastRule`, StableHLO emission | 2056 → 2067 |
+| 0.4.457 | G1c | bf16 certified on REAL XLA (GB10 CUDA): native buffers + cast-at-boundary | 2067 → 2071 |
+| 0.4.458 | G1d | mixed-precision training in `:nn` — `Precision.MIXED_BF16`, no loss scaler | 2071 → 2080 |
+| 0.4.459 | G2a | TPU bring-up, local half — `PjrtTarget.Tpu`, platform-gated options, self-skipping smoke suite | 2080 → 2092 |
+| 0.4.460 | G3a | ALL_REDUCE + SHARD_CONSTRAINT UN-DEMOTED — interpreter, VJP/JVP, emission | 2092 → 2103 |
+| 0.4.461 | G3a-2 | multi-host design + the certifiable halves (client options, Maestro pod groups) | 2103 → 2119 |
+| 0.4.462 | close-out | this sweep — docs only | 2119 |
+
+**The canonical arc number is 2119**, clean-room certified at §0.4.462
+(`./gradlew test jvmTest --rerun`, zero `failures=`/`errors=` across
+327 JUnit XMLs, `scripts/count-tests.sh` = 2119). The certification's
+shape is itself the arc's honesty claim: **every CUDA smoke suite
+EXECUTED on the GB10** (`PjrtBf16SmokeTest` 4/4,
+`PjrtMixedPrecisionSmokeTest` 2/2, `PjrtRngSmokeTest` 5/5, and the rest
+— `skipped="0"`), and **`PjrtTpuSmokeTest` skipped 5 of 5**, which is
+exactly what a machine with no TPU should report.
+
+**North-star invariants, verified by grep at the close:**
+- **One engine.** Zero `fun backward(`, zero `class Gradients`, zero
+  `class GradientTape` anywhere in the repo outside vendored Maestro.
+  `DxirReverseTransform` still owns every adjoint the arc added —
+  `AllReduceRule`, `ShardConstraintRule` and `CastRule`'s bf16
+  straight-through arm are registry rules, not hand-written math.
+- **No silent gaps.** Every op and dtype the arc introduced either
+  renders in `KotlinSourceRenderer` or refuses there BY NAME:
+  SHARD_CONSTRAINT → identity arm; ALL_REDUCE → named refusal
+  (line ~609); bf16 → named refusal that states the story (line ~150).
+  `DemotedOpKinds` shrank to LAYERNORM + SDPA, each refusal naming its
+  sanctioned alternative.
+
+**WHAT AWAITS THE TPU VM** — the exact list, in dependency order.
+[TPU_BRINGUP.md](TPU_BRINGUP.md) is the next session's script
+(provisioning, JDK, libtpu, the gradle invocation, and teardown).
+
+1. **G2b — TPU execution.** Run `PjrtTpuSmokeTest`'s 5 tests for real
+   and turn the skips into passes. Its six recorded questions:
+   (a) libtpu reports platform `"tpu"`; (b) **the flagship** — threefry
+   uniform draws bit-exact on TPU (the §0.4.422 emission is pure
+   StableHLO integer ops and cannot fork by construction; a TPU pass
+   makes the portability claim MEASURED); (c) whether TPU-XLA also
+   folds the f32→bf16→f32 convert pair and where it rounds a bf16 dot's
+   output (CUDA: folds, and rounds at the op boundary); (d) the TPU
+   tiled on-device size for a bf16 buffer (CUDA pins 2 bytes/element;
+   TPU may pad to tiles — the test PRINTS and lower-bounds it, never
+   pins it); (e) which create-options libtpu accepts (`ml_framework_name`,
+   `ml_framework_version`, `max_inflight_computations` are candidates
+   deliberately NOT passed today); (f) donation semantics + memory
+   kinds beyond defaults. Then re-run `PjrtBf16SmokeTest` and
+   `PjrtMixedPrecisionSmokeTest` there — parametrizing both onto a
+   shared multi-backend harness is G2b's named cleanup.
+2. **G4a — the kv-store FFM upcalls + a coordinator service.** The
+   design intent is MULTIHOST_DESIGN.md §4; today `numNodes > 1` client
+   creation refuses by name precisely because NULL kv callbacks would
+   fail or hang inside the plugin.
+3. **G4b — multi-node client creation**, once (2) exists.
+4. **G4c — ALL_REDUCE across real devices**, upgrading §0.4.460's
+   single-process replicated-value semantics to a measured collective.
+   The `reduction` general-op story rides here too: mean scales the
+   adjoint by 1/|group|, max/min need subgradient routing, and ragged
+   `replica_groups` need StableHLO's -1 padding — all three refuse by
+   name today.
+5. **G4d — the Maestro wiring**: the `distributed { nodes = N }` step
+   schema + `TlalocStepRuntime`; gang-scheduling CRDs are a stated
+   deployment requirement, not something the builder emits.
+6. **G4e — the DDP-equivalent trainer** over Phase F's `:nn`.
+7. **G5 — Pallas/Mosaic kernels** behind `stablehlo.custom_call` with
+   recognizer-driven claiming (designed, not started).
+8. **Independent of the TPU: `sdy-opt`.** `SdyRoundTripTest` and
+   `SdyPropagationTest` skip on every box here — no prebuilt aarch64
+   binary exists; provisioning means a bazel build of
+   `//shardy/tools:sdy_opt` from openxla/shardy. Same story on a TPU VM.
+   Multi-slice/MegaScale env emission (the `MEGASCALE_*` layer recorded
+   UNVERIFIED in MULTIHOST_DESIGN.md) confirms against a live libtpu at
+   the same time.
+
+### The record, newest first
+
+- **§0.4.462 — the Phase G local-arc CLOSE-OUT (docs only).** The
+  sweep: §5's running record made complete with the ARC STATE above
+  (the nine-section table, the canonical number, the hardware queue);
+  §3's weakness table re-stated row by row at the close — bf16 from
+  *critical gap* to **landed with measured floors** (the floors
+  transcribed, not summarized: bit-exact narrowing, bit-exact native
+  matmul, the 0.0028125 one-ulp reverse divergence, the R·2⁻⁸·scale
+  mixed-precision floor, the 2.1e-4-against-0.163 derived envelope),
+  collectives from *half-alive* to **ALL_REDUCE-complete**, multi-host
+  from *absent* to **designed + marshalled**, with rows 4–6 marked
+  deliberately unchanged; the doc's sections NUMBERED (1–5, the
+  TorchTPU amendments becoming 3a) so "§3" and "§5" resolve; the
+  header rewritten to state the arc state and forbid the claims the
+  arc does not hold. [DIFFKT_PARITY_PLAN.md](DIFFKT_PARITY_PLAN.md)'s
+  end-state header and [MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md)'s end
+  state both swept: the DiffKT book of work STAYS CLOSED (Phase G is
+  not a DiffKT phase — DiffKT has no bf16, no TPU and no collectives),
+  but both now point here and carry the post-arc suite number so
+  neither reads as stale at 2020. The north-star invariants verified by
+  grep rather than assertion (results above). NO CODE CHANGED — the
+  suite number is therefore §0.4.461's, re-certified clean-room rather
+  than inherited. **Suite 2119 → 2119.**
 
 - **§0.4.461 — G3a-2 DONE: the multi-host design on file + the certifiable
   seam implemented** (design-heavy by charter; NO multi-host run is claimed

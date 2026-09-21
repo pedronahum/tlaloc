@@ -10,6 +10,22 @@ block inside it records the model-layer completion. Goal per Pedro:
 support everything [facebookresearch/diffkt](https://github.com/facebookresearch/diffkt)
 supports that Tlaloc doesn't yet.
 
+**Post-book sweep (§0.4.462): the book stays CLOSED; Phase G is not one
+of its phases.** The arc that landed after Phase F — bf16 end to end,
+TPU PJRT bring-up's local half, ALL_REDUCE/SHARD_CONSTRAINT un-demoted,
+the multi-host design (§0.4.454–462) — is Phase G, scoped by
+[TPU_READINESS_AUDIT.md](TPU_READINESS_AUDIT.md), and DiffKT has no
+counterpart to any of it (no bf16, no TPU, no collectives), so no row
+in this plan's parity tables moves and no tail in its consolidated list
+closes. Two marks here would otherwise read stale: the end-of-book
+suite number **1944** and the post-F number **2020** are historical,
+and the current clean-room count is **2119** (§0.4.462); and the `:nn`
+module this plan hands to [MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md)
+gained a mixed-precision capture mode (`Precision.MIXED_BF16`,
+§0.4.458) that is purely ADDITIVE — the default `Precision.F32` path is
+byte-for-byte the Phase F one, and every Phase F certification still
+runs on it.
+
 ## Where parity already stands (opened at §0.4.359–364; markers kept current — last sweep §0.4.433)
 
 | DiffKT capability | Tlaloc status |

@@ -1157,3 +1157,42 @@ stack end to end, and the training loop runs certified on host and GPU
 with PyTorch-parity evidence. With Phase F closed, the DiffKT parity
 book of work has NO remaining open phase — see DIFFKT_PARITY_PLAN.md's
 end-state header.
+
+## 5. Post-F addition: mixed precision (§0.4.458, Phase G1d)
+
+Recorded here because it touched `:nn`, and swept at the Phase G
+local-arc close-out (§0.4.462). It is **additive and out of DiffKT
+scope** — DiffKT has no bf16 — so nothing in §1–§4 above is superseded,
+and the ratified §2 decisions all hold unchanged (immutable functional
+components; the AD route is the compiler stack; no gradient math in
+`:nn`).
+
+**The convention, on `io.tlaloc.nn.Precision`: master weights in F32,
+compute in BF16, loss and gradients in F32, NO LOSS SCALING** — bf16
+keeps f32's 8-bit exponent, so the entire fp16 `GradScaler` apparatus
+has nothing to protect against. `MIXED_BF16` is a CAPTURE-level flag on
+the existing trace, not a model property (a `MixedPrecision(model)`
+wrapper was REJECTED for exactly that reason: the f32 capture of the
+SAME model is the oracle). The trace injects one `Tracer.cast(BF16)`
+per f32 leaf and one bf16→f32 cast at the model output, so the loss
+reduction accumulates in f32 and per-parameter gradients are f32 BY
+CONSTRUCTION through `CastRule`'s straight-through adjoint — `:nn`
+still writes no gradient math.
+
+Certified (`MixedPrecisionTrainingTest`, `PjrtMixedPrecisionSmokeTest`):
+graph structure counted on the capture; a bf16-exact lane where mixed ==
+f32 BIT-FOR-BIT for loss and every gradient; a snap lane bit-exact
+against a reference spelled only with the §0.4.455 helpers; a DERIVED
+forward envelope measured 2.1e-4 against a bound of 0.163; 10 Adam steps
+strictly decreasing and bit-reproducible; and on the GB10, the capture's
+own gradient function through the compiled lane inside the R·2⁻⁸·scale
+floor with the loss bit-equal. `gradSource()` on a mixed capture REFUSES
+BY NAME — the readable-reverse story holds.
+
+Deferrals (additions to the consolidated list at the end of §4's F8
+entry, not replacements): f32 trace-time
+CONSTANT leaves inside a bf16 region refuse at trace time; mixed
+coverage is certified for the Dense-MLP family only (conv / BatchNorm /
+embedding-table bf16 are uncertified, and the embedding table keeps its
+own F32 requirement); the whole lane is CUDA-measured — a TPU re-run is
+G2b's, per [TPU_READINESS_AUDIT.md](TPU_READINESS_AUDIT.md) §5.

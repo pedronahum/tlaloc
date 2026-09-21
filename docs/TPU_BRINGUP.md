@@ -7,6 +7,17 @@ GB10 (where every TPU-gated test skips cleanly, by design). **No TPU
 execution claim exists yet.** G2b is running this runbook on a Cloud TPU
 VM and turning the skips into passes.
 
+**Arc state (§0.4.462): the whole Phase G LOCAL arc is now closed and
+this document is the next session's script.** Everything that could be
+proved on a GB10 CUDA box was — bf16 end to end, the TPU bring-up local
+half, ALL_REDUCE/SHARD_CONSTRAINT, the multi-host design — at a
+clean-room suite of **2119**, with every CUDA smoke EXECUTED and
+`PjrtTpuSmokeTest`'s 5 tests skipping by design. The ordered queue that
+awaits the VM (G2b → G4a–G4e → G5, plus the `sdy-opt` provisioning that
+is independent of the TPU) is enumerated in
+[TPU_READINESS_AUDIT.md](TPU_READINESS_AUDIT.md) §5's ARC STATE block;
+the six G2b questions below are step one of it.
+
 ## What the local half established (so G2b doesn't re-litigate it)
 
 1. **Plugin resolution** (`PjrtBinaries.tpuPluginPath`):
