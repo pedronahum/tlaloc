@@ -46,9 +46,99 @@ pip install "jax[cuda12]" numpy            # CPU-only lane: pip install jax nump
 python -c "import jax; print(jax.devices())"
 ```
 
+**This is the only sanctioned write to that venv.** Once it exists it is
+frozen — read §0.1 before typing `pip` at it again.
+
 `jax.devices()` printing a `CudaDevice` is the gate for the CUDA lane;
 the CPU lane needs nothing further and is the one the tolerances are
 tightest on (see §3).
+
+---
+
+## 0.1 `~/.local/venvs/iree` is FROZEN — the oracle venv (§0.4.474)
+
+**Never `pip install`, `pip install -U` or `pip uninstall` anything into
+`~/.local/venvs/iree`.** Creating it from nothing on a fresh machine (the
+recipe above) is the one sanctioned write. After that it is frozen
+infrastructure, and this is the most consequential rule in the runbook.
+
+### Why
+
+That venv is not a convenience, it is **the measurement apparatus**. It
+is where every cross-language claim in this repository gets its *other
+side*, and none of those claims fail loudly when it moves:
+
+| what runs there | what it certifies |
+|---|---|
+| `run_pytorch_llama.py`, `run_pytorch_llama_grad.py`, `run_pytorch*.py` | the PyTorch agreement harness — Tlaloc's forward **and its gradients** |
+| `write_llama_safetensors.py` | H2's bit-exact safetensors parity (torch writes the bytes we then claim to read) |
+| `tlaloc_serve.py`, `run_tlaloc_serve_check.py` | §4's "a Python process with no JVM runs the artifact", at 1e-5 CPU / 1e-3 CUDA |
+| the `vllm_tlaloc` package, `run_vllm_tlaloc_check.py` | the plugin contract and the two-step decode runner |
+| `jax_plugins/xla_cuda12/xla_cuda_plugin.so` | **every PJRT lane in the repo, JVM-side included** — `PjrtBinaries` resolves the plugin out of this venv's site-packages |
+| `iree-base-compiler`, `iree-base-runtime` | the IREE compile-and-run lanes |
+
+A `pip install` that swapped `torch 2.11.0+cpu` for a CUDA build, or
+bumped `jax` one minor version, or set CUDA-13 wheels down beside jax's
+CUDA-12 plugin, would leave `./gradlew test` **green** while silently
+moving every number this repo compares itself against. That is not a
+build break; it is a quiet redefinition of "correct".
+
+`torch` is pinned **including its `+cpu` local tag**, and the tag is the
+point: this torch is a *numerical reference*, not an accelerator. A CUDA
+torch here is a silent swap of the instrument, not an upgrade.
+
+### The precedent (§0.4.470)
+
+The H3b agent needed vLLM and dry-ran `pip install vllm` into this venv.
+The plan came back with **186 packages**, `torch 2.13` replacing the
+oracle torch, **33 CUDA-13 wheels** beside jax's CUDA-12 plugin, and a
+numpy downgrade. It refused — which is why the live-vLLM certification
+is still recorded in
+[INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md) §5 as a named
+deferral rather than as a number nobody could reproduce.
+
+### Instead: give the slice its own venv
+
+```bash
+python -m venv ~/.local/venvs/<slice> && . ~/.local/venvs/<slice>/bin/activate
+pip install <whatever that slice needs>
+# point the harness at it explicitly; do NOT re-point TLALOC_VENV
+```
+
+Venvs are cheap and disk is not the constraint. A second copy of torch
+costs a few GB; a moved oracle costs the arc's credibility.
+
+### The canary
+
+`OracleVenvIntegrityTest` (in `:maestro:jvmTest`, beside the other
+Python-subprocess certifications) runs
+`harness/python/check_oracle_venv.py` in that interpreter and asserts the
+stack is intact: `jax`/`jaxlib` `0.10.0`, the `jax-cuda12-plugin` /
+`jax-cuda12-pjrt` family **version-matched to jax**, `torch 2.11.0+cpu`
+with `torch.version.cuda is None`, `numpy` / `safetensors` / the IREE
+pair present, and **no `jax-cuda13` or `*-cu13` wheel anywhere**. The
+failure message says why it matters and hands over the separate-venv
+recipe.
+
+Two design points worth keeping:
+
+- **No `TLALOC_TORCH_PYTHON` override**, unlike every other subprocess
+  certification here. Those ask "is there an interpreter that can run my
+  reference?" and any answer will do; this one asks "is *the* oracle
+  intact?", and an override would let the thing under test point the
+  test elsewhere.
+- **The policy is a pure function, and it is tested against a venv that
+  is wrong** — the §0.4.470 inventory (torch 2.13, a `jax-cuda13`
+  plugin, `nvidia-cublas-cu13`) must produce a problem naming each. A
+  canary that has only ever seen a healthy venv is an untested canary.
+
+**Bumping a pin in that file is a deliberate act**: it means re-running
+the oracles that depend on it — at minimum the PyTorch agreement
+harness, the safetensors parity test and both serving lanes — and saying
+so in the commit that moves it. It is not maintenance.
+
+Self-skips: no venv at the path, or a venv there carrying neither `jax`
+nor `torch` (some other venv, not the oracle). A fresh clone stays green.
 
 ---
 

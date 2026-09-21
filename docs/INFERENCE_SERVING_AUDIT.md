@@ -1238,6 +1238,17 @@ Nine sections, one day (2026-09-21), suite **2119 → 2290**:
 | 0.4.471 | H4 | the KPTX paged-attention kernel and OpKind-keyed claiming | 2241 → 2259 |
 | 0.4.472 | H5 | `KvQuantPool` + `OpKind.DEQUANTIZE_KV` + `kvQuant` in the manifest; SGLang priced | 2259 → 2290 |
 | 0.4.473 | close-out | this sweep + [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md) — docs only | 2290 |
+| 0.4.474 | H6 rail | `OracleVenvIntegrityTest` + [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md) — the oracle venv is frozen, and now says so out loud | 2290 → 2292 |
+
+**Before touching anything in the next section, read
+[SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
+**frozen oracle infrastructure** — the measurement apparatus for every
+cross-language claim in the table below, JVM-side PJRT lanes included
+(`PjrtBinaries` resolves `xla_cuda_plugin.so` out of its site-packages).
+Every "certify it like this" command in the UNCERTIFIED list creates its
+own venv for that reason, and §0.4.474 put a canary in `./gradlew test`
+that turns a mutation of the oracle from a silently-moved number into a
+red line with the separate-venv recipe attached.
 
 #### CERTIFIED — the claim, its oracle, and its floor
 
@@ -1259,6 +1270,7 @@ Nine sections, one day (2026-09-21), suite **2119 → 2290**:
 | Tlaloc's own PTX can replace the lowering inside an XLA executable | `KptxPagedAttentionKernelTest` vs a Double paged walk | **1.2e-7** kernel · 2.44e-4 emission (= 2^-12, TF32's mantissa) · and the property "the kernel is at least as close to the oracle as the emission it replaces" |
 | the KV-quant bound holds and is tight | every element under `scale/2`, some element over 0.9 of it; a hand-derived power-of-two-scale vector checked on paper | **derived**, not tuned |
 | every new op refuses in both AD transforms and the renderer | `PagedAttentionTest` / `KvCacheWriteTest` / `DequantizeKvTest`, three refusal cases each | by name |
+| the oracle venv every row above is measured against is intact | `OracleVenvIntegrityTest` — `check_oracle_venv.py` in that interpreter, pins asserted on the JVM side; and the policy itself certified against the §0.4.470 mutated inventory | exact versions; `torch.version.cuda is None` |
 
 Three sensitivity checks were run before the oracles were trusted, each
 mutated then reverted: the bf16 decode byte-swapped (H2), `PADDING_SEQ_LEN`
