@@ -56,10 +56,48 @@ PyTorch/XLA plugin docs, the OpenXLA PJRT plugin RFC, libtpu on PyPI.
    compile-first with readable reverse source (the north star), stated
    deliberately rather than by omission.
 
-## Phase G proposal (awaiting ratification)
+## Amendments from the TorchTPU talk deep-dive (2026-09-21, Pedro's ask)
+
+Researched against the PyTorch Conference NA 2026 material, the
+Helion-on-TPU PyTorch post, and Ray's TorchTrainer multi-slice PR.
+TorchTPU is now PUBLIC OSS, integrated with HuggingFace Transformers,
+TorchTitan, vLLM and SGLang.
+
+**Kernels — Helion/Pallas vs KPTX.** TorchTPU's custom-kernel lane is
+Pallas/JAX via decorator; Helion (Meta's high-level DSL) now compiles
+one kernel source to EITHER CuteDSL (NVIDIA) or Pallas (TPU) — flash
+attention at 838 TFLOPs / ~79% MFU on TPU v7, 4.48× over torch.compile
+on attention. Tlaloc supports NEITHER; KPTX is PTX/ISA-level and
+NVIDIA-only. KPTX's differentiators (self-verifying transpiler,
+byte-identical corpus, RECOGNIZER-DRIVEN CLAIMING — kernels attach to
+coarsened ops automatically, where Helion kernels are hand-invoked) are
+real, but Helion's cross-vendor authoring is a direct strategic answer
+to per-vendor DSLs. Response: G5 upgrades from deferral to designed
+slice — Mosaic/Pallas-GENERATED kernels behind `stablehlo.custom_call`,
+claimed by the existing recognizers (reuse our strongest asset; do not
+chase DSL portability where Meta+Google have the head start).
+
+**Orchestration — Ray vs Maestro: complementary layers.** Ray's role
+for TorchTPU is the INTRA-JOB distributed runtime: TorchTrainer worker
+groups + multi-slice MegaScale coordination (num_slices inspection,
+MegaScale env dispatch across slices). Tlaloc's orchestration —
+vendored Netflix Maestro + `maestro-tlaloc` (TlalocPodSpecBuilder, K8s
+step execution) over `:maestro`'s typed manifests (StableHLO+SDY
+bodies, content-addressed, Mesh placement, a backendMatrix schema that
+already carries "google"/"tpu_v5e") — is the BETWEEN-JOBS pipeline
+layer, which TorchTPU's stack has no typed equivalent of. Maestro is
+NOT Ray and should not become it: G3 is the Ray-shaped hole (intra-job
+multi-host coordination — collective bootstrap, PJRT distributed init,
+the MegaScale-equivalent env wiring), layered UNDER Maestro; the
+natural seam is TlalocPodSpecBuilder emitting multi-host pod groups
+carrying the G3 runtime's init env.
+
+## Phase G proposal (awaiting ratification; amended per the above)
 
 G1 bf16 end-to-end → G2 TPU PJRT plugin bring-up + Cloud TPU smoke/CI
-lane → G3 collectives completed (differentiable or refusing by name) +
-Shardy in the emit path + multi-host PJRT init → G4 distributed trainer
-over Phase F (DDP-equivalent first) → G5 (recorded, deferred)
-Mosaic-via-custom_call kernels, bounded dynamism.
+lane → G3 the intra-job coordinator (collectives differentiable or
+refusing by name, Shardy in the emit path, multi-host PJRT init, the
+Maestro pod-group seam) → G4 distributed trainer over Phase F
+(DDP-equivalent first) → G5 (designed slice, upgraded from deferral)
+Pallas/Mosaic-generated kernels behind `custom_call` with
+recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
