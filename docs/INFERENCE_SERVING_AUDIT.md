@@ -560,3 +560,129 @@ buffer story first.
 **Still open in Phase H**: H3 (the `vllm-tlaloc` platform plugin, certified on
 CUDA), H4 (KPTX paged-attention kernel + recognizer claiming), H5 (SGLang
 variant + KV-quant).
+
+### H3a — the serving artifact and its Python side (§0.4.469)
+
+The first half of gap-list item 6, and the slice where the arc's central
+property stops being an intention. **No new op kind, no new attrs, no gradient
+math** — so no new AD refusal and no new `KotlinSourceRenderer` arm; nothing
+entered the IR. What entered is a LINE: everything upstream of it is Kotlin,
+everything downstream is Python + PJRT, and the line is a directory.
+
+**The artifact.** `io.tlaloc.maestro.serving.ServingArtifactWriter.export`
+writes, for a family of `DecodeGraphSpec`s:
+
+```
+  <artifact>/
+    tlaloc-serving.json          the ServingManifest
+    bodies/<sha256>.mlir         StableHLO+SDY, content-addressed
+    programs/<entryId>.json      one ProgramManifest per entry, unmodified
+    weights/…                    pointed at, not necessarily present
+```
+
+The manifest carries model shape (including the **KV-pool axis order, stated
+and not implied** — four integers where two may be equal is not a layout), the
+**bucket ladder** (H1c's named deferral, closed: the artifact states its own
+ladder so the Python side does bucket SELECTION without a second copy of
+`DecodeBucketPolicy`'s arithmetic), a **weights pointer**, and one entry per
+compiled ladder point with its role-tagged input/output slots, its
+`donationPairs`, its `entryPoint`, its body's content address, and
+`DecodeGraphSpec.executableCacheKey` verbatim.
+
+**`ProgramManifest` was extended by ZERO fields, and that is the decision.**
+It describes ONE program; a serving artifact is a deployment of a FAMILY of
+programs sharing a model, a ladder and a weights pointer, whose slots
+additionally carry a serving ROLE. REJECTED: adding `bucket` / `role` /
+`donationPairs` to `ProgramManifest` and `TypeDescriptor` — they are
+meaningless to a `program { }` step that runs a training epoch, and a schema
+most of whose instances must leave fields null has stopped describing
+anything. The composition runs the other way: a `ServingEntry` POINTS AT a
+`ProgramManifest` by path, and the exporter cross-checks that the two agree
+about the boundary types and the content address, so the redundancy is
+*checked* rather than *drifting*.
+
+**Other decisions, and what they rejected.**
+- **`verifySignature` runs on every graph at EXPORT time.** The consumer
+  cannot call back; a signature mismatch discovered in Python is a shape error
+  from inside XLA with the diagnosis removed.
+- **Bodies are named by their own SHA-256 and de-duplicated.** REJECTED:
+  naming them by entry id — readable, and it throws away the one property that
+  lets a loader verify bytes it was handed (`verify_bodies()` on the Python
+  side re-hashes them).
+- **The entry point is `main`, written that way.** REJECTED: the §0.4.325
+  spike's regex rename — a loader that edits a program's text before running
+  it is not running the program it was given.
+- **One module per entry.** A serving process compiles buckets independently;
+  one module with N functions makes every compile pay for every bucket's text.
+- **Textual MLIR, JSON manifest.** REJECTED: StableHLO bytecode (better
+  transport, a NAMED DEFERRAL) — textual MLIR is what
+  `jaxlib.mlir.ir.Module.parse` takes and what §0.4.299 proved jaxlib consumes
+  verbatim, and a `grep`-able artifact is worth a lot in the slice that first
+  draws this line. REJECTED: protobuf/kotlinx-serialization — `:core`'s strict
+  parser (§0.4.468, written because a checkpoint is untrusted input) already
+  exists, so the artifact and the checkpoint are read by one discipline.
+- **Weights stay EMBEDDED as body constants in v1**, and the pointer says so
+  (`embedded: true`, no path). When H3b stages them they become graph
+  parameters and the schema does not move. REJECTED: copying a checkpoint into
+  the artifact to make the directory "self-contained".
+
+**The Python side.** `harness/python/tlaloc_serve.py` — reads the manifest,
+verifies body hashes, selects a bucket off the declared ladder (refusing
+over-cap BY NAME rather than clamping, because a clamped context silently
+truncates a user's history), pads with the wire convention, compiles through
+`jaxlib.mlir` + `backend.compile_and_load` (the §0.4.299 spike pattern,
+reused), caches executables by the manifest's `cacheKey`, executes, and slices
+the logits back to the real rows so the padding row never leaves the loader.
+`run_tlaloc_serve_check.py` is the CLI the certification drives. The padding
+constants are duplicated from `DecodePadding` **deliberately and loudly** —
+they are a wire convention between two processes — and
+`check_padding_constants()` exists so the certification PINS the two copies
+together instead of trusting a comment.
+
+**Oracles.** (1) The exported directory describes itself truthfully: every
+body hashes to the name it is filed under, every `@main` is there, each
+per-entry `ProgramManifest` parses with its OWN parser and agrees, bodies are
+one file per DISTINCT program, and two exports of one model are byte-identical
+(a content address, not a timestamp). (2) Manifest round-trip and refusal
+suite: an entry off the declared ladder, duplicate ladder points, a donation
+pair aliasing mismatched types, an unaligned context ladder, a weights pointer
+that claims both embedded and a path, an unknown schema version, a missing
+field, an unknown slot role — each refused by name. (3) **Export-then-run**:
+Kotlin exports; a Python subprocess with no JVM and no gradle in the loop
+loads the directory, compiles, runs a decode step of three sequences in a
+bucket-4 graph, and its numbers are compared against the host interpreter.
+
+**Two lanes, two floors, and why that is not hedging.** The same artifact runs
+on the PJRT **CPU** client at **1e-5** relative and on the PJRT **CUDA** client
+on the GB10 at **1e-3** relative. The looseness is MEASURED, not guessed:
+XLA-GPU lowers a default-precision f32 `dot_general` through TF32, which puts
+this step ~5e-4 relative from the host while the CPU lane sits at ~1e-7 on the
+identical bytes — so it is the backend's precision policy, not an emission
+bug. A GPU-only oracle at 1e-3 would have been a semantics test with a
+thousandfold hole in it; a CPU-only oracle would not have certified what a
+deployment runs. This closes H1c's deferred device-side measurement with the
+honest answer: **the number is per-backend**. Two claims escape the tolerance
+entirely — the pools are poisoned at 1000+index so a misplaced write is three
+orders of magnitude out, and the padded row's scratch page is pinned with
+exact `==` on BOTH lanes, because an untouched slot is COPIED, not computed.
+
+**Sensitivity check.** Two deliberate mutations before the oracles were
+trusted: `tlaloc_serve.py`'s `PADDING_SEQ_LEN` flipped to 0 (both lanes
+failed), and the block table sent to Python desynced by one page from the
+reference's (both lanes failed). Both passed again on revert.
+
+**Named deferrals from this slice**: buffer DONATION (the manifest carries
+`donationPairs`; wiring them into `CompileOptions` is the measurable win of the
+next slice); staged weights and the HF name-mapping, i.e. exporting a REAL
+Llama decode step rather than the reference mini-graph — **H3b**; the vLLM
+platform-plugin classes themselves (`Platform`/`Worker`/`ModelRunner`) and
+sampling, which is where H3 actually ends; `precision_config = HIGHEST`
+emission for dots that want it, and the top-1 consequence of the TF32 gap on a
+real vocabulary; StableHLO bytecode bodies; warm-up policy (which buckets a
+deployment compiles at startup, still a tuning question with no answer);
+multi-device serving across a mesh; prefill entries (the ladder and the
+contract carry `DecodeGraphKind.PREFILL` today, and nothing exports one yet).
+
+**Still open in Phase H**: H3b/H3c (staged weights + a real Llama; the
+`vllm-tlaloc` plugin classes), H4 (KPTX paged-attention kernel + recognizer
+claiming), H5 (SGLang variant + KV-quant).

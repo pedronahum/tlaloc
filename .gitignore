@@ -23,3 +23,7 @@ replay_pid*
 kotlin-js-store/
 
 .claude/settings.local.json
+
+# §0.4.469 — harness/python is now imported as a module (tlaloc_serve).
+__pycache__/
+*.pyc
