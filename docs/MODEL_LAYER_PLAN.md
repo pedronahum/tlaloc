@@ -929,3 +929,91 @@ optimizer side. Blocked on nothing, sized ~1 §, taken when a consumer
 EmbeddingBag Mean/Max (unimplemented in DiffKT — parity is Sum; F0's
 standing item), empty bags (the recorded narrowing above), and F0's
 standing deferral list unchanged.
+
+### F7 — §0.4.443: GRU — the unroll is the graph, and BPTT is just the transform
+
+**What landed.** `Gru.kt` in `:nn` — the gap table's F7 row held to the
+letter: ZERO new TRACE spellings, zero `Backward.kt` changes, zero rule
+changes, zero gradient math. The cell is Dense reuse plus the existing
+elementwise/CONCAT/SLICE/RESHAPE spellings; the sequence loop is a plain
+Kotlin `for` building the trace; the captured `DxirFunction` is the
+UNROLLED graph and `DxirReverseTransform` differentiates it like any
+other — backpropagation through time is not a feature of this layer, it
+is what reverse-mode ON the unrolled graph already is.
+
+- **The gate equations, exactly as F0 §4.0.4 read them off DiffKT's
+  source.** Input `[batch, seq, numInputs]` (batch axis 0, seq axis 1);
+  per step DiffKT's own `slice(t, t+1, seqAxis).squeeze(seqAxis)`
+  (SLICE + the squeeze RESHAPE); default variant (`LinearAfterResetGru`)
+  `xh = concat(x, h, 1)`, `u = xh2u(xh)`, `r = xh2r(xh)`,
+  `n = xh2n(concat(x, r·h, 1))`, `h' = (1−u)·n + u·h`, the gates whole
+  `Dense` layers with their own biases and baked-in activations
+  (σ/σ/tanh); `linearBeforeReset` variant
+  `n = tanh(x2n(x) + r·h2n(h))` with Identity-activated `x2n`/`h2n`
+  carrying their own biases, same `u`/`r`/`h'`. `AccType.Fold` returns
+  the last `[batch, numHidden]`; `AccType.AccMap` concats the per-step
+  outputs (each unsqueezed at the seq axis) into `[batch, seq,
+  numHidden]`.
+- **The initial state is a CONSTANT zeros leaf** `[batch, numHidden]`
+  (`isConstant = true`, the F5 mask precedent) — the gap table's own
+  recommendation: DiffKT's `initialState` is non-trainable zeros
+  `expand`ed to batch, and a zeros constant carries no gradient, so the
+  expand needs no traced broadcast. REJECTED: tracing it as a parameter
+  (F0's parameter table lists only the gate Denses).
+- Parameter keys are gate-prefixed Dense keys in declaration order
+  (`xh2u.w`, `xh2u.b`, `xh2r.*`, then `xh2n.*` or `x2n.*`/`h2n.*`) —
+  the Sequential-style prefix delegation, `withParameters` grouping by
+  gate and delegating to `Dense.withParameters`.
+- The companion is the DiffKT surface `GRU(numInputs, numHidden, key,
+  acc, linearBeforeReset)`; key discipline lifted to a composite layer:
+  ONE `split(3)` (or `split(4)`) into child keys per GATE in declaration
+  order, each gate Dense applying the F2 per-parameter `split(2)` below
+  that.
+
+**Design decisions, with rejections.**
+
+- **One concrete class covering both candidate variants** (nullable
+  gate slots, private primary constructor, two public tensor-level
+  constructors). REJECTED: mirroring DiffKT's `RecurrentBase` two-
+  subclass hierarchy — under the self-typed `Trainable<T>` a
+  variant-choosing factory must return an erased `TrainableLayer<*>`,
+  which `capture`'s `M : Layer, M : Trainable<M>` bounds cannot hold.
+- **The tensor-level constructors REQUIRE DiffKT's activations**
+  (σ/σ/tanh; Identity/Identity for the before-reset pair) — a loud
+  parity guard so the audited gate equations cannot be silently
+  re-plumbed; pinned by refusal tests.
+- **The multi-input `Layer` question F1 parked: not needed.** GRU is
+  single-input like DiffKT's own (`getSingleInput`); the F1 deferral
+  closes as "no consumer materialised".
+
+**Oracle story.** Two independent oracles per the slice, both on a
+2-unit cell (numIn = numHidden = 2, batch 1, quarter-grid weights):
+FORWARD losses pinned at 1e-5 against a JUnit-side Float replication
+whose same-JVM-ops claim is stated precisely in the test KDoc — it
+mirrors the `DxirInterpreter` arms operation for operation (MATMUL's
+f32 accumulation in (k, n) order from a zero accumulator, bias ADD
+after the matmul, SIGMOID/TANH computed in Double and narrowed — the
+arms' own spelling, and what `valueAndGradients`' loss actually is
+under `includeForward`), so agreement is expected to the bit and the
+1e-5 pin is the slice's contract, not the observed slack. GRADIENTS
+pinned at 1e-5 against central finite differences (step 1e-5,
+truncation O(1e-10)) over an INDEPENDENT double-precision replication
+of the equations — every parameter element AND every input element, at
+seq 1 and seq 3 (Fold), seq 3 (AccMap — the concat path), and seq 2
+for `linearBeforeReset`. The recorded single-step structural fact: with
+h₀ = 0 the reset gate reaches the loss only through `r·h₀`, so its
+gradients are EXACT (±)0 — pinned `== 0f`, with the 3-step cert pinning
+the gate live (|grad| > 1e-4) once h ≠ 0. The BPTT sanity: Fold's loss
+reads only h₃ yet the step-0 input slice carries nonzero gradient
+(shape `[1, 3, 2]` pinned too). Companion draws bit-exact against
+freshly-drawn Denses under the gatewise split for BOTH variants;
+`withParameters` functional (original untouched, pass-through pinned)
+and every guard refuses loudly. The trace-vs-hand-built-DXIR spot check
+was NOT taken ("if cheap" — the unrolled step is ~20 hand-built ops,
+and every constituent spelling already carries its own F2/F5/F6
+trace-vs-DXIR pin through the same transform).
+
+**Deferred, by name:** none new. F1's "multi-input Layer surface if GRU
+wants it" deferral CLOSES unneeded (above); DiffKT's
+`LinearBeforeResetGRU` DNNL hookup stays never-existed-upstream; F0's
+standing deferral list unchanged.
