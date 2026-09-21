@@ -1,64 +1,94 @@
-# Four-Worlds + Maestro examples (Layer 2 §0.4.243+)
+# four-worlds — where your code lives, and what may cross between
 
-Reference snippets demonstrating Tlaloc's four-worlds taxonomy and typed
-buffer-handle protocol.
+**What it shows.** Tlaloc splits a distributed program into four scopes, each
+one an ordinary Kotlin receiver type:
 
-These files are documentation-grade — copy into a project that depends on
-`io.tlaloc:core` and `io.tlaloc:maestro` to run.
+| World | What belongs there | How you enter it |
+|---|---|---|
+| **Kernel** | the maths — elementwise ops, matmuls, reductions | the body lambda of `program { }` |
+| **Orchestration** | building Kernel bodies into shippable artifacts | `Tlaloc.program(...)` |
+| **Program** | composing artifacts into a graph | `Tlaloc.workflow { }` |
+| **Cluster** | running the graph on real hardware | the emitted Maestro descriptor |
 
-| File | Purpose |
-|------|---------|
-| [`SingleStepProgramExample.kt`](SingleStepProgramExample.kt) | A `program { }` block with Kernel/Orchestration scope discipline. Shows that orchestration ops are not callable from inside the kernel body. |
-| [`TwoStepWorkflowExample.kt`](TwoStepWorkflowExample.kt) | `workflow { }` composing two `MaestroStep`s with typed `BufferHandle`s flowing between them. |
-| Type-mismatch (below) | A program that **does not compile** because a step's input handle type doesn't match the producing step's output. |
+Two consequences, both visible in this example:
 
-## Type-mismatch example (compile error by design)
+- **Calling into the wrong world is a compile error.** `program` is an
+  extension on `OrchestrationScope`, so it cannot be called from inside a
+  Kernel body — there is no orchestration receiver in there. No runtime guard,
+  no lint rule.
+- **What crosses a step boundary is never a raw tensor.** It is a
+  `BufferHandle<T, M>`, carrying both the value's type and the mesh `M` it
+  lives on. Feed a step a handle of the wrong shape or the wrong mesh and
+  Kotlin's own checker rejects the call site.
 
-```kotlin
-import io.tlaloc.core.*
-import io.tlaloc.core.ops.contract
-import io.tlaloc.maestro.program
-import io.tlaloc.maestro.workflow
-import io.tlaloc.autograd.relu
-import io.tlaloc.autograd.sum
+The run prints: one step built and executed; two steps composed with a handle
+flowing between them (and the recorded edge); and the Maestro JSON descriptor a
+real cluster ingests.
 
-fun main() {
-    val tokens = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f, 3f))
-    val activations = Tensors.f32Matrix<Sym, Sym>(2, 3, FloatArray(6))
+## Running it
 
-    val encode = Tlaloc.program("encode", tokens, Mesh0) { x -> x.relu() }
-    val score = Tlaloc.program("score", activations, Mesh0) { m -> m.sum() }
-    //                                         ^^^^^^^^^^^^
-    // 'score' takes a Rank2<Sym, Sym> input, not a Rank1<Sym>.
-
-    Tlaloc.workflow("mismatched") {
-        val activated = step(encode, seed(tokens, Mesh0))
-        // Compile error at the next line: 'activated' is
-        //   BufferHandle<DTensor<Rank1<Sym>, F32>, Mesh0>
-        // but 'score' expects
-        //   BufferHandle<DTensor<Rank2<Sym, Sym>, F32>, Mesh0>
-        step(score, activated)
-    }
-}
-```
-
-The Kotlin compiler reports a type-mismatch error at the `step(score, activated)`
-call site because `MaestroStep<In, Out>`'s `In` parameter doesn't match
-the type of `activated`. **No plugin diagnostic is involved** — this is
-Kotlin's native type checker doing its job at the function-call site. The
-error rendering is the standard Kotlin "Type mismatch: expected ..., got
-..." form, pointed at the offending argument.
-
-## Running the examples
+This is a standalone Gradle project resolving Tlaloc from **mavenLocal**, so
+publish first:
 
 ```bash
-# From a project that depends on io.tlaloc:core + io.tlaloc:maestro:
-kotlin examples/four-worlds/SingleStepProgramExample.kt
-kotlin examples/four-worlds/TwoStepWorkflowExample.kt
+# from the repo root
+./gradlew publishToMavenLocal
+./gradlew -p examples/four-worlds run
 ```
 
-Both compiling examples exercise the runtime path — the K2 plugin is
-**not** required (Layer 2's `program {}` builder uses the `:autograd`
-runtime tracer to capture the body, not a plugin lowering). The
-plugin's responsibility is enforcing world-scope discipline at compile
-time, which is captured by the test suite under `:compiler-plugin`.
+## Expected output
+
+Verbatim, from this machine (GB10, JDK 25, Kotlin 2.3.20). The body hash is
+content-addressed over the emitted StableHLO, so it is stable across runs:
+
+```
+[1] one step, built by `program { }`
+    name:              activate_and_score
+    body hash:         8d772d28b944a644855c530be9106ababf64c6fd0d583f23534cf77b68675c19
+    body size:         455 bytes of StableHLO
+    inputs:            [TypeDescriptor(dtype=f32, dims=[5], axisNames=[])]
+    outputs:           [TypeDescriptor(dtype=f32, dims=[], axisNames=[])]
+    mesh requirement:  Mesh0
+    result:            35.0   (relu([1,-2,3,-4,5])^2 summed = 1+9+25)
+
+[2] two steps, composed by `workflow { }`
+    workflow:  activate_then_score
+    steps:     [activate, score]
+    edges:     [activate -> score (None)]
+    result:    35.0   (same answer, two artifacts)
+    (reshard kind is None because both steps sit on Mesh0 with the same
+     axis names; a mesh change or a transpose records an explicit edge.)
+
+[3] the Maestro descriptor a cluster would ingest (2167 chars, first 240):
+    {"properties":{"owner":"tlaloc"},"workflow":{"id":"tlaloc_activate_then_score","name":"activate_then_score","steps":[{"step":{"id":"activate","type":"Kubernetes","params":{"image":{"value":"tlaloc-runtime:0.0.1","type":"STRING"},"tlaloc_art...
+
+[4] the two programs that do NOT compile: see the block at the bottom
+    of src/main/kotlin/Main.kt — uncomment either and run again.
+four-worlds OK
+```
+
+## What to read in the source
+
+All of it is in [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt):
+
+| Look at | For |
+|---|---|
+| `singleStepProgram()` | `program { }`: the Kernel body, the artifact it produces (hash, size, manifest), and running it through its shim |
+| `input.handleOn(Mesh0)` | How a tensor from outside the system becomes a `BufferHandle` |
+| `twoStepWorkflow()` | `workflow { }`: `seed(...)`, `step(...)`, and the handle typing that makes the composition check itself |
+| `wf.edges` | The reshard metadata Tlaloc records per edge — `None` here, `Mesh`/`Transpose` when the placement actually changes |
+| the commented block in `main()` | The two failures: wrong handle type, and calling an orchestration op from a kernel body |
+
+## Notes
+
+- **No compiler plugin here.** `program { }` captures its body with the
+  `:autograd` runtime tracer, so this example depends on `core` + `autograd` +
+  `maestro` and nothing else. The plugin's role in the four worlds is
+  compile-time scope discipline, which is what the commented-out block
+  exercises.
+- **No cluster is contacted.** `MaestroDescriptor.emit` produces the JSON; a
+  real Maestro instance would be the thing that consumes it and launches each
+  step's artifact as a Kubernetes job. Nothing in this example needs a network.
+- The value falls out of the workflow because `step(...)` runs each artifact's
+  shim in process as it composes. `StubExecutor`, which older snippets used for
+  this, is deprecated and deliberately not used here.
