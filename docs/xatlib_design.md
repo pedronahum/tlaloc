@@ -297,7 +297,9 @@ processor; no service-loader.
 
 1. `ir/recognizer/RecognitionMatch.kt` — the typed match record shape.
 2. `ir/recognizer/FlashAttentionRecognizer.kt` — the exemplar
-   recognizer. Read alongside `examples/layer3/RecognizeAndCoarsenAttentionExample.kt`.
+   recognizer. Read alongside `examples/layer3/` (§0.4.485 rebuilt that example
+   as a standalone runnable project; its `src/main/kotlin/Main.kt` walks
+   recognize → coarsen → emit and prints each stage).
 3. `ir/recognizer/coarsener/FlashAttentionCoarsener.kt` — the analytical
    VJP for attention.
 4. `ir/recognizer/kernel/KernelTemplate.kt` + `FlashAttentionKernel.kt`

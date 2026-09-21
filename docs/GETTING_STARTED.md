@@ -110,8 +110,10 @@ IREE binaries) — see the module KDocs and README "Requirements".
 
 ## 6. Where to go next
 
-- [examples/](../examples/) — named indices, four-worlds discipline,
-  Layer-3 kernel selection, the KPTX custom-call matrix.
+- [examples/](../examples/) — eight standalone runnable projects, indexed in
+  [examples/README.md](../examples/README.md): readable gradients, named
+  indices, the four worlds, Layer-3 kernel selection, GPU training, GPU
+  serving, and the TPU program written before the TPU.
 - [DIFFKTX_SPEC.md](../DIFFKTX_SPEC.md) — the book of work; §0.4 is the
   session-by-session ship log.
 - [README](../README.md) — architecture, layer map, benchmarks.

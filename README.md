@@ -26,8 +26,8 @@ Requires a JDK 25 toolchain. (No GPU needed for this example.)
 
 ```bash
 git clone https://github.com/pedronahum/tlaloc && cd tlaloc
-./gradlew publishToMavenLocal      # builds Tlaloc, installs io.tlaloc:*:0.0.1-SNAPSHOT
-cd examples/quickstart && ./gradlew run
+./gradlew publishToMavenLocal          # builds Tlaloc, installs io.tlaloc:*:0.0.1-SNAPSHOT
+./gradlew -p examples/quickstart run   # a standalone project that resolves it from mavenLocal
 ```
 
 ```kotlin
@@ -176,17 +176,25 @@ Four claims, each with the thing that proves it:
 
 ## Examples
 
-Each directory under [`examples/`](examples/) is a standalone project that
-consumes Tlaloc from `mavenLocal` exactly as your own project would:
+Eight standalone projects under [`examples/`](examples/), each its own Gradle
+build resolving Tlaloc from `mavenLocal` exactly as yours would. Run any of them
+with `./gradlew -p examples/<name> run` after `publishToMavenLocal`. Five need
+nothing at all; the rest name what they are missing and exit `0`.
 
-- [`quickstart/`](examples/quickstart/) — `grad {}` on a matmul, plus a
-  named-axis compile error you can uncomment.
-- [`named-indices/`](examples/named-indices/) — axis names enforced by the
-  type system.
-- [`four-worlds/`](examples/four-worlds/) — `program {}` / `workflow {}` and
-  the buffer-handle boundary.
-- [`layer3/`](examples/layer3/) — pattern recognition, kernel selection, and
-  the per-target backend matrix.
+| | | Needs |
+|---|---|---|
+| [`quickstart/`](examples/quickstart/) | `grad {}` on a matmul, lowered at compile time | — |
+| [`named-indices/`](examples/named-indices/) | axis names checked by Kotlin's own type checker | — |
+| [`readable-gradients/`](examples/readable-gradients/) | the derivative printed as Kotlin, recompiled without the plugin, and agreeing bit for bit | — |
+| [`four-worlds/`](examples/four-worlds/) | `program {}` / `workflow {}` and the buffer-handle boundary | — |
+| [`layer3/`](examples/layer3/) | recognition, coarsening, and one artifact per device | — |
+| [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on the Blackwell, gradient derived by the compiler | CUDA |
+| [`gpu-inference/`](examples/gpu-inference/) | Kotlin writes a directory and exits; a framework-free `python3` serves it | CUDA |
+| [`tpu/`](examples/tpu/) | five acts, tolerances fixed in advance, written before the hardware exists | TPU |
+
+[`examples/README.md`](examples/README.md) is the full index: what each one
+shows, a reading order, and exactly what every one of them printed when the set
+was last run end to end.
 
 ## Documentation
 

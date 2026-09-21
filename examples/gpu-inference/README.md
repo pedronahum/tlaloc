@@ -127,7 +127,7 @@ Real output of `python3 serve.py`, GB10 / NVIDIA Blackwell, CUDA driver
 ```
 the entire runtime of this process:
   PJRT plugin   .../jax_plugins/xla_cuda12/xla_cuda_plugin.so
-  driver        whatever that plugin drives (cuda)
+  platform      cuda (requested; the client's own answer is below)
   Python        /usr/bin/python3 (3.12.3)
   frameworks    none installed in this interpreter (jax, torch, numpy: not found)
 
@@ -256,7 +256,7 @@ Real output, on the same GB10:
 ```
 the entire runtime of this process:
   PJRT plugin   .../jax_plugins/xla_cuda12/xla_cuda_plugin.so
-  driver        whatever that plugin drives (cuda)
+  platform      cuda (requested; the client's own answer is below)
   Python        /usr/bin/python3 (3.12.3)
   frameworks    none installed in this interpreter (jax, torch, numpy: not found)
 
@@ -327,6 +327,16 @@ what it costs today, printed by the example rather than hidden by it.
   already on a Cloud TPU VM image, and the artifact is hardware-neutral by
   construction — but **nothing in this repo has ever run on a TPU**, so that
   path is untested and this example does not claim it. See `docs/TPU_BRINGUP.md`.
+  Note that `--platform` is a *request*, not a device: a CUDA plugin handed
+  `--platform tpu` opens CUDA anyway. §0.4.490 found this example printing the
+  flag back as if it were the hardware, and now it prints what the live client
+  answers instead, plus a `MISMATCH` line when the two disagree:
+
+  ```
+    platform      tpu (requested; the client's own answer is below)
+    engine      CtypesEngine on cuda
+    MISMATCH    you asked for 'tpu' and the plugin opened 'cuda'. The plugin .so, not the flag, chose the device.
+  ```
 * **Prefill as one call.** The prompt runs as N decode steps: the ragged
   chunked-prefill form of `PAGED_ATTENTION` is an open performance deferral.
 * **Sampling.** Greedy argmax only, host-side, in the driver.

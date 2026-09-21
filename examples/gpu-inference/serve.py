@@ -105,7 +105,12 @@ def main() -> int:
 
     print("the entire runtime of this process:")
     print(f"  PJRT plugin   {plugin}")
-    print(f"  driver        whatever that plugin drives ({args.platform})")
+    # `--platform` is a REQUEST, not an observation: the plugin decides what it
+    # actually opens, and a plugin built for one backend will happily ignore a
+    # name meant for another. So this line says what was asked for, and the
+    # `engine` line below — which asks the live client for its own platform
+    # name — says what answered. If the two disagree, the mismatch is printed.
+    print(f"  platform      {args.platform} (requested; the client's own answer is below)")
     print(f"  Python        {sys.executable} ({sys.version.split()[0]})")
     print(f"  frameworks    {frameworks()}")
     print()
@@ -132,7 +137,13 @@ def main() -> int:
               f"{'entry' if len(art.entries) == 1 else 'entries'}, all re-hashed OK")
         print(f"  weights     {staged} staged operand files"
               if staged else "  weights     in-body constants (nothing staged)")
-        print(f"  engine      {type(art.engine).__name__} on {art.engine.platform_name()}")
+        # The client's own platform name, read back off the live PJRT client —
+        # this is the device claim, and the only one in this program.
+        actual = art.engine.platform_name()
+        print(f"  engine      {type(art.engine).__name__} on {actual}")
+        if actual.lower() != args.platform.lower():
+            print(f"  MISMATCH    you asked for '{args.platform}' and the plugin opened "
+                  f"'{actual}'. The plugin .so, not the flag, chose the device.")
         print()
 
         block_size = art.model["blockSize"]
