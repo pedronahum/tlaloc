@@ -800,8 +800,68 @@ object KptxKernels {
      *      The `−inf` dead lanes exponentiate to exactly `0`, so no
      *      masking arm is needed there.
      *   3. `kptx_paged_out(S, vcache, btab, slens, o, n_h, n_d, n_bs,
-     *      n_kv, n_mb)` — one CTA per output row, threads strided over
-     *      `headDim`, accumulating only over the live lanes.
+     *      n_kv, n_mb)` — one CTA per output row, accumulating only over
+     *      the live lanes. **§0.4.482 gave this stage a second
+     *      dimension**: see below.
+     *
+     * # §0.4.482 — the context split in stage 3
+     *
+     * As written in §0.4.471 stage 3 strided its threads over `headDim`
+     * alone, so at `headDim = 64` with a 256-thread block **192 of 256
+     * threads exited immediately** and the surviving 64 each walked the
+     * whole context serially. The K1 diagnosis
+     * (`docs/KPTX_PAGED_PERF.md` §3.3) named that as item 6, and at the
+     * latency-critical batch-1 shape it is the whole ballgame: 32 CTAs
+     * x 64 live threads is 2048 threads on a 48-SM device.
+     *
+     * The stage now decomposes its block as `(part, d)`:
+     *
+     * ```
+     *   nsplit = ntid / n_d          // CTA-wide, so branch-uniform
+     *   part   = tid / n_d,  d = tid % n_d
+     *   part p accumulates j = p, p+nsplit, p+2*nsplit, ... < seqLen
+     *   smem[tid] = partial; bar.sync
+     *   part 0 sums smem[p*n_d + d] for p in 1..nsplit-1 and stores O[row,d]
+     * ```
+     *
+     * Three properties this shape was chosen for, each of which is a way
+     * it could have been got wrong:
+     *
+     * - **The barrier is branch-uniform.** `nsplit` is derived only from
+     *   `ntid` and `n_d`, both CTA-wide, so either every thread takes
+     *   the split path or none does. A thread whose `part >= nsplit`
+     *   (`ntid` not a multiple of `n_d`) skips only the *accumulation*
+     *   and still stores its zero and still reaches `bar.sync`.
+     * - **`nsplit < 2` keeps the original program**, which is what makes
+     *   `headDim >= ntid` safe: there the old d-strided loop is both
+     *   correct and already fully parallel, and no shared memory or
+     *   barrier is touched at all.
+     * - **Coalescing is preserved, not sacrificed.** Consecutive `tid`
+     *   within a part have consecutive `d`, so a warp's
+     *   `V[block, off, kvh, d]` request is still one contiguous run; the
+     *   partition index moved to the *slow* axis (`j`), not the fast
+     *   one. Threads sharing a `part` also share a `j`, hence a page
+     *   resolution and a `P[row, j]` broadcast.
+     *
+     * The floating-point sum is **reassociated** by this: partial sums
+     * are now per-partition and added in partition order rather than in
+     * `j` order. That is a different rounding of the same mathematics,
+     * and the §0.4.471 oracle (vs the interpreter's Double paged walk)
+     * is what says it stayed inside tolerance — the worst |delta| at the
+     * certification shape is **1.1920929e-7 before and after**, bit for
+     * bit the same number, because at `headDim 64 / ctx 128` each
+     * partition's chain is short enough that neither ordering loses a
+     * bit the other keeps. That is a *result*, not a guarantee: a longer
+     * context would round differently, and the oracle is what would say
+     * so.
+     *
+     * **The `nsplit < 2` arm is the §0.4.471 program verbatim** and is
+     * not exercised by any shape in the suite (every fixture has
+     * `headDim <= 128` against a 256-thread block). It is reached only
+     * at `headDim >= 128` with a block of 256 — i.e. `headDim 256`, or a
+     * 128-thread launch — and `thePagedOutStageCarriesBothDecompositions`
+     * in `PagedAttentionModuleTest` pins that both arms are still in the
+     * emitted PTX.
      *
      * **GQA is indexing, not new math**: `kvHead = h / (numHeads /
      * numKvHeads)`, computed per CTA from the trailing shape params. The
@@ -962,9 +1022,14 @@ object KptxKernels {
                     val nMbP = param(".u32", "n_mb")
 
                     val p1 = pred(); val p2 = pred()
-                    val r = List(21) { r32() }
+                    val r = List(24) { r32() }
                     val f = List(3) { f32() }
-                    val rd = List(20) { r64() }
+                    val rd = List(21) { r64() }
+                    // §0.4.482 — the cross-partition reduction buffer. One
+                    // f32 per thread; the split path writes `ntid` of them
+                    // and reads `nsplit * n_d <= ntid`, so `block` threads
+                    // is the bound, exactly as it is for the row softmax.
+                    val sacc = shared("spacc", sizeBytes = 4 * block)
 
                     inst("ld.param.u64", rd[0], mem(sPtr))
                     inst("ld.param.u64", rd[1], mem(vPtr))
@@ -1007,7 +1072,85 @@ object KptxKernels {
                     inst("mul.wide.u32", rd[13], r[14], imm(4))
                     inst("add.s64", rd[13], rd[7], rd[13], comment = "block-table row")
                     blank()
+                    comment("0.4.482: nsplit = ntid / n_d context partitions; < 2 takes the d-strided scalar path")
+                    val scalarPath = label("SCALAR_D")
+                    inst("div.u32", r[20], r[7], r[1])
+                    inst("setp.lt.u32", p1, r[20], imm(2))
+                    inst("bra", scalarPath, guard = p1)
+                    blank()
+                    comment("SPLIT: thread = (part, d). Part `p` walks j = p, p+nsplit, ...; then reduce over parts.")
+                    inst("div.u32", r[21], r[6], r[1], comment = "part")
+                    inst("mul.lo.u32", r[22], r[21], r[1])
+                    inst("sub.u32", r[22], r[6], r[22], comment = "d")
+                    inst("mov.f32", f[0], imm("0f00000000"))
+                    val spStore = label("SP_STORE")
+                    val spLoop = label("SP_J_LOOP")
+                    val spLoopDone = label("SP_J_DONE")
+                    val spRed = label("SP_RED")
+                    val spRedDone = label("SP_RED_DONE")
+                    val spDone = label("SP_DONE")
+                    inst("setp.ge.u32", p1, r[21], r[20])
+                    inst(
+                        "bra", spStore, guard = p1,
+                        comment = "ntid not a multiple of n_d: the tail threads contribute a zero",
+                    )
+                    inst("mov.u32", r[16], r[21])
+                    place(spLoop)
+                    inst("setp.ge.u32", p2, r[16], r[13])
+                    inst("bra", spLoopDone, guard = p2)
+                    inst("div.u32", r[17], r[16], r[2], comment = "page index within the sequence")
+                    inst("mul.lo.u32", r[18], r[17], r[2])
+                    inst("sub.u32", r[18], r[16], r[18], comment = "offset within the page")
+                    inst("mul.wide.u32", rd[14], r[17], imm(4))
+                    inst("add.s64", rd[14], rd[13], rd[14])
+                    inst("ld.global.u32", r[19], mem(rd[14]), comment = "physical block")
+                    inst("mul.lo.u32", r[14], r[19], r[2])
+                    inst("add.u32", r[14], r[14], r[18])
+                    inst("mul.lo.u32", r[14], r[14], r[3])
+                    inst("add.u32", r[14], r[14], r[11])
+                    inst("mul.lo.u32", r[14], r[14], r[1])
+                    inst("add.u32", r[14], r[14], r[22])
+                    inst("mul.wide.u32", rd[15], r[14], imm(4))
+                    inst("add.s64", rd[15], rd[6], rd[15], comment = "&V[block, off, kvh, d]")
+                    inst("mul.wide.u32", rd[16], r[16], imm(4))
+                    inst("add.s64", rd[16], rd[11], rd[16], comment = "&P[row, j]")
+                    inst("ld.global.f32", f[1], mem(rd[16]))
+                    inst("ld.global.f32", f[2], mem(rd[15]))
+                    inst("fma.rn.f32", f[0], f[1], f[2], f[0])
+                    inst("add.u32", r[16], r[16], r[20])
+                    inst("bra", spLoop)
+                    place(spLoopDone)
+                    place(spStore)
+                    inst("mov.u64", rd[20], sacc)
+                    inst("mul.wide.u32", rd[19], r[6], imm(4))
+                    inst("add.s64", rd[19], rd[20], rd[19])
+                    inst("st.shared.f32", mem(rd[19]), f[0])
+                    inst(
+                        "bar.sync", imm(0),
+                        comment = "UNIFORM: nsplit is a CTA-wide quantity, so every thread reaches this",
+                    )
+                    inst("setp.ne.u32", p1, r[21], imm(0))
+                    inst("bra", spDone, guard = p1, comment = "part 0 owns the output row (part 0 <=> tid < n_d)")
+                    inst("mov.u32", r[23], imm(1))
+                    place(spRed)
+                    inst("setp.ge.u32", p2, r[23], r[20])
+                    inst("bra", spRedDone, guard = p2)
+                    inst("mad.lo.u32", r[14], r[23], r[1], r[22])
+                    inst("mul.wide.u32", rd[14], r[14], imm(4))
+                    inst("add.s64", rd[14], rd[20], rd[14])
+                    inst("ld.shared.f32", f[1], mem(rd[14]))
+                    inst("add.f32", f[0], f[0], f[1])
+                    inst("add.u32", r[23], r[23], imm(1))
+                    inst("bra", spRed)
+                    place(spRedDone)
+                    inst("mul.wide.u32", rd[15], r[22], imm(4))
+                    inst("add.s64", rd[15], rd[12], rd[15])
+                    inst("st.global.f32", mem(rd[15]), f[0])
+                    place(spDone)
+                    inst("ret")
+                    blank()
                     comment("for d strided: O[row,d] = sum over LIVE j of P[row,j] * V[page(j),kvh,d]")
+                    place(scalarPath)
                     inst("mov.u32", r[15], r[6])
                     val dimLoop = label("DIM_LOOP")
                     val dimDone = label("DIM_DONE")

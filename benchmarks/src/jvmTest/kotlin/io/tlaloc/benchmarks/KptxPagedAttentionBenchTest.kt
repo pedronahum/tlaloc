@@ -20,6 +20,7 @@ import io.tlaloc.runtime.pjrt.kptx.KptxPagedAttention
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import kotlin.math.abs
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
@@ -268,19 +269,29 @@ class KptxPagedAttentionBenchTest {
 
         // Three stages, in the launch order the registry uses.
         assertTrue(report.size == 3, "expected 3 kernels, got ${report.map { it.name }}")
-        // The structural fact the perf tier has to change: the two
-        // stages that WALK PAGES declare not one byte of shared memory,
-        // so every K and V element they touch comes from global memory
-        // and is never reused across the block. (The softmax's 1 KiB is
-        // its cross-warp reduction scratch — a tree buffer, not a staged
-        // page window; it is the one stage that already uses smem, and
-        // it is the one stage that touches no pages.) If a future kernel
-        // stages the page window, this assertion is what notices.
-        val pageWalkers = report.filter { it.name != "kptx_paged_softmax" }
+        // §0.4.481 asserted here that BOTH page-walking stages declare
+        // zero shared memory, and said in so many words: "if a future
+        // kernel stages the page window, this assertion is what
+        // notices." §0.4.482 is that future and this is that notice,
+        // so the assertion is re-aimed rather than deleted.
+        //
+        // What changed and what did NOT: `kptx_paged_out` now declares
+        // `4 * block` bytes, but that buffer is a CROSS-PARTITION
+        // REDUCTION TREE (the same shape as the softmax's `smax`), not a
+        // staged page window — stage 3's V elements still come from
+        // global memory once each and are still never reused across the
+        // block. `kptx_paged_scores` is untouched and still declares
+        // zero, which is the remaining half of KPTX_PAGED_PERF item 3.
+        val scores = report.single { it.name == "kptx_paged_scores" }
         assertTrue(
-            pageWalkers.size == 2 && pageWalkers.all { it.staticSmemBytes == 0 },
-            "the correctness tier's page walks declare no shared memory; a staged page window " +
-                "would change this: " + report.map { it.name to it.staticSmemBytes },
+            scores.staticSmemBytes == 0,
+            "the score stage still walks pages straight out of global memory; staging K would " +
+                "change this: " + report.map { it.name to it.staticSmemBytes },
+        )
+        val outStage = report.single { it.name == "kptx_paged_out" }
+        assertEquals(
+            4 * block, outStage.staticSmemBytes,
+            "stage 3's context split reduces through one f32 per thread",
         )
     }
 

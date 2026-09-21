@@ -70,6 +70,35 @@ class PagedAttentionModuleTest {
         )
     }
 
+    /**
+     * §0.4.482 — stage 3 carries TWO decompositions and picks between
+     * them at run time on `nsplit = ntid / n_d`. The split arm is the
+     * one every shape in the suite takes (`headDim <= 128` against a
+     * 256-thread block); the `nsplit < 2` arm is §0.4.471's d-strided
+     * program kept verbatim for `headDim >= ntid`, and **no test shape
+     * reaches it**, which is exactly why it needs a pin here. If a
+     * future edit collapses the kernel to one arm, this is what notices.
+     */
+    @Test
+    fun thePagedOutStageCarriesBothDecompositions() {
+        val ptx = module.emitPtx()
+        val out = ptx.substringAfter(".visible .entry kptx_paged_out")
+        // The split arm: a shared reduction buffer, a barrier, and the
+        // branch-uniform nsplit test that guards both.
+        assertTrue(".shared .align 4 .b8 spacc[1024]" in ptx, "stage 3's reduction buffer, 4 bytes x 256 threads")
+        assertTrue("bar.sync" in out, "the split arm's cross-partition barrier")
+        assertTrue("SCALAR_D" in out, "the nsplit < 2 fallback label")
+        // The scalar arm: the original d-strided loop, still present.
+        assertTrue("DIM_LOOP" in out && "DIM_DONE" in out, "stage 3's original d-strided arm")
+        // Exactly one barrier: the split arm synchronises ONCE. A second
+        // would mean a barrier landed inside a loop whose trip count is
+        // per-thread, which is the classic way to hang a CTA.
+        assertEquals(1, Regex("bar\\.sync").findAll(out).count(), "stage 3 synchronises exactly once")
+        // Stage 1 was not touched: it still declares no shared memory.
+        val scores = ptx.substringAfter(".visible .entry kptx_paged_scores").substringBefore(".visible .entry kptx_paged_softmax")
+        assertTrue("bar.sync" !in scores, "the score stage stays barrier-free")
+    }
+
     @Test
     fun theEmittedPtxIsPureAscii() {
         // ptxas rejects a non-ASCII byte anywhere in the file — including

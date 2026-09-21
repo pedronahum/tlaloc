@@ -3,6 +3,13 @@
 **§0.4.481 (Phase H4b, slice K1). Measure and diagnose; no kernel was
 rewritten in this slice.**
 
+> **§0.4.482 (slice K2) amends this document — read [§7](#7-04482-k2-the-first-tier-change-a-controlled-null-and-what-it-bought)
+> before acting on §4's priority list.** K2 implemented item **#6**
+> (stage 3's idle threads), certified it, and measured **no change** —
+> and that null, taken against a 2× lever, **bounds stage 3 at ≤ 16% of
+> the chain** and re-ranks everything below it. The list in §4 is kept
+> verbatim as K1 wrote it; §7 says which of its numbers survived contact.
+
 §0.4.471 landed the correctness-tier `@kptx_paged_attention` kernel at
 1.2e-7 against the interpreter's Double paged walk, reported **465 µs
 claimed against 310 µs unclaimed**, concluded the kernel was *1.5×
@@ -221,3 +228,163 @@ Items #1, #4 and #5 are the ones that move the small points.
   than indicative.
 - **The ragged / chunked-prefill form** — still H1a's deferral, and
   every shape here is a decode shape.
+
+---
+
+# 7. §0.4.482 (K2): the first tier change, a controlled null, and what it bought
+
+**Slice K2 took item #6 — the cheapest item on §4's list and the only
+one whose defect was structural rather than arithmetic — implemented it,
+certified it, measured it, and got NOTHING. That is this section.**
+
+The change is real and it is in: `kptx_paged_out` now decomposes its
+block as `(part, d)` instead of striding `d` alone, so at `headDim 64`
+against a 256-thread block the stage went from **64 live threads to
+256**, and at `headDim 128` from 128 to 256. The mechanism, the
+branch-uniformity argument for its one barrier, and the `nsplit < 2`
+fallback are documented on `KptxKernels.pagedAttentionModule`; the pins
+are `PagedAttentionModuleTest.thePagedOutStageCarriesBothDecompositions`
+(both arms still emitted, exactly one `bar.sync`) and the re-aimed smem
+assertion in the bench test, which §0.4.481 wrote *expressly* so that a
+kernel staging shared memory would trip it. It did, and it was re-aimed
+rather than deleted.
+
+## 7.1 The numbers
+
+Same test, same apparatus, same box, same day. Two sessions before the
+change and two after, all four within an hour of each other:
+
+| point | c/u before (2 sessions) | c/u after (2 sessions) |
+|---|---|---|
+| tinyllama-s1-ctx256 | 1.99, 1.60 | 2.14, 1.27 |
+| tinyllama-s8-ctx512 | —, 1.84 | 1.55, 1.65 |
+| llama3-8b-s8-ctx1024 | —, 0.84 | 0.83, 0.84 |
+| llama3-8b-s16-ctx1024 | —, 0.70 | 0.71, 0.68 |
+
+(The first pre-change session aborted at point 1 on the bench's own
+dispatch-floor sanity assertion — the floor lane came in at 144 µs
+against an unclaimed lane of 135 µs. That is the noise §0.4.481 already
+declined to subtract from anything, showing its teeth.)
+
+The claimed lane's absolute device floor at `llama3-8b-s16-ctx1024`:
+**1614 µs before; 1695 and 1533 after.** At `llama3-8b-s8-ctx1024`:
+**1116 before; 1025 and 1098 after.** The change is inside the
+run-to-run spread in both directions at both points. **There is no win
+here and none is claimed.**
+
+## 7.2 What the null actually proves
+
+A null result from a *lever of known size* is not the same as a null
+result from a guess, and this lever's size is known: at `headDim 128`
+the stage's thread count doubled exactly. If stage 3 were a fraction `f`
+of the chain and its time improved by a factor `k`, the chain would
+improve by `f·(1 − 1/k)`. The 8B points moved by less than ~8%
+end-to-end against `k ≈ 2`, so
+
+> **stage 3 is at most ~16% of the three-stage chain** — and that is an
+> upper bound obtained by assuming the doubled thread count bought a
+> full 2×, which it plainly did not.
+
+§0.4.481 wrote item #6 down as "recovers 2–4× of stage 3's parallelism"
+and it did. **Parallelism was not what stage 3 was short of.**
+
+## 7.3 The mechanism the null exposes: stage 1 is uncoalesced and stage 3 never was
+
+Reading the two page walks side by side for their *warp-level* address
+pattern — which §0.4.481's §3.3 recorded as one row ("scalar,
+unvectorized page walk") covering both stages, and which is in fact
+**two completely different situations**:
+
+| | `kptx_paged_scores` (stage 1) | `kptx_paged_out` (stage 3) |
+|---|---|---|
+| what a thread owns | one context lane `j` | one head dim `d` (and, since K2, a lane partition) |
+| what varies across a warp at one load | **`j`** | **`d`** |
+| address stride between adjacent lanes of the warp | `numKvHeads · headDim · 4` = **4096 B** at the 8B shapes | **4 B** |
+| sectors a warp's 128 B of useful data costs | **32 × 32 B = 1024 B** | 4 × 32 B = 128 B |
+| read amplification | **8×** | **1×** |
+
+Stage 3's V walk has been perfectly coalesced since §0.4.471 — a warp's
+32 threads read 32 consecutive f32 of one `V[block, off, kvh, :]` row.
+Stage 1's K walk has never been coalesced at all: at a fixed `d`, its 32
+threads are reading 32 *different pages*, 4 KB apart, and each 4-byte
+load drags a 32-byte sector. **Stage 1 pays roughly 8× the DRAM traffic
+its arithmetic needs, and stage 3 pays 1×.**
+
+That single asymmetry explains the null completely: the stage K2
+parallelised was the cheap one. It also re-reads §3.1's headline number.
+The 4× GQA *multiplicity* is issued by both stages, but stage 1 issues it
+through an 8×-amplified path and stage 3 through a clean one — so of the
+"383 GB/s of issued traffic" at `llama3-8b-s16-ctx1024`, the K side and
+the V side are not the same size at all, and the K side is the one that
+is mostly waste.
+
+## 7.4 The re-ranked list
+
+§4's table is kept above exactly as K1 wrote it. What K2's evidence does
+to it:
+
+| §4 item | K2's verdict |
+|---|---|
+| **#6** stage 3's idle threads | **DONE, and worth ~0.** Landed and certified because it is correct, costs nothing measurable (68 → 73 declared register slots, still 3 blocks/SM; 1 KiB smem that does not bind) and is the `(part, d)` substrate item #1's V half will need. Its value to this arc was the measurement, not the microseconds. |
+| **#3** coalescing / staging | **Promoted to #1 in effort-per-microsecond, and narrowed to STAGE 1 ONLY.** §7.3 puts an 8× read amplification on exactly one of the two page walks. Stage 3 needs no staging; it was never the problem. |
+| **#1** one CTA per (seq, KV head) | **Still the largest term, and now known to be worth more on the K side than the V side.** Fusing the GQA group in stage 1 removes 3/4 of an 8×-amplified stream; in stage 3 it removes 3/4 of a clean one. |
+| **#2** bf16 pools | Unchanged: halves whatever the other two leave. |
+| **#4**, **#5** | Unchanged, and still the only items that address the small points — where, note, the dispatch floor is now 40–70% of the whole measurement and the chain and the floor cannot be told apart at all. |
+| **#7** register shave | Untouched. Stage 3's slot count went the other way (68 → 73) with no occupancy change, which is itself weak evidence that the declared-register cliff is not where the time is. |
+
+**The concrete next kernel**, stated so the next slice does not have to
+re-derive it: give `kptx_paged_scores` a warp-per-lane mapping — warp `w`
+owns context lane `j = w, w + nWarps, …`; its 32 threads split `headDim`
+(`d = lane, lane + 32, …`), so each warp load is 32 consecutive f32 =
+one 128 B transaction; reduce the dot across the warp with
+`shflSync(DOWN, …)` (§0.4.343) and let lane 0 store `S[row, j]`. **No
+barrier and no shared memory**, because a warp is already synchronous
+and every thread of it shares `j`.
+
+**One blocker is already known** and is named here so it is not
+rediscovered: `shflSync` moves `.b32` and requires `%r`-class registers,
+while the accumulator is `%f`. The natural spelling `mov.b32 %r1, %f1`
+is legal PTX but is **rejected by Tlaloc's own ISA table**
+(`PtxIsa.kt`'s `mov` entry class-checks both operands from the type, so
+`b32` demands `%r` on both sides). Closing this needs a small,
+principled table change — a bit-typed `mov` should be class-`Any` — with
+its own `PtxIsaTest` pin. That is the first commit of the next slice,
+not an afterthought inside it.
+
+## 7.5 The gate, unchanged
+
+§5's gate stands untouched: `defaultInferenceKernelTemplates` stays
+empty. **This slice does not register the kernel and does not move the
+kernel toward registration** — the small points, where the gate fails,
+are exactly where nothing changed. What would it take? §5's condition,
+and nothing has been added to or subtracted from it:
+
+> the claimed lane's **device** floor below the unclaimed lane's at
+> **every** point in §2, measured with this test, in one session,
+> interleaved.
+
+The honest statement of where that stands after K2 is that the 8B points
+have been winning since K1 measured them properly, the TinyLlama points
+still lose, and the two changes that address the TinyLlama points
+(#4, #5) have not been attempted. A third thing is now also true: at
+those points the dispatch floor is 144–252 µs against a claimed lane of
+308–540 µs, so **the gate as written may not be measurable at
+`tinyllama-s1-ctx256` at all** until the large-point dispatch floor
+(§6's second deferral) is explained. That is not a reason to weaken the
+gate; it is a reason to fix the instrument first.
+
+## 7.6 K2's own deferrals
+
+- **The stage-1 warp-mapped kernel** — designed in §7.4, not written.
+  Time-boxed out after the null result consumed the slice's
+  implementation budget, and left with its blocker named.
+- **The `mov.b32` ISA-table gap** — see §7.4. One line of table, one
+  pin, and it gates everything warp-reduced that carries floats.
+- **The `nsplit < 2` arm of stage 3 is unexercised on hardware.** It is
+  §0.4.471's program kept verbatim, and no fixture in the suite has
+  `headDim >= 256`, so only the emitted-PTX pin covers it. A GPU arm at
+  `headDim 256` would close it.
+- **Per-stage timing.** Every conclusion in §7.2 is a *bound* derived
+  from end-to-end floors because the apparatus times the whole chain.
+  Three separately-timed custom calls, or CUPTI, would turn "≤ 16%" into
+  a number.

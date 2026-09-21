@@ -964,7 +964,9 @@ convention for every KPTX template.
    their own and no masking arm is needed. The dense module's PTX is unchanged
    (its kernel name and param name are what the helper takes).
 3. `kptx_paged_out` — one CTA per output row, threads strided over `headDim`,
-   accumulating only over live lanes.
+   accumulating only over live lanes. **(§0.4.482 gave this stage a
+   `(part, d)` decomposition so it uses its whole block; see the K2 entry.
+   The `headDim >= ntid` arm is still this program verbatim.)**
 
 GQA is indexing, not new math: `kvHead = h / (numHeads / numKvHeads)`,
 computed per CTA. `seqLens[seq]` is **clamped** to the window width — an
@@ -1983,6 +1985,108 @@ would be the fair-comparison hazard with none of the compensating value.
 `KptxPagedAttention` and `PagedAttentionKernel` are byte-identical at
 this commit; the slice adds one benchmark file and one document.
 
+### H4b — the tier's first kernel change is a certified null, and the null names the real defect (§0.4.482)
+
+Slice K2 of the performance tier. The slice's brief was "land the
+biggest single win from K1's list with its measured delta". **It landed
+a change, certified it, measured it, and there is no win. That is the
+entry.** The full write-up is [KPTX_PAGED_PERF.md §7](KPTX_PAGED_PERF.md);
+this records what it changes about what the audit believes.
+
+**What was built.** K1's item **#6** — `kptx_paged_out` strided its
+threads over `headDim` alone, so at headDim 64 against a 256-thread
+block **192 of 256 threads exited immediately** and the surviving 64
+each walked the whole context serially. The stage now decomposes its
+block as `(part, d)`: `nsplit = ntid / n_d` context partitions, part `p`
+accumulating `j = p, p+nsplit, …`, one `bar.sync`, and a shared-memory
+reduction over parts by the `part == 0` threads. Thread occupancy of the
+stage goes 64 → 256 at headDim 64 and 128 → 256 at headDim 128.
+
+Three things it was built to get right, each a way it could have hung or
+lied: the barrier is **branch-uniform** (`nsplit` derives only from
+`ntid` and `n_d`, both CTA-wide, and a `part >= nsplit` tail thread skips
+only the accumulation, never the barrier); `nsplit < 2` keeps
+**§0.4.471's program verbatim**, which is what makes `headDim >= ntid`
+safe; and **coalescing is preserved** — consecutive `tid` within a part
+still carry consecutive `d`, so the partition index went on the slow
+axis, not the fast one.
+
+**Certified, at the same tolerance and the same shape.** The §0.4.471
+oracle — the kernel against the interpreter's Double paged walk, over a
+permuted block table, ragged `seqLens` (full window, single token,
+mid-page stop, page-aligned stop) and GQA group 4 — gives worst
+|Δ| = **1.1920929e-7, bit for bit the number before the change**,
+although the change reassociates the sum. Offline pins added:
+`thePagedOutStageCarriesBothDecompositions` (both arms still emitted,
+**exactly one** `bar.sync` — a second would mean a barrier inside a
+per-thread-trip-count loop), and the bench's shared-memory assertion,
+which §0.4.481 wrote saying "if a future kernel stages the page window,
+this assertion is what notices". It noticed; it was **re-aimed, not
+deleted**, and now pins that stage 1 still declares zero smem while
+stage 3 declares its `4 · block`-byte reduction tree.
+
+**The measurement, and it is a null.** Two sessions before and two after,
+same box, same hour. c/u at `llama3-8b-s16-ctx1024`: **0.70 before;
+0.71, 0.68 after.** At `llama3-8b-s8-ctx1024`: **0.84 before; 0.83, 0.84
+after.** Claimed-lane absolutes at the s16 point: 1614 before; 1695 and
+1533 after. The change is inside the run-to-run spread in both
+directions. **No win is claimed and none is reported.**
+
+**What the null proves, because the lever's size was known.** At
+headDim 128 the stage's thread count doubled *exactly*. If stage 3 were
+a fraction `f` of the chain improving by `k`, the chain improves by
+`f·(1 − 1/k)`; under 8% end-to-end against `k ≈ 2` bounds
+**stage 3 at ≤ ~16% of the three-stage chain** — and that bound assumes
+the doubling bought a full 2×, which it plainly did not. K1 predicted
+item #6 would "recover 2–4× of stage 3's parallelism". It did.
+**Parallelism was not what stage 3 was short of.**
+
+**The mechanism the null exposes, and it corrects §0.4.481.** K1's §3.3
+recorded "scalar, unvectorized page walk" as ONE row covering both page
+walkers. They are not one situation. Across a warp at a single load,
+stage 1 varies the **context lane** and stage 3 varies the **head dim**:
+
+| | `kptx_paged_scores` | `kptx_paged_out` |
+|---|---|---|
+| stride between adjacent warp lanes | `numKvHeads·headDim·4` = **4096 B** (8B shapes) | **4 B** |
+| sectors per 128 B of useful data | 32 × 32 B = **1024 B** | 4 × 32 B = 128 B |
+| read amplification | **8×** | **1×** |
+
+**Stage 3's V walk has been perfectly coalesced since §0.4.471; stage
+1's K walk has never been coalesced at all.** The stage K2 parallelised
+was the cheap one — which is the whole explanation of the null, and it
+re-ranks K1's list: item **#3 (coalescing) is promoted and narrowed to
+STAGE 1 ONLY**, and item #1's GQA fusion is worth more on the K side
+(3/4 of an 8×-amplified stream) than the V side (3/4 of a clean one).
+
+**The next kernel is specified rather than attempted**, with its blocker
+named so it is not rediscovered: a warp-per-lane mapping for
+`kptx_paged_scores` (warp `w` owns `j = w, w+nWarps, …`; its 32 threads
+split `headDim` so each load is one 128 B transaction; `shflSync(DOWN)`
+reduces the dot; no barrier, no smem) is blocked on Tlaloc's own ISA
+table — `shflSync` requires `%r`-class registers and the accumulator is
+`%f`, while the legal PTX spelling `mov.b32 %r1, %f1` is **rejected by
+`PtxIsa.kt`**, whose `mov` entry class-checks both operands from the
+type. A bit-typed `mov` should be class-`Any`; that table change with its
+own pin is the next slice's first commit.
+
+**Registration: unchanged, and this slice does not move it.**
+`defaultInferenceKernelTemplates` stays **empty**. §0.4.481's gate is
+untouched — the claimed lane's device floor below the unclaimed lane's
+at *every* point — and the points where it fails are exactly the points
+where nothing changed. One new caveat on the gate itself: at
+`tinyllama-s1-ctx256` the dispatch floor ran 144–252 µs against a
+claimed lane of 308–540 µs across these four sessions, so the gate **may
+not be measurable at that point at all** until the dispatch floor is
+explained. That is a reason to fix the instrument, not to weaken the
+gate.
+
+**Cost of keeping the change**: `kptx_paged_out` goes 68 → 73 declared
+register slots (still 3 blocks/SM, 50%) and declares 1 KiB of smem that
+does not bind. It is kept rather than reverted because it is correct, it
+costs nothing measurable, it is the `(part, d)` substrate item #1's V
+half needs, and it is the instrument that produced the bound above.
+
 ### ARC STATE (§0.4.473, the close-out) — read this first
 
 **THE PATH IS BUILT END TO END, IT EXECUTES, IT HAS RUN UNDER REAL vLLM
@@ -2027,6 +2131,7 @@ more the same day carried it past the framework (**2290 → 2296**):
 | 0.4.479 | H3c-2 | `HfLlamaDecodeGraph` + `HfLlamaStagedWeights` + `DecodeGraphSpec.weightSlots` — the real checkpoint becomes a decode graph, certified against HF transformers at **1e-5 relative with argmax and top-5 exact**; RSQRT/SILU interpreter arms found and closed on the way | 2320 → 2330 |
 | 0.4.480 | H3c-3 | `ServingWeightsPointer.table` + `buffer_from_file` + `HfLlamaServingExport` — the artifact carries a staged weight table and a REAL 22-layer TinyLlama serves on PJRT-CUDA, **6/6 generated token ids equal to HuggingFace** | 2330 → 2333 |
 | 0.4.481 | H4b (K1) | `KptxPagedAttentionBenchTest` + [KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md) — the paged-attention tier's baselines, measured on the DEVICE instead of through the host round trip: the kernel is **1.4–1.6× faster** than XLA's lowering at 8B-shaped decode points and 1.9× slower at toy ones, §0.4.471's "1.5× slower" is retired as a staging measurement, and the dominant cost is the GQA re-read, not the score matrix | 2333 → 2335 |
+| 0.4.482 | H4b (K2) | the tier's first kernel change — `kptx_paged_out` gets a `(part, d)` decomposition (64 → 256 live threads at headDim 64), certified at the **same 1.1920929e-7** against the Double paged walk — and it measures **NOTHING**: a controlled null that bounds stage 3 at **≤ 16% of the chain** and exposes the real defect, **stage 1's K walk is 8×-read-amplified across a warp while stage 3's V walk was always coalesced**. Registry still empty | 2335 → 2336 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -2218,6 +2323,16 @@ Three new `OpKind`s entered the IR in Phase H and no others:
    online-softmax fusion. The default inference registry stays empty until
    the claimed lane's device floor beats the unclaimed lane's at EVERY point
    in that sweep.
+   **§0.4.482 (K2) amends the order on evidence**: the tier's cheapest item
+   (stage 3's idle threads) was built, certified and measured to do
+   **nothing**, which bounds stage 3 at ≤ 16% of the chain and exposes the
+   real asymmetry — **stage 1's K walk is 8×-read-amplified across a warp
+   and stage 3's V walk was always coalesced.** Coalescing is promoted and
+   narrowed to stage 1; the next kernel is a warp-per-lane
+   `kptx_paged_scores` with a `shflSync` dot reduction, blocked on a
+   one-line `PtxIsa.kt` fix (a bit-typed `mov` must be class-`Any` so
+   `mov.b32 %r, %f` validates). The registry is still empty and this slice
+   did not move it.
 6. **Narrow DTypes (`I8`, and the fp8 tour)** — a bf16-sized piece of work,
    and the difference between KV-quant's contract and its bytes.
 7. **`precision_config = HIGHEST`** for dots that want it, and the top-1
