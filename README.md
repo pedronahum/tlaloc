@@ -1,284 +1,229 @@
 # Tlaloc
 
-**A Kotlin-native differentiable-programming framework.** Compile-time AD via a K2 compiler plugin, shape- and sharding-typed tensors enforced by the Kotlin type system, StableHLO + Shardy lowering, vendor-fused-kernel custom-calls (FlashAttention v3, TPU pallas, etc.), and Netflix-Maestro-native step orchestration. KMP-first: one source set targets JVM, Android, iOS, and WASM.
+**Differentiable programming for Kotlin, compiled.** You write plain Kotlin;
+a K2 compiler plugin turns `grad { }` into a gradient function at compile
+time — no runtime tape, no `requires_grad`, no framework objects in your
+types. Tensors carry their shape and dtype in the Kotlin type system, so a
+rank or axis mistake is a red squiggle in the IDE, not a stack trace in
+production. Programs lower to StableHLO and run on GPU through PJRT.
 
-> Pre-alpha. Built in the open; not yet packaged for consumption. See [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) §0.4 for the session-by-session ship log.
+And the gradient the compiler derives is **Kotlin source you can read** —
+ask for it with a compiler flag, and what it prints compiles and runs.
 
-## How it fits together
-
-Tlaloc is the **compiler**: Kotlin source → typed IR → StableHLO + per-target kernel decisions. [Netflix Maestro](https://github.com/Netflix/maestro) is the **orchestrator** that runs those compiled programs on Kubernetes. The contract between them is `ProgramManifest`: each `program { }` block produces a `MaestroStep` whose manifest carries a per-(vendor, arch) backend matrix — H100, TPU v5e, Trainium2, CPU fallback, each with its picked kernel and roofline cost. At job-launch time, vendored Maestro reads that matrix and lands the pod on matching hardware. You write Kotlin once; the manifest tells Maestro where to run it.
+> **Status: pre-alpha, developed in the open.** The engine is real and
+> heavily certified (2336 automated tests at HEAD, including live
+> GPU certifications on an NVIDIA GB10); the packaging is not. There are no
+> published artifacts yet — you build from source and consume via
+> `publishToMavenLocal`. APIs move without deprecation cycles. See
+> [What works today](#what-works-today) for the honest capability map:
+> every row says where it runs and what pins it.
 
 ---
 
-## Why
+## Quickstart
 
-PyTorch owns Python. JAX owns research. We don't try to fight on that turf.
+Requires a JDK 25 toolchain. (No GPU needed for this example.)
 
-Tlaloc targets the gap Python frameworks leave open:
-
-- **Android / KMP on-device training** — LoRA fine-tuning, federated learning, personalization, sensor-driven models.
-- **JVM-native enterprise ML** — Spring Boot / Kafka / Flink / Spark hot paths.
-- **Shape-safety-obsessed teams** — fintech, aerospace; silent shape bugs that are a P0.
-- **Differentiable simulation** — games, robotics, XR where Kotlin already has a foothold (libGDX, Korge, Android XR).
-
-## What it is
-
-- **Compile-time AD, one engine.** `grad { x: Float -> ... }` is realized by a K2 plugin — not a runtime tape. The plugin lowers the lambda body to a typed SSA IR (DXIR), runs a coarsening pass, applies the reverse-mode transform, and synthesises a forward Kotlin function that computes the gradient directly. There is no second AD engine: every gradient in Tlaloc — the `grad {}` intrinsics, the Tracer-capture API, the `:nn` training step — comes from the same `DxirReverseTransform` (§0.4.446).
-- **Readable reverse code** (the Tangent inheritance, extended). The derived gradient prints as complete, compilable Kotlin over the `:core` ops — ask the compiler with `-P plugin:io.tlaloc.plugin:dumpGradSource=true` and it shows you the gradient it derived at the lambda's source location, or call `CapturedStep.gradSource()` on a captured model. The printed source compiles standalone, runs, and is certified raw-bit-identical to the compiled gradient. Side-by-side demo: [docs/READABLE_REVERSE.md](docs/READABLE_REVERSE.md).
-- **φ-calculus coarsening** from Shen, Shivers, Dea et al. [Efficient, Sound Gradient Descent in Dynamic and Dependent Control Flow, OOPSLA 2021](docs/papers/coarsening-autodiff.txt). The pass implements F1–F5 + C1–C9 with a [Symja](https://github.com/axkr/symja_android_library)-backed symbolic engine for closed-form closure of affine / indexed-affine / variable-coefficient / power-form recurrences.
-- **Shape-typed tensors.** `DTensor<Rank1<Sym>, F32>` carries shape and dtype in the Kotlin type system. Rank mismatches and shape-wrong broadcasts are compile errors, surfaced in the IDE.
-- **Named indices** (Layer 1). `Named<N, A>` lets a tensor's axes carry symbolic names enforced at the type level: `contract(M_x_K, K_x_N)` only compiles when the shared axis name lines up.
-- **Sharding-typed.** Mesh axis names live in the type system. Users annotate a handful of tensors with partition specs; the compiler propagates shardings through the rest of the program and hands off to [Shardy](https://github.com/openxla/shardy)'s propagation passes. DP, TP, EP, ZeRO, and context parallelism are all the same mechanism.
-- **Four-worlds discipline** (Layer 2). `program { }` and `workflow { }` blocks live in `OrchestrationScope`; the body lambda's receiver is `KernelScope` — kernel-only ops compile, orchestration ops don't. `BufferHandle<T, M>` is the only thing that crosses a step boundary.
-- **First-class Maestro step type** (Layer 2.5). Vendored `third-party/maestro/`. Workflows declare `"type": "Tlaloc"` natively; `TlalocStepRuntime` reads the manifest's `backendMatrix`, builds K8s `nodeSelector` + accelerator hints from the matched row, and executes via `TlalocRunner` inside the runtime container.
-- **Pattern-recognition + per-target kernel registry** (Layer 3). Recognises FlashAttention / RMS norm / RoPE / cross-entropy. Per-(pattern, target) kernel selection across 7 device descriptors (NVIDIA H100/A100, AMD MI300X, Google TPU v4/v5e/v6e, AWS Trainium2). Best-effort KV-quant. Cost-model-driven backend matrix on every manifest.
-- **StableHLO + SDY emission.** We don't write CUDA. We lower to MLIR and let PJRT-backed runtimes (XLA, IREE) codegen.
-
-## What it is not
-
-- Not a PyTorch clone. No `torch.nn` parity goal.
-- Not a research playground for novel AD algorithms. Boring, correct, fast.
-- Not a CUDA kernel project. Not a collectives library.
-- Not Python-compatible at the API level. Interop is via ONNX / StableHLO artifacts.
-
-## Example — scalar `grad`
+```bash
+git clone https://github.com/pedronahum/tlaloc && cd tlaloc
+./gradlew publishToMavenLocal      # builds Tlaloc, installs io.tlaloc:*:0.0.1-SNAPSHOT
+cd examples/quickstart && ./gradlew run
+```
 
 ```kotlin
 import io.tlaloc.autograd.grad
+import io.tlaloc.core.*
+import io.tlaloc.core.ops.*
 
 fun main() {
-    // Paper-faithful BGDHyperOpt (OOPSLA 2021 §6.2), minus the convergence break.
-    // Inputs packed as [r, x_0..x_{M-1}, y_0..y_{M-1}]; gradient wrt slot 0 = d(err)/dr.
-    val g = grad { p: DTensor<Rank1<Sym>, F32> ->
-        val r = p[0]; val Mf = 3.0f
-        var Sxy = 0.0f; var Sx2 = 0.0f
-        for (i in 0 until 3) {
-            val xi = p[1 + i]; val yi = p[4 + i]
-            Sxy = Sxy + xi * yi
-            Sx2 = Sx2 + xi * xi
-        }
-        var w = 0.0f; var k = 0
-        while (k < 50) {
-            val d = 2.0f * (Sx2 * w - Sxy)
-            w = w - r * d / Mf
-            k = k + 1
-        }
-        var e = 0.0f
-        for (j in 0 until 3) {
-            val diff = p[4 + j] - p[1 + j] * w
-            e = e + diff * diff
-        }
-        (e / Mf).sqrt()
-    }
+    // Rewritten at COMPILE TIME into a gradient function.
+    // d/dA sum(A·A) = ones·Aᵀ + Aᵀ·ones
+    val g = grad { a: DTensor<Rank2<Sym, Sym>, F32> -> (a matmul a).sum().toFloat() }
+
+    val a = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f))
+    println(g(a).hostF32().toList())   // [6.0, 8.0, 6.0, 8.0]
 }
 ```
 
-No tape. No `torch.tensor(..., requires_grad=True)`. No gradient type wrapping the primal type. The lambda reads as straight Kotlin — the compiler plugin does the work. And the work is inspectable: compile with `dumpGradSource=true` and the plugin prints the derived gradient as Kotlin source you can read, compile, and run ([docs/READABLE_REVERSE.md](docs/READABLE_REVERSE.md)).
+Want to see what the compiler derived? Add
+`-P plugin:io.tlaloc.plugin:dumpGradSource=true` and it prints the gradient
+as Kotlin source, at your lambda's source location. That printed source
+compiles, runs, and is certified bit-identical to the compiled gradient —
+see [docs/READABLE_REVERSE.md](docs/READABLE_REVERSE.md) for a side-by-side
+demo with real generated output.
 
-## Example — Layer 3 pipeline (recognize → coarsen → kernel → matrix)
+## What works today
 
-```kotlin
-import io.tlaloc.ir.recognizer.*
-import io.tlaloc.ir.recognizer.coarsener.*
-import io.tlaloc.ir.recognizer.kernel.*
-import io.tlaloc.maestro.populateBackendMatrix
+Status means exactly this:
+**✅ Certified** — an automated test pins it, and the table says where it ran ·
+**🧪 Written** — the code exists and unit-tests pass, but the end-to-end path
+has never run (why is always stated) ·
+**📐 Designed** — a design document exists, no implementation ·
+**❌ Not planned**
 
-// Recognise + coarsen the canonical attention shape.
-val matches = recognizeAll(userFn)            // [FlashAttention]
-val coarsened = coarsenRecognizedPatterns(userFn, matches)
+### Automatic differentiation
 
-// Lower for a specific target — H100 picks flash_attn_v3.
-val h100 = lowerKernelChoice(coarsened, KernelTarget.NVIDIA_H100)
+| Capability | Status | Notes |
+|---|---|---|
+| Reverse mode — `grad`, `grad2`, `grad3`, `valueAndGrad*` | ✅ | Compile-time, via the K2 plugin |
+| Forward mode — `jvp`, `jvp2`, `valueAndJvp*` | ✅ | |
+| `vjp` / `jacobian` / `jacobianReverse` / `hessian` (+ `*2` forms) | ✅ | Arbitrary-arity models go through graph capture, not the fixed-arity intrinsics |
+| Higher order — fwd-over-rev, rev-over-rev, nesting matrix | ✅ | Full nesting matrix certified |
+| Custom derivatives — `customVjp`, `customJvp`, `customVjpJvp` | ✅ | |
+| Control flow — loops and branches under `grad` | ✅ | φ-calculus coarsening ([OOPSLA 2021](docs/papers/coarsening-autodiff.txt)) with a Symja-backed closed-form engine |
+| **Readable reverse code** | ✅ | `dumpGradSource` compiler flag + `DxirFunction.toKotlinSource()`; printed source compiles and runs |
+| **One AD engine** | ✅ | The runtime tape was deleted; every gradient — intrinsics, capture API, `:nn` training — comes from the same reverse transform |
 
-// Or populate the full per-target matrix that ships with the manifest.
-val matrix = populateBackendMatrix(
-    userFn,
-    targets = listOf(
-        KernelTarget.NVIDIA_H100,    // → flash_attn_v3
-        KernelTarget.NVIDIA_A100,    // → flash_attn_v2
-        KernelTarget.GOOGLE_TPU_V6E, // → tpu_pallas_flash_attention
-        KernelTarget.AWS_TRAINIUM2,  // → nki_flash_attention
-        KernelTarget.CPU_GENERIC,    // → decompose to primitives
-    ),
-    kvQuant = KvQuantConfig.FP8_PER_HEAD,  // best-effort per target
-)
-```
+### Tensors and operations
 
-The matrix becomes part of `ProgramManifest.backendMatrix`. At job-launch time, `TlalocPodSpecBuilder` (inside vendored Maestro) reads the matrix and translates the row matching the cluster's `(vendor, arch)` into K8s `nodeSelector` labels + accelerator hints. See [`examples/layer3/`](examples/layer3/) for runnable examples and [`docs/xatlib_design.md`](docs/xatlib_design.md) for the design doc.
+| Capability | Status | Notes |
+|---|---|---|
+| Shape- and dtype-typed tensors | ✅ | `DTensor<Rank2<Sym, Sym>, F32>`; mismatches are compile errors |
+| Named axes | ✅ | `Named<N, A>`; a contract over misaligned axis names does not compile |
+| Op surface — elementwise, broadcasting, reductions, shape ops, `concat`/`slice`/`pad`, `where` | ✅ | Full [DiffKT](https://github.com/facebookresearch/diffkt) parity, closed |
+| NN ops — conv2d (incl. grouped/depthwise), pooling, softmax, embedding, losses, batch norm | ✅ | |
+| Special functions — `lgamma`, `digamma`, `polygamma`, `integral` | ✅ | |
+| Stateless RNG — threefry-2x32, uniform/normal/cauchy/exponential/chiSquare | ✅ | Bit-exact against JAX's classic stream; reparameterized gradients |
+| Sparse — rank-2 CSR, sparse×dense matmul through `grad { }` | ✅ | Host + interpreter; no GPU emission by design (see [audit](docs/SPARSE_PARITY_AUDIT.md)) |
+| dtypes — F32, F64, I32, **BF16** | ✅ | bf16 end to end incl. native PJRT BF16 buffers and mixed-precision training |
+| dtypes — F16, FP8, int8 tensors | ❌ | int8 exists for KV-cache quantization only |
 
-## Status
+### Models and training (`:nn`)
 
-| Layer | Focus                                                                                | Status      | Closure spec        |
-|-------|--------------------------------------------------------------------------------------|-------------|---------------------|
-| Stage A   | DXIR + reverse-mode SCT + K2 handoff                                             | shipped     | §0.4.31             |
-| Stage B   | φ-calculus coarsening (F1–F5 + C1–C9) + Symja engine                             | shipped     | §0.4.33             |
-| Stage C   | StableHLO + Shardy emission; SOI splice op; coarsening cache                     | shipped     | §0.4.43             |
-| Stage D.1 | Brachistochrone full port                                                        | shipped     | §0.4.43             |
-| Stage D.2 | HookeanSpring full port                                                          | shipped     | §0.4.47             |
-| Stage D.3 | BGDHyperOpt full source port — paper-speedup closure firing                      | shipped     | §0.4.52             |
-| Layer 1   | Named indices (`Named<N, A>` + `axisNames` + typed `contract` op)                | shipped     | §0.4.241            |
-| Layer 2   | Four worlds + `program { }` + `workflow { }` + `BufferHandle` + Maestro descriptor | shipped     | §0.4.243            |
-| Layer 2.5 | Vendored Maestro + first-class `Tlaloc` step type + `SerializedBufferHandle`     | shipped     | §0.4.249            |
-| Layer 3   | Pattern recognition + VJP coarsening + kernel registry + cost model + KV-quant + backend matrix + pod-spec | **shipped (closure)** | §0.4.260 |
-| Layer 4.1 | StableHLO `custom_call` emit for COARSENED + `kernel_descriptor` lowering              | shipped     | §0.4.261            |
-| Layer 4.x | `:runtime-iree` (CPU + CUDA) + `:runtime-pjrt` (PJRT-XLA via pure-Kotlin FFM); LlamaDecoder forward+backward agrees with PyTorch + JAX on real GPUs | shipped     | §0.4.284 → §0.4.324 |
-| Layer 4.5 | Cost-driven scheduling + live Maestro K8s integration end-to-end | not started | —          |
-| KPTX arc  | Native PTX DSL + transpiler, v1–v3. Glow-style native runtime: NO-GO today, conditional GO gated on kernel coverage | closed      | §0.4.326 → §0.4.348 |
-| DiffKT parity | Op-surface + AD parity with [facebookresearch/diffkt](https://github.com/facebookresearch/diffkt): implicit broadcasting, shape templates, concat/stack, forward-mode intrinsics, NCHW conv + pooling | **active**  | [docs/DIFFKT_PARITY_PLAN.md](docs/DIFFKT_PARITY_PLAN.md) |
+| Capability | Status | Notes |
+|---|---|---|
+| Layers — Dense, Conv2d, MaxPool/AvgPool, BatchNorm, Dropout, Embedding, EmbeddingBag, GRU, Flatten | ✅ | Immutable/functional; a training step returns a new model |
+| Optimizers — SGD, Momentum, RMSprop, Adam, FixedLearningRate | ✅ | Pure `(params, grads, state) → (params', state')` |
+| Training loop — capture once, train | ✅ | MLP converges; loss curve matches PyTorch **to 7 decimals** |
+| Training on GPU | ✅ | The captured gradient graph compiles to StableHLO and trains on CUDA |
+| Mixed precision (bf16 compute, f32 master weights) | ✅ | No loss scaling needed |
+| Distributed / multi-GPU training | 📐 | [Design](docs/MULTIHOST_DESIGN.md) + marshalling done; never run (needs 2+ hosts) |
 
-Full suite green at HEAD: **1862 Tlaloc-side tests** — `bash scripts/count-tests.sh` after `./gradlew test` for the exact number. The §0.4 ship log in [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) ends at §0.4.263; from §0.4.264 onward the per-section record lives in the commit messages, and the active book of work is [docs/DIFFKT_PARITY_PLAN.md](docs/DIFFKT_PARITY_PLAN.md). See [docs/audits/](docs/audits/) for closing audits per layer and [docs/xatlib_design.md](docs/xatlib_design.md) for the Layer 3 design narrative.
+### Inference and serving
 
-### What's landed in Layer 4 (closed at §0.4.324)
+| Capability | Status | Notes |
+|---|---|---|
+| Paged attention, KV-cache writes, decode bucketing | ✅ | Inference-only ops; they refuse differentiation by name |
+| HuggingFace safetensors ingestion | ✅ | Kotlin parser; certified against torch reading the same bytes |
+| **A real Llama serving end to end** | ✅ | TinyLlama-1.1B, all 22 layers, on PJRT-CUDA — **6/6 generated token ids identical to HuggingFace transformers** |
+| **Framework-free serving runtime** | ✅ | The serving process imports no JAX, no PyTorch, no NumPy — just a PJRT plugin `.so` and a driver (proven by an import blocker that raises on those modules while the path runs) |
+| vLLM platform plugin | 🧪 | Platform discovery activates it and the worker API executes live; `LLM.generate()` still needs one backend-class stub (named in the [audit](docs/INFERENCE_SERVING_AUDIT.md)) |
+| SGLang plugin | 📐 | Design recorded; reuses the same artifact |
+| KV-cache quantization (int8) | ✅ | Derived error bound, not a guess |
 
-- **StableHLO `custom_call` emit for COARSENED.** Materializes `stablehlo.custom_call @flash_attn_v3 {backend_config={...}}` from L3-annotated COARSENED ops (§0.4.261).
-- **Pattern-coarsener coverage.** RmsNorm, RoPE, CrossEntropy, SwiGLU, TransformerMLP, LayerNorm, and GroupedQueryAttention (MQA + GQA, including Llama-3 8B's `repeat_kv` shape) each ship analytical primal + gradient bodies.
-- **Two real runtimes.** `:runtime-iree` dispatches LlamaDecoder forward+backward on IREE-CPU and IREE-CUDA; `:runtime-pjrt` runs the same workload on PJRT-XLA-CUDA via pure-Kotlin FFM (no JNI, no Python in the dispatch path). Forward+backward agree with `torch.autograd.grad` at PyTorch-allclose tolerances.
-- **Comparison matrix on real hardware.** 6-row × 2-mode benchmark (Tlaloc-IREE-CPU/CUDA, Tlaloc-PJRT-FFM-CUDA, Tlaloc-PJRT-XLA-spike, PyTorch-CPU, JAX-GPU) on the LlamaDecoder. Tlaloc-PJRT-FFM-CUDA lands within ~7% of JAX-GPU.
+### Compilation and runtimes
 
-### What's still missing (Layer 4.5+)
+| Capability | Status | Notes |
+|---|---|---|
+| StableHLO + Shardy (SDY) emission | ✅ | We don't write CUDA; we lower to MLIR |
+| PJRT execution from Kotlin (pure FFM — no JNI, no Python) | ✅ | Certified on NVIDIA GB10 |
+| PJRT execution from Python (pure ctypes — no framework) | ✅ | |
+| IREE runtime (CPU + CUDA) | ✅ | |
+| Pattern recognition + coarsening — FlashAttention, GQA, RMSNorm, RoPE, SwiGLU, cross-entropy, LayerNorm | ✅ | |
+| KPTX — a PTX DSL, parser, transpiler, and recognizer-driven kernel claiming | ✅ | Kernels attach to recognized ops automatically |
+| KPTX paged-attention kernel — **performance** | 🧪 | Correct, but currently **slower than XLA's own lowering** on-device. The honest numbers and the specified fix are in [docs/KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md). Not registered by default |
+| Netflix Maestro orchestration — manifest, step type, pod-spec builder | ✅ | Unit-certified; a live K8s run has not been done |
 
-- **Sharding-aware kernel custom-calls.** Plumb SDY mesh axis names through the kernel descriptor's `customCallAttrs` so cross-device attention has a well-typed sharding.
-- **Cost-driven scheduling.** Today's `TlalocPodSpecBuilder` picks rows by `(vendor, arch)` exact match; an L4 scheduler can honor cluster availability + cost policy.
-- **Live K8s integration end-to-end.** Today's L3.6 pod-spec construction is unit-tested; L4 exercises it against a live Maestro instance.
+### Hardware and platforms
 
-8 audit OQs filed during L3 closure track refinement work — see [`docs/audits/xatlib_kotlin_audit.md`](docs/audits/xatlib_kotlin_audit.md) §15.
+| Target | Status | Notes |
+|---|---|---|
+| NVIDIA GPU (CUDA, via PJRT) | ✅ | Everything above marked ✅-on-GPU was certified on a **GB10 (Blackwell, aarch64)**. Other NVIDIA parts are expected to work but are not certified here |
+| CPU | ✅ | Host interpreter + IREE-CPU. Note: the *interpreter* is a correctness engine, not a fast CPU backend |
+| **Google TPU** | 🧪 | The plugin lane, platform gating, and a full self-skipping smoke suite are written; **nothing has ever executed on a TPU** — no hardware. [docs/TPU_BRINGUP.md](docs/TPU_BRINGUP.md) is the runbook for the day it does |
+| AMD / Trainium | 📐 | Named in the kernel registry's target matrix; no runtime lane |
+| JVM | ✅ | The only build target declared today |
+| Android / iOS / WASM | ❌ **not today** | The modules are KMP-structured (`commonMain` source sets), which makes these reachable later — but **no such targets are declared or built**, and nothing has been tested on them |
 
-## Modules
+## What makes it different
 
-| path                                                | role                                                                                |
-|-----------------------------------------------------|-------------------------------------------------------------------------------------|
-| [`core/`](core/)                                    | `DTensor`, shape / dtype types, `Mesh` types, host ops                              |
-| [`ir/`](ir/)                                        | DXIR + PhiCalculus + DxirReverseTransform + Symja engine + interpreter + Layer 3 (recognizer / coarsener / kernel / cost / fusion / quant) |
-| [`autograd/`](autograd/)                            | runtime tape (fallback when the plugin can't lower a lambda)                        |
-| [`stablehlo/`](stablehlo/)                          | StableHLO + Shardy emission; round-trip tests                                       |
-| [`compiler-plugin/`](compiler-plugin/)              | K2 plugin: FIR-to-DXIR lowering + IR-generation extension + synthesis               |
-| [`maestro/`](maestro/)                              | Layer 2 — `program { }` / `workflow { }` builders, `MaestroStep`, `BufferHandle`, `ProgramManifest` + `BackendTarget` (Layer 3.5) |
-| [`runtime-iree/`](runtime-iree/)                    | Layer 4 — `runOnIree(fn, inputs)` + `IreeRuntime` (CPU + CUDA); subprocess facade over `iree-compile` / `iree-run-module`            |
-| [`runtime-pjrt/`](runtime-pjrt/)                    | Layer 4 — `PjrtSession` + pure-Kotlin FFM bindings to OpenXLA's PJRT C API; in-process GPU dispatch with compile cache               |
-| [`benchmarks/`](benchmarks/)                        | JMH benchmarks for the four ported papers (Brachistochrone / HookeanSpring / BGDHyperOpt / etc.) + LlamaDecoder comparison matrix     |
-| [`third-party/maestro/`](third-party/maestro/)      | Vendored Netflix Maestro + Tlaloc-specific `maestro-tlaloc/` module (Layer 2.5/3.6)  |
-| [`examples/`](examples/)                            | Documentation-grade Kotlin snippets (four-worlds, named-indices, layer3)            |
+Four claims, each with the thing that proves it:
 
-## Requirements
+1. **The gradient is compiled, and you can read it.** Tangent showed you the
+   derivative of your Python as Python. Tlaloc shows you the derivative of
+   your Kotlin as Kotlin — and because every op prints as a real `:core`
+   call, the printed gradient **compiles and runs**, certified bit-identical
+   to what the compiler produced. → [docs/READABLE_REVERSE.md](docs/READABLE_REVERSE.md)
 
-- **JDK 25 LTS** (bumped from 21 in §0.4.311 — stable FFM per JEP 454; dropped `--enable-preview` flag).
-- **Kotlin 2.x** (provided by Gradle wrapper; no host install needed).
-- **macOS** (Apple Silicon recommended) or **Linux**. Windows untested.
-- **External MLIR toolchains** for `:stablehlo` round-trip tests: `stablehlo-translate`, `sdy-opt`, `iree-compile`. Built from source via the bootstrap scripts; pinned to JAX 0.10.0's bundled commits.
+2. **One AD engine, no tape.** There is no runtime-tape fallback path that
+   could quietly disagree with the compiled one: the tape was deleted, and a
+   test pins that the capture API and the `grad {}` intrinsic produce
+   raw-bit-identical gradients. → [docs/AD_SINGLE_ENGINE_AUDIT.md](docs/AD_SINGLE_ENGINE_AUDIT.md)
 
-The bootstrap scripts handle Homebrew/apt + JDK 21 + the MLIR build. Two parallel sets exist for the two supported dev environments:
+3. **Shape errors are compile errors.** Rank, dtype, and named-axis
+   mismatches fail in the IDE. For teams where a silent shape bug is a P0,
+   this is the whole pitch.
 
-### macOS (Apple Silicon)
+4. **Deployment is an artifact, not a runtime.** A compiled program is a
+   content-addressed manifest of StableHLO bodies. Serving it needs a PJRT
+   plugin `.so` and a driver — no JVM, no framework. The same artifact is
+   what would run on TPU. → [docs/SERVING_RUNBOOK.md](docs/SERVING_RUNBOOK.md)
 
-```bash
-# Stage 1 — admin / sudo (you must run; one-time):
-bash scripts/setup-mac-bootstrap.sh
+## Limitations worth knowing before you invest
 
-# Stage 2 — userspace (sudo-free; ~30–60 min cold, fetches + builds MLIR):
-bash scripts/setup-mac-userspace.sh
-```
+- **Pre-alpha packaging.** No Maven Central release; build from source.
+- **JVM only today** (see the platform table). Android/iOS/WASM are
+  structurally reachable, not delivered.
+- **TPU is written, not run.** Treat every TPU claim as untested until the
+  bring-up runbook has been executed on real hardware.
+- **No Python API.** Interop is via StableHLO/ONNX artifacts, not bindings.
+- **Not a PyTorch clone.** No `torch.nn` parity goal; the model layer covers
+  DiffKT's surface, not PyTorch's.
+- **The interpreter is for correctness, not speed.** Performance claims mean
+  the compiled GPU path.
+- **Kernel performance is XLA's today.** Our own KPTX kernels are a real
+  lane, but on paged attention XLA still wins — and we publish that.
 
-Already on JDK 17? Use the migration helper:
+## Examples
 
-```bash
-bash scripts/install-jdk21.sh    # adds openjdk@21 alongside an existing 17 install
-```
+Each directory under [`examples/`](examples/) is a standalone project that
+consumes Tlaloc from `mavenLocal` exactly as your own project would:
 
-### NVIDIA DGX Spark (aarch64 / DGX OS)
+- [`quickstart/`](examples/quickstart/) — `grad {}` on a matmul, plus a
+  named-axis compile error you can uncomment.
+- [`named-indices/`](examples/named-indices/) — axis names enforced by the
+  type system.
+- [`four-worlds/`](examples/four-worlds/) — `program {}` / `workflow {}` and
+  the buffer-handle boundary.
+- [`layer3/`](examples/layer3/) — pattern recognition, kernel selection, and
+  the per-target backend matrix.
 
-For the GB10 Grace-Blackwell workstation. Assumes DGX OS with NVIDIA drivers + CUDA already installed (which is the factory state):
+## Documentation
 
-```bash
-# Stage 1 — admin / sudo (you must run; one-time, apt-based):
-bash scripts/setup-dgx-spark-bootstrap.sh
+| Document | What it covers |
+|---|---|
+| [DIFFKT_PARITY_PLAN.md](docs/DIFFKT_PARITY_PLAN.md) | The op/AD surface, phase by phase, and its end state |
+| [MODEL_LAYER_PLAN.md](docs/MODEL_LAYER_PLAN.md) | The `:nn` layer design and per-slice record |
+| [READABLE_REVERSE.md](docs/READABLE_REVERSE.md) | Generated gradient source, side by side with its input |
+| [INFERENCE_SERVING_AUDIT.md](docs/INFERENCE_SERVING_AUDIT.md) | The serving arc: what is certified, what is only written |
+| [SERVING_RUNBOOK.md](docs/SERVING_RUNBOOK.md) | Export an artifact and serve it |
+| [TPU_READINESS_AUDIT.md](docs/TPU_READINESS_AUDIT.md) | Honest comparison against TorchTPU; the TPU plan |
+| [TPU_BRINGUP.md](docs/TPU_BRINGUP.md) | The Cloud TPU VM session script |
+| [KPTX_PLAN.md](docs/KPTX_PLAN.md) · [KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md) | The PTX DSL, and where our kernels stand against XLA |
+| [TLALOC_EMIT_CONTRACT.md](docs/TLALOC_EMIT_CONTRACT.md) | What our StableHLO looks like, op by op |
 
-# Stage 2 — userspace (sudo-free; ~30–90 min cold on Grace; faster warm):
-bash scripts/setup-dgx-spark-userspace.sh
-```
-
-If the DGX OS system Python already has PyTorch + CUDA wired (the typical factory state), skip the venv torch install and inherit:
-
-```bash
-bash scripts/setup-dgx-spark-userspace.sh --skip-torch    # uses --system-site-packages
-```
-
-The script verifies `nvidia-smi` works as a sanity gate before running. The MLIR builds (`stablehlo-translate`, `sdy-opt`) use the same JAX-0.10.0-pinned commits as the Mac scripts, so emitted MLIR text round-trips between the two environments without dialect-version skew.
-
-## Quick start
-
-```bash
-# Clone + run the full suite (Tlaloc + vendored Maestro composite build).
-git clone https://github.com/pedronahum/tlaloc.git
-cd tlaloc
-./gradlew test
-```
-
-**Consume it as a library** (pre-alpha, via mavenLocal): see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — `./gradlew publishToMavenLocal` publishes every module under `io.tlaloc:*`, and [examples/quickstart](examples/quickstart) is a standalone consumer project (own Gradle build, resolves from mavenLocal, applies the K2 plugin) whose `grad { }` call is rewritten into synthesized gradient code at compile time. `scripts/onboarding-smoke.sh` runs the whole loop.
-
-Expected: ~1862 tests passing on the Tlaloc side (`bash scripts/count-tests.sh` for the exact count). To exercise the vendored Maestro tree as well:
-
-```bash
-./gradlew test :vendored-maestro:maestro-tlaloc:test
-```
-
-Run a single layer's tests:
-
-```bash
-./gradlew :ir:jvmTest --tests "io.tlaloc.ir.recognizer.*"      # Layer 3 recognizer + coarsener + kernel + cost
-./gradlew :maestro:jvmTest --tests "*BackendMatrixTest*"        # Layer 3.5 backend matrix
-./gradlew :compiler-plugin:test --tests "*BGDHyperOptTest*"    # Stage D.3 paper benchmark
-./gradlew :stablehlo:jvmTest                                    # StableHLO + Shardy round-trip
-```
-
-### Run the examples
-
-Examples are documentation-grade Kotlin files; copy any of them into a fresh project that depends on the relevant Tlaloc modules to run:
-
-| Example dir                                             | Layer | Topic                                                  |
-|---------------------------------------------------------|-------|--------------------------------------------------------|
-| [`examples/named-indices/`](examples/named-indices/)    | 1     | `Named<N, A>` axes + typed `contract`                  |
-| [`examples/four-worlds/`](examples/four-worlds/)        | 2     | `program { }` / `workflow { }`, `BufferHandle` typing  |
-| [`examples/layer3/`](examples/layer3/)                  | 3     | recognize+coarsen, per-target kernel matrix, KV-quant, populator |
-
-### Aggregate test count
+## Development
 
 ```bash
-bash scripts/count-tests.sh        # sums tests= across all JUnit XMLs after a test run
+./gradlew test                    # the full suite
+./gradlew test --rerun-tasks      # forced re-run (a clean-room count needs this)
+bash scripts/count-tests.sh       # aggregate test count across all modules
 ```
 
-## Build
-
-Single Gradle wrapper drives Tlaloc + vendored Maestro as a composite build. JDK 25 LTS throughout.
-
-```bash
-./gradlew test                                         # full Tlaloc-side suite: a few minutes when the
-                                                       # GPU smoke tests recompile real XLA, seconds when up-to-date
-./gradlew :ir:jvmTest                                  # one module
-./gradlew :compiler-plugin:test --tests "*BGDHyperOpt*"  # one benchmark
-./gradlew :vendored-maestro:maestro-tlaloc:test        # vendored Maestro tests
-./gradlew clean build                                  # everything from scratch
-```
-
-External toolchains used by `:stablehlo` round-trip tests (`stablehlo-translate`, `sdy-opt`) are located via system properties — see [docs/STAGE_B_PLAN.md](docs/STAGE_B_PLAN.md) for setup. The bootstrap scripts pin them to JAX 0.10.0's bundled commits (stablehlo @ 3a8886de, shardy @ 22259c17).
-
-## Repository tour
-
-| Concern                              | Where                                          |
-|--------------------------------------|-----------------------------------------------|
-| Per-session ship log                 | [DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) §0.4        |
-| Layer 1 closing audit                | [docs/audits/named_indices_audit.md](docs/audits/named_indices_audit.md) |
-| Layer 2 closing audit                | [docs/audits/four_worlds_audit.md](docs/audits/four_worlds_audit.md)     |
-| Layer 2.5 closing audit              | [docs/audits/maestro_first_class_audit.md](docs/audits/maestro_first_class_audit.md) |
-| Layer 3 closing audit                | [docs/audits/xatlib_kotlin_audit.md](docs/audits/xatlib_kotlin_audit.md) |
-| Layer 3 design narrative             | [docs/xatlib_design.md](docs/xatlib_design.md)  |
-| φ-calculus pass design               | [docs/STAGE_B_PLAN.md](docs/STAGE_B_PLAN.md)    |
-| Vendoring philosophy + upgrades      | [docs/vendoring.md](docs/vendoring.md)          |
-| Maestro descriptor (deprecated, L2)  | [docs/maestro_descriptor.md](docs/maestro_descriptor.md) |
-| Source paper (coarsening AD)         | [docs/papers/coarsening-autodiff.txt](docs/papers/coarsening-autodiff.txt) |
-| Symja adequacy bake-off              | [docs/papers/symja-bakeoff-2026-04.md](docs/papers/symja-bakeoff-2026-04.md) |
+The engineering discipline, if you want to contribute in the same style:
+claims are certified by tests against analytic or cross-implementation
+oracles; unsupported cases **refuse loudly by name** rather than silently
+degrading; anything deferred is named in a design document rather than left
+implicit. Negative results get published too — the KPTX performance page
+exists because our kernel lost.
 
 ## Acknowledgments
 
-The φ-calculus coarsening machinery is a direct descendant of the technique in Shen, Shivers, Dea et al., *Efficient, Sound Gradient Descent in Dynamic and Dependent Control Flow* (OOPSLA 2021). The original DiffKt showed Kotlin-native AD can be 10× faster than Python frameworks on scalar benchmarks; Tlaloc extends that result to shape-typed tensors, compile-time transformation, StableHLO/Shardy lowering, and per-target vendor-fused-kernel custom-calls.
-
-The Layer 2.5+ Maestro integration vendors and extends [Netflix Maestro](https://github.com/Netflix/maestro). The single divergence-against-upstream is documented in [docs/audits/xatlib_kotlin_audit.md](docs/audits/xatlib_kotlin_audit.md) §10.
+φ-calculus coarsening follows Shen, Shivers, Dea et al., *Efficient, Sound
+Gradient Descent in Dynamic and Dependent Control Flow* (OOPSLA 2021).
+The op surface and model layer take their parity target from
+[facebookresearch/diffkt](https://github.com/facebookresearch/diffkt); the
+readable-derivative idea comes from
+[google/tangent](https://github.com/google/tangent). Lowering targets
+[OpenXLA](https://github.com/openxla) StableHLO, Shardy, and PJRT.
+Orchestration vendors [Netflix Maestro](https://github.com/Netflix/maestro).
