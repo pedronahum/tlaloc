@@ -1,0 +1,65 @@
+/**
+ * Two gradients Tlaloc REFUSES to compile — the other half of the story.
+ *
+ * This file is deliberately named `Refusals.kt.disabled`, so Gradle's Kotlin
+ * source set (which only picks up files ending in .kt) never sees it and the
+ * project builds green. To watch the compiler refuse, rename it and build:
+ *
+ *   mv src/main/kotlin/Refusals.kt.disabled src/main/kotlin/Refusals.kt
+ *   ./gradlew compileKotlin        # FAILS, with the two errors below
+ *   mv src/main/kotlin/Refusals.kt src/main/kotlin/Refusals.kt.disabled
+ *
+ * Neither failure is a runtime exception, a NaN, or a silently wrong number.
+ * Both are compile errors that name the problem. README.md quotes them
+ * verbatim, with the line:column you will see.
+ */
+import io.tlaloc.autograd.grad
+import io.tlaloc.autograd.grad2
+import io.tlaloc.core.Batch
+import io.tlaloc.core.DTensor
+import io.tlaloc.core.F32
+import io.tlaloc.core.Hidden
+import io.tlaloc.core.Named
+import io.tlaloc.core.Rank2
+import io.tlaloc.core.SeqLen
+import io.tlaloc.core.Sym
+import io.tlaloc.core.ops.contract
+import io.tlaloc.core.ops.sum
+import io.tlaloc.core.ops.times
+
+/**
+ * (a) An axis error — a contraction between operands that share no named axis.
+ *
+ * `a` is indexed [Batch, SeqLen]; `b` is indexed [Hidden, Hidden]. There is no
+ * axis to sum over, so the contraction is meaningless. Two layers catch it:
+ * Kotlin's own type checker (the axis names are phantom type parameters, so
+ * the call does not even type), and — first in the error list — Tlaloc's
+ * NAMED_INDEX_MISMATCH diagnostic, which says WHICH axes, by name.
+ */
+fun refusalA() {
+    val disjointAxes = grad2 {
+        a: DTensor<Rank2<Named<Batch, Sym>, Named<SeqLen, Sym>>, F32>,
+        b: DTensor<Rank2<Named<Hidden, Sym>, Named<Hidden, Sym>>, F32> ->
+        (a contract b).sum()
+    }
+    println(disjointAxes)
+}
+
+/**
+ * (b) A differentiability error — `grad {}` over a body that returns a TENSOR.
+ *
+ * `grad` is the gradient of a SCALAR-valued function; there is no single
+ * gradient of a tensor-valued one. The type parameter `R` in
+ * `grad(f: (A) -> R)` is unconstrained, so Kotlin happily types this — and
+ * then Tlaloc's checker runs the real reverse transform at CHECK time, which
+ * refuses, naming the transform, the offending type, and the surface you
+ * actually wanted (`vjp`, the seeded pullback).
+ *
+ * Note the shape in the message: `f32[-1,-1]`. Those -1s are Tlaloc's symbolic
+ * extents — the dims are not known until you call the function, which is
+ * exactly why the refusal is about the RETURN KIND and not about sizes.
+ */
+fun refusalB() {
+    val tensorReturn = grad { t: DTensor<Rank2<Sym, Sym>, F32> -> t * t }
+    println(tensorReturn)
+}
