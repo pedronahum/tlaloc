@@ -1,0 +1,380 @@
+# Serving runbook — export an artifact, run it, plug it into vLLM
+
+**Status (§0.4.473, the Phase H close-out).** This is the reproduction
+script for the whole serving path: it takes a fresh machine to a Tlaloc
+serving artifact, runs that artifact from Python with **no JVM in the
+process**, and hands it to vLLM through the `vllm-tlaloc` platform
+plugin. Every step is marked **CERTIFIED** (a test in `./gradlew test`
+proves it) or **UNCERTIFIED** (written, never executed here, with the
+reason and the command that would settle it).
+
+The design and the decisions behind all of this live in
+[INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md); its §5 ARC
+STATE block is the ledger. This file is the *commands*.
+
+The one sentence that motivates the whole shape: **the artifact is the
+deployment.** After step 2 returns, a directory of JSON and textual
+StableHLO is the entire input to serving; nothing downstream calls back
+into Kotlin, and the same directory is what will serve on TPU the day
+G2b lands ([TPU_BRINGUP.md](TPU_BRINGUP.md)).
+
+---
+
+## 0. The machine
+
+Certified on: **GB10 / DGX Spark, aarch64, DGX OS**, CUDA 13 driver with
+the CUDA-12 jaxlib plugin, JDK 25 LTS at `~/.local/jdks/jdk-25.0.3+9`.
+
+```bash
+export JAVA_HOME=~/.local/jdks/jdk-25.0.3+9      # every gradle command
+export TLALOC_VENV=~/.local/venvs/iree            # the project venv
+```
+
+What the venv must already have, and why:
+
+| package | why |
+|---|---|
+| `jax` + `jaxlib` (+ `jax-cuda12-plugin` for the CUDA lane) | `tlaloc_serve` compiles the artifact's MLIR through `jaxlib.mlir` and runs it on a PJRT client. **This is the only hard dependency of the serving path.** |
+| `numpy` | the wire format between the loader and the caller |
+| `torch`, `safetensors` | only for the *oracles* (H2's bf16 parity reads bytes torch wrote). Not needed to serve. |
+
+On a fresh machine, the serving half alone is:
+
+```bash
+python -m venv "$TLALOC_VENV" && . "$TLALOC_VENV/bin/activate"
+pip install "jax[cuda12]" numpy            # CPU-only lane: pip install jax numpy
+python -c "import jax; print(jax.devices())"
+```
+
+`jax.devices()` printing a `CudaDevice` is the gate for the CUDA lane;
+the CPU lane needs nothing further and is the one the tolerances are
+tightest on (see §3).
+
+---
+
+## 1. Build and certify (CERTIFIED)
+
+```bash
+cd /home/pedro/programming/tlaloc
+JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew test --rerun-tasks 2>&1 | tee /tmp/cert1.log | tail -5
+JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew \
+  :vendored-maestro:maestro-tlaloc:test :vendored-maestro:maestro-common:test \
+  --tests "*KubernetesCommandTlalocFieldsTest*"
+./scripts/count-tests.sh
+```
+
+**Use `--rerun-tasks`, not `--rerun`.** `--rerun` only forces the task
+you named; in a multi-module KMP build the per-module `:<m>:jvmTest`
+lanes stay `UP-TO-DATE` and the "clean-room recount" recounts yesterday's
+XML. This was found at this close-out (a 31-second "full suite"), and it
+is the strongest form of the §0.4.470 landmine below.
+
+**Landmine (§0.4.470).** `:maestro:jvmTest` does **not** re-run when only
+`harness/python/**` changes — the Python files are not declared task
+inputs. Any edit to `tlaloc_serve.py` or `vllm_tlaloc/**` needs
+`--rerun-tasks` or it certifies the *old* Python.
+
+---
+
+## 2. Export a serving artifact (CERTIFIED)
+
+The exporter is `io.tlaloc.maestro.serving.ServingArtifactWriter.export`,
+and the reference model's entry point is
+`io.tlaloc.maestro.serving.ReferenceDecodeGraphKt.main`:
+
+```bash
+JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :maestro:jvmJar
+CP=$(find . -path '*/build/libs/*-jvm-*.jar' -o -path '*/build/libs/*.jar' | tr '\n' ':')
+CP="$CP$(find ~/.gradle/caches/modules-2 -name 'kotlin-stdlib-2*.jar' | head -1)"
+"$JAVA_HOME/bin/java" -cp "$CP" io.tlaloc.maestro.serving.ReferenceDecodeGraphKt \
+  /tmp/tlaloc-serving-artifact
+```
+
+**Named deferral: there is no `./gradlew exportServingArtifact` task.**
+The `main` exists and is the sanctioned entry point; a JavaExec task that
+assembles this classpath is a one-file build change and was left out of
+the docs-only close-out on purpose. Until it lands, the *certified* way
+to produce an artifact is the export test itself, which writes one into a
+temp directory on every run:
+
+```bash
+JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :maestro:jvmTest --rerun-tasks \
+  --tests "*ServingArtifactExportRunTest*"
+```
+
+### What lands on disk
+
+```
+  <artifact>/
+    tlaloc-serving.json          the ServingManifest — model shape, KV-pool
+                                 axis order, the bucket ladder, the weights
+                                 pointer, one entry per compiled ladder point
+    bodies/<sha256>.mlir         StableHLO+SDY, content-addressed and
+                                 de-duplicated; @main is the entry point
+    programs/<entryId>.json      one :maestro ProgramManifest per entry,
+                                 unmodified, cross-checked against the entry
+    weights/…                    pointed at, not necessarily present
+                                 (v1: `embedded: true`, weights are body consts)
+```
+
+Two exports of one model are **byte-identical** — the body name is a
+content address, not a timestamp. `grep` is a legitimate debugging tool
+on this directory, which is why the bodies are textual MLIR.
+
+### Exporting *your* model instead of the reference
+
+`export(dir, modelName, modelHash, model, ladder, specs, weights, build)`
+takes a `build: (DecodeGraphSpec) -> DxirFunction`. The contract the graph
+must satisfy is `DecodeGraphSpec.verifySignature`, which the exporter runs
+on **every** graph at export time — a signature mismatch found in Python
+is an XLA shape error with the diagnosis removed.
+
+```
+  in   tokenIds [B,T] I32 · positions [B,T] I32 · blockTables [B,maxBlocksPerSeq] I32
+       seqLens [B] I32 · slotMapping [B*T] I32 · (key,value) pools × numLayers
+  out  logits [B,T,V] · the same pools, updated
+```
+
+**Weights.** H2's reader
+(`io.tlaloc.core.io.SafetensorsFile.openCheckpoint(dir)`) loads an HF
+safetensors checkpoint — single file or sharded `model.safetensors.index.json`
+— and brands each tensor with `asF32<S>()` / `asBf16` / `asI32` / `asF64`.
+F16, I64 and fp8 are **refused by name**. In v1 the weights end up as graph
+constants; **staged weights and the HF name-mapping are H3c**, the arc's
+largest open item.
+
+---
+
+## 3. Run the artifact from Python (CERTIFIED, both lanes)
+
+No JVM, no gradle, no Kotlin in this process. The directory is the input.
+
+```bash
+. "$TLALOC_VENV/bin/activate"
+export PYTHONPATH=/home/pedro/programming/tlaloc/harness/python
+python - <<'PY'
+import numpy as np, tlaloc_serve
+
+art = tlaloc_serve.ServingArtifact.load("/tmp/tlaloc-serving-artifact", platform="cuda")
+art.verify_bodies()                       # re-hash every body against its filename
+print(art.manifest["model"])
+b, c = art.select_bucket(batch=3, context=4)   # rounds UP; refuses over-cap BY NAME
+entry = art.entry_for("DECODE", b, c)
+print(entry.entry_id, entry.cache_key)
+PY
+```
+
+`select_bucket` **refuses** an over-cap request rather than clamping it: a
+clamped context silently truncates a user's history, which is a wrong
+answer dressed as a slow one, and only a scheduler can split the request.
+
+The padding convention is a **wire contract between two processes** and is
+duplicated in `tlaloc_serve.py` deliberately and loudly:
+
+| field | padded value | why |
+|---|---|---|
+| `tokenIds` | `0` | |
+| `positions` | `0` | there is no correct position to derive for a dead row |
+| `blockTables` | `0` | page 0 is the reserved scratch page — **never allocated to a live sequence** |
+| `slotMapping` | `-1` | `KV_CACHE_WRITE` drops an out-of-bounds scatter update |
+| `seqLens` | **`1`, never `0`** | `0` masks every lane to −Inf ⇒ `0/0 = NaN` in the emission |
+
+`check_padding_constants()` exists so the certification pins the two
+copies together instead of trusting a comment.
+
+### The certified end-to-end check
+
+```bash
+python harness/python/run_tlaloc_serve_check.py \
+  --artifact /tmp/tlaloc-serving-artifact \
+  --request /tmp/req.json --output /tmp/result.json --platform cuda
+```
+
+Exit codes: `0` ran · `1` the run failed (the interesting failure) · `2`
+the environment cannot run it at all (no jax, no device) — the Kotlin side
+self-skips on 2 and fails on 1. `ServingArtifactExportRunTest` drives
+exactly this, builds the request, and compares against the host
+interpreter.
+
+**The two floors, and why there are two.** The identical artifact runs on
+the PJRT **CPU** client at **1e-5** relative and the PJRT **CUDA** client
+at **1e-3** relative. The looseness is *measured*, not hedged: XLA-GPU
+lowers a default-precision f32 `dot_general` through **TF32**, putting the
+step ~5e-4 from the host while the CPU lane sits at ~1e-7 on the same
+bytes. Two claims escape the tolerance entirely and are pinned with exact
+`==` on **both** lanes — the poisoned pools (a misplaced write is three
+orders of magnitude out) and the padded row's scratch page, because an
+untouched slot is copied, not computed.
+
+---
+
+## 4. Plug it into vLLM (plugin CERTIFIED below vLLM's API, live path UNCERTIFIED)
+
+```bash
+pip install -e harness/python      # registers the vllm.platform_plugins entry point
+export TLALOC_SERVING_ARTIFACT=/tmp/tlaloc-serving-artifact
+python -c "from vllm.platforms import current_platform; print(current_platform)"
+vllm serve <tokenizer/config> --max-num-seqs 4 --max-model-len 4 --block-size 2
+```
+
+The first command is the **discovery** check (vLLM's platform resolution
+must land on `TlalocPlatform`); the second is a single-request
+`generate()`. **`--block-size` must equal the artifact's compiled
+`blockSize` and `--max-model-len` must lie on the ladder** —
+`check_and_update_config` refuses rather than adjusts, because a different
+block size is a different KV layout, not a preference.
+
+### vLLM is NOT installed here, and that is a decision
+
+`pip install vllm` **resolves** on this box (aarch64, CPython 3.12,
+vllm 0.29.0). A `--dry-run --report` stated the closure exactly: **186
+packages**, including **torch 2.13.0** (replacing this venv's
+`torch 2.11.0+cpu`), **33 CUDA-13 wheels** landing beside the venv's
+`jax-cuda12-plugin 0.10.0`, and a numpy downgrade 2.4.4 → 2.3.5. That venv
+is the measurement apparatus for every oracle in this repo. Install vLLM
+**in a venv of its own**, with jaxlib present, and settle the
+CUDA-13-beside-CUDA-12 question there:
+
+```bash
+python -m venv ~/.local/venvs/vllm && . ~/.local/venvs/vllm/bin/activate
+pip install vllm "jax[cuda12]"
+pip install -e /home/pedro/programming/tlaloc/harness/python
+```
+
+### What is certified without vLLM present
+
+The plugin is split along exactly one line — whether a file imports vLLM:
+
+| file | imports vLLM? | certified? |
+|---|---|---|
+| `__init__.py` — `register()`, `PLATFORM_CLASS_PATH` | no | **yes** |
+| `paging.py` — KV page pool, block tables, slot arithmetic | no | **yes** |
+| `batching.py` — requests → one padded bucket-selected call | no | **yes** |
+| `runner.py` — `TlalocModelRunner`: artifact + pools + sampling | no | **yes** |
+| `platform.py` — `TlalocPlatform` | **yes** | **no** |
+| `worker.py` — `TlalocWorker` | **yes** | **no** |
+
+`VllmPluginContractTest` runs three lanes inside `./gradlew test`:
+registration metadata (entry point ↔ `register()` ↔ `PLATFORM_CLASS_PATH`
+↔ the class in the file the path names), 31 stdlib-only `unittest` cases
+over the page pool and the marshalling, and **two decode steps of three
+sequences** driven by `TlalocModelRunner` against a real exported artifact
+on both PJRT clients. Two steps and not one: a single step cannot tell a
+KV cache threaded across steps from one recomputed.
+
+You can drive the vLLM-free unit lane yourself:
+
+```bash
+python harness/python/vllm_tlaloc_test.py
+python harness/python/run_vllm_tlaloc_check.py --help
+```
+
+### Driving the runner directly (no vLLM at all)
+
+```python
+from vllm_tlaloc.runner import TlalocModelRunner
+r = TlalocModelRunner("/tmp/tlaloc-serving-artifact", platform="cuda")
+r.add_sequence(0, [7])
+print(r.generate(0, [7], max_new_tokens=4))     # greedy, host-side sampling
+r.free_sequence(0)
+```
+
+A prompt longer than one token is **refused by name**: there is no
+PREFILL entry in the artifact yet, and a runner that quietly decoded a
+prompt one token at a time would be "working" while doing what no serving
+system accepts.
+
+---
+
+## 5. The KPTX paged-attention kernel (CERTIFIED, and deliberately opt-in)
+
+Tlaloc's own PTX can replace the gather-composed `PAGED_ATTENTION`
+lowering inside the XLA executable. The claiming pass keys on
+**`OpKind`**, and its decline path is *the op itself* — so a machine with
+no KPTX tier runs the same program with the same numbers.
+
+`defaultInferenceKernelTemplates` is **EMPTY on purpose**, and should stay
+that way in any deployment today. The correctness-tier kernel measured
+**465 µs vs 310 µs** for the lowering it replaces — 1.5× slower, the
+expected §0.4.358 outcome for three f32 scalar loops against XLA's tiled
+tensor cores. It is the *claiming* milestone, not a speedup. The
+performance tier (warp specialization, shared-memory staging of the page
+window) is the named follow-up, and 465 µs is the floor it must beat.
+
+To opt in, a pipeline passes `kptxInferenceKernelTemplates` and the
+serving process registers the chain
+(`io.tlaloc.runtime.pjrt.kptx.KptxPagedAttention.register`).
+
+**Landmine (§0.4.471).** `ptxas` rejects a **non-ASCII byte anywhere in
+the PTX file, comments included**, and the failure surfaces as
+`CUDA_ERROR_INVALID_PTX` out of `cuModuleLoadData` deep inside an XLA
+execution, naming nothing. Pinned in `PagedAttentionModuleTest`.
+
+---
+
+## 6. KV-quant (contract CERTIFIED, bytes DEFERRED)
+
+`KvQuantPool` is the symmetric-absmax codec; `OpKind.DEQUANTIZE_KV` is its
+in-graph half; `ServingModelShape.kvQuant` carries it in the manifest. The
+error bound is **derived, not tuned**: `|x − x̂| ≤ scale/2 = absmax/254`
+for int8, and `maxRoundTripError` recomputes it so the tests assert the
+measurement against the derivation.
+
+Read the manifest's two fields together, because today they disagree and
+that is the point:
+
+- `dtype: "int8"` — what the codes **mean** (the accuracy story),
+- `codeDtype: "i32"` — what the codes **ride** (the byte budget).
+
+There is no `I8` DType yet, so **v1 buys the contract, not the bytes**. A
+deployment sizing a KV pool reads `codeDtype`; one reasoning about answer
+quality reads `dtype`. **fp8 is refused by name** — it is a float format
+whose code carries its own exponent, so `value = code * scale` is simply
+not its dequantization.
+
+---
+
+## 7. SGLang (UNCERTIFIED — design only)
+
+The precedent is **SGL-JAX**, and the integration surface is a *model
+runner*. The prediction manifest-as-artifact makes: the loader, the
+manifest reader, the bucket selection and the PJRT execution path are
+**frontend-agnostic**; what a second frontend rewrites is the adapter
+class and its `ForwardBatch → slot` translation. That prediction is
+**untested** until an environment carries SGLang, for the same venv reason
+as vLLM (`pip install sglang` pulls a CUDA torch stack and a compiled
+kernel library). The one IR-level item SGLang's radix path would actually
+need from this side is the **ragged/chunked-prefill form of
+`PAGED_ATTENTION`**, H1a's named deferral since the first slice.
+
+---
+
+## 8. On TPU (GATED — the artifact is ready, the hardware is not)
+
+Nothing in the artifact mentions CUDA. The bodies are StableHLO+SDY, the
+manifest is JSON, and `tlaloc_serve.ServingArtifact.load(..., platform=…)`
+takes the platform as a parameter. On a Cloud TPU VM the whole of §3 is
+the same commands with `platform="tpu"`, once G2b turns
+`PjrtTpuSmokeTest`'s self-skips into passes — the step-by-step is
+[TPU_BRINGUP.md](TPU_BRINGUP.md), and the ordered queue is
+[TPU_READINESS_AUDIT.md](TPU_READINESS_AUDIT.md) §5.
+
+What a TPU session owes this document, specifically: re-run §3 on the
+`tpu` platform and record **its** floor, because §3's two floors are
+CPU's and XLA-GPU-TF32's and a TPU's default `dot_general` precision is
+neither.
+
+---
+
+## 9. Troubleshooting, by symptom
+
+| symptom | cause |
+|---|---|
+| `BUILD SUCCESSFUL in 31s` on a "full" suite | `--rerun` instead of `--rerun-tasks`; the module `jvmTest` lanes were `UP-TO-DATE` |
+| a Python edit changes nothing | `:maestro:jvmTest` does not declare `harness/python/**` as inputs (§0.4.470) |
+| `CUDA_ERROR_INVALID_PTX` naming nothing | a non-ASCII byte in a PTX comment (§0.4.471) |
+| NaN logits on a padded batch | `seqLens = 0` on a padding row; the convention is **1** |
+| a padded row reads live KV | page 0 was allocated to a sequence; it is the reserved scratch page |
+| vLLM says "no platform found" | the distribution is not installed (`pip install -e harness/python`) |
+| `--block-size` refused | it disagrees with the artifact's compiled `blockSize`; that is a KV layout, not a preference |
+| the machine reboots under XLA | never create a PJRT client without `create_options` (§0.4.333) |

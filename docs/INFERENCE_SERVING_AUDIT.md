@@ -1,8 +1,13 @@
 # Inference serving — vLLM / SGLang integration audit (2026-09-21)
 
-**Status: PHASE H RATIFIED (Pedro, 2026-09-21) — GO on the H1–H5
-slicing in §4.** The arc runs on CUDA (vLLM runs on the GB10); the same
-artifacts serve on TPU the day G2b lands. Running record in §5.
+**Status: PHASE H CLOSED (§0.4.473) — H1–H5 all landed, suite
+2119 → 2290.** Ratified by Pedro 2026-09-21; GO on the H1–H5 slicing in
+§4, and every slice of it is in. **Read §5's ARC STATE block first**: it
+carries the per-slice ledger, what is CERTIFIED (with each claim's oracle
+and floor), what is WRITTEN BUT UNCERTIFIED (the live vLLM and SGLang
+paths, with the commands that would settle them), and what awaits the
+Cloud TPU VM. The commands to reproduce the whole path are
+[SERVING_RUNBOOK.md](SERVING_RUNBOOK.md). §2's gap list is swept at HEAD.
 
 Researched against the vLLM TPU unified-backend material
 (`tpu-inference`), the SGLang × Google TPU announcement, and the
@@ -40,7 +45,11 @@ jaxlib/PJRT — the §0.4.299 spike already proved jaxlib consumes Tlaloc
 MLIR verbatim. The same artifact serves on GPU today and TPU the day
 G2b lands.
 
-## 2. The honest gap list
+## 2. The honest gap list — swept at the arc close (§0.4.473)
+
+The list below is the **original 2026-09-21 audit text**, kept verbatim so
+the arc's starting position stays legible, each item followed by **AT THE
+CLOSE**: what is true at HEAD.
 
 1. **Paged attention** — vLLM's core primitive: attention over a
    block-table-indexed KV page pool. We have FlashAttention/GQA
@@ -48,22 +57,94 @@ G2b lands.
    Inference-only ⇒ **no VJP required** (the single biggest scope
    relief): a coarse op + gather-composed reference emission, with
    vendor/KPTX kernel claiming as the follow-on. Biggest single item.
+
+   **AT THE CLOSE — CLOSED for decode (H1a §0.4.465), one form deferred.**
+   `OpKind.PAGED_ATTENTION` with `scale` as its only attribute (every other
+   quantity derived from operand shapes and refused as an attr by name),
+   interpreter arm, gather-composed StableHLO emission, cost-model arm,
+   inference-only refusals in both AD transforms and the renderer. Certified
+   against a dense contiguous walk, a hand-exact uniform-softmax case, and
+   real XLA on the GB10 at worst |Δ| = 6e-8. **DEFERRED: the ragged /
+   chunked-prefill `[numTokens, …]` form** — prefill rides the dense
+   FlashAttention path meanwhile, as vLLM's own TPU backend does. It is the
+   one IR-level item both frontends eventually want.
 2. **KV-cache ops** — cache-write scatter + page-table gather.
    `SCATTER`/`GATHER` exist in narrow forms; the already-recorded
    "gather/scatter axis+list forms" tail is exactly what is missing.
+
+   **AT THE CLOSE — CLOSED (H1b §0.4.466), and the second half turned out
+   not to be needed.** `OpKind.KV_CACHE_WRITE` (no attributes at all; flat
+   slots, `-1` = padding, functional-returning-an-updated-pool) lowers to ONE
+   `stablehlo.scatter`, agrees with the interpreter EXACTLY on real XLA, and
+   composes with item 1 in a round-trip oracle. The **page-table gather** was
+   NOT built as a separate kind: it already exists inside `PAGED_ATTENTION`'s
+   emission with its dimension numbers pinned, and a standalone kind buys
+   nothing until something other than paged attention needs it. The audit's
+   "gather/scatter axis+list forms" tail therefore remains open as a
+   **training-side AD-surface item**, which is not what this arc was about.
 3. **Decode-graph shapes + bucketing** — single-token decode with
    cache-in/cache-out signatures, compiled per (batch, seq-bucket) and
    cached in `PjrtSession`. Our static-shape story **suffices**: vLLM's
    TPU backend buckets identically (bounded dynamism is their roadmap
    item too).
+
+   **AT THE CLOSE — CLOSED (H1c §0.4.467).** `DecodeGraphSpec` (the
+   signature, `verifySignature`, `executableCacheKey`, `donationPairs`) and
+   `DecodeBucketPolicy` (two ladders multiplied, context aligned up to whole
+   pages, over-cap **refused by name and never clamped**) in
+   `ir/…/inference/`. `PjrtSession.runOn`/`prepare` take the cache key, so a
+   hit does not re-emit. The padding convention's one real decision —
+   `seqLens = 1`, never 0 — is pinned by the batch- and context-bucket
+   padding-invariant oracle (bit-identical rows in the reference
+   interpreter). **PREFILL is covered by the contract, not deferred**; only
+   item 1's prefill *attention form* is.
 4. **Weight ingestion** — HF safetensors → `DTensor` loader, then
    decode-graph parity vs the HF reference (`LlamaDecoderPrimal` and the
    PyTorch-agreement harness are the substrate).
+
+   **AT THE CLOSE — the READER is closed (H2 §0.4.468); the REAL Llama is
+   H3c and open.** `io.tlaloc.core.io` carries a strict JSON parser (written
+   because a checkpoint is untrusted input: duplicate keys refused, raw
+   number text kept, escapes handled) and a safetensors reader with the
+   header validated against the file before a byte is decoded, four dtypes
+   mapped and the rest refused **by name** (F16, I64, fp8), per-tensor reads,
+   and the sharded `model.safetensors.index.json` implemented with
+   `weight_map` values required to be bare filenames. Parity is certified
+   against a checkpoint **torch wrote**, bit-for-bit on bf16 patterns and
+   1e-3 relative on the decode loss through the IREE-CPU lane. **OPEN: the HF
+   NAME-MAPPING** (`model.layers.N.self_attn.q_proj.weight` → graph
+   parameter) and a real Llama end to end — H3c, the arc's largest open item.
 5. **Dtypes** — bf16 landed in Phase G (§0.4.455–458, native PJRT BF16
    buffers included); int8/fp8 KV-quant stays a named deferral with a
    manifest slot already reserved.
+
+   **AT THE CLOSE — int8/int4 got the CONTRACT (H5 §0.4.472); the BYTES and
+   fp8 did not.** `KvQuantPool` (symmetric absmax, per-head scales derived
+   from the scale operand's extent, round-half-away-from-zero, error bound
+   `scale/2 = absmax/254` **derived and asserted against the measurement**),
+   `OpKind.DEQUANTIZE_KV` with interpreter arm + emission + cost arm +
+   refusals, and `kvQuant` fed end to end into the manifest. **There is no
+   `I8` DType**, so the codes ride I32 and the manifest says so in two
+   separate fields (`dtype` = what they mean, `codeDtype` = what they ride) —
+   v1 buys the accuracy contract, not the byte budget. **fp8 is REFUSED BY
+   NAME**, not missing: it is a float format whose code carries its own
+   exponent, so `value = code * scale` is not its dequantization.
 6. **The plugin itself** — conform to vLLM's platform-plugin API
    (worker + model-runner classes), sampling host-side in v1.
+
+   **AT THE CLOSE — the artifact and the plugin are WRITTEN and certified
+   below vLLM's API surface (H3a §0.4.469, H3b §0.4.470); the LIVE vLLM path
+   is UNCERTIFIED.** `ServingArtifactWriter` writes the deployment directory
+   (manifest + content-addressed StableHLO bodies + per-entry
+   `ProgramManifest`s, with `ProgramManifest` extended by ZERO fields);
+   `harness/python/tlaloc_serve.py` loads and runs it with **no JVM in the
+   process**, certified on the PJRT CPU client at 1e-5 and the CUDA client at
+   1e-3 (the gap is XLA-GPU's TF32 dot policy, measured). `vllm_tlaloc/`'s
+   four vLLM-free files (page pool, batching, runner, registration) are
+   certified inside `./gradlew test`; `platform.py` and `worker.py` import
+   vLLM and are not, because **vLLM was deliberately not installed** — see
+   H3b for the 186-package closure and why that venv is the measurement
+   apparatus. Sampling is host-side greedy in v1, as planned.
 
 **Explicitly NOT built**: schedulers, continuous batching, prefix
 caching / RadixAttention. Integrating *into* vLLM/SGLang is precisely
@@ -1137,3 +1218,154 @@ that it is **untested** until an environment carries SGLang.
 plugin), the H4 performance tier, the H5 tails above (narrow DTypes, the
 quantized decode-graph signature, the SGLang runner), and the ragged prefill
 form that both frontends eventually want.
+
+### ARC STATE (§0.4.473, the close-out) — read this first
+
+**THE PATH IS BUILT END TO END AND IT EXECUTES. WHAT IT DOES NOT YET RUN IS
+A REAL LLAMA, AND WHAT IT HAS NEVER RUN UNDER IS vLLM ITSELF.**
+
+Nine sections, one day (2026-09-21), suite **2119 → 2290**:
+
+| § | Slice | What it closed | Suite |
+| --- | --- | --- | --- |
+| 0.4.464 | ratification | the shape decision (`tpu-inference`, not `torchtpu-vllm`), the gap list, the H1–H5 slicing | 2119 |
+| 0.4.465 | H1a | `OpKind.PAGED_ATTENTION` — decode form, gather-composed emission, inference-only refusals | 2119 → 2136 |
+| 0.4.466 | H1b | `OpKind.KV_CACHE_WRITE` — one `stablehlo.scatter`, flat slots, `-1` padding | 2136 → 2156 |
+| 0.4.467 | H1c | `DecodeGraphSpec` + `DecodeBucketPolicy` + the keyed executable cache | 2156 → 2182 |
+| 0.4.468 | H2 | safetensors + a strict JSON parser in `:core`; parity vs a checkpoint torch wrote | 2182 → 2221 |
+| 0.4.469 | H3a | `ServingArtifactWriter` + `tlaloc_serve.py` — the line, and no JVM past it | 2221 → 2237 |
+| 0.4.470 | H3b | `vllm_tlaloc/` — the plugin, split along "does this file import vLLM" | 2237 → 2241 |
+| 0.4.471 | H4 | the KPTX paged-attention kernel and OpKind-keyed claiming | 2241 → 2259 |
+| 0.4.472 | H5 | `KvQuantPool` + `OpKind.DEQUANTIZE_KV` + `kvQuant` in the manifest; SGLang priced | 2259 → 2290 |
+| 0.4.473 | close-out | this sweep + [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md) — docs only | 2290 |
+
+#### CERTIFIED — the claim, its oracle, and its floor
+
+| claim | oracle | floor |
+|---|---|---|
+| `PAGED_ATTENTION` computes paged attention | a dense contiguous walk over separately-gathered pages + a hand-exact uniform-softmax case with poisoned dead slots | exact structure; elementwise |
+| …and XLA agrees | `PjrtPagedAttentionSmokeTest`, real XLA on the GB10 | **6e-8** (fixture too small for a tensor-core path) |
+| `KV_CACHE_WRITE` writes where the allocator said | a position-encoded pool (every element equals its own flat index) + an independent pool-major walk | exact |
+| …and XLA drops rather than clamps an OOB scatter | `PjrtKvCacheWriteSmokeTest` | **exact** (a write does no arithmetic) |
+| the two ops agree what a flat slot is | the round trip: write, then read at `seqLens = 1`, where softmax is exactly 1.0 | bit-for-bit |
+| bucketing does not change the answer | the padding invariant: batch-3-in-bucket-4 vs batch-3-in-bucket-3, across batch AND context buckets | **`==`**, reference interpreter |
+| the safetensors reader reads the producer's bytes | `write_llama_safetensors.py` records raw bit patterns; f32 via `toRawBits`, bf16 via `HostBf16Storage` | **exact, no tolerance** |
+| an f32 graph on a bf16 checkpoint computes the checkpoint's real numbers | `LlamaSafetensorsParityTest` vs `run_pytorch_llama.py` (§0.4.289's op-for-op mirror) through the IREE-CPU lane | **1e-3 relative** on the loss |
+| the exported directory describes itself truthfully | every body hashes to its filename; per-entry `ProgramManifest` parses with its own parser and agrees; two exports byte-identical | exact |
+| a Python process with no JVM runs the artifact | `ServingArtifactExportRunTest`, export-then-subprocess | **1e-5** PJRT CPU · **1e-3** PJRT CUDA |
+| …and the poisoned pools / scratch page are untouched | same test, both lanes | **`==`** (a copied slot is not a computed one) |
+| the plugin's page arithmetic and marshalling are right | `VllmPluginContractTest` lane 2 — 31 stdlib-only `unittest` cases | exact |
+| the runner threads a KV cache across steps | lane 3 — **two** decode steps of three sequences on both PJRT clients | 1e-5 / 1e-3 on floats; **exact** on every page id, slot, position and bucket |
+| Tlaloc's own PTX can replace the lowering inside an XLA executable | `KptxPagedAttentionKernelTest` vs a Double paged walk | **1.2e-7** kernel · 2.44e-4 emission (= 2^-12, TF32's mantissa) · and the property "the kernel is at least as close to the oracle as the emission it replaces" |
+| the KV-quant bound holds and is tight | every element under `scale/2`, some element over 0.9 of it; a hand-derived power-of-two-scale vector checked on paper | **derived**, not tuned |
+| every new op refuses in both AD transforms and the renderer | `PagedAttentionTest` / `KvCacheWriteTest` / `DequantizeKvTest`, three refusal cases each | by name |
+
+Three sensitivity checks were run before the oracles were trusted, each
+mutated then reverted: the bf16 decode byte-swapped (H2), `PADDING_SEQ_LEN`
+flipped to 0 and the block table desynced by a page (H3a), and
+`append_token` advancing `length` before computing the slot (H3b). Every one
+of them failed the lane it was supposed to fail.
+
+#### WRITTEN BUT UNCERTIFIED — and exactly how to certify it
+
+1. **The live vLLM path** — `platform.py` and `worker.py`, the two files
+   that import vLLM. vLLM is not installed and the H3b entry states the
+   closure (186 packages, torch 2.13, 33 CUDA-13 wheels, a numpy downgrade)
+   and why that venv is the measurement apparatus for every oracle here.
+   In a venv of its own:
+
+   ```bash
+   python -m venv ~/.local/venvs/vllm && . ~/.local/venvs/vllm/bin/activate
+   pip install vllm "jax[cuda12]"
+   pip install -e /home/pedro/programming/tlaloc/harness/python
+   export TLALOC_SERVING_ARTIFACT=<dir written by ServingArtifactWriter>
+   python -c "from vllm.platforms import current_platform; print(current_platform)"
+   vllm serve <tokenizer/config> --max-num-seqs 4 --max-model-len 4 --block-size 2
+   ```
+
+   First command = platform discovery must land on `TlalocPlatform`; second
+   = one `generate()`.
+2. **The SGLang runner** — a design record only (§5 H5(2)). `pip install
+   sglang` has the same venv problem. The **checkable prediction** is that
+   the loader, manifest reader, bucket selection and PJRT execution path are
+   reused wholesale and only the adapter class + its `ForwardBatch → slot`
+   translation are new. Certify it by writing that adapter against a real
+   installed SGLang and re-running the H3b lane-3 shape against it.
+3. **The `./gradlew exportServingArtifact` task.** The exporter's `main`
+   exists (`ReferenceDecodeGraphKt`) and is the sanctioned entry point; no
+   build task assembles its classpath, so the only *certified* way to
+   produce an artifact today is the export test. One-file build change.
+
+#### AWAITS THE CLOUD TPU VM
+
+The artifact does not mention CUDA: the bodies are StableHLO+SDY, the
+manifest is JSON, and `ServingArtifact.load(..., platform=…)` takes the
+platform as a parameter. On a TPU VM, §3 of the runbook is the same commands
+with `platform="tpu"` — once G2b turns `PjrtTpuSmokeTest`'s self-skips into
+passes ([TPU_BRINGUP.md](TPU_BRINGUP.md); the ordered queue is
+[TPU_READINESS_AUDIT.md](TPU_READINESS_AUDIT.md) §5).
+
+What a TPU session owes this arc, specifically:
+
+- **re-run the export-then-run lane on `tpu` and record ITS floor.** The two
+  floors above are the PJRT CPU client's and XLA-GPU's TF32 dot policy; a
+  TPU's default `dot_general` precision is neither, so neither number
+  transfers. This is the single most valuable thing a TPU VM adds here.
+- the H3b lane-3 runner steps on TPU (the same two-step KV-threading check),
+- the H4 claiming lane **does not apply** — KPTX is PTX, and the decline
+  path is the op itself, which is exactly why claiming was built that way.
+
+#### The arc's invariants, verified by grep at the close
+
+Three new `OpKind`s entered the IR in Phase H and no others:
+`PAGED_ATTENTION`, `KV_CACHE_WRITE`, `DEQUANTIZE_KV`.
+
+- **All three are in `INFERENCE_ONLY_OP_KINDS`**, each with a rationale in
+  its `OpKind` doc comment and in `inferenceOnlyKindRefusal`.
+- **All three refuse in BOTH transforms** — `DxirReverseTransform` and
+  `DxirForwardTransform` each consult `INFERENCE_ONLY_OP_KINDS` and `error`
+  with the named message, and each has a test asserting it.
+- **All three refuse BY NAME in `KotlinSourceRenderer`** (arms at lines
+  598 / 610 / 625), with a test each. The north star holds: every new op
+  either renders or refuses there by name.
+- **All three are COMPLETE where they run** — interpreter arm, StableHLO
+  emission, cost-model arm. That is the inference-only kind's defining
+  difference from a demoted kind, and it is what makes serving executable.
+- **No silent gaps**: the refusal messages name the kind, the rationale, and
+  the differentiable spelling (FlashAttention/GQA for paged attention,
+  SCATTER/SCATTER_ADD for the cache write, MUL-by-scale for dequantize).
+- **No gradient math was written anywhere in this arc.** One AD engine.
+
+#### What remains, in the order a next session should take it
+
+1. **H3c — staged weights + a real Llama through the plugin.** The largest
+   open item, and the one that turns "the path executes" into "the path
+   serves". It is a NAME-MAPPING problem plus making weights graph
+   parameters instead of body constants.
+2. **Buffer donation.** `donationPairs` has ridden the manifest since H3a
+   and is still unwired into `CompileOptions`. Named the "next measurable
+   win" twice; it still is.
+3. **The ragged / chunked-prefill `PAGED_ATTENTION` form.** H1a's deferral
+   since the first slice, refused by name in three places, and the one
+   IR-level item both vLLM's chunked prefill and SGLang's radix path need.
+4. **The H4 performance tier** — warp specialization, shared-memory staging
+   of the page window. The floor to beat is the measured **465 µs** against
+   the lowering's 310 µs. Until it lands, nothing should register this
+   kernel in a deployment, which is why the default inference registry is
+   empty.
+5. **Narrow DTypes (`I8`, and the fp8 tour)** — a bf16-sized piece of work,
+   and the difference between KV-quant's contract and its bytes.
+6. **`precision_config = HIGHEST`** for dots that want it, and the top-1
+   consequence of the TF32 gap on a real vocabulary — which only becomes
+   measurable once (1) lands.
+
+Smaller named tails, carried forward so nothing is lost: StableHLO bytecode
+bodies; the embeddings entry point (speculative decoding / multimodal); warm-up
+policy (which buckets a deployment compiles at startup); multi-device serving
+across a mesh; vLLM's own sampler and logprobs; prefix caching / RadixAttention
+(theirs, by design); mmap / zero-copy `MemorySegment`-backed weight storage;
+`HostI64Storage`; a scale-generic KPTX kernel; the fused `KV_CACHE_WRITE` +
+`PAGED_ATTENTION` and `DEQUANTIZE_KV` + `PAGED_ATTENTION` claims; the quantized
+decode-graph signature; the Python side reading `kvQuant` to size its pools;
+and the training-side vectorized gather/scatter axis+list forms, which this
+arc deliberately did not touch.
