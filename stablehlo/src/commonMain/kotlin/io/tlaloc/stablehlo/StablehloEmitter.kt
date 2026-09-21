@@ -6,6 +6,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
+import io.tlaloc.ir.AllReduceAttrs
 import io.tlaloc.ir.DxirBlock
 import io.tlaloc.ir.DxirBlockArg
 import io.tlaloc.ir.DxirCall
@@ -327,6 +328,9 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             OpKind.SHARD_CONSTRAINT -> emitShardConstraint(
                 step, name, ops[0], node, node.operands[0].type,
             )
+            // §0.4.460 — Phase G3a: `stablehlo.all_reduce` with the reduction
+            // region + dense replica_groups (see emitAllReduce).
+            OpKind.ALL_REDUCE -> emitAllReduce(step, name, ops[0], node)
             OpKind.SCATTER -> emitScatter(
                 step, name,
                 operand = ops[0], scatterIndices = ops[1], updates = ops[2],
@@ -2553,6 +2557,49 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine(
             "$step$name = sdy.sharding_constraint $x ${sharding.toSdyAttr()} : ${inputType.toMlir()}",
         )
+    }
+
+    /**
+     * §0.4.460 — Phase G3a: `stablehlo.all_reduce` in the generic region form
+     * (guaranteed-parseable MLIR; StableHLO has no compact `applies` printer
+     * for all_reduce the way `stablehlo.reduce` does):
+     *
+     * ```
+     * %y = "stablehlo.all_reduce"(%x) ({
+     * ^bb0(%arg0: tensor<f32>, %arg1: tensor<f32>):
+     *   %s = stablehlo.add %arg0, %arg1 : tensor<f32>
+     *   stablehlo.return %s : tensor<f32>
+     * }) {replica_groups = dense<[[0]]> : tensor<1x1xi64>} : (tensor<4xf32>) -> tensor<4xf32>
+     * ```
+     *
+     * The reduction region is the element-typed `stablehlo.add` twin of the
+     * house `stablehlo.reduce ... applies stablehlo.add` spelling
+     * ([AllReduceAttrs.parse] refuses non-sum reductions by name before this
+     * point). `replica_groups` comes from the validated attr (uniform group
+     * sizes — ragged needs StableHLO's -1 padding, a named deferral; absent =
+     * `[[0]]`, the single-replica program). No `channel_handle` and no
+     * `use_global_device_ids`: the cross-replica default, matching the
+     * single-host single-task PJRT ExecuteOptions story from §0.4.459.
+     * Region-local SSA names (`%arg0` etc.) are block-scoped in MLIR, so two
+     * all_reduce ops in one function cannot collide.
+     */
+    private fun emitAllReduce(step: String, name: String, x: String, node: DxirOp) {
+        val inputType = node.operands[0].type
+        require(inputType.dims == node.type.dims && inputType.dtype == node.type.dtype) {
+            "ALL_REDUCE preserves type; got input=$inputType output=${node.type}"
+        }
+        val parsed = AllReduceAttrs.parse(node, "StablehloEmitter")
+        val groups = parsed.groups
+        val rows = groups.joinToString(", ") { g -> "[${g.joinToString(", ")}]" }
+        val groupsAttr =
+            "replica_groups = dense<[$rows]> : tensor<${groups.size}x${groups[0].size}xi64>"
+        val elemTy = DxirType(node.type.dtype, emptyList()).toMlir()
+        val tensorTy = inputType.toMlir()
+        out.appendLine("$step$name = \"stablehlo.all_reduce\"($x) ({")
+        out.appendLine("$step^bb0(%arg0: $elemTy, %arg1: $elemTy):")
+        out.appendLine("$step  %all_reduce_sum = stablehlo.add %arg0, %arg1 : $elemTy")
+        out.appendLine("$step  stablehlo.return %all_reduce_sum : $elemTy")
+        out.appendLine("$step}) {$groupsAttr} : ($tensorTy) -> ${node.type.toMlir()}")
     }
 
     /**

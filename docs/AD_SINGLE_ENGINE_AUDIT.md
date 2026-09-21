@@ -135,10 +135,14 @@ SPLIT deletion (recommended §0.4.448) RATIFIED and DONE §0.4.454.
   of the walk's index-0 upstream lookup; `walkBranchReverse` carries the
   same guard for IF-branch bodies), and `DxirForwardTransform` (first
   branch of the walk's op dispatch, ahead of the generic multi-result
-  out-of-scope error). ALL_REDUCE / SHARD_CONSTRAINT refuse as
-  non-differentiable BY DESIGN in both transforms only — their demotion is
-  about differentiability, so the interpreter keeps its generic
-  unsupported-op arm. Recognition (cost model, FlashAttentionRecognizer)
+  out-of-scope error). ALL_REDUCE / SHARD_CONSTRAINT refused as
+  non-differentiable BY DESIGN in both transforms only — UNTIL §0.4.460
+  (Phase G3a) un-demoted both, deliberately: ALL_REDUCE-sum is linear and
+  self-adjoint (interpreter single-process semantics, AllReduceRule,
+  forward tangent, StableHLO region emission — attr convention in
+  `ir/.../AllReduceAttrs.kt`), and SHARD_CONSTRAINT is a value identity
+  with layout metadata (identity adjoint/tangent). Their refusal pins
+  moved to AllReduceTest's real-op oracles. Recognition (cost model, FlashAttentionRecognizer)
   and StableHLO emission are untouched: those remain the kinds' sanctioned
   roles, now stated in each OpKind doc comment with the rejected
   complete-the-kinds alternative recorded. Pins:
@@ -237,8 +241,10 @@ refusals in the interpreter and both transforms, doc notes on the kinds,
 pins. `ALL_REDUCE`/`SHARD_CONSTRAINT` are non-differentiable by design
 (sharding constructs) — document that, refuse by name in the
 transforms. `SPLIT` followed the same demotion (the FIR fold covers
-users). **DONE §0.4.448**; SPLIT then DELETED outright in §0.4.454 —
-see the running record.
+users). **DONE §0.4.448**; SPLIT then DELETED outright in §0.4.454;
+ALL_REDUCE/SHARD_CONSTRAINT then UN-DEMOTED in §0.4.460 (Phase G3a:
+real interpreter arms, VjpRules, tangents, all_reduce emission) — see
+the running record above.
 
 **D. Dual `grad` naming.** Tracer-lambda `grad` vs intrinsic `grad`
 share names, disambiguated by lambda type. Documented and load-bearing

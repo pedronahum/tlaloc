@@ -17,19 +17,22 @@ import io.tlaloc.ir.OpKind
  * REJECTED alternative (the audit's demote decision): completing the kinds —
  * interpreter arms, VjpRules, forward tangents — would duplicate work the
  * coarseners already own with certification (layernorm/attention fused
- * semantics). ALL_REDUCE and SHARD_CONSTRAINT are non-differentiable BY
- * DESIGN: sharding is a layout annotation on an already-differentiated
- * program, not a mathematical operation with an adjoint (GradShardingVerify
- * checks the fwd/grad collective duality instead).
+ * semantics).
  *
- * A third demoted kind, SPLIT, was DELETED outright in §0.4.454 (Phase G
- * slice 1): unreachable — per-piece SLICE is the sanctioned spelling.
+ * Departures from the §0.4.448 table:
+ * - SPLIT was DELETED outright in §0.4.454 (Phase G slice 1): unreachable —
+ *   per-piece SLICE is the sanctioned spelling.
+ * - ALL_REDUCE and SHARD_CONSTRAINT were UN-DEMOTED in §0.4.460 (Phase G3a),
+ *   deliberately: ALL_REDUCE-sum is a linear, self-adjoint op (interpreter
+ *   arm with single-process semantics, AllReduceRule, forward tangent,
+ *   StableHLO region emission — see [io.tlaloc.ir.AllReduceAttrs]), and
+ *   reading showed SHARD_CONSTRAINT is a value-identity with layout metadata
+ *   (identity adjoint/tangent are honest and cheap). GradShardingVerify keeps
+ *   its sharded-pipeline collective-duality role alongside.
  */
 internal val DEMOTED_OP_KINDS: Set<OpKind> = setOf(
     OpKind.LAYERNORM,
     OpKind.SCALED_DOT_PRODUCT_ATTENTION,
-    OpKind.ALL_REDUCE,
-    OpKind.SHARD_CONSTRAINT,
 )
 
 /**
@@ -48,15 +51,5 @@ internal fun demotedKindRefusal(kind: OpKind, layer: String): String? = when (ki
             "kind (FlashAttentionRecognizer + cost model + StableHLO emitter are its " +
             "sanctioned layers) — spell attention via the FlashAttention composition " +
             "(MATMUL/softmax/MATMUL) and let the coarsener own the fused semantics"
-    OpKind.ALL_REDUCE ->
-        "$layer: ALL_REDUCE is non-differentiable by design (a sharding collective; " +
-            "GradShardingVerify's adjoint-duality check is its sanctioned layer) — " +
-            "differentiate the unsharded program and verify the sharded gradient's " +
-            "collectives with GradShardingVerify"
-    OpKind.SHARD_CONSTRAINT ->
-        "$layer: SHARD_CONSTRAINT is non-differentiable by design (an SDY sharding " +
-            "annotation; propagation + the StableHLO emitter are its sanctioned " +
-            "layers) — differentiate the unsharded program and re-apply sharding " +
-            "constraints to the gradient function"
     else -> null
 }

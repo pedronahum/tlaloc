@@ -599,10 +599,30 @@ internal object KotlinSourceRenderer {
             OpKind.MANUAL_COMPUTATION, OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER ->
                 refuse(op, "sharding/collective kinds are emission-layer constructs with no host spelling")
 
+            // §0.4.460 — Phase G3a: ALL_REDUCE is differentiable now, but it
+            // keeps a NAMED refusal here: the readable reverse of a collective
+            // program is its PER-REPLICA local source, and rendering the
+            // interpreter's single-process ×|group| convention would bake a
+            // distribution fact (the group size) into host math as a literal —
+            // the sentinel-dims class of mistake. Execution semantics arrive
+            // with G2b/G4.
+            OpKind.ALL_REDUCE ->
+                refuse(
+                    op,
+                    "ALL_REDUCE has no single-process host spelling — the readable reverse " +
+                        "of a collective program is its per-replica local source; the " +
+                        "interpreter's ×|group| unit semantics are an SPMD modelling " +
+                        "convention, not host math (§0.4.460 G3a; G2b/G4 own execution)",
+                )
+
+            // §0.4.460 — Phase G3a: SHARD_CONSTRAINT is a value identity with
+            // layout metadata; the host rendering is the pass-through (the
+            // metadata has no host-math meaning and is deliberately dropped).
+            OpKind.SHARD_CONSTRAINT -> ranked(r(0))
+
             // Demoted kinds: handled above by demotedKindRefusal, but the `when`
             // stays exhaustive so a NEW OpKind fails compilation right here.
             OpKind.LAYERNORM, OpKind.SCALED_DOT_PRODUCT_ATTENTION,
-            OpKind.ALL_REDUCE, OpKind.SHARD_CONSTRAINT,
             -> throw KotlinRenderRefusal(demotedKindRefusal(op.op, "toKotlinSource")!!)
         }
     }

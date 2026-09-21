@@ -596,26 +596,43 @@ enum class OpKind {
     COARSENED,
 
     // Sharding (SDY-equivalent lowering points)
-    // §0.4.448 — audit finding C: SHARD_CONSTRAINT is NON-DIFFERENTIABLE BY
-    // DESIGN. It is a layout annotation (SDY), not a mathematical operation
-    // with an adjoint: differentiation happens on the unsharded program, and
-    // sharding constraints are re-applied to the gradient function (with
-    // GradShardingVerify checking the fwd/grad duality). Sanctioned layers:
-    // propagation, the cost model, and the StableHLO emitter
-    // (emitShardConstraint). Both AD transforms refuse it by name — see
-    // passes/DemotedOpKinds.kt.
+    // §0.4.460 — Phase G3a UN-DEMOTES SHARD_CONSTRAINT (reversing §0.4.448
+    // finding C's demotion, deliberately): reading showed it is a VALUE
+    // IDENTITY with layout metadata (emitShardConstraint asserts shape
+    // preservation and emits `sdy.sharding_constraint` — the value passes
+    // through untouched), so the identity adjoint (upstream passes through,
+    // VjpRegistry.ShardConstraintRule) and identity tangent are honest and
+    // cheap. The interpreter evaluates it as identity; the KotlinSourceRenderer
+    // renders the pass-through (the metadata has no host-math meaning).
+    // Re-applying the SAME constraint to the adjoint value is a NAMED DEFERRAL
+    // (JAX's with_sharding_constraint transpose does; it needs mesh carryover
+    // into AD-built functions) — GradShardingVerify's param-boundary
+    // identity-dual check governs gradient layouts meanwhile.
     SHARD_CONSTRAINT, MANUAL_COMPUTATION,
 
     // Collectives — inserted by Shardy's export passes or written explicitly in a manual
-    // computation. We only need enough kinds here to express adjoint duality for
-    // GradShardingVerify; a full set would include ALL_TO_ALL, BROADCAST-across-replicas,
-    // etc. For forward lowering these remain as StableHLO custom_call / stablehlo.collective
-    // placeholders until the emitter grows dedicated handling.
-    // §0.4.448 — audit finding C: ALL_REDUCE is NON-DIFFERENTIABLE BY DESIGN
-    // (the same reasoning as SHARD_CONSTRAINT above — a distribution
-    // construct, not math with an adjoint; its "dual" is GradShardingVerify's
-    // collective-duality relation, not a VjpRule). Sanctioned layers:
-    // GradShardingVerify and the cost model. Both AD transforms refuse it by
-    // name — see passes/DemotedOpKinds.kt.
+    // computation. A full set would include ALL_TO_ALL, BROADCAST-across-replicas, etc.
+    // §0.4.460 — Phase G3a promotes ALL_REDUCE to a REAL OP (reversing
+    // §0.4.448 finding C's demotion, deliberately — the intra-job
+    // coordinator's first brick). Attribute convention and validation live in
+    // [io.tlaloc.ir.AllReduceAttrs]: `replica_groups: List<List<Int>>`
+    // (absent = [[0]], the single-replica program) and `reduction: String`
+    // (absent = "sum"; v1 supports sum ONLY — mean scales, max/min need
+    // subgradient routing, both refuse by name). Shape-preserving. Layers:
+    // interpreter (single-process SPMD semantics: |group(0)| × value — exact
+    // identity when replica_count == 1; the multi-replica arm is exercised
+    // only via unit semantics until G2b/G4), AllReduceRule (all-reduce-sum is
+    // SELF-ADJOINT in the replicated per-replica-upstream view: the adjoint
+    // is the same ALL_REDUCE on the upstream — NOTE this is a different level
+    // than GradShardingVerify.adjointOf's varying→invariant sharded-pipeline
+    // table, where the dual is identity; both are recorded, neither replaces
+    // the other), forward tangent (linear: the same op on the tangent),
+    // StableHLO emission (`"stablehlo.all_reduce"` with the stablehlo.add
+    // reduction region + dense replica_groups). KotlinSourceRenderer refuses
+    // by name (no single-process host spelling — rendering ×|group| would
+    // bake a distribution fact into host math).
+    // ALL_GATHER / REDUCE_SCATTER remain GradShardingVerify-duality-only
+    // kinds (no interpreter arm, no rules, no emission) until a slice needs
+    // them.
     ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER,
 }

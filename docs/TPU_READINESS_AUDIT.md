@@ -110,6 +110,65 @@ recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
 
+- **§0.4.460 — G3a slice 1 DONE: ALL_REDUCE from demoted refusal to real
+  op — the intra-job coordinator's first brick** (LOCAL certification —
+  single-process semantics only; NO multi-device execution claim, that is
+  G2b/G4's). Both §0.4.448-demoted collectives UN-DEMOTED, deliberately,
+  per what reading showed. **(1) The attr convention**, one shared parser
+  (`ir/.../AllReduceAttrs.kt`) so no layer can disagree:
+  `replica_groups: List<List<Int>>` (absent = `[[0]]`, the single-replica
+  program; uniform group sizes — ragged needs StableHLO's -1 padding,
+  NAMED DEFERRAL; disjoint, non-negative, replica 0 present) and
+  `reduction: String` (absent = "sum"; v1 supports sum ONLY — the
+  general-op story recorded on every refusal: mean scales the adjoint by
+  1/|group|, max/min need subgradient routing, both DEFER BY NAME).
+  **(2) Interpreter arm** — the SPMD replicated-value view: the process
+  models replica 0, whose group members all hold the same value, so
+  all-reduce-sum = |group(0)| × value; replica_count == 1 is EXACT
+  identity (the copyOf arm, no float math), certified end-to-end; the
+  multi-replica scale is exercised ONLY via unit semantics until G2b/G4
+  put devices behind the groups (stated on the pins). **(3) StableHLO
+  emission** — `"stablehlo.all_reduce"` in the generic region form
+  (stablehlo.add reduction region, `^bb0` element-typed block args,
+  `stablehlo.return`, dense<NxMxi64> replica_groups; no channel_handle —
+  the cross-replica default matching §0.4.459's single-host
+  ExecuteOptions), MLIR-shape pinned in EmitterTest (single-group,
+  absent-default, multi-group, named refusals). **(4) Differentiability**
+  — AllReduceRule: all-reduce-sum is SELF-ADJOINT (Jacobian
+  `ones(n,n) ⊗ I`, symmetric), so the gradient is the SAME all_reduce
+  (same replica_groups) on the upstream — pinned structurally AND
+  numerically (grad of Σ all_reduce(x⊙x) over |group|=2 hand-pinned at
+  4x; JVP-VJP identity ⟨∇f,v⟩ = tangent through the all-reduce-bearing
+  loss); forward tangent is the same op on the tangent (linear). NOTE the
+  recorded LEVEL DISTINCTION: GradShardingVerify.adjointOf's
+  varying→invariant sharded-pipeline table (all_reduce ↔ identity) is a
+  DIFFERENT level than the VjpRule's replicated per-replica-upstream
+  view; both stand, neither replaces the other (on OpKind.ALL_REDUCE and
+  the rule doc). **(5) SHARD_CONSTRAINT un-demoted too** — reading showed
+  it IS a value-identity with layout metadata (emitShardConstraint
+  asserts shape preservation; `sdy.sharding_constraint` passes the value
+  through), so the identity adjoint/tangent are honest and cheap:
+  interpreter identity arm, ShardConstraintRule (upstream pass-through;
+  re-applying the SAME constraint to the adjoint is a NAMED DEFERRAL —
+  needs mesh carryover into AD-built functions, GradShardingVerify's
+  param-boundary check governs meanwhile), renderer pass-through arm.
+  **(6) KotlinSourceRenderer**: SHARD_CONSTRAINT renders as identity;
+  ALL_REDUCE keeps a NAMED refusal (the readable reverse of a collective
+  program is its per-replica local source — rendering ×|group| would bake
+  a distribution fact into host math, the sentinel-dims class of
+  mistake). **(7) Shardy visibility**: the SdyRoundTrip/SdyPropagation
+  skip condition (assumeTrue on `sdy-opt` on PATH) is now documented in
+  docs/TPU_BRINGUP.md with the build-from-source provisioning note; the
+  emit-path sdy annotations where DxirSharding is present are verified
+  against their existing pins (EmitterTest sharding_constraint family,
+  CoarsenedCustomCallTest's per_value present+absent pair), and the
+  recorded gap is stated: plain ops with a DxirSharding carry no per-op
+  `sdy.sharding` attr — propagation owns plain-op layouts. ALL_GATHER /
+  REDUCE_SCATTER stay duality-table-only kinds until a slice needs them.
+  DemotedOpKinds shrinks to LAYERNORM + SDPA (refusal rows moved to
+  AllReduceTest's real-op oracles); AD_SINGLE_ENGINE_AUDIT finding C
+  updated in the same commit. Suite 2092 → 2103.
+
 - **§0.4.459 — G2a DONE: the local half of TPU bring-up — everything but
   execution, which remains FORBIDDEN to claim** (no TPU exists here; the
   smoke suite self-skips by design and G2b turns the skips into passes

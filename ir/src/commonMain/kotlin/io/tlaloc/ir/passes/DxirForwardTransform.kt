@@ -4,6 +4,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
+import io.tlaloc.ir.AllReduceAttrs
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirFunction
@@ -167,8 +168,9 @@ object DxirForwardTransform {
                         // BY NAME with the sanctioned alternative in the message
                         // (see [demotedKindRefusal]) before any tangent/multi-
                         // result dispatch — a demoted kind would otherwise hit
-                        // the generic out-of-scope error, and the collectives
-                        // are non-differentiable by design.
+                        // the generic out-of-scope error. (§0.4.460 un-demoted
+                        // the collectives: ALL_REDUCE and SHARD_CONSTRAINT now
+                        // carry real tangent arms in [tangentOf].)
                         node.op in DEMOTED_OP_KINDS -> error(
                             demotedKindRefusal(node.op, "DxirForwardTransform")!!,
                         )
@@ -698,6 +700,21 @@ object DxirForwardTransform {
             // carries no tangent.
             OpKind.CHECK_SHAPE_LIKE ->
                 b.op(OpKind.CHECK_SHAPE_LIKE, listOf(t(node.operands[0]), vOps[1]), ty)
+
+            // §0.4.460 — Phase G3a: ALL_REDUCE is LINEAR, so the tangent is
+            // the same collective over the operand tangent, replica_groups
+            // and reduction attrs carried verbatim (the JVP mirror of
+            // AllReduceRule's self-adjoint VJP). parse() refuses non-sum
+            // reductions and malformed groups by name before emitting.
+            OpKind.ALL_REDUCE -> {
+                AllReduceAttrs.parse(node, "DxirForwardTransform")
+                b.op(OpKind.ALL_REDUCE, listOf(t(node.operands[0])), ty, node.attrs)
+            }
+
+            // §0.4.460 — Phase G3a: SHARD_CONSTRAINT is a value identity with
+            // layout metadata; the tangent passes through untouched (the
+            // metadata rides the VALUE clone, which keeps op attrs+sharding).
+            OpKind.SHARD_CONSTRAINT -> t(node.operands[0])
 
             // §0.4.403 — Phase B3: the COARSENED forward arm. The tangent of a
             // coarsened op is the forward transform of its stored `primal_body`,

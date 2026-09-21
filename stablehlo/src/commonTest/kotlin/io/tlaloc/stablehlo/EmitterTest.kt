@@ -2656,6 +2656,78 @@ class EmitterTest {
         assertFailsWith<IllegalStateException> { io.tlaloc.ir.DxirModule(listOf(fn)).toStablehlo() }
     }
 
+    // --- §0.4.460 Phase G3a — stablehlo.all_reduce (region + replica_groups). ---
+
+    @Test
+    fun allReduceEmitsReductionRegionAndReplicaGroups() {
+        val fn = DxirBuilder.function("ar") {
+            val x = param("x", DxirType(F32, listOf(4)))
+            listOf(
+                op(
+                    OpKind.ALL_REDUCE, listOf(x), DxirType(F32, listOf(4)),
+                    attrs = mapOf<String, Any>("replica_groups" to listOf(listOf(0))),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        // The generic region form: op, block signature, add reducer, terminator,
+        // dense replica_groups — each pinned structurally.
+        assertTrue(mlir.contains("\"stablehlo.all_reduce\"(%0) ({"), mlir)
+        assertTrue(mlir.contains("^bb0(%arg0: tensor<f32>, %arg1: tensor<f32>):"), mlir)
+        assertTrue(mlir.contains("%all_reduce_sum = stablehlo.add %arg0, %arg1 : tensor<f32>"), mlir)
+        assertTrue(mlir.contains("stablehlo.return %all_reduce_sum : tensor<f32>"), mlir)
+        assertTrue(
+            mlir.contains("}) {replica_groups = dense<[[0]]> : tensor<1x1xi64>} : (tensor<4xf32>) -> tensor<4xf32>"),
+            mlir,
+        )
+    }
+
+    @Test
+    fun allReduceAbsentGroupsDefaultToSingleReplica() {
+        val fn = DxirBuilder.function("ar_default") {
+            val x = param("x", DxirType(F32, listOf(2, 3)))
+            listOf(op(OpKind.ALL_REDUCE, listOf(x), DxirType(F32, listOf(2, 3))))
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("replica_groups = dense<[[0]]> : tensor<1x1xi64>"), mlir)
+        assertTrue(mlir.contains("(tensor<2x3xf32>) -> tensor<2x3xf32>"), mlir)
+    }
+
+    @Test
+    fun allReduceEmitsMultiGroupDenseLiteral() {
+        val fn = DxirBuilder.function("ar_groups") {
+            val x = param("x", DxirType(F32, listOf(4)))
+            listOf(
+                op(
+                    OpKind.ALL_REDUCE, listOf(x), DxirType(F32, listOf(4)),
+                    attrs = mapOf<String, Any>(
+                        "replica_groups" to listOf(listOf(0, 1), listOf(2, 3)),
+                    ),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(
+            mlir.contains("replica_groups = dense<[[0, 1], [2, 3]]> : tensor<2x2xi64>"),
+            mlir,
+        )
+    }
+
+    @Test
+    fun allReduceRefusesNonSumAndRaggedByName() {
+        fun failing(attrs: Map<String, Any>): String {
+            val fn = DxirBuilder.function("ar_bad") {
+                val x = param("x", DxirType(F32, listOf(4)))
+                listOf(op(OpKind.ALL_REDUCE, listOf(x), DxirType(F32, listOf(4)), attrs = attrs))
+            }
+            return assertFailsWith<RuntimeException> { fn.toStablehlo() }.message ?: ""
+        }
+        val nonSum = failing(mapOf("reduction" to "max"))
+        assertTrue("ALL_REDUCE" in nonSum && "max" in nonSum, nonSum)
+        val ragged = failing(mapOf("replica_groups" to listOf(listOf(0, 1), listOf(2))))
+        assertTrue("ragged" in ragged, ragged)
+    }
+
     @Test
     fun embeddingRejectsFloatIndices() {
         val fn = DxirBuilder.function("bad") {

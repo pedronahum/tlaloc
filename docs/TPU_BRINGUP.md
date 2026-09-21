@@ -96,6 +96,29 @@ Caveat for the TPU VM: the CUDA suites gate on `PjrtBinaries.available`
 that path — the CUDA suites still skip on the `cudaAvailable` gate, which
 is the load-bearing one there.
 
+## The Shardy validation lane (G3a note, §0.4.460)
+
+The SDY suites self-skip without their tool, silently on most boxes —
+made visible here so nobody mistakes a skip for a cert:
+
+- `SdyRoundTripTest` and `SdyPropagationTest` (`stablehlo/src/jvmTest`)
+  gate on `assumeTrue(SdyOpt.available)` — `sdy-opt` resolved from
+  `PATH` (`RoundTripHarness.kt`). No `sdy-opt` → the whole external
+  round-trip/propagation lane SKIPS. There is no prebuilt aarch64
+  binary; provisioning = build Shardy from source
+  (github.com/openxla/shardy, bazel build of `//shardy/tools:sdy_opt`)
+  and put `sdy-opt` on `PATH`. Same story on a TPU VM.
+- What still certifies WITHOUT `sdy-opt` (runs everywhere, pinned
+  structurally): the emit path emits sdy annotations wherever
+  `DxirSharding` is present — `sdy.mesh` decls + `sdy.sharding_constraint`
+  with the `<@mesh, [...]>` attr (EmitterTest's `shardConstraintLowersToSdyOp`
+  and neighbours), `sdy.sharding = #sdy.sharding_per_value<[...]>` on
+  sharded custom_calls (CoarsenedCustomCallTest, both the present and the
+  deliberately-absent pins), and `sdy.manual_computation`
+  in/out_shardings. Recorded gap: PLAIN ops with a `DxirSharding` do not
+  get a per-op `sdy.sharding` attr (only constraint/custom_call/
+  manual_computation sites annotate); propagation owns plain-op layouts.
+
 ## What G2b must record (the open questions, from §0.4.457/§0.4.459)
 
 1. `platformNameReportsTpu` — that libtpu reports `"tpu"`.

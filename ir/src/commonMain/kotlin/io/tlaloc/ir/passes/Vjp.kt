@@ -2,6 +2,7 @@ package io.tlaloc.ir.passes
 
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
+import io.tlaloc.ir.AllReduceAttrs
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirNode
@@ -1936,6 +1937,47 @@ object VjpRegistry {
         }
     }
 
+    /**
+     * §0.4.460 — Phase G3a: all-reduce-sum is SELF-ADJOINT, so the gradient of
+     * a sum-all-reduce is the SAME all-reduce on the upstream (same
+     * replica_groups, same reduction). In the replicated per-replica-upstream
+     * view the collective's Jacobian is `ones(n,n) ⊗ I` — symmetric — and
+     * under the interpreter's single-process semantics (×|group|) the rule is
+     * the scalar multiple's own adjoint, so JVP-VJP identities close exactly.
+     * NOTE the level distinction, recorded on OpKind.ALL_REDUCE: this is NOT
+     * GradShardingVerify.adjointOf's varying→invariant sharded-pipeline table
+     * (where all_reduce's dual is identity) — that table keeps governing
+     * emitted collective sequences.
+     *
+     * The general-op story (refusals fire inside [AllReduceAttrs.parse], by
+     * name): mean SCALES the upstream by 1/|group|; max/min need subgradient
+     * routing — both defer by name until a consumer exists.
+     */
+    val AllReduceRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            AllReduceAttrs.parse(op, "AllReduceRule")
+            val d = builder.op(OpKind.ALL_REDUCE, listOf(upstream), op.operands[0].type, attrs = op.attrs)
+            return listOf(op.operands[0] to d)
+        }
+    }
+
+    /**
+     * §0.4.460 — Phase G3a: SHARD_CONSTRAINT is a value identity with layout
+     * metadata, so its adjoint is the identity — the upstream passes through
+     * untouched. Re-emitting the SAME constraint onto the adjoint value
+     * (JAX's with_sharding_constraint transpose) is a NAMED DEFERRAL: it
+     * needs mesh carryover into AD-built functions; until then
+     * GradShardingVerify's param-boundary identity-dual check governs
+     * gradient layouts.
+     */
+    val ShardConstraintRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder) = listOf(
+            op.operands[0] to upstream,
+        )
+    }
+
     private val rules: Map<OpKind, VjpRule> = mapOf(
         OpKind.ADD to AddRule,
         OpKind.SUB to SubRule,
@@ -2016,6 +2058,9 @@ object VjpRegistry {
         // §0.4.415 — Phase B5: the customVjp shape assert is a value-identity;
         // see [CheckShapeLikeRule] (rev∘custom nesting needs it ruled).
         OpKind.CHECK_SHAPE_LIKE to CheckShapeLikeRule,
+        // §0.4.460 — Phase G3a: the collectives' first differentiable pair.
+        OpKind.ALL_REDUCE to AllReduceRule,
+        OpKind.SHARD_CONSTRAINT to ShardConstraintRule,
     )
 
     operator fun get(kind: OpKind): VjpRule? = rules[kind]

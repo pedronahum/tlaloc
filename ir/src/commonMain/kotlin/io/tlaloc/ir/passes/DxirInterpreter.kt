@@ -1,5 +1,6 @@
 package io.tlaloc.ir.passes
 
+import io.tlaloc.ir.AllReduceAttrs
 import io.tlaloc.ir.DxirBlockArg
 import io.tlaloc.ir.DxirCall
 import io.tlaloc.ir.DxirConst
@@ -1611,12 +1612,34 @@ object DxirInterpreter {
                 }
                 FloatArray(summed.size) { summed[it] / n }
             }
+            // §0.4.460 — Phase G3a: ALL_REDUCE under single-process semantics
+            // (the SPMD replicated-value view — see [AllReduceAttrs]).
+            // This process models replica 0; every member of replica 0's group
+            // holds the same value, so all-reduce-sum evaluates to
+            // |group(0)| × value. With replica_count == 1 (absent attr or
+            // [[0]]) the scale is 1 and the arm is EXACTLY identity — the case
+            // certified end-to-end today; the multi-replica scale is exercised
+            // only via these unit semantics until G2b/G4 put devices behind
+            // the groups. Non-sum reductions refuse by name inside parse().
+            OpKind.ALL_REDUCE -> {
+                val parsed = AllReduceAttrs.parse(op, "DxirInterpreter")
+                val value = evalNode(op.operands[0], env, multiResults)
+                require(op.type.dims == op.operands[0].type.dims) {
+                    "DxirInterpreter: ALL_REDUCE preserves shape; got " +
+                        "input=${op.operands[0].type.dims} output=${op.type.dims}"
+                }
+                val n = parsed.groupSizeOfReplicaZero
+                if (n == 1) value.copyOf() else FloatArray(value.size) { value[it] * n }
+            }
+            // §0.4.460 — Phase G3a: SHARD_CONSTRAINT is a value identity with
+            // layout metadata (the emitter asserts shape preservation and
+            // emits `sdy.sharding_constraint`); the metadata has no
+            // host-evaluation meaning, so the arm is the exact copy.
+            OpKind.SHARD_CONSTRAINT ->
+                evalNode(op.operands[0], env, multiResults).copyOf()
             // §0.4.448 — audit finding C: the demoted kinds refuse by name with
             // the sanctioned alternative in the message (see [demotedKindRefusal]),
-            // instead of falling into the generic else below. ALL_REDUCE and
-            // SHARD_CONSTRAINT stay on the generic arm: their demotion is about
-            // differentiability (the transforms refuse them by name), not about
-            // a host-evaluation story this interpreter ever promised.
+            // instead of falling into the generic else below.
             OpKind.LAYERNORM, OpKind.SCALED_DOT_PRODUCT_ATTENTION ->
                 error(demotedKindRefusal(op.op, "DxirInterpreter")!!)
             else -> error("DxirInterpreter: op ${op.op} not in the bridge's supported set")

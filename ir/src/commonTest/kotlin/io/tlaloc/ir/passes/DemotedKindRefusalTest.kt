@@ -22,11 +22,10 @@ import kotlin.test.assertTrue
  * Layer matrix (the audit's demote decision):
  * - LAYERNORM / SCALED_DOT_PRODUCT_ATTENTION: refused by
  *   DxirInterpreter, DxirReverseTransform, DxirForwardTransform.
- * - ALL_REDUCE / SHARD_CONSTRAINT: non-differentiable by design — refused by
- *   both transforms (the interpreter keeps its generic unsupported-op arm:
- *   their demotion is about differentiability, not host evaluation).
- * (SPLIT, the third §0.4.448 demotee, was DELETED in §0.4.454 — its rows
- * left with the kind.)
+ * (SPLIT, a §0.4.448 demotee, was DELETED in §0.4.454 — its rows left with
+ * the kind. ALL_REDUCE / SHARD_CONSTRAINT were UN-DEMOTED in §0.4.460
+ * Phase G3a — their refusal rows left with the demotion, replaced by the
+ * real-op oracles in AllReduceTest.)
  * Recognition (cost model, recognizers) and StableHLO emission remain the
  * sanctioned roles and are deliberately NOT touched by this pin.
  */
@@ -58,18 +57,6 @@ class DemotedKindRefusalTest {
         listOf(op(OpKind.SUM, listOf(y), f32s))
     }
 
-    private fun allReduceFn(): DxirFunction = DxirBuilder.function("ar") {
-        val x = param("x", vec4)
-        val y = op(OpKind.ALL_REDUCE, listOf(x), vec4)
-        listOf(op(OpKind.SUM, listOf(y), f32s))
-    }
-
-    private fun shardConstraintFn(): DxirFunction = DxirBuilder.function("sc") {
-        val x = param("x", vec4)
-        val y = op(OpKind.SHARD_CONSTRAINT, listOf(x), vec4)
-        listOf(op(OpKind.SUM, listOf(y), f32s))
-    }
-
     // --- DxirInterpreter refusals (LAYERNORM / SDPA). ---
 
     @Test
@@ -89,7 +76,7 @@ class DemotedKindRefusalTest {
         assertNamedRefusal(ex, "SCALED_DOT_PRODUCT_ATTENTION", "FlashAttention")
     }
 
-    // --- DxirReverseTransform refusals (all four). ---
+    // --- DxirReverseTransform refusals. ---
 
     @Test
     fun reverseTransformRefusesLayernormByName() {
@@ -103,21 +90,7 @@ class DemotedKindRefusalTest {
         assertNamedRefusal(ex, "SCALED_DOT_PRODUCT_ATTENTION", "FlashAttention")
     }
 
-    @Test
-    fun reverseTransformRefusesAllReduceByName() {
-        val ex = assertFailsWith<IllegalStateException> { DxirReverseTransform.apply(allReduceFn()) }
-        assertNamedRefusal(ex, "ALL_REDUCE", "non-differentiable by design")
-    }
-
-    @Test
-    fun reverseTransformRefusesShardConstraintByName() {
-        val ex = assertFailsWith<IllegalStateException> {
-            DxirReverseTransform.apply(shardConstraintFn())
-        }
-        assertNamedRefusal(ex, "SHARD_CONSTRAINT", "non-differentiable by design")
-    }
-
-    // --- DxirForwardTransform refusals (all four). ---
+    // --- DxirForwardTransform refusals. ---
 
     @Test
     fun forwardTransformRefusesLayernormByName() {
@@ -129,19 +102,5 @@ class DemotedKindRefusalTest {
     fun forwardTransformRefusesSdpaByName() {
         val ex = assertFailsWith<IllegalStateException> { DxirForwardTransform.apply(sdpaFn()) }
         assertNamedRefusal(ex, "SCALED_DOT_PRODUCT_ATTENTION", "FlashAttention")
-    }
-
-    @Test
-    fun forwardTransformRefusesAllReduceByName() {
-        val ex = assertFailsWith<IllegalStateException> { DxirForwardTransform.apply(allReduceFn()) }
-        assertNamedRefusal(ex, "ALL_REDUCE", "non-differentiable by design")
-    }
-
-    @Test
-    fun forwardTransformRefusesShardConstraintByName() {
-        val ex = assertFailsWith<IllegalStateException> {
-            DxirForwardTransform.apply(shardConstraintFn())
-        }
-        assertNamedRefusal(ex, "SHARD_CONSTRAINT", "non-differentiable by design")
     }
 }
