@@ -298,6 +298,60 @@ untouched slot is copied, not computed.
 
 ---
 
+## 3.1 PJRT without a framework — `tlaloc_pjrt.py` (CERTIFIED, §0.4.475)
+
+`tlaloc_serve.py` above reaches PJRT through **jaxlib**. `tlaloc_pjrt.py`
+does the same job with **`ctypes` and the standard library only** — no jax,
+no jaxlib, no torch, no numpy. It is a mirror of the JVM's FFM binding
+(`runtime-pjrt/.../ffm/PjrtFfm.kt`), § numbers cited in place.
+
+The only thing it needs is a PJRT plugin `.so`, and that file can live
+anywhere — inside someone else's jax install, at `/lib/libtpu.so` on a TPU
+VM, or in a directory a deployment ships:
+
+```bash
+export TLALOC_PJRT_PLUGIN_PATH=$HOME/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so
+export PYTHONPATH=/home/pedro/programming/tlaloc/harness/python
+python3 - <<'PY'                     # any python3 — nothing is installed
+import tlaloc_pjrt as P
+api = P.PjrtApi.load()               # dlopen + GetPjrtApi
+with api.create_client(platform="cuda") as client:   # create_options ALWAYS (§0.4.333)
+    dev = client.addressable_devices()[0]
+    print(client.platform_name())
+    with client.compile(open("body.mlir").read()) as exe:
+        x = client.buffer_from_host_f32(dev, [1.0, 2.0], [2])
+        outs = exe.execute([x], dev)
+        print(outs[0].to_f32(2))
+        for b in outs: b.close()
+        x.close()
+PY
+```
+
+**Never create a CUDA client without create_options.** The binding refuses
+it by name: with none, the plugin defaults to `preallocate=true`,
+`memory_fraction=0.75`, which on this unified-memory box pins ~98 GB per
+client and hangs the machine (§0.4.333). A TPU client, by contrast, gets
+**no** options at all — those knobs are the XLA GPU plugin's (§0.4.459).
+
+The two certification modes, both run by `PjrtCtypesBindingTest`:
+
+```bash
+# ABI mirror — no plugin, no GPU, runs anywhere
+python3 harness/python/run_pjrt_ctypes_check.py --layouts /tmp/layouts.json
+
+# real XLA: compile + execute four graphs, jax/jaxlib/torch/numpy BLOCKED
+python3 harness/python/run_pjrt_ctypes_check.py --run /tmp/job.json /tmp/out.json
+```
+
+Both report a `guard` block: the driver installs a `sys.meta_path` finder
+that raises on those four packages *before* importing anything, runs the
+whole PJRT path underneath it, and then deliberately imports jax to prove
+the guard fires. The JVM asserts both.
+
+**Still true today**: `tlaloc_serve.py` has not been re-pointed at this
+binding (that is H6b). The framework-free claim is about the binding, not
+yet about the loader.
+
 ## 4. Plug it into vLLM (plugin CERTIFIED below vLLM's API, live path UNCERTIFIED)
 
 ```bash

@@ -1219,6 +1219,92 @@ plugin), the H4 performance tier, the H5 tails above (narrow DTypes, the
 quantized decode-graph signature, the SGLang runner), and the ragged prefill
 form that both frontends eventually want.
 
+### H6a — PJRT from Python, with no framework under it (§0.4.475)
+
+**The claim H3a could not make.** "A Python process with no JVM runs the
+artifact" has been certified since §0.4.469 — but that process reaches PJRT
+through **jaxlib**: `jax._src.xla_bridge` for the backend, `jaxlib.mlir` for
+the module, `jaxlib._jax.CompileOptions` for the compile. So the serving
+runtime's real dependency list was "a driver, a plugin, and 500 MB of
+framework whose CUDA wheel family must not collide with anything else in the
+venv". The §0.4.470 refusal (186 packages, torch 2.13, 33 CUDA-13 wheels) and
+the §0.4.474 canary are both consequences of that sentence.
+
+`harness/python/tlaloc_pjrt.py` removes the framework from the sentence. It
+binds the PJRT C API with **`ctypes` and the standard library only** — no
+jax, no jaxlib, no torch, **no numpy** — and it is a mechanical mirror of
+`runtime-pjrt/.../ffm/PjrtFfm.kt`, the Kotlin FFM binding that has carried
+every PJRT lane here since §0.4.303. Offsets, struct layouts, the
+`PJRT_Buffer_Type` codes, the §0.4.333 create-options NamedValues, the
+§0.4.304 six-byte `CompileOptionsProto`, the §0.4.459 platform gate: each
+carries the § number of the commit that learned it, because re-deriving them
+from the header would have meant re-learning the reboot incident and the XLA
+Check-fail by repeating them.
+
+**A plugin `.so` can live anywhere**, and that is the whole dependency story:
+inside somebody else's jax install, at `/lib/libtpu.so` on a TPU VM, or in a
+directory a deployment ships. The path comes from `TLALOC_PJRT_PLUGIN_PATH`
+(the same variable `PjrtBinaries` reads JVM-side) or an explicit argument.
+Nothing imports the package the file happens to sit in.
+
+**What is bound**: `GetPjrtApi`, `Client_Create` with create_options,
+platform name, device enumeration, `Compile`, `BufferFromHostBuffer` for
+F32 / **I32** / BF16, `OnDeviceSizeInBytes`, `ToHostBuffer`,
+`LoadedExecutable_Execute` with the padded `ExecuteOptions`, `NumOutputs`
+through `GetExecutable`, `Event_Await` / `Event_Destroy`, and every Destroy —
+each handle a context manager, each `close()` clearing its pointer *before*
+the destroy call so a raise cannot become a double free.
+
+**I32 is the one code with no JVM twin.** The Kotlin has never staged an
+integer buffer, so `PJRT_Buffer_Type_S32 = 4` was read off the same enum the
+others come from — and is *certified*, not assumed: the i32 lane round-trips
+a buffer through a real executable and compares exact integers, which a wrong
+type code cannot survive. (Mutating it to 5 fails both lanes; that check was
+run and reverted.)
+
+**Certification, in two independent halves.** `PjrtCtypesBindingTest`:
+
+1. **The ABI mirror, GPU-less.** The driver's `--layouts` mode reports every
+   struct size, the padding-sensitive field offsets, the whole `PJRT_Api`
+   offset table, the buffer-type codes, the compile-options bytes, and the
+   marshalled create_options array — and the JVM asserts each against
+   `PjrtFfm`'s own values and against the bytes
+   `PjrtFfm.marshalCreateOptions` writes. This half needs no accelerator,
+   which matters because a struct laid out wrong does not fail at the call
+   site; it segfaults three calls later. The one interesting difference is
+   in our favour: the Kotlin pads `PJRT_ExecuteOptions` after `launch_id` by
+   hand because FFM lays fields exactly where you put them, while ctypes
+   pads by C's own alignment rule — and the test proves the two land on the
+   same 120 bytes.
+2. **Real XLA, with jax blocked.** Four graphs (`x+y` f32, a 2×3·3×2 matmul,
+   an i32 add, a bf16 identity) compiled and executed through the ctypes path
+   on the GB10's CUDA plugin, against `DxirInterpreter`. Floors: **1e-5**
+   elementwise, **1e-3** matmul (XLA-GPU's TF32 dot policy — named, not
+   tuned), **exact** on i32, **bit-for-bit** on the bf16 patterns, plus the
+   staged buffer's on-device size proving 2-byte bf16 storage. Values cross
+   the process boundary in both directions as **raw bit patterns**, so no
+   claim here passes through a decimal printer.
+
+**The pin.** Before importing anything, the driver installs a
+`sys.meta_path` finder that **raises** on `jax`, `jaxlib`, `torch` or
+`numpy`, and the entire path runs underneath it. The interpreter is the
+oracle venv, where jax 0.10.0 *is* installed (§0.4.474 pins exactly that), so
+"no jax was imported" is a claim about restraint rather than absence — the
+framework was reachable and the serving surface did not need it. Proving the
+same thing in an empty venv would have proven less and cost a venv. And
+because an unfired guard certifies nothing, the run ends by deliberately
+importing jax and reporting that it was stopped; both halves are asserted.
+
+**Named deferrals.** `tlaloc_serve.py` is **unchanged** and still reaches
+PJRT through jaxlib — re-pointing the H3a loader at this binding is **H6b**,
+and until it lands the dependency-free claim is about the binding, not about
+the loader. Also unbound, by name: `Compile`'s donation options (the manifest
+has carried `donationPairs` since H3a), the async `PJRT_Buffer_ReadyEvent`
+path, f16 / i8 / fp8 staging, multi-device execute, and the §0.4.461
+multi-node create-options — those exist JVM-side so a multi-node client can
+be *refused*, and a knob that can only be set to its own refusal is worse
+than no knob.
+
 ### ARC STATE (§0.4.473, the close-out) — read this first
 
 **THE PATH IS BUILT END TO END AND IT EXECUTES. WHAT IT DOES NOT YET RUN IS
@@ -1239,6 +1325,7 @@ Nine sections, one day (2026-09-21), suite **2119 → 2290**:
 | 0.4.472 | H5 | `KvQuantPool` + `OpKind.DEQUANTIZE_KV` + `kvQuant` in the manifest; SGLang priced | 2259 → 2290 |
 | 0.4.473 | close-out | this sweep + [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md) — docs only | 2290 |
 | 0.4.474 | H6 rail | `OracleVenvIntegrityTest` + [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md) — the oracle venv is frozen, and now says so out loud | 2290 → 2292 |
+| 0.4.475 | H6a | `harness/python/tlaloc_pjrt.py` — the PJRT C API bound from Python with **ctypes alone**, mirroring the FFM runtime; jax blocked by an import guard while it runs | 2292 → 2294 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -1271,6 +1358,9 @@ red line with the separate-venv recipe attached.
 | the KV-quant bound holds and is tight | every element under `scale/2`, some element over 0.9 of it; a hand-derived power-of-two-scale vector checked on paper | **derived**, not tuned |
 | every new op refuses in both AD transforms and the renderer | `PagedAttentionTest` / `KvCacheWriteTest` / `DequantizeKvTest`, three refusal cases each | by name |
 | the oracle venv every row above is measured against is intact | `OracleVenvIntegrityTest` — `check_oracle_venv.py` in that interpreter, pins asserted on the JVM side; and the policy itself certified against the §0.4.470 mutated inventory | exact versions; `torch.version.cuda is None` |
+| the ctypes binding lays the PJRT structs down exactly as the certified FFM binding does | `PjrtCtypesBindingTest.layoutsMirrorTheFfmBinding` vs `PjrtFfm`'s own layouts, offset table, compile-options bytes and marshalled create_options — **no device needed** | exact |
+| a Python process with **no framework at all** compiles and executes through PJRT | `PjrtCtypesBindingTest` vs `DxirInterpreter`, four graphs on real XLA-CUDA | **1e-5** elementwise · **1e-3** matmul (TF32) · **exact** i32 · **bit-for-bit** bf16 |
+| …and it imported no jax, jaxlib, torch or numpy while doing it | a `sys.meta_path` guard that raises, in the venv where jax *is* installed — and is itself made to fire before the run reports | by name |
 
 Three sensitivity checks were run before the oracles were trusted, each
 mutated then reverted: the bf16 decode byte-swapped (H2), `PADDING_SEQ_LEN`
@@ -1354,20 +1444,27 @@ Three new `OpKind`s entered the IR in Phase H and no others:
    open item, and the one that turns "the path executes" into "the path
    serves". It is a NAME-MAPPING problem plus making weights graph
    parameters instead of body constants.
-2. **Buffer donation.** `donationPairs` has ridden the manifest since H3a
+2. **H6b — re-point `tlaloc_serve.py` at the ctypes binding.** §0.4.475 built
+   and certified `tlaloc_pjrt.py`; the H3a loader still compiles and executes
+   through jaxlib. Until this lands, "the serving runtime needs no framework"
+   is true of the binding and not yet of the loader. The shape is known: the
+   loader's `_ensure_backend` / `compiled` / device-put path is the only part
+   that touches jax, and the artifact's bodies are already StableHLO text,
+   which is what `PjrtClient.compile` takes.
+3. **Buffer donation.** `donationPairs` has ridden the manifest since H3a
    and is still unwired into `CompileOptions`. Named the "next measurable
    win" twice; it still is.
-3. **The ragged / chunked-prefill `PAGED_ATTENTION` form.** H1a's deferral
+4. **The ragged / chunked-prefill `PAGED_ATTENTION` form.** H1a's deferral
    since the first slice, refused by name in three places, and the one
    IR-level item both vLLM's chunked prefill and SGLang's radix path need.
-4. **The H4 performance tier** — warp specialization, shared-memory staging
+5. **The H4 performance tier** — warp specialization, shared-memory staging
    of the page window. The floor to beat is the measured **465 µs** against
    the lowering's 310 µs. Until it lands, nothing should register this
    kernel in a deployment, which is why the default inference registry is
    empty.
-5. **Narrow DTypes (`I8`, and the fp8 tour)** — a bf16-sized piece of work,
+6. **Narrow DTypes (`I8`, and the fp8 tour)** — a bf16-sized piece of work,
    and the difference between KV-quant's contract and its bytes.
-6. **`precision_config = HIGHEST`** for dots that want it, and the top-1
+7. **`precision_config = HIGHEST`** for dots that want it, and the top-1
    consequence of the TF32 gap on a real vocabulary — which only becomes
    measurable once (1) lands.
 
