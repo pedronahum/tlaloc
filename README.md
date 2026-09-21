@@ -23,7 +23,8 @@ Tlaloc targets the gap Python frameworks leave open:
 
 ## What it is
 
-- **Compile-time AD.** `grad { x: Float -> ... }` is realized by a K2 plugin — not a runtime tape. The plugin lowers the lambda body to a typed SSA IR (DXIR), runs a coarsening pass, applies the reverse-mode transform, and synthesises a forward Kotlin function that computes the gradient directly.
+- **Compile-time AD, one engine.** `grad { x: Float -> ... }` is realized by a K2 plugin — not a runtime tape. The plugin lowers the lambda body to a typed SSA IR (DXIR), runs a coarsening pass, applies the reverse-mode transform, and synthesises a forward Kotlin function that computes the gradient directly. There is no second AD engine: every gradient in Tlaloc — the `grad {}` intrinsics, the Tracer-capture API, the `:nn` training step — comes from the same `DxirReverseTransform` (§0.4.446).
+- **Readable reverse code** (the Tangent inheritance, extended). The derived gradient prints as complete, compilable Kotlin over the `:core` ops — ask the compiler with `-P plugin:io.tlaloc.plugin:dumpGradSource=true` and it shows you the gradient it derived at the lambda's source location, or call `CapturedStep.gradSource()` on a captured model. The printed source compiles standalone, runs, and is certified raw-bit-identical to the compiled gradient. Side-by-side demo: [docs/READABLE_REVERSE.md](docs/READABLE_REVERSE.md).
 - **φ-calculus coarsening** from Shen, Shivers, Dea et al. [Efficient, Sound Gradient Descent in Dynamic and Dependent Control Flow, OOPSLA 2021](docs/papers/coarsening-autodiff.txt). The pass implements F1–F5 + C1–C9 with a [Symja](https://github.com/axkr/symja_android_library)-backed symbolic engine for closed-form closure of affine / indexed-affine / variable-coefficient / power-form recurrences.
 - **Shape-typed tensors.** `DTensor<Rank1<Sym>, F32>` carries shape and dtype in the Kotlin type system. Rank mismatches and shape-wrong broadcasts are compile errors, surfaced in the IDE.
 - **Named indices** (Layer 1). `Named<N, A>` lets a tensor's axes carry symbolic names enforced at the type level: `contract(M_x_K, K_x_N)` only compiles when the shared axis name lines up.
@@ -72,7 +73,7 @@ fun main() {
 }
 ```
 
-No tape. No `torch.tensor(..., requires_grad=True)`. No gradient type wrapping the primal type. The lambda reads as straight Kotlin — the compiler plugin does the work.
+No tape. No `torch.tensor(..., requires_grad=True)`. No gradient type wrapping the primal type. The lambda reads as straight Kotlin — the compiler plugin does the work. And the work is inspectable: compile with `dumpGradSource=true` and the plugin prints the derived gradient as Kotlin source you can read, compile, and run ([docs/READABLE_REVERSE.md](docs/READABLE_REVERSE.md)).
 
 ## Example — Layer 3 pipeline (recognize → coarsen → kernel → matrix)
 

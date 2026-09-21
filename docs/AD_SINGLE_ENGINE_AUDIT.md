@@ -1,13 +1,44 @@
 # The single-AD-engine audit (2026-09-21)
 
-**Status: findings RATIFIED by direction (Pedro, 2026-09-21: "why do we
-have a tape when we invested so much effort with the compiler … I don't
-want this to be a loose end"), fixes executing as the cleanup arc.** The
-governing product statement is on file in the same conversation: *Tlaloc
-is an improved Tangent and an improved DiffKT — the reverse code must be
-readable by the user, and compiled.*
+**Status: EXECUTED (§0.4.446–451, one day, 2026-09-21).** Findings were
+ratified by direction (Pedro, 2026-09-21: "why do we have a tape when we
+invested so much effort with the compiler … I don't want this to be a
+loose end"); the governing product statement is on file in the same
+conversation: *Tlaloc is an improved Tangent and an improved DiffKT —
+the reverse code must be readable by the user, and compiled.* All five
+findings are closed (A §0.4.446, B §0.4.447, C §0.4.448, D no-action by
+design, E §0.4.446) and both readable-reverse surfaces shipped
+(§0.4.449–450); the demo document is `docs/READABLE_REVERSE.md`
+(§0.4.451). Surviving deferrals, by name: the sentinel-tolerant tensor
+rendering (the printer's Sym-extent value vocabulary — tensor `grad {}`
+dumps refuse loudly until it lands); the renderer's named op deferrals
+(§0.4.449 list — ABS/RSQRT/GELU/SILU/SIN/COS twin gap, rank≥3 MATMUL,
+GATHER/SCATTER, control flow, F64, rank>4); the `bmm` host-twin gap
+(§0.4.447); jvp/vjp/jacobian/hessian families dump no source yet
+(§0.4.450); SPLIT deletion recommended, awaiting Pedro's call
+(§0.4.448); the `DScalarMixingGradientTest` legacy test name (§0.4.446).
 
 ## Running record
+
+- **§0.4.451 — ARC CLOSED (the ledger).** `docs/READABLE_REVERSE.md`
+  written: the Tangent-style side-by-side demo with GENERATED (never
+  hand-written) gradient source — the §0.4.450 compiler dump of
+  `grad { x -> x*x*x + 2.5f*x }` (`Main_kt_3_13_grad.kt`, verbatim, the
+  product rule visible term by term) and the §0.4.449 print of a real
+  two-layer MLP MSE loss captured on the F1 surface (`model_grad`, 30
+  ops, the textbook `δ·Wᵀ` / `hᵀ·δ` matmul adjoints and the relu
+  `step` mask readable by eye), each with its certification named. The
+  one-engine claim re-verified at HEAD by grep: `Backward.kt` absent,
+  no `backward()`/`Gradients` symbol in `:autograd`, and every
+  surviving "tape fallback" phrase in docs is either the §0.4.446
+  correction itself, this audit's finding text, or an immutable
+  DIFFKTX_SPEC historical session record. README's AD claims swept:
+  the "Compile-time AD" bullet now carries the one-engine sentence and
+  a "Readable reverse code" bullet points at the demo doc. Status
+  header above flipped to EXECUTED with the surviving deferrals named.
+  Docs-only; suite count unchanged by construction and re-certified
+  with the corrected §0.4.450 recipe (`jvmTest --rerun test --rerun` +
+  both maestro lanes + count-tests.sh) as the arc's canonical number.
 
 - **§0.4.450 — READABLE-REVERSE SURFACE 2 SHIPPED (the north star's
   compile-time half).** The K2 plugin grew its FIRST CLI options
