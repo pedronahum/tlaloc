@@ -147,9 +147,20 @@ internal object KotlinSourceRenderer {
             // Bool rides the host mask convention: comparisons and WHERE
             // predicates are 0f/1f F32 tensors on the host surface.
             Bool -> "F32"
+            // §0.4.456 (G1b) — bf16 keeps the NAMED refusal (the north-star
+            // rule): the host has no bf16 kernels (compute-in-f32-store-bf16,
+            // §0.4.455), so a bf16-typed reverse graph has no honest host-twin
+            // spelling. The readable-reverse story for bf16 programs is the
+            // f32 graph BETWEEN the precision casts; render that instead.
             else -> throw KotlinRenderRefusal(
                 "toKotlinSource: $where has dtype ${t.dtype.name} — only F32/I32 (and Bool " +
-                    "as the F32 mask convention) have host-twin renderings",
+                    "as the F32 mask convention) have host-twin renderings" +
+                    if (t.dtype.name == "bf16") {
+                        " (bf16 is storage/interchange — host math is compute-in-f32, " +
+                            "so render the f32 graph between the casts, §0.4.456)"
+                    } else {
+                        ""
+                    },
             )
         }
         val shape = when (t.rank) {

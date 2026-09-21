@@ -38,9 +38,11 @@ internal fun mlirElementType(dtype: DType): String = when (dtype) {
     is I32 -> "i32"
     is I64 -> "i64"
     is Bool -> "i1"
-    // §0.4.455 named refusal: the "bf16" spelling is trivial, but emitting it
-    // untested would CLAIM an emission path this slice does not certify. G1b.
-    is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
+    // §0.4.456 (G1b) — the §0.4.455 refusal lifts: `bf16` is MLIR's builtin
+    // bfloat16 element type, ingested natively by XLA. Tensor types, casts
+    // (stablehlo.convert), and elementwise/matmul/reduce ops all spell it
+    // through here; GPU EXECUTION of bf16 modules is G1c and not claimed.
+    is BF16 -> "bf16"
 }
 
 /**
@@ -91,7 +93,10 @@ internal fun negInfLiteral(dtype: DType): String = when (dtype) {
     is I32 -> Int.MIN_VALUE.toString()
     is I64 -> Long.MIN_VALUE.toString()
     is Bool -> "false"
-    is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
+    // §0.4.456 (G1b) — bf16 -Inf bit pattern (sign 1, exponent 0xFF,
+    // mantissa 0): the top 16 bits of f32's 0xFF800000. MLIR hex float
+    // literals are sized to the element type's bit width.
+    is BF16 -> "0xFF80"
 }
 
 /**
@@ -104,5 +109,6 @@ internal fun posInfLiteral(dtype: DType): String = when (dtype) {
     is I32 -> Int.MAX_VALUE.toString()
     is I64 -> Long.MAX_VALUE.toString()
     is Bool -> "true"
-    is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
+    // §0.4.456 (G1b) — bf16 +Inf: the top 16 bits of f32's 0x7F800000.
+    is BF16 -> "0x7F80"
 }

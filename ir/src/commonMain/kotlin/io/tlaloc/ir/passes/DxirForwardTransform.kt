@@ -683,6 +683,10 @@ object DxirForwardTransform {
             OpKind.SCATTER_ADD ->
                 b.op(node.op, listOf(t(node.operands[0]), vOps[1], t(node.operands[2])), ty)
 
+            // CAST is linear (piecewise-identity for precision casts): the
+            // tangent of a cast is the cast of the tangent. §0.4.456 — this
+            // arm covers f32↔bf16 unchanged (the tangent narrows/widens with
+            // the primal, the JVP mirror of CastRule's straight-through VJP).
             OpKind.CAST -> b.op(OpKind.CAST, listOf(t(node.operands[0])), ty)
 
             // §0.4.415 — Phase B5: CHECK_SHAPE_LIKE is a value-identity with a

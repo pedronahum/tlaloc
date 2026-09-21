@@ -1426,13 +1426,26 @@ object VjpRegistry {
      * identity map on values, so its adjoint is the reverse cast of upstream
      * back to the operand's dtype. Emitted only when BOTH sides are float —
      * float→int truncation stays contribution-free (piecewise-constant).
+     *
+     * §0.4.456 (G1b) — BF16 joins the float set, STRAIGHT-THROUGH: the adjoint
+     * of the narrowing cast f32→bf16 is the WIDENING cast of the upstream
+     * (bf16→f32, exact), and the adjoint of the widening cast is the narrowing
+     * cast of the upstream. RNE rounding is piecewise-identity (derivative 1
+     * a.e.), so the straight-through estimator is the analytical adjoint
+     * everywhere off the measure-zero rounding boundaries — the same
+     * convention PyTorch autocast and JAX use for precision casts. Without
+     * this arm the rule returned an EMPTY contribution for bf16 casts — a
+     * silent zero gradient, exactly the failure mode the north-star rule
+     * exists to forbid.
      */
     val CastRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            fun isFloat(d: io.tlaloc.core.DType) =
+                d == io.tlaloc.core.F32 || d == io.tlaloc.core.F64 || d == io.tlaloc.core.BF16
             val x = op.operands[0]
-            val srcF = x.type.dtype == io.tlaloc.core.F32 || x.type.dtype == io.tlaloc.core.F64
-            val dstF = op.type.dtype == io.tlaloc.core.F32 || op.type.dtype == io.tlaloc.core.F64
+            val srcF = isFloat(x.type.dtype)
+            val dstF = isFloat(op.type.dtype)
             if (!srcF || !dstF) return emptyList()
             val back = builder.op(OpKind.CAST, listOf(upstream), x.type)
             return listOf(x to back)

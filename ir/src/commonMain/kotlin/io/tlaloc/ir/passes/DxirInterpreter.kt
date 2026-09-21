@@ -10,7 +10,9 @@ import io.tlaloc.ir.DxirOpResult
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.DxirType
 import io.tlaloc.core.RandomKey
+import io.tlaloc.core.bf16BitsToFloat
 import io.tlaloc.core.digamma
+import io.tlaloc.core.floatToBf16Bits
 import io.tlaloc.core.lgamma
 import io.tlaloc.core.normalFloats
 import io.tlaloc.core.polygamma
@@ -79,6 +81,32 @@ object DxirInterpreter {
 
     private fun sizeOf(type: DxirType): Int =
         if (type.dims.isEmpty()) 1 else type.dims.fold(1) { acc, d -> acc * d }
+
+    /**
+     * §0.4.456 (G1b) — THE BF16 VALUE CONVENTION, stated loudly:
+     *
+     * Interpreter value arrays stay `FloatArray` for EVERY dtype, bf16
+     * included. A bf16-typed node's values are the F32-WIDENED FORMS OF
+     * BF16-ROUNDED NUMBERS — every element of such an array is exactly
+     * representable in bf16 (widening bf16→f32 is exact, so the set of
+     * bf16 values IS a subset of f32 values). The invariant is enforced
+     * centrally in [evalNode]: after any node whose result type is BF16
+     * evaluates, its result array is snapped through the §0.4.455 RNE
+     * helpers (`floatToBf16Bits` then `bf16BitsToFloat`). RNE is
+     * idempotent on already-representable values, so double-snapping a
+     * CAST result is a no-op.
+     *
+     * Consequence for op semantics: an op with bf16 operands computes its
+     * arithmetic in f32 on the widened forms and rounds ONCE at its own
+     * output — for MATMUL/SUM this is "f32 accumulation, bf16 result",
+     * XLA's own bf16 dot/reduce convention. Per-intermediate bf16
+     * rounding INSIDE an op body (what a chain of separate bf16 hardware
+     * instructions would do) is deliberately NOT simulated; device-level
+     * agreement at bf16 granularity is a G1c certification question, not
+     * an interpreter contract.
+     */
+    private fun snapToBf16(a: FloatArray): FloatArray =
+        FloatArray(a.size) { bf16BitsToFloat(floatToBf16Bits(a[it])) }
 
     /**
      * §0.4.432 — resolve a runtime RNG key word from operand [idx] of [op].
@@ -294,8 +322,15 @@ object DxirInterpreter {
                     "binding must happen via the enclosing IF / WHILE arm of evalOp",
             )
         }
-        env[node.id] = result
-        return result
+        // §0.4.456 (G1b) — central bf16 snap: see [snapToBf16]'s KDoc for the
+        // convention. Every bf16-typed node's memoized array holds only
+        // bf16-representable (widened) values. Multi-result index-0 slots pass
+        // through here too; index>0 slots come out of region bodies whose own
+        // nodes were each snapped on THEIR eval, so the invariant holds there
+        // by composition.
+        val snapped = if (node.type.dtype == io.tlaloc.core.BF16) snapToBf16(result) else result
+        env[node.id] = snapped
+        return snapped
     }
 
     /** Pack `(sourceId, resultIndex)` into a single Long key for [multiResults] lookup. */
@@ -1017,10 +1052,23 @@ object DxirInterpreter {
                 val dstDtype = op.type.dtype
                 when {
                     // Narrowing-to-integer paths truncate toward zero (Kotlin's
-                    // `toInt()` / `toLong()` semantics on Float/Double).
-                    (srcDtype == io.tlaloc.core.F32 || srcDtype == io.tlaloc.core.F64) &&
+                    // `toInt()` / `toLong()` semantics on Float/Double). §0.4.456 —
+                    // bf16 joins the float sources: its widened-form values
+                    // truncate identically.
+                    (srcDtype == io.tlaloc.core.F32 || srcDtype == io.tlaloc.core.F64 ||
+                        srcDtype == io.tlaloc.core.BF16) &&
                         (dstDtype == io.tlaloc.core.I32 || dstDtype == io.tlaloc.core.I64) ->
                         FloatArray(a.size) { a[it].toInt().toFloat() }
+                    // §0.4.456 (G1b) — f32→bf16 narrows through the §0.4.455 RNE
+                    // helpers and stores the WIDENED forms of the rounded numbers
+                    // (the FloatArray convention, see [snapToBf16]). Written
+                    // explicitly here — the central evalNode snap would produce
+                    // the identical array (RNE is idempotent), but CAST is the op
+                    // that OWNS the rounding and should say so.
+                    dstDtype == io.tlaloc.core.BF16 ->
+                        FloatArray(a.size) { bf16BitsToFloat(floatToBf16Bits(a[it])) }
+                    // §0.4.456 — bf16→f32 widening is EXACT: the source array
+                    // already holds the widened forms, so the copy IS the cast.
                     // All other scalar-to-scalar conversions are no-ops at the
                     // FloatArray storage level — the integer value 0, 1, 2, ...
                     // stored as 0f, 1f, 2f already reads correctly as Float/Double.
@@ -2601,7 +2649,13 @@ object DxirInterpreter {
         }
         val env: MutableMap<Int, FloatArray> = HashMap()
         val multiResults: MutableMap<Long, FloatArray> = HashMap()
-        for ((i, p) in fn.params.withIndex()) env[p.id] = inputs[i]
+        // §0.4.456 — a bf16-typed param snaps its caller-supplied f32 array to
+        // widened-bf16 forms on binding, so the [snapToBf16] invariant holds at
+        // the leaves too (a caller passing non-representable floats gets the
+        // RNE-rounded values, exactly what device transfer to bf16 would do).
+        for ((i, p) in fn.params.withIndex()) {
+            env[p.id] = if (p.type.dtype == io.tlaloc.core.BF16) snapToBf16(inputs[i]) else inputs[i]
+        }
         for (node in fn.body) evalNode(node, env, multiResults)
         return fn.returns.map { evalNode(it, env, multiResults) }
     }

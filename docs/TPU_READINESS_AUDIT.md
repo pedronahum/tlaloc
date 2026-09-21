@@ -110,6 +110,45 @@ recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
 
+- **§0.4.456 — G1b DONE: bf16 through the IR.** The §0.4.455 emitter
+  refusals lift; bf16 is now a first-class IR dtype end-to-end SHORT OF
+  DEVICE EXECUTION (G1c owns that claim). INTERPRETER: value arrays stay
+  FloatArray — THE CONVENTION, stated loudly at `snapToBf16`: a
+  bf16-typed node's values are the f32-WIDENED FORMS OF BF16-ROUNDED
+  numbers, enforced by a central RNE snap in `evalNode` (idempotent, so
+  the explicit CAST arm double-snapping is a no-op); ops with bf16
+  results compute in f32 and round ONCE at their own output — XLA's
+  "f32 accumulate, bf16 result" dot/reduce convention; per-intermediate
+  device-granularity rounding is NOT simulated (a G1c certification
+  question). CAST arms: f32→bf16 narrows via the §0.4.455 RNE helpers,
+  bf16→f32 is the exact-copy widening, bf16→int truncates like the
+  other floats; bf16 params snap on binding. AD: CastRule's §0.4.427
+  float set gains BF16 — STRAIGHT-THROUGH (the adjoint of the narrowing
+  cast is the widening cast of the upstream and vice versa; RNE is
+  piecewise-identity, PyTorch-autocast/JAX convention) — without it the
+  rule returned an EMPTY contribution: a silent zero gradient, the
+  exact north-star failure mode; the forward CAST arm covers bf16
+  unchanged (tangent casts with the primal). EMITTER: `bf16` element
+  type in MlirCommon, casts emit `stablehlo.convert`, elementwise/
+  matmul/reduce ride the type spelling; the enumerated f32-assumption
+  arms: STEP + ARGMAX fold bf16 into their FLOAT branches, MAX/MIN init
+  literals get width-matched 16-bit hex patterns (0xFF80/0x7F80), RNG
+  draws now REFUSE bf16 BY NAME (the threefry mantissa trick is a
+  binary32 bit-stream contract — draw at f32 and CAST). DxirCanonical
+  parses "bf16" types (reverse-CSE keys carry result types); bf16
+  CONSTANTS stay refused — spell them CAST(f32 const) (named deferral,
+  no producer exists). KotlinSourceRenderer keeps the NAMED refusal,
+  now pointing at the story: bf16 host math is compute-in-f32, so the
+  readable reverse of a bf16 program is the f32 graph between the
+  casts; the grad{} plugin frontend's bf16 nulls are RATIFIED as the
+  convention, not a gap. Oracles: interpreter casts bit-pinned vs the
+  G1a helpers; a cast-in/add/matmul/cast-out program with hand-derived
+  bf16-exact expected values (plus a dedicated output-rounding pin:
+  bf16 add 256 + 1.0078125 → 258); reverse-through-casts gradient
+  pinned at hand values; six structural MLIR pins (types, convert both
+  directions, bf16 add/dot_general/reduce/STEP, the 0xFF80 init, the
+  RNG refusal). Suite 2056 → 2067.
+
 - **§0.4.455 — G1a DONE: the bf16 foundation in :core.** The design on
   file (the gap open since §0.4.354). REPRESENTATION: `BF16` is a
   first-class sealed `DType` (2 bytes, name "bf16");

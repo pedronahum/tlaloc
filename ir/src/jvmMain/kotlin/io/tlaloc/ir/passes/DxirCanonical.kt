@@ -434,6 +434,10 @@ object DxirCanonical {
         val dtype: DType = when (dtypeName) {
             "f32" -> F32
             "f64" -> F64
+            // §0.4.456 (G1b) — bf16-TYPED ops round-trip through canonical text
+            // (the reverse-transform CSE keys include result types, so the
+            // spelling must parse back); bf16 CONSTANTS stay refused below.
+            "bf16" -> BF16
             "i32" -> I32
             "i64" -> I64
             "bool" -> Bool
@@ -450,9 +454,14 @@ object DxirCanonical {
         I32 -> (value as Int).toUInt().toString(16).padStart(8, '0')
         I64 -> (value as Long).toULong().toString(16).padStart(16, '0')
         Bool -> if (value as Boolean) "1" else "0"
-        // §0.4.455: bf16 is a host storage/interchange dtype only until G1b
-        // gives the IR a bf16 story; no dxir constant carries it yet.
-        BF16 -> error("DxirCanonical: bf16 constants are not part of the dxir surface yet (G1b)")
+        // §0.4.456 (G1b): bf16-typed OPS are first-class, but no dxir constant
+        // carries bf16 — the sanctioned constant spelling is CAST(f32 const).
+        // A bf16 const would need a bit-pattern literal convention here plus
+        // interpreter/emitter const arms; named deferral until a producer exists.
+        BF16 -> error(
+            "DxirCanonical: bf16 constants are not part of the dxir surface — " +
+                "spell them CAST(f32 const) (§0.4.456 named deferral)",
+        )
     }
 
     private fun parseValue(s: String, type: DxirType): Any = when (type.dtype) {
@@ -461,7 +470,10 @@ object DxirCanonical {
         I32 -> s.toUInt(16).toInt()
         I64 -> s.toULong(16).toLong()
         Bool -> s == "1"
-        BF16 -> error("DxirCanonical: bf16 constants are not part of the dxir surface yet (G1b)")
+        BF16 -> error(
+            "DxirCanonical: bf16 constants are not part of the dxir surface — " +
+                "spell them CAST(f32 const) (§0.4.456 named deferral)",
+        )
     }
 
     private fun parseKv(token: String, key: String): String {

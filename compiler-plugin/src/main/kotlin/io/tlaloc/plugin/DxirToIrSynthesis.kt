@@ -1520,9 +1520,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             I32 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Int, v as Int)
             I64 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Long, v as Long)
             Bool -> null
-            // §0.4.455: no Kotlin primitive exists at bf16 width; readable-reverse
-            // synthesis of bf16 consts is G1b territory. Null = "not synthesizable
-            // here", the same convention Bool uses, surfaced by the caller.
+            // §0.4.455/§0.4.456: no Kotlin primitive exists at bf16 width, and
+            // G1b RATIFIED the convention: the grad{} synthesis frontend does
+            // not spell bf16 — bf16 programs enter via the IR/capture surface
+            // and their readable-reverse story is the f32 graph between the
+            // precision casts. Null = "not synthesizable here", the same
+            // convention Bool uses, surfaced by the caller.
             BF16 -> null
         }
     }
@@ -4281,7 +4284,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             I32 -> "toInt"
             I64 -> "toLong"
             Bool -> return null
-            BF16 -> return null // §0.4.455: no Kotlin bf16 primitive to cast to (G1b).
+            BF16 -> return null // §0.4.455/§0.4.456: no Kotlin bf16 primitive to cast to (frontend refusal is the ratified convention).
         }
         return srcCls.owner.declarations
             .asSequence()
@@ -4695,8 +4698,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 // future rule needs them, [irConstFor] / [zeroOrOneConst] must grow too.
                 Bool -> pluginContext.irBuiltIns.booleanType
                 // §0.4.455: bf16 scalars have no JVM primitive to lower to; the
-                // synthesis path refuses (null) rather than silently widening. G1b
-                // decides whether reverse source spells bf16 locals as Float.
+                // synthesis path refuses (null) rather than silently widening.
+                // §0.4.456 decided: reverse source does NOT spell bf16 locals as
+                // Float — the readable story is the f32 graph between the casts.
                 BF16 -> return null
             }
         }
@@ -4988,7 +4992,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         I32 -> pluginContext.irBuiltIns.intClass
         I64 -> pluginContext.irBuiltIns.longClass
         Bool -> null
-        BF16 -> null // §0.4.455: no bf16 primitive class on the JVM (G1b).
+        BF16 -> null // §0.4.455: no bf16 primitive class on the JVM (frontend refusal ratified in §0.4.456).
     }
 
     private fun findBinaryOp(opName: String, dxirType: DxirType, context: SynthesisContext): IrSimpleFunctionSymbol? {

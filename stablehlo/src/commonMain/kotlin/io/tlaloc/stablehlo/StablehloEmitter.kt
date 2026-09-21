@@ -639,6 +639,14 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     private fun emitRngDraw(step: String, name: String, node: DxirOp) {
+        // §0.4.456 (G1b) named refusal — the threefry bit-stream contract is
+        // binary32 (top-23-bit mantissa trick, bit-exact vs the host kernel and
+        // JAX); a bf16-typed draw would silently change the certified stream.
+        // The sanctioned spelling is draw-at-f32 then CAST to bf16.
+        require(node.type.dtype is F32) {
+            "${node.op} emission is f32-only (the threefry mantissa trick is a binary32 " +
+                "contract); got ${node.type.dtype.name} — draw at f32 and CAST to ${node.type.dtype.name}"
+        }
         val (k0, k1) = rngKeyWords(node)
         val dims = node.type.dims
         require(dims.isNotEmpty() && dims.all { it > 0 }) {
@@ -893,10 +901,11 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         val boolType = DxirType(Bool, type.dims)
         val boolMlir = boolType.toMlir()
         val (zeroLit, oneLit, cmpSuffix) = when (type.dtype) {
-            is F32, is F64 -> Triple("0.0", "1.0", "FLOAT")
+            // §0.4.456 (G1b) — bf16 is a float dtype: same decimal splat
+            // literals (MLIR rounds them to the element type) and FLOAT compare.
+            is F32, is F64, is BF16 -> Triple("0.0", "1.0", "FLOAT")
             is I32, is I64 -> Triple("0", "1", "SIGNED")
             is Bool -> error("STEP on bool input is not meaningful")
-            is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
         }
         val zero = synth(); val one = synth(); val gt = synth()
         out.appendLine("$step$zero = stablehlo.constant dense<$zeroLit> : $tMlir")
@@ -2571,10 +2580,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         val scalarValT = "tensor<${mlirElementType(inputType.dtype)}>"
         val scalarIdxT = "tensor<${mlirElementType(outputType.dtype)}>"
         val cmpSuffix = when (inputType.dtype) {
-            is F32, is F64 -> "FLOAT"
+            // §0.4.456 (G1b) — bf16 values compare as floats.
+            is F32, is F64, is BF16 -> "FLOAT"
             is I32, is I64 -> "SIGNED"
             is Bool -> "UNSIGNED"
-            is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
         }
 
         // 1. Iota along reduction axis at the output int dtype.
