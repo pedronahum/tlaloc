@@ -1,12 +1,16 @@
 # Serving runbook — export an artifact, run it, plug it into vLLM
 
-**Status (§0.4.476, H6b).** This is the reproduction script for the whole
+**Status (§0.4.477, H7).** This is the reproduction script for the whole
 serving path: it takes a fresh machine to a Tlaloc serving artifact, runs
 that artifact from Python with **no JVM, no JAX, no torch and no numpy in
 the process — a PJRT plugin `.so` and a driver are the entire runtime** —
-and hands it to vLLM through the `vllm-tlaloc` platform plugin. Every step is marked **CERTIFIED** (a test in `./gradlew test`
-proves it) or **UNCERTIFIED** (written, never executed here, with the
-reason and the command that would settle it).
+and hands it to vLLM through the `vllm-tlaloc` platform plugin — which, as
+of §0.4.477, is **run against a real vLLM 0.29.0 in a venv of its own**
+rather than merely written. Every step is marked **CERTIFIED** (a test in
+`./gradlew test` proves it) or **UNCERTIFIED** (written, never executed
+here, with the reason and the command that would settle it). Exactly one
+serving step is still UNCERTIFIED and it is §4's last paragraph: `vllm
+serve` over a REAL model, which waits on H3c and not on the plugin.
 
 The design and the decisions behind all of this live in
 [INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md); its §5 ARC
@@ -192,6 +196,19 @@ inputs. Any edit to `tlaloc_serve.py` or `vllm_tlaloc/**` needs
 
 ## 2. Export a serving artifact (CERTIFIED)
 
+```bash
+JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :maestro:exportServingArtifact \
+  -PoutDir=/tmp/tlaloc-serving-artifact
+```
+
+Six entries and their bodies land in that directory (§0.4.477). The task is
+a `JavaExec` over the **jvmMain** runtime classpath — not jvmTest, because
+if the exporter needed a test fixture the artifact would be a test fixture,
+and the claim that the directory is the deployment would be a claim about
+the test source set.
+
+<details><summary>The hand-rolled classpath this replaced (§0.4.469–476)</summary>
+
 The exporter is `io.tlaloc.maestro.serving.ServingArtifactWriter.export`,
 and the reference model's entry point is
 `io.tlaloc.maestro.serving.ReferenceDecodeGraphKt.main`:
@@ -204,12 +221,10 @@ CP="$CP$(find ~/.gradle/caches/modules-2 -name 'kotlin-stdlib-2*.jar' | head -1)
   /tmp/tlaloc-serving-artifact
 ```
 
-**Named deferral: there is no `./gradlew exportServingArtifact` task.**
-The `main` exists and is the sanctioned entry point; a JavaExec task that
-assembles this classpath is a one-file build change and was left out of
-the docs-only close-out on purpose. Until it lands, the *certified* way
-to produce an artifact is the export test itself, which writes one into a
-temp directory on every run:
+</details>
+
+The export test also writes one into a temp directory on every run, and is
+still the thing that certifies the bytes:
 
 ```bash
 JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :maestro:jvmTest --rerun-tasks \
@@ -397,23 +412,80 @@ the guard fires. The JVM asserts both.
 binding (that is H6b). The framework-free claim is about the binding, not
 yet about the loader.
 
-## 4. Plug it into vLLM (plugin CERTIFIED below vLLM's API, live path UNCERTIFIED)
+## 4. Plug it into vLLM (CERTIFIED through the worker API, §0.4.477)
+
+### The venv recipe that worked — copy this one
+
+Verified on this box on 2026-09-21. **~25 minutes**, ~7.7 GB, 197
+distributions, and **not one byte written to `~/.local/venvs/iree`.**
 
 ```bash
-pip install -e harness/python      # registers the vllm.platform_plugins entry point
+python3 -m venv ~/.local/venvs/vllm                  # FRESH. Its own venv. Always.
+~/.local/venvs/vllm/bin/python -m pip install --upgrade pip
+~/.local/venvs/vllm/bin/python -m pip install --only-binary=:all: vllm
+~/.local/venvs/vllm/bin/python -m pip install -e /home/pedro/programming/tlaloc/harness/python
+
 export TLALOC_SERVING_ARTIFACT=/tmp/tlaloc-serving-artifact
-python -c "from vllm.platforms import current_platform; print(current_platform)"
-vllm serve <tokenizer/config> --max-num-seqs 4 --max-model-len 4 --block-size 2
+export TLALOC_PJRT_PLUGIN_PATH=$HOME/.local/venvs/iree/lib/python3.12/\
+site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so
+~/.local/venvs/vllm/bin/python -c \
+  "from vllm.platforms import current_platform; print(current_platform)"
 ```
 
-The first command is the **discovery** check (vLLM's platform resolution
-must land on `TlalocPlatform`); the second is a single-request
-`generate()`. **`--block-size` must equal the artifact's compiled
-`blockSize` and `--max-model-len` must lie on the ladder** —
-`check_and_update_config` refuses rather than adjusts, because a different
-block size is a different KV layout, not a preference.
+Three things in that recipe are load-bearing:
 
-### vLLM is NOT installed here, and that is a decision
+* **`--only-binary=:all:`.** A source build of any one of 197 packages on
+  aarch64 is a stall with no upper bound. Wheels exist for all of them; the
+  flag turns "this will finish or tell you why" into a property of the
+  command instead of a hope. Drop it and the slice's time box is gone.
+* **No `jax`.** The older version of this recipe said `pip install vllm
+  "jax[cuda12]"`, and that second half was the hard part — jax's CUDA-12
+  wheels beside vLLM's CUDA-13 ones. Since H6 the serving path is ctypes,
+  so **do not install jax here.** `pip install -e harness/python` pulls
+  nothing at all.
+* **`TLALOC_PJRT_PLUGIN_PATH` pointing into the oracle venv.** That is a
+  `dlopen` of a file, not an import of that venv's Python, and nothing in
+  that directory is written. It is the *only* interaction this recipe has
+  with the frozen venv. (A deployment ships its own `.so`; this is the
+  convenience path on this machine.)
+
+The `print(current_platform)` must say `TlalocPlatform`, and vLLM logs
+`Platform plugin tlaloc is activated`. **`--block-size` must equal the
+artifact's compiled `blockSize` and `--max-model-len` must lie on the
+ladder** — `check_and_update_config` refuses rather than adjusts, because a
+different block size is a different KV layout, not a preference.
+
+### What §0.4.477 certified, and the one thing it did not
+
+`VllmLivePluginTest` (in `./gradlew test`, self-skipping when
+`~/.local/venvs/vllm` is absent) runs, live against **vLLM 0.29.0**:
+platform discovery; `check_and_update_config` against real
+`vllm.config.CacheConfig`/`ParallelConfig` with all four refusals firing by
+name; and `TlalocWorker` through the whole v1 worker API —
+`load_model`, `determine_available_memory`, `get_kv_cache_spec`,
+`initialize_from_config` (accept *and* refuse), two `execute_model` steps
+returning real `vllm.v1.outputs.ModelRunnerOutput`, and the chunked-prefill
+refusal. It compares those logits against the oracle venv's runner lane on
+the same artifact: **bit-for-bit, `==`.**
+
+**The coexistence question this file used to leave open is ANSWERED: yes.**
+vLLM's CUDA-13 torch and the CUDA-12 XLA PJRT plugin live in one process
+without complaint — `import vllm` loads torch 2.13.0+cu130, and the same
+process then compiles and executes through `xla_cuda_plugin.so` on the
+GB10 and gets the right numbers.
+
+**NOT certified: `vllm serve` / `LLM.generate()` end to end.** Both need a
+HuggingFace `config.json` and tokenizer for a real model; the only artifact
+this repo exports is the reference LCG toy, which has neither. That is
+H3c's job (real weights, real name-mapping), not the plugin's. When an
+artifact for a real model exists:
+
+```bash
+vllm serve <the model those weights came from> \
+    --max-num-seqs 4 --max-model-len 4 --block-size 2
+```
+
+### Why it is a second venv and not this one (§0.4.470, still the rule)
 
 `pip install vllm` **resolves** on this box (aarch64, CPython 3.12,
 vllm 0.29.0). A `--dry-run --report` stated the closure exactly: **186
@@ -453,10 +525,9 @@ export TLALOC_PJRT_PLUGIN_PATH=$HOME/.local/venvs/iree/lib/python3.12/\
 site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so
 ```
 
-**Still open, and H6b does not close it:** whether vLLM's CUDA-13 torch and
-the CUDA-12 XLA plugin coexist in one process. H6b removes jax from the
-question; it does not answer it. That is the live-serving certification's
-first finding, whichever way it goes.
+**ANSWERED by §0.4.477:** vLLM's CUDA-13 torch and the CUDA-12 XLA plugin
+DO coexist in one process. It was the live certification's first finding,
+and it went the good way.
 
 ### What is certified without vLLM present
 
@@ -468,8 +539,16 @@ The plugin is split along exactly one line — whether a file imports vLLM:
 | `paging.py` — KV page pool, block tables, slot arithmetic | no | **yes** |
 | `batching.py` — requests → one padded bucket-selected call | no | **yes** |
 | `runner.py` — `TlalocModelRunner`: artifact + pools + sampling | no | **yes** |
-| `platform.py` — `TlalocPlatform` | **yes** | **no** |
-| `worker.py` — `TlalocWorker` | **yes** | **no** |
+| `platform.py` — `TlalocPlatform` | **yes** | **yes**, in the vLLM venv (§0.4.477) |
+| `worker.py` — `TlalocWorker` | **yes** | **yes**, in the vLLM venv (§0.4.477) |
+
+The split still earns its keep: the four vLLM-free files are certified by a
+stdlib `unittest` run that anyone can execute in eight milliseconds, and
+the two vLLM-facing ones by a lane that costs a 7.7 GB venv. Keeping the
+first four out of the second lane is why the arithmetic was ever exercised
+at all. What §0.4.477 changed is that the bottom two rows are no longer
+**no** — and the bug it found was in the TOP half, reached only by driving
+the bottom half for real.
 
 `VllmPluginContractTest` runs three lanes inside `./gradlew test`:
 registration metadata (entry point ↔ `register()` ↔ `PLATFORM_CLASS_PATH`

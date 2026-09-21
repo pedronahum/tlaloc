@@ -94,6 +94,9 @@ class TlalocModelRunner:
         self.pool = PagePool(num_blocks=m["numBlocks"], block_size=m["blockSize"])
         self.kv_pools = self.artifact.empty_pools()
         self.tokens: dict = {}
+        # §0.4.477 — set by `step`; None until one has run (see `step`).
+        self.last_call = None
+        self.last_logits = None
 
     # --- sequence lifecycle ---------------------------------------------
 
@@ -130,6 +133,16 @@ class TlalocModelRunner:
         call = build_decode_call(self.pool, self.artifact, requests)
         logits, pools = self.artifact.run_decode(kv_pools=self.kv_pools, **call.as_kwargs())
         self.kv_pools = pools
+        # §0.4.477 (H7) — the last step's call and logits, kept so the
+        # WORKER lane can be measured. `TlalocWorker.execute_model` returns
+        # vLLM's `ModelRunnerOutput`, which carries sampled TOKENS and no
+        # logits; without these two attributes the live vLLM lane could only
+        # certify that the adapter agreed on the tokens, and agreeing on a
+        # greedy argmax is a much weaker statement than agreeing on the
+        # vector it was taken from. Two references, overwritten each step —
+        # not a history, which would be a leak in a server.
+        self.last_call = call
+        self.last_logits = logits
         sampled = [greedy_sample(last_token_logits(row)) for row in logits]
         for seq_id, tok in zip(call.seq_ids, sampled):
             self.tokens[seq_id].append(int(tok))

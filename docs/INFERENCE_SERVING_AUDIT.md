@@ -1388,12 +1388,138 @@ unwired — every step round-trips whole pools through the host, a
 performance fact and not a correctness one), staged weights, prefill,
 multi-device execute, and the CPU lane's dependence on the jax oracle.
 
+### H7 — vLLM installed, and the live lane run (§0.4.477)
+
+**The two files that had never executed, executed. One of them was
+wrong.**
+
+#### The venv, and why it could be built at all
+
+`~/.local/venvs/vllm`, created from nothing with `python3 -m venv`, holds
+**vLLM 0.29.0 + torch 2.13.0+cu130 — 197 distributions, ~7.7 GB, and no
+jax**. The oracle venv was not touched: `check_oracle_venv.py` was run in
+`~/.local/venvs/iree` before and after and reports the same pins
+(jax 0.10.0, torch 2.11.0+cpu, `torch.version.cuda is None`), and
+`OracleVenvIntegrityTest` is green in the clean-room run below.
+
+The install resolved and completed on aarch64 under `--only-binary=:all:`,
+which was a deliberate choice and not a flag copied from somewhere: a
+source build of any one of 197 packages on this box is a stall with no
+upper bound, and the slice was time-boxed. Wheels existed for all of them.
+The §0.4.470 dry-run's shape was right (186 packages then, 197 now).
+
+**This venv is possible only because of H6.** Before §0.4.475–476 the
+loader reached PJRT through jaxlib, so a live vLLM lane would have needed
+`jax[cuda12]` installed beside vLLM's 33 CUDA-13 wheels — the exact
+collision the H6 rail exists to prevent, one directory over. Since H6 the
+serving path is ctypes and the standard library, so the vLLM venv gets
+`pip install -e harness/python` (which pulls **nothing**) and
+`$TLALOC_PJRT_PLUGIN_PATH` pointed at the `xla_cuda_plugin.so` that
+happens to sit in the ORACLE venv's site-packages. Loading a `.so` from
+another venv's directory is `dlopen`, not a Python dependency: no code
+from that venv is imported, and its `python` is never executed. That
+sentence is the whole reason H6 came first.
+
+#### What the live lane does — `run_vllm_live_check.py`
+
+Three stages, in the vLLM venv, against a real artifact on real PJRT-CUDA:
+
+1. **Discovery.** `from vllm.platforms import current_platform` resolves to
+   `vllm_tlaloc.platform.TlalocPlatform`. vLLM logs `Platform plugin tlaloc
+   is activated`. The entry point, `register()`'s dotted path, the
+   `PlatformEnum.OOT` contract and `get_device_name`/`supports_v1`/
+   `is_async_output_supported` all hold against the vLLM that is installed
+   rather than the one the docstrings were written from.
+2. **The config hook**, against **real `vllm.config.CacheConfig` and
+   `ParallelConfig`** — `check_and_update_config` sets
+   `worker_cls = vllm_tlaloc.worker.TlalocWorker`, takes `block_size` and
+   `num_gpu_blocks_override` from the artifact, and all four refusals fire
+   by name: `--block-size` disagreeing with the compiled `blockSize`,
+   `--max-model-len` past the context ladder, `--max-num-seqs` past the
+   batch ladder, `world_size != 1`. A refusal that has only ever met a
+   `SimpleNamespace` has never met a pydantic validator; these have.
+3. **The worker lane.** `TlalocWorker` through the v1 worker API:
+   `init_device`, `load_model`, `determine_available_memory` (384 bytes —
+   the compiled pool, computed from the manifest and checked against
+   `numBlocks × blockSize × numKvHeads × headDim × 4 × 2 × numLayers` on
+   the JVM side), `get_kv_cache_spec`, `initialize_from_config` (accepted
+   when it agrees, refused **by name** when vLLM sizes the pool
+   differently), then two `execute_model` steps returning a real
+   `vllm.v1.outputs.ModelRunnerOutput`, and the chunked-prefill refusal.
+
+#### The claim, and its floor
+
+`VllmLivePluginTest` runs that lane in the **vLLM venv** and H3b's
+already-certified `run_vllm_tlaloc_check.py` in the **oracle venv**, over
+the same exported artifact and the same request, and compares. The logits
+agree **bit-for-bit — `==`, not a tolerance** — across two venvs with
+different torch builds, only one of which has jax, on both steps; so do
+the sampled tokens, the chosen buckets and the compile count (1: one
+bucket, one compile, the cache key did not move between callers). A
+tolerance would have been wrong here: both lanes run the same ctypes
+engine against the same plugin `.so` on the same device, so the only thing
+that differs is the ADAPTER, and any difference at all is the defect.
+
+#### What it found, on its first execution
+
+`KeyError`, step 0. `TlalocWorker.execute_model` builds the batch and
+*then* admits the new sequences, so
+`decode_requests_from_scheduler_output` asked the runner for the token
+history of a request it had not been told about — **the first step of
+every server that would ever have started**. The vLLM-free unit lane
+passed it because its `last_token_of` stand-in was a dict literal that
+happened to have an entry for the new id, and a dict is more forgiving
+than a runner. That gap *is* the gap between "written" and "certified",
+and it is the argument for the whole slice.
+
+The fix is not a reorder. A new request's feed token is already in the
+scheduler output (the prompt's last token), so asking the runner for it
+was always a detour through state that need not exist yet; taking it from
+the prompt leaves `last_token_of` with one meaning — CACHED requests —
+instead of two, and makes the function independent of the worker's
+ordering rather than merely compatible with it. An empty prompt is refused
+by name rather than indexed off the end. Two regression tests in
+`vllm_tlaloc_test.py`: one whose `last_token_of` **raises** like a real
+runner and asserts it is never consulted for a new request, one for the
+empty prompt.
+
+#### `./gradlew :maestro:exportServingArtifact`
+
+The UNCERTIFIED list's item 3, closed as a side effect of needing it: a
+`JavaExec` task over the **jvmMain** runtime classpath (not jvmTest — if
+the exporter needed a test fixture, the artifact would be a test fixture,
+and H3a's claim that the directory is the deployment would be a claim
+about the test source set). `-PoutDir=/abs/path`; six entries written.
+
+#### Deferrals this slice did NOT close, named
+
+- **`LLM.generate()` / `vllm serve` end to end.** Both need a HuggingFace
+  `config.json` and a tokenizer for a real model. The only artifact this
+  repo can export is `ReferenceDecodeGraph` — a 16-wide-vocabulary LCG toy
+  with no tokenizer. This is **H3c** (weight name-mapping + a real Llama),
+  already the audit's largest open item, and it is a MODEL-COVERAGE gap,
+  not a plugin gap. Fabricating a `config.json` around the reference model
+  would have certified the fabrication, so the lane stops at the worker
+  API and says so.
+- **vLLM's own sampler and logprobs.** `ModelRunnerOutput.logprobs` is
+  `None` and sampling is host-side greedy, as H3b decided.
+- **The scheduler-output type.** The adapter is duck-typed on purpose (its
+  docstring says why: the dataclass is internal and has been renamed
+  between versions), so the live lane hands it a stand-in carrying the v1
+  field names. Everything the adapter hands its result *to* — `WorkerBase`,
+  `ModelRunnerOutput`, the validated config — is real. Driving vLLM's real
+  scheduler requires an engine, which requires a model, which is H3c.
+- **SGLang** remains a design record; `pip install sglang` now has an
+  obvious answer (a third venv) and no one has spent it.
+
 ### ARC STATE (§0.4.473, the close-out) — read this first
 
-**THE PATH IS BUILT END TO END AND IT EXECUTES. WHAT IT DOES NOT YET RUN IS
-A REAL LLAMA, AND WHAT IT HAS NEVER RUN UNDER IS vLLM ITSELF.**
+**THE PATH IS BUILT END TO END AND IT EXECUTES. SINCE §0.4.477 IT HAS RUN
+UNDER REAL vLLM. WHAT IT DOES NOT YET RUN IS A REAL LLAMA — and that one
+gap is now the only thing standing between this and `vllm serve`.**
 
-Nine sections, one day (2026-09-21), suite **2119 → 2290**:
+Nine sections closed the arc on 2026-09-21 (suite **2119 → 2290**); four
+more the same day carried it past the framework (**2290 → 2296**):
 
 | § | Slice | What it closed | Suite |
 | --- | --- | --- | --- |
@@ -1410,6 +1536,7 @@ Nine sections, one day (2026-09-21), suite **2119 → 2290**:
 | 0.4.474 | H6 rail | `OracleVenvIntegrityTest` + [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md) — the oracle venv is frozen, and now says so out loud | 2290 → 2292 |
 | 0.4.475 | H6a | `harness/python/tlaloc_pjrt.py` — the PJRT C API bound from Python with **ctypes alone**, mirroring the FFM runtime; jax blocked by an import guard while it runs | 2292 → 2294 |
 | 0.4.476 | H6b | `tlaloc_serve.py` rewired onto that binding — the **whole** serving path runs with no jax, jaxlib, torch or numpy, and the distribution's dependency list is empty | 2294 → 2295 |
+| 0.4.477 | H7 | `~/.local/venvs/vllm` (vLLM 0.29.0, its own venv), the live lane run, `platform.py`+`worker.py` CERTIFIED, one real bug found and fixed, `exportServingArtifact` | 2295 → 2296 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -1448,6 +1575,10 @@ red line with the separate-venv recipe attached.
 | the WHOLE SERVING PATH — manifest, bucket, compile, staging, execute, readback — runs with no framework imported | `ServingArtifactExportRunTest.theFullServingPathRunsWithNoFrameworkImported`, asserted on the same subprocess that produced the CUDA lane's numbers: nothing loaded, nothing even attempted, and the guard shown to fire | by name, three facts |
 | and the deployment needs only a plugin `.so` | `vllm-tlaloc`'s `dependencies` is `[]`, pinned by a test; `tlaloc_serve`'s import pulls in no framework, pinned by another; the plugin is found by FILE lookup in three places, never by import | exact |
 | the loader's shape arithmetic survives having no ndarray | `LoaderIsStandardLibraryOnly` — flatten/unflatten inverses, `numel`, per-dtype staging, dtype refusal by name, engine defaulting | exact |
+| **vLLM's own platform discovery lands on `TlalocPlatform`** | `VllmLivePluginTest`, real vLLM **0.29.0** in `~/.local/venvs/vllm` (its own venv; the oracle untouched) | exact class path; vLLM logs the activation |
+| **`check_and_update_config` imposes and refuses against REAL `vllm.config` objects** | same test — `worker_cls` set, `block_size`/`num_gpu_blocks_override` taken from the artifact, and all four refusals (block size, max-model-len, max-num-seqs, world size) fired on a `vllm.config.CacheConfig`/`ParallelConfig` | by name, four messages |
+| **`TlalocWorker` runs the v1 worker API and returns vLLM's real `ModelRunnerOutput`** | same test — `load_model`, `determine_available_memory` (= the compiled pool, checked arithmetically JVM-side), `get_kv_cache_spec`, `initialize_from_config` accept **and** refusal, two `execute_model` steps, the chunked-prefill refusal | exact |
+| **the same artifact called through vLLM and called directly gives the same numbers** | the vLLM venv's worker lane vs the oracle venv's `run_vllm_tlaloc_check.py` runner lane — two venvs, two torches, jax in only one | **`==`, bit-for-bit** on every logit, plus sampled tokens, buckets and compile count |
 
 Four sensitivity checks were run before the oracles were trusted, each
 mutated then reverted: the bf16 decode byte-swapped (H2), `PADDING_SEQ_LEN`
@@ -1460,33 +1591,40 @@ supposed to fail.
 
 #### WRITTEN BUT UNCERTIFIED — and exactly how to certify it
 
-1. **The live vLLM path** — `platform.py` and `worker.py`, the two files
-   that import vLLM. vLLM is not installed and the H3b entry states the
-   closure (186 packages, torch 2.13, 33 CUDA-13 wheels, a numpy downgrade)
-   and why that venv is the measurement apparatus for every oracle here.
-   In a venv of its own:
+1. ~~**The live vLLM path**~~ — **CERTIFIED (H7, §0.4.477)**, with one
+   named remainder. `~/.local/venvs/vllm` exists (vLLM 0.29.0, 197
+   distributions, no jax), the oracle venv was not touched, and
+   `VllmLivePluginTest` runs discovery + the config hook + the whole v1
+   worker API live, matching the runner lane **bit-for-bit across the two
+   venvs**. The recipe that worked is [SERVING_RUNBOOK.md §4](SERVING_RUNBOOK.md);
+   note that the `jax[cuda12]` in the command block this entry used to
+   carry is **not installed and must not be** — H6 removed the need, and
+   installing it beside vLLM's CUDA-13 wheels is the collision the rail
+   exists to prevent.
+
+   **THE REMAINDER: `LLM.generate()` / `vllm serve` itself.** Both need a
+   HuggingFace `config.json` and tokenizer for a real model, and the only
+   exportable artifact is the reference LCG toy. That is **H3c**, not a
+   plugin gap; see the H7 entry. Certify it by exporting a real Llama and
+   running:
 
    ```bash
-   python -m venv ~/.local/venvs/vllm && . ~/.local/venvs/vllm/bin/activate
-   pip install vllm "jax[cuda12]"
-   pip install -e /home/pedro/programming/tlaloc/harness/python
    export TLALOC_SERVING_ARTIFACT=<dir written by ServingArtifactWriter>
-   python -c "from vllm.platforms import current_platform; print(current_platform)"
-   vllm serve <tokenizer/config> --max-num-seqs 4 --max-model-len 4 --block-size 2
+   export TLALOC_PJRT_PLUGIN_PATH=<a plugin .so>
+   vllm serve <the model whose weights that artifact was exported from> \
+       --max-num-seqs 4 --max-model-len 4 --block-size 2
    ```
-
-   First command = platform discovery must land on `TlalocPlatform`; second
-   = one `generate()`.
 2. **The SGLang runner** — a design record only (§5 H5(2)). `pip install
    sglang` has the same venv problem. The **checkable prediction** is that
    the loader, manifest reader, bucket selection and PJRT execution path are
    reused wholesale and only the adapter class + its `ForwardBatch → slot`
    translation are new. Certify it by writing that adapter against a real
    installed SGLang and re-running the H3b lane-3 shape against it.
-3. **The `./gradlew exportServingArtifact` task.** The exporter's `main`
-   exists (`ReferenceDecodeGraphKt`) and is the sanctioned entry point; no
-   build task assembles its classpath, so the only *certified* way to
-   produce an artifact today is the export test. One-file build change.
+3. ~~**The `./gradlew exportServingArtifact` task.**~~ **DONE (§0.4.477).**
+   `./gradlew :maestro:exportServingArtifact -PoutDir=/abs/path` — a `JavaExec`
+   over the **jvmMain** runtime classpath. H7 needed it: a live-serving
+   certification needs a directory a shell can point `$TLALOC_SERVING_ARTIFACT`
+   at, and "be inside the export test" is not that.
 
 #### AWAITS THE CLOUD TPU VM
 
@@ -1533,7 +1671,10 @@ Three new `OpKind`s entered the IR in Phase H and no others:
 1. **H3c — staged weights + a real Llama through the plugin.** The largest
    open item, and the one that turns "the path executes" into "the path
    serves". It is a NAME-MAPPING problem plus making weights graph
-   parameters instead of body constants.
+   parameters instead of body constants. **§0.4.477 raised its value:** the
+   plugin, the platform and the worker are now certified against real vLLM,
+   so H3c is the *only* thing between this repo and an actual `vllm serve`
+   — no longer one of two unknowns.
 2. ~~**H6b — re-point `tlaloc_serve.py` at the ctypes binding.**~~ **DONE
    (§0.4.476).** What it leaves behind: the CPU semantics lane still rides the
    jax ORACLE engine, because jaxlib ships no CPU PJRT plugin `.so`. That is a

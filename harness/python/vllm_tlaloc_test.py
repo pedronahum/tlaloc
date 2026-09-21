@@ -224,6 +224,38 @@ class SchedulerOutputAdapterTest(unittest.TestCase):
         self.assertEqual([("a", 7), ("b", 11)], decode)
         self.assertEqual(["c"], finished)
 
+    def test_a_new_request_never_asks_the_runner_for_a_history_it_cannot_have(self):
+        """§0.4.477 (H7) — the bug the LIVE vLLM lane found on step 0.
+
+        `TlalocWorker.execute_model` builds the batch BEFORE it admits the
+        new sequences, so asking `last_token_of` about a new request asks
+        the runner for a sequence it has not been told about — `KeyError`
+        on the first step of every server that ever started. The old test
+        above missed it because its `last_token_of` was a dict literal that
+        happened to have an entry for "a"; a runner does not.
+
+        Here the stand-in is a runner's actual behaviour: it RAISES for an
+        id it has never seen. A new request's feed token must come from the
+        prompt in the scheduler output, so this must pass without the
+        callback ever being reached."""
+        asked = []
+
+        def strict_last_token_of(rid):
+            asked.append(rid)
+            raise KeyError(rid)  # what TlalocModelRunner.sequence_tokens does
+
+        out = self.FakeOutput([self.FakeNew("a", [7])], None, {"a": 1})
+        new, decode, finished = decode_requests_from_scheduler_output(
+            out, last_token_of=strict_last_token_of,
+        )
+        self.assertEqual([("a", 7)], decode)
+        self.assertEqual([], asked, "last_token_of must not be consulted for a new request")
+
+    def test_a_new_request_with_no_prompt_is_refused_rather_than_indexed(self):
+        out = self.FakeOutput([self.FakeNew("a", [])], None, {"a": 1})
+        with self.assertRaisesRegex(ValueError, "empty prompt"):
+            decode_requests_from_scheduler_output(out, last_token_of=lambda rid: 1)
+
     def test_a_chunked_or_prefill_request_is_refused_by_name(self):
         out = self.FakeOutput([self.FakeNew("a", [1, 2, 3])], None, {"a": 3})
         with self.assertRaisesRegex(NotImplementedError, "named deferral"):

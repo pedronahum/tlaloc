@@ -131,7 +131,29 @@ def decode_requests_from_scheduler_output(scheduler_output, last_token_of) -> li
     `last_token_of` maps a request id to the token that request most
     recently produced — the runner's own history, because the scheduler
     output carries the *counts* of what to run and not the token ids of an
-    ongoing generation.
+    ongoing generation. **It is consulted for CACHED requests only.**
+
+    ## §0.4.477 (H7) — the ordering bug the live vLLM lane found
+
+    Until H7 this function asked `last_token_of` for EVERY scheduled
+    request, new ones included. That is wrong, and wrong in a way no test
+    here could see: `TlalocWorker.execute_model` calls this function FIRST
+    and admits the new sequences with `add_sequence` SECOND, so on the step
+    a request arrives, `last_token_of(rid)` asks the runner for the history
+    of a sequence it has not been told about yet — `KeyError` on the very
+    first step of every server that has ever started. The unit lane passed
+    because its stand-in was a dict literal that happened to have an answer
+    for the new id; a `dict` is more forgiving than a runner, and the gap
+    between them is exactly the gap between "written" and "certified". The
+    live lane (`run_vllm_live_check.py`, vLLM 0.29.0) hit it on step 0.
+
+    The fix is not to reorder the worker. A NEW request's feed token is a
+    fact the scheduler output already carries — it is the last token of the
+    prompt — so asking the runner for it was always a detour through state
+    that need not exist yet. Reordering the worker would have made the
+    function *work*; taking the token from the prompt makes the function
+    not need the ordering at all, and leaves `last_token_of` with one
+    meaning instead of two.
 
     A request scheduled for more than one token is a PREFILL or a chunked
     prefill and is refused by name: there is no prefill entry in the
@@ -151,8 +173,24 @@ def decode_requests_from_scheduler_output(scheduler_output, last_token_of) -> li
         ids = getattr(cached, "req_ids", None)
         cached_ids = list(ids) if ids is not None else [getattr(r, "req_id") for r in cached]
 
+    # `feed_of` is the one place the two kinds of request differ: a new
+    # request's token is in the scheduler output (the prompt's last token);
+    # a cached one's is in the runner's history. See the §0.4.477 note above
+    # for why this is not a reordering.
+    def _prompt_feed(rid, prompt):
+        if not prompt:
+            raise ValueError(
+                f"request {rid} arrived with an empty prompt; a decode step needs a "
+                f"token to feed and the scheduler output carries none — refused here "
+                f"rather than read off the end of the list"
+            )
+        return prompt[-1]
+
+    feed_of = [(rid, (lambda r=rid, p=prompt: _prompt_feed(r, p))) for rid, prompt in new_requests]
+    feed_of += [(rid, (lambda r=rid: last_token_of(r))) for rid in cached_ids]
+
     decode_requests = []
-    for rid in [r for r, _ in new_requests] + cached_ids:
+    for rid, feed in feed_of:
         n = counts.get(rid, 1)
         if n != 1:
             raise NotImplementedError(
@@ -161,7 +199,7 @@ def decode_requests_from_scheduler_output(scheduler_output, last_token_of) -> li
                 f"prefill / chunked-prefill entry is a named deferral — the scheduler "
                 f"must be configured so that it never chunks"
             )
-        decode_requests.append((rid, last_token_of(rid)))
+        decode_requests.append((rid, feed()))
 
     finished = list(getattr(scheduler_output, "finished_req_ids", []) or [])
     return new_requests, decode_requests, finished

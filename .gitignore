@@ -27,3 +27,6 @@ kotlin-js-store/
 # §0.4.469 — harness/python is now imported as a module (tlaloc_serve).
 __pycache__/
 *.pyc
+
+# §0.4.477 — `pip install -e harness/python` (the vLLM venv recipe) writes this.
+harness/python/*.egg-info/
