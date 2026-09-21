@@ -573,3 +573,78 @@ chained hand-exact.
 
 **Deferred, by name:** rank-3 Dense input (above); F0's standing
 deferral list unchanged.
+
+### F3 — §0.4.439: the optimizers, pure and functional
+
+**What landed.** `Optimizers.kt` in `:nn` — the decision-4 contract made
+concrete: `Optimizer<S>` with `initialState()` and pure
+`step(params, grads, state) → OptimizerStep(params', state')`, plus the
+model-level `Optimizer.step(model, grads, state) → (model', state')`
+convenience over `withParameters`, so a training loop is a fold. State
+is keyed like the parameters and created LAZILY — a key absent from the
+state map IS DiffKT's "first visit of a parameter", with no visit-order
+cursor. The gap table's F3 row held exactly: pure host math on
+DTensor/FloatArray, zero tape/trace involvement, zero gradient math.
+
+- `FixedLearningRate(alpha)`: `t − α·g`, stateless (`Unit`). The F0
+  audit records no DiffKT default for `alpha`, so none is offered.
+- `SGD(initialLearningRate = .001f, lrDecay = 0f, momentum = 0f)`:
+  DiffKT-exact — EMA momentum `v' = μ·v + (1−μ)·g` (NOT PyTorch's
+  `μ·v + g`), first visit seeds `v = g`, update `t − lr·v'`, and the
+  `afterFit()` schedule `lr = lr₀/(1 + lrDecay·completedSteps)`.
+  DiffKT's `weightDecay` is spelled `lrDecay`, as F0 §4.0.2 demanded.
+  `momentum = 0` stores no velocity slots at all.
+- `RMSprop(alpha = .005f, beta = .9f, eps = 0f)`: DiffKT-literal —
+  first visit `ms = g²`, else `ms' = β·ms + (1−β)·g²`, update
+  `t − α·g/√ms'` with NO epsilon by default; `eps` is the recorded
+  Tlaloc extension in PyTorch's placement (`√ms' + ε`), never oracled
+  against DiffKT.
+- `Adam(lr = 1e-3f, β₁ = .9f, β₂ = .999f, ε = 1e-8f)`: standard
+  Kingma–Ba, BIAS-CORRECTED. **The recorded finding the slice asked
+  for: DiffKT's `AdamOptimizer` is a `TODO("Not yet implemented")`
+  placeholder (F0 §4.0.2), so there is no "does DiffKT bias-correct"
+  fact to match — ours bias-corrects per the paper** and its oracle is
+  hand-stepped math now, the PyTorch harness in F8. The bias-correction
+  step count is global to the state, not per key — the `Trainable`
+  contract steps every parameter together (recorded so nobody "fixes"
+  it apart).
+- **The "Momentum optimizer" of the slice list IS `SGD(momentum = μ)`**:
+  DiffKT's `Momentum.kt` is not an optimizer but the EMA helper (the
+  other recorded F0 finding), shipped here as `momentumUpdated`
+  (Float + tensor overloads, momentum weighting the NEW statistic —
+  the PyTorch running-stats convention) for F5's BatchNorm.
+
+**Design decisions, with rejections.** Typed per-optimizer state values
+(`SGDState`/`RMSpropState`/`AdamState`, internal constructors) —
+REJECTED: one generic slot-map state shared by all optimizers (stringly
+slots, no compiler help pairing optimizer to state), and DiffKT's
+mutable `nextParameter` visit cursor + `afterFit()` reset (fights
+decision 2, breaks on reorder; keyed lazy maps carry the same
+semantics). Guards are strict: every parameter must have a gradient of
+matching dims AND unknown gradient keys refuse — REJECTED: silently
+ignoring extras (typo camouflage). `hostF32()` returns the backing
+array, so every output is a fresh allocation; inputs are never written.
+
+**Oracle story.** Hand-stepped references, 3 steps on the 2-param toy
+(`w = [1, −2]`, `b = [0.5]`) with distinct quarter-grid gradients per
+step so every slot outlives its first-visit seeding. Exact
+`assertContentEquals` where the arithmetic is dyadic: FixedLearningRate
+all 3 steps, SGD-with-momentum all 3 steps (velocities pinned too),
+lrDecay steps 1–2, RMSprop step 1 (`√g² = |g|` on the grid) and every
+`ms` slot at every step. 1e-6 against inline DOUBLE-precision hand math
+where sqrt/div enter (an independent spelling — no code shared with the
+Float path): lrDecay's `lr = 0.5/3` step, RMSprop steps 2–3, Adam all
+3 steps plus the pinned step-1 collapse (`m̂ = g`, `v̂ = g²` at `t = 1`
+⇒ update `≈ lr·sign(g)`). Equivalence pin: `SGD(momentum = 0)` ==
+`FixedLearningRate` bit-exact over 3 steps. The eps test pins BOTH
+regimes: `eps > 0` leaves a zero-gradient parameter untouched;
+`eps = 0` NaNs on `0/√0` — the DiffKT-literal hazard, pinned as a
+finding rather than papered over. Purity/laziness pinned (inputs and
+old state unchanged, initial states empty). The integration cert:
+`Dense(2, 1, fromSeed(7))` + F1's `valueAndGradients` + `SGD(lr = .1)`
+on a quarter-grid batch of 4, loss `mean((y − 1.5)²)` STRICTLY
+decreasing across all 10 steps (11 losses compared).
+
+**Deferred, by name:** PyTorch optimizer parity (F8's harness, per
+F0 §4.0.8 — DiffKT-formula quirks stay on hand-stepped Kotlin oracles);
+F0's standing deferral list unchanged.
