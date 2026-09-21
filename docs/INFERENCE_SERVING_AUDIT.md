@@ -686,3 +686,153 @@ contract carry `DecodeGraphKind.PREFILL` today, and nothing exports one yet).
 **Still open in Phase H**: H3b/H3c (staged weights + a real Llama; the
 `vllm-tlaloc` plugin classes), H4 (KPTX paged-attention kernel + recognizer
 claiming), H5 (SGLang variant + KV-quant).
+
+### H3b — the `vllm-tlaloc` platform plugin (§0.4.470)
+
+Gap-list item 6's second half. **Read the certification boundary first**,
+because it is the whole character of this slice: what is written is the plugin;
+what is *certified* is everything under vLLM's API surface; what is *not* is the
+two files that import vLLM.
+
+**vLLM was NOT installed, and that is a decision with numbers behind it.** The
+attempt ran (`pip install vllm` into `~/.local/venvs/iree`). It RESOLVES on this
+box — aarch64, CPython 3.12, vllm 0.29.0 — and it was stopped during the
+download phase, before it could touch `site-packages`, once the resolution was
+readable. A `--dry-run --report` then stated the closure exactly: **186
+packages**, including **torch 2.13.0** (replacing this venv's `torch 2.11.0+cpu`),
+**33 CUDA-13 wheels** (`cuda-toolkit 13.0.3`, `nvidia-cublas 13.1.1.3`, …) landing
+beside the venv's `jax-cuda12-plugin 0.10.0`, `transformers 5.17.0`, and a numpy
+DOWNGRADE 2.4.4 → 2.3.5. That venv is not a scratch environment: it is the one
+every certification oracle in this repo runs in — H2's safetensors bf16 parity
+reads bytes *torch* wrote, `run_pytorch_llama.py` is the §0.4.289 op-for-op
+mirror, and every PJRT lane imports that jax. Replacing the torch under the
+oracles, and stacking a CUDA-13 runtime next to a CUDA-12 one in a venv whose
+whole job is to run both in one process, is a change to the measurement
+apparatus, and it is not this slice's to make unilaterally.
+REJECTED: a second venv with vLLM *and* jax in it — it does not avoid the
+CUDA-13-beside-CUDA-12 question, it only moves it somewhere nothing else would
+notice it breaking.
+
+**So the live-serving certification is a NAMED DEFERRAL with its command.**
+When vLLM is installed (ideally in a venv of its own, with jaxlib present and
+the CUDA question settled):
+
+```
+  pip install -e harness/python          # registers the entry point
+  export TLALOC_SERVING_ARTIFACT=<dir written by ServingArtifactWriter>
+  python -c "from vllm.platforms import current_platform; print(current_platform)"
+  vllm serve <tokenizer/config> --max-num-seqs 4 --max-model-len 4 --block-size 2
+```
+
+The first command is the discovery check (vLLM's platform resolution must land
+on `TlalocPlatform`); the second is a single-request `generate()`.
+
+**What the plugin is.** `harness/python/vllm_tlaloc/`, plus a `pyproject.toml`
+beside it whose only real content is the entry point:
+
+| file | imports vLLM? | certified? |
+|---|---|---|
+| `__init__.py` — `register()`, `PLATFORM_CLASS_PATH` | no | yes |
+| `paging.py` — KV page pool, block tables, slot arithmetic | no | yes |
+| `batching.py` — requests → one padded bucket-selected call | no | yes |
+| `runner.py` — `TlalocModelRunner`, artifact + pools + sampling | no | yes |
+| `platform.py` — `TlalocPlatform` | **yes** | **no** |
+| `worker.py` — `TlalocWorker` | **yes** | **no** |
+
+That split is the slice's central engineering decision and not tidiness. A
+plugin whose page arithmetic can only be exercised with 186 packages present is
+a plugin whose page arithmetic is never exercised. Because the vLLM-facing
+classes are adapters and nothing else, the uncertified surface is exactly
+"vLLM's API shape" — and the thing underneath it runs against a REAL artifact on
+REAL PJRT in this commit.
+
+**Decisions, and what they rejected.**
+- **Page 0 is reserved as the padding scratch page and never allocated.**
+  `DecodePadding.PADDING_BLOCK` is 0, so every padded row in a bucket reads page
+  0; handing it to a live sequence makes an inert row read live KV. Harmless
+  *today* (the padded row's logits are sliced off inside the loader) and not
+  harmless the moment anything poisons or checksums that page — which H3a's own
+  oracle does. One page out of `numBlocks` is the cheap side. REJECTED: a
+  per-request padding block, which is a wire constant that varies.
+- **The free list is kept SORTED.** REJECTED: a LIFO stack, the usual choice —
+  the certification compares against an independently computed expectation, and
+  that needs "which page does the newcomer get" to have one answer.
+- **`append_token` computes the slot BEFORE advancing `length`**, and allocates
+  at most one page. Prefill's many-tokens-at-once is `reserve()`, kept separate
+  so the decode path cannot grow by more than a page.
+- **The token axis is INDEXED, not flattened away** (`last_token_logits`). The
+  contract's logits are `[batch, tokensPerSeq, vocab]` and `tokensPerSeq` is 1
+  today; reshaping to `(-1,)` is correct now and silently samples from a
+  concatenation of positions the day a prefill entry exists.
+- **`check_and_update_config` REFUSES rather than adjusts.** A `--block-size`
+  disagreeing with the artifact's compiled `blockSize` is a different KV layout,
+  not a preference; `--max-model-len` past the ladder is refused for the same
+  reason H3a's loader refuses an over-cap context rather than clamping. It sets
+  `worker_cls`, because that is what the hook is for.
+- **`determine_available_memory` reports the artifact's pool, not a
+  measurement.** vLLM profiles a forward pass to size the KV cache; here the
+  pool is a COMPILED shape, and a profile more generous than the truth is a
+  silent out-of-bounds write.
+- **`get_attn_backend_cls` raises by name**: attention is inside the compiled
+  program (`PAGED_ATTENTION`), chosen at export. A config asking for
+  FlashAttention gets an answer instead of being quietly ignored.
+- **vLLM is not a dependency of the distribution.** It is the HOST. Declaring it
+  would let a plain `pip install .` drag the closure above into any venv.
+- **A longer-than-one-token prompt is refused BY NAME** — there is no prefill
+  entry (H3a's deferral), and a runner that quietly decoded a prompt one token
+  at a time would be "working" while doing what no serving system accepts.
+
+**Oracles.** Three lanes, in `VllmPluginContractTest`:
+1. **Registration**, needing nothing installed: the entry point in
+   `pyproject.toml`, `register()`, and `PLATFORM_CLASS_PATH` all name one class,
+   and that class exists in the file the path names. A typo here surfaces in
+   vLLM as "no platform found", the least informative error in the system.
+2. **The vLLM-free unit lane**: 31 stdlib-only `unittest` cases over the page
+   pool, the marshalling, the scheduler-output adapter, sampling and the
+   registration metadata — driven from the Kotlin test so the coverage is part
+   of `./gradlew test` and not a command somebody remembers.
+3. **The plugin-driven decode lane**: Kotlin exports the reference artifact,
+   then `TlalocModelRunner` — the class the worker delegates to — runs **two**
+   decode steps of three sequences through its own bookkeeping, on the PJRT
+   **CPU** client at `1e-5` and the **CUDA** client at `1e-3` (H3a's measured
+   per-backend floors; the looseness is XLA-GPU's TF32 dot policy). Two steps
+   and not one: a single step cannot tell a KV cache threaded across steps from
+   one recomputed, and the pool swap is the runner's most easily-wrong line.
+
+The numbers are checked against the host interpreter, but the **decisions are
+pinned exactly on both lanes** — a page id is not a float. Block tables, slot
+mapping, positions, `seq_lens` and the chosen bucket are computed in Kotlin from
+the RULE and compared to what the plugin did; host-side greedy sampling must
+agree with the interpreter's argmax, which it must, because the token it picks
+is fed into the next step. Then: two steps at one bucket compile ONE executable
+(the manifest's `cacheKey` works) while the batch-of-one lifecycle step compiles
+a second (bucket selection really selects); freeing a sequence returns its pages
+and the newcomer gets the freed one back (a loop that leaks a page per request
+dies of it); and the runner's own history of what it decoded is what vLLM's
+scheduler output cannot supply.
+
+**Sensitivity check.** `append_token` was mutated to advance `length` before
+computing the slot — the classic off-by-one, and the failure mode that writes
+every token one slot past itself. Three lanes failed (the unit lane and both
+device lanes); all three passed again on revert.
+
+**House landmine found.** `:maestro:jvmTest` does NOT re-run when only
+`harness/python/**` changes — the Python files are not declared task inputs, so
+a Python-side edit needs `--rerun` (a mutation check without it reports BUILD
+SUCCESSFUL in 600ms on mutated code). This applies to every subprocess
+certification in the repo, not only this one.
+
+**Named deferrals from this slice**: the live vLLM lane above (platform
+discovery + a real `generate()`); vLLM's own sampler and logprobs (v1 samples
+greedily on the host — adapting to vLLM's sampler means materialising logits as
+torch CPU tensors, a measurable cost that wants a real vocabulary to measure);
+prefill and chunked prefill, refused by name in three places and waiting on a
+PREFILL entry in the artifact; buffer donation, still open from H3a and still
+the next measurable win; multi-device serving (refused in
+`check_and_update_config`); vLLM's prefix caching / RadixAttention, which the
+reserved-scratch-page allocator does not model; and the paged-attention KERNEL,
+which is H4.
+
+**Still open in Phase H**: H3c (staged weights + a real Llama through the
+plugin), H4 (KPTX paged-attention kernel + recognizer claiming), H5 (SGLang
+variant + KV-quant).

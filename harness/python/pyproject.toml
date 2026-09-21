@@ -1,0 +1,37 @@
+# §0.4.470 — Phase H3b: the `vllm-tlaloc` distribution.
+#
+# This exists for ONE reason: vLLM discovers out-of-tree platforms through
+# the `vllm.platform_plugins` entry-point group, and an entry point is a
+# property of an installed distribution. `pip install -e harness/python`
+# registers the plugin; nothing else in this repo needs installing.
+#
+# The distribution ships the plugin package AND `tlaloc_serve` — the H3a
+# loader the plugin delegates execution to. They are one deployable: a
+# plugin that can find vLLM but not its loader is not a serving install.
+#
+# vLLM is deliberately NOT a dependency. It is the HOST: whoever runs
+# `vllm serve` already has it, and declaring it here would let a plain
+# `pip install .` drag in a 186-package closure (torch 2.13 + 33 CUDA-13
+# wheels — see docs/INFERENCE_SERVING_AUDIT.md §5 H3b) beside this venv's
+# jax-cuda12 and every certification oracle's torch.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-tlaloc"
+version = "0.4.470"
+description = "vLLM out-of-tree platform plugin executing Tlaloc serving artifacts through PJRT"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.entry-points."vllm.platform_plugins"]
+# The value is `module:callable`; vLLM calls it and expects the dotted path
+# of a Platform subclass back. Pinned against vllm_tlaloc.register and
+# vllm_tlaloc.PLATFORM_CLASS_PATH by vllm_tlaloc_test.py, so this file and
+# the code cannot drift.
+tlaloc = "vllm_tlaloc:register"
+
+[tool.setuptools]
+packages = ["vllm_tlaloc"]
+py-modules = ["tlaloc_serve"]
