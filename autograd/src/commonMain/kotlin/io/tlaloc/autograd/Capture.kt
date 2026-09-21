@@ -77,6 +77,42 @@ fun <S : Shape> capture(
     return tape.toDxirFunction(name, paramIds = listOf(x.id), returnIds = listOf(out.id))
 }
 
+/**
+ * §0.4.437 — the N-ary capture, the Phase F model-layer entry point. [capture] and
+ * [capture2] are the fixed-arity conveniences the intrinsic surface grew up on; a
+ * model's forward has one tape leaf per (input tensor + parameter tensor) and that
+ * count is arbitrary — the 1–4 ceiling is a `grad {}` lambda-intrinsic property,
+ * never the IR's ([Tape.toDxirFunction] takes any [paramIds] list, `DxirFunction`
+ * any param count, `DxirReverseTransform` any arity).
+ *
+ * Traces every tensor in [inputs] as a differentiable tape leaf (in list order —
+ * the resulting `DxirFunction`'s positional param order), runs [f] over the leaf
+ * tracers, and captures the single result as the function's return. [f] receives
+ * the leaves erased to `Tracer<Shape>` — the N-ary surface is untyped by nature
+ * (a heterogeneous list of phantom shapes has no useful common spelling); the
+ * same-shape generic operators apply directly and shapes are checked at trace time
+ * as always.
+ *
+ * The caller owns the semantics of the position list (which slots are model inputs
+ * vs. parameters); `:nn`'s capture step builds exactly that bookkeeping on top.
+ */
+@Suppress("UNCHECKED_CAST")
+fun captureN(
+    inputs: List<DTensor<*, F32>>,
+    name: String = "traced",
+    f: (List<Tracer<Shape>>) -> Tracer<*>,
+): DxirFunction {
+    require(inputs.isNotEmpty()) { "captureN: at least one input tensor is required" }
+    val tape = Tape()
+    val leaves = inputs.map { tape.traceLeaf(it as DTensor<Shape, F32>) }
+    val out = f(leaves)
+    require(out.tape === tape) {
+        "captureN: the result tracer does not belong to this capture's tape — " +
+            "the lambda must derive its result from the supplied leaf tracers"
+    }
+    return tape.toDxirFunction(name, paramIds = leaves.map { it.id }, returnIds = listOf(out.id))
+}
+
 fun <S1 : Shape, S2 : Shape> capture2(
     f: (Tracer<S1>, Tracer<S2>) -> Tracer<*>,
     a: DTensor<S1, F32>,

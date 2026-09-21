@@ -31,6 +31,7 @@ includeBuild("third-party/maestro") {
 include(":core")
 include(":ir")
 include(":autograd")
+include(":nn")
 include(":stablehlo")
 include(":compiler-plugin")
 include(":benchmarks")

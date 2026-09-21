@@ -412,3 +412,86 @@ dense v1); grouped-conv host twins; EmbeddingBag Mean/Max reductions
 (DiffKT ships only Sum; parity is Sum); `store`/`load` checkpointing
 beyond tensor round-trip; GPU-resident training (§2.9); DiffKT's
 `LinearBeforeResetGRU` DNNL hookup (never existed upstream either).
+
+### F1 — §0.4.437: the `:nn` module + the compiler-route substrate
+
+The first slice on the amended route (§0.4.436), and the loop closes
+exactly as decision 3 promised: `nn/src/commonMain` holds component
+values and capture bookkeeping, ZERO gradient math, and the 2-layer
+Sequential's gradients come out of `DxirReverseTransform` hand-exact.
+
+**What landed.**
+
+- `:nn` (`io.tlaloc.nn`), registered in `settings.gradle.kts`, `api`
+  deps on `:core`/`:ir`/`:autograd` (the surface speaks `DTensor`,
+  `DxirFunction`, `Tracer` in public types).
+- `captureN` in `:autograd`'s `Capture.kt` — the N-ary generalisation
+  of `capture`/`capture2`: N tensors → N tape leaves (list order = the
+  `DxirFunction`'s positional param order) → `Tape.toDxirFunction`.
+  This is the arbitrary-arity entry the amendment named; the gap
+  table's F1 row ("none — library only") holds: no new TRACE spelling
+  (`sum()` already reduces full-to-scalar), no `Backward.kt` change.
+- Components per F0 §4.0.1, erased-Tracer surface: `Layer.forward(x:
+  Tracer<Shape>, params: Params)` (single-input v1 — DiffKT's
+  `LayerSingleInput` fold), `Trainable` (stable path-like keys in
+  declaration order + `withParameters` functional rebuild),
+  `TrainableLayer`, `NamedParameter`, `AffineTransform` (`m·x + b`
+  elementwise, F0's spelling), `Sequential` (fold; child keys prefixed
+  `"<layerIndex>."` — positional like DiffKT's `withTrainables`
+  splice). `Params` is a scoped key→leaf-tracer resolver: a container
+  narrows it before handing it to a child, so a layer only ever speaks
+  its OWN keys.
+- The differentiation contract in `Training.kt`: `capture(model,
+  inputs, lossFn)` traces the forward once with every input + every
+  parameter as a differentiable leaf (inputs first, then parameters in
+  key order), requires a scalar loss, converts via `toDxirFunction`,
+  and applies `DxirReverseTransform.apply(primal, includeForward =
+  true)` ONCE — the gradient function returns `(loss, *grads)` so a
+  training step is a single `DxirInterpreter.evalFunction` call.
+  `CapturedStep.run(model, inputs)` re-binds host values positionally
+  (guarded: parameter keys must equal the captured list), returns
+  `StepResult(loss, gradients keyed like the model, inputGradients)`.
+  `valueAndGradients` = capture + run, honestly retracing per call.
+
+**Design decisions, with rejections.**
+
+- **Erased `Tracer<Shape>` at the `:nn` boundary.** REJECTED:
+  threading phantom shapes through `Layer` — Dense-style shape changes
+  make a general interface inexpressible without rank/arity variant
+  explosions, for no safety the traced ops' dims checks don't already
+  give. DiffKT's own surface is untyped `DTensor`.
+- **`Params` resolver over a "traced twin" model.** REJECTED:
+  rebuilding the model with Tracer-typed fields per capture — it
+  duplicates every layer class; the resolver keeps each layer's
+  forward single-sourced. Also REJECTED: DiffKT's `extractTangent`
+  extractor protocol — key-addressed gradients from the transform make
+  the hook meaningless here (F0 §4.0.1 anticipated this).
+- **One combined `(loss, *grads)` evaluation** via `includeForward =
+  true`. REJECTED: separate primal + gradient evals per step (two
+  walks where one suffices); the standalone primal is still captured and
+  exposed — it is the prediction path, the route pin's witness, and
+  F8's emission artifact.
+- **Caching = caller-held `CapturedStep` in F1.** The pair re-binds
+  values per step (params are `DxirParam`s, never baked constants) and
+  refuses structure drift by key comparison. RECORDED CONTRACT: F8
+  adds the structure-keyed cache in front of the compiled-GPU lane
+  (the §0.4.307 amortization); `valueAndGradients` remains the honest
+  retrace-per-call convenience until then.
+
+**Oracle story.** Quarter-integer grid throughout, `==` not
+tolerance: a 2-layer Sequential's five gradients (4 params + the
+input gradient, which the transform returns for free) pinned against
+the hand derivation; the ROUTE PIN asserts the captured primal is a
+real `DxirFunction` with 5 params — one past the `grad {}` 4-arity
+ceiling the IR never had; and the trace-vs-hand-built-DXIR oracle
+builds the same single-affine graph through `capture` and through
+`DxirBuilder` directly, transforms BOTH, and pins elementwise
+equality (plus both against hand values). One bit-exactness lesson
+worth keeping: `2·0·(−0.25) = −0.0`, and the oracles assert the
+signed zero. Re-bind is pinned too: one `CapturedStep`, two
+parameter sets, both losses hand-exact, structure drift refused.
+
+**Deferred, by name:** multi-input `Layer` surface (single-input v1;
+F7 revisits if GRU wants it at the interface); automatic
+structure-keyed caching (F8, per the recorded contract); everything
+in F0's standing deferral list.
