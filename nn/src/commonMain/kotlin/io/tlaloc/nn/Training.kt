@@ -73,6 +73,19 @@ class CapturedStep internal constructor(
     val parameterKeys: List<String>,
     val inputCount: Int,
 ) {
+    /**
+     * §0.4.449 — the readable-reverse surface (the Tangent inheritance): the
+     * captured gradient function, printed as compilable Kotlin source over the
+     * `:core` host twins. What comes back is the EXACT program [run] executes
+     * through [DxirInterpreter] — the same ops, as `val`-per-op Kotlin a user
+     * can read, compile and call (certified bit-identical against the
+     * interpreter in the §0.4.449 golden tests).
+     */
+    fun gradSource(): String = io.tlaloc.ir.render.toKotlinSource(gradient)
+
+    /** [gradSource]'s primal twin: the captured forward, printed. */
+    fun primalSource(): String = io.tlaloc.ir.render.toKotlinSource(primal)
+
     fun run(model: Trainable<*>, inputs: List<DTensor<*, *>>): StepResult {
         require(inputs.size == inputCount) {
             "CapturedStep.run: captured for $inputCount input(s), got ${inputs.size}"

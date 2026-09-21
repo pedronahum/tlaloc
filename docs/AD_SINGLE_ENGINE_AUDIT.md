@@ -9,6 +9,53 @@ readable by the user, and compiled.*
 
 ## Running record
 
+- **§0.4.449 — READABLE-REVERSE SURFACE 1 SHIPPED (the north star's
+  flagship).** `ir/.../render/KotlinSourceRenderer.kt`:
+  `DxirFunction.toKotlinSource()` (+ top-level `toKotlinSource(fn)`, and the
+  `:nn` user surface `CapturedStep.gradSource()` / `primalSource()`) prints a
+  captured function as a COMPLETE, COMPILABLE Kotlin function — every body op
+  a `val` bound to its certified `:core` host-twin spelling (`matmul`,
+  `.relu()`, `.step()`, `sumToLike`, `embeddingGrad`, `intZerosLike`,
+  `conv2dDataAdjoint`, `stretchToRank2`, …), every const a `Tensors.*` /
+  `broadcastDims` literal, multi-returns as Pair/Triple/List, every line
+  comment-annotated with the SSA node it renders. TYPING DECISION (recorded):
+  values declare their honest ranked phantom types (`DTensor<Rank2<Sym, Sym>,
+  F32>`, `I32` for integer values; Bool rides the host 0f/1f mask
+  convention) so the source reads like user code and the `<S : Shape>` twins
+  infer S from the declared type or a template argument; twins whose static
+  return erases to `DTensor<Shape, F32>` (axis reductions, `concat`,
+  `.slice`) are wrapped in `reshapeToRankN(…)` — an identity copy, zero bits
+  changed. REJECTED: a FloatArray-level printer (reads as codegen scratch,
+  not the Kotlin a user would write — the point IS readability). GOLDEN
+  ORACLE (the beyond-Tangent claim, executable —
+  `PrintedGradientGoldenTest`): grad-of-(Dense-like matmul+bias+relu+mean
+  loss) and an embedding gradient (I32 param + ZEROS_LIKE + EMBEDDING_GRAD)
+  captured via the F1 route, printed, COMPILED with the in-process
+  K2JVMCompiler (no plugin — printed source is plain user Kotlin over
+  `:core`), RUN, and pinned RAW-BIT-IDENTICAL (`Float.toRawBits`) to
+  `DxirInterpreter` on the same inputs — free by construction, since the
+  twins and the interpreter arms are the §0.4.447-pinned bit-equal pair.
+  COVERAGE CONTRACT (the §0.4.448 discipline, exhaustive `when` over OpKind
+  — a NEW kind fails compilation at the printer): renders the elementwise
+  family, reductions (+softmax), rank-2 MATMUL, conv/convT/pool primals and
+  ALL SIX fused adjoints, shape ops (reshape/transpose/broadcast/concat/
+  slice/flip), the ENTIRE runtime-extent family (SUM_TO/BROADCAST_LIKE/
+  PAD_TO/SLICE_AT/SLICE_LIKE/PAD_LIKE/ZEROS_LIKE/CHECK_SHAPE_LIKE),
+  WHERE/COMPARE/Bool-CAST, EMBEDDING/EMBEDDING_GRAD, literal-key rank-1/2
+  RNG; everything else refuses LOUDLY NAMING THE KIND (`KotlinRenderRefusal`;
+  demoted kinds reuse `demotedKindRefusal`'s message verbatim), pinned in
+  `KotlinSourceRendererTest`. Named deferrals: ABS/RSQRT/GELU/SILU/SIN/COS
+  (no `:core` tensor twins — the bmm-precedent twin gap), rank≥3 MATMUL
+  (bmm), DOT/ARGMAX/LOGSUMEXP/CROSS_ENTROPY, GATHER/SCATTER/SCATTER_ADD
+  (runtime scalar-index operands vs Int-taking twins), SPARSE_* wiring,
+  strided SLICE, standalone PAD, runtime-key RNG, IF/WHILE/COARSENED
+  (control flow), rank>4, F64; and primal-provenance line comments ("this
+  adjoint serves op X") — the reverse transform tracks no provenance, so the
+  comments name the rendered SSA node instead. Surface 2 (the K2 plugin
+  compile-time dump of synthesized `grad {}` bodies) remains queued — it
+  needs a sentinel-tolerant rendering, exactly the thing this printer
+  refuses by design.
+
 - **§0.4.448 — C CLOSED (demoted, loud, by name).** The five half-alive
   kinds now refuse with named messages that state the kind AND the
   sanctioned alternative, via one shared table
@@ -149,7 +196,9 @@ Two surfaces, queued with the cleanup arc:
    ops as their `:core` host-twin calls — readable AND compilable AND
    runnable (beyond Tangent: the printed derivative is a working
    function). Golden test: compile and execute the printed source of a
-   gradient function, match numbers.
+   gradient function, match numbers. **DONE §0.4.449** (bit-identical, not
+   just matching — see the running record).
 2. A K2 plugin dump option rendering each synthesized `grad {}` gradient
    body as Kotlin source at compile time, next to the lambda it
-   differentiates.
+   differentiates. (Open: needs a sentinel-tolerant rendering — the
+   §0.4.449 printer refuses -1 dims by design.)
