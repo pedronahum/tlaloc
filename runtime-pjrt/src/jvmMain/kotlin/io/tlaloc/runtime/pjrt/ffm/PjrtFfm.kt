@@ -183,6 +183,7 @@ object PjrtFfm {
         JAVA_LONG.withName("value_size"),
     )
 
+    internal const val PJRT_NAMED_VALUE_TYPE_INT64: Int = 1
     internal const val PJRT_NAMED_VALUE_TYPE_FLOAT: Int = 3
     internal const val PJRT_NAMED_VALUE_TYPE_BOOL: Int = 4
 
@@ -195,15 +196,29 @@ object PjrtFfm {
     internal val SZ_NamedValue: Long = PJRT_NamedValue_LAYOUT.byteSize()
 
     /**
-     * §0.4.333 — marshal [options] as a `PJRT_NamedValue[2]` array
+     * §0.4.333 — marshal [options] as a `PJRT_NamedValue` array
      * (`memory_fraction`: kFloat, `preallocate`: kBool) allocated in [arena].
      * Returns the array segment to be stored in
-     * `PJRT_Client_Create_Args.create_options` (with `num_options = 2`).
-     * Extracted from [PjrtApi.createClient] so the byte layout is pinned by
-     * a GPU-less unit test.
+     * `PJRT_Client_Create_Args.create_options` (with `num_options =`
+     * [PjrtClientOptions.namedValueCount]). Extracted from
+     * [PjrtApi.createClient] so the byte layout is pinned by a GPU-less
+     * unit test.
+     *
+     * §0.4.461 (G3a-2) — when [options] declares a multi-node group
+     * (`numNodes > 1`), two kInt64 entries follow: `node_id` and
+     * `num_nodes`, the names the XLA GPU plugin's create path parses
+     * (verified against xla/pjrt/c/pjrt_c_api_gpu_internal.cc, openxla/xla
+     * main 2026-09-21). The single-node encoding is BYTE-IDENTICAL to the
+     * §0.4.333 two-entry form — the distributed fields add nothing until
+     * they are asked for. `coordinatorAddress` is deliberately NOT
+     * marshalled: the PJRT C API has no such option — the coordinator
+     * backs the kv-store callbacks in `PJRT_Client_Create_Args`
+     * (kv_get/kv_try_get/kv_put), which Tlaloc does not implement yet
+     * (G4; see docs/MULTIHOST_DESIGN.md).
      */
     internal fun marshalCreateOptions(arena: Arena, options: PjrtClientOptions): MemorySegment {
-        val array = arena.allocate(SZ_NamedValue * 2)
+        val count = options.namedValueCount
+        val array = arena.allocate(SZ_NamedValue * count)
 
         fun header(index: Int, name: String, type: Int): Long {
             val base = index * SZ_NamedValue
@@ -224,7 +239,38 @@ object PjrtFfm {
         val preallocBase = header(1, "preallocate", PJRT_NAMED_VALUE_TYPE_BOOL)
         array.set(JAVA_BYTE, preallocBase + OFF_NamedValue_Value, if (options.preallocate) 1 else 0)
 
+        if (options.numNodes > 1) {
+            val nodeIdBase = header(2, "node_id", PJRT_NAMED_VALUE_TYPE_INT64)
+            array.set(JAVA_LONG, nodeIdBase + OFF_NamedValue_Value, options.nodeId.toLong())
+
+            val numNodesBase = header(3, "num_nodes", PJRT_NAMED_VALUE_TYPE_INT64)
+            array.set(JAVA_LONG, numNodesBase + OFF_NamedValue_Value, options.numNodes.toLong())
+        }
+
         return array
+    }
+
+    /**
+     * §0.4.461 (G3a-2) — the multi-node create refusal, extracted pure so it
+     * certifies GPU-less. A `numNodes > 1` client CANNOT be created today:
+     * the GPU plugin rendezvouses multi-node clients through the kv-store
+     * callbacks in `PJRT_Client_Create_Args` (kv_get/kv_try_get/kv_put over
+     * the coordinator's store — how JAX's distributed service does it), and
+     * Tlaloc leaves those NULL. Passing `num_nodes > 1` with a NULL kv store
+     * would fail or hang inside the plugin — a loud named refusal beats
+     * either. Lifting this is the G4 kv-store upcall work
+     * (docs/MULTIHOST_DESIGN.md §4).
+     */
+    internal fun requireKvStoreForMultiNode(options: PjrtClientOptions?) {
+        require(options == null || options.numNodes == 1) {
+            "PJRT client create: options declare a multi-node group " +
+                "(node_id=${options!!.nodeId}, num_nodes=${options.numNodes}, " +
+                "coordinator=${options.coordinatorAddress}) but the kv-store callbacks " +
+                "(PJRT_Client_Create_Args.kv_get/kv_try_get/kv_put) are not implemented — " +
+                "a multi-node client cannot rendezvous without them. Multi-host init is " +
+                "G4 surface; see docs/MULTIHOST_DESIGN.md. Marshalling of node_id/" +
+                "num_nodes is certified; client CREATION at num_nodes > 1 is refused by name."
+        }
     }
 
     internal val PJRT_Client_Destroy_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
@@ -602,18 +648,70 @@ object PjrtFfm {
 data class PjrtClientOptions(
     val memoryFraction: Float,
     val preallocate: Boolean,
+    /** §0.4.461 (G3a-2) — this process's rank in a multi-node group.
+     * Marshals as the GPU plugin's `node_id` kInt64 create-option when
+     * [numNodes] > 1; single-node (the default) marshals nothing new. */
+    val nodeId: Int = 0,
+    /** §0.4.461 (G3a-2) — group size. 1 (the default) is the single-node
+     * client every certified lane uses today; > 1 marshals `node_id` +
+     * `num_nodes` and is REFUSED at client create until the kv-store
+     * callbacks exist (G4 — see [PjrtFfm.requireKvStoreForMultiNode]). */
+    val numNodes: Int = 1,
+    /** §0.4.461 (G3a-2) — `host:port` of node 0's coordination service.
+     * NOT a PJRT create-option (the C API has none) — it is the address
+     * the G4 kv-store callbacks will dial, carried here so one options
+     * object states the whole group contract, and so the pod-group env
+     * (`TLALOC_PJRT_COORDINATOR_ADDRESS`, emitted by Maestro's
+     * TlalocPodSpecBuilder.buildPodGroup) resolves into it. Required
+     * exactly when [numNodes] > 1. */
+    val coordinatorAddress: String? = null,
 ) {
     init {
         require(memoryFraction > 0f && memoryFraction <= 1f) {
             "memoryFraction must be in (0, 1], got $memoryFraction"
         }
+        require(numNodes >= 1) { "numNodes must be >= 1, got $numNodes" }
+        require(nodeId in 0 until numNodes) {
+            "nodeId must be in [0, numNodes), got nodeId=$nodeId with numNodes=$numNodes"
+        }
+        if (numNodes > 1) {
+            require(coordinatorAddress != null) {
+                "a multi-node group (numNodes=$numNodes) requires coordinatorAddress " +
+                    "(host:port of node 0's coordination service)"
+            }
+        }
+        if (coordinatorAddress != null) {
+            val port = coordinatorAddress.substringAfterLast(':', "")
+            require(
+                coordinatorAddress.substringBeforeLast(':', "").isNotBlank() &&
+                    port.toIntOrNull() in 1..65535,
+            ) {
+                "coordinatorAddress must be host:port with port in [1, 65535], " +
+                    "got '$coordinatorAddress'"
+            }
+        }
     }
 
+    /** Number of `PJRT_NamedValue` entries [PjrtFfm.marshalCreateOptions]
+     * emits for these options: 2 single-node (§0.4.333 unchanged), 4 when
+     * the group is multi-node (+node_id, +num_nodes). */
+    val namedValueCount: Long get() = if (numNodes > 1) 4L else 2L
+
     companion object {
-        /** Resolve from env, falling back to the unified-memory-safe defaults. */
+        /** Resolve from env, falling back to the unified-memory-safe defaults.
+         *
+         * §0.4.461 (G3a-2) — the distributed trio joins the env surface:
+         * `TLALOC_PJRT_NODE_ID`, `TLALOC_PJRT_NUM_NODES`,
+         * `TLALOC_PJRT_COORDINATOR_ADDRESS` — exactly the variables a
+         * Maestro pod-group member is launched with (TlalocPodSpecBuilder
+         * .buildPodGroup). Absent, everything defaults to the single-node
+         * client. */
         fun resolve(): PjrtClientOptions = PjrtClientOptions(
             memoryFraction = System.getenv("TLALOC_PJRT_MEMORY_FRACTION")?.toFloat() ?: 0.5f,
             preallocate = System.getenv("TLALOC_PJRT_PREALLOCATE")?.toBooleanStrict() ?: false,
+            nodeId = System.getenv("TLALOC_PJRT_NODE_ID")?.toInt() ?: 0,
+            numNodes = System.getenv("TLALOC_PJRT_NUM_NODES")?.toInt() ?: 1,
+            coordinatorAddress = System.getenv("TLALOC_PJRT_COORDINATOR_ADDRESS"),
         )
     }
 }
@@ -669,11 +767,14 @@ class PjrtApi internal constructor(
      * enforces that pairing by target and refuses the cross-wirings by
      * name. */
     fun createClient(options: PjrtClientOptions? = PjrtClientOptions.resolve()): PjrtClient {
+        // §0.4.461 (G3a-2) — multi-node creation refused by name until the
+        // kv-store callbacks exist (G4); marshalling alone is certified.
+        PjrtFfm.requireKvStoreForMultiNode(options)
         val args = arena.allocate(PjrtFfm.PJRT_Client_Create_Args_LAYOUT)
         args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_StructSize, PjrtFfm.SZ_ClientCreate)
         if (options != null) {
             args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalCreateOptions(arena, options))
-            args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 2L)
+            args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, options.namedValueCount)
         } else {
             args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, MemorySegment.NULL)
             args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 0L)

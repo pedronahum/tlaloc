@@ -110,6 +110,51 @@ recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
 
+- **§0.4.461 — G3a-2 DONE: the multi-host design on file + the certifiable
+  seam implemented** (design-heavy by charter; NO multi-host run is claimed
+  anywhere — that needs 2+ hosts and is G4's). **(1) docs/MULTIHOST_DESIGN.md**
+  is the authority: the PJRT C API's two distributed surfaces kept distinct —
+  the GPU plugin's create-option NamedValues (the full parsed set enumerated
+  and VERIFIED against xla/pjrt/c/pjrt_c_api_gpu_internal.cc at openxla/xla
+  main 2026-09-21, `node_id`/`num_nodes` kInt64 among them) versus the
+  kv-store callbacks in PJRT_Client_Create_Args (how multi-node clients
+  actually rendezvous; **there is NO coordinator_address option** — the
+  coordinator is a framework-side service backing the kv callbacks, JAX's
+  distributed runtime being the reference); the TPU/MegaScale env layer
+  (TPU_PROCESS_* singles, MEGASCALE_COORDINATOR_ADDRESS/NUM_SLICES/SLICE_ID/
+  PORT multi-slice — recorded from Ray/TorchTPU usage, marked UNVERIFIED
+  until a libtpu confirms); and the design consequence stated: the group
+  contract travels as ENV, because both worlds consume env. **(2) The
+  certified runtime half**: `PjrtClientOptions` gains
+  `nodeId`/`numNodes`/`coordinatorAddress` — single-node marshals
+  BYTE-IDENTICAL to §0.4.333 (the distributed fields add nothing until asked
+  for, pinned), `numNodes > 1` marshals node_id/num_nodes as kInt64 entries
+  3–4 (bytes pinned GPU-less), `coordinatorAddress` is NEVER marshalled (no
+  such option exists — it is the G4 kv-store dial target, validated
+  host:port, required exactly when multi-node), and client CREATION at
+  numNodes > 1 REFUSES BY NAME via the pure-extracted
+  `requireKvStoreForMultiNode` (NULL kv callbacks would fail or hang inside
+  the plugin; the refusal names MULTIHOST_DESIGN.md) — refusal certified
+  GPU-less too. `resolve()` reads the env trio TLALOC_PJRT_NODE_ID/
+  NUM_NODES/COORDINATOR_ADDRESS. **(3) The certified Maestro half**:
+  `TlalocPodSpecBuilder.buildPodGroup(base, numNodes, host, port)` expands
+  one accelerator-selected KubernetesCommand into N members — env trio with
+  per-member rank, dedup key suffixed `-node<i>` so members never collapse
+  into one K8s job, everything else copied (mesh-consistent by construction:
+  one manifest, N pods), reserved-env collisions refused by name, composition
+  order pinned (applyBackendTarget THEN buildPodGroup). REJECTED: a Python
+  `jax.distributed` sidecar for init (reintroduces the runtime Python the FFM
+  stack exists to avoid); minting K8s names inside the builder (the runner
+  owns naming — coordinator host/port are data). NAMED DEFERRALS: the kv-store
+  FFM upcalls + coordinator service (G4a — design intent in the doc §4);
+  gang-scheduling CRDs (deployment requirement, stated, not emitted); the
+  Maestro `distributed { nodes = N }` step schema + TlalocStepRuntime wiring
+  (G4d — rides with the first real run); multi-slice/MegaScale env emission.
+  The G4 dependency chain recorded (doc §6): G4a kv-store → G4b multi-node
+  create → G4c ALL_REDUCE across real devices (upgrading §0.4.460's
+  single-process semantics) → G4d Maestro wiring → G4e DDP-equivalent
+  trainer; multi-slice last. Suite 2103 → 2119.
+
 - **§0.4.460 — G3a slice 1 DONE: ALL_REDUCE from demoted refusal to real
   op — the intra-job coordinator's first brick** (LOCAL certification —
   single-process semantics only; NO multi-device execution claim, that is

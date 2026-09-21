@@ -55,6 +55,20 @@ import lombok.extern.slf4j.Slf4j;
 public final class TlalocPodSpecBuilder {
 
   /**
+   * §0.4.461 (G3a-2) — the env contract a distributed pod-group member is launched with. The
+   * names are exactly what {@code PjrtClientOptions.resolve()} (runtime-pjrt) reads, so a pod
+   * whose env carries them builds its PJRT client with the right rank/group/coordinator without
+   * any other plumbing. See docs/MULTIHOST_DESIGN.md.
+   */
+  public static final String ENV_NODE_ID = "TLALOC_PJRT_NODE_ID";
+
+  /** See {@link #ENV_NODE_ID}. */
+  public static final String ENV_NUM_NODES = "TLALOC_PJRT_NUM_NODES";
+
+  /** See {@link #ENV_NODE_ID}. */
+  public static final String ENV_COORDINATOR_ADDRESS = "TLALOC_PJRT_COORDINATOR_ADDRESS";
+
+  /**
    * Maps lower-case vendor → K8s nodeSelector key/value patterns we emit.
    *
    * <p>Vendors absent from the map fall through to the "no nodeSelector" path — same as the
@@ -161,6 +175,79 @@ public final class TlalocPodSpecBuilder {
         .accelerators(Map.copyOf(accelerators))
         .gpu(gpu)
         .build();
+  }
+
+  /**
+   * §0.4.461 (G3a-2) — expand one accelerator-selected {@link KubernetesCommand} into a
+   * DISTRIBUTED POD GROUP: {@code numNodes} member commands, identical in every field except
+   * env (each member gains {@link #ENV_NODE_ID}=i, {@link #ENV_NUM_NODES}=N,
+   * {@link #ENV_COORDINATOR_ADDRESS}=host:port) and the job-deduplication key (suffixed
+   * {@code -nodeN} so the members never collapse into one K8s job).
+   *
+   * <p>The workflow-level contract (docs/MULTIHOST_DESIGN.md §5): a distributed step = one
+   * program manifest, N pods, mesh-consistent — every member runs the SAME image/command over
+   * the SAME manifest, and only the env trio distinguishes rank. Compose with
+   * {@link #applyBackendTarget} first (accelerator selection), then expand; the group is
+   * homogeneous by construction because expansion copies the already-selected base.
+   *
+   * <p>The coordinator address names node 0's coordination service — by convention the node-0
+   * pod's stable DNS name under a headless service ({@code <group>-node0.<service>}); the
+   * builder takes it as data rather than minting K8s object names (the runner owns naming).
+   *
+   * <p>What v1 does NOT do, by name: no PodGroup/gang-scheduling CRD emission (Kueue/Volcano
+   * are cluster-operator territory; all-or-nothing scheduling is recorded as a deployment
+   * requirement, not enforced here), no per-member GPU topology spreading, no multi-slice
+   * (MegaScale) env — single-slice groups only until G4 measures a real one.
+   *
+   * @param base the fully-built single-pod command (accelerator selection already applied).
+   * @param numNodes group size; must be >= 1. Size 1 returns the degenerate one-member group
+   *     (env trio still emitted, so the contract is uniform and {@code PjrtClientOptions}
+   *     resolves identically at every size).
+   * @param coordinatorHost DNS name or IP of node 0's coordination service.
+   * @param coordinatorPort port of that service, in [1, 65535].
+   * @return an immutable list of {@code numNodes} member commands, index = node id.
+   */
+  public List<KubernetesCommand> buildPodGroup(
+      KubernetesCommand base, int numNodes, String coordinatorHost, int coordinatorPort) {
+    if (numNodes < 1) {
+      throw new IllegalArgumentException(
+          "buildPodGroup: numNodes must be >= 1, got " + numNodes);
+    }
+    if (coordinatorHost == null || coordinatorHost.isBlank()) {
+      throw new IllegalArgumentException("buildPodGroup: coordinatorHost must be non-blank");
+    }
+    if (coordinatorPort < 1 || coordinatorPort > 65535) {
+      throw new IllegalArgumentException(
+          "buildPodGroup: coordinatorPort must be in [1, 65535], got " + coordinatorPort);
+    }
+    Map<String, String> baseEnv = base.getEnv() == null ? Map.of() : base.getEnv();
+    for (String reserved : List.of(ENV_NODE_ID, ENV_NUM_NODES, ENV_COORDINATOR_ADDRESS)) {
+      if (baseEnv.containsKey(reserved)) {
+        throw new IllegalArgumentException(
+            "buildPodGroup: base env already carries reserved key "
+                + reserved
+                + " — the pod-group builder owns the distributed env trio "
+                + "(refusing rather than silently overwriting a rank)");
+      }
+    }
+    String coordinatorAddress = coordinatorHost + ":" + coordinatorPort;
+    List<KubernetesCommand> members = new java.util.ArrayList<>(numNodes);
+    for (int nodeId = 0; nodeId < numNodes; nodeId++) {
+      Map<String, String> env = new LinkedHashMap<>(baseEnv);
+      env.put(ENV_NODE_ID, Integer.toString(nodeId));
+      env.put(ENV_NUM_NODES, Integer.toString(numNodes));
+      env.put(ENV_COORDINATOR_ADDRESS, coordinatorAddress);
+      String dedupKey =
+          base.getJobDeduplicationKey() == null
+              ? null
+              : base.getJobDeduplicationKey() + "-node" + nodeId;
+      members.add(
+          base.toBuilder()
+              .env(Map.copyOf(env))
+              .jobDeduplicationKey(dedupKey)
+              .build());
+    }
+    return List.copyOf(members);
   }
 
   private static double costOrInfinity(BackendTargetRecord r) {

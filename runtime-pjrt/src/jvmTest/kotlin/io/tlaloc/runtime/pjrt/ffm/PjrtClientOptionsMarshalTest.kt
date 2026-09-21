@@ -84,6 +84,133 @@ class PjrtClientOptionsMarshalTest {
         assertFailsWith<IllegalArgumentException> { PjrtClientOptions(1.5f, false) }
     }
 
+    // =====================================================================
+    // §0.4.461 (G3a-2) — the distributed create-options. Marshalling is the
+    // certified claim (GPU-less, the §0.4.333 way); client CREATION at
+    // num_nodes > 1 is refused by name until G4's kv-store callbacks exist.
+    // =====================================================================
+
+    @Test
+    fun singleNodeDefaultsMarshalExactlyTheTwoLegacyEntries() {
+        // The distributed fields must add NOTHING until asked for: the
+        // §0.4.333 CUDA lane's bytes are unchanged by this slice.
+        val options = PjrtClientOptions(memoryFraction = 0.5f, preallocate = false)
+        assertEquals(0, options.nodeId)
+        assertEquals(1, options.numNodes)
+        assertEquals(null, options.coordinatorAddress)
+        assertEquals(2L, options.namedValueCount)
+        Arena.ofConfined().use { arena ->
+            val array = PjrtFfm.marshalCreateOptions(arena, options)
+            assertEquals(PjrtFfm.SZ_NamedValue * 2, array.byteSize())
+            assertEquals("memory_fraction", readName(array, 0))
+            assertEquals("preallocate", readName(array, 1))
+        }
+    }
+
+    @Test
+    fun multiNodeMarshalsNodeIdAndNumNodesAsInt64Entries() {
+        // Names + types verified against the GPU plugin's create path
+        // (xla/pjrt/c/pjrt_c_api_gpu_internal.cc, openxla/xla main
+        // 2026-09-21): node_id and num_nodes parse as kInt64.
+        val options = PjrtClientOptions(
+            memoryFraction = 0.5f, preallocate = false,
+            nodeId = 3, numNodes = 8, coordinatorAddress = "trainer-node0.tlaloc:8476",
+        )
+        assertEquals(4L, options.namedValueCount)
+        Arena.ofConfined().use { arena ->
+            val array = PjrtFfm.marshalCreateOptions(arena, options)
+            assertEquals(PjrtFfm.SZ_NamedValue * 4, array.byteSize())
+
+            val nodeIdBase = 2 * PjrtFfm.SZ_NamedValue
+            assertEquals(PjrtFfm.SZ_NamedValue, array.get(JAVA_LONG, nodeIdBase + PjrtFfm.OFF_NamedValue_StructSize))
+            assertEquals("node_id", readName(array, 2))
+            assertEquals(PjrtFfm.PJRT_NAMED_VALUE_TYPE_INT64, array.get(JAVA_INT, nodeIdBase + PjrtFfm.OFF_NamedValue_Type))
+            assertEquals(3L, array.get(JAVA_LONG, nodeIdBase + PjrtFfm.OFF_NamedValue_Value))
+            assertEquals(1L, array.get(JAVA_LONG, nodeIdBase + PjrtFfm.OFF_NamedValue_ValueSize))
+
+            val numNodesBase = 3 * PjrtFfm.SZ_NamedValue
+            assertEquals("num_nodes", readName(array, 3))
+            assertEquals(PjrtFfm.PJRT_NAMED_VALUE_TYPE_INT64, array.get(JAVA_INT, numNodesBase + PjrtFfm.OFF_NamedValue_Type))
+            assertEquals(8L, array.get(JAVA_LONG, numNodesBase + PjrtFfm.OFF_NamedValue_Value))
+        }
+    }
+
+    @Test
+    fun coordinatorAddressIsNeverMarshalled() {
+        // The PJRT C API has no coordinator create-option — the address
+        // backs the (unimplemented, G4) kv-store callbacks. It must not
+        // leak into the NamedValue array under any name.
+        val options = PjrtClientOptions(
+            memoryFraction = 0.5f, preallocate = false,
+            nodeId = 0, numNodes = 2, coordinatorAddress = "10.0.0.7:8476",
+        )
+        Arena.ofConfined().use { arena ->
+            val array = PjrtFfm.marshalCreateOptions(arena, options)
+            val names = (0 until 4).map { readName(array, it) }
+            assertEquals(listOf("memory_fraction", "preallocate", "node_id", "num_nodes"), names)
+        }
+    }
+
+    @Test
+    fun rejectsMalformedDistributedOptions() {
+        val coord = "host:8476"
+        // numNodes must be >= 1.
+        assertFailsWith<IllegalArgumentException> {
+            PjrtClientOptions(0.5f, false, nodeId = 0, numNodes = 0)
+        }
+        // nodeId must sit inside [0, numNodes).
+        assertFailsWith<IllegalArgumentException> {
+            PjrtClientOptions(0.5f, false, nodeId = 2, numNodes = 2, coordinatorAddress = coord)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PjrtClientOptions(0.5f, false, nodeId = -1, numNodes = 1)
+        }
+        // A multi-node group without a coordinator is not a group contract.
+        assertFailsWith<IllegalArgumentException> {
+            PjrtClientOptions(0.5f, false, nodeId = 0, numNodes = 2)
+        }
+        // Coordinator must be host:port with a real port.
+        assertFailsWith<IllegalArgumentException> {
+            PjrtClientOptions(0.5f, false, nodeId = 0, numNodes = 2, coordinatorAddress = "no-port")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PjrtClientOptions(0.5f, false, nodeId = 0, numNodes = 2, coordinatorAddress = ":8476")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PjrtClientOptions(0.5f, false, nodeId = 0, numNodes = 2, coordinatorAddress = "host:99999")
+        }
+    }
+
+    @Test
+    fun resolveDefaultsToSingleNodeWhenEnvUnset() {
+        if (System.getenv("TLALOC_PJRT_NODE_ID") == null &&
+            System.getenv("TLALOC_PJRT_NUM_NODES") == null &&
+            System.getenv("TLALOC_PJRT_COORDINATOR_ADDRESS") == null
+        ) {
+            val resolved = PjrtClientOptions.resolve()
+            assertEquals(0, resolved.nodeId)
+            assertEquals(1, resolved.numNodes)
+            assertEquals(null, resolved.coordinatorAddress)
+        }
+    }
+
+    @Test
+    fun multiNodeClientCreationRefusesByNameWithoutKvStore() {
+        // The guard is extracted pure (PjrtFfm.requireKvStoreForMultiNode)
+        // so THIS certification needs no plugin: num_nodes > 1 with NULL
+        // kv callbacks would fail or hang inside the plugin, so create
+        // refuses loudly and names the G4 gap.
+        PjrtFfm.requireKvStoreForMultiNode(null) // TPU form: fine
+        PjrtFfm.requireKvStoreForMultiNode(PjrtClientOptions(0.5f, false)) // single-node: fine
+        val ex = assertFailsWith<IllegalArgumentException> {
+            PjrtFfm.requireKvStoreForMultiNode(
+                PjrtClientOptions(0.5f, false, nodeId = 1, numNodes = 4, coordinatorAddress = "c:8476"),
+            )
+        }
+        val message = ex.message ?: ""
+        kotlin.test.assertTrue("kv" in message && "MULTIHOST_DESIGN" in message, "message was: $message")
+    }
+
     private fun readName(array: java.lang.foreign.MemorySegment, index: Int): String {
         val base = index * PjrtFfm.SZ_NamedValue
         val ptr = array.get(ADDRESS, base + PjrtFfm.OFF_NamedValue_Name).reinterpret(Long.MAX_VALUE)
