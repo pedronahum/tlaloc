@@ -5,9 +5,20 @@
 # property of an installed distribution. `pip install -e harness/python`
 # registers the plugin; nothing else in this repo needs installing.
 #
-# The distribution ships the plugin package AND `tlaloc_serve` — the H3a
-# loader the plugin delegates execution to. They are one deployable: a
-# plugin that can find vLLM but not its loader is not a serving install.
+# The distribution ships the plugin package AND the loader stack it
+# delegates execution to: `tlaloc_serve` (H3a, rewired in H6b),
+# `tlaloc_pjrt` (H6a's ctypes binding of the PJRT C API) and `import_guard`
+# (the certification's framework net). They are one deployable: a plugin
+# that can find vLLM but not its loader is not a serving install.
+#
+# §0.4.476 (H6b) — THE DEPENDENCY LIST IS EMPTY, AND THAT IS THE POINT.
+# It said `numpy` until the loader ran on jaxlib and numpy arrays. It now
+# reaches PJRT through ctypes and the standard library, so the serving half
+# of this distribution installs with nothing behind it: a PJRT plugin `.so`
+# and a driver are the runtime. numpy is still reachable — the jax ORACLE
+# engine uses it for the CPU semantics lane — but an oracle is a thing you
+# install to MEASURE a deployment, never a thing the deployment needs, and
+# declaring it here would have made that distinction invisible to pip.
 #
 # vLLM is deliberately NOT a dependency. It is the HOST: whoever runs
 # `vllm serve` already has it, and declaring it here would let a plain
@@ -20,10 +31,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm-tlaloc"
-version = "0.4.470"
+version = "0.4.476"
 description = "vLLM out-of-tree platform plugin executing Tlaloc serving artifacts through PJRT"
 requires-python = ">=3.10"
-dependencies = ["numpy"]
+dependencies = []
 
 [project.entry-points."vllm.platform_plugins"]
 # The value is `module:callable`; vLLM calls it and expects the dotted path
@@ -34,4 +45,4 @@ tlaloc = "vllm_tlaloc:register"
 
 [tool.setuptools]
 packages = ["vllm_tlaloc"]
-py-modules = ["tlaloc_serve"]
+py-modules = ["tlaloc_serve", "tlaloc_pjrt", "import_guard"]

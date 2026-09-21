@@ -8,7 +8,14 @@ arrays the graph reads and returns.
 **It does not import vLLM.** `worker.py` adapts vLLM's call shapes onto
 this class's methods; this class is drivable by anything, which is how the
 certification drives it against a real exported artifact with no vLLM
-installed. numpy and jax arrive only through `tlaloc_serve`, lazily.
+installed.
+
+§0.4.476 (H6b): execution arrives through `tlaloc_serve`, which now reaches
+PJRT by ctypes on every platform that has a plugin `.so` — so on the CUDA
+lane this runner drives a device without importing jax, jaxlib, torch or
+numpy at all. The `"cpu"` platform still resolves to the jax ORACLE engine
+(jaxlib ships no CPU PJRT plugin); `tlaloc_serve.default_engine_for` is the
+single place that rule is written down.
 
 ## Decisions
 

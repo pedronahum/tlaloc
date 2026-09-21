@@ -1,10 +1,10 @@
 # Serving runbook — export an artifact, run it, plug it into vLLM
 
-**Status (§0.4.473, the Phase H close-out).** This is the reproduction
-script for the whole serving path: it takes a fresh machine to a Tlaloc
-serving artifact, runs that artifact from Python with **no JVM in the
-process**, and hands it to vLLM through the `vllm-tlaloc` platform
-plugin. Every step is marked **CERTIFIED** (a test in `./gradlew test`
+**Status (§0.4.476, H6b).** This is the reproduction script for the whole
+serving path: it takes a fresh machine to a Tlaloc serving artifact, runs
+that artifact from Python with **no JVM, no JAX, no torch and no numpy in
+the process — a PJRT plugin `.so` and a driver are the entire runtime** —
+and hands it to vLLM through the `vllm-tlaloc` platform plugin. Every step is marked **CERTIFIED** (a test in `./gradlew test`
 proves it) or **UNCERTIFIED** (written, never executed here, with the
 reason and the command that would settle it).
 
@@ -30,15 +30,39 @@ export JAVA_HOME=~/.local/jdks/jdk-25.0.3+9      # every gradle command
 export TLALOC_VENV=~/.local/venvs/iree            # the project venv
 ```
 
-What the venv must already have, and why:
+What the venv must already have, and why. **Read the middle column
+carefully: since §0.4.476 the serving path needs none of it.**
 
-| package | why |
-|---|---|
-| `jax` + `jaxlib` (+ `jax-cuda12-plugin` for the CUDA lane) | `tlaloc_serve` compiles the artifact's MLIR through `jaxlib.mlir` and runs it on a PJRT client. **This is the only hard dependency of the serving path.** |
-| `numpy` | the wire format between the loader and the caller |
-| `torch`, `safetensors` | only for the *oracles* (H2's bf16 parity reads bytes torch wrote). Not needed to serve. |
+| package | needed to SERVE? | why it is here |
+|---|---|---|
+| `jax` + `jaxlib` (+ `jax-cuda12-plugin`) | **no** | it is where a `xla_cuda_plugin.so` happens to sit on this box, and it is the ORACLE for the 1e-5 XLA-CPU semantics lane (jaxlib ships no CPU PJRT plugin `.so`) |
+| `numpy` | **no** | the jax oracle engine's array type. The ctypes loader's wire format is flat Python lists |
+| `torch`, `safetensors` | **no** | oracles only (H2's bf16 parity reads bytes torch wrote) |
+| a PJRT plugin `.so` | **YES — and it is the only one** | `tlaloc_pjrt` dlopens it and calls `GetPjrtApi` |
 
-On a fresh machine, the serving half alone is:
+### What a SERVING machine actually needs (§0.4.476)
+
+```bash
+python -m venv /srv/tlaloc-venv && . /srv/tlaloc-venv/bin/activate
+pip install -e /home/pedro/programming/tlaloc/harness/python   # zero dependencies
+export TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so
+```
+
+`pip install -e harness/python` pulls **nothing**: the distribution's
+`dependencies` list is empty and pinned empty by a test
+(`vllm_tlaloc_test.LoaderIsStandardLibraryOnly` / the registration lane).
+The plugin `.so` comes from one of exactly three places, and the loader
+looks for them in this order — all three are FILE lookups, never imports:
+
+1. `TLALOC_PJRT_PLUGIN_PATH` — what a deployment that ships its own plugin
+   sets. Same variable `PjrtBinaries` reads JVM-side, so one export
+   configures both halves of the box.
+2. `/lib/libtpu.so` — a Cloud TPU VM's plugin, already on the image (G2b).
+3. `<site-packages>/jax_plugins/*/xla_cuda_plugin.so` — a jax install used
+   as a *place a file sits*. This is the convenience path on THIS machine
+   and it is a directory walk, not an `import jax_plugins`.
+
+### The development venv (the oracles)
 
 ```bash
 python -m venv "$TLALOC_VENV" && . "$TLALOC_VENV/bin/activate"
@@ -237,14 +261,16 @@ largest open item.
 
 ## 3. Run the artifact from Python (CERTIFIED, both lanes)
 
-No JVM, no gradle, no Kotlin in this process. The directory is the input.
+No JVM, no gradle, no Kotlin in this process — and since §0.4.476 no
+framework either. The directory plus a plugin `.so` is the input.
 
 ```bash
 . "$TLALOC_VENV/bin/activate"
 export PYTHONPATH=/home/pedro/programming/tlaloc/harness/python
 python - <<'PY'
-import numpy as np, tlaloc_serve
+import tlaloc_serve                      # stdlib + ctypes; no jax, no numpy
 
+print(tlaloc_serve.find_pjrt_plugin())   # the entire runtime dependency
 art = tlaloc_serve.ServingArtifact.load("/tmp/tlaloc-serving-artifact", platform="cuda")
 art.verify_bodies()                       # re-hash every body against its filename
 print(art.manifest["model"])
@@ -272,6 +298,14 @@ duplicated in `tlaloc_serve.py` deliberately and loudly:
 `check_padding_constants()` exists so the certification pins the two
 copies together instead of trusting a comment.
 
+Host arrays are **flat row-major Python lists**, not ndarrays (§0.4.476):
+`empty_pools()` hands them out in the form `run_decode` takes, and
+`run_decode` returns `logits` nested to the manifest's declared trailing
+dims — `[tokensPerSeq, vocab]` per real row, token axis KEPT even at 1 so
+`last_token_logits` still works the day a prefill entry exists. Shapes come
+from the manifest, which is where they were authoritative anyway.
+`tlaloc_serve.unflatten` / `.flatten` convert.
+
 ### The certified end-to-end check
 
 ```bash
@@ -281,10 +315,21 @@ python harness/python/run_tlaloc_serve_check.py \
 ```
 
 Exit codes: `0` ran · `1` the run failed (the interesting failure) · `2`
-the environment cannot run it at all (no jax, no device) — the Kotlin side
-self-skips on 2 and fails on 1. `ServingArtifactExportRunTest` drives
-exactly this, builds the request, and compares against the host
-interpreter.
+the environment cannot run it at all (no plugin, no device, no jax for the
+oracle lane) — the Kotlin side self-skips on 2 and fails on 1.
+`ServingArtifactExportRunTest` drives exactly this, builds the request, and
+compares against the host interpreter.
+
+**Which engine ran, and why there are two (§0.4.476).**
+`--engine ctypes` is the default and the deployment path: `tlaloc_serve`
+compiles and executes through `tlaloc_pjrt`, and the whole run happens under
+a `sys.meta_path` guard that raises on `jax`, `jaxlib`, `torch` and `numpy`
+— in the venv where jax *is* installed. `--engine jax` is an **oracle** and
+nothing else: jaxlib ships no CPU PJRT plugin `.so` (its CPU client is a C++
+class inside the jaxlib extension), so the tight 1e-5 XLA-CPU *semantics*
+lane has nothing for ctypes to `dlopen`. `tlaloc_serve.default_engine_for`
+is the one place that rule is written down — `cpu` gets jax, every
+accelerator platform gets ctypes.
 
 **The two floors, and why there are two.** The identical artifact runs on
 the PJRT **CPU** client at **1e-5** relative and the PJRT **CUDA** client
@@ -381,9 +426,37 @@ CUDA-13-beside-CUDA-12 question there:
 
 ```bash
 python -m venv ~/.local/venvs/vllm && . ~/.local/venvs/vllm/bin/activate
-pip install vllm "jax[cuda12]"
-pip install -e /home/pedro/programming/tlaloc/harness/python
+pip install vllm                     # jax NO LONGER REQUIRED — see below
+pip install -e /home/pedro/programming/tlaloc/harness/python   # zero deps
+export TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so
 ```
+
+#### What the vLLM venv will and will not need (§0.4.476)
+
+**Will need:** vLLM itself and its own closure (torch included — vLLM's
+scheduler, tokenizer and API server are torch-native and that is the host's
+business, not ours); `vllm-tlaloc` installed for its entry point; and a PJRT
+plugin `.so` reachable through `TLALOC_PJRT_PLUGIN_PATH`.
+
+**Will NOT need:** `jax`, `jaxlib`, `jax-cuda12-plugin`, or numpy on
+Tlaloc's account. Before H6b the recipe above said `pip install vllm
+"jax[cuda12]"`, and that second half was the thing that made the venv
+question hard — jax's CUDA-12 wheel family landing beside vLLM's CUDA-13
+one. `tlaloc_serve` no longer imports any of it. What remains is a single
+`.so`, and the honest way to get one into that venv without installing jax
+is to copy it (or point at the oracle venv's copy, which is a read of a file
+and changes nothing in it — **that is not a write to the frozen venv, and it
+is the only interaction with it this recipe has**):
+
+```bash
+export TLALOC_PJRT_PLUGIN_PATH=$HOME/.local/venvs/iree/lib/python3.12/\
+site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so
+```
+
+**Still open, and H6b does not close it:** whether vLLM's CUDA-13 torch and
+the CUDA-12 XLA plugin coexist in one process. H6b removes jax from the
+question; it does not answer it. That is the live-serving certification's
+first finding, whichever way it goes.
 
 ### What is certified without vLLM present
 

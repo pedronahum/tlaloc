@@ -42,34 +42,17 @@ from __future__ import annotations
 import json
 import sys
 
-FORBIDDEN_ROOTS = ("jax", "jaxlib", "torch", "numpy")
+# §0.4.476 (H6b) moved the guard itself into `import_guard.py`, because that
+# slice wanted a second copy and two copies of a safety net drift. The field
+# names this script reports are unchanged, so the JVM assertions are too.
+import import_guard
 
+FORBIDDEN_ROOTS = import_guard.FORBIDDEN_ROOTS
 
-class _ForbiddenImportFinder:
-    """A `sys.meta_path` finder that refuses the frameworks this slice exists
-    to do without. It sits at the FRONT of meta_path, so it is consulted
-    before any real finder and an installed jax cannot satisfy the import."""
-
-    def __init__(self):
-        self.attempts = []
-
-    def find_module(self, fullname, path=None):  # legacy protocol, harmless
-        return self.find_spec(fullname, path)
-
-    def find_spec(self, fullname, path=None, target=None):
-        root = fullname.split(".")[0]
-        if root in FORBIDDEN_ROOTS:
-            self.attempts.append(fullname)
-            raise ImportError(
-                f"BLOCKED: '{fullname}' must not be imported on this path. §0.4.475 (H6a) "
-                "binds PJRT through ctypes precisely so the serving runtime needs no "
-                "framework; an import here means the dependency-free claim is false."
-            )
-        return None
-
-
-_GUARD = _ForbiddenImportFinder()
-sys.meta_path.insert(0, _GUARD)
+_GUARD = import_guard.install(
+    why="§0.4.475 (H6a) binds PJRT through ctypes precisely so the serving runtime "
+        "needs no framework; an import here means the dependency-free claim is false.",
+)
 
 # Imported under the guard, deliberately: stdlib only, and if that ever stops
 # being true this line is where it is found out.
@@ -77,25 +60,7 @@ import tlaloc_pjrt as P  # noqa: E402
 
 
 def _guard_report() -> dict:
-    """What the guard saw, plus the self-test that proves it would have
-    fired. `already_loaded` is a separate question from `attempts`: a module
-    imported before the guard went up would not be in `attempts`, and the
-    honest check is that `sys.modules` carries none of them."""
-    already = sorted({m.split(".")[0] for m in sys.modules if m.split(".")[0] in FORBIDDEN_ROOTS})
-    try:
-        __import__("jax")
-        fired = False
-        reason = "import jax SUCCEEDED — the guard is not installed"
-    except ImportError as exc:
-        fired = "BLOCKED" in str(exc)
-        reason = str(exc).splitlines()[0]
-    return {
-        "forbidden_roots": list(FORBIDDEN_ROOTS),
-        "loaded_forbidden": already,
-        "blocked_attempts": list(_GUARD.attempts),
-        "guard_self_test_fired": fired,
-        "guard_self_test_reason": reason,
-    }
+    return import_guard.report(_GUARD)
 
 
 def _layouts(out_path: str) -> None:

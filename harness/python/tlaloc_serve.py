@@ -1,61 +1,97 @@
-"""§0.4.469 — Phase H3a: the Python side of a Tlaloc serving artifact.
+"""§0.4.469 (H3a), rewired in §0.4.476 (H6b) — the Python side of a Tlaloc
+serving artifact, executing through **PJRT bound by ctypes**.
 
-This module is the other half of `docs/INFERENCE_SERVING_AUDIT.md`'s
-central claim: **no JVM in the serving path**. Kotlin AOT-compiles a
-family of decode graphs into an artifact DIRECTORY (see
-`io.tlaloc.maestro.serving.ServingArtifactWriter`); this file reads that
-directory, hands the StableHLO to jaxlib/PJRT, and runs decode steps. It
-imports nothing of Tlaloc's, starts no JVM, and never calls back.
+WHAT CHANGED IN H6b, AND WHY IT IS THE POINT
+============================================
 
-The shape follows vLLM's `tpu-inference` precedent (audit §1): the
-serving loop's scheduler, continuous batching and paged-KV bookkeeping
-stay in Python; what this replaces is EXECUTION.
+H3a wrote this module against **jaxlib**: `jax._src.xla_bridge` for the
+backend, `jaxlib.mlir` for the module, `jaxlib._jax.CompileOptions` for the
+compile, numpy for every host array. That worked, and it certified — but it
+meant the deployment claim was "no JVM", with a 500 MB CUDA-12 wheel family
+standing quietly behind it.
 
-    art = ServingArtifact.load("build/serving-artifact")
-    logits, pools = art.run_decode(
-        token_ids=[3, 1, 4], positions=[0, 0, 0],
-        block_tables=[[2], [5], [3]], seq_lens=[1, 1, 1],
-        slot_mapping=[4, 10, 6], kv_pools=pools,
-    )
+H6a (`tlaloc_pjrt.py`) bound the PJRT C API with `ctypes` alone. This file
+now runs on that binding, and the claim becomes the one the audit wanted:
 
-Design notes, and what they rejected:
+    no JVM, no JAX, no torch, no numpy — just the PJRT plugin `.so`.
 
-* **Bucket selection is read from the manifest, not re-derived.** The
-  artifact carries its ladder (H1c named this as the manifest field it
-  was deferring), so the rounding rule lives in one place. REJECTED:
-  hard-coding powers of two here — two implementations of one policy is
-  how a request gets padded to a shape nobody compiled.
-* **Padding constants are duplicated from `DecodePadding`, deliberately
-  and loudly.** They are a WIRE convention between two processes, so
-  they are restated here with the reason attached (`seq_lens` padding is
-  1 and never 0: a zero-length row makes the paged-attention softmax
-  0/0). `check_padding_constants()` exists so a test can pin the two
-  copies together rather than trusting a comment.
-* **The body is compiled, never edited.** The §0.4.325 spike regex-renamed
-  the entry function to `@main` before compiling; the exporter names it
-  `main` instead and the manifest states it, so a loader does not rewrite
-  a program it was asked to run.
-* **Executables are cached by the manifest's `cacheKey`** — the same
-  string `DecodeGraphSpec.executableCacheKey` builds, so the JVM-side and
-  serving-side caches agree by construction.
+At module scope this file imports `json`, `os`, `hashlib`, `pathlib`,
+`dataclasses`, `typing` and `tlaloc_pjrt`. Nothing else. That is checkable,
+and `run_tlaloc_serve_check.py` checks it: the whole serving path runs under
+a `sys.meta_path` guard that raises on `jax`, `jaxlib`, `torch` or `numpy`,
+in the venv where jax *is* installed, and the guard is made to fire before
+the run reports so a guard that never fired cannot be mistaken for a clean
+run (§0.4.474's lesson, §0.4.475's pattern).
 
-Named deferrals: buffer DONATION (the manifest carries `donationPairs`;
-wiring them into `CompileOptions` is the next slice's measurable win),
-staged weights (v1 bodies carry them as constants), sampling (host-side,
-outside this module, per the audit), and multi-device execution.
+    art = ServingArtifact.load("build/serving-artifact")   # engine="ctypes"
+    with art:
+        logits, pools = art.run_decode(
+            token_ids=[3, 1, 4], positions=[0, 0, 0],
+            block_tables=[[2], [5], [3]], seq_lens=[1, 1, 1],
+            slot_mapping=[4, 10, 6], kv_pools=art.empty_pools(),
+        )
+
+THE HOST WIRE FORMAT IS FLAT LISTS, DELIBERATELY
+================================================
+
+Without numpy there is no ndarray, so every host-side tensor here is a
+**flat row-major sequence of Python numbers** and the shape comes from the
+manifest — which is where it was authoritative anyway. `run_decode` returns
+`logits` split into the real rows (`list[list[float]]`, the bucket's padding
+rows never leave this function) and the KV pools WHOLE and flat, because a
+pool is device state shared by every sequence and slicing it would be
+meaningless. `unflatten()` is here for a caller that wants nesting;
+`empty_pools()` hands back the same flat form it accepts.
+
+REJECTED: carrying a tiny ndarray-alike so the surface looked like the old
+one. A shim that is 5% of numpy is a thing every caller has to learn *and*
+cannot trust; a flat list is a thing every Python caller already knows.
+
+TWO ENGINES, AND THE HONEST REASON THERE ARE TWO
+================================================
+
+`engine="ctypes"` is **the serving engine**, and the default for every
+platform that has a plugin file — see `default_engine_for`, which is the one
+place the rule lives. It is what the deployment runs and what the claim above
+is about.
+
+`engine="jax"` is kept, and kept ONLY as an **oracle**: jaxlib ships no CPU
+PJRT plugin `.so` — its CPU client is a C++ class inside the jaxlib
+extension, not a loadable plugin — so the 1e-5 XLA-CPU *semantics* lane
+(`ServingArtifactExportRunTest`, the tight floor that says the program MEANS
+what the interpreter means) has no ctypes route on this machine. Deleting
+the jax engine would have deleted a certified row to make a sentence
+tidier. Its imports live INSIDE its methods, so selecting `engine="ctypes"`
+imports none of it and the import guard is a true statement about which
+engine ran, not a hopeful one.
+
+The house rule is one engine per job. The jobs are different: one is the
+deployment, one is the measurement apparatus. The day a CPU PJRT plugin
+`.so` exists here (or the TPU VM's `libtpu.so` does, G2b), the ctypes engine
+covers that lane unchanged and the jax engine goes.
+
+WHAT IS STILL DEFERRED
+======================
+
+Buffer DONATION (the manifest carries `donationPairs`; neither engine wires
+them into compile options yet — every step still round-trips whole pools
+through the host, which is the next measurable win and the reason this is
+a correctness artifact rather than a throughput one), staged weights (v1
+bodies carry them as constants), sampling (host-side, outside this module),
+multi-device execution, and bf16/int8 pools end to end (the dtype mapping
+below handles them; nothing has exported one yet).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-# GB10 is unified-memory: JAX's default 75% preallocation would claim ~90 GB
-# of system RAM. Must be set before `import jax` (§0.4.333, the reboot).
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+import tlaloc_pjrt as P
 
 SCHEMA_VERSION = "tlaloc-serving-v1"
 
@@ -92,35 +128,134 @@ def check_padding_constants(expected: dict) -> None:
             )
 
 
-# Keys are `io.tlaloc.core.DType.name` VERBATIM (lower case — `f32`, not
-# `F32`). The manifest writes that name and this reads it; folding case
-# here would let an artifact and a loader disagree about a dtype spelling
-# and still agree about the dtype, which is the sort of latitude that hides
-# a real mismatch later.
-_DTYPE_TO_NUMPY = {
-    "f32": "float32",
-    "f64": "float64",
-    "i32": "int32",
-    "i64": "int64",
-    "bf16": "bfloat16",
-    "bool": "bool",
+# ---------------------------------------------------------------------------
+# Finding a PJRT plugin, which is the whole dependency story.
+# ---------------------------------------------------------------------------
+
+def find_pjrt_plugin(explicit: str | None = None) -> str:
+    """Locate a PJRT plugin `.so`. **Imports nothing** — it looks for a FILE.
+
+    Three sources, in the order a deployment would want them:
+
+      1. `TLALOC_PJRT_PLUGIN_PATH` — the same env var `PjrtBinaries` honours
+         JVM-side, so one export configures both halves of the box. This is
+         what a deployment that ships its own plugin sets.
+      2. `/lib/libtpu.so` — a Cloud TPU VM's plugin, present on the image.
+      3. `jax_plugins/*/xla_cuda_plugin.so` under any site-packages of THIS
+         interpreter. Note carefully: this is a directory walk, not an
+         import. A jax install is being used as a place a `.so` happens to
+         sit, exactly as `PjrtBinaries` uses it JVM-side. Nothing about the
+         plugin knows or cares that a Python package delivered it.
+
+    REJECTED: `import jax_plugins` to find (3). It works, it is shorter, and
+    it would quietly make the framework a dependency of the thing whose
+    headline is that it is not one.
+    """
+    if explicit:
+        if not os.path.exists(explicit):
+            raise FileNotFoundError(f"no PJRT plugin at {explicit}")
+        return explicit
+    env = os.environ.get("TLALOC_PJRT_PLUGIN_PATH")
+    if env:
+        if not os.path.exists(env):
+            raise FileNotFoundError(
+                f"TLALOC_PJRT_PLUGIN_PATH={env} but no such file"
+            )
+        return env
+    if os.path.exists("/lib/libtpu.so"):
+        return "/lib/libtpu.so"
+    import site
+    import sysconfig
+
+    roots = []
+    for fn in ("getsitepackages", "getusersitepackages"):
+        f = getattr(site, fn, None)
+        if f is None:
+            continue
+        try:
+            got = f()
+        except Exception:  # pragma: no cover - site is not always initialised
+            continue
+        roots.extend([got] if isinstance(got, str) else list(got))
+    roots.append(sysconfig.get_paths().get("purelib", ""))
+    for root in roots:
+        plug = Path(root) / "jax_plugins"
+        if not plug.is_dir():
+            continue
+        for child in sorted(plug.iterdir()):
+            for name in ("xla_cuda_plugin.so", "xla_rocm_plugin.so", "pjrt_plugin.so"):
+                cand = child / name
+                if cand.exists():
+                    return str(cand)
+    raise FileNotFoundError(
+        "no PJRT plugin found. Set TLALOC_PJRT_PLUGIN_PATH to a plugin .so "
+        "(a jax install's jax_plugins/xla_cuda12/xla_cuda_plugin.so, a TPU "
+        "VM's /lib/libtpu.so, or a standalone plugin a deployment ships). "
+        "The serving runtime needs that file and a driver — nothing else."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dtypes. Keys are `io.tlaloc.core.DType.name` VERBATIM (lower case — `f32`,
+# not `F32`). The manifest writes that name and this reads it; folding case
+# here would let an artifact and a loader disagree about a dtype spelling and
+# still agree about the dtype, which is the sort of latitude that hides a real
+# mismatch later.
+#
+# This table is where H6b LIFTS the jax path's practical single-dtype squeeze:
+# every slot is staged as its own PJRT buffer of its own declared type, so an
+# I32 block table is a real device i32 buffer rather than something a
+# framework had to be talked into. (The manifest always described per-slot
+# dtypes — `ServingManifest`'s slots are exactly that — so this is honouring a
+# schema that was already right, not inventing one.)
+# ---------------------------------------------------------------------------
+
+_STAGE = {
+    "f32": ("buffer_from_host_f32", "to_f32", float),
+    "i32": ("buffer_from_host_i32", "to_i32", int),
+    "bf16": ("buffer_from_host_bf16", "to_bf16_patterns", int),
 }
 
 
-def _numpy_dtype(name: str):
-    import numpy as np
-
-    if name == "bf16":
-        import ml_dtypes
-
-        return ml_dtypes.bfloat16
+def _stage_for(dtype: str):
     try:
-        return np.dtype(_DTYPE_TO_NUMPY[name])
+        return _STAGE[dtype]
     except KeyError:
         raise ValueError(
-            f"Tlaloc dtype '{name}' has no numpy mapping in tlaloc_serve.py; "
-            f"known: {sorted(_DTYPE_TO_NUMPY)}"
+            f"Tlaloc dtype '{dtype}' has no PJRT staging in tlaloc_serve.py; "
+            f"known: {sorted(_STAGE)}. f64/i64/bool are refused BY NAME rather "
+            f"than coerced — a silently widened slot is a wrong answer that "
+            f"runs."
         ) from None
+
+
+def numel(dims: Sequence[int]) -> int:
+    n = 1
+    for d in dims:
+        n *= int(d)
+    return n
+
+
+def unflatten(flat: Sequence[Any], dims: Sequence[int]) -> list:
+    """Row-major nesting, for a caller that wants it. The loader itself never
+    needs it — shapes live in the manifest."""
+    if len(dims) <= 1:
+        return list(flat)
+    stride = numel(dims[1:])
+    return [unflatten(flat[i * stride:(i + 1) * stride], dims[1:]) for i in range(dims[0])]
+
+
+def flatten(nested) -> list:
+    """Row-major flattening, the inverse of [unflatten]."""
+    out = []
+    stack = [nested]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            stack.extend(reversed(item))
+        else:
+            out.append(item)
+    return out
 
 
 @dataclass(frozen=True)
@@ -134,6 +269,10 @@ class Slot:
     def parse(o: dict) -> "Slot":
         t = o["type"]
         return Slot(o["name"], o["role"], t["dtype"], tuple(t["dims"]))
+
+    @property
+    def count(self) -> int:
+        return numel(self.dims)
 
 
 @dataclass(frozen=True)
@@ -174,15 +313,194 @@ class Entry:
         return [i for i, s in enumerate(among) if s.role == role]
 
 
+# ---------------------------------------------------------------------------
+# Engines.
+# ---------------------------------------------------------------------------
+
+
+class CtypesEngine:
+    """THE serving engine: `tlaloc_pjrt` and the standard library.
+
+    Owns the plugin handle, the client and the executable cache; a `close()`
+    destroys them in the order PJRT requires (executables, then client),
+    because a leaked CUDA client is a pinned BFC pool that outlives the
+    process that wanted it.
+    """
+
+    name = "ctypes"
+
+    def __init__(self, platform: str, plugin_path: str | None):
+        self.platform = platform
+        self.plugin_path = find_pjrt_plugin(plugin_path)
+        self._api = None
+        self._client = None
+        self._device = None
+
+    def _ensure(self):
+        if self._client is not None:
+            return
+        self._api = P.PjrtApi.load(self.plugin_path)
+        # create_options are NOT optional on CUDA (§0.4.333): without them the
+        # plugin preallocates 75% of unified memory and takes the GB10 down.
+        # `create_client` refuses `None` for a GPU platform by name.
+        self._client = self._api.create_client(self.platform)
+        self._device = self._client.addressable_devices()[0]
+
+    def platform_name(self) -> str:
+        self._ensure()
+        return self._client.platform_name()
+
+    def compile(self, text: str):
+        self._ensure()
+        return self._client.compile(text)
+
+    def run(self, exe, staged: Sequence[tuple], outputs: Sequence[Slot]) -> list:
+        """`staged` is [(Slot, flat host sequence)] in the entry's input order.
+
+        Every input buffer and every output buffer is destroyed before this
+        returns: one decode step must not leave device memory behind, or a
+        serving loop is an allocator leak with a model attached.
+        """
+        self._ensure()
+        bufs = []
+        try:
+            for slot, values in staged:
+                maker, _, _ = _stage_for(slot.dtype)
+                bufs.append(getattr(self._client, maker)(self._device, values, slot.dims))
+            results = exe.execute(bufs, self._device)
+            try:
+                out = []
+                for i, slot in enumerate(outputs):
+                    _, reader, _ = _stage_for(slot.dtype)
+                    out.append(getattr(results[i], reader)(slot.count))
+                return out
+            finally:
+                for r in results:
+                    r.close()
+        finally:
+            for b in bufs:
+                b.close()
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+        self._api = None
+        self._device = None
+
+
+class JaxEngine:
+    """ORACLE ONLY — not the deployment path. See the module docstring.
+
+    Exists because jaxlib ships no CPU PJRT plugin `.so`, so the tight
+    XLA-CPU semantics lane has no ctypes route here. Every import is inside a
+    method on purpose: choosing the ctypes engine must import none of this,
+    and that is what makes the import guard a fact rather than a wish.
+    """
+
+    name = "jax"
+
+    def __init__(self, platform: str, plugin_path: str | None):
+        self.platform = platform
+        self.plugin_path = plugin_path
+        self._backend = None
+
+    def _ensure(self):
+        if self._backend is not None:
+            return
+        # GB10 is unified-memory: JAX's default 75% preallocation would claim
+        # ~90 GB of system RAM. Must be set before `import jax` (§0.4.333).
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+        import jax
+        import jax._src.xla_bridge as xb
+        import jaxlib._jax as _jax
+
+        backend = xb.backends()[self.platform]
+        devs = backend.local_devices()
+        if not devs:
+            raise RuntimeError(f"PJRT backend '{self.platform}' has no local devices")
+        self._backend = backend
+        self._devices = devs
+        self._device_list = _jax.DeviceList(tuple(devs[:1]))
+        self._jax = jax
+        self._jaxlib = _jax
+
+    def platform_name(self) -> str:
+        self._ensure()
+        return self.platform
+
+    def compile(self, text: str):
+        self._ensure()
+        import jaxlib.mlir.ir as ir
+        from jaxlib.mlir._mlir_libs._jax_mlir_ext import register_dialects
+        import jaxlib.mlir.dialects.stablehlo as stablehlo
+
+        reg = ir.DialectRegistry()
+        register_dialects(reg)
+        ctx = ir.Context()
+        ctx.append_dialect_registry(reg)
+        ctx.load_all_available_dialects()
+        stablehlo.register_dialect(ctx)
+        with ctx, ir.Location.unknown(ctx):
+            module = ir.Module.parse(text)
+        return self._backend.compile_and_load(module, self._device_list, self._jaxlib.CompileOptions())
+
+    def run(self, exe, staged: Sequence[tuple], outputs: Sequence[Slot]) -> list:
+        self._ensure()
+        import numpy as np
+
+        np_of = {"f32": np.float32, "i32": np.int32}
+        ordered = []
+        for slot, values in staged:
+            if slot.dtype not in np_of:
+                raise ValueError(
+                    f"the jax oracle engine stages f32/i32 only (slot '{slot.name}' is "
+                    f"{slot.dtype}); the ctypes engine is the one that carries bf16"
+                )
+            a = np.asarray(list(values), dtype=np_of[slot.dtype]).reshape(slot.dims)
+            ordered.append(self._jax.device_put(a, self._devices[0]))
+        results = exe.execute(ordered)
+        return [
+            [t.item() for t in np.asarray(r).reshape(-1)]
+            for r in results
+        ]
+
+    def close(self) -> None:
+        self._backend = None
+
+
+_ENGINES = {"ctypes": CtypesEngine, "jax": JaxEngine}
+
+
+def default_engine_for(platform: str) -> str:
+    """Which engine a platform gets when the caller does not say.
+
+    One rule, in one place, and it is a statement about jaxlib rather than a
+    preference: **there is no CPU PJRT plugin `.so`**. jaxlib's CPU client is
+    a C++ class inside its own extension module, so the ctypes binding — which
+    dlopens a file and calls `GetPjrtApi` — has nothing to open for `"cpu"`.
+    Every accelerator platform (cuda, rocm, tpu) ships a real plugin file and
+    therefore gets the ctypes engine, which is the deployment path.
+
+    The day a CPU plugin `.so` exists here this function is the only thing
+    that changes.
+    """
+    return "jax" if platform == "cpu" else "ctypes"
+
+
 class ServingArtifact:
     """A loaded Tlaloc serving artifact: manifest, bodies, executables."""
 
-    def __init__(self, root: Path, manifest: dict, platform: str = "cuda"):
+    def __init__(self, root: Path, manifest: dict, platform: str = "cuda",
+                 engine: str | None = None, plugin_path: str | None = None):
+        engine = engine or default_engine_for(platform)
         if manifest.get("schemaVersion") != SCHEMA_VERSION:
             raise ValueError(
                 f"{root}: schemaVersion {manifest.get('schemaVersion')!r} is not "
                 f"{SCHEMA_VERSION!r}; refusing an artifact of unknown shape"
             )
+        if engine not in _ENGINES:
+            raise ValueError(f"unknown engine {engine!r}; known: {sorted(_ENGINES)}")
         self.root = root
         self.manifest = manifest
         self.platform = platform
@@ -196,25 +514,40 @@ class ServingArtifact:
         self.weights = manifest["weights"]
         self.entries = [Entry.parse(e) for e in manifest["entries"]]
         self._exe_cache: dict = {}
-        self._backend = None
-        self._device_list = None
+        self.engine = _ENGINES[engine](platform, plugin_path)
 
     # --- loading -------------------------------------------------------
 
     @classmethod
-    def load(cls, path, platform: str = "cuda") -> "ServingArtifact":
+    def load(cls, path, platform: str = "cuda", engine: str | None = None,
+             plugin_path: str | None = None) -> "ServingArtifact":
         root = Path(path)
         mf = root / "tlaloc-serving.json"
         if not mf.exists():
             raise FileNotFoundError(f"{root} is not a Tlaloc serving artifact: no {mf.name}")
-        return cls(root, json.loads(mf.read_text()), platform=platform)
+        return cls(root, json.loads(mf.read_text()), platform=platform,
+                   engine=engine, plugin_path=plugin_path)
+
+    def __enter__(self) -> "ServingArtifact":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Drop the executables, then the client. A serving process that
+        reloads an artifact must not accumulate PJRT clients."""
+        for exe in self._exe_cache.values():
+            close = getattr(exe, "close", None)
+            if close is not None:
+                close()
+        self._exe_cache.clear()
+        self.engine.close()
 
     def verify_bodies(self) -> None:
         """Content-address check: every body hashes to the name it is filed
         under. The artifact crossed a process boundary; this is the cheapest
         possible statement that it arrived intact."""
-        import hashlib
-
         for e in self.entries:
             data = (self.root / e.body_path).read_bytes()
             got = hashlib.sha256(data).hexdigest()
@@ -260,44 +593,18 @@ class ServingArtifact:
 
     # --- compilation ---------------------------------------------------
 
-    def _ensure_backend(self):
-        if self._backend is not None:
-            return
-        import jax
-        import jax._src.xla_bridge as xb
-        import jaxlib._jax as _jax
-
-        backend = xb.backends()[self.platform]
-        devs = backend.local_devices()
-        if not devs:
-            raise RuntimeError(f"PJRT backend '{self.platform}' has no local devices")
-        self._backend = backend
-        self._devices = devs
-        self._device_list = _jax.DeviceList(tuple(devs[:1]))
-        self._jax = jax
-        self._jaxlib = _jax
-
     def compiled(self, entry: Entry):
-        """Compile (once per `cacheKey`) and return a LoadedExecutable."""
+        """Compile (once per `cacheKey`) and return a loaded executable.
+
+        The body is compiled, never edited: the exporter names the entry
+        function `main` and the manifest states it, so a loader does not
+        rewrite a program it was asked to run (the §0.4.325 spike had to
+        regex-rename; that was a smell, and the fix went in the exporter).
+        """
         hit = self._exe_cache.get(entry.cache_key)
         if hit is not None:
             return hit
-        self._ensure_backend()
-        import jaxlib.mlir.ir as ir
-        from jaxlib.mlir._mlir_libs._jax_mlir_ext import register_dialects
-        import jaxlib.mlir.dialects.stablehlo as stablehlo
-
-        text = (self.root / entry.body_path).read_text()
-        reg = ir.DialectRegistry()
-        register_dialects(reg)
-        ctx = ir.Context()
-        ctx.append_dialect_registry(reg)
-        ctx.load_all_available_dialects()
-        stablehlo.register_dialect(ctx)
-        with ctx, ir.Location.unknown(ctx):
-            module = ir.Module.parse(text)
-        co = self._jaxlib.CompileOptions()
-        exe = self._backend.compile_and_load(module, self._device_list, co)
+        exe = self.engine.compile((self.root / entry.body_path).read_text())
         self._exe_cache[entry.cache_key] = exe
         return exe
 
@@ -316,18 +623,16 @@ class ServingArtifact:
         block_tables: Sequence[Sequence[int]],
         seq_lens: Sequence[int],
         slot_mapping: Sequence[int],
-        kv_pools: Sequence[Any],
+        kv_pools: Sequence[Sequence[float]],
         context: int | None = None,
     ):
         """One decode step for `len(token_ids)` sequences.
 
-        Returns `(logits, kv_pools)` with `logits` sliced back to the real
-        rows — the padding rows the bucket added never leave this function.
-        The pools come back WHOLE, because a pool is device state shared by
-        every sequence and slicing it would be meaningless.
+        Returns `(logits, kv_pools)`. `logits` is `list[list[float]]`, one row
+        per REAL sequence — the padding rows the bucket added never leave this
+        function. The pools come back WHOLE and flat, because a pool is device
+        state shared by every sequence and slicing it would be meaningless.
         """
-        import numpy as np
-
         n = len(token_ids)
         if not (len(positions) == len(seq_lens) == len(block_tables) == n):
             raise ValueError(
@@ -342,37 +647,29 @@ class ServingArtifact:
         want_context = context if context is not None else max(seq_lens)
         b, c = self.select_bucket(n, want_context)
         entry = self.entry_for("decode", b, c)
-
         mbs = entry.max_blocks_per_seq
 
-        def pad_rows(rows, width, fill):
-            out = np.full((b, width), fill, dtype=np.int32)
-            for i, r in enumerate(rows):
-                if len(r) > width:
+        def pad_tables(rows):
+            out = []
+            for i in range(b):
+                r = list(rows[i]) if i < len(rows) else []
+                if len(r) > mbs:
                     raise ValueError(
                         f"run_decode: sequence {i} names {len(r)} blocks but the "
-                        f"(batch={b}, context={c}) bucket's table is {width} wide"
+                        f"(batch={b}, context={c}) bucket's table is {mbs} wide"
                     )
-                out[i, : len(r)] = r
+                out.extend(r + [PADDING_BLOCK] * (mbs - len(r)))
             return out
 
-        args_np = {
-            "TOKEN_IDS": np.array(
-                [list(token_ids) + [PADDING_TOKEN_ID] * (b - n)], dtype=np.int32
-            ).reshape(b, entry.tokens_per_seq),
-            "POSITIONS": np.array(
-                [list(positions) + [PADDING_POSITION] * (b - n)], dtype=np.int32
-            ).reshape(b, entry.tokens_per_seq),
-            "BLOCK_TABLES": pad_rows(block_tables, mbs, PADDING_BLOCK),
-            "SEQ_LENS": np.array(
-                list(seq_lens) + [PADDING_SEQ_LEN] * (b - n), dtype=np.int32
-            ),
-            "SLOT_MAPPING": np.array(
-                list(slot_mapping) + [PADDING_SLOT] * (b - n), dtype=np.int32
-            ),
+        args = {
+            "TOKEN_IDS": list(token_ids) + [PADDING_TOKEN_ID] * (b - n),
+            "POSITIONS": list(positions) + [PADDING_POSITION] * (b - n),
+            "BLOCK_TABLES": pad_tables(block_tables),
+            "SEQ_LENS": list(seq_lens) + [PADDING_SEQ_LEN] * (b - n),
+            "SLOT_MAPPING": list(slot_mapping) + [PADDING_SLOT] * (b - n),
         }
 
-        pools = list(kv_pools)
+        pools = [list(p) for p in kv_pools]
         expected_pools = sum(1 for s in entry.inputs if s.role == "KV_POOL_IN")
         if len(pools) != expected_pools:
             raise ValueError(
@@ -380,36 +677,42 @@ class ServingArtifact:
                 f"has {expected_pools} (two per layer, (key, value) order, layers ascending)"
             )
 
-        self._ensure_backend()
-        jnp = self._jax.numpy
-        dev = self._devices[0]
-        ordered = []
+        staged = []
         pool_i = 0
         for slot in entry.inputs:
             if slot.role == "KV_POOL_IN":
-                a = np.asarray(pools[pool_i], dtype=_numpy_dtype(slot.dtype))
+                values = pools[pool_i]
                 pool_i += 1
             else:
-                a = args_np[slot.role]
-            if tuple(a.shape) != slot.dims:
+                values = args[slot.role]
+            if len(values) != slot.count:
                 raise ValueError(
-                    f"run_decode: operand '{slot.name}' is {tuple(a.shape)} but the "
-                    f"compiled entry declares {slot.dims}"
+                    f"run_decode: operand '{slot.name}' has {len(values)} elements but the "
+                    f"compiled entry declares {list(slot.dims)} = {slot.count}"
                 )
-            ordered.append(
-                self._jax.device_put(jnp.asarray(a, dtype=_numpy_dtype(slot.dtype)), dev)
-            )
+            staged.append((slot, values))
 
-        results = self.compiled(entry).execute(ordered)
-        out = [np.asarray(r) for r in results]
-        logits = out[0][:n]
+        out = self.engine.run(self.compiled(entry), staged, entry.outputs)
+        logits_slot = entry.outputs[0]
+        # A row is nested to the slot's DECLARED trailing dims — `[tokensPerSeq,
+        # vocab]` for decode. The token axis is kept even at `tokensPerSeq == 1`,
+        # because the same contract describes a prefill entry where it is not 1
+        # and `last_token_logits` has to be able to find the last position
+        # (`vllm_tlaloc.batching`, which rejected flattening for exactly that
+        # reason). Everything below the row is the manifest's shape, not a
+        # convention invented here.
+        stride = numel(logits_slot.dims[1:]) if len(logits_slot.dims) > 1 else len(out[0])
+        logits = [
+            unflatten(out[0][i * stride:(i + 1) * stride], logits_slot.dims[1:])
+            for i in range(n)
+        ]
         return logits, out[1:]
 
-    def empty_pools(self, fill: float = 0.0):
-        """Freshly-zeroed KV pools of the artifact's declared layout."""
-        import numpy as np
-
+    def empty_pools(self, fill: float = 0.0) -> list:
+        """Freshly-zeroed KV pools of the artifact's declared layout, in the
+        flat host form `run_decode` takes and returns."""
         m = self.model
-        dims = tuple(m["kvPoolDims"])
-        dt = _numpy_dtype(m["kvDtype"])
-        return [np.full(dims, fill, dtype=dt) for _ in range(2 * m["numLayers"])]
+        n = numel(tuple(m["kvPoolDims"]))
+        _stage_for(m["kvDtype"])  # refuse an unstageable pool dtype here, by name
+        value = int(fill) if m["kvDtype"] in ("i32", "bf16") else float(fill)
+        return [[value] * n for _ in range(2 * m["numLayers"])]

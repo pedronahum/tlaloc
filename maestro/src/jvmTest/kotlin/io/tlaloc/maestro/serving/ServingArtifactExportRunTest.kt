@@ -183,10 +183,21 @@ class ServingArtifactExportRunTest {
      * something other than what the interpreter does. Pinned at 1e-5
      * relative, a floor the house rule allows precisely because no device
      * precision policy sits between the two sides.
+     *
+     * §0.4.476 (H6b): this is the one lane that still rides `engine="jax"`,
+     * and the reason is a fact about jaxlib rather than a preference —
+     * **jaxlib ships no CPU PJRT plugin `.so`**. Its CPU client is a C++
+     * class inside the jaxlib extension, not a loadable plugin, so the
+     * ctypes binding (which dlopens a plugin and calls `GetPjrtApi`) has
+     * nothing to open. Keeping this lane on jax keeps the tight semantics
+     * floor; moving it would have meant deleting a certified row to make a
+     * sentence tidier. The day a CPU plugin `.so` exists here — or the TPU
+     * VM's `libtpu.so` does (G2b) — this lane switches engine and nothing
+     * else changes.
      */
     @Test
     fun theExportedArtifactRunsOnThePjrtCpuClientAndAgreesWithTheInterpreter() {
-        runLane(platform = "cpu", tolerance = 1e-5f)
+        runLane(platform = "cpu", tolerance = 1e-5f, engine = "jax")
     }
 
     /**
@@ -208,21 +219,61 @@ class ServingArtifactExportRunTest {
      * want it (an emitter-wide question, and a serving deployment usually
      * wants TF32's speed), and measuring the top-1 consequence on a real
      * Llama's vocabulary, which needs H3b's un-embedded weights.
+     *
+     * §0.4.476 (H6b): this lane now runs `engine="ctypes"` — the artifact is
+     * compiled and executed through `tlaloc_pjrt`, the ctypes binding of the
+     * PJRT C API, under an import guard that raises on jax, jaxlib, torch and
+     * numpy. The numbers did not move; what moved is what had to be installed
+     * to get them. See [theFullServingPathRunsWithNoFrameworkImported].
      */
     @Test
     fun theSameArtifactRunsOnTheCudaClientOnTheGb10() {
-        runLane(platform = "cuda", tolerance = 1e-3f)
+        runLane(platform = "cuda", tolerance = 1e-3f, engine = "ctypes")
     }
 
-    private fun runLane(platform: String, tolerance: Float) {
+    /**
+     * §0.4.476 (H6b) — **the slice's headline claim, as an assertion.**
+     *
+     * The CUDA lane above already runs under the guard; this test is about
+     * the guard itself, because a negative claim ("this process imported no
+     * framework") is worth exactly as much as the thing that would have
+     * caught the positive. Three separate facts, and all three are needed:
+     *
+     * 1. `sys.modules` carries no `jax`, `jaxlib`, `torch` or `numpy` root
+     *    after the whole serving path — manifest parse, body verification,
+     *    bucket selection, compile, staging, execute, readback — has run.
+     * 2. Nothing was even ATTEMPTED: `blocked_attempts` is empty, so this is
+     *    not a path that tried and fell back.
+     * 3. The guard FIRED when deliberately provoked, in the interpreter where
+     *    jax is genuinely installed. Without this, (1) and (2) are equally
+     *    consistent with a guard that was never installed (§0.4.474's
+     *    lesson: the canary has to be shown to sing).
+     *
+     * And the run this is asserted on is the one that produced numbers, not a
+     * separate hello-world: the same subprocess reports both.
+     */
+    @Test
+    fun theFullServingPathRunsWithNoFrameworkImported() {
+        runLane(platform = "cuda", tolerance = 1e-3f, engine = "ctypes", guardOnly = true)
+    }
+
+    private fun runLane(
+        platform: String,
+        tolerance: Float,
+        engine: String,
+        guardOnly: Boolean = false,
+    ) {
         val python = resolvePython() ?: run {
             println("[skip] no venv python at ~/.local/venvs/iree/bin/python"); return
         }
-        if (!pythonHasJax(python)) {
+        if (engine == "jax" && !pythonHasJax(python)) {
             println("[skip] venv python has no jax"); return
         }
+        if (engine == "ctypes" && resolvePlugin() == null) {
+            println("[skip] no PJRT plugin .so resolved for the ctypes engine"); return
+        }
 
-        val dir = Files.createTempDirectory("tlaloc-serving-$platform")
+        val dir = Files.createTempDirectory("tlaloc-serving-$platform-$engine")
         try {
             ReferenceDecodeGraph.exportTo(dir)
 
@@ -232,14 +283,20 @@ class ServingArtifactExportRunTest {
             Files.writeString(reqFile, buildRequest(keyPool, valuePool))
             val outFile = dir.resolve("result.json")
 
-            val pb = ProcessBuilder(
+            val cmd = mutableListOf(
                 python, scriptPath().toString(),
                 "--artifact", dir.toString(),
                 "--request", reqFile.toString(),
                 "--output", outFile.toString(),
                 "--platform", platform,
+                "--engine", engine,
             )
+            resolvePlugin()?.let { if (engine == "ctypes") { cmd += "--plugin"; cmd += it } }
+            val pb = ProcessBuilder(cmd)
             // GB10 is unified-memory: never let JAX preallocate (§0.4.333).
+            // The ctypes engine reaches the same setting through
+            // PjrtClientOptions instead, which is why it does not need a
+            // framework to be talked out of eating the machine.
             pb.environment()["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
             pb.redirectErrorStream(true)
             val proc = pb.start()
@@ -259,6 +316,27 @@ class ServingArtifactExportRunTest {
 
             val got = SimpleJson(result)
             assertTrue(got.bool("ok"), "script reported failure: $result")
+
+            if (guardOnly) {
+                // §0.4.476 (H6b): the three facts, in the order that makes
+                // them mean something. See the test's doc comment.
+                assertEquals(
+                    "[]", got.raw("loaded_forbidden"),
+                    "the serving path loaded a framework it claims not to need: $result",
+                )
+                assertEquals(
+                    "[]", got.raw("blocked_attempts"),
+                    "the serving path TRIED to import a framework and was stopped; the claim " +
+                        "is that it never reaches for one, not that it is prevented: $result",
+                )
+                assertTrue(
+                    got.bool("guard_self_test_fired"),
+                    "the import guard did not fire when provoked — so 'nothing was imported' " +
+                        "is equally consistent with a guard that was never installed (§0.4.474): $result",
+                )
+                assertEquals("\"ctypes\"", got.raw("engine"), "the guarded lane must be the ctypes one")
+                return
+            }
             assertEquals(
                 listOf(4, 4), got.ints("bucket"),
                 "a batch of 3 at context 3 belongs in bucket (4,4) — bucket selection is the " +
@@ -386,6 +464,31 @@ class ServingArtifactExportRunTest {
         return if (Files.isExecutable(venv)) venv.toString() else null
     }
 
+    /**
+     * §0.4.476 (H6b) — the PJRT plugin `.so` the ctypes engine dlopens.
+     *
+     * `:maestro` does not depend on `:runtime-pjrt`, so this mirrors
+     * `PjrtBinaries`'s resolution order rather than calling it: the env var
+     * first (what a deployment sets), then the plugin file that happens to
+     * live inside the venv's jax install. Note what that second source is —
+     * a FILE PATH, not an import. The whole point of the slice is that the
+     * plugin does not know a Python package delivered it.
+     */
+    private fun resolvePlugin(): String? {
+        System.getenv("TLALOC_PJRT_PLUGIN_PATH")?.let { if (Files.exists(Path.of(it))) return it }
+        val home = System.getProperty("user.home") ?: return null
+        val venv = Path.of(home, ".local", "venvs", "iree", "lib")
+        if (!Files.isDirectory(venv)) return null
+        Files.list(venv).use { pys ->
+            for (py in pys) {
+                val p = py.resolve("site-packages")
+                    .resolve("jax_plugins").resolve("xla_cuda12").resolve("xla_cuda_plugin.so")
+                if (Files.exists(p)) return p.toString()
+            }
+        }
+        return null
+    }
+
     private fun pythonHasJax(python: String): Boolean {
         val pb = ProcessBuilder(python, "-c", "import jax")
         pb.environment()["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -405,7 +508,7 @@ class ServingArtifactExportRunTest {
      * file a test wrote.
      */
     private class SimpleJson(private val text: String) {
-        private fun raw(key: String): String {
+        fun raw(key: String): String {
             val i = text.indexOf("\"$key\"")
             require(i >= 0) { "result JSON has no '$key': $text" }
             val c = text.indexOf(':', i) + 1

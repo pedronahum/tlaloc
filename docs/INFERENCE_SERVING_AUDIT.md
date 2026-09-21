@@ -1295,15 +1295,98 @@ same thing in an empty venv would have proven less and cost a venv. And
 because an unfired guard certifies nothing, the run ends by deliberately
 importing jax and reporting that it was stopped; both halves are asserted.
 
-**Named deferrals.** `tlaloc_serve.py` is **unchanged** and still reaches
-PJRT through jaxlib — re-pointing the H3a loader at this binding is **H6b**,
-and until it lands the dependency-free claim is about the binding, not about
-the loader. Also unbound, by name: `Compile`'s donation options (the manifest
+**Named deferrals.** `tlaloc_serve.py` was **unchanged** at §0.4.475 and
+still reached PJRT through jaxlib — re-pointing the H3a loader at this
+binding was **H6b**, and it landed in §0.4.476 (below). Also unbound, by
+name: `Compile`'s donation options (the manifest
 has carried `donationPairs` since H3a), the async `PJRT_Buffer_ReadyEvent`
 path, f16 / i8 / fp8 staging, multi-device execute, and the §0.4.461
 multi-node create-options — those exist JVM-side so a multi-node client can
 be *refused*, and a knob that can only be set to its own refusal is worse
 than no knob.
+
+### H6b — the loader runs on it, and the dependency list empties (§0.4.476)
+
+**What changed.** `tlaloc_serve.py` now compiles and executes through
+`tlaloc_pjrt`. The H3a surface is intact — manifest read, `verify_bodies`,
+`select_bucket` / `entry_for` off the ladder, `run_decode(...)` returning
+`(logits, kv_pools)`, the `cacheKey`-keyed executable cache — and every jax
+and numpy call underneath it is gone. At module scope the loader imports
+`json`, `os`, `hashlib`, `pathlib`, `dataclasses`, `typing` and
+`tlaloc_pjrt`. Nothing else.
+
+**The headline, and how it is measured rather than asserted.** The CUDA lane
+of `ServingArtifactExportRunTest` runs the whole path — manifest parse, body
+hashing, bucket selection, compile, staging, execute, readback — under a
+`sys.meta_path` guard that *raises* on `jax`, `jaxlib`, `torch` and `numpy`,
+in the oracle venv where jax is genuinely installed. The guard goes up
+**before `tlaloc_serve` is imported**, so the module's whole dependency
+surface is under test and not merely whatever its methods happened to touch.
+`theFullServingPathRunsWithNoFrameworkImported` asserts three separate facts
+on that same subprocess — the one that produced the numbers, not a
+hello-world beside it: nothing forbidden is in `sys.modules`, nothing was
+even *attempted* (so this is not a path that tried and fell back), and the
+guard **fired** when deliberately provoked. Without the third, the first two
+are equally consistent with a guard nobody installed (§0.4.474's lesson).
+
+`import_guard.py` is that net, factored out of §0.4.475's copy of it. Two
+copies of a safety net drift, and the one that drifts is the one nobody is
+watching. Its `blocked_attempts` is now snapshotted *before* the
+self-provocation, so the field means "what the path under test reached for"
+rather than "what the check did to itself".
+
+**The wire format is flat lists.** Without numpy there is no ndarray, so
+every host-side tensor is a flat row-major Python sequence and the shape
+comes from the manifest — which is where it was authoritative anyway.
+`run_decode` returns logits nested to the slot's declared trailing dims
+(`[tokensPerSeq, vocab]` per real row, token axis KEPT at 1 so
+`last_token_logits` still finds the last position the day a prefill entry
+exists) and the pools whole and flat. REJECTED: a tiny ndarray-alike so the
+surface *looked* unchanged — a shim that is 5% of numpy is a thing every
+caller must learn and cannot trust.
+
+**Mixed dtypes stopped being a squeeze.** Each slot is staged as its own
+PJRT buffer of its own declared type: the five I32 index operands are real
+device `S32` buffers, the pools and logits `F32`, and `bf16` rides as raw
+u16 patterns. `f64`/`i64`/`bool` are refused **by name** rather than
+coerced. The manifest always described per-slot dtypes — this honours a
+schema that was already right.
+
+**TWO ENGINES, and the honest reason.** `engine="ctypes"` is the serving
+engine and the default for every platform that has a plugin file.
+`engine="jax"` survives as an **oracle only**, because **jaxlib ships no CPU
+PJRT plugin `.so`** — its CPU client is a C++ class inside the jaxlib
+extension, so the binding has nothing to `dlopen` for `"cpu"` and the tight
+**1e-5 XLA-CPU semantics lane** has no ctypes route on this machine.
+REJECTED: deleting it for tidiness, which would have deleted a certified row
+to make a sentence shorter. Its imports live inside its methods, so
+selecting ctypes imports none of it. `default_engine_for` is the one place
+the rule is written, and it is the only thing that changes the day a CPU
+plugin (or a TPU VM's `libtpu.so`) exists here.
+
+**The distribution's `dependencies` is now `[]`**, pinned by a test. It said
+`numpy` while the loader used ndarrays. An oracle's numpy is something you
+install to MEASURE a deployment; leaving it declared makes pip unable to
+tell the two apart. `tlaloc_pjrt` and `import_guard` join `tlaloc_serve` in
+`py-modules`, because shipping a loader without what it imports installs a
+module that cannot import.
+
+**Sensitivity check.** A bare `import numpy` added at `tlaloc_serve`'s
+module scope failed *both* the guard test and the CUDA numeric lane, then
+was reverted.
+
+**A note on the suite count.** The JUnit total moves 2294 → 2295 — one new
+Kotlin test — but the stdlib-only Python lane grew **31 → 42 cases**
+(`LoaderIsStandardLibraryOnly`, plus the empty-dependency pin). Those run
+inside `VllmPluginContractTest` lane 2 as a subprocess and so contribute one
+XML row between them, which is the shape H3b chose and not something this
+slice should quietly change. Counting them would have meant inventing a
+second way to count.
+
+**Named deferrals, unchanged by this slice.** Buffer donation (still
+unwired — every step round-trips whole pools through the host, a
+performance fact and not a correctness one), staged weights, prefill,
+multi-device execute, and the CPU lane's dependence on the jax oracle.
 
 ### ARC STATE (§0.4.473, the close-out) — read this first
 
@@ -1326,6 +1409,7 @@ Nine sections, one day (2026-09-21), suite **2119 → 2290**:
 | 0.4.473 | close-out | this sweep + [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md) — docs only | 2290 |
 | 0.4.474 | H6 rail | `OracleVenvIntegrityTest` + [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md) — the oracle venv is frozen, and now says so out loud | 2290 → 2292 |
 | 0.4.475 | H6a | `harness/python/tlaloc_pjrt.py` — the PJRT C API bound from Python with **ctypes alone**, mirroring the FFM runtime; jax blocked by an import guard while it runs | 2292 → 2294 |
+| 0.4.476 | H6b | `tlaloc_serve.py` rewired onto that binding — the **whole** serving path runs with no jax, jaxlib, torch or numpy, and the distribution's dependency list is empty | 2294 → 2295 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -1350,7 +1434,7 @@ red line with the separate-venv recipe attached.
 | the safetensors reader reads the producer's bytes | `write_llama_safetensors.py` records raw bit patterns; f32 via `toRawBits`, bf16 via `HostBf16Storage` | **exact, no tolerance** |
 | an f32 graph on a bf16 checkpoint computes the checkpoint's real numbers | `LlamaSafetensorsParityTest` vs `run_pytorch_llama.py` (§0.4.289's op-for-op mirror) through the IREE-CPU lane | **1e-3 relative** on the loss |
 | the exported directory describes itself truthfully | every body hashes to its filename; per-entry `ProgramManifest` parses with its own parser and agrees; two exports byte-identical | exact |
-| a Python process with no JVM runs the artifact | `ServingArtifactExportRunTest`, export-then-subprocess | **1e-5** PJRT CPU · **1e-3** PJRT CUDA |
+| a Python process with no JVM runs the artifact | `ServingArtifactExportRunTest`, export-then-subprocess | **1e-5** PJRT CPU (jax ORACLE engine) · **1e-3** PJRT CUDA (**ctypes engine**, §0.4.476) |
 | …and the poisoned pools / scratch page are untouched | same test, both lanes | **`==`** (a copied slot is not a computed one) |
 | the plugin's page arithmetic and marshalling are right | `VllmPluginContractTest` lane 2 — 31 stdlib-only `unittest` cases | exact |
 | the runner threads a KV cache across steps | lane 3 — **two** decode steps of three sequences on both PJRT clients | 1e-5 / 1e-3 on floats; **exact** on every page id, slot, position and bucket |
@@ -1361,12 +1445,18 @@ red line with the separate-venv recipe attached.
 | the ctypes binding lays the PJRT structs down exactly as the certified FFM binding does | `PjrtCtypesBindingTest.layoutsMirrorTheFfmBinding` vs `PjrtFfm`'s own layouts, offset table, compile-options bytes and marshalled create_options — **no device needed** | exact |
 | a Python process with **no framework at all** compiles and executes through PJRT | `PjrtCtypesBindingTest` vs `DxirInterpreter`, four graphs on real XLA-CUDA | **1e-5** elementwise · **1e-3** matmul (TF32) · **exact** i32 · **bit-for-bit** bf16 |
 | …and it imported no jax, jaxlib, torch or numpy while doing it | a `sys.meta_path` guard that raises, in the venv where jax *is* installed — and is itself made to fire before the run reports | by name |
+| the WHOLE SERVING PATH — manifest, bucket, compile, staging, execute, readback — runs with no framework imported | `ServingArtifactExportRunTest.theFullServingPathRunsWithNoFrameworkImported`, asserted on the same subprocess that produced the CUDA lane's numbers: nothing loaded, nothing even attempted, and the guard shown to fire | by name, three facts |
+| and the deployment needs only a plugin `.so` | `vllm-tlaloc`'s `dependencies` is `[]`, pinned by a test; `tlaloc_serve`'s import pulls in no framework, pinned by another; the plugin is found by FILE lookup in three places, never by import | exact |
+| the loader's shape arithmetic survives having no ndarray | `LoaderIsStandardLibraryOnly` — flatten/unflatten inverses, `numel`, per-dtype staging, dtype refusal by name, engine defaulting | exact |
 
-Three sensitivity checks were run before the oracles were trusted, each
+Four sensitivity checks were run before the oracles were trusted, each
 mutated then reverted: the bf16 decode byte-swapped (H2), `PADDING_SEQ_LEN`
-flipped to 0 and the block table desynced by a page (H3a), and
-`append_token` advancing `length` before computing the slot (H3b). Every one
-of them failed the lane it was supposed to fail.
+flipped to 0 and the block table desynced by a page (H3a),
+`append_token` advancing `length` before computing the slot (H3b), and a
+bare `import numpy` added at `tlaloc_serve`'s module scope (H6b — which
+failed BOTH the guard test and the CUDA numeric lane, since the guard goes
+up before the loader is imported). Every one of them failed the lane it was
+supposed to fail.
 
 #### WRITTEN BUT UNCERTIFIED — and exactly how to certify it
 
@@ -1444,13 +1534,12 @@ Three new `OpKind`s entered the IR in Phase H and no others:
    open item, and the one that turns "the path executes" into "the path
    serves". It is a NAME-MAPPING problem plus making weights graph
    parameters instead of body constants.
-2. **H6b — re-point `tlaloc_serve.py` at the ctypes binding.** §0.4.475 built
-   and certified `tlaloc_pjrt.py`; the H3a loader still compiles and executes
-   through jaxlib. Until this lands, "the serving runtime needs no framework"
-   is true of the binding and not yet of the loader. The shape is known: the
-   loader's `_ensure_backend` / `compiled` / device-put path is the only part
-   that touches jax, and the artifact's bodies are already StableHLO text,
-   which is what `PjrtClient.compile` takes.
+2. ~~**H6b — re-point `tlaloc_serve.py` at the ctypes binding.**~~ **DONE
+   (§0.4.476).** What it leaves behind: the CPU semantics lane still rides the
+   jax ORACLE engine, because jaxlib ships no CPU PJRT plugin `.so`. That is a
+   fact about jaxlib, not a tail of this work — but it means the phrase "no
+   framework" is precise only about the accelerator lanes, and the doc says so
+   in both places it appears.
 3. **Buffer donation.** `donationPairs` has ridden the manifest since H3a
    and is still unwired into `CompileOptions`. Named the "next measurable
    win" twice; it still is.

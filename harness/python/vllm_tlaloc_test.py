@@ -290,9 +290,32 @@ class RegistrationTest(unittest.TestCase):
 
         data = tomllib.loads((HERE / "pyproject.toml").read_text())
         self.assertIn("vllm_tlaloc", data["tool"]["setuptools"]["packages"])
+        mods = data["tool"]["setuptools"]["py-modules"]
         self.assertIn(
-            "tlaloc_serve", data["tool"]["setuptools"]["py-modules"],
+            "tlaloc_serve", mods,
             "a plugin installed without the H3a loader can find vLLM and not its model",
+        )
+        # §0.4.476 (H6b): the loader executes through the ctypes PJRT binding
+        # and certifies under the import guard. Shipping the loader without
+        # them installs a module that cannot import.
+        for m in ("tlaloc_pjrt", "import_guard"):
+            self.assertIn(m, mods, f"tlaloc_serve imports {m}; it must ship with it")
+
+    def test_the_serving_distribution_declares_no_runtime_dependencies(self):
+        """§0.4.476 (H6b) — the deployment claim, as a property of the
+        distribution rather than a sentence in a doc.
+
+        It declared `numpy` while the loader ran on jaxlib arrays. The ctypes
+        PJRT binding removed the last one. An oracle's numpy is a thing you
+        install to MEASURE a deployment; the moment it appears here, pip stops
+        being able to tell the difference.
+        """
+        import tomllib
+
+        data = tomllib.loads((HERE / "pyproject.toml").read_text())
+        self.assertEqual(
+            [], data["project"].get("dependencies", []),
+            "the serving runtime is a PJRT plugin .so and a driver; nothing belongs here",
         )
 
     def test_vllm_is_not_a_dependency_of_this_distribution(self):
@@ -332,6 +355,89 @@ class ImportGuardTest(unittest.TestCase):
         import vllm_tlaloc.batching  # noqa: F401
         import vllm_tlaloc.paging  # noqa: F401
         import vllm_tlaloc.runner  # noqa: F401
+
+
+class LoaderIsStandardLibraryOnly(unittest.TestCase):
+    """§0.4.476 (H6b) — the loader's shape-and-dtype arithmetic, with no
+    device, no plugin and no framework in the room.
+
+    These are the parts of `tlaloc_serve` that decide how many numbers go
+    into a buffer and how they come back out. They are exactly where a
+    silent reshape lives, and they are testable on a laptop precisely
+    because the module no longer needs jaxlib to be imported.
+    """
+
+    def setUp(self):
+        import tlaloc_serve
+
+        self.s = tlaloc_serve
+
+    def test_importing_the_loader_pulls_in_no_framework(self):
+        import tlaloc_serve  # noqa: F401
+
+        for root in ("jax", "jaxlib", "torch", "numpy"):
+            self.assertNotIn(
+                root, sys.modules,
+                f"importing tlaloc_serve dragged in {root}; the jax ORACLE engine's "
+                f"imports must stay inside its methods",
+            )
+
+    def test_flatten_and_unflatten_are_inverses_in_row_major_order(self):
+        flat = list(range(24))
+        nested = self.s.unflatten(flat, (2, 3, 4))
+        self.assertEqual(2, len(nested))
+        self.assertEqual([0, 1, 2, 3], nested[0][0])
+        self.assertEqual([20, 21, 22, 23], nested[1][2])
+        self.assertEqual(flat, self.s.flatten(nested))
+
+    def test_numel_is_the_element_count_a_buffer_needs(self):
+        self.assertEqual(24, self.s.numel((2, 3, 4)))
+        self.assertEqual(1, self.s.numel(()))
+
+    def test_an_unstageable_dtype_is_refused_by_name(self):
+        with self.assertRaises(ValueError) as cm:
+            self.s._stage_for("f64")
+        self.assertIn("f64", str(cm.exception))
+        self.assertIn("refused BY NAME", str(cm.exception))
+
+    def test_every_dtype_the_decode_contract_uses_can_be_staged(self):
+        # i32 for the five index operands, f32 for the pools and logits,
+        # bf16 for the G1c dtype. A missing one is a graph that cannot run.
+        for dt in ("i32", "f32", "bf16"):
+            maker, reader, _ = self.s._stage_for(dt)
+            self.assertTrue(maker.startswith("buffer_from_host_"))
+            self.assertTrue(reader.startswith("to_"))
+
+    def test_the_engine_default_follows_whether_a_platform_has_a_plugin(self):
+        self.assertEqual("ctypes", self.s.default_engine_for("cuda"))
+        self.assertEqual("ctypes", self.s.default_engine_for("tpu"))
+        self.assertEqual(
+            "jax", self.s.default_engine_for("cpu"),
+            "jaxlib ships no CPU PJRT plugin .so, so 'cpu' is the one platform the "
+            "ctypes engine has nothing to dlopen for",
+        )
+
+    def test_an_unknown_engine_is_refused_rather_than_guessed(self):
+        with self.assertRaises(ValueError) as cm:
+            self.s.ServingArtifact(Path("/nonexistent"),
+                                   {"schemaVersion": self.s.SCHEMA_VERSION},
+                                   engine="iree")
+        self.assertIn("iree", str(cm.exception))
+
+    def test_an_artifact_of_unknown_schema_is_refused_before_anything_is_read(self):
+        with self.assertRaises(ValueError) as cm:
+            self.s.ServingArtifact(Path("/nonexistent"), {"schemaVersion": "v99"})
+        self.assertIn("refusing an artifact of unknown shape", str(cm.exception))
+
+    def test_finding_a_plugin_refuses_a_path_that_is_not_there(self):
+        with self.assertRaises(FileNotFoundError):
+            self.s.find_pjrt_plugin("/definitely/not/a/plugin.so")
+
+    def test_the_padding_mirror_refuses_a_producer_that_disagrees(self):
+        self.s.check_padding_constants({"PADDING_SEQ_LEN": 1})
+        with self.assertRaises(ValueError) as cm:
+            self.s.check_padding_constants({"PADDING_SEQ_LEN": 0})
+        self.assertIn("pad a batch differently", str(cm.exception))
 
 
 if __name__ == "__main__":
