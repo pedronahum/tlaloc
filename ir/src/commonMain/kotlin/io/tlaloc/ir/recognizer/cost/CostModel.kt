@@ -223,6 +223,20 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
         4.0 * outputType.elementCount.toDouble() * mid
     }
 
+    // §0.4.465 — Phase H1a: paged attention costs what dense attention over
+    // the WORST-CASE context window costs — 4·numSeqs·numHeads·maxContextLen·
+    // headDim — because the gather-composed reference form materialises that
+    // window and masks it (the mask is what keeps the SHAPE static; the FLOPs
+    // are genuinely spent). A per-sequence seqLens-weighted figure would be
+    // more honest about the work a FUSED H4 kernel does, but seqLens is a
+    // RUNTIME value and pricing may never read tensor contents — so the cost
+    // model prices the upper bound it can actually see. maxContextLen is
+    // maxBlocksPerSeq · blockSize, both off operand shapes.
+    OpKind.PAGED_ATTENTION -> {
+        val maxContextLen = op.operands[3].type.dims[1] * op.operands[1].type.dims[1]
+        4.0 * op.type.elementCount.toDouble() * maxContextLen.toDouble()
+    }
+
     OpKind.EMBEDDING -> op.type.elementCount.toDouble()
     // §0.4.370 — embedding adjoint: one scatter-add per upstream element.
     OpKind.EMBEDDING_GRAD -> op.operands[1].type.elementCount.toDouble()

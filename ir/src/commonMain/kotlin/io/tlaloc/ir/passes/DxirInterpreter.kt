@@ -1037,6 +1037,7 @@ object DxirInterpreter {
                 }
                 out
             }
+            OpKind.PAGED_ATTENTION -> evalPagedAttention(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -1779,6 +1780,100 @@ object DxirInterpreter {
      * integers, so `.toInt()` recovers them losslessly for any index the
      * tests or a real workload can reach.
      */
+    /**
+     * §0.4.465 — Phase H1a: the PAGED_ATTENTION reference walk — vLLM's decode
+     * primitive, attention over a block-table-indexed KV page pool.
+     *
+     * Per sequence `s` with length `L = seqLens[s]`, the logical context
+     * position `t ∈ [0, L)` lives in page `blockTables[s][t / blockSize]` at
+     * slot `t % blockSize`; the last page is PARTIALLY FILLED whenever
+     * `L % blockSize != 0`, and everything at or beyond `L` is not read at all
+     * (it is stale or unallocated memory — reading it is the classic paged
+     * bug, so the walk never indexes past `L`, and a partially-filled last
+     * page is a first-class oracle case).
+     *
+     * Per (sequence, query head) the walk is the house attention convention
+     * with DOUBLE accumulators throughout — QKᵀ·scale, max-shifted softmax,
+     * then the probability-weighted V sum — narrowed to F32 once at the
+     * output. GQA: query head `h` reads kv head `h / group` (heads grouped
+     * contiguously per kv head; see [io.tlaloc.ir.PagedAttentionAttrs]).
+     *
+     * NO adjoint and NO tangent by design — both transforms refuse this kind
+     * by name (see [INFERENCE_ONLY_OP_KINDS]).
+     */
+    private fun evalPagedAttention(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.PagedAttentionAttrs.parse(op, "DxirInterpreter")
+        val query = evalNode(op.operands[0], env, multiResults)
+        val keyCache = evalNode(op.operands[1], env, multiResults)
+        val valueCache = evalNode(op.operands[2], env, multiResults)
+        val blockTables = evalCsrIntOperand(op, 3, "blockTables", env, multiResults)
+        val seqLens = evalCsrIntOperand(op, 4, "seqLens", env, multiResults)
+
+        val d = p.headDim
+        val out = FloatArray(p.numSeqs * p.numHeads * d)
+        val scores = DoubleArray(p.maxContextLen)
+        val acc = DoubleArray(d)
+
+        for (s in 0 until p.numSeqs) {
+            val len = seqLens[s]
+            require(len >= 0 && len <= p.maxContextLen) {
+                "DxirInterpreter: PAGED_ATTENTION seqLens[$s] = $len is outside " +
+                    "[0, maxBlocksPerSeq * blockSize = ${p.maxContextLen}]"
+            }
+            if (len == 0) continue // an empty sequence contributes nothing; its output stays zero
+            val pagesUsed = (len + p.blockSize - 1) / p.blockSize
+            for (h in 0 until p.numHeads) {
+                val kv = h / p.group
+                val qOff = (s * p.numHeads + h) * d
+                // 1. scores[t] = scale · <Q[s,h,:], K[page(t), slot(t), kv, :]>
+                var maxScore = Double.NEGATIVE_INFINITY
+                for (page in 0 until pagesUsed) {
+                    val blockId = blockTables[s * p.maxBlocksPerSeq + page]
+                    require(blockId in 0 until p.numBlocks) {
+                        "DxirInterpreter: PAGED_ATTENTION blockTables[$s][$page] = $blockId is " +
+                            "outside [0, numBlocks = ${p.numBlocks}) — a block table must name " +
+                            "allocated pages for every slot it covers"
+                    }
+                    val base = page * p.blockSize
+                    val slots = minOf(p.blockSize, len - base)
+                    for (slot in 0 until slots) {
+                        val kOff = ((blockId * p.blockSize + slot) * p.numKvHeads + kv) * d
+                        var dot = 0.0
+                        for (j in 0 until d) dot += query[qOff + j].toDouble() * keyCache[kOff + j]
+                        val sc = dot * p.scale
+                        scores[base + slot] = sc
+                        if (sc > maxScore) maxScore = sc
+                    }
+                }
+                // 2. max-shifted softmax over the LIVE context only.
+                var denom = 0.0
+                for (t in 0 until len) {
+                    val e = kotlin.math.exp(scores[t] - maxScore)
+                    scores[t] = e
+                    denom += e
+                }
+                // 3. out[s,h,:] = Σ_t p[t] · V[page(t), slot(t), kv, :]
+                acc.fill(0.0)
+                for (page in 0 until pagesUsed) {
+                    val blockId = blockTables[s * p.maxBlocksPerSeq + page]
+                    val base = page * p.blockSize
+                    val slots = minOf(p.blockSize, len - base)
+                    for (slot in 0 until slots) {
+                        val w = scores[base + slot] / denom
+                        val vOff = ((blockId * p.blockSize + slot) * p.numKvHeads + kv) * d
+                        for (j in 0 until d) acc[j] += w * valueCache[vOff + j]
+                    }
+                }
+                for (j in 0 until d) out[qOff + j] = acc[j].toFloat()
+            }
+        }
+        return out
+    }
+
     private fun evalCsrIntOperand(
         op: DxirOp,
         index: Int,

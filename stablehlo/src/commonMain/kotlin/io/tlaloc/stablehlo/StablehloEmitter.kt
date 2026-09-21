@@ -21,6 +21,7 @@ import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.DxirSharding
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.PagedAttentionAttrs
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 
 fun DxirModule.toStablehlo(): String = buildString {
@@ -427,6 +428,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 vType = node.operands[2].type,
                 outType = node.type,
             )
+            OpKind.PAGED_ATTENTION -> emitPagedAttention(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,
                 name,
@@ -2858,6 +2860,144 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 "contracting_dims = [${r - 1}] x [${r - 2}] " +
                 ": ($scoresMlir, ${vType.toMlir()}) -> ${outType.toMlir()}",
         )
+    }
+
+    /**
+     * §0.4.465 — Phase H1a: PAGED_ATTENTION's GATHER-COMPOSED REFERENCE FORM.
+     * Correctness first; a fused vendor/KPTX paged kernel with recognizer
+     * claiming is Phase H4 and the reason the coarse kind is a kind at all.
+     *
+     * The shape:
+     * ```
+     *   1. Kg = gather(keyCache,   blockTables)  [S, M, P, Hkv, D]
+     *      Vg = gather(valueCache, blockTables)
+     *   2. reshape both to the dense context window [S, M*P, Hkv, D]
+     *   3. Qr = reshape(query) [S, Hkv, G, D]                 (GQA grouping)
+     *   4. scores = dot_general(Qr, Kg) batching S,Hkv → [S, Hkv, G, M*P]
+     *   5. scale, then MASK: iota over the context axis >= seqLens[s] → -Inf
+     *   6. max-shifted softmax over the context axis
+     *   7. out = dot_general(probs, Vg) → [S, Hkv, G, D], reshape → [S, H, D]
+     * ```
+     *
+     * REJECTED alternative for step 5: slicing each sequence's live prefix
+     * (a `real_dynamic_slice` per row) — that is data-dependent output shape,
+     * exactly what XLA's static-shape contract forbids, and it is why vLLM's
+     * own TPU backend masks-and-buckets instead. The -Inf mask makes the
+     * padded lanes contribute `exp(-Inf) = 0` to both softmax sums, so the
+     * result is bit-identical to a walk that never reads them — *provided*
+     * every sequence has at least one live position, which the interpreter's
+     * own `len == 0` arm and this mask agree on as the one degenerate case.
+     *
+     * REJECTED alternative for steps 1–2: gathering per (sequence, position)
+     * with a computed flat index. It avoids materialising unused pages, but it
+     * needs an index tensor of shape [S, M*P] built by arithmetic on the block
+     * table — more ops, a second indexing convention to keep honest, and no
+     * benefit at decode sizes where the page gather is one contiguous copy per
+     * block. H4's kernel removes the materialisation entirely; until then the
+     * simplest correct form is the right one.
+     */
+    private fun emitPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
+        val qType = node.operands[0].type
+        val kType = node.operands[1].type
+        val vType = node.operands[2].type
+        val tType = node.operands[3].type
+        val lType = node.operands[4].type
+        val dt = qType.dtype
+        val s = p.numSeqs; val hkv = p.numKvHeads; val g = p.group
+        val d = p.headDim; val m = p.maxBlocksPerSeq; val bs = p.blockSize
+        val ctx = p.maxContextLen
+        val scalarT = "tensor<${mlirElementType(dt)}>"
+
+        // 1. Gather the pages named by the block table. index_vector_dim == the
+        // indices' rank spells "each entry is a scalar page id" (StableHLO's
+        // implicit trailing index dim), so one slice of [1, P, Hkv, D] per
+        // (sequence, table slot), with the page axis collapsed.
+        val gatheredT = DxirType(dt, listOf(s, m, bs, hkv, d))
+        val windowT = DxirType(dt, listOf(s, ctx, hkv, d))
+        fun gatherPages(cache: String, cacheType: DxirType): String {
+            val gathered = synth()
+            emitGatherOp(
+                step, gathered, cache, ops[3], cacheType, tType, gatheredT,
+                offsetDims = listOf(2, 3, 4),
+                collapsedSliceDims = listOf(0),
+                startIndexMap = listOf(0),
+                indexVectorDim = tType.rank,
+                sliceSizes = listOf(1, bs, hkv, d),
+                indicesAreSorted = false,
+            )
+            val flat = synth()
+            out.appendLine("$step$flat = stablehlo.reshape $gathered : (${gatheredT.toMlir()}) -> ${windowT.toMlir()}")
+            return flat
+        }
+        val kWin = gatherPages(ops[1], kType)
+        val vWin = gatherPages(ops[2], vType)
+
+        // 2. GQA grouping: [S, H, D] → [S, Hkv, G, D]. Query head h reads kv
+        // head h / G — heads grouped CONTIGUOUSLY per kv head, so the reshape
+        // IS the grouping (no transpose), which is what makes this convention
+        // worth pinning in PagedAttentionAttrs rather than rediscovering.
+        val qGroupedT = DxirType(dt, listOf(s, hkv, g, d))
+        val qr = synth()
+        out.appendLine("$step$qr = stablehlo.reshape ${ops[0]} : (${qType.toMlir()}) -> ${qGroupedT.toMlir()}")
+
+        // 3. scores = Q · Kᵀ over headDim, batched over (sequence, kv head).
+        val scoresT = DxirType(dt, listOf(s, hkv, g, ctx))
+        val scoresMlir = scoresT.toMlir()
+        val scores = synth()
+        out.appendLine(
+            "$step$scores = stablehlo.dot_general $qr, $kWin, batching_dims = [0, 1] x [0, 2], " +
+                "contracting_dims = [3] x [3] : (${qGroupedT.toMlir()}, ${windowT.toMlir()}) -> $scoresMlir",
+        )
+        val scaleC = synth(); val scaleBc = synth(); val scaled = synth()
+        out.appendLine("$step$scaleC = stablehlo.constant dense<${p.scale.toFloat()}> : $scalarT")
+        out.appendLine("$step$scaleBc = stablehlo.broadcast_in_dim $scaleC, dims = [] : ($scalarT) -> $scoresMlir")
+        out.appendLine("$step$scaled = stablehlo.multiply $scores, $scaleBc : $scoresMlir")
+
+        // 4. The seqLens mask: context position t is LIVE iff t < seqLens[s].
+        // The iota rides in the seqLens dtype so the compare needs no convert.
+        val idxT = DxirType(lType.dtype, listOf(s, hkv, g, ctx))
+        val predT = DxirType(Bool, listOf(s, hkv, g, ctx))
+        val iota = synth(); val lensBc = synth(); val live = synth()
+        out.appendLine("$step$iota = stablehlo.iota dim = 3 : ${idxT.toMlir()}")
+        out.appendLine("$step$lensBc = stablehlo.broadcast_in_dim ${ops[4]}, dims = [0] : (${lType.toMlir()}) -> ${idxT.toMlir()}")
+        out.appendLine("$step$live = stablehlo.compare LT, $iota, $lensBc, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
+        val negInf = synth(); val negInfBc = synth(); val masked = synth()
+        out.appendLine("$step$negInf = stablehlo.constant dense<${negInfLiteral(dt)}> : $scalarT")
+        out.appendLine("$step$negInfBc = stablehlo.broadcast_in_dim $negInf, dims = [] : ($scalarT) -> $scoresMlir")
+        out.appendLine("$step$masked = stablehlo.select $live, $scaled, $negInfBc : ${predT.toMlir()}, $scoresMlir")
+
+        // 5. Max-shifted softmax over the context axis (dim 3) — the house
+        // numeric convention, identical in shape to emitSdpa's.
+        val reducedT = DxirType(dt, listOf(s, hkv, g))
+        val reducedMlir = reducedT.toMlir()
+        val bcDims = "0, 1, 2"
+        val maxInit = synth(); val mx = synth(); val mxBc = synth(); val shifted = synth(); val e = synth()
+        out.appendLine("$step$maxInit = stablehlo.constant dense<${negInfLiteral(dt)}> : $scalarT")
+        out.appendLine(
+            "$step$mx = stablehlo.reduce($masked init: $maxInit) applies stablehlo.maximum across dimensions = [3] " +
+                ": ($scoresMlir, $scalarT) -> $reducedMlir",
+        )
+        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mx, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        out.appendLine("$step$shifted = stablehlo.subtract $masked, $mxBc : $scoresMlir")
+        out.appendLine("$step$e = stablehlo.exponential $shifted : $scoresMlir")
+        val sumInit = synth(); val sum = synth(); val sumBc = synth(); val probs = synth()
+        out.appendLine("$step$sumInit = stablehlo.constant dense<0.0> : $scalarT")
+        out.appendLine(
+            "$step$sum = stablehlo.reduce($e init: $sumInit) applies stablehlo.add across dimensions = [3] " +
+                ": ($scoresMlir, $scalarT) -> $reducedMlir",
+        )
+        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $sum, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        out.appendLine("$step$probs = stablehlo.divide $e, $sumBc : $scoresMlir")
+
+        // 6. out = probs · V, then ungroup the heads.
+        val ctxOutT = DxirType(dt, listOf(s, hkv, g, d))
+        val ctxOut = synth()
+        out.appendLine(
+            "$step$ctxOut = stablehlo.dot_general $probs, $vWin, batching_dims = [0, 1] x [0, 2], " +
+                "contracting_dims = [3] x [1] : ($scoresMlir, ${windowT.toMlir()}) -> ${ctxOutT.toMlir()}",
+        )
+        out.appendLine("$step$name = stablehlo.reshape $ctxOut : (${ctxOutT.toMlir()}) -> ${node.type.toMlir()}")
     }
 
     private fun emitGather(

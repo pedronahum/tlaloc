@@ -53,3 +53,49 @@ internal fun demotedKindRefusal(kind: OpKind, layer: String): String? = when (ki
             "(MATMUL/softmax/MATMUL) and let the coarsener own the fused semantics"
     else -> null
 }
+
+/**
+ * §0.4.465 — Phase H1a: the INFERENCE-ONLY kinds. A SIBLING of
+ * [DEMOTED_OP_KINDS], not a member of it, and the difference is the whole
+ * point:
+ *
+ * - a DEMOTED kind is partial in the *execution* layers too — no interpreter
+ *   arm, because a coarsener already owns its semantics with certification;
+ * - an INFERENCE-ONLY kind is COMPLETE where it runs (interpreter arm +
+ *   StableHLO emission are mandatory — serving has to actually execute) and
+ *   deliberately absent only in the two AD transforms.
+ *
+ * The rationale is not "we didn't get to it": there is no training graph in
+ * which these are differentiable intermediates. Paged attention reads a KV
+ * page pool that previous decode steps mutated, indexed by an integer block
+ * table the allocator produced — state and bookkeeping, not a differentiable
+ * value. Writing a VJP for it would invent math nobody can check against a
+ * reference, which the house forbids (see the no-adjoint-shortcuts rule).
+ *
+ * So both transforms refuse BY NAME, with the TRAINING spelling in the
+ * message — never a silent gap, never a zero. The arc rule that produced this
+ * file's predecessor applies unchanged: any new op either renders/handles or
+ * refuses by name.
+ */
+internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
+    OpKind.PAGED_ATTENTION,
+)
+
+/**
+ * The refusal message for an inference-only kind, prefixed with the refusing
+ * [layer], or null when [kind] is not inference-only. Every message names the
+ * kind, the inference-only RATIONALE, and the differentiable alternative.
+ */
+internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = when (kind) {
+    OpKind.PAGED_ATTENTION ->
+        "$layer: PAGED_ATTENTION is INFERENCE-ONLY BY DESIGN (Phase H1a, " +
+            "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
+            "not a gap: its key/value operands are a block-table-indexed KV PAGE POOL " +
+            "mutated across decode steps and addressed by integer allocator bookkeeping, " +
+            "so it is not a differentiable intermediate in any training graph. It DOES " +
+            "have an interpreter arm and StableHLO emission (serving executes it). To " +
+            "DIFFERENTIATE attention, use the training spelling: the FlashAttention " +
+            "composition (MATMUL/softmax/MATMUL) or the GQA recognizer's coarsened form, " +
+            "which the coarseners own with certified gradients"
+    else -> null
+}

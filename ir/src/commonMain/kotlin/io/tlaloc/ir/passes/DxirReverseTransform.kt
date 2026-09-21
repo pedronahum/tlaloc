@@ -158,6 +158,12 @@ object DxirReverseTransform {
                 // skip an op with no accumulated upstream silently). Branch
                 // bodies get the same guard inside [walkBranchReverse].
                 demotedKindRefusal(n.op, "DxirReverseTransform")?.let { error(it) }
+                // §0.4.465 — Phase H1a: the INFERENCE-ONLY kinds refuse here
+                // too, by name, with the TRAINING spelling in the message.
+                // Same gate, different reason: these kinds DO execute (they
+                // have interpreter arms and emission), they simply have no
+                // adjoint that means anything — see [INFERENCE_ONLY_OP_KINDS].
+                inferenceOnlyKindRefusal(n.op, "DxirReverseTransform")?.let { error(it) }
                 if (n.hasRegions) {
                     require(n.op == OpKind.IF) {
                         "DxirReverseTransform: op ${n.op} has regions but no rule supports " +

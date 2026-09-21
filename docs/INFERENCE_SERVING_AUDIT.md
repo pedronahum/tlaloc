@@ -88,4 +88,76 @@ PJRT bet paying out on the inference side.
 
 ## 5. Running record (Phase H)
 
-(Filled per slice as the workflow lands them.)
+### H1a — `PAGED_ATTENTION` (§0.4.465)
+
+Gap-list item 1, the arc's biggest single piece, landed as a coarse op that
+is **complete where it runs and refuses where it does not**.
+
+**The op.** `PAGED_ATTENTION(query, keyCache, valueCache, blockTables,
+seqLens) → out`, with
+`query [numSeqs, numHeads, headDim]`,
+`key/valueCache [numBlocks, blockSize, numKvHeads, headDim]`,
+`blockTables [numSeqs, maxBlocksPerSeq] I32`,
+`seqLens [numSeqs] I32`, and **`scale` as the only attribute**.
+`blockSize`, `numKvHeads`, the GQA `group` and `maxBlocksPerSeq` are DERIVED
+from operand shapes and REFUSED as attrs by name — the house sentinel-dims
+rule, plus the stronger property that attr-vs-operand disagreement becomes
+unrepresentable. One parser (`ir/.../PagedAttentionAttrs.kt`, the
+`AllReduceAttrs` precedent) so no two layers can disagree about what a legal
+paged attention is.
+
+**Shape decision.** The DECODE shape (one query token per sequence), matching
+vLLM's `paged_attention_v1`. REJECTED: the unified `[numTokens, …]` ragged
+form — it needs a `queryStartLoc` operand *and* intra-chunk causal masking,
+which is a different mask algebra, not a different shape; folding both in
+would make the mask a mode flag. **Named deferral**: the prefill/chunked
+form; prefill rides the existing dense FlashAttention/GQA path today, as
+vLLM's own TPU backend does.
+
+**Inference-only by design.** A new sibling of the demoted set —
+`INFERENCE_ONLY_OP_KINDS` in `ir/.../passes/DemotedOpKinds.kt` — with the
+distinction spelled out there: a demoted kind is partial in the execution
+layers too, an inference-only kind is COMPLETE where it runs (interpreter arm
++ StableHLO emission are mandatory; serving executes) and absent only in the
+two AD transforms. Both transforms and `KotlinSourceRenderer` refuse BY NAME,
+each message carrying the rationale (the KV pool is state mutated across
+decode steps, addressed by integer allocator bookkeeping — not a
+differentiable intermediate) and the TRAINING spelling (FlashAttention /
+the GQA coarsener). No gradient math was written.
+
+**Emission**: the gather-composed reference form — gather the pages the block
+table names into a dense `[numSeqs, maxBlocksPerSeq*blockSize, numKvHeads,
+headDim]` window, mask past `seqLens` to −Inf, batched `dot_general`s over
+(sequence, kv head), GQA by reshape. REJECTED: per-sequence dynamic slicing
+(data-dependent shapes, which XLA forbids and which is why vLLM's TPU backend
+masks-and-buckets too), and per-position flat-index gathering (a second
+indexing convention to keep honest, for no gain at decode sizes). A fused
+vendor/KPTX paged kernel with recognizer claiming is **H4**, and the coarse
+kind exists precisely so that swap is local.
+
+**Oracles.** (1) Paged-vs-DENSE equivalence: the same attention built two
+ways — the paged walk, and a dense contiguous walk over a window materialised
+by separately gathering the named pages — pinned elementwise under an
+identity table, a permuted table with ragged lengths, and a full sweep of
+`seqLens` from 1 to the window width. (2) A hand-exact case: tied scores make
+the softmax exactly uniform, so the answer is the mean of the live V rows,
+with the slots at and past `seqLen` POISONED at 1000.0 so an over-read is
+unmissable. (3) GPU: `PjrtPagedAttentionSmokeTest` compiles the emission
+under real XLA on the GB10 and agrees with the interpreter to **worst
+|Δ| = 6e-8** (permuted table, partially-filled last page) — the emission and
+the walk are genuinely different programs (one skips dead lanes, the other
+computes and cancels them), so that agreement pins the mask algebra, the
+gather dimension numbers and the GQA convention at once. (4) Offline
+structure pins in `PagedAttentionEmitTest` so certification never depends on
+a GPU being present.
+
+**Named deferrals from this slice**: the prefill/chunked `[numTokens, …]`
+form; bf16 paged attention (the dtype exists; the smoke runs f32);
+mixed-dtype PJRT input lanes (`runOn` is all-F32, so the GPU smoke rides
+`blockTables`/`seqLens` as I32 consts — a harness limit, not a shape limit,
+and H3 feeds these as device buffers through the manifest); the cost model
+prices the WORST-CASE window because `seqLens` is a runtime value and pricing
+may never read tensor contents.
+
+**Still open in H1**: gap-list item 2 (KV-cache write scatter + page-table
+gather forms) and item 3 (decode-graph shape contract + bucketing).

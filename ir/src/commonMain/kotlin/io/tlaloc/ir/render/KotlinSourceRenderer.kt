@@ -590,6 +590,19 @@ internal object KotlinSourceRenderer {
 
             OpKind.SPARSE_MATMUL, OpKind.SPARSE_MATMUL_VALUES_ADJOINT ->
                 refuse(op, "the CSR-component sparse family is host-twin-backed but not yet wired into the printer (named deferral in docs/AD_SINGLE_ENGINE_AUDIT.md)")
+            // §0.4.465 — Phase H1a: the north-star rule (render or refuse by
+            // name) applied to the inference-only kind. There is no host twin
+            // and deliberately so: a page pool + block table is serving-runtime
+            // state, and a straight-line Kotlin spelling of it would be a
+            // second implementation of the walk with nothing keeping it honest.
+            OpKind.PAGED_ATTENTION ->
+                refuse(
+                    op,
+                    "PAGED_ATTENTION is inference-only serving machinery (Phase H1a) with no " +
+                        "host-twin spelling — its KV page pool and integer block table are " +
+                        "runtime allocator state, not a DTensor expression; run it on the " +
+                        "interpreter or through StableHLO/PJRT",
+                )
             OpKind.RMSNORM, OpKind.BATCHNORM ->
                 refuse(op, "the norm kinds ride their desugared op compositions (§0.4.390); the fused kinds have no printed spelling")
 

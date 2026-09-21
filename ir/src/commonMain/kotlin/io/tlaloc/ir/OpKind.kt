@@ -409,6 +409,63 @@ enum class OpKind {
     // composition: MATMUL/softmax/MATMUL) — see passes/DemotedOpKinds.kt.
     SCALED_DOT_PRODUCT_ATTENTION,
 
+    // §0.4.465 — Phase H1a (docs/INFERENCE_SERVING_AUDIT.md §2 gap 1):
+    // attention over a block-table-indexed KV PAGE POOL — vLLM's core serving
+    // primitive, and the single biggest item in the inference arc.
+    //
+    // INFERENCE-ONLY BY DESIGN — and that is a scope decision, not a gap.
+    // Paged attention exists to serve a KV cache that was built by *previous*
+    // decode steps; there is no training graph in which a page pool is a
+    // differentiable intermediate (the pool is mutated state across steps, and
+    // its block table is an integer allocator artifact). So this kind has NO
+    // VjpRule and NO forward tangent, and BOTH AD transforms refuse it BY NAME
+    // with the training spelling in the message (SDPA / the FlashAttention
+    // MATMUL-softmax-MATMUL composition, which the coarseners own with
+    // certification) — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS].
+    // It differs from the DEMOTED kinds in exactly one way: it DOES carry a
+    // real interpreter arm and real StableHLO emission, because inference has
+    // to actually run.
+    //
+    // PAGED_ATTENTION(query, keyCache, valueCache, blockTables, seqLens) → out
+    //   query      [numSeqs, numHeads, headDim]      F32/BF16
+    //   keyCache   [numBlocks, blockSize, numKvHeads, headDim]
+    //   valueCache [numBlocks, blockSize, numKvHeads, headDim]
+    //   blockTables[numSeqs, maxBlocksPerSeq]        I32
+    //   seqLens    [numSeqs]                         I32
+    //   out        [numSeqs, numHeads, headDim]
+    // attrs: `scale: Double` (the softmax temperature) — and NOTHING ELSE.
+    //
+    // The DECODE query shape [numSeqs, numHeads, headDim] (one query token per
+    // sequence) is deliberate and matches vLLM's `paged_attention_v1` decode
+    // kernel signature. REJECTED alternative: the unified [numTokens, numHeads,
+    // headDim] ragged form (vLLM's chunked-prefill path) — it additionally
+    // needs a `queryStartLoc` operand AND intra-chunk causal masking, which is
+    // a different mask algebra, not a different shape; folding both into one
+    // kind would make the mask a mode flag. The prefill/chunked form is a NAMED
+    // DEFERRAL (Phase H tail), and prefill today rides the existing dense
+    // FlashAttention/GQA path, which is what vLLM's own TPU backend does for
+    // the non-paged prefill leg.
+    //
+    // `blockSize` and `numKvHeads` are NOT attrs: they are keyCache.dims[1] and
+    // keyCache.dims[2], and the house sentinel-dims rule forbids baking
+    // dim-derived values where an attr could then disagree with the operand.
+    // GQA grouping is likewise DERIVED: numHeads / numKvHeads must divide
+    // evenly, and query head h reads kv head `h / group` — heads grouped
+    // CONTIGUOUSLY per kv head, the [numSeqs, numKvHeads, group, headDim]
+    // reshape convention shared by the interpreter and the emitter.
+    //
+    // blockTables and seqLens are integer tensors: non-differentiable,
+    // structural-zero slots by the §0.4.54/§0.4.400 convention — moot here,
+    // since the whole op refuses differentiation.
+    //
+    // Emission is the GATHER-COMPOSED REFERENCE FORM (correctness first):
+    // gather the pages named by the block table into a dense
+    // [numSeqs, maxBlocksPerSeq*blockSize, numKvHeads, headDim] window, mask
+    // past seqLen with -inf, then dense GQA attention. A fused vendor/KPTX
+    // paged kernel with recognizer claiming is Phase H4 — the whole point of
+    // the coarse kind being a kind.
+    PAGED_ATTENTION,
+
     // Misc
     EMBEDDING, CROSS_ENTROPY, CAST,
 

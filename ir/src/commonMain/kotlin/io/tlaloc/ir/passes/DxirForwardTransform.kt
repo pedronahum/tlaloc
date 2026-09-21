@@ -174,6 +174,13 @@ object DxirForwardTransform {
                         node.op in DEMOTED_OP_KINDS -> error(
                             demotedKindRefusal(node.op, "DxirForwardTransform")!!,
                         )
+                        // §0.4.465 — Phase H1a: the INFERENCE-ONLY kinds
+                        // (PAGED_ATTENTION) refuse by name with the training
+                        // spelling in the message. They execute everywhere
+                        // else; only the tangent is deliberately absent.
+                        node.op in INFERENCE_ONLY_OP_KINDS -> error(
+                            inferenceOnlyKindRefusal(node.op, "DxirForwardTransform")!!,
+                        )
                         node.op == OpKind.IF -> {
                             // The IF direct forward arm. The condition is
                             // piecewise-constant (zero tangent, value cloned); the
