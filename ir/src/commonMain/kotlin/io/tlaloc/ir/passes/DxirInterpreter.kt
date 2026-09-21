@@ -335,6 +335,17 @@ object DxirInterpreter {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { if (a[it] > 0f) 1f else 0f }
             }
+            OpKind.RELU -> {
+                // §0.4.438 — F2: the forward twin of ReluRule's STEP mask,
+                // same `> 0` convention (x = 0 → 0 both here and in the
+                // gradient). Until Phase F no interpreted graph carried a
+                // forward RELU — the value-tape computes forwards host-side
+                // and ReluRule's contributions are STEP+MUL — but the
+                // compiler-route training step evaluates the transform's
+                // `includeForward` output, which re-emits the primal ops.
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { if (a[it] > 0f) a[it] else 0f }
+            }
             OpKind.SIGN -> {
                 // §0.4.204 — sign(x) = +1 / -1 / 0 for x>0 / x<0 / x=0. Used by
                 // CartPole's policy `a = sign(tanh(...) - ε)`. SignRule emits a

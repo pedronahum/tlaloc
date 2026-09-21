@@ -668,6 +668,33 @@ fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastCol(
     return Tracer<Rank2<A, B>>(tape, e)
 }
 
+/**
+ * §0.4.438 — F2: element-count-preserving relayout, the Flatten substrate.
+ * Records [OpKind.RESHAPE] with the RESULT dims on the entry and NO attrs —
+ * exactly the spelling the interpreter's §0.4.359 arm and `ReshapeRule` read
+ * (both work off the operand/result types alone; `Tape.toDxirFunction` puts
+ * the entry dims into the op's `DxirType`, so the captured graph carries
+ * everything the transform needs). Forward is a pure row-major copy of the
+ * cached value; the reverse is `ReshapeRule`'s reshape-the-upstream-back
+ * (identity Jacobian under the flat view) — no gradient math here.
+ *
+ * The result dims are read off the receiver at TRACE time, which is the
+ * contract everywhere on the tape: a captured graph is valid for one
+ * structure and a structure change retraces (the F1 caching contract).
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.reshape(newDims: IntArray): Tracer<S> {
+    require(newDims.all { it > 0 }) {
+        "reshape: all dims must be positive (got ${newDims.toList()})"
+    }
+    val expected = if (newDims.isEmpty()) 1 else newDims.fold(1) { acc, d -> acc * d }
+    require(size == expected) {
+        "reshape: element count $size does not match product of dims ${newDims.toList()} ($expected)"
+    }
+    val e = tape.op(OpKind.RESHAPE, intArrayOf(id), newDims.copyOf(), entry.value.copyOf())
+    return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value
     var acc = 0f

@@ -495,3 +495,81 @@ parameter sets, both losses hand-exact, structure drift refused.
 F7 revisits if GRU wants it at the interface); automatic
 structure-keyed caching (F8, per the recorded contract); everything
 in F0's standing deferral list.
+
+### F2 — §0.4.438: the simple layers + the initializer family
+
+**What landed.**
+
+- `Dense` in DiffKT's exact semantics (F0 §4.0.4): `w [numIn, numOut]`,
+  `b [numOut]`, forward `activation(x matmul W + b)` with the bias
+  riding the §0.4.85 row-broadcast TRACE spelling
+  (`broadcast_dimensions = [1]`, whose reverse is the axis-0 SUM every
+  bias gradient is); `bias = false` skips the add and keeps `b` out of
+  the trainables (DiffKT parks a `FloatScalar.ZERO` placeholder; we keep
+  none — same maths). The DiffKT constructor surface is the companion
+  `Dense(numInputs, numOutputs, key, bias, activation)` drawing BOTH W
+  and b `uniform(±√(1/numInputs))` — DiffKT's own default for both.
+- **The key-split discipline, fixed for all of Phase F** (F0 §4.0.7's
+  open item): a layer splits its key ONCE into one child per parameter
+  tensor in declaration order (`split(2)[0]` → w, `[1]` → b), and
+  `bias = false` still consumes the same split, so the drawn W is
+  bit-identical with and without a bias.
+- `Flatten` (`flatten(startDim = 1)`; rank-2 input passes through
+  untouched — DiffKT's flatten is the same no-op view there — and
+  rank ≥ 3 records the new `reshape` spelling), `ReluLayer`, and the
+  `Activation` objects (Identity/Relu/Sigmoid/Tanh) Dense composes
+  post-op. `AffineTransform` had landed in F1.
+- Initializers over the D1 threefry streams (`:nn`-level host math,
+  zero tape involvement): `uniformInit`/`gaussianInit` (DiffKT's affine
+  rescales verbatim, on `uniformFloats`/`normalFloats`), `fanOf` +
+  `ActivationGain` (DiffKT's fan and gain constants exactly),
+  `kaimingUniformInit` (`bound = √(3/fan)·gain`). `kaimingNormalInit`
+  and `xavierUniformInit`/`xavierNormalInit` are RECORDED Tlaloc
+  extensions — the standard He/Glorot (PyTorch) formulas, absent from
+  DiffKT and never oracled against it.
+- The gap table's F2 TRACE spelling: `Tracer.reshape(newDims)` —
+  RESHAPE, no attrs, result dims on the entry, forward a pure row-major
+  copy; `ReshapeRule` reverses it for free. (Also F7's future
+  squeeze/unsqueeze substrate, as the table noted.)
+- One interpreter arm: `OpKind.RELU` forward (the STEP mask's twin,
+  same `> 0` convention at zero). No interpreted graph ever carried a
+  forward RELU before — the value-tape computes forwards host-side and
+  ReluRule's contributions are STEP+MUL — but the compiler route
+  evaluates the transform's `includeForward` output, which re-emits the
+  primal ops. `Backward.kt` untouched, as the amendment promised.
+
+**Design decisions, with rejections.**
+
+- **Dense input is rank-2 `[batch, numInputs]` in v1** — DiffKT accepts
+  rank ≥ 2 (its matmul broadcasts leading axes); the traced matmul is
+  rank-2/rank-3 today, so the rank-3 Dense input form is a NAMED
+  DEFERRAL, not a silent divergence.
+- **Kaiming/Xavier uniform variants DELEGATE to `uniformInit`** so
+  every uniform initializer shares one bit pattern per (key, bound).
+  REJECTED: per-variant draw loops — a bit-drift risk between spellings
+  for zero gain.
+- **`kaimingNormalInit` scales by `std` directly** rather than routing
+  `variance = std²` through `gaussianInit` — `sqrt(std·std)` need not
+  round-trip to `std` in f32, and the tests pin bits.
+
+**Oracle story.** Layered, bit-exact at the base: `uniformInit` /
+`gaussianInit` pinned `==` against the raw `uniformFloats` /
+`normalFloats` draws under the identical affine rescale for a fixed
+key; fan factors and gain constants pinned analytically (including the
+exact degeneracies `LeakyRelu(0) = Relu`'s gain and `LeakyRelu(1) = 1`);
+the Kaiming/Xavier variants pinned against the base initializers at
+test-replicated bounds; the Dense factory pins the split discipline and
+the `bias = false` W-stability. Gradient certs on the quarter grid,
+`==` not tolerance: the Dense+ReluLayer+Dense Sequential (unambiguous
+relu masks, no pre-relu zeros) hand-exact through `valueAndGradients` —
+every masked-position zero comes out `+0.0` (the interpreter's
+accumulator-init absorbs the `−0.0`s the STEP·upstream products
+produce); the trace-vs-hand-built-DXIR oracle on a single Dense with
+composed Relu (MATMUL → BROADCAST → ADD → RELU → MUL → SUM built both
+ways, both through the SAME transform, elementwise equal and both
+hand-exact); Flatten alone (the gradient comes back rank-3-shaped —
+ReshapeRule's reverse witnessed by the shape itself) and Flatten→Dense
+chained hand-exact.
+
+**Deferred, by name:** rank-3 Dense input (above); F0's standing
+deferral list unchanged.
