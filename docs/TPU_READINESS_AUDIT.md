@@ -110,6 +110,57 @@ recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
 
+- **§0.4.458 — G1d DONE: the mixed-precision training story for :nn**
+  (LOCAL certification — the GPU half runs the CUDA plugin on the GB10;
+  NO TPU claim, G2b re-runs it there). THE CONVENTION, recorded on
+  `io.tlaloc.nn.Precision` with its rejected alternatives: **MASTER
+  WEIGHTS IN F32, COMPUTE IN BF16, LOSS AND GRADIENTS IN F32, NO LOSS
+  SCALING** — bf16 keeps f32's 8-bit exponent, so the entire fp16
+  GradScaler apparatus has nothing to protect against (stated as the
+  reason bf16 beats fp16). `MIXED_BF16` is a CAPTURE-level flag riding
+  the existing trace (a `MixedPrecision(model)` wrapper was REJECTED:
+  precision is a property of one capture, not of model structure — the
+  f32 capture of the same model is the oracle); the trace injects ONE
+  `Tracer.cast(BF16)` per f32 leaf (params eagerly, I32 index leaves
+  pass through) and ONE bf16→f32 cast at the model output, so the loss
+  reduction accumulates in f32 (cast-the-loss was REJECTED: a large-N
+  mean at 8 mantissa bits) and per-parameter gradients are f32 BY
+  CONSTRUCTION through CastRule's straight-through adjoint. NEW
+  SURFACES: `Tracer.cast(dtype)` (F32↔BF16 only, everything else
+  refused by name; identity casts return `this`), and `Tape.op` dtype
+  PROPAGATION — any bf16 input makes a bf16 result, bf16⊕f32 operand
+  mixing REFUSES BY NAME at trace time (StableHLO wants one element
+  type), and a central RNE snap at bf16 entries mirrors the
+  interpreter's `snapToBf16` so tape forwards match the interpreter by
+  construction. Certs (MixedPrecisionTrainingTest +
+  PjrtMixedPrecisionSmokeTest): structure counted on the captured
+  graph (5 injected narrows for 1 input + 4 params, exactly 1 widen,
+  f32 primal params, f32 MEAN); a batch-1 snap-lane MLP BIT-EXACT vs a
+  reference spelled with nothing but the §0.4.455 snap helpers (values
+  chosen so every f32 op between snaps is exact — accumulation order
+  cannot matter); a bf16-exact lane where mixed == f32 BIT-FOR-BIT,
+  loss AND every gradient (straight-through adds exactly nothing when
+  nothing rounds); the forward envelope DERIVED, not guessed —
+  |ΔL| ≤ (1/n)Σ Δyᵢ(2(Aᵢ+|tᵢ|)+Δyᵢ) with Δyᵢ = ((1+2⁻⁸)⁸−1)·Aᵢ off the
+  triangle-inequality magnitude bound, measured 2.1e-4 against bound
+  0.163; 10 Adam steps strictly decrease the loss and reproduce
+  BIT-IDENTICALLY on rerun; `gradSource()` on a mixed capture refuses
+  naming bf16 (the §0.4.456 readable-reverse story holds). ON-GPU: the
+  capture's OWN gradient function through the compiled lane — snap
+  lane within the documented floor R·2⁻⁸·scale (R = 25 bf16 ops
+  counted on the graph, the conservative elidable-narrowing bound from
+  the §0.4.457 convert-fold finding; measured loss bit-equal), the
+  SGD-updated weights within the lr-scaled floor, and the exact lane
+  BIT-EXACT for loss + all gradients. NAMED DEFERRALS: f32 CONSTANT
+  leaves inside a bf16 region refuse at trace time (auto-casting
+  trace-time constants is future work — Dense/Relu MLPs capture clean;
+  a forward using scalar-literal overloads does not, and says so);
+  mixed coverage certified for the Dense-MLP family only (conv/
+  BatchNorm/embedding-table bf16 uncertified — the embedding table
+  keeps its own F32 requirement); the typed mixed-dtype session lane
+  stays deferred from G1c (moot here: the boundaries are f32, `runOn`
+  is the honest transport). Suite 2071 → 2080.
+
 - **§0.4.457 — G1c DONE: bf16 certified against real XLA on the GB10**
   (LOCAL certification — CUDA plugin on Blackwell; NO TPU claim, G2b
   re-runs this suite there). BOTH forms from the G1c menu are certified,

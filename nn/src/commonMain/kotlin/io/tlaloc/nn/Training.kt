@@ -31,9 +31,56 @@ import io.tlaloc.core.hostF32
 import io.tlaloc.core.hostI32
 import io.tlaloc.autograd.Tracer
 import io.tlaloc.autograd.captureN
+import io.tlaloc.autograd.cast
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.passes.DxirInterpreter
 import io.tlaloc.ir.passes.DxirReverseTransform
+
+/**
+ * §0.4.458 (G1d) — the mixed-precision training convention, stated once:
+ * **MASTER WEIGHTS IN F32, COMPUTE IN BF16, LOSS AND GRADIENTS IN F32.**
+ *
+ * [MIXED_BF16] is a CAPTURE-level property, not a model property: the trace
+ * injects `Tracer.cast(BF16)` on every F32 input and parameter leaf at the
+ * trace boundary (I32 index inputs pass through — an integer has no
+ * precision), the model's forward then RECORDS in bf16 (the tape's dtype
+ * propagation, §0.4.458 `Tape.op`), and the model OUTPUT is cast back to F32
+ * before the loss function runs — so the loss computes in f32, and the
+ * gradient function's per-parameter outputs are f32 BY CONSTRUCTION (the
+ * params are f32-typed; CastRule's straight-through adjoint widens every
+ * upstream back through the boundary casts, §0.4.456). The model's stored
+ * tensors are never touched: they ARE the f32 master weights, the optimizer
+ * updates them in f32, and only the traced graph ever sees bf16.
+ *
+ * NO LOSS SCALING — deliberately, and this is WHY bf16 beats fp16 for
+ * training: bf16 keeps f32's full 8-bit exponent (§0.4.455 — it is the top
+ * half of binary32), so gradients cannot underflow the way fp16's 5-bit
+ * exponent makes them; the entire GradScaler apparatus fp16 AMP needs
+ * (scale, unscale, inf-check, skip-step) has nothing to protect against.
+ *
+ * REJECTED alternatives, recorded per the house pattern:
+ * - A `MixedPrecision(model)` WRAPPER layer — precision is a property of one
+ *   capture, not of the model structure: the same model must capture both
+ *   ways (the f32 capture is the oracle the mixed one certifies against),
+ *   and a wrapper would either fake `Trainable` (its "parameters" are the
+ *   inner model's) or intercept `Params` lookups per-key at forward time —
+ *   both spellings put the cast decision further from the trace boundary
+ *   the casts belong to.
+ * - CASTING THE LOSS instead of the model output — the loss reduction
+ *   (mean/MSE) would then compute in bf16 and round a large-N accumulation
+ *   at 8 mantissa bits; casting at the model-output boundary is the
+ *   standard AMP shape (torch.autocast computes reductions in f32).
+ * - BF16 MASTER WEIGHTS — the optimizer update `w − α·g` with α·g typically
+ *   1e-3× smaller than w needs more than 8 mantissa bits or updates round
+ *   to zero; f32 masters are the whole point of the mixed convention.
+ */
+enum class Precision {
+    /** The pre-G1d default: everything traces and runs in f32. */
+    F32,
+
+    /** f32 master weights, bf16 compute between the boundary casts, f32 loss + gradients. */
+    MIXED_BF16,
+}
 
 /** One training-step evaluation: the scalar loss and the per-parameter gradients. */
 class StepResult(
@@ -124,6 +171,7 @@ fun <M> capture(
     model: M,
     inputs: List<DTensor<*, *>>,
     name: String = "model",
+    precision: Precision = Precision.F32,
     lossFn: (Tracer<Shape>) -> Tracer<*>,
 ): CapturedStep where M : Layer, M : Trainable<M> {
     require(inputs.size == 1) {
@@ -135,15 +183,34 @@ fun <M> capture(
 
     @Suppress("UNCHECKED_CAST")
     val primal = captureN(inputs + params.map { it.tensor }, name) { leaves ->
-        val inputTracers = leaves.subList(0, inputs.size)
+        // §0.4.458 (G1d) — the MIXED_BF16 trace boundary (see [Precision]):
+        // every F32 leaf gets ONE injected cast to bf16 (params eagerly here,
+        // so a key looked up twice shares one CAST node); I32 index leaves
+        // pass through untouched.
+        fun toCompute(t: Tracer<Shape>): Tracer<Shape> =
+            if (precision == Precision.MIXED_BF16 && t.dtype == io.tlaloc.core.F32)
+                t.cast(io.tlaloc.core.BF16)
+            else t
+        val inputTracers = leaves.subList(0, inputs.size).map(::toCompute)
         val paramTracers: Map<String, Tracer<Shape>> =
-            keys.withIndex().associate { (j, key) -> key to leaves[inputs.size + j] }
+            keys.withIndex().associate { (j, key) -> key to toCompute(leaves[inputs.size + j]) }
         val out = model.forward(inputTracers[0], Params { key ->
             paramTracers[key] ?: error("capture: forward asked for unknown parameter key '$key' (known: $keys)")
         })
-        val loss = lossFn(out)
+        // The output boundary: back to f32 BEFORE the loss, so the loss
+        // reduction accumulates in f32 (the standard AMP shape — see the
+        // rejected cast-the-loss alternative on [Precision]).
+        val lossIn =
+            if (precision == Precision.MIXED_BF16 && out.dtype == io.tlaloc.core.BF16)
+                out.cast(io.tlaloc.core.F32)
+            else out
+        val loss = lossFn(lossIn)
         require(loss.dims.isEmpty()) {
             "capture: lossFn must reduce to a scalar (got dims ${loss.dims.toList()}) — end with .sum() or .mean()"
+        }
+        require(loss.dtype == io.tlaloc.core.F32) {
+            "capture: the loss must be F32-typed (got ${loss.dtype.name}) — mixed precision keeps " +
+                "the loss in f32; the bf16 region ends at the model-output cast"
         }
         loss as Tracer<Shape>
     }
@@ -159,9 +226,10 @@ fun <M> capture(
 fun <M> valueAndGradients(
     model: M,
     inputs: List<DTensor<*, *>>,
+    precision: Precision = Precision.F32,
     lossFn: (Tracer<Shape>) -> Tracer<*>,
 ): StepResult where M : Layer, M : Trainable<M> =
-    capture(model, inputs, lossFn = lossFn).run(model, inputs)
+    capture(model, inputs, precision = precision, lossFn = lossFn).run(model, inputs)
 
 /**
  * §0.4.442 — the interpreter environment is float-typed for every dtype (its

@@ -1191,3 +1191,32 @@ fun <S : Shape> concat(parts: List<Tracer<*>>, axis: Int): Tracer<S> {
     )
     return Tracer<Shape>(tape, e) as Tracer<S>
 }
+
+/**
+ * §0.4.458 (G1d) — the Tracer CAST spelling, the mixed-precision trace
+ * boundary. Records [OpKind.CAST] to [dtype] on the tape; `Tape.toDxirFunction`
+ * reproduces it as the type-driven `DxirOp` the whole G1b stack already
+ * certifies (interpreter arm §0.4.456, `stablehlo.convert` emission, CastRule's
+ * straight-through adjoint — no new gradient math anywhere, the one-engine
+ * rule).
+ *
+ * v1 scope, refused by name outside it: F32 ↔ BF16 only. Int casts stay the
+ * FIR lowering's territory (`i.toFloat()`), and no other float dtype has a
+ * tracer story yet. A cast to the tracer's OWN dtype returns `this` — a
+ * recorded identity CAST would be graph noise with no numeric content.
+ *
+ * The forward value: for →BF16 the entry's central snap (see `Tape.op`)
+ * rounds it — CAST is the op that OWNS the rounding, and the snap there IS
+ * this op's math; for BF16→F32 the copy is exact (the source array already
+ * holds widened forms, §0.4.455).
+ */
+fun <S : Shape> Tracer<S>.cast(dtype: io.tlaloc.core.DType): Tracer<S> {
+    if (dtype == entry.dtype) return this
+    val ok = { d: io.tlaloc.core.DType -> d == F32 || d == io.tlaloc.core.BF16 }
+    require(ok(dtype) && ok(entry.dtype)) {
+        "Tracer.cast v1: F32<->BF16 only (got ${entry.dtype.name} -> ${dtype.name}) — " +
+            "integer casts are the FIR lowering's spelling, other float dtypes have no tracer story yet"
+    }
+    val e = tape.op(OpKind.CAST, intArrayOf(id), dims.copyOf(), entry.value.copyOf(), dtype = dtype)
+    return Tracer(tape, e)
+}
