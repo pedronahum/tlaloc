@@ -138,7 +138,7 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // movement-cost here since they never dominate a kernel decision).
     // §0.4.415 — CHECK_SHAPE_LIKE is a value-identity (a runtime dims assert
     // around a customVjp user gradient): no compute, no movement of its own.
-    OpKind.CONCAT, OpKind.SPLIT, OpKind.CAST, OpKind.PAD, OpKind.WHERE, OpKind.COMPARE,
+    OpKind.CONCAT, OpKind.CAST, OpKind.PAD, OpKind.WHERE, OpKind.COMPARE,
     OpKind.CHECK_SHAPE_LIKE -> 0.0
 
     // Elementwise binary (one op per output element).

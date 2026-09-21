@@ -343,7 +343,6 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 valueType = node.operands[2].type,
             )
             OpKind.BATCHNORM -> emitBatchNorm(step, name, ops, node)
-            OpKind.SPLIT -> emitSplit(step, node, ops[0], node.operands[0].type)
             OpKind.MANUAL_COMPUTATION -> emitManualComputation(step, name, ops, node)
             // §0.4.60 — `stablehlo.not` / `stablehlo.and` on Bool (i1) inputs. Added
             // alongside the existing `stablehlo.power` arm at line 140; these three
@@ -496,8 +495,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             else -> error("StableHLO lowering not yet implemented for ${node.op}")
         }
         // Most ops emit a single line whose result is the literal `%N` we named above.
-        // Multi-output ops (e.g. ARGMAX, which uses `%pair:2` and takes result #1; SPLIT,
-        // which emits N slices) set ssa[node.id] themselves earlier; we preserve those.
+        // Multi-output ops (e.g. ARGMAX, which uses `%pair:2` and takes result #1)
+        // set ssa[node.id] themselves earlier; we preserve those.
         if (node.id !in ssa) ssa[node.id] = listOf(name)
     }
 
@@ -2480,49 +2479,6 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 is DxirBlockArg -> error("DxirBlockArg should not appear directly in a block body")
             }
         }
-    }
-
-    private fun emitSplit(
-        step: String,
-        node: DxirOp,
-        x: String,
-        inputType: DxirType,
-    ) {
-        val axis = normalizeAxis(intAttr(node, "axis"), inputType.rank)
-        val sizes = intListAttr(node, "sizes")
-        require(sizes.isNotEmpty()) { "SPLIT 'sizes' must be non-empty" }
-        require(sizes.all { it > 0 }) { "SPLIT 'sizes' must be positive; got $sizes" }
-        require(sizes.sum() == inputType.dims[axis]) {
-            "SPLIT sizes sum=${sizes.sum()} must equal input dim $axis = ${inputType.dims[axis]}"
-        }
-        require(sizes.size == node.numResults) {
-            "SPLIT declared ${node.numResults} result types but 'sizes' has ${sizes.size} entries"
-        }
-        for (k in sizes.indices) {
-            val expected = inputType.dims.toMutableList().also { it[axis] = sizes[k] }
-            require(node.types[k].dims == expected) {
-                "SPLIT result $k shape ${node.types[k].dims} does not match expected $expected"
-            }
-        }
-
-        val outNames = ArrayList<String>(sizes.size)
-        var offset = 0
-        for (k in sizes.indices) {
-            val start = offset
-            val end = offset + sizes[k]
-            offset = end
-            val sliceName = synth()
-            outNames += sliceName
-            val rangesStr = (0 until inputType.rank).joinToString(", ") { i ->
-                val lo = if (i == axis) start else 0
-                val hi = if (i == axis) end else inputType.dims[i]
-                "$lo:$hi"
-            }
-            out.appendLine(
-                "$step$sliceName = stablehlo.slice $x [$rangesStr] : (${inputType.toMlir()}) -> ${node.types[k].toMlir()}",
-            )
-        }
-        ssa[node.id] = outNames
     }
 
     private fun emitBatchNorm(

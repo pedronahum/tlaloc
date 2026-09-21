@@ -3,7 +3,8 @@
 **Status: PHASE G RATIFIED (Pedro, 2026-09-21) with the local/hardware
 split** — the arc certifies only what its machine can prove: G1 (bf16)
 + G2a (TPU bring-up, local half) + G3a (collectives/Shardy/multi-host
-design) run on the GB10 now, with SPLIT deletion ratified alongside;
+design) run on the GB10 now, with SPLIT deletion ratified alongside
+(DONE §0.4.454, §5 below);
 G2b (TPU execution), G4 (distributed trainer) and G5 (Pallas/Mosaic
 kernels) are GATED ON HARDWARE — a Cloud TPU VM Pedro provisions
 (v5e/v6e spot suffices). The running record lands in §5 below. Researched 2026-09-21 against the TorchTPU
@@ -109,4 +110,25 @@ recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
 
-(Filled per slice as the workflow lands them.)
+- **§0.4.454 — G slice 1 DONE: OpKind.SPLIT deleted.** The arc's banked
+  win, ratified with Phase G itself (§0.4.453; recommended since the
+  §0.4.448 audit-finding-C demotion). The kind was unreachable — the
+  §0.4.448 grep showed nothing constructs it outside the StableHLO
+  emitter arm and IR-plumbing tests, and the user-facing split surfaces
+  (the :core/:nn host `split()` from §0.4.428, the FIR stack/split
+  folds) never emitted it (re-verified at HEAD: zero `OpKind.SPLIT`
+  references in core/nn/fir/frontend). Removed: the enum entrant, the
+  emitter's arm + `emitSplit` (SPLIT-only; ARGMAX's `%pair:2` handling
+  is separate and untouched), the `DemotedOpKinds` entry + refusal
+  message, the cost-model row, the interpreter/renderer refusal-arm
+  listings, 12 SPLIT-vehicle tests (6 EmitterTest, 3 RoundTripTest, 3
+  DemotedKindRefusalTest rows), and every stale doc/comment reference
+  (OpKind.kt, DxirReverse/ForwardTransform, TLALOC_EMIT_CONTRACT.md,
+  AD_SINGLE_ENGINE_AUDIT.md). KEPT: DxirTest's two multi-result
+  IR-plumbing pins, retargeted to COARSENED — the plumbing under test
+  (opMulti, per-index `DxirOpResult`, the `%N:2` packed printer form)
+  is kind-agnostic and stays covered. Per-piece SLICE is the sanctioned
+  spelling; a re-introduction would need the full differentiable-op
+  contract (interpreter arm, VjpRule with per-index adjoint routing,
+  forward tangent, KotlinSourceRenderer arm or named refusal, oracle
+  story) — recorded in the OpKind.kt comment where the entrant lived.

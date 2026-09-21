@@ -166,8 +166,8 @@ object DxirForwardTransform {
                         // §0.4.448 — audit finding C: the demoted kinds refuse
                         // BY NAME with the sanctioned alternative in the message
                         // (see [demotedKindRefusal]) before any tangent/multi-
-                        // result dispatch — a multi-result SPLIT would otherwise
-                        // hit the generic out-of-scope error, and the collectives
+                        // result dispatch — a demoted kind would otherwise hit
+                        // the generic out-of-scope error, and the collectives
                         // are non-differentiable by design.
                         node.op in DEMOTED_OP_KINDS -> error(
                             demotedKindRefusal(node.op, "DxirForwardTransform")!!,

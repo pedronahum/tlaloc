@@ -17,14 +17,16 @@ import kotlin.test.assertTrue
  * the KIND and the sanctioned ALTERNATIVE — the whole point of the demotion
  * is that a hand-built graph using one of these fails with directions, not
  * with a generic "unsupported op" (or, worst of all pre-§0.4.448 shapes, a
- * silent index-0 skip that dropped a multi-result SPLIT's gradient to zero).
+ * silent index-0 skip that dropped a multi-result op's gradient to zero).
  *
  * Layer matrix (the audit's demote decision):
- * - LAYERNORM / SCALED_DOT_PRODUCT_ATTENTION / SPLIT: refused by
+ * - LAYERNORM / SCALED_DOT_PRODUCT_ATTENTION: refused by
  *   DxirInterpreter, DxirReverseTransform, DxirForwardTransform.
  * - ALL_REDUCE / SHARD_CONSTRAINT: non-differentiable by design — refused by
  *   both transforms (the interpreter keeps its generic unsupported-op arm:
  *   their demotion is about differentiability, not host evaluation).
+ * (SPLIT, the third §0.4.448 demotee, was DELETED in §0.4.454 — its rows
+ * left with the kind.)
  * Recognition (cost model, recognizers) and StableHLO emission remain the
  * sanctioned roles and are deliberately NOT touched by this pin.
  */
@@ -56,18 +58,6 @@ class DemotedKindRefusalTest {
         listOf(op(OpKind.SUM, listOf(y), f32s))
     }
 
-    /** Consumes result index 1 ONLY — the exact shape the reverse walk's
-     * index-0 upstream lookup would have skipped silently pre-§0.4.448. */
-    private fun splitFn(): DxirFunction = DxirBuilder.function("splitting") {
-        val x = param("x", DxirType(F32, listOf(6, 4)))
-        val split = opMulti(
-            OpKind.SPLIT, listOf(x),
-            types = listOf(DxirType(F32, listOf(3, 4)), DxirType(F32, listOf(3, 4))),
-            attrs = mapOf("axis" to 0, "sizes" to listOf(3, 3)),
-        )
-        listOf(op(OpKind.SUM, listOf(split.result(1)), f32s))
-    }
-
     private fun allReduceFn(): DxirFunction = DxirBuilder.function("ar") {
         val x = param("x", vec4)
         val y = op(OpKind.ALL_REDUCE, listOf(x), vec4)
@@ -80,7 +70,7 @@ class DemotedKindRefusalTest {
         listOf(op(OpKind.SUM, listOf(y), f32s))
     }
 
-    // --- DxirInterpreter refusals (LAYERNORM / SDPA / SPLIT). ---
+    // --- DxirInterpreter refusals (LAYERNORM / SDPA). ---
 
     @Test
     fun interpreterRefusesLayernormByName() {
@@ -99,15 +89,7 @@ class DemotedKindRefusalTest {
         assertNamedRefusal(ex, "SCALED_DOT_PRODUCT_ATTENTION", "FlashAttention")
     }
 
-    @Test
-    fun interpreterRefusesSplitByName() {
-        val ex = assertFailsWith<IllegalStateException> {
-            DxirInterpreter.evalFunction(splitFn(), listOf(FloatArray(24) { it.toFloat() }))
-        }
-        assertNamedRefusal(ex, "SPLIT", "SLICE")
-    }
-
-    // --- DxirReverseTransform refusals (all five). ---
+    // --- DxirReverseTransform refusals (all four). ---
 
     @Test
     fun reverseTransformRefusesLayernormByName() {
@@ -119,15 +101,6 @@ class DemotedKindRefusalTest {
     fun reverseTransformRefusesSdpaByName() {
         val ex = assertFailsWith<IllegalStateException> { DxirReverseTransform.apply(sdpaFn()) }
         assertNamedRefusal(ex, "SCALED_DOT_PRODUCT_ATTENTION", "FlashAttention")
-    }
-
-    @Test
-    fun reverseTransformRefusesSplitByName() {
-        // Pre-§0.4.448 this was the SILENT shape: the walk's index-0 upstream
-        // lookup found nothing for a SPLIT consumed only at index 1 and
-        // skipped it — zero gradient, no error. Now it refuses by name.
-        val ex = assertFailsWith<IllegalStateException> { DxirReverseTransform.apply(splitFn()) }
-        assertNamedRefusal(ex, "SPLIT", "SLICE")
     }
 
     @Test
@@ -144,7 +117,7 @@ class DemotedKindRefusalTest {
         assertNamedRefusal(ex, "SHARD_CONSTRAINT", "non-differentiable by design")
     }
 
-    // --- DxirForwardTransform refusals (all five). ---
+    // --- DxirForwardTransform refusals (all four). ---
 
     @Test
     fun forwardTransformRefusesLayernormByName() {
@@ -156,14 +129,6 @@ class DemotedKindRefusalTest {
     fun forwardTransformRefusesSdpaByName() {
         val ex = assertFailsWith<IllegalStateException> { DxirForwardTransform.apply(sdpaFn()) }
         assertNamedRefusal(ex, "SCALED_DOT_PRODUCT_ATTENTION", "FlashAttention")
-    }
-
-    @Test
-    fun forwardTransformRefusesSplitByName() {
-        // Pre-§0.4.448 a SPLIT here hit the generic multi-result
-        // out-of-scope error; the named refusal fires first now.
-        val ex = assertFailsWith<IllegalStateException> { DxirForwardTransform.apply(splitFn()) }
-        assertNamedRefusal(ex, "SPLIT", "SLICE")
     }
 
     @Test

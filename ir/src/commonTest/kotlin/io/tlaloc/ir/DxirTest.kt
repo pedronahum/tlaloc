@@ -95,27 +95,62 @@ class DxirTest {
         assertEquals("helper", callNode.callee.name)
     }
 
+    /** §0.4.454 — the multi-result plumbing tests' vehicle switched from the
+     * deleted SPLIT kind to COARSENED (the sanctioned multi-result kind); the
+     * plumbing under test — per-index [DxirOpResult] wrappers, the packed
+     * printer form — is kind-agnostic. A two-halves split spelled as a
+     * COARSENED whose primal is per-piece SLICE (the sanctioned spelling) and
+     * whose gradient is the analytical CONCAT of the upstreams. */
+    private fun halvesPrimal(): DxirFunction = DxirBuilder.function("halves") {
+        val x = param("x", DxirType(F32, listOf(6, 4)))
+        val half = DxirType(F32, listOf(3, 4))
+        val lo = op(
+            OpKind.SLICE, listOf(x), half,
+            attrs = mapOf(
+                "start_indices" to listOf(0, 0), "limit_indices" to listOf(3, 4),
+                "strides" to listOf(1, 1),
+            ),
+        )
+        val hi = op(
+            OpKind.SLICE, listOf(x), half,
+            attrs = mapOf(
+                "start_indices" to listOf(3, 0), "limit_indices" to listOf(6, 4),
+                "strides" to listOf(1, 1),
+            ),
+        )
+        listOf(lo, hi)
+    }
+
+    private fun halvesGradient(): DxirFunction = DxirBuilder.function("halves_grad") {
+        val half = DxirType(F32, listOf(3, 4))
+        val u0 = param("u0", half)
+        val u1 = param("u1", half)
+        param("x", DxirType(F32, listOf(6, 4)))
+        listOf(op(OpKind.CONCAT, listOf(u0, u1), DxirType(F32, listOf(6, 4)), attrs = mapOf("dimension" to 0)))
+    }
+
     @Test
     fun multiResultOpExposesEachResultViaResultIndex() {
-        val fn = DxirBuilder.function("splitting") {
+        val fn = DxirBuilder.function("multi") {
             val x = param("x", DxirType(F32, listOf(6, 4)))
-            val split = opMulti(
-                OpKind.SPLIT, listOf(x),
-                types = listOf(DxirType(F32, listOf(3, 4)), DxirType(F32, listOf(3, 4))),
-                attrs = mapOf("axis" to 0, "sizes" to listOf(3, 3)),
+            val multi = coarsened(
+                operands = listOf(x),
+                primalBody = halvesPrimal(),
+                gradientBody = halvesGradient(),
+                readsPrimalIndices = emptySet(),
             )
-            listOf(split.result(0), split.result(1))
+            listOf(multi.result(0), multi.result(1))
         }
-        val split = fn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.SPLIT }
-        assertEquals(2, split.numResults)
-        assertTrue(split.isMultiResult)
+        val multi = fn.body.filterIsInstance<DxirOp>().single { it.op == OpKind.COARSENED }
+        assertEquals(2, multi.numResults)
+        assertTrue(multi.isMultiResult)
         assertEquals(2, fn.returns.size)
         val r0 = fn.returns[0]
         val r1 = fn.returns[1]
         assertTrue(r0 is DxirOpResult && r0.index == 0)
         assertTrue(r1 is DxirOpResult && r1.index == 1)
-        assertEquals(split.id, r0.id)
-        assertEquals(split.id, r1.id)
+        assertEquals(multi.id, r0.id)
+        assertEquals(multi.id, r1.id)
     }
 
     @Test
@@ -235,14 +270,16 @@ class DxirTest {
 
     @Test
     fun multiResultPrinterShowsPackedForm() {
+        // §0.4.454 — COARSENED as the multi-result vehicle (SPLIT deleted).
         val fn = DxirBuilder.function("f") {
-            val x = param("x", DxirType(F32, listOf(10)))
-            val split = opMulti(
-                OpKind.SPLIT, listOf(x),
-                types = listOf(DxirType(F32, listOf(6)), DxirType(F32, listOf(4))),
-                attrs = mapOf("axis" to 0, "sizes" to listOf(6, 4)),
+            val x = param("x", DxirType(F32, listOf(6, 4)))
+            val multi = coarsened(
+                operands = listOf(x),
+                primalBody = halvesPrimal(),
+                gradientBody = halvesGradient(),
+                readsPrimalIndices = emptySet(),
             )
-            listOf(split.result(0), split.result(1))
+            listOf(multi.result(0), multi.result(1))
         }
         val out = DxirModule(listOf(fn)).pretty()
         assertTrue(out.contains(":2"), "packed-form `%N:2` missing: $out")

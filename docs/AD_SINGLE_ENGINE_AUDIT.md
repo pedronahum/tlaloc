@@ -15,8 +15,8 @@ dumps refuse loudly until it lands); the renderer's named op deferrals
 (§0.4.449 list — ABS/RSQRT/GELU/SILU/SIN/COS twin gap, rank≥3 MATMUL,
 GATHER/SCATTER, control flow, F64, rank>4); the `bmm` host-twin gap
 (§0.4.447); jvp/vjp/jacobian/hessian families dump no source yet
-(§0.4.450); SPLIT deletion recommended, awaiting Pedro's call
-(§0.4.448); the `DScalarMixingGradientTest` legacy test name (§0.4.446).
+(§0.4.450); the `DScalarMixingGradientTest` legacy test name (§0.4.446).
+SPLIT deletion (recommended §0.4.448) RATIFIED and DONE §0.4.454.
 
 ## Running record
 
@@ -144,11 +144,12 @@ GATHER/SCATTER, control flow, F64, rank>4); the `bmm` host-twin gap
   complete-the-kinds alternative recorded. Pins:
   `DemotedKindRefusalTest` — one test per kind per refusing layer (13),
   each asserting the message names the kind and the alternative; the SPLIT
-  reverse pin consumes result index 1 only, the exact shape whose gradient
-  a silent index-0 skip would have dropped. **SPLIT deletion
-  RECOMMENDED:** nothing outside emitter/IR-plumbing tests constructs it
-  (the FIR fold covers user splits) — the kind is kept with refusals in
-  place; removal is Pedro's call.
+  reverse pin consumed result index 1 only, the exact shape whose gradient
+  a silent index-0 skip would have dropped. **SPLIT deletion RECOMMENDED**
+  here (nothing outside emitter/IR-plumbing tests constructs it; the FIR
+  fold covers user splits) — ratified with Phase G (§0.4.453) and DONE
+  §0.4.454: the kind, its emitter arm, its refusal rows and its pins are
+  gone; per-piece SLICE is the sanctioned spelling.
 
 - **§0.4.447 — B CLOSED (one named twin-gap).** The ~24 private FloatArray
   forward computations in `TracedOps.kt`'s pre-F4 spellings now route through
@@ -235,9 +236,9 @@ completing the kinds would duplicate certified work): loud named
 refusals in the interpreter and both transforms, doc notes on the kinds,
 pins. `ALL_REDUCE`/`SHARD_CONSTRAINT` are non-differentiable by design
 (sharding constructs) — document that, refuse by name in the
-transforms. `SPLIT` follows the same demotion (the FIR fold covers
-users). **DONE §0.4.448** (SPLIT deletion recommended, kept pending
-Pedro's call) — see the running record.
+transforms. `SPLIT` followed the same demotion (the FIR fold covers
+users). **DONE §0.4.448**; SPLIT then DELETED outright in §0.4.454 —
+see the running record.
 
 **D. Dual `grad` naming.** Tracer-lambda `grad` vs intrinsic `grad`
 share names, disambiguated by lambda type. Documented and load-bearing

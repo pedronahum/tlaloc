@@ -10,23 +10,24 @@ import io.tlaloc.ir.OpKind
  * recognizer acceptance) and StableHLO emission are their sanctioned layers;
  * the interpreter and both AD transforms refuse them BY NAME so a hand-built
  * graph using one fails with the sanctioned alternative in the message instead
- * of a generic "unsupported op" — or worse, a silent skip (a multi-result
- * SPLIT whose consumers sit at index > 0 would slip past the reverse walk's
- * index-0 upstream lookup and silently drop its gradient).
+ * of a generic "unsupported op" — or worse, a silent skip (pre-§0.4.448, a
+ * multi-result op whose consumers sat at index > 0 slipped past the reverse
+ * walk's index-0 upstream lookup and silently dropped its gradient).
  *
  * REJECTED alternative (the audit's demote decision): completing the kinds —
  * interpreter arms, VjpRules, forward tangents — would duplicate work the
  * coarseners already own with certification (layernorm/attention fused
- * semantics) or that plain op compositions already cover (SPLIT via per-piece
- * SLICE). ALL_REDUCE and SHARD_CONSTRAINT are non-differentiable BY DESIGN:
- * sharding is a layout annotation on an already-differentiated program, not a
- * mathematical operation with an adjoint (GradShardingVerify checks the
- * fwd/grad collective duality instead).
+ * semantics). ALL_REDUCE and SHARD_CONSTRAINT are non-differentiable BY
+ * DESIGN: sharding is a layout annotation on an already-differentiated
+ * program, not a mathematical operation with an adjoint (GradShardingVerify
+ * checks the fwd/grad collective duality instead).
+ *
+ * A third demoted kind, SPLIT, was DELETED outright in §0.4.454 (Phase G
+ * slice 1): unreachable — per-piece SLICE is the sanctioned spelling.
  */
 internal val DEMOTED_OP_KINDS: Set<OpKind> = setOf(
     OpKind.LAYERNORM,
     OpKind.SCALED_DOT_PRODUCT_ATTENTION,
-    OpKind.SPLIT,
     OpKind.ALL_REDUCE,
     OpKind.SHARD_CONSTRAINT,
 )
@@ -47,10 +48,6 @@ internal fun demotedKindRefusal(kind: OpKind, layer: String): String? = when (ki
             "kind (FlashAttentionRecognizer + cost model + StableHLO emitter are its " +
             "sanctioned layers) — spell attention via the FlashAttention composition " +
             "(MATMUL/softmax/MATMUL) and let the coarsener own the fused semantics"
-    OpKind.SPLIT ->
-        "$layer: SPLIT is an emission-only kind (the StableHLO emitter is its " +
-            "sanctioned layer; the FIR fold covers user splits) — spell it as " +
-            "per-piece SLICE ops"
     OpKind.ALL_REDUCE ->
         "$layer: ALL_REDUCE is non-differentiable by design (a sharding collective; " +
             "GradShardingVerify's adjoint-duality check is its sanctioned layer) — " +

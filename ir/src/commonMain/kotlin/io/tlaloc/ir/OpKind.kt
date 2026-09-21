@@ -203,20 +203,15 @@ enum class OpKind {
     // than shipping a plausible-looking wrong kernel.
     CONV_TRANSPOSE2D_DATA_ADJOINT, CONV_TRANSPOSE2D_KERNEL_ADJOINT,
 
-    // Shape
+    // Shape. (A SPLIT kind lived here until §0.4.453 — demoted §0.4.448, DELETED
+    // §0.4.454: nothing ever constructed it outside the emitter arm and IR-
+    // plumbing tests — per-piece SLICE is the sanctioned spelling, and the
+    // :core/:nn host split() surfaces plus the FIR stack/split folds never
+    // emitted it. Re-introduction would need: an interpreter arm, a VjpRule
+    // with per-index adjoint routing, a forward tangent, a KotlinSourceRenderer
+    // arm or named refusal, and an oracle story — none of which buys anything
+    // SLICE compositions don't already have.)
     RESHAPE, TRANSPOSE, BROADCAST, CONCAT,
-
-    // §0.4.448 — audit finding C, DEMOTED (don't complete): SPLIT is
-    // emission-only. Sanctioned layers: the StableHLO emitter (emitSplit) and
-    // the cost model. NO interpreter arm, NO VjpRule, NO forward tangent —
-    // DxirInterpreter and both AD transforms refuse it by name with the
-    // sanctioned alternative (per-piece SLICE; the FIR fold covers user
-    // splits) — see passes/DemotedOpKinds.kt. Nothing outside emitter/IR-
-    // plumbing tests constructs it; deletion recommended (§0.4.448 commit),
-    // kept pending Pedro's call. REJECTED alternative: completing the kind
-    // (multi-result interpreter arm + per-index adjoint routing) buys nothing
-    // SLICE compositions don't already have, certified.
-    SPLIT,
 
     SLICE, GATHER, SCATTER,
 

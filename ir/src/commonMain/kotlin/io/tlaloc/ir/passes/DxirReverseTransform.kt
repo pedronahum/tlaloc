@@ -48,8 +48,8 @@ private fun DxirNode.gradKey(): Pair<Int, Int> = when (this) {
  *   pullback `(ȳ, x) → x̄`.
  * - **Straight-line bodies only.** Ops carrying nested regions (e.g. `MANUAL_COMPUTATION`,
  *   future `If`/`While`) are rejected — handling them is the φ-calculus pass in Stage B.
- * - **Single-result body ops only.** Multi-result ops (e.g. `SPLIT`, `ARGMAX`) need
- *   per-result accumulator threading; deferred.
+ * - **Single-result body ops only.** Multi-result ops (other than the sanctioned
+ *   `IF`/`COARSENED` arms) need per-result accumulator threading; deferred.
  * - **Only ops with a registered [VjpRule] in [VjpRegistry].** Unsupported ops fail loudly.
  *
  * Multi-parameter primals are accepted (N ≥ 0). Each primal parameter gets its own
@@ -152,7 +152,8 @@ object DxirReverseTransform {
                 // §0.4.448 — audit finding C: the demoted kinds refuse BY NAME
                 // with the sanctioned alternative in the message (see
                 // [demotedKindRefusal]), ahead of the generic multi-result gate
-                // below (which would otherwise catch SPLIT with no directions)
+                // below (which would otherwise catch a demoted kind with no
+                // directions)
                 // and ahead of the walk's index-0 upstream lookup (which would
                 // skip an op with no accumulated upstream silently). Branch
                 // bodies get the same guard inside [walkBranchReverse].

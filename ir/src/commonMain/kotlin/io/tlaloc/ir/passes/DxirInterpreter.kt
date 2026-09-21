@@ -1569,7 +1569,7 @@ object DxirInterpreter {
             // SHARD_CONSTRAINT stay on the generic arm: their demotion is about
             // differentiability (the transforms refuse them by name), not about
             // a host-evaluation story this interpreter ever promised.
-            OpKind.LAYERNORM, OpKind.SCALED_DOT_PRODUCT_ATTENTION, OpKind.SPLIT ->
+            OpKind.LAYERNORM, OpKind.SCALED_DOT_PRODUCT_ATTENTION ->
                 error(demotedKindRefusal(op.op, "DxirInterpreter")!!)
             else -> error("DxirInterpreter: op ${op.op} not in the bridge's supported set")
         }

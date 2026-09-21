@@ -590,7 +590,7 @@ internal object KotlinSourceRenderer {
 
             // Demoted kinds: handled above by demotedKindRefusal, but the `when`
             // stays exhaustive so a NEW OpKind fails compilation right here.
-            OpKind.LAYERNORM, OpKind.SCALED_DOT_PRODUCT_ATTENTION, OpKind.SPLIT,
+            OpKind.LAYERNORM, OpKind.SCALED_DOT_PRODUCT_ATTENTION,
             OpKind.ALL_REDUCE, OpKind.SHARD_CONSTRAINT,
             -> throw KotlinRenderRefusal(demotedKindRefusal(op.op, "toKotlinSource")!!)
         }

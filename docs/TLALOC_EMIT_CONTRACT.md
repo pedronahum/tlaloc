@@ -105,8 +105,6 @@ Pattern matchers must therefore expect intermediate `broadcast_in_dim` between a
 | SLICE      | `%N = stablehlo.slice %X [s0:l0, s1:l1, ...] : (Tin) -> Tout` (strides if ≠1)|
 | CONCAT     | `%N = stablehlo.concatenate %X, %Y, ..., dim = D : (Tins) -> Tout`           |
 
-`SPLIT` is multi-result and emits **N distinct `stablehlo.slice` ops**; downstream uses reference `%result#0`, `%result#1`, etc.
-
 ### 4.4 Reductions
 
 Lowered to `stablehlo.reduce` with a per-OpKind reducer + init constant:
@@ -316,7 +314,7 @@ A short list of things every xatlib / `toNagual` author trips over:
 
 7. **SSA names are Dxir IDs, not semantic names.** `%0 ... %N` are param/result IDs; `%s0 ... %sM` are emitter-synthesised intermediates (reduce inits, scalar constants, broadcast tails). Do not assume `%N` ordering carries semantic meaning.
 
-8. **Multi-result references.** `SPLIT` and `ARGMAX` produce multi-result ops that downstream uses reference as `%result#0`, `%result#1`. The emitter never collapses these into separate single-result ops.
+8. **Multi-result references.** `ARGMAX` emits a multi-result pair internally (`%pair:2`, taking result #1). (The `SPLIT` kind, which emitted N distinct `stablehlo.slice` ops referenced downstream as `%result#0`, `%result#1`, was deleted in §0.4.454 — spell splits as per-piece `SLICE`.)
 
 9. **Constants for non-finite floats.** `-inf` is emitted as `dense<0xFF800000> : tensor<f32>` (raw bit pattern); `+inf` as `0x7F800000`. Pattern matchers should accept both decimal and hex literal forms.
 

@@ -1406,59 +1406,6 @@ class RoundTripTest {
     }
 
     @Test
-    fun splitRoundTripsEqualHalves() {
-        requireTranslateOrSkip()
-        // Most common case: split a transformer (B, 2D) into two (B, D) halves (gate+up).
-        val fn = DxirBuilder.function("sp") {
-            val x = param("x", DxirType(F32, listOf(16, 2048)))
-            val split = opMulti(
-                OpKind.SPLIT, listOf(x),
-                types = listOf(DxirType(F32, listOf(16, 1024)), DxirType(F32, listOf(16, 1024))),
-                attrs = mapOf("axis" to 1, "sizes" to listOf(1024, 1024)),
-            )
-            listOf(split.result(0), split.result(1))
-        }
-        validate(DxirModule(listOf(fn)).toStablehlo(), "SPLIT equal halves (GLU-gate)")
-    }
-
-    @Test
-    fun splitRoundTripsUnequalChunks() {
-        requireTranslateOrSkip()
-        val fn = DxirBuilder.function("sp") {
-            val x = param("x", DxirType(F32, listOf(10, 4)))
-            val split = opMulti(
-                OpKind.SPLIT, listOf(x),
-                types = listOf(
-                    DxirType(F32, listOf(2, 4)),
-                    DxirType(F32, listOf(3, 4)),
-                    DxirType(F32, listOf(5, 4)),
-                ),
-                attrs = mapOf("axis" to 0, "sizes" to listOf(2, 3, 5)),
-            )
-            listOf(split.result(0), split.result(1), split.result(2))
-        }
-        validate(DxirModule(listOf(fn)).toStablehlo(), "SPLIT 3 unequal chunks")
-    }
-
-    @Test
-    fun splitResultFlowsIntoNextOp() {
-        requireTranslateOrSkip()
-        val fn = DxirBuilder.function("sp_chain") {
-            val x = param("x", DxirType(F32, listOf(8, 3)))
-            val split = opMulti(
-                OpKind.SPLIT, listOf(x),
-                types = listOf(DxirType(F32, listOf(4, 3)), DxirType(F32, listOf(4, 3))),
-                attrs = mapOf("axis" to 0, "sizes" to listOf(4, 4)),
-            )
-            // Sum of first half.
-            val r0 = split.result(0)
-            val total = op(OpKind.SUM, listOf(r0), DxirType(F32, emptyList()))
-            listOf(total)
-        }
-        validate(DxirModule(listOf(fn)).toStablehlo(), "SPLIT → SUM chain")
-    }
-
-    @Test
     fun batchNormInferenceRoundTripsMatchesTestdata() {
         requireTranslateOrSkip()
         // Direct port of the stablehlo ops_stablehlo.mlir batch_norm_inference example.
