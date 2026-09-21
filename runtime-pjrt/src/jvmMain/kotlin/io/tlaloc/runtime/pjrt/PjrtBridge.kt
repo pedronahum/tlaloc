@@ -20,6 +20,18 @@ import java.lang.foreign.Arena
  *   - [Cuda]    — XLA's `cuda` backend on NVIDIA GPUs. The v1 default;
  *     the plugin resolved by [PjrtBinaries] is `xla_cuda_plugin.so`
  *     (bundled with `pip install jax[cuda12]`).
+ *   - [Tpu]     — Google TPUs via libtpu's PJRT plugin (§0.4.459, G2a).
+ *     **The local half only**: plugin resolution, platform-name
+ *     expectation, create-options gating and the self-skipping smoke
+ *     suite are certified on this machine; EXECUTION on a TPU is G2b's
+ *     claim and is made nowhere in this repo until a Cloud TPU VM lane
+ *     runs it (see docs/TPU_BRINGUP.md). Plugin resolved by
+ *     [PjrtBinaries.tpuPluginPath]: `TLALOC_PJRT_PLUGIN_PATH` (when it
+ *     names a tpu-shaped .so) or the libtpu default install locations —
+ *     the PyPI `libtpu` wheel ships `site-packages/libtpu/libtpu.so`,
+ *     and TPU VM images carry `/lib/libtpu.so` (older images also spell
+ *     the plugin `pjrt_c_api_tpu_plugin.so`). `PJRT_Client_PlatformName`
+ *     for libtpu is `"tpu"` — the smoke suite asserts exactly that.
  *
  * The single-plugin model is XLA's design — each PJRT plugin .so registers
  * for one platform string at Client_Create time. CPU + CUDA + TPU each
@@ -28,6 +40,7 @@ import java.lang.foreign.Arena
 enum class PjrtTarget(val platform: String) {
     LlvmCpu(platform = "cpu"),
     Cuda(platform = "cuda"),
+    Tpu(platform = "tpu"),
 }
 
 /**
@@ -70,6 +83,15 @@ fun runOnPjrt(
     target: PjrtTarget = PjrtTarget.Cuda,
     @Suppress("UNUSED_PARAMETER") timeoutSeconds: Long = 300L,
 ): List<FloatArray> {
+    // §0.4.459 (G2a) — named refusal: this one-shot path resolves the
+    // CUDA-family plugin ([PjrtBinaries.pluginPath]) and always passes GPU
+    // allocator create-options, both wrong for a TPU client. The TPU lane
+    // is PjrtSession(plugin = PjrtBinaries.tpuPluginPath, target = Tpu).
+    require(target != PjrtTarget.Tpu) {
+        "runOnPjrt: PjrtTarget.Tpu is not supported on the one-shot runOnPjrt path — " +
+            "use PjrtSession(plugin = PjrtBinaries.tpuPluginPath!!, target = PjrtTarget.Tpu) " +
+            "(see docs/TPU_BRINGUP.md)"
+    }
     require(fn.params.size == inputs.size) {
         "runOnPjrt: param count ${fn.params.size} != input count ${inputs.size}"
     }

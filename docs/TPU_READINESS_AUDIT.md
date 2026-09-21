@@ -110,6 +110,63 @@ recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
 
+- **§0.4.459 — G2a DONE: the local half of TPU bring-up — everything but
+  execution, which remains FORBIDDEN to claim** (no TPU exists here; the
+  smoke suite self-skips by design and G2b turns the skips into passes
+  from a Cloud TPU VM per the new docs/TPU_BRINGUP.md runbook).
+  SURFACES: **(1) `PjrtTarget.Tpu`** (platform "tpu") with
+  `PjrtBinaries.tpuPluginPath` — `TLALOC_PJRT_PLUGIN_PATH` honoured only
+  when it names a tpu-shaped .so (the gate that keeps a CUDA host's
+  generic env var out of the TPU lane, unit-pinned both directions), else
+  the libtpu default locations documented from the PyPI wheel layout
+  (site-packages/libtpu/libtpu.so under $VIRTUAL_ENV and ~/.local) and
+  the TPU VM images (/lib/libtpu.so, /usr/lib/libtpu.so;
+  pjrt_c_api_tpu_plugin.so on older images via the env var); resolution
+  core extracted pure so it certifies GPU-less. **(2) The proto/struct
+  backend audit**: the 6-byte CompileOptionsProto re-verified against
+  xla/pjrt/proto/compile_options.proto at openxla/xla main 2026-09-21
+  (executable_build_options=3, num_replicas=4, num_partitions=5 —
+  protobuf wire format is backend-agnostic, so a TPU compile parses it
+  identically), extracted as `COMPILE_OPTIONS_PROTO_BYTES` and
+  structurally decoded by a local pin; PJRT_ExecuteOptions ruled header
+  ABI not backend ABI (the launch_id padding holds on LP64
+  aarch64+x86_64; the TPU-flavoured fields — launch_id, num_tasks/
+  task_ids/incarnation_ids, multi_slice_config — are zeroed, the correct
+  single-host default, non-zero forms named G3/G4 surface). **(3) The
+  §0.4.333 create-options are now PLATFORM-GATED**: memory_fraction/
+  preallocate are the GPU plugin's allocator knobs, so `PjrtApi
+  .createClient` accepts null (create_options=NULL, num_options=0) and
+  `PjrtSession`'s options nullability IS the gate — Tpu defaults to
+  null, everything else to the env-resolved options, and BOTH
+  cross-wirings refuse by name before any FFM work (GPU options on a TPU
+  client; null options on a CUDA client, which would revive the reboot
+  incident); libtpu's own accepted option set is a RECORDED UNKNOWN
+  (headers not vendored; ml_framework_name/max_inflight_computations
+  candidates listed unpassed in the runbook). `runOnPjrt` refuses Tpu by
+  name (one-shot path is CUDA-family-wired). **(4) The TPU smoke suite,
+  written now** (PjrtTpuSmokeTest, 5 tests, assumeTrue on tpuPluginPath):
+  platform-name asserted "tpu" (asserted, not assumed — a mis-resolved
+  plugin fails loudly), threefry uniform bit-exactness (the flagship G2b
+  claim — the §0.4.422 emission is pure StableHLO integer ops,
+  TPU-portable by construction), a matmul+SUM gradient graph vs the
+  interpreter, and the G1c bf16 claims re-targeted (single-convert RNE
+  sweep — the honest probe shape on any backend given the CUDA
+  convert-fold finding; native-bf16 matmul bit-exact on bf16-exact
+  lanes, device size reported and bounded below, never pinned — TPU
+  tiled layout stays the open item). Plus PjrtTpuLocalCertTest (7 tests,
+  run everywhere): resolution rules, both option-gate refusals, the
+  proto decode, the platform-string pin. REJECTED: auto-passing
+  GPU-ish options to TPU (unknown-option behaviour is libtpu's,
+  not ours to guess); a strict platform==target check inside PjrtSession
+  (the CUDA plugin legitimately reports "cuda" OR "gpu" — the assertion
+  belongs to the TPU suite where the expectation is exact); parametrizing
+  PjrtBf16SmokeTest onto a shared multi-backend harness (NAMED DEFERRAL —
+  restating the claims beats refactoring a certified suite inside this
+  slice; the harness is G2b's cleanup). Certified locally: the suite
+  compiles, the 5 TPU smokes skip cleanly here, the 7 local certs pass,
+  and the CUDA lane reruns green (GPU smokes executed, not skipped).
+  Suite 2080 → 2092.
+
 - **§0.4.458 — G1d DONE: the mixed-precision training story for :nn**
   (LOCAL certification — the GPU half runs the CUDA plugin on the GB10;
   NO TPU claim, G2b re-runs it there). THE CONVENTION, recorded on

@@ -453,7 +453,19 @@ object PjrtFfm {
     internal val SZ_NumOutputs: Long = PJRT_Executable_NumOutputs_Args_LAYOUT.byteSize()
 
     /** PJRT_ExecuteOptions (header line 1946). All-zero fields except struct_size
-     * suffice for single-device execute with no callbacks / contexts. */
+     * suffice for single-device execute with no callbacks / contexts.
+     *
+     * §0.4.459 (G2a) backend audit for TPU: this layout is the C header's
+     * ABI, not a backend's — every PJRT plugin consumes the same struct.
+     * The one padding decision (4 bytes after `launch_id`, an i32, so the
+     * following pointer lands 8-aligned) holds on LP64 for both aarch64
+     * (this GB10) and x86_64 (Cloud TPU VM hosts). The fields a TPU cares
+     * about beyond CUDA are exactly the ones we zero: `launch_id`
+     * (cross-host collective matching), `num_tasks`/`task_ids`/
+     * `incarnation_ids` and `multi_slice_config` (multi-host/multi-slice) —
+     * zero is the documented single-host single-task default, correct for
+     * G2b's single-device smoke; the non-zero forms are G3/G4 surface and
+     * are deliberately not marshalled yet. */
     internal val PJRT_ExecuteOptions_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
         JAVA_LONG.withName("struct_size"),
         ADDRESS.withName("extension_start"),
@@ -504,6 +516,33 @@ object PjrtFfm {
     // and returns PJRT_Error* (ADDRESS). PJRT_Error_Destroy returns void.
     // -------------------------------------------------------------------------
 
+    /**
+     * §0.4.304's hand-encoded minimal `CompileOptionsProto`, extracted and
+     * re-verified for TPU in §0.4.459 (G2a). Field numbers checked against
+     * `xla/pjrt/proto/compile_options.proto` at openxla/xla main
+     * (2026-09-21):
+     *
+     *   CompileOptionsProto.executable_build_options = **field 3**
+     *   ExecutableBuildOptionsProto.num_replicas     = **field 4** (int64)
+     *   ExecutableBuildOptionsProto.num_partitions   = **field 5** (int64)
+     *
+     * Bytes: `0x1A 0x04 0x20 0x01 0x28 0x01` —
+     *   0x1A = (3<<3)|2 (field 3, length-delimited), 0x04 = inner length,
+     *   0x20 = (4<<3)|0 (num_replicas, varint) value 0x01,
+     *   0x28 = (5<<3)|0 (num_partitions, varint) value 0x01.
+     *
+     * **Backend audit**: protobuf wire format is backend-agnostic and the
+     * TPU compile path deserialises the same `CompileOptionsProto` message
+     * (PJRT_Client_Compile's `compile_options` is that serialised proto for
+     * every plugin), so a TPU compile parses these six bytes identically.
+     * num_replicas=1 / num_partitions=1 is the single-device shape on TPU
+     * exactly as on CUDA; multi-replica TPU topologies are G3/G4 territory
+     * (device_assignment, use_spmd_partitioning — fields we deliberately
+     * leave unset).
+     */
+    internal val COMPILE_OPTIONS_PROTO_BYTES: ByteArray =
+        byteArrayOf(0x1A, 0x04, 0x20, 0x01, 0x28, 0x01)
+
     internal val FD_ClientCreate: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_ClientDestroy: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_ClientPlatformName: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
@@ -548,6 +587,17 @@ object PjrtFfm {
  * Discrete-GPU hosts (H100 etc.) can safely raise the fraction and turn
  * preallocation back on for benchmark stability; on unified-memory hosts
  * (GB10, Jetson) leave preallocation off.
+ *
+ * §0.4.459 (G2a) — **these are GPU-plugin options, gated by platform.**
+ * `memory_fraction` / `preallocate` are the XLA GPU plugin's BFCAllocator
+ * knobs; the TPU plugin (libtpu) neither needs nor is guaranteed to accept
+ * them, so a TPU client is created with NO create_options
+ * ([PjrtApi.createClient] with null — `create_options = NULL,
+ * num_options = 0`). libtpu's own accepted option set is not enumerable
+ * here (the TPU plugin headers are not vendored; known-from-framework-source
+ * candidates like `ml_framework_name` / `max_inflight_computations` are
+ * recorded as UNVERIFIED in docs/TPU_BRINGUP.md and stay unpassed until
+ * G2b measures them on real hardware).
  */
 data class PjrtClientOptions(
     val memoryFraction: Float,
@@ -605,12 +655,29 @@ class PjrtApi internal constructor(
      * §0.4.333 — always passes [options] (default: env-resolved
      * [PjrtClientOptions]) so the CUDA plugin's BFCAllocator never
      * preallocates 75% of unified memory (the 2026-07-18 reboot incident;
-     * see [PjrtClientOptions] for the full story). */
-    fun createClient(options: PjrtClientOptions = PjrtClientOptions.resolve()): PjrtClient {
+     * see [PjrtClientOptions] for the full story).
+     *
+     * §0.4.459 (G2a) — [options] is now nullable, and **null is the
+     * deliberate non-CUDA form**: `memory_fraction` / `preallocate` are
+     * the XLA *GPU* plugin's allocator options, and a TPU client must not
+     * be handed them (an unknown NamedValue is the plugin's to reject —
+     * libtpu's accepted option set is not vendored here, so we pass the
+     * empty set and record the unknown; see docs/TPU_BRINGUP.md). Null
+     * marshals `create_options = NULL, num_options = 0`, the header's
+     * spelling for "no options". The §0.4.333 rule is unchanged where it
+     * applies: a CUDA client MUST get non-null options — [io.tlaloc.runtime.pjrt.PjrtSession]
+     * enforces that pairing by target and refuses the cross-wirings by
+     * name. */
+    fun createClient(options: PjrtClientOptions? = PjrtClientOptions.resolve()): PjrtClient {
         val args = arena.allocate(PjrtFfm.PJRT_Client_Create_Args_LAYOUT)
         args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_StructSize, PjrtFfm.SZ_ClientCreate)
-        args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalCreateOptions(arena, options))
-        args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 2L)
+        if (options != null) {
+            args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalCreateOptions(arena, options))
+            args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 2L)
+        } else {
+            args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, MemorySegment.NULL)
+            args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 0L)
+        }
         val errorPtr = clientCreate.invokeExact(args) as MemorySegment
         checkError(errorPtr)
         val clientPtr = args.get(ADDRESS, PjrtFfm.OFF_ClientCreate_Client).reinterpret(Long.MAX_VALUE)
@@ -764,8 +831,9 @@ class PjrtApi internal constructor(
         program.set(ADDRESS, PjrtFfm.OFF_Program_Format, formatSeg)
         program.set(JAVA_LONG, PjrtFfm.OFF_Program_FormatSize, formatBytes.size.toLong())
 
-        // Hand-encoded CompileOptionsProto.
-        val optsBytes = byteArrayOf(0x1A, 0x04, 0x20, 0x01, 0x28, 0x01)
+        // Hand-encoded CompileOptionsProto (field numbers verified upstream —
+        // see COMPILE_OPTIONS_PROTO_BYTES).
+        val optsBytes = PjrtFfm.COMPILE_OPTIONS_PROTO_BYTES
         val optsSeg = scratchArena.allocate(optsBytes.size.toLong())
         for ((i, b) in optsBytes.withIndex()) optsSeg.set(JAVA_BYTE, i.toLong(), b)
 

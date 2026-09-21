@@ -94,10 +94,36 @@ class PjrtSession(
      * env-resolved default (`preallocate=false`, fraction 0.5) is the
      * unified-memory-safe choice (§0.4.333); benchmark sessions may opt
      * into a bounded preallocated pool for allocation-latency-free
-     * dispatch (see [io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions]). */
-    options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions =
-        io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions.resolve(),
+     * dispatch (see [io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions]).
+     *
+     * §0.4.459 (G2a) — nullable, and the nullability is EXACTLY the
+     * platform gate: `memory_fraction` / `preallocate` are GPU-plugin
+     * allocator options, so a [PjrtTarget.Tpu] session defaults to (and
+     * must keep) null — the client is created with zero create_options —
+     * while every other target defaults to (and must keep) the §0.4.333
+     * env-resolved options. Both cross-wirings refuse by name in init. */
+    private val options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions? =
+        if (target == PjrtTarget.Tpu) null
+        else io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions.resolve(),
 ) : AutoCloseable {
+
+    init {
+        // §0.4.459 (G2a) — the platform gate, refused by name in BOTH
+        // directions and BEFORE any FFM work (this block precedes the
+        // arena/api/client property initializers):
+        require(target != PjrtTarget.Tpu || options == null) {
+            "PjrtSession: PjrtClientOptions (memory_fraction/preallocate) are the XLA GPU " +
+                "plugin's allocator options — a PjrtTarget.Tpu client must not be handed " +
+                "them (pass options = null; libtpu create-options are a G2b question, " +
+                "see docs/TPU_BRINGUP.md)"
+        }
+        require(target == PjrtTarget.Tpu || options != null) {
+            "PjrtSession: a $target client must always carry PjrtClientOptions — creating " +
+                "a CUDA client with zero create_options revives the §0.4.333 75%-of-unified-" +
+                "memory preallocation (the 2026-07-18 reboot incident); null is reserved " +
+                "for PjrtTarget.Tpu"
+        }
+    }
 
     private val arena: Arena = Arena.ofShared()
     private val api: PjrtApi = PjrtFfm.load(plugin, arena)
@@ -298,6 +324,15 @@ class PjrtSession(
     /** Number of executables currently in the compile cache. Useful for
      * tests asserting cache hit/miss behaviour. */
     val cacheSize: Int get() = executableCache.size
+
+    /** §0.4.459 (G2a) — the platform string the loaded plugin reports via
+     * `PJRT_Client_PlatformName` ("cuda"/"gpu" for the CUDA plugin, "tpu"
+     * for libtpu). The TPU smoke suite asserts this so a mis-resolved
+     * plugin can never silently certify the wrong backend. */
+    fun platformName(): String {
+        check(!closed) { "PjrtSession is closed" }
+        return client.platformName()
+    }
 
     // =========================================================================
     // §0.4.308 — lower-level methods for benchmark loops.
