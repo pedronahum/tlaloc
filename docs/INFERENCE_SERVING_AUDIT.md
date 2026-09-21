@@ -1,10 +1,12 @@
 # Inference serving — vLLM / SGLang integration audit (2026-09-21)
 
-**Status: assessment on file at Pedro's request ("what about integrations
-on the inference side, like vLLM and SGLang plugins?"); Phase H proposal
-at the end awaits ratification.** Researched against the vLLM TPU
-unified-backend material (`tpu-inference`), the SGLang × Google TPU
-announcement, and the TorchTPU serving integrations.
+**Status: PHASE H RATIFIED (Pedro, 2026-09-21) — GO on the H1–H5
+slicing in §4.** The arc runs on CUDA (vLLM runs on the GB10); the same
+artifacts serve on TPU the day G2b lands. Running record in §5.
+
+Researched against the vLLM TPU unified-backend material
+(`tpu-inference`), the SGLang × Google TPU announcement, and the
+TorchTPU serving integrations.
 
 ## 1. The landscape, and which precedent fits Tlaloc
 
@@ -74,7 +76,7 @@ This arc **does not wait for TPU hardware**: vLLM runs on the GB10, so
 artifacts serve on TPU when G2b lands — which is the entire StableHLO +
 PJRT bet paying out on the inference side.
 
-## 4. Phase H proposal (awaiting ratification)
+## 4. Phase H slicing (ratified)
 
 | Slice | Content |
 |---|---|
@@ -83,3 +85,7 @@ PJRT bet paying out on the inference side.
 | H3 | The `vllm-tlaloc` out-of-tree platform plugin, certified on CUDA (manifest-as-artifact, PJRT execution, no JVM at serve time) |
 | H4 | KPTX paged-attention kernel + recognizer claiming |
 | H5 | SGLang variant (the SGL-JAX precedent) + KV-quant (int8/fp8) |
+
+## 5. Running record (Phase H)
+
+(Filled per slice as the workflow lands them.)
