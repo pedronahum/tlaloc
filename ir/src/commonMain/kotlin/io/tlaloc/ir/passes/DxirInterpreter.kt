@@ -543,6 +543,31 @@ object DxirInterpreter {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { kotlin.math.sqrt(a[it].toDouble()).toFloat() }
             }
+            // §0.4.479 — RSQRT and SILU had StableHLO emission
+            // (`stablehlo.rsqrt`, `emitSilu`), a cost-model arm, a TileFusion
+            // entry and a RECOGNIZER ANCHOR each (RmsNormRecognizer anchors on
+            // RSQRT, SwiGLURecognizer on SILU) — and no interpreter arm, so
+            // the reference evaluator refused the two ops every real
+            // transformer graph in this repo is built out of. Found by
+            // building one (H3c-2's Llama decode step). The arms follow the
+            // house convention of the SQRT/SIGMOID arms directly above and
+            // below: evaluate in Double, narrow once.
+            OpKind.RSQRT -> {
+                // 1/sqrt(x). NaN for x < 0 and +Inf at 0, which is IEEE and
+                // is what `stablehlo.rsqrt` does.
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) { (1.0 / kotlin.math.sqrt(a[it].toDouble())).toFloat() }
+            }
+            OpKind.SILU -> {
+                // x * σ(x) — the SAME composition the emitter's emitSilu
+                // builds, so the two agree by construction rather than by a
+                // shared closed form neither of them has.
+                val a = evalNode(op.operands[0], env, multiResults)
+                FloatArray(a.size) {
+                    val x = a[it].toDouble()
+                    (x / (1.0 + kotlin.math.exp(-x))).toFloat()
+                }
+            }
             OpKind.TANH -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { kotlin.math.tanh(a[it].toDouble()).toFloat() }

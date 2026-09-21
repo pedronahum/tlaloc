@@ -9,7 +9,6 @@ import io.tlaloc.ir.recognizer.recognizeAll
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -18,8 +17,8 @@ import kotlin.test.assertTrue
  * Phase 2 step 3 (closes Phase 2) of the dual-track Llama-decoder
  * benchmark plan. The plan's original framing — "FD-validation against
  * the JVM interpreter at the tiny config" — turned out to be infeasible:
- * the LlamaDecoderPrimal uses MEAN, RSQRT, SOFTMAX, and SILU, all of
- * which the [DxirInterpreter] intentionally doesn't cover. Those are
+ * the LlamaDecoderPrimal uses MEAN, RSQRT, SOFTMAX, and SILU, none of
+ * which the [DxirInterpreter] covered at the time. Those are
  * the high-level ops that L4 coarseners absorb into COARSENED bundles
  * for downstream lowering (StableHLO emit / IREE / PJRT-XLA). Even
  * after coarsening, the COARSENED's primal_body recursively hits the
@@ -37,8 +36,18 @@ import kotlin.test.assertTrue
  *    VJPs are wired up correctly end-to-end on Phase 2's workload.
  * 2. The gradient function has the expected shape (13 inputs, 13 grad
  *    outputs).
- * 3. The interpreter-boundary error is explicit (so future contributors
- *    don't waste time wiring up FD harness against the JVM interpreter).
+ * 3. The interpreter boundary. **§0.4.479 MOVED IT**: RSQRT and SILU
+ *    acquired interpreter arms (found while building H3c-2's real Llama
+ *    decode graph), and with MEAN and SOFTMAX already covered, the Llama
+ *    primal now EVALUATES on the host. The two cases that pinned the
+ *    refusal were inverted rather than deleted — see them below — and
+ *    one of them now additionally holds the coarsened form to the raw
+ *    form's loss, which is the coarseners' central claim checked by
+ *    evaluation for the first time on this workload.
+ *
+ * A NAMED OPENING, not a promise: host FD validation of the Llama
+ * gradient is now possible for the first time. It is not done here, and
+ * Phase 4's runtime backend remains the performance eval surface.
  */
 class LlamaDecoderCoarsenedAdTest {
 
@@ -106,44 +115,58 @@ class LlamaDecoderCoarsenedAdTest {
         assertTrue(coarsenedOpsInGrad >= 0, "AD pass produced a valid gradient body")
     }
 
+    /**
+     * §0.4.479 — **THE BOUNDARY MOVED, and this test moved with it.**
+     *
+     * Until H3c-2 these two cases asserted an interpreter REFUSAL: the
+     * §0.4.273 note above says MEAN, RSQRT, SOFTMAX and SILU were all outside
+     * the reference evaluator, so the Llama primal could not be run on the
+     * host at all. MEAN and SOFTMAX had since acquired arms; RSQRT and SILU
+     * had not, and §0.4.479 gave them one — found by building a REAL Llama
+     * decode graph (`HfLlamaDecodeGraph`) and discovering that the reference
+     * evaluator refused the two ops every transformer in this repo is made
+     * of, while the StableHLO emitter, the cost model, TileFusion and two
+     * RECOGNIZER ANCHORS all handled them.
+     *
+     * So the pin is inverted rather than deleted: the primal **evaluates**,
+     * and the loss is finite. A deleted test would have left nothing watching
+     * this seam; an inverted one keeps watching it from the other side.
+     */
     @Test
-    fun rawFormSurfacesInterpreterBoundary() {
-        // Pin the boundary explicitly. Future contributors should not
-        // expect to run the LlamaDecoderPrimal through the JVM
-        // interpreter — Phase 4's runtime backend is the eval surface.
+    fun rawFormNowEvaluatesInTheInterpreter() {
         val primal = LlamaDecoderPrimal.build(LlamaDecoderConfig.tiny)
         val inputs = makeInputs(LlamaDecoderConfig.tiny)
-        val ex = assertFailsWith<IllegalStateException> {
-            DxirInterpreter.evalFunction(primal, inputs)
-        }
-        // One of the high-level ops absorbed by L4 coarseners must be
-        // named in the error.
-        val candidates = listOf("MEAN", "RSQRT", "SOFTMAX", "SILU")
-        assertTrue(
-            candidates.any { ex.message?.contains(it) == true },
-            "expected boundary at MEAN/RSQRT/SOFTMAX/SILU; got: ${ex.message}",
-        )
+        val out = DxirInterpreter.evalFunction(primal, inputs)
+        assertEquals(1, out.size, "the primal returns the scalar cross-entropy loss")
+        assertEquals(1, out[0].size, "and it is a scalar")
+        assertTrue(out[0][0].isFinite(), "loss must be finite, got ${out[0][0]}")
     }
 
+    /**
+     * The coarsened form too — `evalCoarsened` recurses into each COARSENED's
+     * `primal_body`, which is the same decomposed analytical form, so the two
+     * lanes stand or fall together. And now that BOTH run, they can be held
+     * to each other: coarsening is a REWRITE, so the loss must be the same
+     * number, to a float tolerance that only accumulation order can spend.
+     *
+     * This is the first time in this repo that the coarseners' central claim
+     * — that a COARSENED bundle computes what it replaced — is checked on the
+     * Llama primal by EVALUATING both, rather than by reading the bodies.
+     */
     @Test
-    fun coarsenedFormAlsoSurfacesInterpreterBoundary() {
-        // Even after coarsening, the COARSENED's primal_body uses the
-        // same high-level ops internally (the bodies are decomposed
-        // analytical forms — backend resolution picks a fused kernel
-        // at lowering, not at interpretation). evalCoarsened recurses
-        // into the primal_body and hits the same boundary. Documents
-        // that running the coarsened form through the interpreter is
-        // also not a path forward — Phase 4 backend is the right place.
+    fun coarsenedFormEvaluatesAndAgreesWithTheRawFormsLoss() {
         val raw = LlamaDecoderPrimal.build(LlamaDecoderConfig.tiny)
         val coarsened = coarsenRecognizedPatterns(raw, recognizeAll(raw))
         val inputs = makeInputs(LlamaDecoderConfig.tiny)
-        val ex = assertFailsWith<IllegalStateException> {
-            DxirInterpreter.evalFunction(coarsened, inputs)
-        }
-        val candidates = listOf("MEAN", "RSQRT", "SOFTMAX", "SILU")
+
+        val rawLoss = DxirInterpreter.evalFunction(raw, inputs)[0][0]
+        val coarseLoss = DxirInterpreter.evalFunction(coarsened, inputs)[0][0]
+        assertTrue(rawLoss.isFinite() && coarseLoss.isFinite(), "$rawLoss / $coarseLoss")
+        val rel = kotlin.math.abs(rawLoss - coarseLoss) / kotlin.math.max(1e-6f, kotlin.math.abs(rawLoss))
         assertTrue(
-            candidates.any { ex.message?.contains(it) == true },
-            "expected boundary at MEAN/RSQRT/SOFTMAX/SILU; got: ${ex.message}",
+            rel <= 1e-5f,
+            "coarsening changed the loss: raw=$rawLoss coarsened=$coarseLoss rel=$rel — " +
+                "a coarsener is a rewrite, so this is a bug in one of the bundles' primal_body",
         )
     }
 

@@ -88,6 +88,47 @@ data class DecodeGraphSpec(
     val model: DecodeModelShape,
     val bucket: DecodeBucket,
     val kind: DecodeGraphKind = DecodeGraphKind.DECODE,
+    /**
+     * §0.4.479 — Phase H3c-2: STAGED WEIGHTS, appended to the signature after
+     * the KV pools. Empty (the default) means the graph carries its weights as
+     * body constants, which is what §0.4.469's reference graph does and what
+     * every entry written before this field existed does.
+     *
+     * A real checkpoint cannot do that. TinyLlama-1.1B is 1.1e9 parameters;
+     * rendered as StableHLO `dense<[...]>` literals that is **tens of
+     * gigabytes of TEXT** in a file whose whole premise (H3a) is that it is
+     * the deployment. So a real model's weights cross the boundary the same
+     * way its KV pools do — as ordinary operands, staged once and reused
+     * across every decode step.
+     *
+     * Three further reasons this is the right shape and not merely the
+     * feasible one:
+     *
+     * - **One copy per model, not per bucket.** The ladder compiles six or
+     *   more executables; constants would put a private copy of every weight
+     *   in each one. Staged, the six executables share one set of device
+     *   buffers.
+     * - **It is what the checkpoint already is.** The weights are bytes in a
+     *   safetensors file; staging is a read and an upload, and there is no
+     *   step where they become program text at all.
+     * - **`modelHash` keeps its meaning.** The executable stops depending on
+     *   the weight VALUES, so two checkpoints of one architecture share a
+     *   compile — and the cache key keeps the hash anyway, because the
+     *   *artifact* is still per-checkpoint.
+     *
+     * The ORDER is fixed by whoever builds the graph (for Llama:
+     * [HfLlamaDecodeGraph.weightSlots]) and is part of the contract, because a
+     * loader binds by index.
+     *
+     * NOT YET IN THE ARTIFACT. `ServingArtifactWriter` and `tlaloc_serve.py`
+     * still assume the 5 + 2L signature; teaching the manifest to carry a
+     * weight table and the loader to stage it from the checkpoint is H3c-3,
+     * named in `docs/INFERENCE_SERVING_AUDIT.md` §5. Until then this field is
+     * exercised by the graph builder and the interpreter parity lane, and a
+     * spec with a non-empty [weightSlots] is refused by the exporter rather
+     * than written as a half-artifact.
+     */
+    val weightSlots: List<DecodeSlot> = emptyList(),
 ) {
     /** The token axis: 1 for decode, the bucket's context width for prefill. */
     val tokensPerSeq: Int = when (kind) {
@@ -122,6 +163,7 @@ data class DecodeGraphSpec(
             add(DecodeSlot("keyCache$l", poolType, DecodeSlotRole.KV_POOL_IN))
             add(DecodeSlot("valueCache$l", poolType, DecodeSlotRole.KV_POOL_IN))
         }
+        addAll(weightSlots)
     }
 
     /** The full result signature, in return order. */
@@ -231,6 +273,13 @@ data class DecodeSlot(val name: String, val type: DxirType, val role: DecodeSlot
 enum class DecodeSlotRole {
     TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING,
     KV_POOL_IN, KV_POOL_OUT, LOGITS,
+
+    /**
+     * §0.4.479 — a model weight staged as an operand rather than baked in as a
+     * body constant. See [DecodeGraphSpec.weightSlots] for why a real
+     * checkpoint has no other option.
+     */
+    WEIGHT,
 }
 
 /**

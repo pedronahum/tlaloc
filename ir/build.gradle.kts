@@ -57,5 +57,13 @@ tasks.withType<Test>().configureEach {
     // probing only small tensors to stay inside the default — the probe that
     // matters most is the LAST element of the LARGEST tensor, because it is
     // the one that fails when the data_offsets base or a short read is wrong.
-    maxHeapSize = "2g"
+    // §0.4.479 (H3c-2) raised it again, to 8 GB, for a different reason:
+    // HfLlamaRealDecodeParityTest STAGES a real checkpoint's weights as f32
+    // FloatArrays. Two real TinyLlama layers plus the [32000, 2048] embedding
+    // table and the untied head is ~880 MB of staged f32, and each transposed
+    // Linear exists twice for the duration of its transpose. REJECTED:
+    // certifying against a tiny-random model to stay inside 2 GB — §0.4.478
+    // already paid for a real checkpoint precisely so the numbers would be a
+    // real model's, and a parity claim against a stub certifies the stub.
+    maxHeapSize = "8g"
 }

@@ -1646,18 +1646,138 @@ same trade and was right.
 - **fp16 checkpoints remain refused** by §0.4.468's dtype table. TinyLlama is
   bf16 and loads; a fp16 Llama would need an `F16` DType first.
 
+### H3c-2 — the real Llama becomes a graph (§0.4.479)
+
+The other half of H3c's first leg. §0.4.478 could read a real TinyLlama-1.1B
+checkpoint by role and had verified its layout; it computed nothing. This
+slice **builds the decode graph from those tensors and certifies its LOGITS
+against HuggingFace transformers.**
+
+**What landed, four files.**
+
+1. `ir/.../inference/HfLlamaDecodeGraph.kt` (commonMain) — the builder.
+   `embed -> N x (rms_norm -> q/k/v -> RoPE -> KV_CACHE_WRITE x2 ->
+   PAGED_ATTENTION -> o_proj -> +residual -> rms_norm -> SwiGLU -> +residual)
+   -> final rms_norm -> lm_head`. Pure `DxirBuilder` over an `HfLlamaConfig`;
+   touches no file.
+2. `ir/.../inference/HfLlamaStagedWeights.kt` (jvmMain) — **the transpose,
+   performed.** §0.4.478's `[out, in]` layout fact stops being documentation
+   here: the seven Linears per layer and `lm_head` are transposed ONCE,
+   host-side, into math layout; the embedding table and the norm gains are
+   not, and the predicate that decides is `HfLlamaNames.isTransposedLinear`
+   rather than a second list.
+3. `harness/python/hf_llama_reference.py` — the oracle. Imports torch and
+   transformers ON PURPOSE, runs in the **vLLM venv** (torch 2.13.0+cu130,
+   transformers 5.17.0), and is not serving-path code.
+4. Contract change: `DecodeGraphSpec.weightSlots`, a new `DecodeSlotRole.WEIGHT`.
+
+**WEIGHTS ARE STAGED INPUTS, NOT BODY CONSTANTS — the slice's one design
+decision.** §0.4.469's reference graph bakes its weights in; a real model
+cannot. TinyLlama is 1.1e9 parameters and rendered as StableHLO `dense<[...]>`
+literals that is **tens of gigabytes of TEXT**, in a file whose whole premise
+(H3a) is that it *is* the deployment. Three further reasons it is right rather
+than merely feasible: the bucket ladder compiles six or more executables and
+constants would put a private copy of every weight in each, while staged
+buffers are shared; the weights are already bytes in a safetensors file, so
+staging is a read and an upload with no step where they become program text;
+and the executable stops depending on weight VALUES, so two checkpoints of one
+architecture share a compile. The slots go **after** the KV pools, so
+`KV_POOL_INPUT_BASE` and every `donationPairs` entry H3a wrote are untouched —
+pinned by a test.
+
+**THE ORACLE, and what exactly was certified.** A **REDUCED slice: the first
+TWO layers of the real checkpoint** — TinyLlama's real embedding table, its
+real layers 0 and 1, its real final norm and its real untied head. Both sides
+are reduced by the same arithmetic (Tlaloc over `config.copy(numLayers = 2)`,
+transformers over `cfg.num_hidden_layers = 2`), so the thing compared is a
+well-defined 2-layer Llama whose every weight came out of TinyLlama's file.
+The reason is cost and it is stated rather than hidden: the reference
+interpreter is a triple-loop evaluator and a 22-layer 1.1B step through it is
+minutes at a heap that would dominate the suite. The reduced slice exercises
+**every op in the decode graph**; the layers it drops are twenty more
+instances of shapes already covered.
+
+A 5-token prompt was run as **five single-token decode steps with the KV pools
+threaded**, because `PAGED_ATTENTION`'s ragged chunked-prefill form is H1a's
+still-open deferral — a PERFORMANCE deferral, not a correctness one.
+
+| claim | oracle | floor |
+|---|---|---|
+| the real Llama's logits, every position of a 5-step prefill | `hf_llama_reference.py` — `AutoModelForCausalLM`, **fp32 on CPU**, vLLM venv | **1e-5 relative**; measured worst **2.3e-6** |
+| …and the server would emit the same text | the same, per position | **argmax exact, and the whole top-5 ORDER exact** |
+| the staged transpose is load-bearing | the same graph with `q_proj` staged in the file's `[out, in]` layout (shape-legal: q is square on this model) | the logits MOVE, by > 1e-2 |
+| the built graph IS the contract | `DecodeGraphSpec.verifySignature` inside `build()`, and again as a test | exact, per slot |
+| every staged Linear slot is the REVERSE of its file dims, every non-Linear identical | hermetic, against `HfLlamaNames.expectedDims` | exact dims, 7 per layer + `lm_head` |
+| the RoPE tables are HF's DUPLICATED form | `headDim = 2` makes `inv_freq[0] = 1`, so the angle at position p is exactly p radians — written down, not recomputed | 1e-6, and `cos[p][0] == cos[p][1]` exactly |
+
+**The floor is fp32-vs-fp32 on CPU, deliberately.** bf16 -> f32 is exact
+(§0.4.468), and the oracle runs on CPU so TF32 never enters; what remains
+between the two sides is ACCUMULATION ORDER — torch's blocked GEMM against a
+row-major triple loop over a 2048-wide contraction. 1e-5 relative is a bound
+with 4x headroom over the measurement, and a test asserts the worst case is
+strictly INSIDE it, so the floor cannot quietly become the measurement.
+
+**A GAP FOUND AND CLOSED ON THE WAY.** `RSQRT` and `SILU` had StableHLO
+emission, a cost-model arm, a `TileFusion` entry and a RECOGNIZER ANCHOR each
+(`RmsNormRecognizer` anchors on RSQRT, `SwiGLURecognizer` on SILU) — and **no
+`DxirInterpreter` arm**. The reference evaluator refused the two ops every
+transformer in this repo is built out of. Building a real Llama found it in
+one run. Both arms landed, following the house Double-then-narrow convention
+of the SQRT/SIGMOID arms they sit between.
+
+That moved a boundary §0.4.273 had pinned. `LlamaDecoderCoarsenedAdTest`'s two
+"surfaces interpreter boundary" cases were **inverted, not deleted**: the
+Llama primal now evaluates on the host, and the coarsened form is additionally
+held to the raw form's loss at 1e-5 relative — the coarseners' central claim
+(a bundle computes what it replaced) checked by EVALUATION on this workload
+for the first time. Host FD validation of the Llama gradient is now possible
+for the first time; that is a named opening, not a promise.
+
+**REJECTED.** A `TRANSPOSE` node per projection in the graph — the weight is a
+PARAMETER, so there is no constant to fold and the cost is a full re-layout of
+every projection matrix on every decode step. Certifying against a
+"tiny-random" Llama to stay inside the old 2 GB test heap — §0.4.478 already
+paid for a real checkpoint precisely so the numbers would be a real model's,
+and a parity claim against a stub certifies the stub. A one-step sensitivity
+check for the transpose — at `seqLens = 1` the softmax has a single term and
+is exactly 1.0, so attention returns the just-written V and **Q does not enter
+the answer at all**; the first version of that test reported a movement of
+exactly 0.0 and was rewritten to run to a real context.
+
+**NAMED GAPS, carried forward.**
+
+- **THE PJRT/DEVICE LANE IS NOT CLAIMED.** `PjrtSession.runOn` is
+  single-dtype (F32) and this graph's first five operands are I32; the
+  mixed-dtype staging the serving path uses lives in the PYTHON loader, which
+  reads a `ServingArtifactWriter` artifact — and that writer does not yet
+  carry a weight table. The device lane arrives **with** the artifact.
+- **H3c-3, the next slice, named precisely**: teach `ServingManifest` /
+  `ServingArtifactWriter` a weight table and `tlaloc_serve.py` to stage it
+  from the checkpoint, then re-run this parity on PJRT-CUDA and record ITS
+  floor (expect the serving lane's 1e-3, TF32's dot policy). Until then a
+  spec with non-empty `weightSlots` must be refused by the exporter rather
+  than written as a half-artifact.
+- **The tokenizer is still untouched** (§0.4.478's gap, unchanged).
+- **`:ir`'s test JVM heap is now 8 GB** (was 2 GB, §0.4.478). Two real layers
+  plus the `[32000, 2048]` table and the untied head is ~880 MB of staged f32,
+  and each transposed Linear exists twice for the duration of its transpose.
+- **The 22-layer lane is not run.** The reduced slice is what is certified and
+  the entry says so everywhere it appears.
+
 ### ARC STATE (§0.4.473, the close-out) — read this first
 
 **THE PATH IS BUILT END TO END AND IT EXECUTES. SINCE §0.4.477 IT HAS RUN
 UNDER REAL vLLM. WHAT IT DOES NOT YET RUN IS A REAL LLAMA — and that one
 gap is now the only thing standing between this and `vllm serve`.**
 
-**§0.4.478 halved that gap.** A real 1.1B Llama checkpoint is on disk and
-this repo can ask it for any of its 201 tensors BY ROLE, with the HF
-transposed-`[out, in]` layout verified against the file and the bytes
-checked against torch at exact bit patterns. What is still missing is the
-other half: **building a decode graph and an artifact from those tensors**
-(H3c-2), and a tokenizer.
+**§0.4.478 halved that gap and §0.4.479 halved what remained.** A real 1.1B
+Llama checkpoint is on disk, this repo can ask it for any of its 201 tensors
+BY ROLE, and — since §0.4.479 — it BUILDS A DECODE GRAPH from them whose
+logits agree with HuggingFace transformers at 1e-5 relative with argmax and
+the whole top-5 order exact, on two real layers of the real checkpoint. What
+is still missing is the **artifact**: `ServingArtifactWriter` and
+`tlaloc_serve.py` do not yet carry a staged weight table, which is why the
+device lane is not claimed. That is H3c-3, and a tokenizer.
 
 Nine sections closed the arc on 2026-09-21 (suite **2119 → 2290**); four
 more the same day carried it past the framework (**2290 → 2296**):
@@ -1679,6 +1799,7 @@ more the same day carried it past the framework (**2290 → 2296**):
 | 0.4.476 | H6b | `tlaloc_serve.py` rewired onto that binding — the **whole** serving path runs with no jax, jaxlib, torch or numpy, and the distribution's dependency list is empty | 2294 → 2295 |
 | 0.4.477 | H7 | `~/.local/venvs/vllm` (vLLM 0.29.0, its own venv), the live lane run, `platform.py`+`worker.py` CERTIFIED, one real bug found and fixed, `exportServingArtifact` | 2295 → 2296 |
 | 0.4.478 | H3c-1 | a REAL TinyLlama-1.1B checkpoint on disk, and `HfLlamaConfig` + `HfLlamaNames` + `HfLlamaCheckpoint` — HF names to roles, with the transposed-`[out, in]` layout VERIFIED against it and the bytes checked against torch | 2296 → 2320 |
+| 0.4.479 | H3c-2 | `HfLlamaDecodeGraph` + `HfLlamaStagedWeights` + `DecodeGraphSpec.weightSlots` — the real checkpoint becomes a decode graph, certified against HF transformers at **1e-5 relative with argmax and top-5 exact**; RSQRT/SILU interpreter arms found and closed on the way | 2320 → 2330 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -1744,7 +1865,9 @@ supposed to fail.
    installing it beside vLLM's CUDA-13 wheels is the collision the rail
    exists to prevent.
 
-   **THE REMAINDER: `LLM.generate()` / `vllm serve` itself.** Both need a
+   **THE REMAINDER: `LLM.generate()` / `vllm serve` itself.** (§0.4.479
+   narrowed it further: the graph exists and is certified; the ARTIFACT that
+   carries its staged weights does not — H3c-3.) Both need a
    HuggingFace `config.json` and tokenizer for a real model, and the only
    exportable artifact is the reference LCG toy. That is **H3c**, not a
    plugin gap; see the H7 entry. **§0.4.478 landed H3c-1**: the config and
@@ -1813,8 +1936,11 @@ Three new `OpKind`s entered the IR in Phase H and no others:
 
 #### What remains, in the order a next session should take it
 
-1. **H3c — staged weights + a real Llama through the plugin.** The largest
-   open item, and the one that turns "the path executes" into "the path
+1. **H3c-3 — the staged-weight ARTIFACT, and a real Llama through the plugin.**
+   The largest open item, now precisely scoped by §0.4.479: the decode graph
+   and the parity are done; `ServingManifest`/`ServingArtifactWriter` must
+   learn a weight table and `tlaloc_serve.py` must stage it, after which the
+   PJRT-CUDA lane and `vllm serve` both follow. It was, before that slice, and the one that turns "the path executes" into "the path
    serves". It is a NAME-MAPPING problem plus making weights graph
    parameters instead of body constants. **§0.4.477 raised its value:** the
    plugin, the platform and the worker are now certified against real vLLM,

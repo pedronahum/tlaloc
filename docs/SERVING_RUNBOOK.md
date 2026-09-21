@@ -12,8 +12,13 @@ here, with the reason and the command that would settle it). Exactly one
 serving step is still UNCERTIFIED and it is §4's last paragraph: `vllm
 serve` over a REAL model, which waits on H3c and not on the plugin. As of
 §0.4.478 the first half of H3c is in — §4.1 fetches a real Llama checkpoint
-and reads its weights by role — and what remains is building an artifact
-from them.
+and reads its weights by role — and as of **§0.4.479** that checkpoint is a
+DECODE GRAPH whose logits match HuggingFace transformers at 1e-5 relative
+with argmax and the whole top-5 order exact (two real layers of the real
+checkpoint; the oracle is `harness/python/hf_llama_reference.py`, run in the
+vLLM venv). What remains is the ARTIFACT: the manifest and
+`tlaloc_serve.py` must learn to carry and stage a weight table, which is why
+the graph's device lane is not yet claimed. That is H3c-3.
 
 The design and the decisions behind all of this live in
 [INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md); its §5 ARC
