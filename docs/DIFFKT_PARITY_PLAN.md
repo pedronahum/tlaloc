@@ -74,11 +74,12 @@ not re-litigate without new evidence):
   (§0.4.427); the concrete family (`Float`/`FloatScalar`/`DoubleScalar`)
   lowers.
 
-**GATED ON PEDRO:** Phase F, the model/optimizer layer (Layer/
-Sequential/Trainable + Dense/Conv2d/pooling/BatchNorm/Embedding/
-Dropout/GRU + SGD/Adam/RMSprop/Momentum) — a product decision on
-whether it is in scope or superseded by Tlaloc's own module story; not
-blocking anything above. Row-sparse embedding gradients ride with it.
+**PHASE F: RATIFIED AND IN FLIGHT (Pedro, 2026-09-21)** — the
+model/optimizer layer, scoped in
+[MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md) (the `:nn` module: immutable
+functional components over the `:autograd` runtime tape, slices F0–F8).
+Row-sparse embedding gradients ride with it (dense v1, row-sparse a
+recorded design). Nothing else is gated.
 
 ### Remaining tails, consolidated (§0.4.433)
 
@@ -2383,13 +2384,15 @@ Tlaloc's module story supersedes it — not blocking A–E.
     on tensor→tensor `f`; B1 should also expose the seeded-cotangent
     `vjp`/`primalAndPullback` form (DiffKT's pullback takes `vf(primal)`).
 
-### Phase F — model/optimizer layer (audit-surfaced; product decision)
+### Phase F — model/optimizer layer — **RATIFIED (Pedro, 2026-09-21)**
 
-See the audit's model-layer section: DiffKT's `model/` package (Layer/
-Sequential/Trainable + Dense/Conv2d/pooling/BatchNorm/Embedding/Dropout/
-GRU layers + SGD/Adam/RMSprop/Momentum optimizers). Awaiting Pedro's
-call on whether this is in scope or superseded by Tlaloc's own module
-story. Not blocking A–E.
+GO per [MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md), the Phase F
+authority: a new `:nn` module of immutable functional components over
+the `:autograd` runtime tape (whose `applyRegistryRule` bridge routes
+backward through the real `VjpRegistry` — no new gradient math in the
+NN layer), threefry-keyed randomness, functional optimizer/batch-norm
+state, dense-v1 embedding gradients with the row-sparse form a recorded
+design. Slicing F0–F8 in that doc; the running record lands there.
 
 ## Suggested § sequencing
 
