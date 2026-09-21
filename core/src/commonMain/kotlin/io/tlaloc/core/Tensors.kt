@@ -72,6 +72,31 @@ object Tensors {
         return DTensor(HostI32Storage(data.copyOf()), intArrayOf(rows, cols), I32)
     }
 
+    /**
+     * §0.4.455 (Phase G1a) — bf16 scalar constructor. Takes an f32 value and
+     * NARROWS it (round-to-nearest-even, [floatToBf16Bits]); callers hand us
+     * f32 because no Kotlin bf16 literal exists. The stored pattern is the
+     * rounded value — `bf16Scalar(v).toF32()` is v rounded to bf16, not v.
+     */
+    fun bf16Scalar(v: Float): DTensor<ScalarShape, BF16> =
+        DTensor(HostBf16Storage(shortArrayOf(floatToBf16Bits(v))), intArrayOf(), BF16)
+
+    /** §0.4.455 — [f32Vector]'s bf16 twin: narrows each element (RNE). */
+    fun <A : ShapeAtom> bf16Vector(data: FloatArray): DTensor<Rank1<A>, BF16> =
+        DTensor(HostBf16Storage(floatArrayToBf16Bits(data)), intArrayOf(data.size), BF16)
+
+    /** §0.4.455 — [f32Matrix]'s bf16 twin: narrows each element (RNE). */
+    fun <R : ShapeAtom, C : ShapeAtom> bf16Matrix(
+        rows: Int,
+        cols: Int,
+        data: FloatArray,
+    ): DTensor<Rank2<R, C>, BF16> {
+        require(data.size == rows * cols) {
+            "data.size=${data.size} does not match rows*cols=${rows * cols}"
+        }
+        return DTensor(HostBf16Storage(floatArrayToBf16Bits(data)), intArrayOf(rows, cols), BF16)
+    }
+
     fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom, D : ShapeAtom> f32Tensor4(
         d0: Int,
         d1: Int,

@@ -110,6 +110,37 @@ recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
 
+- **§0.4.455 — G1a DONE: the bf16 foundation in :core.** The design on
+  file (the gap open since §0.4.354). REPRESENTATION: `BF16` is a
+  first-class sealed `DType` (2 bytes, name "bf16");
+  `HostBf16Storage(ShortArray)` holds RAW upper-16-bit f32 patterns —
+  bf16 IS the top half of binary32 — a Short is a 16-bit bucket, never a
+  number. REJECTED: a `value class Bf16` element type (KMP boxing, no
+  arithmetic anyway), CharArray/packed-Int storage (worse spelling),
+  lazily-narrowed FloatArray storage (lies about sizeBytes and hides
+  rounding). NARROWING: round-to-nearest-even via the u32 bias-and-carry
+  trick (`bits + 0x7FFF + keptLsb >> 16`), matching XLA/Eigen — NaN
+  quieted before the add (payload top bits kept, 0x0040 forced) so no
+  signaling NaN decays to inf; overflow carries into inf; signed zeros
+  and subnormal flushes keep the sign; widening is exact (`bits << 16`).
+  HOST COMPUTE CONVENTION (the v1 decision): compute-in-f32-store-bf16 —
+  `DTensor<S, BF16>` is storage/interchange, host math goes
+  `toF32() ... toBf16()`; per-op bf16 host twins are a NAMED DEFERRAL
+  (no JVM bf16 units; PyTorch/CPU does the same dance). Surfaces:
+  `floatToBf16Bits`/`bf16BitsToFloat` (+array forms), `toBf16()`/
+  `toF32()` casts, `hostBf16()`, `Tensors.bf16Scalar/Vector/Matrix`
+  (FloatArray in, RNE-narrowed patterns stored). IR/emission untouched
+  (G1b): the sealed-when sites now refuse BY NAME — StableHLO emit
+  errors "bf16 has no StableHLO emission yet — G1b", DxirCanonical
+  refuses bf16 constants, the compiler plugin returns null exactly as
+  its Bool convention does, and KotlinSourceRenderer's existing
+  dtype-naming refusal covers bf16 unchanged. Oracles: 12 bit-level
+  pins (hand-derived RNE ties incl. the even-down/odd-up pair and
+  one-ulp neighbors, signed zeros, inf pass-through, MAX_VALUE→inf,
+  NaN quieting, subnormal flush-by-rounding, the 256-exponent
+  double-sign sweep with mantissa 0/0x55 proving bf16→f32→bf16
+  identity, storage/constructor/cast round-trips). Suite 2044 → 2056.
+
 - **§0.4.454 — G slice 1 DONE: OpKind.SPLIT deleted.** The arc's banked
   win, ratified with Phase G itself (§0.4.453; recommended since the
   §0.4.448 audit-finding-C demotion). The kind was unreachable — the

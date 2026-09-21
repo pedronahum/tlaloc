@@ -26,6 +26,20 @@ class HostI32Storage(val data: IntArray) : TensorStorage {
     override fun release() = Unit
 }
 
+/**
+ * §0.4.455 (Phase G1a) — host storage for bf16 tensors. [data] holds the RAW
+ * upper-16-bit patterns of the f32 values (bf16 is the truncated top half of
+ * binary32), NOT numeric Short values: a Short here is only a 16-bit bucket.
+ * Narrowing f32 -> bf16 rounds to nearest-even ([floatToBf16Bits], matching
+ * XLA's convention); widening bf16 -> f32 is exact ([bf16BitsToFloat]). Host
+ * compute never happens at bf16 width — widen, use the f32 kernels, narrow
+ * (the compute-in-f32-store-bf16 convention, Bf16.kt).
+ */
+class HostBf16Storage(val data: ShortArray) : TensorStorage {
+    override val sizeBytes: Long get() = data.size.toLong() * BF16.sizeBytes
+    override fun release() = Unit
+}
+
 class DTensor<S : Shape, T : DType>(
     val storage: TensorStorage,
     val dims: IntArray,

@@ -1,5 +1,6 @@
 package io.tlaloc.ir.passes
 
+import io.tlaloc.core.BF16
 import io.tlaloc.core.Bool
 import io.tlaloc.core.DType
 import io.tlaloc.core.F32
@@ -449,6 +450,9 @@ object DxirCanonical {
         I32 -> (value as Int).toUInt().toString(16).padStart(8, '0')
         I64 -> (value as Long).toULong().toString(16).padStart(16, '0')
         Bool -> if (value as Boolean) "1" else "0"
+        // §0.4.455: bf16 is a host storage/interchange dtype only until G1b
+        // gives the IR a bf16 story; no dxir constant carries it yet.
+        BF16 -> error("DxirCanonical: bf16 constants are not part of the dxir surface yet (G1b)")
     }
 
     private fun parseValue(s: String, type: DxirType): Any = when (type.dtype) {
@@ -457,6 +461,7 @@ object DxirCanonical {
         I32 -> s.toUInt(16).toInt()
         I64 -> s.toULong(16).toLong()
         Bool -> s == "1"
+        BF16 -> error("DxirCanonical: bf16 constants are not part of the dxir surface yet (G1b)")
     }
 
     private fun parseKv(token: String, key: String): String {

@@ -1,5 +1,6 @@
 package io.tlaloc.stablehlo
 
+import io.tlaloc.core.BF16
 import io.tlaloc.core.Bool
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
@@ -895,6 +896,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             is F32, is F64 -> Triple("0.0", "1.0", "FLOAT")
             is I32, is I64 -> Triple("0", "1", "SIGNED")
             is Bool -> error("STEP on bool input is not meaningful")
+            is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
         }
         val zero = synth(); val one = synth(); val gt = synth()
         out.appendLine("$step$zero = stablehlo.constant dense<$zeroLit> : $tMlir")
@@ -2572,6 +2574,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             is F32, is F64 -> "FLOAT"
             is I32, is I64 -> "SIGNED"
             is Bool -> "UNSIGNED"
+            is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
         }
 
         // 1. Iota along reduction axis at the output int dtype.

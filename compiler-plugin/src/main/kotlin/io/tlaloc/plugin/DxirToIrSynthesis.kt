@@ -1,5 +1,6 @@
 package io.tlaloc.plugin
 
+import io.tlaloc.core.BF16
 import io.tlaloc.core.Bool
 import io.tlaloc.core.DType
 import io.tlaloc.core.F32
@@ -1519,6 +1520,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             I32 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Int, v as Int)
             I64 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Long, v as Long)
             Bool -> null
+            // §0.4.455: no Kotlin primitive exists at bf16 width; readable-reverse
+            // synthesis of bf16 consts is G1b territory. Null = "not synthesizable
+            // here", the same convention Bool uses, surfaced by the caller.
+            BF16 -> null
         }
     }
 
@@ -4276,6 +4281,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             I32 -> "toInt"
             I64 -> "toLong"
             Bool -> return null
+            BF16 -> return null // §0.4.455: no Kotlin bf16 primitive to cast to (G1b).
         }
         return srcCls.owner.declarations
             .asSequence()
@@ -4672,6 +4678,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             I32 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Int, if (one) 1 else 0)
             I64 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Long, if (one) 1L else 0L)
             Bool -> null
+            BF16 -> null // §0.4.455: no bf16 primitive; see irConstFor's BF16 arm.
         }
     }
 
@@ -4687,6 +4694,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 // lowers as a plain if/else. No Bool consts are emitted today; if a
                 // future rule needs them, [irConstFor] / [zeroOrOneConst] must grow too.
                 Bool -> pluginContext.irBuiltIns.booleanType
+                // §0.4.455: bf16 scalars have no JVM primitive to lower to; the
+                // synthesis path refuses (null) rather than silently widening. G1b
+                // decides whether reverse source spells bf16 locals as Float.
+                BF16 -> return null
             }
         }
         // Rank-1 F32: use the call-site-harvested IrType (preserves the source-level shape
@@ -4977,6 +4988,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         I32 -> pluginContext.irBuiltIns.intClass
         I64 -> pluginContext.irBuiltIns.longClass
         Bool -> null
+        BF16 -> null // §0.4.455: no bf16 primitive class on the JVM (G1b).
     }
 
     private fun findBinaryOp(opName: String, dxirType: DxirType, context: SynthesisContext): IrSimpleFunctionSymbol? {

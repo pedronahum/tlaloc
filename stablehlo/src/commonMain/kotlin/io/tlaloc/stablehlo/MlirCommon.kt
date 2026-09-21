@@ -1,5 +1,6 @@
 package io.tlaloc.stablehlo
 
+import io.tlaloc.core.BF16
 import io.tlaloc.core.Bool
 import io.tlaloc.core.DType
 import io.tlaloc.core.F32
@@ -37,6 +38,9 @@ internal fun mlirElementType(dtype: DType): String = when (dtype) {
     is I32 -> "i32"
     is I64 -> "i64"
     is Bool -> "i1"
+    // §0.4.455 named refusal: the "bf16" spelling is trivial, but emitting it
+    // untested would CLAIM an emission path this slice does not certify. G1b.
+    is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
 }
 
 /**
@@ -87,6 +91,7 @@ internal fun negInfLiteral(dtype: DType): String = when (dtype) {
     is I32 -> Int.MIN_VALUE.toString()
     is I64 -> Long.MIN_VALUE.toString()
     is Bool -> "false"
+    is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
 }
 
 /**
@@ -99,4 +104,5 @@ internal fun posInfLiteral(dtype: DType): String = when (dtype) {
     is I32 -> Int.MAX_VALUE.toString()
     is I64 -> Long.MAX_VALUE.toString()
     is Bool -> "true"
+    is BF16 -> error("bf16 has no StableHLO emission yet — Phase G1b owns the bf16 emit path (bf16 is host storage + casts only, \u00a70.4.455)")
 }
