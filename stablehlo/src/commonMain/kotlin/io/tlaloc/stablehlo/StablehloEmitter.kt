@@ -429,7 +429,21 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 vType = node.operands[2].type,
                 outType = node.type,
             )
-            OpKind.PAGED_ATTENTION -> emitPagedAttention(step, name, ops, node)
+            // §0.4.471 — Phase H4: when L3.3's claiming pass attached a
+            // [KernelDescriptor] (the inference lane of lowerKernelChoice),
+            // emit the fused kernel's `stablehlo.custom_call` instead of
+            // the §0.4.465 gather-composed reference form. Unlike
+            // COARSENED, the absence of a descriptor is NOT an error here:
+            // PAGED_ATTENTION is a real op with its own lowering, and the
+            // unclaimed path is the one every non-GB10 target takes.
+            OpKind.PAGED_ATTENTION -> {
+                val descriptor = node.attrs[KernelDescriptor.ATTR_KEY] as? KernelDescriptor
+                if (descriptor != null) {
+                    emitCustomCall(step, name, ops, node, descriptor)
+                } else {
+                    emitPagedAttention(step, name, ops, node)
+                }
+            }
             OpKind.KV_CACHE_WRITE -> emitKvCacheWrite(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,

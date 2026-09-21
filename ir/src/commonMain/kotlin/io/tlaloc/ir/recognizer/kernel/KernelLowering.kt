@@ -66,9 +66,10 @@ fun lowerKernelChoice(
     fn: DxirFunction,
     target: KernelTarget,
     registry: Map<String, KernelTemplate> = defaultKernelTemplates,
+    inferenceRegistry: Map<OpKind, KernelTemplate> = defaultInferenceKernelTemplates,
 ): DxirFunction {
-    val coarsenedOps = fn.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.COARSENED }
-    if (coarsenedOps.isEmpty()) return fn
+    val bodyOps = fn.body.filterIsInstance<DxirOp>()
+    val coarsenedOps = bodyOps.filter { it.op == OpKind.COARSENED }
 
     // Per-coarsened decision: kernel descriptor or null (decompose).
     // Keyed by COARSENED op id.
@@ -77,7 +78,22 @@ fun lowerKernelChoice(
         val template = lookupTemplate(co, registry) ?: continue
         perCoarsened[co.id] = template.pickFor(co, target)
     }
-    if (perCoarsened.isEmpty()) return fn
+
+    // §0.4.471 — the inference lane. Keyed by OpKind, not by a
+    // primal_body name, because these ops ARE the pattern: there is no
+    // recognizer step in front of them and nothing to decompose behind
+    // them. Only CLAIMS are recorded — a template that returns null
+    // leaves the op untouched, so the graph emits its own lowering.
+    val perInference = HashMap<Int, KernelDescriptor>()
+    if (inferenceRegistry.isNotEmpty()) {
+        for (io in bodyOps) {
+            val template = inferenceRegistry[io.op] ?: continue
+            val descriptor = template.pickFor(io, target) ?: continue
+            perInference[io.id] = descriptor
+        }
+    }
+
+    if (perCoarsened.isEmpty() && perInference.isEmpty()) return fn
 
     return DxirBuilder.function(fn.name) {
         val nodeMap = HashMap<Int, DxirNode>()
@@ -114,6 +130,23 @@ fun lowerKernelChoice(
                         // place of the COARSENED.
                         inlineCoarsenedPrimal(node, outerOperands, nodeMap, this)
                     }
+                }
+
+                // §0.4.471 — claimed inference op: same op, same type,
+                // same operands, plus the descriptor. No decompose arm —
+                // an unclaimed inference op falls through to the generic
+                // clone below and emits its own lowering.
+                node is DxirOp && node.id in perInference -> {
+                    val outerOperands = node.operands.map {
+                        nodeMap[it.id] ?: error("KernelLowering: operand id=${it.id} not in nodeMap")
+                    }
+                    nodeMap[node.id] = op(
+                        kind = node.op,
+                        operands = outerOperands,
+                        type = node.type,
+                        attrs = node.attrs + mapOf(KernelDescriptor.ATTR_KEY to perInference.getValue(node.id)),
+                        sharding = node.sharding,
+                    )
                 }
 
                 node is DxirConst -> {
@@ -234,4 +267,28 @@ private fun inlineCoarsenedPrimal(
  */
 val defaultKernelTemplates: Map<String, KernelTemplate> = mapOf(
     "FlashAttention" to FlashAttentionKernel,
+)
+
+/**
+ * §0.4.471 — the INFERENCE claiming registry: `OpKind` → template, for
+ * first-class op kinds that carry their own emission (Phase H's
+ * inference-only family) rather than a COARSENED `primal_body`.
+ *
+ * **Empty by default, deliberately.** Claiming emits a
+ * `stablehlo.custom_call` naming a kernel that some runtime must have
+ * registered — `KptxKernelRegistry.registerKernelChain` for the KPTX
+ * tier. A default-on registry would turn every GB10 decode graph into a
+ * program XLA cannot link the moment `:ir` is used without
+ * `:runtime-pjrt`. The KPTX lane is therefore opt-in per pipeline
+ * ([kptxInferenceKernelTemplates]), matching what every KPTX COARSENED
+ * template already does.
+ */
+val defaultInferenceKernelTemplates: Map<OpKind, KernelTemplate> = emptyMap()
+
+/**
+ * §0.4.471 — the KPTX inference lane: pass this as `inferenceRegistry`
+ * on a pipeline whose runtime has registered the matching launch chains.
+ */
+val kptxInferenceKernelTemplates: Map<OpKind, KernelTemplate> = mapOf(
+    OpKind.PAGED_ATTENTION to PagedAttentionKernel,
 )

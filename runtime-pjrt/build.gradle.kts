@@ -30,6 +30,13 @@ kotlin {
                 // KPTX v1.4 — kernel dispatch inside PJRT executables needs
                 // the CUDA driver bindings (cuModuleLoadData / cuLaunchKernel).
                 api(project(":runtime-cuda"))
+                // §0.4.471 (H4) — the kernel LIBRARY moves to the main side.
+                // KptxKernelRegistry deliberately takes PTX *text*, so it never
+                // needed :kptx; but claiming means the serving path itself must
+                // register a chain for a name the compiler emitted
+                // (KptxPagedAttention), and that needs the kernel sources.
+                // :kptx is pure-Kotlin PTX construction — no native surface.
+                implementation(project(":kptx"))
             }
         }
         jvmTest {

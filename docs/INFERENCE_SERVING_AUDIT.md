@@ -836,3 +836,132 @@ which is H4.
 **Still open in Phase H**: H3c (staged weights + a real Llama through the
 plugin), H4 (KPTX paged-attention kernel + recognizer claiming), H5 (SGLang
 variant + KV-quant).
+
+### H4 — the KPTX paged-attention kernel + claiming (§0.4.471)
+
+Where Tlaloc's differentiator meets the serving path. Helion-style kernel
+libraries are **hand-invoked**: the model author writes the call. Here the
+author writes `PAGED_ATTENTION`, the claiming pass sees a GB10 under it, and
+the fused kernel appears — or does not, on a machine without a KPTX tier, with
+the same numbers either way.
+
+**Claiming a first-class op kind.** Every earlier template
+(`FlashAttentionKernel`, `RmsNormKernel`, `AttentionKernel`, `RopeKernel`,
+`CrossEntropyKernel`) claims an `OpKind.COARSENED` — a compile-time artefact
+carrying a `primal_body`, whose fallback is *decomposition* back into that
+body. `PAGED_ATTENTION` is not that: it is a real op with an interpreter arm
+and a gather-composed emission of its own. So `lowerKernelChoice` grew a
+second lane, keyed by **`OpKind`** rather than by a `primal_body` name
+(`inferenceRegistry`, `kptxInferenceKernelTemplates`), and its decline path is
+**the op itself**. That makes inference-side claiming strictly safer than the
+COARSENED kind: there is no "neither annotated nor decomposed" hole to fall
+into, and the emitter's new arm says so — a missing descriptor on a
+`PAGED_ATTENTION` is the normal case, not the error it is on a COARSENED.
+REJECTED: a separate `lowerInferenceKernelChoice` pass (two traversals with
+two sets of clone restrictions to keep in step, for one `when` arm), and
+wrapping paged attention in a COARSENED to reuse the existing lane (a
+`primal_body` no one would ever inline, invented to satisfy a lookup).
+
+**`defaultInferenceKernelTemplates` is EMPTY on purpose.** Claiming emits a
+custom_call naming a kernel some runtime must have registered; a default-on
+registry would turn every GB10 decode graph into a program XLA cannot link the
+moment `:ir` is used without `:runtime-pjrt`. Opt-in per pipeline, the standing
+convention for every KPTX template.
+
+**The kernel** (`KptxKernels.pagedAttentionModule`) — the serving sibling of
+§0.4.358's dense chain, same skeleton, K and V read *through the block table*:
+
+1. `kptx_paged_scores` — one CTA per (sequence, query head), threads strided
+   over the padded context. A live lane `j` resolves
+   `block = blockTables[seq, j / blockSize]`, `off = j % blockSize`, dots
+   `Q[seq,h,:]` against `K[block, off, kvHead, :]`, scales; a lane at or past
+   `seqLen` is written `−inf`.
+2. `kptx_paged_softmax` — §0.4.358's row softmax, **extracted and shared
+   verbatim** rather than duplicated. The paged form needs exactly that
+   program: `exp(−inf − max)` is `0` for any finite max, and a sequence always
+   has at least one live lane, so the dead lanes fall out of the softmax on
+   their own and no masking arm is needed. The dense module's PTX is unchanged
+   (its kernel name and param name are what the helper takes).
+3. `kptx_paged_out` — one CTA per output row, threads strided over `headDim`,
+   accumulating only over live lanes.
+
+GQA is indexing, not new math: `kvHead = h / (numHeads / numKvHeads)`,
+computed per CTA. `seqLens[seq]` is **clamped** to the window width — an
+over-long sequence is a scheduler bug, and clamping keeps the kernel inside its
+buffers while H1c's bucket policy refuses the over-cap request by name at the
+layer that can actually split it.
+
+**What is baked and what is not.** Every dim-derived quantity —
+`numHeads`/`headDim`/`blockSize`/`numKvHeads`/`maxBlocksPerSeq` — arrives as a
+trailing i32 read from the call frame's *buffer shapes* at dispatch, and
+`seqLens` is read from device memory inside the kernel. The one baked value is
+`scale`, an f32 immediate in the scores stage, with the module cached per
+`(block, scale)`: `scale` is a compile-time literal on the op, not a
+dim-derived value, so this is the house specialization-cache pattern and not a
+sentinel-dims violation. **Named deferral**: a scale-generic kernel, once
+`KptxKernelRegistry.Stage` grows access to the frame's decoded FFI attrs — the
+emitted call already carries `scale` in its typed-FFI `backend_config`.
+
+**The module line.** `:kptx` moved from a test-only dependency of
+`:runtime-pjrt` to a main-side one. `KptxKernelRegistry` deliberately takes PTX
+*text* and so never needed it; claiming does, because the serving path itself
+must now register a chain for a name the compiler emitted
+(`KptxPagedAttention.register`). `:kptx` is pure-Kotlin PTX construction with
+no native surface, and `:ir` stays free of the FFM/CUDA world — the two halves
+of claiming live in different modules on purpose, which is the same line H3
+drew between the plugin and the work.
+
+**Oracles, and what they found.** At numSeqs 8 / numHeads 8 / numKvHeads 2 /
+headDim 64 / blockSize 16 / ctx 128, a permuted block table and ragged lengths
+(full window, a single token, mid-page and page-aligned stops):
+
+| pair | worst \|Δ\| |
+|---|---|
+| kernel vs interpreter's Double paged walk | **1.2e-7** |
+| gather-composed emission vs that same walk | **2.44e-4** |
+| kernel vs emission | 2.44e-4 |
+
+The gap is **the emission's**, not the kernel's, and the number names its
+cause: `2.44e-4 ≈ 2^-12` at magnitude ~1 is TF32's mantissa, which is what XLA
+lowers `dot_general` to by default on this device. The kernel's sequential
+`fma.rn.f32` chain is within 1e-7 of the Double walk. H1a's smoke pins 6e-8
+because its fixture (headDim 4, ctx 6) is too small for XLA to pick a
+tensor-core path at all — so this only shows up at a shape with real work in
+it. The test therefore pins kernel-vs-oracle at the house 1e-4 floor,
+kernel-vs-emission an order looser with the reason stated, and adds the
+property that actually matters: **the fused kernel must be at least as close to
+the Double oracle as the emission it replaces**.
+
+**The cost, reported honestly.** Per-call floors, same session, executable
+already compiled, host round trip included:
+**claimed `@kptx_paged_attention` 465 µs, unclaimed gather-composed 310 µs.**
+The correctness-tier kernel is **1.5× SLOWER** than the lowering it replaces.
+That is the expected §0.4.358 outcome, not a surprise: three f32 scalar loops
+with one CTA per (sequence, head) against XLA's tiled tensor-core
+`dot_general`s. This slice is the **claiming** milestone — the end-to-end path
+from an op in a decode graph to Tlaloc's own PTX running inside an XLA
+executable, with the numbers pinned. The warp-specialized pass (the
+TLX-informed bf16 GEMM tile ingested in §0.4.357) is the follow-up, and until
+it lands **nothing should register this kernel in a serving deployment** —
+which is exactly why the default inference registry is empty.
+
+**Named deferrals from this slice**: the performance tier (warp specialization,
+shared-memory staging of the page window, one warp per lane group rather than
+one CTA per row — the measured 465 µs is the floor this must beat before the
+registry is anything but opt-in); a scale-generic kernel (above); bf16 pools,
+declined by the template by name rather than silently miscomputed; the
+prefill/ragged form, still H1a's deferral; mixed-dtype PJRT input lanes, so the
+GPU test still rides `blockTables`/`seqLens` as I32 consts — they do reach the
+kernel as real device buffers, XLA materialises a constant, so the dispatch
+path under test is the production one; and fusing the adjacent
+`KV_CACHE_WRITE` + `PAGED_ATTENTION` pair into one claim, which H1b left
+available and which wants the perf tier first.
+
+**House landmine found.** `ptxas` rejects a **non-ASCII byte anywhere in the
+PTX file, comments included**, and the failure surfaces as
+`CUDA_ERROR_INVALID_PTX` out of `cuModuleLoadData` deep inside an XLA
+execution, naming nothing. A typographic `·` in a kernel comment cost one
+debugging round trip. Pinned in `PagedAttentionModuleTest` for both chains.
+
+**Still open in Phase H**: H3c (staged weights + a real Llama through the
+plugin), the H4 performance tier, H5 (SGLang variant + KV-quant).

@@ -707,134 +707,7 @@ object KptxKernels {
                 inst("ret")
             }
 
-            kernel("kptx_attn_softmax") {
-                val sPtr = param(".u64", "s_ptr")
-                val nTP = param(".u32", "n_t")
-
-                val p1 = pred(); val p2 = pred(); val p3 = pred()
-                val r = List(7) { r32() }
-                val f = List(12) { f32() }
-                val rd = List(11) { r64() }
-                val smax = shared("smax", sizeBytes = 4 * block)
-
-                inst("ld.param.u64", rd[0], mem(sPtr))
-                inst("ld.param.u32", r[0], mem(nTP))
-                inst("cvta.to.global.u64", rd[1], rd[0])
-                blank()
-                inst("mov.u32", r[1], ctaidX)
-                inst("mov.u32", r[2], tidX)
-                inst("mov.u32", r[3], ntidX)
-                inst("mul.lo.u32", r[4], r[1], r[0])
-                inst("mul.wide.u32", rd[2], r[4], imm(4))
-                inst("add.s64", rd[3], rd[1], rd[2], comment = "s row")
-                blank()
-                comment("pass 1: strided row max + tree")
-                inst("mov.f32", f[0], imm("0fFF800000"), comment = "-inf")
-                inst("mov.u32", r[4], r[2])
-                val maxLoop = label("MAX_LOOP")
-                val maxDone = label("MAX_DONE")
-                place(maxLoop)
-                inst("setp.ge.u32", p1, r[4], r[0])
-                inst("bra", maxDone, guard = p1)
-                inst("mul.wide.u32", rd[4], r[4], imm(4))
-                inst("add.s64", rd[5], rd[3], rd[4])
-                inst("ld.global.f32", f[1], mem(rd[5]))
-                inst("max.f32", f[0], f[0], f[1])
-                inst("add.u32", r[4], r[4], r[3])
-                inst("bra", maxLoop)
-                place(maxDone)
-                inst("mul.wide.u32", rd[6], r[2], imm(4))
-                inst("mov.u64", rd[7], smax)
-                inst("add.s64", rd[8], rd[7], rd[6])
-                inst("st.shared.f32", mem(rd[8]), f[0])
-                inst("bar.sync", imm(0))
-                inst("shr.u32", r[5], r[3], imm(1))
-                val mred = label("MRED_LOOP")
-                val mredSkip = label("MRED_SKIP")
-                val mredDone = label("MRED_DONE")
-                place(mred)
-                inst("setp.eq.u32", p2, r[5], imm(0))
-                inst("bra", mredDone, guard = p2)
-                inst("setp.ge.u32", p3, r[2], r[5])
-                inst("bra", mredSkip, guard = p3)
-                inst("add.u32", r[6], r[2], r[5])
-                inst("mul.wide.u32", rd[9], r[6], imm(4))
-                inst("add.s64", rd[10], rd[7], rd[9])
-                inst("ld.shared.f32", f[2], mem(rd[10]))
-                inst("ld.shared.f32", f[3], mem(rd[8]))
-                inst("max.f32", f[4], f[2], f[3])
-                inst("st.shared.f32", mem(rd[8]), f[4])
-                place(mredSkip)
-                inst("bar.sync", imm(0))
-                inst("shr.u32", r[5], r[5], imm(1))
-                inst("bra", mred)
-                place(mredDone)
-                inst("ld.shared.f32", f[5], mem(rd[7]), comment = "row max")
-                inst("bar.sync", imm(0))
-                blank()
-                comment("pass 2: strided sum exp(s-max) + tree")
-                inst("mov.f32", f[6], imm("0f00000000"))
-                inst("mov.u32", r[4], r[2])
-                val sumLoop = label("SUM_LOOP")
-                val sumDone = label("SUM_DONE")
-                place(sumLoop)
-                inst("setp.ge.u32", p1, r[4], r[0])
-                inst("bra", sumDone, guard = p1)
-                inst("mul.wide.u32", rd[4], r[4], imm(4))
-                inst("add.s64", rd[5], rd[3], rd[4])
-                inst("ld.global.f32", f[1], mem(rd[5]))
-                inst("sub.f32", f[7], f[1], f[5])
-                inst("mul.f32", f[8], f[7], imm("0f3FB8AA3B"))
-                inst("ex2.approx.f32", f[9], f[8])
-                inst("add.f32", f[6], f[6], f[9])
-                inst("add.u32", r[4], r[4], r[3])
-                inst("bra", sumLoop)
-                place(sumDone)
-                inst("st.shared.f32", mem(rd[8]), f[6])
-                inst("bar.sync", imm(0))
-                inst("shr.u32", r[5], r[3], imm(1))
-                val sred = label("SRED_LOOP")
-                val sredSkip = label("SRED_SKIP")
-                val sredDone = label("SRED_DONE")
-                place(sred)
-                inst("setp.eq.u32", p2, r[5], imm(0))
-                inst("bra", sredDone, guard = p2)
-                inst("setp.ge.u32", p3, r[2], r[5])
-                inst("bra", sredSkip, guard = p3)
-                inst("add.u32", r[6], r[2], r[5])
-                inst("mul.wide.u32", rd[9], r[6], imm(4))
-                inst("add.s64", rd[10], rd[7], rd[9])
-                inst("ld.shared.f32", f[2], mem(rd[10]))
-                inst("ld.shared.f32", f[3], mem(rd[8]))
-                inst("add.f32", f[4], f[2], f[3])
-                inst("st.shared.f32", mem(rd[8]), f[4])
-                place(sredSkip)
-                inst("bar.sync", imm(0))
-                inst("shr.u32", r[5], r[5], imm(1))
-                inst("bra", sred)
-                place(sredDone)
-                inst("ld.shared.f32", f[10], mem(rd[7]), comment = "row sum")
-                blank()
-                comment("pass 3: strided normalize in place")
-                inst("mov.u32", r[4], r[2])
-                val nrmLoop = label("NRM_LOOP")
-                val nrmDone = label("NRM_DONE")
-                place(nrmLoop)
-                inst("setp.ge.u32", p1, r[4], r[0])
-                inst("bra", nrmDone, guard = p1)
-                inst("mul.wide.u32", rd[4], r[4], imm(4))
-                inst("add.s64", rd[5], rd[3], rd[4])
-                inst("ld.global.f32", f[1], mem(rd[5]))
-                inst("sub.f32", f[7], f[1], f[5])
-                inst("mul.f32", f[8], f[7], imm("0f3FB8AA3B"))
-                inst("ex2.approx.f32", f[9], f[8])
-                inst("div.rn.f32", f[11], f[9], f[10])
-                inst("st.global.f32", mem(rd[5]), f[11])
-                inst("add.u32", r[4], r[4], r[3])
-                inst("bra", nrmLoop)
-                place(nrmDone)
-                inst("ret")
-            }
+            rowSoftmaxKernel("kptx_attn_softmax", "n_t", block)
 
             kernel("kptx_attn_out") {
                 val sPtr = param(".u64", "s_ptr")
@@ -905,6 +778,282 @@ object KptxKernels {
     }
 
     /**
+     * §0.4.471 — Phase H4: **paged attention forward** as a three-stage
+     * launch chain behind one `custom_call`, the serving-path sibling of
+     * [attentionModule]. Same skeleton — scores → row softmax → output —
+     * but K and V are read *through the block table* instead of from a
+     * contiguous window, and every row carries its own `seqLen` bound.
+     *
+     * Operand order follows `OpKind.PAGED_ATTENTION`'s
+     * `(query, keyCache, valueCache, blockTables, seqLens) → out`, and the
+     * `S[numSeqs·numHeads, numMaxBlocks·blockSize]` score matrix lives in an
+     * XLA-owned scratch result (the §0.4.350/351 mechanism):
+     *
+     *   1. `kptx_paged_scores(q, kcache, btab, slens, S, n_h, n_d, n_bs,
+     *      n_kv, n_mb)` — one CTA per (sequence, query head), threads
+     *      strided over the padded context. A live lane `j` resolves
+     *      `block = blockTables[seq, j / blockSize]`,
+     *      `off = j % blockSize`, dots `Q[seq,h,:]` against
+     *      `K[block, off, kvHead, :]` and scales; a lane at or past
+     *      `seqLen` is written `−inf`.
+     *   2. `kptx_paged_softmax(S, n_ctx)` — [rowSoftmaxKernel] verbatim.
+     *      The `−inf` dead lanes exponentiate to exactly `0`, so no
+     *      masking arm is needed there.
+     *   3. `kptx_paged_out(S, vcache, btab, slens, o, n_h, n_d, n_bs,
+     *      n_kv, n_mb)` — one CTA per output row, threads strided over
+     *      `headDim`, accumulating only over the live lanes.
+     *
+     * **GQA is indexing, not new math**: `kvHead = h / (numHeads /
+     * numKvHeads)`, computed per CTA from the trailing shape params. The
+     * `numHeads == numKvHeads` case falls out with `group == 1`.
+     *
+     * **The `scale` attribute is baked into the PTX** as an f32 immediate
+     * and the module is cached per `(block, scale)`. This is the house
+     * specialization-cache pattern and is *not* a sentinel-dims violation:
+     * `scale` is a compile-time literal on the op, not a value derived from
+     * a tensor dimension. Every dim-derived quantity —
+     * `numHeads`/`headDim`/`blockSize`/`numKvHeads`/`maxBlocksPerSeq` —
+     * arrives as a trailing i32 read from the call frame's buffer shapes at
+     * dispatch, and `seqLens` is read from device memory inside the kernel.
+     *
+     * `seqLens[seq]` is **clamped** to the padded context width before use:
+     * an over-long sequence is a scheduler bug, and clamping keeps the
+     * kernel inside its buffers while H1c's bucket policy refuses the
+     * over-cap request by name at the layer that can actually split it.
+     *
+     * Correctness-tier f32 loops by design, exactly as §0.4.358's dense
+     * chain was: this is the *claiming* milestone. The warp-specialized
+     * pass is the follow-up.
+     */
+    private val pagedAttnCache = HashMap<Pair<Int, Int>, PtxModule>()
+
+    fun pagedAttentionModule(block: Int, scale: Float): PtxModule =
+        pagedAttnCache.getOrPut(block to scale.toRawBits()) {
+            val scaleImm = "0f" + scale.toRawBits().toUInt().toString(16).uppercase().padStart(8, '0')
+            ptxModule {
+                kernel("kptx_paged_scores") {
+                    val qPtr = param(".u64", "q_ptr")
+                    val kPtr = param(".u64", "k_ptr")
+                    val tabPtr = param(".u64", "tab_ptr")
+                    val lenPtr = param(".u64", "len_ptr")
+                    val sPtr = param(".u64", "s_ptr")
+                    val nHP = param(".u32", "n_h")
+                    val nDP = param(".u32", "n_d")
+                    val nBsP = param(".u32", "n_bs")
+                    val nKvP = param(".u32", "n_kv")
+                    val nMbP = param(".u32", "n_mb")
+
+                    val p1 = pred(); val p2 = pred(); val p3 = pred()
+                    val r = List(20) { r32() }
+                    val f = List(3) { f32() }
+                    val rd = List(19) { r64() }
+
+                    inst("ld.param.u64", rd[0], mem(qPtr))
+                    inst("ld.param.u64", rd[1], mem(kPtr))
+                    inst("ld.param.u64", rd[2], mem(tabPtr))
+                    inst("ld.param.u64", rd[3], mem(lenPtr))
+                    inst("ld.param.u64", rd[4], mem(sPtr))
+                    inst("ld.param.u32", r[0], mem(nHP))
+                    inst("ld.param.u32", r[1], mem(nDP))
+                    inst("ld.param.u32", r[2], mem(nBsP))
+                    inst("ld.param.u32", r[3], mem(nKvP))
+                    inst("ld.param.u32", r[4], mem(nMbP))
+                    inst("cvta.to.global.u64", rd[5], rd[0])
+                    inst("cvta.to.global.u64", rd[6], rd[1])
+                    inst("cvta.to.global.u64", rd[7], rd[2])
+                    inst("cvta.to.global.u64", rd[8], rd[3])
+                    inst("cvta.to.global.u64", rd[9], rd[4])
+                    blank()
+                    comment("row = ctaid = seq*n_h + h; kv head = h / (n_h / n_kv)")
+                    inst("mov.u32", r[5], ctaidX)
+                    inst("mov.u32", r[6], tidX)
+                    inst("mov.u32", r[7], ntidX)
+                    inst("div.u32", r[8], r[5], r[0], comment = "seq")
+                    inst("mul.lo.u32", r[9], r[8], r[0])
+                    inst("sub.u32", r[10], r[5], r[9], comment = "h")
+                    inst("div.u32", r[11], r[0], r[3], comment = "GQA group")
+                    inst("div.u32", r[11], r[10], r[11], comment = "kv head")
+                    inst("mul.lo.u32", r[12], r[4], r[2], comment = "padded context width")
+                    blank()
+                    comment("live lanes = min(seqLens[seq], ctx); an over-long seqLen is clamped, never read")
+                    inst("mul.wide.u32", rd[10], r[8], imm(4))
+                    inst("add.s64", rd[10], rd[8], rd[10])
+                    inst("ld.global.u32", r[13], mem(rd[10]))
+                    inst("setp.gt.u32", p1, r[13], r[12])
+                    inst("mov.u32", r[13], r[12], guard = p1)
+                    blank()
+                    inst("mul.lo.u32", r[14], r[5], r[1])
+                    inst("mul.wide.u32", rd[11], r[14], imm(4))
+                    inst("add.s64", rd[11], rd[5], rd[11], comment = "q row")
+                    inst("mul.lo.u32", r[14], r[5], r[12])
+                    inst("mul.wide.u32", rd[12], r[14], imm(4))
+                    inst("add.s64", rd[12], rd[9], rd[12], comment = "s row")
+                    inst("mul.lo.u32", r[14], r[8], r[4])
+                    inst("mul.wide.u32", rd[13], r[14], imm(4))
+                    inst("add.s64", rd[13], rd[7], rd[13], comment = "block-table row")
+                    blank()
+                    comment("for j strided: live -> scale * dot(Q[seq,h,:], K[page(j),kvh,:]), dead -> -inf")
+                    inst("mov.u32", r[15], r[6])
+                    val jLoop = label("J_LOOP")
+                    val jDone = label("J_DONE")
+                    val live = label("LIVE")
+                    val next = label("NEXT")
+                    place(jLoop)
+                    inst("setp.ge.u32", p1, r[15], r[12])
+                    inst("bra", jDone, guard = p1)
+                    inst("mul.wide.u32", rd[14], r[15], imm(4))
+                    inst("add.s64", rd[15], rd[12], rd[14], comment = "&S[row, j]")
+                    inst("setp.lt.u32", p2, r[15], r[13])
+                    inst("bra", live, guard = p2)
+                    inst("mov.f32", f[0], imm("0fFF800000"), comment = "-inf")
+                    inst("st.global.f32", mem(rd[15]), f[0])
+                    inst("bra", next)
+                    place(live)
+                    inst("div.u32", r[16], r[15], r[2], comment = "page index within the sequence")
+                    inst("mul.lo.u32", r[17], r[16], r[2])
+                    inst("sub.u32", r[17], r[15], r[17], comment = "offset within the page")
+                    inst("mul.wide.u32", rd[16], r[16], imm(4))
+                    inst("add.s64", rd[16], rd[13], rd[16])
+                    inst("ld.global.u32", r[18], mem(rd[16]), comment = "physical block")
+                    inst("mul.lo.u32", r[19], r[18], r[2])
+                    inst("add.u32", r[19], r[19], r[17])
+                    inst("mul.lo.u32", r[19], r[19], r[3])
+                    inst("add.u32", r[19], r[19], r[11])
+                    inst("mul.lo.u32", r[19], r[19], r[1])
+                    inst("mul.wide.u32", rd[17], r[19], imm(4))
+                    inst("add.s64", rd[17], rd[6], rd[17], comment = "&K[block, off, kvh, 0]")
+                    inst("mov.u64", rd[18], rd[11], comment = "q walking ptr")
+                    inst("mov.f32", f[0], imm("0f00000000"))
+                    inst("mov.u32", r[16], imm(0))
+                    val dLoop = label("D_LOOP")
+                    val dDone = label("D_DONE")
+                    place(dLoop)
+                    inst("setp.ge.u32", p3, r[16], r[1])
+                    inst("bra", dDone, guard = p3)
+                    inst("ld.global.f32", f[1], mem(rd[18]))
+                    inst("ld.global.f32", f[2], mem(rd[17]))
+                    inst("fma.rn.f32", f[0], f[1], f[2], f[0])
+                    inst("add.s64", rd[18], rd[18], imm(4))
+                    inst("add.s64", rd[17], rd[17], imm(4))
+                    inst("add.u32", r[16], r[16], imm(1))
+                    inst("bra", dLoop)
+                    place(dDone)
+                    inst("mul.f32", f[0], f[0], imm(scaleImm), comment = "the op's scale attr, baked")
+                    inst("st.global.f32", mem(rd[15]), f[0])
+                    place(next)
+                    inst("add.u32", r[15], r[15], r[7])
+                    inst("bra", jLoop)
+                    place(jDone)
+                    inst("ret")
+                }
+
+                rowSoftmaxKernel("kptx_paged_softmax", "n_ctx", block)
+
+                kernel("kptx_paged_out") {
+                    val sPtr = param(".u64", "s_ptr")
+                    val vPtr = param(".u64", "v_ptr")
+                    val tabPtr = param(".u64", "tab_ptr")
+                    val lenPtr = param(".u64", "len_ptr")
+                    val oPtr = param(".u64", "o_ptr")
+                    val nHP = param(".u32", "n_h")
+                    val nDP = param(".u32", "n_d")
+                    val nBsP = param(".u32", "n_bs")
+                    val nKvP = param(".u32", "n_kv")
+                    val nMbP = param(".u32", "n_mb")
+
+                    val p1 = pred(); val p2 = pred()
+                    val r = List(21) { r32() }
+                    val f = List(3) { f32() }
+                    val rd = List(20) { r64() }
+
+                    inst("ld.param.u64", rd[0], mem(sPtr))
+                    inst("ld.param.u64", rd[1], mem(vPtr))
+                    inst("ld.param.u64", rd[2], mem(tabPtr))
+                    inst("ld.param.u64", rd[3], mem(lenPtr))
+                    inst("ld.param.u64", rd[4], mem(oPtr))
+                    inst("ld.param.u32", r[0], mem(nHP))
+                    inst("ld.param.u32", r[1], mem(nDP))
+                    inst("ld.param.u32", r[2], mem(nBsP))
+                    inst("ld.param.u32", r[3], mem(nKvP))
+                    inst("ld.param.u32", r[4], mem(nMbP))
+                    inst("cvta.to.global.u64", rd[5], rd[0])
+                    inst("cvta.to.global.u64", rd[6], rd[1])
+                    inst("cvta.to.global.u64", rd[7], rd[2])
+                    inst("cvta.to.global.u64", rd[8], rd[3])
+                    inst("cvta.to.global.u64", rd[9], rd[4])
+                    blank()
+                    inst("mov.u32", r[5], ctaidX)
+                    inst("mov.u32", r[6], tidX)
+                    inst("mov.u32", r[7], ntidX)
+                    inst("div.u32", r[8], r[5], r[0], comment = "seq")
+                    inst("mul.lo.u32", r[9], r[8], r[0])
+                    inst("sub.u32", r[10], r[5], r[9], comment = "h")
+                    inst("div.u32", r[11], r[0], r[3], comment = "GQA group")
+                    inst("div.u32", r[11], r[10], r[11], comment = "kv head")
+                    inst("mul.lo.u32", r[12], r[4], r[2], comment = "padded context width")
+                    inst("mul.wide.u32", rd[10], r[8], imm(4))
+                    inst("add.s64", rd[10], rd[8], rd[10])
+                    inst("ld.global.u32", r[13], mem(rd[10]))
+                    inst("setp.gt.u32", p1, r[13], r[12])
+                    inst("mov.u32", r[13], r[12], guard = p1)
+                    blank()
+                    inst("mul.lo.u32", r[14], r[5], r[12])
+                    inst("mul.wide.u32", rd[11], r[14], imm(4))
+                    inst("add.s64", rd[11], rd[5], rd[11], comment = "s row")
+                    inst("mul.lo.u32", r[14], r[5], r[1])
+                    inst("mul.wide.u32", rd[12], r[14], imm(4))
+                    inst("add.s64", rd[12], rd[9], rd[12], comment = "o row")
+                    inst("mul.lo.u32", r[14], r[8], r[4])
+                    inst("mul.wide.u32", rd[13], r[14], imm(4))
+                    inst("add.s64", rd[13], rd[7], rd[13], comment = "block-table row")
+                    blank()
+                    comment("for d strided: O[row,d] = sum over LIVE j of P[row,j] * V[page(j),kvh,d]")
+                    inst("mov.u32", r[15], r[6])
+                    val dimLoop = label("DIM_LOOP")
+                    val dimDone = label("DIM_DONE")
+                    place(dimLoop)
+                    inst("setp.ge.u32", p1, r[15], r[1])
+                    inst("bra", dimDone, guard = p1)
+                    inst("mov.f32", f[0], imm("0f00000000"))
+                    inst("mov.u32", r[16], imm(0))
+                    val jLoop = label("J_LOOP")
+                    val jDone = label("J_DONE")
+                    place(jLoop)
+                    inst("setp.ge.u32", p2, r[16], r[13])
+                    inst("bra", jDone, guard = p2)
+                    inst("div.u32", r[17], r[16], r[2], comment = "page index within the sequence")
+                    inst("mul.lo.u32", r[18], r[17], r[2])
+                    inst("sub.u32", r[18], r[16], r[18], comment = "offset within the page")
+                    inst("mul.wide.u32", rd[14], r[17], imm(4))
+                    inst("add.s64", rd[14], rd[13], rd[14])
+                    inst("ld.global.u32", r[19], mem(rd[14]), comment = "physical block")
+                    inst("mul.lo.u32", r[20], r[19], r[2])
+                    inst("add.u32", r[20], r[20], r[18])
+                    inst("mul.lo.u32", r[20], r[20], r[3])
+                    inst("add.u32", r[20], r[20], r[11])
+                    inst("mul.lo.u32", r[20], r[20], r[1])
+                    inst("add.u32", r[20], r[20], r[15])
+                    inst("mul.wide.u32", rd[15], r[20], imm(4))
+                    inst("add.s64", rd[15], rd[6], rd[15], comment = "&V[block, off, kvh, d]")
+                    inst("mul.wide.u32", rd[16], r[16], imm(4))
+                    inst("add.s64", rd[16], rd[11], rd[16], comment = "&P[row, j]")
+                    inst("ld.global.f32", f[1], mem(rd[16]))
+                    inst("ld.global.f32", f[2], mem(rd[15]))
+                    inst("fma.rn.f32", f[0], f[1], f[2], f[0])
+                    inst("add.u32", r[16], r[16], imm(1))
+                    inst("bra", jLoop)
+                    place(jDone)
+                    inst("mul.wide.u32", rd[17], r[15], imm(4))
+                    inst("add.s64", rd[18], rd[12], rd[17])
+                    inst("st.global.f32", mem(rd[18]), f[0])
+                    inst("add.u32", r[15], r[15], r[7])
+                    inst("bra", dimLoop)
+                    place(dimDone)
+                    inst("ret")
+                }
+            }
+        }
+    /**
      * RMS-norm backward, dw half: `dw_j = Σ_i dy_ij·x_ij·inv_rms_i`,
      * consuming the `inv_rms` vector [rmsNormBwdDx] produced (XLA
      * sequences the two custom_calls via the data dependence). One
@@ -970,6 +1119,153 @@ object KptxKernels {
         inst("add.s64", rd[14], rd[7], rd[13])
         inst("st.global.f32", mem(rd[14]), f[0])
         place(done)
+        inst("ret")
+    }
+}
+
+/**
+ * §0.4.471 — Phase H4: the **row-softmax stage**, shared verbatim by the
+ * dense attention chain ([KptxKernels.attentionModule], where the row width
+ * is `n_t`) and the paged one ([KptxKernels.pagedAttentionModule], where it
+ * is the padded context width `n_ctx`). One CTA per row: strided max → tree
+ * reduce, strided Σ `ex2((s−max)·log2e)` → tree reduce, strided
+ * normalize-in-place.
+ *
+ * Extracted rather than duplicated because the paged form needs *exactly*
+ * this program: H4's score stage writes `−inf` into every lane at or past
+ * `seqLen`, and `exp(−inf − max)` is `0` for any finite max — which it is,
+ * since a sequence has at least one live lane. The dead lanes therefore
+ * fall out of the softmax on their own and no masking arm is needed here.
+ * Emitting `name`/`paramName` keeps the dense module's PTX byte-identical
+ * to §0.4.358's.
+ */
+private fun ModuleScope.rowSoftmaxKernel(name: String, paramName: String, block: Int) {
+    kernel(name) {
+        val sPtr = param(".u64", "s_ptr")
+        val nTP = param(".u32", paramName)
+
+        val p1 = pred(); val p2 = pred(); val p3 = pred()
+        val r = List(7) { r32() }
+        val f = List(12) { f32() }
+        val rd = List(11) { r64() }
+        val smax = shared("smax", sizeBytes = 4 * block)
+
+        inst("ld.param.u64", rd[0], mem(sPtr))
+        inst("ld.param.u32", r[0], mem(nTP))
+        inst("cvta.to.global.u64", rd[1], rd[0])
+        blank()
+        inst("mov.u32", r[1], ctaidX)
+        inst("mov.u32", r[2], tidX)
+        inst("mov.u32", r[3], ntidX)
+        inst("mul.lo.u32", r[4], r[1], r[0])
+        inst("mul.wide.u32", rd[2], r[4], imm(4))
+        inst("add.s64", rd[3], rd[1], rd[2], comment = "s row")
+        blank()
+        comment("pass 1: strided row max + tree")
+        inst("mov.f32", f[0], imm("0fFF800000"), comment = "-inf")
+        inst("mov.u32", r[4], r[2])
+        val maxLoop = label("MAX_LOOP")
+        val maxDone = label("MAX_DONE")
+        place(maxLoop)
+        inst("setp.ge.u32", p1, r[4], r[0])
+        inst("bra", maxDone, guard = p1)
+        inst("mul.wide.u32", rd[4], r[4], imm(4))
+        inst("add.s64", rd[5], rd[3], rd[4])
+        inst("ld.global.f32", f[1], mem(rd[5]))
+        inst("max.f32", f[0], f[0], f[1])
+        inst("add.u32", r[4], r[4], r[3])
+        inst("bra", maxLoop)
+        place(maxDone)
+        inst("mul.wide.u32", rd[6], r[2], imm(4))
+        inst("mov.u64", rd[7], smax)
+        inst("add.s64", rd[8], rd[7], rd[6])
+        inst("st.shared.f32", mem(rd[8]), f[0])
+        inst("bar.sync", imm(0))
+        inst("shr.u32", r[5], r[3], imm(1))
+        val mred = label("MRED_LOOP")
+        val mredSkip = label("MRED_SKIP")
+        val mredDone = label("MRED_DONE")
+        place(mred)
+        inst("setp.eq.u32", p2, r[5], imm(0))
+        inst("bra", mredDone, guard = p2)
+        inst("setp.ge.u32", p3, r[2], r[5])
+        inst("bra", mredSkip, guard = p3)
+        inst("add.u32", r[6], r[2], r[5])
+        inst("mul.wide.u32", rd[9], r[6], imm(4))
+        inst("add.s64", rd[10], rd[7], rd[9])
+        inst("ld.shared.f32", f[2], mem(rd[10]))
+        inst("ld.shared.f32", f[3], mem(rd[8]))
+        inst("max.f32", f[4], f[2], f[3])
+        inst("st.shared.f32", mem(rd[8]), f[4])
+        place(mredSkip)
+        inst("bar.sync", imm(0))
+        inst("shr.u32", r[5], r[5], imm(1))
+        inst("bra", mred)
+        place(mredDone)
+        inst("ld.shared.f32", f[5], mem(rd[7]), comment = "row max")
+        inst("bar.sync", imm(0))
+        blank()
+        comment("pass 2: strided sum exp(s-max) + tree")
+        inst("mov.f32", f[6], imm("0f00000000"))
+        inst("mov.u32", r[4], r[2])
+        val sumLoop = label("SUM_LOOP")
+        val sumDone = label("SUM_DONE")
+        place(sumLoop)
+        inst("setp.ge.u32", p1, r[4], r[0])
+        inst("bra", sumDone, guard = p1)
+        inst("mul.wide.u32", rd[4], r[4], imm(4))
+        inst("add.s64", rd[5], rd[3], rd[4])
+        inst("ld.global.f32", f[1], mem(rd[5]))
+        inst("sub.f32", f[7], f[1], f[5])
+        inst("mul.f32", f[8], f[7], imm("0f3FB8AA3B"))
+        inst("ex2.approx.f32", f[9], f[8])
+        inst("add.f32", f[6], f[6], f[9])
+        inst("add.u32", r[4], r[4], r[3])
+        inst("bra", sumLoop)
+        place(sumDone)
+        inst("st.shared.f32", mem(rd[8]), f[6])
+        inst("bar.sync", imm(0))
+        inst("shr.u32", r[5], r[3], imm(1))
+        val sred = label("SRED_LOOP")
+        val sredSkip = label("SRED_SKIP")
+        val sredDone = label("SRED_DONE")
+        place(sred)
+        inst("setp.eq.u32", p2, r[5], imm(0))
+        inst("bra", sredDone, guard = p2)
+        inst("setp.ge.u32", p3, r[2], r[5])
+        inst("bra", sredSkip, guard = p3)
+        inst("add.u32", r[6], r[2], r[5])
+        inst("mul.wide.u32", rd[9], r[6], imm(4))
+        inst("add.s64", rd[10], rd[7], rd[9])
+        inst("ld.shared.f32", f[2], mem(rd[10]))
+        inst("ld.shared.f32", f[3], mem(rd[8]))
+        inst("add.f32", f[4], f[2], f[3])
+        inst("st.shared.f32", mem(rd[8]), f[4])
+        place(sredSkip)
+        inst("bar.sync", imm(0))
+        inst("shr.u32", r[5], r[5], imm(1))
+        inst("bra", sred)
+        place(sredDone)
+        inst("ld.shared.f32", f[10], mem(rd[7]), comment = "row sum")
+        blank()
+        comment("pass 3: strided normalize in place")
+        inst("mov.u32", r[4], r[2])
+        val nrmLoop = label("NRM_LOOP")
+        val nrmDone = label("NRM_DONE")
+        place(nrmLoop)
+        inst("setp.ge.u32", p1, r[4], r[0])
+        inst("bra", nrmDone, guard = p1)
+        inst("mul.wide.u32", rd[4], r[4], imm(4))
+        inst("add.s64", rd[5], rd[3], rd[4])
+        inst("ld.global.f32", f[1], mem(rd[5]))
+        inst("sub.f32", f[7], f[1], f[5])
+        inst("mul.f32", f[8], f[7], imm("0f3FB8AA3B"))
+        inst("ex2.approx.f32", f[9], f[8])
+        inst("div.rn.f32", f[11], f[9], f[10])
+        inst("st.global.f32", mem(rd[5]), f[11])
+        inst("add.u32", r[4], r[4], r[3])
+        inst("bra", nrmLoop)
+        place(nrmDone)
         inst("ret")
     }
 }
