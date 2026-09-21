@@ -1,7 +1,12 @@
 # TPU readiness audit — Tlaloc vs TorchTPU (2026-09-21)
 
-**Status: assessment on file at Pedro's request; Phase G proposal at the
-end awaits ratification.** Researched 2026-09-21 against the TorchTPU
+**Status: PHASE G RATIFIED (Pedro, 2026-09-21) with the local/hardware
+split** — the arc certifies only what its machine can prove: G1 (bf16)
++ G2a (TPU bring-up, local half) + G3a (collectives/Shardy/multi-host
+design) run on the GB10 now, with SPLIT deletion ratified alongside;
+G2b (TPU execution), G4 (distributed trainer) and G5 (Pallas/Mosaic
+kernels) are GATED ON HARDWARE — a Cloud TPU VM Pedro provisions
+(v5e/v6e spot suffices). The running record lands in §5 below. Researched 2026-09-21 against the TorchTPU
 announcement (Google, April 2026 — the PyTorch-native TPU stack that
 will replace PyTorch/XLA) and the OpenXLA PJRT plugin ecosystem.
 
@@ -101,3 +106,7 @@ Maestro pod-group seam) → G4 distributed trainer over Phase F
 (DDP-equivalent first) → G5 (designed slice, upgraded from deferral)
 Pallas/Mosaic-generated kernels behind `custom_call` with
 recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
+
+## 5. Running record (Phase G)
+
+(Filled per slice as the workflow lands them.)
