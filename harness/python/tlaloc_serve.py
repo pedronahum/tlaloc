@@ -76,10 +76,19 @@ WHAT IS STILL DEFERRED
 Buffer DONATION (the manifest carries `donationPairs`; neither engine wires
 them into compile options yet — every step still round-trips whole pools
 through the host, which is the next measurable win and the reason this is
-a correctness artifact rather than a throughput one), staged weights (v1
-bodies carry them as constants), sampling (host-side, outside this module),
-multi-device execution, and bf16/int8 pools end to end (the dtype mapping
-below handles them; nothing has exported one yet).
+a correctness artifact rather than a throughput one), sampling (host-side,
+outside this module), multi-device execution, and bf16/int8 pools end to end
+(the dtype mapping below handles them; nothing has exported one yet).
+
+STAGED WEIGHTS ARRIVED IN 0.4.480 (H3c-3). An artifact may now carry a
+`weights.table` — one raw little-endian file per WEIGHT operand, already in
+math layout, written by `ServingArtifactWriter`. They are uploaded ONCE per
+artifact through `tlaloc_pjrt.buffer_from_file`, which never creates a Python
+number for them (1.1e9 Python floats is not a slow path, it is an impossible
+one), and are held as live device buffers for the artifact's lifetime. What
+is NOT done: the KV pools still round-trip to the host every step, so a
+22-layer model pays that in Python list construction per token. That is the
+donation item above, and it is now the dominant cost of a real decode.
 """
 
 from __future__ import annotations
@@ -354,19 +363,49 @@ class CtypesEngine:
         self._ensure()
         return self._client.compile(text)
 
-    def run(self, exe, staged: Sequence[tuple], outputs: Sequence[Slot]) -> list:
-        """`staged` is [(Slot, flat host sequence)] in the entry's input order.
+    def stage_weights(self, root, table: Sequence[dict]) -> dict:
+        """§0.4.480 — upload the staged weight table once, return name -> buffer.
 
-        Every input buffer and every output buffer is destroyed before this
-        returns: one decode step must not leave device memory behind, or a
-        serving loop is an allocator leak with a model attached.
+        Straight to `tlaloc_pjrt.buffer_from_file`: the file IS the operand, so
+        no Python number is ever created for a weight. If any upload fails the
+        ones already done are closed — a half-staged model is device memory
+        nobody holds a handle to.
+        """
+        self._ensure()
+        bufs: dict = {}
+        try:
+            for w in table:
+                bufs[w["name"]] = self._client.buffer_from_file(
+                    self._device, Path(root) / w["path"], w["dtype"], tuple(w["dims"]),
+                )
+        except BaseException:
+            for b in bufs.values():
+                b.close()
+            raise
+        return bufs
+
+    def run(self, exe, staged: Sequence[tuple], outputs: Sequence[Slot]) -> list:
+        """`staged` is [(Slot, values)] in the entry's input order, where
+        `values` is a flat host sequence OR an already-uploaded device buffer
+        (the staged weights — see `ServingArtifact.weight_buffers`).
+
+        Every input buffer THIS CALL MADE and every output buffer is destroyed
+        before it returns: one decode step must not leave device memory behind,
+        or a serving loop is an allocator leak with a model attached. A buffer
+        passed in is NOT closed here — its owner is the artifact, not the step.
         """
         self._ensure()
         bufs = []
+        mine = []
         try:
             for slot, values in staged:
+                if isinstance(values, P.PjrtBuffer):
+                    bufs.append(values)
+                    continue
                 maker, _, _ = _stage_for(slot.dtype)
-                bufs.append(getattr(self._client, maker)(self._device, values, slot.dims))
+                b = getattr(self._client, maker)(self._device, values, slot.dims)
+                bufs.append(b)
+                mine.append(b)
             results = exe.execute(bufs, self._device)
             try:
                 out = []
@@ -378,7 +417,7 @@ class CtypesEngine:
                 for r in results:
                     r.close()
         finally:
-            for b in bufs:
+            for b in mine:
                 b.close()
 
     def close(self) -> None:
@@ -444,6 +483,29 @@ class JaxEngine:
         with ctx, ir.Location.unknown(ctx):
             module = ir.Module.parse(text)
         return self._backend.compile_and_load(module, self._device_list, self._jaxlib.CompileOptions())
+
+    def stage_weights(self, root, table: Sequence[dict]) -> dict:
+        """REFUSED BY NAME (§0.4.480).
+
+        The jax engine exists for ONE reason — jaxlib ships no CPU PJRT plugin
+        `.so`, so the tight 1e-5 XLA-CPU semantics lane has nothing for the
+        ctypes engine to dlopen (`default_engine_for`). Staging a real
+        checkpoint's weight table through it would mean `np.fromfile` and a
+        second, differently-shaped upload path, in the one engine the
+        deployment never runs — an oracle that diverges from the thing it is
+        an oracle for.
+
+        The consequence is stated rather than worked around: **a staged-weight
+        artifact has no CPU lane in this loader.** Its oracle is the JVM
+        interpreter and HuggingFace transformers, which is what §0.4.479
+        certified the graph against in the first place.
+        """
+        raise ValueError(
+            f"the jax ORACLE engine does not stage weights ({len(table)} slots asked "
+            f"for). A staged-weight artifact runs on the ctypes engine, which is the "
+            f"deployment path; the jax engine carries the CPU semantics lane for "
+            f"artifacts whose weights are body constants."
+        )
 
     def run(self, exe, staged: Sequence[tuple], outputs: Sequence[Slot]) -> list:
         self._ensure()
@@ -512,8 +574,13 @@ class ServingArtifact:
         self.batch_ladder = list(ladder["batch"])
         self.context_ladder = list(ladder["context"])
         self.weights = manifest["weights"]
+        # §0.4.480 — the staged weight table. Absent reads as empty: an
+        # artifact written before this slice bakes its weights into the bodies
+        # and binds no weight operands, and it stays a legal artifact.
+        self.weight_table = list(self.weights.get("table") or [])
         self.entries = [Entry.parse(e) for e in manifest["entries"]]
         self._exe_cache: dict = {}
+        self._weight_bufs: dict | None = None
         self.engine = _ENGINES[engine](platform, plugin_path)
 
     # --- loading -------------------------------------------------------
@@ -542,7 +609,63 @@ class ServingArtifact:
             if close is not None:
                 close()
         self._exe_cache.clear()
+        if self._weight_bufs is not None:
+            for b in self._weight_bufs.values():
+                b.close()
+            self._weight_bufs = None
         self.engine.close()
+
+    # --- staged weights (§0.4.480) --------------------------------------
+
+    def weight_buffers(self) -> dict:
+        """The staged weight operands, as LIVE DEVICE BUFFERS, uploaded once.
+
+        This is the one place in the loader where a buffer outlives a call, and
+        it is the reason the weight table exists at all. A weight is the same
+        bytes on every decode step of every bucket; re-uploading 4.4 GB per
+        token is not a slow serving loop, it is a different program. So they
+        are staged on first use and closed with the artifact, and
+        `run_decode`'s per-step staging binds them by NAME against the entry's
+        WEIGHT slots.
+
+        Lazy rather than eager in `__init__`: `select_bucket` / `entry_for` /
+        `verify_bodies` are useful without a device, and `ServingArtifact.load`
+        must not need one.
+        """
+        if self._weight_bufs is None:
+            if not self.weight_table:
+                self._weight_bufs = {}
+            else:
+                self._weight_bufs = self.engine.stage_weights(self.root, self.weight_table)
+        return self._weight_bufs
+
+    def verify_weights(self) -> None:
+        """Re-hash every staged weight file against the manifest.
+
+        SEPARATE FROM `verify_bodies` and never automatic. A body is kilobytes
+        and hashing it on load is free; a weight table is gigabytes, and a
+        deployment restarting a worker should not pay a full SHA-256 of the
+        model to learn what its filesystem already told it. The check exists,
+        it is exact, and choosing to run it is the operator's.
+        """
+        for w in self.weight_table:
+            p = self.root / w["path"]
+            size = p.stat().st_size
+            if size != w["byteLength"]:
+                raise ValueError(
+                    f"{w['path']}: {size} bytes on disk, manifest says {w['byteLength']} "
+                    f"for slot '{w['name']}' {w['dims']}"
+                )
+            h = hashlib.sha256()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 22), b""):
+                    h.update(chunk)
+            if h.hexdigest() != w["sha256"]:
+                raise ValueError(
+                    f"{w['path']}: hashes to {h.hexdigest()} but the manifest says "
+                    f"{w['sha256']} — this artifact's weights are not the ones it was "
+                    f"exported with"
+                )
 
     def verify_bodies(self) -> None:
         """Content-address check: every body hashes to the name it is filed
@@ -677,9 +800,26 @@ class ServingArtifact:
                 f"has {expected_pools} (two per layer, (key, value) order, layers ascending)"
             )
 
+        # §0.4.480 — the staged weights, uploaded once and reused by every
+        # step of every bucket. They are bound by NAME, not by position:
+        # position is already the contract between the manifest and XLA, and
+        # re-deriving it here would be a second copy of an ordering that can
+        # only disagree.
+        wbufs = self.weight_buffers()
         staged = []
         pool_i = 0
         for slot in entry.inputs:
+            if slot.role == "WEIGHT":
+                try:
+                    staged.append((slot, wbufs[slot.name]))
+                except KeyError:
+                    raise ValueError(
+                        f"run_decode: entry '{entry.entry_id}' binds a WEIGHT operand "
+                        f"'{slot.name}' that the manifest's weight table does not name "
+                        f"(it has {len(self.weight_table)} entries). The artifact promises "
+                        f"an operand it cannot supply"
+                    ) from None
+                continue
             if slot.role == "KV_POOL_IN":
                 values = pools[pool_i]
                 pool_i += 1

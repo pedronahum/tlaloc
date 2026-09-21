@@ -102,6 +102,16 @@ PJRT_BUFFER_TYPE_F32 = 11
 PJRT_BUFFER_TYPE_F64 = 12
 PJRT_BUFFER_TYPE_BF16 = 13
 
+# §0.4.480 — the raw-bytes staging table: Tlaloc dtype name -> (PJRT type
+# code, bytes per element). Keys are `io.tlaloc.core.DType.name` verbatim, the
+# same spelling `tlaloc_serve._STAGE` uses, so an artifact cannot name a dtype
+# one of the two tables understands and the other does not.
+RAW_DTYPES = {
+    "f32": (PJRT_BUFFER_TYPE_F32, 4),
+    "i32": (PJRT_BUFFER_TYPE_S32, 4),
+    "bf16": (PJRT_BUFFER_TYPE_BF16, 2),
+}
+
 # PJRT_NamedValue_Type: kString=0, kInt64=1, kInt64List=2, kFloat=3, kBool=4.
 PJRT_NAMED_VALUE_TYPE_INT64 = 1
 PJRT_NAMED_VALUE_TYPE_FLOAT = 3
@@ -738,6 +748,48 @@ class PjrtClient:
         _check_count(len(vals), dims, "i32")
         return self._buffer_from_host(device, (ctypes.c_int32 * len(vals))(*vals), len(vals) * 4,
                                       PJRT_BUFFER_TYPE_S32, dims)
+
+    def buffer_from_file(self, device, path, dtype: str, dims: Sequence[int]) -> "PjrtBuffer":
+        """§0.4.480 — upload a RAW little-endian file straight to the device.
+
+        The three `buffer_from_host_*` methods above take a Python iterable and
+        materialise a `list` on the way. That is right for a block table and
+        catastrophic for a weight: TinyLlama-1.1B staged as f32 is 1.1e9
+        elements, and 1.1e9 Python floats is tens of gigabytes of PyObject
+        before a single byte reaches the plugin.
+
+        This path never creates a Python number. It allocates ONE ctypes buffer
+        of exactly the file's length, `readinto`s it (no intermediate `bytes`
+        object — `readinto` writes through the buffer protocol), and hands the
+        address to PJRT. Peak host memory is one tensor, and the bytes are
+        copied exactly once, by the plugin.
+
+        The file is the operand byte for byte — dense row-major, little-endian,
+        no header. That is `ServingArtifactWriter`'s staged-weight format, and
+        the absence of a header is why this function can be four lines: the
+        shape vocabulary lives in the manifest, not in the file.
+        """
+        try:
+            type_code, width = RAW_DTYPES[dtype]
+        except KeyError:
+            raise ValueError(
+                f"buffer_from_file: dtype '{dtype}' has no raw PJRT staging "
+                f"(known: {sorted(RAW_DTYPES)})"
+            ) from None
+        n = 1
+        for d in dims:
+            n *= int(d)
+        nbytes = n * width
+        buf = (ctypes.c_char * nbytes)()
+        with open(path, "rb") as f:
+            got = f.readinto(buf)
+        if got != nbytes:
+            raise ValueError(
+                f"buffer_from_file: {path} yielded {got} bytes but dims {list(dims)} "
+                f"of {dtype} need {nbytes} — the artifact and the file disagree about "
+                f"this operand's shape, which is a wrong answer that would run"
+            )
+        return self._buffer_from_host(device, buf, nbytes, type_code, dims)
 
     def buffer_from_host_bf16(self, device, patterns: Iterable[int], dims: Sequence[int]) -> "PjrtBuffer":
         """bf16 rides as raw `uint16` bit patterns, exactly as it does JVM-side

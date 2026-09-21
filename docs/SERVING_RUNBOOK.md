@@ -1,24 +1,26 @@
 # Serving runbook — export an artifact, run it, plug it into vLLM
 
-**Status (§0.4.477, H7).** This is the reproduction script for the whole
+**Status (§0.4.480, H3c-3).** This is the reproduction script for the whole
 serving path: it takes a fresh machine to a Tlaloc serving artifact, runs
 that artifact from Python with **no JVM, no JAX, no torch and no numpy in
 the process — a PJRT plugin `.so` and a driver are the entire runtime** —
-and hands it to vLLM through the `vllm-tlaloc` platform plugin — which, as
-of §0.4.477, is **run against a real vLLM 0.29.0 in a venv of its own**
-rather than merely written. Every step is marked **CERTIFIED** (a test in
+and hands it to vLLM through the `vllm-tlaloc` platform plugin, which since
+§0.4.477 is **run against a real vLLM 0.29.0 in a venv of its own** rather
+than merely written. Every step is marked **CERTIFIED** (a test in
 `./gradlew test` proves it) or **UNCERTIFIED** (written, never executed
-here, with the reason and the command that would settle it). Exactly one
-serving step is still UNCERTIFIED and it is §4's last paragraph: `vllm
-serve` over a REAL model, which waits on H3c and not on the plugin. As of
-§0.4.478 the first half of H3c is in — §4.1 fetches a real Llama checkpoint
-and reads its weights by role — and as of **§0.4.479** that checkpoint is a
-DECODE GRAPH whose logits match HuggingFace transformers at 1e-5 relative
-with argmax and the whole top-5 order exact (two real layers of the real
-checkpoint; the oracle is `harness/python/hf_llama_reference.py`, run in the
-vLLM venv). What remains is the ARTIFACT: the manifest and
-`tlaloc_serve.py` must learn to carry and stage a weight table, which is why
-the graph's device lane is not yet claimed. That is H3c-3.
+here, with the reason and the command that would settle it).
+
+**Start at §5 if you want the demo.** As of §0.4.480 a real
+TinyLlama-1.1B — all 22 layers, from its own HuggingFace checkpoint —
+greedy-decodes through an exported artifact on PJRT-CUDA and produces the
+**same token ids HuggingFace transformers produces**: `Paris.\n\n2.`, six
+for six. §§1–4 are the machinery under it, in the order it was built.
+
+Exactly one serving step is still UNCERTIFIED and it is §4's last block:
+`vllm serve` / `LLM.generate()`. After §0.4.480 attempted it, the reason is
+no longer a missing model — it is **one classmethod**,
+`get_attn_backend_cls`, which vLLM 0.29.0's v1 engine core calls
+unconditionally and which the plugin refuses by name. That is H3c-4.
 
 The design and the decisions behind all of this live in
 [INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md); its §5 ARC
@@ -482,16 +484,32 @@ without complaint — `import vllm` loads torch 2.13.0+cu130, and the same
 process then compiles and executes through `xla_cuda_plugin.so` on the
 GB10 and gets the right numbers.
 
-**NOT certified: `vllm serve` / `LLM.generate()` end to end.** Both need a
-HuggingFace `config.json` and tokenizer for a real model; the only artifact
-this repo exports is the reference LCG toy, which has neither. That is
-H3c's job (real weights, real name-mapping), not the plugin's. When an
-artifact for a real model exists:
+**NOT certified: `vllm serve` / `LLM.generate()` end to end — and since
+§0.4.480 the reason is ONE CLASSMETHOD, not a missing model.** §5 of the
+runbook below exports a real TinyLlama-1.1B artifact and serves it. Pointing
+vLLM at that artifact gets through platform discovery and dies inside
+`EngineCore` startup:
+
+```
+NotImplementedError: tlaloc: attention is compiled into the serving artifact's
+programs (OpKind.PAGED_ATTENTION); there is no runtime-selectable attention
+backend to name
+```
+
+That is `vllm_tlaloc/platform.py`'s `get_attn_backend_cls`, refusing by name
+as designed. vLLM 0.29.0's v1 engine core calls it **unconditionally**, so it
+is not an optional hook. The fix is **H3c-4**
+([INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md) §5, §0.4.480's
+entry): hand vLLM a backend class whose `get_kv_cache_shape` agrees with the
+manifest and whose forward is never reached. The command that will then work:
 
 ```bash
-vllm serve <the model those weights came from> \
-    --max-num-seqs 4 --max-model-len 4 --block-size 2
+export TLALOC_SERVING_ARTIFACT=/tmp/tl-llama
+vllm serve ~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
+    --max-num-seqs 1 --max-model-len 64 --block-size 16
 ```
+
+Until it does, **§5 below is the demo path.**
 
 ### Why it is a second venv and not this one (§0.4.470, still the rule)
 
@@ -718,3 +736,122 @@ neither.
 | vLLM says "no platform found" | the distribution is not installed (`pip install -e harness/python`) |
 | `--block-size` refused | it disagrees with the artifact's compiled `blockSize`; that is a KV layout, not a preference |
 | the machine reboots under XLA | never create a PJRT client without `create_options` (§0.4.333) |
+
+
+---
+
+## 5. Serve a REAL Llama (CERTIFIED, §0.4.480 — this is the demo)
+
+A real TinyLlama-1.1B, all 22 layers, greedy-decoding on PJRT-CUDA from a
+Tlaloc serving artifact, in a process with **no JVM and no framework** — and
+agreeing with HuggingFace transformers token for token.
+
+### 5.1 The checkpoint (once)
+
+```bash
+~/.local/venvs/vllm/bin/python -c "from huggingface_hub import snapshot_download; \
+  snapshot_download('TinyLlama/TinyLlama-1.1B-Chat-v1.0', \
+  local_dir='$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0')"
+```
+
+2.2 GB, single-file `model.safetensors`, 201 tensors, every one bf16. The
+cache directory is under `$HOME` and **inside neither venv**.
+
+### 5.2 Export the artifact (~9 s, 4.2 GiB)
+
+```bash
+JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :maestro:exportLlamaServingArtifact \
+  -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
+  -PoutDir=/tmp/tl-llama \
+  -PmaxBatch=1 -PmaxContext=64 -PblockSize=16 -PnumBlocks=64
+```
+
+`-PnumLayers=2` gives the cheap lane — the exact reduced model §0.4.479
+certified against transformers, the same code path with one integer changed.
+
+What lands beside `bodies/` and `programs/` is new in §0.4.480:
+
+```
+  <artifact>/weights/NNNN_<slot>.bin     raw little-endian, dense row-major,
+                                         NO HEADER — the file IS the operand
+```
+
+201 of them, in the spec's own slot order, **already transposed** into math
+layout by §0.4.479's host-side pass. The manifest's `weights.table` names
+each one's dtype, dims, byte length and SHA-256. The loader's whole job is
+`open`, `readinto`, upload: it never interprets a format and never creates a
+Python number for a weight (1.1e9 Python floats is not a slow path, it is an
+impossible one).
+
+### 5.3 Tokenize and generate
+
+The oracle owns the tokenizer, so it owns the ids — nothing in this repo
+writes a token id by hand.
+
+```bash
+~/.local/venvs/vllm/bin/python harness/python/hf_llama_greedy_oracle.py \
+  --checkpoint $HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
+  --prompt "The capital of France is" --max-new 6 --output /tmp/oracle.json
+
+export TLALOC_PJRT_PLUGIN_PATH=$HOME/.local/venvs/iree/lib/python3.12/\
+site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so
+export PYTHONPATH=/home/pedro/programming/tlaloc/harness/python
+
+cat > /tmp/req.json <<'J'
+{"promptTokens": [1, 450, 7483, 310, 3444, 338], "maxNewTokens": 6}
+J
+python3 harness/python/run_llama_generate.py \
+  --artifact /tmp/tl-llama --request /tmp/req.json --output /tmp/gen.json \
+  --platform cuda --verify-weights
+```
+
+(`promptTokens` above is what the oracle's `promptTokens` field returned for
+that prompt; copy it from `/tmp/oracle.json` rather than trusting this file.)
+
+Both sides produce `[3681, 29889, 13, 13, 29906, 29889]` — **`Paris.\n\n2.`**
+
+### 5.4 What is certified, and what the numbers are
+
+`HfLlamaServingArtifactTest` (in `./gradlew test`, self-skipping without the
+checkpoint / the vLLM venv / a plugin `.so`) runs exactly the two commands
+above and asserts the generated token ids are **equal**.
+
+**Why token ids and not a logit tolerance.** XLA-GPU's default f32
+`dot_general` policy is TF32 (§3's 1e-3 CUDA floor is the same fact) and the
+oracle is fp32 on CPU. A logit tolerance here would be a number chosen to
+pass; an argmax is not. Greedy decoding agrees EXACTLY until the two
+arithmetics disagree about a top-1, so the claim is the **length of the
+prefix that agrees**, asserted at the full requested budget. At 6 tokens on
+this prompt there is no divergence to report.
+
+| | |
+|---|---|
+| export (read bf16, widen, transpose, hash, write 4196 MiB) | **9.0 s** |
+| first decode step (weight upload + XLA compile, 22 layers) | **7.0 s** |
+| median decode step | **1.35 s** |
+
+**The median is not a throughput claim.** The KV pools still round-trip to
+the host every step as flat Python lists — 44 pools × 32768 floats per token,
+built and unpacked in pure Python. That is buffer DONATION, which has ridden
+`donationPairs` in the manifest since H3a and has been the named "next
+measurable win" three times; it is now the dominant cost of a real decode,
+and measurable for the first time. The weights, by contrast, are uploaded
+once and held.
+
+### 5.5 What does NOT work, by name
+
+* **`vllm serve` / `LLM.generate()`** — H3c-4, §4's last block.
+* **The `jax` engine** refuses a staged weight table BY NAME. It exists only
+  because jaxlib ships no CPU PJRT plugin `.so`; a staged-weight artifact
+  therefore has **no CPU lane in this loader**, and its oracle is
+  transformers rather than the tight 1e-5 XLA-CPU semantics lane.
+* **bf16 weight tables** — the writer refuses a non-f32 staged slot by name.
+  Halving the artifact needs the GRAPH to be bf16 (the G1 path).
+* **More than one ladder point, batch > 1, context > 64** — the demo exports
+  one point because each is a full XLA compile of a 22-layer model. H1c
+  already certified that bucketing does not change the answer.
+* **Prefill as one call** — the prompt runs as N decode steps, because
+  `PAGED_ATTENTION`'s ragged chunked-prefill form is H1a's open deferral.
+  A performance deferral, not a correctness one.
+* **A tokenizer inside the runtime** — ids in, ids out, deliberately.
+* **Sampling** — greedy/argmax only, host-side, in the driver.

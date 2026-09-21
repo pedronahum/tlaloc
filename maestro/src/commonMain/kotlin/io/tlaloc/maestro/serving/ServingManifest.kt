@@ -342,28 +342,55 @@ data class ServingBucketLadder(
 }
 
 /**
- * Where the weights are. A POINTER, not the bytes.
+ * Where the weights are. A POINTER, and — since §0.4.480 — optionally a
+ * TABLE naming the file behind each staged weight slot.
  *
- * v1 exports graphs whose weights are StableHLO `constant`s inside the
- * body, which is why [embedded] exists and is `true` today. That is an
- * honest v1 and a **named deferral**, not a design: a real Llama's weights
- * are gigabytes, a constant-folded body is a body XLA must re-ingest on
- * every compile, and the whole point of H2's per-tensor safetensors reader
- * is to stage them as device buffers instead. When that lands the body's
- * weight constants become graph PARAMETERS, [embedded] goes false, and
- * [path] names the checkpoint the loader stages — the schema does not move.
+ * §0.4.469's v1 exported graphs whose weights are StableHLO `constant`s
+ * inside the body, which is why [embedded] exists. §0.4.479 established
+ * that a real checkpoint cannot do that (`DecodeGraphSpec.weightSlots`:
+ * TinyLlama-1.1B as `dense<[...]>` literals is tens of gigabytes of TEXT,
+ * in the file whose whole premise is that it *is* the deployment), and this
+ * slice is where the other branch grows a body: [embedded] goes false,
+ * [path] names an artifact-relative directory, and [table] names one file
+ * per `WEIGHT` slot **in the spec's own slot order**.
  *
- * REJECTED: copying the checkpoint into the artifact directory. The
- * artifact is small and content-addressed; a checkpoint is neither, and
- * duplicating 140 GB to make a directory "self-contained" is a worse
- * property than a pointer plus a hash.
+ * ## Why STAGED-LAYOUT FILES and not the checkpoint
+ *
+ * This type's original doc REJECTED copying the checkpoint in, and that
+ * judgement stands for the *checkpoint*. What [table] carries is not the
+ * checkpoint: it is the checkpoint **after** §0.4.479's host-side
+ * transpose, widened to the graph's dtype, one file per operand, in call
+ * order. The difference is load-bearing in exactly one place — the loader
+ * is `tlaloc_serve.py`, which has no framework under it (§0.4.476), and
+ * asking it to transpose 1.1e9 floats or to widen bf16 in pure Python is
+ * asking for minutes per process start. The JVM already did that work once,
+ * at export, where the code that knows the layout fact lives.
+ *
+ * So the rule the two branches divide on is: **an artifact points at a
+ * checkpoint it did not have to change, and carries the bytes it did.** A
+ * `"safetensors"` [format] with an empty [table] — the loader staging from
+ * an unmodified checkpoint — remains legal in the schema and is a NAMED
+ * DEFERRAL, not a refusal; it needs a stdlib safetensors reader and a
+ * transpose budget nobody has measured.
+ *
+ * REJECTED: one concatenated blob with offsets. It saves inodes and costs
+ * the property that `ls -l weights/` is a shape report and that a single
+ * corrupt tensor is identifiable by name. REJECTED: `.npy`. It is a numpy
+ * format, and the loader's whole claim is that numpy is not there.
  */
 data class ServingWeightsPointer(
-    /** `"safetensors"`, or `"embedded"` while v1 folds them into the body. */
+    /** `"staged"`, `"safetensors"`, or `"embedded"` when the bodies fold them in. */
     val format: String,
     /** Artifact-relative or absolute path; null while [embedded]. */
     val path: String?,
     val embedded: Boolean,
+    /**
+     * One entry per `WEIGHT` slot of the entries' shared signature, in that
+     * exact order — a loader binds by index, so the order is the contract and
+     * not a convenience. Empty when [embedded], or when [format] points at a
+     * checkpoint the loader is expected to read itself.
+     */
+    val table: List<ServingWeightFile> = emptyList(),
 ) {
     init {
         require(embedded == (path == null)) {
@@ -371,21 +398,92 @@ data class ServingWeightsPointer(
                 "folded into the bodies (embedded, no path) or staged from a checkpoint " +
                 "(a path); an artifact that claims both has not decided"
         }
+        require(!(embedded && table.isNotEmpty())) {
+            "ServingWeightsPointer: embedded weights with a ${table.size}-entry staging table — " +
+                "the bodies would carry the constants AND the loader would bind operands for " +
+                "them, and exactly one of those two descriptions is wrong"
+        }
+        val dup = table.groupBy { it.name }.filterValues { it.size > 1 }.keys
+        require(dup.isEmpty()) {
+            "ServingWeightsPointer: duplicate weight slot names $dup — a loader resolving a " +
+                "slot by name would have to pick one silently"
+        }
     }
 
     fun toJson(): String =
         "{\"format\":${jsonStr(format)},\"path\":${path?.let { jsonStr(it) } ?: "null"}," +
-            "\"embedded\":$embedded}"
+            "\"embedded\":$embedded,\"table\":" +
+            table.joinToString(",", "[", "]") { it.toJson() } + "}"
 
     companion object {
         /** The v1 shape: constants live in the StableHLO body. */
         fun embedded(): ServingWeightsPointer = ServingWeightsPointer("embedded", null, true)
+
+        /** The §0.4.480 shape: one raw little-endian file per staged operand. */
+        const val STAGED_FORMAT: String = "staged"
+
+        /** The artifact-relative directory [STAGED_FORMAT] writes into. */
+        const val STAGED_DIR: String = "weights"
 
         fun fromJson(o: JsonObject): ServingWeightsPointer = ServingWeightsPointer(
             format = o.str("format"),
             path = (o["path"] as? io.tlaloc.core.io.JsonString)?.value,
             embedded = (o["embedded"] as? io.tlaloc.core.io.JsonBool)?.value
                 ?: throw JsonException("weights.embedded is not a boolean"),
+            // Absent reads as empty: an artifact written before this slice is
+            // still a legal artifact (the ServingModelShape.kvQuant precedent).
+            table = (o["table"] as? JsonArray)?.elements?.map {
+                ServingWeightFile.fromJson(
+                    it as? JsonObject ?: throw JsonException("weights.table[] element is not an object"),
+                )
+            } ?: emptyList(),
+        )
+    }
+}
+
+/**
+ * One staged weight operand: the slot it binds to, the file that holds it,
+ * and enough to check the file before believing it.
+ *
+ * [byteLength] is stated rather than left to `dtype × dims`, and [sha256] is
+ * carried even though the file is not named after it — the two properties
+ * the bodies get for free from content addressing, bought back explicitly
+ * here. The reason bodies are content-addressed and weights are not is
+ * de-duplication: two ladder points share a body, and no two weight slots
+ * share a tensor (a tied `lm_head` resolves to the embedding table at
+ * §0.4.478's reader, so it is staged twice, deliberately — the alternative
+ * is a loader that has to know about aliasing to bind an operand list).
+ */
+data class ServingWeightFile(
+    /** The `WEIGHT` slot's name, verbatim. */
+    val name: String,
+    /** Artifact-relative path of the raw little-endian bytes. */
+    val path: String,
+    /** `io.tlaloc.core.DType.name`, matching the slot's type. */
+    val dtype: String,
+    val dims: List<Int>,
+    val byteLength: Long,
+    /** SHA-256 hex of the file's bytes. Checked on demand, not on load —
+     *  re-hashing gigabytes at every process start is a cost a deployment
+     *  should choose, so `verify_weights()` is a separate call Python-side. */
+    val sha256: String,
+) {
+    val count: Long get() = dims.fold(1L) { a, b -> a * b }
+
+    fun toJson(): String =
+        "{\"name\":${jsonStr(name)},\"path\":${jsonStr(path)},\"dtype\":${jsonStr(dtype)}," +
+            "\"dims\":${dims.joinToString(",", "[", "]")},\"byteLength\":$byteLength," +
+            "\"sha256\":${jsonStr(sha256)}}"
+
+    companion object {
+        fun fromJson(o: JsonObject): ServingWeightFile = ServingWeightFile(
+            name = o.str("name"),
+            path = o.str("path"),
+            dtype = o.str("dtype"),
+            dims = o.arr("dims").asIntList("weights.table[].dims"),
+            byteLength = (o["byteLength"] as? JsonNumber)?.asLong("byteLength")
+                ?: throw JsonException("weights.table[].byteLength is not a number"),
+            sha256 = o.str("sha256"),
         )
     }
 }

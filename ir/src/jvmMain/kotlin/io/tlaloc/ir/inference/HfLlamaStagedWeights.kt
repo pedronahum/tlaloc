@@ -67,7 +67,25 @@ object HfLlamaStagedWeights {
             "HfLlamaStagedWeights: ${slots.size} slots vs ${roles.size} roles — " +
                 "HfLlamaDecodeGraph.weightSlots and .weightRoles must stay in lockstep"
         }
-        return slots.indices.map { i ->
+        return slots.indices.map { i -> stageAt(ckpt, config, i) }
+    }
+
+    /**
+     * One slot of [stage], by index, with nothing else resident.
+     *
+     * §0.4.480 added this: `ServingArtifactWriter` writes the staged weights
+     * one file at a time, and a `List<FloatArray>` of TinyLlama-1.1B is 4.4 GB
+     * of live heap for no reason — the exporter only ever looks at one tensor.
+     * [stage] is now this function in a loop, so the two cannot disagree.
+     */
+    fun stageAt(ckpt: HfLlamaCheckpoint, config: HfLlamaConfig, index: Int): FloatArray {
+        val slots = HfLlamaDecodeGraph.weightSlots(config)
+        val roles = HfLlamaDecodeGraph.weightRoles(config)
+        require(index in slots.indices) {
+            "HfLlamaStagedWeights.stageAt: slot $index is outside 0..${slots.size - 1}"
+        }
+        return run {
+            val i = index
             val role = roles[i]
             val slot = slots[i]
             val t = loadFor(ckpt, role, config)

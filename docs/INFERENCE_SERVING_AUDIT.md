@@ -1764,20 +1764,157 @@ exactly 0.0 and was rewritten to run to a real context.
 - **The 22-layer lane is not run.** The reduced slice is what is certified and
   the entry says so everywhere it appears.
 
+### H3c-3 — the artifact learns to carry a model, and a real Llama answers (§0.4.480)
+
+The leg §0.4.479 named. Its graph was certified against HuggingFace and could
+only run on the JVM interpreter, for one stated reason: **the artifact had
+nowhere to put a weight table.** This slice gives it one, teaches the
+framework-free loader to bind it, and then runs a real TinyLlama-1.1B on
+PJRT-CUDA — where it produces, token for token, what HuggingFace produces.
+
+**What landed.**
+
+1. `ServingWeightsPointer.table: List<ServingWeightFile>` — one entry per
+   `WEIGHT` slot, in the spec's own order, each naming a path, dtype, dims,
+   byte length and SHA-256.
+2. `ServingArtifactWriter.stageWeights` — `weights/NNNN_<slot>.bin`, **raw
+   little-endian, dense row-major, no header**: the file IS the operand, in
+   the form `PJRT_Client_BufferFromHostBuffer` takes.
+3. `tlaloc_pjrt.buffer_from_file` + `RAW_DTYPES` — `readinto` a ctypes buffer
+   and hand PJRT the address. **No Python number is ever created for a
+   weight**, which is not an optimisation: 1.1e9 Python floats is tens of GB
+   of PyObject, so the list-based `buffer_from_host_f32` path is not slow
+   here, it is impossible.
+4. `ServingArtifact.weight_buffers()` / `verify_weights()` — staged ONCE per
+   artifact, held as live device buffers, bound by NAME in `run_decode`.
+5. `HfLlamaServingExport` + `./gradlew :maestro:exportLlamaServingArtifact`.
+6. `harness/python/run_llama_generate.py` (stdlib + `tlaloc_serve`, the
+   deployment side) and `harness/python/hf_llama_greedy_oracle.py` (torch +
+   transformers, the vLLM venv, ON PURPOSE — not serving-path code).
+
+**THE ARTIFACT CARRIES STAGED BYTES, AND POINTS AT NOTHING ELSE.** §0.4.469
+REJECTED copying a checkpoint into the artifact, and that judgement stands for
+the *checkpoint*. What `table` carries is not the checkpoint: it is the
+checkpoint **after** §0.4.479's host-side transpose, widened to the graph's
+dtype, one file per operand, in call order. The rule the two branches divide
+on is **an artifact points at what it did not have to change and carries what
+it did** — and the reason is the loader, which has no framework under it
+(§0.4.476): asking pure Python to transpose 1.1e9 floats or widen bf16 is
+minutes per process start. The JVM already did that work once, at export,
+where the code that knows the layout fact lives. `format: "safetensors"` with
+an empty table — the loader reading an unmodified checkpoint itself — stays
+legal in the schema and is a NAMED DEFERRAL, not a refusal.
+
+**THE CERTIFICATION.** `HfLlamaServingArtifactTest`, in `./gradlew test`,
+self-skipping without the checkpoint / the vLLM venv / a plugin `.so`.
+
+| claim | oracle | floor |
+|---|---|---|
+| a real TinyLlama-1.1B, **all 22 layers**, greedy-decoding "The capital of France is" through an exported artifact on **PJRT-CUDA** | `hf_llama_greedy_oracle.py` — `AutoModelForCausalLM`, **fp32 on CPU**, vLLM venv (torch 2.13.0+cu130, transformers 5.17.0) | **6 of 6 generated token ids EXACTLY equal**; the text is `Paris.\n\n2.` on both sides |
+| every `WEIGHT` operand of the compiled entry has a file behind it | the manifest vs the entry's own slot list | **201 = 201**, exact |
+| the staged file is the length its dims imply, and the length the manifest states | `Files.size` vs `byteLength` vs `count × 4`, all 201 | exact, three ways |
+| the bytes are the bytes the exporter wrote | `verify_weights()` — SHA-256 of all 4196 MiB, re-hashed in the serving process | exact |
+| the manifest survives its own wire format | `fromJson(toJson()) == manifest` with a 201-entry table | `==` |
+| a half-artifact is refused | a stager for specs with no weight slots; an `embedded` pointer carrying a table | by name, hermetic |
+
+**WHY TOKEN IDS AND NOT A LOGIT TOLERANCE.** XLA-GPU's default f32
+`dot_general` policy is TF32 (§0.4.477's serving floor is 1e-3 for exactly
+this reason) and the oracle is fp32 on CPU, so a logit tolerance here would be
+a number chosen to pass. An argmax is not. Greedy decoding agrees EXACTLY
+until the two arithmetics disagree about a top-1, so the honest claim is **the
+length of the prefix that agrees** — and the test asserts the full requested
+budget and reports the first divergence if one appears, rather than shrinking
+the budget until it is comfortable. At 6 tokens on this prompt there is no
+divergence to report. **The prompt is never written down as ids**: the oracle
+tokenizes it with the checkpoint's own tokenizer and Tlaloc is asked to
+continue those. §0.4.477 refused to fabricate a `config.json`; a hand-typed
+token id is the same refusal, smaller.
+
+**THE NUMBERS, for scale rather than as a benchmark.** 201 staged weights,
+4196 MiB; export (read bf16, widen, transpose, hash, write) **9.0 s**; first
+decode step 7.0 s (weight upload + XLA compile of a 22-layer graph); median
+step **1.35 s**. That median is NOT a throughput claim and the next paragraph
+says why.
+
+**WHAT IS SLOW, AND IT IS THE KNOWN ITEM.** The KV pools still round-trip to
+the host every step as flat Python lists — 44 pools × 32768 floats per token,
+constructed and unpacked in pure Python. That is buffer DONATION, which has
+ridden `donationPairs` since H3a and has been the named "next measurable win"
+three times; it is now the dominant cost of a real decode and it is
+measurable for the first time. The weights, by contrast, are uploaded once.
+
+**vLLM `LLM.generate()` — ATTEMPTED, AND IT FAILED FOR A NAMED STRUCTURAL
+REASON.** With the real artifact exported and `TLALOC_SERVING_ARTIFACT` set,
+`LLM(model=<the checkpoint>, max_num_seqs=1, max_model_len=64, block_size=16)`
+in the vLLM venv gets past platform discovery and dies inside `EngineCore`
+startup on:
+
+```
+NotImplementedError: tlaloc: attention is compiled into the serving artifact's
+programs (OpKind.PAGED_ATTENTION); there is no runtime-selectable attention
+backend to name
+```
+
+That is `vllm_tlaloc/platform.py`'s `get_attn_backend_cls`, refusing by name
+exactly as §0.4.470 designed it to. The refusal is right about Tlaloc and
+wrong about vLLM 0.29.0: the v1 engine core calls that classmethod
+**unconditionally** while building the model runner, so it is not an optional
+hook a backend may decline. **This is a plugin gap, and now a precisely
+scoped one** — H7's entry predicted the remaining work was H3c's model
+coverage, and with the model in hand the last obstacle turns out to be one
+classmethod. The fix is a design question, not a typo: the plugin must return
+a backend CLASS whose `get_kv_cache_shape` agrees with the artifact's compiled
+pool layout (`kvPoolAxisOrder`/`kvPoolDims`, already in the manifest) and
+whose forward is never called, because `TlalocWorker.execute_model` runs the
+compiled program. Writing a stub that lies about its own forward is the sort
+of thing this arc has refused all the way through, so it is NAMED as **H3c-4**
+rather than improvised at the end of a slice. `run_llama_generate.py` is the
+demo path meanwhile, and the runbook says so.
+
+**NAMED GAPS, carried forward.**
+
+- **H3c-4: `get_attn_backend_cls`**, above. It is the only thing between this
+  repo and `vllm serve`, and the whole serving stack below it is certified.
+- **The jax ORACLE engine refuses staged weights BY NAME.** It exists because
+  jaxlib ships no CPU PJRT plugin `.so`; staging a checkpoint through it would
+  mean a second, differently-shaped upload path in the one engine the
+  deployment never runs. The consequence is stated: **a staged-weight artifact
+  has no CPU lane in this loader**, and its oracle is transformers.
+- **Buffer donation**, above — now the measured bottleneck.
+- **bf16 weight tables.** The writer refuses a non-f32 staged slot by name.
+  Halving the artifact and the upload needs the GRAPH to be a bf16 graph
+  (the G1 path), not a file-format change.
+- **One ladder point.** The demo exports batch 1 × context 64. H1c already
+  certified that bucketing does not change the answer; every extra point is
+  another full XLA compile of a 22-layer model.
+- **The tokenizer is still untouched** (§0.4.478's gap, unchanged, and now
+  deliberate: ids in, ids out — text is the frontend's job).
+- **`:maestro`'s test JVM heap is now 2 GB** (Gradle's default is 512 MB).
+  The export widens, transposes and serialises one tensor at a time; the
+  embedding table alone is 262 MiB of f32 plus its byte buffer. It is 2 GB and
+  not :ir's 8 GB precisely because `stageWeight` is a CALLBACK — 4196 MiB of
+  weights is never resident.
+
 ### ARC STATE (§0.4.473, the close-out) — read this first
 
-**THE PATH IS BUILT END TO END AND IT EXECUTES. SINCE §0.4.477 IT HAS RUN
-UNDER REAL vLLM. WHAT IT DOES NOT YET RUN IS A REAL LLAMA — and that one
-gap is now the only thing standing between this and `vllm serve`.**
+**THE PATH IS BUILT END TO END, IT EXECUTES, IT HAS RUN UNDER REAL vLLM
+SINCE §0.4.477 — AND SINCE §0.4.480 IT SERVES A REAL LLAMA.**
 
-**§0.4.478 halved that gap and §0.4.479 halved what remained.** A real 1.1B
-Llama checkpoint is on disk, this repo can ask it for any of its 201 tensors
-BY ROLE, and — since §0.4.479 — it BUILDS A DECODE GRAPH from them whose
-logits agree with HuggingFace transformers at 1e-5 relative with argmax and
-the whole top-5 order exact, on two real layers of the real checkpoint. What
-is still missing is the **artifact**: `ServingArtifactWriter` and
-`tlaloc_serve.py` do not yet carry a staged weight table, which is why the
-device lane is not claimed. That is H3c-3, and a tokenizer.
+A real TinyLlama-1.1B, all 22 layers, greedy-decodes through an exported
+Tlaloc serving artifact on PJRT-CUDA in a process with **no JVM and no
+framework**, and produces the **same six token ids** HuggingFace transformers
+produces for the same prompt. The three slices that got there: §0.4.478 put
+the checkpoint on disk and made it readable BY ROLE; §0.4.479 turned those
+tensors into a decode graph certified against transformers at 1e-5; §0.4.480
+gave the artifact a staged WEIGHT TABLE and the framework-free loader a way to
+bind it, which is what the device lane had been waiting on.
+
+**What is left is ONE CLASSMETHOD.** `vllm serve` / `LLM.generate()` still
+fails, and after §0.4.480 attempted it the reason is no longer "no real
+model": vLLM 0.29.0's v1 engine core calls `get_attn_backend_cls`
+unconditionally, and `vllm_tlaloc/platform.py` refuses it by name because
+attention is compiled into the artifact. That is **H3c-4**, scoped in the
+§0.4.480 entry.
 
 Nine sections closed the arc on 2026-09-21 (suite **2119 → 2290**); four
 more the same day carried it past the framework (**2290 → 2296**):
@@ -1800,6 +1937,7 @@ more the same day carried it past the framework (**2290 → 2296**):
 | 0.4.477 | H7 | `~/.local/venvs/vllm` (vLLM 0.29.0, its own venv), the live lane run, `platform.py`+`worker.py` CERTIFIED, one real bug found and fixed, `exportServingArtifact` | 2295 → 2296 |
 | 0.4.478 | H3c-1 | a REAL TinyLlama-1.1B checkpoint on disk, and `HfLlamaConfig` + `HfLlamaNames` + `HfLlamaCheckpoint` — HF names to roles, with the transposed-`[out, in]` layout VERIFIED against it and the bytes checked against torch | 2296 → 2320 |
 | 0.4.479 | H3c-2 | `HfLlamaDecodeGraph` + `HfLlamaStagedWeights` + `DecodeGraphSpec.weightSlots` — the real checkpoint becomes a decode graph, certified against HF transformers at **1e-5 relative with argmax and top-5 exact**; RSQRT/SILU interpreter arms found and closed on the way | 2320 → 2330 |
+| 0.4.480 | H3c-3 | `ServingWeightsPointer.table` + `buffer_from_file` + `HfLlamaServingExport` — the artifact carries a staged weight table and a REAL 22-layer TinyLlama serves on PJRT-CUDA, **6/6 generated token ids equal to HuggingFace** | 2330 → 2333 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -1841,7 +1979,9 @@ red line with the separate-venv recipe attached.
 | **vLLM's own platform discovery lands on `TlalocPlatform`** | `VllmLivePluginTest`, real vLLM **0.29.0** in `~/.local/venvs/vllm` (its own venv; the oracle untouched) | exact class path; vLLM logs the activation |
 | **`check_and_update_config` imposes and refuses against REAL `vllm.config` objects** | same test — `worker_cls` set, `block_size`/`num_gpu_blocks_override` taken from the artifact, and all four refusals (block size, max-model-len, max-num-seqs, world size) fired on a `vllm.config.CacheConfig`/`ParallelConfig` | by name, four messages |
 | **`TlalocWorker` runs the v1 worker API and returns vLLM's real `ModelRunnerOutput`** | same test — `load_model`, `determine_available_memory` (= the compiled pool, checked arithmetically JVM-side), `get_kv_cache_spec`, `initialize_from_config` accept **and** refusal, two `execute_model` steps, the chunked-prefill refusal | exact |
-| **the same artifact called through vLLM and called directly gives the same numbers** | the vLLM venv's worker lane vs the oracle venv's `run_vllm_tlaloc_check.py` runner lane — two venvs, two torches, jax in only one | **`==`, bit-for-bit** on every logit, plus sampled tokens, buckets and compile count |
+| **a REAL TinyLlama-1.1B (22 layers) serves from an exported artifact on PJRT-CUDA** | `hf_llama_greedy_oracle.py` — transformers `AutoModelForCausalLM`, fp32 on CPU, vLLM venv | **6/6 generated token ids `==`**; `Paris.\n\n2.` on both sides |
+| …and the 4196 MiB of staged weights in that artifact are the bytes the exporter wrote | `verify_weights()`, SHA-256 re-hashed in the serving process | exact |
+| the same artifact called through vLLM and called directly gives the same numbers | the vLLM venv's worker lane vs the oracle venv's `run_vllm_tlaloc_check.py` runner lane — two venvs, two torches, jax in only one | **`==`, bit-for-bit** on every logit, plus sampled tokens, buckets and compile count |
 
 Four sensitivity checks were run before the oracles were trusted, each
 mutated then reverted: the bf16 decode byte-swapped (H2), `PADDING_SEQ_LEN`
@@ -1865,7 +2005,13 @@ supposed to fail.
    installing it beside vLLM's CUDA-13 wheels is the collision the rail
    exists to prevent.
 
-   **THE REMAINDER: `LLM.generate()` / `vllm serve` itself.** (§0.4.479
+   **THE REMAINDER: `LLM.generate()` / `vllm serve` itself — and since
+   §0.4.480 it is ONE CLASSMETHOD, not a model gap.** The artifact for a real
+   TinyLlama-1.1B exists and serves (see the §0.4.480 entry); pointing vLLM at
+   it reaches `EngineCore` startup and dies on
+   `vllm_tlaloc/platform.py`'s `get_attn_backend_cls` refusal, which vLLM
+   0.29.0 calls unconditionally. That is **H3c-4**. The historical framing
+   follows. (§0.4.479
    narrowed it further: the graph exists and is certified; the ARTIFACT that
    carries its staged weights does not — H3c-3.) Both need a
    HuggingFace `config.json` and tokenizer for a real model, and the only
@@ -1936,7 +2082,21 @@ Three new `OpKind`s entered the IR in Phase H and no others:
 
 #### What remains, in the order a next session should take it
 
-1. **H3c-3 — the staged-weight ARTIFACT, and a real Llama through the plugin.**
+0. **H3c-4 — `get_attn_backend_cls`, the last thing between this repo and
+   `vllm serve`.** §0.4.480 exported a real Llama artifact, pointed vLLM
+   0.29.0 at it, and got past platform discovery into `EngineCore` startup
+   before the plugin's deliberate refusal stopped it. The plugin must hand
+   vLLM a backend CLASS whose `get_kv_cache_shape` agrees with the manifest's
+   `kvPoolAxisOrder`/`kvPoolDims` and whose forward is never reached. See the
+   §0.4.480 entry for why that stub is a design question rather than a typo.
+
+1. ~~**H3c-3 — the staged-weight ARTIFACT, and a real Llama through the plugin.**~~
+   **DONE (§0.4.480).** What it leaves behind: buffer donation is now the
+   measured bottleneck (item 3), and the jax oracle engine refuses staged
+   weights by name, so a staged-weight artifact has no CPU lane in the loader.
+   The superseded text follows.
+
+   **H3c-3 — the staged-weight ARTIFACT, and a real Llama through the plugin.**
    The largest open item, now precisely scoped by §0.4.479: the decode graph
    and the parity are done; `ServingManifest`/`ServingArtifactWriter` must
    learn a weight table and `tlaloc_serve.py` must stage it, after which the

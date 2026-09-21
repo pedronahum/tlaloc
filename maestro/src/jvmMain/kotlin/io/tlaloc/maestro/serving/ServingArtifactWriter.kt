@@ -1,5 +1,6 @@
 package io.tlaloc.maestro.serving
 
+import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirModule
 import io.tlaloc.ir.inference.DecodeBucket
@@ -7,12 +8,17 @@ import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.DecodeGraphSpec
 import io.tlaloc.ir.inference.DecodeModelShape
+import io.tlaloc.ir.inference.DecodeSlot
+import io.tlaloc.ir.inference.DecodeSlotRole
 import io.tlaloc.maestro.ProgramManifest
 import io.tlaloc.maestro.TypeDescriptor
 import io.tlaloc.maestro.sha256Hex
 import io.tlaloc.stablehlo.toStablehlo
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 
 /**
  * §0.4.469 — Phase H3a: **the exporter**. This is the JVM's last act.
@@ -66,6 +72,9 @@ object ServingArtifactWriter {
     const val BODIES_DIR: String = "bodies"
     const val PROGRAMS_DIR: String = "programs"
 
+    /** §0.4.480: where staged weight operands land. */
+    const val WEIGHTS_DIR: String = ServingWeightsPointer.STAGED_DIR
+
     /**
      * A serving artifact is single-device in H3a. The field is
      * [ProgramManifest]'s mesh requirement and it is not optional there, so
@@ -82,6 +91,13 @@ object ServingArtifactWriter {
      *
      * @param build produces the graph for one spec. The exporter does not
      *   know how to build a model; it knows how to check one and write it.
+     * @param stageWeight produces the host bytes of ONE staged weight slot,
+     *   in math layout and the slot's dtype. Required exactly when the specs
+     *   declare `weightSlots`. It is a per-slot callback rather than a
+     *   `List<FloatArray>` argument on purpose: TinyLlama-1.1B staged as f32
+     *   is 4.4 GB, and a list would hold every tensor resident while the
+     *   writer is only ever looking at one. Peak heap is the largest single
+     *   tensor plus its transpose, not the model.
      */
     fun export(
         dir: Path,
@@ -91,6 +107,7 @@ object ServingArtifactWriter {
         ladder: ServingBucketLadder,
         specs: List<DecodeGraphSpec>,
         weights: ServingWeightsPointer = ServingWeightsPointer.embedded(),
+        stageWeight: ((DecodeSlot) -> FloatArray)? = null,
         build: (DecodeGraphSpec) -> DxirFunction,
     ): ServingManifest {
         require(specs.isNotEmpty()) {
@@ -103,8 +120,35 @@ object ServingArtifactWriter {
                     "artifact declares $model — one artifact is one model"
             }
         }
+        // §0.4.480. One artifact is one model, so one weight signature: a
+        // ladder whose points disagree about their staged operands would make
+        // "the weight table" ambiguous, and the loader binds ONE table across
+        // every entry it may select.
+        val weightSlots = specs.first().weightSlots
+        for (s in specs) {
+            require(s.weightSlots == weightSlots) {
+                "ServingArtifactWriter.export: ladder point ${s.bucket} declares " +
+                    "${s.weightSlots.size} staged weight slots but ${specs.first().bucket} " +
+                    "declares ${weightSlots.size} — the weight table is written ONCE for the " +
+                    "artifact and bound by every entry, so the signatures must be identical"
+            }
+        }
+        require(weightSlots.isEmpty() == (stageWeight == null)) {
+            if (weightSlots.isEmpty()) {
+                "ServingArtifactWriter.export: a stageWeight callback was supplied for specs " +
+                    "that declare no weight slots — the bytes would be written into the " +
+                    "artifact and bound by nothing"
+            } else {
+                "ServingArtifactWriter.export: these specs declare ${weightSlots.size} staged " +
+                    "weight slots (${weightSlots.take(3).joinToString { it.name }}…) and no " +
+                    "stageWeight callback was given. A half-artifact — a manifest promising " +
+                    "operands whose files are absent — is refused rather than written"
+            }
+        }
         Files.createDirectories(dir.resolve(BODIES_DIR))
         Files.createDirectories(dir.resolve(PROGRAMS_DIR))
+        val weightsPointer =
+            if (stageWeight == null) weights else stageWeights(dir, weightSlots, stageWeight)
 
         val entries = specs.map { spec ->
             val fn = build(spec)
@@ -184,7 +228,7 @@ object ServingArtifactWriter {
                 },
             ),
             bucketLadder = ladder,
-            weights = weights,
+            weights = weightsPointer,
             entries = entries,
         )
         Files.write(
@@ -192,6 +236,73 @@ object ServingArtifactWriter {
             manifest.toJson().toByteArray(Charsets.UTF_8),
         )
         return manifest
+    }
+
+    /**
+     * §0.4.480 — write one raw file per staged weight slot and describe them.
+     *
+     * **Little-endian, dense row-major, no header.** The file is the operand,
+     * byte for byte, in the form PJRT's `BufferFromHostBuffer` takes — so the
+     * loader's whole job is `open`, `readinto`, upload, and it never has to
+     * interpret a format. The dims, the dtype and the length are in the
+     * manifest, which is where the artifact's shape vocabulary already lives;
+     * duplicating them into a per-file header would create a second place for
+     * them to be wrong.
+     *
+     * Little-endian is stated rather than "native": the artifact is a
+     * deployment format and aarch64 being LE is a fact about this machine.
+     *
+     * Names are `weights/NNNN_<slot>.bin`, zero-padded to the slot INDEX, so
+     * `ls` sorts into call order and two exports of one model are
+     * byte-identical directories (H3a's property, extended to the weights).
+     */
+    private fun stageWeights(
+        dir: Path,
+        slots: List<DecodeSlot>,
+        stage: (DecodeSlot) -> FloatArray,
+    ): ServingWeightsPointer {
+        Files.createDirectories(dir.resolve(WEIGHTS_DIR))
+        val digest = MessageDigest.getInstance("SHA-256")
+        val table = slots.mapIndexed { i, slot ->
+            require(slot.role == DecodeSlotRole.WEIGHT) {
+                "ServingArtifactWriter: slot '${slot.name}' in the weight signature has role " +
+                    "${slot.role}, not WEIGHT"
+            }
+            require(slot.type.dtype == F32) {
+                "ServingArtifactWriter: staged weight '${slot.name}' is ${slot.type.dtype}; " +
+                    "§0.4.480 writes f32 only. A bf16 weight table halves the artifact and the " +
+                    "upload and is a NAMED DEFERRAL — it needs the graph to be a bf16 graph, " +
+                    "which is the G1 path, not a file-format change"
+            }
+            val data = stage(slot)
+            val want = slot.type.dims.fold(1) { a, b -> a * b }
+            require(data.size == want) {
+                "ServingArtifactWriter: staged weight '${slot.name}' has ${data.size} elements " +
+                    "but the slot declares ${slot.type.dims} = $want"
+            }
+            val bytes = ByteArray(data.size * 4)
+            val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            for (v in data) bb.putFloat(v)
+            val name = "$WEIGHTS_DIR/${i.toString().padStart(4, '0')}_${slot.name}.bin"
+            Files.write(dir.resolve(name), bytes)
+            digest.reset()
+            ServingWeightFile(
+                name = slot.name,
+                path = name,
+                dtype = slot.type.dtype.name,
+                dims = slot.type.dims,
+                byteLength = bytes.size.toLong(),
+                sha256 = digest.digest(bytes).joinToString("") { b ->
+                    ((b.toInt() and 0xFF) + 0x100).toString(16).substring(1)
+                },
+            )
+        }
+        return ServingWeightsPointer(
+            format = ServingWeightsPointer.STAGED_FORMAT,
+            path = WEIGHTS_DIR,
+            embedded = false,
+            table = table,
+        )
     }
 
     /** The MLIR symbol every exported entry is called through. */
