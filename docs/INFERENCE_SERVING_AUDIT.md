@@ -965,3 +965,175 @@ debugging round trip. Pinned in `PagedAttentionModuleTest` for both chains.
 
 **Still open in Phase H**: H3c (staged weights + a real Llama through the
 plugin), the H4 performance tier, H5 (SGLang variant + KV-quant).
+
+### H5 — KV-quant, and the SGLang design entry (§0.4.472)
+
+Two halves, prioritized as the slice's brief said to prioritize them: KV-quant
+is a real capability and got the code; SGLang is a second frontend over the
+same artifact and got a design record, because **SGLang is not installed and
+does not install cheaply here** (neither is vLLM — see H3b; `pip install
+sglang` pulls a CUDA torch stack and a compiled kernel library into a venv
+whose jaxlib+CUDA pins are what the rest of this arc certifies against). A
+plugin package written against an import that is not there, and certified by
+nothing, would be a worse artifact than a page that says exactly what the
+second frontend costs.
+
+#### (1) KV-quant: the contract, not the directive
+
+**What was there.** §0.4.257's `KvQuantConfig` — an attr stamped on a COARSENED
+attention op saying "materialize K and V narrow at runtime", read by a vendor
+kernel, backed by no IR, no interpreter arm, and no number anyone could check.
+Honest as a kernel hint; useless as a capability. `BackendTarget.kvQuantDtype`
+has carried a value since §0.4.258, and what it named was that hint.
+
+**What landed.** The other half — the exact map from a float page pool to
+(codes, scales) and back, in three pieces:
+
+- **`KvQuantPool`** (`:ir`, `io.tlaloc.ir.inference`) — the symmetric-absmax
+  codec. `scale = absmax / qmax` per group, `code = clamp(roundHalfAway(x/s))`,
+  `x̂ = code * s`, with the **error bound derived rather than tuned**:
+  `|x − x̂| ≤ scale/2 = absmax/254` for int8, and `maxRoundTripError` recomputes
+  it so the tests assert the measurement against the derivation.
+- **`OpKind.DEQUANTIZE_KV`** — `(codes, scales) → pool`,
+  `out[b,s,h,d] = codes[b,s,h,d] * scales[h]`. Interpreter arm (which
+  *delegates to the codec*: one formula, two callers), StableHLO emission
+  (convert + `broadcast_in_dim dims = [2]` + multiply), cost-model arm, a
+  renderer refusal that points at the codec, and both AD transforms refusing
+  **by name**.
+- **The manifest slot, fed end to end** — `DecodeModelShape.kvQuant` →
+  `ServingModelShape.kvQuant` (`ServingKvQuant`), round-tripped through the
+  artifact's JSON.
+
+**Why the scales key on the kv-HEAD axis.** It is the only pool axis that is
+neither allocator bookkeeping nor within-vector structure. `numBlocks` and
+`blockSize` index *pages*, which the allocator recycles between sequences — a
+per-page scale would have to be rewritten on every reassignment, and a decode
+step writing one slot would invalidate the scale of every other token sharing
+its page. `headDim` is inside a single key vector, where a per-element scale is
+an f32 pool with extra steps. Per-head is also what production serving does,
+and it is what `KvScaleStrategy.PER_HEAD` has meant since §0.4.257 — this is
+the first slice where the meaning is executed. The strategy is **derived from
+the scale operand's extent**, never an attr: `[numKvHeads]` is per-head, `[1]`
+is per-tensor.
+
+**REJECTED: folding dequantization into `PAGED_ATTENTION`** as two optional
+scale operands plus a dtype attr. It reads attractive (one op, one fused
+kernel) and it is wrong for this IR: it makes that op's arity a mode flag (5
+operands or 7), duplicates the formula inside the arc's most intricate
+emission, and hides the quantization from every *other* consumer of a pool
+(`KV_CACHE_WRITE`'s read-modify-write, a debug print, a CPU fallback). As its
+own kind it is one visible node that CSE shares between a layer's K and V
+paths and that H4's claiming lane can claim **as a pair** — which is the
+natural shape of the fused follow-on.
+
+**FP8 IS REFUSED BY NAME, not missing.** int8/int4 are *integer-code* formats:
+a code is a small integer and the dequantization is one multiply. fp8 is a
+*float* format whose code is a bit pattern with its own exponent field, so
+`value = code * scale` is simply not its dequantization — an integer-code path
+would either store the pattern (making the multiply meaningless) or round
+twice, to a different and worse bound than the one derived above. The predicate
+is `KvQuantDtype.isIntegerCoded`, and the refusal fires in the codec, the op
+parser, `DecodeModelShape`, and at emission. This answers the slice brief's
+"fp8 if the dtype story allows": **it does not allow it** — bf16's sealed-DType
+work (§0.4.455–458) is precisely the tour fp8 needs, and this is the reasoned
+no rather than a half-fp8 that rounds twice and reports a bound it does not
+meet.
+
+**The v1 deferral, said out loud IN THE ARTIFACT.** There is no `I8` DType, so
+the codes ride an `I32` tensor and **v1 buys the contract, not yet the bytes**.
+Rather than leave that to a doc, `ServingKvQuant` carries both facts as
+separate fields: `dtype = "int8"` (what the codes *mean*, the accuracy story)
+and `codeDtype = "i32"` (what they *ride*, the byte budget). A deployment
+sizing a KV pool reads one, a deployment reasoning about answer quality reads
+the other, and today they disagree — which is exactly the kind of fact a
+manifest exists to carry. When a narrow dtype lands, one field changes and the
+emission changes in one place (the `convert`'s operand type).
+
+**Oracles.**
+
+1. *Paged attention over an int8 pool vs the f32 pool, at a derived floor.*
+   The same decode step twice — once on f32 pools, once on pools quantized and
+   dequantized **in the graph** — with the agreement floor computed from the
+   quantization bound and the actual inputs (`scale/2` on V directly, plus the
+   softmax-weight wobble the K error induces), not from a tuned tolerance. The
+   test also asserts the two runs actually *differ*, so a codec that
+   round-tripped exactly could not pass while proving nothing.
+2. *A hand-derived vector with exact arithmetic.* Scales chosen so
+   `absmax/127` is a power of two (1 and 2), making the expected codes,
+   dequantized values and per-element errors all literals a reader checks on
+   paper — including three ties that land exactly on the bound, which is where
+   the round-half-**away**-from-zero convention is pinned (`kotlin.math.round`
+   breaks ties towards +∞, which biases a code set asymmetrically; the
+   convention is spelled out in the codec rather than inherited).
+3. *The bound is TIGHT.* Over a pseudo-random pool, every element is under
+   `scale/2` **and** some element reaches >0.9 of it — a conservative codec
+   that rounded everything to zero could not pass.
+4. *One formula, two callers*: the in-graph op and the host codec pinned
+   elementwise, per-head and per-tensor.
+5. *The manifest round trip*, including an artifact written **before** this
+   slice (no `kvQuant` field) still reading as unquantized.
+
+**Named deferrals from this half**: the `I8`/`FP8` DTypes and with them a
+byte-narrow pool (the whole point of KV-quant in production, and a
+bf16-sized piece of work); the **quantized decode-graph signature** — the
+`DecodeGraphSpec` slot types and the scale inputs a quantized graph needs at
+its boundary, so a plugin can hand a quantized pool to a compiled entry (v1
+lands the op, the codec and the manifest field; the graph builder that wires
+them into a full decode signature is the tail); a fused
+`DEQUANTIZE_KV → PAGED_ATTENTION` claim (H4's lane already has the shape); the
+Python side reading `kvQuant` to size its pools; int4 is implemented and
+certified but **not** recommended — the measured error is what it is; and
+calibration (scales come from the pool's own absmax, with
+`quantizeWithScales` taking a caller's better ones).
+
+#### (2) SGLang: what the second frontend actually costs
+
+The precedent is **SGL-JAX** — SGLang's JAX backend, the sibling of the
+`tpu-inference` shape §1 chose for vLLM. The integration surface is a
+**model runner**: SGLang's Python keeps the scheduler, the radix tree, the
+batch formation and the API; the backend supplies a runner that takes a
+forward batch and returns logits.
+
+**What SGLang needs that vLLM's plugin already gave us, unchanged:**
+
+- the **artifact and its loader** (H3a): `ServingManifest`, the bucket ladder,
+  bodies-by-hash, the PJRT executable cache. This is the whole point of
+  manifest-as-artifact — the second frontend reuses it *wholesale*, and
+  nothing in it mentions vLLM.
+- the **bucket selection** (H1c/H3a): round the batch up, refuse over cap. The
+  manifest states the ladder, so the SGLang side performs selection with no
+  second copy of `DecodeBucketPolicy`'s arithmetic.
+- the **slot binding by role** (`DecodeSlotRole`): SGLang names its tensors
+  differently and binds the same roles.
+- the **KV pool layout** (`kvPoolAxisOrder`/`kvPoolDims`, and now `kvQuant`).
+
+**What is genuinely SGLang-shaped and is not written:**
+
+- the runner class itself and its registration path (SGLang's backend
+  selection is not vLLM's platform-plugin entry point),
+- SGLang's **ForwardBatch → slot** adaptation: its scheduler hands a different
+  batch object, and `req_to_token` / `token_to_kv_pool` are *its* page
+  bookkeeping, not vLLM's `block_tables`. The mapping is mechanical but it is
+  the part that must be written against a real installed SGLang, not guessed,
+- capture of its **CUDA-graph / overlap-scheduler** expectations, which we do
+  not satisfy and do not need to (we execute a compiled PJRT executable).
+
+**RadixAttention and prefix caching stay THEIRS.** We supply graphs; the
+radix tree, the prefix match and the eviction policy are the scheduler's, and
+integrating *into* SGLang is precisely what buys them. What we would owe the
+radix path is a prefill graph that can start from a non-zero context — the
+**ragged/chunked-prefill form of `PAGED_ATTENTION`**, which has been H1a's
+named deferral since the first slice and is the one IR-level item the SGLang
+integration would actually need from this side.
+
+**The cheapness claim, stated so it can be checked rather than assumed**: of
+the H3a/H3b Python surface, the loader, the manifest reader, the bucket
+selection and the PJRT execution path are frontend-agnostic; what a second
+frontend rewrites is the adapter class and its batch translation. That is the
+prediction the manifest-as-artifact design makes, and the honest status is
+that it is **untested** until an environment carries SGLang.
+
+**Still open in Phase H**: H3c (staged weights + a real Llama through the
+plugin), the H4 performance tier, the H5 tails above (narrow DTypes, the
+quantized decode-graph signature, the SGLang runner), and the ragged prefill
+form that both frontends eventually want.

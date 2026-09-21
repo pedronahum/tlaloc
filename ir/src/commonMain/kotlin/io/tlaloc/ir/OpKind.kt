@@ -532,6 +532,55 @@ enum class OpKind {
     // StableHLO emission, because serving has to actually run it.
     KV_CACHE_WRITE,
 
+    // §0.4.472 — Phase H5 (docs/INFERENCE_SERVING_AUDIT.md §2 gap 5): the
+    // KV-quant read. A quantized page pool is stored as small integer CODES
+    // plus a scale per kv head; this op turns that pair back into the float
+    // pool PAGED_ATTENTION reads.
+    //
+    // DEQUANTIZE_KV(codes, scales) → pool
+    //   codes  [numBlocks, blockSize, numKvHeads, headDim]   integer
+    //   scales [numKvHeads] or [1]                           float
+    //   out    [numBlocks, blockSize, numKvHeads, headDim]   float
+    // attrs: `kv_quant_dtype: String` — the format tag, REQUIRED and the only
+    // attr (see [io.tlaloc.ir.DequantizeKvAttrs]). It is not dim-derived: it
+    // is a model-config literal, and it fixes the legal CODE RANGE, which is
+    // the one fact about a quantized pool that the operand types cannot carry
+    // (an int4 pool and an int8 pool have identical types).
+    //
+    // out[b, s, h, d] = codes[b, s, h, d] * scales[h] — the symmetric-absmax
+    // contract, derived with its error bound in
+    // [io.tlaloc.ir.inference.KvQuantPool] (|x − x̂| ≤ scale/2 per element,
+    // i.e. absmax/254 for int8). The host codec there and this op are pinned
+    // to agree elementwise.
+    //
+    // REJECTED: folding the dequantization into PAGED_ATTENTION as optional
+    // scale operands — it makes that op's arity a mode flag, duplicates the
+    // formula inside the arc's most intricate emission, and hides the
+    // quantization from every other consumer of a pool. As its own kind it is
+    // one visible node: CSE shares it between a layer's K and V paths, and a
+    // fused kernel can claim the DEQUANTIZE_KV → PAGED_ATTENTION pair the way
+    // §0.4.471's inference lane already claims a single op.
+    //
+    // FP8 IS REFUSED BY NAME here, not merely absent: int8/int4 are
+    // integer-code formats, and `value = code * scale` is simply not fp8's
+    // dequantization (its code is a bit pattern with an exponent field). fp8
+    // KV-quant waits on a narrow DType — bf16's §0.4.455 tour — and the
+    // predicate that says so is KvQuantDtype.isIntegerCoded. The codes
+    // themselves ride an I32 tensor in v1 for the same reason (no I8 DType
+    // exists), so v1 buys the CONTRACT and not yet the bytes; the serving
+    // manifest states that in `ServingKvQuant.codeDtype` rather than leaving
+    // it to a doc.
+    //
+    // INFERENCE-ONLY BY DESIGN — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS].
+    // Quantization is a lossy, staircase-shaped map whose useful derivative is
+    // zero almost everywhere; training through it is the straight-through
+    // estimator, which is a TRAINING-TIME FICTION chosen per recipe (clip
+    // range, STE variant) and not a fact about this op. Inventing one here
+    // would be exactly the adjoint shortcut the house forbids. Both AD
+    // transforms refuse it by name. It DOES carry a real interpreter arm and
+    // real StableHLO emission, because serving has to actually run it.
+    DEQUANTIZE_KV,
+
     // Misc
     EMBEDDING, CROSS_ENTROPY, CAST,
 

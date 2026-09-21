@@ -247,6 +247,15 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // teach the recognizer to avoid the op for the wrong reason.
     OpKind.KV_CACHE_WRITE -> 0.0
 
+    // §0.4.472 — Phase H5: the KV-quant read is ONE MULTIPLY PER POOL ELEMENT
+    // (the convert and the scale broadcast are movement). Priced off the
+    // result, which is the whole dequantized pool — and that number being
+    // large is the honest signal: a materializing dequantization is exactly
+    // the thing a fused DEQUANTIZE_KV → PAGED_ATTENTION kernel exists to
+    // avoid, so the cost model should make the unfused pair look as expensive
+    // as it is rather than flatter it to movement.
+    OpKind.DEQUANTIZE_KV -> op.type.elementCount.toDouble()
+
     OpKind.EMBEDDING -> op.type.elementCount.toDouble()
     // §0.4.370 — embedding adjoint: one scatter-add per upstream element.
     OpKind.EMBEDDING_GRAD -> op.operands[1].type.elementCount.toDouble()

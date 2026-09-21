@@ -193,10 +193,20 @@ data class ServingModelShape(
     val blockSize: Int,
     /** Activation/logits dtype, as a `io.tlaloc.core.DType` name. */
     val dtype: String,
-    /** KV-pool dtype. H5's int8/fp8 KV-quant is exactly the case where this
-     *  differs from [dtype]; the field exists now so that slice adds a value
-     *  and not a field. */
+    /** KV-pool dtype as the graph boundary carries it. Under [kvQuant] this is
+     *  the CODES' integer dtype, not the quantized format — the format is
+     *  [kvQuant]'s business, and the two are deliberately separate fields
+     *  (§0.4.472). */
     val kvDtype: String,
+    /**
+     * §0.4.472 — Phase H5: the KV-quant format, or null for a float pool. The
+     * slot §0.4.258 reserved, finally carrying a value.
+     *
+     * A consumer reads this to learn something no tensor type tells it: that
+     * the buffers behind the KV-pool slots are integer CODES read against a
+     * scale vector, and which code range they live in.
+     */
+    val kvQuant: ServingKvQuant? = null,
 ) {
     val kvPoolAxisOrder: List<String> = listOf("numBlocks", "blockSize", "numKvHeads", "headDim")
     val kvPoolDims: List<Int> = listOf(numBlocks, blockSize, numKvHeads, headDim)
@@ -213,6 +223,7 @@ data class ServingModelShape(
         append("\"blockSize\":").append(blockSize).append(',')
         append("\"dtype\":").append(jsonStr(dtype)).append(',')
         append("\"kvDtype\":").append(jsonStr(kvDtype)).append(',')
+        append("\"kvQuant\":").append(kvQuant?.toJson() ?: "null").append(',')
         append("\"kvPoolAxisOrder\":").append(kvPoolAxisOrder.joinToString(",", "[", "]") { jsonStr(it) }).append(',')
         append("\"kvPoolDims\":").append(kvPoolDims.joinToString(",", "[", "]"))
         append("}")
@@ -225,6 +236,61 @@ data class ServingModelShape(
             headDim = o.int("headDim"), numLayers = o.int("numLayers"),
             numBlocks = o.int("numBlocks"), blockSize = o.int("blockSize"),
             dtype = o.str("dtype"), kvDtype = o.str("kvDtype"),
+            // Absent OR null both read as "no KV-quant": an artifact written
+            // before this slice is still a legal artifact, and the reader says
+            // so instead of failing on a field it did not have.
+            kvQuant = (o["kvQuant"] as? JsonObject)?.let { ServingKvQuant.fromJson(it) },
+        )
+    }
+}
+
+/**
+ * §0.4.472 — Phase H5: the KV-quant format, as the artifact publishes it.
+ *
+ * Four fields, and the fourth is the interesting one:
+ *
+ * - [dtype] — the format tag (`"int8"`, `"int4"`), i.e. what the codes MEAN.
+ * - [scaleStrategy] — `"PER_HEAD"` or `"PER_TENSOR"`, the shape of the scale
+ *   vector a loader must supply: `[numKvHeads]` or `[1]`.
+ * - [codeMax] — the symmetric code bound (127 / 7). Redundant with [dtype] and
+ *   stated anyway, because a Python consumer should not have to keep a table
+ *   of this house's conventions to validate a pool it is handed.
+ * - [codeDtype] — the dtype the codes actually ride at the graph boundary,
+ *   `"i32"` in v1. This is the deferral said OUT LOUD, in the artifact, where
+ *   a deployment can see it: the contract is quantized but the BYTES are not
+ *   yet narrow, because there is no I8 [io.tlaloc.core.DType] (bf16's
+ *   §0.4.455–458 tour is what adding one costs). A serving stack sizing a KV
+ *   pool reads [codeDtype] for its byte budget and [dtype] for its accuracy
+ *   story, and today those two disagree — which is exactly the fact a manifest
+ *   exists to carry.
+ */
+data class ServingKvQuant(
+    val dtype: String,
+    val scaleStrategy: String,
+    val codeMax: Int,
+    val codeDtype: String,
+) {
+    /** Scale-vector length for a pool of [numKvHeads] kv heads. */
+    fun scaleCount(numKvHeads: Int): Int = if (scaleStrategy == PER_HEAD) numKvHeads else 1
+
+    fun toJson(): String = buildString {
+        append("{")
+        append("\"dtype\":").append(jsonStr(dtype)).append(',')
+        append("\"scaleStrategy\":").append(jsonStr(scaleStrategy)).append(',')
+        append("\"codeMax\":").append(codeMax).append(',')
+        append("\"codeDtype\":").append(jsonStr(codeDtype))
+        append("}")
+    }
+
+    companion object {
+        const val PER_HEAD: String = "PER_HEAD"
+        const val PER_TENSOR: String = "PER_TENSOR"
+
+        fun fromJson(o: JsonObject): ServingKvQuant = ServingKvQuant(
+            dtype = o.str("dtype"),
+            scaleStrategy = o.str("scaleStrategy"),
+            codeMax = o.int("codeMax"),
+            codeDtype = o.str("codeDtype"),
         )
     }
 }

@@ -1039,6 +1039,7 @@ object DxirInterpreter {
             }
             OpKind.PAGED_ATTENTION -> evalPagedAttention(op, env, multiResults)
             OpKind.KV_CACHE_WRITE -> evalKvCacheWrite(op, env, multiResults)
+            OpKind.DEQUANTIZE_KV -> evalDequantizeKv(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -1932,6 +1933,37 @@ object DxirInterpreter {
             newKv.copyInto(out, slot * stride, i * stride, (i + 1) * stride)
         }
         return out
+    }
+
+    /**
+     * §0.4.472 — Phase H5: the DEQUANTIZE_KV reference walk, and it is
+     * deliberately NOT a re-derivation — it delegates the arithmetic to
+     * [io.tlaloc.ir.inference.KvQuantPool.dequantize], the same host codec a
+     * loader uses to BUILD a quantized pool. One formula, two callers: if the
+     * in-graph op and the pool builder ever disagreed, a decode step would
+     * read a pool through a different scale than the one it was written with,
+     * and nothing downstream would look wrong — just slightly off. The codec's
+     * loud code-range check (an out-of-range code cannot come from this
+     * contract) comes along with it.
+     *
+     * NO adjoint and NO tangent by design — both transforms refuse this kind
+     * by name (see [INFERENCE_ONLY_OP_KINDS]).
+     */
+    private fun evalDequantizeKv(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.DequantizeKvAttrs.parse(op, "DxirInterpreter")
+        val codes = evalCsrIntOperand(op, 0, "codes", env, multiResults)
+        val scales = evalNode(op.operands[1], env, multiResults)
+        return io.tlaloc.ir.inference.KvQuantPool.dequantize(
+            codes = codes,
+            scales = scales,
+            numKvHeads = p.numKvHeads,
+            headDim = p.headDim,
+            config = p.config,
+        )
     }
 
     private fun evalCsrIntOperand(

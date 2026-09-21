@@ -21,6 +21,7 @@ import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.DxirSharding
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.DequantizeKvAttrs
 import io.tlaloc.ir.KvCacheWriteAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
@@ -445,6 +446,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 }
             }
             OpKind.KV_CACHE_WRITE -> emitKvCacheWrite(step, name, ops, node)
+            OpKind.DEQUANTIZE_KV -> emitDequantizeKv(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,
                 name,
@@ -3054,6 +3056,67 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * literally equal is a lie with an optimizer on the other side of it. The
      * promise is worth less than the risk at decode sizes.
      */
+    /**
+     * §0.4.472 — Phase H5: DEQUANTIZE_KV — `pool = codes * scales[kvHead]`, in
+     * three ops and no cleverness at all:
+     *
+     * ```
+     *   %f  = stablehlo.convert %codes                        // i32 -> f32
+     *   %sb = stablehlo.broadcast_in_dim %scales, dims = [2]  // [H] -> pool
+     *   %r  = stablehlo.multiply %f, %sb
+     * ```
+     *
+     * `dims = [2]` IS the whole per-head convention: axis 2 of
+     * `[numBlocks, blockSize, numKvHeads, headDim]` is the kv-head axis, so a
+     * `[numKvHeads]` scale vector broadcasts along it and a `[1]` per-tensor
+     * scale broadcasts along everything. Both spellings go through the same
+     * `broadcast_in_dim`, which is why the per-tensor case needs no arm of its
+     * own — StableHLO's size-1-expands rule does it.
+     *
+     * The CONVERT is the honest half of the v1 deferral. With no I8 DType the
+     * codes ride an i32 tensor, so what XLA sees is an i32→f32 widen of a
+     * tensor whose values happen to fit in a byte. The day a narrow dtype
+     * lands, exactly one thing changes here — the operand's element type — and
+     * neither the broadcast nor the multiply notices.
+     *
+     * REJECTED: emitting the multiply against a scalar constant in the
+     * per-tensor case (folding the scale into the graph). The scale is
+     * RUNTIME data — a loader computes it from the weights it just read, and a
+     * re-quantization mid-deployment changes it — so baking it in would pin a
+     * checkpoint's numbers into a compiled executable the artifact promises is
+     * reusable across checkpoints of one shape.
+     */
+    private fun emitDequantizeKv(step: String, name: String, ops: List<String>, node: DxirOp) {
+        DequantizeKvAttrs.parse(node, "StablehloEmitter")
+        val codesType = node.operands[0].type
+        val scalesType = node.operands[1].type
+        val outType = node.type
+        val outMlir = outType.toMlir()
+
+        val widened = synth()
+        out.appendLine("$step$widened = stablehlo.convert ${ops[0]} : (${codesType.toMlir()}) -> $outMlir")
+
+        // The scales may be narrower than the pool (an f32 scale vector against
+        // a bf16 pool is the ordinary case once G1's bf16 pools are in play);
+        // StableHLO's multiply wants identical element types, so widen first.
+        var scales = ops[1]
+        var scalesT = scalesType
+        if (scalesType.dtype != outType.dtype) {
+            val cs = synth()
+            val target = DxirType(outType.dtype, scalesType.dims)
+            out.appendLine("$step$cs = stablehlo.convert $scales : (${scalesType.toMlir()}) -> ${target.toMlir()}")
+            scales = cs
+            scalesT = target
+        }
+
+        val bcast = synth()
+        out.appendLine(
+            "$step$bcast = stablehlo.broadcast_in_dim $scales, dims = [2] : " +
+                "(${scalesT.toMlir()}) -> $outMlir",
+        )
+        out.appendLine("$step$name = stablehlo.multiply $widened, $bcast : $outMlir")
+    }
+
     private fun emitKvCacheWrite(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = KvCacheWriteAttrs.parse(node, "StablehloEmitter")
         val cacheType = node.operands[0].type

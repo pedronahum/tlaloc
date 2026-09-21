@@ -3,8 +3,10 @@ package io.tlaloc.ir.inference
 import io.tlaloc.core.DType
 import io.tlaloc.core.F32
 import io.tlaloc.core.I32
+import io.tlaloc.core.I64
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirType
+import io.tlaloc.ir.recognizer.quant.KvQuantConfig
 
 /**
  * §0.4.467 — Phase H1c: the DECODE-GRAPH SHAPE CONTRACT, gap-list item 3 of
@@ -246,10 +248,25 @@ data class DecodeModelShape(
     val numBlocks: Int,
     val blockSize: Int,
     val dtype: DType = F32,
-    /** The KV pools' dtype. Equal to [dtype] today; H5's int8/fp8 KV-quant is
-     *  exactly the case where it is not, and the manifest already reserves a
-     *  `kvQuantDtype` slot for it. */
+    /** The KV pools' dtype as the decode graph's boundary carries it. Equal to
+     *  [dtype] for an unquantized pool; under [kvQuant] it is the CODES'
+     *  integer dtype (I32 in v1 — see [kvQuant]). */
     val kvDtype: DType = dtype,
+    /**
+     * §0.4.472 — Phase H5: the KV-quant format, or null for a float pool.
+     *
+     * Non-null means the pools this model's graphs read are
+     * [io.tlaloc.ir.inference.KvQuantPool]-quantized: integer codes in
+     * [kvDtype] plus a per-head (or per-tensor) scale vector, read back
+     * through [io.tlaloc.ir.OpKind.DEQUANTIZE_KV]. This is the field the
+     * serving manifest's long-reserved `kvQuantDtype` slot is finally fed
+     * from, and the one an artifact consumer reads to know that a pool buffer
+     * is codes and not values — a distinction no tensor type carries.
+     *
+     * Only the INTEGER-CODED formats are admitted (int8/int4); fp8 is refused
+     * by name here for the same reason it is refused in the codec and the op.
+     */
+    val kvQuant: KvQuantConfig? = null,
 ) {
     init {
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
@@ -264,7 +281,31 @@ data class DecodeModelShape(
         require(numBlocks >= 1 && blockSize >= 1) {
             "DecodeModelShape: numBlocks/blockSize must be >= 1, got $numBlocks/$blockSize"
         }
+        val q = kvQuant
+        if (q != null) {
+            require(q.dtype.isIntegerCoded) {
+                "DecodeModelShape: kvQuant ${q.dtype.nameTag} is refused BY NAME — the KV-quant " +
+                    "contract (KvQuantPool, DEQUANTIZE_KV) is integer-coded " +
+                    "(value = code * scale), and a float format's code is a bit pattern; fp8 " +
+                    "pools wait on a narrow DType, the bf16 §0.4.455 precedent"
+            }
+            require(kvDtype == I32 || kvDtype == I64) {
+                "DecodeModelShape: a ${q.dtype.nameTag}-quantized pool carries integer CODES, so " +
+                    "kvDtype must be an integer dtype, got $kvDtype (v1 rides I32 — there is no " +
+                    "I8 DType yet, which is why the artifact states the code dtype explicitly " +
+                    "instead of letting a reader assume the pool is byte-narrow)"
+            }
+        } else {
+            require(kvDtype != I32 && kvDtype != I64) {
+                "DecodeModelShape: kvDtype $kvDtype is an integer dtype but kvQuant is null — an " +
+                    "integer KV pool with no quantization format is a pool nobody can read " +
+                    "(the scales and the code range are exactly what kvQuant carries)"
+            }
+        }
     }
+
+    /** The format tag the serving manifest publishes, or null for a float pool. */
+    val kvQuantDtypeTag: String? get() = kvQuant?.dtype?.nameTag
 
     /** GQA grouping: query heads per kv head. */
     val group: Int get() = numHeads / numKvHeads

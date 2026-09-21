@@ -81,6 +81,41 @@ class ServingManifestTest {
         assertTrue(m.toJson().contains("\"kvPoolAxisOrder\""))
     }
 
+    /**
+     * §0.4.472 — Phase H5: the long-reserved `kvQuant` slot, finally carrying
+     * a value, and the two facts it keeps apart — what the codes MEAN
+     * (`dtype = "int8"`) and what they RIDE (`codeDtype = "i32"`, the v1
+     * deferral said out loud in the artifact rather than only in a doc).
+     */
+    @Test
+    fun aQuantizedKvPoolRoundTripsIncludingTheCodeDtypeDeferral() {
+        val m = manifest().copy(
+            model = ServingModelShape(
+                vocabSize = 11, hiddenSize = 8, numHeads = 4, numKvHeads = 2, headDim = 2,
+                numLayers = 1, numBlocks = 6, blockSize = 2, dtype = "f32", kvDtype = "i32",
+                kvQuant = ServingKvQuant(
+                    dtype = "int8", scaleStrategy = ServingKvQuant.PER_HEAD,
+                    codeMax = 127, codeDtype = "i32",
+                ),
+            ),
+        )
+        val back = ServingManifest.fromJson(m.toJson())
+        assertEquals(m, back, "a quantized artifact must survive its own serialization")
+        val q = back.model.kvQuant!!
+        assertEquals("int8", q.dtype, "what the codes MEAN")
+        assertEquals("i32", q.codeDtype, "what the codes RIDE — the v1 deferral, in the artifact")
+        assertEquals(127, q.codeMax)
+        assertEquals(2, q.scaleCount(numKvHeads = 2), "per-head scaling needs one scale per kv head")
+        assertEquals(1, q.copy(scaleStrategy = ServingKvQuant.PER_TENSOR).scaleCount(2))
+    }
+
+    /** An artifact written before H5 has no `kvQuant` field, and still loads. */
+    @Test
+    fun anArtifactWithNoKvQuantFieldStillReadsAsUnquantized() {
+        val json = manifest().toJson().replace("\"kvQuant\":null,", "")
+        assertEquals(null, ServingManifest.fromJson(json).model.kvQuant)
+    }
+
     @Test
     fun entryForNamesTheCompiledPointsWhenAskedForOneThatIsNotThere() {
         val e = assertFailsWith<IllegalArgumentException> {

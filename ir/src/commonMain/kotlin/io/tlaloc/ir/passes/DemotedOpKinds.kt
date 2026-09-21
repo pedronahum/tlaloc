@@ -83,6 +83,10 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     // rationale, one step earlier in the loop: the write DEPOSITS into the
     // pool that paged attention then reads.
     OpKind.KV_CACHE_WRITE,
+    // §0.4.472 — Phase H5: the KV-quant read. Same family, different reason —
+    // not "the operands are bookkeeping" but "the map is a staircase", see the
+    // refusal message.
+    OpKind.DEQUANTIZE_KV,
 )
 
 /**
@@ -111,5 +115,18 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "have an interpreter arm and StableHLO emission (serving executes it). To " +
             "DIFFERENTIATE a placement of values into a tensor, use the differentiable " +
             "spelling: the SCATTER / SCATTER_ADD family, which carries certified rules"
+    OpKind.DEQUANTIZE_KV ->
+        "$layer: DEQUANTIZE_KV is INFERENCE-ONLY BY DESIGN (Phase H5, " +
+            "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
+            "not a gap: its codes operand is the output of a lossy STAIRCASE map " +
+            "(round-to-nearest against a per-head scale), whose true derivative is zero " +
+            "almost everywhere and undefined on the steps. Training through quantization " +
+            "means a STRAIGHT-THROUGH ESTIMATOR, which is a training-time fiction chosen " +
+            "per recipe (clip range, STE variant) and not a fact about this op — writing " +
+            "one in here would be the const-shortcut adjoint the house forbids. It DOES " +
+            "have an interpreter arm and StableHLO emission (serving executes it). To " +
+            "DIFFERENTIATE a rescale, use the differentiable spelling: MUL by the scale " +
+            "tensor (with a CAST if the codes really are a float quantity), which carries " +
+            "certified rules for both operands"
     else -> null
 }

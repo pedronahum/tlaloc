@@ -32,6 +32,38 @@ enum class KvQuantDtype(val nameTag: String, val bitsPerElement: Int) {
     FP8_E5M2("fp8_e5m2", 8),
     INT8("int8", 8),
     INT4("int4", 4),
+    ;
+
+    /**
+     * §0.4.472 — Phase H5: whether a value of this dtype is a SMALL INTEGER
+     * CODE read against a scale (`x ≈ code * scale`), which is what
+     * [io.tlaloc.ir.inference.KvQuantPool]'s symmetric-absmax contract and
+     * [io.tlaloc.ir.OpKind.DEQUANTIZE_KV] implement.
+     *
+     * False for the float formats, and that is a REFUSAL rather than a gap:
+     * an fp8 value's "code" is a bit pattern with its own exponent field, so
+     * an integer-code path would have to either store the pattern (making the
+     * multiply meaningless) or round twice. fp8 KV-quant wants a narrow
+     * [io.tlaloc.core.DType] the way bf16 got one in §0.4.455.
+     */
+    val isIntegerCoded: Boolean get() = this == INT8 || this == INT4
+
+    /**
+     * The largest magnitude a code may take, for the integer-coded dtypes:
+     * 127 for int8, 7 for int4 — the SYMMETRIC range, so `-128` is not used
+     * even though int8 can hold it. Asymmetry buys one extra code and costs
+     * the property that `quantize(-x) == -quantize(x)`, which is the property
+     * every error bound in [io.tlaloc.ir.inference.KvQuantPool] is derived
+     * from. Refuses by name for the float formats.
+     */
+    val codeMax: Int get() = when (this) {
+        INT8 -> 127
+        INT4 -> 7
+        else -> error(
+            "KvQuantDtype.codeMax: $nameTag is not an integer-coded dtype — see " +
+                "isIntegerCoded for why fp8/bf16/f32 are refused here rather than approximated",
+        )
+    }
 }
 
 /**

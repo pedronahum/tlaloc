@@ -616,6 +616,21 @@ internal object KotlinSourceRenderer {
                         "a DTensor expression; run it on the interpreter or through " +
                         "StableHLO/PJRT (where buffer donation makes the functional write free)",
                 )
+            // §0.4.472 — Phase H5: the north-star rule again, and here the
+            // answer is not "there is no host twin" but "the host twin is
+            // somewhere better". KvQuantPool.dequantize IS the straight-line
+            // Kotlin spelling of this op, certified against it; printing a
+            // second one into generated source would be a copy of the formula
+            // that nothing keeps in step with the codec the loaders use.
+            OpKind.DEQUANTIZE_KV ->
+                refuse(
+                    op,
+                    "DEQUANTIZE_KV is inference-only serving machinery (Phase H5) and its host " +
+                        "spelling already exists as io.tlaloc.ir.inference.KvQuantPool.dequantize " +
+                        "— the codec a loader quantizes pools with, pinned elementwise against " +
+                        "the interpreter arm; rendering a second copy of `code * scale` here " +
+                        "would be a fork of the one formula the two runtimes share",
+                )
             OpKind.RMSNORM, OpKind.BATCHNORM ->
                 refuse(op, "the norm kinds ride their desugared op compositions (§0.4.390); the fused kinds have no printed spelling")
 

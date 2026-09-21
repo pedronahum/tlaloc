@@ -171,6 +171,17 @@ object ServingArtifactWriter {
                 headDim = model.headDim, numLayers = model.numLayers,
                 numBlocks = model.numBlocks, blockSize = model.blockSize,
                 dtype = model.dtype.name, kvDtype = model.kvDtype.name,
+                // §0.4.472 — Phase H5: the reserved slot, fed from the spec's
+                // own config so the artifact cannot claim a format the graphs
+                // were not built for.
+                kvQuant = model.kvQuant?.let {
+                    ServingKvQuant(
+                        dtype = it.dtype.nameTag,
+                        scaleStrategy = it.scaleStrategy.name,
+                        codeMax = it.dtype.codeMax,
+                        codeDtype = model.kvDtype.name,
+                    )
+                },
             ),
             bucketLadder = ladder,
             weights = weights,
