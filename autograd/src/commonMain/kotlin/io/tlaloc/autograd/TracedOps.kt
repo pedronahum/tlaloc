@@ -1,13 +1,45 @@
 package io.tlaloc.autograd
 
+import io.tlaloc.core.DTensor
+import io.tlaloc.core.F32
+import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.hostF32
+import io.tlaloc.core.ops.broadcastToLike
+import io.tlaloc.core.ops.div
+import io.tlaloc.core.ops.exp
+import io.tlaloc.core.ops.log
+import io.tlaloc.core.ops.matmul
+import io.tlaloc.core.ops.mean
+import io.tlaloc.core.ops.minus
+import io.tlaloc.core.ops.neg
+import io.tlaloc.core.ops.plus
+import io.tlaloc.core.ops.pow
+import io.tlaloc.core.ops.relu
+import io.tlaloc.core.ops.sigmoid
+import io.tlaloc.core.ops.sqrt
+import io.tlaloc.core.ops.step
+import io.tlaloc.core.ops.sum
+import io.tlaloc.core.ops.tanh
+import io.tlaloc.core.ops.times
 import io.tlaloc.ir.OpKind
-import kotlin.math.pow
+
+// §0.4.447 — audit finding B (docs/AD_SINGLE_ENGINE_AUDIT.md): the pre-F4
+// spellings below used to carry their own private FloatArray forward loops — a
+// third implementation of the same math alongside the DxirInterpreter arms and
+// the `:core` host twins. They now route through the certified
+// `io.tlaloc.core.ops` host twins (the same engines the F4–F6 TRACE spellings
+// and the K2 plugin's synthesis already call), so the traced forward value and
+// the host path are one implementation by construction. Bit-equality with the
+// old loops is pinned in TracedOpsHostTwinParityTest. The ONLY private forward
+// loop left in this file is `bmm` (no rank-3 batched-matmul host twin exists —
+// the named twin-gap, recorded in the audit doc); SLICE / CONCAT / RESHAPE and
+// the pool/conv/embedding F4–F6 spellings carry no elementwise math (copy walks
+// or already-twinned calls).
 
 private fun requireSameShape(a: Tracer<*>, b: Tracer<*>) {
     require(a.dims.contentEquals(b.dims)) {
@@ -15,16 +47,10 @@ private fun requireSameShape(a: Tracer<*>, b: Tracer<*>) {
     }
 }
 
-private fun elementwise(a: FloatArray, b: FloatArray, f: (Float, Float) -> Float): FloatArray {
-    val out = FloatArray(a.size)
-    for (i in a.indices) out[i] = f(a[i], b[i])
-    return out
-}
-
 operator fun <S : Shape> Tracer<S>.plus(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = elementwise(entry.value, other.entry.value) { x, y -> x + y }
+    val out = (toDTensor() + other.toDTensor()).hostF32()
     val e = tape.op(OpKind.ADD, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -32,7 +58,7 @@ operator fun <S : Shape> Tracer<S>.plus(other: Tracer<S>): Tracer<S> {
 operator fun <S : Shape> Tracer<S>.minus(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = elementwise(entry.value, other.entry.value) { x, y -> x - y }
+    val out = (toDTensor() - other.toDTensor()).hostF32()
     val e = tape.op(OpKind.SUB, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -40,23 +66,19 @@ operator fun <S : Shape> Tracer<S>.minus(other: Tracer<S>): Tracer<S> {
 operator fun <S : Shape> Tracer<S>.times(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = elementwise(entry.value, other.entry.value) { x, y -> x * y }
+    val out = (toDTensor() * other.toDTensor()).hostF32()
     val e = tape.op(OpKind.MUL, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.relu(): Tracer<S> {
-    val v = entry.value
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = if (v[i] > 0f) v[i] else 0f
+    val out = toDTensor().relu().hostF32()
     val e = tape.op(OpKind.RELU, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.step(): Tracer<S> {
-    val v = entry.value
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = if (v[i] > 0f) 1f else 0f
+    val out = toDTensor().step().hostF32()
     val e = tape.op(OpKind.STEP, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -64,15 +86,13 @@ fun <S : Shape> Tracer<S>.step(): Tracer<S> {
 operator fun <S : Shape> Tracer<S>.div(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = elementwise(entry.value, other.entry.value) { x, y -> x / y }
+    val out = (toDTensor() / other.toDTensor()).hostF32()
     val e = tape.op(OpKind.DIV, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.neg(): Tracer<S> {
-    val v = entry.value
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = -v[i]
+    val out = toDTensor().neg().hostF32()
     val e = tape.op(OpKind.NEG, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -93,46 +113,37 @@ operator fun <S : Shape> Tracer<S>.unaryMinus(): Tracer<S> = neg()
 // is populated for downstream predicate reads via `peek()` / `.scalar`, and
 // (b) records the op on the tape for the reverse walk.
 //
-// Forward math uses `kotlin.math.*` for F32 — matches what DxirInterpreter
-// would compute through the VjpRegistry bridge, avoiding drift between the
-// tape's cached forward value and the value the grad rule will re-evaluate.
+// Forward math routes through the `:core` host twins (§0.4.447, audit finding
+// B) — the same engines the DxirInterpreter's arms and the K2 plugin's
+// synthesis certify against, so there is no drift between the tape's cached
+// forward value and the value the grad rule will re-evaluate.
 
 fun <S : Shape> Tracer<S>.sqrt(): Tracer<S> {
-    val v = entry.value
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = kotlin.math.sqrt(v[i])
+    val out = toDTensor().sqrt().hostF32()
     val e = tape.op(OpKind.SQRT, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.exp(): Tracer<S> {
-    val v = entry.value
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = kotlin.math.exp(v[i])
+    val out = toDTensor().exp().hostF32()
     val e = tape.op(OpKind.EXP, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.log(): Tracer<S> {
-    val v = entry.value
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = kotlin.math.ln(v[i])
+    val out = toDTensor().log().hostF32()
     val e = tape.op(OpKind.LOG, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.tanh(): Tracer<S> {
-    val v = entry.value
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = kotlin.math.tanh(v[i])
+    val out = toDTensor().tanh().hostF32()
     val e = tape.op(OpKind.TANH, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.sigmoid(): Tracer<S> {
-    val v = entry.value
-    val out = FloatArray(v.size)
-    for (i in v.indices) out[i] = 1f / (1f + kotlin.math.exp(-v[i]))
+    val out = toDTensor().sigmoid().hostF32()
     val e = tape.op(OpKind.SIGMOID, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -154,7 +165,7 @@ fun <S : Shape> Tracer<S>.sigmoid(): Tracer<S> {
 fun <S : Shape> Tracer<S>.pow(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = elementwise(entry.value, other.entry.value) { x, y -> x.pow(y) }
+    val out = toDTensor().pow(other.toDTensor()).hostF32()
     val e = tape.op(OpKind.POW, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -210,8 +221,8 @@ private fun <S : Shape> Tracer<S>.broadcastScalar(
     scalar: Tracer<io.tlaloc.core.ScalarShape>,
 ): Tracer<S> {
     val tape = sameTape(this, scalar)
-    val scalarValue = scalar.entry.value[0]
-    val broadcasted = FloatArray(size) { scalarValue }
+    val broadcasted =
+        io.tlaloc.core.ops.broadcastLike(scalar.entry.value[0], toDTensor()).hostF32()
     // §0.4.80 — carry `broadcast_dimensions` in the tape op's attrs so both the
     // capture → dxir bridge (emitter requires this attr) and the DxirInterpreter
     // BROADCAST arm see the same shape metadata the IR expects. Scalar input
@@ -302,10 +313,10 @@ fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastRow(
         "broadcastRow: row size ${row.dims[0]} doesn't match matrix col size ${dims[1]}"
     }
     val tape = sameTape(this, row)
-    val m = dims[0]
-    val n = dims[1]
-    val rowValues = row.entry.value
-    val broadcasted = FloatArray(m * n) { idx -> rowValues[idx % n] }
+    // Right-aligned broadcastToLike: rank-1 [N] against the rank-2 [M, N]
+    // template replicates the missing leading axis — exactly `broadcast_
+    // dimensions = [1]` (§0.4.447: the host twin owns the walk).
+    val broadcasted = broadcastToLike(row.toDTensor(), toDTensor()).hostF32()
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(row.id),
@@ -395,11 +406,10 @@ fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A,
         "broadcastInner: inner size ${inner.dims[0]} doesn't match tensor dim 2 ${dims[2]}"
     }
     val tape = sameTape(this, inner)
-    val a = dims[0]
-    val b = dims[1]
-    val c = dims[2]
-    val innerValues = inner.entry.value
-    val broadcasted = FloatArray(a * b * c) { idx -> innerValues[idx % c] }
+    // Right-aligned broadcastToLike: rank-1 [C] against the rank-3 [A, B, C]
+    // template replicates both missing leading axes — `broadcast_dimensions =
+    // [2]` (§0.4.447: the host twin owns the walk).
+    val broadcasted = broadcastToLike(inner.toDTensor(), toDTensor()).hostF32()
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(inner.id),
@@ -449,12 +459,10 @@ fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A,
         "broadcastBatch: matrix col count ${matrix.dims[1]} doesn't match tensor dim 2 ${dims[2]}"
     }
     val tape = sameTape(this, matrix)
-    val a = dims[0]
-    val b = dims[1]
-    val c = dims[2]
-    val matrixValues = matrix.entry.value
-    val sliceSize = b * c
-    val broadcasted = FloatArray(a * sliceSize) { idx -> matrixValues[idx % sliceSize] }
+    // Right-aligned broadcastToLike: rank-2 [B, C] against the rank-3
+    // [A, B, C] template replicates the missing batch axis — `broadcast_
+    // dimensions = [1, 2]` (§0.4.447: the host twin owns the walk).
+    val broadcasted = broadcastToLike(matrix.toDTensor(), toDTensor()).hostF32()
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(matrix.id),
@@ -655,10 +663,14 @@ fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastCol(
         "broadcastCol: col size ${col.dims[0]} doesn't match matrix row size ${dims[0]}"
     }
     val tape = sameTape(this, col)
-    val m = dims[0]
-    val n = dims[1]
-    val colValues = col.entry.value
-    val broadcasted = FloatArray(m * n) { idx -> colValues[idx / n] }
+    // The column direction is NOT right-aligned ([M] against [M, N] would pair
+    // M with N), so the rank-1 value is reviewed as an [M, 1] column first —
+    // a dims-only relabel of the same storage — and broadcastToLike stretches
+    // the size-1 axis: `broadcast_dimensions = [0]` (§0.4.447).
+    val colAsMatrix = DTensor<Shape, F32>(
+        HostF32Storage(col.entry.value.copyOf()), intArrayOf(dims[0], 1), F32,
+    )
+    val broadcasted = broadcastToLike(colAsMatrix, toDTensor()).hostF32()
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(col.id),
@@ -824,50 +836,16 @@ private fun Tracer<*>.tracePool2d(kind: OpKind, windowH: Int, windowW: Int): Tra
 }
 
 // §0.4.441 — F5: axis reductions + the axis broadcast, the BatchNorm substrate
-// (MODEL_LAYER_PLAN.md gap-table row F5). The forward loops mirror the
-// DxirInterpreter's SUM/MEAN projection EXACTLY (linear input iteration,
-// accumulate per projected output cell) so the trace-cached value and the
-// transform's `includeForward` re-evaluation are bit-identical. The attrs are
+// (MODEL_LAYER_PLAN.md gap-table row F5). The forwards route through the
+// `:core` host twins (`sum`/`mean(vararg dims)`, `broadcastToLike` — §0.4.447),
+// whose linear-iteration walk the DxirInterpreter's SUM/MEAN projection
+// mirrors EXACTLY, so the trace-cached value and the transform's
+// `includeForward` re-evaluation are bit-identical. The attrs are
 // the interpreter's spellings: `reduction_dims` on SUM/MEAN (§0.4.366 Phase A1
 // arms; SumRule/MeanRule read the same attr for the keepdims-reshape reverse),
 // `broadcast_dimensions` on BROADCAST (§0.4.371 general form; BroadcastRule
 // reverses with SUM over the complementary axes). No gradient math here — the
 // transform owns it.
-
-/**
- * Shared axis-reduction forward: sum [value] (shaped [inDims]) over [axes],
- * DROPPING the reduced axes (the interpreter's projection — keepdims is a
- * separate RESHAPE the rules insert themselves when they need it). Returns the
- * accumulated array and the kept dims.
- */
-private fun reduceOverAxes(
-    value: FloatArray,
-    inDims: IntArray,
-    axes: List<Int>,
-): Pair<FloatArray, IntArray> {
-    val keep = inDims.indices.filter { it !in axes }
-    val outDims = IntArray(keep.size) { inDims[keep[it]] }
-    val outSize = if (outDims.isEmpty()) 1 else outDims.fold(1) { acc, d -> acc * d }
-    val out = FloatArray(outSize)
-    val inStrides = IntArray(inDims.size)
-    var st = 1
-    for (k in inDims.indices.reversed()) { inStrides[k] = st; st *= inDims[k] }
-    val outStrides = IntArray(keep.size)
-    st = 1
-    for (k in keep.indices.reversed()) { outStrides[k] = st; st *= inDims[keep[k]] }
-    for (flat in value.indices) {
-        var rem = flat
-        var outIdx = 0
-        for (d in inDims.indices) {
-            val coord = rem / inStrides[d]
-            rem -= coord * inStrides[d]
-            val kp = keep.indexOf(d)
-            if (kp >= 0) outIdx += coord * outStrides[kp]
-        }
-        out[outIdx] += value[flat]
-    }
-    return out to outDims
-}
 
 private fun Tracer<*>.checkReductionAxes(axes: IntArray, opName: String): List<Int> {
     val sorted = axes.distinct().sorted()
@@ -891,12 +869,12 @@ private fun Tracer<*>.checkReductionAxes(axes: IntArray, opName: String): List<I
 @Suppress("UNCHECKED_CAST")
 fun <S : Shape> Tracer<*>.sum(axes: IntArray): Tracer<S> {
     val sorted = checkReductionAxes(axes, "sum(axes)")
-    val (out, outDims) = reduceOverAxes(entry.value, dims, sorted)
+    val out = toDTensor().sum(*sorted.toIntArray())
     val e = tape.op(
         OpKind.SUM,
         intArrayOf(id),
-        outDims,
-        out,
+        out.dims.copyOf(),
+        out.hostF32(),
         attrs = mapOf("reduction_dims" to sorted),
     )
     return Tracer<Shape>(tape, e) as Tracer<S>
@@ -911,14 +889,12 @@ fun <S : Shape> Tracer<*>.sum(axes: IntArray): Tracer<S> {
 @Suppress("UNCHECKED_CAST")
 fun <S : Shape> Tracer<*>.mean(axes: IntArray): Tracer<S> {
     val sorted = checkReductionAxes(axes, "mean(axes)")
-    val (out, outDims) = reduceOverAxes(entry.value, dims, sorted)
-    val n = sorted.fold(1) { acc, d -> acc * dims[d] }
-    for (i in out.indices) out[i] /= n
+    val out = toDTensor().mean(*sorted.toIntArray())
     val e = tape.op(
         OpKind.MEAN,
         intArrayOf(id),
-        outDims,
-        out,
+        out.dims.copyOf(),
+        out.hostF32(),
         attrs = mapOf("reduction_dims" to sorted),
     )
     return Tracer<Shape>(tape, e) as Tracer<S>
@@ -948,11 +924,16 @@ fun <S : Shape> Tracer<*>.broadcastAlong(vec: Tracer<*>, axis: Int): Tracer<S> {
         "broadcastAlong: vec size ${vec.dims[0]} doesn't match receiver dim $axis = ${dims[axis]}"
     }
     val tape = sameTape(this, vec)
-    var inner = 1
-    for (k in axis + 1 until rank) inner *= dims[k]
-    val axisLen = dims[axis]
-    val v = vec.entry.value
-    val broadcasted = FloatArray(size) { flat -> v[(flat / inner) % axisLen] }
+    // Reviewed as a rank-N shape that is 1 everywhere except [axis] — a
+    // dims-only relabel of the same storage — so broadcastToLike's equal-rank
+    // stretch replicates every other axis: `broadcast_dimensions = [axis]`
+    // (§0.4.447: the host twin owns the walk).
+    val vecAligned = DTensor<Shape, F32>(
+        HostF32Storage(vec.entry.value.copyOf()),
+        IntArray(rank) { if (it == axis) dims[axis] else 1 },
+        F32,
+    )
+    val broadcasted = broadcastToLike(vecAligned, toDTensor()).hostF32()
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(vec.id),
@@ -964,22 +945,15 @@ fun <S : Shape> Tracer<*>.broadcastAlong(vec: Tracer<*>, axis: Int): Tracer<S> {
 }
 
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
-    val v = entry.value
-    var acc = 0f
-    for (x in v) acc += x
-    val e = tape.op(OpKind.SUM, intArrayOf(id), IntArray(0), floatArrayOf(acc))
+    val out = toDTensor().sum().hostF32()
+    val e = tape.op(OpKind.SUM, intArrayOf(id), IntArray(0), out)
     return Tracer<ScalarShape>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.mean(): Tracer<ScalarShape> {
-    val v = entry.value
-    if (v.isEmpty()) {
-        val e = tape.op(OpKind.MEAN, intArrayOf(id), IntArray(0), floatArrayOf(0f))
-        return Tracer<ScalarShape>(tape, e)
-    }
-    var acc = 0f
-    for (x in v) acc += x
-    val e = tape.op(OpKind.MEAN, intArrayOf(id), IntArray(0), floatArrayOf(acc / v.size))
+    // The host twin's empty-input convention (0f, not NaN) matches the tape's.
+    val out = toDTensor().mean().hostF32()
+    val e = tape.op(OpKind.MEAN, intArrayOf(id), IntArray(0), out)
     return Tracer<ScalarShape>(tape, e)
 }
 
@@ -988,27 +962,11 @@ infix fun <R : ShapeAtom, K : ShapeAtom, C : ShapeAtom> Tracer<Rank2<R, K>>.matm
 ): Tracer<Rank2<R, C>> {
     require(rank == 2 && other.rank == 2) { "matmul requires rank-2 tensors" }
     val tape = sameTape(this, other)
-    val m = dims[0]
-    val k = dims[1]
-    val kb = other.dims[0]
-    val n = other.dims[1]
-    require(k == kb) { "matmul inner dim mismatch: ${dims.toList()} x ${other.dims.toList()}" }
-
-    val a = entry.value
-    val b = other.entry.value
-    val out = FloatArray(m * n)
-    for (i in 0 until m) {
-        for (p in 0 until k) {
-            val aip = a[i * k + p]
-            if (aip == 0f) continue
-            val rowOff = i * n
-            val bOff = p * n
-            for (j in 0 until n) {
-                out[rowOff + j] += aip * b[bOff + j]
-            }
-        }
+    require(dims[1] == other.dims[0]) {
+        "matmul inner dim mismatch: ${dims.toList()} x ${other.dims.toList()}"
     }
-    val e = tape.op(OpKind.MATMUL, intArrayOf(id, other.id), intArrayOf(m, n), out)
+    val out = toDTensor() matmul other.toDTensor()
+    val e = tape.op(OpKind.MATMUL, intArrayOf(id, other.id), out.dims.copyOf(), out.hostF32())
     return Tracer<Rank2<R, C>>(tape, e)
 }
 
@@ -1036,6 +994,12 @@ infix fun <B : ShapeAtom, R : ShapeAtom, K : ShapeAtom, C : ShapeAtom>
     }
     val n = other.dims[2]
 
+    // §0.4.447 TWIN-GAP (audit finding B, recorded in AD_SINGLE_ENGINE_AUDIT.md):
+    // `:core` has no rank-3 batched-matmul host twin — its `matmul` is rank-2
+    // only — so this is the one private forward loop left in this file. The
+    // per-batch inner loop is byte-for-byte the rank-2 twin's skip-zero walk;
+    // when a `bmmGeneral` host twin lands, route through it and extend
+    // TracedOpsHostTwinParityTest's bit-equality pin.
     val a = entry.value
     val bArr = other.entry.value
     val out = FloatArray(batch * m * n)

@@ -9,6 +9,33 @@ readable by the user, and compiled.*
 
 ## Running record
 
+- **§0.4.447 — B CLOSED (one named twin-gap).** The ~24 private FloatArray
+  forward computations in `TracedOps.kt`'s pre-F4 spellings now route through
+  the certified `io.tlaloc.core.ops` host twins: the elementwise binaries
+  (ADD/SUB/MUL/DIV/POW → the DTensor operators + `pow`), the unaries
+  (NEG/RELU/STEP/SQRT/EXP/LOG/TANH/SIGMOID → their extension twins), rank-2
+  `matmul`, the full and axis reductions (SUM/MEAN → `sum()`/`mean()`/
+  `sum(vararg dims)`/`mean(vararg dims)`; the private `reduceOverAxes` helper
+  deleted), and the whole broadcast family (`broadcastScalar` →
+  `broadcastLike`; `broadcastRow`/`broadcastInner`/`broadcastBatch` →
+  right-aligned `broadcastToLike`; `broadcastCol`/`broadcastAlong` →
+  `broadcastToLike` over a dims-only `[M,1]` / ones-except-axis relabel of the
+  same storage). Bit-identity was free by construction (both sides already
+  called the identical `kotlin.math` Float overloads in the identical order)
+  and is now PINNED: `TracedOpsHostTwinParityTest` raw-bit-compares
+  (`Float.toRawBits`) every migrated op's traced value against the host twin
+  on quarter-grid AND irrational-constant inputs, plus hand-derived literal
+  anchors for the exact ops (add, matmul, the broadcast copies).
+  **The one named twin-gap: `bmm`** — `:core` has no rank-3 batched-matmul
+  host twin (its `matmul` is rank-2 only), so `bmm` keeps its private loop
+  (byte-for-byte the rank-2 twin's skip-zero walk, per-batch), commented as
+  the twin-gap at the site and guarded by a hand-derived bit-pin; route it
+  through a future `bmmGeneral` twin when one lands. NOT migrated, and not
+  twin-gaps: `reshape`/`slice`/`concat` carry no arithmetic (pure copy walks,
+  the F6 interpreter-mirror discipline — `:core`'s `sliceAtLike`/`padToLike`
+  are template-shaped adjoint helpers, not forward twins), and the F4–F6
+  spellings (conv2d/pools/embedding) already called their twins.
+
 - **§0.4.446 — A CLOSED, E CLOSED.** `Backward.kt` deleted; `Grad.kt`'s
   entire Tracer-convenience family (`grad`/`grad2`/`grad3`,
   `valueAndGrad{,2,3}`, `gradWithScalar{,s}`, `valueAndGradWithScalar{,s}`)
@@ -55,6 +82,7 @@ arms and the `:core` host twins, with no certified-equality pin. (The
 Phase F TRACE spellings, F4–F6, already call host twins — the older
 elementwise spellings predate that discipline.) **Fix: route the older
 spellings through the `:core` host twins; certify bit-equality.**
+**DONE §0.4.447** (one named twin-gap: `bmm`) — see the running record.
 
 **C. Half-alive OpKinds.** `LAYERNORM` and
 `SCALED_DOT_PRODUCT_ATTENTION`: priced by the cost model, LAYERNORM
