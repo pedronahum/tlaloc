@@ -14,6 +14,13 @@ class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
 
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
         FirExtensionRegistrarAdapter.registerExtension(TlalocFirExtensionRegistrar())
-        IrGenerationExtension.registerExtension(TlalocIrGenerationExtension())
+        // §0.4.450 — the readable-reverse dump options (see TlalocCommandLineProcessor):
+        // the dir form implies the message form.
+        val dumpDir = configuration.get(TlalocCommandLineProcessor.DUMP_GRAD_SOURCE_DIR_KEY)
+        val dump = (configuration.get(TlalocCommandLineProcessor.DUMP_GRAD_SOURCE_KEY) ?: false) ||
+            dumpDir != null
+        IrGenerationExtension.registerExtension(
+            TlalocIrGenerationExtension(dumpGradSource = dump, dumpGradSourceDir = dumpDir),
+        )
     }
 }

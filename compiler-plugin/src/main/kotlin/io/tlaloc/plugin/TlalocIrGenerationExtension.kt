@@ -11,6 +11,8 @@ import io.tlaloc.ir.passes.PhiCalculus
 import io.tlaloc.ir.passes.SymbolicEngine
 import io.tlaloc.ir.passes.SymjaEngine
 import io.tlaloc.ir.pretty
+import io.tlaloc.ir.render.toKotlinSource
+import java.io.File
 import java.nio.file.Path
 import java.nio.file.Paths
 import org.jetbrains.kotlin.backend.common.IrElementTransformerVoidWithContext
@@ -18,6 +20,7 @@ import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
+import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrExpression
@@ -50,8 +53,25 @@ import org.jetbrains.kotlin.name.Name
  * For every match — even when synthesis is skipped — we emit a `WARNING` via the plugin's
  * message collector naming the DxirFunction. That diagnostic is also what the older
  * scaffolding-era test asserts against.
+ *
+ * §0.4.450 — the readable-reverse dump (docs/AD_SINGLE_ENGINE_AUDIT.md, surface 2 —
+ * the north star's compile-time half). With [dumpGradSource] on (the
+ * `dumpGradSource` / `dumpGradSourceDir` plugin CLI options), every reverse-gradient
+ * intrinsic (`grad` / `grad2` / `grad3` / `valueAndGrad{,2,3}`) whose lambda the plugin
+ * SUCCESSFULLY synthesises also emits the reverse-transformed gradient
+ * [DxirFunction] rendered as Kotlin source by [toKotlinSource] — an INFO message
+ * headed by the lambda's source location, plus (dir form) a `.kt` file named after
+ * that location. The dump happens at the dxir level BEFORE synthesis: the rendered
+ * function is the IDENTICAL object handed to [DxirToIrSynthesis.synthesise], so the
+ * gradient the user reads is the gradient the compiler compiles. Gradients the
+ * §0.4.449 renderer cannot honestly print — above all the tensor `grad {}` world,
+ * whose -1 SENTINEL dims forbid every ranked-literal rendering (the house sentinel
+ * landmine) — dump a loud SKIPPED message naming the refusal instead of wrong source.
  */
-class TlalocIrGenerationExtension : IrGenerationExtension {
+class TlalocIrGenerationExtension(
+    private val dumpGradSource: Boolean = false,
+    private val dumpGradSourceDir: String? = null,
+) : IrGenerationExtension {
 
     @OptIn(UnsafeDuringIrConstructionAPI::class)
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
@@ -100,6 +120,9 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
         val cache: CoarseningCache = buildCoarseningCache(mc)
 
         val transformer = object : IrElementTransformerVoidWithContext() {
+            /** §0.4.450 — the file being transformed, for the dump's location header. */
+            var irFileForDump: IrFile? = null
+
             override fun visitCall(expression: IrCall): IrExpression {
                 val transformed = super.visitCall(expression) as IrCall
                 val ownerFn = transformed.symbol.owner
@@ -853,11 +876,22 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
                     )
                     return transformed
                 }
+                // §0.4.450 — the readable-reverse dump: synthesis SUCCEEDED, so
+                // `simplified` (the reverse-transformed gradient dxir, post-decompose,
+                // post-optional-simplify) is exactly what the bytecode now computes.
+                // Render THAT object as Kotlin source next to the lambda it
+                // differentiates. See [dumpGradKotlinSource].
+                if (dumpGradSource) {
+                    dumpGradKotlinSource(
+                        simplified, callableName, irFileForDump, transformed.startOffset, mc,
+                    )
+                }
                 return replacement
             }
         }
 
         for (file in moduleFragment.files) {
+            transformer.irFileForDump = file
             file.transformChildren(transformer, null)
         }
 
@@ -901,6 +935,69 @@ class TlalocIrGenerationExtension : IrGenerationExtension {
             null,
         )
         null
+    }
+
+    /**
+     * §0.4.450 — render the successfully synthesised gradient [gradFn] as Kotlin
+     * source (the §0.4.449 `toKotlinSource` host-twin renderer) and emit it as a
+     * compiler INFO message headed by the intrinsic call's source location; when
+     * [dumpGradSourceDir] is set, ALSO write it as a `.kt` file named after that
+     * location. The dump renders the dxir handed to synthesis — the gradient the
+     * user reads is the same function the synthesis compiles, by construction.
+     *
+     * The renderer's refusals stay LOUD here rather than fatal: a gradient it
+     * cannot honestly print — a tensor `grad {}` body whose types carry the -1
+     * SENTINEL dims (a ranked-literal rendering of those would bake
+     * sentinel-derived garbage, the house landmine), a twin-gap kind, control
+     * flow — dumps a SKIPPED message that repeats the refusal's named reason.
+     * Compilation is never affected: the dump is a window, not a gate.
+     */
+    private fun dumpGradKotlinSource(
+        gradFn: DxirFunction,
+        callableName: String,
+        irFile: IrFile?,
+        startOffset: Int,
+        mc: MessageCollector,
+    ) {
+        val entry = irFile?.fileEntry
+        val line = if (entry != null && startOffset >= 0) entry.getLineNumber(startOffset) + 1 else 0
+        val col = if (entry != null && startOffset >= 0) entry.getColumnNumber(startOffset) + 1 else 0
+        val loc = if (entry != null) "${entry.name}:$line:$col" else "(unknown location)"
+        val source = try {
+            gradFn.toKotlinSource()
+        } catch (t: Throwable) {
+            mc.report(
+                CompilerMessageSeverity.INFO,
+                "Tlaloc grad source dump SKIPPED for '$callableName' at $loc — the gradient " +
+                    "synthesised fine, but it has no honest Kotlin rendering: ${t.message}",
+                null,
+            )
+            return
+        }
+        mc.report(
+            CompilerMessageSeverity.INFO,
+            "Tlaloc grad source for '$callableName' at $loc — the reverse-transformed " +
+                "gradient rendered as Kotlin, the SAME dxir function the synthesis compiles:\n" +
+                source.trimEnd(),
+            null,
+        )
+        val dirRaw = dumpGradSourceDir ?: return
+        try {
+            val dir = File(dirRaw).absoluteFile
+            dir.mkdirs()
+            val fileBase = entry?.name?.substringAfterLast('/') ?: "unknown"
+            val base = "${fileBase}_${line}_${col}_$callableName"
+                .map { if (it.isLetterOrDigit() || it == '_') it else '_' }
+                .joinToString("")
+            File(dir, "$base.kt").writeText(source)
+        } catch (t: Throwable) {
+            mc.report(
+                CompilerMessageSeverity.WARNING,
+                "Tlaloc grad source dump: failed to write the .kt file for '$callableName' " +
+                    "at $loc under '$dirRaw' (${t::class.simpleName}: ${t.message})",
+                null,
+            )
+        }
     }
 
     /**

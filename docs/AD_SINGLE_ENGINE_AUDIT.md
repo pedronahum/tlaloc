@@ -9,6 +9,43 @@ readable by the user, and compiled.*
 
 ## Running record
 
+- **§0.4.450 — READABLE-REVERSE SURFACE 2 SHIPPED (the north star's
+  compile-time half).** The K2 plugin grew its FIRST CLI options
+  (`TlalocCommandLineProcessor`, META-INF-registered next to the registrar;
+  the process-tuning knobs stay system properties by design):
+  `-P plugin:io.tlaloc.plugin:dumpGradSource=true` and the file form
+  `dumpGradSourceDir=<dir>` (which implies the first). For every
+  reverse-gradient intrinsic (`grad`/`grad2`/`grad3`/`valueAndGrad{,2,3}`)
+  whose lambda the plugin SUCCESSFULLY synthesises, the extension renders the
+  reverse-transformed gradient through §0.4.449's `toKotlinSource` and emits
+  it as a compiler INFO message headed by the lambda's source location
+  (`file:line:col`), plus — dir form — a `.kt` file named after that location.
+  The dump happens at the dxir level BEFORE synthesis: the rendered object is
+  the IDENTICAL `DxirFunction` handed to `DxirToIrSynthesis.synthesise`, so
+  the gradient the user reads is the gradient the compiler compiles, by
+  construction. HONESTY RULE: gradients the renderer refuses — above all the
+  tensor `grad {}` world, whose -1 SENTINEL dims forbid ranked-literal
+  renderings (the house landmine §0.4.449 recorded) — dump a loud "SKIPPED"
+  message repeating the refusal's named reason, write NO file, and never
+  affect compilation (the dump is a window, not a gate). REJECTED: a
+  sentinel-tolerant rendering rushed into this slice (it would need a
+  Sym-extent value vocabulary the printer doesn't have — still the named open
+  item below); dumping post-synthesis IR instead of the pre-synthesis dxir
+  (the user would read decompiler output, not the derived gradient); WARNING
+  severity for the dump (a requested dump is information, not a warning —
+  INFO reaches the MessageCollector unfiltered, pinned E2E). Oracle
+  (`DumpGradSourceTest`, the §0.4.58 in-process K2JVMCompiler harness with
+  `pluginOptions`): a scalar `grad {}` program compiled with the option on
+  must dump at the right location with the host-twin spellings
+  (`DTensor<ScalarShape, F32>`, `Tensors.f32Scalar`, the operators), and —
+  the STRONG pin — the dumped `.kt` file is compiled STANDALONE (no plugin),
+  run, and matched RAW-BIT-IDENTICAL (`Float.toRawBits`, no epsilon) against
+  the plugin-compiled gradient's own outputs; the negative pin compiles a
+  rank-1 tensor lambda and asserts exactly one SKIPPED message naming the
+  sentinel, no source dump, no file. Deferrals: the jvp/vjp/jacobian/hessian
+  families dump nothing yet (same mechanism, one call site each — extend when
+  asked); the sentinel-tolerant tensor rendering remains the open item.
+
 - **§0.4.449 — READABLE-REVERSE SURFACE 1 SHIPPED (the north star's
   flagship).** `ir/.../render/KotlinSourceRenderer.kt`:
   `DxirFunction.toKotlinSource()` (+ top-level `toKotlinSource(fn)`, and the
@@ -200,5 +237,12 @@ Two surfaces, queued with the cleanup arc:
    just matching — see the running record).
 2. A K2 plugin dump option rendering each synthesized `grad {}` gradient
    body as Kotlin source at compile time, next to the lambda it
-   differentiates. (Open: needs a sentinel-tolerant rendering — the
-   §0.4.449 printer refuses -1 dims by design.)
+   differentiates. **DONE §0.4.450** (`dumpGradSource` /
+   `dumpGradSourceDir`; scalar gradients render and the dumped source
+   runs bit-identical to the compiled gradient — see the running
+   record). Still open, by name: the sentinel-tolerant rendering — a
+   tensor `grad {}` gradient's -1 dims refuse honestly (a loud SKIPPED
+   dump), because the §0.4.449 printer's ranked-literal renderings may
+   not bake sentinel-derived values; printing those bodies needs a
+   Sym-extent value vocabulary (dims read off operands at runtime, the
+   `*Like` twins' discipline extended to consts/reshape/broadcast).

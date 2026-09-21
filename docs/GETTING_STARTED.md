@@ -59,6 +59,27 @@ Without the plugin on the compiler classpath, `grad { }` throws at the
 call site with instructions (the tape API
 `io.tlaloc.autograd.gradWithScalars` works plugin-free for scalars).
 
+### Reading the gradient the compiler derived
+
+Tlaloc's north star is Tangent's: the derivative is code you can read.
+Two plugin options print, for every `grad {}` / `valueAndGrad {}` lambda
+the plugin synthesizes, the reverse-transformed gradient as Kotlin
+source over the `:core` host ops — the SAME DXIR function the synthesis
+then compiles to bytecode, so what you read is what runs:
+
+```
+-P plugin:io.tlaloc.plugin:dumpGradSource=true      # compiler INFO message per lambda
+-P plugin:io.tlaloc.plugin:dumpGradSourceDir=<dir>  # …plus one .kt file per lambda
+```
+
+Each dump is headed by the lambda's source location, and the dumped
+`.kt` file compiles and runs standalone — bit-identical to the compiled
+gradient (pinned in `DumpGradSourceTest`). Scalar lambdas render today;
+tensor `grad {}` lambdas (whose shapes are symbolic at compile time)
+print a named "dump SKIPPED" note instead of unprintable source. The
+runtime capture route (`CapturedStep.gradSource()`) renders tensor
+gradients too — see `docs/AD_SINGLE_ENGINE_AUDIT.md`.
+
 ## 4. Compile-time safety
 
 Named axes live in the type system, and the checker validates your
