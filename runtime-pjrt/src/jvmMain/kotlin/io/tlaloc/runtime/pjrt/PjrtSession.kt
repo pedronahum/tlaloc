@@ -78,7 +78,9 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * # v1 limitations (carried from runOnPjrt)
  *
- *   - F32 only.
+ *   - Per-lane single dtype: [runOn] is all-F32, [runOnF64] all-F64
+ *     (§0.4.354), [runOnBf16] all-BF16 (§0.4.457). Mixed-dtype programs
+ *     ride [runOn] with in-graph CASTs (the cast-at-boundary pattern).
  *   - Single-device dispatch (the first addressable device).
  *   - Plugin distribution depends on a JAX install or
  *     `TLALOC_PJRT_PLUGIN_PATH`; CPU plugin is "build from source"
@@ -224,6 +226,62 @@ class PjrtSession(
         } finally {
             inputBuffers.forEach { it.close() }
         }
+    }
+
+    /**
+     * §0.4.457 (G1c) — BF16 twin of [runOn]: every param and return must be
+     * BF16, and host arrays are RAW BIT PATTERNS per the §0.4.455 ShortArray
+     * convention (a Short is a 16-bit bucket, never a number — narrow/widen
+     * explicitly with `floatArrayToBf16Bits`/`bf16BitsToFloatArray`). The
+     * device stores and computes TRUE bf16; this lane does no numeric
+     * conversion in either direction, so what XLA rounds is what you read.
+     * Mixed-dtype programs (f32 params casting into bf16 compute) ride the
+     * plain [runOn] lane instead — the cast-at-boundary pattern.
+     */
+    fun runOnBf16(fn: DxirFunction, inputs: List<ShortArray>): List<ShortArray> {
+        check(!closed) { "PjrtSession is closed" }
+        require(fn.params.size == inputs.size) {
+            "PjrtSession.runOnBf16: param count ${fn.params.size} != input count ${inputs.size}"
+        }
+        for ((i, p) in fn.params.withIndex()) {
+            require(p.type.dtype == io.tlaloc.core.BF16) {
+                "PjrtSession.runOnBf16: param '${p.name}' dtype is ${p.type.dtype}; expected BF16"
+            }
+            val expected = p.type.elementCount.toInt()
+            require(inputs[i].size == expected) {
+                "PjrtSession.runOnBf16: param '${p.name}' expects size $expected but got ${inputs[i].size}"
+            }
+        }
+        for ((i, r) in fn.returns.withIndex()) {
+            require(r.type.dtype == io.tlaloc.core.BF16) {
+                "PjrtSession.runOnBf16: return[$i] dtype is ${r.type.dtype}; expected BF16"
+            }
+        }
+
+        val mlir = fn.toStablehlo("")
+        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
+            client.bufferFromHostBf16(device, arr, p.type.dims)
+        }
+        try {
+            val outputs = exec.execute(inputBuffers, device)
+            try {
+                return outputs.zip(fn.returns).map { (buf, ret) ->
+                    buf.toBf16Array(ret.type.elementCount.toInt())
+                }
+            } finally {
+                outputs.forEach { it.close() }
+            }
+        } finally {
+            inputBuffers.forEach { it.close() }
+        }
+    }
+
+    /** §0.4.457 (G1c) — stage a raw bf16 pattern array onto [device]. Caller
+     * owns the returned [PjrtBuffer] and must close it. */
+    fun bufferFromHostBf16(data: ShortArray, dims: List<Int>): PjrtBuffer {
+        check(!closed) { "PjrtSession is closed" }
+        return client.bufferFromHostBf16(device, data, dims)
     }
 
     /**

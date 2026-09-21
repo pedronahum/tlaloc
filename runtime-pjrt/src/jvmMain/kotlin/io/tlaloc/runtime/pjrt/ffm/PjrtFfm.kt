@@ -114,6 +114,11 @@ object PjrtFfm {
     internal const val PJRT_BUFFER_TYPE_F32: Int = 11
     // §0.4.354 — F64 joins the marshalling surface (PJRT_Buffer_Type.F64).
     internal const val PJRT_BUFFER_TYPE_F64: Int = 12
+    // §0.4.457 (G1c) — BF16 joins: PJRT_Buffer_Type_BF16 sits directly after
+    // F64 in the header enum (verified against xla/pjrt/c/pjrt_c_api.h:934).
+    // Host representation is the :core convention — a ShortArray of raw
+    // upper-16-bit f32 patterns, never numbers (§0.4.455).
+    internal const val PJRT_BUFFER_TYPE_BF16: Int = 13
 
     // =========================================================================
     // Args struct layouts. Every Args struct opens with:
@@ -863,6 +868,47 @@ class PjrtApi internal constructor(
         return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
     }
 
+    /** §0.4.457 (G1c) — bf16 twin of [bufferFromHostF32]. [data] is raw bit
+     * patterns per the §0.4.455 host convention (a Short is a 16-bit bucket);
+     * PJRT receives them verbatim as 2-byte elements typed BF16 — there is
+     * no numeric conversion anywhere on this path. */
+    internal fun bufferFromHostBf16(
+        clientPtr: MemorySegment,
+        devicePtr: MemorySegment,
+        data: ShortArray,
+        dims: List<Int>,
+        scratchArena: Arena,
+    ): MemorySegment {
+        val nElements = if (dims.isEmpty()) 1 else dims.fold(1) { a, b -> a * b }
+        require(data.size == nElements) {
+            "bufferFromHostBf16: dims product $nElements != data.size ${data.size}"
+        }
+
+        val dataSeg = scratchArena.allocate((nElements * 2).toLong())
+        for (i in 0 until nElements) dataSeg.set(ValueLayout.JAVA_SHORT, i * 2L, data[i])
+
+        val dimsSeg = scratchArena.allocate((dims.size * 8).toLong())
+        for ((i, d) in dims.withIndex()) dimsSeg.set(JAVA_LONG, i * 8L, d.toLong())
+
+        val args = scratchArena.allocate(PjrtFfm.PJRT_Client_BufferFromHostBuffer_Args_LAYOUT)
+        args.set(JAVA_LONG, PjrtFfm.OFF_BufferFromHost_StructSize, PjrtFfm.SZ_BufferFromHost)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Client, clientPtr)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Data, dataSeg)
+        args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_Type, PjrtFfm.PJRT_BUFFER_TYPE_BF16)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Dims, dimsSeg)
+        args.set(JAVA_LONG, PjrtFfm.OFF_BufferFromHost_NumDims, dims.size.toLong())
+        args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_HostSemantics, PjrtFfm.HOST_BUFFER_SEMANTICS_IMMUTABLE_ONLY_DURING_CALL)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Device, devicePtr)
+
+        val errorPtr = bufferFromHost.invokeExact(args) as MemorySegment
+        checkError(errorPtr)
+
+        val doneEvent = args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_DoneEvent)
+        if (doneEvent.address() != 0L) destroyEvent(doneEvent.reinterpret(Long.MAX_VALUE))
+
+        return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
+    }
+
     internal fun bufferDestroy(bufferPtr: MemorySegment) {
         Arena.ofConfined().use { scoped ->
             val args = scoped.allocate(PjrtFfm.PJRT_Buffer_Destroy_Args_LAYOUT)
@@ -928,6 +974,30 @@ class PjrtApi internal constructor(
                 destroyEvent(eventFull)
             }
             return DoubleArray(nDoubles) { dst.get(ValueLayout.JAVA_DOUBLE, it * 8L) }
+        }
+    }
+
+    /** §0.4.457 (G1c) — bf16 twin of [bufferToHostF32]: raw 16-bit patterns
+     * out, no numeric conversion (widening is the caller's explicit act via
+     * `bf16BitsToFloatArray`). */
+    internal fun bufferToHostBf16(bufferPtr: MemorySegment, nElements: Int): ShortArray {
+        Arena.ofConfined().use { scoped ->
+            val sizeBytes = (nElements * 2).toLong()
+            val dst = scoped.allocate(sizeBytes)
+            val args = scoped.allocate(PjrtFfm.PJRT_Buffer_ToHostBuffer_Args_LAYOUT)
+            args.set(JAVA_LONG, PjrtFfm.OFF_ToHost_StructSize, PjrtFfm.SZ_ToHost)
+            args.set(ADDRESS, PjrtFfm.OFF_ToHost_Src, bufferPtr)
+            args.set(ADDRESS, PjrtFfm.OFF_ToHost_Dst, dst)
+            args.set(JAVA_LONG, PjrtFfm.OFF_ToHost_DstSize, sizeBytes)
+            val errorPtr = toHost.invokeExact(args) as MemorySegment
+            checkError(errorPtr)
+            val event = args.get(ADDRESS, PjrtFfm.OFF_ToHost_Event)
+            if (event.address() != 0L) {
+                val eventFull = event.reinterpret(Long.MAX_VALUE)
+                awaitEvent(eventFull)
+                destroyEvent(eventFull)
+            }
+            return ShortArray(nElements) { dst.get(ValueLayout.JAVA_SHORT, it * 2L) }
         }
     }
 
@@ -1145,6 +1215,15 @@ class PjrtClient internal constructor(
         }
     }
 
+    /** §0.4.457 (G1c) — bf16 twin of [bufferFromHostF32]. [data] is raw bit
+     * patterns (the §0.4.455 ShortArray convention). */
+    fun bufferFromHostBf16(device: PjrtDevice, data: ShortArray, dims: List<Int>): PjrtBuffer {
+        Arena.ofConfined().use { scratch ->
+            val bufPtr = api.bufferFromHostBf16(clientPtr, device.devicePtr, data, dims, scratch)
+            return PjrtBuffer(bufPtr, this)
+        }
+    }
+
     override fun close() = api.destroyClient(clientPtr)
 }
 
@@ -1164,6 +1243,9 @@ class PjrtBuffer internal constructor(
 
     /** §0.4.354 — f64 twin of [toFloatArray]. */
     fun toDoubleArray(nDoubles: Int): DoubleArray = client.api.bufferToHostF64(bufferPtr, nDoubles)
+
+    /** §0.4.457 (G1c) — bf16 twin of [toFloatArray]: raw 16-bit patterns. */
+    fun toBf16Array(nElements: Int): ShortArray = client.api.bufferToHostBf16(bufferPtr, nElements)
 
     /** Size in bytes of the buffer's on-device storage (after layout +
      * padding). Useful for cross-checking against caller's expected size. */

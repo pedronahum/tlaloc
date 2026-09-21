@@ -110,6 +110,45 @@ recognizer-driven claiming; bounded dynamism stays tracked-not-chased.
 
 ## 5. Running record (Phase G)
 
+- **§0.4.457 — G1c DONE: bf16 certified against real XLA on the GB10**
+  (LOCAL certification — CUDA plugin on Blackwell; NO TPU claim, G2b
+  re-runs this suite there). BOTH forms from the G1c menu are certified,
+  stated loudly: **(1) NATIVE BF16 BUFFERS** — `PJRT_Buffer_Type_BF16`
+  (= 13, verified against xla/pjrt/c/pjrt_c_api.h) joins the FFM
+  marshalling surface as ShortArray-of-raw-patterns twins of the §0.4.354
+  F64 pair (`bufferFromHostBf16`/`bufferToHostBf16`,
+  `PjrtBuffer.toBf16Array`, `PjrtSession.runOnBf16` — an all-BF16 lane
+  with NO numeric conversion in either direction), and the staged
+  buffer's on-device size is 2 bytes/element — TRUE bf16 device storage,
+  not silently widened f32; **(2) CAST-AT-BOUNDARY** — f32 params,
+  in-graph casts, bf16 compute, f32 outputs, riding the existing `runOn`
+  lane (the mixed-precision-training shape). MEASURED CLAIMS
+  (PjrtBf16SmokeTest, assumeTrue self-skip off-GPU): device f32→bf16
+  narrowing BIT-EXACT vs the §0.4.455 RNE helper on a 19-lane sweep
+  (both tie directions, one-ulp neighbors, signed zeros, overflow→inf,
+  subnormal flushes) — probed through the dtype-agnostic `executeOn`
+  lane because of the first finding: **XLA's simplifier FOLDS an
+  f32→bf16→f32 convert pair to identity** (the naive round-trip program
+  came back raw), so only a single-convert program measures the device;
+  bf16 matmul+add on native buffers BIT-EXACT vs the interpreter on
+  bf16-exact lanes; the 257-tie discriminator ANSWERS G1b's open
+  per-intermediate-rounding question: XLA-CUDA rounds the dot output to
+  bf16 at the op boundary (256 — the interpreter's per-op-snap
+  convention, not fused-f32's 258); a DxirReverseTransform gradient
+  graph with bf16 compute (CastRule straight-through adjoint) runs on
+  GPU, exact lanes bit-exact, non-zero, and the one honest divergence
+  PINNED both ways: the device adjoint reads RAW x where the
+  interpreter reads snap(x) — XLA folds mul-by-one then elides the
+  narrow→widen pair — measured 0.0028125, exactly the snap error,
+  bounded at one bf16 ulp (2⁻⁸ relative), the recorded tolerance for
+  graphs whose narrowings are elidable. NaN narrowing pinned as `isNaN`
+  only (convert payload propagation is target-defined). OPEN FOR TPU
+  (G2b): re-run this suite on libtpu — the convert-fold and
+  op-boundary-rounding results are XLA-CUDA measurements that may
+  legitimately differ; TPU tiled buffer layout unverified; a typed
+  mixed-dtype session lane stays a named deferral (`executeOn` covers
+  the shape untyped). Suite 2067 → 2071.
+
 - **§0.4.456 — G1b DONE: bf16 through the IR.** The §0.4.455 emitter
   refusals lift; bf16 is now a first-class IR dtype end-to-end SHORT OF
   DEVICE EXECUTION (G1c owns that claim). INTERPRETER: value arrays stay
