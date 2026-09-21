@@ -39,8 +39,9 @@ dependencies {
     testImplementation(libs.kotest.assertions.core)
     testImplementation(libs.kotest.runner.junit5)
     // §0.4.58 — real :autograd on the test classpath so the Tracer-surface
-    // integration test can prove the plugin falls back and the runtime tape
-    // produces the correct gradient end-to-end (not via a broken-stub sentinel).
+    // integration test can prove the plugin falls back and the Tracer-capture route
+    // (§0.4.446: the same compiler engine, traced at runtime) produces the correct
+    // gradient end-to-end (not via a broken-stub sentinel).
     testImplementation(project(":autograd"))
 }
 

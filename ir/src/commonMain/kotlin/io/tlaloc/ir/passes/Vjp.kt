@@ -1964,6 +1964,12 @@ object VjpRegistry {
         OpKind.TRIGAMMA to TrigammaRule,
         OpKind.POLYGAMMA to PolygammaRule,
         OpKind.SIGN to SignRule,
+        // §0.4.446 — STEP shares SignRule's identically-zero adjoint (d/dx of a
+        // piecewise-constant is 0 everywhere but the jump; PyTorch/JAX convention).
+        // Inherited from the deleted runtime-tape engine's one local arm
+        // (`Backward.kt`'s STEP no-op), so a primal `step(x)` stays differentiable
+        // (to zero) under the single compiler engine instead of erroring.
+        OpKind.STEP to SignRule,
         OpKind.SQRT to SqrtRule,
         OpKind.TANH to TanhRule,
         OpKind.SIGMOID to SigmoidRule,

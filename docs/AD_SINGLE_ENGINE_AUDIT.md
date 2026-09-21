@@ -2,10 +2,36 @@
 
 **Status: findings RATIFIED by direction (Pedro, 2026-09-21: "why do we
 have a tape when we invested so much effort with the compiler … I don't
-want this to be a loose end"), fixes queued as the cleanup arc.** The
+want this to be a loose end"), fixes executing as the cleanup arc.** The
 governing product statement is on file in the same conversation: *Tlaloc
 is an improved Tangent and an improved DiffKT — the reverse code must be
 readable by the user, and compiled.*
+
+## Running record
+
+- **§0.4.446 — A CLOSED, E CLOSED.** `Backward.kt` deleted; `Grad.kt`'s
+  entire Tracer-convenience family (`grad`/`grad2`/`grad3`,
+  `valueAndGrad{,2,3}`, `gradWithScalar{,s}`, `valueAndGradWithScalar{,s}`)
+  reimplemented over capture → `Tape.toDxirFunction` →
+  `DxirReverseTransform(includeForward = true)` → `DxirInterpreter`,
+  signatures unchanged, `GradTest` green with ZERO value edits. The tape's
+  one local gradient arm (STEP ≡ 0) moved into `VjpRegistry`
+  (`STEP → SignRule` — the identical identically-zero adjoint), so
+  `step()` in a primal stays differentiable-to-zero under one engine, on
+  BOTH routes. Pins: `OneEngineParityTest` (E2E through the real K2
+  plugin, no stub — the same function on the Tracer surface and the
+  `grad {}`/`grad2 {}` intrinsic surface produces RAW-BIT-IDENTICAL
+  gradients), `SingleEngineDeletionTest` (`Class.forName` absence of
+  `BackwardKt`/`Gradients`), `GradTest.stepHasIdenticallyZeroGradient`
+  (primitive-compare zeros). `DxirBridgeEquivalenceTest` re-scoped: it now
+  pins that a lambda-built tape captures faithfully against hand-built IR,
+  not that two engines agree. E: "tape fallback" phrasing corrected across
+  `DIFFKT_PARITY_PLAN.md` / `STAGE_B_PLAN.md` / the §0.4.58 harness
+  comments to the `pluginMissing` reality (cert sentences now read
+  "no synthesis fallback" / "no silent fallback"). Deferral: the
+  `DScalarMixingGradientTest` test-name string "falls back to the tape"
+  kept (renaming a certified test's name adds no value; its doc already
+  reads as kept-original-call).
 
 ## Findings
 
@@ -20,7 +46,8 @@ a second AD engine in the tree. **Fix: reimplement `Grad.kt`'s API over
 capture → `Tape.toDxirFunction` → `DxirReverseTransform` →
 `DxirInterpreter` (same signatures), then DELETE `Backward.kt` and the
 bridge.** One engine — the compiler's. (Phase F's `:nn` route already
-proves the pattern end to end, §0.4.437.)
+proves the pattern end to end, §0.4.437.) **DONE §0.4.446** — see the
+running record.
 
 **B. `TracedOps` carries private forward math.** ~22 elementwise
 `FloatArray` loops — a third implementation alongside the interpreter
@@ -50,7 +77,8 @@ becomes cosmetic. No action beyond doc clarity.
 **E. "Tape fallback" language drift.** The intrinsics throw
 `pluginMissing` with guidance at runtime when synthesis falls back —
 there is no silent tape fallback for `grad {}` lambdas. Several records
-say "tape fallback"; sweep the phrasing.
+say "tape fallback"; sweep the phrasing. **DONE §0.4.446** — see the
+running record.
 
 ## Not a mess (deliberate dual implementations, certified)
 

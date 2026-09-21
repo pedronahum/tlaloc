@@ -15,14 +15,18 @@ package io.tlaloc.autograd
  * plugin's tape path doesn't cover), you get an exception that says
  * exactly what to do, instead of silently-wrong identity results.
  *
- * For plugin-free scalar work, the [Tracer]-tape API
- * ([gradWithScalars], [valueAndGradWithScalars]) remains available.
+ * For plugin-free work, the [Tracer]-capture API ([gradWithScalars],
+ * [valueAndGradWithScalars], and the `Grad.kt` family) remains available —
+ * since §0.4.446 it runs the SAME engine as the plugin route: the traced
+ * lambda is captured via `Tape.toDxirFunction`, differentiated by
+ * `DxirReverseTransform`, and evaluated by `DxirInterpreter`. The only
+ * difference is trace-at-runtime vs rewrite-at-compile-time.
  */
 internal fun pluginMissing(name: String): Nothing = throw IllegalStateException(
     "Tlaloc: `$name { }` requires the Tlaloc K2 compiler plugin, which rewrites this call at " +
         "compile time. Add `io.tlaloc:compiler-plugin` to kotlinCompilerPluginClasspath " +
-        "(docs/GETTING_STARTED.md), or use the Tracer-tape API (io.tlaloc.autograd.gradWithScalars) " +
-        "for plugin-free scalar gradients.",
+        "(docs/GETTING_STARTED.md), or use the Tracer-capture API (io.tlaloc.autograd.gradWithScalars) " +
+        "for plugin-free gradients over the same compiler engine.",
 )
 
 /** Gradient of a scalar-valued function of one tensor/value argument. */

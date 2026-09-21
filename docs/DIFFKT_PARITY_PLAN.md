@@ -393,7 +393,7 @@ reachable from `grad {}`, not new math. New-op families come after.
         note here claimed one line would do it; that was wrong.) Consequence: for a
         concat the K2 synthesis path is the ONLY path, so a synthesis rejection is a
         hard failure rather than a slow fallback — hence the E2E no-fallback pins.
-      Certified: 3 E2E through the real K2 plugin with no tape fallback —
+      Certified: 3 E2E through the real K2 plugin with no synthesis fallback —
       `Σ concat(1, a⊙2, b⊙3)` over a[2,2]/b[2,3] (da = 2s shape [2,2], db = 3s
       shape [2,3]: each operand gets its OWN window back); a THREE-operand
       `Σ concat(1, a, b, a)` where `a` feeds windows 0 and 2, so its two
@@ -795,7 +795,7 @@ reachable from `grad {}`, not new math. New-op families come after.
        in §0.4.393.
        Also certified: `ConvTransposeGradientTest` E2E through the real plugin for
        both the stride-1 and the upsampling (`lhs_dilation` 2) spellings, all four
-       gradients against central differences, no tape fallback; and the
+       gradients against central differences, no synthesis fallback; and the
        host↔interpreter bit-exact walk extended to both new kinds with an
        asymmetric `window_reversal` [true, false] so a swapped or dropped flag cannot
        cancel out.
@@ -886,7 +886,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     `io.tlaloc.core.ops.sqrt` and tensor-IrType threading", and that extension
     already existed. New host shims: `reshapeToRank4`, `unsqueezeAxes3`,
     `squeezeAxes3`, `{sum,mean,max,min}Over3`.
-    Certified: `BatchNormGradientTest` E2E through the real plugin, no tape fallback,
+    Certified: `BatchNormGradientTest` E2E through the real plugin, no synthesis fallback,
     with TWO oracles because one is not enough — the primal value against an
     independent Double implementation (which is what pins the wiring, since
     `valueAndGrad2`'s value and gradients come from the same lowered graph and a
@@ -1199,13 +1199,16 @@ reachable from `grad {}`, not new math. New-op families come after.
       to the anonymous type-mismatch guard: the refusal is structural (the
       function type fixes the slot to the interface, so the concrete class
       at the returned function's call sites is unknowable at compile time —
-      no constructor to box the gradient into), the tape fallback still
-      runs, and the `kept original call` warning names both concrete
-      spellings (`FloatScalar (F32) or DoubleScalar (F64)`). REJECTED — a
-      checker-level hard error: the runtime tape handles the dynamic
-      spelling correctly today, and erroring would break working code to
-      punish a supported (if slower) path. All four certs value-checked in
-      `DScalarMixingGradientTest`.
+      no constructor to box the gradient into), the lambda keeps its
+      original call — which throws `pluginMissing` loudly at first
+      invocation (§0.4.446 phrasing correction: there was never a silent
+      runtime-tape fallback for `grad {}` lambdas) — and the
+      `kept original call` warning names both concrete spellings
+      (`FloatScalar (F32) or DoubleScalar (F64)`). REJECTED — a
+      checker-level hard error: the kept call already fails loudly with
+      guidance at first invocation, and a compile-time error would also
+      break builds whose returned function is never invoked. All four
+      certs value-checked in `DScalarMixingGradientTest`.
 
 ### Phase B — AD-mode parity
 
@@ -1267,7 +1270,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     seeded lambda's true `Function2<A, A, R>` type (A from the intrinsic
     call's type, R from the `f` argument's type) and passes it through; the
     original call keeps supplying source offsets only.
-  - **No tape fallback** (the `concat` precedent): a synthesis rejection
+  - **No silent fallback** (the `concat` precedent): a synthesis rejection
     keeps the original call, which throws `pluginMissing` loudly at first
     invocation. The FIR checker probes `jacobian` with the forward transform
     (its lambda returns a TENSOR, which the reverse probe would reject) and
@@ -1314,7 +1317,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     only seam is parameter ORDER — the transform emits the upstream first,
     the declared surface takes `(x, ȳ)` — and synthesis resolves body
     references by node id (params are positional metadata), so the plugin
-    rotates the params list and synthesises directly. No tape fallback
+    rotates the params list and synthesises directly. No silent fallback
     (the `concat`/`jacobian` precedent); the FIR checker probes with
     `seedAsParam = true` so tensor-returning bodies are checked with
     exactly what the IR extension runs.
@@ -1370,7 +1373,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     the override (`seedRet` = `R` for `jacobian2`, `Pair<A, B>` for
     `hessian2`). Checker probes match the real lowering: `jacobian2`
     forward, `hessian2` forward∘reverse, `vjp2`/`valueAndVjp2` seeded
-    reverse. No tape fallback (the `concat` precedent).
+    reverse. No silent fallback (the `concat` precedent).
   - Certified E2E (`MultiArgSeededIntrinsicTest`, the §0.4.394 pattern —
     real plugin, REAL generic `:autograd` declarations, no stubs, "kept
     original call" a hard failure): `vjp2` over `Σ(a⊙b)` at scalar ȳ = 2
@@ -1418,7 +1421,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     `callTypeOverride = Function2<A, R, A>` (the call site's own type is
     the 1-param ASSEMBLED function), then one IrCall to
     `assembleJacobianReverse(f, vjp)`. Checker probes the seeded reverse,
-    exactly what the extension runs. No tape fallback (the `concat`
+    exactly what the extension runs. No silent fallback (the `concat`
     precedent). Scalar-R needed NO special casing: a `Float`-returning
     `f` synthesises with a Float-typed upstream (certified since
     §0.4.406's scalar-ȳ `vjp2`) and degenerates to the `[1, n]` row at a
@@ -1836,7 +1839,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     `Σ lgamma(digamma(x⊙w))` (both rules + TRIGAMMA chained), f32
     central-difference cross-check through the interpreter; E2E `grad {}` ×4
     (scalar lgamma/digamma — the digamma one pins that TRIGAMMA synthesises
-    despite having no FIR entry — and the tensor twins, no tape fallback);
+    despite having no FIR entry — and the tensor twins, no synthesis fallback);
     host pins; GPU smoke.
   - ~~Deferred tail: general `POLYGAMMA(n)`~~ **CLOSED, §0.4.405** — see the
     entry below.
@@ -1894,7 +1897,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     the Int-arg `tensorUnaryCall` extension, scalar via the
     `coreScalarIntArgSymbolFor` sibling of the §0.4.377 path; POLYGAMMA in
     all three IrType-solver unary lists. E2E ×5 in
-    `PolygammaGradientTest`, no tape fallback: scalar orders 0/1/2 (the
+    `PolygammaGradientTest`, no synthesis fallback: scalar orders 0/1/2 (the
     normalisation pins: d polygamma(0) = ψ₁, d polygamma(1) = ψ₂,
     d polygamma(2) = ψ₃) + tensor orders 1/2.
 - **C2. Trig tails** ✅ **DONE, §0.4.395 (2026-09-20)**: `TAN` and `ATAN`,
@@ -1923,7 +1926,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     elementwise lists.
   - Certified: IR-level analytic pins with non-uniform upstream + the
     JVP⇄VJP cross-identity through `atan(tan(x)⊙w)`; five E2E `grad {}`
-    spellings through the real plugin with no tape fallback (scalar
+    spellings through the real plugin with no synthesis fallback (scalar
     receiver ×2, bare `kotlin.math` ×1, tensor ×2); GPU smoke grads within
     2.3e-5 of the interpreter.
 - ✅ **C3. `REVERSE` (flip) op — DONE (§0.4.396)**: DiffKT `flip(axes)` as a
@@ -1954,7 +1957,7 @@ reachable from `grad {}`, not new math. New-op families come after.
     non-square shape — the non-contiguous copy — both axes, involution);
     `∇_a Σ flip(a)⊙b = flip(b)` with non-uniform upstream; JVP⇄VJP
     cross-identity through `Σ tanh(flip(a)⊙b)`; E2E `grad {}` through the
-    real plugin on one AND two axes with no tape fallback; host pins with
+    real plugin on one AND two axes with no synthesis fallback; host pins with
     refusals; GPU smoke. The runtime tape deliberately has no flip
     producer (the §0.4.382 concat precedent) — synthesis is the only path.
   - Still open (unchanged): re-expressing the conv adjoints'

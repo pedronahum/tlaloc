@@ -700,7 +700,10 @@ Inside `PhiCalculus.apply(fn: DxirFunction)`:
      try C7 (constant-a, indexed-b affine)
      try C6 (constant-a, constant-b affine)
      try C5 (simple iteration f^n(p))
-     if none apply, leave WHILE in place — Stage A's runtime-tape fallback handles it
+     if none apply, leave WHILE in place — the lambda keeps its original call, which fails
+     loudly at first invocation (`pluginMissing`; §0.4.446 phrasing correction — there is no
+     silent runtime-tape fallback; the Tracer-capture API unrolls value-dependent loops at
+     trace time instead)
 11. for each IF not eliminated by F1/F2/C1/C3:
      // C2 is implicit — Stage A's reverse-mode AD on the IF-flattened body produces
      // the C2-style adjoint per branch automatically. No explicit C2 call here.

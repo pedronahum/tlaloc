@@ -1927,4 +1927,18 @@ class GradTest {
             )
         }
     }
+
+    @Test
+    fun stepHasIdenticallyZeroGradient() {
+        // §0.4.446 — d/dx step(x) = 0 everywhere (piecewise-constant; Dirac at the
+        // jump treated as 0 — PyTorch/JAX convention). This was the deleted
+        // runtime-tape engine's ONE local arm (`Backward.kt`'s empty STEP case);
+        // under the single compiler engine it is VjpRegistry's STEP → SignRule
+        // zero. Structural zeros pinned with primitive `v == 0f` (signed-zero
+        // landmine), never boxed assertEquals.
+        val vg = valueAndGrad { x: Tracer<io.tlaloc.core.Rank1<Sym>> -> x.step().sum() }
+        val (value, dx) = vg(Tensors.f32Vector(floatArrayOf(-2f, 0f, 3f)))
+        assertEquals(1f, value)  // step = [0, 0, 1] (step(0) = 0), sum = 1
+        for (v in dx.hostF32()) assertTrue(v == 0f, "step grad must be exactly zero; got $v")
+    }
 }

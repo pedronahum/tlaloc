@@ -5,13 +5,45 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
-import io.tlaloc.core.hostF32
+import io.tlaloc.ir.passes.DxirInterpreter
+import io.tlaloc.ir.passes.DxirReverseTransform
 
-private fun <S : Shape> gradTensor(tape: Tape, grads: Gradients, id: Int): DTensor<S, F32> {
-    val entry = tape.entries[id]
-    val data = grads.get(id) ?: FloatArray(entry.size)
-    return DTensor(HostF32Storage(data), entry.dims.copyOf(), F32)
+/*
+ * §0.4.446 — ONE AD ENGINE. The Tracer-convenience API below used to run its own
+ * runtime value-tape reverse walk (`Backward.kt`, deleted in the same commit). Now
+ * every entry point routes through the COMPILER's AD, exactly like `grad {}`
+ * intrinsics and the `:nn` model layer (§0.4.437):
+ *
+ *   trace (Tape) → [Tape.toDxirFunction] → [DxirReverseTransform] (includeForward)
+ *                → [DxirInterpreter.evalFunction]
+ *
+ * The signatures are unchanged; only the engine underneath moved. The tape remains
+ * purely a TRACING structure (eager forward values + op recording) — it no longer
+ * walks itself backwards. Gradient math lives in one place, the IR-side
+ * `VjpRegistry`, consumed by one transform.
+ */
+
+/**
+ * The shared spine: reproduce the tape as a [io.tlaloc.ir.DxirFunction] whose
+ * params are [leafIds] (in order) and whose single return is [outId], apply the
+ * reverse transform with `includeForward = true` — the gradient function's
+ * outputs are `(value, *grads)`, one grad per param positionally — and evaluate
+ * it on the tape's cached leaf values via the interpreter.
+ */
+private fun reverseThroughCompiler(
+    tape: Tape,
+    leafIds: List<Int>,
+    outId: Int,
+    name: String,
+): List<FloatArray> {
+    val primal = tape.toDxirFunction(name, paramIds = leafIds, returnIds = listOf(outId))
+    val gradient = DxirReverseTransform.apply(primal, includeForward = true)
+    val inputs = leafIds.map { tape.entries[it].value }
+    return DxirInterpreter.evalFunction(gradient, inputs)
 }
+
+private fun <S : Shape> gradTensor(tape: Tape, id: Int, data: FloatArray): DTensor<S, F32> =
+    DTensor(HostF32Storage(data), tape.entries[id].dims.copyOf(), F32)
 
 fun <S : Shape> valueAndGrad(
     f: (Tracer<S>) -> Tracer<ScalarShape>,
@@ -20,9 +52,8 @@ fun <S : Shape> valueAndGrad(
     val x = tape.traceLeaf<S>(input)
     val out = f(x)
     require(out.rank == 0) { "valueAndGrad expects a scalar output, got rank ${out.rank}" }
-    val value = out.entry.value[0]
-    val grads = backward(tape, out.id, floatArrayOf(1f))
-    value to gradTensor<S>(tape, grads, x.id)
+    val outs = reverseThroughCompiler(tape, listOf(x.id), out.id, "valueAndGrad")
+    outs[0][0] to gradTensor<S>(tape, x.id, outs[1])
 }
 
 fun <S : Shape> grad(
@@ -41,9 +72,8 @@ fun <S1 : Shape, S2 : Shape> valueAndGrad2(
         val tb = tape.traceLeaf<S2>(b)
         val out = f(ta, tb)
         require(out.rank == 0) { "valueAndGrad2 expects scalar output, got rank ${out.rank}" }
-        val value = out.entry.value[0]
-        val grads = backward(tape, out.id, floatArrayOf(1f))
-        Triple(value, gradTensor<S1>(tape, grads, ta.id), gradTensor<S2>(tape, grads, tb.id))
+        val outs = reverseThroughCompiler(tape, listOf(ta.id, tb.id), out.id, "valueAndGrad2")
+        Triple(outs[0][0], gradTensor<S1>(tape, ta.id, outs[1]), gradTensor<S2>(tape, tb.id, outs[2]))
     }
 
 fun <S1 : Shape, S2 : Shape> grad2(
@@ -59,8 +89,8 @@ fun <S1 : Shape, S2 : Shape> grad2(
  * at [Triple], so the 3-input variant introduces a small named 4-tuple parallel to
  * how [valueAndGrad2] reused stdlib [Triple] for its 3-tuple result. Mechanics
  * mirror [valueAndGrad2]: trace each input as a tape leaf, evaluate the lambda,
- * require a scalar output, run reverse mode with seed `1f`, and unpack the
- * gradients per leaf.
+ * require a scalar output, and run the captured function through the compiler's
+ * reverse transform (§0.4.446).
  */
 fun <S1 : Shape, S2 : Shape, S3 : Shape> valueAndGrad3(
     f: (Tracer<S1>, Tracer<S2>, Tracer<S3>) -> Tracer<ScalarShape>,
@@ -72,13 +102,12 @@ fun <S1 : Shape, S2 : Shape, S3 : Shape> valueAndGrad3(
         val tc = tape.traceLeaf<S3>(c)
         val out = f(ta, tb, tc)
         require(out.rank == 0) { "valueAndGrad3 expects scalar output, got rank ${out.rank}" }
-        val value = out.entry.value[0]
-        val grads = backward(tape, out.id, floatArrayOf(1f))
+        val outs = reverseThroughCompiler(tape, listOf(ta.id, tb.id, tc.id), out.id, "valueAndGrad3")
         Quadruple(
-            value,
-            gradTensor<S1>(tape, grads, ta.id),
-            gradTensor<S2>(tape, grads, tb.id),
-            gradTensor<S3>(tape, grads, tc.id),
+            outs[0][0],
+            gradTensor<S1>(tape, ta.id, outs[1]),
+            gradTensor<S2>(tape, tb.id, outs[2]),
+            gradTensor<S3>(tape, tc.id, outs[3]),
         )
     }
 
@@ -113,7 +142,6 @@ fun <S1 : Shape, S2 : Shape, S3 : Shape> grad3(
 // and the new mixed variant — producing overload ambiguity. A different name
 // keeps each surface unambiguous.
 
-@Suppress("UNCHECKED_CAST")
 fun <S : Shape> valueAndGradWithScalar(
     f: (Tracer<S>, Tracer<ScalarShape>) -> Tracer<ScalarShape>,
 ): (DTensor<S, F32>, Float) -> Triple<Float, DTensor<S, F32>, Float> = { a, bFloat ->
@@ -127,10 +155,8 @@ fun <S : Shape> valueAndGradWithScalar(
     val tb = tape.traceLeaf<ScalarShape>(bTensor)
     val out = f(ta, tb)
     require(out.rank == 0) { "valueAndGradWithScalar expects scalar output, got rank ${out.rank}" }
-    val value = out.entry.value[0]
-    val grads = backward(tape, out.id, floatArrayOf(1f))
-    val dScalar = gradTensor<ScalarShape>(tape, grads, tb.id).hostF32()[0]
-    Triple(value, gradTensor<S>(tape, grads, ta.id), dScalar)
+    val outs = reverseThroughCompiler(tape, listOf(ta.id, tb.id), out.id, "valueAndGradWithScalar")
+    Triple(outs[0][0], gradTensor<S>(tape, ta.id, outs[1]), outs[2][0])
 }
 
 fun <S : Shape> gradWithScalar(
@@ -155,11 +181,8 @@ fun valueAndGradWithScalars(
     val tb = tape.traceLeaf<ScalarShape>(bTensor)
     val out = f(ta, tb)
     require(out.rank == 0) { "valueAndGradWithScalars expects scalar output, got rank ${out.rank}" }
-    val value = out.entry.value[0]
-    val grads = backward(tape, out.id, floatArrayOf(1f))
-    val da = gradTensor<ScalarShape>(tape, grads, ta.id).hostF32()[0]
-    val db = gradTensor<ScalarShape>(tape, grads, tb.id).hostF32()[0]
-    Triple(value, da, db)
+    val outs = reverseThroughCompiler(tape, listOf(ta.id, tb.id), out.id, "valueAndGradWithScalars")
+    Triple(outs[0][0], outs[1][0], outs[2][0])
 }
 
 fun gradWithScalars(

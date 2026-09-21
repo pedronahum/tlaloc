@@ -20,7 +20,9 @@ import kotlin.test.assertEquals
  * End-to-end proof that a user's `grad { x: Tracer<ScalarShape> -> ... }` with a
  * break-bearing `while` loop compiles through the Tlaloc plugin, falls back cleanly
  * when the plugin can't specialise the shape, and produces the correct gradient via
- * the runtime tape in `:autograd`. Unlike [TlalocPluginDiagnosticTest], which uses
+ * `:autograd`'s Tracer-capture route (§0.4.446: trace-at-runtime into the SAME
+ * compiler engine — capture → `DxirReverseTransform` → `DxirInterpreter` — with the
+ * value-dependent loop unrolled at trace time). Unlike [TlalocPluginDiagnosticTest], which uses
  * `AUTOGRAD_STUB_BROKEN` sentinels to prove the plugin path didn't fire, this test
  * uses the REAL `:autograd` on the test classpath (added as a `testImplementation`
  * dependency in `compiler-plugin/build.gradle.kts`) so the observable output is the
@@ -35,7 +37,7 @@ import kotlin.test.assertEquals
 class TlalocPluginTracerFallbackTest {
 
     @Test
-    fun `break-bearing while on Tracer surface falls back and runtime tape produces correct gradient`() {
+    fun `break-bearing while on Tracer surface falls back and the Tracer capture route produces correct gradient`() {
         // f(x) = doubling until d > 10. For x = 0.5:
         //   5 doublings → df/dx = 2^5 = 32.
         // The plugin CANNOT emit this closed-form (data-dependent break;
@@ -43,7 +45,7 @@ class TlalocPluginTracerFallbackTest {
         // hits DxirReverseTransform's gate → tryReverseTransform returns null
         // → original call kept; OR it rejects at FIR (Tracer params are out-of-
         // scope) → LAMBDA_UNSUPPORTED warning; either way the call remains
-        // unmodified and the runtime tape in :autograd produces the gradient.
+        // unmodified and :autograd's Tracer-capture route produces the gradient.
         val src = """
             import io.tlaloc.autograd.*
             import io.tlaloc.core.ScalarShape
@@ -70,7 +72,7 @@ class TlalocPluginTracerFallbackTest {
         assertEquals(
             "32.0",
             result.stdout.trim(),
-            "expected runtime-tape gradient 32.0 (2^5) for x=0.5 doubling kernel; " +
+            "expected Tracer-capture gradient 32.0 (2^5) for x=0.5 doubling kernel; " +
                 "got '${result.stdout.trim()}'",
         )
     }

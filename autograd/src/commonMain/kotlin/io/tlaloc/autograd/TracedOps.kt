@@ -141,8 +141,8 @@ fun <S : Shape> Tracer<S>.sigmoid(): Tracer<S> {
  * §0.4.64 — elementwise `base^exp`. Both operands must be same-shape F32 Tracers
  * sharing one tape. VjpRegistry's `PowRule` (§0.4.22; §0.4.53 widened for Int exp
  * inside C6's closed form) computes grad_base = upstream · exp · base^(exp-1)
- * and grad_exp = upstream · base^exp · ln(base). Both flow back through the
- * tape when [Backward.kt:49] routes `OpKind.POW` into the registry.
+ * and grad_exp = upstream · base^exp · ln(base). Both flow back when the
+ * captured function's `OpKind.POW` meets `DxirReverseTransform` (§0.4.446).
  *
  * For `x ↦ x^k` where `k` is a runtime-known scalar, wrap `k` as a scalar leaf
  * (e.g. `tape.traceLeaf(f32Scalar(k))`) — it participates in the reverse walk,
@@ -163,9 +163,9 @@ fun <S : Shape> Tracer<S>.pow(other: Tracer<S>): Tracer<S> {
 // `Tracer<S> <op> Float` composes cleanly through `.constantLike(scalar)` +
 // the existing same-shape operators: the scalar is promoted to a rank-S
 // constant leaf (flagged non-differentiable via §0.4.65's isConstant path),
-// and the existing plus/minus/times/div/pow operators apply unchanged. The
-// constant-skip short-circuit in `Backward.applyRegistryRule` means no
-// gradient work is spent on the promoted leaf. Callers can write idiomatic
+// and the existing plus/minus/times/div/pow operators apply unchanged. In the
+// captured `DxirFunction` (§0.4.446) the promoted leaf becomes a `DxirConst`,
+// not a param, so no gradient is ever produced for it. Callers can write idiomatic
 // `x + 5f`, `x * 0.5f` on any rank without reaching for `x.constantLike(...)`
 // explicitly.
 
@@ -194,8 +194,8 @@ fun <S : Shape> Tracer<S>.pow(scalar: Float): Tracer<S> = this.pow(constantLike(
 //
 // Forward: broadcast scalar to rank-1 (records OpKind.BROADCAST on the tape
 // with the rank-1 operand's dims as target), then run the regular same-shape
-// op. Backward routes BROADCAST through VjpRegistry.BroadcastRule which
-// emits SUM(upstream) as the reverse.
+// op. The reverse transform routes BROADCAST through VjpRegistry.BroadcastRule
+// which emits SUM(upstream) as the reverse.
 //
 // Scope for §0.4.77: rank-1 receiver only. Rank-2+ overloads are a
 // straight-line extension using the same machinery; deferred until a use case

@@ -23,11 +23,14 @@ import kotlin.test.assertTrue
  * expression as a [DxirFunction] and (where the tape surface supports it) as a
  * [Tracer]-based lambda, runs both paths, and asserts the gradient values match.
  *
- * The runtime-tape path is `valueAndGrad` → `backward` (which now routes elementwise
- * arms through `VjpRegistry` + `DxirInterpreter`). The SCT path is
- * `DxirReverseTransform.apply` → `DxirInterpreter.evalFunction`. Matching numerical
- * output confirms the two paths share one math source-of-truth for every op in the
- * registry's current scope (ADD / SUB / MUL / DIV / NEG).
+ * §0.4.446 — the Tracer path is `valueAndGrad` → capture (`Tape.toDxirFunction`) →
+ * `DxirReverseTransform` → `DxirInterpreter` (the runtime value-tape engine is
+ * deleted; one AD engine, the compiler's). The SCT path here builds the SAME
+ * expression as a hand-written `DxirFunction` and runs
+ * `DxirReverseTransform.apply` → `DxirInterpreter.evalFunction` directly. Matching
+ * numerical output now pins that the Tracer surface CAPTURES faithfully — that a
+ * lambda-built tape reproduces the hand-built IR — rather than that two engines
+ * happen to agree.
  *
  * As of §0.4.7 the registry also covers `RELU` (via `ReluRule = upstream * STEP(x)`),
  * and `DIV` has a tape-side implementation in `TracedOps.kt`, so the reciprocal case

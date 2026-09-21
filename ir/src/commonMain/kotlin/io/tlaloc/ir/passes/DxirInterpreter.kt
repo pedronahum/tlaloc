@@ -27,14 +27,13 @@ import kotlin.math.pow
  * `env` mapping SSA ids to concrete `FloatArray`s; the interpreter walks a node's
  * operand tree, materialising intermediate values in the env as it goes.
  *
- * ### Role in the tape↔registry bridge (§11.8.1 step 1)
+ * ### Role under the single engine (§0.4.446)
  *
- * [io.tlaloc.autograd.backward]'s elementwise arms used to inline the per-op adjoint
- * math. They now build a transient primal [DxirOp] whose [DxirParam] operands and
- * result are typed with the tape entry's actual `dims`, hand it to
- * `VjpRegistry[op]!!.apply(...)`, and evaluate the returned contribution nodes via
- * [evalNode]. The registry is the canonical math source-of-truth; this interpreter is
- * how runtime-tape code consumes it.
+ * The runtime value-tape's `backward()` (which consumed [VjpRegistry] through a
+ * transient-primal bridge, §11.8.1 step 1) is deleted. Every gradient — Tracer-capture
+ * API, `grad {}` intrinsics, `:nn` training — is a `DxirReverseTransform` output, and
+ * this interpreter is the host-execution backend for those functions
+ * ([evalFunction]). The registry remains the canonical math source-of-truth.
  *
  * ### Shape-awareness
  *

@@ -279,6 +279,13 @@ BatchNorm, exactly (the momentum convention matters):
 
 #### 4.0.5 The tape today (what `:autograd` already covers)
 
+> **§0.4.446 correction:** `Backward.kt` is DELETED (audit finding A —
+> one AD engine). The Tracer API now captures via `Tape.toDxirFunction`
+> into `DxirReverseTransform`; STEP's inline zero arm became
+> `VjpRegistry`'s `STEP → SignRule`. This section and the
+> `Backward.kt` dispatch notes below stand as the historical record of
+> the planning-time shape.
+
 `TracedOps.kt` records, and `Backward.kt` routes through
 `applyRegistryRule` (the real `VjpRegistry` + `DxirInterpreter` bridge):
 
