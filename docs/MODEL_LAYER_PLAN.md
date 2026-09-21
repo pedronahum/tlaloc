@@ -1,6 +1,15 @@
 # Phase F — the model/optimizer layer (`:nn`)
 
-**Status: RATIFIED (Pedro, 2026-09-21) — GO on the scope below.** This
+**Status: COMPLETE (§0.4.434–444, all landed 2026-09-21) — the ratified
+scope, as amended (decision 3: the COMPILER route), is fully delivered.**
+Ratified by Pedro 2026-09-21 (§0.4.434); amended the same day before any
+substrate code landed (§0.4.436); F0–F8 landed in eleven §, one day. The
+end-to-end close: an MLP and a conv net TRAIN through capture →
+`DxirReverseTransform` → interpreter/GPU with the F3 optimizers, the
+captured gradient graph compiles and runs on the GB10 through
+`PjrtSession` matching the interpreter at 3.8e-5, and 50 Adam steps track
+PyTorch at ~1e-7 relative from a shared init. Deferrals are consolidated
+at the end of §4's F8 entry. This
 document is the Phase F authority, the
 [SPARSE_PARITY_AUDIT.md](SPARSE_PARITY_AUDIT.md) /
 [CUSTOM_DERIVATIVES_DESIGN.md](CUSTOM_DERIVATIVES_DESIGN.md) pattern:
@@ -1017,3 +1026,127 @@ trace-vs-DXIR pin through the same transform).
 wants it" deferral CLOSES unneeded (above); DiffKT's
 `LinearBeforeResetGRU` DNNL hookup stays never-existed-upstream; F0's
 standing deferral list unchanged.
+
+### F8 — §0.4.444: the end-to-end training certification, the compiled GPU step, and the close-out
+
+**What landed.** Three certifications and zero new library code — Phase F's
+final slice is deliberately all oracle: the F1–F7 stack already contained
+everything training needs, and F8 proves it end to end on a fixed
+threefry-keyed synthetic task (x ∈ [−1,1)^{16×4} off
+`fromSeed(1234)`'s first child stream, target `y = x₀·x₁ + 0.5·x₂ −
+0.25·x₃` — the product term keeps the hidden layer honest), MSE loss,
+bit-deterministic forever.
+
+- **(1)+(4) The host training certs** (`:nn` `EndToEndTrainingTest`): the
+  MLP `Dense(4,8) → Relu → Dense(8,1)` captures ONCE (the F1 caching
+  contract exercised — the trained model re-binds through the same
+  `CapturedStep` all 200 steps) and Adam(0.05) collapses the loss
+  0.30533 → 0.0012239 (pinned < 2e-3 absolute AND < initial/20;
+  "monotone-ish" made precise as strictly-decreasing non-overlapping
+  25-step window means). The step-0 FD spot check: central differences
+  THROUGH the captured loss itself (perturbed `withParameters` +
+  `CapturedStep.run`) on 3 elements spanning first-layer weight/bias and
+  output-layer weight, at 2e-3 + 2% (h = 1e-2; the pin's error budget is
+  derived in the KDoc, not tuned). The conv net `Conv2d([2,1,2,2]) → Relu
+  → Flatten → Dense(18,1)` trains 0.04120 → 0.000179 over 40 Adam steps
+  (pinned < initial/10 + 10-step window means).
+- **(2) THE COMPILED GPU TRAINING STEP** (`:benchmarks`
+  `NnMlpGpuTrainingTest`, PJRT/CUDA self-skip ladder) — the amended
+  decision-3 payoff: the F1-captured gradient `DxirFunction` — the SAME
+  object the host lane interprets — goes `toStablehlo` → PJRT compile →
+  GB10 execution via `PjrtSession.runOn`. One step's six outputs (loss +
+  input gradient + 4 parameter gradients) pin elementwise against
+  `DxirInterpreter` at 1e-4, observed max|diff| 3.8e-5 (f32
+  reduction-order noise — the §0.4.292 LlamaDecoder backward cert's own
+  band). Then FIVE training steps run with gradients entirely on the GPU
+  lane (host-side F3 Adam between them, per the §2.9 scope) against the
+  interpreter-lane twin: per-step losses within 1e-4, final parameters
+  within 1e-3 — observed 4.6e-5 — and `session.cacheSize == 1` pins that
+  all five dispatches reuse ONE compiled executable (params are
+  `DxirParam`s, never baked constants — the §0.4.307 amortization
+  working exactly as the F1 contract said it would). **No emission gap
+  was hit**: every op in the captured MLP gradient graph has an emitter
+  arm, so the slice's record-and-pin-host contingency was not needed.
+- **(3) PyTorch convergence parity** (`:benchmarks`
+  `NnMlpVsPytorchTrainingTest` + `harness/python/run_pytorch_nn_train.py`,
+  the §0.4.289 npy-export/subprocess/JSON pattern, torch venv self-skip):
+  SAME initial weights (exported — threefry ≠ torch RNG), same data, same
+  MSE, 50 identical Adam(0.02) steps (both sides Kingma–Ba bias-corrected
+  — the F0 finding that DiffKT's Adam is a TODO placeholder is exactly
+  why PyTorch is the oracle). OBSERVED: step-0 rel diff 9.8e-8, steps 0–9
+  max 5.9e-7, final 9.3e-8 — the two f32 trajectories track each other
+  ~1e-7 relative for the whole run, far tighter than the slice's
+  float-order-divergence contingency anticipated. Pins sit 2–4 orders
+  above observed (1e-5 / 1e-4 / 1e-2 + both finals < 0.05) to absorb
+  torch-version drift; the observed numbers are recorded in the test KDoc
+  so a regression to "merely within tolerance" stays visible.
+
+**Design decisions, with rejections.**
+
+- **Targets enter the trace as a CONSTANT leaf** (`y.constant(targets,
+  dims)`) — the fixed-task form: full-batch training re-binds x and the
+  parameters, the target rides the graph. REJECTED for v1: the target as
+  a second capture INPUT — `capture` is single-input (F1's DiffKT
+  `LayerSingleInput` fold), and widening it belongs to the mini-batch
+  story (deferral below), not to this certification.
+- **The GPU lane unpacks outputs host-side in the test**, mirroring
+  `CapturedStep.run`'s indexing, rather than growing a
+  `CapturedStep.runOn(session)` in `:nn`. REJECTED: an `:nn` →
+  `:runtime-pjrt` dependency — the module boundary decision (execution is
+  a BACKEND CHOICE the caller makes) survives its first consumer; the
+  ~10-line unpacking is the certified recipe for anyone who wants the
+  convenience wrapper later.
+- **The F1 caching-contract question resolved**: the "structure-keyed
+  cache in front of the compiled-GPU lane" the F1 record promised IS
+  `PjrtSession`'s MLIR-text-keyed executable cache (structurally
+  identical captures produce identical MLIR and hit one slot — pinned by
+  `cacheSize == 1`), plus the caller-held `CapturedStep`. An automatic
+  :nn-level capture cache keyed on model structure was NOT built —
+  named deferral, taken when a consumer holds many structures at once.
+
+**Oracle story.** Four independent oracles converge on the same stack:
+hand-pinned convergence bounds on a bit-deterministic task (host), the FD
+check (derivative-free, through the captured loss), the interpreter
+(certified by the whole parity arc) against XLA-on-GB10 elementwise, and
+PyTorch (a foreign AD + foreign runtime) tracking the full 50-step
+trajectory from shared bits. The GPU and PyTorch certs self-skip cleanly
+on hosts missing CUDA or torch, and say what to install.
+
+**Phase F consolidated deferral list** (the close-out sweep — every item
+named across F0–F8, none silent):
+
+1. Row-sparse embedding gradients — dense v1 ratified (§2.7); the worked
+   CSR design is recorded in the F6 entry, sized ~1 §, taken when a
+   consumer at real vocab sizes asks.
+2. Grouped conv at the layer/trace level — waits on the §0.4.429
+   grouped-conv host-twin tail (`feature_group_count` lives in the IR).
+3. Rhs-dilated ("à-trous") conv at the trace level — IR + rule support
+   it; no DiffKT surface asks (F4).
+4. Rank-3 Dense input — DiffKT accepts rank ≥ 2; traced matmul is
+   rank-2/3 (F2).
+5. Mini-batch training with per-step targets — needs the multi-input
+   capture surface (target as a re-bindable input instead of a baked
+   constant) or per-batch re-capture; the F8 certs are full-batch
+   fixed-task by design.
+6. Automatic structure-keyed capture cache in `:nn` — resolved to
+   caller-held `CapturedStep` + `PjrtSession`'s MLIR-keyed executable
+   cache (above); an automatic layer waits for a multi-structure
+   consumer.
+7. BatchNorm stats threading through `Sequential` (F5) and
+   `BatchNormTrainingV1` (F5 — V2 is DiffKT's default; V1 waits for a
+   consumer).
+8. EmbeddingBag Mean/Max reductions (DiffKT ships only Sum — parity IS
+   Sum) and empty bags (recorded narrowing: we refuse loudly, F6).
+9. `store`/`load` checkpointing beyond tensor round-trip helpers, data
+   loaders, GPU-RESIDENT optimizer state (the F8 GPU lane is
+   gradients-on-device + host optimizer, the ratified §2.9 scope).
+10. DiffKT's `LinearBeforeResetGRU` DNNL hookup — never existed upstream.
+
+**End state.** Phase F is COMPLETE per the ratified + amended scope:
+every DiffKT `model/` abstraction, layer, initializer and optimizer has
+its Tlaloc form in `:nn` (34 upstream files' semantics, audited and
+matched or recorded-divergent by name), the AD route is the compiler
+stack end to end, and the training loop runs certified on host and GPU
+with PyTorch-parity evidence. With Phase F closed, the DiffKT parity
+book of work has NO remaining open phase — see DIFFKT_PARITY_PLAN.md's
+end-state header.

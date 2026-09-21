@@ -1,9 +1,12 @@
 # DiffKT Parity Plan
 
 **Status: BOOK OF WORK CLOSED (§0.4.433 close-out, 2026-09-20; opened
-2026-07-19, post-§0.4.364).** See "End-state at §0.4.433" below for what
-is complete, what is closed by ratified refusal, and the one consolidated
-remaining-tails list. Goal per Pedro:
+2026-07-19, post-§0.4.364) — and the one gated phase, Phase F, RATIFIED
+AND COMPLETED §0.4.434–444 (2026-09-21) per
+[MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md).** See "End-state at
+§0.4.433" below for what is complete, what is closed by ratified
+refusal, and the one consolidated remaining-tails list; the Phase F
+block inside it records the model-layer completion. Goal per Pedro:
 support everything [facebookresearch/diffkt](https://github.com/facebookresearch/diffkt)
 supports that Tlaloc doesn't yet.
 
@@ -74,12 +77,26 @@ not re-litigate without new evidence):
   (§0.4.427); the concrete family (`Float`/`FloatScalar`/`DoubleScalar`)
   lowers.
 
-**PHASE F: RATIFIED AND IN FLIGHT (Pedro, 2026-09-21)** — the
-model/optimizer layer, scoped in
-[MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md) (the `:nn` module: immutable
-functional components over the `:autograd` runtime tape, slices F0–F8).
-Row-sparse embedding gradients ride with it (dense v1, row-sparse a
-recorded design). Nothing else is gated.
+**PHASE F: COMPLETE (§0.4.434–444, ratified AND landed 2026-09-21)** —
+the model/optimizer layer, scoped in
+[MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md) and AMENDED before any
+substrate code landed (§0.4.436, Pedro's veto: **the AD route is the
+COMPILER stack — trace → DXIR → `DxirReverseTransform` → interpreter or
+StableHLO/PJRT — not the runtime value-tape**, which stays a debugging
+fallback). The `:nn` module ships every DiffKT `model/` layer
+(Dense/Conv2d+SamePadding/pools/Flatten/Relu/AffineTransform/BatchNorm/
+Dropout/Embedding/EmbeddingBag/GRU), the FanMode initializers
+(threefry, bit-deterministic), the five optimizers (DiffKT-exact SGD/
+RMSprop quirks recorded by name; Adam is Kingma–Ba since DiffKT's is a
+TODO placeholder), and the F8 end-to-end close: MLP + conv net train to
+pinned convergence, the captured gradient graph runs compiled on the
+GB10 matching the interpreter at 3.8e-5 with ONE cached executable
+across steps, and 50 Adam steps track PyTorch at ~1e-7 relative from a
+shared init. Row-sparse embedding gradients rode with it as dense v1
+(the row-sparse CSR design is recorded in that doc's F6 entry); the
+consolidated Phase F deferral list lives at the end of its §4 F8 entry.
+**Nothing else is gated — the book of work has no remaining open
+phase.** The post-F suite number is **2020** (§0.4.444 clean-room).
 
 ### Remaining tails, consolidated (§0.4.433)
 
@@ -2384,15 +2401,24 @@ Tlaloc's module story supersedes it — not blocking A–E.
     on tensor→tensor `f`; B1 should also expose the seeded-cotangent
     `vjp`/`primalAndPullback` form (DiffKT's pullback takes `vf(primal)`).
 
-### Phase F — model/optimizer layer — **RATIFIED (Pedro, 2026-09-21)**
+### Phase F — model/optimizer layer — **COMPLETE (§0.4.434–444, 2026-09-21)**
 
-GO per [MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md), the Phase F
-authority: a new `:nn` module of immutable functional components over
-the `:autograd` runtime tape (whose `applyRegistryRule` bridge routes
-backward through the real `VjpRegistry` — no new gradient math in the
-NN layer), threefry-keyed randomness, functional optimizer/batch-norm
-state, dense-v1 embedding gradients with the row-sparse form a recorded
-design. Slicing F0–F8 in that doc; the running record lands there.
+Ratified per [MODEL_LAYER_PLAN.md](MODEL_LAYER_PLAN.md), the Phase F
+authority — and AMENDED there before any substrate code landed
+(§0.4.436): **the AD route is the COMPILER stack, not the runtime tape**
+— the model's forward traces once through the `:autograd` Tracer into a
+real `DxirFunction` (arbitrary arity — the `grad {}` 1–4 ceiling was
+never the IR's), `DxirReverseTransform` produces the gradient function,
+and execution is a backend choice (interpreter on host, StableHLO →
+`PjrtSession` on GPU). The value-tape stays a debugging fallback. The
+`:nn` module of immutable functional components landed F0–F8 in eleven
+§ (deep audit, substrate, layers, initializers, optimizers, conv stack,
+BatchNorm/Dropout, Embedding/EmbeddingBag, GRU, and the F8 end-to-end
+training certification with the compiled-GPU step and PyTorch
+convergence parity); threefry-keyed randomness, functional
+optimizer/batch-norm state, dense-v1 embedding gradients with the
+row-sparse form a recorded design. The running record and the
+consolidated Phase F deferral list live in that doc's §4.
 
 ## Suggested § sequencing
 

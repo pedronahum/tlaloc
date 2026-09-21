@@ -50,6 +50,11 @@ kotlin {
                 // §0.4.344 — KptxTestKernels registers DSL-emitted PTX from
                 // the :kptx production kernel library. Test-only dependency.
                 implementation(project(":kptx"))
+                // §0.4.444 — Phase F8: the :nn end-to-end training
+                // certifications (compiled-GPU step via PjrtSession, PyTorch
+                // convergence parity via the harness/python subprocess
+                // pattern). Test-only dependency.
+                implementation(project(":nn"))
             }
         }
     }
