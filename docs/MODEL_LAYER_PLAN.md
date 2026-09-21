@@ -729,3 +729,89 @@ refuse).
 the §0.4.429 host-twin tail); rhs-dilated ("à-trous") conv at the trace
 level (the IR and rule support it; no DiffKT surface asks for it);
 F0's standing deferral list unchanged.
+
+### F5 — §0.4.441: BatchNorm desugared, Dropout keyed — and the transform never noticed
+
+**What landed.** The gap table's F5 TRACE spellings in `TracedOps.kt` —
+`sum(axes)` / `mean(axes)` (SUM/MEAN with `reduction_dims`, reduced axes
+DROPPED, forward loops mirroring the interpreter's §0.4.366 projection
+bit-for-bit) and `broadcastAlong(vec, axis)` (rank-1 → rank-N BROADCAST
+with `broadcast_dimensions = [axis]`, the §0.4.85 `broadcastRow`
+generalised to any receiver rank — the NCHW channel broadcast at
+`axis = 1`) — and `BatchNorm.kt` + `Dropout.kt` in `:nn`. Zero gradient
+math, zero `Backward.kt` changes, zero rule changes: the §0.4.366
+axis-aware SumRule/MeanRule and the §0.4.84 BroadcastRule were already
+waiting, exactly as the amendment promised.
+
+- **BatchNorm** (DiffKT `BatchNormTraining` V2, F0 §4.0.4, F0 landmine
+  8 honoured): NO fused BATCHNORM kind — the training forward desugars
+  `μ = Σx/n`, `σ² = Σx²/n − μ²` (biased), `out = γ·(x − μ)/√(σ² +
+  1e-5) + β` into SUM(axes)/DIV/SUB/MUL/SQRT/ADD + the axis broadcast,
+  so the transform differentiates THROUGH the batch statistics (the
+  full three-term batch-norm gradient falls out of the registry rules).
+  Channel axis is AXIS 1 (NCHW, the F4 layout decision; rank-2 `[N, C]`
+  is the Dense-stack form), reduction over all other axes. `EPS = 1e-5f`
+  is DiffKT's literal, not a knob. Running state is the functional V2
+  triple `BatchNormStats(runningN, runningSum, runningSumOfSquares)`
+  (decision 6 — `batchNormTrainV2`'s own pure signature), EMA'd through
+  F3's `momentumUpdated` (momentum weights the NEW stat, default 0.1f —
+  F0 landmine 3): `trainForward` returns the `(output, updatedStats)`
+  pair, `updatedStats(batch)` is the host-side step for a held
+  `CapturedStep` (stats never enter the trace — they are not
+  differentiable state), `withStats` rebuilds. `inferenceMode()` is
+  DiffKT's `freezeBatchNorm` — `m = γ/√(σ²+ε)`, `b = β − m·μ` off the
+  RUNNING stats — frozen to the new `ChannelAffine(m, b)` layer
+  (trainable, like the frozen DiffKT `AffineTransform`'s tensors).
+- **Dropout** (F0 §4.0.4): inverted dropout, DiffKT's own comparison —
+  `mask[i] = u[i] > p ? 1/(1−p) : 0f` over `uniformFloats(key, n)`,
+  eval (`inferenceMode()`) = the new `IdentityLayer`. The mask enters
+  the trace as a CONSTANT leaf (`isConstant = true` — the D2 precedent
+  and F0 landmine 9), the forward is one existing MUL, and the key is
+  part of the layer VALUE (`withKey` re-keys per step — `Layer.forward`
+  has no key slot; DiffKT's per-call `random` is the same discipline
+  one constructor earlier).
+
+**Design decisions, with rejections.**
+
+- **`ChannelAffine` as its own layer.** REJECTED: widening F1's
+  same-shape `AffineTransform` with implicit broadcasting — the trace
+  spelling would silently depend on input rank; the explicit
+  `broadcast_dimensions = [1]` op is the honest captured-graph form.
+- **`inferenceMode()` refuses on fresh stats** (`runningN = 0` → 0/0)
+  rather than freezing NaNs — DiffKT would NaN silently; recorded as a
+  deliberate divergence in loudness, not maths.
+- **`forward` = the TRAINING forward** (what DiffKT's mutating `invoke`
+  computes), identical to `trainForward(...).output`; inside a
+  Sequential fold the stats update is discarded (a fold cannot return
+  per-layer state). Stats threading through containers is a NAMED
+  DEFERRAL; standalone use calls `updatedStats` per batch.
+- **Stats accumulation order pinned**: `updatedStats`'s host loop folds
+  in flat row-major order — the same sequence the traced `sum(axes)`
+  spelling and the interpreter's SUM arm use, so the three surfaces
+  never drift by a bit.
+
+**Oracle story.** The trace-vs-hand-built-DXIR oracle on all three new
+spellings at once (`Σ(broadcastAlong(x.sum([0,2,3])·w + x.mean([0,2,3]),
+1) ⊙ x)` built through the Tracer AND through `DxirBuilder` with the
+interpreter's exact attrs, both through the SAME transform, elementwise
+`==`). BatchNorm gradients (γ, β, x — statistics terms included) against
+an independent DOUBLE-precision spelling of the analytic formulas
+`dx = (γ/σ)(g − ḡ − x̂·mean(g·x̂))` at 1e-4 (the F3 precedent — ε=1e-5
+keeps √ off the dyadic grid); the rank-2 form pins `dβ = n` exactly and
+the zero-mean cancellation (`dγ, dx → 0`) at tolerance. Running stats:
+two training calls at momentum 0.25 (dyadic), every EMA step
+`==`-exact, through BOTH surfaces (`trainForward`'s pair and
+`updatedStats`), purity of the original pinned. The freeze: m/b against
+the double reference at 1e-6, the frozen forward's loss at 1e-4, and
+`ChannelAffine`'s own gradients hand-exact `==` (`dm = Σ_channel x` —
+the `broadcast_dimensions = [1]` reverse — `db = n`, `dx = m` splat).
+Dropout: mask bit-exact vs the raw `uniformFloats` threshold
+(`assertContentEquals`), train-mode input gradient == the mask exactly
+(even at the non-dyadic scale 4/3 — upstream ≡ 1), loss = the
+flat-order f32 accumulation, eval identity and `p = 0` both exact,
+determinism per key and `withKey` re-keying pinned against the stream.
+
+**Deferred, by name:** stats threading through Sequential containers
+(above); `BatchNormTrainingV1` (running mean/var EMAs with Bessel's
+correction — DiffKT ships V2 as the default; V1 waits for a consumer);
+F0's standing deferral list unchanged.

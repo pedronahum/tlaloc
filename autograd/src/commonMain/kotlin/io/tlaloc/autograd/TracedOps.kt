@@ -821,6 +821,146 @@ private fun Tracer<*>.tracePool2d(kind: OpKind, windowH: Int, windowW: Int): Tra
     return Tracer(tape, e)
 }
 
+// §0.4.441 — F5: axis reductions + the axis broadcast, the BatchNorm substrate
+// (MODEL_LAYER_PLAN.md gap-table row F5). The forward loops mirror the
+// DxirInterpreter's SUM/MEAN projection EXACTLY (linear input iteration,
+// accumulate per projected output cell) so the trace-cached value and the
+// transform's `includeForward` re-evaluation are bit-identical. The attrs are
+// the interpreter's spellings: `reduction_dims` on SUM/MEAN (§0.4.366 Phase A1
+// arms; SumRule/MeanRule read the same attr for the keepdims-reshape reverse),
+// `broadcast_dimensions` on BROADCAST (§0.4.371 general form; BroadcastRule
+// reverses with SUM over the complementary axes). No gradient math here — the
+// transform owns it.
+
+/**
+ * Shared axis-reduction forward: sum [value] (shaped [inDims]) over [axes],
+ * DROPPING the reduced axes (the interpreter's projection — keepdims is a
+ * separate RESHAPE the rules insert themselves when they need it). Returns the
+ * accumulated array and the kept dims.
+ */
+private fun reduceOverAxes(
+    value: FloatArray,
+    inDims: IntArray,
+    axes: List<Int>,
+): Pair<FloatArray, IntArray> {
+    val keep = inDims.indices.filter { it !in axes }
+    val outDims = IntArray(keep.size) { inDims[keep[it]] }
+    val outSize = if (outDims.isEmpty()) 1 else outDims.fold(1) { acc, d -> acc * d }
+    val out = FloatArray(outSize)
+    val inStrides = IntArray(inDims.size)
+    var st = 1
+    for (k in inDims.indices.reversed()) { inStrides[k] = st; st *= inDims[k] }
+    val outStrides = IntArray(keep.size)
+    st = 1
+    for (k in keep.indices.reversed()) { outStrides[k] = st; st *= inDims[keep[k]] }
+    for (flat in value.indices) {
+        var rem = flat
+        var outIdx = 0
+        for (d in inDims.indices) {
+            val coord = rem / inStrides[d]
+            rem -= coord * inStrides[d]
+            val kp = keep.indexOf(d)
+            if (kp >= 0) outIdx += coord * outStrides[kp]
+        }
+        out[outIdx] += value[flat]
+    }
+    return out to outDims
+}
+
+private fun Tracer<*>.checkReductionAxes(axes: IntArray, opName: String): List<Int> {
+    val sorted = axes.distinct().sorted()
+    require(sorted.isNotEmpty()) {
+        "$opName: empty axis list — use the full-reduce ${opName.removeSuffix("(axes)")}() form"
+    }
+    require(sorted.all { it in 0 until rank }) {
+        "$opName: axes ${sorted} out of range for rank $rank (dims ${dims.toList()})"
+    }
+    return sorted
+}
+
+/**
+ * §0.4.441 — axis-aware sum. Records [OpKind.SUM] with
+ * `reduction_dims = axes` (sorted, deduplicated) and the KEPT dims on the
+ * entry — the reduced axes are dropped, the interpreter's own projection.
+ * `SumRule` reverses via the keepdims RESHAPE + equal-rank stretch BROADCAST
+ * (§0.4.366). `sum(0, 2, 3)` on NCHW is the per-channel batch statistic F5's
+ * BatchNorm desugars through.
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.sum(axes: IntArray): Tracer<S> {
+    val sorted = checkReductionAxes(axes, "sum(axes)")
+    val (out, outDims) = reduceOverAxes(entry.value, dims, sorted)
+    val e = tape.op(
+        OpKind.SUM,
+        intArrayOf(id),
+        outDims,
+        out,
+        attrs = mapOf("reduction_dims" to sorted),
+    )
+    return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
+/**
+ * §0.4.441 — axis-aware mean: the [sum] projection divided per cell by the
+ * product of the REDUCED extents (the interpreter's §0.4.366 MEAN arm computes
+ * the same sum-then-divide, so the cached value matches bit-for-bit).
+ * `MeanRule`'s reverse bakes the same 1/n for concrete dims.
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.mean(axes: IntArray): Tracer<S> {
+    val sorted = checkReductionAxes(axes, "mean(axes)")
+    val (out, outDims) = reduceOverAxes(entry.value, dims, sorted)
+    val n = sorted.fold(1) { acc, d -> acc * dims[d] }
+    for (i in out.indices) out[i] /= n
+    val e = tape.op(
+        OpKind.MEAN,
+        intArrayOf(id),
+        outDims,
+        out,
+        attrs = mapOf("reduction_dims" to sorted),
+    )
+    return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
+/**
+ * §0.4.441 — rank-1 → rank-N broadcast along one axis of the RECEIVER's shape:
+ * the receiver contributes dims + tape only (it is NOT an operand — no gradient
+ * flows to it through this op, matching [broadcastRow]'s convention), and [vec]
+ * (rank-1, `vec.dims[0] == dims[axis]`) is replicated over every other axis.
+ * Records [OpKind.BROADCAST] with `broadcast_dimensions = [axis]`;
+ * `BroadcastRule` reverses it as `SUM(upstream, reduction_dims = <all other
+ * axes>)` — for the NCHW channel axis (`axis = 1`) exactly the per-channel
+ * gradient every BatchNorm/bias term wants. Generalises §0.4.85's
+ * `broadcastRow` (rank-2, axis 1) to any receiver rank; F5's BatchNorm uses it
+ * at rank 4.
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.broadcastAlong(vec: Tracer<*>, axis: Int): Tracer<S> {
+    require(vec.rank == 1) {
+        "broadcastAlong: vec must be rank-1 (got dims ${vec.dims.toList()})"
+    }
+    require(rank >= 1 && axis in 0 until rank) {
+        "broadcastAlong: axis $axis out of range for receiver rank $rank"
+    }
+    require(dims[axis] == vec.dims[0]) {
+        "broadcastAlong: vec size ${vec.dims[0]} doesn't match receiver dim $axis = ${dims[axis]}"
+    }
+    val tape = sameTape(this, vec)
+    var inner = 1
+    for (k in axis + 1 until rank) inner *= dims[k]
+    val axisLen = dims[axis]
+    val v = vec.entry.value
+    val broadcasted = FloatArray(size) { flat -> v[(flat / inner) % axisLen] }
+    val e = tape.op(
+        OpKind.BROADCAST,
+        intArrayOf(vec.id),
+        dims.copyOf(),
+        broadcasted,
+        attrs = mapOf("broadcast_dimensions" to listOf(axis)),
+    )
+    return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
     val v = entry.value
     var acc = 0f
