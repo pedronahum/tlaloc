@@ -1563,6 +1563,14 @@ object DxirInterpreter {
                 }
                 FloatArray(summed.size) { summed[it] / n }
             }
+            // §0.4.448 — audit finding C: the demoted kinds refuse by name with
+            // the sanctioned alternative in the message (see [demotedKindRefusal]),
+            // instead of falling into the generic else below. ALL_REDUCE and
+            // SHARD_CONSTRAINT stay on the generic arm: their demotion is about
+            // differentiability (the transforms refuse them by name), not about
+            // a host-evaluation story this interpreter ever promised.
+            OpKind.LAYERNORM, OpKind.SCALED_DOT_PRODUCT_ATTENTION, OpKind.SPLIT ->
+                error(demotedKindRefusal(op.op, "DxirInterpreter")!!)
             else -> error("DxirInterpreter: op ${op.op} not in the bridge's supported set")
         }
     }

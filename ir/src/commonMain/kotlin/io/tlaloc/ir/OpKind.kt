@@ -204,7 +204,21 @@ enum class OpKind {
     CONV_TRANSPOSE2D_DATA_ADJOINT, CONV_TRANSPOSE2D_KERNEL_ADJOINT,
 
     // Shape
-    RESHAPE, TRANSPOSE, BROADCAST, CONCAT, SPLIT, SLICE, GATHER, SCATTER,
+    RESHAPE, TRANSPOSE, BROADCAST, CONCAT,
+
+    // §0.4.448 — audit finding C, DEMOTED (don't complete): SPLIT is
+    // emission-only. Sanctioned layers: the StableHLO emitter (emitSplit) and
+    // the cost model. NO interpreter arm, NO VjpRule, NO forward tangent —
+    // DxirInterpreter and both AD transforms refuse it by name with the
+    // sanctioned alternative (per-piece SLICE; the FIR fold covers user
+    // splits) — see passes/DemotedOpKinds.kt. Nothing outside emitter/IR-
+    // plumbing tests constructs it; deletion recommended (§0.4.448 commit),
+    // kept pending Pedro's call. REJECTED alternative: completing the kind
+    // (multi-result interpreter arm + per-index adjoint routing) buys nothing
+    // SLICE compositions don't already have, certified.
+    SPLIT,
+
+    SLICE, GATHER, SCATTER,
 
     // §0.4.396 — REVERSE (DiffKT `flip`, Phase C3): reverse element order along
     // the axes listed in the `dimensions` attr (List<Int>, compile-time user
@@ -379,9 +393,25 @@ enum class OpKind {
     SCATTER_ADD,
 
     // Normalization
+    // §0.4.448 — audit finding C, DEMOTED (don't complete): LAYERNORM is
+    // coarsener-recognized/emission-only. Sanctioned layers: the cost model
+    // and the StableHLO emitter (emitLayerNorm). NO interpreter arm, NO
+    // VjpRule, NO forward tangent — DxirInterpreter and both AD transforms
+    // refuse it by name with the sanctioned alternative (spell layernorm via
+    // ops, the §0.4.390 batchNorm desugaring precedent; the coarsener owns
+    // the fused semantics) — see passes/DemotedOpKinds.kt. REJECTED
+    // alternative: completing the kind would duplicate certified coarsener
+    // work.
     LAYERNORM, RMSNORM, BATCHNORM,
 
     // Attention
+    // §0.4.448 — audit finding C, DEMOTED (don't complete): SDPA is
+    // coarsener-recognized/emission-only. Sanctioned layers:
+    // FlashAttentionRecognizer (accepts pre-fused SDPA ops), the cost model,
+    // and the StableHLO emitter (emitSdpa). NO interpreter arm, NO VjpRule,
+    // NO forward tangent — DxirInterpreter and both AD transforms refuse it
+    // by name with the sanctioned alternative (the FlashAttention
+    // composition: MATMUL/softmax/MATMUL) — see passes/DemotedOpKinds.kt.
     SCALED_DOT_PRODUCT_ATTENTION,
 
     // Misc
@@ -571,6 +601,14 @@ enum class OpKind {
     COARSENED,
 
     // Sharding (SDY-equivalent lowering points)
+    // §0.4.448 — audit finding C: SHARD_CONSTRAINT is NON-DIFFERENTIABLE BY
+    // DESIGN. It is a layout annotation (SDY), not a mathematical operation
+    // with an adjoint: differentiation happens on the unsharded program, and
+    // sharding constraints are re-applied to the gradient function (with
+    // GradShardingVerify checking the fwd/grad duality). Sanctioned layers:
+    // propagation, the cost model, and the StableHLO emitter
+    // (emitShardConstraint). Both AD transforms refuse it by name — see
+    // passes/DemotedOpKinds.kt.
     SHARD_CONSTRAINT, MANUAL_COMPUTATION,
 
     // Collectives — inserted by Shardy's export passes or written explicitly in a manual
@@ -578,5 +616,11 @@ enum class OpKind {
     // GradShardingVerify; a full set would include ALL_TO_ALL, BROADCAST-across-replicas,
     // etc. For forward lowering these remain as StableHLO custom_call / stablehlo.collective
     // placeholders until the emitter grows dedicated handling.
+    // §0.4.448 — audit finding C: ALL_REDUCE is NON-DIFFERENTIABLE BY DESIGN
+    // (the same reasoning as SHARD_CONSTRAINT above — a distribution
+    // construct, not math with an adjoint; its "dual" is GradShardingVerify's
+    // collective-duality relation, not a VjpRule). Sanctioned layers:
+    // GradShardingVerify and the cost model. Both AD transforms refuse it by
+    // name — see passes/DemotedOpKinds.kt.
     ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER,
 }

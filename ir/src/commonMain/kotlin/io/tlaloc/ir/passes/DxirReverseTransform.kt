@@ -149,6 +149,14 @@ object DxirReverseTransform {
         val ifLiveIndices = HashMap<Int, Set<Int>>()
         for (n in primal.body) {
             if (n is DxirOp) {
+                // §0.4.448 — audit finding C: the demoted kinds refuse BY NAME
+                // with the sanctioned alternative in the message (see
+                // [demotedKindRefusal]), ahead of the generic multi-result gate
+                // below (which would otherwise catch SPLIT with no directions)
+                // and ahead of the walk's index-0 upstream lookup (which would
+                // skip an op with no accumulated upstream silently). Branch
+                // bodies get the same guard inside [walkBranchReverse].
+                demotedKindRefusal(n.op, "DxirReverseTransform")?.let { error(it) }
                 if (n.hasRegions) {
                     require(n.op == OpKind.IF) {
                         "DxirReverseTransform: op ${n.op} has regions but no rule supports " +
@@ -1803,6 +1811,10 @@ object DxirReverseTransform {
         // Step 3: reverse walk through the branch body.
         for (n in block.body.asReversed()) {
             if (n !is DxirOp) continue
+
+            // §0.4.448 — audit finding C: same demoted-kind refusal as the
+            // top-level reverse walk, for ops living inside an IF branch body.
+            demotedKindRefusal(n.op, "walkBranchReverse")?.let { error(it) }
 
             // §0.4.155 — IF dispatch (mirrors top-level): collect per-(live-index)
             // upstreams from the per-(id, idx) gradAccum. Single-result IFs use {0}.

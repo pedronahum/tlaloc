@@ -163,6 +163,15 @@ object DxirForwardTransform {
                         // Structural zero tangent — resolved lazily by tangent().
                     }
                     is DxirOp -> when {
+                        // §0.4.448 — audit finding C: the demoted kinds refuse
+                        // BY NAME with the sanctioned alternative in the message
+                        // (see [demotedKindRefusal]) before any tangent/multi-
+                        // result dispatch — a multi-result SPLIT would otherwise
+                        // hit the generic out-of-scope error, and the collectives
+                        // are non-differentiable by design.
+                        node.op in DEMOTED_OP_KINDS -> error(
+                            demotedKindRefusal(node.op, "DxirForwardTransform")!!,
+                        )
                         node.op == OpKind.IF -> {
                             // The IF direct forward arm. The condition is
                             // piecewise-constant (zero tangent, value cloned); the

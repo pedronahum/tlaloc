@@ -9,6 +9,32 @@ readable by the user, and compiled.*
 
 ## Running record
 
+- **§0.4.448 — C CLOSED (demoted, loud, by name).** The five half-alive
+  kinds now refuse with named messages that state the kind AND the
+  sanctioned alternative, via one shared table
+  (`ir/.../passes/DemotedOpKinds.kt`: `DEMOTED_OP_KINDS` +
+  `demotedKindRefusal(kind, layer)`). LAYERNORM / SDPA / SPLIT refuse in
+  `DxirInterpreter` (a named arm ahead of the generic bridge else),
+  `DxirReverseTransform` (in the pre-scan, AHEAD of the generic
+  multi-result gate that used to catch SPLIT with no directions, and ahead
+  of the walk's index-0 upstream lookup; `walkBranchReverse` carries the
+  same guard for IF-branch bodies), and `DxirForwardTransform` (first
+  branch of the walk's op dispatch, ahead of the generic multi-result
+  out-of-scope error). ALL_REDUCE / SHARD_CONSTRAINT refuse as
+  non-differentiable BY DESIGN in both transforms only — their demotion is
+  about differentiability, so the interpreter keeps its generic
+  unsupported-op arm. Recognition (cost model, FlashAttentionRecognizer)
+  and StableHLO emission are untouched: those remain the kinds' sanctioned
+  roles, now stated in each OpKind doc comment with the rejected
+  complete-the-kinds alternative recorded. Pins:
+  `DemotedKindRefusalTest` — one test per kind per refusing layer (13),
+  each asserting the message names the kind and the alternative; the SPLIT
+  reverse pin consumes result index 1 only, the exact shape whose gradient
+  a silent index-0 skip would have dropped. **SPLIT deletion
+  RECOMMENDED:** nothing outside emitter/IR-plumbing tests constructs it
+  (the FIR fold covers user splits) — the kind is kept with refusals in
+  place; removal is Pedro's call.
+
 - **§0.4.447 — B CLOSED (one named twin-gap).** The ~24 private FloatArray
   forward computations in `TracedOps.kt`'s pre-F4 spellings now route through
   the certified `io.tlaloc.core.ops` host twins: the elementwise binaries
@@ -95,7 +121,8 @@ refusals in the interpreter and both transforms, doc notes on the kinds,
 pins. `ALL_REDUCE`/`SHARD_CONSTRAINT` are non-differentiable by design
 (sharding constructs) — document that, refuse by name in the
 transforms. `SPLIT` follows the same demotion (the FIR fold covers
-users).
+users). **DONE §0.4.448** (SPLIT deletion recommended, kept pending
+Pedro's call) — see the running record.
 
 **D. Dual `grad` naming.** Tracer-lambda `grad` vs intrinsic `grad`
 share names, disambiguated by lambda type. Documented and load-bearing
