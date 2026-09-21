@@ -648,3 +648,84 @@ decreasing across all 10 steps (11 losses compared).
 **Deferred, by name:** PyTorch optimizer parity (F8's harness, per
 F0 §4.0.8 — DiffKT-formula quirks stay on hand-stepped Kotlin oracles);
 F0's standing deferral list unchanged.
+
+### F4 — §0.4.440: the conv stack joins the traced graph and the layer set
+
+**What landed.** The gap table's three F4 TRACE spellings in
+`TracedOps.kt`, and the four conv-stack layers in `:nn`'s new
+`ConvLayers.kt`. Zero gradient math anywhere, zero `Backward.kt`
+changes, zero interpreter changes — the §0.4.385/386/389 fused adjoints
+were already waiting behind `Conv2dRule`/`AvgPool2dRule`/`MaxPool2dRule`
+and the transform routes the captured graph straight through them.
+
+- `Tracer.conv2d(w, strideH, strideW, padTop, padBottom, padLeft,
+  padRight)` — CONV2D over NCHW × OIHW, forward via the certified
+  `:core` `conv2dGeneral` host twin, attrs EXACTLY the interpreter's:
+  `window_strides = [sH, sW]`, `padding = [[t, b], [l, r]]`, the
+  dilation/reversal/group attrs left to their shared defaults. Groups
+  stay 1 at the trace level (the host twin the forward routes through
+  rejects grouped — §0.4.429; the IR itself supports them).
+- `Tracer.maxPool2d(h, w)` / `Tracer.avgPool2d(h, w)` — the classic
+  non-overlapping pool (the only form `MaxPool2dRule` v1
+  differentiates), attrs all explicit: `window`, `window_strides =
+  window`, `padding = [[0,0],[0,0]]`. DiffKT's spatial-divisibility
+  require lives in the spelling (F0 landmine 7), so every layer above
+  inherits it.
+- `Conv2d(filter [Co, Ci, kh, kw], hStride, vStride, activation,
+  paddingStyle)` — DiffKT's exact surface (NO bias tensor; activation
+  composes post-op; `vStride` strides H, `hStride` W, DiffKT's own
+  naming) on **the recorded F4 LAYOUT DECISION: Tlaloc-native
+  NCHW/OIHW.** DiffKT's NHWC/`[Co, kh, kw, Ci]` is a layout transpose
+  of the same maths, the F8 PyTorch oracle is NCHW-native anyway, and
+  the fan is unaffected (`shape[1]·shape.drop(2).product` = `Ci·kh·kw`
+  on both layouts). `PaddingStyle` ships all four DiffKT variants —
+  Valid / Same / Full / Explicit — and Same is computed AT THE LAYER
+  per axis from the input dims (`samePadding`, the TF formula off
+  DiffKT's source: `total = in % s == 0 ? max(k − s, 0) : max(k − in %
+  s, 0)`, before = total/2, odd unit AFTER) and passed down as explicit
+  attrs, so the captured graph only ever carries literal padding. The
+  companion draws `kaimingUniform(FanIn, LeakyRelu(√5))` under the F2
+  key discipline (`split(1)[0]` for the single parameter).
+- `Conv2dWithSamePadding` (the DiffKT subclass sugar, delegating to a
+  Same-styled `Conv2d`), `MaxPool2d(poolH, poolW)`, `AvgPool2d(poolH,
+  poolW)` — the pools are plain non-trainable `Layer`s.
+
+**Design decisions, with rejections.** Forward values route through
+the `:core` host twins (`conv2dGeneral`/`maxPool2dGeneral`/
+`avgPool2dGeneral`) — REJECTED: reimplementing the loops inline in
+TracedOps (the elementwise-op pattern) — the twins are the certified
+engines the rule bodies themselves execute through, so trace-time
+forward and gradient-body recomputation share one implementation.
+The pool spellings keep DiffKT's divisibility require — REJECTED:
+inheriting the engines' floor-division permissiveness (the host and
+interpreter handle a remainder, but DiffKT refuses, and parity means
+refusing where it refuses). A `groups` parameter on `Conv2d` —
+REJECTED for v1: the host twin rejects grouped (§0.4.429 stands);
+recorded as available in the IR, not a DiffKT feature.
+
+**Oracle story.** All hand assertions `==` — the grids are
+quarter-integer and the arithmetic dyadic. The trace-vs-hand-built-DXIR
+oracle on the full net CONV2D(stride 2) → RELU → MAXPOOL2D → SUM:
+built through the `:nn` capture AND through `DxirBuilder` with the
+interpreter's exact attr spellings, both through the SAME transform,
+elementwise `assertContentEquals` (stronger than the slice's 1e-6).
+The hand-exact certs: the 1×1×3×3 valid conv through
+`valueAndGradients` (`∂L/∂W` = the four block sums, `∂L/∂x` = the
+tap-coverage sums); the same conv net's gradients (only the
+pool-winning window carries gradient — `∂L/∂W` = its x taps, `∂L/∂x` =
+W scattered there); maxpool on the shuffled well-separated 16-distinct
+grid under `Σy²` (argmax positions get `2·max`, all else exactly zero,
+and the empty `gradients` map pins that pooling is untrainable);
+avgpool over two channels (uniform `2·mean/4` splat); the Same-padding
+conv (loss, `∂L/∂W`, `∂L/∂x` all hand-exact, and `∂L/∂x`'s dims pin
+the output-extent-equals-input-extent contract). `samePadding` itself
+is pinned per axis (including `k < in % stride` → zero and the
+odd-total after-heavy split), the companion's draw is bit-exact
+against `kaimingUniformInit` under the key discipline, and
+`withParameters` is functional (original untouched, unknown keys
+refuse).
+
+**Deferred, by name:** grouped conv at the layer/trace level (waits on
+the §0.4.429 host-twin tail); rhs-dilated ("à-trous") conv at the trace
+level (the IR and rule support it; no DiffKT surface asks for it);
+F0's standing deferral list unchanged.

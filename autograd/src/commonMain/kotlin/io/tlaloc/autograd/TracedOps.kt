@@ -5,6 +5,7 @@ import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.ShapeAtom
+import io.tlaloc.core.hostF32
 import io.tlaloc.ir.OpKind
 import kotlin.math.pow
 
@@ -693,6 +694,131 @@ fun <S : Shape> Tracer<*>.reshape(newDims: IntArray): Tracer<S> {
     }
     val e = tape.op(OpKind.RESHAPE, intArrayOf(id), newDims.copyOf(), entry.value.copyOf())
     return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
+// §0.4.440 — F4: the conv-stack TRACE spellings. Forward values come from the
+// certified `:core` host twins ([io.tlaloc.core.ops.conv2dGeneral] /
+// [io.tlaloc.core.ops.maxPool2dGeneral] / [io.tlaloc.core.ops.avgPool2dGeneral]
+// — the same engines the VjpRule gradient bodies execute through), and the
+// recorded attrs are EXACTLY the DxirInterpreter's spellings, so
+// `Tape.toDxirFunction` reproduces the ops in the captured graph and
+// `DxirReverseTransform` differentiates them through the §0.4.385/386/389 fused
+// adjoints. No gradient math here — the transform owns it.
+
+/**
+ * §0.4.440 — 2-D convolution: NCHW `[N, Ci, H, W]` input against an OIHW
+ * `[Co, Ci, kh, kw]` kernel, output NCHW (Tlaloc's native layouts — the F4
+ * layout decision recorded in MODEL_LAYER_PLAN.md; DiffKT's NHWC/[Co,kh,kw,Ci]
+ * is a layout transpose of the same maths). Records [OpKind.CONV2D] with attrs
+ * `window_strides = [strideH, strideW]` and `padding = [[top, bottom], [left,
+ * right]]` — `lhs_dilation`/`rhs_dilation`/`window_reversal`/
+ * `feature_group_count` are left to their defaults ([1,1]/[1,1]/[false,false]/1),
+ * which is both the interpreter's and `Conv2dRule`'s reading. Groups stay 1 at
+ * the trace level: the IR supports them but the host twin this forward routes
+ * through does not (§0.4.429's named deferral).
+ *
+ * Result shape `[N, Co, (H + top + bottom − kh)/strideH + 1, (W + left + right
+ * − kw)/strideW + 1]`, read off the host twin's own result.
+ */
+@Suppress("UNCHECKED_CAST", "LongParameterList")
+fun <S : Shape> Tracer<*>.conv2d(
+    w: Tracer<*>,
+    strideH: Int,
+    strideW: Int,
+    padTop: Int,
+    padBottom: Int,
+    padLeft: Int,
+    padRight: Int,
+): Tracer<S> {
+    require(rank == 4 && w.rank == 4) {
+        "conv2d: rank-4 NCHW input and OIHW kernel required; got " +
+            "${dims.toList()} / ${w.dims.toList()}"
+    }
+    require(w.dims[1] == dims[1]) {
+        "conv2d: kernel input channels ${w.dims[1]} ≠ input channels ${dims[1]} " +
+            "(groups stay 1 at the trace level — §0.4.429)"
+    }
+    require(strideH > 0 && strideW > 0) {
+        "conv2d: strides must be positive; got [$strideH, $strideW]"
+    }
+    val tape = sameTape(this, w)
+    val out = io.tlaloc.core.ops.conv2dGeneral<Shape>(
+        toDTensor(), w.toDTensor(), strideH, strideW, 1, 1, 1, 1,
+        padTop, padBottom, padLeft, padRight, false, false,
+    )
+    val e = tape.op(
+        OpKind.CONV2D,
+        intArrayOf(id, w.id),
+        out.dims.copyOf(),
+        out.hostF32(),
+        attrs = mapOf(
+            "window_strides" to listOf(strideH, strideW),
+            "padding" to listOf(listOf(padTop, padBottom), listOf(padLeft, padRight)),
+        ),
+    )
+    return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
+/**
+ * §0.4.440 — 2-D max pooling, NCHW, the classic non-overlapping pool (window =
+ * stride, zero padding — DiffKT's `MaxPool2d(poolH, poolW)` shape and the ONLY
+ * form `MaxPool2dRule` v1 differentiates). Records [OpKind.MAXPOOL2D] with
+ * attrs `window = [windowH, windowW]`, `window_strides = window`, `padding =
+ * [[0, 0], [0, 0]]` — the interpreter's exact spelling, all three explicit so
+ * the captured graph never leans on a default.
+ *
+ * DiffKT requires the spatial dims to divide by the pool (`H %% poolH == 0`);
+ * F4 keeps the same requires (F0 landmine 7). Tie convention downstream:
+ * MAXPOOL2D_GRAD routes the upstream to ALL within-window ties (§0.4.389) —
+ * pin oracles on tie-free grids.
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.maxPool2d(windowH: Int, windowW: Int): Tracer<S> =
+    tracePool2d(OpKind.MAXPOOL2D, windowH, windowW) as Tracer<S>
+
+/**
+ * §0.4.440 — 2-D average pooling, NCHW, non-overlapping (window = stride, zero
+ * padding), dividing by the FULL window `kh·kw` (count_include_pad — the
+ * interpreter's and PyTorch's convention; padding is zero here so the two
+ * conventions coincide anyway). Same attr spelling and divisibility contract
+ * as [maxPool2d]; `AvgPool2dRule` reverses through the fused AVGPOOL2D_GRAD.
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<*>.avgPool2d(windowH: Int, windowW: Int): Tracer<S> =
+    tracePool2d(OpKind.AVGPOOL2D, windowH, windowW) as Tracer<S>
+
+private fun Tracer<*>.tracePool2d(kind: OpKind, windowH: Int, windowW: Int): Tracer<Shape> {
+    val opName = if (kind == OpKind.MAXPOOL2D) "maxPool2d" else "avgPool2d"
+    require(rank == 4) { "$opName: rank-4 NCHW input required; got ${dims.toList()}" }
+    require(windowH > 0 && windowW > 0) {
+        "$opName: window must be positive; got [$windowH, $windowW]"
+    }
+    require(dims[2] % windowH == 0 && dims[3] % windowW == 0) {
+        "$opName: spatial dims [${dims[2]}, ${dims[3]}] must divide by the window " +
+            "[$windowH, $windowW] (DiffKT's own require — F0 landmine 7)"
+    }
+    val out =
+        if (kind == OpKind.MAXPOOL2D) {
+            io.tlaloc.core.ops.maxPool2dGeneral<Shape>(
+                toDTensor(), windowH, windowW, windowH, windowW, 0, 0, 0, 0,
+            )
+        } else {
+            io.tlaloc.core.ops.avgPool2dGeneral<Shape>(
+                toDTensor(), windowH, windowW, windowH, windowW, 0, 0, 0, 0,
+            )
+        }
+    val e = tape.op(
+        kind,
+        intArrayOf(id),
+        out.dims.copyOf(),
+        out.hostF32(),
+        attrs = mapOf(
+            "window" to listOf(windowH, windowW),
+            "window_strides" to listOf(windowH, windowW),
+            "padding" to listOf(listOf(0, 0), listOf(0, 0)),
+        ),
+    )
+    return Tracer(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
