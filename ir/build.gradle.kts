@@ -49,4 +49,13 @@ kotlin {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // §0.4.478 (H3c-1). Gradle forks a Test JVM at a 512 MB default heap, and
+    // HfLlamaCheckpointTest's lane B decodes REAL tensors out of a 2.2 GB
+    // TinyLlama checkpoint — `model.embed_tokens.weight` alone is 32000x2048
+    // bf16, a 131 MB ShortArray decoded from a 131 MB read buffer. 2 GB leaves
+    // room for that pair without making the number a tuning knob. REJECTED:
+    // probing only small tensors to stay inside the default — the probe that
+    // matters most is the LAST element of the LARGEST tensor, because it is
+    // the one that fails when the data_offsets base or a short read is wrong.
+    maxHeapSize = "2g"
 }

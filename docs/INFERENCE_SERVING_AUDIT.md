@@ -1512,11 +1512,152 @@ about the test source set). `-PoutDir=/abs/path`; six entries written.
 - **SGLang** remains a design record; `pip install sglang` now has an
   obvious answer (a third venv) and no one has spent it.
 
+### H3c-1 — a real Llama's weights, by role (§0.4.478)
+
+The first slice of the arc's last open item. H7 stopped at the worker API
+because the only exportable artifact was a 16-token LCG toy; this slice
+puts a **real 1.1B-parameter Llama checkpoint** on disk and gives the repo
+a typed way to ask it for a tensor. It does NOT yet build a decode graph
+from those tensors — that is H3c-2 — and it says so rather than implying
+otherwise.
+
+**The checkpoint.** `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, fetched with
+`huggingface_hub` in the **vLLM venv** into
+`~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0` — a cache
+directory under `$HOME`, **inside neither venv**. 2.2 GB, single-file
+`model.safetensors`, 201 tensors, every one BF16, `format: pt`. Chosen for
+three properties, all of which a certification needs and none of which a
+"tiny-random" stub has: it is **GQA** (32 heads / 4 KV heads), its MLP is
+**rectangular** (2048 -> 5632), and it is **untied** — so the tied case had
+to be certified some other way (it was; see below).
+
+**What landed.**
+
+1. `ir/.../inference/HfLlama.kt` (commonMain) — `HfLlamaConfig` (config.json
+   through `:core`'s strict `parseJson`), `LlamaWeightRole` /
+   `LlamaLayerPart`, and `HfLlamaNames`: the HF-name <-> role **bijection**,
+   the role list a config implies, and `expectedDims(role, config)`.
+2. `ir/.../inference/HfLlamaCheckpoint.kt` (jvmMain) — the only part that
+   touches a filesystem. Opens a directory through §0.4.468's
+   `SafetensorsIndex.openCheckpoint`, so **sharding is already handled and
+   this file never learns which form it got**; TinyLlama is single-file, a
+   70B is thirty shards, and the code above is identical.
+3. `harness/python/read_hf_llama_probes.py` — the oracle. Imports torch and
+   `safetensors` **on purpose**; it is not serving-path code and runs in the
+   vLLM venv.
+
+**THE LAYOUT FACT, verified rather than assumed.** HuggingFace stores every
+`nn.Linear` weight **transposed, `[out_features, in_features]`**, because
+`F.linear(x, W)` computes `x @ W.T`. The slice was told to verify this
+against the real file and did:
+
+| tensor | dims in the file |
+|---|---|
+| `model.layers.N.self_attn.k_proj.weight` | `[256, 2048]` |
+| `model.layers.N.self_attn.v_proj.weight` | `[256, 2048]` |
+| `model.layers.N.mlp.gate_proj.weight` | `[5632, 2048]` |
+| `model.layers.N.mlp.down_proj.weight` | `[2048, 5632]` |
+
+Those four are **rectangular**, which is the whole point: `q_proj` and
+`o_proj` on this model are both `[2048, 2048]` and **cannot distinguish the
+two conventions at all**. A certification that used only a square model
+would assert nothing, and the test says so in place. `model.embed_tokens.
+weight` is likewise no witness — it is a lookup table, not a Linear, so
+`[vocab, hidden]` either way.
+
+There is a second, independent confirmation in the tied-embedding case: a
+tied `lm_head` reuses the embedding buffer, which **only typechecks under
+`[out, in]`**. Under the other convention the head and the table would be
+transposes of each other and tying would be a shape error.
+
+**Defaulting rules, which are the knowledge the type exists to hold.**
+`num_key_value_heads` absent means MHA (= `num_attention_heads`) — get it
+wrong and an MHA checkpoint loads cleanly as GQA with 1/N of its K/V.
+`head_dim` **when stated wins over `hidden/heads`**, because Llama-3.2 and
+several derivatives decouple them (TinyLlama states none and the quotient
+is 64). `rms_norm_eps` defaults to 1e-6, `rope_theta` to 10000.
+
+**Refused BY NAME**, each because the alternative is a model that serves
+and is quietly wrong: a scaled `rope_scaling` (both the modern `rope_type`
+and the pre-4.43 `type` spelling; `{"rope_type": "default"}` correctly
+means no scaling and is not refused), `attention_bias=true` (Llama proper
+has none, Qwen2 does, and there are no bias roles), a non-Llama
+`architectures[0]` unless the caller passes `strictArchitecture=false`, a
+missing shape key rather than a guessed default, an indivisible GQA
+grouping, and — the one worth reading twice — **a config that disagrees
+with its own file about tying, in both directions**. A tied head is the
+embedding table and an untied one is a separately trained matrix; picking
+either answer silently moves every logit the model will ever produce.
+
+**Oracles and floors.**
+
+| claim | oracle | floor |
+|---|---|---|
+| the role<->name map is a bijection covering the model | 201 roles vs the real file's **201 tensors**, `verifyInventory()` returning no unmapped names | exact, total |
+| HF stores Linear weights `[out, in]` | `expectedDims` vs the real header for **all 201 tensors**, plus the four rectangular witnesses spelled out | exact dims |
+| the config record is the checkpoint's real shape | TinyLlama's own config.json, verbatim, in both the common and jvm tests | exact |
+| the reader's bytes are the bytes torch sees | `read_hf_llama_probes.py` (torch 2.13.0+cu130 + `safetensors`, vLLM venv) on six probes incl. the **last element of the largest tensor** | **exact raw bf16 bit patterns, no tolerance** |
+| …and every tensor's shape and dtype agrees with torch's own header read | same oracle's `shapes`/`dtypes` tables, all 201 | exact |
+| tied embeddings resolve the head to the embedding table | a **hermetic** safetensors checkpoint the test writes byte by byte | `==` on the whole buffer |
+| a config/file disagreement about tying is fatal | the same, both directions | by name |
+| a transposed projection is caught at load, with the convention named | the same, `k_proj` written `[hidden, kvOut]` | by name, both dims in the message |
+
+**SENSITIVITY CHECK, run and reverted.** `expectedDims(K_PROJ)` was flipped
+to `[hiddenSize, kvProjOut]` — i.e. the *other* convention. Three tests went
+red: the hermetic transpose case, the real-checkpoint layout lane, and the
+torch probe lane. Reverted; the suite is green at the committed state.
+
+**Lane split, deliberate.** The hermetic tests (tiny safetensors files the
+test writes itself) run everywhere and gate `./gradlew test` on a fresh
+machine. The real-checkpoint lane **self-skips** when
+`~/.cache/tlaloc-checkpoints/...` is absent (override with
+`TLALOC_HF_LLAMA_CHECKPOINT`); the fetch command is in the test's KDoc. On
+THIS machine it ran: 9 tests, **0 skipped**, both real lanes included.
+
+**REJECTED.** `:core`'s `io` package for the mapping — it holds FORMATS and
+knows nothing about a transformer. `:maestro` — §0.4.468 already rejected it
+for weights, and this is weights. Mocking `WeightSource` in the tests — the
+claims are about how a *directory* resolves, and a mock replaces exactly the
+thing under test. Loading first and letting the graph builder find the shape
+mismatch — by then the tensor is a `FloatArray` with no name attached.
+Fabricating a small config to avoid a 2.2 GB download — §0.4.477 refused the
+same trade and was right.
+
+**NAMED GAPS, carried forward.**
+
+- **`WeightSource` exposes no `dtype(name)`.** Asking a checkpoint what
+  width a tensor is stored at currently means decoding it. The fix is a
+  header accessor in `:core` beside the parser that already knows; until
+  then `HfLlamaConfig.storageDType` reports `torch_dtype` (what the producer
+  INTENDED, not what the bytes ARE) and the test closes the gap by opening
+  the same file through `SafetensorsFile` directly.
+- **`:ir`'s Test JVM heap is now 2 GB** (Gradle's default is 512 MB). Lane
+  B decodes a 131 MB `ShortArray` from a 131 MB read buffer. Probing only
+  small tensors would have stayed inside the default and lost the probe that
+  matters most — the last element of the largest tensor, which is what fails
+  when a `data_offsets` base or a short read is wrong.
+- **No graph is built from these weights yet.** Roles in, tensors out. H3c-2
+  is `DecodeGraphSpec` + `ServingArtifactWriter` fed from a
+  `HfLlamaCheckpoint`, and it is where the transpose stops being a
+  documented fact and becomes a matmul.
+- **The tokenizer is untouched.** `vllm serve` needs it and `tokenizer.json`
+  / `tokenizer.model` were fetched alongside the weights, but nothing here
+  reads them.
+- **fp16 checkpoints remain refused** by §0.4.468's dtype table. TinyLlama is
+  bf16 and loads; a fp16 Llama would need an `F16` DType first.
+
 ### ARC STATE (§0.4.473, the close-out) — read this first
 
 **THE PATH IS BUILT END TO END AND IT EXECUTES. SINCE §0.4.477 IT HAS RUN
 UNDER REAL vLLM. WHAT IT DOES NOT YET RUN IS A REAL LLAMA — and that one
 gap is now the only thing standing between this and `vllm serve`.**
+
+**§0.4.478 halved that gap.** A real 1.1B Llama checkpoint is on disk and
+this repo can ask it for any of its 201 tensors BY ROLE, with the HF
+transposed-`[out, in]` layout verified against the file and the bytes
+checked against torch at exact bit patterns. What is still missing is the
+other half: **building a decode graph and an artifact from those tensors**
+(H3c-2), and a tokenizer.
 
 Nine sections closed the arc on 2026-09-21 (suite **2119 → 2290**); four
 more the same day carried it past the framework (**2290 → 2296**):
@@ -1537,6 +1678,7 @@ more the same day carried it past the framework (**2290 → 2296**):
 | 0.4.475 | H6a | `harness/python/tlaloc_pjrt.py` — the PJRT C API bound from Python with **ctypes alone**, mirroring the FFM runtime; jax blocked by an import guard while it runs | 2292 → 2294 |
 | 0.4.476 | H6b | `tlaloc_serve.py` rewired onto that binding — the **whole** serving path runs with no jax, jaxlib, torch or numpy, and the distribution's dependency list is empty | 2294 → 2295 |
 | 0.4.477 | H7 | `~/.local/venvs/vllm` (vLLM 0.29.0, its own venv), the live lane run, `platform.py`+`worker.py` CERTIFIED, one real bug found and fixed, `exportServingArtifact` | 2295 → 2296 |
+| 0.4.478 | H3c-1 | a REAL TinyLlama-1.1B checkpoint on disk, and `HfLlamaConfig` + `HfLlamaNames` + `HfLlamaCheckpoint` — HF names to roles, with the transposed-`[out, in]` layout VERIFIED against it and the bytes checked against torch | 2296 → 2320 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -1605,7 +1747,10 @@ supposed to fail.
    **THE REMAINDER: `LLM.generate()` / `vllm serve` itself.** Both need a
    HuggingFace `config.json` and tokenizer for a real model, and the only
    exportable artifact is the reference LCG toy. That is **H3c**, not a
-   plugin gap; see the H7 entry. Certify it by exporting a real Llama and
+   plugin gap; see the H7 entry. **§0.4.478 landed H3c-1**: the config and
+   the weights are now readable by role from a real TinyLlama-1.1B
+   checkpoint (see that entry's oracles). H3c-2 — the decode graph and the
+   artifact built FROM those tensors — is what this command still waits on. Certify it by exporting a real Llama and
    running:
 
    ```bash

@@ -10,7 +10,10 @@ rather than merely written. Every step is marked **CERTIFIED** (a test in
 `./gradlew test` proves it) or **UNCERTIFIED** (written, never executed
 here, with the reason and the command that would settle it). Exactly one
 serving step is still UNCERTIFIED and it is §4's last paragraph: `vllm
-serve` over a REAL model, which waits on H3c and not on the plugin.
+serve` over a REAL model, which waits on H3c and not on the plugin. As of
+§0.4.478 the first half of H3c is in — §4.1 fetches a real Llama checkpoint
+and reads its weights by role — and what remains is building an artifact
+from them.
 
 The design and the decisions behind all of this live in
 [INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md); its §5 ARC
@@ -581,6 +584,42 @@ prompt one token at a time would be "working" while doing what no serving
 system accepts.
 
 ---
+
+## 4.1 Fetch a real Llama checkpoint (CERTIFIED as far as ingestion, §0.4.478)
+
+`vllm serve` needs a real model. Fetch one **into a cache under `$HOME`, not
+into either venv** — 2.2 GB of weights are not a Python package:
+
+```bash
+~/.local/venvs/vllm/bin/python -c "from huggingface_hub import snapshot_download; \
+  snapshot_download('TinyLlama/TinyLlama-1.1B-Chat-v1.0', \
+    local_dir='$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0', \
+    allow_patterns=['*.json','*.safetensors','tokenizer*'])"
+```
+
+That directory is what `HfLlamaCheckpoint.open(dir)` reads: `config.json`
+through `:core`'s strict parser into an `HfLlamaConfig`, and any of the
+checkpoint's 201 tensors by `LlamaWeightRole` — shape-verified against the
+config on every load. Sharded checkpoints work unchanged (§0.4.468's
+`SafetensorsIndex`); this one is single-file.
+
+**The layout fact you will need downstream: HuggingFace stores `nn.Linear`
+weights TRANSPOSED as `[out_features, in_features]`.** So `k_proj.weight` is
+`[numKvHeads*headDim, hiddenSize]` — on TinyLlama, `[256, 2048]`. A matmul
+against it needs `x @ W^T` or an explicit transpose. This is checked against
+the real file for all 201 tensors, not assumed.
+
+Verify the ingestion lane, oracle included:
+
+```bash
+JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :ir:jvmTest --tests "*HfLlama*"
+# 24 tests; the two real-checkpoint ones self-skip if the cache dir is absent.
+# Override the location with TLALOC_HF_LLAMA_CHECKPOINT=<dir>.
+```
+
+**What this does NOT yet do**: build a decode graph or a serving artifact
+from those weights. That is H3c-2, and it is why the last paragraph of §4
+is still the one uncertified serving step.
 
 ## 5. The KPTX paged-attention kernel (CERTIFIED, and deliberately opt-in)
 
