@@ -1895,6 +1895,94 @@ demo path meanwhile, and the runbook says so.
   not :ir's 8 GB precisely because `stageWeight` is a CALLBACK — 4196 MiB of
   weights is never resident.
 
+### H4b — the paged-attention tier gets a baseline, and §0.4.471's verdict is overturned (§0.4.481)
+
+Slice K1 of the performance tier: **measure and diagnose, rewrite
+nothing**. The full write-up with every number, the roofline arithmetic
+and the priority-ordered change list is
+[KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md); this entry records what it
+changed about what the audit believed.
+
+**What §0.4.471 believed.** "Per-call floors, same session, executable
+already compiled, host round trip included: claimed 465 µs, unclaimed
+310 µs. The correctness-tier kernel is 1.5× SLOWER than the lowering it
+replaces." Everything in that sentence is true as written — **and the
+number is a staging measurement.** The fixture's KV pool is ~1 MB, and
+465 µs of round trip over 1 MB is ≈ 2.3 GB/s: a unified-memory transfer
+rate with an attention kernel somewhere inside it. The first version of
+this slice's harness reported round trips too, at 8–134 MB, and its two
+lanes differed by less than the transfer's own run-to-run noise — a
+differencing apparatus built on it produced a *negative* device cost,
+which is how the flaw surfaced.
+
+**The instrument that works** is `PjrtSession.executeOn` against
+pre-staged device buffers — the §0.4.309 benchmark path, already
+documented in that class as "amortise the staging cost … sync via PJRT's
+device-complete event". Three lanes (claimed, unclaimed, and a
+**dispatch floor**: the same staged buffers, the same execute path, one
+elementwise multiply instead of an attention), timed **interleaved**,
+floors over 20 reps after 3 warmup, one session. Lane-at-a-time was
+tried and rejected in the same breath as the round trip: a floor is
+comparable across lanes only if whatever drifts drifts across all of
+them.
+
+**The result reverses the headline.** Device floors, µs, one session:
+
+| point | claimed | unclaimed | c/u | dispatch floor |
+|---|---|---|---|---|
+| tinyllama-s1-ctx256 | 177.5 | 93.0 | **1.91×** | 42.2 |
+| tinyllama-s8-ctx512 | 272.9 | 141.7 | **1.93×** | 45.4 |
+| llama3-8b-s8-ctx1024 | 882.8 | 1209.8 | **0.73×** | 312.9 |
+| llama3-8b-s16-ctx1024 | 1431.1 | 2322.4 | **0.62×** | 236.0 |
+
+**The correctness-tier kernel already beats XLA's gather-composed
+lowering by 1.4–1.6× at Llama-3-8B-shaped decode points**, and loses by
+~1.9× at TinyLlama-shaped ones. Three independent sessions gave
+0.70/0.65, 0.73/0.62 and 0.76/0.66 on the 8B pair while the absolutes
+drifted by tens of percent, so the crossover is not drift. The
+small-shape loss is **not** a fixed per-custom-call tax either: above the
+dispatch floor the claimed lane is ~2.5× the unclaimed lane at both small
+points, which is real kernel time.
+
+**What the diagnosis found, and what it killed.** The expected culprit —
+the score matrix crossing global memory **six times** (counted from the
+PTX: stage 1 stores it, the shared row softmax's three passes load it
+three times and store it once, stage 3 loads it again) — is **2–5% of
+traffic**. The dominant term is instead the **GQA re-read**: one CTA per
+*(sequence, query head)* means K and V are walked `group` times, 536 MB
+issued against 134 MB distinct at the largest point, over a pool that
+does not fit the 24 MB L2. On distinct bytes the kernel achieves
+94 GB/s against NVIDIA's published 273 GB/s for this part (vendor spec,
+not measured here — a measured ceiling is a named deferral). The
+priority list that falls out is therefore led by **one CTA per
+(sequence, KV head)**, not by fusion; fusion is item 5, worth its two
+deleted launches at the small shapes.
+
+Also recorded: both page-walking stages declare **zero shared memory**
+(so nothing is reused inside a block), both sit at **50% declared
+occupancy, register-limited at 65 and 68 slots/thread with the cliff at
+64**, `kptx_paged_out` leaves **192 of 256 threads idle** at headDim 64,
+and `tinyllama-s1-ctx256` runs **32 CTAs on 48 SMs** — a third of the
+device idle at the latency-critical batch-1 shape.
+
+**The gate is restated because the old one was unmeasurable.** Not
+"beat 465 µs"; rather: the default inference registry stays empty until
+the claimed lane's *device* floor is below the unclaimed lane's at
+**every** point in the sweep, `tinyllama-s1-ctx256` included.
+
+**The vLLM reference row is a named deferral with a verified reason**:
+vLLM 0.29.0 in `~/.local/venvs/vllm` ships **no `vllm._C` extension
+module** — `from vllm import _custom_ops` warns
+`Failed to import from vllm._C` and exposes only `paged_attention_rocm`,
+because 0.29's CUDA path routes attention through FlashAttention /
+FlashInfer rather than the classic `paged_attention_v1`. Timing a
+different algorithm through a different launch path beside these rows
+would be the fair-comparison hazard with none of the compensating value.
+
+**No kernel was touched.** `KptxKernels.pagedAttentionModule`,
+`KptxPagedAttention` and `PagedAttentionKernel` are byte-identical at
+this commit; the slice adds one benchmark file and one document.
+
 ### ARC STATE (§0.4.473, the close-out) — read this first
 
 **THE PATH IS BUILT END TO END, IT EXECUTES, IT HAS RUN UNDER REAL vLLM
@@ -1938,6 +2026,7 @@ more the same day carried it past the framework (**2290 → 2296**):
 | 0.4.478 | H3c-1 | a REAL TinyLlama-1.1B checkpoint on disk, and `HfLlamaConfig` + `HfLlamaNames` + `HfLlamaCheckpoint` — HF names to roles, with the transposed-`[out, in]` layout VERIFIED against it and the bytes checked against torch | 2296 → 2320 |
 | 0.4.479 | H3c-2 | `HfLlamaDecodeGraph` + `HfLlamaStagedWeights` + `DecodeGraphSpec.weightSlots` — the real checkpoint becomes a decode graph, certified against HF transformers at **1e-5 relative with argmax and top-5 exact**; RSQRT/SILU interpreter arms found and closed on the way | 2320 → 2330 |
 | 0.4.480 | H3c-3 | `ServingWeightsPointer.table` + `buffer_from_file` + `HfLlamaServingExport` — the artifact carries a staged weight table and a REAL 22-layer TinyLlama serves on PJRT-CUDA, **6/6 generated token ids equal to HuggingFace** | 2330 → 2333 |
+| 0.4.481 | H4b (K1) | `KptxPagedAttentionBenchTest` + [KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md) — the paged-attention tier's baselines, measured on the DEVICE instead of through the host round trip: the kernel is **1.4–1.6× faster** than XLA's lowering at 8B-shaped decode points and 1.9× slower at toy ones, §0.4.471's "1.5× slower" is retired as a staging measurement, and the dominant cost is the GQA re-read, not the score matrix | 2333 → 2335 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -2118,11 +2207,17 @@ Three new `OpKind`s entered the IR in Phase H and no others:
 4. **The ragged / chunked-prefill `PAGED_ATTENTION` form.** H1a's deferral
    since the first slice, refused by name in three places, and the one
    IR-level item both vLLM's chunked prefill and SGLang's radix path need.
-5. **The H4 performance tier** — warp specialization, shared-memory staging
-   of the page window. The floor to beat is the measured **465 µs** against
-   the lowering's 310 µs. Until it lands, nothing should register this
-   kernel in a deployment, which is why the default inference registry is
-   empty.
+5. **The H4 performance tier** — now with a baseline and a priority order
+   (§0.4.481, [KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md)). The 465 µs floor
+   named here is **retired**: it was a host round trip, and on the device the
+   kernel already wins 1.4–1.6× at Llama-3-8B-shaped decode points while
+   losing 1.9× at TinyLlama-shaped ones. The leading change is **one CTA per
+   (sequence, KV head)** — the GQA re-read, not the score matrix, is the
+   dominant traffic term — followed by bf16 pools, vectorized/staged page
+   loads, context splitting for batch 1, and only then the single-kernel
+   online-softmax fusion. The default inference registry stays empty until
+   the claimed lane's device floor beats the unclaimed lane's at EVERY point
+   in that sweep.
 6. **Narrow DTypes (`I8`, and the fp8 tour)** — a bf16-sized piece of work,
    and the difference between KV-quant's contract and its bytes.
 7. **`precision_config = HIGHEST`** for dots that want it, and the top-1
