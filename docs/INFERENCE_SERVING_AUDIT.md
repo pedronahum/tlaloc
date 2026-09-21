@@ -412,3 +412,151 @@ bucket ladder — H3, where the manifest is written.
 **H1 is now CLOSED**: gap-list items 1 (paged attention), 2's write half (cache
 write) and 3 (contract + bucketing) are all landed. Next is **H2** — safetensors
 → `DTensor` weight ingestion and Llama decode-graph parity vs the HF reference.
+
+### H2 — safetensors weight ingestion + decode parity (§0.4.468)
+
+Gap-list item 4. **No new op kind, no new attrs, no gradient math** — and
+therefore no new AD refusal and no new `KotlinSourceRenderer` arm: this slice
+is I/O and an oracle. The north star is untouched because nothing new entered
+the IR.
+
+**The reader.** `io.tlaloc.core.io` — `Json.kt` (a strict minimal JSON reader)
+and `Safetensors.kt` (the format) in `commonMain`, `SafetensorsFile.kt` (a
+`FileChannel` and the sharded index) in `jvmMain`. The format is: `[0,8)` a u64
+little-endian header length, `[8, 8+N)` a UTF-8 JSON header mapping name →
+`{dtype, shape, data_offsets}` where the offsets are relative to the DATA
+BUFFER at `8+N`, then tensors packed back to back, row-major, little-endian.
+
+**Placement.** `:core`. The reader's output type IS `DTensor`, and
+`HostF32Storage` / `HostBf16Storage` / `HostI32Storage` / `DType` all live
+there. REJECTED: a new `:io` module — it would name a `:core` type in every
+signature it has and be depended on by everything that loads weights: a module
+boundary with no API of its own. REJECTED: `:maestro` — that module is about
+the deployment MANIFEST, and weights are not a program. The commonMain/jvmMain
+split is the honest one: decoding the format is arithmetic over bytes and is
+tested without a filesystem; opening a file is the only jvm-specific part.
+
+**A JSON parser in `:core`, which has no dependencies at all.** REJECTED:
+kotlinx-serialization-json — a first dependency on the module everything else
+depends on, to read a flat map. REJECTED, more importantly: scanning the header
+with `indexOf`, which is what "quick" loaders do and which is wrong the first
+time a tensor name contains a `{`, a `,` or an escaped quote — all legal in a
+JSON string. A checkpoint is UNTRUSTED INPUT; the thing that reads it is a
+parser. It is strict by design (no trailing commas, no unquoted keys, no
+`NaN`/`Infinity` literals, raw control characters in strings refused), keeps
+each number's RAW TEXT so `4.0` is not a shape of 4 and a 2^53+ offset is not
+rounded, and refuses DUPLICATE KEYS rather than taking last-wins — two entries
+for one tensor name are two disagreeing offsets, and picking one silently is
+how a loader reads the wrong bytes.
+
+**Decisions, and what they rejected.**
+- **Validate the header against the file before decoding a byte.** Negative
+  dims, a backwards offset pair, a byte span that disagrees with
+  `dtype × elementCount`, a range past the end of the buffer, and OVERLAPPING
+  tensors are each refused BY NAME. REJECTED: trusting the header and letting
+  an index throw — that reports a corrupt checkpoint as an
+  `ArrayIndexOutOfBoundsException` from inside a decode loop, which is the same
+  information with the diagnosis removed. The declared header length is bounded
+  (100 MB) BEFORE anything is allocated, so a hostile u64 is a named error and
+  not an `OutOfMemoryError`.
+- **Dtypes: map four, refuse the rest BY NAME.** F32, F64, BF16 (into
+  `HostBf16Storage`, raw patterns, §0.4.455) and I32 map. **F16 is refused** —
+  fp16 has no host representation and neither widening nor narrowing it would
+  put the checkpoint's own numbers in the tensor. **I64 is refused** — it is a
+  `DType` but has no `HostI64Storage`, and narrowing corrupts exactly the token
+  ids and position buffers HF stores at that width. **fp8 is refused as the H5
+  deferral**, naming the reserved `kvQuantDtype` manifest slot. REJECTED
+  throughout: a silent upcast, which produces numbers the producer never wrote.
+- **Per-tensor reads, not whole-file.** `SafetensorsFile.load` reads only that
+  tensor's `[begin, end)` range. REJECTED: slurping the file and slicing — it
+  doubles peak memory at the moment memory is scarce, and a 70B checkpoint is
+  the intended caller. REJECTED for v1: `mmap` — right for a large f32
+  checkpoint whose storage could be a buffer VIEW, but Tlaloc's host storages
+  are Kotlin primitive arrays so the decode copies regardless; a zero-copy
+  MemorySegment-backed storage is a NAMED DEFERRAL (the FFM stack exists).
+- **The sharded index is IMPLEMENTED, not deferred.**
+  `model.safetensors.index.json`'s `weight_map` routes each tensor to a shard;
+  shards open LAZILY on first mention and close together, and
+  `openCheckpoint(dir)` picks the index or the single file behind one
+  `WeightSource`. A `weight_map` value is an untrusted string, so it is required
+  to be a BARE filename — an index that can name `../../etc/passwd` is an index
+  that can read arbitrary files.
+- **`LoadedTensor` does not invent a phantom `Shape`.** A `DTensor`'s shape
+  parameter is a compile-time fact and a checkpoint's rank is a runtime one, so
+  the caller brands it (`asF32<S>()` / `asBf16` / `asI32` / `asF64`, each
+  refusing a dtype mismatch by name). REJECTED: returning `DTensor<Nothing, _>`
+  and letting subtyping paper over it — it typechecks and it lies about what
+  was proven.
+
+**Parity, and the oracle.** `LlamaSafetensorsParityTest` runs a REAL
+safetensors checkpoint written by the reference implementation:
+`harness/python/write_llama_safetensors.py` synthesizes `LlamaDecoderPrimal`'s
+thirteen parameters and saves them through `safetensors.numpy.save_file` AND
+(at bf16) `safetensors.torch.save_file`. Tlaloc's reader loads them; the CPU
+baseline pipeline (`recognize → coarsen → decomposeCoarsened`) runs the decode
+step through Tlaloc-IREE; `harness/python/run_pytorch_llama.py` — the existing
+op-for-op PyTorch mirror (§0.4.289) — supplies the loss on the same numbers.
+
+Two claims, both pinned:
+1. **Bit-for-bit read.** The writer records the raw element bit patterns it
+   actually wrote at chosen flat indices (both ends, where an offset off-by-one
+   shows first, plus a spread through the middle) and the reader must reproduce
+   them EXACTLY — `Float.toRawBits()` for F32, the raw 16-bit pattern out of
+   `HostBf16Storage` for BF16. No tolerance: reading bytes is not arithmetic.
+2. **Decode parity** at 1e-3 relative on the loss, for the f32 checkpoint and
+   the bf16 one.
+
+The **bf16 file is the load-bearing half**: its numbers are the f32 ones put
+through `torch.bfloat16`, so torch does the rounding and Tlaloc must read the
+identical 16-bit patterns — which incidentally pins §0.4.455's
+round-to-nearest-even against torch's own conversion. Widening back to f32 is
+exact, and the PyTorch reference runs on the widened values, so "an f32 graph
+on a bf16 checkpoint computes on the checkpoint's real numbers" is a certified
+sentence rather than a hopeful one. A separate assertion requires the two
+checkpoints to produce DIFFERENT losses — if bf16 rounding were a no-op, or if
+the bf16 read quietly fell back to the f32 file, that is the line that notices.
+
+**Why synthesized weights, not a downloaded TinyLlama.** The bytes of a random
+f32 tensor and a trained one are the same kind of bytes, and
+`LlamaDecoderPrimal` is not TinyLlama's graph anyway (single layer, single
+head, no GQA — its own scope notes say so), so a download would add a network
+dependency and a multi-gigabyte footprint to the certification suite without
+strengthening either claim. What a real checkpoint WOULD add is HF's tensor
+NAMING and the sharded-index form: the index is pinned in
+`SafetensorsFileTest`, and mapping HF names onto a model-layer graph is H3's
+business, where the manifest is written.
+
+**Why the IREE-CPU lane and not the interpreter or the GPU.** The reference
+interpreter's op coverage is deliberately narrow (it does not carry `RSQRT`,
+and widening it is AD-engine work, not ingestion work). The IREE-CPU lane and
+the PyTorch oracle were already pinned against each other in §0.4.289, so the
+ONLY new variable in this test is where the weights came from, and any
+disagreement is the reader's. Running the step on the GPU through PJRT is a
+SECOND claim with its own floor (~4e-5, never tighter than 1e-4) and belongs
+with H3's real decode step, where a logits difference has a top-1 consequence.
+
+**Format-level oracles without any toolchain.** `SafetensorsTest` builds files
+BYTE BY BYTE — never through a writer of ours, because a reader tested against
+its own writer certifies that the two agree, not that either matches the
+format. It covers mixed dtypes in one file, a rank-0 tensor, a zero-element
+tensor, signed zero pinned on raw bits, the full 256-exponent bf16 sweep, and
+every refusal above. `JsonTest` covers the escapes, the control-character rule,
+the duplicate-key refusal and the exact-integer rule.
+
+**Sensitivity check.** The bf16 decode was deliberately byte-swapped before the
+parity test was trusted: it failed at `checkBf16Probes` with "Tlaloc read a
+different bf16 pattern than torch wrote", then passed again on revert.
+
+**Named deferrals from this slice**: mmap / zero-copy `MemorySegment`-backed
+storage; `HostI64Storage` (and with it I64 checkpoints); F16 and fp8 (H5);
+loading a real HF Llama end to end, which is a NAME-MAPPING problem
+(`model.layers.N.self_attn.q_proj.weight` → graph parameter) and belongs with
+H3's model layer; a safetensors WRITER (nothing in the serving path writes
+one — the manifest is the artifact, weights are an input); device-side decode
+parity (H3); and streaming a checkpoint straight into device buffers, which is
+what a serving loader eventually wants and which needs H3's manifest-side
+buffer story first.
+
+**Still open in Phase H**: H3 (the `vllm-tlaloc` platform plugin, certified on
+CUDA), H4 (KPTX paged-attention kernel + recognizer claiming), H5 (SGLang
+variant + KV-quant).
