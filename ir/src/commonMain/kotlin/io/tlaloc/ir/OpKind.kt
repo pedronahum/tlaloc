@@ -466,6 +466,72 @@ enum class OpKind {
     // the coarse kind being a kind.
     PAGED_ATTENTION,
 
+    // §0.4.466 — Phase H1b (docs/INFERENCE_SERVING_AUDIT.md §2 gap 2): the
+    // KV-cache write. vLLM's decode step computes one new K and one new V per
+    // token and deposits them into the page pool at the slots its allocator
+    // named, THEN attends over the pool with PAGED_ATTENTION. This is that
+    // deposit.
+    //
+    // KV_CACHE_WRITE(cache, newKv, slotMapping) → updatedCache
+    //   cache       [numBlocks, blockSize, numKvHeads, headDim]
+    //   newKv       [numTokens, numKvHeads, headDim]
+    //   slotMapping [numTokens]                        I32 — FLAT slots:
+    //                                                  blockIdx*blockSize + offset
+    //   out         [numBlocks, blockSize, numKvHeads, headDim]
+    // attrs: NONE (see [io.tlaloc.ir.KvCacheWriteAttrs]).
+    //
+    // THE NAME. vLLM calls this `reshape_and_cache`, after the reshape its CUDA
+    // kernel does on the way in ([numTokens, numKvHeads*headDim] → the paged
+    // layout). That names an implementation detail of one kernel, not the
+    // semantics. KV_CACHE_WRITE is the house name because the house names ops
+    // for what they mean; the reshape is the emitter's business, and H4's fused
+    // kernel may not do one at all.
+    //
+    // ONE POOL PER OP, and the decode graph calls it twice (K then V).
+    // REJECTED: fusing both pools into one two-result op, the literal shape of
+    // `reshape_and_cache`. That shape exists to save a kernel launch, which is
+    // a concern of the kernel and not of the IR; here it would buy a
+    // multi-result op (the §0.4.448 result-index landmine) in exchange for
+    // nothing, and it would forbid the perfectly ordinary graph that writes
+    // only K. A fused recognizer pattern over the adjacent pair is available
+    // in H4 if a kernel ever wants it.
+    //
+    // FUNCTIONAL, NOT IN-PLACE: the op RETURNS an updated pool. The house IR is
+    // value-semantics throughout and an aliasing/donating op would be a new and
+    // load-bearing concept in it. REJECTED alternative: in-place mutation with
+    // the cache as an inout operand — it would make every pass that reorders or
+    // CSEs ops responsible for a memory model none of them has. The cost of the
+    // functional form is a notional full-pool copy, and the answer to that is
+    // XLA's BUFFER DONATION: the serving loop donates the cache buffer and XLA
+    // writes in place under the hood, no copy, no IR concept. Wiring donation
+    // through the manifest + PjrtSession is a NAMED FOLLOW-ON (Phase H3).
+    //
+    // A NEGATIVE slot means PADDING — skip the token. That is vLLM's -1
+    // convention, and it is what lets a bucketed static-shape decode graph
+    // carry slack lanes without a recompile per real batch size. Non-negative
+    // slots must be DISTINCT (see KvCacheWriteAttrs for why the emission
+    // depends on it).
+    //
+    // NOT a duplicate of SCATTER, and this was checked before the kind was
+    // added. The existing SCATTER/SCATTER_ADD take a SCALAR I32 index and
+    // replace ONE row: expressing a KV write with them needs numTokens GATHERs
+    // (to pull each slot out of the slotMapping tensor) plus numTokens
+    // SCATTERs, an O(numTokens) op explosion for something a single StableHLO
+    // scatter expresses — and it would lose the recognizable single kind that
+    // H4's fused kernel and H3's buffer donation both need to claim. The
+    // general "vectorized scatter" kind that WOULD subsume this is a
+    // differentiable surface needing a VjpRule; this one is inference-only and
+    // needs none. They are different ops, not one op twice.
+    //
+    // INFERENCE-ONLY BY DESIGN — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS].
+    // A KV page pool is state mutated across decode steps and addressed by
+    // integer allocator bookkeeping; it is not a differentiable intermediate in
+    // any training graph, and the training spelling of "put these values
+    // somewhere" is the differentiable SCATTER family. Both AD transforms
+    // refuse it BY NAME. It DOES carry a real interpreter arm and real
+    // StableHLO emission, because serving has to actually run it.
+    KV_CACHE_WRITE,
+
     // Misc
     EMBEDDING, CROSS_ENTROPY, CAST,
 

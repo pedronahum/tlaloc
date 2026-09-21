@@ -1038,6 +1038,7 @@ object DxirInterpreter {
                 out
             }
             OpKind.PAGED_ATTENTION -> evalPagedAttention(op, env, multiResults)
+            OpKind.KV_CACHE_WRITE -> evalKvCacheWrite(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -1870,6 +1871,65 @@ object DxirInterpreter {
                 }
                 for (j in 0 until d) out[qOff + j] = acc[j].toFloat()
             }
+        }
+        return out
+    }
+
+    /**
+     * §0.4.466 — Phase H1b: the KV_CACHE_WRITE reference walk — vLLM's decode
+     * deposit, the step that fills the pool [evalPagedAttention] then reads.
+     *
+     * FUNCTIONAL: the pool is COPIED and the copy is written, because the
+     * house IR is value-semantics and an aliasing op would be a new memory
+     * model for every pass to respect. (In deployment XLA's buffer donation
+     * makes the copy disappear — a named H3 follow-on; here correctness is the
+     * only concern and a copy is exactly right.)
+     *
+     * The pool's row-major flattening is
+     * `[numBlocks*blockSize, numKvHeads, headDim]`, and `slotMapping[i]` is
+     * already the flat slot — so a token's destination is a single contiguous
+     * `slotStride`-element run, and the write is one [FloatArray.copyInto] per
+     * token. No index arithmetic on block/offset appears anywhere: that IS the
+     * flat-slot convention's payoff (see [io.tlaloc.ir.KvCacheWriteAttrs]).
+     *
+     * Two refusals, both loud, both about things the GPU would do differently:
+     * an out-of-range slot (a genuine allocator bug — StableHLO's scatter would
+     * silently DROP it, which is the right behaviour for padding and the wrong
+     * one for a bug, so the distinction is drawn here by the SIGN), and a
+     * REPEATED live slot (StableHLO leaves duplicate-index scatter with a
+     * non-commutative update computation implementation-defined, so "last token
+     * wins" would be a promise only the interpreter keeps).
+     */
+    private fun evalKvCacheWrite(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.KvCacheWriteAttrs.parse(op, "DxirInterpreter")
+        val cache = evalNode(op.operands[0], env, multiResults)
+        val newKv = evalNode(op.operands[1], env, multiResults)
+        val slotMapping = evalCsrIntOperand(op, 2, "slotMapping", env, multiResults)
+
+        val out = cache.copyOf()
+        val stride = p.slotStride
+        val seen = HashSet<Int>()
+        for (i in 0 until p.numTokens) {
+            val slot = slotMapping[i]
+            // A NEGATIVE slot is vLLM's padding marker: this lane of the
+            // bucketed batch is not a real token. Skip it — no write, no error.
+            if (slot < 0) continue
+            require(slot < p.numSlots) {
+                "DxirInterpreter: KV_CACHE_WRITE token $i names slot $slot but the pool holds " +
+                    "${p.numSlots} slots (${p.numBlocks} blocks × ${p.blockSize}) — a slot past " +
+                    "the pool is an allocator bug, not padding (padding is NEGATIVE)"
+            }
+            require(seen.add(slot)) {
+                "DxirInterpreter: KV_CACHE_WRITE slot $slot is written by more than one token " +
+                    "(token $i repeats it) — the non-negative slots must be DISTINCT: StableHLO " +
+                    "leaves a duplicate-index scatter with a replace body implementation-defined, " +
+                    "so a 'last one wins' rule would hold here and nowhere else"
+            }
+            newKv.copyInto(out, slot * stride, i * stride, (i + 1) * stride)
         }
         return out
     }

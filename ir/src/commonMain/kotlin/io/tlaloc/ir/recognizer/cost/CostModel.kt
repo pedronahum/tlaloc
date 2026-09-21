@@ -237,6 +237,16 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
         4.0 * op.type.elementCount.toDouble() * maxContextLen.toDouble()
     }
 
+    // §0.4.466 — Phase H1b: the KV-cache write is PURE DATA MOVEMENT (a
+    // scatter of newKv's rows into the pool), so zero FLOPs — the movement
+    // bucket above is where it belongs and where its siblings SCATTER /
+    // SCATTER_ADD already sit. Deliberately NOT priced by the pool size: the
+    // functional form's notional full-pool copy is an artifact of
+    // value-semantics IR that XLA's buffer donation removes (the named H3
+    // follow-on), and pricing a copy the deployed program does not make would
+    // teach the recognizer to avoid the op for the wrong reason.
+    OpKind.KV_CACHE_WRITE -> 0.0
+
     OpKind.EMBEDDING -> op.type.elementCount.toDouble()
     // §0.4.370 — embedding adjoint: one scatter-add per upstream element.
     OpKind.EMBEDDING_GRAD -> op.operands[1].type.elementCount.toDouble()

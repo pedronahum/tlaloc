@@ -79,6 +79,10 @@ internal fun demotedKindRefusal(kind: OpKind, layer: String): String? = when (ki
  */
 internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     OpKind.PAGED_ATTENTION,
+    // §0.4.466 — Phase H1b: the other half of the paged decode step. Same
+    // rationale, one step earlier in the loop: the write DEPOSITS into the
+    // pool that paged attention then reads.
+    OpKind.KV_CACHE_WRITE,
 )
 
 /**
@@ -97,5 +101,15 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "DIFFERENTIATE attention, use the training spelling: the FlashAttention " +
             "composition (MATMUL/softmax/MATMUL) or the GQA recognizer's coarsened form, " +
             "which the coarseners own with certified gradients"
+    OpKind.KV_CACHE_WRITE ->
+        "$layer: KV_CACHE_WRITE is INFERENCE-ONLY BY DESIGN (Phase H1b, " +
+            "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
+            "not a gap: it deposits a decode step's new keys/values into a KV PAGE POOL " +
+            "at flat slots an allocator named, so its cache operand is serving-runtime " +
+            "state threaded across steps and its slotMapping is integer bookkeeping — " +
+            "neither is a differentiable intermediate in any training graph. It DOES " +
+            "have an interpreter arm and StableHLO emission (serving executes it). To " +
+            "DIFFERENTIATE a placement of values into a tensor, use the differentiable " +
+            "spelling: the SCATTER / SCATTER_ADD family, which carries certified rules"
     else -> null
 }

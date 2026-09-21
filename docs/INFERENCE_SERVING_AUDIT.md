@@ -159,5 +159,107 @@ and H3 feeds these as device buffers through the manifest); the cost model
 prices the WORST-CASE window because `seqLens` is a runtime value and pricing
 may never read tensor contents.
 
-**Still open in H1**: gap-list item 2 (KV-cache write scatter + page-table
-gather forms) and item 3 (decode-graph shape contract + bucketing).
+**Still open in H1** (after H1a): gap-list item 2 (KV-cache write scatter +
+page-table gather forms) and item 3 (decode-graph shape contract + bucketing).
+
+### H1b — `KV_CACHE_WRITE` (§0.4.466)
+
+Gap-list item 2's **write** half: the step that fills the pool H1a reads.
+
+**The op.** `KV_CACHE_WRITE(cache, newKv, slotMapping) → updatedCache`, with
+`cache [numBlocks, blockSize, numKvHeads, headDim]`,
+`newKv [numTokens, numKvHeads, headDim]`,
+`slotMapping [numTokens]` integer, and **no attributes at all** — every
+quantity is derived from operand shapes, and `blockSize`/`numKvHeads`/
+`headDim`/`numTokens`/`numBlocks` are REFUSED as attrs by name (the sentinel-
+dims rule). One parser: `ir/.../KvCacheWriteAttrs.kt`, the
+`PagedAttentionAttrs` precedent.
+
+**Did an existing kind already express this?** Checked first, because adding a
+duplicate kind is the failure mode here. **No.** `SCATTER`/`SCATTER_ADD` take a
+**scalar** I32 index and replace **one** row; a KV write needs a *vectorized*
+index, since `slotMapping` is a runtime rank-1 tensor. Expressing it with the
+narrow kinds costs `numTokens` GATHERs (to pull each slot out as a scalar) plus
+`numTokens` SCATTERs — an O(numTokens) op explosion for what one StableHLO
+scatter does, and it would dissolve the single recognizable kind that H4's
+fused kernel and H3's buffer donation both need to claim. The general
+vectorized-scatter kind that *would* subsume this is a **differentiable**
+surface needing a `VjpRule`; this one is inference-only and needs none. The
+audit's "gather/scatter axis+list forms" tail therefore stays open as a
+*training-side* item, and is **not** what H1b landed.
+
+**The name.** vLLM calls it `reshape_and_cache`, after a reshape its CUDA
+kernel happens to do on the way in. The house names ops for what they mean, and
+H4's kernel may not reshape at all — hence `KV_CACHE_WRITE`.
+
+**Decisions, and what they rejected.**
+- **Flat slots** (`slot = blockIdx*blockSize + offset`), vLLM's own
+  convention. REJECTED: a `[numTokens, 2]` (block, offset) pair tensor — every
+  consumer would re-derive the flat index, "is this slot live" becomes two
+  comparisons, and the plugin's first act would be flattening back what the
+  scheduler already had flat. The payoff is visible in the lowering: **no
+  block/offset arithmetic appears anywhere** (pinned as a test).
+- **One pool per op**, called twice (K then V). REJECTED: fusing both pools
+  into one two-result op, `reshape_and_cache`'s literal shape — that shape
+  exists to save a kernel launch, which is the kernel's concern, and here it
+  would buy the §0.4.448 multi-result-index landmine and forbid a graph that
+  writes only K. A fused recognizer pattern over the adjacent pair is available
+  in H4 if a kernel wants it.
+- **Functional, returning an UPDATED pool.** REJECTED: in-place mutation via an
+  inout operand — it would make every pass that reorders or CSEs ops
+  responsible for a memory model none of them has. The notional full-pool copy
+  is answered by **XLA buffer donation**: the serving loop donates the cache
+  buffer, XLA writes in place, no copy and no new IR concept. **Named
+  follow-on**: wiring donation through the manifest + `PjrtSession` (H3).
+- **Negative slot = padding**, vLLM's `-1`. Load-bearing for the static-shape
+  story: bucketed decode graphs always carry slack lanes.
+
+**Emission**: ONE `stablehlo.scatter` bracketed by two reshapes (pool ↔
+`[numBlocks*blockSize, numKvHeads, headDim]`), `update_window_dims = [1, 2]`,
+`inserted_window_dims = [0]`, `scatter_dims_to_operand_dims = [0]`,
+`index_vector_dim` = the indices' rank, replace body. Padding rides StableHLO's
+rule that an **out-of-bounds scatter update is dropped**. REJECTED: masking
+padding explicitly with a `slot >= 0` predicate and a `select` — three more ops
+plus a gather of the current pool rows to select back, to defend against a rule
+the spec states. `unique_indices = false` deliberately: not a statement about
+the live slots (those are required distinct) but about the padding lanes, which
+repeat `-1`; promising uniqueness where indices are literally equal is a lie
+with an optimizer behind it.
+
+**Inference-only by design.** Joins `INFERENCE_ONLY_OP_KINDS`. Both AD
+transforms and `KotlinSourceRenderer` refuse BY NAME, with the rationale (the
+pool is serving-runtime state threaded across decode steps; `slotMapping` is
+integer allocator bookkeeping) and the differentiable spelling (the
+`SCATTER`/`SCATTER_ADD` family, which carries certified rules). No gradient math
+was written.
+
+**Oracles.** (1) Hand-exact slot-mapping writes against a pool
+*position-encoded* so every element equals its own flat index — a write one
+slot, head or lane off yields a value that names where it actually went — with
+the expectation rebuilt by an independent pool-major walk, and with two tokens
+landing in the SAME BLOCK and a write into a partially-filled block whose other
+slot must survive. (2) The **round trip**: a decode graph that writes K/V then
+runs `PAGED_ATTENTION` with `seqLens = 1`, where a one-element softmax is
+exactly 1.0, so attention must read back the written V **bit for bit** — with
+the pool poisoned at 1000.0 so a write that did not land is off by three orders
+of magnitude. This composes H1a and pins that both ops agree what a flat slot
+is. (3) Conventions: padding writes nothing, the input array is not mutated,
+and duplicate/out-of-range slots refuse loudly (the sign is what separates
+padding from an allocator bug). (4) GPU: `PjrtKvCacheWriteSmokeTest` compiles
+the emission under real XLA on the GB10 and agrees with the interpreter
+**exactly** (a write does no arithmetic) — padding lane included, which is the
+only honest way to confirm that XLA *drops* rather than *clamps* an
+out-of-bounds scatter index. It does. (5) Offline structure pins in
+`KvCacheWriteEmitTest`.
+
+**Named deferrals from this slice**: buffer donation (H3); a standalone
+page-gather kind — the page-table gather already exists *inside*
+`PAGED_ATTENTION`'s emission with its dimension numbers pinned, and a separate
+kind buys nothing until something other than paged attention needs it; int8/fp8
+KV-quant, which would make the write a converting one (H5); bf16 pools (the
+dtype exists and the parser accepts it; the smoke runs f32); mixed-dtype PJRT
+input lanes, so the smoke rides `slotMapping` as an I32 const.
+
+**Still open in H1**: gap-list item 3 (decode-graph shape contract +
+bucketing). Item 2's write half is closed; its training-side vectorized
+gather/scatter tail remains an AD-surface item, not an inference one.

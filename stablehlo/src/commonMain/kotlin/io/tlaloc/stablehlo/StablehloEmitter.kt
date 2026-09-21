@@ -21,6 +21,7 @@ import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.DxirSharding
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.KvCacheWriteAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 
@@ -429,6 +430,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 outType = node.type,
             )
             OpKind.PAGED_ATTENTION -> emitPagedAttention(step, name, ops, node)
+            OpKind.KV_CACHE_WRITE -> emitKvCacheWrite(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,
                 name,
@@ -2998,6 +3000,78 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
                 "contracting_dims = [3] x [1] : ($scoresMlir, ${windowT.toMlir()}) -> ${ctxOutT.toMlir()}",
         )
         out.appendLine("$step$name = stablehlo.reshape $ctxOut : (${ctxOutT.toMlir()}) -> ${node.type.toMlir()}")
+    }
+
+    /**
+     * §0.4.466 — Phase H1b: KV_CACHE_WRITE lowers to ONE `stablehlo.scatter`,
+     * bracketed by two free reshapes:
+     * ```
+     *   flat = reshape(cache)  [numBlocks*blockSize, numKvHeads, headDim]
+     *   upd  = scatter(flat, slotMapping, newKv)   body: return the update
+     *   out  = reshape(upd)    back to the pool's [B, P, Hkv, D]
+     * ```
+     * The flat-slot convention is what makes this a single op: `slotMapping[i]`
+     * is ALREADY `blockIdx*blockSize + offset`, which is exactly the index into
+     * the pool's row-major first axis once the two leading dims are collapsed.
+     * No arithmetic on the block table appears anywhere in the lowering — the
+     * convention was chosen for that (see [io.tlaloc.ir.KvCacheWriteAttrs]).
+     *
+     * Dimension numbers: `index_vector_dim = 1` == the indices' rank, the
+     * implicit-trailing-index spelling for "each entry is a scalar slot id";
+     * `inserted_window_dims = [0]` + `scatter_dims_to_operand_dims = [0]`
+     * because the slot indexes the collapsed slot axis; `update_window_dims =
+     * [1, 2]` because a token's update is a whole [numKvHeads, headDim] window.
+     *
+     * PADDING rides StableHLO's out-of-bounds rule: a scatter whose target
+     * index is out of bounds has its update IGNORED, so a `-1` slot writes
+     * nothing — which is precisely the interpreter's explicit `slot < 0 →
+     * skip`. Two different mechanisms reaching the same result is worth a
+     * pinned oracle rather than a comment, and `PjrtKvCacheWriteSmokeTest`
+     * carries a padding lane for exactly that reason. REJECTED alternative:
+     * masking the padding lanes explicitly (build a `slot >= 0` predicate,
+     * `select` the token's old pool row back over its update). It is three more
+     * ops, it needs a gather of the CURRENT pool rows to have something to
+     * select back, and it would be defending against a rule the spec states.
+     *
+     * `unique_indices = false` is deliberate and NOT a statement about the live
+     * slots (those are required distinct). It is about the padding lanes: a
+     * bucketed batch may carry many `-1`s, and while their updates are dropped,
+     * promising the compiler that every index is unique when several are
+     * literally equal is a lie with an optimizer on the other side of it. The
+     * promise is worth less than the risk at decode sizes.
+     */
+    private fun emitKvCacheWrite(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = KvCacheWriteAttrs.parse(node, "StablehloEmitter")
+        val cacheType = node.operands[0].type
+        val updatesType = node.operands[1].type
+        val slotsType = node.operands[2].type
+        val dt = cacheType.dtype
+        val flatType = DxirType(dt, listOf(p.numSlots, p.numKvHeads, p.headDim))
+        val scalarT = "tensor<${mlirElementType(dt)}>"
+
+        val flat = synth()
+        out.appendLine("$step$flat = stablehlo.reshape ${ops[0]} : (${cacheType.toMlir()}) -> ${flatType.toMlir()}")
+
+        val dimNumbers = "#stablehlo.scatter<" +
+            "update_window_dims = [1, 2], " +
+            "inserted_window_dims = [0], " +
+            "scatter_dims_to_operand_dims = [0], " +
+            "index_vector_dim = ${slotsType.rank}>"
+        val scattered = synth()
+        val cur = synth()
+        val upd = synth()
+        out.appendLine(
+            """$step$scattered = "stablehlo.scatter"($flat, ${ops[2]}, ${ops[1]}) <{scatter_dimension_numbers = $dimNumbers, unique_indices = false}> ({""",
+        )
+        out.appendLine("$step ^bb0($cur: $scalarT, $upd: $scalarT):")
+        // Replace semantics: the new token's value wins outright. The current
+        // pool value is deliberately unused — a cache write overwrites whatever
+        // stale token used to own the slot.
+        out.appendLine("$step   stablehlo.return $upd : $scalarT")
+        out.appendLine(
+            "$step }) : (${flatType.toMlir()}, ${slotsType.toMlir()}, ${updatesType.toMlir()}) -> ${flatType.toMlir()}",
+        )
+        out.appendLine("$step$name = stablehlo.reshape $scattered : (${flatType.toMlir()}) -> ${node.type.toMlir()}")
     }
 
     private fun emitGather(

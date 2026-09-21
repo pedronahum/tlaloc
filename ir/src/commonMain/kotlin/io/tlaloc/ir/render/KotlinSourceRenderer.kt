@@ -603,6 +603,19 @@ internal object KotlinSourceRenderer {
                         "runtime allocator state, not a DTensor expression; run it on the " +
                         "interpreter or through StableHLO/PJRT",
                 )
+            // §0.4.466 — Phase H1b: same north-star rule, same answer, and the
+            // extra reason is the aliasing one — a printed host twin would
+            // either copy a whole pool per decode step or reach for mutation,
+            // and the IR's whole claim is that it does neither.
+            OpKind.KV_CACHE_WRITE ->
+                refuse(
+                    op,
+                    "KV_CACHE_WRITE is inference-only serving machinery (Phase H1b) with no " +
+                        "host-twin spelling — it deposits a decode step's keys/values into a KV " +
+                        "page pool at allocator-named flat slots, which is runtime state and not " +
+                        "a DTensor expression; run it on the interpreter or through " +
+                        "StableHLO/PJRT (where buffer donation makes the functional write free)",
+                )
             OpKind.RMSNORM, OpKind.BATCHNORM ->
                 refuse(op, "the norm kinds ride their desugared op compositions (§0.4.390); the fused kinds have no printed spelling")
 
