@@ -30,17 +30,32 @@ here since Phase E ratification: row-sparse embedding gradients.
    optimizer state). REJECTED: PyTorch-style mutable modules — they
    fight the entire stateless design (threefry keys, pure grad
    transforms, the interpreter's value semantics).
-3. **The AD route is the `:autograd` runtime tape.** Models carry
-   arbitrarily many parameter tensors; the `grad {}` intrinsics are
-   fixed-arity by design (1–4 params) and stay the compiler path for
-   research code. The tape's `applyRegistryRule` bridge already routes
-   backward through the REAL `VjpRegistry` via a scratch DxirBuilder +
-   env walk — so every op with a VjpRule + interpreter arm can join the
-   tape by adding a `Tracer` forward spelling. That is the whole
-   extension mechanism; no new gradient math is written in `:nn`.
-   REJECTED: packing parameters through fixed-arity `grad {}` (arity
-   ceiling, unnatural flattening); a parallel NN-specific autograd
-   (would fork the rule set the whole book of work certified).
+3. **The AD route is the COMPILER stack — trace to DXIR, transform,
+   execute.** *(AMENDED by Pedro, 2026-09-21, superseding the original
+   runtime-tape decision before any code landed on it: "what's the
+   whole point of the Kotlin compiler creating the autodiff code?" —
+   exactly.)* The model's forward traces ONCE through the `:autograd`
+   `Tracer` into a real `DxirFunction` via the existing
+   `Tape.toDxirFunction(name, paramIds, returnIds)` — one param per
+   (input + parameter tensor), ARBITRARY arity (the 1–4 ceiling is a
+   property of the `grad {}` lambda-intrinsic surface only, never of
+   the IR). **`DxirReverseTransform` — the compiler's AD — produces the
+   gradient function**, and execution is a backend choice: the
+   `DxirInterpreter` on host, or coarsening → recognition →
+   StableHLO → `PjrtSession` on GPU with cached executables (the
+   §0.4.307 amortization) — the §0.4.292 LlamaDecoder
+   backward-vs-PyTorch GPU certification is precisely this shape at 13
+   parameters. Model graphs are thereby visible to the
+   recognizer/coarsener/KPTX pipeline like any other Tlaloc graph.
+   Tracer op coverage is extended by TRACE spellings that record
+   `TapeEntry`s with the right OpKind/attrs (forward value via the
+   `:core` host twins); gradients always come from the registry rules
+   through the transform — no gradient math is written in `:nn`.
+   REJECTED: the runtime value-tape as the model route (host-only,
+   interpreted, sidelines the compiler stack that IS the product; it
+   remains a debugging fallback); packing parameters through
+   fixed-arity `grad {}` (arity ceiling, unnatural flattening); a
+   parallel NN-specific autograd (would fork the certified rule set).
 4. **Parameter trees walk functionally.** `Trainable` components expose
    their parameter tensors (with stable keys) and rebuild themselves
    from updated tensors; optimizers are pure functions
@@ -77,14 +92,14 @@ here since Phase E ratification: row-sparse embedding gradients.
 | Slice | Content | Size |
 |---|---|---|
 | F0 | Deep audit: walk DiffKT `model/` fresh-clone; per-layer op-requirements map vs the tape's current coverage; append the closed inventory + gap table to this doc | 1 § |
-| F1 | `:nn` module + `Trainable`/`Sequential` substrate + tape-backed `valueAndGradients(model, loss)` contract | 1 § |
+| F1 | `:nn` module + `Trainable`/`Sequential` substrate + the trace→DXIR→`DxirReverseTransform` `valueAndGradients(model, loss)` contract (interpreter execution v1; the compiled-GPU step is F8's integration) | 1 § |
 | F2 | Dense, Flatten, ReluLayer, AffineTransform + FanMode initializers (threefry, bit-deterministic) | 1 § |
 | F3 | Optimizers: FixedLearningRate, SGD, Momentum, RMSprop, Adam — pure `(params, grads, state)` functions, hand-stepped oracles | 1 § |
-| F4 | Conv stack: Conv2d (+SamePadding), MaxPool2d, AvgPool2d — Tracer spellings over the existing rules/interpreter arms | 1 § |
+| F4 | Conv stack: Conv2d (+SamePadding), MaxPool2d, AvgPool2d — Tracer TRACE spellings recording the ops into the captured graph | 1 § |
 | F5 | BatchNorm (functional stats) + Dropout (threefry-keyed) | 1 § |
 | F6 | Embedding + EmbeddingBag; row-sparse gradient disposition per §2.7 | 1 § |
 | F7 | GRU — library-level unroll over time steps (the tape handles unrolled graphs natively) | 1 § |
-| F8 | End-to-end training certification: MLP + small conv net to convergence vs PyTorch reference; Phase F close-out sweep of this doc + the parity plan | 1–2 § |
+| F8 | End-to-end training certification: MLP + small conv net to convergence vs PyTorch reference; the compiled-GPU training step (PjrtSession over the captured gradient graph); Phase F close-out sweep | 1–2 § |
 
 Total: ~9–10 honest §.
 
