@@ -2087,7 +2087,72 @@ does not bind. It is kept rather than reverted because it is correct, it
 costs nothing measurable, it is the `(part, d)` substrate item #1's V
 half needs, and it is the instrument that produced the bound above.
 
-### ARC STATE (§0.4.473, the close-out) — read this first
+### H3c + H4b — the close-out for both arcs (§0.4.483)
+
+Slice K3, and **docs only**: no Kotlin, no Python, no PTX changed at this
+commit. Its job is to make the ledger below true at HEAD after six slices
+(§0.4.478–482) landed against it, and to leave both arcs with a stated
+verdict rather than a trailing edge.
+
+**What it swept.**
+
+1. **The H3c arc's three slices are recorded** (§0.4.478 weights-by-role,
+   §0.4.479 graph-and-parity, §0.4.480 artifact-and-serve) and the
+   CERTIFIED table carries their oracles and floors — including the one
+   that matters most, **6/6 generated token ids `==` HuggingFace
+   transformers** for a real 22-layer TinyLlama-1.1B on PJRT-CUDA from a
+   process with no framework in it.
+2. **The live-serving entry's status is made exact.** The WRITTEN-BUT-
+   UNCERTIFIED list's item 1 still carried its own history — text
+   predicting H3c-2 and H3c-3 as the blockers, both of which have since
+   landed. It is rewritten to the one true remaining sentence: the
+   platform, the config hook and the whole v1 worker API are CERTIFIED
+   live against vLLM 0.29.0 and agree with the direct runner lane
+   bit-for-bit; **`vllm serve` itself fails on one classmethod**
+   (`get_attn_backend_cls`), which is H3c-4.
+3. **The KPTX tier gets a verdict**, not a trailing measurement:
+   [KPTX_PAGED_PERF.md §8](KPTX_PAGED_PERF.md). The registry stays empty;
+   shape-conditional registration is REJECTED by name with three reasons
+   (it bakes one box's crossover into a library default; the crossover
+   sits partly inside an unexplained dispatch floor; and it would convert
+   the claiming pass's clean decline into a silent shape-dependent change
+   of numbers, since the claimed lane is 1.2e-7 from the oracle and the
+   emission 2.44e-4). §4's and §7.4's lists are merged into one ranked
+   order, with the honest note that **ranks 1–3 are all 8B-side items and
+   the 8B points already pass the gate** — the gate is waiting on rank 4
+   (flash-decode splitting, single-kernel fusion), which is also the
+   hardest.
+4. **The runbook becomes runnable by a colleague.**
+   [SERVING_RUNBOOK.md §10](SERVING_RUNBOOK.md) gains a §10.0 that names
+   the four steps, their costs, which venv each runs in, and — in the same
+   block — **where vLLM sits and where it stops**. Its §5 (KPTX) had still
+   been quoting the retired `465 µs vs 310 µs` verdict as live guidance;
+   that is replaced with K1's device table, the two-line opt-in
+   registration recipe, and the recommendation in both directions (not by
+   default; a measured 1.4–1.6× at 8B shapes if you opt in after measuring
+   your own). The file also had **two sections numbered 5** — §0.4.480
+   appended the demo after §9 — so the demo is renumbered to §10 and the
+   three pointers to it are fixed.
+
+**Invariants re-verified by grep at this commit**, not assumed:
+
+| invariant | how it was checked | result |
+|---|---|---|
+| the serving runtime imports no framework | module-scope imports of `tlaloc_serve.py` and `tlaloc_pjrt.py` | `ctypes`, `os`, `re`, `struct`, `hashlib`, `json`, `dataclasses`, `pathlib`, `typing`, and `tlaloc_pjrt` — nothing else. The only `jax`/`numpy` imports are **inside** the named ORACLE engine functions, which exist because jaxlib ships no CPU PJRT plugin `.so` |
+| exactly three inference-only `OpKind`s, all in the set | `INFERENCE_ONLY_OP_KINDS` in `DemotedOpKinds.kt` | `PAGED_ATTENTION`, `KV_CACHE_WRITE`, `DEQUANTIZE_KV` — no fourth entered in H3c or H4b |
+| every new `OpKind` renders or refuses **by name** | `KotlinSourceRenderer.kt` arms | three arms, each naming the kind, its phase and its differentiable spelling |
+| both AD transforms refuse them | `DxirForwardTransform` / `DxirReverseTransform` consult the same set | both, by name |
+| the registry is still empty | `KernelLowering.kt:286` + its test | `defaultInferenceKernelTemplates = emptyMap()`, pinned by `PagedAttentionKernelTest` |
+| the oracle venv is intact | `OracleVenvIntegrityTest` in the clean-room run | green |
+| one AD engine | no gradient math was written in H3c or H4b; the kernel work is inference-only PTX | holds |
+
+**What this slice deliberately did NOT do**: attempt H3c-4. The
+`get_attn_backend_cls` stub is a design question (what does a backend
+class whose forward is never reached owe vLLM's KV-cache-shape
+bookkeeping?) and a close-out slice that also shipped a speculative stub
+would have left the ledger describing something it had not certified.
+
+### ARC STATE (swept at §0.4.483) — read this first
 
 **THE PATH IS BUILT END TO END, IT EXECUTES, IT HAS RUN UNDER REAL vLLM
 SINCE §0.4.477 — AND SINCE §0.4.480 IT SERVES A REAL LLAMA.**
@@ -2109,7 +2174,10 @@ attention is compiled into the artifact. That is **H3c-4**, scoped in the
 §0.4.480 entry.
 
 Nine sections closed the arc on 2026-09-21 (suite **2119 → 2290**); four
-more the same day carried it past the framework (**2290 → 2296**):
+more the same day carried it past the framework (**2290 → 2296**); three
+more put a real model through it (**2296 → 2333**); and three more opened,
+measured and closed out the KPTX performance tier (**2333 → 2336**).
+**Twenty slices, one day, suite 2119 → 2336.**
 
 | § | Slice | What it closed | Suite |
 | --- | --- | --- | --- |
@@ -2132,6 +2200,7 @@ more the same day carried it past the framework (**2290 → 2296**):
 | 0.4.480 | H3c-3 | `ServingWeightsPointer.table` + `buffer_from_file` + `HfLlamaServingExport` — the artifact carries a staged weight table and a REAL 22-layer TinyLlama serves on PJRT-CUDA, **6/6 generated token ids equal to HuggingFace** | 2330 → 2333 |
 | 0.4.481 | H4b (K1) | `KptxPagedAttentionBenchTest` + [KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md) — the paged-attention tier's baselines, measured on the DEVICE instead of through the host round trip: the kernel is **1.4–1.6× faster** than XLA's lowering at 8B-shaped decode points and 1.9× slower at toy ones, §0.4.471's "1.5× slower" is retired as a staging measurement, and the dominant cost is the GQA re-read, not the score matrix | 2333 → 2335 |
 | 0.4.482 | H4b (K2) | the tier's first kernel change — `kptx_paged_out` gets a `(part, d)` decomposition (64 → 256 live threads at headDim 64), certified at the **same 1.1920929e-7** against the Double paged walk — and it measures **NOTHING**: a controlled null that bounds stage 3 at **≤ 16% of the chain** and exposes the real defect, **stage 1's K walk is 8×-read-amplified across a warp while stage 3's V walk was always coalesced**. Registry still empty | 2335 → 2336 |
+| 0.4.483 | H3c + H4b close-out (K3) | this sweep + [KPTX_PAGED_PERF.md §8](KPTX_PAGED_PERF.md) (the registry verdict, shape-conditional registration REJECTED by name, §4 and §7.4 merged into one ranked order) + [SERVING_RUNBOOK.md §10](SERVING_RUNBOOK.md) (the real-model demo as four copy-pasteable steps; the runbook's retired 465 µs KPTX verdict replaced with K1's device table and a two-line opt-in recipe; the duplicate section 5 renumbered). Invariants re-verified by grep, not assumed — docs only | 2336 → 2336 (docs only) |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -2176,6 +2245,9 @@ red line with the separate-venv recipe attached.
 | **a REAL TinyLlama-1.1B (22 layers) serves from an exported artifact on PJRT-CUDA** | `hf_llama_greedy_oracle.py` — transformers `AutoModelForCausalLM`, fp32 on CPU, vLLM venv | **6/6 generated token ids `==`**; `Paris.\n\n2.` on both sides |
 | …and the 4196 MiB of staged weights in that artifact are the bytes the exporter wrote | `verify_weights()`, SHA-256 re-hashed in the serving process | exact |
 | the same artifact called through vLLM and called directly gives the same numbers | the vLLM venv's worker lane vs the oracle venv's `run_vllm_tlaloc_check.py` runner lane — two venvs, two torches, jax in only one | **`==`, bit-for-bit** on every logit, plus sampled tokens, buckets and compile count |
+| the claimed and unclaimed paged-attention lanes agree before either is timed | `KptxPagedAttentionBenchTest`, every point in the sweep, on real XLA-CUDA | asserted per point; the timing is refused if they disagree |
+| the K2 `(part, d)` stage-3 decomposition is still the same kernel | `KptxPagedAttentionKernelTest` vs the Double paged walk, unchanged across the change | **1.1920929e-7**, the same number before and after |
+| …and it emits both arms with exactly one barrier | `PagedAttentionModuleTest.thePagedOutStageCarriesBothDecompositions` — no GPU needed | exact, on the emitted PTX |
 
 Four sensitivity checks were run before the oracles were trusted, each
 mutated then reverted: the bf16 decode byte-swapped (H2), `PADDING_SEQ_LEN`
@@ -2188,40 +2260,53 @@ supposed to fail.
 
 #### WRITTEN BUT UNCERTIFIED — and exactly how to certify it
 
-1. ~~**The live vLLM path**~~ — **CERTIFIED (H7, §0.4.477)**, with one
-   named remainder. `~/.local/venvs/vllm` exists (vLLM 0.29.0, 197
+1. ~~**The live vLLM path**~~ — **CERTIFIED (H7, §0.4.477)**, with ONE
+   named remainder, and after the H3c arc that remainder is exactly one
+   classmethod. `~/.local/venvs/vllm` exists (vLLM 0.29.0, 197
    distributions, no jax), the oracle venv was not touched, and
-   `VllmLivePluginTest` runs discovery + the config hook + the whole v1
-   worker API live, matching the runner lane **bit-for-bit across the two
-   venvs**. The recipe that worked is [SERVING_RUNBOOK.md §4](SERVING_RUNBOOK.md);
-   note that the `jax[cuda12]` in the command block this entry used to
-   carry is **not installed and must not be** — H6 removed the need, and
-   installing it beside vLLM's CUDA-13 wheels is the collision the rail
-   exists to prevent.
+   `VllmLivePluginTest` runs platform discovery, `check_and_update_config`
+   against real `vllm.config` objects with all four refusals firing, and
+   the whole v1 worker API live — matching the direct runner lane
+   **bit-for-bit across the two venvs**. The recipe that worked is
+   [SERVING_RUNBOOK.md §4](SERVING_RUNBOOK.md); note that the
+   `jax[cuda12]` this entry used to carry in its command block is **not
+   installed and must not be** — H6 removed the need, and installing it
+   beside vLLM's CUDA-13 wheels is the collision the rail exists to
+   prevent.
 
-   **THE REMAINDER: `LLM.generate()` / `vllm serve` itself — and since
-   §0.4.480 it is ONE CLASSMETHOD, not a model gap.** The artifact for a real
-   TinyLlama-1.1B exists and serves (see the §0.4.480 entry); pointing vLLM at
-   it reaches `EngineCore` startup and dies on
-   `vllm_tlaloc/platform.py`'s `get_attn_backend_cls` refusal, which vLLM
-   0.29.0 calls unconditionally. That is **H3c-4**. The historical framing
-   follows. (§0.4.479
-   narrowed it further: the graph exists and is certified; the ARTIFACT that
-   carries its staged weights does not — H3c-3.) Both need a
-   HuggingFace `config.json` and tokenizer for a real model, and the only
-   exportable artifact is the reference LCG toy. That is **H3c**, not a
-   plugin gap; see the H7 entry. **§0.4.478 landed H3c-1**: the config and
-   the weights are now readable by role from a real TinyLlama-1.1B
-   checkpoint (see that entry's oracles). H3c-2 — the decode graph and the
-   artifact built FROM those tensors — is what this command still waits on. Certify it by exporting a real Llama and
-   running:
+   **THE REMAINDER, stated exactly: `vllm serve` / `LLM.generate()`.**
+   Everything it used to wait on has landed. A real TinyLlama-1.1B
+   artifact exists and serves (§0.4.480); the decode graph is certified
+   against transformers (§0.4.479); the weights are readable by role
+   (§0.4.478). Pointing vLLM 0.29.0 at that artifact now gets **past**
+   platform discovery and into `EngineCore` startup, where it dies on
+   `vllm_tlaloc/platform.py`'s deliberate refusal:
+
+   ```
+   NotImplementedError: tlaloc: attention is compiled into the serving
+   artifact's programs (OpKind.PAGED_ATTENTION); there is no
+   runtime-selectable attention backend to name
+   ```
+
+   vLLM's v1 engine core calls `get_attn_backend_cls` **unconditionally**,
+   so the refusal is not an optional hook. That is **H3c-4**: hand vLLM a
+   backend class whose `get_kv_cache_shape` agrees with the manifest's
+   `kvPoolAxisOrder`/`kvPoolDims` and whose `forward` is never reached —
+   a design question (see the §0.4.480 entry), not a typo. Certify it
+   with:
 
    ```bash
-   export TLALOC_SERVING_ARTIFACT=<dir written by ServingArtifactWriter>
+   export TLALOC_SERVING_ARTIFACT=/tmp/tl-llama   # from RUNBOOK §10.2
    export TLALOC_PJRT_PLUGIN_PATH=<a plugin .so>
-   vllm serve <the model whose weights that artifact was exported from> \
-       --max-num-seqs 4 --max-model-len 4 --block-size 2
+   vllm serve ~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
+       --max-num-seqs 1 --max-model-len 64 --block-size 16
    ```
+
+   and assert the served completion against
+   `harness/python/hf_llama_greedy_oracle.py` on the same prompt — the
+   same oracle §0.4.480 used, which is why this is a **short** slice once
+   the stub's contract is decided.
+
 2. **The SGLang runner** — a design record only (§5 H5(2)). `pip install
    sglang` has the same venv problem. The **checkable prediction** is that
    the loader, manifest reader, bucket selection and PJRT execution path are
@@ -2255,6 +2340,10 @@ What a TPU session owes this arc, specifically:
 
 #### The arc's invariants, verified by grep at the close
 
+**Re-verified by grep at §0.4.483, at HEAD, after six further slices** —
+the table in that slice's entry above has the commands and their output.
+Nothing below moved.
+
 Three new `OpKind`s entered the IR in Phase H and no others:
 `PAGED_ATTENTION`, `KV_CACHE_WRITE`, `DEQUANTIZE_KV`.
 
@@ -2273,6 +2362,14 @@ Three new `OpKind`s entered the IR in Phase H and no others:
   the differentiable spelling (FlashAttention/GQA for paged attention,
   SCATTER/SCATTER_ADD for the cache write, MUL-by-scale for dequantize).
 - **No gradient math was written anywhere in this arc.** One AD engine.
+  Still true after H3c and H4b: the real-Llama work is a decode graph
+  built from existing differentiable ops plus the three inference-only
+  kinds, and the KPTX work is PTX for an op that refuses both transforms.
+- **The serving runtime still imports no framework.** `tlaloc_serve.py`
+  and `tlaloc_pjrt.py` are stdlib + each other at module scope; the only
+  `jax`/`numpy` imports in the tree's serving path are inside the named
+  ORACLE engine, which exists solely because jaxlib ships no CPU PJRT
+  plugin `.so`.
 
 #### What remains, in the order a next session should take it
 
@@ -2333,6 +2430,20 @@ Three new `OpKind`s entered the IR in Phase H and no others:
    one-line `PtxIsa.kt` fix (a bit-typed `mov` must be class-`Any` so
    `mov.b32 %r, %f` validates). The registry is still empty and this slice
    did not move it.
+   **§0.4.483 (K3) closes the tier with a stated verdict**
+   ([KPTX_PAGED_PERF.md §8](KPTX_PAGED_PERF.md)): the registry stays empty
+   and **shape-conditional registration is REJECTED by name** — it would
+   bake one box's crossover into a library default, fit a threshold
+   through a dispatch floor nobody has explained, and turn the claiming
+   pass's clean decline into a silent shape-dependent change of numbers
+   (the two lanes are 1.2e-7 and 2.44e-4 from the oracle, not bit-equal).
+   Opt-in registration is the deployment story, and at 8B-shaped decode on
+   this box it is a **measured 1.4–1.6× win**. The merged ranked order is
+   (1) warp-per-lane `kptx_paged_scores`, (2) one CTA per (seq, KV head),
+   (3) bf16 pools, (4) flash-decode splitting + single-kernel fusion,
+   (5) the register shave — with the honest note that **1–3 are all
+   8B-side items and the 8B points already pass**, so the gate itself is
+   waiting on (4).
 6. **Narrow DTypes (`I8`, and the fp8 tour)** — a bf16-sized piece of work,
    and the difference between KV-quant's contract and its bytes.
 7. **`precision_config = HIGHEST`** for dots that want it, and the top-1

@@ -3,6 +3,11 @@
 **§0.4.481 (Phase H4b, slice K1). Measure and diagnose; no kernel was
 rewritten in this slice.**
 
+> **§0.4.483 (slice K3) closes the tier in [§8](#8-04483-k3-the-tiers-close-out--the-registry-decision-stated).**
+> If you only want the answer to "can I turn the kernel on today?", read
+> §8.1 — **no**, with the reason, the rejected alternative, and the merged
+> ranked list of what would change it.
+>
 > **§0.4.482 (slice K2) amends this document — read [§7](#7-04482-k2-the-first-tier-change-a-controlled-null-and-what-it-bought)
 > before acting on §4's priority list.** K2 implemented item **#6**
 > (stage 3's idle threads), certified it, and measured **no change** —
@@ -388,3 +393,139 @@ gate; it is a reason to fix the instrument first.
   from end-to-end floors because the apparatus times the whole chain.
   Three separately-timed custom calls, or CUPTI, would turn "≤ 16%" into
   a number.
+
+---
+
+# 8. §0.4.483 (K3): the tier's close-out — the registry decision, stated
+
+**This section is the answer to the one question the tier owes a
+deployment: *can I turn the kernel on today?* It is written after K1 and
+K2 and changes neither of their numbers.**
+
+## 8.1 The decision
+
+> **NO. `defaultInferenceKernelTemplates` stays empty, and the opt-in
+> spelling (`kptxInferenceKernelTemplates` +
+> `KptxPagedAttention.register`) remains the only way the kernel enters
+> an executable.**
+
+The gate is §5's and it is unchanged: the claimed lane's **device** floor
+below the unclaimed lane's at **every** point in §2, one session,
+interleaved. After K1 and K2 the honest scoreboard against it is:
+
+| point | c/u | gate |
+|---|---|---|
+| tinyllama-s1-ctx256 | 1.27–2.14 | **FAILS** |
+| tinyllama-s8-ctx512 | 1.55–1.93 | **FAILS** |
+| llama3-8b-s8-ctx1024 | 0.73–0.84 | passes |
+| llama3-8b-s16-ctx1024 | 0.62–0.71 | passes |
+
+Two of four. **The reason the answer is "no" is not the one §0.4.471
+gave.** That slice said the kernel was 1.5× slower than the lowering
+everywhere; K1 showed that number was a host round trip over a ~1 MB
+fixture and that on the device the kernel *already wins by 1.4–1.6× at
+the shapes a served 8B model actually decodes at.* What is left is a
+narrower and more specific "no": the kernel loses at small shapes, and
+nothing in this tier has yet addressed a small shape.
+
+## 8.2 The REJECTED alternative: register it conditionally on shape
+
+The crossover in §2 is real, reproduced across five sessions, and its
+sign never moved. The obvious move is therefore to register the kernel
+**above a shape threshold** — claim `PAGED_ATTENTION` when
+`numSeqs · numKvHeads · ctx` exceeds some constant, decline below it.
+That is refused here, for three reasons that are worth writing down
+because they will recur:
+
+1. **It bakes one box's measurement into a library default.** The
+   crossover is a GB10 number: 48 SMs, sm_121, LPDDR5X. The same kernel
+   against the same XLA on a device with a different SM count and a
+   different memory system has a different crossover, and a threshold
+   constant compiled into `defaultInferenceKernelTemplates` would be a
+   measurement of this machine presented as a property of the kernel.
+2. **The crossover's location is partly an artifact of an unexplained
+   instrument.** At `tinyllama-s1-ctx256` the dispatch floor ran
+   144–252 µs against a claimed lane of 308–540 µs (§7.5) — 40–70% of
+   the whole measurement is a cost neither lane's attention explains.
+   A threshold fitted through that is fitted through noise.
+3. **The claiming pass's decline path is the op itself** (§0.4.471's
+   design), which is what makes an empty registry *safe*: a deployment
+   with no KPTX tier runs the same program with the same numbers. A
+   shape-conditional registry converts that clean binary into a silent,
+   shape-dependent change of numeric behaviour — the claimed lane is
+   1.2e-7 from the Double oracle and the emission is 2.44e-4 from it, so
+   the two lanes are **not** bit-identical, and a deployment would get
+   different logits above and below a threshold it never chose.
+
+The deployment story therefore stays what it has been since H4: **opt in
+explicitly, at shapes you measured yourself, with this test.** A
+deployment serving 8B-shaped decodes on a GB10 has a measured 1.4–1.6×
+reason to do so; §10 of [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md) is the
+command.
+
+## 8.3 What is left, consolidated and re-ranked
+
+§4 is K1's list and §7.4 is K2's re-ranking of it. This is the merged
+order a next slice should take, with each item's expected win restated
+against the *measured* baselines and each marked with which gate point
+it moves.
+
+| rank | item (§4 #) | expected win | moves the gate at |
+|---|---|---|---|
+| **1** | **Warp-per-lane `kptx_paged_scores`** (#3, narrowed to stage 1) — warp `w` owns context lane `j`; its 32 threads split `headDim`; `shflSync(DOWN)` reduces the dot. No barrier, no smem. | Removes an **8× read amplification** on the K walk (§7.3). The largest measured defect in the chain, on the stage K2's null proved holds ≥ 84% of it. | all four points |
+| **2** | **One CTA per (sequence, KV head)** (#1) — the GQA group shares one page walk, `group` score rows in registers. | Removes 3/4 of issued K+V. Worth more on the K side than the V side, and it **composes with 1** rather than competing. **~1.5–2.5×** at 8B. | 8B; helps all |
+| **3** | **bf16 pools** (#2) — declined by name today. | Halves whatever 1 and 2 leave. **~2×** where memory-bound. | all |
+| **4** | **Flash-decode context splitting** (#4) + **single-kernel online softmax** (#5). | The **only** two items that address the failing gate points: 0.67 CTA/SM at batch 1, and two launches + two grid-wide barriers worth ~30–60 µs. | **tinyllama-s1, tinyllama-s8** |
+| **5** | **Register shave 65 → 64** (#7). | 3 → 4 blocks/SM if ptxas agrees. K2's evidence (stage 3 went 68 → 73 with no measurable change) is weak evidence *against* the declared-register cliff mattering. | speculative |
+| — | **#6, stage 3's idle threads** | **DONE (K2), worth ~0 µs.** Kept for correctness and as item 2's `(part, d)` substrate. | — |
+
+**The gate cannot be closed by ranks 1–3 alone.** They are the 8B-side
+items and the 8B points already pass. Rank 4 is what the gate is waiting
+on, and rank 4 is also the hardest. That ordering is deliberate anyway:
+1–3 are where the microseconds are, and a deployment opting in at 8B
+shapes gets them without the gate ever closing.
+
+## 8.4 Fix the instrument before the next measurement is believed
+
+Three named instrument gaps, each of which currently limits what any
+future number here can claim:
+
+| gap | what it blocks | where named |
+|---|---|---|
+| **the dispatch floor at large staged working sets** (236–313 µs for a 2-MFLOP multiply over 67–134 MB) and at small ones (144–252 µs, 40–70% of the small-point measurement) | the gate's measurability at `tinyllama-s1-ctx256` | §6, §7.5 |
+| **per-stage timing** (three separately-timed custom calls, or CUPTI) | turns K2's "stage 3 is ≤ 16% of the chain" from a bound into a number, and would have cost K2 nothing to know in advance | §7.6 |
+| **a measured memory-bandwidth ceiling for this box** (STREAM-style) | every "% of peak" in §3.1 and item #3 leans on NVIDIA's published 273 GB/s | §6 |
+
+## 8.5 The first commit of the next slice, unchanged from §7.4
+
+`PtxIsa.kt`'s `mov` entry class-checks both operands from the type, so
+the legal PTX `mov.b32 %r1, %f1` is rejected by Tlaloc's own ISA table.
+A bit-typed `mov` must be class-`Any`, with its own `PtxIsaTest` pin.
+**Every warp-reduced kernel that carries floats is behind that one
+line** — rank 1 above included. It is a table change and a test, not a
+kernel, and it should land on its own.
+
+## 8.6 What this tier actually bought
+
+Two slices, two commits, and the deliverables are honest to name:
+
+- **A retired number.** §0.4.471's "1.5× slower" was the reason the
+  registry was empty and the reason nobody looked further. It was a
+  staging measurement. The kernel was never 1.5× slower at any shape
+  anyone would serve.
+- **A reusable instrument.** `KptxPagedAttentionBenchTest` runs inside
+  `./gradlew test`, self-skips without a GPU, times three interleaved
+  lanes from one session against pre-staged device buffers, asserts the
+  lanes agree before timing either, and carries its own sanity
+  assertions (one of which aborted a session, correctly).
+- **A diagnosis with a bound on it.** The dominant cost is the GQA
+  re-read through an 8×-amplified K walk — not the score matrix, which
+  everyone expects and which is 2–5% of traffic. Stage 3 is ≤ 16% of the
+  chain and needs nothing.
+- **A certified null.** One kernel change, landed, correct, and measured
+  to do nothing — reported as nothing. That is the result that produced
+  the bound and the diagnosis, and it is the reason rank 1 above is
+  stage 1 rather than "more parallelism somewhere".
+
+What it did **not** buy is a single microsecond of measured speedup, and
+this document does not claim one.

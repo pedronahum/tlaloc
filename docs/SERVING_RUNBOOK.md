@@ -1,6 +1,6 @@
 # Serving runbook — export an artifact, run it, plug it into vLLM
 
-**Status (§0.4.480, H3c-3).** This is the reproduction script for the whole
+**Status (§0.4.483, the H3c + H4b close-out).** This is the reproduction script for the whole
 serving path: it takes a fresh machine to a Tlaloc serving artifact, runs
 that artifact from Python with **no JVM, no JAX, no torch and no numpy in
 the process — a PJRT plugin `.so` and a driver are the entire runtime** —
@@ -10,7 +10,7 @@ than merely written. Every step is marked **CERTIFIED** (a test in
 `./gradlew test` proves it) or **UNCERTIFIED** (written, never executed
 here, with the reason and the command that would settle it).
 
-**Start at §5 if you want the demo.** As of §0.4.480 a real
+**Start at §10 if you want the demo.** As of §0.4.480 a real
 TinyLlama-1.1B — all 22 layers, from its own HuggingFace checkpoint —
 greedy-decodes through an exported artifact on PJRT-CUDA and produces the
 **same token ids HuggingFace transformers produces**: `Paris.\n\n2.`, six
@@ -485,7 +485,7 @@ process then compiles and executes through `xla_cuda_plugin.so` on the
 GB10 and gets the right numbers.
 
 **NOT certified: `vllm serve` / `LLM.generate()` end to end — and since
-§0.4.480 the reason is ONE CLASSMETHOD, not a missing model.** §5 of the
+§0.4.480 the reason is ONE CLASSMETHOD, not a missing model.** §10 of the
 runbook below exports a real TinyLlama-1.1B artifact and serves it. Pointing
 vLLM at that artifact gets through platform discovery and dies inside
 `EngineCore` startup:
@@ -509,7 +509,7 @@ vllm serve ~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
     --max-num-seqs 1 --max-model-len 64 --block-size 16
 ```
 
-Until it does, **§5 below is the demo path.**
+Until it does, **§10 below is the demo path.**
 
 ### Why it is a second venv and not this one (§0.4.470, still the rule)
 
@@ -640,9 +640,11 @@ JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :ir:jvmTest --tests "*HfLlama*"
 # Override the location with TLALOC_HF_LLAMA_CHECKPOINT=<dir>.
 ```
 
-**What this does NOT yet do**: build a decode graph or a serving artifact
-from those weights. That is H3c-2, and it is why the last paragraph of §4
-is still the one uncertified serving step.
+**Since §0.4.480 this is no longer the end of the road.** H3c-2 built the
+decode graph from those weights and certified it against transformers at
+1e-5; H3c-3 gave the artifact a staged weight table and served it. **§10
+is the demo**, and it starts by downloading this same checkpoint. What
+remains uncertified is `vllm serve` alone — §4's last block, H3c-4.
 
 ## 5. The KPTX paged-attention kernel (CERTIFIED, and deliberately opt-in)
 
@@ -651,17 +653,50 @@ lowering inside the XLA executable. The claiming pass keys on
 **`OpKind`**, and its decline path is *the op itself* — so a machine with
 no KPTX tier runs the same program with the same numbers.
 
-`defaultInferenceKernelTemplates` is **EMPTY on purpose**, and should stay
-that way in any deployment today. The correctness-tier kernel measured
-**465 µs vs 310 µs** for the lowering it replaces — 1.5× slower, the
-expected §0.4.358 outcome for three f32 scalar loops against XLA's tiled
-tensor cores. It is the *claiming* milestone, not a speedup. The
-performance tier (warp specialization, shared-memory staging of the page
-window) is the named follow-up, and 465 µs is the floor it must beat.
+`defaultInferenceKernelTemplates` is **EMPTY on purpose** and stays that
+way — see [KPTX_PAGED_PERF.md §8](KPTX_PAGED_PERF.md) for the decision and
+the alternative (shape-conditional registration) that was rejected with
+its reasons.
 
-To opt in, a pipeline passes `kptxInferenceKernelTemplates` and the
-serving process registers the chain
-(`io.tlaloc.runtime.pjrt.kptx.KptxPagedAttention.register`).
+**Read the verdict that replaced the old one.** This file used to say the
+kernel was "465 µs vs 310 µs — 1.5× slower". **That number is RETIRED**
+(§0.4.481): it was a host round trip over a ~1 MB fixture, ≈ 95% staging
+traffic with an attention somewhere inside it. Measured on the device,
+from one session, interleaved, against pre-staged buffers:
+
+| decode point | KPTX / XLA-lowering device floor |
+|---|---|
+| TinyLlama-shaped, batch 1, ctx 256 | **1.9× slower** |
+| TinyLlama-shaped, batch 8, ctx 512 | **1.9× slower** |
+| Llama-3-8B-shaped, batch 8, ctx 1024 | **0.73× — 1.4× FASTER** |
+| Llama-3-8B-shaped, batch 16, ctx 1024 | **0.62× — 1.6× FASTER** |
+
+The sign of that comparison reproduced across five sessions; the
+absolutes drift (the §0.4.337 rule). So the honest recommendation has two
+halves:
+
+- **Do NOT enable it by default.** The registry stays empty until the
+  claimed lane wins at *every* point above, small ones included.
+- **Enabling it explicitly is a measured 1.4–1.6× win at 8B-shaped
+  decode on a GB10**, and a loss at toy shapes. Measure your own shapes
+  with `KptxPagedAttentionBenchTest` before you do.
+
+### The registration step (opt-in, two lines)
+
+```kotlin
+// compile side: claim OpKind.PAGED_ATTENTION when lowering
+import io.tlaloc.ir.recognizer.kernel.kptxInferenceKernelTemplates
+lowerKernels(graph, KernelTarget.NVIDIA_GB10,
+             inferenceRegistry = kptxInferenceKernelTemplates)
+
+// serving process: register the PTX chain with the plugin before execute
+io.tlaloc.runtime.pjrt.kptx.KptxPagedAttention.register()
+```
+
+Both halves are required and neither is a default. The claiming pass's
+**decline path is the op itself**, so a process that does neither runs the
+same program with the same numbers — which is exactly why an empty
+registry is safe and a shape-conditional one would not be.
 
 **Landmine (§0.4.471).** `ptxas` rejects a **non-ASCII byte anywhere in
 the PTX file, comments included**, and the failure surfaces as
@@ -740,13 +775,41 @@ neither.
 
 ---
 
-## 5. Serve a REAL Llama (CERTIFIED, §0.4.480 — this is the demo)
+## 10. Serve a REAL Llama (CERTIFIED, §0.4.480 — this is the demo)
 
 A real TinyLlama-1.1B, all 22 layers, greedy-decoding on PJRT-CUDA from a
 Tlaloc serving artifact, in a process with **no JVM and no framework** — and
 agreeing with HuggingFace transformers token for token.
 
-### 5.1 The checkpoint (once)
+### 10.0 The whole demo, in the order a colleague runs it
+
+Four steps, ~15 minutes on a cold machine, most of it the 2.2 GB download.
+Prerequisites: the two venvs of §0 and §4, a CUDA GPU, JDK 25, and ~7 GB
+free (2.2 GB checkpoint + 4.2 GiB artifact).
+
+| step | what it costs | where |
+|---|---|---|
+| 1. download the checkpoint (`huggingface_hub`, vLLM venv) | 2.2 GB, once | 10.1 |
+| 2. export the artifact (`./gradlew :maestro:exportLlamaServingArtifact`) | ~9 s, 4.2 GiB on disk | 10.2 |
+| 3. run the HF oracle to get the token ids (vLLM venv, transformers) | ~1 min CPU fp32 | 10.3 |
+| 4. generate on PJRT-CUDA with **no framework in the process** | ~7 s first step, ~1.35 s/token | 10.3 |
+
+Step 4 is the one that matters: the process it runs in imports `ctypes`,
+`json`, `hashlib`, `os`, `struct` and `pathlib`, loads one PJRT plugin
+`.so`, and that is the entire runtime. Steps 1 and 3 are *tooling* — they
+may use torch and transformers, and they run in the serving venv, never in
+the frozen oracle venv (§0.1).
+
+**Where vLLM sits in this, honestly:** it does not, yet. `vllm serve`
+against this artifact is the one uncertified serving step (H3c-4, §4's last
+block) — vLLM's platform discovery, config hook and the whole v1 worker API
+*are* certified live against vLLM 0.29.0 (§4), and the same artifact called
+through vLLM's worker and called directly agrees bit-for-bit; what stops
+`vllm serve` is one classmethod the engine core calls unconditionally. So
+the demo below is the driver path, and a colleague who wants to see tokens
+runs it, not `vllm serve`.
+
+### 10.1 The checkpoint (once)
 
 ```bash
 ~/.local/venvs/vllm/bin/python -c "from huggingface_hub import snapshot_download; \
@@ -757,7 +820,7 @@ agreeing with HuggingFace transformers token for token.
 2.2 GB, single-file `model.safetensors`, 201 tensors, every one bf16. The
 cache directory is under `$HOME` and **inside neither venv**.
 
-### 5.2 Export the artifact (~9 s, 4.2 GiB)
+### 10.2 Export the artifact (~9 s, 4.2 GiB)
 
 ```bash
 JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :maestro:exportLlamaServingArtifact \
@@ -783,7 +846,7 @@ each one's dtype, dims, byte length and SHA-256. The loader's whole job is
 Python number for a weight (1.1e9 Python floats is not a slow path, it is an
 impossible one).
 
-### 5.3 Tokenize and generate
+### 10.3 Tokenize and generate
 
 The oracle owns the tokenizer, so it owns the ids — nothing in this repo
 writes a token id by hand.
@@ -810,7 +873,7 @@ that prompt; copy it from `/tmp/oracle.json` rather than trusting this file.)
 
 Both sides produce `[3681, 29889, 13, 13, 29906, 29889]` — **`Paris.\n\n2.`**
 
-### 5.4 What is certified, and what the numbers are
+### 10.4 What is certified, and what the numbers are
 
 `HfLlamaServingArtifactTest` (in `./gradlew test`, self-skipping without the
 checkpoint / the vLLM venv / a plugin `.so`) runs exactly the two commands
@@ -838,7 +901,7 @@ measurable win" three times; it is now the dominant cost of a real decode,
 and measurable for the first time. The weights, by contrast, are uploaded
 once and held.
 
-### 5.5 What does NOT work, by name
+### 10.5 What does NOT work, by name
 
 * **`vllm serve` / `LLM.generate()`** — H3c-4, §4's last block.
 * **The `jax` engine** refuses a staged weight table BY NAME. It exists only
