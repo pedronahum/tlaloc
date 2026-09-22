@@ -12,6 +12,10 @@ package io.tlaloc.kptx
  * Ampere+ shape), `shfl.sync` (all four modes), `vote.sync.ballot`.
  * WGMMA / TMA / tcgen05 are deferred until a kernel needs them
  * (docs/KPTX_PLAN.md task 14 note).
+ *
+ * §0.4.493 adds the **float warp reduction** this surface was missing:
+ * [warpReduceSumF32], plus the bit-reinterpreting [movB32], plus a
+ * relaxation of [shflSync] from `%r`-only to any 32-bit class.
  */
 
 /** A fragment operand for [KernelScope.inst]. */
@@ -71,10 +75,69 @@ fun KernelScope.shflSync(
     c: KOp,
     mask: KOp = imm("0xffffffff"),
 ) {
-    require(d.cls == IsaRegClass.R32 && a.cls == IsaRegClass.R32) {
-        "shfl.sync moves 32-bit values: d/a must be %r-class, got d=$d a=$a"
+    // §0.4.493 — the constraint is 32 bits, not %r. `shfl.sync` is
+    // `.b32`-typed, and `bN` is untyped bit storage of a stated size:
+    // `shfl.sync.down.b32 %f2, %f1, 16, 0x1f, …` assembles (verified
+    // against ptxas 13.0). §0.4.343 wrote `%r`-only here, and
+    // docs/KPTX_PAGED_PERF.md §7.4 then recorded that as the blocker
+    // standing between this DSL and a float warp reduction. It was a
+    // wrapper's `require`, not the ISA.
+    require(d.cls.widthBits == 32 && a.cls.widthBits == 32) {
+        "shfl.sync moves 32 bits: d/a must be a 32-bit class (%r or %f), " +
+            "got d=$d (${d.cls.prefix}) a=$a (${a.cls.prefix})"
     }
     inst("shfl.sync.${mode.token}.b32", d, a, b, c, mask)
+}
+
+/**
+ * §0.4.493 — `mov.b32 d, a`: **bit reinterpretation** between 32-bit
+ * register classes, with no conversion. `movB32(r, f)` is the PTX
+ * spelling of `Float.toRawBits()`, and `movB32(f, r)` of
+ * `Float.fromBits()` — this is *not* [KernelScope.inst]`("cvt…")`,
+ * which changes the bits to preserve the value.
+ *
+ * Needed where a bit-typed instruction genuinely refuses a class (the
+ * `%r`-only lane-index operands, `vote.sync.ballot`'s word). It is
+ * **not** needed to warp-reduce floats — see [shflSync] — which is why
+ * [warpReduceSumF32] does not call it.
+ */
+fun KernelScope.movB32(d: KReg, a: KReg) {
+    require(d.cls.widthBits == 32 && a.cls.widthBits == 32) {
+        "mov.b32 moves 32 bits: both operands must be a 32-bit class (%r or %f), " +
+            "got d=$d (${d.cls.prefix}) a=$a (${a.cls.prefix})"
+    }
+    inst("mov.b32", d, a)
+}
+
+/**
+ * §0.4.493 — the natural spelling of a **full-warp f32 sum**: after
+ * this, lane 0 of every warp holds the sum of all 32 lanes' [acc]
+ * (the other lanes hold partial sums and are conventionally discarded).
+ *
+ * Five `shfl.sync.down` steps at offsets 16, 8, 4, 2, 1, each followed
+ * by `add.rn.f32` — no barrier and no shared memory, because a warp is
+ * already synchronous. The scratch register is allocated from the
+ * enclosing [KernelScope], so the call site writes one line.
+ *
+ * Deferred by name: **sub-warp widths.** The clamp/segment word is
+ * pinned to `0x1f` (a full 32-lane segment); a `width < 32` reduction
+ * needs `0x1f or ((32 - width) shl 8)` and a test that a partial warp
+ * actually segments, which no kernel here needs yet.
+ *
+ * Summation order is the tree above, so the result is
+ * order-deterministic but **not** bit-identical to a sequential sum —
+ * the usual f32 non-associativity, stated because paged attention's
+ * oracle tolerances are quoted to 1.2e-7.
+ */
+fun KernelScope.warpReduceSumF32(acc: KReg) {
+    require(acc.cls == IsaRegClass.F32) {
+        "warpReduceSumF32 accumulates an f32: acc must be %f-class, got $acc (${acc.cls.prefix})"
+    }
+    val tmp = f32()
+    for (off in listOf(16, 8, 4, 2, 1)) {
+        shflSync(KShflMode.DOWN, d = tmp, a = acc, b = imm(off), c = imm("0x1f"))
+        inst("add.rn.f32", acc, acc, tmp)
+    }
 }
 
 /**

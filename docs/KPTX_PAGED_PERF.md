@@ -385,6 +385,9 @@ gate; it is a reason to fix the instrument first.
   implementation budget, and left with its blocker named.
 - **The `mov.b32` ISA-table gap** — see §7.4. One line of table, one
   pin, and it gates everything warp-reduced that carries floats.
+  > **§0.4.493 (W1): this gap did not exist.** The table had accepted
+  > `mov.b32 %r1, %f1` since §0.4.357, and `shfl.sync.down.b32` moves
+  > `%f` registers directly, so no `mov` is needed at all. See [§9](#9-04493-w1-the-enabling-slice--and-the-blocker-that-was-not-there).
 - **The `nsplit < 2` arm of stage 3 is unexercised on hardware.** It is
   §0.4.471's program kept verbatim, and no fixture in the suite has
   `headDim >= 256`, so only the emitted-PTX pin covers it. A GPU arm at
@@ -472,7 +475,7 @@ it moves.
 
 | rank | item (§4 #) | expected win | moves the gate at |
 |---|---|---|---|
-| **1** | **Warp-per-lane `kptx_paged_scores`** (#3, narrowed to stage 1) — warp `w` owns context lane `j`; its 32 threads split `headDim`; `shflSync(DOWN)` reduces the dot. No barrier, no smem. | Removes an **8× read amplification** on the K walk (§7.3). The largest measured defect in the chain, on the stage K2's null proved holds ≥ 84% of it. | all four points |
+| **1** | **Warp-per-lane `kptx_paged_scores`** (#3, narrowed to stage 1) — warp `w` owns context lane `j`; its 32 threads split `headDim`; `shflSync(DOWN)` reduces the dot. No barrier, no smem. **Unblocked by §0.4.493: the reduction is `warpReduceSumF32(acc)`, one call.** | Removes an **8× read amplification** on the K walk (§7.3). The largest measured defect in the chain, on the stage K2's null proved holds ≥ 84% of it. | all four points |
 | **2** | **One CTA per (sequence, KV head)** (#1) — the GQA group shares one page walk, `group` score rows in registers. | Removes 3/4 of issued K+V. Worth more on the K side than the V side, and it **composes with 1** rather than competing. **~1.5–2.5×** at 8B. | 8B; helps all |
 | **3** | **bf16 pools** (#2) — declined by name today. | Halves whatever 1 and 2 leave. **~2×** where memory-bound. | all |
 | **4** | **Flash-decode context splitting** (#4) + **single-kernel online softmax** (#5). | The **only** two items that address the failing gate points: 0.67 CTA/SM at batch 1, and two launches + two grid-wide barriers worth ~30–60 µs. | **tinyllama-s1, tinyllama-s8** |
@@ -497,6 +500,12 @@ future number here can claim:
 | **a measured memory-bandwidth ceiling for this box** (STREAM-style) | every "% of peak" in §3.1 and item #3 leans on NVIDIA's published 273 GB/s | §6 |
 
 ## 8.5 The first commit of the next slice, unchanged from §7.4
+
+> **SUPERSEDED by [§9](#9-04493-w1-the-enabling-slice--and-the-blocker-that-was-not-there)
+> (§0.4.493, W1).** The paragraph below is wrong on both of its facts
+> and is kept verbatim because §9 is about *how* it was wrong. Rank 1 in
+> §8.3 is no longer behind anything: `warpReduceSumF32` exists, is
+> emission-pinned, and reduces 32 float lanes exactly on GB10.
 
 `PtxIsa.kt`'s `mov` entry class-checks both operands from the type, so
 the legal PTX `mov.b32 %r1, %f1` is rejected by Tlaloc's own ISA table.
@@ -529,3 +538,122 @@ Two slices, two commits, and the deliverables are honest to name:
 
 What it did **not** buy is a single microsecond of measured speedup, and
 this document does not claim one.
+
+---
+
+# 9. §0.4.493 (W1): the enabling slice — and the blocker that was not there
+
+§8.5 named "the first commit of the next slice" and it has now been
+made. The line it asked for is not the line that was needed, and the
+honest report of this slice is that **the blocker §7.4 named did not
+exist**. It was closed, in two different ways, before K2 wrote it down.
+
+## 9.1 What §7.4 and §8.5 claimed
+
+> `shflSync` moves `.b32` and requires `%r`-class registers, while the
+> accumulator is `%f`. The natural spelling `mov.b32 %r1, %f1` is legal
+> PTX but is **rejected by Tlaloc's own ISA table** (`PtxIsa.kt`'s `mov`
+> entry class-checks both operands from the type, so `b32` demands `%r`
+> on both sides).
+
+Both halves were verified this slice, against `ptxas 13.0
+-arch=sm_75` — the real assembler, not the ISA PDF and not inference —
+and both are false.
+
+**Half one: the table already accepted it.** §0.4.357 had made
+`classOfType` return null for the b-types with a comment naming this
+exact spelling (`mov.b32 %f2, %r8`, pyptx's bit-preserving cross-class
+move). `mov.b32 %r1, %f1` has validated clean since that commit, which
+predates K2 by a hundred sections. K2 read the `mov` entry's
+`reg()`/`FromType(0)` and reasoned to the conclusion instead of running
+the validator.
+
+**Half two: the round trip is not needed at all.** `shfl.sync` is
+`.b32`-typed, and `bN` is untyped bit storage — so
+`shfl.sync.down.b32 %f2, %f1, 16, 0x1f, 0xffffffff` **assembles**, and
+runs. The `%r`-only constraint was a `require` in §0.4.343's *Kotlin
+wrapper*, thirteen characters of `d.cls == IsaRegClass.R32`, never an
+ISA fact. A float warp reduction needs no `mov.b32` in it anywhere.
+
+The probes, verbatim in their verdicts:
+
+| spelling | ptxas |
+|---|---|
+| `mov.b32 %r1, %f1`, `mov.b32 %f2, %r1` | legal |
+| `shfl.sync.down.b32 %f2, %f1, 16, 0x1f, …` | **legal** |
+| `mov.b32 %rd3, %f1` | rejected — `Arguments mismatch for instruction 'mov'` |
+| `shfl.sync.down.b32 %rd3, %rd1, …` | rejected |
+| `mov.f32 %r1, %f1` | **legal** (ptxas treats `mov` as a bit-mover) |
+| `add.u32 %f2, %f1, %f1` | rejected |
+
+## 9.2 What the slice landed instead
+
+The gap the probes *did* find is the opposite of the one named: since
+§0.4.357, b-typed operands were checked by **nothing at all**. Dropping
+the class check dropped the size check with it, so
+`mov.b32 %rd1, %f1` — which ptxas refuses outright — validated clean
+through Tlaloc's table and would have reached the driver as a JIT
+error. Half the ISA's rule had been implemented.
+
+- **`PtxIsa.kt`: bit-typed operands are width-checked** (`widthOfBitType`).
+  `IsaRegClass` grows a `widthBits`; `b32` accepts any 32-bit class
+  (`%r`, `%f`) and refuses `%rd` and `%p`; `b64` accepts `%rd` alone;
+  `b16`/`b128` stay unchecked because KPTX has no class of either width
+  and inventing a rejection would be guessing. `.wide` widens the
+  expected width the same way it widens the expected class.
+- **`WarpIntrinsics.kt`: `shflSync` rejects on width, not class.** `%f`
+  is now a legal shuffle operand, which is the whole unblock.
+- **`warpReduceSumF32(acc)`** — the natural spelling asked for: one
+  call, five `shfl.sync.down`/`add.rn.f32` steps at offsets 16…1,
+  scratch allocated from the enclosing scope, no barrier and no shared
+  memory.
+- **`movB32(d, a)`** — bit reinterpretation as a named operation
+  (`Float.toRawBits` / `fromBits`), for the operands that genuinely are
+  `%r`-only. Deliberately *not* used by `warpReduceSumF32`.
+
+**REJECTED: making the b-types class-`Any`, as §8.5 specified.** That is
+the state §0.4.357 already left the table in, and it is why
+`mov.b32 %rd1, %f1` passed. The principled rule is not "no check" but
+"the check PTX actually makes".
+
+**REJECTED: relaxing KPTX's class check on `mov.f32`.** ptxas accepts
+`mov.f32 %r1, %f1`; KPTX keeps refusing it, and `keepsTheStricterClassCheckOnTypedMoves`
+pins the divergence so it stays a decision. An `%r` holding an f32 value
+is a bug in every kernel in this repo.
+
+## 9.3 The certification
+
+- **ISA pins** (`PtxIsaTest`): accepted spellings `mov.b32 %r1, %f1`,
+  `mov.b32 %f1, %r1`, `shfl.sync.down.b32 %f2, %f1, …`, `mov.b64 %rd1, %rd2`;
+  rejected by name `mov.b32 %rd1, %f1`, `mov.b64 %r1, %rd1`,
+  `shfl.sync.down.b32 %rd3, %rd1, …` (both data operands), `mov.b32 %p1, %f1`,
+  and `mov.f32 %r1, %f1`.
+- **Byte-level emission pin** (`WarpIntrinsicsTest.floatWarpReductionIsOneCall`):
+  the ten-line body, exact, plus `assertTrue("mov.b32" !in text)`.
+- **The real proof** (`WarpIntrinsicsGpuTest.shflF32WarpSumComputesCorrectly`,
+  `:runtime-cuda`, GB10 sm_121): a DSL-authored kernel warp-reduces 32
+  lanes holding `0f..31f` and lands **496.0f exactly** — driver-JIT
+  accepted, numerically correct, `skipped="0"` in the result XML. The
+  values are integral so the assertion is an equality, not a tolerance.
+
+## 9.4 Deferred by name
+
+- **Sub-warp reduction widths.** `warpReduceSumF32` pins the
+  clamp/segment word to `0x1f` (a full 32-lane segment). `width < 32`
+  needs `0x1f or ((32 - width) shl 8)` and a test that a partial warp
+  actually segments. No kernel here needs it.
+- **`f32x2` / packed-half shuffles.** `b64` shuffles do not exist; a
+  paired reduction would need two `shfl` per step. Not attempted.
+- **The stage-1 warp-mapped kernel itself** — still §8.3 rank 1, still
+  unwritten. This slice removed its only named blocker and nothing else:
+  **no microsecond of §2's table moves on this commit**, and none is
+  claimed.
+
+## 9.5 The lesson worth keeping
+
+§7.4 and §8.5 spent two paragraphs and a rank-1 dependency on a blocker
+that a one-line `validateInst` call and a six-line `.ptx` file through
+`ptxas` would have dissolved in either direction. The probe cost four
+minutes. Reasoning about a validator by reading it cost a slice's
+implementation budget and a wrong entry in two ranked lists. **When a
+doc names a blocker, the next slice runs it before it believes it.**

@@ -20,6 +20,11 @@ package io.tlaloc.kptx
  * writes a predicate, and that `.wide` widens the destination to
  * `%rd`.
  *
+ * §0.4.493 adds the second half of the b-type rule: bit-typed operands
+ * are **width**-checked (see [widthOfBitType]), so `mov.b32 %r1, %f1`
+ * is accepted and `mov.b32 %rd1, %f1` is not — which is what `ptxas`
+ * itself does, and what every warp-reduced float kernel needs.
+ *
  * Coverage: the 18 instruction families the v1 corpus exercises.
  * Adding a family is one [IsaInstructionSpec] literal — the validator
  * never grows per-opcode code. Instructions whose base is absent from
@@ -28,9 +33,11 @@ package io.tlaloc.kptx
  * is the intended response, not bypassing it.)
  */
 
-/** KPTX register classes, by naming convention. */
-enum class IsaRegClass(val prefix: String) {
-    PRED("%p"), R32("%r"), F32("%f"), R64("%rd");
+/** KPTX register classes, by naming convention. [widthBits] is the
+ * class's storage width — §0.4.493's bit-typed rule checks *that*
+ * rather than the class (see [widthOfBitType]). */
+enum class IsaRegClass(val prefix: String, val widthBits: Int) {
+    PRED("%p", 1), R32("%r", 32), F32("%f", 32), R64("%rd", 64);
 }
 
 /** Infer the class of a register name; null for unknown spellings. */
@@ -56,6 +63,42 @@ internal fun classOfType(type: String): IsaRegClass? = when (type) {
     "u32", "s32" -> IsaRegClass.R32
     "u64", "s64" -> IsaRegClass.R64
     "pred" -> IsaRegClass.PRED
+    else -> null
+}
+
+/**
+ * §0.4.493 — the **width** a bit-typed suffix constrains its register
+ * operands to, or null for "no width check".
+ *
+ * §0.4.357 dropped the class check for `bN` and stopped there, leaving
+ * b-typed operands checked by nothing at all. That is half the ISA's
+ * rule. PTX `bN` is untyped bit *storage of a stated size*: the class
+ * is free, the **size is not**. Verified against `ptxas 13.0`
+ * (`-arch=sm_75`) rather than assumed, since this is the arm every
+ * warp-reduced float kernel leans on:
+ *
+ * | spelling | ptxas |
+ * |---|---|
+ * | `mov.b32 %r1, %f1` / `mov.b32 %f2, %r1` | **legal** — bit reinterpretation, the intended use |
+ * | `shfl.sync.down.b32 %f2, %f1, 16, 0x1f, …` | **legal** — the shuffle moves `%f` registers directly |
+ * | `mov.b32 %rd3, %f1` | rejected: `Arguments mismatch for instruction 'mov'` |
+ * | `shfl.sync.down.b32 %rd3, %rd1, …` | rejected |
+ *
+ * So `b32` accepts any 32-bit class (`%r`, `%f`) and refuses `%rd`
+ * and `%p`; `b64` accepts `%rd` alone. `b16`/`b128` map to null — KPTX
+ * has no register class of either width, so there is nothing to check
+ * and inventing a rejection would be guessing.
+ *
+ * Two boundaries this deliberately does **not** move. `ptxas` is
+ * looser than this table on u/s/f-typed `mov` (`mov.f32 %r1, %f1`
+ * assembles); KPTX keeps the stricter class check, because a `%r`
+ * holding an f32 value is a bug in every kernel this repo has written.
+ * And `ptxas` *is* class-strict on arithmetic (`add.u32 %f2, %f1, %f1`
+ * is rejected), which is exactly what [classOfType] already enforces.
+ */
+internal fun widthOfBitType(type: String): Int? = when (type) {
+    "b32" -> 32
+    "b64" -> 64
     else -> null
 }
 
@@ -429,12 +472,23 @@ fun validateInst(inst: PtxInst): List<String> {
                 if (wide && i == 0 && (base == IsaRegClass.R32)) IsaRegClass.R64 else base
             }
         }
+        // §0.4.493 — bit-typed operands are width-checked instead.
+        val expectedWidth = when (val rule = opSpec.classRule) {
+            is IsaClassRule.FromType -> {
+                val w = widthOfBitType(types.getOrNull(rule.typeIndex) ?: "")
+                if (wide && i == 0 && w == 32) 64 else w
+            }
+            else -> null
+        }
         fun checkReg(name: String, what: String) {
             val actual = regClassOf(name)
             if (actual == null) {
                 errors += "$at: $what `$name` has no recognizable class"
             } else if (expected != null && actual != expected) {
                 errors += "$at: $what `$name` is ${actual.prefix}-class; expected ${expected.prefix}"
+            } else if (expected == null && expectedWidth != null && actual.widthBits != expectedWidth) {
+                errors += "$at: $what `$name` is ${actual.widthBits}-bit (${actual.prefix}-class); " +
+                    "a bit-typed `.b$expectedWidth` operand must be $expectedWidth-bit"
             }
         }
         when (op) {

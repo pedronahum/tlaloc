@@ -94,12 +94,80 @@ class WarpIntrinsicsTest {
         assertEquals(text, parsePtx(text).emitPtx())
         assertEquals(emptyList(), module.validateIsaErrors())
 
-        val wrongClass = assertFailsWith<IllegalArgumentException> {
+        // §0.4.493 — the wrapper now rejects on WIDTH, not class: a
+        // 64-bit operand is what `shfl.sync.…b32` cannot carry. The
+        // §0.4.343 spelling of this case (d=%f, a=%r) is legal PTX and
+        // is asserted positive in [floatWarpReductionIsOneCall].
+        val wrongWidth = assertFailsWith<IllegalArgumentException> {
             ptxKernel("bad") {
-                val f1 = f32(); val r1 = r32()
-                shflSync(KShflMode.DOWN, d = f1, a = r1, b = imm(1), c = imm("0x1f"))
+                val rd1 = r64(); val r1 = r32()
+                shflSync(KShflMode.DOWN, d = rd1, a = r1, b = imm(1), c = imm("0x1f"))
             }
         }
-        assertTrue(wrongClass.message!!.contains("must be %r-class"), wrongClass.message)
+        assertTrue(wrongWidth.message!!.contains("must be a 32-bit class"), wrongWidth.message)
+    }
+
+    /**
+     * §0.4.493 — the byte-level emission pin for the float warp
+     * reduction. The point of the slice is that this is **one call** at
+     * the kernel site and contains **no `mov.b32` round trip**: the
+     * shuffle carries `%f` registers itself.
+     */
+    @Test
+    fun floatWarpReductionIsOneCall() {
+        val module = ptxKernel("warp_sum_f32") {
+            param(".u64", "p")
+            val acc = f32()          // %f1
+            warpReduceSumF32(acc)    // allocates %f2 as scratch
+            inst("ret")
+        }
+        val text = module.emitPtx()
+        val body = text.lines().map { it.trim() }.filter { it.startsWith("shfl") || it.startsWith("add") }
+        assertEquals(
+            listOf(
+                "shfl.sync.down.b32 %f2, %f1, 16, 0x1f, 0xffffffff;",
+                "add.rn.f32 %f1, %f1, %f2;",
+                "shfl.sync.down.b32 %f2, %f1, 8, 0x1f, 0xffffffff;",
+                "add.rn.f32 %f1, %f1, %f2;",
+                "shfl.sync.down.b32 %f2, %f1, 4, 0x1f, 0xffffffff;",
+                "add.rn.f32 %f1, %f1, %f2;",
+                "shfl.sync.down.b32 %f2, %f1, 2, 0x1f, 0xffffffff;",
+                "add.rn.f32 %f1, %f1, %f2;",
+                "shfl.sync.down.b32 %f2, %f1, 1, 0x1f, 0xffffffff;",
+                "add.rn.f32 %f1, %f1, %f2;",
+            ),
+            body,
+        )
+        assertTrue("mov.b32" !in text, "no bit-reinterpretation round trip is needed:\n$text")
+        assertEquals(text, parsePtx(text).emitPtx())
+        assertEquals(emptyList(), module.validateIsaErrors())
+
+        val wrongClass = assertFailsWith<IllegalArgumentException> {
+            ptxKernel("bad") { warpReduceSumF32(r32()) }
+        }
+        assertTrue(wrongClass.message!!.contains("must be %f-class"), wrongClass.message)
+    }
+
+    /** §0.4.493 — `mov.b32` as bit reinterpretation, both directions,
+     * and the width rejection the ISA table now carries. */
+    @Test
+    fun movB32ReinterpretsAcrossThirtyTwoBitClasses() {
+        val module = ptxKernel("bitcast") {
+            param(".u64", "p")
+            val f1 = f32(); val r1 = r32()
+            movB32(r1, f1)
+            movB32(f1, r1)
+            inst("ret")
+        }
+        val text = module.emitPtx()
+        assertTrue(text.contains("    mov.b32 %r1, %f1;\n"), text)
+        assertTrue(text.contains("    mov.b32 %f1, %r1;\n"), text)
+        assertEquals(text, parsePtx(text).emitPtx())
+        assertEquals(emptyList(), module.validateIsaErrors())
+
+        val tooWide = assertFailsWith<IllegalArgumentException> {
+            ptxKernel("bad") { movB32(r64(), f32()) }
+        }
+        assertTrue(tooWide.message!!.contains("must be a 32-bit class"), tooWide.message)
     }
 }

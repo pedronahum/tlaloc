@@ -126,4 +126,69 @@ class PtxIsaTest {
         val e = assertFailsWith<IsaValidationException> { module.validateIsa() }
         assertTrue(e.errors.single().startsWith("kernel bad, stmt 1:"), e.errors.toString())
     }
+
+    /**
+     * §0.4.493 — the bit-typed rule, pinned by spelling. Every accepted
+     * and every rejected line below was first put through
+     * `ptxas 13.0 -arch=sm_75` (see [widthOfBitType]'s table); this test
+     * is the assertion that KPTX's table agrees with the assembler.
+     */
+    @Test
+    fun acceptsBitTypedCrossClassOperandsOfTheRightWidth() {
+        // The natural spelling of Float.toRawBits() / Float.fromBits().
+        assertEquals(emptyList(), validateInst(PtxInst("mov.b32", listOf(PtxReg("%r1"), PtxReg("%f1")))))
+        assertEquals(emptyList(), validateInst(PtxInst("mov.b32", listOf(PtxReg("%f1"), PtxReg("%r1")))))
+        // And the line docs/KPTX_PAGED_PERF.md §7.4 believed was
+        // unreachable: the shuffle moving a float register directly.
+        assertEquals(
+            emptyList(),
+            validateInst(
+                PtxInst(
+                    "shfl.sync.down.b32",
+                    listOf(PtxReg("%f2"), PtxReg("%f1"), PtxImm("16"), PtxImm("0x1f"), PtxImm("0xffffffff")),
+                ),
+            ),
+        )
+        // b64 accepts the 64-bit class.
+        assertEquals(emptyList(), validateInst(PtxInst("mov.b64", listOf(PtxReg("%rd1"), PtxReg("%rd2")))))
+    }
+
+    @Test
+    fun rejectsBitTypedOperandsOfTheWrongWidth() {
+        // ptxas: "Arguments mismatch for instruction 'mov'".
+        assertTrue(
+            validateInst(PtxInst("mov.b32", listOf(PtxReg("%rd1"), PtxReg("%f1"))))
+                .single().contains("64-bit (%rd-class); a bit-typed `.b32` operand must be 32-bit"),
+        )
+        assertTrue(
+            validateInst(PtxInst("mov.b64", listOf(PtxReg("%r1"), PtxReg("%rd1"))))
+                .single().contains("a bit-typed `.b64` operand must be 64-bit"),
+        )
+        assertTrue(
+            validateInst(
+                PtxInst(
+                    "shfl.sync.down.b32",
+                    listOf(PtxReg("%rd3"), PtxReg("%rd1"), PtxImm("16"), PtxImm("0x1f"), PtxImm("0xffffffff")),
+                ),
+            ).size == 2,
+            "both shfl data operands are width-checked",
+        )
+        // A predicate is 1 bit and is not bit-movable either.
+        assertTrue(
+            validateInst(PtxInst("mov.b32", listOf(PtxReg("%p1"), PtxReg("%f1"))))
+                .single().contains("1-bit (%p-class)"),
+        )
+    }
+
+    @Test
+    fun keepsTheStricterClassCheckOnTypedMoves() {
+        // ptxas ACCEPTS `mov.f32 %r1, %f1` — it treats mov as a pure
+        // bit-mover. KPTX is deliberately stricter: an f32-typed move
+        // into a %r is a bug in every kernel in this repo. Pinned so the
+        // divergence is a decision, not a drift.
+        assertTrue(
+            validateInst(PtxInst("mov.f32", listOf(PtxReg("%r1"), PtxReg("%f1"))))
+                .single().contains("is %r-class; expected %f"),
+        )
+    }
 }
