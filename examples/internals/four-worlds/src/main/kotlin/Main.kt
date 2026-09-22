@@ -25,6 +25,7 @@
  *       ingests;
  *   [4] points at the two programs that do NOT compile.
  */
+import java.io.File
 import io.tlaloc.autograd.relu
 import io.tlaloc.autograd.sum
 import io.tlaloc.autograd.times
@@ -133,29 +134,34 @@ fun main() {
     twoStepWorkflow()
 
     println()
-    println("[4] the two programs that do NOT compile: see the block at the bottom")
-    println("    of src/main/kotlin/Main.kt — uncomment either and run again.")
+    println("[4] the program that does NOT compile")
+    println()
+    val source = System.getProperty("tlaloc.example.shapeErrorSource")?.let(::File)
+    if (source != null && source.isFile) {
+        source.readLines()
+            .dropWhile { !it.startsWith("fun wrongHandleType") }
+            .forEach { println("    $it") }
+    } else {
+        println("    (source not found — run via `./gradlew -p examples/internals/four-worlds run`)")
+    }
+    println()
+    println("    `activate` yields a Rank1 handle; `matrixStep` wants a Rank2 one. What")
+    println("    crosses a step boundary is a typed BufferHandle<T, M>, so the wrong one")
+    println("    does not type-check. Watch it:")
+    println()
+    println("        ./gradlew -p examples/internals/four-worlds shapeError")
+    println()
+    println("    e: WorldErrors.kt:44:26 Argument type mismatch: actual type is")
+    println("       'BufferHandle<DTensor<Rank1<Sym>, F32>, Mesh0>', but")
+    println("       'BufferHandle<DTensor<Rank2<Sym, Sym>, F32>, Mesh0>' was expected.")
+    println()
+    println("    A SECOND claim used to live here, commented out: that calling")
+    println("    `Tlaloc.program` from inside a Kernel body would not resolve. Turning")
+    println("    these comments into a file the build actually compiles showed that it")
+    println("    DOES resolve, so the claim is gone. The @WorldScope DslMarker shadows")
+    println("    an IMPLICIT outer receiver inside a nested builder; `Tlaloc.program`")
+    println("    names its receiver explicitly, and DslMarker never blocks that. The")
+    println("    world separation you can rely on today is the typed handle above.")
+    println()
     println("four-worlds OK")
-
-    // ---------------------------------------------------------------------
-    // (a) WRONG HANDLE TYPE. `activate` produces a Rank1 handle; a step that
-    //     wants a Rank2 handle cannot be fed it. Kotlin reports a type
-    //     mismatch at the `step(...)` argument, pointing at the offending
-    //     value — no plugin involved.
-    //
-    //   val matrixStep = Tlaloc.program("matrix", Tensors.f32Matrix<Sym, Sym>(2, 3, FloatArray(6)), Mesh0) { m -> m.sum() }
-    //   Tlaloc.workflow("mismatched") {
-    //       val activated = step(activate, seed(input, Mesh0))
-    //       step(matrixStep, activated)   // <-- compile error, by design
-    //   }
-    //
-    // (b) WRONG WORLD. `program` is an OrchestrationScope extension, so it
-    //     cannot be called from inside a Kernel body — the world boundary is
-    //     the receiver, and there is no orchestration receiver in there.
-    //
-    //   Tlaloc.program("nested", input, Mesh0) { x ->
-    //       Tlaloc.program("inner", input, Mesh0) { y -> y.sum() }   // <-- does not resolve
-    //       x.sum()
-    //   }
-    // ---------------------------------------------------------------------
 }

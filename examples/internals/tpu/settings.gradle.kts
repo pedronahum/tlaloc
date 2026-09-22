@@ -3,7 +3,7 @@
 // from mavenLocal, exactly as an external user would.
 //
 // From the repo root:
-//   ./gradlew publishToMavenLocal && ./gradlew -p examples/tpu run
+//   ./gradlew publishToMavenLocal && ./gradlew -p examples/internals/tpu run
 //
 // On a machine without a TPU that prints the host half and then a named skip.
 // On a Cloud TPU VM with TLALOC_PJRT_PLUGIN_PATH pointing at libtpu.so it runs

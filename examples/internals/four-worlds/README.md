@@ -12,14 +12,20 @@ one an ordinary Kotlin receiver type:
 
 Two consequences, both visible in this example:
 
-- **Calling into the wrong world is a compile error.** `program` is an
-  extension on `OrchestrationScope`, so it cannot be called from inside a
-  Kernel body — there is no orchestration receiver in there. No runtime guard,
-  no lint rule.
 - **What crosses a step boundary is never a raw tensor.** It is a
   `BufferHandle<T, M>`, carrying both the value's type and the mesh `M` it
   lives on. Feed a step a handle of the wrong shape or the wrong mesh and
-  Kotlin's own checker rejects the call site.
+  Kotlin's own checker rejects the call site — no runtime guard, no lint rule.
+  [`src/shapeError/kotlin/WorldErrors.kt`](src/shapeError/kotlin/WorldErrors.kt)
+  is a real file that proves it, and `./gradlew -p examples/internals/four-worlds
+  shapeError` is the command that makes the compiler say so.
+- **The scopes are a design, and one of their claims turned out not to hold.**
+  This README used to say that `program` cannot be called from inside a Kernel
+  body. Writing the failing case down as a file the build compiles showed that
+  it *can*: the `@WorldScope` DslMarker shadows an **implicit** outer receiver
+  in a nested builder, and `Tlaloc.program` names its receiver explicitly, which
+  DslMarker never blocks. The separation you can rely on today is the typed
+  handle above. Keeping the claim would have been cheaper than checking it.
 
 The run prints: one step built and executed; two steps composed with a handle
 flowing between them (and the recorded edge); and the Maestro JSON descriptor a
@@ -33,7 +39,7 @@ publish first:
 ```bash
 # from the repo root
 ./gradlew publishToMavenLocal
-./gradlew -p examples/four-worlds run
+./gradlew -p examples/internals/four-worlds run
 ```
 
 ## Expected output
@@ -62,8 +68,36 @@ content-addressed over the emitted StableHLO, so it is stable across runs:
 [3] the Maestro descriptor a cluster would ingest (2167 chars, first 240):
     {"properties":{"owner":"tlaloc"},"workflow":{"id":"tlaloc_activate_then_score","name":"activate_then_score","steps":[{"step":{"id":"activate","type":"Kubernetes","params":{"image":{"value":"tlaloc-runtime:0.0.1","type":"STRING"},"tlaloc_art...
 
-[4] the two programs that do NOT compile: see the block at the bottom
-    of src/main/kotlin/Main.kt — uncomment either and run again.
+[4] the program that does NOT compile
+
+    fun wrongHandleType() {
+        val matrixStep = Tlaloc.program(
+            "matrix", Tensors.f32Matrix<Sym, Sym>(2, 3, FloatArray(6)), Mesh0,
+        ) { m -> m.sum() }
+        Tlaloc.workflow("mismatched") {
+            val activated = step(activate, seed(input, Mesh0))
+            step(matrixStep, activated)   // <-- compile error, by design
+        }
+    }
+
+    `activate` yields a Rank1 handle; `matrixStep` wants a Rank2 one. What
+    crosses a step boundary is a typed BufferHandle<T, M>, so the wrong one
+    does not type-check. Watch it:
+
+        ./gradlew -p examples/internals/four-worlds shapeError
+
+    e: WorldErrors.kt:44:26 Argument type mismatch: actual type is
+       'BufferHandle<DTensor<Rank1<Sym>, F32>, Mesh0>', but
+       'BufferHandle<DTensor<Rank2<Sym, Sym>, F32>, Mesh0>' was expected.
+
+    A SECOND claim used to live here, commented out: that calling
+    `Tlaloc.program` from inside a Kernel body would not resolve. Turning
+    these comments into a file the build actually compiles showed that it
+    DOES resolve, so the claim is gone. The @WorldScope DslMarker shadows
+    an IMPLICIT outer receiver inside a nested builder; `Tlaloc.program`
+    names its receiver explicitly, and DslMarker never blocks that. The
+    world separation you can rely on today is the typed handle above.
+
 four-worlds OK
 ```
 

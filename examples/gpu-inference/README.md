@@ -1,5 +1,18 @@
 # gpu-inference — compile a model into an artifact and serve it with no framework
 
+```
+$ ./gradlew -p examples/gpu-inference run        # Kotlin writes a directory, exits
+$ python3 serve.py                               # no jax, no torch, no numpy, no JVM
+
+    prompt      ' The capital of France is'
+    completion  ' Paris.\n\n2.'
+```
+
+That is a real TinyLlama-1.1B — all 22 layers, 4.1 GiB of its own weights — run
+by `/usr/bin/python3` on a machine where jax, torch, numpy and transformers are
+**not installed at all**. Those six generated token ids are the same six
+HuggingFace `transformers` produces from the same checkpoint.
+
 **What it shows.** Two processes, and the gap between them is the whole point.
 
 ```
@@ -9,16 +22,14 @@
    build a decode graph        ───────►      load the directory
    emit StableHLO           a DIRECTORY      compile it with XLA
    stage the weights                         run it on the GPU
-   write the manifest                        print token ids
+   write the manifest                        decode tokens
    EXIT
 ```
 
 The first process never loads a PJRT plugin, never opens a CUDA context and
 never runs the graph it just built — it does not even depend on
-`io.tlaloc:runtime-pjrt`. The second process has **no JVM in it, and no jax, no
-torch, no numpy and no transformers either**. The run recorded below was made
-with `/usr/bin/python3`, the stock system interpreter, on a machine where those
-packages are *not installed at all*; `serve.py` asks the import system and
+`io.tlaloc:runtime-pjrt`. The second has **no JVM in it, and no jax, no torch,
+no numpy and no transformers either**; `serve.py` asks the import system and
 prints the answer, so you do not have to take that on faith.
 
 What the serving process depends on is exactly two things:
@@ -29,6 +40,27 @@ What the serving process depends on is exactly two things:
 
 That is the sentence this example exists to make runnable: **the artifact is
 the deployment.**
+
+## Which model you get, without asking for one
+
+The export looks for a checkpoint in the cache this repo already uses
+(`~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0`):
+
+- **it is there** → the real 22-layer TinyLlama is exported, and the default
+  prompt is `"The capital of France is"`, encoded with the checkpoint's own
+  `tokenizer.json`. You get the run at the top of this page.
+- **it is not there** → the **reference decode graph** is exported instead: one
+  attention layer, an 11-word vocabulary, weights from a fixed LCG. It needs no
+  download, no GPU to export, and it exercises the identical code path — which
+  is the point of it. `--reference` forces this lane even when the checkpoint
+  exists.
+
+Nothing writes a token id by hand in either lane. `serve.py` reads
+`tokenizer.json` with the standard library's `json` — a vocabulary lookup, not
+a tokenizer library — so the ids come from the model's own vocabulary or the
+script refuses. `--text "..."` encodes your own prompt the same way (exact
+vocabulary matches only; it will not guess a subword split that might differ
+from the oracle's).
 
 ## Running it
 
@@ -45,6 +77,22 @@ your own project would, so publish first.
 # half two — Python serves. Point it at a plugin .so; any interpreter will do.
 export TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so
 /usr/bin/python3 examples/gpu-inference/serve.py
+
+# your own prompt, encoded with the model's own vocabulary
+/usr/bin/python3 examples/gpu-inference/serve.py --text "The capital of Japan is"
+
+# the toy graph on purpose, even if a checkpoint is cached
+./gradlew -p examples/gpu-inference run --args="--reference"
+```
+
+Want the real model and do not have it cached? It is one download into the
+cache the export already looks in:
+
+```bash
+# tooling, not runtime — any venv with huggingface_hub; the serving process
+# never sees it.
+huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  --local-dir ~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0
 ```
 
 `serve.py` needs `tlaloc_serve` on its path. A repo checkout has it — the

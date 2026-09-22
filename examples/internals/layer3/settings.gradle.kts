@@ -3,7 +3,7 @@
 // from mavenLocal, exactly as an external user's project would.
 //
 // Run from the repo root:
-//   ./gradlew publishToMavenLocal && ./gradlew -p examples/layer3 run
+//   ./gradlew publishToMavenLocal && ./gradlew -p examples/internals/layer3 run
 rootProject.name = "tlaloc-layer3"
 
 pluginManagement {

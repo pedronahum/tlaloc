@@ -66,15 +66,15 @@ From the repository root:
 
 ```bash
 ./gradlew publishToMavenLocal            # publish io.tlaloc:* into ~/.m2
-./gradlew -p examples/tpu run            # the TPU lane (default)
+./gradlew -p examples/internals/tpu run            # the TPU lane (default)
 ```
 
 On a machine with no TPU that prints the host half and a named skip, and exits
 0. Useful flags:
 
 ```bash
-./gradlew -p examples/tpu run --args="--target cuda"          # dry run on a GPU
-./gradlew -p examples/tpu run --args="--seq 2048 --dim 512"   # v5e-sized work
+./gradlew -p examples/internals/tpu run --args="--target cuda"          # dry run on a GPU
+./gradlew -p examples/internals/tpu run --args="--seq 2048 --dim 512"   # v5e-sized work
 ```
 
 ## What it actually prints — without a TPU
@@ -240,7 +240,7 @@ git clone <tlaloc remote> ~/tlaloc && cd ~/tlaloc
 ./gradlew publishToMavenLocal
 
 # 5. The moment.
-./gradlew -p examples/tpu run
+./gradlew -p examples/internals/tpu run
 ```
 
 **What to expect.** The host half is identical to the output above, including

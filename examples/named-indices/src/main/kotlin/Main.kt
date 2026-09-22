@@ -27,9 +27,11 @@
  *      and one contracting axis (Dim), which is the exact shape a transformer
  *      layer has. No reshape-to-2D trick.
  *
- * Then it shows — as commented-out code you should uncomment — the program
- * that does NOT compile.
+ * Then it shows the program that does NOT compile — a real file in a real
+ * source set, and one command that makes the compiler reject it in front of
+ * you: `./gradlew -p examples/named-indices shapeError`.
  */
+import java.io.File
 import io.tlaloc.core.Batch
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.Dim
@@ -169,22 +171,30 @@ fun main() {
     rank4Attention()
 
     println()
-    println("[3] the program that does NOT compile: see the block at the bottom")
-    println("    of src/main/kotlin/Main.kt — uncomment it and run again.")
+    println("[3] the program that does NOT compile")
+    println()
+    val source = System.getProperty("tlaloc.example.shapeErrorSource")?.let(::File)
+    if (source != null && source.isFile) {
+        source.readLines()
+            .dropWhile { !it.startsWith("fun shapeErrorThatMustNotCompile") }
+            .forEach { println("    $it") }
+    } else {
+        println("    (source not found — run via `./gradlew -p examples/named-indices run`)")
+    }
+    println()
+    println("    `a`'s axis 1 is named SeqLen; `b`'s axis 0 is named Vocab. No overload")
+    println("    of `contract` matches operands sharing no axis name, so the call does")
+    println("    not resolve. Watch it:")
+    println()
+    println("        ./gradlew -p examples/named-indices shapeError")
+    println()
+    println("    e: ShapeError.kt:35:24 Argument type mismatch: actual type is")
+    println("       'DTensor<Rank2<Named<Vocab, Sym>, Named<Hidden, Sym>>, F32>', but")
+    println("       'DTensor<Rank2<Named<SeqLen, Sym>, ...>>, F32>' was expected.")
+    println()
+    println("    That is KOTLIN'S OWN type checker — this project does not even put the")
+    println("    Tlaloc compiler plugin on its classpath. The rule lives in ordinary")
+    println("    generics, so your IDE draws the squiggle with no Tlaloc tooling at all.")
+    println()
     println("named-indices OK")
-
-    // ---------------------------------------------------------------------
-    // Uncomment to see the safety net fire. `a`'s axis 1 is named SeqLen;
-    // `b`'s axis 0 is named Vocab. No overload of `contract` matches, so
-    // Kotlin reports a type mismatch AT THE CALL SITE — red squiggle in the
-    // IDE, before you have allocated a single float.
-    //
-    //   val a: DTensor<Rank2<Named<Batch, Sym>, Named<SeqLen, Sym>>, F32> = TODO()
-    //   val b: DTensor<Rank2<Named<io.tlaloc.core.Vocab, Sym>, Named<Hidden, Sym>>, F32> = TODO()
-    //   val c = a contract b   // <-- compile error, by design
-    //
-    // The rendering is Kotlin's own ("Type mismatch: expected ..., got ...").
-    // No plugin diagnostic is involved; see docs/audits/named_indices_audit.md
-    // for why that was the design goal rather than a limitation.
-    // ---------------------------------------------------------------------
 }

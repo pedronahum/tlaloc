@@ -182,6 +182,7 @@ private class Opts(
         fun parse(args: Array<String>): Opts {
             var out = Path.of("build/artifact")
             var ckpt: Path? = null
+            var reference = false
             var layers: Int? = null
             var context = 64
             var blockSize = 16
@@ -194,12 +195,13 @@ private class Opts(
                 when (a) {
                     "--out" -> out = Path.of(next())
                     "--checkpoint" -> ckpt = Path.of(next())
+                    "--reference" -> reference = true
                     "--layers" -> layers = next().toInt()
                     "--context" -> context = next().toInt()
                     "--block-size" -> blockSize = next().toInt()
                     "--num-blocks" -> numBlocks = next().toInt()
                     else -> error(
-                        "unknown argument '$a'. usage: [--out DIR] [--checkpoint DIR] " +
+                        "unknown argument '$a'. usage: [--out DIR] [--checkpoint DIR] [--reference] " +
                             "[--layers N] [--context N] [--block-size N] [--num-blocks N]",
                     )
                 }
@@ -207,9 +209,31 @@ private class Opts(
             }
             require(ckpt == null || ckpt.isDirectory()) {
                 "--checkpoint $ckpt is not a directory. Fetch TinyLlama with the command in " +
-                    "this example's README, or drop the flag to export the reference graph."
+                    "this example's README, or pass --reference to export the toy graph."
             }
+            // No --checkpoint given: look where the repo's own tooling caches
+            // checkpoints. If a real TinyLlama is sitting there, USE IT — the
+            // default should be the demo that says "Paris", not the toy graph.
+            // `--reference` opts back out; so does simply not having the model.
+            if (ckpt == null && !reference) ckpt = defaultCheckpoint()
             return Opts(out, ckpt, layers, context, blockSize, numBlocks)
+        }
+
+        /**
+         * The checkpoint cache `scripts/` and the serving tests already use.
+         * Returns null when there is nothing there — in which case this example
+         * exports the reference decode graph and says so, which still runs end
+         * to end and needs no download.
+         */
+        fun defaultCheckpoint(): Path? {
+            val dir = Path.of(System.getProperty("user.home"))
+                .resolve(".cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0")
+            // A checkpoint is only usable if the weights are actually there.
+            val hasWeights = dir.isDirectory() &&
+                Files.list(dir).use { s -> s.anyMatch { it.fileName.toString().endsWith(".safetensors") } }
+            if (hasWeights) return dir
+            val nested = dir.resolve("snapshot")
+            return if (nested.isDirectory()) nested else null
         }
     }
 }

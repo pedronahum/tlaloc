@@ -3,7 +3,7 @@
 // from mavenLocal, exactly as an external user's project would.
 //
 // Run from the repo root:
-//   ./gradlew publishToMavenLocal && ./gradlew -p examples/four-worlds run
+//   ./gradlew publishToMavenLocal && ./gradlew -p examples/internals/four-worlds run
 rootProject.name = "tlaloc-four-worlds"
 
 pluginManagement {

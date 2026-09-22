@@ -74,6 +74,9 @@ def main() -> int:
     ap.add_argument("--artifact", default=str(Path(__file__).resolve().parent / "build" / "artifact"))
     ap.add_argument("--platform", default="cuda", help="cuda | tpu | cpu")
     ap.add_argument("--prompt", default="", help="comma-separated token IDS (not text)")
+    ap.add_argument("--text", default="", help="a prompt in WORDS, encoded with the model's own tokenizer.json")
+    ap.add_argument("--tokenizer", default="",
+                    help="path to the model's tokenizer.json (default: the checkpoint cache)")
     ap.add_argument("--max-new", type=int, default=4)
     ap.add_argument("--verify-weights", action="store_true",
                     help="re-hash every staged weight file (slow, honest)")
@@ -150,7 +153,13 @@ def main() -> int:
         mbs = max(e.max_blocks_per_seq for e in art.entries)
         capacity = block_size * mbs
 
-        prompt = [int(t) for t in args.prompt.split(",") if t.strip()] or default_prompt(art)
+        if args.text:
+            tok_path = find_tokenizer(art, args.tokenizer)
+            if tok_path is None:
+                raise SystemExit("--text needs the model's tokenizer.json; pass --tokenizer PATH")
+            prompt = encode(load_vocab(tok_path)[0], args.text)
+        else:
+            prompt = [int(t) for t in args.prompt.split(",") if t.strip()] or default_prompt(art)
         max_new = min(args.max_new, capacity - len(prompt))
         if max_new < 1:
             print(f"prompt of {len(prompt)} fills this artifact's compiled context "
@@ -213,10 +222,23 @@ def main() -> int:
         if step_ms:
             print(f"  median step      {sorted(step_ms)[len(step_ms) // 2]:.0f} ms")
         print()
-        print("Those are token IDS, in and out. There is no tokenizer in this process")
-        print("and none in the artifact: turning text into ids is a frontend's job, and")
-        print(f"the manifest names '{art.model_name}' precisely so a frontend can find")
-        print("the tokenizer that belongs to these weights.")
+        tok_path = find_tokenizer(art, args.tokenizer)
+        if tok_path is not None:
+            _, rev = load_vocab(tok_path)
+            print("  in words, using the vocabulary that ships with the checkpoint:")
+            print()
+            print(f"    prompt      {decode(rev, prompt)!r}")
+            print(f"    completion  {decode(rev, generated)!r}")
+            print()
+            print("There is still no tokenizer LIBRARY in this process — that is a JSON")
+            print("file and the standard library's `json`. Turning text into ids is a")
+            print(f"frontend's job, and the manifest names '{art.model_name}' precisely")
+            print("so a frontend can find the vocabulary that belongs to these weights.")
+        else:
+            print("Those are token IDS, in and out. There is no tokenizer in this process")
+            print("and none in the artifact: turning text into ids is a frontend's job, and")
+            print(f"the manifest names '{art.model_name}' precisely so a frontend can find")
+            print("the tokenizer that belongs to these weights.")
     return 0
 
 
@@ -236,20 +258,91 @@ def frameworks() -> str:
     return f"{', '.join(present)} installed but UNUSED by this script"
 
 
+# ---------------------------------------------------------------------------
+# The tokenizer: not imported, READ.
+#
+# There is still no tokenizer library in this process. `tokenizer.json` is a
+# JSON file that ships with the checkpoint, and `json` is in the standard
+# library — so the ids below come from the model's OWN vocabulary rather than
+# from a number written by hand, which was always the rule here. Encoding is
+# exact-match only: if a word is not one vocabulary entry, this refuses instead
+# of guessing, because a prompt that does not match the oracle's tokenization
+# would make the whole comparison meaningless.
+# ---------------------------------------------------------------------------
+
+DEFAULT_TEXT = "The capital of France is"
+
+
+def find_tokenizer(art, explicit: str):
+    """The model's own tokenizer.json, or None."""
+    if explicit:
+        p = Path(explicit)
+        return p if p.is_file() else None
+    name = getattr(art, "model_name", None) or ""
+    if not name:
+        return None
+    p = Path.home() / ".cache" / "tlaloc-checkpoints" / name / "tokenizer.json"
+    return p if p.is_file() else None
+
+
+def load_vocab(path):
+    """{token: id} and {id: token} from a tokenizer.json, with json alone."""
+    with open(path) as fh:
+        vocab = json.load(fh)["model"]["vocab"]
+    return vocab, {v: k for k, v in vocab.items()}
+
+
+def encode(vocab, text: str) -> list:
+    """BOS + one id per whitespace-separated word. Exact matches only."""
+    ids = [vocab.get("<s>", 1)]
+    for word in text.split():
+        token = "\u2581" + word
+        if token not in vocab:
+            raise SystemExit(
+                f"the word {word!r} is not a single entry in this model's vocabulary.\n"
+                "This encoder is exact-match only — it will not guess a split that\n"
+                "might differ from the tokenizer HuggingFace would use. Pass --prompt\n"
+                "with ids instead."
+            )
+        ids.append(vocab[token])
+    return ids
+
+
+def decode(rev, ids) -> str:
+    """Ids back to text: SentencePiece marks a word start with U+2581."""
+    out = []
+    for i in ids:
+        tok = rev.get(i)
+        if tok is None:
+            out.append(f"<{i}>")
+        elif tok.startswith("<0x") and tok.endswith(">"):
+            out.append(chr(int(tok[3:-1], 16)))
+        elif tok in ("<s>", "</s>"):
+            continue
+        else:
+            out.append(tok.replace("\u2581", " "))
+    return "".join(out)
+
+
 def default_prompt(art) -> list:
     """A prompt that is in range for whatever was exported.
 
     The reference decode graph has an 11-word vocabulary and 4 tokens of
-    context; a real Llama's ids have to come from its own tokenizer, so this
-    refuses to make them up and says so.
+    context, so it gets a toy prompt. A real model gets DEFAULT_TEXT, encoded
+    with its own tokenizer.json — and if that file is not next to the weights,
+    this still refuses to invent ids.
     """
-    if art.weight_table:
+    if not art.weight_table:
+        return [1, 2]
+    path = find_tokenizer(art, "")
+    if path is None:
         raise SystemExit(
             "this artifact is a real model — pass --prompt with ids from its own\n"
-            "tokenizer. Nothing in this repo writes a token id by hand; see the\n"
-            "README's 'real Llama' section for the oracle command that prints them."
+            "tokenizer, or --tokenizer with the path to its tokenizer.json.\n"
+            "Nothing here writes a token id by hand."
         )
-    return [1, 2]
+    vocab, _ = load_vocab(path)
+    return encode(vocab, DEFAULT_TEXT)
 
 
 if __name__ == "__main__":

@@ -334,7 +334,11 @@ internal object KotlinSourceRenderer {
                     ?: refuse(op, "missing integer 'order' attr")
                 ranked("${r(0)}.polygamma($order)")
             }
-            OpKind.ABS, OpKind.RSQRT, OpKind.GELU, OpKind.SILU, OpKind.SIN, OpKind.COS ->
+            // §0.4.496 — SIN/COS moved out of the twin gap below: `:core` grew the
+            // DTensor twins, so a gradient through trig now prints.
+            OpKind.SIN -> ranked("${r(0)}.sin()")
+            OpKind.COS -> ranked("${r(0)}.cos()")
+            OpKind.ABS, OpKind.RSQRT, OpKind.GELU, OpKind.SILU ->
                 refuse(op, "no `:core` tensor host twin exists for this unary (the bmm-precedent twin gap) — add the twin, then teach the printer its spelling")
             OpKind.NOT, OpKind.LAND ->
                 refuse(op, "boolean-algebra kinds have no host-twin spelling (control-flow substrate)")

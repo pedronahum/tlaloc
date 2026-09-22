@@ -1,12 +1,11 @@
 # Tlaloc examples
 
-Eight standalone programs. Each directory here is its **own Gradle build** — its
-own `settings.gradle.kts`, its own `build.gradle.kts` — and each one resolves
-Tlaloc from **mavenLocal**, as `io.tlaloc:core:0.0.1-SNAPSHOT` and friends,
-exactly the way your project would. None of them is a module of the repo build,
-none of them uses `includeBuild`, and none of them imports another. Delete the
-rest of the repository after `publishToMavenLocal` and every one of them still
-compiles and runs.
+Ten standalone programs. Each directory here is its **own Gradle build** — its own
+`settings.gradle.kts`, its own `build.gradle.kts` — and each resolves Tlaloc from
+**mavenLocal**, as `io.tlaloc:core:0.0.1-SNAPSHOT` and friends, exactly the way
+your project would. None is a module of the repo build, none uses `includeBuild`,
+and none imports another. Delete the rest of the repository after
+`publishToMavenLocal` and every one of them still compiles and runs.
 
 Everything printed in every README here is **real output from a real run**. Where
 a number could not be produced on this machine — anything involving a TPU — the
@@ -20,9 +19,7 @@ README says so in those words instead of showing you a number.
 |---|---|
 | **JDK 25** | every example sets `jvmToolchain(25)`. On the DGX Spark: `export JAVA_HOME=~/.local/jdks/jdk-25.0.3+9` |
 | **Publish first** | `./gradlew publishToMavenLocal` at the repo root, once, and again after you change Tlaloc itself |
-| **Nothing else** | no GPU, no driver, no Python, no checkpoint — for five of the eight |
-
-Run one from the repo root:
+| **Nothing else** | no GPU, no driver, no Python, no checkpoint — for six of the ten |
 
 ```bash
 ./gradlew publishToMavenLocal          # once
@@ -34,66 +31,110 @@ the way in. (`scripts/onboarding-smoke.sh` does both steps for `quickstart`.)
 
 ---
 
-## The examples
+## Start here
 
-| Example | What it shows | What it needs |
+The three that show what is actually different about Tlaloc. None needs anything
+but a JDK.
+
+### [`readable-gradients/`](readable-gradients/) — the derivative is a file you can read
+
+The same gradient three ways — compiled by the plugin, **printed as Kotlin and
+recompiled without the plugin**, and a finite difference. The first two are
+raw-bit identical; the third agrees to `5.525e-08`. No other autodiff framework
+will hand you the derivative as source.
+
+### [`differentiable-physics/`](differentiable-physics/) — gradient descent through a simulator
+
+A ball, air drag, and a hoop 4.6 m away. The `for` loop that integrates Newton's
+laws lives *inside* `grad2 { }`, so the compiler differentiates **the simulator**
+— 832 lines of derivative it wrote itself — and gradient descent finds the throw.
+
+```
+    first guess:   35.52° at 6.400 m/s  —  misses by 2.13 m
+    learned throw: 48.91° at 8.266 m/s  —  0.0000 m from the centre of the rim
+    SWISH.
+```
+
+### [`quickstart/`](quickstart/) — a gradient, and a shape bug that never runs
+
+Three lines for the gradient. Then a real file in a real source set that is
+*supposed* to fail, and one command that makes the compiler reject it in front of
+you:
+
+```
+e: Tlaloc named-index mismatch: contract operands share no named axis:
+   lhs=[Batch, SeqLen] rhs=[Hidden, Hidden]
+```
+
+---
+
+## Then these
+
+| Example | What it shows | Needs |
 |---|---|---|
-| [`quickstart/`](quickstart/) | The smallest complete program: `grad { }` over a matmul, lowered by the K2 compiler plugin at compile time. Plus a named-axis error you can uncomment. | nothing |
-| [`named-indices/`](named-indices/) | Axis **names** in the Kotlin type, so a transposed weight is an overload-resolution failure in Kotlin's own type checker — not a runtime shape error. | nothing |
-| [`readable-gradients/`](readable-gradients/) | The derivative as a **file you can read**: the same gradient three ways — compiled, printed as Kotlin by the plugin and compiled again *without* the plugin, and a finite difference. All three agree. | nothing |
-| [`four-worlds/`](four-worlds/) | Kernel / Orchestration / Program / Cluster as four receiver types, the `BufferHandle` that is the only thing allowed across a step boundary, and the Maestro descriptor a cluster ingests. | nothing |
-| [`layer3/`](layer3/) | The device decision moved **upstream of the runtime**: recognize attention, coarsen it into one op carrying its own gradient, and emit a genuinely different artifact per target (GB10, H100, TPU v6e, Trainium2, generic CPU). | nothing |
-| [`gpu-training/`](gpu-training/) | A network learns a disc on the Blackwell. `capture` derives the gradient with the compiler's own reverse pass, Adam runs 600 steps on the GPU, and the GPU answer is checked against the host interpreter. | CUDA GPU *(self-skips to a host lane)* |
-| [`gpu-inference/`](gpu-inference/) | Two processes: Kotlin compiles a model into a directory and **exits**; a stock `python3` with no jax, no torch and no numpy in it loads that directory and decodes tokens on the GPU. | half one: nothing · half two: a PJRT plugin `.so` + driver *(self-skips)* · the Llama path: a checkpoint |
-| [`tpu/`](tpu/) | Five acts written **before the hardware exists**: platform identity, forward, compiler-derived gradient, threefry bit-exactness, bf16 narrowing — each with its tolerance and verdict fixed in advance. Runs as a dry run on CUDA. | a TPU *(never run on one; self-skips, and `--target cuda` is the dry run)* |
+| [`mnist/`](mnist/) | The real MNIST — 60,000 digits, downloaded and parsed — at **93.66 %** test accuracy, trained by a captured gradient. Act `[4]` prints test digits as ASCII next to the model's verdict. | CUDA *(self-skips to a slower host lane)* · downloads 11 MB once |
+| [`gpu-training/`](gpu-training/) | A network learns a disc on the Blackwell: 600 Adam steps in 1.8 s, **98.3 %** held out, and the decision boundary drawn next to the ground truth. | CUDA *(self-skips)* |
+| [`gpu-inference/`](gpu-inference/) | Kotlin compiles a real TinyLlama-1.1B into a directory and **exits**; a stock `python3` with no jax, no torch and no numpy loads it and answers `' Paris.'` | CUDA + a PJRT plugin *(self-skips; falls back to a toy graph with no checkpoint)* |
+| [`named-indices/`](named-indices/) | Axis **names** in the Kotlin type, so a transposed weight is an overload-resolution failure in Kotlin's own type checker — no plugin involved. | nothing |
+
+---
+
+## How it works inside — [`internals/`](internals/)
+
+Not tutorials. These three explain Tlaloc's *structure*, and they assume you
+already care about it.
+
+| Example | What it shows | Needs |
+|---|---|---|
+| [`internals/layer3/`](internals/layer3/) | The device decision moved **upstream of the runtime**: recognize attention, coarsen it into one op carrying its own gradient, and emit a genuinely different artifact per target (GB10, H100, TPU v6e, Trainium2, CPU). | nothing |
+| [`internals/four-worlds/`](internals/four-worlds/) | Kernel / Orchestration / Program / Cluster as four receiver types, the `BufferHandle` that is the only thing allowed across a step boundary, and the Maestro descriptor a cluster ingests — plus one boundary claim that writing the failing case down proved false. | nothing |
+| [`internals/tpu/`](internals/tpu/) | Five acts written **before the hardware exists**: tolerances and verdicts fixed in advance, so the first TPU session is spent debugging a TPU rather than writing a test for one. | a TPU *(never run on one; `--target cuda` is the dry run)* |
 
 ---
 
 ## A reading order
 
-1. **[`quickstart/`](quickstart/)** — what a Tlaloc program is: three lines, one
-   gradient, no tape.
-2. **[`readable-gradients/`](readable-gradients/)** — what makes it different
+1. **[`readable-gradients/`](readable-gradients/)** — what makes Tlaloc different
    from every other autodiff: the derivative is *source*, and you can read it.
-3. **[`named-indices/`](named-indices/)** — what the type system buys you before
-   anything runs.
-4. **[`gpu-training/`](gpu-training/)** — the same machinery, now training on a
-   real accelerator, with the GPU checked against the interpreter.
+2. **[`differentiable-physics/`](differentiable-physics/)** — that same derivative,
+   now taken through a loop, solving a problem that has nothing to do with ML.
+3. **[`quickstart/`](quickstart/)** — the smallest complete program, and the
+   compile error that is the other half of the pitch.
+4. **[`mnist/`](mnist/)** — the benchmark you already know, so you can judge the
+   result rather than take it on trust.
 5. **[`gpu-inference/`](gpu-inference/)** — what you ship: a directory, and a
    process with nothing installed in it.
-6. **[`layer3/`](layer3/)** and **[`four-worlds/`](four-worlds/)** — the two
-   structural ideas underneath all of the above: the artifact carries the device
-   decision, and the four worlds keep the scopes apart.
-7. **[`tpu/`](tpu/)** — the frontier. Read it as a claim nobody has cashed yet.
+6. **[`internals/`](internals/)** — the structural ideas underneath all of it.
 
 ---
 
 ## What happened on this machine
 
-The full set was run end to end on 2026-09-21 (§0.4.490) on the GB10 DGX Spark,
-aarch64, CUDA driver 580.126.09, JDK 25.0.3+9, **no TPU**. Every one exited `0`.
+Run end to end on 2026-09-22 on the GB10 DGX Spark, aarch64, CUDA driver
+580.126.09, JDK 25.0.3+9, **no TPU**. Every one exited `0`.
 
 | Example | Outcome | What it printed |
 |---|---|---|
-| `quickstart` | ran | `d/dA sum(A matmul A)` at `[[1,2],[3,4]]` = `[7.0, 11.0, 9.0, 13.0]` |
-| `named-indices` | ran | rank-2 contraction `[2,4]` and the rank-4 attention core `[1,2,4,4]`, both matching their expected dims |
+| `quickstart` | ran | `d/dA sum(A matmul A)` at `[[1,2],[3,4]]` = `[7.0, 11.0, 9.0, 13.0]`, then the shape-error source and the command that rejects it |
+| `quickstart shapeError` | **failed, as designed** | `e: Tlaloc named-index mismatch: contract operands share no named axis: lhs=[Batch, SeqLen] rhs=[Hidden, Hidden]` |
 | `readable-gradients` | ran | compiled `grad { }` vs the printed source: **raw-bit identical** at all 7 points; vs central difference: `max \|gap\| = 5.525e-08` |
-| `four-worlds` | ran | one step (body hash `8d772d28…`, 455 bytes of StableHLO) → `35.0`; the two-step workflow → the same `35.0`; a 2167-char Maestro descriptor |
-| `layer3` | ran | `flash_attn_v3` for GB10/H100, `tpu_pallas_flash_attention` for TPU v6e, `nki_flash_attention` for Trainium2, no custom call at all for generic CPU |
-| `gpu-training` | ran **on the GPU** | 600 Adam steps on PJRT/XLA CUDA in 1.814 s (3.02 ms/step), loss `0.992417 → 0.047460`, held-out accuracy **98.1 %** on 1024 unseen points |
-| `gpu-training` (host lane) | ran | `TLALOC_EXAMPLE_LANE=host`: the GPU lane self-skips by name, 600 steps in 5.314 s on the JVM interpreter, held-out **97.9 %** |
-| `gpu-inference` half one | ran | artifact written in 0.1 s: 6 content-addressed bodies (56.3 KiB), 6 programs, an 8.6 KiB manifest |
-| `gpu-inference` half two | ran **on the GPU** | `/usr/bin/python3` (3.12.3), no jax/torch/numpy: prompt `[1, 2]` → generated `[9, 7]`, 2 XLA compiles, median step 2 ms |
-| `gpu-inference` half two (no plugin) | self-skipped | `SKIP: no PJRT plugin on this machine…`, exit `0` |
-| `tpu` | device half **self-skipped** | host half computed its whole reference (loss `-2.553444`), then: `no TPU PJRT plugin resolved`, with the four search paths named, exit `0` |
-| `tpu --target cuda` | dry run **on the GPU** | 5 / 5 acts PASS — forward `max\|diff\| 2.6e-05`, gradient `4.3e-05`, threefry **4113/4113 lanes bit-identical**, bf16 `0/19` disagreements. Proves the program; says nothing about a TPU. |
+| `differentiable-physics` | ran | gradient vs finite differences: worst relative gap `8.401e-04`; descent `2.13 m` miss → `0.0000 m`; the derivative it printed: **832 lines, 823 operations** |
+| `named-indices` | ran | rank-2 contraction `[2,4]` and the rank-4 attention core `[1,2,4,4]`, then the program that does not compile |
+| `named-indices shapeError` | **failed, as designed** | `Argument type mismatch: actual type is 'DTensor<Rank2<Named<Vocab, Sym>, …>>' but 'DTensor<Rank2<Named<SeqLen, Sym>, …>>' was expected` |
+| `mnist` | ran **on the GPU** | 600 full-batch steps over 4,096 images in 8.28 s, loss `0.112445 → 0.002118`, **93.66 %** on all 10,000 test images, 6 of 6 shown digits correct |
+| `mnist` (host lane) | ran | `TLALOC_EXAMPLE_LANE=host`: 40 steps over 512 images in 19.85 s, **82.50 %** on 1,000 |
+| `gpu-training` | ran **on the GPU** | 600 Adam steps on PJRT/XLA CUDA, held-out accuracy **98.3 %** on 1024 unseen points |
+| `gpu-inference` half one | ran | the real TinyLlama-1.1B: 4.1 GiB of weights and a 65 KiB manifest written in 10.5 s |
+| `gpu-inference` half two | ran **on the GPU** | `/usr/bin/python3`, no jax/torch/numpy: `' The capital of France is'` → `' Paris.\n\n2.'`, 1 XLA compile, median step 1353 ms |
+| `gpu-inference --reference` | ran **on the GPU** | the toy graph, no checkpoint needed: 2 XLA compiles, median step 2 ms |
+| `internals/four-worlds` | ran | one step, the two-step workflow, a Maestro descriptor, and the handle-type violation it can no longer claim more of than is true |
+| `internals/four-worlds shapeError` | **failed, as designed** | `Argument type mismatch: actual type is 'BufferHandle<DTensor<Rank1<Sym>, F32>, Mesh0>', but 'BufferHandle<DTensor<Rank2<Sym, Sym>, F32>, Mesh0>' was expected` |
+| `internals/layer3` | ran | `flash_attn_v3` for GB10/H100, `tpu_pallas_flash_attention` for TPU v6e, `nki_flash_attention` for Trainium2, no custom call for generic CPU |
+| `internals/tpu` | device half **self-skipped** | host half computed its whole reference, then named the four paths it searched for a TPU plugin, exit `0` |
 
 Two examples are deliberately not bit-reproducible and say so in their own
-READMEs: `gpu-training`'s GPU lane (XLA autotunes its GEMMs, so the loss drifts
-in the third decimal — the run above came in at `0.047460` against the
-`0.051002` its README recorded in §0.4.486, and its host lane is exact every
-time: `5.314 s` and 97.9 % here, `5.301 s` and 97.9 % there), and wall-clock
-timings everywhere.
+READMEs: the GPU lanes of `mnist` and `gpu-training` (XLA autotunes its GEMMs, so
+the loss drifts in the last decimals), and wall-clock timings everywhere.
 
 ---
 
@@ -106,9 +147,14 @@ The standard this folder holds itself to:
   example.
 - **One idea.** If you need two paragraphs to say what it shows, it is two
   examples.
+- **Lead with the result.** The first thing in the README is what the program
+  printed, not what the author wanted to demonstrate.
 - **It runs, and the README says what it printed.** Paste the real output.
   Never write output you did not observe.
 - **It degrades honestly.** No accelerator must mean a named skip and exit `0`,
   never a stack trace — a laptop reader should get through the whole folder.
+- **Nothing is homework.** If the point of the example is a program that fails
+  to compile, ship that program and a command that compiles it. "Uncomment this
+  block" is not a demonstration.
 - **It teaches.** These are the first Kotlin a newcomer reads. Comment
   accordingly.

@@ -42,6 +42,25 @@ class KotlinSourceRendererTest {
     }
 
     @Test
+    fun sinCosPrintTheirHostTwins() {
+        // §0.4.496 — SIN/COS used to refuse with the twin-gap message, which made
+        // every gradient through trig unprintable (a `grad { }` over a launch
+        // angle, for instance). `:core` grew the DTensor twins, so they render.
+        val fn = DxirBuilder.function("trig") {
+            val a = param("a", mat22)
+            val s = op(OpKind.SIN, listOf(a), mat22)
+            val c = op(OpKind.COS, listOf(a), mat22)
+            val m = op(OpKind.MUL, listOf(s, c), mat22)
+            listOf(m)
+        }
+        val src = fn.toKotlinSource()
+        assertTrue("a.sin()" in src, src)
+        assertTrue("a.cos()" in src, src)
+        assertTrue("// %1 = SIN(%0)" in src, src)
+        assertTrue("// %2 = COS(%0)" in src, src)
+    }
+
+    @Test
     fun multiReturnRendersAsPair() {
         val fn = DxirBuilder.function("two") {
             val a = param("a", mat22)

@@ -349,6 +349,17 @@ fun <S : Shape> DTensor<S, F32>.sqrt(): DTensor<S, F32> =
 fun <S : Shape> DTensor<S, F32>.tan(): DTensor<S, F32> =
     unary { x -> kotlin.math.tan(x.toDouble()).toFloat() }
 
+// §0.4.496 — the SIN/COS tensor twins. `Float.sin()/cos()` and the interpreter's
+// SIN/COS arms have existed since §0.4.166, but the DTensor surface did not, which
+// is why `KotlinSourceRenderer` had to refuse to print any gradient containing
+// them (the bmm-precedent twin gap). Same Double-then-narrow convention as the
+// interpreter, so a printed gradient evaluates bit-for-bit like the compiled one.
+fun <S : Shape> DTensor<S, F32>.sin(): DTensor<S, F32> =
+    unary { x -> kotlin.math.sin(x.toDouble()).toFloat() }
+
+fun <S : Shape> DTensor<S, F32>.cos(): DTensor<S, F32> =
+    unary { x -> kotlin.math.cos(x.toDouble()).toFloat() }
+
 fun <S : Shape> DTensor<S, F32>.atan(): DTensor<S, F32> =
     unary { x -> kotlin.math.atan(x.toDouble()).toFloat() }
 

@@ -87,6 +87,25 @@ class HostOpsTest {
     }
 
     @Test
+    fun sinCosElementwise() {
+        // §0.4.496 — the SIN/COS tensor twins. They exist so that a gradient
+        // containing trig has an honest Kotlin rendering; the values must match
+        // the interpreter's own arm, which is Double-then-narrow.
+        val a = Tensors.f32Matrix<Sym, Sym>(1, 5, floatArrayOf(0f, 0.5f, -1.0f, 1.2f, 3.5f))
+        val sn = a.sin().hostF32()
+        val cs = a.cos().hostF32()
+        for (i in 0 until 5) {
+            val x = a.hostF32()[i].toDouble()
+            assertEquals(kotlin.math.sin(x).toFloat(), sn[i], 1e-6f, "sin slot $i")
+            assertEquals(kotlin.math.cos(x).toFloat(), cs[i], 1e-6f, "cos slot $i")
+            // The identity the adjoint pair relies on.
+            assertEquals(1f, sn[i] * sn[i] + cs[i] * cs[i], 1e-6f, "sin^2+cos^2 slot $i")
+        }
+        assertContentEquals(intArrayOf(1, 5), a.sin().dims)
+        assertContentEquals(intArrayOf(1, 5), a.cos().dims)
+    }
+
+    @Test
     fun lgammaDigammaTrigammaElementwise() {
         // §0.4.402 — Phase C1 special functions: the tensor surface routes
         // through the shared Double kernels in :core/SpecialFunctions.kt.
