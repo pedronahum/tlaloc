@@ -61,7 +61,7 @@ jobs:
         # macOS minutes are billed at 10x Linux on private repositories.
         os: [ubuntu-latest, macos-15]
     # 45 was the ubuntu budget; macOS runners are slower and the suite has grown
-    # (2,345 tests at §0.4.503), so 60 is headroom, not an expectation.
+    # (2,522 tests at §0.4.507), so 60 is headroom, not an expectation.
     timeout-minutes: 60
 
     steps:
@@ -91,7 +91,7 @@ jobs:
 
       # The count the repo tracks in its own smoke gate. Printed, not asserted:
       # a runner skips the hardware lanes, so its total is legitimately lower
-      # than the 2345 a GB10 reports, and pinning it here would only teach
+      # than the 2522 a GB10 reports, and pinning it here would only teach
       # people to ignore a red build.
       - name: Test count (informational)
         if: always()
@@ -190,7 +190,7 @@ jobs:
         run: bash scripts/jdk21-smoke.sh
 
       # NO test-count step here, on purpose: this job runs six modules, not the
-      # suite, so a number from it would be compared against 2345 and read as a
+      # suite, so a number from it would be compared against 2522 and read as a
       # regression. The count belongs to the `test` lanes above.
 
       - name: Upload test reports

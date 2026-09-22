@@ -2,6 +2,7 @@ package io.tlaloc.plugin
 
 import io.tlaloc.ir.passes.SymbolicEngines
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -79,8 +80,18 @@ class SymbolicEngineRefusalTest {
         assertTrue("org.matheclipse:matheclipse-core:" in text, "the coordinate: $text")
         assertTrue("LGPL-3.0" in text, "the licence: $text")
         assertTrue(
-            "implementation(\"org.matheclipse:matheclipse-core:" in text,
+            "kotlinCompilerPluginClasspath(\"org.matheclipse:matheclipse-core:" in text,
             "the one line to add: $text",
+        )
+        // §0.4.507 — this assertion used to demand `implementation(...)`, and so did the twin in
+        // :ir's SymjaOptionalDependencyTest. Both certified advice that could not work: the CAS is
+        // resolved against the COMPILER PLUGIN's class loader (this very extension is the only
+        // production caller), so a jar on the consumer's runtime classpath is invisible to the
+        // probe and the reader would have added the line and seen the identical refusal again.
+        // Two gates agreeing on a false claim is why this one is now stated in the negative too.
+        assertFalse(
+            "implementation(\"org.matheclipse" in text,
+            "must not send the reader to their own runtime classpath: $text",
         )
     }
 }

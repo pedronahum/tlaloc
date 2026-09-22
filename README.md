@@ -238,7 +238,7 @@ repeat(600) {
 
 No `.backward()`, no `zero_grad()`, no hand-written derivatives. On a GB10 that
 loop runs **600 Adam steps in 2.02 s (3.4 ms/step)** on PJRT-CUDA — loss
-`0.992 → 0.047`, **98.3 %** on held-out points — and the same program falls back
+`0.992 → 0.047`, **98.0 %** on held-out points — and the same program falls back
 to the host interpreter on a laptop.
 
 When it is done, the model and the optimizer's moments go into one safetensors
@@ -350,8 +350,9 @@ gradient on a real JDK 21.
 compile time, and says what it found) · JVM only (see [Maturity](#maturity)) ·
 for GPU, a PJRT plugin `.so` and an NVIDIA driver · `org.matheclipse:matheclipse-core`
 (**LGPL-3.0**) is **optional** since `0.1.0-alpha01` — add it only if you
-differentiate a symbolic-trip-count loop, and Tlaloc tells you by name on the day
-you need it.
+differentiate a symbolic-trip-count loop, and then to
+`kotlinCompilerPluginClasspath` (the CAS runs inside the compiler, not inside your
+program). Tlaloc tells you by name, with that line, on the day you need it.
 
 [jep454]: https://openjdk.org/jeps/454
 
@@ -377,7 +378,7 @@ name what they are missing and exit `0`.
 | | | Needs |
 |---|---|---|
 | [`mnist/`](examples/mnist/) | the real MNIST at **93.66 %**, with test digits printed as ASCII next to the model's verdict | CUDA · 11 MB download |
-| [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on a Blackwell GPU, 98.3 % held out, decision boundary drawn as ASCII | CUDA |
+| [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on a Blackwell GPU, 98.0 % held out, decision boundary drawn as ASCII | CUDA |
 | [`gpu-inference/`](examples/gpu-inference/) | Kotlin compiles a real TinyLlama and exits; a bare `python3` answers `' Paris.'` | CUDA |
 | [`named-indices/`](examples/named-indices/) | axis names checked by Kotlin's own type checker | — |
 

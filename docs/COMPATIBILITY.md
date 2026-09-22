@@ -144,8 +144,9 @@ a list of things this policy could not keep.
 - **Symja (`org.matheclipse:matheclipse-core`, LGPL-3.0) is optional from
   `0.1.0-alpha01`.** It was a mandatory runtime dependency of `io.tlaloc:ir` until
   §0.4.503 and is `compileOnly` now, so it will not appear in your graph unless
-  you add it. Adding it is one line, and Tlaloc names that line at compile time on
-  the day a body actually needs the CAS. If your policy forbids LGPL in the
+  you add it. Adding it is one line — `kotlinCompilerPluginClasspath(...)`, because
+  the CAS runs inside the compiler and not inside your program — and Tlaloc names
+  that line at compile time on the day a body actually needs the CAS. If your policy forbids LGPL in the
   dependency graph, nothing in Tlaloc pulls it in.
 
 ## When this policy changes

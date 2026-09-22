@@ -120,8 +120,19 @@ class SymjaOptionalDependencyTest {
         assertTrue("org.matheclipse:matheclipse-core:" in message, "the coordinate: $message")
         assertTrue("LGPL-3.0" in message, "the licence — this is the fact a policy reviewer needs: $message")
         assertTrue(
-            "implementation(\"org.matheclipse:matheclipse-core:" in message,
+            "kotlinCompilerPluginClasspath(\"org.matheclipse:matheclipse-core:" in message,
             "the literal build line, copy-pasteable: $message",
+        )
+        // §0.4.507 — the regression tripwire, and the reason this assertion is inverted.
+        // Until §0.4.507 this message named an `implementation` dependency. That CANNOT work:
+        // `SymbolicEngines.symjaAvailable` probes `SymbolicEngines::class.java.classLoader`, and
+        // the only production caller is the compiler plugin's `TlalocIrGenerationExtension`, so
+        // the loader being asked is the PLUGIN's. A jar on the consumer's own runtime classpath
+        // is invisible to it, and the reader would have followed the advice and seen no change.
+        // Advice that cannot work is worse than no advice, so the wrong line is now pinned out.
+        assertFalse(
+            "implementation(\"org.matheclipse" in message,
+            "must not send the reader to their own runtime classpath: $message",
         )
         assertTrue("optional" in message.lowercase(), "that it is optional and why: $message")
         assertTrue(

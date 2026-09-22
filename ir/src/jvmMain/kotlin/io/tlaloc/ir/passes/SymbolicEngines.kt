@@ -87,11 +87,14 @@ object SymbolicEngines {
      */
     fun absenceMessage(need: String): String =
         "$need, which requires a symbolic engine, and none is available: Symja " +
-            "($SYMJA_COORDINATE, $SYMJA_LICENSE) is not on the runtime classpath. " +
-            "Since 0.1.0-alpha01 Symja is an OPTIONAL dependency of io.tlaloc:ir — it is an " +
-            "8.3 MB $SYMJA_LICENSE jar that most programs never need, so it is no longer " +
-            "forced on every consumer. Add exactly one line to get it back:\n" +
-            "    implementation(\"$SYMJA_COORDINATE\")\n" +
+            "($SYMJA_COORDINATE, $SYMJA_LICENSE) is not on the classpath of the process that " +
+            "needs it. Since 0.1.0-alpha01 Symja is an OPTIONAL dependency of io.tlaloc:ir — it " +
+            "is an 8.3 MB $SYMJA_LICENSE jar that most programs never need, so it is no longer " +
+            "forced on every consumer. Note WHERE it goes: the CAS runs inside the KOTLIN " +
+            "COMPILER, not inside your program — coarsening happens in this plugin's IR phase — " +
+            "so the jar must be on the COMPILER PLUGIN's classpath, and an `implementation` " +
+            "dependency is invisible to it. Add exactly one line to get it back:\n" +
+            "    kotlinCompilerPluginClasspath(\"$SYMJA_COORDINATE\")\n" +
             "Tlaloc only links Symja across the io.tlaloc.ir.passes.SymbolicEngine interface; " +
             "it does not modify or redistribute it, which is what makes an $SYMJA_LICENSE " +
             "dependency compatible with Tlaloc's own Apache-2.0 licence. If your policy " +

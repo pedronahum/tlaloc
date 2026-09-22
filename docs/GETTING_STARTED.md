@@ -66,7 +66,11 @@ now, so it is not in your dependency graph unless you put it there. You need it
 only to differentiate a loop whose trip count is not a compile-time constant — a
 `for` loop over a `const val` bound is unrolled with no CAS at all. On the day a
 body genuinely needs it, the compiler refuses by name and prints the one line to
-add. Tlaloc only *links* Symja across the `SymbolicEngine` interface; it does not
+add. Note *where* it goes: the CAS runs inside the Kotlin compiler, not inside
+your program, so the line is
+`kotlinCompilerPluginClasspath("org.matheclipse:matheclipse-core:3.1.1")` — an
+`implementation` dependency is on the wrong classpath and the plugin will not see
+it. Tlaloc only *links* Symja across the `SymbolicEngine` interface; it does not
 modify or redistribute it, which is what keeps an LGPL-3.0 dependency compatible
 with Tlaloc's Apache-2.0 licence.
 
