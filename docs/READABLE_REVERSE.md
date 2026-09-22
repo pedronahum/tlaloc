@@ -84,6 +84,41 @@ appears at the right location, the dumped file compiles standalone
 without the plugin, runs, and matches the plugin-compiled gradient
 raw-bit-for-bit.
 
+### A captured runtime value is a PARAMETER of the printed function
+
+Since §0.4.501 a `grad {}` body may read a runtime value declared outside
+it — a local `val`, a parameter of the enclosing function — and the
+lowering carries it as a TRAILING parameter of the gradient function,
+which the IR phase binds at the call site. The printer renders that
+parameter, because that is what it is:
+
+```kotlin
+val scale = runtimeScale(2.0f)              // not a compile-time constant
+val g = grad { x: Float -> x * x * scale }
+```
+
+```kotlin
+fun grad_body_grad(x: DTensor<ScalarShape, F32>, scale: DTensor<ScalarShape, F32>)
+        : DTensor<ScalarShape, F32> {
+    ...
+}
+```
+
+Two properties hold, and both are pinned by
+`CapturedRuntimeValueGradientTest.the printed gradient carries the capture as a
+parameter and runs standalone`:
+
+- **it still compiles and runs standalone**, called with the captured
+  value in that slot, raw-bit-identical to the bytecode the plugin
+  compiled — the same certified property as Demo 1;
+- **the return is still the user's gradient alone.** The captured
+  parameter is an input, never a differentiation target, so a one-param
+  `grad {}` with three captures prints a function of four parameters
+  returning one value — not a `Pair`, not a `Quadruple`. If the printed
+  return type ever grew a component per capture, the returned function's
+  own arity would have changed with it, which is the failure this pin
+  exists to catch.
+
 ## Demo 2 — an MLP loss (`:nn` capture)
 
 A real two-layer MLP with a mean-squared-error loss, on the F1

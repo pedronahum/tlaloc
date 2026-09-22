@@ -814,20 +814,41 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      *   1-param assembled function — the caller builds the seeded lambda's
      *   true function type and passes it here. [originalCall] still supplies
      *   source offsets.
+     * @param capturedBindings §0.4.501 — the IR declarations backing [fn]'s TRAILING
+     *   params, index-aligned with `fn.params.takeLast(capturedBindings.size)`. Those
+     *   params are NOT parameters of the synthesised lambda: it takes the user's
+     *   declared params alone (so `grad` still returns `(A) -> A`, `grad2` a
+     *   `Pair`-returning `(A, B) -> …`), and each captured param is bound at the top
+     *   of the body to an `irGet` of the declaration the user's own lambda closed
+     *   over. Everything that reads the call site's `FunctionN<P0, …, Pn-1, R>` type
+     *   arguments — the per-param tensor IrTypes, the boxed-scalar detection, the
+     *   position of `R` — is indexed against the USER param count for the same
+     *   reason: the captured params have no slot there.
      */
     fun synthesise(
         fn: DxirFunction,
         originalCall: IrCall,
         parent: IrDeclarationParent,
         callTypeOverride: IrSimpleType? = null,
+        capturedBindings: List<IrValueDeclaration> = emptyList(),
     ): IrFunctionExpression? {
         lastFailureReason = null
+        // §0.4.501 — the user-visible arity. Identical to fn.params.size for every
+        // call with no captures, which is every call before §0.4.501.
+        val userParamCount = fn.params.size - capturedBindings.size
+        if (userParamCount < 0) {
+            return reject(
+                "capturedBindings (${capturedBindings.size}) outnumber the lowered params " +
+                    "(${fn.params.size})",
+            )
+        }
+        val userParams = fn.params.take(userParamCount)
         // Harvest the rank-1 DTensor IrType from the call site if any DxirParam is rank-1.
         // The call's type is `FunctionN<P0, …, Pn-1, R>` — the first rank-1 F32 DxirParam's
         // IrType matches `transformed.type.arguments[paramIdx].typeOrNull`. We only support
         // one distinct tensor IrType per function today (the single-rank-1-param case
         // covered by §0.4.10). Multiple tensor shapes would require a per-node map.
-        val firstTensorParamIdx = fn.params.indexOfFirst { isAcceptedTensorType(it.type) }
+        val firstTensorParamIdx = userParams.indexOfFirst { isAcceptedTensorType(it.type) }
         val tensorIrType: IrType? = if (firstTensorParamIdx < 0) null else run {
             val callType = callTypeOverride ?: originalCall.type as? IrSimpleType
                 ?: return reject("call type ${originalCall.type} is not IrSimpleType")
@@ -844,7 +865,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val callType = callTypeOverride ?: originalCall.type as? IrSimpleType
         val paramIrTypeMap = HashMap<Int, IrType>()
         if (callType != null) {
-            for ((idx, p) in fn.params.withIndex()) {
+            for ((idx, p) in userParams.withIndex()) {
                 // §0.4.400 — index tensor params (embedding's rank-1 I32 indices)
                 // harvest their call-site IrType too: `irTypeFor` has no fallback
                 // for integer tensors, so the call site is their only source.
@@ -867,7 +888,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // the guard exactly as before.
         val boxedScalarParams = HashMap<Int, IrType>()
         if (callType != null) {
-            for ((idx, p) in fn.params.withIndex()) {
+            for ((idx, p) in userParams.withIndex()) {
                 if (!p.type.isScalar) continue
                 val argType = callType.arguments.getOrNull(idx)?.typeOrNull ?: continue
                 // §0.4.427 — the DScalar INTERFACE param refuses BY NAME instead
@@ -949,9 +970,26 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // the lambda's own parameter must carry the box so the function type
         // matches. `paramIrTypeMap` stays untouched — body nodes reading the param
         // see the UNWRAPPED local, whose primitive type comes from `irTypeFor`.
-        val paramIrTypes = fn.params.map { p ->
+        val paramIrTypes = userParams.map { p ->
             boxedScalarParams[p.id] ?: paramIrTypeMap[p.id] ?: irTypeFor(p.type, context)
                 ?: return reject("no IrType for param '${p.name}' type=${p.type}")
+        }
+        // §0.4.501 — a captured param is bound to a declaration that already exists,
+        // so its dxir type and the declaration's IrType must AGREE: nothing later
+        // would catch a Float dxir param reading a Double local, it would just compute
+        // a wrong number. Compared by classifier, the same way `isBoxedScalarType`
+        // compares one.
+        for ((j, decl) in capturedBindings.withIndex()) {
+            val p = fn.params[userParamCount + j]
+            val expected = irTypeFor(p.type, context)
+                ?: return reject("no IrType for captured param '${p.name}' type=${p.type}")
+            if (!sameClassifier(expected, decl.type)) {
+                return reject(
+                    "captured value '${p.name}' lowered as ${p.type} but its declaration is " +
+                        "typed ${decl.type} — the synthesised gradient would read the wrong kind " +
+                        "of value",
+                )
+            }
         }
         if (fn.returns.isEmpty() || fn.returns.size > 4) {
             return reject("returns.size=${fn.returns.size} outside [1, 4]")
@@ -966,7 +1004,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // For RECTANGULAR (a: Rank2<R, K>, b: Rank2<K, C>), R = Pair<a's IrType,
         // b's IrType> — distinct components, slice-3b-2a's first correctness win.
         val returnIrTypes: List<IrType> = run {
-            val callSiteR = callType?.arguments?.getOrNull(fn.params.size)?.typeOrNull as? IrSimpleType
+            val callSiteR = callType?.arguments?.getOrNull(userParamCount)?.typeOrNull as? IrSimpleType
             val decomposed = when (fn.returns.size) {
                 1 -> callSiteR?.let { listOf<IrType>(it) }
                 2, 3, 4 -> {
@@ -1274,7 +1312,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             this.parent = parent
         }
 
-        val irParams: List<IrValueParameter> = fn.params.mapIndexed { i, p ->
+        val irParams: List<IrValueParameter> = userParams.mapIndexed { i, p ->
             lambdaFun.addValueParameter(p.name, paramIrTypes[i])
         }
 
@@ -1283,17 +1321,23 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // rank-1 param only for this slice — multi-tensor callers would need a richer
         // template-selection strategy keyed by DxirType equality.
         val tensorTemplateParam = if (firstTensorParamIdx >= 0) irParams[firstTensorParamIdx] else null
+        // §0.4.501 — `fnParams` / `irParams` are index-aligned and the axis-matching
+        // walkers index one by the other's position, so the context carries the USER
+        // params only. A captured param is a scalar (the FIR side admits no other
+        // type), so it is never a shape template for anything.
         val bodyContext = context.copy(
             tensorTemplateParam = tensorTemplateParam,
-            fnParams = fn.params,
+            fnParams = userParams,
             irParams = irParams,
         )
 
-        val body = buildBody(fn, lambdaFun, irParams, boxedReturnType, bodyContext, boxedScalarParams, returnIrTypes)
-            ?: return reject(lastFailureReason ?: "buildBody aborted (no specific gate stamped)")
+        val body = buildBody(
+            fn, lambdaFun, irParams, boxedReturnType, bodyContext, boxedScalarParams,
+            returnIrTypes, capturedBindings,
+        ) ?: return reject(lastFailureReason ?: "buildBody aborted (no specific gate stamped)")
         lambdaFun.body = body
 
-        val functionType = pluginContext.irBuiltIns.functionN(fn.params.size).symbol
+        val functionType = pluginContext.irBuiltIns.functionN(userParamCount).symbol
             .typeWith(paramIrTypes + boxedReturnType)
 
         return IrFunctionExpressionImpl(
@@ -1313,6 +1357,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
         boxedScalarParams: Map<Int, IrType> = emptyMap(),
         returnIrTypes: List<IrType> = emptyList(),
+        capturedBindings: List<IrValueDeclaration> = emptyList(),
     ): IrBlockBody? {
         val builder = DeclarationIrBuilder(
             pluginContext,
@@ -1333,7 +1378,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 // the body through ONE unwrap local (`val uN = s.toFloat()`), so
                 // every read site downstream sees the primitive exactly as the
                 // Float-param spelling does. Plain params bind directly, as ever.
-                for ((i, p) in fn.params.withIndex()) {
+                // §0.4.501 — the captured params come LAST and are not lambda
+                // parameters at all: each binds to the declaration the user's own
+                // lambda closed over. `irGet` at every read site (the same discipline
+                // every other node uses) means a value captured twice is read twice
+                // from ONE declaration, never duplicated.
+                for ((j, decl) in capturedBindings.withIndex()) {
+                    env[fn.params[irParams.size + j].id] = decl
+                }
+                for ((i, p) in fn.params.take(irParams.size).withIndex()) {
                     val boxedTy = boxedScalarParams[p.id]
                     if (boxedTy == null) {
                         env[p.id] = irParams[i]
@@ -5052,6 +5105,20 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             F64 -> classifier == doubleScalarClass()
             else -> false
         }
+    }
+
+    /**
+     * §0.4.501 — do two IrTypes name the same class? Used to check a captured value's
+     * declaration against the dxir type its param was lowered with. Compares the
+     * CLASSIFIER, not the whole type, for the same reason [isBoxedScalarType] does:
+     * nullability and type-argument spellings differ between a call-site harvest and
+     * an `irBuiltIns` lookup, the classifier does not. A type with no classifier
+     * (a dynamic / error type) never matches.
+     */
+    private fun sameClassifier(a: IrType, b: IrType): Boolean {
+        val ca = (a as? IrSimpleType)?.classifier ?: return false
+        val cb = (b as? IrSimpleType)?.classifier ?: return false
+        return ca == cb
     }
 
     private fun boxedScalarConstructor(irType: IrType): IrConstructorSymbol? {

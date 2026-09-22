@@ -1,8 +1,8 @@
 # Alpha plan — the ledger for the road to a usable alpha
 
 **Status: TIER 0 COMPLETE (§0.4.498, 2026-09-22). TIER 1 COMPLETE (§0.4.499,
-2026-09-22). TIER 2 ITEM 6 SLICE 1 COMPLETE (§0.4.500, 2026-09-22); the rest of
-TIER 2, and TIERS 3–4, ARE NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
+2026-09-22). TIER 2 ITEM 6 COMPLETE — slice 1 (§0.4.500) and slice 2 (§0.4.501),
+2026-09-22; the rest of TIER 2, and TIERS 3–4, ARE NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
 that takes Tlaloc from "an engine with 2,345 passing tests that nobody may
 legally use" to "an alpha a stranger can depend on". Tier 0 was the legal and
 distribution tier: before it, the repository had no `LICENSE` (so, by default,
@@ -122,7 +122,7 @@ with the constant's name in a trailing comment.
 | **A top-level / enclosing-function `val` folds too** | ✅ | `CapturedConstantGradientTest.a top-level val with a literal initializer folds, not only a const val` | Gated on `!isVar && !hasDelegate && (isConst || callableId?.classId == null)`. The `classId == null` arm covers a top-level `val` and a `val` local to the enclosing function; both are single-assignment with a fixed initializer, so the folded value is the value the lambda would have read. A non-`const` MEMBER `val` is deliberately excluded — an instance's value, and possibly an override's. |
 | **A captured runtime value refuses with its own wording** | ✅ | `CapturedConstantGradientTest`, four negative tests: a `var`, a computed `val`, a parameter of the enclosing function, a non-`const` member `val`. Each asserts the capture is named, the reason is named, the phrase `captured RUNTIME values are not yet supported` is present, and the old `outside the lowering scope` text is **absent**. | This distinction is the contract slice 2 turns on. The old sentence survives only for a symbol that is neither a property nor a value parameter (an enum entry, say), where it is still the accurate thing to say. |
 | **f64 constant folding produces a Double** | ✅ | `ir`: `DxirConstFoldDtypeTest` (4 tests) — every f64-typed folded const holds a `Double`; the f64 product is the *double-precision* product and not the f32 one widened; the f32 arm is unchanged; the `MUL(x, 0)` short-circuit's hard-coded `0.0f` is covered too. Plus `CapturedConstantGradientTest.a captured Double const folds at f64, not at f32`. | **Not a capture bug — found by the capture tests.** See "What this slice found that was not in its brief" below. |
-| **Slice 2: runtime capture** | ⬜ | — | Not attempted, by instruction. A captured runtime value has to become an extra operand of the synthesized gradient with no gradient slot of its own, threaded from the call site — the same machinery the customVjp capture story (`CapturingEnv`, §0.4.415) refuses for the same reason. Every refusal message this slice emits names it. |
+| **Slice 2: runtime capture** | ✅ | Landed in §0.4.501 — see the Tier 2 slice 2 section below | It became a trailing input-only PARAMETER of the lowered function rather than an extra COARSENED operand: the gradient has no slot for it, which is exactly the problem `CapturingEnv` (§0.4.415) refuses for the customVjp case, and a parameter the reverse transform is told to skip is the shape that has one. |
 | **A captured constant of an unsupported dtype** | 🧪 | Read by eye; no test reaches it | `foldCapturedConstant` refuses by name when the folded literal is not Float/Double/Int/Long. That arm appears to be **unreachable from type-correct Kotlin** today: the lowering's expression surface is numeric, so a `String`, `Char`, `Boolean`, `Byte` or `Short` constant cannot appear in a position the lowering lowers — the read that would reach it (`LABEL.length`) refuses one link earlier, at `length`. Pinned instead: `CapturedConstantGradientTest.a capture chain refuses at the first link the compiler cannot fold`. Kept as a defensive branch, and named here rather than presented as certified. |
 | **A captured `Long` constant** | ⬜ | — | `literalDType` maps `Long → I64` and the fold would emit it, but no type-correct `grad { }` body reaches a captured `Long`: the scalar surface is Float/Double, and a `0 until N` bound with `N: Long` resolves to `LongRange`, which `extractForLoopTripCount` does not recognise. Uncertified and unclaimed. |
 | **Positions that read a `FirLiteralExpression` directly** | ⬜ | — | Some lowering paths pattern-match on a literal ARGUMENT rather than lowering it (axis and shape arguments, some `pow` exponents). A captured constant in one of those positions refuses with that path's own message, not with the fold. Not swept, not counted, and not part of this slice. |
@@ -162,6 +162,105 @@ Two things this leaves open, named rather than fixed:
   unroll, the Symja engine's constant emission and `zeroValueFor`/`seedValueFor`
   callers were not swept for the same mistake. Only f64 scalar bodies are affected,
   which is a narrow lane, but it is not zero.
+
+## Tier 2 — item 6, slice 2: captured RUNTIME values as synthesized parameters (§0.4.501, 2026-09-22)
+
+Slice 1 made a captured *compile-time constant* fold. This slice turns on the
+values it deliberately left refusing: a runtime value the compiler cannot know.
+
+```kotlin
+val scale = computeScale()                     // a runtime value
+val g = grad { x: Float -> f(x) * scale }      // now lowers
+```
+
+**The mechanism, in one sentence:** a captured runtime value becomes a TRAILING
+parameter of the lowered `DxirFunction`, and the IR phase binds that parameter at
+the call site to an `irGet` of the very declaration the user's lambda closed over,
+so the synthesized gradient closes over it exactly as the user's lambda did and
+the JVM backend's own closure conversion carries it.
+
+**The design decision worth recording** is that the lowering RE-RUNS. A capture is
+discovered mid-body, and a parameter appended mid-body would carry an SSA id
+allocated after some of the body's, making the lowered function subtly different
+from the same lambda written with that value as a trailing parameter.
+`FirLambdaToDxirLowering.lower` therefore catches the discovery, adds it to a list
+and lowers the lambda again from the top with the parameter declared up front —
+one extra pass per distinct capture, on a pure function of the FIR. What that buys
+is the oracle: the dxir a capture produces **is** the dxir the explicit-parameter
+spelling produces, so every equivalence test below is testing a property the
+design guarantees rather than a coincidence.
+
+| Item | Status | What pins it | Deferred / notes |
+|---|---|---|---|
+| **A captured runtime `Float` / `Double` lowers and gives the right gradient** | ✅ | `CapturedRuntimeValueGradientTest` (16 tests). Every positive test is a THREE-WAY equivalence: the capture, the same body with that value as an explicit trailing lambda parameter (`grad2 { x, s -> … }.first`), and the same body with the value inlined — all three compiled, run, and required to print identical stdout, plus the analytic value. | The explicit-parameter spelling is the oracle that matters; the inlined one catches a fold/bind that agreed with itself while being wrong about the number. |
+| **`Int` and `Long` captures too** | ✅ | `a captured runtime Int reaches the body through the same cast a param does`, `a captured runtime Long reaches an f64 body the same way` | They reach the body through the same `CAST_OP_MAP` path (`n.toFloat()`) a declared `Int` parameter does. Non-differentiable, so the reverse transform's typed zero for them is what gets dropped. |
+| **The returned function's arity does not change** | ✅ | Three tests: `grad2 with a capture still returns exactly two gradients`, `valueAndGrad with a capture still returns the value and one gradient`, and the base case where `grad`'s captured spelling returns a bare `Float` while its explicit-parameter twin returns a `Pair`. The test stubs' declared return types would not type-check if the synthesized lambda's arity moved, and the IR extension's type-match guard would then drop the rewrite — which the sentinel check catches. | This is the failure that would have been silent and repository-wide. The mechanism: `DxirReverseTransform.apply` takes `inputOnlyTrailingParams`, emits no gradient for that many trailing params, and the adjoint chain that fed them becomes unreachable and is dropped by the pass's existing `dropUnreachableBody`. |
+| **The value is read at the CALL, not baked in** | ✅ | `a captured parameter of the enclosing function is read at the call, not baked in` — one `grad { }` call site inside `fun build(scale: Float)`, two closures built from it with different `scale`s, three gradients that must differ accordingly | A capture that was folded, cached per call site, or bound once would print the same number twice. |
+| **A value captured twice is ONE parameter** | ✅ | `a capture read twice is ONE parameter, read twice` — the numbers *and* the lowered dxir: the signature must be exactly `fn grad_body(%0: f32, %1: f32) -> f32` | Free by construction: the capture is bound into `env` under its FIR symbol, so the second reference resolves through the same `env` hit a lambda parameter does. Pinned anyway, because the numbers alone could not tell the two cases apart. |
+| **Two captures keep their first-reference order** | ✅ | `two captures in one body keep their first-reference order` — `(x + a) * b`, whose gradient is `b`; a swapped binding returns `a` instead | |
+| **A capture survives the loop coarsening** | ✅ | `a capture inside a for loop survives the coarsening` — a constant-trip-count loop over `d = d * scale`, whose gradient is `scale³` | The shape `examples/differentiable-physics` is made of: PhiCalculus unrolls (C5) before the reverse transform runs, and the captured param has to travel through intact. |
+| **The printed gradient still compiles and runs standalone** | ✅ | `the printed gradient carries the capture as a parameter and runs standalone` — the dumped `.kt` is compiled with NO plugin, called with the captured value in the trailing slot, and required to be raw-bit-identical to the plugin-compiled gradient | The renderer needed no change: it renders every param, so the capture appears as a parameter — which is what it *is* in the dxir. The test also asserts the printed return type is not a `Pair`/`Triple`, i.e. the arity claim above holds in the printed source too. Documented in [READABLE_REVERSE.md](READABLE_REVERSE.md). |
+| **A captured `var` refuses by name** | ✅ | `a captured var refuses by name and says it must be immutable` | The gradient is derived where the lambda is written but runs where it is called, so a mutable capture has no single value to bind. Binding it to the declaration (which is what the IR phase does) would in fact read the value at call time — but nothing in the lowering *checks* that the body's meaning is unchanged by a reassignment between the two points, so this refuses rather than guesses. |
+| **A captured top-level / member property refuses by name** | ✅ | `a captured top-level val with a runtime initializer refuses as a property`, `a captured member property with a runtime initializer refuses as a property` | Reading one is a getter CALL, not a value declaration: there is no `IrVariable` / `IrValueParameter` to bind to, and a member's receiver is not knowable in the lowering. A separate slice would resolve the property's getter symbol through `IrPluginContext.referenceProperties` and emit the call; it is not this one. |
+| **A capture of an unsupported type refuses naming the surface** | ✅ | `a captured value whose type is outside the surface refuses naming the surface` (a `:core` `FloatScalar` box) | The capture type surface is deliberately NARROWER than the declared-parameter surface: a value-class scalar param enters synthesis through the §0.4.414 call-site unwrap and a captured param has no call-site slot to read the box from; a captured tensor would need its `IrType` from the same absent slot, and the axis-matching machinery indexes the user's params positionally. Both named here rather than half-supported. |
+| **A capture in a non-`grad` intrinsic refuses by name** | ✅ | `a capture in a forward-mode intrinsic refuses and names the grad family` | `jvp` / `jacobian` / `hessian` / `vjp` and their arity-2 spellings build their own parameter lists out of the lowered one (primals ++ tangents, a seeded rotation, a runtime basis loop), so a trailing capture param there would change what the returned function takes. Gated in the FIR checker (`captureCarryingIntrinsics`) and independently in the IR extension (`CAPTURE_CARRYING_INTRINSICS`), which refuses to rewrite rather than trusting the other half. |
+| **A capture the IR phase cannot bind keeps the original call** | 🧪 | Read by eye; no test constructs the case | If the declaration's source offset matches nothing in the file's IR, or matches ambiguously, the extension emits a named WARNING and leaves the call as written (→ the `pluginMissing` refusal at the first call). Every capture the FIR side admits has a real `IrVariable` / `IrValueParameter` at the same source offset — the two phases share offsets — so no test could reach this without corrupting the handoff. It exists so that a future FIR-side widening cannot silently bind the wrong value. |
+| **A captured TENSOR** | ⬜ | — | Refused by the type surface above. It is the natural next slice (`grad { x -> x matmul weights }` with runtime `weights`), and it needs the call-site `IrType` harvest and the tensor-template machinery to stop being indexed by call-site position. |
+| **A captured value-class scalar (`FloatScalar` / `DoubleScalar`)** | ⬜ | — | Same absent call-site slot; the §0.4.414 unwrap would have to take its type from the declaration instead. |
+| **A capture under the SOI coarsening path** | ⬜ | — | `tlaloc.soi.enabled=true` routes `grad` through `PhiCalculus.coarsenFunction`, whose `gradient_body` has the signature `(upstream, *params) → (*grads)`. The trailing-param drop is applied to the OUTER returns, so the inner body still computes an adjoint for the capture that nothing reads. It should be correct and is not tested: the property is off by default and no test in the repository sets it together with a capture. |
+| **More than 8 captures in one lambda** | ✅ | The bound is enforced by name (`MAX_RUNTIME_CAPTURES`), not by looping forever | One re-lowering pass per distinct capture, so the bound is a bound on passes. Nothing certifies the *message*; it is a refusal, not a feature. |
+
+### What slice 2 did not change
+
+- **Slice 1's identity claim.** The FOLD still runs first: a captured `const val`
+  emits the same `DxirConst` an inline literal emits and never becomes a
+  parameter. `CapturedConstantGradientTest`'s twelve tests are untouched and still
+  pass, including the four negative ones — whose refusal *text* changed for the
+  `var` and enclosing-parameter cases, which is why those assert on the name and
+  the reason rather than on a whole sentence.
+- **Any lambda that captures nothing.** `captures` is empty,
+  `inputOnlyTrailingParams` is 0, `capturedBindings` is empty, and every branch
+  below those is the pre-§0.4.501 code. That is the reason the rest of the suite
+  is untouched.
+- **A name collision between a capture and a lambda parameter** is unreachable
+  rather than handled: if the two had the same name, Kotlin's shadowing would
+  resolve the reference to the lambda parameter and there would be no capture.
+  The printed source would not compile if it were reachable, so it is recorded
+  here as reasoned, not tested.
+
+### What slice 2 found that was not in its brief
+
+**A reference that misses the lowering's `env` is not the same thing as a
+capture.** The first full-suite run after the feature worked turned
+`TlalocPluginDiagnosticTest."break-bearing while with body-local break cond falls
+back to runtime tape"` into a TWO-parameter lowering of a ONE-parameter lambda. A
+`val` declared in a WHILE body and read from the trailing `if (cond) break` is
+lowered in the CONDITION region (the §0.4.50 LAND-hoist), where the body's
+bindings do not exist — so it misses `env` in exactly the place a genuine capture
+does, and slice 2 was about to promote it to a gradient parameter bound to an
+`IrVariable` declared INSIDE the lambda. That `IrVariable` is not in scope where
+the synthesized lambda is built. In this particular program the reverse transform
+happened to reject the function a step later, so nothing wrong was emitted; that
+was luck, not a gate.
+
+The gate is the lambda's own source range, checked on the FIR side, plus an
+independent IR-side check that the declaration is written before the intrinsic
+call (Kotlin has no forward reference to a local, and the call's range covers the
+lambda). Both must agree before an `irGet` is emitted. Pinned by
+`CapturedRuntimeValueGradientTest.a value declared INSIDE the lambda is not a
+capture and refuses as one is not`, which asserts the refusal names `delta` and
+says it is not a capture — and by the diagnostic test that found it, which is
+unchanged.
+
+### Suite state at slice 2 close
+
+| | |
+|---|---|
+| `./gradlew test --rerun-tasks` | BUILD SUCCESSFUL, 115 tasks |
+| `bash scripts/count-tests.sh` | 2385 (2368 at §0.4.500 + 17 new) |
+| `bash scripts/onboarding-smoke.sh` | passes |
+| `./gradlew -p examples/differentiable-physics run` | SWISH; act [1] 8.401e-04, act [5] 9.180e-04 |
+| `./gradlew -p examples/readable-gradients run` | compiled == printed, raw-bit identical |
 
 ## Tier 3
 

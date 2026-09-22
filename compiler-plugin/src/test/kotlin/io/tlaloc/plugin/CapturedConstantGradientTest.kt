@@ -347,25 +347,38 @@ class CapturedConstantGradientTest {
     }
 
     @Test
-    fun `a captured parameter of the enclosing function refuses by name`() {
-        val err = assertRefusal(
+    fun `a captured parameter of the enclosing function is a PARAMETER, never a folded constant`() {
+        // THIS TEST CHANGED IN §0.4.501. Until then it asserted that a captured
+        // parameter of the enclosing function refused by name; slice 2 turned that
+        // case on, and `CapturedRuntimeValueGradientTest` certifies its numbers
+        // three ways. What is still slice 1's business, and is what this test now
+        // pins, is the BOUNDARY: the constant fold must not swallow a runtime value.
+        // A folded capture becomes a `DxirConst` and bakes a number into the
+        // gradient; if the fold ever accepted `gain` here, every closure built from
+        // this call site would return the same wrong derivative, silently. The
+        // lowered dxir is the evidence — two params, no const.
+        val result = compileAndRun(
             SCALAR_STUB,
             """
                 import io.tlaloc.autograd.grad
                 fun build(gain: Float): (Float) -> Float = grad { x: Float -> x * gain }
                 fun main() {
-                    println(build(2.0f)(1.0f))
+                    println("" + build(2.0f)(1.0f) + " " + build(5.0f)(1.0f))
                 }
             """.trimIndent(),
+            pluginOptions = arrayOf("plugin:io.tlaloc.plugin:dumpLoweredIr=true"),
         )
-        assertTrue("'gain'" in err, "the refusal must name the captured parameter; got:\n$err")
-        assertTrue(
-            "parameter of the enclosing function" in err,
-            "the refusal must name the construct, not just the symbol; got:\n$err",
+        assertEquals(0, result.exitCode, "compile/run failed:\n${result.render()}")
+        assertEquals(
+            "2.0 5.0", result.stdout.trim(),
+            "d/dx (x·gain) is `gain`, and the two closures were built with different ones",
         )
+        val dump = result.messages.firstOrNull { "fn grad_body(" in it.message }
+            ?: error("no lowered-dxir dump; messages:\n${result.render()}")
         assertTrue(
-            "captured RUNTIME values are not yet supported" in err,
-            "an enclosing parameter is the canonical slice-2 case; got:\n$err",
+            "fn grad_body(%0: f32, %1: f32) -> f32" in dump.message,
+            "the captured parameter must arrive as a PARAM of the lowered function, not as a " +
+                "folded const; got:\n${dump.message.lines().first()}",
         )
     }
 
@@ -494,7 +507,11 @@ class CapturedConstantGradientTest {
                 (if (stdout.isNotBlank()) "\n--- stdout ---\n$stdout" else "")
     }
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(
+        stub: String,
+        user: String,
+        pluginOptions: Array<String> = emptyArray(),
+    ): RunResult {
         val tempDir = Files.createTempDirectory("tlaloc-captured-const").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)
@@ -518,6 +535,7 @@ class CapturedConstantGradientTest {
             val args = K2JVMCompilerArguments().apply {
                 freeArgs = listOf(tempDir.absolutePath)
                 pluginClasspaths = pluginClasspath()
+                if (pluginOptions.isNotEmpty()) this.pluginOptions = pluginOptions
                 destination = outDir.absolutePath
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true

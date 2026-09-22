@@ -112,14 +112,23 @@ class TlalocIntrinsicCallChecker(
         // route outright.
         if (isTracerLambda(lambda)) return
 
-        val loweredName = "${callableId.callableName.asString()}_body"
+        val shortName = callableId.callableName.asString()
+        val loweredName = "${shortName}_body"
         // §0.4.500 — the session goes in because the lowering folds captured
         // compile-time constants, and a `const val` whose initializer is itself an
         // expression needs the compiler's own constant evaluator to resolve it.
+        // §0.4.501 — captured RUNTIME values become trailing input-only params of
+        // the lowered function, which only the reverse-mode `grad` family can carry:
+        // the forward / assembly / seeded-cotangent branches of the IR extension
+        // rebuild the parameter list out of the lowered one (primals ++ tangents, a
+        // seeded rotation, a runtime basis loop), so an extra param there would
+        // change what the returned function takes. Those refuse a runtime capture by
+        // name instead — see [FirLambdaToDxirLowering.requestRuntimeCapture].
         val result = FirLambdaToDxirLowering.lower(
             loweredName,
             lambda.anonymousFunction,
             context.session,
+            allowRuntimeCaptures = shortName in captureCarryingIntrinsics,
         )
         when (result) {
             is FirLambdaToDxirLowering.Result.Success -> {
@@ -200,7 +209,16 @@ class TlalocIntrinsicCallChecker(
                             }
                         }
                         else -> {
-                            { DxirReverseTransform.apply(result.fn) }
+                            // §0.4.501 — the probe drops the trailing captured
+                            // params' gradients exactly as the IR extension will, so
+                            // a red squiggle here means the same thing it means
+                            // there.
+                            {
+                                DxirReverseTransform.apply(
+                                    result.fn,
+                                    inputOnlyTrailingParams = result.captures.size,
+                                )
+                            }
                         }
                     }
                     runCatching { probe() }.onFailure { t ->
@@ -213,7 +231,9 @@ class TlalocIntrinsicCallChecker(
                 }
                 val src = expression.source
                 if (src != null) {
-                    TlalocLoweringHandoff.record(src.startOffset, src.endOffset, result.fn)
+                    TlalocLoweringHandoff.record(
+                        src.startOffset, src.endOffset, result.fn, result.captures,
+                    )
                 }
             }
             is FirLambdaToDxirLowering.Result.Failure -> {
@@ -265,6 +285,14 @@ class TlalocIntrinsicCallChecker(
                 n.regions.any { r -> r.blocks.any { b -> hasNestedNonIfRegions(b.body) } }
             )
     }
+
+    /** §0.4.501 — the intrinsics whose synthesized function can carry a captured
+     * runtime value as a trailing input-only parameter: the reverse-mode `grad`
+     * family, whose lowered param list IS the returned function's param list (minus
+     * the captures, which the IR phase binds at the call site). */
+    private val captureCarryingIntrinsics: Set<String> = setOf(
+        "grad", "grad2", "grad3", "valueAndGrad", "valueAndGrad2", "valueAndGrad3",
+    )
 
     private companion object {
         const val TRACER_FQN = "io.tlaloc.autograd.Tracer"

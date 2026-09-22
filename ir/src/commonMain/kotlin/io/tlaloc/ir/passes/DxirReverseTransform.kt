@@ -105,11 +105,22 @@ object DxirReverseTransform {
      *   mode `(upstream, *primal_params) → (y, *grads)` is the `valueAndVjp` shape
      *   (a COARSENED gradient_body still never passes both, but the seeded-cotangent
      *   user surface needs the primal value alongside the pullback).
+     * @param inputOnlyTrailingParams §0.4.501 — how many of the primal's LAST params
+     *   are inputs only: no gradient is emitted for them, so `returns` carries
+     *   `params.size - inputOnlyTrailingParams` gradients instead of one per param.
+     *   This is what the K2 plugin's captured runtime values are — a `grad { x -> f(x)
+     *   * scale }` lowers `scale` to a trailing param that the IR phase binds at the
+     *   CALL SITE, and the user asked for the derivative with respect to the lambda's
+     *   declared parameters only. The adjoint chain that fed a dropped gradient becomes
+     *   unreachable and the following `dropUnreachableBody` removes it, so the returned
+     *   function is the same one a primal without that param would have produced,
+     *   plus the param. Default 0 — every pre-§0.4.501 caller is unchanged.
      */
     fun apply(
         primal: DxirFunction,
         includeForward: Boolean = false,
         seedAsParam: Boolean = false,
+        inputOnlyTrailingParams: Int = 0,
     ): DxirFunction {
         // §0.4.212 — Pre-pass `PhiCalculus.liftIfRegionBodies` to hoist safe arithmetic
         // ops out of IF region bodies. Without this, IFs with non-empty regions (e.g.,
@@ -126,6 +137,13 @@ object DxirReverseTransform {
         // the lift step.
         @Suppress("NAME_SHADOWING")
         val primal = PhiCalculus.liftIfRegionBodies(primal)
+        // §0.4.501 — a bad count would silently drop a REAL gradient (or index past
+        // the param list), which is the one failure mode a captured-value feature must
+        // not have. Refuse by name.
+        require(inputOnlyTrailingParams in 0..primal.params.size) {
+            "DxirReverseTransform: inputOnlyTrailingParams=$inputOnlyTrailingParams is outside " +
+                "0..${primal.params.size} for '${primal.name}'"
+        }
         require(primal.returns.size == 1) {
             "DxirReverseTransform v1 requires exactly 1 return value (got ${primal.returns.size})"
         }
@@ -446,7 +464,7 @@ object DxirReverseTransform {
             //        one integer param per lambda from §0.4.400 until now). Scalar
             //        integer params keep the plain const: a scalar carries no
             //        sentinel extents, so there is nothing to address.
-            val gradReturns = primal.params.map { p ->
+            val gradReturns = primal.params.dropLast(inputOnlyTrailingParams).map { p ->
                 if (isIntegerDtype(p.type.dtype)) {
                     if (p.type.isScalar) {
                         const(zeroValueFor(p.type.dtype), p.type)

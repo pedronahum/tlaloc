@@ -160,11 +160,11 @@ IDE squiggles. → [`examples/named-indices`](examples/named-indices/)
 
 And a body the plugin cannot **lower** at all is a build error too, carrying the
 lowering's own reason (`captured value 'gain' is not a compile-time constant (it is
-a \`var\`) — captured RUNTIME values are not yet supported …`, and ~207 others). It
+a \`var\`, and a captured runtime value must be immutable …)`, and ~207 others). It
 used to be a warning that let the build pass and threw at the first call instead.
 Opt back into that with `-P plugin:io.tlaloc.plugin:strictLowering=false`.
 
-### A `grad {}` body can reference a constant declared outside it
+### A `grad {}` body can reference a value declared outside it
 
 A captured reference the compiler can resolve to a
 **compile-time constant** — a `const val` anywhere, a top-level or
@@ -174,9 +174,25 @@ would have produced. Until §0.4.500 a `grad {}` lambda could reference nothing
 declared outside itself at all, which is why
 [`examples/differentiable-physics`](examples/differentiable-physics/) had every
 number in its simulator inlined. Its derivative is byte-identical either way.
-A captured *runtime* value (a `var`, a computed `val`, a parameter of the enclosing
-function) still refuses by name; that is the next slice of the same arc, tracked in
-[docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
+
+A captured **runtime** value works too, since §0.4.501:
+
+```kotlin
+fun aimAt(hoopX: Float, hoopY: Float) = grad2 { angle: Float, speed: Float ->
+    …                                   // the simulator, reading hoopX / hoopY
+}
+```
+
+It becomes a trailing parameter of the derived gradient, which the plugin binds at
+the call site by reading the declaration the lambda closed over — so the derivation
+is still entirely at compile time and only the value arrives at run time. **The
+returned function's arity does not change**: a captured value is an input, never a
+differentiation target, so `grad2` above still hands back two gradients. Supported:
+an immutable local `val` or a parameter of the enclosing function, typed `Float`,
+`Double`, `Int` or `Long`, under the reverse-mode `grad` family. Still refused by
+name: a `var`, a top-level or member property (a getter call, not a value
+declaration), a captured tensor, and the forward / assembly / seeded-cotangent
+intrinsics. Tracked in [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
 
 ### A build that works says nothing
 

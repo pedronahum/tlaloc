@@ -20,8 +20,12 @@ import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
+import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.declarations.IrValueDeclaration
+import org.jetbrains.kotlin.ir.declarations.IrValueParameter
+import org.jetbrains.kotlin.ir.declarations.IrVariable
 import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
@@ -31,6 +35,9 @@ import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.types.typeOrNull
 import org.jetbrains.kotlin.ir.types.typeWith
 import org.jetbrains.kotlin.ir.util.callableId
+import org.jetbrains.kotlin.ir.visitors.IrVisitorVoid
+import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
+import org.jetbrains.kotlin.ir.visitors.acceptVoid
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
@@ -126,6 +133,18 @@ class TlalocIrGenerationExtension(
             /** §0.4.450 — the file being transformed, for the dump's location header. */
             var irFileForDump: IrFile? = null
 
+            /**
+             * §0.4.501 — every `IrVariable` / `IrValueParameter` in the file being
+             * transformed, keyed by its source START OFFSET. This is the IR side of
+             * the FIR→IR handoff for a captured runtime value: FIR recorded the
+             * DECLARATION's source range, and the two phases share source offsets, so
+             * this is how the synthesised gradient gets a handle on the very
+             * declaration the user's lambda closed over. A list per offset (rather
+             * than a single entry) so an ambiguous match can be REFUSED instead of
+             * guessed at.
+             */
+            var valueDeclIndex: Map<Int, List<IrValueDeclaration>> = emptyMap()
+
             override fun visitCall(expression: IrCall): IrExpression {
                 val transformed = super.visitCall(expression) as IrCall
                 val ownerFn = transformed.symbol.owner
@@ -144,9 +163,10 @@ class TlalocIrGenerationExtension(
                     cid.callableName.asString() !in INTRINSIC_NAMES
                 ) return transformed
 
-                val fn: DxirFunction = TlalocLoweringHandoff.take(
+                val lowered: TlalocLoweringHandoff.LoweredLambda = TlalocLoweringHandoff.take(
                     transformed.startOffset, transformed.endOffset,
                 ) ?: return transformed
+                val fn: DxirFunction = lowered.fn
 
                 // §0.4.499 — developer introspection, OFF by default and INFO when on.
                 // This was an unconditional WARNING: together with the FIR checker's
@@ -158,6 +178,26 @@ class TlalocIrGenerationExtension(
                         "Tlaloc IR extension saw handoff for '${fn.name}':\n${fn.pretty().trimEnd()}",
                         null,
                     )
+                }
+
+                // §0.4.501 — captured runtime values. The FIR side admits them for the
+                // reverse-mode `grad` family only (see
+                // TlalocIntrinsicCallChecker.captureCarryingIntrinsics), so this is a
+                // belt-and-braces guard: were one ever to arrive at a branch that
+                // rebuilds the parameter list, the extra param would change what the
+                // returned function takes, and that must never happen silently.
+                if (lowered.captures.isNotEmpty() &&
+                    cid.callableName.asString() !in CAPTURE_CARRYING_INTRINSICS
+                ) {
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc IR extension kept original call for '${fn.name}' — it captures " +
+                            "the runtime value(s) ${lowered.captures.joinToString { "'" + it.name + "'" }} " +
+                            "and '${cid.callableName.asString()}' cannot carry a captured value " +
+                            "as an input-only parameter",
+                        null,
+                    )
+                    return transformed
                 }
 
                 // Stage A follow-up (§0.4.4): route all four intrinsics through the
@@ -722,6 +762,64 @@ class TlalocIrGenerationExtension(
                 val includeForward = callableName == "valueAndGrad" || callableName == "valueAndGrad2" ||
                     callableName == "valueAndGrad3"
 
+                // §0.4.501 — bind each captured runtime value to the IR declaration the
+                // user's own lambda closed over, BEFORE anything is transformed: a
+                // capture we cannot bind must keep the original call, not synthesise a
+                // gradient that reads the wrong value. The FIR side matched them by the
+                // DECLARATION's source range; `valueDeclIndex` is that range's IR side.
+                // Everything downstream of here is POSITIONAL — the reverse transform
+                // drops the last N gradients, synthesis binds the last N params — so
+                // the FIR side's claim that the captures ARE the last N params of the
+                // lowered function is checked rather than trusted.
+                if (lowered.captures.isNotEmpty() &&
+                    fn.params.takeLast(lowered.captures.size).map { it.id } !=
+                    lowered.captures.map { it.paramId }
+                ) {
+                    mc.report(
+                        CompilerMessageSeverity.WARNING,
+                        "Tlaloc IR extension kept original call for '${fn.name}' — the captured " +
+                            "runtime values are not the trailing params of the lowered function " +
+                            "(params=${fn.params.map { it.id }}, " +
+                            "captures=${lowered.captures.map { it.paramId }})",
+                        null,
+                    )
+                    return transformed
+                }
+                val capturedBindings = ArrayList<IrValueDeclaration>(lowered.captures.size)
+                for (c in lowered.captures) {
+                    val candidates = valueDeclIndex[c.declStartOffset].orEmpty()
+                        .filter { it.name.asString() == c.name }
+                        // §0.4.501 — the IR phase's OWN scope check, independent of the
+                        // FIR side's (which refuses a declaration inside the lambda's
+                        // source range). A declaration the gradient can close over is
+                        // written BEFORE the intrinsic call — Kotlin has no forward
+                        // reference to a local — and the call's range covers the lambda,
+                        // so this also excludes anything declared inside it. Two halves
+                        // that must both agree before an `irGet` is emitted.
+                        .filter { it.startOffset < transformed.startOffset }
+                    val decl = candidates.singleOrNull()
+                    if (decl == null) {
+                        mc.report(
+                            CompilerMessageSeverity.WARNING,
+                            "Tlaloc IR extension kept original call for '${fn.name}' — the " +
+                                "captured runtime value '${c.name}' was lowered as an input-only " +
+                                "gradient parameter, but its declaration at source offset " +
+                                "${c.declStartOffset} " +
+                                (
+                                    if (candidates.isEmpty()) "is not an IR local or parameter " +
+                                        "of this file declared before the call"
+                                    else "is ambiguous (${candidates.size} declarations share " +
+                                        "that name and offset)"
+                                    ) +
+                                " — the gradient cannot be bound to it, so the call is left as " +
+                                "written",
+                            null,
+                        )
+                        return transformed
+                    }
+                    capturedBindings += decl
+                }
+
                 // §0.4.24 — Stage B.4a. Run PhiCalculus.apply before SCT so IF/WHILE
                 // primals are coarsened ahead of the reverse transform. For IF-only
                 // primals the engine-backed corollaries never fire, so F1/F2/F3/C3
@@ -780,6 +878,10 @@ class TlalocIrGenerationExtension(
                 val lifted: DxirFunction = PhiCalculus.liftIfRegionBodies(coarsened)
                 val toSynthesise: DxirFunction = tryReverseTransform(
                     lifted, includeForward, mc, fn.name,
+                    // §0.4.501 — the captured params are INPUTS. No gradient is emitted
+                    // for them, so `grad` still returns one gradient, `grad2` a Pair and
+                    // `grad3` a Triple, whatever the lambda captured.
+                    inputOnlyTrailingParams = lowered.captures.size,
                 ) ?: run {
                     // §0.4.173 — augment the §0.4.169 warning: also dump the post-
                     // coarsening + post-lift dxir so the next firing has full visibility
@@ -853,7 +955,10 @@ class TlalocIrGenerationExtension(
                     }
                 } else decomposed
 
-                val replacement = synth.synthesise(simplified, transformed, currentDeclarationParent!!)
+                val replacement = synth.synthesise(
+                    simplified, transformed, currentDeclarationParent!!,
+                    capturedBindings = capturedBindings,
+                )
                 if (replacement == null) {
                     val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
                     mc.report(
@@ -901,12 +1006,54 @@ class TlalocIrGenerationExtension(
 
         for (file in moduleFragment.files) {
             transformer.irFileForDump = file
+            transformer.valueDeclIndex = indexValueDeclarations(file)
             file.transformChildren(transformer, null)
         }
 
         // Clear any unclaimed entries so a re-run of the in-process compiler harness
         // doesn't find stale handoffs from a previous invocation.
         TlalocLoweringHandoff.clear()
+    }
+
+    /**
+     * §0.4.501 — index every value DECLARATION in [file] by its source start offset.
+     *
+     * Only `IrVariable` (a local `val` / `var`) and `IrValueParameter` (a function's or
+     * lambda's parameter) are collected, because those are the two shapes a captured
+     * runtime value is admitted in on the FIR side: both are read with a plain
+     * `irGet`, which is exactly what the user's own lambda compiles to, and the JVM
+     * backend's closure conversion then captures them for the synthesised lambda the
+     * same way it would have captured them for the original one. A top-level or member
+     * property is a getter CALL, not a value declaration, and the FIR side refuses it
+     * by name.
+     *
+     * Several declarations can share a start offset (a destructuring declaration's
+     * components, a synthesised parameter over the same source range), so the value is
+     * a LIST and the caller refuses an ambiguous match rather than picking one.
+     */
+    private fun indexValueDeclarations(file: IrFile): Map<Int, List<IrValueDeclaration>> {
+        val byOffset = HashMap<Int, MutableList<IrValueDeclaration>>()
+        file.acceptVoid(object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                element.acceptChildrenVoid(this)
+            }
+
+            override fun visitVariable(declaration: IrVariable) {
+                record(declaration)
+                super.visitVariable(declaration)
+            }
+
+            override fun visitValueParameter(declaration: IrValueParameter) {
+                record(declaration)
+                super.visitValueParameter(declaration)
+            }
+
+            private fun record(declaration: IrValueDeclaration) {
+                if (declaration.startOffset < 0) return
+                byOffset.getOrPut(declaration.startOffset) { ArrayList(1) } += declaration
+            }
+        })
+        return byOffset
     }
 
     /**
@@ -926,8 +1073,13 @@ class TlalocIrGenerationExtension(
         includeForward: Boolean,
         mc: MessageCollector,
         fnName: String,
+        inputOnlyTrailingParams: Int = 0,
     ): DxirFunction? = try {
-        DxirReverseTransform.apply(primal, includeForward)
+        DxirReverseTransform.apply(
+            primal,
+            includeForward,
+            inputOnlyTrailingParams = inputOnlyTrailingParams,
+        )
     } catch (t: IllegalArgumentException) {
         mc.report(
             CompilerMessageSeverity.WARNING,
@@ -1058,6 +1210,17 @@ class TlalocIrGenerationExtension(
             // §0.4.398 — the seeded-cotangent user surface. §0.4.406 — its
             // two-argument forms.
             "vjp", "valueAndVjp", "vjp2", "valueAndVjp2",
+        )
+
+        /**
+         * §0.4.501 — the intrinsics whose synthesised function can carry a captured
+         * runtime value as a trailing input-only parameter. Mirrors
+         * `TlalocIntrinsicCallChecker.captureCarryingIntrinsics`, which is the gate
+         * that decides whether the FIR lowering promotes a capture at all; this set
+         * is the IR phase's independent check that nothing else ever sees one.
+         */
+        private val CAPTURE_CARRYING_INTRINSICS: Set<String> = setOf(
+            "grad", "grad2", "grad3", "valueAndGrad", "valueAndGrad2", "valueAndGrad3",
         )
 
         /**

@@ -73,20 +73,37 @@ trip count. Such a capture is folded into the lowered IR as *exactly* the
 constant an inline literal would have produced, so the gradient is identical
 either way.
 
-A captured **runtime** value is refused by name at compile time, with the
-reason it is not foldable:
+Since §0.4.501 a captured **runtime** value works as well — an immutable
+local `val`, or a parameter of the enclosing function, typed `Float`,
+`Double`, `Int` or `Long`:
+
+```kotlin
+val scale = computeScale()                      // not a compile-time constant
+val g = grad { x: Float -> x * x * scale }      // lowers; scale is read at the call
+```
+
+It becomes a trailing parameter of the derived gradient function, and the
+plugin binds it at the call site by reading the declaration your lambda closed
+over. **The returned function's arity is unchanged**: a captured value is an
+input, never a differentiation target, so `grad` still returns one gradient,
+`grad2` a `Pair` and `grad3` a `Triple`.
+
+What still refuses, by name and with the reason:
 
 ```
 e: Tlaloc could not lower this lambda at compile time: captured value 'gain' is
-   not a compile-time constant (it is a `var`) — captured RUNTIME values are not
-   yet supported. A `grad { }` body may reference a `const val`, or a top-level /
-   enclosing-function `val` whose initializer the compiler can fold, and nothing
-   else. Declare 'gain' as `const val`, or pass it in as a lambda parameter.
+   not a compile-time constant (it is a `var`, and a captured runtime value must
+   be immutable — the gradient is derived where the lambda is written but runs
+   where it is called, so a mutable capture has no single value to bind. Declare
+   'gain' as a `val`) — …
 ```
 
-That covers a `var`, a `val` with a computed initializer, a parameter of the
-enclosing function, and a non-`const` member property. Runtime capture is the
-next slice of that arc; see [ALPHA_PLAN.md](ALPHA_PLAN.md).
+That covers a `var`; a top-level or member property (reading one is a getter
+CALL, not a value declaration the gradient can close over — copy it into a local
+`val` first); a captured value of any other type, including a tensor; and the
+forward-mode, assembly and seeded-cotangent intrinsics (`jvp`, `jacobian`,
+`hessian`, `vjp` and their arity-2 spellings), which build their own parameter
+lists out of the lowered one. See [ALPHA_PLAN.md](ALPHA_PLAN.md).
 
 ### Reading the gradient the compiler derived
 

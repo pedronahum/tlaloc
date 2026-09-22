@@ -48,7 +48,7 @@ val dMiss = grad2 { angle: Float, speed: Float ->
 
 Those names are `const val`s declared outside the lambda, including the loop's trip
 count. Until §0.4.500 not one of them would compile inside a `grad2 { }` body — see
-[the limitation section below](#a-limitation-you-will-meet-immediately), which used
+[the limitation section below](#the-limitation-and-what-is-left-of-it), which used
 to be about this and is now about what is left.
 
 That loop is differentiated **at compile time**. The K2 plugin lowers the lambda
@@ -103,7 +103,7 @@ own project would, so publish first. **No GPU, no dataset, no network.**
 ./gradlew -p examples/differentiable-physics run
 ```
 
-## A limitation you will meet immediately
+## The limitation, and what is left of it
 
 **This section used to say that no number inside the `grad2 { }` body could be a
 `const val`.** Every one of them was an inlined literal with the constant's name in
@@ -137,26 +137,61 @@ the same `DxirConst` the literal path emits, so the reverse transform, the
 apart. Only the dump's *filename* moved, because the `valueAndGrad2` call is three
 lines further down the file.
 
-### What is still refused
+### And a captured RUNTIME value, since §0.4.501
 
-A captured **runtime** value. That is the rest of this arc, and it has not landed:
+The other half of the arc. A value the compiler cannot know — the result of a
+call, a parameter of the enclosing function — becomes a **trailing parameter of
+the derived gradient**, which the plugin binds at the call site by reading the
+very declaration the lambda closed over. The derivation still happens at compile
+time; only the value arrives at run time. That is what act `[5]` of this example
+does:
 
 ```kotlin
-var gain = 2.0f                                   // a `var`
-val gain = readConfig()                           // a computed `val`
-fun build(gain: Float) = grad { x: Float -> x * gain }   // an enclosing parameter
-class Box { val gain = 2.0f }                     // a non-const member property
+private fun aimingSolver(hoopX: Float, hoopY: Float): (Float, Float) -> Pair<Float, Float> =
+    grad2 { angle: Float, speed: Float ->
+        ...
+        (x - hoopX) * (x - hoopX) + (y - hoopY) * (y - hoopY)
+    }
 ```
 
-Each of those is refused by name, and the refusal now says WHICH kind of failure it
-is instead of the one generic sentence every capture used to get:
+`aimingSolver(4.6f, 3.05f)` and `aimingSolver(6.75f, 3.05f)` are two closures over
+**one** compiled derivative, and the example finite-differences both of them
+against the plain-Kotlin simulator before printing anything.
+
+**The arity does not change.** A captured value is an input, never a
+differentiation target: `grad2` above still returns a `Pair` of two gradients —
+`d/dangle` and `d/dspeed` — and not one per captured hoop coordinate. The
+derivative the compiler writes for it says so out loud — four parameters in,
+two gradients out (`build/gradients/Main_kt_234_5_grad2.kt`, after a build):
+
+```kotlin
+fun grad2_body_grad(
+    angle: DTensor<ScalarShape, F32>, speed: DTensor<ScalarShape, F32>,
+    hoopX: DTensor<ScalarShape, F32>, hoopY: DTensor<ScalarShape, F32>,
+): Pair<DTensor<ScalarShape, F32>, DTensor<ScalarShape, F32>> {
+```
+
+### What is still refused
+
+```kotlin
+var gain = 2.0f                              // a `var`
+val GAIN = readConfig()                      // a top-level property
+class Box { val gain = readConfig() }        // a member property
+val t: DTensor<Rank1<Sym>, F32> = load()     // a captured tensor
+```
+
+A `var` has no single value to bind: the gradient is derived where the lambda is
+written and runs where it is called. A top-level or member property is read
+through a *getter call*, not a local read, so there is no declaration for the
+synthesized gradient to close over. A captured tensor's shape would have to come
+from a call-site slot it does not have. Each is refused by name:
 
 ```
-e: Tlaloc could not lower this lambda at compile time: captured value 'gain' is not
-   a compile-time constant (it is a `var`) — captured RUNTIME values are not yet
-   supported. A `grad { }` body may reference a `const val`, or a top-level /
-   enclosing-function `val` whose initializer the compiler can fold, and nothing
-   else. Declare 'gain' as `const val`, or pass it in as a lambda parameter.
+e: Tlaloc could not lower this lambda at compile time: captured value 'gain' is
+   not a compile-time constant (it is a `var`, and a captured runtime value must
+   be immutable — the gradient is derived where the lambda is written but runs
+   where it is called, so a mutable capture has no single value to bind. Declare
+   'gain' as a `val`) — ...
 ```
 
 Try one. It is the house rule in action — an unsupported case says so, loudly,
@@ -253,7 +288,7 @@ Tlaloc differentiable physics — a free throw, solved by differentiating the si
 
 [4] the derivative of the simulator, as the compiler wrote it
 
-    Main_kt_131_23_valueAndGrad2.kt — 832 lines, 823 operations.
+    Main_kt_133_23_valueAndGrad2.kt — 832 lines, 823 operations.
     Nobody wrote this by hand: it is the chain rule carried back through
     38 timesteps of the loop above, and it is ordinary Kotlin over `:core`.
 
@@ -276,7 +311,20 @@ Tlaloc differentiable physics — a free throw, solved by differentiating the si
         return Triple(v741, v1445, v1441)
     }
 
-    the whole file: /home/pedro/programming/tlaloc/examples/differentiable-physics/build/gradients/Main_kt_131_23_valueAndGrad2.kt
+    the whole file: /home/pedro/programming/tlaloc/examples/differentiable-physics/build/gradients/Main_kt_133_23_valueAndGrad2.kt
+
+[5] the same derivative, aimed somewhere else at run time
+
+    The hoop in `aimingSolver` is a parameter of the enclosing function, not a
+    `const val`. The lambda reads it; the gradient is still derived at compile
+    time and the value is bound where the function is called.
+
+    hoop                 d/dangle    finite diff         d/dspeed    finite diff
+    4.60, 3.05         -17.556320     -17.555487        -2.353585      -2.355096
+    6.75, 3.05          -4.018332      -4.014647        -5.316582      -5.315873
+
+    worst relative disagreement: 9.180e-04
+    -> one compiled derivative, two targets, both right.
 
 differentiable-physics OK
 ```

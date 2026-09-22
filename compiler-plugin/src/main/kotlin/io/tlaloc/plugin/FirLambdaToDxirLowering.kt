@@ -42,6 +42,7 @@ import org.jetbrains.kotlin.fir.expressions.FirWhenExpression
 import org.jetbrains.kotlin.fir.expressions.FirWhileLoop
 import org.jetbrains.kotlin.fir.expressions.impl.FirElseIfTrueCondition
 import org.jetbrains.kotlin.fir.references.toResolvedCallableSymbol
+import org.jetbrains.kotlin.fir.symbols.impl.FirLocalPropertySymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirPropertySymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirValueParameterSymbol
 import org.jetbrains.kotlin.fir.types.ConeKotlinType
@@ -79,7 +80,18 @@ import org.jetbrains.kotlin.fir.types.type
 object FirLambdaToDxirLowering {
 
     sealed class Result {
-        data class Success(val fn: DxirFunction) : Result()
+        /**
+         * @property captures §0.4.501 — the captured RUNTIME values this lambda
+         *   reads, in the order they were first referenced. Each one is a TRAILING
+         *   param of [fn] (`fn.params.takeLast(captures.size)`, index-aligned), and
+         *   the IR phase binds it at the call site instead of taking it as a lambda
+         *   argument. Empty for every lambda that captures nothing, which is every
+         *   lambda in the repo before this section.
+         */
+        data class Success(
+            val fn: DxirFunction,
+            val captures: List<CapturedRuntimeValue> = emptyList(),
+        ) : Result()
         /** §0.4.353 — [namedIndex] classifies contract/named-axis violations
          * so the checker can report them as error-severity
          * [TlalocErrors.NAMED_INDEX_MISMATCH] instead of the generic
@@ -88,24 +100,129 @@ object FirLambdaToDxirLowering {
     }
 
     /**
+     * §0.4.501 (slice 2 of the capture arc) — one captured RUNTIME value, promoted
+     * to a trailing synthesized parameter of the lowered [DxirFunction].
+     *
+     * It is an INPUT, never a differentiation target: the user asked for the
+     * gradient with respect to the lambda's DECLARED parameters, so
+     * [io.tlaloc.ir.passes.DxirReverseTransform] is told to emit no gradient for
+     * these (`inputOnlyTrailingParams`) and the synthesized lambda keeps exactly
+     * the user-visible arity.
+     *
+     * [declStartOffset] / [declEndOffset] are the source range of the DECLARATION
+     * (the `val` or the enclosing function's parameter). They are how the value
+     * crosses the FIR→IR boundary: the IR phase indexes every `IrVariable` /
+     * `IrValueParameter` in the file by its start offset and binds the param to an
+     * `irGet` of the one that matches, so the synthesized gradient closes over the
+     * same declaration the user's lambda did. A name alone would be ambiguous
+     * (two functions may each have a local `scale`); the offset is not.
+     */
+    data class CapturedRuntimeValue(
+        val name: String,
+        val paramId: Int,
+        val declStartOffset: Int,
+        val declEndOffset: Int,
+    )
+
+    /**
      * [session] (§0.4.500) is the FIR session of the module being compiled. It is
      * what [evaluateToLiteral] needs to fold a captured `const val` whose
      * initializer is itself an expression (`const val HALF_DT = DT / 2.0f`); a
      * plain literal initializer folds without it. It is optional so that a caller
      * with no session in hand still lowers — with constant folding narrowed to
      * literal initializers — rather than failing.
+     *
+     * [allowRuntimeCaptures] (§0.4.501) admits a captured RUNTIME value as a
+     * trailing input-only param ([CapturedRuntimeValue]). It is OFF by default and
+     * the checker turns it on for the reverse-mode `grad` family alone: the
+     * forward, assembly and seeded-cotangent intrinsics build their own parameter
+     * lists out of the lowered one (primals ++ tangents, seeded rotations, runtime
+     * basis assembly), and an extra param in there would silently change what the
+     * returned function takes. Those refuse a runtime capture BY NAME instead.
+     *
+     * §0.4.501 — the lowering may run more than once. A capture is discovered
+     * mid-body, and a param appended mid-body would carry an SSA id allocated
+     * after some of the body's; re-lowering with the discovery declared UP FRONT
+     * makes the result byte-identical to the same lambda written with that value
+     * as a trailing parameter, which is exactly what the equivalence tests
+     * compare it against. One extra pass per distinct capture, on a pure function
+     * of the FIR.
      */
-    fun lower(name: String, anonFn: FirAnonymousFunction, session: FirSession? = null): Result {
-        val env = HashMap<Any, DxirNode>()
+    fun lower(
+        name: String,
+        anonFn: FirAnonymousFunction,
+        session: FirSession? = null,
+        allowRuntimeCaptures: Boolean = false,
+    ): Result {
         // §0.4.415 — Phase B5: a fresh per-lowering registry of local vals bound
         // to `customVjp(f, vjpFn)` call-forms (save/restore for re-entrancy).
         val previousDefs = customVjpDefsTl.get()
-        customVjpDefsTl.set(HashMap())
         // §0.4.500 — same save/restore discipline for the session: the whole
         // lowering is synchronous on this thread, and a ThreadLocal keeps the
         // ~40 private helpers from each having to carry it.
         val previousSession = sessionTl.get()
+        val previousAllow = allowCapturesTl.get()
+        val previousRange = lambdaRangeTl.get()
         sessionTl.set(session)
+        allowCapturesTl.set(allowRuntimeCaptures)
+        // §0.4.501 — the lambda's OWN source range. A capture is by definition
+        // declared outside it, and [requestRuntimeCapture] refuses anything declared
+        // inside: see that function for the shape that makes this load-bearing.
+        lambdaRangeTl.set(
+            anonFn.source?.let { it.startOffset.toLong()..it.endOffset.toLong() },
+        )
+        return try {
+            val discovered = ArrayList<CaptureRequest>()
+            var result: Result? = null
+            while (result == null) {
+                customVjpDefsTl.set(HashMap())
+                result = try {
+                    lowerOnce(name, anonFn, discovered)
+                } catch (c: CaptureDiscovered) {
+                    if (discovered.any { it.key == c.request.key }) {
+                        // Defensive: the retry declared this capture as a param and
+                        // keyed `env` by the same symbol, so the reference must have
+                        // resolved. Refuse loudly rather than spin.
+                        return Result.Failure(
+                            "captured value '${c.request.name}' was promoted to a synthesized " +
+                                "gradient parameter but the re-lowering did not resolve it — " +
+                                "this is a Tlaloc plugin bug, please report it",
+                        )
+                    }
+                    if (discovered.size >= MAX_RUNTIME_CAPTURES) {
+                        return Result.Failure(
+                            "this lambda captures more than $MAX_RUNTIME_CAPTURES runtime values " +
+                                "(the next one is '${c.request.name}') — pass them in as lambda " +
+                                "parameters instead",
+                        )
+                    }
+                    discovered += c.request
+                    null
+                }
+            }
+            result
+        } finally {
+            customVjpDefsTl.set(previousDefs)
+            sessionTl.set(previousSession)
+            allowCapturesTl.set(previousAllow)
+            lambdaRangeTl.set(previousRange)
+        }
+    }
+
+    /**
+     * One lowering attempt. [captures] are the runtime captures discovered by
+     * PREVIOUS attempts; they are declared as params ahead of the body walk so
+     * their SSA ids sit with the user's params, and bound into `env` under the
+     * same FIR symbol key the body reference resolves to — which is why a value
+     * captured twice becomes one param read twice, not two params.
+     */
+    private fun lowerOnce(
+        name: String,
+        anonFn: FirAnonymousFunction,
+        captures: List<CaptureRequest>,
+    ): Result {
+        val env = HashMap<Any, DxirNode>()
+        val capturedParamIds = ArrayList<Int>(captures.size)
         return try {
             val fn = DxirBuilder.function(name) {
                 for (firParam in anonFn.valueParameters) {
@@ -117,16 +234,23 @@ object FirLambdaToDxirLowering {
                     val dp = param(firParam.name.asString(), paramType)
                     env[firParam.symbol] = dp
                 }
+                for (c in captures) {
+                    val dp = param(c.name, c.type)
+                    capturedParamIds += dp.id
+                    env[c.key] = dp
+                }
                 val body = anonFn.body ?: throw LoweringException("lambda has no body")
                 val returnNode = lowerBlock(body, env, this)
                 listOf(returnNode)
             }
-            Result.Success(fn)
+            Result.Success(
+                fn,
+                captures.mapIndexed { i, c ->
+                    CapturedRuntimeValue(c.name, capturedParamIds[i], c.declStartOffset, c.declEndOffset)
+                },
+            )
         } catch (e: LoweringException) {
             Result.Failure(e.message ?: "unknown", namedIndex = e is NamedIndexException)
-        } finally {
-            customVjpDefsTl.set(previousDefs)
-            sessionTl.set(previousSession)
         }
     }
 
@@ -313,19 +437,171 @@ object FirLambdaToDxirLowering {
         // declared outside the lambda. Until §0.4.500 every one of them was the same
         // refusal ("reference to symbol outside the lowering scope"), which is why
         // `examples/differentiable-physics` had to inline every number in its body.
-        // A capture FIR can resolve to a compile-time constant now folds; anything
-        // else refuses with wording that says WHICH of the two it is, because that
-        // distinction is what slice 2 (runtime capture) turns on.
+        // A capture FIR can resolve to a compile-time constant folds; anything else
+        // refuses with wording that says WHICH of the two it is.
+        // §0.4.501 — and a capture that is a genuine RUNTIME value, when the
+        // intrinsic can carry one, becomes a trailing input-only param instead
+        // ([requestRuntimeCapture]). The FOLD still comes first: a `const val` must
+        // keep emitting the literal's own [DxirConst], or §0.4.500's identity claim
+        // (a folded constant is indistinguishable from an inlined one) would quietly
+        // become false the moment slice 2 landed.
         return when (sym) {
-            is FirPropertySymbol -> foldCapturedConstant(sym, emitter)
-            is FirValueParameterSymbol -> throw runtimeCapture(
-                sym.name.asString(),
-                "it is a parameter of the enclosing function, so its value exists only at run time",
+            is FirPropertySymbol -> try {
+                foldCapturedConstant(sym, emitter)
+            } catch (notConst: NotAConstantCapture) {
+                capturePropertyAsParam(sym, notConst)
+            }
+            is FirValueParameterSymbol -> requestRuntimeCapture(
+                key = sym,
+                name = sym.name.asString(),
+                coneType = sym.resolvedReturnType,
+                source = sym.source,
+                whyNotConstant = "it is a parameter of the enclosing function",
             )
             else -> throw LoweringException(
                 "reference to symbol outside the lowering scope: ${sym.callableId}",
             )
         }
+    }
+
+    /**
+     * §0.4.501 — a captured property the constant fold declined. Only an IMMUTABLE,
+     * LOCAL declaration can become a param: the IR phase binds the param by reading
+     * the declaration at the call site, which is an `irGet` of an `IrVariable` (a
+     * local `val`) or of an `IrValueParameter` (an enclosing function's parameter).
+     * A top-level or member property is a getter CALL, and its receiver is not
+     * knowable here — that is a separate slice, and it refuses with [notConst]'s own
+     * wording plus the reason.
+     */
+    private fun capturePropertyAsParam(
+        sym: FirPropertySymbol,
+        notConst: NotAConstantCapture,
+    ): DxirNode {
+        val name = sym.name.asString()
+        if (sym.isVar) {
+            throw runtimeCapture(
+                name,
+                "it is a `var`, and a captured runtime value must be immutable — the gradient " +
+                    "is derived where the lambda is written but runs where it is called, so a " +
+                    "mutable capture has no single value to bind. Declare '$name' as a `val`",
+            )
+        }
+        if (sym.hasDelegate) throw notConst
+        if (sym !is FirLocalPropertySymbol) {
+            throw runtimeCapture(
+                name,
+                "${notConst.why}, and it is a top-level or member property, so reading it is a " +
+                    "getter CALL rather " +
+                    "than a local read — §0.4.501 binds a captured runtime value by reading its " +
+                    "DECLARATION at the call site, which covers a local `val` and a parameter of " +
+                    "the enclosing function. Declare '$name' as `const val`, copy it into a " +
+                    "local `val` first, or pass it in as a lambda parameter",
+            )
+        }
+        return requestRuntimeCapture(
+            key = sym,
+            name = name,
+            coneType = sym.resolvedReturnType,
+            source = sym.source,
+            whyNotConstant = notConst.why,
+        )
+    }
+
+    /**
+     * §0.4.501 — promote a captured runtime value to a trailing param of the lowered
+     * function. Never returns: it throws [CaptureDiscovered], which [lower] catches
+     * and answers by re-lowering the whole lambda with this value declared as a param
+     * UP FRONT (see [lower]'s KDoc for why the id order matters). Every rejection
+     * below is a refusal BY NAME that names what would be needed instead.
+     */
+    private fun requestRuntimeCapture(
+        key: Any,
+        name: String,
+        coneType: ConeKotlinType,
+        source: org.jetbrains.kotlin.KtSourceElement?,
+        whyNotConstant: String,
+    ): Nothing {
+        if (!allowCapturesTl.get()) {
+            throw runtimeCapture(
+                name,
+                "$whyNotConstant, and this intrinsic does not accept a captured runtime value — " +
+                    "§0.4.501 carries one as an input-only parameter of the synthesized gradient, " +
+                    "which the reverse-mode `grad` / `grad2` / `grad3` / `valueAndGrad` / " +
+                    "`valueAndGrad2` / `valueAndGrad3` spellings support; the forward, assembly " +
+                    "and seeded-cotangent intrinsics build their own parameter lists out of the " +
+                    "lowered one, so an extra param there would change what the returned " +
+                    "function takes. Declare '$name' as `const val`, or pass it in as a lambda " +
+                    "parameter",
+            )
+        }
+        val dxirType = resolveCapturedType(coneType)
+            ?: throw runtimeCapture(
+                name,
+                "$whyNotConstant, and its type ${coneType.renderForError()} is not one a " +
+                    "synthesized gradient parameter can carry — a captured runtime value must be " +
+                    "`Float`, `Double`, `Int` or `Long` today (a captured tensor, a `DScalar` box " +
+                    "or any other type is a later slice). Pass '$name' in as a lambda parameter",
+            )
+        val start = source?.startOffset
+        val end = source?.endOffset
+        // §0.4.501 — THE GATE THIS SLICE WAS MISSING, found by
+        // `TlalocPluginDiagnosticTest.break-bearing while with body-local break cond
+        // falls back to runtime tape`. A reference that misses `env` is not
+        // necessarily a capture: a `val` declared in a WHILE body and read from the
+        // trailing `if (cond) break` (the §0.4.50 LAND-hoist, which lowers the
+        // condition in the cond region where the body's bindings do not exist) also
+        // lands here — and that `val` is declared INSIDE the lambda. Promoting it to
+        // a param would bind the synthesized gradient to an `IrVariable` that is not
+        // in scope where the gradient is built. The lambda's own source range is what
+        // tells the two apart.
+        val range = lambdaRangeTl.get()
+            ?: throw runtimeCapture(
+                name,
+                "$whyNotConstant, and this lambda has no source range — a capture must be shown " +
+                    "to be declared OUTSIDE the lambda before it can be promoted to a gradient " +
+                    "parameter, and without the lambda's own range that cannot be checked",
+            )
+        if (start != null && end != null &&
+            start.toLong() >= range.first && end.toLong() <= range.last
+        ) {
+            throw LoweringException(
+                "value '$name' is declared INSIDE this lambda but is not in scope at the point " +
+                    "it is read, so it is not a capture: the lowering binds a local `val` only " +
+                    "within the region that declares it, and a `val` declared in a loop BODY and " +
+                    "read from the loop's CONDITION (the trailing `if (cond) break` hoist) is the " +
+                    "shape that reaches here ($whyNotConstant). Read the carried `var`s directly " +
+                    "in the condition, or lift the declaration above the loop",
+            )
+        }
+        if (start == null || end == null || start < 0) {
+            throw runtimeCapture(
+                name,
+                "$whyNotConstant, and its declaration has no source range — the IR phase binds a " +
+                    "captured runtime value by matching the declaration's source offset, so a " +
+                    "compiler-synthesized declaration cannot be bound. Pass '$name' in as a " +
+                    "lambda parameter",
+            )
+        }
+        throw CaptureDiscovered(CaptureRequest(key, name, dxirType, start, end))
+    }
+
+    /**
+     * §0.4.501 — the type surface of a captured runtime value: the four Kotlin
+     * primitives [PRIMITIVE_DTYPE_MAP] maps, and nothing else. Deliberately NARROWER
+     * than [resolveParamType], which also admits `DTensor` and the `FloatScalar` /
+     * `DoubleScalar` value classes:
+     *  - a value-class scalar param enters synthesis through the §0.4.414 unwrap,
+     *    which is keyed off the CALL SITE's type arguments — a captured param has
+     *    no call-site slot, so there is nothing to read the box from;
+     *  - a captured tensor would need its `IrType` from the same absent slot, and
+     *    `tensorTemplateParam` / the axis-matching machinery indexes the user's
+     *    params positionally.
+     * Both are named in docs/ALPHA_PLAN.md rather than half-supported.
+     */
+    private fun resolveCapturedType(type: ConeKotlinType): DxirType? {
+        val fqn = type.classId?.asString() ?: return null
+        if (fqn !in CAPTURABLE_PRIMITIVES) return null
+        return PRIMITIVE_DTYPE_MAP[fqn]?.let { DxirType(it, emptyList()) }
     }
 
     /**
@@ -351,24 +627,27 @@ object FirLambdaToDxirLowering {
      *  - a `val` whose initializer is a call, a parameter read, or anything else the
      *    constant evaluator declines.
      *
-     * Slice 2 of this arc is what turns those into an extra gradient-less operand;
-     * until it lands they are refusals, not silent degradations.
+     * §0.4.501 — each refusal below is now a [NotAConstantCapture], which
+     * [lookupReference] catches to offer the value the runtime-capture route
+     * instead. Uncaught, it renders exactly the §0.4.500 sentence it always did, so
+     * every refusal this function produces for an intrinsic that cannot carry a
+     * capture reads as it did before.
      */
     private fun foldCapturedConstant(sym: FirPropertySymbol, emitter: DxirEmitter): DxirNode {
         val name = sym.name.asString()
-        if (sym.isVar) throw runtimeCapture(name, "it is a `var`")
-        if (sym.hasDelegate) throw runtimeCapture(name, "it is a delegated property")
+        if (sym.isVar) throw NotAConstantCapture(name, "it is a `var`")
+        if (sym.hasDelegate) throw NotAConstantCapture(name, "it is a delegated property")
         if (!sym.isConst && sym.callableId?.classId != null) {
-            throw runtimeCapture(name, "it is a member property of a class and not `const`")
+            throw NotAConstantCapture(name, "it is a member property of a class and not `const`")
         }
         val initializer = sym.resolvedInitializer
-            ?: throw runtimeCapture(
+            ?: throw NotAConstantCapture(
                 name,
                 "the compiler can see no initializer for it (a custom getter, or a value assigned elsewhere)",
             )
         val literal = initializer as? FirLiteralExpression
             ?: evaluateToLiteral(initializer)
-            ?: throw runtimeCapture(name, "its initializer is not a compile-time constant")
+            ?: throw NotAConstantCapture(name, "its initializer is not a compile-time constant")
         return constFromLiteral(literal, emitter)
             ?: throw LoweringException(
                 "captured constant '$name' is a compile-time constant of type " +
@@ -383,11 +662,42 @@ object FirLambdaToDxirLowering {
      * scope": that text meant "any reference out of the lambda", and after slice 1 it
      * would be a lie. This one names what slice 2 has to build.
      */
-    private fun runtimeCapture(name: String, why: String): LoweringException = LoweringException(
+    private fun runtimeCapture(name: String, why: String): LoweringException =
+        LoweringException(runtimeCaptureMessage(name, why))
+
+    private fun runtimeCaptureMessage(name: String, why: String): String =
         "captured value '$name' is not a compile-time constant ($why) — captured RUNTIME " +
             "values are not yet supported. A `grad { }` body may reference a `const val`, or a " +
             "top-level / enclosing-function `val` whose initializer the compiler can fold, and " +
-            "nothing else. Declare '$name' as `const val`, or pass it in as a lambda parameter.",
+            "nothing else. Declare '$name' as `const val`, or pass it in as a lambda parameter."
+
+    /**
+     * §0.4.501 — "this capture is not a compile-time constant, and here is why".
+     * Thrown by [foldCapturedConstant] where §0.4.500 threw the flat
+     * [runtimeCapture]; [lookupReference] catches it and tries the runtime-capture
+     * route. Its MESSAGE is still §0.4.500's verbatim sentence, so an intrinsic that
+     * cannot carry a capture (or a capture the route rejects) reads unchanged.
+     */
+    private class NotAConstantCapture(val valueName: String, val why: String) :
+        LoweringException(FirLambdaToDxirLowering.runtimeCaptureMessage(valueName, why))
+
+    /**
+     * §0.4.501 — a capture the lowering wants as a trailing param. Deliberately NOT
+     * a [LoweringException]: the ~208 named refusal sites and the three `catch
+     * (e: LoweringException)` re-wrappers inside this lowering must not swallow it.
+     * It carries no stack trace (the throw is control flow, one per capture).
+     */
+    private class CaptureDiscovered(val request: CaptureRequest) :
+        RuntimeException(null, null, false, false)
+
+    /** §0.4.501 — one discovered capture: the `env` key it binds under, its param
+     * name and dxir type, and the source range of its DECLARATION. */
+    private class CaptureRequest(
+        val key: Any,
+        val name: String,
+        val type: DxirType,
+        val declStartOffset: Int,
+        val declEndOffset: Int,
     )
 
     /**
@@ -2919,6 +3229,27 @@ object FirLambdaToDxirLowering {
     /** §0.4.500 — this lowering's FIR session, set and restored by [lower]. Read only
      * by [evaluateToLiteral]; null means "fold literal initializers only". */
     private val sessionTl: ThreadLocal<FirSession?> = ThreadLocal.withInitial { null }
+
+    /** §0.4.501 — whether THIS lowering's intrinsic can carry a captured runtime
+     * value as a trailing input-only param. Set and restored by [lower]; same
+     * save/restore discipline and same reason as [sessionTl]. */
+    private val allowCapturesTl: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
+
+    /** §0.4.501 — the source range of the lambda being lowered, set and restored by
+     * [lower]. Null when the anonymous function has no source, which makes every
+     * runtime capture refuse (the gate below cannot be evaluated, and a capture that
+     * might be declared inside the lambda must not be promoted). */
+    private val lambdaRangeTl: ThreadLocal<LongRange?> = ThreadLocal.withInitial { null }
+
+    /** §0.4.501 — one re-lowering pass per distinct capture, so the bound is a
+     * bound on passes too. A lambda that reads more than this many captured
+     * runtime values refuses by name rather than re-lowering 40 times. */
+    private const val MAX_RUNTIME_CAPTURES: Int = 8
+
+    /** §0.4.501 — see [resolveCapturedType]: the type surface a captured runtime
+     * value may have, narrower than [resolveParamType]'s on purpose. */
+    private val CAPTURABLE_PRIMITIVES: Set<String> =
+        setOf("kotlin/Float", "kotlin/Double", "kotlin/Int", "kotlin/Long")
 
     /** §0.4.416 — one of the six custom-derivative call-form spellings:
      * [arity] primal args, and which user bodies the form carries. */

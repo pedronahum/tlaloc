@@ -37,7 +37,29 @@ retro-summarise them; it is the record from the first named version forward.
   generic out-of-scope sentence: a `var`, a computed `val`, a parameter of the
   enclosing function or a non-`const` member property is named, the reason it is
   not foldable is named, and the two ways out (`const val`, or a lambda
-  parameter) are named. Runtime capture itself is not implemented; see
+  parameter) are named.
+- **A `grad {}` body can reference a RUNTIME value declared outside it.** This is
+  the other half of the same arc:
+
+  ```kotlin
+  val scale = computeScale()                     // not a compile-time constant
+  val g = grad { x: Float -> f(x) * scale }      // now lowers
+  ```
+
+  The captured value becomes a trailing parameter of the lowered gradient
+  function, and the IR phase binds it at the call site by reading the very
+  declaration the user's own lambda closed over — so the synthesized gradient
+  closes over it the same way, and reads it when it is *called*, not when it was
+  derived. **The returned function's arity does not change**: a captured value is
+  an input, never a differentiation target, so `grad` still returns one gradient,
+  `grad2` a `Pair` and `grad3` a `Triple`. What is supported, and certified by
+  equivalence against the same body written with that value as an explicit lambda
+  parameter: an immutable local `val` or a parameter of the enclosing function, of
+  type `Float`, `Double`, `Int` or `Long`, under the reverse-mode `grad` family.
+  What still refuses, by name: a `var` (no single value to bind), a top-level or
+  member property (reading one is a getter call, not a value declaration), any
+  other type, and the forward / assembly / seeded-cotangent intrinsics, whose own
+  parameter lists are rebuilt from the lowered one. See
   [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
 
 ### Changed

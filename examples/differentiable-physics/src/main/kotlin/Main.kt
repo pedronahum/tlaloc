@@ -109,9 +109,11 @@ fun main() {
     // so the simulator below reads like the `simulate()` transcription further
     // down instead of being a column of unnamed numbers.
     //
-    // What is still refused, by name, is a captured RUNTIME value — a `var`, a
-    // computed `val`, a parameter of the enclosing function. See the README
-    // section "A limitation you will meet immediately".
+    // §0.4.501 lifted the other half: a captured RUNTIME value now becomes a
+    // trailing parameter of the derived gradient, bound at the call site. Act [5]
+    // below uses it. What is still refused, by name, is a `var` and a top-level or
+    // member property. See the README section "The limitation, and what is left
+    // of it".
     val dMiss = grad2 { angle: Float, speed: Float ->
         var x = X0
         var y = Y0
@@ -209,8 +211,65 @@ fun main() {
     // ------------------------------------------------------------------ 6 ---
     printDerivedGradient()
 
+    // ------------------------------------------------------------------ 7 ---
+    aimSomewhereElse()
+
     println()
     println("differentiable-physics OK")
+}
+
+/**
+ * §0.4.501 — the same derivation, aimed somewhere else at RUN time.
+ *
+ * Everything above differentiates a simulator whose numbers are all `const val`s,
+ * which is the honest shape for physical constants. A target is not a physical
+ * constant, and this is what the second half of the capture arc bought: the hoop
+ * is a PARAMETER of the enclosing function, read by the lambda, and the compiler
+ * still derives the gradient at compile time. The captured value becomes a
+ * trailing parameter of the derived gradient function, which the plugin binds at
+ * the call site — so the two closures below share one compiled derivative and
+ * disagree about where the hoop is.
+ */
+private fun aimingSolver(hoopX: Float, hoopY: Float): (Float, Float) -> Pair<Float, Float> =
+    grad2 { angle: Float, speed: Float ->
+        var x = X0
+        var y = Y0
+        var vx = speed * angle.cos()
+        var vy = speed * angle.sin()
+        for (i in 0 until STEPS) {
+            vx = vx - DRAG * vx * DT
+            vy = vy - (G + DRAG * vy) * DT
+            x = x + vx * DT
+            y = y + vy * DT
+        }
+        (x - hoopX) * (x - hoopX) + (y - hoopY) * (y - hoopY)
+    }
+
+/** Act [5]: two hoops, one compiled derivative, both checked against finite differences. */
+private fun aimSomewhereElse() {
+    println()
+    println("[5] the same derivative, aimed somewhere else at run time")
+    println()
+    println("    The hoop in `aimingSolver` is a parameter of the enclosing function, not a")
+    println("    `const val`. The lambda reads it; the gradient is still derived at compile")
+    println("    time and the value is bound where the function is called.")
+    println()
+    println("    %-14s %14s %14s   %14s %14s".format(
+        "hoop", "d/dangle", "finite diff", "d/dspeed", "finite diff"))
+    var worst = 0.0f
+    for ((hx, hy) in listOf(HOOP_X to HOOP_Y, 6.75f to HOOP_Y)) {
+        val solver = aimingSolver(hx, hy)
+        val (dAngle, dSpeed) = solver(GUESS_ANGLE, GUESS_SPEED)
+        val fdAngle = centralDifference(GUESS_ANGLE, GUESS_SPEED, wrtAngle = true, hoopX = hx, hoopY = hy)
+        val fdSpeed = centralDifference(GUESS_ANGLE, GUESS_SPEED, wrtAngle = false, hoopX = hx, hoopY = hy)
+        worst = maxOf(worst, relativeGap(dAngle, fdAngle), relativeGap(dSpeed, fdSpeed))
+        println("    %-14s %14.6f %14.6f   %14.6f %14.6f"
+            .format("%.2f, %.2f".format(hx, hy), dAngle, fdAngle, dSpeed, fdSpeed))
+    }
+    println()
+    println("    worst relative disagreement: %.3e".format(worst))
+    check(worst < 2e-2f) { "captured-hoop gradient disagrees with finite differences" }
+    println("    -> one compiled derivative, two targets, both right.")
 }
 
 // ---------------------------------------------------------------------------
@@ -235,18 +294,32 @@ private fun simulate(angle: Float, speed: Float): List<Pair<Float, Float>> {
     return path
 }
 
-/** The same squared miss the `grad2` lambda computes, in f64 for FD headroom. */
-private fun missSquared(angle: Float, speed: Float): Double {
+/** The same squared miss the `grad2` lambda computes, in f64 for FD headroom.
+ *  The hoop defaults to the one the example aims at; act [5] passes another. */
+private fun missSquared(
+    angle: Float,
+    speed: Float,
+    hoopX: Float = HOOP_X,
+    hoopY: Float = HOOP_Y,
+): Double {
     val (x, y) = simulate(angle, speed).last()
-    val dx = (x - HOOP_X).toDouble()
-    val dy = (y - HOOP_Y).toDouble()
+    val dx = (x - hoopX).toDouble()
+    val dy = (y - hoopY).toDouble()
     return dx * dx + dy * dy
 }
 
-private fun centralDifference(angle: Float, speed: Float, wrtAngle: Boolean): Float {
+private fun centralDifference(
+    angle: Float,
+    speed: Float,
+    wrtAngle: Boolean,
+    hoopX: Float = HOOP_X,
+    hoopY: Float = HOOP_Y,
+): Float {
     val h = 1e-3f
-    val up = if (wrtAngle) missSquared(angle + h, speed) else missSquared(angle, speed + h)
-    val down = if (wrtAngle) missSquared(angle - h, speed) else missSquared(angle, speed - h)
+    val up = if (wrtAngle) missSquared(angle + h, speed, hoopX, hoopY)
+        else missSquared(angle, speed + h, hoopX, hoopY)
+    val down = if (wrtAngle) missSquared(angle - h, speed, hoopX, hoopY)
+        else missSquared(angle, speed - h, hoopX, hoopY)
     return ((up - down) / (2.0 * h)).toFloat()
 }
 
@@ -323,7 +396,11 @@ private fun printDerivedGradient() {
         println("    (the compiler wrote no gradient source into ${dir.path})")
         return
     }
-    val file = dumps.maxByOrNull { it.length() }!!
+    // The `valueAndGrad2` derivation by NAME, not by size: act [5] added a third
+    // dump to this directory and "the biggest file" stopped being a description of
+    // which gradient this act is about.
+    val file = dumps.firstOrNull { "valueAndGrad2" in it.name }
+        ?: dumps.maxByOrNull { it.length() }!!
     val lines = file.readLines()
     val ops = lines.count { it.trimStart().startsWith("val v") }
     println("    ${file.name} — ${lines.size} lines, $ops operations.")
