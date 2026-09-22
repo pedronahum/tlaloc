@@ -92,6 +92,29 @@ lambda **as you type**:
 - A body the reverse-mode transform cannot differentiate →
   `NOT_DIFFERENTIABLE` error, with the transform's reason verbatim.
 - Concrete-dim shape violations → `TENSOR_SHAPE_MISMATCH` error.
+- A body the plugin cannot **lower** at all → `Tlaloc could not lower this
+  lambda at compile time: <reason>` **error**, carrying the lowering's own
+  verbatim reason (§0.4.499). Before 0.1.0-alpha01 this was a warning and
+  the program then threw `IllegalStateException` at the first call to the
+  returned function; the information is the same, hours earlier. Opt out
+  with `strictLowering=false` below if you want that late failure back.
+
+## 4a. Plugin options
+
+All four are `-P plugin:io.tlaloc.plugin:<name>=<value>` on the Kotlin
+compile task (`kotlinOptions.freeCompilerArgs` / `compilerOptions`):
+
+| option | default | what it does |
+| --- | --- | --- |
+| `strictLowering` | `true` | An unlowerable `grad {}` / `jvp {}` / `vjp {}` lambda is a compile **error**. `false` restores the pre-0.1.0-alpha01 warning plus a runtime `IllegalStateException`. |
+| `dumpLoweredIr` | `false` | Dump the lowered Tlaloc IR for every recognised intrinsic lambda: one WARNING from the FIR checker, one INFO from the IR extension. **Developer introspection.** It is off by default because a consumer's build log is not the place for it — and because, being warnings, the two dumps used to break every build compiling with `-Werror`. Do not combine this option with `-Werror`: K2's diagnostic DSL has no INFO severity, so the FIR half is necessarily a warning. |
+| `dumpGradSource` | `false` | Print each synthesized gradient as readable Kotlin (INFO). See above. |
+| `dumpGradSourceDir` | — | Like `dumpGradSource`, and also write one `.kt` per lambda into this directory. |
+
+A build with none of these set and a `grad {}` that lowers is **silent**:
+Tlaloc says nothing at all. That is pinned by `DiagnosticNoiseTest`, which
+compiles a `grad {}` consumer with `-Werror` and asserts both that it
+succeeds and that no message mentions Tlaloc.
 
 Try it: uncomment the `bad` block at the bottom of the quickstart's
 `Main.kt`.

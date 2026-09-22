@@ -36,6 +36,8 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
     override val pluginOptions: Collection<AbstractCliOption> = listOf(
         DUMP_GRAD_SOURCE_OPTION,
         DUMP_GRAD_SOURCE_DIR_OPTION,
+        DUMP_LOWERED_IR_OPTION,
+        STRICT_LOWERING_OPTION,
     )
 
     override fun processOption(
@@ -47,8 +49,22 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
             configuration.put(DUMP_GRAD_SOURCE_KEY, value.toBooleanStrictOrNull() ?: (value == "true"))
         DUMP_GRAD_SOURCE_DIR_OPTION.optionName ->
             configuration.put(DUMP_GRAD_SOURCE_DIR_KEY, value)
+        DUMP_LOWERED_IR_OPTION.optionName ->
+            configuration.put(DUMP_LOWERED_IR_KEY, parseBoolean(DUMP_LOWERED_IR_OPTION.optionName, value))
+        STRICT_LOWERING_OPTION.optionName ->
+            configuration.put(STRICT_LOWERING_KEY, parseBoolean(STRICT_LOWERING_OPTION.optionName, value))
         else -> throw CliOptionProcessingException("Unknown option: ${option.optionName}")
     }
+
+    /**
+     * §0.4.499 — a boolean option REFUSES a value it does not understand, by name,
+     * instead of silently reading it as `false`. `dumpLoweredIr=ture` used to be a
+     * no-op; now it fails the compilation and says which option and which value.
+     */
+    private fun parseBoolean(optionName: String, value: String): Boolean =
+        value.toBooleanStrictOrNull() ?: throw CliOptionProcessingException(
+            "Tlaloc plugin option '$optionName' expects true or false, got '$value'",
+        )
 
     companion object {
         const val PLUGIN_ID: String = "io.tlaloc.plugin"
@@ -71,10 +87,47 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
             allowMultipleOccurrences = false,
         )
 
+        /**
+         * §0.4.499 — developer introspection: the lowered dxir for every recognised
+         * intrinsic lambda. Off by default; see [TlalocPluginOptions.dumpLoweredIr].
+         */
+        val DUMP_LOWERED_IR_OPTION = CliOption(
+            optionName = "dumpLoweredIr",
+            valueDescription = "true|false",
+            description = "Dump the lowered Tlaloc IR for every recognised grad {} / jvp {} / " +
+                "vjp {} lambda (developer introspection; off by default so a working build is " +
+                "silent). The IR-phase half is an INFO message; the FIR-phase half is a " +
+                "WARNING, because K2's diagnostic DSL has no INFO severity — do not combine " +
+                "this option with -Werror",
+            required = false,
+            allowMultipleOccurrences = false,
+        )
+
+        /**
+         * §0.4.499 — the refusal severity for a lambda the plugin cannot lower. On by
+         * default; see [TlalocPluginOptions.strictLowering].
+         */
+        val STRICT_LOWERING_OPTION = CliOption(
+            optionName = "strictLowering",
+            valueDescription = "true|false",
+            description = "Refuse an unlowerable grad {} / jvp {} / vjp {} lambda at COMPILE " +
+                "time, naming the lowering's own reason (default: true). Set false to get the " +
+                "pre-0.1.0-alpha01 behaviour instead: a warning at compile time and an " +
+                "IllegalStateException from the io.tlaloc.autograd fallback body at the first call",
+            required = false,
+            allowMultipleOccurrences = false,
+        )
+
         val DUMP_GRAD_SOURCE_KEY: CompilerConfigurationKey<Boolean> =
             CompilerConfigurationKey.create("dump synthesised gradients as Kotlin source")
 
         val DUMP_GRAD_SOURCE_DIR_KEY: CompilerConfigurationKey<String> =
             CompilerConfigurationKey.create("directory for dumped gradient .kt files")
+
+        val DUMP_LOWERED_IR_KEY: CompilerConfigurationKey<Boolean> =
+            CompilerConfigurationKey.create("dump the lowered dxir for every recognised intrinsic lambda")
+
+        val STRICT_LOWERING_KEY: CompilerConfigurationKey<Boolean> =
+            CompilerConfigurationKey.create("refuse an unlowerable intrinsic lambda at compile time")
     }
 }

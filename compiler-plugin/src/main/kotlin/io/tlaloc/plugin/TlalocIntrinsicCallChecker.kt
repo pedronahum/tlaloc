@@ -14,8 +14,24 @@ import org.jetbrains.kotlin.fir.expressions.FirExpression
 import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
 import org.jetbrains.kotlin.fir.references.toResolvedCallableSymbol
+import org.jetbrains.kotlin.fir.types.classId
+import org.jetbrains.kotlin.fir.types.coneType
 
-object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common) {
+/**
+ * §0.4.499 — was an `object`; now a class carrying this compilation's
+ * [TlalocPluginOptions]. Two things hang off them:
+ *
+ *  - [TlalocPluginOptions.dumpLoweredIr] gates the lowered-dxir dump
+ *    ([TlalocErrors.LAMBDA_LOWERED] and [TlalocErrors.INTRINSIC_CALL]). Until
+ *    §0.4.499 both fired unconditionally, so ONE `grad {}` put two IR dumps in
+ *    every consumer's build log — and made the plugin unusable under `-Werror`.
+ *  - [TlalocPluginOptions.strictLowering] decides the severity of a lowering
+ *    FAILURE: [TlalocErrors.LAMBDA_NOT_LOWERABLE] (error, the default) versus
+ *    [TlalocErrors.LAMBDA_UNSUPPORTED] (warning, the opt-out).
+ */
+class TlalocIntrinsicCallChecker(
+    private val options: TlalocPluginOptions = TlalocPluginOptions(),
+) : FirFunctionCallChecker(MppCheckerKind.Common) {
     private val intrinsicNames: Set<String> = setOf(
         "io.tlaloc.autograd.grad",
         "io.tlaloc.autograd.grad2",
@@ -64,18 +80,51 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
 
         val lambda = extractLambdaArgument(expression)
         if (lambda == null) {
-            reporter.reportOn(expression.source, TlalocErrors.INTRINSIC_CALL, fqn)
+            // §0.4.499 — no lambda literal to lower. The call stays as written, so
+            // the `io.tlaloc.autograd` fallback body runs and throws at the first
+            // call: under the default that is a refusal, by name, at compile time.
+            // The informational spelling survives behind `dumpLoweredIr`.
+            if (options.strictLowering) {
+                reporter.reportOn(
+                    expression.source,
+                    TlalocErrors.LAMBDA_NOT_LOWERABLE,
+                    "the argument to `$fqn` is not a lambda literal — the plugin lowers the " +
+                        "BODY of a `{ }` written at the call site; a function reference, a " +
+                        "variable holding a lambda, or a lambda built elsewhere has no body here " +
+                        "to lower",
+                )
+            } else if (options.dumpLoweredIr) {
+                reporter.reportOn(expression.source, TlalocErrors.INTRINSIC_CALL, fqn)
+            }
             return
         }
+
+        // §0.4.499 — `io.tlaloc.autograd.grad` / `grad2` / `grad3` / `valueAndGrad*`
+        // are OVERLOADED: the compile-time INTRINSIC (GradIntrinsics.kt) and the
+        // runtime Tracer-capture TAPE (Grad.kt) share those names, and Kotlin's
+        // overload resolution picks between them by the lambda's parameter types.
+        // This checker matches on the FQN alone, so it sees both. A Tracer-typed
+        // lambda is the tape overload — the documented plugin-free route, never
+        // something the plugin was asked to lower — so it is not diagnosed here at
+        // all. Until §0.4.499 every such call drew a spurious
+        // "could not lower lambda: ... unsupported type io.tlaloc.autograd.Tracer"
+        // warning; with the refusal promoted to an error it would have broken that
+        // route outright.
+        if (isTracerLambda(lambda)) return
 
         val loweredName = "${callableId.callableName.asString()}_body"
         when (val result = FirLambdaToDxirLowering.lower(loweredName, lambda.anonymousFunction)) {
             is FirLambdaToDxirLowering.Result.Success -> {
-                reporter.reportOn(
-                    expression.source,
-                    TlalocErrors.LAMBDA_LOWERED,
-                    result.fn.pretty().trimEnd(),
-                )
+                // §0.4.499 — developer introspection, OFF by default. This dump plus
+                // the IR extension's handoff dump were the two warnings every
+                // successful `grad {}` used to put in a consumer's build log.
+                if (options.dumpLoweredIr) {
+                    reporter.reportOn(
+                        expression.source,
+                        TlalocErrors.LAMBDA_LOWERED,
+                        result.fn.pretty().trimEnd(),
+                    )
+                }
                 // §0.4.353 — Meta-stage ergonomics: validate the lowered body
                 // NOW, so shape and differentiability failures are red
                 // squiggles at the call site instead of runtime surprises.
@@ -160,16 +209,32 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
                 }
             }
             is FirLambdaToDxirLowering.Result.Failure -> {
-                // §0.4.353 — named-axis misuse is a type error (error severity);
-                // everything else stays a warning (the runtime tape still runs it).
-                reporter.reportOn(
-                    expression.source,
-                    if (result.namedIndex) TlalocErrors.NAMED_INDEX_MISMATCH else TlalocErrors.LAMBDA_UNSUPPORTED,
-                    result.reason,
-                )
+                // §0.4.353 — named-axis misuse is a type error (error severity).
+                // §0.4.499 — and so, by default, is every OTHER lowering failure:
+                // there is no working fallback behind it. The lowering's own verbatim
+                // reason is carried through either way, so the ~208 named
+                // `LoweringException` sites stay distinguishable instead of
+                // collapsing to one generic string. `strictLowering=false` restores
+                // the pre-alpha warning.
+                val factory = when {
+                    result.namedIndex -> TlalocErrors.NAMED_INDEX_MISMATCH
+                    options.strictLowering -> TlalocErrors.LAMBDA_NOT_LOWERABLE
+                    else -> TlalocErrors.LAMBDA_UNSUPPORTED
+                }
+                reporter.reportOn(expression.source, factory, result.reason)
             }
         }
     }
+
+    /** §0.4.499 — true when any of the lambda's parameters is an
+     * `io.tlaloc.autograd.Tracer`, i.e. this call resolved to the runtime
+     * tape overload rather than the compile-time intrinsic. */
+    private fun isTracerLambda(lambda: FirAnonymousFunctionExpression): Boolean =
+        runCatching {
+            lambda.anonymousFunction.valueParameters.any { p ->
+                p.returnTypeRef.coneType.classId?.asFqNameString() == TRACER_FQN
+            }
+        }.getOrDefault(false)
 
     private fun extractLambdaArgument(call: FirFunctionCall): FirAnonymousFunctionExpression? {
         for (arg in call.argumentList.arguments) {
@@ -191,5 +256,9 @@ object TlalocIntrinsicCallChecker : FirFunctionCallChecker(MppCheckerKind.Common
             (n.regions.isNotEmpty() && n.op != io.tlaloc.ir.OpKind.IF) ||
                 n.regions.any { r -> r.blocks.any { b -> hasNestedNonIfRegions(b.body) } }
             )
+    }
+
+    private companion object {
+        const val TRACER_FQN = "io.tlaloc.autograd.Tracer"
     }
 }

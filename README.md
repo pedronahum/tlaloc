@@ -158,6 +158,22 @@ adds diagnostics of its own on top (`NAMED_INDEX_MISMATCH`,
 `TENSOR_SHAPE_MISMATCH`, `NOT_DIFFERENTIABLE`), all of them build errors with
 IDE squiggles. → [`examples/named-indices`](examples/named-indices/)
 
+And a body the plugin cannot **lower** at all is a build error too, carrying the
+lowering's own reason (`reference to symbol outside the lowering scope: /X0`, and
+~207 others). It used to be a warning that let the build pass and threw at the
+first call instead. Opt back into that with
+`-P plugin:io.tlaloc.plugin:strictLowering=false`.
+
+### A build that works says nothing
+
+A `grad {}` that lowers produces **no Tlaloc output whatsoever** — no warnings,
+no IR dumps, nothing. That is worth stating because until `0.1.0-alpha01` it was
+false: every single `grad {}` put two IR dumps in the consumer's build log, and
+any project compiling with `allWarningsAsErrors = true` could not build at all.
+The dumps are still one flag away (`dumpLoweredIr=true`), and the four plugin
+options are tabulated in
+[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md#4a-plugin-options).
+
 ### `capture` — train a model
 
 `:nn` is a functional model layer: layers are immutable, a training step returns

@@ -13,14 +13,24 @@ class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
     override val supportsK2: Boolean = true
 
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
-        FirExtensionRegistrarAdapter.registerExtension(TlalocFirExtensionRegistrar())
+        // §0.4.499 — the per-compilation knobs, resolved once and handed to BOTH
+        // halves of the plugin (FIR checker + IR extension) as a value.
+        val options = TlalocPluginOptions(
+            dumpLoweredIr = configuration.get(TlalocCommandLineProcessor.DUMP_LOWERED_IR_KEY) ?: false,
+            strictLowering = configuration.get(TlalocCommandLineProcessor.STRICT_LOWERING_KEY) ?: true,
+        )
+        FirExtensionRegistrarAdapter.registerExtension(TlalocFirExtensionRegistrar(options))
         // §0.4.450 — the readable-reverse dump options (see TlalocCommandLineProcessor):
         // the dir form implies the message form.
         val dumpDir = configuration.get(TlalocCommandLineProcessor.DUMP_GRAD_SOURCE_DIR_KEY)
         val dump = (configuration.get(TlalocCommandLineProcessor.DUMP_GRAD_SOURCE_KEY) ?: false) ||
             dumpDir != null
         IrGenerationExtension.registerExtension(
-            TlalocIrGenerationExtension(dumpGradSource = dump, dumpGradSourceDir = dumpDir),
+            TlalocIrGenerationExtension(
+                dumpGradSource = dump,
+                dumpGradSourceDir = dumpDir,
+                options = options,
+            ),
         )
     }
 }

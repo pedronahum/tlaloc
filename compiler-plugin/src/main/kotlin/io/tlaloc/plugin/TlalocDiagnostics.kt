@@ -21,8 +21,30 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
-    /** Fires with a human-readable reason when the lambda body couldn't be lowered. */
+    /**
+     * Fires with a human-readable reason when the lambda body couldn't be lowered
+     * AND the compilation opted out of the §0.4.499 refusal
+     * (`strictLowering=false`). Warning severity: the call stays unrewritten and
+     * the `io.tlaloc.autograd` fallback body runs — which throws at the first
+     * call. See [LAMBDA_NOT_LOWERABLE] for the default.
+     */
     val LAMBDA_UNSUPPORTED: KtDiagnosticFactory1<String> by warning1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /**
+     * §0.4.499 — the DEFAULT severity for a lambda body the lowering refused: an
+     * ERROR at the call site, carrying the lowering's own verbatim reason (one of
+     * ~208 named `LoweringException` sites in `FirLambdaToDxirLowering`).
+     *
+     * Why an error and not a warning: leaving the call unrewritten does not
+     * degrade to a slower-but-correct path — it leaves `io.tlaloc.autograd`'s
+     * `pluginMissing` fallback in place, which throws `IllegalStateException` at
+     * the FIRST CALL, at runtime, telling the user to add a compiler plugin that
+     * is already applied. A compile-time refusal that names the construct is the
+     * same information, hours earlier.
+     */
+    val LAMBDA_NOT_LOWERABLE: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
         SourceElementPositioningStrategies.DEFAULT,
     )
 
@@ -71,6 +93,17 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
         map.put(
             TlalocErrors.LAMBDA_UNSUPPORTED,
             "Tlaloc could not lower lambda: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.LAMBDA_NOT_LOWERABLE,
+            "Tlaloc could not lower this lambda at compile time: {0}\n" +
+                "The call is therefore NOT rewritten, and the io.tlaloc.autograd fallback body " +
+                "would throw at the first call instead of returning a gradient. Rewrite the body " +
+                "within the supported surface (docs/GETTING_STARTED.md), use the Tracer-capture " +
+                "API (io.tlaloc.autograd.gradWithScalars) for this one, or — to take that runtime " +
+                "failure deliberately — pass " +
+                "-P plugin:io.tlaloc.plugin:strictLowering=false, which turns this back into a warning.",
             CommonRenderers.STRING,
         )
         map.put(

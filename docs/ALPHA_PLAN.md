@@ -1,7 +1,7 @@
 # Alpha plan — the ledger for the road to a usable alpha
 
-**Status: TIER 0 COMPLETE (§0.4.498, 2026-09-22). TIERS 1–4 NOT YET STARTED, AND
-NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
+**Status: TIER 0 COMPLETE (§0.4.498, 2026-09-22). TIER 1 COMPLETE (§0.4.499,
+2026-09-22). TIERS 2–4 NOT YET STARTED, AND NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
 that takes Tlaloc from "an engine with 2,345 passing tests that nobody may
 legally use" to "an alpha a stranger can depend on". Tier 0 was the legal and
 distribution tier: before it, the repository had no `LICENSE` (so, by default,
@@ -63,10 +63,40 @@ down yet", never "nothing to do".
 
 ---
 
-## Tier 1
+## Tier 1 — first-contact defects (§0.4.499, 2026-09-22)
 
-⬜ Not scoped in this file yet — see the note above. The agent that lands it adds
-its rows here.
+The two things a stranger meets before they meet the engine: what Tlaloc puts in
+their build log, and what it does when it cannot lower their lambda. Both were
+wrong in the same direction — informational output dressed as a warning, and a
+real failure dressed as a warning — and the second one made the first one fatal.
+
+| Item | Status | What pins it | Deferred / notes |
+|---|---|---|---|
+| **A working `grad {}` produces no Tlaloc output at all** | ✅ | `DiagnosticNoiseTest.the default build emits neither the FIR dxir dump nor the IR handoff dump`, plus the reproduction by hand: `./gradlew -p examples/quickstart compileKotlin --rerun-tasks` printed two warnings and eight lines of IR before this tier, and prints nothing after it | The two messages were `TlalocErrors.LAMBDA_LOWERED` (FIR checker) and the IR extension's "saw handoff". Both are now gated on the new `dumpLoweredIr` option; the IR half also dropped from `WARNING` to `INFO`. |
+| **A consumer using `-Werror` can compile at all** | ✅ | `DiagnosticNoiseTest.a correct grad consumer compiles under -Werror and emits no Tlaloc diagnostic` — it sets `K2JVMCompilerArguments.allWarningsAsErrors` and asserts exit code 0 **and** that no message mentions Tlaloc. Verified end to end outside the suite too, with a Gradle init script setting `allWarningsAsErrors = true` on `examples/quickstart`: `BUILD FAILED … e: warnings found and -Werror specified` before, `BUILD SUCCESSFUL` after | This is the defect that mattered: a routine Kotlin-shop setting made Tlaloc impossible to adopt, caused entirely by Tlaloc's own informational output. |
+| **The lowered IR is still reachable** | ✅ | `DiagnosticNoiseTest.dumpLoweredIr brings both dumps back, and the IR half is an INFO not a warning`; and five existing harnesses (`TlalocPluginDiagnosticTest`, `ContractInferenceTest`, `NamedIndexResolutionTest`, `MatmulRecognitionTest`) now pass the option explicitly and keep asserting on the dump contents | **Named limitation:** with `dumpLoweredIr=true` the FIR half is still a `WARNING`, so that option and `-Werror` cannot be combined. K2's diagnostic DSL (`KtDiagnosticFactoryDsl.kt`, kotlin-compiler-embeddable 2.3.20) offers `error*`, `warning*`, `strongWarning` and `deprecation` only — there is no `info*` factory, and a FIR checker has no `MessageCollector`. Moving that half to the IR phase (where INFO is available, as `dumpGradSource` already is) would lose the FIR source location unless the location is carried through the handoff table; that is the follow-up, and it is not done. |
+| **`dumpGradSource` / `dumpGradSourceDir` still behave exactly as documented** | ✅ | `DumpGradSourceTest` (unchanged, including its raw-bit-identical standalone-compile pin); `examples/readable-gradients` builds green against the republished plugin | — |
+| **An unlowerable lambda refuses at COMPILE time, by name** | ✅ | `DiagnosticNoiseTest.an unlowerable grad body is a compile-time ERROR naming the construct and the opt-out` — asserts a non-zero exit, exactly one `ERROR`, the lowering's own reason (which names the offending `cube` call) and the opt-out flag's spelling | New diagnostic `TlalocErrors.LAMBDA_NOT_LOWERABLE` (`error1`). `LAMBDA_UNSUPPORTED` (warning) survives as the opt-out's diagnostic, so the ~208 distinct `LoweringException` reasons keep flowing through both, unflattened. |
+| **The opt-out works and is named everywhere it is mentioned** | ✅ | `DiagnosticNoiseTest.strictLowering=false restores the pre-alpha warning and the build stays green`; `CustomVjpGradientTest` and `RngGradientTest` (whose whole point is a named lowering refusal followed by a tape fallback) pass the flag and are otherwise untouched | `-P plugin:io.tlaloc.plugin:strictLowering=false`. It is named in the error text itself, in `docs/GETTING_STARTED.md` §4a, in the README, in `examples/differentiable-physics`'s README and source comment, and in the runtime exception. |
+| **A non-lambda argument (`grad(::f)`) refuses by name** | ✅ | `DiagnosticNoiseTest.a non-lambda argument is refused by name instead of failing at the first call` | It used to emit `TLALOC_INTRINSIC_CALL`, whose text still promised "the K2 plugin will replace this with a dxir transform in a later step" — stale since §0.4.4. That spelling now only appears under `dumpLoweredIr` with the opt-out on. |
+| **The Tracer tape route is not collateral damage** | ✅ | `TlalocPluginTracerFallbackTest` runs in DEFAULT (strict) mode and still produces the real gradient `32.0` end to end | `io.tlaloc.autograd.grad`/`grad2`/`grad3`/`valueAndGrad*` are **overloaded**: the compile-time intrinsic (`GradIntrinsics.kt`) and the runtime `Tracer` tape (`Grad.kt`) share those names, and the checker matched the FQN alone. Every tape call was therefore drawing a bogus `could not lower lambda: … unsupported type io.tlaloc.autograd.Tracer` warning; promoting that to an error would have broken the documented plugin-free route. A Tracer-typed lambda parameter is now recognised as the tape overload and left alone. **This was found by the tier, not by the brief.** |
+| **The runtime message distinguishes the two ways it can fire** | 🧪 | Read by eye; no test asserts the text | `pluginMissing` used to say "requires the Tlaloc K2 compiler plugin" even when the plugin was applied and had simply refused the body. It now names both states and points at the compile-time reason for the second. **What it still cannot do is TELL THEM APART**: a JVM at runtime has no way to observe whether a K2 plugin was applied to the module that compiled the call, and the plugin leaves an unlowered call byte-identical to one compiled with no plugin at all. Making it genuinely detectable means rewriting the refused call site to a reason-carrying stub — that is IR synthesis of a function-typed value, the same machinery `DxirToIrSynthesis` does for real gradients, and it was out of scope here. Recorded rather than faked. |
+| **Options are refused by name when misspelled** | ✅ | `DiagnosticNoiseTest.an unknown value for a boolean plugin option is refused by name` | `dumpGradSource` predates this and still reads any non-boolean value as `false` (`value.toBooleanStrictOrNull() ?: (value == "true")`). Left as it was rather than changed under this tier's heading — a behaviour change to a documented option belongs to whoever owns that option's row. |
+
+### What Tier 1 did not touch, on purpose
+
+- **The other IR-extension warnings.** `"kept original call — …"` and the
+  `DxirReverseTransform rejected the dxir` warnings are still `WARNING`s, and
+  deliberately: they announce a real degradation (the lambda lowered, then
+  synthesis refused it), which is exactly what a warning is for. They do mean a
+  `-Werror` consumer whose lambda takes the synthesis fallback still fails the
+  build. Nobody has decided whether that is wrong; it is not what this tier
+  fixed, and it does not fire for a `grad {}` that works.
+- **`TLALOC_INTRINSIC_CALL`'s stale renderer text** ("the K2 plugin will replace
+  this with a dxir transform in a later step" — the later step shipped in
+  §0.4.4). The message is now reachable only under `dumpLoweredIr` **and**
+  `strictLowering=false`, so it was left rather than rewritten.
+- **The FIR-phase `MessageCollector` question.** See the `dumpLoweredIr` row.
 
 ## Tier 2
 

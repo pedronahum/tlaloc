@@ -102,12 +102,19 @@ Every number inside the `grad2 { }` body is a literal rather than one of the
 to Tlaloc IR, and a reference out of that scope is **refused by name**:
 
 ```
-w: Tlaloc could not lower lambda: reference to symbol outside the lowering scope: /X0
+e: Tlaloc could not lower this lambda at compile time: reference to symbol outside
+   the lowering scope: /X0
 ```
 
-Swap `0.0f` for `X0` and read the warning. It is worth doing once: it is the
+Swap `0.0f` for `X0` and read the refusal. It is worth doing once: it is the
 house rule in action — an unsupported case says so, loudly, instead of quietly
 falling back to something slower that would still have produced a number.
+
+Since §0.4.499 that refusal is an **error**, not a warning, and the build stops.
+It used to be a warning, and the program then threw `IllegalStateException` the
+first time it called `dMiss` — the same information, one run later. If you want
+that late failure back, pass
+`-P plugin:io.tlaloc.plugin:strictLowering=false`.
 
 ## A limitation this example removed
 

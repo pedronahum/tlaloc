@@ -1961,6 +1961,13 @@ class TlalocPluginDiagnosticTest {
             val args = K2JVMCompilerArguments().apply {
                 freeArgs = listOf(tempDir.absolutePath)
                 pluginClasspaths = pluginClasspath()
+                // §0.4.499 — this harness READS the lowered-dxir dump, which is off
+                // by default now; and (where listed) it exercises the pre-alpha
+                // tape-fallback path, which is a compile error by default.
+                pluginOptions = arrayOf(
+                    "plugin:io.tlaloc.plugin:dumpLoweredIr=true",
+                    "plugin:io.tlaloc.plugin:strictLowering=false",
+                )
                 destination = outDir.absolutePath
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true
@@ -2020,6 +2027,13 @@ class TlalocPluginDiagnosticTest {
             val args = K2JVMCompilerArguments().apply {
                 freeArgs = listOf(tempDir.absolutePath)
                 pluginClasspaths = pluginClasspath()
+                // §0.4.499 — this harness READS the lowered-dxir dump, which is off
+                // by default now; and (where listed) it exercises the pre-alpha
+                // tape-fallback path, which is a compile error by default.
+                pluginOptions = arrayOf(
+                    "plugin:io.tlaloc.plugin:dumpLoweredIr=true",
+                    "plugin:io.tlaloc.plugin:strictLowering=false",
+                )
                 destination = outDir.absolutePath
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true

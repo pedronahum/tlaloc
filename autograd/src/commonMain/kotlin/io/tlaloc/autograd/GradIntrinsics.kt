@@ -23,10 +23,18 @@ package io.tlaloc.autograd
  * difference is trace-at-runtime vs rewrite-at-compile-time.
  */
 internal fun pluginMissing(name: String): Nothing = throw IllegalStateException(
-    "Tlaloc: `$name { }` requires the Tlaloc K2 compiler plugin, which rewrites this call at " +
-        "compile time. Add `io.tlaloc:compiler-plugin` to kotlinCompilerPluginClasspath " +
-        "(docs/GETTING_STARTED.md), or use the Tracer-capture API (io.tlaloc.autograd.gradWithScalars) " +
-        "for plugin-free gradients over the same compiler engine.",
+    "Tlaloc: `$name { }` was NOT rewritten at compile time, so this fallback body ran and " +
+        "there is no gradient to return. Since 0.1.0-alpha01 (§0.4.499) a lambda the plugin " +
+        "cannot lower is a compile-time ERROR naming the construct, so reaching this message " +
+        "means exactly one of two things:\n" +
+        "  (1) the Tlaloc K2 compiler plugin is not on this module's compile classpath — add " +
+        "`io.tlaloc:compiler-plugin` to kotlinCompilerPluginClasspath (docs/GETTING_STARTED.md); or\n" +
+        "  (2) the plugin IS applied and refused this body, and the build opted out of that " +
+        "refusal with -P plugin:io.tlaloc.plugin:strictLowering=false — the compile log then " +
+        "carries `w: Tlaloc could not lower lambda: <reason>` at this call site, which names " +
+        "the exact construct; drop the opt-out to get it as an error instead.\n" +
+        "Either way, the Tracer-capture API (io.tlaloc.autograd.gradWithScalars) gives " +
+        "plugin-free gradients over the same compiler engine.",
 )
 
 /** Gradient of a scalar-valued function of one tensor/value argument. */

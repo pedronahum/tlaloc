@@ -65,12 +65,15 @@ class MatmulRecognitionTest {
 
         // Assert the FIR-side dxir contains a `matmul(...)` op — confirms BINARY_OP_MAP
         // wired through.
+        // §0.4.499 — the handoff dump is an INFO now (and opt-in; the harness turns
+        // `dumpLoweredIr` on). It used to be an unconditional WARNING in every
+        // consumer's build log.
         val handoffWarning = result.messages
-            .filter { it.severity == CompilerMessageSeverity.WARNING }
+            .filter { it.severity == CompilerMessageSeverity.INFO }
             .firstOrNull { "saw handoff" in it.message }
         assertTrue(
             handoffWarning != null,
-            "no 'saw handoff' warning — FirLambdaToDxirLowering didn't emit dxir dump",
+            "no 'saw handoff' dump — FirLambdaToDxirLowering didn't emit dxir dump",
         )
         assertTrue(
             handoffWarning!!.message.contains("matmul("),
@@ -126,6 +129,12 @@ class MatmulRecognitionTest {
             val args = K2JVMCompilerArguments().apply {
                 freeArgs = listOf(tempDir.absolutePath)
                 pluginClasspaths = pluginClasspath()
+                // §0.4.499 — this harness READS the lowered-dxir dump, which is off
+                // by default now; and (where listed) it exercises the pre-alpha
+                // tape-fallback path, which is a compile error by default.
+                pluginOptions = arrayOf(
+                    "plugin:io.tlaloc.plugin:dumpLoweredIr=true",
+                )
                 destination = outDir.absolutePath
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true

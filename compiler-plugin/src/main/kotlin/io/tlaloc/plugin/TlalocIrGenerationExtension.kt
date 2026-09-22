@@ -50,9 +50,11 @@ import org.jetbrains.kotlin.name.Name
  * references a tensor type or an op outside the primitive-scalar surface), we fall back
  * to the original call so the runtime-tape path in `:autograd` still runs.
  *
- * For every match — even when synthesis is skipped — we emit a `WARNING` via the plugin's
- * message collector naming the DxirFunction. That diagnostic is also what the older
- * scaffolding-era test asserts against.
+ * §0.4.499 — for every match the extension USED to emit an unconditional `WARNING` via
+ * the plugin's message collector naming the DxirFunction. It is now an `INFO`, and only
+ * with [TlalocPluginOptions.dumpLoweredIr] on: it is developer introspection, and a
+ * consumer's build log is not the place for it. The scaffolding-era tests that assert on
+ * the "saw handoff" text turn the option on explicitly.
  *
  * §0.4.450 — the readable-reverse dump (docs/AD_SINGLE_ENGINE_AUDIT.md, surface 2 —
  * the north star's compile-time half). With [dumpGradSource] on (the
@@ -71,6 +73,7 @@ import org.jetbrains.kotlin.name.Name
 class TlalocIrGenerationExtension(
     private val dumpGradSource: Boolean = false,
     private val dumpGradSourceDir: String? = null,
+    private val options: TlalocPluginOptions = TlalocPluginOptions(),
 ) : IrGenerationExtension {
 
     @OptIn(UnsafeDuringIrConstructionAPI::class)
@@ -145,11 +148,17 @@ class TlalocIrGenerationExtension(
                     transformed.startOffset, transformed.endOffset,
                 ) ?: return transformed
 
-                mc.report(
-                    CompilerMessageSeverity.WARNING,
-                    "Tlaloc IR extension saw handoff for '${fn.name}':\n${fn.pretty().trimEnd()}",
-                    null,
-                )
+                // §0.4.499 — developer introspection, OFF by default and INFO when on.
+                // This was an unconditional WARNING: together with the FIR checker's
+                // LAMBDA_LOWERED it put two dxir dumps into a consumer's build log for
+                // every single `grad {}`, and broke any build using -Werror outright.
+                if (options.dumpLoweredIr) {
+                    mc.report(
+                        CompilerMessageSeverity.INFO,
+                        "Tlaloc IR extension saw handoff for '${fn.name}':\n${fn.pretty().trimEnd()}",
+                        null,
+                    )
+                }
 
                 // Stage A follow-up (§0.4.4): route all four intrinsics through the
                 // reverse-mode transform. `grad` / `grad2` emit only the gradients;

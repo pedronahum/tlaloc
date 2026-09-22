@@ -275,6 +275,10 @@ class RngGradientTest {
             val args = K2JVMCompilerArguments().apply {
                 freeArgs = listOf(tempDir.absolutePath)
                 pluginClasspaths = pluginClasspath()
+                // §0.4.499 — a non-literal RandomKey receiver is a lowering failure, so §0.4.499 makes it a
+                // compile error by default; this file pins the opt-out path — the refusal is
+                // still named, and the stub sentinel still proves the lambda never guessed.
+                pluginOptions = arrayOf("plugin:io.tlaloc.plugin:strictLowering=false")
                 destination = outDir.absolutePath
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true

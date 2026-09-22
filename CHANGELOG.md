@@ -14,7 +14,45 @@ retro-summarise them; it is the record from the first named version forward.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **A working build is silent.** Every recognised `grad {}` used to emit two
+  compiler **warnings**, each dumping the lowered Tlaloc IR into the consumer's
+  build output: the FIR checker's `LAMBDA_LOWERED` and the IR extension's "saw
+  handoff". They were developer introspection, and because they were warnings
+  they also **broke the build outright** in any project compiling with
+  `allWarningsAsErrors = true` (`e: warnings found and -Werror specified`) — on
+  a program that was entirely correct. Both are now off by default; the IR half
+  is an `INFO` rather than a `WARNING`. Turn them back on with
+  `-P plugin:io.tlaloc.plugin:dumpLoweredIr=true`. `dumpGradSource` /
+  `dumpGradSourceDir` are unchanged.
+- **An unlowerable `grad {}` lambda is a compile-time error.** It was a warning;
+  the call was then left unrewritten and `io.tlaloc.autograd`'s fallback body
+  threw `IllegalStateException` at the **first call**, telling the user to add a
+  compiler plugin that was already applied. The refusal now happens at the call
+  site at compile time, carrying the lowering's own verbatim reason (one of the
+  ~208 named `LoweringException` sites) and naming the opt-out. Opt out with
+  `-P plugin:io.tlaloc.plugin:strictLowering=false`, which restores the warning
+  and the late failure exactly.
+- **`grad(::f)` and other non-lambda arguments are refused by name** instead of
+  compiling green and throwing at the first call: the plugin lowers the body of
+  a `{ }` written at the call site, and now says so.
+- **The runtime message when a `grad {}` was not rewritten** no longer claims the
+  compiler plugin is missing. It names the two states that can produce it — no
+  plugin on the compile classpath, or a plugin that refused the body under
+  `strictLowering=false` — and says where the compile-time reason is.
+
+### Fixed
+
+- **The Tracer-capture route no longer draws a spurious refusal.**
+  `io.tlaloc.autograd.grad` / `grad2` / `grad3` / `valueAndGrad*` are overloaded:
+  the compile-time intrinsic and the runtime `Tracer` tape share every one of
+  those names. The plugin's checker matched on the FQN alone, so a
+  `grad { t: Tracer<...> -> ... }` call — the documented plugin-free route — got
+  a `could not lower lambda: ... unsupported type io.tlaloc.autograd.Tracer`
+  warning on every call. A Tracer-typed lambda is now recognised as the tape
+  overload and not diagnosed at all. (Had it not been, promoting the refusal to
+  an error would have broken that route outright.)
 
 ## [0.1.0-alpha01] — 2026-09-22
 

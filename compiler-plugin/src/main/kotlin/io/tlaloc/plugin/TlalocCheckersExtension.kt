@@ -5,9 +5,12 @@ import org.jetbrains.kotlin.fir.analysis.checkers.expression.ExpressionCheckers
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.FirFunctionCallChecker
 import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtension
 
-class TlalocCheckersExtension(session: FirSession) : FirAdditionalCheckersExtension(session) {
+class TlalocCheckersExtension(
+    session: FirSession,
+    private val options: TlalocPluginOptions = TlalocPluginOptions(),
+) : FirAdditionalCheckersExtension(session) {
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
         override val functionCallCheckers: Set<FirFunctionCallChecker> =
-            setOf(TlalocIntrinsicCallChecker)
+            setOf(TlalocIntrinsicCallChecker(options))
     }
 }

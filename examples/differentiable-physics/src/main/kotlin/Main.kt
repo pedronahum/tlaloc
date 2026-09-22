@@ -103,10 +103,10 @@ fun main() {
     // NOTE: every number in the lambda is a LITERAL, not one of the `const
     // val`s above. The body is lowered to Tlaloc IR at compile time, and a
     // reference out of that scope is refused by name rather than silently
-    // degrading:
-    //     w: Tlaloc could not lower lambda: reference to symbol outside the
-    //        lowering scope: /X0
-    // Swap `0.0f` for `X0` and read the warning yourself. The finite-difference
+    // degrading — since §0.4.499 as a compile ERROR, not a warning:
+    //     e: Tlaloc could not lower this lambda at compile time: reference to
+    //        symbol outside the lowering scope: /X0
+    // Swap `0.0f` for `X0` and read the refusal yourself. The finite-difference
     // check below is what guarantees these literals still agree with the
     // constants the rest of the file uses.
     val dMiss = grad2 { angle: Float, speed: Float ->
