@@ -106,6 +106,100 @@ def _refusal(fn) -> str:
     return ""
 
 
+def _attention_backend_stage(current_platform) -> dict:
+    """§0.4.491 (H3c-4a) — the backend class, resolved and cross-examined
+    against vLLM's OWN KV-cache arithmetic.
+
+    This is the part of the H3c-4 contract that can be certified without a
+    server, and the reason it is worth certifying: the plugin's page shape
+    is derived from the artifact's `kvPoolAxisOrder`/`kvPoolDims`, and
+    vLLM 0.29.0 derives its own from an `AttentionSpec` through
+    `compute_layer_kv_cache_shape_bytes`. Two independent derivations of
+    one pool. The lane records both and the JVM side asserts they are the
+    same tuple and the same byte count — with the axis-order divergence
+    (Tlaloc stores K and V as two tensors; vLLM interleaves them into the
+    content axis) stated rather than smoothed over.
+
+    It also resolves the returned dotted string the way vLLM itself does,
+    `resolve_obj_by_qualname`, because that is the call that turns a typo
+    into an import error deep inside engine startup.
+    """
+    import torch
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+    from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        compute_layer_kv_cache_shape_bytes,
+    )
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+
+    path = current_platform.get_attn_backend_cls()
+    backend = resolve_obj_by_qualname(path)
+    described = backend.describe()
+
+    b, n, h, c = described["kvCacheShape"][1:]  # numBlocks, blockSize, numKvHeads, headDim
+    spec = FullAttentionSpec(
+        block_size=n, num_kv_heads=h, head_size=c,
+        dtype={"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}[
+            described["kvDtype"]
+        ],
+    )
+    out = {
+        "attnBackend": described,
+        "attnBackendResolves": backend.__module__ + "." + backend.__qualname__,
+        "attnBackendIsAttentionBackend": bool(issubclass(backend, AttentionBackend)),
+        # vLLM's own numbers for the same pool, computed by vLLM's own code.
+        "vllmPageShapeBytes": list(compute_layer_kv_cache_shape_bytes(spec, b)),
+        "vllmPageSizeBytes": int(spec.page_size_bytes),
+        # The capability predicates, asked the way vLLM asks them.
+        "attnSupportsCompiledBlockSize": bool(backend.supports_block_size(n)),
+        "attnSupportsDoubleBlockSize": bool(backend.supports_block_size(n * 8)),
+        "attnSupportsCompiledHeadSize": bool(backend.supports_head_size(c)),
+        "attnSupportsOtherHeadSize": bool(backend.supports_head_size(c + 1)),
+        "attnKvCacheLayouts": [l.name for l in backend.supported_kv_cache_layouts()],
+        # The forward that is never reached, and the constructor above it.
+        "attnImplRefusal": _refusal(
+            lambda: backend.get_impl_cls()(num_heads=1, head_size=c, scale=1.0)
+        ),
+        "attnBuilderRefusal": _refusal(
+            lambda: backend.get_builder_cls()(kv_cache_spec=None, layer_names=[], device=None)
+        ),
+        "attnForwardRefusal": _refusal(
+            lambda: backend.get_impl_cls().forward(
+                object(), None, None, None, None, None, None, None
+            )
+        ),
+        # A selector config that disagrees with the compiled artifact.
+        "attnHeadSizeRefusal": _refusal(
+            lambda: current_platform.get_attn_backend_cls(
+                None,
+                attn_selector_config=AttentionSelectorConfig(
+                    head_size=c + 1, dtype=torch.float32,
+                    kv_cache_dtype="auto", block_size=n,
+                ),
+            )
+        ),
+        "attnMlaRefusal": _refusal(
+            lambda: current_platform.get_attn_backend_cls(
+                None,
+                attn_selector_config=AttentionSelectorConfig(
+                    head_size=c, dtype=torch.float32, kv_cache_dtype="auto",
+                    block_size=n, use_mla=True,
+                ),
+            )
+        ),
+        # And one that agrees: it must come back with the same path.
+        "attnAgreeingConfigPath": current_platform.get_attn_backend_cls(
+            None,
+            attn_selector_config=AttentionSelectorConfig(
+                head_size=c, dtype=torch.float32, kv_cache_dtype="auto", block_size=n,
+            ),
+            num_heads=h,
+        ),
+    }
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--artifact", required=True, type=Path)
@@ -145,9 +239,17 @@ def main() -> int:
         payload["isAsyncOutputSupported"] = bool(
             current_platform.is_async_output_supported(True)
         )
-        # The attention-backend refusal: compiled-in attention has no
-        # runtime-selectable backend, and vLLM asking must get an answer.
-        payload["attnBackendRefusal"] = _refusal(current_platform.get_attn_backend_cls)
+        # §0.4.491 (H3c-4a): the attention backend class. Until this slice
+        # `get_attn_backend_cls` RAISED, and this line recorded the refusal;
+        # vLLM's v1 engine core calls it unconditionally, so the refusal was
+        # where §0.4.480 died with a real artifact in hand. Now it answers,
+        # and what is recorded is the whole surface plus the refusals that
+        # survive.
+        payload["attnBackendClass"] = current_platform.get_attn_backend_cls()
+        payload["attnBackendRefusal"] = _refusal(
+            lambda: current_platform.get_attn_backend_cls("FLASH_ATTN")
+        )
+        payload.update(_attention_backend_stage(current_platform))
     except Exception as e:
         return emit(
             {**payload, "ok": False, "stage": "discovery", "error": f"{type(e).__name__}: {e}",

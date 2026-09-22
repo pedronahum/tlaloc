@@ -35,6 +35,7 @@ worker API and is honestly untested.
 
 from __future__ import annotations
 
+from . import kv_layout
 from .batching import decode_requests_from_scheduler_output
 
 try:  # pragma: no cover - exercised only where vLLM is installed
@@ -83,18 +84,11 @@ class TlalocWorker(WorkerBase):
 
     def determine_available_memory(self) -> int:
         """Bytes of KV cache available — the artifact's pool, exactly."""
-        r = self._runner()
-        m = r.model
-        elem = {"f32": 4, "bf16": 2, "f64": 8, "i32": 4, "i64": 8}.get(m["kvDtype"])
-        if elem is None:
-            raise ValueError(
-                f"tlaloc: KV dtype '{m['kvDtype']}' has no element size here; a worker "
-                f"that guesses this number reports a pool that does not exist"
-            )
-        pool_elems = 1
-        for d in m["kvPoolDims"]:
-            pool_elems *= d
-        return pool_elems * elem * 2 * m["numLayers"]
+        # §0.4.491: the element-size table and the pool arithmetic moved to
+        # `kv_layout`, which the attention backend class reads the same
+        # answer out of. Two tables is how a reported pool stops being the
+        # pool that exists.
+        return kv_layout.pool_bytes(self._runner().model)
 
     def get_kv_cache_spec(self) -> dict:
         """vLLM asks each layer's KV shape so its block manager can size
@@ -110,6 +104,11 @@ class TlalocWorker(WorkerBase):
                 "head_size": m["headDim"],
                 "dtype": m["kvDtype"],
                 "pool_dims": list(m["kvPoolDims"]),
+                # §0.4.491: the same two numbers the attention backend class
+                # publishes, from the same module, so the worker's spec and
+                # the backend's capabilities cannot describe different pools.
+                "page_size_bytes": kv_layout.page_size_bytes(m),
+                "kv_cache_layout": kv_layout.kv_cache_layout_name(m),
             }
             for i in range(m["numLayers"])
         }

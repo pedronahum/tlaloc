@@ -1875,8 +1875,10 @@ demo path meanwhile, and the runbook says so.
 
 **NAMED GAPS, carried forward.**
 
-- **H3c-4: `get_attn_backend_cls`**, above. It is the only thing between this
-  repo and `vllm serve`, and the whole serving stack below it is certified.
+- ~~**H3c-4: `get_attn_backend_cls`**~~ **CLOSED (§0.4.491)** — see the
+  H3c-4a entry. What replaces it in this list is **H3c-4b: the live server.**
+  `vllm serve` and `LLM.generate()` have still never been run; the backend
+  class removes the named obstacle and does not, by itself, start a server.
 - **The jax ORACLE engine refuses staged weights BY NAME.** It exists because
   jaxlib ships no CPU PJRT plugin `.so`; staging a checkpoint through it would
   mean a second, differently-shaped upload path in the one engine the
@@ -2152,6 +2154,120 @@ class whose forward is never reached owe vLLM's KV-cache-shape
 bookkeeping?) and a close-out slice that also shipped a speculative stub
 would have left the ledger describing something it had not certified.
 
+### H3c-4a — the last classmethod answers, and the contract it was written
+against does not exist in the vLLM that is installed (§0.4.491)
+
+`vllm_tlaloc/attention.py` + `vllm_tlaloc/kv_layout.py`. `TlalocPlatform.
+get_attn_backend_cls` returns
+`"vllm_tlaloc.attention.TlalocAttentionBackend"` instead of raising, and
+the live lane exercises that class under real vLLM 0.29.0.
+
+**The first thing the slice did was read the installed vLLM, and the
+contract moved.** The H3c-4 entry above says "a backend CLASS whose
+`get_kv_cache_shape` agrees with the manifest's
+`kvPoolAxisOrder`/`kvPoolDims`". Read against
+`~/.local/venvs/vllm/.../vllm/v1/attention/backend.py`, **`AttentionBackend`
+in 0.29.0 has no `get_kv_cache_shape`.** The KV page shape moved onto
+`AttentionSpec` + `KVCacheLayout` (`compute_layer_kv_cache_shape_bytes`,
+RFC #42082), and what a backend publishes instead is a set of capability
+predicates — supported head sizes, supported kernel block sizes, supported
+dtypes, preferred layouts. Two more facts the same read settled, both of
+which the design would have got wrong from memory:
+
+- **`get_attn_backend_cls` returns a dotted STRING**, not a class; vLLM
+  runs it through `resolve_obj_by_qualname` (`v1/attention/selector.py`).
+  That is why the backend is a module-level name reading the manifest
+  lazily and not a class built per artifact — a dynamically created class
+  has no qualname to resolve.
+- **its signature is `(selected_backend, attn_selector_config, num_heads)`**,
+  called by keyword.
+
+So the contract's INTENT is honoured and its spelling is not. Every
+predicate the class publishes is derived from the manifest at call time;
+nothing about the pool is a literal in that file. `get_kv_cache_shape` is
+implemented **anyway**, in the classic
+`(2, num_blocks, block_size, num_kv_heads, head_size)` spelling the
+contract meant, and labelled in its own docstring as a compatibility
+surface 0.29.0 does not call. It is not dead code — it is the both-ways
+pin, and it refuses a caller's numbers by axis NAME rather than returning
+them.
+
+**The layout divergence, named rather than smoothed over.** vLLM 0.29.0
+reads a per-layer page as `[B, H, N, C]` with `C = (head_size +
+head_size_v) * itemsize` — K and V INTERLEAVED into one content cell.
+Tlaloc's pools are separate K and V tensors per layer, which is exactly
+`(2, *kvPoolDims)`. The axis orders differ and are **not** made to match.
+What they agree on is the number vLLM's block manager actually spends, and
+the live lane proves it with vLLM's own code:
+
+| | vLLM 0.29.0 computed it | the plugin derived it from the manifest |
+|---|---|---|
+| `[B, H, N, C_bytes]` | `compute_layer_kv_cache_shape_bytes(FullAttentionSpec(…), 6)` → `(6, 2, 2, 16)` | `kv_layout.vllm_logical_page_shape_bytes` → `(6, 2, 2, 16)` |
+| page size | `AttentionSpec.page_size_bytes` → **64** | `kv_layout.page_size_bytes` → **64** |
+
+Two independent derivations of one pool, landing on one tuple.
+`KV_PAGE_BYTES_AGREE` is that invariant by name, and it is the one that
+matters: blocks are handed out against bytes.
+
+**A defect this lane found, which a docstring would not have.** vLLM's
+inherited `supports_block_size` accepts any block size that is a **multiple**
+of a supported one, because 0.29.0 can subdivide a manager block into
+kernel blocks (`group_kernel_blocks`). Publishing "kernel block size 2" and
+stopping there therefore declares `--block-size 16` supported — eight
+kernel blocks per manager block. A Tlaloc artifact cannot do that:
+`blockSize` is baked into H1a's gather and H1b's scatter and there is no
+splitting pass. `TlalocAttentionBackend.supports_block_size` overrides to
+EQUALITY, and the live lane pins the negative (`supports_block_size(16)` is
+false). Inheriting the default would have let a scheduler page memory the
+compiled program has no slots for — the same class of error
+`determine_available_memory` refuses to make by profiling.
+
+**A second defect, found by the unit lane.** `attention.py` imported
+`torch` before `vllm`. The oracle venv has torch and no vLLM, so the
+module's import guard fired correctly **after** torch was already resident
+— a framework leak with a passing guard above it, caught by §0.4.476's
+`test_importing_the_loader_pulls_in_no_framework`. vLLM first, torch
+second, pinned by a test that reads the two lines' order.
+
+**What `forward` does.** It raises `TlalocAttentionNotReached`, and so do
+the impl's and the builder's constructors, each naming what reaching it
+would mean (vLLM built a torch attention layer, which means it built a
+torch model, which means execution did not go through `TlalocWorker`).
+REJECTED: returning zeros or passing `query` through — both turn a
+structural gap into a numerical one, which this arc has refused since
+§0.4.465.
+
+**Two refusals SURVIVE** from §0.4.470's, and they are the half that was
+about the user rather than about vLLM: an explicit `--attention-backend` is
+refused by name, and a selector config disagreeing with the compiled
+artifact (head size, MLA, sparse) is refused by name. REJECTED: refusing a
+block-size disagreement here as well — the backend class already answers it
+on vLLM's own terms, and two messages for one mistake arrive in an order
+that depends on vLLM's internals.
+
+**Certified.** `VllmLivePluginTest` (`skipped="0"`, real vLLM 0.29.0 in
+`~/.local/venvs/vllm`): the returned string resolves through
+`resolve_obj_by_qualname` to a real `AttentionBackend` subclass; the shape
+agreement both ways against a real exported manifest; the layout resolving
+to `KVCacheLayout.LBNHC`; the four capability predicates including the two
+negatives; the three refusal messages; and the agreeing-config path. Plus
+**12 new stdlib-only cases** in `vllm_tlaloc_test.py` (44 → 56), including a
+permuted `kvPoolAxisOrder` that a positional read could not have caught
+(the reference pool is `[6, 2, 2, 2]` — three of four extents equal).
+
+**The combined suite does not move: 2336 → 2336.** Both lanes this slice
+grew are driven by existing Kotlin tests — the Python cases run as one
+subprocess inside `VllmPluginContractTest` and the live assertions are new
+lines inside `VllmLivePluginTest`'s single method — so the count is honest
+and uninformative here, and the numbers that moved are the two above.
+
+**What this slice did NOT do, stated rather than implied.** It did not run
+`vllm serve` or `LLM.generate()`. That is the next slice, and it needs the
+real-Llama artifact of §0.4.480 plus a tokenizer path; what is settled here
+is that the classmethod that stopped §0.4.480 now answers, and answers with
+numbers vLLM itself computes the same way. **Claiming a live server here
+would be claiming the thing this slice exists to make possible.**
+
 ### ARC STATE (swept at §0.4.483) — read this first
 
 **THE PATH IS BUILT END TO END, IT EXECUTES, IT HAS RUN UNDER REAL vLLM
@@ -2166,12 +2282,21 @@ tensors into a decode graph certified against transformers at 1e-5; §0.4.480
 gave the artifact a staged WEIGHT TABLE and the framework-free loader a way to
 bind it, which is what the device lane had been waiting on.
 
-**What is left is ONE CLASSMETHOD.** `vllm serve` / `LLM.generate()` still
-fails, and after §0.4.480 attempted it the reason is no longer "no real
-model": vLLM 0.29.0's v1 engine core calls `get_attn_backend_cls`
-unconditionally, and `vllm_tlaloc/platform.py` refuses it by name because
-attention is compiled into the artifact. That is **H3c-4**, scoped in the
-§0.4.480 entry.
+~~**What is left is ONE CLASSMETHOD.**~~ **THE CLASSMETHOD ANSWERS
+(§0.4.491).** `get_attn_backend_cls` returns
+`vllm_tlaloc.attention.TlalocAttentionBackend`, a real
+`vllm.v1.attention.backend.AttentionBackend` subclass whose every published
+fact is derived from the artifact manifest and whose `forward` raises
+`TlalocAttentionNotReached` by name. Its page shape is pinned both ways
+against vLLM 0.29.0's own `compute_layer_kv_cache_shape_bytes` — see the
+H3c-4a entry, which also records that the contract as written named a
+`get_kv_cache_shape` that **0.29.0's `AttentionBackend` does not have**.
+
+**What is left is the SERVER ITSELF.** `vllm serve` / `LLM.generate()` has
+not been run. That is **H3c-4b**: the real-Llama artifact of §0.4.480, a
+tokenizer path, and whatever vLLM asks for after the backend class. What
+§0.4.491 removed is the named obstacle, not the remaining distance, and
+this ledger says so rather than reporting a server nobody started.
 
 Nine sections closed the arc on 2026-09-21 (suite **2119 → 2290**); four
 more the same day carried it past the framework (**2290 → 2296**); three
@@ -2201,6 +2326,7 @@ measured and closed out the KPTX performance tier (**2333 → 2336**).
 | 0.4.481 | H4b (K1) | `KptxPagedAttentionBenchTest` + [KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md) — the paged-attention tier's baselines, measured on the DEVICE instead of through the host round trip: the kernel is **1.4–1.6× faster** than XLA's lowering at 8B-shaped decode points and 1.9× slower at toy ones, §0.4.471's "1.5× slower" is retired as a staging measurement, and the dominant cost is the GQA re-read, not the score matrix | 2333 → 2335 |
 | 0.4.482 | H4b (K2) | the tier's first kernel change — `kptx_paged_out` gets a `(part, d)` decomposition (64 → 256 live threads at headDim 64), certified at the **same 1.1920929e-7** against the Double paged walk — and it measures **NOTHING**: a controlled null that bounds stage 3 at **≤ 16% of the chain** and exposes the real defect, **stage 1's K walk is 8×-read-amplified across a warp while stage 3's V walk was always coalesced**. Registry still empty | 2335 → 2336 |
 | 0.4.483 | H3c + H4b close-out (K3) | this sweep + [KPTX_PAGED_PERF.md §8](KPTX_PAGED_PERF.md) (the registry verdict, shape-conditional registration REJECTED by name, §4 and §7.4 merged into one ranked order) + [SERVING_RUNBOOK.md §10](SERVING_RUNBOOK.md) (the real-model demo as four copy-pasteable steps; the runbook's retired 465 µs KPTX verdict replaced with K1's device table and a two-line opt-in recipe; the duplicate section 5 renumbered). Invariants re-verified by grep, not assumed — docs only | 2336 → 2336 (docs only) |
+| 0.4.491 | H3c-4a | `vllm_tlaloc/attention.py` + `kv_layout.py` — `get_attn_backend_cls` ANSWERS. A real `AttentionBackend` subclass, every fact manifest-derived, page shape pinned **both ways** against vLLM's own `compute_layer_kv_cache_shape_bytes` (`(6,2,2,16)`, 64 B/page, from two independent derivations), `forward` refusing by name. The contract's `get_kv_cache_shape` **does not exist in 0.29.0** and the entry says so; vLLM's divisibility-based `supports_block_size` overridden to equality after the live lane showed it declaring `--block-size 16` supported | 2336 (Python lane 44 → 56) |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -2227,7 +2353,8 @@ red line with the separate-venv recipe attached.
 | the exported directory describes itself truthfully | every body hashes to its filename; per-entry `ProgramManifest` parses with its own parser and agrees; two exports byte-identical | exact |
 | a Python process with no JVM runs the artifact | `ServingArtifactExportRunTest`, export-then-subprocess | **1e-5** PJRT CPU (jax ORACLE engine) · **1e-3** PJRT CUDA (**ctypes engine**, §0.4.476) |
 | …and the poisoned pools / scratch page are untouched | same test, both lanes | **`==`** (a copied slot is not a computed one) |
-| the plugin's page arithmetic and marshalling are right | `VllmPluginContractTest` lane 2 — 31 stdlib-only `unittest` cases | exact |
+| the plugin's page arithmetic and marshalling are right | `VllmPluginContractTest` lane 2 — **56** stdlib-only `unittest` cases (§0.4.491) | exact |
+| the attention backend class and vLLM agree what a KV page is | `VllmLivePluginTest`, real vLLM 0.29.0: the manifest-derived page vs vLLM's own `compute_layer_kv_cache_shape_bytes` / `AttentionSpec.page_size_bytes` | **`==`** on the `[B,H,N,C]` tuple and on bytes per page |
 | the runner threads a KV cache across steps | lane 3 — **two** decode steps of three sequences on both PJRT clients | 1e-5 / 1e-3 on floats; **exact** on every page id, slot, position and bucket |
 | Tlaloc's own PTX can replace the lowering inside an XLA executable | `KptxPagedAttentionKernelTest` vs a Double paged walk | **1.2e-7** kernel · 2.44e-4 emission (= 2^-12, TF32's mantissa) · and the property "the kernel is at least as close to the oracle as the emission it replaces" |
 | the KV-quant bound holds and is tight | every element under `scale/2`, some element over 0.9 of it; a hand-derived power-of-two-scale vector checked on paper | **derived**, not tuned |

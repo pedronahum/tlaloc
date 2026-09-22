@@ -142,9 +142,99 @@ class VllmLivePluginTest {
             refusals.mustContain("maxModelLen", "exceeds the artifact's top context bucket")
             refusals.mustContain("maxNumSeqs", "exceeds the artifact's top batch bucket")
             refusals.mustContain("worldSize", "multi-device serving is a named deferral")
-            live.mustContain("attnBackendRefusal", "OpKind.PAGED_ATTENTION")
             live.mustContain("kvConfigRefusal", "cannot be resized by a config")
             live.mustContain("chunkedPrefillRefusal", "named deferral")
+
+            // --- 2b. §0.4.491 (H3c-4a): the attention backend CLASS -------
+            // Until this slice `get_attn_backend_cls` RAISED, and vLLM's v1
+            // engine core calls it unconditionally — which is where §0.4.480
+            // died with a real 22-layer artifact in hand. It now answers with
+            // a dotted path, and everything below is that answer examined
+            // against vLLM's own code rather than against a docstring.
+            assertEquals(
+                "vllm_tlaloc.attention.TlalocAttentionBackend", live.str("attnBackendClass"),
+                "the platform must hand vLLM the dotted path of the backend class",
+            )
+            assertEquals(
+                live.str("attnBackendClass"), live.str("attnBackendResolves"),
+                "vLLM resolves that string with resolve_obj_by_qualname and nothing " +
+                    "checks it first; a typo surfaces as an import error inside engine startup",
+            )
+            assertTrue(
+                live.bool("attnBackendIsAttentionBackend"),
+                "it must be a real vllm.v1.attention.backend.AttentionBackend subclass",
+            )
+            // An EXPLICIT --attention-backend is still refused by name: a user
+            // who asked for FlashAttention deserves an answer, not a silent
+            // substitution.
+            live.mustContain("attnBackendRefusal", "OpKind.PAGED_ATTENTION")
+            live.mustContain("attnHeadSizeRefusal", "disagrees with the serving artifact")
+            live.mustContain("attnMlaRefusal", "named deferral")
+            assertEquals(
+                "vllm_tlaloc.attention.TlalocAttentionBackend",
+                live.str("attnAgreeingConfigPath"),
+                "a selector config that AGREES with the artifact must be answered, not refused",
+            )
+
+            // The shape agreement, BOTH WAYS, against a real manifest. The
+            // plugin derives its page from kvPoolAxisOrder/kvPoolDims; vLLM
+            // derives its own from an AttentionSpec through
+            // compute_layer_kv_cache_shape_bytes. Two independent
+            // derivations of one pool, and they must land on one tuple.
+            val attn = live.obj("attnBackend")
+            assertEquals(
+                listOf(2, m.numBlocks, m.blockSize, m.numKvHeads, m.headDim),
+                attn.ints("kvCacheShape"),
+                "the backend's KV cache shape is the manifest's kvPoolDims with K and V " +
+                    "in front — separate tensors, which is what a Tlaloc pool literally is",
+            )
+            assertEquals(
+                listOf("kv", "numBlocks", "blockSize", "numKvHeads", "headDim"),
+                attn.strings("kvCacheAxisNames"),
+            )
+            assertEquals(
+                live.ints("vllmPageShapeBytes"), attn.ints("vllmLogicalPageShapeBytes"),
+                "vLLM's own compute_layer_kv_cache_shape_bytes and the plugin's reading " +
+                    "of the same manifest must produce the same [B, H, N, C] page",
+            )
+            assertEquals(
+                live.int("vllmPageSizeBytes"), attn.int("pageSizeBytes"),
+                "KV_PAGE_BYTES_AGREE: vLLM interleaves K and V into the content axis and " +
+                    "Tlaloc stores them as two tensors — the axis orders differ and the " +
+                    "BYTES PER PAGE do not, and the byte count is what blocks are handed " +
+                    "out against",
+            )
+            assertEquals(
+                m.numBlocks * m.blockSize * m.numKvHeads * m.headDim * 4 * 2 * m.numLayers,
+                attn.int("poolBytes"),
+            )
+            assertEquals("LBNHC", attn.str("kvCacheLayout"))
+            assertEquals(listOf("LBNHC"), live.strings("attnKvCacheLayouts"))
+            assertEquals(listOf(m.headDim), attn.ints("supportedHeadSizes"))
+            assertEquals(listOf(m.blockSize), attn.ints("supportedKernelBlockSizes"))
+
+            // The capability predicates, asked the way vLLM asks them. The
+            // interesting one is the NEGATIVE: vLLM's inherited
+            // supports_block_size accepts any MULTIPLE of a supported size,
+            // because 0.29.0 can subdivide a manager block into kernel
+            // blocks. A compiled pool cannot, and this lane is what found it.
+            assertTrue(live.bool("attnSupportsCompiledBlockSize"))
+            assertTrue(
+                !live.bool("attnSupportsDoubleBlockSize"),
+                "blockSize is baked into H1a's gather and H1b's scatter; inheriting " +
+                    "vLLM's divisibility rule would let the scheduler page memory the " +
+                    "compiled program has no slots for",
+            )
+            assertTrue(live.bool("attnSupportsCompiledHeadSize"))
+            assertTrue(!live.bool("attnSupportsOtherHeadSize"))
+
+            // The forward that is never reached, and the two constructors
+            // above it. Each says WHY arriving there means vLLM took a path
+            // this plugin does not implement.
+            live.mustContain("attnImplRefusal", "TlalocAttentionNotReached")
+            live.mustContain("attnImplRefusal", "there is no torch attention layer to build")
+            live.mustContain("attnBuilderRefusal", "TlalocAttentionNotReached")
+            live.mustContain("attnForwardRefusal", "Attention lives inside the compiled artifact")
 
             // --- 3. what the worker reports about the pool ---------------
             // The artifact's pool, exactly — not a memory profile. A profile

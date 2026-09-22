@@ -1,14 +1,11 @@
 """§0.4.470 — `TlalocPlatform`, the class vLLM's out-of-tree platform
 discovery loads.
 
-**This is the one module (with `worker.py`) that imports vLLM**, and it is
-therefore the one module the certification cannot run — see the honest
-record in `docs/INFERENCE_SERVING_AUDIT.md` §5 (H3b): vLLM is NOT installed
-in this repo's venv and installing it would replace the torch every
-certification oracle runs on. What is written here is written against
-vLLM's documented out-of-tree platform-plugin API; what is *certified* is
-everything under it (`paging`, `batching`, `runner`), end to end against a
-real artifact on real PJRT.
+**This is one of three modules that import vLLM** (`worker.py` and, since
+§0.4.491, `attention.py` are the others). §0.4.477 put vLLM in a venv of
+its own and these modules have RUN since — see `VllmLivePluginTest`; what
+is certified without it is everything underneath (`paging`, `batching`,
+`runner`, `kv_layout`), end to end against a real artifact on real PJRT.
 
 The contract, as documented:
 
@@ -170,13 +167,80 @@ class TlalocPlatform(Platform):
             parallel.worker_cls = "vllm_tlaloc.worker.TlalocWorker"
 
     @classmethod
-    def get_attn_backend_cls(cls, *args, **kwargs) -> str:
-        """There is no pluggable attention backend: attention is inside the
-        compiled program (`PAGED_ATTENTION`, §0.4.465), chosen at export
-        time. Refused by name so that a config asking for FlashAttention
-        gets an answer instead of a backend that is quietly ignored."""
-        raise NotImplementedError(
-            "tlaloc: attention is compiled into the serving artifact's programs "
-            "(OpKind.PAGED_ATTENTION); there is no runtime-selectable attention "
-            "backend to name"
-        )
+    def get_attn_backend_cls(
+        cls,
+        selected_backend=None,
+        attn_selector_config=None,
+        num_heads: int | None = None,
+        *args,
+        **kwargs,
+    ) -> str:
+        """§0.4.491 (H3c-4a) — the dotted path of the backend class.
+
+        From §0.4.470 to §0.4.490 this RAISED, because attention is inside
+        the compiled program (`PAGED_ATTENTION`, §0.4.465) and there is no
+        runtime-selectable kernel to name. That refusal was right about
+        Tlaloc and wrong about vLLM: 0.29.0's v1 engine core calls this
+        classmethod **unconditionally** while building the model runner
+        (`vllm/v1/attention/selector.py`), so declining it ends the process
+        — which is exactly where §0.4.480 stopped with a real 22-layer
+        artifact in hand.
+
+        What is returned is a dotted STRING, which vLLM resolves with
+        `resolve_obj_by_qualname`; see `vllm_tlaloc.attention` for what the
+        class publishes and why its `forward` raises.
+
+        Two refusals SURVIVE, and they are the part of §0.4.470's refusal
+        that was about the user rather than about vLLM:
+
+        * an EXPLICIT `--attention-backend` is refused by name. A user who
+          asked for FlashAttention deserves an answer, not a backend
+          quietly substituted for the one they named.
+        * a selector config that disagrees with the compiled artifact
+          (head size, MLA, sparse) is refused by name, for the reason
+          `check_and_update_config` refuses `--block-size`: a compiled
+          shape is not a preference.
+
+        REJECTED: narrowing the block-size disagreement here too. The
+        backend class already answers it on vLLM's own terms
+        (`get_supported_kernel_block_sizes` returns the one compiled size,
+        and vLLM's `supports_block_size` does the rest), and raising here
+        as well would mean two error messages for one mistake, arriving in
+        an order that depends on vLLM's internals.
+        """
+        from . import ATTENTION_BACKEND_CLASS_PATH
+
+        if selected_backend is not None:
+            raise ValueError(
+                f"tlaloc: an attention backend was named explicitly ({selected_backend!r}), "
+                f"but attention is compiled into the serving artifact's programs "
+                f"(OpKind.PAGED_ATTENTION) and chosen at EXPORT time; there is no "
+                f"runtime-selectable attention kernel here to honour that choice. Drop "
+                f"the flag and the plugin will report the compiled one"
+            )
+
+        if attn_selector_config is not None:
+            from .kv_layout import read_model
+
+            model = read_model(cls.artifact_path())
+            head_size = getattr(attn_selector_config, "head_size", None)
+            if head_size is not None and head_size != model["headDim"]:
+                raise ValueError(
+                    f"tlaloc: the model config's attention head size {head_size} "
+                    f"disagrees with the serving artifact's compiled headDim "
+                    f"{model['headDim']}; --model and $" + ARTIFACT_ENV_VAR + " are "
+                    f"describing two different models"
+                )
+            if getattr(attn_selector_config, "use_mla", False):
+                raise ValueError(
+                    "tlaloc: MLA attention is a named deferral — the exported program "
+                    "carries H1a's PAGED_ATTENTION over a [numBlocks, blockSize, "
+                    "numKvHeads, headDim] pool, which is not an MLA latent cache"
+                )
+            if getattr(attn_selector_config, "use_sparse", False):
+                raise ValueError(
+                    "tlaloc: sparse attention is a named deferral; the compiled "
+                    "PAGED_ATTENTION op attends over every allocated page"
+                )
+
+        return ATTENTION_BACKEND_CLASS_PATH

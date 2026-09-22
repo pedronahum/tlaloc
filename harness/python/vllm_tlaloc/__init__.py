@@ -16,8 +16,11 @@ installed is in a module that does not import vLLM**:
 * `paging.py`  — the KV page pool: allocation, block tables, slot mapping.
 * `batching.py` — requests → one padded, bucket-selected decode call.
 * `runner.py`  — `TlalocModelRunner`: artifact + pool + sampling. Pure.
-* `platform.py`, `worker.py` — the vLLM-facing classes. These import vLLM,
-  and ONLY these.
+* `kv_layout.py` — the KV page layout, read out of the manifest by name.
+* `platform.py`, `worker.py`, `attention.py` — the vLLM-facing classes.
+  These import vLLM, and ONLY these. (`attention.py` joined them in
+  §0.4.491: vLLM's v1 engine core asks for an attention backend CLASS
+  unconditionally, so the plugin has to subclass one.)
 
 That is not a tidiness preference. vLLM is a 186-package dependency
 closure (see the install record in the audit); a plugin whose marshalling
@@ -46,6 +49,13 @@ from __future__ import annotations
 # message about it must all be talking about the same string.
 PLATFORM_CLASS_PATH = "vllm_tlaloc.platform.TlalocPlatform"
 
+# §0.4.491 — the dotted path `get_attn_backend_cls` returns. vLLM resolves
+# it with `resolve_obj_by_qualname`, so it must name a module-level class
+# and not a class built per artifact. Stated here beside PLATFORM_CLASS_PATH
+# for the same reason: the platform that returns it, the module that defines
+# it and the test that pins it must all be saying the same string.
+ATTENTION_BACKEND_CLASS_PATH = "vllm_tlaloc.attention.TlalocAttentionBackend"
+
 # The environment variable naming the serving artifact directory. A vLLM
 # `--model` is a HuggingFace id or a checkpoint path, and a Tlaloc
 # deployment's unit is neither: it is the directory H3a writes. REJECTED:
@@ -57,6 +67,7 @@ ARTIFACT_ENV_VAR = "TLALOC_SERVING_ARTIFACT"
 
 __all__ = [
     "PLATFORM_CLASS_PATH",
+    "ATTENTION_BACKEND_CLASS_PATH",
     "ARTIFACT_ENV_VAR",
     "register",
 ]

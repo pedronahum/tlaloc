@@ -31,6 +31,7 @@ from vllm_tlaloc.batching import (  # noqa: E402
     greedy_sample,
     last_token_logits,
 )
+from vllm_tlaloc import kv_layout  # noqa: E402
 from vllm_tlaloc.paging import PagePool, PagePoolExhausted, SCRATCH_BLOCK  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -370,6 +371,132 @@ class RegistrationTest(unittest.TestCase):
         )
 
 
+class KvLayoutTest(unittest.TestCase):
+    """§0.4.491 (H3c-4a) — the page layout the attention backend class
+    publishes, checked against a REAL exported manifest and against the
+    arithmetic vLLM 0.29.0 does to the same pool.
+
+    The backend class itself cannot run here (it subclasses
+    `vllm.v1.attention.backend.AttentionBackend`), and everything it
+    answers WITH can — which is why `kv_layout.py` exists as a module of
+    its own. The live lane in `run_vllm_live_check.py` then pins these same
+    numbers against vLLM's own `compute_layer_kv_cache_shape_bytes`.
+    """
+
+    #: A real exported manifest's model block — the reference decode graph's,
+    #: field for field as `ServingModelShape.toJson` writes it.
+    MODEL = {
+        "vocabSize": 11, "hiddenSize": 8, "numHeads": 4, "numKvHeads": 2,
+        "headDim": 2, "numLayers": 1, "numBlocks": 6, "blockSize": 2,
+        "dtype": "f32", "kvDtype": "f32", "kvQuant": None,
+        "kvPoolAxisOrder": ["numBlocks", "blockSize", "numKvHeads", "headDim"],
+        "kvPoolDims": [6, 2, 2, 2],
+    }
+
+    def test_the_shape_is_the_manifest_dims_with_k_and_v_in_front(self):
+        self.assertEqual((2, 6, 2, 2, 2), kv_layout.kv_cache_shape(self.MODEL))
+        self.assertEqual(
+            ("kv", "numBlocks", "blockSize", "numKvHeads", "headDim"),
+            kv_layout.kv_cache_axis_names(self.MODEL),
+        )
+
+    def test_the_dims_are_read_through_the_axis_names_and_not_by_position(self):
+        """The failure this guards is invisible when extents coincide.
+
+        The reference pool is `[6, 2, 2, 2]`: three of its four axes are 2,
+        so a positional read is indistinguishable from a named one on it.
+        Permute the STATED order and a named read must refuse, because the
+        artifact is describing a pool this plugin was not compiled for.
+        """
+        permuted = dict(self.MODEL)
+        permuted["kvPoolAxisOrder"] = ["numBlocks", "numKvHeads", "blockSize", "headDim"]
+        with self.assertRaises(kv_layout.KvLayoutError) as cm:
+            kv_layout.kv_cache_shape(permuted)
+        self.assertIn("different compiled artifact", str(cm.exception))
+
+    def test_a_mismatched_pair_of_fields_is_refused(self):
+        short = dict(self.MODEL, kvPoolDims=[6, 2, 2])
+        with self.assertRaises(kv_layout.KvLayoutError):
+            kv_layout.kv_cache_shape(short)
+
+    def test_the_layout_name_is_derived_from_the_axis_order(self):
+        # numBlocks->B, blockSize->N, numKvHeads->H, headDim->C, L outermost
+        # because Tlaloc's pools are separate tensors per layer.
+        self.assertEqual("LBNHC", kv_layout.kv_cache_layout_name(self.MODEL))
+
+    def test_a_page_is_one_block_of_k_and_v_for_one_layer(self):
+        # 2 (K,V) * blockSize 2 * numKvHeads 2 * headDim 2 * 4 bytes = 64
+        self.assertEqual(64, kv_layout.page_size_bytes(self.MODEL))
+        # and the whole pool is that, times numBlocks, times numLayers.
+        self.assertEqual(64 * 6 * 1, kv_layout.pool_bytes(self.MODEL))
+
+    def test_the_two_readings_of_one_page_spend_the_same_bytes(self):
+        """`KV_PAGE_BYTES_AGREE`, which is the whole of what a compiled
+        artifact and vLLM's block manager have to agree about.
+
+        vLLM 0.29.0 reads a page as `[B, H, N, C]` with K and V INTERLEAVED
+        into `C`; Tlaloc stores them as two tensors. The axis orders differ
+        and are not made to match — the byte count does, and that is the
+        number blocks are handed out against.
+        """
+        b, h, n, c = kv_layout.vllm_logical_page_shape_bytes(self.MODEL)
+        self.assertEqual((6, 2, 2, 16), (b, h, n, c))
+        self.assertEqual(h * n * c, kv_layout.page_size_bytes(self.MODEL))
+        self.assertEqual(64, kv_layout.check_page_bytes_agree(self.MODEL))
+
+    def test_an_unknown_kv_dtype_is_refused_rather_than_sized(self):
+        with self.assertRaises(kv_layout.KvLayoutError) as cm:
+            kv_layout.page_size_bytes(dict(self.MODEL, kvDtype="fp8"))
+        self.assertIn("pool that does not exist", str(cm.exception))
+
+    def test_it_reads_the_model_block_out_of_a_real_artifact_directory(self):
+        """The round trip the contract is about: a manifest a Kotlin
+        exporter wrote, parsed here, giving the shape the pool has."""
+        exported = (
+            HERE.parents[1] / "examples" / "gpu-inference" / "build" / "artifact"
+        )
+        if not (exported / kv_layout.MANIFEST_NAME).is_file():
+            self.skipTest(f"no exported artifact at {exported}")
+        model = kv_layout.read_model(exported)
+        self.assertEqual(
+            list(kv_layout.KV_POOL_AXIS_ORDER), model["kvPoolAxisOrder"],
+            "the exporter and this reader must state the same axis order",
+        )
+        self.assertEqual(
+            (2, *model["kvPoolDims"]), kv_layout.kv_cache_shape(model),
+        )
+        kv_layout.check_page_bytes_agree(model)
+
+    def test_a_directory_with_no_manifest_is_refused_by_name(self):
+        with self.assertRaises(kv_layout.KvLayoutError) as cm:
+            kv_layout.read_model(HERE)
+        self.assertIn(kv_layout.MANIFEST_NAME, str(cm.exception))
+
+
+class AttentionBackendPathTest(unittest.TestCase):
+    """§0.4.491 — the dotted path, pinned the way the platform path is.
+
+    vLLM resolves what `get_attn_backend_cls` returns with
+    `resolve_obj_by_qualname` and nothing checks it first, so a typo
+    surfaces as an import error deep inside engine startup.
+    """
+
+    def test_the_path_names_a_module_and_class_that_exist(self):
+        mod, _, cls = vllm_tlaloc.ATTENTION_BACKEND_CLASS_PATH.rpartition(".")
+        path = HERE / Path(*mod.split(".")).with_suffix(".py")
+        self.assertTrue(path.exists(), f"{path} does not exist")
+        # Read, not import: attention.py imports vLLM by design.
+        self.assertIn(f"class {cls}(", path.read_text())
+
+    def test_the_platform_returns_that_constant_and_not_a_literal(self):
+        src = (HERE / "vllm_tlaloc" / "platform.py").read_text()
+        self.assertIn("return ATTENTION_BACKEND_CLASS_PATH", src)
+        self.assertNotIn(
+            f'"{vllm_tlaloc.ATTENTION_BACKEND_CLASS_PATH}"', src,
+            "the platform must return the shared constant, not its own copy of the string",
+        )
+
+
 class ImportGuardTest(unittest.TestCase):
     def test_the_vllm_facing_modules_say_what_is_missing(self):
         try:
@@ -378,13 +505,33 @@ class ImportGuardTest(unittest.TestCase):
             self.skipTest("vLLM is installed; the guard is not the live path")
         except ImportError:
             pass
-        for name in ("vllm_tlaloc.platform", "vllm_tlaloc.worker"):
+        for name in ("vllm_tlaloc.platform", "vllm_tlaloc.worker", "vllm_tlaloc.attention"):
             with self.assertRaises(ImportError) as cm:
                 __import__(name)
             self.assertIn("requires vLLM", str(cm.exception))
 
+    def test_the_attention_module_reaches_for_vllm_before_torch(self):
+        """§0.4.491 — an ordering the unit lane found the hard way.
+
+        `attention.py` needs torch dtypes, but only where vLLM is present.
+        The ORACLE venv has torch and no vLLM, so importing torch first
+        would leave it resident in a process that then correctly refused to
+        load this module — a framework leak with a passing import guard
+        above it. `test_importing_the_loader_pulls_in_no_framework` caught
+        it; this pins the fix at the line that has to stay in order.
+        """
+        src = (HERE / "vllm_tlaloc" / "attention.py").read_text()
+        self.assertLess(
+            src.index("from vllm.v1.attention.backend import"),
+            src.index("\n    import torch"),
+            "attention.py must reach for vLLM before torch: its torch need is "
+            "downstream of vLLM's, and the reverse order leaks torch into a venv "
+            "that has no vLLM",
+        )
+
     def test_the_certified_modules_import_without_vllm(self):
         import vllm_tlaloc.batching  # noqa: F401
+        import vllm_tlaloc.kv_layout  # noqa: F401
         import vllm_tlaloc.paging  # noqa: F401
         import vllm_tlaloc.runner  # noqa: F401
 
