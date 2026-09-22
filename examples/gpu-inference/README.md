@@ -100,9 +100,10 @@ script adds `harness/python` itself. A deployment gets it with
 `pip install -e <tlaloc>/harness/python`, which **pulls in nothing**: that
 distribution's dependency list is empty, and a test pins it empty.
 
-**No GPU?** Half one still runs and still writes a complete artifact — it is
-complete whether or not the box that made it can execute it. Half two then
-prints a `SKIP:` line naming what is missing and exits `0`:
+**No GPU — or no `TLALOC_PJRT_PLUGIN_PATH`?** Half one still runs and still
+writes a complete artifact — it is complete whether or not the box that made it
+can execute it. Half two then prints a `SKIP:` line naming what is missing and
+exits `0`:
 
 ```
 SKIP: no PJRT plugin on this machine, so there is nothing to run on.
@@ -111,6 +112,13 @@ SKIP: no PJRT plugin on this machine, so there is nothing to run on.
       /lib/libtpu.so, or a standalone plugin a deployment ships). The serving
       runtime needs that file and a driver — nothing else.
 ```
+
+That message is about this process's *inputs*, not about the machine. A box with
+a working plugin prints exactly the same thing if the `export` above was skipped:
+the JVM side (`PjrtBinaries`, §0.4.503) searches seven roots for a plugin, and the
+serving runtime deliberately searches none — it takes the path it is given, because
+a deployment ships its own `.so` and guessing is not a serving-time behaviour.
+Measured at §0.4.506, on a GB10 whose JVM lane was running on CUDA at the time.
 
 ---
 

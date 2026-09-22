@@ -5,8 +5,19 @@
 2026-09-22. TIER 2 ITEM 7 COMPLETE (§0.4.502, 2026-09-22). TIER 3 COMPLETE —
 portability and trust (§0.4.503) and the CI matrix (§0.4.504), 2026-09-22; the CI
 lanes are 🧪 because no GitHub Actions run of them exists. TIER 4 COMPLETE —
-documentation debt and the public API surface (§0.4.505, 2026-09-22). The rest of
-TIER 2 IS NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
+documentation debt and the public API surface (§0.4.505, 2026-09-22). FINAL
+VERIFICATION COMPLETE (§0.4.506, 2026-09-22): the whole gauntlet re-run from a
+clean room — 2,522 tests, 0 failures, ten examples, the published POMs, both
+halves of the framework-free serving path — with one new defect published and one
+deferral closed. The rest of TIER 2 IS NOT YET SCOPED IN THIS FILE.**
+
+**The verdict is at the bottom of this file, under
+[Final verification (§0.4.506)](#final-verification-04506-2026-09-22): the engine
+is an alpha; the *distribution* is not yet, and the three things standing in the
+way are a group-id decision, one CI run and one GPG key — none of them
+engineering.**
+
+This document is the running record for the arc
 that takes Tlaloc from "an engine with 2,345 passing tests that nobody may
 legally use" to "an alpha a stranger can depend on". Tier 0 was the legal and
 distribution tier: before it, the repository had no `LICENSE` (so, by default,
@@ -592,7 +603,7 @@ claims are true, and four of them were not.
 | `./gradlew apiCheck` | green; **negative-tested** — one added public function in `:stablehlo` makes it fail with the diff |
 | `./gradlew apiDocs` | 2,898 HTML pages, 46 MB, eleven modules, 206 KDoc-link warnings |
 | `bash scripts/onboarding-smoke.sh` | passes |
-| Every one of the ten examples | ran; the two that now need `@file:OptIn` were re-run after adding it, including `four-worlds`'s deliberately-failing `shapeError` source set |
+| **Nine** of the ten examples | ran; the two that now need `@file:OptIn` were re-run after adding it, including `four-worlds`'s deliberately-failing `shapeError` source set. **`gpu-inference` was NOT re-run at §0.4.505** — it writes 4.1 GiB and then needs a separate Python process, and it touches no marked API and no file that tier changed. *(Corrected at §0.4.506: this row originally read "Every one of the ten examples | ran", which contradicted this tier's own handover. Both halves of `gpu-inference` were then run at §0.4.506 — see the final-verification section.)* |
 
 **One real break this tier caused, found by the suite and fixed.**
 `WorldScopeDisciplineTest` compiles five snippets against `:core` through
@@ -643,3 +654,171 @@ a POM this build generated — and a JUnit test that shelled out to Gradle to
 produce one would be slower, flakier and less precise about which module failed.
 It is wired into `check`, so it runs in exactly the command the repository already
 treats as its gate.
+
+---
+
+## Final verification (§0.4.506, 2026-09-22)
+
+The arc's closing tier. It changed **no Kotlin, no Gradle logic and no test** — it
+re-ran every claim the five tiers above made about this repository as a whole, from
+a clean room, and wrote down what it observed rather than what the tiers reported.
+Two things came out of it that the tiers had not said: one closure (a deferral that
+is no longer deferred) and one asymmetry (a resolver that §0.4.503 fixed on one side
+of the serving seam and not the other).
+
+### The gauntlet, as observed
+
+Every row below was executed here, in this order, one Gradle invocation at a time.
+
+| Step | Observed |
+|---|---|
+| `./gradlew test --rerun-tasks` | **BUILD SUCCESSFUL in 3m 32s — "139 actionable tasks: 139 executed"**. Zero up-to-date, so it is a genuine re-execution and not a no-op |
+| Failures / errors | **none**: all 377 `TEST-*.xml` files report `failures="0"` and `errors="0"` |
+| `bash scripts/count-tests.sh` | **2522**. Baseline at the start of this arc was 2345, so **+177**; the count did not go down |
+| Where the 2522 come from | **2471 from the root suite + 51 from `third-party/maestro`.** The Maestro XMLs are dated 2026-09-21 17:32 and 2026-09-22 22:31 — *before* this run's 23:37–23:40 — so root `./gradlew test` did not re-execute them, exactly as §0.4.504 said. The impurity §0.4.504 named is now measured: the reproducible root-suite number is **2471** |
+| Skips | **93**, all self-skips by name: 76 `RoundTripTest` + 7 `SdyRoundTripTest` + 5 `SdyPropagationTest` (no `stablehlo-translate` / `sdy-opt`) and 5 `PjrtTpuSmokeTest` (no TPU) |
+| Known flakes | **neither fired.** `BGDHyperOptTest` (Tier 0, Tier 4) and `KptxPagedAttentionBenchTest` (Tier 3) were both green in this clean-room run. Recorded because "green once" is not the same as "not a flake" — they remain wall-clock assertions on a shared machine |
+| `bash scripts/onboarding-smoke.sh` | **passes, exit 0** — `publishToMavenLocal` then `examples/quickstart run`, printing the `[7.0, 11.0, 9.0, 13.0]` gradient. The `0.1.0-alpha01` coordinate is consistent across all 19 files that name it; the only surviving `0.0.1-SNAPSHOT` strings in the tree are three *historical* mentions (a `CHANGELOG` entry, a `build.gradle.kts` comment, an `ALPHA_PLAN` row) |
+| Ten example projects | **all ten exit 0** — `quickstart`, `named-indices`, `readable-gradients`, `differentiable-physics`, `mnist`, `gpu-training`, `internals/four-worlds`, `internals/layer3`, `internals/tpu`, `gpu-inference`. Verified individually that each did real work or skipped BY NAME; none passed silently |
+| `./gradlew -p examples/quickstart shapeError` | **BUILD FAILED, as it must** — `e: ShapeError.kt:30:5 Tlaloc named-index mismatch: contract operands share no named axis: lhs=[Batch, SeqLen] rhs=[Hidden, Hidden]`. This is also the independent pin for Tier 4 item 6: the diagnostic carries file, line and column |
+| `compileKotlin --rerun-tasks` (Tier 1's regression) | **0 lines matching `^w:`**, no Tlaloc output of any kind, on a genuine re-execution |
+| The same compile with `allWarningsAsErrors` | **BUILD SUCCESSFUL.** And the green is not vacuous: an instrumented copy of the init script printed `WERROR-APPLIED-TO: :compileKotlin (org.jetbrains.kotlin.gradle.tasks.KotlinCompile_Decorated)`, so the flag demonstrably reached the task that compiles `grad {}` |
+| The published metadata | **All 21 POMs** under `~/.m2/repository/io/tlaloc/` carry `<name>`, `<description>`, `<url>`, `<licenses>`, `<developers>`, `<scm>` — plus `<issueManagement>` and `<inceptionYear>`. `core-jvm`'s POM was read in full. **All 21 publications** carry both a `-sources.jar` and a `-javadoc.jar`; `core-jvm`'s javadoc jar holds **591 HTML pages / 8.9 MB** of real Dokka output, not an empty shell |
+| Symja's scope, checked independently | **0 occurrences of `matheclipse`** in `ir-jvm`'s POM *and* in its Gradle module metadata. Tier 3's `compileOnly` claim confirmed from the published artifact rather than from the build script |
+| The JDK split, checked independently | Read out of the **published jars'** class-file major version, not from `verifyJvmTarget`: `core` `ir` `autograd` `nn` `stablehlo` `maestro` → **65** (Java 21); `runtime-pjrt` `runtime-cuda` `kptx` `runtime-iree` `compiler-plugin` → **69** (Java 25). Exactly the `tlalocJvmTargets` map |
+| Do the three gates actually ride in `./gradlew test`? | **Yes**, and it was checked rather than assumed: `./gradlew test --dry-run` lists **11 `verifyPomMetadata`** (Tier 0), **12 `verifyJvmTarget`** (Tier 3) and **6 `apiCheck`** (Tier 4) — the six Java-21 modules, which is the exact set Tier 4 said the ABI validator can read. The green suite therefore covers all three |
+| `git status` | clean before and after; nothing the runs wrote is untracked |
+| AI attribution in this arc's commit messages | **none.** All eight commits `1f4be79..HEAD` were grepped, message body *and* author *and* committer, for `claude`, `opus`, `anthropic`, `co-authored`, `generated with`, `sonnet` and the robot emoji. Every one is clean and authored `Pedro N. Rodriguez <pnrodriguezh@gmail.com>`. No rewrite was needed, so none was made |
+
+### What the final verification found
+
+**1. `examples/gpu-inference` is no longer a deferral — both halves ran here.**
+Tier 4 recorded it as the one example it had not re-run ("writes 4.1 GiB … and then
+needs a separate Python process"). Both halves were executed for this tier:
+
+- Half one, Kotlin: wrote the artifact from the real cached TinyLlama-1.1B —
+  22 layers, 201 staged operand files, 4.1 GiB, one compiled entry
+  `decode_b1_c64 -> bodies/8cbf1976….mlir`.
+- Half two, `/usr/bin/python3 serve.py`: loaded that directory through
+  `CtypesEngine on cuda` and greedily decoded — prompt `[1, 450, 7483, 310, 3444,
+  338]`, generated `[3681, 29889, 13, 13, 29906, 29889]`, which the checkpoint's own
+  `tokenizer.json` renders as **`' Paris.\n\n2.'`** — the completion the example's
+  README promises, on the first line of the file. First step 6652 ms (weight upload
+  + XLA compile), median step 1347 ms, 1 XLA compile.
+
+So the repository's headline serving claim — a real Llama, served by a process with
+no JVM, no jax, no torch and no numpy in it — is certified at §0.4.506 as well as at
+§0.4.490, on this build, by a reader who did not write it.
+
+**2. THE ASYMMETRY: §0.4.503 taught the JVM to find a PJRT plugin, and the serving
+runtime still cannot.** This is the one real defect the final pass found, and it is
+published rather than fixed, because fixing it is a behavioural change to the
+serving runtime and this tier commits documentation only.
+
+The first attempt at half two, run exactly as the example's own hand-off line
+prints it (`python3 serve.py --artifact …`), printed:
+
+```
+SKIP: no PJRT plugin on this machine, so there is nothing to run on.
+```
+
+That sentence is **false about this machine**. There is a plugin at
+`~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`
+(447 MB, present), and `examples/gpu-training` had run on CUDA through it four
+minutes earlier without any environment variable set. The cause is a seam:
+
+- JVM side, `PjrtBinaries` (§0.4.503): **globs seven roots** — `$VIRTUAL_ENV`,
+  `~/.local/venvs/*`, `~/.venv`, `~/venv`, `~/.local`, `/usr/local`, `/usr` — across
+  any venv name, any `python3.N` and any `jax_plugins/*cuda*` package, and reports
+  everywhere it looked.
+- Python side, `PjrtApi.load` in `harness/python/tlaloc_pjrt.py`: takes an explicit
+  path or `TLALOC_PJRT_PLUGIN_PATH` and **searches nothing at all**.
+
+With the variable exported the same script runs the model perfectly (finding 1). So
+the honest statements are: the serving runtime **refuses by name and exits 0**, which
+is the house rule and is not broken; the requirement **is documented** — the export is
+line one of half two in `examples/gpu-inference/README.md`, in the root README and in
+`docs/SERVING_RUNBOOK.md`; and the message's own second line names the variable. What
+is imprecise is (a) the README frames that SKIP block under "**No GPU?**", which is
+one cause of it and not the one a GB10 owner hits, and (b) the Kotlin half's printed
+hand-off line omits the export that the README's own code block has. Neither is a
+false capability claim. **Deferred, with the reason:** porting the seven-root glob
+into `tlaloc_pjrt.py` would make the two halves symmetric and is the obvious repair,
+but it is new behaviour in the runtime a deployment ships, and it needs its own tests
+on synthetic install trees the way `PjrtCudaPluginResolutionTest` has. ⬜.
+
+**3. A third data point on the GPU lane's reproducibility, and it supports the
+hedge.** `examples/gpu-training` on CUDA ended this run at **loss 0.047137, 98.0 %
+held out, 337/337 parameter scalars bit-identical after the checkpoint round trip**.
+That final loss is the **§0.4.486** value — not §0.4.502's `0.046667`, which §0.4.502
+observed twice and used to soften the nondeterminism claim. Both recorded values have
+now been observed from the same source tree. That is the evidence for exactly what
+the example's README says ("XLA autotunes its GEMM kernels at compile time … CAN pick
+a different winner per run, and it does not have to") and against either stronger
+claim. The 98.0 % figure matches the README's committed block exactly.
+
+**4. The skip count in the repository's own memory is stale, harmlessly.** The
+long-standing note "91 MLIR round-trip tests always skip" is now **88** (76 + 7 + 5)
+plus 5 TPU smoke tests, for 93 skips in total. Nothing regressed; the suites grew.
+
+### The arc at a glance — Tiers 0 through 4
+
+One row per tier, with the gate that pins it and the deferral that still blocks it.
+The per-item tables above remain the authority; this is the roll-up.
+
+| Tier | § | Verdict | The gate that pins it | What still blocks it |
+|---|---|---|---|---|
+| **0 — legal and distribution** | §0.4.498 | ✅ certified, with three 🧪 rows | `verifyPomMetadata` × 11 inside `check`; `scripts/onboarding-smoke.sh`. Re-verified here from the published artifacts | **Nothing is on Maven Central.** Signing, the `central` repository and `RELEASING.md`'s last two steps have never executed, and the `io.tlaloc` vs `io.github.pedronahum` namespace decision is unmade. ⬜ |
+| **1 — first-contact defects** | §0.4.499 | ✅ certified | `DiagnosticNoiseTest` (7); re-verified here as 0 `w:` lines and a green `-Werror` compile with the flag proven to reach the task | The `pluginMissing` runtime text still cannot distinguish "no plugin" from "plugin refused" (🧪). `dumpLoweredIr=true` still cannot be combined with `-Werror`. Both named |
+| **2 — item 6, captured values** | §0.4.500 + §0.4.501 | ✅ certified, both slices | `CapturedConstantGradientTest` (12) + `CapturedRuntimeValueGradientTest` (17), every positive one an equivalence against the explicit-parameter or inlined spelling | A captured **tensor**, a captured value-class scalar, a captured property and a captured `var` all refuse by name. ⬜ — the next slice |
+| **2 — item 7, persistence** | §0.4.502 | ✅ certified | 83 tests, incl. two cross-language oracle suites that **ran** (`safetensors` 0.8.0, torch 2.11.0+cpu) and a negative control on optimizer state | Sharded and streaming output are 📐. A checkpoint carries no structure and no hyperparameters — permanent, by design, and stated in the refusal itself |
+| **2 — the rest** | — | ⬜ **never scoped in this file** | — | Items 1–5 and 8+ of Tier 2 were never in any brief this arc received. Three tiers said so rather than inventing them. **This is the arc's largest unknown** |
+| **3 — portability and trust** | §0.4.503 | ✅ certified | `verifyJvmTarget` × 12 + `-Xjdk-release=21` × 6 inside `check`; 41 tests; `scripts/jdk21-smoke.sh` on OpenJDK 21.0.2. Re-verified here from published bytecode | `:compiler-plugin` stays on Java 25, so a **JDK-21-only machine still cannot build `grad {}`**. No Symja-free CAS. KMP variants publish no `org.gradle.jvm.version`. All ⬜ |
+| **3 — CI matrix** | §0.4.504 | 🧪 **lanes** / ✅ **their commands** | `actionlint` 1.7.12, zero findings on three workflows; every Gradle command in them run locally (1,822 tests on JDK 21; 1,750 under the 2.4.20 compiler) | **No GitHub Actions run of any lane exists.** Kotlin 2.4.20 does not compile `:compiler-plugin` (one error, published). No aarch64-Linux lane. ⬜ |
+| **4 — docs and the public surface** | §0.4.505 | ✅ certified | 13 tests (`ExperimentalTlalocApiTest`, `ExperimentalApiOptInTest`, `DiagnosticSourcePositionTest`) + `apiCheck` inside `check`, confirmed here to be in `./gradlew test` for 6 modules | The ABI baseline covers **6 of 11** modules — a measured tool limit (BCV 0.18.2 cannot read Java 25 bytecode). 206 Dokka warnings counted, unswept. Nothing is hosted. `:kptx` unmarked. ⬜ |
+| **5 — final verification** | §0.4.506 | ✅ this section | The gauntlet table above | The serving-side plugin resolver (finding 2). ⬜ |
+
+### The verdict: is this an alpha?
+
+**As an engine: yes, and by a margin.** 2,471 tests re-executed from a clean room
+with zero failures; gradients certified against analytic answers and against
+PyTorch, JAX and `safetensors` as cross-implementation oracles; a real TinyLlama-1.1B
+decoding correct tokens in a process with no framework in it; ten example projects
+that all run, one of which is *supposed* to fail and does. The house rules hold under
+inspection: every unsupported case this tier could reach refused **by name** and
+exited 0, and the one wrong sentence found in a whole day of verification
+(`SKIP: no PJRT plugin on this machine`) was wrong about its environment, not about
+its own inputs.
+
+**As something a stranger can depend on: not yet — and what is missing is not
+engineering.** Three facts, all of them ⬜ and none of them code:
+
+1. **Nothing is on Maven Central.** Every install path in every document begins with
+   `git clone`. The wiring exists and is dry-runnable; it has never been run.
+2. **The group id is undecided.** `io.tlaloc` needs a DNS TXT record on a domain;
+   `io.github.pedronahum` needs nothing but changes every coordinate in the README,
+   the docs and ten example projects. Until it is chosen, the coordinate this
+   repository advertises is provisional.
+3. **No CI run of any lane exists.** Five 🧪 rows in
+   [CAPABILITIES.md](CAPABILITIES.md) become ✅ or become bug reports the first time
+   a workflow executes, and every ✅ in that file was certified on exactly one
+   machine.
+
+**The shortest remaining path to an alpha a stranger can install**, in the order the
+dependencies force:
+
+1. **Decide the group id.** One decision, nobody's but the owner's, and it gates
+   every coordinate in every file. (`RELEASING.md` §4.)
+2. **Push, and let CI run once.** The lanes are written and lint-clean; a single
+   green `ubuntu-latest` + `macos-15` run converts the arc's largest block of 🧪 into
+   evidence, and a red one is worth more than the 🧪.
+3. **Make one GPG key and run `RELEASING.md`'s last two steps.** That single act
+   turns signing, the `central` repository and the release procedure from 🧪 to ✅
+   simultaneously — they are one row wearing three hats.
+
+Nothing on that list is a feature. Everything else this arc named — the plugin on
+JDK 21, a Symja-free CAS, Kotlin 2.4 support, an ABI baseline for the Java-25
+modules, captured tensors, the serving-side resolver, 206 KDoc links, an aarch64
+Linux lane, and the unscoped remainder of Tier 2 — is **post-alpha work**, and all of
+it is written down: in the tables above, in `CAPABILITIES.md`, in `COMPATIBILITY.md`,
+or in the refusal message a user actually sees.

@@ -14,6 +14,40 @@ retro-summarise them; it is the record from the first named version forward.
 
 ## [Unreleased]
 
+### Verified
+
+- **The alpha arc's final verification (§0.4.506).** No code changed; every claim the
+  arc made about the repository as a whole was re-run from a clean room and the
+  observations written into `docs/ALPHA_PLAN.md`. `./gradlew test --rerun-tasks`:
+  BUILD SUCCESSFUL, 139 of 139 tasks executed, **0 failures and 0 errors across all
+  377 JUnit report files**, 2,522 tests (2,471 from the root suite + 51 from the
+  vendored Maestro results, which root `test` does not re-execute). Also re-run:
+  `scripts/onboarding-smoke.sh`; all **ten** example projects (each verified to do
+  real work or self-skip *by name*); `examples/quickstart shapeError`, which still
+  fails as designed with the diagnostic at `ShapeError.kt:30:5`; a consumer compile
+  under `allWarningsAsErrors` — green, with the flag *proven* to have reached
+  `:compileKotlin` so the green is not vacuous; all 21 published POMs (every
+  Central-mandatory element present, sources + javadoc jars on every publication,
+  Symja absent from `ir-jvm`'s POM *and* module metadata); the Java 21/25 split read
+  out of published bytecode rather than out of the build script; and **both halves of
+  `examples/gpu-inference`** — a real TinyLlama-1.1B, 4.1 GiB of weights, decoded by
+  `/usr/bin/python3` to `' Paris.\n\n2.'`, which closes the one example §0.4.505 had
+  not re-run.
+- **One defect published, not fixed: the serving runtime cannot find a PJRT plugin
+  for itself.** §0.4.503 taught the JVM's `PjrtBinaries` to glob seven roots;
+  `PjrtApi.load` in `harness/python/tlaloc_pjrt.py` searches nothing and takes the
+  path it is given. So on a machine with a working plugin and no
+  `TLALOC_PJRT_PLUGIN_PATH`, the JVM lane runs on CUDA while `serve.py` prints
+  `SKIP: no PJRT plugin on this machine` — a refusal that is by name and exits 0, but
+  whose sentence is false about the box. The export is documented as line one of half
+  two; what was imprecise was the surrounding framing, now corrected in
+  `examples/gpu-inference/README.md`. Recorded as ⬜ in `docs/CAPABILITIES.md` and
+  `docs/ALPHA_PLAN.md`.
+- **One ledger contradiction corrected.** `docs/ALPHA_PLAN.md`'s Tier 4 suite-state
+  table claimed "Every one of the ten examples ran" while the same tier's handover
+  said nine did. The row now says nine, names the exception, and points at the
+  §0.4.506 run that closed it.
+
 ### Added
 
 - **`@ExperimentalTlalocApi` — an opt-in marker on the part of the surface that is

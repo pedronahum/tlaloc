@@ -13,7 +13,11 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet (the mark [ALPHA_PLAN.md](ALPHA_PLAN.md) uses; added to this legend in §0.4.504) |
 | ❌ **Not planned** | |
 
-Last reviewed at §0.4.505 (2026-09-22), 2,522 automated tests at HEAD.
+Last reviewed at §0.4.506 (2026-09-22), 2,522 automated tests at HEAD — a number
+re-measured from a clean-room `./gradlew test --rerun-tasks` with 0 failures. Of it,
+**2,471 come from the root suite and 51 from the vendored Maestro results in the
+tree**, which root `test` does not re-execute; the reproducible root-suite number is
+2,471.
 
 ## Automatic differentiation
 
@@ -65,6 +69,7 @@ Last reviewed at §0.4.505 (2026-09-22), 2,522 automated tests at HEAD.
 | safetensors WRITING | ✅ | F32/F64/I32/BF16, header padded and tensors ordered so every offset is naturally aligned; certified both ways against the reference `safetensors` library on raw bytes. Sharded and streamed output are named deferrals; F16/FP8 refuse by name |
 | A real Llama serving end to end | ✅ | TinyLlama-1.1B, all 22 layers, on PJRT-CUDA — 6/6 generated token ids identical to HuggingFace transformers, driven directly *and* through vLLM |
 | Framework-free serving runtime | ✅ | The serving process imports no JAX, no PyTorch, no NumPy — just a PJRT plugin `.so` and a driver (proven by an import blocker that raises on those modules while the path runs) |
+| The serving runtime finding a plugin for itself | ⬜ | **Asymmetric with the JVM, measured at §0.4.506.** `PjrtApi.load` in `harness/python/tlaloc_pjrt.py` takes an explicit path or `TLALOC_PJRT_PLUGIN_PATH` and searches nothing; §0.4.503 taught the Kotlin `PjrtBinaries` to glob seven roots. On a machine with a working plugin and no env var, the JVM lane runs on CUDA while `serve.py` prints `SKIP: no PJRT plugin on this machine` — a refusal that is by name and exits 0, but whose sentence is false about the box. The export is documented as line one of half two in [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md) and in `examples/gpu-inference/README.md`; porting the glob into the Python resolver is new runtime behaviour and is not done. See [ALPHA_PLAN.md](ALPHA_PLAN.md) §0.4.506 finding 2 |
 | vLLM platform plugin | ✅ | vLLM 0.29.0's `LLM.generate()` runs a real TinyLlama from a Tlaloc artifact — the same 6 token ids as the direct driver and as HuggingFace. One sequence, greedy, prompt within the compiled context; `vllm serve`'s HTTP layer is not yet run ([audit](INFERENCE_SERVING_AUDIT.md), [runbook §11](SERVING_RUNBOOK.md)) |
 | SGLang plugin | 📐 | Design recorded; reuses the same artifact |
 | KV-cache quantization (int8) | ✅ | Derived error bound, not a guess |
@@ -116,6 +121,7 @@ them has no access to GitHub Actions.
 | Lane | Status | Notes |
 |---|---|---|
 | GB10 (aarch64 Linux, JDK 25) | ✅ | The reference machine. Every GPU, PJRT, IREE, KPTX and cross-language-oracle row in this file was certified here and nowhere else |
+| The whole gauntlet, re-run clean-room | ✅ | §0.4.506, on the GB10: `./gradlew test --rerun-tasks` (139 of 139 tasks executed, 3m32s, **0 failures across 377 report files**), `scripts/onboarding-smoke.sh`, all **ten** examples, `quickstart shapeError` failing as designed, a `-Werror` consumer compile with the flag proven to reach the task, all 21 published POMs and their sources+javadoc jars, and **both halves of `examples/gpu-inference`** — a real TinyLlama-1.1B decoding `' Paris.\n\n2.'` through `/usr/bin/python3`. Neither of the two known wall-clock flakes fired |
 | The library's suites on a JDK 21 | ✅ | `-PtlalocTestJdk=21` over `:core :ir :autograd :nn :stablehlo :maestro` — 1,822 tests green on OpenJDK 21.0.2 (§0.4.504). Ran here, on this machine, not in CI |
 | The plugin under a foreign Kotlin compiler | ✅ | `-PtlalocKotlinVersion=2.3.10` — `KotlinVersionGuard` refuses by name, from inside a real 2.3.10 compile (§0.4.504). The same probe against **2.4.20 does not compile the plugin at all**: one error, direct `MessageCollector` access. A published negative result, not a fixed one |
 | x86_64 Linux CI (`ubuntu-latest`) | 🧪 | `.github/workflows/build.yml`. Written §0.4.497, widened §0.4.504. **No run exists.** A green run would mean "the platform-neutral subset passes": a runner has no GPU, no PJRT plugin, no IREE, no `stablehlo-translate` and no PyTorch oracle venv, and every test needing one self-skips by name |
