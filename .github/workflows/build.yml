@@ -1,0 +1,59 @@
+# The repo-wide lane. The maestro lane next door is paths-scoped and answers a
+# narrow question (does our step type still register against vendored Maestro);
+# this one answers the broad one: does Tlaloc still build and pass its suite.
+#
+# On what this can and cannot certify: a GitHub runner has no GPU, no PJRT
+# plugin, no IREE toolchain and no stablehlo-translate. Every test that needs
+# one gates on PjrtBinaries.available / cudaAvailable and SELF-SKIPS BY NAME,
+# so green here means "the platform-neutral subset passes" — it is not a
+# substitute for the GB10 run that certifies the GPU claims in the README.
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Test
+        run: ./gradlew test --no-daemon --stacktrace
+
+      # The count the repo tracks in its own smoke gate. Printed, not asserted:
+      # a runner skips the hardware lanes, so its total is legitimately lower
+      # than the 2345 a GB10 reports, and pinning it here would only teach
+      # people to ignore a red build.
+      - name: Test count (informational)
+        if: always()
+        run: bash scripts/count-tests.sh || true
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          retention-days: 14
+          if-no-files-found: warn

@@ -1,0 +1,77 @@
+# OQ-Layer2.5-9 — the CI lane specified by §0.4.249 (L2.5.5) and recorded in
+# docs/audits/maestro_first_class_audit.md §1 "CI integration".
+#
+# The file was designed in that slice but never landed: its push was rejected
+# because the auth token lacked `workflow` scope. This is that file, with the
+# one change the intervening year forced — the toolchain is JDK 25, not the
+# JDK 21 the original design named (the repo moved in §0.4.311).
+#
+# What it does NOT do, deliberately, per the audit:
+#   - build the runtime container image (Docker-in-Docker; OQ-Layer2.5-3)
+#   - boot a live Maestro with K8s pod lifecycle (kind/k3d; OQ-Layer2.5-3)
+# v1 runs the maestro-tlaloc suite, which exercises the same code path with
+# synthetic inputs.
+name: maestro-integration
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      # The vendored step type, its entrypoint builder and its tests.
+      - 'third-party/maestro/maestro-tlaloc/**'
+      # Maestro's own StepType registry — a rename there breaks our registration.
+      - 'third-party/maestro/maestro-common/src/main/java/com/netflix/maestro/models/definition/StepType.java'
+      # The Tlaloc side of the handoff: the typed handle that crosses a step.
+      - 'maestro/src/jvmMain/kotlin/io/tlaloc/maestro/SerializedBufferHandle.kt'
+      - 'maestro/src/jvmTest/kotlin/io/tlaloc/maestro/SerializedBufferHandleTest.kt'
+      - 'maestro/src/**/serving/**'
+      # And this file.
+      - '.github/workflows/maestro-integration.yml'
+
+concurrency:
+  group: maestro-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    # The audit's budget is 10 minutes; the composite Gradle build is the long
+    # pole (~5-7 min cold, ~1 min warm). 25 is headroom, not an expectation.
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The Tlaloc-side suite. Hardware-gated tests (PJRT, CUDA, IREE, KPTX)
+      # check PjrtBinaries.available / cudaAvailable and self-skip by name on a
+      # runner that has none of them; the MLIR round-trip tests skip when
+      # stablehlo-translate is absent. A green run here is the platform-neutral
+      # subset, which is what this lane is for.
+      - name: Tlaloc test suite
+        run: ./gradlew test --no-daemon --stacktrace
+
+      # The vendored Maestro side, through the composite build. This is the
+      # step the lane exists for: it fails if our step type stops registering
+      # against the Maestro we vendor.
+      - name: maestro-tlaloc test suite
+        run: ./gradlew :vendored-maestro:maestro-tlaloc:test --no-daemon --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-integration-reports
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          retention-days: 14
+          if-no-files-found: warn
