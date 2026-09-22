@@ -3,10 +3,38 @@
 # this one answers the broad one: does Tlaloc still build and pass its suite.
 #
 # On what this can and cannot certify: a GitHub runner has no GPU, no PJRT
-# plugin, no IREE toolchain and no stablehlo-translate. Every test that needs
-# one gates on PjrtBinaries.available / cudaAvailable and SELF-SKIPS BY NAME,
-# so green here means "the platform-neutral subset passes" — it is not a
-# substitute for the GB10 run that certifies the GPU claims in the README.
+# plugin, no IREE toolchain, no stablehlo-translate and no oracle venv. Every
+# test that needs one gates on PjrtBinaries.available / cudaAvailable (or, for
+# the cross-language oracles, on a Python interpreter at
+# ~/.local/venvs/iree/bin/python) and SELF-SKIPS BY NAME, so green here means
+# "the platform-neutral subset passes" — it is not a substitute for the GB10 run
+# that certifies the GPU claims in the README.
+#
+# §0.4.504 widened it from one job to four lanes, because every ✅ in
+# docs/CAPABILITIES.md had been certified on exactly ONE machine — an NVIDIA
+# GB10, aarch64, JDK 25 — and a single ubuntu-latest job only added a second
+# x86_64 data point:
+#
+#   test (ubuntu-latest, JDK 25)  the platform-neutral subset on x86_64 Linux
+#   test (macos-15, JDK 25)       the same on arm64 macOS, which the repo has
+#                                 supported as a dev platform since the
+#                                 scripts/setup-mac-*.sh pair and the root
+#                                 build's /opt/homebrew/bin PATH injection
+#   library-jdk21                 the §0.4.503 claim "a consumer on JDK 21 can
+#                                 use the library", executed rather than asserted
+#   (kotlin-next.yml)             the next Kotlin feature release, allowed to fail
+#
+# THESE LANES HAVE NEVER RUN. They were written on a machine with no access to
+# GitHub Actions, validated as YAML and against actionlint's rule set by reading,
+# and every Gradle invocation in them was run locally first. docs/ALPHA_PLAN.md
+# marks them 🧪, not ✅, and will keep marking them 🧪 until a run exists.
+#
+# NO aarch64 LINUX LANE, deliberately. GitHub's arm64 Linux runners
+# (`ubuntu-24.04-arm`) are free for PUBLIC repositories and a paid plan for
+# private ones, and this repository's visibility could not be checked from the
+# machine that wrote the file (no `gh`, no credentials). A lane that cannot start
+# is worse than a named gap, so the gap is named: the aarch64 evidence for this
+# project is the GB10 itself, and docs/ALPHA_PLAN.md carries the row.
 name: build
 
 on:
@@ -21,8 +49,20 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: test (${{ matrix.os }}, JDK 25)
+    runs-on: ${{ matrix.os }}
+    # fail-fast off on purpose: the whole point of a second platform is to see
+    # WHICH platform broke, and a cancelled sibling job answers nothing.
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15 and macos-14 are both Apple Silicon; macos-13 was the last
+        # x86_64 image and is retired. A cost note, since it is the owner's bill:
+        # macOS minutes are billed at 10x Linux on private repositories.
+        os: [ubuntu-latest, macos-15]
+    # 45 was the ubuntu budget; macOS runners are slower and the suite has grown
+    # (2,345 tests at §0.4.503), so 60 is headroom, not an expectation.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +76,16 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # macOS-specific honesty, stated where someone reading a green check will
+      # see it: the root build.gradle.kts injects /opt/homebrew/bin into every
+      # Test task's PATH so brew-installed stablehlo-translate / sdy-opt /
+      # iree-compile are found in non-interactive shells. A GitHub macOS runner
+      # HAS /opt/homebrew/bin (brew is preinstalled) and does NOT have those
+      # binaries: scripts/setup-mac-userspace.sh builds them with bazelisk from
+      # pinned openxla/stablehlo + openxla/shardy commits, a 20-60 minute build.
+      # So the MLIR round-trip tests self-skip on this lane exactly as they do on
+      # the Linux one. Nothing here certifies Apple hardware as a Tlaloc backend
+      # either — there is no PJRT plugin for it and no lane claims one.
       - name: Test
         run: ./gradlew test --no-daemon --stacktrace
 
@@ -51,7 +101,103 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-reports
+          # Per-leg name: upload-artifact@v4 FAILS on a duplicate artifact name,
+          # so a matrix cannot share the single "build-reports" this file used
+          # when it had one job.
+          name: build-reports-${{ matrix.os }}
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          retention-days: 14
+          if-no-files-found: warn
+
+  # §0.4.504 — THE JDK 21 LANE, which exists because §0.4.503 made a claim this
+  # repository could not check on a second machine.
+  #
+  # §0.4.503 split the bytecode targets: :core, :ir, :autograd, :nn, :stablehlo
+  # and :maestro emit Java 21, the FFM backends and :compiler-plugin stay at 25.
+  # It certified the consumer story one way — scripts/jdk21-smoke.sh runs a
+  # compile-time-synthesized gradient on a real JDK 21 — and left the library's
+  # own 1,822 tests running only on the toolchain JDK. This lane runs them on 21.
+  #
+  # THE BOUNDARY, repeated here because it is the thing people get wrong: BUILD
+  # on 25, RUN on 21. Kotlin loads a compiler plugin inside the compiler's own
+  # JVM and io.tlaloc:compiler-plugin is 25 bytecode, so a JDK-21-only machine
+  # cannot COMPILE `grad { }` at all. That is why this job installs both JDKs and
+  # uses 25 as the toolchain: the supported consumer configuration is
+  # jvmToolchain(25) + jvmTarget = JVM_21, which is what examples/quickstart does.
+  library-jdk21:
+    name: library on JDK 21 (built by 25)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both JDKs, in this order: the LAST setup-java wins JAVA_HOME, and Gradle
+      # must run on 25 (the toolchain every module declares).
+      - name: Set up JDK 21
+        id: jdk21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      # gradle.properties carries `org.gradle.java.installations.fromEnv=JDK21_HOME`
+      # (§0.4.503) precisely so the location of a JDK 21 is an environment
+      # variable and not one developer's path in a committed file. Gradle's own
+      # auto-detection does not search setup-java's install directory.
+      - name: Point Gradle's toolchain detection at the JDK 21
+        run: echo "JDK21_HOME=${{ steps.jdk21.outputs.path }}" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The bytecode claim: every class in each module's jar is the major version
+      # tlalocJvmTargets says it is. Registered in all twelve subprojects and
+      # wired into `check`, so `./gradlew test` covers it too — it is named
+      # separately here because this is the lane whose subject it is.
+      - name: Bytecode targets match tlalocJvmTargets
+        run: ./gradlew verifyJvmTarget --no-daemon --stacktrace
+
+      # The suite claim. -PtlalocTestJdk=21 (root build.gradle.kts, §0.4.504)
+      # points each Test task's LAUNCHER at the JDK 21 and REFUSES BY NAME for
+      # any module whose own bytecode target is higher, so this task list is not
+      # decoration: naming :runtime-pjrt here would fail with the module, its
+      # target and the list of modules the flag is valid for, instead of an
+      # UnsupportedClassVersionError out of the test runner.
+      #
+      # Ran locally before being written down: all six suites, 1,822 tests, pass
+      # on OpenJDK 21.0.2 (2026-09-22, §0.4.504).
+      - name: The 21-targeted modules' own suites, running ON a JDK 21
+        run: |
+          ./gradlew --no-daemon --stacktrace -PtlalocTestJdk=21 \
+            :core:jvmTest :ir:jvmTest :autograd:jvmTest \
+            :nn:jvmTest :stablehlo:jvmTest :maestro:jvmTest
+
+      # And the end-to-end consumer story: publish, compile examples/quickstart
+      # at target 21 with the K2 plugin synthesizing a gradient, run the result
+      # on the JDK 21 launcher. This is the one step that cannot be faked by a
+      # bytecode check — a JDK 22+ API anywhere in :core, :ir or :autograd fails
+      # it with NoSuchMethodError instead of printing a derivative.
+      - name: A synthesized gradient, compiled at target 21 and run on JDK 21
+        run: bash scripts/jdk21-smoke.sh
+
+      # NO test-count step here, on purpose: this job runs six modules, not the
+      # suite, so a number from it would be compared against 2345 and read as a
+      # regression. The count belongs to the `test` lanes above.
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: library-jdk21-reports
           path: |
             **/build/reports/tests/
             **/build/test-results/

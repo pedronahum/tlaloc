@@ -62,6 +62,29 @@ retro-summarise them; it is the record from the first named version forward.
 
 ### Added
 
+- **CI is four lanes now, and two of them exist to catch what one machine cannot
+  see.** Every ✅ in `docs/CAPABILITIES.md` had been certified on one host — an
+  NVIDIA GB10, aarch64, JDK 25 — and CI was a single `ubuntu-latest` job running
+  `./gradlew test`. `.github/workflows/build.yml` now runs that suite on **x86_64
+  Linux and arm64 macOS**, plus a `library-jdk21` job that RUNS the six
+  Java-21-targeted modules' own suites on a JDK 21 and then compiles and runs a
+  synthesized gradient there; `.github/workflows/kotlin-next.yml` probes the next
+  published Kotlin (resolved from Maven Central, not pinned) and is allowed to
+  fail, which is the mitigation `DIFFKTX_SPEC.md` §16 named for "K2 plugin API
+  changes across Kotlin releases" and nobody had implemented. Two new build
+  properties make those lanes possible and both are usable by hand:
+  `-PtlalocTestJdk=21` points every `Test` task's launcher at another JDK (and
+  refuses by name for a module whose own bytecode target is higher), and
+  `-PtlalocKotlinVersion=<v>` swaps the Kotlin compiler the whole build runs.
+  **The lanes themselves have never run** — they were written on a machine with no
+  access to GitHub Actions — so `docs/ALPHA_PLAN.md` marks them 🧪 and nothing
+  claims a green run. What DID run, locally: the library's 1,822 tests on OpenJDK
+  21.0.2, and the Kotlin probe against 2.4.20 and 2.3.10 — which found that
+  **Kotlin 2.4.20 does not compile `:compiler-plugin`** (one error, direct
+  `MessageCollector` access in `TlalocCompilerPluginRegistrar.kt`) and that the
+  §0.4.503 version guard refuses a foreign compiler by name from inside a real
+  2.3.10 compile.
+
 - **The compiler plugin refuses an unsupported Kotlin version by name.** The
   plugin reads 40 `org.jetbrains.kotlin.fir.*` packages of internal K2 API that
   JetBrains moves between feature releases, and nothing checked which compiler it

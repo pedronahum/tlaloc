@@ -1,0 +1,265 @@
+# §0.4.504 — THE NEXT-KOTLIN LANE. The mitigation DIFFKTX_SPEC.md §16 named and
+# nobody implemented.
+#
+# §16's risk register lists "K2 plugin API changes across Kotlin releases" as
+# HIGH likelihood / HIGH impact, with a three-word mitigation: "CI against Kotlin
+# EAP". The plugin reads 40 `org.jetbrains.kotlin.fir.*` packages of internal API
+# (119 `org.jetbrains.kotlin.*` imports) and JetBrains moves those between
+# FEATURE releases without deprecation. Until this file, nothing in the
+# repository would notice until a user did.
+#
+# ALLOWED TO FAIL, and that is the design, not a concession: a red run here means
+# "the next Kotlin breaks us", which is information, not a broken build. The job
+# carries `continue-on-error: true` and so does every probe step, so one probe
+# failing does not hide the next one's answer.
+#
+# WHAT IT MEASURES, and what it does not:
+#
+#   probe 1  :compiler-plugin compiled against the NEW kotlin-compiler-embeddable.
+#            This is the §16 signal. The plugin's compileOnly dependency IS the
+#            internal API, so a removed or re-signatured FIR method is a compile
+#            error here, months before a user meets it.
+#   probe 2  the library modules compiled and tested by the NEW compiler — the
+#            language / stdlib signal, which has nothing to do with the plugin.
+#   probe 3  KotlinVersionGuard (§0.4.503) inside a genuinely foreign compiler.
+#            The guard's whole job is to refuse an unsupported Kotlin BY NAME
+#            instead of letting it crash with a NoSuchMethodError from inside the
+#            compiler, and until §0.4.504 that refusal had only ever been tested
+#            as a pure function. Here it runs for real.
+#
+#   NOT measured: `./gradlew test` under the override. Under a foreign feature
+#   release the guard refuses, by design, inside every one of the ~83 in-process
+#   K2 harnesses in :compiler-plugin — each of which builds its own
+#   K2JVMCompilerArguments and has no shared place to pass
+#   `unsafeAllowUnsupportedKotlin=true`. So the full suite would report dozens of
+#   failures that all say the same thing the guard already said. Named in
+#   docs/ALPHA_PLAN.md as the reason a shared harness would be worth having.
+#
+# HOW THE VERSION IS SWAPPED: `-PtlalocKotlinVersion=<v>` — see the long comment
+# in settings.gradle.kts. It moves every `org.jetbrains.kotlin:*` dependency,
+# which in Kotlin 2.x includes `kotlin-build-tools-impl`, so the COMPILER that
+# runs is the new one while the Kotlin Gradle PLUGIN stays at the catalog's
+# version. Moving KGP itself is not possible from a resolution rule in this
+# repository — Gradle refuses with "the plugin is already on the classpath with a
+# different version" because the root build declares both Kotlin plugins
+# `apply false`. That limitation is recorded in docs/ALPHA_PLAN.md, not hidden.
+#
+# THIS LANE HAS NEVER RUN ON GITHUB. Its Gradle invocations were run locally
+# first, against Kotlin 2.4.20 and 2.3.10 (§0.4.504), and both found something:
+# 2.4.20 fails probe 1 with one hard error in TlalocCompilerPluginRegistrar.kt,
+# and 2.3.10 compiles but is refused by the guard, by name, inside six real
+# in-process compiles. docs/ALPHA_PLAN.md marks the lane 🧪 and the two findings
+# separately.
+name: kotlin-next
+
+on:
+  workflow_dispatch:
+    inputs:
+      kotlin_version:
+        description: >-
+          Kotlin version to probe (e.g. 2.4.20, or 2.5.0-Beta1). Empty means
+          "whatever Maven Central currently reports as <latest>".
+        required: false
+        default: ''
+  # Weekly, because the Kotlin release train moves independently of this
+  # repository: the interesting event is JetBrains publishing, not us pushing.
+  schedule:
+    - cron: '17 6 * * 1'
+  # Plus on a push that changes the plugin or the toolchain declaration, which is
+  # when our own exposure to the internal API changes.
+  push:
+    branches: [main]
+    paths:
+      - 'compiler-plugin/**'
+      - 'gradle/libs.versions.toml'
+      - 'settings.gradle.kts'
+      - 'build.gradle.kts'
+      - '.github/workflows/kotlin-next.yml'
+
+concurrency:
+  group: kotlin-next-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  next:
+    name: next Kotlin (allowed to fail)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Resolved, not pinned. A literal "the next Kotlin" in this file would be
+      # wrong within weeks and would eventually name a version that does not
+      # exist, which is a lane that cannot pass. Central's own <latest> includes
+      # Betas and RCs (2.4.20-Beta1 is there), so this picks up an EAP the moment
+      # one is published — which is what §16 asked for.
+      - name: Resolve the version to probe
+        id: resolve
+        env:
+          REQUESTED: ${{ github.event.inputs.kotlin_version }}
+        run: |
+          set -u
+          catalog="$(sed -n 's/^kotlin = "\(.*\)"$/\1/p' gradle/libs.versions.toml | head -1)"
+          if [ -z "$catalog" ]; then
+            echo "could not read libs.versions.kotlin out of gradle/libs.versions.toml" >&2
+            exit 1
+          fi
+          if [ -n "${REQUESTED}" ]; then
+            next="${REQUESTED}"
+            source='workflow input'
+          else
+            meta=metadata.xml
+            curl -fsSL -o "$meta" \
+              https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/maven-metadata.xml
+            next="$(sed -n 's:.*<latest>\(.*\)</latest>.*:\1:p' "$meta" | head -1)"
+            source='Maven Central <latest>'
+          fi
+          if [ -z "$next" ]; then
+            echo "could not determine a version to probe" >&2
+            exit 1
+          fi
+          # The unit of internal-API compatibility is the FEATURE release, which
+          # Kotlin numbers by tens in the third component (2.3.20 and 2.3.27 are
+          # the same release; 2.3.10 is not). KotlinVersionGuard uses exactly this
+          # rule, so probe 3 can predict what the guard should say.
+          family() {
+            printf '%s' "$1" | sed 's/-.*//' \
+              | awk -F. '{printf "%s.%s.%s", $1, $2, int($3/10)}'
+          }
+          catalog_family="$(family "$catalog")"
+          next_family="$(family "$next")"
+          differs=true
+          [ "$next" = "$catalog" ] && differs=false
+          same_family=false
+          [ "$next_family" = "$catalog_family" ] && same_family=true
+          {
+            echo "catalog=$catalog"
+            echo "next=$next"
+            echo "differs=$differs"
+            echo "same_family=$same_family"
+          } >> "$GITHUB_OUTPUT"
+          echo "the repository declares Kotlin $catalog (feature family $catalog_family)"
+          echo "probing Kotlin $next (feature family $next_family), from $source"
+          if [ "$differs" = false ]; then
+            echo "::notice::Kotlin $next is the version this repository already builds with; nothing for this lane to detect."
+          elif [ "$same_family" = true ]; then
+            echo "::notice::Kotlin $next is a BUGFIX of the built-against feature release. KotlinVersionGuard should ACCEPT it and the plugin should behave."
+          else
+            echo "::notice::Kotlin $next is a DIFFERENT feature release. KotlinVersionGuard should REFUSE it by name, and probe 1 is where internal-API drift shows up."
+          fi
+
+      # PROBE 1 — the §16 signal.
+      - name: 'Probe 1: :compiler-plugin against the new internal K2 API'
+        id: probe1
+        if: steps.resolve.outputs.differs == 'true'
+        continue-on-error: true
+        env:
+          NEXT: ${{ steps.resolve.outputs.next }}
+        run: |
+          ./gradlew --no-daemon --stacktrace "-PtlalocKotlinVersion=$NEXT" \
+            :compiler-plugin:compileKotlin :compiler-plugin:compileTestKotlin
+
+      # PROBE 2 — the language / stdlib signal, independent of the plugin.
+      - name: 'Probe 2: the library modules, compiled and tested by the new compiler'
+        id: probe2
+        if: steps.resolve.outputs.differs == 'true'
+        continue-on-error: true
+        env:
+          NEXT: ${{ steps.resolve.outputs.next }}
+        run: |
+          ./gradlew --no-daemon --stacktrace "-PtlalocKotlinVersion=$NEXT" \
+            :core:jvmTest :ir:jvmTest :autograd:jvmTest :nn:jvmTest :stablehlo:jvmTest
+
+      # PROBE 3 — the guard, inside a real foreign compiler.
+      #
+      # Its expectation is INVERTED and the script says which way. Under a
+      # different feature release the one test that reads the RUNNING compiler's
+      # version — `the guard does not refuse the compiler this repository builds
+      # with` — is supposed to fail, and its failure message quotes the version
+      # the guard saw. A pass there would mean the guard waved a foreign compiler
+      # through, which is the defect §0.4.503 existed to remove.
+      - name: 'Probe 3: KotlinVersionGuard inside the new compiler'
+        id: probe3
+        if: steps.resolve.outputs.differs == 'true' && steps.probe1.outcome == 'success'
+        continue-on-error: true
+        env:
+          NEXT: ${{ steps.resolve.outputs.next }}
+          SAME_FAMILY: ${{ steps.resolve.outputs.same_family }}
+        run: |
+          set -u
+          status=0
+          ./gradlew --no-daemon "-PtlalocKotlinVersion=$NEXT" \
+            :compiler-plugin:test --tests '*KotlinVersionGuardTest*' || status=$?
+          # The whole results directory, not one file name: Gradle wipes and
+          # rewrites it per run, so the only thing worth matching is the text.
+          report=compiler-plugin/build/test-results/test
+          if [ "$SAME_FAMILY" = true ]; then
+            if [ "$status" -eq 0 ]; then
+              echo "the guard ACCEPTED Kotlin $NEXT, which is what a bugfix release should get."
+            else
+              echo "::error::the guard REFUSED Kotlin $NEXT, a bugfix of the release it is built against. Either the range rule in KotlinVersionGuard is wrong or the release train changed shape."
+              exit 1
+            fi
+          else
+            if [ "$status" -eq 0 ]; then
+              echo "::error::the guard ACCEPTED Kotlin $NEXT although it is a different FEATURE release. That is the silent-crash path §0.4.503 removed; the range rule needs looking at."
+              exit 1
+            elif grep -rq "the guard refuses the running compiler ($NEXT)" "$report"; then
+              echo "the guard REFUSED Kotlin $NEXT by name, from inside a real $NEXT compiler. That is the expected result and it is the thing this probe certifies."
+            else
+              echo "::error::the guard subset failed for some OTHER reason than the expected refusal of $NEXT — read the report, this is not the certification."
+              exit 1
+            fi
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          CATALOG: ${{ steps.resolve.outputs.catalog }}
+          NEXT: ${{ steps.resolve.outputs.next }}
+          DIFFERS: ${{ steps.resolve.outputs.differs }}
+          SAME_FAMILY: ${{ steps.resolve.outputs.same_family }}
+          P1: ${{ steps.probe1.outcome }}
+          P2: ${{ steps.probe2.outcome }}
+          P3: ${{ steps.probe3.outcome }}
+        run: |
+          {
+            echo "## kotlin-next"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| declared (libs.versions.kotlin) | \`${CATALOG:-?}\` |"
+            echo "| probed | \`${NEXT:-?}\` |"
+            echo "| different version / same feature family | \`${DIFFERS:-?}\` / \`${SAME_FAMILY:-?}\` |"
+            echo "| probe 1 — plugin vs internal K2 API | \`${P1:-skipped}\` |"
+            echo "| probe 2 — library vs new compiler | \`${P2:-skipped}\` |"
+            echo "| probe 3 — version guard in a foreign compiler | \`${P3:-skipped}\` |"
+            echo
+            echo "A failure in probe 1 or 2 is this lane doing its job: it means the"
+            echo "next Kotlin needs work before the toolchain can move, NOT that the"
+            echo "repository is broken. Nothing here says anything about GPU, PJRT or"
+            echo "IREE behaviour — see .github/workflows/build.yml's header for what a"
+            echo "runner can and cannot certify."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-next-reports
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          retention-days: 14
+          if-no-files-found: warn

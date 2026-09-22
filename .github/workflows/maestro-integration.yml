@@ -11,6 +11,25 @@
 #   - boot a live Maestro with K8s pod lifecycle (kind/k3d; OQ-Layer2.5-3)
 # v1 runs the maestro-tlaloc suite, which exercises the same code path with
 # synthetic inputs.
+#
+# §0.4.504 made three changes and left everything else alone:
+#
+#   1. IT NOW RUNS ON PULL REQUESTS. It was `push`-only, so a PR that renamed
+#      Maestro's StepType registry — the exact event the paths filter exists to
+#      catch — merged unchecked and only went red afterwards, on main.
+#   2. THE FULL TLALOC SUITE STEP IS GONE, replaced by `:maestro:jvmTest`. When
+#      this file landed (§0.4.497) the repo-wide lane was one ubuntu job; the
+#      suite step here was the only thing covering Tlaloc on a matching push.
+#      build.yml now runs `./gradlew test` on x86_64 Linux AND arm64 macOS on
+#      these same events, so running it a third time here bought nothing and cost
+#      the lane its 10-minute budget. What is left is the part this lane is FOR:
+#      the Tlaloc side of the handoff, plus the vendored-Maestro side.
+#   3. Every path in the filter below was checked to still exist (§0.4.504); a
+#      stale path in a paths filter is a lane that silently never triggers.
+#
+# The `:vendored-maestro:maestro-tlaloc:test` step was run locally on 2026-09-22
+# and is green (26 tasks, 4 executed). The LANE, as a GitHub workflow, has never
+# run — docs/ALPHA_PLAN.md marks it 🧪.
 name: maestro-integration
 
 on:
@@ -26,6 +45,17 @@ on:
       - 'maestro/src/jvmTest/kotlin/io/tlaloc/maestro/SerializedBufferHandleTest.kt'
       - 'maestro/src/**/serving/**'
       # And this file.
+      - '.github/workflows/maestro-integration.yml'
+  # The same list, duplicated because GitHub Actions does not support YAML
+  # anchors in workflow files and a `paths` filter cannot be shared between two
+  # events. Keep the two lists in step.
+  pull_request:
+    paths:
+      - 'third-party/maestro/maestro-tlaloc/**'
+      - 'third-party/maestro/maestro-common/src/main/java/com/netflix/maestro/models/definition/StepType.java'
+      - 'maestro/src/jvmMain/kotlin/io/tlaloc/maestro/SerializedBufferHandle.kt'
+      - 'maestro/src/jvmTest/kotlin/io/tlaloc/maestro/SerializedBufferHandleTest.kt'
+      - 'maestro/src/**/serving/**'
       - '.github/workflows/maestro-integration.yml'
 
 concurrency:
@@ -51,13 +81,14 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # The Tlaloc-side suite. Hardware-gated tests (PJRT, CUDA, IREE, KPTX)
-      # check PjrtBinaries.available / cudaAvailable and self-skip by name on a
-      # runner that has none of them; the MLIR round-trip tests skip when
-      # stablehlo-translate is absent. A green run here is the platform-neutral
-      # subset, which is what this lane is for.
-      - name: Tlaloc test suite
-        run: ./gradlew test --no-daemon --stacktrace
+      # The Tlaloc side of the handoff. Hardware-gated tests (PJRT, CUDA, IREE,
+      # KPTX) check PjrtBinaries.available / cudaAvailable and self-skip by name
+      # on a runner that has none of them, and the serving lanes' Python oracle
+      # skips with no venv at ~/.local/venvs/iree — so this is the
+      # platform-neutral part of :maestro, which is what this lane is for. The
+      # whole repository's suite is build.yml's job, on both platforms.
+      - name: Tlaloc :maestro test suite
+        run: ./gradlew :maestro:jvmTest --no-daemon --stacktrace
 
       # The vendored Maestro side, through the composite build. This is the
       # step the lane exists for: it fails if our step type stops registering

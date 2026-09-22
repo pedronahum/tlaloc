@@ -409,6 +409,115 @@ subprojects {
     }
 }
 
+// §0.4.504 (Tier 3, CI matrix) — the Kotlin version override. THE RULE LIVES HERE;
+// settings.gradle.kts only adds the repositories it may need and explains the whole
+// mechanism, including the one thing it cannot do (move the Kotlin Gradle plugin).
+//
+// It rewrites every `org.jetbrains.kotlin:*` dependency. The two that matter:
+// `kotlin-compiler-embeddable`, which is the internal K2 API `:compiler-plugin`
+// compiles against AND the compiler its 83 in-process harnesses run; and
+// `kotlin-build-tools-impl`, which is how Kotlin 2.x's Gradle plugin actually runs a
+// compilation — so this one rule swaps the running compiler for every module too.
+// .github/workflows/kotlin-next.yml is the lane; docs/ALPHA_PLAN.md is the record.
+//
+// No property, no rule: `configurations.configureEach` is not even visited.
+val tlalocKotlinVersionOverride: String? =
+    (
+        providers.gradleProperty("tlalocKotlinVersion").orNull
+            ?: providers.environmentVariable("TLALOC_KOTLIN_VERSION").orNull
+        )?.trim()?.takeIf { it.isNotEmpty() }
+
+if (tlalocKotlinVersionOverride != null) {
+    logger.lifecycle(
+        "§0.4.504: Kotlin override ACTIVE — org.jetbrains.kotlin:* -> " +
+            "$tlalocKotlinVersionOverride (the catalog still declares " +
+            "${libs.versions.kotlin.get()}; KotlinVersionGuard is expected to refuse).",
+    )
+    allprojects {
+        configurations.configureEach {
+            resolutionStrategy.eachDependency {
+                if (requested.group == "org.jetbrains.kotlin") {
+                    useVersion(tlalocKotlinVersionOverride)
+                    because(
+                        "§0.4.504 next-version lane: -PtlalocKotlinVersion=" +
+                            tlalocKotlinVersionOverride,
+                    )
+                }
+            }
+        }
+    }
+}
+
+// §0.4.504 (Tier 3, CI matrix) — RUN THE TESTS ON A DIFFERENT JDK THAN THE ONE THAT
+// BUILT THEM.
+//
+// §0.4.503 split the bytecode targets so a consumer on JDK 21 can use the library, and
+// certified the claim one way: `scripts/jdk21-smoke.sh` runs a compile-time-synthesized
+// gradient on a real JDK 21. What it did NOT do is run the library's own 2,000-test
+// suite there, so "the library works on 21" rested on one program.
+//
+//   ./gradlew :core:jvmTest :ir:jvmTest … -PtlalocTestJdk=21
+//
+// points every `Test` task's LAUNCHER at that JDK. It works because the six 21-targeted
+// modules compile *every* compilation to JVM_21, tests included — so their test classes
+// are 21 bytecode too. `.github/workflows/build.yml`'s `library-jdk21` job is the lane.
+//
+// It REFUSES BY NAME rather than degrading: asking for a JDK older than a module's own
+// bytecode target would produce an UnsupportedClassVersionError out of the test runner,
+// naming a class and not the mistake. So a 25-targeted module's test task fails with the
+// module name, its target, and the list of modules the request is valid for.
+val tlalocTestJdk: String? = providers.gradleProperty("tlalocTestJdk").orNull
+    ?.trim()?.takeIf { it.isNotEmpty() }
+
+if (tlalocTestJdk != null) {
+    val requested = tlalocTestJdk.toIntOrNull()
+        ?: throw GradleException(
+            "§0.4.504: -PtlalocTestJdk=$tlalocTestJdk is not a Java release number. Pass a " +
+                "major version, e.g. -PtlalocTestJdk=21.",
+        )
+    val validFor = tlalocJvmTargets.filterValues { it <= requested }.keys.sorted()
+    subprojects {
+        val moduleTarget = tlalocJvmTargets.getValue(name)
+        val moduleName = name
+        tasks.withType<Test>().configureEach {
+            if (moduleTarget > requested) {
+                // Configuration-time throw would break `:core:jvmTest` too (Gradle
+                // configures every project), so the refusal is at execution time — the
+                // point at which the wrong JDK would actually have been used.
+                doFirst {
+                    throw GradleException(
+                        "§0.4.504: -PtlalocTestJdk=$requested cannot run ':$moduleName' tests: " +
+                            "that module emits Java $moduleTarget bytecode (tlalocJvmTargets in " +
+                            "the root build.gradle.kts), so its own test classes would not load " +
+                            "on a JDK $requested. Run it without the flag, or name only the " +
+                            "modules the request is valid for: " +
+                            validFor.joinToString(", ") { ":$it" } + ".",
+                    )
+                }
+            } else {
+                val toolchains = project.extensions.findByType(JavaToolchainService::class.java)
+                    ?: throw GradleException(
+                        "§0.4.504: ':$moduleName' has no javaToolchains extension, so " +
+                            "-PtlalocTestJdk=$requested cannot select a launcher for it.",
+                    )
+                javaLauncher.set(
+                    toolchains.launcherFor {
+                        languageVersion.set(JavaLanguageVersion.of(requested))
+                    },
+                )
+                doFirst {
+                    logger.lifecycle(
+                        "§0.4.504: ':$moduleName' tests running on JDK " +
+                            "${javaLauncher.get().metadata.languageVersion.asInt()} " +
+                            "(${javaLauncher.get().metadata.jvmVersion}), bytecode target " +
+                            "$moduleTarget.",
+                    )
+                }
+            }
+        }
+    }
+}
+
 // §0.4.41 — make `./gradlew test` run every subproject's tests, not just those
 // where a `test` task exists at the subproject level. The root `test` lifecycle
 // task historically only picked up `:compiler-plugin:test` (the plain-JVM module);

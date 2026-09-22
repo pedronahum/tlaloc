@@ -485,7 +485,31 @@ The full row-by-row matrix, with what pins each row, is in
 bash scripts/count-tests.sh       # aggregate count across modules
 bash scripts/onboarding-smoke.sh  # publish + run the quickstart, end to end
 ./gradlew verifyPomMetadata        # every POM still carries what Maven Central mandates
+./gradlew verifyJvmTarget          # every class is the bytecode version the module claims
 ```
+
+Two flags exist for the CI lanes and work by hand:
+
+```bash
+# Run the Java-21-targeted modules' own suites on a JDK 21 (needs JDK21_HOME).
+# Refuses by name for a module whose bytecode target is higher.
+./gradlew -PtlalocTestJdk=21 :core:jvmTest :ir:jvmTest :autograd:jvmTest \
+                             :nn:jvmTest :stablehlo:jvmTest :maestro:jvmTest
+
+# Build and test against a different Kotlin compiler than the catalog's.
+# The K2 plugin reads internal FIR API, so this is how the next release gets checked.
+./gradlew -PtlalocKotlinVersion=2.4.20 :compiler-plugin:compileKotlin
+```
+
+**CI, and what it is worth.** `.github/workflows/` carries four lanes: the suite on
+x86_64 Linux and on arm64 macOS, the library's own suites executed on a JDK 21, and
+a next-Kotlin probe that is allowed to fail. A green runner means *the
+platform-neutral subset passes* — a runner has no GPU, no PJRT plugin, no IREE, no
+`stablehlo-translate` and no PyTorch oracle venv, and every test needing one
+self-skips by name. The GPU rows in the table above are certified on the GB10, not
+by CI. 🧪 **The lanes themselves have never run**: they were written on a machine
+with no access to GitHub Actions, and [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md) says
+which of their commands were at least executed locally.
 
 Contributions are welcome; the house style is worth knowing first:
 

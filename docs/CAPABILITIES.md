@@ -10,9 +10,10 @@ Status means exactly this:
 | ✅ **Certified** | an automated test pins it, and the row says where it ran |
 | 🧪 **Written** | the code exists and unit-tests pass, but the end-to-end path has never run — the reason is always stated |
 | 📐 **Designed** | a design document exists; no implementation |
+| ⬜ **Not started** | planned, nothing written yet (the mark [ALPHA_PLAN.md](ALPHA_PLAN.md) uses; added to this legend in §0.4.504) |
 | ❌ **Not planned** | |
 
-Last reviewed at §0.4.496 (2026-09-22), 2,345 automated tests at HEAD.
+Last reviewed at §0.4.504 (2026-09-22), 2,509 automated tests at HEAD.
 
 ## Automatic differentiation
 
@@ -91,3 +92,21 @@ Last reviewed at §0.4.496 (2026-09-22), 2,345 automated tests at HEAD.
 | AMD / Trainium | 📐 | Named in the kernel registry's target matrix; no runtime lane |
 | JVM | ✅ | The only build target declared today |
 | Android / iOS / WASM | ❌ | The modules are KMP-structured (`commonMain` source sets), which makes these reachable later — but no such targets are declared or built, and nothing has been tested on them |
+
+### Where the tests have actually been executed
+
+Every ✅ above was certified on one machine — a GB10, aarch64, JDK 25 — so this
+table says, separately, on what else the suite has been *run*. §0.4.504 added the
+CI lanes that would widen it; none of them has run, because the machine that wrote
+them has no access to GitHub Actions.
+
+| Lane | Status | Notes |
+|---|---|---|
+| GB10 (aarch64 Linux, JDK 25) | ✅ | The reference machine. Every GPU, PJRT, IREE, KPTX and cross-language-oracle row in this file was certified here and nowhere else |
+| The library's suites on a JDK 21 | ✅ | `-PtlalocTestJdk=21` over `:core :ir :autograd :nn :stablehlo :maestro` — 1,822 tests green on OpenJDK 21.0.2 (§0.4.504). Ran here, on this machine, not in CI |
+| The plugin under a foreign Kotlin compiler | ✅ | `-PtlalocKotlinVersion=2.3.10` — `KotlinVersionGuard` refuses by name, from inside a real 2.3.10 compile (§0.4.504). The same probe against **2.4.20 does not compile the plugin at all**: one error, direct `MessageCollector` access. A published negative result, not a fixed one |
+| x86_64 Linux CI (`ubuntu-latest`) | 🧪 | `.github/workflows/build.yml`. Written §0.4.497, widened §0.4.504. **No run exists.** A green run would mean "the platform-neutral subset passes": a runner has no GPU, no PJRT plugin, no IREE, no `stablehlo-translate` and no PyTorch oracle venv, and every test needing one self-skips by name |
+| arm64 macOS CI (`macos-15`) | 🧪 | Same file, second matrix leg (§0.4.504). **No run exists.** `stablehlo-translate` / `sdy-opt` / `iree-compile` are a 20–60 minute bazelisk build on macOS, so the MLIR round-trips would self-skip there too |
+| JDK 21 CI lane | 🧪 | `build.yml`, job `library-jdk21`. **No run exists**; every command in it was run here first (the row above) |
+| Next-Kotlin CI lane | 🧪 | `.github/workflows/kotlin-next.yml`, `continue-on-error`. **No run exists**; its three probes were run here first |
+| aarch64 *Linux* CI | ⬜ | Not added. GitHub's arm64 Linux runners are free for public repositories only, and this repository's visibility could not be checked from the development machine. See [ALPHA_PLAN.md](ALPHA_PLAN.md) |
