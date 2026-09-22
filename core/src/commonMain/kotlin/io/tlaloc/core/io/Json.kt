@@ -258,3 +258,55 @@ private fun String.format(vararg args: Any): String {
     }
     return out
 }
+
+// ---------------------------------------------------------------------------
+// §0.4.502 — the one WRITING primitive this file owes the safetensors writer.
+//
+// There is no JSON *serializer* here and there is not going to be one: the
+// only JSON this repository emits from `:core` is a safetensors header, whose
+// shape is fixed (an object of objects of a string, an int array and a
+// two-element int array). What a header-builder cannot do by hand is quote a
+// string correctly, because a tensor NAME is caller data — `"` and `\` are
+// legal in it, and so are control characters — and a header that concatenates
+// an unescaped name produces a file whose own reader cannot parse it. That is
+// the one function below, and it is the exact inverse of the string case the
+// parser above already implements.
+// ---------------------------------------------------------------------------
+
+/**
+ * [s] as a quoted JSON string literal, escaped per RFC 8259 §7. The escapes
+ * are the two mandatory ones (`"` and `\`), the five short forms the parser
+ * above accepts (`\b \f \n \r \t`), and `\u00XX` for every remaining control
+ * character below 0x20. Everything else — including non-ASCII — is emitted
+ * verbatim, because the header is written as UTF-8 and a reader that cannot
+ * read UTF-8 cannot read the names HuggingFace already ships.
+ *
+ * DELIBERATELY NOT escaped: `/` (legal either way, and the safetensors files
+ * produced by the reference implementation do not escape it) and the
+ * surrogate-pair range (a lone surrogate cannot be produced by a valid Kotlin
+ * String read from a valid source, and mangling one silently would be worse
+ * than emitting it).
+ */
+fun jsonQuote(s: String): String {
+    val sb = StringBuilder(s.length + 2)
+    sb.append('"')
+    for (c in s) {
+        when (c) {
+            '"' -> sb.append("\\\"")
+            '\\' -> sb.append("\\\\")
+            '\b' -> sb.append("\\b")
+            '\u000C' -> sb.append("\\f")
+            '\n' -> sb.append("\\n")
+            '\r' -> sb.append("\\r")
+            '\t' -> sb.append("\\t")
+            else ->
+                if (c.code < 0x20) {
+                    sb.append("\\u").append(c.code.toString(16).padStart(4, '0'))
+                } else {
+                    sb.append(c)
+                }
+        }
+    }
+    sb.append('"')
+    return sb.toString()
+}

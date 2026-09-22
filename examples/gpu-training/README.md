@@ -17,7 +17,7 @@ plugin uses — to derive the gradient function from it. There is no tape at
 runtime, no `.backward()`, and no hand-written adjoint in this example or in
 `:nn`. Every derivative comes out of the compiler's rule registry.
 
-Three things follow from that, and the program prints evidence for each:
+Four things follow from that, and the program prints evidence for each:
 
 1. **The gradient is a program, so any backend can run it.** The captured
    gradient function is emitted to StableHLO, compiled by XLA and executed on
@@ -32,6 +32,12 @@ Three things follow from that, and the program prints evidence for each:
 3. **The run is reproducible from one seed.** Data, held-out set and initial
    weights are all drawn from Tlaloc's threefry counter-based PRNG (bit-exact
    against JAX). A `RandomKey` is a value, not a mutable generator.
+4. **The trained model is a file.** The run saves the parameters *and* Adam's
+   moments to one safetensors file, builds the model structure again from
+   nothing, restores into it, and prints that the reloaded model's predictions
+   are bit-identical. Everything after the `reloaded :` line — the decision
+   boundary, the held-out accuracy — is computed by the model that came back off
+   the disk.
 
 The task has a ground truth you can *look at*: the model must learn a disc in
 the plane, and the program ends by printing what it learned next to the real
@@ -59,8 +65,10 @@ TLALOC_EXAMPLE_LANE=host ./gradlew -p examples/gpu-training run
 ## Actual output
 
 Verbatim, from this machine — GB10 (Grace Blackwell, DGX Spark, aarch64),
-driver 580.126.09, JDK 25, Kotlin 2.3.20. XLA's own startup logging is left in
-because it names the device the work landed on.
+driver 580.126.09, JDK 25, Kotlin 2.3.20 — with two edits, both stated so the
+block can still be trusted: XLA's own startup logging is trimmed to the two
+lines that name the device the work landed on, and the absolute path to this
+clone is written `<repo>` on the `saved :` line.
 
 ```
 === Tlaloc — training on the GPU with gradients the compiler wrote ===
@@ -78,8 +86,8 @@ capture once (no tape, no .backward(), no hand-written derivatives):
            the gradient graph was DERIVED from the forward graph by
            DxirReverseTransform — the compiler's own reverse-mode AD pass.
 
-I0921 20:45:38.351664 1455962 service.cc:194]   StreamExecutor [0]: NVIDIA GB10, Compute Capability 12.1a (Driver: 13.0.0[580.126.9]; Runtime: 12.9.0; Toolkit: 12.9.0; DNN: 9.21.1)
-I0921 20:45:38.365718 1455962 cuda_dnn.cc:461] Loaded cuDNN version 92101
+I0922 20:58:39.863502 1830646 service.cc:194]   StreamExecutor [0]: NVIDIA GB10, Compute Capability 12.1a (Driver: 13.0.0[580.126.9]; Runtime: 12.9.0; Toolkit: 12.9.0; DNN: 9.21.1)
+I0922 20:58:39.877859 1830646 cuda_dnn.cc:461] Loaded cuDNN version 92101
 device   : GPU via PJRT/XLA (CUDA)
 check    : GPU vs host interpreter at step 0, over 8 outputs —
            max|diff| 0.000335 against max|value| 0.992  (3.4e-04 relative)
@@ -91,23 +99,34 @@ check    : GPU vs host interpreter at step 0, over 8 outputs —
 
 training : Adam(lr=0.02), 600 full-batch steps
            step   0   loss 0.992417
-           step  50   loss 0.198871
-           step 100   loss 0.136552
-           step 150   loss 0.097532
-           step 200   loss 0.081431
-           step 250   loss 0.073537
-           step 300   loss 0.072466
-           step 350   loss 0.063845
-           step 400   loss 0.057488
-           step 450   loss 0.054736
-           step 500   loss 0.051943
-           step 550   loss 0.049497
-           step 600   loss 0.051002   (final)
+           step  50   loss 0.198819
+           step 100   loss 0.134747
+           step 150   loss 0.099857
+           step 200   loss 0.080988
+           step 250   loss 0.074563
+           step 300   loss 0.066082
+           step 350   loss 0.060896
+           step 400   loss 0.059658
+           step 450   loss 0.056312
+           step 500   loss 0.051678
+           step 550   loss 0.065872
+           step 600   loss 0.047137   (final)
 
-           2.058 s wall clock on GPU via PJRT/XLA (CUDA) (3.43 ms/step)
-           loss 0.992417 -> 0.051002
+           1.899 s wall clock on GPU via PJRT/XLA (CUDA) (3.16 ms/step)
+           loss 0.992417 -> 0.047137
            compiled executables after training: 1
            (one program, 600 dispatches — weights are graph PARAMETERS, not constants)
+
+saved    : <repo>/examples/gpu-training/build/checkpoints/disc_mlp.safetensors
+           5452 bytes — one safetensors file: 6 parameter tensors
+           plus Adam's two moment tensors per parameter, and the step count.
+           Nothing Tlaloc-specific is needed to read it: Python's `safetensors`
+           opens it, and the keys are param.0.w, opt.m.0.w, opt.v.0.w, ...
+reloaded : built the same structure from scratch, then restored into it —
+           parameters bit-identical: 337 / 337 scalars
+           held-out predictions vs the in-memory model: BIT-IDENTICAL over 1024 points
+           Adam resumed at step 600 of 600 — training could continue
+           (everything below was computed by the model that came back off the disk)
 
 learned decision boundary vs ground truth  ('#' inside, '.' outside)
 
@@ -115,21 +134,21 @@ learned decision boundary vs ground truth  ('#' inside, '.' outside)
    ...............................   ...............................
    ...............................   ...............................
    ...............................   ...............................
-   ...............######..........   ...............................
-   ...........##############......   ...........############........
-   .........##################....   .........#################.....
+   ...............######..........   ................##.............
+   ...........##############......   ..........##############.......
+   .........##################....   .........##################....
    ........####################...   ........####################...
-   .......#####################...   .......#####################...
+   .......#####################...   ........####################...
    .......#####################...   ........####################...
    ........####################...   ........####################...
    ........###################....   ........###################....
    ..........################.....   ..........###############......
-   .............##########........   .............#########.........
+   .............##########........   .............##########........
    ...............................   ...............................
    ...............................   ...............................
 
-           grid cells where the model disagrees with the truth: 12 / 465 (2.6%)
-           held-out accuracy on 1024 fresh points never seen in training: 97.6%
+           grid cells where the model disagrees with the truth: 9 / 465 (1.9%)
+           held-out accuracy on 1024 fresh points never seen in training: 98.0%
            compiled executables after inference: 3 (training + two inference shapes)
 
 note     : run this twice and the losses will differ in the 3rd decimal. XLA
@@ -147,7 +166,9 @@ done.
 device   : host JVM (DxirInterpreter)
            step   0   loss 0.992422
            step 600   loss 0.045672   (final)
-           5.301 s wall clock on host JVM (DxirInterpreter) (8.83 ms/step)
+           5.190 s wall clock on host JVM (DxirInterpreter) (8.65 ms/step)
+           held-out predictions vs the in-memory model: BIT-IDENTICAL over 1024 points
+           Adam resumed at step 600 of 600 — training could continue
            grid cells where the model disagrees with the truth: 8 / 465 (1.7%)
            held-out accuracy on 1024 fresh points never seen in training: 97.9%
 ```
@@ -158,13 +179,21 @@ Two honest observations about those numbers, both measured rather than assumed:
   scalars) and every step round-trips through the host to run the optimizer.
   This example is about the *route*, not about throughput; the throughput story
   is the LlamaDecoder benchmark matrix in the root README.
-- **The host lane is bit-reproducible and the GPU lane is not.** Two host runs
-  of this example produced identical output apart from the wall-clock line
-  (5.299 s vs 5.228 s — every printed number matched); two GPU runs differed in the
-  third decimal of the loss (0.047137 vs 0.051002 at step 600, converging to
-  the same place). XLA autotunes its GEMM kernels at compile time and can pick
-  a different winner per run. If you need a bit-exact GPU trajectory, that is
-  an XLA flag question, not a Tlaloc one.
+- **The host lane is bit-reproducible and the GPU lane is not guaranteed to
+  be.** Two host runs produced identical output apart from the wall-clock line
+  (5.190 s vs 5.310 s — every other printed number matched). On the GPU the
+  picture is more interesting than "nondeterministic": two runs in §0.4.486
+  differed in the third decimal at step 600 (0.047137 vs 0.051002), while two
+  runs in §0.4.502 reproduced 0.046667 *exactly*. XLA autotunes its GEMM
+  kernels at compile time and can pick a different winner per run — so the
+  nondeterminism is real, and it does not have to show. If you need a bit-exact
+  GPU trajectory, that is an XLA flag question, not a Tlaloc one.
+- **The reloaded model's predictions are bit-identical on BOTH lanes**, which is
+  a weaker statement than it looks and worth saying precisely: the reloaded
+  model and the in-memory model are compared through the *same* compiled
+  executable with the *same* inputs, so the only thing under test is whether
+  the checkpoint round trip preserved every bit of every parameter. It does —
+  337 of 337 scalars, and `max|diff| = 0` over 1024 held-out points.
 
 ### About the TF32 line
 
@@ -177,6 +206,51 @@ too large for f32 rounding. That was measured down, not guessed: with **both**
 Triton GEMM emitter, and cuBLAS), and closing one just moves the work to the
 other.
 
+## The checkpoint
+
+The run ends by saving the trained model to
+`build/checkpoints/disc_mlp.safetensors` and reading it back. Two things about
+that file are worth knowing:
+
+**It is an ordinary safetensors file.** Not a Tlaloc container, not Java
+serialization — the format HuggingFace ships checkpoints in, which this
+repository has read since §0.4.468 and has written since §0.4.502. So you can
+open the file with tools you already have:
+
+```python
+from safetensors import safe_open
+with safe_open("build/checkpoints/disc_mlp.safetensors", framework="pt") as f:
+    print(f.metadata())
+    print(sorted(f.keys()))
+    print(f.get_tensor("param.0.w").shape)
+```
+
+which on the file this example just wrote prints, verbatim (`safetensors` 0.8.0
++ torch 2.11.0, wrapped here only because the lines are long):
+
+```
+{'tlaloc.optimizer.kind': 'Adam', 'tlaloc.optimizer.stepCount': '600',
+ 'seed': '20260921', 'steps': '600', 'task': 'disc',
+ 'tlaloc.checkpoint.version': '1'}
+['opt.m.0.b', 'opt.m.0.w', 'opt.m.2.b', 'opt.m.2.w', 'opt.m.4.b', 'opt.m.4.w',
+ 'opt.v.0.b', 'opt.v.0.w', 'opt.v.2.b', 'opt.v.2.w', 'opt.v.4.b', 'opt.v.4.w',
+ 'param.0.b', 'param.0.w', 'param.2.b', 'param.2.w', 'param.4.b', 'param.4.w']
+torch.Size([2, 16])
+```
+
+**It is resumable, not just a snapshot.** The `opt.m.*` / `opt.v.*` tensors are
+Adam's first and second moments and `tlaloc.optimizer.stepCount` is its `t`, so
+`snapshot.restoreOptimizerState(optimizer)` hands back an optimizer state that
+continues the run instead of restarting its bias correction. A checkpoint
+written without them (`ModelCheckpoint.encode(model)`) is legal and is refused
+*by name* if you later ask it for optimizer state.
+
+**What the file does NOT carry is the model's STRUCTURE.** That is why `Main.kt`
+builds `freshModel()` a second time and restores *into* it: a checkpoint holds
+parameter values, and restoring into a different shape is refused by name with
+the keys that disagree. It is PyTorch's `state_dict` contract, for the same
+reason — a file that reconstructed classes would be a file that executes.
+
 ## What to read in the source
 
 | Look at | For |
@@ -184,6 +258,7 @@ other.
 | [`Main.kt`](src/main/kotlin/Main.kt) | `capture` once, then the six-line training loop: bind → dispatch → unpack → optimizer step |
 | [`Lanes.kt`](src/main/kotlin/Lanes.kt) | The entire "run it on the GPU" story: `PjrtSession`, plus the calling convention of a captured gradient function (`inputs ++ params` in, `loss ++ grads` out) |
 | [`Task.kt`](src/main/kotlin/Task.kt) | threefry `RandomKey` as a *value*: `split` for independent streams, no global generator |
+| [`Main.kt`'s `saved :` / `reloaded :` section](src/main/kotlin/Main.kt) | `saveCheckpoint` / `loadCheckpoint` / `restore`: the model is a value, so loading builds a NEW one |
 | [`build.gradle.kts`](build.gradle.kts) | The dependency set, and why this example needs **no** compiler plugin on the classpath |
 
 ### A note on plumbing

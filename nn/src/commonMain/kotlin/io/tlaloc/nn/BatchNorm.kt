@@ -38,6 +38,10 @@ import io.tlaloc.autograd.times
 private fun channelTensor(data: FloatArray): DTensor<*, F32> =
     DTensor<Shape, F32>(HostF32Storage(data), intArrayOf(data.size), F32)
 
+/** §0.4.502 — a rank-0 F32 tensor, the checkpoint form of a scalar buffer. */
+private fun scalarTensor(v: Float): DTensor<*, F32> =
+    DTensor<Shape, F32>(HostF32Storage(floatArrayOf(v)), IntArray(0), F32)
+
 /**
  * DiffKT `BatchNormTraining` V2's running state, functionally held:
  * (runningN, runningSum `[C]`, runningSumOfSquares `[C]`), from which
@@ -168,7 +172,7 @@ class BatchNorm(
     val beta: DTensor<*, F32>,
     val stats: BatchNormStats,
     val momentum: Float = 0.1f,
-) : TrainableLayer<BatchNorm> {
+) : TrainableLayer<BatchNorm>, Stateful<BatchNorm> {
 
     init {
         require(gamma.dims.size == 1 && beta.dims.contentEquals(gamma.dims)) {
@@ -188,6 +192,43 @@ class BatchNorm(
         val unknown = updated.keys - setOf("gamma", "beta")
         require(unknown.isEmpty()) { "BatchNorm.withParameters: unknown keys $unknown" }
         return BatchNorm(updated["gamma"] ?: gamma, updated["beta"] ?: beta, stats, momentum)
+    }
+
+    /**
+     * §0.4.502 — the [Stateful] half: the running statistics as checkpoint
+     * buffers. `runningN` is a RANK-0 tensor rather than a scalar channel of
+     * its own, because safetensors has a rank-0 shape and a second scalar
+     * channel would have been a second thing to keep in sync (see [Stateful]).
+     *
+     * Order is declaration order and the keys are the field names, so a
+     * checkpoint's `buffer.runningSum` reads as the thing it is. [momentum] is
+     * NOT a buffer: it is a hyperparameter of the layer, part of the model's
+     * STRUCTURE, and a checkpoint that silently overwrote it would change what
+     * the reloaded model does with its next batch.
+     */
+    override val buffers: List<NamedParameter> = listOf(
+        NamedParameter("runningN", scalarTensor(stats.runningN)),
+        NamedParameter("runningSum", stats.runningSum),
+        NamedParameter("runningSumOfSquares", stats.runningSumOfSquares),
+    )
+
+    override fun withBuffers(updated: Map<String, DTensor<*, F32>>): BatchNorm {
+        val known = setOf("runningN", "runningSum", "runningSumOfSquares")
+        val unknown = updated.keys - known
+        require(unknown.isEmpty()) { "BatchNorm.withBuffers: unknown keys $unknown (known: $known)" }
+        val n = updated["runningN"]?.let {
+            require(it.size == 1) {
+                "BatchNorm.withBuffers: runningN must hold one element (got dims ${it.dims.toList()})"
+            }
+            it.hostF32()[0]
+        } ?: stats.runningN
+        return withStats(
+            BatchNormStats(
+                n,
+                updated["runningSum"] ?: stats.runningSum,
+                updated["runningSumOfSquares"] ?: stats.runningSumOfSquares,
+            ),
+        )
     }
 
     /** The functional stats rebuild — the state half of a training step. */

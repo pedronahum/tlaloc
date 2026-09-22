@@ -17,6 +17,12 @@ import io.tlaloc.core.TensorStorage
 // §0.4.468 (Phase H2) — the safetensors reader: gap-list item 4's first half
 // (INFERENCE_SERVING_AUDIT.md §2), weight ingestion.
 //
+// The WRITER is SafetensorsWriter.kt (§0.4.502), which states the format facts
+// that are only a writer's problem — header padding and tensor ordering — and
+// keeps its dtype table the exact inverse of [Safetensors.mapDType]'s. A test
+// pins that inverse, because two tables that disagree about what a Tlaloc
+// checkpoint may contain is the one way this pair can rot.
+//
 // THE FORMAT, stated once so no reader in this repo has to guess:
 //
 //   [0, 8)              u64 little-endian N — the header length in bytes

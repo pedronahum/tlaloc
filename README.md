@@ -229,9 +229,24 @@ repeat(600) {
 ```
 
 No `.backward()`, no `zero_grad()`, no hand-written derivatives. On a GB10 that
-loop runs **600 Adam steps in 1.81 s (3.0 ms/step)** on PJRT-CUDA — loss
-`0.992 → 0.047`, **98.1 %** on held-out points — and the same program falls back
+loop runs **600 Adam steps in 2.02 s (3.4 ms/step)** on PJRT-CUDA — loss
+`0.992 → 0.047`, **98.3 %** on held-out points — and the same program falls back
 to the host interpreter on a laptop.
+
+When it is done, the model and the optimizer's moments go into one safetensors
+file, and a resumed run continues rather than restarts:
+
+```kotlin
+saveCheckpoint(path, model, optimizer, state)              // one file, resumable
+
+val snapshot = loadCheckpoint(path)
+val loaded    = snapshot.restore(freshModel())             // a NEW model; nothing mutates
+val resumed   = snapshot.restoreOptimizerState(optimizer)  // Adam's moments and its step count
+```
+
+`loaded`'s predictions are bit-identical to `model`'s, and the next 15 steps from
+`resumed` match the uninterrupted run bit for bit. The file is an ordinary
+safetensors file — `safetensors.torch.load_file` opens it.
 → [`examples/gpu-training`](examples/gpu-training/)
 
 ### Ship it — a directory, then no framework
@@ -367,6 +382,8 @@ this:
 | Op surface, NN ops, special functions, stateless RNG, sparse | ✅ | RNG is bit-exact against JAX's threefry stream |
 | dtypes | ✅ | F32, F64, I32, BF16 (end to end, incl. native PJRT bf16) — ❌ no F16/FP8 |
 | Model layer + optimizers (`:nn`) | ✅ | Loss curve matches PyTorch to 7 decimals |
+| LR schedules, gradient clipping | ✅ | Pure functions of the step count; agree with PyTorch's schedulers and `clip_grad_*` — including one **deliberate** divergence, certified as a difference |
+| Save and load a model (+ optimizer state) | ✅ | One safetensors file, written by Tlaloc's own writer; round trip is bit-identical and a resumed run matches the uninterrupted one bit for bit |
 | Training on GPU | ✅ | Certified on an NVIDIA GB10 (Blackwell, aarch64) |
 | Inference: paged attention, KV cache, safetensors, framework-free serving | ✅ | Real TinyLlama-1.1B, 6/6 tokens identical to HuggingFace |
 | vLLM platform plugin | ✅ | `LLM.generate()` runs a real TinyLlama from a Tlaloc artifact; `vllm serve`'s HTTP layer is not yet run |

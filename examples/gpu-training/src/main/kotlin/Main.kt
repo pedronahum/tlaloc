@@ -2,7 +2,7 @@
  * Tlaloc — training a neural network on the GPU with gradients the COMPILER
  * wrote.
  *
- * The shape of the program, and the only three ideas in it:
+ * The shape of the program, and the only four ideas in it:
  *
  *  1. CAPTURE ONCE. `capture(model, inputs) { loss }` traces the model's
  *     forward through Tlaloc's Tracer into a real IR function, then applies
@@ -18,9 +18,15 @@
  *     here. Same program, same numbers, different machine.
  *
  *  3. ONE COMPILED EXECUTABLE FOR THE WHOLE RUN. The model's weights enter the
- *     graph as parameters, not constants, so all 300 training steps re-bind
+ *     graph as parameters, not constants, so all 600 training steps re-bind
  *     new values into a single compiled artifact. The example prints the
  *     session's cache size to prove it.
+ *
+ *  4. A TRAINED MODEL IS A FILE. The run ends by writing the model AND Adam's
+ *     moments to one safetensors file, building the same model structure from
+ *     scratch, restoring into it, and checking that the reloaded model's
+ *     predictions are bit-identical. Everything after that point in the output
+ *     is produced by the model that came back off the disk.
  *
  * The task has a ground truth you can see: the model must learn a disc in the
  * plane, and at the end we print what it learned next to the real thing.
@@ -42,7 +48,11 @@ import io.tlaloc.nn.Params
 import io.tlaloc.nn.ReluLayer
 import io.tlaloc.nn.Sequential
 import io.tlaloc.nn.capture
+import io.tlaloc.nn.loadCheckpoint
+import io.tlaloc.nn.saveCheckpoint
 import io.tlaloc.nn.step
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.math.abs
 
 private const val SEED = 20260921L
@@ -69,13 +79,17 @@ fun main() {
     // Two hidden ReLU layers: the disc is not linearly separable, so a model
     // without them provably cannot fit this task.
     val initKeys = streams.init.split(3)
-    val model0 = Sequential(
+    // A function, not a value, because the checkpoint section below needs to
+    // build this STRUCTURE a second time from nothing: a checkpoint carries
+    // parameter values, never the shape of the model that held them.
+    fun freshModel(): Sequential = Sequential(
         Dense(2, 16, initKeys[0]),
         ReluLayer,
         Dense(16, 16, initKeys[1]),
         ReluLayer,
         Dense(16, 1, initKeys[2]),
     )
+    val model0 = freshModel()
     val scalars = model0.parameters.sumOf { p -> p.tensor.dims.fold(1) { a, b -> a * b } }
     println("model    : Dense(2->16) -> ReLU -> Dense(16->16) -> ReLU -> Dense(16->1)")
     println("           ${model0.parameters.size} parameter tensors, $scalars scalars, keys ${model0.parameters.map { it.key }}")
@@ -178,12 +192,57 @@ fun main() {
         }
         println()
 
+        // ---- save it, reload it, keep going -----------------------------
+        // One safetensors file carries the parameters AND Adam's moment
+        // tensors, so this is a resumable checkpoint rather than a snapshot of
+        // weights. `restore` returns a NEW model — layers are immutable here,
+        // so loading cannot mutate anything.
+        val written = saveCheckpoint(
+            Path.of("build", "checkpoints", "disc_mlp.safetensors"),
+            model,
+            optimizer,
+            optState,
+            mapOf("task" to "disc", "seed" to "$SEED", "steps" to "$STEPS"),
+        )
+        val snapshot = loadCheckpoint(written)
+        val reloaded = snapshot.restore(freshModel())
+        val resumed = snapshot.restoreOptimizerState(optimizer)
+
+        var identicalScalars = 0
+        for (i in model.parameters.indices) {
+            val a = model.parameters[i].tensor.hostF32()
+            val b = reloaded.parameters[i].tensor.hostF32()
+            for (j in a.indices) if (a[j].toRawBits() == b[j].toRawBits()) identicalScalars++
+        }
+
         // ---- what did it learn? -----------------------------------------
         // The prediction path is the same model traced WITHOUT a loss: a plain
         // function from points to scores, which runs on the same lane.
         val grid = Grid(cols = 31, rows = 15)
-        val gridScores = predict(lane, model, grid.points, grid.count)
-        val heldOutScores = predict(lane, model, heldOut.xs, heldOut.n)
+        val trainedScores = predict(lane, model, heldOut.xs, heldOut.n)
+        val heldOutScores = predict(lane, reloaded, heldOut.xs, heldOut.n)
+        var maxScoreDiff = 0f
+        for (i in heldOutScores.indices) {
+            maxScoreDiff = maxOf(maxScoreDiff, abs(heldOutScores[i] - trainedScores[i]))
+        }
+
+        println("saved    : $written")
+        println("           ${Files.size(written)} bytes — one safetensors file: " +
+            "${model.parameters.size} parameter tensors")
+        println("           plus Adam's two moment tensors per parameter, and the step count.")
+        println("           Nothing Tlaloc-specific is needed to read it: Python's `safetensors`")
+        println("           opens it, and the keys are param.0.w, opt.m.0.w, opt.v.0.w, ...")
+        println("reloaded : built the same structure from scratch, then restored into it —")
+        println("           parameters bit-identical: $identicalScalars / $scalars scalars")
+        val agreement =
+            if (maxScoreDiff == 0f) "BIT-IDENTICAL" else "max|diff| %.3g".format(maxScoreDiff)
+        println("           held-out predictions vs the in-memory model: $agreement " +
+            "over ${heldOut.n} points")
+        println("           Adam resumed at step ${resumed.stepCount} of $STEPS — training could continue")
+        println("           (everything below was computed by the model that came back off the disk)")
+        println()
+
+        val gridScores = predict(lane, reloaded, grid.points, grid.count)
 
         println("learned decision boundary vs ground truth  ('#' inside, '.' outside)")
         println()

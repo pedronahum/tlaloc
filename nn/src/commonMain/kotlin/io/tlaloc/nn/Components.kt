@@ -53,7 +53,13 @@ interface Layer {
  * The training-capable node (DiffKT's `Trainable`, F0 §4.0.1, minus the
  * `extractTangent` extractor protocol — under the compiler route gradients
  * come back addressed by parameter KEY from the transformed graph, so no
- * extraction hook is needed — and minus `store`/`load`, out of scope v1).
+ * extraction hook is needed).
+ *
+ * §0.4.502 CLOSED the `store`/`load` gap this KDoc used to record as "out of
+ * scope v1": [parameters] and [withParameters] are exactly the two operations a
+ * checkpoint needs, and [ModelCheckpoint] is written against them and nothing
+ * else. Persistent state that is NOT trainable — BatchNorm's running
+ * statistics — is [Stateful]'s business, for the reason recorded there.
  *
  * Contract: [parameters] is in stable declaration order with stable keys, and
  * [withParameters] returns a NEW instance with the keyed tensors replaced
@@ -66,6 +72,42 @@ interface Trainable<T : Trainable<T>> {
 
 /** DiffKT's `TrainableLayer`: a layer that is also a trainable component. */
 interface TrainableLayer<T : TrainableLayer<T>> : Layer, Trainable<T>
+
+/**
+ * §0.4.502 (Tier 2 item 7) — the NON-TRAINABLE persistent state of a
+ * component: tensors that are part of what the model IS, that a checkpoint
+ * must carry, and that no optimizer ever touches. Today there is exactly one
+ * such component, [BatchNorm], whose running statistics are the difference
+ * between a reloaded model that can be served and one that emits NaNs the
+ * first time [BatchNorm.inferenceMode] is called.
+ *
+ * This is a SEPARATE interface from [Trainable] on purpose, and the reason is
+ * the gradient contract: [Trainable.parameters] is the list the reverse
+ * transform returns one gradient per, keyed by [NamedParameter.key], and an
+ * optimizer refuses a key it has no gradient for. Putting running statistics
+ * in that list would make every optimizer step demand a gradient for a
+ * quantity that has none. Naming them separately keeps both contracts exact.
+ *
+ * Contract, mirroring [Trainable] line for line: [buffers] is in stable
+ * declaration order with stable keys, and [withBuffers] returns a NEW instance
+ * with the keyed tensors replaced (absent keys keep their current tensor;
+ * unknown keys are an error). A scalar buffer is a RANK-0 tensor, because
+ * safetensors has a rank-0 shape (`[]`) and inventing a second scalar channel
+ * in the checkpoint format would have been a second thing to keep in sync.
+ *
+ * **Container contract.** A container layer that can hold a [Stateful] child
+ * must itself be [Stateful] and must prefix its children's keys exactly as it
+ * prefixes their parameter keys, or a save silently drops their state. In this
+ * module [Sequential] is the only such container, and that is a TYPE fact, not
+ * a review finding: `GRU` holds `Dense`s, `Conv2dWithSamePadding` holds a
+ * `Conv2d` and `EmbeddingBag.WithOffsets` holds an `EmbeddingBag` — none of
+ * those is `Stateful`, so none of them can lose state it does not have.
+ * `ModelCheckpoint` states the same contract at the point a user meets it.
+ */
+interface Stateful<T : Stateful<T>> {
+    val buffers: List<NamedParameter>
+    fun withBuffers(updated: Map<String, DTensor<*, F32>>): T
+}
 
 /**
  * `AffineTransform(m, b)`: elementwise `m * x + b`, both parameters trainable
@@ -99,7 +141,7 @@ class AffineTransform(
  * none, and optional names can layer on later without breaking the positional
  * scheme.
  */
-class Sequential(val layers: List<Layer>) : TrainableLayer<Sequential> {
+class Sequential(val layers: List<Layer>) : TrainableLayer<Sequential>, Stateful<Sequential> {
 
     constructor(vararg layers: Layer) : this(layers.toList())
 
@@ -126,6 +168,38 @@ class Sequential(val layers: List<Layer>) : TrainableLayer<Sequential> {
                 "Sequential.withParameters: layer $i is not trainable but keys ${childUpdates.keys} target it"
             }
             layer.withParameters(childUpdates) as Layer
+        }
+        return Sequential(rebuilt)
+    }
+
+    /**
+     * §0.4.502 — the [Stateful] half, keyed with the SAME `"<index>."` prefix
+     * the parameters use, so a checkpoint's `param.3.gamma` and
+     * `buffer.3.runningSum` name one layer.
+     */
+    override val buffers: List<NamedParameter> =
+        layers.flatMapIndexed { i, layer ->
+            if (layer is Stateful<*>) {
+                layer.buffers.map { NamedParameter("$i.${it.key}", it.tensor) }
+            } else emptyList()
+        }
+
+    override fun withBuffers(updated: Map<String, DTensor<*, F32>>): Sequential {
+        val perChild = HashMap<Int, MutableMap<String, DTensor<*, F32>>>()
+        for ((key, tensor) in updated) {
+            val dot = key.indexOf('.')
+            val index = if (dot > 0) key.substring(0, dot).toIntOrNull() else null
+            require(index != null && dot < key.length - 1 && index in layers.indices) {
+                "Sequential.withBuffers: key '$key' is not '<layerIndex>.<childKey>'"
+            }
+            perChild.getOrPut(index) { HashMap() }[key.substring(dot + 1)] = tensor
+        }
+        val rebuilt = layers.mapIndexed { i, layer ->
+            val childUpdates = perChild[i] ?: return@mapIndexed layer
+            require(layer is Stateful<*>) {
+                "Sequential.withBuffers: layer $i is not stateful but keys ${childUpdates.keys} target it"
+            }
+            layer.withBuffers(childUpdates) as Layer
         }
         return Sequential(rebuilt)
     }

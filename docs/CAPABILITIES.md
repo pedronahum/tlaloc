@@ -47,6 +47,9 @@ Last reviewed at §0.4.496 (2026-09-22), 2,345 automated tests at HEAD.
 |---|---|---|
 | Layers — Dense, Conv2d, MaxPool/AvgPool, BatchNorm, Dropout, Embedding, EmbeddingBag, GRU, Flatten | ✅ | Immutable/functional; a training step returns a new model |
 | Optimizers — SGD, Momentum, RMSprop, Adam, FixedLearningRate | ✅ | Pure `(params, grads, state) → (params', state')` |
+| LR schedules — step, exponential, cosine, linear warmup | ✅ | Pure functions of the step count; agree with PyTorch's `StepLR`/`ExponentialLR`/`CosineAnnealingLR` to 2.8e-7 relative. `CosineDecay` deliberately CLAMPS past `T_max` where PyTorch's is periodic — certified as a difference |
+| Gradient clipping — by global norm, by value | ✅ | Agrees with `clip_grad_value_` exactly; by-norm differs from `clip_grad_norm_` by torch's own `+1e-6` denominator guard (~1.6e-7 relative) and sits closer to the exact ratio |
+| Model persistence — save/load a model + optimizer state | ✅ | One safetensors file; round trip is BIT-IDENTICAL and a resumed run's next 15 steps match the uninterrupted ones bit for bit. Loading builds a NEW model — layers stay immutable |
 | Training loop — capture once, train | ✅ | MLP converges; loss curve matches PyTorch to 7 decimals |
 | Training on GPU | ✅ | The captured gradient graph compiles to StableHLO and trains on CUDA |
 | Mixed precision (bf16 compute, f32 master weights) | ✅ | No loss scaling needed |
@@ -58,6 +61,7 @@ Last reviewed at §0.4.496 (2026-09-22), 2,345 automated tests at HEAD.
 |---|---|---|
 | Paged attention, KV-cache writes, decode bucketing | ✅ | Inference-only ops; they refuse differentiation by name |
 | HuggingFace safetensors ingestion | ✅ | Kotlin parser; certified against torch reading the same bytes |
+| safetensors WRITING | ✅ | F32/F64/I32/BF16, header padded and tensors ordered so every offset is naturally aligned; certified both ways against the reference `safetensors` library on raw bytes. Sharded and streamed output are named deferrals; F16/FP8 refuse by name |
 | A real Llama serving end to end | ✅ | TinyLlama-1.1B, all 22 layers, on PJRT-CUDA — 6/6 generated token ids identical to HuggingFace transformers, driven directly *and* through vLLM |
 | Framework-free serving runtime | ✅ | The serving process imports no JAX, no PyTorch, no NumPy — just a PJRT plugin `.so` and a driver (proven by an import blocker that raises on those modules while the path runs) |
 | vLLM platform plugin | ✅ | vLLM 0.29.0's `LLM.generate()` runs a real TinyLlama from a Tlaloc artifact — the same 6 token ids as the direct driver and as HuggingFace. One sequence, greedy, prompt within the compiled context; `vllm serve`'s HTTP layer is not yet run ([audit](INFERENCE_SERVING_AUDIT.md), [runbook §11](SERVING_RUNBOOK.md)) |

@@ -92,8 +92,9 @@ here since Phase E ratification: row-sparse embedding gradients.
    `:core` threefry kernels.
 9. **Out of scope for Phase F v1** (recorded, not silent): GPU-resident
    training loops (the tape is a host path; the GPU lane remains the
-   emitted-graph story), checkpoint serialization beyond tensor
-   round-trip helpers, data-loading utilities, and DiffKT's `Model`
+   emitted-graph story), ~~checkpoint serialization beyond tensor
+   round-trip helpers~~ (**CLOSED by §0.4.502** — see item 9 of §9's
+   deferral list), data-loading utilities, and DiffKT's `Model`
    convenience subclasses beyond what `Sequential` + `Trainable` cover.
 
 ## 3. The §-sized slicing (the finalization workflow's task list)
@@ -155,8 +156,10 @@ not remembered. This entry is the reference every F1–F8 agent reads.
 - `LayerWithInferenceMode` — `val inferenceMode: Layer<*>` (BatchNorm
   freezes to `AffineTransform`; Dropout to identity).
 
-Tlaloc mapping (per §2 decisions): the same shape, minus `store`/`load`
-beyond tensor round-trip helpers (out of scope v1) and with
+Tlaloc mapping (per §2 decisions): the same shape, with `store`/`load`
+supplied by §0.4.502's `ModelCheckpoint` over `parameters` /
+`withParameters` rather than as members on the interface (see item 9 of
+the deferral list), and with
 `extractTangent` replaced by the tape's id-addressed gradients — F1's
 `valueAndGradients(model, loss)` walks the parameter tree, records each
 parameter as a tape leaf, and reads gradients back by tape id, so no
@@ -425,8 +428,8 @@ and keeps DiffKT-formula quirks to hand-stepped Kotlin oracles.
 
 Deferred, by name: row-sparse embedding gradients (§2.7 stands —
 dense v1); grouped-conv host twins; EmbeddingBag Mean/Max reductions
-(DiffKT ships only Sum; parity is Sum); `store`/`load` checkpointing
-beyond tensor round-trip; GPU-resident training (§2.9); DiffKT's
+(DiffKT ships only Sum; parity is Sum); GPU-resident training (§2.9);
+DiffKT's
 `LinearBeforeResetGRU` DNNL hookup (never existed upstream either).
 
 ### F1 — §0.4.437: the `:nn` module + the compiler-route substrate
@@ -1144,9 +1147,15 @@ named across F0–F8, none silent):
    consumer).
 8. EmbeddingBag Mean/Max reductions (DiffKT ships only Sum — parity IS
    Sum) and empty bags (recorded narrowing: we refuse loudly, F6).
-9. `store`/`load` checkpointing beyond tensor round-trip helpers, data
-   loaders, GPU-RESIDENT optimizer state (the F8 GPU lane is
-   gradients-on-device + host optimizer, the ratified §2.9 scope).
+9. ~~`store`/`load` checkpointing beyond tensor round-trip helpers~~ —
+   **CLOSED by §0.4.502** (Tier 2 item 7): `ModelCheckpoint` /
+   `saveCheckpoint` / `loadCheckpoint` persist parameters, non-trainable
+   buffers (`Stateful`, for BatchNorm's running statistics) and optimizer
+   state to ONE safetensors file, through a new `:core` safetensors
+   WRITER. Certified bit-identical on round trip, and a resumed run's next
+   15 steps match the uninterrupted ones bit for bit. Still deferred from
+   this item: data loaders, and GPU-RESIDENT optimizer state (the F8 GPU
+   lane is gradients-on-device + host optimizer, the ratified §2.9 scope).
 10. DiffKT's `LinearBeforeResetGRU` DNNL hookup — never existed upstream.
 
 **End state.** Phase F is COMPLETE per the ratified + amended scope:

@@ -116,9 +116,20 @@ private fun requireKnownKeys(params: List<NamedParameter>, grads: Map<String, DT
  * DiffKT's `FixedLearningRateOptimizer(alpha)`: `t − α·g`, no state at all.
  * The F0 audit records no default for `alpha`, so none is offered here.
  */
-class FixedLearningRate(val alpha: Float) : Optimizer<Unit> {
+class FixedLearningRate(val alpha: Float) : CheckpointableOptimizer<Unit> {
 
     override fun initialState() = Unit
+
+    // §0.4.502 — checkpointing. This optimizer has NO state, so its
+    // checkpoint is the kind tag alone. It is still checkpointable rather
+    // than exempt: a training loop written against `Optimizer<S>` must be
+    // able to save whatever optimizer it was handed, and a kind tag that
+    // round-trips is what stops an `Adam` state from being loaded here.
+    override val checkpointKind: String get() = "FixedLearningRate"
+
+    override fun saveState(state: Unit): OptimizerCheckpoint = OptimizerCheckpoint(checkpointKind)
+
+    override fun loadState(checkpoint: OptimizerCheckpoint) = Unit
 
     override fun step(
         params: List<NamedParameter>,
@@ -161,7 +172,7 @@ class SGD(
     val initialLearningRate: Float = 0.001f,
     val lrDecay: Float = 0f,
     val momentum: Float = 0f,
-) : Optimizer<SGDState> {
+) : CheckpointableOptimizer<SGDState> {
 
     init {
         require(momentum in 0f..1f) { "SGD: momentum must be in [0, 1] (got $momentum)" }
@@ -199,6 +210,21 @@ class SGD(
         }
         return OptimizerStep(updated, SGDState(state.stepCount + 1, velocity ?: emptyMap()))
     }
+
+    // §0.4.502 — checkpointing. `stepCount` is load-bearing here and not
+    // merely informational: it drives the [lrDecay] schedule, so a resume
+    // that restarted it at 0 would silently raise the learning rate back to
+    // `initialLearningRate` at the exact moment the run had annealed it.
+    override val checkpointKind: String get() = "SGD"
+
+    override fun saveState(state: SGDState): OptimizerCheckpoint = OptimizerCheckpoint(
+        kind = checkpointKind,
+        scalars = mapOf("stepCount" to state.stepCount.toString()),
+        tensors = OptimizerCheckpoint.grouped("velocity", state.velocity),
+    )
+
+    override fun loadState(checkpoint: OptimizerCheckpoint): SGDState =
+        SGDState(checkpoint.int("stepCount"), checkpoint.group("velocity"))
 }
 
 /** [RMSprop]'s state: the per-key mean-square slots, seeded `ms = g²` on first visit. */
@@ -217,7 +243,7 @@ class RMSprop(
     val alpha: Float = 0.005f,
     val beta: Float = 0.9f,
     val eps: Float = 0f,
-) : Optimizer<RMSpropState> {
+) : CheckpointableOptimizer<RMSpropState> {
 
     override fun initialState() = RMSpropState(emptyMap())
 
@@ -247,6 +273,19 @@ class RMSprop(
         }
         return OptimizerStep(updated, RMSpropState(meanSquare))
     }
+
+    // §0.4.502 — checkpointing. No step count: RMSprop's update has none (it
+    // is DiffKT's `t − α·g/√ms`, with no bias correction and no schedule), so
+    // writing one would be inventing state the optimizer does not have.
+    override val checkpointKind: String get() = "RMSprop"
+
+    override fun saveState(state: RMSpropState): OptimizerCheckpoint = OptimizerCheckpoint(
+        kind = checkpointKind,
+        tensors = OptimizerCheckpoint.grouped("meanSquare", state.meanSquare),
+    )
+
+    override fun loadState(checkpoint: OptimizerCheckpoint): RMSpropState =
+        RMSpropState(checkpoint.group("meanSquare"))
 }
 
 /**
@@ -276,7 +315,7 @@ class Adam(
     val beta1: Float = 0.9f,
     val beta2: Float = 0.999f,
     val eps: Float = 1e-8f,
-) : Optimizer<AdamState> {
+) : CheckpointableOptimizer<AdamState> {
 
     override fun initialState() = AdamState(0, emptyMap(), emptyMap())
 
@@ -308,6 +347,25 @@ class Adam(
         }
         return OptimizerStep(updated, AdamState(t, mSlots, vSlots))
     }
+
+    // §0.4.502 — checkpointing. All three parts of Adam's state matter to a
+    // resume, and the step count most of all: the bias corrections
+    // `1−β₁ᵗ`/`1−β₂ᵗ` are ~0.1/0.001 at t=1 and ~1 by t=1000, so a resume
+    // that restarted `t` would divide a fully-warmed first moment by 0.1 and
+    // take a step ten times too large on the first batch after loading.
+    override val checkpointKind: String get() = "Adam"
+
+    override fun saveState(state: AdamState): OptimizerCheckpoint = OptimizerCheckpoint(
+        kind = checkpointKind,
+        scalars = mapOf("stepCount" to state.stepCount.toString()),
+        tensors = OptimizerCheckpoint.grouped("m", state.m) + OptimizerCheckpoint.grouped("v", state.v),
+    )
+
+    override fun loadState(checkpoint: OptimizerCheckpoint): AdamState = AdamState(
+        checkpoint.int("stepCount"),
+        checkpoint.group("m"),
+        checkpoint.group("v"),
+    )
 }
 
 /**

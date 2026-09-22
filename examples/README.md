@@ -73,7 +73,7 @@ e: Tlaloc named-index mismatch: contract operands share no named axis:
 | Example | What it shows | Needs |
 |---|---|---|
 | [`mnist/`](mnist/) | The real MNIST — 60,000 digits, downloaded and parsed — at **93.66 %** test accuracy, trained by a captured gradient. Act `[4]` prints test digits as ASCII next to the model's verdict. | CUDA *(self-skips to a slower host lane)* · downloads 11 MB once |
-| [`gpu-training/`](gpu-training/) | A network learns a disc on the Blackwell: 600 Adam steps in 1.8 s, **98.3 %** held out, and the decision boundary drawn next to the ground truth. | CUDA *(self-skips)* |
+| [`gpu-training/`](gpu-training/) | A network learns a disc on the Blackwell: 600 Adam steps in 2.0 s, **98.3 %** held out, the decision boundary drawn next to the ground truth — then the model is **saved to one safetensors file and reloaded**, and everything after that line is computed by the model off the disk. | CUDA *(self-skips)* |
 | [`gpu-inference/`](gpu-inference/) | Kotlin compiles a real TinyLlama-1.1B into a directory and **exits**; a stock `python3` with no jax, no torch and no numpy loads it and answers `' Paris.'` | CUDA + a PJRT plugin *(self-skips; falls back to a toy graph with no checkpoint)* |
 | [`named-indices/`](named-indices/) | Axis **names** in the Kotlin type, so a transposed weight is an overload-resolution failure in Kotlin's own type checker — no plugin involved. | nothing |
 
@@ -123,7 +123,7 @@ Run end to end on 2026-09-22 on the GB10 DGX Spark, aarch64, CUDA driver
 | `named-indices shapeError` | **failed, as designed** | `Argument type mismatch: actual type is 'DTensor<Rank2<Named<Vocab, Sym>, …>>' but 'DTensor<Rank2<Named<SeqLen, Sym>, …>>' was expected` |
 | `mnist` | ran **on the GPU** | 600 full-batch steps over 4,096 images in 8.28 s, loss `0.112445 → 0.002118`, **93.66 %** on all 10,000 test images, 6 of 6 shown digits correct |
 | `mnist` (host lane) | ran | `TLALOC_EXAMPLE_LANE=host`: 40 steps over 512 images in 19.85 s, **82.50 %** on 1,000 |
-| `gpu-training` | ran **on the GPU** | 600 Adam steps on PJRT/XLA CUDA, held-out accuracy **98.3 %** on 1024 unseen points |
+| `gpu-training` | ran **on the GPU** | 600 Adam steps on PJRT/XLA CUDA, held-out accuracy **98.3 %** on 1024 unseen points; the save/reload round trip reproduced 337/337 parameter scalars and all 1024 predictions bit-for-bit |
 | `gpu-inference` half one | ran | the real TinyLlama-1.1B: 4.1 GiB of weights and a 65 KiB manifest written in 10.5 s |
 | `gpu-inference` half two | ran **on the GPU** | `/usr/bin/python3`, no jax/torch/numpy: `' The capital of France is'` → `' Paris.\n\n2.'`, 1 XLA compile, median step 1353 ms |
 | `gpu-inference --reference` | ran **on the GPU** | the toy graph, no checkpoint needed: 2 XLA compiles, median step 2 ms |

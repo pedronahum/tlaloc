@@ -16,6 +16,45 @@ retro-summarise them; it is the record from the first named version forward.
 
 ### Added
 
+- **A trained model can be saved and loaded.** Tlaloc could train on a GPU and
+  could not persist the result: `:nn`'s `Components.kt` said so in a comment
+  ("minus `store`/`load`, out of scope v1") and `:core`'s safetensors support was
+  read-only. `:core` now has a **safetensors writer**
+  (`SafetensorsWriter.encode`, plus an atomically-renaming
+  `SafetensorsFileWriter` on the JVM) covering F32, F64, I32 and BF16 and
+  refusing every other dtype by name, and `:nn` has `ModelCheckpoint` /
+  `saveCheckpoint` / `loadCheckpoint`, which put a model's parameters, its
+  non-trainable buffers and its optimizer's state into **one safetensors file**.
+  Loading returns a NEW model (`ModelSnapshot.restore`), because layers are
+  immutable here. The round trip is bit-identical — parameters, predictions and
+  gradients — and a run resumed from a checkpoint produces bit-identical losses
+  and parameters for the next 15 steps. The file is an ordinary safetensors file:
+  `safetensors.torch.load_file` opens it, and the writer is certified in both
+  directions against the reference Python library on raw bytes.
+- **Non-trainable persistent state has a home.** New `Stateful<T>` interface in
+  `:nn`, implemented by `BatchNorm` (its running statistics) and by `Sequential`
+  (which forwards its children's, with the same `"<index>."` prefix it uses for
+  parameters). Deliberately separate from `Trainable`, whose `parameters` list is
+  the one the reverse transform returns a gradient per — running statistics have
+  no gradient.
+- **Learning-rate schedules**: `ConstantLR`, `StepDecay`, `ExponentialDecay`
+  (continuous or staircase), `CosineDecay`, `LinearWarmup`, and a `Scheduled`
+  optimizer combinator that applies any of them to any optimizer. A schedule is a
+  pure function of the completed-step count, so the step count is checkpointed
+  state and a resumed run continues the schedule rather than restarting it. The
+  three PyTorch also ships agree with `StepLR` / `ExponentialLR` /
+  `CosineAnnealingLR` to 2.8e-7 relative over 34 rates.
+- **Gradient clipping**: `GradientClipping.globalNorm`, `byGlobalNorm` and
+  `byValue`, pure functions on the gradient map. `byValue` agrees with torch's
+  `clip_grad_value_` exactly; `byGlobalNorm` uses the exact `maxNorm / ‖g‖` ratio
+  where torch uses `maxNorm / (‖g‖ + 1e-6)`, a recorded ~1.6e-7 divergence. A
+  non-finite gradient norm is refused by name instead of being scaled into zeros
+  or NaNs.
+- **`examples/gpu-training` now saves, reloads and keeps going.** The decision
+  boundary and the held-out accuracy it prints are computed by the model that came
+  back off the disk; observed 337/337 parameter scalars and all 1024 predictions
+  bit-identical on both the CUDA and the host lane.
+
 - **A `grad {}` body can reference a compile-time constant declared outside it.**
   Until now a `grad {}` lambda could reference *nothing* outside itself: the
   lowering resolved property accesses against its own environment (lambda
@@ -64,6 +103,10 @@ retro-summarise them; it is the record from the first named version forward.
 
 ### Changed
 
+- **`CosineDecay` clamps past `decaySteps`, where PyTorch's
+  `CosineAnnealingLR` is periodic and climbs back toward the initial rate.** This
+  is a deliberate divergence and it is certified as one: a test asserts both that
+  torch climbs and that Tlaloc holds. Warm restarts would be their own schedule.
 - **A working build is silent.** Every recognised `grad {}` used to emit two
   compiler **warnings**, each dumping the lowered Tlaloc IR into the consumer's
   build output: the FIR checker's `LAMBDA_LOWERED` and the IR extension's "saw
