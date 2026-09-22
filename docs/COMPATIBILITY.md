@@ -79,9 +79,34 @@ a list of things this policy could not keep.
   synthesizes calls into `:core`/`:ir`; mixing versions is unsupported and is not
   checked for you today (see [ALPHA_PLAN.md](ALPHA_PLAN.md) — this is a named
   gap, not an oversight).
-- **Treat the toolchain as pinned too.** JDK 25 and Kotlin 2.3.20. A K2 compiler
-  plugin binds to compiler internals; a different Kotlin version is not expected
-  to work and is not tested.
+- **Treat the toolchain as pinned too**, and read the two halves separately —
+  §0.4.503 split them.
+  - **Kotlin: 2.3.20 through 2.3.29.** A K2 compiler plugin binds to compiler
+    internals; a different *feature* release is not expected to work and is not
+    tested. Since §0.4.503 the plugin no longer finds out the hard way: it detects
+    the running compiler's version and REFUSES at compile time, naming what it
+    found and the supported range, instead of raising a `NoSuchMethodError` from
+    inside `compileKotlin`. Kotlin numbers feature releases by tens in the third
+    component and bugfixes by ones above them, so the supported range is the whole
+    bugfix family of 2.3.20 and nothing else — 2.3.10 and 2.3.30 are *different
+    feature releases*. `-P plugin:io.tlaloc.plugin:unsafeAllowUnsupportedKotlin=true`
+    turns the refusal into a warning for anyone who wants to try; a crash below it
+    is then the expected outcome, not a bug.
+  - **JDK: 25 to build, 21 to run.** The library modules (`core`, `ir`,
+    `autograd`, `nn`, `stablehlo`, `maestro`) emit Java 21 bytecode and are
+    compiled with `-Xjdk-release=21`. The FFM runtime backends (`runtime-pjrt`,
+    `runtime-cuda`, `kptx`), `runtime-iree` and `compiler-plugin` emit Java 25.
+    Because Kotlin loads a compiler plugin into the compiler's own JVM, a project
+    using `grad { }` needs a JDK 25 *on the build machine* whatever it targets.
+    The per-module table is in [GETTING_STARTED.md](GETTING_STARTED.md) §0 and the
+    gate is `scripts/jdk21-smoke.sh` plus `verifyJvmTarget`, which reads the
+    class-file major version out of every published jar.
+- **Symja (`org.matheclipse:matheclipse-core`, LGPL-3.0) is optional from
+  `0.1.0-alpha01`.** It was a mandatory runtime dependency of `io.tlaloc:ir` until
+  §0.4.503 and is `compileOnly` now, so it will not appear in your graph unless
+  you add it. Adding it is one line, and Tlaloc names that line at compile time on
+  the day a body actually needs the CAS. If your policy forbids LGPL in the
+  dependency graph, nothing in Tlaloc pulls it in.
 
 ## When this policy changes
 

@@ -5,6 +5,10 @@ plugins {
 }
 
 kotlin {
+    // §0.4.503 — This module IS the reason §0.4.311 moved to JDK 25: the PJRT C API is bound
+    // with the Foreign Function & Memory API, stable since JEP 454 (JDK 22) and
+    // final in 25. It stays at 25 while the library modules drop to 21 — see the
+    // `tlalocJvmTargets` table in the root build.gradle.kts.
     jvmToolchain(25)
 
     jvm {

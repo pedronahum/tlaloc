@@ -19,3 +19,11 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
+
+// §0.4.503 — `runOnJdk21` needs a JDK 21 launcher, and Gradle's auto-detection does
+// not look in `~/.local/jdks`. The location comes from an environment variable so no
+// machine-specific path is committed:
+//
+//     export JDK21_HOME=/path/to/jdk-21
+//
+// Nothing else in this project needs it; `run` uses the toolchain JDK 25.

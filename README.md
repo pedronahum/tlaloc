@@ -54,7 +54,8 @@ val g = grad { a: DTensor<Rank2<Sym, Sym>, F32> -> (a matmul a).sum().toFloat() 
 
 ## Quickstart
 
-You need a **JDK 25** toolchain and **Kotlin 2.3.20**. No GPU required.
+You need a **JDK 25** toolchain and **Kotlin 2.3.20** to *build*; what you ship
+runs on **JDK 21** (see [Requirements](#requirements)). No GPU required.
 
 ```bash
 git clone https://github.com/pedronahum/tlaloc && cd tlaloc
@@ -286,8 +287,13 @@ No published artifacts yet. Build once, then consume by coordinate:
 ```kotlin
 // settings.gradle.kts — mavenLocal() first
 // build.gradle.kts
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins { kotlin("jvm") version "2.3.20"; application }
-kotlin { jvmToolchain(25) }
+kotlin {
+    jvmToolchain(25)                                  // to BUILD: the plugin needs 25
+    compilerOptions { jvmTarget.set(JvmTarget.JVM_21) } // to RUN: 21 is enough
+}
 
 dependencies {
     implementation("io.tlaloc:core:0.1.0-alpha01")
@@ -304,8 +310,43 @@ dependencies {
 Without the plugin on the compiler classpath, `grad { }` throws at the call site
 with instructions. Full walkthrough: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
-**Requirements:** JDK 25 · Kotlin 2.3.20 · JVM only (see [Maturity](#maturity)) ·
-for GPU, a PJRT plugin `.so` and an NVIDIA driver.
+<a name="requirements"></a>
+### Requirements
+
+The JDK floor is **per module**, not one number. §0.4.311 moved the whole
+repository to JDK 25 for one reason — the Foreign Function & Memory API went
+stable in [JEP 454][jep454], and Tlaloc's PJRT and CUDA bindings are FFM with no
+JNI — and §0.4.503 gave that reason back the three modules it applies to.
+
+| | Bytecode | Why |
+|---|---|---|
+| `core` `ir` `autograd` `nn` `stablehlo` `maestro` | **Java 21** | nothing in them needs anything newer, and each is compiled with `-Xjdk-release=21` so that is checked, not assumed |
+| `runtime-pjrt` `runtime-cuda` `kptx` | Java 25 | FFM ([JEP 454][jep454]) |
+| `runtime-iree` | Java 25 | no FFM; could be lowered, but no IREE run on 21 is certified — see [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md) |
+| `compiler-plugin` | Java 25 | reads K2 internals; the build machine loads it into the compiler's own JVM |
+
+Read as two sentences:
+
+* **To BUILD** code containing `grad { }` you need a **JDK 25**, because Kotlin
+  runs a compiler plugin inside the compiler's JVM and `compiler-plugin` is 25
+  bytecode. There is no way around that today.
+* **To RUN** what you built, a **JDK 21** is enough — for `grad { }`, `:nn` and
+  StableHLO emission. PJRT / CUDA *execution* needs 25.
+
+So the supported consumer configuration is `jvmToolchain(25)` plus
+`jvmTarget = JVM_21`, which is what [`examples/quickstart`](examples/quickstart)
+does. `bash scripts/jdk21-smoke.sh` (with `JDK21_HOME` set) is the gate: it
+publishes, compiles the quickstart at target 21, and runs the synthesized
+gradient on a real JDK 21.
+
+**Also:** Kotlin **2.3.20–2.3.29** (the plugin refuses anything else by name, at
+compile time, and says what it found) · JVM only (see [Maturity](#maturity)) ·
+for GPU, a PJRT plugin `.so` and an NVIDIA driver · `org.matheclipse:matheclipse-core`
+(**LGPL-3.0**) is **optional** since `0.1.0-alpha01` — add it only if you
+differentiate a symbolic-trip-count loop, and Tlaloc tells you by name on the day
+you need it.
+
+[jep454]: https://openjdk.org/jeps/454
 
 ---
 

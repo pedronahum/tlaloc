@@ -479,6 +479,39 @@ object PhiCalculus {
         }
     }
 
+    /**
+     * §0.4.503 (Tier 3, item 3) — **does this function still contain a loop?**
+     *
+     * Engine-free, side-effect-free, and the whole reason it exists: with Symja
+     * turned into an optional dependency, a caller needs to be able to tell the
+     * difference between "coarsening finished" and "coarsening finished as far as it
+     * could without a computer algebra system". The engine-backed corollaries
+     * C6–C9 are the only rewrites that close a WHILE the engine-free C5 unroll
+     * cannot, so a WHILE surviving [apply] is exactly the condition under which
+     * the absence of the CAS became visible.
+     *
+     * A `for` loop with a concrete trip count is NOT this condition: C5 unrolls it
+     * engine-free and no WHILE remains. That asymmetry is the point — it is what
+     * keeps `examples/differentiable-physics`, whose loop bound is a `const val`,
+     * working with no Symja on the classpath at all.
+     *
+     * Recurses into every region, and into the nested primal carried by a
+     * `COARSENED` op's `primal_body` attribute, because the SOI path puts the
+     * user's body there.
+     */
+    fun containsLoop(fn: DxirFunction): Boolean = containsLoop(fn.body)
+
+    private fun containsLoop(nodes: List<DxirNode>): Boolean {
+        for (node in nodes) {
+            if (node !is DxirOp) continue
+            if (node.op == OpKind.WHILE) return true
+            for (r in node.regions) for (b in r.blocks) if (containsLoop(b.body)) return true
+            val nested = node.attrs["primal_body"]
+            if (nested is DxirFunction && containsLoop(nested.body)) return true
+        }
+        return false
+    }
+
     fun apply(fn: DxirFunction, engine: SymbolicEngine? = null): DxirFunction {
         var current = fn
         for (iter in 0 until FIXPOINT_CAP) {

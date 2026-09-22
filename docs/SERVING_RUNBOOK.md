@@ -76,6 +76,15 @@ looks for them in this order — all three are FILE lookups, never imports:
    as a *place a file sits*. This is the convenience path on THIS machine
    and it is a directory walk, not an `import jax_plugins`.
 
+§0.4.503 made the JVM half as general as the Python half. `PjrtBinaries`
+used to fall back to one literal string —
+`~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`,
+one venv name, one Python minor version, one plugin package — and it now
+globs all three across `$VIRTUAL_ENV`, `~/.local/venvs/*`, `~/.venv`,
+`~/venv`, `~/.local`, `/usr/local` and `/usr`. `PjrtBinaries.pluginSearchReport`
+prints every location it tried and what was at each, which is what the
+examples' "GPU lane unavailable" reason now carries.
+
 ### The development venv (the oracles)
 
 ```bash

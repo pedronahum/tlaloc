@@ -100,8 +100,30 @@ quickstart OK
 |---|---|
 | [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt) | The `grad { }` call — three lines, one gradient, no tape |
 | [`src/shapeError/kotlin/ShapeError.kt`](src/shapeError/kotlin/ShapeError.kt) | The program that must not compile |
-| [`build.gradle.kts`](build.gradle.kts) | The one line that makes it all work: `kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.1.0-alpha01")` — and the `shapeError` task that expects failure |
+| [`build.gradle.kts`](build.gradle.kts) | The one line that makes it all work: `kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.1.0-alpha01")` — the `shapeError` task that expects failure — and, since §0.4.503, the **supported consumer JDK configuration**: `jvmToolchain(25)` to build, `jvmTarget = JVM_21` to run |
 | [`settings.gradle.kts`](settings.gradle.kts) | `mavenLocal()` first — this project is a consumer, not part of the repo build |
+
+## Running it on a JDK 21
+
+§0.4.503 split Tlaloc's bytecode targets: the library modules (`core`, `ir`,
+`autograd`, `nn`, `stablehlo`, `maestro`) emit Java 21, while the FFM runtime
+backends and the compiler plugin stay at 25. This project is the certification
+that the 21 half is real:
+
+```bash
+export JDK21_HOME=/path/to/a/jdk-21     # gradle.properties reads this
+./gradlew -p examples/quickstart runOnJdk21
+```
+
+The program is compiled by a JDK 25 toolchain — the plugin needs one, because
+Kotlin runs a compiler plugin inside the compiler's JVM — into Java 21 bytecode,
+and then executed by a **JDK 21** launcher. A JDK 22+ API anywhere in `:core`,
+`:ir` or `:autograd`, or 25 bytecode in any of them or in the gradient the plugin
+synthesized into this program, fails here with `UnsupportedClassVersionError` or
+`NoSuchMethodError` instead of printing a derivative. Measured on OpenJDK 21.0.2.
+
+`bash scripts/jdk21-smoke.sh` from the repository root is the same thing including
+the `publishToMavenLocal` that has to come first.
 
 ## Where to go next
 

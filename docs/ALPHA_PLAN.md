@@ -2,8 +2,9 @@
 
 **Status: TIER 0 COMPLETE (§0.4.498, 2026-09-22). TIER 1 COMPLETE (§0.4.499,
 2026-09-22). TIER 2 ITEM 6 COMPLETE — slice 1 (§0.4.500) and slice 2 (§0.4.501),
-2026-09-22. TIER 2 ITEM 7 COMPLETE (§0.4.502, 2026-09-22). The rest of TIER 2,
-and TIERS 3–4, ARE NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
+2026-09-22. TIER 2 ITEM 7 COMPLETE (§0.4.502, 2026-09-22). TIER 3 COMPLETE
+(§0.4.503, 2026-09-22). The rest of TIER 2, and TIER 4, ARE NOT YET SCOPED IN
+THIS FILE.** This document is the running record for the arc
 that takes Tlaloc from "an engine with 2,345 passing tests that nobody may
 legally use" to "an alpha a stranger can depend on". Tier 0 was the legal and
 distribution tier: before it, the repository had no `LICENSE` (so, by default,
@@ -333,9 +334,109 @@ tier also named two missing training utilities: learning-rate schedules beyond
 | `TLALOC_EXAMPLE_LANE=host ./gradlew -p examples/gpu-training run` | host lane: loss 0.992422 → 0.045672, 97.9 % held out, 337/337 scalars reloaded bit-identical |
 | Cross-language oracles that RAN | `SafetensorsWriterOracleTest` (3), `NnSchedulesAndClippingVsPytorchTest` (3) — both against the frozen `~/.local/venvs/iree`, nothing installed |
 
-## Tier 3
+## Tier 3 — portability and trust (§0.4.503, 2026-09-22)
 
-⬜ Not scoped in this file yet.
+Four items, all of the same shape: something in this repository was true only of
+the machine it was written on, and a stranger inherited the consequence.
+
+| Item | Status | What pins it | Deferred / notes |
+|---|---|---|---|
+| **The JDK floor is per module now** | ✅ | `verifyJvmTarget`, registered in all twelve subprojects and wired into each one's `check` (so `./gradlew test` covers it): it opens the module's jar and reads the class-file **major version** out of every `.class` byte stream, failing by name on the first disagreement. Negative-tested by setting `"core" to 25` in `tlalocJvmTargets` and confirming `:core:verifyJvmTarget` fails with "119 of 119 classes … are major 65". The authoritative split is the `tlalocJvmTargets` map in the root build; a module missing from it fails configuration by name. | `core` `ir` `autograd` `nn` `stablehlo` `maestro` → **21**; `runtime-pjrt` `runtime-cuda` `kptx` → 25 (FFM, JEP 454); `runtime-iree` `compiler-plugin` `benchmarks` → 25. `:benchmarks` has no `jvmMain` source at all, so the gate reads its **test** classes — an empty jar passes a bytecode check by vacuity, and that is exactly how the gate first failed. |
+| **"No JDK 22+ API" is checked, not assumed** | ✅ | `-Xjdk-release=21` on the MAIN compilation of all six lowered modules. Without it the compiler still resolves against JDK 25's class library, so a JDK 22+ call would compile happily into 21 bytecode and fail at run time with `NoSuchMethodError`. All six compiled first try. | Applied to `main` only. Test compilations run on the toolchain JDK and may use anything it has; nothing claims the test sources run on 21. |
+| **A JDK 21 consumer really runs a synthesized gradient** | ✅ | `scripts/jdk21-smoke.sh` → `./gradlew -p examples/quickstart runOnJdk21`. The quickstart is now `jvmToolchain(25)` + `jvmTarget = JVM_21` + `sourceCompatibility/targetCompatibility = 21`, and `runOnJdk21` executes it on a **JDK 21 launcher**. RAN: OpenJDK 21.0.2, full quickstart output, gradient correct. Verified it is genuinely 21 by unsetting `JDK21_HOME` and confirming Gradle fails with "Cannot find a Java installation … matching {languageVersion=21}". | Needs `JDK21_HOME` (`org.gradle.java.installations.fromEnv` in both `gradle.properties` files), because Gradle does not auto-detect `~/.local/jdks` and a literal path would repeat the defect item 4 removes. The script refuses by name, and checks the JDK it was handed really reports 21. |
+| **`:maestro` → 21, and it ran there** | ✅ | The decision the brief left open. `:maestro` imports no `java.lang.foreign` anywhere, its four project dependencies are all 21, and its serving story is a *directory* read by a framework-free ctypes-PJRT Python process — no JVM on the serving side, so no FFM. `-Xjdk-release=21` compiles; `./gradlew :maestro:exportServingArtifact -PexportJdk=21` RAN on OpenJDK 21.0.2 and wrote all 6 manifest entries + bodies. | `exportJdk` is a knob defaulting to 25, not a hard 21: this task is a documented runbook command and making it need a second JDK that Gradle cannot auto-detect would be a regression for its actual users. |
+| **`compiler-plugin` not lowered to 21** | ⬜ | — | Nothing in the plugin is known to need JDK 22+; it was not tried, because the target split was handed down with `compiler-plugin -> 25` in it and widening an owner-approved decision is not this tier's call. Lowering it is what would make "a JDK 21 machine can build `grad {}`" true, and it is the obvious next question. |
+| **`:runtime-iree` not lowered to 21** | ⬜ | — | It imports no `java.lang.foreign` and shells out to `iree-compile` / `iree-run-module`, so it probably could be. Nothing in this repository certifies an IREE run on a JDK 21, and an uncertified lower bound is worse than a high one. The reason is in the module's own build file, not only here. |
+| **Plugin ↔ library version match still unchecked** | ⬜ | — | Carried forward unchanged from Tier 0. §0.4.503 added a guard for the *Kotlin compiler's* version; it did NOT add one for `io.tlaloc:compiler-plugin` vs `io.tlaloc:core`. Mixing those is still unsupported and still silent, as `docs/COMPATIBILITY.md` says. A separate item. |
+| **The build machine still needs a JDK 25 — stated, not implied** | ✅ | The boundary is written in `compiler-plugin/build.gradle.kts`, the README's new `### Requirements`, `docs/GETTING_STARTED.md` §0, `docs/COMPATIBILITY.md` and `scripts/jdk21-smoke.sh`'s own header. | See "What Tier 3 found that was not in its brief" below: the brief's phrasing ("a consumer on JDK 21 can use `grad {}`") is narrower than it reads, and the split as handed down cannot make it fully true. |
+| **Kotlin version guard** | ✅ | `KotlinVersionGuard` runs FIRST in `registerExtensions`, before a single extension is registered, and reports an ERROR to the `MessageCollector` (a clean refusal, not a thrown crash) naming the version found, the version built against, the supported range and the opt-out. 13 tests in `KotlinVersionGuardTest` cover every branch of the pure decision, plus two links that would otherwise be assumed: that the version the guard reads *at run time* from the running compiler is accepted, and that `COMPILED_AGAINST` equals `libs.versions.kotlin` (handed to the test as a system property). | The supported range is the **bugfix family** of the feature release built against: 2.3.20–2.3.29. Kotlin numbers feature releases by tens in the third component, so "any 2.3.x" would wave through 2.3.0 and 2.3.10, which have different internals, and "exactly 2.3.20" would break users the day a patch lands. |
+| **The guard's refusal on a real foreign compiler** | 🧪 | Nothing. The decision, the severities and the text are all certified as pure functions; what is NOT certified is the plugin actually refusing inside a Kotlin 2.2.x or 2.4.x compiler, because there is one Kotlin on this machine and the test harness compiles with the embeddable on its own classpath. | Staging it needs a second `kotlin-compiler-embeddable` on a separate classloader or a second process. Named here rather than implied by the ✅ above. |
+| **Symja is optional** | ✅ | `ir/build.gradle.kts` declares `compileOnly(libs.symja.core)` in `jvmMain`, so it leaves the published POM; `jvmTest` (`:ir`), `testImplementation` (`:compiler-plugin`) and `jvmTest` (`:benchmarks`) keep it on every classpath that certifies coarsening, and three tests (`symjaIsPresentOnThisTestClasspath`, `symjaIsOnThisModulesTestClasspath`) are tripwires that fail if a future build change drops it. `SymbolicEngines.probe` is exercised against a classloader that genuinely cannot see `org.matheclipse.*`, and `PhiCalculus.containsLoop` — the predicate for "did this body need the CAS" — is pinned on a loop-free body, a WHILE body, a WHILE nested in an IF region, and a concrete-trip loop that C5 unrolls **engine-free**. | `SymbolicEngines` names no Symja type at all: the probe is `Class.forName` on a string. That matters, because `SymjaEngine`'s own fields and signatures mention `org.matheclipse` types, so merely *loading* that class can raise `NoClassDefFoundError` during verification, before any `init` block of its own could run. |
+| **Absence refuses by name** | ✅ | `TlalocIrGenerationExtension.missingSymbolicEngineMessage` — a pure function of (function name, Symja present?, loop survived coarsening?), pinned by `SymbolicEngineRefusalTest` (4 tests) on all three arms. The message names the function, the WHILE it found, C6–C9, the coordinate, LGPL-3.0, and the literal `implementation("…")` line. The refusal fires at the point where the reverse transform **actually rejected** the primal, not merely where a loop exists: §0.4.128's LoopInvariant rewrite legitimately leaves nested WHILEs the transform handles, so blaming Symja for those would be a false accusation. Severity follows `strictLowering`. | 🧪 The end-to-end path — compiling a loop-bearing `grad {}` against a classpath with *no* Symja — is written, not run. Symja is on `:compiler-plugin`'s test classpath deliberately (removing it would make every coarsening test pass by doing nothing) and the K2 harness shares the test JVM's classpath, so staging absence needs a second compiler process. |
+| **The LGPL fact is published** | ✅ | `SymbolicEngines`' KDoc, `ir/build.gradle.kts`, `docs/COMPATIBILITY.md`, `docs/GETTING_STARTED.md` §0 and the README's Requirements all say the same three things: it is LGPL-3.0, Tlaloc only *links* it across the `SymbolicEngine` interface, and it is optional. `theAbsenceMessageNamesTheDependencyTheLicenceAndTheLine` asserts the licence string is in the refusal a user actually sees. | Making the dependency optional does not change the licence analysis (linking was always permitted); it changes *who has to accept it*. A consumer whose policy forbids LGPL in the graph now simply does not add the line and gets a named refusal on the day a body needs the CAS, instead of an audit finding. |
+| **No Symja-free `SymbolicEngine`** | ⬜ | — | The only implementation is `SymjaEngine`. A consumer who cannot accept LGPL-3.0 at all has no CAS, and therefore cannot differentiate a symbolic-trip-count loop. The refusal message says so in as many words rather than implying an opt-out that does not exist. `docs/STAGE_B_PLAN.md` §5.3 already carried "a custom Kotlin CAS" as the fallback if Symja's adequacy failed; this is a second reason to want it. |
+| **The hardcoded PJRT fallback path is gone** | ✅ | `PjrtBinaries.resolveCudaPlugin` / `cudaPluginCandidates` / `describeCudaPluginSearch`, all `internal` and all taking their environment as parameters, pinned by 15 tests in `PjrtCudaPluginResolutionTest` that build **synthetic install trees** under a temp directory — so they pass on a laptop with no GPU and on the GB10 alike. Covered: any venv name under `~/.local/venvs/`, any `python3.N`, any `jax_plugins/*cuda*` package and any `.so` inside it, `dist-packages`, `lib64`, `$VIRTUAL_ENV` outranking a scan, a non-CUDA `jax_plugins` package NOT being offered to the CUDA lane, and determinism when two venvs both have one. | The old fallback was one literal string: `~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`. One venv NAME, one Python MINOR version, one plugin PACKAGE. Every other machine got `available == false` and no way to find out where Tlaloc had looked. |
+| **The GB10 path still resolves** | ✅ | Measured, not assumed: `pluginPath` resolves to `~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so` — the same file as before, found by the glob rather than the literal — and the full suite's GPU lanes ran (`./gradlew test --rerun-tasks` BUILD SUCCESSFUL with live PJRT-CUDA output). | `theGb10InstallShapeStillResolvesHere` self-skips into a weaker assertion on a host with no plugin, rather than asserting about a machine it is not running on. |
+| **The failure names every place it looked** | ✅ | `PjrtBinaries.pluginSearchReport`, asserted by three tests to name the env var, every root (`~/.local/venvs/*`, `~/.venv`, `~/venv`, `~/.local`, `/usr/local`, `/usr`), the globbed `python3.*`, each candidate with FOUND/missing, and the fix. Both examples' "GPU lane unavailable" reason now carries the whole report instead of the advice "set TLALOC_PJRT_PLUGIN_PATH, or install a JAX CUDA plugin", which told a user who *had* installed one nothing at all. | The fix-it line is emitted only when nothing resolved; a successful report ends with `Resolved: <path>`. Printing advice underneath a success is how a log teaches its reader to stop reading it. |
+
+### What Tier 3 found that was not in its brief
+
+- **"A consumer on JDK 21 can use `grad {}`" cannot be made true by this split,
+  and the brief contains both halves of the contradiction.** The target table it
+  handed down (and called owner-approved) puts `compiler-plugin` at 25. Kotlin
+  loads a compiler plugin *inside the compiler's own JVM*, which for a Gradle build
+  is the toolchain JDK — so a 25-bytecode plugin means a JDK-21-only machine cannot
+  compile `grad {}` at all, whatever it targets. The true statement is narrower and
+  is now the one published: **build on 25, run on 21**. Whether the plugin could
+  itself be lowered to 21 was deliberately NOT decided here, because the split was
+  handed down with that row in it; it is the obvious next question and the reason
+  is recorded rather than the answer guessed.
+- **`:benchmarks` has no production source at all.** The bytecode gate failed on it
+  immediately — "found no .class entries" — because every line of `:benchmarks`
+  lives in `jvmTest` and its `jvmJar` is empty. An empty jar passes a bytecode
+  check by vacuity, so the gate treats zero classes as a failure and reads that
+  module's test classes instead. Nothing is exempt; the thing read is different.
+- **`lib64` is a symlink to `lib` on this host**, so the GB10 plugin appears twice
+  in the candidate list (`…/lib/…` and `…/lib64/…`, both FOUND). Harmless — the
+  sorted order picks `lib` — but it is why the report can list the same physical
+  file twice, and worth knowing before someone reads it as two installs.
+- **`scripts/install-jdk21.sh` still exists from the §0.4.244 era**, when the whole
+  repository targeted 21, and its header still says so. It is a macOS
+  Homebrew migration helper and was not touched; §0.4.503 makes half of its
+  statement true again by accident, which is a coincidence and not a plan.
+- **The KMP publications carry no `org.gradle.jvm.version`, so Gradle will not catch
+  a JDK mismatch for you.** Measured in `~/.m2` after `publishToMavenLocal`: every
+  `*-jvm` variant (`core-jvm`, `nn-jvm`, `runtime-pjrt-jvm`, …) publishes that
+  attribute as *absent*, while the plain-JVM `compiler-plugin` publishes `25`. Two
+  consequences, both real:
+  - GOOD: a consumer compiling at `jvmTarget = 21` can still resolve the 25-bytecode
+    plugin on `kotlinCompilerPluginClasspath`. That is why `examples/quickstart`
+    works, and it was not obvious in advance — a `TargetJvmVersion` of 21 on that
+    configuration would have refused the plugin outright.
+  - BAD: a consumer at target 21 who adds `io.tlaloc:runtime-pjrt` gets NO
+    dependency-resolution error. They get `UnsupportedClassVersionError` the first
+    time the class loads. Gradle would normally reject that at resolution time; the
+    Kotlin Multiplatform plugin does not publish the attribute that makes it
+    possible. Not fixed here — forcing the attribute onto KMP variants is a
+    publication change with its own blast radius — but named, because the README's
+    "PJRT / CUDA execution needs 25" is now the only thing standing between a user
+    and that error.
+- **The Symja refusal had to be attached to the reverse transform's failure, not to
+  the presence of a loop.** The first design — refuse whenever a WHILE survived
+  coarsening and no engine was available — would have refused programs that work:
+  §0.4.128's LoopInvariant rewrite produces nested WHILEs inside IF arms and
+  `DxirReverseTransform` recurses into them deliberately (its own comment says the
+  §0.4.118 assumption that "WHILE shouldn't survive SCT" no longer holds). Only the
+  conjunction — loop survived, transform rejected, no engine — makes the missing
+  dependency the actionable cause.
+- **The old engine construction folded three conditions into one silent null.**
+  `try { SymjaEngine() } catch (_: Throwable) { null }` could not tell absent from
+  present-but-broken from present-but-failing-to-initialise, and then degraded
+  quietly in all three cases. `SymbolicEngines` separates absence (a probe) from
+  construction failure (a `runCatching` that is explicitly a *different* condition
+  and deliberately not reported as absence).
+- **`KotlinCompilerVersion.VERSION` is safe to read and it was worth checking.** It
+  is a Java `static final String` assigned in a static initialiser with no
+  `ConstantValue` attribute, so it is *not* inlined into the plugin at compile time
+  and does report the RUNNING compiler. Had it been a `ConstantValue`, the guard
+  would have compared 2.3.20 against itself forever and passed on every machine.
+  The fallback reads `META-INF/compiler.version` straight out of the jar, which
+  needs no Kotlin API and so is the one lookup that cannot be broken by the API
+  drift being detected.
+
+### Suite state at Tier 3 close
+
+| | |
+|---|---|
+| `./gradlew test --rerun-tasks` | BUILD SUCCESSFUL, 127 tasks, 3m30s (three clean-room runs green; see the flake row) |
+| `bash scripts/count-tests.sh` | **2509** (2468 at §0.4.502 + 41 new: 13 version guard, 4 symbolic-engine refusal, 9 Symja-optional + `containsLoop`, 15 PJRT resolution) |
+| `bash scripts/onboarding-smoke.sh` | passes |
+| `JDK21_HOME=… bash scripts/jdk21-smoke.sh` | passes — a compile-time-synthesized gradient ran on OpenJDK 21.0.2 |
+| `./gradlew :maestro:exportServingArtifact -PexportJdk=21` | passes — 6 manifest entries written by a JDK 21 |
+| `PjrtBinaries.pluginPath` on this host | `~/.local/venvs/iree/…/xla_cuda12/xla_cuda_plugin.so` — unchanged, found by the glob |
+| Gates added, not JUnit tests | `verifyJvmTarget` × 12 (wired into `check`), `-Xjdk-release=21` × 6 |
+| Flake seen once on the way | `KptxPagedAttentionBenchTest.pagedAttentionLaneFloorsAcrossDecodeShapes` failed one clean-room run (`BUILD FAILED in 3m 26s`, 21:50). It is a WALL-CLOCK benchmark on a live GB10 that compares a claimed-kernel lane, an XLA lane and a dispatch floor, and §0.4.495 already published the reason it is fragile: "the dispatch floor spread 40–416 µs makes small shapes unmeasurable". Re-run three times in isolation with `--rerun-tasks`: green each time; two subsequent full clean-room suite runs: green. §0.4.503 touches no kernel, no PTX and no timing code. Recorded rather than quietly re-run. |
+| A failure that was NOT this tier's | `:nn:jvmTest > GradientClippingTest.anInvalidRangeIsRefusedByName` appears FAILED in the Gradle daemon log at 20:51 — before §0.4.503's first build. The daemon had been serving the §0.4.502 session since 18:44. Named here because the log is shared and the next reader would otherwise have to work that out. |
 
 ## Tier 4
 

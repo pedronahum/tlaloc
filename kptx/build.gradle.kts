@@ -5,6 +5,9 @@ plugins {
 }
 
 kotlin {
+    // §0.4.503 — Consumed by the FFM launch path in `:runtime-cuda` / `:runtime-pjrt` and
+    // compiled into the same 25-target lane. Stays at 25 — see `tlalocJvmTargets`
+    // in the root build.
     jvmToolchain(25)
 
     jvm {

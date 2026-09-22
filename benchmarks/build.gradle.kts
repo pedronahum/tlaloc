@@ -5,6 +5,9 @@ plugins {
 }
 
 kotlin {
+    // §0.4.503 — A test harness, not a published library (it is excluded from publishing in the
+    // root build). It depends on `:runtime-pjrt` and `:kptx`, so it must be at least
+    // their target; 25 it is.
     jvmToolchain(25)
 
     jvm {
@@ -55,6 +58,12 @@ kotlin {
                 // convergence parity via the harness/python subprocess
                 // pattern). Test-only dependency.
                 implementation(project(":nn"))
+                // §0.4.503 (Tier 3, item 3) — Symja became `compileOnly` in :ir, so it
+                // no longer arrives here transitively. `HeadToHeadHarness` and
+                // `BenchmarkPrimals` construct a `SymjaEngine` directly: without this
+                // line the benchmark harness would coarsen engine-free and report
+                // numbers for a different pipeline than the one it names.
+                implementation(libs.symja.core)
             }
         }
     }

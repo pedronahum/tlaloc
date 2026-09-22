@@ -267,6 +267,148 @@ subprojects {
     tasks.named("check") { dependsOn(verifyPomMetadata) }
 }
 
+// §0.4.503 — THE JVM TARGET SPLIT, and the gate that makes it a checked fact.
+//
+// §0.4.311 put the whole repository on JDK 25 for one stated reason: the Foreign
+// Function & Memory API went stable in JEP 454, and Tlaloc's PJRT and CUDA
+// bindings are FFM with no JNI. That reason is real — and it applies to three
+// modules. Emitting 25 bytecode everywhere else made JDK 25 a hard floor for
+// every consumer of `:core`, `:nn` or `:stablehlo`, months ahead of where most
+// shops are, in exchange for nothing.
+//
+// This map is the authoritative split. It is not what configures the modules —
+// each module sets its own `jvmTarget` (and the 21 ones additionally compile with
+// `-Xjdk-release=21`, so a JDK 22+ API is a compile error rather than a run-time
+// NoSuchMethodError). This map is what CHECKS them: `verifyJvmTarget` opens the
+// module's jar and reads the major version out of every `.class` byte stream.
+// A module missing from the map fails configuration by name, the same way
+// `moduleDescriptions` above works, so a new module cannot arrive untargeted.
+//
+// Class-file major versions: Java 21 = 65, Java 25 = 69 (major = release + 44).
+val tlalocJvmTargets = mapOf(
+    // The library surface. A consumer can put these on a JDK 21 runtime.
+    "core" to 21,
+    "ir" to 21,
+    "autograd" to 21,
+    "nn" to 21,
+    "stablehlo" to 21,
+    // §0.4.503 decision, asked for explicitly: `:maestro` goes to 21. It imports no
+    // `java.lang.foreign` anywhere in `jvmMain`, its four project dependencies are
+    // all 21 now, and the serving story it exports is a DIRECTORY (a manifest plus
+    // StableHLO bodies) read at serve time by a framework-free ctypes-PJRT Python
+    // process — there is no JVM, and therefore no FFM, on the serving side at all.
+    // `-Xjdk-release=21` is the proof it needs nothing newer; `exportServingArtifact`
+    // now runs on a JDK 21 launcher, which is the proof it works there.
+    "maestro" to 21,
+    // FFM (JEP 454) — the original and only reason for the 25 floor.
+    "runtime-pjrt" to 25,
+    "runtime-cuda" to 25,
+    "kptx" to 25,
+    // Not FFM. See the comment in each module's build file for why each stays at 25.
+    "runtime-iree" to 25,
+    "compiler-plugin" to 25,
+    "benchmarks" to 25,
+)
+
+subprojects {
+    val expectedTarget = tlalocJvmTargets[name]
+        ?: throw GradleException(
+            "§0.4.503: module ':$name' has no entry in tlalocJvmTargets in the root " +
+                "build.gradle.kts. Every module's JVM bytecode target is a published, " +
+                "per-module fact (README Requirements, docs/GETTING_STARTED.md §0); add " +
+                "':$name' to that map — and to the docs — rather than letting it inherit " +
+                "a number nobody chose.",
+        )
+    val expectedMajor = expectedTarget + 44
+    val modulePath = path
+    val moduleName = name
+
+    afterEvaluate {
+        // KMP modules jar their JVM output as `jvmJar`; `:compiler-plugin` is a plain
+        // JVM module and calls it `jar`. The JAR is read (not the classes directory)
+        // because the jar is what a consumer resolves.
+        //
+        // `:benchmarks` is the exception and needs naming rather than skipping: it has
+        // NO jvmMain source at all — every line of it lives in `jvmTest` — so its jar is
+        // genuinely empty, and an empty jar passes a bytecode check by vacuity. For that
+        // module the gate reads the JVM TEST classes instead, which is where its code
+        // actually is. Nothing is exempt; the thing being read is just different.
+        val jarTaskName = if (tasks.names.contains("jvmJar")) "jvmJar" else "jar"
+        val jarTask = tasks.named<Jar>(jarTaskName)
+        val jarFile = jarTask.flatMap { it.archiveFile }
+        val codeIsTestOnly = moduleName == "benchmarks"
+        val testClassesDir = layout.buildDirectory.dir("classes/kotlin/jvm/test")
+        val verifyJvmTarget = tasks.register("verifyJvmTarget") {
+            group = "verification"
+            description =
+                "Assert every class this module emits is Java $expectedTarget bytecode"
+            if (codeIsTestOnly) {
+                dependsOn("jvmTestClasses")
+                inputs.dir(testClassesDir).withPropertyName("moduleTestClasses")
+            } else {
+                inputs.file(jarFile).withPropertyName("moduleJar")
+            }
+            doLast {
+                val offenders = linkedMapOf<String, Int>()
+                var classes = 0
+                fun judge(name: String, header: ByteArray) {
+                    classes++
+                    val major = ((header[6].toInt() and 0xFF) shl 8) or (header[7].toInt() and 0xFF)
+                    if (major != expectedMajor) offenders[name] = major
+                }
+                val what: String
+                if (codeIsTestOnly) {
+                    val dir = testClassesDir.get().asFile
+                    what = dir.absolutePath
+                    dir.walkTopDown().filter { it.isFile && it.name.endsWith(".class") }
+                        .forEach { f ->
+                            val header = ByteArray(8)
+                            f.inputStream().use { it.readNBytes(header, 0, 8) }
+                            judge(f.relativeTo(dir).path, header)
+                        }
+                } else {
+                    val jar = jarFile.get().asFile
+                    what = jar.name
+                    java.util.zip.ZipFile(jar).use { zip ->
+                        for (entry in zip.entries()) {
+                            if (!entry.name.endsWith(".class")) continue
+                            // A multi-release jar deliberately carries several versions of
+                            // the same class; Tlaloc publishes none, and if one ever appears
+                            // this gate would be the wrong place to judge it.
+                            if (entry.name.startsWith("META-INF/versions/")) continue
+                            val header = ByteArray(8)
+                            zip.getInputStream(entry).use { it.readNBytes(header, 0, 8) }
+                            judge(entry.name, header)
+                        }
+                    }
+                }
+                if (classes == 0) {
+                    throw GradleException(
+                        "$modulePath: verifyJvmTarget found no .class files in $what. " +
+                            "An empty input passes a bytecode check by vacuity, so this is a " +
+                            "failure, not a pass.",
+                    )
+                }
+                if (offenders.isNotEmpty()) {
+                    throw GradleException(
+                        "$modulePath: tlalocJvmTargets says ':$moduleName' emits Java " +
+                            "$expectedTarget bytecode (class-file major $expectedMajor), but " +
+                            "${offenders.size} of $classes classes in $what disagree. " +
+                            "First few: " +
+                            offenders.entries.take(5).joinToString(", ") {
+                                "${it.key} is major ${it.value} (Java ${it.value - 44})"
+                            } +
+                            ". Fix the module's jvmTarget, or change the map and the docs " +
+                            "that publish the number (README Requirements, " +
+                            "docs/GETTING_STARTED.md, docs/ALPHA_PLAN.md).",
+                    )
+                }
+            }
+        }
+        tasks.named("check") { dependsOn(verifyJvmTarget) }
+    }
+}
+
 // §0.4.41 — make `./gradlew test` run every subproject's tests, not just those
 // where a `test` task exists at the subproject level. The root `test` lifecycle
 // task historically only picked up `:compiler-plugin:test` (the plain-JVM module);

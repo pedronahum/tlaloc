@@ -17,7 +17,8 @@ README says so in those words instead of showing you a number.
 
 | | |
 |---|---|
-| **JDK 25** | every example sets `jvmToolchain(25)`. On the DGX Spark: `export JAVA_HOME=~/.local/jdks/jdk-25.0.3+9` |
+| **JDK 25 to build** | every example sets `jvmToolchain(25)`, and it must: Kotlin loads the Tlaloc K2 plugin into the compiler's own JVM and that plugin is Java 25 bytecode. On the DGX Spark: `export JAVA_HOME=~/.local/jdks/jdk-25.0.3+9` |
+| **JDK 21 to run** | §0.4.503 lowered the library modules to Java 21 bytecode. `quickstart` sets `jvmTarget = JVM_21` and has a `runOnJdk21` task that runs its synthesized gradient on a real JDK 21 (see the repo's `scripts/jdk21-smoke.sh`). PJRT/CUDA *execution* still needs 25 |
 | **Publish first** | `./gradlew publishToMavenLocal` at the repo root, once, and again after you change Tlaloc itself |
 | **Nothing else** | no GPU, no driver, no Python, no checkpoint — for six of the ten |
 

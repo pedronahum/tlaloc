@@ -9,7 +9,7 @@ import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.ir.passes.NoOpCoarseningCache
 import io.tlaloc.ir.passes.PhiCalculus
 import io.tlaloc.ir.passes.SymbolicEngine
-import io.tlaloc.ir.passes.SymjaEngine
+import io.tlaloc.ir.passes.SymbolicEngines
 import io.tlaloc.ir.pretty
 import io.tlaloc.ir.render.toKotlinSource
 import java.io.File
@@ -117,8 +117,20 @@ class TlalocIrGenerationExtension(
         // …); in that case PhiCalculus.apply runs engine-free, which is sufficient for
         // IF-only primals (F1/F2/F3/C3 fire; C5-C9 silently skip). Loop primals (Stage
         // B.4b) will want a hard error instead.
+        //
+        // §0.4.503 (Tier 3, item 3) — that "hard error" is now here, and the reason it
+        // had to arrive is that Symja stopped being a mandatory dependency. `:ir`
+        // declares it `compileOnly`, so ABSENT is the default state for a consumer who
+        // did not ask for an 8.3 MB LGPL-3.0 jar. The old `catch (_: Throwable) { null }`
+        // folded three different situations into one silent null — absent, present but
+        // broken, and present but failing to initialise — and then degraded quietly.
+        // `SymbolicEngines` separates them, and `reportMissingSymbolicEngine` below turns
+        // the one case that MATTERS (the reverse transform rejected a primal that still
+        // has a loop in it, on a classpath with no CAS) into a refusal that names the
+        // missing dependency, its licence and the single line that adds it.
+        val symjaAvailable = SymbolicEngines.symjaAvailable
         val engineLazy: Lazy<SymbolicEngine?> = lazy(LazyThreadSafetyMode.NONE) {
-            try { SymjaEngine() } catch (_: Throwable) { null }
+            SymbolicEngines.symjaOrNull()
         }
         // §0.4.26 — coarsening cache (plan §5.4). Opt-in via system property
         // `tlaloc.cache.dir=<path>` (default: disabled). When enabled, PhiCalculus.apply's
@@ -883,6 +895,13 @@ class TlalocIrGenerationExtension(
                     // `grad3` a Triple, whatever the lambda captured.
                     inputOnlyTrailingParams = lowered.captures.size,
                 ) ?: run {
+                    // §0.4.503 (Tier 3, item 3) — FIRST, the one refusal a user can act
+                    // on. If the primal that was rejected still contains a loop and
+                    // there is no symbolic engine on the classpath, the most likely
+                    // cause of this failure is the missing optional dependency, and the
+                    // dxir dump below is of no use to anybody who does not work on
+                    // Tlaloc. Say so by name.
+                    reportMissingSymbolicEngine(mc, fn.name, coarsened, symjaAvailable)
                     // §0.4.173 — augment the §0.4.169 warning: also dump the post-
                     // coarsening + post-lift dxir so the next firing has full visibility
                     // into the input that DxirReverseTransform rejected. §0.4.174 added
@@ -1068,6 +1087,42 @@ class TlalocIrGenerationExtension(
      * the warning text now names which dxir node / op kind / require-string failed,
      * enabling targeted fixes in subsequent firings.
      */
+    /**
+     * §0.4.503 (Tier 3, item 3) — refuse BY NAME when a body needed the computer
+     * algebra system and Symja was not on the classpath.
+     *
+     * The predicate is deliberately narrow, and its two halves are both necessary.
+     * *Symja absent* alone is not a problem: most programs never need a CAS, and
+     * before this commit nobody who did not need it ever had to know Symja existed.
+     * *A loop surviving coarsening* alone is not a problem either: §0.4.128's
+     * LoopInvariant rewrite legitimately leaves nested WHILEs that the reverse
+     * transform handles. It is the CONJUNCTION — a loop survived, the reverse
+     * transform then rejected the primal, and there was no engine to close the loop
+     * with — that makes the missing dependency the actionable cause. Anything
+     * narrower would be silent; anything wider would blame Symja for other bugs.
+     *
+     * Severity follows [TlalocPluginOptions.strictLowering], the knob §0.4.499
+     * established for precisely this question, so the same `strictLowering=false`
+     * that restores the old late failure everywhere else restores it here too.
+     */
+    private fun reportMissingSymbolicEngine(
+        mc: MessageCollector,
+        fnName: String,
+        coarsened: DxirFunction,
+        symjaAvailable: Boolean,
+    ) {
+        val text = missingSymbolicEngineMessage(
+            fnName = fnName,
+            symjaAvailable = symjaAvailable,
+            loopSurvivedCoarsening = PhiCalculus.containsLoop(coarsened),
+        ) ?: return
+        mc.report(
+            if (options.strictLowering) CompilerMessageSeverity.ERROR else CompilerMessageSeverity.WARNING,
+            text,
+            null,
+        )
+    }
+
     private fun tryReverseTransform(
         primal: DxirFunction,
         includeForward: Boolean,
@@ -1194,6 +1249,28 @@ class TlalocIrGenerationExtension(
     }
 
     companion object {
+
+        /**
+         * §0.4.503 (Tier 3, item 3) — the refusal text, as a pure function of the three
+         * facts that decide it, so the wording and the predicate are both certified by
+         * `SymjaOptionalDependencyTest` without needing a Symja-free compiler run.
+         *
+         * Returns null when there is nothing to say: Symja present, or no loop left in
+         * the primal. See [reportMissingSymbolicEngine] for why both halves matter.
+         */
+        internal fun missingSymbolicEngineMessage(
+            fnName: String,
+            symjaAvailable: Boolean,
+            loopSurvivedCoarsening: Boolean,
+        ): String? {
+            if (symjaAvailable || !loopSurvivedCoarsening) return null
+            return SymbolicEngines.absenceMessage(
+                "Tlaloc cannot build a gradient for '$fnName': the phi-calculus coarsener " +
+                    "left a LOOP in the primal (a dxir WHILE op) and the reverse transform " +
+                    "then rejected it. Closing a loop into a closed form is what the " +
+                    "engine-backed corollaries C6-C9 do",
+            )
+        }
         private val INTRINSIC_NAMES: Set<String> = setOf(
             "grad", "grad2", "valueAndGrad", "valueAndGrad2",
             // §0.4.424 — the three-argument reverse spellings (the transform and

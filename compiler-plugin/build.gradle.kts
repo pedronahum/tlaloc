@@ -27,6 +27,20 @@ publishing {
 }
 
 kotlin {
+    // §0.4.503 — the plugin STAYS at 25 while the library modules drop to 21, and the
+    // consequence has to be stated rather than implied. Kotlin loads a compiler plugin
+    // inside the compiler's own JVM, which for a Gradle build is the toolchain JDK. So
+    // a jar of 25 bytecode here means: BUILDING code that contains `grad { }` requires
+    // a JDK 25 on the build machine, even though the code it produces, and every
+    // library module it links against, runs on a JDK 21.
+    //
+    // That is the honest reading of the split, and it is narrower than "a consumer on
+    // JDK 21 can use grad { }". The supported consumer configuration is
+    // `jvmToolchain(25)` + `jvmTarget = JVM_21` — exactly what this repository now
+    // does to itself — and it is spelled out in the README's Requirements section,
+    // in docs/GETTING_STARTED.md §0 and in docs/ALPHA_PLAN.md's Tier 3 table.
+    // Whether the plugin itself could be lowered to 21 was NOT decided here: the
+    // split was handed down with `compiler-plugin -> 25` in it.
     jvmToolchain(25)
 
     compilerOptions {
@@ -55,6 +69,12 @@ dependencies {
     // (§0.4.446: the same compiler engine, traced at runtime) produces the correct
     // gradient end-to-end (not via a broken-stub sentinel).
     testImplementation(project(":autograd"))
+    // §0.4.503 (Tier 3, item 3) — Symja used to arrive here TRANSITIVELY, through
+    // :ir's runtime elements. Now that :ir declares it `compileOnly` it does not, and
+    // without this line every coarsening test in this module would quietly run
+    // engine-free — the C6–C9 corollaries would stop firing and the suite would still
+    // be green, which is the worst possible outcome of making a dependency optional.
+    testImplementation(libs.symja.core)
 }
 
 evaluationDependsOn(":ir")
@@ -71,4 +91,10 @@ tasks.withType<Test>().configureEach {
     systemProperty("tlaloc.plugin.jar", tasks.jar.flatMap { it.archiveFile }.get().asFile.absolutePath)
     systemProperty("tlaloc.ir.jar", irJvmJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
     systemProperty("tlaloc.core.jar", coreJvmJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
+    // §0.4.503 (Tier 3, item 2) — the version catalog's Kotlin version, handed to
+    // `KotlinVersionGuardTest` so the guard's `COMPILED_AGAINST` constant is pinned to
+    // the ONE place the version is really declared. Without this the guard would be a
+    // second copy of the number, and the failure mode of a second copy is a Kotlin bump
+    // that makes the plugin refuse the very compiler this repository builds with.
+    systemProperty("tlaloc.kotlin.version", libs.versions.kotlin.get())
 }

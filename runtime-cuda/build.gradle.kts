@@ -5,6 +5,8 @@ plugins {
 }
 
 kotlin {
+    // §0.4.503 — FFM (JEP 454) again: `CudaDriverFfm` binds libcuda with `Linker`/`Arena`/
+    // `MemorySegment`. Stays at 25 — see `tlalocJvmTargets` in the root build.
     jvmToolchain(25)
 
     jvm {

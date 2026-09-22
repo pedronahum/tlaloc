@@ -38,6 +38,7 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
         DUMP_GRAD_SOURCE_DIR_OPTION,
         DUMP_LOWERED_IR_OPTION,
         STRICT_LOWERING_OPTION,
+        UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_OPTION,
     )
 
     override fun processOption(
@@ -53,6 +54,11 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
             configuration.put(DUMP_LOWERED_IR_KEY, parseBoolean(DUMP_LOWERED_IR_OPTION.optionName, value))
         STRICT_LOWERING_OPTION.optionName ->
             configuration.put(STRICT_LOWERING_KEY, parseBoolean(STRICT_LOWERING_OPTION.optionName, value))
+        UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_OPTION.optionName ->
+            configuration.put(
+                UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_KEY,
+                parseBoolean(UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_OPTION.optionName, value),
+            )
         else -> throw CliOptionProcessingException("Unknown option: ${option.optionName}")
     }
 
@@ -118,6 +124,24 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
             allowMultipleOccurrences = false,
         )
 
+        /**
+         * §0.4.503 (Tier 3, item 2) — the escape hatch on [KotlinVersionGuard]. Off by
+         * default: a Kotlin version outside the guard's range is a compile-time ERROR
+         * and the plugin registers nothing. Set true to downgrade that to a WARNING and
+         * run anyway.
+         */
+        val UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_OPTION = CliOption(
+            optionName = "unsafeAllowUnsupportedKotlin",
+            valueDescription = "true|false",
+            description = "Register the plugin even when the running Kotlin compiler is " +
+                "outside the version range it was built against (default: false, which is a " +
+                "compile ERROR naming both versions). The plugin reads K2 FIR/IR internals " +
+                "that are not a stable API, so 'unsafe' is literal: a NoSuchMethodError from " +
+                "inside the compiler is the expected outcome, not a bug",
+            required = false,
+            allowMultipleOccurrences = false,
+        )
+
         val DUMP_GRAD_SOURCE_KEY: CompilerConfigurationKey<Boolean> =
             CompilerConfigurationKey.create("dump synthesised gradients as Kotlin source")
 
@@ -129,5 +153,8 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
 
         val STRICT_LOWERING_KEY: CompilerConfigurationKey<Boolean> =
             CompilerConfigurationKey.create("refuse an unlowerable intrinsic lambda at compile time")
+
+        val UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_KEY: CompilerConfigurationKey<Boolean> =
+            CompilerConfigurationKey.create("register the plugin on an unsupported Kotlin version")
     }
 }

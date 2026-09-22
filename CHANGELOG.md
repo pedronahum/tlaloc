@@ -14,7 +14,68 @@ retro-summarise them; it is the record from the first named version forward.
 
 ## [Unreleased]
 
+### Changed
+
+- **The JDK floor is per module now, and it is 21 for the library.** Every module
+  used to emit Java 25 bytecode, which made JDK 25 a hard requirement for every
+  consumer of `:core`, `:nn` or `:stablehlo`. §0.4.311 adopted JDK 25 for one
+  reason — the Foreign Function & Memory API went stable in JEP 454 and Tlaloc's
+  PJRT and CUDA bindings are FFM — and that reason applies to three modules.
+  `core`, `ir`, `autograd`, `nn`, `stablehlo` and `maestro` now emit **Java 21**
+  and are compiled with `-Xjdk-release=21`, so "no JDK 22+ API" is a compile-time
+  check rather than an assumption; `runtime-pjrt`, `runtime-cuda`, `kptx`,
+  `runtime-iree` and `compiler-plugin` stay at 25. A new `verifyJvmTarget` task
+  per module, wired into `check`, reads the class-file major version out of every
+  published jar, so the table cannot drift from the bytecode.
+  **Read it as two sentences:** to *run* Tlaloc — `grad { }`, `:nn`, StableHLO
+  emission — a JDK 21 is enough; to *build* code containing `grad { }` you still
+  need a JDK 25 on the build machine, because Kotlin loads a compiler plugin into
+  the compiler's own JVM and the plugin is 25 bytecode. The supported consumer
+  configuration is `jvmToolchain(25)` + `jvmTarget = JVM_21`, which
+  `examples/quickstart` now is, and `scripts/jdk21-smoke.sh` runs that
+  configuration's synthesized gradient on a real JDK 21.
+- **Symja is an optional dependency.** `org.matheclipse:matheclipse-core` — 8.3 MB,
+  **LGPL-3.0**, with its own transitive tree — was a mandatory *runtime* dependency
+  of `io.tlaloc:ir`, and therefore of `:autograd`, `:nn` and `:stablehlo`, whether
+  or not a program ever differentiated a loop-bearing body. It is `compileOnly`
+  now and no longer appears in the published POM. Add
+  `implementation("org.matheclipse:matheclipse-core:3.1.1")` only if you need the
+  computer algebra system; you need it to differentiate a loop whose trip count is
+  not a compile-time constant (a `for` over a `const val` bound is unrolled with
+  no CAS at all), and on the day a body genuinely needs it the compiler refuses
+  **by name**, naming the coordinate, the licence and the one line to add. Tlaloc
+  only links Symja across the `SymbolicEngine` interface — it does not modify or
+  redistribute it — which is what keeps an LGPL-3.0 dependency compatible with
+  Tlaloc's Apache-2.0 licence.
+- **The PJRT plugin search is no longer one developer's path.**
+  `PjrtBinaries.pluginPath` fell back to the literal
+  `~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`
+  — one venv name, one Python minor version, one plugin package. It now globs all
+  three across `$VIRTUAL_ENV`, `~/.local/venvs/*`, `~/.venv`, `~/venv`,
+  `~/.local`, `/usr/local` and `/usr`, over `lib` and `lib64`, `site-packages` and
+  `dist-packages`, and any `jax_plugins/*cuda*/*.so`. `TLALOC_PJRT_PLUGIN_PATH`
+  still wins outright. Resolution is deterministic (every directory listing is
+  sorted), and the new `PjrtBinaries.pluginSearchReport` names **every** location
+  tried and what was at each — which is what the examples' "GPU lane unavailable"
+  reason now prints, instead of advice that told a user who *had* installed a
+  plugin nothing at all.
+
 ### Added
+
+- **The compiler plugin refuses an unsupported Kotlin version by name.** The
+  plugin reads 40 `org.jetbrains.kotlin.fir.*` packages of internal K2 API that
+  JetBrains moves between feature releases, and nothing checked which compiler it
+  was running inside: a user on 2.2.x or 2.4.x got a raw `NoSuchMethodError` from
+  the middle of `compileKotlin`, naming JetBrains classes and never Tlaloc. The
+  new `KotlinVersionGuard` runs before a single extension is registered and
+  reports a compile ERROR naming the version it found, the version it was built
+  against, the supported range and the opt-out. Supported: **2.3.20 through
+  2.3.29** — the whole bugfix family of the feature release the plugin was built
+  against, because Kotlin numbers feature releases by tens in the third component
+  (2.3.0, 2.3.10 and 2.3.20 have different internals) and bugfixes by ones above
+  them. `-P plugin:io.tlaloc.plugin:unsafeAllowUnsupportedKotlin=true` downgrades
+  the refusal to a warning and registers anyway; the warning says in as many words
+  that a crash below it is then the expected outcome.
 
 - **A trained model can be saved and loaded.** Tlaloc could train on a GPU and
   could not persist the result: `:nn`'s `Components.kt` said so in a comment

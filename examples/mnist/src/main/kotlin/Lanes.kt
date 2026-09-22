@@ -88,8 +88,12 @@ class GpuLane : Lane {
     companion object {
         /** Why the GPU lane is unavailable, or null when it is available. */
         fun unavailableReason(): String? = when {
+            // §0.4.503 — the reason NAMES every location the resolver searched. It
+            // used to say "set TLALOC_PJRT_PLUGIN_PATH, or install a JAX CUDA plugin",
+            // which is advice, not a diagnosis: a user who HAD installed one into a
+            // venv Tlaloc did not look in learned nothing.
             !PjrtBinaries.available ->
-                "no PJRT plugin resolved (set TLALOC_PJRT_PLUGIN_PATH, or install a JAX CUDA plugin)"
+                "no PJRT plugin resolved.\n" + PjrtBinaries.pluginSearchReport
             !PjrtBinaries.cudaAvailable ->
                 "no CUDA device visible to nvidia-smi"
             else -> null

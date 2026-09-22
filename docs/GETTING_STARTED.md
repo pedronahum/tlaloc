@@ -11,6 +11,61 @@ not a runtime crash.
 > deprecation cycle; [COMPATIBILITY.md](COMPATIBILITY.md) says exactly what may
 > break and what will not, and [CHANGELOG.md](../CHANGELOG.md) records what did.
 
+## 0. What you need, per module
+
+Since §0.4.503 the JDK floor is a **per-module fact**, not one number.
+
+| | Bytecode | Why |
+|---|---|---|
+| `core` `ir` `autograd` `nn` `stablehlo` `maestro` | **Java 21** | compiled with `-Xjdk-release=21`, so "no JDK 22+ API" is a compile-time check, not a hope |
+| `runtime-pjrt` `runtime-cuda` `kptx` | Java 25 | the Foreign Function & Memory API, stable in [JEP 454](https://openjdk.org/jeps/454) — this is the *original* reason Tlaloc moved to 25 in §0.4.311 |
+| `runtime-iree` | Java 25 | no FFM; it *could* be lowered, but nothing certifies an IREE run on a JDK 21 and an uncertified claim is worse than a high floor |
+| `compiler-plugin` | Java 25 | it reads K2 compiler internals, and Kotlin loads a plugin into the compiler's own JVM |
+
+Two sentences follow from that, and the second one is the one people get wrong:
+
+1. **To RUN** Tlaloc code — `grad { }` gradients, `:nn` layers and optimizers,
+   StableHLO emission — a **JDK 21** is enough. PJRT / CUDA *execution* needs 25.
+2. **To BUILD** code containing `grad { }` you need a **JDK 25 on the build
+   machine**, because the K2 plugin is 25 bytecode and runs inside the Kotlin
+   compiler's JVM. Lowering your own `jvmTarget` does not change that.
+
+So the supported consumer configuration is:
+
+```kotlin
+kotlin {
+    jvmToolchain(25)                                   // to BUILD
+    compilerOptions { jvmTarget.set(JvmTarget.JVM_21) } // to RUN on 21
+}
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+```
+
+[examples/quickstart](../examples/quickstart) is exactly that, and
+`bash scripts/jdk21-smoke.sh` (with `JDK21_HOME` set to a JDK 21) publishes,
+compiles it at target 21 and runs the synthesized gradient on a real JDK 21.
+
+**Kotlin: 2.3.20 through 2.3.29.** The plugin refuses anything else *by name* at
+compile time, naming both the version it found and the range, because it reads
+40 `org.jetbrains.kotlin.fir.*` packages of unstable K2 internals. Kotlin numbers
+feature releases by tens in the third component (2.3.0, 2.3.10, 2.3.20 are three
+different feature releases) and bugfixes by ones above them — so the whole bugfix
+family of 2.3.20 is supported and nothing else is. `-P
+plugin:io.tlaloc.plugin:unsafeAllowUnsupportedKotlin=true` downgrades the refusal
+to a warning if you want to try it anyway.
+
+**Symja is optional.** `org.matheclipse:matheclipse-core` (**LGPL-3.0**, 8.3 MB)
+used to be a mandatory runtime dependency of `io.tlaloc:ir`. It is `compileOnly`
+now, so it is not in your dependency graph unless you put it there. You need it
+only to differentiate a loop whose trip count is not a compile-time constant — a
+`for` loop over a `const val` bound is unrolled with no CAS at all. On the day a
+body genuinely needs it, the compiler refuses by name and prints the one line to
+add. Tlaloc only *links* Symja across the `SymbolicEngine` interface; it does not
+modify or redistribute it, which is what keeps an LGPL-3.0 dependency compatible
+with Tlaloc's Apache-2.0 licence.
+
 ## 1. Publish the artifacts locally
 
 ```bash

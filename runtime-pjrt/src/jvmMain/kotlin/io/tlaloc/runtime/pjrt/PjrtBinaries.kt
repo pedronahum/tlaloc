@@ -10,33 +10,182 @@ import java.util.concurrent.TimeUnit
  * §0.4.303/§0.4.304 FFM bindings load the plugin directly via
  * [java.lang.foreign.SymbolLookup.libraryLookup].
  *
- * Plugin resolution order:
- *   1. `TLALOC_PJRT_PLUGIN_PATH` env var.
- *   2. `~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`
- *      (the §0.4.297 JAX install — the only PJRT plugin currently distributed
- *      to this host). A future §0.4.306 commit will add a fetch-script /
- *      bundled-resource path so deployment doesn't need a JAX install.
+ * Plugin resolution order — §0.4.503 (Tier 3, item 4) generalised this:
+ *   1. `TLALOC_PJRT_PLUGIN_PATH` env var, when it names an existing file.
+ *   2. A search over the places a JAX CUDA PJRT plugin actually gets installed,
+ *      with the venv name, the Python minor version and the plugin package all
+ *      globbed rather than spelled — see [cudaPluginCandidates].
+ *
+ * What was here until §0.4.503, and why it had to go: step 2 was the single
+ * literal path
+ * `~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`.
+ * That is one developer's machine written into the library — one venv NAME
+ * (`iree`, which is not even the name of the thing it holds), one Python MINOR
+ * version, one plugin PACKAGE. A user who ran `pip install jax[cuda12]` into any
+ * venv of their own got `available == false` and, before this commit, no way to
+ * find out where Tlaloc had looked. [pluginSearchReport] now names every location,
+ * in order, and says what it found at each.
+ *
+ * The GB10 path that certifies this repository's GPU claims still resolves — by
+ * the glob, not by the literal — and `PjrtBinariesResolutionTest` pins exactly
+ * that shape so a future tidy-up cannot quietly drop it.
  *
  * `cudaAvailable` mirrors `IreeBinaries.cudaAvailable` — uses `nvidia-smi -L`
  * so tests can self-skip on hosts without an NVIDIA GPU.
  */
 object PjrtBinaries {
 
+    /** The environment variable a deployment sets to name its own plugin `.so`. */
+    const val PLUGIN_PATH_ENV: String = "TLALOC_PJRT_PLUGIN_PATH"
+
     val pluginPath: Path? by lazy {
-        System.getenv("TLALOC_PJRT_PLUGIN_PATH")?.let { p ->
-            val path = Path.of(p)
-            if (Files.exists(path)) return@lazy path
-        }
-        val home = System.getProperty("user.home") ?: return@lazy null
-        val jaxBundled = Path.of(
-            home, ".local", "venvs", "iree", "lib", "python3.12",
-            "site-packages", "jax_plugins", "xla_cuda12", "xla_cuda_plugin.so",
+        resolveCudaPlugin(
+            envValue = System.getenv(PLUGIN_PATH_ENV),
+            virtualEnv = System.getenv("VIRTUAL_ENV"),
+            home = System.getProperty("user.home"),
         )
-        jaxBundled.takeIf { Files.exists(it) }
     }
 
     val available: Boolean
         get() = pluginPath != null
+
+    /**
+     * §0.4.503 — every place [pluginPath] looked, in order, and what was there.
+     * Meant to be pasted verbatim into a skip reason or an error: a resolver that
+     * fails without saying where it searched makes the user guess, and the thing
+     * they are guessing about is a path inside a Python installation.
+     */
+    val pluginSearchReport: String
+        get() = describeCudaPluginSearch(
+            envValue = System.getenv(PLUGIN_PATH_ENV),
+            virtualEnv = System.getenv("VIRTUAL_ENV"),
+            home = System.getProperty("user.home"),
+        )
+
+    /**
+     * Pure-ish resolution core (filesystem reads only; all environment inputs are
+     * parameters), mirroring [resolveTpuPlugin] so both lanes are unit-testable on
+     * a host with no plugin at all.
+     */
+    internal fun resolveCudaPlugin(envValue: String?, virtualEnv: String?, home: String?): Path? {
+        envValue?.takeIf { it.isNotBlank() }?.let { p ->
+            val path = Path.of(p)
+            // An env var that names a file WINS, whatever the file is called: a
+            // deployment shipping its own plugin has already made the decision, and
+            // second-guessing its file name is how §0.4.459's TPU-lane name gate
+            // earned its long comment. The CUDA-shape filter below applies only to
+            // paths Tlaloc GUESSED.
+            if (Files.exists(path)) return path
+        }
+        return cudaPluginCandidates(virtualEnv, home).firstOrNull { Files.exists(it) }
+    }
+
+    /**
+     * Where a JAX CUDA PJRT plugin lives, in priority order, with every part that
+     * varies between machines globbed:
+     *
+     *  - the ROOT: `$VIRTUAL_ENV` first (an activated venv is the user telling us
+     *    which Python they mean, and [resolveTpuPlugin] already honours it), then
+     *    every directory under `~/.local/venvs/` — this is the shape the GB10 that
+     *    certifies Tlaloc's GPU claims uses — then `~/.venv`, `~/venv`, `~/.local`
+     *    (a `pip install --user`), then `/usr/local` and `/usr` for a system install.
+     *  - the PYTHON VERSION: `lib/python3.*` and `lib64/python3.*`, not `python3.12`.
+     *  - the SITE DIRECTORY: `site-packages` (pip/venv) and `dist-packages` (Debian).
+     *  - the PLUGIN PACKAGE: any directory under `jax_plugins/` whose name mentions
+     *    cuda — `xla_cuda12` today, `xla_cuda13` the day it ships — and any `.so`
+     *    inside it, rather than the literal `xla_cuda_plugin.so`.
+     *
+     * Deterministic: every directory listing is sorted, so two runs on one machine
+     * resolve the same plugin, and a machine with two CUDA venvs gets a stable
+     * answer instead of a filesystem-order one.
+     */
+    internal fun cudaPluginCandidates(virtualEnv: String?, home: String?): List<Path> {
+        val roots = buildList {
+            virtualEnv?.takeIf { it.isNotBlank() }?.let { add(Path.of(it)) }
+            if (home != null) {
+                addAll(sortedChildren(Path.of(home, ".local", "venvs")))
+                add(Path.of(home, ".venv"))
+                add(Path.of(home, "venv"))
+                add(Path.of(home, ".local"))
+            }
+            add(Path.of("/usr/local"))
+            add(Path.of("/usr"))
+        }
+        return roots.flatMap { root ->
+            sequenceOf("lib", "lib64").flatMap { libDir ->
+                sortedChildren(root.resolve(libDir))
+                    .asSequence()
+                    .filter { it.fileName.toString().startsWith("python3") }
+                    .flatMap { pyDir ->
+                        sequenceOf("site-packages", "dist-packages").map { pyDir.resolve(it) }
+                    }
+            }.flatMap { siteDir ->
+                sortedChildren(siteDir.resolve("jax_plugins"))
+                    .asSequence()
+                    .filter { "cuda" in it.fileName.toString().lowercase() }
+                    .flatMap { pkg ->
+                        sortedChildren(pkg).asSequence()
+                            .filter { it.fileName.toString().endsWith(".so") }
+                    }
+            }.toList()
+        }
+    }
+
+    /** Sorted directory listing, or empty when the path is not a readable directory. */
+    private fun sortedChildren(dir: Path): List<Path> = runCatching {
+        if (!Files.isDirectory(dir)) return@runCatching emptyList()
+        Files.list(dir).use { stream -> stream.toList().sortedBy { it.fileName.toString() } }
+    }.getOrElse { emptyList() }
+
+    /**
+     * The human-readable search report. A separate function from
+     * [resolveCudaPlugin] and driven by the same inputs, so the report cannot
+     * describe a search different from the one that ran.
+     */
+    internal fun describeCudaPluginSearch(
+        envValue: String?,
+        virtualEnv: String?,
+        home: String?,
+    ): String {
+        val b = StringBuilder()
+        b.appendLine("PJRT CUDA plugin resolution — where Tlaloc looked:")
+        when {
+            envValue.isNullOrBlank() ->
+                b.appendLine("  1. \$$PLUGIN_PATH_ENV: not set")
+            Files.exists(Path.of(envValue)) ->
+                b.appendLine("  1. \$$PLUGIN_PATH_ENV = $envValue — FOUND")
+            else ->
+                b.appendLine("  1. \$$PLUGIN_PATH_ENV = $envValue — no file there")
+        }
+        val candidates = cudaPluginCandidates(virtualEnv, home)
+        if (candidates.isEmpty()) {
+            b.appendLine(
+                "  2. no jax_plugins/*cuda*/*.so under any searched root. Roots searched: " +
+                    "\$VIRTUAL_ENV${if (virtualEnv.isNullOrBlank()) " (not set)" else " = $virtualEnv"}, " +
+                    "~/.local/venvs/*, ~/.venv, ~/venv, ~/.local, /usr/local, /usr — each at " +
+                    "lib{,64}/python3.*/{site,dist}-packages/jax_plugins/*cuda*/*.so",
+            )
+        } else {
+            b.appendLine("  2. candidates found by the glob, in resolution order:")
+            candidates.forEach { c ->
+                b.appendLine("       $c${if (Files.exists(c)) " — FOUND" else " — missing"}")
+            }
+        }
+        // The "how to fix it" line is emitted only when nothing resolved. Printing
+        // advice underneath a successful resolution is how a log teaches its reader to
+        // stop reading it.
+        val resolved = resolveCudaPlugin(envValue, virtualEnv, home)
+        if (resolved == null) {
+            b.append(
+                "Fix: export $PLUGIN_PATH_ENV=/path/to/xla_cuda_plugin.so, or " +
+                    "`pip install jax[cuda12]` into a venv under ~/.local/venvs/ (or activate " +
+                    "it, so \$VIRTUAL_ENV points at it).",
+            )
+        } else {
+            b.append("Resolved: $resolved")
+        }
+        return b.toString()
+    }
 
     /**
      * §0.4.459 (G2a) — TPU PJRT plugin resolution. Resolution order:
