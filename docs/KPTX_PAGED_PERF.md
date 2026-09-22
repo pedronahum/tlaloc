@@ -3,7 +3,17 @@
 **§0.4.481 (Phase H4b, slice K1). Measure and diagnose; no kernel was
 rewritten in this slice.**
 
-> **§0.4.494 (slice W2) is the latest change — read [§10](#10-04494-w2-the-warp-mapped-stage-1--the-8-read-amplification-paid-down).**
+> **§0.4.495 (slice W3) is the latest section — read [§11](#11-04495-w3-six-sessions-the-tier-re-measured-and-the-registry-question-re-answered).**
+> It re-measures the whole §2 grid at HEAD across **six sessions in one
+> hour**, re-ranks §8.3, and re-answers §8.1. The registry decision is
+> **unchanged (NO)** and all three of §8.2's reasons come out stronger,
+> two of them now quantitative. What changed: the 8B win is a reproduced
+> result (**1.4–1.9×**, 6/6 sessions), `tinyllama-s8`'s gap closed to
+> **1.58×** (W2 helped there too, which §10 did not claim), W2's own
+> headline comes **down** to ×1.2–1.3, and **fixing the instrument is now
+> rank 1** — the dispatch floor spans 40.0–416.3 µs.
+>
+> **§0.4.494 (slice W2) is the last kernel change — read [§10](#10-04494-w2-the-warp-mapped-stage-1--the-8-read-amplification-paid-down).**
 > It implements §8.3 **rank 1** (stage 1's coalescing), and unlike K2 it
 > is not a null: the claimed lane's device floor at both Llama-3-8B
 > points fell **1.3–1.5×** with the unclaimed control lane unmoved, and
@@ -423,6 +433,12 @@ K2 and changes neither of their numbers.**
 > `KptxPagedAttention.register`) remains the only way the kernel enters
 > an executable.**
 
+> **REVISITED by [§11.5](#115-81-revisited-can-the-kernel-be-turned-on-today)
+> (§0.4.495, W3) against six fresh sessions. The answer is the same NO,
+> the scoreboard is still two of four, and each of §8.2's three reasons
+> is stronger than it was — two of them now with numbers.** The
+> deployment sentence at the end of §8.2 is the part that improved.
+
 The gate is §5's and it is unchanged: the claimed lane's **device** floor
 below the unclaimed lane's at **every** point in §2, one session,
 interleaved. After K1 and K2 the honest scoreboard against it is:
@@ -763,6 +779,14 @@ shapes**, and it shows up as achieved bandwidth on unchanged issued
 traffic: c GB/s at s16 went 83.1, 85.0 → **121.7, 110.8**; at s8 61.1,
 72.0 → **80.0, 112.4**.
 
+> **§0.4.495 (W3) brings that 1.3–1.5× DOWN.** Measured against *K1's*
+> recorded claimed floors rather than W2's own before-sessions, and over
+> six sessions rather than two, the same kernel is **×1.17 at s16 and
+> ×1.29 at s8** with the control lane within 4% in both. Read 1.3–1.5×
+> as the upper end of a **×1.2–1.3** win. W3 also finds a win W2 did not
+> claim: **×1.26 at `tinyllama-s8-ctx512`**. See
+> [§11.2](#112-against-the-2-baselines-point-by-point).
+
 **What is NOT claimed.** The two TinyLlama points. Their before- and
 after-ranges overlap in both directions, and the reason is §7.5's
 unexplained instrument showing its teeth again: across these four
@@ -804,6 +828,13 @@ item (fix the instrument) is now the thing standing between this tier
 and an answer at the small points, ahead of any further kernel work
 there.
 
+> **§0.4.495 (W3) makes that promotion formal**: §8.4's instrument row
+> is **rank 1** of the merged list in
+> [§11.4](#114-83s-ranked-list-re-ranked-against-this-evidence), ahead
+> of every kernel item. It also amends "the same two as before" — over
+> six sessions `tinyllama-s8-ctx512`'s claimed floor **did** fall
+> (×1.26, control unmoved), so the gap there is now 1.58×, not 1.93×.
+
 ## 10.6 Deferred by name
 
 - **The GQA fusion (§8.3 rank 1's other half)** — one CTA per
@@ -824,3 +855,241 @@ there.
 - **Per-stage timing.** §7.6 asked for it and §10.4's first bullet is
   the reason: every apportionment above is still a bound derived from
   end-to-end floors.
+
+---
+
+# 11. §0.4.495 (W3): six sessions, the tier re-measured, and the registry question re-answered
+
+**This section re-measures the whole §2 grid at HEAD — W2's warp-mapped
+`kptx_paged_scores` in the claimed lane — across SIX sessions inside one
+hour, re-ranks §8.3 against that evidence, and revisits §8.1. The
+decision does not change. Two of the things §8.2 and §10.3 said about
+*why* do change, and one number W2 claimed comes down.**
+
+## 11.1 The measurement
+
+Method unchanged from §7.1 and §10.3: `./gradlew :benchmarks:jvmTest
+--tests "*KptxPagedAttentionBenchTest*" --rerun-tasks`, six times, all
+within one hour on 2026-09-22. Each session is one `PjrtSession`,
+executables compiled and cached, three lanes interleaved, floor over 20
+reps after 3 warmup. `skipped="0"` in every result XML — every session
+ran on the GB10. Every point's "the two lanes agree" assertion passed
+before anything was timed, in all six.
+
+**DEVICE floors, µs. `c/u < 1.00` means the KPTX kernel wins.**
+
+### `tinyllama-s1-ctx256` — ctx 256, grid 32, 0.67 CTA/SM
+
+| session | c | u | c/u | dispatch floor |
+|---|---|---|---|---|
+| 1 | 287.9 | 149.7 | 1.92 | 53.8 |
+| 2 | 395.9 | 329.7 | 1.20 | 126.6 |
+| 3 | 280.6 | 127.9 | 2.19 | 46.6 |
+| 4 | 235.9 | 193.3 | 1.22 | 47.8 |
+| 5 | 264.1 | 294.1 | **0.90** | 122.3 |
+| 6 | 484.5 | 232.0 | 2.09 | 132.4 |
+| **floor of floors** | **235.9** | **127.9** | **1.84** | 46.6 |
+
+### `tinyllama-s8-ctx512` — ctx 512, grid 256, 5.33 CTA/SM
+
+| session | c | u | c/u | dispatch floor |
+|---|---|---|---|---|
+| 1 | 217.1 | 312.4 | **0.69** | 45.1 |
+| 2 | 223.0 | 137.8 | 1.62 | 40.0 |
+| 3 | 337.4 | 249.1 | 1.35 | 42.0 |
+| 4 | 228.5 | 217.8 | 1.05 | 77.5 |
+| 5 | 291.2 | 168.1 | 1.73 | 127.7 |
+| 6 | 229.7 | 138.1 | 1.66 | 43.6 |
+| **floor of floors** | **217.1** | **137.8** | **1.58** | 40.0 |
+
+### `llama3-8b-s8-ctx1024` — ctx 1024, grid 256, 5.33 CTA/SM
+
+| session | c | u | c/u | dispatch floor |
+|---|---|---|---|---|
+| 1 | 682.0 | 1180.5 | **0.58** | 155.5 |
+| 2 | 798.3 | 1233.9 | **0.65** | 245.6 |
+| 3 | 758.4 | 1224.0 | **0.62** | 154.0 |
+| 4 | 949.3 | 1334.5 | **0.71** | 204.2 |
+| 5 | 762.1 | 1174.4 | **0.65** | 157.4 |
+| 6 | 893.6 | 1238.5 | **0.72** | 166.0 |
+| **floor of floors** | **682.0** | **1174.4** | **0.58** | 154.0 |
+
+### `llama3-8b-s16-ctx1024` — ctx 1024, grid 512, 10.67 CTA/SM
+
+| session | c | u | c/u | dispatch floor |
+|---|---|---|---|---|
+| 1 | 1228.5 | 2255.9 | **0.54** | 144.1 |
+| 2 | 1276.7 | 2241.7 | **0.57** | 167.7 |
+| 3 | 1248.3 | 2228.9 | **0.56** | 157.6 |
+| 4 | 1427.7 | 2432.0 | **0.59** | 149.3 |
+| 5 | 1284.5 | 2420.4 | **0.53** | 221.2 |
+| 6 | 1230.4 | 2347.6 | **0.52** | 416.3 |
+| **floor of floors** | **1228.5** | **2228.9** | **0.55** | 144.1 |
+
+## 11.2 Against the §2 baselines, point by point
+
+§2's row is K1's single session (§0.4.481). The comparable quantity
+across sessions is the ratio (§0.4.337); the absolute columns are given
+so the drift is visible rather than hidden.
+
+| point | §2 c / u / (c/u) | W3 floor-of-floors c / u / (c/u) | c moved | u (control) moved | gate |
+|---|---|---|---|---|---|
+| tinyllama-s1-ctx256 | 177.5 / 93.0 / **1.91** | 235.9 / 127.9 / **1.84** | ×1.33 *slower* | ×1.38 *slower* | **FAILS** |
+| tinyllama-s8-ctx512 | 272.9 / 141.7 / **1.93** | 217.1 / 137.8 / **1.58** | **×1.26 faster** | ×1.03 (unmoved) | **FAILS** |
+| llama3-8b-s8-ctx1024 | 882.8 / 1209.8 / **0.73** | 682.0 / 1174.4 / **0.58** | **×1.29 faster** | ×1.03 (unmoved) | passes |
+| llama3-8b-s16-ctx1024 | 1431.1 / 2322.4 / **0.62** | 1228.5 / 2228.9 / **0.55** | **×1.17 faster** | ×1.04 (unmoved) | passes |
+
+Three things to read off it, and the third is uncomfortable.
+
+**One: the 8B side is now a reproduced result, not a single session.**
+Six of six sessions have the claimed lane ahead at both 8B points, with
+c/u in **0.58–0.72** at s8 and **0.52–0.59** at s16 — that is
+**1.4–1.7× faster at s8 and 1.7–1.9× at s16**, and no session's ratio
+comes within 28% of 1.00. §2's single-session 0.73/0.62 was right and
+was conservative.
+
+**Two: the tinyllama-s1 row's absolute columns moved together.** Both
+lanes are ~1.35× slower than K1's session, control included, so that row
+is a session-scale shift and **nothing about the kernel is claimed from
+it**. The ratio — the quantity §0.4.337 says to compare — went 1.91 →
+1.84, which is inside the noise established below.
+
+**Three: W2's headline comes down.** §10.3 claimed "≈1.3–1.5× on the
+claimed lane at 8B shapes", measured against its own two pre-change
+sessions (1615.4/1578.1 at s16, 932.7/1097.5 at s8). Against *K1's*
+recorded claimed floors, which are lower, the same kernel is **×1.17 at
+s16 and ×1.29 at s8** — a real win, the same sign, but at the bottom of
+the band W2 named and below it at s16. The control lane is within 4% in
+all three comparisons, so this is not a control artifact: it is W2's
+before-sessions having been on the slow side of their own spread.
+**The honest consolidated number for the warp mapping is ×1.2–1.3 on the
+claimed lane at 8B shapes**, and §10.3's 1.3–1.5× should be read as the
+upper end of it.
+
+## 11.3 What six sessions do to the instrument's credibility
+
+§6, §7.5 and §8.4 each named the dispatch floor as unexplained. Six
+sessions make it quantitative, and it is worse than "noisy".
+
+- **The dispatch floor spans 40.0 → 416.3 µs — a 10.4× range — for the
+  identical 2-MFLOP elementwise multiply**, over the same staged buffer
+  sets, on the same box, within one hour. Its largest value (416.3) and
+  its smallest (40.0) are not even at the same point: it does not scale
+  cleanly with the staged working set either.
+- As a share of the measurement it sits at **17–46% of the claimed lane
+  and 25–57% of the unclaimed lane** at `tinyllama-s1-ctx256`, and at
+  **12–44% / 14–76%** at `tinyllama-s8-ctx512`.
+- **§2's "~2.5× above the floor, and that ratio holds in each session"
+  does not survive.** Floor-subtracted, `(c − floor)/(u − floor)` across
+  these six sessions is **2.44, 1.33, 2.88, 1.29, 0.83, 3.54** at
+  tinyllama-s1 and **0.64, 1.87, 1.43, 1.08, 4.05, 1.97** at
+  tinyllama-s8. That is a 4–6× spread in a derived quantity K1 reported
+  as stable. It was stable across K1's three sessions and it is not
+  stable across six.
+- **The two failing gate points straddle 1.00 in both directions.**
+  Session 5 has the claimed lane *winning* at tinyllama-s1 (0.90×);
+  session 1 has it winning at tinyllama-s8 (0.69×). No single session
+  passed both, but the instrument's noise band at both points contains
+  the gate's own threshold.
+
+The consequence is a statement about the gate itself, not about the
+kernel: **§5's gate — "below the unclaimed lane at every point, one
+session, interleaved" — is a decision procedure a lucky session could
+pass.** That is not a reason to weaken it, and it is not weakened here.
+It is the reason §8.4's first row is promoted to rank 1 in §11.4.
+
+## 11.4 §8.3's ranked list, re-ranked against this evidence
+
+| rank | item | what changed |
+|---|---|---|
+| **1** | **Fix the instrument** — the dispatch floor first (§8.4 row 1), then per-stage timing (§8.4 row 2). | **PROMOTED from a supporting list to the head of the ranked list.** §8.3's rank 4 items are the only ones that move the gate, and §11.3 says there is currently **no instrument that could tell whether they worked**: a change worth 30–60 µs at a point whose floor moves by 90 µs between sessions is unmeasurable by construction. Every kernel item below this one is either already-passing (2, 4) or unverifiable (3, 5). |
+| **2** | **One CTA per (sequence, KV head)** (§4 #1) — the GQA group shares one page walk. | **Unchanged in size, restated in value.** Still the largest remaining term, and W2 made the stream it removes a clean one (§10.6). But it is an 8B-side item and the 8B side already passes the gate, so its return is **microseconds for opt-in deployments, not gate movement**. |
+| **3** | **Flash-decode context splitting + single-kernel online softmax** (§4 #4, #5). | **Held, not demoted in importance — blocked.** Still the only two items that address the failing points. Attempting them before rank 1 would spend a slice and produce a number nobody could believe; that is precisely the §0.4.482 lesson, re-learned on the measurement side. |
+| **4** | **bf16 pools** (§4 #2). | Unchanged. Halves whatever the others leave, on the 8B side. |
+| **5** | **Sub-warp reduction widths** (§9.4, §10.6). | **PROMOTED onto the list proper**, from a deferral. At `headDim 64` W2's mapping pays **ten reduction ops against two FMAs per lane** — that ratio is exactly the TinyLlama regime, and it is the one *kernel* explanation on the table for why the small points did not move. Behind rank 1 for the same reason as rank 3. |
+| **6** | **Register shave 65 → 64** (§4 #7). | **Effectively closed as an idea.** `kptx_paged_scores` went 65 → 73 declared slots in W2 with no occupancy change and a measured win; `kptx_paged_out` went 68 → 73 in K2 with no change either way. Two data points now say the declared-register cliff is not where this chain's time is. |
+| — | **Warp-per-lane `kptx_paged_scores`** (§8.3 rank 1) | **DONE (W2).** ×1.17–1.29 on the claimed lane's floor-of-floors at both 8B points against K1's, control within 4%; ×1.26 at tinyllama-s8 as well (§11.2), which §10.3 did not claim and which six sessions now support. Nothing at tinyllama-s1. |
+| — | **Stage 3's idle threads** (§4 #6) | DONE (K2), worth ~0 µs. Unchanged. |
+
+**The one genuinely new item.** §11.2's second row says the warp mapping
+bought ×1.26 at `tinyllama-s8-ctx512` while its control lane stood still
+— so a TinyLlama point *did* move, by roughly what the 8B points moved
+by, and the gate still failed there because the unclaimed lane at that
+point is 137.8 µs and the claimed lane would have to beat it outright.
+**The remaining gap at tinyllama-s8 is 1.58×, not 1.93×.** That is the
+closest the gate has ever been at a failing point.
+
+## 11.5 §8.1 revisited: can the kernel be turned on today?
+
+> **NO. Unchanged. `defaultInferenceKernelTemplates` stays empty, and
+> the opt-in spelling (`kptxInferenceKernelTemplates` +
+> `KptxPagedAttention.register`) remains the only way the kernel enters
+> an executable.**
+
+The scoreboard against §5's gate, on floors of floors over six sessions:
+
+| point | §8.1 (K1+K2) | W3 | gate |
+|---|---|---|---|
+| tinyllama-s1-ctx256 | 1.27–2.14 | 0.90–2.19 (fof **1.84**) | **FAILS** |
+| tinyllama-s8-ctx512 | 1.55–1.93 | 0.69–1.73 (fof **1.58**) | **FAILS** |
+| llama3-8b-s8-ctx1024 | 0.73–0.84 | 0.58–0.72 (fof **0.58**) | passes |
+| llama3-8b-s16-ctx1024 | 0.62–0.71 | 0.52–0.59 (fof **0.55**) | passes |
+
+Still two of four, and the two that fail are the two that have always
+failed.
+
+### The three reasons §8.2 gave, answered against W3's evidence
+
+§8.2 rejected shape-conditional registration for three stated reasons.
+W3 does **not** recommend changing that decision, and each reason is
+stronger than it was, two of them now quantitatively:
+
+1. **"It bakes one box's measurement into a library default."**
+   **Stronger, and in a way §8.2 did not anticipate.** The objection was
+   that the crossover is a property of *this* GB10. W3 shows it is not a
+   stable property of this GB10 either: the same kernel against the same
+   lowering on the same box produced c/u from **0.90 to 2.19** at
+   `tinyllama-s1-ctx256` within one hour. A threshold constant would be
+   fitted to a quantity that moved 2.4× while nothing changed.
+2. **"The crossover's location is partly an artifact of an unexplained
+   instrument."** **Now measured.** The dispatch floor spans
+   **40.0–416.3 µs** across these sessions (§11.3) — 12–46% of the
+   claimed lane and 14–76% of the unclaimed lane at the small points —
+   and the floor-subtracted small-point ratio spans **0.64–4.05**, where
+   K1 reported it as holding steady near 2.5×. Any threshold fitted
+   through the crossover would be fitted through that.
+3. **"A shape-conditional registry is a silent, shape-dependent change
+   of numeric behaviour."** **Unchanged, and now measured at the decode
+   shapes themselves rather than inferred from two oracle numbers.** The
+   bench's own lane-agreement column is the direct measurement: the two
+   lanes' outputs differ by **4.8e-5** (tinyllama-s1), **4.9e-5**
+   (tinyllama-s8), **2.9e-5** (8b-s8) and **2.7e-5** (8b-s16) max-abs,
+   at every point, in every session. Both lanes are correct — the kernel
+   is 8.9e-8 from a Double oracle (§10.2) and the gap is the emission's
+   TF32 `dot_general` (§0.4.471) — but they are **not** the same
+   function to 5 decimal places, and a threshold would hand a deployment
+   different logits above and below a line it never chose.
+
+### What *did* change in the deployment story
+
+The opt-in recommendation is no longer a hedge. §8.2 closed with "a
+deployment serving 8B-shaped decodes on a GB10 has a measured 1.4–1.6×
+reason to do so", from one session. Six sessions make that
+**1.4–1.7× at `llama3-8b-s8-ctx1024` and 1.7–1.9× at
+`llama3-8b-s16-ctx1024`, with no session's ratio inside 28% of parity**.
+§10 of [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md) is still the command.
+
+## 11.6 W3's deferrals, by name
+
+- **The instrument, which W3 diagnosed and did not fix.** Rank 1 above
+  is a full slice: the dispatch floor's 10.4× spread is unexplained, and
+  the candidate causes (PJRT's per-execute allocator behaviour, the
+  event-await path, the staged buffers' residency) were not probed. This
+  slice measured the defect and re-ranked around it; it did not chase it.
+- **Per-stage timing**, again (§7.6, §8.4). Everything in §11.4's
+  apportionment remains a bound from end-to-end floors, including the
+  claim that rank 5 explains the TinyLlama points.
+- **A measured memory-bandwidth ceiling for this box** (§6). Untouched.
+- **No kernel changed on this commit.** §11.2's numbers are HEAD
+  (§0.4.494) re-measured, not a new kernel measured. Nothing in §2's
+  table was re-written; §2 remains K1's session, as it should.

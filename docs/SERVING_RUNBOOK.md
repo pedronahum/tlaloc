@@ -677,9 +677,13 @@ halves:
 
 - **Do NOT enable it by default.** The registry stays empty until the
   claimed lane wins at *every* point above, small ones included.
-- **Enabling it explicitly is a measured 1.4–1.6× win at 8B-shaped
-  decode on a GB10**, and a loss at toy shapes. Measure your own shapes
-  with `KptxPagedAttentionBenchTest` before you do.
+- **Enabling it explicitly is a measured 1.4–1.9× win at 8B-shaped
+  decode on a GB10** — reproduced in 6/6 sessions by §0.4.495
+  ([KPTX_PAGED_PERF.md §11](KPTX_PAGED_PERF.md)), with no session's ratio
+  inside 28% of parity — and a ~1.6–1.8× loss at toy shapes. Measure your
+  own shapes with `KptxPagedAttentionBenchTest` before you do, and note
+  that at toy shapes the test's own dispatch floor is 12–76% of the
+  measurement, so what it tells you there is not yet trustworthy.
 
 ### The registration step (opt-in, two lines)
 

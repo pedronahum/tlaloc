@@ -121,7 +121,7 @@ has never run (why is always stated) ·
 | IREE runtime (CPU + CUDA) | ✅ | |
 | Pattern recognition + coarsening — FlashAttention, GQA, RMSNorm, RoPE, SwiGLU, cross-entropy, LayerNorm | ✅ | |
 | KPTX — a PTX DSL, parser, transpiler, and recognizer-driven kernel claiming | ✅ | Kernels attach to recognized ops automatically |
-| KPTX paged-attention kernel — **performance** | 🧪 | Correct, but currently **slower than XLA's own lowering** on-device. The honest numbers and the specified fix are in [docs/KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md). Not registered by default |
+| KPTX paged-attention kernel — **performance** | 🧪 | On-device (GB10, floors over six sessions): **1.4–1.9× FASTER than XLA's own lowering** at Llama-3-8B-shaped decode points, **1.6–1.8× slower** at TinyLlama-shaped toy points, where the measurement's own dispatch floor is 12–76% of it. **Not registered by default** — opt in per shape, at shapes you measured. Numbers, diagnosis and the ranked fix list: [docs/KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md) |
 | Netflix Maestro orchestration — manifest, step type, pod-spec builder | ✅ | Unit-certified; a live K8s run has not been done |
 
 ### Hardware and platforms
@@ -171,8 +171,10 @@ Four claims, each with the thing that proves it:
   DiffKT's surface, not PyTorch's.
 - **The interpreter is for correctness, not speed.** Performance claims mean
   the compiled GPU path.
-- **Kernel performance is XLA's today.** Our own KPTX kernels are a real
-  lane, but on paged attention XLA still wins — and we publish that.
+- **Kernel performance is mostly XLA's today.** Our own KPTX kernels are a
+  real lane, and on paged attention they now beat XLA's lowering by 1.4–1.9×
+  at 8B-shaped decode points — but they still lose at small shapes, so
+  nothing is registered by default. We publish the losses too.
 
 ## Examples
 
