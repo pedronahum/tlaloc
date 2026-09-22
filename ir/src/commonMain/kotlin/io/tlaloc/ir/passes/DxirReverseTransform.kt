@@ -815,6 +815,20 @@ object DxirReverseTransform {
             return (resolved.value as? Number)?.toFloat()
         }
 
+        // §0.4.500 — the f64 twin. Every fold below used to build its replacement
+        // constant from the FLOAT projection, whatever the node's dtype was, so an
+        // f64 scalar body produced a `DxirConst` whose type said F64 and whose value
+        // was a `java.lang.Float`. `DxirToIrSynthesis`'s `v as Double` then threw a
+        // raw ClassCastException out of the IR generation extension: the whole
+        // compilation died, with no Tlaloc diagnostic, on a program as ordinary as
+        // `grad { x: Double -> x * 1.5 }`. Two bugs in one, and the second is the
+        // worse: it neither worked nor refused by name. See `foldedConst` below.
+        fun asDoubleConst(n: DxirNode): Double? {
+            val resolved = byId[n.id] ?: return null
+            if (resolved !is DxirConst) return null
+            return (resolved.value as? Number)?.toDouble()
+        }
+
         fun emit(replacement: DxirNode, original: DxirNode) {
             byId[original.id] = replacement
             if (replacement !in newBody && (replacement is DxirOp || replacement is DxirConst)) {
@@ -855,16 +869,32 @@ object DxirReverseTransform {
                         newBody += rebuilt
                         continue
                     }
+                    // §0.4.500 — a folded constant carries a value of the NODE's
+                    // dtype, and the arithmetic happens at that width. The f32 arm
+                    // is the pre-§0.4.500 expression, unchanged, so nothing about
+                    // single precision moves; the f64 arm exists at all because
+                    // folding an f64 product through Float and handing the result
+                    // back as "f64" would be a single-precision answer wearing a
+                    // double-precision type. The identity tests below stay on the
+                    // Float projection: they compare against exact small integers,
+                    // where the projection is lossless.
+                    val wide = n.type.dtype == io.tlaloc.core.F64
+                    fun foldedConst(f32: () -> Float, f64: () -> Double): DxirConst =
+                        DxirConst(n.id, if (wide) f64() else f32(), n.type)
+
                     // Try to fold.
                     val folded: DxirNode? = when (n.op) {
                         OpKind.MUL -> {
                             val a = asFloatConst(n.operands[0])
                             val b = asFloatConst(n.operands[1])
                             when {
-                                a != null && b != null -> DxirConst(n.id, a * b, n.type)
+                                a != null && b != null -> foldedConst(
+                                    { a * b },
+                                    { asDoubleConst(n.operands[0])!! * asDoubleConst(n.operands[1])!! },
+                                )
                                 a == 1.0f -> canonicalRef(n.operands[1], byId)
                                 b == 1.0f -> canonicalRef(n.operands[0], byId)
-                                a == 0.0f || b == 0.0f -> DxirConst(n.id, 0.0f, n.type)
+                                a == 0.0f || b == 0.0f -> foldedConst({ 0.0f }, { 0.0 })
                                 else -> null
                             }
                         }
@@ -872,7 +902,10 @@ object DxirReverseTransform {
                             val a = asFloatConst(n.operands[0])
                             val b = asFloatConst(n.operands[1])
                             when {
-                                a != null && b != null -> DxirConst(n.id, a + b, n.type)
+                                a != null && b != null -> foldedConst(
+                                    { a + b },
+                                    { asDoubleConst(n.operands[0])!! + asDoubleConst(n.operands[1])!! },
+                                )
                                 a == 0.0f -> canonicalRef(n.operands[1], byId)
                                 b == 0.0f -> canonicalRef(n.operands[0], byId)
                                 else -> null
@@ -882,7 +915,10 @@ object DxirReverseTransform {
                             val a = asFloatConst(n.operands[0])
                             val b = asFloatConst(n.operands[1])
                             when {
-                                a != null && b != null -> DxirConst(n.id, a - b, n.type)
+                                a != null && b != null -> foldedConst(
+                                    { a - b },
+                                    { asDoubleConst(n.operands[0])!! - asDoubleConst(n.operands[1])!! },
+                                )
                                 b == 0.0f -> canonicalRef(n.operands[0], byId)
                                 else -> null
                             }
@@ -891,14 +927,21 @@ object DxirReverseTransform {
                             val a = asFloatConst(n.operands[0])
                             val b = asFloatConst(n.operands[1])
                             when {
-                                a != null && b != null && b != 0.0f -> DxirConst(n.id, a / b, n.type)
+                                a != null && b != null && b != 0.0f -> foldedConst(
+                                    { a / b },
+                                    { asDoubleConst(n.operands[0])!! / asDoubleConst(n.operands[1])!! },
+                                )
                                 b == 1.0f -> canonicalRef(n.operands[0], byId)
                                 else -> null
                             }
                         }
                         OpKind.NEG -> {
                             val a = asFloatConst(n.operands[0])
-                            if (a != null) DxirConst(n.id, -a, n.type) else null
+                            if (a != null) {
+                                foldedConst({ -a }, { -asDoubleConst(n.operands[0])!! })
+                            } else {
+                                null
+                            }
                         }
                         else -> null
                     }

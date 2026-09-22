@@ -28,20 +28,28 @@ derivative to solve for the program's inputs. No model, no dataset, no training
 — a physics simulation and the chain rule.
 
 ```kotlin
+const val G = 9.81f; const val DRAG = 0.24f; const val DT = 0.025f; const val STEPS = 38
+const val X0 = 0.0f; const val Y0 = 2.0f; const val HOOP_X = 4.6f; const val HOOP_Y = 3.05f
+
 val dMiss = grad2 { angle: Float, speed: Float ->
-    var x = 0.0f
-    var y = 2.0f
+    var x = X0
+    var y = Y0
     var vx = speed * angle.cos()
     var vy = speed * angle.sin()
-    for (i in 0 until 38) {
-        vx = vx - 0.24f * vx * 0.025f             // drag
-        vy = vy - (9.81f + 0.24f * vy) * 0.025f   // gravity + drag
-        x = x + vx * 0.025f
-        y = y + vy * 0.025f
+    for (i in 0 until STEPS) {
+        vx = vx - DRAG * vx * DT              // drag
+        vy = vy - (G + DRAG * vy) * DT        // gravity + drag
+        x = x + vx * DT
+        y = y + vy * DT
     }
-    (x - 4.6f) * (x - 4.6f) + (y - 3.05f) * (y - 3.05f)   // squared miss
+    (x - HOOP_X) * (x - HOOP_X) + (y - HOOP_Y) * (y - HOOP_Y)   // squared miss
 }
 ```
+
+Those names are `const val`s declared outside the lambda, including the loop's trip
+count. Until §0.4.500 not one of them would compile inside a `grad2 { }` body — see
+[the limitation section below](#a-limitation-you-will-meet-immediately), which used
+to be about this and is now about what is left.
 
 That loop is differentiated **at compile time**. The K2 plugin lowers the lambda
 to Tlaloc IR, applies φ-calculus coarsening to the loop (the [OOPSLA 2021
@@ -97,24 +105,66 @@ own project would, so publish first. **No GPU, no dataset, no network.**
 
 ## A limitation you will meet immediately
 
-Every number inside the `grad2 { }` body is a literal rather than one of the
-`const val`s at the top of the file. That is not style — the lambda is lowered
-to Tlaloc IR, and a reference out of that scope is **refused by name**:
+**This section used to say that no number inside the `grad2 { }` body could be a
+`const val`.** Every one of them was an inlined literal with the constant's name in
+a trailing comment, because the lambda is lowered to Tlaloc IR and ANY reference out
+of that scope was refused:
 
 ```
 e: Tlaloc could not lower this lambda at compile time: reference to symbol outside
    the lowering scope: /X0
 ```
 
-Swap `0.0f` for `X0` and read the refusal. It is worth doing once: it is the
-house rule in action — an unsupported case says so, loudly, instead of quietly
-falling back to something slower that would still have produced a number.
+Since §0.4.500 a captured reference the compiler can resolve to a **compile-time
+constant** is folded into the lowered IR as exactly the constant an inline literal
+would have produced — so the simulator above now reads like the `simulate()`
+transcription it is checked against. Concretely, what folds is:
 
-Since §0.4.499 that refusal is an **error**, not a warning, and the build stops.
-It used to be a warning, and the program then threw `IllegalStateException` the
-first time it called `dMiss` — the same information, one run later. If you want
-that late failure back, pass
-`-P plugin:io.tlaloc.plugin:strictLowering=false`.
+- any `const val`, wherever it is declared (top level, file level, or in a
+  companion / named `object`) — including `STEPS` as a loop trip count;
+- a `const val` whose own initializer is constant arithmetic (`const val HALF_DT =
+  DT / 2.0f`), resolved through the Kotlin compiler's own constant evaluator;
+- a top-level `val`, or a `val` local to the enclosing function, whose initializer
+  the compiler can fold. These are single-assignment with a fixed initializer, so
+  the value folded is the value the lambda would have read.
+
+**The interesting result is that nothing in this example's output changed.** The
+derivative the compiler writes into `build/gradients/` is *byte-identical* to the
+one it wrote from the literal body — same 832 lines, same 823 operations, same
+`md5 5d0c2b9704f12a2863938df08f2cae61`. That is the design working: the fold emits
+the same `DxirConst` the literal path emits, so the reverse transform, the
+φ-calculus coarsening and the synthesized bytecode cannot tell the two spellings
+apart. Only the dump's *filename* moved, because the `valueAndGrad2` call is three
+lines further down the file.
+
+### What is still refused
+
+A captured **runtime** value. That is the rest of this arc, and it has not landed:
+
+```kotlin
+var gain = 2.0f                                   // a `var`
+val gain = readConfig()                           // a computed `val`
+fun build(gain: Float) = grad { x: Float -> x * gain }   // an enclosing parameter
+class Box { val gain = 2.0f }                     // a non-const member property
+```
+
+Each of those is refused by name, and the refusal now says WHICH kind of failure it
+is instead of the one generic sentence every capture used to get:
+
+```
+e: Tlaloc could not lower this lambda at compile time: captured value 'gain' is not
+   a compile-time constant (it is a `var`) — captured RUNTIME values are not yet
+   supported. A `grad { }` body may reference a `const val`, or a top-level /
+   enclosing-function `val` whose initializer the compiler can fold, and nothing
+   else. Declare 'gain' as `const val`, or pass it in as a lambda parameter.
+```
+
+Try one. It is the house rule in action — an unsupported case says so, loudly,
+instead of quietly falling back to something slower that would still have produced
+a number. Since §0.4.499 the refusal is an **error**, not a warning, and the build
+stops; before that the program threw `IllegalStateException` the first time it
+called `dMiss`, the same information one run later. If you want that late failure
+back, pass `-P plugin:io.tlaloc.plugin:strictLowering=false`.
 
 ## A limitation this example removed
 
@@ -203,7 +253,7 @@ Tlaloc differentiable physics — a free throw, solved by differentiating the si
 
 [4] the derivative of the simulator, as the compiler wrote it
 
-    Main_kt_128_23_valueAndGrad2.kt — 832 lines, 823 operations.
+    Main_kt_131_23_valueAndGrad2.kt — 832 lines, 823 operations.
     Nobody wrote this by hand: it is the chain rule carried back through
     38 timesteps of the loop above, and it is ordinary Kotlin over `:core`.
 
@@ -226,7 +276,7 @@ Tlaloc differentiable physics — a free throw, solved by differentiating the si
         return Triple(v741, v1445, v1441)
     }
 
-    the whole file: /home/pedro/programming/tlaloc/examples/differentiable-physics/build/gradients/Main_kt_128_23_valueAndGrad2.kt
+    the whole file: /home/pedro/programming/tlaloc/examples/differentiable-physics/build/gradients/Main_kt_131_23_valueAndGrad2.kt
 
 differentiable-physics OK
 ```

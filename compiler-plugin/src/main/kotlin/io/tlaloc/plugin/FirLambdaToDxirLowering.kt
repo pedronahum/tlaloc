@@ -16,15 +16,20 @@ import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import org.jetbrains.kotlin.KtFakeSourceElementKind
+import org.jetbrains.kotlin.fir.FirEvaluatorResult
+import org.jetbrains.kotlin.fir.FirSession
 import org.jetbrains.kotlin.fir.declarations.FirAnonymousFunction
 import org.jetbrains.kotlin.fir.declarations.FirProperty
+import org.jetbrains.kotlin.fir.declarations.utils.isConst
 import org.jetbrains.kotlin.fir.expressions.FirAnonymousFunctionExpression
 import org.jetbrains.kotlin.fir.expressions.FirBlock
 import org.jetbrains.kotlin.fir.expressions.FirBreakExpression
 import org.jetbrains.kotlin.fir.expressions.FirComparisonExpression
 import org.jetbrains.kotlin.fir.expressions.FirExpression
+import org.jetbrains.kotlin.fir.expressions.FirExpressionEvaluator
 import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirLiteralExpression
+import org.jetbrains.kotlin.fir.expressions.PrivateConstantEvaluatorAPI
 import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
 import org.jetbrains.kotlin.fir.expressions.FirVarargArgumentsExpression
 import org.jetbrains.kotlin.types.ConstantValueKind
@@ -51,6 +56,9 @@ import org.jetbrains.kotlin.fir.types.type
  *
  * - `Float`/`Double`/`Int`/`Long` + `DScalar` + `DTensor<ScalarShape|Rank1<_>, …>` params.
  * - Binary `+ - * /` and unary `-`; numeric literals; parameter / local-val references.
+ * - §0.4.500: CAPTURED compile-time constants — a `const val` anywhere, or a top-level /
+ *   enclosing-function `val` with a foldable initializer — fold to the same [DxirConst] an
+ *   inline literal produces. A captured RUNTIME value still refuses, by its own name.
  * - `:core` scalar + `:core/ops` tensor unary/reduction helpers (relu, sigmoid, tanh, exp,
  *   log, sqrt, neg, sum).
  * - §0.4.24 (B.4a): top-level `if (cond) … else …` whose condition is `a > b` / `a < b`
@@ -79,12 +87,25 @@ object FirLambdaToDxirLowering {
         data class Failure(val reason: String, val namedIndex: Boolean = false) : Result()
     }
 
-    fun lower(name: String, anonFn: FirAnonymousFunction): Result {
+    /**
+     * [session] (§0.4.500) is the FIR session of the module being compiled. It is
+     * what [evaluateToLiteral] needs to fold a captured `const val` whose
+     * initializer is itself an expression (`const val HALF_DT = DT / 2.0f`); a
+     * plain literal initializer folds without it. It is optional so that a caller
+     * with no session in hand still lowers — with constant folding narrowed to
+     * literal initializers — rather than failing.
+     */
+    fun lower(name: String, anonFn: FirAnonymousFunction, session: FirSession? = null): Result {
         val env = HashMap<Any, DxirNode>()
         // §0.4.415 — Phase B5: a fresh per-lowering registry of local vals bound
         // to `customVjp(f, vjpFn)` call-forms (save/restore for re-entrancy).
         val previousDefs = customVjpDefsTl.get()
         customVjpDefsTl.set(HashMap())
+        // §0.4.500 — same save/restore discipline for the session: the whole
+        // lowering is synchronous on this thread, and a ThreadLocal keeps the
+        // ~40 private helpers from each having to carry it.
+        val previousSession = sessionTl.get()
+        sessionTl.set(session)
         return try {
             val fn = DxirBuilder.function(name) {
                 for (firParam in anonFn.valueParameters) {
@@ -105,6 +126,7 @@ object FirLambdaToDxirLowering {
             Result.Failure(e.message ?: "unknown", namedIndex = e is NamedIndexException)
         } finally {
             customVjpDefsTl.set(previousDefs)
+            sessionTl.set(previousSession)
         }
     }
 
@@ -222,7 +244,7 @@ object FirLambdaToDxirLowering {
         emitter: DxirEmitter,
     ): DxirNode = when (expr) {
         is FirLiteralExpression -> lowerLiteral(expr, emitter)
-        is FirPropertyAccessExpression -> lookupReference(expr, env)
+        is FirPropertyAccessExpression -> lookupReference(expr, env, emitter)
         is FirFunctionCall -> lowerCall(expr, env, emitter)
         is FirReturnExpression -> lowerExpr(expr.result, env, emitter)
         is FirWhenExpression -> lowerWhen(expr, env, emitter)
@@ -231,19 +253,38 @@ object FirLambdaToDxirLowering {
 
     private fun lowerLiteral(expr: FirLiteralExpression, emitter: DxirEmitter): DxirNode {
         val value = expr.value ?: throw LoweringException("null literal is not a numeric scalar")
-        // §0.4.51 — FIR stores all integer literals' value as kotlin.Long regardless of
-        // the Kotlin source type. Look at `expr.kind` to distinguish `0` (Int) from `0L`
-        // (Long). Without this, `var k = 0` lowered to `const 0 : i64`, which then
-        // cascaded through the raw-while counter into the wrong STEP/SUB dtype and broke
-        // gradient correctness for kernels that combine while-loops with nested for-loops.
+        return constFromLiteral(expr, emitter)
+            ?: throw LoweringException("unsupported literal type ${value::class.simpleName}")
+    }
+
+    /**
+     * The one place a [FirLiteralExpression] becomes a [DxirConst]. §0.4.500 pulled
+     * it out of [lowerLiteral] so a CAPTURED compile-time constant
+     * ([foldCapturedConstant]) emits through exactly this path: downstream — reverse
+     * transform, φ-calculus coarsening, synthesis, the source printer — must not be
+     * able to tell a folded `const val` from an inline literal, and the only way to
+     * guarantee that is for both to run the same three lines.
+     *
+     * §0.4.51 — FIR stores all integer literals' value as `kotlin.Long` regardless of
+     * the Kotlin source type. Look at [FirLiteralExpression.kind] to distinguish `0`
+     * (Int) from `0L` (Long). Without this, `var k = 0` lowered to `const 0 : i64`,
+     * which then cascaded through the raw-while counter into the wrong STEP/SUB dtype
+     * and broke gradient correctness for kernels that combine while-loops with nested
+     * for-loops.
+     *
+     * Returns null — rather than throwing — for a literal whose type the lowering has
+     * no dtype for (a `String`, a `Char`, a `Boolean`), so each caller can name its own
+     * refusal.
+     */
+    private fun constFromLiteral(expr: FirLiteralExpression, emitter: DxirEmitter): DxirNode? {
+        val value = expr.value ?: return null
         return when (expr.kind) {
             ConstantValueKind.Int, ConstantValueKind.IntegerLiteral -> {
-                val intValue = (value as Number).toInt()
+                val intValue = (value as? Number)?.toInt() ?: return null
                 emitter.const(intValue, DxirType(I32, emptyList()))
             }
             else -> {
-                val dtype = literalDType(value)
-                    ?: throw LoweringException("unsupported literal type ${value::class.simpleName}")
+                val dtype = literalDType(value) ?: return null
                 emitter.const(value, DxirType(dtype, emptyList()))
             }
         }
@@ -252,6 +293,7 @@ object FirLambdaToDxirLowering {
     private fun lookupReference(
         expr: FirPropertyAccessExpression,
         env: Map<Any, DxirNode>,
+        emitter: DxirEmitter,
     ): DxirNode {
         val sym = expr.calleeReference.toResolvedCallableSymbol()
             ?: throw LoweringException("unresolved property access")
@@ -262,13 +304,127 @@ object FirLambdaToDxirLowering {
         if (sym is FirPropertySymbol && customVjpDefsTl.get().containsKey(sym)) {
             throw customVjpEscape(sym.name.asString())
         }
+        when (sym) {
+            is FirValueParameterSymbol -> env[sym]?.let { return it }
+            is FirPropertySymbol -> env[sym]?.let { return it }
+            else -> {}
+        }
+        // §0.4.500 — not in `env`, so this is a CAPTURE: a reference to something
+        // declared outside the lambda. Until §0.4.500 every one of them was the same
+        // refusal ("reference to symbol outside the lowering scope"), which is why
+        // `examples/differentiable-physics` had to inline every number in its body.
+        // A capture FIR can resolve to a compile-time constant now folds; anything
+        // else refuses with wording that says WHICH of the two it is, because that
+        // distinction is what slice 2 (runtime capture) turns on.
         return when (sym) {
-            is FirValueParameterSymbol -> env[sym]
-            is FirPropertySymbol -> env[sym]
+            is FirPropertySymbol -> foldCapturedConstant(sym, emitter)
+            is FirValueParameterSymbol -> throw runtimeCapture(
+                sym.name.asString(),
+                "it is a parameter of the enclosing function, so its value exists only at run time",
+            )
+            else -> throw LoweringException(
+                "reference to symbol outside the lowering scope: ${sym.callableId}",
+            )
+        }
+    }
+
+    /**
+     * §0.4.500 (slice 1 of the capture arc) — a captured reference that FIR resolves
+     * to a compile-time constant folds into exactly the [DxirConst] an inline literal
+     * would have produced (see [constFromLiteral]), so the lowered body is
+     * INDISTINGUISHABLE from the hand-inlined one and nothing downstream sees a new
+     * shape.
+     *
+     * What folds:
+     *  - any `const val`, wherever it is declared — top level, file level, or in a
+     *    companion / named `object`;
+     *  - a `val` with no owning class (a top-level `val`, or a `val` local to the
+     *    ENCLOSING function) whose initializer FIR evaluates to a literal. Both are
+     *    single-assignment with a fixed initializer, so the value the lambda would
+     *    have read at run time is the value folded here.
+     *
+     * What refuses, by name, with the runtime-capture wording:
+     *  - a `var` (its value at the call is not knowable here),
+     *  - a delegated property or one with a custom getter,
+     *  - a member `val` of a class that is not `const` (an instance's value, and
+     *    possibly an override's),
+     *  - a `val` whose initializer is a call, a parameter read, or anything else the
+     *    constant evaluator declines.
+     *
+     * Slice 2 of this arc is what turns those into an extra gradient-less operand;
+     * until it lands they are refusals, not silent degradations.
+     */
+    private fun foldCapturedConstant(sym: FirPropertySymbol, emitter: DxirEmitter): DxirNode {
+        val name = sym.name.asString()
+        if (sym.isVar) throw runtimeCapture(name, "it is a `var`")
+        if (sym.hasDelegate) throw runtimeCapture(name, "it is a delegated property")
+        if (!sym.isConst && sym.callableId?.classId != null) {
+            throw runtimeCapture(name, "it is a member property of a class and not `const`")
+        }
+        val initializer = sym.resolvedInitializer
+            ?: throw runtimeCapture(
+                name,
+                "the compiler can see no initializer for it (a custom getter, or a value assigned elsewhere)",
+            )
+        val literal = initializer as? FirLiteralExpression
+            ?: evaluateToLiteral(initializer)
+            ?: throw runtimeCapture(name, "its initializer is not a compile-time constant")
+        return constFromLiteral(literal, emitter)
+            ?: throw LoweringException(
+                "captured constant '$name' is a compile-time constant of type " +
+                    "${literal.value?.let { it::class.simpleName } ?: "null"}, which the lowering has " +
+                    "no dtype for — a captured constant must be Float, Double, Int or Long",
+            )
+    }
+
+    /**
+     * §0.4.500 — the refusal for a capture that is NOT compile-time resolvable. It is
+     * deliberately a different sentence from "reference to symbol outside the lowering
+     * scope": that text meant "any reference out of the lambda", and after slice 1 it
+     * would be a lie. This one names what slice 2 has to build.
+     */
+    private fun runtimeCapture(name: String, why: String): LoweringException = LoweringException(
+        "captured value '$name' is not a compile-time constant ($why) — captured RUNTIME " +
+            "values are not yet supported. A `grad { }` body may reference a `const val`, or a " +
+            "top-level / enclosing-function `val` whose initializer the compiler can fold, and " +
+            "nothing else. Declare '$name' as `const val`, or pass it in as a lambda parameter.",
+    )
+
+    /**
+     * §0.4.500 — fold a non-literal constant initializer (`const val HALF = DT / 2.0f`)
+     * through the compiler's own constant evaluator, so this lowering never re-parses
+     * or re-interprets Kotlin source. Returns null when there is no session (see
+     * [lower]'s `session` parameter) or when the evaluator declines, and every such
+     * null becomes a NAMED refusal at the call site — the `runCatching` is there
+     * because `FirExpressionEvaluator`'s visitor `error(...)`s on FIR shapes it does
+     * not model, and a compiler crash is a worse answer than a refusal.
+     */
+    @OptIn(PrivateConstantEvaluatorAPI::class)
+    private fun evaluateToLiteral(initializer: FirExpression): FirLiteralExpression? {
+        val session = sessionTl.get() ?: return null
+        val evaluated = runCatching {
+            FirExpressionEvaluator.evaluateExpression(initializer, session)
+        }.getOrNull()
+        return (evaluated as? FirEvaluatorResult.Evaluated)?.result as? FirLiteralExpression
+    }
+
+    /**
+     * §0.4.500 — the Int value of a captured compile-time constant, or null if it is
+     * not one. Used by [extractForLoopTripCount], which needs the NUMBER (not a
+     * [DxirNode]) so that `for (i in 0 until STEPS)` takes the same
+     * [ForLoopBound.Concrete] path an int literal does.
+     */
+    private fun foldConstantInt(expr: FirExpression): Int? {
+        val sym = (expr as? FirPropertyAccessExpression)
+            ?.calleeReference?.toResolvedCallableSymbol() as? FirPropertySymbol ?: return null
+        if (sym.isVar || sym.hasDelegate) return null
+        if (!sym.isConst && sym.callableId?.classId != null) return null
+        val initializer = sym.resolvedInitializer ?: return null
+        val literal = initializer as? FirLiteralExpression ?: evaluateToLiteral(initializer) ?: return null
+        return when (literal.kind) {
+            ConstantValueKind.Int, ConstantValueKind.IntegerLiteral -> (literal.value as? Number)?.toInt()
             else -> null
-        } ?: throw LoweringException(
-            "reference to symbol outside the lowering scope: ${sym.callableId}",
-        )
+        }
     }
 
     /**
@@ -685,6 +841,15 @@ object FirLambdaToDxirLowering {
             val endValue = (endExpr.value as? Number)?.toInt() ?: return null
             if (endValue < 0) return null
             return ForLoopBound.Concrete(endValue)
+        }
+        // §0.4.500 — `for (i in 0 until STEPS)` where STEPS is a captured `const val
+        // Int` is the SAME loop as `0 until 38`, and it must take the same path: a
+        // [ForLoopBound.Concrete] bound, which PhiCalculus's C5 corollary unrolls into
+        // straight-line dxir. Falling through to [ForLoopBound.Expression] would have
+        // lowered the identical program to the C6 symbolic trip-count shape instead —
+        // a different gradient body for a difference in spelling only.
+        foldConstantInt(endExpr)?.let { folded ->
+            if (folded >= 0) return ForLoopBound.Concrete(folded)
         }
         return ForLoopBound.Expression(endExpr)
     }
@@ -2750,6 +2915,10 @@ object FirLambdaToDxirLowering {
      * around each lowering for re-entrancy. */
     private val customVjpDefsTl: ThreadLocal<MutableMap<FirPropertySymbol, FirFunctionCall>> =
         ThreadLocal.withInitial { HashMap() }
+
+    /** §0.4.500 — this lowering's FIR session, set and restored by [lower]. Read only
+     * by [evaluateToLiteral]; null means "fold literal initializers only". */
+    private val sessionTl: ThreadLocal<FirSession?> = ThreadLocal.withInitial { null }
 
     /** §0.4.416 — one of the six custom-derivative call-form spellings:
      * [arity] primal args, and which user bodies the form carries. */

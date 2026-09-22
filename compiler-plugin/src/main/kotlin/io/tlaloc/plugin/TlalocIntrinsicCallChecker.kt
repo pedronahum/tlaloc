@@ -113,7 +113,15 @@ class TlalocIntrinsicCallChecker(
         if (isTracerLambda(lambda)) return
 
         val loweredName = "${callableId.callableName.asString()}_body"
-        when (val result = FirLambdaToDxirLowering.lower(loweredName, lambda.anonymousFunction)) {
+        // §0.4.500 — the session goes in because the lowering folds captured
+        // compile-time constants, and a `const val` whose initializer is itself an
+        // expression needs the compiler's own constant evaluator to resolve it.
+        val result = FirLambdaToDxirLowering.lower(
+            loweredName,
+            lambda.anonymousFunction,
+            context.session,
+        )
+        when (result) {
             is FirLambdaToDxirLowering.Result.Success -> {
                 // §0.4.499 — developer introspection, OFF by default. This dump plus
                 // the IR extension's handoff dump were the two warnings every

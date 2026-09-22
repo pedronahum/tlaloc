@@ -14,6 +14,32 @@ retro-summarise them; it is the record from the first named version forward.
 
 ## [Unreleased]
 
+### Added
+
+- **A `grad {}` body can reference a compile-time constant declared outside it.**
+  Until now a `grad {}` lambda could reference *nothing* outside itself: the
+  lowering resolved property accesses against its own environment (lambda
+  parameters and lambda-local `val`s) and every other reference — a top-level
+  `const val` included — was refused with `reference to symbol outside the
+  lowering scope`. A captured reference the compiler can resolve to a constant is
+  now folded into the lowered IR as **exactly** the `DxirConst` an inline literal
+  would have produced, so the reverse transform, the φ-calculus coarsening, the
+  synthesized bytecode and the printed gradient source cannot tell the two
+  spellings apart. What folds: any `const val` (top level, file level, or in a
+  companion / named `object`), a `const val` whose own initializer is constant
+  arithmetic, and a top-level or enclosing-function `val` whose initializer the
+  compiler can fold — including an `Int` constant used as a `for` loop's trip
+  count, which takes the same unrolled path a literal bound does rather than the
+  symbolic-trip-count one. `examples/differentiable-physics` now uses its own
+  `const val`s, and the derivative the compiler writes for it is byte-identical
+  to the one it wrote from the inlined literals.
+- **A captured RUNTIME value refuses with its own wording**, distinct from the old
+  generic out-of-scope sentence: a `var`, a computed `val`, a parameter of the
+  enclosing function or a non-`const` member property is named, the reason it is
+  not foldable is named, and the two ways out (`const val`, or a lambda
+  parameter) are named. Runtime capture itself is not implemented; see
+  [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
+
 ### Changed
 
 - **A working build is silent.** Every recognised `grad {}` used to emit two
@@ -44,6 +70,17 @@ retro-summarise them; it is the record from the first named version forward.
 
 ### Fixed
 
+- **An f64 scalar body with a literal constant no longer kills the compiler.**
+  `DxirReverseTransform`'s scalar constant folding built every folded constant
+  from a `Float` projection of its operands, whatever the node's dtype was, so an
+  f64 node folded to a constant typed `f64` carrying a `java.lang.Float`. Three
+  phases later `DxirToIrSynthesis`'s `v as Double` threw a bare
+  `ClassCastException` out of the K2 IR generation extension, with no Tlaloc
+  diagnostic of any kind: `grad { x: Double -> x * 1.5 }` neither produced a
+  gradient nor refused. The f64 arm of the fold now does its arithmetic in
+  `Double`, so the value has the width its type claims. Found while writing the
+  captured-constant tests above, on the *inlined-literal control*, and unrelated
+  to captures.
 - **The Tracer-capture route no longer draws a spurious refusal.**
   `io.tlaloc.autograd.grad` / `grad2` / `grad3` / `valueAndGrad*` are overloaded:
   the compile-time intrinsic and the runtime `Tracer` tape share every one of

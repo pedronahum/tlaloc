@@ -1,7 +1,8 @@
 # Alpha plan — the ledger for the road to a usable alpha
 
 **Status: TIER 0 COMPLETE (§0.4.498, 2026-09-22). TIER 1 COMPLETE (§0.4.499,
-2026-09-22). TIERS 2–4 NOT YET STARTED, AND NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
+2026-09-22). TIER 2 ITEM 6 SLICE 1 COMPLETE (§0.4.500, 2026-09-22); the rest of
+TIER 2, and TIERS 3–4, ARE NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
 that takes Tlaloc from "an engine with 2,345 passing tests that nobody may
 legally use" to "an alpha a stranger can depend on". Tier 0 was the legal and
 distribution tier: before it, the repository had no `LICENSE` (so, by default,
@@ -98,9 +99,69 @@ real failure dressed as a warning — and the second one made the first one fata
   `strictLowering=false`, so it was left rather than rewritten.
 - **The FIR-phase `MessageCollector` question.** See the `dumpLoweredIr` row.
 
-## Tier 2
+## Tier 2 — item 6, slice 1: constant folding for captured compile-time constants (§0.4.500, 2026-09-22)
 
-⬜ Not scoped in this file yet.
+The largest engineering item in the arc, split into two sequential slices. **This
+row set is slice 1 only.** Before it, a `grad { }` lambda could reference *nothing*
+declared outside itself: `FirLambdaToDxirLowering.lookupReference` resolved a
+`FirPropertyAccessExpression` against the lowering's own `env` — lambda
+value-parameters and lambda-local `val`s — and every other reference fell through
+to `throw LoweringException("reference to symbol outside the lowering scope: …")`.
+A top-level `const val`, a file-level `val`, a class property and a parameter of
+the enclosing function were all the same refusal. That is why
+`examples/differentiable-physics` carried a README section titled "A limitation you
+will meet immediately" and why every number in its simulator was an inlined literal
+with the constant's name in a trailing comment.
+
+| Item | Status | What pins it | Deferred / notes |
+|---|---|---|---|
+| **A captured `const val` folds into the lowered DXIR** | ✅ | `CapturedConstantGradientTest` (12 tests). Seven of them are EQUIVALENCE tests: each compiles and runs the same program twice — captured constant vs. inlined literal — and requires byte-identical stdout, plus (where the derivative is a round number) the analytic value. "It compiled" is not the claim. | The fold is [`constFromLiteral`], pulled out of `lowerLiteral` so both spellings emit through the same three lines; that identity is the whole design, not an optimisation. Covered positions: scalar arithmetic, a `:core` tensor op operand (the mixed-rank `splatLiteral` path, which is only taken *because* the folded node is a `DxirConst`), an `if` condition and both branch bodies, a `for` loop body, and a loop trip count. |
+| **The fold is indistinguishable downstream** | ✅ | `examples/differentiable-physics`: the 832-line gradient source the compiler dumps from the `const val` body is `md5 5d0c2b9704f12a2863938df08f2cae61` — the same file, byte for byte, that the inlined-literal body produced. Verified by building both and diffing. | Only the dump's *filename* changed (`Main_kt_128_23_…` → `Main_kt_131_23_…`), because the call moved three lines down the file. The example's verbatim expected output in its README is unchanged and was re-diffed against a real run. **This is the interesting result**: the arithmetic, the coarsening and the synthesized bytecode are the same. |
+| **An `Int const val` trip count takes the unrolled path, not the symbolic one** | ✅ | `CapturedConstantGradientTest.a captured Int const val as a for-loop trip count takes the same unroll as the literal` | `extractForLoopTripCount` folds a constant bound to `ForLoopBound.Concrete`, the same case an `Int` literal produces. Falling through to `ForLoopBound.Expression` would have compiled `0 until STEPS` to PhiCalculus's C6 *symbolic* trip-count shape and `0 until 38` to the C5 unroll — two different gradient bodies for a difference in spelling. |
+| **A `const val` with a computed initializer folds** | ✅ | `CapturedConstantGradientTest.a const val whose initializer is itself an expression folds` (`const val HALF_DT = DT / 2.0f`) | Resolved through the Kotlin compiler's own `FirExpressionEvaluator`, never by re-parsing source. That needs a `FirSession`, which `lower` now takes and stashes in a save/restore ThreadLocal beside the existing `customVjpDefsTl`. `evaluateExpression` is `@PrivateConstantEvaluatorAPI`, opted into explicitly, and wrapped in `runCatching`: its visitor `error(…)`s on FIR shapes it does not model, and a refusal is a better answer than a compiler crash. |
+| **A top-level / enclosing-function `val` folds too** | ✅ | `CapturedConstantGradientTest.a top-level val with a literal initializer folds, not only a const val` | Gated on `!isVar && !hasDelegate && (isConst || callableId?.classId == null)`. The `classId == null` arm covers a top-level `val` and a `val` local to the enclosing function; both are single-assignment with a fixed initializer, so the folded value is the value the lambda would have read. A non-`const` MEMBER `val` is deliberately excluded — an instance's value, and possibly an override's. |
+| **A captured runtime value refuses with its own wording** | ✅ | `CapturedConstantGradientTest`, four negative tests: a `var`, a computed `val`, a parameter of the enclosing function, a non-`const` member `val`. Each asserts the capture is named, the reason is named, the phrase `captured RUNTIME values are not yet supported` is present, and the old `outside the lowering scope` text is **absent**. | This distinction is the contract slice 2 turns on. The old sentence survives only for a symbol that is neither a property nor a value parameter (an enum entry, say), where it is still the accurate thing to say. |
+| **f64 constant folding produces a Double** | ✅ | `ir`: `DxirConstFoldDtypeTest` (4 tests) — every f64-typed folded const holds a `Double`; the f64 product is the *double-precision* product and not the f32 one widened; the f32 arm is unchanged; the `MUL(x, 0)` short-circuit's hard-coded `0.0f` is covered too. Plus `CapturedConstantGradientTest.a captured Double const folds at f64, not at f32`. | **Not a capture bug — found by the capture tests.** See "What this slice found that was not in its brief" below. |
+| **Slice 2: runtime capture** | ⬜ | — | Not attempted, by instruction. A captured runtime value has to become an extra operand of the synthesized gradient with no gradient slot of its own, threaded from the call site — the same machinery the customVjp capture story (`CapturingEnv`, §0.4.415) refuses for the same reason. Every refusal message this slice emits names it. |
+| **A captured constant of an unsupported dtype** | 🧪 | Read by eye; no test reaches it | `foldCapturedConstant` refuses by name when the folded literal is not Float/Double/Int/Long. That arm appears to be **unreachable from type-correct Kotlin** today: the lowering's expression surface is numeric, so a `String`, `Char`, `Boolean`, `Byte` or `Short` constant cannot appear in a position the lowering lowers — the read that would reach it (`LABEL.length`) refuses one link earlier, at `length`. Pinned instead: `CapturedConstantGradientTest.a capture chain refuses at the first link the compiler cannot fold`. Kept as a defensive branch, and named here rather than presented as certified. |
+| **A captured `Long` constant** | ⬜ | — | `literalDType` maps `Long → I64` and the fold would emit it, but no type-correct `grad { }` body reaches a captured `Long`: the scalar surface is Float/Double, and a `0 until N` bound with `N: Long` resolves to `LongRange`, which `extractForLoopTripCount` does not recognise. Uncertified and unclaimed. |
+| **Positions that read a `FirLiteralExpression` directly** | ⬜ | — | Some lowering paths pattern-match on a literal ARGUMENT rather than lowering it (axis and shape arguments, some `pow` exponents). A captured constant in one of those positions refuses with that path's own message, not with the fold. Not swept, not counted, and not part of this slice. |
+
+### What this slice found that was not in its brief
+
+**`grad { x: Double -> x * 1.5 }` crashed the compiler.** Not a captured constant
+anywhere — an inlined literal in an f64 scalar body. The failure surfaced as
+
+```
+error: org.jetbrains.kotlin.fir.pipeline.IrGenerationExtensionException:
+class java.lang.Float cannot be cast to class java.lang.Double
+```
+
+with **no Tlaloc diagnostic of any kind**, which is the one outcome this
+repository's house rules do not allow: it neither produced a gradient nor refused
+by name. Cause: `DxirReverseTransform.applyConstFold`'s `asFloatConst` projects
+every operand to `Float`, and every fold built its replacement as
+`DxirConst(id, <Float arithmetic>, n.type)`. On an f64 node that is a constant whose
+type says `f64` and whose value is a `java.lang.Float`. Nothing in the IR checks
+value classes — not the pretty printer, not `validateDxirShapes` — so it travelled
+three phases and two modules to `DxirToIrSynthesis`'s
+`IrConstImpl(…, IrConstKind.Double, v as Double)`.
+
+It was found by the *inlined-literal control* of the Double equivalence test, which
+is the argument for writing the control at all. The f64 arm of the fold now does its
+arithmetic in `Double`; the f32 arm is the pre-§0.4.500 expression untouched, and
+`DxirConstFoldDtypeTest` pins that separation. **`f32` numerics did not move.**
+
+Two things this leaves open, named rather than fixed:
+
+- **No invariant check.** Nothing asserts that a `DxirConst`'s value class matches
+  its `DxirType.dtype`. `validateDxirShapes` would be the place; adding it would
+  turn this class of defect into a named refusal at the checker instead of a
+  ClassCastException in the backend. Not done.
+- **Other constant producers are unaudited.** This fold is fixed; PhiCalculus's
+  unroll, the Symja engine's constant emission and `zeroValueFor`/`seedValueFor`
+  callers were not swept for the same mistake. Only f64 scalar bodies are affected,
+  which is a narrow lane, but it is not zero.
 
 ## Tier 3
 

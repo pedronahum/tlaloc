@@ -159,10 +159,24 @@ adds diagnostics of its own on top (`NAMED_INDEX_MISMATCH`,
 IDE squiggles. → [`examples/named-indices`](examples/named-indices/)
 
 And a body the plugin cannot **lower** at all is a build error too, carrying the
-lowering's own reason (`reference to symbol outside the lowering scope: /X0`, and
-~207 others). It used to be a warning that let the build pass and threw at the
-first call instead. Opt back into that with
-`-P plugin:io.tlaloc.plugin:strictLowering=false`.
+lowering's own reason (`captured value 'gain' is not a compile-time constant (it is
+a \`var\`) — captured RUNTIME values are not yet supported …`, and ~207 others). It
+used to be a warning that let the build pass and threw at the first call instead.
+Opt back into that with `-P plugin:io.tlaloc.plugin:strictLowering=false`.
+
+### A `grad {}` body can reference a constant declared outside it
+
+A captured reference the compiler can resolve to a
+**compile-time constant** — a `const val` anywhere, a top-level or
+enclosing-function `val` with a foldable initializer, including as a loop's trip
+count — is folded into the lowered IR as exactly the constant an inline literal
+would have produced. Until §0.4.500 a `grad {}` lambda could reference nothing
+declared outside itself at all, which is why
+[`examples/differentiable-physics`](examples/differentiable-physics/) had every
+number in its simulator inlined. Its derivative is byte-identical either way.
+A captured *runtime* value (a `var`, a computed `val`, a parameter of the enclosing
+function) still refuses by name; that is the next slice of the same arc, tracked in
+[docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
 
 ### A build that works says nothing
 

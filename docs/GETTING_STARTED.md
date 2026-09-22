@@ -61,6 +61,33 @@ Without the plugin on the compiler classpath, `grad { }` throws at the
 call site with instructions (the tape API
 `io.tlaloc.autograd.gradWithScalars` works plugin-free for scalars).
 
+### What the body may reference
+
+The lambda's own parameters and its local `val`s / `var`s, plus — since
+§0.4.500 — any captured reference the compiler can resolve to a
+**compile-time constant**: a `const val` declared anywhere (top level, file
+level, or in a companion / named `object`), a `const val` whose initializer is
+itself constant arithmetic, and a top-level or enclosing-function `val` whose
+initializer the compiler can fold. An `Int` constant works as a `for` loop's
+trip count. Such a capture is folded into the lowered IR as *exactly* the
+constant an inline literal would have produced, so the gradient is identical
+either way.
+
+A captured **runtime** value is refused by name at compile time, with the
+reason it is not foldable:
+
+```
+e: Tlaloc could not lower this lambda at compile time: captured value 'gain' is
+   not a compile-time constant (it is a `var`) — captured RUNTIME values are not
+   yet supported. A `grad { }` body may reference a `const val`, or a top-level /
+   enclosing-function `val` whose initializer the compiler can fold, and nothing
+   else. Declare 'gain' as `const val`, or pass it in as a lambda parameter.
+```
+
+That covers a `var`, a `val` with a computed initializer, a parameter of the
+enclosing function, and a non-`const` member property. Runtime capture is the
+next slice of that arc; see [ALPHA_PLAN.md](ALPHA_PLAN.md).
+
 ### Reading the gradient the compiler derived
 
 Tlaloc's north star is Tangent's: the derivative is code you can read.

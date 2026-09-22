@@ -6,11 +6,11 @@
  * timestep at a time, with air drag, exactly as you would write it if you had
  * never heard of automatic differentiation.
  *
- *     for (i in 0 until 38) {
- *         vx = vx - 0.24f * vx * 0.025f             // drag
- *         vy = vy - (9.81f + 0.24f * vy) * 0.025f   // gravity + drag
- *         x  = x + vx * 0.025f
- *         y  = y + vy * 0.025f
+ *     for (i in 0 until STEPS) {
+ *         vx = vx - DRAG * vx * DT              // drag
+ *         vy = vy - (G + DRAG * vy) * DT        // gravity + drag
+ *         x  = x + vx * DT
+ *         y  = y + vy * DT
  *     }
  *
  * The question it answers is one a person actually has: **how do I throw this
@@ -100,43 +100,46 @@ fun main() {
     // the hoop after 38 timesteps — so the two partial derivatives it hands
     // back are d(miss²)/d(vx₀) and d(miss²)/d(vy₀).
     //
-    // NOTE: every number in the lambda is a LITERAL, not one of the `const
-    // val`s above. The body is lowered to Tlaloc IR at compile time, and a
-    // reference out of that scope is refused by name rather than silently
-    // degrading — since §0.4.499 as a compile ERROR, not a warning:
-    //     e: Tlaloc could not lower this lambda at compile time: reference to
-    //        symbol outside the lowering scope: /X0
-    // Swap `0.0f` for `X0` and read the refusal yourself. The finite-difference
-    // check below is what guarantees these literals still agree with the
-    // constants the rest of the file uses.
+    // NOTE: every number in this lambda is one of the `const val`s declared at
+    // the top of the file — including `STEPS`, the loop's trip count. Until
+    // §0.4.500 that was impossible: the body is lowered to Tlaloc IR at compile
+    // time, and ANY reference out of the lambda's own scope was refused by name.
+    // A capture the compiler can resolve to a constant is now folded into the
+    // lowered IR as exactly the constant an inline literal would have produced,
+    // so the simulator below reads like the `simulate()` transcription further
+    // down instead of being a column of unnamed numbers.
+    //
+    // What is still refused, by name, is a captured RUNTIME value — a `var`, a
+    // computed `val`, a parameter of the enclosing function. See the README
+    // section "A limitation you will meet immediately".
     val dMiss = grad2 { angle: Float, speed: Float ->
-        var x = 0.0f          // X0
-        var y = 2.0f          // Y0
+        var x = X0
+        var y = Y0
         var vx = speed * angle.cos()
         var vy = speed * angle.sin()
-        for (i in 0 until 38) {                       // STEPS
-            vx = vx - 0.24f * vx * 0.025f             // DRAG, DT
-            vy = vy - (9.81f + 0.24f * vy) * 0.025f   // G, DRAG, DT
-            x = x + vx * 0.025f
-            y = y + vy * 0.025f
+        for (i in 0 until STEPS) {
+            vx = vx - DRAG * vx * DT                  // drag
+            vy = vy - (G + DRAG * vy) * DT            // gravity + drag
+            x = x + vx * DT
+            y = y + vy * DT
         }
-        (x - 4.6f) * (x - 4.6f) + (y - 3.05f) * (y - 3.05f)   // HOOP_X, HOOP_Y
+        (x - HOOP_X) * (x - HOOP_X) + (y - HOOP_Y) * (y - HOOP_Y)   // squared miss
     }
 
     // The same derivation, returning the loss as well, so the descent loop can
     // report where it is without simulating twice.
     val lossAndGrad = valueAndGrad2 { angle: Float, speed: Float ->
-        var x = 0.0f
-        var y = 2.0f
+        var x = X0
+        var y = Y0
         var vx = speed * angle.cos()
         var vy = speed * angle.sin()
-        for (i in 0 until 38) {
-            vx = vx - 0.24f * vx * 0.025f
-            vy = vy - (9.81f + 0.24f * vy) * 0.025f
-            x = x + vx * 0.025f
-            y = y + vy * 0.025f
+        for (i in 0 until STEPS) {
+            vx = vx - DRAG * vx * DT
+            vy = vy - (G + DRAG * vy) * DT
+            x = x + vx * DT
+            y = y + vy * DT
         }
-        (x - 4.6f) * (x - 4.6f) + (y - 3.05f) * (y - 3.05f)
+        (x - HOOP_X) * (x - HOOP_X) + (y - HOOP_Y) * (y - HOOP_Y)
     }
 
     // ------------------------------------------------------------------ 2 ---
