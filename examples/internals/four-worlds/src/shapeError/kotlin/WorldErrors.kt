@@ -18,8 +18,16 @@
  * build actually compiles showed it was false, and it is not in this file
  * because it compiles cleanly.
  */
+// §0.4.505 — THE OPT-IN. `Tlaloc`, `program` and `BufferHandle` carry
+// `@ExperimentalTlalocApi` (a `@RequiresOptIn(ERROR)` marker; see `Main.kt`'s
+// header for why). It is here because THIS FILE MUST STILL FAIL FOR ITS OWN
+// REASON — a Rank1 handle where a Rank2 one is required — and not for a missing
+// opt-in, which would be a different error teaching a different lesson.
+@file:OptIn(ExperimentalTlalocApi::class)
+
 import io.tlaloc.autograd.sum
 import io.tlaloc.core.DTensor
+import io.tlaloc.core.ExperimentalTlalocApi
 import io.tlaloc.core.F32
 import io.tlaloc.core.Mesh0
 import io.tlaloc.core.Rank1

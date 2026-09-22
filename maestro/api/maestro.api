@@ -1,0 +1,466 @@
+public final class io/tlaloc/maestro/BackendMatrixPopulatorKt {
+	public static final fun populateBackendMatrix (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;)Ljava/util/List;
+	public static synthetic fun populateBackendMatrix$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/maestro/BackendTarget {
+	public static final field Companion Lio/tlaloc/maestro/BackendTarget$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Double;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Double;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Ljava/lang/Double;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Double;)Lio/tlaloc/maestro/BackendTarget;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/BackendTarget;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Double;ILjava/lang/Object;)Lio/tlaloc/maestro/BackendTarget;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getArch ()Ljava/lang/String;
+	public final fun getCostMicroseconds ()Ljava/lang/Double;
+	public final fun getKernelName ()Ljava/lang/String;
+	public final fun getKvQuantDtype ()Ljava/lang/String;
+	public final fun getVendor ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/BackendTarget$Companion {
+	public final fun fromJson (Ljava/lang/String;)Lio/tlaloc/maestro/BackendTarget;
+}
+
+public final class io/tlaloc/maestro/MaestroDescriptor {
+	public static final field DEFAULT_RESHARD_IMAGE Ljava/lang/String;
+	public static final field DEFAULT_RUNTIME_IMAGE Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/maestro/MaestroDescriptor;
+	public final fun emit (Lio/tlaloc/maestro/Workflow;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+	public static synthetic fun emit$default (Lio/tlaloc/maestro/MaestroDescriptor;Lio/tlaloc/maestro/Workflow;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/MaestroStep {
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/maestro/ProgramManifest;[BLio/tlaloc/core/Mesh;Lkotlin/jvm/functions/Function1;)V
+	public final fun getBody ()[B
+	public final fun getManifest ()Lio/tlaloc/maestro/ProgramManifest;
+	public final fun getMesh ()Lio/tlaloc/core/Mesh;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getShim ()Lkotlin/jvm/functions/Function1;
+	public final fun invoke (Ljava/lang/Object;)Ljava/lang/Object;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/ProgramKt {
+	public static final fun handleOn (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/Mesh;)Lio/tlaloc/core/HandleRef;
+	public static final fun program (Lio/tlaloc/core/OrchestrationScope;Ljava/lang/String;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/Mesh;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/maestro/MaestroStep;
+}
+
+public final class io/tlaloc/maestro/ProgramManifest {
+	public static final field Companion Lio/tlaloc/maestro/ProgramManifest$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Ljava/util/List;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Ljava/lang/String;
+	public final fun component6 ()Ljava/util/List;
+	public final fun component7 ()Ljava/util/List;
+	public final fun copy (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/maestro/ProgramManifest;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/ProgramManifest;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/ProgramManifest;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBackendMatrix ()Ljava/util/List;
+	public final fun getBodyHash ()Ljava/lang/String;
+	public final fun getInputs ()Ljava/util/List;
+	public final fun getMeshRequirement ()Ljava/lang/String;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getOutputs ()Ljava/util/List;
+	public final fun getShardingSpec ()Ljava/util/List;
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/ProgramManifest$Companion {
+	public final fun fromJson (Ljava/lang/String;)Lio/tlaloc/maestro/ProgramManifest;
+}
+
+public final class io/tlaloc/maestro/ReshardKind : java/lang/Enum {
+	public static final field Mesh Lio/tlaloc/maestro/ReshardKind;
+	public static final field None Lio/tlaloc/maestro/ReshardKind;
+	public static final field Transpose Lio/tlaloc/maestro/ReshardKind;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/maestro/ReshardKind;
+	public static fun values ()[Lio/tlaloc/maestro/ReshardKind;
+}
+
+public final class io/tlaloc/maestro/SerializedBufferException : java/lang/RuntimeException {
+	public fun <init> (Ljava/lang/String;)V
+}
+
+public final class io/tlaloc/maestro/SerializedBufferHandle {
+	public static final field Companion Lio/tlaloc/maestro/SerializedBufferHandle$Companion;
+	public static final field MAGIC I
+	public static final field VERSION I
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/TypeDescriptor;Ljava/lang/String;Ljava/lang/String;)V
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getContentHash ()Ljava/lang/String;
+	public final fun getManifestRef ()Ljava/lang/String;
+	public final fun getMeshName ()Ljava/lang/String;
+	public final fun getTypeDescriptor ()Lio/tlaloc/maestro/TypeDescriptor;
+	public final fun getUri ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun read-gaBP5Dw (Lio/tlaloc/maestro/TypeDescriptor;Lio/tlaloc/core/Mesh;Z)Lio/tlaloc/core/HandleRef;
+	public static synthetic fun read-gaBP5Dw$default (Lio/tlaloc/maestro/SerializedBufferHandle;Lio/tlaloc/maestro/TypeDescriptor;Lio/tlaloc/core/Mesh;ZILjava/lang/Object;)Lio/tlaloc/core/HandleRef;
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/SerializedBufferHandle$Companion {
+	public final fun fromJson (Ljava/lang/String;)Lio/tlaloc/maestro/SerializedBufferHandle;
+	public final fun write-DF5QRW8 (Lio/tlaloc/core/HandleRef;Ljava/lang/String;Lio/tlaloc/core/Mesh;Lio/tlaloc/maestro/TypeDescriptor;Ljava/lang/String;)Lio/tlaloc/maestro/SerializedBufferHandle;
+}
+
+public final class io/tlaloc/maestro/StubExecutor {
+	public fun <init> ()V
+	public final fun run (Lio/tlaloc/maestro/Workflow;Ljava/lang/Object;)Ljava/lang/Object;
+}
+
+public final class io/tlaloc/maestro/TypeDescriptor {
+	public static final field Companion Lio/tlaloc/maestro/TypeDescriptor$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Ljava/util/List;
+	public final fun copy (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/maestro/TypeDescriptor;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/TypeDescriptor;Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/TypeDescriptor;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAxisNames ()Ljava/util/List;
+	public final fun getDims ()Ljava/util/List;
+	public final fun getDtype ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/TypeDescriptor$Companion {
+	public final fun fromDxirType (Lio/tlaloc/ir/DxirType;)Lio/tlaloc/maestro/TypeDescriptor;
+	public final fun fromJson (Ljava/lang/String;)Lio/tlaloc/maestro/TypeDescriptor;
+}
+
+public final class io/tlaloc/maestro/Workflow {
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V
+	public final fun getEdges ()Ljava/util/List;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getSteps ()Ljava/util/List;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/WorkflowBuilder : io/tlaloc/core/ProgramScope {
+	public final fun getName ()Ljava/lang/String;
+	public final fun seed-b8p1Llk (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/Mesh;)Lio/tlaloc/core/HandleRef;
+	public final fun step (Lio/tlaloc/maestro/MaestroStep;Ljava/lang/Object;)Ljava/lang/Object;
+}
+
+public final class io/tlaloc/maestro/WorkflowEdge {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/ReshardKind;Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Lio/tlaloc/maestro/ReshardKind;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/ReshardKind;Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/maestro/WorkflowEdge;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/WorkflowEdge;Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/ReshardKind;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/WorkflowEdge;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getFromMesh ()Ljava/lang/String;
+	public final fun getFromStep ()Ljava/lang/String;
+	public final fun getReshardKind ()Lio/tlaloc/maestro/ReshardKind;
+	public final fun getToMesh ()Ljava/lang/String;
+	public final fun getToStep ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun isPassThrough ()Z
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/WorkflowKt {
+	public static final fun workflow (Lio/tlaloc/core/ProgramScope;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/maestro/Workflow;
+}
+
+public final class io/tlaloc/maestro/serving/HfLlamaServingExport {
+	public static final field DEFAULT_NUM_BLOCKS I
+	public static final field INSTANCE Lio/tlaloc/maestro/serving/HfLlamaServingExport;
+	public final fun export (Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/HfLlamaServingExport;Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+}
+
+public final class io/tlaloc/maestro/serving/HfLlamaServingExportKt {
+	public static final fun main ([Ljava/lang/String;)V
+}
+
+public final class io/tlaloc/maestro/serving/ReferenceDecodeGraph {
+	public static final field INSTANCE Lio/tlaloc/maestro/serving/ReferenceDecodeGraph;
+	public static final field MODEL_HASH Ljava/lang/String;
+	public static final field MODEL_NAME Ljava/lang/String;
+	public final fun build (Lio/tlaloc/ir/inference/DecodeGraphSpec;)Lio/tlaloc/ir/DxirFunction;
+	public final fun exportTo (Ljava/nio/file/Path;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun getMODEL ()Lio/tlaloc/ir/inference/DecodeModelShape;
+	public final fun getPOLICY ()Lio/tlaloc/ir/inference/DecodeBucketPolicy;
+}
+
+public final class io/tlaloc/maestro/serving/ReferenceDecodeGraphKt {
+	public static final fun main ([Ljava/lang/String;)V
+}
+
+public final class io/tlaloc/maestro/serving/ServingArtifactWriter {
+	public static final field BODIES_DIR Ljava/lang/String;
+	public static final field ENTRY_POINT Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/maestro/serving/ServingArtifactWriter;
+	public static final field PROGRAMS_DIR Ljava/lang/String;
+	public static final field SINGLE_DEVICE_MESH Ljava/lang/String;
+	public static final field WEIGHTS_DIR Ljava/lang/String;
+	public final fun decodeSpecs (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucketPolicy;)Ljava/util/List;
+	public final fun export (Ljava/nio/file/Path;Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/ServingArtifactWriter;Ljava/nio/file/Path;Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun ladderOf (Lio/tlaloc/ir/inference/DecodeBucketPolicy;)Lio/tlaloc/maestro/serving/ServingBucketLadder;
+}
+
+public final class io/tlaloc/maestro/serving/ServingBucketLadder {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingBucketLadder$Companion;
+	public fun <init> (ILjava/util/List;Ljava/util/List;)V
+	public final fun component1 ()I
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Ljava/util/List;
+	public final fun copy (ILjava/util/List;Ljava/util/List;)Lio/tlaloc/maestro/serving/ServingBucketLadder;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingBucketLadder;ILjava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingBucketLadder;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBatch ()Ljava/util/List;
+	public final fun getBlockSize ()I
+	public final fun getContext ()Ljava/util/List;
+	public final fun getMaxBatch ()I
+	public final fun getMaxContext ()I
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingBucketLadder$Companion {
+	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingBucketLadder;
+}
+
+public final class io/tlaloc/maestro/serving/ServingEntry {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingEntry$Companion;
+	public fun <init> (Lio/tlaloc/ir/inference/DecodeGraphKind;IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;)V
+	public final fun component1 ()Lio/tlaloc/ir/inference/DecodeGraphKind;
+	public final fun component10 ()Ljava/lang/String;
+	public final fun component11 ()Ljava/util/List;
+	public final fun component12 ()Ljava/util/List;
+	public final fun component13 ()Ljava/util/List;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun component6 ()Ljava/lang/String;
+	public final fun component7 ()Ljava/lang/String;
+	public final fun component8 ()Ljava/lang/String;
+	public final fun component9 ()Ljava/lang/String;
+	public final fun copy (Lio/tlaloc/ir/inference/DecodeGraphKind;IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/maestro/serving/ServingEntry;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingEntry;Lio/tlaloc/ir/inference/DecodeGraphKind;IIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingEntry;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBatch ()I
+	public final fun getBodyHash ()Ljava/lang/String;
+	public final fun getBodyPath ()Ljava/lang/String;
+	public final fun getCacheKey ()Ljava/lang/String;
+	public final fun getContext ()I
+	public final fun getDonationPairs ()Ljava/util/List;
+	public final fun getEntryId ()Ljava/lang/String;
+	public final fun getEntryPoint ()Ljava/lang/String;
+	public final fun getInputs ()Ljava/util/List;
+	public final fun getKind ()Lio/tlaloc/ir/inference/DecodeGraphKind;
+	public final fun getMaxBlocksPerSeq ()I
+	public final fun getOutputs ()Ljava/util/List;
+	public final fun getProgramPath ()Ljava/lang/String;
+	public final fun getTokensPerSeq ()I
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingEntry$Companion {
+	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingEntry;
+}
+
+public final class io/tlaloc/maestro/serving/ServingKvQuant {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingKvQuant$Companion;
+	public static final field PER_HEAD Ljava/lang/String;
+	public static final field PER_TENSOR Ljava/lang/String;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()I
+	public final fun component4 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;)Lio/tlaloc/maestro/serving/ServingKvQuant;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingKvQuant;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingKvQuant;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCodeDtype ()Ljava/lang/String;
+	public final fun getCodeMax ()I
+	public final fun getDtype ()Ljava/lang/String;
+	public final fun getScaleStrategy ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun scaleCount (I)I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingKvQuant$Companion {
+	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingKvQuant;
+}
+
+public final class io/tlaloc/maestro/serving/ServingManifest {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingManifest$Companion;
+	public static final field FILE_NAME Ljava/lang/String;
+	public static final field SCHEMA_VERSION Ljava/lang/String;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Ljava/util/List;Ljava/lang/String;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Ljava/util/List;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Lio/tlaloc/maestro/serving/ServingModelShape;
+	public final fun component4 ()Lio/tlaloc/maestro/serving/ServingBucketLadder;
+	public final fun component5 ()Lio/tlaloc/maestro/serving/ServingWeightsPointer;
+	public final fun component6 ()Ljava/util/List;
+	public final fun component7 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Ljava/util/List;Ljava/lang/String;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingManifest;Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun entryFor (Lio/tlaloc/ir/inference/DecodeGraphKind;II)Lio/tlaloc/maestro/serving/ServingEntry;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBucketLadder ()Lio/tlaloc/maestro/serving/ServingBucketLadder;
+	public final fun getEntries ()Ljava/util/List;
+	public final fun getModel ()Lio/tlaloc/maestro/serving/ServingModelShape;
+	public final fun getModelHash ()Ljava/lang/String;
+	public final fun getModelName ()Ljava/lang/String;
+	public final fun getSchemaVersion ()Ljava/lang/String;
+	public final fun getWeights ()Lio/tlaloc/maestro/serving/ServingWeightsPointer;
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingManifest$Companion {
+	public final fun fromJson (Ljava/lang/String;)Lio/tlaloc/maestro/serving/ServingManifest;
+}
+
+public final class io/tlaloc/maestro/serving/ServingModelShape {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingModelShape$Companion;
+	public fun <init> (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;)V
+	public synthetic fun <init> (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()I
+	public final fun component10 ()Ljava/lang/String;
+	public final fun component11 ()Lio/tlaloc/maestro/serving/ServingKvQuant;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun component6 ()I
+	public final fun component7 ()I
+	public final fun component8 ()I
+	public final fun component9 ()Ljava/lang/String;
+	public final fun copy (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;)Lio/tlaloc/maestro/serving/ServingModelShape;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingModelShape;IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingModelShape;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBlockSize ()I
+	public final fun getDtype ()Ljava/lang/String;
+	public final fun getHeadDim ()I
+	public final fun getHiddenSize ()I
+	public final fun getKvDtype ()Ljava/lang/String;
+	public final fun getKvPoolAxisOrder ()Ljava/util/List;
+	public final fun getKvPoolDims ()Ljava/util/List;
+	public final fun getKvQuant ()Lio/tlaloc/maestro/serving/ServingKvQuant;
+	public final fun getNumBlocks ()I
+	public final fun getNumHeads ()I
+	public final fun getNumKvHeads ()I
+	public final fun getNumLayers ()I
+	public final fun getVocabSize ()I
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingModelShape$Companion {
+	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingModelShape;
+}
+
+public final class io/tlaloc/maestro/serving/ServingSlot {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingSlot$Companion;
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public final fun component3 ()Lio/tlaloc/maestro/TypeDescriptor;
+	public final fun copy (Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;)Lio/tlaloc/maestro/serving/ServingSlot;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingSlot;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingSlot;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public final fun getRole ()Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public final fun getType ()Lio/tlaloc/maestro/TypeDescriptor;
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingSlot$Companion {
+	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingSlot;
+	public final fun fromSlot (Lio/tlaloc/ir/inference/DecodeSlot;)Lio/tlaloc/maestro/serving/ServingSlot;
+}
+
+public final class io/tlaloc/maestro/serving/ServingWeightFile {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingWeightFile$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;JLjava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/util/List;
+	public final fun component5 ()J
+	public final fun component6 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;JLjava/lang/String;)Lio/tlaloc/maestro/serving/ServingWeightFile;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingWeightFile;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;JLjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingWeightFile;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getByteLength ()J
+	public final fun getCount ()J
+	public final fun getDims ()Ljava/util/List;
+	public final fun getDtype ()Ljava/lang/String;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getPath ()Ljava/lang/String;
+	public final fun getSha256 ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingWeightFile$Companion {
+	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingWeightFile;
+}
+
+public final class io/tlaloc/maestro/serving/ServingWeightsPointer {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingWeightsPointer$Companion;
+	public static final field STAGED_DIR Ljava/lang/String;
+	public static final field STAGED_FORMAT Ljava/lang/String;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;ZLjava/util/List;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;ZLjava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Z
+	public final fun component4 ()Ljava/util/List;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;ZLjava/util/List;)Lio/tlaloc/maestro/serving/ServingWeightsPointer;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingWeightsPointer;Ljava/lang/String;Ljava/lang/String;ZLjava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingWeightsPointer;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getEmbedded ()Z
+	public final fun getFormat ()Ljava/lang/String;
+	public final fun getPath ()Ljava/lang/String;
+	public final fun getTable ()Ljava/util/List;
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingWeightsPointer$Companion {
+	public final fun embedded ()Lio/tlaloc/maestro/serving/ServingWeightsPointer;
+	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingWeightsPointer;
+}
+

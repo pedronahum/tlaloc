@@ -1,5 +1,7 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
+
 /**
  * §0.4.351 — CrossEntropy kernel selector for the KPTX tier. Claims the
  * coarsened CE (`loss = Σ labels·log(softmax(logits))`, operands
@@ -13,6 +15,7 @@ package io.tlaloc.ir.recognizer.kernel
  * Like the other KPTX templates, **not in [defaultKernelTemplates]** —
  * the lane stays opt-in per pipeline.
  */
+@ExperimentalTlalocApi
 val CrossEntropyKernel: KernelTemplate = KernelTemplate { coarsened, target ->
     val logits = coarsened.operands.firstOrNull()
     when {

@@ -3,8 +3,12 @@
 Differentiable Kotlin, end to end: you write a plain Kotlin lambda, the
 Tlaloc K2 compiler plugin rewrites `grad { }` calls into synthesized
 gradient code at compile time, and misuse (mismatched named axes,
-undifferentiable bodies) is a **compile error with an IDE red squiggle**,
-not a runtime crash.
+undifferentiable bodies) is a **compile error carrying the offending call's
+own file, line and column** — not a runtime crash. An IDE running Kotlin's
+K2 analysis executes the same FIR checkers, so you should also see a redline
+there while you type; that part is expected and is the one thing here no test
+covers (`DiagnosticSourcePositionTest` pins the positions, nothing drives an
+IDE).
 
 > Alpha — `0.1.0-alpha01`. Artifacts are not yet on Maven Central — consume via
 > `mavenLocal()` from a repo checkout. Coordinates and APIs may change without a
@@ -73,9 +77,12 @@ git clone <tlaloc repo> && cd tlaloc
 ./gradlew publishToMavenLocal -x test
 ```
 
-Every module lands under `io.tlaloc:*:0.1.0-alpha01` (`core`, `ir`,
-`autograd`, `stablehlo`, `compiler-plugin`, `runtime-pjrt`,
-`runtime-iree`, `runtime-cuda`, `kptx`, `maestro`).
+All **eleven** published modules land under `io.tlaloc:*:0.1.0-alpha01`:
+`core`, `ir`, `autograd`, **`nn`**, `stablehlo`, `compiler-plugin`,
+`runtime-pjrt`, `runtime-cuda`, `runtime-iree`, `kptx`, `maestro`. (`nn` — the
+layers and optimizers — was missing from this list until §0.4.505, which is
+awkward for the module a reader most likely wants.) `:benchmarks` is a harness
+and publishes nothing.
 
 ## 2. Set up a consumer project
 
@@ -183,11 +190,14 @@ gradients too — see `docs/AD_SINGLE_ENGINE_AUDIT.md`.
 
 ## 4. Compile-time safety
 
-Named axes live in the type system, and the checker validates your
-lambda **as you type**:
+Named axes live in the type system, and the checker runs on every
+compilation of the lambda:
 
 - `contract` over operands sharing no named axis → `NAMED_INDEX_MISMATCH`
-  **error** (the build fails; IntelliJ redlines the call).
+  **error**, reported at the call's own line and column, so the build fails
+  there (pinned by `DiagnosticSourcePositionTest`). IntelliJ in K2 mode runs
+  the same checker and should redline the call as you type — expected, and
+  untested: nothing in this repository drives an IDE.
 - A body the reverse-mode transform cannot differentiate →
   `NOT_DIFFERENTIABLE` error, with the transform's reason verbatim.
 - Concrete-dim shape violations → `TENSOR_SHAPE_MISMATCH` error.
@@ -200,8 +210,11 @@ lambda **as you type**:
 
 ## 4a. Plugin options
 
-All four are `-P plugin:io.tlaloc.plugin:<name>=<value>` on the Kotlin
-compile task (`kotlinOptions.freeCompilerArgs` / `compilerOptions`):
+All **five** are `-P plugin:io.tlaloc.plugin:<name>=<value>` on the Kotlin
+compile task (`kotlinOptions.freeCompilerArgs` / `compilerOptions`). A
+misspelled boolean value is refused by name rather than read as `false` — for
+the four added since §0.4.499; `dumpGradSource` predates that and still reads
+an unknown value as `false` (named in `docs/ALPHA_PLAN.md`):
 
 | option | default | what it does |
 | --- | --- | --- |
@@ -209,6 +222,7 @@ compile task (`kotlinOptions.freeCompilerArgs` / `compilerOptions`):
 | `dumpLoweredIr` | `false` | Dump the lowered Tlaloc IR for every recognised intrinsic lambda: one WARNING from the FIR checker, one INFO from the IR extension. **Developer introspection.** It is off by default because a consumer's build log is not the place for it — and because, being warnings, the two dumps used to break every build compiling with `-Werror`. Do not combine this option with `-Werror`: K2's diagnostic DSL has no INFO severity, so the FIR half is necessarily a warning. |
 | `dumpGradSource` | `false` | Print each synthesized gradient as readable Kotlin (INFO). See above. |
 | `dumpGradSourceDir` | — | Like `dumpGradSource`, and also write one `.kt` per lambda into this directory. |
+| `unsafeAllowUnsupportedKotlin` | `false` | Downgrade `KotlinVersionGuard`'s refusal (§0.4.503) from an ERROR to a warning and try the plugin on a Kotlin outside 2.3.20–2.3.29 anyway. It is spelled "unsafe" because it is: the plugin reads 40 packages of internal K2 API. |
 
 A build with none of these set and a `grad {}` that lowers is **silent**:
 Tlaloc says nothing at all. That is pinned by `DiagnosticNoiseTest`, which
@@ -217,6 +231,38 @@ succeeds and that no message mentions Tlaloc.
 
 Try it: uncomment the `bad` block at the bottom of the quickstart's
 `Main.kt`.
+
+## 4b. `@ExperimentalTlalocApi` — the part of the surface that is provisional
+
+`0.1.0-alpha01` says every API may change without a deprecation cycle, and that
+is true of `grad` (thousands of oracle tests behind it) and of a scope taxonomy
+nothing has ever executed, which makes it useless as a signal. Since §0.4.505
+three surfaces carry a `@RequiresOptIn(ERROR)` marker, `io.tlaloc.core.ExperimentalTlalocApi`,
+and touching one without opting in is a compile error naming the marker:
+
+| Marked | Why |
+|---|---|
+| The four-worlds scopes — `KernelScope`, `OrchestrationScope`, `ProgramScope`, `ClusterScope`, `Tlaloc`, `BufferHandle`, `HandleRef` | Their own KDoc scopes them to "v1 keeps each op single-scope" and names Kotlin's context parameters as where a multi-scope op would send the whole design |
+| `io.tlaloc.ir.AllReduceAttrs` | Distributed execution is 📐 in [CAPABILITIES.md](CAPABILITIES.md) — designed, never run on two hosts — and v1 supports `"sum"` only |
+| `io.tlaloc.ir.recognizer.kernel` and `io.tlaloc.ir.recognizer.cost` | The machinery is unit-certified; what it is *for* is picking a kernel, and the one kernel of ours measured against XLA lost at small shapes ([KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md)) |
+
+`grad`, the tensor and op surface, `:nn`'s layers, optimizers and schedules,
+safetensors, StableHLO emission and the PJRT/IREE runtimes **are not marked**,
+deliberately. A marker on everything teaches you to add `-opt-in=` once and stop
+reading it.
+
+```kotlin
+@file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)   // per file
+```
+
+```kotlin
+kotlin { compilerOptions { optIn.add("io.tlaloc.core.ExperimentalTlalocApi") } }  // per module
+```
+
+[examples/internals/four-worlds](../examples/internals/four-worlds) and
+[examples/internals/layer3](../examples/internals/layer3) each carry the file-level
+form with a comment saying why — they are the two examples that consume a marked
+surface, and they are how the marker is checked from outside this repository.
 
 ## 5. Running on real hardware
 
@@ -234,10 +280,17 @@ IREE binaries) — see the module KDocs and README "Requirements".
 
 ## 6. Where to go next
 
-- [examples/](../examples/) — eight standalone runnable projects, indexed in
-  [examples/README.md](../examples/README.md): readable gradients, named
-  indices, the four worlds, Layer-3 kernel selection, GPU training, GPU
-  serving, and the TPU program written before the TPU.
+- [examples/](../examples/) — **ten** standalone runnable projects, each its own
+  Gradle build resolving Tlaloc from `mavenLocal`, indexed with the verbatim
+  output of every one in [examples/README.md](../examples/README.md). Seven at
+  the top level — `quickstart`, `readable-gradients`, `differentiable-physics`,
+  `named-indices`, `mnist`, `gpu-training`, `gpu-inference` — and three under
+  `examples/internals/`: `layer3` (kernel selection), `four-worlds` (the scope
+  taxonomy) and `tpu` (the program written before the hardware). Six need
+  nothing but a JDK. (This line said "eight" until §0.4.505, and named seven.)
+- **API reference** — `./gradlew apiDocs` from the repository root writes an
+  aggregated Dokka site for all eleven modules to `build/docs/api/index.html`.
+  Nothing is hosted.
 - [DIFFKTX_SPEC.md](../DIFFKTX_SPEC.md) — the book of work; §0.4 is the
   session-by-session ship log.
 - [README](../README.md) — architecture, layer map, benchmarks.

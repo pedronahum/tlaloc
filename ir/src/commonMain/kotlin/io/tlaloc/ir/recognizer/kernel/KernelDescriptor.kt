@@ -1,5 +1,7 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
+
 /**
  * Layer 3 §0.4.253+ — describes a vendor-fused kernel chosen for a
  * recognized pattern on a specific [KernelTarget].
@@ -36,6 +38,7 @@ package io.tlaloc.ir.recognizer.kernel
  *   launch registry (`KptxKernelRegistry`); default false preserves
  *   the §0.4.261 emit byte-for-byte for existing targets.
  */
+@ExperimentalTlalocApi
 data class KernelDescriptor(
     val kernelName: String,
     val vendor: String,

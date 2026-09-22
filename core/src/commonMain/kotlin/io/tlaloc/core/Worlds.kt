@@ -78,6 +78,7 @@ annotation class WorldScope
  * futures lives in [OrchestrationScope]; anything that touches a cluster
  * lives in [ClusterScope].
  */
+@ExperimentalTlalocApi
 @WorldScope
 interface KernelScope
 
@@ -89,6 +90,7 @@ interface KernelScope
  * `program { }` is callable from this scope and opens a [KernelScope]
  * inside its body. `dispatch`, `compile`, `await` live here.
  */
+@ExperimentalTlalocApi
 @WorldScope
 interface OrchestrationScope
 
@@ -98,6 +100,7 @@ interface OrchestrationScope
  * [io.tlaloc.maestro.MaestroWorkflow] artifact. Cross-mesh transfers and
  * pipeline stages also live here.
  */
+@ExperimentalTlalocApi
 @WorldScope
 interface ProgramScope
 
@@ -108,6 +111,7 @@ interface ProgramScope
  *
  * Layer 2 ships ClusterScope as a marker only; v2 fills in the operations.
  */
+@ExperimentalTlalocApi
 @WorldScope
 interface ClusterScope
 
@@ -122,6 +126,7 @@ interface ClusterScope
  * default singleton has no state — concrete orchestration runtimes
  * (e.g. an IREE-backed dispatcher in Layer 3) will subtype this.
  */
+@ExperimentalTlalocApi
 object Tlaloc : OrchestrationScope, ProgramScope
 
 // --------------------------------------------------------------------------
@@ -139,13 +144,17 @@ object Tlaloc : OrchestrationScope, ProgramScope
 // --------------------------------------------------------------------------
 
 /** Smoke marker, callable only from [KernelScope]. */
+@ExperimentalTlalocApi
 fun KernelScope.kernelMarker(): String = "kernel"
 
 /** Smoke marker, callable only from [OrchestrationScope]. */
+@ExperimentalTlalocApi
 fun OrchestrationScope.orchestrationMarker(): String = "orchestration"
 
 /** Smoke marker, callable only from [ProgramScope]. */
+@ExperimentalTlalocApi
 fun ProgramScope.programMarker(): String = "program"
 
 /** Smoke marker, callable only from [ClusterScope]. */
+@ExperimentalTlalocApi
 fun ClusterScope.clusterMarker(): String = "cluster"

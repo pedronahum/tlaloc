@@ -144,7 +144,7 @@ class WorldScopeDisciplineTest {
     private fun compile(user: String): RunResult {
         val tempDir = Files.createTempDirectory("tlaloc-worlds").toFile()
         try {
-            File(tempDir, "Main.kt").writeText(user)
+            File(tempDir, "Main.kt").writeText(OPT_IN + user)
             val outDir = File(tempDir, "out").apply { mkdirs() }
             val collected = mutableListOf<CompileMessage>()
             val collector = object : MessageCollector {
@@ -166,5 +166,25 @@ class WorldScopeDisciplineTest {
         } finally {
             tempDir.deleteRecursively()
         }
+    }
+
+    private companion object {
+        /**
+         * §0.4.505 — every source here opts in, and it matters that ALL of them do.
+         *
+         * The four-worlds taxonomy now carries `@ExperimentalTlalocApi`
+         * (`@RequiresOptIn(ERROR)`), so without this line the two positive tests
+         * would fail and — worse — the three NEGATIVE tests would keep passing for
+         * the wrong reason: they assert `exitCode != 0`, and an opt-in error is a
+         * non-zero exit that has nothing to do with scope discipline. Prepending it
+         * in the harness rather than in each snippet is what makes "all of them"
+         * checkable by reading one place.
+         *
+         * This harness runs `K2JVMCompiler` directly and therefore does NOT inherit
+         * the `-opt-in=` flag the root build passes to Tlaloc's own compilations —
+         * which is the same reason `ExperimentalApiOptInTest` can certify the
+         * refusal at all.
+         */
+        private val OPT_IN = "@file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)\n"
     }
 }

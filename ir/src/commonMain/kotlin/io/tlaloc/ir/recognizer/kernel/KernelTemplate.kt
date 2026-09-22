@@ -1,5 +1,6 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
 import io.tlaloc.ir.DxirOp
 
 /**
@@ -23,6 +24,7 @@ import io.tlaloc.ir.DxirOp
  * on rank-4 inputs). Static maps don't compose those constraints.
  * Functions do.
  */
+@ExperimentalTlalocApi
 fun interface KernelTemplate {
     /**
      * Pick a kernel for the given coarsened op + target, or return

@@ -1,5 +1,7 @@
 package io.tlaloc.ir
 
+import io.tlaloc.core.ExperimentalTlalocApi
+
 /**
  * §0.4.460 — Phase G3a: the ALL_REDUCE attribute convention, shared by every
  * layer that touches the kind (interpreter, both AD transforms, the StableHLO
@@ -28,6 +30,7 @@ package io.tlaloc.ir
  * arm (`|group| > 1`) is exercised only via these unit semantics until
  * G2b/G4 put real devices behind the groups.
  */
+@ExperimentalTlalocApi
 object AllReduceAttrs {
 
     /** The parsed, validated form. [groups] is never empty and never ragged. */

@@ -29,6 +29,7 @@ package io.tlaloc.core
  * runtime. They exist purely to flow through Kotlin's type checker so
  * step composition and reshard insertion are compile-time decisions.
  */
+@ExperimentalTlalocApi
 @JvmInline
 value class BufferHandle<T : DTensor<*, *>, M : Mesh>(val ref: HandleRef) : AutoCloseable {
 
@@ -74,6 +75,7 @@ value class BufferHandle<T : DTensor<*, *>, M : Mesh>(val ref: HandleRef) : Auto
  *
  * **Not thread-safe.** v1 contract: workflow execution is sequential.
  */
+@ExperimentalTlalocApi
 class HandleRef(
     val nativeId: Long,
     val payload: Any? = null,

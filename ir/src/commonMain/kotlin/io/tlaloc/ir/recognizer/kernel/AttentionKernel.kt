@@ -1,5 +1,7 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
+
 /**
  * §0.4.358 — attention kernel selector for the KPTX tier: the fourth
  * (and final medium-decoder) claiming family. Claims the
@@ -17,6 +19,7 @@ package io.tlaloc.ir.recognizer.kernel
  *
  * Like the other KPTX templates, **not in [defaultKernelTemplates]**.
  */
+@ExperimentalTlalocApi
 val AttentionKernel: KernelTemplate = KernelTemplate { coarsened, target ->
     val q = coarsened.operands.getOrNull(0)
     val kt = coarsened.operands.getOrNull(1)

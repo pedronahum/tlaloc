@@ -1,0 +1,248 @@
+public final class io/tlaloc/autograd/CaptureKt {
+	public static final fun capture (Lkotlin/jvm/functions/Function1;Lio/tlaloc/core/DTensor;Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun capture$default (Lkotlin/jvm/functions/Function1;Lio/tlaloc/core/DTensor;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public static final fun capture2 (Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun capture2$default (Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public static final fun captureN (Ljava/util/List;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun captureN$default (Ljava/util/List;Ljava/lang/String;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public static final fun toDxirFunction (Lio/tlaloc/autograd/Tape;Ljava/lang/String;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public final class io/tlaloc/autograd/CustomVjpCheck {
+	public fun <init> (FFFZ)V
+	public final fun component1 ()F
+	public final fun component2 ()F
+	public final fun component3 ()F
+	public final fun component4 ()Z
+	public final fun copy (FFFZ)Lio/tlaloc/autograd/CustomVjpCheck;
+	public static synthetic fun copy$default (Lio/tlaloc/autograd/CustomVjpCheck;FFFZILjava/lang/Object;)Lio/tlaloc/autograd/CustomVjpCheck;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getForwardInner ()F
+	public final fun getPassed ()Z
+	public final fun getRelativeError ()F
+	public final fun getVjpInner ()F
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/autograd/CustomVjpKt {
+	public static final fun checkCustomVjp (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;IFF)Lio/tlaloc/autograd/CustomVjpCheck;
+	public static synthetic fun checkCustomVjp$default (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;IFFILjava/lang/Object;)Lio/tlaloc/autograd/CustomVjpCheck;
+	public static final fun customJvp (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun customJvp2 (Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function4;)Lkotlin/jvm/functions/Function2;
+	public static final fun customVjp (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun customVjp2 (Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function2;
+	public static final fun customVjpJvp (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun customVjpJvp2 (Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function3;Lkotlin/jvm/functions/Function4;)Lkotlin/jvm/functions/Function2;
+}
+
+public final class io/tlaloc/autograd/GradIntrinsicsKt {
+	public static final fun grad (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun grad2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun grad3 (Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function3;
+	public static final fun jvp (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function2;
+	public static final fun jvp2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function4;
+	public static final fun valueAndGrad (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun valueAndGrad2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun valueAndGrad3 (Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function3;
+	public static final fun valueAndJvp (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function2;
+	public static final fun valueAndJvp2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function4;
+	public static final fun valueAndVjp (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function2;
+	public static final fun valueAndVjp2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function3;
+	public static final fun vjp (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function2;
+	public static final fun vjp2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function3;
+}
+
+public final class io/tlaloc/autograd/GradKt {
+	public static final fun grad (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun grad2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun grad3 (Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function3;
+	public static final fun gradWithScalar (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun gradWithScalars (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun valueAndGrad (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun valueAndGrad2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun valueAndGrad3 (Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function3;
+	public static final fun valueAndGradWithScalar (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun valueAndGradWithScalars (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+}
+
+public final class io/tlaloc/autograd/JacobianIntrinsicsKt {
+	public static final fun assembleHessian2Forward (Lkotlin/jvm/functions/Function4;)Lkotlin/jvm/functions/Function2;
+	public static final fun assembleHessianForward (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun assembleJacobian2Forward (Lkotlin/jvm/functions/Function4;)Lkotlin/jvm/functions/Function2;
+	public static final fun assembleJacobianForward (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun assembleJacobianReverse (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun assembleJacobianReverse2 (Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function2;
+	public static final fun hessian (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun hessian2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun jacobian (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun jacobian2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun jacobianReverse (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun jacobianReverse2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+}
+
+public final class io/tlaloc/autograd/Quadruple {
+	public fun <init> (Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V
+	public final fun component1 ()Ljava/lang/Object;
+	public final fun component2 ()Ljava/lang/Object;
+	public final fun component3 ()Ljava/lang/Object;
+	public final fun component4 ()Ljava/lang/Object;
+	public final fun copy (Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Lio/tlaloc/autograd/Quadruple;
+	public static synthetic fun copy$default (Lio/tlaloc/autograd/Quadruple;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;ILjava/lang/Object;)Lio/tlaloc/autograd/Quadruple;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getFirst ()Ljava/lang/Object;
+	public final fun getFourth ()Ljava/lang/Object;
+	public final fun getSecond ()Ljava/lang/Object;
+	public final fun getThird ()Ljava/lang/Object;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/autograd/Tape {
+	public fun <init> ()V
+	public final fun getEntries ()Ljava/util/List;
+	public final fun size ()I
+}
+
+public final class io/tlaloc/autograd/TapeEntry {
+	public final fun getAttrs ()Ljava/util/Map;
+	public final fun getDims ()[I
+	public final fun getDtype ()Lio/tlaloc/core/DType;
+	public final fun getId ()I
+	public final fun getInputs ()[I
+	public final fun getOp ()Lio/tlaloc/ir/OpKind;
+	public final fun getSize ()I
+	public final fun getValue ()[F
+	public final fun isConstant ()Z
+	public final fun isLeaf ()Z
+}
+
+public final class io/tlaloc/autograd/TracedOpsKt {
+	public static final fun avgPool2d (Lio/tlaloc/autograd/Tracer;II)Lio/tlaloc/autograd/Tracer;
+	public static final fun bmm (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun broadcastAlong (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static final fun broadcastBatch (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun broadcastCol (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun broadcastInner (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun broadcastRow (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun cast (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/core/DType;)Lio/tlaloc/autograd/Tracer;
+	public static final fun concat (Ljava/util/List;I)Lio/tlaloc/autograd/Tracer;
+	public static final fun conv2d (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;IIIIII)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (DLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (FLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (ILio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (JLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (Lio/tlaloc/autograd/Tracer;D)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (Lio/tlaloc/autograd/Tracer;J)Lio/tlaloc/autograd/Tracer;
+	public static final fun div (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divMatrixRank1Row (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divRank1InnerTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divRank1Row (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divRank1ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divRank2BatchTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divRank2ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divRank3ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divScalarTracerRank1 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divScalarTracerRank2 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun divScalarTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun embedding (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static synthetic fun embedding$default (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;IILjava/lang/Object;)Lio/tlaloc/autograd/Tracer;
+	public static final fun exp (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun log (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun matmul (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun maxPool2d (Lio/tlaloc/autograd/Tracer;II)Lio/tlaloc/autograd/Tracer;
+	public static final fun mean (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun mean (Lio/tlaloc/autograd/Tracer;[I)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (DLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (FLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (ILio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (JLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (Lio/tlaloc/autograd/Tracer;D)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (Lio/tlaloc/autograd/Tracer;J)Lio/tlaloc/autograd/Tracer;
+	public static final fun minus (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusMatrixRank1Row (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusRank1InnerTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusRank1Row (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusRank1ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusRank2BatchTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusRank2ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusRank3ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusScalarTracerRank1 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusScalarTracerRank2 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun minusScalarTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun neg (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (DLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (FLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (ILio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (JLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (Lio/tlaloc/autograd/Tracer;D)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (Lio/tlaloc/autograd/Tracer;J)Lio/tlaloc/autograd/Tracer;
+	public static final fun plus (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusMatrixRank1Row (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusRank1InnerTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusRank1Row (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusRank1ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusRank2BatchTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusRank2ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusRank3ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusScalarTracerRank1 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusScalarTracerRank2 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun plusScalarTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun pow (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static final fun pow (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun relu (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun reshape (Lio/tlaloc/autograd/Tracer;[I)Lio/tlaloc/autograd/Tracer;
+	public static final fun sigmoid (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun slice (Lio/tlaloc/autograd/Tracer;III)Lio/tlaloc/autograd/Tracer;
+	public static final fun sqrt (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun step (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun sum (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun sum (Lio/tlaloc/autograd/Tracer;[I)Lio/tlaloc/autograd/Tracer;
+	public static final fun tanh (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (DLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (FLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (ILio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (JLio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (Lio/tlaloc/autograd/Tracer;D)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (Lio/tlaloc/autograd/Tracer;J)Lio/tlaloc/autograd/Tracer;
+	public static final fun times (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesMatrixRank1Row (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesRank1InnerTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesRank1Row (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesRank1ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesRank2BatchTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesRank2ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesRank3ScalarLhs (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesScalarTracerRank1 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesScalarTracerRank2 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun timesScalarTracerRank3 (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun unaryMinus (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/autograd/Tracer {
+	public final fun getDims ()[I
+	public final fun getDtype ()Lio/tlaloc/core/DType;
+	public final fun getId ()I
+	public final fun getRank ()I
+	public final fun getSize ()I
+	public final fun peek (I)F
+	public static synthetic fun peek$default (Lio/tlaloc/autograd/Tracer;IILjava/lang/Object;)F
+	public final fun toDTensor ()Lio/tlaloc/core/DTensor;
+}
+
+public final class io/tlaloc/autograd/TracerKt {
+	public static final fun constant (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static final fun constant (Lio/tlaloc/autograd/Tracer;[F)Lio/tlaloc/autograd/Tracer;
+	public static final fun constant (Lio/tlaloc/autograd/Tracer;[F[I)Lio/tlaloc/autograd/Tracer;
+	public static final fun constantLike (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static final fun getScalar (Lio/tlaloc/autograd/Tracer;)F
+}
+

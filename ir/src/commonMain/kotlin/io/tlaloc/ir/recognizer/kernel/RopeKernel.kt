@@ -1,5 +1,6 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
@@ -21,6 +22,7 @@ import io.tlaloc.ir.OpKind
  * Like [RmsNormKernel], **not in [defaultKernelTemplates]** — the KPTX
  * lane stays opt-in per pipeline.
  */
+@ExperimentalTlalocApi
 val RopeKernel: KernelTemplate = KernelTemplate { coarsened, target ->
     val primal = coarsened.attrs["primal_body"] as? DxirFunction
     val ops = primal?.body?.filterIsInstance<DxirOp>().orEmpty()

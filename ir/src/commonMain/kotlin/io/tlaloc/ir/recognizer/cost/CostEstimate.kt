@@ -1,5 +1,6 @@
 package io.tlaloc.ir.recognizer.cost
 
+import io.tlaloc.core.ExperimentalTlalocApi
 import kotlin.math.max
 
 /**
@@ -10,6 +11,7 @@ import kotlin.math.max
  *   For fused regions (e.g. a kernel custom-call), only operand inputs +
  *   final output count; intermediate bytes are elided.
  */
+@ExperimentalTlalocApi
 data class CostEstimate(
     val flops: Double,
     val bytesMoved: Double,

@@ -23,6 +23,17 @@ The run walks the whole Layer-3 pipeline, one printed section per stage:
 
 It is all pure compilation. No GPU, no TPU, no network: this runs on a laptop.
 
+**One line of ceremony at the top of `Main.kt`.** Since §0.4.505 the
+kernel-choice and cost-model surface this example drives — `KernelTarget`,
+`KernelDescriptor`, `lowerKernelChoice`, the cost model — carries
+`@ExperimentalTlalocApi`, a `@RequiresOptIn(ERROR)` marker, so the file opens with
+`@file:OptIn(ExperimentalTlalocApi::class)`. The reason is worth reading rather
+than skipping: everything printed below is *certified* (the artifacts really do
+differ, and tests pin that), but what the machinery is **for** is choosing a
+kernel, and the one kernel of ours measured against XLA's own lowering lost at
+small shapes ([docs/KPTX_PAGED_PERF.md](../../../docs/KPTX_PAGED_PERF.md)). The
+decision mechanism is solid; the decisions are not settled.
+
 ## Running it
 
 This is a standalone Gradle project resolving Tlaloc from **mavenLocal**, so

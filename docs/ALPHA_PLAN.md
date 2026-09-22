@@ -4,8 +4,9 @@
 2026-09-22). TIER 2 ITEM 6 COMPLETE — slice 1 (§0.4.500) and slice 2 (§0.4.501),
 2026-09-22. TIER 2 ITEM 7 COMPLETE (§0.4.502, 2026-09-22). TIER 3 COMPLETE —
 portability and trust (§0.4.503) and the CI matrix (§0.4.504), 2026-09-22; the CI
-lanes are 🧪 because no GitHub Actions run of them exists. The rest of TIER 2, and
-TIER 4, ARE NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
+lanes are 🧪 because no GitHub Actions run of them exists. TIER 4 COMPLETE —
+documentation debt and the public API surface (§0.4.505, 2026-09-22). The rest of
+TIER 2 IS NOT YET SCOPED IN THIS FILE.** This document is the running record for the arc
 that takes Tlaloc from "an engine with 2,345 passing tests that nobody may
 legally use" to "an alpha a stranger can depend on". Tier 0 was the legal and
 distribution tier: before it, the repository had no `LICENSE` (so, by default,
@@ -520,9 +521,109 @@ locally was, and those rows say so.
 | `actionlint` 1.7.12 on all three workflows | zero findings |
 | GitHub Actions runs of any lane | **none — that is the tier's honest limit** |
 
-## Tier 4
+## Tier 4 — documentation debt and the public API surface (§0.4.505, 2026-09-22)
 
-⬜ Not scoped in this file yet.
+Six items. Three are documentation (a spec section 400 sections out of date, a
+count that disagreed with itself, a claim with no test behind it) and three build
+something a consumer needs (an API reference, an opt-in marker, an ABI baseline).
+The tier exists because this repository's distinguishing quality is that its
+claims are true, and four of them were not.
+
+| Item | Status | What pins it | Deferred / notes |
+|---|---|---|---|
+| **1. `DIFFKTX_SPEC.md` §17 no longer marks shipped work ⬜** | ✅ | Reading, not a test — but every section number cited is establishable from `git log` or from the file's own "Cumulative §0.4 trail through §0.4.100" era table, and the header says so | Corrected: step 2 (libtorch DROPPED, MNIST example SHIPPED §0.4.496, the tape deleted §0.4.446–451), step 3 (DCE §0.4.45, CSE §0.4.48 + §0.4.118–119, shape validation §0.4.353), **step 5 IREE ✅ §0.4.284–§0.4.295**, step 6 (✅ — all three "remaining" items shipped), step 8 (🟡 — the emitter shipped, libShardy JNI never did and was replaced by a pure-Kotlin tokenizer), **step 10 PJRT ✅/🟡 §0.4.302–§0.4.309**, step 11 (🟡), step 12 (⬜→❌, matching the README), **steps 13–15 coarsening ✅** (§0.4.11–§0.4.26, §0.4.27–§0.4.36, and the three-part CAS bridge). Nothing was upgraded on a commit title alone. |
+| **1b. Step 16 went the OTHER way: ⬜ → 🟡, not ✅** | ✅ | The absence of any §0.4 entry publishing the six head-to-head numbers, and §0.4.235's "M9 closure waits on user-side toolchain" | **This contradicts the brief that produced this tier**, which described steps 13–16 as "shipped and certified against the OOPSLA 2021 paper". Steps 13–15 are. Step 16 asks for the paper's *speedups* matched within 20%, and that comparison has never been run: all six benchmarks are ported and all six are `HeadToHeadHarness` inhabitants, `aggregate.py` carries the Table 3 numbers (corrected in §0.4.239), and the PyTorch/JAX reference sides were gated on a toolchain nobody supplied. So §11.13's M9 exit criterion is **open**, and the gate the ladder makes coarsening's release conditional on is **unread, not failed** — coarsening shipped anyway. Both facts are now written into §17 and into the paragraph under it. |
+| **1c. §14's four false lines** | ✅ | Grep: no ktlint, no detekt, no Spotless, no Robolectric, no kotlinx-benchmark, no MkDocs anywhere in the build or the workflows | "Formatting: ktlint + detekt, **enforced in CI**" was the worst of them — none of the three exists and nothing lints. Also corrected: "target bytecode 25" (per-module since §0.4.503), "MLIR/StableHLO pinned to a specific commit" (nothing is pinned or vendored but Maestro), the CI platform list (two OS legs, no aarch64-Linux, no Windows, and none has run), and the configuration cache ("on" — it is not). |
+| **1d. §18's answered open questions** | ✅ | Reading, against HEAD | Seven marked **Resolved** with what decided them: the licence (Apache-2.0, §0.4.498), the PJRT plugin strategy (separate install, with a search report), TPU timing (claimed 🧪 in those words, never run), the symbolic engine (Symja, and **not** Apache-2.0 as that line claimed), sparse tensors (revived §0.4.417–§0.4.420, GPU refusal by design), quantization (int8 KV cache only), Shardy pinning (answered *by construction* — no bindings to vendor). Two new entries added because Tier 0 opened them and nothing recorded them here: Symja's licence and the unchosen Central namespace. Governance, Shardy propagation control, MPMD and coarsening-for-higher-order stay open; three are now marked *blocked* on a non-JVM target that does not exist. |
+| **2. The example count, and the drift sweep around it** | ✅ | `for d in examples/*/ examples/internals/*/; do [ -f $d/settings.gradle.kts ]` → exactly **ten**; and every one of them was run | README said ten, `GETTING_STARTED.md` §6 said **eight** and named seven. Ten is right: seven top-level (`quickstart`, `readable-gradients`, `differentiable-physics`, `named-indices`, `mnist`, `gpu-training`, `gpu-inference`) plus three under `internals/`. The sweep for the same class of drift found four more, all listed in the findings section below. |
+| **3. An aggregated API reference** | ✅ | `./gradlew apiDocs` — the task fails by name if `build/docs/api/index.html` is absent, so "there is an API reference" cannot rot into a task that produces nothing. Ran: 2,898 HTML pages, 46 MB, all eleven modules in the module list | Dokka is applied at the ROOT now (it was `apply false`) because Dokka 2's multi-module aggregation needs the root to hold the `dokka` configuration. **Not hosted** — no gh-pages lane, no MkDocs; that is a ⬜ row in `docs/CAPABILITIES.md`. The 206 unresolved-KDoc-link warnings are **counted** here for the first time (Tier 0 recorded them as uncounted): 206 warnings over **110 distinct link targets**, `:ir` 117, `:core` 23, `:compiler-plugin` 19, `:stablehlo` 13, `:runtime-pjrt` 13, `:runtime-iree` 5, `:maestro` 5, `:kptx` 4, `:autograd` 4, `:runtime-cuda` 2, `:nn` 1. Unswept. |
+| **4. `@ExperimentalTlalocApi`** | ✅ | `ExperimentalTlalocApiTest` (5 tests, `:core`) + `ExperimentalApiOptInTest` (5 tests, `:compiler-plugin`) | See the criterion row below. The marker is `@RequiresOptIn(ERROR)`, BINARY retention, declared in `:core`. |
+| **4b. The criterion, and what it deliberately excludes** | ✅ | The annotation's own KDoc states it; `ExperimentalTlalocApiTest."the certified surface does NOT carry the marker"` asserts the exclusion | Three criteria, one needed: (1) `docs/CAPABILITIES.md` marks the capability 🧪 or 📐 → `io.tlaloc.ir.AllReduceAttrs` (distributed is 📐, never run on two hosts, v1 is `"sum"` only); (2) the declaration's own KDoc scopes itself to "v1" and names what it would have to become → the four-worlds taxonomy (`KernelScope`, `OrchestrationScope`, `ProgramScope`, `ClusterScope`, `Tlaloc`, `BufferHandle`, `HandleRef` — "v1 keeps each op single-scope", with context parameters named as the alternative, plus `BufferHandle`'s "v1 stub" payload and single-threaded refcount); (3) the API *selects* behaviour whose result is uncertified → `io.tlaloc.ir.recognizer.kernel` and `io.tlaloc.ir.recognizer.cost` (six files scope themselves to v1, `DeviceDescriptor`'s numbers are dated `v1 (2026-05)`, and the only kernel measured against XLA lost at small shapes). **NOT marked, deliberately:** `grad` and the transformation family, the tensor and op surface, `:nn`, safetensors, StableHLO emission, PJRT and IREE. A marker on everything teaches a reader to add `-opt-in=` once and stop reading it, which is worse than no marker. |
+| **4c. The marker refuses a real consumer** | ✅ | `ExperimentalApiOptInTest` runs a real `K2JVMCompiler` with **no** `-opt-in` argument: the taxonomy refuses naming the marker AND carrying its message, `@OptIn` makes the identical source compile, the kernel surface and `AllReduceAttrs` refuse, and the certified surface compiles with no mention of the marker | Also checked from outside the build: `examples/internals/four-worlds` (both source sets) and `examples/internals/layer3` needed `@file:OptIn` and now carry it with a comment saying why. Those two examples are the only consumers of a marked surface in the repository, which makes them the check. |
+| **4d. Tlaloc's own modules opt in at the build level** | ✅ (and a stated cost) | Root `build.gradle.kts`: `optIn.addAll(...)` on every `KotlinCompilationTask` in the ten modules that can see `:core` | The kotlinx convention. **The cost, stated rather than hidden:** nothing inside this build notices when repository code uses a provisional API. What notices is every consumer, and the two tests above. `:kptx` and `:runtime-cuda` are excluded from the flag because they depend on nothing of Tlaloc's — passing `-opt-in=` a class they cannot resolve makes the compiler warn on every compilation, which is exactly the build-log noise §0.4.499 spent a tier removing. |
+| **5. A binary-compatibility baseline** | ✅ | `api/<module>.api` committed (4,396 lines over six modules); `apiCheck` wired into `check` by the plugin, so `./gradlew test` runs it. **Negative-tested**: adding `fun tlalocApiCheckNegativeProbe(): Int` to `:stablehlo` made `:stablehlo:apiCheck` FAIL and print the one-line diff | binary-compatibility-validator 0.18.2, applied at the root. Experimental API is **in** the dump on purpose — excluding it (`nonPublicMarkers`) would have made the marker a hole in the gate. |
+| **5b. It covers six modules of eleven** | 🧪 for the other five | The failure is reproducible and verbatim: `A failure occurred while executing kotlinx.validation.AbiBuildWorker > Unsupported class file major version 69` | **A measured tool limit, not a choice.** Major 69 is Java 25, and BCV 0.18.2's ABI reader cannot parse it. So the gate covers exactly the six modules §0.4.503 lowered to Java 21 — `:core`, `:ir`, `:autograd`, `:nn`, `:stablehlo`, `:maestro`, which is the library surface a consumer compiles against — and not `:runtime-pjrt`, `:runtime-cuda`, `:kptx`, `:runtime-iree`, `:compiler-plugin`. The ignore list is **derived from `tlalocJvmTargets`**, so a module lowered to 21 later starts being validated with no one remembering to come back. ⬜ row: widening it needs either a BCV release with a newer ASM or a second tool. |
+| **6. The IDE claim matches the evidence** | ✅ for the build error, 🧪 for the IDE | `DiagnosticSourcePositionTest` (3 tests, `:compiler-plugin`): `LAMBDA_NOT_LOWERABLE` and `NAMED_INDEX_MISMATCH` each report at the offending call's own **file, line and column** (the line located by its own text, not hardcoded), and no Tlaloc ERROR is ever emitted without a position | **The capability is not deleted; the claim is narrowed to what is tested.** Eighteen `:compiler-plugin` test classes already asserted diagnostic *text*; not one had read `location`, so "red squiggle" rested on nothing. README, `GETTING_STARTED.md` (header and §4) now claim the build failure at file:line:column and call the IDE redline *expected, untested*, with a 🧪 row in `docs/CAPABILITIES.md`. Nothing here drives IntelliJ and there is no IDE plugin. |
+
+### What this tier found that was not in its brief
+
+- **The README contradicted itself about Symja, and the contradiction was two
+  commits old.** Its `### Requirements` said Symja "is **optional** since
+  `0.1.0-alpha01`" — correct, §0.4.503 made it `compileOnly` — while its "Before
+  you invest" bullet and its whole `## License` section said `ir-jvm` "carries
+  Symja … at runtime scope, with no supported way to opt out yet". §0.4.503 changed
+  the dependency and did not come back to the two places that described it. Both
+  now say the same thing, and the part that *is* still true — no Symja-free
+  `SymbolicEngine` exists, so a policy forbidding LGPL-3.0 outright leaves you
+  without a CAS — is stated as the residual risk rather than dropped.
+- **`docs/GETTING_STARTED.md`'s list of published modules omitted `:nn`.** Ten of
+  eleven were listed; the missing one is the layers and optimizers, which is
+  plausibly what a reader came for.
+- **"All four" plugin options had been five since §0.4.503.**
+  `unsafeAllowUnsupportedKotlin` was added by the Kotlin version guard and §4a was
+  not updated, so the table a reader is pointed at was missing the option that
+  decides whether the plugin runs at all.
+- **Three test counts, three numbers, none of them current.** README said 2,345,
+  `docs/COMPATIBILITY.md` said 2,345, `docs/CAPABILITIES.md` said 2,509. All three
+  now carry the number this tier measured.
+- **The correct annotation retention is the one reflection cannot see.** An opt-in
+  marker must be `AnnotationRetention.BINARY`; Kotlin's BINARY is Java's
+  `RetentionPolicy.CLASS`; and `Class.getAnnotations()` returns only `RUNTIME`
+  annotations. The first version of `ExperimentalTlalocApiTest` therefore asserted
+  three things about an empty array and would have passed with the marker applied
+  to nothing. It reads the class files' constant pools now, which is also the
+  honest statement of the claim: the requirement is in the bytes a consumer's
+  compiler reads. (Kotlin additionally refuses `filterIsInstance<RequiresOptIn>()`
+  — "This class can only be used as an annotation" — which is how the retention
+  problem surfaced.)
+- **Dokka's warning count is 206, over 110 distinct link targets, and `:ir` owns
+  117 of them.** Tier 0 named these warnings as real defects and recorded that
+  nobody had counted them. Counted now; still unswept, because sweeping 110 KDoc
+  references is its own commit.
+
+### Suite state at Tier 4 close
+
+| | |
+|---|---|
+| `./gradlew test --rerun-tasks` | BUILD SUCCESSFUL, **139 tasks executed, 3m35s** |
+| `bash scripts/count-tests.sh` | **2522** = 2509 at §0.4.504 + **13 new tests** (5 `ExperimentalTlalocApiTest`, 5 `ExperimentalApiOptInTest`, 3 `DiagnosticSourcePositionTest`). Of that total, 51 come from `third-party/maestro` results present in the tree — the same caveat §0.4.504 recorded |
+| Failures across all 377 `TEST-*.xml` | none |
+| `./gradlew apiDump` | writes six baselines, 4,396 lines total |
+| `./gradlew apiCheck` | green; **negative-tested** — one added public function in `:stablehlo` makes it fail with the diff |
+| `./gradlew apiDocs` | 2,898 HTML pages, 46 MB, eleven modules, 206 KDoc-link warnings |
+| `bash scripts/onboarding-smoke.sh` | passes |
+| Every one of the ten examples | ran; the two that now need `@file:OptIn` were re-run after adding it, including `four-worlds`'s deliberately-failing `shapeError` source set |
+
+**One real break this tier caused, found by the suite and fixed.**
+`WorldScopeDisciplineTest` compiles five snippets against `:core` through
+`K2JVMCompiler` directly, so it does not inherit the root build's `-opt-in=` flag.
+Marking the four-worlds taxonomy made its two POSITIVE tests fail — and would have
+left its three NEGATIVE tests passing for the wrong reason, since they assert
+`exitCode != 0` and an opt-in error is a non-zero exit that says nothing about
+scope discipline. The harness now prepends the opt-in to every snippet, with the
+reasoning in the source. The only other failure in the first full run was
+`BGDHyperOptTest`'s known wall-clock ratio flake (`ratio=0.4`, bounds
+`0.5 < ratio < 200`), green in isolation and green on the re-run — the same flake
+Tier 0 recorded.
+
+### What Tier 4 did not do
+
+- **Sweep the 206 Dokka warnings.** Counted, attributed per module, not fixed.
+- **Host anything.** No gh-pages, no MkDocs Material book. `./gradlew apiDocs`
+  writes a local site; ⬜ in `docs/CAPABILITIES.md`.
+- **Mark `:kptx`.** It meets the third criterion squarely — the kernel library
+  whose one measured kernel lost to XLA at small shapes — but `:kptx` declares **no
+  dependency on `:core`**, so `@ExperimentalTlalocApi` cannot reach it without
+  adding one, and a documentation tier is the wrong place to change a published
+  module's dependency graph. Named in the annotation's own KDoc. ⬜.
+- **Validate the five Java-25 modules' ABI.** See the 5b row — a tool limit.
+- **Test an IDE.** See item 6. Nothing here drives IntelliJ.
+- **Run the head-to-head comparison that would close §17 step 16.** It is a
+  benchmark run against two Python frameworks, not a documentation item; this tier
+  marked the gate unread and left it unread.
+- **Add a new §0.4 entry to `DIFFKTX_SPEC.md`.** Per the brief. §14, §17 and §18
+  were *corrected*, which is a different act — the §0.4 register itself is
+  untouched.
 
 ---
 

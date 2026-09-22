@@ -6,7 +6,14 @@ import org.w3c.dom.Element
 plugins {
     alias(libs.plugins.kotlin.multiplatform) apply false
     alias(libs.plugins.kotlin.jvm) apply false
-    alias(libs.plugins.dokka) apply false
+    // §0.4.505 — Dokka is APPLIED here, not `apply false`. §0.4.498 wired it per
+    // module for the javadoc jar Central mandates; Dokka 2's multi-module
+    // aggregation needs the root project to hold the `dokka` configuration that
+    // the per-module publications feed into. `./gradlew apiDocs` is the result.
+    alias(libs.plugins.dokka)
+    // §0.4.505 (Tier 4, item 5) — the ABI baseline. Applied at the root only; the
+    // plugin walks the subprojects itself.
+    alias(libs.plugins.binary.compatibility.validator)
 }
 
 group = "io.tlaloc"
@@ -553,4 +560,124 @@ subprojects {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// §0.4.505 (Tier 4) — the public API surface: an opt-in marker, an API
+// reference, and an ABI baseline.
+// ---------------------------------------------------------------------------
+
+// ITEM 4 — `@ExperimentalTlalocApi` (core/src/commonMain/.../ExperimentalTlalocApi.kt)
+// is a `@RequiresOptIn(ERROR)` marker on the three surfaces that are genuinely
+// provisional. Tlaloc's OWN modules opt in here, at the build level, the way
+// kotlinx libraries do: the marker is a signal to a CONSUMER, and making every
+// internal call site carry `@OptIn` would only add noise to files that already
+// document their own v1 scope in prose.
+//
+// The cost of that choice, stated rather than hidden: nothing inside this build
+// notices when repository code uses a provisional API. What DOES notice is every
+// consumer — `examples/internals/four-worlds` and `examples/internals/layer3` both
+// had to add `@OptIn` in §0.4.505, which is the check that the marker works at all,
+// and `ExperimentalTlalocApiTest` in :compiler-plugin compiles a consumer without
+// the opt-in and asserts the error.
+val tlalocOptIns = listOf("io.tlaloc.core.ExperimentalTlalocApi")
+
+// The marker lives in `:core`, so only a module that can SEE `:core` may name it.
+// `:kptx` and `:runtime-cuda` depend on nothing of Tlaloc's (`:runtime-cuda` depends
+// on `:kptx` alone), and passing `-opt-in=` a class they cannot resolve makes the
+// Kotlin compiler warn on every compilation — "Opt-in requirement marker … is
+// unresolved" — which is precisely the kind of unexplained build-log noise §0.4.499
+// spent a tier removing. Naming the two exceptions is better than a blanket flag
+// that talks to modules it cannot reach.
+val tlalocModulesSeeingCore = setOf(
+    "core", "ir", "autograd", "nn", "stablehlo",
+    "compiler-plugin", "maestro", "runtime-pjrt", "runtime-iree", "benchmarks",
+)
+
+subprojects {
+    if (name !in tlalocModulesSeeingCore) return@subprojects
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask<*>>()
+        .configureEach { compilerOptions { optIn.addAll(tlalocOptIns) } }
+}
+
+// ITEM 3 — THE API REFERENCE. §0.4.498 wired Dokka for the javadoc jar Maven
+// Central mandates, and stopped there: the HTML existed only inside eleven
+// separate `-javadoc.jar` files, which is not a thing a person reads. This is the
+// aggregate: one browsable site across every published module, with the module
+// list and cross-module links Dokka can only build when it sees them together.
+//
+//   ./gradlew apiDocs      →  build/docs/api/index.html
+//
+// NOT hosted. There is no gh-pages lane and no MkDocs site; `docs/ALPHA_PLAN.md`
+// says so in the same row that claims this one.
+dependencies {
+    dokka(project(":core"))
+    dokka(project(":ir"))
+    dokka(project(":autograd"))
+    dokka(project(":nn"))
+    dokka(project(":stablehlo"))
+    dokka(project(":compiler-plugin"))
+    dokka(project(":maestro"))
+    dokka(project(":runtime-pjrt"))
+    dokka(project(":runtime-cuda"))
+    dokka(project(":runtime-iree"))
+    dokka(project(":kptx"))
+}
+
+dokka {
+    moduleName.set("Tlaloc")
+    dokkaPublications.named("html") {
+        outputDirectory.set(layout.buildDirectory.dir("docs/api"))
+    }
+}
+
+tasks.register("apiDocs") {
+    group = "documentation"
+    description = "Generate the aggregated Dokka HTML API reference for every published module"
+    dependsOn(tasks.named("dokkaGeneratePublicationHtml"))
+    val index = layout.buildDirectory.file("docs/api/index.html")
+    doLast {
+        val f = index.get().asFile
+        if (!f.isFile) {
+            throw GradleException(
+                "§0.4.505: apiDocs ran but ${f.absolutePath} does not exist. The aggregate " +
+                    "Dokka publication did not write an entry point, so there is no API " +
+                    "reference to point a reader at — which is exactly the claim this task " +
+                    "is supposed to make true.",
+            )
+        }
+        logger.lifecycle("API reference: file://${f.absolutePath}")
+    }
+}
+
+// ITEM 5 — THE ABI BASELINE. `api/<module>.api` is committed; `./gradlew apiCheck`
+// (the plugin wires it into `check`, so `./gradlew test` runs it) fails on any
+// difference. `./gradlew apiDump` re-baselines, and a baseline diff in a commit is
+// the record that the change was intended.
+//
+// EXPERIMENTAL API IS IN THE DUMP, on purpose. Excluding it (BCV's
+// `nonPublicMarkers`) would have made `@ExperimentalTlalocApi` a hole in the gate,
+// and the point of the marker is to tell a consumer that a change is LIKELY, not
+// that it happens unrecorded.
+apiValidation {
+    // :benchmarks publishes nothing and has no `jvmMain` source at all — every line
+    // of it is `jvmTest`. It is excluded for the same reason it is excluded from
+    // `moduleDescriptions`: it is a harness, not a library.
+    ignoredProjects.add("benchmarks")
+
+    // A MEASURED LIMIT, not a preference: binary-compatibility-validator 0.18.2's
+    // ABI reader cannot parse Java 25 bytecode. Pointing it at `:runtime-cuda`
+    // fails with, verbatim:
+    //
+    //   A failure occurred while executing kotlinx.validation.AbiBuildWorker
+    //     > Unsupported class file major version 69
+    //
+    // (major 69 = Java 25). So the gate covers exactly the modules §0.4.503 lowered
+    // to Java 21 — `:core`, `:ir`, `:autograd`, `:nn`, `:stablehlo`, `:maestro` —
+    // which is the library surface a consumer compiles against, and NOT the five
+    // that stay at 25 (`:runtime-pjrt`, `:runtime-cuda`, `:kptx`, `:runtime-iree`,
+    // `:compiler-plugin`). Derived from `tlalocJvmTargets` rather than listed, so a
+    // module that is lowered to 21 later starts being validated without anyone
+    // remembering to come back here. The gap is a ⬜ row in docs/ALPHA_PLAN.md.
+    ignoredProjects.addAll(tlalocJvmTargets.filterValues { it > 21 }.keys)
 }

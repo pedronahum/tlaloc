@@ -1,5 +1,6 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
 import io.tlaloc.core.F32
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.PagedAttentionAttrs
@@ -57,6 +58,7 @@ import io.tlaloc.ir.PagedAttentionAttrs
  * a kernel whose launch chain was never registered with
  * `KptxKernelRegistry` would emit a custom_call XLA cannot resolve.
  */
+@ExperimentalTlalocApi
 val PagedAttentionKernel: KernelTemplate = KernelTemplate { node, target ->
     if (target != KernelTarget.NVIDIA_GB10) return@KernelTemplate null
     if (node.op != OpKind.PAGED_ATTENTION) return@KernelTemplate null

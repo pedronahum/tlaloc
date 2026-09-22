@@ -91,6 +91,16 @@ already care about it.
 | [`internals/four-worlds/`](internals/four-worlds/) | Kernel / Orchestration / Program / Cluster as four receiver types, the `BufferHandle` that is the only thing allowed across a step boundary, and the Maestro descriptor a cluster ingests — plus one boundary claim that writing the failing case down proved false. | nothing |
 | [`internals/tpu/`](internals/tpu/) | Five acts written **before the hardware exists**: tolerances and verdicts fixed in advance, so the first TPU session is spent debugging a TPU rather than writing a test for one. | a TPU *(never run on one; `--target cuda` is the dry run)* |
 
+`layer3` and `four-worlds` are also the folder's **opt-in** examples. Since
+§0.4.505 the surfaces they drive carry `@ExperimentalTlalocApi`, a `@RequiresOptIn(ERROR)` marker Tlaloc
+puts on the part of its API that is genuinely provisional, so each starts with
+`@file:OptIn(ExperimentalTlalocApi::class)` and a comment saying why. That is
+deliberate: they are the only *consumers* of a marked surface in the repository,
+which makes them the check that the marker actually refuses somebody. Nothing in
+`quickstart`, `readable-gradients`, `differentiable-physics`, `named-indices`,
+`mnist`, `gpu-training` or `gpu-inference` needs an opt-in — those use the
+certified surface, and that contrast is the point.
+
 ---
 
 ## A reading order

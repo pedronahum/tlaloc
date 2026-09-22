@@ -1,0 +1,653 @@
+public abstract class io/tlaloc/nn/Activation {
+	public abstract fun apply (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/Activation$Identity : io/tlaloc/nn/Activation {
+	public static final field INSTANCE Lio/tlaloc/nn/Activation$Identity;
+	public fun apply (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/Activation$Relu : io/tlaloc/nn/Activation {
+	public static final field INSTANCE Lio/tlaloc/nn/Activation$Relu;
+	public fun apply (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/Activation$Sigmoid : io/tlaloc/nn/Activation {
+	public static final field INSTANCE Lio/tlaloc/nn/Activation$Sigmoid;
+	public fun apply (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/Activation$Tanh : io/tlaloc/nn/Activation {
+	public static final field INSTANCE Lio/tlaloc/nn/Activation$Tanh;
+	public fun apply (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
+public abstract class io/tlaloc/nn/ActivationGain {
+	public synthetic fun <init> (FLkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getGain ()F
+}
+
+public final class io/tlaloc/nn/ActivationGain$Conv : io/tlaloc/nn/ActivationGain {
+	public static final field INSTANCE Lio/tlaloc/nn/ActivationGain$Conv;
+}
+
+public final class io/tlaloc/nn/ActivationGain$LeakyRelu : io/tlaloc/nn/ActivationGain {
+	public fun <init> (F)V
+	public final fun getNegativeSlope ()F
+}
+
+public final class io/tlaloc/nn/ActivationGain$Linear : io/tlaloc/nn/ActivationGain {
+	public static final field INSTANCE Lio/tlaloc/nn/ActivationGain$Linear;
+}
+
+public final class io/tlaloc/nn/ActivationGain$Relu : io/tlaloc/nn/ActivationGain {
+	public static final field INSTANCE Lio/tlaloc/nn/ActivationGain$Relu;
+}
+
+public final class io/tlaloc/nn/ActivationGain$Sigmoid : io/tlaloc/nn/ActivationGain {
+	public static final field INSTANCE Lio/tlaloc/nn/ActivationGain$Sigmoid;
+}
+
+public final class io/tlaloc/nn/ActivationGain$Tanh : io/tlaloc/nn/ActivationGain {
+	public static final field INSTANCE Lio/tlaloc/nn/ActivationGain$Tanh;
+}
+
+public final class io/tlaloc/nn/Adam : io/tlaloc/nn/CheckpointableOptimizer {
+	public fun <init> ()V
+	public fun <init> (FFFF)V
+	public synthetic fun <init> (FFFFILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getBeta1 ()F
+	public final fun getBeta2 ()F
+	public fun getCheckpointKind ()Ljava/lang/String;
+	public final fun getEps ()F
+	public final fun getLearningRate ()F
+	public fun initialState ()Lio/tlaloc/nn/AdamState;
+	public synthetic fun initialState ()Ljava/lang/Object;
+	public fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Lio/tlaloc/nn/AdamState;
+	public synthetic fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Ljava/lang/Object;
+	public fun saveState (Lio/tlaloc/nn/AdamState;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public synthetic fun saveState (Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public fun step (Ljava/util/List;Ljava/util/Map;Lio/tlaloc/nn/AdamState;)Lio/tlaloc/nn/OptimizerStep;
+	public synthetic fun step (Ljava/util/List;Ljava/util/Map;Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerStep;
+}
+
+public final class io/tlaloc/nn/AdamState {
+	public final fun getM ()Ljava/util/Map;
+	public final fun getStepCount ()I
+	public final fun getV ()Ljava/util/Map;
+}
+
+public final class io/tlaloc/nn/AffineTransform : io/tlaloc/nn/TrainableLayer {
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getB ()Lio/tlaloc/core/DTensor;
+	public final fun getM ()Lio/tlaloc/core/DTensor;
+	public fun getParameters ()Ljava/util/List;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/AffineTransform;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/AvgPool2d : io/tlaloc/nn/Layer {
+	public fun <init> (II)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getPoolHeight ()I
+	public final fun getPoolWidth ()I
+}
+
+public final class io/tlaloc/nn/BatchNorm : io/tlaloc/nn/Stateful, io/tlaloc/nn/TrainableLayer {
+	public static final field Companion Lio/tlaloc/nn/BatchNorm$Companion;
+	public static final field EPS F
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/BatchNormStats;F)V
+	public synthetic fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/BatchNormStats;FILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getBeta ()Lio/tlaloc/core/DTensor;
+	public fun getBuffers ()Ljava/util/List;
+	public final fun getGamma ()Lio/tlaloc/core/DTensor;
+	public final fun getMomentum ()F
+	public final fun getNumFeatures ()I
+	public fun getParameters ()Ljava/util/List;
+	public final fun getStats ()Lio/tlaloc/nn/BatchNormStats;
+	public final fun inferenceMode ()Lio/tlaloc/nn/ChannelAffine;
+	public final fun trainForward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/nn/BatchNormTrainResult;
+	public final fun updatedStats (Lio/tlaloc/core/DTensor;)Lio/tlaloc/nn/BatchNormStats;
+	public fun withBuffers (Ljava/util/Map;)Lio/tlaloc/nn/BatchNorm;
+	public synthetic fun withBuffers (Ljava/util/Map;)Lio/tlaloc/nn/Stateful;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/BatchNorm;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+	public final fun withStats (Lio/tlaloc/nn/BatchNormStats;)Lio/tlaloc/nn/BatchNorm;
+}
+
+public final class io/tlaloc/nn/BatchNorm$Companion {
+	public final fun invoke (IF)Lio/tlaloc/nn/BatchNorm;
+	public static synthetic fun invoke$default (Lio/tlaloc/nn/BatchNorm$Companion;IFILjava/lang/Object;)Lio/tlaloc/nn/BatchNorm;
+}
+
+public final class io/tlaloc/nn/BatchNormStats {
+	public static final field Companion Lio/tlaloc/nn/BatchNormStats$Companion;
+	public fun <init> (FLio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)V
+	public final fun getNumFeatures ()I
+	public final fun getRunningN ()F
+	public final fun getRunningSum ()Lio/tlaloc/core/DTensor;
+	public final fun getRunningSumOfSquares ()Lio/tlaloc/core/DTensor;
+	public final fun mean ()[F
+	public final fun variance ()[F
+}
+
+public final class io/tlaloc/nn/BatchNormStats$Companion {
+	public final fun initial (I)Lio/tlaloc/nn/BatchNormStats;
+}
+
+public final class io/tlaloc/nn/BatchNormTrainResult {
+	public fun <init> (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/BatchNormStats;)V
+	public final fun getOutput ()Lio/tlaloc/autograd/Tracer;
+	public final fun getStats ()Lio/tlaloc/nn/BatchNormStats;
+}
+
+public final class io/tlaloc/nn/CapturedStep {
+	public final fun getGradient ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getInputCount ()I
+	public final fun getParameterKeys ()Ljava/util/List;
+	public final fun getPrimal ()Lio/tlaloc/ir/DxirFunction;
+	public final fun gradSource ()Ljava/lang/String;
+	public final fun primalSource ()Ljava/lang/String;
+	public final fun run (Lio/tlaloc/nn/Trainable;Ljava/util/List;)Lio/tlaloc/nn/StepResult;
+}
+
+public final class io/tlaloc/nn/ChannelAffine : io/tlaloc/nn/TrainableLayer {
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getB ()Lio/tlaloc/core/DTensor;
+	public final fun getM ()Lio/tlaloc/core/DTensor;
+	public fun getParameters ()Ljava/util/List;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/ChannelAffine;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/CheckpointFileKt {
+	public static final fun checkpointTensors (Lio/tlaloc/nn/Trainable;)Ljava/util/List;
+	public static final fun loadCheckpoint (Ljava/nio/file/Path;)Lio/tlaloc/nn/ModelSnapshot;
+	public static final fun saveCheckpoint (Ljava/nio/file/Path;Lio/tlaloc/nn/Trainable;Lio/tlaloc/nn/Optimizer;Ljava/lang/Object;Ljava/util/Map;)Ljava/nio/file/Path;
+	public static final fun saveCheckpoint (Ljava/nio/file/Path;Lio/tlaloc/nn/Trainable;Ljava/util/Map;)Ljava/nio/file/Path;
+	public static synthetic fun saveCheckpoint$default (Ljava/nio/file/Path;Lio/tlaloc/nn/Trainable;Lio/tlaloc/nn/Optimizer;Ljava/lang/Object;Ljava/util/Map;ILjava/lang/Object;)Ljava/nio/file/Path;
+	public static synthetic fun saveCheckpoint$default (Ljava/nio/file/Path;Lio/tlaloc/nn/Trainable;Ljava/util/Map;ILjava/lang/Object;)Ljava/nio/file/Path;
+}
+
+public abstract interface class io/tlaloc/nn/CheckpointableOptimizer : io/tlaloc/nn/Optimizer {
+	public abstract fun getCheckpointKind ()Ljava/lang/String;
+	public abstract fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Ljava/lang/Object;
+	public abstract fun saveState (Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerCheckpoint;
+}
+
+public final class io/tlaloc/nn/ConstantLR : io/tlaloc/nn/LearningRateSchedule {
+	public fun <init> (F)V
+	public fun at (I)F
+	public final fun getLearningRate ()F
+}
+
+public final class io/tlaloc/nn/Conv2d : io/tlaloc/nn/TrainableLayer {
+	public static final field Companion Lio/tlaloc/nn/Conv2d$Companion;
+	public fun <init> (Lio/tlaloc/core/DTensor;IILio/tlaloc/nn/Activation;Lio/tlaloc/nn/PaddingStyle;)V
+	public synthetic fun <init> (Lio/tlaloc/core/DTensor;IILio/tlaloc/nn/Activation;Lio/tlaloc/nn/PaddingStyle;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getActivation ()Lio/tlaloc/nn/Activation;
+	public final fun getFilter ()Lio/tlaloc/core/DTensor;
+	public final fun getHStride ()I
+	public final fun getPaddingStyle ()Lio/tlaloc/nn/PaddingStyle;
+	public fun getParameters ()Ljava/util/List;
+	public final fun getVStride ()I
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Conv2d;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/Conv2d$Companion {
+	public final fun invoke ([ILio/tlaloc/core/RandomKey;IILio/tlaloc/nn/Activation;Lio/tlaloc/nn/PaddingStyle;)Lio/tlaloc/nn/Conv2d;
+	public static synthetic fun invoke$default (Lio/tlaloc/nn/Conv2d$Companion;[ILio/tlaloc/core/RandomKey;IILio/tlaloc/nn/Activation;Lio/tlaloc/nn/PaddingStyle;ILjava/lang/Object;)Lio/tlaloc/nn/Conv2d;
+}
+
+public final class io/tlaloc/nn/Conv2dWithSamePadding : io/tlaloc/nn/TrainableLayer {
+	public fun <init> (Lio/tlaloc/core/DTensor;IILio/tlaloc/nn/Activation;)V
+	public synthetic fun <init> (Lio/tlaloc/core/DTensor;IILio/tlaloc/nn/Activation;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getFilter ()Lio/tlaloc/core/DTensor;
+	public fun getParameters ()Ljava/util/List;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Conv2dWithSamePadding;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/CosineDecay : io/tlaloc/nn/LearningRateSchedule {
+	public fun <init> (FIF)V
+	public synthetic fun <init> (FIFILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun at (I)F
+	public final fun getDecaySteps ()I
+	public final fun getFinalLearningRate ()F
+	public final fun getInitialLearningRate ()F
+}
+
+public final class io/tlaloc/nn/Dense : io/tlaloc/nn/TrainableLayer {
+	public static final field Companion Lio/tlaloc/nn/Dense$Companion;
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/Activation;)V
+	public synthetic fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/Activation;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getActivation ()Lio/tlaloc/nn/Activation;
+	public final fun getB ()Lio/tlaloc/core/DTensor;
+	public fun getParameters ()Ljava/util/List;
+	public final fun getW ()Lio/tlaloc/core/DTensor;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Dense;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/Dense$Companion {
+	public final fun invoke (IILio/tlaloc/core/RandomKey;ZLio/tlaloc/nn/Activation;)Lio/tlaloc/nn/Dense;
+	public static synthetic fun invoke$default (Lio/tlaloc/nn/Dense$Companion;IILio/tlaloc/core/RandomKey;ZLio/tlaloc/nn/Activation;ILjava/lang/Object;)Lio/tlaloc/nn/Dense;
+}
+
+public final class io/tlaloc/nn/Dropout : io/tlaloc/nn/Layer {
+	public fun <init> (FLio/tlaloc/core/RandomKey;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getKey ()Lio/tlaloc/core/RandomKey;
+	public final fun getP ()F
+	public final fun inferenceMode ()Lio/tlaloc/nn/Layer;
+	public final fun withKey (Lio/tlaloc/core/RandomKey;)Lio/tlaloc/nn/Dropout;
+}
+
+public final class io/tlaloc/nn/Embedding : io/tlaloc/nn/TrainableLayer {
+	public static final field Companion Lio/tlaloc/nn/Embedding$Companion;
+	public fun <init> (Lio/tlaloc/core/DTensor;I)V
+	public synthetic fun <init> (Lio/tlaloc/core/DTensor;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getPaddingIndex ()I
+	public fun getParameters ()Ljava/util/List;
+	public final fun getTable ()Lio/tlaloc/core/DTensor;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Embedding;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/Embedding$Companion {
+	public final fun invoke (IILio/tlaloc/core/RandomKey;I)Lio/tlaloc/nn/Embedding;
+	public static synthetic fun invoke$default (Lio/tlaloc/nn/Embedding$Companion;IILio/tlaloc/core/RandomKey;IILjava/lang/Object;)Lio/tlaloc/nn/Embedding;
+}
+
+public final class io/tlaloc/nn/EmbeddingBag : io/tlaloc/nn/TrainableLayer {
+	public static final field Companion Lio/tlaloc/nn/EmbeddingBag$Companion;
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/EmbeddingBag$Reduction;)V
+	public synthetic fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/EmbeddingBag$Reduction;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun forwardBags (Lio/tlaloc/autograd/Tracer;[ILio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public fun getParameters ()Ljava/util/List;
+	public final fun getReduction ()Lio/tlaloc/nn/EmbeddingBag$Reduction;
+	public final fun getTable ()Lio/tlaloc/core/DTensor;
+	public final fun withOffsets ([I)Lio/tlaloc/nn/EmbeddingBag$WithOffsets;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/EmbeddingBag;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/EmbeddingBag$Companion {
+	public final fun invoke (IILio/tlaloc/nn/EmbeddingBag$Reduction;Lio/tlaloc/core/RandomKey;)Lio/tlaloc/nn/EmbeddingBag;
+}
+
+public abstract class io/tlaloc/nn/EmbeddingBag$Reduction {
+	public abstract fun reduce (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/EmbeddingBag$Reduction$Sum : io/tlaloc/nn/EmbeddingBag$Reduction {
+	public static final field INSTANCE Lio/tlaloc/nn/EmbeddingBag$Reduction$Sum;
+	public fun reduce (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/EmbeddingBag$WithOffsets : io/tlaloc/nn/TrainableLayer {
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getBag ()Lio/tlaloc/nn/EmbeddingBag;
+	public fun getParameters ()Ljava/util/List;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/EmbeddingBag$WithOffsets;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/ExponentialDecay : io/tlaloc/nn/LearningRateSchedule {
+	public fun <init> (FFIZ)V
+	public synthetic fun <init> (FFIZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun at (I)F
+	public final fun getDecayRate ()F
+	public final fun getDecaySteps ()I
+	public final fun getInitialLearningRate ()F
+	public final fun getStaircase ()Z
+}
+
+public final class io/tlaloc/nn/FanMode : java/lang/Enum {
+	public static final field FanIn Lio/tlaloc/nn/FanMode;
+	public static final field FanOut Lio/tlaloc/nn/FanMode;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/nn/FanMode;
+	public static fun values ()[Lio/tlaloc/nn/FanMode;
+}
+
+public final class io/tlaloc/nn/FixedLearningRate : io/tlaloc/nn/CheckpointableOptimizer {
+	public fun <init> (F)V
+	public final fun getAlpha ()F
+	public fun getCheckpointKind ()Ljava/lang/String;
+	public synthetic fun initialState ()Ljava/lang/Object;
+	public fun initialState ()V
+	public synthetic fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Ljava/lang/Object;
+	public fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)V
+	public synthetic fun saveState (Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public fun saveState (Lkotlin/Unit;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public synthetic fun step (Ljava/util/List;Ljava/util/Map;Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerStep;
+	public fun step (Ljava/util/List;Ljava/util/Map;Lkotlin/Unit;)Lio/tlaloc/nn/OptimizerStep;
+}
+
+public final class io/tlaloc/nn/Flatten : io/tlaloc/nn/Layer {
+	public static final field INSTANCE Lio/tlaloc/nn/Flatten;
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/GRU : io/tlaloc/nn/TrainableLayer {
+	public static final field Companion Lio/tlaloc/nn/GRU$Companion;
+	public fun <init> (Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/GRU$AccType;)V
+	public synthetic fun <init> (Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/GRU$AccType;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/GRU$AccType;)V
+	public synthetic fun <init> (Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/GRU$AccType;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getAcc ()Lio/tlaloc/nn/GRU$AccType;
+	public final fun getH2n ()Lio/tlaloc/nn/Dense;
+	public final fun getLinearBeforeReset ()Z
+	public final fun getNumHidden ()I
+	public final fun getNumInputs ()I
+	public fun getParameters ()Ljava/util/List;
+	public final fun getX2n ()Lio/tlaloc/nn/Dense;
+	public final fun getXh2n ()Lio/tlaloc/nn/Dense;
+	public final fun getXh2r ()Lio/tlaloc/nn/Dense;
+	public final fun getXh2u ()Lio/tlaloc/nn/Dense;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/GRU;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/GRU$AccType : java/lang/Enum {
+	public static final field AccMap Lio/tlaloc/nn/GRU$AccType;
+	public static final field Fold Lio/tlaloc/nn/GRU$AccType;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/nn/GRU$AccType;
+	public static fun values ()[Lio/tlaloc/nn/GRU$AccType;
+}
+
+public final class io/tlaloc/nn/GRU$Companion {
+	public final fun invoke (IILio/tlaloc/core/RandomKey;Lio/tlaloc/nn/GRU$AccType;Z)Lio/tlaloc/nn/GRU;
+	public static synthetic fun invoke$default (Lio/tlaloc/nn/GRU$Companion;IILio/tlaloc/core/RandomKey;Lio/tlaloc/nn/GRU$AccType;ZILjava/lang/Object;)Lio/tlaloc/nn/GRU;
+}
+
+public final class io/tlaloc/nn/GradientClipping {
+	public static final field INSTANCE Lio/tlaloc/nn/GradientClipping;
+	public final fun byGlobalNorm (Ljava/util/Map;F)Ljava/util/Map;
+	public final fun byValue (Ljava/util/Map;F)Ljava/util/Map;
+	public final fun byValue (Ljava/util/Map;FF)Ljava/util/Map;
+	public final fun globalNorm (Ljava/util/Map;)F
+}
+
+public final class io/tlaloc/nn/IdentityLayer : io/tlaloc/nn/Layer {
+	public static final field INSTANCE Lio/tlaloc/nn/IdentityLayer;
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/InitializersKt {
+	public static final fun fanOf ([ILio/tlaloc/nn/FanMode;)I
+	public static final fun gaussianInit (Lio/tlaloc/core/RandomKey;[IFF)Lio/tlaloc/core/DTensor;
+	public static synthetic fun gaussianInit$default (Lio/tlaloc/core/RandomKey;[IFFILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun kaimingNormalInit (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/FanMode;Lio/tlaloc/nn/ActivationGain;)Lio/tlaloc/core/DTensor;
+	public static synthetic fun kaimingNormalInit$default (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/FanMode;Lio/tlaloc/nn/ActivationGain;ILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun kaimingUniformInit (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/FanMode;Lio/tlaloc/nn/ActivationGain;)Lio/tlaloc/core/DTensor;
+	public static synthetic fun kaimingUniformInit$default (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/FanMode;Lio/tlaloc/nn/ActivationGain;ILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun uniformInit (Lio/tlaloc/core/RandomKey;[IFF)Lio/tlaloc/core/DTensor;
+	public static synthetic fun uniformInit$default (Lio/tlaloc/core/RandomKey;[IFFILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun xavierNormalInit (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/ActivationGain;)Lio/tlaloc/core/DTensor;
+	public static synthetic fun xavierNormalInit$default (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/ActivationGain;ILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun xavierUniformInit (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/ActivationGain;)Lio/tlaloc/core/DTensor;
+	public static synthetic fun xavierUniformInit$default (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/ActivationGain;ILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+}
+
+public abstract interface class io/tlaloc/nn/Layer {
+	public abstract fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+}
+
+public abstract interface class io/tlaloc/nn/LearningRateSchedule {
+	public abstract fun at (I)F
+}
+
+public final class io/tlaloc/nn/LinearWarmup : io/tlaloc/nn/LearningRateSchedule {
+	public fun <init> (IFLio/tlaloc/nn/LearningRateSchedule;)V
+	public fun at (I)F
+	public final fun getPeakLearningRate ()F
+	public final fun getThen ()Lio/tlaloc/nn/LearningRateSchedule;
+	public final fun getWarmupSteps ()I
+}
+
+public final class io/tlaloc/nn/MaxPool2d : io/tlaloc/nn/Layer {
+	public fun <init> (II)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getPoolHeight ()I
+	public final fun getPoolWidth ()I
+}
+
+public final class io/tlaloc/nn/ModelCheckpoint {
+	public static final field BUFFER_PREFIX Ljava/lang/String;
+	public static final field FORMAT_VERSION Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/nn/ModelCheckpoint;
+	public static final field OPTIMIZER_KIND_KEY Ljava/lang/String;
+	public static final field OPTIMIZER_PREFIX Ljava/lang/String;
+	public static final field OPTIMIZER_SCALAR_PREFIX Ljava/lang/String;
+	public static final field PARAM_PREFIX Ljava/lang/String;
+	public static final field RESERVED_METADATA_PREFIX Ljava/lang/String;
+	public static final field VERSION_KEY Ljava/lang/String;
+	public final fun decode ([B)Lio/tlaloc/nn/ModelSnapshot;
+	public final fun encode (Lio/tlaloc/nn/Trainable;Lio/tlaloc/nn/Optimizer;Ljava/lang/Object;Ljava/util/Map;)[B
+	public final fun encode (Lio/tlaloc/nn/Trainable;Ljava/util/Map;)[B
+	public static synthetic fun encode$default (Lio/tlaloc/nn/ModelCheckpoint;Lio/tlaloc/nn/Trainable;Lio/tlaloc/nn/Optimizer;Ljava/lang/Object;Ljava/util/Map;ILjava/lang/Object;)[B
+	public static synthetic fun encode$default (Lio/tlaloc/nn/ModelCheckpoint;Lio/tlaloc/nn/Trainable;Ljava/util/Map;ILjava/lang/Object;)[B
+	public final fun fromParts (Ljava/util/Map;Ljava/util/Map;)Lio/tlaloc/nn/ModelSnapshot;
+}
+
+public final class io/tlaloc/nn/ModelSnapshot {
+	public final fun getBuffers ()Ljava/util/Map;
+	public final fun getFormatVersion ()Ljava/lang/String;
+	public final fun getMetadata ()Ljava/util/Map;
+	public final fun getOptimizer ()Lio/tlaloc/nn/OptimizerCheckpoint;
+	public final fun getParameterScalars ()I
+	public final fun getParameters ()Ljava/util/Map;
+	public final fun restore (Lio/tlaloc/nn/Trainable;)Lio/tlaloc/nn/Trainable;
+	public final fun restoreOptimizerState (Lio/tlaloc/nn/Optimizer;)Ljava/lang/Object;
+}
+
+public final class io/tlaloc/nn/NamedParameter {
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/core/DTensor;)V
+	public final fun getKey ()Ljava/lang/String;
+	public final fun getTensor ()Lio/tlaloc/core/DTensor;
+}
+
+public abstract interface class io/tlaloc/nn/Optimizer {
+	public abstract fun initialState ()Ljava/lang/Object;
+	public abstract fun step (Ljava/util/List;Ljava/util/Map;Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerStep;
+}
+
+public final class io/tlaloc/nn/OptimizerCheckpoint {
+	public static final field Companion Lio/tlaloc/nn/OptimizerCheckpoint$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getKind ()Ljava/lang/String;
+	public final fun getScalars ()Ljava/util/Map;
+	public final fun getTensors ()Ljava/util/Map;
+	public final fun group (Ljava/lang/String;)Ljava/util/Map;
+	public final fun int (Ljava/lang/String;)I
+	public final fun scalar (Ljava/lang/String;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/nn/OptimizerCheckpoint$Companion {
+	public final fun grouped (Ljava/lang/String;Ljava/util/Map;)Ljava/util/Map;
+	public final fun refuse (Lio/tlaloc/nn/Optimizer;Ljava/lang/String;)Ljava/lang/Void;
+}
+
+public final class io/tlaloc/nn/OptimizerStep {
+	public fun <init> (Ljava/util/Map;Ljava/lang/Object;)V
+	public final fun getParams ()Ljava/util/Map;
+	public final fun getState ()Ljava/lang/Object;
+}
+
+public final class io/tlaloc/nn/OptimizersKt {
+	public static final fun momentumUpdated (FFF)F
+	public static final fun momentumUpdated (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;F)Lio/tlaloc/core/DTensor;
+	public static final fun step (Lio/tlaloc/nn/Optimizer;Lio/tlaloc/nn/Trainable;Ljava/util/Map;Ljava/lang/Object;)Lkotlin/Pair;
+}
+
+public abstract class io/tlaloc/nn/PaddingStyle {
+}
+
+public final class io/tlaloc/nn/PaddingStyle$Explicit : io/tlaloc/nn/PaddingStyle {
+	public fun <init> (IIII)V
+	public final fun getBottom ()I
+	public final fun getLeft ()I
+	public final fun getRight ()I
+	public final fun getTop ()I
+}
+
+public final class io/tlaloc/nn/PaddingStyle$Full : io/tlaloc/nn/PaddingStyle {
+	public static final field INSTANCE Lio/tlaloc/nn/PaddingStyle$Full;
+}
+
+public final class io/tlaloc/nn/PaddingStyle$Same : io/tlaloc/nn/PaddingStyle {
+	public static final field INSTANCE Lio/tlaloc/nn/PaddingStyle$Same;
+}
+
+public final class io/tlaloc/nn/PaddingStyle$Valid : io/tlaloc/nn/PaddingStyle {
+	public static final field INSTANCE Lio/tlaloc/nn/PaddingStyle$Valid;
+}
+
+public abstract interface class io/tlaloc/nn/Params {
+	public abstract fun get (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/Precision : java/lang/Enum {
+	public static final field F32 Lio/tlaloc/nn/Precision;
+	public static final field MIXED_BF16 Lio/tlaloc/nn/Precision;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/nn/Precision;
+	public static fun values ()[Lio/tlaloc/nn/Precision;
+}
+
+public final class io/tlaloc/nn/RMSprop : io/tlaloc/nn/CheckpointableOptimizer {
+	public fun <init> ()V
+	public fun <init> (FFF)V
+	public synthetic fun <init> (FFFILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getAlpha ()F
+	public final fun getBeta ()F
+	public fun getCheckpointKind ()Ljava/lang/String;
+	public final fun getEps ()F
+	public fun initialState ()Lio/tlaloc/nn/RMSpropState;
+	public synthetic fun initialState ()Ljava/lang/Object;
+	public fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Lio/tlaloc/nn/RMSpropState;
+	public synthetic fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Ljava/lang/Object;
+	public fun saveState (Lio/tlaloc/nn/RMSpropState;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public synthetic fun saveState (Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public fun step (Ljava/util/List;Ljava/util/Map;Lio/tlaloc/nn/RMSpropState;)Lio/tlaloc/nn/OptimizerStep;
+	public synthetic fun step (Ljava/util/List;Ljava/util/Map;Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerStep;
+}
+
+public final class io/tlaloc/nn/RMSpropState {
+	public final fun getMeanSquare ()Ljava/util/Map;
+}
+
+public final class io/tlaloc/nn/ReluLayer : io/tlaloc/nn/Layer {
+	public static final field INSTANCE Lio/tlaloc/nn/ReluLayer;
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/SGD : io/tlaloc/nn/CheckpointableOptimizer {
+	public fun <init> ()V
+	public fun <init> (FFF)V
+	public synthetic fun <init> (FFFILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun getCheckpointKind ()Ljava/lang/String;
+	public final fun getInitialLearningRate ()F
+	public final fun getLrDecay ()F
+	public final fun getMomentum ()F
+	public fun initialState ()Lio/tlaloc/nn/SGDState;
+	public synthetic fun initialState ()Ljava/lang/Object;
+	public fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Lio/tlaloc/nn/SGDState;
+	public synthetic fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Ljava/lang/Object;
+	public fun saveState (Lio/tlaloc/nn/SGDState;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public synthetic fun saveState (Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public fun step (Ljava/util/List;Ljava/util/Map;Lio/tlaloc/nn/SGDState;)Lio/tlaloc/nn/OptimizerStep;
+	public synthetic fun step (Ljava/util/List;Ljava/util/Map;Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerStep;
+}
+
+public final class io/tlaloc/nn/SGDState {
+	public final fun getStepCount ()I
+	public final fun getVelocity ()Ljava/util/Map;
+}
+
+public final class io/tlaloc/nn/Scheduled : io/tlaloc/nn/CheckpointableOptimizer {
+	public static final field INNER Ljava/lang/String;
+	public static final field KIND Ljava/lang/String;
+	public fun <init> (Lio/tlaloc/nn/LearningRateSchedule;Lkotlin/jvm/functions/Function1;)V
+	public final fun getBuild ()Lkotlin/jvm/functions/Function1;
+	public fun getCheckpointKind ()Ljava/lang/String;
+	public final fun getSchedule ()Lio/tlaloc/nn/LearningRateSchedule;
+	public fun initialState ()Lio/tlaloc/nn/ScheduledState;
+	public synthetic fun initialState ()Ljava/lang/Object;
+	public final fun learningRateAt (I)F
+	public fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Lio/tlaloc/nn/ScheduledState;
+	public synthetic fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Ljava/lang/Object;
+	public final fun optimizerAt (I)Lio/tlaloc/nn/Optimizer;
+	public fun saveState (Lio/tlaloc/nn/ScheduledState;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public synthetic fun saveState (Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public fun step (Ljava/util/List;Ljava/util/Map;Lio/tlaloc/nn/ScheduledState;)Lio/tlaloc/nn/OptimizerStep;
+	public synthetic fun step (Ljava/util/List;Ljava/util/Map;Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerStep;
+}
+
+public final class io/tlaloc/nn/ScheduledState {
+	public final fun getInner ()Ljava/lang/Object;
+	public final fun getStepCount ()I
+}
+
+public final class io/tlaloc/nn/Sequential : io/tlaloc/nn/Stateful, io/tlaloc/nn/TrainableLayer {
+	public fun <init> (Ljava/util/List;)V
+	public fun <init> ([Lio/tlaloc/nn/Layer;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public fun getBuffers ()Ljava/util/List;
+	public final fun getLayers ()Ljava/util/List;
+	public fun getParameters ()Ljava/util/List;
+	public fun withBuffers (Ljava/util/Map;)Lio/tlaloc/nn/Sequential;
+	public synthetic fun withBuffers (Ljava/util/Map;)Lio/tlaloc/nn/Stateful;
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Sequential;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public abstract interface class io/tlaloc/nn/Stateful {
+	public abstract fun getBuffers ()Ljava/util/List;
+	public abstract fun withBuffers (Ljava/util/Map;)Lio/tlaloc/nn/Stateful;
+}
+
+public final class io/tlaloc/nn/StepDecay : io/tlaloc/nn/LearningRateSchedule {
+	public fun <init> (FFI)V
+	public fun at (I)F
+	public final fun getEverySteps ()I
+	public final fun getFactor ()F
+	public final fun getInitialLearningRate ()F
+}
+
+public final class io/tlaloc/nn/StepResult {
+	public fun <init> (FLjava/util/Map;Ljava/util/List;)V
+	public final fun getGradients ()Ljava/util/Map;
+	public final fun getInputGradients ()Ljava/util/List;
+	public final fun getLoss ()F
+}
+
+public abstract interface class io/tlaloc/nn/Trainable {
+	public abstract fun getParameters ()Ljava/util/List;
+	public abstract fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public abstract interface class io/tlaloc/nn/TrainableLayer : io/tlaloc/nn/Layer, io/tlaloc/nn/Trainable {
+}
+
+public final class io/tlaloc/nn/TrainingKt {
+	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun valueAndGradients (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/StepResult;
+	public static synthetic fun valueAndGradients$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/StepResult;
+}
+

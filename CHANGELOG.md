@@ -14,7 +14,84 @@ retro-summarise them; it is the record from the first named version forward.
 
 ## [Unreleased]
 
+### Added
+
+- **`@ExperimentalTlalocApi` — an opt-in marker on the part of the surface that is
+  provisional.** `docs/COMPATIBILITY.md` promised that every alpha API may change
+  without a deprecation cycle, which graded `grad` (thousands of oracle tests) and
+  a scope taxonomy nothing has ever executed exactly the same. A
+  `@RequiresOptIn(ERROR)` marker in `:core` now separates them. Three surfaces
+  carry it, each for a stated reason: the **four-worlds scope taxonomy**
+  (`KernelScope`, `OrchestrationScope`, `ProgramScope`, `ClusterScope`, `Tlaloc`,
+  `BufferHandle`, `HandleRef` — its own KDoc scopes it to "v1 keeps each op
+  single-scope"); **`io.tlaloc.ir.AllReduceAttrs`** (distributed execution is 📐 and
+  has never run on two hosts; v1 is `"sum"` only); and the **kernel-choice and
+  cost-model packages** (`io.tlaloc.ir.recognizer.kernel`,
+  `io.tlaloc.ir.recognizer.cost` — unit-certified machinery whose purpose is
+  picking a kernel, and the one kernel measured against XLA lost at small shapes).
+  `grad`, the op surface and `:nn` are deliberately **not** marked. Two tests pin
+  it: `ExperimentalTlalocApiTest` reads the marker and the marked/unmarked sets out
+  of the class **files** (BINARY retention is invisible to reflection, which the
+  first attempt at that test discovered the hard way), and
+  `ExperimentalApiOptInTest` runs a real `K2JVMCompiler` with no `-opt-in` and
+  asserts the refusal, the `@OptIn` fix, and that a certified surface is unaffected.
+- **A binary-compatibility baseline.** `api/<module>.api` is committed and
+  `./gradlew apiCheck` (wired into `check`, so `./gradlew test` covers it) fails on
+  any difference; `./gradlew apiDump` re-baselines. Negative-tested by adding a
+  public function to `:stablehlo` and watching the check fail with the diff.
+  **It covers six of eleven modules**: binary-compatibility-validator 0.18.2's ABI
+  reader refuses Java 25 bytecode (`Unsupported class file major version 69`), so
+  the six modules §0.4.503 lowered to Java 21 are validated and the five that stay
+  at 25 are not. The ignore list is derived from `tlalocJvmTargets`, so lowering a
+  module to 21 later starts validating it automatically.
+- **An API reference you can actually read.** `./gradlew apiDocs` aggregates all
+  eleven published modules into one Dokka site at `build/docs/api/index.html` —
+  2,898 pages. Before this, the Dokka HTML §0.4.498 wired existed only inside
+  eleven separate `-javadoc.jar` files. Not hosted. The 206 unresolved-KDoc-link
+  warnings it emits (110 distinct targets, 117 of them in `:ir`) are now **counted**
+  — Tier 0 recorded them as uncounted — and still unswept.
+- **The compile-error position is certified.** `DiagnosticSourcePositionTest`
+  asserts that `LAMBDA_NOT_LOWERABLE` and `NAMED_INDEX_MISMATCH` report at the
+  offending call's own file, line and column, and that no Tlaloc error is ever
+  emitted without a position. Eighteen test classes already pinned the diagnostic
+  *text*; not one had looked at `location`.
+
 ### Changed
+
+- **The "red squiggle in the IDE" claim now matches the evidence.** The README and
+  `docs/GETTING_STARTED.md` both promised an IDE redline and nothing tested it.
+  They now claim what is certified — a build failure at the offending call's file,
+  line and column — and state the IDE behaviour as *expected, untested*, with a
+  🧪 row in `docs/CAPABILITIES.md` saying so. The capability is not removed; the
+  claim is.
+- **`DIFFKTX_SPEC.md` §14, §17 and §18 stopped describing a repository that no
+  longer exists.** §17's ladder had been swept on 2026-04-19 and then left for 400
+  sections: the **IREE runtime** (step 5), the **PJRT runtime** (step 10) and the
+  **whole coarsening block** (steps 13–16) were marked ⬜ NOT DONE for capabilities
+  that are certified. Each is now marked with the section that shipped it, cited
+  only where `git log` or the file's own §0.4 era table can establish the number.
+  **One mark went the other way:** step 16 — "gate coarsening release on matching
+  the paper's speedups within 20%" — is 🟡, not ✅. All six benchmarks are ported
+  and all six are harness inhabitants, but the PyTorch/JAX comparison has never
+  been run and no §0.4 entry has published the verdict, so coarsening's
+  *correctness* is certified and its *speedup relative to the paper* is not. §14
+  had four lines that were simply false (ktlint + detekt "enforced in CI" — neither
+  exists; Robolectric; kotlinx-benchmark; a pinned MLIR commit) and §18 carried
+  seven open questions HEAD had already answered, the licence among them.
+- **Two documented counts that disagreed with each other and with the build.**
+  `docs/GETTING_STARTED.md` said "eight standalone runnable projects" where the
+  README said ten — there are **ten**, seven at the top level and three under
+  `examples/internals/`, each with its own `settings.gradle.kts`. The same file's
+  list of published modules omitted **`nn`**, which is the module a reader most
+  likely wants, and called the plugin options "four" when §0.4.503 had added a
+  fifth (`unsafeAllowUnsupportedKotlin`). The README's test count said 2,345 while
+  `docs/CAPABILITIES.md` said 2,509 and the suite was at neither.
+- **The README's own License section was contradicting its Requirements section.**
+  It said `ir-jvm` "carries Symja at runtime scope, with no supported way to opt
+  out yet" — which §0.4.503 had made false two commits earlier by moving Symja to
+  `compileOnly`. Both places now say the same thing, and the part that is still
+  true (no Symja-free `SymbolicEngine` exists, so a policy that forbids LGPL-3.0
+  outright leaves you without a CAS) is stated as the residual risk it is.
 
 - **The JDK floor is per module now, and it is 21 for the library.** Every module
   used to emit Java 25 bytecode, which made JDK 25 a hard requirement for every

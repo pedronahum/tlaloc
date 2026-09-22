@@ -1,5 +1,7 @@
 package io.tlaloc.ir.recognizer.cost
 
+import io.tlaloc.core.ExperimentalTlalocApi
+
 /**
  * Layer 3 §0.4.254+ — device descriptor consumed by the L3.4 cost model.
  *
@@ -51,6 +53,7 @@ package io.tlaloc.ir.recognizer.cost
  * @property extras free-form per-vendor knobs (e.g. `"sparsity_factor"
  *   to 2.0` on NVIDIA cards that publish sparse-tensor TFLOPs).
  */
+@ExperimentalTlalocApi
 data class DeviceDescriptor(
     val name: String,
     val vendor: String,
@@ -78,6 +81,7 @@ data class DeviceDescriptor(
  * cadence, which is fine — the cost model is a relative estimator, not
  * a benchmark.
  */
+@ExperimentalTlalocApi
 object DeviceDescriptors {
 
     /**

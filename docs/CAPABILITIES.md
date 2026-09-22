@@ -13,7 +13,7 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet (the mark [ALPHA_PLAN.md](ALPHA_PLAN.md) uses; added to this legend in §0.4.504) |
 | ❌ **Not planned** | |
 
-Last reviewed at §0.4.504 (2026-09-22), 2,509 automated tests at HEAD.
+Last reviewed at §0.4.505 (2026-09-22), 2,522 automated tests at HEAD.
 
 ## Automatic differentiation
 
@@ -81,6 +81,19 @@ Last reviewed at §0.4.504 (2026-09-22), 2,509 automated tests at HEAD.
 | KPTX — a PTX DSL, parser, transpiler, and recognizer-driven kernel claiming | ✅ | Kernels attach to recognized ops automatically |
 | KPTX paged-attention kernel — performance | 🧪 | On-device (GB10, floors over six sessions): **1.4–1.9× faster than XLA's own lowering** at Llama-3-8B-shaped decode points, **1.6–1.8× slower** at TinyLlama-shaped toy points, where the measurement's own dispatch floor is 12–76% of it. Not registered by default — opt in per shape, at shapes you measured ([numbers and ranked fixes](KPTX_PAGED_PERF.md)) |
 | Netflix Maestro orchestration — manifest, step type, pod-spec builder | ✅ | Unit-certified; a live K8s run has not been done |
+
+## The public surface itself
+
+Added in §0.4.505 (Tier 4). These rows are about the *contract*, not a computation.
+
+| Capability | Status | Notes |
+|---|---|---|
+| Compile-time diagnostics carry a source position | ✅ | `DiagnosticSourcePositionTest` asserts that `LAMBDA_NOT_LOWERABLE` and `NAMED_INDEX_MISMATCH` report at the offending call's own **file, line and column**, and that no Tlaloc error is ever emitted without one. Eighteen test classes already pinned the *text*; none had looked at the position |
+| An IDE "red squiggle" | 🧪 | **Expected, never measured.** A K2-mode IDE runs the same FIR checkers in its own process, so a redline should land on the position above — but nothing in this repository drives an IDE, and there is no IDE plugin. The README and `GETTING_STARTED.md` were reworded in §0.4.505 to claim the build error and call the squiggle expected |
+| `@ExperimentalTlalocApi` — opt-in marker on the provisional surface | ✅ | `@RequiresOptIn(ERROR)` in `:core` on three surfaces (the four-worlds taxonomy, `AllReduceAttrs`, the kernel-choice and cost-model packages) with the criterion recorded in the annotation's own KDoc. Pinned twice: `ExperimentalTlalocApiTest` reads the marker and the marked/unmarked sets out of the **class files** (BINARY retention is invisible to reflection), and `ExperimentalApiOptInTest` runs a real `K2JVMCompiler` with no `-opt-in` and asserts the refusal, the `@OptIn` fix, and that a certified surface is not affected |
+| Binary-compatibility baseline | ✅ | `api/<module>.api` committed; `apiCheck` wired into `check`, negative-tested by adding a public function to `:stablehlo` and watching it fail with the diff. Covers the six Java-21-targeted modules — binary-compatibility-validator 0.18.2 refuses Java 25 bytecode (`Unsupported class file major version 69`), so the five 25-targeted modules are **not** covered |
+| Aggregated API reference | ✅ | `./gradlew apiDocs` → `build/docs/api/index.html`: one Dokka site over all eleven published modules, 2,898 pages. **Not hosted**, and the 206 unresolved-KDoc-link warnings it emits (110 distinct targets, 117 of them in `:ir`) are counted in §0.4.505 and unswept |
+| Hosted documentation site | ⬜ | No gh-pages lane, no MkDocs Material book — the other half of `DIFFKTX_SPEC.md` §14's one-line Docs entry |
 
 ## Hardware and platforms
 

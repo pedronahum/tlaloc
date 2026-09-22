@@ -1,0 +1,17 @@
+public final class io/tlaloc/stablehlo/MlirCommonKt {
+	public static final fun toMlir (Lio/tlaloc/ir/DxirType;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/stablehlo/SdyParser {
+	public static final field INSTANCE Lio/tlaloc/stablehlo/SdyParser;
+	public final fun parseMeshDecl (Ljava/lang/String;)Lio/tlaloc/ir/DxirMesh;
+	public final fun parseMeshesInModule (Ljava/lang/String;)Ljava/util/List;
+	public final fun parseSharding (Ljava/lang/String;)Lio/tlaloc/ir/DxirSharding;
+}
+
+public final class io/tlaloc/stablehlo/StablehloEmitterKt {
+	public static final fun toStablehlo (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)Ljava/lang/String;
+	public static final fun toStablehlo (Lio/tlaloc/ir/DxirModule;)Ljava/lang/String;
+	public static synthetic fun toStablehlo$default (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+}
+

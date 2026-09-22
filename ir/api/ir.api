@@ -1,0 +1,1869 @@
+public final class io/tlaloc/ir/AllReduceAttrs {
+	public static final field INSTANCE Lio/tlaloc/ir/AllReduceAttrs;
+	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/AllReduceAttrs$Parsed;
+}
+
+public final class io/tlaloc/ir/AllReduceAttrs$Parsed {
+	public fun <init> (Ljava/util/List;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Ljava/util/List;Ljava/lang/String;)Lio/tlaloc/ir/AllReduceAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/AllReduceAttrs$Parsed;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/AllReduceAttrs$Parsed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getGroupSizeOfReplicaZero ()I
+	public final fun getGroups ()Ljava/util/List;
+	public final fun getReduction ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/DequantizeKvAttrs {
+	public static final field DTYPE_ATTR Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/ir/DequantizeKvAttrs;
+	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/DequantizeKvAttrs$Parsed;
+}
+
+public final class io/tlaloc/ir/DequantizeKvAttrs$Parsed {
+	public fun <init> (IIILio/tlaloc/ir/recognizer/quant/KvQuantConfig;)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public final fun copy (IIILio/tlaloc/ir/recognizer/quant/KvQuantConfig;)Lio/tlaloc/ir/DequantizeKvAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/DequantizeKvAttrs$Parsed;IIILio/tlaloc/ir/recognizer/quant/KvQuantConfig;ILjava/lang/Object;)Lio/tlaloc/ir/DequantizeKvAttrs$Parsed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCodeMax ()I
+	public final fun getConfig ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public final fun getElementCount ()I
+	public final fun getHeadDim ()I
+	public final fun getNumKvHeads ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract class io/tlaloc/ir/DxirAxisRef {
+	public abstract fun getName ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/DxirAxisRef$Full : io/tlaloc/ir/DxirAxisRef {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/ir/DxirAxisRef$Full;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/DxirAxisRef$Full;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirAxisRef$Full;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/DxirAxisRef$Sub : io/tlaloc/ir/DxirAxisRef {
+	public fun <init> (Ljava/lang/String;II)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun copy (Ljava/lang/String;II)Lio/tlaloc/ir/DxirAxisRef$Sub;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/DxirAxisRef$Sub;Ljava/lang/String;IIILjava/lang/Object;)Lio/tlaloc/ir/DxirAxisRef$Sub;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public final fun getPreSize ()I
+	public final fun getSize ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/DxirBlock {
+	public fun <init> (Ljava/util/List;Ljava/util/List;Ljava/util/List;)V
+	public final fun declaredIds ()Ljava/util/Set;
+	public final fun getArgs ()Ljava/util/List;
+	public final fun getBody ()Ljava/util/List;
+	public final fun getTerminator ()Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/DxirBlockArg : io/tlaloc/ir/DxirNode {
+	public fun <init> (ILio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)V
+	public synthetic fun <init> (ILio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun getId ()I
+	public fun getSharding ()Lio/tlaloc/ir/DxirSharding;
+	public fun getType ()Lio/tlaloc/ir/DxirType;
+}
+
+public final class io/tlaloc/ir/DxirBuilder : io/tlaloc/ir/DxirEmitter {
+	public static final field Companion Lio/tlaloc/ir/DxirBuilder$Companion;
+	public final fun build (Ljava/lang/String;Ljava/util/List;)Lio/tlaloc/ir/DxirFunction;
+	public final fun call (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)Lio/tlaloc/ir/DxirCall;
+	public static synthetic fun call$default (Lio/tlaloc/ir/DxirBuilder;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILjava/lang/Object;)Lio/tlaloc/ir/DxirCall;
+	public final fun coarsened (Ljava/util/List;Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/DxirFunction;Ljava/util/Set;ZLio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/DxirOp;
+	public static synthetic fun coarsened$default (Lio/tlaloc/ir/DxirBuilder;Ljava/util/List;Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/DxirFunction;Ljava/util/Set;ZLio/tlaloc/ir/DxirFunction;ILjava/lang/Object;)Lio/tlaloc/ir/DxirOp;
+	public fun const (Ljava/lang/Object;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)Lio/tlaloc/ir/DxirConst;
+	public final fun declareMesh (Lio/tlaloc/ir/DxirMesh;)Lio/tlaloc/ir/DxirMesh;
+	public final fun ifOp (Lio/tlaloc/ir/DxirNode;Ljava/util/List;Lio/tlaloc/ir/DxirRegion;Lio/tlaloc/ir/DxirRegion;)Lio/tlaloc/ir/DxirOp;
+	public fun op (Lio/tlaloc/ir/OpKind;Ljava/util/List;Lio/tlaloc/ir/DxirType;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;)Lio/tlaloc/ir/DxirOp;
+	public fun opMulti (Lio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/List;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;)Lio/tlaloc/ir/DxirOp;
+	public final fun param (Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)Lio/tlaloc/ir/DxirParam;
+	public static synthetic fun param$default (Lio/tlaloc/ir/DxirBuilder;Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILjava/lang/Object;)Lio/tlaloc/ir/DxirParam;
+	public final fun region (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/ir/DxirRegion;
+	public fun whileOp (Ljava/util/List;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/ir/DxirOp;
+}
+
+public final class io/tlaloc/ir/DxirBuilder$Companion {
+	public final fun function (Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public final class io/tlaloc/ir/DxirCall : io/tlaloc/ir/DxirNode {
+	public fun <init> (ILio/tlaloc/ir/DxirFunction;Ljava/util/List;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)V
+	public synthetic fun <init> (ILio/tlaloc/ir/DxirFunction;Ljava/util/List;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getArgs ()Ljava/util/List;
+	public final fun getCallee ()Lio/tlaloc/ir/DxirFunction;
+	public fun getId ()I
+	public fun getSharding ()Lio/tlaloc/ir/DxirSharding;
+	public fun getType ()Lio/tlaloc/ir/DxirType;
+}
+
+public final class io/tlaloc/ir/DxirConst : io/tlaloc/ir/DxirNode {
+	public fun <init> (ILjava/lang/Object;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)V
+	public synthetic fun <init> (ILjava/lang/Object;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun getId ()I
+	public fun getSharding ()Lio/tlaloc/ir/DxirSharding;
+	public fun getType ()Lio/tlaloc/ir/DxirType;
+	public final fun getValue ()Ljava/lang/Object;
+}
+
+public final class io/tlaloc/ir/DxirDimSharding {
+	public fun <init> (Ljava/util/List;ZLjava/lang/Integer;)V
+	public synthetic fun <init> (Ljava/util/List;ZLjava/lang/Integer;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Z
+	public final fun component3 ()Ljava/lang/Integer;
+	public final fun copy (Ljava/util/List;ZLjava/lang/Integer;)Lio/tlaloc/ir/DxirDimSharding;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/DxirDimSharding;Ljava/util/List;ZLjava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/ir/DxirDimSharding;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAxes ()Ljava/util/List;
+	public final fun getClosed ()Z
+	public final fun getPriority ()Ljava/lang/Integer;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class io/tlaloc/ir/DxirEmitter {
+	public abstract fun const (Ljava/lang/Object;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)Lio/tlaloc/ir/DxirConst;
+	public static synthetic fun const$default (Lio/tlaloc/ir/DxirEmitter;Ljava/lang/Object;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILjava/lang/Object;)Lio/tlaloc/ir/DxirConst;
+	public abstract fun op (Lio/tlaloc/ir/OpKind;Ljava/util/List;Lio/tlaloc/ir/DxirType;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;)Lio/tlaloc/ir/DxirOp;
+	public static synthetic fun op$default (Lio/tlaloc/ir/DxirEmitter;Lio/tlaloc/ir/OpKind;Ljava/util/List;Lio/tlaloc/ir/DxirType;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/DxirOp;
+	public abstract fun opMulti (Lio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/List;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;)Lio/tlaloc/ir/DxirOp;
+	public static synthetic fun opMulti$default (Lio/tlaloc/ir/DxirEmitter;Lio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/List;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/DxirOp;
+	public abstract fun whileOp (Ljava/util/List;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/ir/DxirOp;
+}
+
+public final class io/tlaloc/ir/DxirEmitter$DefaultImpls {
+	public static synthetic fun const$default (Lio/tlaloc/ir/DxirEmitter;Ljava/lang/Object;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILjava/lang/Object;)Lio/tlaloc/ir/DxirConst;
+	public static synthetic fun op$default (Lio/tlaloc/ir/DxirEmitter;Lio/tlaloc/ir/OpKind;Ljava/util/List;Lio/tlaloc/ir/DxirType;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/DxirOp;
+	public static synthetic fun opMulti$default (Lio/tlaloc/ir/DxirEmitter;Lio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/List;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/DxirOp;
+}
+
+public final class io/tlaloc/ir/DxirFunction {
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getBody ()Ljava/util/List;
+	public final fun getMeshes ()Ljava/util/List;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getParams ()Ljava/util/List;
+	public final fun getReturns ()Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/DxirMesh {
+	public fun <init> (Ljava/lang/String;Ljava/util/List;)V
+	public final fun axis (Ljava/lang/String;)Lio/tlaloc/ir/DxirMeshAxis;
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/List;
+	public final fun copy (Ljava/lang/String;Ljava/util/List;)Lio/tlaloc/ir/DxirMesh;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/DxirMesh;Ljava/lang/String;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/DxirMesh;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAxes ()Ljava/util/List;
+	public final fun getName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/DxirMeshAxis {
+	public fun <init> (Ljava/lang/String;I)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()I
+	public final fun copy (Ljava/lang/String;I)Lio/tlaloc/ir/DxirMeshAxis;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/DxirMeshAxis;Ljava/lang/String;IILjava/lang/Object;)Lio/tlaloc/ir/DxirMeshAxis;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public final fun getSize ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/DxirModule {
+	public fun <init> (Ljava/util/List;Ljava/util/List;)V
+	public synthetic fun <init> (Ljava/util/List;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun function (Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public final fun getFunctions ()Ljava/util/List;
+	public final fun getMeshes ()Ljava/util/List;
+	public final fun mesh (Ljava/lang/String;)Lio/tlaloc/ir/DxirMesh;
+}
+
+public abstract class io/tlaloc/ir/DxirNode {
+	public abstract fun getId ()I
+	public abstract fun getSharding ()Lio/tlaloc/ir/DxirSharding;
+	public abstract fun getType ()Lio/tlaloc/ir/DxirType;
+}
+
+public final class io/tlaloc/ir/DxirOp : io/tlaloc/ir/DxirNode {
+	public fun <init> (ILio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/Map;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)V
+	public synthetic fun <init> (ILio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/Map;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (ILio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/Map;Ljava/util/List;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;)V
+	public synthetic fun <init> (ILio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/Map;Ljava/util/List;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getAttrs ()Ljava/util/Map;
+	public final fun getHasRegions ()Z
+	public fun getId ()I
+	public final fun getNumResults ()I
+	public final fun getOp ()Lio/tlaloc/ir/OpKind;
+	public final fun getOperands ()Ljava/util/List;
+	public final fun getRegions ()Ljava/util/List;
+	public fun getSharding ()Lio/tlaloc/ir/DxirSharding;
+	public fun getType ()Lio/tlaloc/ir/DxirType;
+	public final fun getTypes ()Ljava/util/List;
+	public final fun isMultiResult ()Z
+	public final fun result (I)Lio/tlaloc/ir/DxirNode;
+}
+
+public final class io/tlaloc/ir/DxirOpResult : io/tlaloc/ir/DxirNode {
+	public fun <init> (Lio/tlaloc/ir/DxirOp;I)V
+	public fun getId ()I
+	public final fun getIndex ()I
+	public fun getSharding ()Lio/tlaloc/ir/DxirSharding;
+	public final fun getSource ()Lio/tlaloc/ir/DxirOp;
+	public fun getType ()Lio/tlaloc/ir/DxirType;
+}
+
+public final class io/tlaloc/ir/DxirParam : io/tlaloc/ir/DxirNode {
+	public fun <init> (ILjava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)V
+	public synthetic fun <init> (ILjava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun getId ()I
+	public final fun getName ()Ljava/lang/String;
+	public fun getSharding ()Lio/tlaloc/ir/DxirSharding;
+	public fun getType ()Lio/tlaloc/ir/DxirType;
+}
+
+public final class io/tlaloc/ir/DxirRegion {
+	public static final field Companion Lio/tlaloc/ir/DxirRegion$Companion;
+	public fun <init> (Ljava/util/List;)V
+	public final fun getBlocks ()Ljava/util/List;
+	public final fun getEntryBlock ()Lio/tlaloc/ir/DxirBlock;
+}
+
+public final class io/tlaloc/ir/DxirRegion$Companion {
+	public final fun ofBlock (Ljava/util/List;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/ir/DxirRegion;
+}
+
+public final class io/tlaloc/ir/DxirRegionBuilder : io/tlaloc/ir/DxirEmitter {
+	public final fun arg (Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)Lio/tlaloc/ir/DxirBlockArg;
+	public static synthetic fun arg$default (Lio/tlaloc/ir/DxirRegionBuilder;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;ILjava/lang/Object;)Lio/tlaloc/ir/DxirBlockArg;
+	public fun const (Ljava/lang/Object;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirSharding;)Lio/tlaloc/ir/DxirConst;
+	public final fun ifOp (Lio/tlaloc/ir/DxirNode;Ljava/util/List;Lio/tlaloc/ir/DxirRegion;Lio/tlaloc/ir/DxirRegion;)Lio/tlaloc/ir/DxirOp;
+	public fun op (Lio/tlaloc/ir/OpKind;Ljava/util/List;Lio/tlaloc/ir/DxirType;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;)Lio/tlaloc/ir/DxirOp;
+	public fun opMulti (Lio/tlaloc/ir/OpKind;Ljava/util/List;Ljava/util/List;Ljava/util/Map;Lio/tlaloc/ir/DxirSharding;Ljava/util/List;)Lio/tlaloc/ir/DxirOp;
+	public final fun region (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/ir/DxirRegion;
+	public fun whileOp (Ljava/util/List;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/ir/DxirOp;
+	public final fun yields ([Lio/tlaloc/ir/DxirNode;)V
+}
+
+public final class io/tlaloc/ir/DxirSharding {
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Ljava/util/List;
+	public final fun copy (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/ir/DxirSharding;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/DxirSharding;Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/DxirSharding;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getDimShardings ()Ljava/util/List;
+	public final fun getMeshName ()Ljava/lang/String;
+	public final fun getReplicated ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/DxirShardingKt {
+	public static final fun toDxir (Lio/tlaloc/core/MeshSpec;)Lio/tlaloc/ir/DxirMesh;
+	public static final fun toDxir (Ljava/util/List;Ljava/lang/String;)Lio/tlaloc/ir/DxirSharding;
+}
+
+public final class io/tlaloc/ir/DxirType {
+	public fun <init> (Lio/tlaloc/core/DType;Ljava/util/List;Ljava/util/List;)V
+	public synthetic fun <init> (Lio/tlaloc/core/DType;Ljava/util/List;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun axisNameOrNull (I)Ljava/lang/String;
+	public final fun component1 ()Lio/tlaloc/core/DType;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Ljava/util/List;
+	public final fun copy (Lio/tlaloc/core/DType;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/ir/DxirType;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/DxirType;Lio/tlaloc/core/DType;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/DxirType;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAxisNames ()Ljava/util/List;
+	public final fun getDims ()Ljava/util/List;
+	public final fun getDtype ()Lio/tlaloc/core/DType;
+	public final fun getElementCount ()J
+	public final fun getHasNamedAxes ()Z
+	public final fun getRank ()I
+	public fun hashCode ()I
+	public final fun isScalar ()Z
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/KvCacheWriteAttrs {
+	public static final field INSTANCE Lio/tlaloc/ir/KvCacheWriteAttrs;
+	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/KvCacheWriteAttrs$Parsed;
+}
+
+public final class io/tlaloc/ir/KvCacheWriteAttrs$Parsed {
+	public fun <init> (IIIII)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun copy (IIIII)Lio/tlaloc/ir/KvCacheWriteAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/KvCacheWriteAttrs$Parsed;IIIIIILjava/lang/Object;)Lio/tlaloc/ir/KvCacheWriteAttrs$Parsed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBlockSize ()I
+	public final fun getHeadDim ()I
+	public final fun getNumBlocks ()I
+	public final fun getNumKvHeads ()I
+	public final fun getNumSlots ()I
+	public final fun getNumTokens ()I
+	public final fun getSlotStride ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/OpKind : java/lang/Enum {
+	public static final field ABS Lio/tlaloc/ir/OpKind;
+	public static final field ADD Lio/tlaloc/ir/OpKind;
+	public static final field ALL_GATHER Lio/tlaloc/ir/OpKind;
+	public static final field ALL_REDUCE Lio/tlaloc/ir/OpKind;
+	public static final field ARGMAX Lio/tlaloc/ir/OpKind;
+	public static final field ATAN Lio/tlaloc/ir/OpKind;
+	public static final field AVGPOOL2D Lio/tlaloc/ir/OpKind;
+	public static final field AVGPOOL2D_GRAD Lio/tlaloc/ir/OpKind;
+	public static final field BATCHNORM Lio/tlaloc/ir/OpKind;
+	public static final field BROADCAST Lio/tlaloc/ir/OpKind;
+	public static final field BROADCAST_LIKE Lio/tlaloc/ir/OpKind;
+	public static final field CAST Lio/tlaloc/ir/OpKind;
+	public static final field CHECK_SHAPE_LIKE Lio/tlaloc/ir/OpKind;
+	public static final field COARSENED Lio/tlaloc/ir/OpKind;
+	public static final field COMPARE Lio/tlaloc/ir/OpKind;
+	public static final field CONCAT Lio/tlaloc/ir/OpKind;
+	public static final field CONV2D Lio/tlaloc/ir/OpKind;
+	public static final field CONV2D_DATA_ADJOINT Lio/tlaloc/ir/OpKind;
+	public static final field CONV2D_KERNEL_ADJOINT Lio/tlaloc/ir/OpKind;
+	public static final field CONV_TRANSPOSE2D Lio/tlaloc/ir/OpKind;
+	public static final field CONV_TRANSPOSE2D_DATA_ADJOINT Lio/tlaloc/ir/OpKind;
+	public static final field CONV_TRANSPOSE2D_KERNEL_ADJOINT Lio/tlaloc/ir/OpKind;
+	public static final field COS Lio/tlaloc/ir/OpKind;
+	public static final field CROSS_ENTROPY Lio/tlaloc/ir/OpKind;
+	public static final field DEQUANTIZE_KV Lio/tlaloc/ir/OpKind;
+	public static final field DIGAMMA Lio/tlaloc/ir/OpKind;
+	public static final field DIV Lio/tlaloc/ir/OpKind;
+	public static final field DOT Lio/tlaloc/ir/OpKind;
+	public static final field EMBEDDING Lio/tlaloc/ir/OpKind;
+	public static final field EMBEDDING_GRAD Lio/tlaloc/ir/OpKind;
+	public static final field EXP Lio/tlaloc/ir/OpKind;
+	public static final field GATHER Lio/tlaloc/ir/OpKind;
+	public static final field GELU Lio/tlaloc/ir/OpKind;
+	public static final field IF Lio/tlaloc/ir/OpKind;
+	public static final field KV_CACHE_WRITE Lio/tlaloc/ir/OpKind;
+	public static final field LAND Lio/tlaloc/ir/OpKind;
+	public static final field LAYERNORM Lio/tlaloc/ir/OpKind;
+	public static final field LGAMMA Lio/tlaloc/ir/OpKind;
+	public static final field LOG Lio/tlaloc/ir/OpKind;
+	public static final field LOGSUMEXP Lio/tlaloc/ir/OpKind;
+	public static final field MANUAL_COMPUTATION Lio/tlaloc/ir/OpKind;
+	public static final field MATMUL Lio/tlaloc/ir/OpKind;
+	public static final field MAX Lio/tlaloc/ir/OpKind;
+	public static final field MAXPOOL2D Lio/tlaloc/ir/OpKind;
+	public static final field MAXPOOL2D_GRAD Lio/tlaloc/ir/OpKind;
+	public static final field MEAN Lio/tlaloc/ir/OpKind;
+	public static final field MIN Lio/tlaloc/ir/OpKind;
+	public static final field MUL Lio/tlaloc/ir/OpKind;
+	public static final field NEG Lio/tlaloc/ir/OpKind;
+	public static final field NOT Lio/tlaloc/ir/OpKind;
+	public static final field PAD Lio/tlaloc/ir/OpKind;
+	public static final field PAD_LIKE Lio/tlaloc/ir/OpKind;
+	public static final field PAD_TO Lio/tlaloc/ir/OpKind;
+	public static final field PAGED_ATTENTION Lio/tlaloc/ir/OpKind;
+	public static final field POLYGAMMA Lio/tlaloc/ir/OpKind;
+	public static final field POW Lio/tlaloc/ir/OpKind;
+	public static final field REDUCE_SCATTER Lio/tlaloc/ir/OpKind;
+	public static final field RELU Lio/tlaloc/ir/OpKind;
+	public static final field RESHAPE Lio/tlaloc/ir/OpKind;
+	public static final field REVERSE Lio/tlaloc/ir/OpKind;
+	public static final field RMSNORM Lio/tlaloc/ir/OpKind;
+	public static final field RNG_NORMAL Lio/tlaloc/ir/OpKind;
+	public static final field RNG_UNIFORM Lio/tlaloc/ir/OpKind;
+	public static final field RSQRT Lio/tlaloc/ir/OpKind;
+	public static final field SCALED_DOT_PRODUCT_ATTENTION Lio/tlaloc/ir/OpKind;
+	public static final field SCATTER Lio/tlaloc/ir/OpKind;
+	public static final field SCATTER_ADD Lio/tlaloc/ir/OpKind;
+	public static final field SHARD_CONSTRAINT Lio/tlaloc/ir/OpKind;
+	public static final field SIGMOID Lio/tlaloc/ir/OpKind;
+	public static final field SIGN Lio/tlaloc/ir/OpKind;
+	public static final field SILU Lio/tlaloc/ir/OpKind;
+	public static final field SIN Lio/tlaloc/ir/OpKind;
+	public static final field SLICE Lio/tlaloc/ir/OpKind;
+	public static final field SLICE_AT Lio/tlaloc/ir/OpKind;
+	public static final field SLICE_LIKE Lio/tlaloc/ir/OpKind;
+	public static final field SOFTMAX Lio/tlaloc/ir/OpKind;
+	public static final field SPARSE_MATMUL Lio/tlaloc/ir/OpKind;
+	public static final field SPARSE_MATMUL_VALUES_ADJOINT Lio/tlaloc/ir/OpKind;
+	public static final field SQRT Lio/tlaloc/ir/OpKind;
+	public static final field STEP Lio/tlaloc/ir/OpKind;
+	public static final field SUB Lio/tlaloc/ir/OpKind;
+	public static final field SUM Lio/tlaloc/ir/OpKind;
+	public static final field SUM_TO Lio/tlaloc/ir/OpKind;
+	public static final field TAN Lio/tlaloc/ir/OpKind;
+	public static final field TANH Lio/tlaloc/ir/OpKind;
+	public static final field TRANSPOSE Lio/tlaloc/ir/OpKind;
+	public static final field TRIGAMMA Lio/tlaloc/ir/OpKind;
+	public static final field WHERE Lio/tlaloc/ir/OpKind;
+	public static final field WHILE Lio/tlaloc/ir/OpKind;
+	public static final field ZEROS_LIKE Lio/tlaloc/ir/OpKind;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/ir/OpKind;
+	public static fun values ()[Lio/tlaloc/ir/OpKind;
+}
+
+public final class io/tlaloc/ir/PagedAttentionAttrs {
+	public static final field INSTANCE Lio/tlaloc/ir/PagedAttentionAttrs;
+	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/PagedAttentionAttrs$Parsed;
+}
+
+public final class io/tlaloc/ir/PagedAttentionAttrs$Parsed {
+	public fun <init> (IIIIIIID)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun component6 ()I
+	public final fun component7 ()I
+	public final fun component8 ()D
+	public final fun copy (IIIIIIID)Lio/tlaloc/ir/PagedAttentionAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/PagedAttentionAttrs$Parsed;IIIIIIIDILjava/lang/Object;)Lio/tlaloc/ir/PagedAttentionAttrs$Parsed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBlockSize ()I
+	public final fun getGroup ()I
+	public final fun getHeadDim ()I
+	public final fun getMaxBlocksPerSeq ()I
+	public final fun getMaxContextLen ()I
+	public final fun getNumBlocks ()I
+	public final fun getNumHeads ()I
+	public final fun getNumKvHeads ()I
+	public final fun getNumSeqs ()I
+	public final fun getScale ()D
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/PrinterKt {
+	public static final fun pretty (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)Ljava/lang/String;
+	public static final fun pretty (Lio/tlaloc/ir/DxirModule;)Ljava/lang/String;
+	public static synthetic fun pretty$default (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/DecodeBucket {
+	public fun <init> (II)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun copy (II)Lio/tlaloc/ir/inference/DecodeBucket;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeBucket;IIILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeBucket;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBatch ()I
+	public final fun getMaxContext ()I
+	public fun hashCode ()I
+	public final fun maxBlocksPerSeq (I)I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/DecodeBucketPolicy {
+	public static final field Companion Lio/tlaloc/ir/inference/DecodeBucketPolicy$Companion;
+	public static final field DEFAULT_MIN_CONTEXT I
+	public fun <init> (IIII)V
+	public synthetic fun <init> (IIIIILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public synthetic fun <init> (IIIILjava/util/List;Ljava/util/List;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun bucketFor (II)Lio/tlaloc/ir/inference/DecodeBucket;
+	public final fun bucketForOrNull (II)Lio/tlaloc/ir/inference/DecodeBucket;
+	public final fun getAllBuckets ()Ljava/util/List;
+	public final fun getBatchLadder ()Ljava/util/List;
+	public final fun getBlockSize ()I
+	public final fun getContextLadder ()Ljava/util/List;
+	public final fun getExecutableCount ()I
+	public final fun getMaxBatch ()I
+	public final fun getMaxContext ()I
+	public final fun getMinContext ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/DecodeBucketPolicy$Companion {
+	public final fun withLadders (Ljava/util/List;Ljava/util/List;I)Lio/tlaloc/ir/inference/DecodeBucketPolicy;
+}
+
+public final class io/tlaloc/ir/inference/DecodeGraphKind : java/lang/Enum {
+	public static final field DECODE Lio/tlaloc/ir/inference/DecodeGraphKind;
+	public static final field PREFILL Lio/tlaloc/ir/inference/DecodeGraphKind;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/ir/inference/DecodeGraphKind;
+	public static fun values ()[Lio/tlaloc/ir/inference/DecodeGraphKind;
+}
+
+public final class io/tlaloc/ir/inference/DecodeGraphSpec {
+	public static final field Companion Lio/tlaloc/ir/inference/DecodeGraphSpec$Companion;
+	public static final field KV_POOL_INPUT_BASE I
+	public fun <init> (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;)V
+	public synthetic fun <init> (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Lio/tlaloc/ir/inference/DecodeModelShape;
+	public final fun component2 ()Lio/tlaloc/ir/inference/DecodeBucket;
+	public final fun component3 ()Lio/tlaloc/ir/inference/DecodeGraphKind;
+	public final fun component4 ()Ljava/util/List;
+	public final fun copy (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun executableCacheKey (Ljava/lang/String;)Ljava/lang/String;
+	public final fun getBlockTablesType ()Lio/tlaloc/ir/DxirType;
+	public final fun getBucket ()Lio/tlaloc/ir/inference/DecodeBucket;
+	public final fun getDonationPairs ()Ljava/util/List;
+	public final fun getInputs ()Ljava/util/List;
+	public final fun getKind ()Lio/tlaloc/ir/inference/DecodeGraphKind;
+	public final fun getLogitsType ()Lio/tlaloc/ir/DxirType;
+	public final fun getMaxBlocksPerSeq ()I
+	public final fun getModel ()Lio/tlaloc/ir/inference/DecodeModelShape;
+	public final fun getOutputs ()Ljava/util/List;
+	public final fun getPoolType ()Lio/tlaloc/ir/DxirType;
+	public final fun getPositionsType ()Lio/tlaloc/ir/DxirType;
+	public final fun getSeqLensType ()Lio/tlaloc/ir/DxirType;
+	public final fun getSlotMappingType ()Lio/tlaloc/ir/DxirType;
+	public final fun getTokenIdsType ()Lio/tlaloc/ir/DxirType;
+	public final fun getTokensPerSeq ()I
+	public final fun getTotalTokens ()I
+	public final fun getWeightSlots ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+	public final fun verifySignature (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)V
+}
+
+public final class io/tlaloc/ir/inference/DecodeGraphSpec$Companion {
+}
+
+public final class io/tlaloc/ir/inference/DecodeModelShape {
+	public fun <init> (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;)V
+	public synthetic fun <init> (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()I
+	public final fun component10 ()Lio/tlaloc/core/DType;
+	public final fun component11 ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun component6 ()I
+	public final fun component7 ()I
+	public final fun component8 ()I
+	public final fun component9 ()Lio/tlaloc/core/DType;
+	public final fun copy (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeModelShape;IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBlockSize ()I
+	public final fun getDtype ()Lio/tlaloc/core/DType;
+	public final fun getGroup ()I
+	public final fun getHeadDim ()I
+	public final fun getHiddenSize ()I
+	public final fun getKvDtype ()Lio/tlaloc/core/DType;
+	public final fun getKvQuant ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public final fun getKvQuantDtypeTag ()Ljava/lang/String;
+	public final fun getNumBlocks ()I
+	public final fun getNumHeads ()I
+	public final fun getNumKvHeads ()I
+	public final fun getNumLayers ()I
+	public final fun getVocabSize ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/DecodePadding {
+	public static final field INSTANCE Lio/tlaloc/ir/inference/DecodePadding;
+	public static final field PADDING_BLOCK I
+	public static final field PADDING_POSITION I
+	public static final field PADDING_SEQ_LEN I
+	public static final field PADDING_SLOT I
+	public static final field PADDING_TOKEN_ID I
+	public final fun padTo ([FILjava/lang/String;)[F
+	public final fun padTo ([IIILjava/lang/String;)[I
+}
+
+public final class io/tlaloc/ir/inference/DecodeSlot {
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Lio/tlaloc/ir/DxirType;
+	public final fun component3 ()Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public final fun copy (Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;)Lio/tlaloc/ir/inference/DecodeSlot;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeSlot;Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeSlot;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public final fun getRole ()Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public final fun getType ()Lio/tlaloc/ir/DxirType;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/DecodeSlotRole : java/lang/Enum {
+	public static final field BLOCK_TABLES Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static final field KV_POOL_IN Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static final field KV_POOL_OUT Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static final field LOGITS Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static final field POSITIONS Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static final field SEQ_LENS Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static final field SLOT_MAPPING Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static final field TOKEN_IDS Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static final field WEIGHT Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/ir/inference/DecodeSlotRole;
+	public static fun values ()[Lio/tlaloc/ir/inference/DecodeSlotRole;
+}
+
+public final class io/tlaloc/ir/inference/HfLlamaCheckpoint : java/lang/AutoCloseable {
+	public static final field CONFIG_JSON Ljava/lang/String;
+	public static final field Companion Lio/tlaloc/ir/inference/HfLlamaCheckpoint$Companion;
+	public synthetic fun <init> (Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/core/io/WeightSource;ZLkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun close ()V
+	public final fun getConfig ()Lio/tlaloc/ir/inference/HfLlamaConfig;
+	public final fun getDir ()Ljava/nio/file/Path;
+	public final fun getLmHeadPresent ()Z
+	public final fun getNames ()Ljava/util/Set;
+	public final fun getTiedEmbeddings ()Z
+	public final fun load (Lio/tlaloc/ir/inference/LlamaWeightRole;)Lio/tlaloc/core/io/LoadedTensor;
+	public final fun resolveName (Lio/tlaloc/ir/inference/LlamaWeightRole;)Ljava/lang/String;
+	public final fun verifyInventory ()Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/inference/HfLlamaCheckpoint$Companion {
+	public final fun open (Ljava/nio/file/Path;Z)Lio/tlaloc/ir/inference/HfLlamaCheckpoint;
+	public static synthetic fun open$default (Lio/tlaloc/ir/inference/HfLlamaCheckpoint$Companion;Ljava/nio/file/Path;ZILjava/lang/Object;)Lio/tlaloc/ir/inference/HfLlamaCheckpoint;
+}
+
+public final class io/tlaloc/ir/inference/HfLlamaConfig {
+	public static final field Companion Lio/tlaloc/ir/inference/HfLlamaConfig$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component10 ()D
+	public final fun component11 ()D
+	public final fun component12 ()I
+	public final fun component13 ()Z
+	public final fun component14 ()Z
+	public final fun component15 ()Ljava/lang/String;
+	public final fun component16 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun component6 ()I
+	public final fun component7 ()I
+	public final fun component8 ()I
+	public final fun component9 ()I
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;)Lio/tlaloc/ir/inference/HfLlamaConfig;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/HfLlamaConfig;Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/inference/HfLlamaConfig;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getArchitecture ()Ljava/lang/String;
+	public final fun getAttentionBias ()Z
+	public final fun getGqaGroup ()I
+	public final fun getHeadDim ()I
+	public final fun getHiddenSize ()I
+	public final fun getIntermediateSize ()I
+	public final fun getKvProjOut ()I
+	public final fun getMaxPositionEmbeddings ()I
+	public final fun getModelType ()Ljava/lang/String;
+	public final fun getNumHeads ()I
+	public final fun getNumKvHeads ()I
+	public final fun getNumLayers ()I
+	public final fun getQProjOut ()I
+	public final fun getRmsNormEps ()D
+	public final fun getRopeScalingType ()Ljava/lang/String;
+	public final fun getRopeTheta ()D
+	public final fun getStorageDType ()Lio/tlaloc/core/DType;
+	public final fun getTieWordEmbeddings ()Z
+	public final fun getTorchDtype ()Ljava/lang/String;
+	public final fun getVocabSize ()I
+	public fun hashCode ()I
+	public final fun isMultiHead ()Z
+	public final fun toDecodeModelShape (IILio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public static synthetic fun toDecodeModelShape$default (Lio/tlaloc/ir/inference/HfLlamaConfig;IILio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/HfLlamaConfig$Companion {
+	public final fun getSUPPORTED_ARCHITECTURES ()Ljava/util/Set;
+	public final fun parse (Ljava/lang/String;Z)Lio/tlaloc/ir/inference/HfLlamaConfig;
+	public static synthetic fun parse$default (Lio/tlaloc/ir/inference/HfLlamaConfig$Companion;Ljava/lang/String;ZILjava/lang/Object;)Lio/tlaloc/ir/inference/HfLlamaConfig;
+}
+
+public final class io/tlaloc/ir/inference/HfLlamaDecodeGraph {
+	public static final field ENTRY_POINT Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/ir/inference/HfLlamaDecodeGraph;
+	public static final field PARTS_PER_LAYER I
+	public final fun build (Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/HfLlamaConfig;Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun build$default (Lio/tlaloc/ir/inference/HfLlamaDecodeGraph;Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/HfLlamaConfig;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public final fun ropeTables (Lio/tlaloc/ir/inference/HfLlamaConfig;I)Lkotlin/Pair;
+	public final fun spec (Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public final fun weightRoles (Lio/tlaloc/ir/inference/HfLlamaConfig;)Ljava/util/List;
+	public final fun weightSlots (Lio/tlaloc/ir/inference/HfLlamaConfig;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/inference/HfLlamaNames {
+	public static final field EMBED_TOKENS Ljava/lang/String;
+	public static final field FINAL_NORM Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/ir/inference/HfLlamaNames;
+	public static final field LM_HEAD Ljava/lang/String;
+	public final fun expectedDims (Lio/tlaloc/ir/inference/LlamaWeightRole;Lio/tlaloc/ir/inference/HfLlamaConfig;)[I
+	public final fun hfName (Lio/tlaloc/ir/inference/LlamaWeightRole;)Ljava/lang/String;
+	public final fun isTransposedLinear (Lio/tlaloc/ir/inference/LlamaWeightRole;)Z
+	public final fun leaf (Lio/tlaloc/ir/inference/LlamaLayerPart;)Ljava/lang/String;
+	public final fun role (Ljava/lang/String;)Lio/tlaloc/ir/inference/LlamaWeightRole;
+	public final fun roles (Lio/tlaloc/ir/inference/HfLlamaConfig;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/inference/HfLlamaStagedWeights {
+	public static final field INSTANCE Lio/tlaloc/ir/inference/HfLlamaStagedWeights;
+	public final fun stage (Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Lio/tlaloc/ir/inference/HfLlamaConfig;)Ljava/util/List;
+	public static synthetic fun stage$default (Lio/tlaloc/ir/inference/HfLlamaStagedWeights;Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Lio/tlaloc/ir/inference/HfLlamaConfig;ILjava/lang/Object;)Ljava/util/List;
+	public final fun stageAt (Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Lio/tlaloc/ir/inference/HfLlamaConfig;I)[F
+	public final fun transpose ([FII)[F
+}
+
+public final class io/tlaloc/ir/inference/KvQuantPool {
+	public static final field INSTANCE Lio/tlaloc/ir/inference/KvQuantPool;
+	public final fun dequantize ([I[FIILio/tlaloc/ir/recognizer/quant/KvQuantConfig;)[F
+	public final fun maxRoundTripError ([F)F
+	public final fun quantize ([FIILio/tlaloc/ir/recognizer/quant/KvQuantConfig;)Lio/tlaloc/ir/inference/QuantizedPool;
+	public final fun quantizeWithScales ([F[FIILio/tlaloc/ir/recognizer/quant/KvQuantConfig;)[I
+	public final fun roundHalfAway (F)I
+	public final fun scaleCount (ILio/tlaloc/ir/recognizer/quant/KvQuantConfig;)I
+	public final fun scalesOf ([FIILio/tlaloc/ir/recognizer/quant/KvQuantConfig;)[F
+}
+
+public final class io/tlaloc/ir/inference/LlamaLayerPart : java/lang/Enum {
+	public static final field DOWN_PROJ Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static final field GATE_PROJ Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static final field INPUT_LAYERNORM Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static final field K_PROJ Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static final field O_PROJ Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static final field POST_ATTENTION_LAYERNORM Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static final field Q_PROJ Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static final field UP_PROJ Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static final field V_PROJ Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun isNorm ()Z
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public static fun values ()[Lio/tlaloc/ir/inference/LlamaLayerPart;
+}
+
+public abstract interface class io/tlaloc/ir/inference/LlamaWeightRole {
+}
+
+public final class io/tlaloc/ir/inference/LlamaWeightRole$EmbedTokens : io/tlaloc/ir/inference/LlamaWeightRole {
+	public static final field INSTANCE Lio/tlaloc/ir/inference/LlamaWeightRole$EmbedTokens;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/LlamaWeightRole$FinalNorm : io/tlaloc/ir/inference/LlamaWeightRole {
+	public static final field INSTANCE Lio/tlaloc/ir/inference/LlamaWeightRole$FinalNorm;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/LlamaWeightRole$Layer : io/tlaloc/ir/inference/LlamaWeightRole {
+	public fun <init> (ILio/tlaloc/ir/inference/LlamaLayerPart;)V
+	public final fun component1 ()I
+	public final fun component2 ()Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public final fun copy (ILio/tlaloc/ir/inference/LlamaLayerPart;)Lio/tlaloc/ir/inference/LlamaWeightRole$Layer;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/LlamaWeightRole$Layer;ILio/tlaloc/ir/inference/LlamaLayerPart;ILjava/lang/Object;)Lio/tlaloc/ir/inference/LlamaWeightRole$Layer;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getLayer ()I
+	public final fun getPart ()Lio/tlaloc/ir/inference/LlamaLayerPart;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/LlamaWeightRole$LmHead : io/tlaloc/ir/inference/LlamaWeightRole {
+	public static final field INSTANCE Lio/tlaloc/ir/inference/LlamaWeightRole$LmHead;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/QuantizedPool {
+	public fun <init> ([I[FLio/tlaloc/ir/recognizer/quant/KvQuantConfig;)V
+	public final fun component1 ()[I
+	public final fun component2 ()[F
+	public final fun component3 ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public final fun copy ([I[FLio/tlaloc/ir/recognizer/quant/KvQuantConfig;)Lio/tlaloc/ir/inference/QuantizedPool;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/QuantizedPool;[I[FLio/tlaloc/ir/recognizer/quant/KvQuantConfig;ILjava/lang/Object;)Lio/tlaloc/ir/inference/QuantizedPool;
+	public final fun dequantize (II)[F
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCodes ()[I
+	public final fun getConfig ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public final fun getScales ()[F
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/BreakBearingWhile {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/BreakBearingWhile;
+	public final fun classifyBreakCond (Lio/tlaloc/ir/passes/BreakBearingWhile$Pattern;)Lio/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass;
+	public final fun detect (Lio/tlaloc/ir/DxirOp;)Lio/tlaloc/ir/passes/BreakBearingWhile$Pattern;
+}
+
+public abstract class io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass {
+}
+
+public final class io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$CarriedDependent : io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$CarriedDependent;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$Constant : io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass {
+	public fun <init> (Z)V
+	public final fun component1 ()Z
+	public final fun copy (Z)Lio/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$Constant;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$Constant;ZILjava/lang/Object;)Lio/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$Constant;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAlwaysBreaks ()Z
+	public final fun getBreakIteration ()Ljava/lang/Integer;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$CounterOnly : io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$CounterOnly;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$LoopInvariant : io/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/BreakBearingWhile$BreakCondClass$LoopInvariant;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/BreakBearingWhile$Pattern {
+	public fun <init> (Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Ljava/lang/Integer;Ljava/lang/Integer;Lio/tlaloc/ir/DxirParam;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOpResult;)V
+	public synthetic fun <init> (Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Ljava/lang/Integer;Ljava/lang/Integer;Lio/tlaloc/ir/DxirParam;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOpResult;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component2 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component3 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component4 ()Ljava/lang/Integer;
+	public final fun component5 ()Ljava/lang/Integer;
+	public final fun component6 ()Lio/tlaloc/ir/DxirParam;
+	public final fun component7 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component8 ()Lio/tlaloc/ir/DxirOpResult;
+	public final fun copy (Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Ljava/lang/Integer;Ljava/lang/Integer;Lio/tlaloc/ir/DxirParam;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOpResult;)Lio/tlaloc/ir/passes/BreakBearingWhile$Pattern;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/passes/BreakBearingWhile$Pattern;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Ljava/lang/Integer;Ljava/lang/Integer;Lio/tlaloc/ir/DxirParam;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOpResult;ILjava/lang/Object;)Lio/tlaloc/ir/passes/BreakBearingWhile$Pattern;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBreakCond ()Lio/tlaloc/ir/DxirNode;
+	public final fun getCounterArgIdx ()Ljava/lang/Integer;
+	public final fun getOrigCond ()Lio/tlaloc/ir/DxirNode;
+	public final fun getTripCountConst ()Ljava/lang/Integer;
+	public final fun getTripCountOp ()Lio/tlaloc/ir/DxirOp;
+	public final fun getTripCountOpResult ()Lio/tlaloc/ir/DxirOpResult;
+	public final fun getTripCountParam ()Lio/tlaloc/ir/DxirParam;
+	public final fun getWhileOp ()Lio/tlaloc/ir/DxirOp;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract class io/tlaloc/ir/passes/CoarsenResult {
+}
+
+public final class io/tlaloc/ir/passes/CoarsenResult$Failure : io/tlaloc/ir/passes/CoarsenResult {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/ir/passes/CoarsenResult$Failure;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/passes/CoarsenResult$Failure;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/passes/CoarsenResult$Failure;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getReason ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/CoarsenResult$Success : io/tlaloc/ir/passes/CoarsenResult {
+	public fun <init> (Lio/tlaloc/ir/DxirFunction;I)V
+	public final fun component1 ()Lio/tlaloc/ir/DxirFunction;
+	public final fun component2 ()I
+	public final fun copy (Lio/tlaloc/ir/DxirFunction;I)Lio/tlaloc/ir/passes/CoarsenResult$Success;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/passes/CoarsenResult$Success;Lio/tlaloc/ir/DxirFunction;IILjava/lang/Object;)Lio/tlaloc/ir/passes/CoarsenResult$Success;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getSimplified ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getSize ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class io/tlaloc/ir/passes/CoarseningCache {
+	public abstract fun get (Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public fun getOrCompute (Lio/tlaloc/ir/DxirFunction;Lkotlin/jvm/functions/Function0;)Lio/tlaloc/ir/DxirFunction;
+	public abstract fun put (Ljava/lang/String;Lio/tlaloc/ir/DxirFunction;)V
+}
+
+public final class io/tlaloc/ir/passes/CoarseningCache$DefaultImpls {
+	public static fun getOrCompute (Lio/tlaloc/ir/passes/CoarseningCache;Lio/tlaloc/ir/DxirFunction;Lkotlin/jvm/functions/Function0;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public final class io/tlaloc/ir/passes/DefUseChain {
+	public static final field Companion Lio/tlaloc/ir/passes/DefUseChain$Companion;
+	public final fun allDefsWithUses ()Ljava/util/Set;
+	public final fun backwardReachable (ILio/tlaloc/ir/DxirFunction;)Ljava/util/Set;
+	public final fun isDeclared (I)Z
+	public final fun useCount (I)I
+	public final fun usersOf (I)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/passes/DefUseChain$Companion {
+	public final fun build (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/passes/DefUseChain;
+}
+
+public final class io/tlaloc/ir/passes/DiskCoarseningCache : io/tlaloc/ir/passes/CoarseningCache {
+	public static final field Companion Lio/tlaloc/ir/passes/DiskCoarseningCache$Companion;
+	public fun <init> (Ljava/nio/file/Path;Ljava/lang/String;Ljava/time/Duration;)V
+	public synthetic fun <init> (Ljava/nio/file/Path;Ljava/lang/String;Ljava/time/Duration;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun get (Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public fun getOrCompute (Lio/tlaloc/ir/DxirFunction;Lkotlin/jvm/functions/Function0;)Lio/tlaloc/ir/DxirFunction;
+	public fun put (Ljava/lang/String;Lio/tlaloc/ir/DxirFunction;)V
+}
+
+public final class io/tlaloc/ir/passes/DiskCoarseningCache$Companion {
+	public final fun getDEFAULT_MAX_AGE ()Ljava/time/Duration;
+}
+
+public final class io/tlaloc/ir/passes/DxirCanonical {
+	public static final field FORMAT_MARKER Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirCanonical;
+	public final fun deserialise (Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public final fun hash (Lio/tlaloc/ir/DxirFunction;)Ljava/lang/String;
+	public final fun serialise (Lio/tlaloc/ir/DxirFunction;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/DxirForwardTransform {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirForwardTransform;
+	public final fun apply (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public final class io/tlaloc/ir/passes/DxirInterpreter {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirInterpreter;
+	public static final field WHILE_ITERATION_CAP I
+	public final fun evalFunction (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public final fun evalNode (Lio/tlaloc/ir/DxirNode;Ljava/util/Map;Ljava/util/Map;)[F
+	public static synthetic fun evalNode$default (Lio/tlaloc/ir/passes/DxirInterpreter;Lio/tlaloc/ir/DxirNode;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)[F
+}
+
+public final class io/tlaloc/ir/passes/DxirReverseTransform {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirReverseTransform;
+	public final fun apply (Lio/tlaloc/ir/DxirFunction;ZZI)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun apply$default (Lio/tlaloc/ir/passes/DxirReverseTransform;Lio/tlaloc/ir/DxirFunction;ZZIILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public final class io/tlaloc/ir/passes/DxirShapeValidationKt {
+	public static final fun validateDxirShapes (Lio/tlaloc/ir/DxirFunction;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/passes/GradShardingVerify {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/GradShardingVerify;
+	public final fun adjointOf (Lio/tlaloc/ir/OpKind;)Lio/tlaloc/ir/OpKind;
+	public final fun verify (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/DxirFunction;)Ljava/util/List;
+	public final fun verifyCollectiveDuality (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/DxirFunction;)Ljava/util/List;
+	public final fun verifyOrThrow (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/DxirFunction;)V
+}
+
+public final class io/tlaloc/ir/passes/GradShardingVerify$Violation {
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/ir/DxirSharding;Lio/tlaloc/ir/DxirSharding;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Lio/tlaloc/ir/DxirSharding;
+	public final fun component3 ()Lio/tlaloc/ir/DxirSharding;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Lio/tlaloc/ir/DxirSharding;Lio/tlaloc/ir/DxirSharding;Ljava/lang/String;)Lio/tlaloc/ir/passes/GradShardingVerify$Violation;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/passes/GradShardingVerify$Violation;Ljava/lang/String;Lio/tlaloc/ir/DxirSharding;Lio/tlaloc/ir/DxirSharding;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/passes/GradShardingVerify$Violation;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getForwardSharding ()Lio/tlaloc/ir/DxirSharding;
+	public final fun getGradSharding ()Lio/tlaloc/ir/DxirSharding;
+	public final fun getMessage ()Ljava/lang/String;
+	public final fun getSite ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/InMemoryCoarseningCache : io/tlaloc/ir/passes/CoarseningCache {
+	public fun <init> ()V
+	public final fun clear ()V
+	public fun get (Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public fun getOrCompute (Lio/tlaloc/ir/DxirFunction;Lkotlin/jvm/functions/Function0;)Lio/tlaloc/ir/DxirFunction;
+	public fun put (Ljava/lang/String;Lio/tlaloc/ir/DxirFunction;)V
+	public final fun size ()I
+}
+
+public final class io/tlaloc/ir/passes/LProfiler {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/LProfiler;
+	public final fun sweep (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/SymbolicEngine;Ljava/util/List;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/passes/LProfiler$SweepMetric {
+	public fun <init> (IZIIIJJ)V
+	public final fun component1 ()I
+	public final fun component2 ()Z
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun component6 ()J
+	public final fun component7 ()J
+	public final fun copy (IZIIIJJ)Lio/tlaloc/ir/passes/LProfiler$SweepMetric;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/passes/LProfiler$SweepMetric;IZIIIJJILjava/lang/Object;)Lio/tlaloc/ir/passes/LProfiler$SweepMetric;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCoarsenTimeMs ()J
+	public final fun getCoarsenedTopLevelOpCount ()I
+	public final fun getCoarsenedTotalOpCount ()I
+	public final fun getCoarseningFired ()Z
+	public final fun getGradOpCount ()I
+	public final fun getGradTimeMs ()J
+	public final fun getSizeLimit ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/NoOpCoarseningCache : io/tlaloc/ir/passes/CoarseningCache {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/NoOpCoarseningCache;
+	public fun get (Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
+	public fun getOrCompute (Lio/tlaloc/ir/DxirFunction;Lkotlin/jvm/functions/Function0;)Lio/tlaloc/ir/DxirFunction;
+	public fun put (Ljava/lang/String;Lio/tlaloc/ir/DxirFunction;)V
+}
+
+public final class io/tlaloc/ir/passes/PhiCalculus {
+	public static final field FIXPOINT_CAP I
+	public static final field INSTANCE Lio/tlaloc/ir/passes/PhiCalculus;
+	public final fun apply (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/SymbolicEngine;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun apply$default (Lio/tlaloc/ir/passes/PhiCalculus;Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/SymbolicEngine;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public final fun coarsenFunction (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/SymbolicEngine;I)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun coarsenFunction$default (Lio/tlaloc/ir/passes/PhiCalculus;Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/SymbolicEngine;IILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public final fun coarsenLeaf (Lio/tlaloc/ir/passes/RegionTreeNode;Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/SymbolicEngine;)Lio/tlaloc/ir/passes/CoarsenResult;
+	public final fun containsLoop (Lio/tlaloc/ir/DxirFunction;)Z
+	public final fun liftIfRegionBodies (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/DxirFunction;
+	public final fun simplifyReturns (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/SymbolicEngine;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public final class io/tlaloc/ir/passes/RegionTree {
+	public static final field Companion Lio/tlaloc/ir/passes/RegionTree$Companion;
+	public final fun bottomUp ()Ljava/util/List;
+	public final fun getRoot ()Lio/tlaloc/ir/passes/RegionTreeNode;
+	public final fun getSize ()I
+	public final fun preOrder ()Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/passes/RegionTree$Companion {
+	public final fun build (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/passes/RegionTree;
+}
+
+public final class io/tlaloc/ir/passes/RegionTreeNode {
+	public final fun getBlockIndex ()I
+	public final fun getChildren ()Ljava/util/List;
+	public final fun getDepth ()I
+	public final fun getDirectOps ()Ljava/util/List;
+	public final fun getParent ()Lio/tlaloc/ir/passes/RegionTreeNode;
+	public final fun getRegionIndex ()I
+	public final fun getRegionOp ()Lio/tlaloc/ir/DxirOp;
+	public final fun isLeaf ()Z
+	public final fun isRoot ()Z
+	public final fun localIds ()Ljava/util/Set;
+	public final fun subtreeSize ()I
+}
+
+public final class io/tlaloc/ir/passes/SoiCandidate {
+	public fun <init> (Lio/tlaloc/ir/passes/RegionTreeNode;ILjava/util/Set;Ljava/lang/Integer;Z)V
+	public synthetic fun <init> (Lio/tlaloc/ir/passes/RegionTreeNode;ILjava/util/Set;Ljava/lang/Integer;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Lio/tlaloc/ir/passes/RegionTreeNode;
+	public final fun component2 ()I
+	public final fun component3 ()Ljava/util/Set;
+	public final fun component4 ()Ljava/lang/Integer;
+	public final fun component5 ()Z
+	public final fun copy (Lio/tlaloc/ir/passes/RegionTreeNode;ILjava/util/Set;Ljava/lang/Integer;Z)Lio/tlaloc/ir/passes/SoiCandidate;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/passes/SoiCandidate;Lio/tlaloc/ir/passes/RegionTreeNode;ILjava/util/Set;Ljava/lang/Integer;ZILjava/lang/Object;)Lio/tlaloc/ir/passes/SoiCandidate;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getMarkedLarge ()Z
+	public final fun getNode ()Lio/tlaloc/ir/passes/RegionTreeNode;
+	public final fun getReachableOps ()Ljava/util/Set;
+	public final fun getSinkId ()I
+	public final fun getSubtreeSize ()Ljava/lang/Integer;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/passes/SoiIdentification {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/SoiIdentification;
+	public final fun identify (Lio/tlaloc/ir/DxirFunction;)Ljava/util/List;
+	public final fun identifyWithSizeLimit (Lio/tlaloc/ir/DxirFunction;ILio/tlaloc/ir/passes/SymbolicEngine;)Lio/tlaloc/ir/passes/SoiResult;
+	public static synthetic fun identifyWithSizeLimit$default (Lio/tlaloc/ir/passes/SoiIdentification;Lio/tlaloc/ir/DxirFunction;ILio/tlaloc/ir/passes/SymbolicEngine;ILjava/lang/Object;)Lio/tlaloc/ir/passes/SoiResult;
+}
+
+public final class io/tlaloc/ir/passes/SoiResult {
+	public fun <init> (Ljava/util/List;Ljava/util/List;ILio/tlaloc/ir/passes/RegionTree;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()I
+	public final fun component4 ()Lio/tlaloc/ir/passes/RegionTree;
+	public final fun copy (Ljava/util/List;Ljava/util/List;ILio/tlaloc/ir/passes/RegionTree;)Lio/tlaloc/ir/passes/SoiResult;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/passes/SoiResult;Ljava/util/List;Ljava/util/List;ILio/tlaloc/ir/passes/RegionTree;ILjava/lang/Object;)Lio/tlaloc/ir/passes/SoiResult;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCandidates ()Ljava/util/List;
+	public final fun getSizeLimit ()I
+	public final fun getSois ()Ljava/util/List;
+	public final fun getTree ()Lio/tlaloc/ir/passes/RegionTree;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class io/tlaloc/ir/passes/SymExpr {
+}
+
+public abstract interface class io/tlaloc/ir/passes/SymFn {
+}
+
+public abstract interface class io/tlaloc/ir/passes/SymbolicEngine {
+	public abstract fun add (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun apply (Lio/tlaloc/ir/passes/SymFn;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun closure (Ljava/lang/String;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymFn;
+	public abstract fun collect (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun containsVariable (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Z
+	public abstract fun diff (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun div (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun expand (Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun factor (Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun getVersion ()Ljava/lang/String;
+	public abstract fun liftFunction (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/passes/SymFn;
+	public abstract fun liftNode (Lio/tlaloc/ir/DxirNode;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun lowerToDxir (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirBuilder;)Lio/tlaloc/ir/DxirNode;
+	public abstract fun lowerToDxir (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirBuilder;Ljava/util/Map;)Lio/tlaloc/ir/DxirNode;
+	public abstract fun mul (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun neg (Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun nest (Lio/tlaloc/ir/passes/SymFn;Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun opaqueFunction (Ljava/lang/String;I)Lio/tlaloc/ir/passes/SymFn;
+	public abstract fun pow (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun product (Lio/tlaloc/ir/passes/SymFn;Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun rational (JJ)Lio/tlaloc/ir/passes/SymExpr;
+	public static synthetic fun rational$default (Lio/tlaloc/ir/passes/SymbolicEngine;JJILjava/lang/Object;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun realLiteral (D)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun simplify (Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun sub (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun substitute (Lio/tlaloc/ir/passes/SymExpr;Ljava/util/Map;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun sum (Lio/tlaloc/ir/passes/SymFn;Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public abstract fun variable (Ljava/lang/String;)Lio/tlaloc/ir/passes/SymExpr;
+}
+
+public final class io/tlaloc/ir/passes/SymbolicEngine$DefaultImpls {
+	public static synthetic fun rational$default (Lio/tlaloc/ir/passes/SymbolicEngine;JJILjava/lang/Object;)Lio/tlaloc/ir/passes/SymExpr;
+}
+
+public final class io/tlaloc/ir/passes/SymbolicEngine$LoweringException : java/lang/RuntimeException {
+	public fun <init> (Ljava/lang/String;)V
+}
+
+public final class io/tlaloc/ir/passes/SymbolicEngines {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/SymbolicEngines;
+	public static final field SYMJA_COORDINATE Ljava/lang/String;
+	public static final field SYMJA_LICENSE Ljava/lang/String;
+	public static final field SYMJA_PROBE_CLASS Ljava/lang/String;
+	public final fun absenceMessage (Ljava/lang/String;)Ljava/lang/String;
+	public final fun getSymjaAvailable ()Z
+	public final fun probe (Ljava/lang/ClassLoader;)Z
+	public final fun symja (Ljava/lang/String;)Lio/tlaloc/ir/passes/SymbolicEngine;
+	public final fun symjaOrNull ()Lio/tlaloc/ir/passes/SymbolicEngine;
+}
+
+public final class io/tlaloc/ir/passes/SymjaEngine : io/tlaloc/ir/passes/SymbolicEngine {
+	public fun <init> ()V
+	public fun add (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun apply (Lio/tlaloc/ir/passes/SymFn;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun closure (Ljava/lang/String;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymFn;
+	public fun collect (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun containsVariable (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Z
+	public fun diff (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun div (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun expand (Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun factor (Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun getVersion ()Ljava/lang/String;
+	public fun liftFunction (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/passes/SymFn;
+	public fun liftNode (Lio/tlaloc/ir/DxirNode;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun lowerToDxir (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirBuilder;)Lio/tlaloc/ir/DxirNode;
+	public fun lowerToDxir (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirBuilder;Ljava/util/Map;)Lio/tlaloc/ir/DxirNode;
+	public fun mul (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun neg (Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun nest (Lio/tlaloc/ir/passes/SymFn;Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun opaqueFunction (Ljava/lang/String;I)Lio/tlaloc/ir/passes/SymFn;
+	public fun pow (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun product (Lio/tlaloc/ir/passes/SymFn;Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun rational (JJ)Lio/tlaloc/ir/passes/SymExpr;
+	public fun realLiteral (D)Lio/tlaloc/ir/passes/SymExpr;
+	public fun simplify (Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun sub (Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun substitute (Lio/tlaloc/ir/passes/SymExpr;Ljava/util/Map;)Lio/tlaloc/ir/passes/SymExpr;
+	public fun sum (Lio/tlaloc/ir/passes/SymFn;Lio/tlaloc/ir/passes/SymExpr;Lio/tlaloc/ir/passes/SymExpr;)Lio/tlaloc/ir/passes/SymExpr;
+	public final fun toDouble (Lio/tlaloc/ir/passes/SymExpr;)D
+	public fun variable (Ljava/lang/String;)Lio/tlaloc/ir/passes/SymExpr;
+}
+
+public final class io/tlaloc/ir/passes/VjpRegistry {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/VjpRegistry;
+	public final fun contains (Lio/tlaloc/ir/OpKind;)Z
+	public final fun get (Lio/tlaloc/ir/OpKind;)Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getAbsRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getAddRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getAllReduceRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getAtanRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getAvgPool2dRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getBroadcastLikeRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getBroadcastRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getCastRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getCheckShapeLikeRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getCompareRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getConcatRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getConv2dRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getConvTranspose2dRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getCosRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getDigammaRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getDivRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getDotRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getEmbeddingRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getExpRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getGatherRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getLgammaRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getLogRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getMatmulRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getMaxPool2dRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getMaxRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getMeanRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getMinRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getMulRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getNegRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getPadLikeRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getPadRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getPadToRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getPolygammaRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getPowRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getReluRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getReshapeRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getReverseRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getRngDrawRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getShardConstraintRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSigmoidRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSignRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSinRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSliceAtRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSliceLikeVjpRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSliceRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSoftmaxRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSparseMatmulRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSqrtRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSubRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSumRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSumToRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSupportedKinds ()Ljava/util/Set;
+	public final fun getTanRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getTanhRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getTransposeRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getTrigammaRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getWhereRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getZerosLikeRule ()Lio/tlaloc/ir/passes/VjpRule;
+}
+
+public abstract interface class io/tlaloc/ir/passes/VjpRule {
+	public abstract fun apply (Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirBuilder;)Ljava/util/List;
+	public abstract fun getReadsPrimalOperandIndices ()Ljava/util/Set;
+	public fun readsPrimalOperands (Lio/tlaloc/ir/DxirOp;)Ljava/util/Set;
+}
+
+public final class io/tlaloc/ir/passes/VjpRule$DefaultImpls {
+	public static fun readsPrimalOperands (Lio/tlaloc/ir/passes/VjpRule;Lio/tlaloc/ir/DxirOp;)Ljava/util/Set;
+}
+
+public final class io/tlaloc/ir/recognizer/CrossEntropyRecognizerKt {
+	public static final fun recognizeCrossEntropy (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeCrossEntropy$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/FlashAttentionRecognizerKt {
+	public static final fun recognizeFlashAttention (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeFlashAttention$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/GroupedQueryAttentionRecognizerKt {
+	public static final fun recognizeGroupedQueryAttention (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeGroupedQueryAttention$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/LayerNormRecognizerKt {
+	public static final fun recognizeLayerNorm (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeLayerNorm$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionDiagnostic {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;I)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()I
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;I)Lio/tlaloc/ir/recognizer/RecognitionDiagnostic;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionDiagnostic;Ljava/lang/String;Ljava/lang/String;IILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionDiagnostic;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getOpId ()I
+	public final fun getPattern ()Ljava/lang/String;
+	public final fun getReason ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract class io/tlaloc/ir/recognizer/RecognitionMatch {
+	public abstract fun getOps ()Ljava/util/List;
+	public abstract fun getPatternName ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionMatch$CrossEntropy : io/tlaloc/ir/recognizer/RecognitionMatch {
+	public fun <init> (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component3 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component4 ()Lio/tlaloc/ir/DxirNode;
+	public final fun copy (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)Lio/tlaloc/ir/recognizer/RecognitionMatch$CrossEntropy;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionMatch$CrossEntropy;Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionMatch$CrossEntropy;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getLabels ()Lio/tlaloc/ir/DxirNode;
+	public final fun getLogits ()Lio/tlaloc/ir/DxirNode;
+	public fun getOps ()Ljava/util/List;
+	public final fun getOutput ()Lio/tlaloc/ir/DxirNode;
+	public fun getPatternName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionMatch$FlashAttention : io/tlaloc/ir/recognizer/RecognitionMatch {
+	public fun <init> (Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;)V
+	public final fun component1 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component2 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component3 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component4 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component5 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component6 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component7 ()Lio/tlaloc/ir/DxirType;
+	public final fun component8 ()Lio/tlaloc/ir/DxirType;
+	public final fun copy (Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;)Lio/tlaloc/ir/recognizer/RecognitionMatch$FlashAttention;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionMatch$FlashAttention;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionMatch$FlashAttention;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getKInput ()Lio/tlaloc/ir/DxirNode;
+	public fun getOps ()Ljava/util/List;
+	public final fun getOutputType ()Lio/tlaloc/ir/DxirType;
+	public fun getPatternName ()Ljava/lang/String;
+	public final fun getPvMatmul ()Lio/tlaloc/ir/DxirOp;
+	public final fun getQInput ()Lio/tlaloc/ir/DxirNode;
+	public final fun getQkMatmul ()Lio/tlaloc/ir/DxirOp;
+	public final fun getScoreType ()Lio/tlaloc/ir/DxirType;
+	public final fun getSoftmax ()Lio/tlaloc/ir/DxirOp;
+	public final fun getVInput ()Lio/tlaloc/ir/DxirNode;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionMatch$GroupedQueryAttention : io/tlaloc/ir/recognizer/RecognitionMatch {
+	public fun <init> (Ljava/util/List;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;ILio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component10 ()I
+	public final fun component11 ()Lio/tlaloc/ir/DxirType;
+	public final fun component12 ()Lio/tlaloc/ir/DxirType;
+	public final fun component2 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component3 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component4 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component5 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component6 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component7 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component8 ()Lio/tlaloc/ir/DxirOp;
+	public final fun component9 ()Lio/tlaloc/ir/DxirOp;
+	public final fun copy (Ljava/util/List;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;ILio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;)Lio/tlaloc/ir/recognizer/RecognitionMatch$GroupedQueryAttention;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionMatch$GroupedQueryAttention;Ljava/util/List;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/DxirOp;ILio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionMatch$GroupedQueryAttention;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getGroupRatio ()I
+	public final fun getKBroadcast ()Lio/tlaloc/ir/DxirOp;
+	public final fun getKRawInput ()Lio/tlaloc/ir/DxirNode;
+	public fun getOps ()Ljava/util/List;
+	public final fun getOutputType ()Lio/tlaloc/ir/DxirType;
+	public fun getPatternName ()Ljava/lang/String;
+	public final fun getPvMatmul ()Lio/tlaloc/ir/DxirOp;
+	public final fun getQInput ()Lio/tlaloc/ir/DxirNode;
+	public final fun getQkMatmul ()Lio/tlaloc/ir/DxirOp;
+	public final fun getScoreType ()Lio/tlaloc/ir/DxirType;
+	public final fun getSoftmax ()Lio/tlaloc/ir/DxirOp;
+	public final fun getVBroadcast ()Lio/tlaloc/ir/DxirOp;
+	public final fun getVRawInput ()Lio/tlaloc/ir/DxirNode;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionMatch$LayerNorm : io/tlaloc/ir/recognizer/RecognitionMatch {
+	public fun <init> (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component3 ()Lio/tlaloc/ir/DxirNode;
+	public final fun copy (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)Lio/tlaloc/ir/recognizer/RecognitionMatch$LayerNorm;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionMatch$LayerNorm;Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionMatch$LayerNorm;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getInput ()Lio/tlaloc/ir/DxirNode;
+	public fun getOps ()Ljava/util/List;
+	public final fun getOutput ()Lio/tlaloc/ir/DxirNode;
+	public fun getPatternName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionMatch$RmsNorm : io/tlaloc/ir/recognizer/RecognitionMatch {
+	public fun <init> (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component3 ()Lio/tlaloc/ir/DxirNode;
+	public final fun copy (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)Lio/tlaloc/ir/recognizer/RecognitionMatch$RmsNorm;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionMatch$RmsNorm;Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionMatch$RmsNorm;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getInput ()Lio/tlaloc/ir/DxirNode;
+	public fun getOps ()Ljava/util/List;
+	public final fun getOutput ()Lio/tlaloc/ir/DxirNode;
+	public fun getPatternName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionMatch$Rope : io/tlaloc/ir/recognizer/RecognitionMatch {
+	public fun <init> (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component3 ()Lio/tlaloc/ir/DxirNode;
+	public final fun copy (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)Lio/tlaloc/ir/recognizer/RecognitionMatch$Rope;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionMatch$Rope;Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionMatch$Rope;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getInput ()Lio/tlaloc/ir/DxirNode;
+	public fun getOps ()Ljava/util/List;
+	public final fun getOutput ()Lio/tlaloc/ir/DxirNode;
+	public fun getPatternName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionMatch$SwiGLU : io/tlaloc/ir/recognizer/RecognitionMatch {
+	public fun <init> (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component3 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component4 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component5 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component6 ()Lio/tlaloc/ir/DxirType;
+	public final fun component7 ()Lio/tlaloc/ir/DxirType;
+	public final fun copy (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;)Lio/tlaloc/ir/recognizer/RecognitionMatch$SwiGLU;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionMatch$SwiGLU;Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionMatch$SwiGLU;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getOps ()Ljava/util/List;
+	public final fun getOutput ()Lio/tlaloc/ir/DxirNode;
+	public final fun getOutputType ()Lio/tlaloc/ir/DxirType;
+	public fun getPatternName ()Ljava/lang/String;
+	public final fun getWGate ()Lio/tlaloc/ir/DxirNode;
+	public final fun getWUp ()Lio/tlaloc/ir/DxirNode;
+	public final fun getXInput ()Lio/tlaloc/ir/DxirNode;
+	public final fun getXType ()Lio/tlaloc/ir/DxirType;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognitionMatch$TransformerMLP : io/tlaloc/ir/recognizer/RecognitionMatch {
+	public fun <init> (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component3 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component4 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component5 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component6 ()Lio/tlaloc/ir/DxirNode;
+	public final fun component7 ()Lio/tlaloc/ir/DxirType;
+	public final fun component8 ()Lio/tlaloc/ir/DxirType;
+	public final fun copy (Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;)Lio/tlaloc/ir/recognizer/RecognitionMatch$TransformerMLP;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/RecognitionMatch$TransformerMLP;Ljava/util/List;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/DxirType;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/RecognitionMatch$TransformerMLP;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getOps ()Ljava/util/List;
+	public final fun getOutput ()Lio/tlaloc/ir/DxirNode;
+	public final fun getOutputType ()Lio/tlaloc/ir/DxirType;
+	public fun getPatternName ()Ljava/lang/String;
+	public final fun getWDown ()Lio/tlaloc/ir/DxirNode;
+	public final fun getWGate ()Lio/tlaloc/ir/DxirNode;
+	public final fun getWUp ()Lio/tlaloc/ir/DxirNode;
+	public final fun getXInput ()Lio/tlaloc/ir/DxirNode;
+	public final fun getXType ()Lio/tlaloc/ir/DxirType;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/RecognizeAllKt {
+	public static final fun recognizeAll (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeAll$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/RmsNormRecognizerKt {
+	public static final fun recognizeRmsNorm (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeRmsNorm$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/RopeRecognizerKt {
+	public static final fun recognizeRope (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeRope$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/SwiGLURecognizerKt {
+	public static final fun recognizeSwiGLU (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeSwiGLU$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/TransformerMLPRecognizerKt {
+	public static final fun recognizeTransformerMLP (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun recognizeTransformerMLP$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/coarsener/CoarsenedBundle {
+	public fun <init> (Ljava/util/Set;ILjava/util/List;Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/DxirFunction;Ljava/util/Set;)V
+	public final fun component1 ()Ljava/util/Set;
+	public final fun component2 ()I
+	public final fun component3 ()Ljava/util/List;
+	public final fun component4 ()Lio/tlaloc/ir/DxirFunction;
+	public final fun component5 ()Lio/tlaloc/ir/DxirFunction;
+	public final fun component6 ()Ljava/util/Set;
+	public final fun copy (Ljava/util/Set;ILjava/util/List;Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/DxirFunction;Ljava/util/Set;)Lio/tlaloc/ir/recognizer/coarsener/CoarsenedBundle;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/coarsener/CoarsenedBundle;Ljava/util/Set;ILjava/util/List;Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/DxirFunction;Ljava/util/Set;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/coarsener/CoarsenedBundle;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAbsorbedOpIds ()Ljava/util/Set;
+	public final fun getAnchorOpId ()I
+	public final fun getGradientBody ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getOuterOperands ()Ljava/util/List;
+	public final fun getPrimalBody ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getReadsPrimalIndices ()Ljava/util/Set;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/coarsener/DecomposeCoarsenedKt {
+	public static final fun decomposeCoarsened (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public abstract interface class io/tlaloc/ir/recognizer/coarsener/PatternCoarsener {
+	public abstract fun coarsen (Lio/tlaloc/ir/recognizer/RecognitionMatch;)Lio/tlaloc/ir/recognizer/coarsener/CoarsenedBundle;
+}
+
+public final class io/tlaloc/ir/recognizer/coarsener/VjpCoarsenerKt {
+	public static final fun coarsenRecognizedPatterns (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/util/Map;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun coarsenRecognizedPatterns$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public static final fun getDefaultCoarseners ()Ljava/util/Map;
+}
+
+public final class io/tlaloc/ir/recognizer/cost/CostEstimate {
+	public static final field Companion Lio/tlaloc/ir/recognizer/cost/CostEstimate$Companion;
+	public fun <init> (DD)V
+	public final fun component1 ()D
+	public final fun component2 ()D
+	public final fun copy (DD)Lio/tlaloc/ir/recognizer/cost/CostEstimate;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/cost/CostEstimate;DDILjava/lang/Object;)Lio/tlaloc/ir/recognizer/cost/CostEstimate;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getArithmeticIntensity ()D
+	public final fun getBytesMoved ()D
+	public final fun getFlops ()D
+	public fun hashCode ()I
+	public final fun plus (Lio/tlaloc/ir/recognizer/cost/CostEstimate;)Lio/tlaloc/ir/recognizer/cost/CostEstimate;
+	public final fun roofineSeconds (Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;D)D
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/cost/CostEstimate$Companion {
+	public final fun getZERO ()Lio/tlaloc/ir/recognizer/cost/CostEstimate;
+}
+
+public final class io/tlaloc/ir/recognizer/cost/CostModelKt {
+	public static final fun estimateCost (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/recognizer/cost/CostEstimate;
+	public static final fun estimateOp (Lio/tlaloc/ir/DxirOp;)Lio/tlaloc/ir/recognizer/cost/CostEstimate;
+	public static final fun estimateRooflineMicros (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;)D
+}
+
+public final class io/tlaloc/ir/recognizer/cost/DeviceDescriptor {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;DDLjava/lang/Double;DJJILjava/util/Map;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;DDLjava/lang/Double;DJJILjava/util/Map;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component10 ()Ljava/util/Map;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()D
+	public final fun component4 ()D
+	public final fun component5 ()Ljava/lang/Double;
+	public final fun component6 ()D
+	public final fun component7 ()J
+	public final fun component8 ()J
+	public final fun component9 ()I
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;DDLjava/lang/Double;DJJILjava/util/Map;)Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;Ljava/lang/String;Ljava/lang/String;DDLjava/lang/Double;DJJILjava/util/Map;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExtras ()Ljava/util/Map;
+	public final fun getHbmBandwidthBytesPerSec ()D
+	public final fun getHbmCapacityBytes ()J
+	public final fun getName ()Ljava/lang/String;
+	public final fun getOnChipSramBytes ()J
+	public final fun getPeakFlopsBf16 ()D
+	public final fun getPeakFlopsF32 ()D
+	public final fun getPeakFlopsFp8 ()Ljava/lang/Double;
+	public final fun getSmOrCoreCount ()I
+	public final fun getVendor ()Ljava/lang/String;
+	public fun hashCode ()I
+	public final fun peakBf16FlopsPerByte ()D
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/cost/DeviceDescriptors {
+	public static final field INSTANCE Lio/tlaloc/ir/recognizer/cost/DeviceDescriptors;
+	public final fun byName (Ljava/lang/String;)Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getA100 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getAll ()Ljava/util/List;
+	public final fun getB100 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getB200 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getCPU_GENERIC ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getGB10 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getH100 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getTPU_V4 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getTPU_V5E ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getTPU_V6E ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getTRAINIUM2 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+}
+
+public final class io/tlaloc/ir/recognizer/fusion/TileFusionKt {
+	public static final fun annotateTileGroups (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/DxirFunction;
+	public static final fun identifyTileGroups (Lio/tlaloc/ir/DxirFunction;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/recognizer/fusion/TileGroup {
+	public fun <init> (ILjava/util/List;Lio/tlaloc/ir/DxirType;)V
+	public final fun component1 ()I
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Lio/tlaloc/ir/DxirType;
+	public final fun copy (ILjava/util/List;Lio/tlaloc/ir/DxirType;)Lio/tlaloc/ir/recognizer/fusion/TileGroup;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/fusion/TileGroup;ILjava/util/List;Lio/tlaloc/ir/DxirType;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/fusion/TileGroup;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getGroupId ()I
+	public final fun getOpIds ()Ljava/util/List;
+	public final fun getSharedShape ()Lio/tlaloc/ir/DxirType;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/AttentionKernelKt {
+	public static final fun getAttentionKernel ()Lio/tlaloc/ir/recognizer/kernel/KernelTemplate;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/CrossEntropyKernelKt {
+	public static final fun getCrossEntropyKernel ()Lio/tlaloc/ir/recognizer/kernel/KernelTemplate;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/KernelDescriptor {
+	public static final field ATTR_KEY Ljava/lang/String;
+	public static final field Companion Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/util/Map;
+	public final fun component5 ()Z
+	public final fun component6 ()Ljava/util/List;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;)Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCustomCallAttrs ()Ljava/util/Map;
+	public final fun getKernelName ()Ljava/lang/String;
+	public final fun getScratchResults ()Ljava/util/List;
+	public final fun getTargetArch ()Ljava/lang/String;
+	public final fun getTypedFfi ()Z
+	public final fun getVendor ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/KernelDescriptor$Companion {
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/KernelLoweringKt {
+	public static final fun getDefaultInferenceKernelTemplates ()Ljava/util/Map;
+	public static final fun getDefaultKernelTemplates ()Ljava/util/Map;
+	public static final fun getKptxInferenceKernelTemplates ()Ljava/util/Map;
+	public static final fun lowerKernelChoice (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;Ljava/util/Map;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun lowerKernelChoice$default (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/KernelResolution {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/util/Map;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;)Lio/tlaloc/ir/recognizer/kernel/KernelResolution;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/kernel/KernelResolution;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/KernelResolution;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBackendId ()Ljava/lang/String;
+	public final fun getImplementation ()Ljava/lang/String;
+	public final fun getNotes ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class io/tlaloc/ir/recognizer/kernel/KernelResolver {
+	public abstract fun getBackendId ()Ljava/lang/String;
+	public abstract fun resolve (Ljava/lang/String;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;)Lio/tlaloc/ir/recognizer/kernel/KernelResolution;
+	public static synthetic fun resolve$default (Lio/tlaloc/ir/recognizer/kernel/KernelResolver;Ljava/lang/String;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/KernelResolution;
+	public abstract fun supports (Ljava/lang/String;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;)Z
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/KernelResolver$DefaultImpls {
+	public static synthetic fun resolve$default (Lio/tlaloc/ir/recognizer/kernel/KernelResolver;Ljava/lang/String;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/KernelResolution;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/KernelResolverRegistry {
+	public static final field INSTANCE Lio/tlaloc/ir/recognizer/kernel/KernelResolverRegistry;
+	public final fun clear ()V
+	public final fun preferred (Ljava/lang/String;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;)Lio/tlaloc/ir/recognizer/kernel/KernelResolution;
+	public static synthetic fun preferred$default (Lio/tlaloc/ir/recognizer/kernel/KernelResolverRegistry;Ljava/lang/String;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/KernelResolution;
+	public final fun register (Lio/tlaloc/ir/recognizer/kernel/KernelResolver;)V
+	public final fun registered ()Ljava/util/List;
+	public final fun resolveAll (Ljava/lang/String;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;)Ljava/util/List;
+	public static synthetic fun resolveAll$default (Lio/tlaloc/ir/recognizer/kernel/KernelResolverRegistry;Ljava/lang/String;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/util/Map;ILjava/lang/Object;)Ljava/util/List;
+	public final fun unregister (Ljava/lang/String;)Z
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/KernelTarget {
+	public static final field Companion Lio/tlaloc/ir/recognizer/kernel/KernelTarget$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getArch ()Ljava/lang/String;
+	public final fun getVendor ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/KernelTarget$Companion {
+	public final fun getAMD_MI300X ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getAWS_TRAINIUM2 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getCPU_GENERIC ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getGOOGLE_TPU_V4 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getGOOGLE_TPU_V5E ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getGOOGLE_TPU_V5P ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getGOOGLE_TPU_V6E ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getNVIDIA_A100 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getNVIDIA_B100 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getNVIDIA_B200 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getNVIDIA_GB10 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getNVIDIA_H100 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getNVIDIA_L40S ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+}
+
+public abstract interface class io/tlaloc/ir/recognizer/kernel/KernelTemplate {
+	public abstract fun pickFor (Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;)Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/PagedAttentionKernelKt {
+	public static final fun getPagedAttentionKernel ()Lio/tlaloc/ir/recognizer/kernel/KernelTemplate;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/RmsNormKernelKt {
+	public static final fun getRmsNormKernel ()Lio/tlaloc/ir/recognizer/kernel/KernelTemplate;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/RopeKernelKt {
+	public static final fun getRopeKernel ()Lio/tlaloc/ir/recognizer/kernel/KernelTemplate;
+}
+
+public final class io/tlaloc/ir/recognizer/quant/KvQuantApplyKt {
+	public static final fun applyKvQuant (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;)Lio/tlaloc/ir/DxirFunction;
+	public static final fun applyKvQuantWithDiagnostics (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;)Lkotlin/Pair;
+}
+
+public final class io/tlaloc/ir/recognizer/quant/KvQuantConfig {
+	public static final field ATTR_KEY Ljava/lang/String;
+	public static final field Companion Lio/tlaloc/ir/recognizer/quant/KvQuantConfig$Companion;
+	public fun <init> (Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;)V
+	public final fun component1 ()Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public final fun component2 ()Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;
+	public final fun copy (Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;)Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getDtype ()Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public final fun getScaleStrategy ()Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/quant/KvQuantConfig$Companion {
+	public final fun getFP8_PER_HEAD ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+	public final fun getINT8_PER_TENSOR ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
+}
+
+public final class io/tlaloc/ir/recognizer/quant/KvQuantDiagnostic {
+	public fun <init> (ILjava/lang/String;)V
+	public final fun component1 ()I
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (ILjava/lang/String;)Lio/tlaloc/ir/recognizer/quant/KvQuantDiagnostic;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/quant/KvQuantDiagnostic;ILjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/quant/KvQuantDiagnostic;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCoarsenedOpId ()I
+	public final fun getReason ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/quant/KvQuantDtype : java/lang/Enum {
+	public static final field BF16 Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public static final field F32 Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public static final field FP8_E4M3 Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public static final field FP8_E5M2 Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public static final field INT4 Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public static final field INT8 Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public final fun getBitsPerElement ()I
+	public final fun getCodeMax ()I
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getNameTag ()Ljava/lang/String;
+	public final fun isIntegerCoded ()Z
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+	public static fun values ()[Lio/tlaloc/ir/recognizer/quant/KvQuantDtype;
+}
+
+public final class io/tlaloc/ir/recognizer/quant/KvScaleStrategy : java/lang/Enum {
+	public static final field PER_HEAD Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;
+	public static final field PER_TENSOR Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;
+	public static fun values ()[Lio/tlaloc/ir/recognizer/quant/KvScaleStrategy;
+}
+
+public final class io/tlaloc/ir/render/KotlinRenderRefusal : java/lang/IllegalStateException {
+	public fun <init> (Ljava/lang/String;)V
+}
+
+public final class io/tlaloc/ir/render/KotlinSourceRendererKt {
+	public static final fun renderKotlinSource (Lio/tlaloc/ir/DxirFunction;)Ljava/lang/String;
+	public static final fun toKotlinSource (Lio/tlaloc/ir/DxirFunction;)Ljava/lang/String;
+}
+

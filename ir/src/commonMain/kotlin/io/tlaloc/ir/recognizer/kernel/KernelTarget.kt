@@ -1,5 +1,7 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
+
 /**
  * Layer 3 §0.4.253+ — identifies the device target a kernel template
  * picks against. Carries (vendor, arch) — the discriminator a vendor
@@ -25,6 +27,7 @@ package io.tlaloc.ir.recognizer.kernel
  *   match a vendor-wide fallback (e.g. a portable CUDA kernel that runs
  *   on any sm_70+ arch).
  */
+@ExperimentalTlalocApi
 data class KernelTarget(
     val vendor: String,
     val arch: String?,

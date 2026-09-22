@@ -14,7 +14,7 @@ from source and consume from `mavenLocal` (see
 `0.1.0-alpha01` means: **the engine is certified, the surface is not settled.**
 
 Those are different claims and the repository keeps them apart on purpose. The
-2,345 automated tests at HEAD pin behaviour — gradients against analytic and
+2,522 automated tests at HEAD pin behaviour — gradients against analytic and
 cross-implementation oracles, a real TinyLlama matching HuggingFace token for
 token, RNG bit-exact against JAX's threefry stream. None of that pins *names*. A
 function whose result is certified correct may still be renamed, moved to another
@@ -23,6 +23,41 @@ module, or given a different parameter order in `0.1.0-alpha02`.
 Version numbers before `1.0.0` carry no compatibility guarantee under SemVer
 §4, and Tlaloc takes that literally rather than pretending the minor number
 means something it does not.
+
+### Two things added in §0.4.505 make that sentence less blunt
+
+The paragraph above grades a surface with thousands of oracle tests behind it
+exactly the same as a surface nothing has ever executed, which is honest but not
+useful. Two mechanisms now separate them.
+
+- **`@ExperimentalTlalocApi`** — a `@RequiresOptIn(ERROR)` marker (declared in
+  `:core`) on the part of the surface that is *provisional*, meaning it may change
+  **shape**, not merely signature. Three surfaces carry it, each for a stated
+  reason: the four-worlds scope taxonomy (`KernelScope`, `OrchestrationScope`,
+  `ProgramScope`, `ClusterScope`, `Tlaloc`, `BufferHandle`, `HandleRef` — its own
+  KDoc scopes it to v1 and names Kotlin's context parameters as where it would
+  have to go); the collective attribute convention (`io.tlaloc.ir.AllReduceAttrs`
+  — distributed execution is 📐 in [CAPABILITIES.md](CAPABILITIES.md) and has
+  never run on two hosts); and the kernel-choice and cost-model surface
+  (`io.tlaloc.ir.recognizer.kernel`, `io.tlaloc.ir.recognizer.cost` — the
+  machinery is unit-certified but its *purpose* is picking a kernel, and the one
+  kernel measured against XLA lost at small shapes). Touching any of them without
+  `@OptIn(ExperimentalTlalocApi::class)` is a compile error that names the marker
+  and points here. **`grad`, the op surface and `:nn` do NOT carry it**, on
+  purpose: an annotation on everything teaches you to opt in once and stop
+  reading.
+- **An ABI baseline.** `api/<module>.api` is committed and `./gradlew apiCheck`
+  (wired into `check`) fails on any difference, so a break is a reviewed diff
+  rather than a surprise. It covers `:core`, `:ir`, `:autograd`, `:nn`,
+  `:stablehlo` and `:maestro` — the modules a consumer compiles against.
+  binary-compatibility-validator 0.18.2 cannot read Java 25 bytecode
+  (`Unsupported class file major version 69`), so the five 25-targeted modules —
+  `:runtime-pjrt`, `:runtime-cuda`, `:kptx`, `:runtime-iree`, `:compiler-plugin` —
+  are **not** covered. That is a tool limit, stated rather than glossed.
+
+Neither mechanism weakens anything below: an API with no marker on it is still
+free to change in any alpha. What they add is a *signal* about which ones will,
+and a *record* when one does.
 
 ## What may break, without a deprecation cycle
 
@@ -67,6 +102,11 @@ a list of things this policy could not keep.
   it.
 - **Licensing does not change retroactively.** Apache-2.0 for everything Tlaloc
   publishes; a change would apply to later versions only.
+- **A break in the covered modules' ABI leaves a trace.** `api/*.api` is a
+  committed baseline and `apiCheck` runs inside `./gradlew test`, so a change to
+  `:core`, `:ir`, `:autograd`, `:nn`, `:stablehlo` or `:maestro`'s public ABI
+  cannot land without a matching `apiDump` in the same commit. This is not a
+  promise not to break; it is a promise that breaking is visible.
 
 ## What a consumer should do about it
 

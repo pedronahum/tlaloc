@@ -1,5 +1,6 @@
 package io.tlaloc.ir.recognizer.cost
 
+import io.tlaloc.core.ExperimentalTlalocApi
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.ir.DxirConst
@@ -42,6 +43,7 @@ import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
  * micro-models — the cost model is a *relative* estimator, not a
  * benchmark.
  */
+@ExperimentalTlalocApi
 fun estimateCost(fn: DxirFunction): CostEstimate {
     var total = CostEstimate.ZERO
     for (node in fn.body) {
@@ -56,6 +58,7 @@ fun estimateCost(fn: DxirFunction): CostEstimate {
  * estimate respects whether a [KernelDescriptor] is annotated (fused
  * memory cost) or absent (decompose-equivalent cost).
  */
+@ExperimentalTlalocApi
 fun estimateOp(op: DxirOp): CostEstimate {
     if (op.op == OpKind.COARSENED) return estimateCoarsened(op)
 
@@ -365,6 +368,7 @@ internal fun dominantDeviceFlops(fn: DxirFunction, device: DeviceDescriptor): Do
  * Convenience: roofline-style time estimate for [fn] on [device], in
  * microseconds. Picks the dominant-dtype peak automatically.
  */
+@ExperimentalTlalocApi
 fun estimateRooflineMicros(fn: DxirFunction, device: DeviceDescriptor): Double {
     val cost = estimateCost(fn)
     val peak = dominantDeviceFlops(fn, device)

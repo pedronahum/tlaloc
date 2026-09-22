@@ -27,8 +27,11 @@ than JAX or PyTorch:
   back to you as Kotlin source — and that source compiles, runs, and is
   bit-identical to what the compiler produced.
 - **Shape bugs are compile errors.** Rank, dtype and *axis names* live in the
-  Kotlin type system, so a transposed weight is a red squiggle in the IDE
-  instead of a stack trace in production.
+  Kotlin type system, so a transposed weight fails your **build**, at the line
+  and column of the offending call, instead of throwing in production. (In an
+  IDE running Kotlin's K2 analysis that is the same diagnostic and should appear
+  as a redline while you type — expected, and the one part of this we do not
+  test. See [Maturity](#maturity).)
 - **Deployment is an artifact, not a runtime.** A compiled model is a directory
   of StableHLO. Serving it needs a PJRT plugin `.so` and a driver — no JVM, no
   Python framework, nothing of Tlaloc left in the process.
@@ -41,7 +44,7 @@ val g = grad { a: DTensor<Rank2<Sym, Sym>, F32> -> (a matmul a).sum().toFloat() 
 [PJRT]: https://openxla.org/xla/pjrt
 [IREE]: https://iree.dev
 
-> **Alpha — `0.1.0-alpha01`.** The engine is real and heavily tested (2,345
+> **Alpha — `0.1.0-alpha01`.** The engine is real and heavily tested (2,522
 > automated tests at HEAD, including live GPU runs on an NVIDIA GB10); the
 > *packaging* is newer than the engine. Nothing is on Maven Central yet — you
 > build from source and consume from `mavenLocal`, and the release wiring is in
@@ -156,8 +159,12 @@ val hidden = contract(activations, weights)   // OK: they share `SeqLen`
 Swap the weights for a `Hidden × Hidden` matrix and the call does not resolve —
 Kotlin's own type checker rejects it, before any Tlaloc code runs. The plugin
 adds diagnostics of its own on top (`NAMED_INDEX_MISMATCH`,
-`TENSOR_SHAPE_MISMATCH`, `NOT_DIFFERENTIABLE`), all of them build errors with
-IDE squiggles. → [`examples/named-indices`](examples/named-indices/)
+`TENSOR_SHAPE_MISMATCH`, `NOT_DIFFERENTIABLE`), all of them **build errors
+reported at the offending call's own file, line and column** —
+`DiagnosticSourcePositionTest` pins the position, not just the message. An IDE in
+K2 mode runs these same FIR checkers and should draw a squiggle there; that last
+step is expected rather than tested, and this README says so rather than
+implying a screenshot. → [`examples/named-indices`](examples/named-indices/)
 
 And a body the plugin cannot **lower** at all is a build error too, carrying the
 lowering's own reason (`captured value 'gain' is not a compile-time constant (it is
@@ -201,7 +208,7 @@ A `grad {}` that lowers produces **no Tlaloc output whatsoever** — no warnings
 no IR dumps, nothing. That is worth stating because until `0.1.0-alpha01` it was
 false: every single `grad {}` put two IR dumps in the consumer's build log, and
 any project compiling with `allWarningsAsErrors = true` could not build at all.
-The dumps are still one flag away (`dumpLoweredIr=true`), and the four plugin
+The dumps are still one flag away (`dumpLoweredIr=true`), and the five plugin
 options are tabulated in
 [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md#4a-plugin-options).
 
@@ -431,7 +438,9 @@ this:
 | StableHLO + Shardy emission, PJRT from Kotlin (FFM) and Python (ctypes), IREE | ✅ | No JNI anywhere |
 | KPTX — PTX DSL, parser, transpiler, kernel claiming | ✅ | Paged attention: **1.4–1.9× faster than XLA** at 8B-shaped decode points, 1.6–1.8× slower at toy shapes. Not registered by default — opt in per shape, at shapes you measured |
 | Google TPU | 🧪 | Plugin lane, gating and a self-skipping smoke suite exist; **nothing has ever run on a TPU** |
-| Distributed / multi-GPU training | 📐 | Design and marshalling done; needs 2+ hosts |
+| Distributed / multi-GPU training | 📐 | Design and marshalling done; needs 2+ hosts. The collective attribute surface carries `@ExperimentalTlalocApi` |
+| IDE diagnostics — the "red squiggle" | 🧪 | What IS certified: the plugin's errors carry the offending call's own **file, line and column** (`DiagnosticSourcePositionTest`), and a build fails on them. What is NOT: no test drives IntelliJ. A K2-mode IDE runs the same FIR checkers, so the redline is *expected* there — expected, not measured |
+| Public API surface — opt-in marker, ABI baseline, API reference | ✅ | `@ExperimentalTlalocApi` (`@RequiresOptIn(ERROR)`) on the three provisional surfaces, refused-consumer test included; `apiCheck` against a committed `api/*.api` baseline, wired into `check`; `./gradlew apiDocs` for the aggregated Dokka site. The baseline covers the six Java-21 modules — the validator cannot read Java 25 bytecode |
 | Android / iOS / WASM | ❌ | The modules are KMP-structured, which makes these reachable later; no such target is declared or built |
 
 The full row-by-row matrix, with what pins each row, is in
@@ -444,11 +453,21 @@ The full row-by-row matrix, with what pins each row, is in
   been published to Central**, so you still build from source and consume from
   `mavenLocal`. APIs move without deprecation
   ([COMPATIBILITY.md](docs/COMPATIBILITY.md)).
-- **One copyleft dependency you inherit.** `ir-jvm` carries Symja
-  (LGPL-3.0 per its POM) at runtime scope, with no supported way to opt out yet.
-  See [License](#license).
+- **One copyleft dependency, and you no longer inherit it.** Symja (LGPL-3.0 per
+  its POM) was a `runtime` dependency of `ir-jvm` until §0.4.503 made it
+  `compileOnly`; it is not in your dependency graph unless you put it there, and
+  three tripwire tests keep it out of the POM. What is *not* fixed: there is no
+  Symja-free `SymbolicEngine`, so if your policy forbids LGPL outright you have no
+  CAS and cannot differentiate a loop whose trip count is not a compile-time
+  constant. Tlaloc tells you by name on the day you need it. See
+  [License](#license).
 - **JVM only today.**
 - **No Python API.** Interop is via StableHLO artifacts, not bindings.
+- **No IDE plugin, and nobody has run the IDE.** The compile-time diagnostics are
+  certified down to their source positions, but "red squiggle" is an inference
+  from how K2 analysis works, not a tested claim.
+- **No hosted documentation.** `./gradlew apiDocs` builds the API reference
+  locally; there is no site and no MkDocs book.
 - **Not a PyTorch clone.** The model layer targets DiffKT's surface, not `torch.nn`'s.
 - **The interpreter is a correctness engine, not a fast CPU backend.** Performance
   claims mean the compiled GPU path.
@@ -462,6 +481,7 @@ The full row-by-row matrix, with what pins each row, is in
 
 | | |
 |---|---|
+| **API reference** | Not hosted — generated locally: `./gradlew apiDocs` writes an aggregated Dokka site for all eleven published modules to `build/docs/api/index.html` (2,898 pages at §0.4.505) |
 | [GETTING_STARTED.md](docs/GETTING_STARTED.md) | Install, first gradient, first compile error |
 | [CAPABILITIES.md](docs/CAPABILITIES.md) | The full capability matrix and what certifies each row |
 | [READABLE_REVERSE.md](docs/READABLE_REVERSE.md) | Generated gradient source, side by side with its input |
@@ -484,9 +504,18 @@ The full row-by-row matrix, with what pins each row, is in
 ./gradlew test --rerun-tasks      # a true clean-room re-run
 bash scripts/count-tests.sh       # aggregate count across modules
 bash scripts/onboarding-smoke.sh  # publish + run the quickstart, end to end
-./gradlew verifyPomMetadata        # every POM still carries what Maven Central mandates
-./gradlew verifyJvmTarget          # every class is the bytecode version the module claims
+./gradlew verifyPomMetadata       # every POM still carries what Maven Central mandates
+./gradlew verifyJvmTarget         # every class is the bytecode version the module claims
+./gradlew apiCheck                # the public ABI still matches the committed api/*.api baseline
+./gradlew apiDump                 # re-baseline it — the deliberate act that records a break
+./gradlew apiDocs                 # the aggregated API reference → build/docs/api/index.html
 ```
+
+`verifyPomMetadata`, `verifyJvmTarget` and `apiCheck` are wired into `check`, so
+`./gradlew test` runs all three. `apiCheck` covers the six Java-21-targeted
+modules only: binary-compatibility-validator 0.18.2 cannot read Java 25 bytecode
+(`Unsupported class file major version 69`), which is a measured limit, not a
+choice — see [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
 
 Two flags exist for the CI lanes and work by hand:
 
@@ -548,24 +577,34 @@ the op surface's parity target, is MIT — permissive either way, and Tlaloc
 consumes its *surface*, not its code.)
 
 **The one dependency that needs a paragraph.** The Stage B symbolic engine is
-Symja (`org.matheclipse:matheclipse-core:3.1.1`), a runtime dependency of
-`io.tlaloc:ir-jvm`. Its published POM declares **LGPL-3.0**, which is what a
-consumer's license scanner reads and which permits exactly what Tlaloc does:
-link it, never fork or patch it. Upstream's *repository* root `license.txt` is
-plain **GPL-3.0** — upstream's stated position is that the published maven
-modules are LGPL while the repository as a whole (including the Android
-application parts Tlaloc does not consume) is GPL. We rely on the POM and that
-statement; a Central release should get it in writing rather than inferred.
+Symja (`org.matheclipse:matheclipse-core:3.1.1`). Its published POM declares
+**LGPL-3.0**, which is what a consumer's license scanner reads and which permits
+exactly what Tlaloc does: link it, never fork or patch it. Upstream's
+*repository* root `license.txt` is plain **GPL-3.0** — upstream's stated position
+is that the published maven modules are LGPL while the repository as a whole
+(including the Android application parts Tlaloc does not consume) is GPL. We rely
+on the POM and that statement; a Central release should get it in writing rather
+than inferred.
 
-Two things limit the blast radius today, and one does not:
+Three things limit the blast radius, and one does not:
 
+- **It is not in your dependency graph.** Symja was a `runtime` dependency of
+  `io.tlaloc:ir-jvm` until §0.4.503 made it `compileOnly`. It is absent from the
+  published POM and module metadata, three tripwire tests keep it absent, and a
+  body that genuinely needs the CAS refuses *by name*, printing the coordinate,
+  the licence and the one line to add. (This paragraph said the opposite until
+  §0.4.505 — §0.4.503 changed the dependency and did not come back here.)
 - `SymbolicEngine` is an interface in `commonMain`, so every non-JVM target is
   Symja-free by construction, and no Tlaloc production code outside
   `SymjaEngine` itself references Symja — φ-calculus coarsening takes the engine
   as a parameter.
-- What is *not* limited: `ir-jvm`'s POM carries Symja as a `runtime` dependency,
-  so a consumer who cannot take a copyleft dependency at all inherits it anyway.
-  No Symja-free `SymbolicEngine` implementation ships, so there is no supported
-  way to opt out yet.
+- Tlaloc links Symja and never patches it, which is the condition LGPL-3.0
+  attaches to use from non-LGPL code.
+- What is *not* limited: **no Symja-free `SymbolicEngine` implementation ships.**
+  A consumer whose policy forbids LGPL-3.0 outright therefore has no CAS at all,
+  and cannot differentiate a loop whose trip count is not a compile-time
+  constant. `docs/STAGE_B_PLAN.md` §5.3 names "a custom Kotlin CAS" as the
+  fallback; nobody has written it.
 
-Tracked as an open item in [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
+Tracked as an open item in [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md) and in
+[DIFFKTX_SPEC.md](DIFFKTX_SPEC.md) §18.

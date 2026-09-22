@@ -1,5 +1,7 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
+
 /**
  * KPTX v1.8 (§0.4.336) — RMS-norm kernel selector for the **KPTX tier**:
  * Tlaloc's own hand-written PTX kernels dispatched through
@@ -28,6 +30,7 @@ package io.tlaloc.ir.recognizer.kernel
  * production GPU path (v2+, after the DSL rewrite claims coarse ops
  * wholesale — KPTX plan task 15).
  */
+@ExperimentalTlalocApi
 val RmsNormKernel: KernelTemplate = KernelTemplate { coarsened, target ->
     val x = coarsened.operands.firstOrNull()
     when {

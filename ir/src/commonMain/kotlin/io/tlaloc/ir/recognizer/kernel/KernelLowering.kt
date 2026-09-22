@@ -1,5 +1,6 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirFunction
@@ -62,6 +63,7 @@ import io.tlaloc.ir.OpKind
  * [FlashAttentionKernel]. Add patterns by adding a new file +
  * registry entry, mirroring the L3.2 coarsener registry pattern.
  */
+@ExperimentalTlalocApi
 fun lowerKernelChoice(
     fn: DxirFunction,
     target: KernelTarget,
@@ -265,6 +267,7 @@ private fun inlineCoarsenedPrimal(
  * v1 default registry — mirrors L3.2's `defaultCoarseners`. One entry
  * per recognized pattern. Adding a pattern = new file + one entry.
  */
+@ExperimentalTlalocApi
 val defaultKernelTemplates: Map<String, KernelTemplate> = mapOf(
     "FlashAttention" to FlashAttentionKernel,
 )
@@ -283,12 +286,14 @@ val defaultKernelTemplates: Map<String, KernelTemplate> = mapOf(
  * ([kptxInferenceKernelTemplates]), matching what every KPTX COARSENED
  * template already does.
  */
+@ExperimentalTlalocApi
 val defaultInferenceKernelTemplates: Map<OpKind, KernelTemplate> = emptyMap()
 
 /**
  * §0.4.471 — the KPTX inference lane: pass this as `inferenceRegistry`
  * on a pipeline whose runtime has registered the matching launch chains.
  */
+@ExperimentalTlalocApi
 val kptxInferenceKernelTemplates: Map<OpKind, KernelTemplate> = mapOf(
     OpKind.PAGED_ATTENTION to PagedAttentionKernel,
 )

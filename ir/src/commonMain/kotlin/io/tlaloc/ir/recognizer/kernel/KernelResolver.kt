@@ -1,5 +1,7 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import io.tlaloc.core.ExperimentalTlalocApi
+
 /**
  * Layer 4 §0.4.270 — backend-agnostic resolution of `kernel_descriptor`
  * names to concrete implementations.
@@ -43,6 +45,7 @@ package io.tlaloc.ir.recognizer.kernel
  * A future JVM-side helper module can wrap `ServiceLoader` over this
  * interface for production deployments that want auto-discovery.
  */
+@ExperimentalTlalocApi
 interface KernelResolver {
     /**
      * Stable identifier for the backend (e.g. `"iree"`, `"pjrt-xla"`).
@@ -87,6 +90,7 @@ interface KernelResolver {
  *   consume — e.g. `"requires_sm" to "100"` to flag a Blackwell-only
  *   path, or `"fp8_supported" to true`.
  */
+@ExperimentalTlalocApi
 data class KernelResolution(
     val backendId: String,
     val implementation: String,
@@ -102,6 +106,7 @@ data class KernelResolution(
  * will replace `preferred` with a cost-aware picker that scores each
  * resolution from [resolveAll] against the active [DeviceDescriptor].
  */
+@ExperimentalTlalocApi
 object KernelResolverRegistry {
     private val resolvers = mutableListOf<KernelResolver>()
 

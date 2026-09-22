@@ -25,6 +25,19 @@
  *       ingests;
  *   [4] points at the two programs that do NOT compile.
  */
+// §0.4.505 — THE OPT-IN, and why one line of ceremony is here.
+//
+// Tlaloc marks the four-worlds scope taxonomy with `@ExperimentalTlalocApi`, a
+// `@RequiresOptIn(ERROR)` marker: the taxonomy's own KDoc says "v1 keeps each op
+// single-scope", and a multi-scope op would move the whole design onto Kotlin's
+// context parameters — a rewrite of every signature below. Delete the line and
+// this file stops compiling, with an error that says that.
+//
+// `docs/COMPATIBILITY.md` grades every alpha API alike. This annotation is how the
+// ones that may change SHAPE, not just signature, say so in the type system.
+@file:OptIn(ExperimentalTlalocApi::class)
+
+import io.tlaloc.core.ExperimentalTlalocApi
 import java.io.File
 import io.tlaloc.autograd.relu
 import io.tlaloc.autograd.sum
