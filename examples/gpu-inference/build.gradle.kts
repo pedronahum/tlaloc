@@ -8,15 +8,15 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.tlaloc:core:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:ir:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:core:0.1.0-alpha01")
+    implementation("io.tlaloc:ir:0.1.0-alpha01")
     // The exporter and the manifest: ServingArtifactWriter, ServingManifest,
     // ReferenceDecodeGraph, HfLlamaServingExport. This example's Kotlin half is
     // ~100 lines around these, and the whole point of the example is that the
     // Kotlin half STOPS once the directory exists.
-    implementation("io.tlaloc:maestro:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:maestro:0.1.0-alpha01")
     // StableHLO emission — the exporter writes the bodies through it.
-    implementation("io.tlaloc:stablehlo:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:stablehlo:0.1.0-alpha01")
 
     // NOTE what is NOT here: `io.tlaloc:runtime-pjrt`. The exporting process
     // never executes anything, never loads a PJRT plugin and never touches the

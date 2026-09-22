@@ -4,7 +4,7 @@
 
 **Differentiable programming for Kotlin — compiled, typed, and readable.**
 
-[Quickstart](#quickstart) · [Transformations](#transformations) · [Installation](#installation) · [Examples](examples/) · [Docs](#documentation) · [Maturity](#maturity)
+[Quickstart](#quickstart) · [Transformations](#transformations) · [Installation](#installation) · [Examples](examples/) · [Docs](#documentation) · [Maturity](#maturity) · [License](#license)
 
 </div>
 
@@ -41,11 +41,14 @@ val g = grad { a: DTensor<Rank2<Sym, Sym>, F32> -> (a matmul a).sum().toFloat() 
 [PJRT]: https://openxla.org/xla/pjrt
 [IREE]: https://iree.dev
 
-> **Pre-alpha.** The engine is real and heavily tested (2,345 automated tests at
-> HEAD, including live GPU runs on an NVIDIA GB10); the *packaging* is not.
-> Nothing is on Maven Central yet — you build from source and consume from
-> `mavenLocal`. APIs change without deprecation cycles. See
-> [Maturity](#maturity) for a straight answer on what runs where.
+> **Alpha — `0.1.0-alpha01`.** The engine is real and heavily tested (2,345
+> automated tests at HEAD, including live GPU runs on an NVIDIA GB10); the
+> *packaging* is newer than the engine. Nothing is on Maven Central yet — you
+> build from source and consume from `mavenLocal`, and the release wiring is in
+> place but has never been run against Central. APIs change without deprecation
+> cycles; [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) says exactly what that
+> means and what it does not. See [Maturity](#maturity) for a straight answer on
+> what runs where, and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 ---
 
@@ -55,7 +58,7 @@ You need a **JDK 25** toolchain and **Kotlin 2.3.20**. No GPU required.
 
 ```bash
 git clone https://github.com/pedronahum/tlaloc && cd tlaloc
-./gradlew publishToMavenLocal -x test   # installs io.tlaloc:*:0.0.1-SNAPSHOT
+./gradlew publishToMavenLocal -x test   # installs io.tlaloc:*:0.1.0-alpha01
 ./gradlew -p examples/quickstart run    # a standalone project that consumes it
 ```
 
@@ -226,14 +229,14 @@ plugins { kotlin("jvm") version "2.3.20"; application }
 kotlin { jvmToolchain(25) }
 
 dependencies {
-    implementation("io.tlaloc:core:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:ir:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:autograd:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:nn:0.0.1-SNAPSHOT")          // optional: layers + optimizers
-    implementation("io.tlaloc:runtime-pjrt:0.0.1-SNAPSHOT") // optional: GPU execution
+    implementation("io.tlaloc:core:0.1.0-alpha01")
+    implementation("io.tlaloc:ir:0.1.0-alpha01")
+    implementation("io.tlaloc:autograd:0.1.0-alpha01")
+    implementation("io.tlaloc:nn:0.1.0-alpha01")          // optional: layers + optimizers
+    implementation("io.tlaloc:runtime-pjrt:0.1.0-alpha01") // optional: GPU execution
 
     // The K2 plugin — this line is what makes `grad { }` compile-time.
-    kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.0.1-SNAPSHOT")
+    kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.1.0-alpha01")
 }
 ```
 
@@ -332,7 +335,14 @@ The full row-by-row matrix, with what pins each row, is in
 
 ### Before you invest
 
-- **Pre-alpha packaging.** No Maven Central release; build from source; APIs move.
+- **Alpha packaging.** Apache-2.0 licensed and Central-ready — the POMs carry
+  everything Central mandates and a gate keeps it that way — but **nothing has
+  been published to Central**, so you still build from source and consume from
+  `mavenLocal`. APIs move without deprecation
+  ([COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+- **One copyleft dependency you inherit.** `ir-jvm` carries Symja
+  (LGPL-3.0 per its POM) at runtime scope, with no supported way to opt out yet.
+  See [License](#license).
 - **JVM only today.**
 - **No Python API.** Interop is via StableHLO artifacts, not bindings.
 - **Not a PyTorch clone.** The model layer targets DiffKT's surface, not `torch.nn`'s.
@@ -358,6 +368,8 @@ The full row-by-row matrix, with what pins each row, is in
 | [KPTX_PLAN.md](docs/KPTX_PLAN.md) · [KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md) | The PTX DSL, and where our kernels stand against XLA |
 | [TPU_READINESS_AUDIT.md](docs/TPU_READINESS_AUDIT.md) · [TPU_BRINGUP.md](docs/TPU_BRINGUP.md) | The TPU plan and the bring-up runbook |
 | [MULTIHOST_DESIGN.md](docs/MULTIHOST_DESIGN.md) | Distributed execution, as designed |
+| [COMPATIBILITY.md](docs/COMPATIBILITY.md) · [CHANGELOG.md](CHANGELOG.md) | What alpha promises, what may break, and what has changed |
+| [RELEASING.md](docs/RELEASING.md) · [ALPHA_PLAN.md](docs/ALPHA_PLAN.md) | The publish procedure (written, never run) and the road to a usable alpha |
 
 ---
 
@@ -368,6 +380,7 @@ The full row-by-row matrix, with what pins each row, is in
 ./gradlew test --rerun-tasks      # a true clean-room re-run
 bash scripts/count-tests.sh       # aggregate count across modules
 bash scripts/onboarding-smoke.sh  # publish + run the quickstart, end to end
+./gradlew verifyPomMetadata        # every POM still carries what Maven Central mandates
 ```
 
 Contributions are welcome; the house style is worth knowing first:
@@ -393,8 +406,38 @@ readable-derivative idea comes from [google/tangent](https://github.com/google/t
 Lowering targets [OpenXLA](https://github.com/openxla) StableHLO, Shardy and
 PJRT. Orchestration vendors [Netflix Maestro](https://github.com/Netflix/maestro).
 
-<!-- LICENSE: this repository has no LICENSE file yet, so the code is
-     "all rights reserved" by default — which sits badly with the
-     "developed in the open" framing above and with inviting people to
-     build from source. Apache-2.0 would match the OpenXLA / DiffKT /
-     Maestro lineage. Add the file, then add a `## License` section here. -->
+---
+
+## License
+
+[Apache License 2.0](LICENSE). Copyright 2026 Pedro N. Rodriguez.
+
+Apache-2.0 matches the stack Tlaloc compiles into and the code it vendors:
+[OpenXLA](https://github.com/openxla/xla) XLA/StableHLO,
+[Netflix Maestro](https://github.com/Netflix/maestro) and
+[google/tangent](https://github.com/google/tangent) are all Apache-2.0. ([DiffKT](https://github.com/facebookresearch/diffkt),
+the op surface's parity target, is MIT — permissive either way, and Tlaloc
+consumes its *surface*, not its code.)
+
+**The one dependency that needs a paragraph.** The Stage B symbolic engine is
+Symja (`org.matheclipse:matheclipse-core:3.1.1`), a runtime dependency of
+`io.tlaloc:ir-jvm`. Its published POM declares **LGPL-3.0**, which is what a
+consumer's license scanner reads and which permits exactly what Tlaloc does:
+link it, never fork or patch it. Upstream's *repository* root `license.txt` is
+plain **GPL-3.0** — upstream's stated position is that the published maven
+modules are LGPL while the repository as a whole (including the Android
+application parts Tlaloc does not consume) is GPL. We rely on the POM and that
+statement; a Central release should get it in writing rather than inferred.
+
+Two things limit the blast radius today, and one does not:
+
+- `SymbolicEngine` is an interface in `commonMain`, so every non-JVM target is
+  Symja-free by construction, and no Tlaloc production code outside
+  `SymjaEngine` itself references Symja — φ-calculus coarsening takes the engine
+  as a parameter.
+- What is *not* limited: `ir-jvm`'s POM carries Symja as a `runtime` dependency,
+  so a consumer who cannot take a copyleft dependency at all inherits it anyway.
+  No Symja-free `SymbolicEngine` implementation ships, so there is no supported
+  way to opt out yet.
+
+Tracked as an open item in [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).

@@ -16,20 +16,20 @@ sourceSets {
 }
 
 dependencies {
-    implementation("io.tlaloc:core:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:ir:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:autograd:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:core:0.1.0-alpha01")
+    implementation("io.tlaloc:ir:0.1.0-alpha01")
+    implementation("io.tlaloc:autograd:0.1.0-alpha01")
     // The K2 compiler plugin: rewrites `grad { }` calls into synthesized
     // gradient code at compile time (and gives you compile-time shape /
     // differentiability errors in the IDE).
-    kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.0.1-SNAPSHOT")
+    kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.1.0-alpha01")
 
     // The failing source set needs the same libraries and the same plugin —
     // the point is that it fails on its MERITS, not for want of a dependency.
-    "shapeErrorImplementation"("io.tlaloc:core:0.0.1-SNAPSHOT")
-    "shapeErrorImplementation"("io.tlaloc:ir:0.0.1-SNAPSHOT")
-    "shapeErrorImplementation"("io.tlaloc:autograd:0.0.1-SNAPSHOT")
-    "kotlinCompilerPluginClasspathShapeError"("io.tlaloc:compiler-plugin:0.0.1-SNAPSHOT")
+    "shapeErrorImplementation"("io.tlaloc:core:0.1.0-alpha01")
+    "shapeErrorImplementation"("io.tlaloc:ir:0.1.0-alpha01")
+    "shapeErrorImplementation"("io.tlaloc:autograd:0.1.0-alpha01")
+    "kotlinCompilerPluginClasspathShapeError"("io.tlaloc:compiler-plugin:0.1.0-alpha01")
 }
 
 application {

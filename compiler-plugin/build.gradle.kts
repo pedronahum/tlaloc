@@ -6,6 +6,18 @@ plugins {
 
 // §0.4.355 — the KMP modules get publications from the multiplatform plugin
 // automatically; this plain-JVM module declares its own.
+//
+// §0.4.498 — and the KMP modules also got a sources jar for free, which this one
+// did not: `from(components["java"])` publishes the binary jar and nothing else.
+// Maven Central requires sources AND javadoc per artifact, so this module was the
+// single publication in the repo that could never have passed validation. The
+// javadoc jar is attached centrally (root build.gradle.kts, Dokka HTML); the
+// sources jar has to be asked for here, because it is the java component that
+// carries it.
+java {
+    withSourcesJar()
+}
+
 publishing {
     publications {
         create<org.gradle.api.publish.maven.MavenPublication>("maven") {

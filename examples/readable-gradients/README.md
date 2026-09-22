@@ -188,7 +188,7 @@ tasks.named<KotlinCompile>("compileKotlin") {
 // 2. Compile the dump in a source set that does NOT get the plugin.
 sourceSets { create("printed") }
 kotlin.sourceSets.named("printed") { kotlin.srcDir(gradientSourceDir) }
-dependencies { "printedImplementation"("io.tlaloc:core:0.0.1-SNAPSHOT") }
+dependencies { "printedImplementation"("io.tlaloc:core:0.1.0-alpha01") }
 ```
 
 Step 2 is the claim under test. `printedImplementation` gets `:core` — the host

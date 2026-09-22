@@ -8,21 +8,21 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.tlaloc:core:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:ir:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:core:0.1.0-alpha01")
+    implementation("io.tlaloc:ir:0.1.0-alpha01")
     // The Tracer: `capture` traces the model's forward through it.
-    implementation("io.tlaloc:autograd:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:autograd:0.1.0-alpha01")
     // Dense / ReluLayer / Sequential / Adam / capture — the model layer.
-    implementation("io.tlaloc:nn:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:nn:0.1.0-alpha01")
     // StableHLO emission of the captured gradient graph. `:runtime-pjrt` pulls
     // it in transitively, but the example names it because the example's story
     // IS the emission.
-    implementation("io.tlaloc:stablehlo:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:stablehlo:0.1.0-alpha01")
     // PjrtSession + PjrtBinaries: compile the emitted StableHLO with XLA and
     // execute it on the GPU. Pure JVM at resolution time — this dependency
     // costs nothing on a machine with no CUDA, and the example self-skips the
     // GPU lane there.
-    implementation("io.tlaloc:runtime-pjrt:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:runtime-pjrt:0.1.0-alpha01")
 
     // NOTE: no `kotlinCompilerPluginClasspath` here. The compiler plugin lowers
     // `grad { }` LAMBDAS (see examples/quickstart); a MODEL's gradient comes

@@ -12,7 +12,7 @@ import io.tlaloc.ir.DxirType
  * computer algebra system. All φ-calculus rewrites go through [SymbolicEngine]; rule
  * code never depends on Symja (or any specific CAS) types directly.
  *
- * The plan targets Symja (`org.matheclipse:matheclipse-core`, Apache-2.0, JVM-native)
+ * The plan targets Symja (`org.matheclipse:matheclipse-core`, **LGPL-3.0**, JVM-native)
  * as the v0 backend (§11.7 of the spec; §5.2 of the plan). If Symja's compile-time
  * performance or expressiveness turns out to be inadequate for the paper's benchmarks
  * (the adequacy bake-off is §3.2.3 of the plan), the v0.5 fallback is a minimal
@@ -26,6 +26,14 @@ import io.tlaloc.ir.DxirType
  * [rational], [variable], [add]/[sub]/[mul]/[div]/[neg]/[pow], [apply], [nest],
  * [sum], [product], [diff], [simplify], [expand], [factor], [collect],
  * [substitute], [liftNode], [liftFunction], and [lowerToDxir].
+ *
+ * NOTE ON LICENSE (§0.4.498): this KDoc said "Apache-2.0" until §0.4.498 read the
+ * artifact's own POM. It is LGPL-3.0 — `docs/STAGE_B_PLAN.md` §3.2.1 corrected the
+ * plan in §0.4.13 but this file and §3.2.1's own bullet list were missed. LGPL
+ * permits what Tlaloc does (link, never fork or patch), which is why this interface
+ * is the only thing `commonMain` sees. Tlaloc itself is Apache-2.0 as of §0.4.498
+ * (see `LICENSE`), which closes the "presumed Apache-2.0 destination" that Stage B
+ * had been writing against as an open question.
  *
  * NOTE ON MODULE PLACEMENT: the interface lives in `commonMain` because it has no
  * JVM-specific dependencies — [SymExpr] and [SymFn] are opaque sealed interfaces.

@@ -2,7 +2,7 @@
 
 Ten standalone programs. Each directory here is its **own Gradle build** — its own
 `settings.gradle.kts`, its own `build.gradle.kts` — and each resolves Tlaloc from
-**mavenLocal**, as `io.tlaloc:core:0.0.1-SNAPSHOT` and friends, exactly the way
+**mavenLocal**, as `io.tlaloc:core:0.1.0-alpha01` and friends, exactly the way
 your project would. None is a module of the repo build, none uses `includeBuild`,
 and none imports another. Delete the rest of the repository after
 `publishToMavenLocal` and every one of them still compiles and runs.

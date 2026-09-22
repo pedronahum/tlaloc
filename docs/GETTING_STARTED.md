@@ -6,8 +6,10 @@ gradient code at compile time, and misuse (mismatched named axes,
 undifferentiable bodies) is a **compile error with an IDE red squiggle**,
 not a runtime crash.
 
-> Pre-alpha. Artifacts are not yet on Maven Central — consume via
-> `mavenLocal()` from a repo checkout. Coordinates and APIs may change.
+> Alpha — `0.1.0-alpha01`. Artifacts are not yet on Maven Central — consume via
+> `mavenLocal()` from a repo checkout. Coordinates and APIs may change without a
+> deprecation cycle; [COMPATIBILITY.md](COMPATIBILITY.md) says exactly what may
+> break and what will not, and [CHANGELOG.md](../CHANGELOG.md) records what did.
 
 ## 1. Publish the artifacts locally
 
@@ -16,7 +18,7 @@ git clone <tlaloc repo> && cd tlaloc
 ./gradlew publishToMavenLocal -x test
 ```
 
-Every module lands under `io.tlaloc:*:0.0.1-SNAPSHOT` (`core`, `ir`,
+Every module lands under `io.tlaloc:*:0.1.0-alpha01` (`core`, `ir`,
 `autograd`, `stablehlo`, `compiler-plugin`, `runtime-pjrt`,
 `runtime-iree`, `runtime-cuda`, `kptx`, `maestro`).
 
@@ -31,11 +33,11 @@ plugins {
 }
 
 dependencies {
-    implementation("io.tlaloc:core:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:ir:0.0.1-SNAPSHOT")
-    implementation("io.tlaloc:autograd:0.0.1-SNAPSHOT")
+    implementation("io.tlaloc:core:0.1.0-alpha01")
+    implementation("io.tlaloc:ir:0.1.0-alpha01")
+    implementation("io.tlaloc:autograd:0.1.0-alpha01")
     // The K2 plugin: compile-time grad rewriting + compile-time errors.
-    kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.0.1-SNAPSHOT")
+    kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.1.0-alpha01")
 }
 ```
 
