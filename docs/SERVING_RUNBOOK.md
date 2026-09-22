@@ -800,14 +800,13 @@ Step 4 is the one that matters: the process it runs in imports `ctypes`,
 may use torch and transformers, and they run in the serving venv, never in
 the frozen oracle venv (§0.1).
 
-**Where vLLM sits in this, honestly:** it does not, yet. `vllm serve`
-against this artifact is the one uncertified serving step (H3c-4, §4's last
-block) — vLLM's platform discovery, config hook and the whole v1 worker API
-*are* certified live against vLLM 0.29.0 (§4), and the same artifact called
-through vLLM's worker and called directly agrees bit-for-bit; what stops
-`vllm serve` is one classmethod the engine core calls unconditionally. So
-the demo below is the driver path, and a colleague who wants to see tokens
-runs it, not `vllm serve`.
+**Where vLLM sits in this, honestly (§0.4.492):** it runs. `LLM.generate()`
+against this artifact produces the same six token ids the driver below
+produces — see **§11**, which is one command. The demo below is still the
+DRIVER path, and it is still the one to run first, because it is the one
+that shows the runtime with no framework in the process; §11 then shows the
+same artifact answering through vLLM's scheduler, block manager and
+tokenizer. `vllm serve` — the HTTP server — has not been started here.
 
 ### 10.1 The checkpoint (once)
 
@@ -903,7 +902,8 @@ once and held.
 
 ### 10.5 What does NOT work, by name
 
-* **`vllm serve` / `LLM.generate()`** — H3c-4, §4's last block.
+* **`vllm serve`** — the HTTP server has never been started here. The
+  ENGINE under it runs: `LLM.generate()` is certified in §11 (§0.4.492).
 * **The `jax` engine** refuses a staged weight table BY NAME. It exists only
   because jaxlib ships no CPU PJRT plugin `.so`; a staged-weight artifact
   therefore has **no CPU lane in this loader**, and its oracle is
@@ -918,3 +918,73 @@ once and held.
   A performance deferral, not a correctness one.
 * **A tokenizer inside the runtime** — ids in, ids out, deliberately.
 * **Sampling** — greedy/argmax only, host-side, in the driver.
+
+---
+
+## 11. Serve it through vLLM (CERTIFIED, §0.4.492 — H3c-4b)
+
+The same artifact §10 built, answering through **vLLM 0.29.0's own
+`LLM.generate()`**: vLLM's scheduler, its paged-KV block manager, its
+tokenizer and detokenizer, and underneath them the compiled Tlaloc
+StableHLO programs on PJRT-CUDA, reached through the `vllm-tlaloc` platform
+plugin. No torch model is ever built; vLLM's weight loading never runs.
+
+### 11.1 The command
+
+Prerequisite: §10.2 has run and `/tmp/tl-llama` exists.
+
+```bash
+export TLALOC_PJRT_PLUGIN_PATH=$HOME/.local/venvs/iree/lib/python3.12/\
+site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so
+export PYTHONPATH=/home/pedro/programming/tlaloc/harness/python
+
+~/.local/venvs/vllm/bin/python harness/python/run_vllm_generate_check.py \
+    --artifact /tmp/tl-llama \
+    --checkpoint $HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
+    --prompt "The capital of France is" --max-new 6 \
+    --max-context 64 --block-size 16 \
+    --output /tmp/vllm-gen.json
+```
+
+```json
+{ "vllmVersion": "0.29.0",
+  "promptTokens":    [1, 450, 7483, 310, 3444, 338],
+  "generatedTokens": [3681, 29889, 13, 13, 29906, 29889],
+  "text": " Paris.\n\n2.", "finishReason": "length" }
+```
+
+Identical to §10.3's `generatedTokens` and to the transformers oracle's.
+`--checkpoint` names the **tokenizer and HF config**, never the weights —
+those come from the artifact's `weights/` directory, and
+`$TLALOC_SERVING_ARTIFACT` (which the script sets from `--artifact`) is
+what says which.
+
+### 11.2 What the flags are, and why none of them is a workaround
+
+| flag | why |
+|---|---|
+| `--max-context 64` / `--block-size 16` | the artifact's COMPILED ladder and page size. `TlalocPlatform.check_and_update_config` refuses a disagreement by name rather than overriding it; they are passed because vLLM validates them against the HF config before the platform hook runs |
+| `max_num_seqs=1` (in the script) | the artifact's top batch bucket |
+| `enable_prefix_caching=False` (in the script) | this runner's KV pool holds no cross-request prefix, so a cache hit would start a sequence in the middle of a context nothing wrote. `batching.py` refuses it by name; the flag means it never arises |
+| **no `load_format`, no `gpu_memory_utilization`** | deliberately absent. `load_format="dummy"` would start the engine and would be a lie about which weights answered, and the KV pool is a compiled shape rather than a memory-profiling result |
+
+### 11.3 What is certified, and what is refused BY NAME
+
+**Certified**: one sequence, greedy sampling, a prompt that fits the
+compiled context, token ids equal to the direct driver AND to HuggingFace,
+6/6. The lane is `HfLlamaServingArtifactTest` inside `./gradlew test`,
+self-skipping without the checkpoint / the vLLM venv / a plugin `.so`.
+
+**Refused by name** — each of these raises with an explanation rather than
+degrading: `vllm serve`'s HTTP layer (never started here, not refused —
+simply unmeasured), chunked prefill, a prefix-cache hit, a resumed chunk or
+speculative draft, a grammar bitmask (structured outputs: the mask must be
+applied before the argmax and this worker's argmax has already run), a
+`--block-size` or `--max-model-len` or `--max-num-seqs` past the artifact's,
+`--attention-backend`, MLA, sparse attention, and `world_size > 1`.
+
+**The performance fact**: a prompt is served as N single-token decode steps,
+because `PAGED_ATTENTION`'s ragged chunked-prefill form is H1a's open
+deferral. Causal attention makes them compute exactly what a fused prefill
+would; at ~1.35 s/step a six-token prompt spends ~7 s before its first
+generated token. That is what the ragged form is worth.

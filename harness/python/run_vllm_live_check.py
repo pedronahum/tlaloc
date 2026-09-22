@@ -330,7 +330,27 @@ def main() -> int:
         payload["availableMemoryBytes"] = worker.determine_available_memory()
         spec = worker.get_kv_cache_spec()
         payload["kvCacheSpecLayers"] = sorted(spec.keys())
-        payload["kvCacheSpecLayer0"] = spec["layer.0"]
+        # §0.4.492: these are vLLM's OWN `FullAttentionSpec` objects now, not
+        # dicts — `EngineCore._initialize_kv_caches` asks them for derived
+        # properties a dict cannot answer. Serialised here field by field so
+        # the JVM side keeps asserting the same three numbers, plus the class
+        # name (a dict would pass a field check and fail an engine start) and
+        # the derived page size the worker cross-checks against `kv_layout`.
+        layer0 = spec["layer.0"]
+        payload["kvCacheSpecLayer0"] = {
+            "class": type(layer0).__module__ + "." + type(layer0).__qualname__,
+            "block_size": int(layer0.block_size),
+            "num_kv_heads": int(layer0.num_kv_heads),
+            "head_size": int(layer0.head_size),
+            "dtype": str(layer0.dtype),
+            "page_size_bytes": int(layer0.page_size_bytes),
+        }
+        payload["workerKvCacheLayouts"] = list(worker.get_supported_kv_cache_layouts())
+        payload["workerKvLayoutRefusal"] = _refusal(
+            lambda: worker.set_kv_cache_layout("LBHNC")
+        )
+        payload["supportedTasks"] = list(worker.get_supported_tasks())
+        payload["warmUpTimes"] = list(worker.compile_or_warm_up_model())
         # vLLM's KV-cache config is CHECKED against the compiled pool, not
         # applied: agreeing is silent, disagreeing must be named.
         worker.initialize_from_config([SimpleNamespace(num_blocks=probe.num_gpu_blocks)])
@@ -365,7 +385,18 @@ def main() -> int:
                     num_scheduled_tokens={r: 1 for r in seq_ids},
                     finished_req_ids=[],
                 )
-            out = worker.execute_model(so)
+            # §0.4.492: vLLM 0.29.0 splits the step. `execute_model` runs the
+            # model and returns None to mean "sample now"; `sample_tokens`
+            # returns the ModelRunnerOutput. Driving only the first half is
+            # what this lane did for two slices, and it is why the first real
+            # `generate()` died inside `WorkerBase.sample_tokens`.
+            executed = worker.execute_model(so)
+            if executed is not None:
+                raise AssertionError(
+                    "execute_model returned an output instead of None; vLLM's engine "
+                    "would discard it and call sample_tokens anyway"
+                )
+            out = worker.sample_tokens(None)
             r = worker.model_runner
             call = r.last_call
             steps.append({
@@ -393,6 +424,23 @@ def main() -> int:
                 )
             )
         )
+
+        # §0.4.492 — the two new refusals the split and the prompt walk bring
+        # with them. A grammar bitmask must mask the logits BEFORE the argmax
+        # and this worker's argmax has already run; an empty batch is a real
+        # thing vLLM schedules and gets vLLM's own empty output, not a step.
+        payload["grammarRefusal"] = _refusal(lambda: worker.sample_tokens(object()))
+        empty = worker.execute_model(
+            SimpleNamespace(
+                scheduled_new_reqs=[], scheduled_cached_reqs=None,
+                num_scheduled_tokens={}, finished_req_ids=[],
+                total_num_scheduled_tokens=0,
+            )
+        )
+        payload["emptyBatchOutputClass"] = (
+            type(empty).__module__ + "." + type(empty).__qualname__
+        )
+        payload["emptyBatchReqIds"] = list(empty.req_ids)
 
         payload["ok"] = True
         payload["stage"] = "ok"

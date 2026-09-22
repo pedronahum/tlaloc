@@ -96,6 +96,29 @@ _TORCH_DTYPE = {
 _CACHE_DTYPE = {"f32": "float32", "bf16": "bfloat16", "f16": "float16"}
 
 
+def torch_kv_dtype(model: dict):
+    """§0.4.492 — the torch dtype of the artifact's KV pool, refused by name
+    if the manifest states one this plugin has no mapping for.
+
+    It lives HERE rather than in `kv_layout` because it is the one KV fact
+    that cannot be answered without torch, and `kv_layout` is the module
+    that stays importable with neither torch nor vLLM present. The worker
+    needs it to build vLLM's `FullAttentionSpec` (see
+    `TlalocWorker.get_kv_cache_spec`), and going through this function
+    rather than re-spelling the table is what stops the spec's dtype and
+    `supports_kv_cache_dtype`'s from drifting apart.
+    """
+    name = model["kvDtype"]
+    dtype = _TORCH_DTYPE.get(name)
+    if dtype is None:
+        raise ValueError(
+            f"tlaloc: the artifact's KV pool dtype '{name}' has no torch dtype here; "
+            f"vLLM's KVCacheSpec needs a real torch.dtype and guessing one would size "
+            f"the block manager's pages off a dtype the compiled program does not use"
+        )
+    return dtype
+
+
 class TlalocAttentionNotReached(NotImplementedError):
     """Control reached an attention method that a Tlaloc deployment has no
     path to.

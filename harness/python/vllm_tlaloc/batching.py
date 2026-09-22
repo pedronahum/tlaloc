@@ -155,9 +155,26 @@ def decode_requests_from_scheduler_output(scheduler_output, last_token_of) -> li
     not need the ordering at all, and leaves `last_token_of` with one
     meaning instead of two.
 
-    A request scheduled for more than one token is a PREFILL or a chunked
-    prefill and is refused by name: there is no prefill entry in the
-    artifact yet (H3a's named deferral).
+    ## §0.4.492 (H3c-4b) — A WHOLE PROMPT IS NOW ADMISSIBLE, A CHUNK IS NOT
+
+    Until this slice any request scheduled for more than one token was
+    refused. That refusal is what a real `LLM.generate()` hit on its first
+    step: vLLM schedules a new request for `len(prompt)` tokens, and a
+    six-token prompt is six.
+
+    The distinction the refusal was missing is between a PREFILL and a
+    CHUNK. A new request scheduled for exactly its whole prompt is a
+    prefill, and this artifact CAN serve one — as `len(prompt) - 1` decode
+    steps followed by the ordinary batched step, which is precisely what
+    `run_llama_generate.py` has done since §0.4.480 and what §0.4.479's
+    parity lane did before it. Causal attention makes those N single-token
+    steps compute the same KV and the same final logits a fused prefill
+    would; what they cost is N kernel launches instead of one, so the
+    deferral is a PERFORMANCE deferral and is named as one. A request
+    scheduled for FEWER tokens than it has left is a chunk, needs
+    resumption state this runner does not keep, and is still refused by
+    name — as is any cached request scheduled for more than one token
+    (a resumed chunk, or speculative decoding).
     """
     counts = dict(getattr(scheduler_output, "num_scheduled_tokens", {}) or {})
 
@@ -165,6 +182,14 @@ def decode_requests_from_scheduler_output(scheduler_output, last_token_of) -> li
     for r in getattr(scheduler_output, "scheduled_new_reqs", []) or []:
         rid = getattr(r, "req_id")
         prompt = list(getattr(r, "prompt_token_ids", []) or [])
+        computed = getattr(r, "num_computed_tokens", 0) or 0
+        if computed:
+            raise NotImplementedError(
+                f"request {rid} arrives with {computed} tokens already computed "
+                f"(prefix cache hit); this runner's KV pool is its own and holds no "
+                f"cross-request prefix, so it cannot start a sequence in the middle. "
+                f"Run with --no-enable-prefix-caching"
+            )
         new_requests.append((rid, prompt))
 
     cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
@@ -189,15 +214,22 @@ def decode_requests_from_scheduler_output(scheduler_output, last_token_of) -> li
     feed_of = [(rid, (lambda r=rid, p=prompt: _prompt_feed(r, p))) for rid, prompt in new_requests]
     feed_of += [(rid, (lambda r=rid: last_token_of(r))) for rid in cached_ids]
 
+    # How many tokens each request may legitimately be scheduled for this
+    # step: its whole prompt if it is arriving, exactly one if it is not.
+    admissible = {rid: max(len(prompt), 1) for rid, prompt in new_requests}
+
     decode_requests = []
     for rid, feed in feed_of:
         n = counts.get(rid, 1)
-        if n != 1:
+        want = admissible.get(rid, 1)
+        if n != want:
             raise NotImplementedError(
-                f"request {rid} is scheduled for {n} tokens this step; this artifact "
-                f"has only DECODE entries (one token per sequence per step) and the "
-                f"prefill / chunked-prefill entry is a named deferral — the scheduler "
-                f"must be configured so that it never chunks"
+                f"request {rid} is scheduled for {n} tokens this step but {want} "
+                f"{'is' if want == 1 else 'are'} admissible; this artifact has only "
+                f"DECODE entries, so a whole prompt is served as N single-token steps "
+                f"(§0.4.492) and anything else — a chunk, a resumed chunk, a "
+                f"speculative draft — needs the prefill entry that is H1a's named "
+                f"deferral. Run with --no-enable-chunked-prefill"
             )
         decode_requests.append((rid, feed()))
 

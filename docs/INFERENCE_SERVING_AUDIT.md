@@ -4,8 +4,9 @@
 2119 → 2290.** Ratified by Pedro 2026-09-21; GO on the H1–H5 slicing in
 §4, and every slice of it is in. **Read §5's ARC STATE block first**: it
 carries the per-slice ledger, what is CERTIFIED (with each claim's oracle
-and floor), what is WRITTEN BUT UNCERTIFIED (the live vLLM and SGLang
-paths, with the commands that would settle them), and what awaits the
+and floor), what is WRITTEN BUT UNCERTIFIED (the SGLang
+path and `vllm serve`'s HTTP layer, with the commands that would settle
+them — the live vLLM ENGINE path was certified in §0.4.492), and what awaits the
 Cloud TPU VM. The commands to reproduce the whole path are
 [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md). §2's gap list is swept at HEAD.
 
@@ -2292,11 +2293,23 @@ against vLLM 0.29.0's own `compute_layer_kv_cache_shape_bytes` — see the
 H3c-4a entry, which also records that the contract as written named a
 `get_kv_cache_shape` that **0.29.0's `AttentionBackend` does not have**.
 
-**What is left is the SERVER ITSELF.** `vllm serve` / `LLM.generate()` has
-not been run. That is **H3c-4b**: the real-Llama artifact of §0.4.480, a
-tokenizer path, and whatever vLLM asks for after the backend class. What
-§0.4.491 removed is the named obstacle, not the remaining distance, and
-this ledger says so rather than reporting a server nobody started.
+~~**What is left is the SERVER ITSELF.**~~ **vLLM GENERATES (§0.4.492).**
+`LLM.generate()` runs end to end on the real 22-layer TinyLlama artifact and
+produces ` Paris.\n\n2.` — the **same six token ids** the direct driver
+produces on the same artifact, and the same six HuggingFace produces. Two
+callers, one artifact, `==` as the floor. Getting there cost six more
+findings after the classmethod, every one of them an API this repo had
+written against a base class's signature rather than against the installed
+vLLM: the KV spec must be vLLM's `FullAttentionSpec` and not a dict shaped
+like one, `initialize_from_config` takes ONE config and not a list,
+`compile_or_warm_up_model` and `get_supported_tasks` are called
+unconditionally, `execute_model` must return `None` and let `sample_tokens`
+answer, and an empty scheduled batch is a real thing that gets vLLM's own
+empty output. See the H3c-4b row.
+
+**What is left is `vllm serve` — the HTTP server, not the engine.** The
+engine under it is the engine that now runs; nobody has started the server
+here, so this ledger does not say it works.
 
 Nine sections closed the arc on 2026-09-21 (suite **2119 → 2290**); four
 more the same day carried it past the framework (**2290 → 2296**); three
@@ -2327,6 +2340,8 @@ measured and closed out the KPTX performance tier (**2333 → 2336**).
 | 0.4.482 | H4b (K2) | the tier's first kernel change — `kptx_paged_out` gets a `(part, d)` decomposition (64 → 256 live threads at headDim 64), certified at the **same 1.1920929e-7** against the Double paged walk — and it measures **NOTHING**: a controlled null that bounds stage 3 at **≤ 16% of the chain** and exposes the real defect, **stage 1's K walk is 8×-read-amplified across a warp while stage 3's V walk was always coalesced**. Registry still empty | 2335 → 2336 |
 | 0.4.483 | H3c + H4b close-out (K3) | this sweep + [KPTX_PAGED_PERF.md §8](KPTX_PAGED_PERF.md) (the registry verdict, shape-conditional registration REJECTED by name, §4 and §7.4 merged into one ranked order) + [SERVING_RUNBOOK.md §10](SERVING_RUNBOOK.md) (the real-model demo as four copy-pasteable steps; the runbook's retired 465 µs KPTX verdict replaced with K1's device table and a two-line opt-in recipe; the duplicate section 5 renumbered). Invariants re-verified by grep, not assumed — docs only | 2336 → 2336 (docs only) |
 | 0.4.491 | H3c-4a | `vllm_tlaloc/attention.py` + `kv_layout.py` — `get_attn_backend_cls` ANSWERS. A real `AttentionBackend` subclass, every fact manifest-derived, page shape pinned **both ways** against vLLM's own `compute_layer_kv_cache_shape_bytes` (`(6,2,2,16)`, 64 B/page, from two independent derivations), `forward` refusing by name. The contract's `get_kv_cache_shape` **does not exist in 0.29.0** and the entry says so; vLLM's divisibility-based `supports_block_size` overridden to equality after the live lane showed it declaring `--block-size 16` supported | 2336 (Python lane 44 → 56) |
+
+| 0.4.492 | H3c-4b | **`LLM.generate()` RUNS.** vLLM 0.29.0 drives a real 22-layer TinyLlama Tlaloc artifact to ` Paris.\n\n2.`, ids equal to the direct lane AND to HF, 6/6. Six findings on the way, all signature-vs-installed-vLLM (typed `FullAttentionSpec`, singular `initialize_from_config`, `compile_or_warm_up_model`, `get_supported_tasks`, the `execute_model`/`sample_tokens` split, the empty batch). A whole PROMPT is now admissible — served as N decode steps — while a chunk, a resumed chunk, a prefix-cache hit and a grammar bitmask are each refused by name | 2336 (Python lane 56 → 59) |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -2368,9 +2383,12 @@ red line with the separate-venv recipe attached.
 | the loader's shape arithmetic survives having no ndarray | `LoaderIsStandardLibraryOnly` — flatten/unflatten inverses, `numel`, per-dtype staging, dtype refusal by name, engine defaulting | exact |
 | **vLLM's own platform discovery lands on `TlalocPlatform`** | `VllmLivePluginTest`, real vLLM **0.29.0** in `~/.local/venvs/vllm` (its own venv; the oracle untouched) | exact class path; vLLM logs the activation |
 | **`check_and_update_config` imposes and refuses against REAL `vllm.config` objects** | same test — `worker_cls` set, `block_size`/`num_gpu_blocks_override` taken from the artifact, and all four refusals (block size, max-model-len, max-num-seqs, world size) fired on a `vllm.config.CacheConfig`/`ParallelConfig` | by name, four messages |
-| **`TlalocWorker` runs the v1 worker API and returns vLLM's real `ModelRunnerOutput`** | same test — `load_model`, `determine_available_memory` (= the compiled pool, checked arithmetically JVM-side), `get_kv_cache_spec`, `initialize_from_config` accept **and** refusal, two `execute_model` steps, the chunked-prefill refusal | exact |
+| **`TlalocWorker` runs the v1 worker API and returns vLLM's real `ModelRunnerOutput`** | same test — `load_model`, `determine_available_memory` (= the compiled pool, checked arithmetically JVM-side), `get_kv_cache_spec` (§0.4.492: vLLM's own `FullAttentionSpec`), `initialize_from_config` accept **and** refusal, two `execute_model`/`sample_tokens` steps, the empty-batch output, and the chunk / layout / grammar refusals | exact |
 | **a REAL TinyLlama-1.1B (22 layers) serves from an exported artifact on PJRT-CUDA** | `hf_llama_greedy_oracle.py` — transformers `AutoModelForCausalLM`, fp32 on CPU, vLLM venv | **6/6 generated token ids `==`**; `Paris.\n\n2.` on both sides |
 | …and the 4196 MiB of staged weights in that artifact are the bytes the exporter wrote | `verify_weights()`, SHA-256 re-hashed in the serving process | exact |
+| **vLLM 0.29.0's `LLM.generate()` serves a real TinyLlama-1.1B from a Tlaloc artifact** | `HfLlamaServingArtifactTest` + `run_vllm_generate_check.py` — vLLM's scheduler, block manager, tokenizer and `LLM` entry point over `TlalocWorker`, against the direct `run_llama_generate.py` lane AND the transformers oracle | **`==` on all 6 token ids**, three ways |
+| …and vLLM tokenized the prompt itself | `RequestOutput.prompt_token_ids` vs the oracle's tokenizer output | exact; no token id is written by hand anywhere |
+| the worker's KV spec is vLLM's own type, not a dict shaped like one | `VllmLivePluginTest` asserts the CLASS is `vllm.v1.kv_cache_interface.FullAttentionSpec` and its `page_size_bytes` is the compiled pool's page | exact class path; exact bytes |
 | the same artifact called through vLLM and called directly gives the same numbers | the vLLM venv's worker lane vs the oracle venv's `run_vllm_tlaloc_check.py` runner lane — two venvs, two torches, jax in only one | **`==`, bit-for-bit** on every logit, plus sampled tokens, buckets and compile count |
 | the claimed and unclaimed paged-attention lanes agree before either is timed | `KptxPagedAttentionBenchTest`, every point in the sweep, on real XLA-CUDA | asserted per point; the timing is refused if they disagree |
 | the K2 `(part, d)` stage-3 decomposition is still the same kernel | `KptxPagedAttentionKernelTest` vs the Double paged walk, unchanged across the change | **1.1920929e-7**, the same number before and after |
@@ -2387,52 +2405,49 @@ supposed to fail.
 
 #### WRITTEN BUT UNCERTIFIED — and exactly how to certify it
 
-1. ~~**The live vLLM path**~~ — **CERTIFIED (H7, §0.4.477)**, with ONE
-   named remainder, and after the H3c arc that remainder is exactly one
-   classmethod. `~/.local/venvs/vllm` exists (vLLM 0.29.0, 197
-   distributions, no jax), the oracle venv was not touched, and
-   `VllmLivePluginTest` runs platform discovery, `check_and_update_config`
-   against real `vllm.config` objects with all four refusals firing, and
-   the whole v1 worker API live — matching the direct runner lane
-   **bit-for-bit across the two venvs**. The recipe that worked is
-   [SERVING_RUNBOOK.md §4](SERVING_RUNBOOK.md); note that the
-   `jax[cuda12]` this entry used to carry in its command block is **not
-   installed and must not be** — H6 removed the need, and installing it
-   beside vLLM's CUDA-13 wheels is the collision the rail exists to
-   prevent.
+1. ~~**The live vLLM path**~~ — **CERTIFIED END TO END (§0.4.492,
+   H3c-4b): `LLM.generate()` runs.** vLLM 0.29.0, in `~/.local/venvs/vllm`,
+   constructs an `LLM` against a real 22-layer TinyLlama-1.1B Tlaloc serving
+   artifact and generates ` Paris.\n\n2.` — token ids
+   `[3681, 29889, 13, 13, 29906, 29889]`, **equal to what
+   `run_llama_generate.py` produces driving the same artifact directly, and
+   equal to HuggingFace transformers**, six for six. The lane is
+   `HfLlamaServingArtifactTest` +
+   `harness/python/run_vllm_generate_check.py`, and it self-skips without
+   the checkpoint, the vLLM venv or a plugin `.so`. Commands:
+   [SERVING_RUNBOOK.md §11](SERVING_RUNBOOK.md).
 
-   **THE REMAINDER, stated exactly: `vllm serve` / `LLM.generate()`.**
-   Everything it used to wait on has landed. A real TinyLlama-1.1B
-   artifact exists and serves (§0.4.480); the decode graph is certified
-   against transformers (§0.4.479); the weights are readable by role
-   (§0.4.478). Pointing vLLM 0.29.0 at that artifact now gets **past**
-   platform discovery and into `EngineCore` startup, where it dies on
-   `vllm_tlaloc/platform.py`'s deliberate refusal:
+   The historical record, because the shape of what was wrong is the useful
+   part: from §0.4.470 this entry said the path was "written but
+   uncertified"; §0.4.477 certified discovery, `check_and_update_config`
+   and the v1 worker API against real `vllm.config` objects; §0.4.491
+   removed the `get_attn_backend_cls` refusal that ended engine startup;
+   and §0.4.492 started the engine, at which point **six more things were
+   wrong and every one of them was a signature read off a base class or a
+   docstring rather than off the installed vLLM** — see the H3c-4b entry in
+   §5's ledger for the list.
 
-   ```
-   NotImplementedError: tlaloc: attention is compiled into the serving
-   artifact's programs (OpKind.PAGED_ATTENTION); there is no
-   runtime-selectable attention backend to name
-   ```
+   **WHAT IS CERTIFIED, SCOPED HONESTLY.** `LLM.generate()` with one
+   sequence, greedy sampling, a prompt that fits the artifact's compiled
+   context, no prefix caching, no structured outputs. Not certified, each
+   refused BY NAME rather than left to fail late: `vllm serve` (the HTTP
+   server — the engine underneath it is this engine, but nobody has started
+   it here), concurrent sequences past the artifact's `maxBatch`, a prompt
+   longer than the compiled context, chunked prefill, prefix-cache hits,
+   speculative decoding, grammar-constrained decoding, and any sampling
+   parameter other than greedy (`greedy_sample` is the runner's, and
+   `temperature`/`top_p` would need vLLM's sampler over torch tensors —
+   §5 H3b's standing deferral).
 
-   vLLM's v1 engine core calls `get_attn_backend_cls` **unconditionally**,
-   so the refusal is not an optional hook. That is **H3c-4**: hand vLLM a
-   backend class whose `get_kv_cache_shape` agrees with the manifest's
-   `kvPoolAxisOrder`/`kvPoolDims` and whose `forward` is never reached —
-   a design question (see the §0.4.480 entry), not a typo. Certify it
-   with:
-
-   ```bash
-   export TLALOC_SERVING_ARTIFACT=/tmp/tl-llama   # from RUNBOOK §10.2
-   export TLALOC_PJRT_PLUGIN_PATH=<a plugin .so>
-   vllm serve ~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
-       --max-num-seqs 1 --max-model-len 64 --block-size 16
-   ```
-
-   and assert the served completion against
-   `harness/python/hf_llama_greedy_oracle.py` on the same prompt — the
-   same oracle §0.4.480 used, which is why this is a **short** slice once
-   the stub's contract is decided.
+   **THE PERFORMANCE FACT, stated because it is not a correctness one.**
+   A prompt is served as N single-token decode steps
+   (`TlalocModelRunner.add_sequence`), because H1a's ragged
+   chunked-prefill `PAGED_ATTENTION` form is still the open IR-level
+   deferral. Causal attention makes those steps compute exactly what a
+   fused prefill would; what they cost is N kernel launches. At ~1.35 s per
+   step on this artifact a six-token prompt spends ~7 s before its first
+   generated token. That is the number to beat, and the item that beats it
+   is the ragged form.
 
 2. **The SGLang runner** — a design record only (§5 H5(2)). `pip install
    sglang` has the same venv problem. The **checkable prediction** is that

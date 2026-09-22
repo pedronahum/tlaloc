@@ -250,6 +250,37 @@ class VllmLivePluginTest {
             assertEquals(m.numKvHeads, layer0.int("num_kv_heads"))
             assertEquals(m.headDim, layer0.int("head_size"))
             assertEquals(m.numLayers, live.arr("kvCacheSpecLayers").size)
+            // §0.4.492 (H3c-4b) — the TYPE, not just the fields. The three
+            // numbers above were right when this method returned a dict, and
+            // the engine still died on them: `_initialize_kv_caches` asks the
+            // returned value for `.num_heads`, which only vLLM's own
+            // dataclass has. A field check cannot see that; a class check can.
+            assertEquals(
+                "vllm.v1.kv_cache_interface.FullAttentionSpec", layer0.str("class"),
+                "get_kv_cache_spec must return vLLM's KVCacheSpec objects, not dicts " +
+                    "shaped like them — the engine core calls derived properties on them",
+            )
+            // And the page byte count vLLM derives from that spec is the one
+            // `kv_layout` derives from the manifest. Two derivations, one
+            // number, asserted in-process by the worker and again here.
+            assertEquals(
+                2 * m.blockSize * m.numKvHeads * m.headDim * 4, layer0.int("page_size_bytes"),
+                "vLLM's page_size_bytes must be the compiled pool's page",
+            )
+            assertEquals(listOf("LBNHC"), live.strings("workerKvCacheLayouts"))
+            live.mustContain("workerKvLayoutRefusal", "The layout is a compiled fact")
+            assertEquals(listOf("generate"), live.strings("supportedTasks"))
+            // The warm-up that reports nothing rather than a number it did not
+            // spend: PJRT compilation is lazy and per bucket (H3a's deferral).
+            assertEquals(listOf(0.0f, 0.0f), live.floats("warmUpTimes"))
+            // §0.4.492 — an empty batch gets vLLM's own empty output. The
+            // engine schedules one whenever the batch queue drains, and takes
+            // execute_model's return value directly for it.
+            assertEquals(
+                "vllm.v1.outputs.ModelRunnerOutput", live.str("emptyBatchOutputClass"),
+            )
+            assertEquals(0, live.arr("emptyBatchReqIds").size)
+            live.mustContain("grammarRefusal", "structured outputs")
 
             // --- 4. the numbers, against the certified runner lane -------
             val runnerOut = dir.resolve("runner.json")

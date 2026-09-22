@@ -101,16 +101,41 @@ class TlalocModelRunner:
     # --- sequence lifecycle ---------------------------------------------
 
     def add_sequence(self, seq_id: int, prompt_token_ids) -> None:
+        """Admit a sequence and consume all but the LAST prompt token.
+
+        §0.4.492 (H3c-4b) — this used to refuse any prompt but a one-token
+        one, and that refusal is what a real `LLM.generate()` hit on its
+        first step. There is still no PREFILL entry in the artifact (H1a's
+        ragged form is the open deferral), so the prompt is consumed the way
+        `run_llama_generate.py` has consumed it since §0.4.480 and
+        §0.4.479's parity lane before that: as `len(prompt) - 1` single-token
+        decode steps, each writing one KV slot, feeding position `i` at
+        `seqLens = i + 1`. Attention is causal, so those steps compute
+        exactly the KV a fused prefill would; the cost is N launches instead
+        of one, which makes this a PERFORMANCE deferral and not a
+        correctness one.
+
+        The LAST prompt token is deliberately left unconsumed: it is the
+        token the caller's first `step` feeds, and the logits it produces
+        are the first sampled token. Consuming it here would make the
+        admission produce a token, and the runner would be one step ahead of
+        whatever scheduler is driving it for the rest of the sequence.
+
+        REJECTED: sampling during the walk and discarding the results
+        silently. The walk's logits ARE discarded — the prompt already says
+        what comes next — but `_prefill_step` says so by not sampling at
+        all, rather than by sampling into a variable nobody reads.
+        """
         prompt = list(prompt_token_ids)
-        if len(prompt) != 1:
-            raise NotImplementedError(
-                f"TlalocModelRunner.add_sequence: prompt of {len(prompt)} tokens for "
-                f"sequence {seq_id}; this artifact has no PREFILL entry (the decode "
-                f"ladder is the only thing exported — see docs/INFERENCE_SERVING_AUDIT.md "
-                f"§5 H3a's named deferrals), so only a one-token prompt is admissible"
+        if not prompt:
+            raise ValueError(
+                f"TlalocModelRunner.add_sequence: sequence {seq_id} has an empty "
+                f"prompt; there is nothing to condition on and nothing to feed"
             )
         self.pool.add_sequence(seq_id)
         self.tokens[seq_id] = list(prompt)
+        for tok in prompt[:-1]:
+            self._prefill_step(seq_id, tok)
 
     def free_sequence(self, seq_id: int) -> None:
         self.pool.free_sequence(seq_id)
@@ -120,6 +145,21 @@ class TlalocModelRunner:
         return list(self.tokens[seq_id])
 
     # --- execution -------------------------------------------------------
+
+    def _prefill_step(self, seq_id: int, token_id: int) -> None:
+        """One prompt token through the decode graph: write its KV, keep the
+        pools, sample nothing and record nothing.
+
+        Not `step`, because `step` maintains the histories and the
+        `last_call`/`last_logits` the live lane measures, and a prompt walk
+        must leave both describing the step a CALLER made. One sequence at a
+        time on purpose: batching two sequences' prompt walks together would
+        need them to be the same length, and the ladder's padding rules are
+        written for the decode shape.
+        """
+        call = build_decode_call(self.pool, self.artifact, [(seq_id, token_id)])
+        _, pools = self.artifact.run_decode(kv_pools=self.kv_pools, **call.as_kwargs())
+        self.kv_pools = pools
 
     def step(self, requests):
         """Run one decode step for `(seq_id, token_id)` pairs.
@@ -156,7 +196,10 @@ class TlalocModelRunner:
         of many, which is deliberate — the padded rows are exercised by the
         easiest possible request rather than only by the hardest."""
         self.add_sequence(seq_id, prompt_token_ids)
-        nxt = int(list(prompt_token_ids)[0])
+        # §0.4.492: the LAST prompt token, because `add_sequence` consumed
+        # every one before it. At a one-token prompt these are the same
+        # token, which is why this read was right for two slices.
+        nxt = int(list(prompt_token_ids)[-1])
         out = []
         for _ in range(max_new_tokens):
             _, _, sampled = self.step([(seq_id, nxt)])

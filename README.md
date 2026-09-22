@@ -105,9 +105,9 @@ has never run (why is always stated) ·
 |---|---|---|
 | Paged attention, KV-cache writes, decode bucketing | ✅ | Inference-only ops; they refuse differentiation by name |
 | HuggingFace safetensors ingestion | ✅ | Kotlin parser; certified against torch reading the same bytes |
-| **A real Llama serving end to end** | ✅ | TinyLlama-1.1B, all 22 layers, on PJRT-CUDA — **6/6 generated token ids identical to HuggingFace transformers** |
+| **A real Llama serving end to end** | ✅ | TinyLlama-1.1B, all 22 layers, on PJRT-CUDA — **6/6 generated token ids identical to HuggingFace transformers**, driven directly *and* through vLLM |
 | **Framework-free serving runtime** | ✅ | The serving process imports no JAX, no PyTorch, no NumPy — just a PJRT plugin `.so` and a driver (proven by an import blocker that raises on those modules while the path runs) |
-| vLLM platform plugin | 🧪 | Platform discovery activates it and the worker API executes live; `LLM.generate()` still needs one backend-class stub (named in the [audit](docs/INFERENCE_SERVING_AUDIT.md)) |
+| vLLM platform plugin | ✅ | vLLM 0.29.0's `LLM.generate()` runs a real TinyLlama from a Tlaloc artifact — **the same 6 token ids as the direct driver and as HuggingFace**. One sequence, greedy, prompt within the compiled context; `vllm serve`'s HTTP layer is not yet run ([audit](docs/INFERENCE_SERVING_AUDIT.md), [runbook §11](docs/SERVING_RUNBOOK.md)) |
 | SGLang plugin | 📐 | Design recorded; reuses the same artifact |
 | KV-cache quantization (int8) | ✅ | Derived error bound, not a guess |
 

@@ -162,6 +162,60 @@ class HfLlamaServingArtifactTest {
                     "Greedy decoding agrees EXACTLY until TF32 and fp32 disagree about a top-1, " +
                     "so a divergence here is a number to record, not a tolerance to widen",
             )
+            // --- §0.4.492 (H3c-4b): the SAME artifact, driven by vLLM ----
+            // Two callers, one artifact. `run_llama_generate.py` walks the
+            // decode ladder itself; vLLM brings its scheduler, its block
+            // manager, its tokenizer and its `LLM` entry point and reaches
+            // the same programs through `TlalocWorker`. Any difference is
+            // the ADAPTER, which is why the floor is `==` and not a
+            // tolerance — both lanes run the same PJRT plugin on the same
+            // device against the same 4.2 GiB of staged weights.
+            val vllmOut = dir.resolve("vllm-generate.json")
+            val vllmRun = runPython(
+                vllmPython, "run_vllm_generate_check.py", listOf(
+                    "--artifact", dir.resolve("artifact").toString(),
+                    "--checkpoint", ckptDir.toString(),
+                    "--prompt", prompt, "--max-new", maxNew.toString(),
+                    "--max-context", CONTEXT.toString(),
+                    "--block-size", BLOCK_SIZE.toString(),
+                    "--output", vllmOut.toString(),
+                ), plugin, vllmOut,
+            )
+            if (vllmRun == null) {
+                println("[skip] the vLLM generate lane reported an unrunnable environment")
+            } else {
+                // vLLM tokenized the prompt with the checkpoint's own
+                // tokenizer, independently of the oracle. That the two agree
+                // is the statement that both lanes were asked the same
+                // question; nothing here types a token id.
+                assertEquals(
+                    promptIds, vllmRun.ints("promptTokens"),
+                    "vLLM and the transformers oracle tokenized '$prompt' differently, so " +
+                        "the two lanes were never asked the same question",
+                )
+                val viaVllm = vllmRun.ints("generatedTokens")
+                assertEquals(
+                    got, viaVllm,
+                    "the same artifact, called directly and called through vLLM 0.29.0's " +
+                        "LLM.generate(), produced different tokens: direct $got vs vLLM " +
+                        "$viaVllm. Both ran the same compiled programs on the same device, " +
+                        "so the difference is in the plugin's adaptation and nowhere else",
+                )
+                assertEquals(
+                    oracleIds, viaVllm,
+                    "vLLM's generation disagrees with HuggingFace transformers",
+                )
+                assertEquals(maxNew, viaVllm.size)
+                assertEquals("length", vllmRun.str("finishReason"))
+                println(
+                    "[H3c-4b] vLLM ${vllmRun.str("vllmVersion")} LLM.generate() on the " +
+                        "artifact: ${vllmRun.str("text").replace("\n", "\\n")} — " +
+                        "$viaVllm, equal to the direct lane and to HF; " +
+                        "construct ${vllmRun.num("constructSeconds")}s, " +
+                        "generate ${vllmRun.num("generateSeconds")}s",
+                )
+            }
+
             println(
                 "[H3c-3] ${manifest.modelName}: ${manifest.model.numLayers} layers, " +
                     "${manifest.weights.table.size} staged weights " +

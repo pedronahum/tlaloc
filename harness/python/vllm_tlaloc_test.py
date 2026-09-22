@@ -257,9 +257,43 @@ class SchedulerOutputAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty prompt"):
             decode_requests_from_scheduler_output(out, last_token_of=lambda rid: 1)
 
-    def test_a_chunked_or_prefill_request_is_refused_by_name(self):
+    def test_a_new_request_scheduled_for_its_whole_prompt_is_admitted(self):
+        """§0.4.492 (H3c-4b) — a PREFILL is admissible; a CHUNK is not.
+
+        vLLM schedules a new request for `len(prompt)` tokens, so the old
+        blanket refusal of `n != 1` ended every real `generate()` on its
+        first step. The whole prompt is servable as N single-token decode
+        steps (`TlalocModelRunner.add_sequence`), and the feed token is the
+        LAST one — the steps before it are the runner's job."""
         out = self.FakeOutput([self.FakeNew("a", [1, 2, 3])], None, {"a": 3})
+        new, decode, _ = decode_requests_from_scheduler_output(
+            out, last_token_of=lambda rid: 1,
+        )
+        self.assertEqual([("a", [1, 2, 3])], new)
+        self.assertEqual([("a", 3)], decode)
+
+    def test_a_chunk_of_a_prompt_is_refused_by_name(self):
+        """Three tokens scheduled of a five-token prompt is a CHUNK: the rest
+        arrives on a later step and this runner keeps no resumption state."""
+        out = self.FakeOutput([self.FakeNew("a", [1, 2, 3, 4, 5])], None, {"a": 3})
         with self.assertRaisesRegex(NotImplementedError, "named deferral"):
+            decode_requests_from_scheduler_output(out, last_token_of=lambda rid: 1)
+
+    def test_a_cached_request_scheduled_for_more_than_one_token_is_refused(self):
+        """A resumed chunk or a speculative draft. Only an ARRIVING request
+        may be scheduled for more than one token."""
+        out = self.FakeOutput([], self.FakeCached(["b"]), {"b": 3})
+        with self.assertRaisesRegex(NotImplementedError, "named deferral"):
+            decode_requests_from_scheduler_output(out, last_token_of=lambda rid: 1)
+
+    def test_a_prefix_cache_hit_is_refused_rather_than_started_midway(self):
+        """This runner's KV pool is its own and holds no cross-request prefix,
+        so a request arriving with tokens already computed would attend over
+        pages nothing wrote."""
+        new = self.FakeNew("a", [1, 2, 3])
+        new.num_computed_tokens = 2
+        out = self.FakeOutput([new], None, {"a": 1})
+        with self.assertRaisesRegex(NotImplementedError, "prefix cache hit"):
             decode_requests_from_scheduler_output(out, last_token_of=lambda rid: 1)
 
     def test_an_empty_scheduler_output_produces_an_empty_batch(self):
