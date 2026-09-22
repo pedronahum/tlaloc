@@ -100,6 +100,45 @@ class PagedAttentionModuleTest {
     }
 
     @Test
+    fun theScoresStageCarriesBothMappingsAndReducesWithoutABarrier() {
+        val ptx = module.emitPtx()
+        val scores = ptx
+            .substringAfter(".visible .entry kptx_paged_scores")
+            .substringBefore(".visible .entry kptx_paged_softmax")
+        // §0.4.494 — the warp arm: warp w owns j, its 32 lanes split d.
+        assertTrue("W_J_LOOP" in scores && "W_D_LOOP" in scores, "stage 1's warp-mapped arm")
+        assertTrue("SCALAR_J" in scores, "the degenerate-shape fallback label")
+        // The scalar arm is the §0.4.471 program, still present verbatim.
+        assertTrue("J_LOOP" in scores && "D_LOOP" in scores, "stage 1's original j-strided arm")
+        // The d stride is 32 lanes x 4 bytes. It is a WARP constant, not a
+        // dim-derived one: the plugin hands shapes with -1 sentinels and a
+        // rule that baked `headDim` here would be the §0.4.414 landmine.
+        assertEquals(
+            2, Regex("add\\.s64 %rd\\d+, %rd\\d+, 128;").findAll(scores).count(),
+            "the K and Q walking pointers both stride one warp-transaction",
+        )
+        // The reduction: five shuffles, no barrier, no shared memory. A
+        // warp is already synchronous, and `shfl.sync` is what reconverges
+        // it — a `bar.sync` here would be a CTA-wide claim about a
+        // per-warp loop whose trip count is not CTA-uniform.
+        assertEquals(
+            5, Regex("shfl\\.sync\\.down\\.b32").findAll(scores).count(),
+            "warpReduceSumF32's five steps",
+        )
+        assertTrue("bar.sync" !in scores, "the score stage stays barrier-free")
+        assertTrue(".shared" !in scores, "the score stage declares no shared memory")
+        // The guard is CTA-uniform in all three of its conjuncts, so every
+        // thread of a CTA takes the same arm. `ntid & 31` is the one that
+        // matters most: a partial warp would make the 0xffffffff member
+        // mask a lie, and `shfl.sync` would wait on lanes that do not exist.
+        assertTrue("and.b32" in scores && ", 31;" in scores, "the ntid-multiple-of-32 guard")
+        assertEquals(
+            3, Regex("@%p\\d+ bra SCALAR_J;").findAll(scores).count(),
+            "three CTA-uniform reasons to decline the warp mapping",
+        )
+    }
+
+    @Test
     fun theEmittedPtxIsPureAscii() {
         // ptxas rejects a non-ASCII byte anywhere in the file — including
         // inside a comment — with `Unexpected non-ASCII character`, and the

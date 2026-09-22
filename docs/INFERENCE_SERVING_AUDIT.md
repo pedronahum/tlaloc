@@ -2342,6 +2342,8 @@ measured and closed out the KPTX performance tier (**2333 → 2336**).
 | 0.4.491 | H3c-4a | `vllm_tlaloc/attention.py` + `kv_layout.py` — `get_attn_backend_cls` ANSWERS. A real `AttentionBackend` subclass, every fact manifest-derived, page shape pinned **both ways** against vLLM's own `compute_layer_kv_cache_shape_bytes` (`(6,2,2,16)`, 64 B/page, from two independent derivations), `forward` refusing by name. The contract's `get_kv_cache_shape` **does not exist in 0.29.0** and the entry says so; vLLM's divisibility-based `supports_block_size` overridden to equality after the live lane showed it declaring `--block-size 16` supported | 2336 (Python lane 44 → 56) |
 
 | 0.4.492 | H3c-4b | **`LLM.generate()` RUNS.** vLLM 0.29.0 drives a real 22-layer TinyLlama Tlaloc artifact to ` Paris.\n\n2.`, ids equal to the direct lane AND to HF, 6/6. Six findings on the way, all signature-vs-installed-vLLM (typed `FullAttentionSpec`, singular `initialize_from_config`, `compile_or_warm_up_model`, `get_supported_tasks`, the `execute_model`/`sample_tokens` split, the empty batch). A whole PROMPT is now admissible — served as N decode steps — while a chunk, a resumed chunk, a prefix-cache hit and a grammar bitmask are each refused by name | 2336 (Python lane 56 → 59) |
+| 0.4.493 | W1 | The **ISA-table blocker** §7.4/§8.5 made rank 1's dependency **did not exist**: six spellings through real `ptxas` showed `mov.b32 %r1,%f1` had validated since §0.4.357 and that `shfl.sync.down.b32` moves `%f` directly, so no `mov` is needed. What WAS missing is the half of the rule §0.4.357 dropped — `bN` is untyped bit storage *of a stated size*, so `mov.b32 %rd1,%f1` passed a table that exists to refuse it. `IsaRegClass.widthBits`, `warpReduceSumF32`, `movB32`; GPU-proved at 496.0f exactly | 2336 → 2342 |
+| 0.4.494 | W2 | **§8.3 rank 1, written and NOT a null.** `kptx_paged_scores` maps a **warp** to a context lane — 32 lanes split `headDim`, one 128 B transaction per load, `shfl` reduction, **no barrier and no shared memory** — with three CTA-uniform guards keeping the §0.4.471 program. The Double oracle got *tighter* (1.19e-7 → **8.94e-8**, a tree sum rounds better than a chain); the claimed device floor at both Llama-3-8B points fell **1.3–1.5×** with the control lane unmoved, two sessions before and two after. TinyLlama unmoved and nothing claimed for it; the gate stays unmet and the registry stays empty | 2342 → 2343 |
 
 **Before touching anything in the next section, read
 [SERVING_RUNBOOK.md §0.1](SERVING_RUNBOOK.md).** `~/.local/venvs/iree` is
@@ -2585,7 +2587,11 @@ Three new `OpKind`s entered the IR in Phase H and no others:
    (3) bf16 pools, (4) flash-decode splitting + single-kernel fusion,
    (5) the register shave — with the honest note that **1–3 are all
    8B-side items and the 8B points already pass**, so the gate itself is
-   waiting on (4).
+   waiting on (4). **§0.4.494 (W2) landed (1)** ([§10](KPTX_PAGED_PERF.md)):
+   the 8B points now pass by roughly twice the margin (c/u 0.49–0.62 and
+   0.50–0.53 against 0.73–0.85 and 0.62–0.71), and the gate is still
+   waiting on (4) — and, before (4), on §8.4's instrument fix, because the
+   TinyLlama points cannot be told apart from their own dispatch floor.
 6. **Narrow DTypes (`I8`, and the fp8 tour)** — a bf16-sized piece of work,
    and the difference between KV-quant's contract and its bytes.
 7. **`precision_config = HIGHEST`** for dots that want it, and the top-1

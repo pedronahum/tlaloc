@@ -795,7 +795,8 @@ object KptxKernels {
      *      `block = blockTables[seq, j / blockSize]`,
      *      `off = j % blockSize`, dots `Q[seq,h,:]` against
      *      `K[block, off, kvHead, :]` and scales; a lane at or past
-     *      `seqLen` is written `−inf`.
+     *      `seqLen` is written `−inf`. **§0.4.494 gave this stage a
+     *      warp-per-lane mapping**: see below.
      *   2. `kptx_paged_softmax(S, n_ctx)` — [rowSoftmaxKernel] verbatim.
      *      The `−inf` dead lanes exponentiate to exactly `0`, so no
      *      masking arm is needed there.
@@ -803,6 +804,70 @@ object KptxKernels {
      *      n_kv, n_mb)` — one CTA per output row, accumulating only over
      *      the live lanes. **§0.4.482 gave this stage a second
      *      dimension**: see below.
+     *
+     * # §0.4.494 — the warp-per-lane mapping in stage 1
+     *
+     * As written in §0.4.471 stage 1 gave each *thread* a context lane
+     * `j` and walked `headDim` serially inside it. At a fixed `d` the 32
+     * threads of a warp were then reading 32 **different pages**, which
+     * at Llama-3-8B shapes are `numKvHeads · headDim · 4` = 4096 B apart:
+     * 32 separate 32-byte sectors fetched for 128 bytes of useful data,
+     * an **8× read amplification**. `docs/KPTX_PAGED_PERF.md` §7.3 is
+     * where that was diagnosed, and it is the only walk in the chain that
+     * had it — stage 3's V walk has been perfectly coalesced since
+     * §0.4.471.
+     *
+     * The stage now maps a **warp** to a context lane:
+     *
+     * ```
+     *   nWarps = ntid / 32                    // CTA-wide, branch-uniform
+     *   w = tid / 32,  lane = tid % 32
+     *   warp w owns j = w, w+nWarps, w+2*nWarps, ... < ctx
+     *   its 32 lanes split d = lane, lane+32, ... < n_d
+     *   warpReduceSumF32(acc); lane 0 scales and stores S[row, j]
+     * ```
+     *
+     * **No barrier and no shared memory.** A warp is already synchronous
+     * and `shfl.sync` is what reconverges it; the whole warp shares `j`,
+     * so the live/dead test, the page resolution and the block-table load
+     * are all warp-uniform (that load is a broadcast, one transaction).
+     * Each `K[block, off, kvh, lane…]` request is now 32 consecutive f32
+     * — one 128 B transaction — and so is the `Q` request. The pointer
+     * stride is the literal `128`, which is `32 lanes × 4 B`: a **warp**
+     * constant, not a dim-derived one, so no sentinel-dim rule is baked.
+     *
+     * **Three CTA-uniform reasons to decline the mapping**, each keeping
+     * the §0.4.471 program verbatim under `SCALAR_J` — the `nsplit < 2`
+     * precedent from stage 3:
+     *
+     * - **`ntid` is not a multiple of 32.** The reduction's member mask
+     *   is `0xffffffff`; on a partial warp that is a lie and `shfl.sync`
+     *   would wait on lanes that do not exist.
+     * - **`ntid < 32`** (`nWarps == 0`), which would leave the `j` loop
+     *   with no owner at all.
+     * - **`headDim < 32`.** The mapping is still *correct* there — lanes
+     *   past `n_d` contribute a zero to the reduction — but it cannot
+     *   fill a 128 B transaction, which is the entire point, and it pays
+     *   ten reduction ops for fewer than one FMA per lane.
+     *
+     * The floating-point sum is **reassociated** by this a second time:
+     * the dot is now a 32-way tree over `shfl` partials rather than a
+     * sequential `fma.rn.f32` chain. The §0.4.471 oracle says what that
+     * cost, and the answer is that it *gained*: worst |delta| against the
+     * interpreter's Double paged walk at the certification fixture
+     * (permuted block table, ragged `seqLens`, GQA group 4) moved from
+     * **1.1920929e-7 to 8.940697e-8** — a tree sum of 64 terms rounds
+     * better than a chain of 64, which is the textbook result and is
+     * still a measurement, not a guarantee.
+     *
+     * Measured, two sessions before and two after within one hour
+     * (`docs/KPTX_PAGED_PERF.md` §10): at the two Llama-3-8B-shaped
+     * points the claimed lane's device floor fell from **932.7/1097.5 µs
+     * to 596.8/838.3** and from **1615.4/1578.1 µs to 1102.4/1211.8**,
+     * non-overlapping ranges in both cases, with the unclaimed control
+     * lane unmoved. The TinyLlama points stayed inside their own spread
+     * and nothing is claimed for them. Declared registers 65 → 73 with
+     * **no occupancy change** (3 blocks/SM, 50%, still register-limited).
      *
      * # §0.4.482 — the context split in stage 3
      *
@@ -881,9 +946,11 @@ object KptxKernels {
      * kernel inside its buffers while H1c's bucket policy refuses the
      * over-cap request by name at the layer that can actually split it.
      *
-     * Correctness-tier f32 loops by design, exactly as §0.4.358's dense
-     * chain was: this is the *claiming* milestone. The warp-specialized
-     * pass is the follow-up.
+     * Still f32 throughout, exactly as §0.4.358's dense chain was — the
+     * tensor-core pass and bf16 pools are separate items on
+     * `docs/KPTX_PAGED_PERF.md` §8.3's list and neither is attempted
+     * here. What §0.4.494 changed is the *address pattern*, not the
+     * arithmetic.
      */
     private val pagedAttnCache = HashMap<Pair<Int, Int>, PtxModule>()
 
@@ -904,9 +971,9 @@ object KptxKernels {
                     val nMbP = param(".u32", "n_mb")
 
                     val p1 = pred(); val p2 = pred(); val p3 = pred()
-                    val r = List(20) { r32() }
+                    val r = List(25) { r32() }
                     val f = List(3) { f32() }
-                    val rd = List(19) { r64() }
+                    val rd = List(20) { r64() }
 
                     inst("ld.param.u64", rd[0], mem(qPtr))
                     inst("ld.param.u64", rd[1], mem(kPtr))
@@ -952,7 +1019,85 @@ object KptxKernels {
                     inst("mul.wide.u32", rd[13], r[14], imm(4))
                     inst("add.s64", rd[13], rd[7], rd[13], comment = "block-table row")
                     blank()
+                    comment("0.4.494: warp-per-lane mapping, taken when a warp load is a full 128 B run")
+                    comment("guard is CTA-uniform: ntid a multiple of 32, at least one warp, n_d >= 32")
+                    val scalarPath = label("SCALAR_J")
+                    inst("and.b32", r[20], r[7], imm(31))
+                    inst("setp.ne.u32", p1, r[20], imm(0))
+                    inst("bra", scalarPath, guard = p1, comment = "partial warp: shfl's full mask would be a lie")
+                    inst("shr.u32", r[20], r[7], imm(5), comment = "nWarps")
+                    inst("setp.eq.u32", p1, r[20], imm(0))
+                    inst("bra", scalarPath, guard = p1)
+                    inst("setp.lt.u32", p1, r[1], imm(32))
+                    inst("bra", scalarPath, guard = p1, comment = "headDim < 32 cannot fill a warp's transaction")
+                    blank()
+                    comment("WARP: warp w owns j = w, w+nWarps, ...; its 32 lanes split d = lane, lane+32, ...")
+                    inst("shr.u32", r[21], r[6], imm(5), comment = "w")
+                    inst("and.b32", r[22], r[6], imm(31), comment = "lane")
+                    inst("mul.wide.u32", rd[19], r[22], imm(4), comment = "lane's byte offset into a row")
+                    val wLoop = label("W_J_LOOP")
+                    val wDone = label("W_J_DONE")
+                    val wLive = label("W_LIVE")
+                    val wNext = label("W_NEXT")
+                    inst("mov.u32", r[23], r[21])
+                    place(wLoop)
+                    inst("setp.ge.u32", p1, r[23], r[12])
+                    inst("bra", wDone, guard = p1)
+                    inst("mul.wide.u32", rd[14], r[23], imm(4))
+                    inst("add.s64", rd[15], rd[12], rd[14], comment = "&S[row, j]")
+                    inst("setp.lt.u32", p2, r[23], r[13])
+                    inst("bra", wLive, guard = p2, comment = "UNIFORM: every lane of the warp shares j")
+                    inst("setp.ne.u32", p3, r[22], imm(0))
+                    inst("bra", wNext, guard = p3)
+                    inst("mov.f32", f[0], imm("0fFF800000"), comment = "-inf")
+                    inst("st.global.f32", mem(rd[15]), f[0])
+                    inst("bra", wNext)
+                    place(wLive)
+                    comment("page resolution is warp-uniform; the block-table load broadcasts")
+                    inst("div.u32", r[16], r[23], r[2], comment = "page index within the sequence")
+                    inst("mul.lo.u32", r[17], r[16], r[2])
+                    inst("sub.u32", r[17], r[23], r[17], comment = "offset within the page")
+                    inst("mul.wide.u32", rd[16], r[16], imm(4))
+                    inst("add.s64", rd[16], rd[13], rd[16])
+                    inst("ld.global.u32", r[18], mem(rd[16]), comment = "physical block")
+                    inst("mul.lo.u32", r[19], r[18], r[2])
+                    inst("add.u32", r[19], r[19], r[17])
+                    inst("mul.lo.u32", r[19], r[19], r[3])
+                    inst("add.u32", r[19], r[19], r[11])
+                    inst("mul.lo.u32", r[19], r[19], r[1])
+                    inst("mul.wide.u32", rd[17], r[19], imm(4))
+                    inst("add.s64", rd[17], rd[6], rd[17], comment = "&K[block, off, kvh, 0]")
+                    inst("add.s64", rd[17], rd[17], rd[19], comment = "+ lane: 32 lanes = one 128 B transaction")
+                    inst("add.s64", rd[18], rd[11], rd[19], comment = "&Q[seq, h, lane]")
+                    inst("mov.f32", f[0], imm("0f00000000"))
+                    inst("mov.u32", r[24], r[22])
+                    val wdLoop = label("W_D_LOOP")
+                    val wdDone = label("W_D_DONE")
+                    place(wdLoop)
+                    inst("setp.ge.u32", p3, r[24], r[1])
+                    inst("bra", wdDone, guard = p3)
+                    inst("ld.global.f32", f[1], mem(rd[18]))
+                    inst("ld.global.f32", f[2], mem(rd[17]))
+                    inst("fma.rn.f32", f[0], f[1], f[2], f[0])
+                    inst("add.s64", rd[18], rd[18], imm(128), comment = "32 lanes x 4 B, a warp constant")
+                    inst("add.s64", rd[17], rd[17], imm(128))
+                    inst("add.u32", r[24], r[24], imm(32))
+                    inst("bra", wdLoop)
+                    place(wdDone)
+                    comment("every lane reaches this: the d loop's trip count differs, the reduction does not")
+                    warpReduceSumF32(f[0])
+                    inst("setp.ne.u32", p3, r[22], imm(0))
+                    inst("bra", wNext, guard = p3, comment = "lane 0 holds the dot and owns S[row, j]")
+                    inst("mul.f32", f[0], f[0], imm(scaleImm), comment = "the op's scale attr, baked")
+                    inst("st.global.f32", mem(rd[15]), f[0])
+                    place(wNext)
+                    inst("add.u32", r[23], r[23], r[20])
+                    inst("bra", wLoop)
+                    place(wDone)
+                    inst("ret")
+                    blank()
                     comment("for j strided: live -> scale * dot(Q[seq,h,:], K[page(j),kvh,:]), dead -> -inf")
+                    place(scalarPath)
                     inst("mov.u32", r[15], r[6])
                     val jLoop = label("J_LOOP")
                     val jDone = label("J_DONE")

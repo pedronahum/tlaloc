@@ -3,6 +3,14 @@
 **§0.4.481 (Phase H4b, slice K1). Measure and diagnose; no kernel was
 rewritten in this slice.**
 
+> **§0.4.494 (slice W2) is the latest change — read [§10](#10-04494-w2-the-warp-mapped-stage-1--the-8-read-amplification-paid-down).**
+> It implements §8.3 **rank 1** (stage 1's coalescing), and unlike K2 it
+> is not a null: the claimed lane's device floor at both Llama-3-8B
+> points fell **1.3–1.5×** with the unclaimed control lane unmoved, and
+> the Double oracle got *tighter* (1.19e-7 → **8.94e-8**). The gate in
+> §5 is still unmet and `defaultInferenceKernelTemplates` is still
+> empty — the TinyLlama points did not move.
+>
 > **§0.4.483 (slice K3) closes the tier in [§8](#8-04483-k3-the-tiers-close-out--the-registry-decision-stated).**
 > If you only want the answer to "can I turn the kernel on today?", read
 > §8.1 — **no**, with the reason, the rejected alternative, and the merged
@@ -383,6 +391,9 @@ gate; it is a reason to fix the instrument first.
 - **The stage-1 warp-mapped kernel** — designed in §7.4, not written.
   Time-boxed out after the null result consumed the slice's
   implementation budget, and left with its blocker named.
+  > **§0.4.494 (W2) wrote it**, exactly as §7.4 specified. The 8B
+  > points' claimed floors fell 1.3–1.5× with the control lane
+  > unmoved; the TinyLlama points did not move. See [§10](#10-04494-w2-the-warp-mapped-stage-1--the-8-read-amplification-paid-down).
 - **The `mov.b32` ISA-table gap** — see §7.4. One line of table, one
   pin, and it gates everything warp-reduced that carries floats.
   > **§0.4.493 (W1): this gap did not exist.** The table had accepted
@@ -648,6 +659,8 @@ is a bug in every kernel in this repo.
   unwritten. This slice removed its only named blocker and nothing else:
   **no microsecond of §2's table moves on this commit**, and none is
   claimed.
+  > **§0.4.494 (W2) wrote it** on the very next commit, and §2's table
+  > did move at the 8B points. See [§10](#10-04494-w2-the-warp-mapped-stage-1--the-8-read-amplification-paid-down).
 
 ## 9.5 The lesson worth keeping
 
@@ -657,3 +670,157 @@ that a one-line `validateInst` call and a six-line `.ptx` file through
 minutes. Reasoning about a validator by reading it cost a slice's
 implementation budget and a wrong entry in two ranked lists. **When a
 doc names a blocker, the next slice runs it before it believes it.**
+
+---
+
+# 10. §0.4.494 (W2): the warp-mapped stage 1 — the 8× read amplification, paid down
+
+**§8.3 rank 1, written exactly as §7.4 specified it, and this time the
+numbers moved.** W1 (§9) found the blocker it was waiting on did not
+exist; this slice spends the unblock.
+
+## 10.1 What landed
+
+`kptx_paged_scores` maps a **warp** to a context lane instead of a
+thread:
+
+```
+  nWarps = ntid / 32                    // CTA-wide, branch-uniform
+  w = tid / 32,  lane = tid % 32
+  warp w owns j = w, w+nWarps, w+2*nWarps, ... < ctx
+  its 32 lanes split d = lane, lane+32, ... < n_d
+  warpReduceSumF32(acc); lane 0 scales and stores S[row, j]
+```
+
+Every `K[block, off, kvh, lane…]` request is now 32 consecutive f32 —
+one 128 B transaction — where §7.3 measured 32 separate 32-byte sectors
+4096 B apart. The `Q` request coalesces the same way. The pointer stride
+is the literal `128` = **32 lanes × 4 B**, a warp constant and not a
+dim-derived one, so the §0.4.414 sentinel-dims rule is untouched.
+
+**No barrier and no shared memory**, which is the whole reason this arm
+is cheaper than stage 3's `(part, d)` split: the entire warp shares `j`,
+so the live/dead test, the page resolution and the block-table load
+(a broadcast — one transaction) are warp-uniform, and `shfl.sync` is
+what reconverges the one divergence there is, lane 0's store.
+
+**Three CTA-uniform reasons to decline**, each keeping the §0.4.471
+program verbatim under `SCALAR_J` — the `nsplit < 2` precedent:
+
+| guard | why it is not optional |
+|---|---|
+| `ntid % 32 != 0` | the member mask is `0xffffffff`; on a partial warp that is a lie and `shfl.sync` waits on lanes that do not exist |
+| `ntid < 32` (`nWarps == 0`) | the `j` loop would have no owner |
+| `headDim < 32` | still *correct* (lanes past `n_d` contribute a zero) but cannot fill a 128 B transaction, and pays ten reduction ops for under one FMA per lane |
+
+Declared registers **65 → 73**, with **no occupancy change**: 3
+blocks/SM, 768 threads, 50%, still register-limited.
+
+## 10.2 Correctness first: the oracle got *better*
+
+The dot is now a 32-way `shfl` tree rather than a sequential
+`fma.rn.f32` chain — the second reassociation this chain has taken
+(§0.4.482 was the first). `KptxPagedAttentionKernelTest` at the
+certification fixture — **permuted** block table, ragged `seqLens`
+(full window / single token / mid-page stop / page-aligned stop), GQA
+group 4, `headDim 64`, `ctx 128` — against the interpreter's Double
+paged walk:
+
+| | worst \|delta\| vs the Double oracle |
+|---|---|
+| §0.4.471 / §0.4.482 sequential chain | 1.1920929e-7 |
+| §0.4.494 warp tree | **8.940697e-8** |
+
+A tree sum of 64 terms rounds better than a chain of 64. That is the
+textbook result and it is still a *measurement*, not a guarantee: a
+longer context would round differently and the oracle is what would say
+so. `skipped="0"` in the result XML — the lane ran on the GB10. The
+bench's own per-point "the two lanes agree" assertion passed at all four
+points before anything was timed.
+
+## 10.3 The numbers
+
+Method as §7.1: two sessions before the change and two after, all four
+within one hour, same box, same test, floors over 20 reps after 3
+warmup, lanes interleaved. **DEVICE floors, µs.**
+
+| point | c before | c after | u before | u after | c/u before | c/u after |
+|---|---|---|---|---|---|---|
+| tinyllama-s1-ctx256 | 373.6, 433.3 | 300.1, 197.5 | 107.1, 228.8 | 122.5, 206.5 | 3.49, 1.89 | 2.45, 0.96 |
+| tinyllama-s8-ctx512 | 268.3, 343.6 | 217.9, 352.1 | 247.7, 152.1 | 134.5, 337.4 | 1.08, 2.26 | 1.62, 1.04 |
+| **llama3-8b-s8-ctx1024** | 932.7, 1097.5 | **596.8, 838.3** | 1141.8, 1295.6 | 1217.5, 1348.9 | 0.82, 0.85 | **0.49, 0.62** |
+| **llama3-8b-s16-ctx1024** | 1615.4, 1578.1 | **1102.4, 1211.8** | 2338.6, 2454.7 | 2203.8, 2283.9 | 0.69, 0.64 | **0.50, 0.53** |
+
+**What is claimed.** At both Llama-3-8B-shaped points the claimed lane's
+after-range lies **entirely below** its before-range — 838.3 < 932.7 and
+1211.8 < 1578.1 — while the unclaimed control lane did not move (1141.8,
+1295.6 → 1217.5, 1348.9; 2338.6, 2454.7 → 2203.8, 2283.9) and matches
+K1's and K2's sessions to within a few percent. Against K1's and K2's
+recorded claimed floors (882.8 / 1025 / 1098 / 1116 at s8; 1431 / 1533 /
+1615 / 1695 at s16) the after numbers are below every one of them. The
+honest size of the win is **≈1.3–1.5× on the claimed lane at 8B
+shapes**, and it shows up as achieved bandwidth on unchanged issued
+traffic: c GB/s at s16 went 83.1, 85.0 → **121.7, 110.8**; at s8 61.1,
+72.0 → **80.0, 112.4**.
+
+**What is NOT claimed.** The two TinyLlama points. Their before- and
+after-ranges overlap in both directions, and the reason is §7.5's
+unexplained instrument showing its teeth again: across these four
+sessions the dispatch floor ran 37.6–322.6 µs against measurements of
+197.5–433.3. The `0.96×` in the after-column at `tinyllama-s1-ctx256` is
+a 197.5 µs measurement sitting on a **146.8 µs dispatch floor** — it is
+the floor, not the kernel, and it is not evidence the gate moved.
+
+## 10.4 Why 1.4× and not 8×
+
+§7.3 put an 8× read *amplification* on this walk, and paying it down
+bought 1.3–1.5× of the whole chain. Both facts are true and the gap is
+the interesting part:
+
+- The chain is three stages. If stage 1 were 80% of it (stage 3 is
+  ≤16% by §7.2's bound, stage 2 is a row softmax), a 1.4× end-to-end
+  needs stage 1 itself to have got ≈1.6× faster, not 8×.
+- **Amplified sectors are not all DRAM reads.** The 4× GQA multiplicity
+  means four query heads walk the *same* pages, and CTAs sharing a
+  sequence share pages too; a fetched sector that was waste for one warp
+  is an L2 hit for another. The 8× is an accurate count of *sectors
+  requested per useful byte*; it was never a claim about bytes crossing
+  the memory controller.
+- The warp reduction is not free: **ten ops per `j`** (five `shfl`, five
+  `add`) against `headDim/32` FMAs per lane — 4 at `headDim 128`, 2 at
+  `headDim 64`. That ratio is exactly why the mapping helps most where
+  the walk is memory-bound and least at TinyLlama shapes whose 0.52 MB
+  of KV fits in L2.
+
+## 10.5 The gate, unchanged
+
+§5's gate stands: the claimed lane's device floor below the unclaimed
+lane's at **every** point in §2, one session, interleaved.
+`defaultInferenceKernelTemplates` stays empty and §8.1's decision is
+unchanged. The scoreboard after W2 is **two of four**, the same two as
+before — the 8B points now pass by twice the margin they did, and the
+TinyLlama points are still not measurable at this instrument. §8.4's
+item (fix the instrument) is now the thing standing between this tier
+and an answer at the small points, ahead of any further kernel work
+there.
+
+## 10.6 Deferred by name
+
+- **The GQA fusion (§8.3 rank 1's other half)** — one CTA per
+  `(seq, kvHead)` rather than per `(seq, queryHead)`, removing 3/4 of
+  the K stream outright. Untouched; still the largest remaining term,
+  and now cheaper to reason about because the stream it removes is a
+  clean one.
+- **The reduction's op count.** Ten ops per `j` is the price of the
+  coalescing at every `headDim`. A `headDim 32`/`64` kernel could split
+  `j` across half- or quarter-warps and reduce over 16 or 8 lanes
+  instead — which is exactly the sub-warp width `warpReduceSumF32`
+  deferred in §9.4. That is the change that would address a TinyLlama
+  point, and it should not be attempted before §8.4.
+- **The `SCALAR_J` arm is unexercised on hardware**, like stage 3's
+  `nsplit < 2` arm before it: every fixture in the suite launches 256
+  threads at `headDim >= 64`. Only the emitted-PTX pin covers it. A GPU
+  arm at `headDim 16` would close both.
+- **Per-stage timing.** §7.6 asked for it and §10.4's first bullet is
+  the reason: every apportionment above is still a bound derived from
+  end-to-end floors.
