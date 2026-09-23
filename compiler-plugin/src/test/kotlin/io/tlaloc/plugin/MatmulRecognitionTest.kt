@@ -84,7 +84,7 @@ class MatmulRecognitionTest {
         // End-to-end: gradient is rank-2 zero tensor (since lambda returns 0.0f
         // independent of `a`). 4 elements (2×2 input).
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,

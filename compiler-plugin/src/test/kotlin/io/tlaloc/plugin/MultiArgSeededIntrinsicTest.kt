@@ -111,7 +111,7 @@ class MultiArgSeededIntrinsicTest {
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}")
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,
@@ -201,7 +201,7 @@ class MultiArgSeededIntrinsicTest {
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}")
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,

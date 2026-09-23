@@ -8,7 +8,8 @@ package io.tlaloc.plugin
  * [TlalocIntrinsicCallChecker]) and the IR extension.
  *
  * It is a VALUE passed down the extension-construction chain, deliberately not a
- * process-global mutable like [TlalocLoweringHandoff]: `strictLowering` decides
+ * process-global mutable (the [TlalocLoweringHandoff] table travels the same way since
+ * §0.4.514): `strictLowering` decides
  * whether a diagnostic is an error, and two modules compiled concurrently in one
  * Kotlin daemon must not be able to flip each other's severity.
  *

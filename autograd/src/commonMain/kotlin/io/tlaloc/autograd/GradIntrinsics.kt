@@ -23,18 +23,18 @@ package io.tlaloc.autograd
  * difference is trace-at-runtime vs rewrite-at-compile-time.
  */
 internal fun pluginMissing(name: String): Nothing = throw IllegalStateException(
-    "Tlaloc: `$name { }` was NOT rewritten at compile time, so this fallback body ran and " +
-        "there is no gradient to return. Since 0.1.0-alpha01 (§0.4.499) a lambda the plugin " +
-        "cannot lower is a compile-time ERROR naming the construct, so reaching this message " +
-        "means exactly one of two things:\n" +
-        "  (1) the Tlaloc K2 compiler plugin is not on this module's compile classpath — add " +
-        "`io.github.pedronahum:compiler-plugin` to kotlinCompilerPluginClasspath (docs/GETTING_STARTED.md); or\n" +
-        "  (2) the plugin IS applied and refused this body, and the build opted out of that " +
-        "refusal with -P plugin:io.tlaloc.plugin:strictLowering=false — the compile log then " +
-        "carries `w: Tlaloc could not lower lambda: <reason>` at this call site, which names " +
-        "the exact construct; drop the opt-out to get it as an error instead.\n" +
-        "Either way, the Tracer-capture API (io.tlaloc.autograd.gradWithScalars) gives " +
-        "plugin-free gradients over the same compiler engine.",
+    "Tlaloc: `$name { }` was not rewritten at compile time, so this fallback body ran and " +
+        "there is no gradient to return. One of these is the cause:\n" +
+        "  (1) the Tlaloc compiler plugin is not applied to the module that contains this call — " +
+        "add `io.github.pedronahum:compiler-plugin` to kotlinCompilerPluginClasspath " +
+        "(docs/GETTING_STARTED.md);\n" +
+        "  (2) the plugin is applied and could not compile this call, and the build passes " +
+        "-P plugin:io.tlaloc.plugin:strictLowering=false, which turns that compile error into a " +
+        "warning — the compile log has a `w: Tlaloc ...` warning at this call site that names the " +
+        "reason; remove the option to get it as an error;\n" +
+        "  (3) `$name` was not called as `$name { ... }` with the lambda written at the call site " +
+        "(for example through a reference to `$name` itself), so the plugin had no call to rewrite.\n" +
+        "The Tracer-capture API (io.tlaloc.autograd.gradWithScalars) computes gradients without the plugin.",
 )
 
 /** Gradient of a scalar-valued function of one tensor/value argument. */

@@ -10,7 +10,7 @@ import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrarAdapter
 
 @OptIn(ExperimentalCompilerApi::class)
 class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
-    override val pluginId: String = "io.tlaloc.plugin"
+    override val pluginId: String = TlalocCommandLineProcessor.PLUGIN_ID
 
     override val supportsK2: Boolean = true
 
@@ -50,7 +50,12 @@ class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
             dumpLoweredIr = configuration.get(TlalocCommandLineProcessor.DUMP_LOWERED_IR_KEY) ?: false,
             strictLowering = configuration.get(TlalocCommandLineProcessor.STRICT_LOWERING_KEY) ?: true,
         )
-        FirExtensionRegistrarAdapter.registerExtension(TlalocFirExtensionRegistrar(options))
+        // §0.4.514 — ONE handoff table per compilation, shared by the FIR checker that
+        // writes it and the IR extension that reads it. registerExtensions runs once per
+        // compilation, so two modules compiled concurrently in one Kotlin daemon each get
+        // their own table and cannot read, overwrite or clear each other's entries.
+        val handoff = TlalocLoweringHandoff()
+        FirExtensionRegistrarAdapter.registerExtension(TlalocFirExtensionRegistrar(options, handoff))
         // §0.4.450 — the readable-reverse dump options (see TlalocCommandLineProcessor):
         // the dir form implies the message form.
         val dumpDir = configuration.get(TlalocCommandLineProcessor.DUMP_GRAD_SOURCE_DIR_KEY)
@@ -61,6 +66,7 @@ class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
                 dumpGradSource = dump,
                 dumpGradSourceDir = dumpDir,
                 options = options,
+                handoff = handoff,
             ),
         )
     }

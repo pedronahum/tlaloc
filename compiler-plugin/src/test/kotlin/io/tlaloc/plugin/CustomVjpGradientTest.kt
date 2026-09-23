@@ -245,7 +245,7 @@ class CustomVjpGradientTest {
 
     private fun assertNoFallback(result: RunResult) {
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,

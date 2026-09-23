@@ -57,7 +57,7 @@ class Rank2ParamLoweringTest {
 
         // Sanity: synthesis succeeded — no "kept original call" warning.
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,

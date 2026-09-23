@@ -102,7 +102,7 @@ class PolygammaGradientTest {
             "compile/run failed:\n" + result.messages.joinToString("\n") { "${it.severity}: ${it.message}" },
         )
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,

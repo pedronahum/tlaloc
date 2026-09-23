@@ -95,7 +95,7 @@ class DScalarMixingGradientTest {
         )
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,
@@ -156,7 +156,7 @@ class DScalarMixingGradientTest {
 
         // §0.4.414 — no tape fallback: the boxed-scalar param synthesises.
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,
@@ -219,7 +219,7 @@ class DScalarMixingGradientTest {
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,
@@ -277,7 +277,7 @@ class DScalarMixingGradientTest {
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,
@@ -340,7 +340,7 @@ class DScalarMixingGradientTest {
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,
@@ -396,7 +396,7 @@ class DScalarMixingGradientTest {
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,
@@ -449,7 +449,22 @@ class DScalarMixingGradientTest {
                 println(ds.toFloat())
             }
         """.trimIndent()
-        val result = compileAndRun(AUTOGRAD_STUB_DSCALAR, src)
+        // §0.4.514 — by default the IR-phase refusal is a compile ERROR carrying the
+        // same named reason; the tape fallback below is the strictLowering=false path.
+        val strict = compileAndRun(AUTOGRAD_STUB_DSCALAR, src)
+        assertTrue(strict.exitCode != 0, "the default build must refuse:\n${strict.messages}")
+        assertTrue(
+            strict.messages.any {
+                it.severity == CompilerMessageSeverity.ERROR &&
+                    "kept original call" in it.message && "DScalar INTERFACE" in it.message
+            },
+            "the default refusal is an ERROR naming the DScalar interface:\n${strict.messages}",
+        )
+
+        val result = compileAndRun(
+            AUTOGRAD_STUB_DSCALAR, src,
+            options = arrayOf("plugin:io.tlaloc.plugin:strictLowering=false"),
+        )
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
 
         // The refusal is NAMED: the fallback warning must carry the diagnostic
@@ -492,7 +507,7 @@ class DScalarMixingGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stub: String, user: String, options: Array<String> = emptyArray()): RunResult {
         val tempDir = Files.createTempDirectory("tlaloc-dscalar-mixing-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)
@@ -509,6 +524,7 @@ class DScalarMixingGradientTest {
             val args = K2JVMCompilerArguments().apply {
                 freeArgs = listOf(tempDir.absolutePath)
                 pluginClasspaths = pluginClasspath()
+                if (options.isNotEmpty()) pluginOptions = options
                 destination = outDir.absolutePath
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true

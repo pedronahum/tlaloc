@@ -10,8 +10,11 @@ import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrar
  */
 class TlalocFirExtensionRegistrar(
     private val options: TlalocPluginOptions = TlalocPluginOptions(),
+    private val handoff: TlalocLoweringHandoff = TlalocLoweringHandoff(),
 ) : FirExtensionRegistrar() {
     override fun ExtensionRegistrarContext.configurePlugin() {
-        +FirAdditionalCheckersExtension.Factory { session -> TlalocCheckersExtension(session, options) }
+        +FirAdditionalCheckersExtension.Factory { session ->
+            TlalocCheckersExtension(session, options, handoff)
+        }
     }
 }

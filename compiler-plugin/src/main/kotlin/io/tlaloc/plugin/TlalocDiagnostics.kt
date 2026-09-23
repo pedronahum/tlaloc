@@ -75,6 +75,21 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
+    /**
+     * §0.4.514 — an unexpected exception inside the plugin while handling a recognised
+     * intrinsic call (anything other than the lowering's own named refusals). ERROR by
+     * default; see [INTERNAL_ERROR_WARNING] for `strictLowering=false`.
+     */
+    val INTERNAL_ERROR: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** §0.4.514 — [INTERNAL_ERROR] under `strictLowering=false`: the call is left as
+     * written and the fallback body throws at the first call. */
+    val INTERNAL_ERROR_WARNING: KtDiagnosticFactory1<String> by warning1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
     override fun getRendererFactory(): BaseDiagnosticRendererFactory = TlalocRendererFactory
 }
 
@@ -104,6 +119,16 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
                 "API (io.tlaloc.autograd.gradWithScalars) for this one, or — to take that runtime " +
                 "failure deliberately — pass " +
                 "-P plugin:io.tlaloc.plugin:strictLowering=false, which turns this back into a warning.",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.INTERNAL_ERROR,
+            "{0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.INTERNAL_ERROR_WARNING,
+            "{0}",
             CommonRenderers.STRING,
         )
         map.put(

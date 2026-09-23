@@ -8,9 +8,10 @@ import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtensi
 class TlalocCheckersExtension(
     session: FirSession,
     private val options: TlalocPluginOptions = TlalocPluginOptions(),
+    private val handoff: TlalocLoweringHandoff = TlalocLoweringHandoff(),
 ) : FirAdditionalCheckersExtension(session) {
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
         override val functionCallCheckers: Set<FirFunctionCallChecker> =
-            setOf(TlalocIntrinsicCallChecker(options))
+            setOf(TlalocIntrinsicCallChecker(options, handoff))
     }
 }

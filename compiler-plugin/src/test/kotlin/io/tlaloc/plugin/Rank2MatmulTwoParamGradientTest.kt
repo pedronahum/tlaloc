@@ -78,7 +78,7 @@ class Rank2MatmulTwoParamGradientTest {
         assertEquals(0, result.exitCode, "compile failed:\n${result.messages}")
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,

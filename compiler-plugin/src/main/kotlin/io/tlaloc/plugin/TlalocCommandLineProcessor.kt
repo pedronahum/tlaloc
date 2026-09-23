@@ -47,7 +47,7 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
         configuration: CompilerConfiguration,
     ) = when (option.optionName) {
         DUMP_GRAD_SOURCE_OPTION.optionName ->
-            configuration.put(DUMP_GRAD_SOURCE_KEY, value.toBooleanStrictOrNull() ?: (value == "true"))
+            configuration.put(DUMP_GRAD_SOURCE_KEY, parseBoolean(DUMP_GRAD_SOURCE_OPTION.optionName, value))
         DUMP_GRAD_SOURCE_DIR_OPTION.optionName ->
             configuration.put(DUMP_GRAD_SOURCE_DIR_KEY, value)
         DUMP_LOWERED_IR_OPTION.optionName ->

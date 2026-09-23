@@ -18,7 +18,9 @@ import java.nio.file.Paths
 import org.jetbrains.kotlin.backend.common.IrElementTransformerVoidWithContext
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
+import org.jetbrains.kotlin.cli.common.messages.CompilerMessageLocation
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
+import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSourceLocation
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.declarations.IrFile
@@ -81,6 +83,7 @@ class TlalocIrGenerationExtension(
     private val dumpGradSource: Boolean = false,
     private val dumpGradSourceDir: String? = null,
     private val options: TlalocPluginOptions = TlalocPluginOptions(),
+    private val handoff: TlalocLoweringHandoff = TlalocLoweringHandoff(),
 ) : IrGenerationExtension {
 
     @OptIn(UnsafeDuringIrConstructionAPI::class)
@@ -157,8 +160,34 @@ class TlalocIrGenerationExtension(
              */
             var valueDeclIndex: Map<Int, List<IrValueDeclaration>> = emptyMap()
 
+            /** §0.4.514 — the source location of the call being rewritten, so every
+             * IR-phase diagnostic points at the user's line instead of at nothing. */
+            var callLocation: CompilerMessageSourceLocation? = null
+
             override fun visitCall(expression: IrCall): IrExpression {
                 val transformed = super.visitCall(expression) as IrCall
+                // §0.4.514 — the top-level guard, the IR twin of the FIR checker's. An
+                // unexpected exception while rewriting ONE call (a synthesis bug, a
+                // `!!` on an IR shape nobody anticipated) becomes a diagnostic at that
+                // call naming the exception and where to report it, instead of an
+                // internal compiler error. Compiler control-flow exceptions and JVM
+                // errors are rethrown untouched.
+                val location = locationOf(irFileForDump, transformed.startOffset)
+                callLocation = location
+                return try {
+                    rewriteCall(transformed)
+                } catch (t: Throwable) {
+                    if (TlalocInternalErrors.mustRethrow(t)) throw t
+                    mc.report(
+                        if (options.strictLowering) CompilerMessageSeverity.ERROR else CompilerMessageSeverity.WARNING,
+                        TlalocInternalErrors.describe(t, options.strictLowering),
+                        location,
+                    )
+                    transformed
+                }
+            }
+
+            private fun rewriteCall(transformed: IrCall): IrExpression {
                 val ownerFn = transformed.symbol.owner
                 // §0.4.201 — local functions (declared inside another function's
                 // body) lack a `callableId` and Kotlin's IR raises
@@ -175,9 +204,13 @@ class TlalocIrGenerationExtension(
                     cid.callableName.asString() !in INTRINSIC_NAMES
                 ) return transformed
 
-                val lowered: TlalocLoweringHandoff.LoweredLambda = TlalocLoweringHandoff.take(
-                    transformed.startOffset, transformed.endOffset,
+                // §0.4.514 — keyed by this FILE's path as well as the range (see
+                // TlalocLoweringHandoff): the same offsets in another file are another call.
+                val filePath = irFileForDump?.fileEntry?.name ?: return transformed
+                val lowered: TlalocLoweringHandoff.LoweredLambda = handoff.take(
+                    filePath, transformed.startOffset, transformed.endOffset,
                 ) ?: return transformed
+                TlalocInternalErrors.maybeInjectFault(TlalocInternalErrors.Phase.IR)
                 val fn: DxirFunction = lowered.fn
 
                 // §0.4.499 — developer introspection, OFF by default and INFO when on.
@@ -201,13 +234,13 @@ class TlalocIrGenerationExtension(
                 if (lowered.captures.isNotEmpty() &&
                     cid.callableName.asString() !in CAPTURE_CARRYING_INTRINSICS
                 ) {
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
+                    keptOriginal(
+                        mc,
                         "Tlaloc IR extension kept original call for '${fn.name}' — it captures " +
                             "the runtime value(s) ${lowered.captures.joinToString { "'" + it.name + "'" }} " +
                             "and '${cid.callableName.asString()}' cannot carry a captured value " +
                             "as an input-only parameter",
-                        null,
+                        callLocation,
                     )
                     return transformed
                 }
@@ -263,12 +296,12 @@ class TlalocIrGenerationExtension(
                     val jvpFn: DxirFunction = try {
                         DxirForwardTransform.apply(fwdPrimal)
                     } catch (t: Throwable) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "DxirForwardTransform failed (${t::class.simpleName}: ${t.message}); " +
                                 "falling back to the runtime tape\n${fn.pretty().trimEnd()}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -320,31 +353,35 @@ class TlalocIrGenerationExtension(
                     val replacement = synth.synthesise(toSynthesise, transformed, currentDeclarationParent!!)
                     if (replacement == null) {
                         val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "forward-transformed function falls outside the synthesis scope " +
                                 "[$reason]\npost-forward jvp function:\n${toSynthesise.pretty().trimEnd()}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
                     if (replacement.type != transformed.type) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "synthesised type ${replacement.type} doesn't match call type " +
                                 "${transformed.type}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
-                        "Tlaloc lowered '${callableName}' to forward-mode dxir:\n" +
+                    // §0.4.514 — a SUCCESS dump: developer introspection, INFO and only with
+                    // dumpLoweredIr (it was an unconditional WARNING, which failed -Werror builds).
+                    if (options.dumpLoweredIr) {
+                        mc.report(
+                            CompilerMessageSeverity.INFO,
+                            "Tlaloc lowered '${callableName}' to forward-mode dxir:\n" +
                             toSynthesise.pretty().trimEnd(),
-                        null,
-                    )
+                            null,
+                        )
+                    }
                     return replacement
                 }
 
@@ -377,12 +414,12 @@ class TlalocIrGenerationExtension(
                     val arity = if (callableName.endsWith("2")) 2 else 1
                     val isJacobian = callableName.startsWith("jacobian")
                     if (fn.params.size != arity || fn.returns.size != 1) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "$callableName v1 scope is $arity-param single-return " +
                                 "(got ${fn.params.size} params, ${fn.returns.size} returns)",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -393,12 +430,12 @@ class TlalocIrGenerationExtension(
                     val fArgType = transformed.arguments.getOrNull(0)?.type as? IrSimpleType
                     val rType = fArgType?.arguments?.getOrNull(arity)?.typeOrNull
                     if (primalTypes.any { it == null } || rType == null) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "could not harvest the input/output IrTypes from the " +
                                 "$callableName call site (call type ${transformed.type})",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -410,12 +447,12 @@ class TlalocIrGenerationExtension(
                             DxirForwardTransform.apply(DxirReverseTransform.apply(fn))
                         }
                     } catch (t: Throwable) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "the seeded ${if (isJacobian) "forward" else "forward-over-reverse"} " +
                                 "transform failed (${t::class.simpleName}: ${t.message})\n${fn.pretty().trimEnd()}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -468,11 +505,11 @@ class TlalocIrGenerationExtension(
                             .typeWith(primals + primals + it)
                     }
                     if (overrideType == null) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "could not build the seeded lambda's Function${2 * arity} type",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -482,12 +519,12 @@ class TlalocIrGenerationExtension(
                     )
                     if (seededLambda == null) {
                         val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "seeded function falls outside the synthesis scope " +
                                 "[$reason]\nseeded function:\n${tangentFn.pretty().trimEnd()}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -501,11 +538,11 @@ class TlalocIrGenerationExtension(
                         CallableId(FqName("io.tlaloc.autograd"), Name.identifier(helperName)),
                     ).singleOrNull()
                     if (helperSym == null) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "io.tlaloc.autograd.$helperName not resolvable on the compile classpath",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -522,13 +559,17 @@ class TlalocIrGenerationExtension(
                         if (i < assembled.typeArguments.size) assembled.typeArguments[i] = t
                     }
                     assembled.arguments[0] = seededLambda
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
-                        "Tlaloc lowered '$callableName' to a seeded " +
+                    // §0.4.514 — a SUCCESS dump: developer introspection, INFO and only with
+                    // dumpLoweredIr (it was an unconditional WARNING, which failed -Werror builds).
+                    if (options.dumpLoweredIr) {
+                        mc.report(
+                            CompilerMessageSeverity.INFO,
+                            "Tlaloc lowered '$callableName' to a seeded " +
                             "${if (isJacobian) "forward" else "forward-over-reverse"} " +
                             "pass + runtime basis assembly:\n${tangentFn.pretty().trimEnd()}",
-                        null,
-                    )
+                            null,
+                        )
+                    }
                     return assembled
                 }
 
@@ -560,12 +601,12 @@ class TlalocIrGenerationExtension(
                 if (callableName == "jacobianReverse" || callableName == "jacobianReverse2") {
                     val jrArity = if (callableName.endsWith("2")) 2 else 1
                     if (fn.params.size != jrArity || fn.returns.size != 1) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "$callableName v1 scope is $jrArity-param single-return " +
                                 "(got ${fn.params.size} params, ${fn.returns.size} returns)",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -576,12 +617,12 @@ class TlalocIrGenerationExtension(
                     val fArg = transformed.arguments.getOrNull(0)
                     val rType = (fArg?.type as? IrSimpleType)?.arguments?.getOrNull(jrArity)?.typeOrNull
                     if (jrPrimalTypes.any { it == null } || rType == null || fArg == null) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "could not harvest the input/output IrTypes from the " +
                                 "$callableName call site (call type ${transformed.type})",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -589,12 +630,12 @@ class TlalocIrGenerationExtension(
                     val seededGrad: DxirFunction = try {
                         DxirReverseTransform.apply(fn, seedAsParam = true)
                     } catch (t: Throwable) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "the seeded reverse transform failed " +
                                 "(${t::class.simpleName}: ${t.message})\n${fn.pretty().trimEnd()}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -617,11 +658,11 @@ class TlalocIrGenerationExtension(
                             ?.typeWith(jrPrimals)
                     }
                     if (pbReturn == null) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "could not build the seeded pullback's return type",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -633,12 +674,12 @@ class TlalocIrGenerationExtension(
                     )
                     if (seededLambda == null) {
                         val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "seeded pullback falls outside the synthesis scope " +
                                 "[$reason]\npullback function:\n${pullback.pretty().trimEnd()}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -648,12 +689,12 @@ class TlalocIrGenerationExtension(
                         CallableId(FqName("io.tlaloc.autograd"), Name.identifier(jrHelperName)),
                     ).singleOrNull()
                     if (helperSym == null) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "io.tlaloc.autograd.$jrHelperName not resolvable " +
                                 "on the compile classpath",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -668,12 +709,16 @@ class TlalocIrGenerationExtension(
                     }
                     assembled.arguments[0] = fArg
                     assembled.arguments[1] = seededLambda
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
-                        "Tlaloc lowered '$callableName' to a seeded reverse pullback + " +
+                    // §0.4.514 — a SUCCESS dump: developer introspection, INFO and only with
+                    // dumpLoweredIr (it was an unconditional WARNING, which failed -Werror builds).
+                    if (options.dumpLoweredIr) {
+                        mc.report(
+                            CompilerMessageSeverity.INFO,
+                            "Tlaloc lowered '$callableName' to a seeded reverse pullback + " +
                             "runtime output-basis assembly:\n${pullback.pretty().trimEnd()}",
-                        null,
-                    )
+                            null,
+                        )
+                    }
                     return assembled
                 }
 
@@ -706,12 +751,12 @@ class TlalocIrGenerationExtension(
                 if (vjpIntrinsic) {
                     val vjpArity = if (callableName.endsWith("2")) 2 else 1
                     if (fn.params.size != vjpArity || fn.returns.size != 1) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "$callableName v1 scope is $vjpArity-param single-return " +
                                 "(got ${fn.params.size} params, ${fn.returns.size} returns)",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -723,12 +768,12 @@ class TlalocIrGenerationExtension(
                             seedAsParam = true,
                         )
                     } catch (t: Throwable) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "the seeded reverse transform failed " +
                                 "(${t::class.simpleName}: ${t.message})\n${fn.pretty().trimEnd()}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -743,31 +788,35 @@ class TlalocIrGenerationExtension(
                     val replacement = synth.synthesise(pullback, transformed, currentDeclarationParent!!)
                     if (replacement == null) {
                         val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "seeded pullback falls outside the synthesis scope " +
                                 "[$reason]\npullback function:\n${pullback.pretty().trimEnd()}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
                     if (replacement.type != transformed.type) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — " +
                                 "synthesised type ${replacement.type} doesn't match call type " +
                                 "${transformed.type}",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
-                        "Tlaloc lowered '$callableName' to a seeded reverse pullback:\n" +
+                    // §0.4.514 — a SUCCESS dump: developer introspection, INFO and only with
+                    // dumpLoweredIr (it was an unconditional WARNING, which failed -Werror builds).
+                    if (options.dumpLoweredIr) {
+                        mc.report(
+                            CompilerMessageSeverity.INFO,
+                            "Tlaloc lowered '$callableName' to a seeded reverse pullback:\n" +
                             pullback.pretty().trimEnd(),
-                        null,
-                    )
+                            null,
+                        )
+                    }
                     return replacement
                 }
 
@@ -787,13 +836,13 @@ class TlalocIrGenerationExtension(
                     fn.params.takeLast(lowered.captures.size).map { it.id } !=
                     lowered.captures.map { it.paramId }
                 ) {
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
+                    keptOriginal(
+                        mc,
                         "Tlaloc IR extension kept original call for '${fn.name}' — the captured " +
                             "runtime values are not the trailing params of the lowered function " +
                             "(params=${fn.params.map { it.id }}, " +
                             "captures=${lowered.captures.map { it.paramId }})",
-                        null,
+                        callLocation,
                     )
                     return transformed
                 }
@@ -811,8 +860,8 @@ class TlalocIrGenerationExtension(
                         .filter { it.startOffset < transformed.startOffset }
                     val decl = candidates.singleOrNull()
                     if (decl == null) {
-                        mc.report(
-                            CompilerMessageSeverity.WARNING,
+                        keptOriginal(
+                            mc,
                             "Tlaloc IR extension kept original call for '${fn.name}' — the " +
                                 "captured runtime value '${c.name}' was lowered as an input-only " +
                                 "gradient parameter, but its declaration at source offset " +
@@ -825,7 +874,7 @@ class TlalocIrGenerationExtension(
                                     ) +
                                 " — the gradient cannot be bound to it, so the call is left as " +
                                 "written",
-                            null,
+                            callLocation,
                         )
                         return transformed
                     }
@@ -889,7 +938,7 @@ class TlalocIrGenerationExtension(
                 // — see [PhiCalculus.liftIfRegionBodies].
                 val lifted: DxirFunction = PhiCalculus.liftIfRegionBodies(coarsened)
                 val toSynthesise: DxirFunction = tryReverseTransform(
-                    lifted, includeForward, mc, fn.name,
+                    lifted, includeForward, mc, fn.name, callLocation,
                     // §0.4.501 — the captured params are INPUTS. No gradient is emitted
                     // for them, so `grad` still returns one gradient, `grad2` a Pair and
                     // `grad3` a Triple, whatever the lambda captured.
@@ -980,15 +1029,15 @@ class TlalocIrGenerationExtension(
                 )
                 if (replacement == null) {
                     val reason = synth.lastFailureReason ?: "(no specific gate stamped)"
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
+                    keptOriginal(
+                        mc,
                         "Tlaloc IR extension kept original call for '${fn.name}' — " +
                             "DxirFunction falls outside the scalar-primitive synthesis scope " +
                             "[$reason]\n" +
                             "post-coarsening primal:\n${coarsened.pretty().trimEnd()}\n" +
                             "post-lift dxir:\n${lifted.pretty().trimEnd()}\n" +
                             "post-SCT grad function:\n${simplified.pretty().trimEnd()}",
-                        null,
+                        callLocation,
                     )
                     return transformed
                 }
@@ -1000,12 +1049,12 @@ class TlalocIrGenerationExtension(
                 // op kinds, DScalar boxing, etc.) — in that case we keep the original call
                 // so the runtime-tape path runs.
                 if (replacement.type != transformed.type) {
-                    mc.report(
-                        CompilerMessageSeverity.WARNING,
+                    keptOriginal(
+                        mc,
                         "Tlaloc IR extension kept original call for '${fn.name}' — " +
                             "synthesised type ${replacement.type} doesn't match call type " +
                             "${transformed.type} (forward-only scope)",
-                        null,
+                        callLocation,
                     )
                     return transformed
                 }
@@ -1025,13 +1074,62 @@ class TlalocIrGenerationExtension(
 
         for (file in moduleFragment.files) {
             transformer.irFileForDump = file
-            transformer.valueDeclIndex = indexValueDeclarations(file)
+            transformer.callLocation = null
+            // §0.4.514 — the per-call guard lives in visitCall; this one covers the
+            // per-file work around it (the declaration index), with the file as the
+            // only location there is.
+            try {
+                transformer.valueDeclIndex = indexValueDeclarations(file)
+            } catch (t: Throwable) {
+                if (TlalocInternalErrors.mustRethrow(t)) throw t
+                mc.report(
+                    if (options.strictLowering) CompilerMessageSeverity.ERROR else CompilerMessageSeverity.WARNING,
+                    TlalocInternalErrors.describe(t, options.strictLowering),
+                    CompilerMessageLocation.create(file.fileEntry.name),
+                )
+                continue
+            }
             file.transformChildren(transformer, null)
         }
 
-        // Clear any unclaimed entries so a re-run of the in-process compiler harness
-        // doesn't find stale handoffs from a previous invocation.
-        TlalocLoweringHandoff.clear()
+        // §0.4.514 — this compilation's table only (it is a per-compilation instance),
+        // so nothing another compilation in the same daemon recorded is touched.
+        handoff.clear()
+    }
+
+    /**
+     * §0.4.514 — the one reporting path for "kept original call": the call is left
+     * unrewritten, so the `io.tlaloc.autograd` fallback body would throw at the first
+     * call. That is a compile-time ERROR under [TlalocPluginOptions.strictLowering]
+     * (the default), exactly like the FIR phase's LAMBDA_NOT_LOWERABLE, and a WARNING
+     * only when the build opted out with `strictLowering=false`.
+     */
+    private fun keptOriginal(
+        mc: MessageCollector,
+        text: String,
+        location: CompilerMessageSourceLocation?,
+    ) {
+        val versionHint = if ("not resolvable" in text || "no IR symbol" in text || "symbol not found" in text) {
+            "\n" + VERSION_MISMATCH_HINT
+        } else {
+            ""
+        }
+        if (options.strictLowering) {
+            mc.report(CompilerMessageSeverity.ERROR, text + versionHint + "\n" + KEPT_ORIGINAL_STRICT_HINT, location)
+        } else {
+            mc.report(CompilerMessageSeverity.WARNING, text + versionHint + "\n" + KEPT_ORIGINAL_LENIENT_NOTE, location)
+        }
+    }
+
+    private fun locationOf(file: IrFile?, startOffset: Int): CompilerMessageSourceLocation? {
+        val entry = file?.fileEntry ?: return null
+        if (startOffset < 0) return CompilerMessageLocation.create(entry.name)
+        return CompilerMessageLocation.create(
+            entry.name,
+            entry.getLineNumber(startOffset) + 1,
+            entry.getColumnNumber(startOffset) + 1,
+            null,
+        )
     }
 
     /**
@@ -1128,6 +1226,7 @@ class TlalocIrGenerationExtension(
         includeForward: Boolean,
         mc: MessageCollector,
         fnName: String,
+        location: CompilerMessageSourceLocation?,
         inputOnlyTrailingParams: Int = 0,
     ): DxirFunction? = try {
         DxirReverseTransform.apply(
@@ -1136,19 +1235,19 @@ class TlalocIrGenerationExtension(
             inputOnlyTrailingParams = inputOnlyTrailingParams,
         )
     } catch (t: IllegalArgumentException) {
-        mc.report(
-            CompilerMessageSeverity.WARNING,
+        keptOriginal(
+            mc,
             "Tlaloc IR extension kept original call for '$fnName' — DxirReverseTransform " +
                 "rejected the dxir (${t::class.simpleName}: ${t.message})",
-            null,
+            location,
         )
         null
     } catch (t: IllegalStateException) {
-        mc.report(
-            CompilerMessageSeverity.WARNING,
+        keptOriginal(
+            mc,
             "Tlaloc IR extension kept original call for '$fnName' — DxirReverseTransform " +
                 "rejected the dxir (${t::class.simpleName}: ${t.message})",
-            null,
+            location,
         )
         null
     }
@@ -1271,6 +1370,27 @@ class TlalocIrGenerationExtension(
                     "engine-backed corollaries C6-C9 do",
             )
         }
+        /** §0.4.514 — appended to every strict "kept original call" error. */
+        internal const val KEPT_ORIGINAL_STRICT_HINT: String =
+            "The call cannot be compiled to a gradient, so the build stops here instead of " +
+                "throwing at the first call. Rewrite the body within the supported surface " +
+                "(docs/GETTING_STARTED.md), or use the Tracer-capture API " +
+                "(io.tlaloc.autograd.gradWithScalars) for this call. " +
+                "-P plugin:io.tlaloc.plugin:strictLowering=false turns this into a warning, " +
+                "and the call then throws IllegalStateException when it runs."
+
+        /** §0.4.514 — appended to every "kept original call" warning under
+         * `strictLowering=false`. */
+        internal const val KEPT_ORIGINAL_LENIENT_NOTE: String =
+            "The call is left as written (strictLowering=false), so it throws " +
+                "IllegalStateException when it runs."
+
+        /** §0.4.514 — appended when the failure is a library symbol the plugin could not
+         * find: the usual cause is a library/plugin version mismatch. */
+        internal const val VERSION_MISMATCH_HINT: String =
+            "If the io.tlaloc libraries on the compile classpath are a different version from " +
+                "the Tlaloc compiler plugin, use the same version for both."
+
         private val INTRINSIC_NAMES: Set<String> = setOf(
             "grad", "grad2", "valueAndGrad", "valueAndGrad2",
             // §0.4.424 — the three-argument reverse spellings (the transform and

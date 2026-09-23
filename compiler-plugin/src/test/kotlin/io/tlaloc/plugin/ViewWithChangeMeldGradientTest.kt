@@ -252,7 +252,7 @@ class ViewWithChangeMeldGradientTest {
     private fun assertGradients(result: RunResult, want: Map<String, List<Float>>) {
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,

@@ -55,7 +55,7 @@ class JvpIfIntrinsicTest {
         assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
 
         val keptOriginal = result.messages.any {
-            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+            "kept original call" in it.message
         }
         assertTrue(
             !keptOriginal,
@@ -132,6 +132,9 @@ class JvpIfIntrinsicTest {
             val args = K2JVMCompilerArguments().apply {
                 freeArgs = listOf(tempDir.absolutePath)
                 pluginClasspaths = pluginClasspath()
+                // §0.4.514 — the success dump this test reads is developer
+                // introspection now: INFO, and only with dumpLoweredIr.
+                pluginOptions = arrayOf("plugin:io.tlaloc.plugin:dumpLoweredIr=true")
                 destination = outDir.absolutePath
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true

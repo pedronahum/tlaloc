@@ -31,6 +31,7 @@ import org.jetbrains.kotlin.fir.types.coneType
  */
 class TlalocIntrinsicCallChecker(
     private val options: TlalocPluginOptions = TlalocPluginOptions(),
+    private val handoff: TlalocLoweringHandoff = TlalocLoweringHandoff(),
 ) : FirFunctionCallChecker(MppCheckerKind.Common) {
     private val intrinsicNames: Set<String> = setOf(
         "io.tlaloc.autograd.grad",
@@ -77,6 +78,33 @@ class TlalocIntrinsicCallChecker(
         if (callableId.classId != null) return
         val fqn = "${callableId.packageName.asString()}.${callableId.callableName.asString()}"
         if (fqn !in intrinsicNames) return
+
+        // §0.4.514 — the top-level guard. The lowering converts every construct it
+        // knows it cannot handle into a named LoweringException; anything ELSE that
+        // escapes (a `!!` on an unexpected FIR shape, a validator bug) used to reach
+        // the compiler as an internal compiler error with a JetBrains stack trace and
+        // no hint that Tlaloc was involved. It is now a diagnostic at the call site
+        // that names the exception and where to report it. Compiler control-flow
+        // exceptions and JVM errors are rethrown untouched.
+        try {
+            TlalocInternalErrors.maybeInjectFault(TlalocInternalErrors.Phase.FIR)
+            checkIntrinsic(expression, callableId, fqn)
+        } catch (t: Throwable) {
+            if (TlalocInternalErrors.mustRethrow(t)) throw t
+            reporter.reportOn(
+                expression.source,
+                if (options.strictLowering) TlalocErrors.INTERNAL_ERROR else TlalocErrors.INTERNAL_ERROR_WARNING,
+                TlalocInternalErrors.describe(t, options.strictLowering),
+            )
+        }
+    }
+
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    private fun checkIntrinsic(
+        expression: FirFunctionCall,
+        callableId: org.jetbrains.kotlin.name.CallableId,
+        fqn: String,
+    ) {
 
         val lambda = extractLambdaArgument(expression)
         if (lambda == null) {
@@ -229,10 +257,16 @@ class TlalocIntrinsicCallChecker(
                         )
                     }
                 }
+                // §0.4.514 — keyed by FILE as well as range: offsets are per file, so
+                // two calls at identical offsets in two files must not share an entry.
+                // A call with no file path could never be matched by the IR phase, and
+                // the fallback body would throw at the first call: refuse it loudly.
                 val src = expression.source
+                val filePath = context.containingFilePath
+                    ?: error("the FIR checker context has no containing file path for `$fqn`")
                 if (src != null) {
-                    TlalocLoweringHandoff.record(
-                        src.startOffset, src.endOffset, result.fn, result.captures,
+                    handoff.record(
+                        filePath, src.startOffset, src.endOffset, result.fn, result.captures,
                     )
                 }
             }
