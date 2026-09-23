@@ -16,7 +16,7 @@ accepts the bundle.
 
 | Requirement | Where it is satisfied |
 |---|---|
-| `groupId` you control (`io.tlaloc`) | a Central namespace verification for `io.tlaloc`, **not yet done** — see §4 |
+| `groupId` you control (`io.github.pedronahum`) | a Central namespace verification, which for an `io.github.*` namespace is automatic against the GitHub account — see §4 |
 | `<name>`, `<description>`, `<url>` | `moduleDescriptions` + the `pom { }` block in the root `build.gradle.kts` |
 | `<licenses>`, `<developers>`, `<scm>` | same `pom { }` block |
 | a `-sources.jar` per artifact | the KMP plugin; `withSourcesJar()` in `:compiler-plugin` |
@@ -95,13 +95,22 @@ You are looking for `<name>`, `<description>`, `<url>`, `<licenses>`,
 
 ## 4. The two steps that have never run
 
-1. **Verify the `io.tlaloc` namespace** at
-   [central.sonatype.com](https://central.sonatype.com) — a one-time DNS TXT
-   record on `tlaloc.io`, or use a `io.github.pedronahum` namespace instead,
-   which verifies against the GitHub account and needs no domain. **This choice
-   has not been made.** If it lands on `io.github.pedronahum`, the group id
-   changes and every coordinate in step 1.2 changes with it — decide before
-   publishing, not after.
+1. **Verify the `io.github.pedronahum` namespace** at
+   [central.sonatype.com](https://central.sonatype.com). Log in with GitHub; an
+   `io.github.<account>` namespace verifies against that account, so there is no
+   DNS record and no domain to own.
+
+   **§0.4.508 made this decision.** The group id was `io.tlaloc` until then,
+   which would have required a TXT record on `tlaloc.io` — a domain this project
+   does not own. It was changed before publishing rather than after, because a
+   group id is the one part of a coordinate that cannot be corrected later
+   without breaking every consumer, and there are none yet.
+
+   Credentials: **Generate User Token** in your Central account produces a
+   username/password PAIR (neither is your login). They go in
+   `~/.gradle/gradle.properties` as `centralUsername` / `centralPassword` —
+   never in this repository's own `gradle.properties`, which is tracked by git.
+   §2 covers the signing key.
 2. **Upload:**
 
    ```bash

@@ -88,7 +88,10 @@ Any of these may change in any alpha release:
 These are the commitments. They are short on purpose — a long list here would be
 a list of things this policy could not keep.
 
-- **The group id stays `io.tlaloc`.** Artifact ids may gain or lose modules, but
+- **The group id stays `io.github.pedronahum`.** It changed once, in §0.4.508,
+  before anything was published and therefore before it could break anyone; that
+  was the only free moment and it will not be taken again. Artifact ids may gain
+  or lose modules, but
   a coordinate that exists will not be re-pointed at different code under the
   same version.
 - **A published version is immutable.** `0.1.0-alphaNN` is never re-published
