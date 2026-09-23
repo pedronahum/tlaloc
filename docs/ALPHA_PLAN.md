@@ -823,3 +823,41 @@ modules, captured tensors, the serving-side resolver, 206 KDoc links, an aarch64
 Linux lane, and the unscoped remainder of Tier 2 — is **post-alpha work**, and all of
 it is written down: in the tables above, in `CAPABILITIES.md`, in `COMPATIBILITY.md`,
 or in the refusal message a user actually sees.
+
+---
+
+## Release-readiness review (2026-09-23)
+
+A review before the first Central upload, run after the repository went public
+with credentials and a signing key in place. Five read-only audits (docs vs
+code, main-source hygiene, licensing, publishing, plugin and runtime
+robustness) plus a fresh-clone publish and quickstart. Each row below is fixed
+in the stage named; the status column is updated by that stage's commit.
+
+| # | Item | Sev | Stage | Status |
+|---|---|---|---|---|
+| R1 | FIR→IR handoff is keyed by `(startOffset, endOffset)` in a JVM-global table: two `grad {}` calls at equal offsets in different files swap gradients; one compilation's `clear()` wipes another's entries in a shared daemon | P0 | A | ⬜ |
+| R2 | IR-phase "kept original call" is a WARNING whatever `strictLowering` says, so a refused body still reaches `pluginMissing()` at run time with a message naming two causes, neither true | P0 | A | ⬜ |
+| R3 | No top-level guard in the FIR checker or the IR extension: an NPE/CCE in lowering or synthesis is an internal compiler error instead of a diagnostic | P0 | A | ⬜ |
+| R4 | `dumpGradSource` reads `ture` as false; registrar hard-codes the plugin id | P2 | A | ⬜ |
+| R5 | `ir`, `autograd`, `stablehlo`, `maestro`, `runtime-*` expose `core`/`ir` types but declare them `implementation`: a consumer of `autograd` alone cannot name `DTensor` | P0 | B | ⬜ |
+| R6 | Artifact ids `core`, `ir`, `nn`, `maestro`… are generic inside a personal namespace and permanent once published; rename to `tlaloc-*` | P1 | B | ⬜ |
+| R7 | The OSSRH Staging API never hands an upload to the Central Portal without `POST /manual/upload/defaultRepository/<ns>`; nothing makes that call. An upload without a key goes out unsigned | P0 | B | ⬜ |
+| R8 | No tag-triggered release workflow | P1 | B | ⬜ |
+| R9 | `:maestro` publishes two `@Deprecated` classes and two `main()` entry points that print; its POM description names a step type it does not contain | P1 | B | ⬜ |
+| R10 | No Gradle plugin: consumers hand-wire `kotlinCompilerPluginClasspath` per source set and pass options as raw `-P` args; nothing aligns plugin and library versions (no BOM) | P1 | C | ⬜ |
+| R11 | `PjrtSession.executeOn` shares one `ExecuteContext` per executable across threads while its KDoc promises thread safety; `close()` can race an in-flight call | P1 | D | ⬜ |
+| R12 | Neither the JVM nor the Python PJRT binding checks `PJRT_Api.struct_size` / API version before reading fixed offsets | P1 | D | ⬜ |
+| R13 | PJRT refusals name the author's venv, drop the search report, give Linux advice on every OS, leak an arena when client creation fails; env-var parse errors do not name the variable | P1 | D | ⬜ |
+| R14 | Python `PjrtApi.load` searches nothing; `find_pjrt_plugin` searches only its own interpreter and prefers libtpu regardless of platform | P1 | D | ⬜ |
+| R15 | IREE: temp files per call removed only at JVM exit; discovery hard-codes `~/.local/venvs/iree` and `/usr/bin/which` | P1 | D | ⬜ |
+| R16 | `PhiCalculus` catches `Throwable`; `KptxKernels` caches and `KernelResolverRegistry` are unsynchronized globals | P2 | D | ⬜ |
+| R17 | Internal section numbers and jargon inside user-visible exception and diagnostic strings (~29 literals) | P1 | E | ⬜ |
+| R18 | README: `contract(a, b)` does not compile (it is infix); the training snippet uses example-local helpers; test counts disagree across docs | P0 | E | ⬜ |
+| R19 | GETTING_STARTED: no GPU setup, no configuration table (9 env vars/properties undocumented), no troubleshooting, deprecated `kotlinOptions`, dead "Requirements" link, stale shape-error instructions | P1 | E | ⬜ |
+| R20 | Section numbers, `/home/pedro` paths and self-narrating prose across user-facing docs; CAPABILITIES contradicts itself about CI; RELEASING names the old `~/.m2` path | P1 | E | ⬜ |
+| R21 | Vendored Netflix Maestro: no root NOTICE, modified files not marked as modified, Tlaloc-written files carry a Netflix copyright; ALPHA_PLAN claims no Apache source is redistributed | P1 | F | ⬜ |
+| R22 | No CONTRIBUTING, SECURITY, issue/PR templates or dependabot; README names no copyright holder; `docs/papers` text lacks its CC-BY attribution note | P1 | F | ⬜ |
+| R23 | Clean-room re-certification of everything above, then an adversarial critic pass over the whole diff | — | G | ⬜ |
+
+Stages run one at a time: builds on this machine never overlap.
