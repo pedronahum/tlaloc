@@ -196,7 +196,7 @@ data class HfLlamaConfig(
             throw JsonException(
                 "HfLlamaConfig: rope_scaling '$ropeScalingType' is refused BY NAME — this " +
                     "checkpoint's positions are not plain theta=$ropeTheta RoPE, and the decode " +
-                    "graph implements only that. A NAMED DEFERRAL: llama3/linear/dynamic scaling " +
+                    "graph implements only that. llama3/linear/dynamic scaling is not supported: it " +
                     "is a per-family formula, and shipping one untested would make every long " +
                     "context silently wrong rather than loudly unsupported",
             )

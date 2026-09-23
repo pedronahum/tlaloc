@@ -63,7 +63,7 @@ object AllReduceAttrs {
                 ?: "it is not a known reduction (supported: $SUPPORTED_REDUCTIONS)"
             error(
                 "$layer: ALL_REDUCE reduction '$reduction' is refused by name — $why; " +
-                    "v1 supports 'sum' only (§0.4.460 G3a)",
+                    "only 'sum' is supported",
             )
         }
         val raw = op.attrs["replica_groups"] ?: return Parsed(listOf(listOf(0)), reduction)
@@ -78,7 +78,7 @@ object AllReduceAttrs {
         require(groups.all { it.size == size }) {
             "$layer: ALL_REDUCE ragged replica_groups $groups are refused by name — the " +
                 "dense<NxMxi64> emission needs uniform group sizes (StableHLO's -1 padding " +
-                "is a named deferral, §0.4.460 G3a)"
+                "is not supported)"
         }
         val flat = groups.flatten()
         require(flat.all { it >= 0 }) {

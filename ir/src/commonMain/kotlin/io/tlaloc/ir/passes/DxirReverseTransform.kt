@@ -185,9 +185,9 @@ object DxirReverseTransform {
                 if (n.hasRegions) {
                     require(n.op == OpKind.IF) {
                         "DxirReverseTransform: op ${n.op} has regions but no rule supports " +
-                            "regions for it (only IF is handled directly via the §0.4.23 " +
-                            "branch reverse walk; WHILE and others must be coarsened by " +
-                            "Stage B's PhiCalculus pass before SCT)"
+                            "regions for it (only IF is handled directly, by a reverse walk of its " +
+                            "branches; WHILE and others must be coarsened by the " +
+                            "PhiCalculus pass first)"
                     }
                 }
                 if (n.isMultiResult) {

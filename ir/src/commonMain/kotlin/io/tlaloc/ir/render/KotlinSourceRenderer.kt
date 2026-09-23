@@ -137,7 +137,7 @@ internal object KotlinSourceRenderer {
                 throw KotlinRenderRefusal(
                     "toKotlinSource: $where carries a sentinel dim in $t — the printer serves " +
                         "capture-route functions whose dims are concrete; a grad {} synthesis " +
-                        "function (-1 dims) has no honest ranked-literal Kotlin rendering",
+                        "function (-1 dims) cannot be rendered with ranked literals",
                 )
             }
         }
@@ -157,7 +157,7 @@ internal object KotlinSourceRenderer {
                     "as the F32 mask convention) have host-twin renderings" +
                     if (t.dtype.name == "bf16") {
                         " (bf16 is storage/interchange — host math is compute-in-f32, " +
-                            "so render the f32 graph between the casts, §0.4.456)"
+                            "so render the f32 graph between the casts)"
                     } else {
                         ""
                     },
@@ -339,9 +339,9 @@ internal object KotlinSourceRenderer {
             OpKind.SIN -> ranked("${r(0)}.sin()")
             OpKind.COS -> ranked("${r(0)}.cos()")
             OpKind.ABS, OpKind.RSQRT, OpKind.GELU, OpKind.SILU ->
-                refuse(op, "no `:core` tensor host twin exists for this unary (the bmm-precedent twin gap) — add the twin, then teach the printer its spelling")
+                refuse(op, "`:core` has no tensor function for this unary op, so it has no Kotlin spelling")
             OpKind.NOT, OpKind.LAND ->
-                refuse(op, "boolean-algebra kinds have no host-twin spelling (control-flow substrate)")
+                refuse(op, "boolean-algebra kinds have no Kotlin spelling (they exist only inside control flow)")
 
             // --- elementwise binaries: the DTensor operators ---
             OpKind.ADD -> { requireSameShape(); ranked("(${r(0)} + ${r(1)})") }
@@ -372,14 +372,14 @@ internal object KotlinSourceRenderer {
                 ranked("${r(0)}.softmax($axis)")
             }
             OpKind.ARGMAX, OpKind.LOGSUMEXP, OpKind.DOT, OpKind.CROSS_ENTROPY ->
-                refuse(op, "no direct `:core` host-twin spelling wired in v1 (named deferral in docs/AD_SINGLE_ENGINE_AUDIT.md)")
+                refuse(op, "no `:core` host-function spelling is implemented for this op (see docs/AD_SINGLE_ENGINE_AUDIT.md)")
 
             // --- linear algebra ---
             OpKind.MATMUL -> {
                 if (op.operands[0].type.rank == 2 && op.operands[1].type.rank == 2) {
                     ranked("(${r(0)} matmul ${r(1)})")
                 } else {
-                    refuse(op, "rank-${op.operands[0].type.rank} batched matmul — `:core` has no bmm host twin (the §0.4.447 named twin-gap); render blocked until bmmGeneral lands")
+                    refuse(op, "rank-${op.operands[0].type.rank} batched matmul — `:core` has no host batched-matmul function to render it as")
                 }
             }
             OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D -> {
@@ -504,9 +504,9 @@ internal object KotlinSourceRenderer {
                 ranked("${r(0)}.flip(${axes.joinToString(", ")})")
             }
             OpKind.GATHER, OpKind.SCATTER, OpKind.SCATTER_ADD ->
-                refuse(op, "the scalar-index gather/scatter family reads a runtime index operand `:core`'s Int-taking twins cannot express (named deferral in docs/AD_SINGLE_ENGINE_AUDIT.md)")
+                refuse(op, "the scalar-index gather/scatter family reads a runtime index operand `:core`'s Int-taking twins cannot express (see docs/AD_SINGLE_ENGINE_AUDIT.md)")
             OpKind.PAD ->
-                refuse(op, "standalone PAD has no host twin (the transform emits PAD_TO, which renders as padToLike); named deferral")
+                refuse(op, "standalone PAD has no host twin (the transform emits PAD_TO, which renders as padToLike)")
 
             // --- runtime-extent family: template-carrying twins ---
             OpKind.SUM_TO -> ranked("sumToLike(${r(0)}, ${r(1)})")
@@ -593,7 +593,7 @@ internal object KotlinSourceRenderer {
             }
 
             OpKind.SPARSE_MATMUL, OpKind.SPARSE_MATMUL_VALUES_ADJOINT ->
-                refuse(op, "the CSR-component sparse family is host-twin-backed but not yet wired into the printer (named deferral in docs/AD_SINGLE_ENGINE_AUDIT.md)")
+                refuse(op, "the CSR-component sparse family is host-twin-backed but not yet wired into the printer (see docs/AD_SINGLE_ENGINE_AUDIT.md)")
             // §0.4.465 — Phase H1a: the north-star rule (render or refuse by
             // name) applied to the inference-only kind. There is no host twin
             // and deliberately so: a page pool + block table is serving-runtime
@@ -602,7 +602,7 @@ internal object KotlinSourceRenderer {
             OpKind.PAGED_ATTENTION ->
                 refuse(
                     op,
-                    "PAGED_ATTENTION is inference-only serving machinery (Phase H1a) with no " +
+                    "PAGED_ATTENTION is inference-only serving machinery with no " +
                         "host-twin spelling — its KV page pool and integer block table are " +
                         "runtime allocator state, not a DTensor expression; run it on the " +
                         "interpreter or through StableHLO/PJRT",
@@ -614,7 +614,7 @@ internal object KotlinSourceRenderer {
             OpKind.KV_CACHE_WRITE ->
                 refuse(
                     op,
-                    "KV_CACHE_WRITE is inference-only serving machinery (Phase H1b) with no " +
+                    "KV_CACHE_WRITE is inference-only serving machinery with no " +
                         "host-twin spelling — it deposits a decode step's keys/values into a KV " +
                         "page pool at allocator-named flat slots, which is runtime state and not " +
                         "a DTensor expression; run it on the interpreter or through " +
@@ -629,14 +629,14 @@ internal object KotlinSourceRenderer {
             OpKind.DEQUANTIZE_KV ->
                 refuse(
                     op,
-                    "DEQUANTIZE_KV is inference-only serving machinery (Phase H5) and its host " +
+                    "DEQUANTIZE_KV is inference-only serving machinery and its host " +
                         "spelling already exists as io.tlaloc.ir.inference.KvQuantPool.dequantize " +
                         "— the codec a loader quantizes pools with, pinned elementwise against " +
                         "the interpreter arm; rendering a second copy of `code * scale` here " +
                         "would be a fork of the one formula the two runtimes share",
                 )
             OpKind.RMSNORM, OpKind.BATCHNORM ->
-                refuse(op, "the norm kinds ride their desugared op compositions (§0.4.390); the fused kinds have no printed spelling")
+                refuse(op, "the norm kinds are rendered through their decomposed op compositions; the fused kinds have no printed spelling")
 
             // --- control flow / structural: no rendering by design ---
             OpKind.IF, OpKind.WHILE, OpKind.COARSENED ->
@@ -657,7 +657,7 @@ internal object KotlinSourceRenderer {
                     "ALL_REDUCE has no single-process host spelling — the readable reverse " +
                         "of a collective program is its per-replica local source; the " +
                         "interpreter's ×|group| unit semantics are an SPMD modelling " +
-                        "convention, not host math (§0.4.460 G3a; G2b/G4 own execution)",
+                        "convention, not host math",
                 )
 
             // §0.4.460 — Phase G3a: SHARD_CONSTRAINT is a value identity with

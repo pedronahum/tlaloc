@@ -35,8 +35,9 @@ PyTorch:
   StableHLO. Serving it needs a PJRT plugin `.so` and a driver — no JVM, no Python
   framework, nothing of Tlaloc in the process.
 
-> **Alpha — `0.1.0-alpha01`.** 2,525 automated tests, including live GPU runs on an
-> NVIDIA GB10. Nothing is on Maven Central yet: you build from source and consume
+> **Alpha — `0.1.0-alpha01`.** The automated suite includes live GPU runs on an
+> NVIDIA GB10 ([CAPABILITIES.md](docs/CAPABILITIES.md) has the count and what each
+> test pins). Nothing is on Maven Central yet: you build from source and consume
 > from `mavenLocal`. APIs change without deprecation cycles
 > ([COMPATIBILITY.md](docs/COMPATIBILITY.md)). [Maturity](#maturity) says what runs
 > where.
@@ -79,9 +80,11 @@ Call `g` in a hot loop and nothing allocates a tape, because there is no tape.
 
 ### Read the derivative
 
-```
--P plugin:io.tlaloc.plugin:dumpGradSource=true       # print it
--P plugin:io.tlaloc.plugin:dumpGradSourceDir=<dir>   # one .kt per lambda
+```kotlin
+tlaloc {
+    dumpGradSource.set(true)                                   // print it
+    dumpGradSourceDir.set(layout.buildDirectory.dir("grads"))  // one .kt per lambda
+}
 ```
 
 For `f(x) = x·σ(x) / √(1 + log(1 + eˣ))` that writes:
@@ -107,7 +110,7 @@ identical at all 7 test points. → [READABLE_REVERSE.md](docs/READABLE_REVERSE.
 val activations: DTensor<Rank2<Named<Batch, Sym>, Named<SeqLen, Sym>>, F32> = ...
 val weights:     DTensor<Rank2<Named<SeqLen, Sym>, Named<Hidden, Sym>>, F32> = ...
 
-val hidden = contract(activations, weights)   // OK: they share SeqLen
+val hidden = activations contract weights   // OK: they share SeqLen
 ```
 
 Swap in a `Hidden × Hidden` matrix and the call does not resolve. The plugin adds
@@ -138,13 +141,19 @@ plugin cannot lower is a build error carrying the reason.
 optimizers are pure `(params, grads, state) → (params', state')`.
 
 ```kotlin
-val step = capture(model0, listOf(x), name = "disc_mlp") { prediction ->
+val keys = RandomKey.fromSeed(7).split(2)
+val model0 = Sequential(Dense(2, 16, keys[0]), ReluLayer, Dense(16, 1, keys[1]))
+
+val step = capture(model0, listOf(x), name = "mlp") { prediction ->
     val residual = prediction - prediction.constant<Shape>(targets, intArrayOf(n, 1))
     (residual * residual).mean()
 }
 
-repeat(600) {
-    val out = step.unpack(lane.run(step.gradient, step.bind(listOf(xs), model)))
+val optimizer = Adam(learningRate = 0.02f)
+var model = model0
+var state = optimizer.initialState()
+repeat(60) {
+    val out = step.run(model, listOf(x))   // loss and gradients, on the host
     val (nextModel, nextState) = optimizer.step(model, out.gradients, state)
     model = nextModel; state = nextState
 }
@@ -152,11 +161,12 @@ repeat(600) {
 saveCheckpoint(path, model, optimizer, state)   // one safetensors file, resumable
 ```
 
-No `.backward()`, no `zero_grad()`. On a GB10 that loop runs 600 Adam steps in
-2.02 s (3.4 ms/step) on PJRT-CUDA, loss `0.992 → 0.047`, 98.0 % held out. The
-checkpoint is an ordinary safetensors file that `safetensors.torch.load_file`
+No `.backward()`, no `zero_grad()`. `capture` traces the model once; `step.run`
+evaluates the captured gradient on the host interpreter. The same captured program
+also lowers to StableHLO: [`examples/gpu-training`](examples/gpu-training/) runs it
+on PJRT-CUDA, 600 Adam steps in 2.02 s (3.4 ms/step) on a GB10, loss
+`0.992 → 0.047`, 98.0 % held out. The checkpoint is an ordinary safetensors file that `safetensors.torch.load_file`
 opens, and a resumed run matches the uninterrupted one bit for bit.
-→ [`examples/gpu-training`](examples/gpu-training/)
 
 Inference goes the other way — Kotlin writes an artifact and exits:
 
@@ -235,13 +245,14 @@ Full walkthrough and the five plugin options:
 Ten standalone projects under [`examples/`](examples/), each with its own Gradle
 build resolving Tlaloc from `mavenLocal`. Delete the rest of the repo and they
 still run. Six need nothing but a JDK; the others name what they are missing and
-exit `0`.
+exit `0`. The seven below are the user-facing ones.
 
 | | | Needs |
 |---|---|---|
 | [`readable-gradients/`](examples/readable-gradients/) | the derivative printed as Kotlin, recompiled without the plugin, agreeing bit for bit | — |
 | [`differentiable-physics/`](examples/differentiable-physics/) | gradient descent through a physics simulator, and the shot goes in | — |
 | [`quickstart/`](examples/quickstart/) | `grad {}` over a matmul, plus a shape bug the compiler rejects | — |
+| [`named-indices/`](examples/named-indices/) | axis names in the tensor type, so a transposed weight fails overload resolution | — |
 | [`mnist/`](examples/mnist/) | the real MNIST at 93.66 %, test digits as ASCII | CUDA · 11 MB |
 | [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on a Blackwell, 98.0 % held out | CUDA |
 | [`gpu-inference/`](examples/gpu-inference/) | Kotlin compiles TinyLlama; a bare `python3` answers `' Paris.'` | CUDA |
@@ -384,7 +395,7 @@ vendors [Netflix Maestro](https://github.com/Netflix/maestro).
 
 ## License
 
-[Apache-2.0](LICENSE).
+Copyright 2026 Pedro N. Rodriguez. Licensed under [Apache-2.0](LICENSE).
 
 Symja (`org.matheclipse:matheclipse-core`), the optional CAS, is **LGPL-3.0** by its
 published POM, while its upstream repository's `license.txt` is GPL-3.0; upstream's

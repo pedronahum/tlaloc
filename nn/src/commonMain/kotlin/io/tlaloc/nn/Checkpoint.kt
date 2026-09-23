@@ -218,7 +218,7 @@ class ModelSnapshot internal constructor(
             "checkpoint: this file carries model parameters only — no optimizer state was saved, " +
                 "so training cannot resume from it. Save with " +
                 "ModelCheckpoint.encode(model, optimizer, state) to make a resumable checkpoint; " +
-                "optimizer.initialState() is the honest alternative and restarts the moments.",
+                "or start from optimizer.initialState(), which restarts the moments.",
         )
         @Suppress("UNCHECKED_CAST")
         val ck = (optimizer as? CheckpointableOptimizer<S>)

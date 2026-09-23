@@ -117,8 +117,8 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
                 "would throw at the first call instead of returning a gradient. Rewrite the body " +
                 "within the supported surface (docs/GETTING_STARTED.md), use the Tracer-capture " +
                 "API (io.tlaloc.autograd.gradWithScalars) for this one, or — to take that runtime " +
-                "failure deliberately — pass " +
-                "-P plugin:io.tlaloc.plugin:strictLowering=false, which turns this back into a warning.",
+                "failure deliberately — call `strictLowering.set(false)` in the `tlaloc` block of the build script (or pass " +
+                "-P plugin:io.tlaloc.plugin:strictLowering=false), which turns this back into a warning.",
             CommonRenderers.STRING,
         )
         map.put(

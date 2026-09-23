@@ -1305,7 +1305,7 @@ class TlalocIrGenerationExtension(
             mc.report(
                 CompilerMessageSeverity.INFO,
                 "Tlaloc grad source dump SKIPPED for '$callableName' at $loc — the gradient " +
-                    "synthesised fine, but it has no honest Kotlin rendering: ${t.message}",
+                    "compiled, but it cannot be printed as Kotlin source: ${t.message}",
                 null,
             )
             return
@@ -1397,7 +1397,8 @@ class TlalocIrGenerationExtension(
                 "throwing at the first call. Rewrite the body within the supported surface " +
                 "(docs/GETTING_STARTED.md), or use the Tracer-capture API " +
                 "(io.tlaloc.autograd.gradWithScalars) for this call. " +
-                "-P plugin:io.tlaloc.plugin:strictLowering=false turns this into a warning, " +
+                "`tlaloc { strictLowering.set(false) }` (or -P plugin:io.tlaloc.plugin:strictLowering=false) " +
+                "turns this into a warning, " +
                 "and the call then throws IllegalStateException when it runs."
 
         /** §0.4.514 — appended to every "kept original call" warning under

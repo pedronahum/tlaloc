@@ -46,7 +46,7 @@ parameters, not as baked constants, so nothing recompiles when they change.
 running on a different backend — the interpreter is a correctness engine, not a
 fast CPU backend, so the example shortens the run rather than pretending.
 
-## Two honest notes
+## Two notes
 
 **The loss is squared error against one-hot targets, not cross-entropy.**
 `:core` has `crossEntropyLoss`, but there is no traced spelling of it on
@@ -88,7 +88,7 @@ Tlaloc on MNIST — 60,000 handwritten digits, one captured gradient
 [0] the data
     train 60,000 images    test 10,000 images
     28x28 greyscale, scaled to [0,1]; no other preprocessing
-    cache: /home/pedro/.cache/tlaloc-datasets/mnist
+    cache: ~/.cache/tlaloc-datasets/mnist
 [1] the model and the captured gradient
     Dense(784 -> 128) -> ReLU -> Dense(128 -> 10)
     4 parameter tensors, 101,770 scalars
@@ -154,7 +154,7 @@ lane is deterministic.
 
 | Look at | For |
 |---|---|
-| [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt) | `capture` once, the fold that trains, and the two honest notes at the point they matter |
+| [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt) | `capture` once, the fold that trains, and the two notes above at the point they matter |
 | [`src/main/kotlin/Mnist.kt`](src/main/kotlin/Mnist.kt) | Downloading and parsing idx — 70 lines, nothing Tlaloc-specific |
 | [`src/main/kotlin/Lanes.kt`](src/main/kotlin/Lanes.kt) | The whole backend choice: interpreter or GPU, behind one 3-method interface |
 

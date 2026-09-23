@@ -1,12 +1,10 @@
 package io.tlaloc.autograd
 
 /**
- * §0.4.355 — the user-facing gradient intrinsics: the API surface the
- * Tlaloc K2 compiler plugin recognizes (by these exact FQNs) and
- * rewrites at compile time into synthesized gradient code
- * (`TlalocIntrinsicCallChecker` + `DxirToIrSynthesis`). Until this
- * commit these existed only as per-test stubs — a consumer of the
- * published artifacts had no `grad {}` to call. Now they ship.
+ * The user-facing gradient intrinsics: the API surface the Tlaloc K2
+ * compiler plugin recognizes (by these exact FQNs) and rewrites at compile
+ * time into synthesized gradient code
+ * (`TlalocIntrinsicCallChecker` + `DxirToIrSynthesis`).
  *
  * **These bodies are the no-plugin fallback.** With the plugin applied
  * (see docs/GETTING_STARTED.md), a call whose lambda lowers is replaced
@@ -17,7 +15,7 @@ package io.tlaloc.autograd
  *
  * For plugin-free work, the [Tracer]-capture API ([gradWithScalars],
  * [valueAndGradWithScalars], and the `Grad.kt` family) remains available —
- * since §0.4.446 it runs the SAME engine as the plugin route: the traced
+ * it runs the same engine as the plugin route: the traced
  * lambda is captured via `Tape.toDxirFunction`, differentiated by
  * `DxirReverseTransform`, and evaluated by `DxirInterpreter`. The only
  * difference is trace-at-runtime vs rewrite-at-compile-time.
@@ -53,14 +51,12 @@ fun <A, B, R> valueAndGrad2(f: (A, B) -> R): (A, B) -> Triple<R, A, B> =
     { _, _ -> pluginMissing("valueAndGrad2") }
 
 /**
- * §0.4.424 — the three-argument INTRINSIC spellings. The plugin's reverse
- * path has been arity-agnostic all along (`DxirReverseTransform` emits
- * `(*params) → (*grads)` for any arity, and synthesis boxes 3 returns as
- * [Triple] / 4 as [Quadruple] — proven by §0.4.420's 4-param sparse
- * `grad {}`); what was missing was purely this declared surface and the
- * plugin's name gates. The [Tracer]-tape `grad3` / `valueAndGrad3`
- * overloads (§0.4.134, in `Grad.kt`) coexist the same way the tape
- * `grad2` does with the intrinsic `grad2` — lambda parameter types
+ * Gradient of a scalar-valued function of three arguments. The plugin's
+ * reverse path is arity-agnostic (`DxirReverseTransform` emits
+ * `(*params) → (*grads)` for any arity; synthesis boxes 3 returns as
+ * [Triple] and 4 as [Quadruple]). The [Tracer]-tape `grad3` /
+ * `valueAndGrad3` overloads in `Grad.kt` coexist with these the same way
+ * the tape `grad2` does with the intrinsic `grad2`: lambda parameter types
  * disambiguate.
  */
 fun <A, B, C, R> grad3(f: (A, B, C) -> R): (A, B, C) -> Triple<A, B, C> =
@@ -71,10 +67,8 @@ fun <A, B, C, R> valueAndGrad3(f: (A, B, C) -> R): (A, B, C) -> Quadruple<R, A, 
     { _, _, _ -> pluginMissing("valueAndGrad3") }
 
 /**
- * §0.4.372 — forward-mode AD user intrinsics (Phase B1), the missing user
- * surface for the §0.4.361 [io.tlaloc.ir.passes.DxirForwardTransform] (whose
- * reverse-mode twin, `grad`, has shipped since §0.4.355). DiffKT's
- * `forwardDerivative` / `primalAndForwardDerivative`.
+ * Forward-mode AD, backed by [io.tlaloc.ir.passes.DxirForwardTransform].
+ * DiffKT's `forwardDerivative` / `primalAndForwardDerivative`.
  *
  * The Tlaloc idiom curries like [grad]: `jvp(f)` returns a function of
  * `(x, dx)` — the primal input and a tangent (perturbation direction) of the
@@ -89,8 +83,8 @@ fun <A, B, C, R> valueAndGrad3(f: (A, B, C) -> R): (A, B, C) -> Quadruple<R, A, 
  *
  * These are the no-plugin fallbacks (see [pluginMissing]); with the plugin the
  * call is replaced wholesale by [io.tlaloc.ir.passes.DxirForwardTransform] +
- * synthesis. v1 scope: single argument, straight-line bodies (the forward
- * transform's scope — region-bearing bodies fall back to the tape).
+ * synthesis. Scope: single argument, straight-line bodies (the forward
+ * transform's scope; region-bearing bodies fall back to the tape).
  */
 fun <A, R> jvp(f: (A) -> R): (A, A) -> R = { _, _ -> pluginMissing("jvp") }
 
@@ -99,8 +93,8 @@ fun <A, R> valueAndJvp(f: (A) -> R): (A, A) -> Pair<R, R> =
     { _, _ -> pluginMissing("valueAndJvp") }
 
 /**
- * §0.4.398 — the seeded-cotangent user surface (DiffKT's `vjp` /
- * `primalAndPullback`, audit item 10): reverse mode generalised to
+ * The seeded-cotangent surface (DiffKT's `vjp` /
+ * `primalAndPullback`): reverse mode generalised to
  * TENSOR-valued `f`. `vjp(f)` returns `(x, ȳ) → x̄` — the pullback of a
  * user-supplied cotangent `ȳ` (of `f`'s OUTPUT type) through `f` at `x`,
  * computed in ONE reverse pass. `grad(f)` is exactly `vjp(f)` with `ȳ` fixed
@@ -114,7 +108,7 @@ fun <A, R> valueAndJvp(f: (A) -> R): (A, A) -> Pair<R, R> =
  *
  * These are the no-plugin fallbacks (see [pluginMissing]); like `jacobian`
  * there is no runtime-tape path — a failed synthesis is a loud error at
- * first call. v1 scope: single argument, straight-line bodies, single return.
+ * first call. Scope: single argument, straight-line bodies, single return.
  */
 fun <A, R> vjp(f: (A) -> R): (A, R) -> A = { _, _ -> pluginMissing("vjp") }
 
@@ -123,16 +117,15 @@ fun <A, R> valueAndVjp(f: (A) -> R): (A, R) -> Pair<R, A> =
     { _, _ -> pluginMissing("valueAndVjp") }
 
 /**
- * §0.4.406 — the two-argument seeded-cotangent surface, closing the
- * "multi-arg `vjp2`" tail §0.4.398 recorded. Follows the house
- * primals-then-seeds order `grad2`/`jvp2` established: `vjp2(f)` returns
+ * The two-argument seeded-cotangent surface. It follows the
+ * primals-then-seeds order of `grad2`/`jvp2`: `vjp2(f)` returns
  * `(x, w, ȳ) → (x̄, w̄)` — the pullback of a user-supplied cotangent `ȳ`
  * (of `f`'s OUTPUT type, cotangent LAST) through `f` at `(x, w)`, both
- * gradients from ONE reverse pass. The IR layer needed nothing new:
- * `DxirReverseTransform(seedAsParam = true)` has emitted
- * `(upstream, *params) → (*grads)` for arbitrary arity since §0.4.33 (it IS
- * the COARSENED `gradient_body` signature) — the §0.4.398 plugin branch's
- * param rotation and gates just generalise from 1 primal to 2.
+ * gradients from ONE reverse pass.
+ * `DxirReverseTransform(seedAsParam = true)` emits
+ * `(upstream, *params) → (*grads)` for any arity (the COARSENED
+ * `gradient_body` signature); the plugin rotates the parameters into the
+ * declared order.
  */
 fun <A, B, R> vjp2(f: (A, B) -> R): (A, B, R) -> Pair<A, B> =
     { _, _, _ -> pluginMissing("vjp2") }
@@ -142,9 +135,8 @@ fun <A, B, R> valueAndVjp2(f: (A, B) -> R): (A, B, R) -> Triple<R, A, B> =
     { _, _, _ -> pluginMissing("valueAndVjp2") }
 
 /**
- * §0.4.387 — forward mode for a two-argument function, the `grad2` of the
- * forward pair and the follow-up §0.4.375 scoped out ("multi-arg `jvp2` is a
- * clean follow-up: same pattern, more params"). The curried result takes the
+ * Forward mode for a two-argument function, the `grad2` of the forward
+ * pair. The curried result takes the
  * primals then the tangents — `(x, w, dx, dw) -> dy` — which is the parameter
  * order [io.tlaloc.ir.passes.DxirForwardTransform] itself emits (all primals,
  * then `d_`-prefixed tangents), so nothing has to be permuted on the way in.

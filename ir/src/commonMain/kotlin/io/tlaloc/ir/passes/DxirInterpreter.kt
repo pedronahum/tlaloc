@@ -2550,7 +2550,7 @@ object DxirInterpreter {
         val fgcT = (op.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
         require(fgcT == 1) {
             "DxirInterpreter: ${op.op} feature_group_count $fgcT unsupported — grouped " +
-                "transposed-conv adjoints are a §0.4.429 named deferral"
+                "transposed-conv adjoints are not supported"
         }
         // x's type is the data adjoint's RESULT and the kernel adjoint's operand 0;
         // the kernel is IOHW either way.

@@ -460,7 +460,7 @@ object DxirCanonical {
         // interpreter/emitter const arms; named deferral until a producer exists.
         BF16 -> error(
             "DxirCanonical: bf16 constants are not part of the dxir surface — " +
-                "spell them CAST(f32 const) (§0.4.456 named deferral)",
+                "spell them CAST(f32 const)",
         )
     }
 
@@ -472,7 +472,7 @@ object DxirCanonical {
         Bool -> s == "1"
         BF16 -> error(
             "DxirCanonical: bf16 constants are not part of the dxir surface — " +
-                "spell them CAST(f32 const) (§0.4.456 named deferral)",
+                "spell them CAST(f32 const)",
         )
     }
 

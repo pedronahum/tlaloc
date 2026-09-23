@@ -227,8 +227,8 @@ def decode_requests_from_scheduler_output(scheduler_output, last_token_of) -> li
                 f"request {rid} is scheduled for {n} tokens this step but {want} "
                 f"{'is' if want == 1 else 'are'} admissible; this artifact has only "
                 f"DECODE entries, so a whole prompt is served as N single-token steps "
-                f"(§0.4.492) and anything else — a chunk, a resumed chunk, a "
-                f"speculative draft — needs the prefill entry that is H1a's named "
+                f"and anything else — a chunk, a resumed chunk, a "
+                f"speculative draft — needs a prefill entry, which is a named "
                 f"deferral. Run with --no-enable-chunked-prefill"
             )
         decode_requests.append((rid, feed()))

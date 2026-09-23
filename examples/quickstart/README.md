@@ -24,8 +24,8 @@ watch it happen:
 ```
 
 ```
-e: file:///home/pedro/programming/tlaloc/examples/quickstart/src/shapeError/kotlin/ShapeError.kt:30:5 Tlaloc named-index mismatch: contract operands share no named axis: lhs=[Batch, SeqLen] rhs=[Hidden, Hidden]
-e: file:///home/pedro/programming/tlaloc/examples/quickstart/src/shapeError/kotlin/ShapeError.kt:32:12 Cannot infer type for type parameter 'NameN'. Specify it explicitly.
+e: file://<repo>/examples/quickstart/src/shapeError/kotlin/ShapeError.kt:30:5 Tlaloc named-index mismatch: contract operands share no named axis: lhs=[Batch, SeqLen] rhs=[Hidden, Hidden]
+e: file://<repo>/examples/quickstart/src/shapeError/kotlin/ShapeError.kt:32:12 Cannot infer type for type parameter 'NameN'. Specify it explicitly.
 ```
 
 The two operands share no axis **name** — `(Batch, SeqLen)` against
@@ -105,7 +105,7 @@ quickstart OK
 
 ## Running it on a JDK 21
 
-§0.4.503 split Tlaloc's bytecode targets: the library modules (`core`, `ir`,
+Tlaloc's bytecode targets are split: the library modules (`core`, `ir`,
 `autograd`, `nn`, `stablehlo`, `maestro`) emit Java 21, while the FFM runtime
 backends and the compiler plugin stay at 25. This project is the certification
 that the 21 half is real:

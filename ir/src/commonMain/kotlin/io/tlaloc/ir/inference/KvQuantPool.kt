@@ -263,7 +263,7 @@ object KvQuantPool {
                 "the symmetric-absmax INTEGER-CODE contract (a code is a small integer and the " +
                 "dequantization is one multiply), and ${config.dtype.nameTag} is a float format " +
                 "whose code is a bit pattern with its own exponent. It wants a narrow DType the " +
-                "way bf16 got one in §0.4.455, not an integer code path that would round twice. " +
+                "way bf16 has one, not an integer code path that would round twice. " +
                 "Integer-coded dtypes: " +
                 KvQuantDtype.entries.filter { it.isIntegerCoded }.joinToString(", ") { it.nameTag }
         }

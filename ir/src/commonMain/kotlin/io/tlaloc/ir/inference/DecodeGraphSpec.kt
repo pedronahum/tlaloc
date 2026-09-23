@@ -336,7 +336,7 @@ data class DecodeModelShape(
                 "DecodeModelShape: kvQuant ${q.dtype.nameTag} is refused BY NAME — the KV-quant " +
                     "contract (KvQuantPool, DEQUANTIZE_KV) is integer-coded " +
                     "(value = code * scale), and a float format's code is a bit pattern; fp8 " +
-                    "pools wait on a narrow DType, the bf16 §0.4.455 precedent"
+                    "pools need a narrow DType of their own, as bf16 has"
             }
             require(kvDtype == I32 || kvDtype == I64) {
                 "DecodeModelShape: a ${q.dtype.nameTag}-quantized pool carries integer CODES, so " +

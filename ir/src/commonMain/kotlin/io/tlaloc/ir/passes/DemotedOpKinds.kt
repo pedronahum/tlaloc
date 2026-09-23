@@ -44,7 +44,7 @@ internal fun demotedKindRefusal(kind: OpKind, layer: String): String? = when (ki
     OpKind.LAYERNORM ->
         "$layer: LAYERNORM is a coarsener-recognized/emission-only kind (cost model + " +
             "StableHLO emitter are its sanctioned layers) — spell layernorm via ops " +
-            "(SUB/DIV/SQRT over MEAN, the §0.4.390 batchNorm desugaring precedent) " +
+            "(SUB/DIV/SQRT over MEAN, as batchNorm is decomposed) " +
             "and let the coarsener own the fused semantics"
     OpKind.SCALED_DOT_PRODUCT_ATTENTION ->
         "$layer: SCALED_DOT_PRODUCT_ATTENTION is a coarsener-recognized/emission-only " +
@@ -96,7 +96,7 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
  */
 internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = when (kind) {
     OpKind.PAGED_ATTENTION ->
-        "$layer: PAGED_ATTENTION is INFERENCE-ONLY BY DESIGN (Phase H1a, " +
+        "$layer: PAGED_ATTENTION is INFERENCE-ONLY BY DESIGN (" +
             "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
             "not a gap: its key/value operands are a block-table-indexed KV PAGE POOL " +
             "mutated across decode steps and addressed by integer allocator bookkeeping, " +
@@ -106,7 +106,7 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "composition (MATMUL/softmax/MATMUL) or the GQA recognizer's coarsened form, " +
             "which the coarseners own with certified gradients"
     OpKind.KV_CACHE_WRITE ->
-        "$layer: KV_CACHE_WRITE is INFERENCE-ONLY BY DESIGN (Phase H1b, " +
+        "$layer: KV_CACHE_WRITE is INFERENCE-ONLY BY DESIGN (" +
             "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
             "not a gap: it deposits a decode step's new keys/values into a KV PAGE POOL " +
             "at flat slots an allocator named, so its cache operand is serving-runtime " +
@@ -116,7 +116,7 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "DIFFERENTIATE a placement of values into a tensor, use the differentiable " +
             "spelling: the SCATTER / SCATTER_ADD family, which carries certified rules"
     OpKind.DEQUANTIZE_KV ->
-        "$layer: DEQUANTIZE_KV is INFERENCE-ONLY BY DESIGN (Phase H5, " +
+        "$layer: DEQUANTIZE_KV is INFERENCE-ONLY BY DESIGN (" +
             "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
             "not a gap: its codes operand is the output of a lossy STAIRCASE map " +
             "(round-to-nearest against a per-head scale), whose true derivative is zero " +

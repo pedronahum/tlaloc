@@ -202,7 +202,7 @@ object SafetensorsWriter {
             throw JsonException(
                 "safetensors writer: the header would be $padded bytes, past the " +
                     "${Safetensors.MAX_HEADER_BYTES}-byte cap the reader enforces — " +
-                    "a checkpoint with this many tensors needs the sharded form, a named deferral",
+                    "a checkpoint with this many tensors needs the sharded form, which is not supported",
             )
         }
         val total = ALIGNMENT.toLong() + padded + dataBytes
@@ -210,7 +210,7 @@ object SafetensorsWriter {
             throw JsonException(
                 "safetensors writer: the file would be $total bytes, past the " +
                     "${Int.MAX_VALUE}-byte ceiling of a JVM ByteArray — sharded or streamed " +
-                    "writing is the fix and is a NAMED DEFERRAL (see SafetensorsWriter.kt)",
+                    "writing would be needed and is not supported",
             )
         }
 

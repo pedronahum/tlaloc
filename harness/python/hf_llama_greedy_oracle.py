@@ -41,7 +41,7 @@ def main() -> int:
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--max-new", type=int, default=6)
     ap.add_argument("--num-layers", type=int, default=None,
-                    help="reduce to a prefix of layers, as §0.4.479's parity lane does")
+                    help="reduce to a prefix of layers, as the parity lane does")
     ap.add_argument("--output", required=True)
     ap.add_argument("--decode-ids", default=None,
                     help="JSON list of ids to additionally render as text")

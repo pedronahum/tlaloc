@@ -64,7 +64,7 @@ class DemotedKindRefusalTest {
         val ex = assertFailsWith<IllegalStateException> {
             DxirInterpreter.evalFunction(layernormFn(), listOf(FloatArray(4) { it.toFloat() }))
         }
-        assertNamedRefusal(ex, "LAYERNORM", "batchNorm desugaring")
+        assertNamedRefusal(ex, "LAYERNORM", "as batchNorm is decomposed")
     }
 
     @Test
@@ -81,7 +81,7 @@ class DemotedKindRefusalTest {
     @Test
     fun reverseTransformRefusesLayernormByName() {
         val ex = assertFailsWith<IllegalStateException> { DxirReverseTransform.apply(layernormFn()) }
-        assertNamedRefusal(ex, "LAYERNORM", "batchNorm desugaring")
+        assertNamedRefusal(ex, "LAYERNORM", "as batchNorm is decomposed")
     }
 
     @Test
@@ -95,7 +95,7 @@ class DemotedKindRefusalTest {
     @Test
     fun forwardTransformRefusesLayernormByName() {
         val ex = assertFailsWith<IllegalStateException> { DxirForwardTransform.apply(layernormFn()) }
-        assertNamedRefusal(ex, "LAYERNORM", "batchNorm desugaring")
+        assertNamedRefusal(ex, "LAYERNORM", "as batchNorm is decomposed")
     }
 
     @Test

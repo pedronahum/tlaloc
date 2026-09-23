@@ -136,7 +136,7 @@ object DequantizeKvAttrs {
             "$layer: DEQUANTIZE_KV carries '$tag', which is NOT an integer-coded format and is " +
                 "refused BY NAME, not missing — an fp8 code is a bit pattern with its own " +
                 "exponent, so `value = code * scale` is not its dequantization. fp8 KV-quant " +
-                "waits on a narrow DType (the bf16 §0.4.455 precedent); the integer-coded " +
+                "needs a narrow DType of its own, as bf16 has; the integer-coded " +
                 "formats this op implements are " +
                 KvQuantDtype.entries.filter { it.isIntegerCoded }.joinToString(", ") { it.nameTag }
         }

@@ -27,7 +27,7 @@ Two consequences, both visible in this example:
   DslMarker never blocks. The separation you can rely on today is the typed
   handle above. Keeping the claim would have been cheaper than checking it.
 
-- **The whole taxonomy is opt-in, on purpose.** Since §0.4.505 the four scopes
+- **The whole taxonomy is opt-in, on purpose.** The four scopes
   and `BufferHandle` carry `@ExperimentalTlalocApi`, a `@RequiresOptIn(ERROR)`
   marker, so both source files here start with
   `@file:OptIn(ExperimentalTlalocApi::class)` and would not compile without it.
@@ -35,7 +35,7 @@ Two consequences, both visible in this example:
   "v1 keeps each op single-scope" and names Kotlin's context parameters as where
   a multi-scope op would send every signature in the table. `grad`, the op
   surface and `:nn` are **not** marked — see
-  [docs/GETTING_STARTED.md §4b](../../../docs/GETTING_STARTED.md).
+  [docs/GETTING_STARTED.md, section 4b](../../../docs/GETTING_STARTED.md#4b-experimentaltlalocapi-the-provisional-part-of-the-surface).
 
 The run prints: one step built and executed; two steps composed with a handle
 flowing between them (and the recorded edge); and each step's StableHLO

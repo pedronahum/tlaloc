@@ -194,9 +194,9 @@ class SafetensorsTest {
     }
 
     @Test
-    fun fp8IsRefusedAsTheH5Deferral() {
+    fun fp8IsRefusedByName() {
         val e = assertFailsWith<JsonException> { Safetensors.mapDType("F8_E4M3") }
-        assertTrue("H5" in e.message!!, e.message!!)
+        assertTrue("fp8 checkpoints are not supported" in e.message!!, e.message!!)
     }
 
     @Test

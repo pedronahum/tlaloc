@@ -323,8 +323,8 @@ object PjrtFfm {
                 "coordinator=${options.coordinatorAddress}) but the kv-store callbacks " +
                 "(PJRT_Client_Create_Args.kv_get/kv_try_get/kv_put) are not implemented — " +
                 "a multi-node client cannot rendezvous without them. Multi-host init is " +
-                "G4 surface; see docs/MULTIHOST_DESIGN.md. Marshalling of node_id/" +
-                "num_nodes is certified; client CREATION at num_nodes > 1 is refused by name."
+                "designed but not implemented; see docs/MULTIHOST_DESIGN.md. Client " +
+                "creation at num_nodes > 1 is refused."
         }
     }
 

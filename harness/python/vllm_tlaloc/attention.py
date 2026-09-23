@@ -151,7 +151,7 @@ class TlalocAttentionImpl(AttentionImpl):
         raise TlalocAttentionNotReached(
             "tlaloc: vLLM constructed an attention IMPL. Attention in a Tlaloc "
             "deployment is OpKind.PAGED_ATTENTION inside the exported StableHLO "
-            "program (§0.4.465), executed by TlalocWorker.execute_model; there is no "
+            "program, executed by TlalocWorker.execute_model; there is no "
             "torch attention layer to build. Reaching this constructor means vLLM "
             "built a torch model, which is a path vllm_tlaloc does not implement"
         )

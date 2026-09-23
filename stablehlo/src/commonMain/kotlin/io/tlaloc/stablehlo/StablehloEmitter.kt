@@ -492,7 +492,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // check, or a shape-proof that elides it) is a recorded Phase B5
             // tail in docs/CUSTOM_DERIVATIVES_DESIGN.md.
             OpKind.CHECK_SHAPE_LIKE -> error(
-                "${node.op} has no StableHLO emission (Phase B5): the customVjp " +
+                "${node.op} has no StableHLO emission: the customVjp " +
                     "user-gradient shape assert cannot be expressed in StableHLO, and " +
                     "silently dropping it would fork host/device behaviour; run customVjp " +
                     "gradient bodies on host (the synthesis path) or the interpreter",
@@ -510,11 +510,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
             // principle). This is DiffKT's own position (its sparse ops are
             // CPU-only Eigen JNI), so parity is not reduced by refusing.
             OpKind.SPARSE_MATMUL, OpKind.SPARSE_MATMUL_VALUES_ADJOINT -> error(
-                "${node.op} has no StableHLO emission (Phase E1b, the ratified GPU " +
-                    "refusal): StableHLO/XLA has no sparse types, and a densify fallback " +
+                "${node.op} has no StableHLO emission: StableHLO/XLA has no sparse types, and a densify fallback " +
                     "would be a silent O(N²) behaviour fork; run sparse matmuls on host " +
                     "(:core SparseTensor / the sparseMatmul* twins) or the interpreter " +
-                    "(ELL-padded emission is a recorded Phase E tail)",
+                    "(ELL-padded emission is not implemented)",
             )
 
             else -> error("StableHLO lowering not yet implemented for ${node.op}")
@@ -1622,7 +1621,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         val fgcAdj = (node.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
         require(fgcAdj == 1) {
             "${node.op}: feature_group_count $fgcAdj unsupported in emission — grouped " +
-                "conv-adjoint emission is a §0.4.429 named deferral (interpreter handles groups)"
+                "conv-adjoint emission is not supported (the interpreter handles groups)"
         }
         require(node.operands.size == 3) {
             "${node.op} takes (upstream, kernel, xTemplate) or (x, upstream, wTemplate); " +
@@ -1787,7 +1786,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         val fgcAdj = (node.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
         require(fgcAdj == 1) {
             "${node.op}: feature_group_count $fgcAdj unsupported in emission — grouped " +
-                "conv-adjoint emission is a §0.4.429 named deferral"
+                "conv-adjoint emission is not supported"
         }
         require(node.operands.size == 3) {
             "${node.op} takes (upstream, kernel, xTemplate) or (x, upstream, wTemplate); " +

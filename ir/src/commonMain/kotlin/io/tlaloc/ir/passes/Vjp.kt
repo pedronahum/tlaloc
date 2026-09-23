@@ -892,8 +892,8 @@ object VjpRegistry {
             val fgc = (op.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
             require(fgc == 1) {
                 "ConvTranspose2dRule: feature_group_count $fgc unsupported — grouped " +
-                    "transposed-conv VJP is a §0.4.429 named deferral (groups ride only on " +
-                    "CONV2D's adjoints today)"
+                    "transposed-conv VJP is not supported (only CONV2D's adjoints " +
+                    "support groups)"
             }
 
             fun intPair(key: String, def: List<Int>): List<Int> =

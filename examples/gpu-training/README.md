@@ -173,7 +173,7 @@ device   : host JVM (DxirInterpreter)
            held-out accuracy on 1024 fresh points never seen in training: 97.9%
 ```
 
-Two honest observations about those numbers, both measured rather than assumed:
+Two observations about those numbers, both measured:
 
 - **The GPU is only ~2.7× faster here**, because the model is tiny (337
   scalars) and every step round-trips through the host to run the optimizer.
@@ -182,9 +182,9 @@ Two honest observations about those numbers, both measured rather than assumed:
 - **The host lane is bit-reproducible and the GPU lane is not guaranteed to
   be.** Two host runs produced identical output apart from the wall-clock line
   (5.190 s vs 5.310 s — every other printed number matched). On the GPU the
-  picture is more interesting than "nondeterministic": two runs in §0.4.486
+  picture is more interesting than "nondeterministic": two earlier runs
   differed in the third decimal at step 600 (0.047137 vs 0.051002), while two
-  runs in §0.4.502 reproduced 0.046667 *exactly*. XLA autotunes its GEMM
+  later runs reproduced 0.046667 *exactly*. XLA autotunes its GEMM
   kernels at compile time and can pick a different winner per run — so the
   nondeterminism is real, and it does not have to show. If you need a bit-exact
   GPU trajectory, that is an XLA flag question, not a Tlaloc one.
@@ -213,8 +213,8 @@ The run ends by saving the trained model to
 that file are worth knowing:
 
 **It is an ordinary safetensors file.** Not a Tlaloc container, not Java
-serialization — the format HuggingFace ships checkpoints in, which this
-repository has read since §0.4.468 and has written since §0.4.502. So you can
+serialization — the format HuggingFace ships checkpoints in, which Tlaloc
+reads and writes. So you can
 open the file with tools you already have:
 
 ```python

@@ -7,9 +7,9 @@ your project would. None is a module of the repo build, none uses `includeBuild`
 and none imports another. Delete the rest of the repository after
 `publishToMavenLocal` and every one of them still compiles and runs.
 
-Everything printed in every README here is **real output from a real run**. Where
-a number could not be produced on this machine — anything involving a TPU — the
-README says so in those words instead of showing you a number.
+Everything printed in every README here is **output from a real run**. Where a
+number could not be produced (anything involving a TPU), the README says so
+instead of showing one.
 
 ---
 
@@ -17,13 +17,13 @@ README says so in those words instead of showing you a number.
 
 | | |
 |---|---|
-| **JDK 25 to build** | every example sets `jvmToolchain(25)`, and it must: Kotlin loads the Tlaloc K2 plugin into the compiler's own JVM and that plugin is Java 25 bytecode. On the DGX Spark: `export JAVA_HOME=~/.local/jdks/jdk-25.0.3+9` |
-| **JDK 21 to run** | §0.4.503 lowered the library modules to Java 21 bytecode. `quickstart` sets `jvmTarget = JVM_21` and has a `runOnJdk21` task that runs its synthesized gradient on a real JDK 21 (see the repo's `scripts/jdk21-smoke.sh`). PJRT/CUDA *execution* still needs 25 |
-| **Publish first** | `./gradlew publishToMavenLocal` at the repo root, once, and again after you change Tlaloc itself |
+| **JDK 25 to build** | every example sets `jvmToolchain(25)`, and it must: Kotlin loads the Tlaloc K2 plugin into the compiler's own JVM and that plugin is Java 25 bytecode |
+| **JDK 21 to run** | The library modules are Java 21 bytecode. `quickstart` sets `jvmTarget = JVM_21` and has a `runOnJdk21` task that runs its synthesized gradient on a real JDK 21 (see the repo's `scripts/jdk21-smoke.sh`). PJRT/CUDA *execution* still needs 25 |
+| **Publish first** | `./gradlew publishToMavenLocal -x test` at the repo root, once, and again after you change Tlaloc itself |
 | **Nothing else** | no GPU, no driver, no Python, no checkpoint — for six of the ten |
 
 ```bash
-./gradlew publishToMavenLocal          # once
+./gradlew publishToMavenLocal -x test  # once
 ./gradlew -p examples/quickstart run   # and any example, the same way
 ```
 
@@ -91,15 +91,14 @@ already care about it.
 | [`internals/four-worlds/`](internals/four-worlds/) | Kernel / Orchestration / Program / Cluster as four receiver types, the `BufferHandle` that is the only thing allowed across a step boundary, and the Maestro descriptor a cluster ingests — plus one boundary claim that writing the failing case down proved false. | nothing |
 | [`internals/tpu/`](internals/tpu/) | Five acts written **before the hardware exists**: tolerances and verdicts fixed in advance, so the first TPU session is spent debugging a TPU rather than writing a test for one. | a TPU *(never run on one; `--target cuda` is the dry run)* |
 
-`layer3` and `four-worlds` are also the folder's **opt-in** examples. Since
-§0.4.505 the surfaces they drive carry `@ExperimentalTlalocApi`, a `@RequiresOptIn(ERROR)` marker Tlaloc
+`layer3` and `four-worlds` are also the folder's **opt-in** examples. The
+surfaces they drive carry `@ExperimentalTlalocApi`, a `@RequiresOptIn(ERROR)` marker Tlaloc
 puts on the part of its API that is genuinely provisional, so each starts with
 `@file:OptIn(ExperimentalTlalocApi::class)` and a comment saying why. That is
 deliberate: they are the only *consumers* of a marked surface in the repository,
 which makes them the check that the marker actually refuses somebody. Nothing in
 `quickstart`, `readable-gradients`, `differentiable-physics`, `named-indices`,
-`mnist`, `gpu-training` or `gpu-inference` needs an opt-in — those use the
-certified surface, and that contrast is the point.
+`mnist`, `gpu-training` or `gpu-inference` needs an opt-in.
 
 ---
 
@@ -119,7 +118,7 @@ certified surface, and that contrast is the point.
 
 ---
 
-## What happened on this machine
+## Last full run
 
 Run end to end on 2026-09-22 on the GB10 DGX Spark, aarch64, CUDA driver
 580.126.09, JDK 25.0.3+9, **no TPU**. Every one exited `0`.
@@ -162,7 +161,7 @@ The standard this folder holds itself to:
   printed, not what the author wanted to demonstrate.
 - **It runs, and the README says what it printed.** Paste the real output.
   Never write output you did not observe.
-- **It degrades honestly.** No accelerator must mean a named skip and exit `0`,
+- **It degrades by name.** No accelerator must mean a named skip and exit `0`,
   never a stack trace — a laptop reader should get through the whole folder.
 - **Nothing is homework.** If the point of the example is a program that fails
   to compile, ship that program and a command that compiles it. "Uncomment this

@@ -1,9 +1,6 @@
 # Compatibility policy
 
-**Status: this is a promise, not a design note.** It is the written form of the
-one line the README has carried for months — "APIs change without deprecation
-cycles" — and it exists so that line cannot be read more generously than it was
-meant.
+What the alpha series promises, and what it does not.
 
 Current version: **`0.1.0-alpha01`**. Nothing is on Maven Central yet; you build
 from source and consume from `mavenLocal` (see
@@ -13,30 +10,25 @@ from source and consume from `mavenLocal` (see
 
 `0.1.0-alpha01` means: **the engine is certified, the surface is not settled.**
 
-Those are different claims and the repository keeps them apart on purpose. The
-2,522 automated tests at HEAD pin behaviour — gradients against analytic and
+The automated tests pin behaviour: gradients against analytic and
 cross-implementation oracles, a real TinyLlama matching HuggingFace token for
 token, RNG bit-exact against JAX's threefry stream. None of that pins *names*. A
 function whose result is certified correct may still be renamed, moved to another
 module, or given a different parameter order in `0.1.0-alpha02`.
 
 Version numbers before `1.0.0` carry no compatibility guarantee under SemVer
-§4, and Tlaloc takes that literally rather than pretending the minor number
-means something it does not.
+item 4, and Tlaloc takes that literally.
 
-### Two things added in §0.4.505 make that sentence less blunt
+### Which surfaces are more likely to change
 
-The paragraph above grades a surface with thousands of oracle tests behind it
-exactly the same as a surface nothing has ever executed, which is honest but not
-useful. Two mechanisms now separate them.
+Two mechanisms separate well-tested surfaces from provisional ones.
 
 - **`@ExperimentalTlalocApi`** — a `@RequiresOptIn(ERROR)` marker (declared in
   `:core`) on the part of the surface that is *provisional*, meaning it may change
   **shape**, not merely signature. Three surfaces carry it, each for a stated
   reason: the four-worlds scope taxonomy (`KernelScope`, `OrchestrationScope`,
-  `ProgramScope`, `ClusterScope`, `Tlaloc`, `BufferHandle`, `HandleRef` — its own
-  KDoc scopes it to v1 and names Kotlin's context parameters as where it would
-  have to go); the collective attribute convention (`io.tlaloc.ir.AllReduceAttrs`
+  `ProgramScope`, `ClusterScope`, `Tlaloc`, `BufferHandle`, `HandleRef`; each op
+  is limited to one scope, and Kotlin's context parameters may reshape it); the collective attribute convention (`io.tlaloc.ir.AllReduceAttrs`
   — distributed execution is 📐 in [CAPABILITIES.md](CAPABILITIES.md) and has
   never run on two hosts); and the kernel-choice and cost-model surface
   (`io.tlaloc.ir.recognizer.kernel`, `io.tlaloc.ir.recognizer.cost` — the
@@ -53,7 +45,7 @@ useful. Two mechanisms now separate them.
   binary-compatibility-validator 0.18.2 cannot read Java 25 bytecode
   (`Unsupported class file major version 69`), so the five 25-targeted modules —
   `:runtime-pjrt`, `:runtime-cuda`, `:kptx`, `:runtime-iree`, `:compiler-plugin` —
-  are **not** covered. That is a tool limit, stated rather than glossed.
+  are **not** covered.
 
 Neither mechanism weakens anything below: an API with no marker on it is still
 free to change in any alpha. What they add is a *signal* about which ones will,
@@ -85,15 +77,12 @@ Any of these may change in any alpha release:
 
 ## What will not break inside the alpha series
 
-These are the commitments. They are short on purpose — a long list here would be
-a list of things this policy could not keep.
+These are the commitments.
 
-- **The group id stays `io.github.pedronahum`.** It changed once, in §0.4.508,
-  before anything was published and therefore before it could break anyone; that
-  was the only free moment and it will not be taken again. Artifact ids may gain
-  or lose modules, but
-  a coordinate that exists will not be re-pointed at different code under the
-  same version.
+- **The group id stays `io.github.pedronahum`.** It changed from `io.tlaloc`
+  once, before anything was published. Artifacts may be added or removed, but a
+  coordinate that exists will not be re-pointed at different code under the same
+  version.
 - **A published version is immutable.** `0.1.0-alphaNN` is never re-published
   with different bytes. If it is wrong, the fix is `alphaNN+1`.
 - **No silent degradation, ever.** This is a house rule, not a version policy:
@@ -108,8 +97,8 @@ a list of things this policy could not keep.
 - **A break in the covered modules' ABI leaves a trace.** `api/*.api` is a
   committed baseline and `apiCheck` runs inside `./gradlew test`, so a change to
   `:core`, `:ir`, `:autograd`, `:nn`, `:stablehlo` or `:maestro`'s public ABI
-  cannot land without a matching `apiDump` in the same commit. This is not a
-  promise not to break; it is a promise that breaking is visible.
+  cannot land without a matching `apiDump` in the same commit. Breaks are still
+  allowed; they are visible.
 
 ## What a consumer should do about it
 
@@ -119,38 +108,37 @@ a list of things this policy could not keep.
   records breaking changes per version; there is no deprecation period in which
   both spellings work.
 - **Keep the compiler-plugin version equal to the library version.** The plugin
-  synthesizes calls into `:core`/`:ir`; mixing versions is unsupported and is not
-  checked for you today (see [ALPHA_PLAN.md](ALPHA_PLAN.md) — this is a named
-  gap, not an oversight).
-- **Treat the toolchain as pinned too**, and read the two halves separately —
-  §0.4.503 split them.
+  synthesizes calls into `:core`/`:ir`; mixing versions is unsupported. The Gradle
+  plugin applies the compiler plugin of its own version, and `tlaloc-bom` keeps
+  the libraries on one version. Without the Gradle plugin nothing checks that the
+  two match; a missing library symbol at compile time is reported as a likely
+  version mismatch.
+- **Treat the toolchain as pinned too.**
   - **Kotlin: 2.3.20 through 2.3.29.** A K2 compiler plugin binds to compiler
     internals; a different *feature* release is not expected to work and is not
-    tested. Since §0.4.503 the plugin no longer finds out the hard way: it detects
-    the running compiler's version and REFUSES at compile time, naming what it
-    found and the supported range, instead of raising a `NoSuchMethodError` from
-    inside `compileKotlin`. Kotlin numbers feature releases by tens in the third
+    tested. The plugin detects the running compiler's version and refuses at
+    compile time, naming what it found and the supported range, instead of
+    raising a `NoSuchMethodError` from inside `compileKotlin`. Kotlin numbers feature releases by tens in the third
     component and bugfixes by ones above them, so the supported range is the whole
     bugfix family of 2.3.20 and nothing else — 2.3.10 and 2.3.30 are *different
-    feature releases*. `-P plugin:io.tlaloc.plugin:unsafeAllowUnsupportedKotlin=true`
-    turns the refusal into a warning for anyone who wants to try; a crash below it
-    is then the expected outcome, not a bug.
+    feature releases*. `tlaloc { unsafeAllowUnsupportedKotlin.set(true) }` turns
+    the refusal into a warning; a crash inside the compiler is then expected.
   - **JDK: 25 to build, 21 to run.** The library modules (`core`, `ir`,
     `autograd`, `nn`, `stablehlo`, `maestro`) emit Java 21 bytecode and are
     compiled with `-Xjdk-release=21`. The FFM runtime backends (`runtime-pjrt`,
     `runtime-cuda`, `kptx`), `runtime-iree` and `compiler-plugin` emit Java 25.
     Because Kotlin loads a compiler plugin into the compiler's own JVM, a project
     using `grad { }` needs a JDK 25 *on the build machine* whatever it targets.
-    The per-module table is in [GETTING_STARTED.md](GETTING_STARTED.md) §0 and the
+    The per-module table is in [GETTING_STARTED.md](GETTING_STARTED.md), section 0, and the
     gate is `scripts/jdk21-smoke.sh` plus `verifyJvmTarget`, which reads the
     class-file major version out of every published jar.
 - **Symja (`org.matheclipse:matheclipse-core`, LGPL-3.0) is optional from
-  `0.1.0-alpha01`.** It was a mandatory runtime dependency of `io.github.pedronahum:tlaloc-ir` until
-  §0.4.503 and is `compileOnly` now, so it will not appear in your graph unless
-  you add it. Adding it is one line — `kotlinCompilerPluginClasspath(...)`, because
-  the CAS runs inside the compiler and not inside your program — and Tlaloc names
-  that line at compile time on the day a body actually needs the CAS. If your policy forbids LGPL in the
-  dependency graph, nothing in Tlaloc pulls it in.
+  `0.1.0-alpha01`.** It is `compileOnly` in `tlaloc-ir`, so it will not appear in
+  your graph unless you add it. Adding it is one line,
+  `kotlinCompilerPluginClasspath(...)`, because the CAS runs inside the compiler
+  and not inside your program, and Tlaloc prints that line at compile time when a
+  body needs the CAS. If your policy forbids LGPL in the dependency graph,
+  nothing in Tlaloc pulls it in.
 
 ## When this policy changes
 

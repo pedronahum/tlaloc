@@ -23,7 +23,7 @@ The run walks the whole Layer-3 pipeline, one printed section per stage:
 
 It is all pure compilation. No GPU, no TPU, no network: this runs on a laptop.
 
-**One line of ceremony at the top of `Main.kt`.** Since §0.4.505 the
+**One line of ceremony at the top of `Main.kt`.** The
 kernel-choice and cost-model surface this example drives — `KernelTarget`,
 `KernelDescriptor`, `lowerKernelChoice`, the cost model — carries
 `@ExperimentalTlalocApi`, a `@RequiresOptIn(ERROR)` marker, so the file opens with
@@ -149,7 +149,7 @@ All of it is in [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt):
 | `kvQuantAcrossTargets(...)` | `applyKvQuantWithDiagnostics`: best-effort annotation plus a structured decline |
 | `backendMatrix()` | `populateBackendMatrix` and the JSON row the cluster side consumes |
 
-## Honest notes
+## Limitations
 
 - **GB10 and H100 produce IDENTICAL artifacts here**, because both resolve to
   the same `flash_attn_v3` kernel template in the registry. The per-target

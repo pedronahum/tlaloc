@@ -121,8 +121,8 @@ class PjrtTpuLocalCertTest {
             )
         }
         assertTrue(
-            "0.4.333" in (ex.message ?: ""),
-            "refusal must cite the reboot-incident rule; got: ${ex.message}",
+            "preallocates 75% of GPU memory" in (ex.message ?: ""),
+            "refusal must name the preallocation it prevents; got: ${ex.message}",
         )
     }
 

@@ -750,7 +750,7 @@ fun <S : Shape> Tracer<*>.conv2d(
     }
     require(w.dims[1] == dims[1]) {
         "conv2d: kernel input channels ${w.dims[1]} ≠ input channels ${dims[1]} " +
-            "(groups stay 1 at the trace level — §0.4.429)"
+            "(the traced conv2d supports groups = 1 only)"
     }
     require(strideH > 0 && strideW > 0) {
         "conv2d: strides must be positive; got [$strideH, $strideW]"
@@ -809,7 +809,7 @@ private fun Tracer<*>.tracePool2d(kind: OpKind, windowH: Int, windowW: Int): Tra
     }
     require(dims[2] % windowH == 0 && dims[3] % windowW == 0) {
         "$opName: spatial dims [${dims[2]}, ${dims[3]}] must divide by the window " +
-            "[$windowH, $windowW] (DiffKT's own require — F0 landmine 7)"
+            "[$windowH, $windowW]"
     }
     val out =
         if (kind == OpKind.MAXPOOL2D) {

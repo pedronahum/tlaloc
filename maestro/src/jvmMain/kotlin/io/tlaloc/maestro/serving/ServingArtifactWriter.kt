@@ -270,9 +270,9 @@ object ServingArtifactWriter {
             }
             require(slot.type.dtype == F32) {
                 "ServingArtifactWriter: staged weight '${slot.name}' is ${slot.type.dtype}; " +
-                    "§0.4.480 writes f32 only. A bf16 weight table halves the artifact and the " +
-                    "upload and is a NAMED DEFERRAL — it needs the graph to be a bf16 graph, " +
-                    "which is the G1 path, not a file-format change"
+                    "the serving artifact holds f32 weights only. A bf16 weight table is not " +
+                    "supported: it needs the graph itself to be a bf16 graph, not a " +
+                    "file-format change"
             }
             val data = stage(slot)
             val want = slot.type.dims.fold(1) { a, b -> a * b }

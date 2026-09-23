@@ -202,8 +202,8 @@ object HfLlamaDecodeGraph {
     ): DxirFunction {
         require(spec.kind == DecodeGraphKind.DECODE) {
             "HfLlamaDecodeGraph.build: ${spec.kind} is not implemented — PAGED_ATTENTION's " +
-                "query is one token per sequence (§0.4.465), and the ragged chunked-prefill " +
-                "form is that slice's named deferral. Run a prefill as N decode steps"
+                "query is one token per sequence, and the ragged chunked-prefill " +
+                "form is not implemented. Run a prefill as N decode steps"
         }
         require(spec.weightSlots == weightSlots(config)) {
             "HfLlamaDecodeGraph.build: the spec's weight signature is not this config's — " +

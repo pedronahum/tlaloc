@@ -126,13 +126,13 @@ class PjrtSession(
         require(target != PjrtTarget.Tpu || options == null) {
             "PjrtSession: PjrtClientOptions (memory_fraction/preallocate) are the XLA GPU " +
                 "plugin's allocator options — a PjrtTarget.Tpu client must not be handed " +
-                "them (pass options = null; libtpu create-options are a G2b question, " +
+                "them (pass options = null; libtpu create-options are not wired, " +
                 "see docs/TPU_BRINGUP.md)"
         }
         require(target == PjrtTarget.Tpu || options != null) {
             "PjrtSession: a $target client must always carry PjrtClientOptions — creating " +
-                "a CUDA client with zero create_options revives the §0.4.333 75%-of-unified-" +
-                "memory preallocation (the 2026-07-18 reboot incident); null is reserved " +
+                "a CUDA client with zero create_options preallocates 75% of GPU memory, which " +
+                "on a unified-memory machine can exhaust system RAM; null is reserved " +
                 "for PjrtTarget.Tpu"
         }
     }

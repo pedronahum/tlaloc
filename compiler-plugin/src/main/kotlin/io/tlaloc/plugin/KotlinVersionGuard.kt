@@ -164,7 +164,7 @@ object KotlinVersionGuard {
         "REFUSING to register, rather than crashing later with no explanation. Either use " +
             "Kotlin $COMPILED_AGAINST, or use a Tlaloc release built against your Kotlin — " +
             "docs/COMPATIBILITY.md states the toolchain this one is pinned to. To try it " +
-            "anyway, pass " +
+            "anyway, set `tlaloc { unsafeAllowUnsupportedKotlin.set(true) }` or pass " +
             "-P plugin:${TlalocCommandLineProcessor.PLUGIN_ID}:" +
             "${TlalocCommandLineProcessor.UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_OPTION.optionName}=true."
     }

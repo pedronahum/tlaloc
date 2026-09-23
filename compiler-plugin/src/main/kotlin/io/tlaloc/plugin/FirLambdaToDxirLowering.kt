@@ -492,7 +492,7 @@ object FirLambdaToDxirLowering {
                 name,
                 "${notConst.why}, and it is a top-level or member property, so reading it is a " +
                     "getter CALL rather " +
-                    "than a local read — §0.4.501 binds a captured runtime value by reading its " +
+                    "than a local read. Tlaloc binds a captured runtime value by reading its " +
                     "DECLARATION at the call site, which covers a local `val` and a parameter of " +
                     "the enclosing function. Declare '$name' as `const val`, copy it into a " +
                     "local `val` first, or pass it in as a lambda parameter",
@@ -525,7 +525,7 @@ object FirLambdaToDxirLowering {
             throw runtimeCapture(
                 name,
                 "$whyNotConstant, and this intrinsic does not accept a captured runtime value — " +
-                    "§0.4.501 carries one as an input-only parameter of the synthesized gradient, " +
+                    "Tlaloc carries one as an input-only parameter of the synthesized gradient, " +
                     "which the reverse-mode `grad` / `grad2` / `grad3` / `valueAndGrad` / " +
                     "`valueAndGrad2` / `valueAndGrad3` spellings support; the forward, assembly " +
                     "and seeded-cotangent intrinsics build their own parameter lists out of the " +

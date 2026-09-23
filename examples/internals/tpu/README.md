@@ -51,7 +51,7 @@ the point: the device is judged against a reference it did not produce.
 | 5 | f32→bf16 narrowing matches host round-half-to-even | bf16 bit patterns, 19 probe values |
 
 **Act 4 is the flagship.** Tlaloc's `RNG_UNIFORM` does not call a device RNG:
-since §0.4.422 it lowers to explicit StableHLO integer arithmetic — threefry's
+it lowers to explicit StableHLO integer arithmetic — threefry's
 ARX rounds, a shift, a bit-or against the exponent of 1.0, and one exactly
 representable subtraction. Integer arithmetic cannot legally differ between
 backends, so the stream *cannot* fork by construction. That is an argument.
@@ -154,7 +154,7 @@ identical and elided here). **Exit code 0.**
 ```
 --- device half: DRY RUN on cuda (no TPU claim) ------------------------
 
-plugin   : /home/pedro/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so
+plugin   : ~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so
 target   : Cuda
 
 [XLA's plugin writes several I-lines to stderr here; the device one reads
@@ -331,7 +331,6 @@ what G2b must record; that is where it goes.
 ## Related
 
 - `docs/TPU_BRINGUP.md` — the full bring-up runbook this example condenses.
-- `docs/TPU_READINESS_AUDIT.md` §3 — the ranked weaknesses, restated at the
-  close of the local arc.
+- `docs/TPU_READINESS_AUDIT.md`, section 3: the ranked weaknesses.
 - `examples/gpu-training/` — the same AD engine training a model on a real GPU,
   where the numbers are certified rather than anticipated.

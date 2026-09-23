@@ -3,486 +3,152 @@
 All notable changes to Tlaloc are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) **with the alpha
-carve-outs written down in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)** —
-read that before depending on a coordinate.
+carve-outs in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)**. Read that before
+depending on a coordinate.
 
-A note on where the history actually lives: this file starts at
-`0.1.0-alpha01`. The 497 sections of work before it are recorded in commit
-titles (`§0.4.NNN <area>: <what turned out to be true>`) and, up to §0.4.311, in
-[`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md). This file does not attempt to
-retro-summarise them; it is the record from the first named version forward.
+This file starts at `0.1.0-alpha01`. Earlier work is recorded in the commit history
+and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
-## [Unreleased]
+## [0.1.0-alpha01] — unreleased
 
-Not yet published; these land in `0.1.0-alpha01`.
+The first published version. [docs/CAPABILITIES.md](docs/CAPABILITIES.md) lists
+what it contains, what is certified and on what hardware.
 
-### Changed
+### Contents
 
-- Every artifact id carries a `tlaloc-` prefix: `io.github.pedronahum:tlaloc-core`,
-  `tlaloc-ir`, `tlaloc-autograd`, `tlaloc-nn`, `tlaloc-stablehlo`, `tlaloc-maestro`,
-  `tlaloc-runtime-pjrt`, `tlaloc-runtime-iree`, `tlaloc-runtime-cuda`, `tlaloc-kptx`,
-  `tlaloc-compiler-plugin` (JVM artifacts: `tlaloc-core-jvm` and so on).
+- **Automatic differentiation at compile time.** A K2 compiler plugin rewrites
+  `grad`, `grad2`, `grad3`, `valueAndGrad*`, `jvp`, `jvp2`, `vjp`, `vjp2`,
+  `jacobian`, `jacobianReverse` and `hessian` calls into synthesized gradient
+  code. Custom rules through `customVjp`, `customJvp` and `customVjpJvp`. Loops
+  and branches are differentiated through φ-calculus coarsening. One reverse
+  transform serves the intrinsics, the Tracer-capture API and `:nn` training.
+- **Readable gradients.** `dumpGradSource` and `dumpGradSourceDir` print the
+  derived gradient as Kotlin that compiles without the plugin and is bit-identical
+  to the compiled gradient; `CapturedStep.gradSource()` prints captured tensor
+  gradients.
+- **Typed tensors.** Rank, dtype and named axes in the Kotlin type;
+  `NAMED_INDEX_MISMATCH`, `TENSOR_SHAPE_MISMATCH` and `NOT_DIFFERENTIABLE` compile
+  errors at the offending call. dtypes F32, F64, I32 and BF16.
+- **Captured values.** A `grad { }` body may reference compile-time constants
+  declared outside it (folded as literals) and immutable runtime values of type
+  `Float`, `Double`, `Int` or `Long` (bound at the call site).
+- **`:nn`.** Immutable layers (Dense, Conv2d, pooling, BatchNorm, Dropout,
+  Embedding, EmbeddingBag, GRU, Flatten), SGD, Momentum, RMSprop and Adam, learning
+  rate schedules, gradient clipping, and checkpoints: a model and its optimizer
+  state in one safetensors file, reloaded bit for bit.
+- **Execution.** StableHLO and Shardy emission; PJRT from Kotlin through FFM and
+  from Python through ctypes; IREE through its command-line tools; KPTX, a PTX DSL
+  with kernel claiming (no kernel is registered by default).
+- **Serving.** Paged attention, KV-cache writes, decode bucketing, safetensors
+  reading and writing, a serving artifact that runs in a Python process with no
+  JVM and no ML framework, and a vLLM platform plugin. A real TinyLlama-1.1B
+  produces the same tokens as HuggingFace transformers.
+- **`@ExperimentalTlalocApi`**, a `@RequiresOptIn(ERROR)` marker on the
+  provisional surfaces: the four-worlds scopes, `AllReduceAttrs`, and the kernel
+  choice and cost-model packages.
+- **Tooling.** The Gradle plugin `io.github.pedronahum.tlaloc`
+  (`tlaloc-gradle-plugin`), which applies `tlaloc-compiler-plugin` of the same
+  version to every Kotlin/JVM compilation and takes the plugin options in a
+  `tlaloc { }` block; `tlaloc-bom`; a committed ABI baseline checked by
+  `apiCheck`; `./gradlew apiDocs` for a local API reference.
+- **Requirements.** Kotlin 2.3.20–2.3.29 (other versions are refused by name at
+  compile time). JDK 25 to build code that uses `grad { }`; the library modules are
+  Java 21 bytecode, so JDK 21 runs them. PJRT, CUDA, KPTX and IREE need JDK 25.
+  Symja (LGPL-3.0) is optional and not in the published dependency graph.
+
+### Changed since earlier source builds
+
+These matter only if you built Tlaloc from source before this version.
+
+- **Group id `io.tlaloc` → `io.github.pedronahum`.** `io.tlaloc` could not be
+  verified on Maven Central. Package names are unchanged (`io.tlaloc.*`), and so is
+  the compiler plugin id used in `-P plugin:io.tlaloc.plugin:<option>`.
+- **Version `0.0.1-SNAPSHOT` → `0.1.0-alpha01`.**
+- **Every artifact id carries a `tlaloc-` prefix**: `tlaloc-core`, `tlaloc-ir`,
+  `tlaloc-autograd`, `tlaloc-nn`, `tlaloc-stablehlo`, `tlaloc-maestro`,
+  `tlaloc-runtime-pjrt`, `tlaloc-runtime-iree`, `tlaloc-runtime-cuda`,
+  `tlaloc-kptx`, `tlaloc-compiler-plugin` (JVM artifacts `tlaloc-core-jvm` and so
+  on), plus the new `tlaloc-gradle-plugin` and `tlaloc-bom`.
 - `tlaloc-ir`, `tlaloc-autograd`, `tlaloc-stablehlo`, `tlaloc-maestro`,
-  `tlaloc-runtime-iree` and `tlaloc-runtime-pjrt` expose the Tlaloc modules their public
-  signatures use as `api` dependencies: depending on `tlaloc-autograd` alone is enough
-  to write `grad { }` over a `DTensor`.
-- `tlaloc-maestro` no longer contains `main` entry points; the exporters run through
-  `./gradlew :maestro:exportServingArtifact` and `:maestro:exportLlamaServingArtifact`.
-- `PjrtSession` can be used from several threads at once. `executeOn` serialises calls
-  on the same executable, and `close()` waits for in-flight calls before releasing
-  native memory. A `PjrtBuffer`, `PjrtLoadedExecutable` or `PjrtClient` used after
-  its client is closed, and a closed `PjrtBuffer` passed to `executeOn` or
-  `PjrtLoadedExecutable.execute`, throw instead of touching freed memory. Closing a
-  buffer or executable twice, or after its client, does nothing.
-- `IreeModule` is `AutoCloseable`; closing it deletes its compiled VMFB. `runOnIree`
-  and `IreeRuntime.invoke` delete their temporary files when they return.
-- The IREE tools are found through `$TLALOC_IREE_BIN`, `$VIRTUAL_ENV/bin`,
-  `~/.local/venvs/*/bin` or `PATH`, and a missing tool's error lists every place looked.
+  `tlaloc-runtime-iree` and `tlaloc-runtime-pjrt` expose the Tlaloc modules their
+  public signatures use as `api` dependencies: `tlaloc-autograd` alone is enough to
+  write `grad { }` over a `DTensor`.
+- **Every compile-time refusal is an error by default.** An unlowerable
+  `grad { }` lambda, and every call the IR phase leaves as written, stops the
+  build at the call site. `strictLowering = false` turns these into warnings; the
+  call then throws `IllegalStateException` when it runs.
+- **A working build is silent.** The lowered-IR dumps are INFO messages behind
+  `dumpLoweredIr`, so a correct program compiles under `-Werror`.
+- `grad(::f)` and other arguments that are not a lambda written at the call site
+  are refused by name.
+- `dumpGradSource` refuses a value other than `true` or `false`.
+- The runtime message for a `grad { }` that was not rewritten lists its three
+  possible causes.
+- Error messages no longer cite internal work-item numbers.
+- `PjrtSession` can be used from several threads. `executeOn` serialises calls on
+  one executable, and `close()` waits for calls in flight. A `PjrtBuffer`,
+  `PjrtLoadedExecutable` or `PjrtClient` used after its client is closed, and a
+  closed `PjrtBuffer` passed to `executeOn` or `execute`, throw instead of touching
+  freed memory. Closing twice, or after the client, does nothing.
+- `IreeModule` is `AutoCloseable`; closing it deletes its compiled VMFB.
+  `runOnIree` and `IreeRuntime.invoke` delete their temporary files.
+- The PJRT CUDA plugin is searched for under `$VIRTUAL_ENV`, `~/.local/venvs/*`,
+  `~/.venv`, `~/venv`, `~/.local`, `/usr/local` and `/usr`, from the JVM and from
+  Python alike; IREE tools under `$TLALOC_IREE_BIN`, `$VIRTUAL_ENV/bin`,
+  `~/.local/venvs/*/bin` and `PATH`. A failed search lists every place it looked.
+- `CosineDecay` holds its final rate past `decaySteps`, where PyTorch's
+  `CosineAnnealingLR` rises again.
+
+### Added since earlier source builds
+
+- The Gradle plugin and the BOM (see *Contents*).
+- `KotlinVersionGuard`: an unsupported Kotlin version is a compile error naming
+  the version found and the supported range; `unsafeAllowUnsupportedKotlin` turns
+  it into a warning.
+- "Tlaloc internal error" diagnostics: an unexpected exception inside the plugin,
+  or a lowered call the IR phase did not find, is reported at the call site with
+  the issue-tracker address instead of crashing the compiler or compiling green.
+- Model checkpoints, learning-rate schedules and gradient clipping in `:nn`; a
+  safetensors writer in `:core`.
+- `LICENSE` (Apache-2.0), complete Maven Central POM metadata, sources and javadoc
+  jars for every publication, and signing.
+- `./gradlew releaseToCentralPortal` and `.github/workflows/release.yml`.
+- CI on x86_64 Linux, aarch64 Linux and arm64 macOS, a JDK 21 lane for the library
+  modules, and a probe against the next Kotlin release.
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) sections on running on a GPU,
+  configuration (every environment variable and system property Tlaloc reads) and
+  troubleshooting.
 
 ### Removed
 
-- `io.tlaloc.maestro.MaestroDescriptor` and `io.tlaloc.maestro.StubExecutor`, deprecated
-  since the first-class Maestro step type replaced them.
+- `io.tlaloc.maestro.MaestroDescriptor` and `io.tlaloc.maestro.StubExecutor`,
+  replaced by the first-class Maestro step type.
+- The `main` entry points in `tlaloc-maestro`; the exporters run through
+  `./gradlew :maestro:exportServingArtifact` and
+  `:maestro:exportLlamaServingArtifact`.
 - The unused `timeoutSeconds` parameter of `runOnPjrt`.
-
-### Added
-
-- `./gradlew releaseToCentralPortal`: uploads to the Central staging API and hands the
-  upload to the Central Portal. An upload to Central without a signing key or
-  credentials refuses by name before sending anything.
-- `.github/workflows/release.yml`: the same release from a `v<version>` tag.
-- Gradle plugin `io.github.pedronahum.tlaloc` (`tlaloc-gradle-plugin`): applies
-  `tlaloc-compiler-plugin` of the same version to every Kotlin/JVM compilation, with the
-  compiler-plugin options in a `tlaloc { }` block.
-- `tlaloc-bom`: a platform that holds every `tlaloc-*` artifact at one version.
 
 ### Fixed
 
-- The Python serving runtime finds a PJRT plugin in the same places as the JVM's
-  `PjrtBinaries`, and looks for libtpu only for `--platform tpu`. Without
-  `TLALOC_PJRT_PLUGIN_PATH`, `examples/gpu-inference/serve.py` used to report no
-  plugin on a machine whose JVM lane ran on CUDA.
+- Two `grad { }` calls at the same character offsets in two different files could
+  compile each other's gradient, and in a shared Kotlin daemon one compilation
+  could clear another's pending gradients.
+- An f64 `grad { }` body with a literal constant crashed the compiler with a
+  `ClassCastException`, and an f64 constant close to 1 or 0 could be folded as if
+  it were exactly 1 or 0.
+- A `grad { t: Tracer<…> -> … }` call (the plugin-free tape overload) drew a
+  spurious lowering warning.
+- The Python serving runtime did not search for a PJRT plugin, so `serve.py`
+  reported no plugin on a machine whose JVM lane ran on CUDA.
 - Both PJRT bindings check the plugin's `PJRT_Api` size and API version before
-  reading any function pointer and refuse an incompatible plugin by name.
-- A missing CUDA plugin's error carries the full search report, and says the plugin is
-  published for Linux only when the JVM runs elsewhere. A malformed
-  `TLALOC_PJRT_MEMORY_FRACTION`, `TLALOC_PJRT_PREALLOCATE`, `TLALOC_PJRT_NODE_ID` or
-  `TLALOC_PJRT_NUM_NODES` is refused with the variable's name and value.
-- A `PjrtSession` whose client creation fails releases the memory it had allocated.
-- Symbolic simplification no longer swallows JVM errors such as `OutOfMemoryError`;
-  only exceptions fall back to the unsimplified function.
+  reading a function pointer and refuse an incompatible plugin by name.
+- A malformed `TLALOC_PJRT_MEMORY_FRACTION`, `TLALOC_PJRT_PREALLOCATE`,
+  `TLALOC_PJRT_NODE_ID` or `TLALOC_PJRT_NUM_NODES` is refused with the variable's
+  name and value.
+- A `PjrtSession` whose client creation fails releases the memory it allocated.
+- Symbolic simplification no longer swallows JVM errors such as
+  `OutOfMemoryError`.
 - The KPTX kernel caches and the kernel-resolver registry are safe to use from
   several threads.
 
-## [0.1.0-alpha01] — 2026-09-23
-
-The first named version, and one release with two halves. `build.gradle.kts` has
-read `0.1.0-alpha01` since §0.4.498, so everything below ships under that
-coordinate — which is why the engine work that used to sit under *Unreleased* in
-this file is filed here instead. Nothing was ever published in between, so there
-is no consumer for whom this relabelling changes anything.
-
-### Engine and compiler (§0.4.499–§0.4.508)
-
-#### Verified
-
-- **The alpha arc's final verification (§0.4.506).** No code changed; every claim the
-  arc made about the repository as a whole was re-run from a clean room and the
-  observations written into `docs/ALPHA_PLAN.md`. `./gradlew test --rerun-tasks`:
-  BUILD SUCCESSFUL, 139 of 139 tasks executed, **0 failures and 0 errors across all
-  377 JUnit report files**, 2,522 tests (2,471 from the root suite + 51 from the
-  vendored Maestro results, which root `test` does not re-execute). Also re-run:
-  `scripts/onboarding-smoke.sh`; all **ten** example projects (each verified to do
-  real work or self-skip *by name*); `examples/quickstart shapeError`, which still
-  fails as designed with the diagnostic at `ShapeError.kt:30:5`; a consumer compile
-  under `allWarningsAsErrors` — green, with the flag *proven* to have reached
-  `:compileKotlin` so the green is not vacuous; all 21 published POMs (every
-  Central-mandatory element present, sources + javadoc jars on every publication,
-  Symja absent from `ir-jvm`'s POM *and* module metadata); the Java 21/25 split read
-  out of published bytecode rather than out of the build script; and **both halves of
-  `examples/gpu-inference`** — a real TinyLlama-1.1B, 4.1 GiB of weights, decoded by
-  `/usr/bin/python3` to `' Paris.\n\n2.'`, which closes the one example §0.4.505 had
-  not re-run.
-- **One defect published, not fixed: the serving runtime cannot find a PJRT plugin
-  for itself.** §0.4.503 taught the JVM's `PjrtBinaries` to glob seven roots;
-  `PjrtApi.load` in `harness/python/tlaloc_pjrt.py` searches nothing and takes the
-  path it is given. So on a machine with a working plugin and no
-  `TLALOC_PJRT_PLUGIN_PATH`, the JVM lane runs on CUDA while `serve.py` prints
-  `SKIP: no PJRT plugin on this machine` — a refusal that is by name and exits 0, but
-  whose sentence is false about the box. The export is documented as line one of half
-  two; what was imprecise was the surrounding framing, now corrected in
-  `examples/gpu-inference/README.md`. Fixed before release; see *Unreleased*.
-- **One ledger contradiction corrected.** `docs/ALPHA_PLAN.md`'s Tier 4 suite-state
-  table claimed "Every one of the ten examples ran" while the same tier's handover
-  said nine did. The row now says nine, names the exception, and points at the
-  §0.4.506 run that closed it.
-
-#### Added
-
-- **`@ExperimentalTlalocApi` — an opt-in marker on the part of the surface that is
-  provisional.** `docs/COMPATIBILITY.md` promised that every alpha API may change
-  without a deprecation cycle, which graded `grad` (thousands of oracle tests) and
-  a scope taxonomy nothing has ever executed exactly the same. A
-  `@RequiresOptIn(ERROR)` marker in `:core` now separates them. Three surfaces
-  carry it, each for a stated reason: the **four-worlds scope taxonomy**
-  (`KernelScope`, `OrchestrationScope`, `ProgramScope`, `ClusterScope`, `Tlaloc`,
-  `BufferHandle`, `HandleRef` — its own KDoc scopes it to "v1 keeps each op
-  single-scope"); **`io.tlaloc.ir.AllReduceAttrs`** (distributed execution is 📐 and
-  has never run on two hosts; v1 is `"sum"` only); and the **kernel-choice and
-  cost-model packages** (`io.tlaloc.ir.recognizer.kernel`,
-  `io.tlaloc.ir.recognizer.cost` — unit-certified machinery whose purpose is
-  picking a kernel, and the one kernel measured against XLA lost at small shapes).
-  `grad`, the op surface and `:nn` are deliberately **not** marked. Two tests pin
-  it: `ExperimentalTlalocApiTest` reads the marker and the marked/unmarked sets out
-  of the class **files** (BINARY retention is invisible to reflection, which the
-  first attempt at that test discovered the hard way), and
-  `ExperimentalApiOptInTest` runs a real `K2JVMCompiler` with no `-opt-in` and
-  asserts the refusal, the `@OptIn` fix, and that a certified surface is unaffected.
-- **A binary-compatibility baseline.** `api/<module>.api` is committed and
-  `./gradlew apiCheck` (wired into `check`, so `./gradlew test` covers it) fails on
-  any difference; `./gradlew apiDump` re-baselines. Negative-tested by adding a
-  public function to `:stablehlo` and watching the check fail with the diff.
-  **It covers six of eleven modules**: binary-compatibility-validator 0.18.2's ABI
-  reader refuses Java 25 bytecode (`Unsupported class file major version 69`), so
-  the six modules §0.4.503 lowered to Java 21 are validated and the five that stay
-  at 25 are not. The ignore list is derived from `tlalocJvmTargets`, so lowering a
-  module to 21 later starts validating it automatically.
-- **An API reference you can actually read.** `./gradlew apiDocs` aggregates all
-  eleven published modules into one Dokka site at `build/docs/api/index.html` —
-  2,898 pages. Before this, the Dokka HTML §0.4.498 wired existed only inside
-  eleven separate `-javadoc.jar` files. Not hosted. The 206 unresolved-KDoc-link
-  warnings it emits (110 distinct targets, 117 of them in `:ir`) are now **counted**
-  — Tier 0 recorded them as uncounted — and still unswept.
-- **The compile-error position is certified.** `DiagnosticSourcePositionTest`
-  asserts that `LAMBDA_NOT_LOWERABLE` and `NAMED_INDEX_MISMATCH` report at the
-  offending call's own file, line and column, and that no Tlaloc error is ever
-  emitted without a position. Eighteen test classes already pinned the diagnostic
-  *text*; not one had looked at `location`.
-
-#### Changed
-
-- **The "red squiggle in the IDE" claim now matches the evidence.** The README and
-  `docs/GETTING_STARTED.md` both promised an IDE redline and nothing tested it.
-  They now claim what is certified — a build failure at the offending call's file,
-  line and column — and state the IDE behaviour as *expected, untested*, with a
-  🧪 row in `docs/CAPABILITIES.md` saying so. The capability is not removed; the
-  claim is.
-- **`DIFFKTX_SPEC.md` §14, §17 and §18 stopped describing a repository that no
-  longer exists.** §17's ladder had been swept on 2026-04-19 and then left for 400
-  sections: the **IREE runtime** (step 5), the **PJRT runtime** (step 10) and the
-  **whole coarsening block** (steps 13–16) were marked ⬜ NOT DONE for capabilities
-  that are certified. Each is now marked with the section that shipped it, cited
-  only where `git log` or the file's own §0.4 era table can establish the number.
-  **One mark went the other way:** step 16 — "gate coarsening release on matching
-  the paper's speedups within 20%" — is 🟡, not ✅. All six benchmarks are ported
-  and all six are harness inhabitants, but the PyTorch/JAX comparison has never
-  been run and no §0.4 entry has published the verdict, so coarsening's
-  *correctness* is certified and its *speedup relative to the paper* is not. §14
-  had four lines that were simply false (ktlint + detekt "enforced in CI" — neither
-  exists; Robolectric; kotlinx-benchmark; a pinned MLIR commit) and §18 carried
-  seven open questions HEAD had already answered, the licence among them.
-- **Two documented counts that disagreed with each other and with the build.**
-  `docs/GETTING_STARTED.md` said "eight standalone runnable projects" where the
-  README said ten — there are **ten**, seven at the top level and three under
-  `examples/internals/`, each with its own `settings.gradle.kts`. The same file's
-  list of published modules omitted **`nn`**, which is the module a reader most
-  likely wants, and called the plugin options "four" when §0.4.503 had added a
-  fifth (`unsafeAllowUnsupportedKotlin`). The README's test count said 2,345 while
-  `docs/CAPABILITIES.md` said 2,509 and the suite was at neither.
-- **The README's own License section was contradicting its Requirements section.**
-  It said `ir-jvm` "carries Symja at runtime scope, with no supported way to opt
-  out yet" — which §0.4.503 had made false two commits earlier by moving Symja to
-  `compileOnly`. Both places now say the same thing, and the part that is still
-  true (no Symja-free `SymbolicEngine` exists, so a policy that forbids LGPL-3.0
-  outright leaves you without a CAS) is stated as the residual risk it is.
-
-- **The JDK floor is per module now, and it is 21 for the library.** Every module
-  used to emit Java 25 bytecode, which made JDK 25 a hard requirement for every
-  consumer of `:core`, `:nn` or `:stablehlo`. §0.4.311 adopted JDK 25 for one
-  reason — the Foreign Function & Memory API went stable in JEP 454 and Tlaloc's
-  PJRT and CUDA bindings are FFM — and that reason applies to three modules.
-  `core`, `ir`, `autograd`, `nn`, `stablehlo` and `maestro` now emit **Java 21**
-  and are compiled with `-Xjdk-release=21`, so "no JDK 22+ API" is a compile-time
-  check rather than an assumption; `runtime-pjrt`, `runtime-cuda`, `kptx`,
-  `runtime-iree` and `compiler-plugin` stay at 25. A new `verifyJvmTarget` task
-  per module, wired into `check`, reads the class-file major version out of every
-  published jar, so the table cannot drift from the bytecode.
-  **Read it as two sentences:** to *run* Tlaloc — `grad { }`, `:nn`, StableHLO
-  emission — a JDK 21 is enough; to *build* code containing `grad { }` you still
-  need a JDK 25 on the build machine, because Kotlin loads a compiler plugin into
-  the compiler's own JVM and the plugin is 25 bytecode. The supported consumer
-  configuration is `jvmToolchain(25)` + `jvmTarget = JVM_21`, which
-  `examples/quickstart` now is, and `scripts/jdk21-smoke.sh` runs that
-  configuration's synthesized gradient on a real JDK 21.
-- **Symja is an optional dependency.** `org.matheclipse:matheclipse-core` — 8.3 MB,
-  **LGPL-3.0**, with its own transitive tree — was a mandatory *runtime* dependency
-  of `io.github.pedronahum:tlaloc-ir`, and therefore of `:autograd`, `:nn` and `:stablehlo`, whether
-  or not a program ever differentiated a loop-bearing body. It is `compileOnly`
-  now and no longer appears in the published POM. Add
-  `implementation("org.matheclipse:matheclipse-core:3.1.1")` only if you need the
-  computer algebra system; you need it to differentiate a loop whose trip count is
-  not a compile-time constant (a `for` over a `const val` bound is unrolled with
-  no CAS at all), and on the day a body genuinely needs it the compiler refuses
-  **by name**, naming the coordinate, the licence and the one line to add. Tlaloc
-  only links Symja across the `SymbolicEngine` interface — it does not modify or
-  redistribute it — which is what keeps an LGPL-3.0 dependency compatible with
-  Tlaloc's Apache-2.0 licence.
-- **The PJRT plugin search is no longer one developer's path.**
-  `PjrtBinaries.pluginPath` fell back to the literal
-  `~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`
-  — one venv name, one Python minor version, one plugin package. It now globs all
-  three across `$VIRTUAL_ENV`, `~/.local/venvs/*`, `~/.venv`, `~/venv`,
-  `~/.local`, `/usr/local` and `/usr`, over `lib` and `lib64`, `site-packages` and
-  `dist-packages`, and any `jax_plugins/*cuda*/*.so`. `TLALOC_PJRT_PLUGIN_PATH`
-  still wins outright. Resolution is deterministic (every directory listing is
-  sorted), and the new `PjrtBinaries.pluginSearchReport` names **every** location
-  tried and what was at each — which is what the examples' "GPU lane unavailable"
-  reason now prints, instead of advice that told a user who *had* installed a
-  plugin nothing at all.
-
-#### Added
-
-- **CI is four lanes now, and two of them exist to catch what one machine cannot
-  see.** Every ✅ in `docs/CAPABILITIES.md` had been certified on one host — an
-  NVIDIA GB10, aarch64, JDK 25 — and CI was a single `ubuntu-latest` job running
-  `./gradlew test`. `.github/workflows/build.yml` now runs that suite on **x86_64
-  Linux and arm64 macOS**, plus a `library-jdk21` job that RUNS the six
-  Java-21-targeted modules' own suites on a JDK 21 and then compiles and runs a
-  synthesized gradient there; `.github/workflows/kotlin-next.yml` probes the next
-  published Kotlin (resolved from Maven Central, not pinned) and is allowed to
-  fail, which is the mitigation `DIFFKTX_SPEC.md` §16 named for "K2 plugin API
-  changes across Kotlin releases" and nobody had implemented. Two new build
-  properties make those lanes possible and both are usable by hand:
-  `-PtlalocTestJdk=21` points every `Test` task's launcher at another JDK (and
-  refuses by name for a module whose own bytecode target is higher), and
-  `-PtlalocKotlinVersion=<v>` swaps the Kotlin compiler the whole build runs.
-  **The lanes themselves have never run** — they were written on a machine with no
-  access to GitHub Actions — so `docs/ALPHA_PLAN.md` marks them 🧪 and nothing
-  claims a green run. What DID run, locally: the library's 1,822 tests on OpenJDK
-  21.0.2, and the Kotlin probe against 2.4.20 and 2.3.10 — which found that
-  **Kotlin 2.4.20 does not compile `:compiler-plugin`** (one error, direct
-  `MessageCollector` access in `TlalocCompilerPluginRegistrar.kt`) and that the
-  §0.4.503 version guard refuses a foreign compiler by name from inside a real
-  2.3.10 compile.
-
-- **The compiler plugin refuses an unsupported Kotlin version by name.** The
-  plugin reads 40 `org.jetbrains.kotlin.fir.*` packages of internal K2 API that
-  JetBrains moves between feature releases, and nothing checked which compiler it
-  was running inside: a user on 2.2.x or 2.4.x got a raw `NoSuchMethodError` from
-  the middle of `compileKotlin`, naming JetBrains classes and never Tlaloc. The
-  new `KotlinVersionGuard` runs before a single extension is registered and
-  reports a compile ERROR naming the version it found, the version it was built
-  against, the supported range and the opt-out. Supported: **2.3.20 through
-  2.3.29** — the whole bugfix family of the feature release the plugin was built
-  against, because Kotlin numbers feature releases by tens in the third component
-  (2.3.0, 2.3.10 and 2.3.20 have different internals) and bugfixes by ones above
-  them. `-P plugin:io.tlaloc.plugin:unsafeAllowUnsupportedKotlin=true` downgrades
-  the refusal to a warning and registers anyway; the warning says in as many words
-  that a crash below it is then the expected outcome.
-
-- **A trained model can be saved and loaded.** Tlaloc could train on a GPU and
-  could not persist the result: `:nn`'s `Components.kt` said so in a comment
-  ("minus `store`/`load`, out of scope v1") and `:core`'s safetensors support was
-  read-only. `:core` now has a **safetensors writer**
-  (`SafetensorsWriter.encode`, plus an atomically-renaming
-  `SafetensorsFileWriter` on the JVM) covering F32, F64, I32 and BF16 and
-  refusing every other dtype by name, and `:nn` has `ModelCheckpoint` /
-  `saveCheckpoint` / `loadCheckpoint`, which put a model's parameters, its
-  non-trainable buffers and its optimizer's state into **one safetensors file**.
-  Loading returns a NEW model (`ModelSnapshot.restore`), because layers are
-  immutable here. The round trip is bit-identical — parameters, predictions and
-  gradients — and a run resumed from a checkpoint produces bit-identical losses
-  and parameters for the next 15 steps. The file is an ordinary safetensors file:
-  `safetensors.torch.load_file` opens it, and the writer is certified in both
-  directions against the reference Python library on raw bytes.
-- **Non-trainable persistent state has a home.** New `Stateful<T>` interface in
-  `:nn`, implemented by `BatchNorm` (its running statistics) and by `Sequential`
-  (which forwards its children's, with the same `"<index>."` prefix it uses for
-  parameters). Deliberately separate from `Trainable`, whose `parameters` list is
-  the one the reverse transform returns a gradient per — running statistics have
-  no gradient.
-- **Learning-rate schedules**: `ConstantLR`, `StepDecay`, `ExponentialDecay`
-  (continuous or staircase), `CosineDecay`, `LinearWarmup`, and a `Scheduled`
-  optimizer combinator that applies any of them to any optimizer. A schedule is a
-  pure function of the completed-step count, so the step count is checkpointed
-  state and a resumed run continues the schedule rather than restarting it. The
-  three PyTorch also ships agree with `StepLR` / `ExponentialLR` /
-  `CosineAnnealingLR` to 2.8e-7 relative over 34 rates.
-- **Gradient clipping**: `GradientClipping.globalNorm`, `byGlobalNorm` and
-  `byValue`, pure functions on the gradient map. `byValue` agrees with torch's
-  `clip_grad_value_` exactly; `byGlobalNorm` uses the exact `maxNorm / ‖g‖` ratio
-  where torch uses `maxNorm / (‖g‖ + 1e-6)`, a recorded ~1.6e-7 divergence. A
-  non-finite gradient norm is refused by name instead of being scaled into zeros
-  or NaNs.
-- **`examples/gpu-training` now saves, reloads and keeps going.** The decision
-  boundary and the held-out accuracy it prints are computed by the model that came
-  back off the disk; observed 337/337 parameter scalars and all 1024 predictions
-  bit-identical on both the CUDA and the host lane.
-
-- **A `grad {}` body can reference a compile-time constant declared outside it.**
-  Until now a `grad {}` lambda could reference *nothing* outside itself: the
-  lowering resolved property accesses against its own environment (lambda
-  parameters and lambda-local `val`s) and every other reference — a top-level
-  `const val` included — was refused with `reference to symbol outside the
-  lowering scope`. A captured reference the compiler can resolve to a constant is
-  now folded into the lowered IR as **exactly** the `DxirConst` an inline literal
-  would have produced, so the reverse transform, the φ-calculus coarsening, the
-  synthesized bytecode and the printed gradient source cannot tell the two
-  spellings apart. What folds: any `const val` (top level, file level, or in a
-  companion / named `object`), a `const val` whose own initializer is constant
-  arithmetic, and a top-level or enclosing-function `val` whose initializer the
-  compiler can fold — including an `Int` constant used as a `for` loop's trip
-  count, which takes the same unrolled path a literal bound does rather than the
-  symbolic-trip-count one. `examples/differentiable-physics` now uses its own
-  `const val`s, and the derivative the compiler writes for it is byte-identical
-  to the one it wrote from the inlined literals.
-- **A captured RUNTIME value refuses with its own wording**, distinct from the old
-  generic out-of-scope sentence: a `var`, a computed `val`, a parameter of the
-  enclosing function or a non-`const` member property is named, the reason it is
-  not foldable is named, and the two ways out (`const val`, or a lambda
-  parameter) are named.
-- **A `grad {}` body can reference a RUNTIME value declared outside it.** This is
-  the other half of the same arc:
-
-  ```kotlin
-  val scale = computeScale()                     // not a compile-time constant
-  val g = grad { x: Float -> f(x) * scale }      // now lowers
-  ```
-
-  The captured value becomes a trailing parameter of the lowered gradient
-  function, and the IR phase binds it at the call site by reading the very
-  declaration the user's own lambda closed over — so the synthesized gradient
-  closes over it the same way, and reads it when it is *called*, not when it was
-  derived. **The returned function's arity does not change**: a captured value is
-  an input, never a differentiation target, so `grad` still returns one gradient,
-  `grad2` a `Pair` and `grad3` a `Triple`. What is supported, and certified by
-  equivalence against the same body written with that value as an explicit lambda
-  parameter: an immutable local `val` or a parameter of the enclosing function, of
-  type `Float`, `Double`, `Int` or `Long`, under the reverse-mode `grad` family.
-  What still refuses, by name: a `var` (no single value to bind), a top-level or
-  member property (reading one is a getter call, not a value declaration), any
-  other type, and the forward / assembly / seeded-cotangent intrinsics, whose own
-  parameter lists are rebuilt from the lowered one. See
-  [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
-
-#### Changed
-
-- **`CosineDecay` clamps past `decaySteps`, where PyTorch's
-  `CosineAnnealingLR` is periodic and climbs back toward the initial rate.** This
-  is a deliberate divergence and it is certified as one: a test asserts both that
-  torch climbs and that Tlaloc holds. Warm restarts would be their own schedule.
-- **A working build is silent.** Every recognised `grad {}` used to emit two
-  compiler **warnings**, each dumping the lowered Tlaloc IR into the consumer's
-  build output: the FIR checker's `LAMBDA_LOWERED` and the IR extension's "saw
-  handoff". They were developer introspection, and because they were warnings
-  they also **broke the build outright** in any project compiling with
-  `allWarningsAsErrors = true` (`e: warnings found and -Werror specified`) — on
-  a program that was entirely correct. Both are now off by default; the IR half
-  is an `INFO` rather than a `WARNING`. Turn them back on with
-  `-P plugin:io.tlaloc.plugin:dumpLoweredIr=true`. `dumpGradSource` /
-  `dumpGradSourceDir` are unchanged.
-- **An unlowerable `grad {}` lambda is a compile-time error.** It was a warning;
-  the call was then left unrewritten and `io.tlaloc.autograd`'s fallback body
-  threw `IllegalStateException` at the **first call**, telling the user to add a
-  compiler plugin that was already applied. The refusal now happens at the call
-  site at compile time, carrying the lowering's own verbatim reason (one of the
-  ~208 named `LoweringException` sites) and naming the opt-out. Opt out with
-  `-P plugin:io.tlaloc.plugin:strictLowering=false`, which restores the warning
-  and the late failure exactly.
-- **`grad(::f)` and other non-lambda arguments are refused by name** instead of
-  compiling green and throwing at the first call: the plugin lowers the body of
-  a `{ }` written at the call site, and now says so.
-- **The runtime message when a `grad {}` was not rewritten** no longer claims the
-  compiler plugin is missing. It names the two states that can produce it — no
-  plugin on the compile classpath, or a plugin that refused the body under
-  `strictLowering=false` — and says where the compile-time reason is.
-
-#### Fixed
-
-- **An f64 scalar body with a literal constant no longer kills the compiler.**
-  `DxirReverseTransform`'s scalar constant folding built every folded constant
-  from a `Float` projection of its operands, whatever the node's dtype was, so an
-  f64 node folded to a constant typed `f64` carrying a `java.lang.Float`. Three
-  phases later `DxirToIrSynthesis`'s `v as Double` threw a bare
-  `ClassCastException` out of the K2 IR generation extension, with no Tlaloc
-  diagnostic of any kind: `grad { x: Double -> x * 1.5 }` neither produced a
-  gradient nor refused. The f64 arm of the fold now does its arithmetic in
-  `Double`, so the value has the width its type claims. Found while writing the
-  captured-constant tests above, on the *inlined-literal control*, and unrelated
-  to captures.
-- **The Tracer-capture route no longer draws a spurious refusal.**
-  `io.tlaloc.autograd.grad` / `grad2` / `grad3` / `valueAndGrad*` are overloaded:
-  the compile-time intrinsic and the runtime `Tracer` tape share every one of
-  those names. The plugin's checker matched on the FQN alone, so a
-  `grad { t: Tracer<...> -> ... }` call — the documented plugin-free route — got
-  a `could not lower lambda: ... unsupported type io.tlaloc.autograd.Tracer`
-  warning on every call. A Tracer-typed lambda is now recognised as the tape
-  overload and not diagnosed at all. (Had it not been, promoting the refusal to
-  an error would have broken that route outright.)
-
-### Packaging and distribution (§0.4.498)
-
-This half of the release is the packaging: it went from "unpublishable" to
-"publishable but not yet published". When it was written it also said "the engine
-did not change in this release" — true for about a day, and false from §0.4.499
-onward. The engine changes are the section above; both halves ship under this one
-version, because nothing was ever published between them.
-
-#### Added
-
-- **`LICENSE` — Apache-2.0.** The repository had no license file, which made it
-  "all rights reserved" by default and contradicted its own "developed in the
-  open" framing. Copyright 2026 Pedro N. Rodriguez. The README's `## License`
-  section states the one dependency that needs a paragraph (Symja).
-- **Maven Central metadata.** Every published POM now carries `<name>`,
-  `<description>`, `<url>`, `<inceptionYear>`, `<licenses>`, `<developers>`,
-  `<scm>` and `<issueManagement>`. Before this, they carried coordinates and
-  dependencies only, which Central rejects.
-- **`verifyPomMetadata`** — a `check`-wired Gradle task, per module, that reads
-  the POMs the build actually generates and fails by name on a missing
-  Central-mandatory element, a publication with no javadoc artifact, or a module
-  with no sources jar. The "Central-ready" claim is a gate, not a sentence in a
-  commit message.
-- **Dokka + a javadoc jar per publication.** Dokka 2.2.0 (the tooling item
-  `DIFFKTX_SPEC.md` §14 listed and nobody wired). The jar carries Dokka **HTML**
-  under the `javadoc` classifier, because Dokka's Javadoc format does not support
-  Kotlin Multiplatform projects and ten of the eleven modules are KMP.
-- **A sources jar for `:compiler-plugin`.** The KMP modules got one from the
-  multiplatform plugin; this module's `from(components["java"])` publication
-  published the binary jar alone and could never have passed validation.
-- **Signing and the Central deploy repository.** In-memory GPG key from
-  `signingInMemoryKey` (Gradle property) or `SIGNING_IN_MEMORY_KEY` (environment);
-  credentials from `centralUsername` / `centralPassword` or `CENTRAL_USERNAME` /
-  `CENTRAL_PASSWORD`. Both are **no-ops when absent**, so a contributor's
-  `publishToMavenLocal` and the GitHub build lane are unaffected.
-- **`CHANGELOG.md`** (this file), **[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)**
-  (what alpha promises and what it does not) and
-  **[docs/RELEASING.md](docs/RELEASING.md)** (the release procedure).
-- **[docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md)** — the ledger for the road to a
-  usable alpha, with one row per item and what pins each.
-
-#### Changed
-
-- **Version `0.0.1-SNAPSHOT` → `0.1.0-alpha01`**, across the root build, the
-  README, `docs/GETTING_STARTED.md` and all ten standalone example projects.
-  The old coordinate no longer resolves; republish with
-  `./gradlew publishToMavenLocal -x test`.
-
-#### Fixed
-
-- **Two stale license claims in the repository's own words.**
-  `SymbolicEngine.kt`'s KDoc and `docs/STAGE_B_PLAN.md` §3.2.1's bullet list both
-  still described Symja as Apache-2.0, five months after §0.4.13 corrected the
-  rest of that document to LGPL-3.0. Both now say LGPL-3.0, and both now record
-  the discrepancy §0.4.498 found: the *artifact's* POM says LGPL-3.0 while the
-  *repository's* `license.txt` is plain GPL-3.0.
-
-#### Not done, deliberately
-
-- **Nothing has been published to Maven Central.** There are no credentials on
-  the machine this work was done on and a Central upload is irreversible. The
-  wiring is correct and dry-runnable; it has never been run against Central, and
-  `docs/ALPHA_PLAN.md` says so in the row that would otherwise claim it.
-
-[Unreleased]: https://github.com/pedronahum/tlaloc/compare/main...HEAD
 [0.1.0-alpha01]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha01

@@ -624,7 +624,7 @@ def _assert_layouts() -> None:
         if got != want:
             raise AssertionError(
                 f"{name} is {got} bytes under this ctypes, but the certified Kotlin "
-                f"binding (PjrtFfm.kt, §0.4.303/§0.4.304) lays it out as {want}. "
+                f"binding (PjrtFfm.kt) lays it out as {want}. "
                 "One of the two is writing fields into the wrong holes."
             )
     if ctypes.sizeof(_VOIDP) != 8:
@@ -855,7 +855,7 @@ class PjrtApi:
                 f"refusing to create a '{platform}' PJRT client with no create_options: "
                 "the CUDA plugin then defaults to preallocate=true, memory_fraction=0.75, "
                 "which on a unified-memory host (GB10) pins ~75% of system RAM per client "
-                "and hangs the machine (§0.4.333, the 2026-07-18 reboot incident). Pass a "
+                "and can hang the machine. Pass a "
                 "PjrtClientOptions, or use a non-GPU platform where None is the correct form."
             )
         args = PJRT_Client_Create_Args()

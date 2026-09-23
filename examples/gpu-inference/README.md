@@ -137,11 +137,11 @@ model     tlaloc-reference-decode (the reference decode graph)
            4 heads / 2 kv-heads x headDim 2
            KV pool 6 pages x blockSize 2
 weights   in-body constants from a fixed LCG (so two exports are byte-identical)
-out       /home/pedro/programming/tlaloc/examples/gpu-inference/build/artifact
+out       <repo>/examples/gpu-inference/build/artifact
 
 wrote the artifact in 0.1s
 
-  /home/pedro/programming/tlaloc/examples/gpu-inference/build/artifact/
+  <repo>/examples/gpu-inference/build/artifact/
     bodies/          6 files  56.3 KiB
     programs/        6 files  3.8 KiB
     tlaloc-serving.json        8.6 KiB
@@ -351,7 +351,7 @@ commands yourself and compare the two lists; that comparison is the claim.
 f32 `dot_general` through TF32 while the oracle is fp32 on CPU, so a logit
 tolerance here would be a number chosen to pass. An argmax is not. Greedy
 decoding agrees *exactly* until the two arithmetics disagree about a top-1, so
-the honest claim is the **length of the prefix that agrees** — asserted here at
+the claim is the **length of the prefix that agrees** — asserted here at
 the full requested budget, with no divergence to report at 6 tokens.
 
 **The 1.35 s median is not a throughput claim, and the reason is worth knowing.**
@@ -382,9 +382,8 @@ what it costs today, printed by the example rather than hidden by it.
   construction — but **nothing in this repo has ever run on a TPU**, so that
   path is untested and this example does not claim it. See `docs/TPU_BRINGUP.md`.
   Note that `--platform` is a *request*, not a device: a CUDA plugin handed
-  `--platform tpu` opens CUDA anyway. §0.4.490 found this example printing the
-  flag back as if it were the hardware, and now it prints what the live client
-  answers instead, plus a `MISMATCH` line when the two disagree:
+  `--platform tpu` opens CUDA anyway. The example prints what the live client
+  answers, plus a `MISMATCH` line when the two disagree:
 
   ```
     platform      tpu (requested; the client's own answer is below)

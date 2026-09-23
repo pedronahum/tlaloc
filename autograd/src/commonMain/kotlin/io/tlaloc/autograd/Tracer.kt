@@ -84,7 +84,7 @@ internal fun Tape.traceLeafI32(value: DTensor<*, io.tlaloc.core.I32>): Tracer<Sh
         val v = ints[i]
         require(v > -16_777_216 && v < 16_777_216) {
             "traceLeafI32: index $v at position $i exceeds the float-encoding exactness cap 2^24 " +
-                "(the tape's value cache is float-typed — F0 §4.0.5 landmine 4)"
+                "(the tape stores values as floats, which represent integers exactly only up to 2^24)"
         }
         v.toFloat()
     }

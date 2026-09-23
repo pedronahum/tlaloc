@@ -216,7 +216,7 @@ hidden from you.
 
 The other half of "the compiler knows what you meant" is what it will not
 compile. `src/main/kotlin/Refusals.kt.disabled` holds two gradients that cannot
-honestly exist. The file is named `.disabled` so Gradle never compiles it and
+exist. The file is named `.disabled` so Gradle never compiles it and
 this project stays green; rename it to see the errors:
 
 ```bash
@@ -258,21 +258,16 @@ the return *kind* and not about sizes.
 Neither of these is a runtime exception, a NaN, or a silently wrong number an
 hour into a training run. Both are red squiggles in the IDE.
 
-## The honest edges
-
-This example shows the surface at its best. The repository is explicit about
-where it stops, and so is this README:
+## Limitations
 
 - **The dump covers scalar `grad { }` bodies.** A *tensor* `grad { }` lambda
   still compiles and still differentiates correctly, but its compile-time dump
   refuses loudly (a `SKIPPED` message naming the reason) rather than printing
   source whose shape literals would be derived from symbolic `-1` extents.
-- **The renderer's coverage is exhaustive-by-`when`:** anything it cannot
-  render honestly refuses by name instead of emitting plausible-looking wrong
-  source. Named deferrals today include `ABS`/`RSQRT`/`GELU`/`SILU`/`SIN`/`COS`,
+- **Every op either renders or refuses by name**, instead of emitting
+  plausible-looking wrong source. Not rendered: `ABS`/`RSQRT`/`GELU`/`SILU`,
   rank ≥ 3 matmul, gather/scatter, control flow, and F64.
-- **The `jvp` / `vjp` / `jacobian` / `hessian` intrinsics do not dump yet** —
-  same mechanism, one call site each.
+- **The `jvp` / `vjp` / `jacobian` / `hessian` intrinsics do not print source.**
 
 The full statement of what is certified, and the named tests that pin it
 (including a golden test that compiles printed gradients standalone and checks

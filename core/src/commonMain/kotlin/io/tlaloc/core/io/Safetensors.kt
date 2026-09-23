@@ -209,8 +209,8 @@ object Safetensors {
         "I32" -> I32
         "F16" -> refuseDType(
             wire,
-            "fp16 has no host representation in Tlaloc (bf16 does: BF16/HostBf16Storage, " +
-                "§0.4.455). An fp16 checkpoint must be converted by its producer, or an " +
+            "fp16 has no host representation in Tlaloc (bf16 does: BF16/HostBf16Storage). " +
+                "An fp16 checkpoint must be converted by its producer, or an " +
                 "F16 DType + HostF16Storage must land first — narrowing or widening it " +
                 "here would put numbers in the tensor that the checkpoint does not contain",
         )
@@ -227,8 +227,8 @@ object Safetensors {
         )
         "F8_E4M3", "F8_E5M2" -> refuseDType(
             wire,
-            "fp8 is the KV-quant/weight-quant family, a NAMED DEFERRAL of Phase H5 " +
-                "(int8/fp8) with a manifest slot already reserved (kvQuantDtype)",
+            "fp8 checkpoints are not supported (fp8 belongs to the KV-quant/weight-quant " +
+                "family, which has a manifest slot reserved as kvQuantDtype)",
         )
         else -> refuseDType(wire, "unknown safetensors dtype")
     }

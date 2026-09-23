@@ -47,9 +47,8 @@ val dMiss = grad2 { angle: Float, speed: Float ->
 ```
 
 Those names are `const val`s declared outside the lambda, including the loop's trip
-count. Until §0.4.500 not one of them would compile inside a `grad2 { }` body — see
-[the limitation section below](#the-limitation-and-what-is-left-of-it), which used
-to be about this and is now about what is left.
+count. [What the body may reference](#what-the-body-may-reference) lists what
+folds and what still refuses.
 
 That loop is differentiated **at compile time**. The K2 plugin lowers the lambda
 to Tlaloc IR, applies φ-calculus coarsening to the loop (the [OOPSLA 2021
@@ -103,22 +102,12 @@ own project would, so publish first. **No GPU, no dataset, no network.**
 ./gradlew -p examples/differentiable-physics run
 ```
 
-## The limitation, and what is left of it
+## What the body may reference
 
-**This section used to say that no number inside the `grad2 { }` body could be a
-`const val`.** Every one of them was an inlined literal with the constant's name in
-a trailing comment, because the lambda is lowered to Tlaloc IR and ANY reference out
-of that scope was refused:
-
-```
-e: Tlaloc could not lower this lambda at compile time: reference to symbol outside
-   the lowering scope: /X0
-```
-
-Since §0.4.500 a captured reference the compiler can resolve to a **compile-time
-constant** is folded into the lowered IR as exactly the constant an inline literal
-would have produced — so the simulator above now reads like the `simulate()`
-transcription it is checked against. Concretely, what folds is:
+A captured reference the compiler can resolve to a **compile-time constant** is
+folded into the lowered IR as exactly the constant an inline literal would have
+produced, so the simulator above reads like the `simulate()` transcription it is
+checked against. Concretely, what folds is:
 
 - any `const val`, wherever it is declared (top level, file level, or in a
   companion / named `object`) — including `STEPS` as a loop trip count;
@@ -137,9 +126,9 @@ the same `DxirConst` the literal path emits, so the reverse transform, the
 apart. Only the dump's *filename* moved, because the `valueAndGrad2` call is three
 lines further down the file.
 
-### And a captured RUNTIME value, since §0.4.501
+### A captured runtime value
 
-The other half of the arc. A value the compiler cannot know — the result of a
+A value the compiler cannot know — the result of a
 call, a parameter of the enclosing function — becomes a **trailing parameter of
 the derived gradient**, which the plugin binds at the call site by reading the
 very declaration the lambda closed over. The derivation still happens at compile
@@ -196,29 +185,16 @@ e: Tlaloc could not lower this lambda at compile time: captured value 'gain' is
 
 Try one. It is the house rule in action — an unsupported case says so, loudly,
 instead of quietly falling back to something slower that would still have produced
-a number. Since §0.4.499 the refusal is an **error**, not a warning, and the build
-stops; before that the program threw `IllegalStateException` the first time it
-called `dMiss`, the same information one run later. If you want that late failure
-back, set `tlaloc { strictLowering.set(false) }` in `build.gradle.kts`.
+a number. The refusal is a compile **error** and the build stops. With
+`tlaloc { strictLowering.set(false) }` in `build.gradle.kts` it is a warning, and
+the program throws `IllegalStateException` the first time it calls `dMiss`.
 
 ## A limitation this example removed
 
-Writing it turned one up. `angle.cos()` always *differentiated* correctly, but
-the gradient **printer** had no `:core` tensor twin for `COS`, so act `[4]`
-refused:
-
-```
-dump SKIPPED — the gradient synthesised fine, but it has no honest Kotlin
-rendering: COS at %4 — no `:core` tensor host twin exists for this unary
-(the bmm-precedent twin gap)
-```
-
-The first draft dodged it by parameterising on the release velocity components
-instead of an angle. That was the wrong fix: the honest one was to add the
-missing `DTensor.sin()` / `DTensor.cos()` twins to `:core` and teach the printer
-their spelling (§0.4.496), which is why the derivative above now reads
-`angle.cos()`. `ABS`, `RSQRT`, `GELU` and `SILU` are still in that gap and still
-refuse by name.
+The printer renders an op only when `:core` has a tensor function for it, which
+is why the derivative above can read `angle.cos()`. `ABS`, `RSQRT`, `GELU` and
+`SILU` have none yet; a gradient containing one still compiles, and its dump
+prints `dump SKIPPED` with the op's name instead of source.
 
 ## Expected output
 
@@ -311,7 +287,7 @@ Tlaloc differentiable physics — a free throw, solved by differentiating the si
         return Triple(v741, v1445, v1441)
     }
 
-    the whole file: /home/pedro/programming/tlaloc/examples/differentiable-physics/build/gradients/Main_kt_133_23_valueAndGrad2.kt
+    the whole file: <repo>/examples/differentiable-physics/build/gradients/Main_kt_133_23_valueAndGrad2.kt
 
 [5] the same derivative, aimed somewhere else at run time
 
@@ -333,7 +309,7 @@ differentiable-physics OK
 
 | Look at | For |
 |---|---|
-| [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt) | The `grad2 { }` block with the simulator inside it, and `simulate()` — the independent transcription that keeps it honest |
+| [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt) | The `grad2 { }` block with the simulator inside it, and `simulate()`, the independent transcription it is checked against |
 | [`build.gradle.kts`](build.gradle.kts) | `dumpGradSourceDir` — the two lines that make the derivative a file |
 | `build/gradients/*.kt` | The derivative itself, after a build |
 

@@ -206,8 +206,7 @@ class SymjaEngine : SymbolicEngine {
                 io.tlaloc.ir.OpKind.NEG -> neg(liftNode(node.operands[0]))
                 io.tlaloc.ir.OpKind.POW -> pow(liftNode(node.operands[0]), liftNode(node.operands[1]))
                 else -> error(
-                    "SymjaEngine.liftNode: op ${node.op} not yet supported (B.0b first-cut). " +
-                        "Add support when a Stage B.1+ rewrite needs it.",
+                    "SymjaEngine.liftNode: op ${node.op} is not supported.",
                 )
             }
             else -> error(
