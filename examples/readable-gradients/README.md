@@ -192,9 +192,9 @@ dependencies { "printedImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-a
 ```
 
 Step 2 is the claim under test. `printedImplementation` gets `:core` — the host
-tensor library — and nothing else. There is no
-`printedCompilerPluginClasspath` line, so the Tlaloc plugin is not present for
-that compilation. If the printed gradient compiles there, it is plain Kotlin;
+tensor library — and nothing else. The compiler plugin is declared on
+`kotlinCompilerPluginClasspathMain`, which the `printed` compilation does not
+inherit, so the Tlaloc plugin is not present for that compilation. If the printed gradient compiles there, it is plain Kotlin;
 if it then produces the same bits, the source you were shown is the code that
 ran.
 

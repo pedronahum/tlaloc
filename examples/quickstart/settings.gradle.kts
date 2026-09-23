@@ -8,6 +8,9 @@ rootProject.name = "tlaloc-quickstart"
 
 pluginManagement {
     repositories {
+        // The Tlaloc Gradle plugin is published to Maven (mavenLocal here, Maven
+        // Central for a release), not to the Gradle Plugin Portal.
+        mavenLocal()
         gradlePluginPortal()
         mavenCentral()
     }

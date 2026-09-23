@@ -2,6 +2,11 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm") version "2.3.20"
+    // The Tlaloc Gradle plugin puts the K2 compiler plugin (same version) on every
+    // Kotlin/JVM compilation in this project, `shapeError` included. The compiler
+    // plugin rewrites `grad { }` calls into synthesized gradient code at compile
+    // time and turns shape / differentiability misuse into compile errors.
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha01"
     application
 }
 
@@ -41,21 +46,21 @@ sourceSets {
     create("shapeError")
 }
 
-dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
-    // The K2 compiler plugin: rewrites `grad { }` calls into synthesized
-    // gradient code at compile time (and gives you compile-time shape /
-    // differentiability errors in the IDE).
-    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
+val shapeErrorImplementation by configurations.getting
 
-    // The failing source set needs the same libraries and the same plugin —
-    // the point is that it fails on its MERITS, not for want of a dependency.
-    "shapeErrorImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
-    "shapeErrorImplementation"("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
-    "shapeErrorImplementation"("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
-    "kotlinCompilerPluginClasspathShapeError"("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
+dependencies {
+    // The BOM holds the version; the artifacts below do not repeat it.
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
+    implementation("io.github.pedronahum:tlaloc-core")
+    implementation("io.github.pedronahum:tlaloc-ir")
+    implementation("io.github.pedronahum:tlaloc-autograd")
+
+    // The failing source set gets the same libraries (and, from the Gradle plugin,
+    // the same compiler plugin): it fails on its merits, not for want of a dependency.
+    shapeErrorImplementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
+    shapeErrorImplementation("io.github.pedronahum:tlaloc-core")
+    shapeErrorImplementation("io.github.pedronahum:tlaloc-ir")
+    shapeErrorImplementation("io.github.pedronahum:tlaloc-autograd")
 }
 
 application {

@@ -81,30 +81,71 @@ git clone <tlaloc repo> && cd tlaloc
 ./gradlew publishToMavenLocal -x test
 ```
 
-All **eleven** published modules land under `io.github.pedronahum:*:0.1.0-alpha01`:
+All **thirteen** published modules land under `io.github.pedronahum:*:0.1.0-alpha01`:
 `tlaloc-core`, `tlaloc-ir`, `tlaloc-autograd`, **`tlaloc-nn`**, `tlaloc-stablehlo`,
 `tlaloc-compiler-plugin`, `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`,
-`tlaloc-runtime-iree`, `tlaloc-kptx`, `tlaloc-maestro`. `:benchmarks` is a harness
-and publishes nothing.
+`tlaloc-runtime-iree`, `tlaloc-kptx`, `tlaloc-maestro`, `tlaloc-gradle-plugin`
+(plugin id `io.github.pedronahum.tlaloc`) and `tlaloc-bom`. `:benchmarks` is a
+harness and publishes nothing.
 
 ## 2. Set up a consumer project
 
-`settings.gradle.kts` needs `mavenLocal()`; `build.gradle.kts`:
+`settings.gradle.kts` needs `mavenLocal()` for plugins as well as for
+dependencies. The Tlaloc Gradle plugin is published to Maven, not to the Gradle
+Plugin Portal, so after a release the plugin repository is `mavenCentral()`:
+
+```kotlin
+pluginManagement { repositories { mavenLocal(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
+```
+
+`build.gradle.kts`:
 
 ```kotlin
 plugins {
     kotlin("jvm") version "2.3.20"
+    // Puts the K2 compiler plugin (same version) on every Kotlin/JVM compilation:
+    // compile-time grad rewriting + compile-time errors.
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha01"
     application
 }
 
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
-    // The K2 plugin: compile-time grad rewriting + compile-time errors.
-    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
+    implementation("io.github.pedronahum:tlaloc-core")
+    implementation("io.github.pedronahum:tlaloc-ir")
+    implementation("io.github.pedronahum:tlaloc-autograd")
+}
+
+// Optional. Each property is a compiler-plugin option; the values shown are the defaults.
+tlaloc {
+    strictLowering.set(true)
+    dumpGradSource.set(false)
+    // dumpGradSourceDir.set(layout.buildDirectory.dir("gradients"))
+    dumpLoweredIr.set(false)
+    unsafeAllowUnsupportedKotlin.set(false)
 }
 ```
+
+The plugin skips Kotlin/JS, Native, Wasm and Android compilations with a warning
+naming each one, and refuses to apply to a project without a Kotlin plugin.
+
+**Without the Gradle plugin.** Put the compiler plugin on a compilation's plugin
+classpath and pass options as `-P` arguments.
+`kotlinCompilerPluginClasspath(...)` reaches every compilation of the project;
+`kotlinCompilerPluginClasspathMain(...)` only `main`:
+
+```kotlin
+dependencies {
+    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
+}
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions.freeCompilerArgs.addAll("-P", "plugin:io.tlaloc.plugin:strictLowering=true")
+}
+```
+
+[examples/readable-gradients](../examples/readable-gradients) uses this route,
+because one of its source sets must compile without the plugin.
 
 The complete working project is [examples/quickstart](../examples/quickstart)
 — run it from the repo root with `scripts/onboarding-smoke.sh` (or
@@ -213,8 +254,10 @@ compilation of the lambda:
 
 ## 4a. Plugin options
 
-All **five** are `-P plugin:io.tlaloc.plugin:<name>=<value>` on the Kotlin
-compile task (`kotlinOptions.freeCompilerArgs` / `compilerOptions`). A
+All **five** are properties of the Gradle plugin's `tlaloc { }` block, under the
+same names (`tlaloc { strictLowering.set(false) }`). Without the Gradle plugin they
+are `-P plugin:io.tlaloc.plugin:<name>=<value>` on the Kotlin compile task
+(`compilerOptions.freeCompilerArgs`). A
 misspelled boolean value is refused by name rather than read as `false` — for
 the four added since §0.4.499; `dumpGradSource` predates that and still reads
 an unknown value as `false` (named in `docs/ALPHA_PLAN.md`):

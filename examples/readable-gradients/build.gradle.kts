@@ -14,7 +14,8 @@ val gradientSourceDir: Directory = layout.buildDirectory.dir("gradients").get()
 
 sourceSets {
     // A SECOND source set, compiled from the generated gradient. Its whole point
-    // is what it does NOT get: no `printedCompilerPluginClasspath` line below, so
+    // is what it does NOT get: the compiler plugin goes on `kotlinCompilerPluginClasspathMain`
+    // below, which the `printed` compilation does not inherit, so
     // the Tlaloc plugin is absent from this compilation. If the printed gradient
     // compiles here, it is ordinary Kotlin over `:core` — not plugin magic.
     create("printed")
@@ -24,12 +25,18 @@ kotlin.sourceSets.named("printed") {
     kotlin.srcDir(gradientSourceDir)
 }
 
+// This example wires the compiler plugin by hand instead of applying the Tlaloc
+// Gradle plugin, because the Gradle plugin puts it on every JVM compilation and
+// the `printed` source set must compile without it. This is the manual route:
+// the compiler plugin on a compilation's `kotlinCompilerPluginClasspath<Compilation>`
+// configuration (plain `kotlinCompilerPluginClasspath` reaches every compilation)
+// and each option as a `-P plugin:io.tlaloc.plugin:<option>=<value>` argument.
 dependencies {
     implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
     implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
     implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
-    // The K2 compiler plugin — for the MAIN source set only.
-    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
+    // The K2 compiler plugin — for the MAIN compilation only.
+    kotlinCompilerPluginClasspathMain("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
 
     // The printed gradient needs nothing but the host tensor library.
     "printedImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")

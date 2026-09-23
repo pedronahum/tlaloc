@@ -26,10 +26,12 @@ internal fun pluginMissing(name: String): Nothing = throw IllegalStateException(
     "Tlaloc: `$name { }` was not rewritten at compile time, so this fallback body ran and " +
         "there is no gradient to return. One of these is the cause:\n" +
         "  (1) the Tlaloc compiler plugin is not applied to the module that contains this call — " +
-        "add `io.github.pedronahum:tlaloc-compiler-plugin` to kotlinCompilerPluginClasspath " +
+        "apply the Gradle plugin `id(\"io.github.pedronahum.tlaloc\")`, or add " +
+        "`io.github.pedronahum:tlaloc-compiler-plugin` to kotlinCompilerPluginClasspath " +
         "(docs/GETTING_STARTED.md);\n" +
-        "  (2) the plugin is applied and could not compile this call, and the build passes " +
-        "-P plugin:io.tlaloc.plugin:strictLowering=false, which turns that compile error into a " +
+        "  (2) the plugin is applied and could not compile this call, and the build sets " +
+        "strictLowering to false (`tlaloc { strictLowering.set(false) }`, or " +
+        "-P plugin:io.tlaloc.plugin:strictLowering=false), which turns that compile error into a " +
         "warning — the compile log has a `w: Tlaloc ...` warning at this call site that names the " +
         "reason; remove the option to get it as an error;\n" +
         "  (3) `$name` was not called as `$name { ... }` with the lambda written at the call site " +

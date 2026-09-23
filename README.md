@@ -186,23 +186,34 @@ Nothing is published yet. Build once, then consume by coordinate:
 ```
 
 ```kotlin
-plugins { kotlin("jvm") version "2.3.20"; application }
+// settings.gradle.kts
+pluginManagement { repositories { mavenLocal(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
+```
+
+```kotlin
+// build.gradle.kts
+plugins {
+    kotlin("jvm") version "2.3.20"
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha01"  // makes `grad { }` compile-time
+    application
+}
 kotlin {
     jvmToolchain(25)                                     // to BUILD
     compilerOptions { jvmTarget.set(JvmTarget.JVM_21) }  // to RUN
 }
 
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-nn:0.1.0-alpha01")           // layers + optimizers
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha01") // GPU execution
-
-    // This line is what makes `grad { }` compile-time.
-    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
+    implementation("io.github.pedronahum:tlaloc-autograd")
+    implementation("io.github.pedronahum:tlaloc-nn")           // layers + optimizers
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt") // GPU execution
 }
 ```
+
+The Gradle plugin applies `tlaloc-compiler-plugin` of its own version to every
+Kotlin/JVM compilation; its options go in a `tlaloc { }` block. The BOM keeps
+every `tlaloc-*` artifact on one version.
 
 **JDK 25 to build, JDK 21 to run.** Kotlin loads a compiler plugin inside the
 compiler's own JVM and `compiler-plugin` is Java 25 bytecode, so building

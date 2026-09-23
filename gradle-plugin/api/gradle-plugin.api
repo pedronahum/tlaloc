@@ -1,0 +1,21 @@
+public abstract class io/tlaloc/gradle/TlalocExtension {
+	public fun <init> ()V
+	public abstract fun getDumpGradSource ()Lorg/gradle/api/provider/Property;
+	public abstract fun getDumpGradSourceDir ()Lorg/gradle/api/file/DirectoryProperty;
+	public abstract fun getDumpLoweredIr ()Lorg/gradle/api/provider/Property;
+	public abstract fun getStrictLowering ()Lorg/gradle/api/provider/Property;
+	public abstract fun getUnsafeAllowUnsupportedKotlin ()Lorg/gradle/api/provider/Property;
+}
+
+public final class io/tlaloc/gradle/TlalocGradlePlugin : org/gradle/api/Plugin {
+	public static final field Companion Lio/tlaloc/gradle/TlalocGradlePlugin$Companion;
+	public static final field EXTENSION_NAME Ljava/lang/String;
+	public static final field PLUGIN_ID Ljava/lang/String;
+	public fun <init> ()V
+	public synthetic fun apply (Ljava/lang/Object;)V
+	public fun apply (Lorg/gradle/api/Project;)V
+}
+
+public final class io/tlaloc/gradle/TlalocGradlePlugin$Companion {
+}
+

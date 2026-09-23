@@ -40,6 +40,10 @@ Not yet published; these land in `0.1.0-alpha01`.
   upload to the Central Portal. An upload to Central without a signing key or
   credentials refuses by name before sending anything.
 - `.github/workflows/release.yml`: the same release from a `v<version>` tag.
+- Gradle plugin `io.github.pedronahum.tlaloc` (`tlaloc-gradle-plugin`): applies
+  `tlaloc-compiler-plugin` of the same version to every Kotlin/JVM compilation, with the
+  compiler-plugin options in a `tlaloc { }` block.
+- `tlaloc-bom`: a platform that holds every `tlaloc-*` artifact at one version.
 
 ## [0.1.0-alpha01] — 2026-09-23
 

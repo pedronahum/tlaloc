@@ -5,6 +5,8 @@ rootProject.name = "tlaloc-differentiable-physics"
 
 pluginManagement {
     repositories {
+        // The Tlaloc Gradle plugin is published to Maven, not the Gradle Plugin Portal.
+        mavenLocal()
         gradlePluginPortal()
         mavenCentral()
     }

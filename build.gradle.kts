@@ -79,10 +79,26 @@ val moduleDescriptions = mapOf(
     "kptx" to
         "KPTX: a Kotlin DSL, emitter, parser and ISA table for NVIDIA PTX, plus the kernel " +
         "library built with it.",
+    "gradle-plugin" to
+        "The Tlaloc Gradle plugin (id io.github.pedronahum.tlaloc): applies the Tlaloc " +
+        "compiler plugin of the same version to every Kotlin/JVM compilation and maps the " +
+        "tlaloc { } block to its options.",
+    "bom" to
+        "Bill of materials that aligns every Tlaloc artifact on one version.",
 )
 
 val tlalocUrl = "https://github.com/pedronahum/tlaloc"
 val tlalocArtifactPrefix = "tlaloc-"
+
+// Modules whose only publication is a POM: no classes, so no jar, sources or
+// javadoc. Central requires those three only for jar packaging.
+val tlalocPomOnlyModules = setOf("bom")
+
+// java-gradle-plugin's plugin marker (`<id>:<id>.gradle.plugin`, group
+// io.github.pedronahum.tlaloc) is also POM-only. Its coordinates are fixed by the
+// plugin id, so it is not prefixed; the dependency inside it points at the
+// prefixed tlaloc-gradle-plugin, and verifyPomMetadata checks that.
+fun isPluginMarker(publicationName: String) = publicationName.endsWith("PluginMarkerMaven")
 
 // Signing and Central credentials come from Gradle properties first, then the
 // environment. A blank value counts as absent, so `-PsigningInMemoryKey=` on the
@@ -136,13 +152,14 @@ subprojects {
 
     apply(plugin = "maven-publish")
     apply(plugin = "signing")
+    val pomOnlyModule = name in tlalocPomOnlyModules
     // Dokka HTML, not Dokka Javadoc: the Javadoc format explicitly does not
     // support Kotlin Multiplatform projects (kotlinlang.org/docs/dokka-javadoc.html)
     // and ten of these eleven modules are KMP. Central validates that a
     // -javadoc.jar EXISTS, not that it contains Javadoc-flavoured HTML, and
     // shipping Dokka HTML under that classifier is what KMP libraries on Central
     // do. Named in docs/ALPHA_PLAN.md so it is not a silent substitution.
-    apply(plugin = "org.jetbrains.dokka")
+    if (!pomOnlyModule) apply(plugin = "org.jetbrains.dokka")
 
     val moduleName = name
     val moduleDescription = moduleDescriptions[name]
@@ -153,11 +170,15 @@ subprojects {
                 "than letting it publish without one.",
         )
 
-    val javadocJar = tasks.register<Jar>("dokkaJavadocJar") {
-        group = "documentation"
-        description = "Package this module's Dokka HTML as the javadoc artifact Central requires"
-        archiveClassifier.set("javadoc")
-        from(tasks.named("dokkaGeneratePublicationHtml"))
+    val javadocJar = if (pomOnlyModule) {
+        null
+    } else {
+        tasks.register<Jar>("dokkaJavadocJar") {
+            group = "documentation"
+            description = "Package this module's Dokka HTML as the javadoc artifact Central requires"
+            archiveClassifier.set("javadoc")
+            from(tasks.named("dokkaGeneratePublicationHtml"))
+        }
     }
 
     extensions.configure<PublishingExtension> {
@@ -169,10 +190,11 @@ subprojects {
             // the KMP target publications are handled by the hook after this block.
             // Project-dependency coordinates in the generated POM and .module files
             // follow the publication; `verifyPomMetadata` checks all of them.
-            if (!artifactId.startsWith(tlalocArtifactPrefix)) {
+            val pomOnlyPublication = isPluginMarker(name)
+            if (!pomOnlyPublication && !artifactId.startsWith(tlalocArtifactPrefix)) {
                 artifactId = tlalocArtifactPrefix + artifactId
             }
-            artifact(javadocJar)
+            if (!pomOnlyPublication && javadocJar != null) artifact(javadocJar)
             pom {
                 name.set("Tlaloc :: $moduleName")
                 description.set(moduleDescription)
@@ -284,6 +306,7 @@ subprojects {
     val publicationJavadocArtifacts = provider {
         extensions.getByType<PublishingExtension>().publications
             .withType(MavenPublication::class.java)
+            .filterNot { pomOnlyModule || isPluginMarker(it.name) }
             .associate { pub -> pub.name to pub.artifacts.map { it.classifier } }
     }
     val sourcesJarTaskNames = provider { tasks.names.filter { it.endsWith("sourcesJar") } }
@@ -343,7 +366,7 @@ subprojects {
                     )
                 }
             }
-            if (sourcesTasks.get().isEmpty()) {
+            if (!pomOnlyModule && sourcesTasks.get().isEmpty()) {
                 throw GradleException(
                     "$modulePath: no *sourcesJar task exists, so no sources artifact is " +
                         "published. Central requires one per artifact.",
@@ -425,8 +448,12 @@ subprojects {
                 fun direct(e: Element, tag: String): String? =
                     (0 until e.childNodes.length).mapNotNull { e.childNodes.item(it) as? Element }
                         .firstOrNull { it.tagName == tag }?.textContent?.trim()
-                direct(root, "artifactId")?.takeUnless { it.startsWith(prefix) }
-                    ?.let { unprefixed += "${pom.path}: artifactId $it" }
+                // A plugin marker's own coordinates come from the plugin id; every
+                // publication in the Tlaloc group itself must be prefixed.
+                if (direct(root, "groupId") == tlalocGroup) {
+                    direct(root, "artifactId")?.takeUnless { it.startsWith(prefix) }
+                        ?.let { unprefixed += "${pom.path}: artifactId $it" }
+                }
                 val deps = root.getElementsByTagName("dependency")
                 (0 until deps.length).mapNotNull { deps.item(it) as? Element }
                     .filter { direct(it, "groupId") == tlalocGroup }
@@ -475,6 +502,60 @@ subprojects {
 val centralPublishTasks = subprojects
     .filter { it.name != "benchmarks" }
     .map { "${it.path}:publishAllPublicationsToCentralRepository" }
+
+// tlaloc-bom must constrain every artifact the build publishes. This reads the
+// POMs the other modules generate (plugin markers excepted: they are resolved by
+// plugin id, never named in a dependency) and the BOM's own POM, and fails on any
+// artifact id the BOM leaves out or names without publishing.
+project(":bom") {
+    val publishingModules = rootProject.subprojects.filter {
+        it.name != "benchmarks" && it.name !in tlalocPomOnlyModules
+    }
+    val otherPoms = provider {
+        publishingModules.flatMap { p ->
+            p.tasks.withType<GenerateMavenPom>().filterNot { it.name.contains("PluginMarkerMaven") }
+        }
+    }
+    val bomPoms = tasks.withType<GenerateMavenPom>()
+    val verifyBomCoverage = tasks.register("verifyBomCoverage") {
+        group = "verification"
+        description = "Assert tlaloc-bom constrains exactly the artifacts this build publishes"
+        dependsOn(otherPoms)
+        dependsOn(bomPoms)
+        val published = otherPoms.map { tasks -> tasks.map { it.destination } }
+        val bomPomFiles = provider { bomPoms.map { it.destination } }
+        doLast {
+            fun parse(f: File) = DocumentBuilderFactory.newInstance()
+                .also { it.isNamespaceAware = false }
+                .newDocumentBuilder().parse(f).documentElement
+            fun childText(e: Element, tag: String): String? =
+                (0 until e.childNodes.length).mapNotNull { e.childNodes.item(it) as? Element }
+                    .firstOrNull { it.tagName == tag }?.textContent?.trim()
+            val publishedIds = published.get().map { pom ->
+                val root = parse(pom)
+                "${childText(root, "groupId")}:${childText(root, "artifactId")}"
+            }.toSortedSet()
+            val bomPom = bomPomFiles.get().singleOrNull()
+                ?: throw GradleException(":bom: expected exactly one generated POM.")
+            val deps = parse(bomPom).getElementsByTagName("dependency")
+            val constrained = (0 until deps.length).mapNotNull { deps.item(it) as? Element }
+                .map { "${childText(it, "groupId")}:${childText(it, "artifactId")}" }
+                .toSortedSet()
+            val missing = publishedIds - constrained
+            val extra = constrained - publishedIds
+            if (publishedIds.isEmpty() || missing.isNotEmpty() || extra.isNotEmpty()) {
+                throw GradleException(
+                    ":bom: tlaloc-bom does not match what this build publishes. " +
+                        "Published but not constrained: ${missing.ifEmpty { "none" }}. " +
+                        "Constrained but not published: ${extra.ifEmpty { "none" }}. " +
+                        "Edit the module lists in bom/build.gradle.kts.",
+                )
+            }
+            logger.lifecycle(":bom: constrains all ${publishedIds.size} published artifacts.")
+        }
+    }
+    tasks.matching { it.name == "check" }.configureEach { dependsOn(verifyBomCoverage) }
+}
 
 // The Central uploads scheduled in this invocation. The handoff only orders
 // itself after them (mustRunAfter), so under --continue it would still run after
@@ -593,6 +674,8 @@ val tlalocJvmTargets = mapOf(
     // `-Xjdk-release=21` is the proof it needs nothing newer; `exportServingArtifact`
     // now runs on a JDK 21 launcher, which is the proof it works there.
     "maestro" to 21,
+    // Loaded by the consumer's Gradle daemon, which may run on a JDK 21.
+    "gradle-plugin" to 21,
     // FFM (JEP 454) — the original and only reason for the 25 floor.
     "runtime-pjrt" to 25,
     "runtime-cuda" to 25,
@@ -604,6 +687,21 @@ val tlalocJvmTargets = mapOf(
 )
 
 subprojects {
+    // A POM-only module emits no bytecode. It has no entry in tlalocJvmTargets, and
+    // the check below asserts that it really has nothing to target.
+    if (name in tlalocPomOnlyModules) {
+        val modulePath = path
+        afterEvaluate {
+            if (!pluginManager.hasPlugin("java-platform") || tasks.names.contains("jar")) {
+                throw GradleException(
+                    "$modulePath is listed in tlalocPomOnlyModules but is not a java-platform " +
+                        "without a jar. A module that emits classes needs an entry in " +
+                        "tlalocJvmTargets instead.",
+                )
+            }
+        }
+        return@subprojects
+    }
     val expectedTarget = tlalocJvmTargets[name]
         ?: throw GradleException(
             "§0.4.503: module ':$name' has no entry in tlalocJvmTargets in the root " +
@@ -770,6 +868,7 @@ if (tlalocTestJdk != null) {
         )
     val validFor = tlalocJvmTargets.filterValues { it <= requested }.keys.sorted()
     subprojects {
+        if (name in tlalocPomOnlyModules) return@subprojects
         val moduleTarget = tlalocJvmTargets.getValue(name)
         val moduleName = name
         tasks.withType<Test>().configureEach {
@@ -908,6 +1007,7 @@ dependencies {
     dokka(project(":runtime-cuda"))
     dokka(project(":runtime-iree"))
     dokka(project(":kptx"))
+    dokka(project(":gradle-plugin"))
 }
 
 dokka {
