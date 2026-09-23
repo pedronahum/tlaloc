@@ -54,9 +54,23 @@ signingInMemoryKeyPassword=<passphrase>
 SIGNING_IN_MEMORY_KEY / SIGNING_IN_MEMORY_KEY_PASSWORD
 ```
 
-Export the armoured key with `gpg --armor --export-secret-keys <KEY_ID>`, and
-publish the public half to a keyserver (`keys.openpgp.org`) — Central verifies
-the signature against it.
+`bash scripts/setup-signing-key.sh` does all of this — generates the key, pushes
+the public half to `keys.openpgp.org` and `keyserver.ubuntu.com`, exports the
+private half folded to one line, and writes both properties. **Run it in a real
+terminal**: it prompts for a passphrase on a TTY and refuses to run without one,
+so that the passphrase cannot be captured by an agent session or a CI log. It
+prints the key id and nothing secret.
+
+By hand, if you prefer: `gpg --full-generate-key`, then
+`gpg --armor --export-secret-keys <KEY_ID> | sed -z 's/\n/\\n/g'` for the
+property value, then `gpg --keyserver hkps://keys.openpgp.org --send-keys <KEY_ID>`
+— Central verifies a signature by looking the key up, so an unpublished public
+half fails the upload even though the signature itself is valid.
+
+A signing key is what the `Sign` tasks need to exist at all. Without one,
+`publishAllPublicationsToCentralRepository` runs and uploads **unsigned**
+artifacts, and Central rejects the bundle — `--dry-run` showing zero `Sign` tasks
+is the cheap way to notice before the upload.
 
 Central Portal credentials (a user token, not the account password):
 
