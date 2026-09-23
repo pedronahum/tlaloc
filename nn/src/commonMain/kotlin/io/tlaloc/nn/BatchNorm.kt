@@ -242,7 +242,7 @@ class BatchNorm(
     private fun checkInput(dims: IntArray) {
         require(dims.size >= 2 && dims[1] == numFeatures) {
             "BatchNorm: input must be rank >= 2 with channel axis 1 = $numFeatures " +
-                "(NCHW — the F4 layout decision; got dims ${dims.toList()})"
+                "(NCHW; got dims ${dims.toList()})"
         }
     }
 

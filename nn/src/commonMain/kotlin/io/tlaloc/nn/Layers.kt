@@ -107,7 +107,7 @@ class Dense(
     override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> {
         require(x.rank == 2) {
             "Dense v1: input must be rank-2 [batch, numInputs] (got dims ${x.dims.toList()}) — " +
-                "rank-3 input is a named F2 deferral"
+                "rank-3 input is not supported; reshape to rank 2 first"
         }
         require(x.dims[1] == w.dims[0]) {
             "Dense: input width ${x.dims[1]} does not match numInputs ${w.dims[0]}"

@@ -141,9 +141,9 @@ class VllmLivePluginTest {
             refusals.mustContain("blockSize", "disagrees with the serving artifact's compiled")
             refusals.mustContain("maxModelLen", "exceeds the artifact's top context bucket")
             refusals.mustContain("maxNumSeqs", "exceeds the artifact's top batch bucket")
-            refusals.mustContain("worldSize", "multi-device serving is a named deferral")
+            refusals.mustContain("worldSize", "multi-device serving is not supported")
             live.mustContain("kvConfigRefusal", "cannot be resized by a config")
-            live.mustContain("chunkedPrefillRefusal", "named deferral")
+            live.mustContain("chunkedPrefillRefusal", "needs a prefill entry, which is not supported")
 
             // --- 2b. §0.4.491 (H3c-4a): the attention backend CLASS -------
             // Until this slice `get_attn_backend_cls` RAISED, and vLLM's v1
@@ -169,7 +169,7 @@ class VllmLivePluginTest {
             // substitution.
             live.mustContain("attnBackendRefusal", "OpKind.PAGED_ATTENTION")
             live.mustContain("attnHeadSizeRefusal", "disagrees with the serving artifact")
-            live.mustContain("attnMlaRefusal", "named deferral")
+            live.mustContain("attnMlaRefusal", "MLA attention is not supported")
             assertEquals(
                 "vllm_tlaloc.attention.TlalocAttentionBackend",
                 live.str("attnAgreeingConfigPath"),

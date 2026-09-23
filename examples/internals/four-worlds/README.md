@@ -19,13 +19,11 @@ Two consequences, both visible in this example:
   [`src/shapeError/kotlin/WorldErrors.kt`](src/shapeError/kotlin/WorldErrors.kt)
   is a real file that proves it, and `./gradlew -p examples/internals/four-worlds
   shapeError` is the command that makes the compiler say so.
-- **The scopes are a design, and one of their claims turned out not to hold.**
-  This README used to say that `program` cannot be called from inside a Kernel
-  body. Writing the failing case down as a file the build compiles showed that
-  it *can*: the `@WorldScope` DslMarker shadows an **implicit** outer receiver
-  in a nested builder, and `Tlaloc.program` names its receiver explicitly, which
-  DslMarker never blocks. The separation you can rely on today is the typed
-  handle above. Keeping the claim would have been cheaper than checking it.
+- **The scopes do not stop `program` being called inside a Kernel body.**
+  The `@WorldScope` DslMarker shadows an **implicit** outer receiver in a
+  nested builder, and `Tlaloc.program` names its receiver explicitly, which
+  DslMarker never blocks. The separation you can rely on is the typed handle
+  above.
 
 - **The whole taxonomy is opt-in, on purpose.** The four scopes
   and `BufferHandle` carry `@ExperimentalTlalocApi`, a `@RequiresOptIn(ERROR)`

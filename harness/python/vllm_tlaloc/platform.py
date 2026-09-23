@@ -160,7 +160,7 @@ class TlalocPlatform(Platform):
         if parallel is not None:
             if getattr(parallel, "world_size", 1) != 1:
                 raise ValueError(
-                    "tlaloc: multi-device serving is a named deferral (the artifact "
+                    "tlaloc: multi-device serving is not supported (the artifact "
                     "carries one program per bucket for one device); world_size must "
                     "be 1"
                 )
@@ -233,13 +233,13 @@ class TlalocPlatform(Platform):
                 )
             if getattr(attn_selector_config, "use_mla", False):
                 raise ValueError(
-                    "tlaloc: MLA attention is a named deferral — the exported program "
-                    "carries H1a's PAGED_ATTENTION over a [numBlocks, blockSize, "
+                    "tlaloc: MLA attention is not supported — the exported program "
+                    "carries a PAGED_ATTENTION over a [numBlocks, blockSize, "
                     "numKvHeads, headDim] pool, which is not an MLA latent cache"
                 )
             if getattr(attn_selector_config, "use_sparse", False):
                 raise ValueError(
-                    "tlaloc: sparse attention is a named deferral; the compiled "
+                    "tlaloc: sparse attention is not supported; the compiled "
                     "PAGED_ATTENTION op attends over every allocated page"
                 )
 

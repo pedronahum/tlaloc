@@ -816,8 +816,8 @@ object DxirForwardTransform {
                 // Defensive: validateCoarsenedShape already refuses this at
                 // construction (tangent_body requires a single-result node).
                 "DxirForwardTransform: COARSENED id=${node.id} carries a tangent_body " +
-                    "but has ${node.numResults} results — multi-result user f is " +
-                    "B5's recorded tail"
+                    "but has ${node.numResults} results; a user tangent for a multi-result " +
+                    "function is not supported"
             }
             val ty = node.type
             val nOps = node.operands.size

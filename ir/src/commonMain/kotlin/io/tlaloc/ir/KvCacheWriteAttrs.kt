@@ -104,7 +104,7 @@ object KvCacheWriteAttrs {
         }
         require(n.dtype == c.dtype) {
             "$layer: KV_CACHE_WRITE newKv dtype ${n.dtype} must match the cache dtype ${c.dtype} " +
-                "(a write never converts; H5's int8/fp8 KV-quant is a separate, named surface)"
+                "(a write never converts; int8/fp8 KV quantization goes through DEQUANTIZE_KV)"
         }
 
         val numBlocks = c.dims[0]

@@ -153,9 +153,7 @@ All of it is in [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt):
 
 - **GB10 and H100 produce IDENTICAL artifacts here**, because both resolve to
   the same `flash_attn_v3` kernel template in the registry. The per-target
-  divergence is real, but it is per *kernel choice*, not per SKU — an earlier
-  version of this example's doc comment implied a GB10-specific artifact, and
-  the run above says otherwise.
+  divergence is real, but it is per *kernel choice*, not per SKU.
 - **The artifact carries the decision; the runtime does not yet dispatch it.**
   Registering `@flash_attn_v3` as a live PJRT custom-call symbol is separate
   work. Until then the executed path is the decomposed one — which is exactly

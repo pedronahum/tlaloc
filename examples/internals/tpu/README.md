@@ -258,7 +258,7 @@ regression tests:
 ```
 
 `PjrtTpuSmokeTest`'s 5 tests skip on every machine that has ever run them. On a
-TPU they should run. That transition is the whole of G2b.
+TPU they should run.
 
 ## What might go wrong on first contact
 
@@ -325,8 +325,8 @@ Record it. A failure here is the most valuable output this example can produce â
 it is the first real measurement of something that was, until that moment, only
 an argument. In particular a **fork in act 4** would mean the portability
 argument for the RNG is wrong, and the program prints the two disagreeing bit
-patterns for exactly that reason. `docs/TPU_BRINGUP.md` has a section listing
-what G2b must record; that is where it goes.
+patterns for exactly that reason. `docs/TPU_BRINGUP.md` lists what a first TPU run
+must record.
 
 ## Related
 

@@ -388,7 +388,7 @@ Everything Tlaloc reads from the environment or from system properties.
 
 | Variable | Default | Read by | Meaning |
 |---|---|---|---|
-| `TLALOC_PJRT_PLUGIN_PATH` | unset | `runtime-pjrt`, Python serving runtime | Path to a PJRT plugin `.so`. Takes priority over the search when the file exists. For the TPU lane the file name must contain `tpu`. |
+| `TLALOC_PJRT_PLUGIN_PATH` | unset | `runtime-pjrt`, Python serving runtime | Path to a PJRT plugin `.so`, used before any search. If the file does not exist, the JVM falls back to the search and the Python serving runtime refuses. For the TPU lane the file name must contain `tpu`. |
 | `VIRTUAL_ENV` | set by an activated venv | `runtime-pjrt`, `runtime-iree` | Searched first for the PJRT plugin (`lib/python3.*/…`) and for IREE tools (`bin/`). |
 | `TLALOC_PJRT_MEMORY_FRACTION` | `0.5` | `runtime-pjrt`, Python serving runtime | Fraction of GPU memory the CUDA client may use, in (0, 1]. |
 | `TLALOC_PJRT_PREALLOCATE` | `false` | `runtime-pjrt`, Python serving runtime | `true` or `false`: whether the CUDA client reserves its fraction up front. |

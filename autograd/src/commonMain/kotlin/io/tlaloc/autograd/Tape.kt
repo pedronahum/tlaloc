@@ -105,7 +105,7 @@ class Tape {
                     "Tape.op($op): mixed BF16/F32 operands — bf16 compute is dtype-homogeneous " +
                         "(StableHLO elementwise ops take one element type). Cast the f32 operand " +
                         "with Tracer.cast(BF16) first; f32 CONSTANT leaves in a bf16 region are " +
-                        "the known G1d limitation (spell them as cast leaves)."
+                        "not supported (spell them as cast leaves)."
                 }
                 io.tlaloc.core.BF16
             } else F32

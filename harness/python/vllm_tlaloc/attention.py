@@ -180,7 +180,7 @@ class TlalocAttentionMetadataBuilder(AttentionMetadataBuilder):
             "tlaloc: vLLM asked for an attention METADATA BUILDER. Block tables and "
             "slot mapping for a Tlaloc step are built in vllm_tlaloc.batching and "
             "passed as operands of the compiled program; building them again in "
-            "torch would be a second source of truth for H1b's slot arithmetic"
+            "torch would be a second source of truth for the compiled slot arithmetic"
         )
 
     def build(self, *args, **kwargs):  # pragma: no cover - unreachable by construction

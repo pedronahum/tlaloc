@@ -125,4 +125,4 @@ lists where else the suite has run.
 | aarch64 Linux CI (`ubuntu-24.04-arm`) | ✅ | Same workflow, green on GitHub Actions. The only aarch64 evidence from a machine other than the GB10 |
 | arm64 macOS CI (`macos-15`) | ✅ | Same workflow, green on GitHub Actions. The MLIR round trips self-skip, because `stablehlo-translate`, `sdy-opt` and `iree-compile` are not installed |
 | JDK 21 CI lane | ✅ | `build.yml`, job `library-jdk21`, green on GitHub Actions |
-| Next-Kotlin CI lane | ✅ (probe) | `.github/workflows/kotlin-next.yml` runs with `continue-on-error`, so its checkmark is green by construction; read its step outcomes. Its answer: the library modules compile and test under the next Kotlin, the compiler plugin does not |
+| Next-Kotlin CI lane | ✅ (probe) | `.github/workflows/kotlin-next.yml` runs with `continue-on-error`, so its checkmark is green by construction; read its step outcomes. Its answer so far: the compiler plugin does not compile under the next Kotlin (probe 3 runs only after probe 1 succeeds, and it was skipped). The library modules' suites pass under Kotlin 2.4.20 when run locally with `-PtlalocKotlinVersion=2.4.20` |

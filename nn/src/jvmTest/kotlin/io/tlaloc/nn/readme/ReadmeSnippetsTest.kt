@@ -67,8 +67,6 @@ class ReadmeSnippetsTest {
         val dir = Files.createTempDirectory("tlaloc-readme-")
         dir.toFile().deleteOnExit()
         val path: Path = dir.resolve("mlp.safetensors")
-        val losses = ArrayList<Float>()
-
         // SNIPPET
         val keys = RandomKey.fromSeed(7).split(2)
         val model0 = Sequential(Dense(2, 16, keys[0]), ReluLayer, Dense(16, 1, keys[1]))
@@ -85,13 +83,14 @@ class ReadmeSnippetsTest {
             val out = step.run(model, listOf(x))   // loss and gradients, on the host
             val (nextModel, nextState) = optimizer.step(model, out.gradients, state)
             model = nextModel; state = nextState
-            losses += out.loss
         }
 
         saveCheckpoint(path, model, optimizer, state)   // one safetensors file, resumable
         // END SNIPPET
 
-        assertTrue(losses.last() < 0.5f * losses.first(), "the loop must train: $losses")
+        val before = step.run(model0, listOf(x)).loss
+        val after = step.run(model, listOf(x)).loss
+        assertTrue(after < 0.5f * before, "the loop must train: $before -> $after")
         val reloaded = loadCheckpoint(path).restore(
             Sequential(Dense(2, 16, keys[0]), ReluLayer, Dense(16, 1, keys[1])),
         )

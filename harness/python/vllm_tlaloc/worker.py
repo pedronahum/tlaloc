@@ -296,7 +296,7 @@ class TlalocWorker(WorkerBase):
         """
         if grammar_output is not None:
             raise NotImplementedError(
-                "tlaloc: structured outputs (a grammar bitmask) are a named deferral; "
+                "tlaloc: structured outputs (a grammar bitmask) are not supported; "
                 "the mask must be applied to the logits before the argmax and this "
                 "worker samples inside execute_model. Run without a guided-decoding "
                 "backend, or move greedy_sample into sample_tokens first"

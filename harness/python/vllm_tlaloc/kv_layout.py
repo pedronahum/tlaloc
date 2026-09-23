@@ -128,7 +128,7 @@ def _axes(model: dict) -> dict:
     if tuple(order) != KV_POOL_AXIS_ORDER:
         raise KvLayoutError(
             f"kvPoolAxisOrder is {list(order)}; this plugin knows "
-            f"{list(KV_POOL_AXIS_ORDER)} (H1a's PAGED_ATTENTION operand contract). "
+            f"{list(KV_POOL_AXIS_ORDER)} (the PAGED_ATTENTION operand order). "
             f"A pool in a different axis order is a different compiled artifact, and "
             f"reading its dims positionally would hand vLLM a page shape that is "
             f"right only when two of the four extents happen to be equal"

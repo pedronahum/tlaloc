@@ -277,14 +277,14 @@ class SchedulerOutputAdapterTest(unittest.TestCase):
         """Three tokens scheduled of a five-token prompt is a CHUNK: the rest
         arrives on a later step and this runner keeps no resumption state."""
         out = self.FakeOutput([self.FakeNew("a", [1, 2, 3, 4, 5])], None, {"a": 3})
-        with self.assertRaisesRegex(NotImplementedError, "named deferral"):
+        with self.assertRaisesRegex(NotImplementedError, "prefill entry, which is not supported"):
             decode_requests_from_scheduler_output(out, last_token_of=lambda rid: 1)
 
     def test_a_cached_request_scheduled_for_more_than_one_token_is_refused(self):
         """A resumed chunk or a speculative draft. Only an ARRIVING request
         may be scheduled for more than one token."""
         out = self.FakeOutput([], self.FakeCached(["b"]), {"b": 3})
-        with self.assertRaisesRegex(NotImplementedError, "named deferral"):
+        with self.assertRaisesRegex(NotImplementedError, "prefill entry, which is not supported"):
             decode_requests_from_scheduler_output(out, last_token_of=lambda rid: 1)
 
     def test_a_prefix_cache_hit_is_refused_rather_than_started_midway(self):

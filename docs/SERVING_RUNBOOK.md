@@ -138,16 +138,16 @@ A dry run of `pip install vllm` into this venv planned **186 packages**:
 CUDA-12 plugin, and a numpy downgrade. That install would have changed the
 oracles, so vLLM gets a venv of its own (section 4).
 
-### Instead: give the slice its own venv
+### Instead: give each experiment its own venv
 
 ```bash
-python -m venv ~/.local/venvs/<slice> && . ~/.local/venvs/<slice>/bin/activate
-pip install <whatever that slice needs>
+python -m venv ~/.local/venvs/<name> && . ~/.local/venvs/<name>/bin/activate
+pip install <whatever it needs>
 # point the harness at it explicitly; do NOT re-point TLALOC_VENV
 ```
 
 Venvs are cheap and disk is not the constraint. A second copy of torch
-costs a few GB; a moved oracle costs the arc's credibility.
+costs a few GB; a moved oracle invalidates every comparison made against it.
 
 ### The canary
 
@@ -196,10 +196,9 @@ nor `torch` (some other venv, not the oracle). A fresh clone stays green.
 **Use `--rerun-tasks`, not `--rerun`.** `--rerun` only forces the task
 you named; in a multi-module KMP build the per-module `:<m>:jvmTest`
 lanes stay `UP-TO-DATE` and the "clean-room recount" recounts yesterday's
-XML. This was found at this close-out (a 31-second "full suite"), and it
-is the strongest form of the landmine below.
+XML.
 
-**Landmine.** `:maestro:jvmTest` does **not** re-run when only
+**Caution.** `:maestro:jvmTest` does **not** re-run when only
 `harness/python/**` changes — the Python files are not declared task
 inputs. Any edit to `tlaloc_serve.py` or `vllm_tlaloc/**` needs
 `--rerun-tasks` or it certifies the *old* Python.
@@ -431,9 +430,8 @@ Three things in that recipe are load-bearing:
 * **`--only-binary=:all:`.** A source build of any one of 197 packages on
   aarch64 is a stall with no upper bound. Wheels exist for all of them; the
   flag turns "this will finish or tell you why" into a property of the
-  command instead of a hope. Drop it and the slice's time box is gone.
-* **No `jax`.** The older version of this recipe said `pip install vllm
-  "jax[cuda12]"`, and that second half was the hard part — jax's CUDA-12
+  command instead of a hope.
+* **No `jax`.** `pip install vllm "jax[cuda12]"` puts jax's CUDA-12
   wheels beside vLLM's CUDA-13 ones. The serving path is ctypes,
   so **do not install jax here.** `pip install -e harness/python` pulls
   nothing at all.
@@ -441,7 +439,7 @@ Three things in that recipe are load-bearing:
   `dlopen` of a file, not an import of that venv's Python, and nothing in
   that directory is written. It is the *only* interaction this recipe has
   with the frozen venv. (A deployment ships its own `.so`; this is the
-  convenience path on this machine.)
+  convenience path on a development machine.)
 
 The `print(current_platform)` must say `TlalocPlatform`, and vLLM logs
 `Platform plugin tlaloc is activated`. **`--block-size` must equal the
@@ -462,7 +460,7 @@ returning real `vllm.v1.outputs.ModelRunnerOutput`, and the chunked-prefill
 refusal. It compares those logits against the oracle venv's runner lane on
 the same artifact: **bit-for-bit, `==`.**
 
-**The coexistence question this file used to leave open is ANSWERED: yes.**
+**vLLM and the XLA PJRT plugin coexist in one process.**
 vLLM's CUDA-13 torch and the CUDA-12 XLA PJRT plugin live in one process
 without complaint — `import vllm` loads torch 2.13.0+cu130, and the same
 process then compiles and executes through `xla_cuda_plugin.so` on the
@@ -623,10 +621,9 @@ way — see [KPTX_PAGED_PERF.md section 8](KPTX_PAGED_PERF.md) for the decision 
 the alternative (shape-conditional registration) that was rejected with
 its reasons.
 
-**Read the verdict that replaced the old one.** This file used to say the
-kernel was "465 µs vs 310 µs — 1.5× slower". **That number is retired**:
-it was a host round trip over a ~1 MB fixture, ≈ 95% staging
-traffic with an attention somewhere inside it. Measured on the device,
+**Measure on the device, not end to end.** An end-to-end figure of
+"465 µs vs 310 µs — 1.5× slower" is a host round trip over a ~1 MB fixture,
+≈ 95% staging traffic with an attention somewhere inside it. Measured on the device,
 from one session, interleaved, against pre-staged buffers:
 
 | decode point | KPTX / XLA-lowering device floor |
@@ -667,7 +664,7 @@ Both halves are required and neither is a default. The claiming pass's
 same program with the same numbers — which is exactly why an empty
 registry is safe and a shape-conditional one would not be.
 
-**Landmine.** `ptxas` rejects a **non-ASCII byte anywhere in
+**Caution.** `ptxas` rejects a **non-ASCII byte anywhere in
 the PTX file, comments included**, and the failure surfaces as
 `CUDA_ERROR_INVALID_PTX` out of `cuModuleLoadData` deep inside an XLA
 execution, naming nothing. Pinned in `PagedAttentionModuleTest`.
