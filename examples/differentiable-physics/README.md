@@ -199,7 +199,7 @@ instead of quietly falling back to something slower that would still have produc
 a number. Since §0.4.499 the refusal is an **error**, not a warning, and the build
 stops; before that the program threw `IllegalStateException` the first time it
 called `dMiss`, the same information one run later. If you want that late failure
-back, pass `-P plugin:io.tlaloc.plugin:strictLowering=false`.
+back, set `tlaloc { strictLowering.set(false) }` in `build.gradle.kts`.
 
 ## A limitation this example removed
 

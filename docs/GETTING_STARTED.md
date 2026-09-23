@@ -95,7 +95,7 @@ dependencies. The Tlaloc Gradle plugin is published to Maven, not to the Gradle
 Plugin Portal, so after a release the plugin repository is `mavenCentral()`:
 
 ```kotlin
-pluginManagement { repositories { mavenLocal(); gradlePluginPortal() } }
+pluginManagement { repositories { mavenLocal(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
 ```
 
@@ -127,8 +127,10 @@ tlaloc {
 }
 ```
 
-The plugin skips Kotlin/JS, Native, Wasm and Android compilations with a warning
-naming each one, and refuses to apply to a project without a Kotlin plugin.
+The plugin works with `kotlin("jvm")` and `kotlin("multiplatform")`, declared in
+the same `plugins { }` block as the Tlaloc plugin or in a parent project's. In a
+Multiplatform build it skips Kotlin/JS, Native, Wasm and Android compilations with a
+warning naming each one. A project that applies neither Kotlin plugin is refused.
 
 **Without the Gradle plugin.** Put the compiler plugin on a compilation's plugin
 classpath and pass options as `-P` arguments.

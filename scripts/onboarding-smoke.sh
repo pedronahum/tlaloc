@@ -2,7 +2,7 @@
 # The onboarding smoke: an external consumer can use the published Tlaloc
 # artifacts end to end. Publishes every module to mavenLocal, runs
 # examples/quickstart (which applies the Tlaloc Gradle plugin and the BOM), then
-# checks the Gradle plugin itself with four throwaway consumer builds:
+# checks the Gradle plugin itself with five throwaway consumer builds:
 #
 #   1. plugins { id("io.github.pedronahum.tlaloc") } with every tlaloc { } option
 #      set: grad { } runs and dumpGradSourceDir receives the printed gradient.
@@ -11,6 +11,10 @@
 #   3. a Kotlin Multiplatform build with a JS target: the JS compilation is
 #      skipped with a warning that names it.
 #   4. the plugin without a Kotlin plugin: the build refuses by name.
+#   5. a multi-project build: both plugins declared in the root with `apply false`
+#      and applied in a subproject runs grad { }; the Tlaloc plugin declared in the
+#      root and the Kotlin plugin only in the subproject (a classloader the Tlaloc
+#      plugin cannot see) is refused by name.
 #
 # Exits non-zero on the first check that fails.
 set -euo pipefail
@@ -167,8 +171,55 @@ EOF
 if ./gradlew -p "$bare" tasks --console=plain > "$work/bare.log" 2>&1; then
   fail "the Tlaloc Gradle plugin was accepted without a Kotlin plugin." "$work/bare.log"
 fi
-grep -q "applies no Kotlin Gradle plugin" "$work/bare.log" \
+grep -q "applies neither the Kotlin JVM plugin nor the Kotlin Multiplatform plugin" "$work/bare.log" \
   || fail "the build without a Kotlin plugin failed for another reason." "$work/bare.log"
 echo "onboarding-smoke: without a Kotlin plugin, the Tlaloc Gradle plugin refuses by name"
+
+# 5. Multi-project builds.
+multi="$work/multi"
+mkdir -p "$multi/app/src/main/kotlin"
+settings "$multi" multi
+echo 'include("app")' >> "$multi/settings.gradle.kts"
+cp "$with/src/main/kotlin/Main.kt" "$multi/app/src/main/kotlin/Main.kt"
+cat > "$multi/build.gradle.kts" <<EOF
+plugins {
+    kotlin("jvm") version "$kotlin_version" apply false
+    id("io.github.pedronahum.tlaloc") version "$version" apply false
+}
+EOF
+app_build() {
+  cat > "$multi/app/build.gradle.kts" <<EOF
+plugins {
+    kotlin("jvm") $1
+    id("io.github.pedronahum.tlaloc")
+    application
+}
+kotlin { jvmToolchain(25) }
+dependencies {
+    implementation(platform("io.github.pedronahum:tlaloc-bom:$version"))
+    implementation("io.github.pedronahum:tlaloc-core")
+    implementation("io.github.pedronahum:tlaloc-autograd")
+}
+application { mainClass.set("MainKt") }
+EOF
+}
+app_build ""
+./gradlew -p "$multi" :app:run --console=plain > "$work/multi.log" 2>&1 \
+  || fail "the multi-project consumer (both plugins declared in the root) did not build and run." "$work/multi.log"
+grep -q 'scalar=12.0' "$work/multi.log" \
+  || fail "the multi-project consumer printed the wrong gradient." "$work/multi.log"
+# The Kotlin plugin moves into the subproject's own plugins { } block.
+cat > "$multi/build.gradle.kts" <<EOF
+plugins {
+    id("io.github.pedronahum.tlaloc") version "$version" apply false
+}
+EOF
+app_build "version \"$kotlin_version\""
+if ./gradlew -p "$multi" :app:run --console=plain > "$work/multi-split.log" 2>&1; then
+  fail "the Tlaloc plugin was accepted with a Kotlin plugin it cannot see." "$work/multi-split.log"
+fi
+grep -q "cannot use the Kotlin Gradle plugin ('org.jetbrains.kotlin.jvm')" "$work/multi-split.log" \
+  || fail "the split multi-project build failed for another reason." "$work/multi-split.log"
+echo "onboarding-smoke: multi-project build runs; a Kotlin plugin the Tlaloc plugin cannot see is refused by name"
 
 echo "onboarding-smoke: OK"

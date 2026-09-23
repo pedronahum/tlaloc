@@ -187,7 +187,7 @@ Nothing is published yet. Build once, then consume by coordinate:
 
 ```kotlin
 // settings.gradle.kts
-pluginManagement { repositories { mavenLocal(); gradlePluginPortal() } }
+pluginManagement { repositories { mavenLocal(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
 ```
 
