@@ -118,7 +118,8 @@ at the top, as Apache-2.0 section 4(b) requires. Files Tlaloc added are
 `maestro-tlaloc/`, `maestro-common/.../KubernetesCommandTlalocFieldsTest.java`
 and `maestro-server/src/test/resources/samples/sample-tlaloc-*.json`; the Java
 ones carry a `Copyright 2026 Pedro N. Rodriguez` Apache header. The repository
-root `NOTICE` credits Netflix Maestro. After an upgrade, re-check that this
+root `NOTICE` credits Netflix Maestro; Netflix/maestro ships no `NOTICE` file at
+the pinned commit. After an upgrade, re-check that this
 table, the `Modified by` lines and `NOTICE` still match the tree, and carry
 over any `NOTICE` file the new upstream commit ships.
 
@@ -132,6 +133,8 @@ the minimum needed for `Tlaloc` step-type registration. Each modification is:
 2. Listed in the patch capture command above (the `:!third-party/maestro/maestro-tlaloc`
    exclusion in step 1).
 3. Re-applied during every upgrade.
+4. Marked with a `Modified by Pedro N. Rodriguez for Tlaloc` line at the top of
+   the file and listed in [Changes to the upstream tree](#changes-to-the-upstream-tree).
 
 If an upgrade tempts a wider divergence, escalate — either upstream the
 change (file PR), restructure Tlaloc to avoid needing it, or document the
