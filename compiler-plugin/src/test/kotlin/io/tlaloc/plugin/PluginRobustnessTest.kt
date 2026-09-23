@@ -86,6 +86,51 @@ class PluginRobustnessTest {
         assertNull(mine.take("/src/A.kt", 10, 20), "take removes the entry")
     }
 
+    /** A call the FIR phase lowered and the IR phase never matched (the two phases
+     * disagreeing on its file path or offsets) would otherwise compile silently and
+     * throw at its first call. */
+    @Test
+    fun `a lowered call the IR phase never matched is refused at compile time`() {
+        val strict = withInjectedFault(TlalocInternalErrors.Phase.IR_HANDOFF_MISS) {
+            compile(mapOf("stub.kt" to SCALAR_STUB, "Main.kt" to workingGrad))
+        }
+        assertEquals(1, strict.exitCode, "the build must fail; got ${strict.exitCode}:\n${strict.render()}")
+        val err = strict.messages.singleOrNull {
+            it.severity == CompilerMessageSeverity.ERROR && "found no call at this position" in it.message
+        } ?: error("expected one unclaimed-call ERROR; got:\n${strict.render()}")
+        assertTrue("`grad`" in err.message, "names the intrinsic:\n${err.message}")
+        assertTrue(TlalocInternalErrors.ISSUES_URL in err.message, "names the issue tracker:\n${err.message}")
+        assertEquals(3, err.location?.line, "points at the grad call's line")
+
+        val lenient = withInjectedFault(TlalocInternalErrors.Phase.IR_HANDOFF_MISS) {
+            compile(
+                mapOf("stub.kt" to SCALAR_STUB, "Main.kt" to workingGrad),
+                options = arrayOf("plugin:io.tlaloc.plugin:strictLowering=false"),
+            )
+        }
+        assertEquals(0, lenient.exitCode, "strictLowering=false keeps the build green:\n${lenient.render()}")
+        assertTrue(
+            lenient.messages.any {
+                it.severity == CompilerMessageSeverity.WARNING && "found no call at this position" in it.message
+            },
+            "under strictLowering=false it is a warning:\n${lenient.render()}",
+        )
+    }
+
+    @Test
+    fun `drainUnclaimed returns what was never taken and empties the table`() {
+        val fn = DxirFunction("grad_body", emptyList(), emptyList(), emptyList())
+        val h = TlalocLoweringHandoff()
+        h.record("/src/A.kt", 30, 40, fn)
+        h.record("/src/A.kt", 10, 20, fn)
+        h.take("/src/A.kt", 30, 40)
+        assertEquals(
+            listOf(TlalocLoweringHandoff.Unclaimed("/src/A.kt", 10, 20, "grad_body")),
+            h.drainUnclaimed(),
+        )
+        assertEquals(0, h.size())
+    }
+
     // ---------------- R2: IR-phase refusals follow strictLowering ----------------
 
     /** `jacobian` whose assembly helper is missing from the classpath: the FIR phase

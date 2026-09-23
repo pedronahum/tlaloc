@@ -63,6 +63,18 @@ class TlalocLoweringHandoff {
     @Synchronized
     fun size(): Int = entries.size
 
+    /** An entry the IR phase never took: its file, range and lowered function name. */
+    data class Unclaimed(val file: String, val startOffset: Int, val endOffset: Int, val fnName: String)
+
+    /** Removes and returns every entry not yet taken, in file/offset order. */
+    @Synchronized
+    fun drainUnclaimed(): List<Unclaimed> {
+        val out = entries.map { (k, v) -> Unclaimed(k.file, k.startOffset, k.endOffset, v.fn.name) }
+            .sortedWith(compareBy({ it.file }, { it.startOffset }))
+        entries.clear()
+        return out
+    }
+
     /** Drops every entry of THIS compilation's table. */
     @Synchronized
     fun clear() { entries.clear() }

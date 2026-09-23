@@ -207,6 +207,7 @@ class TlalocIrGenerationExtension(
                 // §0.4.514 — keyed by this FILE's path as well as the range (see
                 // TlalocLoweringHandoff): the same offsets in another file are another call.
                 val filePath = irFileForDump?.fileEntry?.name ?: return transformed
+                if (TlalocInternalErrors.faultInjected(TlalocInternalErrors.Phase.IR_HANDOFF_MISS)) return transformed
                 val lowered: TlalocLoweringHandoff.LoweredLambda = handoff.take(
                     filePath, transformed.startOffset, transformed.endOffset,
                 ) ?: return transformed
@@ -1072,6 +1073,7 @@ class TlalocIrGenerationExtension(
             }
         }
 
+        val filesWithIndexFailure = HashSet<String>()
         for (file in moduleFragment.files) {
             transformer.irFileForDump = file
             transformer.callLocation = null
@@ -1087,11 +1089,30 @@ class TlalocIrGenerationExtension(
                     TlalocInternalErrors.describe(t, options.strictLowering),
                     CompilerMessageLocation.create(file.fileEntry.name),
                 )
+                filesWithIndexFailure += TlalocLoweringHandoff.normalisePath(file.fileEntry.name)
                 continue
             }
             file.transformChildren(transformer, null)
         }
 
+        // §0.4.514a — every entry the FIR checker recorded is a call it lowered and
+        // expects the IR phase to rewrite (Tracer-overload calls are never recorded).
+        // One still here means the IR phase never matched that call — the two phases
+        // disagreed on its file path or offsets — and the call is left as written, so
+        // its fallback body throws at the first call. That is refused here by name
+        // instead of surfacing at run time. Files whose declaration index already
+        // failed are skipped: they carry their own internal error.
+        val filesByPath = moduleFragment.files.associateBy {
+            TlalocLoweringHandoff.normalisePath(it.fileEntry.name)
+        }
+        for (u in handoff.drainUnclaimed()) {
+            if (u.file in filesWithIndexFailure) continue
+            mc.report(
+                if (options.strictLowering) CompilerMessageSeverity.ERROR else CompilerMessageSeverity.WARNING,
+                TlalocInternalErrors.describeUnclaimed(u.fnName.removeSuffix("_body"), options.strictLowering),
+                locationOf(filesByPath[u.file], u.startOffset) ?: CompilerMessageLocation.create(u.file),
+            )
+        }
         // §0.4.514 — this compilation's table only (it is a per-compilation instance),
         // so nothing another compilation in the same daemon recorded is touched.
         handoff.clear()

@@ -21,10 +21,19 @@ object TlalocInternalErrors {
      */
     const val INJECT_FAULT_PROPERTY: String = "tlaloc.internal.injectFault"
 
-    enum class Phase(val propertyValue: String) { FIR("fir"), IR("ir") }
+    enum class Phase(val propertyValue: String) {
+        FIR("fir"),
+        IR("ir"),
+
+        /** The IR phase skips the handoff lookup, as if the two phases disagreed on
+         * a call's file or offsets, so the lowered entry is never claimed. */
+        IR_HANDOFF_MISS("ir-handoff-miss"),
+    }
+
+    fun faultInjected(phase: Phase): Boolean = System.getProperty(INJECT_FAULT_PROPERTY) == phase.propertyValue
 
     fun maybeInjectFault(phase: Phase) {
-        if (System.getProperty(INJECT_FAULT_PROPERTY) == phase.propertyValue) {
+        if (faultInjected(phase)) {
             throw IllegalStateException("injected fault ($INJECT_FAULT_PROPERTY=${phase.propertyValue})")
         }
     }
@@ -53,6 +62,23 @@ object TlalocInternalErrors {
             k = k.superclass
         }
         return false
+    }
+
+    /**
+     * The diagnostic text for a call whose lambda the FIR phase lowered but whose call
+     * the IR phase never reached: the call is left as written, so its fallback body
+     * throws at the first call.
+     */
+    fun describeUnclaimed(callableName: String, strictLowering: Boolean = true): String {
+        val consequence = if (strictLowering) {
+            ""
+        } else {
+            " The call is left as written, so its fallback body throws at the first call."
+        }
+        return "Tlaloc internal error: the lambda of this `$callableName` call was lowered, but the " +
+            "IR phase found no call at this position to rewrite. This is a bug in the Tlaloc " +
+            "compiler plugin, not in your code. Please report it at $ISSUES_URL with the code " +
+            "of this call.$consequence"
     }
 
     /** The diagnostic text for an unexpected [t]. */
