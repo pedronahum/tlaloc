@@ -122,7 +122,8 @@ named `SIGNING_IN_MEMORY_KEY`, `SIGNING_IN_MEMORY_KEY_PASSWORD`,
    with the same token. The Staging API does not forward an upload to the Portal
    without this call, and it must come from the same IP address as the upload,
    which is why both run in one invocation. `--no-parallel` keeps the uploads in
-   one sequence.
+   one sequence. If any upload in the same run failed (including under
+   `--continue`), the handoff refuses and sends nothing.
 
 If the POST fails after a successful upload, rerun `./gradlew centralPortalHandoff`
 alone from the same machine. `-PcentralPublishingType=automatic` releases without

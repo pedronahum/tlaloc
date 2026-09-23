@@ -55,11 +55,12 @@ kotlin {
     sourceSets {
         commonMain {
             dependencies {
-                // api, not implementation: :core and :ir types appear in this
-                // module's public signatures, so a consumer of it alone can name them.
+                // api, not implementation: :core, :ir and :autograd types appear in
+                // this module's public signatures (program { } takes a body over
+                // autograd's Tracer), so a consumer of it alone can name them.
                 api(project(":core"))
                 api(project(":ir"))
-                implementation(project(":autograd"))
+                api(project(":autograd"))
                 implementation(project(":stablehlo"))
             }
         }

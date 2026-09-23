@@ -476,10 +476,22 @@ val centralPublishTasks = subprojects
     .filter { it.name != "benchmarks" }
     .map { "${it.path}:publishAllPublicationsToCentralRepository" }
 
+// The Central uploads scheduled in this invocation. The handoff only orders
+// itself after them (mustRunAfter), so under --continue it would still run after
+// one of them failed and hand a partial deployment to the Portal; it checks this
+// list first and refuses instead.
+val centralUploadsInGraph = mutableListOf<Task>()
+gradle.taskGraph.whenReady {
+    centralUploadsInGraph += allTasks.filter {
+        it is PublishToMavenRepository && it.repository.name == "central"
+    }
+}
+
 val centralPortalHandoff = tasks.register("centralPortalHandoff") {
     group = "publishing"
     description = "POST the staged OSSRH upload to the Central Portal (needs credentials)"
     mustRunAfter(centralPublishTasks)
+    val uploads = centralUploadsInGraph
     val version = rootProject.version.toString()
     val publishingType = providers.gradleProperty("centralPublishingType").orElse("user_managed")
     val user = centralUsername
@@ -494,6 +506,15 @@ val centralPortalHandoff = tasks.register("centralPortalHandoff") {
             )
         }
         centralUploadRefusal("centralPortalHandoff", needsSigningKey = false)?.let { throw GradleException(it) }
+        val incomplete = uploads.filter { it.state.failure != null || !it.state.executed }
+        if (incomplete.isNotEmpty()) {
+            throw GradleException(
+                "centralPortalHandoff refused: ${incomplete.size} upload(s) in this build did " +
+                    "not complete (${incomplete.joinToString(", ") { it.path }}), so the staged " +
+                    "deployment is partial. The handoff was not sent. Fix the failure and run " +
+                    "releaseToCentralPortal again.",
+            )
+        }
         val type = publishingType.get()
         if (type !in centralPublishingTypes) {
             throw GradleException(
