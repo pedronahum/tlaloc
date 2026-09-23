@@ -88,7 +88,7 @@ object SymbolicEngines {
     fun absenceMessage(need: String): String =
         "$need, which requires a symbolic engine, and none is available: Symja " +
             "($SYMJA_COORDINATE, $SYMJA_LICENSE) is not on the classpath of the process that " +
-            "needs it. Since 0.1.0-alpha01 Symja is an OPTIONAL dependency of io.github.pedronahum:ir — it " +
+            "needs it. Since 0.1.0-alpha01 Symja is an OPTIONAL dependency of io.github.pedronahum:tlaloc-ir — it " +
             "is an 8.3 MB $SYMJA_LICENSE jar that most programs never need, so it is no longer " +
             "forced on every consumer. Note WHERE it goes: the CAS runs inside the KOTLIN " +
             "COMPILER, not inside your program — coarsening happens in this plugin's IR phase — " +

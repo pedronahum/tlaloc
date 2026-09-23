@@ -8,17 +8,17 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.github.pedronahum:core:0.1.0-alpha01")
-    implementation("io.github.pedronahum:ir:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
     // The exporter and the manifest: ServingArtifactWriter, ServingManifest,
     // ReferenceDecodeGraph, HfLlamaServingExport. This example's Kotlin half is
     // ~100 lines around these, and the whole point of the example is that the
     // Kotlin half STOPS once the directory exists.
-    implementation("io.github.pedronahum:maestro:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-maestro:0.1.0-alpha01")
     // StableHLO emission — the exporter writes the bodies through it.
-    implementation("io.github.pedronahum:stablehlo:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha01")
 
-    // NOTE what is NOT here: `io.github.pedronahum:runtime-pjrt`. The exporting process
+    // NOTE what is NOT here: `io.github.pedronahum:tlaloc-runtime-pjrt`. The exporting process
     // never executes anything, never loads a PJRT plugin and never touches the
     // GPU. Nothing in this build needs a driver, which is why half one of this
     // example runs on any laptop.

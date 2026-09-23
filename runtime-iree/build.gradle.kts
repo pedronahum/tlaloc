@@ -30,8 +30,9 @@ kotlin {
                 // (:stablehlo). The §0.4.284 subprocess facade was dep-free; the
                 // bridge is the layering boundary where IREE meets the rest of
                 // the Tlaloc compiler. Mirrors :stablehlo's commonMain deps.
+                // :ir is api: runOnIree takes a DxirFunction.
                 implementation(project(":core"))
-                implementation(project(":ir"))
+                api(project(":ir"))
                 implementation(project(":stablehlo"))
             }
         }

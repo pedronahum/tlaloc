@@ -1,5 +1,6 @@
 import javax.xml.parsers.DocumentBuilderFactory
 import org.gradle.api.publish.maven.tasks.GenerateMavenPom
+import org.gradle.api.publish.tasks.GenerateModuleMetadata
 import org.gradle.plugins.signing.Sign
 import org.w3c.dom.Element
 
@@ -25,7 +26,7 @@ group = "io.github.pedronahum"
 version = "0.1.0-alpha01"
 
 // §0.4.355 — every consumable module publishes to Maven under
-// io.github.pedronahum:<module>:<version>. `./gradlew publishToMavenLocal` is the
+// io.github.pedronahum:tlaloc-<module>:<version>. `./gradlew publishToMavenLocal` is the
 // onboarding entry point (docs/GETTING_STARTED.md; examples/quickstart is a
 // standalone consumer project resolving from mavenLocal). :benchmarks is a
 // test harness, not a library — excluded.
@@ -66,8 +67,8 @@ val moduleDescriptions = mapOf(
         "The Tlaloc K2 compiler plugin: it rewrites grad { } into synthesized gradient " +
         "code at compile time and turns shape and differentiability misuse into compile errors.",
     "maestro" to
-        "Graph orchestration and serving-artifact export, including the Netflix Maestro " +
-        "step type that runs a Tlaloc graph as a workflow step.",
+        "Typed multi-step workflows over Tlaloc programs, and export of decode graphs as " +
+        "a serving artifact: a manifest plus StableHLO bodies, read at serve time without a JVM.",
     "runtime-iree" to
         "IREE execution backend for Tlaloc's StableHLO artifacts.",
     "runtime-pjrt" to
@@ -81,24 +82,54 @@ val moduleDescriptions = mapOf(
 )
 
 val tlalocUrl = "https://github.com/pedronahum/tlaloc"
+val tlalocArtifactPrefix = "tlaloc-"
 
 // Signing and Central credentials come from Gradle properties first, then the
-// environment. BOTH are optional and their absence is a no-op: a contributor's
-// `./gradlew publishToMavenLocal` and the GitHub build lane have neither, and
-// neither may be made to fail because of that.
-val signingKey: Provider<String> =
-    providers.gradleProperty("signingInMemoryKey")
-        .orElse(providers.environmentVariable("SIGNING_IN_MEMORY_KEY"))
+// environment. A blank value counts as absent, so `-PsigningInMemoryKey=` on the
+// command line switches a key in ~/.gradle/gradle.properties off. Absence is a
+// no-op everywhere except the `central` repository: a contributor's
+// `./gradlew publishToMavenLocal` and the GitHub build lane have neither, while an
+// upload to Central without both refuses before sending anything (below).
+fun secret(property: String, env: String): Provider<String> =
+    providers.gradleProperty(property).filter { it.isNotBlank() }
+        .orElse(providers.environmentVariable(env).filter { it.isNotBlank() })
+val signingKey: Provider<String> = secret("signingInMemoryKey", "SIGNING_IN_MEMORY_KEY")
 val signingKeyPassword: Provider<String> =
-    providers.gradleProperty("signingInMemoryKeyPassword")
-        .orElse(providers.environmentVariable("SIGNING_IN_MEMORY_KEY_PASSWORD"))
-        .orElse("")
-val centralUsername: Provider<String> =
-    providers.gradleProperty("centralUsername")
-        .orElse(providers.environmentVariable("CENTRAL_USERNAME"))
-val centralPassword: Provider<String> =
-    providers.gradleProperty("centralPassword")
-        .orElse(providers.environmentVariable("CENTRAL_PASSWORD"))
+    secret("signingInMemoryKeyPassword", "SIGNING_IN_MEMORY_KEY_PASSWORD").orElse("")
+val centralUsername: Provider<String> = secret("centralUsername", "CENTRAL_USERNAME")
+val centralPassword: Provider<String> = secret("centralPassword", "CENTRAL_PASSWORD")
+
+// The OSSRH Staging API (the `central` repository below) stages an upload and
+// stops. Nothing reaches the Central Portal until a POST to
+// /manual/upload/defaultRepository/<namespace>, made with the same token and from
+// the same IP address as the upload. `centralPortalHandoff` makes that call.
+val centralNamespace = "io.github.pedronahum"
+// `centralStagingApiUrl` moves both the upload and the handoff to another host;
+// it exists so both can be exercised against a local server without touching
+// Sonatype.
+val centralStagingApi: String =
+    providers.gradleProperty("centralStagingApiUrl").orNull?.trimEnd('/')
+        ?: "https://ossrh-staging-api.central.sonatype.com"
+val centralPublishingTypes = setOf("user_managed", "automatic", "portal_api")
+
+/** Names every missing piece a Central upload needs, or returns null when none is. */
+fun centralUploadRefusal(what: String, needsSigningKey: Boolean = true): String? {
+    val missing = buildList {
+        if (needsSigningKey && !signingKey.isPresent) {
+            add("a signing key (signingInMemoryKey or SIGNING_IN_MEMORY_KEY)")
+        }
+        if (!centralUsername.isPresent) {
+            add("a Central token username (centralUsername or CENTRAL_USERNAME)")
+        }
+        if (!centralPassword.isPresent) {
+            add("a Central token password (centralPassword or CENTRAL_PASSWORD)")
+        }
+    }
+    if (missing.isEmpty()) return null
+    return "$what refused: missing ${missing.joinToString("; ")}. Nothing was sent. " +
+        "Set them in ~/.gradle/gradle.properties or the environment (docs/RELEASING.md). " +
+        "publishToMavenLocal needs none of them."
+}
 
 subprojects {
     if (name == "benchmarks") return@subprojects
@@ -131,6 +162,16 @@ subprojects {
 
     extensions.configure<PublishingExtension> {
         publications.withType<MavenPublication>().configureEach {
+            // Published artifact ids carry a `tlaloc-` prefix (tlaloc-core,
+            // tlaloc-core-jvm, tlaloc-compiler-plugin, ...); Gradle project names do
+            // not, so task paths and the api/<module>.api baselines keep their names.
+            // This covers the KMP root publication and :compiler-plugin's `maven`;
+            // the KMP target publications are handled by the hook after this block.
+            // Project-dependency coordinates in the generated POM and .module files
+            // follow the publication; `verifyPomMetadata` checks all of them.
+            if (!artifactId.startsWith(tlalocArtifactPrefix)) {
+                artifactId = tlalocArtifactPrefix + artifactId
+            }
             artifact(javadocJar)
             pom {
                 name.set("Tlaloc :: $moduleName")
@@ -166,20 +207,40 @@ subprojects {
         repositories {
             // Declared unconditionally so `./gradlew publishAllPublicationsToCentralRepository
             // --dry-run` shows the real task graph. Credentials are nullable on
-            // purpose: with none set the task exists and fails at the wire with
-            // 401 instead of failing the whole build at configuration time.
+            // purpose: with none set the task exists and refuses when it runs (the
+            // doFirst below), instead of failing the whole build at configuration time.
             maven {
                 name = "central"
                 url = uri(
                     if (rootProject.version.toString().endsWith("SNAPSHOT")) {
                         "https://central.sonatype.com/repository/maven-snapshots/"
                     } else {
-                        "https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/"
+                        "$centralStagingApi/service/local/staging/deploy/maven2/"
                     },
                 )
-                credentials {
-                    username = centralUsername.orNull
-                    password = centralPassword.orNull
+                // Only when both exist: an unset credentials property fails Gradle's
+                // task validation before the named refusal in the doFirst below runs.
+                if (centralUsername.isPresent && centralPassword.isPresent) {
+                    credentials {
+                        username = centralUsername.get()
+                        password = centralPassword.get()
+                    }
+                }
+            }
+        }
+    }
+
+    // KMP target publications (`core-jvm`) get their artifact id from the Kotlin
+    // Gradle plugin after the configureEach above has run, so the prefix is
+    // applied again through the hook KGP documents for it, which runs after its
+    // own default.
+    plugins.withId("org.jetbrains.kotlin.multiplatform") {
+        extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension> {
+            targets.configureEach {
+                mavenPublication {
+                    if (!artifactId.startsWith(tlalocArtifactPrefix)) {
+                        artifactId = tlalocArtifactPrefix + artifactId
+                    }
                 }
             }
         }
@@ -199,6 +260,20 @@ subprojects {
         dependsOn(tasks.withType<Sign>())
     }
 
+    // An upload to Central without a signing key would go out unsigned, and one
+    // without credentials would fail mid-upload with a 401 after some modules had
+    // already been sent. Both refuse here, before the first byte, by name. Other
+    // repositories (mavenLocal) are untouched.
+    tasks.withType<PublishToMavenRepository>().configureEach {
+        val task = this
+        doFirst {
+            if (task.repository.name == "central") {
+                centralUploadRefusal("Upload of ${task.path} to Maven Central")
+                    ?.let { throw GradleException(it) }
+            }
+        }
+    }
+
     // §0.4.498 — the gate that makes "Central-ready" a checked claim instead of
     // a commit message. It reads the POMs this build actually generates and
     // asserts the six elements Central rejects a bundle for omitting, plus the
@@ -212,11 +287,16 @@ subprojects {
             .associate { pub -> pub.name to pub.artifacts.map { it.classifier } }
     }
     val sourcesJarTaskNames = provider { tasks.names.filter { it.endsWith("sourcesJar") } }
+    val moduleMetadataTasks = tasks.withType<GenerateModuleMetadata>()
+    val moduleFiles = provider { moduleMetadataTasks.map { it.outputFile.get().asFile } }
     val modulePath = path
+    val prefix = tlalocArtifactPrefix
+    val tlalocGroup = "io.github.pedronahum"
     val verifyPomMetadata = tasks.register("verifyPomMetadata") {
         group = "verification"
         description = "Assert every generated POM carries the metadata Maven Central mandates"
         dependsOn(pomTasks)
+        dependsOn(moduleMetadataTasks)
         val poms = pomFiles
         val javadocArtifacts = publicationJavadocArtifacts
         val sourcesTasks = sourcesJarTaskNames
@@ -310,25 +390,153 @@ subprojects {
                     )
                 }
             }
-            pomTasks.mapNotNull { pomTask ->
-                pomTask.destination.resolveSibling(
-                    pomTask.destination.name.replace(Regex("\\.pom$"), ".module"),
-                ).takeIf { it.isFile }
-            }.forEach { moduleFile ->
+            // Read from the GenerateModuleMetadata outputs (build/publications/<pub>/module.json).
+            val moduleJsons = moduleFiles.get().filter { it.isFile }
+            if (moduleJsons.isEmpty()) {
+                throw GradleException(
+                    "$modulePath: verifyPomMetadata found no generated Gradle module metadata, " +
+                        "so the checks on it would pass by vacuity.",
+                )
+            }
+            moduleJsons.forEach { moduleFile ->
                 val text = moduleFile.readText()
                 val offenders = forbiddenGroups.filter { it in text }
                 if (offenders.isNotEmpty()) {
                     throw GradleException(
-                        "$modulePath: ${moduleFile.name} (Gradle module metadata, which Gradle " +
+                        "$modulePath: ${moduleFile.path} (Gradle module metadata, which Gradle " +
                             "consumers prefer over the POM) names " +
                             "${offenders.joinToString(", ")}. See the POM check above for why " +
                             "that breaks a documented promise.",
                     )
                 }
             }
+            // Every Tlaloc coordinate a consumer can resolve carries the `tlaloc-`
+            // prefix: the publication's own artifact id, each dependency on another
+            // Tlaloc module, and the KMP root's `available-at` pointer to its JVM
+            // artifact. One unprefixed id would send a consumer to a coordinate that
+            // is never published.
+            val unprefixed = mutableListOf<String>()
+            generated.forEach { pom ->
+                val root = DocumentBuilderFactory.newInstance()
+                    .also { it.isNamespaceAware = false }
+                    .newDocumentBuilder()
+                    .parse(pom)
+                    .documentElement
+                fun direct(e: Element, tag: String): String? =
+                    (0 until e.childNodes.length).mapNotNull { e.childNodes.item(it) as? Element }
+                        .firstOrNull { it.tagName == tag }?.textContent?.trim()
+                direct(root, "artifactId")?.takeUnless { it.startsWith(prefix) }
+                    ?.let { unprefixed += "${pom.path}: artifactId $it" }
+                val deps = root.getElementsByTagName("dependency")
+                (0 until deps.length).mapNotNull { deps.item(it) as? Element }
+                    .filter { direct(it, "groupId") == tlalocGroup }
+                    .mapNotNull { direct(it, "artifactId") }
+                    .filterNot { it.startsWith(prefix) }
+                    .forEach { unprefixed += "${pom.path}: dependency $tlalocGroup:$it" }
+            }
+            moduleJsons.forEach { moduleFile ->
+                @Suppress("UNCHECKED_CAST")
+                val json = groovy.json.JsonSlurper().parse(moduleFile) as Map<String, Any?>
+                fun visit(node: Any?) {
+                    when (node) {
+                        is Map<*, *> -> {
+                            val g = node["group"]
+                            val m = node["module"]
+                            if (g == tlalocGroup && m is String && !m.startsWith(prefix)) {
+                                unprefixed += "${moduleFile.path}: module $g:$m"
+                            }
+                            node.values.forEach { visit(it) }
+                        }
+                        is List<*> -> node.forEach { visit(it) }
+                    }
+                }
+                visit(json)
+            }
+            if (unprefixed.isNotEmpty()) {
+                throw GradleException(
+                    "$modulePath: published metadata names Tlaloc coordinates without the " +
+                        "'$prefix' prefix, which are not what this build publishes: " +
+                        unprefixed.joinToString("; "),
+                )
+            }
         }
     }
     tasks.named("check") { dependsOn(verifyPomMetadata) }
+}
+
+// Upload every publication to the OSSRH Staging API, then hand the staged upload
+// to the Central Portal. With the default publishing type (user_managed) the
+// deployment waits in the Portal for a person to press Publish.
+//
+//   ./gradlew releaseToCentralPortal --no-parallel
+//
+// `centralPortalHandoff` alone repeats the POST without uploading again (for
+// example after a network failure on the POST itself).
+val centralPublishTasks = subprojects
+    .filter { it.name != "benchmarks" }
+    .map { "${it.path}:publishAllPublicationsToCentralRepository" }
+
+val centralPortalHandoff = tasks.register("centralPortalHandoff") {
+    group = "publishing"
+    description = "POST the staged OSSRH upload to the Central Portal (needs credentials)"
+    mustRunAfter(centralPublishTasks)
+    val version = rootProject.version.toString()
+    val publishingType = providers.gradleProperty("centralPublishingType").orElse("user_managed")
+    val user = centralUsername
+    val pass = centralPassword
+    val base = centralStagingApi
+    val namespace = centralNamespace
+    doLast {
+        if (version.endsWith("SNAPSHOT")) {
+            throw GradleException(
+                "centralPortalHandoff refused: $version is a SNAPSHOT. Snapshots go to " +
+                    "the Central snapshot repository directly and have no Portal handoff.",
+            )
+        }
+        centralUploadRefusal("centralPortalHandoff", needsSigningKey = false)?.let { throw GradleException(it) }
+        val type = publishingType.get()
+        if (type !in centralPublishingTypes) {
+            throw GradleException(
+                "centralPortalHandoff refused: centralPublishingType=$type is not one of " +
+                    "${centralPublishingTypes.sorted().joinToString(", ")}.",
+            )
+        }
+        val token = java.util.Base64.getEncoder()
+            .encodeToString("${user.get()}:${pass.get()}".toByteArray(Charsets.UTF_8))
+        val uri = java.net.URI.create(
+            "$base/manual/upload/defaultRepository/$namespace?publishing_type=$type",
+        )
+        val request = java.net.http.HttpRequest.newBuilder(uri)
+            .header("Authorization", "Bearer $token")
+            .timeout(java.time.Duration.ofMinutes(5))
+            .POST(java.net.http.HttpRequest.BodyPublishers.noBody())
+            .build()
+        logger.lifecycle("POST $uri")
+        val response = java.net.http.HttpClient.newHttpClient()
+            .send(request, java.net.http.HttpResponse.BodyHandlers.ofString())
+        logger.lifecycle("HTTP ${response.statusCode()} ${response.body()}")
+        if (response.statusCode() !in 200..299) {
+            throw GradleException(
+                "centralPortalHandoff: the Staging API answered HTTP ${response.statusCode()}: " +
+                    "${response.body()}. The upload is staged but has not reached the Portal.",
+            )
+        }
+        logger.lifecycle(
+            if (type == "user_managed") {
+                "Handed to the Central Portal. Review the deployment at " +
+                    "https://central.sonatype.com/publishing/deployments and press Publish."
+            } else {
+                "Handed to the Central Portal with publishing_type=$type."
+            },
+        )
+    }
+}
+
+tasks.register("releaseToCentralPortal") {
+    group = "publishing"
+    description = "Upload every publication to Maven Central staging, then hand it to the Portal"
+    dependsOn(centralPublishTasks)
+    dependsOn(centralPortalHandoff)
 }
 
 // §0.4.503 — THE JVM TARGET SPLIT, and the gate that makes it a checked fact.

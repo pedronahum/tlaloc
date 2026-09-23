@@ -221,26 +221,11 @@ JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :maestro:exportServingArtifact \
 ```
 
 Six entries and their bodies land in that directory (§0.4.477). The task is
-a `JavaExec` over the **jvmMain** runtime classpath — not jvmTest, because
+a `JavaExec` over the **jvmMain** runtime classpath plus the unpublished
+`tools` compilation that holds `main` — not jvmTest, because
 if the exporter needed a test fixture the artifact would be a test fixture,
 and the claim that the directory is the deployment would be a claim about
 the test source set.
-
-<details><summary>The hand-rolled classpath this replaced (§0.4.469–476)</summary>
-
-The exporter is `io.tlaloc.maestro.serving.ServingArtifactWriter.export`,
-and the reference model's entry point is
-`io.tlaloc.maestro.serving.ReferenceDecodeGraphKt.main`:
-
-```bash
-JAVA_HOME=~/.local/jdks/jdk-25.0.3+9 ./gradlew :maestro:jvmJar
-CP=$(find . -path '*/build/libs/*-jvm-*.jar' -o -path '*/build/libs/*.jar' | tr '\n' ':')
-CP="$CP$(find ~/.gradle/caches/modules-2 -name 'kotlin-stdlib-2*.jar' | head -1)"
-"$JAVA_HOME/bin/java" -cp "$CP" io.tlaloc.maestro.serving.ReferenceDecodeGraphKt \
-  /tmp/tlaloc-serving-artifact
-```
-
-</details>
 
 The export test also writes one into a temp directory on every run, and is
 still the thing that certifies the bytes:

@@ -13,12 +13,12 @@ kotlin {
 val gradientSourceDir: Directory = layout.buildDirectory.dir("gradients").get()
 
 dependencies {
-    implementation("io.github.pedronahum:core:0.1.0-alpha01")
-    implementation("io.github.pedronahum:ir:0.1.0-alpha01")
-    implementation("io.github.pedronahum:autograd:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
     // The K2 compiler plugin: it is what turns the `grad2 { }` block — loop and
     // all — into synthesized gradient code at compile time.
-    kotlinCompilerPluginClasspath("io.github.pedronahum:compiler-plugin:0.1.0-alpha01")
+    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
 }
 
 // `dumpGradSourceDir` implies `dumpGradSource=true`: every reverse-gradient

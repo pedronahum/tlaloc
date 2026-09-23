@@ -38,13 +38,27 @@ kotlin {
                 }
             }
         }
+        // The exporters' `main` entry points. A separate compilation so the
+        // published jar carries the export API and no command-line programs;
+        // it sees the main compilation and its runtime classpath, not jvmTest's.
+        // Nothing publishes it.
+        compilations.create("tools") {
+            associateWith(this@jvm.compilations.getByName("main"))
+            compileTaskProvider.configure {
+                compilerOptions {
+                    freeCompilerArgs.add("-Xjdk-release=21")
+                }
+            }
+        }
     }
 
     sourceSets {
         commonMain {
             dependencies {
-                implementation(project(":core"))
-                implementation(project(":ir"))
+                // api, not implementation: :core and :ir types appear in this
+                // module's public signatures, so a consumer of it alone can name them.
+                api(project(":core"))
+                api(project(":ir"))
                 implementation(project(":autograd"))
                 implementation(project(":stablehlo"))
             }
@@ -82,7 +96,7 @@ tasks.withType<Test>().configureEach {
  * serving artifact directory outside a test.
  *
  * INFERENCE_SERVING_AUDIT.md §5 carried this as WRITTEN-BUT-UNCERTIFIED
- * item 3: `ReferenceDecodeGraphKt.main` has existed since H3a and is the
+ * item 3: the reference exporter's `main` has existed since H3a and is the
  * documented entry point, but nothing assembled its classpath, so the only
  * *certified* way to obtain an artifact was to be inside
  * `ServingArtifactExportRunTest`. That is fine for a test and useless for a
@@ -91,8 +105,9 @@ tasks.withType<Test>().configureEach {
  *
  *     ./gradlew :maestro:exportServingArtifact -PoutDir=/abs/path
  *
- * The classpath is the jvmMain compilation's runtime classpath — NOT
- * jvmTest's. The distinction is the point: if the exporter needed a test
+ * The classpath is the `tools` compilation's: jvmMain's output and runtime
+ * classpath plus the `main` entry point, which is kept out of the published jar.
+ * NOT jvmTest's. The distinction is the point: if the exporter needed a test
  * fixture to run, the artifact would be a test fixture, and H3a's whole
  * claim (the directory is the deployment) would be a claim about the test
  * source set.
@@ -100,10 +115,10 @@ tasks.withType<Test>().configureEach {
 val exportServingArtifact by tasks.registering(JavaExec::class) {
     group = "tlaloc"
     description = "Write the reference serving artifact (manifest + StableHLO bodies) to -PoutDir"
-    val jvmMain = kotlin.jvm().compilations.getByName("main")
-    dependsOn(jvmMain.compileTaskProvider)
-    classpath(jvmMain.output.allOutputs, jvmMain.runtimeDependencyFiles)
-    mainClass.set("io.tlaloc.maestro.serving.ReferenceDecodeGraphKt")
+    val tools = kotlin.jvm().compilations.getByName("tools")
+    dependsOn(tools.compileTaskProvider)
+    classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
+    mainClass.set("io.tlaloc.maestro.serving.ExportReferenceServingArtifactKt")
     // §0.4.503 — the launcher is a KNOB now, defaulting to the JDK this repository
     // builds with. `-PexportJdk=21` is the certification lane for `:maestro`'s new
     // 21 bytecode target: the export then runs on a JDK 21 against the jvmMain
@@ -149,10 +164,10 @@ val exportServingArtifact by tasks.registering(JavaExec::class) {
 val exportLlamaServingArtifact by tasks.registering(JavaExec::class) {
     group = "tlaloc"
     description = "Write a serving artifact for a real HF Llama checkpoint (-PckptDir) to -PoutDir"
-    val jvmMain = kotlin.jvm().compilations.getByName("main")
-    dependsOn(jvmMain.compileTaskProvider)
-    classpath(jvmMain.output.allOutputs, jvmMain.runtimeDependencyFiles)
-    mainClass.set("io.tlaloc.maestro.serving.HfLlamaServingExportKt")
+    val tools = kotlin.jvm().compilations.getByName("tools")
+    dependsOn(tools.compileTaskProvider)
+    classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
+    mainClass.set("io.tlaloc.maestro.serving.ExportLlamaServingArtifactKt")
     maxHeapSize = "8g"
     // §0.4.503 — `-PexportJdk=<n>`, as on [exportServingArtifact].
     javaLauncher.set(

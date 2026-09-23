@@ -1,6 +1,6 @@
 # Tlaloc Maestro descriptor format
 
-**Status:** Layer 2 §0.4.243+. **⚠ Deprecated as of §0.4.249** — Layer 2.5 vendored Netflix/maestro and registered `Tlaloc` as a first-class step type (see `third-party/maestro/maestro-tlaloc/`). The masquerade approach this document describes (every Tlaloc step shaped as `type: "Kubernetes"`) is replaced by direct `type: "Tlaloc"` workflows. New code should author workflows from the templates under `third-party/maestro/maestro-server/src/test/resources/samples/sample-tlaloc-*.json`. The `MaestroDescriptor.emit()` method and `StubExecutor` class remain functional with `@Deprecated` annotations; removal target is post-Layer-3.
+**Status: removed.** `MaestroDescriptor` and `StubExecutor` were deleted from `:maestro` before the first published release (0.1.0-alpha01). Tlaloc is a first-class Maestro step type (`third-party/maestro/maestro-tlaloc/`), so workflows use `type: "Tlaloc"` steps directly; templates are under `third-party/maestro/maestro-server/src/test/resources/samples/sample-tlaloc-*.json`. The Kubernetes-masquerade format described below is kept as design history.
 
 The remainder of this document captures the Layer-2 design rationale for historical reference. The L2.5.5 audit (`docs/audits/maestro_first_class_audit.md`) documents the migration path.
 

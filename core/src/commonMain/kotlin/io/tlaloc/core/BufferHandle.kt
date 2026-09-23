@@ -63,8 +63,8 @@ value class BufferHandle<T : DTensor<*, *>, M : Mesh>(val ref: HandleRef) : Auto
  * Layer 2 v1 carries the materialized [DTensor] (or whatever the producing
  * step actually computes) directly in [payload]. This is a deliberate v1
  * shortcut — Layer 3 introduces a real runtime buffer pool (PJRT / IREE
- * device buffers) that the stub executor and the runtime image can both
- * point at. Tracked as an open question in the audit.
+ * device buffers) that the runtime image can point at. Tracked as an open
+ * question in the audit.
  *
  * # Refcount semantics
  *

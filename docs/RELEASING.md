@@ -1,158 +1,141 @@
 # Releasing Tlaloc
 
-**Status: WRITTEN AND DRY-RUNNABLE, NEVER RUN.** Every command below has been
-executed except the two that talk to Sonatype. There are no Central credentials
-and no signing key on the machine this was wired on, and a Central upload is
-irreversible — so the last two steps are a procedure, not a certified path.
-Treat the first release as the thing that certifies this document, and correct it
-in the same commit that performs it.
+Tlaloc publishes to Maven Central under the group `io.github.pedronahum`. Every
+artifact id starts with `tlaloc-`:
 
-What *is* certified (§0.4.498): the POMs carry everything Central mandates, every
-publication carries a javadoc jar and a sources jar, and `verifyPomMetadata`
-fails the build by name if that stops being true. What is not: that Central
-accepts the bundle.
+| Module | Artifact (Gradle resolves the `-jvm` one for you) |
+|---|---|
+| `:core` | `tlaloc-core`, `tlaloc-core-jvm` |
+| `:ir` | `tlaloc-ir`, `tlaloc-ir-jvm` |
+| `:autograd` | `tlaloc-autograd`, `tlaloc-autograd-jvm` |
+| `:nn` | `tlaloc-nn`, `tlaloc-nn-jvm` |
+| `:stablehlo` | `tlaloc-stablehlo`, `tlaloc-stablehlo-jvm` |
+| `:maestro` | `tlaloc-maestro`, `tlaloc-maestro-jvm` |
+| `:runtime-pjrt` | `tlaloc-runtime-pjrt`, `tlaloc-runtime-pjrt-jvm` |
+| `:runtime-iree` | `tlaloc-runtime-iree`, `tlaloc-runtime-iree-jvm` |
+| `:runtime-cuda` | `tlaloc-runtime-cuda`, `tlaloc-runtime-cuda-jvm` |
+| `:kptx` | `tlaloc-kptx`, `tlaloc-kptx-jvm` |
+| `:compiler-plugin` | `tlaloc-compiler-plugin` |
 
-## 0. What Central requires, and where each piece comes from
+The Gradle project names have no prefix; the root `build.gradle.kts` adds it to
+every publication.
+
+## What Central requires, and where it comes from
 
 | Requirement | Where it is satisfied |
 |---|---|
-| `groupId` you control (`io.github.pedronahum`) | a Central namespace verification, which for an `io.github.*` namespace is automatic against the GitHub account — see §4 |
-| `<name>`, `<description>`, `<url>` | `moduleDescriptions` + the `pom { }` block in the root `build.gradle.kts` |
-| `<licenses>`, `<developers>`, `<scm>` | same `pom { }` block |
+| a verified namespace (`io.github.pedronahum`) | the Central Portal, verified against the GitHub account |
+| `<name>`, `<description>`, `<url>`, `<licenses>`, `<developers>`, `<scm>` | `moduleDescriptions` and the `pom { }` block in the root `build.gradle.kts` |
 | a `-sources.jar` per artifact | the KMP plugin; `withSourcesJar()` in `:compiler-plugin` |
-| a `-javadoc.jar` per artifact | `dokkaJavadocJar` (Dokka HTML — see the note in `libs.versions.toml`) |
-| PGP signature per file | `signing` with an in-memory key (§2) |
+| a `-javadoc.jar` per artifact | `dokkaJavadocJar` (Dokka HTML) |
+| a PGP signature per file | `signing` with an in-memory key |
 | no `-SNAPSHOT` version | `version` in the root `build.gradle.kts` |
 
-The gate: `./gradlew verifyPomMetadata` — or just `./gradlew test`, which depends
-on it through `check`.
+`./gradlew verifyPomMetadata` (part of `./gradlew test`) fails the build if a POM
+misses one of these elements, a publication lacks a javadoc or sources jar, Symja
+appears in a POM or `.module` file, or any Tlaloc coordinate in the published
+metadata lacks the `tlaloc-` prefix.
 
-## 1. Pick the version and record it
+## 1. Pick the version
 
-1. Set `version` in the root `build.gradle.kts` (one place; `allprojects` reads
-   `rootProject.version`).
-2. Update the coordinate everywhere it is *written out* for a reader: the README's
-   Quickstart and Installation sections, `docs/GETTING_STARTED.md`, and each
-   `examples/*/build.gradle.kts` and `examples/internals/*/build.gradle.kts`.
-   `grep -rn '<old-version>' --include='*.md' --include='*.kts' .` finds them all;
-   §0.4.498 found 16 files this way.
-3. Add the `CHANGELOG.md` entry, including what broke. Alpha releases are allowed
-   to break things (`COMPATIBILITY.md`); they are not allowed to break things
-   silently.
-4. `bash scripts/onboarding-smoke.sh` — this is the exact path a new user walks,
-   and it fails if step 2 was done partially.
+1. Set `version` in the root `build.gradle.kts`.
+2. Update the coordinate where it is written out: `README.md`,
+   `docs/GETTING_STARTED.md`, `examples/**/build.gradle.kts`.
+   `grep -rn '<old-version>' --include='*.md' --include='*.kts' .` finds them.
+3. Add the `CHANGELOG.md` entry, including what broke.
+4. `bash scripts/onboarding-smoke.sh` walks the path a new user takes and fails
+   if step 2 was partial.
 
-## 2. Credentials (none of which live in the repository)
+## 2. Credentials
 
-Signing key, either as Gradle properties in `~/.gradle/gradle.properties` or as
-environment variables:
+None of these live in the repository. Put them in `~/.gradle/gradle.properties`
+(never the tracked `gradle.properties` in this repository) or in the
+environment:
 
-```
-signingInMemoryKey=<ASCII-armoured private key, newlines as \n>
-signingInMemoryKeyPassword=<passphrase>
-# or
-SIGNING_IN_MEMORY_KEY / SIGNING_IN_MEMORY_KEY_PASSWORD
-```
+| Gradle property | Environment variable | What |
+|---|---|---|
+| `signingInMemoryKey` | `SIGNING_IN_MEMORY_KEY` | ASCII-armoured private key, newlines as `\n` |
+| `signingInMemoryKeyPassword` | `SIGNING_IN_MEMORY_KEY_PASSWORD` | its passphrase |
+| `centralUsername` | `CENTRAL_USERNAME` | Central Portal user-token username |
+| `centralPassword` | `CENTRAL_PASSWORD` | Central Portal user-token password |
 
-`bash scripts/setup-signing-key.sh` does all of this — generates the key, pushes
-the public half to `keys.openpgp.org` and `keyserver.ubuntu.com`, exports the
-private half folded to one line, and writes both properties. **Run it in a real
-terminal**: it prompts for a passphrase on a TTY and refuses to run without one,
-so that the passphrase cannot be captured by an agent session or a CI log. It
-prints the key id and nothing secret.
+`bash scripts/setup-signing-key.sh` generates a key, publishes the public half to
+`keys.openpgp.org` and `keyserver.ubuntu.com`, and writes both signing
+properties. Run it in a terminal: it prompts for the passphrase on a TTY.
 
-By hand, if you prefer: `gpg --full-generate-key`, then
-`gpg --armor --export-secret-keys <KEY_ID> | sed -z 's/\n/\\n/g'` for the
-property value, then `gpg --keyserver hkps://keys.openpgp.org --send-keys <KEY_ID>`
-— Central verifies a signature by looking the key up, so an unpublished public
-half fails the upload even though the signature itself is valid.
+The Central token comes from **View Account → Generate User Token** in the
+Portal. Both halves are generated strings; neither is the GitHub account name.
+Generating a new token invalidates the old one.
 
-A signing key is what the `Sign` tasks need to exist at all. Without one,
-`publishAllPublicationsToCentralRepository` runs and uploads **unsigned**
-artifacts, and Central rejects the bundle — `--dry-run` showing zero `Sign` tasks
-is the cheap way to notice before the upload.
-
-Central Portal credentials (a user token, not the account password):
-
-```
-centralUsername / centralPassword
-# or
-CENTRAL_USERNAME / CENTRAL_PASSWORD
-```
-
-**Both are optional and their absence is a no-op.** With no key, nothing is
-signed and no `Sign` task exists; with no credentials, the `central` repository's
-publish task exists but fails at the wire. A contributor's
-`./gradlew publishToMavenLocal` and the GitHub `build` lane must keep working
-with neither, and that is asserted by the fact that both run that way today.
+`publishToMavenLocal` needs none of these. An upload to Central refuses before
+sending anything, naming what is missing, if the signing key or either
+credential is absent. A blank value counts as absent, so
+`-PsigningInMemoryKey=` on the command line switches off a key set in
+`~/.gradle/gradle.properties`.
 
 ## 3. Rehearse locally
 
 ```bash
-./gradlew test --rerun-tasks                  # the suite, genuinely re-executed
-bash scripts/count-tests.sh                   # must not go down
-./gradlew publishToMavenLocal -x test         # the real publication, to ~/.m2
-bash scripts/onboarding-smoke.sh              # a consumer resolves it
-./gradlew publishAllPublicationsToCentralRepository --dry-run   # the task graph, no upload
+./gradlew test --rerun-tasks
+bash scripts/count-tests.sh                      # must not go down
+rm -rf ~/.m2/repository/io/github/pedronahum     # no stale artifacts
+./gradlew publishToMavenLocal
+bash scripts/onboarding-smoke.sh
+./gradlew releaseToCentralPortal --dry-run       # the task graph; nothing is sent
 ```
 
-Then read a POM with your own eyes, because this is the step that would otherwise
-be taken on faith:
+Then read a POM:
 
 ```bash
-cat ~/.m2/repository/io/tlaloc/core-jvm/<version>/core-jvm-<version>.pom
-ls  ~/.m2/repository/io/tlaloc/core-jvm/<version>/
+v=0.1.0-alpha01
+cat ~/.m2/repository/io/github/pedronahum/tlaloc-core-jvm/$v/tlaloc-core-jvm-$v.pom
+ls  ~/.m2/repository/io/github/pedronahum/tlaloc-core-jvm/$v/
 ```
 
-You are looking for `<name>`, `<description>`, `<url>`, `<licenses>`,
-`<developers>`, `<scm>`, and both a `-sources.jar` and a `-javadoc.jar`.
+It should carry `<name>`, `<description>`, `<url>`, `<licenses>`,
+`<developers>` and `<scm>`, next to a `-sources.jar`, a `-javadoc.jar` and an
+`.asc` for every file.
 
-## 4. The two steps that have never run
+## 4. Release
 
-1. **Verify the `io.github.pedronahum` namespace** at
-   [central.sonatype.com](https://central.sonatype.com). Log in with GitHub; an
-   `io.github.<account>` namespace verifies against that account, so there is no
-   DNS record and no domain to own.
+Either from a machine with the credentials:
 
-   **§0.4.508 made this decision.** The group id was `io.tlaloc` until then,
-   which would have required a TXT record on `tlaloc.io` — a domain this project
-   does not own. It was changed before publishing rather than after, because a
-   group id is the one part of a coordinate that cannot be corrected later
-   without breaking every consumer, and there are none yet.
+```bash
+./gradlew releaseToCentralPortal --no-parallel
+```
 
-   **Three names are in play and two of them are not credentials.** Getting this
-   wrong is the first thing that happens to anyone doing this step:
+or from GitHub Actions: push a tag `v<version>` and
+[`release.yml`](../.github/workflows/release.yml) runs. It checks that the tag
+equals `v` + the project version, runs `./gradlew test`, then
+`releaseToCentralPortal`. It reads the four credentials from repository secrets
+named `SIGNING_IN_MEMORY_KEY`, `SIGNING_IN_MEMORY_KEY_PASSWORD`,
+`CENTRAL_USERNAME` and `CENTRAL_PASSWORD`. It can also be started by hand
+(workflow_dispatch) on a tag; on a branch it refuses.
 
-   | | value | what it is |
-   |---|---|---|
-   | GitHub account | `pedronahum` | how you log in to the Portal |
-   | Namespace (the groupId) | `io.github.pedronahum` | derived from the account; already in the build |
-   | Token username | a generated opaque string | `centralUsername` — **not** the account name |
+`releaseToCentralPortal` does two things:
 
-   Credentials: **Generate User Token** (avatar → View Account) mints a
-   username/password PAIR, both random strings. Neither is the GitHub account name
-   and neither is the Portal login. It prints them as a Maven `<server>` block;
-   `<username>` is `centralUsername` and `<password>` is `centralPassword`. The
-   pair is shown ONCE, and generating a new token invalidates the previous one.
+1. `publishAllPublicationsToCentralRepository` in every module uploads the
+   signed artifacts to the OSSRH Staging API
+   (`ossrh-staging-api.central.sonatype.com`).
+2. `centralPortalHandoff` sends
+   `POST /manual/upload/defaultRepository/io.github.pedronahum?publishing_type=user_managed`
+   with the same token. The Staging API does not forward an upload to the Portal
+   without this call, and it must come from the same IP address as the upload,
+   which is why both run in one invocation. `--no-parallel` keeps the uploads in
+   one sequence.
 
-   They go in `~/.gradle/gradle.properties`. **Not** in this repository's own
-   `gradle.properties`, which is tracked by git — a token pasted there is
-   committed and pushed. §2 covers the signing key.
-2. **Upload:**
+If the POST fails after a successful upload, rerun `./gradlew centralPortalHandoff`
+alone from the same machine. `-PcentralPublishingType=automatic` releases without
+the manual step below; the default is `user_managed`.
 
-   ```bash
-   ./gradlew publishAllPublicationsToCentralRepository
-   ```
-
-   then, in the Central Portal, inspect the staged deployment and **Publish**.
-   A published version is immutable and cannot be deleted
-   (`COMPATIBILITY.md`), so the rehearsal in §3 is the only chance to be wrong
-   cheaply.
+Then open <https://central.sonatype.com/publishing/deployments>, check the
+deployment and press **Publish**. A published version is immutable and cannot be
+deleted (`COMPATIBILITY.md`).
 
 ## 5. After
 
-- Tag: `git tag v<version> && git push --tags`.
-- Add the release notes from `CHANGELOG.md` to the GitHub release.
-- Correct this document where it was wrong, and move the Tier 0 "release" row in
-  [ALPHA_PLAN.md](ALPHA_PLAN.md) from WRITTEN to CERTIFIED with the date and the
-  artifact URL. That row is what keeps the repository's own claims honest.
+- If released locally, tag it: `git tag v<version> && git push origin v<version>`.
+  (Pushing the tag starts `release.yml`; skip that push, or cancel the run, if
+  the version is already on Central.)
+- Copy the `CHANGELOG.md` entry into the GitHub release.
+- Record the release (date and artifact URL) in [ALPHA_PLAN.md](ALPHA_PLAN.md).

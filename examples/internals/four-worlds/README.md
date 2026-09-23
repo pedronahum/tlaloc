@@ -8,7 +8,7 @@ one an ordinary Kotlin receiver type:
 | **Kernel** | the maths — elementwise ops, matmuls, reductions | the body lambda of `program { }` |
 | **Orchestration** | building Kernel bodies into shippable artifacts | `Tlaloc.program(...)` |
 | **Program** | composing artifacts into a graph | `Tlaloc.workflow { }` |
-| **Cluster** | running the graph on real hardware | the emitted Maestro descriptor |
+| **Cluster** | running the graph on real hardware | each step's StableHLO artifact, run by a Maestro `Tlaloc` step |
 
 Two consequences, both visible in this example:
 
@@ -38,8 +38,8 @@ Two consequences, both visible in this example:
   [docs/GETTING_STARTED.md §4b](../../../docs/GETTING_STARTED.md).
 
 The run prints: one step built and executed; two steps composed with a handle
-flowing between them (and the recorded edge); and the Maestro JSON descriptor a
-real cluster ingests.
+flowing between them (and the recorded edge); and each step's StableHLO
+artifact, which a Maestro `Tlaloc` step runs on a cluster.
 
 ## Running it
 
@@ -75,8 +75,9 @@ content-addressed over the emitted StableHLO, so it is stable across runs:
     (reshard kind is None because both steps sit on Mesh0 with the same
      axis names; a mesh change or a transpose records an explicit edge.)
 
-[3] the Maestro descriptor a cluster would ingest (2167 chars, first 240):
-    {"properties":{"owner":"tlaloc"},"workflow":{"id":"tlaloc_activate_then_score","name":"activate_then_score","steps":[{"step":{"id":"activate","type":"Kubernetes","params":{"image":{"value":"tlaloc-runtime:0.0.1","type":"STRING"},"tlaloc_art...
+[3] the artifacts a Maestro `Tlaloc` step would run
+    activate: 212 bytes of StableHLO, bodyHash 1597799e2a376bf503ab76910d7dba696f99a02dd5bc09d36ee311456ce4ef4b
+    score: 335 bytes of StableHLO, bodyHash 44d9225a49de4895ce151d24ac25d78e09bc2cd75751f63469e74417501ed624
 
 [4] the program that does NOT compile
 
@@ -130,9 +131,8 @@ All of it is in [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt):
   `maestro` and nothing else. The plugin's role in the four worlds is
   compile-time scope discipline, which is what the commented-out block
   exercises.
-- **No cluster is contacted.** `MaestroDescriptor.emit` produces the JSON; a
-  real Maestro instance would be the thing that consumes it and launches each
-  step's artifact as a Kubernetes job. Nothing in this example needs a network.
+- **No cluster is contacted.** The example prints each step's StableHLO body
+  and manifest hash; a Maestro workflow's `Tlaloc` step is what would run them.
+  Nothing in this example needs a network.
 - The value falls out of the workflow because `step(...)` runs each artifact's
-  shim in process as it composes. `StubExecutor`, which older snippets used for
-  this, is deprecated and deliberately not used here.
+  shim in process as it composes.

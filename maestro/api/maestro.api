@@ -29,14 +29,6 @@ public final class io/tlaloc/maestro/BackendTarget$Companion {
 	public final fun fromJson (Ljava/lang/String;)Lio/tlaloc/maestro/BackendTarget;
 }
 
-public final class io/tlaloc/maestro/MaestroDescriptor {
-	public static final field DEFAULT_RESHARD_IMAGE Ljava/lang/String;
-	public static final field DEFAULT_RUNTIME_IMAGE Ljava/lang/String;
-	public static final field INSTANCE Lio/tlaloc/maestro/MaestroDescriptor;
-	public final fun emit (Lio/tlaloc/maestro/Workflow;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
-	public static synthetic fun emit$default (Lio/tlaloc/maestro/MaestroDescriptor;Lio/tlaloc/maestro/Workflow;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
-}
-
 public final class io/tlaloc/maestro/MaestroStep {
 	public fun <init> (Ljava/lang/String;Lio/tlaloc/maestro/ProgramManifest;[BLio/tlaloc/core/Mesh;Lkotlin/jvm/functions/Function1;)V
 	public final fun getBody ()[B
@@ -119,11 +111,6 @@ public final class io/tlaloc/maestro/SerializedBufferHandle$Companion {
 	public final fun write-DF5QRW8 (Lio/tlaloc/core/HandleRef;Ljava/lang/String;Lio/tlaloc/core/Mesh;Lio/tlaloc/maestro/TypeDescriptor;Ljava/lang/String;)Lio/tlaloc/maestro/SerializedBufferHandle;
 }
 
-public final class io/tlaloc/maestro/StubExecutor {
-	public fun <init> ()V
-	public final fun run (Lio/tlaloc/maestro/Workflow;Ljava/lang/Object;)Ljava/lang/Object;
-}
-
 public final class io/tlaloc/maestro/TypeDescriptor {
 	public static final field Companion Lio/tlaloc/maestro/TypeDescriptor$Companion;
 	public fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V
@@ -192,10 +179,6 @@ public final class io/tlaloc/maestro/serving/HfLlamaServingExport {
 	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/HfLlamaServingExport;Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
 }
 
-public final class io/tlaloc/maestro/serving/HfLlamaServingExportKt {
-	public static final fun main ([Ljava/lang/String;)V
-}
-
 public final class io/tlaloc/maestro/serving/ReferenceDecodeGraph {
 	public static final field INSTANCE Lio/tlaloc/maestro/serving/ReferenceDecodeGraph;
 	public static final field MODEL_HASH Ljava/lang/String;
@@ -204,10 +187,6 @@ public final class io/tlaloc/maestro/serving/ReferenceDecodeGraph {
 	public final fun exportTo (Ljava/nio/file/Path;)Lio/tlaloc/maestro/serving/ServingManifest;
 	public final fun getMODEL ()Lio/tlaloc/ir/inference/DecodeModelShape;
 	public final fun getPOLICY ()Lio/tlaloc/ir/inference/DecodeBucketPolicy;
-}
-
-public final class io/tlaloc/maestro/serving/ReferenceDecodeGraphKt {
-	public static final fun main ([Ljava/lang/String;)V
 }
 
 public final class io/tlaloc/maestro/serving/ServingArtifactWriter {

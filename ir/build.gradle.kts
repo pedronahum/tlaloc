@@ -43,7 +43,9 @@ kotlin {
     sourceSets {
         commonMain {
             dependencies {
-                implementation(project(":core"))
+                // api, not implementation: :core's DType and shapes appear in this
+                // module's public signatures, so a consumer of it alone can name them.
+                api(project(":core"))
             }
         }
         commonTest {

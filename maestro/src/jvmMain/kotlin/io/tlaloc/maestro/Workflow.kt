@@ -33,9 +33,9 @@ import io.tlaloc.core.ProgramScope
  *
  * # Runtime semantics
  *
- * v1 executes the steps in order via the recorded shim functions. The
- * stub executor (Layer 2.3) is a thin wrapper around [Workflow.run]; the
- * real Maestro executor consumes the [WorkflowDescriptor] (Layer 2.3).
+ * v1 executes the steps in order via the recorded shim functions as the
+ * workflow is composed. A Maestro deployment runs each step's [MaestroStep.body]
+ * through the `Tlaloc` step type in `third-party/maestro/maestro-tlaloc`.
  */
 class Workflow(
     val name: String,

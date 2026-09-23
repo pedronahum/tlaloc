@@ -28,8 +28,9 @@ kotlin {
                 // DxirType (:ir), DType (:core), and the StableHLO emit
                 // pipeline (:stablehlo) so runOnPjrt can take a
                 // DxirFunction directly.
+                // :ir is api: runOnPjrt and PjrtSession take a DxirFunction.
                 implementation(project(":core"))
-                implementation(project(":ir"))
+                api(project(":ir"))
                 implementation(project(":stablehlo"))
                 // KPTX v1.4 — kernel dispatch inside PJRT executables needs
                 // the CUDA driver bindings (cuModuleLoadData / cuLaunchKernel).

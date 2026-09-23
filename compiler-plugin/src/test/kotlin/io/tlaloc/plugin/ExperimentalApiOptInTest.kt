@@ -151,7 +151,7 @@ class ExperimentalApiOptInTest {
                 destination = outDir.absolutePath
                 // :core and :ir are on the test JVM's classpath (both are
                 // `implementation` dependencies of :compiler-plugin), which is exactly
-                // what a consumer resolving io.github.pedronahum:core + io.github.pedronahum:ir would have.
+                // what a consumer resolving io.github.pedronahum:tlaloc-core + io.github.pedronahum:tlaloc-ir would have.
                 // NOTE what is absent: any `-opt-in=` argument.
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true

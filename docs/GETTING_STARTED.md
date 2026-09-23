@@ -61,7 +61,7 @@ plugin:io.tlaloc.plugin:unsafeAllowUnsupportedKotlin=true` downgrades the refusa
 to a warning if you want to try it anyway.
 
 **Symja is optional.** `org.matheclipse:matheclipse-core` (**LGPL-3.0**, 8.3 MB)
-used to be a mandatory runtime dependency of `io.github.pedronahum:ir`. It is `compileOnly`
+used to be a mandatory runtime dependency of `io.github.pedronahum:tlaloc-ir`. It is `compileOnly`
 now, so it is not in your dependency graph unless you put it there. You need it
 only to differentiate a loop whose trip count is not a compile-time constant — a
 `for` loop over a `const val` bound is unrolled with no CAS at all. On the day a
@@ -82,10 +82,9 @@ git clone <tlaloc repo> && cd tlaloc
 ```
 
 All **eleven** published modules land under `io.github.pedronahum:*:0.1.0-alpha01`:
-`core`, `ir`, `autograd`, **`nn`**, `stablehlo`, `compiler-plugin`,
-`runtime-pjrt`, `runtime-cuda`, `runtime-iree`, `kptx`, `maestro`. (`nn` — the
-layers and optimizers — was missing from this list until §0.4.505, which is
-awkward for the module a reader most likely wants.) `:benchmarks` is a harness
+`tlaloc-core`, `tlaloc-ir`, `tlaloc-autograd`, **`tlaloc-nn`**, `tlaloc-stablehlo`,
+`tlaloc-compiler-plugin`, `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`,
+`tlaloc-runtime-iree`, `tlaloc-kptx`, `tlaloc-maestro`. `:benchmarks` is a harness
 and publishes nothing.
 
 ## 2. Set up a consumer project
@@ -99,11 +98,11 @@ plugins {
 }
 
 dependencies {
-    implementation("io.github.pedronahum:core:0.1.0-alpha01")
-    implementation("io.github.pedronahum:ir:0.1.0-alpha01")
-    implementation("io.github.pedronahum:autograd:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
     // The K2 plugin: compile-time grad rewriting + compile-time errors.
-    kotlinCompilerPluginClasspath("io.github.pedronahum:compiler-plugin:0.1.0-alpha01")
+    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
 }
 ```
 
@@ -273,10 +272,10 @@ surface, and they are how the marker is checked from outside this repository.
 The quickstart's gradient runs on the JVM. The same DXIR programs
 dispatch to GPUs through:
 
-- **`io.github.pedronahum:runtime-pjrt`** — PJRT-XLA via pure-Kotlin FFM (no JNI,
+- **`io.github.pedronahum:tlaloc-runtime-pjrt`** — PJRT-XLA via pure-Kotlin FFM (no JNI,
   no Python at runtime); F32 and F64. See `PjrtSession`.
-- **`io.github.pedronahum:runtime-iree`** — IREE CPU/CUDA via subprocess facade.
-- **`io.github.pedronahum:kptx`** — hand-written/DSL PTX kernels inside XLA
+- **`io.github.pedronahum:tlaloc-runtime-iree`** — IREE CPU/CUDA via subprocess facade.
+- **`io.github.pedronahum:tlaloc-kptx`** — hand-written/DSL PTX kernels inside XLA
   executables (the escape-hatch tier; see `docs/KPTX_PLAN.md`).
 
 Both GPU runtimes need their toolchains (a JAX-bundled PJRT plugin or

@@ -21,8 +21,8 @@
  *   [1] builds ONE step with `program { }` and runs it through its shim;
  *   [2] composes TWO steps with `workflow { }`, letting a BufferHandle flow
  *       between them, and prints the recorded edge;
- *   [3] emits the Maestro JSON descriptor — the artifact a real cluster
- *       ingests;
+ *   [3] prints each step's StableHLO artifact — what a Maestro `Tlaloc`
+ *       step runs on a cluster;
  *   [4] points at the two programs that do NOT compile.
  */
 // §0.4.505 — THE OPT-IN, and why one line of ceremony is here.
@@ -52,7 +52,6 @@ import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
 import io.tlaloc.core.Tlaloc
 import io.tlaloc.core.hostF32
-import io.tlaloc.maestro.MaestroDescriptor
 import io.tlaloc.maestro.handleOn
 import io.tlaloc.maestro.program
 import io.tlaloc.maestro.workflow
@@ -133,13 +132,15 @@ private fun twoStepWorkflow() {
     println("    (reshard kind is None because both steps sit on Mesh0 with the same")
     println("     axis names; a mesh change or a transpose records an explicit edge.)")
 
-    // The descriptor is the hand-off to the cluster world: a real Maestro
-    // instance ingests this JSON and launches each step's artifact as a
-    // Kubernetes job on hardware matching the step's backend matrix.
-    val descriptor = MaestroDescriptor.emit(wf)
+    // Each step's artifact is the hand-off to the cluster world: a Maestro
+    // workflow's `Tlaloc` step (third-party/maestro/maestro-tlaloc) points at the
+    // StableHLO body and its manifest, and runs it on hardware matching the
+    // step's backend matrix.
     println()
-    println("[3] the Maestro descriptor a cluster would ingest (${descriptor.length} chars, first 240):")
-    println("    ${descriptor.take(240).replace("\n", "\n    ")}...")
+    println("[3] the artifacts a Maestro `Tlaloc` step would run")
+    for (s in wf.steps) {
+        println("    ${s.name}: ${s.body.size} bytes of StableHLO, bodyHash ${s.manifest.bodyHash}")
+    }
 }
 
 fun main() {

@@ -164,17 +164,3 @@ object ReferenceDecodeGraph {
         build = ::build,
     )
 }
-
-/**
- * The exporter's entry point:
- * `java -cp … io.tlaloc.maestro.serving.ReferenceDecodeGraphKt <dir>`.
- *
- * This is the only JVM invocation in the whole serving story, and it runs
- * at BUILD time. After it returns, the directory is the deployment.
- */
-fun main(args: Array<String>) {
-    val dir = java.nio.file.Path.of(args.firstOrNull() ?: "build/serving-artifact")
-    val manifest = ReferenceDecodeGraph.exportTo(dir)
-    println("wrote ${manifest.entries.size} entries to ${dir.toAbsolutePath()}")
-    for (e in manifest.entries) println("  ${e.entryId}  ${e.bodyPath}  ${e.cacheKey}")
-}

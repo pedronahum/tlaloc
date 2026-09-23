@@ -43,8 +43,10 @@ kotlin {
     sourceSets {
         commonMain {
             dependencies {
+                // api, not implementation: :ir's DxirFunction appears in this
+                // module's public signatures, so a consumer of it alone can name them.
                 implementation(project(":core"))
-                implementation(project(":ir"))
+                api(project(":ir"))
             }
         }
         commonTest {

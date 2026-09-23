@@ -14,7 +14,32 @@ retro-summarise them; it is the record from the first named version forward.
 
 ## [Unreleased]
 
-Nothing yet.
+Not yet published; these land in `0.1.0-alpha01`.
+
+### Changed
+
+- Every artifact id carries a `tlaloc-` prefix: `io.github.pedronahum:tlaloc-core`,
+  `tlaloc-ir`, `tlaloc-autograd`, `tlaloc-nn`, `tlaloc-stablehlo`, `tlaloc-maestro`,
+  `tlaloc-runtime-pjrt`, `tlaloc-runtime-iree`, `tlaloc-runtime-cuda`, `tlaloc-kptx`,
+  `tlaloc-compiler-plugin` (JVM artifacts: `tlaloc-core-jvm` and so on).
+- `tlaloc-ir`, `tlaloc-autograd`, `tlaloc-stablehlo`, `tlaloc-maestro`,
+  `tlaloc-runtime-iree` and `tlaloc-runtime-pjrt` expose the Tlaloc modules their public
+  signatures use as `api` dependencies: depending on `tlaloc-autograd` alone is enough
+  to write `grad { }` over a `DTensor`.
+- `tlaloc-maestro` no longer contains `main` entry points; the exporters run through
+  `./gradlew :maestro:exportServingArtifact` and `:maestro:exportLlamaServingArtifact`.
+
+### Removed
+
+- `io.tlaloc.maestro.MaestroDescriptor` and `io.tlaloc.maestro.StubExecutor`, deprecated
+  since the first-class Maestro step type replaced them.
+
+### Added
+
+- `./gradlew releaseToCentralPortal`: uploads to the Central staging API and hands the
+  upload to the Central Portal. An upload to Central without a signing key or
+  credentials refuses by name before sending anything.
+- `.github/workflows/release.yml`: the same release from a `v<version>` tag.
 
 ## [0.1.0-alpha01] — 2026-09-23
 
@@ -159,7 +184,7 @@ is no consumer for whom this relabelling changes anything.
   configuration's synthesized gradient on a real JDK 21.
 - **Symja is an optional dependency.** `org.matheclipse:matheclipse-core` — 8.3 MB,
   **LGPL-3.0**, with its own transitive tree — was a mandatory *runtime* dependency
-  of `io.github.pedronahum:ir`, and therefore of `:autograd`, `:nn` and `:stablehlo`, whether
+  of `io.github.pedronahum:tlaloc-ir`, and therefore of `:autograd`, `:nn` and `:stablehlo`, whether
   or not a program ever differentiated a loop-bearing body. It is `compileOnly`
   now and no longer appears in the published POM. Add
   `implementation("org.matheclipse:matheclipse-core:3.1.1")` only if you need the

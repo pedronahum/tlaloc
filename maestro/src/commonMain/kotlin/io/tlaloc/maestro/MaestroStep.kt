@@ -36,7 +36,7 @@ import io.tlaloc.core.Mesh
  * @property manifest Self-describing metadata.
  * @property body StableHLO+SDY bytes.
  * @property mesh Phantom-typed mesh placement of the produced output.
- * @property shim Kotlin function executed by the stub executor.
+ * @property shim Kotlin function run in process when the step is composed.
  */
 class MaestroStep<In, Out>(
     val name: String,
