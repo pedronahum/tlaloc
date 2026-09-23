@@ -5,7 +5,7 @@ to date.
 
 ## Why vendor
 
-Layer 2.5's introduction (§0.4.244+) makes vendored Maestro the canonical
+Vendored Maestro is the canonical
 substrate for Tlaloc-on-Maestro. The masquerade approach from Layer 2 — emit a
 Maestro `Kubernetes`-typed step with `tlaloc-runtime:*` image — is deprecated
 in favor of a first-class `Tlaloc` step type registered inside vendored
@@ -143,7 +143,7 @@ new divergence in the audit before merging.
 ## On the optional upstream PR
 
 Layer 2.5's audit tracks the question of whether to upstream a generic
-"custom step type" SPI to Netflix/maestro. As of §0.4.244, deferred — see
+"custom step type" SPI to Netflix/maestro. It is deferred; see
 `docs/maestro_upstream_pr.md` for the rationale.
 
 If we later file the PR and Netflix accepts a generic-extension SPI, the

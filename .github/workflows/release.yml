@@ -66,9 +66,31 @@ jobs:
             *SNAPSHOT) echo "::error::$version is a SNAPSHOT; Central releases need a fixed version."; exit 1 ;;
           esac
           echo "Releasing $version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # A version released from a workstation, then tagged, must not be uploaded a
+      # second time.
+      - name: Version is not on Central yet
+        run: |
+          pom="https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/$VERSION/tlaloc-core-$VERSION.pom"
+          status=$(curl -s -o /dev/null -w '%{http_code}' "$pom")
+          if [ "$status" = "200" ]; then
+            echo "::error::$VERSION is already on Maven Central ($pom). Nothing to upload."
+            exit 1
+          fi
+          if [ "$status" != "404" ]; then
+            echo "::error::could not tell whether $VERSION is on Maven Central: HTTP $status for $pom."
+            exit 1
+          fi
 
       - name: Test
         run: ./gradlew test --no-daemon --stacktrace
+
+      # Publishes to mavenLocal and builds consumers from it: the Gradle plugin's
+      # options and refusals, and the build files printed in the README and
+      # GETTING_STARTED, verbatim.
+      - name: Onboarding smoke
+        run: bash scripts/onboarding-smoke.sh
 
       # --no-parallel keeps every module's upload in one sequence from this
       # runner's IP address, which the Portal handoff at the end must share.

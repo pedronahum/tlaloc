@@ -91,6 +91,7 @@ dependencies. The Tlaloc Gradle plugin is published to Maven, not to the Gradle
 Plugin Portal, so after a release its plugin repository is `mavenCentral()`:
 
 ```kotlin
+// settings.gradle.kts
 pluginManagement { repositories { mavenLocal(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
 ```
@@ -98,6 +99,7 @@ dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
 `build.gradle.kts`:
 
 ```kotlin
+// build.gradle.kts
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -111,6 +113,10 @@ plugins {
 kotlin {
     jvmToolchain(25)
     compilerOptions { jvmTarget.set(JvmTarget.JVM_21) }
+}
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 }
 
 dependencies {

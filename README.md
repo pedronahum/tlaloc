@@ -203,6 +203,8 @@ dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
 
 ```kotlin
 // build.gradle.kts
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     kotlin("jvm") version "2.3.20"
     id("io.github.pedronahum.tlaloc") version "0.1.0-alpha01"  // makes `grad { }` compile-time
@@ -210,14 +212,18 @@ plugins {
 }
 kotlin {
     jvmToolchain(25)                                     // to BUILD
-    compilerOptions { jvmTarget.set(JvmTarget.JVM_21) }  // to RUN
+    compilerOptions { jvmTarget.set(JvmTarget.JVM_21) }  // to RUN on JDK 21
+}
+java {                                                   // Java tasks match Kotlin's target
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 }
 
 dependencies {
     implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
     implementation("io.github.pedronahum:tlaloc-autograd")
     implementation("io.github.pedronahum:tlaloc-nn")           // layers + optimizers
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt") // GPU execution
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt") // GPU execution; runs on JDK 25 only
 }
 ```
 
@@ -359,8 +365,9 @@ bash scripts/jdk21-smoke.sh       # run a synthesized gradient on a real JDK 21
 ```
 
 CI runs five lanes: the suite on x86_64 Linux, aarch64 Linux and arm64 macOS, the
-library suites on a JDK 21, and a next-Kotlin probe that is allowed to fail. All
-four build lanes are green. A green runner means the platform-neutral subset passes
+library suites on a JDK 21, and a next-Kotlin probe that is allowed to fail. A
+release is tagged only on a commit where the four build lanes are green
+([RELEASING.md](docs/RELEASING.md)). A green runner means the platform-neutral subset passes
 — a runner has no GPU, no PJRT plugin, no IREE and no oracle venv, and every test
 needing one self-skips by name. The GPU rows above are certified on the GB10, not by
 CI.

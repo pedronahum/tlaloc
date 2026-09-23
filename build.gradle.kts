@@ -109,7 +109,11 @@ fun isPluginMarker(publicationName: String) = publicationName.endsWith("PluginMa
 fun secret(property: String, env: String): Provider<String> =
     providers.gradleProperty(property).filter { it.isNotBlank() }
         .orElse(providers.environmentVariable(env).filter { it.isNotBlank() })
-val signingKey: Provider<String> = secret("signingInMemoryKey", "SIGNING_IN_MEMORY_KEY")
+// The armoured key is accepted either multi-line or folded to one line with literal
+// `\n` (the form scripts/setup-signing-key.sh writes). A properties file unfolds
+// `\n` itself; an environment variable, such as a GitHub secret, does not.
+val signingKey: Provider<String> =
+    secret("signingInMemoryKey", "SIGNING_IN_MEMORY_KEY").map { it.replace("\\n", "\n") }
 val signingKeyPassword: Provider<String> =
     secret("signingInMemoryKeyPassword", "SIGNING_IN_MEMORY_KEY_PASSWORD").orElse("")
 val centralUsername: Provider<String> = secret("centralUsername", "CENTRAL_USERNAME")
@@ -153,6 +157,14 @@ subprojects {
     apply(plugin = "maven-publish")
     apply(plugin = "signing")
     val pomOnlyModule = name in tlalocPomOnlyModules
+
+    // Every jar (classes, sources, javadoc) carries the licence and the notice. Zip,
+    // not Jar: the Kotlin Multiplatform plugin's sources jars are plain Zip tasks.
+    tasks.withType<Zip>().configureEach {
+        if (archiveExtension.get() == "jar") {
+            from(rootProject.files("LICENSE", "NOTICE")) { into("META-INF") }
+        }
+    }
     // Dokka HTML, not Dokka Javadoc: the Javadoc format explicitly does not
     // support Kotlin Multiplatform projects (kotlinlang.org/docs/dokka-javadoc.html)
     // and ten of these eleven modules are KMP. Central validates that a
@@ -164,7 +176,7 @@ subprojects {
     val moduleName = name
     val moduleDescription = moduleDescriptions[name]
         ?: throw GradleException(
-            "§0.4.498: module ':$name' publishes to Maven but has no entry in " +
+            "Module ':$name' publishes to Maven but has no entry in " +
                 "moduleDescriptions in the root build.gradle.kts. Maven Central requires a " +
                 "<description>; add one there (or exclude the module from publishing) rather " +
                 "than letting it publish without one.",
@@ -704,9 +716,9 @@ subprojects {
     }
     val expectedTarget = tlalocJvmTargets[name]
         ?: throw GradleException(
-            "§0.4.503: module ':$name' has no entry in tlalocJvmTargets in the root " +
+            "Module ':$name' has no entry in tlalocJvmTargets in the root " +
                 "build.gradle.kts. Every module's JVM bytecode target is a published, " +
-                "per-module fact (README Requirements, docs/GETTING_STARTED.md §0); add " +
+                "per-module fact (docs/GETTING_STARTED.md, section 0); add " +
                 "':$name' to that map — and to the docs — rather than letting it inherit " +
                 "a number nobody chose.",
         )
@@ -820,7 +832,7 @@ val tlalocKotlinVersionOverride: String? =
 
 if (tlalocKotlinVersionOverride != null) {
     logger.lifecycle(
-        "§0.4.504: Kotlin override ACTIVE — org.jetbrains.kotlin:* -> " +
+        "Kotlin override active — org.jetbrains.kotlin:* -> " +
             "$tlalocKotlinVersionOverride (the catalog still declares " +
             "${libs.versions.kotlin.get()}; KotlinVersionGuard is expected to refuse).",
     )
@@ -830,7 +842,7 @@ if (tlalocKotlinVersionOverride != null) {
                 if (requested.group == "org.jetbrains.kotlin") {
                     useVersion(tlalocKotlinVersionOverride)
                     because(
-                        "§0.4.504 next-version lane: -PtlalocKotlinVersion=" +
+                        "next-Kotlin lane: -PtlalocKotlinVersion=" +
                             tlalocKotlinVersionOverride,
                     )
                 }
@@ -863,7 +875,7 @@ val tlalocTestJdk: String? = providers.gradleProperty("tlalocTestJdk").orNull
 if (tlalocTestJdk != null) {
     val requested = tlalocTestJdk.toIntOrNull()
         ?: throw GradleException(
-            "§0.4.504: -PtlalocTestJdk=$tlalocTestJdk is not a Java release number. Pass a " +
+            "-PtlalocTestJdk=$tlalocTestJdk is not a Java release number. Pass a " +
                 "major version, e.g. -PtlalocTestJdk=21.",
         )
     val validFor = tlalocJvmTargets.filterValues { it <= requested }.keys.sorted()
@@ -878,7 +890,7 @@ if (tlalocTestJdk != null) {
                 // point at which the wrong JDK would actually have been used.
                 doFirst {
                     throw GradleException(
-                        "§0.4.504: -PtlalocTestJdk=$requested cannot run ':$moduleName' tests: " +
+                        "-PtlalocTestJdk=$requested cannot run ':$moduleName' tests: " +
                             "that module emits Java $moduleTarget bytecode (tlalocJvmTargets in " +
                             "the root build.gradle.kts), so its own test classes would not load " +
                             "on a JDK $requested. Run it without the flag, or name only the " +
@@ -889,7 +901,7 @@ if (tlalocTestJdk != null) {
             } else {
                 val toolchains = project.extensions.findByType(JavaToolchainService::class.java)
                     ?: throw GradleException(
-                        "§0.4.504: ':$moduleName' has no javaToolchains extension, so " +
+                        "':$moduleName' has no javaToolchains extension, so " +
                             "-PtlalocTestJdk=$requested cannot select a launcher for it.",
                     )
                 javaLauncher.set(
@@ -899,7 +911,7 @@ if (tlalocTestJdk != null) {
                 )
                 doFirst {
                     logger.lifecycle(
-                        "§0.4.504: ':$moduleName' tests running on JDK " +
+                        "':$moduleName' tests running on JDK " +
                             "${javaLauncher.get().metadata.languageVersion.asInt()} " +
                             "(${javaLauncher.get().metadata.jvmVersion}), bytecode target " +
                             "$moduleTarget.",
@@ -1026,7 +1038,7 @@ tasks.register("apiDocs") {
         val f = index.get().asFile
         if (!f.isFile) {
             throw GradleException(
-                "§0.4.505: apiDocs ran but ${f.absolutePath} does not exist. The aggregate " +
+                "apiDocs ran but ${f.absolutePath} does not exist. The aggregate " +
                     "Dokka publication did not write an entry point, so there is no API " +
                     "reference to point a reader at — which is exactly the claim this task " +
                     "is supposed to make true.",

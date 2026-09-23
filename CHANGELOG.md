@@ -96,6 +96,11 @@ These matter only if you built Tlaloc from source before this version.
   `~/.venv`, `~/venv`, `~/.local`, `/usr/local` and `/usr`, from the JVM and from
   Python alike; IREE tools under `$TLALOC_IREE_BIN`, `$VIRTUAL_ENV/bin`,
   `~/.local/venvs/*/bin` and `PATH`. A failed search lists every place it looked.
+- In the Python serving runtime (`harness/python`, not published to Maven),
+  `PjrtApi.load(plugin_path=None, platform="cuda")` takes a `platform` and, with no
+  path and no `TLALOC_PJRT_PLUGIN_PATH`, searches for a plugin; when none is found
+  it raises `FileNotFoundError` with the search report, where it used to raise
+  `ValueError`.
 - `CosineDecay` holds its final rate past `decaySteps`, where PyTorch's
   `CosineAnnealingLR` rises again.
 
@@ -121,8 +126,10 @@ These matter only if you built Tlaloc from source before this version.
 
 ### Removed
 
-- `io.tlaloc.maestro.MaestroDescriptor` and `io.tlaloc.maestro.StubExecutor`,
-  replaced by the first-class Maestro step type.
+- `io.tlaloc.maestro.MaestroDescriptor` and `io.tlaloc.maestro.StubExecutor`. The
+  first-class Maestro step type that replaces them lives in the vendored Maestro
+  build under `third-party/maestro`, which is not published: a Maven Central user
+  has no replacement.
 - The `main` entry points in `tlaloc-maestro`; the exporters run through
   `./gradlew :maestro:exportServingArtifact` and
   `:maestro:exportLlamaServingArtifact`.

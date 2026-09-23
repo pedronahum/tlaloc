@@ -34,6 +34,14 @@ dependencies {
     // Multiplatform Gradle plugin to be applied, and Gradle carries the stdlib.
     compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:${libs.versions.kotlin.get()}")
     compileOnly(kotlin("stdlib"))
+
+    // ProjectBuilder tests apply the real Kotlin Gradle plugin and read what it wired.
+    testImplementation("org.jetbrains.kotlin:kotlin-gradle-plugin:${libs.versions.kotlin.get()}")
+    testImplementation(kotlin("test"))
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
 }
 
 gradlePlugin {
@@ -51,14 +59,30 @@ gradlePlugin {
 // The compiler plugin's coordinates, baked in at build time so the Gradle plugin
 // always asks for the tlaloc-compiler-plugin built alongside it.
 val generatedVersionDir = layout.buildDirectory.dir("generated/tlaloc-version/kotlin")
+// The compiler plugin id is read from the compiler plugin's own source, so the two
+// cannot drift apart.
+val compilerPluginIdSource =
+    rootProject.file("compiler-plugin/src/main/kotlin/io/tlaloc/plugin/TlalocCommandLineProcessor.kt")
 val generateTlalocVersion = tasks.register("generateTlalocVersion") {
     val outDir = generatedVersionDir
     val group = project.group.toString()
     val version = project.version.toString()
+    val idSource = compilerPluginIdSource
     inputs.property("group", group)
     inputs.property("version", version)
+    inputs.file(idSource).withPropertyName("compilerPluginIdSource")
     outputs.dir(outDir)
     doLast {
+        val ids = Regex("""const val PLUGIN_ID: String = "([^"]+)"""")
+            .findAll(idSource.readText()).map { it.groupValues[1] }.toList()
+        if (ids.size != 1) {
+            throw GradleException(
+                "generateTlalocVersion: expected one `const val PLUGIN_ID: String = \"…\"` in " +
+                    "${idSource.path}, found ${ids.size}. The Gradle plugin reads the compiler " +
+                    "plugin id from there.",
+            )
+        }
+        val compilerPluginId = ids.single()
         val file = outDir.get().file("io/tlaloc/gradle/TlalocBuildInfo.kt").asFile
         file.parentFile.mkdirs()
         file.writeText(
@@ -70,7 +94,7 @@ val generateTlalocVersion = tasks.register("generateTlalocVersion") {
             |    const val GROUP: String = "$group"
             |    const val VERSION: String = "$version"
             |    const val COMPILER_PLUGIN_ARTIFACT: String = "tlaloc-compiler-plugin"
-            |    const val COMPILER_PLUGIN_ID: String = "io.tlaloc.plugin"
+            |    const val COMPILER_PLUGIN_ID: String = "$compilerPluginId"
             |}
             |
             """.trimMargin(),

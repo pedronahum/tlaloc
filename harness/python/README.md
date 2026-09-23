@@ -50,7 +50,7 @@ python harness/python/aggregate.py --input benchmarks/build/ \
     --output benchmarks/build/harness-comparison.md
 ```
 
-The aggregator's Markdown output is what becomes the body of the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity."
+The aggregator's Markdown output is the cross-framework comparison table.
 
 ## Usage
 
@@ -102,7 +102,7 @@ For each benchmark, Tlaloc's forward and gradient values should match the PyTorc
 - **Forward**: 1e-3 absolute tolerance (or 1% relative).
 - **Gradient**: 5e-3 relative tolerance + 1e-3 absolute floor.
 
-Per the §11.13 M9 exit criterion ("f32-tolerance numerical match"). Larger discrepancies indicate a real bug in either Tlaloc's AD pipeline or the Python primal port.
+These are the "f32-tolerance numerical match" criterion of milestone M9 in `DIFFKTX_SPEC.md`. Larger discrepancies indicate a real bug in either Tlaloc's AD pipeline or the Python primal port.
 
 ## Why Phase 2 ships pre-toolchain-install
 
@@ -110,7 +110,7 @@ The /loop's no-toolchain-install rule blocks running these scripts during /loop 
 
 1. When the user installs PyTorch+JAX, they can immediately run a single command and produce the cross-framework CSV/JSON dumps.
 2. The Tlaloc-side primals serve as the reference for the Python ports; any structural divergence (e.g., wrong constant, wrong loop bound) is caught before the toolchain is even installed.
-3. Subsequent /loop firings post-install can focus on **comparison** (read the JSON files, compute the speedup table, write the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity") rather than re-implementing the primals.
+3. Subsequent /loop firings post-install can focus on **comparison** (read the JSON files, compute the speedup table, write the comparison table) rather than re-implementing the primals.
 
 ## Cross-framework aggregator
 
@@ -138,7 +138,7 @@ The Tlaloc JSON is required (the JVM harness must have run); PyTorch and JAX JSO
 
 ## Cross-framework comparison entry
 
-When `harness-results-tlaloc.json`, `harness-results-pytorch.json`, and `harness-results-jax.json` all exist, the `aggregate.py` output above becomes the body of the §0.4 entry. The format mirrors `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3:
+When `harness-results-tlaloc.json`, `harness-results-pytorch.json`, and `harness-results-jax.json` all exist, the `aggregate.py` output above is the comparison table. The format mirrors `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3:
 
 ```
 | Benchmark        | Paper (× over torch.compile) | Tlaloc actual | Pass M9? |
@@ -150,4 +150,4 @@ When `harness-results-tlaloc.json`, `harness-results-pytorch.json`, and `harness
 | BGDHyperOpt      | (paper number)               | <measured>    | ✓/✗      |
 ```
 
-Acceptance per §11.13: within 20% of paper's figures, >3× over `torch.compile` on at least three of six, f32-tolerance numerical match.
+Acceptance (milestone M9 in `DIFFKTX_SPEC.md`): within 20% of paper's figures, >3× over `torch.compile` on at least three of six, f32-tolerance numerical match.

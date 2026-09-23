@@ -13,10 +13,11 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **2,561** automated tests: 2,507 from a clean-room
-`./gradlew test --rerun-tasks` with 0 failures, and 54 from the
-vendored Maestro modules, which the root `test` task does not run. On the GB10
-workstation where they were counted, 93 of the 2,507 skip by name: 88 MLIR round
+The suite has **2,567** automated tests: 2,513 that `./gradlew test` runs, and 54
+from the vendored Maestro modules, which the root `test` task does not run. Of the
+2,513, 2,507 were counted in a clean-room `./gradlew test --rerun-tasks` with 0
+failures; the other 6 are the Gradle plugin's, added after it and run on their
+own. On the GB10 workstation where they were counted, 93 of the 2,507 skip by name: 88 MLIR round
 trips that need `stablehlo-translate` or `sdy-opt`, and 5 TPU smoke tests. This is
 the one place the documentation states the count.
 
@@ -123,8 +124,8 @@ lists where else the suite has run.
 | The whole suite, re-run clean-room | ✅ | On the GB10: `./gradlew test --rerun-tasks` with 0 failures, `scripts/onboarding-smoke.sh`, all ten examples, `quickstart shapeError` failing as designed, a `-Werror` consumer compile, every published POM with its sources and javadoc jars, and both halves of `examples/gpu-inference` (a real TinyLlama-1.1B decoding `' Paris.\n\n2.'` through `/usr/bin/python3`) |
 | The library's suites on a JDK 21 | ✅ | `-PtlalocTestJdk=21` over `:core :ir :autograd :nn :stablehlo :maestro`, green on OpenJDK 21.0.2 on the GB10, and in the CI lane below |
 | The plugin under a foreign Kotlin compiler | ✅ | `-PtlalocKotlinVersion=2.3.10`: `KotlinVersionGuard` refuses by name from inside a real 2.3.10 compile. Against 2.4.20 the plugin does not compile (one error, direct `MessageCollector` access) |
-| x86_64 Linux CI (`ubuntu-latest`) | ✅ | `.github/workflows/build.yml`, green on GitHub Actions. A green runner means the platform-neutral subset passes: a runner has no GPU, no PJRT plugin, no IREE, no `stablehlo-translate` and no PyTorch oracle venv, and every test needing one self-skips by name |
-| aarch64 Linux CI (`ubuntu-24.04-arm`) | ✅ | Same workflow, green on GitHub Actions. The only aarch64 evidence from a machine other than the GB10 |
-| arm64 macOS CI (`macos-15`) | ✅ | Same workflow, green on GitHub Actions. The MLIR round trips self-skip, because `stablehlo-translate`, `sdy-opt` and `iree-compile` are not installed |
-| JDK 21 CI lane | ✅ | `build.yml`, job `library-jdk21`, green on GitHub Actions |
+| x86_64 Linux CI (`ubuntu-latest`) | ✅ | `.github/workflows/build.yml`, green on GitHub Actions at `d0ca85b`; later commits have not run there yet. A green runner means the platform-neutral subset passes: a runner has no GPU, no PJRT plugin, no IREE, no `stablehlo-translate` and no PyTorch oracle venv, and every test needing one self-skips by name |
+| aarch64 Linux CI (`ubuntu-24.04-arm`) | ✅ | Same workflow, green at `d0ca85b`. The only aarch64 evidence from a machine other than the GB10 |
+| arm64 macOS CI (`macos-15`) | ✅ | Same workflow, green at `d0ca85b`. The MLIR round trips self-skip, because `stablehlo-translate`, `sdy-opt` and `iree-compile` are not installed |
+| JDK 21 CI lane | ✅ | `build.yml`, job `library-jdk21`, green at `d0ca85b` |
 | Next-Kotlin CI lane | ✅ (probe) | `.github/workflows/kotlin-next.yml` runs with `continue-on-error`, so its checkmark is green by construction; read its step outcomes. Its answer so far: the compiler plugin does not compile under the next Kotlin (probe 3 runs only after probe 1 succeeds, and it was skipped). The library modules' suites pass under Kotlin 2.4.20 when run locally with `-PtlalocKotlinVersion=2.4.20` |

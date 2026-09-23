@@ -15,6 +15,9 @@
 #      and applied in a subproject runs grad { }; the Tlaloc plugin declared in the
 #      root and the Kotlin plugin only in the subproject (a classloader the Tlaloc
 #      plugin cannot see) is refused by name.
+#   6. the settings and build files printed in README.md and docs/GETTING_STARTED.md,
+#      copied verbatim (the ```kotlin blocks whose first line is
+#      `// settings.gradle.kts` / `// build.gradle.kts`), build and run grad { }.
 #
 # Exits non-zero on the first check that fails.
 set -euo pipefail
@@ -221,5 +224,33 @@ fi
 grep -q "cannot use the Kotlin Gradle plugin ('org.jetbrains.kotlin.jvm')" "$work/multi-split.log" \
   || fail "the split multi-project build failed for another reason." "$work/multi-split.log"
 echo "onboarding-smoke: multi-project build runs; a Kotlin plugin the Tlaloc plugin cannot see is refused by name"
+
+# 6. The install snippets in the docs, verbatim.
+# Prints the ```kotlin block of $1 whose first line is exactly "// $2"; fails
+# unless there is exactly one.
+doc_block() {
+  awk -v want="// $2" '
+    /^```kotlin$/ { infence = 1; first = 1; buf = ""; next }
+    infence && /^```$/ { if (keep) { printf "%s", buf; found++ }; infence = 0; keep = 0; next }
+    infence { if (first) { keep = ($0 == want); first = 0 }; buf = buf $0 "\n" }
+    END { if (found != 1) exit 3 }
+  ' "$1"
+}
+for doc in README.md docs/GETTING_STARTED.md; do
+  name="$(basename "$doc" .md | tr 'A-Z_' 'a-z-')"
+  snip="$work/doc-$name"
+  mkdir -p "$snip/src/main/kotlin"
+  doc_block "$doc" settings.gradle.kts > "$snip/settings.gradle.kts" \
+    || fail "$doc has no single \`// settings.gradle.kts\` Kotlin block."
+  doc_block "$doc" build.gradle.kts > "$snip/build.gradle.kts" \
+    || fail "$doc has no single \`// build.gradle.kts\` Kotlin block."
+  echo 'application { mainClass.set("MainKt") }' >> "$snip/build.gradle.kts"
+  cp "$with/src/main/kotlin/Main.kt" "$snip/src/main/kotlin/Main.kt"
+  ./gradlew -p "$snip" run --console=plain > "$work/doc-$name.log" 2>&1 \
+    || fail "the build files printed in $doc did not build and run." "$work/doc-$name.log"
+  grep -q 'gradient=\[7.0, 11.0, 9.0, 13.0\]' "$work/doc-$name.log" \
+    || fail "the build files printed in $doc ran but printed the wrong gradient." "$work/doc-$name.log"
+  echo "onboarding-smoke: the build files printed in $doc build and run grad { }"
+done
 
 echo "onboarding-smoke: OK"

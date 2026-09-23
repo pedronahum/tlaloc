@@ -1,7 +1,8 @@
 # Releasing Tlaloc
 
 Tlaloc publishes to Maven Central under the group `io.github.pedronahum`. Every
-artifact id starts with `tlaloc-`:
+artifact id starts with `tlaloc-`. A release is 23 `tlaloc-*` artifacts plus the
+Gradle plugin marker, 24 publications in all:
 
 | Module | Artifact (Gradle resolves the `-jvm` one for you) |
 |---|---|
@@ -16,9 +17,13 @@ artifact id starts with `tlaloc-`:
 | `:runtime-cuda` | `tlaloc-runtime-cuda`, `tlaloc-runtime-cuda-jvm` |
 | `:kptx` | `tlaloc-kptx`, `tlaloc-kptx-jvm` |
 | `:compiler-plugin` | `tlaloc-compiler-plugin` |
+| `:gradle-plugin` | `tlaloc-gradle-plugin` |
+| `:gradle-plugin` (plugin marker) | `io.github.pedronahum.tlaloc:io.github.pedronahum.tlaloc.gradle.plugin`, a POM that points `plugins { id("io.github.pedronahum.tlaloc") }` at `tlaloc-gradle-plugin` |
+| `:bom` | `tlaloc-bom`, which constrains the other 22 |
 
 The Gradle project names have no prefix; the root `build.gradle.kts` adds it to
-every publication.
+every publication. The plugin marker's group and artifact id are fixed by Gradle's
+plugin-marker convention and carry no prefix.
 
 ## What Central requires, and where it comes from
 
@@ -42,9 +47,22 @@ metadata lacks the `tlaloc-` prefix.
 2. Update the coordinate where it is written out: `README.md`,
    `docs/GETTING_STARTED.md`, `examples/**/build.gradle.kts`.
    `grep -rn '<old-version>' --include='*.md' --include='*.kts' .` finds them.
-3. Add the `CHANGELOG.md` entry, including what broke.
-4. `bash scripts/onboarding-smoke.sh` walks the path a new user takes and fails
-   if step 2 was partial.
+3. Add the `CHANGELOG.md` entry, including what broke, headed with the release
+   date (not `unreleased`).
+4. For the first release to Central, the docs still say nothing is published.
+   Change, before tagging (the tagged sources are what the release ships):
+   - `README.md`: the Alpha note ("Nothing is on Maven Central yet"), the Install
+     lead ("Nothing is published yet. Build once…" and its `publishToMavenLocal`
+     block), and the first item under Limits;
+   - `docs/COMPATIBILITY.md`: the "Nothing is on Maven Central yet" line under the
+     current version;
+   - `docs/GETTING_STARTED.md`: the note at the top and section 1, which have the
+     user publish to `mavenLocal`.
+   `grep -rn 'Maven Central yet\|Nothing is published\|Nothing is on Maven\|mavenLocal' README.md docs/*.md`
+   finds them.
+5. `bash scripts/onboarding-smoke.sh` walks the path a new user takes, builds the
+   settings and build files printed in `README.md` and `docs/GETTING_STARTED.md`
+   verbatim, and fails if step 2 was partial.
 
 ## 2. Credentials
 
@@ -54,7 +72,7 @@ environment:
 
 | Gradle property | Environment variable | What |
 |---|---|---|
-| `signingInMemoryKey` | `SIGNING_IN_MEMORY_KEY` | ASCII-armoured private key, newlines as `\n` |
+| `signingInMemoryKey` | `SIGNING_IN_MEMORY_KEY` | ASCII-armoured private key. In a properties file: one line, newlines written as a literal `\n` (what `setup-signing-key.sh` writes). In the environment or a GitHub secret: that same line, or the multi-line output of `gpg --armor --export-secret-keys <id>` |
 | `signingInMemoryKeyPassword` | `SIGNING_IN_MEMORY_KEY_PASSWORD` | its passphrase |
 | `centralUsername` | `CENTRAL_USERNAME` | Central Portal user-token username |
 | `centralPassword` | `CENTRAL_PASSWORD` | Central Portal user-token password |
@@ -74,6 +92,10 @@ credential is absent. A blank value counts as absent, so
 `~/.gradle/gradle.properties`.
 
 ## 3. Rehearse locally
+
+First, the commit to be tagged must be pushed and green on every lane of
+[`build.yml`](../.github/workflows/build.yml) (x86_64 Linux, aarch64 Linux, macOS,
+JDK 21).
 
 ```bash
 ./gradlew test --rerun-tasks
@@ -107,7 +129,9 @@ Either from a machine with the credentials:
 or from GitHub Actions: push a tag `v<version>` and
 [`release.yml`](../.github/workflows/release.yml) runs. It checks that the tag
 equals `v` + the project version, runs `./gradlew test`, then
-`releaseToCentralPortal`. It reads the four credentials from repository secrets
+`releaseToCentralPortal`. Before the upload it refuses if the version's
+`tlaloc-core` POM is already on `repo1.maven.org`, and it runs
+`scripts/onboarding-smoke.sh`. It reads the four credentials from repository secrets
 named `SIGNING_IN_MEMORY_KEY`, `SIGNING_IN_MEMORY_KEY_PASSWORD`,
 `CENTRAL_USERNAME` and `CENTRAL_PASSWORD`. It can also be started by hand
 (workflow_dispatch) on a tag; on a branch it refuses.
@@ -129,14 +153,25 @@ If the POST fails after a successful upload, rerun `./gradlew centralPortalHando
 alone from the same machine. `-PcentralPublishingType=automatic` releases without
 the manual step below; the default is `user_managed`.
 
-Then open <https://central.sonatype.com/publishing/deployments>, check the
-deployment and press **Publish**. A published version is immutable and cannot be
+Then open <https://central.sonatype.com/publishing/deployments> and check the
+deployment before pressing **Publish**: it must list 24 components, the 23
+`tlaloc-*` artifacts and the plugin marker
+`io.github.pedronahum.tlaloc:io.github.pedronahum.tlaloc.gradle.plugin`. The marker
+is in the sub-group `io.github.pedronahum.tlaloc` while the handoff names the
+namespace `io.github.pedronahum`; only a local capture server has exercised this,
+so the first release is the first check that the marker lands in the same
+deployment. If it is missing, drop the deployment instead of publishing it:
+without the marker, `plugins { id("io.github.pedronahum.tlaloc") }` fails with
+"plugin not found". A published version is immutable and cannot be
 deleted (`COMPATIBILITY.md`).
 
 ## 5. After
 
 - If released locally, tag it: `git tag v<version> && git push origin v<version>`.
-  (Pushing the tag starts `release.yml`; skip that push, or cancel the run, if
-  the version is already on Central.)
+  Pushing the tag starts `release.yml`. Push it only once
+  `https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/<version>/`
+  exists: `release.yml` then refuses before uploading anything. Pushed earlier,
+  the run uploads a second deployment, which the Portal will not publish over the
+  first; drop it there. The tag route alone (section 4) avoids this.
 - Copy the `CHANGELOG.md` entry into the GitHub release.
 - Record the release (date and artifact URL) in [ALPHA_PLAN.md](ALPHA_PLAN.md).
