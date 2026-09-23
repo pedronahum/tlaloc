@@ -531,15 +531,23 @@ Two flags exist for the CI lanes and work by hand:
 ./gradlew -PtlalocKotlinVersion=2.4.20 :compiler-plugin:compileKotlin
 ```
 
-**CI, and what it is worth.** `.github/workflows/` carries four lanes: the suite on
-x86_64 Linux and on arm64 macOS, the library's own suites executed on a JDK 21, and
-a next-Kotlin probe that is allowed to fail. A green runner means *the
-platform-neutral subset passes* — a runner has no GPU, no PJRT plugin, no IREE, no
-`stablehlo-translate` and no PyTorch oracle venv, and every test needing one
-self-skips by name. The GPU rows in the table above are certified on the GB10, not
-by CI. 🧪 **The lanes themselves have never run**: they were written on a machine
-with no access to GitHub Actions, and [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md) says
-which of their commands were at least executed locally.
+**CI, and what it is worth.** `.github/workflows/` carries five lanes: the suite on
+x86_64 Linux, on **aarch64 Linux** and on arm64 macOS, the library's own suites
+executed on a JDK 21, and a next-Kotlin probe that is allowed to fail. A green
+runner means *the platform-neutral subset passes* — a runner has no GPU, no PJRT
+plugin, no IREE, no `stablehlo-translate` and no PyTorch oracle venv, and every
+test needing one self-skips by name. The GPU rows in the table above are certified
+on the GB10, not by CI.
+
+✅ **The lanes run.** The x86_64, macOS and JDK 21 lanes are green at HEAD. Two
+results from their first week are worth stating rather than absorbing: the arc's
+first push went **red on x86_64 Linux only**, while macOS and JDK 21 passed — which
+is what a second platform is for — and the next-Kotlin probe found that the library
+modules compile and test under the next Kotlin while the **compiler plugin does
+not**. That probe's job is green *by construction* (`continue-on-error`), so read
+its step outcomes and its summary, not its checkmark. The aarch64 Linux lane was
+added in §0.4.511 and has not run yet; it is the one that matters most, because
+every GPU claim here was certified on an aarch64 machine.
 
 Contributions are welcome; the house style is worth knowing first:
 

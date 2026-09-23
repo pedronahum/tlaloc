@@ -128,4 +128,4 @@ them has no access to GitHub Actions.
 | arm64 macOS CI (`macos-15`) | 🧪 | Same file, second matrix leg (§0.4.504). **No run exists.** `stablehlo-translate` / `sdy-opt` / `iree-compile` are a 20–60 minute bazelisk build on macOS, so the MLIR round-trips would self-skip there too |
 | JDK 21 CI lane | 🧪 | `build.yml`, job `library-jdk21`. **No run exists**; every command in it was run here first (the row above) |
 | Next-Kotlin CI lane | 🧪 | `.github/workflows/kotlin-next.yml`, `continue-on-error`. **No run exists**; its three probes were run here first |
-| aarch64 *Linux* CI | ⬜ | Not added. GitHub's arm64 Linux runners are free for public repositories only, and this repository's visibility could not be checked from the development machine. See [ALPHA_PLAN.md](ALPHA_PLAN.md) |
+| aarch64 *Linux* CI | 🧪 | **Added in §0.4.511** (`ubuntu-24.04-arm`), once the repository became public and the runner became free. It matters more than the other lanes: every ✅ above was certified on a GB10, which is aarch64, so until this lane runs the only aarch64 evidence for this project is the one machine that produced all of it. Marked 🧪 until a run of *this* lane exists |

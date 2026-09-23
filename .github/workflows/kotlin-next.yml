@@ -44,7 +44,21 @@
 # different version" because the root build declares both Kotlin plugins
 # `apply false`. That limitation is recorded in docs/ALPHA_PLAN.md, not hidden.
 #
-# THIS LANE HAS NEVER RUN ON GITHUB. Its Gradle invocations were run locally
+# §0.4.511 — THIS LANE HAS NOW RUN, and it did its job. On 7b74ce5 probe 1 FAILED
+# and probe 2 passed: the library modules compile and test under the next Kotlin,
+# the COMPILER PLUGIN does not. That is the §16 risk ("K2 plugin API changes
+# across Kotlin releases", likelihood High, impact High) showing up as evidence
+# instead of a prediction, and it independently confirms what §0.4.504 found by
+# hand.
+#
+# READ THE OUTCOMES, NOT THE GREEN CHECK. Every probe carries
+# `continue-on-error: true`, so a FAILED step still reports `conclusion: success`
+# and the job is green by construction. The real answer is each step's `outcome`,
+# which is what the Summary step prints and what probe 3's `if:` condition reads —
+# probe 3 was skipped on that run precisely because `probe1.outcome != 'success'`.
+# A reader who trusts the checkmark learns the opposite of what this lane measured.
+#
+# Originally: THIS LANE HAD NEVER RUN ON GITHUB. Its Gradle invocations were run locally
 # first, against Kotlin 2.4.20 and 2.3.10 (§0.4.504), and both found something:
 # 2.4.20 fails probe 1 with one hard error in TlalocCompilerPluginRegistrar.kt,
 # and 2.3.10 compiles but is refused by the guard, by name, inside six real

@@ -24,17 +24,24 @@
 #                                 use the library", executed rather than asserted
 #   (kotlin-next.yml)             the next Kotlin feature release, allowed to fail
 #
-# THESE LANES HAVE NEVER RUN. They were written on a machine with no access to
-# GitHub Actions, validated as YAML and against actionlint's rule set by reading,
-# and every Gradle invocation in them was run locally first. docs/ALPHA_PLAN.md
-# marks them 🧪, not ✅, and will keep marking them 🧪 until a run exists.
+# §0.4.511 — THESE LANES HAVE NOW RUN, and the repository is public. Both facts
+# changed what this file should be, so both are recorded rather than quietly
+# absorbed:
 #
-# NO aarch64 LINUX LANE, deliberately. GitHub's arm64 Linux runners
-# (`ubuntu-24.04-arm`) are free for PUBLIC repositories and a paid plan for
-# private ones, and this repository's visibility could not be checked from the
-# machine that wrote the file (no `gh`, no credentials). A lane that cannot start
-# is worse than a named gap, so the gap is named: the aarch64 evidence for this
-# project is the GB10 itself, and docs/ALPHA_PLAN.md carries the row.
+#   * The first push of the alpha arc (690a77c) went RED on ubuntu-latest while
+#     macOS and the JDK 21 lane passed — an x86_64-Linux-only failure, which is
+#     exactly the class of thing a second platform exists to find. It has been
+#     green on every run since 7b74ce5. Whether that was a fix or a flake is NOT
+#     established; docs/ALPHA_PLAN.md carries the open row.
+#   * All three lanes are green at HEAD.
+#
+# THE aarch64 LINUX LANE, added now that it can be. §0.4.504 left it out because
+# `ubuntu-24.04-arm` is free for PUBLIC repositories and paid for private ones,
+# and the machine that wrote the file could not check which this was. It is
+# public, so the lane costs nothing — and it matters more here than the other
+# two: every ✅ in docs/CAPABILITIES.md was certified on an NVIDIA GB10, which is
+# aarch64. Until now the ONLY aarch64 evidence for this project was the single
+# developer machine that produced all of it.
 name: build
 
 on:
@@ -57,9 +64,15 @@ jobs:
       fail-fast: false
       matrix:
         # macos-15 and macos-14 are both Apple Silicon; macos-13 was the last
-        # x86_64 image and is retired. A cost note, since it is the owner's bill:
-        # macOS minutes are billed at 10x Linux on private repositories.
-        os: [ubuntu-latest, macos-15]
+        # x86_64 image and is retired. `ubuntu-24.04-arm` is the aarch64 Linux
+        # standard runner — the same architecture as the GB10 every GPU claim in
+        # this repository was certified on, minus the GPU.
+        #
+        # On cost, since it is the owner's bill: standard GitHub-hosted runners
+        # are free in public repositories, which this one now is. The 10x macOS
+        # multiplier this comment used to warn about applies to PRIVATE
+        # repositories and no longer applies here.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
     # 45 was the ubuntu budget; macOS runners are slower and the suite has grown
     # (2,522 tests at §0.4.507), so 60 is headroom, not an expectation.
     timeout-minutes: 60
