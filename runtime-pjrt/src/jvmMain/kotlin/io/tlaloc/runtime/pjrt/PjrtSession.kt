@@ -445,6 +445,9 @@ class PjrtSession(
         // The context is one argument block shared by every call on this
         // executable: fill, execute, await and read back under its monitor so
         // two threads never interleave their input or output pointers.
+        // A closed buffer (or one from a closed client) refuses by name here
+        // rather than handing PJRT a freed pointer.
+        stagedInputs.forEach { it.usable() }
         val outputPtrs = synchronized(ctx) {
             for ((i, buf) in stagedInputs.withIndex()) {
                 ctx.innerArgsSegment.set(ADDRESS, i * 8L, buf.bufferPtr)

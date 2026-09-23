@@ -7,6 +7,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfm
 import io.tlaloc.runtime.pjrt.ffm.PjrtRuntimeException
+import io.tlaloc.stablehlo.toStablehlo
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.lang.foreign.Arena
 import java.nio.file.Files
@@ -177,6 +178,37 @@ class PjrtSessionConcurrencyTest {
         assertEquals("PjrtBuffer used after its PJRT client was closed", e.message)
         buf.close()
         buf.close()
+    }
+
+    @Test
+    fun aClosedBufferPassedToExecuteOnIsRefusedByName() {
+        assumeGpu()
+        val fn = triple()
+        PjrtSession().use { session ->
+            val buf = session.bufferFromHostF32(FloatArray(n) { 1f }, listOf(n))
+            buf.close()
+            val e = assertFailsWith<IllegalStateException> { session.executeOn(fn, listOf(buf)) }
+            assertEquals("PjrtBuffer used after close()", e.message)
+        }
+    }
+
+    @Test
+    fun aClientAndItsExecutableRefuseUseAfterTheClientIsClosed() {
+        assumeGpu()
+        Arena.ofShared().use { arena ->
+            val api = PjrtFfm.load(PjrtBinaries.pluginPath!!, arena)
+            val client = api.createClient(PjrtClientOptions.resolve())
+            val device = client.addressableDevices().first()
+            val exec = client.compile(triple().toStablehlo(""))
+            client.close()
+            client.close()
+            val ce = assertFailsWith<IllegalStateException> { client.addressableDevices() }
+            assertEquals("PjrtClient used after its PJRT client was closed", ce.message)
+            val ee = assertFailsWith<IllegalStateException> { exec.execute(emptyList(), device) }
+            assertEquals("PjrtLoadedExecutable used after its PJRT client was closed", ee.message)
+            exec.close()
+            exec.close()
+        }
     }
 
     @Test

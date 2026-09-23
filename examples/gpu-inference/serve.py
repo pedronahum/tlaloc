@@ -15,8 +15,9 @@ Two files, and this script names both out loud when it starts:
   1. a **PJRT plugin `.so`** — `xla_cuda_plugin.so` on an NVIDIA box,
      `/lib/libtpu.so` on a Cloud TPU VM. `tlaloc_serve` `dlopen`s it through
      `ctypes` and calls `GetPjrtApi`. It is looked up as a FILE, never
-     imported: `$TLALOC_PJRT_PLUGIN_PATH` first, then `/lib/libtpu.so`, then a
-     directory walk of any `jax_plugins/*/` that happens to be installed.
+     imported: `$TLALOC_PJRT_PLUGIN_PATH` first, then the same install
+     locations the JVM's `PjrtBinaries` searches (a jax CUDA plugin under a
+     venv for `--platform cuda`, libtpu for `--platform tpu`).
   2. a **driver** for whatever that plugin drives.
 
 `pip install -e harness/python` pulls in nothing at all: the distribution's

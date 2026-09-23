@@ -1425,19 +1425,25 @@ class PjrtClient internal constructor(
     internal val clientPtr: MemorySegment,
     internal val api: PjrtApi,
 ) : AutoCloseable {
-    fun platformName(): String = api.clientPlatformName(clientPtr)
+    fun platformName(): String {
+        checkOpen("PjrtClient")
+        return api.clientPlatformName(clientPtr)
+    }
 
     /** §0.4.304 — list of addressable devices on this client. Element 0 is
      * the typical "default" device for single-GPU hosts. The returned [PjrtDevice]
      * handles share lifetime with [PjrtClient] (PJRT owns them; no destroy call). */
-    fun addressableDevices(): List<PjrtDevice> =
-        api.clientAddressableDevices(clientPtr).map { PjrtDevice(it) }
+    fun addressableDevices(): List<PjrtDevice> {
+        checkOpen("PjrtClient")
+        return api.clientAddressableDevices(clientPtr).map { PjrtDevice(it) }
+    }
 
     /** Compile [stablehloMlir] into a [PjrtLoadedExecutable]. The MLIR can be
      * either StableHLO bytecode or text — XLA's MLIR import accepts both
      * via the "mlir" PJRT_Program format. Caller takes ownership of the
      * returned executable and must `close()` it. */
     fun compile(stablehloMlir: String): PjrtLoadedExecutable {
+        checkOpen("PjrtClient")
         // A confined arena lives only for the duration of the Compile call; the
         // PJRT plugin doesn't retain pointers into it past the return.
         Arena.ofConfined().use { scratch ->
@@ -1449,6 +1455,7 @@ class PjrtClient internal constructor(
     /** Stage an f32 host array onto [device] as a PJRT buffer. Caller takes
      * ownership of the returned [PjrtBuffer] and must `close()` it. */
     fun bufferFromHostF32(device: PjrtDevice, data: FloatArray, dims: List<Int>): PjrtBuffer {
+        checkOpen("PjrtClient")
         Arena.ofConfined().use { scratch ->
             val bufPtr = api.bufferFromHostF32(clientPtr, device.devicePtr, data, dims, scratch)
             return PjrtBuffer(bufPtr, this)
@@ -1457,6 +1464,7 @@ class PjrtClient internal constructor(
 
     /** §0.4.354 — f64 twin of [bufferFromHostF32]. */
     fun bufferFromHostF64(device: PjrtDevice, data: DoubleArray, dims: List<Int>): PjrtBuffer {
+        checkOpen("PjrtClient")
         Arena.ofConfined().use { scratch ->
             val bufPtr = api.bufferFromHostF64(clientPtr, device.devicePtr, data, dims, scratch)
             return PjrtBuffer(bufPtr, this)
@@ -1466,15 +1474,16 @@ class PjrtClient internal constructor(
     /** §0.4.457 (G1c) — bf16 twin of [bufferFromHostF32]. [data] is raw bit
      * patterns (the §0.4.455 ShortArray convention). */
     fun bufferFromHostBf16(device: PjrtDevice, data: ShortArray, dims: List<Int>): PjrtBuffer {
+        checkOpen("PjrtClient")
         Arena.ofConfined().use { scratch ->
             val bufPtr = api.bufferFromHostBf16(clientPtr, device.devicePtr, data, dims, scratch)
             return PjrtBuffer(bufPtr, this)
         }
     }
 
-    /** True once [close] has run. Buffers and executables made by this client
-     * check it, so a use after the client is gone fails by name instead of
-     * calling into freed native memory. */
+    /** True once [close] has run. This client's own methods, and the buffers
+     * and executables it made, check it, so a use after the client is gone
+     * fails by name instead of calling into freed native memory. */
     @Volatile
     var isClosed: Boolean = false
         private set
@@ -1518,7 +1527,9 @@ class PjrtBuffer internal constructor(
 
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    private fun usable(): PjrtClient {
+    /** The owning client, after checking that neither this buffer nor the
+     * client has been closed. */
+    internal fun usable(): PjrtClient {
         check(!closed.get()) { "PjrtBuffer used after close()" }
         client.checkOpen("PjrtBuffer")
         return client
@@ -1542,12 +1553,20 @@ class PjrtLoadedExecutable internal constructor(
 
     /** Number of outputs the executable produces per device. Cached on first
      * call so subsequent execute() invocations don't pay another round-trip. */
-    val numOutputs: Int by lazy { client.api.loadedExecGetNumOutputs(execPtr) }
+    val numOutputs: Int by lazy {
+        client.checkOpen("PjrtLoadedExecutable")
+        client.api.loadedExecGetNumOutputs(execPtr)
+    }
+
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** Single-device execute. [argBuffers] are the input device buffers in
      * order; returns one output buffer per executable result (caller takes
      * ownership and must close). */
     fun execute(argBuffers: List<PjrtBuffer>, device: PjrtDevice): List<PjrtBuffer> {
+        check(!closed.get()) { "PjrtLoadedExecutable used after close()" }
+        client.checkOpen("PjrtLoadedExecutable")
+        argBuffers.forEach { it.usable() }
         val outputPtrs = client.api.loadedExecExecuteSingleDevice(
             execPtr,
             argBuffers.map { it.bufferPtr },
@@ -1557,7 +1576,13 @@ class PjrtLoadedExecutable internal constructor(
         return outputPtrs.map { PjrtBuffer(it, client) }
     }
 
-    override fun close() = client.api.loadedExecDestroy(execPtr)
+    /** Destroys the executable. Idempotent. Does nothing once the owning
+     * client is closed: the client released the executable with it. */
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        if (client.isClosed) return
+        client.api.loadedExecDestroy(execPtr)
+    }
 }
 
 class PjrtRuntimeException(message: String) : RuntimeException(message)

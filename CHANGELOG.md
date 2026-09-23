@@ -30,8 +30,10 @@ Not yet published; these land in `0.1.0-alpha01`.
   `./gradlew :maestro:exportServingArtifact` and `:maestro:exportLlamaServingArtifact`.
 - `PjrtSession` can be used from several threads at once. `executeOn` serialises calls
   on the same executable, and `close()` waits for in-flight calls before releasing
-  native memory. A `PjrtBuffer` read after its session is closed throws instead of
-  touching freed memory.
+  native memory. A `PjrtBuffer`, `PjrtLoadedExecutable` or `PjrtClient` used after
+  its client is closed, and a closed `PjrtBuffer` passed to `executeOn` or
+  `PjrtLoadedExecutable.execute`, throw instead of touching freed memory. Closing a
+  buffer or executable twice, or after its client, does nothing.
 - `IreeModule` is `AutoCloseable`; closing it deletes its compiled VMFB. `runOnIree`
   and `IreeRuntime.invoke` delete their temporary files when they return.
 - The IREE tools are found through `$TLALOC_IREE_BIN`, `$VIRTUAL_ENV/bin`,
