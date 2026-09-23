@@ -99,6 +99,29 @@ git add third-party/maestro third-party/README.md docs/vendoring.md
 git commit -m "vendoring: bump Netflix/maestro pin to <new-pin>"
 ```
 
+## Changes to the upstream tree
+
+Every file under `third-party/maestro/` that differs from Netflix/maestro at the
+pinned commit (paths relative to `third-party/maestro/`; `VendoringNoticeTest` in
+`maestro-tlaloc` checks this table against the tree):
+
+| File | Change |
+|------|--------|
+| `build.gradle` | JDK 25 toolchain; the Security Manager test flag removed; JUnit Platform launcher and vintage engine on the test classpath |
+| `settings.gradle` | Includes `maestro-tlaloc` |
+| `maestro-common/src/main/java/com/netflix/maestro/models/definition/StepType.java` | Adds the `TLALOC` step type |
+| `maestro-common/src/main/java/com/netflix/maestro/models/stepruntime/KubernetesCommand.java` | Adds the `nodeSelector` and `accelerators` fields |
+| `maestro-server/src/main/java/com/netflix/maestro/server/config/MaestroStepRuntimeConfiguration.java` | Registers the Tlaloc step runtime beans |
+
+Each of these carries a `Modified by Pedro N. Rodriguez for Tlaloc, 2026` line
+at the top, as Apache-2.0 section 4(b) requires. Files Tlaloc added are
+`maestro-tlaloc/`, `maestro-common/.../KubernetesCommandTlalocFieldsTest.java`
+and `maestro-server/src/test/resources/samples/sample-tlaloc-*.json`; the Java
+ones carry a `Copyright 2026 Pedro N. Rodriguez` Apache header. The repository
+root `NOTICE` credits Netflix Maestro. After an upgrade, re-check that this
+table, the `Modified by` lines and `NOTICE` still match the tree, and carry
+over any `NOTICE` file the new upstream commit ships.
+
 ## Divergence policy (recap from third-party/README.md)
 
 Modifications to vendored Maestro outside `maestro-tlaloc/` are restricted to

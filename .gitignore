@@ -30,3 +30,6 @@ __pycache__/
 
 # §0.4.477 — `pip install -e harness/python` (the vLLM venv recipe) writes this.
 harness/python/*.egg-info/
+
+# JVM heap dumps
+*.hprof

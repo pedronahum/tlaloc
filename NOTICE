@@ -1,0 +1,8 @@
+Tlaloc
+Copyright 2026 Pedro N. Rodriguez
+
+This product includes software developed by Netflix, Inc.
+(Netflix Maestro, https://github.com/Netflix/maestro, Apache License 2.0),
+vendored in third-party/maestro at upstream commit
+0150f2a78005cf135023de29e5f8e06fd592563d. Files there that Tlaloc changed
+carry a "Modified by" line; docs/vendoring.md lists every change.

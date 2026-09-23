@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    # third-party/maestro is vendored at a pinned upstream commit and is upgraded
+    # only by the procedure in docs/vendoring.md.
+    exclude-paths:
+      - "third-party/**"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

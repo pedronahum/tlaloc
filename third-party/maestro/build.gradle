@@ -1,3 +1,6 @@
+// Modified by Pedro N. Rodriguez for Tlaloc, 2026: JDK 25 toolchain, JUnit Platform launcher on the
+// test classpath. See docs/vendoring.md in the Tlaloc repository.
+
 buildscript {
     repositories {
         mavenCentral()

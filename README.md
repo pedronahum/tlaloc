@@ -379,6 +379,9 @@ House style, if you are contributing:
   [KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md) exists because our own kernel lost
   to XLA.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build and review checklist and
+[SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+
 ---
 
 ## Acknowledgments
@@ -396,6 +399,10 @@ vendors [Netflix Maestro](https://github.com/Netflix/maestro).
 ## License
 
 Copyright 2026 Pedro N. Rodriguez. Licensed under [Apache-2.0](LICENSE).
+
+`third-party/maestro/` vendors [Netflix Maestro](https://github.com/Netflix/maestro)
+(Apache-2.0); [NOTICE](NOTICE) credits it. Tlaloc does not publish it. The paper text in
+`docs/papers/` is CC-BY-4.0; see [its README](docs/papers/README.md).
 
 Symja (`org.matheclipse:matheclipse-core`), the optional CAS, is **LGPL-3.0** by its
 published POM, while its upstream repository's `license.txt` is GPL-3.0; upstream's

@@ -1,3 +1,6 @@
+// Modified by Pedro N. Rodriguez for Tlaloc, 2026: includes the maestro-tlaloc module.
+// See docs/vendoring.md in the Tlaloc repository.
+
 rootProject.name = 'maestro'
 
 include 'netflix-sel'

@@ -1,6 +1,9 @@
 /*
  * Copyright 2025 Netflix, Inc.
  *
+ * Modified by Pedro N. Rodriguez for Tlaloc, 2026: adds the nodeSelector and accelerators fields.
+ * See docs/vendoring.md.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
  *

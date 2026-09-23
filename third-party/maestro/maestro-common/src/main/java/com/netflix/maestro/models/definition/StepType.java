@@ -1,3 +1,8 @@
+/*
+ * Netflix Maestro (https://github.com/Netflix/maestro), Apache License 2.0.
+ *
+ * Modified by Pedro N. Rodriguez for Tlaloc, 2026: adds the TLALOC step type. See docs/vendoring.md.
+ */
 package com.netflix.maestro.models.definition;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
