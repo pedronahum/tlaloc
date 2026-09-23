@@ -28,7 +28,7 @@ HuggingFace `transformers` produces from the same checkpoint.
 
 The first process never loads a PJRT plugin, never opens a CUDA context and
 never runs the graph it just built — it does not even depend on
-`io.tlaloc:runtime-pjrt`. The second has **no JVM in it, and no jax, no torch,
+`io.github.pedronahum:runtime-pjrt`. The second has **no JVM in it, and no jax, no torch,
 no numpy and no transformers either**; `serve.py` asks the import system and
 prints the answer, so you do not have to take that on faith.
 

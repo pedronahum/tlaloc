@@ -10,7 +10,7 @@ kotlin {
     // that exists to be copied. BUILD on JDK 25, EMIT Java 21 bytecode:
     //
     //   * the toolchain must be 25, because Kotlin runs a compiler plugin inside the
-    //     compiler's own JVM and `io.tlaloc:compiler-plugin` is 25 bytecode. This is
+    //     compiler's own JVM and `io.github.pedronahum:compiler-plugin` is 25 bytecode. This is
     //     the honest boundary of the §0.4.503 split: your BUILD machine needs a JDK 25
     //     to use `grad { }` at all.
     //   * the TARGET can be 21, because every library module Tlaloc publishes except
@@ -42,20 +42,20 @@ sourceSets {
 }
 
 dependencies {
-    implementation("io.tlaloc:core:0.1.0-alpha01")
-    implementation("io.tlaloc:ir:0.1.0-alpha01")
-    implementation("io.tlaloc:autograd:0.1.0-alpha01")
+    implementation("io.github.pedronahum:core:0.1.0-alpha01")
+    implementation("io.github.pedronahum:ir:0.1.0-alpha01")
+    implementation("io.github.pedronahum:autograd:0.1.0-alpha01")
     // The K2 compiler plugin: rewrites `grad { }` calls into synthesized
     // gradient code at compile time (and gives you compile-time shape /
     // differentiability errors in the IDE).
-    kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.1.0-alpha01")
+    kotlinCompilerPluginClasspath("io.github.pedronahum:compiler-plugin:0.1.0-alpha01")
 
     // The failing source set needs the same libraries and the same plugin —
     // the point is that it fails on its MERITS, not for want of a dependency.
-    "shapeErrorImplementation"("io.tlaloc:core:0.1.0-alpha01")
-    "shapeErrorImplementation"("io.tlaloc:ir:0.1.0-alpha01")
-    "shapeErrorImplementation"("io.tlaloc:autograd:0.1.0-alpha01")
-    "kotlinCompilerPluginClasspathShapeError"("io.tlaloc:compiler-plugin:0.1.0-alpha01")
+    "shapeErrorImplementation"("io.github.pedronahum:core:0.1.0-alpha01")
+    "shapeErrorImplementation"("io.github.pedronahum:ir:0.1.0-alpha01")
+    "shapeErrorImplementation"("io.github.pedronahum:autograd:0.1.0-alpha01")
+    "kotlinCompilerPluginClasspathShapeError"("io.github.pedronahum:compiler-plugin:0.1.0-alpha01")
 }
 
 application {
@@ -76,7 +76,7 @@ tasks.named<JavaExec>("run") {
  * This is the certification behind the README's per-module JDK table. The program is
  * compiled by a JDK 25 toolchain (the compiler plugin needs one) into Java 21
  * bytecode, and then executed by a JDK 21 launcher against the published
- * `io.tlaloc:core`, `:ir` and `:autograd` jars. If any of those jars — or the
+ * `io.github.pedronahum:core`, `:ir` and `:autograd` jars. If any of those jars — or the
  * gradient the plugin synthesized into this one — carried a JDK 22+ API or 25
  * bytecode, this task fails with `UnsupportedClassVersionError` or
  * `NoSuchMethodError` instead of printing a gradient.

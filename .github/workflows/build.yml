@@ -122,7 +122,7 @@ jobs:
   #
   # THE BOUNDARY, repeated here because it is the thing people get wrong: BUILD
   # on 25, RUN on 21. Kotlin loads a compiler plugin inside the compiler's own
-  # JVM and io.tlaloc:compiler-plugin is 25 bytecode, so a JDK-21-only machine
+  # JVM and io.github.pedronahum:compiler-plugin is 25 bytecode, so a JDK-21-only machine
   # cannot COMPILE `grad { }` at all. That is why this job installs both JDKs and
   # uses 25 as the toolchain: the supported consumer configuration is
   # jvmToolchain(25) + jvmTarget = JVM_21, which is what examples/quickstart does.

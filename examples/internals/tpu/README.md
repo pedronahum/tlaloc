@@ -65,7 +65,7 @@ allows no tolerance at all.
 From the repository root:
 
 ```bash
-./gradlew publishToMavenLocal            # publish io.tlaloc:* into ~/.m2
+./gradlew publishToMavenLocal            # publish io.github.pedronahum:* into ~/.m2
 ./gradlew -p examples/internals/tpu run            # the TPU lane (default)
 ```
 

@@ -15,7 +15,7 @@ import kotlin.streams.asSequence
  *
  * This process reads a model and writes a **directory**. It never loads a PJRT
  * plugin, never opens a CUDA context and never runs the graph it just built;
- * it does not depend on `io.tlaloc:runtime-pjrt` at all. When `main` returns,
+ * it does not depend on `io.github.pedronahum:runtime-pjrt` at all. When `main` returns,
  * Kotlin's involvement in serving this model is over, permanently.
  *
  * That is the claim the whole example exists to make legible: **the artifact is

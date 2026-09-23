@@ -100,7 +100,7 @@ quickstart OK
 |---|---|
 | [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt) | The `grad { }` call — three lines, one gradient, no tape |
 | [`src/shapeError/kotlin/ShapeError.kt`](src/shapeError/kotlin/ShapeError.kt) | The program that must not compile |
-| [`build.gradle.kts`](build.gradle.kts) | The one line that makes it all work: `kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.1.0-alpha01")` — the `shapeError` task that expects failure — and, since §0.4.503, the **supported consumer JDK configuration**: `jvmToolchain(25)` to build, `jvmTarget = JVM_21` to run |
+| [`build.gradle.kts`](build.gradle.kts) | The one line that makes it all work: `kotlinCompilerPluginClasspath("io.github.pedronahum:compiler-plugin:0.1.0-alpha01")` — the `shapeError` task that expects failure — and, since §0.4.503, the **supported consumer JDK configuration**: `jvmToolchain(25)` to build, `jvmTarget = JVM_21` to run |
 | [`settings.gradle.kts`](settings.gradle.kts) | `mavenLocal()` first — this project is a consumer, not part of the repo build |
 
 ## Running it on a JDK 21

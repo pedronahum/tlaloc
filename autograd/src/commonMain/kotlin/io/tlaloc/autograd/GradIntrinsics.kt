@@ -28,7 +28,7 @@ internal fun pluginMissing(name: String): Nothing = throw IllegalStateException(
         "cannot lower is a compile-time ERROR naming the construct, so reaching this message " +
         "means exactly one of two things:\n" +
         "  (1) the Tlaloc K2 compiler plugin is not on this module's compile classpath — add " +
-        "`io.tlaloc:compiler-plugin` to kotlinCompilerPluginClasspath (docs/GETTING_STARTED.md); or\n" +
+        "`io.github.pedronahum:compiler-plugin` to kotlinCompilerPluginClasspath (docs/GETTING_STARTED.md); or\n" +
         "  (2) the plugin IS applied and refused this body, and the build opted out of that " +
         "refusal with -P plugin:io.tlaloc.plugin:strictLowering=false — the compile log then " +
         "carries `w: Tlaloc could not lower lambda: <reason>` at this call site, which names " +

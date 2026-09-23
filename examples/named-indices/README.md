@@ -132,7 +132,7 @@ All of it is in [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt):
 
 ## Notes
 
-- **No compiler plugin here.** This example depends on `io.tlaloc:core` only.
+- **No compiler plugin here.** This example depends on `io.github.pedronahum:core` only.
   Named axes are enforced by Kotlin generics, so the K2 plugin is not in the
   loop — its job is lowering `grad { }` bodies (see
   [`../quickstart/`](../quickstart/)). That separation was the design goal, not

@@ -1,5 +1,5 @@
 // §0.4.487 — the GPU inference example: a STANDALONE Gradle build (deliberately
-// not included in the root settings) consuming the published io.tlaloc:*
+// not included in the root settings) consuming the published io.github.pedronahum:*
 // artifacts from mavenLocal, exactly as an external user would.
 //
 //   ./gradlew publishToMavenLocal                      # at the repo root

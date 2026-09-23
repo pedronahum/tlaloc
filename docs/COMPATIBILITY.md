@@ -142,7 +142,7 @@ a list of things this policy could not keep.
     gate is `scripts/jdk21-smoke.sh` plus `verifyJvmTarget`, which reads the
     class-file major version out of every published jar.
 - **Symja (`org.matheclipse:matheclipse-core`, LGPL-3.0) is optional from
-  `0.1.0-alpha01`.** It was a mandatory runtime dependency of `io.tlaloc:ir` until
+  `0.1.0-alpha01`.** It was a mandatory runtime dependency of `io.github.pedronahum:ir` until
   §0.4.503 and is `compileOnly` now, so it will not appear in your graph unless
   you add it. Adding it is one line — `kotlinCompilerPluginClasspath(...)`, because
   the CAS runs inside the compiler and not inside your program — and Tlaloc names

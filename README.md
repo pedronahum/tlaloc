@@ -62,7 +62,7 @@ runs on **JDK 21** (see [Requirements](#requirements)). No GPU required.
 
 ```bash
 git clone https://github.com/pedronahum/tlaloc && cd tlaloc
-./gradlew publishToMavenLocal -x test   # installs io.tlaloc:*:0.1.0-alpha01
+./gradlew publishToMavenLocal -x test   # installs io.github.pedronahum:*:0.1.0-alpha01
 ./gradlew -p examples/quickstart run    # a standalone project that consumes it
 ```
 
@@ -303,14 +303,14 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.tlaloc:core:0.1.0-alpha01")
-    implementation("io.tlaloc:ir:0.1.0-alpha01")
-    implementation("io.tlaloc:autograd:0.1.0-alpha01")
-    implementation("io.tlaloc:nn:0.1.0-alpha01")          // optional: layers + optimizers
-    implementation("io.tlaloc:runtime-pjrt:0.1.0-alpha01") // optional: GPU execution
+    implementation("io.github.pedronahum:core:0.1.0-alpha01")
+    implementation("io.github.pedronahum:ir:0.1.0-alpha01")
+    implementation("io.github.pedronahum:autograd:0.1.0-alpha01")
+    implementation("io.github.pedronahum:nn:0.1.0-alpha01")          // optional: layers + optimizers
+    implementation("io.github.pedronahum:runtime-pjrt:0.1.0-alpha01") // optional: GPU execution
 
     // The K2 plugin — this line is what makes `grad { }` compile-time.
-    kotlinCompilerPluginClasspath("io.tlaloc:compiler-plugin:0.1.0-alpha01")
+    kotlinCompilerPluginClasspath("io.github.pedronahum:compiler-plugin:0.1.0-alpha01")
 }
 ```
 
@@ -590,7 +590,7 @@ than inferred.
 Three things limit the blast radius, and one does not:
 
 - **It is not in your dependency graph.** Symja was a `runtime` dependency of
-  `io.tlaloc:ir-jvm` until §0.4.503 made it `compileOnly`. It is absent from the
+  `io.github.pedronahum:ir-jvm` until §0.4.503 made it `compileOnly`. It is absent from the
   published POM and module metadata, three tripwire tests keep it absent, and a
   body that genuinely needs the CAS refuses *by name*, printing the coordinate,
   the licence and the one line to add. (This paragraph said the opposite until

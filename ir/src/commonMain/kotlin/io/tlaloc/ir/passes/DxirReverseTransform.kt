@@ -893,12 +893,27 @@ object DxirReverseTransform {
                     // single precision moves; the f64 arm exists at all because
                     // folding an f64 product through Float and handing the result
                     // back as "f64" would be a single-precision answer wearing a
-                    // double-precision type. The identity tests below stay on the
-                    // Float projection: they compare against exact small integers,
-                    // where the projection is lossless.
+                    // double-precision type.
                     val wide = n.type.dtype == io.tlaloc.core.F64
                     fun foldedConst(f32: () -> Float, f64: () -> Double): DxirConst =
                         DxirConst(n.id, if (wide) f64() else f32(), n.type)
+
+                    // §0.4.508 — the IDENTITY predicates must ask at the node's own width.
+                    // §0.4.500 left them on the `Float` projection and argued the projection
+                    // was lossless "because they compare against exact small integers". The
+                    // comparison target is exact; the PROJECTED OPERAND is not. `1.0 + 1e-10`
+                    // is a double that `toFloat()` rounds to exactly `1.0f`, so `a == 1.0f`
+                    // fired and MUL collapsed to its other operand — turning d/dx x*1.0000000001
+                    // into 1.0. Likewise `1e-50` projects to `0.0f`, so MUL-by-it folded the
+                    // whole product to zero. Both are silent single-precision answers inside an
+                    // f64 program, which is the same class of defect the dtype fix above closed,
+                    // one level up: there the VALUE was narrow, here the DECISION is.
+                    fun isExactly(operand: DxirNode, target: Double): Boolean =
+                        if (wide) {
+                            asDoubleConst(operand) == target
+                        } else {
+                            asFloatConst(operand) == target.toFloat()
+                        }
 
                     // Try to fold.
                     val folded: DxirNode? = when (n.op) {
@@ -910,9 +925,10 @@ object DxirReverseTransform {
                                     { a * b },
                                     { asDoubleConst(n.operands[0])!! * asDoubleConst(n.operands[1])!! },
                                 )
-                                a == 1.0f -> canonicalRef(n.operands[1], byId)
-                                b == 1.0f -> canonicalRef(n.operands[0], byId)
-                                a == 0.0f || b == 0.0f -> foldedConst({ 0.0f }, { 0.0 })
+                                isExactly(n.operands[0], 1.0) -> canonicalRef(n.operands[1], byId)
+                                isExactly(n.operands[1], 1.0) -> canonicalRef(n.operands[0], byId)
+                                isExactly(n.operands[0], 0.0) || isExactly(n.operands[1], 0.0) ->
+                                    foldedConst({ 0.0f }, { 0.0 })
                                 else -> null
                             }
                         }
@@ -924,8 +940,8 @@ object DxirReverseTransform {
                                     { a + b },
                                     { asDoubleConst(n.operands[0])!! + asDoubleConst(n.operands[1])!! },
                                 )
-                                a == 0.0f -> canonicalRef(n.operands[1], byId)
-                                b == 0.0f -> canonicalRef(n.operands[0], byId)
+                                isExactly(n.operands[0], 0.0) -> canonicalRef(n.operands[1], byId)
+                                isExactly(n.operands[1], 0.0) -> canonicalRef(n.operands[0], byId)
                                 else -> null
                             }
                         }
@@ -937,7 +953,7 @@ object DxirReverseTransform {
                                     { a - b },
                                     { asDoubleConst(n.operands[0])!! - asDoubleConst(n.operands[1])!! },
                                 )
-                                b == 0.0f -> canonicalRef(n.operands[0], byId)
+                                isExactly(n.operands[1], 0.0) -> canonicalRef(n.operands[0], byId)
                                 else -> null
                             }
                         }
@@ -945,11 +961,11 @@ object DxirReverseTransform {
                             val a = asFloatConst(n.operands[0])
                             val b = asFloatConst(n.operands[1])
                             when {
-                                a != null && b != null && b != 0.0f -> foldedConst(
+                                a != null && b != null && !isExactly(n.operands[1], 0.0) -> foldedConst(
                                     { a / b },
                                     { asDoubleConst(n.operands[0])!! / asDoubleConst(n.operands[1])!! },
                                 )
-                                b == 1.0f -> canonicalRef(n.operands[0], byId)
+                                isExactly(n.operands[1], 1.0) -> canonicalRef(n.operands[0], byId)
                                 else -> null
                             }
                         }

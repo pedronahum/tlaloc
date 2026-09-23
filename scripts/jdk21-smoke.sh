@@ -19,7 +19,7 @@
 #
 # What this script deliberately does NOT claim: that a JDK 21 machine can BUILD a
 # program containing `grad { }`. It cannot. Kotlin loads a compiler plugin inside
-# the compiler's own JVM, and io.tlaloc:compiler-plugin is 25 bytecode, so the
+# the compiler's own JVM, and io.github.pedronahum:compiler-plugin is 25 bytecode, so the
 # build machine needs a JDK 25. The supported consumer configuration is exactly
 # what examples/quickstart does: jvmToolchain(25) + jvmTarget = JVM_21.
 #

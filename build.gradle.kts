@@ -16,7 +16,7 @@ plugins {
     alias(libs.plugins.binary.compatibility.validator)
 }
 
-group = "io.tlaloc"
+group = "io.github.pedronahum"
 
 // §0.4.498 — 0.0.1-SNAPSHOT was never a release coordinate; it was a placeholder
 // that outlived 140 sections. The first named version is an ALPHA, deliberately:
@@ -25,7 +25,7 @@ group = "io.tlaloc"
 version = "0.1.0-alpha01"
 
 // §0.4.355 — every consumable module publishes to Maven under
-// io.tlaloc:<module>:<version>. `./gradlew publishToMavenLocal` is the
+// io.github.pedronahum:<module>:<version>. `./gradlew publishToMavenLocal` is the
 // onboarding entry point (docs/GETTING_STARTED.md; examples/quickstart is a
 // standalone consumer project resolving from mavenLocal). :benchmarks is a
 // test harness, not a library — excluded.
@@ -38,7 +38,7 @@ version = "0.1.0-alpha01"
 // DRY-RUNNABLE, not certified — docs/RELEASING.md is the procedure and
 // docs/ALPHA_PLAN.md carries the honest status.
 allprojects {
-    group = "io.tlaloc"
+    group = "io.github.pedronahum"
     version = rootProject.version
 }
 
@@ -268,6 +268,63 @@ subprojects {
                     "$modulePath: no *sourcesJar task exists, so no sources artifact is " +
                         "published. Central requires one per artifact.",
                 )
+            }
+            // §0.4.508 — THE COPYLEFT-ABSENCE GATE.
+            //
+            // "Symja is optional, so it will not appear in your dependency graph" is the
+            // most consequential sentence in the README: a reader whose policy forbids
+            // copyleft decides whether to adopt Tlaloc on it. §0.4.503 made it true by
+            // moving Symja to `compileOnly`, and §0.4.506 CHECKED it by reading ~/.m2 by
+            // eye — which certifies the claim for exactly as long as nobody edits a build
+            // file. A `compileOnly` that someone restores to `implementation` to fix a
+            // compile error would put an LGPL/GPL jar back into every consumer's runtime
+            // graph and break no test. This is that test.
+            //
+            // Both files, because they are read by different consumers: Maven reads the
+            // POM, Gradle prefers the .module metadata, and only the POM is parsed here
+            // (the .module is JSON, where a substring match cannot be fooled by a
+            // same-named element in another position the way `<name>` fooled the check
+            // above).
+            val forbiddenGroups = listOf("org.matheclipse")
+            generated.forEach { pom ->
+                val root = DocumentBuilderFactory.newInstance()
+                    .also { it.isNamespaceAware = false }
+                    .newDocumentBuilder()
+                    .parse(pom)
+                    .documentElement
+                val groupIds = root.getElementsByTagName("dependency").let { deps ->
+                    (0 until deps.length).mapNotNull { deps.item(it) as? Element }
+                }.mapNotNull { dep ->
+                    dep.getElementsByTagName("groupId").item(0)?.textContent?.trim()
+                }
+                val offenders = groupIds.filter { g -> forbiddenGroups.any { g.startsWith(it) } }
+                if (offenders.isNotEmpty()) {
+                    throw GradleException(
+                        "$modulePath: ${pom.name} declares a dependency on " +
+                            "${offenders.distinct().joinToString(", ")}, which the README, " +
+                            "docs/COMPATIBILITY.md and docs/ALPHA_PLAN.md all promise is NOT in " +
+                            "a consumer's graph. Symja is LGPL-3.0 (its upstream repository is " +
+                            "GPL-3.0) and must stay `compileOnly`. If this dependency is " +
+                            "genuinely needed at runtime, the documented claim has to change in " +
+                            "the same commit.",
+                    )
+                }
+            }
+            pomTasks.mapNotNull { pomTask ->
+                pomTask.destination.resolveSibling(
+                    pomTask.destination.name.replace(Regex("\\.pom$"), ".module"),
+                ).takeIf { it.isFile }
+            }.forEach { moduleFile ->
+                val text = moduleFile.readText()
+                val offenders = forbiddenGroups.filter { it in text }
+                if (offenders.isNotEmpty()) {
+                    throw GradleException(
+                        "$modulePath: ${moduleFile.name} (Gradle module metadata, which Gradle " +
+                            "consumers prefer over the POM) names " +
+                            "${offenders.joinToString(", ")}. See the POM check above for why " +
+                            "that breaks a documented promise.",
+                    )
+                }
             }
         }
     }

@@ -14,7 +14,19 @@ retro-summarise them; it is the record from the first named version forward.
 
 ## [Unreleased]
 
-### Verified
+Nothing yet.
+
+## [0.1.0-alpha01] — 2026-09-23
+
+The first named version, and one release with two halves. `build.gradle.kts` has
+read `0.1.0-alpha01` since §0.4.498, so everything below ships under that
+coordinate — which is why the engine work that used to sit under *Unreleased* in
+this file is filed here instead. Nothing was ever published in between, so there
+is no consumer for whom this relabelling changes anything.
+
+### Engine and compiler (§0.4.499–§0.4.508)
+
+#### Verified
 
 - **The alpha arc's final verification (§0.4.506).** No code changed; every claim the
   arc made about the repository as a whole was re-run from a clean room and the
@@ -48,7 +60,7 @@ retro-summarise them; it is the record from the first named version forward.
   said nine did. The row now says nine, names the exception, and points at the
   §0.4.506 run that closed it.
 
-### Added
+#### Added
 
 - **`@ExperimentalTlalocApi` — an opt-in marker on the part of the surface that is
   provisional.** `docs/COMPATIBILITY.md` promised that every alpha API may change
@@ -90,7 +102,7 @@ retro-summarise them; it is the record from the first named version forward.
   emitted without a position. Eighteen test classes already pinned the diagnostic
   *text*; not one had looked at `location`.
 
-### Changed
+#### Changed
 
 - **The "red squiggle in the IDE" claim now matches the evidence.** The README and
   `docs/GETTING_STARTED.md` both promised an IDE redline and nothing tested it.
@@ -147,7 +159,7 @@ retro-summarise them; it is the record from the first named version forward.
   configuration's synthesized gradient on a real JDK 21.
 - **Symja is an optional dependency.** `org.matheclipse:matheclipse-core` — 8.3 MB,
   **LGPL-3.0**, with its own transitive tree — was a mandatory *runtime* dependency
-  of `io.tlaloc:ir`, and therefore of `:autograd`, `:nn` and `:stablehlo`, whether
+  of `io.github.pedronahum:ir`, and therefore of `:autograd`, `:nn` and `:stablehlo`, whether
   or not a program ever differentiated a loop-bearing body. It is `compileOnly`
   now and no longer appears in the published POM. Add
   `implementation("org.matheclipse:matheclipse-core:3.1.1")` only if you need the
@@ -171,7 +183,7 @@ retro-summarise them; it is the record from the first named version forward.
   reason now prints, instead of advice that told a user who *had* installed a
   plugin nothing at all.
 
-### Added
+#### Added
 
 - **CI is four lanes now, and two of them exist to catch what one machine cannot
   see.** Every ✅ in `docs/CAPABILITIES.md` had been certified on one host — an
@@ -296,7 +308,7 @@ retro-summarise them; it is the record from the first named version forward.
   parameter lists are rebuilt from the lowered one. See
   [docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md).
 
-### Changed
+#### Changed
 
 - **`CosineDecay` clamps past `decaySteps`, where PyTorch's
   `CosineAnnealingLR` is periodic and climbs back toward the initial rate.** This
@@ -328,7 +340,7 @@ retro-summarise them; it is the record from the first named version forward.
   plugin on the compile classpath, or a plugin that refused the body under
   `strictLowering=false` — and says where the compile-time reason is.
 
-### Fixed
+#### Fixed
 
 - **An f64 scalar body with a literal constant no longer kills the compiler.**
   `DxirReverseTransform`'s scalar constant folding built every folded constant
@@ -351,12 +363,15 @@ retro-summarise them; it is the record from the first named version forward.
   overload and not diagnosed at all. (Had it not been, promoting the refusal to
   an error would have broken that route outright.)
 
-## [0.1.0-alpha01] — 2026-09-22
+### Packaging and distribution (§0.4.498)
 
-The first named version. The engine did not change in this release; the
-*packaging* did, from "unpublishable" to "publishable but not yet published".
+This half of the release is the packaging: it went from "unpublishable" to
+"publishable but not yet published". When it was written it also said "the engine
+did not change in this release" — true for about a day, and false from §0.4.499
+onward. The engine changes are the section above; both halves ship under this one
+version, because nothing was ever published between them.
 
-### Added
+#### Added
 
 - **`LICENSE` — Apache-2.0.** The repository had no license file, which made it
   "all rights reserved" by default and contradicted its own "developed in the
@@ -389,14 +404,14 @@ The first named version. The engine did not change in this release; the
 - **[docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md)** — the ledger for the road to a
   usable alpha, with one row per item and what pins each.
 
-### Changed
+#### Changed
 
 - **Version `0.0.1-SNAPSHOT` → `0.1.0-alpha01`**, across the root build, the
   README, `docs/GETTING_STARTED.md` and all ten standalone example projects.
   The old coordinate no longer resolves; republish with
   `./gradlew publishToMavenLocal -x test`.
 
-### Fixed
+#### Fixed
 
 - **Two stale license claims in the repository's own words.**
   `SymbolicEngine.kt`'s KDoc and `docs/STAGE_B_PLAN.md` §3.2.1's bullet list both
@@ -405,7 +420,7 @@ The first named version. The engine did not change in this release; the
   the discrepancy §0.4.498 found: the *artifact's* POM says LGPL-3.0 while the
   *repository's* `license.txt` is plain GPL-3.0.
 
-### Not done, deliberately
+#### Not done, deliberately
 
 - **Nothing has been published to Maven Central.** There are no credentials on
   the machine this work was done on and a Central upload is irreversible. The

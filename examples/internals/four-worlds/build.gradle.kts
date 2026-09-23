@@ -15,18 +15,18 @@ sourceSets {
 }
 
 dependencies {
-    implementation("io.tlaloc:core:0.1.0-alpha01")
-    implementation("io.tlaloc:autograd:0.1.0-alpha01")
+    implementation("io.github.pedronahum:core:0.1.0-alpha01")
+    implementation("io.github.pedronahum:autograd:0.1.0-alpha01")
     // `program { }` / `workflow { }` and the Maestro descriptor live here.
-    implementation("io.tlaloc:maestro:0.1.0-alpha01")
+    implementation("io.github.pedronahum:maestro:0.1.0-alpha01")
     // No compiler plugin: `program { }` captures its body with the :autograd
     // runtime tracer, not a plugin lowering. The plugin's role in the four
     // worlds is enforcing scope discipline at compile time, which this example
     // demonstrates with a source set that must not compile.
 
-    "shapeErrorImplementation"("io.tlaloc:core:0.1.0-alpha01")
-    "shapeErrorImplementation"("io.tlaloc:autograd:0.1.0-alpha01")
-    "shapeErrorImplementation"("io.tlaloc:maestro:0.1.0-alpha01")
+    "shapeErrorImplementation"("io.github.pedronahum:core:0.1.0-alpha01")
+    "shapeErrorImplementation"("io.github.pedronahum:autograd:0.1.0-alpha01")
+    "shapeErrorImplementation"("io.github.pedronahum:maestro:0.1.0-alpha01")
 }
 
 application {

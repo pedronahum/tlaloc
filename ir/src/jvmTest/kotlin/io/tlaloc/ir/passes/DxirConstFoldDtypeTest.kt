@@ -8,6 +8,7 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -137,6 +138,83 @@ class DxirConstFoldDtypeTest {
         assertEquals(
             0.0, f64Consts.mapNotNull { it.value as? Double }.lastOrNull(),
             "d/dx (x · 0) = 0",
+        )
+    }
+
+    /**
+     * §0.4.508 — the fold DECISION, not the folded value.
+     *
+     * §0.4.500 made the folded constant carry a value of the node's own width and left
+     * the identity predicates comparing the `Float` PROJECTION of the operand, on the
+     * argument that the comparison targets (0 and 1) are exactly representable. They
+     * are; the projection of the operand is not. `1.0 + 1e-10` is a distinct double
+     * that `toFloat()` rounds to exactly `1.0f`, so `MUL`'s `a == 1.0f` arm fired and
+     * returned the other operand unchanged — d/dx of `x · 1.0000000001` came back as
+     * `1.0`. A single-precision answer inside an f64 program, arrived at by a
+     * single-precision decision, with nothing anywhere reporting a loss.
+     */
+    @Test
+    fun `an f64 constant a float projection would round to 1 does not fold as identity`() {
+        val nearlyOne = 1.0 + 1e-10
+        assertEquals(1.0f, nearlyOne.toFloat(), "premise: this double projects to exactly 1.0f")
+        assertTrue(nearlyOne != 1.0, "premise: but it is not 1.0")
+
+        // The shape matters, and getting it wrong makes this test vacuous: for
+        // `x · k` the adjoint multiplies the SEED (exactly 1.0) by k, so the identity
+        // arm fires on the seed and correctly hands back k — k survives either way.
+        // The defect needs k itself in the identity position against a NON-constant
+        // operand, which `(x · x) · k` produces: adj(x) = MUL(k, x).
+        val fn = DxirBuilder.function("f64_near_one") {
+            val x = param("x", f64s)
+            val k = const(nearlyOne, f64s)
+            val sq = op(OpKind.MUL, listOf(x, x), f64s)
+            listOf(op(OpKind.MUL, listOf(sq, k), f64s))
+        }
+
+        val grad = DxirReverseTransform.apply(fn)
+        val f64Consts = grad.body.filterIsInstance<DxirConst>()
+            .filter { it.type.dtype == F64 }
+            .mapNotNull { it.value as? Double }
+
+        // d/dx (x · k) = k. The gradient must still carry k itself, at full width.
+        assertTrue(
+            f64Consts.contains(nearlyOne),
+            "the derivative must be the constant itself, not its f32 projection; " +
+                "f64 consts in the gradient were $f64Consts",
+        )
+        assertFalse(
+            f64Consts.contains(1.0) && !f64Consts.contains(nearlyOne),
+            "folding to exactly 1.0 is the pre-§0.4.508 defect: $f64Consts",
+        )
+    }
+
+    /**
+     * §0.4.508 — the same defect at the other end of the range. `1e-50` projects to
+     * `0.0f`, so `MUL`'s zero arm collapsed the entire product to a constant zero.
+     */
+    @Test
+    fun `an f64 constant a float projection would round to 0 does not fold to zero`() {
+        val tiny = 1e-50
+        assertEquals(0.0f, tiny.toFloat(), "premise: this double underflows to 0.0f")
+        assertTrue(tiny != 0.0, "premise: but it is not 0.0")
+
+        // `(x · x) · k`, for the reason spelled out in the near-one test above.
+        val fn = DxirBuilder.function("f64_tiny") {
+            val x = param("x", f64s)
+            val k = const(tiny, f64s)
+            val sq = op(OpKind.MUL, listOf(x, x), f64s)
+            listOf(op(OpKind.MUL, listOf(sq, k), f64s))
+        }
+
+        val grad = DxirReverseTransform.apply(fn)
+        val f64Consts = grad.body.filterIsInstance<DxirConst>()
+            .filter { it.type.dtype == F64 }
+            .mapNotNull { it.value as? Double }
+
+        assertTrue(
+            f64Consts.contains(tiny),
+            "d/dx ((x·x)·1e-50) must still carry 1e-50, not collapse to 0.0; " +
+                "f64 consts were $f64Consts",
         )
     }
 }
