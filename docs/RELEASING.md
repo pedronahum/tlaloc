@@ -106,11 +106,24 @@ You are looking for `<name>`, `<description>`, `<url>`, `<licenses>`,
    group id is the one part of a coordinate that cannot be corrected later
    without breaking every consumer, and there are none yet.
 
-   Credentials: **Generate User Token** in your Central account produces a
-   username/password PAIR (neither is your login). They go in
-   `~/.gradle/gradle.properties` as `centralUsername` / `centralPassword` —
-   never in this repository's own `gradle.properties`, which is tracked by git.
-   §2 covers the signing key.
+   **Three names are in play and two of them are not credentials.** Getting this
+   wrong is the first thing that happens to anyone doing this step:
+
+   | | value | what it is |
+   |---|---|---|
+   | GitHub account | `pedronahum` | how you log in to the Portal |
+   | Namespace (the groupId) | `io.github.pedronahum` | derived from the account; already in the build |
+   | Token username | a generated opaque string | `centralUsername` — **not** the account name |
+
+   Credentials: **Generate User Token** (avatar → View Account) mints a
+   username/password PAIR, both random strings. Neither is the GitHub account name
+   and neither is the Portal login. It prints them as a Maven `<server>` block;
+   `<username>` is `centralUsername` and `<password>` is `centralPassword`. The
+   pair is shown ONCE, and generating a new token invalidates the previous one.
+
+   They go in `~/.gradle/gradle.properties`. **Not** in this repository's own
+   `gradle.properties`, which is tracked by git — a token pasted there is
+   committed and pushed. §2 covers the signing key.
 2. **Upload:**
 
    ```bash
