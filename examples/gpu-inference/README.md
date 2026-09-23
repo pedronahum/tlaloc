@@ -74,8 +74,9 @@ your own project would, so publish first.
 # half one — Kotlin compiles and exports. No GPU needed, no checkpoint needed.
 ./gradlew -p examples/gpu-inference run
 
-# half two — Python serves. Point it at a plugin .so; any interpreter will do.
-export TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so
+# half two — Python serves; any interpreter will do. It finds a JAX CUDA plugin
+# in the same places the JVM does. Export the path only for a plugin elsewhere:
+#   export TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so
 /usr/bin/python3 examples/gpu-inference/serve.py
 
 # your own prompt, encoded with the model's own vocabulary
@@ -100,25 +101,23 @@ script adds `harness/python` itself. A deployment gets it with
 `pip install -e <tlaloc>/harness/python`, which **pulls in nothing**: that
 distribution's dependency list is empty, and a test pins it empty.
 
-**No GPU — or no `TLALOC_PJRT_PLUGIN_PATH`?** Half one still runs and still
-writes a complete artifact — it is complete whether or not the box that made it
-can execute it. Half two then prints a `SKIP:` line naming what is missing and
-exits `0`:
+**No GPU, or no plugin?** Half one still runs and still writes a complete
+artifact — it is complete whether or not the box that made it can execute it.
+Half two then prints a `SKIP:` line listing every place it looked and exits `0`:
 
 ```
-SKIP: no PJRT plugin on this machine, so there is nothing to run on.
-      no PJRT plugin found. Set TLALOC_PJRT_PLUGIN_PATH to a plugin .so (a jax
-      install's jax_plugins/xla_cuda12/xla_cuda_plugin.so, a TPU VM's
-      /lib/libtpu.so, or a standalone plugin a deployment ships). The serving
-      runtime needs that file and a driver — nothing else.
+SKIP: no PJRT cuda plugin found, so there is nothing to run on.
+      PJRT cuda plugin resolution — where Tlaloc looked:
+        1. $TLALOC_PJRT_PLUGIN_PATH: not set
+        2. no jax_plugins/*cuda*/*.so under any searched root. Roots searched: $VIRTUAL_ENV (not set), ~/.local/venvs/*, ~/.venv, ~/venv, ~/.local, /usr/local, /usr, and this interpreter's site-packages — each at lib{,64}/python3.*/{site,dist}-packages/jax_plugins/*cuda*/*.so
+      Fix: export TLALOC_PJRT_PLUGIN_PATH=/path/to/the/plugin.so, or `pip install jax[cuda12]` into a venv under ~/.local/venvs/ (or activate it).
+      Half one still ran: the artifact in --artifact is the deployment,
+      and it is complete whether or not this box can execute it.
 ```
 
-That message is about this process's *inputs*, not about the machine. A box with
-a working plugin prints exactly the same thing if the `export` above was skipped:
-the JVM side (`PjrtBinaries`, §0.4.503) searches seven roots for a plugin, and the
-serving runtime deliberately searches none — it takes the path it is given, because
-a deployment ships its own `.so` and guessing is not a serving-time behaviour.
-Measured at §0.4.506, on a GB10 whose JVM lane was running on CUDA at the time.
+The serving runtime searches the same roots as the JVM's `PjrtBinaries`, in the
+same order, so a machine where the Kotlin half finds a plugin serves without
+the export. For `--platform tpu` it looks for libtpu instead.
 
 ---
 
@@ -301,7 +300,6 @@ which returned, really:
 And then serve it — back in the interpreter with nothing installed in it:
 
 ```bash
-export TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so
 /usr/bin/python3 examples/gpu-inference/serve.py \
   --artifact /tmp/tl-llama-example \
   --prompt 1,450,7483,310,3444,338 --max-new 6 --verify-weights

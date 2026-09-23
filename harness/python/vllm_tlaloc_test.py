@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -651,6 +652,122 @@ class LoaderIsStandardLibraryOnly(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             self.s.check_padding_constants({"PADDING_SEQ_LEN": 0})
         self.assertIn("pad a batch differently", str(cm.exception))
+
+
+
+class PluginDiscoveryTest(unittest.TestCase):
+    """`tlaloc_pjrt.find_plugin` over synthetic install trees: the JVM's
+    `PjrtBinaries` roots in the same order, libtpu only for tpu, and a search
+    report when nothing is found. Also the PJRT_Api version gate and the named
+    option-variable errors, which need no plugin."""
+
+    def setUp(self):
+        import tempfile
+
+        import tlaloc_pjrt
+
+        self.P = tlaloc_pjrt
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name) / "home"
+        self.home.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _touch(self, *parts) -> str:
+        path = self.home.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+        return str(path)
+
+    def _cuda_plugin_in(self, root: tuple, py="python3.12", pkg="xla_cuda12", name="xla_cuda_plugin.so") -> str:
+        return self._touch(*root, "lib", py, "site-packages", "jax_plugins", pkg, name)
+
+    def _find(self, platform="cuda", env=None):
+        return self.P.find_plugin(platform, env=env or {}, home=str(self.home), extra_site_dirs=())
+
+    def _skip_if_system_has(self, platform):
+        if self.P._resolve(platform, {}, "/nonexistent-home", ()):
+            self.skipTest(f"this host has a system-wide {platform} plugin under /usr or /lib")
+
+    def test_any_venv_under_local_venvs_any_python_any_cuda_package(self):
+        self._skip_if_system_has("cuda")
+        want = self._cuda_plugin_in((".local", "venvs", "aaa"), py="python3.11", pkg="xla_cuda13", name="plugin.so")
+        self._cuda_plugin_in((".local", "venvs", "zzz"))
+        self.assertEqual(want, self._find())
+
+    def test_an_activated_venv_comes_first(self):
+        self._cuda_plugin_in((".local", "venvs", "aaa"))
+        venv_plugin = self._cuda_plugin_in(("elsewhere",))
+        self.assertEqual(venv_plugin, self._find(env={"VIRTUAL_ENV": str(self.home / "elsewhere")}))
+
+    def test_user_site_and_dist_packages_are_searched(self):
+        self._skip_if_system_has("cuda")
+        want = self._touch(".local", "lib", "python3.10", "dist-packages", "jax_plugins", "cuda_x", "p.so")
+        self.assertEqual(want, self._find())
+
+    def test_libtpu_is_found_only_for_tpu(self):
+        self._skip_if_system_has("cuda")
+        libtpu = self._touch("tpuvenv", "lib", "python3.12", "site-packages", "libtpu", "libtpu.so")
+        cuda = self._cuda_plugin_in(("tpuvenv",))
+        env = {"VIRTUAL_ENV": str(self.home / "tpuvenv")}
+        self.assertEqual(cuda, self._find("cuda", env))
+        self.assertEqual(libtpu, self._find("tpu", env))
+
+    def test_the_env_variable_wins_for_cuda_but_not_with_a_cuda_file_for_tpu(self):
+        self._skip_if_system_has("tpu")
+        shipped = self._touch("ship", "xla_cuda_plugin.so")
+        self._cuda_plugin_in((".local", "venvs", "a"))
+        env = {"TLALOC_PJRT_PLUGIN_PATH": shipped}
+        self.assertEqual(shipped, self._find("cuda", env))
+        with self.assertRaises(FileNotFoundError) as cm:
+            self._find("tpu", env)
+        self.assertIn("not a tpu plugin name", str(cm.exception))
+
+    def test_a_variable_naming_no_file_is_refused(self):
+        with self.assertRaises(FileNotFoundError) as cm:
+            self._find(env={"TLALOC_PJRT_PLUGIN_PATH": str(self.home / "gone.so")})
+        self.assertIn("TLALOC_PJRT_PLUGIN_PATH=", str(cm.exception))
+
+    def test_nothing_found_reports_every_root(self):
+        self._skip_if_system_has("cuda")
+        with self.assertRaises(FileNotFoundError) as cm:
+            self._find()
+        report = str(cm.exception)
+        for needle in ("$TLALOC_PJRT_PLUGIN_PATH: not set", "~/.local/venvs/*", "~/.venv", "~/venv",
+                       "/usr/local", "python3.*", "jax_plugins/*cuda*/*.so", "Fix: export"):
+            self.assertIn(needle, report)
+
+    def test_the_serve_resolver_delegates(self):
+        import tlaloc_serve
+
+        shipped = self._touch("ship", "libtpu.so")
+        with unittest.mock.patch.dict("os.environ", {"TLALOC_PJRT_PLUGIN_PATH": shipped}):
+            self.assertEqual(shipped, tlaloc_serve.find_pjrt_plugin(platform="tpu"))
+
+    def test_an_api_of_another_major_version_is_refused_by_name(self):
+        with self.assertRaises(self.P.PjrtError) as cm:
+            self.P.check_api_compatible("/p/plugin.so", 4096, 1, 0)
+        self.assertIn("PJRT C API 1.0", str(cm.exception))
+        self.assertIn("major version 0", str(cm.exception))
+
+    def test_an_api_table_too_short_is_refused_by_name(self):
+        need = self.P.PJRT_API_MIN_STRUCT_SIZE
+        self.assertEqual(self.P.OFFSET_PJRT_Buffer_ToHostBuffer + 8, need)
+        with self.assertRaises(self.P.PjrtError) as cm:
+            self.P.check_api_compatible("/p/plugin.so", need - 8, 0, 30)
+        self.assertIn(f"at least {need} bytes", str(cm.exception))
+        self.P.check_api_compatible("/p/plugin.so", need, 0, 30)
+
+    def test_malformed_option_variables_are_refused_by_name(self):
+        for name, value in (("TLALOC_PJRT_MEMORY_FRACTION", "half"),
+                            ("TLALOC_PJRT_MEMORY_FRACTION", "2"),
+                            ("TLALOC_PJRT_PREALLOCATE", "yes")):
+            with unittest.mock.patch.dict("os.environ", {name: value}):
+                with self.assertRaises(ValueError) as cm:
+                    self.P.PjrtClientOptions()
+                self.assertIn(name, str(cm.exception))
+                self.assertIn(f"'{value}'", str(cm.exception))
 
 
 if __name__ == "__main__":

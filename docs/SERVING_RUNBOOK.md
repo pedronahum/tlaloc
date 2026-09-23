@@ -65,25 +65,28 @@ export TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so
 `pip install -e harness/python` pulls **nothing**: the distribution's
 `dependencies` list is empty and pinned empty by a test
 (`vllm_tlaloc_test.LoaderIsStandardLibraryOnly` / the registration lane).
-The plugin `.so` comes from one of exactly three places, and the loader
-looks for them in this order — all three are FILE lookups, never imports:
+The export above is needed only for a plugin outside the standard install
+locations. `tlaloc_pjrt.find_plugin` (which `tlaloc_serve.find_pjrt_plugin`
+calls) searches the same places as the JVM's `PjrtBinaries`, in the same order,
+and every lookup is a file lookup, never an import:
 
 1. `TLALOC_PJRT_PLUGIN_PATH` — what a deployment that ships its own plugin
    sets. Same variable `PjrtBinaries` reads JVM-side, so one export
-   configures both halves of the box.
-2. `/lib/libtpu.so` — a Cloud TPU VM's plugin, already on the image (G2b).
-3. `<site-packages>/jax_plugins/*/xla_cuda_plugin.so` — a jax install used
-   as a *place a file sits*. This is the convenience path on THIS machine
-   and it is a directory walk, not an `import jax_plugins`.
+   configures both halves of the box. For `tpu` it counts only when it names
+   a tpu-shaped file.
+2. For `cuda`: `lib{,64}/python3.*/{site,dist}-packages/jax_plugins/*cuda*/*.so`
+   under `$VIRTUAL_ENV`, `~/.local/venvs/*`, `~/.venv`, `~/venv`, `~/.local`,
+   `/usr/local` and `/usr`, then this interpreter's own site-packages. A jax
+   install is used as a place a file sits.
+3. For `tpu`: the libtpu wheel's `libtpu/libtpu.so` in `$VIRTUAL_ENV` or
+   `~/.local`, then `/lib/libtpu.so` and `/usr/lib/libtpu.so` (a Cloud TPU VM).
 
-§0.4.503 made the JVM half as general as the Python half. `PjrtBinaries`
-used to fall back to one literal string —
-`~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`,
-one venv name, one Python minor version, one plugin package — and it now
-globs all three across `$VIRTUAL_ENV`, `~/.local/venvs/*`, `~/.venv`,
-`~/venv`, `~/.local`, `/usr/local` and `/usr`. `PjrtBinaries.pluginSearchReport`
-prints every location it tried and what was at each, which is what the
-examples' "GPU lane unavailable" reason now carries.
+When nothing is found, the error lists every location tried and what was
+there. `PjrtBinaries.pluginSearchReport` prints the same report JVM-side.
+
+Before reading any function pointer, both bindings check the plugin's
+`PJRT_Api.struct_size` and API version and refuse, naming the plugin, a
+major version other than 0 or a table too short for the calls they make.
 
 ### The development venv (the oracles)
 

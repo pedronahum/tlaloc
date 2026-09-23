@@ -81,7 +81,6 @@ fun runOnPjrt(
     fn: DxirFunction,
     inputs: List<FloatArray>,
     target: PjrtTarget = PjrtTarget.Cuda,
-    @Suppress("UNUSED_PARAMETER") timeoutSeconds: Long = 300L,
 ): List<FloatArray> {
     // §0.4.459 (G2a) — named refusal: this one-shot path resolves the
     // CUDA-family plugin ([PjrtBinaries.pluginPath]) and always passes GPU
@@ -111,8 +110,7 @@ fun runOnPjrt(
         }
     }
 
-    val plugin = PjrtBinaries.pluginPath
-        ?: error("PJRT plugin not resolved; set TLALOC_PJRT_PLUGIN_PATH or `pip install jax[cuda12]` into ~/.local/venvs/iree")
+    val plugin = PjrtBinaries.requireCudaPlugin("runOnPjrt")
 
     val mlir = fn.toStablehlo("")
 

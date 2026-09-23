@@ -1,5 +1,7 @@
 package io.tlaloc.kptx
 
+import kotlin.jvm.Synchronized
+
 /**
  * KPTX v2.7 (§0.4.344) — the production kernel library (plan task 15):
  * the v1 hand-written kernels rewritten as [PtxKernelTemplate]s. This
@@ -379,8 +381,11 @@ object KptxKernels {
      */
     /* Multi-kernel modules come from [ptxModule]; [PtxKernelTemplate]
      * is single-kernel, so the CE chain is cached here by block size. */
+    // The module caches below are process-global and read from any thread;
+    // each accessor is @Synchronized so a module is built once per key.
     private val ceCache = HashMap<Int, PtxModule>()
 
+    @Synchronized
     fun crossEntropyModule(block: Int): PtxModule = ceCache.getOrPut(block) {
         // log2(e) = 0x3FB8AA3B, ln(2) = 0x3F317218 (f32, bit-exact).
         ptxModule {
@@ -638,6 +643,7 @@ object KptxKernels {
      */
     private val attnCache = HashMap<Int, PtxModule>()
 
+    @Synchronized
     fun attentionModule(block: Int): PtxModule = attnCache.getOrPut(block) {
         // log2(e) = 0x3FB8AA3B (f32, bit-exact).
         ptxModule {
@@ -954,6 +960,7 @@ object KptxKernels {
      */
     private val pagedAttnCache = HashMap<Pair<Int, Int>, PtxModule>()
 
+    @Synchronized
     fun pagedAttentionModule(block: Int, scale: Float): PtxModule =
         pagedAttnCache.getOrPut(block to scale.toRawBits()) {
             val scaleImm = "0f" + scale.toRawBits().toUInt().toString(16).uppercase().padStart(8, '0')

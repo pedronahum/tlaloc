@@ -71,8 +71,65 @@ object PjrtFfm {
             getPjrtApiAddr,
             FunctionDescriptor.of(ADDRESS),
         )
-        val pjrtApiPtr = (getPjrtApi.invokeExact() as MemorySegment).reinterpret(PJRT_API_OBSERVED_SIZE)
+        val pjrtApiPtr = checkedApi(getPjrtApi.invokeExact() as MemorySegment, pluginPath)
         return PjrtApi(pjrtApiPtr, arena)
+    }
+
+    /** The PJRT C API major version these bindings are written against. A
+     * major bump may reorder the function table, so any other major is refused. */
+    internal const val PJRT_API_MAJOR_SUPPORTED: Int = 0
+
+    /** Highest `PJRT_Api` function-pointer offset any binding in this module
+     * reads. The plugin's `PJRT_Api.struct_size` must cover it. */
+    internal const val PJRT_API_HIGHEST_OFFSET_USED: Long = 600 // OFFSET_PJRT_Buffer_ToHostBuffer; a test pins the two equal
+
+    /** Bytes of `PJRT_Api` a plugin must provide: through the last pointer read. */
+    internal const val PJRT_API_MIN_STRUCT_SIZE: Long = PJRT_API_HIGHEST_OFFSET_USED + 8
+
+    // `PJRT_Api` header: struct_size @0, extension_start @8, then the embedded
+    // PJRT_Api_Version (struct_size @16, extension_start @24, major @32, minor @36).
+    private const val OFF_Api_StructSize: Long = 0
+    private const val OFF_Api_VersionMajor: Long = 32
+    private const val OFF_Api_VersionMinor: Long = 36
+    private const val API_HEADER_SIZE: Long = 40
+
+    /**
+     * Validates the `PJRT_Api*` a plugin's `GetPjrtApi` returned before any
+     * fixed offset is read from it, and returns it sized to the plugin's own
+     * `struct_size`. Refuses a NULL table, a major version other than
+     * [PJRT_API_MAJOR_SUPPORTED], and a table too short to hold every
+     * function pointer these bindings call.
+     */
+    internal fun checkedApi(raw: MemorySegment, pluginPath: Path): MemorySegment {
+        if (raw.address() == 0L) {
+            throw PjrtRuntimeException("PJRT plugin at $pluginPath returned NULL from GetPjrtApi")
+        }
+        val header = raw.reinterpret(API_HEADER_SIZE)
+        val structSize = header.get(JAVA_LONG, OFF_Api_StructSize)
+        val major = header.get(JAVA_INT, OFF_Api_VersionMajor)
+        val minor = header.get(JAVA_INT, OFF_Api_VersionMinor)
+        checkApiCompatible(pluginPath.toString(), structSize, major, minor)
+        return raw.reinterpret(structSize)
+    }
+
+    /** The version/size rule behind [checkedApi], separate so it is testable
+     * without a plugin. */
+    internal fun checkApiCompatible(plugin: String, structSize: Long, major: Int, minor: Int) {
+        if (major != PJRT_API_MAJOR_SUPPORTED) {
+            throw PjrtRuntimeException(
+                "PJRT plugin at $plugin implements PJRT C API $major.$minor; Tlaloc binds " +
+                    "API major version $PJRT_API_MAJOR_SUPPORTED and cannot call a plugin with a " +
+                    "different major version. Use a plugin built for PJRT C API $PJRT_API_MAJOR_SUPPORTED.x.",
+            )
+        }
+        if (structSize < PJRT_API_MIN_STRUCT_SIZE) {
+            throw PjrtRuntimeException(
+                "PJRT plugin at $plugin implements PJRT C API $major.$minor with a PJRT_Api table of " +
+                    "$structSize bytes; Tlaloc calls function pointers up to byte offset " +
+                    "$PJRT_API_HIGHEST_OFFSET_USED and needs at least $PJRT_API_MIN_STRUCT_SIZE bytes. " +
+                    "The plugin is too old; use a newer one.",
+            )
+        }
     }
 
     // =========================================================================
@@ -81,11 +138,9 @@ object PjrtFfm {
 
     internal val LINKER: Linker = Linker.nativeLinker()
 
-    /** §0.4.304 widens the observed PJRT_Api prefix to 1024 bytes — enough
-     * for every function pointer we use through PJRT_Buffer_ToHostBuffer
-     * (offset 600). Subsequent commits can widen further as new PJRT calls
-     * (DmaMap, AsyncTransferManager, …) come online. */
-    internal const val PJRT_API_OBSERVED_SIZE: Long = 1024
+    // A new PJRT call bound past PJRT_Buffer_ToHostBuffer must move
+    // PJRT_API_HIGHEST_OFFSET_USED with it, so [checkedApi] keeps refusing
+    // plugins whose table does not reach it.
 
     // PJRT_Api function-pointer offsets. The struct opens with
     // (struct_size: 8 + extension_start: 8 + pjrt_api_version: 24) = 40 bytes
@@ -706,13 +761,37 @@ data class PjrtClientOptions(
          * Maestro pod-group member is launched with (TlalocPodSpecBuilder
          * .buildPodGroup). Absent, everything defaults to the single-node
          * client. */
-        fun resolve(): PjrtClientOptions = PjrtClientOptions(
-            memoryFraction = System.getenv("TLALOC_PJRT_MEMORY_FRACTION")?.toFloat() ?: 0.5f,
-            preallocate = System.getenv("TLALOC_PJRT_PREALLOCATE")?.toBooleanStrict() ?: false,
-            nodeId = System.getenv("TLALOC_PJRT_NODE_ID")?.toInt() ?: 0,
-            numNodes = System.getenv("TLALOC_PJRT_NUM_NODES")?.toInt() ?: 1,
-            coordinatorAddress = System.getenv("TLALOC_PJRT_COORDINATOR_ADDRESS"),
-        )
+        fun resolve(): PjrtClientOptions = resolve(System::getenv)
+
+        /** [resolve] over an arbitrary variable lookup, so the parsing and its
+         * error messages are testable without touching the process environment. */
+        internal fun resolve(env: (String) -> String?): PjrtClientOptions {
+            val fraction = parseEnv(env, "TLALOC_PJRT_MEMORY_FRACTION", "a number in (0, 1]") { it.toFloatOrNull() }
+            val nodeId = parseEnv(env, "TLALOC_PJRT_NODE_ID", "a non-negative integer") { it.toIntOrNull() }
+            val numNodes = parseEnv(env, "TLALOC_PJRT_NUM_NODES", "a positive integer") { it.toIntOrNull() }
+            val preallocate = parseEnv(env, "TLALOC_PJRT_PREALLOCATE", "true or false") { it.toBooleanStrictOrNull() }
+            try {
+                return PjrtClientOptions(
+                    memoryFraction = fraction ?: 0.5f,
+                    preallocate = preallocate ?: false,
+                    nodeId = nodeId ?: 0,
+                    numNodes = numNodes ?: 1,
+                    coordinatorAddress = env("TLALOC_PJRT_COORDINATOR_ADDRESS")?.takeIf { it.isNotBlank() },
+                )
+            } catch (e: IllegalArgumentException) {
+                throw IllegalArgumentException(
+                    "PJRT client options from the environment are invalid: ${e.message}. " +
+                        "Check TLALOC_PJRT_MEMORY_FRACTION, TLALOC_PJRT_NODE_ID, TLALOC_PJRT_NUM_NODES " +
+                        "and TLALOC_PJRT_COORDINATOR_ADDRESS.",
+                    e,
+                )
+            }
+        }
+
+        private fun <T : Any> parseEnv(env: (String) -> String?, name: String, expected: String, parse: (String) -> T?): T? {
+            val raw = env(name)?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            return parse(raw) ?: throw IllegalArgumentException("$name must be $expected, got '$raw'")
+        }
     }
 }
 
@@ -1393,7 +1472,24 @@ class PjrtClient internal constructor(
         }
     }
 
-    override fun close() = api.destroyClient(clientPtr)
+    /** True once [close] has run. Buffers and executables made by this client
+     * check it, so a use after the client is gone fails by name instead of
+     * calling into freed native memory. */
+    @Volatile
+    var isClosed: Boolean = false
+        private set
+
+    internal fun checkOpen(what: String) {
+        check(!isClosed) { "$what used after its PJRT client was closed" }
+    }
+
+    override fun close() {
+        synchronized(this) {
+            if (isClosed) return
+            isClosed = true
+        }
+        api.destroyClient(clientPtr)
+    }
 }
 
 /** Handle to a `PJRT_Device*`. Owned by the [PjrtClient] — does not need
@@ -1408,19 +1504,33 @@ class PjrtBuffer internal constructor(
 ) : AutoCloseable {
     /** Pulls the buffer's contents back to host as an f32 array of [nFloats]
      * elements. Caller knows the expected size from compile-time type info. */
-    fun toFloatArray(nFloats: Int): FloatArray = client.api.bufferToHostF32(bufferPtr, nFloats)
+    fun toFloatArray(nFloats: Int): FloatArray = usable().api.bufferToHostF32(bufferPtr, nFloats)
 
     /** §0.4.354 — f64 twin of [toFloatArray]. */
-    fun toDoubleArray(nDoubles: Int): DoubleArray = client.api.bufferToHostF64(bufferPtr, nDoubles)
+    fun toDoubleArray(nDoubles: Int): DoubleArray = usable().api.bufferToHostF64(bufferPtr, nDoubles)
 
     /** §0.4.457 (G1c) — bf16 twin of [toFloatArray]: raw 16-bit patterns. */
-    fun toBf16Array(nElements: Int): ShortArray = client.api.bufferToHostBf16(bufferPtr, nElements)
+    fun toBf16Array(nElements: Int): ShortArray = usable().api.bufferToHostBf16(bufferPtr, nElements)
 
     /** Size in bytes of the buffer's on-device storage (after layout +
      * padding). Useful for cross-checking against caller's expected size. */
-    fun deviceSizeInBytes(): Long = client.api.bufferDeviceSize(bufferPtr)
+    fun deviceSizeInBytes(): Long = usable().api.bufferDeviceSize(bufferPtr)
 
-    override fun close() = client.api.bufferDestroy(bufferPtr)
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun usable(): PjrtClient {
+        check(!closed.get()) { "PjrtBuffer used after close()" }
+        client.checkOpen("PjrtBuffer")
+        return client
+    }
+
+    /** Destroys the device buffer. Idempotent. Does nothing once the owning
+     * client is closed: the client released the buffer's memory with it. */
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        if (client.isClosed) return
+        client.api.bufferDestroy(bufferPtr)
+    }
 }
 
 /** Handle to a `PJRT_LoadedExecutable*`. AutoCloseable — `close()` calls

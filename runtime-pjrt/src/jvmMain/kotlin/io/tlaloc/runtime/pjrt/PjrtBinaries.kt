@@ -63,6 +63,29 @@ object PjrtBinaries {
         )
 
     /**
+     * The resolved CUDA plugin, or an [IllegalStateException] that says why there
+     * is none: on an operating system other than Linux, that JAX publishes its CUDA
+     * PJRT plugin for Linux only; on Linux, the whole [pluginSearchReport].
+     * [caller] names the entry point in the message.
+     */
+    fun requireCudaPlugin(caller: String): Path =
+        pluginPath ?: throw IllegalStateException(
+            missingCudaPluginMessage(caller, System.getProperty("os.name").orEmpty(), pluginSearchReport),
+        )
+
+    /** The text behind [requireCudaPlugin], with its inputs as parameters. */
+    internal fun missingCudaPluginMessage(caller: String, osName: String, searchReport: String): String {
+        val header = "$caller: no PJRT CUDA plugin found."
+        return if (!osName.lowercase().startsWith("linux")) {
+            "$header The JAX CUDA PJRT plugin (xla_cuda_plugin.so) is published for Linux only, and " +
+                "this JVM runs on $osName. Run the CUDA lane on a Linux host with an NVIDIA GPU, or set " +
+                "$PLUGIN_PATH_ENV to a PJRT plugin built for this platform.\n$searchReport"
+        } else {
+            "$header\n$searchReport"
+        }
+    }
+
+    /**
      * Pure-ish resolution core (filesystem reads only; all environment inputs are
      * parameters), mirroring [resolveTpuPlugin] so both lanes are unit-testable on
      * a host with no plugin at all.

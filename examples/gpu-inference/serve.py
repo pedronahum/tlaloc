@@ -91,11 +91,11 @@ def main() -> int:
 
     # ---- dependency 1 of 2: the plugin .so ---------------------------------
     try:
-        plugin = tlaloc_serve.find_pjrt_plugin()
+        plugin = tlaloc_serve.find_pjrt_plugin(platform=args.platform)
     except Exception as e:
-        print("SKIP: no PJRT plugin on this machine, so there is nothing to run on.")
-        print(f"      {e}")
-        print("      Set TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so and retry.")
+        print(f"SKIP: no PJRT {args.platform} plugin found, so there is nothing to run on.")
+        for line in str(e).splitlines():
+            print(f"      {line}")
         print("      Half one still ran: the artifact in --artifact is the deployment,")
         print("      and it is complete whether or not this box can execute it.")
         return 0

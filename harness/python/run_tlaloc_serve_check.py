@@ -93,7 +93,7 @@ def main() -> int:
         if args.engine == "ctypes":
             # Resolving the plugin is an ENVIRONMENT question: no plugin file
             # is a skip (2), not a failure (1).
-            plugin = tlaloc_serve.find_pjrt_plugin(args.plugin)
+            plugin = tlaloc_serve.find_pjrt_plugin(args.plugin, args.platform)
     except Exception as e:  # pragma: no cover - environment gate
         return emit({"ok": False, "stage": "plugin", "error": f"{type(e).__name__}: {e}"}, 2)
 

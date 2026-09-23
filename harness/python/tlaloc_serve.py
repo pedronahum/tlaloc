@@ -141,67 +141,26 @@ def check_padding_constants(expected: dict) -> None:
 # Finding a PJRT plugin, which is the whole dependency story.
 # ---------------------------------------------------------------------------
 
-def find_pjrt_plugin(explicit: str | None = None) -> str:
-    """Locate a PJRT plugin `.so`. **Imports nothing** — it looks for a FILE.
+def find_pjrt_plugin(explicit: str | None = None, platform: str = "cuda") -> str:
+    """Locate a PJRT plugin `.so` for `platform`. **Imports nothing** — it looks
+    for a FILE.
 
-    Three sources, in the order a deployment would want them:
+    Delegates to `tlaloc_pjrt.find_plugin`, which searches the same places as
+    the JVM's `PjrtBinaries`, in the same order:
 
-      1. `TLALOC_PJRT_PLUGIN_PATH` — the same env var `PjrtBinaries` honours
-         JVM-side, so one export configures both halves of the box. This is
-         what a deployment that ships its own plugin sets.
-      2. `/lib/libtpu.so` — a Cloud TPU VM's plugin, present on the image.
-      3. `jax_plugins/*/xla_cuda_plugin.so` under any site-packages of THIS
-         interpreter. Note carefully: this is a directory walk, not an
-         import. A jax install is being used as a place a `.so` happens to
-         sit, exactly as `PjrtBinaries` uses it JVM-side. Nothing about the
-         plugin knows or cares that a Python package delivered it.
+      1. `explicit`, then `TLALOC_PJRT_PLUGIN_PATH` — the variable a deployment
+         that ships its own plugin sets. For `tpu` the variable counts only
+         when it names a tpu-shaped file.
+      2. For cuda: `jax_plugins/*cuda*/*.so` in the site-packages of
+         `$VIRTUAL_ENV`, `~/.local/venvs/*`, `~/.venv`, `~/venv`, `~/.local`,
+         `/usr/local`, `/usr`, then this interpreter's own site-packages. A jax
+         install is used as a place a file sits; nothing is imported.
+      3. For tpu: the libtpu wheel's `libtpu/libtpu.so`, then `/lib/libtpu.so`
+         and `/usr/lib/libtpu.so`.
 
-    REJECTED: `import jax_plugins` to find (3). It works, it is shorter, and
-    it would quietly make the framework a dependency of the thing whose
-    headline is that it is not one.
+    On failure the FileNotFoundError carries every place looked.
     """
-    if explicit:
-        if not os.path.exists(explicit):
-            raise FileNotFoundError(f"no PJRT plugin at {explicit}")
-        return explicit
-    env = os.environ.get("TLALOC_PJRT_PLUGIN_PATH")
-    if env:
-        if not os.path.exists(env):
-            raise FileNotFoundError(
-                f"TLALOC_PJRT_PLUGIN_PATH={env} but no such file"
-            )
-        return env
-    if os.path.exists("/lib/libtpu.so"):
-        return "/lib/libtpu.so"
-    import site
-    import sysconfig
-
-    roots = []
-    for fn in ("getsitepackages", "getusersitepackages"):
-        f = getattr(site, fn, None)
-        if f is None:
-            continue
-        try:
-            got = f()
-        except Exception:  # pragma: no cover - site is not always initialised
-            continue
-        roots.extend([got] if isinstance(got, str) else list(got))
-    roots.append(sysconfig.get_paths().get("purelib", ""))
-    for root in roots:
-        plug = Path(root) / "jax_plugins"
-        if not plug.is_dir():
-            continue
-        for child in sorted(plug.iterdir()):
-            for name in ("xla_cuda_plugin.so", "xla_rocm_plugin.so", "pjrt_plugin.so"):
-                cand = child / name
-                if cand.exists():
-                    return str(cand)
-    raise FileNotFoundError(
-        "no PJRT plugin found. Set TLALOC_PJRT_PLUGIN_PATH to a plugin .so "
-        "(a jax install's jax_plugins/xla_cuda12/xla_cuda_plugin.so, a TPU "
-        "VM's /lib/libtpu.so, or a standalone plugin a deployment ships). "
-        "The serving runtime needs that file and a driver — nothing else."
-    )
+    return P.find_plugin(platform, explicit)
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +299,7 @@ class CtypesEngine:
 
     def __init__(self, platform: str, plugin_path: str | None):
         self.platform = platform
-        self.plugin_path = find_pjrt_plugin(plugin_path)
+        self.plugin_path = find_pjrt_plugin(plugin_path, platform)
         self._api = None
         self._client = None
         self._device = None
@@ -348,7 +307,7 @@ class CtypesEngine:
     def _ensure(self):
         if self._client is not None:
             return
-        self._api = P.PjrtApi.load(self.plugin_path)
+        self._api = P.PjrtApi.load(self.plugin_path, self.platform)
         # create_options are NOT optional on CUDA (§0.4.333): without them the
         # plugin preallocates 75% of unified memory and takes the GB10 down.
         # `create_client` refuses `None` for a GPU platform by name.

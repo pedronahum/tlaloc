@@ -15,7 +15,8 @@ import java.nio.file.Files
  * Pipeline:
  *  1. Validate input arity + sizes against [DxirFunction.params].
  *  2. Emit StableHLO MLIR via [DxirFunction.toStablehlo].
- *  3. Compile via [IreeRuntime.compile] (subprocess `iree-compile`, cached by VMFB path).
+ *  3. Compile via [IreeRuntime.compile] (subprocess `iree-compile`); the module's
+ *     temporary directory is deleted when the call returns.
  *  4. Marshal each input to IREE's textual `<shape>xf32=<v0>,<v1>,…` form.
  *  5. Invoke via [IreeRuntime.invoke] (subprocess `iree-run-module`).
  *  6. Parse each output's `<shape>xf32=…` line back to a flat [FloatArray].
@@ -55,33 +56,35 @@ fun runOnIree(
     }
 
     val mlir = fn.toStablehlo("")
-    val module = IreeRuntime.compile(mlir, target, timeoutSeconds = timeoutSeconds)
+    IreeRuntime.compile(mlir, target, timeoutSeconds = timeoutSeconds).use { module ->
+        // §0.4.294 — for medium / large configs, the textual `<shape>xf32=v0,v1,…`
+        // form blows past flagfile-parse limits (medium = ~24 MB raw f32 → ~240 MB
+        // textual). When [useNpyInputs] is true, write each input to a temp `.npy`
+        // file (NPY 1.0 little-endian f32) and pass `--input=@<path>` instead.
+        // iree-run-module / iree-benchmark-module accept this directly.
+        val npyDir = if (useNpyInputs) Files.createTempDirectory("tlaloc-iree-bridge-npy-") else null
+        try {
+            val inputArgs: List<String> = if (npyDir != null) {
+                fn.params.zip(inputs).mapIndexed { i, (p, arr) ->
+                    val file = npyDir.resolve("input_${"%03d".format(i)}_${p.name}.npy")
+                    NpyWriter.writeFloat32(file, arr, p.type.dims)
+                    "@$file"
+                }
+            } else {
+                fn.params.zip(inputs).map { (p, arr) -> formatInput(p.type, arr) }
+            }
+            val rawOutputs = IreeRuntime.invoke(
+                module, function = fn.name, inputs = inputArgs, timeoutSeconds = timeoutSeconds,
+            )
 
-    // §0.4.294 — for medium / large configs, the textual `<shape>xf32=v0,v1,…`
-    // form blows past flagfile-parse limits (medium = ~24 MB raw f32 → ~240 MB
-    // textual). When [useNpyInputs] is true, write each input to a temp `.npy`
-    // file (NPY 1.0 little-endian f32) and pass `--input=@<path>` instead.
-    // iree-run-module / iree-benchmark-module accept this directly.
-    val inputArgs: List<String> = if (useNpyInputs) {
-        val workDir = Files.createTempDirectory("tlaloc-iree-bridge-npy-")
-        workDir.toFile().deleteOnExit()
-        fn.params.zip(inputs).mapIndexed { i, (p, arr) ->
-            val target = workDir.resolve("input_${"%03d".format(i)}_${p.name}.npy")
-            NpyWriter.writeFloat32(target, arr, p.type.dims)
-            target.toFile().deleteOnExit()
-            "@$target"
+            require(rawOutputs.size == fn.returns.size) {
+                "runOnIree: iree-run-module returned ${rawOutputs.size} results; expected ${fn.returns.size}"
+            }
+            return fn.returns.zip(rawOutputs).map { (retNode, raw) -> parseOutput(retNode.type, raw) }
+        } finally {
+            npyDir?.let { IreeRuntime.deleteRecursively(it) }
         }
-    } else {
-        fn.params.zip(inputs).map { (p, arr) -> formatInput(p.type, arr) }
     }
-    val rawOutputs = IreeRuntime.invoke(
-        module, function = fn.name, inputs = inputArgs, timeoutSeconds = timeoutSeconds,
-    )
-
-    require(rawOutputs.size == fn.returns.size) {
-        "runOnIree: iree-run-module returned ${rawOutputs.size} results; expected ${fn.returns.size}"
-    }
-    return fn.returns.zip(rawOutputs).map { (retNode, raw) -> parseOutput(retNode.type, raw) }
 }
 
 /** `<dim0>x<dim1>x…xf32=v0,v1,…` for rank ≥ 1; `f32=v` for scalars. */

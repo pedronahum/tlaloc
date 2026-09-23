@@ -87,6 +87,19 @@ OFFSET_PJRT_Buffer_Destroy = 504
 OFFSET_PJRT_Buffer_OnDeviceSizeInBytes = 552
 OFFSET_PJRT_Buffer_ToHostBuffer = 600
 
+# The PJRT C API major version these bindings are written against, and the
+# number of `PJRT_Api` bytes a plugin must provide: through the last function
+# pointer read above. Mirrors `PjrtFfm.checkApiCompatible`.
+PJRT_API_MAJOR_SUPPORTED = 0
+PJRT_API_HIGHEST_OFFSET_USED = OFFSET_PJRT_Buffer_ToHostBuffer
+PJRT_API_MIN_STRUCT_SIZE = PJRT_API_HIGHEST_OFFSET_USED + 8
+
+# `PJRT_Api` header: struct_size @0, extension_start @8, then the embedded
+# PJRT_Api_Version (struct_size @16, extension_start @24, major @32, minor @36).
+_OFF_API_STRUCT_SIZE = 0
+_OFF_API_VERSION_MAJOR = 32
+_OFF_API_VERSION_MINOR = 36
+
 # PJRT_Buffer_Type (xla/pjrt/c/pjrt_c_api.h:907). F32 = 11 and F64 = 12 are
 # §0.4.303/§0.4.354; BF16 = 13 sits directly after F64 and is §0.4.457 (G1c).
 #
@@ -142,6 +155,213 @@ COMPILE_OPTIONS_PROTO_BYTES = bytes([0x1A, 0x04, 0x20, 0x01, 0x28, 0x01])
 
 class PjrtError(RuntimeError):
     """A `PJRT_Error*` the plugin returned, with its message read out."""
+
+
+def check_api_compatible(plugin: str, struct_size: int, major: int, minor: int) -> None:
+    """Refuse a `PJRT_Api` table these bindings cannot read at fixed offsets.
+
+    Same rule and wording as the JVM's `PjrtFfm.checkApiCompatible`.
+    """
+    if major != PJRT_API_MAJOR_SUPPORTED:
+        raise PjrtError(
+            f"PJRT plugin at {plugin} implements PJRT C API {major}.{minor}; Tlaloc binds "
+            f"API major version {PJRT_API_MAJOR_SUPPORTED} and cannot call a plugin with a "
+            f"different major version. Use a plugin built for PJRT C API {PJRT_API_MAJOR_SUPPORTED}.x."
+        )
+    if struct_size < PJRT_API_MIN_STRUCT_SIZE:
+        raise PjrtError(
+            f"PJRT plugin at {plugin} implements PJRT C API {major}.{minor} with a PJRT_Api table of "
+            f"{struct_size} bytes; Tlaloc calls function pointers up to byte offset "
+            f"{PJRT_API_HIGHEST_OFFSET_USED} and needs at least {PJRT_API_MIN_STRUCT_SIZE} bytes. "
+            "The plugin is too old; use a newer one."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding a plugin file. Mirrors the JVM's `PjrtBinaries`: the same roots in
+# the same order, every directory listing sorted, and a report of every place
+# looked when nothing is found. Everything here is a FILE lookup; nothing is
+# imported.
+# ---------------------------------------------------------------------------
+
+PLUGIN_PATH_ENV = "TLALOC_PJRT_PLUGIN_PATH"
+
+
+def _sorted_children(path: str) -> list:
+    try:
+        return [os.path.join(path, n) for n in sorted(os.listdir(path))]
+    except OSError:
+        return []
+
+
+def _search_roots(virtual_env: str | None, home: str | None) -> list:
+    roots = []
+    if virtual_env:
+        roots.append(virtual_env)
+    if home:
+        roots.extend(p for p in _sorted_children(os.path.join(home, ".local", "venvs")) if os.path.isdir(p))
+        roots.append(os.path.join(home, ".venv"))
+        roots.append(os.path.join(home, "venv"))
+        roots.append(os.path.join(home, ".local"))
+    roots.append("/usr/local")
+    roots.append("/usr")
+    return roots
+
+
+def _site_dirs(root: str) -> list:
+    out = []
+    for lib in ("lib", "lib64"):
+        for py in _sorted_children(os.path.join(root, lib)):
+            if os.path.basename(py).startswith("python3"):
+                out.append(os.path.join(py, "site-packages"))
+                out.append(os.path.join(py, "dist-packages"))
+    return out
+
+
+def _own_site_dirs() -> list:
+    """This interpreter's own site-packages, searched after the fixed roots."""
+    import site
+    import sysconfig
+
+    dirs = []
+    for name in ("getsitepackages", "getusersitepackages"):
+        fn = getattr(site, name, None)
+        if fn is None:
+            continue
+        try:
+            got = fn()
+        except Exception:  # pragma: no cover - site is not always initialised
+            continue
+        dirs.extend([got] if isinstance(got, str) else list(got))
+    purelib = sysconfig.get_paths().get("purelib")
+    if purelib:
+        dirs.append(purelib)
+    return dirs
+
+
+def _gpu_family(platform: str) -> str | None:
+    """The `jax_plugins/*<family>*` package name fragment for a GPU platform."""
+    return {"cuda": "cuda", "gpu": "cuda", "rocm": "rocm"}.get(platform)
+
+
+def plugin_candidates(platform: str, virtual_env: str | None, home: str | None,
+                      extra_site_dirs: Sequence[str] = ()) -> list:
+    """Every path a plugin for `platform` may live at, in resolution order.
+
+    - cuda / gpu / rocm: `lib{,64}/python3.*/{site,dist}-packages/jax_plugins/*<family>*/*.so`
+      under `$VIRTUAL_ENV`, `~/.local/venvs/*`, `~/.venv`, `~/venv`, `~/.local`,
+      `/usr/local`, `/usr`, then under this interpreter's own site-packages.
+    - tpu: `libtpu/libtpu.so` in `$VIRTUAL_ENV` and `~/.local` site-packages, then
+      `/lib/libtpu.so` and `/usr/lib/libtpu.so`.
+    - anything else (cpu): no standard install location; name the file explicitly.
+    """
+    if platform == "tpu":
+        out = []
+        for prefix in [p for p in (virtual_env, os.path.join(home, ".local") if home else None) if p]:
+            for py in _sorted_children(os.path.join(prefix, "lib")):
+                if os.path.basename(py).startswith("python3"):
+                    out.append(os.path.join(py, "site-packages", "libtpu", "libtpu.so"))
+        out += ["/lib/libtpu.so", "/usr/lib/libtpu.so"]
+        return out
+    family = _gpu_family(platform)
+    if family is None:
+        return []
+    site_dirs = [d for root in _search_roots(virtual_env, home) for d in _site_dirs(root)]
+    site_dirs += [d for d in extra_site_dirs if d not in site_dirs]
+    out = []
+    for site_dir in site_dirs:
+        for pkg in _sorted_children(os.path.join(site_dir, "jax_plugins")):
+            if family in os.path.basename(pkg).lower() and os.path.isdir(pkg):
+                out.extend(f for f in _sorted_children(pkg) if f.endswith(".so"))
+    return out
+
+
+def _env_names_usable_plugin(platform: str, value: str) -> bool:
+    # The TPU lane takes the generic variable only when it names a tpu-shaped
+    # file, exactly as `PjrtBinaries.resolveTpuPlugin` does: on a CUDA host the
+    # variable legitimately names xla_cuda_plugin.so.
+    return platform != "tpu" or "tpu" in os.path.basename(value)
+
+
+def find_plugin(platform: str = "cuda", explicit: str | None = None, *,
+                env: dict | None = None, home: str | None = None,
+                extra_site_dirs: Sequence[str] | None = None) -> str:
+    """Locate a PJRT plugin `.so` for `platform`, or raise FileNotFoundError
+    carrying the whole search report.
+
+    Order: `explicit`, then `TLALOC_PJRT_PLUGIN_PATH`, then
+    [plugin_candidates]. An explicit path or a set variable that names no file
+    is refused rather than skipped.
+    """
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+    if explicit:
+        if not os.path.exists(explicit):
+            raise FileNotFoundError(f"no PJRT plugin at {explicit}")
+        return explicit
+    value = env.get(PLUGIN_PATH_ENV)
+    if value and not os.path.exists(value):
+        raise FileNotFoundError(f"{PLUGIN_PATH_ENV}={value} but no such file")
+    extra = _own_site_dirs() if extra_site_dirs is None else extra_site_dirs
+    found = _resolve(platform, env, home, extra)
+    if found is None:
+        raise FileNotFoundError(plugin_search_report(platform, env=env, home=home, extra_site_dirs=extra))
+    return found
+
+
+def _resolve(platform: str, env, home: str, extra: Sequence[str]) -> str | None:
+    value = env.get(PLUGIN_PATH_ENV)
+    if value and os.path.exists(value) and _env_names_usable_plugin(platform, value):
+        return value
+    for cand in plugin_candidates(platform, env.get("VIRTUAL_ENV"), home, extra):
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def plugin_search_report(platform: str = "cuda", *, env: dict | None = None, home: str | None = None,
+                         extra_site_dirs: Sequence[str] | None = None) -> str:
+    """Every place [find_plugin] looks for `platform`, in order, and what is there."""
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+    extra = _own_site_dirs() if extra_site_dirs is None else extra_site_dirs
+    lines = [f"PJRT {platform} plugin resolution — where Tlaloc looked:"]
+    value = env.get(PLUGIN_PATH_ENV)
+    if not value:
+        lines.append(f"  1. ${PLUGIN_PATH_ENV}: not set")
+    elif not os.path.exists(value):
+        lines.append(f"  1. ${PLUGIN_PATH_ENV} = {value} — no file there")
+    elif not _env_names_usable_plugin(platform, value):
+        lines.append(f"  1. ${PLUGIN_PATH_ENV} = {value} — not a tpu plugin name, ignored for tpu")
+    else:
+        lines.append(f"  1. ${PLUGIN_PATH_ENV} = {value} — FOUND")
+    cands = plugin_candidates(platform, env.get("VIRTUAL_ENV"), home, extra)
+    if platform == "tpu":
+        lines.append("  2. libtpu locations, in order:")
+        lines += [f"       {c} — {'FOUND' if os.path.exists(c) else 'missing'}" for c in cands]
+    elif _gpu_family(platform) is None:
+        lines.append(f"  2. no standard install location for a '{platform}' plugin; set ${PLUGIN_PATH_ENV}")
+    elif not cands:
+        fam = _gpu_family(platform)
+        venv = env.get("VIRTUAL_ENV")
+        lines.append(
+            f"  2. no jax_plugins/*{fam}*/*.so under any searched root. Roots searched: "
+            f"$VIRTUAL_ENV{' = ' + venv if venv else ' (not set)'}, ~/.local/venvs/*, ~/.venv, ~/venv, "
+            f"~/.local, /usr/local, /usr, and this interpreter's site-packages — each at "
+            f"lib{{,64}}/python3.*/{{site,dist}}-packages/jax_plugins/*{fam}*/*.so"
+        )
+    else:
+        lines.append("  2. candidates found, in resolution order:")
+        lines += [f"       {c}" for c in cands]
+    found = _resolve(platform, env, home, extra)
+    if found:
+        lines.append(f"Resolved: {found}")
+    else:
+        lines.append(
+            f"Fix: export {PLUGIN_PATH_ENV}=/path/to/the/plugin.so"
+            + (", or `pip install jax[cuda12]` into a venv under ~/.local/venvs/ (or activate it)."
+               if _gpu_family(platform) == "cuda" else "."))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -445,9 +665,22 @@ class PjrtClientOptions:
 
     def __init__(self, memory_fraction: float = None, preallocate: bool = None):
         if memory_fraction is None:
-            memory_fraction = float(os.environ.get("TLALOC_PJRT_MEMORY_FRACTION", "0.5"))
+            raw = os.environ.get("TLALOC_PJRT_MEMORY_FRACTION", "").strip()
+            try:
+                memory_fraction = float(raw) if raw else 0.5
+            except ValueError:
+                raise ValueError(
+                    f"TLALOC_PJRT_MEMORY_FRACTION must be a number in (0, 1], got '{raw}'"
+                ) from None
+            if not (0.0 < memory_fraction <= 1.0):
+                raise ValueError(
+                    f"TLALOC_PJRT_MEMORY_FRACTION must be a number in (0, 1], got '{raw}'"
+                )
         if preallocate is None:
-            preallocate = os.environ.get("TLALOC_PJRT_PREALLOCATE", "false").lower() == "true"
+            raw = os.environ.get("TLALOC_PJRT_PREALLOCATE", "").strip()
+            if raw not in ("", "true", "false"):
+                raise ValueError(f"TLALOC_PJRT_PREALLOCATE must be true or false, got '{raw}'")
+            preallocate = raw == "true"
         if not (0.0 < memory_fraction <= 1.0):
             raise ValueError(f"memoryFraction must be in (0, 1], got {memory_fraction}")
         self.memory_fraction = memory_fraction
@@ -541,7 +774,7 @@ class PjrtApi:
         self._fn = {}
 
     @staticmethod
-    def load(plugin_path: str = None) -> "PjrtApi":
+    def load(plugin_path: str = None, platform: str = "cuda") -> "PjrtApi":
         """dlopen a PJRT plugin and call its `GetPjrtApi`.
 
         `plugin_path` defaults to `TLALOC_PJRT_PLUGIN_PATH` — the same env var
@@ -550,15 +783,12 @@ class PjrtApi:
         (`jax_plugins/xla_cuda12/xla_cuda_plugin.so`), at `/lib/libtpu.so` on
         a TPU VM, or in a directory a deployment ships. Nothing here imports
         the package the file happens to sit in.
+
+        With neither, [find_plugin] searches the same roots as the JVM's
+        `PjrtBinaries` for a `platform` plugin. The loaded table's size and API
+        version are checked before any function pointer is read.
         """
-        path = plugin_path or os.environ.get("TLALOC_PJRT_PLUGIN_PATH")
-        if not path:
-            raise ValueError(
-                "no PJRT plugin path: pass one, or set TLALOC_PJRT_PLUGIN_PATH "
-                "(the same variable the JVM's PjrtBinaries reads)"
-            )
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"PJRT plugin not found at {path}")
+        path = find_plugin(platform, plugin_path)
         lib = ctypes.CDLL(path)
         try:
             get_api = lib.GetPjrtApi
@@ -572,7 +802,14 @@ class PjrtApi:
         api_ptr = get_api()
         if not api_ptr:
             raise PjrtError(f"GetPjrtApi returned NULL for {path}")
-        return PjrtApi(lib, api_ptr, path)
+        struct_size = ctypes.c_size_t.from_address(api_ptr + _OFF_API_STRUCT_SIZE).value
+        major = ctypes.c_int32.from_address(api_ptr + _OFF_API_VERSION_MAJOR).value
+        minor = ctypes.c_int32.from_address(api_ptr + _OFF_API_VERSION_MINOR).value
+        check_api_compatible(path, struct_size, major, minor)
+        api = PjrtApi(lib, api_ptr, path)
+        api.api_version = (major, minor)
+        api.api_struct_size = struct_size
+        return api
 
     def _call(self, offset: int, args, void: bool = False):
         fn = self._fn.get(offset)

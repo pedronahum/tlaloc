@@ -162,8 +162,8 @@ Inference goes the other way — Kotlin writes an artifact and exits:
 
 ```bash
 ./gradlew -p examples/gpu-inference run          # Kotlin writes the artifact
-export TLALOC_PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so
 /usr/bin/python3 examples/gpu-inference/serve.py # no jax, no torch, no numpy
+# finds a jax CUDA plugin under a venv; otherwise set TLALOC_PJRT_PLUGIN_PATH
 ```
 
 ```

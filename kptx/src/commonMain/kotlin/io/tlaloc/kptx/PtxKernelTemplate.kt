@@ -1,5 +1,7 @@
 package io.tlaloc.kptx
 
+import kotlin.jvm.Synchronized
+
 /**
  * KPTX v2.5 (§0.4.342) — symbolic-shape kernel templates + the
  * specialization cache (plan task 13).
@@ -36,13 +38,16 @@ class PtxKernelTemplate(
     private val cache = HashMap<SpecKey, PtxModule>()
 
     /** Number of distinct specializations emitted so far. */
-    val specializationCount: Int get() = cache.size
+    val specializationCount: Int
+        @Synchronized get() = cache.size
 
     /**
      * Emit (or fetch) the specialization of this template for
      * ([arch], [shapes], [args]). [arch] becomes the module's
      * `.target`; equal keys return the identical cached instance.
+     * Safe to call from several threads.
      */
+    @Synchronized
     fun specialize(
         arch: String = "sm_75",
         shapes: Map<String, Int> = emptyMap(),

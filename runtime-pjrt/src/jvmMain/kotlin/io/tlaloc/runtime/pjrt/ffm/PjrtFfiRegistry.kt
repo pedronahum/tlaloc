@@ -240,7 +240,7 @@ object PjrtFfiRegistry {
                     .orElseThrow { IllegalStateException("$path does not export GetPjrtApi") },
                 FunctionDescriptor.of(ADDRESS),
             )
-            (getPjrtApi.invokeExact() as MemorySegment).reinterpret(PjrtFfm.PJRT_API_OBSERVED_SIZE)
+            PjrtFfm.checkedApi(getPjrtApi.invokeExact() as MemorySegment, path)
         }
 
     /** Minimal PJRT_Error message read + destroy via [PjrtFfm]'s offset

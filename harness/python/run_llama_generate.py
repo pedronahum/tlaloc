@@ -73,7 +73,7 @@ def main() -> int:
         return 1
 
     try:
-        tlaloc_serve.find_pjrt_plugin()
+        tlaloc_serve.find_pjrt_plugin(platform=args.platform)
     except Exception as e:
         print(f"no PJRT plugin: {e}", file=sys.stderr)
         return 2

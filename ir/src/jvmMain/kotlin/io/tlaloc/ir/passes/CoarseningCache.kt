@@ -131,7 +131,7 @@ class DiskCoarseningCache(
         for (prefixDir in prefixDirs) {
             val files: List<Path> = try {
                 Files.list(prefixDir).use { it.toList() }
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 continue
             }
             for (file in files) {
@@ -157,7 +157,7 @@ class DiskCoarseningCache(
     private fun isOlderThanCutoff(file: Path, cutoffMillis: Long): Boolean {
         val mtime = try {
             Files.getLastModifiedTime(file).toMillis()
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             return false
         }
         return mtime < cutoffMillis
@@ -169,7 +169,7 @@ class DiskCoarseningCache(
         val text = Files.readString(file, Charsets.UTF_8)
         return try {
             DxirCanonical.deserialise(text)
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             // Corrupt entry (interrupted write, format drift). Drop + miss.
             runCatching { Files.deleteIfExists(file) }
             null

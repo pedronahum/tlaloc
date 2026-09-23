@@ -15,6 +15,8 @@ import io.tlaloc.stablehlo.toStablehlo
 import java.lang.foreign.Arena
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions
 
 /**
  * §0.4.307 — long-lived holder that amortises the PJRT init cost across many
@@ -62,19 +64,30 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * # Thread-safety
  *
- * The compile-cache uses [ConcurrentHashMap.computeIfAbsent], so concurrent
- * callers with the same MLIR will compile exactly once and the others wait.
- * Different MLIR strings compile in parallel. Dispatch (`execute`) itself is
- * not parallelised — PJRT serialises GPU work onto the device's stream — so
- * concurrent callers will block each other on the underlying device, but
- * the compile-cache is the right shape for that workload.
+ * Every public method may be called from any number of threads at once.
+ *
+ *   - The compile cache uses [ConcurrentHashMap.computeIfAbsent], so
+ *     concurrent callers with the same program compile it once and the
+ *     others wait; different programs compile in parallel.
+ *   - [runOn], [runOnF64] and [runOnBf16] marshal through per-call scratch
+ *     memory and share no mutable state between calls.
+ *   - [executeOn] reuses one pre-allocated argument block per executable.
+ *     Calls on the same executable are serialised on that block (fill,
+ *     execute, await, read back the output pointers); calls on different
+ *     executables do not wait for each other on the JVM side. The device
+ *     still orders the GPU work itself.
  *
  * # Lifetime
  *
- * `close()` walks: cached executables → client → arena. The arena's close
- * releases all MemorySegments allocated against it; client/exec destroy
- * downcalls happen before that, so the args structs they marshal are still
- * valid memory at the time of the call.
+ * [close] waits for every in-flight call on this session to return, then
+ * destroys the cached executables, the client and the arena, in that order.
+ * A call that starts after [close] fails with "PjrtSession is closed".
+ *
+ * [PjrtBuffer]s handed out by [bufferFromHostF32], [bufferFromHostBf16] and
+ * [executeOn] belong to the caller and are not tracked by the session:
+ * close them before closing the session. After the session is closed,
+ * reading such a buffer throws and closing it does nothing (the client
+ * that owned the device memory has already released it).
  *
  * # v1 limitations (carried from runOnPjrt)
  *
@@ -87,8 +100,7 @@ import java.util.concurrent.ConcurrentHashMap
  *     (per §0.4.306 doc).
  */
 class PjrtSession(
-    plugin: Path = PjrtBinaries.pluginPath
-        ?: error("PJRT plugin not resolved; set TLALOC_PJRT_PLUGIN_PATH or `pip install jax[cuda12]`"),
+    plugin: Path = PjrtBinaries.requireCudaPlugin("PjrtSession"),
     val target: PjrtTarget = PjrtTarget.Cuda,
     /** §0.4.337 — allocator options for the underlying client. The
      * env-resolved default (`preallocate=false`, fraction 0.5) is the
@@ -125,13 +137,41 @@ class PjrtSession(
         }
     }
 
-    private val arena: Arena = Arena.ofShared()
-    private val api: PjrtApi = PjrtFfm.load(plugin, arena)
-    private val client: PjrtClient = api.createClient(options)
+    /** The native handles, opened together so that a failure part-way
+     * (the plugin will not load, client creation fails, no device) releases
+     * whatever was already opened instead of leaking the arena or client. */
+    internal class Handles(val arena: Arena, val api: PjrtApi, val client: PjrtClient, val device: PjrtDevice)
+
+    private val handles: Handles = openHandles(plugin, target, options)
+    private val arena: Arena get() = handles.arena
+    private val api: PjrtApi get() = handles.api
+    private val client: PjrtClient get() = handles.client
 
     /** First addressable device — the "default" GPU for single-GPU hosts. */
-    val device: PjrtDevice = client.addressableDevices().firstOrNull()
-        ?: error("PJRT client has no addressable devices for $target")
+    val device: PjrtDevice get() = handles.device
+
+    /**
+     * Guards the session's lifetime. Every public operation holds the read
+     * lock for its whole duration, so any number of them run concurrently;
+     * [close] takes the write lock, so it waits for in-flight calls to return
+     * and no call can start while it frees native memory.
+     */
+    private val lifecycle = ReentrantReadWriteLock()
+
+    /** Runs [block] as an in-flight session call. Tests use it to hold a
+     * call open while [close] is attempted. */
+    internal fun <T> asInFlightCall(block: () -> T): T = live(block)
+
+    private inline fun <T> live(block: () -> T): T {
+        val read = lifecycle.readLock()
+        read.lock()
+        try {
+            check(!closed) { "PjrtSession is closed" }
+            return block()
+        } finally {
+            read.unlock()
+        }
+    }
 
     private val executableCache = ConcurrentHashMap<String, PjrtLoadedExecutable>()
 
@@ -190,8 +230,7 @@ class PjrtSession(
      * structurally identical DxirFunctions hit the same cache slot. Pass
      * [cacheKey] to skip the re-emission on a hit; see [keyedMlir].
      */
-    fun runOn(fn: DxirFunction, inputs: List<FloatArray>, cacheKey: String? = null): List<FloatArray> {
-        check(!closed) { "PjrtSession is closed" }
+    fun runOn(fn: DxirFunction, inputs: List<FloatArray>, cacheKey: String? = null): List<FloatArray> = live {
         require(fn.params.size == inputs.size) {
             "PjrtSession.runOn: param count ${fn.params.size} != input count ${inputs.size}"
         }
@@ -224,7 +263,7 @@ class PjrtSession(
         try {
             val outputs = exec.execute(inputBuffers, device)
             try {
-                return outputs.zip(fn.returns).map { (buf, ret) ->
+                outputs.zip(fn.returns).map { (buf, ret) ->
                     buf.toFloatArray(ret.type.elementCount.toInt())
                 }
             } finally {
@@ -242,8 +281,7 @@ class PjrtSession(
      * modest, but correctness-tier work like scientific kernels and
      * gradient checks wants the precision).
      */
-    fun runOnF64(fn: DxirFunction, inputs: List<DoubleArray>): List<DoubleArray> {
-        check(!closed) { "PjrtSession is closed" }
+    fun runOnF64(fn: DxirFunction, inputs: List<DoubleArray>): List<DoubleArray> = live {
         require(fn.params.size == inputs.size) {
             "PjrtSession.runOnF64: param count ${fn.params.size} != input count ${inputs.size}"
         }
@@ -270,7 +308,7 @@ class PjrtSession(
         try {
             val outputs = exec.execute(inputBuffers, device)
             try {
-                return outputs.zip(fn.returns).map { (buf, ret) ->
+                outputs.zip(fn.returns).map { (buf, ret) ->
                     buf.toDoubleArray(ret.type.elementCount.toInt())
                 }
             } finally {
@@ -291,8 +329,7 @@ class PjrtSession(
      * Mixed-dtype programs (f32 params casting into bf16 compute) ride the
      * plain [runOn] lane instead — the cast-at-boundary pattern.
      */
-    fun runOnBf16(fn: DxirFunction, inputs: List<ShortArray>): List<ShortArray> {
-        check(!closed) { "PjrtSession is closed" }
+    fun runOnBf16(fn: DxirFunction, inputs: List<ShortArray>): List<ShortArray> = live {
         require(fn.params.size == inputs.size) {
             "PjrtSession.runOnBf16: param count ${fn.params.size} != input count ${inputs.size}"
         }
@@ -319,7 +356,7 @@ class PjrtSession(
         try {
             val outputs = exec.execute(inputBuffers, device)
             try {
-                return outputs.zip(fn.returns).map { (buf, ret) ->
+                outputs.zip(fn.returns).map { (buf, ret) ->
                     buf.toBf16Array(ret.type.elementCount.toInt())
                 }
             } finally {
@@ -332,9 +369,8 @@ class PjrtSession(
 
     /** §0.4.457 (G1c) — stage a raw bf16 pattern array onto [device]. Caller
      * owns the returned [PjrtBuffer] and must close it. */
-    fun bufferFromHostBf16(data: ShortArray, dims: List<Int>): PjrtBuffer {
-        check(!closed) { "PjrtSession is closed" }
-        return client.bufferFromHostBf16(device, data, dims)
+    fun bufferFromHostBf16(data: ShortArray, dims: List<Int>): PjrtBuffer = live {
+        client.bufferFromHostBf16(device, data, dims)
     }
 
     /**
@@ -346,10 +382,10 @@ class PjrtSession(
      * walks `DecodeBucketPolicy.allBuckets` at startup and prepares one
      * executable per bucket, so the first real request never pays a compile.
      */
-    fun prepare(fn: DxirFunction, cacheKey: String? = null) {
-        check(!closed) { "PjrtSession is closed" }
+    fun prepare(fn: DxirFunction, cacheKey: String? = null): Unit = live {
         val mlir = lower(fn, cacheKey)
         executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        Unit
     }
 
     /** Number of executables currently in the compile cache. Useful for
@@ -360,9 +396,8 @@ class PjrtSession(
      * `PJRT_Client_PlatformName` ("cuda"/"gpu" for the CUDA plugin, "tpu"
      * for libtpu). The TPU smoke suite asserts this so a mis-resolved
      * plugin can never silently certify the wrong backend. */
-    fun platformName(): String {
-        check(!closed) { "PjrtSession is closed" }
-        return client.platformName()
+    fun platformName(): String = live {
+        client.platformName()
     }
 
     // =========================================================================
@@ -385,9 +420,8 @@ class PjrtSession(
 
     /** Stage a host f32 buffer onto [device]. Caller owns the returned
      * [PjrtBuffer] and must close it. */
-    fun bufferFromHostF32(data: FloatArray, dims: List<Int>): PjrtBuffer {
-        check(!closed) { "PjrtSession is closed" }
-        return client.bufferFromHostF32(device, data, dims)
+    fun bufferFromHostF32(data: FloatArray, dims: List<Int>): PjrtBuffer = live {
+        client.bufferFromHostF32(device, data, dims)
     }
 
     /** Execute a previously-prepared (or first-time-compiled) executable
@@ -398,8 +432,7 @@ class PjrtSession(
      * so the per-call cost is the FFM downcall + GPU work, no per-call
      * arena allocation.
      */
-    fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> {
-        check(!closed) { "PjrtSession is closed" }
+    fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> = live {
         val mlir = fn.toStablehlo("")
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
         val ctx = executeContextCache.computeIfAbsent(mlir) {
@@ -409,19 +442,22 @@ class PjrtSession(
             "PjrtSession.executeOn: cached context expects ${ctx.nInputs} inputs but got ${stagedInputs.size}"
         }
 
-        // Fill inner args with current input PJRT_Buffer pointers.
-        for ((i, buf) in stagedInputs.withIndex()) {
-            ctx.innerArgsSegment.set(ADDRESS, i * 8L, buf.bufferPtr)
+        // The context is one argument block shared by every call on this
+        // executable: fill, execute, await and read back under its monitor so
+        // two threads never interleave their input or output pointers.
+        val outputPtrs = synchronized(ctx) {
+            for ((i, buf) in stagedInputs.withIndex()) {
+                ctx.innerArgsSegment.set(ADDRESS, i * 8L, buf.bufferPtr)
+            }
+            api.executeReusable(
+                argsSegment = ctx.argsSegment,
+                innerOutputsSegment = ctx.innerOutputsSegment,
+                deviceCompleteEventSlot = ctx.deviceCompleteEventSlot,
+                nInputs = ctx.nInputs,
+                nOutputs = ctx.nOutputs,
+            )
         }
-
-        val outputPtrs = api.executeReusable(
-            argsSegment = ctx.argsSegment,
-            innerOutputsSegment = ctx.innerOutputsSegment,
-            deviceCompleteEventSlot = ctx.deviceCompleteEventSlot,
-            nInputs = ctx.nInputs,
-            nOutputs = ctx.nOutputs,
-        )
-        return outputPtrs.map { PjrtBuffer(it, client) }
+        outputPtrs.map { PjrtBuffer(it, client) }
     }
 
     private fun buildExecuteContext(exec: PjrtLoadedExecutable, nInputs: Int): ExecuteContext {
@@ -461,12 +497,44 @@ class PjrtSession(
     }
 
     override fun close() {
-        if (closed) return
-        closed = true
-        executableCache.values.forEach { runCatching { it.close() } }
-        executableCache.clear()
-        keyedMlir.clear()
-        runCatching { client.close() }
-        runCatching { arena.close() }
+        val write = lifecycle.writeLock()
+        write.lock()
+        try {
+            if (closed) return
+            closed = true
+            executableCache.values.forEach { runCatching { it.close() } }
+            executableCache.clear()
+            executeContextCache.clear()
+            keyedMlir.clear()
+            runCatching { client.close() }
+            runCatching { arena.close() }
+        } finally {
+            write.unlock()
+        }
+    }
+
+    internal companion object {
+        /** Opens arena, plugin, client and device; on any failure closes what
+         * was opened and rethrows. [newArena] is a seam for tests. */
+        internal fun openHandles(
+            plugin: Path,
+            target: PjrtTarget,
+            options: PjrtClientOptions?,
+            newArena: () -> Arena = { Arena.ofShared() },
+        ): Handles {
+            val arena = newArena()
+            var client: PjrtClient? = null
+            try {
+                val api = PjrtFfm.load(plugin, arena)
+                client = api.createClient(options)
+                val device = client.addressableDevices().firstOrNull()
+                    ?: error("PJRT client has no addressable devices for $target (plugin $plugin)")
+                return Handles(arena, api, client, device)
+            } catch (e: Throwable) {
+                client?.let { c -> runCatching { c.close() }.exceptionOrNull()?.let(e::addSuppressed) }
+                runCatching { arena.close() }.exceptionOrNull()?.let(e::addSuppressed)
+                throw e
+            }
+        }
     }
 }

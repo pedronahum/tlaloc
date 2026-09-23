@@ -147,7 +147,7 @@ object PhiCalculus {
                 val lifted = liftReturnWithLeaves(ret, engine, opaqueLeaves)
                 engine.simplify(lifted)
             }
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
             return fn
         }
         // Lower each simplified expression back to dxir under a freshly-built
@@ -176,7 +176,7 @@ object PhiCalculus {
                     engine.lowerToDxir(sym, origReturn.type, this, symbolMap)
                 }
             }
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
             // Lowering failure (Symja produced an op the lower-half can't emit, or
             // an opaque-leaf subtree fell outside the cloner's scope) → unchanged.
             fn
@@ -3443,14 +3443,14 @@ object PhiCalculus {
 
         val mini = try {
             buildLeafMiniFunction(leaf, sourceFn)
-        } catch (t: Throwable) {
+        } catch (t: Exception) {
             return CoarsenResult.Failure(
                 "mini-function construction failed: ${t::class.simpleName}: ${t.message}",
             )
         }
         val simplified = try {
             apply(mini, engine)
-        } catch (t: Throwable) {
+        } catch (t: Exception) {
             return CoarsenResult.Failure(
                 "PhiCalculus.apply failed on mini-function: ${t::class.simpleName}: ${t.message}",
             )
@@ -3599,7 +3599,7 @@ object PhiCalculus {
 
         val primalBody = try {
             apply(fn, engine)
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             return fn
         }
         if (primalBody.body.any { it is DxirOp && it.hasRegions }) return fn
@@ -3610,7 +3610,7 @@ object PhiCalculus {
                 includeForward = false,
                 seedAsParam = true,
             )
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             return fn
         }
         if (gradientBody.body.any { it is DxirOp && it.hasRegions }) return fn
@@ -3725,7 +3725,7 @@ object PhiCalculus {
                 includeForward = false,
                 seedAsParam = true,
             )
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             return null
         }
         if (gradientBody.body.any { it is DxirOp && it.hasRegions }) return null

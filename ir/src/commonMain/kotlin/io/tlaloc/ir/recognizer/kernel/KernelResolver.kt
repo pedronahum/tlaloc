@@ -1,5 +1,7 @@
 package io.tlaloc.ir.recognizer.kernel
 
+import kotlin.concurrent.Volatile
+import kotlin.jvm.Synchronized
 import io.tlaloc.core.ExperimentalTlalocApi
 
 /**
@@ -98,8 +100,8 @@ data class KernelResolution(
 )
 
 /**
- * Process-global registry of [KernelResolver]s. Mutable; call [clear]
- * in tests to ensure isolation.
+ * Process-global registry of [KernelResolver]s. Safe to use from several
+ * threads. Mutable; call [clear] in tests to ensure isolation.
  *
  * Resolution order is registration order — first registered wins on
  * [preferred]. The eventual L4.3 cost-driven scheduler (post-Phase-3)
@@ -108,19 +110,28 @@ data class KernelResolution(
  */
 @ExperimentalTlalocApi
 object KernelResolverRegistry {
-    private val resolvers = mutableListOf<KernelResolver>()
+    // Copy-on-write: writers replace the list under the object's monitor,
+    // readers take the current snapshot without locking, so a resolver is
+    // never called while the registry is locked.
+    @Volatile
+    private var resolvers: List<KernelResolver> = emptyList()
 
     /** Register [resolver] at the end of the registration order. */
+    @Synchronized
     fun register(resolver: KernelResolver) {
-        resolvers += resolver
+        resolvers = resolvers + resolver
     }
 
     /**
      * Remove every registered resolver whose [KernelResolver.backendId]
      * matches [backendId]. Returns true if at least one was removed.
      */
+    @Synchronized
     fun unregister(backendId: String): Boolean {
-        return resolvers.removeAll { it.backendId == backendId }
+        val kept = resolvers.filterNot { it.backendId == backendId }
+        val removed = kept.size != resolvers.size
+        resolvers = kept
+        return removed
     }
 
     /**
@@ -153,7 +164,8 @@ object KernelResolverRegistry {
     fun registered(): List<String> = resolvers.map { it.backendId }
 
     /** Drop every registered resolver. For test isolation. */
+    @Synchronized
     fun clear() {
-        resolvers.clear()
+        resolvers = emptyList()
     }
 }

@@ -28,11 +28,20 @@ Not yet published; these land in `0.1.0-alpha01`.
   to write `grad { }` over a `DTensor`.
 - `tlaloc-maestro` no longer contains `main` entry points; the exporters run through
   `./gradlew :maestro:exportServingArtifact` and `:maestro:exportLlamaServingArtifact`.
+- `PjrtSession` can be used from several threads at once. `executeOn` serialises calls
+  on the same executable, and `close()` waits for in-flight calls before releasing
+  native memory. A `PjrtBuffer` read after its session is closed throws instead of
+  touching freed memory.
+- `IreeModule` is `AutoCloseable`; closing it deletes its compiled VMFB. `runOnIree`
+  and `IreeRuntime.invoke` delete their temporary files when they return.
+- The IREE tools are found through `$TLALOC_IREE_BIN`, `$VIRTUAL_ENV/bin`,
+  `~/.local/venvs/*/bin` or `PATH`, and a missing tool's error lists every place looked.
 
 ### Removed
 
 - `io.tlaloc.maestro.MaestroDescriptor` and `io.tlaloc.maestro.StubExecutor`, deprecated
   since the first-class Maestro step type replaced them.
+- The unused `timeoutSeconds` parameter of `runOnPjrt`.
 
 ### Added
 
@@ -44,6 +53,24 @@ Not yet published; these land in `0.1.0-alpha01`.
   `tlaloc-compiler-plugin` of the same version to every Kotlin/JVM compilation, with the
   compiler-plugin options in a `tlaloc { }` block.
 - `tlaloc-bom`: a platform that holds every `tlaloc-*` artifact at one version.
+
+### Fixed
+
+- The Python serving runtime finds a PJRT plugin in the same places as the JVM's
+  `PjrtBinaries`, and looks for libtpu only for `--platform tpu`. Without
+  `TLALOC_PJRT_PLUGIN_PATH`, `examples/gpu-inference/serve.py` used to report no
+  plugin on a machine whose JVM lane ran on CUDA.
+- Both PJRT bindings check the plugin's `PJRT_Api` size and API version before
+  reading any function pointer and refuse an incompatible plugin by name.
+- A missing CUDA plugin's error carries the full search report, and says the plugin is
+  published for Linux only when the JVM runs elsewhere. A malformed
+  `TLALOC_PJRT_MEMORY_FRACTION`, `TLALOC_PJRT_PREALLOCATE`, `TLALOC_PJRT_NODE_ID` or
+  `TLALOC_PJRT_NUM_NODES` is refused with the variable's name and value.
+- A `PjrtSession` whose client creation fails releases the memory it had allocated.
+- Symbolic simplification no longer swallows JVM errors such as `OutOfMemoryError`;
+  only exceptions fall back to the unsimplified function.
+- The KPTX kernel caches and the kernel-resolver registry are safe to use from
+  several threads.
 
 ## [0.1.0-alpha01] — 2026-09-23
 
@@ -82,8 +109,7 @@ is no consumer for whom this relabelling changes anything.
   `SKIP: no PJRT plugin on this machine` — a refusal that is by name and exits 0, but
   whose sentence is false about the box. The export is documented as line one of half
   two; what was imprecise was the surrounding framing, now corrected in
-  `examples/gpu-inference/README.md`. Recorded as ⬜ in `docs/CAPABILITIES.md` and
-  `docs/ALPHA_PLAN.md`.
+  `examples/gpu-inference/README.md`. Fixed before release; see *Unreleased*.
 - **One ledger contradiction corrected.** `docs/ALPHA_PLAN.md`'s Tier 4 suite-state
   table claimed "Every one of the ten examples ran" while the same tier's handover
   said nine did. The row now says nine, names the exception, and points at the

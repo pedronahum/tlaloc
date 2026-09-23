@@ -46,55 +46,56 @@ object IreeBenchmark {
         minTimePerRep: String = "0.5s",
         timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
     ): IreeBenchmarkStats {
-        val bin = IreeBinaries.ireeBenchmarkModule
-            ?: error("iree-benchmark-module not resolved; set TLALOC_IREE_BIN or install via the dual-track plan's path A")
+        val bin = IreeBinaries.requireTool("iree-benchmark-module", IreeBinaries.ireeBenchmarkModule)
 
         // Reuse the §0.4.288 flagfile-for-inputs pattern so giant input lists
         // (LlamaDecoder is 13 weights at ~196 KB textual each) don't hit the OS
         // argv limit.
         val flagfile = Files.createTempFile("tlaloc-iree-bench-flagfile-", ".txt")
-        flagfile.toFile().deleteOnExit()
-        Files.writeString(
-            flagfile,
-            buildString {
-                for (input in inputs) {
-                    append("--input=").append(input).append('\n')
-                }
-            },
-        )
-
         val stdoutFile = Files.createTempFile("tlaloc-iree-bench-stdout-", ".csv")
         val stderrFile = Files.createTempFile("tlaloc-iree-bench-stderr-", ".log")
-        stdoutFile.toFile().deleteOnExit()
-        stderrFile.toFile().deleteOnExit()
-
-        val args = listOf(
-            bin,
-            "--module=${module.vmfbPath}",
-            "--device=${module.target.device}",
-            "--function=$function",
-            "--benchmark_format=csv",
-            "--benchmark_min_time=$minTimePerRep",
-            "--benchmark_repetitions=$repetitions",
-            "--flagfile=$flagfile",
-        )
-        val pb = ProcessBuilder(args)
-            .redirectOutput(stdoutFile.toFile())
-            .redirectError(stderrFile.toFile())
-        val p = pb.start()
-        p.outputStream.close()
-        val finished = p.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-        if (!finished) {
-            p.destroyForcibly()
-            error("iree-benchmark-module timed out after ${timeoutSeconds}s")
-        }
-        if (p.exitValue() != 0) {
-            error(
-                "iree-benchmark-module failed (exit=${p.exitValue()}); stderr:\n" +
-                    Files.readString(stderrFile).take(4000),
+        try {
+            Files.writeString(
+                flagfile,
+                buildString {
+                    for (input in inputs) {
+                        append("--input=").append(input).append('\n')
+                    }
+                },
             )
+
+            val args = listOf(
+                bin,
+                "--module=${module.vmfbPath}",
+                "--device=${module.target.device}",
+                "--function=$function",
+                "--benchmark_format=csv",
+                "--benchmark_min_time=$minTimePerRep",
+                "--benchmark_repetitions=$repetitions",
+                "--flagfile=$flagfile",
+            )
+            val pb = ProcessBuilder(args)
+                .redirectOutput(stdoutFile.toFile())
+                .redirectError(stderrFile.toFile())
+            val p = pb.start()
+            p.outputStream.close()
+            val finished = p.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            if (!finished) {
+                p.destroyForcibly()
+                error("iree-benchmark-module timed out after ${timeoutSeconds}s")
+            }
+            if (p.exitValue() != 0) {
+                error(
+                    "iree-benchmark-module failed (exit=${p.exitValue()}); stderr:\n" +
+                        Files.readString(stderrFile).take(4000),
+                )
+            }
+            return parse(Files.readString(stdoutFile))
+        } finally {
+            Files.deleteIfExists(flagfile)
+            Files.deleteIfExists(stdoutFile)
+            Files.deleteIfExists(stderrFile)
         }
-        return parse(Files.readString(stdoutFile))
     }
 
     /**

@@ -55,7 +55,7 @@ object LProfiler {
             val gradStart = System.currentTimeMillis()
             val gradFn = try {
                 DxirReverseTransform.apply(coarsened)
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 null
             }
             val gradTimeMs = System.currentTimeMillis() - gradStart
