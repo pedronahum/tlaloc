@@ -8,8 +8,8 @@ K2 analysis executes the same FIR checkers, so it should show the error as you
 type; `DiagnosticSourcePositionTest` pins the positions, and no test drives an
 IDE.
 
-> Alpha — `0.1.0-alpha01`. Artifacts are not yet on Maven Central; consume them
-> via `mavenLocal()` from a repository checkout. Coordinates and APIs may change
+> Alpha — `0.1.0-alpha01`, on Maven Central as `io.github.pedronahum:tlaloc-*`.
+> Coordinates and APIs may change
 > without a deprecation cycle. [COMPATIBILITY.md](COMPATIBILITY.md) lists what
 > may break and what will not, and [CHANGELOG.md](../CHANGELOG.md) records what
 > did.
@@ -70,30 +70,33 @@ is `kotlinCompilerPluginClasspath("org.matheclipse:matheclipse-core:3.1.1")`; an
 it. Tlaloc links Symja across the `SymbolicEngine` interface and does not modify
 or redistribute it.
 
-## 1. Publish the artifacts locally
+## 1. The artifacts
+
+All **thirteen** published modules are on Maven Central under
+`io.github.pedronahum:*:0.1.0-alpha01`: `tlaloc-core`, `tlaloc-ir`,
+`tlaloc-autograd`, `tlaloc-nn`, `tlaloc-stablehlo`, `tlaloc-compiler-plugin`,
+`tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`, `tlaloc-runtime-iree`,
+`tlaloc-kptx`, `tlaloc-maestro`, `tlaloc-gradle-plugin` (plugin id
+`io.github.pedronahum.tlaloc`) and `tlaloc-bom`.
+
+To build them from source instead (the examples in this repository do this):
 
 ```bash
 git clone https://github.com/pedronahum/tlaloc && cd tlaloc
 ./gradlew publishToMavenLocal -x test
 ```
 
-All **thirteen** published modules land under `io.github.pedronahum:*:0.1.0-alpha01`:
-`tlaloc-core`, `tlaloc-ir`, `tlaloc-autograd`, `tlaloc-nn`, `tlaloc-stablehlo`,
-`tlaloc-compiler-plugin`, `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`,
-`tlaloc-runtime-iree`, `tlaloc-kptx`, `tlaloc-maestro`, `tlaloc-gradle-plugin`
-(plugin id `io.github.pedronahum.tlaloc`) and `tlaloc-bom`. `:benchmarks` is a
-harness and publishes nothing.
+and put `mavenLocal()` first in both repository blocks below.
 
 ## 2. Set up a consumer project
 
-`settings.gradle.kts` needs `mavenLocal()` for plugins as well as for
-dependencies. The Tlaloc Gradle plugin is published to Maven, not to the Gradle
-Plugin Portal, so after a release its plugin repository is `mavenCentral()`:
+The Tlaloc Gradle plugin is published to Maven Central, not to the Gradle Plugin
+Portal, so `pluginManagement` needs `mavenCentral()` as well:
 
 ```kotlin
 // settings.gradle.kts
-pluginManagement { repositories { mavenLocal(); mavenCentral(); gradlePluginPortal() } }
-dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
+pluginManagement { repositories { mavenCentral(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositories { mavenCentral() } }
 ```
 
 `build.gradle.kts`:

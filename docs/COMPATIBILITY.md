@@ -2,9 +2,8 @@
 
 What the alpha series promises, and what it does not.
 
-Current version: **`0.1.0-alpha01`**. Nothing is on Maven Central yet; you build
-from source and consume from `mavenLocal` (see
-[GETTING_STARTED.md](GETTING_STARTED.md)).
+Current version: **`0.1.0-alpha01`**, on Maven Central as
+`io.github.pedronahum:tlaloc-*` (see [GETTING_STARTED.md](GETTING_STARTED.md)).
 
 ## What "alpha" means here
 

@@ -242,6 +242,12 @@ for doc in README.md docs/GETTING_STARTED.md; do
   mkdir -p "$snip/src/main/kotlin"
   doc_block "$doc" settings.gradle.kts > "$snip/settings.gradle.kts" \
     || fail "$doc has no single \`// settings.gradle.kts\` Kotlin block."
+  # The docs print the Maven Central setup. Resolve from the mavenLocal publish
+  # above unless TLALOC_SMOKE_FROM_CENTRAL=1, which checks the released artifacts.
+  if [ "${TLALOC_SMOKE_FROM_CENTRAL:-0}" != 1 ]; then
+    sed -i.bak 's/repositories { /repositories { mavenLocal(); /' "$snip/settings.gradle.kts"
+    rm -f "$snip/settings.gradle.kts.bak"
+  fi
   doc_block "$doc" build.gradle.kts > "$snip/build.gradle.kts" \
     || fail "$doc has no single \`// build.gradle.kts\` Kotlin block."
   echo 'application { mainClass.set("MainKt") }' >> "$snip/build.gradle.kts"

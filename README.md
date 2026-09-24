@@ -37,8 +37,8 @@ PyTorch:
 
 > **Alpha — `0.1.0-alpha01`.** The automated suite includes live GPU runs on an
 > NVIDIA GB10 ([CAPABILITIES.md](docs/CAPABILITIES.md) has the count and what each
-> test pins). Nothing is on Maven Central yet: you build from source and consume
-> from `mavenLocal`. APIs change without deprecation cycles
+> test pins). Published on Maven Central as `io.github.pedronahum:tlaloc-*`.
+> APIs change without deprecation cycles
 > ([COMPATIBILITY.md](docs/COMPATIBILITY.md)). [Maturity](#maturity) says what runs
 > where.
 
@@ -189,16 +189,13 @@ HuggingFace transformers — from the direct driver and from vLLM 0.29.0's
 
 ## Install
 
-Nothing is published yet. Build once, then consume by coordinate:
-
-```bash
-./gradlew publishToMavenLocal -x test
-```
+From Maven Central. The Gradle plugin is published there too, not to the Gradle
+Plugin Portal, so `pluginManagement` needs `mavenCentral()`:
 
 ```kotlin
 // settings.gradle.kts
-pluginManagement { repositories { mavenLocal(); mavenCentral(); gradlePluginPortal() } }
-dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
+pluginManagement { repositories { mavenCentral(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositories { mavenCentral() } }
 ```
 
 ```kotlin
@@ -239,6 +236,9 @@ needs only 21 — except PJRT and CUDA execution, which need 25.
 **Also:** Kotlin 2.3.20–2.3.29, refused by name outside that range · JVM only ·
 for GPU, a PJRT plugin `.so` and an NVIDIA driver · Symja (LGPL-3.0) is optional
 and not in your dependency graph unless you add it.
+
+To build from source instead, run `./gradlew publishToMavenLocal -x test` in a
+checkout and put `mavenLocal()` first in both repository blocks.
 
 Full walkthrough and the five plugin options:
 [GETTING_STARTED.md](docs/GETTING_STARTED.md). Per-module detail:
@@ -320,8 +320,6 @@ Row by row, with what pins each one: [CAPABILITIES.md](docs/CAPABILITIES.md).
 
 ### Limits
 
-- **Nothing is on Maven Central.** The POMs carry everything Central mandates and a
-  gate keeps it that way, but you build from source today.
 - **JVM only. No Python API.** Interop is via StableHLO artifacts, not bindings.
 - **The interpreter is a correctness engine, not a fast CPU backend.** Performance
   claims mean the compiled GPU path.
