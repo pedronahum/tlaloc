@@ -71,13 +71,13 @@ class KotlinVersionGuardTest {
 
     @Test
     fun `the whole bugfix family of the built-against feature release is supported`() {
-        // Kotlin numbers bugfix releases by ones above a feature release: 2.3.21 and
-        // 2.3.29 are bugfixes OF 2.3.20 and do not move K2 internals.
+        // Kotlin numbers bugfix releases by ones above a feature release: 2.4.21 and
+        // 2.4.29 are bugfixes OF 2.4.20 and do not move K2 internals.
         for (patch in 20..29) {
-            val v = "2.3.$patch"
+            val v = "2.4.$patch"
             assertEquals(
                 KotlinVersionGuard.Verdict.Supported, KotlinVersionGuard.verdict(v),
-                "$v is a bugfix release of 2.3.20 and must be accepted — refusing it would " +
+                "$v is a bugfix release of 2.4.20 and must be accepted — refusing it would " +
                     "break every user the day JetBrains ships a patch",
             )
         }
@@ -85,20 +85,21 @@ class KotlinVersionGuardTest {
 
     @Test
     fun `a different feature release in the same minor is refused`() {
-        // The trap this rule exists for: 2.3.0 and 2.3.10 look like "2.3.x" and are
-        // NOT the same feature release as 2.3.20.
-        for (v in listOf("2.3.0", "2.3.9", "2.3.10", "2.3.19", "2.3.30", "2.3.31")) {
+        // The trap this rule exists for: 2.4.0 and 2.4.10 look like "2.4.x" and are
+        // NOT the same feature release as 2.4.20.
+        for (v in listOf("2.4.0", "2.4.9", "2.4.10", "2.4.19", "2.4.30", "2.4.31")) {
             val verdict = KotlinVersionGuard.verdict(v)
             assertTrue(
                 verdict is KotlinVersionGuard.Verdict.Unsupported,
-                "$v is a different Kotlin FEATURE release than 2.3.20 and must be refused; got $verdict",
+                "$v is a different Kotlin FEATURE release than 2.4.20 and must be refused; got $verdict",
             )
         }
     }
 
     @Test
     fun `a different minor or major is refused`() {
-        for (v in listOf("2.2.20", "2.4.20", "1.9.20", "3.0.20")) {
+        // 2.3.20 is the family the previous Tlaloc release (0.1.0-alpha01) supports.
+        for (v in listOf("2.3.20", "2.3.29", "2.5.20", "2.5.0-Beta1", "1.9.20", "3.0.20")) {
             assertTrue(
                 KotlinVersionGuard.verdict(v) is KotlinVersionGuard.Verdict.Unsupported,
                 "$v must be refused",
@@ -108,7 +109,7 @@ class KotlinVersionGuardTest {
 
     @Test
     fun `a pre-release of the supported feature release is accepted`() {
-        for (v in listOf("2.3.20-RC", "2.3.20-RC2", "2.3.21-Beta1", "2.3.20-dev-1234")) {
+        for (v in listOf("2.4.20-RC", "2.4.20-RC2", "2.4.21-Beta1", "2.4.20-dev-1234")) {
             assertEquals(
                 KotlinVersionGuard.Verdict.Supported, KotlinVersionGuard.verdict(v),
                 "$v carries the supported numeric triple; the suffix is a build channel, not a " +
@@ -119,7 +120,7 @@ class KotlinVersionGuardTest {
 
     @Test
     fun `an unreadable version is refused rather than assumed good`() {
-        for (v in listOf(null, "", "   ", "2.3", "2.3.x", "banana", "2.3.20.1", "-1.2.3")) {
+        for (v in listOf(null, "", "   ", "2.4", "2.4.x", "banana", "2.4.20.1", "-1.2.3")) {
             val verdict = KotlinVersionGuard.verdict(v)
             assertTrue(
                 verdict is KotlinVersionGuard.Verdict.Unreadable,
@@ -140,7 +141,7 @@ class KotlinVersionGuardTest {
 
     @Test
     fun `the supported range reads as two concrete numbers`() {
-        assertEquals("2.3.20 through 2.3.29", KotlinVersionGuard.supportedRangeDescription)
+        assertEquals("2.4.20 through 2.4.29", KotlinVersionGuard.supportedRangeDescription)
     }
 
     // ---------------- the refusal itself ----------------
@@ -149,7 +150,7 @@ class KotlinVersionGuardTest {
     fun `an unsupported version is an ERROR that names both versions and the opt-out`() {
         val reported = mutableListOf<Pair<CompilerMessageSeverity, String>>()
         val mayRegister = KotlinVersionGuard.check(
-            found = "2.2.20",
+            found = "2.3.20",
             allowUnsupported = false,
         ) { severity, text -> reported += severity to text }
 
@@ -159,9 +160,9 @@ class KotlinVersionGuardTest {
         assertEquals(CompilerMessageSeverity.ERROR, severity, "a refusal is an ERROR, not a warning")
         // By name, all four of them: what it found, what it was built against, the
         // range, and the flag that overrides it.
-        assertTrue("2.2.20" in text, "the message must name the version it FOUND: $text")
-        assertTrue("2.3.20" in text, "the message must name the version it was BUILT AGAINST: $text")
-        assertTrue("2.3.20 through 2.3.29" in text, "the message must name the RANGE: $text")
+        assertTrue("running Kotlin compiler is 2.3.20" in text, "the message must name the version it FOUND: $text")
+        assertTrue("built against Kotlin 2.4.20" in text, "the message must name the version it was BUILT AGAINST: $text")
+        assertTrue("2.4.20 through 2.4.29" in text, "the message must name the RANGE: $text")
         assertTrue(
             "unsafeAllowUnsupportedKotlin" in text,
             "the message must name the opt-out option: $text",
@@ -186,7 +187,7 @@ class KotlinVersionGuardTest {
     fun `the opt-out downgrades the refusal to a WARNING and lets registration proceed`() {
         val reported = mutableListOf<Pair<CompilerMessageSeverity, String>>()
         val mayRegister = KotlinVersionGuard.check(
-            found = "2.4.0",
+            found = "2.5.0",
             allowUnsupported = true,
         ) { severity, text -> reported += severity to text }
 
@@ -196,7 +197,7 @@ class KotlinVersionGuardTest {
             CompilerMessageSeverity.WARNING, severity,
             "with the opt-out the refusal becomes a warning — the user asked for this",
         )
-        assertTrue("2.4.0" in text, "the warning still names the version: $text")
+        assertTrue("2.5.0" in text, "the warning still names the version: $text")
         assertTrue(
             "expected, not a bug" in text,
             "the warning must say that a later crash is the expected outcome: $text",

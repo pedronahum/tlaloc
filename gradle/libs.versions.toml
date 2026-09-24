@@ -1,5 +1,10 @@
 [versions]
-kotlin = "2.3.20"
+kotlin = "2.4.20"
+# The Kotlin feature release the PREVIOUS Tlaloc release (0.1.0-alpha01) was built
+# against. Not a build toolchain: `:compiler-plugin`'s ForeignCompilerGuardTest runs
+# this compiler as a separate process with the freshly built plugin loaded into it,
+# and pins that KotlinVersionGuard refuses it by name instead of failing to link.
+previousKotlin = "2.3.20"
 kotlinx-coroutines = "1.11.0"
 kotest = "6.2.5"
 # Stage B coarsening — symbolic engine. LGPL-3.0 (not Apache-2.0 as docs/STAGE_B_PLAN.md
@@ -32,6 +37,7 @@ kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.
 kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
 kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
 kotlin-compiler-embeddable = { module = "org.jetbrains.kotlin:kotlin-compiler-embeddable", version.ref = "kotlin" }
+previousKotlin-compiler-embeddable = { module = "org.jetbrains.kotlin:kotlin-compiler-embeddable", version.ref = "previousKotlin" }
 symja-core = { module = "org.matheclipse:matheclipse-core", version.ref = "symja" }
 
 [plugins]

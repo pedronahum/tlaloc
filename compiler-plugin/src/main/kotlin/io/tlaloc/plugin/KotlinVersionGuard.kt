@@ -22,17 +22,17 @@ import org.jetbrains.kotlin.config.KotlinCompilerVersion
  * ## The supported range, and why it is that shape
  *
  * Kotlin's release train numbers FEATURE releases by tens in the third
- * component — 2.3.0, 2.3.10, 2.3.20 are three different feature releases — and
- * BUGFIX releases by ones above them: 2.3.21, 2.3.22 are bugfixes of 2.3.20.
+ * component — 2.4.0, 2.4.10, 2.4.20 are three different feature releases — and
+ * BUGFIX releases by ones above them: 2.4.21, 2.4.22 are bugfixes of 2.4.20.
  * Internal API moves at feature releases, not at bugfix releases. So the
  * supported range is the whole bugfix family of the release this plugin was
  * built against and nothing else:
  *
- *   built against 2.3.20  ⇒  supported 2.3.20 … 2.3.29
+ *   built against 2.4.20  ⇒  supported 2.4.20 … 2.4.29
  *
- * That is deliberately neither "exactly 2.3.20" (which would break every user
- * the day a bugfix release lands, for no reason) nor "any 2.3.x" (which would
- * wave 2.3.0 and 2.3.10 through, and those are different feature releases with
+ * That is deliberately neither "exactly 2.4.20" (which would break every user
+ * the day a bugfix release lands, for no reason) nor "any 2.4.x" (which would
+ * wave 2.4.0 and 2.4.10 through, and those are different feature releases with
  * different internals). [supportedRangeDescription] renders it for humans and
  * the README / docs/GETTING_STARTED.md / docs/COMPATIBILITY.md quote the same
  * two numbers.
@@ -57,7 +57,7 @@ object KotlinVersionGuard {
      * `gradle/libs.versions.toml` that forgets this constant is a red test, not
      * a guard that silently refuses the compiler the repository itself uses.
      */
-    const val COMPILED_AGAINST: String = "2.3.20"
+    const val COMPILED_AGAINST: String = "2.4.20"
 
     /** A parsed Kotlin version. [suffix] is everything after the numeric triple. */
     data class Version(
@@ -67,8 +67,8 @@ object KotlinVersionGuard {
         val suffix: String?,
     ) {
         /**
-         * The feature-release family: `patch / 10`. 2.3.20 and 2.3.27 share a
-         * family (20..29); 2.3.10 does not. See the class KDoc for why this, and
+         * The feature-release family: `patch / 10`. 2.4.20 and 2.4.27 share a
+         * family (20..29); 2.4.10 does not. See the class KDoc for why this, and
          * not the patch number, is the unit of API compatibility.
          */
         val featureFamily: Int get() = patch / 10
@@ -90,7 +90,7 @@ object KotlinVersionGuard {
         data class Unreadable(val found: String?) : Verdict
     }
 
-    /** e.g. `2.3.20 through 2.3.29`. */
+    /** e.g. `2.4.20 through 2.4.29`. */
     val supportedRangeDescription: String
         get() {
             val v = parse(COMPILED_AGAINST)
@@ -192,7 +192,7 @@ object KotlinVersionGuard {
     /**
      * Run the guard. Returns true when the plugin's extensions may be registered.
      *
-     * [report] is the sink (a `MessageCollector` in production); it is a parameter
+     * [report] is the sink ([GuardReporter] in production); it is a parameter
      * so the whole decision — verdict, severity and text — is unit-testable without
      * a second Kotlin compiler on the machine, which is the one thing a test on
      * this box cannot conjure.

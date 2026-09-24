@@ -45,7 +45,6 @@ kotlin {
 
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_25)
-        freeCompilerArgs.addAll("-Xcontext-parameters")
     }
 }
 
@@ -77,6 +76,23 @@ dependencies {
     testImplementation(libs.symja.core)
 }
 
+// Two standalone Kotlin compilers, each resolved with its own dependencies and run as
+// a separate process by ForeignCompilerGuardTest: the previous feature release (the
+// one the guard must refuse, by name, from inside a compiler this plugin was not
+// built against) and the catalog's own (the control, which must accept).
+val foreignKotlinCompiler: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+val currentKotlinCompiler: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+dependencies {
+    foreignKotlinCompiler(libs.previousKotlin.compiler.embeddable)
+    currentKotlinCompiler(libs.kotlin.compiler.embeddable)
+}
+
 evaluationDependsOn(":ir")
 evaluationDependsOn(":core")
 evaluationDependsOn(":autograd")
@@ -97,4 +113,13 @@ tasks.withType<Test>().configureEach {
     // second copy of the number, and the failure mode of a second copy is a Kotlin bump
     // that makes the plugin refuse the very compiler this repository builds with.
     systemProperty("tlaloc.kotlin.version", libs.versions.kotlin.get())
+    systemProperty("tlaloc.kotlin.previousVersion", libs.versions.previousKotlin.get())
+    inputs.files(foreignKotlinCompiler).withPropertyName("foreignKotlinCompiler")
+    inputs.files(currentKotlinCompiler).withPropertyName("currentKotlinCompiler")
+    val foreignCp = foreignKotlinCompiler
+    val currentCp = currentKotlinCompiler
+    doFirst {
+        systemProperty("tlaloc.foreignCompiler.classpath", foreignCp.asPath)
+        systemProperty("tlaloc.currentCompiler.classpath", currentCp.asPath)
+    }
 }

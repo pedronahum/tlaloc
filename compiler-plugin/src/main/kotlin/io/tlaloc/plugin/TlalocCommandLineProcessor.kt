@@ -141,19 +141,25 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
             allowMultipleOccurrences = false,
         )
 
+        // The keys are built with the constructor, not `CompilerConfigurationKey.create`:
+        // Kotlin 2.4 moved `create` onto a companion object, so a plugin compiled against
+        // 2.4 calls `CompilerConfigurationKey.Companion`, which a 2.3 compiler does not
+        // have — and this class is loaded before KotlinVersionGuard runs, so that would be
+        // a NoSuchFieldError in place of the guard's refusal. The public constructor
+        // exists in both. ForeignCompilerGuardTest pins it.
         val DUMP_GRAD_SOURCE_KEY: CompilerConfigurationKey<Boolean> =
-            CompilerConfigurationKey.create("dump synthesised gradients as Kotlin source")
+            CompilerConfigurationKey("dump synthesised gradients as Kotlin source")
 
         val DUMP_GRAD_SOURCE_DIR_KEY: CompilerConfigurationKey<String> =
-            CompilerConfigurationKey.create("directory for dumped gradient .kt files")
+            CompilerConfigurationKey("directory for dumped gradient .kt files")
 
         val DUMP_LOWERED_IR_KEY: CompilerConfigurationKey<Boolean> =
-            CompilerConfigurationKey.create("dump the lowered dxir for every recognised intrinsic lambda")
+            CompilerConfigurationKey("dump the lowered dxir for every recognised intrinsic lambda")
 
         val STRICT_LOWERING_KEY: CompilerConfigurationKey<Boolean> =
-            CompilerConfigurationKey.create("refuse an unlowerable intrinsic lambda at compile time")
+            CompilerConfigurationKey("refuse an unlowerable intrinsic lambda at compile time")
 
         val UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_KEY: CompilerConfigurationKey<Boolean> =
-            CompilerConfigurationKey.create("register the plugin on an unsupported Kotlin version")
+            CompilerConfigurationKey("register the plugin on an unsupported Kotlin version")
     }
 }

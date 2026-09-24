@@ -34,7 +34,6 @@ import org.jetbrains.kotlin.ir.declarations.IrValueDeclaration
 import org.jetbrains.kotlin.ir.declarations.IrValueParameter
 import org.jetbrains.kotlin.ir.expressions.IrBlockBody
 import org.jetbrains.kotlin.ir.expressions.IrCall
-import org.jetbrains.kotlin.ir.expressions.IrConstKind
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.IrFunctionExpression
 import org.jetbrains.kotlin.ir.expressions.IrStatementOrigin
@@ -1495,10 +1494,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!node.type.isScalar) {
             if (!isAcceptedTensorType(node.type)) return null
             val scalarValue = (v as? Number)?.toFloat() ?: return null
-            val scalarConst = IrConstImpl(
+            val scalarConst = IrConstImpl.float(
                 startOffset, endOffset,
                 pluginContext.irBuiltIns.floatType,
-                IrConstKind.Float, scalarValue,
+                scalarValue,
             )
 
             // §0.4.200 — Phase 3 third slice: try axis-matching first (mirrors
@@ -1559,10 +1558,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return call
         }
         return when (node.type.dtype) {
-            F32 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Float, v as Float)
-            F64 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Double, v as Double)
-            I32 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Int, v as Int)
-            I64 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Long, v as Long)
+            F32 -> IrConstImpl.float(startOffset, endOffset, ty, v as Float)
+            F64 -> IrConstImpl.double(startOffset, endOffset, ty, v as Double)
+            I32 -> IrConstImpl.int(startOffset, endOffset, ty, v as Int)
+            I64 -> IrConstImpl.long(startOffset, endOffset, ty, v as Long)
             Bool -> null
             // §0.4.455/§0.4.456: no Kotlin primitive exists at bf16 width, and
             // G1b RATIFIED the convention: the grad{} synthesis frontend does
@@ -2940,7 +2939,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
         val intTy = pluginContext.irBuiltIns.intType
         for ((i, v) in (listOf(k0, k1) + dims).withIndex()) {
-            call.arguments[i] = IrConstImpl(startOffset, endOffset, intTy, IrConstKind.Int, v)
+            call.arguments[i] = IrConstImpl.int(startOffset, endOffset, intTy, v)
         }
         return call
     }
@@ -3847,12 +3846,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    private fun IrBuilderWithScope.intConst(v: Int): IrExpression = IrConstImpl(
-        startOffset, endOffset, pluginContext.irBuiltIns.intType, IrConstKind.Int, v,
+    private fun IrBuilderWithScope.intConst(v: Int): IrExpression = IrConstImpl.int(
+        startOffset, endOffset, pluginContext.irBuiltIns.intType, v,
     )
 
-    private fun IrBuilderWithScope.boolConst(v: Boolean): IrExpression = IrConstImpl(
-        startOffset, endOffset, pluginContext.irBuiltIns.booleanType, IrConstKind.Boolean, v,
+    private fun IrBuilderWithScope.boolConst(v: Boolean): IrExpression = IrConstImpl.boolean(
+        startOffset, endOffset, pluginContext.irBuiltIns.booleanType, v,
     )
 
     /**
@@ -3884,10 +3883,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             symbol = intArrayGetSym,
         )
         getCall.arguments[0] = dimsCall
-        getCall.arguments[1] = IrConstImpl(
+        getCall.arguments[1] = IrConstImpl.int(
             startOffset, endOffset,
             pluginContext.irBuiltIns.intType,
-            IrConstKind.Int, axis,
+            axis,
         )
         return getCall
     }
@@ -4703,10 +4702,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     private fun IrBuilderWithScope.zeroOrOneConst(type: DxirType, one: Boolean, context: SynthesisContext): IrExpression? {
         val ty = irTypeFor(type, context) ?: return null
         return when (type.dtype) {
-            F32 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Float, if (one) 1.0f else 0.0f)
-            F64 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Double, if (one) 1.0 else 0.0)
-            I32 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Int, if (one) 1 else 0)
-            I64 -> IrConstImpl(startOffset, endOffset, ty, IrConstKind.Long, if (one) 1L else 0L)
+            F32 -> IrConstImpl.float(startOffset, endOffset, ty, if (one) 1.0f else 0.0f)
+            F64 -> IrConstImpl.double(startOffset, endOffset, ty, if (one) 1.0 else 0.0)
+            I32 -> IrConstImpl.int(startOffset, endOffset, ty, if (one) 1 else 0)
+            I64 -> IrConstImpl.long(startOffset, endOffset, ty, if (one) 1L else 0L)
             Bool -> null
             BF16 -> null // §0.4.455: no bf16 primitive; see irConstFor's BF16 arm.
         }

@@ -4,7 +4,6 @@ import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar
 import org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi
-import org.jetbrains.kotlin.config.CommonConfigurationKeys
 import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrarAdapter
 
@@ -25,24 +24,36 @@ class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
         // a published plugin API, is the difference between a sentence the user can act
         // on and a stack trace they cannot.
         //
-        // Reported to the MessageCollector as an ERROR (which fails the compilation)
-        // rather than thrown, per the house rule: a clean refusal, not a crash. The
-        // collector is absent only in a host that configured none, and then there is no
-        // channel to be clean on, so the guard throws with the same text.
-        val allowUnsupportedKotlin =
-            configuration.get(TlalocCommandLineProcessor.UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_KEY) ?: false
-        val messageCollector = configuration.get(CommonConfigurationKeys.MESSAGE_COLLECTOR_KEY)
-        val mayRegister = KotlinVersionGuard.check(
-            found = KotlinVersionGuard.detectRunningCompilerVersion(),
-            allowUnsupported = allowUnsupportedKotlin,
-        ) { severity, text ->
-            if (messageCollector != null) {
-                messageCollector.report(severity, text, null)
-            } else if (severity == CompilerMessageSeverity.ERROR) {
-                error(text)
-            }
+        // Reported as an ERROR (which fails the compilation) rather than thrown, per the
+        // house rule: a clean refusal, not a crash. `GuardReporter` owns the channel: the
+        // compiler's own CLI diagnostic API when the running compiler has it, the message
+        // collector when it does not — the guard's whole job is to run inside compilers
+        // this plugin was NOT built against, so its reporting cannot assume the API it
+        // was compiled against is there.
+        val runningKotlin = KotlinVersionGuard.detectRunningCompilerVersion()
+        if (!runVersionGuard(configuration, runningKotlin)) return
+        try {
+            registerTlalocExtensions(configuration)
+        } catch (e: LinkageError) {
+            // Reached only past the guard's opt-out: on a compiler inside the supported
+            // range every one of these classes links. Reported as an ERROR that repeats
+            // the versions and the opt-out, rather than left to crash the compiler: a
+            // crash prints a stack trace and nothing else, and a Kotlin 2.3 CLI does not
+            // print the guard's warning once the compilation has an error either.
+            GuardReporter.report(
+                configuration,
+                CompilerMessageSeverity.ERROR,
+                "Tlaloc's K2 compiler plugin could not register its extensions in Kotlin " +
+                    "$runningKotlin: it is built against Kotlin " +
+                    "${KotlinVersionGuard.COMPILED_AGAINST} (supported: " +
+                    "${KotlinVersionGuard.supportedRangeDescription}) and was loaded anyway " +
+                    "because unsafeAllowUnsupportedKotlin is set. The running compiler lacks " +
+                    "an API it needs (${e.javaClass.simpleName}: ${e.message}).",
+            )
         }
-        if (!mayRegister) return
+    }
+
+    private fun ExtensionStorage.registerTlalocExtensions(configuration: CompilerConfiguration) {
 
         // §0.4.499 — the per-compilation knobs, resolved once and handed to BOTH
         // halves of the plugin (FIR checker + IR extension) as a value.
@@ -69,5 +80,22 @@ class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
                 handoff = handoff,
             ),
         )
+    }
+
+    internal companion object {
+        /**
+         * The guard step of [registerExtensions], with the running compiler's version
+         * as a parameter so a test can drive the refusal through a real compilation of
+         * the compiler this plugin is built against. Returns true when the extensions
+         * may be registered.
+         */
+        fun runVersionGuard(configuration: CompilerConfiguration, found: String?): Boolean {
+            val allowUnsupportedKotlin =
+                configuration.get(TlalocCommandLineProcessor.UNSAFE_ALLOW_UNSUPPORTED_KOTLIN_KEY) ?: false
+            return KotlinVersionGuard.check(
+                found = found,
+                allowUnsupported = allowUnsupportedKotlin,
+            ) { severity, text -> GuardReporter.report(configuration, severity, text) }
+        }
     }
 }
