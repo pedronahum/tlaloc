@@ -111,7 +111,7 @@ jobs:
           java-version: '25'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # Resolved, not pinned. A literal "the next Kotlin" in this file would be
       # wrong within weeks and would eventually name a version that does not

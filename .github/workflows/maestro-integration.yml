@@ -79,7 +79,7 @@ jobs:
           java-version: '25'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # The Tlaloc side of the handoff. Hardware-gated tests (PJRT, CUDA, IREE,
       # KPTX) check PjrtBinaries.available / cudaAvailable and self-skip by name

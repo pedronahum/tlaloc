@@ -87,7 +87,7 @@ jobs:
           java-version: '25'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # macOS-specific honesty, stated where someone reading a green check will
       # see it: the root build.gradle.kts injects /opt/homebrew/bin into every
@@ -170,7 +170,7 @@ jobs:
         run: echo "JDK21_HOME=${{ steps.jdk21.outputs.path }}" >> "$GITHUB_ENV"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # The bytecode claim: every class in each module's jar is the major version
       # tlalocJvmTargets says it is. Registered in all twelve subprojects and
