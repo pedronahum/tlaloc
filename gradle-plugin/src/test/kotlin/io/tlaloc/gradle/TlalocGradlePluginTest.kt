@@ -142,6 +142,25 @@ class TlalocGradlePluginTest {
     }
 
     @Test
+    fun aMultiplatformJvmTargetDumpsIntoJvmMainAndJvmTest() {
+        val p = project {
+            pluginManager.apply("org.jetbrains.kotlin.multiplatform")
+            pluginManager.apply(TlalocGradlePlugin::class.java)
+            extensions.getByType(KotlinMultiplatformExtension::class.java).jvm()
+            extensions.getByType(TlalocExtension::class.java).apply {
+                dumpGradSourceDir.set(layout.buildDirectory.dir("gradients"))
+            }
+        }
+        val gradients = p.layout.buildDirectory.dir("gradients").get().asFile
+        for ((task, sourceSet) in listOf("compileKotlinJvm" to "jvmMain", "compileTestKotlinJvm" to "jvmTest")) {
+            val expectedDir = File(gradients, sourceSet).absolutePath
+            assertEquals(expectedDir, tlalocOptions(p, task).single { it.key == "dumpGradSourceDir" }.value, task)
+            val compile = p.tasks.getByName(task) as KotlinCompile
+            assertTrue(File(expectedDir) in compile.outputs.files.files, "$task outputs ${compile.outputs.files.files}")
+        }
+    }
+
+    @Test
     fun withoutAKotlinPluginTheBuildIsRefusedByName() {
         val error = runCatching {
             project { pluginManager.apply(TlalocGradlePlugin::class.java) }
