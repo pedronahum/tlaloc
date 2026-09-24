@@ -35,7 +35,7 @@ PyTorch:
   StableHLO. Serving it needs a PJRT plugin `.so` and a driver — no JVM, no Python
   framework, nothing of Tlaloc in the process.
 
-> **Alpha — `0.1.0-alpha01`.** The automated suite includes live GPU runs on an
+> **Alpha — `0.1.0-alpha02`.** The automated suite includes live GPU runs on an
 > NVIDIA GB10 ([CAPABILITIES.md](docs/CAPABILITIES.md) has the count and what each
 > test pins). Published on Maven Central as `io.github.pedronahum:tlaloc-*`.
 > APIs change without deprecation cycles
@@ -50,7 +50,7 @@ PyTorch:
 
 ## Quickstart
 
-JDK 25 to build. No GPU required. `main` builds with Kotlin 2.4.20.
+JDK 25 to build, Kotlin 2.4.20. No GPU required.
 
 ```bash
 git clone https://github.com/pedronahum/tlaloc && cd tlaloc
@@ -124,7 +124,7 @@ Control flow inside `grad { }` is differentiated, not unrolled by hand. Coarseni
 follows Shen et al., *Coarsening Optimization for Differentiable Programming*
 ([OOPSLA 2021][phi]), with a closed-form solver behind it.
 [`examples/differentiable-physics`](examples/differentiable-physics/) puts a
-38-step Euler integrator in a `grad2 { }` and gets an 823-operation derivative of
+38-step Euler integrator in a `valueAndGrad2 { }` and gets an 823-operation derivative of
 the whole simulator.
 
 Forward mode is `jvp` / `jvp2`. `vjp`, `jacobian`, `jacobianReverse` and `hessian`
@@ -165,8 +165,9 @@ No `.backward()`, no `zero_grad()`. `capture` traces the model once; `step.run`
 evaluates the captured gradient on the host interpreter. The same captured program
 also lowers to StableHLO: [`examples/gpu-training`](examples/gpu-training/) runs it
 on PJRT-CUDA, 600 Adam steps in 2.02 s (3.4 ms/step) on a GB10, loss
-`0.992 → 0.047`, 98.0 % held out. The checkpoint is an ordinary safetensors file that `safetensors.torch.load_file`
-opens, and a resumed run matches the uninterrupted one bit for bit.
+`0.992 → 0.047`, 98.0 % held out. The checkpoint is an ordinary safetensors file
+that `safetensors.torch.load_file` opens, and a resumed run matches the
+uninterrupted one bit for bit.
 
 Inference goes the other way — Kotlin writes an artifact and exits:
 
@@ -203,8 +204,8 @@ dependencyResolutionManagement { repositories { mavenCentral() } }
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    kotlin("jvm") version "2.3.20"
-    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha01"  // makes `grad { }` compile-time
+    kotlin("jvm") version "2.4.20"
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha02"  // makes `grad { }` compile-time
     application
 }
 kotlin {
@@ -217,7 +218,7 @@ java {                                                   // Java tasks match Kot
 }
 
 dependencies {
-    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha02"))
     implementation("io.github.pedronahum:tlaloc-autograd")
     implementation("io.github.pedronahum:tlaloc-nn")           // layers + optimizers
     implementation("io.github.pedronahum:tlaloc-runtime-pjrt") // GPU execution; runs on JDK 25 only
@@ -233,7 +234,9 @@ compiler's own JVM and `compiler-plugin` is Java 25 bytecode, so building
 `grad { }` needs 25. The library modules target Java 21, so running what you built
 needs only 21 — except PJRT and CUDA execution, which need 25.
 
-**Also:** Kotlin 2.3.20–2.3.29, refused by name outside that range · JVM only ·
+**Also:** Kotlin 2.4.20–2.4.29, refused by name outside that range (on Kotlin
+2.3.x, use `0.1.0-alpha01`; [COMPATIBILITY.md](docs/COMPATIBILITY.md) has the
+table) · JVM only ·
 for GPU, a PJRT plugin `.so` and an NVIDIA driver · Symja (LGPL-3.0) is optional
 and not in your dependency graph unless you add it.
 
@@ -371,8 +374,9 @@ needing one self-skips by name. The GPU rows above are certified on the GB10, no
 CI.
 
 The next-Kotlin lane is green by construction, so read its step outcomes rather than
-its checkmark. Its current answer: the library modules compile and test under the
-next Kotlin, the compiler plugin does not.
+its checkmark. Its current answer, for 2.5.0-Beta1: the library modules compile
+and pass, the compiler plugin compiles, and the plugin refuses 2.5 by name until
+it is ported.
 
 House style, if you are contributing:
 
