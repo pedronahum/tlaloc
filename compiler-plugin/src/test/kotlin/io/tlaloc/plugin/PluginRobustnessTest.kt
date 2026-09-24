@@ -266,6 +266,37 @@ class PluginRobustnessTest {
         )
     }
 
+    @Test
+    fun `the IR-phase refusal error cannot be silenced with @Suppress`() {
+        for (name in listOf("IR_LOWERING_REFUSED", "IR_ERROR_NO_SOURCE", "IR_LOWERING_REFUSED_WARNING")) {
+            val result = compile(
+                mapOf(
+                    "stub.kt" to jacobianStubWithoutHelper,
+                    "Main.kt" to jacobianUser.replace("fun main()", "@Suppress(\"$name\")\nfun main()"),
+                ),
+            )
+            assertEquals(1, result.exitCode, "@Suppress(\"$name\") must not let a refused call compile:\n${result.render()}")
+            val err = result.messages.singleOrNull {
+                it.severity == CompilerMessageSeverity.ERROR && "kept original call" in it.message
+            } ?: error("expected the refusal ERROR under @Suppress(\"$name\"); got:\n${result.render()}")
+            assertEquals(4, err.location?.line, "still at the call's line")
+        }
+    }
+
+    @Test
+    fun `the lenient IR-phase refusal warning fails a -Werror build`() {
+        val result = compile(
+            mapOf("stub.kt" to jacobianStubWithoutHelper, "Main.kt" to jacobianUser),
+            options = arrayOf("plugin:io.tlaloc.plugin:strictLowering=false"),
+            werror = true,
+        )
+        assertEquals(1, result.exitCode, "a warning under -Werror fails the build:\n${result.render()}")
+        assertTrue(
+            result.messages.any { it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message },
+            "the refusal is the warning that failed it:\n${result.render()}",
+        )
+    }
+
     // ---------------- R3: unexpected exceptions ----------------
 
     private val workingGrad = """

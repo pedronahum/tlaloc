@@ -960,17 +960,22 @@ the issue-tracker address; degradation messages stay warnings; the `dumpLoweredI
 and `dumpGradSource` output stays INFO, so a working program compiles silently under
 `-Werror`. Message texts are unchanged. Messages with no call to point at (a
 whole-file failure, a call the IR phase never found) are sourceless diagnostics that
-keep their file, line and column. Changed: the degradation warnings raised while rewriting a call, which had no
-location, now point at the call; an IR-phase error stops the build before code
-generation; warnings can be silenced with `@Suppress` naming the diagnostic.
+keep their file, line and column. Changed: the degradation warnings raised while
+rewriting a call, which had no location, now point at the call; an IR-phase error
+stops the build before code generation; warnings can be silenced with `@Suppress` naming the diagnostic. Errors
+cannot: they are reported without a source element, at the call's file, line and
+column, so an enclosing `@Suppress` does not reach them. A refused call throws when
+it runs, and `strictLowering=false` stays the only way to compile one.
 `TlalocIrGenerationExtension` takes the `CompilerConfiguration` as a constructor
 parameter (the ABI baseline records it).
 
 New tests in `PluginRobustnessTest`: the refusal's line and column and no class file
 written; `@Suppress("IR_LOWERING_REFUSED_WARNING")` silences the lenient warning
-(another name does not); the `dumpGradSource` dump is INFO under `-Werror`. With the
-reporter forced onto the sourceless path and INFO sent as a warning, all three fail,
-and so do two existing tests.
+(another name does not); `@Suppress` does not silence the refusal error; the
+lenient warning fails a `-Werror` build; the `dumpGradSource` dump is INFO under
+`-Werror`. Negative controls: the `@Suppress` test fails against a reporter that
+anchors errors at the call; with errors reported without a location, warnings sent
+as INFO and INFO sent as a warning, every other new test fails.
 
 Kotlin 2.5.0-Beta1 experiment (`-PtlalocKotlinVersion=2.5.0-Beta1`): main and test
 sources compile. `:compiler-plugin:test` runs 344 tests and 303 fail, 299 of them

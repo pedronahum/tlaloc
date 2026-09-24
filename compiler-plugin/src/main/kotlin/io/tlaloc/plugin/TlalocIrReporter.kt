@@ -5,7 +5,6 @@ import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSourceLocation
 import org.jetbrains.kotlin.cli.reportInfo
 import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.diagnostics.KtDiagnosticFactory1
-import org.jetbrains.kotlin.diagnostics.KtSourcelessDiagnosticFactory
 import org.jetbrains.kotlin.ir.IrDiagnosticReporter
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.declarations.IrFile
@@ -14,13 +13,18 @@ import org.jetbrains.kotlin.ir.declarations.IrFile
  * Every message the IR phase emits goes through here.
  *
  * Errors and warnings are compiler diagnostics reported through the IR plugin
- * context's [IrDiagnosticReporter] (the factories are in [TlalocIrErrors]). They
- * point at the intrinsic call being rewritten, so they carry its file, line and
- * column, fail the build before code generation when they are errors, fail a
- * `-Werror` build when they are warnings, and can be silenced with `@Suppress`
- * naming the factory. A message with no call to point at (a whole-file failure, a
- * call the IR phase never found) is reported without a source element, with the
- * best location there is.
+ * context's [IrDiagnosticReporter], at the file, line and column of the intrinsic
+ * call being rewritten. Errors fail the build before code generation and warnings
+ * fail a `-Werror` build.
+ *
+ * Warnings are reported on the call itself (the factories are in [TlalocIrErrors]),
+ * so `@Suppress` naming the factory silences them. Errors are reported without a
+ * source element (the factory is in [TlalocIrSourcelessErrors]) so that `@Suppress`
+ * cannot reach them: a refused call is left as written and throws when it runs, and
+ * the only way to compile it anyway is `strictLowering=false`, which turns the error
+ * into a warning. A warning with no call to point at (a whole-file failure, a call
+ * the IR phase never found) is reported the same sourceless way, with the best
+ * location there is.
  *
  * Informational output (the `dumpLoweredIr` and `dumpGradSource` dumps) is not a
  * diagnostic: it goes to the compiler's message output at INFO severity, so a
@@ -67,11 +71,11 @@ internal class TlalocIrReporter(
      * `strictLowering`, a warning otherwise.
      */
     fun refuse(text: String) {
-        report(
-            if (strictLowering) TlalocIrErrors.IR_LOWERING_REFUSED else TlalocIrErrors.IR_LOWERING_REFUSED_WARNING,
-            text,
-            fallbackLocation = callLocation,
-        )
+        if (strictLowering) {
+            error(text, callLocation)
+        } else {
+            warn(TlalocIrErrors.IR_LOWERING_REFUSED_WARNING, text, fallbackLocation = callLocation)
+        }
     }
 
     /**
@@ -79,16 +83,16 @@ internal class TlalocIrReporter(
      * is one, otherwise at [location].
      */
     fun internalError(text: String, location: CompilerMessageSourceLocation? = callLocation) {
-        report(
-            if (strictLowering) TlalocIrErrors.IR_INTERNAL_ERROR else TlalocIrErrors.IR_INTERNAL_ERROR_WARNING,
-            text,
-            fallbackLocation = location,
-        )
+        if (strictLowering) {
+            error(text, location)
+        } else {
+            warn(TlalocIrErrors.IR_INTERNAL_ERROR_WARNING, text, fallbackLocation = location)
+        }
     }
 
     /** A step failed but compilation carries on with a less processed input. */
     fun degraded(text: String) {
-        report(TlalocIrErrors.IR_DEGRADED, text, fallbackLocation = callLocation)
+        warn(TlalocIrErrors.IR_DEGRADED, text, fallbackLocation = callLocation)
     }
 
     /** Developer introspection: printed as compiler INFO output, never a diagnostic. */
@@ -96,7 +100,13 @@ internal class TlalocIrReporter(
         configuration.reportInfo(text)
     }
 
-    private fun report(
+    /** An error, sourceless so that `@Suppress` on an enclosing declaration cannot
+     * silence it; [location] still carries the call's file, line and column. */
+    private fun error(text: String, location: CompilerMessageSourceLocation?) {
+        reporter.report(TlalocIrSourcelessErrors.IR_ERROR_NO_SOURCE, text, location)
+    }
+
+    private fun warn(
         factory: KtDiagnosticFactory1<String>,
         text: String,
         fallbackLocation: CompilerMessageSourceLocation?,
@@ -108,16 +118,9 @@ internal class TlalocIrReporter(
         if (element != null && irFile != null && element.startOffset >= 0) {
             reporter.at(element, irFile).report(factory, text)
         } else {
-            reporter.report(sourcelessTwin(factory), text, fallbackLocation)
+            reporter.report(TlalocIrSourcelessErrors.IR_WARNING_NO_SOURCE, text, fallbackLocation)
         }
     }
-
-    private fun sourcelessTwin(factory: KtDiagnosticFactory1<String>): KtSourcelessDiagnosticFactory =
-        if (factory == TlalocIrErrors.IR_LOWERING_REFUSED || factory == TlalocIrErrors.IR_INTERNAL_ERROR) {
-            TlalocIrSourcelessErrors.IR_ERROR_NO_SOURCE
-        } else {
-            TlalocIrSourcelessErrors.IR_WARNING_NO_SOURCE
-        }
 
     internal companion object {
         /** The file, line and column of [startOffset] in [file]; the file alone when the

@@ -25,6 +25,8 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   refusals and warnings are reported at the call site through the compiler's
   diagnostic reporter, with unchanged text and severity, and a warning can be
   silenced with `@Suppress` naming it (for example `IR_LOWERING_REFUSED_WARNING`).
+  The errors cannot be silenced that way; `strictLowering=false` is still the only
+  way to compile a call the plugin refuses.
 - **ABI baseline for every published module.** The committed `api/*.api` baselines
   are checked by the Kotlin Gradle plugin's ABI validation (`checkKotlinAbi`,
   `updateKotlinAbi`) instead of binary-compatibility-validator, and now also cover
