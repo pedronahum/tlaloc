@@ -67,21 +67,20 @@ import org.jetbrains.kotlin.name.SpecialNames
  * - Scalar primitives (Float / Double / Int / Long): each [DxirOp] maps to the matching
  *   `kotlin.{Float,Double,Int,Long}` arithmetic operator; [DxirConst]s become [IrConstImpl];
  *   [DxirParam]s become `irGet` of the matching lambda value parameter.
- * - Rank-1 `DTensor<Rank1<_>, F32>` — narrow widening landed in §0.4.10. Only exercised by
- *   `grad { x: DTensor<Rank1<_>, F32> -> x.sum() }` today: the gradient body is a scalar seed
- *   const + a `BROADCAST` op lowered as a call into `io.tlaloc.core.ops.broadcastLike`.
- *   The tensor IrType is harvested from the call site's [IrCall.type] (the function type's
- *   parameter arg) rather than rebuilt generically — generic erasure makes any phantom
- *   shape witness the same at runtime, so reusing the call-site IrType keeps
- *   [TlalocIrGenerationExtension]'s type-mismatch guard happy without re-deriving type args.
+ * - F32 `DTensor`s of rank 1–4 and rank-1/2 I32 index tensors: each op
+ *   lowers to a call into the matching `io.tlaloc.core.ops` host function. Tensor IrTypes
+ *   are harvested from the call site's [IrCall.type] (the function type's parameter args)
+ *   rather than rebuilt generically — generic erasure makes any phantom shape witness the
+ *   same at runtime, so reusing the call-site IrType keeps [TlalocIrGenerationExtension]'s
+ *   type-mismatch guard satisfied without re-deriving type args.
  *
  * Every intermediate (Const + Op) is materialised as a local `val` so the IR tree never
  * shares a node between parents — callers can reference the same DxirNode multiple times
  * (e.g. `x * x`) without running into IR node-sharing checks.
  *
  * Returns `null` (forcing the caller to leave the original call intact) if [fn] contains
- * anything outside this scope: rank > 1, unsupported op kinds, block args, nested regions,
- * multi-result ops, or a return that isn't one / two / three values.
+ * anything outside this scope (unsupported ranks, dtypes or op kinds, unsupported region
+ * shapes, multi-result ops, unsupported return arities); [lastFailureReason] names the gate.
  */
 @OptIn(UnsafeDuringIrConstructionAPI::class)
 internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
@@ -92,13 +91,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * requiring every lowering arm to re-derive them. Scalar-only primals leave
      * [tensorIrType] and [tensorTemplateParam] null.
      *
-     * §0.4.192 — Phase 0c-rectangular slice 1: [operandIrTypes] threads per-operand
-     * `DxirNode.id → IrType` so future rank-2 ops with non-uniform shapes (rectangular
-     * MATMUL: `Rank2<R, K> matmul Rank2<K, C>` produces `Rank2<R, C>` where R, K, C
-     * differ) can resolve each operand's specific IrType. The map is empty by default
-     * — when [tensorIrType] is set, callers fall back to it for any operand absent
-     * from the map. Slice 2 will populate it from the call-site IrType arguments and
-     * wire `irMatmul` / `irTranspose` to consult it instead of `tensorIrType`.
+     * [operandIrTypes] threads per-operand `DxirNode.id → IrType` so ops with
+     * non-uniform shapes (rectangular MATMUL: `Rank2<R, K> matmul Rank2<K, C>` produces
+     * `Rank2<R, C>` where R, K, C differ) resolve each operand's specific IrType. It is
+     * populated from the call-site IrType arguments and from derived op-result types;
+     * when [tensorIrType] is set, callers fall back to it for any operand absent from
+     * the map.
      */
     private data class SynthesisContext(
         val tensorIrType: IrType?,
@@ -113,14 +111,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     )
 
     /**
-     * §0.4.192 — Phase 0c-rectangular slice 1 helper. Returns the IrType for a
-     * specific [DxirNode], preferring the per-operand map when present, falling back
-     * to the call-site `tensorIrType` for any rank-1/2/3 F32 type, and `null` for
-     * shapes outside the synthesis surface.
-     *
-     * Slice 1 doesn't populate the map yet (callers consistently fall back to
-     * `tensorIrType`); behavior is bit-exact equivalent to the pre-§0.4.192 path.
-     * Slice 2 wires the populator.
+     * Returns the IrType for a specific [DxirNode], preferring the per-operand map
+     * when present, falling back to the call-site `tensorIrType` for any rank-1/2/3
+     * F32 type, and `null` for shapes outside the synthesis surface.
      */
     private fun irTypeForNode(node: io.tlaloc.ir.DxirNode, context: SynthesisContext): IrType? {
         context.operandIrTypes[node.id]?.let { return it }
@@ -128,7 +121,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.194 — Phase 0c-rectangular slice 3a. Returns a fresh `IrSimpleType` shaped
+     * Returns a fresh `IrSimpleType` shaped
      * like [original] but with [newArgs] substituted for `arguments`. Wraps Kotlin's
      * [buildSimpleType] DSL so callers don't need to reach into the impl package.
      * Used by [deriveResultIrType] to construct DTensor / Rank2 IrTypes with rearranged
@@ -138,13 +131,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         original.buildSimpleType { arguments = newArgs }
 
     /**
-     * §0.4.194 — derive a `DxirOp`'s result IrType for the rectangular-shape ops:
+     * Derive a `DxirOp`'s result IrType for the rectangular-shape ops:
      * [OpKind.TRANSPOSE] swaps the inner Rank2's two type-args; [OpKind.MATMUL]
      * combines LHS's first inner arg + RHS's last inner arg into a fresh Rank2.
      * For other ops returns null — callers fall back to [SynthesisContext.tensorIrType]
      * via [irTypeForNode].
      *
-     * Operates only on rank-2 F32 surfaces (the slice-3a scope). The outer DTensor's
+     * Operates only on rank-2 F32 surfaces. The outer DTensor's
      * second type-arg (F32) is preserved from the operand.
      *
      * Returns null when:
@@ -402,7 +395,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.384 — Phase A3b slice 1: rank-4 (NCHW) result-IrType derivation.
+     * Rank-4 (NCHW) result-IrType derivation.
      *
      * - TRANSPOSE: permute the operand's four atoms by the `permutation` attr —
      *   the batch↔feature swap `[1,0,2,3]` that Conv2dRule's `dW = conv(Xᵀ, dYᵀ)`
@@ -413,16 +406,16 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      *   SECOND for CONV_TRANSPOSE2D (IOHW `[Ci, Co, kh, kw]` — the op contracts
      *   over axis 0 and emits axis 1). Both spatial axes take placeholder
      *   `Lit<Int>` atoms: their extents are a floor-division over runtime input
-     *   extents and kernel sizes, so no param-sourced atom stands for them. That
-     *   is §0.4.375's reasoning for a reshape-created unit axis and Phase A2b's
-     *   for a concat axis, and it is safe for the same reason — nothing reads a
+     *   extents and kernel sizes, so no param-sourced atom stands for them. The
+     *   same reasoning covers a reshape-created unit axis and a concat axis, and it
+     *   is safe for the same reason — nothing reads a
      *   placeholder for a runtime-dim decision: the conv host twins derive their
      *   own output extents from the operands' runtime `dims`.
      * - elementwise binaries/unaries: the same rank-agnostic propagation the
      *   rank-2 arms do (the forward transform's conv product rule emits a rank-4
      *   ADD of two convs; a relu/sum chain over a conv keeps propagating too).
      *
-     * Pooling (MAXPOOL2D/AVGPOOL2D) follows the same shape once their slices land.
+     * Pooling (MAXPOOL2D/AVGPOOL2D) follows the same shape.
      */
     private fun deriveResultIrTypeRank4(op: DxirOp, operandIrTypes: Map<Int, IrType>): IrType? =
         when (op.op) {
@@ -549,7 +542,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.197 — Backward-pass solve for a MATMUL's missing LHS operand. Given the
+     * Backward-pass solve for a MATMUL's missing LHS operand. Given the
      * MATMUL's output IrType `Rank2<R, C>` and the known RHS IrType `Rank2<K, C>`,
      * the missing LHS must be `Rank2<R, K>` (since output.first = lhs.first = R and
      * lhs.last = rhs.first = K).
@@ -574,7 +567,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.197 — Backward-pass solve for a MATMUL's missing RHS operand. Given the
+     * Backward-pass solve for a MATMUL's missing RHS operand. Given the
      * MATMUL's output IrType `Rank2<R, C>` and the known LHS IrType `Rank2<R, K>`,
      * the missing RHS must be `Rank2<K, C>` (since lhs.last = rhs.first = K and
      * output.last = rhs.last = C).
@@ -595,7 +588,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.366 — given `DTensor<RankN<A0…An-1>, F32>` and result-indexed
+     * Given `DTensor<RankN<A0…An-1>, F32>` and result-indexed
      * [dropped] positions, returns `DTensor<RankM<kept atoms>, F32>` where
      * M = N − |dropped|. The backward-pass solve for a keepdims-unsqueeze
      * RESHAPE's operand: recovers the true squeezed rank so upstream
@@ -625,7 +618,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.375 (Phase A4b) — inverse of [deriveDroppedAxesDTensor]: given a
+     * Inverse of [deriveDroppedAxesDTensor]: given a
      * lower-rank `DTensor<RankM<…>, F32>` and result-indexed [inserted]
      * unit-axis positions, returns `DTensor<RankN<…>, F32>` (N = M + |inserted|)
      * carrying a placeholder `Lit<Int>` atom at each inserted position and the
@@ -662,7 +655,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * Phase A2b — the shape atoms of a `DTensor<RankN<A0…>, F32>` IrType, or null if
+     * The shape atoms of a `DTensor<RankN<A0…>, F32>` IrType, or null if
      * [dtensor] is not shaped that way or does not carry exactly [rank] of them.
      */
     private fun shapeAtomsOf(dtensor: IrSimpleType, rank: Int): List<IrType>? {
@@ -673,9 +666,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * Phase A2b — rebuild [dtensor]'s shape argument as `Rank{rank}<newAtoms…>`,
+     * Rebuild [dtensor]'s shape argument as `Rank{rank}<newAtoms…>`,
      * keeping its dtype argument and its shape argument's variance. Shared by
-     * [deriveInsertedAxesDTensor] (§0.4.375, which INSERTS placeholder atoms) and the
+     * [deriveInsertedAxesDTensor] (which INSERTS placeholder atoms) and the
      * CONCAT arm (which REPLACES the concat axis's atom with one).
      */
     private fun rebuildShapeAtoms(dtensor: IrSimpleType, newAtoms: List<IrType>, rank: Int): IrSimpleType? {
@@ -700,14 +693,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return reshapeIrSimpleType(dtensor, listOf(proj, dtensor.arguments[1]))
     }
 
-    /** §0.4.375 — the placeholder `Lit<Int>` shape atom for reshape-created unit axes. */
+    /** The placeholder `Lit<Int>` shape atom for reshape-created unit axes. */
     private fun litIntAtom(): IrType? {
         val litClass = pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/Lit")) ?: return null
         return litClass.typeWith(listOf(pluginContext.irBuiltIns.intType))
     }
 
     /**
-     * §0.4.197 — Structural equivalence on shape-atom IrTypes. Two atoms are
+     * Structural equivalence on shape-atom IrTypes. Two atoms are
      * equivalent when their classifiers match AND their type arguments recursively
      * match. Used by [matchBroadcastAxesToParams] to identify which (param, axis)
      * pair contributes each axis of a BROADCAST's target shape. `Sym` ≡ `Sym`,
@@ -727,11 +720,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.197 — Match each axis of a BROADCAST's target Rank2 IrType to a
+     * Match each axis of a BROADCAST's target Rank2 IrType to a
      * (param, axisIdx) pair where the param's inner-Rank2 atom at `axisIdx` is
      * structurally equivalent to the target axis atom. Returns null when ANY axis
-     * fails to find a matching param-axis (BROADCAST falls back to the runtime-
-     * tape path or `broadcastLike` template selection).
+     * fails to find a matching param-axis (BROADCAST then falls back to
+     * `broadcastLike` template selection).
      *
      * Ambiguous matches (multiple params have an equivalent atom) pick the first
      * match — this is correct for the structural derivation since two equivalent
@@ -785,13 +778,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.173 — names the FIRST gate that rejected the dxir during the most recent
+     * Names the FIRST gate that rejected the dxir during the most recent
      * [synthesise] call. Set by [reject] / [cancelWith] at every tagged return-null
      * site; cleared at the top of [synthesise]. Read by
-     * [TlalocIrGenerationExtension] when the call returns null so the WARNING text
-     * names the specific reason instead of the bare "DxirFunction falls outside the
-     * scalar-primitive synthesis scope" message that landed in §0.4.171's bisection.
-     * Mirrors the §0.4.169 → §0.4.172 diagnostic arc on the synthesis side.
+     * [TlalocIrGenerationExtension] when the call returns null so the diagnostic
+     * names the specific reason the function falls outside the synthesis scope.
      */
     var lastFailureReason: String? = null
         private set
@@ -806,7 +797,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * @param callTypeOverride §0.4.394 — Phase B2. When non-null, the
+     * @param callTypeOverride when non-null, the
      *   `FunctionN<P0, …, Pn-1, R>` type used to harvest per-param and return
      *   IrTypes, INSTEAD of [originalCall]'s own type. The assembly intrinsics
      *   (`jacobian` / `hessian`) synthesise a 2-param seeded lambda
@@ -814,7 +805,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      *   1-param assembled function — the caller builds the seeded lambda's
      *   true function type and passes it here. [originalCall] still supplies
      *   source offsets.
-     * @param capturedBindings §0.4.501 — the IR declarations backing [fn]'s TRAILING
+     * @param capturedBindings the IR declarations backing [fn]'s TRAILING
      *   params, index-aligned with `fn.params.takeLast(capturedBindings.size)`. Those
      *   params are NOT parameters of the synthesised lambda: it takes the user's
      *   declared params alone (so `grad` still returns `(A) -> A`, `grad2` a
@@ -1481,7 +1472,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     private fun cancel(): Nothing = throw SynthesisAbort()
 
-    /** §0.4.173 — cancel after stamping [reason] so the caller's WARNING names the gate. */
+    /** Cancel after stamping [reason] so the caller's WARNING names the gate. */
     private fun cancelWith(reason: String): Nothing {
         if (lastFailureReason == null) lastFailureReason = reason
         throw SynthesisAbort()
@@ -1584,7 +1575,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * Phase A5c-2 — the elementwise binaries that have a broadcasting host op in
+     * The elementwise binaries that have a broadcasting host op in
      * `:core/ops/BroadcastOps.kt`. POW is absent on purpose: its tensor spelling
      * shares one shape parameter (`pow(other: DTensor<S, F32>)`), so it cannot be
      * called with two different shapes and keeps its shape-preserving symbol.
@@ -1593,7 +1584,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         setOf(OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV)
 
     /**
-     * Phase A5c-2 — tensor ADD/SUB/MUL/DIV → an IrCall to the matching
+     * Tensor ADD/SUB/MUL/DIV → an IrCall to the matching
      * `:core/ops` broadcasting binary (`plusBroadcast(a, b)`, …). Those take
      * star-projected operands plus an explicit result-shape witness [R], which is
      * threaded from the derived result IrType exactly as `broadcastLike` /
@@ -1826,13 +1817,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     /**
      * STEP(x) → `if (x > 0) 1 else 0` for numeric result types, or bare `x > 0` when the
-     * result is typed Bool (IF-predicate usage; §0.4.24). Synthesised via [irIfThenElse]
+     * result is typed Bool (IF-predicate usage). Synthesised via [irIfThenElse]
      * + the `>` primitive from [IrBuiltIns.greaterFunByOperandType] rather than any stdlib
      * operator — the `x == 0` case falls into the `else` branch and yields 0 / false,
      * matching the `stablehlo.compare GT` + `stablehlo.select` lowering in [:stablehlo].
      *
-     * ReluRule (§0.4.7) emits STEP with the operand's numeric dtype; the FIR-side `if
-     * (x > y)` lowering (§0.4.24) emits STEP with Bool dtype to feed an IF predicate.
+     * ReluRule emits STEP with the operand's numeric dtype; the FIR-side `if
+     * (x > y)` lowering emits STEP with Bool dtype to feed an IF predicate.
      * Both cases share one Kotlin lowering — the operand's dtype drives the `>` lookup.
      */
     private fun IrBuilderWithScope.irStep(
@@ -1875,7 +1866,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.198 — Resolves `io.tlaloc.core.ops.DTensor.step()` (the rank-1/2/3 F32
+     * Resolves `io.tlaloc.core.ops.DTensor.step()` (the rank-1/2/3 F32
      * elementwise Heaviside step extension). Used by [irStep] when `OpKind.STEP`
      * has a tensor result type.
      */
@@ -1888,7 +1879,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * `OpKind.NOT` → Kotlin `!b`. Emitted by PhiCalculus F3 canonicalisation (§0.4.14)
+     * `OpKind.NOT` → Kotlin `!b`. Emitted by PhiCalculus F3 canonicalisation
      * when the if-branch order is swapped — the adjoint pipeline therefore sees NOT on
      * Bool-scalar predicates. Uses [IrBuiltIns.booleanNotSymbol] (the same symbol the
      * frontend resolves `!` to; avoids the `Boolean?.not()` overload ambiguity).
@@ -1910,7 +1901,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.55 — `OpKind.LAND(a, b)` → Kotlin `a and b` (infix `Boolean.and`). Emitted
+     * `OpKind.LAND(a, b)` → Kotlin `a and b` (infix `Boolean.and`). Emitted
      * by the break-hoist path in `lowerRawWhileLoop`'s branchless select: the `broke`
      * carried var's update uses LAND over Bool operands. We route to `kotlin.Boolean.and`
      * rather than `&&` so the dxir-to-IR mapping stays 1:1 with the dxir op (short-
@@ -1944,7 +1935,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
 
     /**
      * `OpKind.IF` → Kotlin `if (pred) thenYield else elseYield`. Accepts only the shape
-     * `DxirReverseTransform.handleIfAdjoint` emits (§0.4.23): empty-body regions whose
+     * `DxirReverseTransform.handleIfAdjoint` emits: empty-body regions whose
      * single-terminator each yields an outer-scope SSA value. Primal-shape IFs with
      * branch-internal body ops never reach the synthesis layer (walkBranchReverse
      * absorbs them before SCT finishes).
@@ -2008,7 +1999,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.199 — Resolves `io.tlaloc.core.ops.DTensor.relu()` (the rank-1/2/3 F32
+     * Resolves `io.tlaloc.core.ops.DTensor.relu()` (the rank-1/2/3 F32
      * elementwise RELU extension). Used by [irRelu] when `OpKind.RELU` has a tensor
      * result type.
      */
@@ -2021,7 +2012,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.390 — resolves the DTensor `io.tlaloc.core.ops.sqrt` extension. Distinct
+     * Resolves the DTensor `io.tlaloc.core.ops.sqrt` extension. Distinct
      * package from the scalar `io.tlaloc.core.sqrt` on Float/Double that
      * [sqrtSymbolFor] resolves, so the two never collide in `singleOrNull`.
      */
@@ -2034,14 +2025,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.200 — Phase 3 third slice. `OpKind.TANH(x)` for tensor x → IrCall to
+     * `OpKind.TANH(x)` for tensor x → IrCall to
      * `:core/ops/tanh` (the DTensor extension). Mirrors [irRelu] / [irStep] /
-     * [irSigmoid] rank-dispatch. Required by CartPole's `tanh(...)` chain in the
-     * NN forward (and by any tanh-bearing primal more broadly).
+     * [irSigmoid] rank-dispatch.
      *
      * No scalar fallback — the existing scalar `tanh` lowering route through
      * `irUnaryMathCall(kotlin.math.tanh)` already handles scalar surfaces;
-     * `irTanh` is only invoked for tensor TANH ops via the §0.4.200 dispatch
+     * `irTanh` is only invoked for tensor TANH ops via the tensor dispatch
      * entry in [irOpFor].
      */
     private fun IrBuilderWithScope.irTanh(
@@ -2058,14 +2048,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.200 — Phase 3 third slice. `OpKind.SIGMOID(x)` for tensor x → IrCall to
+     * `OpKind.SIGMOID(x)` for tensor x → IrCall to
      * `:core/ops/sigmoid` (the DTensor extension). Same pattern as [irTanh].
      *
-     * Phase A5b — scalar SIGMOID now synthesises too, via the new
-     * `io.tlaloc.core.sigmoid` host extension ([irCoreScalarCall]). The §0.4.200
-     * rejection ("no Tlaloc surface emits it scalarly") stopped holding once the
-     * FIR grew the scalar `io.tlaloc.core.sigmoid` map entry; unlike TANH there is
-     * no `kotlin.math` equivalent to route to.
+     * Scalar SIGMOID synthesises via the `io.tlaloc.core.sigmoid` host extension
+     * ([irCoreScalarCall]); unlike TANH there is no `kotlin.math` equivalent to
+     * route to.
      */
     private fun IrBuilderWithScope.irSigmoid(
         op: DxirOp,
@@ -2080,7 +2068,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.200 — Helper for tensor unary ops. Builds an `IrCall(symbol)` with the
+     * Helper for tensor unary ops. Builds an `IrCall(symbol)` with the
      * operand's shape arg threaded through `typeArguments[0]`. Result IrType
      * derived via [irTypeForNode] (= operand IrType for unary ops, by the
      * elementwise propagation in [deriveResultIrType]).
@@ -2126,7 +2114,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.204 — Phase 3 sixth slice. `OpKind.SIGN(x)` for tensor x → IrCall to
+     * `OpKind.SIGN(x)` for tensor x → IrCall to
      * `:core/ops/sign` (the DTensor extension). Mirrors [irTanh] / [irSigmoid].
      * Scalar SIGN is rejected today (no Tlaloc scalar surface emits it).
      */
@@ -2155,7 +2143,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      *
      * The target shape comes from [SynthesisContext.tensorTemplateParam]'s runtime
      * `dims` (read inside the helper), not from any dxir-level dim value — [DxirType.dims]
-     * is `-1` sentinel here per §0.4.10. Only the narrow scalar → rank-1 form emitted by
+     * is the `-1` sentinel here. Only the narrow scalar → rank-1 form emitted by
      * [io.tlaloc.ir.passes.VjpRegistry.SumRule] is supported: the operand must be scalar
      * and the output must be rank-1 F32.
      */
@@ -2298,7 +2286,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * single type argument is the template's shape and the call's type is the
      * template's IrType; [resultIrType] supplies both. `fromSymbolOwner` sizes
      * `arguments` from the callee's parameter shape — 2 regulars, no dispatch
-     * receiver. Shared by the explicit-template arm of [irBroadcast] (Phase A5c-2)
+     * receiver. Shared by the explicit-template arm of [irBroadcast]
      * and its param-template fallback.
      */
     private fun IrBuilderWithScope.irBroadcastLikeCall(
@@ -2322,7 +2310,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.197 — Resolves `io.tlaloc.core.ops.broadcastDimsRank{N}` for [rank] ∈ {1, 2, 3}.
+     * Resolves `io.tlaloc.core.ops.broadcastDimsRank{N}` for [rank] ∈ {1, 2, 3}.
      * Each delegate takes a `Float` value + N individual `Int` dim args and
      * forwards to the IntArray-taking [io.tlaloc.core.ops.broadcastDims].
      */
@@ -2341,7 +2329,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.366 — the non-scalar half of [irBroadcast] (Phase A1): equal-rank
+     * The non-scalar half of [irBroadcast]: equal-rank
      * stretch of a keepdims-shaped tensor over its size-1 axes. Primary path
      * reuses [matchBroadcastAxesToParams] to read each target dim off a
      * structurally-matching param at runtime (`stretchToRankN(x, p.dims[i]…)`);
@@ -2446,7 +2434,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * `fun <S : Shape> stretchLike(x: DTensor<*, F32>, template: DTensor<S, F32>)`,
      * so its single type argument and the call's type are both the template's shape
      * and [resultIrType] supplies them. Shared by [irBroadcastStretch]'s
-     * explicit-template arm (Phase A5c-3) and its param-template fallback.
+     * explicit-template arm and its param-template fallback.
      */
     private fun IrBuilderWithScope.irStretchLikeCall(
         valueDecl: IrValueDeclaration,
@@ -2468,7 +2456,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return call
     }
 
-    /** §0.4.366 — resolves `io.tlaloc.core.ops.stretchToRank{N}` for rank ∈ {1, 2, 3}. */
+    /** Resolves `io.tlaloc.core.ops.stretchToRank{N}` for rank ∈ {1, 2, 3}. */
     private fun stretchToRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
         val name = when (rank) {
             1 -> "stretchToRank1"
@@ -2483,7 +2471,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.366 — resolves `io.tlaloc.core.ops.stretchLike`. */
+    /** Resolves `io.tlaloc.core.ops.stretchLike`. */
     private fun stretchLikeSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -2493,7 +2481,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.373 — SUM_TO in gradient bodies: BroadcastRule's runtime-extent
+     * SUM_TO in gradient bodies: BroadcastRule's runtime-extent
      * unbroadcast adjoint for the in-place size-1 stretch. Calls the host twin
      * `sumToLike(value, template)`: `value` (operand[0]) is the upstream
      * gradient at the broadcast output shape, `template` (operand[1]) is the
@@ -2527,7 +2515,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return call
     }
 
-    /** §0.4.373 — resolves `io.tlaloc.core.ops.sumToLike`. */
+    /** Resolves `io.tlaloc.core.ops.sumToLike`. */
     private fun sumToLikeSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -2537,7 +2525,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.415 — Phase B5 (customVjp): CHECK_SHAPE_LIKE in gradient bodies —
+     * customVjp: CHECK_SHAPE_LIKE in gradient bodies —
      * the runtime assert `handleCoarsenedAdjoint` wraps around a USER
      * gradient_body's returns. Calls the host twin `checkShapeLike(value,
      * template)`: `value` (operand[0]) is the user vjpFn's returned
@@ -2571,7 +2559,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return call
     }
 
-    /** §0.4.415 — resolves `io.tlaloc.core.ops.checkShapeLike`. */
+    /** Resolves `io.tlaloc.core.ops.checkShapeLike`. */
     private fun checkShapeLikeSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -2581,7 +2569,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.374 — the primal `slice` recomputed into a gradient body (it survives
+     * The primal `slice` recomputed into a gradient body (it survives
      * when the sliced result feeds a downstream op, e.g. `slice(a) * b` — the
      * MulRule reads it as the primal operand). Calls the host
      * `x.slice(start, end, axis)` extension with (start, end, axis) recovered
@@ -2620,7 +2608,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return call
     }
 
-    /** §0.4.428 — resolves the no-arg `io.tlaloc.core.ops.flatten()` extension. */
+    /** Resolves the no-arg `io.tlaloc.core.ops.flatten()` extension. */
     private fun flattenSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -2631,7 +2619,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
     }
 
-    /** §0.4.374 — resolves the `io.tlaloc.core.ops.slice(start, end, axis)` extension. */
+    /** Resolves the `io.tlaloc.core.ops.slice(start, end, axis)` extension. */
     private fun sliceSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -2641,7 +2629,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.374 — SliceRule's runtime-extent adjoint (`slice`'s dual). Calls the
+     * SliceRule's runtime-extent adjoint (`slice`'s dual). Calls the
      * fixed-arity host `padToLikeRankN(value, template, l0..)`: `value`
      * (operand[0]) is the upstream gradient at the slice-output shape, `template`
      * (operand[1]) is the primal sliced operand whose RUNTIME shape drives the
@@ -2682,7 +2670,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.399 — SumToRule's runtime-extent adjoint (SUM_TO's dual). Calls the
+     * SumToRule's runtime-extent adjoint (SUM_TO's dual). Calls the
      * host twin `broadcastToLike(value, template)`: `value` (operand[0]) is the
      * upstream gradient at the SUM_TO-output shape, `template` (operand[1]) is
      * the primal value operand whose RUNTIME shape is the broadcast target (its
@@ -2715,7 +2703,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return call
     }
 
-    /** §0.4.399 — resolves `io.tlaloc.core.ops.broadcastToLike`. */
+    /** Resolves `io.tlaloc.core.ops.broadcastToLike`. */
     private fun broadcastToLikeSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -2725,7 +2713,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.399 — PadToRule's runtime-extent adjoint (PAD_TO's dual). Calls the
+     * PadToRule's runtime-extent adjoint (PAD_TO's dual). Calls the
      * fixed-arity host `sliceAtLikeRankN(value, template, l0..)`: `value`
      * (operand[0]) is the upstream gradient at the PAD_TO-output shape,
      * `template` (operand[1]) is the primal value operand whose RUNTIME shape
@@ -2763,7 +2751,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return call
     }
 
-    /** §0.4.399 — resolves `io.tlaloc.core.ops.sliceAtLikeRank{1,2,3}`. */
+    /** Resolves `io.tlaloc.core.ops.sliceAtLikeRank{1,2,3}`. */
     private fun sliceAtLikeRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
         val name = when (rank) {
             1 -> "sliceAtLikeRank1"
@@ -2778,7 +2766,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.374 — resolves `io.tlaloc.core.ops.padToLikeRank{1,2,3}`. */
+    /** Resolves `io.tlaloc.core.ops.padToLikeRank{1,2,3}`. */
     private fun padToLikeRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
         val name = when (rank) {
             1 -> "padToLikeRank1"
@@ -2794,7 +2782,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.366 — reductions in gradient bodies (Phase A1). Two arms:
+     * Reductions in gradient bodies. Two arms:
      * scalar result → the no-arg `:core/ops` extension (`.sum()`/`.mean()`/
      * `.max()`/`.min()`) chained with `.toFloat()` (scalar dxir nodes ride
      * as Kotlin `Float` locals); axis result → the fixed-arity
@@ -2805,12 +2793,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * recompute, and axis-reduction primal ops cloned into grad bodies.
      */
     /**
-     * §0.4.368 — SOFTMAX in gradient bodies (Phase A3). SoftmaxRule recomputes
+     * SOFTMAX in gradient bodies. SoftmaxRule recomputes
      * `y = SOFTMAX(x)` (the TanhRule convention) so a bare softmax in a user
      * lambda produces a SOFTMAX node in the grad body. Calls the shape-
      * preserving `:core/ops` host `.softmax(axis)` with the axis baked as an
      * Int const (a compile-time attr fact — never a runtime dim). The rest of
-     * the softmax adjoint (SUM/BROADCAST-stretch/MUL/SUB) reuses the §0.4.366
+     * the softmax adjoint (SUM/BROADCAST-stretch/MUL/SUB) reuses the
      * axis-reduction synthesis arms unchanged.
      */
     private fun IrBuilderWithScope.irSoftmax(
@@ -2842,19 +2830,17 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.400 — the integer zero const the reverse transform returns for a
-     * non-differentiable index param (§0.4.54's typed zero, reaching tensor
-     * land for the first time). Materialised as `intZerosLike(param)` on the
+     * The integer zero const for a non-differentiable index param (a typed
+     * zero at tensor type). Materialised as `intZerosLike(param)` on the
      * function's index-typed param, whose RUNTIME dims are the only sound
      * shape source under -1 sentinels. Requires exactly ONE index-typed param
      * — with several, the const's sentinel-dimmed DxirType cannot say which
      * one it zeroes.
      *
-     * §0.4.419 — VESTIGIAL for param gradients: DxirReverseTransform now
-     * emits the structural zero as the param-addressed `OpKind.ZEROS_LIKE`
-     * (see [irZerosLike]), which has no ambiguity and no param-count gate.
-     * This path stays for any other producer of an anonymous integer zero
-     * const reaching a body (none known today).
+     * Not used for param gradients: DxirReverseTransform emits the structural
+     * zero as the param-addressed `OpKind.ZEROS_LIKE` (see [irZerosLike]), which
+     * has no ambiguity and no param-count gate. This path covers any other
+     * producer of an anonymous integer zero const reaching a body.
      */
     private fun IrBuilderWithScope.irIndexZerosConst(
         node: DxirConst,
@@ -2881,17 +2867,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.419 — Phase E1c-pre: `ZEROS_LIKE(template)` in `grad {}` bodies —
-     * the PARAM-ADDRESSED structural zero DxirReverseTransform now emits for a
+     * `ZEROS_LIKE(template)` in `grad {}` bodies —
+     * the PARAM-ADDRESSED structural zero DxirReverseTransform emits for a
      * non-differentiable integer tensor param, materialised as
      * `intZerosLike(<template's local>)` through the env like every other op
      * operand. This is [irIndexZerosConst] with the ambiguity dissolved: the
      * op's operand names its template directly, so ANY number of integer
-     * params per lambda synthesises (the singleOrNull gate there was the
-     * §0.4.400 one-integer-param restriction this slice exists to lift — a
-     * CSR sparse operand carries colIdx AND rowPtr). v1 scope = the index
-     * tensor types that need it (I32 rank-1/2, `isAcceptedIndexTensorType`);
-     * a float-templated ZEROS_LIKE has no emitter here yet and falls back.
+     * params per lambda synthesises (a CSR sparse operand carries colIdx AND
+     * rowPtr). Scope: the I32 rank-1/2 index tensor types; a float-templated
+     * ZEROS_LIKE has no emitter here and is rejected.
      */
     private fun IrBuilderWithScope.irZerosLike(
         op: DxirOp,
@@ -2917,9 +2901,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.421 — Phase D2 tail: RNG_UNIFORM / RNG_NORMAL in `grad {}` bodies —
+     * RNG_UNIFORM / RNG_NORMAL in `grad {}` bodies —
      * the primal draw, and its CLONE in the gradient body when an adjoint
-     * reads ε (MulRule's `d scale = upstream ⊙ ε` — the §0.4.413
+     * reads ε (MulRule's `d scale = upstream ⊙ ε` — the
      * reparameterization contract: the clone carries the same literal
      * key0/key1/dims attrs, so the gradient's ε is a fresh evaluation of the
      * SAME stream). Zero operands; everything replays from attrs as plain Int
@@ -2927,7 +2911,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * `rng{Uniform,Normal}{Vector,Matrix}` — the same `:core/Random.kt`
      * kernels the host surface and the interpreter call, bit-for-bit. Baking
      * the attr ints as consts is CORRECT here, not a sentinel-dims violation:
-     * they are compile-time literals by the FIR arm's v1 contract, never
+     * they are compile-time literals by the FIR arm's contract, never
      * dim-derived values.
      */
     private fun IrBuilderWithScope.irRngDraw(
@@ -2962,7 +2946,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.420 — Phase E1c: `SPARSE_MATMUL` in `grad {}` bodies — the primal
+     * `SPARSE_MATMUL` in `grad {}` bodies — the primal
      * (and its recompute under a nonlinear loss) AND the `transposed = true`
      * adjoint form SparseMatmulRule emits for `d_dense = Aᵀ · upstream`. The
      * plain 4-operand form lowers to the host twin `sparseMatmul(values,
@@ -3002,7 +2986,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.420 — Phase E1c: the fused SDDMM values-adjoint in `grad {}`
+     * The fused SDDMM values-adjoint in `grad {}`
      * bodies → the host twin `sparseMatmulValuesAdjoint(upstream, dense,
      * colIdx, rowPtr)` (no type params). Only STORED positions get an adjoint
      * entry — the result is [nnz], colIdx's extent at runtime.
@@ -3027,12 +3011,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.400 — EMBEDDING in `grad {}` bodies (the primal, and its recompute
+     * EMBEDDING in `grad {}` bodies (the primal, and its recompute
      * when the embedded rows feed a nonlinear consumer): `embedding(table,
      * indices)` in `:core/ops`. The rank-1 host signature is `<V, D, N>` —
      * vocab and feature atoms from the table's Rank2, the position atom from
      * the indices' Rank1 — dug out of the operand IrTypes the way [irMatmul]
-     * digs `<R, K, C>`. §0.4.409 — the overload set grew: rank-2 `[B, N]`
+     * digs `<R, K, C>`. The overload set also covers rank-2 `[B, N]`
      * index batches (`<V, D, B, N>`) and the arity-3 `paddingIndex` spellings
      * (the `padding_index` attr replayed as an Int literal argument);
      * [embeddingHostSymbol] picks the overload by arity + indices rank.
@@ -3075,7 +3059,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.409 — resolves the `io.tlaloc.core.ops.embedding` overload with
+     * Resolves the `io.tlaloc.core.ops.embedding` overload with
      * [paramCount] regular params whose indices param (slot 1) carries a
      * `Rank[idxRank]` shape argument. The overload set erasure-clashes on the
      * JVM (`@JvmName` disambiguates there), so the Kotlin-name lookup returns
@@ -3097,7 +3081,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
     }
 
-    /** §0.4.409 — resolves the `embeddingGrad` overload by arity (3 = plain, 4 = padded). */
+    /** Resolves the `embeddingGrad` overload by arity (3 = plain, 4 = padded). */
     private fun embeddingGradHostSymbol(paramCount: Int): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -3109,10 +3093,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.400 — EMBEDDING_GRAD → `:core/ops embeddingGrad(upstream, indices,
+     * EMBEDDING_GRAD → `:core/ops embeddingGrad(upstream, indices,
      * tableTemplate)`: EmbeddingRule's fused scatter-add adjoint. The dxir
-     * operand order is (indices, upstream, template) — the §0.4.370 contract
-     * plus the shape template — while the host twin leads with the upstream
+     * operand order is (indices, upstream, template) — the gather-adjoint
+     * operand contract plus the shape template — while the host twin leads with the upstream
      * (the [sumToLike] value-then-template convention). The template's RUNTIME
      * dims size the result (`[V, D]` is all -1 sentinels here), so the host
      * call forwards the cloned table operand as-is; its values are never read.
@@ -3149,22 +3133,21 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.384 — Phase A3b slice 1: CONV2D / CONV_TRANSPOSE2D → the fixed-arity
+     * CONV2D / CONV_TRANSPOSE2D → the fixed-arity
      * `:core/ops` twins (`conv2dGeneral` / `convTranspose2dGeneral`), which are
      * bit-exact against the interpreter's `evalConv2d` (pinned by
      * `DxirHostConvParityTest`).
      *
-     * Every attr rides as a compile-time `Int`/`Boolean` const. That is sound here
-     * — and it is the whole reason forward-mode conv works while reverse-mode does
-     * not: a conv's OWN attrs (`window_strides`, `padding`, dilations) are literal
+     * Every attr rides as a compile-time `Int`/`Boolean` const. That is sound here:
+     * a conv's OWN attrs (`window_strides`, `padding`, dilations) are literal
      * facts the FIR folded off the user's call, so they survive `grad {}`'s -1
-     * sentinel dims unchanged. Conv2dRule's adjoint, by contrast, SOLVES its
-     * padding from the primal's extents, which are exactly the symbolic values; it
-     * now rejects them loudly rather than baking garbage.
+     * sentinel dims unchanged. The reverse-mode adjoint's padding solve, which needs
+     * the primal's extents, runs inside the host twin at runtime (see
+     * [irConvAdjoint]).
      *
-     * Groups have no host twin (v1 scope, matching the interpreter), so a
-     * `feature_group_count`/`batch_group_count` above 1 rejects and falls back to
-     * the runtime tape rather than silently convolving the wrong way.
+     * Groups have no host twin (matching the interpreter), so a
+     * `feature_group_count`/`batch_group_count` above 1 is rejected rather than
+     * silently convolving the wrong way.
      */
     private fun IrBuilderWithScope.irConv(
         op: DxirOp,
@@ -3221,7 +3204,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.385 — the fused conv adjoints → `:core/ops conv2dDataAdjoint` /
+     * The fused conv adjoints → `:core/ops conv2dDataAdjoint` /
      * `conv2dKernelAdjoint`. Three tensor operands (the two conv operands plus the
      * shape-only template) and six Int attrs — and every one of those attrs is a
      * literal fact off the primal conv, so this arm reads no extent. The padding
@@ -3277,7 +3260,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.391 — the fused TRANSPOSED-conv adjoints → `:core/ops
+     * The fused TRANSPOSED-conv adjoints → `:core/ops
      * convTranspose2dDataAdjoint` / `convTranspose2dKernelAdjoint`. Same shape as
      * [irConvAdjoint], with two differences: the attr set is the transposed conv's
      * (so `lhs_dilation` and `window_reversal` ride along too — the index inversion
@@ -3335,7 +3318,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.386 — `OpKind.AVGPOOL2D`, and (§0.4.389) `OpKind.MAXPOOL2D` →
+     * `OpKind.AVGPOOL2D` and `OpKind.MAXPOOL2D` →
      * `:core/ops avgPool2dGeneral` / `maxPool2dGeneral`, the host twins that are
      * bit-exact against the interpreter's `evalPool2d` (count_include_pad for the
      * average branch: the sum divides by the FULL window). A pooling primal reaches
@@ -3385,8 +3368,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.386 — the fused pooling adjoints → `:core/ops avgPool2dGrad` and
-     * (§0.4.389) `maxPool2dGrad`. Same shape as [irConvAdjoint]: literal attrs
+     * The fused pooling adjoints → `:core/ops avgPool2dGrad` and
+     * `maxPool2dGrad`. Same shape as [irConvAdjoint]: literal attrs
      * only, the extent question answered at runtime by INVERTING the window against
      * the operands' real `dims`, and the result IrType taken from the tensor whose
      * shape the adjoint produces (operand 1) rather than derived.
@@ -3439,18 +3422,16 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * Phase A2b — `OpKind.CONCAT(a, b)` → an IrCall to `:core/ops concatPair(axis, a, b)`.
+     * `OpKind.CONCAT(a, b)` → an IrCall to `:core/ops concatPair(axis, a, b)`.
      *
-     * Exactly two operands: the FIR folds an n-ary user `concat`/`stack` into a
-     * right-fold of binary CONCATs precisely so this arm never needs an `IrVararg`
-     * (which the plugin cannot build — the documented reason for the `…RankN` shim
-     * family). An IR-level n-ary CONCAT therefore has no synthesis path (and no
-     * tape fallback exists for concat, so a rejection here is a hard "kept original
-     * call" — which user code can never hit, since the FIR only ever builds binary
-     * nodes); `DxirShapePlumbingTest` and the emitter tests exercise the variadic
-     * form at the IR level, where it belongs. Its ADJOINT is a different story:
-     * ConcatRule is variadic, so [irSliceLike]/[irPadLike] accept up to 7 priors
-     * (§0.4.425) for gradient bodies over hand-built variadic CONCATs.
+     * Exactly two operands: the FIR folds an n-ary user `concat`/`stack` into a right-fold of
+     * binary CONCATs precisely so this arm never needs an `IrVararg` (which the plugin cannot
+     * build — the documented reason for the `…RankN` shim family). An IR-level n-ary CONCAT
+     * therefore has no synthesis path (a rejection here is a "kept original call" — which user
+     * code can never hit, since the FIR only ever builds binary nodes); `DxirShapePlumbingTest`
+     * and the emitter tests exercise the variadic form at the IR level, where it belongs. Its
+     * ADJOINT is a different story: ConcatRule is variadic, so [irSliceLike]/[irPadLike] accept
+     * up to 7 priors for gradient bodies over hand-built variadic CONCATs.
      */
     private fun IrBuilderWithScope.irConcat(
         op: DxirOp,
@@ -3478,13 +3459,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * Phase A2b — `OpKind.SLICE_LIKE(value, thisTemplate, priorTemplate…)` → the
+     * `OpKind.SLICE_LIKE(value, thisTemplate, priorTemplate…)` → the
      * matching fixed-arity `:core/ops` twin (`sliceLikeStart` / `sliceLikeAfter{1..7}`),
      * selected by the PRIOR-template count. The axis rides as an Int const; every
      * extent is read off the templates at runtime, which is the whole point (a concat
      * operand's window offset is the cumulative sum of the prior operands' runtime
      * extents and does not exist at compile time). Bounded at 8 concat operands
-     * (§0.4.425, from 4) — a bound that only an IR-level VARIADIC concat can reach:
+     * — a bound that only an IR-level VARIADIC concat can reach:
      * the FIR's fold-to-binary means user `concat`/`stack` of ANY arity only ever
      * needs one prior, so user code never sees this ceiling at all.
      */
@@ -3517,7 +3498,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.404 — `OpKind.PAD_LIKE(value, outTemplate, priorTemplate…)` → the
+     * `OpKind.PAD_LIKE(value, outTemplate, priorTemplate…)` → the
      * matching fixed-arity `:core/ops` twin (`padLikeStart` / `padLikeAfter{1..7}`),
      * selected by the PRIOR-template count — the [irSliceLike] shape exactly, since
      * PAD_LIKE is SLICE_LIKE's transpose: the axis rides as an Int const; the offset
@@ -3553,7 +3534,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return call
     }
 
-    /** §0.4.368 — resolves the `io.tlaloc.core.ops.softmax(axis)` extension (one Regular param). */
+    /** Resolves the `io.tlaloc.core.ops.softmax(axis)` extension (one Regular param). */
     private fun softmaxSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -3639,12 +3620,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.366 — RESHAPE in gradient bodies, scoped to the keepdims
+     * RESHAPE in gradient bodies, scoped to the keepdims
      * unsqueeze the axis-reduction rules emit: result dims must equal the
      * operand dims with size-1 axes INSERTED. The inserted positions are
      * structural compile-time facts (from `reduction_dims`), so they bake
-     * as Int consts without touching possibly-sentinel dim values. General
-     * relayout RESHAPE stays out of synthesis scope until Phase A2.
+     * as Int consts without touching possibly-sentinel dim values.
      */
     private fun IrBuilderWithScope.irReshape(
         op: DxirOp,
@@ -3746,7 +3726,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.366 — match [outDims] as [inDims] with size-1 axes inserted;
+     * Match [outDims] as [inDims] with size-1 axes inserted;
      * returns the inserted positions (result-indexed, ascending) or null if
      * the shapes don't relate that way. Ambiguity against input dims that are
      * themselves 1 resolves greedily — any valid assignment is runtime-
@@ -3771,7 +3751,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.366 — resolves the NO-ARG `:core/ops` reduction extension
+     * Resolves the NO-ARG `:core/ops` reduction extension
      * (`sum`/`mean`/`max`/`min`); these names also carry the vararg axis
      * overloads, so filter to the overload with zero Regular parameters.
      */
@@ -3785,7 +3765,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
     }
 
-    /** §0.4.366 — resolves `io.tlaloc.core.ops.{name}Over{axisCount}` (distinct names, no overloads). */
+    /** Resolves `io.tlaloc.core.ops.{name}Over{axisCount}` (distinct names, no overloads). */
     private fun reduceOverSymbol(name: String, axisCount: Int): IrSimpleFunctionSymbol? {
         // §0.4.390 — three axes too: `mean(0, 2, 3)` is how training batchNorm takes
         // its per-channel statistics over an NCHW tensor.
@@ -3797,7 +3777,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.366 — resolves `io.tlaloc.core.ops.unsqueezeAxes{N}` for N ∈ {1, 2, 3}. */
+    /** Resolves `io.tlaloc.core.ops.unsqueezeAxes{N}` for N ∈ {1, 2, 3}. */
     private fun unsqueezeSymbol(count: Int): IrSimpleFunctionSymbol? {
         // §0.4.390 — three inserted axes: `[C] → [1,C,1,1]`, the per-channel
         // parameter reshape an NCHW batchNorm needs.
@@ -3809,7 +3789,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.367 — resolves `io.tlaloc.core.ops.squeezeAxes{N}` for N ∈ {1, 2, 3}. */
+    /** Resolves `io.tlaloc.core.ops.squeezeAxes{N}` for N ∈ {1, 2, 3}. */
     private fun squeezeAxesSymbol(count: Int): IrSimpleFunctionSymbol? {
         // §0.4.390 — three dropped axes: the adjoint of `[C] → [1,C,1,1]`.
         if (count !in 1..3) return null
@@ -3820,7 +3800,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.367 — resolves `io.tlaloc.core.ops.reshapeToRank{N}` for N ∈ {1, 2, 3, 4}. */
+    /** Resolves `io.tlaloc.core.ops.reshapeToRank{N}` for N ∈ {1, 2, 3, 4}. */
     private fun reshapeToRankSymbol(rank: Int): IrSimpleFunctionSymbol? {
         // §0.4.390 — rank 4 too, for the NCHW surfaces.
         if (rank !in 1..4) return null
@@ -3832,8 +3812,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.367 — resolves `io.tlaloc.core.ops.transposePerm{N}` for N ∈ {2, 3}.
-     * §0.4.384 — N = 4 too, for the batch↔feature swap Conv2dRule's `dW` emits.
+     * Resolves `io.tlaloc.core.ops.transposePerm{N}` for N ∈ {2, 3, 4} (N = 4 is
+     * the batch↔feature swap Conv2dRule's `dW` emits).
      */
     private fun transposePermSymbol(rank: Int): IrSimpleFunctionSymbol? {
         if (rank !in 2..4) return null
@@ -3845,7 +3825,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.396 — resolves `io.tlaloc.core.ops.flipAxes{N}` for N ∈ {1, 2, 3}
+     * Resolves `io.tlaloc.core.ops.flipAxes{N}` for N ∈ {1, 2, 3}
      * (the fixed-arity delegates of the vararg `flip`; the usual IrVararg
      * reason — see [transposePermSymbol]).
      */
@@ -3858,7 +3838,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return pluginContext.referenceFunctions(callableId).singleOrNull()
     }
 
-    /** §0.4.366 — resolves `io.tlaloc.core.ops.toFloat` (the scalar-DTensor → Float bridge). */
+    /** Resolves `io.tlaloc.core.ops.toFloat` (the scalar-DTensor → Float bridge). */
     private fun toFloatSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
@@ -3876,7 +3856,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     )
 
     /**
-     * §0.4.197 — Synthesise `param.dims[axis]` as an IR expression. Two-step IR call:
+     * Synthesise `param.dims[axis]` as an IR expression. Two-step IR call:
      * (1) `param.dims` (DTensor's val constructor property → property getter call);
      * (2) `IntArray.get(axis)` (primitive operator).
      *
@@ -3913,7 +3893,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.197 — Resolves the getter for `io.tlaloc.core.DTensor.dims` (a `val`
+     * Resolves the getter for `io.tlaloc.core.DTensor.dims` (a `val`
      * constructor property on `DTensor<S, T>`).
      */
     private fun dtensorDimsGetter(): IrSimpleFunctionSymbol? {
@@ -3926,7 +3906,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.197 — Resolves `kotlin.IntArray.get(Int): Int` — the primitive operator
+     * Resolves `kotlin.IntArray.get(Int): Int` — the primitive operator
      * for `intArr[i]` reads.
      */
     private fun intArrayGetSymbol(): IrSimpleFunctionSymbol? {
@@ -3942,12 +3922,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * declared in `:core/DScalar.kt`) for a scalar, or to the `io.tlaloc.core.ops.sqrt`
      * DTensor extension for a tensor.
      *
-     * §0.4.390 — the tensor path. It was scalar-only ("the narrow scalar path is
-     * sufficient for the D.1b brachistochrone port"), so ANY tensor sqrt in a gradient
-     * body fell out of synthesis scope and silently dropped the whole function back to
-     * the runtime tape. Training batchNorm's `√(ν+eps)` is the first body to need it;
-     * the shape-preserving `DTensor<S, F32>.sqrt()` extension already existed, so this
-     * mirrors [irRelu]'s tensor arm rather than adding host surface.
+     * The tensor path (needed by, e.g., training batchNorm's `√(ν+eps)`) calls the
+     * shape-preserving `DTensor<S, F32>.sqrt()` extension, mirroring [irRelu]'s
+     * tensor arm.
      */
     private fun IrBuilderWithScope.irSqrt(
         op: DxirOp,
@@ -4032,7 +4009,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * `OpKind.SCATTER(base, idx, value)` → IrCall to `io.tlaloc.core.ops.scatter`
      * (the non-destructive rank-1 slot-replace helper declared in HostOps.kt).
      * Emitted by the gradient body when GatherRule's adjoint propagates an upstream
-     * scalar into a one-hot rank-1 vector (§0.4.41).
+     * scalar into a one-hot rank-1 vector.
      */
     private fun IrBuilderWithScope.irScatter(
         op: DxirOp,
@@ -4070,7 +4047,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * `OpKind.SCATTER_ADD(base, idx, value)` → IrCall to a `:core/ops` runtime
      * helper. Emits `scatterAddInPlace` (destructive, mutates base's buffer) when
      * the op carries the `"in_place": true` attr set by
-     * `DxirReverseTransform.tagSingleUseScatterAdds` (§0.4.46); otherwise emits
+     * `DxirReverseTransform.tagSingleUseScatterAdds`; otherwise emits
      * `scatterAddInto` (non-destructive, copies base). Rank-1 F32 only.
      */
     private fun IrBuilderWithScope.irScatterAdd(
@@ -4121,7 +4098,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * Resolves `io.tlaloc.core.ops.get` (`operator fun <S : Shape> DTensor<S, F32>.get(i: Int): Float`).
+     * Resolves `io.tlaloc.core.ops.get` (`operator fun <S : Shape> DTensor<S, F32>.get(i: Int):
+     * Float`).
      */
     private fun gatherSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
@@ -4232,7 +4210,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.364 — `OpKind.COMPARE(a, b)` with a `direction` attr → IrCall to the
+     * `OpKind.COMPARE(a, b)` with a `direction` attr → IrCall to the
      * matching `:core/ops` comparison extension (`gt`/`ge`/`lt`/`le`/`eq`/`ne`,
      * HostOps.kt). The IR-level result is Bool; the runtime value is the 0/1 F32
      * mask those extensions return — the synthesis-wide convention for Bool
@@ -4278,7 +4256,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.364 — `OpKind.WHERE(pred, a, b)` → IrCall to
+     * `OpKind.WHERE(pred, a, b)` → IrCall to
      * `io.tlaloc.core.ops.where` (top-level, HostOps.kt). Emitted both by the
      * forward lowering of user `where(...)` calls and by WhereRule's adjoint
      * (which routes the upstream through the same mask). `pred`'s runtime value
@@ -4374,12 +4352,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.52 — `OpKind.POW(base, exp)` → IrCall to `kotlin.math.pow` (the
+     * `OpKind.POW(base, exp)` → IrCall to `kotlin.math.pow` (the
      * `Float.pow(Float): Float` / `Double.pow(Double): Double` extension). Emitted by
-     * C6's closed-form geometric-sum lowering (`a^n`), which previously could not be
-     * synthesised — the natural BGDHyperOpt kernel's coarsening went through SCT's
-     * scalar-primitive synthesis check, rejected on POW, and fell back to runtime
-     * tape. Scalar-only (F32 / F64); rank-1 POW would need the tensor extension.
+     * C6's closed-form geometric-sum lowering (`a^n`). Scalar-only (F32 / F64);
+     * rank-1 POW would need the tensor extension.
      */
     private fun IrBuilderWithScope.irPow(
         op: DxirOp,
@@ -4422,11 +4398,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.53 — `OpKind.LOG(x)` → `kotlin.math.ln(x)`. Emitted by C6's closed-form
-     * differentiation wrt a symbolic trip count: `d/dn (a^n) = a^n · ln(a)`. No LOG
-     * support in synthesis previously because BGDHyperOpt's gradient was wrt the
-     * hyperparameter (r, inside `a`) not wrt the iteration count; symbolic T changes
-     * that. Scalar-only (F32 / F64).
+     * `OpKind.LOG(x)` → `kotlin.math.ln(x)`. Emitted by C6's closed-form
+     * differentiation wrt a symbolic trip count: `d/dn (a^n) = a^n · ln(a)`.
+     * Scalar-only (F32 / F64).
      */
     private fun IrBuilderWithScope.irLog(
         op: DxirOp,
@@ -4444,9 +4418,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.53 — `OpKind.EXP(x)` → `kotlin.math.exp(x)`. Mirrors [irLog]; kept here so
-     * any future C6/C7 closed form that differentiates into an `exp` term has a
-     * synthesis path. §0.4.368 — tensor EXP dispatches to `:core/ops/exp`.
+     * `OpKind.EXP(x)` → `kotlin.math.exp(x)`. Mirrors [irLog], so a C6/C7 closed
+     * form that differentiates into an `exp` term has a synthesis path. Tensor EXP
+     * dispatches to `:core/ops/exp`.
      */
     private fun IrBuilderWithScope.irExp(
         op: DxirOp,
@@ -4462,8 +4436,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.368 — resolves a single-overload `:core/ops` callable by name: the tensor
-     * unary extensions (`tanh`, `sigmoid`, `log`, `neg`, …) and, since Phase A5c-2,
+     * Resolves a single-overload `:core/ops` callable by name: the tensor
+     * unary extensions (`tanh`, `sigmoid`, `log`, `neg`, …) and
      * the broadcasting binaries (`plusBroadcast`, `timesBroadcast`, …), which are
      * top-level and uniquely named so `singleOrNull()` holds for both.
      */
@@ -4476,7 +4450,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.166 — `OpKind.SIN(x)` → `kotlin.math.sin(x)`. CartPole Phase 0a primitive.
+     * `OpKind.SIN(x)` → `kotlin.math.sin(x)`.
      * Scalar-only (F32 / F64). SinRule's adjoint emits `MUL(upstream, COS(x))`,
      * which routes through this synthesis arm + irCos for the COS.
      */
@@ -4486,7 +4460,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("sin"))
 
-    /** §0.4.166 — `OpKind.COS(x)` → `kotlin.math.cos(x)`. Companion to [irSin]. */
+    /** `OpKind.COS(x)` → `kotlin.math.cos(x)`. Companion to [irSin]. */
     private fun IrBuilderWithScope.irCos(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,
@@ -4494,7 +4468,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("cos"))
 
     /**
-     * §0.4.395 — `OpKind.TAN(x)`: tensor operands dispatch to `:core/ops/tan`
+     * `OpKind.TAN(x)`: tensor operands dispatch to `:core/ops/tan`
      * (the [irLog]/[irExp] pattern — TanRule's adjoint keeps a same-rank TAN
      * recompute in the gradient body), scalars to `kotlin.math.tan`.
      */
@@ -4512,12 +4486,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.402 — Phase C1 special functions: `OpKind.LGAMMA` / `DIGAMMA` /
+     * Special functions: `OpKind.LGAMMA` / `DIGAMMA` /
      * `TRIGAMMA`. Tensor operands dispatch to the `:core/ops` extension of the
      * same [name]; scalars to the `io.tlaloc.core` five-overload extension via
-     * [irCoreScalarCall] (the §0.4.377 sigmoid path — none of these has a
+     * [irCoreScalarCall] (the scalar sigmoid path — none of these has a
      * `kotlin.math` equivalent). TRIGAMMA reaches here from gradient bodies
-     * (DIGAMMA's adjoint/tangent emit it) and, since §0.4.405, from the user's
+     * (DIGAMMA's adjoint/tangent emit it) and from the user's
      * `polygamma(1)` spelling, which the FIR normalises to the TRIGAMMA op.
      */
     private fun IrBuilderWithScope.irSpecialUnary(
@@ -4534,11 +4508,11 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.405 — `OpKind.POLYGAMMA(x)` with its literal `order` attr: the
+     * `OpKind.POLYGAMMA(x)` with its literal `order` attr: the
      * [irSpecialUnary] shape plus one trailing Int const argument. Tensor
      * operands dispatch to `:core/ops/polygamma(n)`, scalars to the
      * `io.tlaloc.core.polygamma(n)` extension (both are single positional-Int
-     * ops with no defaults — the K2 named-arg landmine). Reaches here both
+     * ops with no defaults, so no named-argument handling is needed). Reaches here both
      * from user `polygamma(n ≥ 2)` bodies and from gradient bodies (TRIGAMMA's
      * adjoint emits POLYGAMMA(2), POLYGAMMA(n)'s emits POLYGAMMA(n+1)).
      */
@@ -4571,7 +4545,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.405 — the `(receiver, Int)` sibling of [coreScalarSymbolFor]:
+     * The `(receiver, Int)` sibling of [coreScalarSymbolFor]:
      * resolves the `io.tlaloc.core` scalar extension of [callable] whose
      * extension receiver matches the op's primitive dtype and whose single
      * regular parameter is `Int` (the polygamma order).
@@ -4595,7 +4569,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
     }
 
-    /** §0.4.395 — `OpKind.ATAN(x)`. Companion to [irTan]; `kotlin.math.atan` exists. */
+    /** `OpKind.ATAN(x)`. Companion to [irTan]; `kotlin.math.atan` exists. */
     private fun IrBuilderWithScope.irAtan(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,
@@ -4610,7 +4584,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.167 — `OpKind.ABS(x)` → `kotlin.math.abs(x)`. CartPole Phase 0a-2 primitive.
+     * `OpKind.ABS(x)` → `kotlin.math.abs(x)`.
      * Scalar-only (F32 / F64). AbsRule's adjoint emits `STEP(x) - STEP(-x)` — STEP
      * is synthesised separately via [irStep]; no special handling needed here.
      */
@@ -4658,7 +4632,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * Phase A5b — the `io.tlaloc.core` sibling of [irUnaryMathCall]: an IrCall to a
+     * The `io.tlaloc.core` sibling of [irUnaryMathCall]: an IrCall to a
      * receiver-only scalar extension declared in `:core/DScalar.kt`
      * (`Float.sigmoid()` / `Double.sigmoid()`) for a scalar-typed op. Needed for the
      * ops with no `kotlin.math` equivalent; the five-overload set each `:core` scalar
@@ -4771,29 +4745,25 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     private fun isRank1F32(type: DxirType): Boolean = type.rank == 1 && type.dtype == F32
 
     /**
-     * §0.4.186 — Phase 0c slice (b). Widens the synthesis-side acceptance from "rank-1
-     * F32 only" to "rank-1, rank-2, or rank-3 F32" so that gradient bodies for primals
-     * with rank-2/3 inputs can route through the existing `broadcastLike` helper.
+     * The float tensor scope of synthesis: F32 tensors of rank 1 to 4 (rank 4 being
+     * the NCHW conv/pool tensors).
      *
-     * §0.4.384 — Phase A3b slice 1 widens once more, to rank 4: the NCHW conv/pool
-     * tensors. Rank 4 is safe to admit blanket-wide (rather than only for the conv
+     * Rank 4 is safe to admit blanket-wide (rather than only for the conv
      * kinds) because every rank-dispatching arm resolves a `…RankN` host delegate by
      * name and returns null when it has no rank-4 entry — a missing delegate rejects
-     * the function and falls back to the runtime tape, exactly as before, so the widen
-     * cannot turn a rejection into wrong code. The `:core/ops` host ops that take a
-     * generic `S : Shape` (`broadcastLike`, `stretchLike`, the elementwise binaries,
-     * `sumToLike`, `padToLike`) read their runtime `dims` and are rank-agnostic
-     * already. Rank 5+ and non-F32 dtypes still fall back.
+     * the function, so admitting rank 4 cannot turn a rejection into wrong code. The
+     * `:core/ops` host ops that take a generic `S : Shape` (`broadcastLike`,
+     * `stretchLike`, the elementwise binaries, `sumToLike`, `padToLike`) read their
+     * runtime `dims` and are rank-agnostic. Rank 5+ and non-F32 dtypes are rejected.
      */
     private fun isAcceptedTensorType(type: DxirType): Boolean =
         type.dtype == F32 && type.rank in 1..4
 
     /**
-     * §0.4.400 — the integer INDEX tensor scope: `embedding`'s I32 index
-     * tensors, flowing through a `grad {}` lambda as non-differentiable params.
-     * §0.4.409 widened rank-1 to rank 1..2 (the `[B, N]` batch spelling the
-     * host `embedding` now accepts). Still deliberately narrow — the general
-     * integer-tensor synthesis story stays out of scope.
+     * The integer INDEX tensor scope: `embedding`'s I32 index tensors of rank 1..2
+     * (rank 2 is the `[B, N]` batch spelling), flowing through a `grad {}` lambda as
+     * non-differentiable params. Deliberately narrow — general integer-tensor
+     * synthesis is out of scope.
      */
     private fun isAcceptedIndexTensorType(type: DxirType): Boolean =
         type.dtype == I32 && type.rank in 1..2
@@ -4801,7 +4771,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     /**
      * Resolves `io.tlaloc.core.ops.broadcastLike` — the top-level extension function that
      * lowers [OpKind.BROADCAST] at the synthesis layer. Uses [CallableId] lookup
-     * (top-level, no classId) and takes the single overload as of §0.4.10; if the helper
+     * (top-level, no classId) and takes the single overload; if the helper
      * ever grows an overload set, the type-arg would need to be checked here.
      */
     private fun broadcastLikeSymbol(): IrSimpleFunctionSymbol? {
@@ -4813,21 +4783,19 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.189 — `OpKind.TRANSPOSE(a)` → IrCall to `io.tlaloc.core.ops.transpose`
+     * `OpKind.TRANSPOSE(a)` → IrCall to `io.tlaloc.core.ops.transpose`
      * (the Rank2 extension declared in HostOps.kt). Used by `MatmulRule`'s
      * gradient emission for the dA = upstream · B^T and dB = A^T · upstream chain.
      *
-     * §0.4.193 — Phase 0c-rectangular slice 2: type-args now read from the operand's
-     * specific IrType via [irTypeForNode] rather than the call-site `tensorIrType`.
-     * For square-matrix surfaces the two are identical (one tensor IrType across all
-     * operands); for multi-param surfaces with per-operand IrTypes populated in
-     * `operandIrTypes`, `irTypeForNode` returns the operand-specific type. Slice 3
-     * still needs op-result IrType derivation (TRANSPOSE: input `Rank2<R, C>` →
-     * output `Rank2<C, R>`) before non-param operands (e.g., a TRANSPOSE feeding
-     * a downstream op) can resolve correctly.
+     * Type-args are read from the operand's specific IrType via [irTypeForNode]
+     * rather than the call-site `tensorIrType`. For square-matrix surfaces the two
+     * are identical (one tensor IrType across all operands); for multi-param surfaces
+     * with per-operand IrTypes populated in `operandIrTypes`, `irTypeForNode` returns
+     * the operand-specific type. The result IrType (`Rank2<R, C>` → `Rank2<C, R>`)
+     * comes from [deriveResultIrType].
      */
     /**
-     * §0.4.396 — `OpKind.REVERSE` → `flipAxes{N}(x, a0…)` (Phase C3). The
+     * `OpKind.REVERSE` → `flipAxes{N}(x, a0…)`. The
      * `dimensions` attr is a compile-time user literal, so each axis rides as
      * a positional Int const into the fixed-arity delegate selected by axis
      * count — the `transposePerm{N}` pattern. Shape-preserving: the result
@@ -4947,21 +4915,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.189 — `OpKind.MATMUL(a, b)` → IrCall to `io.tlaloc.core.ops.matmul`
+     * `OpKind.MATMUL(a, b)` → IrCall to `io.tlaloc.core.ops.matmul`
      * (the Rank2 × Rank2 → Rank2 infix declared in HostOps.kt).
      *
-     * §0.4.193 — Phase 0c-rectangular slice 2: per-operand type-arg reading. LHS
-     * type-arg now derives from operand[0]'s IrType (via [irTypeForNode]); RHS
-     * type-arg derives from operand[1]'s. For square surfaces both are identical
-     * to `tensorIrType`. For rectangular surfaces with per-param `operandIrTypes`
-     * populated, LHS and RHS pick up the correct distinct shape args.
-     *
-     * Result type still uses `tensorIrType`; slice 3 will derive the output shape
-     * (combining LHS first type-arg + RHS last) so the generated MATMUL's call
-     * type matches the dxir-level rank-2 output. Until then non-param operands
-     * (TRANSPOSE results, BROADCAST results) fall back to `tensorIrType` and the
-     * rectangular surface still requires the BROADCAST template gap to close
-     * before it can ship end-to-end.
+     * Per-operand type-arg reading: the `<R, K, C>` shape atoms come from
+     * operand[0]'s and operand[1]'s IrTypes (via [irTypeForNode]). For square
+     * surfaces both are identical to `tensorIrType`; for rectangular surfaces with
+     * per-param `operandIrTypes` populated, LHS and RHS pick up the correct distinct
+     * shape args. The result type is the derived output shape (LHS first atom + RHS
+     * last atom), falling back to `tensorIrType` when no derivation is available.
      */
     private fun IrBuilderWithScope.irMatmul(
         op: DxirOp,
@@ -5079,7 +5041,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     // §0.4.414 — boxed scalar params/returns (Phase A5c-3(iv) tail).
     // ------------------------------------------------------------------
 
-    /** §0.4.427 — the sealed super-interface, matched only to refuse it by name. */
+    /** The sealed super-interface, matched only to refuse it by name. */
     private fun dScalarInterface(): IrClassSymbol? =
         pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/DScalar"))
 
@@ -5092,7 +5054,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     /**
      * True when [irType] is the `:core` value class whose payload matches the
      * DxirParam's erased [dtype] — `FloatScalar` ↔ F32, `DoubleScalar` ↔ F64.
-     * The dtype cross-check is what keeps the pair honest: a `DoubleScalar`
+     * The dtype cross-check keeps the pair consistent: a `DoubleScalar`
      * call-site slot over an F32 dxir node (or vice versa) matches nothing and
      * falls to the type guard rather than boxing the wrong precision.
      * (`DoubleScalar` has no FIR-lowerable spelling today — see the plan — but
@@ -5108,7 +5070,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * §0.4.501 — do two IrTypes name the same class? Used to check a captured value's
+     * Do two IrTypes name the same class? Used to check a captured value's
      * declaration against the dxir type its param was lowered with. Compares the
      * CLASSIFIER, not the whole type, for the same reason [isBoxedScalarType] does:
      * nullability and type-argument spellings differ between a call-site harvest and
@@ -5176,11 +5138,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         pluginContext.referenceClass(ClassId.fromString("kotlin/Triple"))
 
     /**
-     * §0.4.203 — `io.tlaloc.autograd.Quadruple<A, B, C, D>` (introduced §0.4.134
-     * for `valueAndGrad3`'s `(value, dA, dB, dC)` return). Used by
-     * [synthesise] when `fn.returns.size == 4` — typically a 4-grad-param surface
-     * (CartPole's full NN with X + W1 + W2 + W3) or a `valueAndGrad3` that
-     * synthesises through the plugin path.
+     * `io.tlaloc.autograd.Quadruple<A, B, C, D>` (the return type of
+     * `valueAndGrad3`'s `(value, dA, dB, dC)`). Used by [synthesise] when
+     * `fn.returns.size == 4` — a 4-grad-param surface or a `valueAndGrad3`.
      */
     private fun quadrupleClass(): IrClassSymbol? =
         pluginContext.referenceClass(ClassId.fromString("io/tlaloc/autograd/Quadruple"))

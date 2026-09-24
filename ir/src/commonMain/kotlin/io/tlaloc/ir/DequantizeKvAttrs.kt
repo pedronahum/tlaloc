@@ -10,11 +10,11 @@ import io.tlaloc.ir.recognizer.quant.KvQuantDtype
 import io.tlaloc.ir.recognizer.quant.KvScaleStrategy
 
 /**
- * §0.4.472 — Phase H5: the DEQUANTIZE_KV operand/attribute convention, shared
+ * The DEQUANTIZE_KV operand/attribute convention, shared
  * by every layer that touches the kind (the interpreter, the StableHLO
  * emitter, the renderer's refusal). ONE parser, so the layers cannot disagree
- * about what a legal dequantization looks like — the [PagedAttentionAttrs]
- * precedent from §0.4.465.
+ * about what a legal dequantization looks like (the same pattern as
+ * [PagedAttentionAttrs]).
  *
  * ```
  *   0 codes  [numBlocks, blockSize, numKvHeads, headDim]   integer
@@ -44,15 +44,15 @@ import io.tlaloc.ir.recognizer.quant.KvScaleStrategy
  * extra optional operands (`kScales`, `vScales`) plus a dtype attr. It reads
  * attractive — one op, one fused kernel — and it is wrong for this IR: it
  * makes PAGED_ATTENTION's arity a mode flag (5 operands or 7), it duplicates
- * the same dequantization inside an op that already has the arc's most
- * intricate emission, and it hides the quantization from every OTHER consumer
+ * the same dequantization inside an op that already has the most
+ * intricate emission of the inference ops, and it hides the quantization from every OTHER consumer
  * of a pool (KV_CACHE_WRITE's read-modify-write, a debug print, a CPU
  * fallback). As a separate op the dequantization is one node that any pass can
  * see, that CSE can share between the K and V paths of one layer, and that a
  * future fused kernel can CLAIM together with the attention it feeds — which
- * is precisely how §0.4.471's claiming lane already works: it rewrites a
+ * is precisely how the inference claiming registry works: it rewrites a
  * recognized op into a custom call, and a recognizer over the
- * DEQUANTIZE_KV → PAGED_ATTENTION pair is the natural H-tail shape.
+ * DEQUANTIZE_KV → PAGED_ATTENTION pair fits that shape.
  */
 object DequantizeKvAttrs {
 

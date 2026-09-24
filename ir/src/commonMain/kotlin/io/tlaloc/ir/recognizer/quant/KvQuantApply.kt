@@ -10,14 +10,15 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 
 /**
- * Layer 3 §0.4.257+ — KV-cache quantization application pass.
+ * KV-cache quantization application pass.
  *
  * # What
  *
  * Walks `fn` and, for each `OpKind.COARSENED` op that:
  *
  * 1. Has a [KernelDescriptor] annotated under [KernelDescriptor.ATTR_KEY]
- *    (i.e., L3.3 picked a vendor kernel for the recognized pattern), and
+ *    (i.e., [io.tlaloc.ir.recognizer.kernel.lowerKernelChoice] picked a vendor kernel for the
+ * recognized pattern), and
  * 2. The descriptor's `customCallAttrs["supported_kv_dtypes"]` list
  *    contains the requested dtype's [KvQuantDtype.nameTag],
  *
@@ -49,11 +50,9 @@ import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
  * - **No primal_body type rewrite.** The K and V tensors stay F32 in
  *   DXIR; only memory layout at the kernel-call boundary changes.
  *   Adding native `OpKind.QUANTIZE` / `OpKind.DEQUANTIZE` ops with I8 /
- *   FP8 dtypes is a separate type-system extension (Layer 4+).
- * - **No automatic dtype selection.** v1 callers explicitly pick the
- *   target dtype. A future cost-model-driven picker can choose between
- *   FP8 / int8 / BF16 based on accuracy budget + memory savings; for
- *   now the user's request is honored verbatim.
+ *   FP8 dtypes is a separate type-system extension.
+ * - **No automatic dtype selection.** Callers explicitly pick the
+ *   target dtype; the request is honored verbatim.
  */
 fun applyKvQuant(fn: DxirFunction, requested: KvQuantConfig): DxirFunction =
     applyKvQuantWithDiagnostics(fn, requested).first
@@ -61,7 +60,7 @@ fun applyKvQuant(fn: DxirFunction, requested: KvQuantConfig): DxirFunction =
 /**
  * Two-return variant of [applyKvQuant]. The second list reports each
  * COARSENED that was skipped + the reason — useful for IDE tooling and
- * for the L3.7 examples that want to surface a "tried FP8, fell back to
+ * for examples that want to surface a "tried FP8, fell back to
  * BF16" line to the user.
  */
 fun applyKvQuantWithDiagnostics(

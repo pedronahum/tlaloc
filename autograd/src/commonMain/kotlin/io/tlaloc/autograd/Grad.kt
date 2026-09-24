@@ -84,13 +84,13 @@ fun <S1 : Shape, S2 : Shape> grad2(
 }
 
 /**
- * §0.4.134 — value-and-gradient for a 3-tensor function `f: (S1, S2, S3) → scalar`.
+ * Value-and-gradient for a 3-tensor function `f: (S1, S2, S3) → scalar`.
  * Returns a 4-tuple `(value, dA, dB, dC)` via [Quadruple] — Kotlin's stdlib stops
  * at [Triple], so the 3-input variant introduces a small named 4-tuple parallel to
  * how [valueAndGrad2] reused stdlib [Triple] for its 3-tuple result. Mechanics
  * mirror [valueAndGrad2]: trace each input as a tape leaf, evaluate the lambda,
  * require a scalar output, and run the captured function through the compiler's
- * reverse transform (§0.4.446).
+ * reverse transform.
  */
 fun <S1 : Shape, S2 : Shape, S3 : Shape> valueAndGrad3(
     f: (Tracer<S1>, Tracer<S2>, Tracer<S3>) -> Tracer<ScalarShape>,
@@ -112,7 +112,7 @@ fun <S1 : Shape, S2 : Shape, S3 : Shape> valueAndGrad3(
     }
 
 /**
- * §0.4.134 — gradient-only convenience for a 3-tensor scalar-valued function.
+ * Gradient-only convenience for a 3-tensor scalar-valued function.
  * Returns a [Triple] of the per-input gradients (drops the primal value). For the
  * primal value alongside the gradients use [valueAndGrad3].
  */
@@ -193,7 +193,7 @@ fun gradWithScalars(
 }
 
 /**
- * §0.4.134 — generic 4-tuple. Kotlin's stdlib stops at [Triple]; [valueAndGrad3]
+ * Generic 4-tuple. Kotlin's stdlib stops at [Triple]; [valueAndGrad3]
  * needs a 4-slot return type for `(value, dA, dB, dC)`. Equivalent to [Pair]
  * and [Triple] in shape — destructurable, and componentN-returning.
  */

@@ -1,7 +1,7 @@
 package io.tlaloc.core
 
 /**
- * §0.4.505 (Tier 4) — the opt-in marker for the part of Tlaloc's public surface
+ * The opt-in marker for the part of Tlaloc's public surface
  * that is genuinely provisional.
  *
  * `docs/COMPATIBILITY.md` says every `0.1.0-alpha01` API may change without a
@@ -49,7 +49,7 @@ package io.tlaloc.core
  * are not *provisional*, and saying otherwise would make the marker noise.
  *
  * `:kptx`'s PTX DSL is a fourth surface that meets criterion 3 and is **not**
- * marked, for a mechanical reason recorded in `docs/ALPHA_PLAN.md`: `:kptx`
+ * marked, for a mechanical reason: `:kptx`
  * declares no dependency on `:core`, so this annotation cannot reach it without
  * adding one, and a documentation tier is the wrong place to change a published
  * module's dependency graph.

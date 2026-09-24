@@ -1,9 +1,8 @@
 package io.tlaloc.core
 
 /**
- * Pre-defined [MeshDim] singletons for common parallelism axes (Layer 2
- * §0.4.243+). Mirrors the `CommonNames.kt` convention from Layer 1 for
- * tensor-axis names. User code may declare additional axes elsewhere.
+ * Pre-defined [MeshDim] singletons for common parallelism axes. Mirrors the
+ * `CommonNames.kt` convention for tensor-axis names. User code may declare additional axes elsewhere.
  */
 
 /** Data-parallel axis: replicate model, partition the batch. */

@@ -10,7 +10,7 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 
 /**
- * Layer 3 §0.4.256+ — tile-fusion candidate identification + annotation.
+ * Tile-fusion candidate identification + annotation.
  *
  * # What
  *
@@ -33,8 +33,7 @@ import io.tlaloc.ir.OpKind
  *
  * - **Reduction → elementwise** chains (the "softmax bias" pattern).
  *   Reductions break the elementwise-shape invariant; tile-loop
- *   reduction needs a two-pass schedule that v1 doesn't synthesise.
- *   L3.4 closer / IREE backend can extend.
+ *   reduction needs a two-pass schedule that this pass doesn't synthesise.
  * - **Cross-COARSENED fusion**. The fusion pass walks the outer
  *   function's straight-line body; ops *inside* a `COARSENED` op's
  *   `primal_body` are not visited. Future-cost: recurse into bodies.
@@ -42,7 +41,7 @@ import io.tlaloc.ir.OpKind
  *
  * # Why a separate pass, not inline-with-coarsening
  *
- * The L3.2 coarsener focuses on *recognized compound forms* (FlashAttention,
+ * The VJP coarsener focuses on *recognized compound forms* (FlashAttention,
  * RMS norm, etc.) — patterns with vendor-fused kernel equivalents.
  * Tile fusion handles the *unrecognized residue* — long chains of plain
  * elementwise ops that don't match any compound. Both passes target

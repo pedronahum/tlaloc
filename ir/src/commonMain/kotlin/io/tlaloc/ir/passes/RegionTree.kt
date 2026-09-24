@@ -5,12 +5,12 @@ import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
 
 /**
- * §0.4.27 — Stage C.1 def-use region tree. Structures a [DxirFunction]'s ops by the
+ * Def-use region tree. Structures a [DxirFunction]'s ops by the
  * natural code-region hierarchy: the root is the function body; each [DxirOp] with
  * non-empty [DxirOp.regions] (IF, WHILE, MANUAL_COMPUTATION) introduces a child node
  * per region-block. Leaves are straight-line sequences of ops with no nested regions.
  *
- * Per the paper (§5, two paragraphs above Fig. 7): "Def-use region tree has two major
+ * Per the paper (Section 5, two paragraphs above Fig. 7): "Def-use region tree has two major
  * differences from code region hierarchy: (i) only relevant variable definitions are
  * considered; (ii) every loop-exit 𝜙 function is put as part of the region of the
  * associated loop." Property (i) requires intersection with the backward-reachable
@@ -20,14 +20,14 @@ import io.tlaloc.ir.DxirOp
  * WHILE's yielded loop-carried values are DxirOpResults of the WHILE itself, which
  * sit in the same scope as the WHILE (the parent region).
  *
- * Scope (C.1 first cut):
+ * Scope:
  *  - Every [DxirOp] with regions creates children: one [RegionTreeNode] per region
  *    block (IF has 2 regions × 1 block each → 2 children; WHILE is the same).
  *  - The node's [directOps] includes the region-bearing op itself (it's declared at
  *    this scope) — children only cover the region's INTERIOR.
  *  - Bottom-up traversal yields deepest-children-first, parents-last.
  *  - Multi-block regions (not yet emitted by DxirBuilder surface) would produce one
- *    child per block; deferred scope until needed.
+ *    child per block; not handled.
  */
 class RegionTreeNode internal constructor(
     val parent: RegionTreeNode?,
@@ -75,14 +75,14 @@ class RegionTreeNode internal constructor(
     }
 
     /**
-     * §0.4.28 — Total op count in this node's subtree (directOps + all children
-     * transitively). Used as the size proxy for the C.2a size-check heuristic:
-     * a subtree bigger than `L` (plan §8.2; default 50) signals that symbolic
+     * Total op count in this node's subtree (directOps + all children
+     * transitively). Used as the size proxy for the SOI size-check heuristic:
+     * a subtree bigger than `L` (default 50) signals that symbolic
      * coarsening would blow past the engine's budget. Raw pre-coarsening count is
      * a conservative upper bound — the true post-`PhiCalculus.apply` symbolic
      * expression is typically smaller because F1/F2/C1/C3 collapse φs and C5-C9
-     * close loops. C.3's engine-backed `PhiCalculus.coarsen(subtree, engine)` will
-     * replace this with the exact count when the integration lands.
+     * close loops. When a symbolic engine is supplied, [SoiIdentification.identifyWithSizeLimit]
+     * uses the post-coarsening count for leaves instead.
      */
     fun subtreeSize(): Int {
         var total = directOps.size

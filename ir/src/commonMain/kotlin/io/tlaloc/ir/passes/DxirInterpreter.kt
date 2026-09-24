@@ -26,14 +26,13 @@ import kotlin.math.pow
  * Minimal `FloatArray`-valued interpreter for the subset of [DxirNode] emitted by
  * [VjpRegistry]'s currently-registered rules (ADD, SUB, MUL, DIV, NEG, STEP, BROADCAST,
  * TRANSPOSE, MATMUL) over [DxirParam] / [DxirConst] operands, plus structured control
- * flow (IF, WHILE — added in B.0a, see docs/STAGE_B_PLAN.md §7.1.a). Callers supply an
+ * flow (IF, WHILE). Callers supply an
  * `env` mapping SSA ids to concrete `FloatArray`s; the interpreter walks a node's
  * operand tree, materialising intermediate values in the env as it goes.
  *
- * ### Role under the single engine (§0.4.446)
+ * ### Role in gradient execution
  *
- * The runtime value-tape's `backward()` (which consumed [VjpRegistry] through a
- * transient-primal bridge, §11.8.1 step 1) is deleted. Every gradient — Tracer-capture
+ * There is no runtime value tape. Every gradient — Tracer-capture
  * API, `grad {}` intrinsics, `:nn` training — is a `DxirReverseTransform` output, and
  * this interpreter is the host-execution backend for those functions
  * ([evalFunction]). The registry remains the canonical math source-of-truth.
@@ -46,18 +45,17 @@ import kotlin.math.pow
  * materialise to the length implied by their result type. Elementwise ops still require
  * their operands to share a length (the interpreter does not broadcast silently).
  *
- * [OpKind.BROADCAST] is supported only in the narrow shape this session's [VjpRegistry]
+ * [OpKind.BROADCAST] is supported only in the narrow shape [VjpRegistry]
  * emits (scalar → rank-N uniform, `broadcast_dimensions = []`); general rank-K → rank-N
  * broadcasting is [error]'d pending a rule that demands it. This keeps the interpreter
- * honest: if a future rule produces a shape we can't evaluate, the bridge fails loudly
+ * strict: if a rule produces a shape it can't evaluate, evaluation fails loudly
  * instead of silently producing wrong gradients.
  *
  * ### Scope limits
  *
  * - **No type coercion.** F32/F64 bits are both fit through `FloatArray` here — dtype
- *   is used only for const-literal conversion. Callers working in F64 still get F32
- *   numeric precision through this path; that's fine because the runtime tape is F32
- *   today anyway. The moment a non-F32 tape surface lands, this needs to widen.
+ *   is used only for const-literal conversion. Callers working in F64 get F32
+ *   numeric precision through this path.
  * - **Single-block, straight-line bodies only.** Multi-result ops, block-arg
  *   references, and nested regions all error.
  *
@@ -68,14 +66,14 @@ import kotlin.math.pow
  * typed length), walks body nodes in program order, and returns the evaluated returns.
  * Used by the dxir-eval equivalence tests to drive gradient functions produced by
  * [DxirReverseTransform] against concrete inputs and compare the numerical result with
- * the runtime tape's `Backward.kt` path.
+ * an independent reference.
  */
 object DxirInterpreter {
 
     /**
      * Hard cap on WHILE iteration count. Catches infinite loops in malformed test
      * primals before they hang the test suite; chosen to be large enough that any
-     * realistic Stage B test (`iterate5(x)`, BGDHyperOpt with K=10..100) terminates
+     * realistic loop test (`iterate5(x)`, BGDHyperOpt with K=10..100) terminates
      * well below it. Increase only if a test legitimately needs more iterations.
      */
     const val WHILE_ITERATION_CAP: Int = 1_000_000
@@ -84,7 +82,7 @@ object DxirInterpreter {
         if (type.dims.isEmpty()) 1 else type.dims.fold(1) { acc, d -> acc * d }
 
     /**
-     * §0.4.456 (G1b) — THE BF16 VALUE CONVENTION, stated loudly:
+     * THE BF16 VALUE CONVENTION:
      *
      * Interpreter value arrays stay `FloatArray` for EVERY dtype, bf16
      * included. A bf16-typed node's values are the F32-WIDENED FORMS OF
@@ -92,7 +90,7 @@ object DxirInterpreter {
      * representable in bf16 (widening bf16→f32 is exact, so the set of
      * bf16 values IS a subset of f32 values). The invariant is enforced
      * centrally in [evalNode]: after any node whose result type is BF16
-     * evaluates, its result array is snapped through the §0.4.455 RNE
+     * evaluates, its result array is snapped through the round-to-nearest-even
      * helpers (`floatToBf16Bits` then `bf16BitsToFloat`). RNE is
      * idempotent on already-representable values, so double-snapping a
      * CAST result is a no-op.
@@ -103,14 +101,14 @@ object DxirInterpreter {
      * XLA's own bf16 dot/reduce convention. Per-intermediate bf16
      * rounding INSIDE an op body (what a chain of separate bf16 hardware
      * instructions would do) is deliberately NOT simulated; device-level
-     * agreement at bf16 granularity is a G1c certification question, not
+     * agreement at bf16 granularity is a device certification question, not
      * an interpreter contract.
      */
     private fun snapToBf16(a: FloatArray): FloatArray =
         FloatArray(a.size) { bf16BitsToFloat(floatToBf16Bits(a[it])) }
 
     /**
-     * §0.4.432 — resolve a runtime RNG key word from operand [idx] of [op].
+     * Resolve a runtime RNG key word from operand [idx] of [op].
      * The operand must be a scalar I32. An Int-carrying [DxirConst] is read
      * VERBATIM — no float round-trip, exact for any 32-bit word (the
      * interpreter's FloatArray const materialisation would round beyond
@@ -118,7 +116,7 @@ object DxirInterpreter {
      * domain, which carries integers exactly only below 2^24 — the guard is
      * STRICT (|key| < 2^24): 2^24 + 1 rounds INTO 2^24 under f32, so an
      * inclusive bound would silently accept a corrupted key word. Beyond the
-     * domain the refusal names the honest alternatives; the StableHLO
+     * domain the refusal names the alternatives; the StableHLO
      * emission path carries high-bit runtime keys exactly (i32 SSA values,
      * nothing rounds).
      */
@@ -147,7 +145,7 @@ object DxirInterpreter {
     }
 
     /**
-     * Phase A5c — elementwise binary evaluation with NumPy implicit broadcasting.
+     * Elementwise binary evaluation with NumPy implicit broadcasting.
      *
      * The result shape is the op's own type; each operand right-aligns against it
      * (operand axis `j` maps to result axis `outRank − inRank + j`), an operand axis
@@ -156,10 +154,9 @@ object DxirInterpreter {
      * same contract [validateDxirShapes] checks statically for equal-rank operands
      * and the emitter's `broadcast_in_dim` injection enforces for XLA.
      *
-     * EQUAL-shape operands take the flat zip the interpreter has always used: no
-     * stride arithmetic and no per-element index remap, so programs that evaluated
-     * before A5c are bit-identical (and just as fast). Only genuinely mixed shapes
-     * pay for the broadcast walk.
+     * EQUAL-shape operands take a flat zip: no stride arithmetic and no
+     * per-element index remap. Only genuinely mixed shapes pay for the
+     * broadcast walk.
      */
     private fun binaryBroadcast(
         op: DxirOp,
@@ -1675,7 +1672,7 @@ object DxirInterpreter {
     }
 
     /**
-     * Evaluate an IF op (Stage B.0a). The cond operand is evaluated against [env];
+     * Evaluate an IF op. The cond operand is evaluated against [env];
      * the chosen region's block body is then evaluated in program order, and its
      * terminator value(s) are returned. Multi-result IFs cache extra results in
      * [multiResults] keyed by `(op.id, i)` for `i > 0` so [DxirOpResult] lookups work.
@@ -1704,7 +1701,7 @@ object DxirInterpreter {
     }
 
     /**
-     * Evaluate a WHILE op (Stage B.0a). Iterates the cond + body regions until the
+     * Evaluate a WHILE op. Iterates the cond + body regions until the
      * cond region's predicate evaluates to `0f` (false), or until [WHILE_ITERATION_CAP]
      * is exceeded (in which case [error] fires loudly so an infinite-loop test primal
      * doesn't hang the suite).
@@ -1718,9 +1715,8 @@ object DxirInterpreter {
      * 1..N-1 are stashed in [multiResults] keyed by `(op.id, i)` for [DxirOpResult]
      * extraction.
      *
-     * Single back-edge only (Stage B.0a scope per plan §3.1.2). Multi-back-edge WHILEs
-     * (the `break` form, with `m > 1` loop-exit φ arguments per paper F5) are deferred
-     * post-Stage-B.
+     * Single back-edge only. Multi-back-edge WHILEs (the `break` form, with `m > 1`
+     * loop-exit φ arguments) are not supported.
      */
     private fun evalWhile(
         op: DxirOp,
@@ -1775,7 +1771,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.31 — evaluate [OpKind.COARSENED] by nesting [evalFunction] on the stored
+     * Evaluate [OpKind.COARSENED] by nesting [evalFunction] on the stored
      * `primal_body`. Operand values (from the outer env) map positionally to the
      * primal_body's params. Multi-result COARSENED stashes results[i > 0] in
      * [multiResults] via [multiResultKey] for downstream [DxirOpResult] lookups —
@@ -1801,14 +1797,14 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.418 — Phase E1b: evaluate one CSR integer component operand
+     * Evaluate one CSR integer component operand
      * (colIdx or rowPtr) to an IntArray. The single-buffer FloatArray storage
      * (see the file top comment) holds integer dtypes as exact float-valued
      * integers, so `.toInt()` recovers them losslessly for any index the
      * tests or a real workload can reach.
      */
     /**
-     * §0.4.465 — Phase H1a: the PAGED_ATTENTION reference walk — vLLM's decode
+     * The PAGED_ATTENTION reference walk — vLLM's decode
      * primitive, attention over a block-table-indexed KV page pool.
      *
      * Per sequence `s` with length `L = seqLens[s]`, the logical context
@@ -1819,7 +1815,7 @@ object DxirInterpreter {
      * bug, so the walk never indexes past `L`, and a partially-filled last
      * page is a first-class oracle case).
      *
-     * Per (sequence, query head) the walk is the house attention convention
+     * Per (sequence, query head) the walk is the library's attention convention
      * with DOUBLE accumulators throughout — QKᵀ·scale, max-shifted softmax,
      * then the probability-weighted V sum — narrowed to F32 once at the
      * output. GQA: query head `h` reads kv head `h / group` (heads grouped
@@ -1902,14 +1898,14 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.466 — Phase H1b: the KV_CACHE_WRITE reference walk — vLLM's decode
+     * The KV_CACHE_WRITE reference walk — vLLM's decode
      * deposit, the step that fills the pool [evalPagedAttention] then reads.
      *
      * FUNCTIONAL: the pool is COPIED and the copy is written, because the
-     * house IR is value-semantics and an aliasing op would be a new memory
+     * IR has value semantics and an aliasing op would be a new memory
      * model for every pass to respect. (In deployment XLA's buffer donation
-     * makes the copy disappear — a named H3 follow-on; here correctness is the
-     * only concern and a copy is exactly right.)
+     * can make the copy disappear; here correctness is the only concern and a
+     * copy is exactly right.)
      *
      * The pool's row-major flattening is
      * `[numBlocks*blockSize, numKvHeads, headDim]`, and `slotMapping[i]` is
@@ -1961,7 +1957,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.472 — Phase H5: the DEQUANTIZE_KV reference walk, and it is
+     * The DEQUANTIZE_KV reference walk, and it is
      * deliberately NOT a re-derivation — it delegates the arithmetic to
      * [io.tlaloc.ir.inference.KvQuantPool.dequantize], the same host codec a
      * loader uses to BUILD a quantized pool. One formula, two callers: if the
@@ -2007,14 +2003,14 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.418 — Phase E1b: loud validation of a CSR component triple's
-     * invariant, the E1a `SparseTensor` constructor's checks minus the
+     * Loud validation of a CSR component triple's
+     * invariant: the `SparseTensor` constructor's checks minus the
      * strictly-increasing-columns one (the SpMM/SDDMM walks are
-     * order-independent in the math; canonical inputs — the only kind E1a
-     * and the eventual E1c surface produce — additionally get bit-for-bit
+     * order-independent in the math; canonical inputs — the only kind
+     * `SparseTensor` produces — additionally get bit-for-bit
      * parity with `SparseTensor.matmul`, whose contraction order is the
-     * canonical one). The audit's `nonZeroIndices` trap is what a sparse op
-     * earns by trusting its own internals, so nothing here is skipped.
+     * canonical one). A sparse op that trusts its own index arrays without
+     * checking them reads out of bounds silently, so nothing here is skipped.
      */
     private fun validateCsrComponents(
         opName: String,
@@ -2046,11 +2042,9 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.136 — rank-N stride-based transpose. The original rank-2-only path
-     * covered all paths VjpRules emitted (MatmulRule's `[1, 0]` swap), but
-     * §0.4.135's batched-MATMUL substrate implies an eventual batched MatmulRule
-     * which would emit `[0, 2, 1]`-style permutations. Handles any valid
-     * permutation of any rank.
+     * Rank-N stride-based transpose. Handles any valid permutation of any rank
+     * (for example MatmulRule's `[1, 0]` swap and batched `[0, 2, 1]`-style
+     * permutations).
      *
      * Algorithm: the output element at multi-index (i_0, …, i_{N-1}) corresponds
      * to the input element at multi-index (j_0, …, j_{N-1}) where
@@ -2058,7 +2052,7 @@ object DxirInterpreter {
      * the input flat offset accumulates `i_k * inputStrides[perm[k]]` per output
      * axis `k`.
      *
-     * §0.4.385 — lifted out of the TRANSPOSE arm so [evalConvAdjoint] can run the
+     * Separate from the TRANSPOSE arm so [evalConvAdjoint] can run the
      * batch↔feature swap its kernel gradient needs without materialising
      * throwaway TRANSPOSE nodes.
      */
@@ -2102,7 +2096,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.396 — rank-N stride-based axis flip (REVERSE). The output element at
+     * Rank-N stride-based axis flip (REVERSE). The output element at
      * multi-index (i_0, …, i_{N-1}) reads the input at (j_0, …, j_{N-1}) where
      * `j_k = dims[k] − 1 − i_k` on flipped axes and `j_k = i_k` elsewhere.
      * Shape-preserving, so input and output strides coincide; walking the
@@ -2143,7 +2137,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.362 — general 2-D convolution matching `stablehlo.convolution`
+     * General 2-D convolution matching `stablehlo.convolution`
      * semantics for the layouts [StablehloEmitter] fixes: lhs NCHW
      * `[b, f, 0, 1]`, kernel OIHW `[o, i, 0, 1]` for [OpKind.CONV2D] /
      * IOHW `[i, o, 0, 1]` for [OpKind.CONV_TRANSPOSE2D], output NCHW.
@@ -2155,7 +2149,7 @@ object DxirInterpreter {
      * `window_reversal` [Bool, Bool] (spatially flips the kernel taps —
      * what the conv adjoint needs).
      *
-     * §0.4.429 — `feature_group_count` (default 1) is honoured with
+     * `feature_group_count` (default 1) is honoured with
      * StableHLO's own layout convention: the kernel's input-feature dim
      * carries `Ci / g` and its output-feature dim the FULL `Co`
      * (divisible by g), so output channel `o` belongs to group
@@ -2175,7 +2169,7 @@ object DxirInterpreter {
         )
 
     /**
-     * §0.4.385 — [evalConv2d]'s body, lifted so a caller can supply the operand and
+     * [evalConv2d]'s body, separated so a caller can supply the operand and
      * result types EXPLICITLY instead of reading them off a [DxirOp]. The fused conv
      * adjoints need that: they run the transposed/strided conv whose padding they have
      * just solved at runtime, and whose transposed operand types (the batch↔feature
@@ -2286,7 +2280,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.385 — the fused conv adjoints (see [OpKind.CONV2D_DATA_ADJOINT]). Both
+     * The fused conv adjoints (see [OpKind.CONV2D_DATA_ADJOINT]). Both
      * solve the classical adjoint padding from the RUNTIME extents of their
      * operands and their shape-only template, then delegate to [conv2dCore] — so
      * there is still exactly one conv evaluator, and the sentinel-safety lives
@@ -2300,9 +2294,9 @@ object DxirInterpreter {
      *       low = kEff − 1 − p_low,   high = p_low + H − dilSize
      *   dW: low = p_low,   high = (k−1)·d + dilSize − H − p_low
      *
-     * Algebraically these are the values Conv2dRule used to bake at TRANSFORM
-     * time; the difference is that `H` (and `k`, `hOut`) are read at execution,
-     * when they exist, instead of out of a type carrying -1 sentinels.
+     * Algebraically these are the classical adjoint paddings; `H` (and `k`,
+     * `hOut`) are read at execution, when they exist, instead of out of a type
+     * that may carry -1 sentinels at transform time.
      *
      * The kernel gradient additionally fuses the batch↔feature transpose trick:
      * `dW = (Xᵀ ⋆ dYᵀ)ᵀ` with stride and rhs_dilation swapping roles, so the
@@ -2467,7 +2461,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.429 — contiguous slice of [count] indices starting at [start] along
+     * Contiguous slice of [count] indices starting at [start] along
      * [axis] of a row-major array with extents [dims]. The grouped conv adjoints
      * are the only callers; both channel axes of every operand are axis 0 or 1,
      * but the arithmetic is rank-generic.
@@ -2511,7 +2505,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.391 — the fused adjoints of [OpKind.CONV_TRANSPOSE2D].
+     * The fused adjoints of [OpKind.CONV_TRANSPOSE2D].
      *
      * Where [evalConvAdjoint] has to SOLVE a padding so a convolution lands on a
      * target extent, these need no solve: the primal's tap maps input↔output through
@@ -2651,7 +2645,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.363 — 2-D window pooling over NCHW, matching
+     * 2-D window pooling over NCHW, matching
      * `stablehlo.reduce_window` semantics: MAXPOOL2D reduces each window
      * with max (padding taps contribute −∞, i.e. are skipped); AVGPOOL2D
      * sums each window (padding taps contribute 0) and divides by the
@@ -2714,7 +2708,7 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.386 — [OpKind.AVGPOOL2D_GRAD]: the adjoint of [evalPool2d]'s AVGPOOL2D
+     * [OpKind.AVGPOOL2D_GRAD]: the adjoint of [evalPool2d]'s AVGPOOL2D
      * branch, written as the mirror image of that gather. Each input element
      * collects the upstream of every output window covering it, divided by the FULL
      * window size `kh·kw` — the count_include_pad convention the primal uses, so a
@@ -2785,18 +2779,18 @@ object DxirInterpreter {
     }
 
     /**
-     * §0.4.389 — [OpKind.MAXPOOL2D_GRAD]: the adjoint of [evalPool2d]'s MAXPOOL2D
+     * [OpKind.MAXPOOL2D_GRAD]: the adjoint of [evalPool2d]'s MAXPOOL2D
      * branch, computed by INVERTING the window per input element instead of
      * nearest-upsampling the pooled value and the upstream back to x's shape and
-     * masking. Same semantics, no rank-6 intermediates — which is what kept
-     * maxpool out of `grad {}`: those intermediates bake `n`/`c`/`Ho`/`Wo` into
-     * their types, and under -1 sentinels there is nothing to bake.
+     * masking. Same semantics, no rank-6 intermediates — those would bake
+     * `n`/`c`/`Ho`/`Wo` into their types, and under `grad {}`'s -1 sentinels
+     * there is nothing to bake.
      *
      * An input element wins a window iff it EQUALS that window's max, so every
      * within-window tie receives the full upstream (the MaxRule/JAX-select
      * convention). The comparison is exact Float equality on purpose: that is what
-     * the upsample-and-mask spelling did, and what the emitter's compare+select
-     * expansion does, so all three engines agree even on ties.
+     * the emitter's compare+select expansion does, so the engines agree even on
+     * ties.
      *
      * `y` (operand 2) is the pooled value the rule materialised; reading it beats
      * recomputing the max here. `x` (operand 1) is a VALUE operand, not the

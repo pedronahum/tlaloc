@@ -10,26 +10,24 @@ import org.matheclipse.core.interfaces.IExpr
 import org.matheclipse.core.interfaces.ISymbol
 
 /**
- * Stage B coarsening — Symja-backed [SymbolicEngine]. JVM-only. LGPL-3.0 (the dependency
+ * Symja-backed [SymbolicEngine] for coarsening. JVM-only. LGPL-3.0 (the dependency
  * carries that license; Tlaloc itself stays Apache-compatible because LGPL allows linking
- * from non-LGPL code — see DIFFKTX_SPEC.md §0.4.13 for the licensing analysis).
+ * from non-LGPL code — see [SymbolicEngines] for the licensing summary).
  *
  * Wraps Symja's [ExprEvaluator] with the Tlaloc-side [SymbolicEngine] interface. All
- * `evaluator` calls run inside `synchronized(evaluator)` per docs/STAGE_B_PLAN.md §13
- * risk #13 — Symja's evaluator is not documented as thread-safe and the K2 compiler
- * plugin may invoke `PhiCalculus.apply` from concurrent compilation tasks. If contention
- * becomes a measurable bottleneck (Stage B.3 timing data), switch to thread-local
- * evaluators; deferred until measured.
+ * `evaluator` calls run inside `synchronized(evaluator)` — Symja's evaluator is not documented
+ * as thread-safe and the K2 compiler plugin may invoke `PhiCalculus.apply` from concurrent
+ * compilation tasks. Thread-local evaluators would remove the contention if it ever becomes
+ * measurable.
  *
- * **Status (B.0b):** real bodies for arithmetic, composition, summation, differentiation,
- * simplification + first-cut [liftNode] / [liftFunction] / [lowerToDxir]. The first
- * caller is the Symja adequacy bake-off (`SymjaBakeoffTest`); `PhiCalculus.apply` lands
- * in Stage B.1 on top of this engine.
+ * Implements arithmetic, composition, summation, differentiation, simplification,
+ * [liftNode] / [liftFunction] / [lowerToDxir]; `PhiCalculus.apply` runs on top of
+ * this engine.
  *
  * **Treat as runtime-only:** never fork-and-patch matheclipse-core (any modifications
  * would inherit LGPL on our side). The interface boundary in `SymbolicEngine.kt`
- * insulates us — if Symja's adequacy fails for our use cases, we swap in a custom
- * Kotlin CAS implementation per spec §11.7 / plan §5.3.
+ * insulates us — if Symja's adequacy fails for our use cases, a custom Kotlin
+ * CAS implementation can be swapped in behind the same interface.
  */
 class SymjaEngine : SymbolicEngine {
 
@@ -56,8 +54,8 @@ class SymjaEngine : SymbolicEngine {
         wrap(if (denominator == 1L) F.ZZ(numerator) else F.QQ(numerator, denominator))
 
     /**
-     * Construct a [SymExpr] from a concrete `Double`. Promoted to the [SymbolicEngine]
-     * interface in Stage B.3 — C6's affine-coefficient lifting from concrete Float
+     * Construct a [SymExpr] from a concrete `Double`. Part of the [SymbolicEngine]
+     * interface: C6's affine-coefficient lifting from concrete Float
      * consts uses this (the rational form would lose precision on arbitrary floats).
      */
     override fun realLiteral(value: Double): SymExpr = wrap(F.num(value))
@@ -171,8 +169,7 @@ class SymjaEngine : SymbolicEngine {
      * Promote a [Number] DxirConst payload to its closest Symja form. Integer-valued
      * payloads (Long/Int and Float/Double whose value round-trips through Long) lift to
      * `rational` so Symja's integer-domain rules fire (`Times[1, x] → x`). Fractional
-     * Float/Double payloads lift to `realLiteral` to preserve precision (D.1i Phase 2 —
-     * §0.4.104).
+     * Float/Double payloads lift to `realLiteral` to preserve precision.
      */
     private fun liftNumber(n: Number): SymExpr {
         val d = n.toDouble()
@@ -184,11 +181,10 @@ class SymjaEngine : SymbolicEngine {
     }
 
     /**
-     * First-cut [liftNode]. Handles the subtree shapes Stage B.0b's bake-off and Stage B.1's
-     * F1/F2/F3/C1/C3 tests construct: scalar `DxirParam` / `DxirConst` / arithmetic
-     * elementwise ops (ADD/SUB/MUL/DIV/NEG/POW). Every other op kind throws — a future
-     * Stage B step that needs a wider lift surface (e.g., embedded WHILE inside a lifted
-     * subtree) explicitly grows this routine and the matching [lowerToDxir] half.
+     * [liftNode] handles scalar `DxirParam` / `DxirConst` / arithmetic elementwise ops
+     * (ADD/SUB/MUL/DIV/NEG/POW) — the shapes the F1/F2/F3/C1/C3 rules produce. Every
+     * other op kind (e.g., an embedded WHILE inside a lifted subtree) throws; widening
+     * the lift surface means growing this routine and the matching [lowerToDxir] half.
      */
     override fun liftNode(node: DxirNode): SymExpr {
         return when (node) {
@@ -217,9 +213,9 @@ class SymjaEngine : SymbolicEngine {
     }
 
     /**
-     * First-cut [liftFunction]. Treats a single-param + single-return [DxirFunction] as the
+     * [liftFunction] treats a single-param + single-return [DxirFunction] as the
      * closure `λparam. liftNode(returnExpr)`. Multi-param / multi-return / region-bearing
-     * functions error — Stage B.1+ widens this when needed.
+     * functions throw.
      */
     override fun liftFunction(fn: DxirFunction): SymFn {
         require(fn.params.size == 1) {
@@ -241,9 +237,9 @@ class SymjaEngine : SymbolicEngine {
      * left-fold ADD), `Times[a, b, ...]` (left-fold MUL), `Subtract`, `Divide`, `Negate`,
      * `Power`, and named symbols (resolved against [symbolMap]).
      *
-     * Variadic Plus/Times lower as a left-fold of binary ops, which is the only shape the
-     * dxir surface supports today (ADD / MUL are strictly binary). Symja's evaluator may
-     * normalise `a + b + c` into `Plus[a, b, c]`; the lowering folds it into `ADD(ADD(a, b), c)`.
+     * Variadic Plus/Times lower as a left-fold of binary ops, which is the only shape the dxir
+     * surface supports today (ADD / MUL are strictly binary). Symja's evaluator may normalise
+     * `a + b + c` into `Plus[a, b, c]`; the lowering folds it into `ADD(ADD(a, b), c)`.
      *
      * `Power[base, exp]` lowers to `OpKind.POW` regardless of whether the exponent is
      * symbolic, integer, or rational. The dxir interpreter doesn't yet evaluate POW
@@ -263,7 +259,7 @@ class SymjaEngine : SymbolicEngine {
 
     /**
      * Variant of [lowerToDxir] that accepts a `symbol-name → DxirNode` map for resolving
-     * free variables. Promoted to the [SymbolicEngine] interface in Stage B.3 — C6's
+     * free variables. Part of the [SymbolicEngine] interface: C6's
      * lowering needs to map closed-form free variables (e.g., `p`, `n`) back to dxir
      * params in the rewritten function.
      */

@@ -1,22 +1,23 @@
 /**
- * §0.4.440 — Phase F4: the conv stack, in DiffKT's semantics (F0 §4.0.4) on
+ * The conv stack, in DiffKT's semantics, on
  * Tlaloc's native layouts: `Conv2d` (NO bias tensor — DiffKT ships none; the
  * activation composes post-op), `Conv2dWithSamePadding` (the subclass sugar),
  * `MaxPool2d` and `AvgPool2d` (window = stride, spatial divisibility required —
  * DiffKT's own contract).
  *
- * THE LAYOUT DECISION (recorded in MODEL_LAYER_PLAN.md §4): `:nn` adopts
+ * Layout: `:nn` adopts
  * NCHW input / OIHW `[Co, Ci, kh, kw]` filters — the layouts every Tlaloc
  * engine (interpreter, emitter, host twins) already speaks. DiffKT's
  * NHWC / `[Co, kh, kw, Ci]` is a layout transpose of the same maths, and the
- * F8 PyTorch oracle is NCHW-native anyway. The fan computation is unaffected:
+ * PyTorch oracle the tests use is NCHW-native anyway. The fan computation is unaffected:
  * DiffKT's `fan = shape[1] · shape.drop(2).product` on ITS layout equals
  * `Ci·kh·kw`, exactly what the same formula yields on OIHW.
  *
- * All forwards are TRACE spellings under amended decision 3: conv2d /
+ * All forwards are TRACE spellings (see the compiler-route contract in
+ * `Training.kt`): conv2d /
  * maxPool2d / avgPool2d record onto the `:autograd` tape with the
  * interpreter's exact attrs, and `DxirReverseTransform` differentiates them
- * through the §0.4.385/386/389 fused adjoints. Zero gradient math in this file.
+ * through the fused conv and pooling adjoints. Zero gradient math in this file.
  */
 package io.tlaloc.nn
 
@@ -51,7 +52,7 @@ sealed class PaddingStyle {
 }
 
 /**
- * DiffKT's TF-SAME split for one spatial axis (F0 §4.0.4, read off the
+ * DiffKT's TF-SAME split for one spatial axis (as in DiffKT's
  * source): total `= if (in % stride == 0) max(k − stride, 0) else
  * max(k − in % stride, 0)`, then `before = total / 2`, `after = total −
  * before` — the odd unit lands on the AFTER side (bottom/right), TF's own
@@ -79,12 +80,12 @@ internal fun samePadding(inSize: Int, kernel: Int, stride: Int): Pair<Int, Int> 
  *
  * Groups: the layer is groups = 1 (a DiffKT-parity fact — DiffKT has no groups
  * parameter). The IR's CONV2D supports `feature_group_count` end to end, but
- * the host twin the trace forward routes through rejects grouped (§0.4.429's
- * named deferral), so a groups parameter waits on that host-twin tail.
+ * the host twin the trace forward routes through rejects grouped convolution,
+ * so the layer has no groups parameter yet.
  *
  * The randomly-initialized form is the companion `invoke` — DiffKT's conv
  * default `kaimingUniform(FanIn, LeakyRelu(sqrt(5)))` (the PyTorch conv
- * default). Key discipline per F2: the layer splits its key once into one
+ * default). Key discipline (the `:nn` convention): the layer splits its key once into one
  * child per parameter tensor in declaration order — one parameter here, so
  * `split(1)[0]` → filter.
  */
@@ -182,7 +183,7 @@ class Conv2dWithSamePadding private constructor(private val inner: Conv2d) :
 /**
  * DiffKT's `MaxPool2d(poolHeight, poolWidth)`: window = stride, zero padding,
  * NCHW rank-4, spatial dims must divide by the pool (the trace spelling keeps
- * DiffKT's own require). Not trainable. Tie note (F0 landmine 6): the
+ * DiffKT's own require). Not trainable. Tie note: the
  * MAXPOOL2D_GRAD adjoint routes upstream to ALL within-window ties, PyTorch to
  * the first — oracles pin on tie-free grids.
  */

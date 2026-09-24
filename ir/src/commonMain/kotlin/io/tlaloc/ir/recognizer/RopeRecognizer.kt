@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * Layer 3 §0.4.251+ — recognize rotary positional embedding (RoPE)
+ * Recognize rotary positional embedding (RoPE)
  * compound forms.
  *
  * # Match shape
@@ -22,17 +22,17 @@ import io.tlaloc.ir.OpKind
  * out  = SUB(a, b)                // or ADD, depending on rotation direction
  * ```
  *
- * v1 anchors on `OpKind.SIN` (rare in non-RoPE graphs) and looks for a
+ * The recognizer anchors on `OpKind.SIN` (rare in non-RoPE graphs) and looks for a
  * paired `COS` consumed by a different `MUL` that combines with the
  * SIN-MUL via `ADD` or `SUB`.
  *
  * # What's NOT matched
  *
  * - Per-element bit-tricks (some implementations re-shape input to (real,
- *   imag) pairs explicitly via slicing + broadcasting). v1 matches the
- *   simplest in-place form.
- * - Multi-block frequency tables (different θ per dim). v1 matches a
- *   single (cosθ, sinθ) pair; v2 can extend.
+ *   imag) pairs explicitly via slicing + broadcasting). Only the
+ *   simplest in-place form is matched.
+ * - Multi-block frequency tables (different θ per dim). Only a
+ *   single (cosθ, sinθ) pair is matched.
  *
  * # Near-miss diagnostics
  *

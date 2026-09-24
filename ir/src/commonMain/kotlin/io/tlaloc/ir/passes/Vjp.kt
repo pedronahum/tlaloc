@@ -48,10 +48,9 @@ import io.tlaloc.ir.OpKind
  * This registry is the canonical home for the math of every supported reverse-mode rule.
  * The runtime tape in `:autograd` mirrors a subset of these rules in float-array form for
  * performance; per-op equivalence tests (in `:compiler-plugin`'s test harness) verify the
- * two paths produce the same numerical answer for every case in the registry. With
- * MATMUL registered as of §0.4.9, the registry now covers every op the runtime tape
- * currently traces (ADD/SUB/MUL/DIV/NEG/RELU/SUM/MEAN/MATMUL) — the "single math source
- * of truth" goal of §11.8.1 step 1 is honestly met.
+ * two paths produce the same numerical answer for every case in the registry. The
+ * registry covers every op the runtime tape traces (ADD/SUB/MUL/DIV/NEG/RELU/SUM/MEAN/MATMUL),
+ * so it is the single source of truth for the math.
  */
 interface VjpRule {
     /**
@@ -65,7 +64,7 @@ interface VjpRule {
 
     /**
      * Per-node refinement of [readsPrimalOperandIndices]. Whether a rule dereferences
-     * an operand can depend on the node itself: Phase A5c-2 has [SumRule] and
+     * an operand can depend on the node itself: [SumRule] and
      * [MeanRule] attach a shape-only template operand to their scalar seed ONLY when
      * the target shape carries a -1 sentinel — with concrete dims no template is
      * needed, because synthesis bakes every extent as a const — so the clone that
@@ -94,7 +93,7 @@ object VjpRegistry {
     // --- Elementwise binary ---
 
     /**
-     * Phase A5c — unbroadcast an adjoint contribution back to the shape of the
+     * Unbroadcast an adjoint contribution back to the shape of the
      * [operand] it belongs to.
      *
      * With implicit broadcasting the contribution is shaped like the RESULT (the
@@ -102,7 +101,7 @@ object VjpRegistry {
      * onto an operand must be shaped like that operand: `d/da Σ(a ⊙ b)` with
      * `a:[N,1]`, `b:[N,C]` is `[Σ_C upstream·b]` of shape `[N,1]`, not `[N,C]`.
      * The un-broadcast is NumPy's reduce-over-replicated-axes, which is exactly
-     * `SUM_TO` (§0.4.373) reading the target extents from the operand's ACTUAL
+     * `SUM_TO` reading the target extents from the operand's ACTUAL
      * runtime shape — so it is correct under the -1 sentinel dims of `grad {}`,
      * where which axes were size-1 (or which axes the operand lacked) is
      * statically unknowable.
@@ -112,7 +111,7 @@ object VjpRegistry {
      * contribution is already right-sized. Both cases would be a runtime no-op
      * anyway (`sumToLike` reduces nothing) — skipping them keeps the concrete-dims
      * IR that the coarsener, the emitter tests and the pinned gradient tests walk
-     * byte-identical to pre-A5c. Anything else (differing dims, or any sentinel)
+     * unchanged by broadcasting support. Anything else (differing dims, or any sentinel)
      * takes the SUM_TO path, which is sound in both directions.
      */
     private fun unbroadcast(builder: DxirBuilder, contribution: DxirNode, operand: DxirNode): DxirNode {
@@ -124,7 +123,7 @@ object VjpRegistry {
     }
 
     /**
-     * Phase A5c-2 — whether a scalar-seed splat to [target] needs a runtime shape
+     * Whether a scalar-seed splat to [target] needs a runtime shape
      * template operand. Concrete dims need none: synthesis bakes every extent as a
      * const. A -1 sentinel does, because the extents exist only at execution and the
      * static-atom axis-matching that would otherwise supply them is a guess — wrong
@@ -136,7 +135,7 @@ object VjpRegistry {
     private fun needsShapeTemplate(target: DxirType): Boolean = target.dims.any { it <= 0 }
 
     /**
-     * Phase A5c-3 — emit a `broadcast_dimensions = []` BROADCAST of [value] to
+     * Emit a `broadcast_dimensions = []` BROADCAST of [value] to
      * [targetType], carrying [template] as a shape-only second operand whenever the
      * target's extents are not statically known ([needsShapeTemplate]).
      *
@@ -166,13 +165,13 @@ object VjpRegistry {
     )
 
     /**
-     * Phase A5c-3 — a literal splatted over [template]'s shape. Under SYMBOLIC dims
+     * A literal splatted over [template]'s shape. Under SYMBOLIC dims
      * this is a scalar const carried by a templated [broadcastTo], so synthesis reads
      * the target extents off a real runtime value; a bare shaped const has no runtime
      * shape source and synthesis would have to guess its extents by axis-matching
      * static atoms against the params. Under CONCRETE dims — and for a scalar target,
      * which needs no splat at all — this is exactly the plain shaped const it always
-     * was, so no pre-A5c IR changes shape.
+     * was.
      */
     private fun splatConst(builder: DxirBuilder, value: Any, template: DxirNode, targetType: DxirType): DxirNode =
         if (needsShapeTemplate(targetType) && !targetType.isScalar) {
@@ -188,7 +187,7 @@ object VjpRegistry {
 
     /**
      * d(a + b)/da = 1, d(a + b)/db = 1 — the upstream, un-broadcast to each
-     * operand's own shape (Phase A5c: the operands may broadcast against each
+     * operand's own shape (the operands may broadcast against each
      * other, so the upstream is result-shaped and each side needs its own reduce).
      */
     val AddRule: VjpRule = object : VjpRule {
@@ -408,26 +407,23 @@ object VjpRegistry {
      * body-ops. This matches the MulRule / DivRule pattern — contrast with SumRule /
      * MeanRule which only read shape metadata and declare `emptySet()`.
      *
-     * §0.4.137 — extended from rank-2 to rank-2-or-3 batched. §0.4.138 — generalised
-     * to any rank ≥ 2 with arbitrary batch axes. The shape contract is the same
-     * canonical batched-matmul convention §0.4.135's substrate uses: `(B0..Bk, M, K)
+     * Supports any rank ≥ 2 with arbitrary batch axes. The shape contract is the
+     * canonical batched-matmul convention: `(B0..Bk, M, K)
      * × (B0..Bk, K, N) → (B0..Bk, M, N)`. The TRANSPOSE permutation becomes `[0..r-3,
      * r-1, r-2]` — preserve all batch axes, swap the last two. The MATMUL kind is
      * the same op for all ranks; the substrate dispatches by shape.
      *
      * Declared before [rules] because Kotlin initialises `object` properties in source
      * order; a forward reference from `rules` to a later val fails to compile
-     * (§0.4.3 object-init trap — worth repeating in every new VjpRule).
+     * (the same holds for every VjpRule in this object).
      */
     /**
-     * §0.4.353 — rank-1 dot product `s = Σ a_i·b_i` (OpKind.DOT, the
+     * Rank-1 dot product `s = Σ a_i·b_i` (OpKind.DOT, the
      * `rank1 contract rank1` lowering): d s/d a = upstream ⊙ b,
      * d s/d b = upstream ⊙ a (upstream is the scalar seed; MUL
      * broadcasts scalar × vector). Contributions are typed with the
      * *receiving* operand's DxirType so named axes accumulate onto the
-     * right parameter. Gap found by the §0.4.353 check-time
-     * differentiability probe — a grad over rank-1 contract previously
-     * failed only at runtime.
+     * right parameter.
      */
     val DotRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
@@ -450,10 +446,9 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.359 — `d/dx reshape(x)` = reshape the upstream back to x's
+     * `d/dx reshape(x)` = reshape the upstream back to x's
      * shape (element-count-preserving relayout has an identity Jacobian
-     * under the row-major flat view). Gap flagged by the DiffKT
-     * comparison: RESHAPE was lowerable but undifferentiable.
+     * under the row-major flat view).
      */
     val ReshapeRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
@@ -465,7 +460,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.366 — shared axis-reduction plumbing (Phase A1).
+     * Shared axis-reduction plumbing.
      *
      * [reductionDimsOf] reads the op's `reduction_dims` attr (absent/empty →
      * null = full reduce). [reshapeToKeepdims] adapts a reduced-shape value
@@ -540,19 +535,17 @@ object VjpRegistry {
         }
     }
 
-    /** §0.4.359 — max-reduction subgradient (see [reduceExtremumRule]). */
+    /** Max-reduction subgradient (see [reduceExtremumRule]). */
     val MaxRule: VjpRule = reduceExtremumRule(OpKind.MAX)
 
-    /** §0.4.359 — min-reduction subgradient (see [reduceExtremumRule]). */
+    /** Min-reduction subgradient (see [reduceExtremumRule]). */
     val MinRule: VjpRule = reduceExtremumRule(OpKind.MIN)
 
     /**
-     * §0.4.359 — raw softmax adjoint: with `y = softmax(x, axis)`,
+     * Raw softmax adjoint: with `y = softmax(x, axis)`,
      * `dx = y ⊙ (upstream − Σ_axis(upstream ⊙ y))`. Recomputes y
      * (TanhRule convention); the inner sum keeps dims for the stretch
-     * broadcast back over the axis. Until now softmax differentiated
-     * only through coarsened pattern bodies — a bare softmax in a user
-     * lambda failed (flagged by the DiffKT comparison).
+     * broadcast back over the axis.
      */
     val SoftmaxRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
@@ -581,7 +574,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.360 — `d/dx_i concat(x_1..x_n, dim)` = the upstream sliced back
+     * `d/dx_i concat(x_1..x_n, dim)` = the upstream sliced back
      * to each operand's window along `dimension`.
      */
     val ConcatRule: VjpRule = object : VjpRule {
@@ -633,7 +626,7 @@ object VjpRegistry {
     }
 
     /**
-     * Phase A2b — whether a CONCAT's window offsets are statically knowable. Any
+     * Whether a CONCAT's window offsets are statically knowable. Any
      * sentinel on the result or on an operand means no: the axis extents that
      * [ConcatRule] would otherwise accumulate into `start_indices` are -1, and a
      * baked offset of -1 is not a wrong answer so much as a meaningless one.
@@ -642,9 +635,9 @@ object VjpRegistry {
         needsShapeTemplate(op.type) || op.operands.any { needsShapeTemplate(it.type) }
 
     /**
-     * §0.4.360 — `d/dx slice(x)` = the upstream zero-padded back into x's
-     * shape (SLICE's adjoint IS a pad). v1 requires unit strides — the
-     * strided adjoint needs interior padding, deferred until demanded.
+     * `d/dx slice(x)` = the upstream zero-padded back into x's
+     * shape (SLICE's adjoint IS a pad). Requires unit strides — the
+     * strided adjoint needs interior padding, which is not implemented.
      */
     val SliceRule: VjpRule = object : VjpRule {
         // §0.4.374 — the adjoint dereferences the primal input (operand 0) as
@@ -677,7 +670,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.360 — `where(pred, a, b)`: d/da = upstream ⊙ mask,
+     * `where(pred, a, b)`: d/da = upstream ⊙ mask,
      * d/db = upstream ⊙ (1 − mask), mask = cast(pred). No contribution to
      * pred (boolean routing carries no gradient).
      */
@@ -700,7 +693,7 @@ object VjpRegistry {
         }
     }
 
-    /** §0.4.360 — comparisons are piecewise-constant: zero gradient to both
+    /** Comparisons are piecewise-constant: zero gradient to both
      * operands (the SignRule convention). */
     val CompareRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
@@ -711,7 +704,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.419 — reverse of ZEROS_LIKE (the param-addressed structural zero):
+     * Reverse of ZEROS_LIKE (the param-addressed structural zero):
      * it creates a constant, so nothing flows anywhere — the template operand
      * is shape-only and gets a zero contribution. That zero is spelled as
      * ZEROS_LIKE on the template ITSELF (not an anonymous const, whose
@@ -727,7 +720,7 @@ object VjpRegistry {
         }
     }
 
-    /** §0.4.360 — `d/dx pad(x)` = the upstream sliced back to x's window
+    /** `d/dx pad(x)` = the upstream sliced back to x's window
      * (PAD's adjoint IS a slice — the dual of [SliceRule]). */
     val PadRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
@@ -784,7 +777,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.362 — CONV2D adjoint (NCHW / OIHW, the [StablehloEmitter]
+     * CONV2D adjoint (NCHW / OIHW, the [StablehloEmitter]
      * layouts). The two classical results, expressed with existing ops:
      *
      * - `dX`: a lhs-dilated, tap-reversed transposed conv of dY against W —
@@ -795,18 +788,18 @@ object VjpRegistry {
      *   `i = N`), `window_strides = rhs_dilation` and `rhs_dilation = stride`
      *   swapped, padded so the result is exactly `[kh, kw]`, transposed back.
      *
-     * §0.4.385 — both are emitted as FUSED, runtime-extent ops
+     * Both are emitted as FUSED, runtime-extent ops
      * ([OpKind.CONV2D_DATA_ADJOINT] / [OpKind.CONV2D_KERNEL_ADJOINT]) rather
-     * than as the explicit CONV_TRANSPOSE2D / TRANSPOSE+CONV2D+TRANSPOSE
-     * chains this rule used to build. The reason is sentinel-safety: both
+     * than as explicit CONV_TRANSPOSE2D / TRANSPOSE+CONV2D+TRANSPOSE
+     * chains. The reason is sentinel-safety: both
      * paddings are SOLVED from the primal's extents, and under `grad {}` those
-     * extents are -1 sentinels, so solving here baked arithmetic garbage
+     * extents are -1 sentinels, so solving at rule-build time would bake arithmetic garbage
      * (`[[-3,1],[-3,1]]` where `[[1,1],[1,1]]` is correct for a stride-1
-     * padding-1 conv) that the interpreter, the emitter and the host twins all
-     * honoured faithfully — a silently wrong gradient, with no downstream gate
+     * padding-1 conv) that the interpreter, the emitter and the host twins would all
+     * honour faithfully — a silently wrong gradient, with no downstream gate
      * to catch it. The fused ops take the tensor whose extents are the target
      * as a shape-only template operand (the PAD_TO / SUM_TO / SLICE_LIKE
-     * convention) and solve at EXECUTION time; this rule now passes down
+     * convention) and solve at EXECUTION time; this rule passes down
      * nothing but the primal's own literal attrs, so it reads no extent at all.
      * Fusing the transposes into the kernel adjoint also leaves the gradient
      * body with no rank-4 TRANSPOSE nodes to type, and makes each adjoint's
@@ -857,10 +850,8 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.391 — CONV_TRANSPOSE2D adjoint: differentiating THROUGH a transposed
-     * conv (a deconvolution / fractionally-strided upsample), which until here was a
-     * loud "no VJP rule registered" even though the primal's FIR arm and host twin
-     * shipped in §0.4.384.
+     * CONV_TRANSPOSE2D adjoint: differentiating THROUGH a transposed
+     * conv (a deconvolution / fractionally-strided upsample).
      *
      * Structurally [Conv2dRule]'s mirror — two fused ops, each carrying the tensor
      * whose shape it produces as its last operand — but simpler in one important way:
@@ -874,10 +865,10 @@ object VjpRegistry {
      *
      * Verified against central differences over six configurations (lhs_dilation 1
      * and 2, window_strides 1 and 2, rhs_dilation, reversal, asymmetric padding, and
-     * all combined) before implementation.
+     * all combined).
      *
      * All three engines have an arm; the emitter goes through the
-     * conv-of-the-dilated-input identity rather than the index inversion (§0.4.393)
+     * conv-of-the-dilated-input identity rather than the index inversion
      * and rejects `window_reversal`, which nothing user-reachable sets.
      */
     val ConvTranspose2dRule: VjpRule = object : VjpRule {
@@ -921,16 +912,16 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.363 — AVGPOOL2D adjoint: each input element receives
+     * AVGPOOL2D adjoint: each input element receives
      * `Σ dY/(kh·kw)` over every window containing it — exactly a
      * transposed convolution of dY with a uniform `1/(kh·kw)` kernel.
      * Fully general strides/padding (count_include_pad — the interpreter's
      * convention, which divides by the FULL window).
      *
-     * §0.4.386 — emitted as the fused [OpKind.AVGPOOL2D_GRAD] rather than the
-     * original `RESHAPE → CONV_TRANSPOSE2D → RESHAPE` channel-folding chain, for
-     * the same sentinel reason [Conv2dRule] gives: that chain solved its padding
-     * from the primal's extents AND baked `n * c` as a reshape target, both of
+     * Emitted as the fused [OpKind.AVGPOOL2D_GRAD] rather than a
+     * `RESHAPE → CONV_TRANSPOSE2D → RESHAPE` channel-folding chain, for
+     * the same sentinel reason [Conv2dRule] gives: that chain would solve its padding
+     * from the primal's extents AND bake `n * c` as a reshape target, both of
      * which are arithmetic on -1s under `grad {}`. The fused op inverts the window
      * at execution time and needs no channel fold at all — the adjoint is
      * per-channel, so the depthwise-via-batch-folding trick (which only existed to
@@ -972,20 +963,20 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.363 — MAXPOOL2D adjoint: recompute `y = maxpool(x)`, then
+     * MAXPOOL2D adjoint: recompute `y = maxpool(x)`, then
      * `dx = where(x == y_per_window, dY_per_window, 0)` — each input element
      * receives the upstream of every window it wins.
      *
-     * §0.4.389 — emitted as the fused [OpKind.MAXPOOL2D_GRAD] instead of the
-     * original nearest-upsample-and-mask chain (`reshape → identity-dims stretch
-     * broadcast → reshape` on both `y` and `dY`, then COMPARE + WHERE). Those
-     * rank-6 intermediates are why the plan kept maxpool LAST: their types bake
+     * Emitted as the fused [OpKind.MAXPOOL2D_GRAD] instead of a
+     * nearest-upsample-and-mask chain (`reshape → identity-dims stretch
+     * broadcast → reshape` on both `y` and `dY`, then COMPARE + WHERE). Such
+     * rank-6 intermediates bake
      * `n`/`c`/`Ho`/`Wo`, so under `grad {}`'s -1 sentinels the reshape targets are
      * meaningless, and the synthesis has no rank-6 shape witness to type them with.
      * Inverting the window per input element needs no upsample at all, so the body
      * stays rank-4 and the result type is just `x`'s.
      *
-     * v1 scope: the classic non-overlapping pool — `strides == window`, zero
+     * Scope: the classic non-overlapping pool — `strides == window`, zero
      * padding (PyTorch's `MaxPool2d(k)` default shape). Window-DIVISIBLE spatial
      * dims are no longer required here (that check read extents); a remainder is
      * handled correctly by the host and interpreter, and is rejected by the emitter
@@ -1038,10 +1029,9 @@ object VjpRegistry {
      * d(base^exp)/d(base) = exp · base^(exp-1)
      * d(base^exp)/d(exp)  = base^exp · ln(base)
      *
-     * Added in §0.4.21 (Stage B.3 follow-up) to unblock gradient-through-coarsened-loops:
-     * C6/C7/C8/C9's closed forms for symbolic trip counts emit POW ops (e.g., `a^n · p`
-     * for C6 with symbolic n), which Stage A SCT couldn't previously differentiate. With
-     * PowRule, `grad { r -> coarsenedBgdOuterLoop(r, ...) }` pipelines work end-to-end.
+     * Needed for gradients through coarsened loops: C6/C7/C8/C9's closed forms for
+     * symbolic trip counts emit POW ops (e.g., `a^n · p` for C6 with symbolic n), so
+     * `grad { r -> coarsenedBgdOuterLoop(r, ...) }` pipelines depend on this rule.
      *
      * `readsPrimalOperandIndices = setOf(0, 1)`: both base and exp are dereferenced by
      * the emitted adjoint ops (base appears in base^(exp-1), in ln(base), and in base^exp;
@@ -1050,18 +1040,18 @@ object VjpRegistry {
      * The exp-gradient branch emits `LOG(base)` unconditionally; when the primal's exp
      * is a `DxirConst`, the framework's constant-filter in [DxirReverseTransform] skips
      * the contribution but the LOG(base) still lives as a dead op in the gradient body.
-     * Stage B.3's DCE (deferred) will strip it. An alternative — gate the exp-gradient
+     * No DCE pass strips it. An alternative — gate the exp-gradient
      * emission on `op.operands[1] !is DxirConst` — is correct but couples the rule to
      * the framework's const-filter assumption; keeping the emission unconditional keeps
      * the contracts independent.
      *
-     * **Scope (first cut)**: F32/F64 operands only. Integer-typed POW (e.g., `int^int`)
+     * **Scope**: F32/F64 operands only. Integer-typed POW (e.g., `int^int`)
      * is not differentiable cleanly (ln of an integer isn't an integer); guard with a
-     * runtime check on the operand dtype. Declared before [rules] (§0.4.3 object-init
-     * trap).
+     * runtime check on the operand dtype. Declared before [rules] (object-init
+     * order).
      */
     /**
-     * `d/dx(exp(x)) = exp(x)`. Stage A §0.4.22 — a unary elementwise rule that reuses
+     * `d/dx(exp(x)) = exp(x)`. A unary elementwise rule that reuses
      * the forward op's structure by emitting a fresh `EXP(x)` in the gradient body
      * rather than trying to share the primal's result. Slight redundancy (one extra
      * EXP in the gradient body) — acceptable; the interpreter handles it and downstream
@@ -1093,9 +1083,8 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(|x|) = sign(x)` with `sign(0) = 0`. §0.4.167 — primitive for CartPole's
-     * loss-clipping `(2.4 - |xt+1,0|)` and `(0.21 - |xt+1,2|)` per
-     * docs/CARTPOLE_PORT_PLAN.md Phase 0a-2.
+     * `d/dx(|x|) = sign(x)` with `sign(0) = 0`. Used, e.g., by CartPole's
+     * loss-clipping `(2.4 - |xt+1,0|)` and `(0.21 - |xt+1,2|)`.
      *
      * Implementation: `STEP(x) - STEP(-x)` evaluates to +1 / -1 / 0 at x>0 / x<0 / x=0.
      * Both STEPs are typed in the operand's dtype (F32 for scalar Float), matching
@@ -1118,7 +1107,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.204 — CartPole Phase 3 sixth slice. `d/dx sign(x) = 0` everywhere
+     * `d/dx sign(x) = 0` everywhere
      * except at the non-differentiable origin (where it's a Dirac delta).
      * Practical AD convention: gradient is identically zero. SignRule emits a
      * zero const at x's shape; [readsPrimalOperandIndices] = `emptySet()` since
@@ -1140,7 +1129,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.413 — Phase D2 v1: RNG_UNIFORM / RNG_NORMAL differentiate as
+     * RNG_UNIFORM / RNG_NORMAL differentiate as
      * CONSTANTS. A stateless draw is a pure function of its literal `key0`/
      * `key1`/`dims` attrs — piecewise-constant in the key, with ZERO operands
      * — so the reverse walk that reaches it with accumulated upstream has
@@ -1153,9 +1142,7 @@ object VjpRegistry {
      * the draw's VALUE (MulRule's `d scale = upstream ⊙ ε`), the RNG op is
      * cloned into the gradient body via `usedByAdjoint` with its literal
      * attrs intact — same key → same ε, deterministically, which is the
-     * reparameterization contract (pinned in DxirRngTest). §0.4.408's loud
-     * refusal is deliberately REPLACED by this arm; the refusal's spirit
-     * survives as the pinned-zero certs.
+     * reparameterization contract (pinned in DxirRngTest).
      */
     val RngDrawRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
@@ -1164,8 +1151,7 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(sin(x)) = cos(x)`. §0.4.166 — Trigonometric primitive for the CartPole
-     * physics step. Mirrors ExpRule's "emit a fresh primal-shape op in the gradient
+     * `d/dx(sin(x)) = cos(x)`. Mirrors ExpRule's "emit a fresh primal-shape op in the gradient
      * body" approach to avoid sharing the primal's result with the adjoint.
      */
     val SinRule: VjpRule = object : VjpRule {
@@ -1179,7 +1165,7 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(cos(x)) = -sin(x)`. §0.4.166 — companion to SinRule. The negation is
+     * `d/dx(cos(x)) = -sin(x)`. Companion to SinRule. The negation is
      * folded into the multiplication via NEG(MUL(upstream, sin(x))) rather than
      * MUL(upstream, NEG(sin(x))) — both produce the same value; the former keeps
      * the SIN op's structure unchanged for downstream CSE if multiple cos calls
@@ -1197,10 +1183,10 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(tan(x)) = 1 + tan²(x)` (= sec²(x)). §0.4.395 — Phase C2 trig tail.
+     * `d/dx(tan(x)) = 1 + tan²(x)` (= sec²(x)).
      * The tan-recompute form (rather than `1/cos²`) mirrors TanhRule: the fresh
      * TAN over the cloned primal operand CSEs with the primal's own TAN node,
-     * reads no extents (sentinel-safe), and the `1` splat rides the §0.4.380
+     * reads no extents (sentinel-safe), and the `1` splat rides the
      * shape-template machinery via [splatConst].
      */
     val TanRule: VjpRule = object : VjpRule {
@@ -1217,7 +1203,7 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(atan(x)) = 1 / (1 + x²)`. §0.4.395 — companion to TanRule. Bounded in
+     * `d/dx(atan(x)) = 1 / (1 + x²)`. Companion to TanRule. Bounded in
      * (0, 1], so numerically benign everywhere; the denominator reads only the
      * primal operand's values, never its extents.
      */
@@ -1234,7 +1220,7 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(lgamma(x)) = ψ(x)` (digamma). §0.4.402 — Phase C1 special functions.
+     * `d/dx(lgamma(x)) = ψ(x)` (digamma).
      * The adjoint is a fresh DIGAMMA over the cloned primal operand — a
      * different special function, so unlike TanhRule there is nothing to
      * recompute from the primal's own value stream; it reads only the operand's
@@ -1251,10 +1237,9 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(digamma(x)) = ψ₁(x)` (trigamma). §0.4.402 — companion to
-     * [LgammaRule]; TRIGAMMA is the internal op this rule exists to emit.
-     * Until §0.4.405 TRIGAMMA had no rule of its own, so second-order reverse
-     * through DIGAMMA refused loudly; [TrigammaRule] closed that.
+     * `d/dx(digamma(x)) = ψ₁(x)` (trigamma). Companion to
+     * [LgammaRule]; TRIGAMMA is the internal op this rule exists to emit, and
+     * [TrigammaRule] makes second-order reverse through DIGAMMA compose.
      */
     val DigammaRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
@@ -1267,9 +1252,8 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(ψ₁(x)) = ψ₂(x)` = polygamma(2). §0.4.405 — the rule that flips the
-     * §0.4.402 pinned refusal: second-order reverse through DIGAMMA (whose
-     * first adjoint emits TRIGAMMA) now composes instead of failing. The
+     * `d/dx(ψ₁(x)) = ψ₂(x)` = polygamma(2). With this rule, second-order
+     * reverse through DIGAMMA (whose first adjoint emits TRIGAMMA) composes. The
      * adjoint is a fresh POLYGAMMA(order = 2) over the cloned primal operand —
      * values only, never extents, sentinel-safe by construction.
      */
@@ -1284,10 +1268,10 @@ object VjpRegistry {
     }
 
     /**
-     * `d/dx(ψ⁽ⁿ⁾(x)) = ψ⁽ⁿ⁺¹⁾(x)`. §0.4.405 — the general polygamma rule: the
+     * `d/dx(ψ⁽ⁿ⁾(x)) = ψ⁽ⁿ⁺¹⁾(x)`. The general polygamma rule: the
      * adjoint climbs one rung of the ψ-ladder by re-emitting POLYGAMMA with
-     * `order + 1` (a LITERAL attr read off the primal op, never a shape — the
-     * §0.4.366 sentinel discipline is trivially satisfied), so reverse
+     * `order + 1` (a LITERAL attr read off the primal op, never a shape — so it is
+     * trivially sentinel-safe), so reverse
      * differentiation through the special-function family composes to ANY
      * depth. The order attr is part of the CSE signature, so ψ⁽ⁿ⁾ and ψ⁽ⁿ⁺¹⁾
      * nodes over the same operand never deduplicate onto each other.
@@ -1416,28 +1400,25 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.40 — `CAST` is emitted by the FIR lowering for dtype conversions like
+     * `CAST` is emitted by the FIR lowering for dtype conversions like
      * `i.toFloat()` (where `i` is the loop counter). An Int/Long/Bool operand is
      * not a differentiable surface: contribution stays empty (the reverse
-     * transform's zero-init covers the slot — the §0.4.419 integer-operand
+     * transform's zero-init covers the slot — the integer-operand
      * exception to the analytical-adjoint rule).
      *
-     * §0.4.427 — the FLOAT→FLOAT arm this rule's own §0.4.40 note anticipated:
-     * a precision cast (F32↔F64, the `DoubleScalar` grad{}-param path) is the
+     * FLOAT→FLOAT: a precision cast (F32↔F64, the `DoubleScalar` grad{}-param path) is the
      * identity map on values, so its adjoint is the reverse cast of upstream
      * back to the operand's dtype. Emitted only when BOTH sides are float —
      * float→int truncation stays contribution-free (piecewise-constant).
      *
-     * §0.4.456 (G1b) — BF16 joins the float set, STRAIGHT-THROUGH: the adjoint
+     * BF16 is in the float set, STRAIGHT-THROUGH: the adjoint
      * of the narrowing cast f32→bf16 is the WIDENING cast of the upstream
      * (bf16→f32, exact), and the adjoint of the widening cast is the narrowing
      * cast of the upstream. RNE rounding is piecewise-identity (derivative 1
      * a.e.), so the straight-through estimator is the analytical adjoint
      * everywhere off the measure-zero rounding boundaries — the same
-     * convention PyTorch autocast and JAX use for precision casts. Without
-     * this arm the rule returned an EMPTY contribution for bf16 casts — a
-     * silent zero gradient, exactly the failure mode the north-star rule
-     * exists to forbid.
+     * convention PyTorch autocast and JAX use for precision casts. An EMPTY
+     * contribution here would be a silent zero gradient.
      */
     val CastRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
@@ -1493,7 +1474,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.396 — `y = flip(x, axes)` (Phase C3, DiffKT `flip`). REVERSE is a
+     * `y = flip(x, axes)`. REVERSE is a
      * permutation of the elements and an involution, so it is SELF-ADJOINT:
      * `dx = REVERSE(dy, same axes)` — flipping is linear, its permutation
      * matrix is symmetric, and applying the same flip to the upstream undoes
@@ -1525,7 +1506,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.415 — Phase B5 (customVjp): CHECK_SHAPE_LIKE is a value-identity
+     * CHECK_SHAPE_LIKE (customVjp) is a value-identity
      * carrying a runtime dims assert (a USER gradient_body's shape contract),
      * so its adjoint is the upstream passed straight through to the value
      * operand: the check guarantees the value's runtime shape equals the
@@ -1542,9 +1523,9 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.41 — d(arr[idx])/d(arr) is a one-hot vector at slot [idx] with value 1;
+     * d(arr[idx])/d(arr) is a one-hot vector at slot [idx] with value 1;
      * scaled by [upstream], the adjoint is `SCATTER(zeros_like(arr), idx, upstream)`.
-     * §0.4.111 — same shape generalises to rank-2 `arr`: d(arr[idx, :])/d(arr) is a
+     * The same shape generalises to rank-2 `arr`: d(arr[idx, :])/d(arr) is a
      * matrix of zeros with row [idx] equal to `upstream` (rank-1). The structural
      * BROADCAST → SCATTER_ADD chain works unchanged because every operand's type
      * is derived from `arr.type` or `upstream`'s type.
@@ -1569,7 +1550,7 @@ object VjpRegistry {
      * — same as how [MulRule] marks both operands even though only the product's
      * derivative structure needs them.
      *
-     * Phase A5c-3 — index 0 joins the set as well, but only per NODE: the zero base
+     * Index 0 joins the set as well, but only per NODE: the zero base
      * is a scalar splat to `arr`'s shape, so under symbolic dims it carries `arr` as
      * a shape template (see [broadcastTo]). With concrete dims no template is
      * emitted and `arr` stays uncloned, which is why [readsPrimalOperands] refines
@@ -1611,7 +1592,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.370 — reverse of EMBEDDING (DiffKT-parity `embedding` gradient).
+     * Reverse of EMBEDDING (the `embedding` gradient).
      * `EMBEDDING(table, indices)` gathers `table[indices[p], :]` for each flat
      * index position `p`; its adjoint w.r.t. `table` scatter-ADDs each upstream
      * row back to the vocab slot its index selected:
@@ -1620,7 +1601,7 @@ object VjpRegistry {
      * [OpKind.EMBEDDING_GRAD] op (indices, upstream, tableTemplate) → dTable,
      * mirroring how [GatherRule] fuses its scatter-add adjoint.
      *
-     * §0.4.400 — the primal table rides along as a SHAPE-ONLY template operand
+     * The primal table rides along as a SHAPE-ONLY template operand
      * (the SUM_TO/PAD_TO convention): under `grad {}`'s -1 sentinel dims the
      * result type's vocab extent is unknowable at compile time, and the
      * template's runtime dims are the only sound source for the synthesis's
@@ -1651,17 +1632,15 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.418 — reverse of SPARSE_MATMUL (Phase E1b, DiffKT sparse parity —
-     * the sparse×dense matmul VJP the whole phase exists for; DiffKT itself
-     * has NO sparse VJP anywhere, so this is parity-plus).
+     * Reverse of SPARSE_MATMUL (the sparse×dense matmul VJP).
      *
      * Forward primal `Y = A · B` over the CSR components (values, colIdx,
      * rowPtr) of A [N, C] and dense B [C, D]:
      *
      * - `d_values` = the SDDMM masked to the sparsity pattern,
      *   `d_values[k] = Σ_j upstream[row(k), j] · B[colIdx[k], j]`, emitted as
-     *   the single fused [OpKind.SPARSE_MATMUL_VALUES_ADJOINT] (the
-     *   EMBEDDING_GRAD fused-adjoint precedent — O(nnz·D), never the dense
+     *   the single fused [OpKind.SPARSE_MATMUL_VALUES_ADJOINT] (fused like
+     *   EMBEDDING_GRAD — O(nnz·D), never the dense
      *   [N, C] outer product re-masked).
      * - `d_dense = Aᵀ · upstream`, emitted as SPARSE_MATMUL over the SAME
      *   components with `transposed = true` and the primal dense operand
@@ -1683,7 +1662,7 @@ object VjpRegistry {
      * a transposed primal gets no contribution (shape-only).
      *
      * colIdx/rowPtr (operands 1, 2) are integer tensors: non-differentiable,
-     * structural-zero slots (§0.4.54/§0.4.400) — no contribution flows to
+     * structural-zero slots — no contribution flows to
      * them. [readsPrimalOperandIndices] = all of 0..3: every adjoint op
      * dereferences the CSR components, and the dense operand feeds both the
      * SDDMM and (as template) the transposed product.
@@ -1724,11 +1703,11 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.77 — reverse of BROADCAST. When a lower-rank input is broadcast to a
+     * Reverse of BROADCAST. When a lower-rank input is broadcast to a
      * higher-rank output, the gradient flowing back must be SUM-reduced across
      * the inserted dims to return to the input's shape.
      *
-     * §0.4.84 — generalised to axis-aware partial SUM. The `broadcast_dimensions`
+     * Axis-aware partial SUM: The `broadcast_dimensions`
      * attr on the primal BROADCAST names which output axes the input's axes map
      * to; the reverse sums over the *other* output axes (those inserted by
      * broadcasting). Falls back to the scalar-input special case (SUM over all
@@ -1789,7 +1768,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.399 — the runtime-extent family closes under differentiation.
+     * The runtime-extent family closes under differentiation.
      *
      * SUM_TO's adjoint w.r.t. `value` broadcasts the upstream (shaped like the
      * TEMPLATE) back up to `value`'s shape — but that shape is a -1 sentinel
@@ -1801,11 +1780,9 @@ object VjpRegistry {
      *
      * `readsPrimalOperandIndices = setOf(0)`: the adjoint dereferences the
      * primal `value` operand as BROADCAST_LIKE's template, so its subgraph
-     * must be cloned into the gradient body. Before this rule existed,
-     * reverse-mode THROUGH a gradient body — reverse-over-reverse, the one
-     * second-order composition forward-over-reverse (§0.4.394's hessian)
-     * cannot substitute for — failed loudly with "no VJP rule registered for
-     * SUM_TO".
+     * must be cloned into the gradient body. This rule is what lets
+     * reverse mode run THROUGH a gradient body (reverse-over-reverse, the one
+     * second-order composition forward-over-reverse cannot substitute for).
      */
     val SumToRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
@@ -1817,7 +1794,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.399 — BROADCAST_LIKE's own VJP is the numpy unbroadcast back down to
+     * BROADCAST_LIKE's own VJP is the numpy unbroadcast back down to
      * `value`'s runtime shape: `SUM_TO(upstream, template=value)`. Together with
      * [SumToRule] the pair is closed — each op's adjoint is the other, so any
      * order of differentiation through them terminates.
@@ -1832,7 +1809,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.399 — PAD_TO's adjoint w.r.t. `value` cuts the upstream (shaped like
+     * PAD_TO's adjoint w.r.t. `value` cuts the upstream (shaped like
      * the TEMPLATE) back down to `value`'s window: the extents are `value`'s
      * runtime shape (-1 sentinels under `grad {}`, so `SLICE_AT` reads them off
      * the primal `value` operand at execution) and the offset is the PAD_TO
@@ -1854,12 +1831,12 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.399 — SLICE_AT's own VJP zero-pads the upstream back into `value`'s
+     * SLICE_AT's own VJP zero-pads the upstream back into `value`'s
      * window at the same literal `low`: `PAD_TO(upstream, template=value, low)`.
      * The PAD_TO ⇄ SLICE_AT pair is closed under differentiation, like
      * SUM_TO ⇄ BROADCAST_LIKE. (SLICE_LIKE's window offset is a runtime SUM of
      * prior templates' extents, which no literal `low` can carry — it gets its
-     * own mirror, [SliceLikeVjpRule]'s PAD_LIKE, §0.4.404.)
+     * own mirror, [SliceLikeVjpRule]'s PAD_LIKE.)
      */
     val SliceAtRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
@@ -1874,22 +1851,21 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.404 — SLICE_LIKE's adjoint, the last ruleless member of the
-     * runtime-extent family (the §0.4.399 deferral). `d/d value
+     * SLICE_LIKE's adjoint. `d/d value
      * SLICE_LIKE(value, thisTemplate, priors…, axis)` places the upstream
      * (shaped like the window) back into `value`'s extent at the window's
      * offset — and that offset is `Σⱼ priorⱼ.dims[axis]`, a runtime SUM of the
      * PRIOR templates' extents that no literal `low` (PAD_TO/SLICE_AT) can
      * carry. `PAD_LIKE(upstream, outTemplate=value, same priors, axis)` reads
      * it off the same shape-only templates at execution: the primal `value`
-     * becomes the outTemplate of its own adjoint (the §0.4.399 inversion), and
+     * becomes the outTemplate of its own adjoint (the same inversion as [SumToRule]), and
      * the priors ride along verbatim. `thisTemplate` is NOT dereferenced — the
      * upstream already carries the window's shape. Templates get no
      * contribution (pure shape sources — typed zeros).
      *
      * Variadic, so the static property cannot express "value plus every
-     * prior"; [readsPrimalOperands] is authoritative (the ConcatRule
-     * precedent): index 0 (dereferenced as PAD_LIKE's outTemplate) plus every
+     * prior"; [readsPrimalOperands] is authoritative (as for
+     * ConcatRule): index 0 (dereferenced as PAD_LIKE's outTemplate) plus every
      * prior index 2.. — each must be cloned into the gradient body.
      */
     val SliceLikeVjpRule: VjpRule = object : VjpRule {
@@ -1910,7 +1886,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.404 — PAD_LIKE's own VJP cuts the upstream back out of the placed
+     * PAD_LIKE's own VJP cuts the upstream back out of the placed
      * window: `SLICE_LIKE(upstream, thisTemplate=value, same priors, axis)`.
      * The SLICE_LIKE ⇄ PAD_LIKE pair is closed under differentiation, like
      * SUM_TO ⇄ BROADCAST_LIKE and PAD_TO ⇄ SLICE_AT — with it, EVERY
@@ -1938,7 +1914,7 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.460 — Phase G3a: all-reduce-sum is SELF-ADJOINT, so the gradient of
+     * All-reduce-sum is SELF-ADJOINT, so the gradient of
      * a sum-all-reduce is the SAME all-reduce on the upstream (same
      * replica_groups, same reduction). In the replicated per-replica-upstream
      * view the collective's Jacobian is `ones(n,n) ⊗ I` — symmetric — and
@@ -1951,7 +1927,7 @@ object VjpRegistry {
      *
      * The general-op story (refusals fire inside [AllReduceAttrs.parse], by
      * name): mean SCALES the upstream by 1/|group|; max/min need subgradient
-     * routing — both defer by name until a consumer exists.
+     * routing — both are refused by name.
      */
     val AllReduceRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = emptySet()
@@ -1963,11 +1939,11 @@ object VjpRegistry {
     }
 
     /**
-     * §0.4.460 — Phase G3a: SHARD_CONSTRAINT is a value identity with layout
+     * SHARD_CONSTRAINT is a value identity with layout
      * metadata, so its adjoint is the identity — the upstream passes through
      * untouched. Re-emitting the SAME constraint onto the adjoint value
-     * (JAX's with_sharding_constraint transpose) is a NAMED DEFERRAL: it
-     * needs mesh carryover into AD-built functions; until then
+     * (JAX's with_sharding_constraint transpose) is not done: it
+     * needs mesh carryover into AD-built functions. Instead,
      * GradShardingVerify's param-boundary identity-dual check governs
      * gradient layouts.
      */

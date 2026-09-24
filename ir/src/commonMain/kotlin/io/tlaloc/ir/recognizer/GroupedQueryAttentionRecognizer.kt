@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * §0.4.320 — recognise grouped-query / multi-query attention shapes.
+ * Recognise grouped-query / multi-query attention shapes.
  *
  * Anchors on [OpKind.SOFTMAX] like [recognizeFlashAttention], then walks
  * the K and V operands of the surrounding matmuls back through a chain
@@ -16,10 +16,8 @@ import io.tlaloc.ir.OpKind
  *
  * The match's [RecognitionMatch.GroupedQueryAttention.ops] list contains
  * the FlashAttention triple plus all walked TRANSPOSE/RESHAPE/BROADCAST
- * ops, so the §0.4.282 [resolveLargestMatch] picks this over the bare
- * FlashAttention match every time. This is the third v2-resolver
- * scenario after TransformerMLP > SwiGLU and (the deferred RSQRT-form)
- * LayerNorm > RmsNorm.
+ * ops, so [resolveLargestMatch] picks this over the bare
+ * FlashAttention match every time (as it picks TransformerMLP over SwiGLU).
  *
  * # Near-miss diagnostics
  *

@@ -1,11 +1,10 @@
 package io.tlaloc.kptx
 
 /**
- * KPTX v2.1 (§0.4.338) — canonical PTX text emitter. The output format
- * **is** the corpus format: task 10's parser round-trips
+ * Canonical PTX text emitter. The output format
+ * **is** the corpus format: [parsePtx] round-trips
  * `emit(parse(text)) == text` byte-for-byte against text in this style,
- * which is deliberately the style the v1 hand-written kernels already
- * use (§0.4.328–337):
+ * which is the style of the hand-written KPTX kernels:
  *
  * ```
  * .version 7.0

@@ -23,8 +23,8 @@ import io.tlaloc.ir.OpKind
 import java.security.MessageDigest
 
 /**
- * §0.4.26 — Canonical textual serialisation + SHA-256 hashing of [DxirFunction] for
- * the Stage B.3 coarsening cache (plan §5.4). Enables two things simultaneously:
+ * Canonical textual serialisation + SHA-256 hashing of [DxirFunction] for
+ * the coarsening cache ([CoarseningCache]). Enables two things simultaneously:
  *
  *  - **Cache key**: [hash] produces a stable SHA-256 hex digest that does NOT depend
  *    on the original SSA ids — re-numbered to 0..N in depth-first pre-order so two
@@ -33,7 +33,7 @@ import java.security.MessageDigest
  *  - **Cache payload**: [serialise] / [deserialise] round-trip a function through a
  *    line-oriented text format so cached artifacts survive across JVM invocations.
  *
- * ### Scope (first cut)
+ * ### Scope
  *
  *  - Scalar + rank-N `DxirType` (dtype + dim list serialised verbatim).
  *  - [DxirParam] / [DxirConst] / [DxirOp] (single + multi-result, with nested regions

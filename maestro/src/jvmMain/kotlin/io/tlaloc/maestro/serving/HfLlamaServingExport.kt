@@ -10,26 +10,23 @@ import io.tlaloc.ir.inference.HfLlamaStagedWeights
 import java.nio.file.Path
 
 /**
- * §0.4.480 — Phase H3c-3: export a **real HuggingFace Llama checkpoint** as a
+ * Export a **real HuggingFace Llama checkpoint** as a
  * serving artifact.
  *
- * This is the other end of the line [ServingArtifactWriter] draws.
- * §0.4.478 taught the repo to read a real TinyLlama by role, §0.4.479 turned
- * those tensors into a decode graph whose logits match HuggingFace
- * transformers, and the thing both of them stopped short of was the
- * ARTIFACT — because the manifest had nowhere to put a weight table and the
- * loader had no way to bind one. Both now do, and this object is the
- * composition: checkpoint in, deployment directory out.
+ * This is the other end of the line [ServingArtifactWriter] draws. It
+ * composes the checkpoint reader (tensors located by role), the decode
+ * graph built from them (logits match HuggingFace transformers), and the
+ * staged weight table: checkpoint in, deployment directory out.
  *
  * ## The reduced-layer knob, and why it is a parameter
  *
  * [export] takes `numLayers`, defaulting to the checkpoint's own. A reduced
- * copy is the exact object §0.4.479 certified against transformers (both
+ * copy is the exact object certified against transformers (both
  * sides reduced by the same arithmetic), so the cheap lane and the real lane
  * are **the same code path with one integer different** — which is the only
  * way a fast test says anything about the slow one. It is NOT a trimming
  * heuristic: layers are taken as a prefix, 0..n-1, and every other dimension
- * must still match the file (§0.4.479's `loadFor` refuses per tensor if it
+ * must still match the file (`loadFor` refuses per tensor if it
  * does not).
  *
  * ## What is NOT here

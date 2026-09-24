@@ -10,8 +10,8 @@ import kotlin.math.max
 import kotlin.random.Random
 
 /**
- * §0.4.415 — Phase B5: user-defined custom derivatives (the ratified
- * Candidate A call-form of docs/CUSTOM_DERIVATIVES_DESIGN.md). `customVjp(f,
+ * User-defined custom derivatives (the call-form described in
+ * docs/CUSTOM_DERIVATIVES_DESIGN.md). `customVjp(f,
  * vjpFn)` attaches a USER-written reverse-mode adjoint to `f`: inside a
  * differentiated lambda (`grad {}` / `vjp {}`), applying the returned function
  * runs `f` in the value stream while reverse mode splices `vjpFn` — verbatim,
@@ -36,8 +36,8 @@ import kotlin.random.Random
  * **Forward mode refuses**: `jvp {}` over a body containing a `customVjp`
  * application errors loudly naming `user_gradient` — auto-differentiating
  * `f`'s primal would silently disagree with a deliberately divergent user
- * adjoint (the ratified refuse-unless-jvpFn policy; [customVjpJvp] — landed
- * §0.4.416 — lifts it by supplying both bodies).
+ * adjoint (forward mode refuses unless a JVP is supplied; [customVjpJvp]
+ * lifts the refusal by supplying both bodies).
  *
  * **Host-stub asymmetry vs [grad]**: without the plugin (or outside any
  * differentiated context) `customVjp` does NOT throw [pluginMissing] — it
@@ -50,7 +50,7 @@ import kotlin.random.Random
 fun <A, R> customVjp(f: (A) -> R, vjpFn: (R, A) -> A): (A) -> R = f
 
 /**
- * §0.4.415 — the two-argument [customVjp]: `vjpFn(upstream, a, b)` returns
+ * The two-argument [customVjp]: `vjpFn(upstream, a, b)` returns
  * `Pair(d_a, d_b)`, which the FIR lowering unboxes to the COARSENED
  * `gradient_body`'s 2-return convention. The `Pair` must be constructed
  * directly at the return position (`Pair(da, db)` or `da to db`).
@@ -58,8 +58,8 @@ fun <A, R> customVjp(f: (A) -> R, vjpFn: (R, A) -> A): (A) -> R = f
 fun <A, B, R> customVjp2(f: (A, B) -> R, vjpFn: (R, A, B) -> Pair<A, B>): (A, B) -> R = f
 
 /**
- * §0.4.416 — Phase B5, the forward twin (Candidate C of
- * docs/CUSTOM_DERIVATIVES_DESIGN.md): `customJvp(f, jvpFn)` attaches a
+ * The forward twin (see docs/CUSTOM_DERIVATIVES_DESIGN.md):
+ * `customJvp(f, jvpFn)` attaches a
  * USER-written forward-mode tangent to `f`. Inside a `jvp {}` /
  * `valueAndJvp {}` body, applying the returned function runs `f` in the value
  * stream while forward mode splices `jvpFn` — verbatim, with NO fallback to
@@ -83,14 +83,14 @@ fun <A, B, R> customVjp2(f: (A, B) -> R, vjpFn: (R, A, B) -> Pair<A, B>): (A, B)
 fun <A, R> customJvp(f: (A) -> R, jvpFn: (A, A) -> R): (A) -> R = f
 
 /**
- * §0.4.416 — the two-argument [customJvp]: `jvpFn(a, b, da, db)` returns the
+ * The two-argument [customJvp]: `jvpFn(a, b, da, db)` returns the
  * single result tangent `dy` (primals first, then tangents — the
  * `DxirForwardTransform` emission order for any arity).
  */
 fun <A, B, R> customJvp2(f: (A, B) -> R, jvpFn: (A, B, A, B) -> R): (A, B) -> R = f
 
 /**
- * §0.4.416 — BOTH user derivatives on one function: `vjpFn` is spliced by
+ * BOTH user derivatives on one function: `vjpFn` is spliced by
  * reverse mode exactly as in [customVjp], `jvpFn` by forward mode exactly as
  * in [customJvp] — flipping both refusals, so the returned function
  * differentiates in `grad {}`/`vjp {}` AND `jvp {}`/`hessian` alike. The two
@@ -102,7 +102,7 @@ fun <A, B, R> customJvp2(f: (A, B) -> R, jvpFn: (A, B, A, B) -> R): (A, B) -> R 
  */
 fun <A, R> customVjpJvp(f: (A) -> R, vjpFn: (R, A) -> A, jvpFn: (A, A) -> R): (A) -> R = f
 
-/** §0.4.416 — the two-argument [customVjpJvp]. */
+/** The two-argument [customVjpJvp]. */
 fun <A, B, R> customVjpJvp2(
     f: (A, B) -> R,
     vjpFn: (R, A, B) -> Pair<A, B>,
@@ -110,7 +110,7 @@ fun <A, B, R> customVjpJvp2(
 ): (A, B) -> R = f
 
 /**
- * §0.4.415 — the result of [checkCustomVjp]: both sides of the JVP⇄VJP
+ * The result of [checkCustomVjp]: both sides of the JVP⇄VJP
  * inner-product identity `⟨ȳ, J·v⟩ = ⟨vjpFn(ȳ, x), v⟩` at one random probe,
  * with `J·v` estimated by central differences of `f`.
  */
@@ -126,8 +126,7 @@ data class CustomVjpCheck(
 )
 
 /**
- * §0.4.415 — the OPT-IN debug oracle for a [customVjp] pair (the ratified
- * third decision of docs/CUSTOM_DERIVATIVES_DESIGN.md §6): numerically checks
+ * The OPT-IN debug oracle for a [customVjp] pair: numerically checks
  * the JVP⇄VJP cross-identity `⟨ȳ, J_f(at)·v⟩ = ⟨vjpFn(ȳ, at), v⟩` at random
  * directions `v`, `ȳ` drawn from a seeded [Random], with the directional
  * derivative `J·v` estimated by CENTRAL DIFFERENCES of `f` — pure host math on

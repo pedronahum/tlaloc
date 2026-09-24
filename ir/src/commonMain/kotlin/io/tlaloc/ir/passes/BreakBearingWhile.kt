@@ -10,16 +10,17 @@ import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.OpKind
 
 /**
- * §0.4.123 — D.3i Phase 1. Structural detector for the LAND-composed break-bearing
+ * Structural detector for the LAND-composed break-bearing
  * WHILE pattern. The FIR lowering hoists `while (cond) { ... if (break_cond) break }`
  * into a `WHILE` whose cond region is `LAND(cond, NOT(break_cond))` (per [OpKind.LAND]'s
- * source comment). This detector recognises that shape so future phases can apply
- * paper §6's closed-form closure to break-bearing loops without re-parsing the
+ * source comment). This detector recognises that shape so a closed-form loop
+ * closure can be applied to break-bearing loops without re-parsing the
  * structure each time.
  *
- * Phase 1 ships only the detector — no rewrite, no gradient handling. Subsequent
- * phases will plug into [PhiCalculus.coarsenFunction]'s WHILE path or
- * [DxirReverseTransform]'s reverse walk to apply the closure rule.
+ * This is a detector only: it performs no rewrite and no gradient handling.
+ * A closure rule for break-bearing loops would plug into
+ * [PhiCalculus.coarsenFunction]'s WHILE path or [DxirReverseTransform]'s
+ * reverse walk.
  *
  * Returned [Pattern] carries:
  *  - [origCond]: the first operand of the top-level LAND — the loop's "natural"
@@ -30,7 +31,7 @@ import io.tlaloc.ir.OpKind
  *
  * @see OpKind.LAND for the FIR-side hoist that produces this shape.
  * @see PhiCalculus.detectAffineRecurrence for the analogous pattern detector
- *      applied to the C6 affine-recurrence form.
+ *      applied to the affine-recurrence form.
  */
 object BreakBearingWhile {
 
@@ -39,15 +40,15 @@ object BreakBearingWhile {
      * [breakCond]) are always non-null on a successful match. The trip-count fields
      * ([counterArgIdx], [tripCountConst], [tripCountParam], [tripCountOp],
      * [tripCountOpResult]) are populated when [origCond] matches the canonical
-     * `STEP(SUB(n, args[counterArgIdx]))` C5/C6 shape; otherwise they're null and
+     * `STEP(SUB(n, args[counterArgIdx]))` counted-loop shape; otherwise they're null and
      * consumers fall back to other detection paths.
      *
      * Trip count is mutually exclusive: at most one of [tripCountConst] /
      * [tripCountParam] / [tripCountOp] / [tripCountOpResult] is non-null when
      * [counterArgIdx] is set. A concrete-int bound flows through [tripCountConst];
      * a loop-invariant scalar param bound flows through [tripCountParam]; a
-     * scalar-typed [DxirOp] bound (added §0.4.143) flows through [tripCountOp];
-     * a scalar-typed [DxirOpResult] bound (added §0.4.150) flows through
+     * scalar-typed [DxirOp] bound flows through [tripCountOp];
+     * a scalar-typed [DxirOpResult] bound flows through
      * [tripCountOpResult] — i.e., a multi-result op's result(k) used directly
      * as the trip count.
      */
@@ -63,17 +64,16 @@ object BreakBearingWhile {
     )
 
     /**
-     * §0.4.126 — D.3i Phase 3a. Dependency classification of the break predicate.
-     * Future closure phases dispatch on this to pick the right break-iteration
-     * computation strategy:
+     * Dependency classification of the break predicate. A closure rule
+     * dispatches on this to pick the break-iteration computation strategy:
      *  - [Constant] — folded at compile time; the closure is fully resolved (skip
      *    the loop entirely or treat as a vanilla [OpKind.WHILE]).
      *  - [LoopInvariant] — predicate is constant across iterations but only known
      *    at runtime; the closure can evaluate it once before the loop and branch.
      *  - [CounterOnly] — depends only on the counter block-arg (and loop-invariant
-     *    operands); break iteration is structurally derivable (Phase 3b: Symja).
+     *    operands); the break iteration is derivable symbolically.
      *  - [CarriedDependent] — depends on at least one non-counter carried block-arg;
-     *    the break must stay per-iteration (Phase 3c: runtime fallback).
+     *    the break must stay per-iteration (runtime evaluation).
      */
     sealed class BreakCondClass {
         /**
@@ -162,12 +162,12 @@ object BreakBearingWhile {
     }
 
     /**
-     * §0.4.126 — D.3i Phase 3a. Classify [pattern]'s [Pattern.breakCond] by what
-     * it depends on within the cond region, so future closure phases can dispatch
-     * to the right break-iteration computation strategy.
+     * Classify [pattern]'s [Pattern.breakCond] by what it depends on within the
+     * cond region, so a closure rule can dispatch to the right break-iteration
+     * computation strategy.
      *
      * Returns null when [Pattern.counterArgIdx] is null — the classifier requires
-     * the Phase-1/1.5/2 invariants (see [Pattern]) to be satisfied so it can
+     * the counter and trip-count invariants (see [Pattern]) to be satisfied so it can
      * distinguish counter references from generic carried-arg references.
      *
      * The walk descends through [DxirOp.operands], [DxirOpResult.source], and
@@ -212,14 +212,14 @@ object BreakBearingWhile {
     }
 
     /**
-     * §0.4.125 — Phase 2 validation. Confirm that:
+     * Counter validation. Confirm that:
      *  - `whileOp.operands[counterArgIdx]` is `const(0)` (integer-valued).
      *  - The body block's terminator at slot [counterArgIdx] is
      *    `ADD(bodyArgs[counterArgIdx], const(1))` (the standard +=1 increment).
      *
      * Returns true when both invariants hold. Mirrors the same checks
      * [PhiCalculus.detectSimpleLoop] and [PhiCalculus.detectAffineRecurrence]
-     * apply for the C5/C6 paths — keeping them in lockstep means the trip-count
+     * apply for simple and affine-recurrence loops — keeping them in lockstep means the trip-count
      * surface this detector produces is interoperable with the existing
      * closure-pipeline expectations.
      */
@@ -241,24 +241,25 @@ object BreakBearingWhile {
     }
 
     /**
-     * §0.4.124 — extract counter index + trip count bound from a node matching
-     * `STEP(SUB(n, args[counterArgIdx]))`, the canonical C5 / C6 cond shape used
+     * Extract counter index + trip count bound from a node matching
+     * `STEP(SUB(n, args[counterArgIdx]))`, the canonical counted-loop cond shape used
      * across [PhiCalculus.detectSimpleLoop] and [PhiCalculus.detectAffineRecurrence].
      * Returns null if [node] doesn't match.
      *
      * The bound `n` is recognised in four forms:
      *  - [DxirConst] with a non-negative integer-valued numeric → `tripCountConst`.
      *  - [DxirParam] of scalar type → `tripCountParam` (loop-invariant symbolic bound).
-     *  - [DxirOp] of scalar type → `tripCountOp` (added §0.4.143; downstream phases
-     *    distinguish region-internal liftable from outer-scope by checking against
+     *  - [DxirOp] of scalar type → `tripCountOp` (consumers distinguish a
+     *    region-internal liftable bound from an outer-scope one by checking against
      *    the cond-region body's id set).
-     *  - [DxirOpResult] of scalar type → `tripCountOpResult` (added §0.4.150;
-     *    multi-result op's `result(k)` used directly as the trip count).
+     *  - [DxirOpResult] of scalar type → `tripCountOpResult` (a multi-result op's
+     *    `result(k)` used directly as the trip count).
      *
      * This helper is intentionally NOT shared with the existing PhiCalculus.kt
      * detectors — those run earlier in the pipeline and target slightly different
-     * structural shapes (concrete-only for C5; broader for C6). Keeping the D.3i
-     * extraction in its own surface lets it evolve independently.
+     * structural shapes (concrete-only bounds for simple loops; broader for affine
+     * recurrences). Keeping the break-bearing extraction in its own surface lets it
+     * evolve independently.
      */
     private data class CounterMatch(
         val argIdx: Int,

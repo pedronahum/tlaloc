@@ -6,7 +6,7 @@ import kotlin.math.ln
 import kotlin.math.sqrt
 
 /**
- * §0.4.408 — Phase D1: the stateless PRNG foundation (DiffKT `RandomKey`
+ * The stateless PRNG foundation (DiffKT `RandomKey`
  * parity, first slice).
  *
  * DiffKT's `random/` package is a counter-based (stateless) PRNG: a
@@ -36,10 +36,10 @@ import kotlin.math.sqrt
  * identities instead of an erfinv approximation. It is still a pure function
  * of (key, index) with the same determinism guarantees.
  *
- * All draws are NON-differentiable in this slice: a `grad {}` / jvp body
+ * All draws are NON-differentiable: a `grad {}` / jvp body
  * containing an RNG op refuses loudly by name (the output is
  * piecewise-constant in the key, and DiffKT's reparameterized-gradient story
- * — gradients through the loc/scale of sampled normals — is Phase D2).
+ * — gradients through the loc/scale of sampled normals — is not supported).
  */
 
 /**
@@ -203,7 +203,7 @@ fun normalFloats(key: RandomKey, n: Int): FloatArray {
  * `x = tan(π · (u − ½))` over one [uniformFloats] stream. `u ∈ [0, 1)` maps
  * to angle `[−π/2, π/2)`; `u = ½` (an exact f32 multiple of 2⁻²³, so it does
  * occur) lands exactly on tan(0) = 0, and the pole at −π/2 is never hit
- * exactly but nearby mantissas produce the honest heavy tail (finite-but-huge
+ * exactly but nearby mantissas produce the genuine heavy tail (finite-but-huge
  * in Double, never ±∞ — the TAN arm's IEEE note). Centring and scaling are
  * f32, the tangent goes through Double — bit-for-bit the composition
  * RNG_UNIFORM → SUB ½ → MUL π → TAN that the `grad {}` lowering emits.
@@ -221,7 +221,7 @@ fun cauchyFloats(key: RandomKey, n: Int): FloatArray {
  * [n] unit-rate exponential f32 draws via the quantile transform:
  * `x = −ln(1 − u)`. `1 − u ∈ (0, 1]` keeps the log finite (u < 1 exactly,
  * the same guard [normalFloats] leans on), and `u = 0` gives exactly 0 —
- * the distribution's support edge, honestly included. The log runs in
+ * the distribution's support edge, included. The log runs in
  * Double over the f32 complement, mirroring the LOG arm convention.
  */
 fun exponentialFloats(key: RandomKey, n: Int): FloatArray {
@@ -283,7 +283,7 @@ fun <R : ShapeAtom, C : ShapeAtom> RandomKey.normalMatrix(
 ): DTensor<Rank2<R, C>, F32> =
     DTensor(HostF32Storage(normalFloats(this, rows * cols)), intArrayOf(rows, cols), F32)
 
-/** Standard-Cauchy rank-1 host tensor of [n] draws (§0.4.431). */
+/** Standard-Cauchy rank-1 host tensor of [n] draws. */
 fun <A : ShapeAtom> RandomKey.cauchyVector(n: Int): DTensor<Rank1<A>, F32> =
     DTensor(HostF32Storage(cauchyFloats(this, n)), intArrayOf(n), F32)
 
@@ -294,7 +294,7 @@ fun <R : ShapeAtom, C : ShapeAtom> RandomKey.cauchyMatrix(
 ): DTensor<Rank2<R, C>, F32> =
     DTensor(HostF32Storage(cauchyFloats(this, rows * cols)), intArrayOf(rows, cols), F32)
 
-/** Unit-rate exponential rank-1 host tensor of [n] draws (§0.4.431). */
+/** Unit-rate exponential rank-1 host tensor of [n] draws. */
 fun <A : ShapeAtom> RandomKey.exponentialVector(n: Int): DTensor<Rank1<A>, F32> =
     DTensor(HostF32Storage(exponentialFloats(this, n)), intArrayOf(n), F32)
 
@@ -305,7 +305,7 @@ fun <R : ShapeAtom, C : ShapeAtom> RandomKey.exponentialMatrix(
 ): DTensor<Rank2<R, C>, F32> =
     DTensor(HostF32Storage(exponentialFloats(this, rows * cols)), intArrayOf(rows, cols), F32)
 
-/** Chi-square([dof]) rank-1 host tensor of [n] draws (§0.4.431). */
+/** Chi-square([dof]) rank-1 host tensor of [n] draws. */
 fun <A : ShapeAtom> RandomKey.chiSquareVector(n: Int, dof: Int): DTensor<Rank1<A>, F32> =
     DTensor(HostF32Storage(chiSquareFloats(this, n, dof)), intArrayOf(n), F32)
 

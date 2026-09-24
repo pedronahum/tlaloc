@@ -1,6 +1,6 @@
 /**
- * §0.4.443 — Phase F7: the GRU layer, gate equations EXACTLY as the F0 audit
- * read them off DiffKT's fresh-clone source (F0 §4.0.4): input
+ * The GRU layer, gate equations EXACTLY as DiffKT's
+ * source defines them: input
  * `[batch, seq, numInputs]` (batch axis 0, seq axis 1), initial hidden state
  * zeros expanded to the batch, per time step
  *
@@ -18,23 +18,23 @@
  * LAST step's `[batch, numHidden]`; `AccType.AccMap` concatenates the per-step
  * outputs (each unsqueezed at the seq axis) into `[batch, seq, numHidden]`.
  *
- * The implementation is the gap table's F7 row verbatim: a LIBRARY-LEVEL
+ * The implementation is a LIBRARY-LEVEL
  * unroll. Per time step the gate math is traced ops (SLICE → RESHAPE squeeze,
  * CONCAT, the Dense matmul/broadcast/add, sigmoid/tanh, elementwise MUL/SUB/
- * ADD — every spelling already on the tape from F2/F5/F6), the sequence loop
+ * ADD — every spelling already on the tape), the sequence loop
  * is a plain Kotlin `for` building the trace, and the captured `DxirFunction`
  * is the UNROLLED graph — `DxirReverseTransform` differentiates it like any
  * other graph, so backpropagation through time is not a feature, it is what
  * reverse-mode ON the unrolled graph ALREADY IS. Zero gradient math in this
- * file, zero new TRACE spellings, zero `Backward.kt` changes.
+ * file and zero new TRACE spellings.
  *
  * The initial hidden state is a CONSTANT zeros leaf `[batch, numHidden]`
- * (`isConstant = true` — the F5 dropout-mask precedent): DiffKT's
+ * (`isConstant = true`, as for the dropout mask): DiffKT's
  * `initialState` is non-trainable zeros `[1, numHidden]` `expand`ed to batch,
- * and tiling the zeros host-side is the gap table's own recommendation — a
+ * and tiling the zeros host-side is equivalent — a
  * zeros constant carries no gradient, so the expand never needs a traced
- * broadcast. REJECTED: tracing `initialState` as a parameter — DiffKT's F0
- * §4.0.4 parameter table lists ONLY the gate Denses as trainable.
+ * broadcast. REJECTED: tracing `initialState` as a parameter — DiffKT
+ * lists ONLY the gate Denses as trainable.
  */
 package io.tlaloc.nn
 
@@ -65,13 +65,13 @@ import io.tlaloc.autograd.times
  * identical. The gates are whole [Dense] layers with their own biases and
  * activations baked in, exactly like the source; the tensor-level
  * constructors REQUIRE DiffKT's activations (σ/σ/tanh, and Identity for the
- * before-reset pair) so the gate equations stay the audited ones — recorded
- * as a loud parity guard, not a modelling freedom.
+ * before-reset pair) so the gate equations stay DiffKT's — a loud guard,
+ * not a modelling freedom.
  *
  * Parameter keys are gate-prefixed Dense keys in declaration order
  * (`"xh2u.w"`, `"xh2u.b"`, `"xh2r.w"`, … — the Sequential-style prefix
  * delegation), so the gradients come back from the transform addressed per
- * gate tensor like every other Phase F layer.
+ * gate tensor like every other `:nn` layer.
  */
 class GRU private constructor(
     val xh2u: Dense,
@@ -82,7 +82,7 @@ class GRU private constructor(
     val acc: AccType,
 ) : TrainableLayer<GRU> {
 
-    /** DiffKT's `RecurrentBase` accumulation variants (F0 §4.0.4). */
+    /** DiffKT's `RecurrentBase` accumulation variants. */
     enum class AccType {
         /** Return the LAST step's output `[batch, numHidden]`. */
         Fold,
@@ -204,7 +204,7 @@ class GRU private constructor(
 
     private fun scoped(params: Params, gate: String) = Params { key -> params["$gate.$key"] }
 
-    /** One time step — the audited gate equations, verbatim. */
+    /** One time step — DiffKT's gate equations, verbatim. */
     private fun step(xt: Tracer<Shape>, h: Tracer<Shape>, params: Params): Tracer<Shape> {
         val xh: Tracer<Shape> = concat(listOf(xt, h), 1)
         val u = xh2u.forward(xh, scoped(params, "xh2u"))
@@ -220,7 +220,7 @@ class GRU private constructor(
 
     companion object {
         /**
-         * The DiffKT constructor surface. Key discipline (the F2 convention
+         * The DiffKT constructor surface. Key discipline (the `:nn` layer convention
          * lifted to a composite layer): the GRU splits its key ONCE into one
          * child per GATE in declaration order — `split(3)` → xh2u/xh2r/xh2n,
          * or `split(4)` → xh2u/xh2r/x2n/h2n — and each gate Dense applies its

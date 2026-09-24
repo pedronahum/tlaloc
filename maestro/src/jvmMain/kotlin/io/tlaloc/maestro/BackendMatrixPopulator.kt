@@ -14,8 +14,8 @@ import io.tlaloc.ir.recognizer.quant.applyKvQuant
 import io.tlaloc.ir.recognizer.recognizeAll
 
 /**
- * Layer 3 §0.4.258+ — populate `ProgramManifest.backendMatrix` from the
- * L3 pipeline.
+ * Populate `ProgramManifest.backendMatrix` from the
+ * kernel-selection pipeline.
  *
  * # Pipeline
  *
@@ -33,24 +33,23 @@ import io.tlaloc.ir.recognizer.recognizeAll
  * # When to call this
  *
  * `Tlaloc.program { }` does NOT call this automatically — running the
- * full L3 pipeline per (vendor × arch × kv-quant) combo at trace time
+ * full pipeline per (vendor × arch × kv-quant) combo at trace time
  * would balloon trace cost. Instead, callers that *want* a populated
  * backend matrix invoke this explicitly:
  *
  * ```
  * val step = Tlaloc.program("encode", input, Mesh0) { ... }
  * val matrix = populateBackendMatrix(
- *     fn = step.capturedFn,  // exposed via L3.5+ extension
+ *     fn = step.capturedFn,  // not exposed by MaestroStep yet
  *     targets = listOf(KernelTarget.NVIDIA_H100, KernelTarget.AWS_TRAINIUM2),
  *     kvQuant = KvQuantConfig.FP8_PER_HEAD,
  * )
  * val richer = step.copy(manifest = step.manifest.copy(backendMatrix = matrix))
  * ```
  *
- * v1's [MaestroStep] doesn't expose the captured `DxirFunction` (the
- * L2 design treats the StableHLO bytes + manifest as the public surface),
- * so this populator takes the function directly. L3.6+ surfaces will
- * thread the captured function for callers that want to populate.
+ * [MaestroStep] doesn't expose the captured `DxirFunction` (its public
+ * surface is the StableHLO bytes + manifest), so this populator takes the
+ * function directly.
  *
  * @param fn the captured `DxirFunction` from `Tlaloc.program { }`
  *   tracing — pre-coarsening, pre-lowering.
@@ -61,7 +60,7 @@ import io.tlaloc.ir.recognizer.recognizeAll
  *   per-target [BackendTarget.kvQuantDtype] reflects whether the
  *   target's kernel actually accepted the dtype (best-effort: a
  *   request that isn't supported on a given target produces a
- *   `kvQuantDtype = null` entry, matching the L3.4d skip semantics).
+ *   `kvQuantDtype = null` entry, matching the KV-quant pass's skip semantics).
  * @return one [BackendTarget] per element of [targets], in the same
  *   order. No diagnostics — for skip reasons, callers should run
  *   `applyKvQuantWithDiagnostics` separately.

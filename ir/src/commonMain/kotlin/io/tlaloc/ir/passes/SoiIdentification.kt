@@ -5,27 +5,22 @@ import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirOp
 
 /**
- * §0.4.27 / §0.4.28 — Stage C SOI-identification. Ports paper Fig. 7(a)'s algorithm
- * in two slices:
+ * SOI (sub-program of interest) identification. Ports paper Fig. 7(a)'s algorithm
+ * in two modes:
  *
- *  - **C.1 (§0.4.27)** — the scaffolding: def-use chain, region tree, per-sink
+ *  - **Unsized** — the scaffolding: def-use chain, region tree, per-sink
  *    bottom-up traversal. [identify] runs the worklist but doesn't size-check; every
  *    reachable region emits a candidate.
- *  - **C.2a (§0.4.28)** — size-limit marking. [identifyWithSizeLimit] adds the `L`
+ *  - **Size-limited** — size-limit marking. [identifyWithSizeLimit] adds the `L`
  *    cap, the `markedLarge` propagation (children-large → parent-large; own-size > L
  *    → self-large), and the small-children-as-SOI promotion when a parent is marked
  *    large. Uses **raw op count** as the size proxy (a conservative upper bound on
- *    the post-coarsening symbolic-expression size); C.3 will replace the size source
- *    with an engine-backed `PhiCalculus.coarsen(subtree, engine)` call.
+ *    the post-coarsening symbolic-expression size), or, when a [SymbolicEngine] is
+ *    supplied, the post-coarsening op count of each leaf. A large leaf is split
+ *    around its most-reused SSA variable (`splitOnReuses`).
  *
- * Still deferred to C.2b / C.3:
- *  - `splitOnReuses()` — when a large leaf can't be reduced by its parent, pick the
- *    most-reused SSA variable + partition the leaf's ops into two new nodes. Needs
- *    [DefUseChain.useCount] (already in place) plus a leaf-partitioning rewriter.
- *  - `mergeSomeChildren()` — greedy merge of consecutive small children when their
- *    combined size stays under `L`. C.2b.
- *  - `PhiCalculus.coarsen(subtree, engine)` — produce the simplified primal +
- *    gradient for each final SOI. C.3.
+ * Not implemented: `mergeSomeChildren()` — greedy merge of consecutive small children
+ * when their combined size stays under `L`.
  *
  * The "active sinks" `S` map to [DxirFunction.returns] — each function return is a
  * sink whose gradient a caller wants. Multi-return functions (e.g., `grad2`'s
@@ -39,12 +34,12 @@ data class SoiCandidate(
     /** Intersection of the node's local ids with the sink's backward-reachable set. */
     val reachableOps: Set<Int>,
     /**
-     * §0.4.28 — raw op count of the node's subtree. Present only when [identify] was
-     * called with a size-limit threshold; otherwise null (C.1 bare-scaffold mode).
+     * Raw op count of the node's subtree. Present only when [identify] was
+     * called with a size-limit threshold; otherwise null (unsized mode).
      */
     val subtreeSize: Int? = null,
     /**
-     * §0.4.28 — `true` when the node was marked large by the C.2a pass (either its
+     * `true` when the node was marked large by the size-limit pass (either its
      * subtree size exceeded `L` OR one of its children was marked large first). When
      * present alongside a list of same-sink candidates, a `markedLarge` parent
      * emits its **small children** (not itself) as SOIs per paper Fig. 7(a). When
@@ -56,7 +51,7 @@ data class SoiCandidate(
 object SoiIdentification {
 
     /**
-     * C.1 entry point — enumerate every tree node that intersects each sink's
+     * Unsized entry point — enumerate every tree node that intersects each sink's
      * backward-reachable set, in bottom-up order. Does NOT size-check or mark
      * nodes. Every emitted candidate is a "small, unmarked" node. Useful when the
      * caller wants to drive its own sizing pass.
@@ -82,19 +77,19 @@ object SoiIdentification {
     }
 
     /**
-     * §0.4.28 / §0.4.29 — C.2 entry point. For each active sink, walk the region
+     * Size-limited entry point. For each active sink, walk the region
      * tree bottom-up and mark nodes `markedLarge`:
      *
      *  - A node is large if any child is large.
      *  - Else if the node's raw subtree op count exceeds [sizeLimit], it's large.
      *  - Else it's small.
      *
-     * §0.4.29 — when a marked-large node is a leaf, attempt `splitOnReuses` per
+     * When a marked-large node is a leaf, attempt `splitOnReuses` per
      * paper Fig. 7(a) line 18: partition the leaf's ops around the free-variable
      * SSA id with the highest use count in `fn`. If the split succeeds, the two
      * new sub-leaves become SOIs instead of the original oversized leaf. If the
      * split fails (no free variables, all ops depend on pivot, single-op leaf),
-     * the large leaf falls through as an SOI-as-is (C.2a behaviour).
+     * the large leaf falls through as an SOI as-is.
      *
      * Returns `SoiResult` holding:
      *  - `candidates`: all reachable tree nodes for each sink, with `markedLarge` + `subtreeSize` set.
@@ -153,7 +148,7 @@ object SoiIdentification {
     }
 
     /**
-     * §0.4.30 — resolve a node's size from the precomputed leaf-size map. Leaves use
+     * Resolve a node's size from the precomputed leaf-size map. Leaves use
      * the engine-backed size when available (else raw count); non-leaves aggregate
      * their children's sizes plus their own directOps count minus the region-bearing
      * ops whose contribution lives in the children (to avoid double-counting).
@@ -198,15 +193,15 @@ object SoiIdentification {
      * does NOT itself become an SOI (it's too big to coarsen in one shot). When the
      * root is NOT marked large, the root is the single SOI.
      *
-     * §0.4.29: large leaves are further refined by `splitOnReuses` — partition the
+     * Large leaves are further refined by `splitOnReuses` — partition the
      * leaf's ops around its highest-use-count free variable. Split fragments become
      * SOIs in place of the original oversized leaf. If the split can't reduce size
      * (single op, no free variables, or all ops depend on pivot), the large leaf
-     * falls through as-is (C.2a fallback).
+     * falls through as-is.
      *
      * Edge cases:
      *  - A node filtered by per-sink reachability (empty `directOps` intersection)
-     *    isn't considered for SOI emission — matches C.1's property (i) filter.
+     *    isn't considered for SOI emission — the paper's property (i) filter.
      */
     private fun chooseSois(
         perSinkCandidates: List<SoiCandidate>,
@@ -259,8 +254,8 @@ object SoiIdentification {
      *     the leaf but NOT declared by it. For a leaf region, this is every outer-
      *     scope operand referenced by any op in `directOps`.
      *  2. Pick the pivot: free variable with the maximum `DefUseChain.useCount` in
-     *     `fn` (breaks ties by smallest id for determinism). Rationale from paper
-     *     §5: "splitting point is chosen to be the variable that... has the largest
+     *     `fn` (breaks ties by smallest id for determinism). Rationale from the paper
+     *     (Section 5): "splitting point is chosen to be the variable that... has the largest
      *     number of references (and hence reuses) in `f`." Most-reused variables
      *     participate in more chain-rule simplifications when the splitter respects
      *     them, so the gradient pass can factor through them.
@@ -272,7 +267,7 @@ object SoiIdentification {
      *     empty).
      *
      * Returns null when split can't reduce the leaf. Caller falls back to emitting
-     * the oversized leaf as-is (C.2a fallback).
+     * the oversized leaf as-is.
      */
     private fun splitOnReuses(
         leaf: RegionTreeNode,
@@ -365,12 +360,12 @@ object SoiIdentification {
 }
 
 /**
- * §0.4.28 — result of [SoiIdentification.identifyWithSizeLimit]. Separates:
+ * Result of [SoiIdentification.identifyWithSizeLimit]. Separates:
  *  - [candidates]: every reachable tree node for every sink (for debugging /
- *    introspection). Same content a C.1 [SoiIdentification.identify] would emit,
+ *    introspection). Same content [SoiIdentification.identify] would emit,
  *    enriched with `subtreeSize` + `markedLarge`.
- *  - [sois]: the final SOI set — what C.3's coarsening + splice pipeline should act on.
- *  - [tree] (§0.4.35): the [RegionTree] used for identification. Exposed so downstream
+ *  - [sois]: the final SOI set — what the coarsening + splice pipeline acts on.
+ *  - [tree]: the [RegionTree] used for identification. Exposed so downstream
  *    passes (e.g., [PhiCalculus.coarsenFunction]) can distinguish original tree nodes
  *    from split fragments produced by [splitOnReuses] via reference-identity lookup.
  */

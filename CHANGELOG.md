@@ -21,6 +21,9 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   compiler plugin classpath.
 - **Gradle 9.7.1.** The repository's wrapper moves from 9.5.0 to 9.7.1; the
   Tlaloc Gradle plugin is tested with it.
+- **API documentation.** KDoc in every published module describes the code
+  without internal changelog numbers, plan phases or planning-document names;
+  `./gradlew test` fails if one comes back (`scripts/check-kdoc-internal-refs.py`).
 
 ## [0.1.0-alpha01] — 2026-09-24
 

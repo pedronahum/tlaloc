@@ -1,10 +1,9 @@
 package io.tlaloc.core
 
 /**
- * §0.4.417 — Phase E1a: the `:core` host sparse type (rank-2 CSR).
+ * The `:core` host sparse type (rank-2 CSR).
  *
- * DiffKT parity target per docs/SPARSE_PARITY_AUDIT.md (ratified by Pedro,
- * 2026-09-20): `SparseFloatTensor`'s actually-exercised surface is rank-2 CSR
+ * Modelled on DiffKT's `SparseFloatTensor`, whose actually-exercised surface is rank-2 CSR
  * arithmetic — elementwise `plus`/`minus`/`times`, `transpose`, `matmul` —
  * behind an Eigen JNI shim. This type is the pure-Kotlin host-level answer:
  * three parallel arrays in the classic CSR layout,
@@ -16,11 +15,10 @@ package io.tlaloc.core
  *     `values[rowPtr[i] until rowPtr[i+1]]`, so `rowPtr[0] == 0`,
  *     `rowPtr[rows] == nnz`, and the array is monotone non-decreasing.
  *
- * Construction validates the whole invariant loudly (the audit's
- * `nonZeroIndices` trap is exactly what happens when a sparse type trusts its
- * own internals); every op below therefore ASSUMES canonical inputs and
- * produces canonical outputs, which is what makes the two-pointer merges
- * correct.
+ * Construction validates the whole invariant loudly (a sparse type that
+ * trusts unvalidated internals silently produces wrong `nonZeroIndices`);
+ * every op below therefore ASSUMES canonical inputs and produces canonical
+ * outputs, which is what makes the two-pointer merges correct.
  *
  * Explicit zeros: a stored entry whose value happens to be `0f` is legal
  * (matching Eigen/scipy). `fromCoo` keeps caller-provided zeros; the
@@ -29,12 +27,13 @@ package io.tlaloc.core
  * re-sparsification); the intersection merge (`times`) and SpGEMM keep every
  * STRUCTURALLY touched position. `toDense` is always exact regardless.
  *
- * NOT here, by ratified decision: `matdiv` (DiffKT's is SparseLU via explicit
+ * Not supported: `matdiv` (DiffKT's is SparseLU via explicit
  * inverse through Eigen JNI — skipped, a solver arrives as its own designed
  * feature or never); rank > 2 (DiffKT's hierarchical nesting is where their
  * broken surface lives); any AD participation (sparse is primal-only in
- * DiffKT too — the `grad {}`-relevant `SPARSE_MATMUL` op is Phase E1b/E1c).
- * GPU: pinned emit refusal when E1b lands (StableHLO has no sparse types).
+ * DiffKT too — differentiation goes through the `SPARSE_MATMUL` op).
+ * GPU: StableHLO has no sparse types; the StableHLO emitter refuses
+ * `SPARSE_MATMUL` by name.
  */
 class SparseTensor(
     val rows: Int,

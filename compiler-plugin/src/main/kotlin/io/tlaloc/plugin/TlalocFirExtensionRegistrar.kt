@@ -4,7 +4,7 @@ import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtensi
 import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrar
 
 /**
- * §0.4.499 — [options] arrives here as a value rather than a global, so the FIR
+ * [options] arrives here as a value rather than a global, so the FIR
  * checker's diagnostic severities belong to THIS compilation and cannot be flipped
  * by another module compiled concurrently in the same Kotlin daemon.
  */

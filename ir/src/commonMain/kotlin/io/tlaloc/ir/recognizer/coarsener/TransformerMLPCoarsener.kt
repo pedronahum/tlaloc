@@ -8,7 +8,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * Layer 4 §0.4.314 — TransformerMLP analytical-backward coarsener.
+ * TransformerMLP analytical-backward coarsener.
  *
  * # What this is
  *
@@ -71,7 +71,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *
  * Mirrors the SwiGLU coarsener: recompute everything (gate, up, silu_g,
  * silu_up, sig) from the four primal operands. The recompute matmuls
- * (gate and up) dominate the gradient body's cost, so v2 may want to
+ * (gate and up) dominate the gradient body's cost, so a later version may want to
  * hoist them into the COARSENED's payload as additional primal
  * outputs — matches the SwiGLU coarsener's identical TODO.
  *

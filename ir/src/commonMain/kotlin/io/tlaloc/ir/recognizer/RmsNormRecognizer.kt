@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * Layer 3 §0.4.251+ — recognize RMS-norm compound forms.
+ * Recognize RMS-norm compound forms.
  *
  * # Match shape
  *

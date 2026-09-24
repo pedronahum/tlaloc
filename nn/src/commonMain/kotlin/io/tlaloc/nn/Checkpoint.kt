@@ -1,10 +1,6 @@
 /**
- * §0.4.502 (Tier 2 item 7) — **model persistence.** Before this file, Tlaloc
- * could train a model on a GPU (certified: 600 Adam steps on a GB10,
- * `examples/gpu-training`) and could not save the result. `Components.kt` said
- * so in a comment — "minus `store`/`load`, out of scope v1" — and
- * `core/.../Safetensors.kt` was read-only. §0.4.502 wrote the safetensors
- * WRITER; this file is the model-level round trip on top of it.
+ * **Model persistence**: the model-level checkpoint round trip, built on the
+ * `:core` safetensors reader and writer.
  *
  * ## The format, and why it is safetensors
  *
@@ -22,7 +18,7 @@
  *                    metadata
  *
  * REJECTED: a Tlaloc-specific container format. The repository already reads
- * safetensors (§0.4.468, HuggingFace ingestion), already writes it (§0.4.502),
+ * safetensors (HuggingFace ingestion), already writes it,
  * and a checkpoint that `safetensors.torch.load_file` can open is a checkpoint
  * a user can inspect with tools they already have. REJECTED: Java
  * serialization — it ties the file to the JVM and to the exact class shapes,
@@ -36,7 +32,7 @@
  * anywhere: [ModelSnapshot.restore] takes the model whose STRUCTURE the
  * checkpoint must match and returns a new instance through
  * [Trainable.withParameters] / [Stateful.withBuffers]. This is not a stylistic
- * choice, it is the module's contract (decision 2 of MODEL_LAYER_PLAN.md): a
+ * choice, it is the module's contract: a
  * training step already returns a new model, so a loader that mutated would be
  * the only thing in `:nn` that did.
  *

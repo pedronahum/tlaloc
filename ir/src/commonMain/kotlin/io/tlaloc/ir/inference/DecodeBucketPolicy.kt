@@ -1,7 +1,7 @@
 package io.tlaloc.ir.inference
 
 /**
- * §0.4.467 — Phase H1c: the BUCKETING POLICY.
+ * The BUCKETING POLICY for compiled decode steps.
  *
  * A compiled decode step has static shapes. A serving loop does not have a
  * static batch size or a static context length — vLLM's scheduler hands the

@@ -6,7 +6,7 @@ import io.tlaloc.core.Mesh
 import io.tlaloc.core.ProgramScope
 
 /**
- * Layer 2 §0.4.243+ — workflow composition.
+ * Workflow composition.
  *
  * A [Workflow] is a typed DAG of [MaestroStep]s. The [workflow] builder
  * records the per-step composition order, validates input/output type
@@ -66,8 +66,8 @@ data class WorkflowEdge(
 /**
  * Reshard kind for a [WorkflowEdge]. v1 distinguishes mesh-only reshards
  * (different mesh placement, same shape) from transpose reshards
- * (different named-axis structure). Layer 4 makes both produce real
- * StableHLO/SDY ops.
+ * (different named-axis structure). Both are metadata only; neither
+ * emits StableHLO/SDY ops yet.
  */
 enum class ReshardKind {
     /** No reshard needed; producer and consumer agree on placement + shape. */
@@ -75,14 +75,14 @@ enum class ReshardKind {
 
     /**
      * Cross-mesh transition: producer outputs on Mesh A, consumer expects
-     * Mesh B. v1 records this as metadata; Layer 4's emitter produces
-     * `sdy.reshard` (or equivalent collective).
+     * Mesh B. Recorded as metadata only; no `sdy.reshard` (or equivalent
+     * collective) is emitted yet.
      */
     Mesh,
 
     /**
      * Named-axis transpose: shape stays the same but axis order/names
-     * differ. v1 metadata-only; Layer 4 emits `stablehlo.transpose`.
+     * differ. Metadata only; no `stablehlo.transpose` is emitted yet.
      */
     Transpose,
 }
@@ -140,8 +140,8 @@ class WorkflowBuilder internal constructor(val name: String) : ProgramScope {
 
     /**
      * Bring an externally-provided tensor into the workflow as a typed
-     * [BufferHandle]. v1 carries the tensor in [HandleRef.payload]; Layer 3
-     * replaces with real device-buffer allocation.
+     * [BufferHandle]. The tensor is carried in [HandleRef.payload]; no
+     * device buffer is allocated.
      */
     fun <T : io.tlaloc.core.DTensor<*, *>, M : Mesh> seed(
         value: T,

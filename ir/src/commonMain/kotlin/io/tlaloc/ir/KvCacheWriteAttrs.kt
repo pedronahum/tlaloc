@@ -5,11 +5,11 @@ import io.tlaloc.core.I32
 import io.tlaloc.core.I64
 
 /**
- * §0.4.466 — Phase H1b: the KV_CACHE_WRITE operand convention, shared by every
+ * The KV_CACHE_WRITE operand convention, shared by every
  * layer that touches the kind (the interpreter, the StableHLO emitter, the
  * renderer's refusal, the cost model). ONE parser, so no two layers can
- * disagree about what a legal cache write looks like — the [AllReduceAttrs]
- * (§0.4.460) / [PagedAttentionAttrs] (§0.4.465) precedent.
+ * disagree about what a legal cache write looks like (the same pattern as
+ * [AllReduceAttrs] and [PagedAttentionAttrs]).
  *
  * Operands (see [OpKind.KV_CACHE_WRITE] for the full rationale):
  * ```
@@ -21,7 +21,7 @@ import io.tlaloc.core.I64
  *
  * **Attributes: NONE.** `blockSize`, `numKvHeads`, `headDim`, `numBlocks` and
  * `numTokens` are all derived from operand shapes, and are REFUSED as attrs BY
- * NAME: the house sentinel-dims rule forbids baking a dim-derived value where
+ * NAME: the sentinel-dims rule forbids baking a dim-derived value where
  * an attr could then disagree with the operand it was derived from. This op
  * has nothing else to configure — the whole of its behaviour is in
  * `slotMapping`, which is a runtime tensor.
@@ -37,7 +37,7 @@ import io.tlaloc.core.I64
  * reads more explicitly, but it forces every consumer to re-derive the flat
  * index, it makes the "is this slot live" test two comparisons instead of one,
  * and it diverges from what vLLM's Python scheduler already hands us — the
- * plugin (H3) would spend its first act flattening it back.
+ * serving plugin would spend its first act flattening it back.
  *
  * **Padding slots.** A NEGATIVE `slotMapping` entry means "this token is
  * padding — do not write it", vLLM's `-1` convention for the slack lanes of a

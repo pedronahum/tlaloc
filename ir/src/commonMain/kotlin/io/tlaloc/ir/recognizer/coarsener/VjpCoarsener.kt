@@ -10,7 +10,7 @@ import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * Layer 3 §0.4.252+ — VJP coarsener registry + driver.
+ * VJP coarsener registry + driver.
  *
  * Consumes the output of `recognizeAll(fn)` and rewrites [fn] so each
  * recognized sub-graph is replaced by a single `OpKind.COARSENED` op
@@ -20,8 +20,8 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *
  * ```
  * fn (raw user code)
- *   → recognizer.recognizeAll(fn)         [L3.0/L3.1]
- *   → coarsenRecognizedPatterns(fn, ms)   [this file, L3.2]
+ *   → recognizer.recognizeAll(fn)
+ *   → coarsenRecognizedPatterns(fn, ms)   [this file]
  *   → fn' (with COARSENED envelopes)
  *   → DxirReverseTransform                [pre-existing]
  *   → grad fn (analytical VJPs spliced in)
@@ -29,10 +29,8 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *
  * # Registry shape
  *
- * Coarseners are registered by `RecognitionMatch.patternName`. v1
- * supplies a single entry — `FlashAttention`. RmsNorm / RoPE /
- * CrossEntropy coarseners can land in subsequent §0.4.x phases by
- * adding a per-pattern file + one [defaultCoarseners] entry. No
+ * Coarseners are registered by `RecognitionMatch.patternName`. A new
+ * pattern is added with a per-pattern file + one [defaultCoarseners] entry. No
  * build-system changes required.
  *
  * # Scope (first cut)
@@ -184,7 +182,7 @@ private fun hasNoExternalConsumers(fn: DxirFunction, bundle: CoarsenedBundle): B
 /**
  * Compute the set of [primalBody] param indices that the [gradientBody]
  * actually dereferences. Mirrors `PhiCalculus.computeGradientReads`'s
- * shape — duplicated here to keep the L3.2 coarsener self-contained
+ * shape — duplicated here to keep the coarsener self-contained
  * (the φ-calculus helper is `private`).
  *
  * For multi-result patterns (K > 1), the first K params of [gradientBody]

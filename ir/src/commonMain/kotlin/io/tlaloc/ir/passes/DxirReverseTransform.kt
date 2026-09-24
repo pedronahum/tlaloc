@@ -17,14 +17,14 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 
 /**
- * §0.4.154 — gradient-accumulator key. The contribution that feeds back into a
+ * Gradient-accumulator key. The contribution that feeds back into a
  * primal value is keyed by `(primal node id, result index)`. For single-result
  * primal nodes (params, consts, single-result `DxirOp`) the index is always 0.
  * For [DxirOpResult] (a multi-result op's result reference), the index is
  * `node.index` and the id is `node.source.id`. Centralising this mapping in one
  * extension keeps every gradAccum read / write at every call site (top-level,
- * branch, COARSENED) consistent — and lets a future multi-live-index MR IF AD
- * arm seed contributions at distinct indices without touching the substrate.
+ * branch, COARSENED) consistent, and lets contributions be seeded at distinct
+ * result indices without changing the accumulator.
  */
 private fun DxirNode.gradKey(): Pair<Int, Int> = when (this) {
     is DxirOpResult -> source.id to index
@@ -38,18 +38,18 @@ private fun DxirNode.gradKey(): Pair<Int, Int> = when (this) {
  * `includeForward = true`, the primal return value is prepended to the returns list so
  * callers can synthesise `valueAndGrad` / `valueAndGrad2` without re-running the forward.
  *
- * This is the SCT baseline (§11.8.1 Stage A) — the prerequisite for the coarsening pass
- * in Stage B. It is intentionally narrow:
+ * The coarsening pass ([PhiCalculus]) builds on this transform. It is intentionally narrow:
  *
  * - **Single scalar return only** on the default (const-1.0-seed) path. Vector / tensor
  *   outputs require an explicit upstream-cotangent parameter — which is exactly what
- *   `seedAsParam = true` provides (§0.4.398): with a caller-supplied seed the reverse walk
+ *   `seedAsParam = true` provides: with a caller-supplied seed the reverse walk
  *   is seed-agnostic, so the single return may be any type and the transform is a true
  *   pullback `(ȳ, x) → x̄`.
  * - **Straight-line bodies only.** Ops carrying nested regions (e.g. `MANUAL_COMPUTATION`,
- *   future `If`/`While`) are rejected — handling them is the φ-calculus pass in Stage B.
+ *   `WHILE`) are rejected, except for the `IF` and `COARSENED` arms; loops are removed
+ *   beforehand by the φ-calculus coarsening pass.
  * - **Single-result body ops only.** Multi-result ops (other than the sanctioned
- *   `IF`/`COARSENED` arms) need per-result accumulator threading; deferred.
+ *   `IF`/`COARSENED` arms) would need per-result accumulator threading and are rejected.
  * - **Only ops with a registered [VjpRule] in [VjpRegistry].** Unsupported ops fail loudly.
  *
  * Multi-parameter primals are accepted (N ≥ 0). Each primal parameter gets its own
@@ -76,7 +76,7 @@ private fun DxirNode.gradKey(): Pair<Int, Int> = when (this) {
  * 5. Walk the primal body in reverse. For each op with non-null upstream gradient, look
  *    up its [VjpRule], invoke it, and accumulate the returned contributions into
  *    `gradAccum` keyed by the primal operand's id. Repeated contributions to the same id
- *    emit a fresh `ADD`, mirroring the runtime tape's `Tape.pushback` accumulation. For
+ *    emit a fresh `ADD`. For
  *    primal ops not in [usedByAdjoint] (no clone in body), construct a detached phantom
  *    [DxirOp] with [nodeMap]-resolved operands to hand to the rule; the phantom is never
  *    added to the gradient body.
@@ -95,17 +95,17 @@ object DxirReverseTransform {
      * @param primal The forward function. Must have exactly 1 scalar return.
      * @param includeForward If true, prepend the cloned primal return to the output's
      *   returns list — `valueAndGrad` shape.
-     * @param seedAsParam §0.4.33 — if true, the gradient function's first param is an
+     * @param seedAsParam If true, the gradient function's first param is an
      *   explicit `upstream` (typed to match the primal's return type) that seeds
      *   `gradAccum[ret.id]`. The resulting signature is
      *   `(upstream, *primal_params) → (*grads)`, which is what
      *   [OpKind.COARSENED]'s `gradient_body` attribute expects. When false (default),
      *   the seed is `const(1.0)` — the existing `grad` / `valueAndGrad` behaviour.
-     *   §0.4.398 — no longer mutually exclusive with `includeForward`: the combined
+     *   May be combined with `includeForward`: the combined
      *   mode `(upstream, *primal_params) → (y, *grads)` is the `valueAndVjp` shape
      *   (a COARSENED gradient_body still never passes both, but the seeded-cotangent
      *   user surface needs the primal value alongside the pullback).
-     * @param inputOnlyTrailingParams §0.4.501 — how many of the primal's LAST params
+     * @param inputOnlyTrailingParams How many of the primal's LAST params
      *   are inputs only: no gradient is emitted for them, so `returns` carries
      *   `params.size - inputOnlyTrailingParams` gradients instead of one per param.
      *   This is what the K2 plugin's captured runtime values are — a `grad { x -> f(x)
@@ -114,7 +114,7 @@ object DxirReverseTransform {
      *   declared parameters only. The adjoint chain that fed a dropped gradient becomes
      *   unreachable and the following `dropUnreachableBody` removes it, so the returned
      *   function is the same one a primal without that param would have produced,
-     *   plus the param. Default 0 — every pre-§0.4.501 caller is unchanged.
+     *   plus the param. Default 0: every param gets a gradient.
      */
     fun apply(
         primal: DxirFunction,
@@ -490,13 +490,12 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.430 — canonicalize a node REFERENCE through an id-keyed map while
+     * Canonicalize a node REFERENCE through an id-keyed map while
      * preserving a [DxirOpResult]'s index: `byId[ref.id]` maps a `%op#k`
      * reference to the rebuilt SOURCE op, and returning that op directly
-     * collapses the reference to result 0 (the §0.4.130 terminator bug's
-     * operand-position twin — found by the multi-result COARSENED JVP⇄VJP
-     * cross-identity, where `MUL(seed, %c#1)`'s surviving operand folded to
-     * `%c` and the gradient read result 0's value). Every id-keyed
+     * collapses the reference to result 0 (for example, `MUL(seed, %c#1)`'s
+     * surviving operand would fold to `%c` and the gradient would read result
+     * 0's value). Every id-keyed
      * canonicalization in the CSE / const-fold plumbing routes through here.
      */
     private fun canonicalRef(ref: DxirNode, byId: Map<Int, DxirNode>): DxirNode {
@@ -511,7 +510,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.48 — common sub-expression elimination on the gradient body. Adjoint
+     * Common sub-expression elimination on the gradient body. Adjoint
      * rules often emit structurally-identical ops: [MulRule] on `x*x` produces
      * two identical `MUL(upstream, x)` contributions (one per operand slot),
      * [SqrtRule] emits a fresh `SQRT(op.operands[0])` whose input already has a
@@ -521,13 +520,11 @@ object DxirReverseTransform {
      * become unreachable and are dropped by the following [dropUnreachableBody]
      * step.
      *
-     * §0.4.118 — extended to recurse into IF region bodies. Each branch's block
+     * Recurses into IF region bodies. Each branch's block
      * gets its own scope-local CSE pass that inherits the outer canonical maps
      * (so inner ops can dedup against outer-scope canonical entries) but doesn't
      * leak its own registrations back. Block args are added to the inner scope
-     * only. COARSENED and WHILE region bodies remain skipped — their region
-     * shapes carry pre-computed gradient bodies (COARSENED) or aren't expected
-     * post-SCT (WHILE), so internal CSE has less leverage there.
+     * only. See [cseRegionBearingOp] for how WHILE and COARSENED bodies are handled.
      *
      * Scope: single-result ops only. Multi-result ops are kept verbatim — their
      * structural equivalence is subtler and not load-bearing for any benchmark
@@ -566,13 +563,12 @@ object DxirReverseTransform {
      * Callers that need to scope these maps to a sub-region should pass copies.
      */
     /**
-     * §0.4.366 — CSE signature. `types` is part of the key: two ops with
+     * CSE signature. `types` is part of the key: two ops with
      * identical (kind, operands, attrs) can still differ in RESULT TYPE —
      * BROADCAST is the archetype (the same scalar seed splat to two different
-     * shapes carries `broadcast_dimensions=[]` both times). Pre-§0.4.366 the
-     * key was (kind, operands, attrs) only, and MeanRule's runtime-N `ones`
-     * broadcast deduplicated onto the rank-1 upstream splat — a wrong-shape
-     * gradient caught by the Phase A1 E2E test.
+     * shapes carries `broadcast_dimensions=[]` both times). Without the types
+     * in the key, MeanRule's runtime-N `ones` broadcast would deduplicate onto
+     * the rank-1 upstream splat and produce a wrong-shape gradient.
      */
     private data class CseSig(
         val op: OpKind,
@@ -657,18 +653,18 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.118 — region-bearing op CSE. For [OpKind.IF], recurse into each branch's
-     * region body using a scoped copy of the canonical maps. §0.4.129 — same
-     * recursion now also fires for [OpKind.WHILE]: the §0.4.128 LoopInvariant
-     * rewrite produces nested WHILEs inside IF arms, so the §0.4.118 assumption
-     * that "WHILE shouldn't survive SCT" no longer holds in every case.
+     * Region-bearing op CSE. For [OpKind.IF], recurse into each branch's
+     * region body using a scoped copy of the canonical maps. The same
+     * recursion fires for [OpKind.WHILE]: the LoopInvariant break-loop
+     * rewrite produces nested WHILEs inside IF arms, so WHILEs can survive
+     * coarsening.
      * [cseRegion] processes each region's block with its own scoped copy of the
      * canonical maps, so the cond / body regions of a WHILE never cross-pollute
      * (their block args have distinct ids, and inner registrations don't leak
      * back to outer scope). The op's IMMEDIATE operands are still canonicalized
      * in all cases.
      *
-     * §0.4.119 — for [OpKind.COARSENED], the regions list is empty (the op stores
+     * For [OpKind.COARSENED], the regions list is empty (the op stores
      * its `primal_body` and `gradient_body` in attrs as full [DxirFunction]s, not
      * as regions). Run [applyCSE] on each nested function so inner redundancy
      * still gets deduplicated. `applyCSE` is idempotent (returns the same
@@ -741,7 +737,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.118 — recursively CSE a region's blocks under a scope-local copy of the
+     * Recursively CSE a region's blocks under a scope-local copy of the
      * canonical maps. Block args are added to the inner scope so block-arg-rooted
      * ops can be deduplicated within the block. Inner registrations don't leak
      * back to the outer scope (different control-flow scope = different operand
@@ -798,7 +794,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.48 — peephole constant folding on scalar numeric ops. Handles:
+     * Peephole constant folding on scalar numeric ops. Handles:
      * - `MUL(const a, const b)` → `const(a*b)`
      * - `ADD(const a, const b)` → `const(a+b)`
      * - `SUB(const a, const b)` → `const(a-b)`
@@ -1011,17 +1007,15 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.45 — simple DCE over a function's body. Marks reachable nodes by walking
+     * Simple DCE over a function's body. Marks reachable nodes by walking
      * from [DxirFunction.returns] through operand + nested-region references,
      * transitively. Unreferenced top-level body ops are filtered out. Params are
      * always preserved (so the declared signature survives even if the gradient
      * doesn't dereference a param, which is common — e.g., the idx operand of a
-     * GATHER whose adjoint is zero). Nested region bodies aren't pruned here —
-     * region-internal DCE is deferred; the Stage B.3 DCE pass the PhiCalculus
-     * comments reference was scoped to a future session.
+     * GATHER whose adjoint is zero). Nested region bodies aren't pruned.
      *
      * Primary motivation: [GatherRule] emits `SCATTER_ADD(zero_bcast, idx, upstream)`;
-     * [applyC5Pass]-side gradAccum fusion rewrites subsequent SCATTER_ADDs to thread
+     * the gradAccum fusion in [PhiCalculus] rewrites subsequent SCATTER_ADDs to thread
      * the accumulator forward, orphaning the per-gather zero-broadcast. Without DCE
      * those orphans survive into synthesis and re-introduce the per-gather
      * allocation overhead the fusion was meant to eliminate.
@@ -1049,13 +1043,13 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.46 — tag each `OpKind.SCATTER_ADD` whose `operand[0]` (the accumulator
+     * Tag each `OpKind.SCATTER_ADD` whose `operand[0]` (the accumulator
      * base) has exactly one use in the function. The single-use invariant makes
      * destructive in-place mutation safe: the cloned buffer isn't aliased anywhere
      * else, so `base[idx] += value` can write through to `base`'s storage without
      * corrupting a shared view.
      *
-     * GatherRule's post-§0.4.45 emission pattern is exactly this shape — a linear
+     * GatherRule's emission pattern (after DCE) is exactly this shape — a linear
      * chain where each SCATTER_ADD's base is the previous SCATTER_ADD's result
      * (or, for the first, a BROADCAST(0) used only as that SCATTER_ADD's base).
      * Every SCATTER_ADD in the accumulator chain qualifies; in-place lowering
@@ -1130,10 +1124,10 @@ object DxirReverseTransform {
      * chain reaching a used node is itself cloneable.
      */
     /**
-     * §0.4.139 — find the unique result index of [ifOp] that's referenced downstream
+     * Find the unique result index of [ifOp] that's referenced downstream
      * in [fn]'s body or returns. Returns null when zero or multiple indices are
-     * referenced — both cases are handled by other phases (zero = dead op, deferred
-     * to DCE; multiple = needs per-index gradAccum, deferred). Used by the multi-
+     * referenced (zero = dead op, left to DCE; multiple = would need per-index
+     * gradAccum, which is not supported). Used by the multi-
      * result-IF AD entry-point validation in [apply].
      *
      * Mirrors the structural shape of [PhiCalculus.findReferencedCarried] but
@@ -1141,7 +1135,7 @@ object DxirReverseTransform {
      * returning a unique-or-null result.
      */
     /**
-     * §0.4.155 — operand resolution for the body-cloning step that preserves
+     * Operand resolution for the body-cloning step that preserves
      * [DxirOpResult] wrapping. Without this, a body op whose operand is a
      * `DxirOpResult` (e.g., `ADD(ifop.result(0), ifop.result(1))`) would have
      * both operands collapse to the same `nodeMap[ifop.id]` reference under
@@ -1205,7 +1199,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.144 — block-local mirror of [findIfLiveResultIndex]. Walks the given
+     * Block-local mirror of [findIfLiveResultIndex]. Walks the given
      * [block]'s body + terminator looking for downstream references to [ifOp]
      * (via [DxirOpResult] or direct [DxirOp] ref). Returns the unique result
      * index if exactly one is referenced, else null.
@@ -1215,8 +1209,8 @@ object DxirReverseTransform {
      * outer branch's block, NOT the whole function. Walking the function would
      * also pick up references inside the inner IF's own regions (which are
      * region-internal to the inner IF, not downstream uses). Walking just the
-     * outer block is the correct scope and matches Phase 1's [findIfLiveResultIndex]
-     * shape exactly.
+     * outer block is the correct scope and matches the top-level
+     * [findIfLiveResultIndex] shape exactly.
      */
     private fun findIfLiveResultIndicesInBlock(
         block: io.tlaloc.ir.DxirBlock,
@@ -1318,8 +1312,8 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.23 — handle the IF op as a special case in [DxirReverseTransform.apply]'s
-     * reverse walk. Per paper C2 (`d/dx(φ(a, b)) = φ(da/dx, db/dx)`), the gradient of an
+     * Handle the IF op as a special case in [DxirReverseTransform.apply]'s
+     * reverse walk. Per the φ-node rule (`d/dx(φ(a, b)) = φ(da/dx, db/dx)`), the gradient of an
      * IF result distributes through its branches: for each outer-scope value `x`
      * referenced in a branch, the contribution to `x`'s gradient is an IF that picks
      * the per-branch gradient based on the runtime predicate.
@@ -1334,11 +1328,11 @@ object DxirReverseTransform {
      *     outer gradient body: `IF(pred, thenAdj, elseAdj)`. Missing-branch
      *     contributions become `const(0)`. Accumulate into the outer `gradAccum`.
      *
-     * Limitations (first cut, §0.4.23; relaxed in §0.4.139, §0.4.140, §0.4.144):
-     *  - Multi-result IF: single-live-index only (§0.4.139 top-level; §0.4.144 nested).
+     * Limitations:
+     *  - Multi-result IF: single-live-index only (top-level and nested).
      *  - Nested control flow in branch bodies: single-result IF supported via
-     *    recursive dispatch (§0.4.140); nested multi-result IF supported via
-     *    block-local live-index analysis (§0.4.144); WHILE still errors.
+     *    recursive dispatch; nested multi-result IF supported via
+     *    block-local live-index analysis; WHILE errors.
      *  - Branch bodies must not contain non-IF multi-result ops.
      *  - `usedByAdjoint` analysis isn't extended into branches — all branch body ops
      *    are unconditionally cloned into the gradient body.
@@ -1423,7 +1417,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.32 — handle the [OpKind.COARSENED] op in the reverse walk. Mirrors
+     * Handle the [OpKind.COARSENED] op in the reverse walk. Mirrors
      * [handleIfAdjoint]'s role: the standard [VjpRule] contract doesn't fit COARSENED
      * (the reads set is per-instance data in attrs, not a static val), so
      * [DxirReverseTransform.apply]'s dispatch routes COARSENED to this helper directly.
@@ -1442,10 +1436,10 @@ object DxirReverseTransform {
      *     `coarsened.operands[i]`. Accumulate into `outerGradAccum` via the standard
      *     ADD-on-existing convention.
      *
-     * Limitations (C.3b.2 first cut):
-     *  - Single-result COARSENED only (the top-level guard still rejects multi-result).
+     * Limitations:
+     *  - Single-result COARSENED only (the top-level guard rejects multi-result).
      *  - `gradient_body.body` must be straight-line (no regions, no multi-result).
-     *    Real VJPs produced by the coarsening pipeline (C.3b.3) satisfy this; hand-
+     *    VJPs produced by the coarsening pipeline satisfy this; hand-
      *    built gradient_bodies with regions would need recursive handling.
      */
     private fun handleCoarsenedAdjoint(
@@ -1578,14 +1572,14 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.120 — clone a single gradient_body node into [builder]'s scope, resolving
+     * Clone a single gradient_body node into [builder]'s scope, resolving
      * operand refs through [gradNodeMap]. Handles:
      *
      *  - [DxirConst]: re-emit verbatim (id may differ; gradNodeMap is updated by caller).
      *  - [DxirOp] without regions, single-result: clone operands canonically; emit via
      *    `builder.op` with the same kind/attrs/types.
      *  - [DxirOp] of kind [OpKind.IF], single-result: clone each branch region recursively.
-     *    Multi-result IF and other region-bearing kinds still error — those cases would
+     *    Multi-result IF and other region-bearing kinds error — those cases would
      *    need scope tracking that this single-purpose helper doesn't carry.
      *  - [DxirOpResult]: shouldn't appear in a single-result gradient_body's straight-
      *    line body, but if it does, throw — the caller's contract excludes multi-result
@@ -1626,7 +1620,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.120 — clone an IF op from the gradient body into [builder]'s scope. Each
+     * Clone an IF op from the gradient body into [builder]'s scope. Each
      * branch's region is cloned via [cloneGradRegion]. Block args are scope-local;
      * inner-region operand refs to outer-scope ids resolve through the outer
      * [gradNodeMap], while inner block-arg ids are added to a per-region copy.
@@ -1656,7 +1650,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.120 — clone a region's single block into the active region builder. The
+     * Clone a region's single block into the active region builder. The
      * outer [outerGradNodeMap] is copied so block args added inside don't leak back.
      * Block args live only within the cloned region's scope; their inner-only ids
      * never appear in the outer map.
@@ -1690,10 +1684,10 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.120 — variant of [cloneGradNode] for nodes inside a region. Emits via the
-     * region builder rather than the function builder. §0.4.121 — extended to support
+     * Variant of [cloneGradNode] for nodes inside a region. Emits via the
+     * region builder rather than the function builder. Supports
      * nested IF inside an IF arm by recursing into [cloneGradIfInRegion]. WHILE and
-     * COARSENED inside an arm still error with documented messages — those would
+     * COARSENED inside an arm error with documented messages — those would
      * require coordinating with the loop/closed-form contracts that this surface
      * doesn't carry.
      */
@@ -1732,7 +1726,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.121 — clone an IF op nested inside another IF's arm. Mirror of [cloneGradIf]
+     * Clone an IF op nested inside another IF's arm. Mirror of [cloneGradIf]
      * but emits via [io.tlaloc.ir.DxirRegionBuilder] instead of [DxirBuilder]. Both
      * builders share `region { ... }` and `ifOp(...)` surfaces, so the structure is
      * identical; only the receiver differs.
@@ -1772,13 +1766,13 @@ object DxirReverseTransform {
      * filtered out by the caller (only outer-scope ids contribute back to the outer
      * `gradAccum`).
      *
-     * §0.4.140 — nested single-result IF in the branch body is supported via a
-     * recursive [handleIfAdjoint] dispatch in step 3. §0.4.144 — nested
-     * multi-result IF with a unique downstream-referenced result index (mirrors
-     * Phase 1's top-level rule for the inner case) is also supported. Nested
-     * WHILE still errors: that needs WHILE-aware AD (Stage B). Multi-live-index
-     * MR IF still errors: that needs the per-index gradAccum refactor that the
-     * top-level path also defers.
+     * Nested single-result IF in the branch body is supported via a
+     * recursive [handleIfAdjoint] dispatch in step 3. Nested
+     * multi-result IF with a unique downstream-referenced result index (the
+     * top-level rule applied to the inner case) is also supported. Nested
+     * WHILE errors: it needs WHILE-aware AD. Multi-live-index multi-result IF
+     * errors: it needs a per-index gradAccum, which the top-level path does not
+     * have either.
      */
     private fun walkBranchReverse(
         block: io.tlaloc.ir.DxirBlock,
@@ -1976,7 +1970,7 @@ object DxirReverseTransform {
     }
 
     /**
-     * §0.4.24 — walk an IF (or any region-bearing op) and enqueue every operand id
+     * Walk an IF (or any region-bearing op) and enqueue every operand id
      * referenced by body ops inside its regions. Recurses into nested regions. The
      * enqueue worklist filters out region-internal ids later (via `primalById[id] ?: continue`),
      * so pushing every operand id is safe — the transitive closure ignores ids that
@@ -2012,7 +2006,7 @@ object DxirReverseTransform {
         else -> error("DxirReverseTransform: cannot zero-seed gradient for dtype $dtype")
     }
 
-    /** §0.4.54 — integer dtypes whose gradients are structurally zero. */
+    /** Integer dtypes whose gradients are structurally zero. */
     private fun isIntegerDtype(dtype: io.tlaloc.core.DType): Boolean =
         dtype == I32 || dtype == I64 || dtype == io.tlaloc.core.Bool
 }

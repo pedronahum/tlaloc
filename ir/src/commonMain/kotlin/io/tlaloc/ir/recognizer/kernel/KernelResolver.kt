@@ -5,17 +5,16 @@ import kotlin.jvm.Synchronized
 import io.tlaloc.core.ExperimentalTlalocApi
 
 /**
- * Layer 4 §0.4.270 — backend-agnostic resolution of `kernel_descriptor`
+ * Backend-agnostic resolution of `kernel_descriptor`
  * names to concrete implementations.
  *
  * # What this is
  *
- * Phase 1 step 6 of the dual-track Llama-decoder benchmark plan
- * (`memory/llama_benchmark_dual_track.md`). The shared substrate that
- * Track 1 (IREE) and Track 2 (PJRT-XLA) both register against — without
+ * The shared substrate that
+ * the IREE and PJRT-XLA backends both register against — without
  * this, each backend would either bake its own kernel-name → dispatch
  * map into the interpreter (creating two divergent code paths to drift)
- * or share a JNI-libtorch assumption that contradicts the spec.
+ * or share a JNI-libtorch assumption.
  *
  * # The contract
  *
@@ -30,10 +29,9 @@ import io.tlaloc.core.ExperimentalTlalocApi
  *
  * - Single-backend deployment: one resolver registered; `preferred(...)`
  *   returns its resolution or null.
- * - Dual-backend deployment (the v0.5 story): both IREE + PJRT-XLA
- *   registered; `resolveAll(...)` returns both options. The eventual
- *   L4.3 cost-driven scheduler picks per kernel based on cost-model
- *   scoring of each resolution.
+ * - Dual-backend deployment: both IREE + PJRT-XLA
+ *   registered; `resolveAll(...)` returns both options for a caller to
+ *   choose between.
  *
  * # Why not ServiceLoader
  *
@@ -104,8 +102,7 @@ data class KernelResolution(
  * threads. Mutable; call [clear] in tests to ensure isolation.
  *
  * Resolution order is registration order — first registered wins on
- * [preferred]. The eventual L4.3 cost-driven scheduler (post-Phase-3)
- * will replace `preferred` with a cost-aware picker that scores each
+ * [preferred]. A caller wanting cost-aware selection can score each
  * resolution from [resolveAll] against the active [DeviceDescriptor].
  */
 @ExperimentalTlalocApi
@@ -149,8 +146,7 @@ object KernelResolverRegistry {
 
     /**
      * The first matching resolution in registration order, or null if
-     * none. v1 picks first-registered; the cost-aware picker lands at
-     * L4.3 once both backends are wired up.
+     * none.
      */
     fun preferred(
         kernelName: String,

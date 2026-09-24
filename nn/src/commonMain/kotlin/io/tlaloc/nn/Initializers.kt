@@ -1,10 +1,10 @@
 /**
- * §0.4.438 — Phase F2: the initializer family over the `:core` threefry
- * streams. Pure host math, bit-deterministic per key (decision 5: no global
+ * The initializer family over the `:core` threefry
+ * streams. Pure host math, bit-deterministic per key (no global
  * RNG anywhere), zero tape involvement — an initializer's output is an
  * ordinary parameter tensor the capture step later traces as a leaf.
  *
- * DiffKT ships (F0 §4.0.3): `uniform(min, max)`, `gaussian(mean, variance)`,
+ * DiffKT ships: `uniform(min, max)`, `gaussian(mean, variance)`,
  * and `kaimingUniform(fanMode, activationGainFactor)` with
  * `bound = sqrt(3/fan) · gain` over `fan = fanSize(shape) · Π shape[2:]`,
  * `FanIn.fanSize = shape[1]`, `FanOut.fanSize = shape[0]`. Those three are the
@@ -13,8 +13,8 @@
  * — NOT in DiffKT, recorded as Tlaloc extensions, oracled against the formulas
  * themselves, never against DiffKT.
  *
- * Draw substrate: `uniformFloats` / `normalFloats` (D1's bit-pinned threefry
- * streams). Every affine rescale below is spelled once and pinned bit-exact in
+ * Draw substrate: `uniformFloats` / `normalFloats` (`:core`'s bit-pinned
+ * threefry streams). Every affine rescale below is spelled once and pinned bit-exact in
  * the tests by replaying the identical expression over the same key.
  */
 package io.tlaloc.nn
@@ -46,7 +46,7 @@ fun fanOf(dims: IntArray, mode: FanMode): Int {
 }
 
 /**
- * DiffKT's activation gain constants (F0 §4.0.3): Linear/Conv/Sigmoid `1`,
+ * DiffKT's activation gain constants: Linear/Conv/Sigmoid `1`,
  * Tanh `5/3`, Relu `√2`, LeakyRelu(slope) `√(2/(1+slope²))` — so
  * `LeakyRelu(0)` = Relu's gain and `LeakyRelu(1)` = 1 exactly.
  */
@@ -87,7 +87,7 @@ fun uniformInit(key: RandomKey, dims: IntArray, min: Float = 0f, max: Float = 1f
 /**
  * DiffKT `gaussian(mean, variance)`: `z · sqrt(variance) + mean` per element
  * over `z = normalFloats(key, n)` — the same affine spelling as the source
- * (which scales `nextGaussian()` by `sqrt(variance)`), on the D1 Box-Muller
+ * (which scales `nextGaussian()` by `sqrt(variance)`), on the `:core` Box-Muller
  * stream instead of `java.util.Random`.
  */
 fun gaussianInit(key: RandomKey, dims: IntArray, mean: Float = 0f, variance: Float = 1f): DTensor<*, F32> {

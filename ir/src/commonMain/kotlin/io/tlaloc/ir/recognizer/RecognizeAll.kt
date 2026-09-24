@@ -3,7 +3,7 @@ package io.tlaloc.ir.recognizer
 import io.tlaloc.ir.DxirFunction
 
 /**
- * Layer 3 §0.4.250+ — aggregate recognizer entry point.
+ * Aggregate recognizer entry point.
  *
  * Runs every per-pattern recognizer over [fn] and returns the union of
  * matches, with overlapping smaller matches stripped (the resolver
@@ -55,17 +55,14 @@ fun recognizeAll(
 /**
  * Strip overlapping smaller matches when a larger match contains them.
  *
- * v1 implementation: for each matched op id, the recognizer with the
+ * For each matched op id, the recognizer with the
  * largest [RecognitionMatch.ops] list wins. Ties broken by stable order
  * (FlashAttention before RmsNorm before Rope before CrossEntropy —
  * matches `recognizeAll`'s call order).
  *
- * Layer 4 §0.4.314 — the first v2 compound (TransformerMLP, a strict
- * superset of SwiGLU) lights up this resolver on production code: every
- * Llama-style decoder MLP matches both TransformerMLP (5 ops) and the
- * bare SwiGLU (4 ops) on the same SILU anchor, and the resolver picks
- * the compound. Pre-§0.4.314, this function ran but no production
- * patterns ever overlapped — the resolver was tested but dormant.
+ * Overlap occurs on production code: every Llama-style decoder MLP
+ * matches both TransformerMLP (5 ops) and the bare SwiGLU (4 ops) on the
+ * same SILU anchor, and the resolver picks the compound.
  */
 internal fun resolveLargestMatch(matches: List<RecognitionMatch>): List<RecognitionMatch> {
     if (matches.size < 2) return matches

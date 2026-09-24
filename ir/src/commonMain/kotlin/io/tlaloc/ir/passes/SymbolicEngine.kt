@@ -6,51 +6,33 @@ import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirType
 
 /**
- * Stage B scaffolding per `docs/STAGE_B_PLAN.md` §5.
- *
  * The single swap boundary between the φ-calculus coarsening pass and the underlying
  * computer algebra system. All φ-calculus rewrites go through [SymbolicEngine]; rule
  * code never depends on Symja (or any specific CAS) types directly.
  *
- * The plan targets Symja (`org.matheclipse:matheclipse-core`, **LGPL-3.0**, JVM-native)
- * as the v0 backend (§11.7 of the spec; §5.2 of the plan). If Symja's compile-time
- * performance or expressiveness turns out to be inadequate for the paper's benchmarks
- * (the adequacy bake-off is §3.2.3 of the plan), the v0.5 fallback is a minimal
- * custom Kotlin CAS with a focused surface: rational arithmetic, symbolic
- * differentiation, [nest], and polynomial-only [simplify].
+ * The shipped backend is Symja (`org.matheclipse:matheclipse-core`, **LGPL-3.0**,
+ * JVM-native), implemented by [SymjaEngine] in `jvmMain`. A minimal custom Kotlin CAS
+ * with a focused surface (rational arithmetic, symbolic differentiation, [nest], and
+ * polynomial-only [simplify]) could replace it behind this interface.
  *
- * This file ships as **interface-only scaffolding**. Every function body is `TODO()`.
- * The first callers land in Stage B.1 (`PhiCalculus.kt`) per §7.2 of the plan;
- * [SymjaEngine] (not in this file) lands in Stage B.0 session 2 at
- * `ir/src/jvmMain/kotlin/io/tlaloc/ir/passes/SymjaEngine.kt`, with real bodies for
- * [rational], [variable], [add]/[sub]/[mul]/[div]/[neg]/[pow], [apply], [nest],
- * [sum], [product], [diff], [simplify], [expand], [factor], [collect],
- * [substitute], [liftNode], [liftFunction], and [lowerToDxir].
+ * LICENSE: Symja is LGPL-3.0. LGPL permits what Tlaloc does (link, never fork or
+ * patch), which is why this interface is the only thing `commonMain` sees. Tlaloc
+ * itself is Apache-2.0 (see `LICENSE`).
  *
- * NOTE ON LICENSE (§0.4.498): this KDoc said "Apache-2.0" until §0.4.498 read the
- * artifact's own POM. It is LGPL-3.0 — `docs/STAGE_B_PLAN.md` §3.2.1 corrected the
- * plan in §0.4.13 but this file and §3.2.1's own bullet list were missed. LGPL
- * permits what Tlaloc does (link, never fork or patch), which is why this interface
- * is the only thing `commonMain` sees. Tlaloc itself is Apache-2.0 as of §0.4.498
- * (see `LICENSE`), which closes the "presumed Apache-2.0 destination" that Stage B
- * had been writing against as an open question.
- *
- * NOTE ON MODULE PLACEMENT: the interface lives in `commonMain` because it has no
- * JVM-specific dependencies — [SymExpr] and [SymFn] are opaque sealed interfaces.
+ * MODULE PLACEMENT: the interface lives in `commonMain` because it has no
+ * JVM-specific dependencies — [SymExpr] and [SymFn] are opaque interfaces.
  * Symja-backed implementations must live in `jvmMain` because Symja itself is
- * JVM-only. KMP targets other than JVM (Kotlin/Native, Kotlin/JS) will never see
- * a running [SymbolicEngine]; coarsening is server-side compile-time only and
- * coarsened artifacts for mobile are baked at publish time per §18 of the spec.
+ * JVM-only. Targets other than JVM never see a running [SymbolicEngine]; coarsening
+ * happens at compile time.
  *
- * @see <a href="../../../../../../../../docs/STAGE_B_PLAN.md">docs/STAGE_B_PLAN.md</a>
- * @see io.tlaloc.ir.passes.DxirReverseTransform — Stage A's SCT reverse-mode AD;
- *   Stage B runs before this and rewrites control-flow-bearing subtrees.
+ * @see io.tlaloc.ir.passes.DxirReverseTransform — reverse-mode AD; coarsening runs
+ *   before it and rewrites control-flow-bearing subtrees.
  */
 interface SymbolicEngine {
 
     /**
      * Version string identifying the backend + plugin version. Used as a cache-key
-     * component per §5.4 of the plan.
+     * component.
      *
      * Example values: `"symja-2.0.0-tlaloc-b1"`, `"kotlin-cas-v0.5-tlaloc-b3"`.
      */
@@ -71,7 +53,7 @@ interface SymbolicEngine {
      * Lift a [DxirFunction] to a symbolic function. Each parameter becomes a free
      * symbolic variable; the function's (single) return becomes the expression body.
      *
-     * Stage B.2 only supports single-return functions. Multi-return (tuple) functions
+     * Only single-return functions are lifted as one [SymFn]. Multi-return (tuple) functions
      * remain lifted as separate [SymFn]s, one per return position.
      */
     fun liftFunction(fn: DxirFunction): SymFn
@@ -86,7 +68,7 @@ interface SymbolicEngine {
     /**
      * Construct a symbolic real (`Double`) literal. Implementations may store this as
      * a finite-precision real (Symja's `Num`), as an exact rational approximation, or
-     * any equivalent. Stage B.3 needs this for affine-coefficient lifting from concrete
+     * any equivalent. Needed for affine-coefficient lifting from concrete
      * `Float` consts in the dxir into symbolic expressions; the [rational] form would
      * lose precision on arbitrary float values.
      */
@@ -105,7 +87,7 @@ interface SymbolicEngine {
 
     /**
      * Construct a unary closure `Function[{varName}, body]` from an existing [SymExpr]
-     * body in the named variable. Stage B.3 introduced this for C6-style closed-form
+     * body in the named variable. Used for C6-style closed-form
      * construction — `Σ_{i=0}^{n-1} a^i` requires a `λi. a^i` closure that the
      * existing [opaqueFunction] (which is just a free symbol) doesn't supply.
      */
@@ -135,19 +117,18 @@ interface SymbolicEngine {
      * via `Nest[f, x, n]` with symbolic n closing via `Sum` / `Product` when the
      * recurrence is simple.
      *
-     * Load-bearing for C5 (§4.8 of the plan).
+     * Load-bearing for rule C5.
      */
     fun nest(f: SymFn, x: SymExpr, n: SymExpr): SymExpr
 
     /**
      * Closed-form summation: `Sum(f(i), i, lo, hi)`. [f] is a unary function of
-     * the bound variable. Load-bearing for C6 (§4.9 of the plan).
+     * the bound variable. Load-bearing for rule C6.
      */
     fun sum(f: SymFn, lo: SymExpr, hi: SymExpr): SymExpr
 
     /**
-     * Closed-form product: `Product(f(i), i, lo, hi)`. Load-bearing for C7
-     * (§4.10 of the plan).
+     * Closed-form product: `Product(f(i), i, lo, hi)`. Load-bearing for rule C7.
      */
     fun product(f: SymFn, lo: SymExpr, hi: SymExpr): SymExpr
 
@@ -167,8 +148,8 @@ interface SymbolicEngine {
 
     /**
      * Algebraic simplification. Idempotent: `simplify(simplify(x)) == simplify(x)`.
-     * The main compile-time cost of Stage B — [SymjaEngine.simplify] should be
-     * cached per §5.4 of the plan.
+     * The main compile-time cost of coarsening — [SymjaEngine.simplify] should be
+     * cached.
      */
     fun simplify(expr: SymExpr): SymExpr
 
@@ -185,7 +166,7 @@ interface SymbolicEngine {
     fun substitute(expr: SymExpr, subst: Map<SymExpr, SymExpr>): SymExpr
 
     /**
-     * §0.4.52 — returns true if [expr] references [v] as a free variable. Used by C6's
+     * Returns true if [expr] references [v] as a free variable. Used by C6's
      * algebraic pre-normalization: after computing `aSym = simplify(diff(backEdge, w))`,
      * checking `containsVariable(aSym, w) == false` is the affine-in-w test — if the
      * linear coefficient itself depends on w, the expression has a quadratic-or-higher
@@ -216,7 +197,7 @@ interface SymbolicEngine {
 
     /**
      * Variant of [lowerToDxir] that accepts a `symbol-name → DxirNode` map for resolving
-     * free variables. Used by Stage B.3+ when re-emitting a lifted closed-form whose
+     * free variables. Used when re-emitting a lifted closed-form whose
      * free variables correspond to existing dxir nodes (typically the original
      * function's params: e.g., `p` and `n` in C6's `a^n * p + b * Σa^i`).
      */
@@ -238,14 +219,13 @@ interface SymbolicEngine {
  * **Contract:** implementations MUST treat [SymExpr] instances as immutable. Do
  * not mutate fields via reflection. Sharing a [SymExpr] across multiple
  * [SymbolicEngine] calls is safe; sharing across threads requires the backend's
- * own synchronisation (Symja's `ExprEvaluator` is not documented as thread-safe
- * — see §13 risk #13 of the plan).
+ * own synchronisation (Symja's `ExprEvaluator` is not documented as thread-safe).
  *
  * NOTE on sealing: this was originally declared `sealed` to prevent random external
  * impls. KMP rejects extending a sealed type across source-set boundaries (commonMain
  * and jvmMain are treated as different "modules" for sealing purposes), so we drop
  * `sealed` to let `SymjaEngine` provide its concrete impl in jvmMain. The intended
- * impl set is still small + controlled (Symja v0; a custom Kotlin CAS in v0.5);
+ * impl set is still small + controlled (Symja; possibly a custom Kotlin CAS);
  * external implementations outside the `:ir` module are not part of the public API.
  */
 interface SymExpr

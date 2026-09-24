@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirSharding
 import io.tlaloc.ir.OpKind
 
 /**
- * Spec §9.6 step 3 — `tlaloc-grad-sharding-pass`. Runs between Shardy's propagation and
+ * `tlaloc-grad-sharding-pass`. Runs between Shardy's propagation and
  * export stages; catches the class of bugs where a gradient function's shardings don't
  * correspond to the forward function's.
  *
@@ -18,9 +18,8 @@ import io.tlaloc.ir.OpKind
  * - Where the forward function crosses a sharding boundary (e.g. an `all_reduce`), the
  *   backward function emits the dual collective (identity / reduce-scatter / etc.).
  *
- * This v0 of the pass checks the **identity dual** case — no collectives crossed. The
- * ops-with-dual-collectives case belongs in a later revision, after the K2 plugin's `grad`
- * transform actually produces such pairs.
+ * [verify] checks the **identity dual** case — no collectives crossed.
+ * [verifyCollectiveDuality] checks that in-body collectives form valid reverse-mode duals.
  *
  * ### Usage
  *
@@ -120,9 +119,9 @@ object GradShardingVerify {
 
     /**
      * Two shardings are equivalent if they reference the same mesh and have structurally
-     * identical per-dim + replicated axis lists. v0 is conservative: exact equality. Future
-     * revisions can relax this for semantically-equivalent-but-syntactically-different
-     * forms (e.g. open-axis refinements).
+     * identical per-dim + replicated axis lists. The check is conservative: exact equality,
+     * so semantically-equivalent-but-syntactically-different forms (e.g. open-axis
+     * refinements) are reported as mismatches.
      */
     private fun shardingEquivalent(a: DxirSharding?, b: DxirSharding?): Boolean = a == b
 

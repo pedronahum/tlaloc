@@ -5,7 +5,7 @@ import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * Layer 3 §0.4.252+ — interface for per-pattern VJP coarseners.
+ * Interface for per-pattern VJP coarseners.
  *
  * A `PatternCoarsener` consumes a [RecognitionMatch] and produces a
  * [CoarsenedBundle] — everything the generic [coarsenRecognizedPatterns]

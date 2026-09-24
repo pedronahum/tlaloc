@@ -1,10 +1,10 @@
 package io.tlaloc.maestro
 
 /**
- * Layer 3 §0.4.258+ — per-(vendor, arch) compile-decision tuple for a
+ * Per-(vendor, arch) compile-decision tuple for a
  * single program manifest.
  *
- * One [BackendTarget] entry records what the L3 pipeline (recognize →
+ * One [BackendTarget] entry records what the kernel-selection pipeline (recognize →
  * coarsen → lowerKernelChoice → cost-model) decided for a specific
  * device target. A program is potentially compiled for many targets;
  * `ProgramManifest.backendMatrix` is the materialized list of
@@ -13,10 +13,7 @@ package io.tlaloc.maestro
  *
  * # Why structured, not free-form strings
  *
- * The §0.4.243 placeholder shipped `backendMatrix: List<String>` to
- * defer the schema decision until L3 settled the recognizer + kernel
- * registry shape. With L3.0–L3.4 in place, the per-target decision is
- * a fixed-arity tuple: vendor, arch, kernel-name (or null for
+ * The per-target decision is a fixed-arity tuple: vendor, arch, kernel-name (or null for
  * decompose), kv-quant-dtype (or null), cost in microseconds (or null
  * if not yet estimated). String concatenation would re-encode the
  * tuple per consumer; structured carriage is one-edit-away from a
@@ -27,21 +24,21 @@ package io.tlaloc.maestro
  * Adding a new field = bump the JSON schema + extend [ManifestJsonParser]
  * with the new key (with a sensible default). Removing a field is a
  * breaking change and should bump a manifest-format-version field
- * (Layer 4+ when needed).
+ * (the manifest does not carry one yet).
  *
  * @property vendor lower-case vendor string (`"nvidia"`, `"google"`,
  *   `"amd"`, `"aws"`, `"tlaloc"`). Matches `KernelTarget.vendor`.
  * @property arch device-specific identifier (`"h100"`, `"tpu_v5e"`,
  *   `"cpu_generic"`). Matches `KernelTarget.arch`.
- * @property kernelName the kernel identifier the L3.3 lowering pass
+ * @property kernelName the kernel identifier the kernel-choice lowering pass
  *   picked for this target — e.g. `"flash_attn_v3"`. `null` when the
- *   kernel registry returned no match and the L3.3 pass decomposed.
+ *   kernel registry returned no match and the pass decomposed.
  * @property kvQuantDtype the KV-quant dtype name tag (e.g.
- *   `"fp8_e4m3"`, `"int8"`) the L3.4d KV-quant pass annotated. `null`
+ *   `"fp8_e4m3"`, `"int8"`) the KV-quant pass annotated. `null`
  *   when no quantization was applied (either user didn't request it or
  *   the kernel didn't support it).
  * @property costMicroseconds roofline-style time estimate from the
- *   L3.4b cost model. `null` when the populator wasn't asked to
+ *   roofline cost model. `null` when the populator wasn't asked to
  *   compute it. Useful for downstream scheduling.
  */
 data class BackendTarget(

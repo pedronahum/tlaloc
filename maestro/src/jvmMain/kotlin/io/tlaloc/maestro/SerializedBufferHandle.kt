@@ -15,9 +15,9 @@ import java.nio.file.Files
 import java.nio.file.Paths
 
 /**
- * Layer 2.5 §0.4.244+ — typed cross-pod buffer-handle serialization.
+ * Typed cross-pod buffer-handle serialization.
  *
- * [BufferHandle] (Layer 2) is in-process and references the materialized
+ * [BufferHandle] is in-process and references the materialized
  * [DTensor] via [HandleRef.payload]. To cross a step boundary in a real
  * Maestro deployment the handle's payload must be serialized to a content-
  * addressed object store and re-read on the consumer side with both
@@ -36,7 +36,7 @@ import java.nio.file.Paths
  *   from its [ProgramManifest]. Consumer reads with an `expectedType` and
  *   any mismatch (rank, dtype, dims, axis names) fails loudly.
  * - **`manifestRef`**: the producer step's `manifest.bodyHash` — lineage
- *   pointer. v1 stores it for audit; consumer validation does not require it.
+ *   pointer. It is stored for provenance; consumer validation does not require it.
  * - **`meshName`**: phantom-type-erased name of the mesh placement
  *   (`Mesh1`, `Mesh2`, etc.). Consumer validates against the expected mesh's
  *   class simple name.

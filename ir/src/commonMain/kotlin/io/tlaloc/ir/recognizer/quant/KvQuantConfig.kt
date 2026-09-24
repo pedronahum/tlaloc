@@ -1,7 +1,7 @@
 package io.tlaloc.ir.recognizer.quant
 
 /**
- * Layer 3 §0.4.257+ — KV-cache quantization configuration carried as
+ * KV-cache quantization configuration carried as
  * metadata on a FlashAttention `OpKind.COARSENED` op.
  *
  * # Why metadata, not type-system change
@@ -35,7 +35,7 @@ enum class KvQuantDtype(val nameTag: String, val bitsPerElement: Int) {
     ;
 
     /**
-     * §0.4.472 — Phase H5: whether a value of this dtype is a SMALL INTEGER
+     * Whether a value of this dtype is a SMALL INTEGER
      * CODE read against a scale (`x ≈ code * scale`), which is what
      * [io.tlaloc.ir.inference.KvQuantPool]'s symmetric-absmax contract and
      * [io.tlaloc.ir.OpKind.DEQUANTIZE_KV] implement.
@@ -44,7 +44,7 @@ enum class KvQuantDtype(val nameTag: String, val bitsPerElement: Int) {
      * an fp8 value's "code" is a bit pattern with its own exponent field, so
      * an integer-code path would have to either store the pattern (making the
      * multiply meaningless) or round twice. fp8 KV-quant wants a narrow
-     * [io.tlaloc.core.DType] the way bf16 got one in §0.4.455.
+     * [io.tlaloc.core.DType] the way bf16 has one.
      */
     val isIntegerCoded: Boolean get() = this == INT8 || this == INT4
 

@@ -1,34 +1,23 @@
 package io.tlaloc.ir.passes
 
 /**
- * §0.4.503 (Tier 3, item 3) — **Symja is an optional dependency now, and this object
- * is the seam.**
+ * **Symja is an optional dependency, and this object is the seam.**
  *
- * The defect: `ir/build.gradle.kts` declared `implementation(libs.symja.core)` in
- * `jvmMain`, so `org.matheclipse:matheclipse-core` — an 8.3 MB **LGPL-3.0** jar plus
- * its own transitive tree — was a mandatory runtime dependency of every consumer of
- * `:ir`, and therefore of `:autograd`, `:nn` and `:stablehlo` too. Most programs
- * never differentiate a loop-bearing body and never touch the computer algebra
- * system at all; they paid for it anyway, and — this is the part that matters to a
- * corporate policy reviewer — they inherited an LGPL artifact into their dependency
- * graph without being asked.
- *
- * It is now `compileOnly`. `:ir` still compiles against it (so [SymjaEngine] is
- * built and shipped exactly as before) and the coarsening test suite still puts it
- * on the test classpath, so nothing about the certified behaviour changes. What
- * changes is that a consumer who wants the CAS asks for it:
+ * `org.matheclipse:matheclipse-core` is an 8.3 MB **LGPL-3.0** jar plus its own
+ * transitive tree. Most programs never differentiate a loop-bearing body and never
+ * touch the computer algebra system, so `:ir` declares it `compileOnly`: [SymjaEngine]
+ * is compiled and shipped, but the jar is not a runtime dependency of `:ir` (or of
+ * `:autograd`, `:nn` and `:stablehlo`). A consumer who wants the CAS asks for it:
  *
  *     implementation("org.matheclipse:matheclipse-core:3.2.0")   // LGPL-3.0
  *
- * ## Licensing, stated plainly because this is where a reader will look for it
+ * ## Licensing
  *
  * matheclipse-core is LGPL-3.0. Tlaloc is Apache-2.0 and only ever LINKS Symja
  * across the [SymbolicEngine] interface — it does not fork it, patch it, or
- * redistribute it. LGPL permits that, which is why the arrangement was legal
- * before and is legal now. Making the dependency optional does not change the
- * licence analysis; it changes who has to accept it. A consumer whose policy
- * forbids LGPL in the graph can now simply not add the line, and will get a named
- * refusal from the compiler plugin on the day a body actually needs the CAS
+ * redistribute it. LGPL permits that. Because the dependency is optional, a
+ * consumer whose policy forbids LGPL in the graph can simply not add the line,
+ * and will get a named refusal from the compiler plugin on the day a body actually needs the CAS
  * instead of an audit finding.
  *
  * ## Why a separate object and not a check inside SymjaEngine

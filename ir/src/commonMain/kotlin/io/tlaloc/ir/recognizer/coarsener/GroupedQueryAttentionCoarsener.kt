@@ -9,7 +9,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * §0.4.321 / §0.4.322 / §0.4.324 — GroupedQueryAttention analytical-
+ * GroupedQueryAttention analytical-
  * backward coarsener.
  *
  * # What this is
@@ -35,11 +35,11 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  * Three production shapes are coarsened, all sharing the same logic
  * (per-side chains processed independently, can be asymmetric):
  *
- * - **MQA-canonical** (§0.4.321): one BROADCAST per side, no surrounding
+ * - **MQA-canonical**: one BROADCAST per side, no surrounding
  *   RESHAPE. `match.ops.size == 5`.
- * - **GQA-canonical** (§0.4.322): one inner RESHAPE → BROADCAST →
+ * - **GQA-canonical**: one inner RESHAPE → BROADCAST →
  *   one outer RESHAPE per side — PyTorch `repeat_kv`. `match.ops.size == 9`.
- * - **GQA-with-K^T** (§0.4.324): the Llama-3 / Mistral attention layout
+ * - **GQA-with-K^T**: the Llama-3 / Mistral attention layout
  *   where K's outer chain has a trailing TRANSPOSE for `Q · K^T`. K side:
  *   `[TRANSPOSE, RESHAPE]` outer; V side: `[RESHAPE]` outer. The
  *   per-side chains are asymmetric and that's fine — each is processed

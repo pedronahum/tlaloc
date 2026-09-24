@@ -9,11 +9,10 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.recognizer.quant.KvQuantConfig
 
 /**
- * §0.4.467 — Phase H1c: the DECODE-GRAPH SHAPE CONTRACT, gap-list item 3 of
- * `docs/INFERENCE_SERVING_AUDIT.md`.
+ * The DECODE-GRAPH SHAPE CONTRACT.
  *
- * This is the piece that makes the plugin's compile story real. H1a gave us a
- * paged attention and H1b the cache write; what was missing is the *signature*
+ * [io.tlaloc.ir.OpKind.PAGED_ATTENTION] and [io.tlaloc.ir.OpKind.KV_CACHE_WRITE]
+ * supply the attention and the cache write; this contract is the *signature*
  * a serving loop calls: which tensors cross the host/device boundary, in what
  * order, at what static shapes, and how a batch of 3 runs in a graph compiled
  * for 4.
@@ -49,7 +48,7 @@ import io.tlaloc.ir.recognizer.quant.KvQuantConfig
  *
  * Every shape is static per bucket. Nothing in the signature is derived from a
  * *value*: `seqLens` and `blockTables` are runtime tensors and the graph never
- * reads them at compile time, which is the house sentinel-dims rule stated
+ * reads them at compile time, which is the sentinel-dims rule stated
  * from the serving side.
  *
  * ### Decisions
@@ -58,17 +57,17 @@ import io.tlaloc.ir.recognizer.quant.KvQuantConfig
  *   embeddings and leaving the embedding lookup host-side — it moves
  *   `B*T*hiddenSize` floats across PCIe every step instead of `B*T` ints, and
  *   the embedding table is already a device weight. Speculative decoding and
- *   multimodal prefixes do want an embedding entry point; that is a **named
- *   deferral** (a second, sibling spec — not a mode flag on this one).
+ *   multimodal prefixes do want an embedding entry point; that is not
+ *   supported (it would be a second, sibling spec — not a mode flag on this one).
  * - **The KV pools cross the boundary as ordinary in/out operands**, two per
  *   layer, in `(key, value)` order per layer, layers ascending. This is what
- *   makes the graph FUNCTIONAL end to end (H1b's decision) and it is what
+ *   makes the graph FUNCTIONAL end to end (as [io.tlaloc.ir.OpKind.KV_CACHE_WRITE] is) and it is what
  *   XLA's buffer donation then makes free. REJECTED: hiding the pools in a
  *   side-channel resource the way a stateful runtime would — it buys nothing
  *   here and costs every pass a memory model.
  * - **Sampling is NOT in the graph.** The graph returns logits; the plugin
- *   samples host-side in v1, which is what the audit's §2.6 already says.
- *   REJECTED for v1: fusing top-k/top-p/temperature in, because each sampling
+ *   samples host-side.
+ *   REJECTED: fusing top-k/top-p/temperature in, because each sampling
  *   config would fork the executable cache on an axis that has nothing to do
  *   with shape.
  * - **`positions` is an operand, not derived from `seqLens`.** RoPE needs the
@@ -89,14 +88,13 @@ data class DecodeGraphSpec(
     val bucket: DecodeBucket,
     val kind: DecodeGraphKind = DecodeGraphKind.DECODE,
     /**
-     * §0.4.479 — Phase H3c-2: STAGED WEIGHTS, appended to the signature after
+     * STAGED WEIGHTS, appended to the signature after
      * the KV pools. Empty (the default) means the graph carries its weights as
-     * body constants, which is what §0.4.469's reference graph does and what
-     * every entry written before this field existed does.
+     * body constants, as the small reference graphs do.
      *
      * A real checkpoint cannot do that. TinyLlama-1.1B is 1.1e9 parameters;
      * rendered as StableHLO `dense<[...]>` literals that is **tens of
-     * gigabytes of TEXT** in a file whose whole premise (H3a) is that it is
+     * gigabytes of TEXT** in a file whose whole premise is that it is
      * the deployment. So a real model's weights cross the boundary the same
      * way its KV pools do — as ordinary operands, staged once and reused
      * across every decode step.
@@ -121,9 +119,8 @@ data class DecodeGraphSpec(
      * loader binds by index.
      *
      * NOT YET IN THE ARTIFACT. `ServingArtifactWriter` and `tlaloc_serve.py`
-     * still assume the 5 + 2L signature; teaching the manifest to carry a
-     * weight table and the loader to stage it from the checkpoint is H3c-3,
-     * named in `docs/INFERENCE_SERVING_AUDIT.md` §5. Until then this field is
+     * assume the 5 + 2L signature; the manifest does not carry a weight table
+     * and the loader does not stage weights from the checkpoint. This field is
      * exercised by the graph builder and the interpreter parity lane, and a
      * spec with a non-empty [weightSlots] is refused by the exporter rather
      * than written as a half-artifact.
@@ -177,7 +174,7 @@ data class DecodeGraphSpec(
 
     /**
      * Input index ↔ output index for every pool, the pairs a runtime hands to
-     * XLA as donated buffers (the H1b named follow-on, wired in H3). Input `i`
+     * XLA as donated buffers. Input `i`
      * aliases output `o`; the pool is written in place and nothing is copied.
      */
     val donationPairs: List<Pair<Int, Int>>
@@ -198,7 +195,7 @@ data class DecodeGraphSpec(
      * hash together — but it costs a full re-emission of the program on every
      * lookup, which at decode rates is the one thing a cache is supposed to
      * avoid. This key is the cheap front door; the MLIR text stays the
-     * back-stop, and H3 wires the two together.
+     * back-stop.
      *
      * REJECTED: object identity of the [DxirFunction]. A plugin that rebuilds
      * the graph per request (the obvious thing to write) would miss every time
@@ -275,7 +272,7 @@ enum class DecodeSlotRole {
     KV_POOL_IN, KV_POOL_OUT, LOGITS,
 
     /**
-     * §0.4.479 — a model weight staged as an operand rather than baked in as a
+     * A model weight staged as an operand rather than baked in as a
      * body constant. See [DecodeGraphSpec.weightSlots] for why a real
      * checkpoint has no other option.
      */
@@ -302,13 +299,13 @@ data class DecodeModelShape(
      *  integer dtype (I32 in v1 — see [kvQuant]). */
     val kvDtype: DType = dtype,
     /**
-     * §0.4.472 — Phase H5: the KV-quant format, or null for a float pool.
+     * The KV-quant format, or null for a float pool.
      *
      * Non-null means the pools this model's graphs read are
      * [io.tlaloc.ir.inference.KvQuantPool]-quantized: integer codes in
      * [kvDtype] plus a per-head (or per-tensor) scale vector, read back
      * through [io.tlaloc.ir.OpKind.DEQUANTIZE_KV]. This is the field the
-     * serving manifest's long-reserved `kvQuantDtype` slot is finally fed
+     * serving manifest's `kvQuantDtype` slot is fed
      * from, and the one an artifact consumer reads to know that a pool buffer
      * is codes and not values — a distinction no tensor type carries.
      *
@@ -361,7 +358,7 @@ data class DecodeModelShape(
 }
 
 /**
- * §0.4.467 — the PADDING AND MASKING CONVENTION, and the invariant it buys.
+ * The PADDING AND MASKING CONVENTION, and the invariant it buys.
  *
  * A bucket-4 graph running a batch of 3 has one slack row. The convention says
  * what goes in it, and the invariant says what that costs the three real rows:
@@ -373,7 +370,7 @@ data class DecodeModelShape(
  * | `positions` | [PADDING_POSITION] = 0 | a legal RoPE position; no NaN from a rotation |
  * | `blockTables` | [PADDING_BLOCK] = 0 | must be an ALLOCATED page: the gather is in-bounds or XLA's behaviour is on us |
  * | `seqLens` | [PADDING_SEQ_LEN] = 1 | **not 0** — see below |
- * | `slotMapping` | [PADDING_SLOT] = -1 | H1b's convention: the write is dropped |
+ * | `slotMapping` | [PADDING_SLOT] = -1 | the KV_CACHE_WRITE convention: the write is dropped |
  *
  * ### Why `seqLens = 1` and never 0
  *
@@ -381,7 +378,7 @@ data class DecodeModelShape(
  * context lane of sequence `s` to −Inf, and a softmax whose every term is
  * `exp(-Inf - (-Inf))` is `0/0` — **NaN**. The reference interpreter takes a
  * `len == 0` early-out and leaves that row zero; the gather-composed emission
- * has no such arm and produces NaN. H1a's emitter already names this as the
+ * has no such arm and produces NaN. The PAGED_ATTENTION emitter documents this as the
  * single degenerate case where the two disagree. A padding convention that
  * routed through it would make every padded batch differ between the oracle
  * and the device, and would put NaN in a device buffer that any later fused
@@ -420,13 +417,11 @@ data class DecodeModelShape(
  * executables, and XLA is free to tile a `[4, H] × [H, V]` matmul differently
  * from a `[3, H] × [H, V]` one — a different tiling is a different
  * accumulation order, and floating-point addition is not associative. The
- * honest device claim is agreement to the house GPU-vs-host floor, **~4e-5,
- * never pinned tighter than 1e-4**. H3 measures it on the real Llama decode
- * step, where "the same logits" has a top-1 consequence worth reporting; this
- * slice states the claim and its reason rather than pinning a floor on a toy.
+ * device claim is agreement to the GPU-vs-host floor, **~4e-5,
+ * never pinned tighter than 1e-4**.
  */
 object DecodePadding {
-    /** `slotMapping` for a padding token: H1b drops the write. */
+    /** `slotMapping` for a padding token: KV_CACHE_WRITE drops the write. */
     const val PADDING_SLOT: Int = -1
 
     /** `seqLens` for a padding row. NOT 0 — see the object doc. */

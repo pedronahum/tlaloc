@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * Layer 4 §0.4.314 — recognize the SwiGLU + down-projection fused MLP block.
+ * Recognize the SwiGLU + down-projection fused MLP block.
  *
  * # Match shape
  *
@@ -26,11 +26,11 @@ import io.tlaloc.ir.OpKind
  * consumer whose other operand is a non-SwiGLU node (the down-projection
  * weight).
  *
- * # Why this is a v2 compound
+ * # Overlap with SwiGLU
  *
  * `recognizeAll` runs both this recognizer and [recognizeSwiGLU] over the
  * same SILU anchor. When the down-proj is present, both recognizers
- * match — but their op-id sets overlap (the four SwiGLU ops). The §0.4.282
+ * match — but their op-id sets overlap (the four SwiGLU ops). The
  * `resolveLargestMatch` resolver picks the larger match (this one,
  * 5 ops) and discards the bare SwiGLU. When the down-proj is absent
  * (e.g. the LM-head matmul that bypasses SwiGLU, or a SwiGLU whose
@@ -43,7 +43,7 @@ import io.tlaloc.ir.OpKind
  *
  * - **Gating MUL has multiple consumers.** Llama's silu_g feeds only the
  *   down-proj, but a hypothetical residual or skip-connection sourced
- *   from silu_g would also need that op to survive. v1 declines if the
+ *   from silu_g would also need that op to survive. The recognizer declines if the
  *   gating MUL has any consumer other than the candidate down-proj
  *   MATMUL.
  * - **Bias-bearing variants.** Same as [recognizeSwiGLU]: bias-free only.

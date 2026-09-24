@@ -17,8 +17,8 @@ class Tracer<S : Shape> internal constructor(
     val size: Int get() = entry.size
 
     /**
-     * §0.4.442 — the tracer's element dtype ([io.tlaloc.core.F32] for every
-     * pre-F6 spelling; [io.tlaloc.core.I32] for an integer index leaf). Ops
+     * The tracer's element dtype ([io.tlaloc.core.F32] by
+     * default; [io.tlaloc.core.I32] for an integer index leaf). Ops
      * that care — `embedding`'s index operand — check it at trace time.
      */
     val dtype: io.tlaloc.core.DType get() = entry.dtype
@@ -27,7 +27,7 @@ class Tracer<S : Shape> internal constructor(
         DTensor(HostF32Storage(entry.value.copyOf()), dims.copyOf(), F32)
 
     /**
-     * §0.4.59 — raw read of the tape-recorded forward value at [index], without
+     * Raw read of the tape-recorded forward value at [index], without
      * allocating a copy. Intended for loop predicates that need to decide whether
      * to emit more tape ops based on the current forward state (e.g.
      * `while (d.peek() <= threshold) { d = d + d }`). Reading is a plain array
@@ -50,11 +50,10 @@ class Tracer<S : Shape> internal constructor(
 }
 
 /**
- * §0.4.62 — type-safe shortcut for `Tracer<ScalarShape>.peek()`. Compiles only on
+ * Type-safe shortcut for `Tracer<ScalarShape>.peek()`. Compiles only on
  * scalar tracers (rank 0), so a user writing `arr.scalar` on a `Tracer<Rank1<N>>`
  * gets a compile error at the call site instead of a silent `peek(0)` that returns
- * only the first element. Follow-up to §0.4.59 where this convenience was noted as
- * "could still be added later without breaking `peek()`".
+ * only the first element.
  *
  * Implemented as an extension property (not a member) because member-on-generic-
  * with-specific-type-parameter can't express "only on `S = ScalarShape`". An
@@ -69,13 +68,13 @@ internal fun <S : Shape> Tape.traceLeaf(value: DTensor<S, F32>): Tracer<S> {
 }
 
 /**
- * §0.4.442 — the I32 leaf, the embedding-index entry point. The tape's value
+ * The I32 leaf, the embedding-index entry point. The tape's value
  * cache is FloatArray-typed for every dtype (see [TapeEntry.dtype]), so the
  * integers are float-encoded here — exact below 2²⁴, and the require makes the
  * cap loud instead of silently rounding a big vocab id. The leaf's dtype rides
  * to `Tape.toDxirFunction`, which stamps the reproduced `DxirParam` I32-typed:
  * the interpreter's EMBEDDING arm demands an integer index operand, and
- * `DxirReverseTransform` returns the §0.4.419 ZEROS_LIKE structural zero for
+ * `DxirReverseTransform` returns the ZEROS_LIKE structural zero for
  * an integer param — non-differentiable by DTYPE, no `isConstant` flag needed.
  */
 internal fun Tape.traceLeafI32(value: DTensor<*, io.tlaloc.core.I32>): Tracer<Shape> {
@@ -98,7 +97,7 @@ internal fun sameTape(a: Tracer<*>, b: Tracer<*>): Tape {
 }
 
 /**
- * §0.4.65 — creates a scalar constant leaf on the same tape as [this]. The leaf is
+ * Creates a scalar constant leaf on the same tape as [this]. The leaf is
  * flagged `isConstant`, so the reverse walk short-circuits any gradient flowing
  * into it — the exp position of `x.pow(x.constant(2f))` doesn't spend compute
  * materialising PowRule's `x^e · ln(x)` path for a value the user can't retrieve.
@@ -114,7 +113,7 @@ fun Tracer<*>.constant(value: Float): Tracer<io.tlaloc.core.ScalarShape> {
 }
 
 /**
- * §0.4.67 — rank-1 form of [constant]. Creates a `Rank1<Sym>` leaf on the same
+ * Rank-1 form of [constant]. Creates a `Rank1<Sym>` leaf on the same
  * tape as [this], flagged non-differentiable. Defensively copies [values] so a
  * later caller mutation of the input array doesn't desync from the tape's cache.
  *
@@ -135,20 +134,20 @@ fun Tracer<*>.constant(values: FloatArray): Tracer<io.tlaloc.core.Rank1<io.tlalo
 }
 
 /**
- * §0.4.69 — same-shape constant convenience. Creates a leaf on [this]'s tape
+ * Same-shape constant convenience. Creates a leaf on [this]'s tape
  * with the SAME shape as [this], every element filled with [value], flagged
  * non-differentiable. Enables `x + x.constantLike(5f)` on rank-N Tracers
  * without going through scalar-rank broadcasting: the constant and [this]
  * already share a shape so the existing same-shape `plus`/`minus`/`times`/`div`
  * overloads apply directly.
  *
- * Generalises §0.4.65's scalar `constant(Float)` (which only returns a scalar
+ * Generalises the scalar `constant(Float)` (which only returns a scalar
  * Tracer) by projecting the fill value into [this]'s shape. For callers who
- * want an arbitrary per-element rank-1 constant, §0.4.67's `constant(FloatArray)`
+ * want an arbitrary per-element rank-1 constant, `constant(FloatArray)`
  * remains the path.
  */
 /**
- * §0.4.70 — rank-N form of [constant]. Caller supplies both a flat `FloatArray`
+ * Rank-N form of [constant]. Caller supplies both a flat `FloatArray`
  * of values (row-major) and the target `IntArray` of dims. Validates that
  * `values.size` matches the product of `dims`, and that each dim is positive.
  * Values are defensively copied.

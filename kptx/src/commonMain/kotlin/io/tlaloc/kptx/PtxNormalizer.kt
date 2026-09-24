@@ -1,11 +1,11 @@
 package io.tlaloc.kptx
 
 /**
- * §0.4.352 — the lenient foreign-PTX front-end. [normalizePtx] accepts
+ * The lenient foreign-PTX front-end. [normalizePtx] accepts
  * real-world PTX formatting (expert hand-written kernels, pyptx/CUTLASS
- * output) and produces the §0.4.338 IR; `emitPtx()` from there is
- * canonical, so the strict [parsePtx] round-trips it and the §0.4.345
- * transpiler can lift it into DSL source. This is the missing mouth of
+ * output) and produces the value-type IR ([PtxModule]); `emitPtx()` from
+ * there is canonical, so the strict [parsePtx] round-trips it and the
+ * transpiler can lift it into DSL source. This is the entry point of
  * the bootstrap pipeline:
  *
  * ```
@@ -157,8 +157,8 @@ private class PtxNormalizer(source: String) {
     /** Canonical body shape: coalesced register banks first (standard
      * classes in pred/b32/f32/b64 order with canonical storage types,
      * then custom prefixes in appearance order), shared decls, one
-     * blank, then statements — the §0.4.338 emitter/KernelScope
-     * convention. §0.4.357: pyptx-style declaration surfaces — single
+     * blank, then statements — the emitter/KernelScope
+     * convention. Pyptx-style declaration surfaces — single
      * registers (`.reg .b64 %rd0;`), mixed storage types per class, and
      * custom array banks (`%farr0_<4>`) — all coalesce here; declaring
      * more registers than used is harmless PTX. */

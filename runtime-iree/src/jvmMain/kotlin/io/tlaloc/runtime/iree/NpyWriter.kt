@@ -23,9 +23,9 @@ import java.nio.file.StandardOpenOption
  * directly, which means a host that needs to dispatch with hundreds of MB of
  * inputs (e.g. a medium-shaped LlamaDecoder forward) can sidestep the textual
  * `<shape>xf32=v0,v1,…` form and the OS argv / flagfile-size limits that
- * come with it. Used by both the §0.4.289+ PyTorch-comparison test (npy as
- * the cross-language hand-off format) and the §0.4.294+ medium-config
- * benchmark (npy as the input-marshalling format for IREE's tools).
+ * come with it. npy also serves as the hand-off format for cross-language
+ * comparisons (e.g. against PyTorch) and as the input-marshalling format for
+ * IREE's tools in benchmarks.
  */
 object NpyWriter {
 

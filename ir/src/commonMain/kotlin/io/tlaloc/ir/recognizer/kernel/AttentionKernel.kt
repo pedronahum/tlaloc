@@ -3,15 +3,14 @@ package io.tlaloc.ir.recognizer.kernel
 import io.tlaloc.core.ExperimentalTlalocApi
 
 /**
- * §0.4.358 — attention kernel selector for the KPTX tier: the fourth
- * (and final medium-decoder) claiming family. Claims the
+ * Attention kernel selector for the KPTX tier. Claims the
  * FlashAttention COARSENED — operands `(Q[T,D], Kᵀ[D,T], V[T,D])`,
  * single result `[T,D]` (the LlamaDecoder primal pre-transposes K, so
  * the second operand is already the score matmul's rhs) — on the GB10
  * and lowers it to `stablehlo.custom_call @kptx_attention` under the
  * typed-FFI convention with one scratch result: the `S[T,T]` score
  * matrix the three-stage launch chain (scores → row-softmax → output)
- * stages through, XLA-owned per the §0.4.350/351 mechanism.
+ * stages through, XLA-owned (see [KernelDescriptor.scratchResults]).
  *
  * The GQA/MQA COARSENED (broadcast-expanded K/V chains) is the planned
  * extension of the same kernel — the expansions are indexing, not new

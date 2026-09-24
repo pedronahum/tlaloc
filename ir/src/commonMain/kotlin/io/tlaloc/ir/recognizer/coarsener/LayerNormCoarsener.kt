@@ -10,7 +10,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * §0.4.319 — LayerNorm analytical-backward coarsener.
+ * LayerNorm analytical-backward coarsener.
  *
  * Consumes a [RecognitionMatch.LayerNorm] (the canonical
  * `MEAN(x) → SUB(x, mean1) → MUL(centered²) → MEAN → [+eps] → SQRT → DIV`
@@ -20,7 +20,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   forward op-by-op so downstream lowering can substitute a single
  *   `OpKind.COARSENED` for the chain.
  * - **`gradient_body`** — `(dy, x[, eps]) → (dx[, d_eps])`, the analytical
- *   VJP. No const-zero shortcuts — same rule as §0.4.292's RmsNorm fix.
+ *   VJP. No const-zero shortcuts: every operand gets its analytical gradient.
  *
  * # Math
  *

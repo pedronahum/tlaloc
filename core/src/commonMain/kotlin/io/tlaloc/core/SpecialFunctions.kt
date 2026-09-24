@@ -146,8 +146,8 @@ private val POLYGAMMA_BERNOULLI: DoubleArray = doubleArrayOf(
 )
 
 /**
- * ψ⁽ⁿ⁾(x) = dⁿ⁺¹/dxⁿ⁺¹ ln Γ(x) (polygamma of order [n]). §0.4.405 — C1's
- * recorded deferral. n = 0 delegates to [digamma]; n ≥ 1 runs the
+ * ψ⁽ⁿ⁾(x) = dⁿ⁺¹/dxⁿ⁺¹ ln Γ(x) (polygamma of order [n]).
+ * n = 0 delegates to [digamma]; n ≥ 1 runs the
  * recurrence-shift + differentiated Bernoulli asymptotic series, with the
  * differentiated reflection formula (cot-derivative polynomial recurrence)
  * covering the negative axis. Poles at 0, −1, −2, … return +∞ for odd n (the
@@ -155,7 +155,7 @@ private val POLYGAMMA_BERNOULLI: DoubleArray = doubleArrayOf(
  * for even n (odd-order pole, sign-indefinite — the digamma convention).
  * Orders above 100 are refused: the series' factorial coefficients and the
  * reflection polynomial's coefficients leave Double's precision regime there,
- * and no honest value can be returned.
+ * and no accurate value can be returned.
  */
 fun Double.polygamma(n: Int): Double {
     require(n >= 0) { "polygamma order must be ≥ 0; got $n" }

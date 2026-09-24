@@ -3,7 +3,7 @@ package io.tlaloc.ir
 import io.tlaloc.core.ExperimentalTlalocApi
 
 /**
- * §0.4.460 — Phase G3a: the ALL_REDUCE attribute convention, shared by every
+ * The ALL_REDUCE attribute convention, shared by every
  * layer that touches the kind (interpreter, both AD transforms, the StableHLO
  * emitter). One parser so the layers cannot disagree about what a legal
  * ALL_REDUCE looks like.
@@ -11,9 +11,9 @@ import io.tlaloc.core.ExperimentalTlalocApi
  * Attributes:
  * - `attrs["replica_groups"]: List<List<Int>>` — the replica partition, in
  *   StableHLO's `replica_groups` shape. ABSENT means the single-replica
- *   program `[[0]]` (the local, pre-G2b/G4 world). Groups must be non-empty,
+ *   program `[[0]]` (a single local device). Groups must be non-empty,
  *   UNIFORM in size (the dense<NxMxi64> emission cannot spell ragged groups —
- *   StableHLO's -1 padding is a NAMED DEFERRAL), pairwise disjoint, with
+ *   StableHLO's -1 padding is not supported), pairwise disjoint, with
  *   non-negative ids, and replica 0 must belong to some group (the
  *   single-process interpreter models replica 0's view).
  * - `attrs["reduction"]: String` — the reduction kind; ABSENT means `"sum"`.
@@ -21,14 +21,14 @@ import io.tlaloc.core.ExperimentalTlalocApi
  *   refusal can cite it: `"mean"` is (1/|group|)·sum, so its adjoint SCALES
  *   the upstream by 1/|group| instead of being self-adjoint; `"max"`/`"min"`
  *   need subgradient routing (a WHERE mask against the reduced result, the
- *   MaxRule shape) — both DEFER BY NAME until a consumer exists.
+ *   MaxRule shape) — both are refused by name.
  *
  * Single-process semantics (the SPMD replicated-value view): the interpreter
  * models ONE replica whose value every group member also holds, so
  * all-reduce-sum evaluates to `|group(0)| × value`. With one replica that is
  * exactly identity — the case certified end-to-end today. The multi-replica
- * arm (`|group| > 1`) is exercised only via these unit semantics until
- * G2b/G4 put real devices behind the groups.
+ * arm (`|group| > 1`) is exercised only via these unit semantics; no
+ * multi-device execution backs the groups yet.
  */
 @ExperimentalTlalocApi
 object AllReduceAttrs {

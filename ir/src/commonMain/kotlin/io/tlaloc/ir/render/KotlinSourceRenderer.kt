@@ -1,16 +1,15 @@
 /**
- * §0.4.449 — the DxirFunction → Kotlin source pretty-printer: the north star's
- * flagship surface (Tlaloc as an improved Tangent / DiffKT — the reverse code
- * must be READABLE by the user as Kotlin source, AND COMPILED). Where Tangent
+ * The DxirFunction → Kotlin source pretty-printer: reverse-mode code that is
+ * READABLE by the user as Kotlin source, AND COMPILED. Where Tangent
  * prints Python it cannot type, this prints a complete, compilable Kotlin
  * function over the `:core` DTensor host twins: every body op becomes a `val`
  * bound to the certified host-twin call spelling (`matmul`, `sumToLike`,
  * `embeddingGrad`, `.relu()`, …), every const a `Tensors.*` literal, and the
  * printed gradient RUNS — bit-identical to [io.tlaloc.ir.passes.DxirInterpreter]
  * on the same inputs (the host twins and the interpreter arms are the
- * bit-equality-pinned pair the §0.4.447 audit certified).
+ * bit-equality-pinned pair).
  *
- * Typing decision (recorded): every value is declared at its HONEST ranked
+ * Typing decision: every value is declared at its ranked
  * phantom type — `DTensor<ScalarShape, F32>`, `DTensor<Rank1<Sym>, F32>`,
  * `DTensor<Rank2<Sym, Sym>, F32>`, … (`I32` for integer values) — so the
  * printed source reads like user code and the `<S : Shape>`-generic host twins
@@ -23,14 +22,14 @@
  * `reshapeToRankN(…, dims…)` — an identity copy that restores the ranked
  * declared type without touching a bit.
  *
- * Scope contract (LOUD, the §0.4.448 discipline): the printer either renders
+ * Scope contract (LOUD): the printer either renders
  * an op as its host-twin spelling or THROWS naming the kind and the reason —
  * never a silent skip, never a plausible-looking wrong spelling. The
- * capture-route functions this serves (F1 `captureN` → `Tape.toDxirFunction`
+ * capture-route functions this serves (`captureN` → `Tape.toDxirFunction`
  * → `DxirReverseTransform`) carry CONCRETE dims by construction; a -1
  * sentinel dim (the `grad {}` FIR synthesis world) is refused by name, since
  * the ranked-literal renderings below legitimately read dims off the types —
- * which is exactly what the sentinel landmine forbids doing to a sentinel.
+ * which is exactly what the sentinel-dims rule forbids doing to a sentinel.
  */
 package io.tlaloc.ir.render
 

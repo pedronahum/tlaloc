@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * Layer 3 §0.4.251+ — recognize cross-entropy compound forms.
+ * Recognize cross-entropy compound forms.
  *
  * # Match shape
  *
@@ -26,8 +26,8 @@ import io.tlaloc.ir.OpKind
  *
  * # What's NOT matched
  *
- * - Stable `LogSumExp` form (`LOGSUMEXP(logits) - logits[label]`). v1 may
- *   miss this; a separate `recognizeLogSumExpCrossEntropy` could cover
+ * - Stable `LogSumExp` form (`LOGSUMEXP(logits) - logits[label]`) is not
+ *   matched; a separate `recognizeLogSumExpCrossEntropy` could cover
  *   it later.
  * - Sparse / one-hot label optimisations that bypass the explicit MUL
  *   with labels.

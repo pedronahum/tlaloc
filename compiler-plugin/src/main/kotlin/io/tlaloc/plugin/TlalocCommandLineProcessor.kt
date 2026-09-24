@@ -9,11 +9,10 @@ import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.config.CompilerConfigurationKey
 
 /**
- * §0.4.450 — the plugin's first CLI options: the readable-reverse dump (the
- * north star's compile-time half — docs/AD_SINGLE_ENGINE_AUDIT.md, surface 2).
- * Until now every plugin knob rode a system property (`tlaloc.cache.dir`,
- * `tlaloc.soi.enabled`, …) because they tune the COMPILER PROCESS; the dump is
- * a per-compilation USER request, so it takes the front door:
+ * The plugin's CLI options. The first of them is the readable-reverse dump.
+ * Knobs that tune the COMPILER PROCESS ride system properties
+ * (`tlaloc.cache.dir`, `tlaloc.soi.enabled`, …); per-compilation USER requests
+ * such as the dump are CLI options:
  *
  *   -P plugin:io.tlaloc.plugin:dumpGradSource=true
  *   -P plugin:io.tlaloc.plugin:dumpGradSourceDir=<dir>
@@ -22,7 +21,7 @@ import org.jetbrains.kotlin.config.CompilerConfigurationKey
  * `valueAndGrad {}` (…the reverse-gradient family) lambda the plugin
  * successfully synthesises, a compiler INFO message headed by the lambda's
  * source location and carrying the REVERSE-TRANSFORMED gradient rendered as
- * Kotlin source by `DxirFunction.toKotlinSource()` (§0.4.449). The dump
+ * Kotlin source by `DxirFunction.toKotlinSource()`. The dump
  * happens at the dxir level BEFORE synthesis: the gradient the user reads is
  * the SAME function the synthesis then compiles to bytecode.
  * `dumpGradSourceDir=<dir>` implies the message form and ADDITIONALLY writes
@@ -63,9 +62,9 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
     }
 
     /**
-     * §0.4.499 — a boolean option REFUSES a value it does not understand, by name,
-     * instead of silently reading it as `false`. `dumpLoweredIr=ture` used to be a
-     * no-op; now it fails the compilation and says which option and which value.
+     * A boolean option REFUSES a value it does not understand, by name,
+     * instead of silently reading it as `false`: `dumpLoweredIr=ture` fails the
+     * compilation and says which option and which value.
      */
     private fun parseBoolean(optionName: String, value: String): Boolean =
         value.toBooleanStrictOrNull() ?: throw CliOptionProcessingException(
@@ -94,7 +93,7 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
         )
 
         /**
-         * §0.4.499 — developer introspection: the lowered dxir for every recognised
+         * Developer introspection: the lowered dxir for every recognised
          * intrinsic lambda. Off by default; see [TlalocPluginOptions.dumpLoweredIr].
          */
         val DUMP_LOWERED_IR_OPTION = CliOption(
@@ -110,7 +109,7 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
         )
 
         /**
-         * §0.4.499 — the refusal severity for a lambda the plugin cannot lower. On by
+         * The refusal severity for a lambda the plugin cannot lower. On by
          * default; see [TlalocPluginOptions.strictLowering].
          */
         val STRICT_LOWERING_OPTION = CliOption(
@@ -125,7 +124,7 @@ class TlalocCommandLineProcessor : CommandLineProcessor {
         )
 
         /**
-         * §0.4.503 (Tier 3, item 2) — the escape hatch on [KotlinVersionGuard]. Off by
+         * The escape hatch on [KotlinVersionGuard]. Off by
          * default: a Kotlin version outside the guard's range is a compile-time ERROR
          * and the plugin registers nothing. Set true to downgrade that to a WARNING and
          * run anyway.

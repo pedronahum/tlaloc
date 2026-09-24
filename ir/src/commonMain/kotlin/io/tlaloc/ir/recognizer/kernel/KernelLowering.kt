@@ -11,13 +11,13 @@ import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.OpKind
 
 /**
- * Layer 3 §0.4.253+ — kernel template registry + decompose-fallback
+ * Kernel template registry + decompose-fallback
  * driver.
  *
  * # Pipeline shape
  *
  * ```
- * fn (with COARSENED ops post-L3.2)
+ * fn (with COARSENED ops from coarsenRecognizedPatterns)
  *   → lowerKernelChoice(fn, target)
  *   → fn' (each COARSENED either *annotated* with a KernelDescriptor
  *           for downstream custom-call emit, or *decomposed* by inlining
@@ -42,26 +42,24 @@ import io.tlaloc.ir.OpKind
  *
  * # Why annotate instead of wrapping in MANUAL_COMPUTATION?
  *
- * The L3 plan's intent ("custom-call envelopes via OpKind.MANUAL_COMPUTATION
- * reuse") was to give downstream lowering a uniform op shape to dispatch
- * on. In Tlaloc today, `MANUAL_COMPUTATION` is reserved for Shardy's
+ * Wrapping in `OpKind.MANUAL_COMPUTATION` would give downstream lowering a
+ * uniform op shape to dispatch on. However, `MANUAL_COMPUTATION` is reserved for Shardy's
  * `sdy.manual_computation` (in_shardings/out_shardings/manual_axes
  * required by the existing emitter at stablehlo/Emitter.kt:1131-1135).
  * Reusing the op for kernel custom-calls would require extending the
- * SDY emitter to dispatch on attrs — out of L3.3 scope.
+ * SDY emitter to dispatch on attrs.
  *
  * Annotating the existing COARSENED op with a [KernelDescriptor] attr
  * achieves the same separation (pattern-recognized + kernel-tagged
  * sub-graphs are distinguishable at lowering time) without an emitter
- * change. Tracked as audit OQ-Layer3-1: "evaluate adding a dedicated
- * `KERNEL_CALL` opkind once a second backend (IREE, Triton) needs the
- * dispatch shape".
+ * change. A dedicated `KERNEL_CALL` opkind becomes worth adding once a
+ * second backend (IREE, Triton) needs the dispatch shape.
  *
  * # Default registry
  *
  * [defaultKernelTemplates] ships one entry — `"FlashAttention"` →
  * [FlashAttentionKernel]. Add patterns by adding a new file +
- * registry entry, mirroring the L3.2 coarsener registry pattern.
+ * registry entry, mirroring the coarsener registry pattern.
  */
 @ExperimentalTlalocApi
 fun lowerKernelChoice(
@@ -185,7 +183,7 @@ fun lowerKernelChoice(
 /**
  * Look up a [KernelTemplate] for [coarsened] in [registry].
  *
- * Bridges the L3.2 coarsener's `primal_body.name = "<pattern>_primal"`
+ * Bridges the coarsener's `primal_body.name = "<pattern>_primal"`
  * convention (snake_case) to the registry's CamelCase keys
  * (`"FlashAttention"`). The mapping is case-insensitive, hyphen-/
  * underscore-stripped.
@@ -206,9 +204,9 @@ private fun lookupTemplate(
  * primal_body's last return (which becomes the value any consumer of
  * the original COARSENED references).
  *
- * v1 limitation: assumes single-result COARSENED, no regions inside the
+ * Limitation: assumes single-result COARSENED, no regions inside the
  * primal_body, no multi-result ops in the primal_body. This matches
- * what L3.2's [coarsenRecognizedPatterns] produces today.
+ * what [coarsenRecognizedPatterns] produces.
  */
 private fun inlineCoarsenedPrimal(
     coarsenedOp: DxirOp,
@@ -264,7 +262,7 @@ private fun inlineCoarsenedPrimal(
 }
 
 /**
- * v1 default registry — mirrors L3.2's `defaultCoarseners`. One entry
+ * Default registry — mirrors `defaultCoarseners`. One entry
  * per recognized pattern. Adding a pattern = new file + one entry.
  */
 @ExperimentalTlalocApi
@@ -273,8 +271,8 @@ val defaultKernelTemplates: Map<String, KernelTemplate> = mapOf(
 )
 
 /**
- * §0.4.471 — the INFERENCE claiming registry: `OpKind` → template, for
- * first-class op kinds that carry their own emission (Phase H's
+ * The INFERENCE claiming registry: `OpKind` → template, for
+ * first-class op kinds that carry their own emission (the
  * inference-only family) rather than a COARSENED `primal_body`.
  *
  * **Empty by default, deliberately.** Claiming emits a
@@ -290,7 +288,7 @@ val defaultKernelTemplates: Map<String, KernelTemplate> = mapOf(
 val defaultInferenceKernelTemplates: Map<OpKind, KernelTemplate> = emptyMap()
 
 /**
- * §0.4.471 — the KPTX inference lane: pass this as `inferenceRegistry`
+ * The KPTX inference lane: pass this as `inferenceRegistry`
  * on a pipeline whose runtime has registered the matching launch chains.
  */
 @ExperimentalTlalocApi

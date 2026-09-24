@@ -13,12 +13,11 @@ import java.lang.invoke.MethodHandle
 import java.nio.charset.StandardCharsets
 
 /**
- * KPTX v1.2 (§0.4.328) — hand-written FFM bindings for the **CUDA driver
+ * Hand-written FFM bindings for the **CUDA driver
  * API** (`libcuda.so.1`). The KPTX kernel tier loads hand-written /
  * DSL-emitted PTX through the driver JIT (`cuModuleLoadData`) and launches
  * with `cuLaunchKernel` — no CUDA *toolkit* dependency at runtime, only the
- * driver the GPU host already has (aligned with the no-Python-at-runtime
- * story; docs/KPTX_PLAN.md).
+ * driver the GPU host already has, so no Python is needed at runtime.
  *
  * Conventions follow [io.tlaloc.runtime.pjrt.ffm.PjrtFfm] exactly:
  * `MemorySegment.set/get` (never VarHandles — the kotlinc

@@ -1,7 +1,7 @@
 package io.tlaloc.plugin
 
 /**
- * §0.4.514 — the plugin's handling of exceptions it did not expect.
+ * The plugin's handling of exceptions it did not expect.
  *
  * Both halves of the plugin (the FIR checker and the IR extension) wrap their work on
  * a recognised intrinsic call in a guard that turns an unexpected exception into a

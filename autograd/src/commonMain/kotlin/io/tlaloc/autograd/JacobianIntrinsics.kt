@@ -8,7 +8,7 @@ import io.tlaloc.core.Shape
 import io.tlaloc.core.Sym
 
 /**
- * §0.4.394 — Phase B2: the `jacobian` / `hessian` user intrinsics (DiffKT's
+ * The `jacobian` / `hessian` user intrinsics (DiffKT's
  * identity-seeded `reverseDerivative` on tensor→tensor `f`, and its
  * second-order analogue).
  *
@@ -22,15 +22,14 @@ import io.tlaloc.core.Sym
  *
  * Mechanism (the plugin rewrite): the K2 plugin lowers the lambda once and
  * synthesises a SEEDED single-pass derivative —
- *  - `jacobian`: the §0.4.361 forward transform's `jvp_f(x, dx) → dy`
+ *  - `jacobian`: the forward transform's `jvp_f(x, dx) → dy`
  *    (dual-number, one forward pass per column);
  *  - `hessian`: forward-over-reverse, `hvp_f(x, v) → H·v` — the composition
- *    pinned at IR level since §0.4.361 (the reverse transform's gradient body
+ *    certified at IR level (the reverse transform's gradient body
  *    is straight-line, and every runtime-extent adjoint op — SUM_TO, PAD_TO,
  *    SLICE_LIKE — has carried a forward tangent from birth, which is why the
- *    Hessian could be forward-OVER-reverse long before those ops had VjpRules
- *    of their own; §0.4.399/§0.4.404 later closed the reverse-over-reverse
- *    route too) —
+ *    Hessian works forward-OVER-reverse independently of those ops' own
+ *    VjpRules; the reverse-over-reverse route works too) —
  * then wraps it in [assembleJacobianForward] / [assembleHessianForward],
  * which loop over the standard basis at RUNTIME (where the actual extents are
  * known) and stack the resulting columns/rows. Cost: n passes of the seeded
@@ -39,7 +38,7 @@ import io.tlaloc.core.Sym
  *
  * These bodies are the no-plugin fallbacks (see [pluginMissing]). Unlike
  * `grad`, there is no runtime-tape path for a failed synthesis — a fallback
- * is a loud error at first call, the `concat` precedent.
+ * is a loud error at first call, as for `concat`.
  *
  * v1 scope: single-argument `f`, straight-line bodies, F32 host tensors.
  */
@@ -51,11 +50,11 @@ fun <A, R> hessian(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
     { _ -> pluginMissing("hessian") }
 
 /**
- * §0.4.412 — the REVERSE-assembled (tall) Jacobian, closing the m ≪ n tail
- * §0.4.394 recorded. Same contract as [jacobian] — `(x) → J` with
+ * The REVERSE-assembled (tall) Jacobian, for the m ≪ n case.
+ * Same contract as [jacobian] — `(x) → J` with
  * `J[i, j] = ∂yᵢ/∂xⱼ` over the ROW-MAJOR FLATTENED input and output, shape
  * `[m, n]`, erased to `DTensor<Rank2<Sym, Sym>, F32>` — but assembled from
- * the OTHER seeded pass: the plugin synthesises the §0.4.398 seeded reverse
+ * the OTHER seeded pass: the plugin synthesises the seeded reverse
  * pullback `vjp_f(x, ȳ) → x̄` (one Jacobian ROW per output-basis cotangent
  * `eᵢ`) instead of the forward `jvp_f(x, dx) → dy` (one COLUMN per
  * input-basis tangent).
@@ -67,8 +66,8 @@ fun <A, R> hessian(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
  * Pick this spelling when the output is much smaller than the input
  * (m ≪ n, DiffKT's `reverseDerivative` regime); pick [jacobian] when
  * n ≪ m. The choice is the caller's: both extents are runtime quantities
- * under `grad {}`'s -1 sentinel dims, so no compile-time heuristic could
- * honestly compare them.
+ * under `grad {}`'s -1 sentinel dims, so no compile-time heuristic can
+ * compare them.
  *
  * A `Float`-returning `f` degenerates to the `[1, n]` gradient row (the
  * unit cotangent is `grad`'s own seed).
@@ -81,9 +80,8 @@ fun <A, R> jacobianReverse(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
     { _ -> pluginMissing("jacobianReverse") }
 
 /**
- * §0.4.424 — the two-argument REVERSE-assembled Jacobian, the §0.4.412
- * pattern at [jacobian2]'s arity (the "would be the §0.4.406 pattern
- * verbatim if ever pulled" deferral, pulled). `jacobianReverse2(f)` returns
+ * The two-argument REVERSE-assembled Jacobian: [jacobianReverse] at
+ * [jacobian2]'s arity. `jacobianReverse2(f)` returns
  * `(x, w) → Pair(J_x [m, nx], J_w [m, nw])` — the SAME per-argument block
  * convention as [jacobian2] — but assembled from the seeded reverse
  * pullback `vjp2_f(x, w, ȳ) → (x̄, w̄)`: each output-basis cotangent `eᵢ`
@@ -105,8 +103,7 @@ fun <A, B, R> jacobianReverse2(
     { _, _ -> pluginMissing("jacobianReverse2") }
 
 /**
- * §0.4.406 — the two-argument Jacobian, closing the "multi-arg
- * `jacobian2`" tail §0.4.394 recorded. `jacobian2(f)` returns
+ * The two-argument Jacobian. `jacobian2(f)` returns
  * `(x, w) → Pair(J_x, J_w)` where `J_x[i, j] = ∂yᵢ/∂xⱼ` (shape `[m, nx]`)
  * and `J_w[i, j] = ∂yᵢ/∂wⱼ` (shape `[m, nw]`), each over the ROW-MAJOR
  * FLATTENED input/output — the same convention as [jacobian], returned as
@@ -124,8 +121,7 @@ fun <A, B, R> jacobian2(
     { _, _ -> pluginMissing("jacobian2") }
 
 /**
- * §0.4.406 — the two-argument Hessian of a scalar-valued `f(x, w)`,
- * closing the "multi-arg `hessian2`" tail §0.4.394 recorded. Returns the
+ * The two-argument Hessian of a scalar-valued `f(x, w)`. Returns the
  * FULL dense Hessian over the CONCATENATED row-major-flattened input
  * `z = (x; w)` — one `[(nx+nw), (nx+nw)]` matrix in the block layout
  *

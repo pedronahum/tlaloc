@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * §0.4.349 — RoPE kernel selector for the KPTX tier. Claims the
+ * RoPE kernel selector for the KPTX tier. Claims the
  * recognizer's **SUB-form / cos-first** recombination
  * (`out = x_real·cos(θ) − x_imag·sin(θ)` — the LlamaDecoder shape) on
  * the GB10 and lowers it to `stablehlo.custom_call @kptx_rope` under

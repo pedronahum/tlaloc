@@ -3,8 +3,7 @@ package io.tlaloc.kptx
 import kotlin.jvm.Synchronized
 
 /**
- * KPTX v2.5 (§0.4.342) — symbolic-shape kernel templates + the
- * specialization cache (plan task 13).
+ * Symbolic-shape kernel templates + the specialization cache.
  *
  * A [PtxKernelTemplate] is a kernel authored against **symbolic
  * shapes**: the builder receives a [SpecializationEnv] and asks it for
@@ -12,17 +11,17 @@ import kotlin.jvm.Synchronized
  * specialization time. This is where DSL kernels earn their keep over
  * static PTX text: a shape can size a shared-memory array, bake a loop
  * bound as an immediate, pick an unroll factor, or select an
- * instruction variant — decisions the v1 hand-written kernels had to
+ * instruction variant — decisions hand-written kernels have to
  * either hard-code or push to runtime scalar params.
  *
  * [specialize] memoizes by structural key `(arch, shapes, args)` —
  * equal keys return the **same** [PtxModule] instance, so downstream
  * identity-keyed caches (the launch registry's driver-JIT
- * `functionCache` keys on PTX identity, §0.4.330) compose: one
+ * `functionCache` keys on PTX identity) compose: one
  * specialization → one emit → one JIT.
  *
- * Not thread-safe (single-threaded kernel-construction is the v1/v2
- * usage; the *launch* layer's caches are concurrent where it matters).
+ * Not thread-safe (kernel construction is expected to be
+ * single-threaded; the *launch* layer's caches are concurrent where it matters).
  */
 class PtxKernelTemplate(
     val name: String,

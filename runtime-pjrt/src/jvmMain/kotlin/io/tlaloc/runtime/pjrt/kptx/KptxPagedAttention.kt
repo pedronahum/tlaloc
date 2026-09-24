@@ -5,7 +5,7 @@ import io.tlaloc.kptx.emitPtx
 import java.nio.file.Path
 
 /**
- * §0.4.471 — Phase H4: the **runtime half** of paged-attention claiming.
+ * The **runtime half** of paged-attention claiming.
  *
  * `PagedAttentionKernel` (in `:ir`) decides *that* a `PAGED_ATTENTION` op
  * on a GB10 becomes `stablehlo.custom_call @kptx_paged_attention`; this
@@ -16,9 +16,8 @@ import java.nio.file.Path
  * The two halves are deliberately in different modules: `:ir` must stay
  * Kotlin-Multiplatform and free of the FFM/CUDA world, and a graph that
  * merely *names* the kernel is a perfectly good artefact to ship to a
- * machine that resolves it differently. The pairing is the plugin's job,
- * which is exactly the H3 line ("the half vLLM calls, the half that does
- * the work").
+ * machine that resolves it differently. Pairing the two is the serving
+ * plugin's job.
  *
  * # Shape derivation, at dispatch
  *
@@ -38,7 +37,7 @@ import java.nio.file.Path
  * [scale] is the one value that *is* baked, into the PTX: see
  * `KptxKernels.pagedAttentionModule`. One registration therefore serves
  * one scale, which for a served model is one number for the whole run.
- * **Named deferral**: a scale-generic kernel, once `Stage` grows access
+ * A scale-generic kernel is not supported: it needs `Stage` to gain access
  * to the frame's decoded FFI attrs (the emitted call already carries
  * `scale` in its typed-FFI `backend_config`).
  */
@@ -53,7 +52,7 @@ object KptxPagedAttention {
      *
      * Process-permanent and single-shot per (plugin, name), like every
      * KPTX registration — a second call for a different scale needs a
-     * different [name] until the deferral above closes.
+     * different [name].
      */
     fun register(
         pluginPath: Path,

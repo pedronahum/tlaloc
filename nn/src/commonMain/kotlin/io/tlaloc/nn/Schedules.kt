@@ -1,17 +1,14 @@
 /**
- * §0.4.502 (Tier 2 item 7) — **learning-rate schedules**, and the optimizer
- * combinator that applies one.
+ * **Learning-rate schedules**, and the optimizer combinator that applies one.
  *
- * Before this file the only schedule in `:nn` was [SGD.lrDecay] — DiffKT's
- * `1/(1 + d·k)` annealing, baked into one optimizer and unavailable to the
- * other three. A review named that as a gap, and it is: step, exponential and
- * cosine decay are the three schedules essentially every training run uses.
+ * [SGD.lrDecay] is DiffKT's `1/(1 + d·k)` annealing, baked into one optimizer;
+ * the schedules here apply to all four optimizers and cover step, exponential
+ * and cosine decay.
  *
  * ## The contract: a schedule is a FUNCTION OF THE STEP COUNT
  *
  * `at(step): Float`, pure, with no state of its own. That is not a style
- * preference, it is forced by the module's own design (decision 4 of
- * MODEL_LAYER_PLAN.md): an optimizer here is an immutable VALUE and `step` is
+ * preference, it is forced by the module's own design: an optimizer here is an immutable VALUE and `step` is
  * `(params, grads, state) -> (params', state')`. A schedule holding a mutable
  * cursor — PyTorch's `LRScheduler.step()` shape — would be the only mutable
  * thing in the module, would produce a different trajectory depending on how
@@ -129,8 +126,8 @@ class ExponentialDecay(
  * difference: PyTorch's `CosineAnnealingLR` keeps going and rises back toward
  * `lr₀` (it is an *annealing* schedule with a period), and a run that trained
  * past `T_max` by accident would silently get its learning rate back. Clamping
- * refuses to do that; a warm-restart schedule is a NAMED DEFERRAL and would be
- * its own class.
+ * refuses to do that; a warm-restart schedule would be its own class (not
+ * implemented).
  */
 class CosineDecay(
     val initialLearningRate: Float,
@@ -185,7 +182,7 @@ class ScheduledState<S> internal constructor(
 )
 
 /**
- * §0.4.502 — the combinator that applies a [LearningRateSchedule] to any
+ * The combinator that applies a [LearningRateSchedule] to any
  * optimizer: `Scheduled(CosineDecay(0.01f, 600)) { lr -> Adam(lr) }`.
  *
  * ## Why a rebuild per step, and not a mutable learning rate

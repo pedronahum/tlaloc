@@ -3,7 +3,7 @@ package io.tlaloc.maestro
 import io.tlaloc.ir.DxirType
 
 /**
- * Layer 2 §0.4.243+ — typed manifest for a [MaestroStep] artifact.
+ * Typed manifest for a [MaestroStep] artifact.
  *
  * The manifest is a fully-self-describing snapshot of a `program { }`
  * block: the input/output type structure (rank, dtype, named axes), the
@@ -12,9 +12,7 @@ import io.tlaloc.ir.DxirType
  * programs produce manifests with identical [bodyHash]es.
  *
  * v1 keeps the JSON serialization minimal — hand-rolled, no
- * kotlinx.serialization dependency. The schema is small and stable; if
- * Layer 3+ needs richer serialization (back-compat-aware), pull in
- * `kotlinx.serialization` then.
+ * kotlinx.serialization dependency. The schema is small and stable.
  */
 data class ProgramManifest(
     /** Step name; matches the `program(name = ...)` argument. */
@@ -31,14 +29,14 @@ data class ProgramManifest(
     val meshRequirement: String,
     /** SHA-256 hex of the StableHLO body bytes (content-addressed). */
     val bodyHash: String,
-    /** Placeholder for Layer 4 cross-step Shardy propagation. v1: empty. */
+    /** Placeholder for cross-step Shardy propagation. Currently always empty. */
     val shardingSpec: List<String> = emptyList(),
     /**
-     * Layer 3 §0.4.258+ — per-(vendor, arch) compile-decision tuples
-     * recording what the L3 pipeline picked for each device target.
+     * Per-(vendor, arch) compile-decision tuples
+     * recording what the kernel-selection pipeline picked for each device target.
      * Default empty for callers that haven't run the populator yet
-     * (`Tlaloc.program { }` from L2 produces an empty list; the L3.5
-     * `populateBackendMatrix` extends it).
+     * (`Tlaloc.program { }` produces an empty list;
+     * `populateBackendMatrix` fills it).
      */
     val backendMatrix: List<BackendTarget> = emptyList(),
 ) {
@@ -63,7 +61,7 @@ data class ProgramManifest(
 /**
  * Description of one tensor at a step boundary. Captures the same
  * structural shape carried by [DxirType]: dtype, dims (sentinel `-1`
- * for symbolic), and per-axis names from Layer 1.
+ * for symbolic), and per-axis names.
  */
 data class TypeDescriptor(
     val dtype: String,
@@ -99,7 +97,7 @@ data class TypeDescriptor(
 
         /**
          * Parse a single [TypeDescriptor] JSON object (inverse of [toJson]).
-         * Layer 2.5 §0.4.244+ — needed by [io.tlaloc.maestro.SerializedBufferHandle]
+         * Needed by [io.tlaloc.maestro.SerializedBufferHandle]
          * for cross-pod descriptor parsing.
          */
         fun fromJson(json: String): TypeDescriptor =

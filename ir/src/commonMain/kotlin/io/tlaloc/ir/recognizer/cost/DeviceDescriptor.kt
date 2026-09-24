@@ -3,7 +3,7 @@ package io.tlaloc.ir.recognizer.cost
 import io.tlaloc.core.ExperimentalTlalocApi
 
 /**
- * Layer 3 §0.4.254+ — device descriptor consumed by the L3.4 cost model.
+ * Device descriptor consumed by the cost model ([estimateCost]).
  *
  * Captures the per-target peak compute (per dtype family) + memory
  * bandwidth + on-chip SRAM that the cost model needs to score
@@ -13,9 +13,9 @@ import io.tlaloc.core.ExperimentalTlalocApi
  *
  * # Why a fixed schema
  *
- * Scope honesty: full performance models would need per-tensor-core
+ * Scope: full performance models would need per-tensor-core
  * sustained TFLOPs, per-cache-level latencies, NVLink/ICI bandwidth
- * across multiple chips, etc. This v1 schema picks the smallest set
+ * across multiple chips, etc. This schema picks the smallest set
  * that produces a reasonable roofline-style estimate (peak compute,
  * HBM bandwidth, on-chip SRAM size) for picking between a fused vendor
  * kernel (custom-call) and the decomposed primitive chain. Future
@@ -75,8 +75,8 @@ data class DeviceDescriptor(
 }
 
 /**
- * The seven canonical device descriptors L3.4 ships with. Sourced from
- * vendor datasheets — citations inline. Numbers reflect v1 (2026-05);
+ * The seven canonical device descriptors. Sourced from
+ * vendor datasheets — citations inline. Numbers reflect datasheets as of 2026-05;
  * vendors may update sustained-perf claims independent of our release
  * cadence, which is fine — the cost model is a relative estimator, not
  * a benchmark.

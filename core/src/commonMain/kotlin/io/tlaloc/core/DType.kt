@@ -16,7 +16,7 @@ data object F64 : DType {
 }
 
 /**
- * §0.4.455 (Phase G1a) — bfloat16: the truncated-f32 format TPUs are built
+ * bfloat16: the truncated-f32 format TPUs are built
  * around and Blackwell tensor cores prefer. bf16 IS the top 16 bits of an
  * IEEE-754 binary32 (1 sign + 8 exponent + 7 mantissa), so the host
  * representation is the raw upper-16-bit pattern in a Short (see

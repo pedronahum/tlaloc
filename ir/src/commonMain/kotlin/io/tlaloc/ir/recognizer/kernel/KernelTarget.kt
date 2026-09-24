@@ -3,7 +3,7 @@ package io.tlaloc.ir.recognizer.kernel
 import io.tlaloc.core.ExperimentalTlalocApi
 
 /**
- * Layer 3 §0.4.253+ — identifies the device target a kernel template
+ * Identifies the device target a kernel template
  * picks against. Carries (vendor, arch) — the discriminator a vendor
  * uses to ship per-arch fused kernels (e.g., NVIDIA ships
  * `flash_attn_v3` for H100 but `flash_attn_v2` for A100).
@@ -13,7 +13,7 @@ import io.tlaloc.core.ExperimentalTlalocApi
  * release cadence, and an enum would force a release cycle for every
  * new arch. Templates pattern-match on these strings.
  *
- * # Common targets (string keys used across L3.3+ + L3.4 cost model)
+ * # Common targets (string keys used by kernel templates and the cost model)
  *
  * - `nvidia`: `h100`, `h200`, `a100`, `l40s`, `gb10`, `b100`, `b200`
  * - `amd`: `mi300x`, `mi355x`

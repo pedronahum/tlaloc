@@ -1,17 +1,17 @@
 /**
- * §0.4.442 — Phase F6: `Embedding` + `EmbeddingBag`, in DiffKT's exact
- * semantics (F0 §4.0.4, verified against the fresh-clone source): a trainable
+ * `Embedding` + `EmbeddingBag`, in DiffKT's exact
+ * semantics: a trainable
  * `[numEmbeddings, embeddingSize]` table, gaussian-initialized by default;
  * `Embedding` gathers `(*) → (*, D)`, `EmbeddingBag` is embedding followed by
  * a per-bag reduction over axis 0 (`slice → reduce → concat`, DiffKT's own
  * spelling), bags addressed by linear offsets into the flattened indices with
  * the last bag running to the end.
  *
- * The AD route is the amended decision 3: the forward is TRACE spellings only
+ * The AD route is the compiler route (see `Training.kt`): the forward is TRACE spellings only
  * (EMBEDDING, SLICE, SUM(axes), RESHAPE, CONCAT), the index input rides as an
  * I32-typed leaf/param, and `DxirReverseTransform` owns every gradient — the
  * table's arrives through `EmbeddingRule`'s fused EMBEDDING_GRAD dense scatter
- * (the ratified §2.7 dense v1), the indices' as the §0.4.419 ZEROS_LIKE
+ * (a dense gradient), the indices' as the ZEROS_LIKE
  * structural zero. Zero gradient math in this file.
  */
 package io.tlaloc.nn
@@ -37,8 +37,8 @@ import io.tlaloc.autograd.sum
  * MUST be an I32 tensor — trace-time checked, mirroring DiffKT's own
  * `IllegalArgumentException` on a non-`IntTensor` input.
  *
- * [paddingIndex] is the recorded Tlaloc EXTRA (DiffKT's Embedding has none;
- * the `:core` §0.4.409 substrate does): positions whose index equals it
+ * [paddingIndex] is a Tlaloc EXTRA (DiffKT's Embedding has none;
+ * the `:core` `embedding` op does): positions whose index equals it
  * produce exact-zero rows forward AND contribute exactly zero gradient to the
  * table (the attr rides the primal onto the fused EMBEDDING_GRAD). Negative =
  * none, the -1 sentinel.
@@ -100,7 +100,7 @@ class Embedding(
  * differentiated by the transform like everything else.
  *
  * DiffKT ships ONLY `Reduction.Sum` (`sum(0, keepDims = true)`); Mean/Max are
- * unimplemented upstream and stay the F0 named deferral — parity is Sum.
+ * unimplemented upstream and are not offered here either — only Sum.
  */
 class EmbeddingBag(
     val table: DTensor<*, F32>,
@@ -136,7 +136,7 @@ class EmbeddingBag(
     }
 
     /**
-     * DiffKT parity: the single-input `Layer` form refuses — a bag call needs
+     * As in DiffKT, the single-input `Layer` form refuses — a bag call needs
      * `(indices, bagOffsets)`, exactly like DiffKT's vararg `invoke` throws
      * for its typed two-arg overload. Use [forwardBags] or [withOffsets].
      */
@@ -179,8 +179,8 @@ class EmbeddingBag(
 
     /**
      * A single-input `Layer` view for one FIXED bag structure — what a
-     * `Sequential` or [valueAndGradients] can hold. Honest under the F1
-     * caching contract: the offsets shape the captured graph (they are SLICE
+     * `Sequential` or [valueAndGradients] can hold. Consistent with the
+     * caching contract of [CapturedStep]: the offsets shape the captured graph (they are SLICE
      * attrs), so a different bag structure is a different trace anyway; this
      * view just names that fact as a value.
      */

@@ -4,9 +4,9 @@ import io.tlaloc.core.ExperimentalTlalocApi
 import io.tlaloc.ir.DxirOp
 
 /**
- * Layer 3 §0.4.253+ — pattern-specific kernel selector.
+ * Pattern-specific kernel selector.
  *
- * Given a coarsened op (an `OpKind.COARSENED` produced by L3.2's VJP
+ * Given a coarsened op (an `OpKind.COARSENED` produced by the VJP
  * coarsener) and a [KernelTarget], a `KernelTemplate` returns either:
  *
  * - A [KernelDescriptor] — pick this vendor-fused kernel.
@@ -31,7 +31,7 @@ fun interface KernelTemplate {
      * `null` to force the decompose fallback.
      *
      * @param coarsened the `OpKind.COARSENED` op carrying the matched
-     *   primal_body / gradient_body (post-L3.2 coarsening). The
+     *   primal_body / gradient_body (from coarsening). The
      *   template can inspect operand types, primal_body structure, etc.
      * @param target the device descriptor.
      */

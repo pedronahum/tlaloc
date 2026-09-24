@@ -4,7 +4,7 @@ import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.config.KotlinCompilerVersion
 
 /**
- * §0.4.503 (Tier 3, item 2) — **the Kotlin version guard.**
+ * **The Kotlin version guard.**
  *
  * The problem it solves, stated plainly: this plugin is compiled against
  * `kotlin-compiler-embeddable` [COMPILED_AGAINST] and reaches into 40 distinct
@@ -16,8 +16,8 @@ import org.jetbrains.kotlin.config.KotlinCompilerVersion
  * `AbstractMethodError` from the middle of `compileKotlin`, with a stack trace
  * full of JetBrains package names and nothing at all pointing at Tlaloc.
  *
- * Before §0.4.503 nothing checked. That is exactly the failure mode the house
- * rules forbid: an unsupported case that does not refuse by name.
+ * The guard turns that into a refusal that names the Kotlin version and the
+ * supported range before any extension is registered.
  *
  * ## The supported range, and why it is that shape
  *
@@ -132,7 +132,7 @@ object KotlinVersionGuard {
 
     /**
      * The text a user sees. Null for [Verdict.Supported] — a working build stays
-     * silent, which is the rule Tier 1 (§0.4.499) established for this plugin.
+     * silent.
      */
     fun message(verdict: Verdict, allowUnsupported: Boolean): String? = when (verdict) {
         Verdict.Supported -> null

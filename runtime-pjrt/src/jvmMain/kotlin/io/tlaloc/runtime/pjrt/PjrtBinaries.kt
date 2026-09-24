@@ -5,30 +5,22 @@ import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 
 /**
- * §0.4.305 — resolves the PJRT plugin path. Replaces the §0.4.302 python-based
- * resolver — `:runtime-pjrt` no longer goes through a Python subprocess; the
- * §0.4.303/§0.4.304 FFM bindings load the plugin directly via
+ * Resolves the PJRT plugin path. No Python subprocess is involved: the FFM
+ * bindings in [io.tlaloc.runtime.pjrt.ffm.PjrtFfm] load the plugin directly via
  * [java.lang.foreign.SymbolLookup.libraryLookup].
  *
- * Plugin resolution order — §0.4.503 (Tier 3, item 4) generalised this:
+ * Plugin resolution order:
  *   1. `TLALOC_PJRT_PLUGIN_PATH` env var, when it names an existing file.
  *   2. A search over the places a JAX CUDA PJRT plugin actually gets installed,
  *      with the venv name, the Python minor version and the plugin package all
  *      globbed rather than spelled — see [cudaPluginCandidates].
  *
- * What was here until §0.4.503, and why it had to go: step 2 was the single
- * literal path
- * `~/.local/venvs/iree/lib/python3.12/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`.
- * That is one developer's machine written into the library — one venv NAME
- * (`iree`, which is not even the name of the thing it holds), one Python MINOR
- * version, one plugin PACKAGE. A user who ran `pip install jax[cuda12]` into any
- * venv of their own got `available == false` and, before this commit, no way to
- * find out where Tlaloc had looked. [pluginSearchReport] now names every location,
- * in order, and says what it found at each.
- *
- * The GB10 path that certifies this repository's GPU claims still resolves — by
- * the glob, not by the literal — and `PjrtBinariesResolutionTest` pins exactly
- * that shape so a future tidy-up cannot quietly drop it.
+ * No venv name, Python minor version or plugin package is hard-coded, so a
+ * `pip install jax[cuda12]` into any venv is found. [pluginSearchReport] names
+ * every location searched, in order, and what was found at each.
+ * `PjrtBinariesResolutionTest` pins that a
+ * `<venv>/lib/python3.N/site-packages/jax_plugins/xla_cuda12/xla_cuda_plugin.so`
+ * layout resolves through the glob.
  *
  * `cudaAvailable` mirrors `IreeBinaries.cudaAvailable` — uses `nvidia-smi -L`
  * so tests can self-skip on hosts without an NVIDIA GPU.
@@ -50,7 +42,7 @@ object PjrtBinaries {
         get() = pluginPath != null
 
     /**
-     * §0.4.503 — every place [pluginPath] looked, in order, and what was there.
+     * Every place [pluginPath] looked, in order, and what was there.
      * Meant to be pasted verbatim into a skip reason or an error: a resolver that
      * fails without saying where it searched makes the user guess, and the thing
      * they are guessing about is a path inside a Python installation.
@@ -109,8 +101,7 @@ object PjrtBinaries {
      *
      *  - the ROOT: `$VIRTUAL_ENV` first (an activated venv is the user telling us
      *    which Python they mean, and [resolveTpuPlugin] already honours it), then
-     *    every directory under `~/.local/venvs/` — this is the shape the GB10 that
-     *    certifies Tlaloc's GPU claims uses — then `~/.venv`, `~/venv`, `~/.local`
+     *    every directory under `~/.local/venvs/`, then `~/.venv`, `~/venv`, `~/.local`
      *    (a `pip install --user`), then `/usr/local` and `/usr` for a system install.
      *  - the PYTHON VERSION: `lib/python3.*` and `lib64/python3.*`, not `python3.12`.
      *  - the SITE DIRECTORY: `site-packages` (pip/venv) and `dist-packages` (Debian).
@@ -211,7 +202,7 @@ object PjrtBinaries {
     }
 
     /**
-     * §0.4.459 (G2a) — TPU PJRT plugin resolution. Resolution order:
+     * TPU PJRT plugin resolution. Resolution order:
      *
      *   1. `TLALOC_PJRT_PLUGIN_PATH`, honoured for the TPU lane **only when
      *      the file name is tpu-shaped** (contains "tpu": `libtpu.so`,
@@ -232,8 +223,8 @@ object PjrtBinaries {
      *          images; older images also distribute the plugin as
      *          `pjrt_c_api_tpu_plugin.so` — reach those via the env var)
      *
-     * On this GB10 none of these exist, so [tpuAvailable] is false and the
-     * TPU smoke suite self-skips — the designed local behaviour.
+     * On a host without libtpu none of these exist, so [tpuAvailable] is
+     * false and the TPU smoke suite self-skips.
      */
     val tpuPluginPath: Path? by lazy {
         resolveTpuPlugin(
@@ -281,7 +272,7 @@ object PjrtBinaries {
 
     /**
      * Best-effort detector for whether NVIDIA CUDA dispatch is plausible on this
-     * host. Mirrors the §0.4.290 [io.tlaloc.runtime.iree.IreeBinaries.cudaAvailable]
+     * host. Mirrors the [io.tlaloc.runtime.iree.IreeBinaries.cudaAvailable]
      * implementation — `nvidia-smi -L` returning zero with non-empty output is
      * sufficient evidence to attempt PJRT-CUDA. Actual driver / plugin failures
      * surface as real test failures (not silent skips).

@@ -23,7 +23,7 @@ object TlalocErrors : KtDiagnosticsContainer() {
 
     /**
      * Fires with a human-readable reason when the lambda body couldn't be lowered
-     * AND the compilation opted out of the §0.4.499 refusal
+     * AND the compilation opted out of the default refusal
      * (`strictLowering=false`). Warning severity: the call stays unrewritten and
      * the `io.tlaloc.autograd` fallback body runs — which throws at the first
      * call. See [LAMBDA_NOT_LOWERABLE] for the default.
@@ -33,7 +33,7 @@ object TlalocErrors : KtDiagnosticsContainer() {
     )
 
     /**
-     * §0.4.499 — the DEFAULT severity for a lambda body the lowering refused: an
+     * The DEFAULT severity for a lambda body the lowering refused: an
      * ERROR at the call site, carrying the lowering's own verbatim reason (one of
      * ~208 named `LoweringException` sites in `FirLambdaToDxirLowering`).
      *
@@ -49,7 +49,7 @@ object TlalocErrors : KtDiagnosticsContainer() {
     )
 
     /**
-     * Layer 1 (§0.4.241+) — fires when a binary tensor op's operands carry
+     * Fires when a binary tensor op's operands carry
      * incompatible named-index structure: disjoint named axes that can neither
      * contract nor broadcast, or a shared name with conflicting symbolic dims.
      * The payload is the rendered offending mismatch (e.g. "expected Named<Batch, B>
@@ -59,14 +59,14 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
-    /** §0.4.353 — concrete tensor-shape violation in a successfully lowered
+    /** Concrete tensor-shape violation in a successfully lowered
      * grad body (e.g. matmul contract-dim mismatch on literal dims). Error
      * severity: the program cannot execute. */
     val TENSOR_SHAPE_MISMATCH: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
         SourceElementPositioningStrategies.DEFAULT,
     )
 
-    /** §0.4.353 — the reverse-mode transform, run at CHECK time on the
+    /** The reverse-mode transform, run at CHECK time on the
      * lowered body, failed: the gradient this call requests cannot be
      * computed. The payload is the transform's reason (e.g. a missing VJP
      * rule). Error severity — the same failure would otherwise surface at
@@ -76,7 +76,7 @@ object TlalocErrors : KtDiagnosticsContainer() {
     )
 
     /**
-     * §0.4.514 — an unexpected exception inside the plugin while handling a recognised
+     * An unexpected exception inside the plugin while handling a recognised
      * intrinsic call (anything other than the lowering's own named refusals). ERROR by
      * default; see [INTERNAL_ERROR_WARNING] for `strictLowering=false`.
      */
@@ -84,7 +84,7 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
-    /** §0.4.514 — [INTERNAL_ERROR] under `strictLowering=false`: the call is left as
+    /** [INTERNAL_ERROR] under `strictLowering=false`: the call is left as
      * written and the fallback body throws at the first call. */
     val INTERNAL_ERROR_WARNING: KtDiagnosticFactory1<String> by warning1<PsiElement, String>(
         SourceElementPositioningStrategies.DEFAULT,

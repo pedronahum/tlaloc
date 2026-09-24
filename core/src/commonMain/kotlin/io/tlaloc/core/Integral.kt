@@ -125,7 +125,7 @@ fun integralWithBoundGrads(
     IntegralWithBoundGrads(integral(a, b, f), -f(a), f(b))
 
 /**
- * §0.4.426 — `∫ₐᵇ f(x; p) dx` with its parameter derivative wired by
+ * `∫ₐᵇ f(x; p) dx` with its parameter derivative wired by
  * differentiation under the integral sign (Leibniz, fixed bounds):
  * `dP = ∫ₐᵇ ∂f/∂p dx`, quadratured over the caller-supplied [dfdp] with the
  * same Romberg kernel — analytic in the integrand, never differentiated

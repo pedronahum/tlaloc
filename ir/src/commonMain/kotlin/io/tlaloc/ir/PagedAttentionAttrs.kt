@@ -5,11 +5,11 @@ import io.tlaloc.core.I32
 import io.tlaloc.core.I64
 
 /**
- * §0.4.465 — Phase H1a: the PAGED_ATTENTION operand/attribute convention,
+ * The PAGED_ATTENTION operand/attribute convention,
  * shared by every layer that touches the kind (the interpreter, the StableHLO
  * emitter, the renderer's refusal, the cost model). ONE parser, so the layers
- * cannot disagree about what a legal paged attention looks like — the
- * [AllReduceAttrs] precedent from §0.4.460.
+ * cannot disagree about what a legal paged attention looks like (the same
+ * pattern as [AllReduceAttrs]).
  *
  * Operands (see [OpKind.PAGED_ATTENTION] for the full rationale):
  * ```
@@ -24,14 +24,14 @@ import io.tlaloc.core.I64
  * Attributes: `scale: Number` — the softmax temperature, REQUIRED. It is the
  * only attribute, deliberately: every other quantity a paged-attention kernel
  * wants (`blockSize`, `numKvHeads`, the GQA `group`, `maxBlocksPerSeq`) is
- * DERIVED from operand shapes here. The house sentinel-dims rule forbids
+ * DERIVED from operand shapes here. The sentinel-dims rule forbids
  * baking dim-derived values into attrs, and derivation additionally makes
  * attr-vs-operand disagreement unrepresentable.
  *
  * REJECTED alternative: `scale` as a sixth (scalar tensor) operand. It would
  * be a runtime value, which reads well — but the scale is a *compile-time
  * literal* of the model config (1/sqrt(headDim), or a config override), a
- * fused kernel in H4 needs it as a kernel constant, and a tensor operand would
+ * fused kernel needs it as a kernel constant, and a tensor operand would
  * force every claiming recognizer to prove constancy first.
  *
  * GQA: `numHeads` must be a multiple of `numKvHeads`; query head `h` reads kv

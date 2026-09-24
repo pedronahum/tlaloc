@@ -1,31 +1,31 @@
 package io.tlaloc.kptx
 
 /**
- * KPTX v2.3 (§0.4.340) — the declarative ISA spec table (plan task 11).
+ * The declarative ISA spec table.
  *
- * The parser (§0.4.339) is opcode-agnostic on purpose; this table is
+ * The parser ([parsePtx]) is opcode-agnostic on purpose; this table is
  * where opcode knowledge lives, as **data**: per instruction family
  * (keyed by base opcode) an [IsaInstructionSpec] declares the ordered
  * modifier slots, the type-suffix positions, and the operand signature
  * (kinds + register classes). [validateIsa] checks a [PtxModule]
- * against the table; the task-12 `inst("opcode.mods", …)` escape hatch
+ * against the table; the [KernelScope] `inst("opcode.mods", …)` escape hatch
  * calls the same validator at the Kotlin call site, so a typo'd
  * modifier or a class-mismatched register fails at kernel-construction
  * time, not at driver-JIT time with an inscrutable `CUDA_ERROR_INVALID_PTX`.
  *
- * Register classes follow the KPTX naming convention the v1 kernels
- * established (`%p` pred, `%r` b32, `%f` f32, `%rd` b64; special
+ * Register classes follow the KPTX naming convention
+ * (`%p` pred, `%r` b32, `%f` f32, `%rd` b64; special
  * registers `%tid/%ntid/%ctaid/%nctaid` are 32-bit) — the table checks
  * that a `ld.global.f32` destination is an `%f` register, that `setp`
  * writes a predicate, and that `.wide` widens the destination to
  * `%rd`.
  *
- * §0.4.493 adds the second half of the b-type rule: bit-typed operands
- * are **width**-checked (see [widthOfBitType]), so `mov.b32 %r1, %f1`
+ * Bit-typed operands are **width**-checked (see [widthOfBitType]), so
+ * `mov.b32 %r1, %f1`
  * is accepted and `mov.b32 %rd1, %f1` is not — which is what `ptxas`
  * itself does, and what every warp-reduced float kernel needs.
  *
- * Coverage: the 18 instruction families the v1 corpus exercises.
+ * Coverage: the instruction families the KPTX kernel corpus exercises.
  * Adding a family is one [IsaInstructionSpec] literal — the validator
  * never grows per-opcode code. Instructions whose base is absent from
  * the table are **rejected**: the escape hatch's contract is "validated
@@ -34,7 +34,7 @@ package io.tlaloc.kptx
  */
 
 /** KPTX register classes, by naming convention. [widthBits] is the
- * class's storage width — §0.4.493's bit-typed rule checks *that*
+ * class's storage width — the bit-typed rule checks *that*
  * rather than the class (see [widthOfBitType]). */
 enum class IsaRegClass(val prefix: String, val widthBits: Int) {
     PRED("%p", 1), R32("%r", 32), F32("%f", 32), R64("%rd", 64);
@@ -54,7 +54,7 @@ fun regClassOf(name: String): IsaRegClass? {
 }
 
 /** Map a type suffix to the register class that holds values of it;
- * null means "no class check" — f64 (no v1 bank) and, §0.4.357, the
+ * null means "no class check" — f64 (no KPTX register bank) and the
  * b-types: PTX `bN` is untyped bit storage, and b-typed instructions
  * (`mov.b32 %f2, %r8` — pyptx's bit-preserving cross-class move) are
  * class-agnostic by ISA semantics. u/s/f types stay class-checked. */
@@ -67,12 +67,12 @@ internal fun classOfType(type: String): IsaRegClass? = when (type) {
 }
 
 /**
- * §0.4.493 — the **width** a bit-typed suffix constrains its register
+ * The **width** a bit-typed suffix constrains its register
  * operands to, or null for "no width check".
  *
- * §0.4.357 dropped the class check for `bN` and stopped there, leaving
- * b-typed operands checked by nothing at all. That is half the ISA's
- * rule. PTX `bN` is untyped bit *storage of a stated size*: the class
+ * [classOfType] skips the class check for `bN`; this function supplies
+ * the other half of the ISA's rule. PTX `bN` is untyped bit
+ * *storage of a stated size*: the class
  * is free, the **size is not**. Verified against `ptxas 13.0`
  * (`-arch=sm_75`) rather than assumed, since this is the arm every
  * warp-reduced float kernel leans on:
@@ -162,7 +162,7 @@ private fun mem() = IsaOperand(setOf(IsaOperandKind.MEM), IsaClassRule.Any)
 private fun sym() = IsaOperand(setOf(IsaOperandKind.SYM), IsaClassRule.Any)
 private fun immOnly() = IsaOperand(setOf(IsaOperandKind.IMM), IsaClassRule.Any)
 
-/** The v1-coverage ISA table, keyed by base opcode. */
+/** The ISA table, keyed by base opcode. */
 val PTX_ISA: Map<String, IsaInstructionSpec> = listOf(
     IsaInstructionSpec("ret"),
     IsaInstructionSpec("bra", operands = listOf(sym())),

@@ -1,25 +1,24 @@
 package io.tlaloc.kptx
 
 /**
- * KPTX v2.1 (§0.4.338) — the value-type PTX IR, first slice of the
- * Kotlin PTX DSL arc (docs/KPTX_PLAN.md task 9). Design lifted from the
- * pyptx study: **immutable value types, byte-identical round-trip
+ * The value-type PTX IR underlying the Kotlin PTX DSL. Design lifted from pyptx:
+ * **immutable value types, byte-identical round-trip
  * discipline** — the IR models the *text*, not an abstraction over it,
  * so `emit(parse(text)) == text` can hold byte-for-byte on the
- * canonical corpus (task 10) and every v1 kernel is expressible without
+ * canonical corpus and every hand-written kernel is expressible without
  * loss (comments and blank lines are statements, not trivia).
  *
- * Scope: exactly the surface the v1 kernels exercise (§0.4.328–337) —
+ * Scope: the surface the hand-written kernels exercise —
  * `.visible .entry` kernels, `.param` lists, `.reg`/`.shared`
  * directives, dotted-opcode instructions with register / immediate /
  * memory / symbol operands, `@pred` guards, labels. The opcode is an
  * **uninterpreted dotted string** (`"fma.rn.f32"`) — the IR stays
  * opcode-agnostic by construction; per-opcode validation is the ISA
- * spec table's job (task 11), not the type system's.
+ * spec table's job (see PtxIsa.kt), not the type system's.
  *
  * Everything here is a `data class`/`data object`: structural equality
  * is the identity the round-trip corpus and the specialization cache
- * (task 13) key on.
+ * ([PtxKernelTemplate.specialize]) key on.
  */
 
 /**
@@ -27,10 +26,10 @@ package io.tlaloc.kptx
  * header followed by one or more kernel entries.
  *
  * @property version PTX ISA version line (`.version 7.0`). 7.0 is the
- *   v1 floor — every feature the v1 kernels use is ≥ ISA 6.x, and the
- *   driver JIT accepts anything ≤ its own ISA.
+ *   default floor — the baseline KPTX kernels need ISA 6.x or later, and
+ *   the driver JIT accepts anything ≤ its own ISA.
  * @property target virtual architecture (`.target sm_75`). The driver
- *   JITs to the real SASS (GB10 = sm_121); sm_75 is the v1 baseline.
+ *   JITs to the real SASS (GB10 = sm_121); sm_75 is the default baseline.
  * @property addressSize `.address_size 64` — the only value KPTX
  *   supports (the FFM launch path is 64-bit throughout).
  */
@@ -44,7 +43,7 @@ data class PtxModule(
 /**
  * A `.visible .entry` kernel: name, `.param` declarations (order is the
  * launch ABI — the registry marshals `void**` slots positionally,
- * inputs then outputs then trailing scalars, §0.4.330), and the body
+ * inputs then outputs then trailing scalars), and the body
  * statement list (directives, instructions, labels, comments, blanks —
  * in source order).
  */
@@ -74,8 +73,8 @@ data class PtxRegDecl(val type: String, val prefix: String, val count: Int) : Pt
 
 /**
  * `.shared .align 4 .b8 sdata[1024];` — a static shared-memory array.
- * v1 emits `.b8`-typed byte arrays only (the v1 kernels' 1–2 KB
- * reduction scratch); typed shared arrays can widen this later.
+ * Only `.b8`-typed byte arrays are modelled (the kernels' reduction
+ * scratch); typed shared arrays are not supported.
  */
 data class PtxSharedDecl(val align: Int, val name: String, val sizeBytes: Int) : PtxStmt
 
@@ -126,7 +125,7 @@ data class PtxMem(val base: String, val offset: Int = 0) : PtxOperand
 data class PtxSym(val name: String) : PtxOperand
 
 /**
- * §0.4.343 — a vector/fragment operand `{%f1, %f2, %f3, %f4}` (mma
+ * A vector/fragment operand `{%f1, %f2, %f3, %f4}` (mma
  * fragments, vector ld/st). Elements are register names including `%`;
  * canonical spelling separates with `", "` like top-level operands.
  */

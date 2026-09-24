@@ -1,12 +1,12 @@
 package io.tlaloc.core
 
 /**
- * Layer 2 §0.4.243+ — typed buffer handle for step boundaries.
+ * Typed buffer handle for step boundaries.
  *
  * A [BufferHandle] is the only thing that crosses a [io.tlaloc.maestro.MaestroStep]
  * boundary; never a materialized tensor, never an untyped reference. The
  * type parameters carry compile-time-known shape ([T] = the [DTensor] type
- * with named axes from Layer 1) and mesh placement ([M] = a phantom
+ * with named axes) and mesh placement ([M] = a phantom
  * [Mesh]).
  *
  * # Lifecycle (v1 — single-threaded)
@@ -19,7 +19,7 @@ package io.tlaloc.core
  * v1 assumes **sequential workflow execution** — refcounting is a plain
  * `var`, not lock-free. The workflow builder generates explicit increment
  * / release calls in one logical thread. Multi-threaded refcount safety
- * is a v2 enhancement, deferred until Layer 3 introduces parallel dispatch.
+ * is not provided; it becomes necessary only with parallel dispatch.
  *
  * # Why a value class
  *
@@ -60,18 +60,17 @@ value class BufferHandle<T : DTensor<*, *>, M : Mesh>(val ref: HandleRef) : Auto
  *
  * # Payload (v1 stub)
  *
- * Layer 2 v1 carries the materialized [DTensor] (or whatever the producing
+ * v1 carries the materialized [DTensor] (or whatever the producing
  * step actually computes) directly in [payload]. This is a deliberate v1
- * shortcut — Layer 3 introduces a real runtime buffer pool (PJRT / IREE
- * device buffers) that the runtime image can point at. Tracked as an open
- * question in the audit.
+ * shortcut; a runtime buffer pool (PJRT / IREE device buffers) that the
+ * runtime image can point at is not implemented.
  *
  * # Refcount semantics
  *
  * - Constructed at refcount = 1 (the producing step holds the initial reference).
  * - [retain] increments before exposing to a new consumer.
  * - [release] decrements; on transition to 0, the [onZero] callback fires
- *   (this is where Layer 3's dispatcher will free the underlying buffer).
+ *   (this is where a dispatcher frees the underlying buffer).
  *
  * **Not thread-safe.** v1 contract: workflow execution is sequential.
  */

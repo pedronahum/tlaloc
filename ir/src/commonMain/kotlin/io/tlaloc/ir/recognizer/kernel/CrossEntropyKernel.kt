@@ -3,11 +3,11 @@ package io.tlaloc.ir.recognizer.kernel
 import io.tlaloc.core.ExperimentalTlalocApi
 
 /**
- * §0.4.351 — CrossEntropy kernel selector for the KPTX tier. Claims the
+ * CrossEntropy kernel selector for the KPTX tier. Claims the
  * coarsened CE (`loss = Σ labels·log(softmax(logits))`, operands
  * `(logits, labels)`, scalar result) on the GB10 and lowers it to
  * `stablehlo.custom_call @kptx_cross_entropy` under the typed-FFI
- * convention **with a scratch result**: the §0.4.350 launch chain
+ * convention **with a scratch result**: the multi-stage launch chain
  * stages its per-row pass through an XLA-owned `row_loss[rows]`
  * appended as result #1 (the op's scalar stays result #0; nothing
  * downstream references the scratch).

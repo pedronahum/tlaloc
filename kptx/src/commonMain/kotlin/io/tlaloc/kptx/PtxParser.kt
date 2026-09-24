@@ -1,17 +1,16 @@
 package io.tlaloc.kptx
 
 /**
- * KPTX v2.2 (§0.4.339) — opcode-agnostic parser for canonical-format
- * PTX (plan task 10). Inverse of [emitPtx]: for any text in the
+ * Opcode-agnostic parser for canonical-format
+ * PTX. Inverse of [emitPtx]: for any text in the
  * canonical style, `parsePtx(text).emitPtx() == text` **byte-for-byte**
- * — pinned by the round-trip corpus (the five real v1 kernels,
- * §0.4.328–337, copied verbatim).
+ * — pinned by a round-trip corpus of real hand-written kernels.
  *
  * Opcode-agnostic by construction: an instruction line is
  * `[@[!]%guard ] opcode [op1, op2, ...];[    // comment]` and the
  * opcode is stored as its uninterpreted dotted string — the parser
  * never consults an opcode table, so unknown/future instructions parse
- * fine. Per-opcode validation is the ISA spec's job (task 11).
+ * fine. Per-opcode validation is the ISA spec's job ([validateInst]).
  *
  * **Strict, not lenient.** The parser accepts exactly the canonical
  * format (the emitter's output grammar) and throws [PtxParseException]
@@ -20,10 +19,10 @@ package io.tlaloc.kptx
  * but the emitter respells is a corpus bug that strictness surfaces
  * immediately.
  *
- * Operand surface matches the IR (v1 kernels): registers (incl.
+ * Operand surface matches the IR: registers (incl.
  * special `%ctaid.x` forms), immediates (kept as exact spellings),
- * `[base]` / `[base+offset]` memory operands, bare symbols. Vector
- * operands (`{a, b}`) are out of scope until task 14 needs them.
+ * `[base]` / `[base+offset]` memory operands, bare symbols, and
+ * `{a, b, …}` vector/fragment operands ([PtxVec]).
  */
 class PtxParseException(val line: Int, message: String) :
     RuntimeException("PTX parse error at line $line: $message")
@@ -155,7 +154,7 @@ private class PtxParser(private val lines: List<String>) {
     }
 
     /** Split on top-level `", "` — commas inside `{…}` fragment vectors
-     * (§0.4.343) belong to the vector, not the operand list. */
+     * belong to the vector, not the operand list. */
     private fun splitOperands(s: String): List<String> {
         val out = ArrayList<String>()
         var depth = 0

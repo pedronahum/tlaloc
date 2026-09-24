@@ -274,7 +274,7 @@ private fun String.format(vararg args: Any): String {
 // ---------------------------------------------------------------------------
 
 /**
- * [s] as a quoted JSON string literal, escaped per RFC 8259 §7. The escapes
+ * [s] as a quoted JSON string literal, escaped per RFC 8259 section 7. The escapes
  * are the two mandatory ones (`"` and `\`), the five short forms the parser
  * above accepts (`\b \f \n \r \t`), and `\u00XX` for every remaining control
  * character below 0x20. Everything else — including non-ASCII — is emitted

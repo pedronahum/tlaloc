@@ -24,7 +24,7 @@ import java.nio.file.StandardCopyOption
  * REJECTED: `Files.write(path, bytes)` directly — one line shorter, and it
  * makes the interrupted-save case silently corrupt instead of simply absent.
  * REJECTED: writing through a channel in chunks — [SafetensorsWriter.encode]
- * already materialises the whole file (a named deferral recorded there), so
+ * already materialises the whole file, so
  * chunking the write would only stage the same bytes twice.
  */
 object SafetensorsFileWriter {

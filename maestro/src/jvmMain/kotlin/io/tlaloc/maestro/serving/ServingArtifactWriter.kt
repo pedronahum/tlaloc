@@ -21,12 +21,12 @@ import java.nio.file.Path
 import java.security.MessageDigest
 
 /**
- * §0.4.469 — Phase H3a: **the exporter**. This is the JVM's last act.
+ * **The exporter**. This is the JVM's last act.
  *
  * Everything upstream of here is Kotlin: the graph builder, the recogniser,
- * the coarsener, the StableHLO emitter, H1c's shape contract. Everything
+ * the coarsener, the StableHLO emitter, the [DecodeGraphSpec] shape contract. Everything
  * downstream is Python + PJRT. The line between them is a DIRECTORY, and
- * this object is what draws it — which is what makes the audit's "no JVM in
+ * this object is what draws it — which is what makes "no JVM in
  * the serving path" a property of the system rather than an intention.
  *
  * ## What it writes
@@ -53,13 +53,13 @@ import java.security.MessageDigest
  *   property that lets a loader verify a body it was handed.
  * - **The entry point is `main`.** XLA's `compile_and_load` wants the
  *   module's entry function, and jaxlib's own path is `@main`; the
- *   alternative is the §0.4.325 spike's regex rename, which is a loader
+ *   alternative is a regex rename, which is a loader
  *   editing a program's text before running it. The exporter names it
  *   correctly instead, and [ServingEntry.entryPoint] states it rather than
  *   leaving Python to assume.
  * - **One module per entry, not one module with N functions.** A serving
  *   process compiles buckets lazily and independently (warm-up policy is
- *   still open, H1c named it); a single module would make every compile pay
+ *   still open); a single module would make every compile pay
  *   for every bucket's text.
  * - **The ProgramManifest is written per entry, unmodified.** Its
  *   `inputs`/`outputs`/`bodyHash` are cross-checked against the
@@ -72,16 +72,16 @@ object ServingArtifactWriter {
     const val BODIES_DIR: String = "bodies"
     const val PROGRAMS_DIR: String = "programs"
 
-    /** §0.4.480: where staged weight operands land. */
+    /** Where staged weight operands land. */
     const val WEIGHTS_DIR: String = ServingWeightsPointer.STAGED_DIR
 
     /**
-     * A serving artifact is single-device in H3a. The field is
+     * A serving artifact is single-device. The field is
      * [ProgramManifest]'s mesh requirement and it is not optional there, so
-     * it is stated honestly rather than left as a model-class name that
+     * it is stated explicitly rather than left as a model-class name that
      * would imply a mesh nobody declared. Multi-device serving (tensor
      * parallelism across a mesh, with the SDY sharding the emitter already
-     * knows how to write) is a NAMED DEFERRAL of this slice.
+     * knows how to write) is not supported.
      */
     const val SINGLE_DEVICE_MESH: String = "single-device"
 
@@ -239,7 +239,7 @@ object ServingArtifactWriter {
     }
 
     /**
-     * §0.4.480 — write one raw file per staged weight slot and describe them.
+     * Write one raw file per staged weight slot and describe them.
      *
      * **Little-endian, dense row-major, no header.** The file is the operand,
      * byte for byte, in the form PJRT's `BufferFromHostBuffer` takes — so the
@@ -254,7 +254,7 @@ object ServingArtifactWriter {
      *
      * Names are `weights/NNNN_<slot>.bin`, zero-padded to the slot INDEX, so
      * `ls` sorts into call order and two exports of one model are
-     * byte-identical directories (H3a's property, extended to the weights).
+     * byte-identical directories, weights included.
      */
     private fun stageWeights(
         dir: Path,

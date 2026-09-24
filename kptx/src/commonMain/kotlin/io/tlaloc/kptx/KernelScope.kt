@@ -1,7 +1,7 @@
 package io.tlaloc.kptx
 
 /**
- * KPTX v2.4 (§0.4.341) — the KernelScope builder DSL (plan task 12).
+ * The KernelScope builder DSL.
  *
  * Kernels written in pure Kotlin, one call = one instruction:
  *
@@ -23,20 +23,20 @@ package io.tlaloc.kptx
  * ```
  *
  * Design (the pyptx lessons, adapted):
- * - **`inst()` is the validated escape hatch** (task 11's DoD): every
+ * - **`inst()` is the validated escape hatch**: every
  *   call constructs a [PtxInst] and runs [validateInst] against the ISA
  *   table immediately — a typo'd modifier, wrong operand count, or a
  *   class-mismatched register throws at the Kotlin call site (with the
  *   construction stack trace), not at driver-JIT time. Typed per-opcode
- *   wrappers (task 14) are sugar over this same call.
+ *   wrappers (see WarpIntrinsics.kt) are sugar over this same call.
  * - **Registers are typed handles, auto-numbered per class** following
- *   the v1 naming convention (`%p`/`%r`/`%f`/`%rd`, indices from 1);
+ *   the naming convention `%p`/`%r`/`%f`/`%rd`, indices from 1;
  *   the `.reg` bank declarations are synthesized from the allocation
  *   high-water mark (`<count+1>`, matching the hand-written style) and
  *   prepended in the canonical order pred, b32, f32, b64.
  * - **Guards read naturally**: a predicate register *is* a positive
  *   [KGuard]; `!p` negates it.
- * - **Everything lowers to the §0.4.338 value-type IR** — the DSL is a
+ * - **Everything lowers to the value-type IR** — the DSL is a
  *   builder over [PtxModule], so DSL-written kernels inherit the
  *   emitter's canonical format and the parser's byte-identical
  *   round-trip guarantees for free.
@@ -187,7 +187,7 @@ class KernelScope internal constructor(private val name: String) {
     fun r64(): KReg = alloc(IsaRegClass.R64)
 
     /**
-     * §0.4.345 — a handle to the **specific** register `<cls><index>`
+     * A handle to the **specific** register `<cls><index>`
      * (`reg(IsaRegClass.F32, 13)` → `%f13`), bumping the class
      * high-water mark without consuming allocator sequence. The
      * transpiler uses this to keep an original kernel's register
@@ -203,7 +203,7 @@ class KernelScope internal constructor(private val name: String) {
     }
 
     /**
-     * §0.4.345 — force the `.reg` bank declaration for [cls] to at
+     * Forces the `.reg` bank declaration for [cls] to at
      * least `<count>`. Transpiler-fidelity control: a source kernel's
      * decl count is authoritative even when it over-declares
      * (`%f<16>` with `%f14` as the highest use).

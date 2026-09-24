@@ -16,9 +16,8 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 
 /**
- * §0.4.361 — **forward-mode automatic differentiation** over DXIR: the
- * JVP (Jacobian-vector product) transform, the DiffKT-parity milestone
- * (its `forward/` package) and the missing half of the AD pair.
+ * **Forward-mode automatic differentiation** over DXIR: the
+ * JVP (Jacobian-vector product) transform, the forward half of the AD pair.
  *
  * [apply] rewrites a primal `f(x₁..xₙ) → (y₁..yₘ)` into
  * `jvp_f(x₁..xₙ, dx₁..dxₙ) → (y₁..yₘ, dy₁..dyₘ)`: the forward values
@@ -32,7 +31,7 @@ import io.tlaloc.ir.OpKind
  * scalar (training losses). Forward mode is O(1)-pass for few-inputs →
  * many-outputs (sensitivities, per-sample Jacobian columns) — and the
  * two **compose**: `forward(reverse(f))` is a Hessian-vector product,
- * pinned in the §0.4.361 tests. The cross-validation identity
+ * which the forward-mode tests certify. The cross-validation identity
  * `⟨∇f(x), v⟩ = jvp_f(x, v).tangent` makes each transform the other's
  * oracle.
  *
@@ -50,24 +49,24 @@ import io.tlaloc.ir.OpKind
  * # Scope
  *
  * Straight-line bodies over the differentiable op set (the same
- * surface [VjpRegistry] + [DxirInterpreter] cover), plus — §0.4.403,
- * Phase B3 — [OpKind.COARSENED] ops: their tangent is the forward
+ * surface [VjpRegistry] + [DxirInterpreter] cover), plus
+ * [OpKind.COARSENED] ops: their tangent is the forward
  * transform of the stored `primal_body`, spliced inline (the mirror
  * image of [DxirReverseTransform]'s `handleCoarsenedAdjoint` consuming
- * `gradient_body`). §0.4.430 widened the arm to MULTI-result COARSENED
- * (per-result tangent tracking — one splice, m tangent returns) and the
- * splice's clone loop to IF-bearing and multi-result spliced bodies, so
- * an IF inside a `primal_body` now rides the recursion end to end.
- * §0.4.407 — the IF direct forward arm:
+ * `gradient_body`). MULTI-result COARSENED ops are supported
+ * (per-result tangent tracking — one splice, m tangent returns), and the
+ * splice's clone loop handles IF-bearing and multi-result spliced bodies, so
+ * an IF inside a `primal_body` goes through the recursion end to end.
+ *
  * [OpKind.IF] (single- AND multi-result) is handled in the walk itself.
  * The condition is piecewise-constant in the inputs, so its tangent is
  * structurally zero and the tangent of the IF is a SECOND IF over the
  * SAME cloned condition whose branches yield the tangents of the primal
- * branches' yields (paper C2, `d/dx φ(a, b) = φ(da/dx, db/dx)` — the
+ * branches' yields (the φ-node rule `d/dx φ(a, b) = φ(da/dx, db/dx)` — the
  * forward twin of `handleIfAdjoint`). Branch body ops are FLATTENED
  * into the outer forward stream (both branches evaluate; the IFs only
- * select), the same unconditional-hoist trade the reverse side has made
- * since §0.4.23's `walkBranchReverse` — and the resulting empty-region,
+ * select), the same unconditional-hoist trade the reverse side makes in
+ * `walkBranchReverse` — and the resulting empty-region,
  * yield-only IF pair is exactly the shape [DxirToIrSynthesis.irIfOp]
  * and the emitter already accept from reverse-mode adjoints. WHILE and
  * other region-bearing ops still error loudly; the K2 plugin's forward
@@ -291,9 +290,9 @@ object DxirForwardTransform {
      * cloned operand values [vOps]; [t] resolves operand tangents. Returns
      * null for piecewise-constant ops — a STRUCTURAL zero the caller must
      * NOT store, so the lazy tangent() fallback materialises a typed zero
-     * only if something actually consumes it (§0.4.407 — an eagerly-emitted
-     * `const 0.0 : bool` for an IF predicate's STEP was dead weight the
-     * synthesis could not emit). */
+     * only if something actually consumes it (an eagerly-emitted
+     * `const 0.0 : bool` for an IF predicate's STEP would be dead weight the
+     * synthesis cannot emit). */
     private fun tangentOf(
         node: DxirOp,
         v: DxirNode,
@@ -760,39 +759,34 @@ object DxirForwardTransform {
     }
 
     /**
-     * §0.4.430 — the COARSENED tangent computation both walk arms share,
+     * The COARSENED tangent computation both walk arms share,
      * returning ONE tangent node PER result index. The single-result path
      * (via [tangentOf]) takes `.single()`; the multi-result walk arm stores
-     * the whole list for per-index resolution — the §0.4.403 recorded tail's
-     * "per-result tangent tracking in the splice".
+     * the whole list for per-index resolution.
      *
-     * §0.4.415 — Phase B5 (customVjp): REFUSE a USER-gradient node without a
+     * customVjp: REFUSE a USER-gradient node without a
      * tangent_body loudly. For a machine-coarsened node the auto-tangent
      * (forward transform of primal_body) agrees with gradient_body by
      * construction; for a customVjp node they need not — the whole point of
-     * use case 3 (straight-through estimators, stopGradient) is a reverse
+     * straight-through estimators and stopGradient is a reverse
      * adjoint that deliberately diverges from the primal's math. Silently
      * auto-differentiating the primal would make jvp {} and grad {} DISAGREE
-     * over the same body (the §0.4.392 no-silent-fork principle), so forward
+     * over the same body without saying so, so forward
      * mode refuses unless the user also supplies a jvpFn — the `tangent_body`
-     * attr (§0.4.416, the ratified refuse-unless-jvpFn policy's lifting half).
+     * attr.
      *
-     * §0.4.416 — Phase B5 (customJvp / customVjpJvp): a USER tangent_body
-     * splices IN PLACE OF the auto-tangent — the user's jvpFn runs verbatim,
-     * exactly as the user's vjpFn does in reverse (the design doc's
-     * semantic-fork principle: each mode honours ITS body, never derives one
-     * from the other). Param convention: `(primals…, tangents…) → (dy)` — the
-     * same order this transform's own jvp emission uses (params then
-     * d_params), so the user's declared jvpFn signature IS the splice contract
-     * with no adapter. The tangent, like the reverse contributions, honours
-     * the runtime shape contract: statically concrete result types need
-     * nothing (the construction-time type check pinned them); sentinel-bearing
-     * ones wrap in CHECK_SHAPE_LIKE against the node's own value clone — the
-     * one template whose runtime dims the tangent must match.
-     * Machine-coarsened nodes (no user_gradient) never carry tangent_body and
-     * keep the auto path verbatim. User tangent bodies stay single-result
-     * (validateCoarsenedShape refuses the construction; B5's recorded
-     * multi-result-f tail).
+     * customJvp / customVjpJvp: a USER tangent_body splices IN PLACE OF the auto-tangent — the
+     * user's jvpFn runs verbatim, exactly as the user's vjpFn does in reverse (each mode
+     * honours ITS body, never derives one from the other). Param convention: `(primals…,
+     * tangents…) → (dy)` — the same order this transform's own jvp emission uses (params then
+     * d_params), so the user's declared jvpFn signature IS the splice contract with no adapter.
+     * The tangent, like the reverse contributions, honours the runtime shape contract:
+     * statically concrete result types need nothing (the construction-time type check pinned
+     * them); sentinel-bearing ones wrap in CHECK_SHAPE_LIKE against the node's own value clone
+     * — the one template whose runtime dims the tangent must match. Machine-coarsened nodes (no
+     * user_gradient) never carry tangent_body and keep the auto path verbatim. User tangent
+     * bodies are single-result only (validateCoarsenedShape refuses a multi-result
+     * construction).
      */
     private fun coarsenedTangents(
         node: DxirOp,
@@ -878,7 +872,7 @@ object DxirForwardTransform {
 
     /** Resolve a spliced-body reference through [spliceMap], re-wrapping a
      * [DxirOpResult]'s index when the source cloned to a multi-result op —
-     * the splice-scope twin of the walk's `resolveResult` (§0.4.430). */
+     * the splice-scope twin of the walk's `resolveResult`. */
     private fun resolveSpliced(n: DxirNode, spliceMap: Map<Int, DxirNode>): DxirNode? {
         val mapped = spliceMap[n.id] ?: return null
         return if (n is DxirOpResult && mapped is DxirOp && mapped.isMultiResult) {
@@ -889,24 +883,21 @@ object DxirForwardTransform {
     }
 
     /**
-     * §0.4.416 — the inline splice both COARSENED tangent paths share: clone
+     * The inline splice both COARSENED tangent paths share: clone
      * [body]'s ops into [b] with operand references resolved through
-     * [spliceMap] (pre-seeded with the param bindings). Used by the §0.4.403
-     * auto path (body = `apply(primal_body)`) and the §0.4.416 user path
+     * [spliceMap] (pre-seeded with the param bindings). Used by the
+     * auto path (body = `apply(primal_body)`) and the user path
      * (body = the user's `tangent_body`).
      *
-     * §0.4.430 — the clone loop widens beyond straight-line (the §0.4.407
-     * recorded tail): [OpKind.IF] clones through its own arm — branch body
-     * ops FLATTEN into the outer stream first (the same both-branches-
-     * evaluate trade the walk and `walkBranchReverse` make; recursion handles
-     * nested IFs), then the IF re-emits yield-only with cond and yields
-     * resolved through the map — so a spliced jvp body's value-IF/tangent-IF
-     * pairs (what `apply(primal_body)` produces for an IF-bearing primal)
-     * arrive in the outer function in exactly the empty-region shape
-     * [DxirToIrSynthesis.irIfOp] and the emitter accept. Region-free
-     * multi-result ops (a nested multi-result COARSENED, MR IF results) clone
-     * via `opMulti` with [DxirOpResult] references re-wrapped per index.
-     * Other region-bearing ops (WHILE) still refuse loudly by name.
+     * The clone loop is not limited to straight-line code: [OpKind.IF] clones through its own
+     * arm — branch body ops FLATTEN into the outer stream first (the same both-branches-
+     * evaluate trade the walk and `walkBranchReverse` make; recursion handles nested IFs), then
+     * the IF re-emits yield-only with cond and yields resolved through the map — so a spliced
+     * jvp body's value-IF/tangent-IF pairs (what `apply(primal_body)` produces for an
+     * IF-bearing primal) arrive in the outer function in exactly the empty-region shape
+     * [DxirToIrSynthesis.irIfOp] and the emitter accept. Region-free multi-result ops (a nested
+     * multi-result COARSENED, MR IF results) clone via `opMulti` with [DxirOpResult] references
+     * re-wrapped per index. Other region-bearing ops (WHILE) still refuse loudly by name.
      */
     private fun spliceForwardBody(
         node: DxirOp,

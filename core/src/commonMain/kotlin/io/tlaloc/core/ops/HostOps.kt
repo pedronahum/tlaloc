@@ -63,13 +63,13 @@ operator fun <S : Shape> DTensor<S, F32>.div(other: DTensor<S, F32>): DTensor<S,
     elementwiseBroadcast<S>(this, other) { x, y -> x / y }
 
 /**
- * §0.4.206 — Scalar-multiply on a DTensor: `tensor * scalar` returns a fresh
+ * Scalar-multiply on a DTensor: `tensor * scalar` returns a fresh
  * `DTensor<S, F32>` with the same shape and each element multiplied by [scalar].
  * Required for vanilla gradient-descent updates (`W = W - lr * dW`) used by
  * CartPole's outer training loop. Avoids the `broadcastLike(scalar, W) * dW`
  * roundabout that would otherwise be needed for `lr * dW`.
  *
- * Phase A5 (DiffKT parity) completes the set: DiffKT mixes scalars into every
+ * The scalar-mixing overloads below complete the set: DiffKT mixes scalars into every
  * binary op (`timesScalar` + `broadcast(S1, S2)`), so `a + 1.0f`, `a / 2.0f`
  * and the scalar-on-the-left spellings `3.0f - a` / `2.0f * a` are all
  * writable. The scalar-on-left forms matter for the non-commutative ops —
@@ -112,16 +112,16 @@ operator fun <S : Shape> Float.div(other: DTensor<S, F32>): DTensor<S, F32> =
     elementwiseScalar(other, this) { x, y -> y / x }
 
 /**
- * §0.4.397 — Phase A5c-3(iv): `DScalar × DTensor` mixing, DiffKT's
+ * `DScalar × DTensor` mixing, DiffKT's
  * `timesScalar`. DiffKT's `Operations` interface carries exactly ONE
  * scalar-mixing primitive — `timesScalar(left: DScalar, right: DTensor)` —
  * surfaced as `DScalar * DTensor` and `DTensor * DScalar`; the other binaries
- * mix through `Float` (which Tlaloc ships since Phase A5a above). These two
- * overloads close that parity point at host level: the scalar side unwraps to
+ * mix through `Float` (the overloads above). These two
+ * overloads provide the same at host level: the scalar side unwraps to
  * its Float value (F32 host storage — DoubleScalar narrows, matching
  * `DScalar.toFloat()`), and the walk is the same [elementwiseScalar]. Inside
  * `grad {}` the K2 plugin's mixed-rank arm splats the rank-0 DScalar operand
- * through the templated BROADCAST (the A5a computed-scalar path), so a
+ * through the templated BROADCAST (the computed-scalar path), so a
  * DIFFERENTIABLE scalar factor gets BroadcastRule's full-reduce adjoint for
  * free — `d s = Σ (∂loss/∂prod ⊙ a)`.
  */
@@ -139,7 +139,7 @@ fun <S : Shape> DTensor<S, F32>.relu(): DTensor<S, F32> {
 }
 
 /**
- * §0.4.198 — Phase 3 first slice. Elementwise step (Heaviside) on a tensor:
+ * Elementwise step (Heaviside) on a tensor:
  * `1.0` where the element is strictly positive, `0.0` elsewhere (including
  * exactly zero — matches the convention `ReluRule` / `AbsRule` use for STEP
  * adjoints). Emitted by the K2 plugin's [DxirToIrSynthesis.irStep] when the
@@ -156,7 +156,7 @@ fun <S : Shape> DTensor<S, F32>.step(): DTensor<S, F32> {
 }
 
 /**
- * §0.4.204 — CartPole Phase 3 sixth slice. Elementwise sign (signum) on a tensor:
+ * Elementwise sign (signum) on a tensor:
  * `+1` where x > 0, `-1` where x < 0, `0` at x = 0. Required by CartPole's NN
  * forward `a = sign(tanh(...) - ε)` which discretises the action to {-1, +1}.
  *
@@ -191,7 +191,7 @@ private fun <S : Shape> DTensor<S, F32>.unary(f: (Float) -> Float): DTensor<S, F
 }
 
 /**
- * §0.4.364 — elementwise comparisons producing a 0/1 F32 mask (the
+ * Elementwise comparisons producing a 0/1 F32 mask (the
  * DiffKT-gap user surface for `grad {}` lambdas). The host surface stays
  * all-F32 — there is no `DTensor<S, Bool>` host type; masks are 1f/0f,
  * matching the IR's Bool encoding. The K2 plugin lowers these to
@@ -219,12 +219,12 @@ infix fun <S : Shape> DTensor<S, F32>.ne(other: DTensor<S, F32>): DTensor<S, F32
     elementwise(this, other) { x, y -> if (x != y) 1f else 0f }
 
 /**
- * §0.4.397 — Phase A5c-3(iv): comparisons against a Float scalar (`a gt 1.0f`),
+ * Comparisons against a Float scalar (`a gt 1.0f`),
  * the last everyday DiffKT comparison spelling Tlaloc rejected. Same 0/1 F32
  * mask contract as the tensor⊙tensor forms above; the scalar side is compared
  * against every element. Inside `grad {}` the K2 plugin splats the scalar side
- * over the tensor operand's shape (the Phase A5a literal-splat pattern), so the
- * IR sees the uniform two-tensor COMPARE the §0.4.364 arm already lowers.
+ * over the tensor operand's shape (the same literal splat the arithmetic
+ * overloads use), so the IR sees the uniform two-tensor COMPARE.
  */
 infix fun <S : Shape> DTensor<S, F32>.gt(other: Float): DTensor<S, F32> =
     elementwiseScalar(this, other) { x, y -> if (x > y) 1f else 0f }
@@ -245,7 +245,7 @@ infix fun <S : Shape> DTensor<S, F32>.ne(other: Float): DTensor<S, F32> =
     elementwiseScalar(this, other) { x, y -> if (x != y) 1f else 0f }
 
 /**
- * §0.4.364 — elementwise select: `where(pred, a, b)[i] = if (pred[i] != 0)
+ * Elementwise select: `where(pred, a, b)[i] = if (pred[i] != 0)
  * a[i] else b[i]`. [pred] is a 0/1 F32 mask (usually from [gt] and
  * friends). The differentiable routing primitive: gradients flow to [a]
  * where the mask holds and to [b] elsewhere (WhereRule); [pred] gets
@@ -269,10 +269,10 @@ fun <S : Shape> where(
 }
 
 /**
- * §0.4.369 — Phase A4 (DiffKT parity): elementwise `maximum(a, b)` /
+ * Elementwise `maximum(a, b)` /
  * `minimum(a, b)` — first-class in DiffKT, sugar in Tlaloc. Inside `grad {}`
  * the K2 plugin lowers `maximum` to `WHERE(COMPARE(a, b, GE), a, b)` and
- * `minimum` to `WHERE(COMPARE(a, b, LE), a, b)` — the §0.4.364 where/compare
+ * `minimum` to `WHERE(COMPARE(a, b, LE), a, b)` — the [where]/compare
  * surface — so the gradient flows through WhereRule with no new AD math:
  * full upstream to the larger (resp. smaller) operand, ties to the first
  * (the `>=` / `<=` mask keeps `a`). This host body is the runtime twin. The
@@ -285,7 +285,7 @@ fun <S : Shape> minimum(a: DTensor<S, F32>, b: DTensor<S, F32>): DTensor<S, F32>
     elementwise(a, b) { x, y -> if (x <= y) x else y }
 
 /**
- * §0.4.369 — `clip(x, lo, hi)` with compile-time Float scalar bounds =
+ * `clip(x, lo, hi)` with compile-time Float scalar bounds =
  * `minimum(maximum(x, lo), hi)`. Inside `grad {}` this composes as two
  * COMPARE+WHERE pairs against `lo`/`hi` splat consts of `x`'s shape, so the
  * gradient is exactly 1 where `lo ≤ x ≤ hi` and 0 outside (WhereRule routes
@@ -298,7 +298,7 @@ fun <S : Shape> clip(x: DTensor<S, F32>, lo: Float, hi: Float): DTensor<S, F32> 
 }
 
 /**
- * §0.4.369 — `outerProduct(a, b)` for rank-1 operands: `out[i, j] = a[i]·b[j]`,
+ * `outerProduct(a, b)` for rank-1 operands: `out[i, j] = a[i]·b[j]`,
  * result shape `[n, m]` (DiffKT's `concat(shapeA, shapeB)` specialised to
  * rank-1 ⊗ rank-1). Inside `grad {}` the K2 plugin lowers this to
  * `MATMUL(reshape(a, [n, 1]), reshape(b, [1, m]))` — the outer product IS a
@@ -386,10 +386,9 @@ fun <S : Shape> DTensor<S, F32>.polygamma(n: Int): DTensor<S, F32> =
     unary { x -> x.toDouble().polygamma(n).toFloat() }
 
 /**
- * Phase A5b (DiffKT parity) — elementwise power. POW has been fully ruled below
- * the surface since Stage B.3 (PowRule, the interpreter arm, `stablehlo.power`
- * emission, the forward-mode tangent, and synthesis's scalar `kotlin.math.pow`
- * arm) but had no host op and no FIR entry, so user code could never reach it.
+ * Elementwise power, the user-facing entry to POW (PowRule, the interpreter
+ * arm, `stablehlo.power` emission, the forward-mode tangent, and synthesis's
+ * scalar `kotlin.math.pow` arm).
  * Three spellings, matching DiffKT's `pow(Float/Int/tensor-exponent)`: a tensor
  * exponent (elementwise, same shape) and Float / Int exponents — the K2 plugin
  * splats a literal exponent to the operand's shape, so the IR always sees the
@@ -407,7 +406,7 @@ fun <S : Shape> DTensor<S, F32>.pow(exp: Float): DTensor<S, F32> =
 fun <S : Shape> DTensor<S, F32>.pow(exp: Int): DTensor<S, F32> = pow(exp.toFloat())
 
 /**
- * §0.4.368 — Phase A3 (DiffKT parity): `softmax(axis)` over a single axis
+ * `softmax(axis)` over a single axis
  * (default last; negative axes count from the back). Numerically stable
  * (subtract the per-slice max before exponentiating), row-major stride walk
  * matching the dxir interpreter's SOFTMAX arm bit-for-bit so the host path
@@ -443,7 +442,7 @@ fun <S : Shape> DTensor<S, F32>.softmax(axis: Int = -1): DTensor<S, F32> {
 }
 
 /**
- * §0.4.368 — `logSoftmax(axis)` = log(softmax(x, axis)), computed in the
+ * `logSoftmax(axis)` = log(softmax(x, axis)), computed in the
  * stable `x - max - log(Σ exp(x - max))` form (never materialises the
  * softmax then logs it, which would lose precision in the tail). Inside
  * `grad {}` the K2 plugin lowers this to `LOG(SOFTMAX(x, axis))` — both
@@ -476,7 +475,7 @@ fun <S : Shape> DTensor<S, F32>.logSoftmax(axis: Int = -1): DTensor<S, F32> {
 }
 
 /**
- * §0.4.370 — Phase A3b (DiffKT parity): `crossEntropyLoss(logits, oneHot)` =
+ * `crossEntropyLoss(logits, oneHot)` =
  * the sum-reduced softmax cross entropy. Equal to `-Σ oneHot ⊙ logSoftmax(logits)`
  * over the last (class) axis, then summed over every position (the sum-reduction
  * convention — the total of the per-sample cross-entropies). `oneHot` is a float
@@ -500,7 +499,7 @@ fun <S : Shape> crossEntropyLoss(
 }
 
 /**
- * §0.4.370 — `nllLoss(logProbs, oneHot)` = the negative-log-likelihood loss on
+ * `nllLoss(logProbs, oneHot)` = the negative-log-likelihood loss on
  * already-log-normalised probabilities: `-Σ oneHot ⊙ logProbs`, summed over every
  * position. The companion to [crossEntropyLoss] for when the caller has already
  * applied `logSoftmax`. Inside `grad {}` it lowers to `NEG(SUM(MUL(oneHot, logProbs)))`.
@@ -520,14 +519,14 @@ fun <S : Shape> nllLoss(
 }
 
 /**
- * §0.4.400 — Phase A3b (DiffKT parity): `embedding(table, indices)` gathers
+ * `embedding(table, indices)` gathers
  * `table[indices[p], :]` for each index position — the rank-2 `[V, D]` table
  * against a rank-1 `[N]` I32 index vector, producing `[N, D]`. Row-major walk
  * matching the dxir interpreter's EMBEDDING arm bit-for-bit (same bounds check,
  * same gather order) so the host path and the IR path agree. The phantom result
  * shape is `Rank2<N, D>`: the position atom from the indices, the feature atom
  * from the table. Inside `grad {}` the K2 plugin lowers this to
- * [io.tlaloc.ir.OpKind.EMBEDDING]; the §0.4.370 EmbeddingRule provides the
+ * [io.tlaloc.ir.OpKind.EMBEDDING]; EmbeddingRule provides the
  * reverse (a fused scatter-add), for which [embeddingGrad] is the runtime twin.
  */
 fun <V : ShapeAtom, D : ShapeAtom, N : ShapeAtom> embedding(
@@ -540,7 +539,7 @@ fun <V : ShapeAtom, D : ShapeAtom, N : ShapeAtom> embedding(
 }
 
 /**
- * §0.4.409 — DiffKT's `embedding(table, indices, paddingIndex)`: positions whose
+ * DiffKT's `embedding(table, indices, paddingIndex)`: positions whose
  * index equals [paddingIndex] produce EXACT-zero output rows (and, through the
  * padded `embeddingGrad` twin, contribute zero gradient to the table). A
  * negative [paddingIndex] means "none" — the -1 sentinel the IR's optional
@@ -562,7 +561,7 @@ fun <V : ShapeAtom, D : ShapeAtom, N : ShapeAtom> embedding(
 }
 
 /**
- * §0.4.409 — the rank-2 index batch `[B, N]` → `[B, N, D]`. Same row-major
+ * The rank-2 index batch `[B, N]` → `[B, N, D]`. Same row-major
  * gather walk as the rank-1 spelling (the flat position order IS the batch
  * order), so the dxir interpreter's rank-agnostic EMBEDDING arm stays the
  * bit-exact oracle. `@JvmName` dodges the erasure clash with the rank-1
@@ -579,7 +578,7 @@ fun <V : ShapeAtom, D : ShapeAtom, B : ShapeAtom, N : ShapeAtom> embedding(
     return DTensor(HostF32Storage(out), intArrayOf(indices.dims[0], indices.dims[1], table.dims[1]), F32)
 }
 
-/** §0.4.409 — rank-2 index batch with [paddingIndex]; see the rank-1 padded overload. */
+/** Rank-2 index batch with [paddingIndex]; see the rank-1 padded overload. */
 @JvmName("embeddingBatchPadded")
 fun <V : ShapeAtom, D : ShapeAtom, B : ShapeAtom, N : ShapeAtom> embedding(
     table: DTensor<Rank2<V, D>, F32>,
@@ -616,7 +615,7 @@ private fun embeddingGather(
 }
 
 /**
- * §0.4.400 — [embedding]'s reverse twin: scatter-ADD each upstream row back to
+ * [embedding]'s reverse twin: scatter-ADD each upstream row back to
  * the vocab slot its index selected, `dTable[indices[p], :] += upstream[p, :]`,
  * collisions summing when the same vocab row was embedded at multiple
  * positions. The runtime twin of the dxir interpreter's EMBEDDING_GRAD arm,
@@ -633,7 +632,7 @@ fun <S : Shape> embeddingGrad(
 ): DTensor<S, F32> = embeddingGrad(upstream, indices, tableTemplate, -1)
 
 /**
- * §0.4.409 — the padded reverse twin: positions whose index equals
+ * The padded reverse twin: positions whose index equals
  * [paddingIndex] are SKIPPED by the scatter walk entirely, so the padded vocab
  * row's gradient stays exactly zero (and a paddingIndex outside the vocab is
  * legal — nothing is ever scattered there). Negative [paddingIndex] = none.
@@ -669,10 +668,10 @@ fun <S : Shape> embeddingGrad(
 }
 
 /**
- * §0.4.400 — the zero "gradient" of an integer tensor param. `grad {}` on a
+ * The zero "gradient" of an integer tensor param. `grad {}` on a
  * lambda with a non-differentiable I32 param (embedding indices) still returns
  * one gradient per param; the reverse transform types the integer slot as a
- * structural zero (§0.4.54), and the synthesis materialises it with this —
+ * structural zero, and the synthesis materialises it with this —
  * shaped like the param at RUNTIME, since its static dims are -1 sentinels.
  */
 fun <S : Shape> intZerosLike(t: DTensor<S, I32>): DTensor<S, I32> =
@@ -705,7 +704,7 @@ fun <S : Shape> rngNormalMatrix(key0: Int, key1: Int, rows: Int, cols: Int): DTe
     DTensor(HostF32Storage(normalFloats(RandomKey(key0, key1), rows * cols)), intArrayOf(rows, cols), F32)
 
 /**
- * §0.4.418 — Phase E1b: loud validation of a CSR component triple, the E1a
+ * Loud validation of a CSR component triple, the
  * `SparseTensor` constructor's invariant minus the strictly-increasing-columns
  * check (the SpMM/SDDMM walks are order-independent in the math; canonical
  * inputs additionally get bit-for-bit parity with `SparseTensor.matmul`).
@@ -741,10 +740,10 @@ private fun validateCsrComponents(
 }
 
 /**
- * §0.4.418 — Phase E1b: the host twin of the dxir interpreter's SPARSE_MATMUL
+ * The host twin of the dxir interpreter's SPARSE_MATMUL
  * arm — sparse `[N, C]` (as CSR components) × dense `[C, D]` → dense `[N, D]`.
  * `N` is read off [rowPtr]'s ACTUAL runtime extent (N+1 entries — the
- * runtime-extent house pattern, which is what makes the eventual `grad {}`
+ * runtime-extent pattern the other host twins use, which keeps the `grad {}`
  * synthesis path sound under -1 sentinel dims), `C`/`D` off the dense
  * operand's runtime dims. The walk is `SparseTensor.matmul(dense)` — and the
  * interpreter arm — bit-for-bit: per output row a Double accumulator collects
@@ -783,7 +782,7 @@ fun sparseMatmul(
 }
 
 /**
- * §0.4.418 — the `transposed = true` form's host twin: `Aᵀ · dense` over the
+ * The `transposed = true` form's host twin: `Aᵀ · dense` over the
  * SAME CSR components, `dense` here `[N, D]` (the upstream, in the adjoint
  * use). [denseTemplate] contributes SHAPE ONLY — its values are never read
  * (the SUM_TO / embeddingGrad template convention): its runtime leading dim
@@ -833,7 +832,7 @@ fun <S : Shape> sparseMatmulTransposed(
 }
 
 /**
- * §0.4.418 — the fused SDDMM values-adjoint's host twin, the dxir
+ * The fused SDDMM values-adjoint's host twin, the dxir
  * interpreter's SPARSE_MATMUL_VALUES_ADJOINT arm bit-for-bit:
  * `d_values[k] = Σ_j upstream[row(k), j] · dense[colIdx[k], j]`, one
  * Double-accumulated length-D dot per STORED entry — the structural zeros
@@ -874,7 +873,7 @@ fun sparseMatmulValuesAdjoint(
 }
 
 /**
- * §0.4.384 — Phase A3b slice 1, the rank-4 substrate: the shared conv engine.
+ * The rank-4 substrate: the shared conv engine.
  * NCHW input; the kernel reads OIHW `[Co, Ci, kh, kw]` when [transpose] is false
  * and IOHW `[Ci, Co, kh, kw]` when true — the layouts the dxir interpreter's
  * `evalConv2d` and the StableHLO emitter fix. This is a port of that eval, kept
@@ -891,8 +890,8 @@ fun sparseMatmulValuesAdjoint(
  * `rhs_dilation` (à-trous kernel), `window_reversal` (spatially flips the kernel
  * taps — what [io.tlaloc.ir.passes.VjpRegistry.Conv2dRule]'s `dX` needs).
  * `feature_group_count` / `batch_group_count` are 1 here: the interpreter grew a
- * grouped arm in §0.4.429, but the host twins (and with them the `grad {}` /
- * `jvp {}` synthesis surface) are part of that section's named deferral — the K2
+ * grouped arm, but the host twins (and with them the `grad {}` /
+ * `jvp {}` synthesis surface) do not support grouped convolution yet — the K2
  * synthesis rejects grouped conv ops loudly rather than convolving the wrong way.
  */
 private fun conv2dEngine(
@@ -993,7 +992,7 @@ private fun conv2dEngine(
 }
 
 /**
- * §0.4.384 — 2-D convolution, NCHW input against an OIHW `[Co, Ci, kh, kw]`
+ * 2-D convolution, NCHW input against an OIHW `[Co, Ci, kh, kw]`
  * kernel. The result erases to `DTensor<Shape, F32>`: its spatial extents are a
  * runtime function of the input's and of stride/padding, which no static shape
  * witness can carry — the convention `reshape`, `slice`, `concat` and
@@ -1027,7 +1026,7 @@ fun <S : Shape> DTensor<S, F32>.conv2d(
 )
 
 /**
- * §0.4.384 — transposed 2-D convolution (the "deconvolution" / fractionally-strided
+ * Transposed 2-D convolution (the "deconvolution" / fractionally-strided
  * conv), NCHW input against an IOHW `[Ci, Co, kh, kw]` kernel — note the channel
  * order is the reverse of [conv2d]'s, because the op contracts over the kernel's
  * FIRST axis and emits the second.
@@ -1057,7 +1056,7 @@ fun <S : Shape> DTensor<S, F32>.convTranspose2d(
 )
 
 /**
- * §0.4.384 — fixed-arity synthesis delegates: every attr the dxir CONV2D /
+ * Fixed-arity synthesis delegates: every attr the dxir CONV2D /
  * CONV_TRANSPOSE2D ops carry, as positional `Int`/`Boolean` arguments, with the
  * result's shape witness `S` supplied by the caller (synthesis passes the derived
  * IrType's shape argument). All attrs explicit and none defaulted because these
@@ -1117,7 +1116,7 @@ fun <S : Shape> convTranspose2dGeneral(
 }
 
 /**
- * §0.4.385 — the host twin of `OpKind.CONV2D_DATA_ADJOINT`: a 2-D conv's gradient
+ * The host twin of `OpKind.CONV2D_DATA_ADJOINT`: a 2-D conv's gradient
  * w.r.t. its INPUT, fused into one op.
  *
  * Mathematically it is the lhs-dilated, tap-reversed transposed convolution of
@@ -1183,7 +1182,7 @@ fun <S : Shape> conv2dDataAdjoint(
 }
 
 /**
- * §0.4.385 — the host twin of `OpKind.CONV2D_KERNEL_ADJOINT`: a 2-D conv's gradient
+ * The host twin of `OpKind.CONV2D_KERNEL_ADJOINT`: a 2-D conv's gradient
  * w.r.t. its KERNEL, fused into one op.
  *
  * This is the batch↔feature transposed trick — `dW = (Xᵀ ⋆ dYᵀ)ᵀ`, where X reads
@@ -1250,7 +1249,7 @@ fun <S : Shape> conv2dKernelAdjoint(
 }
 
 /**
- * §0.4.391 — the shared engine for the two transposed-conv adjoint twins. A port of
+ * The shared engine for the two transposed-conv adjoint twins. A port of
  * the interpreter's `evalConvTransposeAdjoint`, kept literal so the host result is
  * bit-exact against the interpreted dxir (same Double accumulator, same loop order,
  * same single Float conversion).
@@ -1354,11 +1353,11 @@ private fun convTranspose2dAdjointEngine(
 }
 
 /**
- * §0.4.391 — the host twin of `OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT`: the gradient
+ * The host twin of `OpKind.CONV_TRANSPOSE2D_DATA_ADJOINT`: the gradient
  * of a transposed convolution w.r.t. its INPUT. [xTemplate] contributes SHAPE ONLY.
  *
  * Attrs are the primal transposed conv's, all literals. The StableHLO emitter also
- * has an arm (§0.4.393), reached through the conv-of-the-dilated-input identity
+ * has an arm, reached through the conv-of-the-dilated-input identity
  * rather than this index inversion, and it rejects `window_reversal` — which this
  * twin handles, as does the interpreter.
  */
@@ -1401,7 +1400,7 @@ fun <S : Shape> convTranspose2dDataAdjoint(
 }
 
 /**
- * §0.4.391 — the host twin of `OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT`: the gradient
+ * The host twin of `OpKind.CONV_TRANSPOSE2D_KERNEL_ADJOINT`: the gradient
  * of a transposed convolution w.r.t. its IOHW KERNEL. [x] is a VALUE operand here (the
  * gather reads it); [wTemplate] contributes shape only.
  */
@@ -1444,11 +1443,11 @@ fun <S : Shape> convTranspose2dKernelAdjoint(
 }
 
 /**
- * §0.4.386 — the host pooling engine: a port of the dxir interpreter's
+ * The host pooling engine: a port of the dxir interpreter's
  * `evalPool2d`, kept deliberately literal so the host result is bit-exact against
  * the interpreted dxir (same `Double` accumulator, same `n → c → y → x → ky → kx`
- * order, same single Float conversion at the end). §0.4.389 generalised it from
- * avg-only to both pooling kinds with an [isMax] flag, mirroring the interpreter's
+ * order, same single Float conversion at the end). It covers
+ * both pooling kinds with an [isMax] flag, mirroring the interpreter's
  * own single-`evalPool2d`-two-kinds structure.
  *
  * count_include_pad for the average branch, the interpreter's convention: the sum
@@ -1514,7 +1513,7 @@ private fun pool2dEngine(
 }
 
 /**
- * §0.4.386 — 2-D average pooling, NCHW. Two arities and no default parameter
+ * 2-D average pooling, NCHW. Two arities and no default parameter
  * values, for the reason documented on [conv2d]: K2 unwraps a named argument
  * before the plugin's FIR lowering sees it and does not reorder it, so attrs must
  * be positional to be unambiguous. `avgPool2d(windowH, windowW)` is the
@@ -1541,7 +1540,7 @@ fun <S : Shape> DTensor<S, F32>.avgPool2d(
 )
 
 /**
- * §0.4.386 — fixed-arity synthesis delegate for `OpKind.AVGPOOL2D`, every attr
+ * Fixed-arity synthesis delegate for `OpKind.AVGPOOL2D`, every attr
  * explicit and positional (the usual IrVararg reason, and the result's shape
  * witness `S` comes from the caller's derived IrType).
  */
@@ -1564,7 +1563,7 @@ fun <S : Shape> avgPool2dGeneral(
 }
 
 /**
- * §0.4.386 — the host twin of `OpKind.AVGPOOL2D_GRAD`: each input element collects
+ * The host twin of `OpKind.AVGPOOL2D_GRAD`: each input element collects
  * the upstream of every output window covering it, divided by the FULL window
  * `kh·kw` (count_include_pad, mirroring [avgPool2dEngine]).
  *
@@ -1641,7 +1640,7 @@ fun <S : Shape> avgPool2dGrad(
 }
 
 /**
- * §0.4.389 — 2-D max pooling, NCHW. Same two-arity, no-defaults contract as
+ * 2-D max pooling, NCHW. Same two-arity, no-defaults contract as
  * [avgPool2d] and for the same reason (K2 unwraps named arguments before the
  * plugin's FIR lowering sees them, so attrs must be positional to be
  * unambiguous): `maxPool2d(windowH, windowW)` is the classic non-overlapping pool
@@ -1665,7 +1664,7 @@ fun <S : Shape> DTensor<S, F32>.maxPool2d(
     this, windowH, windowW, strideH, strideW, padTop, padBottom, padLeft, padRight,
 )
 
-/** §0.4.389 — fixed-arity synthesis delegate for `OpKind.MAXPOOL2D`. */
+/** Fixed-arity synthesis delegate for `OpKind.MAXPOOL2D`. */
 @Suppress("LongParameterList")
 fun <S : Shape> maxPool2dGeneral(
     x: DTensor<*, F32>,
@@ -1685,7 +1684,7 @@ fun <S : Shape> maxPool2dGeneral(
 }
 
 /**
- * §0.4.389 — the host twin of `OpKind.MAXPOOL2D_GRAD`: each input element receives
+ * The host twin of `OpKind.MAXPOOL2D_GRAD`: each input element receives
  * the upstream of every output window it WINS, i.e. every window whose max it
  * equals. Ties route the full upstream to every winner (the MaxRule/JAX-select
  * convention) — deliberately not XLA's `select_and_scatter`, which picks a single
@@ -1772,7 +1771,7 @@ fun <S : Shape> maxPool2dGrad(
 }
 
 /**
- * §0.4.390 — TRAINING-mode batch normalisation, NCHW with the feature axis at 1:
+ * TRAINING-mode batch normalisation, NCHW with the feature axis at 1:
  * per channel, subtract the mean and divide by the standard deviation computed
  * over the batch AND spatial extents of this call, then apply the per-channel
  * [scale] (γ) and [offset] (β).
@@ -1801,7 +1800,7 @@ fun <S : Shape> DTensor<S, F32>.batchNorm(
     eps: Float,
 ): DTensor<Shape, F32> = batchNormGeneral(this, scale, offset, eps)
 
-/** §0.4.390 — fixed-arity form with an explicit `eps`. Rank-4 NCHW only in v1. */
+/** Fixed-arity form with an explicit `eps`. Rank-4 NCHW only in v1. */
 fun <S : Shape> batchNormGeneral(
     x: DTensor<*, F32>,
     scale: DTensor<*, F32>,
@@ -1859,11 +1858,11 @@ fun <S : Shape> batchNormGeneral(
 }
 
 /**
- * Scalar → rank-N uniform broadcast: produce a fresh `DTensor<S, F32>` shaped like
- * [template] whose every element equals [v]. Used by the IR-rewrite synthesis path to
- * lower `OpKind.BROADCAST` in gradient bodies emitted by [io.tlaloc.ir.passes.VjpRegistry.SumRule]
- * (and later MeanRule). Keeping this as a `:core/ops` helper rather than inlining an
- * IR-level loop mirrors every other op's synthesis shape (`IrCall` into HostOps).
+ * Scalar → rank-N uniform broadcast: produce a fresh `DTensor<S, F32>` shaped like [template]
+ * whose every element equals [v]. Used by the IR-rewrite synthesis path to lower
+ * `OpKind.BROADCAST` in gradient bodies emitted by [io.tlaloc.ir.passes.VjpRegistry.SumRule]
+ * (and later MeanRule). Keeping this as a `:core/ops` helper rather than inlining an IR-level
+ * loop mirrors every other op's synthesis shape (`IrCall` into HostOps).
  *
  * The caller is responsible for ensuring [template]'s shape matches the intended target
  * shape; the helper copies [template.dims] rather than trusting the phantom type parameter,
@@ -1872,7 +1871,7 @@ fun <S : Shape> batchNormGeneral(
 /**
  * Scalar-index-into-rank-1 read (`arr[i]`). The `operator` form lets user code write
  * `arr[i]` inside a `grad` lambda; FIR sees `io.tlaloc.core.ops.get` and emits
- * `OpKind.GATHER(arr, idx)` (§0.4.42's FIR mapping). Generic in shape so we don't
+ * `OpKind.GATHER(arr, idx)`. Generic in shape so we don't
  * fight Kotlin's operator resolver, but the compile path validates `rank == 1` —
  * calls on rank-2 tensors surface as `LoweringException` at FIR time. Runtime falls
  * back to `HostF32Storage` linear indexing, which is correct for rank-1 and
@@ -1890,13 +1889,13 @@ operator fun <S : Shape> DTensor<S, F32>.get(i: Int): Float = hostF32()[i]
  * fresh `DTensor` with the same shape as [base] and slot `[i]` replaced by [value].
  * Emitted by `DxirToIrSynthesis.irScatter` for gradient bodies — specifically the
  * `SCATTER(BROADCAST(0, arr.type), idx, upstream)` one-hot construction that
- * `GatherRule` (§0.4.41) uses to propagate a scalar adjoint back to a rank-1
+ * `GatherRule` uses to propagate a scalar adjoint back to a rank-1
  * primal array.
  *
- * Non-destructive by design: gradient accumulation in [io.tlaloc.ir.passes.DxirReverseTransform]
- * relies on value-semantics (each SCATTER produces a fresh vector; outer `ADD`s
- * combine them). Sharing `base`'s buffer and mutating in place would break the
- * accumulator's correctness.
+ * Non-destructive by design: gradient accumulation in
+ * [io.tlaloc.ir.passes.DxirReverseTransform] relies on value-semantics (each SCATTER produces a
+ * fresh vector; outer `ADD`s combine them). Sharing `base`'s buffer and mutating in place would
+ * break the accumulator's correctness.
  */
 fun <S : Shape> scatter(base: DTensor<S, F32>, i: Int, value: Float): DTensor<S, F32> {
     val src = base.hostF32()
@@ -1906,14 +1905,14 @@ fun <S : Shape> scatter(base: DTensor<S, F32>, i: Int, value: Float): DTensor<S,
 }
 
 /**
- * §0.4.45 — fused `base[i] += value` with fresh buffer. Returns a new `DTensor`
+ * Fused `base[i] += value` with fresh buffer. Returns a new `DTensor`
  * equal to [base] with slot `[i]` incremented by [value]; the other slots are
  * preserved from [base]. Emitted by `DxirToIrSynthesis.irScatterAdd` for the
  * `OpKind.SCATTER_ADD` op, which `GatherRule` emits instead of the 3-op
- * `BROADCAST(0) + SCATTER + ADD` chain it used pre-§0.4.45.
+ * `BROADCAST(0) + SCATTER + ADD` chain.
  *
  * One allocation (output buffer) + one `copyOf` + one slot update. Down from
- * three allocations per gradient contribution in the old chain. For N gathers
+ * three allocations per gradient contribution in the unfused chain. For N gathers
  * in a gradient body, total transient allocations drop from ~3N to ~N (plus
  * one initial zero-broadcast for the first gather's accumulator seed).
  */
@@ -1925,7 +1924,7 @@ fun <S : Shape> scatterAddInto(base: DTensor<S, F32>, i: Int, value: Float): DTe
 }
 
 /**
- * §0.4.46 — destructive `base[i] += value`. **Mutates [base]'s internal buffer
+ * Destructive `base[i] += value`. **Mutates [base]'s internal buffer
  * in place** and returns the SAME `DTensor` wrapper.
  *
  * **ONLY call this when you have exclusive ownership of [base].** The intended
@@ -1952,7 +1951,7 @@ fun <S : Shape> broadcastLike(v: Float, template: DTensor<S, F32>): DTensor<S, F
 }
 
 /**
- * §0.4.195 — Phase 0c-rectangular slice 3b-1. Scalar → rank-N uniform broadcast keyed
+ * Scalar → rank-N uniform broadcast keyed
  * by an explicit [dims] array rather than a runtime template DTensor. Mirrors
  * [broadcastLike]'s output structurally — `DTensor<S, F32>` with `dims = dims.copyOf()`
  * and `storage = FloatArray(prod(dims)) { v }` — but lifts the shape source out of the
@@ -1979,7 +1978,7 @@ fun <S : Shape> broadcastDims(v: Float, dims: IntArray): DTensor<S, F32> {
 }
 
 /**
- * §0.4.197 — Phase 0c-rectangular slice 3b-2b. Rank-specific delegates for
+ * Rank-specific delegates for
  * [broadcastDims]. The K2 plugin's `irBroadcast` path emits a call to
  * `broadcastDimsRank{1, 2, 3}` with individual `Int` args (read from existing
  * tensor params' dims via property-getter + IntArray.get IR calls) instead of
@@ -2005,7 +2004,7 @@ fun <S : Shape> broadcastDimsRank3(v: Float, d0: Int, d1: Int, d2: Int): DTensor
     broadcastDims(v, intArrayOf(d0, d1, d2))
 
 /**
- * §0.4.188 — DTensor → Float bridge for grad lambdas. The K2 plugin recognises
+ * DTensor → Float bridge for grad lambdas. The K2 plugin recognises
  * this call site (via FirLambdaToDxirLowering) as a no-op at the dxir level —
  * `DxirType(F32, [])` is the same whether the value flows through a DTensor
  * wrapper or a primitive Float. Closes the last gap for end-to-end MATMUL /
@@ -2029,10 +2028,10 @@ fun <S : Shape> DTensor<S, F32>.mean(): DTensor<ScalarShape, F32> {
 }
 
 /**
- * §0.4.397 — Phase A5c-3(iv): DiffKT's `stats()` — the `(mean, variance)`
- * pair over all elements, thin sugar over the A1 full reductions. Variance is
+ * DiffKT's `stats()` — the `(mean, variance)`
+ * pair over all elements, thin sugar over the full reductions. Variance is
  * BIASED (divide by N, not N−1), matching both DiffKT's convention and the
- * per-channel statistic `batchNormGeneral` takes (§0.4.390). Host-level only
+ * per-channel statistic `batchNormGeneral` takes. Host-level only
  * by design: DiffKT's `stats` is a convenience accessor, not a
  * differentiation surface — a Pair-returning body has no `grad {}` lowering
  * (the loss contract is scalar), and a loss that needs the pieces writes
@@ -2060,7 +2059,7 @@ fun <S : Shape> DTensor<S, F32>.stats(): Pair<DTensor<ScalarShape, F32>, DTensor
 }
 
 /**
- * §0.4.366 — axis-wise reduction engine (DiffKT parity, Phase A1: DiffKT's
+ * Axis-wise reduction engine (DiffKT's
  * `sum(vararg axes: Int, keepDims: Boolean)` family). Reduces [x] over the
  * axes in [dims] (negative axes count from the back), accumulating with [acc]
  * from [init]; [finish] maps (accumulated, reducedElementCount) → output
@@ -2124,8 +2123,8 @@ private fun <S : Shape> reduceOver(
 }
 
 /**
- * §0.4.366 — axis-wise reductions, the DiffKT `sum(axes, keepDims)` user
- * surface (Phase A1). The result's shape type is erased to [Shape]: the
+ * Axis-wise reductions, the DiffKT `sum(axes, keepDims)` user
+ * surface. The result's shape type is erased to [Shape]: the
  * output dims depend on the runtime axis list, which Kotlin's phantom shape
  * typing cannot express per-overload. Inside `grad {}` the K2 plugin computes
  * the exact `DxirType` from the operand's dims and the constant axis
@@ -2144,7 +2143,7 @@ fun <S : Shape> DTensor<S, F32>.max(vararg dims: Int, keepDims: Boolean = false)
 fun <S : Shape> DTensor<S, F32>.min(vararg dims: Int, keepDims: Boolean = false): DTensor<Shape, F32> =
     reduceOver(this, dims, keepDims, Float.POSITIVE_INFINITY, { a, b -> if (b < a) b else a })
 
-/** §0.4.366 — full-reduce extremum companions to [sum]/[mean] (DiffKT defaults `axes = allAxes`). */
+/** Full-reduce extremum companions to [sum]/[mean] (DiffKT defaults `axes = allAxes`). */
 fun <S : Shape> DTensor<S, F32>.max(): DTensor<ScalarShape, F32> {
     val v = hostF32()
     require(v.isNotEmpty()) { "max: empty tensor" }
@@ -2162,8 +2161,8 @@ fun <S : Shape> DTensor<S, F32>.min(): DTensor<ScalarShape, F32> {
 }
 
 /**
- * §0.4.366 — fixed-arity synthesis delegates for the axis reductions, one per
- * (kind, axis-count) pair. Same reason as [broadcastDimsRank1] (§0.4.197):
+ * Fixed-arity synthesis delegates for the axis reductions, one per
+ * (kind, axis-count) pair. Same reason as [broadcastDimsRank1]:
  * the K2 synthesis cannot build `IrVararg` nodes, so `DxirToIrSynthesis`
  * emits calls to these with plain `Int` + `Boolean` const arguments read off
  * the dxir op's `reduction_dims` attr and result type. Runtime semantics are
@@ -2194,7 +2193,7 @@ fun <S : Shape> minOver2(x: DTensor<S, F32>, d0: Int, d1: Int, keepDims: Boolean
     x.min(d0, d1, keepDims = keepDims)
 
 /**
- * §0.4.390 — the three-axis shims. A rank-4 NCHW surface needs them: reducing over
+ * The three-axis shims. A rank-4 NCHW surface needs them: reducing over
  * the batch and both spatial axes (`mean(0, 2, 3)`, which is how training batchNorm
  * takes its per-channel statistics) is a three-axis reduction, and the fixed-arity
  * family stopped at two, so such a body fell out of synthesis scope.
@@ -2216,7 +2215,7 @@ fun <S : Shape> minOver3(
 ): DTensor<Shape, F32> = x.min(d0, d1, d2, keepDims = keepDims)
 
 /**
- * §0.4.366 — stretch broadcast: tile [x] (whose dims must each be 1 or equal
+ * Stretch broadcast: tile [x] (whose dims must each be 1 or equal
  * the target) up to the target dims. This is the host twin of the dxir
  * interpreter's keepdims-stretch BROADCAST arm — the shape the reduction
  * VJP rules emit when un-reducing an upstream back over the reduced axes
@@ -2270,7 +2269,7 @@ fun <S : Shape> stretchToRank3(x: DTensor<*, F32>, d0: Int, d1: Int, d2: Int): D
     stretchTo(x, intArrayOf(d0, d1, d2))
 
 /**
- * §0.4.366 — template-shaped stretch: tile [x] up to [template]'s runtime
+ * Template-shaped stretch: tile [x] up to [template]'s runtime
  * dims. The synthesis fallback when structural axis-matching against the
  * function params fails (mirrors `broadcastLike(v, template)` for splats).
  */
@@ -2278,7 +2277,7 @@ fun <S : Shape> stretchLike(x: DTensor<*, F32>, template: DTensor<S, F32>): DTen
     stretchTo(x, template.dims)
 
 /**
- * §0.4.373 — numpy unbroadcast: reduce [value] down to [template]'s RUNTIME
+ * Numpy unbroadcast: reduce [value] down to [template]'s RUNTIME
  * dims — the reverse mirror of [stretchLike]. This is the synthesis/plugin
  * twin of the dxir interpreter's SUM_TO arm: BroadcastRule's adjoint for the
  * in-place size-1 stretch (`[1,C]→[N,C]`, `[N,1]→[N,C]`) sums `value` over the
@@ -2290,15 +2289,15 @@ fun <S : Shape> stretchLike(x: DTensor<*, F32>, template: DTensor<S, F32>): DTen
  * read.
  */
 /**
- * §0.4.415 — Phase B5 (customVjp): the host twin of the dxir
+ * The customVjp host twin of the dxir
  * `CHECK_SHAPE_LIKE` op — a value-identity that ASSERTS the user vjpFn's
  * returned gradient has its operand's runtime shape before it is accumulated.
  * [template] is the customVjp operand the contribution belongs to and
  * contributes SHAPE ONLY (its values are never read). Under `grad {}`'s -1
  * sentinel dims the contract is undecidable at compile time, so this is where
  * a wrong-shaped user adjoint fails LOUDLY instead of silently corrupting the
- * gradient (design doc §4.1; the `conv2dDataAdjoint` template-assert
- * precedent). The value passes through as a re-wrapped view — no copy, its
+ * gradient (the same template-assert pattern `conv2dDataAdjoint`
+ * uses). The value passes through as a re-wrapped view — no copy, its
  * storage is the user body's freshly computed tensor.
  */
 fun <S : Shape> checkShapeLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DTensor<S, F32> {
@@ -2353,7 +2352,7 @@ fun <S : Shape> sumToLike(value: DTensor<*, F32>, template: DTensor<S, F32>): DT
 }
 
 /**
- * §0.4.399 — broadcast-to-template: stretch [value] up to [template]'s RUNTIME
+ * Broadcast-to-template: stretch [value] up to [template]'s RUNTIME
  * dims under NumPy right-alignment — the forward twin (and VJP) of
  * [sumToLike], and the synthesis/plugin twin of the dxir interpreter's
  * BROADCAST_LIKE arm. Each aligned axis of [value] must equal the template's
@@ -2403,7 +2402,7 @@ fun <S : Shape> broadcastToLike(value: DTensor<*, F32>, template: DTensor<S, F32
 }
 
 /**
- * §0.4.374 — zero-pad-to-template: place [value] into a zero tensor of
+ * Zero-pad-to-template: place [value] into a zero tensor of
  * [template]'s RUNTIME dims at offset [low] per axis — the reverse mirror of
  * [slice] and the synthesis/plugin twin of the dxir interpreter's PAD_TO arm.
  * This is SliceRule's adjoint: the upstream gradient is zero-padded back into
@@ -2444,7 +2443,7 @@ fun <S : Shape> padToLike(value: DTensor<*, F32>, template: DTensor<S, F32>, low
     return DTensor(HostF32Storage(out), t.copyOf(), F32)
 }
 
-/** §0.4.374 — fixed-arity `padToLike` shims (synthesis bakes the `low`
+/** Fixed-arity `padToLike` shims (synthesis bakes the `low`
  * offsets as Int consts, one per axis; mirror of the `stretchToRankN` family). */
 fun <S : Shape> padToLikeRank1(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int): DTensor<S, F32> =
     padToLike(value, template, intArrayOf(l0))
@@ -2456,7 +2455,7 @@ fun <S : Shape> padToLikeRank3(value: DTensor<*, F32>, template: DTensor<S, F32>
     padToLike(value, template, intArrayOf(l0, l1, l2))
 
 /**
- * §0.4.399 — window-at-literal-offset: cut out of [value] the window of
+ * Window-at-literal-offset: cut out of [value] the window of
  * [template]'s RUNTIME dims starting at [low] per axis — the reverse mirror
  * (and VJP) of [padToLike], and the synthesis/plugin twin of the dxir
  * interpreter's SLICE_AT arm. This is PadToRule's adjoint: the upstream
@@ -2498,7 +2497,7 @@ fun <S : Shape> sliceAtLike(value: DTensor<*, F32>, template: DTensor<S, F32>, l
     return DTensor(HostF32Storage(out), t.copyOf(), F32)
 }
 
-/** §0.4.399 — fixed-arity `sliceAtLike` shims (synthesis bakes the `low`
+/** Fixed-arity `sliceAtLike` shims (synthesis bakes the `low`
  * offsets as Int consts, one per axis; mirror of the `padToLikeRankN` family). */
 fun <S : Shape> sliceAtLikeRank1(value: DTensor<*, F32>, template: DTensor<S, F32>, l0: Int): DTensor<S, F32> =
     sliceAtLike(value, template, intArrayOf(l0))
@@ -2510,7 +2509,7 @@ fun <S : Shape> sliceAtLikeRank3(value: DTensor<*, F32>, template: DTensor<S, F3
     sliceAtLike(value, template, intArrayOf(l0, l1, l2))
 
 /**
- * Phase A2b — the host twin of dxir `SLICE_LIKE`, i.e. CONCAT's adjoint: cut out
+ * The host twin of dxir `SLICE_LIKE`, i.e. CONCAT's adjoint: cut out
  * of [value] the window along [axis] that starts after every one of [priors] and
  * runs for [thisTemplate]'s extent, taking every other axis whole.
  *
@@ -2562,7 +2561,7 @@ private fun <S : Shape> sliceWindow(
 /** Fixed-arity `SLICE_LIKE` twins, one per PRIOR-template count — the usual
  * IrVararg reason (see [broadcastDimsRank1]): synthesis builds positional
  * `IrCall` arguments, so the operand count has to be in the callee's name.
- * §0.4.425 lifted the family from 3 priors to 7 (an 8-operand IR-level
+ * The family covers up to 7 priors (an 8-operand IR-level
  * CONCAT); the user-facing [concat]'s fold-to-binary never needs more than
  * ONE prior, so the wider twins serve only hand-built variadic CONCAT nodes
  * differentiated through the plugin. */
@@ -2642,7 +2641,7 @@ fun <S : Shape> sliceLikeAfter7(
     sliceWindow(value, thisTemplate, axis, listOf(prior0, prior1, prior2, prior3, prior4, prior5, prior6))
 
 /**
- * §0.4.404 — the host twin of dxir `PAD_LIKE`, i.e. SLICE_LIKE's transpose and
+ * The host twin of dxir `PAD_LIKE`, i.e. SLICE_LIKE's transpose and
  * VJP: place [value] into a zero tensor of [outTemplate]'s RUNTIME dims at the
  * window along [axis] that starts after every one of [priors] (every other
  * axis at 0).
@@ -2697,7 +2696,7 @@ private fun <S : Shape> padWindow(
 /** Fixed-arity `PAD_LIKE` twins, one per PRIOR-template count — the usual
  * IrVararg reason (see [sliceLikeStart]): synthesis builds positional
  * `IrCall` arguments, so the operand count has to be in the callee's name.
- * §0.4.425 lifted the family from 3 priors to 7, mirroring the `SLICE_LIKE`
+ * The family covers up to 7 priors, mirroring the `SLICE_LIKE`
  * twins — the pair must stay closed under differentiation (SLICE_LIKE's VJP
  * is PAD_LIKE with the SAME priors), so the two bounds move together. */
 fun <S : Shape> padLikeStart(value: DTensor<*, F32>, outTemplate: DTensor<S, F32>, axis: Int): DTensor<S, F32> =
@@ -2776,7 +2775,7 @@ fun <S : Shape> padLikeAfter7(
     padWindow(value, outTemplate, axis, listOf(prior0, prior1, prior2, prior3, prior4, prior5, prior6))
 
 /**
- * Phase A2b — the two-operand concat the K2 plugin synthesises with.
+ * The two-operand concat the K2 plugin synthesises with.
  *
  * Fixed arity on purpose: synthesis builds positional `IrCall` arguments and cannot
  * construct an `IrVararg` (the documented reason the whole `…RankN` shim family
@@ -2821,7 +2820,7 @@ fun <R : Shape> concatPair(axis: Int, a: DTensor<*, F32>, b: DTensor<*, F32>): D
 }
 
 /**
- * Phase A2b (DiffKT parity) — concatenate [tensors] along [axis]. The result erases
+ * Concatenate [tensors] along [axis]. The result erases
  * to `DTensor<Shape, F32>`: the concat axis's extent is a runtime SUM of the
  * operands' extents, which no static shape witness can carry — the same convention
  * `slice`, `reshape` and `broadcastTo` follow. Differentiable in `grad {}`: the
@@ -2836,7 +2835,7 @@ fun concat(axis: Int, vararg tensors: DTensor<*, F32>): DTensor<Shape, F32> {
 }
 
 /**
- * Phase A2b (DiffKT parity) — `stack(axis, tensors)`: give each operand a new
+ * `stack(axis, tensors)`: give each operand a new
  * size-1 axis at [axis], then concatenate along it, so the result has rank
  * `operand.rank + 1`. Pure sugar over [unsqueeze] + [concat], which is exactly how
  * the K2 plugin lowers it.
@@ -2850,7 +2849,7 @@ fun stack(axis: Int, vararg tensors: DTensor<*, F32>): DTensor<Shape, F32> {
 }
 
 /**
- * §0.4.366 — insert size-1 axes at the given (result-indexed, ascending)
+ * Insert size-1 axes at the given (result-indexed, ascending)
  * positions. The host twin of the keepdims RESHAPE the reduction VJP rules
  * emit (`upstream` at the squeezed shape → the keepdims spelling): axis
  * POSITIONS are compile-time constants from `reduction_dims`, so the
@@ -2881,7 +2880,7 @@ fun <S : Shape> unsqueezeAxes2(x: DTensor<*, F32>, a0: Int, a1: Int): DTensor<S,
     DTensor(HostF32Storage(x.hostF32().copyOf()), unsqueezeAxes(x, intArrayOf(a0, a1)), F32)
 
 /**
- * §0.4.390 — three inserted unit axes: what `[C] → [1,C,1,1]` needs, i.e. how a
+ * Three inserted unit axes: what `[C] → [1,C,1,1]` needs, i.e. how a
  * per-channel parameter becomes broadcastable against an NCHW tensor. Without it a
  * rank-4 body containing that reshape falls out of synthesis scope.
  */
@@ -2889,12 +2888,12 @@ fun <S : Shape> unsqueezeAxes3(x: DTensor<*, F32>, a0: Int, a1: Int, a2: Int): D
     DTensor(HostF32Storage(x.hostF32().copyOf()), unsqueezeAxes(x, intArrayOf(a0, a1, a2)), F32)
 
 /**
- * §0.4.367 — Phase A2a (DiffKT parity): the RESHAPE-family user surface.
+ * The RESHAPE-family user surface.
  * `squeeze(axis)` drops a size-1 axis, `unsqueeze(axis)` inserts one,
  * `flatten()` collapses to rank-1, `reshape(vararg dims)` is the general
  * element-count-preserving relayout (row-major; data is shared semantics —
  * we copy for host-value simplicity). Result shape types erase to [Shape]
- * for the same reason as the axis reductions (§0.4.366): the result dims
+ * for the same reason as the axis reductions: the result dims
  * depend on runtime arguments; inside `grad {}` the K2 plugin computes the
  * exact `DxirType` from the literal arguments instead.
  */
@@ -2934,7 +2933,7 @@ fun <S : Shape> DTensor<S, F32>.reshape(vararg newDims: Int): DTensor<Shape, F32
 }
 
 /**
- * §0.4.367 — general permutation transpose (DiffKT `transpose(axes)`).
+ * General permutation transpose (DiffKT `transpose(axes)`).
  * The no-arg rank-2 [transpose] above keeps its precise `Rank2<C, R>`
  * shape typing; this vararg form handles any rank 1..3 with an erased
  * result type. Row-major stride walk mirroring the dxir interpreter's
@@ -2972,7 +2971,7 @@ fun <S : Shape> DTensor<S, F32>.transpose(vararg perm: Int): DTensor<Shape, F32>
 }
 
 /**
- * §0.4.396 — axis flip (DiffKT `flip`, Phase C3): reverse the element order
+ * Axis flip (DiffKT `flip`): reverse the element order
  * along each listed axis, all other axes untouched. Shape-preserving, so the
  * receiver's precise shape type survives. Negative axes count from the end;
  * axes must be distinct. Row-major stride walk mirroring the dxir
@@ -3009,10 +3008,10 @@ fun <S : Shape> DTensor<S, F32>.flip(vararg axes: Int): DTensor<S, F32> {
 }
 
 /**
- * §0.4.396 — fixed-arity synthesis delegates for [flip] (the usual IrVararg
+ * Fixed-arity synthesis delegates for [flip] (the usual IrVararg
  * reason: synthesis cannot build an `IrVararg`, so each REVERSE node's literal
- * `dimensions` attr rides as positional Int constants — the `transposePerm{N}`
- * precedent exactly).
+ * `dimensions` attr rides as positional Int constants, exactly as for
+ * `transposePerm{N}`).
  */
 fun <S : Shape> flipAxes1(x: DTensor<*, F32>, a0: Int): DTensor<S, F32> {
     @Suppress("UNCHECKED_CAST")
@@ -3030,13 +3029,12 @@ fun <S : Shape> flipAxes3(x: DTensor<*, F32>, a0: Int, a1: Int, a2: Int): DTenso
 }
 
 /**
- * §0.4.371 — rank-increasing broadcast (DiffKT `broadcastTo`/`expand`, Phase
- * A2b). NumPy right-alignment: the receiver's axes map to the TRAILING axes of
- * [newDims]; the new leading axes are replicated. §0.4.373 — in-place size-1
- * stretch (`[1,C]→[N,C]`, `[N,1]→[N,C]`) is now supported too: an operand axis
- * of extent 1 replicates across its (equal-position) target extent (full
- * `stablehlo.broadcast_in_dim` semantics, matching the dxir interpreter's
- * BROADCAST arm). A non-1 operand axis must match its target exactly.
+ * Rank-increasing broadcast (DiffKT `broadcastTo`/`expand`). NumPy right-alignment: the
+ * receiver's axes map to the TRAILING axes of [newDims]; the new leading axes are replicated.
+ * In-place size-1 stretch (`[1,C]→[N,C]`, `[N,1]→[N,C]`) is supported too: an operand axis of
+ * extent 1 replicates across its (equal-position) target extent (full
+ * `stablehlo.broadcast_in_dim` semantics, matching the dxir interpreter's BROADCAST arm). A
+ * non-1 operand axis must match its target exactly.
  */
 fun <S : Shape> DTensor<S, F32>.broadcastTo(vararg newDims: Int): DTensor<Shape, F32> {
     val r = dims.size
@@ -3071,7 +3069,7 @@ fun <S : Shape> DTensor<S, F32>.broadcastTo(vararg newDims: Int): DTensor<Shape,
 }
 
 /**
- * §0.4.374 — single-axis slice (DiffKT parity, Phase A2b): take elements
+ * Single-axis slice (DiffKT `slice`): take elements
  * `[start, end)` along [axis], all other axes full. `start`/`end`/`axis` are
  * compile-time literals; the result shape equals the receiver's with `axis`'s
  * extent replaced by `end − start`. This is the differentiable `slice`: its
@@ -3107,7 +3105,7 @@ fun <S : Shape> DTensor<S, F32>.slice(start: Int, end: Int, axis: Int): DTensor<
 }
 
 /**
- * §0.4.428 — `view(range, axis)` (DiffKT parity, the A2 indexing-sugar tail):
+ * `view(range, axis)` (DiffKT indexing sugar):
  * the contiguous-range view of one axis, all other axes full. Pure sugar over
  * [slice] — `view(a..b, axis) == slice(a, b + 1, axis)` — with DiffKT's
  * inclusive-range spelling. The axis survives (rank is preserved); the
@@ -3123,7 +3121,7 @@ fun <S : Shape> DTensor<S, F32>.view(range: IntRange, axis: Int): DTensor<Shape,
 }
 
 /**
- * §0.4.428 — `view(index, axis)`: pick one index along [axis] and DROP the
+ * `view(index, axis)`: pick one index along [axis] and DROP the
  * axis (DiffKT's indexing view — the result has rank `r − 1`). Sugar over
  * [slice] + [squeeze]. Its `grad {}` adjoint routes the upstream into the
  * indexed window and zeros elsewhere (the slice adjoint after the unit-axis
@@ -3140,14 +3138,14 @@ fun <S : Shape> DTensor<S, F32>.view(index: Int, axis: Int): DTensor<Shape, F32>
 }
 
 /**
- * §0.4.428 — `withChange(range, axis, replacement)`: the FUNCTIONAL update
- * (DiffKT parity, A2) — a copy of the receiver with the contiguous window
+ * `withChange(range, axis, replacement)`: the FUNCTIONAL update
+ * (DiffKT `withChange`) — a copy of the receiver with the contiguous window
  * `[range.first, range.last]` along [axis] replaced by [replacement] (same
  * rank; the window's shape). The receiver is untouched. Inside `grad {}` the
  * K2 plugin lowers this as `x + PAD_TO(replacement − slice(x), template = x)`
  * — every piece an existing fully-ruled op, so the adjoint routes the
  * upstream's window to `replacement` and zeros that window in `d_x` with no
- * new IR: the PAD_TO ⇄ SLICE_AT pair (§0.4.399) does the bookkeeping.
+ * new IR: the PAD_TO ⇄ SLICE_AT pair does the bookkeeping.
  */
 fun <S : Shape> DTensor<S, F32>.withChange(
     range: IntRange,
@@ -3189,7 +3187,7 @@ fun <S : Shape> DTensor<S, F32>.withChange(
 }
 
 /**
- * §0.4.428 — `withChange(index, axis, replacement)`: replace the single
+ * `withChange(index, axis, replacement)`: replace the single
  * `view(index, axis)` slice — [replacement] has rank `r − 1` (the view's
  * shape). Sugar over [unsqueeze] + the range overload above.
  */
@@ -3211,7 +3209,7 @@ fun <S : Shape> DTensor<S, F32>.withChange(
 }
 
 /**
- * §0.4.428 — `meld(tensors…)` (DiffKT parity, A2): flatten every operand
+ * `meld(tensors…)` (DiffKT `meld`): flatten every operand
  * row-major and concatenate the flats into one rank-1 tensor of the total
  * element count. The inverse of [split]. Inside `grad {}` this is pure sugar
  * — RESHAPE-to-rank-1 per operand + the binary-CONCAT fold — so each
@@ -3233,12 +3231,12 @@ fun meld(vararg tensors: DTensor<*, F32>): DTensor<Shape, F32> {
 }
 
 /**
- * §0.4.428 — `split(shapes)` (DiffKT parity, A2): cut the receiver's
+ * `split(shapes)` (DiffKT `split`): cut the receiver's
  * row-major data into consecutive tensors of the given shapes, which must
  * consume every element exactly. The inverse of [meld]. HOST-LEVEL ONLY:
  * a `List<DTensor>`-valued expression has no value model in the `grad {}`
  * lambda lowering, so the differentiable spelling stays `view`/`slice`
- * per piece (recorded as a named deferral in the parity plan).
+ * per piece.
  */
 fun DTensor<*, F32>.split(shapes: List<IntArray>): List<DTensor<Shape, F32>> {
     require(shapes.isNotEmpty()) { "split: needs at least 1 shape" }
@@ -3265,7 +3263,7 @@ fun DTensor<*, F32>.split(shapes: List<IntArray>): List<DTensor<Shape, F32>> {
 }
 
 /**
- * §0.4.367 — fixed-arity synthesis delegates (the usual IrVararg reason).
+ * Fixed-arity synthesis delegates (the usual IrVararg reason).
  * `squeezeAxes{N}` drops size-1 axes at result-computed positions (the
  * adjoint of an unsqueeze); `reshapeToRank{N}` relayouts to explicit dims —
  * the synthesis feeds each dim either as a baked const (concrete dxir dim)
@@ -3290,7 +3288,7 @@ fun <S : Shape> squeezeAxes2(x: DTensor<*, F32>, a0: Int, a1: Int): DTensor<S, F
 }
 
 /**
- * §0.4.390 — the adjoint of [unsqueezeAxes3]: `[1,C,1,1] → [C]`, which is what the
+ * The adjoint of [unsqueezeAxes3]: `[1,C,1,1] → [C]`, which is what the
  * gradient of a per-channel parameter reshape needs.
  */
 fun <S : Shape> squeezeAxes3(x: DTensor<*, F32>, a0: Int, a1: Int, a2: Int): DTensor<S, F32> {
@@ -3323,7 +3321,7 @@ fun <S : Shape> reshapeToRank2(x: DTensor<*, F32>, d0: Int, d1: Int): DTensor<S,
 fun <S : Shape> reshapeToRank3(x: DTensor<*, F32>, d0: Int, d1: Int, d2: Int): DTensor<S, F32> =
     DTensor(HostF32Storage(reshapeTo(x, intArrayOf(d0, d1, d2))), intArrayOf(d0, d1, d2), F32)
 
-/** §0.4.390 — rank-4 relayout, for the NCHW surfaces (conv/pool/batchNorm). */
+/** Rank-4 relayout, for the NCHW surfaces (conv/pool/batchNorm). */
 fun <S : Shape> reshapeToRank4(
     x: DTensor<*, F32>, d0: Int, d1: Int, d2: Int, d3: Int,
 ): DTensor<S, F32> =
@@ -3344,7 +3342,7 @@ fun <S : Shape> transposePerm3(x: DTensor<*, F32>, p0: Int, p1: Int, p2: Int): D
 }
 
 /**
- * §0.4.384 — the rank-4 permutation transpose, for the batch↔feature swap
+ * The rank-4 permutation transpose, for the batch↔feature swap
  * `[0,1,2,3] → [1,0,2,3]` that [io.tlaloc.ir.passes.VjpRegistry.Conv2dRule]'s
  * `dW = conv(Xᵀ, dYᵀ)` trick emits on both sides. The vararg [transpose] above
  * already walks any rank; this delegate exists for the usual IrVararg reason and
@@ -3356,7 +3354,7 @@ fun <S : Shape> transposePerm4(x: DTensor<*, F32>, p0: Int, p1: Int, p2: Int, p3
 }
 
 /**
- * §0.4.189 — rank-2 transpose. Used by the K2 plugin's synthesis-side lowering
+ * Rank-2 transpose. Used by the K2 plugin's synthesis-side lowering
  * of [OpKind.TRANSPOSE] emitted by [io.tlaloc.ir.passes.VjpRegistry.MatmulRule].
  * The signature flips R and C in the shape type so the result is correctly
  * typed for downstream matmul chains.

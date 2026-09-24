@@ -5,7 +5,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * §0.4.36 — Stage C.4 empirical `L` tuning harness. Runs a [DxirFunction] through
+ * Empirical tuning harness for the coarsening size limit `L`. Runs a [DxirFunction] through
  * [PhiCalculus.coarsenFunction] + [DxirReverseTransform.apply] at a range of size
  * limits, capturing:
  *  - Whether coarsening fired (the resulting body contains a `COARSENED` op).

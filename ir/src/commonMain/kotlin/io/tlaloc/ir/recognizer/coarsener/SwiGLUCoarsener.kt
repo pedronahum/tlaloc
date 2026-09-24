@@ -8,7 +8,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * Layer 4 §0.4.268 — SwiGLU analytical-backward coarsener.
+ * SwiGLU analytical-backward coarsener.
  *
  * # What this is
  *
@@ -99,7 +99,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   recognizer + coarsener.
  *
  * - **Recompute everything.** Mirrors RmsNorm/RoPE/CrossEntropy/FA's
- *   "recompute is cheaper than thread" choice. v2 can hoist `gate`,
+ *   "recompute is cheaper than thread" choice. A later version could hoist `gate`,
  *   `up`, `silu_g`, `sig` into the COARSENED's payload as additional
  *   primal returns to skip the recompute matmuls — a meaningful win
  *   for the SwiGLU case, since the recompute matmuls are the heaviest

@@ -5,22 +5,21 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * §0.4.353 — conservative static shape validation over a [DxirFunction]'s
+ * Conservative static shape validation over a [DxirFunction]'s
  * top-level body. Reports only **certain** errors (a mismatch that cannot
  * execute), never style opinions; symbolic/unknown dims (any dim ≤ 0)
  * are skipped, so running this on plugin-lowered bodies whose dims
  * resolve at call time is silent-by-design until literal dims appear.
  *
- * Checked in v1:
+ * Checked:
  * - `MATMUL`: lhs last dim vs rhs first dim (the Tlaloc contraction
  *   convention, `S = A · B` contracting last(A) × first(B)).
  * - Elementwise binaries (`ADD`/`SUB`/`MUL`/`DIV`/`POW`): a right-aligned
  *   axis position where both sides are concrete, differ, and neither is 1 —
  *   the one case NumPy broadcasting cannot save either, so the interpreter,
  *   the emitter's `broadcast_in_dim` injection and the host broadcasting ops
- *   would all reject it at runtime. Phase A5c made these ops implicitly
- *   broadcasting, which is what lets rank-differing operands be checked here
- *   too (v1 skipped them and left them to an emitter that refused them).
+ *   would all reject it at runtime. Because these ops broadcast implicitly,
+ *   rank-differing operands are checked here too.
  *
  * Consumed by the K2 checker (compile-time red squiggles,
  * `TENSOR_SHAPE_MISMATCH`) and usable as a library pass on

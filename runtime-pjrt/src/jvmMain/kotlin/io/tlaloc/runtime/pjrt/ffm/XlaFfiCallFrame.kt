@@ -12,7 +12,7 @@ import java.lang.foreign.ValueLayout.JAVA_LONG
 import java.nio.charset.StandardCharsets
 
 /**
- * KPTX v1.3 (§0.4.329) — pure-Kotlin decoder for the typed-FFI
+ * Pure-Kotlin decoder for the typed-FFI
  * **`XLA_FFI_CallFrame`** delivered to handlers registered via
  * [PjrtFfiRegistry]. This is the pyptx-shim decode (call frame → stream +
  * device buffer pointers + attributes) done in FFM instead of C.

@@ -64,7 +64,7 @@ internal fun denseFromArray(values: FloatArray, dims: List<Int>): String {
 }
 
 /**
- * §0.4.400 — [denseFromArray]'s integer twin: format a row-major [FloatArray]
+ * [denseFromArray]'s integer twin: format a row-major [FloatArray]
  * (the dxir const carrier — integer consts store their values in the same
  * float-width view the interpreter uses) as an INTEGER dense literal. Without
  * this, an I32 index const (`embedding`'s gradient graphs clone them) would

@@ -7,22 +7,20 @@ import kotlin.math.abs
 import kotlin.math.floor
 
 /**
- * §0.4.472 — Phase H5: the KV-POOL QUANTIZATION CONTRACT — the layout, the
+ * The KV-POOL QUANTIZATION CONTRACT — the layout, the
  * numerics, and the error bound that makes an int8 page pool checkable rather
  * than merely smaller.
  *
- * Until this slice, "KV-quant" in Tlaloc was a *directive*: §0.4.257's
- * [KvQuantConfig] rides on a COARSENED attention op and tells a vendor kernel
- * "materialize K and V narrow at runtime", with nothing in the IR, nothing in
- * the interpreter, and no number anyone could check. That is honest as a
- * kernel hint and useless as a capability. This file is the other half: the
+ * [KvQuantConfig] is a *directive*: it rides on a COARSENED attention op and
+ * tells a vendor kernel "materialize K and V narrow at runtime", with nothing
+ * in the IR or the interpreter to check. This file is the other half: the
  * exact map from an f32 page pool to (integer codes, per-head scales) and
  * back, with a bound on what the trip costs.
  *
  * # The layout
  *
  * A pool is `[numBlocks, blockSize, numKvHeads, headDim]` (the axis order the
- * whole arc uses — [DecodeModelShape], `ServingModelShape.kvPoolAxisOrder`,
+ * inference ops use — [DecodeModelShape], `ServingModelShape.kvPoolAxisOrder`,
  * `PAGED_ATTENTION`). Quantized, it becomes TWO tensors:
  *
  * ```
@@ -44,8 +42,8 @@ import kotlin.math.floor
  * every other token sharing its page); `headDim` is inside a single key
  * vector, where a per-element scale is just an f32 pool with extra steps.
  * Per-head is also what production serving does (vLLM's fp8 KV cache keys its
- * scales by layer and head), and it is what [KvScaleStrategy.PER_HEAD] has
- * meant since §0.4.257 — this file is the first place the meaning is executed.
+ * scales by layer and head), and it is what [KvScaleStrategy.PER_HEAD]
+ * means — this file is where that meaning is executed.
  *
  * # The numerics: symmetric absmax
  *
@@ -78,7 +76,7 @@ import kotlin.math.floor
  * convention is a decision in this file and not a property of a stdlib
  * function: `q(0.5) = 1`, `q(-0.5) = -1`, `q(-1.5) = -2`.
  *
- * # What is NOT here, and why (the named deferrals)
+ * # What is NOT here, and why
  *
  * - **FP8 is REFUSED, not missing.** int8/int4 are INTEGER-CODE formats: a
  *   code is a small integer, so it rides today's integer tensors losslessly
@@ -87,16 +85,16 @@ import kotlin.math.floor
  *   as an integer code would either store the bit pattern (making the multiply
  *   meaningless) or round twice (fp8 then f32, a different and worse error
  *   bound than the one derived above). fp8 wants a narrow [io.tlaloc.core.DType]
- *   the way bf16 got one in §0.4.455, and [KvQuantDtype.isIntegerCoded] is the
+ *   the way bf16 has one, and [KvQuantDtype.isIntegerCoded] is the
  *   predicate that says so by name.
- * - **The codes ride an I32 tensor, so v1 saves no BYTES yet.** There is no
+ * - **The codes ride an I32 tensor, so it saves no BYTES yet.** There is no
  *   I8 DType (the sealed [io.tlaloc.core.DType] is F32/F64/BF16/I32/I64/Bool),
- *   and adding one is bf16's whole §0.4.455–458 tour — host storage, PJRT
- *   buffer types, emitter type names, every exhaustive `when`. What v1 buys is
+ *   and adding one touches host storage, PJRT
+ *   buffer types, emitter type names and every exhaustive `when`, as bf16 did. What this buys is
  *   the CONTRACT: the layout, the scales, the bound, the in-graph dequant, and
- *   the manifest field that states the format. The byte-narrow pool is the
- *   named tail, and the artifact says so out loud
- *   (`ServingKvQuant.codeDtype` = "i32" today).
+ *   the manifest field that states the format. A byte-narrow pool is not
+ *   implemented, and the artifact states it
+ *   (`ServingKvQuant.codeDtype` = "i32").
  * - **No calibration.** Scales come from the pool's own absmax, computed when
  *   the pool is quantized. Activation-aware or percentile-clipped scales are a
  *   model-prep concern, and the codec takes scales as an argument
@@ -207,7 +205,7 @@ object KvQuantPool {
     /**
      * The hand-derived per-element bound `scale/2`, at the widest scale in
      * [scales]. A test asserts the MEASURED round-trip error against this,
-     * which is the derivation in §"The numerics" recomputed — not a tolerance
+     * which is the derivation under "The numerics" recomputed — not a tolerance
      * someone tuned until the test passed.
      */
     fun maxRoundTripError(scales: FloatArray): Float = (scales.max()) / 2f

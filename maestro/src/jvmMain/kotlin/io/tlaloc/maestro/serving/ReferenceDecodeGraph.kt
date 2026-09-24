@@ -11,28 +11,25 @@ import io.tlaloc.ir.inference.DecodeModelShape
 import kotlin.math.sqrt
 
 /**
- * §0.4.469 — Phase H3a: the reference decode graph the exporter exports and
+ * The reference decode graph the exporter exports and
  * the certification runs. **Main source, not test source**, and that is the
  * point: the artifact a `main` writes and the artifact the cert checks are
  * produced by one function, so "the export path works" and "the exported
  * thing is right" are claims about the same code.
  *
- * It is H1c's end-to-end mini step, unchanged in structure:
+ * It is a minimal end-to-end decode step:
  *
  * ```
  *   embed → q/k/v projections → KV_CACHE_WRITE ×2 → PAGED_ATTENTION → lm head
  * ```
  *
  * one layer, weights as in-body constants. That is deliberately **not** a
- * Llama: H3a is about the SEAM — export, load, compile, run, agree — and a
+ * Llama: it certifies the SEAM — export, load, compile, run, agree — and a
  * seam is certified by a graph small enough that a disagreement is
- * attributable. Exporting a real Llama decode step needs H2's HF
- * name-mapping and the un-embedded weights this slice defers; it is named
- * as the next slice (H3b) rather than half-done here.
+ * attributable. Real Llama checkpoints are exported by [HfLlamaServingExport].
  *
- * RoPE is still absent for the same reason H1c gave: `positions` is an
- * operand of the contract and is not consumed by this graph, because the
- * rotary tables are model-layer work.
+ * RoPE is absent: `positions` is an operand of the contract and is not
+ * consumed by this graph, because the rotary tables are model-layer work.
  *
  * Weights come from a fixed LCG so two exports of the same model are
  * byte-identical artifacts — which is what makes the body hash a content

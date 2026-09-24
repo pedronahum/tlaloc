@@ -11,20 +11,20 @@ import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * KPTX v1.4 (§0.4.330) — the kernel launch registry: name →
+ * The KPTX kernel launch registry: name →
  * [LaunchConfig], dispatched inside XLA-compiled PJRT executables.
  *
- * [registerKernel] wires the full path proven piecewise in §0.4.326–329:
+ * [registerKernel] installs
  * a [PjrtFfiRegistry] typed-FFI handler that, per execution, decodes the
  * [XlaFfi] call frame, resolves the driver-JIT'd CUfunction (cached),
  * marshals the `void**` kernel-params array — **inputs then outputs**,
  * each a pointer to that buffer's device pointer, the pyptx convention —
  * and `cuLaunchKernel`s **on XLA's stream**.
  *
- * Design decisions (see docs/KPTX_PLAN.md):
+ * Design decisions:
  * - **Per-kernel-name registration**, not pyptx's single-handler +
  *   handle-attribute: Tlaloc's emitter names kernels symbolically
- *   (`stablehlo.custom_call @<kernelName>`, §0.4.261), so the name *is*
+ *   (`stablehlo.custom_call @<kernelName>`), so the name *is*
  *   the natural key and the MLIR stays free of process-local handles.
  * - **Framework owns memory and streams**: the handler never allocates
  *   tensor data, never synchronizes, never switches CUDA context.
@@ -55,7 +55,7 @@ object KptxKernelRegistry {
      * @param trailingI32Params extra scalar i32 params appended after the
      *   buffer pointers (e.g. element counts), derived per call from the
      *   decoded frame. Empty by default: kernels that can read shapes from
-     *   a fixed signature need nothing else at v1.
+     *   a fixed signature need nothing else.
      */
     data class LaunchConfig(
         val ptx: String,
@@ -67,13 +67,13 @@ object KptxKernelRegistry {
     )
 
     /**
-     * §0.4.350 — one stage of a launch chain: entry symbol plus its own
+     * One stage of a launch chain: entry symbol plus its own
      * grid/block and **buffer selection**. Multi-stage custom_calls
      * (e.g. cross-entropy's per-row pass then cross-row sum) launch
      * their stages back-to-back on XLA's stream inside one handler
      * dispatch — stream order sequences them, and intermediates live in
      * extra XLA-owned custom_call *results* (never handler-allocated
-     * scratch: framework owns memory, per the standing decision).
+     * scratch: the framework owns memory).
      *
      * @param paramBuffers which frame buffers this stage's kernel
      *   params reference, in kernel-signature order (`args` = operands,
@@ -126,7 +126,7 @@ object KptxKernelRegistry {
     }
 
     /**
-     * §0.4.350 — register a multi-stage launch chain under custom-call
+     * Registers a multi-stage launch chain under custom-call
      * target [name]: all [stages]' entry symbols live in the one [ptx]
      * module (the DSL's `ptxModule { }` emits multi-kernel modules);
      * per dispatch, stages launch back-to-back on XLA's stream.

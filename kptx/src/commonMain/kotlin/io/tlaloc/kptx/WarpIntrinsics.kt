@@ -1,8 +1,8 @@
 package io.tlaloc.kptx
 
 /**
- * KPTX v2.6 (§0.4.343) — typed wrappers for tensor-core mma and warp
- * intrinsics (plan task 14). Sugar over [KernelScope.inst] — the ISA
+ * Typed wrappers for tensor-core mma and warp
+ * intrinsics. Sugar over [KernelScope.inst] — the ISA
  * table still validates every emitted instruction — but the wrappers
  * add what the table can't express generically: **fragment arity and
  * register class per operand position**, checked in Kotlin before the
@@ -10,12 +10,11 @@ package io.tlaloc.kptx
  *
  * Scope: `mma.sync` (m16n8k16, f32.f16.f16.f32 — the workhorse
  * Ampere+ shape), `shfl.sync` (all four modes), `vote.sync.ballot`.
- * WGMMA / TMA / tcgen05 are deferred until a kernel needs them
- * (docs/KPTX_PLAN.md task 14 note).
+ * WGMMA / TMA / tcgen05 are not wrapped.
  *
- * §0.4.493 adds the **float warp reduction** this surface was missing:
- * [warpReduceSumF32], plus the bit-reinterpreting [movB32], plus a
- * relaxation of [shflSync] from `%r`-only to any 32-bit class.
+ * Also here: the **float warp reduction** [warpReduceSumF32], the
+ * bit-reinterpreting [movB32], and [shflSync] accepting any 32-bit
+ * register class (not only `%r`).
  */
 
 /** A fragment operand for [KernelScope.inst]. */
@@ -90,7 +89,7 @@ fun KernelScope.shflSync(
 }
 
 /**
- * §0.4.493 — `mov.b32 d, a`: **bit reinterpretation** between 32-bit
+ * `mov.b32 d, a`: **bit reinterpretation** between 32-bit
  * register classes, with no conversion. `movB32(r, f)` is the PTX
  * spelling of `Float.toRawBits()`, and `movB32(f, r)` of
  * `Float.fromBits()` — this is *not* [KernelScope.inst]`("cvt…")`,
@@ -110,7 +109,7 @@ fun KernelScope.movB32(d: KReg, a: KReg) {
 }
 
 /**
- * §0.4.493 — the natural spelling of a **full-warp f32 sum**: after
+ * The natural spelling of a **full-warp f32 sum**: after
  * this, lane 0 of every warp holds the sum of all 32 lanes' [acc]
  * (the other lanes hold partial sums and are conventionally discarded).
  *
@@ -119,10 +118,10 @@ fun KernelScope.movB32(d: KReg, a: KReg) {
  * already synchronous. The scratch register is allocated from the
  * enclosing [KernelScope], so the call site writes one line.
  *
- * Deferred by name: **sub-warp widths.** The clamp/segment word is
+ * **Sub-warp widths are not supported.** The clamp/segment word is
  * pinned to `0x1f` (a full 32-lane segment); a `width < 32` reduction
- * needs `0x1f or ((32 - width) shl 8)` and a test that a partial warp
- * actually segments, which no kernel here needs yet.
+ * would need `0x1f or ((32 - width) shl 8)` and a test that a partial
+ * warp actually segments.
  *
  * Summation order is the tree above, so the result is
  * order-deterministic but **not** bit-identical to a sequential sum —

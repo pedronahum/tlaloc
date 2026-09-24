@@ -69,7 +69,7 @@ object HfLlamaDecodeGraph {
      * **The dims here are MATH layout `[in, out]`, not the file's `[out,
      * in]`.** That is the load-bearing line of this file. HF stores every
      * `nn.Linear` weight transposed because `F.linear(x, W)` is `x @ W.T`
-     * (§0.4.478 verified it against the real checkpoint's rectangular k/v and
+     * (verified against a real checkpoint's rectangular k/v and
      * gate/up); Tlaloc's [OpKind.MATMUL] contracts `last(A) × first(B)`, so
      * somebody has to transpose.
      *

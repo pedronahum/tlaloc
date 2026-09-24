@@ -10,7 +10,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * Layer 4 §0.4.266 — Cross-entropy analytical-backward coarsener.
+ * Cross-entropy analytical-backward coarsener.
  *
  * # What this is
  *
@@ -57,7 +57,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  * # (positive sign because the recognizer matches the un-negated form;
  * #  user code that wants NLL applies a NEG outside this envelope.)
  * d_logits = d_loss · (labels − softmax(logits))
- * d_labels = d_loss · log(softmax(logits))    (§0.4.292; was 0 pre-fix)
+ * d_labels = d_loss · log(softmax(logits))
  * ```
  *
  * The scalar `d_loss` is broadcast to `logits`'s shape via an explicit
@@ -79,12 +79,12 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   declines on type mismatch.
  *
  * - **Recompute softmax inside the gradient.** Mirrors RmsNorm /
- *   FlashAttention's "recompute is cheaper than thread" choice. v2 can
+ *   FlashAttention's "recompute is cheaper than thread" choice. A later version could
  *   hoist `probs` into the COARSENED's payload as an additional primal
  *   return.
  *
- * - **Labels gradient.** §0.4.292 closed the prior shortcut (`d_labels = 0`).
- *   Tlaloc honours the math: `d_labels = d_loss · log(softmax(logits))`.
+ * - **Labels gradient.** Not a `d_labels = 0` shortcut; the full
+ *   derivative is emitted: `d_labels = d_loss · log(softmax(logits))`.
  *   Callers who treat labels as observed data (the common case) can stop
  *   gradient propagation themselves; the coarsener doesn't privilege that
  *   choice. Mirrors the same fix in RmsNorm + RoPE.

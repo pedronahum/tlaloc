@@ -6,10 +6,10 @@ import io.tlaloc.core.DType
  * SSA value type carried by every [DxirNode]: dtype + dim vector + optional
  * per-axis names.
  *
- * `axisNames` is the Layer 1 (§0.4.241+) extension that lets DXIR carry the
+ * `axisNames` lets DXIR carry the
  * Kotlin-side `Named<N, A>` axis identifiers through to the StableHLO emitter
  * and SDY sharding anchors. When [axisNames] is empty (the default), the type
- * has no named axes — fully backwards-compatible with pre-Layer-1 DXIR. When
+ * has no named axes. When
  * non-empty, it must align positionally with [dims]; individual entries may be
  * `null` to mark a single axis as unnamed within an otherwise-named type.
  */

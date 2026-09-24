@@ -10,7 +10,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * Layer 4 §0.4.265 — RoPE analytical-backward coarsener.
+ * RoPE analytical-backward coarsener.
  *
  * # What this is
  *
@@ -65,14 +65,14 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  * d_x_imag = dy · sin
  * ```
  *
- * §0.4.292 — `d_theta` is the analytical chain-rule contribution
+ * `d_theta` is the analytical chain-rule contribution
  * `d_theta = dy · ∂out/∂theta` where the partial expands per-form via
- * the cos/sin chain rule. Pre-§0.4.292 this was a const-zero shortcut
- * (under the rationale "theta is a positional argument, not a learnable
- * parameter"); the shortcut produced bit-exact disagreement with PyTorch
+ * the cos/sin chain rule. It is not a const-zero shortcut
+ * ("theta is a positional argument, not a learnable
+ * parameter"); such a shortcut disagrees with PyTorch
  * on consumers that bind theta to other operand slots (e.g. the
  * LlamaDecoder primal binds theta to BOTH `x_imag` and `theta` so the
- * `d_x_imag` arm covered only one of the four contributions).
+ * `d_x_imag` arm alone would cover only one of the four contributions).
  *
  * # Scope notes
  *
@@ -82,7 +82,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   surface theta_sin and theta_cos as separate outer operands.
  *
  * - **Recompute cos/sin inside the gradient.** Mirrors RmsNorm's
- *   "recompute is cheaper than thread" choice. v2 can hoist them into
+ *   "recompute is cheaper than thread" choice. A later version could hoist them into
  *   the COARSENED's payload as additional primal returns to skip the
  *   second `COS`/`SIN`.
  *

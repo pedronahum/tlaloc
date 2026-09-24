@@ -16,29 +16,31 @@ import io.tlaloc.ir.DxirRegion
 import io.tlaloc.ir.OpKind
 
 /**
- * Stage B.1 — φ-calculus rewrite pass on dxir per docs/STAGE_B_PLAN.md §4 + §7.2.
+ * φ-calculus rewrite pass on dxir, following Shen et al., *Coarsening Optimization
+ * for Differentiable Programming* (OOPSLA 2021). The rule names used throughout this
+ * file — formulas F1–F5 and corollaries C1–C9 — are the paper's.
  *
  * Implements F1 (identity), F3 (commutative canonicalisation), F2 / C1 (distributive
  * push of an op into an IF's branches), and C3 (nested-IF flattening). F4 is implicit
- * in [SymbolicEngine.nest] (used by C5–C9 in Stage B.2/B.3); F5 is trivial for
- * single-back-edge WHILE and is handled by Stage B.2's WHILE-targeted rewrites.
- * C2 (`d/dx φ(a,b) = φ(da/dx, db/dx)`) is realised by Stage A SCT running on the
- * post-PhiCalculus dxir; C4 (`f(φ(a,a)) = f(a)`) is the pipeline composition of
+ * in [SymbolicEngine.nest] (used by the loop corollaries C5–C9); F5 is trivial for
+ * single-back-edge WHILE and is handled by the WHILE-targeted rewrites.
+ * C2 (`d/dx φ(a,b) = φ(da/dx, db/dx)`) is realised by [DxirReverseTransform] running on
+ * the post-PhiCalculus dxir; C4 (`f(φ(a,a)) = f(a)`) is the pipeline composition of
  * C1 then F1 (no standalone Kotlin function).
  *
- * ### Apply pipeline (per plan §4.13)
+ * ### Apply pipeline
  *
  * 1. F1: identity collapse — `IF(p, x, x) ⇒ x`.
  * 2. F3: canonicalisation — swap branches + wrap predicate in NOT to put a deterministic
  *    branch order; this exposes more F1 collapse opportunities downstream.
  * 3. F2 / C1: distributive — push an outer op into both branches of an IF operand. F2
- *    is the unary/binary case; C1 is the k-ary generalisation (paper §4.7). Same
- *    Kotlin function handles both. Anti-swell gate per plan §4.3 — only fire when the
+ *    is the unary/binary case; C1 is the k-ary generalisation. Same
+ *    Kotlin function handles both. Anti-swell gate: only fire when the
  *    IF has a single use OR both branch bodies are < 5 ops.
  * 4. F1 again — collapse identity branches that distribution may have exposed.
  * 5. C3: nested-IF flattening — `outerIF(c, innerIF(c2, a, b), z) ⇒ innerIF(c2, outerIF(c, a, z), outerIF(c, b, z))`.
  *    Distributes inner IF outward, swapping nesting. Useful when downstream consumers
- *    can fuse outerIFs sharing the same predicate (deferred CSE-style optimisation).
+ *    can fuse outerIFs sharing the same predicate.
  * 6. F1 again.
  *
  * Iterates the whole pipeline to fixpoint (cap: 50 iterations) so chained rewrites
@@ -54,18 +56,18 @@ import io.tlaloc.ir.OpKind
  * resolve through `nodeMap` to the replacement.
  *
  * Dead ops (e.g., the original elementwise op consumed by F2's distributive push)
- * are emitted but never referenced; a future Stage B.3 DCE pass strips them. The
+ * are emitted but never referenced; this pass does not strip them. The
  * [DxirInterpreter] tolerates dead nodes — it walks the body in program order,
  * caching results that aren't read.
  *
- * ### Scope (B.1)
+ * ### Scope
  *
- * - **No SymbolicEngine calls.** All five rewrites are pure dxir-level structural
- *   transformations. The engine wires in for B.2 (C5) and B.3 (C6–C9).
- * - **No WHILE-targeted rewrites.** Stage B.2 lands C5; Stage B.3 lands C6–C9.
- * - **Single-back-edge IF only.** Multi-result IFs (per plan §3.1.1's region shape)
- *   are accepted by the rewrites but the F2 / C1 distribution path requires single-
- *   result; multi-result distribution is deferred.
+ * - **Structural rewrites need no SymbolicEngine.** The IF rewrites above are pure
+ *   dxir-level structural transformations, as is C5 (direct unroll of concrete-trip-count
+ *   loops). C6–C9 (closed forms for loop recurrences) require an engine.
+ * - **Single-back-edge IF only.** Multi-result IFs are accepted by the rewrites but
+ *   the F2 / C1 distribution path requires single-result; multi-result IFs are not
+ *   distributed.
  */
 object PhiCalculus {
 
@@ -82,7 +84,8 @@ object PhiCalculus {
      * (or, for binary ops, of the same dtype as both operands which must agree).
      * STEP / NOT are excluded because they take a numeric / Bool input and produce
      * a Bool output — pushing them into a branch yielding numeric values would
-     * change the IF's result type, requiring the IF op to be re-typed; out of B.1 scope.
+     * change the IF's result type, requiring the IF op to be re-typed, which this pass
+     * does not do.
      */
     private val DISTRIBUTABLE_OPS: Set<OpKind> = setOf(
         OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT,
@@ -102,23 +105,23 @@ object PhiCalculus {
      * @param engine optional [SymbolicEngine] enabling C6/C7/C8/C9 (engine-backed
      *   closed-form rewrites for affine + power loop recurrences). If null, only the
      *   structural rewrites (F1/F3/F2/C1/C3) and the engine-free C5 (direct unroll for
-     *   concrete-trip-count loops) fire — preserves backward-compatible behaviour for
-     *   callers from `commonTest` that have no engine impl available.
+     *   concrete-trip-count loops) fire — for callers, such as `commonTest`, that have
+     *   no engine impl available.
      */
     /**
-     * §0.4.103 — **D.1i Phase 1**. Apply Symja's `Simplify` to each return expression
+     * Apply Symja's `Simplify` to each return expression
      * of [fn], producing an equivalent function whose body has been algebraically
-     * simplified by the symbolic engine. This is the paper's §6.1 mechanism (ii)
+     * simplified by the symbolic engine. This is the paper's Section 6.1 mechanism (ii)
      * ("computation simplification thanks to the large-scoped symbolic
      * differentiation"), applied to whole gradient expressions output by
      * `DxirReverseTransform`.
      *
-     * **Phase 1 scope** (this session): minimal lift→simplify→lower scaffolding for
-     * arithmetic-only return expressions. Uses [SymbolicEngine.liftNode] (currently
-     * supports DxirParam / DxirConst with integer values / arithmetic ops at the
-     * scalar level), [SymbolicEngine.simplify] (Symja's `Simplify`), and
-     * [SymbolicEngine.lowerToDxir] (with a per-param symbol map so free variables
-     * in the simplified expression resolve back to the new function's params).
+     * **Scope**: lift→simplify→lower for arithmetic return expressions, with non-arithmetic
+     * subtrees treated as opaque leaves. Uses [SymbolicEngine.liftNode] (currently supports
+     * DxirParam / DxirConst with integer values / arithmetic ops at the scalar level),
+     * [SymbolicEngine.simplify] (Symja's `Simplify`), and [SymbolicEngine.lowerToDxir] (with a
+     * per-param symbol map so free variables in the simplified expression resolve back to the
+     * new function's params).
      *
      * **Bail-out semantics**: if any return fails to lift OR any simplified expression
      * fails to lower (e.g. the body contains a non-arithmetic op the engine doesn't
@@ -127,11 +130,7 @@ object PhiCalculus {
      * `liftNode`'s coverage automatically widens what this pass can simplify, with
      * no callsite changes here.
      *
-     * **Not yet wired** into `apply`'s pipeline. Callers must invoke this pass
-     * explicitly. Phase 2 will integrate it into `TlalocIrGenerationExtension`
-     * behind an opt-in system property; Phase 3+ will widen `liftNode` to handle
-     * fractional constants and the non-arithmetic ops that gradient bodies for
-     * tensor surfaces emit.
+     * **Not part of** `apply`'s pipeline. Callers must invoke this pass explicitly.
      */
     fun simplifyReturns(fn: DxirFunction, engine: SymbolicEngine): DxirFunction {
         // §0.4.107 — D.1i Phase 4. Lift each return through `liftReturnWithLeaves`,
@@ -184,7 +183,7 @@ object PhiCalculus {
     }
 
     /**
-     * Phase-4 lifter for `simplifyReturns`. Recurses through arithmetic ops
+     * Lifter for `simplifyReturns`. Recurses through arithmetic ops
      * (ADD/SUB/MUL/DIV/NEG/POW) using [SymbolicEngine] primitives; for everything
      * else, registers an opaque sentinel symbol in [leafMap] and returns
      * `engine.variable(sentinel)`. The sentinel name is `_simplify_leaf_<id>`,
@@ -287,12 +286,12 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.174 — pre-SCT region-body lift pass. For each top-level [OpKind.IF] whose
-     * regions have non-empty branch bodies, lifts the region-internal ops to the
-     * function's top level just before the IF; the IF's regions are replaced with
-     * empty-body regions yielding the lifted version of each terminator.
+     * Region-body lift pass, run before the reverse transform. For each top-level [OpKind.IF]
+     * whose regions have non-empty branch bodies, lifts the region-internal ops to the
+     * function's top level just before the IF; the IF's regions are replaced with empty-body
+     * regions yielding the lifted version of each terminator.
      *
-     * **Why**: §0.4.173 traced a CartPole-shape SSA leak — coarsening's `distribute`
+     * **Why**: without it, a CartPole-shaped primal leaks SSA ids — coarsening's `distribute`
      * rule produces region-internal ops referencing OUTER-scope IFs as forward
      * operands (`%59 = MUL(%58, %57-OUTER-IF)` inside a sibling IF's branch).
      * [DxirReverseTransform.apply]'s cloning loop maps `nodeMap[primal-IF] = primal-IF`
@@ -480,10 +479,10 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.503 (Tier 3, item 3) — **does this function still contain a loop?**
+     * **Does this function still contain a loop?**
      *
-     * Engine-free, side-effect-free, and the whole reason it exists: with Symja
-     * turned into an optional dependency, a caller needs to be able to tell the
+     * Engine-free and side-effect-free. Symja is an optional dependency, so a
+     * caller needs to be able to tell the
      * difference between "coarsening finished" and "coarsening finished as far as it
      * could without a computer algebra system". The engine-backed corollaries
      * C6–C9 are the only rewrites that close a WHILE the engine-free C5 unroll
@@ -805,13 +804,13 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.131 — D.3i Phase 3e helper. Recognise the canonical CounterOnly shape
+     * Recognise the canonical CounterOnly shape
      * `breakCond = STEP(SUB(args[counterArgIdx], thresholdConst))` (i.e., "break
      * when counter > threshold") and compute the resulting effective trip count.
      *
      * With counter starting at 0 and incrementing by 1, `breakCond` first becomes
      * true at iteration `threshold + 1`. Combined with the original natural bound
-     * `n` (already validated as a concrete int by §0.4.124's [Pattern.tripCountConst]),
+     * `n` (already validated as a concrete int via [Pattern.tripCountConst]),
      * the effective trip count is `min(n, threshold + 1)`.
      *
      * Returns null when (a) the breakCond doesn't match the canonical shape, (b)
@@ -842,7 +841,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.131 — CounterOnly arm. The break predicate has the canonical shape
+     * CounterOnly arm. The break predicate has the canonical shape
      * `STEP(SUB(args[counter], thresholdConst))` AND the natural bound `n` is a
      * concrete integer. Both bounds compose into a single effective trip count
      * `min(n, threshold + 1)`; this rewrite emits a vanilla bounded WHILE whose
@@ -894,12 +893,12 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.141 — D.3i Phase 3f. Captures the canonical CounterOnly shape
+     * Captures the canonical CounterOnly shape
      * `breakCond = STEP(SUB(args[counterArgIdx], threshold))` when at least one of
      * `n` / `threshold` is a region-external [DxirParam] — i.e., the cases where
      * the effective trip count `min(n, threshold + 1)` can't be folded at compile
-     * time but CAN be emitted as a runtime IF chain in outer scope. Phase 3e's
-     * concrete-int shortcut handles the both-concrete case via const folding.
+     * time but CAN be emitted as a runtime IF chain in outer scope. The
+     * concrete-int path handles the both-concrete case via const folding.
      *
      * Returns null when:
      *  - The breakCond doesn't match the canonical `STEP(SUB(args[counter], threshold))`
@@ -912,16 +911,15 @@ object PhiCalculus {
      *    here keeps the lift sound).
      *  - `n` is a region-internal [DxirOp] whose subtree transitively references a
      *    cond-region block-arg (defensive check, mirrors the threshold case).
-     *  - BOTH `n` and `threshold` are concrete [DxirConst] — that's Phase 3e's case.
-     *  - The threshold const is negative or non-integer (mirrors Phase 3e's checks).
+     *  - BOTH `n` and `threshold` are concrete [DxirConst] — the concrete-int path's case.
+     *  - The threshold const is negative or non-integer (mirrors the concrete-int checks).
      *
-     * §0.4.142 (Phase 3g) widened the accepted threshold shape from
-     * `DxirConst | DxirParam` to also include `DxirOp` — outer-scope [DxirOp]s
-     * resolve through `nodeMap` directly, region-internal [DxirOp]s get their
-     * dependency tree lifted into outer scope by [rewriteCounterOnlySymbolicBreak]
-     * via [liftRegionInternalSubtree], mirroring §0.4.128's `rewriteLoopInvariantBreak`.
+     * The accepted threshold shapes are `DxirConst`, `DxirParam` and `DxirOp`: outer-scope
+     * [DxirOp]s resolve through `nodeMap` directly, region-internal [DxirOp]s get their
+     * dependency tree lifted into outer scope by [rewriteCounterOnlySymbolicBreak] via
+     * [liftRegionInternalSubtree], mirroring `rewriteLoopInvariantBreak`.
      *
-     * §0.4.143 (Phase 3h) extends the same widening to `n` via the new
+     * The same shapes are accepted for `n` via the
      * [BreakBearingWhile.Pattern.tripCountOp] field — the dispatch is identical
      * to the threshold path, just applied to the n operand.
      */
@@ -1025,7 +1023,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.142 — D.3i Phase 3g check. Returns true when [root] is a region-internal
+     * Returns true when [root] is a region-internal
      * subtree whose dependency walk reaches only outer-scope leaves ([DxirParam],
      * outer-scope [DxirOp]s/[DxirConst]s) and other region-internal [DxirOp]/[DxirConst]
      * nodes — never a [DxirBlockArg]. A block-arg dep means the threshold is
@@ -1033,10 +1031,10 @@ object PhiCalculus {
      * routed to [BreakBearingWhile.BreakCondClass.CarriedDependent]; this check
      * defensively rejects such shapes regardless of how they were classified.
      *
-     * §0.4.149 — [DxirOpResult] is now accepted: the walker recurses into the
+     * [DxirOpResult] is accepted: the walker recurses into the
      * source op's operands, treating the multi-result op as if it were a regular
      * [DxirOp]. [cloneNode] handles the multi-result reconstruction via `opMulti`
-     * based on `node.types.size > 1`. [DxirCall] still rejects (cross-function
+     * based on `node.types.size > 1`. [DxirCall] is rejected (cross-function
      * call boundaries need separate handling).
      */
     private fun isRegionInternalSubtreeLiftable(
@@ -1063,7 +1061,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.141 — D.3i Phase 3f. Symbolic-bound CounterOnly arm. The closed-form
+     * Symbolic-bound CounterOnly arm. The closed-form
      * effective trip count `min(n, threshold + 1)` becomes a runtime `IF` chain
      * lifted into outer scope:
      *
@@ -1210,19 +1208,19 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.142 — D.3i Phase 3g lift helper. Walks [root] post-order over the cond
+     * Lift helper. Walks [root] post-order over the cond
      * region's body, collects region-internal ids that need cloning into outer
      * scope, and emits the clones via [cloneNode] in topological order (operands
      * before users). Returns the lifted root — i.e., `nodeMap[root.id]` after the
      * clones land — so the caller can splice it into outer-scope arithmetic.
      *
-     * Mirrors the inline walk in §0.4.128's [rewriteLoopInvariantBreak]: same
+     * Mirrors the inline walk in [rewriteLoopInvariantBreak]: same
      * post-order traversal, same `LinkedHashSet` for ordering, same `cloneNode`
      * dispatch. Errors on [DxirBlockArg] because [computeCounterOnlySymbolicShape]'s
      * pre-check ([isRegionInternalSubtreeLiftable]) should have rejected any
      * subtree with carried-arg deps before reaching here.
      *
-     * §0.4.149 — [DxirOpResult] is now walked through to its source's operands;
+     * [DxirOpResult] is walked through to its source's operands;
      * the source op (multi-result) is added to `toClone` and `cloneNode` rebuilds
      * it via `opMulti`. The DxirOpResult ref itself doesn't need a separate
      * clone — `nodeMap[source.id]` after the lift holds the cloned multi-result
@@ -1289,7 +1287,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.127 — Constant arm. `alwaysBreaks=true` collapses the WHILE to its inits
+     * Constant arm. `alwaysBreaks=true` collapses the WHILE to its inits
      * via `multiOut` (loop runs zero times); `alwaysBreaks=false` rebuilds the WHILE
      * with the LAND-NOT wrapper dropped from the cond region, leaving a vanilla
      * bounded WHILE for the C5–C9 corollaries to close downstream in the same pass.
@@ -1348,7 +1346,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.128 — LoopInvariant arm. The breakCond predicate doesn't depend on any
+     * LoopInvariant arm. The breakCond predicate doesn't depend on any
      * cond block-arg, so it evaluates to the same value every iteration. Lift it
      * into outer scope and emit `IF(breakCond, then=inits, else=vanillaWhile)` —
      * the predicate runs once before the loop, then either short-circuits the loop
@@ -1472,8 +1470,8 @@ object PhiCalculus {
     /** Pattern detected by [detectSimpleLoop]. */
     private data class SimpleLoopPattern(
         /**
-         * Indices of every non-counter result referenced downstream (§0.4.51 widened C5
-         * from single to multi). The unroll tracks ALL carrieds per iteration and, after
+         * Indices of every non-counter result referenced downstream. The unroll tracks ALL
+         * carrieds per iteration and, after
          * `tripCount` iterations, publishes each referenced index's final value into
          * `rewriteFunction`'s multiOut map. If the set is empty, C5 skips (the loop is
          * dead — a separate DCE concern).
@@ -1486,9 +1484,9 @@ object PhiCalculus {
     )
 
     /**
-     * Recognise an N-loop-carried WHILE matching the C5 simple-loop pattern. Widened
-     * in §0.4.39 from the original 2-carried case to support multi-var for-loop bodies
-     * (the FIR lowering now emits one carried per mutated outer `var` plus the counter):
+     * Recognise an N-loop-carried WHILE matching the C5 simple-loop pattern. Supports
+     * multi-var for-loop bodies (the FIR lowering emits one carried per mutated outer
+     * `var` plus the counter):
      *  - N ≥ 1 loop-carried user values + 1 counter (any positions; counter detected
      *    structurally via the cond-STEP-of-SUB shape)
      *  - Counter init is `const(0)` of integer type
@@ -1498,9 +1496,8 @@ object PhiCalculus {
      *  - NO carried back-edge references `args[counterIdx]` (the paper's C5 hypothesis:
      *    every carried update is a function of carrieds + loop-invariants, not the
      *    iteration index)
-     *  - Exactly one non-counter result is referenced downstream (caller-checked via
-     *    [findSingleReferencedCarried]); multi-reference is deferred until the
-     *    `rewriteFunction` framework grows multi-result replacement support.
+     *  - At least one non-counter result is referenced downstream (caller-checked via
+     *    [findReferencedCarried]).
      *
      * Returns null if any check fails.
      */
@@ -1596,18 +1593,18 @@ object PhiCalculus {
     /**
      * C5 rewrite pass — direct unroll of detected simple loops.
      *
-     * For each WHILE matching [detectSimpleLoop], build the closed-form value of the
-     * single downstream-referenced carried result by cloning the body region's body N
+     * For each WHILE matching [detectSimpleLoop], build the closed-form value of each
+     * downstream-referenced carried result by cloning the body region's body N
      * times into the outer builder. Each iteration's block args are bound to the
      * previous iteration's back-edge values — ALL carried args, not just the referenced
      * one, because body ops may read them (e.g., a multi-var brachistochrone body
      * computes `v_new` then reads `v_old` + `v_new` when updating `t`). The referenced
-     * carried's final value replaces the WHILE in the rewritten function.
+     * carrieds' final values replace the WHILE's results in the rewritten function.
      *
-     * **Restriction (§0.4.39):** only fires when exactly one non-counter result is
-     * referenced downstream. Zero references means the loop is dead (a separate DCE
-     * concern); multiple references would need multi-result replacement in the
-     * [rewriteFunction] framework (deferred). The counter result is always dropped.
+     * **Restriction:** only fires when at least one non-counter result is referenced
+     * downstream; zero references means the loop is dead (a separate DCE concern).
+     * The counter result is always dropped. WHILEs nested in any region-bearing op
+     * are found and rewritten too.
      */
     private fun applyC5Pass(fn: DxirFunction): DxirFunction {
         // §0.4.152 — region-recursive pre-scan: detect C5-eligible WHILEs at top level
@@ -1670,7 +1667,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.152 — extract the per-WHILE C5 unroll body so it can run from either a
+     * The per-WHILE C5 unroll body, factored out so it can run from either a
      * top-level [DxirBuilder] context or a nested [DxirRegionBuilder] context. The
      * unrolled iter clones land in [emitter]'s body; [multiOut] is populated with
      * the per-result-index replacement list and the smallest referenced index is
@@ -1711,11 +1708,10 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.152 / §0.4.161 — true iff any descendant op (in any region of [op], at any
+     * True iff any descendant op (in any region of [op], at any
      * nesting depth) is a [safeC5]-keyed WHILE. Used to decide whether [op] needs
-     * region-recursive C5 rewriting (else it's cloned verbatim). §0.4.152 named this
-     * `ifRegionsContainSafeC5` and applied only to IF; §0.4.161's Phase 4b widens
-     * to all region-bearing ops (WHILE, IF, future region-bearing kinds).
+     * region-recursive C5 rewriting (else it's cloned verbatim). Applies to all
+     * region-bearing ops (WHILE, IF, and any other region-bearing kind).
      */
     private fun regionsContainSafeC5(
         op: DxirOp,
@@ -1738,7 +1734,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.152 — clone [region] into [parentEmitter], rewriting safeC5 WHILEs to
+     * Clone [region] into [parentEmitter], rewriting safeC5 WHILEs to
      * unrolled chains and recursing into nested IFs that themselves contain safeC5
      * WHILEs. Mirrors [cloneRegion]'s terminator handling for `DxirOpResult` /
      * multi-result clones.
@@ -1830,10 +1826,8 @@ object PhiCalculus {
      * than one non-counter result is read. Counter-result references are disqualifying
      * (C5 drops the counter).
      *
-     * Widened in §0.4.39 from the 2-carried-only `onlyCarriedResultReferenced` check:
-     * previously the caller pre-computed `carriedIdx` via the "OTHER index" rule and
-     * this function binary-validated it; now we discover the referenced index from the
-     * use-sites directly, which generalises to N-carried WHILEs.
+     * The referenced index is discovered from the use-sites directly, which works for
+     * N-carried WHILEs.
      */
     private fun findSingleReferencedCarried(
         fn: DxirFunction,
@@ -1841,9 +1835,9 @@ object PhiCalculus {
     ): Int? = findReferencedCarried(fn, whileOp).singleOrNull()
 
     /**
-     * §0.4.51 — return every result index of [whileOp] that is referenced downstream
+     * Return every result index of [whileOp] that is referenced downstream
      * (including the counter slot; the caller filters that out via the counter-idx
-     * check). Used by C5's multi-result widening and by the C6/C7/C8/C9 single-result
+     * check). Used by C5's multi-result unroll and by the C6/C7/C8/C9 single-result
      * guards (via [findSingleReferencedCarried]).
      */
     private fun findReferencedCarried(
@@ -1877,12 +1871,11 @@ object PhiCalculus {
     }
 
     /**
-     * Backwards-compatible wrapper for C6/C7/C8/C9: returns true when [whileOp]'s only
-     * downstream reference is to result [carriedIdx]. Those corollaries still target
-     * the 2-carried shape (one counter + one user-carried, §0.4.17's `detectAffineRecurrence`
-     * hard-codes `op.operands.size == 2`), so this is equivalent to the §0.4.39 extension's
-     * `findSingleReferencedCarried() == carriedIdx` check. When C6/C7/C8/C9 grow N-carried
-     * support themselves, they should call [findSingleReferencedCarried] directly.
+     * Wrapper for C6/C7/C8/C9: returns true when [whileOp]'s only
+     * downstream reference is to result [carriedIdx]. Those corollaries target
+     * the 2-carried shape (one counter + one user-carried; `detectAffineRecurrence`
+     * requires `op.operands.size == 2`), so this is equivalent to
+     * `findSingleReferencedCarried() == carriedIdx`.
      */
     private fun onlyCarriedResultReferenced(
         fn: DxirFunction,
@@ -1919,9 +1912,8 @@ object PhiCalculus {
          * counter or carried). Null when the pattern matched the `ADD(args[carried], b)`
          * shape (a=1 implicit). Can be a `DxirConst`, a `DxirParam`, or any arithmetic
          * op tree composed of loop-invariants (including function-param references).
-         * Widened in §0.4.20 for BGDHyperOpt e2e — previously required `DxirConst`.
          *
-         * §0.4.52 — null when the symbolic Symja-backed path matched (see [aSym]).
+         * Null when the symbolic Symja-backed path matched (see [aSym]).
          */
         val aRoot: DxirNode?,
         /**
@@ -1931,23 +1923,23 @@ object PhiCalculus {
          */
         val bRoot: DxirNode?,
         /**
-         * §0.4.52 — symbolic multiplicative coefficient produced by the Symja-backed
+         * Symbolic multiplicative coefficient produced by the Symja-backed
          * detection path for user code that doesn't fit one of the three syntactic
          * back-edge shapes (e.g., `w = w - r·(2·(Sx2·w - Sxy))/M`). When non-null,
          * [aRoot] is null and [applyC6Pass] uses this directly as the `a_sym` symbolic
          * coefficient in the closed-form construction, skipping [liftOffsetSubtree].
          */
         val aSym: SymExpr? = null,
-        /** §0.4.52 — symbolic additive coefficient; companion to [aSym]. */
+        /** Symbolic additive coefficient; companion to [aSym]. */
         val bSym: SymExpr? = null,
         /**
-         * §0.4.52 — params referenced by the lifted back-edge expression, collected
+         * Params referenced by the lifted back-edge expression, collected
          * during Symja lifting. Used by [applyC6Pass] to build the `symbolMap` for
          * `lowerToDxir`. Empty set when the syntactic path matched.
          */
         val symLiftedParams: Set<DxirParam> = emptySet(),
         /**
-         * §0.4.52 — opaque-leaf map for the Symja path: variable name → original dxir
+         * Opaque-leaf map for the Symja path: variable name → original dxir
          * node. Non-arithmetic ops (GATHER, SQRT, SCATTER, …) and unreduced
          * DxirOpResult refs that appear in the back-edge get assigned fresh Symja
          * symbols during lifting; this map routes them back to the original dxir
@@ -2041,7 +2033,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.52 — Symja-backed fallback detector for C6. Same counter pattern as
+     * Symja-backed fallback detector for C6. Same counter pattern as
      * [detectAffineRecurrence]; differs in how the carried back-edge is recognized.
      *
      * Lifts the back-edge expression into [SymExpr] with the carried arg replaced by a
@@ -2155,7 +2147,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.52 — variant of [liftOffsetSubtree] that handles the carried-arg mapping
+     * Variant of [liftOffsetSubtree] that handles the carried-arg mapping
      * in addition to the counter. When `root.id == carriedArgId`, returns [carriedSym]
      * (the sentinel variable representing the carried in the symbolic lift).
      *
@@ -2226,8 +2218,7 @@ object PhiCalculus {
     /**
      * Shared trip-count extractor used by both C6 (`detectAffineRecurrence`) and C7
      * (`detectIndexedAffineRecurrence`). Accepts any numeric scalar — int OR float —
-     * so that C6/C7 fire on uniformly-typed F32-counter loops too (which is needed
-     * until dxir grows an i32→f32 CAST op).
+     * so that C6/C7 fire on uniformly-typed F32-counter loops too.
      */
     private fun extractTripCount(node: DxirNode): TripCount? {
         return when (node) {
@@ -2251,9 +2242,8 @@ object PhiCalculus {
      * returned pair means "implicit value": `aRoot = null` ⇒ a = 1; `bRoot = null` ⇒ b = 0.
      *
      * Subtrees may be any dxir node — `DxirConst`, `DxirParam`, or arithmetic `DxirOp`
-     * trees over loop-invariants. Widened from the pre-§0.4.20 const-only version to
-     * support BGDHyperOpt-shaped loops where coefficients are runtime-parameter
-     * expressions (e.g., `a = 1 + 2r·Sx2/M`).
+     * trees over loop-invariants. This supports BGDHyperOpt-shaped loops where
+     * coefficients are runtime-parameter expressions (e.g., `a = 1 + 2r·Sx2/M`).
      */
     private fun extractAffineSubtrees(root: DxirNode, carriedArgId: Int): Pair<DxirNode?, DxirNode?>? {
         if (root !is DxirOp) return null
@@ -2283,9 +2273,8 @@ object PhiCalculus {
     /**
      * Extract the `a_subtree` coefficient from a `MUL(a_subtree, args[carriedArgId])` op
      * (or its commutative twin). Returns null if neither operand is the carried arg.
-     * Unlike the pre-§0.4.20 version which required a `DxirConst` coefficient, this
-     * accepts any dxir node — the loop-invariance check happens at the pattern-match
-     * call site.
+     * Accepts any dxir node as the coefficient — the loop-invariance check happens at
+     * the pattern-match call site.
      */
     private fun extractMulCoefficientSubtree(mul: DxirOp, carriedArgId: Int): DxirNode? {
         require(mul.op == OpKind.MUL)
@@ -2551,9 +2540,8 @@ object PhiCalculus {
      *  - `ADD(MUL(const_a, args[carried]), offset_subtree)` → returns `(const_a, offset)`
      *  - `ADD(args[carried], offset_subtree)` → returns `(1f, offset)`
      *
-     * C7's first-cut narrower than C6: requires the multiplicative coefficient `a` to
-     * be a concrete `DxirConst`. Widening to subtree (like C6's §0.4.20 widening) would
-     * collide with C8's pattern; deferred until a benchmark needs it.
+     * Narrower than C6: requires the multiplicative coefficient `a` to be a concrete
+     * `DxirConst`. Accepting a subtree (as C6 does) would collide with C8's pattern.
      */
     private fun extractIndexedAffineParts(root: DxirNode, carriedArgId: Int): Pair<Float, DxirNode>? {
         if (root !is DxirOp) return null
@@ -2572,8 +2560,8 @@ object PhiCalculus {
 
     /**
      * Narrow variant of the MUL-coefficient extractor that requires the coefficient to
-     * be a concrete `DxirConst`. Used by C7's pattern matcher which (for first cut)
-     * doesn't accept runtime-param `a` subtrees. Distinct from C6's widened
+     * be a concrete `DxirConst`. Used by C7's pattern matcher, which
+     * doesn't accept runtime-param `a` subtrees. Distinct from C6's
      * `extractMulCoefficientSubtree` which accepts any node.
      */
     private fun extractMulConstCoefficient(mul: DxirOp, carriedArgId: Int): Float? {
@@ -2594,8 +2582,8 @@ object PhiCalculus {
      * lowering time.
      *
      * Supported op kinds: ADD, SUB, MUL, DIV, NEG, POW. Other ops (SQRT/EXP/LOG/etc.)
-     * error explicitly — Stage B.3 first-cut focus is the BGDHyperOpt inner-loop shape
-     * (polynomial in the counter); other shapes wait for a benchmark that needs them.
+     * error explicitly — the supported shape is an offset polynomial in the counter
+     * (for example the BGDHyperOpt inner loop).
      */
     private fun liftOffsetSubtree(
         root: DxirNode,
@@ -2750,8 +2738,8 @@ object PhiCalculus {
     )
 
     /**
-     * Recognise the C8 variable-coefficient pattern. Same counter/trip-count detection
-     * as C6/C7. The carried back-edge must match `ADD(MUL(a_subtree, args[carried]), b_subtree)`
+     * Recognise the C8 variable-coefficient pattern. Same counter/trip-count detection as
+     * C6/C7. The carried back-edge must match `ADD(MUL(a_subtree, args[carried]), b_subtree)`
      * with the following distinguishing constraints (vs C6/C7):
      *  - `a_subtree` MUST depend on `args[counter]` (otherwise C6 or C7 fires: C6 when
      *    a_subtree is a `DxirConst`, C7 when a_subtree is a const but b_subtree depends
@@ -2844,7 +2832,7 @@ object PhiCalculus {
 
     /**
      * C8 rewrite pass — engine-backed closed-form construction for variable-coefficient
-     * affine recurrences. Closed form (derivation-verified, see §0.4.18):
+     * affine recurrences. Closed form:
      *   `d_exit = p · ∏_{i=0}^{n-1} a[i] + Σ_{k=0}^{n-1} b[k] · ∏_{j=k+1}^{n-1} a[j]`
      */
     private fun applyC8Pass(fn: DxirFunction, engine: SymbolicEngine): DxirFunction {
@@ -3112,8 +3100,8 @@ object PhiCalculus {
      * to the new node.
      *
      * Dead ops (cloned verbatim but never referenced by downstream) are tolerated —
-     * the [DxirInterpreter] walks them but their results are never read. Stage B.3 DCE
-     * pass will strip them.
+     * the [DxirInterpreter] walks them but their results are never read. This walker
+     * does not strip them.
      */
     private fun rewriteFunction(
         fn: DxirFunction,
@@ -3240,7 +3228,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.51 — resolve a cloned operand. For plain nodes the `nodeMap[id]` lookup is
+     * Resolve a cloned operand. For plain nodes the `nodeMap[id]` lookup is
      * sufficient. For [DxirOpResult] operands the lookup strips the multi-result index
      * (because `DxirOpResult.id == source.id`), so we re-wrap with the right index when
      * the cloned source is still a multi-result [DxirOp]. If C5 collapsed the source to
@@ -3405,12 +3393,11 @@ object PhiCalculus {
      * mini-function is run through [apply] with [engine] and the size of the
      * resulting body becomes the authoritative post-coarsening op count.
      *
-     * Stage C.3a scope:
+     * Scope:
      *  - Leaves only (no region-bearing ops in `directOps`). If a region-bearing op
      *    is encountered, returns [CoarsenResult.Failure] — caller falls back to raw
      *    op count.
-     *  - Single-result ops only (no multi-result). Multi-result leaf ops are rare
-     *    in practice; widen when a benchmark demands it.
+     *  - Single-result ops only (no multi-result).
      *  - `DxirOpResult` operand references (e.g., a WHILE's carried output consumed
      *    inside a leaf that sits after the WHILE) are tolerated — the clone routes
      *    through `.result(idx)` on the source op.
@@ -3420,8 +3407,8 @@ object PhiCalculus {
      * throws — any internal error is wrapped into `Failure`.
      *
      * The simplified function is a **standalone** [DxirFunction] suitable for:
-     *  - size measurement (this session's use case).
-     *  - C.3b's gradient synthesis: run [DxirReverseTransform.apply] on it to get
+     *  - size measurement.
+     *  - gradient synthesis: run [DxirReverseTransform.apply] on it to get
      *    the pre-computed VJP body + splice both primal + gradient into an
      *    `OpKind.COARSENED` op in the parent function.
      */
@@ -3543,35 +3530,32 @@ object PhiCalculus {
     // ------------------------------------------------------------------------
 
     /**
-     * Run the Stage C SOI-identification + coarsening pipeline on [fn], producing a new
+     * Run the SOI-identification + coarsening pipeline on [fn], producing a new
      * [DxirFunction] where each final SOI is replaced by a single [OpKind.COARSENED]
      * op carrying the pre-computed primal + gradient. Downstream consumers
      * ([DxirReverseTransform.apply]) use [DxirReverseTransform.handleCoarsenedAdjoint]
      * to splice the stored gradient when they encounter the COARSENED op.
      *
-     * **C.3b.3a** (§0.4.33) — the root-is-leaf case: a region-free primal collapses to a
+     * **Root-is-leaf case**: a region-free primal collapses to a
      * single COARSENED op at the top level.
      *
-     * **C.3b.3b2** (§0.4.35) — the region-bearing case: when the primal contains IF
+     * **Region-bearing case**: when the primal contains IF
      * branches, each branch whose body is a viable SOI (non-empty, scalar-numeric
      * single-yield) gets its body replaced by a per-branch COARSENED op. The enclosing
      * IF structure is preserved; downstream `DxirReverseTransform.walkBranchReverse`
-     * (extended in §0.4.34 to dispatch COARSENED) handles the gradient through each
-     * branch. WHILE cond/body regions are deferred — cond yields Bool (non-differentiable
-     * result type), and body yields multiple values (multi-result COARSENED not yet
-     * supported).
+     * (which dispatches COARSENED) handles the gradient through each
+     * branch. WHILE cond/body regions are not coarsened here — cond yields Bool
+     * (non-differentiable result type), and body yields multiple values.
      *
-     * Single-return primals only. Multi-sink coarsening is conceptually
-     * straightforward (one COARSENED op per sink) but defers until a benchmark demands
-     * it.
+     * Single-return primals only; multi-sink primals are returned unchanged.
      *
      * If the primal doesn't meet the scope (multi-return, no viable SOIs, coarsening
      * failure), returns [fn] unchanged — callers can check structurally whether any
      * replacement happened.
      *
-     * @param sizeLimit The SOI size limit `L` (plan §8.2 default: 50). Drives which
+     * @param sizeLimit The SOI size limit `L` (typical value: 50). Drives which
      *   nodes in the region tree [SoiIdentification.identifyWithSizeLimit] marks as
-     *   large; first-cut coarsenFunction does whole-leaf coarsening without further
+     *   large; coarsenFunction does whole-leaf coarsening without further
      *   size discrimination at the leaf level.
      */
     fun coarsenFunction(
@@ -3590,7 +3574,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.33 — wrap the entire region-free function body in one COARSENED op. Returns
+     * Wrap the entire region-free function body in one COARSENED op. Returns
      * [fn] unchanged on any failure (PhiCalculus.apply threw, resulting body has
      * regions, gradient body generation failed, etc.).
      */
@@ -3630,7 +3614,7 @@ object PhiCalculus {
     }
 
     /**
-     * §0.4.35 — Stage C.3b.3b2 multi-SOI splice. For a region-bearing primal, identify
+     * Multi-SOI splice. For a region-bearing primal, identify
      * SOIs that are IF-branch leaves (single-yield, scalar numeric) and replace each
      * branch body with a single COARSENED op carrying the coarsened primal + gradient.
      * Non-SOI regions + non-IF region-bearing ops (WHILE in particular) survive unchanged.
@@ -3782,7 +3766,7 @@ object PhiCalculus {
     /**
      * Inside a new IF-branch region builder, emit the replacement COARSENED op and yield
      * its result. Operands map to the outer [nodeMap] via the recorded free-var ids.
-     * IF-branch blocks have no args (per §3.1.1's shape constraint), so there's no block-
+     * IF-branch blocks have no args (an IR shape constraint), so there's no block-
      * arg mapping to thread — the operand lookup happens entirely through the outer nodeMap.
      */
     private fun emitCoarsenedBranchBody(
@@ -3818,7 +3802,7 @@ object PhiCalculus {
         rb.yields(c)
     }
 
-    /** §0.4.35 — per-SOI replacement artifact produced by [buildReplacement]. */
+    /** Per-SOI replacement artifact produced by [buildReplacement]. */
     private data class CoarsenedReplacement(
         val primalBody: DxirFunction,
         val gradientBody: DxirFunction,

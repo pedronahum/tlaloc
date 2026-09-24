@@ -1,16 +1,16 @@
 package io.tlaloc.maestro
 
 /**
- * Layer 2 §0.4.243+ — minimal recursive-descent JSON parser tailored to
+ * Minimal recursive-descent JSON parser tailored to
  * the [ProgramManifest] schema. Does **not** aspire to be a general JSON
  * library — accepts only the exact shape produced by `ProgramManifest.toJson()`
  * and `TypeDescriptor.toJson()`.
  *
- * Choice rationale (audit §10): hand-rolled vs. pulling in
+ * Hand-rolled vs. pulling in
  * `kotlinx.serialization` — the schema is small, stable, and entirely
  * internal to Tlaloc's manifest pipeline. A 120-line targeted parser is
- * cheaper than the dependency. If Layer 3+ needs richer serialization
- * (back-compat-aware versioning, polymorphic decoding), revisit.
+ * cheaper than the dependency. Richer serialization (back-compat-aware
+ * versioning, polymorphic decoding) would warrant revisiting that choice.
  */
 internal class ManifestJsonParser(private val text: String) {
     private var pos = 0

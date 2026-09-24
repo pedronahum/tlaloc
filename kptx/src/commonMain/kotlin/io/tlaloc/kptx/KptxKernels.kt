@@ -3,35 +3,30 @@ package io.tlaloc.kptx
 import kotlin.jvm.Synchronized
 
 /**
- * KPTX v2.7 (§0.4.344) — the production kernel library (plan task 15):
- * the v1 hand-written kernels rewritten as [PtxKernelTemplate]s. This
- * file is now the **single source** for the KPTX rms_norm family — the
- * runtime/benchmark tests register `specialize(...).emitPtx()` output
- * instead of hand-written strings, so the same GPU tests that pinned
- * the v1 texts (§0.4.335/336 oracles + E2E) re-certify these
- * transcriptions numerically on every run.
+ * The KPTX production kernel library, written as [PtxKernelTemplate]s
+ * and multi-kernel [PtxModule]s. This file is the **single source** for
+ * the KPTX kernels — the runtime/benchmark tests register
+ * `specialize(...).emitPtx()` output, and the GPU oracle and end-to-end
+ * tests check the emitted kernels numerically on every run.
  *
  * The symbolic `block` shape sizes the shared-memory reduction scratch
- * (`4·block` bytes per array) — the v1 texts hard-coded 1024 for the
- * 256-thread launch; specializing at another block size now emits a
- * consistent kernel instead of a silent smem overflow.
+ * (`4·block` bytes per array), so specializing at any block size emits a
+ * consistent kernel rather than overflowing a fixed-size smem array.
  *
- * Emitted text is canonical from birth: byte-stable under parse/emit
- * (the v2 DoD) and ISA-clean by construction (every `inst()` was
- * validated at build time). The §0.4.328–336 hand-written texts remain
- * in [PtxRoundTripCorpus] as historical parser fixtures.
+ * Emitted text is canonical: byte-stable under parse/emit and ISA-clean
+ * by construction (every `inst()` is validated at build time).
  */
 object KptxKernels {
 
     /**
      * RMS-norm forward, eps-operand variant — the kernel the
      * [io.tlaloc.ir.recognizer.kernel] RmsNormKernel template claims as
-     * `custom_call @kptx_rms_norm(x, eps[rows,1]) -> y` (§0.4.336).
+     * `custom_call @kptx_rms_norm(x, eps[rows,1]) -> y`.
      * One CTA per token row, `block` threads: strided fma
      * sum-of-squares, shared-memory tree reduction, `sqrt.rn`+`rcp.rn`
      * normalizer, strided `out = x · r` writes. Launch signature:
      * `(x_ptr, eps_ptr, out_ptr, n_cols)` — n_cols stays a runtime
-     * scalar (the registry's trailing-i32 marshalling, §0.4.330).
+     * scalar (the launch registry's trailing-i32 marshalling).
      */
     val rmsNormEps: PtxKernelTemplate = PtxKernelTemplate("kptx_rms_norm") { env ->
         val block = env.shape("block")
@@ -141,7 +136,7 @@ object KptxKernels {
     }
 
     /**
-     * RMS-norm backward, dx half (§0.4.335 math): with
+     * RMS-norm backward, dx half: with
      * `r = 1/sqrt(mean(x²)+eps)`, `s = Σ dy·w·x`, computes
      * `dx = (dy·w)·r − x·r³·s/D` and writes `inv_rms[row] = r` for the
      * dw kernel to consume. One CTA per row, dual shared-memory tree
@@ -297,7 +292,7 @@ object KptxKernels {
     }
 
     /**
-     * §0.4.349 — RoPE forward, the recognizer's SUB-form/cos-first
+     * RoPE forward, the recognizer's SUB-form/cos-first
      * recombination (the LlamaDecoder shape):
      * `out = x_real·cos(θ) − x_imag·sin(θ)`, elementwise. Grid-stride
      * one-thread-per-element; `n` (total elements) stays a runtime
@@ -358,7 +353,7 @@ object KptxKernels {
     }
 
     /**
-     * §0.4.350 — CrossEntropy forward as a **two-stage launch chain**
+     * CrossEntropy forward as a **two-stage launch chain**
      * behind one custom_call: the coarsened CE returns a scalar
      * (`loss = Σ_ij labels·log(softmax(logits))`, labels-left, full
      * reduction), which needs a cross-row stage; the intermediate
@@ -622,12 +617,12 @@ object KptxKernels {
     }
 
     /**
-     * §0.4.358 — attention forward (`O = softmax(Q·Kᵀ)·V`, the
-     * FlashAttention COARSENED's math: operands `(Q[T,D], Kᵀ[D,T],
+     * Attention forward (`O = softmax(Q·Kᵀ)·V`, the
+     * math of the coarsened FlashAttention op: operands `(Q[T,D], Kᵀ[D,T],
      * V[T,D])`, no scale factor, max-subtracting row softmax — exactly
      * the emitter's decomposition) as a **three-stage launch chain**
      * behind one custom_call. The score matrix `S[T,T]` lives in an
-     * XLA-owned scratch result (the §0.4.350/351 mechanism):
+     * XLA-owned scratch result (the same mechanism as [crossEntropyModule]):
      *
      *   1. `kptx_attn_scores(q, kt, S, n_t, n_d)` — CTA per score row,
      *      thread-strided columns, D-loop dot per element.
@@ -637,9 +632,8 @@ object KptxKernels {
      *   3. `kptx_attn_out(S, v, o, n_t, n_d)` — CTA per output row,
      *      thread-strided dims, T-loop dot per element.
      *
-     * Correctness-tier f32 loops by design — the claiming milestone;
-     * the warp-specialized mma performance pass (TLX-informed, from the
-     * §0.4.357-ingested bf16 GEMM tile) is the follow-up.
+     * Correctness-tier f32 loops by design; there is no warp-specialized
+     * mma (tensor-core) path.
      */
     private val attnCache = HashMap<Int, PtxModule>()
 
@@ -784,7 +778,7 @@ object KptxKernels {
     }
 
     /**
-     * §0.4.471 — Phase H4: **paged attention forward** as a three-stage
+     * **Paged attention forward** as a three-stage
      * launch chain behind one `custom_call`, the serving-path sibling of
      * [attentionModule]. Same skeleton — scores → row softmax → output —
      * but K and V are read *through the block table* instead of from a
@@ -793,37 +787,34 @@ object KptxKernels {
      * Operand order follows `OpKind.PAGED_ATTENTION`'s
      * `(query, keyCache, valueCache, blockTables, seqLens) → out`, and the
      * `S[numSeqs·numHeads, numMaxBlocks·blockSize]` score matrix lives in an
-     * XLA-owned scratch result (the §0.4.350/351 mechanism):
+     * XLA-owned scratch result (the same mechanism as [crossEntropyModule]):
      *
      *   1. `kptx_paged_scores(q, kcache, btab, slens, S, n_h, n_d, n_bs,
-     *      n_kv, n_mb)` — one CTA per (sequence, query head), threads
-     *      strided over the padded context. A live lane `j` resolves
+     *      n_kv, n_mb)` — one CTA per (sequence, query head), context
+     *      lanes distributed over the CTA's warps. A live lane `j` resolves
      *      `block = blockTables[seq, j / blockSize]`,
      *      `off = j % blockSize`, dots `Q[seq,h,:]` against
      *      `K[block, off, kvHead, :]` and scales; a lane at or past
-     *      `seqLen` is written `−inf`. **§0.4.494 gave this stage a
-     *      warp-per-lane mapping**: see below.
+     *      `seqLen` is written `−inf`. See the warp-per-lane mapping below.
      *   2. `kptx_paged_softmax(S, n_ctx)` — [rowSoftmaxKernel] verbatim.
      *      The `−inf` dead lanes exponentiate to exactly `0`, so no
      *      masking arm is needed there.
      *   3. `kptx_paged_out(S, vcache, btab, slens, o, n_h, n_d, n_bs,
      *      n_kv, n_mb)` — one CTA per output row, accumulating only over
-     *      the live lanes. **§0.4.482 gave this stage a second
-     *      dimension**: see below.
+     *      the live lanes, with the context split across the block. See
+     *      the context split below.
      *
-     * # §0.4.494 — the warp-per-lane mapping in stage 1
+     * # The warp-per-lane mapping in stage 1
      *
-     * As written in §0.4.471 stage 1 gave each *thread* a context lane
-     * `j` and walked `headDim` serially inside it. At a fixed `d` the 32
-     * threads of a warp were then reading 32 **different pages**, which
-     * at Llama-3-8B shapes are `numKvHeads · headDim · 4` = 4096 B apart:
-     * 32 separate 32-byte sectors fetched for 128 bytes of useful data,
-     * an **8× read amplification**. `docs/KPTX_PAGED_PERF.md` §7.3 is
-     * where that was diagnosed, and it is the only walk in the chain that
-     * had it — stage 3's V walk has been perfectly coalesced since
-     * §0.4.471.
+     * Giving each *thread* a context lane `j` and walking `headDim`
+     * serially inside it would have the 32 threads of a warp, at a fixed
+     * `d`, read 32 **different pages**, which at Llama-3-8B shapes are
+     * `numKvHeads · headDim · 4` = 4096 B apart: 32 separate 32-byte
+     * sectors fetched for 128 bytes of useful data, an **8× read
+     * amplification** (analysis in `docs/KPTX_PAGED_PERF.md`). Stage 3's
+     * V walk does not have this problem; it is coalesced by construction.
      *
-     * The stage now maps a **warp** to a context lane:
+     * The stage therefore maps a **warp** to a context lane:
      *
      * ```
      *   nWarps = ntid / 32                    // CTA-wide, branch-uniform
@@ -837,14 +828,14 @@ object KptxKernels {
      * and `shfl.sync` is what reconverges it; the whole warp shares `j`,
      * so the live/dead test, the page resolution and the block-table load
      * are all warp-uniform (that load is a broadcast, one transaction).
-     * Each `K[block, off, kvh, lane…]` request is now 32 consecutive f32
+     * Each `K[block, off, kvh, lane…]` request is 32 consecutive f32
      * — one 128 B transaction — and so is the `Q` request. The pointer
      * stride is the literal `128`, which is `32 lanes × 4 B`: a **warp**
      * constant, not a dim-derived one, so no sentinel-dim rule is baked.
      *
-     * **Three CTA-uniform reasons to decline the mapping**, each keeping
-     * the §0.4.471 program verbatim under `SCALAR_J` — the `nsplit < 2`
-     * precedent from stage 3:
+     * **Three CTA-uniform reasons to decline the mapping**, each falling
+     * back to the thread-per-lane program under `SCALAR_J`, the same
+     * pattern as the `nsplit < 2` arm of stage 3:
      *
      * - **`ntid` is not a multiple of 32.** The reduction's member mask
      *   is `0xffffffff`; on a partial warp that is a lie and `shfl.sync`
@@ -856,36 +847,32 @@ object KptxKernels {
      *   fill a 128 B transaction, which is the entire point, and it pays
      *   ten reduction ops for fewer than one FMA per lane.
      *
-     * The floating-point sum is **reassociated** by this a second time:
-     * the dot is now a 32-way tree over `shfl` partials rather than a
-     * sequential `fma.rn.f32` chain. The §0.4.471 oracle says what that
-     * cost, and the answer is that it *gained*: worst |delta| against the
-     * interpreter's Double paged walk at the certification fixture
-     * (permuted block table, ragged `seqLens`, GQA group 4) moved from
-     * **1.1920929e-7 to 8.940697e-8** — a tree sum of 64 terms rounds
-     * better than a chain of 64, which is the textbook result and is
-     * still a measurement, not a guarantee.
+     * The floating-point sum is **reassociated** by this mapping: the dot
+     * is a 32-way tree over `shfl` partials rather than a sequential
+     * `fma.rn.f32` chain. Against the interpreter's Double paged walk at
+     * the test fixture (permuted block table, ragged `seqLens`, GQA group
+     * 4) the worst |delta| is **8.940697e-8**, versus 1.1920929e-7 for the
+     * sequential chain — a tree sum of 64 terms rounds better than a chain
+     * of 64. That is a measurement at one shape, not a guarantee.
      *
-     * Measured, two sessions before and two after within one hour
-     * (`docs/KPTX_PAGED_PERF.md` §10): at the two Llama-3-8B-shaped
-     * points the claimed lane's device floor fell from **932.7/1097.5 µs
-     * to 596.8/838.3** and from **1615.4/1578.1 µs to 1102.4/1211.8**,
-     * non-overlapping ranges in both cases, with the unclaimed control
-     * lane unmoved. The TinyLlama points stayed inside their own spread
-     * and nothing is claimed for them. Declared registers 65 → 73 with
-     * **no occupancy change** (3 blocks/SM, 50%, still register-limited).
+     * Measured on a GB10 at the two Llama-3-8B-shaped benchmark points
+     * (`docs/KPTX_PAGED_PERF.md`), the warp mapping lowered the claimed
+     * lane's device floor from 932.7/1097.5 µs to 596.8/838.3 µs and from
+     * 1615.4/1578.1 µs to 1102.4/1211.8 µs (two sessions each,
+     * non-overlapping ranges), with the unclaimed control lane unmoved; the
+     * TinyLlama-shaped points stayed inside their own spread. Declared
+     * registers rise 65 → 73 with **no occupancy change** (3 blocks/SM,
+     * 50%, register-limited).
      *
-     * # §0.4.482 — the context split in stage 3
+     * # The context split in stage 3
      *
-     * As written in §0.4.471 stage 3 strided its threads over `headDim`
-     * alone, so at `headDim = 64` with a 256-thread block **192 of 256
-     * threads exited immediately** and the surviving 64 each walked the
-     * whole context serially. The K1 diagnosis
-     * (`docs/KPTX_PAGED_PERF.md` §3.3) named that as item 6, and at the
-     * latency-critical batch-1 shape it is the whole ballgame: 32 CTAs
-     * x 64 live threads is 2048 threads on a 48-SM device.
+     * Striding threads over `headDim` alone would, at `headDim = 64` with
+     * a 256-thread block, leave **192 of 256 threads idle** and have the
+     * surviving 64 each walk the whole context serially. At the
+     * latency-critical batch-1 shape that dominates: 32 CTAs x 64 live
+     * threads is 2048 threads on a 48-SM device.
      *
-     * The stage now decomposes its block as `(part, d)`:
+     * The stage therefore decomposes its block as `(part, d)`:
      *
      * ```
      *   nsplit = ntid / n_d          // CTA-wide, so branch-uniform
@@ -903,8 +890,8 @@ object KptxKernels {
      *   the split path or none does. A thread whose `part >= nsplit`
      *   (`ntid` not a multiple of `n_d`) skips only the *accumulation*
      *   and still stores its zero and still reaches `bar.sync`.
-     * - **`nsplit < 2` keeps the original program**, which is what makes
-     *   `headDim >= ntid` safe: there the old d-strided loop is both
+     * - **`nsplit < 2` keeps the d-strided program**, which is what makes
+     *   `headDim >= ntid` safe: there the d-strided loop is both
      *   correct and already fully parallel, and no shared memory or
      *   barrier is touched at all.
      * - **Coalescing is preserved, not sacrificed.** Consecutive `tid`
@@ -915,31 +902,28 @@ object KptxKernels {
      *   resolution and a `P[row, j]` broadcast.
      *
      * The floating-point sum is **reassociated** by this: partial sums
-     * are now per-partition and added in partition order rather than in
-     * `j` order. That is a different rounding of the same mathematics,
-     * and the §0.4.471 oracle (vs the interpreter's Double paged walk)
-     * is what says it stayed inside tolerance — the worst |delta| at the
-     * certification shape is **1.1920929e-7 before and after**, bit for
-     * bit the same number, because at `headDim 64 / ctx 128` each
-     * partition's chain is short enough that neither ordering loses a
-     * bit the other keeps. That is a *result*, not a guarantee: a longer
-     * context would round differently, and the oracle is what would say
-     * so.
+     * are per-partition and added in partition order rather than in
+     * `j` order. That is a different rounding of the same mathematics;
+     * against the interpreter's Double paged walk the worst |delta| at
+     * the test shape (`headDim 64 / ctx 128`) is **1.1920929e-7** either
+     * way, because each partition's chain is short enough that neither
+     * ordering loses a bit the other keeps. That is a *result*, not a
+     * guarantee: a longer context would round differently, and the
+     * oracle test is what would say so.
      *
-     * **The `nsplit < 2` arm is the §0.4.471 program verbatim** and is
-     * not exercised by any shape in the suite (every fixture has
-     * `headDim <= 128` against a 256-thread block). It is reached only
-     * at `headDim >= 128` with a block of 256 — i.e. `headDim 256`, or a
-     * 128-thread launch — and `thePagedOutStageCarriesBothDecompositions`
-     * in `PagedAttentionModuleTest` pins that both arms are still in the
-     * emitted PTX.
+     * **The `nsplit < 2` arm** is not exercised by any shape in the suite
+     * (every fixture has `headDim <= 128` against a 256-thread block). It
+     * is reached only at `headDim >= 128` with a block of 256 — i.e.
+     * `headDim 256`, or a 128-thread launch — and
+     * `thePagedOutStageCarriesBothDecompositions` in
+     * `PagedAttentionModuleTest` pins that both arms are in the emitted PTX.
      *
      * **GQA is indexing, not new math**: `kvHead = h / (numHeads /
      * numKvHeads)`, computed per CTA from the trailing shape params. The
      * `numHeads == numKvHeads` case falls out with `group == 1`.
      *
      * **The `scale` attribute is baked into the PTX** as an f32 immediate
-     * and the module is cached per `(block, scale)`. This is the house
+     * and the module is cached per `(block, scale)`. This is the
      * specialization-cache pattern and is *not* a sentinel-dims violation:
      * `scale` is a compile-time literal on the op, not a value derived from
      * a tensor dimension. Every dim-derived quantity —
@@ -949,14 +933,11 @@ object KptxKernels {
      *
      * `seqLens[seq]` is **clamped** to the padded context width before use:
      * an over-long sequence is a scheduler bug, and clamping keeps the
-     * kernel inside its buffers while H1c's bucket policy refuses the
+     * kernel inside its buffers while the decode bucket policy refuses the
      * over-cap request by name at the layer that can actually split it.
      *
-     * Still f32 throughout, exactly as §0.4.358's dense chain was — the
-     * tensor-core pass and bf16 pools are separate items on
-     * `docs/KPTX_PAGED_PERF.md` §8.3's list and neither is attempted
-     * here. What §0.4.494 changed is the *address pattern*, not the
-     * arithmetic.
+     * f32 throughout, like the dense [attentionModule] chain; there is no
+     * tensor-core path and no bf16 KV-cache pool support here.
      */
     private val pagedAttnCache = HashMap<Pair<Int, Int>, PtxModule>()
 
@@ -1419,7 +1400,7 @@ object KptxKernels {
 }
 
 /**
- * §0.4.471 — Phase H4: the **row-softmax stage**, shared verbatim by the
+ * The **row-softmax stage**, shared verbatim by the
  * dense attention chain ([KptxKernels.attentionModule], where the row width
  * is `n_t`) and the paged one ([KptxKernels.pagedAttentionModule], where it
  * is the padded context width `n_ctx`). One CTA per row: strided max → tree
@@ -1427,12 +1408,12 @@ object KptxKernels {
  * normalize-in-place.
  *
  * Extracted rather than duplicated because the paged form needs *exactly*
- * this program: H4's score stage writes `−inf` into every lane at or past
+ * this program: the paged score stage writes `−inf` into every lane at or past
  * `seqLen`, and `exp(−inf − max)` is `0` for any finite max — which it is,
  * since a sequence has at least one live lane. The dead lanes therefore
  * fall out of the softmax on their own and no masking arm is needed here.
- * Emitting `name`/`paramName` keeps the dense module's PTX byte-identical
- * to §0.4.358's.
+ * The `name`/`paramName` parameters let each chain keep its own kernel and
+ * parameter names.
  */
 private fun ModuleScope.rowSoftmaxKernel(name: String, paramName: String, block: Int) {
     kernel(name) {

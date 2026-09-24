@@ -1,11 +1,11 @@
 /**
- * §0.4.438 — Phase F2: the simple layers, in DiffKT's exact semantics (the F0
- * §4.0.4 table): `Dense` (`activation(x matmul W + b)`, bias broadcast over
+ * The simple layers, in DiffKT's exact semantics: `Dense` (`activation(x matmul W + b)`, bias broadcast over
  * rows, `b` omitted from the trainables when `bias = false`), `Flatten`
  * (`flatten(startDim = 1)` — the batch axis survives), `ReluLayer`, and the
  * `Activation` objects Dense composes post-op.
  *
- * All forwards are TRACE spellings under the amended decision 3: matmul,
+ * All forwards are TRACE spellings (see the compiler-route contract in
+ * `Training.kt`): matmul,
  * broadcast-add and relu record onto the `:autograd` tape, `Tape.toDxirFunction`
  * reproduces them in the captured graph, and `DxirReverseTransform` owns every
  * gradient. Zero adjoint math in this file.
@@ -29,7 +29,7 @@ import io.tlaloc.autograd.sigmoid
 import io.tlaloc.autograd.tanh
 
 /**
- * DiffKT's `Activation` objects (F0 §4.0.4): Relu / Identity / Sigmoid / Tanh,
+ * DiffKT's `Activation` objects: Relu / Identity / Sigmoid / Tanh,
  * composed by Dense AFTER the affine op. Each is a pure trace spelling over
  * the existing elementwise ops — the registry rules differentiate them.
  */
@@ -57,7 +57,7 @@ sealed class Activation {
  * DiffKT's `Dense(numInputs, numOutputs, random, bias = true, activation)`:
  * `W [numInputs, numOutputs]` and `b [numOutputs]`, forward
  * `activation(x matmul W + b)` with `b` broadcast over the batch rows
- * (`broadcast_dimensions = [1]` — the §0.4.85 row broadcast, whose reverse is
+ * (`broadcast_dimensions = [1]` — the row broadcast, whose reverse is
  * the axis-0 SUM every bias gradient is). When [b] is null (DiffKT's
  * `bias = false`), the add is skipped entirely and only `w` is trainable —
  * DiffKT keeps a `FloatScalar.ZERO` placeholder out of `trainables`; we keep
@@ -65,12 +65,12 @@ sealed class Activation {
  *
  * Input is rank-2 `[batch, numInputs]` in v1. DiffKT accepts rank ≥ 2 (its
  * matmul broadcasts leading axes); the traced matmul spelling is rank-2/rank-3
- * today and the rank-3 Dense input form is a NAMED DEFERRAL (recorded in
- * MODEL_LAYER_PLAN.md §4), not a silent divergence.
+ * today and the rank-3 Dense input form is not supported (it is refused, not
+ * silently computed differently).
  *
  * The randomly-initialized form is the companion `invoke` — DiffKT's default
- * init for BOTH W and b is `uniform(±sqrt(1/numInputs))` (F0 §4.0.3). The key
- * discipline (fixed here for all of Phase F, per F0 §4.0.7): the layer splits
+ * init for BOTH W and b is `uniform(±sqrt(1/numInputs))`. The key
+ * discipline (shared by every `:nn` layer): the layer splits
  * its key ONCE into one child per parameter tensor in declaration order —
  * `split(2)[0]` → w, `split(2)[1]` → b — and `bias = false` still consumes the
  * same split so the drawn W is identical with and without a bias.
@@ -145,7 +145,7 @@ class Dense(
  * the batch axis survives, everything after collapses, `[N, d1, …, dk]` →
  * `[N, d1·…·dk]`. Rank-2 input is already flat and passes through untouched
  * (no RESHAPE recorded — DiffKT's flatten is a no-op view there as well);
- * rank ≥ 3 records the F2 `reshape` trace spelling and `ReshapeRule` hands the
+ * rank ≥ 3 records the `reshape` trace spelling and `ReshapeRule` hands the
  * gradient back in the input's shape.
  */
 object Flatten : Layer {

@@ -17,16 +17,15 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 
 /**
- * §0.4.303 — hand-written FFM bindings for the OpenXLA PJRT C API
+ * Hand-written FFM bindings for the OpenXLA PJRT C API
  * (xla/pjrt/c/pjrt_c_api.h, observed at API version 0.106 upstream;
  * the bundled `xla_cuda_plugin.so` reports 0.104, both ABI-compatible
- * for the surface this commit binds).
+ * for the surface bound here).
  *
  * **Why FFM, not JNI**: PJRT is a stable C ABI exposed via plugin shared
- * libraries (`xla_cuda_plugin.so`, `pjrt_plugin_xla_cpu.so`, …). FFM in
- * JDK 21 (preview) lets us bind directly from Kotlin — no C/C++ source,
- * no CMake, no JNI marshalling glue. JDK 22 (stable) is the migration
- * target after the bindings are working — see the §0.4.30N follow-up.
+ * libraries (`xla_cuda_plugin.so`, `pjrt_plugin_xla_cpu.so`, …). FFM
+ * (stable since JDK 22) lets us bind directly from Kotlin — no C/C++ source,
+ * no CMake, no JNI marshalling glue.
  *
  * # Kotlin + FFM gotcha (and why this file uses MemorySegment.set/get
  *   instead of VarHandles)
@@ -40,8 +39,8 @@ import java.nio.file.Path
  * The fix is to use [MemorySegment.set] / [MemorySegment.get] which take
  * a [ValueLayout] + byte offset + value as regular (non-polymorphic) method
  * arguments. We compute byte offsets once from each [MemoryLayout] and use
- * them as `Long` constants throughout. Cleaner than VarHandle juggling
- * anyway — and JDK 22 doesn't change this story.
+ * them as `Long` constants throughout. Stable FFM (JDK 22+) does not
+ * change this.
  *
  * # PJRT_Api struct field offsets
  *
@@ -50,7 +49,7 @@ import java.nio.file.Path
  * PJRT_Api_Version) where PJRT_Api_Version = (size_t struct_size + ptr*
  * extension_start + 2 ints) = 24 bytes. So the first function pointer is
  * at offset 8 + 8 + 24 = 40, and each subsequent fn-ptr is +8 bytes
- * (aarch64 / x86_64). v1 surface used here:
+ * (aarch64 / x86_64). Surface used here:
  *
  *   PJRT_Error_Destroy            offset 40
  *   PJRT_Error_Message            offset 48
@@ -211,7 +210,7 @@ object PjrtFfm {
     )
 
     /**
-     * §0.4.333 — `PJRT_NamedValue` (pjrt_c_api.h:229), the entry format for
+     * `PJRT_NamedValue` (pjrt_c_api.h:229), the entry format for
      * `PJRT_Client_Create_Args.create_options`. Hand-computed offsets
      * (aarch64/x86_64 LP64):
      *
@@ -251,7 +250,7 @@ object PjrtFfm {
     internal val SZ_NamedValue: Long = PJRT_NamedValue_LAYOUT.byteSize()
 
     /**
-     * §0.4.333 — marshal [options] as a `PJRT_NamedValue` array
+     * Marshals [options] as a `PJRT_NamedValue` array
      * (`memory_fraction`: kFloat, `preallocate`: kBool) allocated in [arena].
      * Returns the array segment to be stored in
      * `PJRT_Client_Create_Args.create_options` (with `num_options =`
@@ -259,17 +258,16 @@ object PjrtFfm {
      * [PjrtApi.createClient] so the byte layout is pinned by a GPU-less
      * unit test.
      *
-     * §0.4.461 (G3a-2) — when [options] declares a multi-node group
+     * When [options] declares a multi-node group
      * (`numNodes > 1`), two kInt64 entries follow: `node_id` and
      * `num_nodes`, the names the XLA GPU plugin's create path parses
-     * (verified against xla/pjrt/c/pjrt_c_api_gpu_internal.cc, openxla/xla
-     * main 2026-09-21). The single-node encoding is BYTE-IDENTICAL to the
-     * §0.4.333 two-entry form — the distributed fields add nothing until
-     * they are asked for. `coordinatorAddress` is deliberately NOT
-     * marshalled: the PJRT C API has no such option — the coordinator
-     * backs the kv-store callbacks in `PJRT_Client_Create_Args`
-     * (kv_get/kv_try_get/kv_put), which Tlaloc does not implement yet
-     * (G4; see docs/MULTIHOST_DESIGN.md).
+     * (xla/pjrt/c/pjrt_c_api_gpu_internal.cc in openxla/xla). A single-node
+     * group encodes as the two-entry form only — the distributed fields
+     * add nothing until they are asked for. `coordinatorAddress` is
+     * deliberately NOT marshalled: the PJRT C API has no such option — the
+     * coordinator backs the kv-store callbacks in `PJRT_Client_Create_Args`
+     * (kv_get/kv_try_get/kv_put), which Tlaloc does not implement
+     * (see docs/MULTIHOST_DESIGN.md).
      */
     internal fun marshalCreateOptions(arena: Arena, options: PjrtClientOptions): MemorySegment {
         val count = options.namedValueCount
@@ -306,15 +304,15 @@ object PjrtFfm {
     }
 
     /**
-     * §0.4.461 (G3a-2) — the multi-node create refusal, extracted pure so it
-     * certifies GPU-less. A `numNodes > 1` client CANNOT be created today:
+     * The multi-node create refusal, kept pure so it is testable without a
+     * GPU. A `numNodes > 1` client CANNOT be created:
      * the GPU plugin rendezvouses multi-node clients through the kv-store
      * callbacks in `PJRT_Client_Create_Args` (kv_get/kv_try_get/kv_put over
      * the coordinator's store — how JAX's distributed service does it), and
      * Tlaloc leaves those NULL. Passing `num_nodes > 1` with a NULL kv store
      * would fail or hang inside the plugin — a loud named refusal beats
-     * either. Lifting this is the G4 kv-store upcall work
-     * (docs/MULTIHOST_DESIGN.md §4).
+     * either. Lifting this requires kv-store upcalls
+     * (see docs/MULTIHOST_DESIGN.md).
      */
     internal fun requireKvStoreForMultiNode(options: PjrtClientOptions?) {
         require(options == null || options.numNodes == 1) {
@@ -556,17 +554,17 @@ object PjrtFfm {
     /** PJRT_ExecuteOptions (header line 1946). All-zero fields except struct_size
      * suffice for single-device execute with no callbacks / contexts.
      *
-     * §0.4.459 (G2a) backend audit for TPU: this layout is the C header's
+     * Backend audit for TPU: this layout is the C header's
      * ABI, not a backend's — every PJRT plugin consumes the same struct.
      * The one padding decision (4 bytes after `launch_id`, an i32, so the
      * following pointer lands 8-aligned) holds on LP64 for both aarch64
-     * (this GB10) and x86_64 (Cloud TPU VM hosts). The fields a TPU cares
+     * and x86_64 (Cloud TPU VM hosts). The fields a TPU cares
      * about beyond CUDA are exactly the ones we zero: `launch_id`
      * (cross-host collective matching), `num_tasks`/`task_ids`/
      * `incarnation_ids` and `multi_slice_config` (multi-host/multi-slice) —
      * zero is the documented single-host single-task default, correct for
-     * G2b's single-device smoke; the non-zero forms are G3/G4 surface and
-     * are deliberately not marshalled yet. */
+     * single-device execution; the non-zero forms belong to multi-host
+     * execution and are not marshalled. */
     internal val PJRT_ExecuteOptions_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
         JAVA_LONG.withName("struct_size"),
         ADDRESS.withName("extension_start"),
@@ -618,10 +616,9 @@ object PjrtFfm {
     // -------------------------------------------------------------------------
 
     /**
-     * §0.4.304's hand-encoded minimal `CompileOptionsProto`, extracted and
-     * re-verified for TPU in §0.4.459 (G2a). Field numbers checked against
-     * `xla/pjrt/proto/compile_options.proto` at openxla/xla main
-     * (2026-09-21):
+     * Hand-encoded minimal `CompileOptionsProto`, valid for CUDA and TPU.
+     * Field numbers from `xla/pjrt/proto/compile_options.proto` in
+     * openxla/xla:
      *
      *   CompileOptionsProto.executable_build_options = **field 3**
      *   ExecutableBuildOptionsProto.num_replicas     = **field 4** (int64)
@@ -637,9 +634,8 @@ object PjrtFfm {
      * (PJRT_Client_Compile's `compile_options` is that serialised proto for
      * every plugin), so a TPU compile parses these six bytes identically.
      * num_replicas=1 / num_partitions=1 is the single-device shape on TPU
-     * exactly as on CUDA; multi-replica TPU topologies are G3/G4 territory
-     * (device_assignment, use_spmd_partitioning — fields we deliberately
-     * leave unset).
+     * exactly as on CUDA; multi-replica TPU topologies need
+     * device_assignment and use_spmd_partitioning, which are left unset.
      */
     internal val COMPILE_OPTIONS_PROTO_BYTES: ByteArray =
         byteArrayOf(0x1A, 0x04, 0x20, 0x01, 0x28, 0x01)
@@ -665,18 +661,17 @@ object PjrtFfm {
 }
 
 /**
- * §0.4.333 — GPU-client allocator options passed as `create_options` to
+ * GPU-client allocator options passed as `create_options` to
  * `PJRT_Client_Create`.
  *
- * **Why this exists (the 2026-07-18 reboot incident).** With zero
+ * **Why this exists.** With zero
  * create_options the CUDA plugin defaults to `preallocate=true` +
  * `memory_fraction=0.75`: at client create it `cuMemAlloc`s 75% of "device
  * memory" up front for the BFCAllocator. On the GB10 device memory *is*
  * system RAM (128 GB unified, CPU-coherent), so every client pinned a
- * ~98 GB unswappable pool. A test run that created a handful of clients
- * (each PjrtSession / spike test creates its own) stacked those pools,
- * starved the OS of reclaimable memory, and hard-hung the machine — twice,
- * with journald's last words being the moment a process opened the GPU.
+ * ~98 GB unswappable pool. A process set that creates a handful of clients
+ * (each PjrtSession creates its own) stacks those pools, starves the OS of
+ * reclaimable memory, and can hard-hang the machine.
  *
  * Defaults here: **no preallocation** (the BFC pool grows on demand and is
  * released at client destroy) and a **0.5 fraction cap** so even a runaway
@@ -689,7 +684,7 @@ object PjrtFfm {
  * preallocation back on for benchmark stability; on unified-memory hosts
  * (GB10, Jetson) leave preallocation off.
  *
- * §0.4.459 (G2a) — **these are GPU-plugin options, gated by platform.**
+ * **These are GPU-plugin options, gated by platform.**
  * `memory_fraction` / `preallocate` are the XLA GPU plugin's BFCAllocator
  * knobs; the TPU plugin (libtpu) neither needs nor is guaranteed to accept
  * them, so a TPU client is created with NO create_options
@@ -697,24 +692,24 @@ object PjrtFfm {
  * num_options = 0`). libtpu's own accepted option set is not enumerable
  * here (the TPU plugin headers are not vendored; known-from-framework-source
  * candidates like `ml_framework_name` / `max_inflight_computations` are
- * recorded as UNVERIFIED in docs/TPU_BRINGUP.md and stay unpassed until
- * G2b measures them on real hardware).
+ * recorded as UNVERIFIED in docs/TPU_BRINGUP.md and are not passed until
+ * measured on real hardware).
  */
 data class PjrtClientOptions(
     val memoryFraction: Float,
     val preallocate: Boolean,
-    /** §0.4.461 (G3a-2) — this process's rank in a multi-node group.
+    /** This process's rank in a multi-node group.
      * Marshals as the GPU plugin's `node_id` kInt64 create-option when
      * [numNodes] > 1; single-node (the default) marshals nothing new. */
     val nodeId: Int = 0,
-    /** §0.4.461 (G3a-2) — group size. 1 (the default) is the single-node
-     * client every certified lane uses today; > 1 marshals `node_id` +
-     * `num_nodes` and is REFUSED at client create until the kv-store
-     * callbacks exist (G4 — see [PjrtFfm.requireKvStoreForMultiNode]). */
+    /** Group size. 1 (the default) is the single-node
+     * client; > 1 marshals `node_id` +
+     * `num_nodes` and is REFUSED at client create because the kv-store
+     * callbacks are not implemented (see [PjrtFfm.requireKvStoreForMultiNode]). */
     val numNodes: Int = 1,
-    /** §0.4.461 (G3a-2) — `host:port` of node 0's coordination service.
+    /** `host:port` of node 0's coordination service.
      * NOT a PJRT create-option (the C API has none) — it is the address
-     * the G4 kv-store callbacks will dial, carried here so one options
+     * kv-store callbacks would dial, carried here so one options
      * object states the whole group contract, and so the pod-group env
      * (`TLALOC_PJRT_COORDINATOR_ADDRESS`, emitted by Maestro's
      * TlalocPodSpecBuilder.buildPodGroup) resolves into it. Required
@@ -748,14 +743,14 @@ data class PjrtClientOptions(
     }
 
     /** Number of `PJRT_NamedValue` entries [PjrtFfm.marshalCreateOptions]
-     * emits for these options: 2 single-node (§0.4.333 unchanged), 4 when
+     * emits for these options: 2 single-node, 4 when
      * the group is multi-node (+node_id, +num_nodes). */
     val namedValueCount: Long get() = if (numNodes > 1) 4L else 2L
 
     companion object {
         /** Resolve from env, falling back to the unified-memory-safe defaults.
          *
-         * §0.4.461 (G3a-2) — the distributed trio joins the env surface:
+         * The distributed variables are
          * `TLALOC_PJRT_NODE_ID`, `TLALOC_PJRT_NUM_NODES`,
          * `TLALOC_PJRT_COORDINATOR_ADDRESS` — exactly the variables a
          * Maestro pod-group member is launched with (TlalocPodSpecBuilder
@@ -829,20 +824,19 @@ class PjrtApi internal constructor(
     /** Create a PJRT client (one per process / device family). Throws
      * [PjrtRuntimeException] if the plugin returns a PJRT_Error*.
      *
-     * §0.4.333 — always passes [options] (default: env-resolved
+     * Passes [options] (default: env-resolved
      * [PjrtClientOptions]) so the CUDA plugin's BFCAllocator never
-     * preallocates 75% of unified memory (the 2026-07-18 reboot incident;
-     * see [PjrtClientOptions] for the full story).
+     * preallocates 75% of unified memory (see [PjrtClientOptions] for why).
      *
-     * §0.4.459 (G2a) — [options] is now nullable, and **null is the
+     * [options] is nullable, and **null is the
      * deliberate non-CUDA form**: `memory_fraction` / `preallocate` are
      * the XLA *GPU* plugin's allocator options, and a TPU client must not
      * be handed them (an unknown NamedValue is the plugin's to reject —
      * libtpu's accepted option set is not vendored here, so we pass the
      * empty set and record the unknown; see docs/TPU_BRINGUP.md). Null
      * marshals `create_options = NULL, num_options = 0`, the header's
-     * spelling for "no options". The §0.4.333 rule is unchanged where it
-     * applies: a CUDA client MUST get non-null options — [io.tlaloc.runtime.pjrt.PjrtSession]
+     * spelling for "no options". A CUDA client MUST get non-null
+     * options — [io.tlaloc.runtime.pjrt.PjrtSession]
      * enforces that pairing by target and refuses the cross-wirings by
      * name. */
     fun createClient(options: PjrtClientOptions? = PjrtClientOptions.resolve()): PjrtClient {
@@ -1078,7 +1072,7 @@ class PjrtApi internal constructor(
         return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
     }
 
-    /** §0.4.354 — f64 twin of [bufferFromHostF32]. */
+    /** F64 twin of [bufferFromHostF32]. */
     internal fun bufferFromHostF64(
         clientPtr: MemorySegment,
         devicePtr: MemorySegment,
@@ -1116,8 +1110,8 @@ class PjrtApi internal constructor(
         return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
     }
 
-    /** §0.4.457 (G1c) — bf16 twin of [bufferFromHostF32]. [data] is raw bit
-     * patterns per the §0.4.455 host convention (a Short is a 16-bit bucket);
+    /** BF16 twin of [bufferFromHostF32]. [data] is raw bit
+     * patterns per the ShortArray convention (a Short is a 16-bit bucket);
      * PJRT receives them verbatim as 2-byte elements typed BF16 — there is
      * no numeric conversion anywhere on this path. */
     internal fun bufferFromHostBf16(
@@ -1203,7 +1197,7 @@ class PjrtApi internal constructor(
         }
     }
 
-    /** §0.4.354 — f64 twin of [bufferToHostF32]. */
+    /** F64 twin of [bufferToHostF32]. */
     internal fun bufferToHostF64(bufferPtr: MemorySegment, nDoubles: Int): DoubleArray {
         Arena.ofConfined().use { scoped ->
             val sizeBytes = (nDoubles * 8).toLong()
@@ -1225,7 +1219,7 @@ class PjrtApi internal constructor(
         }
     }
 
-    /** §0.4.457 (G1c) — bf16 twin of [bufferToHostF32]: raw 16-bit patterns
+    /** BF16 twin of [bufferToHostF32]: raw 16-bit patterns
      * out, no numeric conversion (widening is the caller's explicit act via
      * `bf16BitsToFloatArray`). */
     internal fun bufferToHostBf16(bufferPtr: MemorySegment, nElements: Int): ShortArray {
@@ -1348,7 +1342,7 @@ class PjrtApi internal constructor(
     }
 
     /**
-     * §0.4.309 — fast-path single-device execute that takes pre-allocated
+     * Fast-path single-device execute that takes pre-allocated
      * args / inner-args / inner-outputs / device-complete-events segments
      * from the caller (typically a [io.tlaloc.runtime.pjrt.PjrtSession]'s
      * long-lived arena). Saves ~10 µs/call vs [loadedExecExecuteSingleDevice]
@@ -1430,7 +1424,7 @@ class PjrtClient internal constructor(
         return api.clientPlatformName(clientPtr)
     }
 
-    /** §0.4.304 — list of addressable devices on this client. Element 0 is
+    /** List of addressable devices on this client. Element 0 is
      * the typical "default" device for single-GPU hosts. The returned [PjrtDevice]
      * handles share lifetime with [PjrtClient] (PJRT owns them; no destroy call). */
     fun addressableDevices(): List<PjrtDevice> {
@@ -1462,7 +1456,7 @@ class PjrtClient internal constructor(
         }
     }
 
-    /** §0.4.354 — f64 twin of [bufferFromHostF32]. */
+    /** F64 twin of [bufferFromHostF32]. */
     fun bufferFromHostF64(device: PjrtDevice, data: DoubleArray, dims: List<Int>): PjrtBuffer {
         checkOpen("PjrtClient")
         Arena.ofConfined().use { scratch ->
@@ -1471,8 +1465,8 @@ class PjrtClient internal constructor(
         }
     }
 
-    /** §0.4.457 (G1c) — bf16 twin of [bufferFromHostF32]. [data] is raw bit
-     * patterns (the §0.4.455 ShortArray convention). */
+    /** BF16 twin of [bufferFromHostF32]. [data] is raw bit
+     * patterns (the ShortArray convention). */
     fun bufferFromHostBf16(device: PjrtDevice, data: ShortArray, dims: List<Int>): PjrtBuffer {
         checkOpen("PjrtClient")
         Arena.ofConfined().use { scratch ->
@@ -1515,10 +1509,10 @@ class PjrtBuffer internal constructor(
      * elements. Caller knows the expected size from compile-time type info. */
     fun toFloatArray(nFloats: Int): FloatArray = usable().api.bufferToHostF32(bufferPtr, nFloats)
 
-    /** §0.4.354 — f64 twin of [toFloatArray]. */
+    /** F64 twin of [toFloatArray]. */
     fun toDoubleArray(nDoubles: Int): DoubleArray = usable().api.bufferToHostF64(bufferPtr, nDoubles)
 
-    /** §0.4.457 (G1c) — bf16 twin of [toFloatArray]: raw 16-bit patterns. */
+    /** BF16 twin of [toFloatArray]: raw 16-bit patterns. */
     fun toBf16Array(nElements: Int): ShortArray = usable().api.bufferToHostBf16(bufferPtr, nElements)
 
     /** Size in bytes of the buffer's on-device storage (after layout +

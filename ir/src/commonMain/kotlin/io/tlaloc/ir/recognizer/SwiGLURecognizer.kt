@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * Layer 4 §0.4.267 — recognize the SwiGLU gated-MLP activation.
+ * Recognize the SwiGLU gated-MLP activation.
  *
  * # Match shape
  *
@@ -27,13 +27,12 @@ import io.tlaloc.ir.OpKind
  * # What's NOT matched
  *
  * - **Bias-bearing variants.** `SILU(MATMUL(x, W_gate) + b_gate)` adds an
- *   ADD between the MATMUL and SILU; v1 declines. Llama-style MLPs are
+ *   ADD between the MATMUL and SILU; the recognizer declines. Llama-style MLPs are
  *   bias-free, so this covers the dominant case.
- * - **Down projection.** v1 matches just the SwiGLU activation (two
+ * - **Down projection.** This matches just the SwiGLU activation (two
  *   parallel matmuls + SILU + gating), not the surrounding
- *   `MATMUL(out, W_down)`. A future "TransformerMLP" recognizer can
- *   absorb the down-proj for cuBLASLt-style fused-MLP kernels — this
- *   is a strict superset and gets its own commit.
+ *   `MATMUL(out, W_down)`. [recognizeTransformerMLP] absorbs the
+ *   down-proj for cuBLASLt-style fused-MLP kernels.
  * - **GeGLU / ReGLU.** Same structural shape but with GELU/RELU instead
  *   of SILU. Anchoring on a different OpKind would land them as separate
  *   recognizers; they share no code with this one beyond the shape.

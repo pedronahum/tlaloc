@@ -1,10 +1,9 @@
 /**
- * §0.4.437 — Phase F1: the `:nn` component substrate, per the ratified (and
- * amended) MODEL_LAYER_PLAN.md decisions. Immutable, functional components in
- * DiffKT's own convention (F0 §4.0.1): a layer is a value holding its `DTensor`
+ * The `:nn` component substrate. Immutable, functional components in
+ * DiffKT's own convention: a layer is a value holding its `DTensor`
  * parameters, `forward` is pure, and a training step returns a NEW instance.
  *
- * The AD route is the COMPILER stack (amended decision 3): a layer's `forward`
+ * The AD route is the COMPILER stack: a layer's `forward`
  * is written once, in Tracer land, and [Training.kt]'s capture step turns the
  * whole model into a `DxirFunction` that `DxirReverseTransform` differentiates.
  * No gradient math lives in this module — the transform owns it.
@@ -41,8 +40,8 @@ fun interface Params {
 
 /**
  * A layer: a pure traced forward, single input (DiffKT's `LayerSingleInput` —
- * the multi-input `invoke(vararg)` narrowing is F7's business if GRU needs it
- * at the interface level; DiffKT's own Sequential is single-input too).
+ * DiffKT's multi-input `invoke(vararg)` has no counterpart here; DiffKT's own
+ * Sequential is single-input too).
  * Non-trainable layers ignore [params].
  */
 interface Layer {
@@ -50,13 +49,12 @@ interface Layer {
 }
 
 /**
- * The training-capable node (DiffKT's `Trainable`, F0 §4.0.1, minus the
+ * The training-capable node (DiffKT's `Trainable`, minus the
  * `extractTangent` extractor protocol — under the compiler route gradients
  * come back addressed by parameter KEY from the transformed graph, so no
  * extraction hook is needed).
  *
- * §0.4.502 CLOSED the `store`/`load` gap this KDoc used to record as "out of
- * scope v1": [parameters] and [withParameters] are exactly the two operations a
+ * [parameters] and [withParameters] are exactly the two operations a
  * checkpoint needs, and [ModelCheckpoint] is written against them and nothing
  * else. Persistent state that is NOT trainable — BatchNorm's running
  * statistics — is [Stateful]'s business, for the reason recorded there.
@@ -74,7 +72,7 @@ interface Trainable<T : Trainable<T>> {
 interface TrainableLayer<T : TrainableLayer<T>> : Layer, Trainable<T>
 
 /**
- * §0.4.502 (Tier 2 item 7) — the NON-TRAINABLE persistent state of a
+ * The NON-TRAINABLE persistent state of a
  * component: tensors that are part of what the model IS, that a checkpoint
  * must carry, and that no optimizer ever touches. Today there is exactly one
  * such component, [BatchNorm], whose running statistics are the difference
@@ -111,7 +109,7 @@ interface Stateful<T : Stateful<T>> {
 
 /**
  * `AffineTransform(m, b)`: elementwise `m * x + b`, both parameters trainable
- * (DiffKT F0 §4.0.4 — BatchNorm's frozen form). Same-shape elementwise at any
+ * (DiffKT's BatchNorm frozen form). Same-shape elementwise at any
  * rank, exactly like the source.
  */
 class AffineTransform(
@@ -133,7 +131,7 @@ class AffineTransform(
 }
 
 /**
- * `Sequential(layers)`: the fold of single-input layers (DiffKT F0 §4.0.1).
+ * `Sequential(layers)`: the fold of single-input layers (as in DiffKT).
  * Parameter keys are path-like, prefixed by the child's LIST INDEX (`"0.m"`,
  * `"1.b"`) — positional like DiffKT's `withTrainables` splice, so two children
  * of the same class never collide and non-trainable layers hold their index
@@ -173,7 +171,7 @@ class Sequential(val layers: List<Layer>) : TrainableLayer<Sequential>, Stateful
     }
 
     /**
-     * §0.4.502 — the [Stateful] half, keyed with the SAME `"<index>."` prefix
+     * The [Stateful] half, keyed with the SAME `"<index>."` prefix
      * the parameters use, so a checkpoint's `param.3.gamma` and
      * `buffer.3.runningSum` name one layer.
      */

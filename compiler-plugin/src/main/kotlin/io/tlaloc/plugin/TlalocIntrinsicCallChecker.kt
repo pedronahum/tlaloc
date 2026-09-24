@@ -18,13 +18,13 @@ import org.jetbrains.kotlin.fir.types.classId
 import org.jetbrains.kotlin.fir.types.coneType
 
 /**
- * §0.4.499 — was an `object`; now a class carrying this compilation's
- * [TlalocPluginOptions]. Two things hang off them:
+ * A class carrying this compilation's [TlalocPluginOptions] (not a process-global
+ * `object`). Two things hang off them:
  *
  *  - [TlalocPluginOptions.dumpLoweredIr] gates the lowered-dxir dump
- *    ([TlalocErrors.LAMBDA_LOWERED] and [TlalocErrors.INTRINSIC_CALL]). Until
- *    §0.4.499 both fired unconditionally, so ONE `grad {}` put two IR dumps in
- *    every consumer's build log — and made the plugin unusable under `-Werror`.
+ *    ([TlalocErrors.LAMBDA_LOWERED] and [TlalocErrors.INTRINSIC_CALL]). It is
+ *    off by default, so a consumer's build log carries no IR dumps and builds
+ *    under `-Werror` are unaffected.
  *  - [TlalocPluginOptions.strictLowering] decides the severity of a lowering
  *    FAILURE: [TlalocErrors.LAMBDA_NOT_LOWERABLE] (error, the default) versus
  *    [TlalocErrors.LAMBDA_UNSUPPORTED] (warning, the opt-out).
@@ -64,8 +64,8 @@ class TlalocIntrinsicCallChecker(
         "io.tlaloc.autograd.valueAndVjp2",
     )
 
-    /** §0.4.372 — the forward-mode intrinsics probe differentiability with the
-     * forward transform (JVP), not the reverse one. §0.4.394 — `jacobian`
+    /** The forward-mode intrinsics probe differentiability with the
+     * forward transform (JVP), not the reverse one. `jacobian`
      * assembles forward columns, so it probes the same way (its lambda returns
      * a TENSOR, which the reverse probe would reject outright). */
     private val forwardIntrinsics: Set<String> =
@@ -288,7 +288,7 @@ class TlalocIntrinsicCallChecker(
         }
     }
 
-    /** §0.4.499 — true when any of the lambda's parameters is an
+    /** True when any of the lambda's parameters is an
      * `io.tlaloc.autograd.Tracer`, i.e. this call resolved to the runtime
      * tape overload rather than the compile-time intrinsic. */
     private fun isTracerLambda(lambda: FirAnonymousFunctionExpression): Boolean =
@@ -309,7 +309,7 @@ class TlalocIntrinsicCallChecker(
     private fun unwrap(expr: FirExpression): FirExpression =
         if (expr is FirNamedArgumentExpression) expr.expression else expr
 
-    /** §0.4.407 — true when any op in [nodes] (recursing through IF branch
+    /** True when any op in [nodes] (recursing through IF branch
      * bodies) carries regions and is NOT an IF: a WHILE nested inside an IF
      * branch, the one region shape the raw forward transform still refuses
      * and the extension's PhiCalculus pipeline may yet lower. */
@@ -320,7 +320,7 @@ class TlalocIntrinsicCallChecker(
             )
     }
 
-    /** §0.4.501 — the intrinsics whose synthesized function can carry a captured
+    /** The intrinsics whose synthesized function can carry a captured
      * runtime value as a trailing input-only parameter: the reverse-mode `grad`
      * family, whose lowered param list IS the returned function's param list (minus
      * the captures, which the IR phase binds at the call site). */

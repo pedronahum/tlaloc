@@ -70,9 +70,8 @@ class IreeModule internal constructor(val vmfbPath: Path, val target: IreeTarget
 }
 
 /**
- * Subprocess-based facade over `iree-compile` and `iree-run-module`. Phase 1 of the
- * IREE port plan (§0.4.230) chose ProcessBuilder over JNI to keep the first slice small;
- * §0.4.284 landed that slice for CPU dispatch, §0.4.290 broadens it to CUDA via [IreeTarget].
+ * Subprocess-based facade over `iree-compile` and `iree-run-module`, driven through
+ * ProcessBuilder rather than JNI. Supports CPU and CUDA dispatch via [IreeTarget].
  *
  * Inputs and outputs are passed as IREE's textual `--input='f32=…'` form (per-input
  * marshalling lives in [IreeBridge]'s `runOnIree`).

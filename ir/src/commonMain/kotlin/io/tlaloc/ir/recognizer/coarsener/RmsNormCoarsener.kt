@@ -10,7 +10,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * Layer 4 §0.4.264 — RMS-norm analytical-backward coarsener.
+ * RMS-norm analytical-backward coarsener.
  *
  * # What this is
  *
@@ -69,10 +69,10 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *
  * - **Keepdims-only.** Requires the matched MEAN to preserve rank
  *   (`mean.type.rank == x.type.rank`, with size-1 reduced axes). This is
- *   the form the §0.4.251 recognizer's positive-match test produces and
+ *   the form [io.tlaloc.ir.recognizer.recognizeRmsNorm] matches and
  *   what real LLM code (Llama, Mistral) emits. A no-keepdims variant
  *   would need an explicit BROADCAST in the gradient body, mirroring
- *   FlashAttentionCoarsener's pattern; out of v1 scope. The coarsener
+ *   FlashAttentionCoarsener's pattern; not supported. The coarsener
  *   declines (`return null`) on rank mismatch.
  *
  * - **Eps surfaced as outer operand when present.** When the matched
@@ -84,7 +84,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   per-row); deferred until a downstream caller actually needs it.
  *
  * - **Recompute r inside the gradient.** Mirrors FlashAttention's
- *   "recompute is cheaper than thread" choice; v2 can hoist `r` (and
+ *   "recompute is cheaper than thread" choice; a later version could hoist `r` (and
  *   intermediate `m`) into the COARSENED's payload as additional primal
  *   returns to skip the second `MEAN+RSQRT`.
  */

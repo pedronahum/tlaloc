@@ -1,23 +1,20 @@
 /**
- * §0.4.441 — Phase F5: BatchNorm in DiffKT's exact training semantics (the F0
- * §4.0.4 audit of `BatchNormTraining` V2 + the `batchNorm` op), on the amended
- * decision-3 route: the batch statistics are DESUGARED into traced primitives
- * (SUM with `reduction_dims`, elementwise SUB/DIV/SQRT/MUL/ADD, the axis
- * BROADCAST) — there is NO fused BATCHNORM kind on the tape (F0 landmine 8) —
- * so `DxirReverseTransform` differentiates the whole composition through the
- * existing registry rules. Zero gradient math in this file.
+ * BatchNorm in DiffKT's exact training semantics (`BatchNormTraining` V2 + the `batchNorm` op),
+ * on the compiler route: the batch statistics are DESUGARED into traced primitives (SUM with
+ * `reduction_dims`, elementwise SUB/DIV/SQRT/MUL/ADD, the axis BROADCAST) — there is NO fused
+ * BATCHNORM kind on the tape — so `DxirReverseTransform` differentiates the whole composition
+ * through the existing registry rules. Zero gradient math in this file.
  *
- * Layout: the channel axis is AXIS 1 — Tlaloc-native NCHW (the F4 layout
- * decision), rank ≥ 2 with rank-2 `[N, C]` as the Dense-stack form. DiffKT is
- * C-last (NHWC); same maths, transposed layout, and the F8 PyTorch oracle is
- * NCHW-native anyway.
+ * Layout: the channel axis is AXIS 1 — Tlaloc-native NCHW, rank ≥ 2 with rank-2 `[N, C]` as the
+ * Dense-stack form. DiffKT is C-last (NHWC); same maths, transposed layout, and the PyTorch
+ * oracle is NCHW-native anyway.
  *
- * The running statistics are FUNCTIONAL state (ratified decision 6): DiffKT
+ * The running statistics are FUNCTIONAL state: DiffKT
  * wrote the pure `(output, newStats)` function and then wrapped it mutably
  * (their own TODO #172); we keep the pure function. V2's state triple is
  * (runningN, runningSum, runningSumOfSquares), each EMA'd through
  * [momentumUpdated] — momentum weights the NEW batch statistic (PyTorch's
- * `running_stats` convention, F0 landmine 3), default 0.1f.
+ * `running_stats` convention), default 0.1f.
  */
 package io.tlaloc.nn
 
@@ -38,7 +35,7 @@ import io.tlaloc.autograd.times
 private fun channelTensor(data: FloatArray): DTensor<*, F32> =
     DTensor<Shape, F32>(HostF32Storage(data), intArrayOf(data.size), F32)
 
-/** §0.4.502 — a rank-0 F32 tensor, the checkpoint form of a scalar buffer. */
+/** A rank-0 F32 tensor, the checkpoint form of a scalar buffer. */
 private fun scalarTensor(v: Float): DTensor<*, F32> =
     DTensor<Shape, F32>(HostF32Storage(floatArrayOf(v)), IntArray(0), F32)
 
@@ -46,7 +43,7 @@ private fun scalarTensor(v: Float): DTensor<*, F32> =
  * DiffKT `BatchNormTraining` V2's running state, functionally held:
  * (runningN, runningSum `[C]`, runningSumOfSquares `[C]`), from which
  * inference statistics derive as `mean = runningSum / runningN`,
- * `var = runningSS / runningN − mean²` (F0 §4.0.4). Fresh state is all
+ * `var = runningSS / runningN − mean²`. Fresh state is all
  * zeros — statistics are undefined (0/0) until the first training update,
  * and [BatchNorm.inferenceMode] refuses loudly rather than emitting NaNs.
  */
@@ -104,12 +101,12 @@ class BatchNormTrainResult(
  * The per-channel affine layer `y = m·x + b` with `m, b` rank-1 `[C]`
  * broadcast along the channel axis (axis 1) — BatchNorm's frozen inference
  * form on the NCHW layout. DiffKT freezes to `AffineTransform(m, b)` and
- * leans on its implicit C-last broadcasting; our F1 `AffineTransform` is
+ * leans on its implicit C-last broadcasting; our `AffineTransform` is
  * same-shape elementwise by design, so the channel-broadcast form is its own
  * (trainable, like DiffKT's frozen `TrainableTensor`s) layer. REJECTED:
  * widening `AffineTransform` with implicit broadcasting — the trace spelling
  * would silently depend on the input's rank, and the explicit
- * `broadcast_dimensions = [1]` op is the honest captured-graph form.
+ * `broadcast_dimensions = [1]` op states the broadcast in the captured graph.
  */
 class ChannelAffine(
     val m: DTensor<*, F32>,
@@ -164,7 +161,7 @@ class ChannelAffine(
  * Note on [forward] inside a container fold: the traced output is identical to
  * `trainForward(...).output`, but the stats update is discarded — a Sequential
  * cannot return per-layer state through the fold. Threading stats through
- * containers is a NAMED F5 DEFERRAL (recorded in MODEL_LAYER_PLAN.md §4);
+ * containers is not supported;
  * standalone use calls [updatedStats] per training batch.
  */
 class BatchNorm(
@@ -195,7 +192,7 @@ class BatchNorm(
     }
 
     /**
-     * §0.4.502 — the [Stateful] half: the running statistics as checkpoint
+     * The [Stateful] half: the running statistics as checkpoint
      * buffers. `runningN` is a RANK-0 tensor rather than a scalar channel of
      * its own, because safetensors has a rank-0 shape and a second scalar
      * channel would have been a second thing to keep in sync (see [Stateful]).

@@ -13,7 +13,7 @@ class Mul<A : ShapeAtom, B : ShapeAtom> : ShapeAtom
 class Add<A : ShapeAtom, B : ShapeAtom> : ShapeAtom
 
 /**
- * Type-level marker for a named tensor-axis identifier (Layer 1 §0.4.241+).
+ * Type-level marker for a named tensor-axis identifier.
  *
  * Each named index is a singleton object. The K2 plugin reads the singleton's
  * class FQN at FIR-stage type resolution and lifts it into [io.tlaloc.ir.DxirType.axisNames]
@@ -27,7 +27,7 @@ class Add<A : ShapeAtom, B : ShapeAtom> : ShapeAtom
  * non-sealed so user modules can extend it; the K2 plugin matches on FQN, not
  * on a closed type hierarchy.
  *
- * Layer 1 deliberately uses singletons over annotations because singletons compose
+ * Named indices deliberately use singletons over annotations because singletons compose
  * naturally inside [Rank2]/[Rank3]/... type-arg products without needing a
  * synthetic FIR type-construction extension.
  */
@@ -37,7 +37,7 @@ interface IndexName {
 
 /**
  * Type-level wrapper attaching a named-index identifier [N] to a shape atom [A]
- * (Layer 1 §0.4.241+). Use inside a `RankN<...>` slot to give that axis a
+ * Use inside a `RankN<...>` slot to give that axis a
  * semantic name:
  *
  *     typealias Activations =

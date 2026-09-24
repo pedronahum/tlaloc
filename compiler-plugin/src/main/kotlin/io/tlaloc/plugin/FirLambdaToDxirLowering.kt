@@ -57,50 +57,53 @@ import org.jetbrains.kotlin.fir.types.type
  *
  * - `Float`/`Double`/`Int`/`Long` + `DScalar` + `DTensor<ScalarShape|Rank1<_>, …>` params.
  * - Binary `+ - * /` and unary `-`; numeric literals; parameter / local-val references.
- * - §0.4.500: CAPTURED compile-time constants — a `const val` anywhere, or a top-level /
+ * - CAPTURED compile-time constants — a `const val` anywhere, or a top-level /
  *   enclosing-function `val` with a foldable initializer — fold to the same [DxirConst] an
- *   inline literal produces. A captured RUNTIME value still refuses, by its own name.
+ *   inline literal produces. A captured RUNTIME value becomes a trailing input-only
+ *   param for the reverse-mode `grad` family ([CapturedRuntimeValue]) and refuses by
+ *   name elsewhere.
  * - `:core` scalar + `:core/ops` tensor unary/reduction helpers (relu, sigmoid, tanh, exp,
  *   log, sqrt, neg, sum).
- * - §0.4.24 (B.4a): top-level `if (cond) … else …` whose condition is `a > b` / `a < b`
+ * - Top-level `if (cond) … else …` whose condition is `a > b` / `a < b`
  *   between two lowerable scalar numeric operands. Each branch body is itself a lowerable
- *   block (no nested when/if, no tensor ops inside branches for this slice).
- * - §0.4.25 (B.4b): `for (i in 0 until N)` loops over a concrete integer literal range,
+ *   block.
+ * - `for (i in 0 until N)` loops over a concrete integer literal range,
  *   where the body mutates exactly one outer-scope `var` via scalar arithmetic that does
  *   NOT read the loop index `i`. Emits [OpKind.WHILE] in the canonical C5-pattern shape
  *   (`operands = [carried, counter=0i32]`, counter cond `STEP(SUB(n, counter))`, counter
  *   step `ADD(counter, 1i32)`) so `PhiCalculus.apply` can close it via C5/C6 before SCT.
  *   `var d = x` inside the lambda body + simple `d = <expr>` assignments are supported.
  *
- * No raw `while`/`do-while`, no multi-branch `when`, no user-defined functions, no `break`
- * / `continue`, no nested loops, no body references to the loop index. Anything outside
- * that surface throws [LoweringException], which the caller surfaces as
- * `TLALOC_LAMBDA_UNSUPPORTED`.
+ * The dispatch arms below extend this surface (raw `while` with a trailing `break`,
+ * nested loops and when-expressions, tensor reductions, reshapes, slices, named-index
+ * contractions, custom derivatives), each documented where it is lowered. Anything
+ * outside the surface throws [LoweringException], which the checker reports as
+ * [TlalocErrors.LAMBDA_NOT_LOWERABLE] (or [TlalocErrors.LAMBDA_UNSUPPORTED] under
+ * `strictLowering=false`).
  */
 object FirLambdaToDxirLowering {
 
     sealed class Result {
         /**
-         * @property captures §0.4.501 — the captured RUNTIME values this lambda
+         * @property captures the captured RUNTIME values this lambda
          *   reads, in the order they were first referenced. Each one is a TRAILING
          *   param of [fn] (`fn.params.takeLast(captures.size)`, index-aligned), and
          *   the IR phase binds it at the call site instead of taking it as a lambda
-         *   argument. Empty for every lambda that captures nothing, which is every
-         *   lambda in the repo before this section.
+         *   argument. Empty for a lambda that captures nothing.
          */
         data class Success(
             val fn: DxirFunction,
             val captures: List<CapturedRuntimeValue> = emptyList(),
         ) : Result()
-        /** §0.4.353 — [namedIndex] classifies contract/named-axis violations
-         * so the checker can report them as error-severity
-         * [TlalocErrors.NAMED_INDEX_MISMATCH] instead of the generic
-         * (warning-severity, tape-fallback) [TlalocErrors.LAMBDA_UNSUPPORTED]. */
+        /** [namedIndex] classifies contract/named-axis violations
+         * so the checker reports them as [TlalocErrors.NAMED_INDEX_MISMATCH]
+         * (always an error) instead of the generic lowering refusal, whose
+         * severity follows `strictLowering`. */
         data class Failure(val reason: String, val namedIndex: Boolean = false) : Result()
     }
 
     /**
-     * §0.4.501 (slice 2 of the capture arc) — one captured RUNTIME value, promoted
+     * One captured RUNTIME value, promoted
      * to a trailing synthesized parameter of the lowered [DxirFunction].
      *
      * It is an INPUT, never a differentiation target: the user asked for the
@@ -125,14 +128,14 @@ object FirLambdaToDxirLowering {
     )
 
     /**
-     * [session] (§0.4.500) is the FIR session of the module being compiled. It is
+     * [session] is the FIR session of the module being compiled. It is
      * what [evaluateToLiteral] needs to fold a captured `const val` whose
      * initializer is itself an expression (`const val HALF_DT = DT / 2.0f`); a
      * plain literal initializer folds without it. It is optional so that a caller
      * with no session in hand still lowers — with constant folding narrowed to
      * literal initializers — rather than failing.
      *
-     * [allowRuntimeCaptures] (§0.4.501) admits a captured RUNTIME value as a
+     * [allowRuntimeCaptures] admits a captured RUNTIME value as a
      * trailing input-only param ([CapturedRuntimeValue]). It is OFF by default and
      * the checker turns it on for the reverse-mode `grad` family alone: the
      * forward, assembly and seeded-cotangent intrinsics build their own parameter
@@ -140,7 +143,7 @@ object FirLambdaToDxirLowering {
      * basis assembly), and an extra param in there would silently change what the
      * returned function takes. Those refuse a runtime capture BY NAME instead.
      *
-     * §0.4.501 — the lowering may run more than once. A capture is discovered
+     * The lowering may run more than once. A capture is discovered
      * mid-body, and a param appended mid-body would carry an SSA id allocated
      * after some of the body's; re-lowering with the discovery declared UP FRONT
      * makes the result byte-identical to the same lambda written with that value
@@ -256,8 +259,8 @@ object FirLambdaToDxirLowering {
 
     private open class LoweringException(message: String) : RuntimeException(message)
 
-    /** §0.4.353 — named-axis misuse (the user's type-level contract is
-     * inconsistent): reported as a compile ERROR, not a lowering fallback. */
+    /** Named-axis misuse (the user's type-level contract is
+     * inconsistent): reported as a compile ERROR regardless of `strictLowering`. */
     private class NamedIndexException(message: String) : LoweringException(message)
 
     private fun lowerBlock(
@@ -275,7 +278,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * Single statement dispatch shared by [lowerBlock] and B.4b's for-loop body processor.
+     * Single statement dispatch shared by [lowerBlock] and the for-loop body processor.
      * Returns the statement's yielded SSA value when the statement is a trailing expression
      * (per Kotlin's block-as-expression rules), or null for "side-effect-only" forms like
      * [FirVariableAssignment] / desugared for-loops. Callers track the final non-null
@@ -382,19 +385,19 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * The one place a [FirLiteralExpression] becomes a [DxirConst]. §0.4.500 pulled
-     * it out of [lowerLiteral] so a CAPTURED compile-time constant
+     * The one place a [FirLiteralExpression] becomes a [DxirConst]. It is separate
+     * from [lowerLiteral] so a CAPTURED compile-time constant
      * ([foldCapturedConstant]) emits through exactly this path: downstream — reverse
      * transform, φ-calculus coarsening, synthesis, the source printer — must not be
      * able to tell a folded `const val` from an inline literal, and the only way to
      * guarantee that is for both to run the same three lines.
      *
-     * §0.4.51 — FIR stores all integer literals' value as `kotlin.Long` regardless of
-     * the Kotlin source type. Look at [FirLiteralExpression.kind] to distinguish `0`
-     * (Int) from `0L` (Long). Without this, `var k = 0` lowered to `const 0 : i64`,
-     * which then cascaded through the raw-while counter into the wrong STEP/SUB dtype
-     * and broke gradient correctness for kernels that combine while-loops with nested
-     * for-loops.
+     * FIR stores all integer literals' value as `kotlin.Long` regardless of
+     * the Kotlin source type, so [FirLiteralExpression.kind] distinguishes `0`
+     * (Int) from `0L` (Long). Reading the value's type instead would lower `var k = 0`
+     * to `const 0 : i64`, which cascades through a raw-while counter into the wrong
+     * STEP/SUB dtype and breaks gradients of kernels that combine while-loops with
+     * nested for-loops.
      *
      * Returns null — rather than throwing — for a literal whose type the lowering has
      * no dtype for (a `String`, a `Char`, a `Boolean`), so each caller can name its own
@@ -465,13 +468,12 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.501 — a captured property the constant fold declined. Only an IMMUTABLE,
+     * A captured property the constant fold declined. Only an IMMUTABLE,
      * LOCAL declaration can become a param: the IR phase binds the param by reading
      * the declaration at the call site, which is an `irGet` of an `IrVariable` (a
      * local `val`) or of an `IrValueParameter` (an enclosing function's parameter).
      * A top-level or member property is a getter CALL, and its receiver is not
-     * knowable here — that is a separate slice, and it refuses with [notConst]'s own
-     * wording plus the reason.
+     * knowable here, so it refuses with [notConst]'s own wording plus the reason.
      */
     private fun capturePropertyAsParam(
         sym: FirPropertySymbol,
@@ -508,7 +510,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.501 — promote a captured runtime value to a trailing param of the lowered
+     * Promote a captured runtime value to a trailing param of the lowered
      * function. Never returns: it throws [CaptureDiscovered], which [lower] catches
      * and answers by re-lowering the whole lambda with this value declared as a param
      * UP FRONT (see [lower]'s KDoc for why the id order matters). Every rejection
@@ -586,17 +588,17 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.501 — the type surface of a captured runtime value: the four Kotlin
+     * The type surface of a captured runtime value: the four Kotlin
      * primitives [PRIMITIVE_DTYPE_MAP] maps, and nothing else. Deliberately NARROWER
      * than [resolveParamType], which also admits `DTensor` and the `FloatScalar` /
      * `DoubleScalar` value classes:
-     *  - a value-class scalar param enters synthesis through the §0.4.414 unwrap,
+     *  - a value-class scalar param enters synthesis through the value-class unwrap,
      *    which is keyed off the CALL SITE's type arguments — a captured param has
      *    no call-site slot, so there is nothing to read the box from;
      *  - a captured tensor would need its `IrType` from the same absent slot, and
      *    `tensorTemplateParam` / the axis-matching machinery indexes the user's
      *    params positionally.
-     * Both are named in docs/ALPHA_PLAN.md rather than half-supported.
+     * Both refuse by name rather than being half-supported.
      */
     private fun resolveCapturedType(type: ConeKotlinType): DxirType? {
         val fqn = type.classId?.asString() ?: return null
@@ -605,7 +607,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.500 (slice 1 of the capture arc) — a captured reference that FIR resolves
+     * A captured reference that FIR resolves
      * to a compile-time constant folds into exactly the [DxirConst] an inline literal
      * would have produced (see [constFromLiteral]), so the lowered body is
      * INDISTINGUISHABLE from the hand-inlined one and nothing downstream sees a new
@@ -627,11 +629,10 @@ object FirLambdaToDxirLowering {
      *  - a `val` whose initializer is a call, a parameter read, or anything else the
      *    constant evaluator declines.
      *
-     * §0.4.501 — each refusal below is now a [NotAConstantCapture], which
-     * [lookupReference] catches to offer the value the runtime-capture route
-     * instead. Uncaught, it renders exactly the §0.4.500 sentence it always did, so
-     * every refusal this function produces for an intrinsic that cannot carry a
-     * capture reads as it did before.
+     * Each refusal below is a [NotAConstantCapture], which [lookupReference]
+     * catches to offer the value the runtime-capture route instead. Uncaught, it
+     * renders the [runtimeCapture] sentence, which is what an intrinsic that cannot
+     * carry a capture reports.
      */
     private fun foldCapturedConstant(sym: FirPropertySymbol, emitter: DxirEmitter): DxirNode {
         val name = sym.name.asString()
@@ -657,10 +658,10 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.500 — the refusal for a capture that is NOT compile-time resolvable. It is
+     * The refusal for a capture that is NOT compile-time resolvable. It is
      * deliberately a different sentence from "reference to symbol outside the lowering
-     * scope": that text meant "any reference out of the lambda", and after slice 1 it
-     * would be a lie. This one names what slice 2 has to build.
+     * scope": compile-time constants captured from outside the lambda do lower, so
+     * this one says the value is not a compile-time constant and why.
      */
     private fun runtimeCapture(name: String, why: String): LoweringException =
         LoweringException(runtimeCaptureMessage(name, why))
@@ -672,17 +673,17 @@ object FirLambdaToDxirLowering {
             "nothing else. Declare '$name' as `const val`, or pass it in as a lambda parameter."
 
     /**
-     * §0.4.501 — "this capture is not a compile-time constant, and here is why".
-     * Thrown by [foldCapturedConstant] where §0.4.500 threw the flat
-     * [runtimeCapture]; [lookupReference] catches it and tries the runtime-capture
-     * route. Its MESSAGE is still §0.4.500's verbatim sentence, so an intrinsic that
-     * cannot carry a capture (or a capture the route rejects) reads unchanged.
+     * "This capture is not a compile-time constant, and here is why".
+     * Thrown by [foldCapturedConstant]; [lookupReference] catches it and tries the
+     * runtime-capture route. Its MESSAGE is the [runtimeCapture] sentence, which is
+     * what an intrinsic that cannot carry a capture (or a capture the route rejects)
+     * reports.
      */
     private class NotAConstantCapture(val valueName: String, val why: String) :
         LoweringException(FirLambdaToDxirLowering.runtimeCaptureMessage(valueName, why))
 
     /**
-     * §0.4.501 — a capture the lowering wants as a trailing param. Deliberately NOT
+     * A capture the lowering wants as a trailing param. Deliberately NOT
      * a [LoweringException]: the ~208 named refusal sites and the three `catch
      * (e: LoweringException)` re-wrappers inside this lowering must not swallow it.
      * It carries no stack trace (the throw is control flow, one per capture).
@@ -690,7 +691,7 @@ object FirLambdaToDxirLowering {
     private class CaptureDiscovered(val request: CaptureRequest) :
         RuntimeException(null, null, false, false)
 
-    /** §0.4.501 — one discovered capture: the `env` key it binds under, its param
+    /** One discovered capture: the `env` key it binds under, its param
      * name and dxir type, and the source range of its DECLARATION. */
     private class CaptureRequest(
         val key: Any,
@@ -701,7 +702,7 @@ object FirLambdaToDxirLowering {
     )
 
     /**
-     * §0.4.500 — fold a non-literal constant initializer (`const val HALF = DT / 2.0f`)
+     * Fold a non-literal constant initializer (`const val HALF = DT / 2.0f`)
      * through the compiler's own constant evaluator, so this lowering never re-parses
      * or re-interprets Kotlin source. Returns null when there is no session (see
      * [lower]'s `session` parameter) or when the evaluator declines, and every such
@@ -719,7 +720,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.500 — the Int value of a captured compile-time constant, or null if it is
+     * The Int value of a captured compile-time constant, or null if it is
      * not one. Used by [extractForLoopTripCount], which needs the NUMBER (not a
      * [DxirNode]) so that `for (i in 0 until STEPS)` takes the same
      * [ForLoopBound.Concrete] path an int literal does.
@@ -738,9 +739,9 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.24 — `if (cond) a else b` (a [FirWhenExpression] with an `else`-branch synthetic
+     * `if (cond) a else b` (a [FirWhenExpression] with an `else`-branch synthetic
      * true-condition) lowers to [OpKind.IF] with a Bool-scalar predicate + two regions.
-     * The condition shape that B.4a accepts is a [FirComparisonExpression] whose operation
+     * The accepted condition shape is a [FirComparisonExpression] whose operation
      * is [FirOperation.GT] or [FirOperation.LT]; the operands must be lowerable as scalars.
      * Other when shapes (subject form, multi-branch, `>=` / `<=` / `==`) throw.
      *
@@ -750,14 +751,14 @@ object FirLambdaToDxirLowering {
      * branch's yielded value becomes the region's single terminator — resolved through
      * [lowerBlock]'s trailing expression.
      *
-     * §0.4.162 — nested when-expressions (if/when inside another region body, e.g.
-     * inside a WHILE body or inside another IF branch) are now supported. The
+     * Nested when-expressions (if/when inside another region body, e.g.
+     * inside a WHILE body or inside another IF branch) are supported. The
      * dispatch on `emitter` (DxirBuilder vs DxirRegionBuilder) mirrors the pattern
      * `PhiCalculus.cloneRegion` uses: both subclasses expose `region { … }` and
      * `ifOp(…)` with the same signatures, but those aren't on the `DxirEmitter`
-     * interface, so we type-switch at call sites. Required by HMC Phase 3's
-     * numerical-stability mask `if (-Xβ_i > 80) -Xβ_i else log(1 + exp(-Xβ_i))`,
-     * which lives inside a `for`-loop body (lowered to a WHILE body region).
+     * interface, so we type-switch at call sites. A typical use is a
+     * numerical-stability mask `if (-Xβ_i > 80) -Xβ_i else log(1 + exp(-Xβ_i))`
+     * inside a `for`-loop body (lowered to a WHILE body region).
      */
     private fun lowerWhen(
         expr: FirWhenExpression,
@@ -820,7 +821,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.50 — lower a raw `while (cond) { body }` to [OpKind.WHILE]. Unlike the
+     * Lower a raw `while (cond) { body }` to [OpKind.WHILE]. Unlike the
      * desugared-for-loop path, there is no synthetic counter: carried vars are exactly
      * the user-scope mutations in the body, and the condition is a user expression
      * (currently a [FirComparisonExpression] accepted by [lowerPredicate]).
@@ -833,7 +834,8 @@ object FirLambdaToDxirLowering {
      *             lowers user stmts, yields new env[v_k] for each carried var
      * Post-loop: env[v_k] = w.result(k).
      *
-     * Constraints (first cut): comparison predicate (GT/LT), no break, no nested when
+     * Constraints: comparison predicate (GT/LT), a `break` only as the body's trailing
+     * `if (cond) break` (see [detectTrailingBreak]), no nested when
      * reading carried vars across the cond region, only scalar-typed carried vars.
      */
     private fun lowerRawWhileLoop(
@@ -915,7 +917,7 @@ object FirLambdaToDxirLowering {
     private data class TrailingBreak(val breakCond: FirExpression)
 
     /**
-     * §0.4.50 Gap 3 — match `... ; if (break_cond) break` as the tail of a while body.
+     * Match `... ; if (break_cond) break` as the tail of a while body.
      * Returns the extracted `break_cond` or `null` if the pattern doesn't match.
      * Also returns null if the body contains any OTHER `FirBreakExpression` (i.e., a
      * break not in the trailing-if position) — we reject rather than silently drop.
@@ -1000,7 +1002,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.25 — lower a desugared `for (i in 0 until N)` block to [OpKind.WHILE] in the
+     * Lower a desugared `for (i in 0 until N)` block to [OpKind.WHILE] in the
      * canonical C5-pattern shape. Kotlin's raw-FIR builder rewrites `for` loops into a
      * `FirBlock { val <iterator> = range.iterator(); FirWhileLoop(hasNext) { val i =
      * iter.next(); <body> } }` (marker: `source.kind == KtFakeSourceElementKind
@@ -1008,10 +1010,10 @@ object FirLambdaToDxirLowering {
      * so `PhiCalculus.apply`'s C5/C6 corollaries can detect + close it into straight-line
      * dxir before SCT.
      *
-     * Constraints (B.4b first cut):
+     * Constraints:
      *  - Range is `0 until N` where `N` is a concrete `Int` literal.
      *  - Body mutates exactly one outer-scope `var` via [FirVariableAssignment].
-     *  - Body does not read the loop index `i` (any reference throws — falls back to tape).
+     *  - Body does not read the loop index `i` (any reference throws [LoweringException]).
      *  - No nested loops, no `break`/`continue`, no nested region emission from the body.
      *
      * Emission shape matches the `iterateConcreteN` test primal in `PhiCalculusTest.kt`:
@@ -1120,7 +1122,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.53 — for-loop trip-count is either a concrete Int literal or an arbitrary
+     * The for-loop trip-count is either a concrete Int literal or an arbitrary
      * FIR expression (typically a lambda-param reference, e.g., `for (i in 0 until T)`
      * where T is `Int`/`Float`). The expression path lowers inside
      * [lowerDesugaredForLoop] via [lowerExpr] so PhiCalculus's C6 `TripCount.Symbolic`
@@ -1168,7 +1170,7 @@ object FirLambdaToDxirLowering {
      * Walk [statements] and collect every [FirVariableAssignment] target symbol,
      * descending through plain [FirBlock]s (e.g., the `FirSingleExpressionBlock` wrapping
      * a braceless `for (...) body` statement) AND through nested desugared-for-loop
-     * blocks (§0.4.50 — the outer loop's carried-var set must include vars mutated by
+     * blocks (the outer loop's carried-var set must include vars mutated by
      * the inner loop, otherwise the outer WHILE body wouldn't yield the updated value).
      * Other nested control flow (raw while, when) is still out of scope.
      */
@@ -1210,10 +1212,10 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * Lower a boolean expression suitable for the IF-predicate slot. B.4a's shape is a
+     * Lower a boolean expression suitable for the IF-predicate slot. The accepted shape is a
      * [FirComparisonExpression] with GT or LT. `a > b` → `STEP(SUB(a, b))` with Bool result
      * type; `a < b` → `STEP(SUB(b, a))`. `>=`, `<=`, and equality are rejected — they
-     * would need distinct ops (STEP(0)=0 per §0.4.7 gives strict inequality only).
+     * would need distinct ops (STEP(0)=0 gives strict inequality only).
      */
     private fun lowerPredicate(
         expr: FirExpression,
@@ -2800,7 +2802,7 @@ object FirLambdaToDxirLowering {
         call.dispatchReceiver ?: call.extensionReceiver
 
     /**
-     * §0.4.366 — constant-fold an integer axis argument. Accepts a plain
+     * Constant-fold an integer axis argument. Accepts a plain
      * integer literal or the FIR spelling of a negative literal (`-1` resolves
      * to `1.unaryMinus()` — a [FirFunctionCall] over a literal receiver).
      * Returns null for anything non-constant; callers turn that into a
@@ -2823,7 +2825,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.428 — constant-fold an IntRange literal (`a..b`, `a until b`,
+     * Constant-fold an IntRange literal (`a..b`, `a until b`,
      * `a..<b`) into `(start, endExclusive)`. The operands must themselves be
      * integer literals (negative spellings included, via [intLiteralArg]).
      * Returns null for anything else — callers fall through to the Int-literal
@@ -2842,8 +2844,8 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.428 — the single-axis SLICE emission `view`/`withChange` share with
-     * the §0.4.374 `slice` arm: `[start, end)` along [axis], every other axis
+     * The single-axis SLICE emission `view`/`withChange` share with
+     * the `slice` arm: `[start, end)` along [axis], every other axis
      * full. Validates the literal window against the axis extent where that
      * extent is concrete; sentinel extents are checked at execution by the
      * host `slice`.
@@ -2881,7 +2883,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.369 — constant-fold a Float scalar bound (clip's `lo`/`hi`).
+     * Constant-fold a Float scalar bound (clip's `lo`/`hi`).
      * Accepts any numeric literal (Float/Double/Int spelling) and the negative
      * literal form (`-1.0f` = `1.0f.unaryMinus()`). Returns null for anything
      * non-constant; callers turn that into a [LoweringException].
@@ -2903,14 +2905,14 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * Phase A5 — the mixed-rank arm of the [BINARY_OP_MAP] dispatch: one side is
+     * The mixed-rank arm of the [BINARY_OP_MAP] dispatch: one side is
      * an F32 `DTensor`, the other a scalar. Returns the lowered op, or null when
      * the call is not a scalar × tensor mix (so the caller's uniform path runs).
      *
      * Which side is the tensor is read off the FIR types rather than off lowered
      * nodes, so the literal case can splat straight to a shaped const without
      * first materialising — and then orphaning — a rank-0 const: the same IR shape
-     * the §0.4.369 `clip` arm produces for its Float bounds. A COMPUTED scalar
+     * the `clip` arm produces for its Float bounds. A COMPUTED scalar
      * side (a rank-0 value: a reduction result, a scalar param, a `val`) has no
      * literal to fold, so it splats through [splatScalarTo]'s BROADCAST form.
      *
@@ -2949,7 +2951,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * Phase A5c-3 — a literal splatted over [tensor]'s shape.
+     * A literal splatted over [tensor]'s shape.
      *
      * Concrete dims bake a shaped const: synthesis materialises every extent as a
      * const and there is nothing to guess. SYMBOLIC dims carry [tensor] as a
@@ -2975,7 +2977,7 @@ object FirLambdaToDxirLowering {
         expr.resolvedType.classId?.asString() == "io/tlaloc/core/DTensor"
 
     /**
-     * Phase A5c-2 — the NumPy broadcast of two operand shapes: right-aligned, each
+     * The NumPy broadcast of two operand shapes: right-aligned, each
      * aligned pair equal or 1 on one side, the result taking the max of each pair, a
      * rank-deficient operand gaining replicated leading axes.
      *
@@ -3031,7 +3033,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * Phase A2b — the result type of a binary CONCAT along [axis]: the axis extents
+     * The result type of a binary CONCAT along [axis]: the axis extents
      * SUM and every other extent must agree. Sentinel-propagating like
      * [broadcastResultType] — under `grad {}` the operands' extents are -1, so the
      * sum is too, and the concat axis's runtime extent is recovered by the host
@@ -3056,7 +3058,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * Layer 1 §0.4.241+ + Layer 1.5 §0.4.242+ — emit a [OpKind.MATMUL] (or
+     * Emit a [OpKind.MATMUL] (or
      * [OpKind.DOT] for the rank-1 × rank-1 case) for a named-index
      * `contract` call.
      *
@@ -3064,16 +3066,15 @@ object FirLambdaToDxirLowering {
      * overload resolution succeeded, which means both operands carry
      * named axes with at least one shared [io.tlaloc.core.IndexName].
      *
-     * Layer 1.5 generalises the v1 "exactly one shared name" rule to
-     * support batched contractions:
+     * Shared names are partitioned to support batched contractions:
      *
      * - **Batching axes**: shared names that appear at the *same dim
      *   position* in both operands. These are preserved in the output one-
      *   to-one (StableHLO `dot_general` batching dims).
      * - **Contracting axes**: shared names that appear at *different dim
      *   positions* in lhs vs rhs. Summed over and removed from the output
-     *   (StableHLO `dot_general` contracting dims). v1.5 still requires
-     *   exactly one contracting axis (the position-mismatch case).
+     *   (StableHLO `dot_general` contracting dims). Exactly one
+     *   contracting axis is required (the position-mismatch case).
      *
      * The position-based partition is the natural reading of the user's
      * type-level overload: when the overload signature shares a type
@@ -3226,32 +3227,32 @@ object FirLambdaToDxirLowering {
     private val customVjpDefsTl: ThreadLocal<MutableMap<FirPropertySymbol, FirFunctionCall>> =
         ThreadLocal.withInitial { HashMap() }
 
-    /** §0.4.500 — this lowering's FIR session, set and restored by [lower]. Read only
+    /** This lowering's FIR session, set and restored by [lower]. Read only
      * by [evaluateToLiteral]; null means "fold literal initializers only". */
     private val sessionTl: ThreadLocal<FirSession?> = ThreadLocal.withInitial { null }
 
-    /** §0.4.501 — whether THIS lowering's intrinsic can carry a captured runtime
+    /** Whether THIS lowering's intrinsic can carry a captured runtime
      * value as a trailing input-only param. Set and restored by [lower]; same
      * save/restore discipline and same reason as [sessionTl]. */
     private val allowCapturesTl: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
 
-    /** §0.4.501 — the source range of the lambda being lowered, set and restored by
+    /** The source range of the lambda being lowered, set and restored by
      * [lower]. Null when the anonymous function has no source, which makes every
      * runtime capture refuse (the gate below cannot be evaluated, and a capture that
      * might be declared inside the lambda must not be promoted). */
     private val lambdaRangeTl: ThreadLocal<LongRange?> = ThreadLocal.withInitial { null }
 
-    /** §0.4.501 — one re-lowering pass per distinct capture, so the bound is a
+    /** One re-lowering pass per distinct capture, so the bound is a
      * bound on passes too. A lambda that reads more than this many captured
      * runtime values refuses by name rather than re-lowering 40 times. */
     private const val MAX_RUNTIME_CAPTURES: Int = 8
 
-    /** §0.4.501 — see [resolveCapturedType]: the type surface a captured runtime
+    /** See [resolveCapturedType]: the type surface a captured runtime
      * value may have, narrower than [resolveParamType]'s on purpose. */
     private val CAPTURABLE_PRIMITIVES: Set<String> =
         setOf("kotlin/Float", "kotlin/Double", "kotlin/Int", "kotlin/Long")
 
-    /** §0.4.416 — one of the six custom-derivative call-form spellings:
+    /** One of the six custom-derivative call-form spellings:
      * [arity] primal args, and which user bodies the form carries. */
     private data class CustomDerivativeForm(
         val name: String,
@@ -3289,10 +3290,9 @@ object FirLambdaToDxirLowering {
     /**
      * Splice one custom-derivative application: lower the applied operands in
      * the OUTER env, recursively lower every lambda literal the form carries
-     * (diagnosing WHICH body failed — the design doc's §3 checker
-     * requirement, surfaced through the probe-lowering diagnostics), validate
-     * the attr contract, and emit the COARSENED node. §0.4.416 — the six
-     * spellings share this arm: `vjpFn` becomes `gradient_body`, `jvpFn`
+     * (diagnosing WHICH body failed, surfaced through the probe-lowering
+     * diagnostics), validate the attr contract, and emit the COARSENED node.
+     * The six spellings share this arm: `vjpFn` becomes `gradient_body`, `jvpFn`
      * becomes `tangent_body`, and the attrs a node carries are exactly the
      * bodies its form supplies.
      */
@@ -3469,8 +3469,7 @@ object FirLambdaToDxirLowering {
 
     /**
      * The `reads_primal_indices` attr, computed from vjpFn's ACTUAL param
-     * uses — a param with no uses is not a read (the §0.4.386-style clone
-     * discipline). Mirrors `PhiCalculus.computeGradientReads` exactly:
+     * uses — a param with no uses is not a read. Mirrors `PhiCalculus.computeGradientReads` exactly:
      * params[0] is the upstream; params[i ≥ 1] are the primal operands, so a
      * reference to params[i] marks operand index i − 1.
      */
@@ -3497,11 +3496,11 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.416 — `reads_primal_indices` for a customJvp-ONLY node: jvpFn's
+     * `reads_primal_indices` for a customJvp-ONLY node: jvpFn's
      * PRIMAL-half param uses (params[0 until n] are the primals; a reference
      * to params[i], i < n, marks operand index i). Reverse mode refuses such
      * nodes before ever consuming the set, but the COARSENED attr contract
-     * requires it, and the honest value is the analogue of [computeVjpReads].
+     * requires it, and the correct value is the analogue of [computeVjpReads].
      */
     private fun computeJvpPrimalReads(jvpBody: DxirFunction, n: Int): Set<Int> {
         val paramIds = jvpBody.params.map { it.id }
@@ -3530,7 +3529,7 @@ object FirLambdaToDxirLowering {
      * to outer nodes would be broken SSA — with ONE exception: a captured
      * outer local whose lowered value is a compile-time constant
      * ([DxirConst]) is re-emitted inline (see [CapturingEnv]); any other
-     * capture refuses loudly naming the v1 restriction.
+     * capture refuses loudly, naming the restriction.
      *
      * [pairReturn] (customVjp2's vjpFn): the trailing `Pair(dA, dB)` /
      * `dA to dB` unboxes into the gradient_body's 2-return convention — the
@@ -3560,14 +3559,14 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.415 — the customVjp capture story (design doc §4.4): an inner
+     * How customVjp bodies capture: an inner
      * lambda referencing an outer local resolves through the OUTER env, but
      * only a [DxirConst]-valued binding (a literal-initialised `val`) can
      * cross the splice boundary — it is re-emitted inline in the inner
      * builder, so the inner function stays self-contained. Anything else
      * (a computed value, a tensor, a lambda param) refuses loudly: a
      * non-const capture would have to become an extra COARSENED operand WITH
-     * a gradient slot the user's vjpFn does not return — deferred.
+     * a gradient slot the user's vjpFn does not return, which is not supported.
      */
     private class CapturingEnv(
         private val outerEnv: Map<Any, DxirNode>,
@@ -3742,7 +3741,7 @@ object FirLambdaToDxirLowering {
         else -> null
     }
 
-    /** §0.4.53 — dtype-matched zero/one constants for synthesizing for-loop counters. */
+    /** Dtype-matched zero/one constants for synthesizing for-loop counters. */
     private fun zeroOfDtype(type: DxirType): Any = when (type.dtype) {
         F32 -> 0.0f
         F64 -> 0.0
@@ -3763,7 +3762,7 @@ object FirLambdaToDxirLowering {
         classId?.asFqNameString() ?: this::class.simpleName ?: "unknown"
 
     /**
-     * §0.4.364 — `:core/ops` comparison FQN → COMPARE `direction` attr
+     * `:core/ops` comparison FQN → COMPARE `direction` attr
      * (stablehlo.compare's spelling). Consumed by the dedicated dispatch
      * arm (COMPARE + CAST pair), not BINARY_OP_MAP.
      */
@@ -3826,7 +3825,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * Phase A5 — the [BINARY_OP_MAP] kinds whose operands must agree in shape,
+     * The [BINARY_OP_MAP] kinds whose operands must agree in shape,
      * i.e. the ones the mixed-rank scalar-splat arm applies to. MATMUL is in the
      * same map but contracts rank ≥ 2 operands, where a scalar side is a type
      * error rather than a broadcast.
@@ -3835,18 +3834,18 @@ object FirLambdaToDxirLowering {
         setOf(OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW)
 
     /**
-     * Phase A5 — splat a rank-0 [scalar] over [tensor]'s shape.
+     * Splat a rank-0 [scalar] over [tensor]'s shape.
      *
      * A compile-time constant goes through [splatLiteral]. A computed rank-0 value
-     * splats through BROADCAST with an EMPTY `broadcast_dimensions`, the §0.4.359
-     * scalar-seed polymorphism the §0.4.371 generalisation preserved: the interpreter
+     * splats through BROADCAST with an EMPTY `broadcast_dimensions` (scalar-seed
+     * polymorphism): the interpreter
      * fills the output with the single input element, the emitter emits a
      * scalar→shape `broadcast_in_dim`, and BroadcastRule's adjoint is the full reduce
-     * — emitted since §0.4.373 as the runtime-extent `SUM_TO`, which reads the target
+     * — emitted as the runtime-extent `SUM_TO`, which reads the target
      * shape from its template operand at execution. A differentiable scalar side
      * therefore gets a correct adjoint for free.
      *
-     * Phase A5c-3 — [tensor] rides along as the BROADCAST's shape-only template in
+     * [tensor] rides along as the BROADCAST's shape-only template in
      * both forms, so synthesis reads the target extents off a real runtime value
      * instead of axis-matching static atoms against the params. It is already a body
      * node (the binary op's other operand), so the reference costs nothing.
@@ -4007,7 +4006,7 @@ object FirLambdaToDxirLowering {
     }
 
     /**
-     * §0.4.366 — the axis-reduction user surface (Phase A1). Calls WITH axis
+     * The axis-reduction user surface. Calls WITH axis
      * arguments dispatch through the REDUCE_OP_MAP arm (literal axes →
      * `reduction_dims` attr + exact result type); no-arg calls fall through
      * to UNARY_OP_MAP's full-reduce-to-scalar arm.
@@ -4019,7 +4018,7 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.min" to OpKind.MIN,
     )
 
-    /** §0.4.367 — the RESHAPE-family + transpose user surface (Phase A2a). */
+    /** The RESHAPE-family + transpose user surface. */
     private val SHAPE_OP_SET: Set<String> = setOf(
         "io.tlaloc.core.ops.squeeze",
         "io.tlaloc.core.ops.unsqueeze",

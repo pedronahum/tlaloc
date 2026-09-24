@@ -24,10 +24,10 @@ data class IreeBenchmarkStats(
 /**
  * Subprocess facade over `iree-benchmark-module`. iree-benchmark-module runs
  * the warmup + measurement loop inside its own process, so per-iteration
- * timing is dominated by the actual compute (not the JVM↔subprocess RTT). The
- * §0.4.292 timing-via-iree-run-module approach paid ~30 ms subprocess
- * overhead per dispatch — useless for measuring sub-ms ops; this tool hides
- * the overhead behind a single subprocess per benchmark instead.
+ * timing is dominated by the actual compute (not the JVM↔subprocess RTT).
+ * Timing through `iree-run-module` pays ~30 ms subprocess overhead per
+ * dispatch, which swamps sub-ms ops; this tool pays one subprocess per
+ * benchmark instead.
  *
  * Usage: compile via [IreeRuntime.compile] (cached VMFB), pass the resulting
  * [IreeModule] in here along with the same input strings you would have given

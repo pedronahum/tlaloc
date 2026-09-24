@@ -12,7 +12,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 
 /**
- * Layer 3 §0.4.255+ — per-op + per-function cost estimator.
+ * Per-op + per-function cost estimator.
  *
  * Roofline-style: each op contributes a `flops` term (FLOPs needed to
  * compute it) and a `bytesMoved` term (bytes read + written if executed
@@ -20,7 +20,7 @@ import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
  * exception that `OpKind.COARSENED` ops are charged either:
  *
  * - as the sum of their `primal_body`'s op costs (if no `kernel_descriptor`
- *   attribute is present — i.e., the L3.3 lowering chose decompose), or
+ *   attribute is present — i.e., [io.tlaloc.ir.recognizer.kernel.lowerKernelChoice] chose decompose), or
  * - as the same FLOP count but with bytes-moved limited to operand
  *   inputs + final output (if a `kernel_descriptor` is present — i.e.,
  *   a vendor-fused kernel will be emitted by StableHLO emit). This
@@ -33,7 +33,7 @@ import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
  * - No region-bearing ops (IF / WHILE / MANUAL_COMPUTATION). Estimating
  *   through control flow needs a frequency model — out of v1.
  * - No collective costs (ALL_REDUCE / ALL_GATHER) — placeholder zeros.
- *   Layer 4's sharding-aware cost model adds the network terms.
+ *   Network terms are not modelled.
  *
  * # Per-op formulas
  *

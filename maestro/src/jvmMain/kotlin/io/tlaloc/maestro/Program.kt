@@ -17,40 +17,39 @@ import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Layer 2 §0.4.243+ — `program { }` builder. Lowers a body lambda over
+ * `program { }` builder. Lowers a body lambda over
  * [Tracer] into a [MaestroStep] artifact with content-addressed StableHLO
  * body bytes.
  *
  * # Why an [OrchestrationScope] receiver
  *
- * Per the Layer 2 design (audit §10.1), the four-worlds discipline puts
+ * The four-worlds discipline puts
  * `program { }` in [OrchestrationScope] — that's where buffer management
  * + dispatch + futures live. Inside the body lambda, the receiver is
  * [KernelScope]: kernel-only ops compile, orchestration ops do not.
  *
  * # BufferHandle at step boundaries
  *
- * Per the spec, "BufferHandle is the only thing that crosses a step
+ * By design, "BufferHandle is the only thing that crosses a step
  * boundary — never a materialized tensor, never an untyped reference."
  * The returned [MaestroStep] is therefore typed
  * `MaestroStep<BufferHandle<DTensor<Sin, F32>, M>, BufferHandle<DTensor<Sout, F32>, M>>`
  * — the type checker enforces mesh placement [M] flowing through the step
  * graph at compose time. v1's [HandleRef.payload] carries the materialized
- * [DTensor]; Layer 3+ replaces with a real runtime buffer pool.
+ * [DTensor]; there is no device buffer pool yet.
  *
  * # v1 shim semantics
  *
  * The returned [MaestroStep.shim] **re-traces** the original body lambda
  * against the materialized input tensor each invocation. Works for any
- * Tracer-supported op. Layer 3+ replaces with `iree-compile`-driven
- * dispatch of [MaestroStep.body].
+ * Tracer-supported op. It does not dispatch the compiled [MaestroStep.body].
  *
  * @param name step name; flows into the manifest and synthesised StableHLO
  *   function name.
  * @param input concrete input tensor used to seed the trace; defines
  *   the param-typing for the resulting [MaestroStep].
  * @param mesh phantom-typed mesh placement [M] for both the input and
- *   output [BufferHandle]. v1 v2.1 covers single-mesh programs; cross-
+ *   output [BufferHandle]. Only single-mesh programs are covered; cross-
  *   mesh splits are reshard ops introduced by [io.tlaloc.maestro.workflow]
  *   builder edges.
  * @param body the kernel-world lambda. Receiver is [KernelScope]; argument
@@ -125,8 +124,8 @@ fun <Sin : Shape, Sout : Shape, M : Mesh> OrchestrationScope.program(
 
 /**
  * Convenience: wrap a [DTensor] in a fresh [BufferHandle] anchored to
- * mesh [M]. v1's stub buffer pool stores the tensor as the ref payload;
- * Layer 3 replaces with real device buffer allocation.
+ * mesh [M]. The stub buffer pool stores the tensor as the ref payload;
+ * no device buffer is allocated.
  */
 fun <S : Shape, M : Mesh> DTensor<S, F32>.handleOn(@Suppress("UNUSED_PARAMETER") mesh: M): BufferHandle<DTensor<S, F32>, M> =
     BufferHandle(HandleRef(nativeId = nextNativeId(), payload = this))
@@ -136,7 +135,7 @@ private val nativeIdCounter = AtomicLong(0L)
 internal fun nextNativeId(): Long = nativeIdCounter.incrementAndGet()
 
 /**
- * SHA-256 of [bytes] as a lowercase hex string. Layer 2's content-
+ * SHA-256 of [bytes] as a lowercase hex string. The content-
  * addressing primitive: two `program { }` invocations with the same
  * lambda body and same input shape produce identical [ProgramManifest.bodyHash]es,
  * making manifest equality structural.

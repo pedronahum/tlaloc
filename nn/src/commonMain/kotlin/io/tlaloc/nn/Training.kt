@@ -1,25 +1,23 @@
 /**
- * §0.4.437 — Phase F1: the COMPILER-ROUTE differentiation contract (amended
- * decision 3 of MODEL_LAYER_PLAN.md). The model's forward traces ONCE through
+ * The COMPILER-ROUTE differentiation contract. The model's forward traces ONCE through
  * the `:autograd` Tracer into a real `DxirFunction` — one param per (input
  * tensor + parameter tensor), arbitrary arity — and `DxirReverseTransform`,
  * the compiler's AD, produces the gradient function. `:nn` writes NO gradient
  * math: the registry rules own every adjoint, and execution is a backend
  * choice ([DxirInterpreter] on host here; the coarsened/StableHLO/PjrtSession
- * GPU lane is F8's integration).
+ * GPU lane is a separate backend).
  *
- * REJECTED alternatives, recorded per the house pattern:
- * - The runtime value-tape (`Backward.kt`) as the model route — Pedro's veto,
- *   §0.4.436: host-only, interpreted, and it sidelines the compiler stack that
- *   IS the product. It stays a debugging fallback, untouched.
+ * REJECTED alternatives:
+ * - A runtime value-tape reverse walk as the model route: host-only,
+ *   interpreted, and it bypasses the compiler stack.
  * - Packing parameters through the fixed-arity `grad {}` intrinsics — the 1–4
  *   ceiling is a lambda-surface property; flattening a model into it is
  *   unnatural and caps arity for no reason the IR has.
  * - Separate primal and gradient evaluations per step — the transform's
  *   `includeForward = true` mode returns `(loss, *grads)` from ONE function,
  *   so a training step is a single `evalFunction` call. The standalone primal
- *   is still captured and exposed: it is the prediction path, the route pin,
- *   and F8's emission artifact.
+ *   is still captured and exposed: it is the prediction path and the
+ *   function a GPU backend emits.
  */
 package io.tlaloc.nn
 
@@ -37,28 +35,28 @@ import io.tlaloc.ir.passes.DxirInterpreter
 import io.tlaloc.ir.passes.DxirReverseTransform
 
 /**
- * §0.4.458 (G1d) — the mixed-precision training convention, stated once:
+ * The mixed-precision training convention, stated once:
  * **MASTER WEIGHTS IN F32, COMPUTE IN BF16, LOSS AND GRADIENTS IN F32.**
  *
  * [MIXED_BF16] is a CAPTURE-level property, not a model property: the trace
  * injects `Tracer.cast(BF16)` on every F32 input and parameter leaf at the
  * trace boundary (I32 index inputs pass through — an integer has no
  * precision), the model's forward then RECORDS in bf16 (the tape's dtype
- * propagation, §0.4.458 `Tape.op`), and the model OUTPUT is cast back to F32
+ * propagation in `Tape.op`), and the model OUTPUT is cast back to F32
  * before the loss function runs — so the loss computes in f32, and the
  * gradient function's per-parameter outputs are f32 BY CONSTRUCTION (the
  * params are f32-typed; CastRule's straight-through adjoint widens every
- * upstream back through the boundary casts, §0.4.456). The model's stored
+ * upstream back through the boundary casts). The model's stored
  * tensors are never touched: they ARE the f32 master weights, the optimizer
  * updates them in f32, and only the traced graph ever sees bf16.
  *
  * NO LOSS SCALING — deliberately, and this is WHY bf16 beats fp16 for
- * training: bf16 keeps f32's full 8-bit exponent (§0.4.455 — it is the top
+ * training: bf16 keeps f32's full 8-bit exponent (it is the top
  * half of binary32), so gradients cannot underflow the way fp16's 5-bit
  * exponent makes them; the entire GradScaler apparatus fp16 AMP needs
  * (scale, unscale, inf-check, skip-step) has nothing to protect against.
  *
- * REJECTED alternatives, recorded per the house pattern:
+ * REJECTED alternatives:
  * - A `MixedPrecision(model)` WRAPPER layer — precision is a property of one
  *   capture, not of the model structure: the same model must capture both
  *   ways (the f32 capture is the oracle the mixed one certifies against),
@@ -75,7 +73,7 @@ import io.tlaloc.ir.passes.DxirReverseTransform
  *   to zero; f32 masters are the whole point of the mixed convention.
  */
 enum class Precision {
-    /** The pre-G1d default: everything traces and runs in f32. */
+    /** The default: everything traces and runs in f32. */
     F32,
 
     /** f32 master weights, bf16 compute between the boundary casts, f32 loss + gradients. */
@@ -91,8 +89,8 @@ class StepResult(
      * Gradients w.r.t. the model INPUTS, positionally. The reverse transform
      * returns one gradient per captured param — inputs included — so these come
      * for free; useful for adversarial/saliency work, ignorable for training.
-     * §0.4.442 — an INTEGER input (an embedding-index batch) is
-     * non-differentiable by dtype: its slot is the transform's §0.4.419
+     * An INTEGER input (an embedding-index batch) is
+     * non-differentiable by dtype: its slot is the transform's
      * ZEROS_LIKE structural zero, surfaced here as an F32 all-zeros tensor of
      * the input's shape — expected, not a bug.
      */
@@ -106,11 +104,10 @@ class StepResult(
  * valid while the model's structure — layer list, parameter keys, every dim —
  * is unchanged. Retracing is only needed when the structure changes.
  *
- * Caching contract (recorded for F8): F1 keys nothing automatically — the
+ * Caching contract: nothing is keyed automatically — the
  * caller holds the `CapturedStep` across steps, and the [valueAndGradients]
- * convenience honestly retraces per call. F8's GPU integration adds the
- * structure-keyed cache in front of the compiled-executable lane (the §0.4.307
- * amortization), where re-capture actually costs something.
+ * convenience retraces per call. A structure-keyed cache belongs in front of
+ * a compiled-executable GPU lane, where re-capture actually costs something.
  */
 class CapturedStep internal constructor(
     /** The traced forward: params = inputs ++ parameters, one scalar return. */
@@ -121,12 +118,11 @@ class CapturedStep internal constructor(
     val inputCount: Int,
 ) {
     /**
-     * §0.4.449 — the readable-reverse surface (the Tangent inheritance): the
-     * captured gradient function, printed as compilable Kotlin source over the
+     * The captured gradient function, printed as compilable Kotlin source over the
      * `:core` host twins. What comes back is the EXACT program [run] executes
      * through [DxirInterpreter] — the same ops, as `val`-per-op Kotlin a user
      * can read, compile and call (certified bit-identical against the
-     * interpreter in the §0.4.449 golden tests).
+     * interpreter by golden tests).
      */
     fun gradSource(): String = io.tlaloc.ir.render.toKotlinSource(gradient)
 
@@ -219,9 +215,9 @@ fun <M> capture(
 }
 
 /**
- * The one-shot convenience: capture + run. Honestly retraces per call — hold
+ * The one-shot convenience: capture + run. Retraces per call — hold
  * the [CapturedStep] from [capture] yourself to amortize (see its KDoc for the
- * F8 caching contract).
+ * caching contract).
  */
 fun <M> valueAndGradients(
     model: M,
@@ -232,7 +228,7 @@ fun <M> valueAndGradients(
     capture(model, inputs, precision = precision, lossFn = lossFn).run(model, inputs)
 
 /**
- * §0.4.442 — the interpreter environment is float-typed for every dtype (its
+ * The interpreter environment is float-typed for every dtype (its
  * EMBEDDING arms read indices via `toInt()`): an I32 input binds as its
  * float-encoded values, exact below 2²⁴ (the trace leaf asserted the cap; the
  * per-step re-bind asserts it again — new step, new indices).

@@ -16,7 +16,7 @@ class HostF64Storage(val data: DoubleArray) : TensorStorage {
 }
 
 /**
- * §0.4.400 — host storage for integer tensors. The first user is `embedding`'s
+ * Host storage for integer tensors. The first user is `embedding`'s
  * index operand (a `DTensor<Rank1<N>, I32>` of vocab slots): indices are DATA
  * at the host level, not shape, so they need a real storage class rather than
  * the float view the dxir interpreter uses internally.
@@ -27,7 +27,7 @@ class HostI32Storage(val data: IntArray) : TensorStorage {
 }
 
 /**
- * §0.4.455 (Phase G1a) — host storage for bf16 tensors. [data] holds the RAW
+ * Host storage for bf16 tensors. [data] holds the RAW
  * upper-16-bit patterns of the f32 values (bf16 is the truncated top half of
  * binary32), NOT numeric Short values: a Short here is only a 16-bit bucket.
  * Narrowing f32 -> bf16 rounds to nearest-even ([floatToBf16Bits], matching

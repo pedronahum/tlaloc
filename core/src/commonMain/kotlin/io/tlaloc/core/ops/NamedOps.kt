@@ -14,17 +14,16 @@ import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.hostF32
 
 /**
- * Layer 1 §0.4.241+ — **named-index contraction** (Refined Option A).
+ * **Named-index contraction**.
  *
  * `contract` is the named-aware tensor contraction operator: when both
  * operands carry a [Named] axis with the same [IndexName] singleton at the
  * appropriate position, the contraction is over that axis. The result type
  * has both contracted axes removed.
  *
- * # Design — Refined Option A: native Kotlin type inference
+ * # Design: native Kotlin type inference
  *
- * Per the Layer 1 design audit (`docs/audits/named_indices_audit.md`), this
- * file uses *Kotlin's native type-inference machinery* — not a K2 plugin
+ * This file uses *Kotlin's native type-inference machinery* — not a K2 plugin
  * extension — to enforce contraction correctness. Each overload below
  * declares the contraction structure as a relationship between bound type
  * variables ([NameK], [K] are shared between the two operands; the result
@@ -58,7 +57,7 @@ import io.tlaloc.core.hostF32
  * on the result `DxirType` and `contracted_names` / `preserved_names`
  * attrs on the op. Outside `grad { }`, the runtime bodies below execute.
  *
- * # Supported shapes (Layer 1.5 §0.4.242+)
+ * # Supported shapes
  *
  * | LHS shape | RHS shape | Result shape | Batching | Contracting |
  * |-----------|-----------|--------------|----------|-------------|
@@ -77,8 +76,7 @@ import io.tlaloc.core.hostF32
  *
  * The rank-4 row models the QK^T attention forward pass exactly:
  * `(Batch, Heads, Time, Dim) × (Batch, Heads, Dim, Time') → (Batch, Heads,
- * Time, Time')`. v2 enhancements (rank-5+, multi-axis contraction) are
- * tracked in `docs/audits/named_indices_audit.md`.
+ * Time, Time')`. Rank-5+ and multi-axis contraction are not supported.
  */
 
 /**
@@ -124,8 +122,7 @@ infix fun <NameM : IndexName, NameK : IndexName, NameN : IndexName,
     ): DTensor<Rank2<Named<NameM, M>, Named<NameN, N>>, F32> = matmul(other)
 
 /**
- * Layer 1.5 §0.4.242+ — rank-3 × rank-3 batched contraction (closes audit
- * OQ-5 partway). Both operands carry a leading batching axis [NameB] (same
+ * Rank-3 × rank-3 batched contraction. Both operands carry a leading batching axis [NameB] (same
  * type variable at axis 0) and contract over the inner axis [NameK]. The
  * output preserves the batch axis and the two non-shared inner axes.
  *
@@ -174,8 +171,7 @@ infix fun <NameB : IndexName, NameM : IndexName, NameK : IndexName, NameN : Inde
 }
 
 /**
- * Layer 1.5 §0.4.242+ — rank-4 × rank-4 batched contraction (closes audit
- * OQ-5). Models the QK^T attention forward pass: two leading batching axes
+ * Rank-4 × rank-4 batched contraction. Models the QK^T attention forward pass: two leading batching axes
  * ([NameB] = batch, [NameH] = heads) shared at the same positions in both
  * operands, plus a contracting axis [NameD] at LHS axis 3 / RHS axis 2.
  *
@@ -185,8 +181,7 @@ infix fun <NameB : IndexName, NameM : IndexName, NameK : IndexName, NameN : Inde
  *     (NameB, NameH, NameD,  NameT2) →
  *     (NameB, NameH, NameT,  NameT2)
  *
- * This is the single use case the user flagged as load-bearing for Layer 2:
- * the typed-step-boundary work would otherwise have to walk around a hole
+ * Typed step boundaries depend on this overload; they would otherwise have to walk around a hole
  * in the type system. With this overload the type checker enforces every
  * axis identity at the call site.
  *

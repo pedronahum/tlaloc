@@ -1,7 +1,7 @@
 package io.tlaloc.ir.recognizer.kernel
 
 /**
- * Layer 3 §0.4.253+ — FlashAttention kernel selector.
+ * FlashAttention kernel selector.
  *
  * Maps `(KernelTarget) → KernelDescriptor` for the recognized
  * FlashAttention compound. v1 ships per-target entries that match the
@@ -47,9 +47,8 @@ package io.tlaloc.ir.recognizer.kernel
  * The descriptor's `customCallAttrs` carries a small backend-config
  * dict per kernel — `softmax_scale` defaulting to `1/sqrt(head_dim)`
  * when the head-dim is inferable from the matched op's input types.
- * v1 leaves this empty; L3.4's cost model populates it during target
- * selection. Out-of-scope is causal-masking (a v2 kernel-selector
- * extension when the recognizer learns to detect `tril`-mask shape).
+ * This template leaves it empty. Causal masking is out of scope (the
+ * recognizer does not detect a `tril`-mask shape).
  */
 internal val FlashAttentionKernel: KernelTemplate = KernelTemplate { _, target ->
     // Per-target supported_kv_dtypes (the [KvQuantDtype.nameTag] strings;

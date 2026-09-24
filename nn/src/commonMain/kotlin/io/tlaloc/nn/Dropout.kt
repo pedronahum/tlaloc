@@ -1,16 +1,15 @@
 /**
- * §0.4.441 — Phase F5: Dropout in DiffKT's exact convention (F0 §4.0.4):
+ * Dropout in DiffKT's exact convention:
  * inverted dropout, scaled at TRAIN time — `mask[i] = rand() > p ? 1/(1−p) :
  * 0f`, `train: x·mask`, `inferenceMode: identity`. Randomness is threefry-keyed
- * and explicit (ratified decision 5): the mask is a pure function of
- * `(key, p, element count)` over the D1 [uniformFloats] stream — bit-
+ * and explicit: the mask is a pure function of
+ * `(key, p, element count)` over the [uniformFloats] stream — bit-
  * deterministic, no global RNG anywhere.
  *
- * On the amended decision-3 route the mask enters the trace as a CONSTANT leaf
- * (`isConstant = true` — the D2 precedent: draws differentiate as constants,
- * and F0 landmine 9: a non-constant mask leaf would pay a dead adjoint
- * materialisation per entry). The forward is one existing MUL; the transform
- * hands back `upstream · mask` through `MulRule` with zero new rules.
+ * On the compiler route the mask enters the trace as a CONSTANT leaf (`isConstant = true`:
+ * random draws differentiate as constants, and a non-constant mask leaf would pay a dead
+ * adjoint materialisation per entry). The forward is one existing MUL; the transform hands back
+ * `upstream · mask` through `MulRule` with zero new rules.
  */
 package io.tlaloc.nn
 
@@ -32,8 +31,8 @@ object IdentityLayer : Layer {
  * comparison) and scaled by `1/(1 − p)`, dropped to exact zero otherwise.
  * DiffKT's `Dropout(p)` takes its `random` per CALL; our [Layer.forward] has
  * no key slot, so the key is part of the layer VALUE and a training loop
- * re-keys per step with [withKey] (split a step key off the loop's root —
- * the §2.5 discipline). Not trainable: no parameters, and the mask constant
+ * re-keys per step with [withKey] (split a step key off the loop's root). Not trainable: no
+ * parameters, and the mask constant
  * contributes no adjoint work.
  */
 class Dropout(

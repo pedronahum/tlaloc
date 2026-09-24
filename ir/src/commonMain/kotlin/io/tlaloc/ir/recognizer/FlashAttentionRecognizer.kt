@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * Layer 3 §0.4.250+ — recognize `MATMUL → SOFTMAX → MATMUL` compound
+ * Recognize `MATMUL → SOFTMAX → MATMUL` compound
  * forms typical of unfused attention forward passes.
  *
  * # Match shape
@@ -23,18 +23,16 @@ import io.tlaloc.ir.OpKind
  * three matched ops + the Q / K / V leaf inputs. The recognizer is
  * structural — it doesn't depend on a specific source-language form.
  *
- * # What's NOT matched (by design, for v1)
+ * # What's NOT matched (by design)
  *
  * - Pre-fused `OpKind.SCALED_DOT_PRODUCT_ATTENTION` ops. Users who opt
  *   into the pre-fused op already have the structure the downstream
  *   coarsener wants; matching them again would duplicate work.
  *   A separate `recognizeFusedAttention` could surface those for
  *   uniform handling later.
- * - Causal / variable-length predication (out of Layer 3 scope per
- *   non-goals).
+ * - Causal / variable-length predication.
  * - Multi-head attention with explicit head-index projection ops between
- *   the matmul and softmax. v1 matches the simplest compound form;
- *   structural-elaboration matchers for fused heads are a v2 add.
+ *   the matmul and softmax. Only the simplest compound form is matched.
  *
  * # Near-miss diagnostics
  *

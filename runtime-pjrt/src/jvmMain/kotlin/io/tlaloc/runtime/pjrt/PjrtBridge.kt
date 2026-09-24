@@ -17,15 +17,13 @@ import java.lang.foreign.Arena
  *     source (`xla/pjrt/c/pjrt_c_api_cpu.{cc,h}`) as a separate
  *     deliverable; the FFM bindings here are CPU/CUDA-agnostic and will
  *     pick it up by setting `TLALOC_PJRT_PLUGIN_PATH` once it exists.
- *   - [Cuda]    — XLA's `cuda` backend on NVIDIA GPUs. The v1 default;
+ *   - [Cuda]    — XLA's `cuda` backend on NVIDIA GPUs. The default;
  *     the plugin resolved by [PjrtBinaries] is `xla_cuda_plugin.so`
  *     (bundled with `pip install jax[cuda12]`).
- *   - [Tpu]     — Google TPUs via libtpu's PJRT plugin (§0.4.459, G2a).
- *     **The local half only**: plugin resolution, platform-name
- *     expectation, create-options gating and the self-skipping smoke
- *     suite are certified on this machine; EXECUTION on a TPU is G2b's
- *     claim and is made nowhere in this repo until a Cloud TPU VM lane
- *     runs it (see docs/TPU_BRINGUP.md). Plugin resolved by
+ *   - [Tpu]     — Google TPUs via libtpu's PJRT plugin.
+ *     Plugin resolution, platform-name expectation, create-options
+ *     gating and the self-skipping smoke suite are tested; execution on
+ *     a TPU has not been certified (see docs/TPU_BRINGUP.md). Plugin resolved by
  *     [PjrtBinaries.tpuPluginPath]: `TLALOC_PJRT_PLUGIN_PATH` (when it
  *     names a tpu-shaped .so) or the libtpu default install locations —
  *     the PyPI `libtpu` wheel ships `site-packages/libtpu/libtpu.so`,
@@ -50,9 +48,8 @@ enum class PjrtTarget(val platform: String) {
  *   inputs / outputs flow as flat row-major [FloatArray]s sized by
  *   `param.type.elementCount` / `return.type.elementCount`.
  *
- * §0.4.305 reimplemented this on top of the §0.4.303/§0.4.304 FFM bindings —
- * no Python subprocess, no `.npy` files crossing process boundaries, no
- * `pjrt_dispatch.py` script. The dispatch path is pure-Kotlin via
+ * Built on the [PjrtFfm] bindings: no Python subprocess and no `.npy` files
+ * crossing process boundaries. The dispatch path is pure-Kotlin via
  * `java.lang.foreign` straight into the bundled `xla_cuda_plugin.so`.
  *
  * Pipeline:
@@ -65,14 +62,13 @@ enum class PjrtTarget(val platform: String) {
  *  7. Execute, await device-complete event.
  *  8. Read each output as FloatArray via PjrtBuffer.toFloatArray.
  *
- * v1 limitations (still applicable post-FFM):
+ * Limitations:
  *   - F32 only.
  *   - Per-call client + executable creation (~500 ms of XLA service init).
  *     For per-iteration timing, use [PjrtFfm] / [PjrtClient] directly so the
  *     client + compiled executable persist across many invocations.
  *
- * Per-call cost note: the §0.4.302 subprocess facade paid ~5 s of cold JAX
- * import per call; this FFM path pays ~500 ms (XLA service init + CUDA
+ * Per-call cost note: each call pays ~500 ms (XLA service init + CUDA
  * context create). For a long-lived dispatch loop, hoist the
  * `Arena.ofShared() → PjrtFfm.load → createClient → compile` setup outside
  * the loop and reuse [PjrtLoadedExecutable.execute] inside.

@@ -62,13 +62,13 @@ class DxirFunction(
     }
 
     /**
-     * §0.4.31 — shape check for the SOI splice op. The COARSENED op carries a
+     * Shape check for the SOI splice op. The COARSENED op carries a
      * nested [DxirFunction] as `attrs["primal_body"]`; its operands must align
      * positionally with that function's params, and its result types must align
      * with the primal's returns. [attrs["gradient_body"]] + [attrs["reads_primal_indices"]]
-     * are required at construction time — C.3b.2 consumes both during reverse-mode.
+     * are required at construction time; reverse mode consumes both.
      *
-     * §0.4.416 — Phase B5: the ONE exception to the gradient_body requirement
+     * The ONE exception to the gradient_body requirement
      * is a customJvp-only node (`user_gradient = true` with a `tangent_body`
      * and no gradient_body) — forward-differentiable via the tangent splice;
      * reverse mode refuses it loudly by name. A `tangent_body`, when present,
@@ -291,7 +291,7 @@ class DxirFunction(
 }
 
 /**
- * §0.4.172 — pretty-print a [DxirFunction]'s in-progress params + body + returns
+ * Pretty-print a [DxirFunction]'s in-progress params + body + returns
  * as a flat listing for diagnostic dumps when validation fails. Used by
  * [DxirFunction]'s init when the SSA-id check fails — letting the caller see
  * which op references the unknown id without re-running the build path. Top-level
@@ -333,8 +333,8 @@ class DxirModule(
 /**
  * Common emit surface shared by [DxirBuilder] (function body) and [DxirRegionBuilder]
  * (nested region body). Lets pass-writers (e.g., [io.tlaloc.ir.passes.PhiCalculus])
- * write builder-agnostic helper functions that emit ops into either context. Stage B.1
- * needs this for clone-and-rewrite walkers that descend into IF/WHILE regions.
+ * write builder-agnostic helper functions that emit ops into either context, as the
+ * clone-and-rewrite walkers that descend into IF/WHILE regions do.
  *
  * Contract: every method has the same signature on both implementations and produces a
  * node that lands in the appropriate scope's body list.
@@ -361,10 +361,9 @@ interface DxirEmitter {
     fun const(value: Any, type: DxirType, sharding: DxirSharding? = null): DxirConst
 
     /**
-     * §0.4.50 — lifted from [DxirBuilder] to support nested control flow (e.g.,
-     * `for (k) { for (i) { ... } }` or `for in if`). Both builders support the same
-     * signature; previously `whileOp` was only on [DxirBuilder], forcing FIR lowering
-     * to cast emitters and fail on nested for-loops.
+     * Available on both builders to support nested control flow (e.g.,
+     * `for (k) { for (i) { ... } }` or `for in if`); both builders share the same
+     * signature, so FIR lowering can emit nested for-loops without casting emitters.
      */
     fun whileOp(
         inits: List<DxirNode>,
@@ -436,7 +435,7 @@ class DxirBuilder private constructor() : DxirEmitter {
      * [OpKind.IF] convenience builder — boolean-scalar predicate operand + two regions
      * `[then, else]` whose single blocks each have **no args** and yield `types.size`-many
      * values. Single-result IFs return a [DxirOp]; multi-result IFs are also valid (use
-     * [DxirOp.result] to extract individual outputs). See plan §3.1.1 for the full shape.
+     * [DxirOp.result] to extract individual outputs).
      */
     fun ifOp(
         cond: DxirNode,
@@ -462,7 +461,7 @@ class DxirBuilder private constructor() : DxirEmitter {
      * The cond / body lambdas receive the freshly-allocated block-arg list, so users
      * can wire arg references into the region body without manually calling [arg].
      *
-     * Single back-edge only — no `break` / multi-back-edge form (deferred per plan §4.6).
+     * Single back-edge only — no `break` / multi-back-edge form.
      * The op is multi-result with `types == operands.map { it.type }`; access individual
      * loop-carried results via [DxirOp.result].
      */
@@ -491,11 +490,10 @@ class DxirBuilder private constructor() : DxirEmitter {
     }
 
     /**
-     * §0.4.31 — convenience builder for [OpKind.COARSENED]. The SOI splice op
+     * Convenience builder for [OpKind.COARSENED]. The SOI splice op
      * carries a nested [DxirFunction] as `primal_body` + gradient-body for
-     * pre-computed VJP splicing (C.3b.2). Operand types must match `primal_body.params`
-     * positionally; result types are derived from `primal_body.returns`. See
-     * docs/STAGE_B_PLAN.md §3.5 for the splice contract.
+     * pre-computed VJP splicing in reverse mode. Operand types must match `primal_body.params`
+     * positionally; result types are derived from `primal_body.returns`.
      */
     fun coarsened(
         operands: List<DxirNode>,
@@ -612,7 +610,7 @@ class DxirRegionBuilder internal constructor(private val outer: DxirBuilder) : D
     ).also { body += it }
 
     /**
-     * §0.4.50 — nested WHILE inside a region (enables FIR lowering of nested
+     * Nested WHILE inside a region (enables FIR lowering of nested
      * for-loops like BGDHyperOpt's Fig. 6 `for (k) { for (i) { … } }`). Same
      * semantics as [DxirBuilder.whileOp]; uses the shared id space via [outer]
      * and writes the constructed op into this region's body list.

@@ -1,7 +1,7 @@
 package io.tlaloc.core
 
 /**
- * Pre-defined [IndexName] singletons for common ML tensor axes (Layer 1 §0.4.241+).
+ * Pre-defined [IndexName] singletons for common ML tensor axes.
  *
  * Importing this package makes the standard names usable without per-project
  * boilerplate:

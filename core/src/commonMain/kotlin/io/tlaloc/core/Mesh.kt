@@ -12,7 +12,7 @@ data class MeshAxis(val name: String, val size: Int) {
  * cluster topology (name + axes + sizes). Used by sharding utilities and
  * the IR's `DxirMesh` / `DxirSharding` layer.
  *
- * Layer 2 (§0.4.243+) introduces a parallel **phantom-typed** [Mesh]
+ * A parallel **phantom-typed** [Mesh]
  * sealed interface for compile-time tracking of where a [BufferHandle]
  * lives. The two are intentionally separate: [MeshSpec] is the runtime
  * value; [Mesh] is the type-level placement marker. Renamed from `Mesh`

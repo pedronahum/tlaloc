@@ -1,10 +1,7 @@
 package io.tlaloc.kptx
 
 /**
- * KPTX v3.3 (§0.4.347) — static resource + occupancy report (plan task
- * 18's representative "debug/verification extra"; deadlock beacons and
- * differential symbolic execution stay deferred until a kernel needs
- * them, per the plan's optional framing).
+ * Static resource + occupancy report for a PTX kernel.
  *
  * [resourceReport] summarizes what a kernel *declares*: virtual
  * register banks per class, static shared memory. [estimateOccupancy]
@@ -12,7 +9,7 @@ package io.tlaloc.kptx
  * factor named — the number a kernel author actually wants when
  * choosing a block size.
  *
- * **Honesty caveats, in order of importance:**
+ * **Caveats, in order of importance:**
  * - Declared virtual registers are an *upper bound proxy*: the driver
  *   JIT re-allocates real SASS registers (usually fewer). A
  *   register-limited verdict here means "at most this occupancy from

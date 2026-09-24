@@ -19,7 +19,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 import io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions
 
 /**
- * §0.4.307 — long-lived holder that amortises the PJRT init cost across many
+ * Long-lived holder that amortises the PJRT init cost across many
  * dispatches. Without this, each `runOnPjrt` call pays ~500 ms of XLA service
  * init + CUDA context create + plugin dlopen. With this, the steady-state
  * per-call cost is dominated by the actual compute (sub-ms for tiny
@@ -89,30 +89,30 @@ import io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions
  * reading such a buffer throws and closing it does nothing (the client
  * that owned the device memory has already released it).
  *
- * # v1 limitations (carried from runOnPjrt)
+ * # Limitations
  *
- *   - Per-lane single dtype: [runOn] is all-F32, [runOnF64] all-F64
- *     (§0.4.354), [runOnBf16] all-BF16 (§0.4.457). Mixed-dtype programs
+ *   - Per-lane single dtype: [runOn] is all-F32, [runOnF64] all-F64,
+ *     [runOnBf16] all-BF16. Mixed-dtype programs
  *     ride [runOn] with in-graph CASTs (the cast-at-boundary pattern).
  *   - Single-device dispatch (the first addressable device).
  *   - Plugin distribution depends on a JAX install or
- *     `TLALOC_PJRT_PLUGIN_PATH`; CPU plugin is "build from source"
- *     (per §0.4.306 doc).
+ *     `TLALOC_PJRT_PLUGIN_PATH`; a CPU plugin has to be built from XLA
+ *     source.
  */
 class PjrtSession(
     plugin: Path = PjrtBinaries.requireCudaPlugin("PjrtSession"),
     val target: PjrtTarget = PjrtTarget.Cuda,
-    /** §0.4.337 — allocator options for the underlying client. The
+    /** Allocator options for the underlying client. The
      * env-resolved default (`preallocate=false`, fraction 0.5) is the
-     * unified-memory-safe choice (§0.4.333); benchmark sessions may opt
+     * unified-memory-safe choice; benchmark sessions may opt
      * into a bounded preallocated pool for allocation-latency-free
      * dispatch (see [io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions]).
      *
-     * §0.4.459 (G2a) — nullable, and the nullability is EXACTLY the
+     * Nullable, and the nullability is exactly the
      * platform gate: `memory_fraction` / `preallocate` are GPU-plugin
      * allocator options, so a [PjrtTarget.Tpu] session defaults to (and
      * must keep) null — the client is created with zero create_options —
-     * while every other target defaults to (and must keep) the §0.4.333
+     * while every other target defaults to (and must keep) the
      * env-resolved options. Both cross-wirings refuse by name in init. */
     private val options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions? =
         if (target == PjrtTarget.Tpu) null
@@ -176,7 +176,7 @@ class PjrtSession(
     private val executableCache = ConcurrentHashMap<String, PjrtLoadedExecutable>()
 
     /**
-     * §0.4.309 — pre-allocated execute context per cached executable.
+     * Pre-allocated execute context per cached executable.
      * Holds the args struct + inner args/outputs arrays + options + event slot
      * in the session arena so [executeOn] doesn't allocate-and-free a confined
      * arena on each dispatch. Lazily built on first [executeOn] (we don't know
@@ -197,7 +197,7 @@ class PjrtSession(
     private var closed = false
 
     /**
-     * §0.4.467 (H1c) — the CHEAP FRONT DOOR to the compile cache.
+     * The cheap front door to the compile cache.
      *
      * The back-stop key is the emitted StableHLO text, which is correct
      * (structurally identical programs hash together) but costs a full
@@ -275,11 +275,10 @@ class PjrtSession(
     }
 
     /**
-     * §0.4.354 — F64 twin of [runOn]: every param and return must be F64
-     * (mixed-dtype programs are a follow-up; the emitter already types
-     * `f64` tensors and XLA-CUDA executes them — GB10 f64 throughput is
-     * modest, but correctness-tier work like scientific kernels and
-     * gradient checks wants the precision).
+     * F64 twin of [runOn]: every param and return must be F64
+     * (mixed-dtype programs are not supported on this lane). f64
+     * throughput on a GB10 is modest, but
+     * scientific kernels and gradient checks want the precision.
      */
     fun runOnF64(fn: DxirFunction, inputs: List<DoubleArray>): List<DoubleArray> = live {
         require(fn.params.size == inputs.size) {
@@ -320,8 +319,8 @@ class PjrtSession(
     }
 
     /**
-     * §0.4.457 (G1c) — BF16 twin of [runOn]: every param and return must be
-     * BF16, and host arrays are RAW BIT PATTERNS per the §0.4.455 ShortArray
+     * BF16 twin of [runOn]: every param and return must be
+     * BF16, and host arrays are RAW BIT PATTERNS per the ShortArray
      * convention (a Short is a 16-bit bucket, never a number — narrow/widen
      * explicitly with `floatArrayToBf16Bits`/`bf16BitsToFloatArray`). The
      * device stores and computes TRUE bf16; this lane does no numeric
@@ -367,7 +366,7 @@ class PjrtSession(
         }
     }
 
-    /** §0.4.457 (G1c) — stage a raw bf16 pattern array onto [device]. Caller
+    /** Stages a raw bf16 pattern array onto [device]. Caller
      * owns the returned [PjrtBuffer] and must close it. */
     fun bufferFromHostBf16(data: ShortArray, dims: List<Int>): PjrtBuffer = live {
         client.bufferFromHostBf16(device, data, dims)
@@ -378,7 +377,7 @@ class PjrtSession(
      * where you want the compile cost outside the timing loop. Idempotent
      * (a second call with structurally identical [fn] is a no-op).
      *
-     * §0.4.467 (H1c) — [cacheKey] is the serving-side warm-up path: a plugin
+     * [cacheKey] is the serving-side warm-up path: a plugin
      * walks `DecodeBucketPolicy.allBuckets` at startup and prepares one
      * executable per bucket, so the first real request never pays a compile.
      */
@@ -392,7 +391,7 @@ class PjrtSession(
      * tests asserting cache hit/miss behaviour. */
     val cacheSize: Int get() = executableCache.size
 
-    /** §0.4.459 (G2a) — the platform string the loaded plugin reports via
+    /** The platform string the loaded plugin reports via
      * `PJRT_Client_PlatformName` ("cuda"/"gpu" for the CUDA plugin, "tpu"
      * for libtpu). The TPU smoke suite asserts this so a mis-resolved
      * plugin can never silently certify the wrong backend. */
@@ -428,7 +427,7 @@ class PjrtSession(
      * against [stagedInputs]. Returns one [PjrtBuffer] per executable
      * output; **caller must close each output** after use.
      *
-     * §0.4.309 — uses a pre-allocated [ExecuteContext] cached per executable
+     * Uses a pre-allocated [ExecuteContext] cached per executable
      * so the per-call cost is the FFM downcall + GPU work, no per-call
      * arena allocation.
      */

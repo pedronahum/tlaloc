@@ -14,11 +14,10 @@ import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * KPTX v1.1 (§0.4.327) — out-of-tree **typed-FFI custom-call handler
+ * Out-of-tree **typed-FFI custom-call handler
  * registration** against a PJRT GPU plugin, in pure Kotlin FFM.
  *
- * Productionisation of the §0.4.326 spike
- * ([PjrtCustomCallRegistrationSpikeTest]): registers Kotlin upcall stubs
+ * Registers Kotlin upcall stubs
  * with the plugin's static XLA FFI registry so that XLA-compiled programs
  * containing `stablehlo.custom_call @<name> {api_version = 4 : i32}`
  * dispatch into Kotlin at execute time. Proven against the stock
@@ -32,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap
  * compilation of any program naming the target; order relative to client
  * creation is irrelevant (the registry is static inside the plugin .so).
  *
- * # ABI facts (same provenance as the §0.4.326 spike)
+ * # ABI facts (jaxlib 0.10.0 headers)
  *
  * - `PJRT_Api.extension_start` at offset 8 (matches [PjrtFfm]'s offset
  *   table). Chain nodes are `PJRT_Extension_Base { struct_size(0),
@@ -56,8 +55,8 @@ import java.util.concurrent.ConcurrentHashMap
 object PjrtFfiRegistry {
 
     /** Handler for the EXECUTE stage of a typed-FFI custom call.
-     * [callFrame] is the raw `XLA_FFI_CallFrame*` (decode via the KPTX
-     * call-frame decoder once v1.3 lands; until then, hand offsets).
+     * [callFrame] is the raw `XLA_FFI_CallFrame*` (decode it with
+     * [XlaFfi]).
      * Return [MemorySegment.NULL] for success. Invoked on XLA's dispatch
      * thread — implementations must be thread-safe. Metadata queries are
      * answered by the registry and never reach this handler. */

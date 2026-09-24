@@ -1,7 +1,5 @@
 /**
- * §0.4.502 (Tier 2 item 7) — **gradient clipping**, by global norm and by
- * value. A review named it as missing and it was: nothing in `:nn` stood
- * between a gradient and an optimizer.
+ * **Gradient clipping**, by global norm and by value.
  *
  * Clipping is a pure function on the gradient MAP, applied between
  * `CapturedStep.run` and `Optimizer.step`:
@@ -16,11 +14,10 @@
  * the same clip applies to all four, PyTorch keeps it outside for the same
  * reason, and putting it in would have meant four copies and a constructor
  * argument on each. REJECTED: clipping inside the captured graph. The
- * gradients are already back on the host by the time they are keyed (the F3
- * contract: "pure host math on DTensor/FloatArray"), and a graph-level clip
+ * gradients are already back on the host by the time they are keyed (the
+ * optimizers are pure host math on DTensor/FloatArray), and a graph-level clip
  * would need a global reduction across every parameter tensor inside the
- * traced function — real work for the GPU lane, and a named deferral, not a
- * v1 requirement.
+ * traced function; that is not implemented.
  */
 package io.tlaloc.nn
 

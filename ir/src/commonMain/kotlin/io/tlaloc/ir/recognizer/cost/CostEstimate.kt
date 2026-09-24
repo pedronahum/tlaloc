@@ -4,7 +4,7 @@ import io.tlaloc.core.ExperimentalTlalocApi
 import kotlin.math.max
 
 /**
- * Layer 3 §0.4.255+ — cost estimate for an op or function.
+ * Cost estimate for an op or function.
  *
  * @property flops total floating-point operations.
  * @property bytesMoved total bytes touched (input read + output written).
@@ -35,7 +35,7 @@ data class CostEstimate(
      * `time = max(flops / peak, bytes / bandwidth)` — the workload is
      * bottlenecked by whichever of the two is larger. This is the
      * canonical roofline reading; refinements (overlap, latency,
-     * cache-hit-rate, NVLink overhead) live in v2+.
+     * cache-hit-rate, NVLink overhead) are not modelled.
      */
     fun roofineSeconds(device: DeviceDescriptor, peakFlopsForDtype: Double): Double {
         val computeTime = if (peakFlopsForDtype > 0.0) flops / peakFlopsForDtype else Double.POSITIVE_INFINITY

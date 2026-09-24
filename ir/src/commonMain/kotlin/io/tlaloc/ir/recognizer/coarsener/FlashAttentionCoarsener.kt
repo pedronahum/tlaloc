@@ -7,7 +7,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
- * Layer 3 §0.4.252+ — FlashAttention analytical-backward coarsener.
+ * FlashAttention analytical-backward coarsener.
  *
  * # What this is
  *
@@ -67,7 +67,7 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   (saves one MATMUL + one SOFTMAX per backward call).
  *
  * - **No tile-streaming yet.** This is the "fused, but not tiled"
- *   FlashAttention. L3.4's tile-fusion pass + KV-quant + cost model
+ *   FlashAttention. The tile-fusion pass, KV-quant and the cost model
  *   build on top of this envelope to emit the actually-fused kernel.
  *   The COARSENED op gives downstream lowering one node to substitute.
  *

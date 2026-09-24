@@ -21,7 +21,7 @@ import java.nio.file.Files
  *  5. Invoke via [IreeRuntime.invoke] (subprocess `iree-run-module`).
  *  6. Parse each output's `<shape>xf32=…` line back to a flat [FloatArray].
  *
- * v1 limitations (relax in §0.4.288+):
+ * Limitations:
  *  - F32 only. F64 / I32 / I64 / Bool tensors will throw at the validation step.
  *  - Element values that round-trip as `nan` / `inf` aren't supported (Float.toFloat
  *    rejects those literals; IREE's textual writer emits them as unquoted `nan`/`inf`).

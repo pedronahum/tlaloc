@@ -4,7 +4,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirType
 
 /**
- * Layer 3 §0.4.250+ — typed match record produced by a [DxirFunction]
+ * Typed match record produced by a [DxirFunction]
  * recognizer.
  *
  * Each recognized compound idiom is a sealed subtype carrying:
@@ -27,7 +27,7 @@ sealed class RecognitionMatch {
 
     /**
      * `MATMUL → SOFTMAX → MATMUL` compound form, the canonical
-     * "FlashAttention" candidate. Layer 3 v1 matches the unfused shape
+     * "FlashAttention" candidate. The recognizer matches the unfused shape
      * (the form a user-written attention forward produces); a future
      * recognizer can also match `OpKind.SCALED_DOT_PRODUCT_ATTENTION`
      * directly when users opt into the pre-fused op.
@@ -56,8 +56,8 @@ sealed class RecognitionMatch {
     }
 
     /**
-     * `square → mean(reduce) → rsqrt → multiply` form (RMS norm).
-     * v1 stub — full structural match lands in L3.1.
+     * `square → mean(reduce) → rsqrt → multiply` form (RMS norm),
+     * produced by [recognizeRmsNorm].
      */
     data class RmsNorm(
         override val ops: List<DxirOp>,
@@ -68,7 +68,7 @@ sealed class RecognitionMatch {
     }
 
     /**
-     * §0.4.320 — Grouped/Multi-Query attention. Strict superset of
+     * Grouped/Multi-Query attention. Strict superset of
      * [FlashAttention] in op count: matches a `MATMUL → SOFTMAX → MATMUL`
      * chain whose K and V operands trace back through an explicit
      * `BROADCAST` head-expansion step.
@@ -85,19 +85,17 @@ sealed class RecognitionMatch {
      *
      * Either bracketing can also include a `TRANSPOSE` (the `Q·K^T`
      * shape). When both [FlashAttention] and this pattern fire on the
-     * same softmax, the §0.4.282 resolver picks this one (more ops).
+     * same softmax, [resolveLargestMatch] picks this one (more ops).
      *
-     * # Out of scope (v1)
+     * # Out of scope
      *
      * - Implicit broadcasting at the matmul level (no explicit BROADCAST
      *   op in the chain). Some frameworks lean on matmul broadcast
      *   semantics to handle MQA without a materialised expansion step;
      *   detecting that requires introspecting matmul operand types
-     *   rather than walking through a BROADCAST. Future work.
+     *   rather than walking through a BROADCAST.
      * - `CONCAT`-based head replication (`torch.cat([k]*group_ratio,
      *   dim=-3)`). Equivalent semantically; different IR shape.
-     * - Coarsener (the v1 only adds the recognizer; coarsener follows
-     *   the §0.4.318 / §0.4.319 split).
      */
     data class GroupedQueryAttention(
         override val ops: List<DxirOp>,
@@ -122,7 +120,7 @@ sealed class RecognitionMatch {
     }
 
     /**
-     * §0.4.318 — Layer norm without affine. Canonical decomposition:
+     * Layer norm without affine. Canonical decomposition:
      *
      * ```
      * mean1 = MEAN(x)                  // keepdims, last axis
@@ -134,16 +132,16 @@ sealed class RecognitionMatch {
      * out   = DIV(sub, std)
      * ```
      *
-     * v1 anchors on `OpKind.SQRT` consumed by `DIV(centered, std)`. This
-     * doesn't overlap with [RmsNorm] (which anchors on RSQRT), so the
-     * §0.4.282 [resolveLargestMatch] doesn't kick in for v1. If a future
+     * The recognizer anchors on `OpKind.SQRT` consumed by `DIV(centered, std)`. This
+     * doesn't overlap with [RmsNorm] (which anchors on RSQRT), so
+     * [resolveLargestMatch] does not need to arbitrate between them. If a future
      * RSQRT+MUL alternative form is added, RmsNorm's `MUL(x, x)` check
      * would pass on a LayerNorm region (with `x = sub`); the resolver
      * would then pick LayerNorm by op count (always larger by exactly
      * the {mean1, sub} pair).
      *
-     * v1 also doesn't recognise the optional affine `* gamma + beta`
-     * post-scale — same scope reasoning as [RmsNorm].
+     * The optional affine `* gamma + beta`
+     * post-scale is not recognised — same scope reasoning as [RmsNorm].
      */
     data class LayerNorm(
         override val ops: List<DxirOp>,
@@ -154,8 +152,8 @@ sealed class RecognitionMatch {
     }
 
     /**
-     * Rotary positional embedding (RoPE) — sin/cos rotation pair. v1
-     * stub — full structural match lands in L3.1.
+     * Rotary positional embedding (RoPE) — sin/cos rotation pair,
+     * produced by [recognizeRope].
      */
     data class Rope(
         override val ops: List<DxirOp>,
@@ -166,8 +164,8 @@ sealed class RecognitionMatch {
     }
 
     /**
-     * Cross-entropy loss compound form. v1 stub — full structural match
-     * lands in L3.1.
+     * Cross-entropy loss compound form, produced by
+     * [recognizeCrossEntropy].
      */
     data class CrossEntropy(
         override val ops: List<DxirOp>,
@@ -179,7 +177,7 @@ sealed class RecognitionMatch {
     }
 
     /**
-     * SwiGLU gated MLP activation. Layer 4 §0.4.267 — the canonical
+     * SwiGLU gated MLP activation — the canonical
      * Llama / Mistral / PaLM MLP gate:
      *
      * ```
@@ -188,12 +186,11 @@ sealed class RecognitionMatch {
      * out       = SILU(gate_proj) · up_proj
      * ```
      *
-     * v1 matches the inner SwiGLU activation (two parallel matmuls + SILU
+     * This matches the inner SwiGLU activation (two parallel matmuls + SILU
      * + elementwise gating), not the surrounding `down_proj` matmul. The
      * coarsener target is a fused `silu_mul_kernel` (one kernel launch +
-     * no `silu(gate)` materialisation in HBM). A future "TransformerMLP"
-     * recognizer can absorb the down-proj for cuBLASLt-style fused-MLP
-     * kernels.
+     * no `silu(gate)` materialisation in HBM). [TransformerMLP] absorbs the
+     * down-proj for cuBLASLt-style fused-MLP kernels.
      *
      * @property xInput the shared input tensor (operand of both MATMULs).
      * @property wGate the gate-projection weight (the non-shared operand
@@ -217,7 +214,7 @@ sealed class RecognitionMatch {
     }
 
     /**
-     * Layer 4 §0.4.314 — the SwiGLU + down-projection fused MLP block,
+     * The SwiGLU + down-projection fused MLP block,
      * the canonical Llama / Mistral / PaLM transformer MLP:
      *
      * ```
@@ -229,8 +226,7 @@ sealed class RecognitionMatch {
      *
      * Strict superset of [SwiGLU] — same 4 ops plus the down-projection
      * MATMUL. The two patterns claim overlapping op ids (the SwiGLU four),
-     * so [resolveLargestMatch] picks this one whenever it matches: the
-     * v2 compound use-case the §0.4.282 resolver was plumbed for.
+     * so [resolveLargestMatch] picks this one whenever it matches.
      *
      * Exists for cuBLASLt-style fused-MLP kernels: the down-proj's
      * `silu_g` materialisation is the heaviest tensor traffic in the

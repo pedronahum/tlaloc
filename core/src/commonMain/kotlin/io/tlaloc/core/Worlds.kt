@@ -1,7 +1,7 @@
 package io.tlaloc.core
 
 /**
- * Layer 2 §0.4.243+ — **four-worlds taxonomy**, the structural backbone
+ * **Four-worlds taxonomy**, the structural backbone
  * separating pure tensor compute from buffer management from multi-step
  * orchestration from cluster lifecycle.
  *
@@ -23,7 +23,7 @@ package io.tlaloc.core
  *
  * # Why DslMarker over context parameters
  *
- * The Layer 2 design audit picks **DslMarker-based receiver-only scoping**
+ * Tlaloc uses **DslMarker-based receiver-only scoping**
  * over Kotlin 2.2's Beta `context` parameters because:
  *
  * - Each Tlaloc op has exactly one valid scope (no multi-scope composition
@@ -109,7 +109,7 @@ interface ProgramScope
  * worlds use — cluster connection, topology discovery, barriers, fault-
  * handler hook registration.
  *
- * Layer 2 ships ClusterScope as a marker only; v2 fills in the operations.
+ * ClusterScope is currently a marker only; it declares no operations yet.
  */
 @ExperimentalTlalocApi
 @WorldScope
@@ -124,7 +124,7 @@ interface ClusterScope
  * who wants to build a `program { }` artifact starts from `with(Tlaloc) { … }`
  * (or a function that takes [OrchestrationScope] as receiver). The
  * default singleton has no state — concrete orchestration runtimes
- * (e.g. an IREE-backed dispatcher in Layer 3) will subtype this.
+ * (e.g. an IREE-backed dispatcher) subtype this.
  */
 @ExperimentalTlalocApi
 object Tlaloc : OrchestrationScope, ProgramScope

@@ -1,7 +1,7 @@
 package io.tlaloc.core
 
 /**
- * Layer 2 §0.4.243+ — phantom-typed device-mesh markers for compile-time
+ * Phantom-typed device-mesh markers for compile-time
  * placement tracking on [BufferHandle].
  *
  * These types are entirely separate from [MeshSpec] (the runtime device-
@@ -10,7 +10,7 @@ package io.tlaloc.core
  * step-boundary signatures so a `BufferHandle<T, Mesh1<DataAxis>>` can't
  * accidentally be passed to a step expecting `BufferHandle<T, Mesh1<ModelAxis>>`.
  *
- * The pattern mirrors Layer 1's [IndexName] / [Named]:
+ * The pattern mirrors the tensor-axis [IndexName] / [Named] markers:
  *
  * - [MeshDim] is a non-sealed marker interface. User-defined subtypes are
  *   one-line `object MyAxis : MeshDim { override val name = "my-axis" }`
@@ -20,20 +20,20 @@ package io.tlaloc.core
  *   `RankN` family for tensor shapes.
  *
  * A workflow that reshards across two distinct phantom meshes inserts an
- * explicit reshard step (Layer 2.2 / §0.4.243's workflow builder); the
+ * explicit reshard step (see the workflow builder); the
  * type system catches mesh mismatches at compose time.
  */
 
 /**
  * Type-level marker for a named mesh axis (e.g. "data parallel", "model
- * parallel", "pipeline parallel"). Mirrors [IndexName] from Layer 1 — the
+ * parallel", "pipeline parallel"). Mirrors [IndexName] — the
  * interface is non-sealed so user code can declare additional axes.
  */
 interface MeshDim {
     val name: String
 }
 
-/** Phantom-typed device mesh. Layer 2's compile-time placement marker. */
+/** Phantom-typed device mesh: the compile-time placement marker. */
 sealed interface Mesh
 
 /** Zero-dimensional ("singleton") mesh — a single device, no parallelism. */
@@ -50,6 +50,6 @@ class Mesh3<A0 : MeshDim, A1 : MeshDim, A2 : MeshDim> : Mesh
 
 /**
  * Four-axis mesh. Higher arities can be added as the need arises; v1.x
- * caps at 4 to mirror the rank-4 tensor surface from Layer 1.5.
+ * caps at 4 to mirror the rank-4 named-contraction surface.
  */
 class Mesh4<A0 : MeshDim, A1 : MeshDim, A2 : MeshDim, A3 : MeshDim> : Mesh

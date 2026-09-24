@@ -553,12 +553,11 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.277 — Inject `stablehlo.broadcast_in_dim` if [operandType] doesn't
+     * Inject `stablehlo.broadcast_in_dim` if [operandType] doesn't
      * match [resultType]. Returns the SSA name to use downstream (the original
      * if no broadcast was needed; the broadcast result otherwise).
      *
-     * v1 was same-rank only (each input dim equal to the result dim or 1).
-     * Phase A5c generalises it to NumPy right-alignment, which is what the
+     * Broadcasting follows NumPy right-alignment, which is what the
      * elementwise binaries' implicit broadcasting needs: the operand's axis `j`
      * maps to result axis `offset + j` where `offset = resultRank − operandRank`,
      * a size-1 operand axis stretches, and the unlisted LEADING result axes are
@@ -597,14 +596,15 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         return bcast
     }
 
-    /** §0.4.402 — CHLO unary elementwise assembly carries both types: `chlo.op %x : t -> t`. */
+    /** CHLO unary elementwise assembly carries both types: `chlo.op %x : t -> t`. */
     private fun chloUnary(step: String, name: String, op: String, x: String, type: String) {
         out.appendLine("$step$name = $op $x : $type -> $type")
     }
 
     /**
-     * §0.4.422 — explicit-threefry RNG emission (the honest GPU path; the
-     * §0.4.408 rng_bit_generator refusal's recorded resolution). The draw's
+     * Explicit-threefry RNG emission, used instead of
+     * `stablehlo.rng_bit_generator` so every backend produces the same bits as
+     * the host kernel. The draw's
      * key words and dims are literal attrs, so the whole graph is STATIC:
      * counters are an iota, the Threefry-2x32 key schedule and per-round
      * injection constants fold to Kotlin Int arithmetic at emit time
@@ -614,14 +614,13 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * lane whose counter reads 0 and whose output word is sliced away.
      */
     /**
-     * §0.4.432 — a threefry key word as the emission sees it: either a
-     * compile-time literal Int (the §0.4.408 zero-operand attr form — folds
-     * into splat constants and emit-time key-schedule arithmetic, exactly as
-     * before) or a rank-0 `tensor<i32>` SSA value (the runtime-key operand
-     * form — splats via `broadcast_in_dim` and the key schedule EMITS as
-     * i32 ops). Inside [emitThreefryUniform] the Dyn arm is re-used at
-     * counter width after broadcasting; the two meanings never mix because
-     * the rank-0 → half-width conversion happens exactly once, up front.
+     * A threefry key word as the emission sees it: either a compile-time literal Int (the
+     * zero-operand attr form — folds into splat constants and emit-time key-schedule
+     * arithmetic) or a rank-0 `tensor<i32>` SSA value (the runtime-key operand form — splats
+     * via `broadcast_in_dim` and the key schedule EMITS as i32 ops). Inside
+     * [emitThreefryUniform] the Dyn arm is re-used at counter width after broadcasting; the two
+     * meanings never mix because the rank-0 → half-width conversion happens exactly once, up
+     * front.
      */
     private sealed interface RngKeyWord {
         data class Lit(val v: Int) : RngKeyWord
@@ -630,7 +629,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
 
     /**
      * Resolve a draw's two key words: 0 operands → literal `key0`/`key1`
-     * attrs (§0.4.408); 2 operands → scalar-I32 SSA values (§0.4.432). The
+     * attrs; 2 operands → scalar-I32 SSA values. The
      * forms are exclusive — an op carrying both is refused, as is any other
      * arity. The `dims` attr stays literal in both forms: the result shape
      * must be static, the stream need not be.
@@ -695,9 +694,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * against the host kernel on every backend: integer ops only, then one
      * bitcast into [1, 2) and one exact subtract.
      *
-     * §0.4.432 — key words arrive as [RngKeyWord]s. Literal words fold into
-     * splat constants and emit-time key-schedule arithmetic (byte-identical
-     * to the §0.4.422 emission — the attr form's MLIR does not change);
+     * Key words arrive as [RngKeyWord]s. Literal words fold into
+     * splat constants and emit-time key-schedule arithmetic;
      * runtime words broadcast from their rank-0 SSA values once, and the
      * key schedule (ks2's xors, the five injection `+ (i+1)` adds) EMITS as
      * the same i32 ops the :core kernel computes in Kotlin. The ARX rounds
@@ -1168,7 +1166,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * Resolve the intermediate (post-`stablehlo.reduce`) shape, plus whether
      * the caller wants keep-dims (size-1 reduced axes preserved in the output).
      *
-     * § 0.4.274 — keep-dims is detected by [outputType] having the same rank
+     * Keep-dims is detected by [outputType] having the same rank
      * as [inputType] (with the reduced axes as size 1). The recognized pattern
      * for RmsNorm (`MUL → MEAN → ... → MUL`) emits the keepdims form, which
      * is what real Llama / Mistral code does. Without this, the LlamaDecoder
@@ -1279,7 +1277,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.373 — SUM_TO (numpy unbroadcast): reduce [value] (shape U) down to
+     * SUM_TO (numpy unbroadcast): reduce [value] (shape U) down to
      * [template]'s shape (T, T.rank ≤ U.rank, right-aligned). Reduce axes = the
      * leading (U.rank − T.rank) axes ∪ the aligned axes where T == 1 but U > 1.
      * Emitted as a `stablehlo.reduce(add)` over those axes (yielding the dropped
@@ -1460,7 +1458,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.363 — MAXPOOL2D / AVGPOOL2D as `stablehlo.reduce_window` in
+     * MAXPOOL2D / AVGPOOL2D as `stablehlo.reduce_window` in
      * generic form (there is no compact sugar for reduce_window): max
      * with −∞ init, add with 0 init; AVGPOOL2D follows with a splat
      * multiply by 1/(kh·kw) — the count_include_pad convention pinned at
@@ -1547,7 +1545,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.385 — the `stablehlo.convolution` line itself, with every window attr
+     * The `stablehlo.convolution` line itself, with every window attr
      * passed in rather than read off a [DxirOp]. [emitConv2d] supplies them from
      * the node's attrs; [emitConvAdjoint] supplies the padding it has just SOLVED
      * at emit time (and the dilations/stride/reversal the adjoint spelling needs).
@@ -1595,14 +1593,14 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.385 — the fused conv adjoints (see [io.tlaloc.ir.OpKind.CONV2D_DATA_ADJOINT]).
+     * The fused conv adjoints (see [io.tlaloc.ir.OpKind.CONV2D_DATA_ADJOINT]).
      *
      * Their padding is a function of the primal's extents, and at EMIT time those
      * extents are concrete (the GPU path requires static shapes), so the very solve
      * the interpreter and the host twins perform at runtime is performed here once
      * — and what lands in the module is an ordinary `stablehlo.convolution`. The
-     * resulting MLIR is the same the pre-fusion rule produced, which is why
-     * §0.4.362's real-XLA certification still covers this path.
+     * resulting MLIR is the same the unfused gradient rule produced, so the
+     * existing real-XLA certification of that form covers this path.
      *
      * The kernel adjoint emits its batch↔feature transposes EXPLICITLY rather than
      * spelling the swap through `dim_numbers`: identical semantics to the other two
@@ -1654,7 +1652,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.393 — the solved-padding, lhs-dilated, tap-reversed transposed
+     * The solved-padding, lhs-dilated, tap-reversed transposed
      * convolution that IS a forward conv's data adjoint. Lifted out of
      * [emitConvAdjoint] so the transposed-conv adjoints can reuse it: there the
      * primal is `conv(dilate(x, L), swap01(w))`, so this runs against the DILATED
@@ -1696,7 +1694,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.393 — the transpose/conv/transpose expansion that IS a forward conv's
+     * The transpose/conv/transpose expansion that IS a forward conv's
      * kernel adjoint, lifted out of [emitConvAdjoint] for the same reason.
      * [outType] is the final OIHW kernel shape; the inner convolution produces it
      * with the channel axes swapped. Solve per axis: `dilSize = (hOut−1)·s + 1`,
@@ -1752,7 +1750,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.393 — the fused TRANSPOSED-conv adjoints (`CONV_TRANSPOSE2D_DATA_ADJOINT`
+     * The fused TRANSPOSED-conv adjoints (`CONV_TRANSPOSE2D_DATA_ADJOINT`
      * / `_KERNEL_ADJOINT`).
      *
      * The interpreter and host twins invert the primal's tap equation per element,
@@ -1776,7 +1774,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * unverified; nothing user-reachable sets it (`convTranspose2d`'s FIR arm never
      * emits the attr, and the host sugar passes `false`), while the interpreter and
      * host twins handle any reversal. Failing loudly beats shipping a
-     * plausible-looking wrong kernel — the §0.4.389 maxpool emitter note is the same
+     * plausible-looking wrong kernel; the maxpool adjoint emitter makes the same
      * call.
      */
     private fun emitConvTransposeAdjoint(step: String, name: String, ops: List<String>, node: DxirOp) {
@@ -1868,8 +1866,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.386 — the fused avgpool adjoint, expanded into exactly the MLIR the
-     * pre-fusion rule produced: fold channels into the batch dim, one lhs-dilated
+     * The fused avgpool adjoint, expanded into exactly the MLIR the
+     * unfused gradient rule produced: fold channels into the batch dim, one lhs-dilated
      * `stablehlo.convolution` against a uniform `1/(kh·kw)` splat kernel (IOHW
      * `[1,1,kh,kw]`, so a single-channel kernel applies depthwise without
      * grouped-conv support), then fold back.
@@ -1880,10 +1878,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      *
      *     dilSize = (hOut−1)·s + 1,   low = kh − 1 − p_low,   high = p_low + H − dilSize
      *
-     * Keeping this expansion rather than a `feature_group_count = C` depthwise
-     * convolution means the module uses only patterns §0.4.362/§0.4.363 already
-     * certified against real XLA. The value convention matches the interpreter's
-     * count_include_pad: the splat carries `1/(kh·kw)` for the FULL window.
+     * Keeping this expansion rather than a `feature_group_count = C` depthwise convolution
+     * means the module uses only the convolution and reduce_window patterns already certified
+     * against real XLA. The value convention matches the interpreter's count_include_pad: the
+     * splat carries `1/(kh·kw)` for the FULL window.
      */
     private fun emitAvgPoolGrad(step: String, name: String, up: String, node: DxirOp) {
         val upType = node.operands[0].type
@@ -1927,8 +1925,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.389 — the fused maxpool adjoint, expanded into the upsample-and-mask MLIR
-     * the pre-fusion rule produced (and §0.4.363 certified on the GB10):
+     * The fused maxpool adjoint, expanded into the upsample-and-mask MLIR
+     * the unfused gradient rule produced (certified against real XLA on GPU):
      * nearest-upsample both the pooled value and the upstream back to x's shape via
      * `[N,C,Ho,Wo] → [N,C,Ho,1,Wo,1] → broadcast → [N,C,Ho,kh,Wo,kw] → [N,C,H,W]`,
      * then `select(x == U(y), U(dY), 0)`. Row-major flattening makes that
@@ -2115,9 +2113,9 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.112 — lowering for the `:autograd`-emitted [OpKind.SCATTER_ADD] substrate
-     * shape (`base[idx] += value`, no attrs). Two operand-rank slices are supported,
-     * matching the [DxirInterpreter] arms shipped in §0.4.45 + §0.4.111:
+     * Lowering for the `:autograd`-emitted [OpKind.SCATTER_ADD] substrate
+     * shape (`base[idx] += value`, no attrs). Two operand ranks are supported,
+     * matching the [DxirInterpreter] arms:
      *
      *  - rank-1: `base: tensor<NxF>, idx: scalar I32, value: scalar F`.
      *  - rank-2: `base: tensor<MxNxF>, idx: scalar I32, value: tensor<NxF>`.
@@ -2131,7 +2129,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * stablehlo-style scatter; this path is dedicated to the substrate shape that
      * `GatherRule` emits.
      *
-     * The `in_place` attr (§0.4.46's destructive-mutation marker) is intentionally
+     * The `in_place` attr (the destructive-mutation marker) is intentionally
      * IGNORED here: stablehlo.scatter is functional, not in-place. The marker is a
      * synthesis-side hint for the host-runtime path; emitting through StableHLO
      * always produces a fresh tensor regardless.
@@ -2208,7 +2206,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.133 — recognise the scatter-into-zeros base pattern: `BROADCAST(const(0))`
+     * Recognise the scatter-into-zeros base pattern: `BROADCAST(const(0))`
      * (the canonical shape [GatherRule] emits for the gradient of GATHER) or a
      * literal rank-N const tensor where every element is zero. Returns true if the
      * operand is a compile-time-known zero tensor.
@@ -2232,9 +2230,9 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.114 — lowering for the autograd-emitted [OpKind.SCATTER] substrate shape
-     * (`base[idx] = value`, no attrs). Two operand-rank slices are supported,
-     * matching the [DxirInterpreter] arms shipped in §0.4.41 + §0.4.114:
+     * Lowering for the autograd-emitted [OpKind.SCATTER] substrate shape
+     * (`base[idx] = value`, no attrs). Two operand ranks are supported,
+     * matching the [DxirInterpreter] arms:
      *
      *  - rank-1 base + scalar idx + scalar value → rank-1 result.
      *  - rank-2 base + scalar idx + rank-1 [N] value → rank-2 [M, N] result (replaces
@@ -2375,20 +2373,20 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * Layer 4.1 §0.4.261 — emit `stablehlo.custom_call` for a COARSENED op
+     * Emit `stablehlo.custom_call` for a COARSENED op
      * carrying a [KernelDescriptor]. The descriptor's `kernelName` becomes
      * the call_target_name (`@<kernelName>`); `customCallAttrs` is encoded
      * into the `backend_config` string (deterministic alphabetic key order
      * so tests can pin the exact emitted text).
      *
-     * Layer 4.2 §0.4.262 — when [node].sharding is non-null, attach
+     * When [node].sharding is non-null, attach
      * `sdy.sharding = #sdy.sharding_per_value<[<...>]>` so the SDY
      * propagation pass can carry shardings *across* the kernel boundary.
      * Custom calls are opaque to propagation — without an explicit
      * op-level sharding, propagation stops at the kernel and the result
      * stays unsharded. The `per_value` form handles single-result and
      * multi-result uniformly (multi-result COARSENED is reserved for
-     * future kernel shapes; today's L3 emits only single-result).
+     * future kernel shapes; kernel lowering currently emits only single-result).
      */
     private fun emitCustomCall(
         step: String,
@@ -2467,14 +2465,14 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * KPTX v1.6 §0.4.332 — encode [customCallAttrs] as the *body* of an
+     * Encode [customCallAttrs] as the *body* of an
      * `mhlo.backend_config` dictionary attribute for typed-FFI custom
      * calls. Unlike [encodeBackendConfig]'s free-form string, dictionary
      * values are typed MLIR attribute literals: ints are `: i64`, floats
      * `: f32` (doubles `: f64`), strings quoted, booleans bare. XLA turns
      * these into `XLA_FFI_Attrs` scalars/strings on the handler's call
      * frame (decoded Kotlin-side by XlaFfi in :runtime-pjrt). Keys sorted
-     * alphabetically for deterministic emit, matching §0.4.261.
+     * alphabetically for deterministic emit, matching [encodeBackendConfig].
      */
     private fun encodeTypedFfiConfig(customCallAttrs: Map<String, Any>): String =
         customCallAttrs.entries
@@ -2579,7 +2577,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.460 — Phase G3a: `stablehlo.all_reduce` in the generic region form
+     * `stablehlo.all_reduce` in the generic region form
      * (guaranteed-parseable MLIR; StableHLO has no compact `applies` printer
      * for all_reduce the way `stablehlo.reduce` does):
      *
@@ -2595,10 +2593,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * house `stablehlo.reduce ... applies stablehlo.add` spelling
      * ([AllReduceAttrs.parse] refuses non-sum reductions by name before this
      * point). `replica_groups` comes from the validated attr (uniform group
-     * sizes — ragged needs StableHLO's -1 padding, a named deferral; absent =
+     * sizes — ragged groups need StableHLO's -1 padding and are not supported; absent =
      * `[[0]]`, the single-replica program). No `channel_handle` and no
-     * `use_global_device_ids`: the cross-replica default, matching the
-     * single-host single-task PJRT ExecuteOptions story from §0.4.459.
+     * `use_global_device_ids`: the cross-replica default, matching
+     * single-host, single-task PJRT execution.
      * Region-local SSA names (`%arg0` etc.) are block-scoped in MLIR, so two
      * all_reduce ops in one function cannot collide.
      */
@@ -2880,9 +2878,9 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.465 — Phase H1a: PAGED_ATTENTION's GATHER-COMPOSED REFERENCE FORM.
-     * Correctness first; a fused vendor/KPTX paged kernel with recognizer
-     * claiming is Phase H4 and the reason the coarse kind is a kind at all.
+     * PAGED_ATTENTION's GATHER-COMPOSED REFERENCE FORM.
+     * Correctness first; a fused vendor/KPTX paged kernel claimed by the
+     * recognizer replaces it, and is the reason the coarse kind is a kind at all.
      *
      * The shape:
      * ```
@@ -2908,10 +2906,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * REJECTED alternative for steps 1–2: gathering per (sequence, position)
      * with a computed flat index. It avoids materialising unused pages, but it
      * needs an index tensor of shape [S, M*P] built by arithmetic on the block
-     * table — more ops, a second indexing convention to keep honest, and no
+     * table — more ops, a second indexing convention to keep consistent, and no
      * benefit at decode sizes where the page gather is one contiguous copy per
-     * block. H4's kernel removes the materialisation entirely; until then the
-     * simplest correct form is the right one.
+     * block. A fused paged kernel removes the materialisation entirely; without
+     * one, the simplest correct form is the right one.
      */
     private fun emitPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
@@ -3018,7 +3016,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.466 — Phase H1b: KV_CACHE_WRITE lowers to ONE `stablehlo.scatter`,
+     * KV_CACHE_WRITE lowers to ONE `stablehlo.scatter`,
      * bracketed by two free reshapes:
      * ```
      *   flat = reshape(cache)  [numBlocks*blockSize, numKvHeads, headDim]
@@ -3056,7 +3054,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * promise is worth less than the risk at decode sizes.
      */
     /**
-     * §0.4.472 — Phase H5: DEQUANTIZE_KV — `pool = codes * scales[kvHead]`, in
+     * DEQUANTIZE_KV — `pool = codes * scales[kvHead]`, in
      * three ops and no cleverness at all:
      *
      * ```
@@ -3072,7 +3070,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * `broadcast_in_dim`, which is why the per-tensor case needs no arm of its
      * own — StableHLO's size-1-expands rule does it.
      *
-     * The CONVERT is the honest half of the v1 deferral. With no I8 DType the
+     * The CONVERT exists because there is no I8 DType yet: the
      * codes ride an i32 tensor, so what XLA sees is an i32→f32 widen of a
      * tensor whose values happen to fit in a byte. The day a narrow dtype
      * lands, exactly one thing changes here — the operand's element type — and
@@ -3209,9 +3207,9 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.113 — lower the autograd-emitted [OpKind.GATHER] substrate shape (scalar
-     * I32 idx, no attrs) to `stablehlo.gather`. Two operand-rank slices are supported,
-     * matching the [DxirInterpreter] arms shipped in §0.4.41 + §0.4.111:
+     * Lower the autograd-emitted [OpKind.GATHER] substrate shape (scalar
+     * I32 idx, no attrs) to `stablehlo.gather`. Two operand ranks are supported,
+     * matching the [DxirInterpreter] arms:
      *
      *  - rank-1 operand (`arr: tensor<NxF>`) → scalar result. Equivalent to `arr[idx]`.
      *    `offset_dims = []`, `collapsed_slice_dims = [0]`, `slice_sizes = [1]`.
@@ -3222,7 +3220,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * For both, `start_index_map = [0]` and `index_vector_dim = 0` (with rank-0
      * `scatter_indices`, StableHLO's spec implicitly expands by a trailing-1 dim,
      * so the effective indices rank becomes 1 — consistent with the rank arithmetic
-     * used by [emitScatterAdd] in §0.4.112).
+     * used by [emitScatterAdd]).
      *
      * The general [emitGatherOp] path is reused; this method only synthesizes the
      * canonical attrs for the substrate.
@@ -3331,7 +3329,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.409 — the shared padding mask: `select(indices == paddingIndex, 0, x)`
+     * The shared padding mask: `select(indices == paddingIndex, 0, x)`
      * with the predicate broadcast from the indices' shape onto [maskedType]
      * (whose leading axes ARE the index axes — both EMBEDDING's output and
      * EMBEDDING_GRAD's upstream have shape `indices.dims ++ [D]`). Writes the
@@ -3364,18 +3362,15 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.400 — EMBEDDING's fused scatter-add adjoint, deferred by §0.4.370 and
-     * closed here: `stablehlo.scatter` with an ADD computation region over a
-     * splat-zero `[V, D]` base. Rank-r indices with
-     * `index_vector_dim = r` (== indices rank, the implicit trailing-1 form the
-     * SCATTER_ADD arm already uses for its scalar index; §0.4.409 generalised
-     * the v1 rank-1 contract to any r ≥ 1); each `[…, D]` upstream
-     * row is a window over operand axis 1 (`update_window_dims = [r]`) landing
-     * at the vocab slot its index selects (`inserted_window_dims = [0]`,
-     * `scatter_dims_to_operand_dims = [0]`). Collisions are the POINT — the same
-     * vocab row embedded at several positions must accumulate — so
-     * `unique_indices` is left unset and the region body is a real add, never
-     * the §0.4.133 return-upd peephole (which is only sound for unique indices).
+     * EMBEDDING's fused scatter-add adjoint: `stablehlo.scatter` with an ADD computation region
+     * over a splat-zero `[V, D]` base. Rank-r indices with `index_vector_dim = r` (== indices
+     * rank, the implicit trailing-1 form the SCATTER_ADD arm already uses for its scalar index;
+     * any r ≥ 1); each `[…, D]` upstream row is a window over operand axis 1
+     * (`update_window_dims = [r]`) landing at the vocab slot its index selects
+     * (`inserted_window_dims = [0]`, `scatter_dims_to_operand_dims = [0]`). Collisions are the
+     * POINT — the same vocab row embedded at several positions must accumulate — so
+     * `unique_indices` is left unset and the region body is a real add, never the
+     * scatter-into-zeros return-upd peephole (which is only sound for unique indices).
      */
     private fun emitEmbeddingGrad(
         step: String,
@@ -3541,7 +3536,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.396 — REVERSE → `stablehlo.reverse %x, dims = […]` (Phase C3). The
+     * REVERSE → `stablehlo.reverse %x, dims = […]`. The
      * `dimensions` attr carries the user's literal axis positions; the op is
      * shape-preserving, so operand and result types coincide and the pretty
      * form's functional type spells both.
@@ -3618,7 +3613,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         )
     }
 
-    /** §0.4.360 — `stablehlo.select` over a Bool predicate tensor. */
+    /** `stablehlo.select` over a Bool predicate tensor. */
     private fun emitWhere(step: String, name: String, ops: List<String>, node: DxirOp) {
         val predMlir = node.operands[0].type.toMlir()
         out.appendLine(
@@ -3626,7 +3621,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         )
     }
 
-    /** §0.4.360 — `stablehlo.compare` with the `direction` attr
+    /** `stablehlo.compare` with the `direction` attr
      * (EQ/NE/LT/LE/GT/GE); FLOAT vs SIGNED comparison type from the
      * operand dtype (the emitStep spelling). Result is a Bool tensor. */
     private fun emitCompare(step: String, name: String, ops: List<String>, node: DxirOp) {
@@ -3646,8 +3641,8 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         )
     }
 
-    /** §0.4.360 — `stablehlo.pad` with zero padding value, edge-only
-     * (`low`/`high` List<Int> attrs; interior fixed at 0 in v1). */
+    /** `stablehlo.pad` with zero padding value, edge-only
+     * (`low`/`high` List<Int> attrs; interior fixed at 0). */
     private fun emitPad(step: String, name: String, x: String, node: DxirOp, inputType: DxirType) {
         val low = intListAttr(node, "low")
         val high = intListAttr(node, "high")
@@ -3659,7 +3654,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
 
     /**
      * One `stablehlo.pad`, with the syntax in a single place: [emitPad] (outer
-     * padding only, interior fixed at 0) and §0.4.393's transposed-conv adjoints
+     * padding only, interior fixed at 0) and the transposed-conv adjoints
      * (which need a genuine INTERIOR pad to dilate `x` by `lhs_dilation`) both go
      * through here.
      */
@@ -3752,7 +3747,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * Phase A2b — `SLICE_LIKE(value, thisTemplate, priorTemplate…)`, the CONCAT
+     * `SLICE_LIKE(value, thisTemplate, priorTemplate…)`, the CONCAT
      * adjoint: the window along attr `axis` starts at the sum of the prior
      * templates' axis extents and runs for `thisTemplate`'s, with every other axis
      * taken whole. Emit-time dims are always concrete, so both bounds fold to
@@ -3790,7 +3785,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.404 — `PAD_LIKE(value, outTemplate, priorTemplate…)` + attr `axis`,
+     * `PAD_LIKE(value, outTemplate, priorTemplate…)` + attr `axis`,
      * SLICE_LIKE's transpose and VJP: place `value` into a zero tensor of the
      * outTemplate's shape at the window along `axis` that starts after the
      * prior templates' extents. Emit-time dims are always concrete, so the
@@ -3799,7 +3794,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      * literals and this is the same static `stablehlo.pad` [emitPadTo] emits —
      * the templates exist for the host path, where the extents are only known
      * at runtime, and their SSA values go unreferenced here (MLIR-legal,
-     * DCE'd; the [emitSliceLike] precedent).
+     * DCE'd, as in [emitSliceLike]).
      */
     private fun emitPadLike(
         step: String,
@@ -3846,13 +3841,13 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.399 — `BROADCAST_LIKE(value, template)`, SUM_TO's forward twin and
+     * `BROADCAST_LIKE(value, template)`, SUM_TO's forward twin and
      * VJP: broadcast `value` up to the template's shape under NumPy
      * right-alignment. Emit-time dims are always concrete, so it folds to a
      * static `stablehlo.broadcast_in_dim` with the identity right-aligned axis
      * map (value axis j → output axis `offset + j`) — the template's SSA value
      * goes unreferenced (it exists for the host path's runtime extents),
-     * MLIR-legal and DCE'd downstream, the SLICE_LIKE precedent.
+     * MLIR-legal and DCE'd downstream, as in [emitSliceLike].
      */
     private fun emitBroadcastLike(
         step: String,
@@ -3879,7 +3874,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     /**
-     * §0.4.399 — `SLICE_AT(value, template)` + attr `low`, PAD_TO's reverse
+     * `SLICE_AT(value, template)` + attr `low`, PAD_TO's reverse
      * mirror and VJP: the window of the template's shape at literal offset
      * `low` per axis. Emit-time dims are always concrete, so the bounds fold to
      * literals and this is the same static `stablehlo.slice` [emitSlice] emits —

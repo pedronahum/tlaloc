@@ -11,7 +11,7 @@ import io.tlaloc.core.io.JsonException
  *
  * ## The transpose, performed
  *
- * §0.4.478 established, against the real file, that HF stores every
+ * HF stores every
  * `nn.Linear` weight as `[out_features, in_features]` — because
  * `F.linear(x, W)` is `x @ W.T`. Tlaloc's [io.tlaloc.ir.OpKind.MATMUL]
  * contracts `last(A) × first(B)`, so a projection wants `[in, out]`. This
@@ -35,13 +35,12 @@ import io.tlaloc.core.io.JsonException
  * ## Dtype
  *
  * Everything is staged as **f32**. TinyLlama's bytes are bf16, and
- * [io.tlaloc.core.io.WeightSource] already widens them exactly (§0.4.468:
- * bf16→f32 is lossless, it is a 16-bit left shift). The graph is f32 because
+ * [io.tlaloc.core.io.WeightSource] already widens them exactly
+ * (bf16→f32 is lossless, it is a 16-bit left shift). The graph is f32 because
  * [DecodeGraphSpec]'s default `dtype` is and because the reference
- * interpreter is; a bf16 decode graph is the G1 path and a named tail, not
- * this slice. The consequence is honest and stated in the parity lane: we
- * compute in f32 from bf16-exact inputs, and the oracle is asked to do the
- * same, so a disagreement is arithmetic ORDER and not width.
+ * interpreter is; a bf16 decode graph is not supported here. The consequence,
+ * stated in the parity lane: we compute in f32 from bf16-exact inputs, and the
+ * oracle is asked to do the same, so a disagreement is arithmetic ORDER and not width.
  */
 object HfLlamaStagedWeights {
 
@@ -53,7 +52,7 @@ object HfLlamaStagedWeights {
      * layers); the roles it implies are then a prefix-by-layer of the file's,
      * which is exactly what a reduced-layer certification wants. Everything
      * else — hidden size, head counts, vocab — must still match, and [load]
-     * refuses per tensor if it does not because §0.4.478's dim check is
+     * refuses per tensor if it does not because the dim check is
      * against the config it is handed.
      */
     fun stage(ckpt: HfLlamaCheckpoint, config: HfLlamaConfig = ckpt.config): List<FloatArray> {
@@ -73,7 +72,7 @@ object HfLlamaStagedWeights {
     /**
      * One slot of [stage], by index, with nothing else resident.
      *
-     * §0.4.480 added this: `ServingArtifactWriter` writes the staged weights
+     * `ServingArtifactWriter` writes the staged weights
      * one file at a time, and a `List<FloatArray>` of TinyLlama-1.1B is 4.4 GB
      * of live heap for no reason — the exporter only ever looks at one tensor.
      * [stage] is now this function in a loop, so the two cannot disagree.
@@ -112,7 +111,7 @@ object HfLlamaStagedWeights {
 
     /**
      * Load one role, verifying against [config] rather than the checkpoint's
-     * own — so a reduced-layer config still gets §0.4.478's dim check, and a
+     * own — so a reduced-layer config still gets the dim check, and a
      * reduced config that quietly disagrees about hidden size or head count
      * is caught at the tensor, by name, instead of inside a matmul.
      */

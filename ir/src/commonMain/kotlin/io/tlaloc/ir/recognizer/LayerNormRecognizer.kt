@@ -6,7 +6,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.OpKind
 
 /**
- * §0.4.318 — recognise the canonical LayerNorm shape.
+ * Recognise the canonical LayerNorm shape.
  *
  * # Match shape
  *

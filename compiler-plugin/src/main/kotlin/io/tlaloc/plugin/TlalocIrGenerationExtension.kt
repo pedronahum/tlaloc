@@ -46,27 +46,20 @@ import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 
 /**
- * Session-4 IR phase. Walks every [IrCall] in the module fragment; for each call whose
- * callee FQN matches a Tlaloc `grad` / `valueAndGrad` intrinsic AND whose source range
- * has a matching [TlalocLoweringHandoff] entry (populated by the FIR checker), synthesise
- * a fresh lambda expression that evaluates the forward pass of the stored [DxirFunction]
- * and return it in place of the original call.
+ * The IR phase. Walks every [IrCall] in the module fragment; for each call whose
+ * callee FQN matches a Tlaloc differentiation intrinsic AND whose source range has a
+ * matching [TlalocLoweringHandoff] entry (populated by the FIR checker), it transforms
+ * the stored [DxirFunction] (reverse mode for the `grad` family, forward mode for the
+ * `jvp` family), synthesises a fresh lambda expression from the result and returns it
+ * in place of the original call, so the derivative compiles to plain Kotlin bytecode.
+ * If a step fails, the original call is kept and reported (see
+ * [TlalocPluginOptions.strictLowering]).
  *
- * Session-4 scope is forward-only: `grad` and friends, at the IR level, currently return
- * the same scalar value the user's lambda would produce (not the derivative). The `grad`
- * transform is the next item; this work is the machinery that lets `grad` lower to plain
- * Kotlin bytecode in the first place. If the synthesis fails (e.g. the DxirFunction
- * references a tensor type or an op outside the primitive-scalar surface), we fall back
- * to the original call so the runtime-tape path in `:autograd` still runs.
+ * For every match the extension emits an `INFO` naming the DxirFunction, only with
+ * [TlalocPluginOptions.dumpLoweredIr] on: it is developer introspection and stays out of
+ * a consumer's build log by default.
  *
- * §0.4.499 — for every match the extension USED to emit an unconditional `WARNING` via
- * the plugin's message collector naming the DxirFunction. It is now an `INFO`, and only
- * with [TlalocPluginOptions.dumpLoweredIr] on: it is developer introspection, and a
- * consumer's build log is not the place for it. The scaffolding-era tests that assert on
- * the "saw handoff" text turn the option on explicitly.
- *
- * §0.4.450 — the readable-reverse dump (docs/AD_SINGLE_ENGINE_AUDIT.md, surface 2 —
- * the north star's compile-time half). With [dumpGradSource] on (the
+ * The readable-reverse dump: with [dumpGradSource] on (the
  * `dumpGradSource` / `dumpGradSourceDir` plugin CLI options), every reverse-gradient
  * intrinsic (`grad` / `grad2` / `grad3` / `valueAndGrad{,2,3}`) whose lambda the plugin
  * SUCCESSFULLY synthesises also emits the reverse-transformed gradient
@@ -75,9 +68,9 @@ import org.jetbrains.kotlin.name.Name
  * that location. The dump happens at the dxir level BEFORE synthesis: the rendered
  * function is the IDENTICAL object handed to [DxirToIrSynthesis.synthesise], so the
  * gradient the user reads is the gradient the compiler compiles. Gradients the
- * §0.4.449 renderer cannot honestly print — above all the tensor `grad {}` world,
- * whose -1 SENTINEL dims forbid every ranked-literal rendering (the house sentinel
- * landmine) — dump a loud SKIPPED message naming the refusal instead of wrong source.
+ * renderer cannot print faithfully — above all tensor `grad {}` bodies, whose -1
+ * SENTINEL dims forbid every ranked-literal rendering — dump a SKIPPED message naming
+ * the refusal instead of wrong source.
  */
 class TlalocIrGenerationExtension(
     private val dumpGradSource: Boolean = false,
@@ -145,11 +138,11 @@ class TlalocIrGenerationExtension(
         val cache: CoarseningCache = buildCoarseningCache(mc)
 
         val transformer = object : IrElementTransformerVoidWithContext() {
-            /** §0.4.450 — the file being transformed, for the dump's location header. */
+            /** The file being transformed, for the dump's location header. */
             var irFileForDump: IrFile? = null
 
             /**
-             * §0.4.501 — every `IrVariable` / `IrValueParameter` in the file being
+             * Every `IrVariable` / `IrValueParameter` in the file being
              * transformed, keyed by its source START OFFSET. This is the IR side of
              * the FIR→IR handoff for a captured runtime value: FIR recorded the
              * DECLARATION's source range, and the two phases share source offsets, so
@@ -160,7 +153,7 @@ class TlalocIrGenerationExtension(
              */
             var valueDeclIndex: Map<Int, List<IrValueDeclaration>> = emptyMap()
 
-            /** §0.4.514 — the source location of the call being rewritten, so every
+            /** The source location of the call being rewritten, so every
              * IR-phase diagnostic points at the user's line instead of at nothing. */
             var callLocation: CompilerMessageSourceLocation? = null
 
@@ -1119,7 +1112,7 @@ class TlalocIrGenerationExtension(
     }
 
     /**
-     * §0.4.514 — the one reporting path for "kept original call": the call is left
+     * The one reporting path for "kept original call": the call is left
      * unrewritten, so the `io.tlaloc.autograd` fallback body would throw at the first
      * call. That is a compile-time ERROR under [TlalocPluginOptions.strictLowering]
      * (the default), exactly like the FIR phase's LAMBDA_NOT_LOWERABLE, and a WARNING
@@ -1154,7 +1147,7 @@ class TlalocIrGenerationExtension(
     }
 
     /**
-     * §0.4.501 — index every value DECLARATION in [file] by its source start offset.
+     * Index every value DECLARATION in [file] by its source start offset.
      *
      * Only `IrVariable` (a local `val` / `var`) and `IrValueParameter` (a function's or
      * lambda's parameter) are collected, because those are the two shapes a captured
@@ -1199,30 +1192,26 @@ class TlalocIrGenerationExtension(
      * the primal violates a gate (e.g., non-scalar return, regions, unsupported op kind);
      * the caller falls back to the original runtime call.
      *
-     * §0.4.169 — emits a per-failure WARNING that surfaces the specific exception
-     * message (replacing the prior generic "(gate violation)" string). Two consecutive
-     * port attempts (§0.4.163 HMC nested-loop, §0.4.168 CartPole Phase 1) hit the
-     * downstream gate but couldn't pinpoint the failing op without exception text;
-     * the warning text now names which dxir node / op kind / require-string failed,
-     * enabling targeted fixes in subsequent firings.
+     * Each failure is reported with the transform's own exception message, which names
+     * the dxir node, op kind or requirement that failed.
      */
     /**
-     * §0.4.503 (Tier 3, item 3) — refuse BY NAME when a body needed the computer
+     * Refuse BY NAME when a body needed the computer
      * algebra system and Symja was not on the classpath.
      *
      * The predicate is deliberately narrow, and its two halves are both necessary.
      * *Symja absent* alone is not a problem: most programs never need a CAS, and
-     * before this commit nobody who did not need it ever had to know Symja existed.
-     * *A loop surviving coarsening* alone is not a problem either: §0.4.128's
+     * nobody who does not need it has to know Symja exists.
+     * *A loop surviving coarsening* alone is not a problem either: the
      * LoopInvariant rewrite legitimately leaves nested WHILEs that the reverse
      * transform handles. It is the CONJUNCTION — a loop survived, the reverse
      * transform then rejected the primal, and there was no engine to close the loop
      * with — that makes the missing dependency the actionable cause. Anything
      * narrower would be silent; anything wider would blame Symja for other bugs.
      *
-     * Severity follows [TlalocPluginOptions.strictLowering], the knob §0.4.499
-     * established for precisely this question, so the same `strictLowering=false`
-     * that restores the old late failure everywhere else restores it here too.
+     * Severity follows [TlalocPluginOptions.strictLowering]: with
+     * `strictLowering=false` this is a warning and the call fails at runtime instead,
+     * as every other lowering failure does.
      */
     private fun reportMissingSymbolicEngine(
         mc: MessageCollector,
@@ -1274,17 +1263,17 @@ class TlalocIrGenerationExtension(
     }
 
     /**
-     * §0.4.450 — render the successfully synthesised gradient [gradFn] as Kotlin
-     * source (the §0.4.449 `toKotlinSource` host-twin renderer) and emit it as a
+     * Render the successfully synthesised gradient [gradFn] as Kotlin
+     * source (the `toKotlinSource` host-twin renderer) and emit it as a
      * compiler INFO message headed by the intrinsic call's source location; when
      * [dumpGradSourceDir] is set, ALSO write it as a `.kt` file named after that
      * location. The dump renders the dxir handed to synthesis — the gradient the
      * user reads is the same function the synthesis compiles, by construction.
      *
      * The renderer's refusals stay LOUD here rather than fatal: a gradient it
-     * cannot honestly print — a tensor `grad {}` body whose types carry the -1
+     * cannot print faithfully — a tensor `grad {}` body whose types carry the -1
      * SENTINEL dims (a ranked-literal rendering of those would bake
-     * sentinel-derived garbage, the house landmine), a twin-gap kind, control
+     * sentinel-derived garbage), an op kind with no host twin, control
      * flow — dumps a SKIPPED message that repeats the refusal's named reason.
      * Compilation is never affected: the dump is a window, not a gate.
      */
@@ -1337,7 +1326,7 @@ class TlalocIrGenerationExtension(
     }
 
     /**
-     * §0.4.26 — resolve the [CoarseningCache] impl for this compilation. Reads the
+     * Resolve the [CoarseningCache] impl for this compilation. Reads the
      * system property `tlaloc.cache.dir`:
      *
      *  - Unset or empty → [NoOpCoarseningCache] (caching disabled; default behaviour).
@@ -1371,7 +1360,7 @@ class TlalocIrGenerationExtension(
     companion object {
 
         /**
-         * §0.4.503 (Tier 3, item 3) — the refusal text, as a pure function of the three
+         * The refusal text, as a pure function of the three
          * facts that decide it, so the wording and the predicate are both certified by
          * `SymjaOptionalDependencyTest` without needing a Symja-free compiler run.
          *
@@ -1391,7 +1380,7 @@ class TlalocIrGenerationExtension(
                     "engine-backed corollaries C6-C9 do",
             )
         }
-        /** §0.4.514 — appended to every strict "kept original call" error. */
+        /** Appended to every strict "kept original call" error. */
         internal const val KEPT_ORIGINAL_STRICT_HINT: String =
             "The call cannot be compiled to a gradient, so the build stops here instead of " +
                 "throwing at the first call. Rewrite the body within the supported surface " +
@@ -1401,13 +1390,13 @@ class TlalocIrGenerationExtension(
                 "turns this into a warning, " +
                 "and the call then throws IllegalStateException when it runs."
 
-        /** §0.4.514 — appended to every "kept original call" warning under
+        /** Appended to every "kept original call" warning under
          * `strictLowering=false`. */
         internal const val KEPT_ORIGINAL_LENIENT_NOTE: String =
             "The call is left as written (strictLowering=false), so it throws " +
                 "IllegalStateException when it runs."
 
-        /** §0.4.514 — appended when the failure is a library symbol the plugin could not
+        /** Appended when the failure is a library symbol the plugin could not
          * find: the usual cause is a library/plugin version mismatch. */
         internal const val VERSION_MISMATCH_HINT: String =
             "If the io.tlaloc libraries on the compile classpath are a different version from " +
@@ -1432,7 +1421,7 @@ class TlalocIrGenerationExtension(
         )
 
         /**
-         * §0.4.501 — the intrinsics whose synthesised function can carry a captured
+         * The intrinsics whose synthesised function can carry a captured
          * runtime value as a trailing input-only parameter. Mirrors
          * `TlalocIntrinsicCallChecker.captureCarryingIntrinsics`, which is the gate
          * that decides whether the FIR lowering promotes a capture at all; this set
@@ -1449,26 +1438,25 @@ class TlalocIrGenerationExtension(
         const val CACHE_DIR_PROPERTY: String = "tlaloc.cache.dir"
 
         /**
-         * §0.4.33 — system property toggling Stage C.3b.3a SOI-based coarsening.
+         * System property toggling SOI-based coarsening.
          * When set to "true", `grad { ... }` calls route through
          * [PhiCalculus.coarsenFunction] (wraps the primal in an OpKind.COARSENED op
          * with pre-computed gradient_body). `valueAndGrad` + multi-return primals
-         * continue to use the existing [PhiCalculus.apply] path because C.3b.3a
-         * doesn't yet handle them.
+         * continue to use the existing [PhiCalculus.apply] path because SOI
+         * coarsening does not handle them.
          */
         const val SOI_ENABLED_PROPERTY: String = "tlaloc.soi.enabled"
 
         /**
-         * §0.4.36 — system property overriding the SOI size-limit `L` when coarsening is
+         * System property overriding the SOI size-limit `L` when coarsening is
          * enabled. Must be a positive integer. Unset / invalid values fall back to the
-         * paper-informed default of 50 (plan §8.2). `LSweepTest` in `:ir/jvmTest` sweeps
-         * L ∈ {5, 25, 50, 100, 200} across a benchmark suite to inform tuning; see
-         * §0.4.36 for empirical findings.
+         * paper-informed default of 50. `LSweepTest` in `:ir/jvmTest` sweeps
+         * L ∈ {5, 25, 50, 100, 200} across a benchmark suite to inform tuning.
          */
         const val SOI_SIZE_LIMIT_PROPERTY: String = "tlaloc.soi.size.limit"
 
         /**
-         * §0.4.105 — D.1i Phase 3. System property toggling [PhiCalculus.simplifyReturns]
+         * System property toggling [PhiCalculus.simplifyReturns]
          * over each gradient `DxirFunction` after [DxirReverseTransform.apply]. When set
          * to "true", the IR extension lifts each return expression to a Symja `SymExpr`,
          * runs `Simplify`, and lowers back. Unset / "false" / anything else: gradient
@@ -1479,7 +1467,7 @@ class TlalocIrGenerationExtension(
         const val SIMPLIFY_ENABLED_PROPERTY: String = "tlaloc.simplify.enabled"
 
         /**
-         * CAS version string per plan §3.2.2 — bumps invalidate cached entries. Tied to
+         * CAS version string — bumps invalidate cached entries. Tied to
          * the plugin build (bump on plugin code changes that alter PhiCalculus output or
          * reverse-transform semantics) AND to Symja's resolved runtime version. Format:
          * `"tlaloc-<plugin>-symja-<symja>"`. The Symja version is read lazily (Symja's

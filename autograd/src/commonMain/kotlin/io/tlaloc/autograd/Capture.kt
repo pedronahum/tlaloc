@@ -82,7 +82,7 @@ fun <S : Shape> capture(
 }
 
 /**
- * §0.4.437 — the N-ary capture, the Phase F model-layer entry point. [capture] and
+ * The N-ary capture, the model-layer entry point. [capture] and
  * [capture2] are the fixed-arity conveniences the intrinsic surface grew up on; a
  * model's forward has one tape leaf per (input tensor + parameter tensor) and that
  * count is arbitrary — the 1–4 ceiling is a `grad {}` lambda-intrinsic property,
@@ -100,10 +100,10 @@ fun <S : Shape> capture(
  * The caller owns the semantics of the position list (which slots are model inputs
  * vs. parameters); `:nn`'s capture step builds exactly that bookkeeping on top.
  *
- * §0.4.442 — the input list is dtype-heterogeneous: an [io.tlaloc.core.I32]
+ * The input list is dtype-heterogeneous: an [io.tlaloc.core.I32]
  * tensor (an embedding-index batch) traces through [traceLeafI32] into an
  * I32-typed leaf/param, whose gradient the reverse transform returns as the
- * §0.4.419 ZEROS_LIKE structural zero. Every other dtype refuses loudly.
+ * ZEROS_LIKE structural zero. Every other dtype refuses loudly.
  */
 @Suppress("UNCHECKED_CAST")
 fun captureN(

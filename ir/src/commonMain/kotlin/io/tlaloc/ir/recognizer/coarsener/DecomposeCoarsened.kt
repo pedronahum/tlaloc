@@ -10,16 +10,16 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 
 /**
- * Layer 4 §0.4.275 — Decompose every COARSENED op without an attached
+ * Decompose every COARSENED op without an attached
  * `kernel_descriptor` by inlining its `primal_body` back into the parent
  * function. Returns the rewritten function (or [fn] unchanged if there's
  * nothing to decompose).
  *
  * # Why this exists
  *
- * The Phase-1 coarsening pipeline produces COARSENED ops carrying a
+ * The coarsening pipeline produces COARSENED ops carrying a
  * `primal_body` (the analytical forward) and a `gradient_body` (the
- * analytical VJP). Layer 3.3's [io.tlaloc.ir.recognizer.kernel.lowerKernelChoice]
+ * analytical VJP). [io.tlaloc.ir.recognizer.kernel.lowerKernelChoice]
  * then attaches a `kernel_descriptor` for targets that have a fused
  * vendor kernel for that pattern (e.g., `flash_attn_v3` on H100). The
  * StableHLO emitter consumes these descriptors as `stablehlo.custom_call`
@@ -35,13 +35,10 @@ import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
  *
  * # CPU baseline strategy
  *
- * Per the dual-track Llama-decoder benchmark plan
- * (`memory/llama_benchmark_dual_track.md`, Phase 3a — CPU first), this
- * is the rewrite that makes "CPU = decomposed" work as the reference
+ * This is the rewrite that makes "CPU = decomposed" work as the reference
  * baseline. GPU/TPU runs pick fused custom_calls via `lowerKernelChoice`;
- * CPU runs decompose to primitives via this pass; the eventual
- * benchmark headline ("X.Y× speedup vs CPU baseline") then measures the
- * actual coarsening win.
+ * CPU runs decompose to primitives via this pass, so a benchmark against
+ * the CPU baseline measures the actual coarsening win.
  *
  * # Scope (v1)
  *

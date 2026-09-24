@@ -6,7 +6,7 @@ import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.PagedAttentionAttrs
 
 /**
- * §0.4.471 — Phase H4: the **paged-attention kernel selector**, and the
+ * The **paged-attention kernel selector**, and the
  * first claiming template that claims a *first-class op kind* rather than
  * a COARSENED splice.
  *
@@ -14,11 +14,11 @@ import io.tlaloc.ir.PagedAttentionAttrs
  *
  * Every earlier template ([FlashAttentionKernel], [RmsNormKernel],
  * [AttentionKernel], [RopeKernel], [CrossEntropyKernel]) claims an
- * `OpKind.COARSENED` produced by L3.2's recognizer — a compile-time
+ * `OpKind.COARSENED` produced by the VJP coarsener — a compile-time
  * artefact carrying a `primal_body`, whose *fallback* is decomposition
  * back into that body. `OpKind.PAGED_ATTENTION` is not that: it is a real
  * op with an interpreter arm and a gather-composed StableHLO emission of
- * its own (§0.4.465). So the fallback here is **the op itself** — decline
+ * its own. So the fallback here is **the op itself** — decline
  * and the graph emits exactly what it emitted before claiming existed.
  * That makes inference-side claiming strictly safer than the COARSENED
  * kind: there is no "neither annotated nor decomposed" hole to fall into.
@@ -39,7 +39,7 @@ import io.tlaloc.ir.PagedAttentionAttrs
  * under the typed-FFI convention with **one scratch result**: the
  * `S[numSeqs·numHeads, maxBlocksPerSeq·blockSize]` score matrix the
  * three-stage launch chain (scores → row softmax → output) stages
- * through, XLA-owned per the §0.4.350/351 mechanism.
+ * through, XLA-owned (see [KernelDescriptor.scratchResults]).
  *
  * `scale` rides [KernelDescriptor.customCallAttrs] so the emitted MLIR
  * names it. The v1 kernel *bakes* it into its PTX (the specialization
@@ -50,8 +50,8 @@ import io.tlaloc.ir.PagedAttentionAttrs
  * Declines:
  * - non-GB10 targets — the KPTX tier is NVIDIA-only by construction.
  * - anything [PagedAttentionAttrs] refuses, and any dtype other than F32:
- *   the v1 kernel is the correctness tier's f32 loops (bf16 pools are a
- *   named H4 deferral, as they were for H1a's emission).
+ *   the kernel is the correctness tier's f32 loops (bf16 pools are not
+ *   supported, as they are not in the op's own emission).
  *
  * **Not in [defaultInferenceKernelTemplates]** — the KPTX lane is opt-in
  * per pipeline, the standing convention for every KPTX template: claiming

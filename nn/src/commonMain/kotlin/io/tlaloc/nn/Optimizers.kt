@@ -1,23 +1,21 @@
 /**
- * §0.4.439 — Phase F3: the optimizers, pure and functional, per the ratified
- * decision 4 of MODEL_LAYER_PLAN.md and the F0 §4.0.2 audit of DiffKT's exact
+ * The optimizers, pure and functional, with DiffKT's exact
  * update formulas. An optimizer is an immutable VALUE; `step` is a pure
  * function `(params, grads, state) → (params', state')` with state keyed like
  * the parameters and created LAZILY (a key absent from the state map IS the
  * "first visit of a parameter" DiffKT detects with its mutable per-visit
  * cursor — same semantics, no cursor). REJECTED: DiffKT's mutable
  * `nextParameter` cursor + `afterFit()` reset (visit-order-indexed
- * `mutableListOf` state fights decision 2's immutability and breaks the moment
+ * `mutableListOf` state fights the immutability of `:nn` values and breaks the moment
  * a parameter set is reordered); a `var`-bearing optimizer with an internal
  * step counter (same objection — the step count is state, so it lives in the
  * state value).
  *
- * Zero tape/trace involvement (the gap table's F3 row: "pure host math on
- * DTensor/FloatArray; no tape involvement at all") and, as everywhere in
+ * Zero tape/trace involvement (pure host math on DTensor/FloatArray) and, as everywhere in
  * `:nn`, zero gradient math — gradients arrive from `DxirReverseTransform`
  * via [valueAndGradients]/[CapturedStep.run], keyed like the parameters.
  *
- * DiffKT-parity findings recorded by the F0 audit and honoured here:
+ * Differences from other frameworks, following DiffKT:
  * - `SGD` momentum is the EMA form `v' = μ·v + (1−μ)·g`, NOT PyTorch's
  *   `μ·v + g`; the first visit seeds `v = g`.
  * - DiffKT's `SGDOptimizer.weightDecay` is LEARNING-RATE decay
@@ -31,13 +29,13 @@
  *   with, and no "does DiffKT bias-correct" question to answer: [Adam] here
  *   is standard Kingma–Ba, BIAS-CORRECTED (m̂ = m/(1−β₁ᵗ), v̂ = v/(1−β₂ᵗ),
  *   update `θ − lr·m̂/(√v̂ + ε)`, defaults lr=1e-3, β₁=.9, β₂=.999, ε=1e-8),
- *   oracled against hand-stepped values and (in F8) the PyTorch harness.
+ *   oracled against hand-stepped values and the PyTorch harness.
  * - **DiffKT's `Momentum.kt` is NOT an optimizer**: it is the EMA helper
  *   `momentumUpdated(new, momentum) = (1−momentum)·this + momentum·new`
  *   shared with BatchNorm's running stats (momentum weights the NEW stat —
- *   the PyTorch `running_stats` convention). The "Momentum optimizer" of the
- *   slice list IS `SGD(momentum = μ)`; the helper ships here as
- *   [momentumUpdated] for F5's BatchNorm.
+ *   the PyTorch `running_stats` convention). A "Momentum optimizer"
+ *   IS `SGD(momentum = μ)`; the helper ships here as
+ *   [momentumUpdated] for [BatchNorm].
  */
 package io.tlaloc.nn
 
@@ -56,7 +54,7 @@ class OptimizerStep<S>(
 )
 
 /**
- * The pure optimizer contract (decision 4): `step(params, grads, state)`
+ * The pure optimizer contract: `step(params, grads, state)`
  * returns NEW parameter tensors and NEW state; nothing is mutated anywhere.
  * [initialState] is the empty state — per-key slots appear lazily on each
  * key's first visit, so a freshly-constructed optimizer needs no knowledge of
@@ -75,7 +73,7 @@ interface Optimizer<S> {
 /**
  * The model-level convenience: step every parameter of [model] and rebuild it
  * via [Trainable.withParameters]. Returns the NEW model and the NEW state —
- * the training loop is a fold, exactly as decision 2 promised.
+ * the training loop is a fold.
  */
 fun <M, S> Optimizer<S>.step(
     model: M,
@@ -114,7 +112,7 @@ private fun requireKnownKeys(params: List<NamedParameter>, grads: Map<String, DT
 
 /**
  * DiffKT's `FixedLearningRateOptimizer(alpha)`: `t − α·g`, no state at all.
- * The F0 audit records no default for `alpha`, so none is offered here.
+ * DiffKT has no default for `alpha`, so none is offered here.
  */
 class FixedLearningRate(val alpha: Float) : CheckpointableOptimizer<Unit> {
 
@@ -159,7 +157,7 @@ class SGDState internal constructor(
 
 /**
  * DiffKT's `SGDOptimizer(initialLearningRate = .001f, weightDecay = 0f,
- * momentum = 0f)`, formulas exact per F0 §4.0.2:
+ * momentum = 0f)`, formulas exact:
  * - momentum = 0: `v = g`; first visit of a key: `v = g` (seeded, stored);
  *   else `v' = μ·v + (1−μ)·g` — the EMA form, NOT PyTorch's `μ·v + g`.
  * - update: `t − lr·v'` with `lr = lr₀ / (1 + lrDecay·stepCount)` — DiffKT's
@@ -233,8 +231,8 @@ class RMSpropState internal constructor(
 )
 
 /**
- * DiffKT's `RMSpropOptimizer(alpha = 0.005f, beta = 0.9f)`, exact per F0
- * §4.0.2: first visit `ms = g²`, else `ms' = β·ms + (1−β)·g²`; update
+ * DiffKT's `RMSpropOptimizer(alpha = 0.005f, beta = 0.9f)`, exact:
+ * first visit `ms = g²`, else `ms' = β·ms + (1−β)·g²`; update
  * `t − α·g/√ms'`. DiffKT has NO epsilon — [eps] defaults to 0f (literal
  * parity) and, when nonzero, takes PyTorch's placement `√ms' + ε` (recorded:
  * a Tlaloc extension, never oracled against DiffKT).
@@ -302,9 +300,8 @@ class AdamState internal constructor(
 )
 
 /**
- * Standard Kingma–Ba Adam, BIAS-CORRECTED — see the file KDoc for the
- * recorded finding: DiffKT's `AdamOptimizer` is a `TODO(...)` placeholder,
- * so this is a Tlaloc implementation of the paper, not a DiffKT parity item.
+ * Standard Kingma–Ba Adam, BIAS-CORRECTED. DiffKT's `AdamOptimizer` is a
+ * `TODO(...)` placeholder, so this implements the paper, not a DiffKT port.
  *
  *   m' = β₁·m + (1−β₁)·g;  v' = β₂·v + (1−β₂)·g²;  t' = t + 1
  *   m̂ = m'/(1−β₁^t');      v̂ = v'/(1−β₂^t')
@@ -369,12 +366,10 @@ class Adam(
 }
 
 /**
- * DiffKT's `Momentum.kt` EMA helper (NOT an optimizer there — the F0 §4.0.2
- * finding): `this.momentumUpdated(new, momentum) = (1−momentum)·this +
- * momentum·new`. Momentum weights the NEW statistic — PyTorch's
- * `running_stats` convention (default 0.1 at the BatchNorm call site, F5's
- * consumer), NOT Flax's `1−momentum`. Float and tensor overloads, exactly
- * like the source.
+ * DiffKT's `Momentum.kt` EMA helper (NOT an optimizer there): `this.momentumUpdated(new,
+ * momentum) = (1−momentum)·this + momentum·new`. Momentum weights the NEW statistic — PyTorch's
+ * `running_stats` convention (default 0.1 at the [BatchNorm] call site), NOT Flax's
+ * `1−momentum`. Float and tensor overloads, exactly like the source.
  */
 fun Float.momentumUpdated(new: Float, momentum: Float): Float =
     (1f - momentum) * this + momentum * new

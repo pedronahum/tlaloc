@@ -10,14 +10,14 @@ import io.tlaloc.ir.DxirOpResult
 import io.tlaloc.ir.DxirParam
 
 /**
- * §0.4.27 — Stage C.1 def-use analysis on a [DxirFunction]. Records both **forward**
+ * Def-use analysis on a [DxirFunction]. Records both **forward**
  * (def → list of consumer op ids) and **reverse** (backward reachability from any
  * specified sink) information. The forward map is used by the SOI identification
  * algorithm's `splitOnReuses` step (picks the free variable with the most consumers
  * to split a too-large leaf); the backward-reachable set is used to restrict the
  * region tree to ops actually contributing to a specific active sink `s ∈ S`.
  *
- * Scope (C.1 first cut):
+ * Scope:
  *  - Records uses from op-operand edges at every nesting depth (top-level body, IF/
  *    WHILE regions, nested regions). Region terminators (yields) also count — they
  *    carry values out of the region.

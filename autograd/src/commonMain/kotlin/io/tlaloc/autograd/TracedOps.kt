@@ -98,7 +98,7 @@ fun <S : Shape> Tracer<S>.neg(): Tracer<S> {
 }
 
 /**
- * §0.4.96 — Kotlin unary-minus operator. Lets users write `-x` instead of
+ * Kotlin unary-minus operator. Lets users write `-x` instead of
  * `x.neg()`. Delegates straight to [neg]; no new tape op or rule. Closes a
  * cosmetic gap where `+`, `-`, `*`, `/` were operators but the negation form
  * needed an explicit method call.
@@ -149,18 +149,16 @@ fun <S : Shape> Tracer<S>.sigmoid(): Tracer<S> {
 }
 
 /**
- * §0.4.64 — elementwise `base^exp`. Both operands must be same-shape F32 Tracers
- * sharing one tape. VjpRegistry's `PowRule` (§0.4.22; §0.4.53 widened for Int exp
- * inside C6's closed form) computes grad_base = upstream · exp · base^(exp-1)
+ * Elementwise `base^exp`. Both operands must be same-shape F32 Tracers
+ * sharing one tape. VjpRegistry's `PowRule` computes grad_base = upstream · exp · base^(exp-1)
  * and grad_exp = upstream · base^exp · ln(base). Both flow back when the
- * captured function's `OpKind.POW` meets `DxirReverseTransform` (§0.4.446).
+ * captured function's `OpKind.POW` meets `DxirReverseTransform`.
  *
  * For `x ↦ x^k` where `k` is a runtime-known scalar, wrap `k` as a scalar leaf
  * (e.g. `tape.traceLeaf(f32Scalar(k))`) — it participates in the reverse walk,
  * but if you don't seed `k` with anything in the lambda it contributes no grad.
- * For constant-exp cases where `k` need NOT be differentiable, a future
- * lightweight "constant tracer" wrapper would avoid the leaf dance; tracked as
- * a potential convenience but not shipping here (out of scope for §0.4.64).
+ * For constant-exp cases where `k` need NOT be differentiable, use the
+ * `Tracer<S>.pow(Float)` overload below.
  */
 fun <S : Shape> Tracer<S>.pow(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
@@ -186,14 +184,11 @@ operator fun <S : Shape> Tracer<S>.times(scalar: Float): Tracer<S> = this * cons
 operator fun <S : Shape> Tracer<S>.div(scalar: Float): Tracer<S> = this / constantLike(scalar)
 
 /**
- * §0.4.76 — scalar-literal `pow` overload. Follows the §0.4.75 pattern: promote
+ * Scalar-literal `pow` overload. Like the scalar arithmetic overloads, it promotes
  * the Float literal to a same-shape constant leaf and route through the
  * existing `Tracer<S>.pow(Tracer<S>)` surface. PowRule still builds its
- * `grad_exp = upstream · x^e · ln(x)` tree — the §0.4.65 constant-skip cuts
+ * `grad_exp = upstream · x^e · ln(x)` tree — the constant-leaf skip cuts
  * the DxirInterpreter evaluation step but not the rule's dxir construction.
- * For callers who want to save that construction cost on a hot loop, a
- * dedicated `OpKind.SCALAR_POW` with a one-sided VjpRule is filed as a future
- * optimisation (§0.4.75's decision note).
  */
 fun <S : Shape> Tracer<S>.pow(scalar: Float): Tracer<S> = this.pow(constantLike(scalar))
 
@@ -297,14 +292,14 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
 // users expect as the gradient of a bias term.
 
 /**
- * §0.4.89 — public companion to the §0.4.85 `Tracer<Rank2<A, B>>.plus(Tracer<Rank1<B>>)`
+ * Public companion to the `Tracer<Rank2<A, B>>.plus(Tracer<Rank1<B>>)`
  * operator. Same machinery (records BROADCAST with `broadcast_dimensions = [1]`),
  * exposed as a named builder so users who want the broadcast direction to be
  * explicit in their code can call it directly — e.g. inside a larger expression
  * where the implicit operator overload would be harder to read.
  *
- * Mirrors §0.4.87's `broadcastCol` in both signature and intent. The §0.4.85
- * implicit operator continues to delegate here; no behavioural change.
+ * Mirrors [broadcastCol] in both signature and intent. The implicit
+ * operator delegates here.
  */
 fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastRow(
     row: Tracer<io.tlaloc.core.Rank1<B>>,
@@ -348,13 +343,13 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
 ): Tracer<Rank2<A, B>> = this / broadcastRow(row)
 
 /**
- * §0.4.87 — rank-1-to-rank-2 column-vector broadcast. Produces a rank-2 tracer
+ * Rank-1-to-rank-2 column-vector broadcast. Produces a rank-2 tracer
  * where each column-entry gets the corresponding [col] value replicated across
  * all columns. Shape contract: `col.dims[0] == this.dims[0]` (matrix row
  * count); output shape matches [this].
  *
  * Not an operator overload: `Tracer<Rank2<A, B>>.plus(Tracer<Rank1<A>>)` would
- * clash source-level with §0.4.85's `Tracer<Rank2<A, B>>.plus(Tracer<Rank1<B>>)`
+ * clash source-level with `Tracer<Rank2<A, B>>.plus(Tracer<Rank1<B>>)`
  * when the phantom types A and B are both `Sym` (the default for `Tensors.
  * f32Matrix<Sym, Sym>` callers). Kotlin's overload resolution picks "more
  * specific", and both candidates are equally specific for `Rank1<Sym>` — so the
@@ -362,7 +357,7 @@ operator fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.div(
  * the collision; users write `matrix + matrix.broadcastCol(col)` explicitly.
  *
  * Records `OpKind.BROADCAST` with `broadcast_dimensions = listOf(0)` (input dim
- * 0 → output dim 0; output dim 1 is broadcast-inserted). §0.4.84's axis-aware
+ * 0 → output dim 0; output dim 1 is broadcast-inserted). The axis-aware
  * BroadcastRule reverses it as `SUM(upstream, reduction_dims = [1])` →
  * rank-1 grad back to [col].
  */
@@ -682,9 +677,9 @@ fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastCol(
 }
 
 /**
- * §0.4.438 — F2: element-count-preserving relayout, the Flatten substrate.
+ * Element-count-preserving relayout, the Flatten substrate.
  * Records [OpKind.RESHAPE] with the RESULT dims on the entry and NO attrs —
- * exactly the spelling the interpreter's §0.4.359 arm and `ReshapeRule` read
+ * exactly the spelling the interpreter's RESHAPE arm and `ReshapeRule` read
  * (both work off the operand/result types alone; `Tape.toDxirFunction` puts
  * the entry dims into the op's `DxirType`, so the captured graph carries
  * everything the transform needs). Forward is a pure row-major copy of the
@@ -693,7 +688,7 @@ fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastCol(
  *
  * The result dims are read off the receiver at TRACE time, which is the
  * contract everywhere on the tape: a captured graph is valid for one
- * structure and a structure change retraces (the F1 caching contract).
+ * structure and a structure change retraces (the model-layer caching contract).
  */
 @Suppress("UNCHECKED_CAST")
 fun <S : Shape> Tracer<*>.reshape(newDims: IntArray): Tracer<S> {
@@ -720,16 +715,15 @@ fun <S : Shape> Tracer<*>.reshape(newDims: IntArray): Tracer<S> {
 // adjoints. No gradient math here — the transform owns it.
 
 /**
- * §0.4.440 — 2-D convolution: NCHW `[N, Ci, H, W]` input against an OIHW
- * `[Co, Ci, kh, kw]` kernel, output NCHW (Tlaloc's native layouts — the F4
- * layout decision recorded in MODEL_LAYER_PLAN.md; DiffKT's NHWC/[Co,kh,kw,Ci]
+ * 2-D convolution: NCHW `[N, Ci, H, W]` input against an OIHW
+ * `[Co, Ci, kh, kw]` kernel, output NCHW (Tlaloc's native layouts; DiffKT's NHWC/[Co,kh,kw,Ci]
  * is a layout transpose of the same maths). Records [OpKind.CONV2D] with attrs
  * `window_strides = [strideH, strideW]` and `padding = [[top, bottom], [left,
  * right]]` — `lhs_dilation`/`rhs_dilation`/`window_reversal`/
  * `feature_group_count` are left to their defaults ([1,1]/[1,1]/[false,false]/1),
  * which is both the interpreter's and `Conv2dRule`'s reading. Groups stay 1 at
  * the trace level: the IR supports them but the host twin this forward routes
- * through does not (§0.4.429's named deferral).
+ * through does not.
  *
  * Result shape `[N, Co, (H + top + bottom − kh)/strideH + 1, (W + left + right
  * − kw)/strideW + 1]`, read off the host twin's own result.
@@ -774,7 +768,7 @@ fun <S : Shape> Tracer<*>.conv2d(
 }
 
 /**
- * §0.4.440 — 2-D max pooling, NCHW, the classic non-overlapping pool (window =
+ * 2-D max pooling, NCHW, the classic non-overlapping pool (window =
  * stride, zero padding — DiffKT's `MaxPool2d(poolH, poolW)` shape and the ONLY
  * form `MaxPool2dRule` v1 differentiates). Records [OpKind.MAXPOOL2D] with
  * attrs `window = [windowH, windowW]`, `window_strides = window`, `padding =
@@ -782,8 +776,8 @@ fun <S : Shape> Tracer<*>.conv2d(
  * the captured graph never leans on a default.
  *
  * DiffKT requires the spatial dims to divide by the pool (`H %% poolH == 0`);
- * F4 keeps the same requires (F0 landmine 7). Tie convention downstream:
- * MAXPOOL2D_GRAD routes the upstream to ALL within-window ties (§0.4.389) —
+ * Tlaloc keeps the same requirement. Tie convention downstream:
+ * MAXPOOL2D_GRAD routes the upstream to ALL within-window ties —
  * pin oracles on tie-free grids.
  */
 @Suppress("UNCHECKED_CAST")
@@ -791,7 +785,7 @@ fun <S : Shape> Tracer<*>.maxPool2d(windowH: Int, windowW: Int): Tracer<S> =
     tracePool2d(OpKind.MAXPOOL2D, windowH, windowW) as Tracer<S>
 
 /**
- * §0.4.440 — 2-D average pooling, NCHW, non-overlapping (window = stride, zero
+ * 2-D average pooling, NCHW, non-overlapping (window = stride, zero
  * padding), dividing by the FULL window `kh·kw` (count_include_pad — the
  * interpreter's and PyTorch's convention; padding is zero here so the two
  * conventions coincide anyway). Same attr spelling and divisibility contract
@@ -859,11 +853,11 @@ private fun Tracer<*>.checkReductionAxes(axes: IntArray, opName: String): List<I
 }
 
 /**
- * §0.4.441 — axis-aware sum. Records [OpKind.SUM] with
+ * Axis-aware sum. Records [OpKind.SUM] with
  * `reduction_dims = axes` (sorted, deduplicated) and the KEPT dims on the
  * entry — the reduced axes are dropped, the interpreter's own projection.
- * `SumRule` reverses via the keepdims RESHAPE + equal-rank stretch BROADCAST
- * (§0.4.366). `sum(0, 2, 3)` on NCHW is the per-channel batch statistic F5's
+ * `SumRule` reverses via the keepdims RESHAPE + equal-rank stretch BROADCAST.
+ * `sum(0, 2, 3)` on NCHW is the per-channel batch statistic `:nn`'s
  * BatchNorm desugars through.
  */
 @Suppress("UNCHECKED_CAST")
@@ -881,8 +875,8 @@ fun <S : Shape> Tracer<*>.sum(axes: IntArray): Tracer<S> {
 }
 
 /**
- * §0.4.441 — axis-aware mean: the [sum] projection divided per cell by the
- * product of the REDUCED extents (the interpreter's §0.4.366 MEAN arm computes
+ * Axis-aware mean: the [sum] projection divided per cell by the
+ * product of the REDUCED extents (the interpreter's MEAN arm computes
  * the same sum-then-divide, so the cached value matches bit-for-bit).
  * `MeanRule`'s reverse bakes the same 1/n for concrete dims.
  */
@@ -901,15 +895,15 @@ fun <S : Shape> Tracer<*>.mean(axes: IntArray): Tracer<S> {
 }
 
 /**
- * §0.4.441 — rank-1 → rank-N broadcast along one axis of the RECEIVER's shape:
+ * Rank-1 → rank-N broadcast along one axis of the RECEIVER's shape:
  * the receiver contributes dims + tape only (it is NOT an operand — no gradient
  * flows to it through this op, matching [broadcastRow]'s convention), and [vec]
  * (rank-1, `vec.dims[0] == dims[axis]`) is replicated over every other axis.
  * Records [OpKind.BROADCAST] with `broadcast_dimensions = [axis]`;
  * `BroadcastRule` reverses it as `SUM(upstream, reduction_dims = <all other
  * axes>)` — for the NCHW channel axis (`axis = 1`) exactly the per-channel
- * gradient every BatchNorm/bias term wants. Generalises §0.4.85's
- * `broadcastRow` (rank-2, axis 1) to any receiver rank; F5's BatchNorm uses it
+ * gradient every BatchNorm/bias term wants. Generalises
+ * [broadcastRow] (rank-2, axis 1) to any receiver rank; `:nn`'s BatchNorm uses it
  * at rank 4.
  */
 @Suppress("UNCHECKED_CAST")
@@ -971,9 +965,9 @@ infix fun <R : ShapeAtom, K : ShapeAtom, C : ShapeAtom> Tracer<Rank2<R, K>>.matm
 }
 
 /**
- * §0.4.137 — batched matrix multiply for rank-3 inputs. `(B, M, K) × (B, K, N) → (B, M, N)`.
+ * Batched matrix multiply for rank-3 inputs. `(B, M, K) × (B, K, N) → (B, M, N)`.
  * Records as [OpKind.MATMUL] in the tape (the same op kind that the rank-2 matmul uses);
- * §0.4.135's substrate handles both ranks, and §0.4.137's [MatmulRule] extension
+ * the IR handles both ranks, and `MatmulRule`
  * recognises the rank-3 shape on the reverse pass and emits batched-TRANSPOSE +
  * batched-MATMUL contributions for each operand.
  */
@@ -1035,18 +1029,18 @@ infix fun <B : ShapeAtom, R : ShapeAtom, K : ShapeAtom, C : ShapeAtom>
 // transform owns it.
 
 /**
- * §0.4.442 — embedding lookup: the receiver is the rank-2 `[V, D]` F32 table,
+ * Embedding lookup: the receiver is the rank-2 `[V, D]` F32 table,
  * [indices] a rank-1 `[N]` or rank-2 `[B, N]` I32 leaf (traced through
  * `captureN`'s dtype dispatch), result `[N, D]` / `[B, N, D]`. Records
  * [OpKind.EMBEDDING] with operands (table, indices) and the optional
  * `padding_index` attr (recorded only when ≥ 0 — absent = none, the
  * interpreter's own reading); positions whose index equals [paddingIndex]
  * produce EXACT-zero output rows and, through the fused EMBEDDING_GRAD the
- * EmbeddingRule emits (primal attrs riding along, §0.4.409), contribute
+ * EmbeddingRule emits (primal attrs riding along), contribute
  * exactly zero gradient to the table.
  *
  * The indices operand is non-differentiable by DTYPE: its captured param is
- * I32-typed, so the reverse transform returns the §0.4.419 ZEROS_LIKE
+ * I32-typed, so the reverse transform returns the ZEROS_LIKE
  * structural zero for it — expected, not a bug.
  */
 @Suppress("UNCHECKED_CAST")
@@ -1096,7 +1090,7 @@ fun <S : Shape> Tracer<*>.embedding(indices: Tracer<*>, paddingIndex: Int = -1):
 }
 
 /**
- * §0.4.442 — contiguous slice `[start, end)` along [axis] (stride 1 — the only
+ * Contiguous slice `[start, end)` along [axis] (stride 1 — the only
  * form `SliceRule` v1 differentiates; its reverse is the zero-PAD back to the
  * operand's extent). Records [OpKind.SLICE] with the interpreter's full-rank
  * attr spelling: `start_indices` / `limit_indices` / `strides`, one entry per
@@ -1142,7 +1136,7 @@ fun <S : Shape> Tracer<*>.slice(start: Int, end: Int, axis: Int): Tracer<S> {
 }
 
 /**
- * §0.4.442 — concatenation of [parts] along [axis] (every part the same rank
+ * Concatenation of [parts] along [axis] (every part the same rank
  * and extents outside [axis]). Records [OpKind.CONCAT] with the interpreter's
  * `dimension` attr and one operand per part; `ConcatRule` reverses it as one
  * SLICE per operand. Forward is the interpreter's own outer-major copy walk.
@@ -1193,12 +1187,11 @@ fun <S : Shape> concat(parts: List<Tracer<*>>, axis: Int): Tracer<S> {
 }
 
 /**
- * §0.4.458 (G1d) — the Tracer CAST spelling, the mixed-precision trace
+ * The Tracer CAST spelling, the mixed-precision trace
  * boundary. Records [OpKind.CAST] to [dtype] on the tape; `Tape.toDxirFunction`
- * reproduces it as the type-driven `DxirOp` the whole G1b stack already
- * certifies (interpreter arm §0.4.456, `stablehlo.convert` emission, CastRule's
- * straight-through adjoint — no new gradient math anywhere, the one-engine
- * rule).
+ * reproduces it as the type-driven `DxirOp` the compiler path already
+ * certifies (interpreter arm, `stablehlo.convert` emission, CastRule's
+ * straight-through adjoint — no gradient math of its own).
  *
  * v1 scope, refused by name outside it: F32 ↔ BF16 only. Int casts stay the
  * FIR lowering's territory (`i.toFloat()`), and no other float dtype has a
@@ -1208,7 +1201,7 @@ fun <S : Shape> concat(parts: List<Tracer<*>>, axis: Int): Tracer<S> {
  * The forward value: for →BF16 the entry's central snap (see `Tape.op`)
  * rounds it — CAST is the op that OWNS the rounding, and the snap there IS
  * this op's math; for BF16→F32 the copy is exact (the source array already
- * holds widened forms, §0.4.455).
+ * holds widened forms).
  */
 fun <S : Shape> Tracer<S>.cast(dtype: io.tlaloc.core.DType): Tracer<S> {
     if (dtype == entry.dtype) return this

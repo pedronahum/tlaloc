@@ -11,7 +11,7 @@ class TapeEntry internal constructor(
     val dims: IntArray,
     val value: FloatArray,
     /**
-     * §0.4.65 — marks a leaf as an opaque constant. The reverse walk short-circuits
+     * Marks a leaf as an opaque constant. The reverse walk short-circuits
      * any contribution targeting this entry (the user never asks for its gradient,
      * so there's no point materialising the VJP rule's dExp/dBase-like expression
      * for it). Only meaningful on leaves (`op == null`); ops carry their own
@@ -19,7 +19,7 @@ class TapeEntry internal constructor(
      */
     val isConstant: Boolean = false,
     /**
-     * §0.4.80 — attributes carried alongside the op, mirroring the dxir
+     * Attributes carried alongside the op, mirroring the dxir
      * DxirOp.attrs map. Most ops don't need attrs (their semantics are fully
      * determined by inputs + dims); BROADCAST needs `broadcast_dimensions` so
      * captures and StableHLO emission can reconstruct the dxir shape without
@@ -27,13 +27,13 @@ class TapeEntry internal constructor(
      */
     val attrs: Map<String, Any> = emptyMap(),
     /**
-     * §0.4.442 — the entry's element dtype, [F32] unless stated otherwise. The
+     * The entry's element dtype, [F32] unless stated otherwise. The
      * tape's VALUE cache stays a FloatArray for every dtype (the dxir
      * interpreter's own float-encoded environment convention — its
      * EMBEDDING/EMBEDDING_GRAD arms read indices via `toInt()`); what the dtype
      * governs is the [io.tlaloc.ir.DxirType] that `Tape.toDxirFunction` stamps
      * on the reproduced node, so an I32 index leaf comes out an I32-typed
-     * `DxirParam` and `DxirReverseTransform` emits its §0.4.419 ZEROS_LIKE
+     * `DxirParam` and `DxirReverseTransform` emits its ZEROS_LIKE
      * structural zero instead of trying to differentiate it. Float-encoded
      * integers are exact to 2²⁴ — the I32 leaf spelling asserts the bound.
      */
@@ -62,7 +62,7 @@ class Tape {
     }
 
     /**
-     * §0.4.458 (G1d) — [dtype] `null` (every pre-G1d op site) means PROPAGATE:
+     * [dtype] `null` (the default at most op sites) means PROPAGATE:
      * any [io.tlaloc.core.BF16] input makes the result BF16, and mixing a BF16
      * input with an F32 input REFUSES BY NAME — StableHLO's elementwise ops
      * demand one element type, so a mixed-operand tape entry would emit
@@ -72,7 +72,7 @@ class Tape {
      * (CAST, the dtype-preserving RESHAPE/SLICE) bypass propagation unchanged.
      *
      * The BF16 VALUE INVARIANT, enforced centrally here exactly like the
-     * interpreter's `snapToBf16` in `evalNode` (§0.4.456): a BF16-typed
+     * interpreter's `snapToBf16` in `evalNode`: a BF16-typed
      * entry's FloatArray holds the f32-WIDENED FORMS OF BF16-ROUNDED numbers.
      * The op sites compute their forward in f32 through the host twins; this
      * one RNE snap at the entry's own output is the compute-in-f32,

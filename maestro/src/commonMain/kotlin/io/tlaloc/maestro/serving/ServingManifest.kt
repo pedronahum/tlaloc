@@ -13,9 +13,9 @@ import io.tlaloc.maestro.ProgramManifest
 import io.tlaloc.maestro.TypeDescriptor
 
 /**
- * §0.4.469 — Phase H3a: the **serving artifact's** top-level manifest.
+ * The **serving artifact's** top-level manifest.
  *
- * `docs/INFERENCE_SERVING_AUDIT.md` §1 stakes the arc on one property —
+ * The serving design rests on one property —
  * **no JVM in the serving path**. That property is a claim about an
  * ARTIFACT: Tlaloc AOT-compiles a family of decode/prefill graphs and hands
  * a directory to a Python process, which loads it through jaxlib/PJRT and
@@ -26,15 +26,13 @@ import io.tlaloc.maestro.TypeDescriptor
  * It is **not an extension of [ProgramManifest]**, and that is a decision
  * rather than an omission. [ProgramManifest] describes ONE program: its
  * boundary types, its mesh requirement, the content address of its
- * StableHLO bytes, and the L3 backend matrix. A serving artifact is a
+ * StableHLO bytes, and the backend matrix. A serving artifact is a
  * DEPLOYMENT of a *family* of programs — one per (kind, batch, context)
  * ladder point — that share a model shape, a bucket ladder and a weights
  * pointer, and whose slots additionally carry a serving ROLE (which
  * operand is the block table, which pair of buffers is layer 7's KV pool).
  *
- * The slice was asked to extend [ProgramManifest] "only as needed and
- * justify each field". It needed **zero new fields**, and the justification
- * for each field it did not get is the same: `bucket`, `donationPairs`,
+ * [ProgramManifest] gets **no serving fields**, for one reason: `bucket`, `donationPairs`,
  * `role`, `bucketLadder`, `weights` are meaningless to a `program { }`
  * step that resizes an image or runs a training epoch, and a schema that
  * carries fields most of its instances must leave null is a schema that has
@@ -63,14 +61,13 @@ import io.tlaloc.maestro.TypeDescriptor
  * ## Why a JSON schema and not a serialized protobuf / StableHLO bytecode
  *
  * REJECTED: `stablehlo` bytecode for the bodies. It is the better transport
- * (smaller, version-stable) and it is a **named deferral**; textual MLIR is
- * what `jaxlib.mlir.ir.Module.parse` takes directly, it is what the
- * §0.4.299 spike proved jaxlib consumes verbatim, and a serving artifact a
- * human can `grep` is worth a lot in the slice that first draws the line
- * between the two runtimes.
+ * (smaller, version-stable) and is not supported yet; textual MLIR is
+ * what `jaxlib.mlir.ir.Module.parse` takes directly, jaxlib consumes it
+ * verbatim, and a serving artifact a human can `grep` is easier to debug
+ * at the boundary between the two runtimes.
  *
  * REJECTED: protobuf / kotlinx-serialization for the manifest. `:core`'s
- * strict [parseJson] (§0.4.468, written because a checkpoint is untrusted
+ * strict [parseJson] (written because a checkpoint is untrusted
  * input) already exists and is strict in exactly the ways that matter here
  * — duplicate keys refused, `4.0` is not an extent of 4 — so the artifact
  * and the checkpoint are read by the same discipline.
@@ -178,7 +175,7 @@ data class ServingManifest(
  * becomes a breaking change to an artifact already on disk.
  *
  * [kvPoolAxisOrder] is stated rather than implied. The pool is
- * `[numBlocks, blockSize, numKvHeads, headDim]` (H1a's operand contract),
+ * `[numBlocks, blockSize, numKvHeads, headDim]` (PAGED_ATTENTION's operand contract),
  * and a loader that has to infer which axis is which from four integers
  * will get it right until the day two of them are equal.
  */
@@ -195,12 +192,10 @@ data class ServingModelShape(
     val dtype: String,
     /** KV-pool dtype as the graph boundary carries it. Under [kvQuant] this is
      *  the CODES' integer dtype, not the quantized format — the format is
-     *  [kvQuant]'s business, and the two are deliberately separate fields
-     *  (§0.4.472). */
+     *  [kvQuant]'s business, and the two are deliberately separate fields. */
     val kvDtype: String,
     /**
-     * §0.4.472 — Phase H5: the KV-quant format, or null for a float pool. The
-     * slot §0.4.258 reserved, finally carrying a value.
+     * The KV-quant format, or null for a float pool.
      *
      * A consumer reads this to learn something no tensor type tells it: that
      * the buffers behind the KV-pool slots are integer CODES read against a
@@ -245,7 +240,7 @@ data class ServingModelShape(
 }
 
 /**
- * §0.4.472 — Phase H5: the KV-quant format, as the artifact publishes it.
+ * The KV-quant format, as the artifact publishes it.
  *
  * Four fields, and the fourth is the interesting one:
  *
@@ -256,10 +251,9 @@ data class ServingModelShape(
  *   stated anyway, because a Python consumer should not have to keep a table
  *   of this house's conventions to validate a pool it is handed.
  * - [codeDtype] — the dtype the codes actually ride at the graph boundary,
- *   `"i32"` in v1. This is the deferral said OUT LOUD, in the artifact, where
- *   a deployment can see it: the contract is quantized but the BYTES are not
- *   yet narrow, because there is no I8 [io.tlaloc.core.DType] (bf16's
- *   §0.4.455–458 tour is what adding one costs). A serving stack sizing a KV
+ *   `"i32"` today. The artifact states this where a deployment can see it:
+ *   the contract is quantized but the BYTES are not yet narrow, because
+ *   there is no I8 [io.tlaloc.core.DType]. A serving stack sizing a KV
  *   pool reads [codeDtype] for its byte budget and [dtype] for its accuracy
  *   story, and today those two disagree — which is exactly the fact a manifest
  *   exists to carry.
@@ -296,9 +290,8 @@ data class ServingKvQuant(
 }
 
 /**
- * The compiled ladder, as the artifact advertises it. This is the
- * "manifest field carrying the spec" that H1c named as a deferral to this
- * slice: a deployment now states its own bucket ladder, so the Python side
+ * The compiled ladder, as the artifact advertises it. A deployment
+ * states its own bucket ladder, so the Python side
  * performs bucket SELECTION — round the request up, refuse over-cap — with
  * no access to `DecodeBucketPolicy` and no second copy of the policy's
  * arithmetic hard-coded in Python.
@@ -342,26 +335,25 @@ data class ServingBucketLadder(
 }
 
 /**
- * Where the weights are. A POINTER, and — since §0.4.480 — optionally a
+ * Where the weights are. A POINTER, and optionally a
  * TABLE naming the file behind each staged weight slot.
  *
- * §0.4.469's v1 exported graphs whose weights are StableHLO `constant`s
- * inside the body, which is why [embedded] exists. §0.4.479 established
- * that a real checkpoint cannot do that (`DecodeGraphSpec.weightSlots`:
+ * Small graphs can carry their weights as StableHLO `constant`s
+ * inside the body, which is why [embedded] exists. A real checkpoint
+ * cannot do that (`DecodeGraphSpec.weightSlots`:
  * TinyLlama-1.1B as `dense<[...]>` literals is tens of gigabytes of TEXT,
- * in the file whose whole premise is that it *is* the deployment), and this
- * slice is where the other branch grows a body: [embedded] goes false,
+ * in the file whose whole premise is that it *is* the deployment), so for
+ * those [embedded] is false,
  * [path] names an artifact-relative directory, and [table] names one file
  * per `WEIGHT` slot **in the spec's own slot order**.
  *
  * ## Why STAGED-LAYOUT FILES and not the checkpoint
  *
- * This type's original doc REJECTED copying the checkpoint in, and that
- * judgement stands for the *checkpoint*. What [table] carries is not the
- * checkpoint: it is the checkpoint **after** §0.4.479's host-side
+ * The artifact does not copy the checkpoint in. What [table] carries is
+ * not the checkpoint: it is the checkpoint **after** the host-side
  * transpose, widened to the graph's dtype, one file per operand, in call
  * order. The difference is load-bearing in exactly one place — the loader
- * is `tlaloc_serve.py`, which has no framework under it (§0.4.476), and
+ * is `tlaloc_serve.py`, which has no framework under it, and
  * asking it to transpose 1.1e9 floats or to widen bf16 in pure Python is
  * asking for minutes per process start. The JVM already did that work once,
  * at export, where the code that knows the layout fact lives.
@@ -369,8 +361,8 @@ data class ServingBucketLadder(
  * So the rule the two branches divide on is: **an artifact points at a
  * checkpoint it did not have to change, and carries the bytes it did.** A
  * `"safetensors"` [format] with an empty [table] — the loader staging from
- * an unmodified checkpoint — remains legal in the schema and is a NAMED
- * DEFERRAL, not a refusal; it needs a stdlib safetensors reader and a
+ * an unmodified checkpoint — remains legal in the schema but is not
+ * implemented by the loader; it needs a stdlib safetensors reader and a
  * transpose budget nobody has measured.
  *
  * REJECTED: one concatenated blob with offsets. It saves inodes and costs
@@ -419,7 +411,7 @@ data class ServingWeightsPointer(
         /** The v1 shape: constants live in the StableHLO body. */
         fun embedded(): ServingWeightsPointer = ServingWeightsPointer("embedded", null, true)
 
-        /** The §0.4.480 shape: one raw little-endian file per staged operand. */
+        /** One raw little-endian file per staged operand. */
         const val STAGED_FORMAT: String = "staged"
 
         /** The artifact-relative directory [STAGED_FORMAT] writes into. */
@@ -450,8 +442,8 @@ data class ServingWeightsPointer(
  * the bodies get for free from content addressing, bought back explicitly
  * here. The reason bodies are content-addressed and weights are not is
  * de-duplication: two ladder points share a body, and no two weight slots
- * share a tensor (a tied `lm_head` resolves to the embedding table at
- * §0.4.478's reader, so it is staged twice, deliberately — the alternative
+ * share a tensor (a tied `lm_head` resolves to the embedding table in
+ * the checkpoint reader, so it is staged twice, deliberately — the alternative
  * is a loader that has to know about aliasing to bind an operand list).
  */
 data class ServingWeightFile(
@@ -493,7 +485,7 @@ data class ServingEntry(
     val kind: DecodeGraphKind,
     val batch: Int,
     val context: Int,
-    /** 1 for decode, the context width for prefill (H1c's token axis). */
+    /** 1 for decode, the context width for prefill (the token axis). */
     val tokensPerSeq: Int,
     val maxBlocksPerSeq: Int,
     /** [DecodeGraphSpec.executableCacheKey] — the string a serving process
@@ -510,7 +502,7 @@ data class ServingEntry(
     val programPath: String,
     val inputs: List<ServingSlot>,
     val outputs: List<ServingSlot>,
-    /** `(inputIndex, outputIndex)` pairs a runtime may donate. H1c's list. */
+    /** `(inputIndex, outputIndex)` pairs a runtime may donate, as [DecodeGraphSpec] lists them. */
     val donationPairs: List<List<Int>>,
 ) {
     /** Stable id: what the program-manifest file is named after. */
@@ -581,7 +573,7 @@ data class ServingEntry(
 /**
  * A named, ROLE-tagged position in a compiled entry's signature. The role
  * is what lets a plugin bind by meaning — "hand me the block tables" —
- * rather than by an index it would have to keep in sync with H1c by hand.
+ * rather than by an index it would have to keep in sync with [DecodeGraphSpec] by hand.
  */
 data class ServingSlot(val name: String, val role: DecodeSlotRole, val type: TypeDescriptor) {
     fun toJson(): String =

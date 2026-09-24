@@ -922,6 +922,28 @@ if (tlalocTestJdk != null) {
     }
 }
 
+// Published API docs describe the code, not the work items that produced it: no
+// changelog section numbers, plan phases or planning-document names in the KDoc
+// of any module's main sources. scripts/check-kdoc-internal-refs.py is the check;
+// `./gradlew test` and `./gradlew check` run it.
+val kdocGateScript = layout.projectDirectory.file("scripts/check-kdoc-internal-refs.py")
+val kdocGateSources = fileTree(layout.projectDirectory) {
+    include("*/src/main/**/*.kt", "*/src/*Main/**/*.kt")
+    exclude("benchmarks/**", "examples/**", "harness/**", "third-party/**", "build/**")
+}
+val checkKdocInternalRefs = tasks.register<Exec>("checkKdocInternalRefs") {
+    group = "verification"
+    description = "Fail on internal work-item references in the KDoc of published sources"
+    inputs.file(kdocGateScript)
+    inputs.files(kdocGateSources).withPathSensitivity(PathSensitivity.RELATIVE)
+    val stamp = layout.buildDirectory.file("kdoc-internal-refs.ok")
+    outputs.file(stamp)
+    workingDir = layout.projectDirectory.asFile
+    commandLine("python3", kdocGateScript.asFile.path)
+    doLast { stamp.get().asFile.writeText("ok\n") }
+}
+tasks.matching { it.name == "check" }.configureEach { dependsOn(checkKdocInternalRefs) }
+
 // §0.4.41 — make `./gradlew test` run every subproject's tests, not just those
 // where a `test` task exists at the subproject level. The root `test` lifecycle
 // task historically only picked up `:compiler-plugin:test` (the plain-JVM module);
@@ -933,6 +955,7 @@ if (tlalocTestJdk != null) {
 // three latent failures in PhiCalculusC7/8/9 that this change would have caught).
 tasks.register("test") {
     dependsOn(subprojects.map { it.tasks.named("check") })
+    dependsOn(checkKdocInternalRefs)
 }
 
 // Round-trip tests in :stablehlo (and future :runtime-iree) shell out to

@@ -7,7 +7,7 @@ import java.nio.file.StandardCopyOption
 import java.time.Duration
 
 /**
- * §0.4.26 — cache interface for storing the result of an expensive coarsening pass
+ * Cache interface for storing the result of an expensive coarsening pass
  * (typically [PhiCalculus.apply]) keyed by the input function's canonical SHA-256 hash
  * (from [DxirCanonical.hash]). Implementations vary in where they persist:
  *
@@ -19,8 +19,8 @@ import java.time.Duration
  *
  * The CAS version is baked into the [put] key + re-checked on [get] so a toolchain bump
  * (Symja upgrade, rewrite-rule change, emitter tweak) invalidates stale entries without
- * an explicit purge. Stale entries are pruned at [DiskCoarseningCache] instantiation
- * (§0.4.109): files whose CAS-version suffix doesn't match the current one OR whose
+ * an explicit purge. Stale entries are pruned at [DiskCoarseningCache] instantiation:
+ * files whose CAS-version suffix doesn't match the current one OR whose
  * mtime is older than 30 days are deleted before the cache becomes live.
  *
  * Concurrent-access safety is minimal: a single Gradle daemon may run compilations
@@ -85,7 +85,7 @@ class InMemoryCoarseningCache : CoarseningCache {
  * path. At instantiation, [pruneStaleEntries] sweeps the cache directory and deletes
  * (a) any `.dxir` file whose embedded CAS-version doesn't match [casVersion] (the
  * toolchain has moved on; the entry can no longer be read) and (b) any file whose
- * last-modified time predates [maxAge] (default 30 days, per plan §5.4).
+ * last-modified time predates [maxAge] (default 30 days).
  *
  * Sweeping at instantiation rather than on every read keeps the hot path cost-free:
  * compilations that hit a warm cache pay only the read; pruning amortises across the
@@ -112,7 +112,7 @@ class DiskCoarseningCache(
     }
 
     /**
-     * §0.4.109 — sweep the cache directory at startup, deleting any `.dxir` entry that:
+     * Sweep the cache directory at startup, deleting any `.dxir` entry that:
      *  - has a CAS-version suffix not matching [casVersion] (a toolchain bump made the
      *    entry unreadable), OR
      *  - has an mtime older than [maxAge] (cold entry; reclaim space).
@@ -185,7 +185,7 @@ class DiskCoarseningCache(
     }
 
     companion object {
-        /** §0.4.109 — default cache-entry lifetime. Per plan §5.4 ("age > 30 days"). */
+        /** Default cache-entry lifetime: 30 days. */
         val DEFAULT_MAX_AGE: Duration = Duration.ofDays(30)
 
         private const val DXIR_EXT: String = ".dxir"

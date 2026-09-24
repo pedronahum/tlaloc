@@ -1,8 +1,8 @@
 package io.tlaloc.kptx
 
 /**
- * KPTX v3.1 (§0.4.345) — the PTX → Kotlin DSL transpiler (plan task
- * 16): the bootstrap workflow's first half. Feed it expert-written PTX
+ * The PTX → Kotlin DSL transpiler: the first half of the bootstrap
+ * workflow (existing PTX → editable DSL source). Feed it expert-written PTX
  * (canonical format, e.g. straight out of [parsePtx]); it produces
  * Kotlin source that rebuilds the same module through [KernelScope] —
  * ready to edit, specialize, and dispatch through the KPTX stack.
