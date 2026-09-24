@@ -1,7 +1,7 @@
 [versions]
 kotlin = "2.3.20"
 kotlinx-coroutines = "1.10.2"
-kotest = "5.9.1"
+kotest = "6.2.5"
 # Stage B coarsening — symbolic engine. LGPL-3.0 (not Apache-2.0 as docs/STAGE_B_PLAN.md
 # §10.2 originally claimed; corrected in §0.4.13). LGPL allows linking from non-LGPL
 # code, so Tlaloc's eventual Apache-2.0 license is unaffected — but modifications to
