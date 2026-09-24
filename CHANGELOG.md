@@ -11,6 +11,13 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0-alpha02] — 2026-09-24
+
+The Kotlin 2.4 release: the compiler plugin supports Kotlin 2.4.20–2.4.29. Stay on
+`0.1.0-alpha01` for Kotlin 2.3.x.
+
 ### Changed
 
 - **Kotlin 2.4.20.** Tlaloc is built against Kotlin 2.4.20 and its compiler plugin
@@ -213,3 +220,4 @@ These matter only if you built Tlaloc from source before this version.
   several threads.
 
 [0.1.0-alpha01]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha01
+[0.1.0-alpha02]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha02
