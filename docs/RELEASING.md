@@ -60,9 +60,22 @@ metadata lacks the `tlaloc-` prefix.
      user publish to `mavenLocal`.
    `grep -rn 'Maven Central yet\|Nothing is published\|Nothing is on Maven\|mavenLocal' README.md docs/*.md`
    finds them.
-5. `bash scripts/onboarding-smoke.sh` walks the path a new user takes, builds the
-   settings and build files printed in `README.md` and `docs/GETTING_STARTED.md`
-   verbatim, and fails if step 2 was partial.
+5. Move the install blocks to the new pair. Between releases the `kotlin("jvm")`
+   version, the plugin version and the BOM version in the `README.md` and
+   `docs/GETTING_STARTED.md` install blocks name the *released* artifact, while
+   `gradle/libs.versions.toml` and `build.gradle.kts` are already ahead. At
+   release, set all three to the new Kotlin (`libs.versions.kotlin`) and the new
+   Tlaloc version, together with the prose that quotes them: the Kotlin range in
+   GETTING_STARTED section 0, 4a and Troubleshooting, the README's "Also" line and
+   Quickstart line, and the Tlaloc row in the `docs/COMPATIBILITY.md` Kotlin table
+   ("next release" becomes the version).
+6. `bash scripts/onboarding-smoke.sh` walks the path a new user takes and builds
+   the settings and build files printed in `README.md` and
+   `docs/GETTING_STARTED.md`, with the Kotlin and Tlaloc versions replaced by this
+   checkout's, against the mavenLocal publish. It prints the pair it found in each
+   document and the pair it built with; after step 5 they are the same. Nothing
+   fails if step 5 is skipped, because the previous pair still resolves from
+   Central.
 
 ## 2. Credentials
 

@@ -54,7 +54,9 @@ other Kotlin at compile time, naming the version it found and the supported rang
 Kotlin numbers feature releases by tens in the third component (2.3.0, 2.3.10,
 2.3.20 are three feature releases) and bugfixes by ones above them, so the bugfix
 family of 2.3.20 is supported and nothing else is. `unsafeAllowUnsupportedKotlin`
-([section 4a](#4a-plugin-options)) turns the refusal into a warning.
+([section 4a](#4a-plugin-options)) turns the refusal into a warning. This is the
+range of `0.1.0-alpha01`; the next release is built against Kotlin 2.4.20, and
+[COMPATIBILITY.md](COMPATIBILITY.md) lists the range of each version.
 
 **Gradle:** the Tlaloc Gradle plugin is tested with this repository's Gradle 9.7
 wrapper and by hand with Gradle 8.14.3.

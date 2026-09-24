@@ -50,7 +50,7 @@ PyTorch:
 
 ## Quickstart
 
-JDK 25 to build, Kotlin 2.3.20. No GPU required.
+JDK 25 to build. No GPU required. `main` builds with Kotlin 2.4.20.
 
 ```bash
 git clone https://github.com/pedronahum/tlaloc && cd tlaloc

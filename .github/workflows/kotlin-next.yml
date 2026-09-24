@@ -64,6 +64,11 @@
 # and 2.3.10 compiles but is refused by the guard, by name, inside six real
 # in-process compiles. docs/ALPHA_PLAN.md marks the lane 🧪 and the two findings
 # separately.
+#
+# §0.4.530 — the catalog moved to 2.4.20, so the lane now resolves the newest
+# version in a LATER feature release (2.5.0-Beta1 at the time) instead of
+# Central's <latest>. Run by hand, probe 1 fails on 2.5.0-Beta1 with one error:
+# `IrPluginContext.messageCollector` no longer exists.
 name: kotlin-next
 
 on:
@@ -71,8 +76,8 @@ on:
     inputs:
       kotlin_version:
         description: >-
-          Kotlin version to probe (e.g. 2.4.20, or 2.5.0-Beta1). Empty means
-          "whatever Maven Central currently reports as <latest>".
+          Kotlin version to probe (e.g. 2.5.0-Beta1). Empty means the newest
+          version Maven Central lists in a later feature release than the catalog's.
         required: false
         default: ''
   # Weekly, because the Kotlin release train moves independently of this
@@ -114,10 +119,12 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
 
       # Resolved, not pinned. A literal "the next Kotlin" in this file would be
-      # wrong within weeks and would eventually name a version that does not
-      # exist, which is a lane that cannot pass. Central's own <latest> includes
-      # Betas and RCs (2.4.20-Beta1 is there), so this picks up an EAP the moment
-      # one is published — which is what §16 asked for.
+      # wrong within weeks. The probe is the newest version Maven Central lists in a
+      # LATER feature release than the catalog's (2.5.0-Beta1 while the catalog is
+      # 2.4.20), pre-releases included, so an EAP is picked up the day it is
+      # published. Central's plain <latest> is not used: a bugfix of the current
+      # release (say 2.4.21) published after 2.5.0-Beta1 would become <latest> and
+      # turn this lane into a probe of the version already in use.
       - name: Resolve the version to probe
         id: resolve
         env:
@@ -136,16 +143,36 @@ jobs:
             meta=metadata.xml
             curl -fsSL -o "$meta" \
               https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/maven-metadata.xml
-            next="$(sed -n 's:.*<latest>\(.*\)</latest>.*:\1:p' "$meta" | head -1)"
-            source='Maven Central <latest>'
+            next="$(CATALOG="$catalog" python3 - "$meta" <<'PY'
+          import os, re, sys
+          def key(v):
+              m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-(.+))?", v)
+              return None if m is None else (int(m[1]), int(m[2]), int(m[3]), m[4])
+          cat = key(os.environ["CATALOG"])
+          family = lambda k: (k[0], k[1], k[2] // 10)
+          versions = re.findall(r"<version>([^<]+)</version>", open(sys.argv[1]).read())
+          best = None
+          for order, v in enumerate(versions):
+              k = key(v)
+              if k is None or family(k) <= family(cat):
+                  continue
+              # Newest triple first; for the same triple a release beats its
+              # pre-releases, and a later pre-release (metadata order) beats an earlier.
+              rank = (k[:3], k[3] is None, order)
+              if best is None or rank > best[0]:
+                  best = (rank, v)
+          print(best[1] if best else "")
+          PY
+            )"
+            source="Maven Central, newest version in a later feature release than $catalog"
           fi
           if [ -z "$next" ]; then
             echo "could not determine a version to probe" >&2
             exit 1
           fi
           # The unit of internal-API compatibility is the FEATURE release, which
-          # Kotlin numbers by tens in the third component (2.3.20 and 2.3.27 are
-          # the same release; 2.3.10 is not). KotlinVersionGuard uses exactly this
+          # Kotlin numbers by tens in the third component (2.4.20 and 2.4.27 are
+          # the same release; 2.4.10 is not). KotlinVersionGuard uses exactly this
           # rule, so probe 3 can predict what the guard should say.
           family() {
             printf '%s' "$1" | sed 's/-.*//' \

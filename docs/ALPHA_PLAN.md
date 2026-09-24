@@ -890,3 +890,47 @@ nothing was published. `CHANGELOG.md` records the user-visible changes under
   `onboarding-smoke.sh`, `check-doc-links.py` and the quickstart, readable-gradients,
   differentiable-physics and named-indices examples pass.
 - CI on 48639a6: build, kotlin-next and maestro-integration succeeded.
+
+## Kotlin 2.4.20 (2026-09-24)
+
+`main` moves to Kotlin 2.4.20 and version `0.1.0-alpha02` (unreleased). The
+compiler plugin supports 2.4.20–2.4.29; `0.1.0-alpha01` stays the release for
+2.3.20–2.3.29. The README and GETTING_STARTED install blocks keep naming the
+released pair until alpha02 ships; `onboarding-smoke.sh` builds them with this
+checkout's pair unless `TLALOC_SMOKE_FROM_CENTRAL=1`.
+
+What the port changed, all in `:compiler-plugin`:
+
+| Found | Fix |
+|---|---|
+| `CompilerConfiguration.get(MESSAGE_COLLECTOR_KEY)` is an opt-in error in 2.4 (`@MessageCollectorAccess`) | the guard reports through `CompilerConfiguration.report(CliDiagnostics.COMPILER_PLUGIN_INITIALIZATION_ERROR/_WARNING, …)`; `GuardReporter` falls back to the message collector when that API does not link (Kotlin 2.3) or the CLI diagnostics collector is absent |
+| A plugin compiled against 2.4 did not reach the guard inside a 2.3 compiler: `CompilerConfigurationKey.create` compiles to `CompilerConfigurationKey.Companion.create` in 2.4, which 2.3 lacks, and `TlalocCommandLineProcessor` is loaded before the guard runs — a `NoSuchFieldError` in place of the refusal | the five keys use the constructor, which both releases have |
+| Past `unsafeAllowUnsupportedKotlin`, registering the FIR extension in a 2.3 compiler throws `NoClassDefFoundError` (`ExtensionPointDescriptor`), and the 2.3 CLI then prints only the stack trace | the `LinkageError` is reported as a compile error naming both versions and the opt-out |
+| 13 `IrConstImpl(…, IrConstKind.X, …)` calls use the top-level builder that 2.5.0-Beta1 removes | typed factories (`IrConstImpl.float/double/int/long/boolean`), present in 2.3, 2.4 and 2.5 |
+| `-Xcontext-parameters` is redundant at language version 2.4 | removed from `:compiler-plugin` |
+
+Nothing observable changed: the 340 `:compiler-plugin` tests (332 before, plus 8 new)
+compile and run real programs against oracles and all pass, and the example
+outputs match their READMEs line for line (GPU lanes up to XLA's documented
+autotuning noise). New tests: `GuardReportingTest` (the guard's refusal through a
+real 2.4.20 compile, with a supported-version control, and which channel carries
+it) and `ForeignCompilerGuardTest` (a real 2.3.20 compiler process loading the
+built plugin; the 2.4.20 compiler in the same harness is the control). With the
+`LinkageError` fallback removed, `ForeignCompilerGuardTest` fails.
+
+Not changed: 60 deprecation warnings for `IrPluginContext.referenceClass` /
+`referenceFunctions` / `referenceProperties` / `referenceConstructors` (deprecated
+at WARNING level in 2.3.20 already), and the deprecated
+`IrPluginContext.messageCollector` in `TlalocIrGenerationExtension`.
+
+Kotlin 2.5.0-Beta1, `-PtlalocKotlinVersion=2.5.0-Beta1 :compiler-plugin:compileKotlin`:
+one frontend error, `IrPluginContext.messageCollector` unresolved
+(`TlalocIrGenerationExtension.kt`); the backend was not reached. `kotlin-next.yml`
+now probes the newest version in a later feature release than the catalog's.
+
+Suite: 2,525 tests in `./gradlew test --rerun-tasks`, 0 failures, 93 skipped;
+`count-tests.sh` 2,647. `onboarding-smoke.sh` passes both ways (this checkout's
+pair and `TLALOC_SMOKE_FROM_CENTRAL=1`). quickstart (with `shapeError` and
+`runOnJdk21`), readable-gradients (compiled == printed, raw-bit identical),
+differentiable-physics, named-indices, internals/four-worlds, internals/layer3,
+and gpu-training and mnist on CUDA (GB10) run.

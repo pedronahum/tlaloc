@@ -113,15 +113,23 @@ These are the commitments.
   two match; a missing library symbol at compile time is reported as a likely
   version mismatch.
 - **Treat the toolchain as pinned too.**
-  - **Kotlin: 2.3.20 through 2.3.29.** A K2 compiler plugin binds to compiler
-    internals; a different *feature* release is not expected to work and is not
-    tested. The plugin detects the running compiler's version and refuses at
-    compile time, naming what it found and the supported range, instead of
-    raising a `NoSuchMethodError` from inside `compileKotlin`. Kotlin numbers feature releases by tens in the third
-    component and bugfixes by ones above them, so the supported range is the whole
-    bugfix family of 2.3.20 and nothing else — 2.3.10 and 2.3.30 are *different
-    feature releases*. `tlaloc { unsafeAllowUnsupportedKotlin.set(true) }` turns
-    the refusal into a warning; a crash inside the compiler is then expected.
+  - **Kotlin: one feature release per Tlaloc version.** A K2 compiler plugin
+    binds to compiler internals; a different *feature* release is not expected to
+    work and is not tested. The plugin detects the running compiler's version and
+    refuses at compile time, naming what it found and the supported range, instead
+    of raising a `NoSuchMethodError` from inside `compileKotlin`. Kotlin numbers
+    feature releases by tens in the third component and bugfixes by ones above
+    them, so each Tlaloc version supports the whole bugfix family of the release it
+    is built against and nothing else:
+
+    | Tlaloc | Kotlin |
+    |---|---|
+    | `0.1.0-alpha01` | 2.3.20 through 2.3.29 |
+    | next release (unreleased `main`) | 2.4.20 through 2.4.29 |
+
+    2.4.10 and 2.4.30 are *different feature releases* from 2.4.20.
+    `tlaloc { unsafeAllowUnsupportedKotlin.set(true) }` turns the refusal into a
+    warning; a failure inside the compiler is then expected.
   - **JDK: 25 to build, 21 to run.** The library modules (`core`, `ir`,
     `autograd`, `nn`, `stablehlo`, `maestro`) emit Java 21 bytecode and are
     compiled with `-Xjdk-release=21`. The FFM runtime backends (`runtime-pjrt`,

@@ -13,6 +13,14 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **Kotlin 2.4.20.** Tlaloc is built against Kotlin 2.4.20 and its compiler plugin
+  supports Kotlin **2.4.20 through 2.4.29**; any other Kotlin is refused by name at
+  compile time. Projects on Kotlin 2.3.20–2.3.29 stay on `0.1.0-alpha01`. The
+  plugin's refusal also reaches a user of an older compiler as a compile error:
+  under Kotlin 2.3 it is reported through the message collector, because the
+  diagnostic API Kotlin 2.4 recommends does not exist there.
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) lists the Kotlin range of each
+  Tlaloc version.
 - **Symja 3.2.0.** The build compiles and tests `tlaloc-ir` against
   `org.matheclipse:matheclipse-core:3.2.0`, and the compiler's refusal for a
   symbolic-trip-count loop now names that coordinate. Symja stays `compileOnly`
