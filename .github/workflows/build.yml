@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
@@ -151,13 +151,13 @@ jobs:
       # must run on 25 (the toolchain every module declares).
       - name: Set up JDK 21
         id: jdk21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
