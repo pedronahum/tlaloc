@@ -56,7 +56,7 @@ Kotlin numbers feature releases by tens in the third component (2.3.0, 2.3.10,
 family of 2.3.20 is supported and nothing else is. `unsafeAllowUnsupportedKotlin`
 ([section 4a](#4a-plugin-options)) turns the refusal into a warning.
 
-**Gradle:** the Tlaloc Gradle plugin is tested with this repository's Gradle 9.5
+**Gradle:** the Tlaloc Gradle plugin is tested with this repository's Gradle 9.7
 wrapper and by hand with Gradle 8.14.3.
 
 **Symja is optional.** `org.matheclipse:matheclipse-core` (**LGPL-3.0**, 8.3 MB)

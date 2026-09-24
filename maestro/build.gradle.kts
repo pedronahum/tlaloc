@@ -113,7 +113,7 @@ tasks.withType<Test>().configureEach {
  * claim (the directory is the deployment) would be a claim about the test
  * source set.
  */
-val exportServingArtifact by tasks.registering(JavaExec::class) {
+tasks.register<JavaExec>("exportServingArtifact") {
     group = "tlaloc"
     description = "Write the reference serving artifact (manifest + StableHLO bodies) to -PoutDir"
     val tools = kotlin.jvm().compilations.getByName("tools")
@@ -162,7 +162,7 @@ val exportServingArtifact by tasks.registering(JavaExec::class) {
  * `[out, in] -> [in, out]` pass holds a tensor and its transpose at once,
  * and TinyLlama's embedding table is 262 MiB staged as f32.
  */
-val exportLlamaServingArtifact by tasks.registering(JavaExec::class) {
+tasks.register<JavaExec>("exportLlamaServingArtifact") {
     group = "tlaloc"
     description = "Write a serving artifact for a real HF Llama checkpoint (-PckptDir) to -PoutDir"
     val tools = kotlin.jvm().compilations.getByName("tools")

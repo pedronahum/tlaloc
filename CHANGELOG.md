@@ -19,6 +19,8 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   (not in a consumer's dependency graph). The 0.1.0-alpha01 `tlaloc-ir` jar calls
   the same 36 Symja methods and fields, so it also runs with 3.2.0 on the
   compiler plugin classpath.
+- **Gradle 9.7.1.** The repository's wrapper moves from 9.5.0 to 9.7.1; the
+  Tlaloc Gradle plugin is tested with it.
 
 ## [0.1.0-alpha01] — 2026-09-24
 

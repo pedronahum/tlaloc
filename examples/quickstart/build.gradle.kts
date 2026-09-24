@@ -93,7 +93,7 @@ tasks.named<JavaExec>("run") {
  * `publishToMavenLocal` that has to precede it. Gradle cannot auto-detect a JDK in
  * `~/.local/jdks`, so the env var is how the location stays off this file.
  */
-val runOnJdk21 by tasks.registering(JavaExec::class) {
+tasks.register<JavaExec>("runOnJdk21") {
     group = "verification"
     description = "Run the quickstart on a JDK 21 launcher (needs \$JDK21_HOME)"
     val main = kotlin.target.compilations.getByName("main")
