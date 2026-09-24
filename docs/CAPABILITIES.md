@@ -13,12 +13,12 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **2,567** automated tests: 2,513 that `./gradlew test` runs, and 54
-from the vendored Maestro modules, which the root `test` task does not run. Of the
-2,513, 2,507 were counted in a clean-room `./gradlew test --rerun-tasks` with 0
-failures; the other 6 are the Gradle plugin's, added after it and run on their
-own. On the GB10 workstation where they were counted, 93 of the 2,507 skip by name: 88 MLIR round
-trips that need `stablehlo-translate` or `sdy-opt`, and 5 TPU smoke tests. This is
+The suite has **2,639** automated tests: 2,517 that `./gradlew test` runs, and 122
+from the vendored Maestro modules, which the root `test` task does not run (50 in
+`maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). The
+2,517 were counted in a clean-room `./gradlew test --rerun-tasks` with 0 failures.
+On the GB10 workstation where they were counted, 93 of them skip by name: 88 MLIR
+round trips that need `stablehlo-translate` or `sdy-opt`, and 5 TPU smoke tests. This is
 the one place the documentation states the count.
 
 ## Automatic differentiation
