@@ -8,7 +8,7 @@ K2 analysis executes the same FIR checkers, so it should show the error as you
 type; `DiagnosticSourcePositionTest` pins the positions, and no test drives an
 IDE.
 
-> Alpha — `0.1.0-alpha01`, on Maven Central as `io.github.pedronahum:tlaloc-*`.
+> Alpha — `0.1.0-alpha02`, on Maven Central as `io.github.pedronahum:tlaloc-*`.
 > Coordinates and APIs may change
 > without a deprecation cycle. [COMPATIBILITY.md](COMPATIBILITY.md) lists what
 > may break and what will not, and [CHANGELOG.md](../CHANGELOG.md) records what
@@ -48,14 +48,14 @@ java {
 `bash scripts/jdk21-smoke.sh` (with `JDK21_HOME` set to a JDK 21) publishes,
 compiles it at target 21 and runs the synthesized gradient on a real JDK 21.
 
-**Kotlin: 2.3.20 through 2.3.29.** The plugin reads 40
+**Kotlin: 2.4.20 through 2.4.29.** The plugin reads 40
 `org.jetbrains.kotlin.fir.*` packages of unstable K2 internals, so it refuses any
 other Kotlin at compile time, naming the version it found and the supported range.
-Kotlin numbers feature releases by tens in the third component (2.3.0, 2.3.10,
-2.3.20 are three feature releases) and bugfixes by ones above them, so the bugfix
-family of 2.3.20 is supported and nothing else is. `unsafeAllowUnsupportedKotlin`
+Kotlin numbers feature releases by tens in the third component (2.4.0, 2.4.10,
+2.4.20 are three feature releases) and bugfixes by ones above them, so the bugfix
+family of 2.4.20 is supported and nothing else is. `unsafeAllowUnsupportedKotlin`
 ([section 4a](#4a-plugin-options)) turns the refusal into a warning. This is the
-range of `0.1.0-alpha01`; the next release is built against Kotlin 2.4.20, and
+range of `0.1.0-alpha02`. On Kotlin 2.3.x, use `0.1.0-alpha01`;
 [COMPATIBILITY.md](COMPATIBILITY.md) lists the range of each version.
 
 **Gradle:** the Tlaloc Gradle plugin is tested with this repository's Gradle 9.7
@@ -75,7 +75,7 @@ or redistribute it.
 ## 1. The artifacts
 
 All **thirteen** published modules are on Maven Central under
-`io.github.pedronahum:*:0.1.0-alpha01`: `tlaloc-core`, `tlaloc-ir`,
+`io.github.pedronahum:*:0.1.0-alpha02`: `tlaloc-core`, `tlaloc-ir`,
 `tlaloc-autograd`, `tlaloc-nn`, `tlaloc-stablehlo`, `tlaloc-compiler-plugin`,
 `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`, `tlaloc-runtime-iree`,
 `tlaloc-kptx`, `tlaloc-maestro`, `tlaloc-gradle-plugin` (plugin id
@@ -108,10 +108,10 @@ dependencyResolutionManagement { repositories { mavenCentral() } }
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    kotlin("jvm") version "2.3.20"
+    kotlin("jvm") version "2.4.20"
     // Puts the K2 compiler plugin (same version) on every Kotlin/JVM compilation:
     // compile-time grad rewriting and compile-time errors.
-    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha01"
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha02"
     application
 }
 
@@ -125,7 +125,7 @@ java {
 }
 
 dependencies {
-    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha02"))
     implementation("io.github.pedronahum:tlaloc-core")
     implementation("io.github.pedronahum:tlaloc-ir")
     implementation("io.github.pedronahum:tlaloc-autograd")
@@ -154,7 +154,7 @@ classpath and pass options as `-P` arguments.
 
 ```kotlin
 dependencies {
-    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
+    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha02")
 }
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     compilerOptions.freeCompilerArgs.addAll("-P", "plugin:io.tlaloc.plugin:strictLowering=true")
@@ -296,7 +296,7 @@ is refused by name.
 | `dumpLoweredIr` | `false` | Dump the lowered Tlaloc IR for every recognized intrinsic lambda: one WARNING from the FIR checker and one INFO from the IR extension. For debugging the plugin. K2's diagnostic API has no INFO severity, so the FIR half is a warning and breaks a `-Werror` build. |
 | `dumpGradSource` | `false` | Print each synthesized gradient as readable Kotlin (INFO). |
 | `dumpGradSourceDir` | unset | Like `dumpGradSource`, and also write one `.kt` per lambda. The Gradle plugin writes each compilation's files into `<dir>/<source set>` (`<dir>/main`, `<dir>/test`) and declares that directory an output of the compile task; the raw `-P` option writes into `<dir>` itself. |
-| `unsafeAllowUnsupportedKotlin` | `false` | Turn the Kotlin version refusal into a warning and run the plugin on a Kotlin outside 2.3.20–2.3.29. The plugin reads internal K2 API, so expect crashes from inside the compiler. |
+| `unsafeAllowUnsupportedKotlin` | `false` | Turn the Kotlin version refusal into a warning and run the plugin on a Kotlin outside 2.4.20–2.4.29. The plugin reads internal K2 API, so expect crashes from inside the compiler. |
 
 A build with none of these set and a `grad {}` that lowers is **silent**: Tlaloc
 prints nothing. `DiagnosticNoiseTest` pins that by compiling a `grad {}` consumer
@@ -304,7 +304,7 @@ with `-Werror`.
 
 ## 4b. `@ExperimentalTlalocApi`: the provisional part of the surface
 
-Every API in `0.1.0-alpha01` may change without a deprecation cycle. Within that,
+Every API in `0.1.0-alpha02` may change without a deprecation cycle. Within that,
 three surfaces carry a `@RequiresOptIn(ERROR)` marker,
 `io.tlaloc.core.ExperimentalTlalocApi`, and using one without opting in is a
 compile error naming the marker:
@@ -437,9 +437,10 @@ The five `tlaloc { }` options are in [section 4a](#4a-plugin-options).
 
 ## Troubleshooting
 
-**`Tlaloc's K2 compiler plugin is built against Kotlin 2.3.20 and the running
+**`Tlaloc's K2 compiler plugin is built against Kotlin 2.4.20 and the running
 Kotlin compiler is …`**
-Your Kotlin is outside 2.3.20–2.3.29. Use `kotlin("jvm") version "2.3.20"`, or set
+Your Kotlin is outside 2.4.20–2.4.29. Use `kotlin("jvm") version "2.4.20"`, use
+Tlaloc `0.1.0-alpha01` on Kotlin 2.3.x, or set
 `tlaloc { unsafeAllowUnsupportedKotlin.set(true) }` to try anyway.
 
 **``Tlaloc: `grad { }` was not rewritten at compile time, so this fallback body ran``**

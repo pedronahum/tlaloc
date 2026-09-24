@@ -2,18 +2,18 @@
 
 What the alpha series promises, and what it does not.
 
-Current version: **`0.1.0-alpha01`**, on Maven Central as
+Current version: **`0.1.0-alpha02`**, on Maven Central as
 `io.github.pedronahum:tlaloc-*` (see [GETTING_STARTED.md](GETTING_STARTED.md)).
 
 ## What "alpha" means here
 
-`0.1.0-alpha01` means: **the engine is certified, the surface is not settled.**
+Each `0.1.0-alpha` release means: **the engine is certified, the surface is not settled.**
 
 The automated tests pin behaviour: gradients against analytic and
 cross-implementation oracles, a real TinyLlama matching HuggingFace token for
 token, RNG bit-exact against JAX's threefry stream. None of that pins *names*. A
 function whose result is certified correct may still be renamed, moved to another
-module, or given a different parameter order in `0.1.0-alpha02`.
+module, or given a different parameter order in the next alpha.
 
 Version numbers before `1.0.0` carry no compatibility guarantee under SemVer
 item 4, and Tlaloc takes that literally.
@@ -121,7 +121,7 @@ These are the commitments.
     | Tlaloc | Kotlin |
     |---|---|
     | `0.1.0-alpha01` | 2.3.20 through 2.3.29 |
-    | next release (unreleased `main`) | 2.4.20 through 2.4.29 |
+    | `0.1.0-alpha02` | 2.4.20 through 2.4.29 |
 
     2.4.10 and 2.4.30 are *different feature releases* from 2.4.20.
     `tlaloc { unsafeAllowUnsupportedKotlin.set(true) }` turns the refusal into a
