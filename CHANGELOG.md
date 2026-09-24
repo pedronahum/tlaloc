@@ -25,6 +25,15 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   without internal changelog numbers, plan phases or planning-document names;
   `./gradlew test` fails if one comes back (`scripts/check-kdoc-internal-refs.py`).
 
+### Fixed
+
+- **Vendored Maestro server builds.** `third-party/maestro/maestro-server`
+  compiles: it declares its dependency on `maestro-tlaloc`, and its Spring
+  configuration builds the Tlaloc step runtime with the pod-spec builder and the
+  cluster accelerator from `TLALOC_CLUSTER_VENDOR` / `TLALOC_CLUSTER_ARCH`. The
+  vendored build's Spotless, Checkstyle and PMD checks run on JDK 25 with Gradle 9
+  (Spotless 8.10.2, google-java-format 1.30.0, Checkstyle 9.3).
+
 ## [0.1.0-alpha01] — 2026-09-24
 
 The first published version. [docs/CAPABILITIES.md](docs/CAPABILITIES.md) lists

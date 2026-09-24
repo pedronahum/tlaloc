@@ -41,8 +41,8 @@ import lombok.extern.slf4j.Slf4j;
  * <p>Selection algorithm — v1 picks the row matching {@code (cluster.vendor, cluster.arch)}; if no
  * exact match exists, falls back to the lowest-cost row in the matrix (defensive: a workflow
  * targeted at H100 deployed on an A100 cluster still launches; observability captures the
- * mismatch). When the matrix is empty or unparseable, returns an empty modification — preserves
- * the original {@link KubernetesCommand} unchanged.
+ * mismatch). When the matrix is empty or unparseable, returns an empty modification — preserves the
+ * original {@link KubernetesCommand} unchanged.
  *
  * <h2>What's NOT in v1</h2>
  *
@@ -52,17 +52,18 @@ import lombok.extern.slf4j.Slf4j;
  *       vendor/arch only.
  *   <li>GPU count from cost-model memory pressure. Always emits {@code gpu="1"} for accelerator
  *       targets.
- *   <li>Spot vs on-demand selection. The cluster operator can post-process via standard K8s tooling.
+ *   <li>Spot vs on-demand selection. The cluster operator can post-process via standard K8s
+ *       tooling.
  * </ul>
  */
 @Slf4j
 public final class TlalocPodSpecBuilder {
 
   /**
-   * §0.4.461 (G3a-2) — the env contract a distributed pod-group member is launched with. The
-   * names are exactly what {@code PjrtClientOptions.resolve()} (runtime-pjrt) reads, so a pod
-   * whose env carries them builds its PJRT client with the right rank/group/coordinator without
-   * any other plumbing. See docs/MULTIHOST_DESIGN.md.
+   * §0.4.461 (G3a-2) — the env contract a distributed pod-group member is launched with. The names
+   * are exactly what {@code PjrtClientOptions.resolve()} (runtime-pjrt) reads, so a pod whose env
+   * carries them builds its PJRT client with the right rank/group/coordinator without any other
+   * plumbing. See docs/MULTIHOST_DESIGN.md.
    */
   public static final String ENV_NODE_ID = "TLALOC_PJRT_NODE_ID";
 
@@ -75,16 +76,20 @@ public final class TlalocPodSpecBuilder {
   /**
    * Maps lower-case vendor → K8s nodeSelector key/value patterns we emit.
    *
-   * <p>Vendors absent from the map fall through to the "no nodeSelector" path — same as the
-   * {@code "tlaloc"} (CPU) case, where the workload runs on any node and we don't request a GPU
-   * slot. ({@code Map.of} forbids null values, so omission is the encoding for "skip".)
+   * <p>Vendors absent from the map fall through to the "no nodeSelector" path — same as the {@code
+   * "tlaloc"} (CPU) case, where the workload runs on any node and we don't request a GPU slot.
+   * ({@code Map.of} forbids null values, so omission is the encoding for "skip".)
    */
+  private static final String ACCELERATOR_LABEL = "accelerator";
+
+  private static final int MAX_PORT = 65535;
+
   private static final Map<String, NodeSelectorTemplate> VENDOR_TEMPLATES =
       Map.of(
           "nvidia",
-          new NodeSelectorTemplate("accelerator", arch -> "nvidia-tesla-" + arch),
+          new NodeSelectorTemplate(ACCELERATOR_LABEL, arch -> "nvidia-tesla-" + arch),
           "amd",
-          new NodeSelectorTemplate("accelerator", arch -> "amd-" + arch),
+          new NodeSelectorTemplate(ACCELERATOR_LABEL, arch -> "amd-" + arch),
           "google",
           new NodeSelectorTemplate("cloud.google.com/gke-accelerator", arch -> arch),
           "aws",
@@ -112,28 +117,35 @@ public final class TlalocPodSpecBuilder {
       KubernetesCommand base, String backendMatrixJson, String clusterVendor, String clusterArch) {
     Optional<BackendTargetRecord> picked =
         pickTarget(backendMatrixJson, clusterVendor, clusterArch);
-    if (picked.isEmpty()) return base;
+    if (picked.isEmpty()) {
+      return base;
+    }
     return apply(base, picked.get());
   }
 
   /**
    * Pick the BackendTargetRecord row that best matches the cluster. Public for testability.
    *
-   * <p>Selection: exact (vendor, arch) match wins. If no exact match, fall back to the
-   * lowest-cost row that has a vendor match. If no vendor match either, fall back to the
-   * absolute lowest-cost row. Returns empty when the matrix is unparseable / empty.
+   * <p>Selection: exact (vendor, arch) match wins. If no exact match, fall back to the lowest-cost
+   * row that has a vendor match. If no vendor match either, fall back to the absolute lowest-cost
+   * row. Returns empty when the matrix is unparseable / empty.
    */
   public Optional<BackendTargetRecord> pickTarget(
       String backendMatrixJson, String clusterVendor, String clusterArch) {
-    if (backendMatrixJson == null || backendMatrixJson.isBlank()) return Optional.empty();
+    if (backendMatrixJson == null || backendMatrixJson.isBlank()) {
+      return Optional.empty();
+    }
     List<BackendTargetRecord> rows;
     try {
       rows = objectMapper.readValue(backendMatrixJson, new TypeReference<>() {});
     } catch (Exception e) {
-      LOG.warn("TlalocPodSpecBuilder: malformed backend_matrix JSON; falling back to base command", e);
+      LOG.warn(
+          "TlalocPodSpecBuilder: malformed backend_matrix JSON; falling back to base command", e);
       return Optional.empty();
     }
-    if (rows.isEmpty()) return Optional.empty();
+    if (rows.isEmpty()) {
+      return Optional.empty();
+    }
 
     Optional<BackendTargetRecord> exact =
         rows.stream()
@@ -144,13 +156,17 @@ public final class TlalocPodSpecBuilder {
                         && r.arch() != null
                         && r.arch().equalsIgnoreCase(clusterArch))
             .findFirst();
-    if (exact.isPresent()) return exact;
+    if (exact.isPresent()) {
+      return exact;
+    }
 
     Optional<BackendTargetRecord> sameVendor =
         rows.stream()
             .filter(r -> r.vendor() != null && r.vendor().equalsIgnoreCase(clusterVendor))
             .min(Comparator.comparing(TlalocPodSpecBuilder::costOrInfinity));
-    if (sameVendor.isPresent()) return sameVendor;
+    if (sameVendor.isPresent()) {
+      return sameVendor;
+    }
 
     return rows.stream().min(Comparator.comparing(TlalocPodSpecBuilder::costOrInfinity));
   }
@@ -159,8 +175,12 @@ public final class TlalocPodSpecBuilder {
     Map<String, String> accelerators = new LinkedHashMap<>();
     accelerators.put("vendor", row.vendor());
     accelerators.put("arch", row.arch());
-    if (row.kernelName() != null) accelerators.put("kernel", row.kernelName());
-    if (row.kvQuantDtype() != null) accelerators.put("kv_quant_dtype", row.kvQuantDtype());
+    if (row.kernelName() != null) {
+      accelerators.put("kernel", row.kernelName());
+    }
+    if (row.kvQuantDtype() != null) {
+      accelerators.put("kv_quant_dtype", row.kvQuantDtype());
+    }
 
     NodeSelectorTemplate template = VENDOR_TEMPLATES.get(row.vendor() == null ? "" : row.vendor());
     Map<String, String> nodeSelector;
@@ -168,7 +188,9 @@ public final class TlalocPodSpecBuilder {
     if (template != null && row.arch() != null) {
       nodeSelector = Map.of(template.labelKey(), template.labelValueFor().apply(row.arch()));
       // v1 simplification: any non-CPU target asks for one accelerator unit.
-      if (gpu == null) gpu = "1";
+      if (gpu == null) {
+        gpu = "1";
+      }
     } else {
       nodeSelector = Map.of();
       // CPU target — no GPU slot requested.
@@ -182,45 +204,45 @@ public final class TlalocPodSpecBuilder {
   }
 
   /**
-   * §0.4.461 (G3a-2) — expand one accelerator-selected {@link KubernetesCommand} into a
-   * DISTRIBUTED POD GROUP: {@code numNodes} member commands, identical in every field except
-   * env (each member gains {@link #ENV_NODE_ID}=i, {@link #ENV_NUM_NODES}=N,
-   * {@link #ENV_COORDINATOR_ADDRESS}=host:port) and the job-deduplication key (suffixed
-   * {@code -nodeN} so the members never collapse into one K8s job).
+   * §0.4.461 (G3a-2) — expand one accelerator-selected {@link KubernetesCommand} into a DISTRIBUTED
+   * POD GROUP: {@code numNodes} member commands, identical in every field except env (each member
+   * gains {@link #ENV_NODE_ID}=i, {@link #ENV_NUM_NODES}=N, {@link
+   * #ENV_COORDINATOR_ADDRESS}=host:port) and the job-deduplication key (suffixed {@code -nodeN} so
+   * the members never collapse into one K8s job).
    *
-   * <p>The workflow-level contract (docs/MULTIHOST_DESIGN.md §5): a distributed step = one
-   * program manifest, N pods, mesh-consistent — every member runs the SAME image/command over
-   * the SAME manifest, and only the env trio distinguishes rank. Compose with
-   * {@link #applyBackendTarget} first (accelerator selection), then expand; the group is
-   * homogeneous by construction because expansion copies the already-selected base.
+   * <p>The workflow-level contract (docs/MULTIHOST_DESIGN.md §5): a distributed step = one program
+   * manifest, N pods, mesh-consistent — every member runs the SAME image/command over the SAME
+   * manifest, and only the env trio distinguishes rank. Compose with {@link #applyBackendTarget}
+   * first (accelerator selection), then expand; the group is homogeneous by construction because
+   * expansion copies the already-selected base.
    *
-   * <p>The coordinator address names node 0's coordination service — by convention the node-0
-   * pod's stable DNS name under a headless service ({@code <group>-node0.<service>}); the
-   * builder takes it as data rather than minting K8s object names (the runner owns naming).
+   * <p>The coordinator address names node 0's coordination service — by convention the node-0 pod's
+   * stable DNS name under a headless service ({@code <group>-node0.<service>}); the builder takes
+   * it as data rather than minting K8s object names (the runner owns naming).
    *
-   * <p>What v1 does NOT do, by name: no PodGroup/gang-scheduling CRD emission (Kueue/Volcano
-   * are cluster-operator territory; all-or-nothing scheduling is recorded as a deployment
-   * requirement, not enforced here), no per-member GPU topology spreading, no multi-slice
-   * (MegaScale) env — single-slice groups only until G4 measures a real one.
+   * <p>What v1 does NOT do, by name: no PodGroup/gang-scheduling CRD emission (Kueue/Volcano are
+   * cluster-operator territory; all-or-nothing scheduling is recorded as a deployment requirement,
+   * not enforced here), no per-member GPU topology spreading, no multi-slice (MegaScale) env —
+   * single-slice groups only until G4 measures a real one.
    *
    * @param base the fully-built single-pod command (accelerator selection already applied).
-   * @param numNodes group size; must be >= 1. Size 1 returns the degenerate one-member group
-   *     (env trio still emitted, so the contract is uniform and {@code PjrtClientOptions}
-   *     resolves identically at every size).
+   * @param numNodes group size; must be >= 1. Size 1 returns the degenerate one-member group (env
+   *     trio still emitted, so the contract is uniform and {@code PjrtClientOptions} resolves
+   *     identically at every size).
    * @param coordinatorHost DNS name or IP of node 0's coordination service.
    * @param coordinatorPort port of that service, in [1, 65535].
    * @return an immutable list of {@code numNodes} member commands, index = node id.
    */
+  @SuppressWarnings("PMD.AvoidInstantiatingObjectsInLoops") // one env map per pod-group member
   public List<KubernetesCommand> buildPodGroup(
       KubernetesCommand base, int numNodes, String coordinatorHost, int coordinatorPort) {
     if (numNodes < 1) {
-      throw new IllegalArgumentException(
-          "buildPodGroup: numNodes must be >= 1, got " + numNodes);
+      throw new IllegalArgumentException("buildPodGroup: numNodes must be >= 1, got " + numNodes);
     }
     if (coordinatorHost == null || coordinatorHost.isBlank()) {
       throw new IllegalArgumentException("buildPodGroup: coordinatorHost must be non-blank");
     }
-    if (coordinatorPort < 1 || coordinatorPort > 65535) {
+    if (coordinatorPort < 1 || coordinatorPort > MAX_PORT) {
       throw new IllegalArgumentException(
           "buildPodGroup: coordinatorPort must be in [1, 65535], got " + coordinatorPort);
     }
@@ -245,11 +267,7 @@ public final class TlalocPodSpecBuilder {
           base.getJobDeduplicationKey() == null
               ? null
               : base.getJobDeduplicationKey() + "-node" + nodeId;
-      members.add(
-          base.toBuilder()
-              .env(Map.copyOf(env))
-              .jobDeduplicationKey(dedupKey)
-              .build());
+      members.add(base.toBuilder().env(Map.copyOf(env)).jobDeduplicationKey(dedupKey).build());
     }
     return List.copyOf(members);
   }
@@ -259,11 +277,10 @@ public final class TlalocPodSpecBuilder {
   }
 
   /**
-   * Vendor-specific nodeSelector emit pattern. K8s label conventions vary by cloud — NVIDIA/GKE
-   * use {@code accelerator: nvidia-tesla-h100}, GCP TPUs use {@code
-   * cloud.google.com/gke-accelerator: tpu_v5e}, AWS uses {@code aws.amazon.com/neuron:
-   * trainium2}. Stub mapping; production deployments may override via a cluster-config
-   * dependency.
+   * Vendor-specific nodeSelector emit pattern. K8s label conventions vary by cloud — NVIDIA/GKE use
+   * {@code accelerator: nvidia-tesla-h100}, GCP TPUs use {@code cloud.google.com/gke-accelerator:
+   * tpu_v5e}, AWS uses {@code aws.amazon.com/neuron: trainium2}. Stub mapping; production
+   * deployments may override via a cluster-config dependency.
    */
   private record NodeSelectorTemplate(
       String labelKey, java.util.function.Function<String, String> labelValueFor) {}

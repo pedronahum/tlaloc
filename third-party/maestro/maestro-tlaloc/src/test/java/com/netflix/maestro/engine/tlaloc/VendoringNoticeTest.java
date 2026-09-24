@@ -50,8 +50,10 @@ public class VendoringNoticeTest {
       }
       p = p.getParent();
     }
-    fail("VendoringNoticeTest must run inside the Tlaloc repository (no settings.gradle.kts above "
-        + Paths.get("").toAbsolutePath() + ")");
+    fail(
+        "VendoringNoticeTest must run inside the Tlaloc repository (no settings.gradle.kts above "
+            + Paths.get("").toAbsolutePath()
+            + ")");
     return null;
   }
 
@@ -98,9 +100,13 @@ public class VendoringNoticeTest {
     TreeSet<String> documented = new TreeSet<>(documentedChanges(root));
     for (String rel : documented) {
       Path f = maestro.resolve(rel);
-      assertTrue("docs/vendoring.md lists " + rel + ", which does not exist", Files.isRegularFile(f));
       assertTrue(
-          rel + " is listed as modified but has no '" + MODIFIED_MARK + "' line in its first 12 lines",
+          "docs/vendoring.md lists " + rel + ", which does not exist", Files.isRegularFile(f));
+      assertTrue(
+          rel
+              + " is listed as modified but has no '"
+              + MODIFIED_MARK
+              + "' line in its first 12 lines",
           head(f, 12).contains(MODIFIED_MARK));
     }
     TreeSet<String> marked = new TreeSet<>();
@@ -117,7 +123,8 @@ public class VendoringNoticeTest {
         }
       }
     }
-    assertEquals("files carrying a 'Modified by' line vs the docs/vendoring.md table", documented, marked);
+    assertEquals(
+        "files carrying a 'Modified by' line vs the docs/vendoring.md table", documented, marked);
   }
 
   @Test
@@ -148,10 +155,16 @@ public class VendoringNoticeTest {
         maestro.resolve(
             "maestro-common/src/test/java/com/netflix/maestro/models/stepruntime/"
                 + "KubernetesCommandTlalocFieldsTest.java"));
+    files.add(
+        maestro.resolve(
+            "maestro-server/src/test/java/com/netflix/maestro/server/config/"
+                + "MaestroStepRuntimeConfigurationTlalocTest.java"));
     for (Path f : files) {
       String h = head(f, 12);
       assertTrue(f + " does not carry '" + TLALOC_COPYRIGHT + "'", h.contains(TLALOC_COPYRIGHT));
-      assertFalse(f + " carries a Netflix copyright but was written for Tlaloc", h.contains("Netflix, Inc."));
+      assertFalse(
+          f + " carries a Netflix copyright but was written for Tlaloc",
+          h.contains("Netflix, Inc."));
       assertTrue(f + " has no Apache-2.0 header", h.contains("Apache License, Version 2.0"));
     }
   }

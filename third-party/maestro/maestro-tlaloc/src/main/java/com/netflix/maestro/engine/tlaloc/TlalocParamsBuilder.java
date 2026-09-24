@@ -36,8 +36,8 @@ import java.util.Map;
  * }</pre>
  *
  * <p>v1 stub: {@link #build(KubernetesStepContext)} returns a JSON string with placeholder values
- * when params are absent. L2.5.2 fills in the real extraction logic against a fully-typed
- * Tlaloc step's params.
+ * when params are absent. L2.5.2 fills in the real extraction logic against a fully-typed Tlaloc
+ * step's params.
  */
 public final class TlalocParamsBuilder {
 
@@ -50,8 +50,8 @@ public final class TlalocParamsBuilder {
   }
 
   /**
-   * Build the JSON payload string that {@link TlalocRunner} consumes from {@code TLALOC_PARAMS}
-   * env var (or the first command-line arg).
+   * Build the JSON payload string that {@link TlalocRunner} consumes from {@code TLALOC_PARAMS} env
+   * var (or the first command-line arg).
    */
   public String build(KubernetesStepContext context) {
     Map<String, Object> payload = new LinkedHashMap<>();
@@ -60,15 +60,20 @@ public final class TlalocParamsBuilder {
             ? Map.<String, Parameter>of()
             : context.getRuntimeSummary().getParams();
     Map<String, Object> tlalocParams = extractTlalocBlock(stepParams);
-    payload.put("artifact_uri", asString(tlalocParams.get("artifact_uri")));
-    payload.put("manifest_ref", asString(tlalocParams.get("manifest_ref")));
-    payload.put("input_handle", asString(tlalocParams.get("input_handle")));
-    payload.put("output_handle_uri", asString(tlalocParams.get("output_handle_uri")));
+    copyParam(payload, tlalocParams, "artifact_uri");
+    copyParam(payload, tlalocParams, "manifest_ref");
+    copyParam(payload, tlalocParams, "input_handle");
+    copyParam(payload, tlalocParams, "output_handle_uri");
     try {
       return objectMapper.writeValueAsString(payload);
     } catch (JsonProcessingException e) {
       throw new MaestroBadRequestException(e, "Failed to serialize Tlaloc params");
     }
+  }
+
+  private static void copyParam(
+      Map<String, Object> payload, Map<String, Object> tlalocParams, String key) {
+    payload.put(key, asString(tlalocParams.get(key)));
   }
 
   /** Extract the {@code tlaloc} sub-block from Maestro's flat params map. */

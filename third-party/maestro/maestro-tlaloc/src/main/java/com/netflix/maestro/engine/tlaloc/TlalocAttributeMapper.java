@@ -22,16 +22,15 @@ import java.util.Map;
  * Tlaloc params; user-provided params pass through unchanged.
  *
  * <p>Tlaloc's runtime image reads its job parameters as JSON in the {@code TLALOC_PARAMS}
- * environment variable. The mapper surfaces here for symmetry with the maestro-actus structure
- * even though Tlaloc has fewer naming-bridge needs (Tlaloc's own surface is camelCase already at
- * the JSON level via {@code ProgramManifest.toJson}).
+ * environment variable. The mapper surfaces here for symmetry with the maestro-actus structure even
+ * though Tlaloc has fewer naming-bridge needs (Tlaloc's own surface is camelCase already at the
+ * JSON level via {@code ProgramManifest.toJson}).
  */
 public final class TlalocAttributeMapper {
 
   /**
-   * Tlaloc-recognised parameter keys. Maestro workflows declare these in their {@code
-   * params: { tlaloc: {...} }} block; the mapper validates membership and passes them through
-   * verbatim.
+   * Tlaloc-recognised parameter keys. Maestro workflows declare these in their {@code params: {
+   * tlaloc: {...} }} block; the mapper validates membership and passes them through verbatim.
    */
   private static final Map<String, String> CANONICAL_NAMES = canonicalNames();
 

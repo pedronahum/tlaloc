@@ -37,9 +37,9 @@ import lombok.extern.slf4j.Slf4j;
  * point is {@link com.netflix.maestro.engine.tlaloc.TlalocRunner}.
  *
  * <p>Replaces Layer 2's "Kubernetes-step masquerade" approach (the deprecated {@code
- * io.tlaloc.maestro.MaestroDescriptor.emit}) with proper step-type registration. The
- * descriptor emitter for the new type lands in L2.5.4+; until then this class is wired in DI
- * but only exercised by the smoke test.
+ * io.tlaloc.maestro.MaestroDescriptor.emit}) with proper step-type registration. The descriptor
+ * emitter for the new type lands in L2.5.4+; until then this class is wired in DI but only
+ * exercised by the smoke test.
  */
 @Slf4j
 public class TlalocStepRuntime extends KubernetesStepRuntime {
@@ -53,6 +53,7 @@ public class TlalocStepRuntime extends KubernetesStepRuntime {
    * directly; production deployments may use a richer cluster-config service.
    */
   private final String clusterVendor;
+
   private final String clusterArch;
 
   /** Constructor — args mirror {@link KubernetesStepRuntime}'s + the Tlaloc entrypoint builder. */
@@ -126,13 +127,21 @@ public class TlalocStepRuntime extends KubernetesStepRuntime {
    */
   @SuppressWarnings("unchecked")
   private static String lookupBackendMatrixJson(KubernetesStepContext context) {
-    if (context.getRuntimeSummary() == null) return null;
+    if (context.getRuntimeSummary() == null) {
+      return null;
+    }
     Map<String, Parameter> params = context.getRuntimeSummary().getParams();
-    if (params == null) return null;
+    if (params == null) {
+      return null;
+    }
     Parameter root = params.get("tlaloc");
-    if (root == null) return null;
+    if (root == null) {
+      return null;
+    }
     Object v = root.getValue();
-    if (!(v instanceof Map<?, ?> m)) return null;
+    if (!(v instanceof Map<?, ?> m)) {
+      return null;
+    }
     Object inner = ((Map<String, Object>) m).get("backend_matrix");
     return inner == null ? null : String.valueOf(inner);
   }

@@ -69,7 +69,8 @@ public class TlalocPodSpecBuilderTest {
 
   @Test
   public void caseInsensitiveVendorArchMatch() {
-    Optional<BackendTargetRecord> picked = builder.pickTarget(fiveRowMatrixJson(), "NVIDIA", "H100");
+    Optional<BackendTargetRecord> picked =
+        builder.pickTarget(fiveRowMatrixJson(), "NVIDIA", "H100");
     assertTrue(picked.isPresent());
     assertEquals("h100", picked.get().arch());
   }
@@ -78,7 +79,8 @@ public class TlalocPodSpecBuilderTest {
   public void noExactMatchFallsBackToSameVendorLowestCost() {
     // Cluster is nvidia/v100 (not in matrix). Among nvidia rows, A100 (cost 7.2) is cheaper than
     // H100 (cost 3.5)? No — H100 is cheaper. Pick H100.
-    Optional<BackendTargetRecord> picked = builder.pickTarget(fiveRowMatrixJson(), "nvidia", "v100");
+    Optional<BackendTargetRecord> picked =
+        builder.pickTarget(fiveRowMatrixJson(), "nvidia", "v100");
     assertTrue(picked.isPresent());
     assertEquals("nvidia", picked.get().vendor());
     assertEquals("h100", picked.get().arch());
@@ -115,8 +117,7 @@ public class TlalocPodSpecBuilderTest {
     KubernetesCommand result =
         builder.applyBackendTarget(base, fiveRowMatrixJson(), "nvidia", "h100");
     assertNotNull(result.getNodeSelector());
-    assertEquals(
-        "nvidia-tesla-h100", result.getNodeSelector().get("accelerator"));
+    assertEquals("nvidia-tesla-h100", result.getNodeSelector().get("accelerator"));
     assertEquals("nvidia", result.getAccelerators().get("vendor"));
     assertEquals("h100", result.getAccelerators().get("arch"));
     assertEquals("flash_attn_v3", result.getAccelerators().get("kernel"));
@@ -132,8 +133,7 @@ public class TlalocPodSpecBuilderTest {
     KubernetesCommand base = KubernetesCommand.builder().image("img").build();
     KubernetesCommand result =
         builder.applyBackendTarget(base, fiveRowMatrixJson(), "google", "tpu_v5e");
-    assertEquals(
-        "tpu_v5e", result.getNodeSelector().get("cloud.google.com/gke-accelerator"));
+    assertEquals("tpu_v5e", result.getNodeSelector().get("cloud.google.com/gke-accelerator"));
   }
 
   @Test
@@ -141,8 +141,7 @@ public class TlalocPodSpecBuilderTest {
     KubernetesCommand base = KubernetesCommand.builder().image("img").build();
     KubernetesCommand result =
         builder.applyBackendTarget(base, fiveRowMatrixJson(), "aws", "trainium2");
-    assertEquals(
-        "trainium2", result.getNodeSelector().get("aws.amazon.com/neuron"));
+    assertEquals("trainium2", result.getNodeSelector().get("aws.amazon.com/neuron"));
   }
 
   @Test
@@ -163,8 +162,7 @@ public class TlalocPodSpecBuilderTest {
 
   @Test
   public void emptyMatrixLeavesCommandUnchanged() {
-    KubernetesCommand base =
-        KubernetesCommand.builder().image("img").cpu("4").gpu("2").build();
+    KubernetesCommand base = KubernetesCommand.builder().image("img").cpu("4").gpu("2").build();
     KubernetesCommand result = builder.applyBackendTarget(base, "[]", "nvidia", "h100");
     assertEquals("empty matrix → identity transform", base, result);
   }
@@ -187,7 +185,8 @@ public class TlalocPodSpecBuilderTest {
 
   @Test
   public void backendTargetRecordWithNullsRoundTrips() throws Exception {
-    BackendTargetRecord original = new BackendTargetRecord("tlaloc", "cpu_generic", null, null, null);
+    BackendTargetRecord original =
+        new BackendTargetRecord("tlaloc", "cpu_generic", null, null, null);
     String json = mapper.writeValueAsString(original);
     BackendTargetRecord parsed = mapper.readValue(json, BackendTargetRecord.class);
     assertEquals(original, parsed);

@@ -26,14 +26,15 @@ import java.util.Map;
  * java -cp '/app/*' com.netflix.maestro.engine.tlaloc.TlalocRunner '<JSON params>' '/tmp/maestro-tlaloc-output.json'
  * }</pre>
  *
- * <p>JSON params are escaped for single-quote shell embedding. The runner writes its output JSON
- * to the second arg path; Maestro collects it as {@link
- * com.netflix.maestro.engine.dto.OutputData}.
+ * <p>JSON params are escaped for single-quote shell embedding. The runner writes its output JSON to
+ * the second arg path; Maestro collects it as {@link com.netflix.maestro.engine.dto.OutputData}.
  */
 public final class TlalocEntrypointBuilder {
 
   /** Default output path inside the container; matches maestro-actus's convention. */
   public static final String DEFAULT_OUTPUT_PATH = "/tmp/maestro-tlaloc-output.json";
+
+  private static final String SINGLE_QUOTE = "'";
 
   private final TlalocParamsBuilder paramsBuilder;
 
@@ -50,7 +51,7 @@ public final class TlalocEntrypointBuilder {
             + escaped
             + "' '"
             + DEFAULT_OUTPUT_PATH
-            + "'";
+            + SINGLE_QUOTE;
 
     String artifactUri = lookupParam(context, "artifact_uri");
     String manifestRef = lookupParam(context, "manifest_ref");
@@ -62,16 +63,22 @@ public final class TlalocEntrypointBuilder {
 
   private static String escapeSingleQuotes(String s) {
     // Same approach as maestro-actus: 'foo'\''bar' wraps a single quote.
-    return s.replace("'", "'\\''");
+    return s.replace(SINGLE_QUOTE, "'\\''");
   }
 
   @SuppressWarnings("unchecked")
   private static String lookupParam(KubernetesStepContext context, String key) {
-    if (context.getRuntimeSummary() == null) return "";
+    if (context.getRuntimeSummary() == null) {
+      return "";
+    }
     Map<String, Parameter> params = context.getRuntimeSummary().getParams();
-    if (params == null) return "";
+    if (params == null) {
+      return "";
+    }
     Parameter root = params.get("tlaloc");
-    if (root == null) return "";
+    if (root == null) {
+      return "";
+    }
     Object v = root.getValue();
     if (v instanceof Map<?, ?> m) {
       Object inner = ((Map<String, Object>) m).get(key);

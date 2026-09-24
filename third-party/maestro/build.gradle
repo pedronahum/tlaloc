@@ -1,5 +1,6 @@
 // Modified by Pedro N. Rodriguez for Tlaloc, 2026: JDK 25 toolchain, JUnit Platform launcher on the
-// test classpath. See docs/vendoring.md in the Tlaloc repository.
+// test classpath, Spotless 8 / google-java-format 1.30.0, Checkstyle pinned to 9.3.
+// See docs/vendoring.md in the Tlaloc repository.
 
 buildscript {
     repositories {
@@ -9,7 +10,7 @@ buildscript {
         }
     }
     dependencies {
-        classpath 'com.diffplug.spotless:spotless-plugin-gradle:6.+'
+        classpath 'com.diffplug.spotless:spotless-plugin-gradle:8.10.2'
         classpath "com.github.spotbugs.snom:spotbugs-gradle-plugin:6.+"
     }
 }
@@ -28,10 +29,19 @@ allprojects {
         }
     }
 
+    // Spotless 6 with google-java-format 1.19.2 cannot run on JDK 25: Spotless 6 resolves the
+    // formatter while configuring the task, which Gradle 9 refuses inside a composite build, and
+    // google-java-format below 1.30.0 refuses JVM 25. 1.30.0 indents a comment that follows a
+    // switch case differently from 1.19.2; the three upstream files that have one keep their
+    // upstream formatting and are excluded rather than reformatted.
     spotless {
         java {
-            googleJavaFormat()
+            googleJavaFormat('1.30.0')
             removeUnusedImports() // removes any unused imports
+            targetExclude(
+                '**/com/netflix/maestro/engine/listeners/MaestroFinalFlowStatusCallback.java',
+                '**/com/netflix/maestro/engine/steps/ForeachStepRuntime.java',
+                '**/com/netflix/maestro/engine/tasks/MaestroTask.java')
         }
     }
 
@@ -70,6 +80,9 @@ configure(allprojects - project(':netflix-sel')) {
     apply plugin: 'com.github.spotbugs'
 
     checkstyle {
+        // Checkstyle 9.3 is the version Gradle 8.8 (upstream's wrapper) defaults to. Gradle 9
+        // defaults to 10.x, which rejects the `scope` property config/checkstyle/checkstyle.xml sets.
+        toolVersion = "9.3"
         checkstyleMain.enabled = true
         checkstyleMain.source = fileTree("src/main/java")
         checkstyleTest.enabled = false

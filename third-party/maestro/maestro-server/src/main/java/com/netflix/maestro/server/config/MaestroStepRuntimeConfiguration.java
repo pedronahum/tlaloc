@@ -43,8 +43,6 @@ import com.netflix.maestro.engine.stepruntime.HttpStepRuntime;
 import com.netflix.maestro.engine.stepruntime.KubernetesStepRuntime;
 import com.netflix.maestro.engine.stepruntime.NotebookStepRuntime;
 import com.netflix.maestro.engine.stepruntime.TlalocStepRuntime;
-import com.netflix.maestro.engine.tlaloc.TlalocEntrypointBuilder;
-import com.netflix.maestro.engine.tlaloc.TlalocParamsBuilder;
 import com.netflix.maestro.engine.steps.ForeachStepRuntime;
 import com.netflix.maestro.engine.steps.NoOpStepRuntime;
 import com.netflix.maestro.engine.steps.SleepStepRuntime;
@@ -52,6 +50,9 @@ import com.netflix.maestro.engine.steps.StepRuntime;
 import com.netflix.maestro.engine.steps.SubworkflowStepRuntime;
 import com.netflix.maestro.engine.steps.WhileStepRuntime;
 import com.netflix.maestro.engine.templates.JobTemplateManager;
+import com.netflix.maestro.engine.tlaloc.TlalocEntrypointBuilder;
+import com.netflix.maestro.engine.tlaloc.TlalocParamsBuilder;
+import com.netflix.maestro.engine.tlaloc.TlalocPodSpecBuilder;
 import com.netflix.maestro.engine.tracing.MaestroTracingManager;
 import com.netflix.maestro.engine.utils.WorkflowEnrichmentHelper;
 import com.netflix.maestro.engine.utils.WorkflowHelper;
@@ -133,6 +134,17 @@ public class MaestroStepRuntimeConfiguration {
   }
 
   @Bean
+  public TlalocPodSpecBuilder tlalocPodSpecBuilder(
+      @Qualifier(Constants.MAESTRO_QUALIFIER) ObjectMapper objectMapper) {
+    LOG.info("Creating tlalocPodSpecBuilder within Spring boot...");
+    return new TlalocPodSpecBuilder(objectMapper);
+  }
+
+  /**
+   * The cluster's primary accelerator comes from the {@code TLALOC_CLUSTER_VENDOR} and {@code
+   * TLALOC_CLUSTER_ARCH} environment variables; unset means no preferred backend-matrix row.
+   */
+  @Bean
   public TlalocStepRuntime tlaloc(
       @Qualifier(STEP_RUNTIME_QUALIFIER) Map<StepType, StepRuntime> stepRuntimeMap,
       KubernetesRuntimeExecutor runtimeExecutor,
@@ -141,7 +153,8 @@ public class MaestroStepRuntimeConfiguration {
       OutputDataManager outputDataManager,
       @Qualifier(Constants.MAESTRO_QUALIFIER) ObjectMapper objectMapper,
       MaestroMetrics metrics,
-      TlalocEntrypointBuilder entrypointBuilder) {
+      TlalocEntrypointBuilder entrypointBuilder,
+      TlalocPodSpecBuilder podSpecBuilder) {
     LOG.info("Creating tlaloc step runtime within Spring boot...");
     TlalocStepRuntime step =
         new TlalocStepRuntime(
@@ -151,7 +164,10 @@ public class MaestroStepRuntimeConfiguration {
             outputDataManager,
             objectMapper,
             metrics,
-            entrypointBuilder);
+            entrypointBuilder,
+            podSpecBuilder,
+            System.getenv("TLALOC_CLUSTER_VENDOR"),
+            System.getenv("TLALOC_CLUSTER_ARCH"));
     stepRuntimeMap.put(StepType.TLALOC, step);
     return step;
   }

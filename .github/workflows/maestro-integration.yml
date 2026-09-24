@@ -40,6 +40,12 @@ on:
       - 'third-party/maestro/maestro-tlaloc/**'
       # Maestro's own StepType registry — a rename there breaks our registration.
       - 'third-party/maestro/maestro-common/src/main/java/com/netflix/maestro/models/definition/StepType.java'
+      # The server that wires the step type in, and the vendored build's own
+      # configuration (tool versions, Checkstyle and PMD rules).
+      - 'third-party/maestro/maestro-server/**'
+      - 'third-party/maestro/build.gradle'
+      - 'third-party/maestro/settings.gradle'
+      - 'third-party/maestro/config/**'
       # The Tlaloc side of the handoff: the typed handle that crosses a step.
       - 'maestro/src/jvmMain/kotlin/io/tlaloc/maestro/SerializedBufferHandle.kt'
       - 'maestro/src/jvmTest/kotlin/io/tlaloc/maestro/SerializedBufferHandleTest.kt'
@@ -53,6 +59,10 @@ on:
     paths:
       - 'third-party/maestro/maestro-tlaloc/**'
       - 'third-party/maestro/maestro-common/src/main/java/com/netflix/maestro/models/definition/StepType.java'
+      - 'third-party/maestro/maestro-server/**'
+      - 'third-party/maestro/build.gradle'
+      - 'third-party/maestro/settings.gradle'
+      - 'third-party/maestro/config/**'
       - 'maestro/src/jvmMain/kotlin/io/tlaloc/maestro/SerializedBufferHandle.kt'
       - 'maestro/src/jvmTest/kotlin/io/tlaloc/maestro/SerializedBufferHandleTest.kt'
       - 'maestro/src/**/serving/**'
@@ -95,6 +105,16 @@ jobs:
       # against the Maestro we vendor.
       - name: maestro-tlaloc test suite
         run: ./gradlew :vendored-maestro:maestro-tlaloc:test --no-daemon --stacktrace
+
+      # Every vendored module compiles, including maestro-server, which registers
+      # the step type, and passes the vendored build's Spotless, Checkstyle and
+      # PMD checks on JDK 25. Then maestro-server's tests, which include the one
+      # that checks the Tlaloc step runtime is registered under TLALOC.
+      - name: vendored Maestro compile and lint
+        run: ./gradlew -p third-party/maestro build -x test --no-daemon --stacktrace
+
+      - name: maestro-server test suite
+        run: ./gradlew :vendored-maestro:maestro-server:test --no-daemon --stacktrace
 
       - name: Upload test reports
         if: always()

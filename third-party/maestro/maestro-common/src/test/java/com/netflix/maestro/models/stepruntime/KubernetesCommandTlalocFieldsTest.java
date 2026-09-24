@@ -17,7 +17,6 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netflix.maestro.MaestroBaseTest;
 import java.util.Map;
 import org.junit.Test;
@@ -39,8 +38,10 @@ public class KubernetesCommandTlalocFieldsTest extends MaestroBaseTest {
     KubernetesCommand cmd =
         KubernetesCommand.builder().appName("plain").image("plain:latest").build();
     String json = MAPPER.writeValueAsString(cmd);
-    assertFalse("nodeSelector must not appear when unset; got: " + json, json.contains("node_selector"));
-    assertFalse("accelerators must not appear when unset; got: " + json, json.contains("accelerators"));
+    assertFalse(
+        "nodeSelector must not appear when unset; got: " + json, json.contains("node_selector"));
+    assertFalse(
+        "accelerators must not appear when unset; got: " + json, json.contains("accelerators"));
   }
 
   @Test

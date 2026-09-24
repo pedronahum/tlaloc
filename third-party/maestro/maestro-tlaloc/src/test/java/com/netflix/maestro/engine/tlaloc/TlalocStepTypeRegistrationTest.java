@@ -28,8 +28,8 @@ import org.junit.Test;
  * <ul>
  *   <li>{@link StepType#TLALOC} exists and exposes the canonical wire string {@code "Tlaloc"}.
  *   <li>{@link StepType#create} round-trips the wire string back to the enum value.
- *   <li>The Tlaloc supporting types ({@link TlalocCommand}, {@link TlalocAttributeMapper}) load
- *       and behave as documented.
+ *   <li>The Tlaloc supporting types ({@link TlalocCommand}, {@link TlalocAttributeMapper}) load and
+ *       behave as documented.
  * </ul>
  */
 public class TlalocStepTypeRegistrationTest {

@@ -1,3 +1,6 @@
+// Modified by Pedro N. Rodriguez for Tlaloc, 2026: depends on maestro-tlaloc, whose step runtime
+// MaestroStepRuntimeConfiguration registers. See docs/vendoring.md in the Tlaloc repository.
+
 plugins {
     id 'org.springframework.boot' version '3.+'
 }
@@ -42,6 +45,7 @@ dependencies {
     implementation project(':maestro-extensions')
     implementation project(':maestro-kubernetes')
     implementation project(':maestro-http')
+    implementation project(':maestro-tlaloc')
 
     implementation('io.fabric8:kubernetes-client:7.+'){
         exclude group: 'org.slf4j'

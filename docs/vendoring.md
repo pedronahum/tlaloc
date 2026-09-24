@@ -107,16 +107,18 @@ pinned commit (paths relative to `third-party/maestro/`; `VendoringNoticeTest` i
 
 | File | Change |
 |------|--------|
-| `build.gradle` | JDK 25 toolchain; the Security Manager test flag removed; JUnit Platform launcher and vintage engine on the test classpath |
+| `build.gradle` | JDK 25 toolchain; the Security Manager test flag removed; JUnit Platform launcher and vintage engine on the test classpath; Spotless 8.10.2 with google-java-format 1.30.0 (the lowest that runs on JDK 25), with the three upstream files whose comment indentation 1.30.0 reformats excluded; Checkstyle pinned to 9.3, the version upstream's Gradle 8.8 used |
 | `settings.gradle` | Includes `maestro-tlaloc` |
 | `maestro-common/src/main/java/com/netflix/maestro/models/definition/StepType.java` | Adds the `TLALOC` step type |
 | `maestro-common/src/main/java/com/netflix/maestro/models/stepruntime/KubernetesCommand.java` | Adds the `nodeSelector` and `accelerators` fields |
+| `maestro-server/build.gradle` | Depends on `maestro-tlaloc` |
 | `maestro-server/src/main/java/com/netflix/maestro/server/config/MaestroStepRuntimeConfiguration.java` | Registers the Tlaloc step runtime beans |
 
 Each of these carries a `Modified by Pedro N. Rodriguez for Tlaloc, 2026` line
 at the top, as Apache-2.0 section 4(b) requires. Files Tlaloc added are
-`maestro-tlaloc/`, `maestro-common/.../KubernetesCommandTlalocFieldsTest.java`
-and `maestro-server/src/test/resources/samples/sample-tlaloc-*.json`; the Java
+`maestro-tlaloc/`, `maestro-common/.../KubernetesCommandTlalocFieldsTest.java`,
+`maestro-server/.../MaestroStepRuntimeConfigurationTlalocTest.java` and
+`maestro-server/src/test/resources/samples/sample-tlaloc-*.json`; the Java
 ones carry a `Copyright 2026 Pedro N. Rodriguez` Apache header. The repository
 root `NOTICE` credits Netflix Maestro; Netflix/maestro ships no `NOTICE` file at
 the pinned commit. After an upgrade, re-check that this

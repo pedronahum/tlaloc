@@ -32,17 +32,17 @@ import org.junit.Test;
  * is loaded from the test classpath, parsed as JSON, and structurally validated:
  *
  * <ul>
- *   <li>Top-level shape matches Maestro's canonical workflow definition (properties +
- *       workflow.id + workflow.steps).
- *   <li>Every Tlaloc-typed step has a {@code params.tlaloc} block with the canonical Tlaloc
- *       fields ({@code image}, {@code artifact_uri}, {@code manifest_ref}, {@code input_handle},
- *       {@code output_handle_uri}).
- *   <li>The keystone typed-handoff sample carries a structurally-correct
- *       {@code SerializedBufferHandle} JSON in its consumer step's input_handle field.
+ *   <li>Top-level shape matches Maestro's canonical workflow definition (properties + workflow.id +
+ *       workflow.steps).
+ *   <li>Every Tlaloc-typed step has a {@code params.tlaloc} block with the canonical Tlaloc fields
+ *       ({@code image}, {@code artifact_uri}, {@code manifest_ref}, {@code input_handle}, {@code
+ *       output_handle_uri}).
+ *   <li>The keystone typed-handoff sample carries a structurally-correct {@code
+ *       SerializedBufferHandle} JSON in its consumer step's input_handle field.
  * </ul>
  *
- * <p>Real workflow execution against a live Maestro server is the L2.5.5 CI integration's
- * concern. v1 (this test) proves the JSONs are structurally valid against the canonical schema.
+ * <p>Real workflow execution against a live Maestro server is the L2.5.5 CI integration's concern.
+ * v1 (this test) proves the JSONs are structurally valid against the canonical schema.
  */
 public class TlalocSampleWorkflowsTest {
 
@@ -84,8 +84,8 @@ public class TlalocSampleWorkflowsTest {
 
   @Test
   public void everyTlalocStepHasCanonicalParamsBlock() throws Exception {
-    Set<String> requiredKeys = Set.of(
-        "image", "artifact_uri", "manifest_ref", "input_handle", "output_handle_uri");
+    Set<String> requiredKeys =
+        Set.of("image", "artifact_uri", "manifest_ref", "input_handle", "output_handle_uri");
     for (String sample : SAMPLES) {
       Map<String, Object> wf = loadSample(sample);
       List<TlalocStepRef> tlalocSteps = collectTlalocSteps(wf);
@@ -127,11 +127,15 @@ public class TlalocSampleWorkflowsTest {
     List<TlalocStepRef> steps = collectTlalocSteps(wf);
     TlalocStepRef score = steps.get(1);
     @SuppressWarnings("unchecked")
-    Map<String, Object> inputHandleParam = (Map<String, Object>) score.tlalocBlock.get("input_handle");
+    Map<String, Object> inputHandleParam =
+        (Map<String, Object>) score.tlalocBlock.get("input_handle");
     String json = (String) inputHandleParam.get("value");
-    Map<String, Object> handle = MAPPER.readValue(json, new TypeReference<Map<String, Object>>() {});
-    // SerializedBufferHandle JSON shape: uri / contentHash / typeDescriptor / manifestRef / meshName
-    for (String key : new String[] {"uri", "contentHash", "typeDescriptor", "manifestRef", "meshName"}) {
+    Map<String, Object> handle =
+        MAPPER.readValue(json, new TypeReference<Map<String, Object>>() {});
+    // SerializedBufferHandle JSON shape: uri / contentHash / typeDescriptor / manifestRef /
+    // meshName
+    for (String key :
+        new String[] {"uri", "contentHash", "typeDescriptor", "manifestRef", "meshName"}) {
       assertTrue(
           "typed-handoff consumer's input_handle missing '" + key + "': " + handle,
           handle.containsKey(key));
@@ -224,8 +228,10 @@ public class TlalocSampleWorkflowsTest {
       String id = String.valueOf(step.get("id"));
       if ("Tlaloc".equalsIgnoreCase(type)) {
         Map<String, Object> params = (Map<String, Object>) step.get("params");
-        Map<String, Object> tlalocWrapper = params != null ? (Map<String, Object>) params.get("tlaloc") : null;
-        Map<String, Object> tlalocBlock = tlalocWrapper != null ? (Map<String, Object>) tlalocWrapper.get("value") : null;
+        Map<String, Object> tlalocWrapper =
+            params != null ? (Map<String, Object>) params.get("tlaloc") : null;
+        Map<String, Object> tlalocBlock =
+            tlalocWrapper != null ? (Map<String, Object>) tlalocWrapper.get("value") : null;
         if (tlalocBlock != null) {
           out.add(new TlalocStepRef(id, tlalocBlock));
         }

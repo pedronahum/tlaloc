@@ -17,14 +17,13 @@ package com.netflix.maestro.engine.tlaloc;
  * com.netflix.maestro.engine.stepruntime.TlalocStepRuntime} hands to the K8s job, plus the
  * Tlaloc-specific metadata (artifact URI, manifest reference) that the runtime image consumes.
  *
- * <p>Mirrors maestro-actus's {@code ActusCommand} record. v1 carries the artifact URI inline;
- * Layer 3+ replaces with a content-addressed registry pointer.
+ * <p>Mirrors maestro-actus's {@code ActusCommand} record. v1 carries the artifact URI inline; Layer
+ * 3+ replaces with a content-addressed registry pointer.
  *
  * @param entrypoint shell command string passed to {@code /bin/sh -c}.
  * @param artifactUri pointer at the StableHLO body (e.g. {@code data:application/...} or {@code
  *     oci://registry/image@sha256:...}).
- * @param manifestRef the producer's {@code ProgramManifest.bodyHash} for lineage / log
- *     correlation.
+ * @param manifestRef the producer's {@code ProgramManifest.bodyHash} for lineage / log correlation.
  * @param stepName workflow step name; included in container logs for grep-ability.
  */
 public record TlalocCommand(

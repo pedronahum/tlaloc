@@ -28,7 +28,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import org.junit.Rule;
 import org.junit.Test;
@@ -37,10 +36,10 @@ import org.junit.rules.TemporaryFolder;
 /**
  * Layer 2.5.2 §0.4.247+ — direct-JVM end-to-end test for {@link TlalocRunner}.
  *
- * <p>Mirrors maestro-actus's {@code ActusRunnerEndToEndTest}: invokes {@link TlalocRunner#main}
- * in the test JVM (no K8s, no real cluster), provides a synthetic {@code SerializedBufferHandle}
- * input file, asserts the runner produces a well-formed OutputData JSON pointing at a copy on
- * the output URI, and validates the wire format on both ends.
+ * <p>Mirrors maestro-actus's {@code ActusRunnerEndToEndTest}: invokes {@link TlalocRunner#main} in
+ * the test JVM (no K8s, no real cluster), provides a synthetic {@code SerializedBufferHandle} input
+ * file, asserts the runner produces a well-formed OutputData JSON pointing at a copy on the output
+ * URI, and validates the wire format on both ends.
  *
  * <p>The synthetic input is built by hand here (no dep on Tlaloc's Kotlin {@code
  * io.tlaloc.maestro:SerializedBufferHandle}) — that keeps the runner-side test classpath free of
@@ -64,28 +63,29 @@ public class TlalocRunnerEndToEndTest {
     Files.write(inputFile, wireBytes);
 
     String contentHash = sha256Hex(payloadBytes(payload));
-    String inputHandleJson = buildHandleJson(
-        inputFile.toUri().toString(),
-        contentHash,
-        descriptorJson(payload.length),
-        "producer-step-hash",
-        "Mesh0");
-    String paramsJson = buildParamsJson(
-        inputHandleJson,
-        outputFile.toUri().toString(),
-        "producer-step-hash");
+    String inputHandleJson =
+        buildHandleJson(
+            inputFile.toUri().toString(),
+            contentHash,
+            descriptorJson(payload.length),
+            "producer-step-hash",
+            "Mesh0");
+    String paramsJson =
+        buildParamsJson(inputHandleJson, outputFile.toUri().toString(), "producer-step-hash");
 
     TlalocRunner.main(new String[] {paramsJson, outputDataFile.toString()});
 
     // Output data assertions
-    Map<String, Object> outputData = MAPPER.readValue(
-        Files.readString(outputDataFile), new TypeReference<Map<String, Object>>() {});
+    Map<String, Object> outputData =
+        MAPPER.readValue(
+            Files.readString(outputDataFile), new TypeReference<Map<String, Object>>() {});
     assertEquals("ok", outputData.get("status"));
     assertEquals("producer-step-hash", outputData.get("manifest_ref"));
     assertNotNull(outputData.get("output_handle"));
     @SuppressWarnings("unchecked")
-    Map<String, Object> outputHandle = MAPPER.readValue(
-        (String) outputData.get("output_handle"), new TypeReference<Map<String, Object>>() {});
+    Map<String, Object> outputHandle =
+        MAPPER.readValue(
+            (String) outputData.get("output_handle"), new TypeReference<Map<String, Object>>() {});
     assertEquals(outputFile.toUri().toString(), outputHandle.get("uri"));
     assertEquals(contentHash, outputHandle.get("contentHash"));
     assertEquals("Mesh0", outputHandle.get("meshName"));
@@ -98,11 +98,13 @@ public class TlalocRunnerEndToEndTest {
   @Test
   public void runnerEmitsNoOpOutputWhenInputHandleAbsent() throws Exception {
     Path outputDataFile = tmp.newFile("output-data.json").toPath();
-    String paramsJson = "{\"artifact_uri\":\"data:foo\",\"manifest_ref\":\"abc\","
-        + "\"input_handle\":\"\",\"output_handle_uri\":\"\"}";
+    String paramsJson =
+        "{\"artifact_uri\":\"data:foo\",\"manifest_ref\":\"abc\","
+            + "\"input_handle\":\"\",\"output_handle_uri\":\"\"}";
     TlalocRunner.main(new String[] {paramsJson, outputDataFile.toString()});
-    Map<String, Object> outputData = MAPPER.readValue(
-        Files.readString(outputDataFile), new TypeReference<Map<String, Object>>() {});
+    Map<String, Object> outputData =
+        MAPPER.readValue(
+            Files.readString(outputDataFile), new TypeReference<Map<String, Object>>() {});
     assertEquals("ok", outputData.get("status"));
     assertEquals("abc", outputData.get("manifest_ref"));
     assertTrue(((String) outputData.get("note")).contains("no input_handle"));
@@ -119,13 +121,14 @@ public class TlalocRunnerEndToEndTest {
     Files.write(inputFile, wireBytes);
 
     // Pass the wrong contentHash in the handle; runner must reject.
-    String inputHandleJson = buildHandleJson(
-        inputFile.toUri().toString(),
-        "0".repeat(64),  // bad hash
-        descriptorJson(payload.length),
-        "producer", "Mesh0");
-    String paramsJson = buildParamsJson(
-        inputHandleJson, outputFile.toUri().toString(), "producer");
+    String inputHandleJson =
+        buildHandleJson(
+            inputFile.toUri().toString(),
+            "0".repeat(64), // bad hash
+            descriptorJson(payload.length),
+            "producer",
+            "Mesh0");
+    String paramsJson = buildParamsJson(inputHandleJson, outputFile.toUri().toString(), "producer");
 
     assertThrows(
         IllegalStateException.class,
@@ -142,12 +145,14 @@ public class TlalocRunnerEndToEndTest {
     byte[] garbage = new byte[64];
     Files.write(inputFile, garbage);
 
-    String inputHandleJson = buildHandleJson(
-        inputFile.toUri().toString(),
-        sha256Hex(new byte[0]),  // doesn't matter; runner fails on magic first
-        descriptorJson(0), "producer", "Mesh0");
-    String paramsJson = buildParamsJson(
-        inputHandleJson, outputFile.toUri().toString(), "producer");
+    String inputHandleJson =
+        buildHandleJson(
+            inputFile.toUri().toString(),
+            sha256Hex(new byte[0]), // doesn't matter; runner fails on magic first
+            descriptorJson(0),
+            "producer",
+            "Mesh0");
+    String paramsJson = buildParamsJson(inputHandleJson, outputFile.toUri().toString(), "producer");
 
     assertThrows(
         IllegalStateException.class,
@@ -157,11 +162,9 @@ public class TlalocRunnerEndToEndTest {
   @Test
   public void runnerRejectsArgCountMismatch() {
     assertThrows(
-        IllegalArgumentException.class,
-        () -> TlalocRunner.main(new String[] {"only-one-arg"}));
+        IllegalArgumentException.class, () -> TlalocRunner.main(new String[] {"only-one-arg"}));
     assertThrows(
-        IllegalArgumentException.class,
-        () -> TlalocRunner.main(new String[] {"a", "b", "c"}));
+        IllegalArgumentException.class, () -> TlalocRunner.main(new String[] {"a", "b", "c"}));
   }
 
   // ---- Wire-format helpers (mirror Tlaloc's Kotlin SerializedBufferHandle) --
@@ -213,14 +216,16 @@ public class TlalocRunnerEndToEndTest {
     Map<String, Object> handle = new LinkedHashMap<>();
     handle.put("uri", uri);
     handle.put("contentHash", hash);
-    handle.put("typeDescriptor", MAPPER.readValue(descriptorJson, new TypeReference<Map<String, Object>>() {}));
+    handle.put(
+        "typeDescriptor",
+        MAPPER.readValue(descriptorJson, new TypeReference<Map<String, Object>>() {}));
     handle.put("manifestRef", manifestRef);
     handle.put("meshName", meshName);
     return MAPPER.writeValueAsString(handle);
   }
 
-  private static String buildParamsJson(String inputHandleJson, String outputHandleUri, String manifestRef)
-      throws IOException {
+  private static String buildParamsJson(
+      String inputHandleJson, String outputHandleUri, String manifestRef) throws IOException {
     Map<String, Object> params = new LinkedHashMap<>();
     params.put("artifact_uri", "data:application/x-tlaloc-stablehlo;sha256=test;base64,");
     params.put("manifest_ref", manifestRef);

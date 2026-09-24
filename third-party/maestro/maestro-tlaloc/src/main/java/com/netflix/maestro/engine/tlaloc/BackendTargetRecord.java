@@ -39,8 +39,4 @@ import com.fasterxml.jackson.databind.annotation.JsonNaming;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
 public record BackendTargetRecord(
-    String vendor,
-    String arch,
-    String kernelName,
-    String kvQuantDtype,
-    Double costMicroseconds) {}
+    String vendor, String arch, String kernelName, String kvQuantDtype, Double costMicroseconds) {}
