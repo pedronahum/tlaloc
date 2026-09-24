@@ -9,6 +9,17 @@ depending on a coordinate.
 This file starts at `0.1.0-alpha01`. Earlier work is recorded in the commit history
 and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
+## [Unreleased]
+
+### Changed
+
+- **Symja 3.2.0.** The build compiles and tests `tlaloc-ir` against
+  `org.matheclipse:matheclipse-core:3.2.0`, and the compiler's refusal for a
+  symbolic-trip-count loop now names that coordinate. Symja stays `compileOnly`
+  (not in a consumer's dependency graph). The 0.1.0-alpha01 `tlaloc-ir` jar calls
+  the same 36 Symja methods and fields, so it also runs with 3.2.0 on the
+  compiler plugin classpath.
+
 ## [0.1.0-alpha01] — 2026-09-24
 
 The first published version. [docs/CAPABILITIES.md](docs/CAPABILITIES.md) lists

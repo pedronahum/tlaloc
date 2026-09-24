@@ -65,7 +65,7 @@ put it there. You need it only to differentiate a loop whose trip count is not a
 compile-time constant; a `for` loop over a `const val` bound is unrolled with no
 CAS. When a body needs it, the compiler refuses by name and prints the line to
 add. The CAS runs inside the Kotlin compiler, not inside your program, so the line
-is `kotlinCompilerPluginClasspath("org.matheclipse:matheclipse-core:3.1.1")`; an
+is `kotlinCompilerPluginClasspath("org.matheclipse:matheclipse-core:3.2.0")`; an
 `implementation` dependency is on the wrong classpath and the plugin will not see
 it. Tlaloc links Symja across the `SymbolicEngine` interface and does not modify
 or redistribute it.

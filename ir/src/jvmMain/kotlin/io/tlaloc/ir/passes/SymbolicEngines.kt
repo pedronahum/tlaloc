@@ -18,7 +18,7 @@ package io.tlaloc.ir.passes
  * on the test classpath, so nothing about the certified behaviour changes. What
  * changes is that a consumer who wants the CAS asks for it:
  *
- *     implementation("org.matheclipse:matheclipse-core:3.1.1")   // LGPL-3.0
+ *     implementation("org.matheclipse:matheclipse-core:3.2.0")   // LGPL-3.0
  *
  * ## Licensing, stated plainly because this is where a reader will look for it
  *
@@ -48,7 +48,7 @@ object SymbolicEngines {
     const val SYMJA_PROBE_CLASS: String = "org.matheclipse.core.eval.ExprEvaluator"
 
     /** The Maven coordinate a user adds, version included. */
-    const val SYMJA_COORDINATE: String = "org.matheclipse:matheclipse-core:3.1.1"
+    const val SYMJA_COORDINATE: String = "org.matheclipse:matheclipse-core:3.2.0"
 
     /** Symja's licence. Stated in the refusal text on purpose — see the class KDoc. */
     const val SYMJA_LICENSE: String = "LGPL-3.0"
