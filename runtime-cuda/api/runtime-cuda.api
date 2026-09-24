@@ -1,0 +1,27 @@
+public final class io/tlaloc/runtime/cuda/CudaDriverException : java/lang/RuntimeException {
+	public fun <init> (Ljava/lang/String;Ljava/lang/Throwable;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/Throwable;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+}
+
+public final class io/tlaloc/runtime/cuda/CudaDriverFfm {
+	public static final field Companion Lio/tlaloc/runtime/cuda/CudaDriverFfm$Companion;
+	public final fun ctxSynchronize ()V
+	public final fun deviceGet (I)I
+	public final fun funcSetAttribute (Ljava/lang/foreign/MemorySegment;II)V
+	public final fun getFUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES ()I
+	public final fun launchKernel (Ljava/lang/foreign/MemorySegment;IIIIIIILjava/lang/foreign/MemorySegment;Ljava/lang/foreign/MemorySegment;)V
+	public final fun memAlloc (J)J
+	public final fun memFree (J)V
+	public final fun memcpyDtoH (Ljava/lang/foreign/MemorySegment;JJ)V
+	public final fun memcpyHtoD (JLjava/lang/foreign/MemorySegment;J)V
+	public final fun moduleGetFunction (Ljava/lang/foreign/MemorySegment;Ljava/lang/String;)Ljava/lang/foreign/MemorySegment;
+	public final fun moduleLoadPtx (Ljava/lang/String;)Ljava/lang/foreign/MemorySegment;
+	public final fun moduleUnload (Ljava/lang/foreign/MemorySegment;)V
+	public final fun primaryCtxRelease (I)V
+	public final fun primaryCtxRetainAndSetCurrent (I)Ljava/lang/foreign/MemorySegment;
+}
+
+public final class io/tlaloc/runtime/cuda/CudaDriverFfm$Companion {
+	public final fun load (Ljava/lang/foreign/Arena;)Lio/tlaloc/runtime/cuda/CudaDriverFfm;
+}
+

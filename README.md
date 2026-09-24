@@ -310,7 +310,7 @@ Every claim in this repository carries one of these marks:
 | Inference — paged attention, KV cache, safetensors, framework-free serving | ✅ | Real TinyLlama-1.1B, 6/6 tokens identical to HuggingFace, also through vLLM |
 | StableHLO + Shardy emission, PJRT from Kotlin (FFM) and Python (ctypes), IREE | ✅ | No JNI anywhere |
 | KPTX — PTX DSL, parser, transpiler, kernel claiming | ✅ | Paged attention 1.4–1.9× faster than XLA at 8B-shaped decode points, 1.6–1.8× slower at toy shapes. Not registered by default |
-| Public API surface — opt-in marker, ABI baseline, API reference | ✅ | `apiCheck` against a committed baseline, wired into `check` |
+| Public API surface — opt-in marker, ABI baseline, API reference | ✅ | `checkKotlinAbi` against a committed baseline for every published module, wired into `check` |
 | Google TPU | 🧪 | Plugin lane, gating and a self-skipping smoke suite exist. Nothing has ever run on a TPU |
 | IDE diagnostics — the "red squiggle" | 🧪 | Source positions are certified; no test drives IntelliJ |
 | Distributed / multi-GPU training | 📐 | Design and marshalling done; needs 2+ hosts |

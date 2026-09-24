@@ -17878,9 +17878,11 @@ tlaloc/
   JDK-21 job and a next-Kotlin probe. **No aarch64 *Linux* lane and no Windows
   lane**, and 🧪 **none of the lanes has ever run**: they were written on a machine
   with no GitHub Actions access (§0.4.504).
-- **Binary compatibility:** ✅ `apiCheck` against a committed `api/<module>.api`
-  baseline, wired into `check` (§0.4.505). Covers the six Java-21-targeted modules;
-  binary-compatibility-validator 0.18.2 cannot read Java 25 bytecode.
+- **Binary compatibility:** ✅ `checkKotlinAbi` against a committed `api/<module>.api`
+  baseline, wired into `check` (§0.4.505, moved to KGP's ABI validation in
+  §0.4.531). Covers every published module, Java-25-targeted ones included;
+  binary-compatibility-validator 0.18.2, used before, could not read Java 25
+  bytecode.
 - **Opt-in marker:** ✅ `@ExperimentalTlalocApi` (§0.4.505) — a
   `@RequiresOptIn(ERROR)` marker on the provisional part of the surface.
 

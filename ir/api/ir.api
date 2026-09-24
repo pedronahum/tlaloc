@@ -493,7 +493,6 @@ public final class io/tlaloc/ir/inference/DecodeBucketPolicy {
 	public static final field DEFAULT_MIN_CONTEXT I
 	public fun <init> (IIII)V
 	public synthetic fun <init> (IIIIILkotlin/jvm/internal/DefaultConstructorMarker;)V
-	public synthetic fun <init> (IIIILjava/util/List;Ljava/util/List;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun bucketFor (II)Lio/tlaloc/ir/inference/DecodeBucket;
 	public final fun bucketForOrNull (II)Lio/tlaloc/ir/inference/DecodeBucket;
 	public final fun getAllBuckets ()Ljava/util/List;
@@ -635,7 +634,6 @@ public final class io/tlaloc/ir/inference/DecodeSlotRole : java/lang/Enum {
 public final class io/tlaloc/ir/inference/HfLlamaCheckpoint : java/lang/AutoCloseable {
 	public static final field CONFIG_JSON Ljava/lang/String;
 	public static final field Companion Lio/tlaloc/ir/inference/HfLlamaCheckpoint$Companion;
-	public synthetic fun <init> (Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/core/io/WeightSource;ZLkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun close ()V
 	public final fun getConfig ()Lio/tlaloc/ir/inference/HfLlamaConfig;
 	public final fun getDir ()Ljava/nio/file/Path;

@@ -849,7 +849,6 @@ public final class io/tlaloc/core/io/SafetensorsEntry {
 
 public final class io/tlaloc/core/io/SafetensorsFile : java/lang/AutoCloseable {
 	public static final field Companion Lio/tlaloc/core/io/SafetensorsFile$Companion;
-	public synthetic fun <init> (Ljava/nio/file/Path;Ljava/nio/channels/FileChannel;Lio/tlaloc/core/io/SafetensorsHeader;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun close ()V
 	public final fun getHeader ()Lio/tlaloc/core/io/SafetensorsHeader;
 	public final fun getMetadata ()Ljava/util/Map;
@@ -882,7 +881,6 @@ public final class io/tlaloc/core/io/SafetensorsHeader {
 
 public final class io/tlaloc/core/io/SafetensorsIndex : java/lang/AutoCloseable {
 	public static final field Companion Lio/tlaloc/core/io/SafetensorsIndex$Companion;
-	public synthetic fun <init> (Ljava/nio/file/Path;Ljava/util/Map;Ljava/util/Map;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun close ()V
 	public final fun getIndexPath ()Ljava/nio/file/Path;
 	public final fun getMetadata ()Ljava/util/Map;

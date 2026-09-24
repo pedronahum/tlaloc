@@ -1,0 +1,290 @@
+public final class io/tlaloc/plugin/FirLambdaToDxirLowering {
+	public static final field INSTANCE Lio/tlaloc/plugin/FirLambdaToDxirLowering;
+	public final fun lower (Ljava/lang/String;Lorg/jetbrains/kotlin/fir/declarations/FirAnonymousFunction;Lorg/jetbrains/kotlin/fir/FirSession;Z)Lio/tlaloc/plugin/FirLambdaToDxirLowering$Result;
+	public static synthetic fun lower$default (Lio/tlaloc/plugin/FirLambdaToDxirLowering;Ljava/lang/String;Lorg/jetbrains/kotlin/fir/declarations/FirAnonymousFunction;Lorg/jetbrains/kotlin/fir/FirSession;ZILjava/lang/Object;)Lio/tlaloc/plugin/FirLambdaToDxirLowering$Result;
+}
+
+public final class io/tlaloc/plugin/FirLambdaToDxirLowering$CapturedRuntimeValue {
+	public fun <init> (Ljava/lang/String;III)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun copy (Ljava/lang/String;III)Lio/tlaloc/plugin/FirLambdaToDxirLowering$CapturedRuntimeValue;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/FirLambdaToDxirLowering$CapturedRuntimeValue;Ljava/lang/String;IIIILjava/lang/Object;)Lio/tlaloc/plugin/FirLambdaToDxirLowering$CapturedRuntimeValue;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getDeclEndOffset ()I
+	public final fun getDeclStartOffset ()I
+	public final fun getName ()Ljava/lang/String;
+	public final fun getParamId ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract class io/tlaloc/plugin/FirLambdaToDxirLowering$Result {
+}
+
+public final class io/tlaloc/plugin/FirLambdaToDxirLowering$Result$Failure : io/tlaloc/plugin/FirLambdaToDxirLowering$Result {
+	public fun <init> (Ljava/lang/String;Z)V
+	public synthetic fun <init> (Ljava/lang/String;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Z
+	public final fun copy (Ljava/lang/String;Z)Lio/tlaloc/plugin/FirLambdaToDxirLowering$Result$Failure;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/FirLambdaToDxirLowering$Result$Failure;Ljava/lang/String;ZILjava/lang/Object;)Lio/tlaloc/plugin/FirLambdaToDxirLowering$Result$Failure;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getNamedIndex ()Z
+	public final fun getReason ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/FirLambdaToDxirLowering$Result$Success : io/tlaloc/plugin/FirLambdaToDxirLowering$Result {
+	public fun <init> (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)V
+	public synthetic fun <init> (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Lio/tlaloc/ir/DxirFunction;
+	public final fun component2 ()Ljava/util/List;
+	public final fun copy (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Lio/tlaloc/plugin/FirLambdaToDxirLowering$Result$Success;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/FirLambdaToDxirLowering$Result$Success;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/plugin/FirLambdaToDxirLowering$Result$Success;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCaptures ()Ljava/util/List;
+	public final fun getFn ()Lio/tlaloc/ir/DxirFunction;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/KotlinVersionGuard {
+	public static final field COMPILED_AGAINST Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/plugin/KotlinVersionGuard;
+	public final fun check (Ljava/lang/String;ZLkotlin/jvm/functions/Function2;)Z
+	public final fun detectRunningCompilerVersion ()Ljava/lang/String;
+	public final fun getSupportedRangeDescription ()Ljava/lang/String;
+	public final fun message (Lio/tlaloc/plugin/KotlinVersionGuard$Verdict;Z)Ljava/lang/String;
+	public final fun parse (Ljava/lang/String;)Lio/tlaloc/plugin/KotlinVersionGuard$Version;
+	public final fun verdict (Ljava/lang/String;)Lio/tlaloc/plugin/KotlinVersionGuard$Verdict;
+}
+
+public abstract interface class io/tlaloc/plugin/KotlinVersionGuard$Verdict {
+}
+
+public final class io/tlaloc/plugin/KotlinVersionGuard$Verdict$Supported : io/tlaloc/plugin/KotlinVersionGuard$Verdict {
+	public static final field INSTANCE Lio/tlaloc/plugin/KotlinVersionGuard$Verdict$Supported;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/KotlinVersionGuard$Verdict$Unreadable : io/tlaloc/plugin/KotlinVersionGuard$Verdict {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/plugin/KotlinVersionGuard$Verdict$Unreadable;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/KotlinVersionGuard$Verdict$Unreadable;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/plugin/KotlinVersionGuard$Verdict$Unreadable;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getFound ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/KotlinVersionGuard$Verdict$Unsupported : io/tlaloc/plugin/KotlinVersionGuard$Verdict {
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/plugin/KotlinVersionGuard$Version;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Lio/tlaloc/plugin/KotlinVersionGuard$Version;
+	public final fun copy (Ljava/lang/String;Lio/tlaloc/plugin/KotlinVersionGuard$Version;)Lio/tlaloc/plugin/KotlinVersionGuard$Verdict$Unsupported;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/KotlinVersionGuard$Verdict$Unsupported;Ljava/lang/String;Lio/tlaloc/plugin/KotlinVersionGuard$Version;ILjava/lang/Object;)Lio/tlaloc/plugin/KotlinVersionGuard$Verdict$Unsupported;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getFound ()Ljava/lang/String;
+	public final fun getVersion ()Lio/tlaloc/plugin/KotlinVersionGuard$Version;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/KotlinVersionGuard$Version {
+	public fun <init> (IIILjava/lang/String;)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()Ljava/lang/String;
+	public final fun copy (IIILjava/lang/String;)Lio/tlaloc/plugin/KotlinVersionGuard$Version;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/KotlinVersionGuard$Version;IIILjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/plugin/KotlinVersionGuard$Version;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getFeatureFamily ()I
+	public final fun getMajor ()I
+	public final fun getMinor ()I
+	public final fun getPatch ()I
+	public final fun getSuffix ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/TlalocCheckersExtension : org/jetbrains/kotlin/fir/analysis/extensions/FirAdditionalCheckersExtension {
+	public fun <init> (Lorg/jetbrains/kotlin/fir/FirSession;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;)V
+	public synthetic fun <init> (Lorg/jetbrains/kotlin/fir/FirSession;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun getExpressionCheckers ()Lorg/jetbrains/kotlin/fir/analysis/checkers/expression/ExpressionCheckers;
+}
+
+public final class io/tlaloc/plugin/TlalocCommandLineProcessor : org/jetbrains/kotlin/compiler/plugin/CommandLineProcessor {
+	public static final field Companion Lio/tlaloc/plugin/TlalocCommandLineProcessor$Companion;
+	public static final field PLUGIN_ID Ljava/lang/String;
+	public fun <init> ()V
+	public fun appendList (Lorg/jetbrains/kotlin/config/CompilerConfiguration;Lorg/jetbrains/kotlin/config/CompilerConfigurationKey;Ljava/lang/Object;)V
+	public fun appendList (Lorg/jetbrains/kotlin/config/CompilerConfiguration;Lorg/jetbrains/kotlin/config/CompilerConfigurationKey;Ljava/util/List;)V
+	public fun applyOptionsFrom (Lorg/jetbrains/kotlin/config/CompilerConfiguration;Ljava/util/Map;Ljava/util/Collection;)V
+	public fun getPluginId ()Ljava/lang/String;
+	public fun getPluginOptions ()Ljava/util/Collection;
+	public fun processOption (Lorg/jetbrains/kotlin/compiler/plugin/AbstractCliOption;Ljava/lang/String;Lorg/jetbrains/kotlin/config/CompilerConfiguration;)V
+}
+
+public final class io/tlaloc/plugin/TlalocCommandLineProcessor$Companion {
+	public final fun getDUMP_GRAD_SOURCE_DIR_KEY ()Lorg/jetbrains/kotlin/config/CompilerConfigurationKey;
+	public final fun getDUMP_GRAD_SOURCE_DIR_OPTION ()Lorg/jetbrains/kotlin/compiler/plugin/CliOption;
+	public final fun getDUMP_GRAD_SOURCE_KEY ()Lorg/jetbrains/kotlin/config/CompilerConfigurationKey;
+	public final fun getDUMP_GRAD_SOURCE_OPTION ()Lorg/jetbrains/kotlin/compiler/plugin/CliOption;
+	public final fun getDUMP_LOWERED_IR_KEY ()Lorg/jetbrains/kotlin/config/CompilerConfigurationKey;
+	public final fun getDUMP_LOWERED_IR_OPTION ()Lorg/jetbrains/kotlin/compiler/plugin/CliOption;
+	public final fun getSTRICT_LOWERING_KEY ()Lorg/jetbrains/kotlin/config/CompilerConfigurationKey;
+	public final fun getSTRICT_LOWERING_OPTION ()Lorg/jetbrains/kotlin/compiler/plugin/CliOption;
+	public final fun getUNSAFE_ALLOW_UNSUPPORTED_KOTLIN_KEY ()Lorg/jetbrains/kotlin/config/CompilerConfigurationKey;
+	public final fun getUNSAFE_ALLOW_UNSUPPORTED_KOTLIN_OPTION ()Lorg/jetbrains/kotlin/compiler/plugin/CliOption;
+}
+
+public final class io/tlaloc/plugin/TlalocCompilerPluginRegistrar : org/jetbrains/kotlin/compiler/plugin/CompilerPluginRegistrar {
+	public fun <init> ()V
+	public fun getPluginId ()Ljava/lang/String;
+	public fun getSupportsK2 ()Z
+	public fun registerExtensions (Lorg/jetbrains/kotlin/compiler/plugin/CompilerPluginRegistrar$ExtensionStorage;Lorg/jetbrains/kotlin/config/CompilerConfiguration;)V
+}
+
+public final class io/tlaloc/plugin/TlalocErrors : org/jetbrains/kotlin/diagnostics/KtDiagnosticsContainer {
+	public static final field INSTANCE Lio/tlaloc/plugin/TlalocErrors;
+	public final fun getINTERNAL_ERROR ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getINTERNAL_ERROR_WARNING ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getINTRINSIC_CALL ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getLAMBDA_LOWERED ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getLAMBDA_NOT_LOWERABLE ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getLAMBDA_UNSUPPORTED ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getNAMED_INDEX_MISMATCH ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getNOT_DIFFERENTIABLE ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public fun getRendererFactory ()Lorg/jetbrains/kotlin/diagnostics/rendering/BaseDiagnosticRendererFactory;
+	public final fun getTENSOR_SHAPE_MISMATCH ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+}
+
+public final class io/tlaloc/plugin/TlalocFirExtensionRegistrar : org/jetbrains/kotlin/fir/extensions/FirExtensionRegistrar {
+	public fun <init> ()V
+	public fun <init> (Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;)V
+	public synthetic fun <init> (Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+}
+
+public final class io/tlaloc/plugin/TlalocInternalErrors {
+	public static final field INJECT_FAULT_PROPERTY Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/plugin/TlalocInternalErrors;
+	public static final field ISSUES_URL Ljava/lang/String;
+	public final fun describe (Ljava/lang/Throwable;Z)Ljava/lang/String;
+	public static synthetic fun describe$default (Lio/tlaloc/plugin/TlalocInternalErrors;Ljava/lang/Throwable;ZILjava/lang/Object;)Ljava/lang/String;
+	public final fun describeUnclaimed (Ljava/lang/String;Z)Ljava/lang/String;
+	public static synthetic fun describeUnclaimed$default (Lio/tlaloc/plugin/TlalocInternalErrors;Ljava/lang/String;ZILjava/lang/Object;)Ljava/lang/String;
+	public final fun faultInjected (Lio/tlaloc/plugin/TlalocInternalErrors$Phase;)Z
+	public final fun maybeInjectFault (Lio/tlaloc/plugin/TlalocInternalErrors$Phase;)V
+	public final fun mustRethrow (Ljava/lang/Throwable;)Z
+}
+
+public final class io/tlaloc/plugin/TlalocInternalErrors$Phase : java/lang/Enum {
+	public static final field FIR Lio/tlaloc/plugin/TlalocInternalErrors$Phase;
+	public static final field IR Lio/tlaloc/plugin/TlalocInternalErrors$Phase;
+	public static final field IR_HANDOFF_MISS Lio/tlaloc/plugin/TlalocInternalErrors$Phase;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getPropertyValue ()Ljava/lang/String;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/plugin/TlalocInternalErrors$Phase;
+	public static fun values ()[Lio/tlaloc/plugin/TlalocInternalErrors$Phase;
+}
+
+public final class io/tlaloc/plugin/TlalocIntrinsicCallChecker : org/jetbrains/kotlin/fir/analysis/checkers/expression/FirExpressionChecker {
+	public fun <init> ()V
+	public fun <init> (Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;)V
+	public synthetic fun <init> (Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun check (Lorg/jetbrains/kotlin/fir/analysis/checkers/context/CheckerContext;Lorg/jetbrains/kotlin/diagnostics/DiagnosticReporter;Lorg/jetbrains/kotlin/fir/expressions/FirFunctionCall;)V
+	public synthetic fun check (Lorg/jetbrains/kotlin/fir/analysis/checkers/context/CheckerContext;Lorg/jetbrains/kotlin/diagnostics/DiagnosticReporter;Lorg/jetbrains/kotlin/fir/expressions/FirStatement;)V
+}
+
+public final class io/tlaloc/plugin/TlalocIrGenerationExtension : org/jetbrains/kotlin/backend/common/extensions/IrGenerationExtension {
+	public static final field CACHE_DIR_PROPERTY Ljava/lang/String;
+	public static final field CAS_VERSION Ljava/lang/String;
+	public static final field Companion Lio/tlaloc/plugin/TlalocIrGenerationExtension$Companion;
+	public static final field SIMPLIFY_ENABLED_PROPERTY Ljava/lang/String;
+	public static final field SOI_ENABLED_PROPERTY Ljava/lang/String;
+	public static final field SOI_SIZE_LIMIT_PROPERTY Ljava/lang/String;
+	public fun <init> ()V
+	public fun <init> (ZLjava/lang/String;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;)V
+	public synthetic fun <init> (ZLjava/lang/String;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun generate (Lorg/jetbrains/kotlin/ir/declarations/IrModuleFragment;Lorg/jetbrains/kotlin/backend/common/extensions/IrPluginContext;)V
+	public fun getPlatformIntrinsicExtension (Lorg/jetbrains/kotlin/backend/common/LoweringContext;)Lorg/jetbrains/kotlin/backend/common/extensions/IrIntrinsicExtension;
+	public fun getShouldAlsoBeAppliedInKaptStubGenerationMode ()Z
+}
+
+public final class io/tlaloc/plugin/TlalocIrGenerationExtension$Companion {
+}
+
+public final class io/tlaloc/plugin/TlalocLoweringHandoff {
+	public static final field Companion Lio/tlaloc/plugin/TlalocLoweringHandoff$Companion;
+	public fun <init> ()V
+	public final fun clear ()V
+	public final fun drainUnclaimed ()Ljava/util/List;
+	public final fun record (Ljava/lang/String;IILio/tlaloc/ir/DxirFunction;Ljava/util/List;)V
+	public static synthetic fun record$default (Lio/tlaloc/plugin/TlalocLoweringHandoff;Ljava/lang/String;IILio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)V
+	public final fun size ()I
+	public final fun take (Ljava/lang/String;II)Lio/tlaloc/plugin/TlalocLoweringHandoff$LoweredLambda;
+}
+
+public final class io/tlaloc/plugin/TlalocLoweringHandoff$Companion {
+	public final fun normalisePath (Ljava/lang/String;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/TlalocLoweringHandoff$LoweredLambda {
+	public fun <init> (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)V
+	public synthetic fun <init> (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Lio/tlaloc/ir/DxirFunction;
+	public final fun component2 ()Ljava/util/List;
+	public final fun copy (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Lio/tlaloc/plugin/TlalocLoweringHandoff$LoweredLambda;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/TlalocLoweringHandoff$LoweredLambda;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/plugin/TlalocLoweringHandoff$LoweredLambda;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCaptures ()Ljava/util/List;
+	public final fun getFn ()Lio/tlaloc/ir/DxirFunction;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/TlalocLoweringHandoff$Unclaimed {
+	public fun <init> (Ljava/lang/String;IILjava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;IILjava/lang/String;)Lio/tlaloc/plugin/TlalocLoweringHandoff$Unclaimed;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/TlalocLoweringHandoff$Unclaimed;Ljava/lang/String;IILjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/plugin/TlalocLoweringHandoff$Unclaimed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getEndOffset ()I
+	public final fun getFile ()Ljava/lang/String;
+	public final fun getFnName ()Ljava/lang/String;
+	public final fun getStartOffset ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/TlalocPluginOptions {
+	public fun <init> ()V
+	public fun <init> (ZZ)V
+	public synthetic fun <init> (ZZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Z
+	public final fun component2 ()Z
+	public final fun copy (ZZ)Lio/tlaloc/plugin/TlalocPluginOptions;
+	public static synthetic fun copy$default (Lio/tlaloc/plugin/TlalocPluginOptions;ZZILjava/lang/Object;)Lio/tlaloc/plugin/TlalocPluginOptions;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getDumpLoweredIr ()Z
+	public final fun getStrictLowering ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/plugin/TlalocRendererFactory : org/jetbrains/kotlin/diagnostics/rendering/BaseDiagnosticRendererFactory {
+	public static final field INSTANCE Lio/tlaloc/plugin/TlalocRendererFactory;
+	public fun getMAP ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactoryToRendererMap;
+}
+

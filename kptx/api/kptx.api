@@ -1,0 +1,550 @@
+public abstract interface class io/tlaloc/kptx/IsaClassRule {
+}
+
+public final class io/tlaloc/kptx/IsaClassRule$Any : io/tlaloc/kptx/IsaClassRule {
+	public static final field INSTANCE Lio/tlaloc/kptx/IsaClassRule$Any;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/IsaClassRule$Fixed : io/tlaloc/kptx/IsaClassRule {
+	public fun <init> (Lio/tlaloc/kptx/IsaRegClass;)V
+	public final fun component1 ()Lio/tlaloc/kptx/IsaRegClass;
+	public final fun copy (Lio/tlaloc/kptx/IsaRegClass;)Lio/tlaloc/kptx/IsaClassRule$Fixed;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/IsaClassRule$Fixed;Lio/tlaloc/kptx/IsaRegClass;ILjava/lang/Object;)Lio/tlaloc/kptx/IsaClassRule$Fixed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCls ()Lio/tlaloc/kptx/IsaRegClass;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/IsaClassRule$FromType : io/tlaloc/kptx/IsaClassRule {
+	public fun <init> ()V
+	public fun <init> (I)V
+	public synthetic fun <init> (IILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()I
+	public final fun copy (I)Lio/tlaloc/kptx/IsaClassRule$FromType;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/IsaClassRule$FromType;IILjava/lang/Object;)Lio/tlaloc/kptx/IsaClassRule$FromType;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getTypeIndex ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/IsaInstructionSpec {
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Z)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Ljava/util/List;
+	public final fun component4 ()Ljava/util/List;
+	public final fun component5 ()Z
+	public final fun copy (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Z)Lio/tlaloc/kptx/IsaInstructionSpec;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/IsaInstructionSpec;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;ZILjava/lang/Object;)Lio/tlaloc/kptx/IsaInstructionSpec;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBase ()Ljava/lang/String;
+	public final fun getMods ()Ljava/util/List;
+	public final fun getOperands ()Ljava/util/List;
+	public final fun getTypes ()Ljava/util/List;
+	public final fun getWideDest ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/IsaModifierSlot {
+	public fun <init> (Ljava/util/Set;Z)V
+	public synthetic fun <init> (Ljava/util/Set;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/util/Set;
+	public final fun component2 ()Z
+	public final fun copy (Ljava/util/Set;Z)Lio/tlaloc/kptx/IsaModifierSlot;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/IsaModifierSlot;Ljava/util/Set;ZILjava/lang/Object;)Lio/tlaloc/kptx/IsaModifierSlot;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAlternatives ()Ljava/util/Set;
+	public final fun getRequired ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/IsaOperand {
+	public fun <init> (Ljava/util/Set;Lio/tlaloc/kptx/IsaClassRule;)V
+	public synthetic fun <init> (Ljava/util/Set;Lio/tlaloc/kptx/IsaClassRule;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/util/Set;
+	public final fun component2 ()Lio/tlaloc/kptx/IsaClassRule;
+	public final fun copy (Ljava/util/Set;Lio/tlaloc/kptx/IsaClassRule;)Lio/tlaloc/kptx/IsaOperand;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/IsaOperand;Ljava/util/Set;Lio/tlaloc/kptx/IsaClassRule;ILjava/lang/Object;)Lio/tlaloc/kptx/IsaOperand;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getClassRule ()Lio/tlaloc/kptx/IsaClassRule;
+	public final fun getKinds ()Ljava/util/Set;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/IsaOperandKind : java/lang/Enum {
+	public static final field IMM Lio/tlaloc/kptx/IsaOperandKind;
+	public static final field MEM Lio/tlaloc/kptx/IsaOperandKind;
+	public static final field REG Lio/tlaloc/kptx/IsaOperandKind;
+	public static final field SYM Lio/tlaloc/kptx/IsaOperandKind;
+	public static final field VEC Lio/tlaloc/kptx/IsaOperandKind;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/kptx/IsaOperandKind;
+	public static fun values ()[Lio/tlaloc/kptx/IsaOperandKind;
+}
+
+public final class io/tlaloc/kptx/IsaRegClass : java/lang/Enum {
+	public static final field F32 Lio/tlaloc/kptx/IsaRegClass;
+	public static final field PRED Lio/tlaloc/kptx/IsaRegClass;
+	public static final field R32 Lio/tlaloc/kptx/IsaRegClass;
+	public static final field R64 Lio/tlaloc/kptx/IsaRegClass;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getPrefix ()Ljava/lang/String;
+	public final fun getWidthBits ()I
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/kptx/IsaRegClass;
+	public static fun values ()[Lio/tlaloc/kptx/IsaRegClass;
+}
+
+public final class io/tlaloc/kptx/IsaValidationException : java/lang/RuntimeException {
+	public fun <init> (Ljava/util/List;)V
+	public final fun getErrors ()Ljava/util/List;
+}
+
+public abstract interface class io/tlaloc/kptx/KGuard {
+	public abstract fun getNegated ()Z
+	public abstract fun getReg ()Lio/tlaloc/kptx/KReg;
+}
+
+public final class io/tlaloc/kptx/KImm : io/tlaloc/kptx/KOp {
+	public fun toOperand ()Lio/tlaloc/kptx/PtxOperand;
+}
+
+public final class io/tlaloc/kptx/KLabel : io/tlaloc/kptx/KOp {
+	public final fun getName ()Ljava/lang/String;
+	public fun toOperand ()Lio/tlaloc/kptx/PtxOperand;
+}
+
+public final class io/tlaloc/kptx/KMem : io/tlaloc/kptx/KOp {
+	public fun toOperand ()Lio/tlaloc/kptx/PtxOperand;
+}
+
+public abstract interface class io/tlaloc/kptx/KOp {
+	public abstract fun toOperand ()Lio/tlaloc/kptx/PtxOperand;
+}
+
+public final class io/tlaloc/kptx/KParam {
+	public final fun getName ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/KReg : io/tlaloc/kptx/KGuard, io/tlaloc/kptx/KOp {
+	public final fun getCls ()Lio/tlaloc/kptx/IsaRegClass;
+	public final fun getName ()Ljava/lang/String;
+	public fun getNegated ()Z
+	public fun getReg ()Lio/tlaloc/kptx/KReg;
+	public final fun not ()Lio/tlaloc/kptx/KGuard;
+	public fun toOperand ()Lio/tlaloc/kptx/PtxOperand;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/KShflMode : java/lang/Enum {
+	public static final field BFLY Lio/tlaloc/kptx/KShflMode;
+	public static final field DOWN Lio/tlaloc/kptx/KShflMode;
+	public static final field IDX Lio/tlaloc/kptx/KShflMode;
+	public static final field UP Lio/tlaloc/kptx/KShflMode;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/kptx/KShflMode;
+	public static fun values ()[Lio/tlaloc/kptx/KShflMode;
+}
+
+public final class io/tlaloc/kptx/KSym : io/tlaloc/kptx/KOp {
+	public final fun getName ()Ljava/lang/String;
+	public fun toOperand ()Lio/tlaloc/kptx/PtxOperand;
+}
+
+public final class io/tlaloc/kptx/KVec : io/tlaloc/kptx/KOp {
+	public fun toOperand ()Lio/tlaloc/kptx/PtxOperand;
+}
+
+public final class io/tlaloc/kptx/KernelResources {
+	public fun <init> (Ljava/lang/String;Ljava/util/Map;I)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/Map;
+	public final fun component3 ()I
+	public final fun copy (Ljava/lang/String;Ljava/util/Map;I)Lio/tlaloc/kptx/KernelResources;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/KernelResources;Ljava/lang/String;Ljava/util/Map;IILjava/lang/Object;)Lio/tlaloc/kptx/KernelResources;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public final fun getRegBanks ()Ljava/util/Map;
+	public final fun getRegSlotsPerThread ()I
+	public final fun getStaticSmemBytes ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/KernelScope {
+	public final fun bank (Lio/tlaloc/kptx/IsaRegClass;I)V
+	public final fun blank ()V
+	public final fun comment (Ljava/lang/String;)V
+	public final fun f32 ()Lio/tlaloc/kptx/KReg;
+	public final fun getCtaidX ()Lio/tlaloc/kptx/KReg;
+	public final fun getCtaidY ()Lio/tlaloc/kptx/KReg;
+	public final fun getCtaidZ ()Lio/tlaloc/kptx/KReg;
+	public final fun getNctaidX ()Lio/tlaloc/kptx/KReg;
+	public final fun getNctaidY ()Lio/tlaloc/kptx/KReg;
+	public final fun getNctaidZ ()Lio/tlaloc/kptx/KReg;
+	public final fun getNtidX ()Lio/tlaloc/kptx/KReg;
+	public final fun getNtidY ()Lio/tlaloc/kptx/KReg;
+	public final fun getNtidZ ()Lio/tlaloc/kptx/KReg;
+	public final fun getTidX ()Lio/tlaloc/kptx/KReg;
+	public final fun getTidY ()Lio/tlaloc/kptx/KReg;
+	public final fun getTidZ ()Lio/tlaloc/kptx/KReg;
+	public final fun inst (Ljava/lang/String;[Lio/tlaloc/kptx/KOp;Lio/tlaloc/kptx/KGuard;Ljava/lang/String;)V
+	public static synthetic fun inst$default (Lio/tlaloc/kptx/KernelScope;Ljava/lang/String;[Lio/tlaloc/kptx/KOp;Lio/tlaloc/kptx/KGuard;Ljava/lang/String;ILjava/lang/Object;)V
+	public final fun label (Ljava/lang/String;)Lio/tlaloc/kptx/KLabel;
+	public final fun mem (Lio/tlaloc/kptx/KParam;)Lio/tlaloc/kptx/KMem;
+	public final fun mem (Lio/tlaloc/kptx/KReg;I)Lio/tlaloc/kptx/KMem;
+	public static synthetic fun mem$default (Lio/tlaloc/kptx/KernelScope;Lio/tlaloc/kptx/KReg;IILjava/lang/Object;)Lio/tlaloc/kptx/KMem;
+	public final fun param (Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/kptx/KParam;
+	public final fun place (Lio/tlaloc/kptx/KLabel;)V
+	public final fun pred ()Lio/tlaloc/kptx/KReg;
+	public final fun r32 ()Lio/tlaloc/kptx/KReg;
+	public final fun r64 ()Lio/tlaloc/kptx/KReg;
+	public final fun reg (Lio/tlaloc/kptx/IsaRegClass;I)Lio/tlaloc/kptx/KReg;
+	public final fun shared (Ljava/lang/String;II)Lio/tlaloc/kptx/KSym;
+	public static synthetic fun shared$default (Lio/tlaloc/kptx/KernelScope;Ljava/lang/String;IIILjava/lang/Object;)Lio/tlaloc/kptx/KSym;
+}
+
+public final class io/tlaloc/kptx/KernelScopeKt {
+	public static final fun imm (I)Lio/tlaloc/kptx/KImm;
+	public static final fun imm (Ljava/lang/String;)Lio/tlaloc/kptx/KImm;
+	public static final fun ptxKernel (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/kptx/PtxModule;
+	public static synthetic fun ptxKernel$default (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxModule;
+	public static final fun ptxModule (Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/kptx/PtxModule;
+	public static synthetic fun ptxModule$default (Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxModule;
+}
+
+public abstract interface annotation class io/tlaloc/kptx/KptxDsl : java/lang/annotation/Annotation {
+}
+
+public final class io/tlaloc/kptx/KptxKernels {
+	public static final field INSTANCE Lio/tlaloc/kptx/KptxKernels;
+	public final fun attentionModule (I)Lio/tlaloc/kptx/PtxModule;
+	public final fun crossEntropyModule (I)Lio/tlaloc/kptx/PtxModule;
+	public final fun getRmsNormBwdDw ()Lio/tlaloc/kptx/PtxKernelTemplate;
+	public final fun getRmsNormBwdDx ()Lio/tlaloc/kptx/PtxKernelTemplate;
+	public final fun getRmsNormEps ()Lio/tlaloc/kptx/PtxKernelTemplate;
+	public final fun getRope ()Lio/tlaloc/kptx/PtxKernelTemplate;
+	public final fun pagedAttentionModule (IF)Lio/tlaloc/kptx/PtxModule;
+}
+
+public final class io/tlaloc/kptx/KptxTranspiler {
+	public static final field INSTANCE Lio/tlaloc/kptx/KptxTranspiler;
+	public final fun transpile (Lio/tlaloc/kptx/PtxModule;Ljava/lang/String;)Ljava/lang/String;
+	public static synthetic fun transpile$default (Lio/tlaloc/kptx/KptxTranspiler;Lio/tlaloc/kptx/PtxModule;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/ModuleScope {
+	public final fun kernel (Ljava/lang/String;Lkotlin/jvm/functions/Function1;)V
+}
+
+public final class io/tlaloc/kptx/OccupancyEstimate {
+	public fun <init> (Ljava/lang/String;IIIILjava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun component6 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;IIIILjava/lang/String;)Lio/tlaloc/kptx/OccupancyEstimate;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/OccupancyEstimate;Ljava/lang/String;IIIILjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/kptx/OccupancyEstimate;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getActiveThreads ()I
+	public final fun getArch ()Ljava/lang/String;
+	public final fun getBlockThreads ()I
+	public final fun getBlocksPerSm ()I
+	public final fun getLimitingFactor ()Ljava/lang/String;
+	public final fun getOccupancyPct ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxBlank : io/tlaloc/kptx/PtxStmt {
+	public static final field INSTANCE Lio/tlaloc/kptx/PtxBlank;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxComment : io/tlaloc/kptx/PtxStmt {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/kptx/PtxComment;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxComment;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxComment;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getText ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxEmitterKt {
+	public static final fun emitPtx (Lio/tlaloc/kptx/PtxModule;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxGuard {
+	public fun <init> (Ljava/lang/String;Z)V
+	public synthetic fun <init> (Ljava/lang/String;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Z
+	public final fun copy (Ljava/lang/String;Z)Lio/tlaloc/kptx/PtxGuard;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxGuard;Ljava/lang/String;ZILjava/lang/Object;)Lio/tlaloc/kptx/PtxGuard;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getNegated ()Z
+	public final fun getReg ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxImm : io/tlaloc/kptx/PtxOperand {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/kptx/PtxImm;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxImm;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxImm;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getText ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxInst : io/tlaloc/kptx/PtxStmt {
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Lio/tlaloc/kptx/PtxGuard;Ljava/lang/String;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/util/List;Lio/tlaloc/kptx/PtxGuard;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Lio/tlaloc/kptx/PtxGuard;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/util/List;Lio/tlaloc/kptx/PtxGuard;Ljava/lang/String;)Lio/tlaloc/kptx/PtxInst;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxInst;Ljava/lang/String;Ljava/util/List;Lio/tlaloc/kptx/PtxGuard;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxInst;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getComment ()Ljava/lang/String;
+	public final fun getGuard ()Lio/tlaloc/kptx/PtxGuard;
+	public final fun getOpcode ()Ljava/lang/String;
+	public final fun getOperands ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxIsaKt {
+	public static final fun getPTX_ISA ()Ljava/util/Map;
+	public static final fun regClassOf (Ljava/lang/String;)Lio/tlaloc/kptx/IsaRegClass;
+	public static final fun validateInst (Lio/tlaloc/kptx/PtxInst;)Ljava/util/List;
+	public static final fun validateIsa (Lio/tlaloc/kptx/PtxModule;)V
+	public static final fun validateIsaErrors (Lio/tlaloc/kptx/PtxModule;)Ljava/util/List;
+}
+
+public final class io/tlaloc/kptx/PtxKernel {
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/util/List;
+	public final fun component3 ()Ljava/util/List;
+	public final fun copy (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/kptx/PtxKernel;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxKernel;Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxKernel;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBody ()Ljava/util/List;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getParams ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxKernelTemplate {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function2;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/functions/Function2;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getName ()Ljava/lang/String;
+	public final fun getSpecializationCount ()I
+	public final fun specialize (Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;)Lio/tlaloc/kptx/PtxModule;
+	public static synthetic fun specialize$default (Lio/tlaloc/kptx/PtxKernelTemplate;Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxModule;
+}
+
+public final class io/tlaloc/kptx/PtxLabel : io/tlaloc/kptx/PtxStmt {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/kptx/PtxLabel;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxLabel;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxLabel;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxMem : io/tlaloc/kptx/PtxOperand {
+	public fun <init> (Ljava/lang/String;I)V
+	public synthetic fun <init> (Ljava/lang/String;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()I
+	public final fun copy (Ljava/lang/String;I)Lio/tlaloc/kptx/PtxMem;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxMem;Ljava/lang/String;IILjava/lang/Object;)Lio/tlaloc/kptx/PtxMem;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBase ()Ljava/lang/String;
+	public final fun getOffset ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxModule {
+	public fun <init> (Ljava/util/List;Ljava/lang/String;Ljava/lang/String;I)V
+	public synthetic fun <init> (Ljava/util/List;Ljava/lang/String;Ljava/lang/String;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()I
+	public final fun copy (Ljava/util/List;Ljava/lang/String;Ljava/lang/String;I)Lio/tlaloc/kptx/PtxModule;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxModule;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;IILjava/lang/Object;)Lio/tlaloc/kptx/PtxModule;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAddressSize ()I
+	public final fun getKernels ()Ljava/util/List;
+	public final fun getTarget ()Ljava/lang/String;
+	public final fun getVersion ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxNormalizeException : java/lang/RuntimeException {
+	public fun <init> (ILjava/lang/String;)V
+	public final fun getLine ()I
+}
+
+public final class io/tlaloc/kptx/PtxNormalizerKt {
+	public static final fun normalizePtx (Ljava/lang/String;)Lio/tlaloc/kptx/PtxModule;
+}
+
+public abstract interface class io/tlaloc/kptx/PtxOperand {
+}
+
+public final class io/tlaloc/kptx/PtxParam {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/kptx/PtxParam;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxParam;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxParam;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public final fun getType ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxParseException : java/lang/RuntimeException {
+	public fun <init> (ILjava/lang/String;)V
+	public final fun getLine ()I
+}
+
+public final class io/tlaloc/kptx/PtxParserKt {
+	public static final fun parsePtx (Ljava/lang/String;)Lio/tlaloc/kptx/PtxModule;
+}
+
+public final class io/tlaloc/kptx/PtxReg : io/tlaloc/kptx/PtxOperand {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/kptx/PtxReg;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxReg;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxReg;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxRegDecl : io/tlaloc/kptx/PtxStmt {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;I)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()I
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;I)Lio/tlaloc/kptx/PtxRegDecl;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxRegDecl;Ljava/lang/String;Ljava/lang/String;IILjava/lang/Object;)Lio/tlaloc/kptx/PtxRegDecl;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCount ()I
+	public final fun getPrefix ()Ljava/lang/String;
+	public final fun getType ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxResourceReportKt {
+	public static final fun estimateOccupancy (Lio/tlaloc/kptx/KernelResources;ILjava/lang/String;)Lio/tlaloc/kptx/OccupancyEstimate;
+	public static final fun getSM_LIMITS ()Ljava/util/Map;
+	public static final fun resourceReport (Lio/tlaloc/kptx/PtxModule;)Ljava/util/List;
+}
+
+public final class io/tlaloc/kptx/PtxSharedDecl : io/tlaloc/kptx/PtxStmt {
+	public fun <init> (ILjava/lang/String;I)V
+	public final fun component1 ()I
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()I
+	public final fun copy (ILjava/lang/String;I)Lio/tlaloc/kptx/PtxSharedDecl;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxSharedDecl;ILjava/lang/String;IILjava/lang/Object;)Lio/tlaloc/kptx/PtxSharedDecl;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAlign ()I
+	public final fun getName ()Ljava/lang/String;
+	public final fun getSizeBytes ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class io/tlaloc/kptx/PtxStmt {
+}
+
+public final class io/tlaloc/kptx/PtxSym : io/tlaloc/kptx/PtxOperand {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/kptx/PtxSym;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxSym;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxSym;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/PtxVec : io/tlaloc/kptx/PtxOperand {
+	public fun <init> (Ljava/util/List;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun copy (Ljava/util/List;)Lio/tlaloc/kptx/PtxVec;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/PtxVec;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/kptx/PtxVec;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getRegs ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/SmLimits {
+	public fun <init> (IIII)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun copy (IIII)Lio/tlaloc/kptx/SmLimits;
+	public static synthetic fun copy$default (Lio/tlaloc/kptx/SmLimits;IIIIILjava/lang/Object;)Lio/tlaloc/kptx/SmLimits;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getMaxBlocks ()I
+	public final fun getMaxThreads ()I
+	public final fun getRegSlots ()I
+	public final fun getSmemBytes ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/kptx/SpecializationEnv {
+	public final fun arg (Ljava/lang/String;)Ljava/lang/String;
+	public final fun argOrNull (Ljava/lang/String;)Ljava/lang/String;
+	public final fun getArch ()Ljava/lang/String;
+	public final fun shape (Ljava/lang/String;)I
+	public final fun shapeOrNull (Ljava/lang/String;)Ljava/lang/Integer;
+}
+
+public final class io/tlaloc/kptx/WarpIntrinsicsKt {
+	public static final fun mmaSyncM16N8K16F32F16 (Lio/tlaloc/kptx/KernelScope;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;)V
+	public static final fun movB32 (Lio/tlaloc/kptx/KernelScope;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KReg;)V
+	public static final fun shflSync (Lio/tlaloc/kptx/KernelScope;Lio/tlaloc/kptx/KShflMode;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KOp;Lio/tlaloc/kptx/KOp;Lio/tlaloc/kptx/KOp;)V
+	public static synthetic fun shflSync$default (Lio/tlaloc/kptx/KernelScope;Lio/tlaloc/kptx/KShflMode;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KOp;Lio/tlaloc/kptx/KOp;Lio/tlaloc/kptx/KOp;ILjava/lang/Object;)V
+	public static final fun vec ([Lio/tlaloc/kptx/KReg;)Lio/tlaloc/kptx/KVec;
+	public static final fun voteBallotSync (Lio/tlaloc/kptx/KernelScope;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KOp;)V
+	public static synthetic fun voteBallotSync$default (Lio/tlaloc/kptx/KernelScope;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KReg;Lio/tlaloc/kptx/KOp;ILjava/lang/Object;)V
+	public static final fun warpReduceSumF32 (Lio/tlaloc/kptx/KernelScope;Lio/tlaloc/kptx/KReg;)V
+}
+

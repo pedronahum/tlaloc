@@ -13,6 +13,11 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **ABI baseline for every published module.** The committed `api/*.api` baselines
+  are checked by the Kotlin Gradle plugin's ABI validation (`checkKotlinAbi`,
+  `updateKotlinAbi`) instead of binary-compatibility-validator, and now also cover
+  `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`, `tlaloc-kptx`, `tlaloc-runtime-iree`
+  and `tlaloc-compiler-plugin`.
 - **Kotlin 2.4.20.** Tlaloc is built against Kotlin 2.4.20 and its compiler plugin
   supports Kotlin **2.4.20 through 2.4.29**; any other Kotlin is refused by name at
   compile time. Projects on Kotlin 2.3.20–2.3.29 stay on `0.1.0-alpha01`. The

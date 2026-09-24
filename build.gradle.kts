@@ -12,9 +12,6 @@ plugins {
     // aggregation needs the root project to hold the `dokka` configuration that
     // the per-module publications feed into. `./gradlew apiDocs` is the result.
     alias(libs.plugins.dokka)
-    // §0.4.505 (Tier 4, item 5) — the ABI baseline. Applied at the root only; the
-    // plugin walks the subprojects itself.
-    alias(libs.plugins.binary.compatibility.validator)
 }
 
 group = "io.github.pedronahum"
@@ -1078,34 +1075,49 @@ tasks.register("apiDocs") {
     }
 }
 
-// ITEM 5 — THE ABI BASELINE. `api/<module>.api` is committed; `./gradlew apiCheck`
-// (the plugin wires it into `check`, so `./gradlew test` runs it) fails on any
-// difference. `./gradlew apiDump` re-baselines, and a baseline diff in a commit is
-// the record that the change was intended.
+// ITEM 5 — THE ABI BASELINE. `api/<module>.api` is committed; `./gradlew checkKotlinAbi`
+// (the Kotlin Gradle plugin wires it into `check`, so `./gradlew test` runs it)
+// fails on any difference. `./gradlew updateKotlinAbi` re-baselines, and a baseline
+// diff in a commit is the record that the change was intended.
 //
-// EXPERIMENTAL API IS IN THE DUMP, on purpose. Excluding it (BCV's
-// `nonPublicMarkers`) would have made `@ExperimentalTlalocApi` a hole in the gate,
-// and the point of the marker is to tell a consumer that a change is LIKELY, not
-// that it happens unrecorded.
-apiValidation {
-    // :benchmarks publishes nothing and has no `jvmMain` source at all — every line
-    // of it is `jvmTest`. It is excluded for the same reason it is excluded from
-    // `moduleDescriptions`: it is a harness, not a library.
-    ignoredProjects.add("benchmarks")
-
-    // A MEASURED LIMIT, not a preference: binary-compatibility-validator 0.18.2's
-    // ABI reader cannot parse Java 25 bytecode. Pointing it at `:runtime-cuda`
-    // fails with, verbatim:
-    //
-    //   A failure occurred while executing kotlinx.validation.AbiBuildWorker
-    //     > Unsupported class file major version 69
-    //
-    // (major 69 = Java 25). So the gate covers exactly the modules §0.4.503 lowered
-    // to Java 21 — `:core`, `:ir`, `:autograd`, `:nn`, `:stablehlo`, `:maestro` —
-    // which is the library surface a consumer compiles against, and NOT the five
-    // that stay at 25 (`:runtime-pjrt`, `:runtime-cuda`, `:kptx`, `:runtime-iree`,
-    // `:compiler-plugin`). Derived from `tlalocJvmTargets` rather than listed, so a
-    // module that is lowered to 21 later starts being validated without anyone
-    // remembering to come back here. The gap is a ⬜ row in docs/ALPHA_PLAN.md.
-    ignoredProjects.addAll(tlalocJvmTargets.filterValues { it > 21 }.keys)
+// EXPERIMENTAL API IS IN THE DUMP, on purpose. Excluding it (an `annotatedWith`
+// filter) would have made `@ExperimentalTlalocApi` a hole in the gate, and the
+// point of the marker is to tell a consumer that a change is LIKELY, not that it
+// happens unrecorded.
+//
+// §0.4.531 — THE TOOL IS THE KOTLIN GRADLE PLUGIN'S OWN ABI VALIDATION, and every
+// module that emits classes is covered, Java 25 ones included. §0.4.505 used
+// binary-compatibility-validator 0.18.2, whose ABI reader refuses Java 25
+// bytecode verbatim with
+//
+//   A failure occurred while executing kotlinx.validation.AbiBuildWorker
+//     > Unsupported class file major version 69
+//
+// so it covered only the seven modules targeting 21. KGP 2.4.20's validation
+// (`kotlin { abiValidation() }`, still `@ExperimentalAbiValidation`) reads major
+// 69: `:runtime-pjrt`, `:runtime-cuda`, `:kptx`, `:runtime-iree` and
+// `:compiler-plugin` now have baselines too. Same `api/<module>.api` path, same
+// format. Re-dumping the seven BCV-era baselines changed six lines in three files,
+// all removals, all of members no Kotlin or Java source can name: the public
+// ACC_SYNTHETIC constructor Kotlin emits (trailing `DefaultConstructorMarker`)
+// beside a `private constructor` — `SafetensorsFile`, `SafetensorsIndex`,
+// `HfLlamaCheckpoint`, `DecodeBucketPolicy` — and the two `const val` fields of
+// `Scheduled`'s `private companion object`, which are `public static final` in
+// bytecode but private in Kotlin (and inlined by javac anyway). BCV read bytecode
+// flags; KGP reads the Kotlin declaration.
+//
+// Keyed on `moduleDescriptions` (the published modules) rather than listed again,
+// so a new published module is validated without anyone coming back here.
+// `:benchmarks` publishes nothing and has no `jvmMain` source; `:bom` emits no
+// classes. Neither is in that map.
+subprojects {
+    if (name !in moduleDescriptions) return@subprojects
+    listOf("org.jetbrains.kotlin.multiplatform", "org.jetbrains.kotlin.jvm").forEach { id ->
+        pluginManager.withPlugin(id) {
+            extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinProjectExtension>("kotlin") {
+                @OptIn(org.jetbrains.kotlin.gradle.dsl.abi.ExperimentalAbiValidation::class)
+                abiValidation()
+            }
+        }
+    }
 }

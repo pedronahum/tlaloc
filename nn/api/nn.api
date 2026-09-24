@@ -580,8 +580,6 @@ public final class io/tlaloc/nn/SGDState {
 }
 
 public final class io/tlaloc/nn/Scheduled : io/tlaloc/nn/CheckpointableOptimizer {
-	public static final field INNER Ljava/lang/String;
-	public static final field KIND Ljava/lang/String;
 	public fun <init> (Lio/tlaloc/nn/LearningRateSchedule;Lkotlin/jvm/functions/Function1;)V
 	public final fun getBuild ()Lkotlin/jvm/functions/Function1;
 	public fun getCheckpointKind ()Ljava/lang/String;

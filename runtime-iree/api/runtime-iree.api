@@ -1,0 +1,96 @@
+public final class io/tlaloc/runtime/iree/IreeBenchmark {
+	public static final field INSTANCE Lio/tlaloc/runtime/iree/IreeBenchmark;
+	public final fun run (Lio/tlaloc/runtime/iree/IreeModule;Ljava/lang/String;Ljava/util/List;ILjava/lang/String;J)Lio/tlaloc/runtime/iree/IreeBenchmarkStats;
+	public static synthetic fun run$default (Lio/tlaloc/runtime/iree/IreeBenchmark;Lio/tlaloc/runtime/iree/IreeModule;Ljava/lang/String;Ljava/util/List;ILjava/lang/String;JILjava/lang/Object;)Lio/tlaloc/runtime/iree/IreeBenchmarkStats;
+}
+
+public final class io/tlaloc/runtime/iree/IreeBenchmarkStats {
+	public fun <init> (Ljava/util/List;J)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()J
+	public final fun copy (Ljava/util/List;J)Lio/tlaloc/runtime/iree/IreeBenchmarkStats;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/iree/IreeBenchmarkStats;Ljava/util/List;JILjava/lang/Object;)Lio/tlaloc/runtime/iree/IreeBenchmarkStats;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getIterationsPerRepetition ()J
+	public final fun getMedianNanos ()J
+	public final fun getMinNanos ()J
+	public final fun getP99Nanos ()J
+	public final fun getRepetitionRealTimesNs ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/iree/IreeBinaries {
+	public static final field BIN_ENV Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/runtime/iree/IreeBinaries;
+	public final fun getAvailable ()Z
+	public final fun getCudaAvailable ()Z
+	public final fun getIreeBenchmarkModule ()Ljava/lang/String;
+	public final fun getIreeCompile ()Ljava/lang/String;
+	public final fun getIreeRunModule ()Ljava/lang/String;
+	public final fun getSearchReport ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/iree/IreeBridgeKt {
+	public static final fun runOnIree (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Lio/tlaloc/runtime/iree/IreeTarget;JZ)Ljava/util/List;
+	public static synthetic fun runOnIree$default (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Lio/tlaloc/runtime/iree/IreeTarget;JZILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/runtime/iree/IreeCompileException : java/lang/RuntimeException {
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/runtime/iree/IreeProcessResult;)V
+	public final fun getMlirSource ()Ljava/lang/String;
+	public final fun getProcess ()Lio/tlaloc/runtime/iree/IreeProcessResult;
+}
+
+public final class io/tlaloc/runtime/iree/IreeModule : java/lang/AutoCloseable {
+	public fun close ()V
+	public final fun getTarget ()Lio/tlaloc/runtime/iree/IreeTarget;
+	public final fun getVmfbPath ()Ljava/nio/file/Path;
+}
+
+public final class io/tlaloc/runtime/iree/IreeProcessResult {
+	public fun <init> (ILjava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()I
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun copy (ILjava/lang/String;Ljava/lang/String;)Lio/tlaloc/runtime/iree/IreeProcessResult;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/iree/IreeProcessResult;ILjava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/runtime/iree/IreeProcessResult;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getExitCode ()I
+	public final fun getOk ()Z
+	public final fun getStderr ()Ljava/lang/String;
+	public final fun getStdout ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/iree/IreeRunException : java/lang/RuntimeException {
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Lio/tlaloc/runtime/iree/IreeProcessResult;)V
+	public final fun getFunction ()Ljava/lang/String;
+	public final fun getInputs ()Ljava/util/List;
+	public final fun getProcess ()Lio/tlaloc/runtime/iree/IreeProcessResult;
+}
+
+public final class io/tlaloc/runtime/iree/IreeRuntime {
+	public static final field INSTANCE Lio/tlaloc/runtime/iree/IreeRuntime;
+	public final fun compile (Ljava/lang/String;Lio/tlaloc/runtime/iree/IreeTarget;JLjava/util/List;)Lio/tlaloc/runtime/iree/IreeModule;
+	public static synthetic fun compile$default (Lio/tlaloc/runtime/iree/IreeRuntime;Ljava/lang/String;Lio/tlaloc/runtime/iree/IreeTarget;JLjava/util/List;ILjava/lang/Object;)Lio/tlaloc/runtime/iree/IreeModule;
+	public final fun invoke (Lio/tlaloc/runtime/iree/IreeModule;Ljava/lang/String;Ljava/util/List;J)Ljava/util/List;
+	public static synthetic fun invoke$default (Lio/tlaloc/runtime/iree/IreeRuntime;Lio/tlaloc/runtime/iree/IreeModule;Ljava/lang/String;Ljava/util/List;JILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/runtime/iree/IreeTarget : java/lang/Enum {
+	public static final field Cuda Lio/tlaloc/runtime/iree/IreeTarget;
+	public static final field LlvmCpu Lio/tlaloc/runtime/iree/IreeTarget;
+	public final fun getCompileFlags ()Ljava/util/List;
+	public final fun getDevice ()Ljava/lang/String;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/runtime/iree/IreeTarget;
+	public static fun values ()[Lio/tlaloc/runtime/iree/IreeTarget;
+}
+
+public final class io/tlaloc/runtime/iree/NpyWriter {
+	public static final field INSTANCE Lio/tlaloc/runtime/iree/NpyWriter;
+	public final fun writeFloat32 (Ljava/nio/file/Path;[FLjava/util/List;)V
+}
+

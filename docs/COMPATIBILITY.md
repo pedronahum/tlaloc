@@ -37,14 +37,11 @@ Two mechanisms separate well-tested surfaces from provisional ones.
   and points here. **`grad`, the op surface and `:nn` do NOT carry it**, on
   purpose: an annotation on everything teaches you to opt in once and stop
   reading.
-- **An ABI baseline.** `api/<module>.api` is committed and `./gradlew apiCheck`
+- **An ABI baseline.** `api/<module>.api` is committed and `./gradlew checkKotlinAbi`
   (wired into `check`) fails on any difference, so a break is a reviewed diff
-  rather than a surprise. It covers `:core`, `:ir`, `:autograd`, `:nn`,
-  `:stablehlo` and `:maestro` — the modules a consumer compiles against.
-  binary-compatibility-validator 0.18.2 cannot read Java 25 bytecode
-  (`Unsupported class file major version 69`), so the five 25-targeted modules —
-  `:runtime-pjrt`, `:runtime-cuda`, `:kptx`, `:runtime-iree`, `:compiler-plugin` —
-  are **not** covered.
+  rather than a surprise. It covers every published module that emits classes,
+  including the Java-25-targeted `:runtime-pjrt`, `:runtime-cuda`, `:kptx`,
+  `:runtime-iree` and `:compiler-plugin`.
 
 Neither mechanism weakens anything below: an API with no marker on it is still
 free to change in any alpha. What they add is a *signal* about which ones will,
@@ -93,11 +90,10 @@ These are the commitments.
   it.
 - **Licensing does not change retroactively.** Apache-2.0 for everything Tlaloc
   publishes; a change would apply to later versions only.
-- **A break in the covered modules' ABI leaves a trace.** `api/*.api` is a
-  committed baseline and `apiCheck` runs inside `./gradlew test`, so a change to
-  `:core`, `:ir`, `:autograd`, `:nn`, `:stablehlo` or `:maestro`'s public ABI
-  cannot land without a matching `apiDump` in the same commit. Breaks are still
-  allowed; they are visible.
+- **A break in a published module's ABI leaves a trace.** `api/*.api` is a
+  committed baseline and `checkKotlinAbi` runs inside `./gradlew test`, so a change
+  to a published module's public ABI cannot land without a matching
+  `updateKotlinAbi` in the same commit. Breaks are still allowed; they are visible.
 
 ## What a consumer should do about it
 
