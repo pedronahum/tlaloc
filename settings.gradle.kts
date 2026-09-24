@@ -10,7 +10,7 @@ rootProject.name = "tlaloc"
 // `gradle/libs.versions.toml`, and a CI lane that wanted a different one had no
 // way to ask for it short of rewriting a tracked file with `sed`.
 //
-//   ./gradlew <tasks> -PtlalocKotlinVersion=2.4.20      (or TLALOC_KOTLIN_VERSION=…)
+//   ./gradlew <tasks> -PtlalocKotlinVersion=2.5.0-Beta1      (or TLALOC_KOTLIN_VERSION=…)
 //
 // WHAT IT ACTUALLY MOVES, measured rather than assumed (§0.4.504, locally, against
 // 2.4.20 and 2.3.10). The rule is in the root build.gradle.kts and it rewrites every

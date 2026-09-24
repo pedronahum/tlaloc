@@ -8,6 +8,7 @@ import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSourceLocation
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler
+import org.jetbrains.kotlin.compiler.plugin.CommandLineProcessor
 import org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar
 import org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi
 import org.jetbrains.kotlin.cli.common.CLIConfigurationKeys
@@ -44,7 +45,10 @@ class GuardReportingTest {
 
     private data class Message(val severity: CompilerMessageSeverity, val text: String)
 
-    private fun compileWithForcedVersion(found: String?): Pair<ExitCode, List<Message>> {
+    private fun compileWithForcedVersion(
+        found: String?,
+        vararg options: String,
+    ): Pair<ExitCode, List<Message>> {
         ForcedVersionGuardRegistrar.found = found
         ForcedVersionGuardRegistrar.mayRegister = null
         val dir = Files.createTempDirectory("tlaloc-guard-reporting").toFile()
@@ -53,6 +57,11 @@ class GuardReportingTest {
             JarOutputStream(pluginJar.outputStream()).use { jar ->
                 jar.putNextEntry(JarEntry("META-INF/services/${CompilerPluginRegistrar::class.java.name}"))
                 jar.write("${ForcedVersionGuardRegistrar::class.java.name}\n".toByteArray())
+                jar.closeEntry()
+                // The production option parser, so `-P plugin:io.tlaloc.plugin:…` reaches
+                // the configuration the guard step reads.
+                jar.putNextEntry(JarEntry("META-INF/services/${CommandLineProcessor::class.java.name}"))
+                jar.write("${TlalocCommandLineProcessor::class.java.name}\n".toByteArray())
                 jar.closeEntry()
             }
             val src = File(dir, "Hello.kt").apply { writeText("fun main() { println(\"hello\") }\n") }
@@ -75,6 +84,9 @@ class GuardReportingTest {
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true
                 noReflect = true
+                pluginOptions = options
+                    .map { "plugin:${TlalocCommandLineProcessor.PLUGIN_ID}:$it" }
+                    .toTypedArray()
             }
             val exit = K2JVMCompiler().exec(collector, Services.EMPTY, args)
             return exit to messages
@@ -95,6 +107,27 @@ class GuardReportingTest {
             "built against Kotlin ${KotlinVersionGuard.COMPILED_AGAINST} and the running Kotlin compiler is 2.3.20" in
                 refusal.single().text,
             "the refusal must name both versions: ${refusal.single().text}",
+        )
+    }
+
+    @Test
+    fun `with the opt-out the same refusal is a WARNING and the compilation succeeds`() {
+        val (exit, messages) = compileWithForcedVersion("2.5.0-Beta1", "unsafeAllowUnsupportedKotlin=true")
+        assertEquals(true, ForcedVersionGuardRegistrar.mayRegister, "the opt-out must let the extensions register")
+        assertEquals(ExitCode.OK, exit, "a downgraded refusal must not fail the compilation; got $messages")
+        val warning = messages.filter { "Tlaloc's K2 compiler plugin" in it.text }
+        assertEquals(1, warning.size, "exactly one guard message must reach the collector; got $messages")
+        // Kotlin 2.4's CLI renders COMPILER_PLUGIN_INITIALIZATION_WARNING as a
+        // STRONG_WARNING (not hidden by -nowarn); the message collector fallback
+        // reports a plain WARNING. Either is a warning; neither fails the build.
+        assertTrue(
+            warning.single().severity in setOf(CompilerMessageSeverity.WARNING, CompilerMessageSeverity.STRONG_WARNING),
+            "the opt-out must downgrade the refusal to a warning; got ${warning.single().severity}",
+        )
+        assertTrue(
+            "running Kotlin compiler is 2.5.0-Beta1" in warning.single().text &&
+                "unsafeAllowUnsupportedKotlin=true was passed" in warning.single().text,
+            "the warning must name the version and the opt-out: ${warning.single().text}",
         )
     }
 
