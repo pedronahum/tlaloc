@@ -9,7 +9,7 @@ depending on a coordinate.
 This file starts at `0.1.0-alpha01`. Earlier work is recorded in the commit history
 and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
-## [0.1.0-alpha01] — unreleased
+## [0.1.0-alpha01] — 2026-09-24
 
 The first published version. [docs/CAPABILITIES.md](docs/CAPABILITIES.md) lists
 what it contains, what is certified and on what hardware.

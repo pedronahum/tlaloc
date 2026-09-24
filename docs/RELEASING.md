@@ -153,17 +153,30 @@ If the POST fails after a successful upload, rerun `./gradlew centralPortalHando
 alone from the same machine. `-PcentralPublishingType=automatic` releases without
 the manual step below; the default is `user_managed`.
 
-Then open <https://central.sonatype.com/publishing/deployments> and check the
-deployment before pressing **Publish**: it must list 24 components, the 23
-`tlaloc-*` artifacts and the plugin marker
-`io.github.pedronahum.tlaloc:io.github.pedronahum.tlaloc.gradle.plugin`. The marker
-is in the sub-group `io.github.pedronahum.tlaloc` while the handoff names the
-namespace `io.github.pedronahum`; only a local capture server has exercised this,
-so the first release is the first check that the marker lands in the same
-deployment. If it is missing, drop the deployment instead of publishing it:
-without the marker, `plugins { id("io.github.pedronahum.tlaloc") }` fails with
-"plugin not found". A published version is immutable and cannot be
+Then open <https://central.sonatype.com/publishing/deployments> (Publish →
+Deployments; not "Publish Component", which is a separate bundle-upload form)
+and check the deployment before pressing **Publish**: it must be VALIDATED and
+list 24 components, the 23 `tlaloc-*` artifacts and the plugin marker
+`io.github.pedronahum.tlaloc:io.github.pedronahum.tlaloc.gradle.plugin`. The
+marker is in the sub-group `io.github.pedronahum.tlaloc`; for 0.1.0-alpha01 it
+landed in the same deployment. If it is ever missing, drop the deployment instead
+of publishing it: without the marker, `plugins { id("io.github.pedronahum.tlaloc") }`
+fails with "plugin not found". A published version is immutable and cannot be
 deleted (`COMPATIBILITY.md`).
+
+The same check from a terminal, with the token encoded as for the handoff:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+  "https://central.sonatype.com/api/v1/publisher/status?id=<deployment id>"
+```
+
+The deployment id is `portal_deployment_id` in
+`GET https://ossrh-staging-api.central.sonatype.com/manual/search/repositories?ip=any&profile_id=io.github.pedronahum`.
+
+Artifacts reach `repo1.maven.org` a few minutes after Publish.
+`TLALOC_SMOKE_FROM_CENTRAL=1 bash scripts/onboarding-smoke.sh` then builds the
+install blocks in the README and GETTING_STARTED against Central alone.
 
 ## 5. After
 
