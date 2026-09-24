@@ -53,7 +53,7 @@ exactly as your own project would, so publish first:
 
 ## Expected output
 
-Verbatim, from this machine (GB10, JDK 25, Kotlin 2.3.20):
+Verbatim, from this machine (GB10, JDK 25, Kotlin 2.4.20):
 
 ```
 [1] a gradient, derived at compile time
@@ -100,7 +100,7 @@ quickstart OK
 |---|---|
 | [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt) | The `grad { }` call — three lines, one gradient, no tape |
 | [`src/shapeError/kotlin/ShapeError.kt`](src/shapeError/kotlin/ShapeError.kt) | The program that must not compile |
-| [`build.gradle.kts`](build.gradle.kts) | The one line that makes it all work: `id("io.github.pedronahum.tlaloc") version "0.1.0-alpha01"`, the Tlaloc Gradle plugin, which puts the compiler plugin on every compilation (the BOM supplies the library versions) — the `shapeError` task that expects failure — and the **supported consumer JDK configuration**: `jvmToolchain(25)` to build, `jvmTarget = JVM_21` to run |
+| [`build.gradle.kts`](build.gradle.kts) | The one line that makes it all work: `id("io.github.pedronahum.tlaloc") version "0.1.0-alpha02"`, the Tlaloc Gradle plugin, which puts the compiler plugin on every compilation (the BOM supplies the library versions) — the `shapeError` task that expects failure — and the **supported consumer JDK configuration**: `jvmToolchain(25)` to build, `jvmTarget = JVM_21` to run |
 | [`settings.gradle.kts`](settings.gradle.kts) | `mavenLocal()` first — this project is a consumer, not part of the repo build |
 
 ## Running it on a JDK 21

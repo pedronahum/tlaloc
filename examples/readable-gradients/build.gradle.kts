@@ -1,7 +1,7 @@
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
-    kotlin("jvm") version "2.3.20"
+    kotlin("jvm") version "2.4.20"
     application
 }
 
@@ -32,14 +32,14 @@ kotlin.sourceSets.named("printed") {
 // configuration (plain `kotlinCompilerPluginClasspath` reaches every compilation)
 // and each option as a `-P plugin:io.tlaloc.plugin:<option>=<value>` argument.
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha02")
     // The K2 compiler plugin — for the MAIN compilation only.
-    kotlinCompilerPluginClasspathMain("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha01")
+    kotlinCompilerPluginClasspathMain("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha02")
 
     // The printed gradient needs nothing but the host tensor library.
-    "printedImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
+    "printedImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-alpha02")
 }
 
 // §0.4.450's plugin CLI option. `dumpGradSourceDir` implies `dumpGradSource=true`:

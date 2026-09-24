@@ -70,7 +70,7 @@ exactly as your own project would, so publish first:
 
 ## Expected output
 
-Verbatim, from this machine (GB10, JDK 25, Kotlin 2.3.20):
+Verbatim, from this machine (GB10, JDK 25, Kotlin 2.4.20):
 
 ```
 [1] rank-2 contraction   (Batch x SeqLen) . (SeqLen x Hidden) -> (Batch x Hidden)

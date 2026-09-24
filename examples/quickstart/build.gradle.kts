@@ -1,12 +1,12 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    kotlin("jvm") version "2.3.20"
+    kotlin("jvm") version "2.4.20"
     // The Tlaloc Gradle plugin puts the K2 compiler plugin (same version) on every
     // Kotlin/JVM compilation in this project, `shapeError` included. The compiler
     // plugin rewrites `grad { }` calls into synthesized gradient code at compile
     // time and turns shape / differentiability misuse into compile errors.
-    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha01"
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha02"
     application
 }
 
@@ -50,14 +50,14 @@ val shapeErrorImplementation by configurations.getting
 
 dependencies {
     // The BOM holds the version; the artifacts below do not repeat it.
-    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha02"))
     implementation("io.github.pedronahum:tlaloc-core")
     implementation("io.github.pedronahum:tlaloc-ir")
     implementation("io.github.pedronahum:tlaloc-autograd")
 
     // The failing source set gets the same libraries (and, from the Gradle plugin,
     // the same compiler plugin): it fails on its merits, not for want of a dependency.
-    shapeErrorImplementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha01"))
+    shapeErrorImplementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha02"))
     shapeErrorImplementation("io.github.pedronahum:tlaloc-core")
     shapeErrorImplementation("io.github.pedronahum:tlaloc-ir")
     shapeErrorImplementation("io.github.pedronahum:tlaloc-autograd")

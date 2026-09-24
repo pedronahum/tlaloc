@@ -80,7 +80,7 @@ and reuses it forever after. No network? The example prints a named `SKIP`, the
 
 ## Expected output
 
-Verbatim, from this machine (GB10 / aarch64, CUDA, JDK 25, Kotlin 2.3.20), with
+Verbatim, from this machine (GB10 / aarch64, CUDA, JDK 25, Kotlin 2.4.20), with
 XLA's own log lines filtered out:
 
 ```
@@ -106,7 +106,7 @@ Tlaloc on MNIST — 60,000 handwritten digits, one captured gradient
        450      0.003017
        525      0.002512
        599      0.002052
-    600 full-batch steps over 4,096 images in 8.43 s  (14.05 ms/step)
+    600 full-batch steps over 4,096 images in 8.39 s  (13.99 ms/step)
     loss 0.112445 -> 0.002052
     compiled executables after training: 1
     (one program, 600 dispatches — the weights are graph PARAMETERS)

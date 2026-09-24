@@ -61,7 +61,7 @@ No GPU, no native library, no Python — this one runs anywhere a JVM does.
 
 ## Expected output
 
-Verbatim, from this machine (GB10 / aarch64, JDK 25, Kotlin 2.3.20):
+Verbatim, from this machine (GB10 / aarch64, JDK 25, Kotlin 2.4.20):
 
 ```
 Tlaloc readable gradients
@@ -188,7 +188,7 @@ tasks.named<KotlinCompile>("compileKotlin") {
 // 2. Compile the dump in a source set that does NOT get the plugin.
 sourceSets { create("printed") }
 kotlin.sourceSets.named("printed") { kotlin.srcDir(gradientSourceDir) }
-dependencies { "printedImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-alpha01") }
+dependencies { "printedImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-alpha02") }
 ```
 
 Step 2 is the claim under test. `printedImplementation` gets `:core` — the host

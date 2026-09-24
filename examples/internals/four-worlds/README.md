@@ -52,7 +52,7 @@ publish first:
 
 ## Expected output
 
-Verbatim, from this machine (GB10, JDK 25, Kotlin 2.3.20). The body hash is
+Verbatim, from this machine (GB10, JDK 25, Kotlin 2.4.20). The body hash is
 content-addressed over the emitted StableHLO, so it is stable across runs:
 
 ```

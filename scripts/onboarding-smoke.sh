@@ -18,6 +18,10 @@
 #   6. the settings and build files printed in README.md and docs/GETTING_STARTED.md,
 #      copied verbatim (the ```kotlin blocks whose first line is
 #      `// settings.gradle.kts` / `// build.gradle.kts`), build and run grad { }.
+#      The docs print the released Kotlin + Tlaloc pair; against the mavenLocal
+#      publish that pair is replaced by this checkout's (libs.versions.kotlin and
+#      the root build's version). TLALOC_SMOKE_FROM_CENTRAL=1 builds the blocks
+#      exactly as printed, against Maven Central.
 #
 # Exits non-zero on the first check that fails.
 set -euo pipefail
@@ -250,6 +254,28 @@ for doc in README.md docs/GETTING_STARTED.md; do
   fi
   doc_block "$doc" build.gradle.kts > "$snip/build.gradle.kts" \
     || fail "$doc has no single \`// build.gradle.kts\` Kotlin block."
+  # The docs name the RELEASED Kotlin and Tlaloc versions. Against the mavenLocal
+  # publish of this checkout, build them with this checkout's own pair instead —
+  # everything else in the block stays verbatim. From Central they stay as printed.
+  if [ "${TLALOC_SMOKE_FROM_CENTRAL:-0}" != 1 ]; then
+    doc_kotlin="$(sed -n 's/^ *kotlin("jvm") version "\([^"]*\)".*/\1/p' "$snip/build.gradle.kts" | head -1)"
+    doc_tlaloc="$(sed -n 's/^ *id("io.github.pedronahum.tlaloc") version "\([^"]*\)".*/\1/p' "$snip/build.gradle.kts" | head -1)"
+    if [[ -z "$doc_kotlin" || -z "$doc_tlaloc" ]]; then
+      fail "could not read the Kotlin and Tlaloc versions out of the build block in $doc."
+    fi
+    sed -i.bak \
+      -e "s/kotlin(\"jvm\") version \"$doc_kotlin\"/kotlin(\"jvm\") version \"$kotlin_version\"/" \
+      -e "s/\"$doc_tlaloc\"/\"$version\"/g" \
+      -e "s/:$doc_tlaloc\"/:$version\"/g" \
+      "$snip/build.gradle.kts"
+    rm -f "$snip/build.gradle.kts.bak"
+    grep -qF "kotlin(\"jvm\") version \"$kotlin_version\"" "$snip/build.gradle.kts" \
+      || fail "the Kotlin version in the $doc build block was not replaced by $kotlin_version."
+    if [ "$doc_tlaloc" != "$version" ] && grep -qF "$doc_tlaloc" "$snip/build.gradle.kts"; then
+      fail "the $doc build block still names Tlaloc $doc_tlaloc after substitution."
+    fi
+    echo "onboarding-smoke: $doc prints Kotlin $doc_kotlin + Tlaloc $doc_tlaloc; building it with $kotlin_version + $version"
+  fi
   echo 'application { mainClass.set("MainKt") }' >> "$snip/build.gradle.kts"
   cp "$with/src/main/kotlin/Main.kt" "$snip/src/main/kotlin/Main.kt"
   ./gradlew -p "$snip" run --console=plain > "$work/doc-$name.log" 2>&1 \

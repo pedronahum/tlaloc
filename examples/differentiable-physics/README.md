@@ -198,7 +198,7 @@ prints `dump SKIPPED` with the op's name instead of source.
 
 ## Expected output
 
-Verbatim, from this machine (GB10 / aarch64, JDK 25, Kotlin 2.3.20):
+Verbatim, from this machine (GB10 / aarch64, JDK 25, Kotlin 2.4.20):
 
 ```
 Tlaloc differentiable physics — a free throw, solved by differentiating the simulator

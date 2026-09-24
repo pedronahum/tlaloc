@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.3.20"
+    kotlin("jvm") version "2.4.20"
     application
 }
 
@@ -8,18 +8,18 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha02")
     // The IR: this example builds its graphs by hand, so the shape of the
     // program is visible in the source instead of hidden behind a model API.
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha02")
     // StableHLO emission — the text handed to the TPU compiler is written to
     // build/ so you can read exactly what crossed the boundary.
-    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha02")
     // PjrtSession + PjrtBinaries + PjrtTarget.Tpu: plugin resolution, client
     // creation, compile, buffer staging, execute. Pure JVM at resolution time;
     // this dependency costs nothing on a machine with no accelerator, which is
     // why the host half of this example runs on a laptop.
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha02")
 
     // NOTE: no `kotlinCompilerPluginClasspath`. The compiler plugin lowers
     // `grad { }` lambdas (see examples/quickstart); this example differentiates

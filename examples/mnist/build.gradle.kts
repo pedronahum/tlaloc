@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.3.20"
+    kotlin("jvm") version "2.4.20"
     application
 }
 
@@ -8,21 +8,21 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha01")
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha02")
     // The Tracer: `capture` traces the model's forward through it.
-    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha02")
     // Dense / ReluLayer / Sequential / Adam / capture — the model layer.
-    implementation("io.github.pedronahum:tlaloc-nn:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-nn:0.1.0-alpha02")
     // StableHLO emission of the captured gradient graph. `:runtime-pjrt` pulls
     // it in transitively, but the example names it because the example's story
     // IS the emission.
-    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha02")
     // PjrtSession + PjrtBinaries: compile the emitted StableHLO with XLA and
     // execute it on the GPU. Pure JVM at resolution time — this dependency
     // costs nothing on a machine with no CUDA, and the example self-skips the
     // GPU lane there.
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha01")
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha02")
 
     // NOTE: no `kotlinCompilerPluginClasspath` here. The compiler plugin lowers
     // `grad { }` LAMBDAS (see examples/quickstart); a MODEL's gradient comes
