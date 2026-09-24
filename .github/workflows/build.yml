@@ -78,16 +78,16 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       # macOS-specific honesty, stated where someone reading a green check will
       # see it: the root build.gradle.kts injects /opt/homebrew/bin into every
@@ -112,7 +112,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Per-leg name: upload-artifact@v4 FAILS on a duplicate artifact name,
           # so a matrix cannot share the single "build-reports" this file used
@@ -145,19 +145,19 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Both JDKs, in this order: the LAST setup-java wins JAVA_HOME, and Gradle
       # must run on 25 (the toolchain every module declares).
       - name: Set up JDK 21
         id: jdk21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
@@ -170,7 +170,7 @@ jobs:
         run: echo "JDK21_HOME=${{ steps.jdk21.outputs.path }}" >> "$GITHUB_ENV"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       # The bytecode claim: every class in each module's jar is the major version
       # tlalocJvmTargets says it is. Registered in all twelve subprojects and
@@ -208,7 +208,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: library-jdk21-reports
           path: |

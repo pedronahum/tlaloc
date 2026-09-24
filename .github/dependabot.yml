@@ -12,3 +12,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # gradle/actions v6 moves its caching into a proprietary component whose
+      # Terms of Use a workflow accepts by upgrading. Staying on v5 (MIT) until
+      # the maintainer decides whether to accept them.
+      - dependency-name: "gradle/actions"
+        versions: [">= 6"]
