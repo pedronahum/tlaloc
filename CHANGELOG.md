@@ -13,11 +13,6 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
-- **ABI baseline for every published module.** The committed `api/*.api` baselines
-  are checked by the Kotlin Gradle plugin's ABI validation (`checkKotlinAbi`,
-  `updateKotlinAbi`) instead of binary-compatibility-validator, and now also cover
-  `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`, `tlaloc-kptx`, `tlaloc-runtime-iree`
-  and `tlaloc-compiler-plugin`.
 - **Kotlin 2.4.20.** Tlaloc is built against Kotlin 2.4.20 and its compiler plugin
   supports Kotlin **2.4.20 through 2.4.29**; any other Kotlin is refused by name at
   compile time. Projects on Kotlin 2.3.20–2.3.29 stay on `0.1.0-alpha01`. The
@@ -26,6 +21,11 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   diagnostic API Kotlin 2.4 recommends does not exist there.
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) lists the Kotlin range of each
   Tlaloc version.
+- **ABI baseline for every published module.** The committed `api/*.api` baselines
+  are checked by the Kotlin Gradle plugin's ABI validation (`checkKotlinAbi`,
+  `updateKotlinAbi`) instead of binary-compatibility-validator, and now also cover
+  `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`, `tlaloc-kptx`, `tlaloc-runtime-iree`
+  and `tlaloc-compiler-plugin`.
 - **Symja 3.2.0.** The build compiles and tests `tlaloc-ir` against
   `org.matheclipse:matheclipse-core:3.2.0`, and the compiler's refusal for a
   symbolic-trip-count loop now names that coordinate. Symja stays `compileOnly`

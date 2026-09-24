@@ -891,7 +891,7 @@ nothing was published. `CHANGELOG.md` records the user-visible changes under
   differentiable-physics and named-indices examples pass.
 - CI on 48639a6: build, kotlin-next and maestro-integration succeeded.
 
-## Kotlin 2.4.20 (2026-09-24)
+## Kotlin 2.4 port (2026-09-24)
 
 `main` moves to Kotlin 2.4.20 and version `0.1.0-alpha02` (unreleased). The
 compiler plugin supports 2.4.20–2.4.29; `0.1.0-alpha01` stays the release for
@@ -928,9 +928,18 @@ one frontend error, `IrPluginContext.messageCollector` unresolved
 (`TlalocIrGenerationExtension.kt`); the backend was not reached. `kotlin-next.yml`
 now probes the newest version in a later feature release than the catalog's.
 
-Suite: 2,525 tests in `./gradlew test --rerun-tasks`, 0 failures, 93 skipped;
-`count-tests.sh` 2,647. `onboarding-smoke.sh` passes both ways (this checkout's
-pair and `TLALOC_SMOKE_FROM_CENTRAL=1`). quickstart (with `shapeError` and
-`runOnJdk21`), readable-gradients (compiled == printed, raw-bit identical),
-differentiable-physics, named-indices, internals/four-worlds, internals/layer3,
-and gpu-training and mnist on CUDA (GB10) run.
+The opt-out was then tested through a real 2.4.20 compile: Kotlin 2.4 reports
+`COMPILER_PLUGIN_INITIALIZATION_WARNING` as a `STRONG_WARNING`, and the refusal is
+downgraded to it. The Kotlin Gradle plugin's ABI validation (`checkKotlinAbi`)
+replaced binary-compatibility-validator; it reads Java 25 bytecode, so all twelve
+published modules have a checked baseline.
+
+Certification before the push: `./gradlew test --rerun-tasks` 2,526 tests,
+0 failures, 93 skipped by name; the three vendored Maestro lanes 122; `count-tests.sh`
+2,648 (2,639 before the port, plus the 9 new `:compiler-plugin` tests).
+`checkKotlinAbi` (12 modules), `onboarding-smoke.sh`, `jdk21-smoke.sh` (JDK 21.0.2)
+and `check-doc-links.py` pass. After `publishToMavenLocal`, quickstart,
+readable-gradients (compiled == printed, raw-bit identical), differentiable-physics,
+named-indices, internals/four-worlds and internals/layer3 run; gpu-training and mnist
+ran on CUDA (GB10) during the port. Dependabot PR #9 (Kotlin 2.3.20 → 2.4.20) is
+closed; the port supersedes it.
