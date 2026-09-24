@@ -2,6 +2,8 @@ package io.tlaloc.gradle
 
 import org.gradle.api.Project
 import org.gradle.api.provider.Provider
+import org.jetbrains.kotlin.gradle.plugin.FilesOptionKind
+import org.jetbrains.kotlin.gradle.plugin.FilesSubpluginOption
 import org.jetbrains.kotlin.gradle.plugin.KotlinCompilation
 import org.jetbrains.kotlin.gradle.plugin.KotlinCompilerPluginSupportPlugin
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
@@ -44,6 +46,14 @@ internal class TlalocKotlinSubplugin : KotlinCompilerPluginSupportPlugin {
     ): Provider<List<SubpluginOption>> {
         val project = kotlinCompilation.target.project
         val extension = project.extensions.getByType(TlalocExtension::class.java)
+        // Each compilation writes into its own subdirectory, named after its default
+        // source set (main, test; jvmMain, jvmTest in Multiplatform), which is an
+        // output of its compile task: two compilations cannot share one output
+        // directory, and an output is stored in and restored from the build cache.
+        val gradSourceDir = extension.dumpGradSourceDir.map { it.dir(kotlinCompilation.defaultSourceSet.name) }
+        kotlinCompilation.compileTaskProvider.configure { task ->
+            task.outputs.dir(gradSourceDir).optional().withPropertyName(GRAD_SOURCE_OUTPUT_PROPERTY)
+        }
         return project.provider {
             buildList {
                 add(SubpluginOption("strictLowering", extension.strictLowering.get().toString()))
@@ -55,10 +65,18 @@ internal class TlalocKotlinSubplugin : KotlinCompilerPluginSupportPlugin {
                         extension.unsafeAllowUnsupportedKotlin.get().toString(),
                     ),
                 )
-                extension.dumpGradSourceDir.orNull?.let {
-                    add(SubpluginOption("dumpGradSourceDir", it.asFile.absolutePath))
+                // A files option is left out of the compile task's inputs, so the
+                // absolute path does not enter the build-cache key; the directory is
+                // tracked as the output registered above.
+                gradSourceDir.orNull?.let {
+                    add(FilesSubpluginOption("dumpGradSourceDir", listOf(it.asFile), FilesOptionKind.INTERNAL))
                 }
             }
         }
+    }
+
+    internal companion object {
+        /** The compile task's output property that holds the dumped gradient sources. */
+        const val GRAD_SOURCE_OUTPUT_PROPERTY: String = "tlalocGradSourceDir"
     }
 }

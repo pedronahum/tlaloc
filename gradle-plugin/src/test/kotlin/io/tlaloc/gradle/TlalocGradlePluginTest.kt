@@ -5,8 +5,10 @@ import org.gradle.api.internal.project.ProjectInternal
 import org.gradle.testfixtures.ProjectBuilder
 import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jetbrains.kotlin.gradle.plugin.FilesSubpluginOption
 import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -75,8 +77,9 @@ class TlalocGradlePluginTest {
                 dumpGradSourceDir.set(layout.buildDirectory.dir("gradients"))
             }
         }
-        val expectedDir = p.layout.buildDirectory.dir("gradients").get().asFile.absolutePath
-        for (task in listOf("compileKotlin", "compileTestKotlin")) {
+        val gradients = p.layout.buildDirectory.dir("gradients").get().asFile
+        for ((task, sourceSet) in listOf("compileKotlin" to "main", "compileTestKotlin" to "test")) {
+            val expectedDir = File(gradients, sourceSet).absolutePath
             val options = tlalocOptions(p, task)
             assertEquals(
                 mapOf(
@@ -89,7 +92,27 @@ class TlalocGradlePluginTest {
                 options.associate { it.key to it.value },
                 task,
             )
+            // A files option: KGP leaves it out of the task's inputs.
+            assertTrue(options.single { it.key == "dumpGradSourceDir" } is FilesSubpluginOption, task)
+            val compile = p.tasks.getByName(task) as KotlinCompile
+            assertTrue(File(expectedDir) in compile.outputs.files.files, "$task outputs ${compile.outputs.files.files}")
+            val inputArgs = compile.pluginOptions.get().flatMap { it.getAsTaskInputArgs().entries }
+            assertTrue(inputArgs.any { it.value == "true" }, "$task input args $inputArgs")
+            assertFalse(inputArgs.any { expectedDir in it.value }, "$task input args $inputArgs")
         }
+    }
+
+    @Test
+    fun withoutADumpDirectoryNoOutputIsAdded() {
+        val p = project {
+            pluginManager.apply("org.jetbrains.kotlin.jvm")
+            pluginManager.apply(TlalocGradlePlugin::class.java)
+            extensions.getByType(TlalocExtension::class.java).dumpGradSource.set(true)
+        }
+        val compile = p.tasks.getByName("compileKotlin")
+        val outputs = compile.outputs.files.files
+        assertTrue(outputs.none { "gradients" in it.path || "tlaloc" in it.name }, "outputs $outputs")
+        assertFalse(tlalocOptions(p, "compileKotlin").any { it.key == "dumpGradSourceDir" })
     }
 
     @Test

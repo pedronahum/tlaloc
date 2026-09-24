@@ -381,7 +381,7 @@ private fun plotTrajectories(first: List<Pair<Float, Float>>, learned: List<Pair
 
 /**
  * Print the gradient the compiler derived — the actual file it wrote while
- * compiling this example, into `build/gradients/`.
+ * compiling this example, into `build/gradients/main/`.
  */
 private fun printDerivedGradient() {
     println("[4] the derivative of the simulator, as the compiler wrote it")
@@ -391,7 +391,9 @@ private fun printDerivedGradient() {
         println("    (no dump directory — run with `./gradlew -p examples/differentiable-physics run`)")
         return
     }
-    val dumps = dir.listFiles { f -> f.name.endsWith(".kt") }.orEmpty()
+    // Searched recursively: the Gradle plugin writes the main compilation's files
+    // into the `main` subdirectory.
+    val dumps = dir.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }.toList()
     if (dumps.isEmpty()) {
         println("    (the compiler wrote no gradient source into ${dir.path})")
         return

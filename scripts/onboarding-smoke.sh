@@ -5,7 +5,7 @@
 # checks the Gradle plugin itself with five throwaway consumer builds:
 #
 #   1. plugins { id("io.github.pedronahum.tlaloc") } with every tlaloc { } option
-#      set: grad { } runs and dumpGradSourceDir receives the printed gradient.
+#      set: grad { } runs and dumpGradSourceDir/main receives the printed gradient.
 #   2. the same program without the plugin: it fails at run time with the
 #      "was not rewritten at compile time" error (the negative control for 1).
 #   3. a Kotlin Multiplatform build with a JS target: the JS compilation is
@@ -124,8 +124,8 @@ tlaloc {
 grep -q 'gradient=\[7.0, 11.0, 9.0, 13.0\]' "$work/with.log" \
   && grep -q 'scalar=12.0' "$work/with.log" \
   || fail "the consumer that applies the Tlaloc Gradle plugin printed the wrong gradient." "$work/with.log"
-ls "$with/build/gradients/"*.kt > /dev/null 2>&1 \
-  || fail "tlaloc { dumpGradSourceDir } wrote no .kt file under $with/build/gradients." "$work/with.log"
+ls "$with/build/gradients/main/"*.kt > /dev/null 2>&1 \
+  || fail "tlaloc { dumpGradSourceDir } wrote no .kt file under $with/build/gradients/main." "$work/with.log"
 echo "onboarding-smoke: Gradle plugin applied, gradient correct, dumpGradSourceDir honoured"
 
 # 2. Negative control: the same program without the plugin.

@@ -238,6 +238,12 @@ tlaloc {
 }
 ```
 
+The files land in one subdirectory per compilation, named after its source set:
+`build/gradients/main/` for `src/main/kotlin`, `build/gradients/test/` for
+`src/test/kotlin` (`jvmMain`, `jvmTest` in a Multiplatform build). Each
+subdirectory is an output of its compile task, so the build cache stores and
+restores it with the classes.
+
 Each dump is headed by the lambda's source location, and the dumped `.kt` file
 compiles and runs on its own, bit-identical to the compiled gradient (pinned in
 `DumpGradSourceTest`). Scalar lambdas render; tensor `grad {}` lambdas, whose
@@ -287,7 +293,7 @@ is refused by name.
 | `strictLowering` | `true` | A `grad {}` / `jvp {}` / `vjp {}` lambda the plugin cannot compile is a compile **error**. `false` makes it a warning, and the call throws `IllegalStateException` when it runs. |
 | `dumpLoweredIr` | `false` | Dump the lowered Tlaloc IR for every recognized intrinsic lambda: one WARNING from the FIR checker and one INFO from the IR extension. For debugging the plugin. K2's diagnostic API has no INFO severity, so the FIR half is a warning and breaks a `-Werror` build. |
 | `dumpGradSource` | `false` | Print each synthesized gradient as readable Kotlin (INFO). |
-| `dumpGradSourceDir` | unset | Like `dumpGradSource`, and also write one `.kt` per lambda into this directory. |
+| `dumpGradSourceDir` | unset | Like `dumpGradSource`, and also write one `.kt` per lambda. The Gradle plugin writes each compilation's files into `<dir>/<source set>` (`<dir>/main`, `<dir>/test`) and declares that directory an output of the compile task; the raw `-P` option writes into `<dir>` itself. |
 | `unsafeAllowUnsupportedKotlin` | `false` | Turn the Kotlin version refusal into a warning and run the plugin on a Kotlin outside 2.3.20–2.3.29. The plugin reads internal K2 API, so expect crashes from inside the compiler. |
 
 A build with none of these set and a `grad {}` that lowers is **silent**: Tlaloc

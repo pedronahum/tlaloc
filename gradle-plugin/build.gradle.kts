@@ -38,10 +38,35 @@ dependencies {
     // ProjectBuilder tests apply the real Kotlin Gradle plugin and read what it wired.
     testImplementation("org.jetbrains.kotlin:kotlin-gradle-plugin:${libs.versions.kotlin.get()}")
     testImplementation(kotlin("test"))
+    testImplementation(gradleTestKit())
 }
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+}
+
+// The functional tests (DumpGradSourceBuildCacheTest) run real consumer builds with
+// Gradle TestKit. The consumers resolve this plugin, the compiler plugin and the
+// libraries a grad { } call needs from the build-local `functionalTest` repository
+// (root build.gradle.kts), published there before the tests run.
+val functionalTestRepo = rootProject.layout.buildDirectory.dir("functional-test-repo")
+val functionalTestModules = listOf(":core", ":ir", ":autograd", ":compiler-plugin", ":gradle-plugin")
+tasks.named<Test>("test") {
+    functionalTestModules.forEach { dependsOn("$it:publishAllPublicationsToFunctionalTestRepository") }
+    // The published files, not the metadata and signatures the publish rewrites each
+    // time, so an unchanged build leaves this task up to date.
+    inputs.files(
+        functionalTestRepo.map { dir ->
+            fileTree(dir) { exclude("**/maven-metadata*", "**/*.asc", "**/*.asc.*") }
+        },
+    ).withPathSensitivity(PathSensitivity.RELATIVE).withPropertyName("functionalTestRepo")
+    val repoPath = functionalTestRepo.map { it.asFile.absolutePath }
+    val kotlinVersion = libs.versions.kotlin.get()
+    inputs.property("kotlinVersion", kotlinVersion)
+    doFirst {
+        systemProperty("tlaloc.functionalTest.repo", repoPath.get())
+        systemProperty("tlaloc.functionalTest.kotlinVersion", kotlinVersion)
+    }
 }
 
 gradlePlugin {

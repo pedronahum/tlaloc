@@ -261,6 +261,13 @@ subprojects {
                     }
                 }
             }
+            // A repository inside this build's own directory. The Gradle plugin's
+            // functional tests build consumer projects that resolve Tlaloc from it
+            // (gradle-plugin/build.gradle.kts), without touching ~/.m2.
+            maven {
+                name = "functionalTest"
+                url = uri(rootProject.layout.buildDirectory.dir("functional-test-repo"))
+            }
         }
     }
 

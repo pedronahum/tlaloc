@@ -1,5 +1,3 @@
-import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
-
 plugins {
     kotlin("jvm") version "2.3.20"
     // Puts the Tlaloc K2 compiler plugin on the compilation: it is what turns the
@@ -12,7 +10,9 @@ kotlin {
     jvmToolchain(25)
 }
 
-// Where the compiler writes the gradient it derived, as Kotlin source.
+// Where the compiler writes the gradient it derived, as Kotlin source. The plugin
+// writes each compilation into a subdirectory named after its source set, so the
+// main code's gradients are in build/gradients/main.
 val gradientSourceDir: Directory = layout.buildDirectory.dir("gradients").get()
 
 dependencies {
@@ -27,11 +27,6 @@ dependencies {
 // lambda's source location. Act [4] reads it back and prints it.
 tlaloc {
     dumpGradSourceDir.set(gradientSourceDir)
-}
-
-// Declaring the dump dir as an output keeps it in sync with the compilation.
-tasks.named<KotlinCompile>("compileKotlin") {
-    outputs.dir(gradientSourceDir)
 }
 
 application {

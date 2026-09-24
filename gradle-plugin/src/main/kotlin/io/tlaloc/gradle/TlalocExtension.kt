@@ -24,8 +24,12 @@ abstract class TlalocExtension {
 
     /**
      * Also write each synthesized gradient as a `.kt` file, named after the lambda's
-     * source location, under this directory. Setting it implies [dumpGradSource].
-     * Unset by default.
+     * source location. Each Kotlin/JVM compilation writes into its own subdirectory,
+     * named after its default source set: `<dir>/main`, `<dir>/test` (`<dir>/jvmMain`,
+     * `<dir>/jvmTest` in a Multiplatform build). That subdirectory is an output of the
+     * compilation's compile task, so the build cache stores and restores it, and the
+     * path does not enter the task's cache key. Setting it implies [dumpGradSource].
+     * Unset by default: [dumpGradSource] alone prints and writes no file.
      */
     abstract val dumpGradSourceDir: DirectoryProperty
 

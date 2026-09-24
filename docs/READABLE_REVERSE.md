@@ -50,9 +50,12 @@ tlaloc {
 }
 ```
 
-Without the Gradle plugin the same options are
-`-P plugin:io.tlaloc.plugin:dumpGradSource=true` and
-`-P plugin:io.tlaloc.plugin:dumpGradSourceDir=<dir>`.
+The Gradle plugin writes each compilation's files into a subdirectory named
+after its source set, here `build/gradients/main/`, and declares it an output of
+the compile task, so the build cache restores it. Without the Gradle plugin the
+same options are `-P plugin:io.tlaloc.plugin:dumpGradSource=true` and
+`-P plugin:io.tlaloc.plugin:dumpGradSourceDir=<dir>`, which writes into `<dir>`
+itself.
 
 The compiler answers with an INFO message headed by the lambda's source
 location (`Main.kt:3:13`), and — dir form — this file, verbatim as

@@ -21,6 +21,16 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   compiler plugin classpath.
 - **Gradle 9.7.1.** The repository's wrapper moves from 9.5.0 to 9.7.1; the
   Tlaloc Gradle plugin is tested with it.
+- **`tlaloc { dumpGradSourceDir }` writes one subdirectory per compilation.** The
+  Gradle plugin writes each Kotlin/JVM compilation's gradient sources into
+  `<dumpGradSourceDir>/<source set>` (`main`, `test`; `jvmMain`, `jvmTest` in a
+  Multiplatform build) instead of into `dumpGradSourceDir` itself, and declares
+  that subdirectory an output of the compile task. The build cache now stores and
+  restores the dumped files, and the directory's absolute path no longer enters
+  the compile task's cache key, so a project that sets it gets cache hits from a
+  checkout at another path. A build that reads the files from
+  `dumpGradSourceDir` directly now reads `dumpGradSourceDir/main`. The raw
+  `-P plugin:io.tlaloc.plugin:dumpGradSourceDir=<dir>` option is unchanged.
 - **API documentation.** KDoc in every published module describes the code
   without internal changelog numbers, plan phases or planning-document names;
   `./gradlew test` fails if one comes back (`scripts/check-kdoc-internal-refs.py`).

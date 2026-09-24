@@ -83,7 +83,7 @@ Call `g` in a hot loop and nothing allocates a tape, because there is no tape.
 ```kotlin
 tlaloc {
     dumpGradSource.set(true)                                   // print it
-    dumpGradSourceDir.set(layout.buildDirectory.dir("grads"))  // one .kt per lambda
+    dumpGradSourceDir.set(layout.buildDirectory.dir("grads"))  // one .kt per lambda, in grads/main
 }
 ```
 

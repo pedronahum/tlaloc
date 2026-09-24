@@ -78,7 +78,7 @@ fun valueAndGrad2_body_grad(angle: DTensor<ScalarShape, F32>, speed: DTensor<Sca
 ```
 
 Nobody writes that by hand, and no other autodiff framework will show it to you.
-The full file lands in `build/gradients/` after a build.
+The full file lands in `build/gradients/main/` after a build.
 
 ## Nothing here is taken on trust
 
@@ -118,7 +118,7 @@ checked against. Concretely, what folds is:
   the value folded is the value the lambda would have read.
 
 **The interesting result is that nothing in this example's output changed.** The
-derivative the compiler writes into `build/gradients/` is *byte-identical* to the
+derivative the compiler writes into `build/gradients/main/` is *byte-identical* to the
 one it wrote from the literal body — same 832 lines, same 823 operations, same
 `md5 5d0c2b9704f12a2863938df08f2cae61`. That is the design working: the fold emits
 the same `DxirConst` the literal path emits, so the reverse transform, the
@@ -151,7 +151,7 @@ against the plain-Kotlin simulator before printing anything.
 differentiation target: `grad2` above still returns a `Pair` of two gradients —
 `d/dangle` and `d/dspeed` — and not one per captured hoop coordinate. The
 derivative the compiler writes for it says so out loud — four parameters in,
-two gradients out (`build/gradients/Main_kt_234_5_grad2.kt`, after a build):
+two gradients out (`build/gradients/main/Main_kt_234_5_grad2.kt`, after a build):
 
 ```kotlin
 fun grad2_body_grad(
@@ -287,7 +287,7 @@ Tlaloc differentiable physics — a free throw, solved by differentiating the si
         return Triple(v741, v1445, v1441)
     }
 
-    the whole file: <repo>/examples/differentiable-physics/build/gradients/Main_kt_133_23_valueAndGrad2.kt
+    the whole file: <repo>/examples/differentiable-physics/build/gradients/main/Main_kt_133_23_valueAndGrad2.kt
 
 [5] the same derivative, aimed somewhere else at run time
 
@@ -311,7 +311,7 @@ differentiable-physics OK
 |---|---|
 | [`src/main/kotlin/Main.kt`](src/main/kotlin/Main.kt) | The `grad2 { }` block with the simulator inside it, and `simulate()`, the independent transcription it is checked against |
 | [`build.gradle.kts`](build.gradle.kts) | `dumpGradSourceDir` — the two lines that make the derivative a file |
-| `build/gradients/*.kt` | The derivative itself, after a build |
+| `build/gradients/main/*.kt` | The derivative itself, after a build |
 
 ## Related
 
