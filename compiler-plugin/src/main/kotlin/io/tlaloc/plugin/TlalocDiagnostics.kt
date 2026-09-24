@@ -4,11 +4,15 @@ import org.jetbrains.kotlin.com.intellij.psi.PsiElement
 import org.jetbrains.kotlin.diagnostics.KtDiagnosticFactory1
 import org.jetbrains.kotlin.diagnostics.KtDiagnosticFactoryToRendererMap
 import org.jetbrains.kotlin.diagnostics.KtDiagnosticsContainer
+import org.jetbrains.kotlin.diagnostics.KtSourcelessDiagnosticFactory
 import org.jetbrains.kotlin.diagnostics.SourceElementPositioningStrategies
 import org.jetbrains.kotlin.diagnostics.rendering.BaseDiagnosticRendererFactory
+import org.jetbrains.kotlin.diagnostics.rendering.BaseSourcelessDiagnosticRendererFactory
 import org.jetbrains.kotlin.diagnostics.rendering.CommonRenderers
 import org.jetbrains.kotlin.diagnostics.error1
+import org.jetbrains.kotlin.diagnostics.errorWithoutSource
 import org.jetbrains.kotlin.diagnostics.warning1
+import org.jetbrains.kotlin.diagnostics.warningWithoutSource
 
 object TlalocErrors : KtDiagnosticsContainer() {
     /** Fires for every recognised intrinsic call that we did *not* attempt to lower. */
@@ -146,5 +150,69 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
             "Tlaloc cannot differentiate this body: {0}",
             CommonRenderers.STRING,
         )
+    }
+}
+
+/**
+ * The IR phase's diagnostics, reported by [TlalocIrReporter] at the intrinsic call
+ * they concern. Each carries its complete message as the single argument, and each
+ * name can be given to `@Suppress` to silence the warning forms.
+ */
+internal object TlalocIrErrors : KtDiagnosticsContainer() {
+    /** The call cannot be rewritten into a gradient and is left as written, so it
+     * would throw at its first call. The default severity. */
+    val IR_LOWERING_REFUSED: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** [IR_LOWERING_REFUSED] under `strictLowering=false`. */
+    val IR_LOWERING_REFUSED_WARNING: KtDiagnosticFactory1<String> by warning1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** An unexpected exception inside the IR phase while rewriting a call. */
+    val IR_INTERNAL_ERROR: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** [IR_INTERNAL_ERROR] under `strictLowering=false`. */
+    val IR_INTERNAL_ERROR_WARNING: KtDiagnosticFactory1<String> by warning1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** A pipeline step failed and the call was compiled from a less processed input. */
+    val IR_DEGRADED: KtDiagnosticFactory1<String> by warning1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    override fun getRendererFactory(): BaseDiagnosticRendererFactory = TlalocIrRendererFactory
+}
+
+internal object TlalocIrRendererFactory : BaseDiagnosticRendererFactory() {
+    override val MAP: KtDiagnosticFactoryToRendererMap by KtDiagnosticFactoryToRendererMap("TlalocIr") { map ->
+        map.put(TlalocIrErrors.IR_LOWERING_REFUSED, "{0}", CommonRenderers.STRING)
+        map.put(TlalocIrErrors.IR_LOWERING_REFUSED_WARNING, "{0}", CommonRenderers.STRING)
+        map.put(TlalocIrErrors.IR_INTERNAL_ERROR, "{0}", CommonRenderers.STRING)
+        map.put(TlalocIrErrors.IR_INTERNAL_ERROR_WARNING, "{0}", CommonRenderers.STRING)
+        map.put(TlalocIrErrors.IR_DEGRADED, "{0}", CommonRenderers.STRING)
+    }
+}
+
+/**
+ * The IR phase's diagnostics that have no call to point at: a failure covering a
+ * whole file, or a call the IR phase never found. They carry a file (and, when
+ * known, a line and column) as a plain location.
+ */
+internal object TlalocIrSourcelessErrors : KtDiagnosticsContainer() {
+    val IR_ERROR_NO_SOURCE: KtSourcelessDiagnosticFactory by errorWithoutSource()
+    val IR_WARNING_NO_SOURCE: KtSourcelessDiagnosticFactory by warningWithoutSource()
+
+    override fun getRendererFactory(): BaseDiagnosticRendererFactory = TlalocIrSourcelessRendererFactory
+}
+
+internal object TlalocIrSourcelessRendererFactory : BaseSourcelessDiagnosticRendererFactory() {
+    override val MAP: KtDiagnosticFactoryToRendererMap by KtDiagnosticFactoryToRendererMap("TlalocIrSourceless") { map ->
+        map.put(TlalocIrSourcelessErrors.IR_ERROR_NO_SOURCE, MESSAGE_PLACEHOLDER)
+        map.put(TlalocIrSourcelessErrors.IR_WARNING_NO_SOURCE, MESSAGE_PLACEHOLDER)
     }
 }

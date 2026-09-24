@@ -78,6 +78,7 @@ class TlalocCompilerPluginRegistrar : CompilerPluginRegistrar() {
                 dumpGradSourceDir = dumpDir,
                 options = options,
                 handoff = handoff,
+                configuration = configuration,
             ),
         )
     }

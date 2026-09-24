@@ -943,3 +943,47 @@ readable-gradients (compiled == printed, raw-bit identical), differentiable-phys
 named-indices, internals/four-worlds and internals/layer3 run; gpu-training and mnist
 ran on CUDA (GB10) during the port. Dependabot PR #9 (Kotlin 2.3.20 → 2.4.20) is
 closed; the port supersedes it.
+
+## IR-phase diagnostics (2026-09-24)
+
+Kotlin 2.5.0-Beta1 removes `IrPluginContext.messageCollector`, the one API whose
+removal stopped `:compiler-plugin` from compiling there. The IR phase now reports
+through `IrPluginContext.diagnosticReporter` (`TlalocIrReporter`, with the factories
+in `TlalocIrErrors` / `TlalocIrSourcelessErrors`), and its INFO dumps through
+`CompilerConfiguration.reportInfo`. One source tree compiles against 2.4.20 and
+2.5.0-Beta1; only calls present in both are used (`at(IrElement, IrFile)` and the
+sourceless `report(factory, message, location)`).
+
+Behaviour kept: refusals are ERROR by default and WARNING under
+`strictLowering=false`, at the call's file, line and column; internal errors keep
+the issue-tracker address; degradation messages stay warnings; the `dumpLoweredIr`
+and `dumpGradSource` output stays INFO, so a working program compiles silently under
+`-Werror`. Message texts are unchanged. Messages with no call to point at (a
+whole-file failure, a call the IR phase never found) are sourceless diagnostics that
+keep their file, line and column. Changed: the degradation warnings raised while rewriting a call, which had no
+location, now point at the call; an IR-phase error stops the build before code
+generation; warnings can be silenced with `@Suppress` naming the diagnostic.
+`TlalocIrGenerationExtension` takes the `CompilerConfiguration` as a constructor
+parameter (the ABI baseline records it).
+
+New tests in `PluginRobustnessTest`: the refusal's line and column and no class file
+written; `@Suppress("IR_LOWERING_REFUSED_WARNING")` silences the lenient warning
+(another name does not); the `dumpGradSource` dump is INFO under `-Werror`. With the
+reporter forced onto the sourceless path and INFO sent as a warning, all three fail,
+and so do two existing tests.
+
+Kotlin 2.5.0-Beta1 experiment (`-PtlalocKotlinVersion=2.5.0-Beta1`): main and test
+sources compile. `:compiler-plugin:test` runs 344 tests and 303 fail, 299 of them
+on the version guard's refusal of 2.5 (by design; the guard's supported range is a
+constant, not the catalog property). With the guard bypassed in a local edit that
+was not committed, 341 of 344 pass; the 3 failures are guard tests
+(`KotlinVersionGuardTest`, and two `ForeignCompilerGuardTest` cases that the bypass
+itself breaks). Not verified: that IR-phase errors abort JS, Wasm and Native
+compilations the same way (only JVM ran).
+
+Suite: `./gradlew test --rerun-tasks` 2,529 tests, 0 failures, 93 skipped by name;
+2,651 combined with the Maestro lanes. `KptxPagedAttentionBenchTest` failed in one of
+three full runs; it is a GPU timing assertion that also fails 1 run in 4 at the
+previous commit. quickstart, readable-gradients and differentiable-physics print OK
+with no Tlaloc warning after `publishToMavenLocal`; the quickstart `shapeError`
+task still fails as designed.

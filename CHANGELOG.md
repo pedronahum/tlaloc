@@ -21,6 +21,10 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   diagnostic API Kotlin 2.4 recommends does not exist there.
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) lists the Kotlin range of each
   Tlaloc version.
+- **IR-phase messages are compiler diagnostics.** The compiler plugin's IR-phase
+  refusals and warnings are reported at the call site through the compiler's
+  diagnostic reporter, with unchanged text and severity, and a warning can be
+  silenced with `@Suppress` naming it (for example `IR_LOWERING_REFUSED_WARNING`).
 - **ABI baseline for every published module.** The committed `api/*.api` baselines
   are checked by the Kotlin Gradle plugin's ABI validation (`checkKotlinAbi`,
   `updateKotlinAbi`) instead of binary-compatibility-validator, and now also cover

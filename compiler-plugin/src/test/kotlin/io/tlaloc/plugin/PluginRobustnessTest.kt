@@ -198,6 +198,74 @@ class PluginRobustnessTest {
         assertTrue(result.messages.none { "Tlaloc" in it.message }, "no Tlaloc diagnostic:\n${result.render()}")
     }
 
+    // ---------------- IR-phase messages are compiler diagnostics ----------------
+
+    @Test
+    fun `an IR-phase refusal points at the call's line and column and stops the build before code generation`() {
+        val result = compile(
+            mapOf("stub.kt" to jacobianStubWithoutHelper, "Main.kt" to jacobianUser),
+            keepOutput = true,
+        )
+        try {
+            assertEquals(1, result.exitCode, "a refusal is a compilation error:\n${result.render()}")
+            val err = result.messages.single {
+                it.severity == CompilerMessageSeverity.ERROR && "kept original call" in it.message
+            }
+            val location = assertNotNull(err.location, "the error carries a location")
+            assertTrue(location.path.endsWith("Main.kt"), "in the user's file: ${location.path}")
+            assertEquals(3, location.line, "on the jacobian call's line")
+            assertEquals(jacobianUser.lines()[2].indexOf("jacobian") + 1, location.column, "at the call's column")
+            val classes = result.outDir.walk().filter { it.isFile && it.name.endsWith(".class") }.toList()
+            assertTrue(classes.isEmpty(), "no class file is written after an IR-phase error: $classes")
+        } finally {
+            result.outDir.parentFile.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `the IR-phase refusal warning is silenced by @Suppress with its diagnostic name`() {
+        fun lenient(suppressed: String): CompileResult = compile(
+            mapOf(
+                "stub.kt" to jacobianStubWithoutHelper,
+                "Main.kt" to jacobianUser.replace("fun main()", "@Suppress(\"$suppressed\")\nfun main()"),
+            ),
+            options = arrayOf("plugin:io.tlaloc.plugin:strictLowering=false"),
+        )
+
+        val control = lenient("UNUSED_VARIABLE")
+        assertEquals(0, control.exitCode, control.render())
+        val warn = control.messages.singleOrNull {
+            it.severity == CompilerMessageSeverity.WARNING && "kept original call" in it.message
+        } ?: error("another name leaves the warning in place; got:\n${control.render()}")
+        assertEquals(4, warn.location?.line, "the warning points at the call's line")
+
+        val silenced = lenient("IR_LOWERING_REFUSED_WARNING")
+        assertEquals(0, silenced.exitCode, silenced.render())
+        assertTrue(
+            silenced.messages.none { "kept original call" in it.message },
+            "@Suppress(\"IR_LOWERING_REFUSED_WARNING\") silences it; got:\n${silenced.render()}",
+        )
+    }
+
+    @Test
+    fun `dumpGradSource output is INFO so a working grad still compiles under -Werror`() {
+        val result = compile(
+            mapOf("stub.kt" to SCALAR_STUB, "Main.kt" to workingGrad),
+            options = arrayOf("plugin:io.tlaloc.plugin:dumpGradSource=true"),
+            werror = true,
+        )
+        assertEquals(0, result.exitCode, "the dump must not fail a -Werror build:\n${result.render()}")
+        val dump = result.messages.singleOrNull { "Tlaloc grad source for" in it.message }
+            ?: error("expected the grad source dump; got:\n${result.render()}")
+        assertEquals(CompilerMessageSeverity.INFO, dump.severity)
+        assertTrue(
+            result.messages.none {
+                "Tlaloc" in it.message && it.severity != CompilerMessageSeverity.INFO
+            },
+            "nothing but INFO from Tlaloc:\n${result.render()}",
+        )
+    }
+
     // ---------------- R3: unexpected exceptions ----------------
 
     private val workingGrad = """

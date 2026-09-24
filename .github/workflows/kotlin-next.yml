@@ -69,6 +69,10 @@
 # version in a LATER feature release (2.5.0-Beta1 at the time) instead of
 # Central's <latest>. Run by hand, probe 1 fails on 2.5.0-Beta1 with one error:
 # `IrPluginContext.messageCollector` no longer exists.
+#
+# §0.4.533 — the IR phase reports through `IrPluginContext.diagnosticReporter`
+# instead, so probe 1 compiles against 2.5.0-Beta1 (run by hand). Probe 3 is
+# unchanged: the guard still refuses 2.5, by design.
 name: kotlin-next
 
 on:

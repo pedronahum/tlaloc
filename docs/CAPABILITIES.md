@@ -13,10 +13,10 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **2,648** automated tests: 2,526 that `./gradlew test` runs, and 122
+The suite has **2,651** automated tests: 2,529 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). The
-2,526 were counted in a clean-room `./gradlew test --rerun-tasks` with 0 failures.
+2,529 were counted in a clean-room `./gradlew test --rerun-tasks` with 0 failures.
 On the GB10 workstation where they were counted, 93 of them skip by name: 88 MLIR
 round trips that need `stablehlo-translate` or `sdy-opt`, and 5 TPU smoke tests. This is
 the one place the documentation states the count.
@@ -128,4 +128,4 @@ lists where else the suite has run.
 | aarch64 Linux CI (`ubuntu-24.04-arm`) | ✅ | Same workflow, green at `d0ca85b`. The only aarch64 evidence from a machine other than the GB10 |
 | arm64 macOS CI (`macos-15`) | ✅ | Same workflow, green at `d0ca85b`. The MLIR round trips self-skip, because `stablehlo-translate`, `sdy-opt` and `iree-compile` are not installed |
 | JDK 21 CI lane | ✅ | `build.yml`, job `library-jdk21`, green at `d0ca85b` |
-| Next-Kotlin CI lane | ✅ (probe) | `.github/workflows/kotlin-next.yml` probes the newest Kotlin on Maven Central in a later feature release than the catalog's — 2.5.0-Beta1 while the catalog is 2.4.20. It runs with `continue-on-error`, so its checkmark is green by construction; read its step outcomes. Run locally, `-PtlalocKotlinVersion=2.5.0-Beta1` fails to compile the plugin with one error: `IrPluginContext.messageCollector` no longer exists |
+| Next-Kotlin CI lane | ✅ (probe) | `.github/workflows/kotlin-next.yml` probes the newest Kotlin on Maven Central in a later feature release than the catalog's — 2.5.0-Beta1 while the catalog is 2.4.20. It runs with `continue-on-error`, so its checkmark is green by construction; read its step outcomes. Run locally, `-PtlalocKotlinVersion=2.5.0-Beta1` compiles the plugin; its tests then stop at the version guard, which refuses 2.5 by design. With the guard bypassed in a local experiment, every plugin test except the guard's own passes under 2.5.0-Beta1 |

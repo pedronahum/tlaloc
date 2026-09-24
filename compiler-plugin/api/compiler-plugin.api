@@ -211,9 +211,8 @@ public final class io/tlaloc/plugin/TlalocIrGenerationExtension : org/jetbrains/
 	public static final field SIMPLIFY_ENABLED_PROPERTY Ljava/lang/String;
 	public static final field SOI_ENABLED_PROPERTY Ljava/lang/String;
 	public static final field SOI_SIZE_LIMIT_PROPERTY Ljava/lang/String;
-	public fun <init> ()V
-	public fun <init> (ZLjava/lang/String;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;)V
-	public synthetic fun <init> (ZLjava/lang/String;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (ZLjava/lang/String;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;Lorg/jetbrains/kotlin/config/CompilerConfiguration;)V
+	public synthetic fun <init> (ZLjava/lang/String;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;Lorg/jetbrains/kotlin/config/CompilerConfiguration;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun generate (Lorg/jetbrains/kotlin/ir/declarations/IrModuleFragment;Lorg/jetbrains/kotlin/backend/common/extensions/IrPluginContext;)V
 	public fun getPlatformIntrinsicExtension (Lorg/jetbrains/kotlin/backend/common/LoweringContext;)Lorg/jetbrains/kotlin/backend/common/extensions/IrIntrinsicExtension;
 	public fun getShouldAlsoBeAppliedInKaptStubGenerationMode ()Z
