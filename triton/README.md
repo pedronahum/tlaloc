@@ -29,6 +29,12 @@ an instance group names gets its own PJRT client.
 | ✅ | GPU 0 selected by ordinal; a GPU the machine does not have is refused by name | GB10, `verify.sh` |
 | 🧪 | Instances on GPUs other than 0, one PJRT client per GPU | Not run: the GB10 has one GPU |
 
+How the backend fits with the Kotlin export and the other two ways to serve
+an artifact is in [docs/SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md).
+[examples/triton-llm](../examples/triton-llm/) exports Qwen3-0.6B (or TinyLlama,
+or Muse Glimmer), serves it with this backend and streams a chat answer, in
+one script.
+
 This directory is not a Gradle module and is not published to Maven.
 
 ```

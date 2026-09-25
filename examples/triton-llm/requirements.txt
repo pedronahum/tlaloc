@@ -1,0 +1,5 @@
+# The chat client. No torch, no transformers.
+tritonclient[grpc]
+tokenizers
+jinja2
+numpy

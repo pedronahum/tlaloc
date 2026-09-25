@@ -1,6 +1,6 @@
 # Tlaloc examples
 
-Ten standalone programs. Each directory here is its **own Gradle build** — its own
+Eleven standalone programs. Each directory here is its **own Gradle build** — its own
 `settings.gradle.kts`, its own `build.gradle.kts` — and each resolves Tlaloc from
 **mavenLocal**, as `io.github.pedronahum:tlaloc-core:0.1.0-alpha02` and friends, exactly the way
 your project would. None is a module of the repo build, none uses `includeBuild`,
@@ -20,7 +20,7 @@ instead of showing one.
 | **JDK 25 to build** | every example sets `jvmToolchain(25)`, and it must: Kotlin loads the Tlaloc K2 plugin into the compiler's own JVM and that plugin is Java 25 bytecode |
 | **JDK 21 to run** | The library modules are Java 21 bytecode. `quickstart` sets `jvmTarget = JVM_21` and has a `runOnJdk21` task that runs its synthesized gradient on a real JDK 21 (see the repo's `scripts/jdk21-smoke.sh`). PJRT/CUDA *execution* still needs 25 |
 | **Publish first** | `./gradlew publishToMavenLocal -x test` at the repo root, once, and again after you change Tlaloc itself |
-| **Nothing else** | no GPU, no driver, no Python, no checkpoint — for six of the ten |
+| **Nothing else** | no GPU, no driver, no Python, no checkpoint — for six of the eleven |
 
 ```bash
 ./gradlew publishToMavenLocal -x test  # once
@@ -76,6 +76,7 @@ e: Tlaloc named-index mismatch: contract operands share no named axis:
 | [`mnist/`](mnist/) | The real MNIST — 60,000 digits, downloaded and parsed — at **93.66 %** test accuracy, trained by a captured gradient. Act `[4]` prints test digits as ASCII next to the model's verdict. | CUDA *(self-skips to a slower host lane)* · downloads 11 MB once |
 | [`gpu-training/`](gpu-training/) | A network learns a disc on the Blackwell: 600 Adam steps in 2.0 s, **98.0 %** held out, the decision boundary drawn next to the ground truth — then the model is **saved to one safetensors file and reloaded**, and everything after that line is computed by the model off the disk. | CUDA *(self-skips)* |
 | [`gpu-inference/`](gpu-inference/) | Kotlin compiles a real TinyLlama-1.1B into a directory and **exits**; a stock `python3` with no jax, no torch and no numpy loads it and answers `' Paris.'` | CUDA + a PJRT plugin *(self-skips; falls back to a toy graph with no checkpoint)* |
+| [`triton-llm/`](triton-llm/) | Kotlin exports Qwen3-0.6B (or TinyLlama, or the 30B Muse Glimmer text decoder) as a **Triton model repository**; Triton serves it through `libtriton_tlaloc.so`, and a small chat client streams the answer token by token: 20.5 ms a token on the GB10. | Docker, CUDA, the Triton image, a PJRT plugin, the checkpoint *(self-skips by name)* |
 | [`named-indices/`](named-indices/) | Axis **names** in the Kotlin type, so a transposed weight is an overload-resolution failure in Kotlin's own type checker — no plugin involved. | nothing |
 
 ---
@@ -114,7 +115,9 @@ which makes them the check that the marker actually refuses somebody. Nothing in
    result rather than take it on trust.
 5. **[`gpu-inference/`](gpu-inference/)** — what you ship: a directory, and a
    process with nothing installed in it.
-6. **[`internals/`](internals/)** — the structural ideas underneath all of it.
+6. **[`triton-llm/`](triton-llm/)** — the same directory behind a production
+   inference server, answering a chat question.
+7. **[`internals/`](internals/)** — the structural ideas underneath all of it.
 
 ---
 
@@ -141,6 +144,16 @@ Run end to end on 2026-09-22 on the GB10 DGX Spark, aarch64, CUDA driver
 | `internals/four-worlds shapeError` | **failed, as designed** | `Argument type mismatch: actual type is 'BufferHandle<DTensor<Rank1<Sym>, F32>, Mesh0>', but 'BufferHandle<DTensor<Rank2<Sym, Sym>, F32>, Mesh0>' was expected` |
 | `internals/layer3` | ran | `flash_attn_v3` for GB10/H100, `tpu_pallas_flash_attention` for TPU v6e, `nki_flash_attention` for Trainium2, no custom call for generic CPU |
 | `internals/tpu` | device half **self-skipped** | host half computed its whole reference, then named the four paths it searched for a TPU plugin, exit `0` |
+
+`triton-llm` was added on 2026-09-25 and ran on the same machine that day,
+exit `0` for each model: Qwen3-0.6B answered the default question in 45
+tokens at a median 20.5 ms a token and "What is the capital of France? Answer
+in one word." with `Paris` (the ids transformers produces for that prompt);
+TinyLlama-1.1B answered in 76 tokens at 26.5 ms; the Muse Glimmer 30B text
+decoder reasoned in its own channel, then answered, 97 tokens at 252 ms. With
+Docker, the GPU, the image, the plugin, the checkpoint or the client packages
+taken away one at a time, it printed a `SKIP:` line naming the missing thing
+and exited `0`.
 
 Two examples are deliberately not bit-reproducible and say so in their own
 READMEs: the GPU lanes of `mnist` and `gpu-training` (XLA autotunes its GEMMs, so

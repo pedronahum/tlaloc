@@ -13,6 +13,21 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **`examples/triton-llm`.** A standalone example: its Gradle build exports a
+  HuggingFace checkpoint (Qwen3-0.6B by default, TinyLlama-1.1B-Chat or the
+  Muse Glimmer 30B text decoder) as a Triton model repository with
+  `HfServingExport` and `TritonModelRepository`; `run.sh` starts Triton with
+  `libtriton_tlaloc.so`, and `chat.py` renders the question with the model's
+  chat template, tokenizes it with `tokenizers` (no torch) and streams the
+  answer token by token through the sequence batcher. It skips by name, with
+  exit status 0, without Docker, a GPU, the Triton image, the PJRT plugin, the
+  checkpoint or the client packages. On the GB10, Qwen3-0.6B decodes at about
+  20 ms a token.
+- **`docs/SERVING_ARCHITECTURE.md`.** How serving works: the Kotlin export
+  from a checkpoint to DXIR, StableHLO and a serving artifact, and the three
+  ways to serve it (framework-free Python, the vLLM platform plugin, Triton),
+  with what runs in which process, where memory lives and what has run on
+  which hardware.
 - **Muse Glimmer (text).** `HfModelFamily.MuseGlimmer` reads
   `MuseGlimmerForConditionalGeneration` checkpoints: the decoder config under
   `text_config`, tensors under `model.language_model.`, the vision encoder's

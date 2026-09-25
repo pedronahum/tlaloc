@@ -15,6 +15,8 @@ PJRT-CUDA and produces the **same token ids HuggingFace transformers produces**:
 
 Not yet run: `vllm serve`'s HTTP layer.
 
+How the pieces fit together (export, artifact, and the three servers: this
+runtime, vLLM and Triton) is in [SERVING_ARCHITECTURE.md](SERVING_ARCHITECTURE.md).
 The design and the decisions behind all of this are in
 [INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md). This file is the
 commands.

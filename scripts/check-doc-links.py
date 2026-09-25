@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 USER_FACING = re.compile(
     r"^(README|CHANGELOG|CONTRIBUTING|SECURITY)\.md$"
     r"|^docs/(GETTING_STARTED|COMPATIBILITY|CAPABILITIES|READABLE_REVERSE|RELEASING"
-    r"|SERVING_RUNBOOK|vendoring)\.md$"
+    r"|SERVING_RUNBOOK|SERVING_ARCHITECTURE|vendoring)\.md$"
     r"|^docs/papers/README\.md$"
     r"|^examples/.*README\.md$"
     r"|^\.github/.*\.md$"

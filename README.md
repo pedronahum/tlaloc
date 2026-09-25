@@ -198,7 +198,10 @@ about 245 ms a token. Its greedy ids equal those of HuggingFace transformers run
 with the same arithmetic (bf16 weights, f32 activations), 32 of 32, and those of
 transformers in bfloat16 up to the one token where the two transformers runs
 differ from each other.
-→ [triton/](triton/README.md)
+[`examples/triton-llm`](examples/triton-llm/) runs it in one script: export,
+serve, and a chat client that streams the answer.
+→ [triton/](triton/README.md) · how the pieces fit:
+[SERVING_ARCHITECTURE.md](docs/SERVING_ARCHITECTURE.md)
 
 ---
 
@@ -265,10 +268,10 @@ Full walkthrough and the five plugin options:
 
 ## Examples
 
-Ten standalone projects under [`examples/`](examples/), each with its own Gradle
+Eleven standalone projects under [`examples/`](examples/), each with its own Gradle
 build resolving Tlaloc from `mavenLocal`. Delete the rest of the repo and they
 still run. Six need nothing but a JDK; the others name what they are missing and
-exit `0`. The seven below are the user-facing ones.
+exit `0`. The eight below are the user-facing ones.
 
 | | | Needs |
 |---|---|---|
@@ -279,6 +282,7 @@ exit `0`. The seven below are the user-facing ones.
 | [`mnist/`](examples/mnist/) | the real MNIST at 93.66 %, test digits as ASCII | CUDA · 11 MB |
 | [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on a Blackwell, 98.0 % held out | CUDA |
 | [`gpu-inference/`](examples/gpu-inference/) | Kotlin compiles TinyLlama; a bare `python3` answers `' Paris.'` | CUDA |
+| [`triton-llm/`](examples/triton-llm/) | Kotlin exports Qwen3-0.6B as a Triton model; a chat client streams the answer | CUDA · Docker · Triton |
 
 [`examples/README.md`](examples/README.md) has the reading order, the three
 internals projects, and verbatim output from the last full run.
@@ -362,6 +366,7 @@ Row by row, with what pins each one: [CAPABILITIES.md](docs/CAPABILITIES.md).
 | [CAPABILITIES.md](docs/CAPABILITIES.md) | The capability matrix and what certifies each row |
 | [COMPATIBILITY.md](docs/COMPATIBILITY.md) · [CHANGELOG.md](CHANGELOG.md) | What alpha promises, what may break, what changed |
 | [READABLE_REVERSE.md](docs/READABLE_REVERSE.md) | Generated gradient source, beside its input |
+| [SERVING_ARCHITECTURE.md](docs/SERVING_ARCHITECTURE.md) | How serving works: Kotlin export, the artifact, and the three ways to serve it (Python, vLLM, Triton) |
 | **API reference** | `./gradlew apiDocs` → `build/docs/api/index.html` (not hosted) |
 
 Design documents for the IR, the emitter, the serving path, KPTX, TPU bring-up and
