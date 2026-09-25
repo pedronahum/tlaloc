@@ -67,7 +67,7 @@ reader (`backend/test/stablehlo_text_test.cc`) before it links the backend.
   request that asks for only one output;
 - `buckets` at both compiled lengths, and a third length that the backend
   refuses;
-- six model configurations the backend must refuse at load, each by the
+- seven model configurations the backend must refuse at load, each by the
   expected message, followed by a reload of the good configuration;
 - that the server is still live at the end.
 
@@ -112,7 +112,7 @@ the first `input` is the first argument, the first `output` the first result.
 
 | Parameter | Required | Meaning |
 |---|---|---|
-| `artifact` | yes | StableHLO text file(s), relative to the model version directory (`<model>/<version>/`). A comma-separated list declares shape buckets: each file is compiled at load, and a request runs on the file whose input shapes it matches exactly. |
+| `artifact` | yes | StableHLO text file(s) inside the model version directory (`<model>/<version>/`), named relative to it; an absolute path or a `..` component is refused. A comma-separated list declares shape buckets: each file is compiled at load, and a request runs on the file whose input shapes it matches exactly. |
 | `entry` | no | The function to serve. Default: `main` if the file has one, otherwise the first `func.func` in the file. |
 | `pjrt_plugin_path` | no | PJRT plugin `.so` for this model. Overrides the backend setting below. |
 
@@ -182,6 +182,11 @@ defaults.
   to the host, and outputs Triton places in GPU memory are copied there from
   the host; `verify.sh` does not exercise these two paths. There is no
   zero-copy path yet.
+- A model that fails to load stays in the repository index as
+  `UNAVAILABLE`. With Triton's default `--strict-readiness=true` the server
+  then answers `/v2/health/ready` with 400 until that model loads, while
+  `/v2/health/live` and the other models keep serving. Pass
+  `--strict-readiness=false` if readiness should track only the server.
 - No sequence batching, no optional inputs, no string tensors, no decoupled
   (streaming) responses.
 - The serving artifact directories written by `:maestro:exportServingArtifact`

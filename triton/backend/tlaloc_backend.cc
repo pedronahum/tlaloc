@@ -364,6 +364,18 @@ ModelState::Load(const BackendState& backend)
           Where() + "artifact '" + item + "' is an absolute path; artifacts are named "
           "relative to the model version directory " + version_dir);
     }
+    {
+      std::stringstream parts(item);
+      std::string part;
+      while (std::getline(parts, part, '/')) {
+        if (part == "..") {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              Where() + "artifact '" + item + "' leaves the model version directory " +
+                  version_dir + "; artifacts must be files inside it");
+        }
+      }
+    }
     const std::string path = JoinPath({version_dir, item});
     std::ifstream in(path, std::ios::binary);
     if (!in) {
