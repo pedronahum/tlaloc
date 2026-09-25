@@ -390,8 +390,9 @@ what it costs today, printed by the example rather than hidden by it.
     engine      CtypesEngine on cuda
     MISMATCH    you asked for 'tpu' and the plugin opened 'cuda'. The plugin .so, not the flag, chose the device.
   ```
-* **Prefill as one call.** The prompt runs as N decode steps: the ragged
-  chunked-prefill form of `PAGED_ATTENTION` is an open performance deferral.
+* **Prefill as one call in this driver.** The prompt runs as N decode steps.
+  The artifact carries prefill entries, and the Triton backend's sequence mode
+  runs a prompt with one call (`triton/README.md`); this driver does not.
 * **Sampling.** Greedy argmax only, host-side, in the driver.
 * **bf16 weight tables.** The writer refuses a non-f32 staged slot by name;
   halving the artifact needs the graph itself to be bf16.

@@ -175,8 +175,8 @@ public final class io/tlaloc/maestro/WorkflowKt {
 public final class io/tlaloc/maestro/serving/HfLlamaServingExport {
 	public static final field DEFAULT_NUM_BLOCKS I
 	public static final field INSTANCE Lio/tlaloc/maestro/serving/HfLlamaServingExport;
-	public final fun export (Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;)Lio/tlaloc/maestro/serving/ServingManifest;
-	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/HfLlamaServingExport;Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun export (Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;Z)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/HfLlamaServingExport;Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ZILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
 }
 
 public final class io/tlaloc/maestro/serving/ReferenceDecodeGraph {
@@ -297,6 +297,7 @@ public final class io/tlaloc/maestro/serving/ServingManifest {
 	public static final field Companion Lio/tlaloc/maestro/serving/ServingManifest$Companion;
 	public static final field FILE_NAME Ljava/lang/String;
 	public static final field SCHEMA_VERSION Ljava/lang/String;
+	public static final field SCHEMA_VERSION_1 Ljava/lang/String;
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Ljava/util/List;Ljava/lang/String;)V
 	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Ljava/util/List;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Ljava/lang/String;
@@ -324,6 +325,7 @@ public final class io/tlaloc/maestro/serving/ServingManifest {
 
 public final class io/tlaloc/maestro/serving/ServingManifest$Companion {
 	public final fun fromJson (Ljava/lang/String;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun getREADABLE_VERSIONS ()Ljava/util/List;
 }
 
 public final class io/tlaloc/maestro/serving/ServingModelShape {
@@ -446,8 +448,35 @@ public final class io/tlaloc/maestro/serving/ServingWeightsPointer$Companion {
 public final class io/tlaloc/maestro/serving/TritonModelRepository {
 	public static final field BACKEND Ljava/lang/String;
 	public static final field INSTANCE Lio/tlaloc/maestro/serving/TritonModelRepository;
+	public static final field LOGITS Ljava/lang/String;
+	public static final field TOKENS Ljava/lang/String;
 	public static final field VERSION Ljava/lang/String;
-	public final fun config (Lio/tlaloc/maestro/serving/ServingManifest;Ljava/lang/String;)Ljava/lang/String;
-	public final fun write (Ljava/nio/file/Path;Ljava/nio/file/Path;Ljava/lang/String;)Ljava/nio/file/Path;
+	public final fun config (Lio/tlaloc/maestro/serving/ServingManifest;Ljava/lang/String;Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;)Ljava/lang/String;
+	public static synthetic fun config$default (Lio/tlaloc/maestro/serving/TritonModelRepository;Lio/tlaloc/maestro/serving/ServingManifest;Ljava/lang/String;Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;ILjava/lang/Object;)Ljava/lang/String;
+	public final fun write (Ljava/nio/file/Path;Ljava/nio/file/Path;Ljava/lang/String;Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;)Ljava/nio/file/Path;
+	public static synthetic fun write$default (Lio/tlaloc/maestro/serving/TritonModelRepository;Ljava/nio/file/Path;Ljava/nio/file/Path;Ljava/lang/String;Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;ILjava/lang/Object;)Ljava/nio/file/Path;
+}
+
+public final class io/tlaloc/maestro/serving/TritonModelRepository$KvMode : java/lang/Enum {
+	public static final field CLIENT Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;
+	public static final field SEQUENCE Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;
+	public static fun values ()[Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;
+}
+
+public final class io/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions {
+	public fun <init> ()V
+	public fun <init> (JJ)V
+	public synthetic fun <init> (JJILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()J
+	public final fun component2 ()J
+	public final fun copy (JJ)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;JJILjava/lang/Object;)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getMaxQueueDelayMicros ()J
+	public final fun getMaxSequenceIdleMicros ()J
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 

@@ -1,7 +1,9 @@
 package io.tlaloc.maestro.serving
 
 import io.tlaloc.ir.DxirFunction
+import io.tlaloc.ir.inference.DecodeBucket
 import io.tlaloc.ir.inference.DecodeBucketPolicy
+import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.DecodeGraphSpec
 import io.tlaloc.ir.inference.HfLlamaCheckpoint
 import io.tlaloc.ir.inference.HfLlamaConfig
@@ -52,6 +54,12 @@ object HfLlamaServingExport {
     /**
      * Build the decode ladder for [ckpt] under [config] and write it to [dir].
      *
+     * With [prefill] (the default) the artifact also gets one prefill entry
+     * per context bucket, at batch 1: a chunk of `context` tokens that writes
+     * their KV and returns the last token's logits in one call. A server
+     * prefills a prompt of up to `context` tokens with one call instead of one
+     * decode step per token.
+     *
      * @param config usually `ckpt.config`, or a `copy(numLayers = n)` of it.
      */
     fun export(
@@ -61,9 +69,14 @@ object HfLlamaServingExport {
         policy: DecodeBucketPolicy,
         numBlocks: Int = DEFAULT_NUM_BLOCKS,
         modelName: String = ckpt.dir.fileName.toString(),
+        prefill: Boolean = true,
     ): ServingManifest {
         val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = policy.blockSize)
-        val specs = policy.allBuckets.map { HfLlamaDecodeGraph.spec(config, model, it) }
+        val decodeSpecs = policy.allBuckets.map { HfLlamaDecodeGraph.spec(config, model, it) }
+        val prefillSpecs = if (!prefill) emptyList() else policy.contextLadder.map { c ->
+            HfLlamaDecodeGraph.spec(config, model, DecodeBucket(1, c), DecodeGraphKind.PREFILL)
+        }
+        val specs = decodeSpecs + prefillSpecs
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
             HfLlamaDecodeGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
         }

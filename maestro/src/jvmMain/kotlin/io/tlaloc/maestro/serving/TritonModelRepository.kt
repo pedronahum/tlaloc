@@ -1,5 +1,6 @@
 package io.tlaloc.maestro.serving
 
+import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.DecodeSlotRole
 import java.io.IOException
 import java.nio.file.Files
@@ -17,7 +18,26 @@ import java.nio.file.StandardCopyOption
  *   <repository>/<model>/1/tlaloc-serving.json, bodies/, programs/, weights/
  * ```
  *
- * The version directory `1/` holds the artifact's files unchanged. The
+ * The version directory `1/` holds the artifact's files unchanged.
+ *
+ * ## Sequence mode (the default for an artifact with KV pools)
+ *
+ * The generated model uses Triton's sequence batcher (oldest strategy) and
+ * the backend's sequence mode: `config.pbtxt` names the manifest
+ * (`serving_manifest`) and declares one input, `TOKENS` (INT32 `[-1]`), one
+ * output, `LOGITS` (FP32 `[vocab]`), and the START, END and CORRID control
+ * inputs. A client sends a sequence's token ids with a correlation ID; the
+ * backend allocates the sequence's KV pages on START, frees them on END (or
+ * when the sequence has been idle longer than `max_sequence_idle_microseconds`),
+ * runs a request of several tokens through the smallest prefill entry that
+ * fits and a one-token request through a decode entry together with the
+ * other sequences' steps in the same batch, and answers with the last
+ * token's logits. `max_batch_size` is the artifact's largest decode batch.
+ * See [SequenceOptions] for the knobs.
+ *
+ * ## Client mode
+ *
+ * With [KvMode.CLIENT] (and always for an artifact without KV pools) the
  * `config.pbtxt` maps each slot of the manifest by its role:
  *
  * - `TOKEN_IDS`, `POSITIONS`, `BLOCK_TABLES`, `SEQ_LENS` and `SLOT_MAPPING`
@@ -49,6 +69,42 @@ object TritonModelRepository {
 
     private val MODEL_NAME = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]*")
 
+    /** How the generated model manages an artifact's KV pools. */
+    enum class KvMode {
+        /** The backend keeps each sequence's pages, keyed by correlation ID. */
+        SEQUENCE,
+
+        /** The client names pages and slots in every request. */
+        CLIENT,
+    }
+
+    /**
+     * Sequence-batcher settings of a [KvMode.SEQUENCE] model.
+     *
+     * @param maxSequenceIdleMicros how long a sequence may go without a request
+     *   before Triton ends it and the backend frees its pages.
+     * @param maxQueueDelayMicros how long the batcher may hold a sequence's
+     *   request to batch it with other sequences' steps. It is added to every
+     *   step of a lone sequence, so keep it small.
+     */
+    data class SequenceOptions(
+        val maxSequenceIdleMicros: Long = 60_000_000,
+        val maxQueueDelayMicros: Long = 1_000,
+    ) {
+        init {
+            require(maxSequenceIdleMicros >= 1 && maxQueueDelayMicros >= 0) {
+                "TritonModelRepository.SequenceOptions: maxSequenceIdleMicros must be >= 1 and " +
+                    "maxQueueDelayMicros >= 0, got $maxSequenceIdleMicros and $maxQueueDelayMicros"
+            }
+        }
+    }
+
+    /** The token-ids input of a [KvMode.SEQUENCE] model. */
+    const val TOKENS: String = "TOKENS"
+
+    /** The logits output of a [KvMode.SEQUENCE] model. */
+    const val LOGITS: String = "LOGITS"
+
     private val REQUEST_INPUT_ROLES = setOf(
         DecodeSlotRole.TOKEN_IDS, DecodeSlotRole.POSITIONS, DecodeSlotRole.BLOCK_TABLES,
         DecodeSlotRole.SEQ_LENS, DecodeSlotRole.SLOT_MAPPING,
@@ -63,7 +119,12 @@ object TritonModelRepository {
      * functions, a slot dtype Triton cannot carry, a `KV_POOL_OUT` without a
      * donation pair, and a `WEIGHT` slot the weight table does not name.
      */
-    fun config(manifest: ServingManifest, modelName: String): String {
+    fun config(
+        manifest: ServingManifest,
+        modelName: String,
+        kv: KvMode = KvMode.SEQUENCE,
+        options: SequenceOptions = SequenceOptions(),
+    ): String {
         require(MODEL_NAME.matches(modelName)) {
             "TritonModelRepository: '$modelName' is not a usable Triton model name; use letters, " +
                 "digits, '_', '.' and '-', not starting with '.' or '-'"
@@ -124,6 +185,7 @@ object TritonModelRepository {
             }
         }
         val hasState = first.inputs.any { it.role == DecodeSlotRole.KV_POOL_IN }
+        if (hasState && kv == KvMode.SEQUENCE) return sequenceConfig(manifest, modelName, options)
 
         fun tensor(index: Int, slot: ServingSlot, side: (ServingEntry) -> List<ServingSlot>): String {
             val dims = slot.type.dims.indices.map { d ->
@@ -182,6 +244,58 @@ object TritonModelRepository {
         }
     }
 
+    private fun sequenceConfig(manifest: ServingManifest, modelName: String, options: SequenceOptions): String {
+        val decode = manifest.entries.filter { it.kind == DecodeGraphKind.DECODE }
+        require(decode.isNotEmpty()) {
+            "TritonModelRepository: the artifact has no decode entry; a sequence-mode model " +
+                "generates tokens with one"
+        }
+        val maxBatch = decode.maxOf { it.batch }
+        val prefill = manifest.entries.filter { it.kind == DecodeGraphKind.PREFILL }
+        val vocab = manifest.model.vocabSize
+        return buildString {
+            append("# Written by Tlaloc from the serving artifact '${manifest.modelName}'\n")
+            append("# (${manifest.modelHash}), ${manifest.entries.size} ")
+            append(if (manifest.entries.size == 1) "entry" else "entries")
+            append(": ${manifest.entries.joinToString(", ") { it.entryId }}.\n")
+            append("# Sequence mode: a request sends one sequence's token ids (with its correlation\n")
+            append("# ID and START/END flags) and gets the last token's logits. The backend keeps each\n")
+            append("# sequence's KV pages; a request of several tokens runs as ")
+            append(if (prefill.isEmpty()) "decode steps" else "a prefill chunk")
+            append(",\n# one token as a decode step batched with other sequences' steps.\n")
+            append("name: \"$modelName\"\n")
+            append("backend: \"$BACKEND\"\n")
+            append("max_batch_size: $maxBatch\n")
+            append("input [\n")
+            append("  { name: \"$TOKENS\" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true }\n")
+            append("]\n")
+            append("output [\n")
+            append("  { name: \"$LOGITS\" data_type: TYPE_FP32 dims: [ $vocab ] }\n")
+            append("]\n")
+            append("sequence_batching {\n")
+            append("  max_sequence_idle_microseconds: ${options.maxSequenceIdleMicros}\n")
+            append("  control_input [\n")
+            append("    { name: \"START\" control [ { kind: CONTROL_SEQUENCE_START int32_false_true: [ 0, 1 ] } ] },\n")
+            append("    { name: \"END\" control [ { kind: CONTROL_SEQUENCE_END int32_false_true: [ 0, 1 ] } ] },\n")
+            append("    { name: \"CORRID\" control [ { kind: CONTROL_SEQUENCE_CORRID data_type: TYPE_UINT64 } ] }\n")
+            append("  ]\n")
+            append("  oldest {\n")
+            // Every live sequence holds at least one page, and page 0 is the
+            // padding page, so no more than numBlocks - 1 can be live at once.
+            append("    max_candidate_sequences: ${maxOf(1, manifest.model.numBlocks - 1)}\n")
+            append("    preferred_batch_size: [ $maxBatch ]\n")
+            append("    max_queue_delay_microseconds: ${options.maxQueueDelayMicros}\n")
+            append("  }\n")
+            append("}\n")
+            append("instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]\n")
+            parameter("serving_manifest", ServingManifest.FILE_NAME)
+            // Read by clients, not by the backend.
+            parameter("kv_block_size", manifest.model.blockSize.toString())
+            parameter("kv_num_blocks", manifest.model.numBlocks.toString())
+            parameter("max_context", decode.maxOf { it.context }.toString())
+        }
+    }
+
     /**
      * Write [artifactDir] (a serving artifact directory) into [repositoryDir]
      * as the Triton model [modelName], and return the model directory.
@@ -191,14 +305,20 @@ object TritonModelRepository {
      * real files, so it can be mounted into a container on its own. Files of a
      * previous write with the same names are replaced.
      */
-    fun write(artifactDir: Path, repositoryDir: Path, modelName: String): Path {
+    fun write(
+        artifactDir: Path,
+        repositoryDir: Path,
+        modelName: String,
+        kv: KvMode = KvMode.SEQUENCE,
+        options: SequenceOptions = SequenceOptions(),
+    ): Path {
         val manifestFile = artifactDir.resolve(ServingManifest.FILE_NAME)
         require(Files.isRegularFile(manifestFile)) {
             "TritonModelRepository: $artifactDir is not a serving artifact (no " +
                 "${ServingManifest.FILE_NAME})"
         }
         val manifest = ServingManifest.fromJson(Files.readString(manifestFile))
-        val config = config(manifest, modelName)
+        val config = config(manifest, modelName, kv, options)
 
         val modelDir = repositoryDir.resolve(modelName)
         val versionDir = modelDir.resolve(VERSION)

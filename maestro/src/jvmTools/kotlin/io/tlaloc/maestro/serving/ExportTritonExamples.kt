@@ -33,8 +33,10 @@ import java.nio.file.Path
  *   for length 8. The model serves both files, one per shape.
  * - `reference_decode`: the reference decode graph's serving artifact (one
  *   attention layer over a paged KV cache, six compiled batch/context
- *   entries), written by [TritonModelRepository.write]. Its `config.pbtxt` is
- *   generated from the manifest rather than written by hand.
+ *   entries), written by [TritonModelRepository.write] in client mode. Its
+ *   `config.pbtxt` is generated from the manifest rather than written by hand.
+ * - `reference_sequence`: the same artifact in sequence mode (the backend
+ *   keeps each sequence's KV pages by correlation ID).
  *
  * The reference files hold the DXIR interpreter's results for the same graphs
  * that were emitted, so served values are compared against Tlaloc's own
@@ -99,8 +101,15 @@ fun main(args: Array<String>) {
     val artifact = Files.createTempDirectory("tlaloc-reference-decode")
     try {
         ReferenceDecodeGraph.exportTo(artifact)
-        val model = TritonModelRepository.write(artifact, repo, "reference_decode")
+        val model = TritonModelRepository.write(
+            artifact, repo, "reference_decode", TritonModelRepository.KvMode.CLIENT,
+        )
         println("  $model")
+        // The same artifact in sequence mode: the backend keeps the pages.
+        val sequence = TritonModelRepository.write(
+            artifact, repo, "reference_sequence", TritonModelRepository.KvMode.SEQUENCE,
+        )
+        println("  $sequence")
     } finally {
         artifact.toFile().deleteRecursively()
     }

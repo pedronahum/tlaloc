@@ -24,15 +24,14 @@ import kotlin.math.sqrt
 //
 // SCOPE, stated up front so nothing here implies more than it does:
 //
-//   * DECODE ONLY — [DecodeGraphKind.DECODE], one token per sequence.
-//     [OpKind.PAGED_ATTENTION]'s query is `[numSeqs, numHeads, headDim]` by
-//     design (§0.4.465), and the ragged `[numTokens, ...]` chunked-prefill
-//     form with its `queryStartLoc` operand and intra-chunk causal mask is
-//     that slice's NAMED DEFERRAL, still open. A prefill of N tokens is
-//     therefore run here as N single-token steps with `seqLens` growing — the
-//     same thing §0.4.470's runner lane already does, and arithmetically the
-//     same answer, at N kernel launches instead of one. It is a PERFORMANCE
-//     deferral, not a correctness one, and the parity lane exercises it.
+//   * DECODE AND PREFILL. Decode runs one token per sequence. Prefill runs a
+//     chunk of T tokens per sequence in one call by treating every token as
+//     its own attention row: the chunk's K/V are written to the pool first,
+//     and row i then attends over the sequence's pages with a causal length of
+//     positions[i] + 1. That is the same arithmetic the decode loop does, row
+//     for row, with no new op kind. The chunk is right-aligned (padding rows
+//     first, slot -1), so the last real token is always row T - 1 and the
+//     graph returns that row's logits.
 //   * FLOAT32 THROUGHOUT. A bf16 checkpoint is decoded to f32 at ingestion.
 //     What that costs and what it buys is in [HfLlamaStagedWeights].
 //   * NO SAMPLING, NO BIAS, NO ROPE SCALING. The first is H1c's decision
@@ -121,8 +120,16 @@ object HfLlamaDecodeGraph {
         add(LlamaWeightRole.LmHead)
     }
 
-    /** The full decode spec for [config] at a pool geometry and a bucket. */
-    fun spec(config: HfLlamaConfig, model: DecodeModelShape, bucket: DecodeBucket): DecodeGraphSpec {
+    /**
+     * The full spec for [config] at a pool geometry and a bucket: a decode
+     * step by default, or a prefill chunk of `bucket.maxContext` tokens.
+     */
+    fun spec(
+        config: HfLlamaConfig,
+        model: DecodeModelShape,
+        bucket: DecodeBucket,
+        kind: DecodeGraphKind = DecodeGraphKind.DECODE,
+    ): DecodeGraphSpec {
         require(model.numLayers == config.numLayers && model.hiddenSize == config.hiddenSize) {
             "HfLlamaDecodeGraph.spec: model shape $model does not describe this config " +
                 "(layers=${config.numLayers}, hidden=${config.hiddenSize})"
@@ -130,7 +137,7 @@ object HfLlamaDecodeGraph {
         return DecodeGraphSpec(
             model = model,
             bucket = bucket,
-            kind = DecodeGraphKind.DECODE,
+            kind = kind,
             weightSlots = weightSlots(config),
         )
     }
@@ -184,7 +191,38 @@ object HfLlamaDecodeGraph {
     // --------------------------------------------------------------- build
 
     /**
-     * Build the decode graph for [spec] over [config].
+     * Build the graph for [spec] over [config]: a decode step when
+     * `spec.kind` is [DecodeGraphKind.DECODE], a prefill chunk when it is
+     * [DecodeGraphKind.PREFILL].
+     *
+     * ## Prefill
+     *
+     * A prefill chunk is `T = spec.tokensPerSeq` tokens per sequence. The
+     * graph flattens the batch and token axes into `B * T` token rows and runs
+     * every per-token op (embedding, norms, projections, RoPE, SwiGLU) on the
+     * rows exactly as a decode step runs them on its sequences. Attention is
+     * the decode step's own [OpKind.PAGED_ATTENTION], with one query row per
+     * token:
+     *
+     * - both [OpKind.KV_CACHE_WRITE]s of a layer run before its attention, so
+     *   every token of the chunk is in the pool when any row reads it;
+     * - row `i` reads its sequence's block table (the `blockTables` row,
+     *   broadcast over the token axis) with a context length of
+     *   `positions[i] + 1`, which is the causal mask: a token sees itself and
+     *   everything before it, and nothing written after it.
+     *
+     * So each row computes what the decode loop computes at that position.
+     * The prefill graph does not read `seqLens`; the operand stays in the
+     * signature so that decode and prefill entries share one signature.
+     *
+     * The chunk is RIGHT-ALIGNED: padding rows come first
+     * ([DecodePadding.PADDING_SLOT] -1, so their K/V writes are dropped;
+     * position 0; any in-vocab token), then the real tokens, so the last real
+     * token is always row `T - 1`. The graph applies the final norm and the
+     * head to that row only and returns `[B, 1, vocab]` logits: what a caller
+     * samples the next token from, without moving `T` rows of logits to the
+     * host. A chunk may start at any position (`positions` need not start at
+     * 0), which is how a prompt longer than one chunk is prefilled in pieces.
      *
      * A REDUCED slice — the first N layers of a real checkpoint — is not a
      * mode of this function: it is this same function over
@@ -200,11 +238,6 @@ object HfLlamaDecodeGraph {
         config: HfLlamaConfig,
         entryName: String = ENTRY_POINT,
     ): DxirFunction {
-        require(spec.kind == DecodeGraphKind.DECODE) {
-            "HfLlamaDecodeGraph.build: ${spec.kind} is not implemented — PAGED_ATTENTION's " +
-                "query is one token per sequence, and the ragged chunked-prefill " +
-                "form is not implemented. Run a prefill as N decode steps"
-        }
         require(spec.weightSlots == weightSlots(config)) {
             "HfLlamaDecodeGraph.build: the spec's weight signature is not this config's — " +
                 "build the spec with HfLlamaDecodeGraph.spec(), which derives it"
@@ -215,6 +248,10 @@ object HfLlamaDecodeGraph {
                 "${config.numLayers}"
         }
         val b = spec.bucket.batch
+        val t = spec.tokensPerSeq
+        // Token rows: every per-token op runs on B * T rows.
+        val r = b * t
+        val maxBlocks = spec.maxBlocksPerSeq
         val d = config.hiddenSize
         val hd = config.headDim
         val half = hd / 2
@@ -224,10 +261,10 @@ object HfLlamaDecodeGraph {
         val scale = 1.0f / sqrt(hd.toFloat())
         val ropePositions = config.maxPositionEmbeddings
         val (cosTable, sinTable) = ropeTables(config, ropePositions)
+        val idx = spec.positionsType.dtype
 
-        val tH = DxirType(F32, listOf(b, d))
-        val tRow = DxirType(F32, listOf(b, 1))
-        val tFf = DxirType(F32, listOf(b, config.intermediateSize))
+        val tH = DxirType(F32, listOf(r, d))
+        val tFf = DxirType(F32, listOf(r, config.intermediateSize))
 
         val fn = DxirBuilder.function(entryName) {
             val tokenIds = param("tokenIds", spec.tokenIdsType)
@@ -242,34 +279,37 @@ object HfLlamaDecodeGraph {
             fun weight(i: Int): DxirNode = w[i]
 
             // ---- helpers ------------------------------------------------
-            val epsConst = const(FloatArray(b) { eps }, tRow)
+            val epsConsts = HashMap<Int, DxirNode>()
 
-            /** HF `LlamaRMSNorm`: `x * rsqrt(mean(x^2) + eps) * gain`. */
-            fun rmsNorm(x: DxirNode, gain: DxirNode): DxirNode {
-                val sq = op(OpKind.MUL, listOf(x, x), tH)
+            /** HF `LlamaRMSNorm` over [rows] rows: `x * rsqrt(mean(x^2) + eps) * gain`. */
+            fun rmsNorm(x: DxirNode, gain: DxirNode, rows: Int): DxirNode {
+                val tX = DxirType(F32, listOf(rows, d))
+                val tRow = DxirType(F32, listOf(rows, 1))
+                val epsConst = epsConsts.getOrPut(rows) { const(FloatArray(rows) { eps }, tRow) }
+                val sq = op(OpKind.MUL, listOf(x, x), tX)
                 val mean = op(
                     OpKind.MEAN, listOf(sq), tRow,
                     attrs = mapOf("reduction_dims" to listOf(1)),
                 )
                 val rsq = op(OpKind.RSQRT, listOf(op(OpKind.ADD, listOf(mean, epsConst), tRow)), tRow)
-                val scaled = op(OpKind.MUL, listOf(x, rsq), tH)
+                val scaled = op(OpKind.MUL, listOf(x, rsq), tX)
                 val gainRow = op(OpKind.RESHAPE, listOf(gain), DxirType(F32, listOf(1, d)))
                 val gainB = op(
-                    OpKind.BROADCAST, listOf(gainRow), tH,
+                    OpKind.BROADCAST, listOf(gainRow), tX,
                     attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
                 )
-                return op(OpKind.MUL, listOf(scaled, gainB), tH)
+                return op(OpKind.MUL, listOf(scaled, gainB), tX)
             }
 
             /** HF `rotate_half`: `cat(-x[..., d/2:], x[..., :d/2])`. */
             fun rotateHalf(x: DxirNode, heads: Int): DxirNode {
-                val t3 = DxirType(F32, listOf(b, heads, hd))
-                val tHalf = DxirType(F32, listOf(b, heads, half))
+                val t3 = DxirType(F32, listOf(r, heads, hd))
+                val tHalf = DxirType(F32, listOf(r, heads, half))
                 val x2 = op(
                     OpKind.SLICE, listOf(x), tHalf,
                     attrs = mapOf(
                         "start_indices" to listOf(0, 0, half),
-                        "limit_indices" to listOf(b, heads, hd),
+                        "limit_indices" to listOf(r, heads, hd),
                         "strides" to listOf(1, 1, 1),
                     ),
                 )
@@ -277,7 +317,7 @@ object HfLlamaDecodeGraph {
                     OpKind.SLICE, listOf(x), tHalf,
                     attrs = mapOf(
                         "start_indices" to listOf(0, 0, 0),
-                        "limit_indices" to listOf(b, heads, half),
+                        "limit_indices" to listOf(r, heads, half),
                         "strides" to listOf(1, 1, 1),
                     ),
                 )
@@ -289,24 +329,21 @@ object HfLlamaDecodeGraph {
             }
 
             // ---- the RoPE angles for THIS step's positions ---------------
-            // `positions` is [B, 1] I32 and is an OPERAND, never derived from
+            // `positions` is [B, T] I32 and is an OPERAND, never derived from
             // seqLens (H1c's decision — a padded row has no correct position
             // to derive, so the convention STATES one). Gathering cos/sin out
             // of a constant table by that operand is an EMBEDDING: the same
             // gather the token lookup is, over a different table.
-            val posFlat = op(
-                OpKind.RESHAPE, listOf(positions),
-                DxirType(spec.positionsType.dtype, listOf(b)),
-            )
+            val posFlat = op(OpKind.RESHAPE, listOf(positions), DxirType(idx, listOf(r)))
             val cosT = const(cosTable, DxirType(F32, listOf(ropePositions, hd)))
             val sinT = const(sinTable, DxirType(F32, listOf(ropePositions, hd)))
-            val cosRow = op(OpKind.EMBEDDING, listOf(cosT, posFlat), DxirType(F32, listOf(b, hd)))
-            val sinRow = op(OpKind.EMBEDDING, listOf(sinT, posFlat), DxirType(F32, listOf(b, hd)))
+            val cosRow = op(OpKind.EMBEDDING, listOf(cosT, posFlat), DxirType(F32, listOf(r, hd)))
+            val sinRow = op(OpKind.EMBEDDING, listOf(sinT, posFlat), DxirType(F32, listOf(r, hd)))
 
             fun bcastToHeads(row: DxirNode, heads: Int): DxirNode {
-                val unsq = op(OpKind.RESHAPE, listOf(row), DxirType(F32, listOf(b, 1, hd)))
+                val unsq = op(OpKind.RESHAPE, listOf(row), DxirType(F32, listOf(r, 1, hd)))
                 return op(
-                    OpKind.BROADCAST, listOf(unsq), DxirType(F32, listOf(b, heads, hd)),
+                    OpKind.BROADCAST, listOf(unsq), DxirType(F32, listOf(r, heads, hd)),
                     attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)),
                 )
             }
@@ -317,7 +354,7 @@ object HfLlamaDecodeGraph {
 
             /** `x*cos + rotate_half(x)*sin`, HF's `apply_rotary_pos_emb`. */
             fun rope(x: DxirNode, heads: Int, c: DxirNode, s: DxirNode): DxirNode {
-                val t3 = DxirType(F32, listOf(b, heads, hd))
+                val t3 = DxirType(F32, listOf(r, heads, hd))
                 return op(
                     OpKind.ADD,
                     listOf(
@@ -328,10 +365,40 @@ object HfLlamaDecodeGraph {
                 )
             }
 
+            // ---- attention rows -------------------------------------------
+            // Decode: one row per sequence, the operands as given. Prefill:
+            // one row per token, reading its sequence's block table with a
+            // causal length of position + 1.
+            val rowTables: DxirNode
+            val rowLens: DxirNode
+            if (spec.kind == DecodeGraphKind.DECODE) {
+                rowTables = blockTables
+                rowLens = seqLens
+            } else {
+                val tables3 = op(
+                    OpKind.RESHAPE, listOf(blockTables),
+                    DxirType(spec.blockTablesType.dtype, listOf(b, 1, maxBlocks)),
+                )
+                val perToken = op(
+                    OpKind.BROADCAST, listOf(tables3),
+                    DxirType(spec.blockTablesType.dtype, listOf(b, t, maxBlocks)),
+                    attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)),
+                )
+                rowTables = op(
+                    OpKind.RESHAPE, listOf(perToken),
+                    DxirType(spec.blockTablesType.dtype, listOf(r, maxBlocks)),
+                )
+                rowLens = op(
+                    OpKind.ADD,
+                    listOf(posFlat, const(1, DxirType(idx, listOf(r)))),
+                    DxirType(spec.seqLensType.dtype, listOf(r)),
+                )
+            }
+
             // ---- embed ---------------------------------------------------
             val embed3 = op(
                 OpKind.EMBEDDING, listOf(weight(0), tokenIds),
-                DxirType(F32, listOf(b, 1, d)),
+                DxirType(F32, listOf(b, t, d)),
             )
             var h = op(OpKind.RESHAPE, listOf(embed3), tH)
 
@@ -339,15 +406,15 @@ object HfLlamaDecodeGraph {
             val poolOuts = ArrayList<DxirNode>(2 * m.numLayers)
             for (l in 0 until m.numLayers) {
                 val base = 1 + l * PARTS_PER_LAYER
-                val hn = rmsNorm(h, weight(base))
+                val hn = rmsNorm(h, weight(base), r)
 
-                val q = op(OpKind.MATMUL, listOf(hn, weight(base + 1)), DxirType(F32, listOf(b, qOut)))
-                val k = op(OpKind.MATMUL, listOf(hn, weight(base + 2)), DxirType(F32, listOf(b, kvOut)))
-                val v = op(OpKind.MATMUL, listOf(hn, weight(base + 3)), DxirType(F32, listOf(b, kvOut)))
+                val q = op(OpKind.MATMUL, listOf(hn, weight(base + 1)), DxirType(F32, listOf(r, qOut)))
+                val k = op(OpKind.MATMUL, listOf(hn, weight(base + 2)), DxirType(F32, listOf(r, kvOut)))
+                val v = op(OpKind.MATMUL, listOf(hn, weight(base + 3)), DxirType(F32, listOf(r, kvOut)))
 
-                val q3 = op(OpKind.RESHAPE, listOf(q), DxirType(F32, listOf(b, config.numHeads, hd)))
-                val k3 = op(OpKind.RESHAPE, listOf(k), DxirType(F32, listOf(b, config.numKvHeads, hd)))
-                val v3 = op(OpKind.RESHAPE, listOf(v), DxirType(F32, listOf(b, config.numKvHeads, hd)))
+                val q3 = op(OpKind.RESHAPE, listOf(q), DxirType(F32, listOf(r, config.numHeads, hd)))
+                val k3 = op(OpKind.RESHAPE, listOf(k), DxirType(F32, listOf(r, config.numKvHeads, hd)))
+                val v3 = op(OpKind.RESHAPE, listOf(v), DxirType(F32, listOf(r, config.numKvHeads, hd)))
 
                 val qRot = rope(q3, config.numHeads, cosQ, sinQ)
                 val kRot = rope(k3, config.numKvHeads, cosK, sinK)
@@ -360,15 +427,15 @@ object HfLlamaDecodeGraph {
 
                 val att = op(
                     OpKind.PAGED_ATTENTION,
-                    listOf(qRot, kc, vc, blockTables, seqLens),
-                    DxirType(F32, listOf(b, config.numHeads, hd)),
+                    listOf(qRot, kc, vc, rowTables, rowLens),
+                    DxirType(F32, listOf(r, config.numHeads, hd)),
                     mapOf("scale" to scale.toDouble()),
                 )
-                val attFlat = op(OpKind.RESHAPE, listOf(att), DxirType(F32, listOf(b, qOut)))
+                val attFlat = op(OpKind.RESHAPE, listOf(att), DxirType(F32, listOf(r, qOut)))
                 val attProj = op(OpKind.MATMUL, listOf(attFlat, weight(base + 4)), tH)
                 val hAttn = op(OpKind.ADD, listOf(h, attProj), tH)
 
-                val hn2 = rmsNorm(hAttn, weight(base + 5))
+                val hn2 = rmsNorm(hAttn, weight(base + 5), r)
                 val gate = op(OpKind.MATMUL, listOf(hn2, weight(base + 6)), tFf)
                 val up = op(OpKind.MATMUL, listOf(hn2, weight(base + 7)), tFf)
                 val swiglu = op(
@@ -380,9 +447,25 @@ object HfLlamaDecodeGraph {
                 h = op(OpKind.ADD, listOf(hAttn, down), tH)
             }
 
+            // ---- the last row of each sequence ---------------------------
+            val last = if (t == 1) {
+                h
+            } else {
+                val h3 = op(OpKind.RESHAPE, listOf(h), DxirType(F32, listOf(b, t, d)))
+                val lastRow = op(
+                    OpKind.SLICE, listOf(h3), DxirType(F32, listOf(b, 1, d)),
+                    attrs = mapOf(
+                        "start_indices" to listOf(0, t - 1, 0),
+                        "limit_indices" to listOf(b, t, d),
+                        "strides" to listOf(1, 1, 1),
+                    ),
+                )
+                op(OpKind.RESHAPE, listOf(lastRow), DxirType(F32, listOf(b, d)))
+            }
+
             // ---- final norm + head ---------------------------------------
             val finalNormIdx = 1 + m.numLayers * PARTS_PER_LAYER
-            val hf = rmsNorm(h, weight(finalNormIdx))
+            val hf = rmsNorm(last, weight(finalNormIdx), b)
             val logits2 = op(
                 OpKind.MATMUL, listOf(hf, weight(finalNormIdx + 1)),
                 DxirType(F32, listOf(b, config.vocabSize)),

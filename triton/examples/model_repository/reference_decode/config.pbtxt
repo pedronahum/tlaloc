@@ -20,3 +20,5 @@ parameters: { key: "artifact" value: { string_value: "bodies/917676809d69dc0f565
 parameters: { key: "entry" value: { string_value: "main" } }
 parameters: { key: "arguments" value: { string_value: "input:tokenIds, input:positions, input:blockTables, input:seqLens, input:slotMapping, state:keyCache0, state:valueCache0" } }
 parameters: { key: "results" value: { string_value: "output:logits, state:keyCache0, state:valueCache0" } }
+parameters: { key: "kv_block_size" value: { string_value: "2" } }
+parameters: { key: "kv_num_blocks" value: { string_value: "6" } }

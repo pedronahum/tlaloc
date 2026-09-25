@@ -24,6 +24,26 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   staged weights at model load and keeps the KV pools on the device between
   requests. TinyLlama-1.1B served this way produces the same six greedy token ids
   as HuggingFace transformers for "The capital of France is".
+- **Prefill entries.** `HfLlamaDecodeGraph` builds a prefill graph: a chunk of
+  tokens per sequence in one call, each token an attention row with a causal
+  context of its position + 1, right-aligned, returning the last token's logits.
+  In the reference interpreter its logits and KV pools equal the decode loop's
+  bit for bit (a random-weight model and two real TinyLlama layers).
+  `HfLlamaServingExport` writes one prefill entry per context bucket
+  (`-Pprefill=false` to leave them out).
+- **Serving manifest `tlaloc-serving-v2`.** Adds prefill entries; decode entries
+  are unchanged and `tlaloc-serving-v1` artifacts are still read. The prefill
+  logits type is `[batch, 1, vocab]` (the last position), as decode's.
+- **Sequence mode in the Triton backend.** A model whose `config.pbtxt` names a
+  serving manifest uses Triton's sequence batcher (oldest strategy): the backend
+  keeps each sequence's KV pages by correlation ID, allocates them as the
+  sequence grows, frees them on END or after the idle timeout, refuses a START by
+  name when the pool is full, runs a prompt through a prefill entry, and runs the
+  decode steps of several sequences as one batched call. Clients send token ids
+  only. `TritonModelRepository` writes this mode by default for an artifact with
+  KV pools (`-PkvMode=client` for the previous form). On the GB10, TinyLlama's
+  6-token prefill takes about 26 ms and four concurrent sequences decode about
+  twice as many tokens per second as one.
 
 ## [0.1.0-alpha02] — 2026-09-24
 

@@ -112,11 +112,12 @@ class HfLlamaDecodeGraphTest {
     }
 
     @Test
-    fun prefillIsRefusedByNameWithTheDeferralNamed() {
+    fun aPrefillGraphMatchesItsContract() {
         val s = spec().copy(kind = DecodeGraphKind.PREFILL)
-        val e = assertFailsWith<IllegalArgumentException> { HfLlamaDecodeGraph.build(s, config) }
-        assertTrue(e.message!!.contains("PAGED_ATTENTION"), e.message!!)
-        assertTrue(e.message!!.contains("N decode steps"), e.message!!)
+        val fn = HfLlamaDecodeGraph.build(s, config)
+        s.verifySignature(fn, "test")
+        assertEquals(listOf(3, 4), fn.params[0].type.dims, "tokenIds [B, T]")
+        assertEquals(listOf(3, 1, config.vocabSize), fn.returns[0].type.dims, "last-position logits")
     }
 
     @Test

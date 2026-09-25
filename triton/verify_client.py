@@ -20,6 +20,11 @@ Expected values:
                 decode steps with the KV pools held by the backend, against
                 the DXIR interpreter (examples/reference/reference_decode.json),
                 within 1e-3 of the largest logit and with the same argmax.
+  reference_sequence
+                the same artifact in sequence mode: the backend keeps each
+                sequence's pages by correlation ID. The reference steps' first
+                sequence sent one token per request and all at once, two more
+                sequences, and requests the backend must refuse by name.
 
 --perturb changes one expected GRAD value; the run must then fail. That is
 the negative control: it shows a wrong answer is caught.
@@ -160,6 +165,108 @@ def reference_decode(kind, mod, url, np, steps):
           f"max |diff| {worst:.2e} (must exceed {10 * bound:.2e})")
     if not ok:
         FAILURES.append(f"{kind} reference_decode state dependence")
+
+
+def reference_sequence(kind, mod, url, np, steps):
+    """The reference decode artifact in sequence mode, against the same
+    interpreter steps: the first four steps are one sequence of tokens
+    3, 7, 1, 9; the fifth runs two new one-token sequences."""
+    print(f"{kind}  reference_sequence  {url}")
+    client = mod.InferenceServerClient(url=url)
+    base = 7000 if kind == "http" else 8000
+
+    def step(corrid, tokens, start=False, end=False):
+        arr = np.asarray(tokens, dtype=np.int32).reshape(1, -1)
+        inp = mod.InferInput("TOKENS", list(arr.shape), "INT32")
+        inp.set_data_from_numpy(arr)
+        res = client.infer("reference_sequence", [inp], sequence_id=corrid,
+                           sequence_start=start, sequence_end=end)
+        out = res.as_numpy("LOGITS")
+        return None if out is None else [float(x) for x in out.reshape(-1)]
+
+    want = [st["outputs"]["logits"]["data"] for st in steps[:4]]
+    tokens = [st["inputs"]["tokenIds"]["data"][0] for st in steps[:4]]
+    for i, t in enumerate(tokens):
+        got = step(base + 1, [t], start=i == 0, end=i == len(tokens) - 1)
+        close(f"{kind} reference_sequence token {i} vs interpreter step {i}", got, want[i])
+    got = step(base + 2, tokens, start=True, end=True)
+    close(f"{kind} reference_sequence 4 tokens in one request vs interpreter step 3", got, want[3])
+    v = len(want[0])
+    pair = steps[4]["outputs"]["logits"]["data"]
+    for r, t in enumerate(steps[4]["inputs"]["tokenIds"]["data"]):
+        got = step(base + 3 + r, [t], start=True, end=True)
+        close(f"{kind} reference_sequence new sequence of token {t} vs interpreter row {r}",
+              got, pair[r * v:(r + 1) * v])
+    expect_error(f"{kind} reference_sequence 5 tokens exceed the context",
+                 lambda: step(base + 5, [1, 2, 3, 4, 5], start=True),
+                 "the largest context this model was compiled for is 4")
+    expect_error(f"{kind} reference_sequence token outside the vocabulary",
+                 lambda: step(base + 6, [11], start=True), "outside the vocabulary [0, 11)")
+    expect_error(f"{kind} reference_sequence step without START",
+                 lambda: step(base + 7, [1]), "must specify the START flag")
+    step(base + 8, [3], start=True)
+    ended = step(base + 8, [], end=True)
+    ok = ended is None
+    print(f"  {'ok  ' if ok else 'FAIL'} {kind} reference_sequence a request with no tokens ends "
+          f"the sequence and returns no LOGITS")
+    if not ok:
+        FAILURES.append(f"{kind} reference_sequence empty END")
+    expect_error(f"{kind} reference_sequence step after END",
+                 lambda: step(base + 8, [1]), "must specify the START flag")
+    expect_error(f"{kind} reference_sequence a request with no tokens and no END",
+                 lambda: step(base + 9, [], start=True), "a request without tokens only ends a sequence")
+    # The refused STARTs leave sequences Triton still counts as live; ending
+    # them releases their batcher slots (the backend holds nothing for them).
+    for corrid in (base + 5, base + 6, base + 9):
+        step(corrid, [], end=True)
+
+
+def refusals_sequence(http):
+    """Sequence-mode configurations the backend must refuse at load, by name."""
+    print(f"refusals sequence mode  {http}")
+    with urllib.request.urlopen(f"http://{http}/v2/models/reference_sequence/config") as r:
+        good = json.load(r)
+
+    def variant(fn):
+        c = json.loads(json.dumps(good))
+        fn(c)
+        return c
+
+    def set_param(c, key, value):
+        c["parameters"][key] = {"string_value": value}
+
+    cases = [
+        ("no sequence_batching", variant(lambda c: c.pop("sequence_batching")),
+         "needs sequence_batching"),
+        ("direct strategy", variant(lambda c: (c["sequence_batching"].pop("oldest"),
+                                              c["sequence_batching"].update({"direct": {}}))),
+         "uses the direct strategy; use oldest"),
+        ("no CORRID control", variant(lambda c: c["sequence_batching"].update(
+            {"control_input": c["sequence_batching"]["control_input"][:2]})),
+         "missing: CORRID"),
+        ("max_batch_size 0", variant(lambda c: (c.update({"max_batch_size": 0}),
+                                               c["sequence_batching"]["oldest"].pop("preferred_batch_size"))),
+         "needs max_batch_size >= 1"),
+        ("serving_manifest with artifact", variant(lambda c: set_param(c, "artifact", "x.mlir")),
+         "cannot be combined with 'artifact'"),
+        ("manifest outside the version directory",
+         variant(lambda c: set_param(c, "serving_manifest", "../1/tlaloc-serving.json")),
+         "must be a file inside the model version directory"),
+        ("two inputs", variant(lambda c: c["input"].append(
+            {"name": "EXTRA", "data_type": "TYPE_INT32", "dims": [-1]})),
+         "declares exactly one input"),
+    ]
+    for label, config, needle in cases:
+        status, body = load(http, "reference_sequence", config)
+        ok = status != 200 and needle in body
+        print(f"  {'ok  ' if ok else 'FAIL'} refused: {label}: HTTP {status} {body.strip()[:200]}")
+        if not ok:
+            FAILURES.append(f"refusal: sequence {label}")
+    status, body = load(http, "reference_sequence")
+    ok = status == 200
+    print(f"  {'ok  ' if ok else 'FAIL'} reload reference_sequence from config.pbtxt: HTTP {status}")
+    if not ok:
+        FAILURES.append("reload reference_sequence")
 
 
 def load(http, name, config=None):
@@ -383,9 +490,12 @@ def main():
         steps[1]["outputs"]["logits"]["data"][0] += 1.0
     for kind, mod, url in (("http", httpclient, args.http), ("grpc", grpcclient, args.grpc)):
         reference_decode(kind, mod, url, np, steps)
+    for kind, mod, url in (("http", httpclient, args.http), ("grpc", grpcclient, args.grpc)):
+        reference_sequence(kind, mod, url, np, steps)
 
     buckets(args.http, np, httpclient)
     refusals(args.http)
+    refusals_sequence(args.http)
 
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed: {FAILURES}")

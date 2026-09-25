@@ -712,7 +712,8 @@ public final class io/tlaloc/ir/inference/HfLlamaDecodeGraph {
 	public final fun build (Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/HfLlamaConfig;Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
 	public static synthetic fun build$default (Lio/tlaloc/ir/inference/HfLlamaDecodeGraph;Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/HfLlamaConfig;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
 	public final fun ropeTables (Lio/tlaloc/ir/inference/HfLlamaConfig;I)Lkotlin/Pair;
-	public final fun spec (Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public final fun spec (Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public static synthetic fun spec$default (Lio/tlaloc/ir/inference/HfLlamaDecodeGraph;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
 	public final fun weightRoles (Lio/tlaloc/ir/inference/HfLlamaConfig;)Ljava/util/List;
 	public final fun weightSlots (Lio/tlaloc/ir/inference/HfLlamaConfig;)Ljava/util/List;
 }

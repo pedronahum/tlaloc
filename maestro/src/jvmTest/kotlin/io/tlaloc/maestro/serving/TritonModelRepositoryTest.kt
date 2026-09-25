@@ -3,6 +3,7 @@ package io.tlaloc.maestro.serving
 import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.DecodeSlotRole
 import io.tlaloc.maestro.TypeDescriptor
+import io.tlaloc.maestro.serving.TritonModelRepository.KvMode.CLIENT
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -50,14 +51,79 @@ class TritonModelRepositoryTest {
                 parameters: { key: "kv_num_blocks" value: { string_value: "6" } }
 
             """.trimIndent()
+            assertEquals(expected, TritonModelRepository.config(manifest, "reference_decode", CLIENT))
+        }
+    }
+
+    @Test
+    fun referenceDecodeSequenceConfigIsTheGoldenText() {
+        withReferenceArtifact { _, manifest ->
+            val expected = """
+                # Written by Tlaloc from the serving artifact 'tlaloc-reference-decode'
+                # (reference-decode-lcg-v1), 6 entries: decode_b1_c2, decode_b1_c4, decode_b2_c2, decode_b2_c4, decode_b4_c2, decode_b4_c4.
+                # Sequence mode: a request sends one sequence's token ids (with its correlation
+                # ID and START/END flags) and gets the last token's logits. The backend keeps each
+                # sequence's KV pages; a request of several tokens runs as decode steps,
+                # one token as a decode step batched with other sequences' steps.
+                name: "reference_decode"
+                backend: "tlaloc"
+                max_batch_size: 4
+                input [
+                  { name: "TOKENS" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true }
+                ]
+                output [
+                  { name: "LOGITS" data_type: TYPE_FP32 dims: [ 11 ] }
+                ]
+                sequence_batching {
+                  max_sequence_idle_microseconds: 60000000
+                  control_input [
+                    { name: "START" control [ { kind: CONTROL_SEQUENCE_START int32_false_true: [ 0, 1 ] } ] },
+                    { name: "END" control [ { kind: CONTROL_SEQUENCE_END int32_false_true: [ 0, 1 ] } ] },
+                    { name: "CORRID" control [ { kind: CONTROL_SEQUENCE_CORRID data_type: TYPE_UINT64 } ] }
+                  ]
+                  oldest {
+                    max_candidate_sequences: 5
+                    preferred_batch_size: [ 4 ]
+                    max_queue_delay_microseconds: 1000
+                  }
+                }
+                instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+                parameters: { key: "serving_manifest" value: { string_value: "tlaloc-serving.json" } }
+                parameters: { key: "kv_block_size" value: { string_value: "2" } }
+                parameters: { key: "kv_num_blocks" value: { string_value: "6" } }
+                parameters: { key: "max_context" value: { string_value: "4" } }
+
+            """.trimIndent()
+            // Sequence mode is the default for an artifact with KV pools.
             assertEquals(expected, TritonModelRepository.config(manifest, "reference_decode"))
+            val tuned = TritonModelRepository.config(
+                manifest, "reference_decode",
+                options = TritonModelRepository.SequenceOptions(maxSequenceIdleMicros = 5, maxQueueDelayMicros = 0),
+            )
+            assertTrue("max_sequence_idle_microseconds: 5\n" in tuned)
+            assertTrue("max_queue_delay_microseconds: 0\n" in tuned)
+        }
+    }
+
+    @Test
+    fun aSequenceModelIsWrittenWithTheWholeArtifact() {
+        withReferenceArtifact { artifact, manifest ->
+            val repo = Files.createTempDirectory("tlaloc-triton-seq-repo")
+            try {
+                val model = TritonModelRepository.write(artifact, repo, "reference_decode")
+                val config = Files.readString(model.resolve("config.pbtxt"))
+                assertTrue("sequence_batching {" in config && "key: \"artifact\"" !in config)
+                for (e in manifest.entries) assertTrue(Files.isRegularFile(model.resolve("1").resolve(e.bodyPath)))
+            } finally {
+                repo.toFile().deleteRecursively()
+            }
         }
     }
 
     @Test
     fun everyManifestSlotAppearsWithItsDtypeAndDims() {
         withReferenceArtifact { _, manifest ->
-            val config = TritonModelRepository.config(manifest, "reference_decode")
+            val config = TritonModelRepository.config(manifest, "reference_decode", CLIENT)
             val first = manifest.entries.first()
             for ((index, slot) in first.inputs.withIndex()) {
                 when (slot.role) {
@@ -108,7 +174,7 @@ class TritonModelRepositoryTest {
             extraInputs = listOf(ServingSlot("embedTokens", DecodeSlotRole.WEIGHT, TypeDescriptor("f32", listOf(11, 8)))),
             weights = ServingWeightsPointer(ServingWeightsPointer.STAGED_FORMAT, "weights", false, listOf(weight)),
         )
-        val config = TritonModelRepository.config(manifest, "tiny")
+        val config = TritonModelRepository.config(manifest, "tiny", CLIENT)
         assertEquals(
             "input:tokenIds, state:keyCache0, weight:weights/0000_embedTokens.bin",
             parameter(config, "arguments"),
@@ -128,11 +194,11 @@ class TritonModelRepositoryTest {
             extraInputs = listOf(ServingSlot("w", DecodeSlotRole.WEIGHT, TypeDescriptor("f32", listOf(2)))),
         )
         val e = assertFailsWith<IllegalArgumentException> {
-            TritonModelRepository.config(unnamedWeight, "tiny")
+            TritonModelRepository.config(unnamedWeight, "tiny", CLIENT)
         }
         assertTrue("WEIGHT slot 'w' is not in the manifest's weight table" in e.message!!)
         val unpaired = syntheticManifest(donationPairs = emptyList())
-        val u = assertFailsWith<IllegalArgumentException> { TritonModelRepository.config(unpaired, "tiny") }
+        val u = assertFailsWith<IllegalArgumentException> { TritonModelRepository.config(unpaired, "tiny", CLIENT) }
         assertTrue("has no donation pair" in u.message!!)
     }
 
@@ -141,10 +207,10 @@ class TritonModelRepositoryTest {
         withReferenceArtifact { artifact, manifest ->
             val repo = Files.createTempDirectory("tlaloc-triton-repo")
             try {
-                val model = TritonModelRepository.write(artifact, repo, "reference_decode")
+                val model = TritonModelRepository.write(artifact, repo, "reference_decode", CLIENT)
                 assertEquals(repo.resolve("reference_decode"), model)
                 val config = Files.readString(model.resolve("config.pbtxt"))
-                assertEquals(TritonModelRepository.config(manifest, "reference_decode"), config)
+                assertEquals(TritonModelRepository.config(manifest, "reference_decode", CLIENT), config)
                 val version = model.resolve("1")
                 assertTrue(Files.isRegularFile(version.resolve(ServingManifest.FILE_NAME)))
                 for (e in manifest.entries) {
@@ -155,7 +221,7 @@ class TritonModelRepositoryTest {
                     assertTrue(Files.isRegularFile(version.resolve(e.programPath)))
                 }
                 // Writing again replaces the files in place.
-                TritonModelRepository.write(artifact, repo, "reference_decode")
+                TritonModelRepository.write(artifact, repo, "reference_decode", CLIENT)
                 assertEquals(config, Files.readString(model.resolve("config.pbtxt")))
             } finally {
                 repo.toFile().deleteRecursively()

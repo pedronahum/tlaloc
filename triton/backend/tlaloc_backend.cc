@@ -9,6 +9,10 @@
 // preallocation) and destroyed when the last such model unloads. Each model
 // compiles its artifact(s) once at load; each artifact is one shape bucket,
 // and a request runs on the bucket whose input shapes it matches exactly.
+//
+// A model whose config names a serving manifest ("serving_manifest") runs in
+// sequence mode instead (sequence_mode.h): the sequence batcher routes each
+// sequence's requests by correlation ID and the backend keeps its KV pages.
 
 #include <chrono>
 #include <cstdlib>
@@ -27,6 +31,7 @@
 #endif
 
 #include "pjrt_runtime.h"
+#include "sequence_mode.h"
 #include "stablehlo_text.h"
 #include "triton/backend/backend_common.h"
 #include "triton/backend/backend_model.h"
@@ -270,6 +275,8 @@ class ModelState : public BackendModel {
   const std::vector<ResultPlan>& results() const { return results_; }
   const PjrtBuffer* weight(size_t arg) const { return weights_[arg].get(); }
   PjrtClient* client() const { return client_.get(); }
+  // Non-null for a sequence-mode model.
+  const SequenceModel* sequence() const { return sequence_.get(); }
 
  private:
   explicit ModelState(TRITONBACKEND_Model* model) : BackendModel(model) {}
@@ -296,6 +303,7 @@ class ModelState : public BackendModel {
   bool explicit_arguments_ = false;
   std::vector<Bucket> buckets_;
   std::vector<std::unique_ptr<PjrtBuffer>> weights_;  // one slot per argument
+  std::unique_ptr<SequenceModel> sequence_;
 };
 
 TRITONSERVER_Error*
@@ -698,23 +706,13 @@ ModelState::LoadWeights()
 TRITONSERVER_Error*
 ModelState::Load(const BackendState& backend)
 {
-  RETURN_IF_ERROR(ReadSpecs("input", &inputs_));
-  RETURN_IF_ERROR(ReadSpecs("output", &outputs_));
-
-  std::string artifact_list, entry, plugin_path;
+  std::string artifact_list, entry, plugin_path, manifest;
   RETURN_IF_ERROR(Parameter("artifact", &artifact_list));
   RETURN_IF_ERROR(Parameter("entry", &entry));
   RETURN_IF_ERROR(Parameter("pjrt_plugin_path", &plugin_path));
+  RETURN_IF_ERROR(Parameter("serving_manifest", &manifest));
   entry = Trim(entry);
-
-  if (Trim(artifact_list).empty()) {
-    return Err(
-        TRITONSERVER_ERROR_INVALID_ARG,
-        Where() + "config.pbtxt has no 'artifact' parameter. Add parameters { key: "
-        "\"artifact\" value: { string_value: \"model.mlir\" } } naming the StableHLO file, "
-        "relative to the model version directory");
-  }
-  RETURN_IF_ERROR(ParsePlan());
+  manifest = Trim(manifest);
 
   if (Trim(plugin_path).empty()) plugin_path = backend.plugin_path;
   if (Trim(plugin_path).empty()) plugin_path = EnvOr("TLALOC_PJRT_PLUGIN_PATH", "");
@@ -726,6 +724,38 @@ ModelState::Load(const BackendState& backend)
         "the backend config --backend-config=tlaloc,pjrt-plugin-path=<path>, or the "
         "environment variable TLALOC_PJRT_PLUGIN_PATH to a PJRT plugin .so");
   }
+
+  if (!manifest.empty()) {
+    std::string arguments, results;
+    RETURN_IF_ERROR(Parameter("arguments", &arguments));
+    RETURN_IF_ERROR(Parameter("results", &results));
+    if (!Trim(artifact_list).empty() || !entry.empty() || !Trim(arguments).empty() ||
+        !Trim(results).empty()) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          Where() + "the 'serving_manifest' parameter cannot be combined with 'artifact', "
+          "'entry', 'arguments' or 'results': the manifest names the entries and binds "
+          "their arguments");
+    }
+    auto acquire = [&](std::shared_ptr<PjrtClient>* out) -> TRITONSERVER_Error* {
+      RETURN_IF_ERROR(AcquireClient(plugin_path, backend.options, &client_));
+      *out = client_;
+      return nullptr;
+    };
+    return SequenceModel::Load(Name(), VersionDir(), manifest, ModelConfig(), acquire, &sequence_);
+  }
+
+  RETURN_IF_ERROR(ReadSpecs("input", &inputs_));
+  RETURN_IF_ERROR(ReadSpecs("output", &outputs_));
+
+  if (Trim(artifact_list).empty()) {
+    return Err(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        Where() + "config.pbtxt has no 'artifact' parameter. Add parameters { key: "
+        "\"artifact\" value: { string_value: \"model.mlir\" } } naming the StableHLO file, "
+        "relative to the model version directory");
+  }
+  RETURN_IF_ERROR(ParsePlan());
 
   // Parse every bucket before touching the GPU, so that a config mistake
   // costs no client.
@@ -823,6 +853,8 @@ class ModelInstanceState : public BackendModelInstance {
   ModelState* model_state_;
   // State buffers by name, on the device, replaced after every request.
   std::map<std::string, std::unique_ptr<PjrtBuffer>> state_;
+  // Sequence mode: per-sequence KV pages and the pools.
+  std::unique_ptr<SequenceInstance> sequence_;
 };
 
 TRITONSERVER_Error*
@@ -848,7 +880,13 @@ ModelInstanceState::Create(
         "instance '" + name + "': the tlaloc backend runs every instance on PJRT device 0; "
         "set instance_group gpus: [ 0 ] (or use KIND_CPU / KIND_MODEL)");
   }
-  TRITONSERVER_Error* err = (*state)->InitState();
+  TRITONSERVER_Error* err = nullptr;
+  if (model_state->sequence() != nullptr) {
+    err = SequenceInstance::Create(
+        model_state->sequence(), (*state)->Name(), instance, &(*state)->sequence_);
+  } else {
+    err = (*state)->InitState();
+  }
   if (err != nullptr) {
     delete *state;
     *state = nullptr;
@@ -1129,6 +1167,10 @@ ModelInstanceState::Run(
 void
 ModelInstanceState::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t count)
 {
+  if (sequence_ != nullptr) {
+    sequence_->ProcessRequests(requests, count);
+    return;
+  }
   const uint64_t exec_start = NowNs();
   uint64_t first_compute_start = 0, last_compute_end = 0, total_batch = 0;
   for (uint32_t r = 0; r < count; ++r) {

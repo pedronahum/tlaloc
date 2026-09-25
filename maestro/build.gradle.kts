@@ -183,7 +183,8 @@ tasks.register<JavaExec>("exportTritonExamples") {
  * for the `tlaloc` backend (triton/README.md).
  *
  *     ./gradlew :maestro:exportTritonModel -PartifactDir=/abs/artifact \
- *         -PoutDir=/abs/model_repository [-PmodelName=tinyllama]
+ *         -PoutDir=/abs/model_repository [-PmodelName=tinyllama] [-PkvMode=sequence|client] \
+ *         [-PmaxSequenceIdleMicros=60000000] [-PmaxQueueDelayMicros=1000]
  *
  * The artifact comes from [exportServingArtifact] or [exportLlamaServingArtifact].
  * Its files are hard-linked into `<outDir>/<modelName>/1/` when both are on one
@@ -207,7 +208,7 @@ tasks.register<JavaExec>("exportTritonModel") {
                 p("outDir").ifBlank {
                     throw GradleException("exportTritonModel needs -PoutDir=<a model repository>")
                 },
-                p("modelName"),
+                p("modelName"), p("kvMode"), p("maxSequenceIdleMicros"), p("maxQueueDelayMicros"),
             )
         },
     )
@@ -219,7 +220,8 @@ tasks.register<JavaExec>("exportTritonModel") {
  *
  *     ./gradlew :maestro:exportLlamaServingArtifact \
  *         -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
- *         -PoutDir=/tmp/tlaloc-llama-artifact [-PnumLayers=2]
+ *         -PoutDir=/tmp/tlaloc-llama-artifact [-PnumLayers=2] [-PmaxBatch=4] \
+ *         [-PmaxContext=64] [-PblockSize=16] [-PnumBlocks=64] [-Pprefill=false]
  *
  * Same classpath rule as [exportServingArtifact] and for the same reason.
  * The heap is raised because the export TRANSPOSES: §0.4.479's host-side
@@ -257,6 +259,7 @@ tasks.register<JavaExec>("exportLlamaServingArtifact") {
                     layout.buildDirectory.dir("llama-serving-artifact").get().asFile.absolutePath
                 },
                 p("numLayers"), p("maxBatch"), p("maxContext"), p("blockSize"), p("numBlocks"),
+                p("prefill"),
             )
         },
     )

@@ -102,7 +102,10 @@ from typing import Any, Sequence
 
 import tlaloc_pjrt as P
 
-SCHEMA_VERSION = "tlaloc-serving-v1"
+SCHEMA_VERSION = "tlaloc-serving-v2"
+# v1 has decode entries only; v2 adds prefill entries (a right-aligned chunk
+# of tokens that returns the last token's logits). Both are read.
+READABLE_SCHEMA_VERSIONS = ("tlaloc-serving-v1", SCHEMA_VERSION)
 
 # --- the wire-level padding convention (mirror of DecodePadding) --------
 PADDING_TOKEN_ID = 0
@@ -515,10 +518,10 @@ class ServingArtifact:
     def __init__(self, root: Path, manifest: dict, platform: str = "cuda",
                  engine: str | None = None, plugin_path: str | None = None):
         engine = engine or default_engine_for(platform)
-        if manifest.get("schemaVersion") != SCHEMA_VERSION:
+        if manifest.get("schemaVersion") not in READABLE_SCHEMA_VERSIONS:
             raise ValueError(
-                f"{root}: schemaVersion {manifest.get('schemaVersion')!r} is not "
-                f"{SCHEMA_VERSION!r}; refusing an artifact of unknown shape"
+                f"{root}: schemaVersion {manifest.get('schemaVersion')!r} is not one of "
+                f"{READABLE_SCHEMA_VERSIONS!r}; refusing an artifact of unknown shape"
             )
         if engine not in _ENGINES:
             raise ValueError(f"unknown engine {engine!r}; known: {sorted(_ENGINES)}")

@@ -1,0 +1,33 @@
+# Written by Tlaloc from the serving artifact 'tlaloc-reference-decode'
+# (reference-decode-lcg-v1), 6 entries: decode_b1_c2, decode_b1_c4, decode_b2_c2, decode_b2_c4, decode_b4_c2, decode_b4_c4.
+# Sequence mode: a request sends one sequence's token ids (with its correlation
+# ID and START/END flags) and gets the last token's logits. The backend keeps each
+# sequence's KV pages; a request of several tokens runs as decode steps,
+# one token as a decode step batched with other sequences' steps.
+name: "reference_sequence"
+backend: "tlaloc"
+max_batch_size: 4
+input [
+  { name: "TOKENS" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true }
+]
+output [
+  { name: "LOGITS" data_type: TYPE_FP32 dims: [ 11 ] }
+]
+sequence_batching {
+  max_sequence_idle_microseconds: 60000000
+  control_input [
+    { name: "START" control [ { kind: CONTROL_SEQUENCE_START int32_false_true: [ 0, 1 ] } ] },
+    { name: "END" control [ { kind: CONTROL_SEQUENCE_END int32_false_true: [ 0, 1 ] } ] },
+    { name: "CORRID" control [ { kind: CONTROL_SEQUENCE_CORRID data_type: TYPE_UINT64 } ] }
+  ]
+  oldest {
+    max_candidate_sequences: 5
+    preferred_batch_size: [ 4 ]
+    max_queue_delay_microseconds: 1000
+  }
+}
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "serving_manifest" value: { string_value: "tlaloc-serving.json" } }
+parameters: { key: "kv_block_size" value: { string_value: "2" } }
+parameters: { key: "kv_num_blocks" value: { string_value: "6" } }
+parameters: { key: "max_context" value: { string_value: "4" } }

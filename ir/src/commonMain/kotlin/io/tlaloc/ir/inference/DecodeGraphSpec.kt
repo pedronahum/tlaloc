@@ -38,13 +38,21 @@ import io.tlaloc.ir.recognizer.quant.KvQuantConfig
  *     4            slotMapping  [B * T]                                  I32
  *     5 .. 5+2L-1  kv pools     [numBlocks, blockSize, numKvHeads, headDim] × 2L
  *   outputs
- *     0            logits       [B, T, vocabSize]      (T == 1 for decode)
+ *     0            logits       [B, 1, vocabSize]      the last token of each sequence
  *     1 .. 2L      kv pools     the SAME shapes, updated
  * ```
  *
  * `T` is the token axis: **1 for decode**, the bucket's context width for
  * **prefill**. That is the whole difference — which is why this is one
  * contract with a [DecodeGraphKind] and not two.
+ *
+ * A prefill chunk is RIGHT-ALIGNED on the token axis: padding tokens first
+ * (slot -1, position 0), then the real tokens, so the last real token of
+ * every sequence is at `T - 1`, and the logits are that position's. A caller
+ * samples from them; the other positions' logits are never needed, so they
+ * are never computed or copied. The prefill graph derives each token's
+ * causal context length from its position (`position + 1`) and does not
+ * read `seqLens`, which stays in the signature so both kinds share one.
  *
  * Every shape is static per bucket. Nothing in the signature is derived from a
  * *value*: `seqLens` and `blockTables` are runtime tensors and the graph never
@@ -118,12 +126,8 @@ data class DecodeGraphSpec(
      * [HfLlamaDecodeGraph.weightSlots]) and is part of the contract, because a
      * loader binds by index.
      *
-     * NOT YET IN THE ARTIFACT. `ServingArtifactWriter` and `tlaloc_serve.py`
-     * assume the 5 + 2L signature; the manifest does not carry a weight table
-     * and the loader does not stage weights from the checkpoint. This field is
-     * exercised by the graph builder and the interpreter parity lane, and a
-     * spec with a non-empty [weightSlots] is refused by the exporter rather
-     * than written as a half-artifact.
+     * The serving artifact writes one file per slot, in this order, and
+     * names them in its manifest's weight table.
      */
     val weightSlots: List<DecodeSlot> = emptyList(),
 ) {
@@ -147,7 +151,8 @@ data class DecodeGraphSpec(
     val blockTablesType: DxirType = DxirType(I32, listOf(bucket.batch, maxBlocksPerSeq))
     val seqLensType: DxirType = DxirType(I32, listOf(bucket.batch))
     val slotMappingType: DxirType = DxirType(I32, listOf(totalTokens))
-    val logitsType: DxirType = DxirType(model.dtype, listOf(bucket.batch, tokensPerSeq, model.vocabSize))
+    /** `[B, 1, vocab]` for both kinds: the logits of each sequence's last token. */
+    val logitsType: DxirType = DxirType(model.dtype, listOf(bucket.batch, 1, model.vocabSize))
 
     /** The full input signature, in call order. */
     val inputs: List<DecodeSlot> = buildList {

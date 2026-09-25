@@ -7,21 +7,29 @@ runs the compiled executable on the GPU. Serving needs no JVM and no JAX:
 the backend loads the PJRT plugin `.so` itself. Clients use Triton's standard
 HTTP and gRPC (KServe v2) endpoints.
 
+A language model exported by Tlaloc is served in sequence mode: Triton's
+sequence batcher routes each sequence's requests by correlation ID, the
+backend keeps the sequence's KV pages on the device, a prompt runs as one
+prefill call, and the decode steps of several sequences run as one batch. A
+client sends token ids and gets the next token's logits back.
+
 This directory is not a Gradle module and is not published to Maven.
 
 ```
 triton/
-  backend/              the backend source (C++17)
+  backend/              the backend source (C++17); sequence_mode.{h,cc} is sequence mode
   third_party/          vendored upstream headers and sources (see docs/vendoring.md)
   examples/
-    model_repository/   four example models, emitted by Tlaloc
+    model_repository/   five example models, emitted by Tlaloc
     reference/          the DXIR interpreter's results for them
   build_backend.sh      builds the backend inside the Triton container
   fetch_pjrt_plugin.sh  downloads the PJRT CUDA plugin
   run_server.sh         starts tritonserver with the backend and a model repository
   verify.sh             end-to-end check: start, infer over HTTP and gRPC, compare, stop
   verify_client.py      the client half of verify.sh
-  generate_client.py    greedy decoding against a decode model (TinyLlama)
+  sequence_client.py    a client for a sequence-mode model (Python, tritonclient)
+  generate_client.py    greedy decoding from text against a sequence-mode model
+  sequence_checks.py    the TinyLlama sequence-mode checks verify.sh runs
 ```
 
 `backends/` (the built `.so`), `pjrt/` (the downloaded plugin) and `build/`
@@ -77,8 +85,18 @@ reader (`backend/test/stablehlo_text_test.cc`) before it links the backend.
   TF32, which is why this one is not bit for bit. A step sent on a page that
   no earlier request wrote must then disagree with the reference, which shows
   that the agreement depends on the carried state;
-- eleven model configurations the backend must refuse at load, each by the
-  expected message, followed by a reload of the good configuration;
+- `reference_sequence` over HTTP and gRPC: the same artifact in sequence mode.
+  The reference steps' first sequence sent one token per request, then all
+  four tokens in one request, and two more one-token sequences, each against
+  the interpreter within 1e-3; then requests the backend or Triton must
+  refuse by name (a prompt longer than the compiled context, a token outside
+  the vocabulary, a step without START, a step after END, an empty request
+  without END) and an empty END request that returns no logits;
+- eleven model configurations the backend must refuse at load, and seven
+  sequence-mode configurations (no `sequence_batching`, the direct strategy,
+  no CORRID control, `max_batch_size: 0`, `serving_manifest` combined with
+  `artifact`, a manifest outside the version directory, two inputs), each by
+  the expected message, each followed by a reload of the good configuration;
 - that the server is still live at the end.
 
 It then runs the client again with deliberately wrong expected values, and
@@ -86,16 +104,38 @@ that run must fail. It stops the container.
 
 Last, if the TinyLlama-1.1B checkpoint is in
 `~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0`
-(`TINYLLAMA_CHECKPOINT` overrides), `verify.sh` exports its decode artifact and
-writes it as the Triton model `tinyllama` under `triton/build/tinyllama/`,
-reusing that model on later runs (`TINYLLAMA_REEXPORT=1` exports again).
-Gradle runs only while no server is up. It then starts a server on that
-repository and greedy-decodes "The capital of France is" with
-`generate_client.py`. The six generated ids must equal HuggingFace
-transformers' ids for the same checkpoint, `[3681, 29889, 13, 13, 29906,
-29889]` (" Paris.\n\n2."). Without the checkpoint this step prints
-`SKIP tinyllama` and the run can still pass; `SKIP_TINYLLAMA=1` skips it on
-purpose.
+(`TINYLLAMA_CHECKPOINT` overrides), `verify.sh` exports its serving artifact
+(decode entries for batches 1, 2 and 4 and a prefill entry, all at context 64)
+and writes it as the sequence-mode Triton model `tinyllama` under
+`triton/build/tinyllama/`, with a 5 s sequence idle timeout. Later runs reuse
+that model (`TINYLLAMA_REEXPORT=1` exports again). Gradle runs only while no
+server is up. It then starts a server on that repository and:
+
+- greedy-decodes "The capital of France is" with `generate_client.py`. The six
+  generated ids must equal HuggingFace transformers' ids for the same
+  checkpoint, `[3681, 29889, 13, 13, 29906, 29889]` (" Paris.\n\n2.");
+- runs `sequence_checks.py`:
+  - prefill: the prompt in one request and the prompt one token per request
+    give the same argmax, and logits within 5e-3 of the largest (measured:
+    9e-3 to 1.3e-2 on logits of about 14; two different executables, TF32).
+    Greedy decoding reproduces HuggingFace's ids over HTTP and gRPC;
+  - concurrent: four sequences with different prompts, decoded from four
+    threads at once, each produce exactly the 12 ids they produce alone, and
+    the server's statistics show fewer executions than requests (the decode
+    steps were batched);
+  - END frees pages: 43 sequences of three pages each, one after the other,
+    on a pool that holds 21 at once, all run;
+  - exhaustion: with 21 sequences holding the whole pool, one more START is
+    refused with `KV page pool exhausted`, the server stays live, the refused
+    sequence has no state, and after the others end a new sequence decodes
+    the expected ids;
+  - idle: 21 sequences abandoned without END lose their pages after the idle
+    timeout; a new sequence then decodes correctly, the abandoned sequence's
+    next step is refused, and 21 new three-page sequences fit again;
+- runs `sequence_checks.py --perturb` (wrong expected ids), which must fail.
+
+Without the checkpoint this step prints `SKIP tinyllama` and the run can
+still pass; `SKIP_TINYLLAMA=1` skips it on purpose.
 
 A request with curl:
 
@@ -115,8 +155,9 @@ curl -s localhost:8000/v2/models/matmul_sumsq/infer \
 | `dtypes` | `x · x + x` for three dtypes | `X_F64` FP64 [4], `X_BF16` BF16 [4], `X_I32` INT32 [4] | `Y_F64`, `Y_BF16`, `Y_I32` |
 | `buckets` | `x · x + x`, compiled for length 4 and length 8 | `X` FP32 [-1] | `Y` FP32 [-1] |
 | `reference_decode` | one decode step of Tlaloc's reference decode graph (embedding, paged attention over a KV cache, LM head), six batch/context entries | `tokenIds`, `positions` INT32 [-1,1], `blockTables` INT32 [-1,-1], `seqLens`, `slotMapping` INT32 [-1] | `logits` FP32 [-1,1,11] |
+| `reference_sequence` | the `reference_decode` artifact in sequence mode | `TOKENS` INT32 [-1] (batch dim added, max batch 4), START/END/CORRID controls | `LOGITS` FP32 [11] |
 
-The `.mlir` files, the `reference_decode` model directory and the files in
+The `.mlir` files, the `reference_decode` and `reference_sequence` model directories and the files in
 `examples/reference/` are generated by Tlaloc. The gradient is Tlaloc's reverse-mode transform of the DXIR graph for
 `f`, not hand-written StableHLO. To regenerate them (JDK 25, from the
 repository root):
@@ -127,14 +168,14 @@ repository root):
 
 The source is `maestro/src/jvmTools/kotlin/io/tlaloc/maestro/serving/ExportTritonExamples.kt`.
 The `config.pbtxt` files of the first three models are written by hand;
-`reference_decode` is written whole from its serving artifact, as described in
-the next section.
+`reference_decode` and `reference_sequence` are written whole from their
+serving artifact, as described in the next section.
 
 ## Exporting a Triton model repository from Kotlin
 
 A Tlaloc serving artifact (the directory `:maestro:exportServingArtifact` and
 `:maestro:exportLlamaServingArtifact` write: a manifest, one StableHLO body
-per batch/context entry, and staged weight files) becomes a Triton model with
+per entry, and staged weight files) becomes a Triton model with
 `TritonModelRepository` in `:maestro`:
 
 ```kotlin
@@ -163,7 +204,20 @@ The artifact's files are hard-linked into the version directory when both are
 on one file system, and copied otherwise. They are real files either way, so
 the repository can be mounted into the container on its own.
 
-The generated `config.pbtxt` maps each slot of the manifest by its role:
+For an artifact with KV pools the model is written in sequence mode (next
+section). `TritonModelRepository.write(..., kv = KvMode.CLIENT)`, or
+`-PkvMode=client`, writes the client-managed form instead, in which the client
+names pages and slots in every request; `reference_decode` is written that
+way. `-PmaxSequenceIdleMicros` and `-PmaxQueueDelayMicros` set the sequence
+batcher's idle timeout (default 60 s) and batching delay (default 1 ms).
+
+The TinyLlama commands above export decode entries for batch 1 only; add
+`-PmaxBatch=4` to `exportLlamaServingArtifact` to let the backend batch up to
+four sequences' decode steps (three decode entries plus the prefill entry:
+four XLA compiles at load, about 15 s for TinyLlama).
+
+In client mode the generated `config.pbtxt` maps each slot of the manifest
+by its role:
 
 | Manifest slot | In Triton |
 |---|---|
@@ -180,18 +234,115 @@ backend never clears a page; attention reads only the first `seqLens`
 positions of a sequence, so a page that is reused is overwritten before it is
 read. The `kv_block_size` and `kv_num_blocks` parameters of the generated
 configuration give a client the page geometry; the backend ignores them.
-`generate_client.py` gives one sequence pages 1 to N (page 0 is the page
-padded rows use) and runs the prompt as single-token decode steps, as
-`examples/gpu-inference/serve.py` does.
 
-On the GB10, the 22-layer TinyLlama loads in 5.1 s: the XLA compile takes
-3.0 s, and uploading 201 weights (4196 MiB as f32) takes 2.0 s. The 44 KV
-pools (44 MiB) are then zeroed on the device. A decode
-step, sent over HTTP and answered with 32000 logits, then takes about 23 ms
-(median of 11 steps); the first step took 62 ms. For comparison, the Python
-driver in `docs/SERVING_RUNBOOK.md` takes 1.35 s per step, because it copies
-every KV pool to the host and back on every step. These are single
-measurements from `verify.sh`, not a benchmark.
+## Sequence mode
+
+A model whose `config.pbtxt` has the parameter `serving_manifest` (the
+manifest file in the version directory) runs in sequence mode. The manifest
+names every entry (body file, kind, batch and context bucket, signature with
+slot roles), the staged weights and the KV pool geometry; the backend reads it
+at load, checks each body's signature against it, compiles every entry and
+uploads the weights. `TritonModelRepository` writes this configuration:
+
+```
+max_batch_size: 4                      # the artifact's largest decode batch
+input  [ { name: "TOKENS" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true } ]
+output [ { name: "LOGITS" data_type: TYPE_FP32 dims: [ 32000 ] } ]
+sequence_batching {
+  max_sequence_idle_microseconds: 60000000
+  control_input [
+    { name: "START"  control [ { kind: CONTROL_SEQUENCE_START  int32_false_true: [ 0, 1 ] } ] },
+    { name: "END"    control [ { kind: CONTROL_SEQUENCE_END    int32_false_true: [ 0, 1 ] } ] },
+    { name: "CORRID" control [ { kind: CONTROL_SEQUENCE_CORRID data_type: TYPE_UINT64 } ] }
+  ]
+  oldest { max_candidate_sequences: 63 preferred_batch_size: [ 4 ] max_queue_delay_microseconds: 1000 }
+}
+parameters: { key: "serving_manifest" value: { string_value: "tlaloc-serving.json" } }
+```
+
+### Protocol
+
+Each request is one step of one sequence: `TOKENS` `[1, n]` with the
+sequence's correlation ID (`sequence_id` in tritonclient), and the
+`sequence_start` / `sequence_end` flags. The response is `LOGITS` `[1, vocab]`,
+the logits of the last token sent. A client
+
+1. sends the prompt with START. The backend runs it as one prefill call;
+2. sends each chosen token alone. Each is a decode step;
+3. sets END on the request that produces the last token it wants, or sends
+   an empty `TOKENS` `[1, 0]` with END, which runs nothing and returns no
+   `LOGITS`.
+
+A request with several tokens appends them to the sequence, so a later
+request may also carry several tokens (it runs as another prefill chunk,
+starting at the sequence's current length). `sequence_client.py` implements
+this; `generate_client.py` adds a tokenizer.
+
+### What the backend does per request
+
+- **START** creates the sequence's state (its page list and length). A START
+  for a correlation ID that already has state restarts it and frees its old
+  pages.
+- **Pages** are allocated as the sequence grows, `ceil(length / blockSize)`
+  of them, lowest page first, from the instance's pool. Page 0 is never
+  allocated: padding rows of a batch point at it. The block table and slot of
+  every token are derived from the page list; the client never sends them.
+- **Entry selection.** A request of `n > 1` tokens runs on the smallest
+  prefill entry whose context covers the sequence's length after it, one call,
+  with the tokens right-aligned in the chunk. A one-token request runs on a
+  decode entry. All one-token requests in one Triton batch (different
+  sequences, which the oldest strategy guarantees) run as one call on the
+  smallest decode entry whose batch and context cover them, with padding rows
+  for the rest of the batch. Without a prefill entry (a v1 artifact, or
+  `-Pprefill=false`), the tokens of a longer request run as decode steps.
+- **END** frees the sequence's pages after its step.
+- **Idle timeout.** In the oldest strategy Triton ends a sequence that has
+  been idle longer than `max_sequence_idle_microseconds` without telling the
+  backend (its log says `Reaper: CORRID n: max sequence idle exceeded`). The
+  backend therefore applies the same timeout itself: at the start of every
+  execution it frees the pages of every sequence it has not served for longer
+  than the timeout. The next request of such a sequence is refused by Triton
+  unless it carries START.
+
+Refused by name, with the server staying up: a START (or growth) that needs
+more pages than are free (`KV page pool exhausted: sequence n needs k more
+page(s) ... End a sequence (sequence_end) or export the artifact with more
+pages (numBlocks)`); a sequence that would pass the largest compiled context;
+a step for a sequence the backend holds nothing for; a token id outside the
+vocabulary; a request with no tokens and no END. A refused START leaves no
+state behind; Triton still counts the sequence as live until END or the idle
+timeout, so a client should send END for it.
+
+### Why one model with an entry chosen per request
+
+Triton's model is the unit that owns instances, and an instance is the unit
+that owns device state. Prefill and decode must write and read the same KV
+pools, so they have to be one model: two Triton models (a prefill model and a
+decode model) would be two sets of instances with no shared state, and the
+sequence batcher routes a correlation ID within one model only. Within the
+model, the number of tokens in the request already says which entry runs, so
+there is no entry-name input for a client to get wrong.
+
+### Why the oldest strategy
+
+The backend keys state by correlation ID, not by batch slot, so the direct
+strategy's slot pinning buys nothing; and the oldest strategy forms batches
+from the next request of several different sequences, which is exactly a
+batched decode step. The direct strategy is refused at load by name.
+
+### Measured on the GB10
+
+From `verify.sh` (TinyLlama-1.1B, f32 weights, context 64, over HTTP): the
+model loads in about 17 s (four XLA compiles of 3.0 to 5.7 s, 2.0 s to upload
+4196 MiB of weights); the 44 KV pools (44 MiB, 63 usable pages of 16 tokens)
+are zeroed per instance. A 6-token prompt's prefill takes about 26 ms (the
+64-token prefill entry, padded) where the same prompt sent as six decode steps
+takes about 6 x 24 ms; a decode step of one sequence takes about 24 ms (41
+tokens/s). Four sequences decoding concurrently take about 42 ms per step
+each, and together produce about 82 to 87 tokens/s, about twice one sequence's
+rate; 48 requests ran in 22 or 23 executions. The Python driver in
+`docs/SERVING_RUNBOOK.md` takes 1.35 s per step, because it copies every KV
+pool to the host and back. These are single measurements, not a benchmark.
 
 ## Model configuration
 
@@ -281,13 +432,16 @@ defaults.
   then answers `/v2/health/ready` with 400 until that model loads, while
   `/v2/health/live` and the other models keep serving. Pass
   `--strict-readiness=false` if readiness should track only the server.
-- No sequence batching, no optional inputs, no string tensors, no decoupled
-  (streaming) responses.
-- State is per model instance and is not tied to a Triton sequence ID. The
-  client that allocates pages must be the only client of that model, or the
-  clients must agree on the pages.
-- A decode artifact has no prefill entry yet, so a prompt runs as one decode
-  step per token. `generate_client.py` handles one sequence at a time, on a
-  model with one block-table width.
+- No optional inputs, no string tensors, no decoupled (streaming) responses.
+- Sequence mode: one instance per model (the pools are its state); pages are
+  allocated as a sequence grows and there is no preemption, so a sequence
+  that needs a page when none is free is refused mid-generation rather than
+  paused. Only the oldest strategy. Prefill entries are batch 1, so two
+  prompts in one Triton batch run as two calls. Sampling is the client's
+  (the backend returns logits). The pools are copied by each execution
+  rather than donated (the PJRT execute call does not donate buffers yet).
+- Client mode: state is per model instance and is not tied to a Triton
+  sequence ID. The client that allocates pages must be the only client of
+  that model, or the clients must agree on the pages.
 - The weights and KV pools are f32 on the device, as the artifact stores them
   (TinyLlama: 4.1 GiB of weights).

@@ -171,6 +171,28 @@ class ServingManifestTest {
     }
 
     @Test
+    fun aVersionOneArtifactIsStillReadAndTheWriterWritesVersionTwo() {
+        assertEquals("tlaloc-serving-v2", manifest().schemaVersion)
+        val v1 = manifest().toJson().replace(ServingManifest.SCHEMA_VERSION, ServingManifest.SCHEMA_VERSION_1)
+        assertEquals(ServingManifest.SCHEMA_VERSION_1, ServingManifest.fromJson(v1).schemaVersion)
+    }
+
+    @Test
+    fun prefillEntriesRoundTripAndAreRefusedInAVersionOneArtifact() {
+        val prefill = entry(1, 4).copy(
+            kind = DecodeGraphKind.PREFILL,
+            tokensPerSeq = 4,
+            programPath = "programs/prefill_b1_c4.json",
+        )
+        val m = manifest(listOf(entry(1, 4), prefill))
+        val back = ServingManifest.fromJson(m.toJson())
+        assertEquals(DecodeGraphKind.PREFILL, back.entryFor(DecodeGraphKind.PREFILL, 1, 4).kind)
+        val v1 = m.toJson().replace(ServingManifest.SCHEMA_VERSION, ServingManifest.SCHEMA_VERSION_1)
+        val e = assertFailsWith<IllegalArgumentException> { ServingManifest.fromJson(v1) }
+        assertTrue(e.message!!.contains("prefill entries"), e.message!!)
+    }
+
+    @Test
     fun aMissingFieldIsNamedRatherThanDefaulted() {
         val bad = manifest().toJson().replace("\"modelHash\":", "\"modelHashX\":")
         val e = assertFailsWith<io.tlaloc.core.io.JsonException> { ServingManifest.fromJson(bad) }

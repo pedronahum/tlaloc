@@ -77,7 +77,8 @@ class DecodeGraphSpecTest {
         assertEquals(128, pre.tokensPerSeq)
         assertEquals(DxirType(I32, listOf(4, 128)), pre.tokenIdsType)
         assertEquals(DxirType(I32, listOf(4 * 128)), pre.slotMappingType)
-        assertEquals(DxirType(F32, listOf(4, 128, 32_000)), pre.logitsType)
+        // Prefill returns the last position's logits, not all 128.
+        assertEquals(DxirType(F32, listOf(4, 1, 32_000)), pre.logitsType)
 
         // The bucket-shaped, model-shaped and pool-shaped parts do not move.
         assertEquals(spec.blockTablesType, pre.blockTablesType)

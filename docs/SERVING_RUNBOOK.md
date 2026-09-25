@@ -878,9 +878,11 @@ once and held.
 * **More than one ladder point, batch > 1, context > 64** — the demo exports
   one point because each is a full XLA compile of a 22-layer model. Bucketing
   is certified not to change the answer.
-* **Prefill as one call** — the prompt runs as N decode steps, because
-  `PAGED_ATTENTION`'s ragged chunked-prefill form is not implemented.
-  This costs time, not correctness.
+* **Prefill as one call in this driver** — the Python driver runs the prompt
+  as N decode steps. The artifact carries prefill entries (one per context
+  bucket: a right-aligned chunk that writes its KV and returns the last
+  token's logits), and the Triton backend uses them (section 12); this
+  driver does not yet. This costs time, not correctness.
 * **A tokenizer inside the runtime** — ids in, ids out, deliberately.
 * **Sampling** — greedy/argmax only, host-side, in the driver.
 
@@ -948,24 +950,30 @@ applied before the argmax and this worker's argmax has already run), a
 `--block-size` or `--max-model-len` or `--max-num-seqs` past the artifact's,
 `--attention-backend`, MLA, sparse attention, and `world_size > 1`.
 
-**The performance fact**: a prompt is served as N single-token decode steps,
-because `PAGED_ATTENTION`'s ragged chunked-prefill form is not
-implemented. Causal attention makes them compute exactly what a fused prefill
-would; at ~1.35 s/step a six-token prompt spends ~7 s before its first
-generated token. That is what the ragged form is worth.
+**The performance fact**: this runner serves a prompt as N single-token
+decode steps. Causal attention makes them compute exactly what a prefill
+call would; at ~1.35 s/step a six-token prompt spends ~7 s before its first
+generated token. The artifact's prefill entries are used by the Triton
+backend (section 12), not by this runner.
 
 ## 12. Serving through Triton
 
 The same artifact serves through NVIDIA Triton Inference Server with the
 `tlaloc` backend in [`triton/`](../triton/README.md). `TritonModelRepository`
-in `:maestro` writes the artifact as a Triton model: the version directory
-holds the artifact's files, and a generated `config.pbtxt` makes the token
-ids, positions, block tables, sequence lengths and slot mapping request inputs
-and the logits the output. The backend loads the staged weights onto the
-device once, at model load, and keeps the KV pools on the device between
-requests, so a request carries only the step's own tensors.
+in `:maestro` writes the artifact as a Triton model in sequence mode: the
+version directory holds the artifact's files, and the generated
+`config.pbtxt` names the manifest and declares Triton's sequence batcher. A
+request carries one sequence's token ids and its correlation ID; the response
+is the last token's logits. The backend loads the staged weights onto the
+device once, keeps the KV pools on the device, allocates each sequence's
+pages on START and frees them on END (or after the idle timeout), runs a
+prompt as one prefill call, and batches the decode steps of concurrent
+sequences into one call.
 
 ```bash
+./gradlew :maestro:exportLlamaServingArtifact \
+    -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
+    -PoutDir=/tmp/tl-llama -PmaxBatch=4
 ./gradlew :maestro:exportTritonModel -PartifactDir=/tmp/tl-llama \
     -PoutDir=/tmp/tl-triton-repository -PmodelName=tinyllama
 MODEL_REPOSITORY=/tmp/tl-triton-repository triton/run_server.sh
@@ -973,11 +981,14 @@ python triton/generate_client.py --model tinyllama \
     --tokenizer $HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0/tokenizer.json
 ```
 
-`/tmp/tl-llama` is the artifact from section 10.2. `triton/verify.sh` runs
-these steps when the checkpoint is present, and requires the six generated
-ids to equal HuggingFace's, `[3681, 29889, 13, 13, 29906, 29889]`. On the GB10
-a decode step through Triton over HTTP took about 23 ms, where the Python
-driver of section 10.4 takes 1.35 s, because the pools no longer go to the
-host and back on every step. Building the backend, the PJRT plugin it loads,
-GPU memory settings and the limits are in
+`triton/verify.sh` runs these steps when the checkpoint is present: the six
+generated ids must equal HuggingFace's, `[3681, 29889, 13, 13, 29906, 29889]`,
+and `triton/sequence_checks.py` checks prefill against one token per request,
+four concurrent sequences against each alone, page freeing on END and on the
+idle timeout, and the refusal of a START when the page pool is full. On the
+GB10 over HTTP a 6-token prefill took about 26 ms, a decode step of one
+sequence about 24 ms (41 tokens/s), and four concurrent sequences together
+about 85 tokens/s, where the Python driver of section 10.4 takes 1.35 s per
+step because it copies the pools to the host and back. The protocol, the
+backend's page management, the GPU memory settings and the limits are in
 [triton/README.md](../triton/README.md).

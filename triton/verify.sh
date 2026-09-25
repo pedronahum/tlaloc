@@ -8,11 +8,15 @@
 #   4. run it again with --perturb (wrong expected values), which must FAIL,
 #   5. stop the server,
 #   6. optional, TinyLlama: if the TinyLlama-1.1B checkpoint is present,
-#      export its decode artifact and write it as a Triton model (Gradle, with
-#      no server running), start a server on that repository, greedy-decode
-#      "The capital of France is" with generate_client.py, require the six
-#      generated ids to equal HuggingFace's, and stop the server. Without the
-#      checkpoint this step is skipped by name.
+#      export its serving artifact (decode batches 1, 2 and 4 and a prefill
+#      entry) and write it as a sequence-mode Triton model with a 5 s idle
+#      timeout (Gradle, with no server running), start a server on that
+#      repository, greedy-decode "The capital of France is" with
+#      generate_client.py (the six ids must equal HuggingFace's), run
+#      sequence_checks.py (prefill, concurrent sequences, END and idle
+#      freeing pages, pool exhaustion), run it again with --perturb (must
+#      fail), and stop the server. Without the checkpoint this step is
+#      skipped by name.
 # Exit status 0 only if step 3 passes, step 4 fails, and step 6 passes or is
 # skipped.
 #
@@ -112,14 +116,17 @@ if [[ "${SKIP_TINYLLAMA:-}" == 1 ]]; then
 elif [[ ! -f "$CKPT/model.safetensors" || ! -f "$CKPT/tokenizer.json" ]]; then
   echo "SKIP tinyllama: no TinyLlama-1.1B checkpoint at $CKPT"
 else
-  if [[ "${TINYLLAMA_REEXPORT:-}" == 1 || ! -f "$TL_DIR/repository/tinyllama/config.pbtxt" ]]; then
+  TL_CONFIG="$TL_DIR/repository/tinyllama/config.pbtxt"
+  if [[ "${TINYLLAMA_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$TL_CONFIG" 2>/dev/null \
+      || ! grep -q "max_sequence_idle_microseconds: 5000000$" "$TL_CONFIG"; then
     # Gradle runs here with no Triton container up.
     rm -rf "$TL_DIR"
     mkdir -p "$TL_DIR"
     (cd "$ROOT" && ./gradlew -q :maestro:exportLlamaServingArtifact \
-      -PckptDir="$CKPT" -PoutDir="$TL_DIR/artifact")
+      -PckptDir="$CKPT" -PoutDir="$TL_DIR/artifact" -PmaxBatch=4)
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
-      -PartifactDir="$TL_DIR/artifact" -PoutDir="$TL_DIR/repository" -PmodelName=tinyllama)
+      -PartifactDir="$TL_DIR/artifact" -PoutDir="$TL_DIR/repository" -PmodelName=tinyllama \
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
   fi
   export CONTAINER_NAME="$BASE_NAME-tinyllama" MODEL_REPOSITORY="$TL_DIR/repository"
   start_server "$LOG.tinyllama" 600
@@ -127,6 +134,21 @@ else
   "$PY" "$HERE/generate_client.py" --url "localhost:$HTTP_PORT" --model tinyllama \
     --tokenizer "$CKPT/tokenizer.json" --text "The capital of France is" --max-new 6 \
     --expect "$EXPECT"
+  echo "== tinyllama sequence checks"
+  "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model tinyllama
+  echo "== tinyllama negative control (must fail)"
+  if "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model tinyllama --perturb >"$LOG.tinyllama.negative" 2>&1; then
+    echo "FAIL: the sequence checks passed with wrong expected ids" >&2
+    cat "$LOG.tinyllama.negative" >&2
+    exit 1
+  fi
+  grep -c "^FAIL" "$LOG.tinyllama.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+  if ! curl -sf "localhost:$HTTP_PORT/v2/health/live" >/dev/null; then
+    echo "FAIL: the server is not live at the end of the sequence checks" >&2
+    exit 1
+  fi
   stop_server
 fi
 echo "VERIFY PASSED"

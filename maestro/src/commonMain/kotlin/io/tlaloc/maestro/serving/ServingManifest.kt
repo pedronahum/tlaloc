@@ -91,10 +91,15 @@ data class ServingManifest(
     val schemaVersion: String = SCHEMA_VERSION,
 ) {
     init {
-        require(schemaVersion == SCHEMA_VERSION) {
-            "ServingManifest: schemaVersion '$schemaVersion' is not '$SCHEMA_VERSION' — a " +
+        require(schemaVersion in READABLE_VERSIONS) {
+            "ServingManifest: schemaVersion '$schemaVersion' is not one of $READABLE_VERSIONS — a " +
                 "loader must refuse an artifact it does not know the shape of rather than " +
                 "read the fields it recognises and guess at the rest"
+        }
+        require(schemaVersion != SCHEMA_VERSION_1 || entries.none { it.kind == DecodeGraphKind.PREFILL }) {
+            "ServingManifest: a $SCHEMA_VERSION_1 artifact with prefill entries — prefill " +
+                "entries are defined from $SCHEMA_VERSION on (right-aligned chunk, last-position " +
+                "logits), so this artifact claims a contract its version does not have"
         }
         require(modelName.isNotBlank()) { "ServingManifest: modelName must not be blank" }
         require(modelHash.isNotBlank()) {
@@ -144,7 +149,26 @@ data class ServingManifest(
     }
 
     companion object {
-        const val SCHEMA_VERSION: String = "tlaloc-serving-v1"
+        /**
+         * The version this writer produces.
+         *
+         * - `tlaloc-serving-v1`: decode entries only.
+         * - `tlaloc-serving-v2`: adds PREFILL entries. A prefill entry takes a
+         *   chunk of `tokensPerSeq` tokens per sequence, right-aligned
+         *   (padding first, slot -1), and returns `[batch, 1, vocab]`: the
+         *   logits of each sequence's last token. Its signature is the decode
+         *   entries' signature with the longer token axis, so a loader binds
+         *   both kinds the same way. Decode entries are unchanged.
+         *
+         * A v1 artifact is still read.
+         */
+        const val SCHEMA_VERSION: String = "tlaloc-serving-v2"
+
+        /** The first version, decode entries only. */
+        const val SCHEMA_VERSION_1: String = "tlaloc-serving-v1"
+
+        /** Every version [fromJson] accepts. */
+        val READABLE_VERSIONS: List<String> = listOf(SCHEMA_VERSION_1, SCHEMA_VERSION)
 
         /** The manifest's filename inside the artifact directory. */
         const val FILE_NAME: String = "tlaloc-serving.json"
