@@ -24,8 +24,11 @@
 #      generate_client.py (the six ids must equal HuggingFace's), run
 #      sequence_checks.py (prefill, concurrent sequences, END and idle
 #      freeing pages, pool exhaustion), run it again with --perturb (must
-#      fail), and stop the server. Without the checkpoint this step is
-#      skipped by name.
+#      fail), and stop the server. Then serve the same model with a 200 ms
+#      idle timeout and run sequence_checks.py --queued: with steps waiting in
+#      Triton's queue past the timeout, no step Triton accepts may find its
+#      sequence's pages freed. Without the checkpoint this step is skipped by
+#      name.
 #   7. optional, Qwen3: if Qwen/Qwen3-0.6B is in the HuggingFace cache, export
 #      it the same way (Gradle, no server running), start a server, run
 #      fixture_checks.py against the committed HuggingFace fixture (a plain
@@ -242,6 +245,23 @@ else
     exit 1
   fi
   stop_server
+
+  # The same model (hard links, no copy of the weights) with a 200 ms idle
+  # timeout: many concurrent sequences make steps wait in Triton's queue for
+  # longer than that, and the backend must not free a sequence Triton holds.
+  echo "== tinyllama queued sequences (200 ms idle timeout)"
+  QUEUED_REPO="$TL_DIR/queued-repository"
+  rm -rf "$QUEUED_REPO"
+  mkdir -p "$QUEUED_REPO"
+  cp -al "$TL_DIR/repository/tinyllama" "$QUEUED_REPO/tinyllama"
+  rm "$QUEUED_REPO/tinyllama/config.pbtxt"
+  sed 's/^  max_sequence_idle_microseconds: .*/  max_sequence_idle_microseconds: 200000/' \
+    "$TL_CONFIG" >"$QUEUED_REPO/tinyllama/config.pbtxt"
+  export CONTAINER_NAME="$BASE_NAME-queued" MODEL_REPOSITORY="$QUEUED_REPO"
+  start_server "$LOG.queued" 600
+  "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --model tinyllama --queued
+  stop_server
+  rm -rf "$QUEUED_REPO"
 fi
 
 # --- Qwen3 -------------------------------------------------------------------

@@ -27,8 +27,9 @@ import java.nio.file.StandardCopyOption
  * (`serving_manifest`) and declares one input, `TOKENS` (INT32 `[-1]`), one
  * output, `LOGITS` (FP32 `[vocab]`), and the START, END and CORRID control
  * inputs. A client sends a sequence's token ids with a correlation ID; the
- * backend allocates the sequence's KV pages on START, frees them on END (or
- * when the sequence has been idle longer than `max_sequence_idle_microseconds`),
+ * backend allocates the sequence's KV pages on START, frees them on END (or,
+ * when pages run short, once the sequence has been idle for twice
+ * `max_sequence_idle_microseconds` plus a queueing allowance),
  * runs a request of several tokens through the smallest prefill entry that
  * fits and a one-token request through a decode entry together with the
  * other sequences' steps in the same batch, and answers with the last

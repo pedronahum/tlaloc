@@ -74,6 +74,7 @@ class SequenceModel {
   int block_size() const { return block_size_; }
   int max_context() const { return max_context_; }
   int max_decode_batch() const { return max_decode_batch_; }
+  int64_t max_batch_size() const { return max_batch_size_; }
   uint64_t idle_ns() const { return idle_ns_; }
   const std::string& tokens_input() const { return tokens_input_; }
   const std::string& logits_output() const { return logits_output_; }
@@ -158,6 +159,7 @@ class SequenceInstance {
   }
   TRITONSERVER_Error* Parse(Work* w);
   TRITONSERVER_Error* Admit(Work* w);
+  // Frees the sequences Triton has ended for being idle (see the definition).
   void Reap(uint64_t now);
   void Free(uint64_t corrid, const char* why);
   // Runs `entry` on the given works (one row each, `tokens` of each placed in
@@ -171,6 +173,8 @@ class SequenceInstance {
   TRITONBACKEND_ModelInstance* instance_;
   PagePool pool_;
   std::unordered_map<uint64_t, SequenceState> sequences_;
+  std::set<uint64_t> batch_;  // correlation IDs with a request in the batch being run
+  uint64_t max_exec_ns_ = 0;  // the longest ProcessRequests call so far
   std::map<std::string, std::unique_ptr<tlaloc_triton::PjrtBuffer>> state_;
 };
 

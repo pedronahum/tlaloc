@@ -968,7 +968,8 @@ version directory holds the artifact's files, and the generated
 request carries one sequence's token ids and its correlation ID; the response
 is the last token's logits. The backend loads the staged weights onto the
 device once, keeps the KV pools on the device, allocates each sequence's
-pages on START and frees them on END (or after the idle timeout), runs a
+pages on START and frees them on END (or, when pages run short, after twice
+the idle timeout plus a queueing allowance), runs a
 prompt as one prefill call, and batches the decode steps of concurrent
 sequences into one call.
 

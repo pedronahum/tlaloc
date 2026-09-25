@@ -134,7 +134,7 @@ memory, which on a GB10 is 75% of the machine's RAM.
 | Process | one Python process: `tlaloc_serve.py` and `tlaloc_pjrt.py` (ctypes) load the plugin `.so` | vLLM's engine and worker processes; `vllm-tlaloc` replaces the model runner | `tritonserver` in the Triton container; `libtriton_tlaloc.so` loads the plugin `.so` |
 | Python packages in the serving process | none beyond the standard library | vLLM and torch (vLLM's own); no torch model is built | none: the backend is C++ |
 | Weights | uploaded once, on the device | uploaded once, on the device | uploaded once per GPU at model load, on the device |
-| KV pages | the caller allocates pages | vLLM's block manager allocates them | the backend allocates them per sequence (correlation ID) and frees them on END or after the idle timeout |
+| KV pages | the caller allocates pages | vLLM's block manager allocates them | the backend allocates them per sequence (correlation ID) and frees them on END, or, when pages run short, after twice the idle timeout plus a queueing allowance |
 | KV pools between steps | copied to the host and back every step | as in (i) | on the device; each execution copies them rather than donating |
 | Prompt | one decode step per token | one decode step per token (chunked prefill refused by name) | one prefill call |
 | Batching | the caller builds the batch | vLLM's scheduler | decode steps of different sequences in one call (Triton's sequence batcher, oldest strategy) |

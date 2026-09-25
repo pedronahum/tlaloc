@@ -762,19 +762,37 @@ SequenceInstance::Free(uint64_t corrid, const char* why)
   sequences_.erase(it);
 }
 
+// Triton ends a sequence that has had no request for
+// max_sequence_idle_microseconds and does not tell the backend, so the
+// backend frees such sequences' pages itself, when a sequence needs pages the
+// pool does not have. It must never free a sequence Triton still holds.
+// Triton measures idleness from a request's arrival, and a request waiting in
+// its queue keeps the sequence alive; the backend only sees `last_ns`, the end
+// of the sequence's last execution, and not the requests still queued. The
+// oldest strategy serves the oldest ready requests first, max_batch_size per
+// execution, so a queued request waits for at most one execution per
+// max_batch_size other live sequences. A sequence is therefore freed only
+// when it has no request in this batch and has been idle for longer than
+//   2 * timeout + ceil(live sequences / max_batch_size) * longest execution,
+// by when Triton has ended it (twice the timeout covers the reaper's own
+// delay), and a later request for it must carry START.
 void
 SequenceInstance::Reap(uint64_t now)
 {
+  const uint64_t batch = static_cast<uint64_t>(std::max<int64_t>(1, model_->max_batch_size()));
+  const uint64_t queue = (sequences_.size() + batch - 1) / batch * max_exec_ns_;
+  const uint64_t limit = 2 * model_->idle_ns() + queue;
   std::vector<uint64_t> idle;
   for (const auto& kv : sequences_) {
-    if (now - kv.second.last_ns > model_->idle_ns()) idle.push_back(kv.first);
+    if (batch_.count(kv.first)) continue;
+    if (now > kv.second.last_ns && now - kv.second.last_ns > limit) idle.push_back(kv.first);
   }
   for (uint64_t id : idle) {
     auto it = sequences_.find(id);
     std::ostringstream m;
-    m << "tlaloc backend: instance '" << name_ << "': sequence " << id
-      << " was idle longer than max_sequence_idle_microseconds (" << model_->idle_ns() / 1000
-      << " us); freeing its " << it->second.pages.size() << " pages";
+    m << "tlaloc backend: instance '" << name_ << "': sequence " << id << " was idle longer than "
+      << limit / 1000 << " us (twice max_sequence_idle_microseconds plus " << queue / 1000
+      << " us of queueing); freeing its " << it->second.pages.size() << " pages";
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
     Free(id, "timed out");
   }
@@ -853,6 +871,7 @@ SequenceInstance::Admit(Work* w)
   }
   const int bs = model_->block_size();
   const int need = (seq.length + n + bs - 1) / bs - static_cast<int>(seq.pages.size());
+  if (need > 0 && need > pool_.free_count()) Reap(NowNs());
   if (need > 0 && !pool_.Take(need, &seq.pages)) {
     return refuse(Err(
         TRITONSERVER_ERROR_UNAVAILABLE,
@@ -982,14 +1001,17 @@ void
 SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t count)
 {
   const uint64_t exec_start = NowNs();
-  Reap(exec_start);
 
   std::vector<Work> works(count);
+  batch_.clear();
   for (uint32_t r = 0; r < count; ++r) {
     Work& w = works[r];
     w.request = requests[r];
     w.err = TRITONBACKEND_ResponseNew(&w.response, w.request);
     if (w.err == nullptr) w.err = Parse(&w);
+    if (w.err == nullptr) batch_.insert(w.corrid);
+  }
+  for (Work& w : works) {
     if (w.err == nullptr) w.err = Admit(&w);
   }
 
@@ -1086,6 +1108,7 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
         TRITONBACKEND_RequestRelease(w.request, TRITONSERVER_REQUEST_RELEASE_ALL),
         "failed to release the request");
   }
+  max_exec_ns_ = std::max(max_exec_ns_, NowNs() - exec_start);
   if (first_compute == 0) first_compute = last_compute = NowNs();
   LOG_IF_ERROR(
       TRITONBACKEND_ModelInstanceReportBatchStatistics(

@@ -187,9 +187,14 @@ server is up. It then starts a server on that repository and:
     refused with `KV page pool exhausted`, the server stays live, the refused
     sequence has no state, and after the others end a new sequence decodes
     the expected ids;
-  - idle: 21 sequences abandoned without END lose their pages after the idle
-    timeout; a new sequence then decodes correctly, the abandoned sequence's
-    next step is refused, and 21 new three-page sequences fit again;
+  - idle: 21 sequences abandoned without END lose their pages after twice the
+    idle timeout (plus the queueing allowance described under "Idle
+    timeout"); a new sequence then decodes correctly, the abandoned
+    sequence's next step is refused, and 21 new three-page sequences fit
+    again;
+  - queued (a second server, the same model with a 200 ms idle timeout):
+    12, 24 and 32 concurrent sequences, so steps wait in Triton's queue past
+    the timeout; no step Triton accepts is refused for having no KV state;
 - runs `sequence_checks.py --perturb` (wrong expected ids), which must fail.
 
 Without the checkpoint this step prints `SKIP tinyllama` and the run can
@@ -420,10 +425,19 @@ this; `generate_client.py` adds a tokenizer.
 - **Idle timeout.** In the oldest strategy Triton ends a sequence that has
   been idle longer than `max_sequence_idle_microseconds` without telling the
   backend (its log says `Reaper: CORRID n: max sequence idle exceeded`). The
-  backend therefore applies the same timeout itself: at the start of every
-  execution it frees the pages of every sequence it has not served for longer
-  than the timeout. The next request of such a sequence is refused by Triton
-  unless it carries START.
+  backend therefore frees such sequences' pages itself, when a sequence needs
+  more pages than are free. Triton's clock starts at a request's arrival and
+  a request waiting in Triton's queue keeps its sequence alive, while the
+  backend only sees when each sequence last ran. So the backend frees a
+  sequence only when it has no request in the current batch and has not run
+  for twice the timeout plus the longest wait the oldest strategy allows a
+  queued request: one execution (the longest seen so far) per
+  `max_batch_size` live sequences. With the timeout alone the backend freed
+  sequences Triton still held once steps queued behind other sequences;
+  `sequence_checks.py --queued` (a 200 ms timeout, 12 to 32 concurrent
+  sequences) catches that, and fails against a backend without the rule. The
+  next request of a sequence Triton has ended is refused by Triton unless it
+  carries START.
 
 Refused by name, with the server staying up: a START (or growth) that needs
 more pages than are free (`KV page pool exhausted: sequence n needs k more

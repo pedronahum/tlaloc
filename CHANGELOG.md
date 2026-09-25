@@ -120,6 +120,20 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   does, and `HfStagedWeights` refuses the file by name if the stored head differs
   from the table.
 
+### Fixed
+
+- **The Triton backend no longer frees a sequence Triton still holds.** In
+  sequence mode the backend freed the pages of any sequence it had not run for
+  `max_sequence_idle_microseconds`, counted from the end of its last execution.
+  Triton counts from a request's arrival, and a request waiting in its queue
+  keeps the sequence alive, so under load a step Triton accepted was refused
+  for having no KV state (a 200 ms timeout and 12 to 32 concurrent TinyLlama
+  sequences: 3 to 16 such refusals a run). The backend now frees idle sequences
+  only when a sequence needs pages the pool lacks, never one with a request in
+  the batch being run, and only after twice the timeout plus the longest queue
+  wait the oldest strategy allows. `verify.sh` runs the case
+  (`sequence_checks.py --queued`); a backend without the fix fails it.
+
 ## [0.1.0-alpha02] — 2026-09-24
 
 The Kotlin 2.4 release: the compiler plugin supports Kotlin 2.4.20–2.4.29. Stay on

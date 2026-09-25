@@ -19,11 +19,20 @@ Run by verify.sh against a server holding the `tinyllama` sequence-mode model
              server stays live, the refused sequence has no state, and after
              ending the others a new sequence runs
   idle       sequences abandoned without END lose their pages once they have
-             been idle longer than max_sequence_idle_microseconds
+             been idle for twice max_sequence_idle_microseconds (plus a few
+             executions of queueing allowance) and a new sequence needs them
 
 Prints timings (prefill, ms per decode step alone and concurrently). Exit
 status 0 only if every check passes. With --perturb the expected ids are
 wrong and only the prefill checks run, so the run must fail.
+
+With --queued (against a copy of the model with a 200 ms idle timeout) it
+checks only that the backend never frees a sequence Triton still holds: 12 to
+32 sequences decode concurrently, so steps wait in Triton's queue for longer
+than the timeout. Triton ends some sequences itself (their next step is
+refused for lacking START, which is Triton's rule), but no step Triton
+accepts may be refused by the backend for having no KV state. (A START the
+full page pool refuses by name is allowed.)
 """
 
 import argparse
@@ -83,13 +92,63 @@ def refused(fn, needle):
     return False, "no error"
 
 
+def queued(url, model):
+    """The backend must not free a sequence whose next request is queued."""
+    import collections
+
+    triton_ended, backend_lost, finished = 0, 0, 0
+    for n, base in ((12, 70000), (24, 71000), (32, 72000)):
+        errors = []
+        barrier = threading.Barrier(n)
+
+        def worker(i):
+            c = SequenceClient(url, model, "http")
+            barrier.wait()
+            try:
+                c.generate(base + i, FRANCE, 20)
+            except Exception as e:  # noqa: BLE001 - classified below
+                errors.append(str(e))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        kinds = collections.Counter(
+            "triton" if "must specify the START flag" in e
+            else "backend" if "has no KV state" in e
+            else "pool" if "KV page pool exhausted" in e else e[:120]
+            for e in errors)
+        triton_ended += kinds.pop("triton", 0)
+        kinds.pop("pool", 0)  # a refusal by name: 32 sequences can need more pages than the pool
+        backend_lost += kinds.pop("backend", 0)
+        finished += n - len(errors)
+        print(f"     {n} concurrent sequences: {n - len(errors)} finished, "
+              f"{len(errors)} ended early {dict(kinds) if kinds else ''}")
+        check(not kinds, f"{n} sequences: no error other than Triton's idle refusal and "
+                         f"the full page pool's")
+    check(triton_ended > 0,
+          f"steps queued longer than the timeout: Triton ended {triton_ended} sequences "
+          f"itself (so the check below can fail)")
+    check(backend_lost == 0,
+          f"no step Triton accepted was refused for having no KV state "
+          f"({backend_lost} were; {finished} sequences finished)")
+    print()
+    print(f"{len(failures)} check(s) FAILED" if failures else "all queued checks passed")
+    return 1 if failures else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--http", default="localhost:8000")
     ap.add_argument("--grpc", default="localhost:8001")
     ap.add_argument("--model", default="tinyllama")
     ap.add_argument("--perturb", action="store_true", help="expect wrong ids (negative control)")
+    ap.add_argument("--queued", action="store_true",
+                    help="only the queued-sequence check (a model with a short idle timeout)")
     args = ap.parse_args()
+    if args.queued:
+        return queued(args.http, args.model)
 
     expect = list(HF_IDS)
     if args.perturb:
@@ -229,8 +288,11 @@ def main():
         abandoned.append(sid)
     hit, _ = refused(lambda: http.step(fresh(), long_prompt, start=True), "KV page pool exhausted")
     check(hit, "the pool is full of abandoned sequences")
-    wait = idle_us / 1e6 + 2.0
-    print(f"     waiting {wait:.1f} s for the idle timeout")
+    # The backend frees a sequence idle for twice the timeout plus a queueing
+    # allowance of a few executions (Triton ends it after one timeout, counted
+    # from the arrival of its last request).
+    wait = 2 * idle_us / 1e6 + 5.0
+    print(f"     waiting {wait:.1f} s for twice the idle timeout")
     time.sleep(wait)
     ids, _, _, _ = http.generate(fresh(), FRANCE, 6)
     check(ids == expect, "after the idle timeout a new sequence gets pages and decodes correctly")
