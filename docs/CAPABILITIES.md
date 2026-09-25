@@ -13,10 +13,10 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **2,706** automated tests: 2,584 that `./gradlew test` runs, and 122
+The suite has **2,748** automated tests: 2,626 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). All
-2,584 were counted in a clean-room `./gradlew test --rerun-tasks` with 0 failures,
+2,626 were counted in a clean-room `./gradlew test --rerun-tasks` with 0 failures,
 and the 122 in each Maestro module's own `test --rerun`, 0 failures.
 On the GB10 workstation where they were counted, 93 of them skip by name: 88 MLIR
 round trips that need `stablehlo-translate` or `sdy-opt`, and 5 TPU smoke tests. This is

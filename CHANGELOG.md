@@ -173,6 +173,17 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **The ABI baselines record the serving changes.** `ir.api`, `maestro.api` and
+  `stablehlo.api` are dumped again. Classes that gained a defaulted property
+  (`PagedAttentionAttrs.Parsed`, `DecodeModelShape`, `DecodeGraphSpec`,
+  `HfDecoderConfig`, `ServingModelShape`) and functions that gained a defaulted
+  parameter (`HfDecoderConfig.toDecodeModelShape`, `HfDecoderGraph.spec`,
+  `HfServingExport.export`, `ServingArtifactWriter.export`) no longer have
+  alpha02's JVM signatures: source written against alpha02 compiles, a binary
+  compiled against it must be rebuilt. `toStablehlo` is `@JvmOverloads`, so its
+  alpha02 signatures remain. New: `WindowedKvPool`, `ServingWindowedKv`,
+  `ServingRefusedToken`, `ServingManifest.SCHEMA_VERSION_3`,
+  `TritonModelRepository.KV_PAGES` and the `WINDOW_*` slot roles.
 - **`triton/verify.sh` checks more.** The bf16 Qwen3 logits must be within
   6e-3 of the largest (measured 3.0e-3; it was 1e-2), and must fail the f32
   artifact's 2e-3, so the logit comparison is shown to tell the two apart.

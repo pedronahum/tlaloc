@@ -36,7 +36,11 @@ import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
  * the result in the same device memory, so state carried from one execution
  * to the next (a KV pool) is updated in place instead of copied. A runtime
  * that does not donate it gets a copy, and the same values.
+ *
+ * `@JvmOverloads` keeps the one-argument JVM signature that alpha02 callers
+ * were compiled against.
  */
+@kotlin.jvm.JvmOverloads
 fun DxirModule.toStablehlo(outputAliases: Map<String, Map<Int, Int>> = emptyMap()): String = buildString {
     val unknown = outputAliases.keys - functions.map { it.name }.toSet()
     require(unknown.isEmpty()) {
@@ -60,7 +64,9 @@ fun DxirModule.toStablehlo(outputAliases: Map<String, Map<Int, Int>> = emptyMap(
  * The function as StableHLO text. [outputAliases] maps a parameter index to
  * the index of the result written over it (see [DxirModule.toStablehlo]);
  * each result is written over at most one parameter, of the same type.
+ * `@JvmOverloads` keeps the `(function, indent)` JVM signature of alpha02.
  */
+@kotlin.jvm.JvmOverloads
 fun DxirFunction.toStablehlo(indent: String = "", outputAliases: Map<Int, Int> = emptyMap()): String =
     StablehloEmitter(this, indent, outputAliases).emit()
 

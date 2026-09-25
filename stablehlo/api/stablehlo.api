@@ -10,8 +10,12 @@ public final class io/tlaloc/stablehlo/SdyParser {
 }
 
 public final class io/tlaloc/stablehlo/StablehloEmitterKt {
+	public static final fun toStablehlo (Lio/tlaloc/ir/DxirFunction;)Ljava/lang/String;
 	public static final fun toStablehlo (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)Ljava/lang/String;
+	public static final fun toStablehlo (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;Ljava/util/Map;)Ljava/lang/String;
 	public static final fun toStablehlo (Lio/tlaloc/ir/DxirModule;)Ljava/lang/String;
-	public static synthetic fun toStablehlo$default (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+	public static final fun toStablehlo (Lio/tlaloc/ir/DxirModule;Ljava/util/Map;)Ljava/lang/String;
+	public static synthetic fun toStablehlo$default (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;Ljava/util/Map;ILjava/lang/Object;)Ljava/lang/String;
+	public static synthetic fun toStablehlo$default (Lio/tlaloc/ir/DxirModule;Ljava/util/Map;ILjava/lang/Object;)Ljava/lang/String;
 }
 
