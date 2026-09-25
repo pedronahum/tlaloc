@@ -6,3 +6,17 @@ This product includes software developed by Netflix, Inc.
 vendored in third-party/maestro at upstream commit
 0150f2a78005cf135023de29e5f8e06fd592563d. Files there that Tlaloc changed
 carry a "Modified by" line; docs/vendoring.md lists every change.
+
+The Triton backend in triton/ includes, unmodified, in triton/third_party:
+
+- Headers and backend utility sources from NVIDIA Triton Inference Server
+  (https://github.com/triton-inference-server/core, /common and /backend,
+  branch r25.11), Copyright (c) NVIDIA CORPORATION & AFFILIATES,
+  BSD 3-Clause License.
+- RapidJSON (https://github.com/Tencent/rapidjson), Copyright (C) 2015 THL
+  A29 Limited, a Tencent company, and Milo Yip, MIT License; its msinttypes
+  headers are Copyright (c) 2006-2013 Alexander Chemeris, BSD 3-Clause License.
+- The PJRT C API header from OpenXLA (https://github.com/openxla/xla),
+  Copyright The OpenXLA Authors, Apache License 2.0.
+
+docs/vendoring.md lists the exact commits and files.

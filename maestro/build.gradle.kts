@@ -150,6 +150,33 @@ tasks.register<JavaExec>("exportServingArtifact") {
 }
 
 /**
+ * `exportTritonExamples`: regenerate the example model repository served by the
+ * Triton `tlaloc` backend (triton/README.md).
+ *
+ *     ./gradlew :maestro:exportTritonExamples -PoutDir=$PWD/triton/examples
+ *
+ * Writes `model_repository/<model>/1/model.mlir` (StableHLO text emitted by
+ * Tlaloc) and `reference/<model>.json` (the DXIR interpreter's result for the
+ * same graph). The `config.pbtxt` files are written by hand and not touched.
+ */
+tasks.register<JavaExec>("exportTritonExamples") {
+    group = "tlaloc"
+    description = "Write the Triton backend's example StableHLO models to -PoutDir"
+    val tools = kotlin.jvm().compilations.getByName("tools")
+    dependsOn(tools.compileTaskProvider)
+    classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
+    mainClass.set("io.tlaloc.maestro.serving.ExportTritonExamplesKt")
+    argumentProviders.add(
+        CommandLineArgumentProvider {
+            listOf(
+                (project.findProperty("outDir") as String?)
+                    ?: rootProject.layout.projectDirectory.dir("triton/examples").asFile.absolutePath,
+            )
+        },
+    )
+}
+
+/**
  * §0.4.480 (H3c-3) — `exportLlamaServingArtifact`: the same act for a REAL
  * HuggingFace Llama checkpoint.
  *

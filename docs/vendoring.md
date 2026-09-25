@@ -152,3 +152,41 @@ If we later file the PR and Netflix accepts a generic-extension SPI, the
 upgrade procedure changes: the registration touches become `service-loader`
 or DI-binding declarations instead of edits to `StepType.java`. The
 `docs/vendoring.md` "Divergence policy" tightens correspondingly.
+
+## Triton backend: `triton/third_party/`
+
+The Triton backend in [`triton/`](../triton/README.md) compiles against a
+small set of upstream files, copied unmodified. Only what the backend
+includes or compiles is there, each directory keeps its upstream path layout,
+and each carries the upstream license file.
+
+| Directory | Upstream | Pin | License | Files |
+|---|---|---|---|---|
+| `core/` | triton-inference-server/core | branch `r25.11`, commit `0e256c102549aeffac4c795ae3ec531fb970ac61` | BSD-3-Clause (`LICENSE`) | `include/triton/core/tritonbackend.h`, `include/triton/core/tritonserver.h` |
+| `common/` | triton-inference-server/common | branch `r25.11`, commit `c09e98a47d721fea51913eb3737d37a45d34b431` | BSD-3-Clause (`LICENSE`) | `include/triton/common/error.h`, `include/triton/common/triton_json.h` |
+| `backend/` | triton-inference-server/backend | branch `r25.11`, commit `3901aa5e51a86ada253ae9ce44f82bcb81fe08b2` | BSD-3-Clause (`LICENSE`) | `include/triton/backend/{backend_common,backend_model,backend_model_instance}.h`, `src/{backend_common,backend_model,backend_model_instance}.cc` |
+| `rapidjson/` | Tencent/rapidjson | `master` at commit `24b5e7a8b27f42fa16b96fc70aade9106cf7102f` | MIT (`license.txt`); `include/rapidjson/msinttypes/` is BSD-3-Clause, as `license.txt` states | `include/rapidjson/**` (the JSON-licensed `bin/jsonchecker` is not copied) |
+| `xla/` | openxla/xla | commit `b6f37ab7767f428fd6f993de5e211643d47d4deb` | Apache-2.0 (`LICENSE`) | `xla/pjrt/c/pjrt_c_api.h` |
+
+Why these pins:
+
+- The three Triton repositories have no release tags. `r25.11` is the branch
+  the `nvcr.io/nvidia/tritonserver:25.11-py3` container was built from
+  (Triton server v2.63.0, server commit
+  `f30b53f554bfcf5d4792b744db9292eec695e5f9`). The two core headers are
+  byte-identical to `/opt/tritonserver/include/triton/core/` in that
+  container, and the backend reports "Triton backend API 1.19, compiled
+  against 1.19" when it loads.
+- rapidjson is needed because `common/triton_json.h` includes it and the
+  container does not ship it. There has been no rapidjson release since 1.1.0
+  (2016); the pin is the `master` head at the time of vendoring.
+- The XLA commit is the one jax v0.10.0 builds against
+  (`third_party/xla/revision.bzl`). Its `pjrt_c_api.h` is PJRT C API 0.104,
+  the version of the plugin `triton/fetch_pjrt_plugin.sh` downloads
+  (jax-cuda13-pjrt 0.10.0). The header includes only C standard headers.
+
+Upgrading: download the new pins' tarballs from GitHub, copy the same files
+over, update this table and `NOTICE`, rebuild with `triton/build_backend.sh`
+and run `triton/verify.sh`. When the container tag moves, the Triton pins
+move with it (branch `rYY.MM`); when the PJRT plugin moves, the XLA pin moves
+to the commit that plugin was built from.

@@ -33,3 +33,7 @@ harness/python/*.egg-info/
 
 # JVM heap dumps
 *.hprof
+
+# Triton backend build output and the downloaded PJRT plugin.
+triton/backends/
+triton/pjrt/

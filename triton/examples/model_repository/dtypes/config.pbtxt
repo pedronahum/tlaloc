@@ -1,0 +1,18 @@
+# x . x + x over f64, bf16 and i32, emitted by Tlaloc
+# (./gradlew :maestro:exportTritonExamples). No 'entry' parameter: the file
+# has one function, so that one is served.
+name: "dtypes"
+backend: "tlaloc"
+max_batch_size: 0
+input [
+  { name: "X_F64" data_type: TYPE_FP64 dims: [ 4 ] },
+  { name: "X_BF16" data_type: TYPE_BF16 dims: [ 4 ] },
+  { name: "X_I32" data_type: TYPE_INT32 dims: [ 4 ] }
+]
+output [
+  { name: "Y_F64" data_type: TYPE_FP64 dims: [ 4 ] },
+  { name: "Y_BF16" data_type: TYPE_BF16 dims: [ 4 ] },
+  { name: "Y_I32" data_type: TYPE_INT32 dims: [ 4 ] }
+]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "model.mlir" } }

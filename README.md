@@ -186,6 +186,11 @@ A real TinyLlama-1.1B, all 22 layers, generated 6 of 6 token ids identical to
 HuggingFace transformers — from the direct driver and from vLLM 0.29.0's
 `LLM.generate()`. → [SERVING_RUNBOOK.md](docs/SERVING_RUNBOOK.md)
 
+Tlaloc StableHLO also serves from NVIDIA Triton Inference Server through a C++
+backend that compiles it with the PJRT CUDA plugin. A Tlaloc-generated gradient
+answers over Triton's HTTP and gRPC endpoints with the same bits the DXIR
+interpreter produces. → [triton/](triton/README.md)
+
 ---
 
 ## Install

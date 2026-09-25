@@ -1,0 +1,11 @@
+# x . x + x over f32, emitted by Tlaloc for two lengths
+# (./gradlew :maestro:exportTritonExamples). Each file is compiled at load;
+# a request runs on the file whose input shape it matches, and any other
+# length is refused.
+name: "buckets"
+backend: "tlaloc"
+max_batch_size: 0
+input [ { name: "X" data_type: TYPE_FP32 dims: [ -1 ] } ]
+output [ { name: "Y" data_type: TYPE_FP32 dims: [ -1 ] } ]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "len4.mlir, len8.mlir" } }

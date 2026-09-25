@@ -1,0 +1,19 @@
+# f(A) = sum(A . A) and its gradient df/dA = 1 . A^T + A^T . 1, emitted by
+# Tlaloc (./gradlew :maestro:exportTritonExamples). Inputs and outputs map to
+# the entry function's arguments and results by position.
+name: "matmul_sumsq"
+backend: "tlaloc"
+max_batch_size: 0
+input [
+  { name: "A" data_type: TYPE_FP32 dims: [ 2, 2 ] }
+]
+output [
+  # The function returns a rank-0 tensor. Triton has no rank-0 tensors in a
+  # non-batching model, so it is declared as [ 1 ] and the backend maps one
+  # to the other.
+  { name: "VALUE" data_type: TYPE_FP32 dims: [ 1 ] },
+  { name: "GRAD" data_type: TYPE_FP32 dims: [ 2, 2 ] }
+]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "model.mlir" } }
+parameters: { key: "entry" value: { string_value: "matmul_sumsq_grad" } }
