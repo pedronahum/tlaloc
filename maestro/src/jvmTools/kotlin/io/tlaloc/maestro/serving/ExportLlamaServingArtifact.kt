@@ -20,7 +20,10 @@ import java.nio.file.Path
  * layers keeps their KV in a windowed pool; `false` gives them full-history
  * pools), `prefillMaxBatch` (default `maxBatch`: prefill entries for every
  * batch of the ladder up to it, so the prompts of several sequences that
- * arrive together are prefilled in one call).
+ * arrive together are prefilled in one call), `weightDType` (`f32` or `bf16`,
+ * default the family's: f32 for Llama and Qwen3, bf16 for Muse Glimmer; bf16
+ * keeps a bf16 checkpoint's weights as stored, half the bytes of f32, and
+ * every projection then rounds its input to bf16 and sums in f32).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -31,7 +34,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch]"
+            "[prefillMaxBatch] [weightDType]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -52,10 +55,18 @@ fun main(args: Array<String>) {
     }
 
     val prefillMaxBatch = arg(10, maxBatch)
+    val weightDType = when (val w = args.getOrNull(11)?.trim()?.lowercase().orEmpty()) {
+        "" -> null
+        "f32" -> io.tlaloc.core.F32
+        "bf16" -> io.tlaloc.core.BF16
+        else -> throw IllegalArgumentException("weightDType must be f32 or bf16, got '$w'")
+    }
 
     HfCheckpoint.open(ckptDir).use { ckpt ->
         val layers = arg(2, ckpt.config.numLayers)
-        val config = ckpt.config.copy(numLayers = layers)
+        val config = ckpt.config.copy(numLayers = layers).let {
+            if (weightDType == null) it else it.copy(weightDType = weightDType)
+        }
         val policy = DecodeBucketPolicy(
             maxBatch = maxBatch, maxContext = maxContext,
             blockSize = blockSize, minContext = maxContext,

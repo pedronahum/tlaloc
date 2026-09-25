@@ -80,7 +80,8 @@ def prompts_for(args, vocab):
         return [a["promptTokens"], b["promptTokens"],
                 a["promptTokens"] + a["generatedTokens"][:6], b["promptTokens"] + b["generatedTokens"][:3]]
     rng = np.random.default_rng(args.seed)
-    return [[int(t) for t in rng.integers(0, vocab, n)] for n in (13, 5, 21, 9)]
+    # The window models refuse their last two ids (placeholder stand-ins).
+    return [[int(t) for t in rng.integers(0, vocab - 2, n)] for n in (13, 5, 21, 9)]
 
 
 def median(xs):

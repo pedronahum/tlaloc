@@ -66,7 +66,9 @@ import kotlin.random.Random
  *   window of 8 positions, in pages of 4, up to 64 positions. In
  *   `window_sequence` the two sliding layers keep their KV in a windowed pool
  *   (a ring of 3 pages per sequence); in `window_sequence_full` every layer
- *   keeps full-history pages. The two must give the same logits.
+ *   keeps full-history pages. The two must give the same logits. Token ids
+ *   62 and 63 stand in for a multimodal checkpoint's image and video
+ *   placeholders: the manifest lists them and the backend refuses them.
  *   `window_sequence/1/tlaloc-serving-short-ring.json` is its manifest with a
  *   ring of one page, which the backend must refuse at load.
  *
@@ -248,6 +250,9 @@ private val WINDOW_MODEL = HfDecoderConfig(
         DecoderLayerSpec(attention = AttentionKind.SLIDING, slidingWindow = 8),
         DecoderLayerSpec(attention = AttentionKind.FULL),
     ),
+    // Stand-ins for a multimodal checkpoint's placeholders: the manifest
+    // lists them and the backend refuses them by name.
+    refusedTokenIds = mapOf(62 to "image_token_id", 63 to "video_token_id"),
 )
 
 /**
@@ -280,6 +285,7 @@ private fun exportWindowModel(dir: Path, windowed: Boolean) {
         specs = specs,
         stageWeight = { slot -> weights.getValue(slot.name) },
         build = { spec -> HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT) },
+        refusedTokenIds = config.refusedTokenIds,
     )
 }
 

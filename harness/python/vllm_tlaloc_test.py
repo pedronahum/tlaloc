@@ -305,6 +305,143 @@ class SchedulerOutputAdapterTest(unittest.TestCase):
         self.assertEqual(([], [], []), (new, decode, finished))
 
 
+def _slot(name, role, dtype, dims):
+    return {"name": name, "role": role, "type": {"dtype": dtype, "dims": list(dims)}}
+
+
+def _prefill_manifest(refused=()):
+    """A one-layer artifact at blockSize 2 with a decode entry (1, 8) and a
+    prefill entry (2, 8): eight tokens per row, a four-page table."""
+    pool = [8, 2, 1, 2]
+
+    def entry(kind, b, t):
+        return {
+            "kind": kind, "batch": b, "context": 8, "tokensPerSeq": t, "maxBlocksPerSeq": 4,
+            "cacheKey": f"{kind}{b}", "entryPoint": "main", "bodyPath": f"bodies/{kind}.mlir",
+            "bodyHash": "0", "programPath": f"programs/{kind}.json",
+            "inputs": [
+                _slot("tokenIds", "TOKEN_IDS", "i32", (b, t)),
+                _slot("positions", "POSITIONS", "i32", (b, t)),
+                _slot("blockTables", "BLOCK_TABLES", "i32", (b, 4)),
+                _slot("seqLens", "SEQ_LENS", "i32", (b,)),
+                _slot("slotMapping", "SLOT_MAPPING", "i32", (b * t,)),
+                _slot("keyCache0", "KV_POOL_IN", "f32", pool),
+                _slot("valueCache0", "KV_POOL_IN", "f32", pool),
+            ],
+            "outputs": [
+                _slot("logits", "LOGITS", "f32", (b, 1, 3)),
+                _slot("keyOut0", "KV_POOL_OUT", "f32", pool),
+                _slot("valueOut0", "KV_POOL_OUT", "f32", pool),
+            ],
+            "donationPairs": [[5, 1], [6, 2]],
+        }
+
+    return {
+        "schemaVersion": "tlaloc-serving-v2", "modelName": "fake", "modelHash": "fake",
+        "model": {"numLayers": 1, "kvDtype": "f32", "kvPoolDims": pool,
+                  "refusedTokens": [{"id": i, "configKey": "image_token_id"} for i in refused]},
+        "bucketLadder": {"blockSize": 2, "batch": [1, 2], "context": [8]},
+        "weights": {"format": "embedded", "path": None, "embedded": True},
+        "entries": [entry("decode", 1, 1), entry("prefill", 2, 8)],
+    }
+
+
+class _RecordingEngine:
+    """Records what one execution was handed; returns logits whose row r is
+    [r, r, r] and the pools unchanged."""
+
+    name = "recording"
+
+    def __init__(self):
+        self.calls = []
+
+    def run(self, exe, staged, outputs):
+        self.calls.append({slot.role: list(v) for slot, v in staged if slot.role != "KV_POOL_IN"})
+        b = outputs[0].dims[0]
+        pools = [list(v) for slot, v in staged if slot.role == "KV_POOL_IN"]
+        return [[float(r) for r in range(b) for _ in range(3)]] + pools
+
+    def close(self):
+        pass
+
+
+def _artifact(refused=()):
+    import tlaloc_serve
+
+    art = tlaloc_serve.ServingArtifact(Path("/nonexistent"), _prefill_manifest(refused), platform="cpu",
+                                       engine="jax")
+    art.engine = _RecordingEngine()
+    art.compiled = lambda entry: entry.entry_id
+    return art
+
+
+class RunPrefillTest(unittest.TestCase):
+    """`ServingArtifact.run_prefill`'s marshalling, with an engine that only
+    records: right-aligned rows, the padding convention, the entry chosen."""
+
+    def test_two_chunks_are_right_aligned_in_one_call(self):
+        art = _artifact()
+        logits, pools = art.run_prefill([[5, 6, 7], [9]], [0, 4], [[1, 2], [3, 4, 5]], art.empty_pools())
+        self.assertEqual(1, len(art.engine.calls), "two prompts, one call")
+        call = art.engine.calls[0]
+        pad = 0
+        self.assertEqual([pad] * 5 + [5, 6, 7] + [pad] * 7 + [9], call["TOKEN_IDS"])
+        self.assertEqual([0] * 5 + [0, 1, 2] + [0] * 7 + [4], call["POSITIONS"])
+        # Positions 0, 1 on page 1 and 2 on page 2 (blockSize 2); position 4
+        # of the second sequence on its third page, 5. Padding writes nowhere.
+        self.assertEqual([-1] * 5 + [2, 3, 4] + [-1] * 7 + [10], call["SLOT_MAPPING"])
+        self.assertEqual([1, 2, 0, 0, 3, 4, 5, 0], call["BLOCK_TABLES"])
+        self.assertEqual([3, 5], call["SEQ_LENS"])
+        self.assertEqual([[[0.0] * 3], [[1.0] * 3]], logits, "one last-token row per sequence")
+        self.assertEqual(2, len(pools))
+
+    def test_a_left_aligned_row_would_be_seen(self):
+        """Control: the check above reads where the last token lands."""
+        art = _artifact()
+        art.run_prefill([[5, 6, 7]], [0], [[1, 2]], art.empty_pools())
+        self.assertEqual(7, art.engine.calls[0]["TOKEN_IDS"][7])
+        self.assertNotEqual(5, art.engine.calls[0]["TOKEN_IDS"][0])
+
+    def test_a_chunk_past_its_pages_is_refused(self):
+        art = _artifact()
+        with self.assertRaisesRegex(ValueError, "needs page 1 but its block table has 1"):
+            art.run_prefill([[5, 6, 7]], [0], [[1]], art.empty_pools())
+
+    def test_no_entry_holding_the_call_is_refused_by_name(self):
+        art = _artifact()
+        self.assertIsNone(art.prefill_entry(3, 4))
+        with self.assertRaisesRegex(ValueError, "no prefill entry holds 3 sequence"):
+            art.run_prefill([[1, 2]] * 3, [0] * 3, [[1], [2], [3]], art.empty_pools())
+
+    def test_a_refused_token_is_refused_by_name_before_anything_runs(self):
+        art = _artifact(refused=(2,))
+        with self.assertRaisesRegex(ValueError, "token 1 is 2, the model's image_token_id placeholder"):
+            art.run_prefill([[1, 2]], [0], [[1]], art.empty_pools())
+        self.assertEqual([], art.engine.calls)
+        # Control: the same prompt without it runs.
+        art.run_prefill([[1, 1]], [0], [[1]], art.empty_pools())
+        self.assertEqual(1, len(art.engine.calls))
+
+    def test_the_runner_writes_a_prompt_with_one_prefill_call(self):
+        from vllm_tlaloc.runner import TlalocModelRunner
+
+        r = TlalocModelRunner.__new__(TlalocModelRunner)
+        r.artifact = _artifact()
+        r.pool = PagePool(num_blocks=8, block_size=2)
+        r.kv_pools = r.artifact.empty_pools()
+        r.tokens = {}
+        r.prefill_calls = 0
+        r.add_sequence(0, [4, 5, 6, 7, 8])
+        self.assertEqual(1, len(r.artifact.engine.calls), "four prompt tokens, one call")
+        self.assertEqual(1, r.prefill_calls)
+        self.assertEqual([4, 5, 6, 7], r.artifact.engine.calls[0]["TOKEN_IDS"][4:8])
+        self.assertEqual(4, r.pool.sequence(0).length, "the last prompt token is the first step's feed")
+        # A prompt of two tokens walks its one token with a decode step.
+        r.add_sequence(1, [4, 5])
+        self.assertEqual(2, len(r.artifact.engine.calls))
+        self.assertEqual([4], r.artifact.engine.calls[1]["TOKEN_IDS"])
+
+
 class SamplingTest(unittest.TestCase):
     def test_argmax_with_ties_to_the_lowest_index(self):
         self.assertEqual(1, greedy_sample([0.0, 2.0, 2.0, 1.0]))

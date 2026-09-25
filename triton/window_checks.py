@@ -32,6 +32,11 @@ three-layer decoder twice: `window_sequence`, whose two sliding-window layers
              and not required)
   exhausted  with the windowed pool's rings taken, one more START is refused
              by name, and after END a new sequence runs
+  refused    ids 62 and 63, which the manifest lists as the model's image and
+             video placeholders, are refused by name (in a START and in a
+             later request, over HTTP and gRPC); the refused request leaves the
+             sequence as it was (its next logits equal those of a sequence that
+             never sent it); id 61 (the control) is accepted
 
 Exit status 0 only if every check passes. With --perturb each request of
 window_sequence is compared with the full-history model's NEXT request, so the
@@ -63,7 +68,11 @@ def params(http, model):
     return {k: v["string_value"] for k, v in cfg.get("parameters", {}).items()}
 
 
-def tokens(seed, n, vocab=64):
+# Ids 62 and 63 stand in for image and video placeholders and are refused.
+REFUSED = {62: "image_token_id", 63: "video_token_id"}
+
+
+def tokens(seed, n, vocab=62):
     return [int(t) for t in np.random.default_rng(seed).integers(0, vocab, n)]
 
 
@@ -184,6 +193,34 @@ def exhausted(url, http):
         c.end(500 + k)
 
 
+def refused_ids(url, protocol):
+    print(f"{protocol:4}  window_sequence, refused token ids  {url}")
+    c = SequenceClient(url, "window_sequence", protocol)
+    prompt = tokens(11, 9)
+    for sid, bad in ((700, 62), (701, 63)):
+        try:
+            c.step(sid, prompt[:3] + [bad] + prompt[3:], start=True, end=True)
+            check(False, f"a START holding {bad} is refused")
+        except Exception as e:  # noqa: BLE001 - the message is checked
+            check(f"is {bad}, the model's {REFUSED[bad]} placeholder" in str(e),
+                  f"a START holding {bad} is refused by name: {str(e)[:150]}")
+    # Mid-sequence: the refused request changes nothing.
+    ref = c.step(702, prompt, start=True)
+    ref_next = c.step(702, [5], end=True)
+    c.step(703, prompt, start=True)
+    try:
+        c.step(703, [63])
+        check(False, "a later request holding 63 is refused")
+    except Exception as e:  # noqa: BLE001 - the message is checked
+        check("video_token_id placeholder" in str(e), f"a later request holding 63 is refused by name")
+    got = c.step(703, [5], end=True)
+    check(ref is not None and np.array_equal(got, ref_next),
+          "after the refused request the sequence's next logits equal those of a sequence that never sent it")
+    # Control: the id below them is an ordinary token.
+    out = c.step(704, prompt + [61], start=True, end=True)
+    check(out is not None, "id 61, which the manifest does not list, is accepted")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--http", default="localhost:8000")
@@ -195,6 +232,8 @@ def main():
     if not args.perturb:
         batched(args.http)
         exhausted(args.http, args.http)
+        refused_ids(args.http, "http")
+        refused_ids(args.grpc, "grpc")
     if failures:
         print(f"{len(failures)} window check(s) FAILED")
         return 1

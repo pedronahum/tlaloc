@@ -29,9 +29,9 @@ WHAT IT DOES
 Loads the artifact, re-hashes every body against its own filename, stages the
 weight table if there is one, and then greedy-decodes: one token per call, KV
 pools threaded through the loop, argmax on the host. The prompt runs as N
-single-token decode steps rather than one prefill call, because the ragged
-chunked-prefill form of PAGED_ATTENTION is a still-open performance deferral
-in this repo — not a correctness one.
+single-token decode steps, which works for any artifact; an artifact with a
+prefill entry can take it in one call instead (`ServingArtifact.run_prefill`,
+as harness/python/run_llama_generate.py does). The two write the same KV.
 
 THE PAGE ARITHMETIC, WHICH IS THE PART THAT CAN BE WRONG SILENTLY
 =================================================================

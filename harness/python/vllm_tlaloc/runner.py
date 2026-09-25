@@ -27,13 +27,10 @@ single place that rule is written down.
   takes and returns host lists, so here a step still moves every pool to
   the host and back, and that is a PERFORMANCE fact, not a correctness one.
 
-* **A sequence is admitted with a one-token prompt, and a longer prompt is
-  refused BY NAME.** There is no prefill entry in the artifact yet (H3a's
-  deferral: the contract and the ladder carry `DecodeGraphKind.PREFILL` and
-  nothing exports one). A runner that quietly decoded a long prompt one
-  token at a time would be "working" while doing something no serving
-  system would accept, and the refusal is where the deferral becomes
-  visible to whoever hits it.
+* **A prompt is written by one prefill call when the artifact can.** All
+  but its last token go through `ServingArtifact.run_prefill` when the
+  artifact has a prefill entry that holds them, else one decode step per
+  token (`add_sequence`).
 
 * **Sampling is host-side and greedy in v1** (`batching.greedy_sample`),
   per the audit's §2.6.
@@ -97,23 +94,21 @@ class TlalocModelRunner:
         # §0.4.477 — set by `step`; None until one has run (see `step`).
         self.last_call = None
         self.last_logits = None
+        # Prompts written by one prefill call (`add_sequence`).
+        self.prefill_calls = 0
 
     # --- sequence lifecycle ---------------------------------------------
 
     def add_sequence(self, seq_id: int, prompt_token_ids) -> None:
         """Admit a sequence and consume all but the LAST prompt token.
 
-        §0.4.492 (H3c-4b) — this used to refuse any prompt but a one-token
-        one, and that refusal is what a real `LLM.generate()` hit on its
-        first step. There is still no PREFILL entry in the artifact (H1a's
-        ragged form is the open deferral), so the prompt is consumed the way
-        `run_llama_generate.py` has consumed it since §0.4.480 and
-        §0.4.479's parity lane before that: as `len(prompt) - 1` single-token
-        decode steps, each writing one KV slot, feeding position `i` at
-        `seqLens = i + 1`. Attention is causal, so those steps compute
-        exactly the KV a fused prefill would; the cost is N launches instead
-        of one, which makes this a PERFORMANCE deferral and not a
-        correctness one.
+        When the artifact has a prefill entry that holds them, those tokens
+        are written by ONE call (`ServingArtifact.run_prefill`, the chunk
+        right-aligned in its row); otherwise, and for a prompt of one or two
+        tokens, as `len(prompt) - 1` single-token decode steps, each writing
+        one KV slot, feeding position `i` at `seqLens = i + 1`. Attention is
+        causal, so both write the KV the decode loop would; the prefill call
+        is one launch instead of N.
 
         The LAST prompt token is deliberately left unconsumed: it is the
         token the caller's first `step` feeds, and the logits it produces
@@ -134,7 +129,16 @@ class TlalocModelRunner:
             )
         self.pool.add_sequence(seq_id)
         self.tokens[seq_id] = list(prompt)
-        for tok in prompt[:-1]:
+        walk = prompt[:-1]
+        find = getattr(self.artifact, "prefill_entry", None)
+        if len(walk) >= 2 and find is not None and find(1, len(walk)) is not None:
+            s = self.pool.reserve(seq_id, len(walk))
+            _, pools = self.artifact.run_prefill([walk], [0], [list(s.blocks)], kv_pools=self.kv_pools)
+            self.kv_pools = pools
+            s.length = len(walk)
+            self.prefill_calls += 1
+            return
+        for tok in walk:
             self._prefill_step(seq_id, tok)
 
     def free_sequence(self, seq_id: int) -> None:

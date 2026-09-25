@@ -16,6 +16,16 @@
 // ring_pages * block_size - min(start, window - 1) tokens, so that no call
 // writes over a position one of its own rows still reads.
 //
+// When a sequence needs pages the pool does not have, the backend reclaims
+// pages from sequences Triton has ended without telling it (idle for longer
+// than the reclaim rule in sequence_mode.cc), least recently active first, and
+// only as many as the request needs. It never takes pages from a sequence
+// Triton still holds: if reclaiming is not enough the request is refused by
+// name (UNAVAILABLE), the refusal lists the sequences holding pages, and a
+// sequence refused mid-generation keeps its pages and KV, so the same request
+// can be sent again once pages are free. There is no preemption of live
+// sequences (swapping their KV out or recomputing it later).
+//
 // The requests of several tokens that arrive in one batch (the prompts of
 // sequences started together) are prefilled together: an artifact with
 // prefill entries of batch > 1 runs the prompts of a context bucket in one
@@ -121,6 +131,9 @@ class SequenceModel {
   int MaxPrefillBatch(int context) const;
   // The largest batch of any prefill entry (0 without prefill entries).
   int max_prefill_batch() const { return max_prefill_batch_; }
+  // Token ids the manifest refuses (model.refusedTokens), with the config key
+  // naming each: a multimodal checkpoint's image and video placeholders.
+  const std::map<int32_t, std::string>& refused_tokens() const { return refused_tokens_; }
 
  private:
   SequenceModel() = default;
@@ -156,6 +169,7 @@ class SequenceModel {
   bool donate_pools_ = true;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
   std::string pages_output_;
+  std::map<int32_t, std::string> refused_tokens_;
 };
 
 // The KV pages of one model instance, of one pool class. Page 0 is never
@@ -209,8 +223,16 @@ class SequenceInstance {
   // as one decode step per token.
   void RunPrompts(const std::vector<Work*>& works, uint64_t* compute_start, uint64_t* compute_end,
                   const std::function<void()>& note);
-  // Frees the sequences Triton has ended for being idle (see the definition).
-  void Reap(uint64_t now);
+  // Frees, least recently active first, sequences Triton has ended for being
+  // idle (see the definition) until `need` pages and `need_ring` windowed
+  // pages are free or no such sequence is left. `for_id` is the sequence
+  // that needs them (for the log).
+  void Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id);
+  // The idle time after which the backend may free a sequence (the rule in
+  // Reclaim's definition), and a description of the sequences holding pages,
+  // most pages first, for a refusal.
+  uint64_t ReclaimLimit() const;
+  std::string Holders(uint64_t now, uint64_t except) const;
   void Free(uint64_t corrid, const char* why);
   // Runs `entry` on the given works (one row each, `tokens` of each placed in
   // its row), stores the state results and each work's logits row.

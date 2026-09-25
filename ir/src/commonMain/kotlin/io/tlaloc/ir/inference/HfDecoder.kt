@@ -563,6 +563,13 @@ data class HfDecoderConfig(
      * [checkTextOnlyTokens].
      */
     val refusedTokenIds: Map<Int, String> = emptyMap(),
+    /**
+     * Under [tieWordEmbeddings], stage the head as its own slot (the
+     * embedding table transposed, a second copy on the device) instead of
+     * contracting against the table itself. False by default; the copy is
+     * kept as the control the direct head is compared with.
+     */
+    val tiedHeadCopy: Boolean = false,
 ) {
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {

@@ -18,13 +18,21 @@ Run by verify.sh against a server holding the `tinyllama` sequence-mode model
   exhaustion with the pool full, one more START is refused by name, the
              server stays live, the refused sequence has no state, and after
              ending the others a new sequence runs
+  pressure   with the pool full of live sequences, one of them needs a page
+             mid-generation: the request is refused by name (the refusal lists
+             the sequences holding pages and says the sequence keeps its KV),
+             no live sequence is reclaimed, and once another sequence ends the
+             same request succeeds and the sequence continues with exactly the
+             ids it gets alone
   idle       sequences abandoned without END lose their pages once they have
              been idle for twice max_sequence_idle_microseconds (plus a few
-             executions of queueing allowance) and a new sequence needs them
+             executions of queueing allowance) and a new sequence needs them;
+             with --log (the server log) the pages are reclaimed least recently
+             active first and only as many as a request needs
 
 Prints timings (prefill, ms per decode step alone and concurrently). Exit
 status 0 only if every check passes. With --perturb the expected ids are
-wrong and only the prefill checks run, so the run must fail.
+wrong and only the prefill and pressure checks run, so the run must fail.
 
 With --queued (against a copy of the model with a 200 ms idle timeout) it
 checks only that the backend never frees a sequence Triton still holds: 12 to
@@ -37,6 +45,8 @@ full page pool refuses by name is allowed.)
 
 import argparse
 import json
+import os
+import re
 import sys
 import threading
 import time
@@ -90,6 +100,71 @@ def refused(fn, needle):
     except Exception as e:  # tritonclient raises InferenceServerException
         return needle in str(e), str(e)
     return False, "no error"
+
+
+def reclaimed(log_path, since):
+    """The sequence ids the server log says were reclaimed after byte `since`, in order."""
+    if not log_path:
+        return None
+    time.sleep(1.0)  # the log is followed from the container: let it catch up
+    with open(log_path, errors="replace") as fh:
+        fh.seek(since)
+        text = fh.read()
+    return [int(m) for m in re.findall(r"reclaimed sequence (\d+) \(the least recently active", text)]
+
+
+def log_size(log_path):
+    return os.path.getsize(log_path) if log_path else 0
+
+
+def text_prompt(n):
+    """BOS and the four prompts' words, repeated, to n tokens: a prompt whose
+    continuation is not one repeated id."""
+    words = [t for p in PROMPTS for t in p[1:]]
+    return [1] + (words * (n // len(words) + 1))[: n - 1]
+
+
+def pressure(http, fresh, long_prompt, grower_prompt, fits, expect_solo, log_path):
+    """A pool full of live sequences, and one of them needs a page."""
+    print("== pressure")
+    n_new = len(expect_solo)
+    check(len(set(expect_solo)) > 1, f"the solo continuation {expect_solo} is not one repeated id")
+    held = []
+    first = None
+    for i in range(fits):
+        sid = fresh()
+        logits = http.step(sid, grower_prompt if i == 0 else long_prompt, start=True)
+        held.append(sid)
+        if first is None:
+            first = logits
+    grower = held[0]
+    mark = log_size(log_path)
+    # The prompt ends one position before its last page is full: the first
+    # generated token fills it, the second needs a new page.
+    ids = [int(np.argmax(first))]
+    logits = http.step(grower, ids[-1:])
+    ids.append(int(np.argmax(logits)))
+    hit, msg = refused(lambda: http.step(grower, ids[-1:]), "KV page pool exhausted")
+    check(hit, f"sequence {grower} needing a page mid-generation with the pool full is refused by "
+               f"name: {msg[:200]}")
+    check("keeps its 3 pages and the KV of its" in msg,
+          "the refusal says the sequence keeps its pages and KV and the request can be sent again")
+    check(f"{fits - 1} other sequence(s) hold pages" in msg and "is not preempted" in msg,
+          f"the refusal lists the {fits - 1} other sequences holding pages")
+    got = reclaimed(log_path, mark)
+    if got is not None:
+        check(got == [], f"no live sequence was reclaimed for it (log: {got})")
+    http.end(held[1])
+    logits = http.step(grower, ids[-1:])
+    check(logits is not None, "after another sequence ended, the same request succeeds")
+    while len(ids) < n_new:
+        ids.append(int(np.argmax(logits)))
+        if len(ids) < n_new:
+            logits = http.step(grower, ids[-1:])
+    check(ids == expect_solo,
+          f"the refused sequence continues with its ids alone: {ids} == {expect_solo}")
+    for sid in held[:1] + held[2:]:
+        http.end(sid)
 
 
 def queued(url, model):
@@ -146,6 +221,7 @@ def main():
     ap.add_argument("--perturb", action="store_true", help="expect wrong ids (negative control)")
     ap.add_argument("--queued", action="store_true",
                     help="only the queued-sequence check (a model with a short idle timeout)")
+    ap.add_argument("--log", default="", help="the server log, to check which sequences were reclaimed")
     args = ap.parse_args()
     if args.queued:
         return queued(args.http, args.model)
@@ -201,6 +277,14 @@ def main():
     alone_step = median(step_ms)
     print(f"     prefill of {len(FRANCE)} tokens: median {median(prefill_ms):.1f} ms; "
           f"decode: median {alone_step:.1f} ms per token (one sequence)")
+    per_seq = 3  # pages per sequence below: a 3-page prompt, one decode step
+    long_prompt = [1] + [450] * (per_seq * block - 2)
+    fits = pages // per_seq
+    grower_prompt = text_prompt(len(long_prompt))
+    solo = http.generate(fresh(), grower_prompt, 6)[0]
+    if args.perturb:
+        solo[-1] += 1
+    pressure(http, fresh, long_prompt, grower_prompt, fits, solo, args.log)
     if args.perturb:
         # The negative control needs only the checks above to fail.
         print(f"{len(failures)} check(s) FAILED")
@@ -249,9 +333,6 @@ def main():
 
     # -- END frees pages -------------------------------------------------------
     print("== end-frees")
-    per_seq = 3  # pages per sequence below: a 3-page prompt, one decode step
-    long_prompt = [1] + [450] * (per_seq * block - 2)
-    fits = pages // per_seq
     ok = True
     for i in range(2 * fits + 1):
         ids, _, _, _ = http.generate(fresh(), long_prompt, 2)
@@ -294,17 +375,29 @@ def main():
     wait = 2 * idle_us / 1e6 + 5.0
     print(f"     waiting {wait:.1f} s for twice the idle timeout")
     time.sleep(wait)
+    mark = log_size(args.log)
     ids, _, _, _ = http.generate(fresh(), FRANCE, 6)
     check(ids == expect, "after the idle timeout a new sequence gets pages and decodes correctly")
+    got = reclaimed(args.log, mark)
+    if got is not None:
+        check(got == abandoned[:1],
+              f"the new sequence needed one page and got it from the least recently active "
+              f"abandoned sequence only (reclaimed {got}, expected {abandoned[:1]})")
     hit, msg = refused(lambda: http.step(abandoned[0], [450]), "")
     check(hit and ("START" in msg or "no KV state" in msg),
           f"a timed-out sequence's next step is refused: {msg[:160]}")
     again = []
+    mark = log_size(args.log)
     for i in range(fits):
         sid = fresh()
         http.step(sid, long_prompt, start=True)
         again.append(sid)
     check(True, f"{fits} sequences of {per_seq} pages hold the pool again")
+    got = reclaimed(args.log, mark)
+    if got is not None:
+        check(got == abandoned[1:],
+              f"the other {fits - 1} abandoned sequences were reclaimed as new ones needed pages, "
+              f"least recently active first (in order: {got == abandoned[1:]})")
     for sid in again:
         http.end(sid)
 

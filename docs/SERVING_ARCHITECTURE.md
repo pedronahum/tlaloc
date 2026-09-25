@@ -46,6 +46,12 @@ per layer: rms_norm → q/k/v → [q/k rms_norm] → [RoPE] → KV_CACHE_WRITE �
 final rms_norm → lm_head → [soft-cap] → logits
 ```
 
+A checkpoint that ties its head to the embedding table (Qwen3) gets no head
+weight: `lm_head` is one `MATMUL` with explicit contracting dims (the hidden
+axis of the final state and of the table, a `dot_general` with
+`contracting_dims = [1] x [1]`), so the table is on the device once. In the
+reference interpreter it gives the logits of a transposed copy bit for bit.
+
 Paged attention and the KV cache write are ops of their own
 (`OpKind.PAGED_ATTENTION`, `OpKind.KV_CACHE_WRITE`). They are inference-only:
 both reverse-mode and forward-mode AD refuse them by name. RMSNorm, RoPE and
@@ -84,8 +90,9 @@ one module per entry, with the entry function named `main`:
   two `dot_general`s at HIGHEST precision (so XLA does not run them in TF32)
   and a masked softmax.
 - `KV_CACHE_WRITE` lowers to `scatter` into the pool at the token's slot.
-- bf16 weights (Muse Glimmer) stay bf16: each projection rounds its f32 input
-  to bf16 and multiplies bf16 by bf16 into f32.
+- bf16 weights (Muse Glimmer by default, Llama and Qwen3 with
+  `-PweightDType=bf16`) stay bf16: each projection rounds its f32 input to
+  bf16 and multiplies bf16 by bf16 into f32.
 
 When a graph declares a device mesh, the emitter also writes Shardy (`sdy`)
 mesh and sharding annotations. Serving artifacts are single-device, so their
@@ -121,6 +128,11 @@ The manifest records:
   pool `WINDOW_BLOCK_TABLES`, `WINDOW_SLOT_MAPPING`, `WINDOW_KV_POOL_IN`) and
   output (`LOGITS`, `KV_POOL_OUT`, `WINDOW_KV_POOL_OUT`);
 - **the weight table**: slot name, dtype, shape and byte length of each file;
+- **the refused tokens** (`model.refusedTokens`, when there are some): the
+  ids of a multimodal checkpoint's image and video placeholders, with the
+  config key naming each. The artifact is the text decoder only, and a
+  server refuses a request holding one by name (the Triton backend and
+  `tlaloc_serve.py` do);
 - **the donation pairs**: each `KV_POOL_OUT` output with the `KV_POOL_IN`
   input it replaces. The body says the same thing to XLA: each paired
   parameter of `@main` carries `tf.aliasing_output = <output index>`, so a
@@ -198,9 +210,9 @@ memory, which on a GB10 is 75% of the machine's RAM.
 | Process | one Python process: `tlaloc_serve.py` and `tlaloc_pjrt.py` (ctypes) load the plugin `.so` | vLLM's engine and worker processes; `vllm-tlaloc` replaces the model runner | `tritonserver` in the Triton container; `libtriton_tlaloc.so` loads the plugin `.so` |
 | Python packages in the serving process | none beyond the standard library | vLLM and torch (vLLM's own); no torch model is built | none: the backend is C++ |
 | Weights | uploaded once, on the device | uploaded once, on the device | uploaded once per GPU at model load, on the device |
-| KV pages | the caller allocates pages | vLLM's block manager allocates them | the backend allocates them per sequence (correlation ID) and frees them on END, or, when pages run short, after twice the idle timeout plus a queueing allowance; a sliding-window layer's pages are a ring per sequence, bounded by the window |
+| KV pages | the caller allocates pages | vLLM's block manager allocates them | the backend allocates them per sequence (correlation ID) and frees them on END; when pages run short it reclaims them from sequences idle past twice the timeout plus a queueing allowance (which Triton has ended), least recently active first, and otherwise refuses the request by name, the sequence keeping its KV; a sliding-window layer's pages are a ring per sequence, bounded by the window |
 | KV pools between steps | copied to the host and back every step | as in (i) | on the device, updated in place: each execution is handed the pools and writes them where they are |
-| Prompt | one decode step per token | one decode step per token (chunked prefill refused by name) | one prefill call; the prompts of sequences started together in one call |
+| Prompt | one prefill call (`run_prefill`) when the artifact has an entry that holds it, else one decode step per token | as in (i), for all but the prompt's last token (chunked prefill refused by name) | one prefill call; the prompts of sequences started together in one call |
 | Batching | the caller builds the batch | vLLM's scheduler | decode steps of different sequences in one call, and prompts of different sequences in one prefill call (Triton's sequence batcher, oldest strategy) |
 | Sampling | greedy, host-side | vLLM's sampler over the returned logits | the client's; the server returns logits |
 
@@ -208,7 +220,8 @@ memory, which on a GB10 is 75% of the machine's RAM.
 
 `harness/python/tlaloc_serve.py` reads the manifest, compiles entries through
 `tlaloc_pjrt.py` (ctypes over the PJRT C API), uploads the weights once and
-runs decode steps. It imports no jax, no torch and no numpy; a test runs it
+runs prefill calls (`run_prefill`: a chunk per sequence, right-aligned in its
+row, one call) and decode steps (`run_decode`). It imports no jax, no torch and no numpy; a test runs it
 with an import guard that raises on those modules.
 [examples/gpu-inference/serve.py](../examples/gpu-inference/) is the
 runnable form. It is a correctness path, not a throughput one: the KV pools
@@ -220,8 +233,9 @@ pools are uploaded fresh every step, so there is no device pool to keep.
 
 `harness/python/vllm_tlaloc` registers a vLLM platform (`TlalocPlatform`) and a
 worker. vLLM keeps its scheduler, its paged block manager, tokenizer and
-detokenizer; the worker runs the artifact's decode entries through
-`tlaloc_serve.py` and never builds a torch model. `--block-size` must equal
+detokenizer; the worker runs the artifact's entries through `tlaloc_serve.py` (a new
+sequence's prompt, but its last token, as one prefill call when the artifact
+has an entry that holds it) and never builds a torch model. `--block-size` must equal
 the artifact's `blockSize` and `--max-model-len` must lie on its context
 ladder; the plugin refuses anything else by name, because a different block
 size is a different compiled program.
@@ -251,6 +265,15 @@ compiles every entry and uploads the weights. Per request:
   smallest entry that holds them;
 - the backend derives each sequence's block table and slots from the pages it
   holds; the client sends token ids only;
+- when pages run short, the backend reclaims them only from sequences Triton
+  has already ended (idle past the rule), least recently active first and
+  only as many as needed; otherwise it refuses the request by name, listing
+  the sequences that hold pages, and a sequence refused mid-generation keeps
+  its pages and KV so the same request can be sent again. A live sequence is
+  never preempted: swapping its KV out, or dropping it and recomputing it
+  later, is not built (📐);
+- a token id the manifest lists as a placeholder is refused by name, and the
+  sequence is left as it was;
 - with a windowed KV pool the backend also keeps each sequence's ring of
   windowed pages, fills the window block table and slots from it, and splits
   a request into calls the ring can hold (each through the smallest prefill
@@ -285,7 +308,12 @@ is the system RAM), driver 580.126.09.
 | (ii) vLLM 0.29.0 `LLM.generate()`, TinyLlama | ✅ GB10 | 6 of 6 ids equal the direct driver and HuggingFace |
 | (ii) `vllm serve` (the HTTP server) | 🧪 | written, never started |
 | (iii) Triton, TinyLlama-1.1B | ✅ GB10 | `triton/verify.sh`: HuggingFace's 6 ids over HTTP and gRPC; four concurrent sequences each equal their solo run; page exhaustion and idle timeout |
-| (iii) Triton, Qwen3-0.6B | ✅ GB10 | `verify.sh`: 16 ids equal HuggingFace's for a plain and a chat-template prompt; about 19 ms a token |
+| (i) framework-free Python, a prompt as one prefill call | ✅ GB10 | `HfLlamaServingArtifactTest`: TinyLlama's 6-token prompt runs as one call of `prefill_b1_c64` and the 6 ids equal HuggingFace's; the vLLM lane on the same artifact (whose runner writes the prompt with one prefill call) gives the same ids |
+| (iii) Triton, Qwen3-0.6B | ✅ GB10 | `verify.sh`: 16 ids equal HuggingFace's for a plain and a chat-template prompt, the plain one also sent as text; the tied head reads the embedding table (310 weights, 2273 MiB, against 2867 MiB with a copy); about 15 ms a token |
+| (iii) Triton, Qwen3-0.6B with bf16 weights | ✅ GB10 | `verify.sh`: 1136 MiB on the device (half), all 32 ids equal HuggingFace's, logits within 3.0e-3 of the largest; about 11 ms a token |
+| (iii) Triton, a full page pool | ✅ GB10 | `verify.sh` (TinyLlama): a live sequence that needs a page when 21 sequences hold the pool is refused by name, nothing is reclaimed from live sequences, and after another sequence ends the same request succeeds and the sequence's ids equal its solo run's; abandoned sequences' pages are reclaimed least recently active first, only as many as needed (read from the server log) |
+| (iii) Triton, preemption of live sequences (KV swap or recompute) | 📐 | not built |
+| (iii) Triton, image and video placeholder ids refused | ✅ GB10 | `verify.sh`: the window models' stand-in ids are refused by name in a START and mid-sequence, the sequence unchanged; Muse Glimmer's 200091 and 200092 with `MUSE_GLIMMER=1` |
 | (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic, served from a v3 artifact whose 39 sliding layers are in the windowed pool; about 245 ms a token |
 | (iii) Triton, windowed KV pool for sliding-window layers | ✅ GB10 | `verify.sh`: a three-layer decoder with random weights (window 8, pages of 4, rings of 3 pages) grown to 60 positions holds at most 3 windowed pages while its full pages reach 15, and its logits equal the same model with full-history pages sent the same calls (worst 5.3e-7 of the largest logit), over HTTP and gRPC, alone and batched; the reference interpreter gives bit-identical logits for the two layouts over several windows, and a ring one page short or a call one token too long changes them |
 | (iii) Triton, prompts of several sequences prefilled in one call | ✅ GB10 | `verify.sh`: 2 and 4 TinyLlama and Qwen3-0.6B prompts sent together run in one call of a batch-2 or batch-4 prefill entry and give their solo argmax and the same 8 greedy ids as alone, over HTTP and gRPC (logits within 5e-3 of the largest; the batched entry is a different executable under TF32); the reference interpreter gives the solo logits and the solo continuation bit for bit, with full-history and windowed pools, and padding that writes its KV or a left-aligned row changes them |

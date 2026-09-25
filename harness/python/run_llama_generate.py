@@ -13,12 +13,12 @@ plugin `.so` and a driver (§0.4.476).
 WHAT IT DOES
 ============
 
-Loads the artifact, stages its weight table once, and runs a prompt as N+M
-single-token decode steps with the KV pools threaded through, picking the
-argmax at each step. The prompt is a sequence of decode steps rather than one
-prefill call because `PAGED_ATTENTION`'s ragged chunked-prefill form is H1a's
-still-open deferral — a PERFORMANCE deferral, not a correctness one, and the
-same choice §0.4.479's parity lane made.
+Loads the artifact, stages its weight table once, and runs the prompt as one
+prefill call when the artifact has a prefill entry that holds it
+(`ServingArtifact.run_prefill`), else as one single-token decode step per
+prompt token; then one decode step per generated token, with the KV pools
+threaded through, picking the argmax at each step. `--no-prefill` walks the
+prompt with decode steps even when a prefill entry exists (the control).
 
 THE PAGE ARITHMETIC, WHICH IS THE PART THAT CAN BE WRONG SILENTLY
 =================================================================
@@ -57,6 +57,8 @@ def main() -> int:
     ap.add_argument("--platform", default="cuda")
     ap.add_argument("--engine", default=None)
     ap.add_argument("--verify-weights", action="store_true")
+    ap.add_argument("--no-prefill", action="store_true",
+                    help="walk the prompt with decode steps even if a prefill entry exists")
     args = ap.parse_args()
 
     try:
@@ -90,7 +92,7 @@ def main() -> int:
         art.verify_bodies()
         if args.verify_weights:
             art.verify_weights()
-        entry = art.entries[0]
+        entry = next(e for e in art.entries if e.kind == "decode")
         block_size = art.block_size
         mbs = entry.max_blocks_per_seq
         capacity = block_size * mbs
@@ -109,13 +111,31 @@ def main() -> int:
         table = [p + 1 for p in range(mbs)]
         pools = art.empty_pools()
 
+        def argmax_of(logits):
+            row = logits[0][-1] if isinstance(logits[0][0], list) else logits[0]
+            return max(range(len(row)), key=row.__getitem__)
+
         t0 = time.time()
         stage_t = None
         tokens = list(prompt)
         generated: list[int] = []
         step_ms: list[float] = []
-        for i in range(total - 1 + 1):
-            if i >= len(tokens):
+        prefill = None if args.no_prefill or len(prompt) < 2 else art.prefill_entry(1, len(prompt))
+        if prefill is not None:
+            # The whole prompt in one call; its last token's logits give the
+            # first generated id.
+            s0 = time.time()
+            pages = (len(prompt) + block_size - 1) // block_size
+            logits, pools = art.run_prefill([prompt], [0], [table[:pages]], pools)
+            stage_t = time.time() - s0
+            nxt = argmax_of(logits)
+            generated.append(nxt)
+            tokens.append(nxt)
+            first = len(prompt)
+        else:
+            first = 0
+        for i in range(first, total):
+            if i >= len(tokens) or len(generated) >= max_new:
                 break
             tok = tokens[i]
             slot = table[i // block_size] * block_size + (i % block_size)
@@ -130,8 +150,7 @@ def main() -> int:
                 stage_t = time.time() - s0
             else:
                 step_ms.append((time.time() - s0) * 1e3)
-            row = logits[0][-1] if isinstance(logits[0][0], list) else logits[0]
-            nxt = max(range(len(row)), key=row.__getitem__)
+            nxt = argmax_of(logits)
             if i >= len(prompt) - 1 and len(generated) < max_new:
                 generated.append(nxt)
                 tokens.append(nxt)
@@ -152,13 +171,15 @@ def main() -> int:
             "maxBlocksPerSeq": mbs,
             "compileCount": art.compile_count,
             "firstStepSeconds": stage_t,
+            "prefillEntry": prefill.entry_id if prefill is not None else None,
+            "promptCalls": 1 if prefill is not None else len(prompt),
             "medianStepMs": sorted(step_ms)[len(step_ms) // 2] if step_ms else None,
             "totalSeconds": time.time() - t0,
         }
     Path(args.output).write_text(json.dumps(result, indent=2))
     print(json.dumps({k: result[k] for k in (
-        "modelName", "numLayers", "weightSlots", "generatedTokens",
-        "firstStepSeconds", "medianStepMs")}, indent=2))
+        "modelName", "numLayers", "weightSlots", "generatedTokens", "prefillEntry",
+        "promptCalls", "firstStepSeconds", "medianStepMs")}, indent=2))
     return 0
 
 

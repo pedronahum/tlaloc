@@ -254,14 +254,79 @@ class HfQwen3Test {
         assertTrue(moved > 1e-2, "dropping the q/k norms moved the logits by only $moved")
     }
 
+    /**
+     * A tied head reads the embedding table: no head slot, one MATMUL that
+     * contracts the hidden axis of the final state and of the table.
+     */
+    @Test
+    fun aTiedHeadHasNoSlotAndContractsAgainstTheTable() {
+        val direct = HfDecoderGraph.weightRoles(small)
+        val copy = HfDecoderGraph.weightRoles(small.copy(tiedHeadCopy = true))
+        assertTrue(DecoderWeightRole.LmHead !in direct, "no head slot: $direct")
+        assertEquals(copy - DecoderWeightRole.LmHead, direct)
+        assertEquals(DecoderWeightRole.LmHead, copy.last())
+        val model = small.toDecodeModelShape(numBlocks = 4, blockSize = 4)
+        val fn = HfDecoderGraph.build(HfDecoderGraph.spec(small, model, DecodeBucket(1, 16)), small)
+        val heads = fn.body.filterIsInstance<io.tlaloc.ir.DxirOp>().filter {
+            it.op == io.tlaloc.ir.OpKind.MATMUL && "rhs_contracting_dims" in it.attrs
+        }
+        assertEquals(1, heads.size, "one head MATMUL with explicit contracting dims")
+        val head = heads.single()
+        assertEquals(listOf(1), head.attrs["lhs_contracting_dims"])
+        assertEquals(listOf(1), head.attrs["rhs_contracting_dims"])
+        assertEquals(listOf(small.vocabSize, small.hiddenSize), head.operands[1].type.dims)
+        assertTrue(head.operands[1] is io.tlaloc.ir.DxirParam, "the table itself, not a transposed copy")
+        assertTrue(fn.body.none { it is io.tlaloc.ir.DxirOp && it.op == io.tlaloc.ir.OpKind.TRANSPOSE })
+    }
+
+    /**
+     * The direct head gives the logits of the transposed copy bit for bit (the
+     * same sums in the same order); a copy with one element changed does not
+     * (the comparison can fail).
+     */
+    @Test
+    fun theDirectHeadGivesTheLogitsOfTheTransposedCopyBitForBit() {
+        val direct = decodeLoop()
+        val copy = decodeLoop(small.copy(tiedHeadCopy = true))
+        for (pos in prompt.indices) {
+            for (v in 0 until small.vocabSize) {
+                assertEquals(copy[pos][v].toRawBits(), direct[pos][v].toRawBits(), "position $pos logit $v")
+            }
+        }
+        val wrong = weights.getValue(DecoderWeightRole.LmHead).copyOf().also { it[3] += 0.25f }
+        val control = decodeLoop(small.copy(tiedHeadCopy = true), head = wrong)
+        assertTrue(
+            prompt.indices.any { p -> (0 until small.vocabSize).any { control[p][it] != direct[p][it] } },
+            "a changed head element must change a logit",
+        )
+    }
+
+    /** With bf16 weights too: the direct head rounds its input as the copy's projection does. */
+    @Test
+    fun theDirectHeadMatchesTheCopyWithBf16Weights() {
+        val bf16 = small.copy(weightDType = io.tlaloc.core.BF16)
+        val direct = decodeLoop(bf16)
+        val copy = decodeLoop(bf16.copy(tiedHeadCopy = true))
+        for (pos in prompt.indices) {
+            for (v in 0 until small.vocabSize) {
+                assertEquals(copy[pos][v].toRawBits(), direct[pos][v].toRawBits(), "position $pos logit $v")
+            }
+        }
+    }
+
     /** Logits at every position, one decode step per token, identity block table. */
-    private fun decodeLoop(): List<FloatArray> {
+    private fun decodeLoop(
+        config: HfDecoderConfig = small,
+        head: FloatArray = weights.getValue(DecoderWeightRole.LmHead),
+    ): List<FloatArray> {
         val blockSize = 4
         val numBlocks = 4
-        val model = small.toDecodeModelShape(numBlocks = numBlocks, blockSize = blockSize)
-        val spec = HfDecoderGraph.spec(small, model, DecodeBucket(1, numBlocks * blockSize))
-        val fn = HfDecoderGraph.build(spec, small)
-        val staged = HfDecoderGraph.weightRoles(small).map { weights.getValue(it) }
+        val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = blockSize)
+        val spec = HfDecoderGraph.spec(config, model, DecodeBucket(1, numBlocks * blockSize))
+        val fn = HfDecoderGraph.build(spec, config)
+        val staged = HfDecoderGraph.weightRoles(config).map {
+            if (it == DecoderWeightRole.LmHead) head else weights.getValue(it)
+        }
         var pools = List(2 * small.numLayers) {
             FloatArray(numBlocks * blockSize * small.numKvHeads * small.headDim)
         }

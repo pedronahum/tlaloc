@@ -29,10 +29,11 @@ import java.io.OutputStream
  * shapes, ~1.1e9 element moves per token, to save a one-off pass at load.
  *
  * WHICH TENSORS. Exactly the ones [HfDecoderNames.isTransposedLinear] says: the
- * seven projections per layer and `lm_head`. A tied head is the embedding
- * table transposed, staged as its own slot: the head costs a second copy of
- * the table on the device (622 MB in f32 for Qwen3-0.6B) in exchange for a
- * graph with no transpose in it. The two RMSNorm gains are rank-1
+ * seven projections per layer and `lm_head`. A tied head has no slot: the
+ * graph contracts the final hidden state against the embedding table's hidden
+ * axis, so the table is on the device once (a separate transposed copy was
+ * 594 MiB in f32 for Qwen3-0.6B). [HfDecoderConfig.tiedHeadCopy] stages the
+ * copy anyway, as a control. The two RMSNorm gains are rank-1
  * and the embedding table is a LOOKUP, not a Linear — transposing either would
  * be a bug that a square model could not detect, which is why the inventory
  * check and this function both go through the same predicate rather than a
@@ -93,7 +94,7 @@ object HfStagedWeights {
             val i = index
             val role = roles[i]
             val slot = slots[i]
-            if (role == DecoderWeightRole.LmHead) ckpt.verifyTiedHead()
+            if (readsHead(role, config)) ckpt.verifyTiedHead()
             val t = loadFor(ckpt, role, config)
             val data = t.toF32Array()
             val fileDims = t.dims
@@ -138,6 +139,15 @@ object HfStagedWeights {
         }
         return t
     }
+
+    /**
+     * Whether staging [role] stages the head: the head's own slot, or the
+     * embedding table when a tied head reads it directly. A tied checkpoint
+     * that also stores `lm_head.weight` is then checked to store the table.
+     */
+    private fun readsHead(role: DecoderWeightRole, config: HfDecoderConfig): Boolean =
+        role == DecoderWeightRole.LmHead ||
+            (role == DecoderWeightRole.EmbedTokens && HfDecoderGraph.headReadsEmbedding(config))
 
     /** The largest piece of a tensor [writeSlot] holds at once, in bytes. */
     const val BLOCK_BYTES: Int = 256 * 1024 * 1024
@@ -187,7 +197,7 @@ object HfStagedWeights {
                 return 4L * data.size
             }
             BF16 -> {
-                if (role == DecoderWeightRole.LmHead) ckpt.verifyTiedHead()
+                if (readsHead(role, config)) ckpt.verifyTiedHead()
                 val e = ckpt.entry(role)
                 val want = HfDecoderNames.expectedDims(role, config)
                 if (e.dims != want.toList()) {

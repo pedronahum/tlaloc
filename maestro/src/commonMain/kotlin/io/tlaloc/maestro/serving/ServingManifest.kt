@@ -268,7 +268,24 @@ data class ServingModelShape(
     val kvQuant: ServingKvQuant? = null,
     /** The windowed KV pool class, or null when every layer keeps full-history pages. */
     val windowedKv: ServingWindowedKv? = null,
+    /**
+     * Token ids a server must refuse, by id, with the config key that names
+     * each: a multimodal checkpoint's image and video placeholders, which the
+     * text-only graph would embed as ordinary rows where the full model puts
+     * vision features. Written only when there are some.
+     */
+    val refusedTokens: List<ServingRefusedToken> = emptyList(),
 ) {
+    init {
+        val dup = refusedTokens.groupBy { it.id }.filterValues { it.size > 1 }.keys
+        require(dup.isEmpty()) { "ServingModelShape: refused token ids listed twice: $dup" }
+        for (t in refusedTokens) {
+            require(t.id in 0 until vocabSize) {
+                "ServingModelShape: refused token ${t.id} (${t.configKey}) is outside the vocabulary [0, $vocabSize)"
+            }
+        }
+    }
+
     val kvPoolAxisOrder: List<String> = listOf("numBlocks", "blockSize", "numKvHeads", "headDim")
     val kvPoolDims: List<Int> = listOf(numBlocks, blockSize, numKvHeads, headDim)
 
@@ -288,6 +305,9 @@ data class ServingModelShape(
         append("\"kvPoolAxisOrder\":").append(kvPoolAxisOrder.joinToString(",", "[", "]") { jsonStr(it) }).append(',')
         append("\"kvPoolDims\":").append(kvPoolDims.joinToString(",", "[", "]"))
         if (windowedKv != null) append(",\"windowedKv\":").append(windowedKv.toJson(this@ServingModelShape))
+        if (refusedTokens.isNotEmpty()) {
+            append(",\"refusedTokens\":").append(refusedTokens.joinToString(",", "[", "]") { it.toJson() })
+        }
         append("}")
     }
 
@@ -303,7 +323,21 @@ data class ServingModelShape(
             // so instead of failing on a field it did not have.
             kvQuant = (o["kvQuant"] as? JsonObject)?.let { ServingKvQuant.fromJson(it) },
             windowedKv = (o["windowedKv"] as? JsonObject)?.let { ServingWindowedKv.fromJson(it) },
+            refusedTokens = (o["refusedTokens"] as? JsonArray)?.elements?.map { v ->
+                ServingRefusedToken.fromJson(
+                    v as? JsonObject ?: throw JsonException("ServingModelShape: a refusedTokens entry is not an object"),
+                )
+            } ?: emptyList(),
         )
+    }
+}
+
+/** A token id a server refuses, and the config key that names it (`image_token_id`). */
+data class ServingRefusedToken(val id: Int, val configKey: String) {
+    fun toJson(): String = "{\"id\":$id,\"configKey\":${jsonStr(configKey)}}"
+
+    companion object {
+        fun fromJson(o: JsonObject): ServingRefusedToken = ServingRefusedToken(o.int("id"), o.str("configKey"))
     }
 }
 

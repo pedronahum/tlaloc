@@ -86,8 +86,22 @@ object HfDecoderGraph {
             DecodeSlot(slotName(role), DxirType(config.weightDType, dims), DecodeSlotRole.WEIGHT)
         }
 
-    /** The [DecoderWeightRole] each slot of [weightSlots] carries, same order. */
-    fun weightRoles(config: HfDecoderConfig): List<DecoderWeightRole> = HfDecoderNames.roles(config)
+    /**
+     * The [DecoderWeightRole] each slot of [weightSlots] carries, same order.
+     *
+     * A tied head ([HfDecoderConfig.tieWordEmbeddings]) has no slot of its
+     * own unless [HfDecoderConfig.tiedHeadCopy] asks for one: the head
+     * contracts the final hidden state against the embedding table's hidden
+     * axis ([tiedHead]), so the table is on the device once.
+     */
+    fun weightRoles(config: HfDecoderConfig): List<DecoderWeightRole> {
+        val all = HfDecoderNames.roles(config)
+        return if (headReadsEmbedding(config)) all - DecoderWeightRole.LmHead else all
+    }
+
+    /** True when the head reads the embedding table directly (a tied head without a copy). */
+    fun headReadsEmbedding(config: HfDecoderConfig): Boolean =
+        config.tieWordEmbeddings && !config.tiedHeadCopy
 
     /** The slot name of a role: `embedTokens`, `qProj3`, `kNorm0`, `lmHead`, ... */
     fun slotName(role: DecoderWeightRole): String = when (role) {
@@ -572,7 +586,11 @@ object HfDecoderGraph {
 
             // ---- final norm + head ---------------------------------------
             val hf = rmsNorm(last, weight(DecoderWeightRole.FinalNorm), listOf(b, d))
-            var logits2 = proj(hf, weight(DecoderWeightRole.LmHead), config.vocabSize)
+            var logits2 = if (headReadsEmbedding(config)) {
+                tiedHead(this, hf, weight(DecoderWeightRole.EmbedTokens))
+            } else {
+                proj(hf, weight(DecoderWeightRole.LmHead), config.vocabSize)
+            }
             if (config.logitMultiplier != 1.0) logits2 = times(logits2, config.logitMultiplier)
             val cap = config.finalLogitSoftcap
             if (cap != null) {
@@ -585,5 +603,24 @@ object HfDecoderGraph {
         }
         spec.verifySignature(fn, "HfDecoderGraph")
         return fn
+    }
+
+    /**
+     * The logits of a tied head: `h @ E^T` for the final hidden state `h`
+     * (`[rows, hidden]`, f32) and the embedding table `E` (`[vocab, hidden]`),
+     * as one [OpKind.MATMUL] that contracts the hidden axis of both
+     * (`lhs_contracting_dims = [1]`, `rhs_contracting_dims = [1]`, a
+     * `stablehlo.dot_general` with no transpose and no second copy of the
+     * table). With BF16 weights `h` is rounded to bf16 first and the product
+     * is taken into f32, as every other projection is.
+     */
+    private fun tiedHead(b: DxirBuilder, h: DxirNode, table: DxirNode): DxirNode = with(b) {
+        val rows = h.type.dims[0]
+        val vocab = table.type.dims[0]
+        val lhs = if (table.type.dtype == F32) h else op(OpKind.CAST, listOf(h), DxirType(table.type.dtype, h.type.dims))
+        op(
+            OpKind.MATMUL, listOf(lhs, table), DxirType(F32, listOf(rows, vocab)),
+            attrs = mapOf("lhs_contracting_dims" to listOf(1), "rhs_contracting_dims" to listOf(1)),
+        )
     }
 }

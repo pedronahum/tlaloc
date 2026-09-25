@@ -151,6 +151,9 @@ class HfLlamaServingArtifactTest {
             assertEquals(manifest.model.numLayers, run.int("numLayers"))
             assertEquals(manifest.weights.table.size, run.int("weightSlots"))
             assertEquals(promptIds, run.ints("promptTokens"))
+            // The artifact has a prefill entry, so the prompt is one call.
+            assertEquals("prefill_b1_c$CONTEXT", run.str("prefillEntry"))
+            assertEquals(1, run.int("promptCalls"), "the prompt was not written by one prefill call")
 
             val got = run.ints("generatedTokens")
             val agree = got.zip(oracleIds).takeWhile { (a, b) -> a == b }.size

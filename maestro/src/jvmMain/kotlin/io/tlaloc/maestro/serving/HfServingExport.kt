@@ -159,7 +159,10 @@ object HfServingExport {
                 "h${config.hiddenSize}:v${config.vocabSize}" +
                 // Existing f32 hashes are unchanged; a bf16 weight table is a
                 // different program input and says so.
-                if (config.weightDType == io.tlaloc.core.F32) "" else ":w${config.weightDType.name}",
+                (if (config.weightDType == io.tlaloc.core.F32) "" else ":w${config.weightDType.name}") +
+                // A tied head that reads the embedding table binds one weight
+                // fewer than one staged as a copy: a different signature.
+                (if (HfDecoderGraph.headReadsEmbedding(config)) ":tiedHead" else ""),
             model = model,
             ladder = ServingArtifactWriter.ladderOf(policy),
             specs = specs,
@@ -171,6 +174,9 @@ object HfServingExport {
                 HfStagedWeights.writeSlot(ckpt, config, i, out)
             },
             build = build,
+            // A multimodal checkpoint's image and video placeholders: the
+            // text-only graph must not be fed them, and a server refuses them.
+            refusedTokenIds = config.refusedTokenIds,
         )
     }
 }

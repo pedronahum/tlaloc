@@ -21,8 +21,10 @@
 #      a decoder whose sliding-window layers keep their KV in a windowed pool
 #      (a ring of 3 pages per sequence) holds at most 3 windowed pages as a
 #      sequence grows to 60 positions and gives the logits of the same model
-#      with full-history pages, over HTTP and gRPC, alone and batched, and a
-#      START with every ring taken is refused by name; then prefill_checks.py
+#      with full-history pages, over HTTP and gRPC, alone and batched, a
+#      START with every ring taken is refused by name, and the token ids the
+#      manifest lists as image and video placeholders are refused by name
+#      without changing the sequence; then prefill_checks.py
 #      on both window models: two prompts sent together are prefilled in one
 #      call (the log must show a batch-2 prefill entry running two sequences)
 #      and each gets its solo logits, and --perturb must fail,
@@ -38,8 +40,10 @@
 #      50 ids twice more (the server log must show every run writing the KV
 #      pools at their own device addresses, 100 of 100 runs in place), run
 #      sequence_checks.py (prefill, concurrent sequences, END and idle
-#      freeing pages, pool exhaustion), run it again with --perturb (must
-#      fail), run prefill_checks.py (1, 2 and 4 prompts prefilled together
+#      freeing pages, pool exhaustion, a live sequence refused a page
+#      mid-generation and resumed with its solo ids, idle pages reclaimed
+#      least recently active first and only as many as needed, read from the
+#      server log), run it again with --perturb (must fail), run prefill_checks.py (1, 2 and 4 prompts prefilled together
 #      give their solo argmax and decoded ids, in one call: the log must show
 #      prefill_b4_c64 running four sequences; prefill throughput), run it with
 #      --perturb (must fail), and stop the server. Control: serve the same model with
@@ -58,8 +62,14 @@
 #      check that the KV pools were updated in place, run
 #      it again with --perturb (must fail), run prefill_checks.py on the
 #      fixture's prompts as for TinyLlama (and with --perturb, which must
-#      fail), and stop the server. Without the
-#      checkpoint this step is skipped by name.
+#      fail), and stop the server. The model must upload 310 weights: its
+#      tied head reads the embedding table, with no copy of it. When the
+#      client's Python has the tokenizers package, generate_client.py sends
+#      the fixture's text prompt as text (the ids must be the fixture's
+#      prompt and continuation; a wrong expectation must fail). Then the same
+#      checkpoint exported with bf16 weights: half the MiB on the device, all
+#      32 ids equal, logits within 1e-2 of the largest, and --perturb must
+#      fail. Without the checkpoint this step is skipped by name.
 #   8. optional and opt-in (MUSE_GLIMMER=1), Muse Glimmer: 28 billion text
 #      parameters, 56 GB of bf16 weights on the device. It needs the
 #      meta-models/Muse-Glimmer-30B snapshot the fixtures name, and refuses by
@@ -74,7 +84,8 @@
 #      and f32 activations (all ids, and the logits within twice the oracle's
 #      own float32-vs-float64 noise), check that the KV pools were updated
 #      in place and that its 39 sliding-window layers have a windowed KV pool,
-#      then --perturb (must fail), and print the peak memory in use.
+#      that its image and video placeholder ids (200092, 200091) are refused by
+#      name, then --perturb (must fail), and print the peak memory in use.
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7 and 8 pass or are skipped.
 #
@@ -96,7 +107,8 @@
 #   QWEN3_CHECKPOINT      [the Qwen/Qwen3-0.6B snapshot the fixture names, in
 #                         ~/.cache/huggingface/hub]
 #   QWEN3_DIR             [triton/build/qwen3]; an existing model is reused
-#   QWEN3_REEXPORT=1      export again even if the model exists
+#   QWEN3_BF16_DIR        [triton/build/qwen3-bf16]: the same checkpoint with bf16 weights
+#   QWEN3_REEXPORT=1      export again even if the model exists (both)
 #   SKIP_QWEN3=1          skip step 7
 #   MUSE_GLIMMER=1        run step 8
 #   MUSE_GLIMMER_DIR      [triton/build/muse-glimmer]; an existing model is reused
@@ -115,7 +127,7 @@ PEAK_PID=""
 cleanup() {
   [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
   docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" \
-    "$BASE_NAME-qwen3" "$BASE_NAME-muse" "$BASE_NAME-device" >/dev/null 2>&1 || true
+    "$BASE_NAME-qwen3" "$BASE_NAME-qwen3-bf16" "$BASE_NAME-muse" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -241,6 +253,7 @@ echo "== windowed KV pool"
 "$PY" "$HERE/window_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT"
 expect_log "model 'window_sequence': uploaded 30 weights"
 expect_log "windowed KV pool for 2 sliding layers (window 8): 13 pages, a ring of at most 3 pages per sequence"
+expect_log "refuses token ids 62 (image_token_id) 63 (video_token_id)"
 expect_log "instance 'window_sequence_0_0': 6 KV pools (0 MiB) zeroed; 64 pages for sequences (page 0 is the padding page); 12 windowed pages, at most 3 per sequence"
 expect_log "instance 'window_sequence_0_0': in 100 runs the 6 KV pools were updated in place 100 times and copied 0 times"
 
@@ -332,7 +345,7 @@ else
   pools_in_place "$LOG.tinyllama"
   echo "== tinyllama sequence checks"
   "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
-    --model tinyllama
+    --model tinyllama --log "$LOG.tinyllama"
   echo "== tinyllama negative control (must fail)"
   if "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
       --model tinyllama --perturb >"$LOG.tinyllama.negative" 2>&1; then
@@ -422,8 +435,10 @@ elif [[ ! -f "$QCKPT/model.safetensors" ]]; then
 else
   Q_CONFIG="$Q_DIR/repository/qwen3/config.pbtxt"
   if [[ "${QWEN3_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$Q_CONFIG" 2>/dev/null \
-      || ! aliased "$Q_DIR/artifact" || ! batched_prefill "$Q_DIR/artifact"; then
-    # Gradle runs here with no Triton container up.
+      || ! aliased "$Q_DIR/artifact" || ! batched_prefill "$Q_DIR/artifact" \
+      || grep -q '"name":"lmHead"' "$Q_DIR/artifact/tlaloc-serving.json"; then
+    # Gradle runs here with no Triton container up. (An artifact that stages
+    # the tied head as a copy of the embedding table is exported again.)
     rm -rf "$Q_DIR"
     mkdir -p "$Q_DIR"
     (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
@@ -435,8 +450,30 @@ else
   export CONTAINER_NAME="$BASE_NAME-qwen3" MODEL_REPOSITORY="$Q_DIR/repository"
   start_server "$LOG.qwen3" 600
   grep -o "uploaded [0-9]* weights.*" "$LOG.qwen3" | head -1
+  # The tied head reads the embedding table: 310 weights, no second copy.
+  expect_in "$LOG.qwen3" "model 'qwen3': uploaded 310 weights"
   "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
     --model qwen3 --fixture "$QWEN3_FIXTURE"
+  echo "== qwen3 text prompt (byte-level BPE)"
+  if "$PY" -c "import tokenizers" 2>/dev/null; then
+    # The fixture's text prompt, tokenized by the checkpoint's tokenizer.json
+    # through the tokenizers package: the prompt ids and the 16 greedy ids
+    # must be the fixture's (transformers' tokenizer and model).
+    Q_IDS() { "$PY" -c "import json,sys; p=json.load(open(sys.argv[1]))['prompts'][0]; print(','.join(map(str, p[sys.argv[2]])))" "$QWEN3_FIXTURE" "$1"; }
+    Q_TEXT="$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1]))['prompts'][0]['input'])" "$QWEN3_FIXTURE")"
+    "$PY" "$HERE/generate_client.py" --url "localhost:$HTTP_PORT" --model qwen3 \
+      --tokenizer "$QCKPT/tokenizer.json" --text "$Q_TEXT" --max-new 16 --sequence-id 31 \
+      --expect-prompt "$(Q_IDS promptTokens)" --expect "$(Q_IDS generatedTokens)"
+    if "$PY" "$HERE/generate_client.py" --url "localhost:$HTTP_PORT" --model qwen3 \
+        --tokenizer "$QCKPT/tokenizer.json" --text "$Q_TEXT" --max-new 16 --sequence-id 32 \
+        --expect-prompt "$(Q_IDS promptTokens)" --expect "0,$(Q_IDS generatedTokens)" >"$LOG.qwen3.text-negative" 2>&1; then
+      echo "FAIL: the text prompt check passed with wrong expected ids" >&2
+      exit 1
+    fi
+    echo "negative control failed as it must ($(grep -c FAIL "$LOG.qwen3.text-negative") failing check)"
+  else
+    echo "SKIP qwen3 text prompt: $PY has no tokenizers package (pip install tokenizers)"
+  fi
   echo "== qwen3 KV pools"
   pools_in_place "$LOG.qwen3"
   echo "== qwen3 negative control (must fail)"
@@ -462,6 +499,43 @@ else
     echo "FAIL: the server is not live at the end of the Qwen3 checks" >&2
     exit 1
   fi
+  stop_server
+
+  # The same checkpoint with its weights staged as bf16 (-PweightDType=bf16):
+  # half the bytes; every projection rounds its input to bf16 and sums in f32,
+  # so the logits are not f32's, and the ids must still all be the fixture's.
+  echo "== qwen3 bf16 weights"
+  QB_DIR="${QWEN3_BF16_DIR:-$HERE/build/qwen3-bf16}"
+  if [[ "${QWEN3_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$QB_DIR/repository/qwen3/config.pbtxt" 2>/dev/null \
+      || ! grep -q ':wbf16:tiedHead"' "$QB_DIR/artifact/tlaloc-serving.json" 2>/dev/null; then
+    rm -rf "$QB_DIR"
+    mkdir -p "$QB_DIR"
+    (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
+      -PckptDir="$QCKPT" -PoutDir="$QB_DIR/artifact" -PmaxBatch=4 -PweightDType=bf16)
+    (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+      -PartifactDir="$QB_DIR/artifact" -PoutDir="$QB_DIR/repository" -PmodelName=qwen3 \
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+  fi
+  export CONTAINER_NAME="$BASE_NAME-qwen3-bf16" MODEL_REPOSITORY="$QB_DIR/repository"
+  start_server "$LOG.qwen3-bf16" 600
+  F32_MIB="$(grep -o "model 'qwen3': uploaded 310 weights ([0-9]* MiB)" "$LOG.qwen3" | head -1 | grep -o "([0-9]*" | tr -d '(')"
+  BF16_MIB="$(grep -o "model 'qwen3': uploaded 310 weights ([0-9]* MiB)" "$LOG.qwen3-bf16" | head -1 | grep -o "([0-9]*" | tr -d '(')"
+  if [[ -z "$F32_MIB" || -z "$BF16_MIB" ]] || (( BF16_MIB * 2 < F32_MIB - 2 || BF16_MIB * 2 > F32_MIB + 2 )); then
+    echo "FAIL: bf16 weights are ${BF16_MIB:-?} MiB, f32 ${F32_MIB:-?} MiB: not half" >&2
+    exit 1
+  fi
+  echo "  ok   weights on the device: $BF16_MIB MiB in bf16, $F32_MIB MiB in f32"
+  # Measured: every id equal, logits within 3.0e-3 of the largest (f32
+  # weights: 5.6e-4); the tolerance is 1e-2.
+  "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model qwen3 --fixture "$QWEN3_FIXTURE" --tol 1e-2 --repeat 3
+  if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model qwen3 --fixture "$QWEN3_FIXTURE" --tol 1e-2 --repeat 0 --perturb >"$LOG.qwen3-bf16.negative" 2>&1; then
+    echo "FAIL: the bf16 Qwen3 fixture checks passed with wrong expected ids" >&2
+    cat "$LOG.qwen3-bf16.negative" >&2
+    exit 1
+  fi
+  grep -c "^FAIL" "$LOG.qwen3-bf16.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   stop_server
 fi
 
@@ -511,7 +585,8 @@ else
     # A model exported before its sliding layers had a windowed KV pool is
     # exported again.
     if [[ "${MUSE_GLIMMER_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$M_CONFIG" 2>/dev/null \
-        || ! aliased "$M_DIR/artifact" || ! grep -q '"windowedKv"' "$M_DIR/artifact/tlaloc-serving.json"; then
+        || ! aliased "$M_DIR/artifact" || ! grep -q '"windowedKv"' "$M_DIR/artifact/tlaloc-serving.json" \
+        || ! grep -q '"refusedTokens"' "$M_DIR/artifact/tlaloc-serving.json"; then
       mem_check 8 "export Muse Glimmer"
       rm -rf "$M_DIR"
       mkdir -p "$M_DIR"
@@ -553,6 +628,25 @@ else
     grep -oE "decode_b1_c[0-9]+ updated the [0-9]+ KV pools in place.*" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /'
     refuse_in "$LOG.muse" "to new device memory"
     expect_in "$LOG.muse" "windowed KV pool for 39 sliding layers (window 2048)"
+    echo "== muse glimmer placeholder tokens"
+    expect_in "$LOG.muse" "refuses token ids 200091 (video_token_id) 200092 (image_token_id)"
+    HERE="$HERE" "$PY" - "localhost:$HTTP_PORT" <<'PYEOF'
+import os, sys
+sys.path.insert(0, os.environ["HERE"])
+from sequence_client import SequenceClient
+c = SequenceClient(sys.argv[1], "muse", "http")
+bad = 0
+for i, (tok, key) in enumerate(((200092, "image_token_id"), (200091, "video_token_id"))):
+    try:
+        c.step(900 + i, [200000, tok, 1000], start=True, end=True)
+        print(f"FAIL a START holding {tok} was accepted")
+        bad += 1
+    except Exception as e:  # tritonclient's exception type
+        ok = f"is {tok}, the model's {key} placeholder" in str(e)
+        print(("  ok   " if ok else "FAIL ") + f"a START holding {tok} ({key}) is refused by name")
+        bad += not ok
+sys.exit(1 if bad else 0)
+PYEOF
     grep -oE "instance 'muse_0_0': [0-9]+ KV pools \([0-9]+ MiB\) zeroed[^;]*;[^;]*;[^;]*;" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /' || true
     echo "== muse glimmer negative control (must fail)"
     if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \

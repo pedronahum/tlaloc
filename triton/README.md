@@ -23,7 +23,12 @@ an instance group names gets its own PJRT client.
 | | What | Where it ran |
 |---|---|---|
 | ✅ | Sequence mode, prefill and batched decode, TinyLlama-1.1B | GB10, `verify.sh` |
-| ✅ | Qwen3-0.6B: 16 greedy ids equal HuggingFace's for a plain and a chat-template prompt | GB10, `verify.sh` |
+| ✅ | Qwen3-0.6B: 16 greedy ids equal HuggingFace's for a plain and a chat-template prompt; the tied head reads the embedding table (no second copy) | GB10, `verify.sh` |
+| ✅ | Qwen3-0.6B with bf16 weights (`-PweightDType=bf16`): half the device memory, all 32 ids equal HuggingFace's, logits within 3.0e-3 of the largest | GB10, `verify.sh` |
+| ✅ | A text prompt tokenized by the checkpoint's tokenizer.json (`tokenizers` package), byte-level BPE included | GB10, `verify.sh` (Qwen3) |
+| ✅ | Image and video placeholder ids refused by name (the manifest lists them) | GB10, `verify.sh` (the window models; Muse Glimmer with `MUSE_GLIMMER=1`) |
+| ✅ | A live sequence that needs a page when the pool is full is refused by name and keeps its KV; idle sequences' pages are reclaimed least recently active first | GB10, `verify.sh` (TinyLlama) |
+| 📐 | Preempting a live sequence (swapping its KV out or recomputing it) | Designed, not built |
 | ✅ | Muse Glimmer 30B, text decoder, bf16 weights: 32 greedy ids equal HuggingFace's run with the same arithmetic | GB10, `verify.sh` with `MUSE_GLIMMER=1` |
 | ✅ | Prompts of several sequences prefilled in one call: 2 and 4 TinyLlama and Qwen3-0.6B prompts give their solo argmax and the same 8 greedy ids as alone | GB10, `verify.sh` |
 | ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`), ragged batches grouped by the shape of their rows | GB10, `verify.sh` |
@@ -193,6 +198,12 @@ Then `window_checks.py` runs `window_sequence` against `window_sequence_full`
   5e-3;
 - with every ring of the windowed pool taken, one more START is refused by
   name (`windowed KV page pool exhausted`), and runs after an END;
+- ids 62 and 63, which the manifest lists as the model's image and video
+  placeholders (stand-ins: the window models are text only), are refused by
+  name in a START and in a later request, over HTTP and gRPC; the sequence
+  a later request was refused for then gives the logits of a sequence that
+  never sent it, bit for bit; id 61 is accepted. The load log must list the
+  refused ids;
 - the log must show the windowed pool at load and 100 of 100 runs with its 6
   pools updated in place.
 
@@ -236,15 +247,25 @@ server is up. It then starts a server on that repository and:
     refused with `KV page pool exhausted`, the server stays live, the refused
     sequence has no state, and after the others end a new sequence decodes
     the expected ids;
+  - pressure: 21 live sequences hold the whole pool, and the first one (a
+    47-token prompt of ordinary words) needs a fourth page for its second
+    generated token. That request is refused with `KV page pool exhausted`,
+    the message lists the 20 other sequences holding pages and says the
+    sequence keeps its 3 pages and the KV of its 48 tokens, and the log shows
+    no sequence reclaimed. After another sequence ends, the same request is
+    sent again and succeeds, and the sequence's 6 ids equal its solo run's;
   - idle: 21 sequences abandoned without END lose their pages after twice the
     idle timeout (plus the queueing allowance described under "Idle
     timeout"); a new sequence then decodes correctly, the abandoned
     sequence's next step is refused, and 21 new three-page sequences fit
-    again;
+    again. From the server log (`--log`): the new one-page sequence
+    reclaimed only the least recently active abandoned sequence, and the 21
+    new sequences reclaimed the other 20 in the order they went idle;
   - queued (a second server, the same model with a 200 ms idle timeout):
     12, 24 and 32 concurrent sequences, so steps wait in Triton's queue past
     the timeout; no step Triton accepts is refused for having no KV state;
-- runs `sequence_checks.py --perturb` (wrong expected ids), which must fail;
+- runs `sequence_checks.py --perturb` (wrong expected ids, for the prefill
+  and pressure checks), which must fail;
 - runs `prefill_checks.py` with `sequence_checks.py`'s four prompts: one, two
   and four prompts sent together, over HTTP and gRPC, each run in one
   execution (the log must show `prefill_b4_c64 ran 4 sequence(s)`), and each
@@ -274,8 +295,21 @@ logit at every position must be within 2e-3 of the largest logit (measured:
 `prefill_checks.py` as for TinyLlama, on four prompts from the fixture (its two
 prompts, and each followed by the first tokens of its continuation: 5, 24, 11
 and 27 tokens; logits measured within 9.0e-4 of the largest), and with
-`--perturb`, which must fail. Without
-the checkpoint this step prints `SKIP qwen3`; `SKIP_QWEN3=1` skips it.
+`--perturb`, which must fail. Qwen3-0.6B ties its head to the embedding
+table, and the model must upload 310 weights: the head contracts against the
+table's hidden axis and no transposed copy is staged (2273 MiB, against 2867
+MiB with the copy; measured logits within 5.6e-4, decode step 15.4 ms against
+16.4 ms). When the client's Python has the `tokenizers` package,
+`generate_client.py` then sends the fixture's text prompt as text: the prompt
+must tokenize to the fixture's 5 ids and the 16 generated ids must be the
+fixture's; with one wrong expected id it must fail. Then the same checkpoint
+is exported with bf16 weights (`-PweightDType=bf16`) into
+`triton/build/qwen3-bf16/` and served: the upload must be half the f32
+model's MiB (1136 against 2273), all 32 ids must equal the fixture's, the
+logits must be within 1e-2 of the largest (measured 3.0e-3: every projection
+rounds its input to bf16), and `--perturb` must fail. A decode step takes
+11.3 ms against 15.4 ms with f32 weights. Without the checkpoint this step
+prints `SKIP qwen3`; `SKIP_QWEN3=1` skips it.
 
 With `MUSE_GLIMMER=1`, and meta-models/Muse-Glimmer-30B (Apache-2.0, 59 GB,
 not gated) in the HuggingFace cache at the revision the fixtures name
@@ -304,7 +338,11 @@ the GB10), printed. Two fixtures, both from `harness/python/muse_glimmer_fixture
   two fixtures agree (`--common-prefix-with`): they choose differently at the
   chat prompt's 16th token (margins 0.31 and 0.12), which is reported.
 
-Then `--perturb`, which must fail, and the peak memory in use.
+The log must list the refused placeholder ids (`refuses token ids 200091
+(video_token_id) 200092 (image_token_id)`), and a START holding either is
+refused by name. Then `--perturb`, which must fail, and the peak memory in
+use. An artifact exported before its manifest listed the placeholder ids is
+exported again.
 
 A request with curl:
 
@@ -386,10 +424,22 @@ python triton/generate_client.py --model tinyllama \
 (the last text only: the vision encoder's tensors are listed and not read). `-PckptDir`
 may be a HuggingFace cache snapshot, for example
 `~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<revision>`; the
-manifest's model name is then the repo id, `Qwen/Qwen3-0.6B`. Qwen3's
-tokenizer is byte-level BPE, which `generate_client.py`'s word lookup does not
-implement, so give it ids with `--prompt` (the fixture's `promptTokens`, for
-example).
+manifest's model name is then the repo id, `Qwen/Qwen3-0.6B`.
+`generate_client.py` tokenizes `--text` with the checkpoint's `tokenizer.json`
+through the `tokenizers` package when it is installed, so a Qwen3 or Muse
+Glimmer (byte-level BPE) prompt can be text; without the package it reads a
+SentencePiece vocabulary word by word (TinyLlama) and a byte-level one needs
+ids (`--prompt`). `-PweightDType=bf16` stages the weights as bf16 (the
+default is f32 for Llama and Qwen3, bf16 for Muse Glimmer): half the device
+memory, and each projection rounds its input to bf16 and sums in f32.
+
+A checkpoint that ties its head to the embedding table (Qwen3) has no head
+weight in the artifact: the head is one `dot_general` that contracts the
+final hidden state against the table's hidden axis. A multimodal checkpoint's
+image and video placeholder ids (`image_token_id`, `video_token_id` in its
+config) are listed in the manifest (`model.refusedTokens`), and the backend
+refuses a request holding one by name: the artifact is the text decoder only,
+so the placeholder would be embedded as an ordinary token.
 
 The artifact's files are hard-linked into the version directory when both are
 on one file system, and copied otherwise. They are real files either way, so
@@ -535,6 +585,22 @@ this; `generate_client.py` adds a tokenizer.
   with it, the rest of that batch is refused, every sequence is freed (a
   later request must START again) and new pools are zeroed.
 - **END** frees the sequence's pages (and its ring) after its step.
+- **Pages run short.** When a request needs more pages than are free, the
+  backend reclaims pages from sequences Triton has already ended without
+  telling it (the idle rule below), the least recently active first, and
+  only until the request's pages are free (`reclaimed sequence n (the least
+  recently active, idle ... us, past the limit of ... us) for sequence m`).
+  Sequences Triton ended with END have already given their pages back. It
+  never takes pages from a sequence Triton still holds: if reclaiming is not
+  enough, the request is refused by name (`KV page pool exhausted`,
+  UNAVAILABLE), and the refusal lists the sequences holding pages (the six
+  largest, with their pages, tokens and idle time). A sequence refused
+  mid-generation keeps its pages and KV (`Sequence n keeps its 3 pages and
+  the KV of its 48 tokens: send this request again once pages are free, or
+  end sequence n`), so the client can send the same request again later; a
+  START that is refused leaves nothing. Live sequences are not preempted:
+  there is no swapping of a sequence's KV to host memory and no
+  recomputation of it later.
 - **Idle timeout.** In the oldest strategy Triton ends a sequence that has
   been idle longer than `max_sequence_idle_microseconds` without telling the
   backend (its log says `Reaper: CORRID n: max sequence idle exceeded`). The
@@ -553,11 +619,15 @@ this; `generate_client.py` adds a tokenizer.
   carries START.
 
 Refused by name, with the server staying up: a START (or growth) that needs
-more pages than are free (`KV page pool exhausted: sequence n needs k more
-page(s) ... End a sequence (sequence_end) or export the artifact with more
-pages (numBlocks)`, or `windowed KV page pool exhausted: ...`); a sequence that would pass the largest compiled context;
-a step for a sequence the backend holds nothing for; a token id outside the
-vocabulary; a request with no tokens and no END. A refused START leaves no
+more pages than are free after reclaiming (`KV page pool exhausted: sequence n
+needs k more page(s) of 16 tokens to grow from 48 to 49 tokens, and 0 of 63
+are free (...). ... Or export the artifact with more pages (numBlocks)`, or
+`windowed KV page pool exhausted: ...`); a sequence that would pass the
+largest compiled context; a step for a sequence the backend holds nothing
+for; a token id outside the vocabulary; a token id the manifest refuses
+(`token 3 of the request is 200092, the model's image_token_id placeholder;
+...`), which leaves the sequence as it was; a request with no tokens and no
+END. A refused START leaves no
 state behind; Triton still counts the sequence as live until END or the idle
 timeout, so a client should send END for it.
 
@@ -616,7 +686,7 @@ below were taken before the pools were updated in place, on an idle GPU.
 
 Qwen3-0.6B (f32 weights, context 64, gRPC, medians of 5 to 10 runs of 16
 tokens): the model loads in about 20 s (four XLA compiles of 3.5 to 6.6 s,
-1.2 s to upload 2867 MiB of weights). Prefill takes about 25 ms for the 5-token
+1.2 s to upload 2867 MiB of weights, the tied head then staged as a copy of the embedding table; 2273 MiB without it). Prefill takes about 25 ms for the 5-token
 and for the 24-token prompt alike, since both run the padded 64-token prefill
 entry. A decode step of one sequence takes about 19 ms (about 52 tokens/s).
 
@@ -814,9 +884,10 @@ defaults.
   `--strict-readiness=false` if readiness should track only the server.
 - No optional inputs, no string tensors, no decoupled (streaming) responses.
 - Sequence mode: one instance per model (the pools are its state); pages are
-  allocated as a sequence grows and there is no preemption, so a sequence
-  that needs a page when none is free is refused mid-generation rather than
-  paused. Only the oldest strategy. Prompts in one Triton batch share a
+  allocated as a sequence grows and live sequences are not preempted, so a
+  sequence that needs a page when none is free (and none can be reclaimed
+  from a sequence Triton has ended) is refused mid-generation, keeping its
+  KV, rather than paused; the client sends the request again. Only the oldest strategy. Prompts in one Triton batch share a
   prefill call only when they fall in one context bucket, and the batcher's
   `max_queue_delay_microseconds` (1 ms by default) is all the time it waits
   for them. Prompts whose request also carries END were not batched together
@@ -825,6 +896,7 @@ defaults.
 - Client mode: state is per model instance and is not tied to a Triton
   sequence ID. The client that allocates pages must be the only client of
   that model, or the clients must agree on the pages.
-- The weights and KV pools are f32 on the device, as the artifact stores them
-  (TinyLlama: 4.1 GiB of weights; Qwen3-0.6B: 2.8 GiB, of which 594 MiB is the
-  tied head, staged as a second, transposed copy of the embedding table).
+- The weights and KV pools are on the device in the artifact's dtypes: f32
+  by default for Llama and Qwen3 (TinyLlama: 4.1 GiB of weights; Qwen3-0.6B:
+  2.2 GiB), bf16 with `-PweightDType=bf16` (Qwen3-0.6B: 1.1 GiB) and for
+  Muse Glimmer. The KV pools are f32.

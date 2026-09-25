@@ -106,6 +106,8 @@ object ServingArtifactWriter {
      *   bytes (math layout, little-endian, the slot's dtype, F32 or BF16) to
      *   the stream and returns how many it wrote. For weights too large to
      *   hold as one array. Give at most one of the two.
+     * @param refusedTokenIds token ids a server must refuse, with the config
+     *   key naming each ([ServingModelShape.refusedTokens]).
      */
     fun export(
         dir: Path,
@@ -118,6 +120,7 @@ object ServingArtifactWriter {
         stageWeight: ((DecodeSlot) -> FloatArray)? = null,
         writeWeight: ((DecodeSlot, OutputStream) -> Long)? = null,
         build: (DecodeGraphSpec) -> DxirFunction,
+        refusedTokenIds: Map<Int, String> = emptyMap(),
     ): ServingManifest {
         require(specs.isNotEmpty()) {
             "ServingArtifactWriter.export: no specs — an artifact that compiles nothing is a " +
@@ -248,6 +251,8 @@ object ServingArtifactWriter {
                 windowedKv = model.windowedKv?.let {
                     ServingWindowedKv(it.window, it.layers, it.numBlocks, it.ringPages)
                 },
+                refusedTokens = refusedTokenIds.entries.sortedBy { it.key }
+                    .map { ServingRefusedToken(it.key, it.value) },
             ),
             bucketLadder = ladder,
             weights = weightsPointer,

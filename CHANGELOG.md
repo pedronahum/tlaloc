@@ -13,6 +13,26 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Refused placeholder tokens in the manifest.** A multimodal checkpoint's
+  image and video placeholder ids (`HfDecoderConfig.refusedTokenIds`) are
+  listed in the artifact (`ServingModelShape.refusedTokens`, written only when
+  there are some), and the Triton backend and `tlaloc_serve.py` refuse a
+  request holding one by name, leaving the sequence as it was.
+- **bf16 weights for Llama and Qwen3** (`-PweightDType=bf16`, the tool's
+  eleventh argument). Qwen3-0.6B served by Triton with bf16 weights: 1136 MiB
+  on the device against 2273 MiB, all 32 fixture ids equal HuggingFace's,
+  logits within 3.0e-3 of the largest, 11.3 ms a decode step against 15.4 ms.
+- **Prefill in the framework-free Python runtime.**
+  `ServingArtifact.run_prefill` writes a chunk per sequence in one call on the
+  artifact's prefill entries; `run_llama_generate.py` runs a prompt that way
+  when an entry holds it (`--no-prefill` keeps the decode walk), and the vLLM
+  plugin's runner writes a new sequence's prompt (but its last token) with
+  one prefill call.
+- **Text prompts for any tokenizer in `generate_client.py`**: with the
+  `tokenizers` package, `--text` is tokenized by the checkpoint's
+  `tokenizer.json` (byte-level BPE included, as `examples/triton-llm/chat.py`
+  does); `--expect-prompt` checks the ids.
+
 - **Prompts of several sequences prefilled in one call.** `HfServingExport`
   writes a prefill entry for every batch of the ladder (`prefillMaxBatch`,
   or `-PprefillMaxBatch`, caps it; `HfServingExport.specs` lists the
@@ -127,6 +147,23 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   exports it (`exportLlamaServingArtifact` remains as a second name).
 
 ### Changed
+
+- **A tied head reads the embedding table.** `HfDecoderGraph` gives a tied
+  head no weight slot: it is one `MATMUL` contracting the hidden axis of the
+  final state and of the embedding table (`lhs_contracting_dims = [1]`,
+  `rhs_contracting_dims = [1]`, a `dot_general` without a transpose), which
+  the DXIR interpreter now evaluates. Qwen3-0.6B's weights go from 2867 MiB to
+  2273 MiB with the same 32 ids; `HfDecoderConfig.tiedHeadCopy` keeps the copy
+  (the control: in the interpreter the two give the same logits bit for bit).
+  The model hash of such an artifact ends in `:tiedHead`.
+- **Triton sequence mode, a full page pool.** When a request needs pages the
+  pool does not have, the backend reclaims pages from sequences idle past the
+  reclaim rule (which Triton has ended) least recently active first, and only
+  as many as the request needs, where it used to free every such sequence. It
+  never takes pages from a live sequence: the request is refused by name,
+  the refusal lists the sequences holding pages, and a sequence refused
+  mid-generation keeps its pages and KV, so the same request can be sent
+  again. Live sequences are not preempted (no KV swap or recompute).
 
 - **Triton dynamic batching groups requests by shape.** A batch's requests
   are keyed by the shape of their rows and each key's requests run together

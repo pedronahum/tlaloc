@@ -463,6 +463,22 @@ SequenceModel::ReadManifest(const std::string& text)
         at + "numBlocks " + std::to_string(num_blocks_) + " leaves no page for a sequence: "
         "page 0 is the padding page");
   }
+  triton::common::TritonJson::Value refused;
+  if (model.Find("refusedTokens", &refused) && !refused.IsNull()) {
+    for (size_t i = 0; i < refused.ArraySize(); ++i) {
+      triton::common::TritonJson::Value t;
+      if (refused.IndexAsObject(i, &t) != nullptr) return Invalid(at + "model.refusedTokens holds a non-object");
+      int id = 0;
+      std::string key;
+      RETURN_IF_ERROR(IntMember(t, "id", &id, at + "model.refusedTokens: "));
+      RETURN_IF_ERROR(StrMember(t, "configKey", &key, at + "model.refusedTokens: "));
+      if (id < 0 || id >= vocab_ || !refused_tokens_.emplace(id, key).second) {
+        return Invalid(
+            at + "model.refusedTokens: token " + std::to_string(id) + " (" + key +
+            ") is outside the vocabulary or listed twice");
+      }
+    }
+  }
   triton::common::TritonJson::Value wkv;
   const bool has_window = model.Find("windowedKv", &wkv) && !wkv.IsNull();
   if (has_window != (version == "tlaloc-serving-v3")) {
@@ -802,6 +818,10 @@ SequenceModel::UploadWeights()
     << " tokens, largest context " << max_context_ << ", largest decode batch "
     << max_decode_batch_ << ", largest prefill batch " << max_prefill_batch_
     << ", sequence idle timeout " << idle_ns_ / 1000 << " us";
+  if (!refused_tokens_.empty()) {
+    m << "; refuses token ids";
+    for (const auto& kv : refused_tokens_) m << " " << kv.first << " (" << kv.second << ")";
+  }
   if (windowed()) {
     m << "; windowed KV pool for " << window_layers_.size() << " sliding layers (window " << window_
       << "): " << window_num_blocks_ << " pages, a ring of at most " << ring_pages_
@@ -1012,31 +1032,72 @@ SequenceInstance::Free(uint64_t corrid, const char* why)
 // of the sequence's last execution, and not the requests still queued. The
 // oldest strategy serves the oldest ready requests first, max_batch_size per
 // execution, so a queued request waits for at most one execution per
-// max_batch_size other live sequences. A sequence is therefore freed only
+// max_batch_size other live sequences. A sequence may therefore be freed only
 // when it has no request in this batch and has been idle for longer than
 //   2 * timeout + ceil(live sequences / max_batch_size) * longest execution,
 // by when Triton has ended it (twice the timeout covers the reaper's own
-// delay), and a later request for it must carry START.
-void
-SequenceInstance::Reap(uint64_t now)
+// delay), and a later request for it must carry START. Of those, the least
+// recently active are freed first, and only until the request's pages are
+// free: a sequence ended with END has already given its pages back.
+uint64_t
+SequenceInstance::ReclaimLimit() const
 {
   const uint64_t batch = static_cast<uint64_t>(std::max<int64_t>(1, model_->max_batch_size()));
   const uint64_t queue = (sequences_.size() + batch - 1) / batch * max_exec_ns_;
-  const uint64_t limit = 2 * model_->idle_ns() + queue;
-  std::vector<uint64_t> idle;
+  return 2 * model_->idle_ns() + queue;
+}
+
+void
+SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id)
+{
+  const uint64_t limit = ReclaimLimit();
+  std::vector<std::pair<uint64_t, uint64_t>> idle;  // last_ns, id
   for (const auto& kv : sequences_) {
     if (batch_.count(kv.first)) continue;
-    if (now > kv.second.last_ns && now - kv.second.last_ns > limit) idle.push_back(kv.first);
+    if (now > kv.second.last_ns && now - kv.second.last_ns > limit) idle.emplace_back(kv.second.last_ns, kv.first);
   }
-  for (uint64_t id : idle) {
-    auto it = sequences_.find(id);
+  std::sort(idle.begin(), idle.end());
+  for (const auto& e : idle) {
+    if (pool_.free_count() >= need && window_pool_.free_count() >= need_ring) break;
+    auto it = sequences_.find(e.second);
     std::ostringstream m;
-    m << "tlaloc backend: instance '" << name_ << "': sequence " << id << " was idle longer than "
-      << limit / 1000 << " us (twice max_sequence_idle_microseconds plus " << queue / 1000
-      << " us of queueing); freeing its " << it->second.pages.size() << " pages";
+    m << "tlaloc backend: instance '" << name_ << "': reclaimed sequence " << e.second
+      << " (the least recently active, idle " << (now - e.first) / 1000 << " us, past the limit of "
+      << limit / 1000 << " us: twice max_sequence_idle_microseconds plus queueing) for sequence "
+      << for_id << ": its " << it->second.pages.size() << " pages";
+    if (model_->windowed()) m << " and " << it->second.ring.size() << " windowed pages";
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
-    Free(id, "timed out");
+    Free(e.second, "timed out");
   }
+}
+
+std::string
+SequenceInstance::Holders(uint64_t now, uint64_t except) const
+{
+  std::vector<std::pair<size_t, uint64_t>> held;  // pages, id
+  for (const auto& kv : sequences_) {
+    if (kv.first != except && !kv.second.pages.empty()) held.emplace_back(kv.second.pages.size(), kv.first);
+  }
+  std::sort(held.begin(), held.end(), [](const auto& a, const auto& b) {
+    return a.first != b.first ? a.first > b.first : a.second < b.second;
+  });
+  std::ostringstream m;
+  m << held.size() << " other sequence(s) hold pages";
+  const size_t shown = std::min<size_t>(held.size(), 6);
+  for (size_t i = 0; i < shown; ++i) {
+    const SequenceState& s = sequences_.at(held[i].second);
+    m << (i == 0 ? ": " : ", ") << held[i].second << " (" << held[i].first << " pages, " << s.length
+      << " tokens, ";
+    if (s.last_ns == 0) {
+      m << "in this batch)";
+    } else {
+      m << "idle " << (now > s.last_ns ? (now - s.last_ns) / 1000000 : 0) << " ms)";
+    }
+  }
+  if (held.size() > shown) m << ", ...";
+  m << "; none of them has been idle past the reclaim limit of " << ReclaimLimit() / 1000000
+    << " ms, and a sequence Triton may still hold is not preempted";
+  return m.str();
 }
 
 TRITONSERVER_Error*
@@ -1059,11 +1120,20 @@ SequenceInstance::Parse(Work* w)
   }
   w->tokens.resize(static_cast<size_t>(shape[1]));
   if (!w->tokens.empty()) std::memcpy(w->tokens.data(), bytes.data(), w->tokens.size() * 4);
-  for (int32_t t : w->tokens) {
+  for (size_t i = 0; i < w->tokens.size(); ++i) {
+    const int32_t t = w->tokens[i];
     if (t < 0 || t >= model_->vocab()) {
       return Invalid(
           "token id " + std::to_string(t) + " is outside the vocabulary [0, " +
           std::to_string(model_->vocab()) + ")");
+    }
+    auto refused = model_->refused_tokens().find(t);
+    if (refused != model_->refused_tokens().end()) {
+      return Invalid(
+          "token " + std::to_string(i) + " of the request is " + std::to_string(t) + ", the model's " +
+          refused->second + " placeholder; this artifact serves the text decoder only (the "
+          "vision encoder is not in it, so the placeholder would be embedded as an ordinary "
+          "token), and the backend refuses it. The sequence's state is unchanged");
     }
   }
   return nullptr;
@@ -1116,8 +1186,20 @@ SequenceInstance::Admit(Work* w)
   const int need_ring =
       model_->windowed() ? std::min(blocks, model_->ring_pages()) - static_cast<int>(seq.ring.size()) : 0;
   if ((need > 0 && need > pool_.free_count()) || (need_ring > 0 && need_ring > window_pool_.free_count())) {
-    Reap(NowNs());
+    Reclaim(NowNs(), std::max(need, 0), std::max(need_ring, 0), id);
   }
+  // What a refused request leaves behind: a new sequence nothing, a sequence
+  // mid-generation its pages and KV, so the same request can be sent again.
+  auto what_now = [&]() {
+    const std::string sid = std::to_string(id);
+    if (w->start) {
+      return "Sequence " + sid + " is refused at START and holds nothing; start it again once "
+             "pages are free";
+    }
+    return "Sequence " + sid + " keeps its " + std::to_string(seq.pages.size()) + " pages and the KV of its " +
+           std::to_string(seq.length) + " tokens: send this request again once pages are free, or end "
+           "sequence " + sid + " (sequence_end)";
+  };
   if (need_ring > 0 && need_ring > window_pool_.free_count()) {
     return refuse(Err(
         TRITONSERVER_ERROR_UNAVAILABLE,
@@ -1125,18 +1207,19 @@ SequenceInstance::Admit(Work* w)
             std::to_string(need_ring) + " more windowed page(s) and " +
             std::to_string(window_pool_.free_count()) + " of " + std::to_string(window_pool_.capacity()) +
             " are free (" + std::to_string(sequences_.size()) + " sequences hold the rest, at most " +
-            std::to_string(model_->ring_pages()) + " each). End a sequence (sequence_end) or export "
-            "the artifact with more windowed pages"));
+            std::to_string(model_->ring_pages()) + " each; " + Holders(NowNs(), id) + "). " + what_now() +
+            ". Or export the artifact with more windowed pages"));
   }
-  if (need > 0 && !pool_.Take(need, &seq.pages)) {
+  if (need > 0 && pool_.free_count() < need) {
     return refuse(Err(
         TRITONSERVER_ERROR_UNAVAILABLE,
         "KV page pool exhausted: sequence " + std::to_string(id) + " needs " +
-            std::to_string(need) + " more page(s) of " + std::to_string(bs) + " tokens and " +
-            std::to_string(pool_.free_count()) + " of " + std::to_string(pool_.capacity()) +
-            " are free (" + std::to_string(sequences_.size()) + " sequences hold the rest). End "
-            "a sequence (sequence_end) or export the artifact with more pages (numBlocks)"));
+            std::to_string(need) + " more page(s) of " + std::to_string(bs) + " tokens to grow from " +
+            std::to_string(seq.length) + " to " + std::to_string(seq.length + n) + " tokens, and " +
+            std::to_string(pool_.free_count()) + " of " + std::to_string(pool_.capacity()) + " are free (" +
+            Holders(NowNs(), id) + "). " + what_now() + ". Or export the artifact with more pages (numBlocks)"));
   }
+  if (need > 0) pool_.Take(need, &seq.pages);
   if (need_ring > 0) window_pool_.Take(need_ring, &seq.ring);
   return nullptr;
 }

@@ -70,6 +70,16 @@ deployment, one is the measurement apparatus. The day a CPU PJRT plugin
 `.so` exists here (or the TPU VM's `libtpu.so` does, G2b), the ctypes engine
 covers that lane unchanged and the jax engine goes.
 
+PREFILL
+=======
+
+`run_prefill` writes the KV of a chunk of tokens per sequence in one call on
+the artifact's prefill entries (each chunk right-aligned in its row, the
+padding at slot -1) and returns each sequence's last-token logits, so a prompt
+is one call instead of one decode step per token. `prefill_entry` says whether
+the artifact has an entry for a given batch and length; without one the caller
+runs the tokens as decode steps.
+
 WHAT IS STILL DEFERRED
 ======================
 
@@ -283,6 +293,11 @@ class Entry:
             outputs=tuple(Slot.parse(s) for s in o["outputs"]),
             donation_pairs=tuple((p[0], p[1]) for p in o["donationPairs"]),
         )
+
+    @property
+    def entry_id(self) -> str:
+        """`decode_b4_c64`, as the manifest's writer names an entry."""
+        return f"{self.kind}_b{self.batch}_c{self.context}"
 
     def role_indices(self, role: str, among) -> list:
         return [i for i, s in enumerate(among) if s.role == role]
@@ -739,6 +754,7 @@ class ServingArtifact:
                 f"run_decode: slot_mapping has {len(slot_mapping)} entries for {n} "
                 f"sequences (decode writes exactly one slot per sequence)"
             )
+        self.check_tokens(token_ids)
         want_context = context if context is not None else max(seq_lens)
         b, c = self.select_bucket(n, want_context)
         entry = self.entry_for("decode", b, c)
@@ -764,11 +780,117 @@ class ServingArtifact:
             "SLOT_MAPPING": list(slot_mapping) + [PADDING_SLOT] * (b - n),
         }
 
+        return self._execute(entry, args, kv_pools, n)
+
+    # --- prefill -------------------------------------------------------
+
+    def prefill_entry(self, batch: int, context: int) -> Entry | None:
+        """The cheapest prefill entry with batch >= `batch` and context >=
+        `context`, or None (an artifact without prefill entries, or a prompt
+        longer than its largest context)."""
+        best = None
+        for e in self.entries:
+            if e.kind != "prefill" or e.batch < batch or e.context < context:
+                continue
+            if best is None or e.batch * e.context < best.batch * best.context:
+                best = e
+        return best
+
+    def run_prefill(
+        self,
+        chunks: Sequence[Sequence[int]],
+        starts: Sequence[int],
+        block_tables: Sequence[Sequence[int]],
+        kv_pools: Sequence[Sequence[float]],
+    ):
+        """Write the KV of a chunk of tokens per sequence in ONE call, and
+        return each sequence's last-token logits.
+
+        `chunks[i]` holds the tokens of sequence i at positions `starts[i]`,
+        `starts[i] + 1`, ...; `block_tables[i]` is its page list, which must
+        already back every one of those positions (slot of position p is
+        `table[p // blockSize] * blockSize + p % blockSize`). The call runs on
+        the smallest prefill entry that holds the batch and the longest
+        `start + len(chunk)`, and each chunk is RIGHT-ALIGNED in its row of
+        `tokensPerSeq` tokens: the padding tokens come first, at position 0
+        with slot -1 (their KV write is dropped), so the last real token is
+        the entry's last and its logits are the ones returned. A row is
+        causal on its own positions, so a sequence prefilled here holds the
+        KV the decode loop would have written token by token.
+
+        Returns `(logits, kv_pools)` in `run_decode`'s form. Refuses by name
+        when no prefill entry covers the call; `prefill_entry` says in
+        advance whether one does.
+        """
+        n = len(chunks)
+        if not (len(starts) == len(block_tables) == n) or n == 0:
+            raise ValueError(
+                f"run_prefill: {n} chunks, {len(starts)} starts, {len(block_tables)} block tables"
+            )
+        if any(len(c) == 0 for c in chunks):
+            raise ValueError("run_prefill: an empty chunk has no last token to return logits for")
+        for chunk in chunks:
+            self.check_tokens(chunk)
+        need = max(int(s) + len(c) for s, c in zip(starts, chunks))
+        entry = self.prefill_entry(n, need)
+        if entry is None:
+            raise ValueError(
+                f"run_prefill: no prefill entry holds {n} sequence(s) up to position {need}; "
+                f"compiled: " + ", ".join(
+                    f"({e.batch},{e.context})" for e in self.entries if e.kind == "prefill"
+                ) + ". Run the tokens as decode steps instead"
+            )
+        b, t, mbs, bs = entry.batch, entry.tokens_per_seq, entry.max_blocks_per_seq, self.block_size
+        tokens = [PADDING_TOKEN_ID] * (b * t)
+        positions = [PADDING_POSITION] * (b * t)
+        slots = [PADDING_SLOT] * (b * t)
+        tables = [PADDING_BLOCK] * (b * mbs)
+        lens = [PADDING_SEQ_LEN] * b
+        for i, (chunk, start, table) in enumerate(zip(chunks, starts, block_tables)):
+            if len(chunk) > t:
+                raise ValueError(
+                    f"run_prefill: chunk {i} has {len(chunk)} tokens; entry {entry.entry_id} "
+                    f"takes {t} per sequence"
+                )
+            table = list(table)
+            if len(table) > mbs:
+                raise ValueError(
+                    f"run_prefill: sequence {i} names {len(table)} blocks but entry "
+                    f"{entry.entry_id}'s table is {mbs} wide"
+                )
+            pad = t - len(chunk)
+            for j, tok in enumerate(chunk):
+                pos = int(start) + j
+                page = pos // bs
+                if page >= len(table):
+                    raise ValueError(
+                        f"run_prefill: sequence {i}'s position {pos} needs page {page} but its "
+                        f"block table has {len(table)}"
+                    )
+                k = i * t + pad + j
+                tokens[k] = int(tok)
+                positions[k] = pos
+                slots[k] = table[page] * bs + pos % bs
+            tables[i * mbs:i * mbs + len(table)] = table
+            lens[i] = int(start) + len(chunk)
+        args = {
+            "TOKEN_IDS": tokens,
+            "POSITIONS": positions,
+            "BLOCK_TABLES": tables,
+            "SEQ_LENS": lens,
+            "SLOT_MAPPING": slots,
+        }
+        return self._execute(entry, args, kv_pools, n)
+
+    def _execute(self, entry: Entry, args: dict, kv_pools, n: int):
+        """Bind the request operands `args` (by role, flat), the KV pools
+        and the staged weights to `entry`, run it, and return `(logits of
+        the first n rows, pools)`."""
         pools = [list(p) for p in kv_pools]
         expected_pools = sum(1 for s in entry.inputs if s.role == "KV_POOL_IN")
         if len(pools) != expected_pools:
             raise ValueError(
-                f"run_decode: {len(pools)} KV pools supplied, the entry's signature "
+                f"{entry.entry_id}: {len(pools)} KV pools supplied, the entry's signature "
                 f"has {expected_pools} (two per layer, (key, value) order, layers ascending)"
             )
 
@@ -786,7 +908,7 @@ class ServingArtifact:
                     staged.append((slot, wbufs[slot.name]))
                 except KeyError:
                     raise ValueError(
-                        f"run_decode: entry '{entry.entry_id}' binds a WEIGHT operand "
+                        f"{entry.entry_id}: binds a WEIGHT operand "
                         f"'{slot.name}' that the manifest's weight table does not name "
                         f"(it has {len(self.weight_table)} entries). The artifact promises "
                         f"an operand it cannot supply"
@@ -799,7 +921,7 @@ class ServingArtifact:
                 values = args[slot.role]
             if len(values) != slot.count:
                 raise ValueError(
-                    f"run_decode: operand '{slot.name}' has {len(values)} elements but the "
+                    f"{entry.entry_id}: operand '{slot.name}' has {len(values)} elements but the "
                     f"compiled entry declares {list(slot.dims)} = {slot.count}"
                 )
             staged.append((slot, values))
@@ -819,6 +941,21 @@ class ServingArtifact:
             for i in range(n)
         ]
         return logits, out[1:]
+
+    def check_tokens(self, ids: Sequence[int]) -> None:
+        """Refuse by name a token id the manifest lists in
+        `model.refusedTokens`: a multimodal checkpoint's image or video
+        placeholder, which the text-only graph would embed as an ordinary
+        token."""
+        refused = {t["id"]: t["configKey"] for t in self.model.get("refusedTokens") or []}
+        if not refused:
+            return
+        for i, t in enumerate(ids):
+            if t in refused:
+                raise ValueError(
+                    f"token {i} is {t}, the model's {refused[t]} placeholder; this artifact "
+                    f"serves the text decoder only, so it is refused"
+                )
 
     def empty_pools(self, fill: float = 0.0) -> list:
         """Freshly-zeroed KV pools of the artifact's declared layout, in the

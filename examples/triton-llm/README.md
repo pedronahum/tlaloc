@@ -4,7 +4,7 @@
 $ examples/triton-llm/run.sh
 question  Why is the sky blue? Answer in two sentences.
 answer    The sky appears blue because of the way light interacts with the Earth's atmosphere, ...
-decode    median 20.5 ms a token over 45 requests (48.8 tokens/s)
+decode    median 15.5 ms a token over 45 requests (64.6 tokens/s)
 ```
 
 Qwen3-0.6B, all 28 layers, answering through
@@ -69,6 +69,12 @@ CHAT_PYTHON=/tmp/chat-venv/bin/python examples/triton-llm/run.sh --model muse-gl
    token by token;
 6. removes the container, also when a step fails or you press Ctrl-C.
 
+`chat.py` tokenizes with the checkpoint's `tokenizer.json` through the
+`tokenizers` package, so the byte-level BPE vocabularies of Qwen3 and Muse
+Glimmer work as well as TinyLlama's SentencePiece one. For a plain text
+completion with no chat template, `triton/generate_client.py --tokenizer
+<checkpoint>/tokenizer.json --text "..."` does the same.
+
 The export is a standalone Gradle project like every other example: its own
 `settings.gradle.kts` and `build.gradle.kts`, resolving
 `io.github.pedronahum:tlaloc-*` from mavenLocal. The serving side uses the
@@ -119,7 +125,7 @@ tokenizers 0.23.2). Timings are single runs, not a benchmark.
 checkpoint  /home/pedro/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
 family      qwen3, 28 layers, hidden 1024, vocab 151936, weights as f32
 entries     decode at batch 1..1 and prefill at batch 1, for contexts 64, 128, 256; KV pages of 16 tokens
-artifact    6 entries, 311 weight files (2867 MiB) in 7.9 s
+artifact    6 entries, 310 weight files (2273 MiB) in 5.0 s
               decode_b1_c64
               decode_b1_c128
               decode_b1_c256
@@ -128,15 +134,15 @@ artifact    6 entries, 311 weight files (2867 MiB) in 7.9 s
               prefill_b1_c256
 triton      /home/pedro/programming/tlaloc/examples/triton-llm/build/qwen3/repository/qwen3/config.pbtxt
 == starting Triton (tlaloc-triton-llm, PJRT memory fraction 0.3, log: /home/pedro/programming/tlaloc/examples/triton-llm/build/qwen3/server.log)
-ready in 30 s: uploaded 311 weights (2867 MiB) in 1679 ms; 6 entries, KV pool of 64 pages x 16 tokens, largest context 256, largest decode batch 1, sequence idle timeout 60000000 us
+ready in 26 s: uploaded 310 weights (2273 MiB) in 1149 ms; 6 entries, KV pool of 64 pages x 16 tokens, largest context 256, largest decode batch 1, largest prefill batch 1, sequence idle timeout 60000000 us
 == chat (gRPC, localhost:8001)
 question  Why is the sky blue? Answer in two sentences.
 prompt    23 tokens after the chat template
 answer    The sky appears blue because of the way light interacts with the Earth's atmosphere, scattering shorter wavelengths of light (blue) while longer wavelengths (red and orange) are scattered more. This scattering causes the sky to appear blue.
 
 generated 45 tokens, stopped by end-of-turn token 151645
-prefill   23 tokens in one request: 82 ms
-decode    median 20.5 ms a token over 45 requests (48.8 tokens/s)
+prefill   23 tokens in one request: 66 ms
+decode    median 15.5 ms a token over 45 requests (64.6 tokens/s)
 ```
 
 `run.sh --question "What is the capital of France? Answer in one word."`
@@ -145,15 +151,15 @@ decode    median 20.5 ms a token over 45 requests (48.8 tokens/s)
 ```
 == export: reusing /home/pedro/programming/tlaloc/examples/triton-llm/build/qwen3/repository (REEXPORT=1 writes it again)
 == starting Triton (tlaloc-triton-llm, PJRT memory fraction 0.3, log: /home/pedro/programming/tlaloc/examples/triton-llm/build/qwen3/server.log)
-ready in 30 s: uploaded 311 weights (2867 MiB) in 4471 ms; 6 entries, KV pool of 64 pages x 16 tokens, largest context 256, largest decode batch 1, sequence idle timeout 60000000 us
+ready in 28 s: uploaded 310 weights (2273 MiB) in 3412 ms; 6 entries, KV pool of 64 pages x 16 tokens, largest context 256, largest decode batch 1, largest prefill batch 1, sequence idle timeout 60000000 us
 == chat (gRPC, localhost:8001)
 question  What is the capital of France? Answer in one word.
 prompt    24 tokens after the chat template
 answer    Paris
 
 generated 1 token, stopped by end-of-turn token 151645
-prefill   24 tokens in one request: 80 ms
-decode    median 27.5 ms a token over 1 request (36.4 tokens/s)
+prefill   24 tokens in one request: 64 ms
+decode    median 25.7 ms a token over 1 request (38.9 tokens/s)
 ```
 
 That prompt is the chat prompt of the Qwen3 fixture that `triton/verify.sh`
@@ -242,18 +248,23 @@ allows at the GB10's memory bandwidth.
 
 | | Qwen3-0.6B | TinyLlama-1.1B | Muse Glimmer 30B |
 |---|---|---|---|
-| Export (Kotlin) | 7.9 s | 6.8 s | 165 s |
-| Server ready (six XLA compiles, weight upload) | 30 s | 28 to 32 s | 133 to 139 s |
-| Prefill of the chat prompt, one request | 80 to 82 ms (23 to 24 tokens) | 73 ms (27 tokens) | 368 ms (67 tokens) |
-| Decode, median per token | 20.5 ms | 26.5 ms | 252 ms |
+| Export (Kotlin) | 5.0 s | 6.8 s | 165 s |
+| Server ready (six XLA compiles, weight upload) | 26 to 28 s | 28 to 32 s | 133 to 139 s |
+| Prefill of the chat prompt, one request | 64 to 66 ms (23 to 24 tokens) | 73 ms (27 tokens) | 368 ms (67 tokens) |
+| Decode, median per token | 15.5 ms | 26.5 ms | 252 ms |
+
+The Qwen3 column is from after its tied head began reading the embedding
+table (2273 MiB of weights instead of 2867 MiB); before, the decode step took
+20.5 ms and the prefill 80 to 82 ms.
 
 The prefill is the first request the server runs after loading, and it runs on
 the 64-token entry (Muse Glimmer's 67-token prompt on the 128-token entry).
 The client measures each request from gRPC call to response, so the numbers
 include the round trip.
 
-One run of the Qwen3 example shared the GPU with another process that had it at
-96% utilization: the decode step took 39 to 43 ms instead of about 20. Check
+One run of the Qwen3 example (before the change above) shared the GPU with
+another process that had it at 96% utilization: the decode step took 39 to 43
+ms instead of about 20. Check
 `nvidia-smi` before reading anything into a timing.
 
 ## When something is missing

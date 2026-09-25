@@ -602,7 +602,9 @@ object DxirInterpreter {
                     ?: error("DxirInterpreter: REVERSE op is missing required 'dimensions' attr")
                 evalReverse(op.operands[0].type, axes, a)
             }
-            OpKind.MATMUL -> {
+            OpKind.MATMUL -> if ("lhs_contracting_dims" in op.attrs || "rhs_contracting_dims" in op.attrs) {
+                evalMatmulContracting(op, evalNode(op.operands[0], env, multiResults), evalNode(op.operands[1], env, multiResults))
+            } else {
                 // §0.4.135 — rank-2 (`(M,K) @ (K,N) → (M,N)`) plus rank-3+ batched
                 // (`(B0..Bk, M, K) @ (B0..Bk, K, N) → (B0..Bk, M, N)`). The batched
                 // path uses the canonical convention: all leading axes are batching
@@ -2065,6 +2067,56 @@ object DxirInterpreter {
      * batch↔feature swap its kernel gradient needs without materialising
      * throwaway TRANSPOSE nodes.
      */
+    /**
+     * A rank-2 MATMUL with explicit `lhs_contracting_dims` /
+     * `rhs_contracting_dims` (one axis each, no batching axes): the
+     * `stablehlo.dot_general` the emitter writes for it. `[1] x [1]` is
+     * `A @ B^T` without a transpose of `B` (a tied head against the embedding
+     * table). The sum runs over the contracted axis in ascending order and
+     * skips zero lhs terms, as the canonical MATMUL does, so `A @ B^T` here
+     * gives the same bits as the canonical MATMUL of `A` and a transposed copy
+     * of `B`.
+     */
+    private fun evalMatmulContracting(op: DxirOp, a: FloatArray, b: FloatArray): FloatArray {
+        val aType = op.operands[0].type
+        val bType = op.operands[1].type
+        fun dims(key: String): List<Int> =
+            (op.attrs[key] as? List<*>)?.map { (it as Number).toInt() }
+                ?: error("DxirInterpreter: MATMUL with explicit contracting dims is missing '$key'")
+        val lc = dims("lhs_contracting_dims")
+        val rc = dims("rhs_contracting_dims")
+        require(aType.rank == 2 && bType.rank == 2 && lc.size == 1 && rc.size == 1 &&
+            lc[0] in 0..1 && rc[0] in 0..1 &&
+            "lhs_batching_dims" !in op.attrs && "rhs_batching_dims" !in op.attrs
+        ) {
+            "DxirInterpreter: MATMUL with explicit dims is evaluated for rank-2 operands with one " +
+                "contracting axis each and no batching axes; got ${aType.dims} x ${bType.dims}, " +
+                "contracting $lc x $rc"
+        }
+        val m = aType.dims[1 - lc[0]]
+        val k = aType.dims[lc[0]]
+        val n = bType.dims[1 - rc[0]]
+        require(bType.dims[rc[0]] == k) {
+            "DxirInterpreter: MATMUL contracts ${aType.dims} axis ${lc[0]} ($k) with ${bType.dims} " +
+                "axis ${rc[0]} (${bType.dims[rc[0]]})"
+        }
+        val out = FloatArray(m * n)
+        for (i in 0 until m) {
+            for (p in 0 until k) {
+                val aip = if (lc[0] == 1) a[i * k + p] else a[p * m + i]
+                if (aip == 0f) continue
+                val rowOff = i * n
+                if (rc[0] == 0) {
+                    val bOff = p * n
+                    for (j in 0 until n) out[rowOff + j] += aip * b[bOff + j]
+                } else {
+                    for (j in 0 until n) out[rowOff + j] += aip * b[j * k + p]
+                }
+            }
+        }
+        return out
+    }
+
     private fun evalTranspose(inputType: DxirType, perm: List<Int>, a: FloatArray): FloatArray {
         val rank = inputType.rank
         require(perm.size == rank) {
