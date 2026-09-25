@@ -11,49 +11,45 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-// §0.4.479 (Phase H3c-2) — the REAL Llama decode step, built from an
-// [HfLlamaConfig]. §0.4.478 gave the repo a way to ask a checkpoint for a
-// tensor by role; this file is where the roles become a graph, and where the
-// transposed-`[out, in]` layout that slice VERIFIED stops being a documented
-// fact and becomes a matmul.
+// The decode and prefill graphs of an HF decoder-only model, built from an
+// [HfDecoderConfig]. Pure [DxirBuilder] arithmetic in :ir commonMain: the
+// bytes are HfCheckpoint's business (jvmMain) and staging them in slot order
+// is HfStagedWeights'.
 //
-// PLACEMENT: `:ir` commonMain, beside [DecodeGraphSpec] — it is pure
-// [DxirBuilder] arithmetic over an [HfLlamaConfig] and touches no file. The
-// bytes are [HfLlamaCheckpoint]'s business (jvmMain) and staging them in slot
-// order is [HfLlamaStagedWeights]'s.
-//
-// SCOPE, stated up front so nothing here implies more than it does:
+// Scope:
 //
 //   * DECODE AND PREFILL. Decode runs one token per sequence. Prefill runs a
 //     chunk of T tokens per sequence in one call by treating every token as
 //     its own attention row: the chunk's K/V are written to the pool first,
 //     and row i then attends over the sequence's pages with a causal length of
-//     positions[i] + 1. That is the same arithmetic the decode loop does, row
-//     for row, with no new op kind. The chunk is right-aligned (padding rows
+//     positions[i] + 1. That is the arithmetic of the decode loop, row for
+//     row, with no new op kind. The chunk is right-aligned (padding rows
 //     first, slot -1), so the last real token is always row T - 1 and the
 //     graph returns that row's logits.
-//   * FLOAT32 THROUGHOUT. A bf16 checkpoint is decoded to f32 at ingestion.
-//     What that costs and what it buys is in [HfLlamaStagedWeights].
-//   * NO SAMPLING, NO BIAS, NO ROPE SCALING. The first is H1c's decision
-//     (logits out, sampler host-side); the last two are refused BY NAME in
-//     [HfLlamaConfig.toDecodeModelShape] and never reach here.
+//   * PER-LAYER SPECS. Each layer is built from its [DecoderLayerSpec]; the
+//     graph implements full causal attention with RoPE and the optional
+//     per-head q/k RMSNorm (Qwen3). Everything else a spec or config can ask
+//     for is refused by name in [HfDecoderConfig.toDecodeModelShape] and never
+//     reaches here.
+//   * FLOAT32 THROUGHOUT. A bf16 checkpoint is widened to f32 at ingestion
+//     (exactly: bf16 -> f32 is a 16-bit shift).
+//   * NO SAMPLING. Logits out; the sampler is host-side.
 
 /**
- * Builds the Llama decode graph the serving contract calls.
+ * Builds the decode graph the serving contract calls.
  *
  * ```
  *   embed
- *   ├─ per layer ─ rms_norm → q/k/v → RoPE → KV_CACHE_WRITE ×2
+ *   ├─ per layer ─ rms_norm → q/k/v → [q/k rms_norm] → RoPE → KV_CACHE_WRITE ×2
  *   │              → PAGED_ATTENTION → o_proj → +residual
  *   │              → rms_norm → SwiGLU → down_proj → +residual
  *   └─ final rms_norm → lm_head → logits
  * ```
  *
  * The signature is [DecodeGraphSpec]'s, with [weightSlots] appended; the
- * built function is checked against it by [DecodeGraphSpec.verifySignature],
- * so "the builder produced the contract" is a gate and not a comment.
+ * built function is checked against it by [DecodeGraphSpec.verifySignature].
  */
-object HfLlamaDecodeGraph {
+object HfDecoderGraph {
 
     /** Default entry symbol, matching `ServingArtifactWriter.ENTRY_POINT`. */
     const val ENTRY_POINT: String = "main"
@@ -61,63 +57,46 @@ object HfLlamaDecodeGraph {
     // ---------------------------------------------------------------- slots
 
     /**
-     * The staged-weight signature, in the ONE canonical order a loader binds
-     * by index against. Embedding table, then each layer's tensors in the
-     * order the layer consumes them, then the final norm and the head.
+     * The staged-weight signature, in the one canonical order a loader binds
+     * by index: the embedding table, each layer's [DecoderLayerSpec.parts],
+     * the final norm and the head ([weightRoles] gives the role of each).
      *
-     * **The dims here are MATH layout `[in, out]`, not the file's `[out,
-     * in]`.** That is the load-bearing line of this file. HF stores every
-     * `nn.Linear` weight transposed because `F.linear(x, W)` is `x @ W.T`
-     * (verified against a real checkpoint's rectangular k/v and
-     * gate/up); Tlaloc's [OpKind.MATMUL] contracts `last(A) × first(B)`, so
-     * somebody has to transpose.
-     *
-     * The transpose happens ONCE, HOST-SIDE, at ingestion
-     * ([HfLlamaStagedWeights]). REJECTED: a [OpKind.TRANSPOSE] node per
-     * projection in the graph — the weight is a PARAMETER, not a constant, so
-     * there is nothing for a constant-folder to fold, and the cost would be a
-     * full re-layout of every projection matrix on every decode step. The
-     * norms and the embedding table are NOT Linears and are staged verbatim
-     * (`HfLlamaNames.isTransposedLinear` is the predicate, and it is the same
-     * one this order is derived from).
+     * The dims are math layout `[in, out]`, not the file's `[out, in]`. HF
+     * stores every `nn.Linear` weight transposed (`F.linear(x, W)` is
+     * `x @ W.T`), and [OpKind.MATMUL] contracts `last(A) × first(B)`, so the
+     * Linears are transposed once, host-side, at ingestion (HfStagedWeights),
+     * not by a [OpKind.TRANSPOSE] per step in the graph. The norms and the
+     * embedding table are not Linears and are staged verbatim
+     * ([HfDecoderNames.isTransposedLinear] is the predicate for both).
      */
-    fun weightSlots(config: HfLlamaConfig): List<DecodeSlot> = buildList {
-        fun w(name: String, vararg dims: Int) =
-            add(DecodeSlot(name, DxirType(F32, dims.toList()), DecodeSlotRole.WEIGHT))
-
-        val d = config.hiddenSize
-        w("embedTokens", config.vocabSize, d)
-        for (l in 0 until config.numLayers) {
-            w("inputNorm$l", d)
-            w("qProj$l", d, config.qProjOut)
-            w("kProj$l", d, config.kvProjOut)
-            w("vProj$l", d, config.kvProjOut)
-            w("oProj$l", config.qProjOut, d)
-            w("postAttnNorm$l", d)
-            w("gateProj$l", d, config.intermediateSize)
-            w("upProj$l", d, config.intermediateSize)
-            w("downProj$l", config.intermediateSize, d)
+    fun weightSlots(config: HfDecoderConfig): List<DecodeSlot> =
+        weightRoles(config).map { role ->
+            val fileDims = HfDecoderNames.expectedDims(role, config).toList()
+            val dims = if (HfDecoderNames.isTransposedLinear(role)) fileDims.reversed() else fileDims
+            DecodeSlot(slotName(role), DxirType(F32, dims), DecodeSlotRole.WEIGHT)
         }
-        w("finalNorm", d)
-        w("lmHead", d, config.vocabSize)
-    }
 
-    /** The [LlamaWeightRole] each slot of [weightSlots] carries, same order. */
-    fun weightRoles(config: HfLlamaConfig): List<LlamaWeightRole> = buildList {
-        add(LlamaWeightRole.EmbedTokens)
-        for (l in 0 until config.numLayers) {
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.INPUT_LAYERNORM))
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.Q_PROJ))
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.K_PROJ))
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.V_PROJ))
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.O_PROJ))
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.POST_ATTENTION_LAYERNORM))
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.GATE_PROJ))
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.UP_PROJ))
-            add(LlamaWeightRole.Layer(l, LlamaLayerPart.DOWN_PROJ))
-        }
-        add(LlamaWeightRole.FinalNorm)
-        add(LlamaWeightRole.LmHead)
+    /** The [DecoderWeightRole] each slot of [weightSlots] carries, same order. */
+    fun weightRoles(config: HfDecoderConfig): List<DecoderWeightRole> = HfDecoderNames.roles(config)
+
+    /** The slot name of a role: `embedTokens`, `qProj3`, `kNorm0`, `lmHead`, ... */
+    fun slotName(role: DecoderWeightRole): String = when (role) {
+        DecoderWeightRole.EmbedTokens -> "embedTokens"
+        DecoderWeightRole.FinalNorm -> "finalNorm"
+        DecoderWeightRole.LmHead -> "lmHead"
+        is DecoderWeightRole.Layer -> when (role.part) {
+            DecoderLayerPart.INPUT_LAYERNORM -> "inputNorm"
+            DecoderLayerPart.Q_PROJ -> "qProj"
+            DecoderLayerPart.K_PROJ -> "kProj"
+            DecoderLayerPart.V_PROJ -> "vProj"
+            DecoderLayerPart.Q_NORM -> "qNorm"
+            DecoderLayerPart.K_NORM -> "kNorm"
+            DecoderLayerPart.O_PROJ -> "oProj"
+            DecoderLayerPart.POST_ATTENTION_LAYERNORM -> "postAttnNorm"
+            DecoderLayerPart.GATE_PROJ -> "gateProj"
+            DecoderLayerPart.UP_PROJ -> "upProj"
+            DecoderLayerPart.DOWN_PROJ -> "downProj"
+        } + role.layer
     }
 
     /**
@@ -125,13 +104,13 @@ object HfLlamaDecodeGraph {
      * step by default, or a prefill chunk of `bucket.maxContext` tokens.
      */
     fun spec(
-        config: HfLlamaConfig,
+        config: HfDecoderConfig,
         model: DecodeModelShape,
         bucket: DecodeBucket,
         kind: DecodeGraphKind = DecodeGraphKind.DECODE,
     ): DecodeGraphSpec {
         require(model.numLayers == config.numLayers && model.hiddenSize == config.hiddenSize) {
-            "HfLlamaDecodeGraph.spec: model shape $model does not describe this config " +
+            "HfDecoderGraph.spec: model shape $model does not describe this config " +
                 "(layers=${config.numLayers}, hidden=${config.hiddenSize})"
         }
         return DecodeGraphSpec(
@@ -151,22 +130,22 @@ object HfLlamaDecodeGraph {
      * axis — the DUPLICATED form, which is what makes `rotate_half` the right
      * partner rather than an interleave.
      *
-     * These are the ONLY body constants in the graph, and they are derived
-     * entirely from `config.json` (`rope_theta`, `head_dim`,
-     * `max_position_embeddings`) — no checkpoint byte reaches them. At
-     * TinyLlama's 2048 × 64 that is 512 KB each, which is a literal a
-     * StableHLO file can carry; a weight matrix is not (see
-     * [DecodeGraphSpec.weightSlots]).
+     * These are the only large body constants in the graph, and they are
+     * derived entirely from `config.json` (`rope_theta`, `head_dim`) and the
+     * entry's context; no checkpoint byte reaches them. [build] asks for the
+     * positions its entry can reach (its context, capped by
+     * `max_position_embeddings`), so a 64-token entry of Qwen3 carries
+     * 64 × 128 floats per table, not 40960 × 128.
      *
      * They are computed in DOUBLE and narrowed, because `theta^(-2i/d)` at
      * `theta = 500000` (Llama-3) loses bits in f32 exactly where the
      * high-frequency lanes live.
      */
-    fun ropeTables(config: HfLlamaConfig, positions: Int): Pair<FloatArray, FloatArray> {
-        require(positions >= 1) { "HfLlamaDecodeGraph.ropeTables: positions must be >= 1" }
+    fun ropeTables(config: HfDecoderConfig, positions: Int): Pair<FloatArray, FloatArray> {
+        require(positions >= 1) { "HfDecoderGraph.ropeTables: positions must be >= 1" }
         val hd = config.headDim
         require(hd % 2 == 0) {
-            "HfLlamaDecodeGraph.ropeTables: head_dim $hd is odd — RoPE rotates PAIRS of " +
+            "HfDecoderGraph.ropeTables: head_dim $hd is odd — RoPE rotates PAIRS of " +
                 "channels and HF's rotate_half splits the axis in half; an odd head_dim has " +
                 "no such split and this builder refuses it BY NAME rather than dropping a lane"
         }
@@ -235,16 +214,16 @@ object HfLlamaDecodeGraph {
      */
     fun build(
         spec: DecodeGraphSpec,
-        config: HfLlamaConfig,
+        config: HfDecoderConfig,
         entryName: String = ENTRY_POINT,
     ): DxirFunction {
         require(spec.weightSlots == weightSlots(config)) {
-            "HfLlamaDecodeGraph.build: the spec's weight signature is not this config's — " +
-                "build the spec with HfLlamaDecodeGraph.spec(), which derives it"
+            "HfDecoderGraph.build: the spec's weight signature is not this config's — " +
+                "build the spec with HfDecoderGraph.spec(), which derives it"
         }
         val m = spec.model
         require(m.numLayers == config.numLayers) {
-            "HfLlamaDecodeGraph.build: spec has ${m.numLayers} layers, config has " +
+            "HfDecoderGraph.build: spec has ${m.numLayers} layers, config has " +
                 "${config.numLayers}"
         }
         val b = spec.bucket.batch
@@ -259,7 +238,10 @@ object HfLlamaDecodeGraph {
         val kvOut = config.kvProjOut
         val eps = config.rmsNormEps.toFloat()
         val scale = 1.0f / sqrt(hd.toFloat())
-        val ropePositions = config.maxPositionEmbeddings
+        // The table covers the positions this entry can reach: its context,
+        // capped by the model's own limit. Qwen3's 40960 positions at
+        // head_dim 128 would be 42 MB of constants in every body.
+        val ropePositions = minOf(config.maxPositionEmbeddings, maxBlocks * m.blockSize)
         val (cosTable, sinTable) = ropeTables(config, ropePositions)
         val idx = spec.positionsType.dtype
 
@@ -276,27 +258,42 @@ object HfLlamaDecodeGraph {
                 param("keyCache$l", spec.poolType) to param("valueCache$l", spec.poolType)
             }
             val w = spec.weightSlots.map { param(it.name, it.type) }
-            fun weight(i: Int): DxirNode = w[i]
+            val byRole: Map<DecoderWeightRole, DxirNode> =
+                weightRoles(config).withIndex().associate { (i, role) -> role to w[i] }
+            fun weight(role: DecoderWeightRole): DxirNode = byRole.getValue(role)
+            fun layerWeight(l: Int, part: DecoderLayerPart): DxirNode =
+                weight(DecoderWeightRole.Layer(l, part))
 
             // ---- helpers ------------------------------------------------
-            val epsConsts = HashMap<Int, DxirNode>()
+            val epsConsts = HashMap<List<Int>, DxirNode>()
 
-            /** HF `LlamaRMSNorm` over [rows] rows: `x * rsqrt(mean(x^2) + eps) * gain`. */
-            fun rmsNorm(x: DxirNode, gain: DxirNode, rows: Int): DxirNode {
-                val tX = DxirType(F32, listOf(rows, d))
-                val tRow = DxirType(F32, listOf(rows, 1))
-                val epsConst = epsConsts.getOrPut(rows) { const(FloatArray(rows) { eps }, tRow) }
+            /**
+             * HF's RMSNorm over the last axis of [dims]:
+             * `x * rsqrt(mean(x^2) + eps) * gain`, with `gain` of the last
+             * axis' width. Rank 2 for the hidden-state norms, rank 3
+             * (`[rows, heads, headDim]`) for Qwen3's per-head q/k norms.
+             */
+            fun rmsNorm(x: DxirNode, gain: DxirNode, dims: List<Int>): DxirNode {
+                val rank = dims.size
+                val tX = DxirType(F32, dims)
+                val rowDims = dims.dropLast(1) + 1
+                val tRow = DxirType(F32, rowDims)
+                val epsConst = epsConsts.getOrPut(rowDims) {
+                    const(FloatArray(rowDims.fold(1) { a, n -> a * n }) { eps }, tRow)
+                }
                 val sq = op(OpKind.MUL, listOf(x, x), tX)
                 val mean = op(
                     OpKind.MEAN, listOf(sq), tRow,
-                    attrs = mapOf("reduction_dims" to listOf(1)),
+                    attrs = mapOf("reduction_dims" to listOf(rank - 1)),
                 )
                 val rsq = op(OpKind.RSQRT, listOf(op(OpKind.ADD, listOf(mean, epsConst), tRow)), tRow)
                 val scaled = op(OpKind.MUL, listOf(x, rsq), tX)
-                val gainRow = op(OpKind.RESHAPE, listOf(gain), DxirType(F32, listOf(1, d)))
+                val gainRow = op(
+                    OpKind.RESHAPE, listOf(gain), DxirType(F32, List(rank - 1) { 1 } + dims.last()),
+                )
                 val gainB = op(
                     OpKind.BROADCAST, listOf(gainRow), tX,
-                    attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
+                    attrs = mapOf("broadcast_dimensions" to (0 until rank).toList()),
                 )
                 return op(OpKind.MUL, listOf(scaled, gainB), tX)
             }
@@ -397,24 +394,40 @@ object HfLlamaDecodeGraph {
 
             // ---- embed ---------------------------------------------------
             val embed3 = op(
-                OpKind.EMBEDDING, listOf(weight(0), tokenIds),
+                OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.EmbedTokens), tokenIds),
                 DxirType(F32, listOf(b, t, d)),
             )
             var h = op(OpKind.RESHAPE, listOf(embed3), tH)
+            val tQ3 = DxirType(F32, listOf(r, config.numHeads, hd))
+            val tKv3 = DxirType(F32, listOf(r, config.numKvHeads, hd))
 
             // ---- decoder layers -----------------------------------------
             val poolOuts = ArrayList<DxirNode>(2 * m.numLayers)
             for (l in 0 until m.numLayers) {
-                val base = 1 + l * PARTS_PER_LAYER
-                val hn = rmsNorm(h, weight(base), r)
+                val layerSpec = config.layer(l)
+                val hn = rmsNorm(h, layerWeight(l, DecoderLayerPart.INPUT_LAYERNORM), listOf(r, d))
 
-                val q = op(OpKind.MATMUL, listOf(hn, weight(base + 1)), DxirType(F32, listOf(r, qOut)))
-                val k = op(OpKind.MATMUL, listOf(hn, weight(base + 2)), DxirType(F32, listOf(r, kvOut)))
-                val v = op(OpKind.MATMUL, listOf(hn, weight(base + 3)), DxirType(F32, listOf(r, kvOut)))
+                val q = op(
+                    OpKind.MATMUL, listOf(hn, layerWeight(l, DecoderLayerPart.Q_PROJ)),
+                    DxirType(F32, listOf(r, qOut)),
+                )
+                val k = op(
+                    OpKind.MATMUL, listOf(hn, layerWeight(l, DecoderLayerPart.K_PROJ)),
+                    DxirType(F32, listOf(r, kvOut)),
+                )
+                val v = op(
+                    OpKind.MATMUL, listOf(hn, layerWeight(l, DecoderLayerPart.V_PROJ)),
+                    DxirType(F32, listOf(r, kvOut)),
+                )
 
-                val q3 = op(OpKind.RESHAPE, listOf(q), DxirType(F32, listOf(r, config.numHeads, hd)))
-                val k3 = op(OpKind.RESHAPE, listOf(k), DxirType(F32, listOf(r, config.numKvHeads, hd)))
-                val v3 = op(OpKind.RESHAPE, listOf(v), DxirType(F32, listOf(r, config.numKvHeads, hd)))
+                var q3: DxirNode = op(OpKind.RESHAPE, listOf(q), tQ3)
+                var k3: DxirNode = op(OpKind.RESHAPE, listOf(k), tKv3)
+                val v3 = op(OpKind.RESHAPE, listOf(v), tKv3)
+                if (layerSpec.qkNorm) {
+                    // Qwen3: RMSNorm over each head's head_dim, before RoPE.
+                    q3 = rmsNorm(q3, layerWeight(l, DecoderLayerPart.Q_NORM), tQ3.dims)
+                    k3 = rmsNorm(k3, layerWeight(l, DecoderLayerPart.K_NORM), tKv3.dims)
+                }
 
                 val qRot = rope(q3, config.numHeads, cosQ, sinQ)
                 val kRot = rope(k3, config.numKvHeads, cosK, sinK)
@@ -432,18 +445,24 @@ object HfLlamaDecodeGraph {
                     mapOf("scale" to scale.toDouble()),
                 )
                 val attFlat = op(OpKind.RESHAPE, listOf(att), DxirType(F32, listOf(r, qOut)))
-                val attProj = op(OpKind.MATMUL, listOf(attFlat, weight(base + 4)), tH)
+                val attProj = op(
+                    OpKind.MATMUL, listOf(attFlat, layerWeight(l, DecoderLayerPart.O_PROJ)), tH,
+                )
                 val hAttn = op(OpKind.ADD, listOf(h, attProj), tH)
 
-                val hn2 = rmsNorm(hAttn, weight(base + 5), r)
-                val gate = op(OpKind.MATMUL, listOf(hn2, weight(base + 6)), tFf)
-                val up = op(OpKind.MATMUL, listOf(hn2, weight(base + 7)), tFf)
+                val hn2 = rmsNorm(
+                    hAttn, layerWeight(l, DecoderLayerPart.POST_ATTENTION_LAYERNORM), listOf(r, d),
+                )
+                val gate = op(OpKind.MATMUL, listOf(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ)), tFf)
+                val up = op(OpKind.MATMUL, listOf(hn2, layerWeight(l, DecoderLayerPart.UP_PROJ)), tFf)
                 val swiglu = op(
                     OpKind.MUL,
                     listOf(op(OpKind.SILU, listOf(gate), tFf), up),
                     tFf,
                 )
-                val down = op(OpKind.MATMUL, listOf(swiglu, weight(base + 8)), tH)
+                val down = op(
+                    OpKind.MATMUL, listOf(swiglu, layerWeight(l, DecoderLayerPart.DOWN_PROJ)), tH,
+                )
                 h = op(OpKind.ADD, listOf(hAttn, down), tH)
             }
 
@@ -464,18 +483,14 @@ object HfLlamaDecodeGraph {
             }
 
             // ---- final norm + head ---------------------------------------
-            val finalNormIdx = 1 + m.numLayers * PARTS_PER_LAYER
-            val hf = rmsNorm(last, weight(finalNormIdx), b)
+            val hf = rmsNorm(last, weight(DecoderWeightRole.FinalNorm), listOf(b, d))
             val logits2 = op(
-                OpKind.MATMUL, listOf(hf, weight(finalNormIdx + 1)),
+                OpKind.MATMUL, listOf(hf, weight(DecoderWeightRole.LmHead)),
                 DxirType(F32, listOf(b, config.vocabSize)),
             )
             listOf(op(OpKind.RESHAPE, listOf(logits2), spec.logitsType)) + poolOuts
         }
-        spec.verifySignature(fn, "HfLlamaDecodeGraph")
+        spec.verifySignature(fn, "HfDecoderGraph")
         return fn
     }
-
-    /** Weight slots per decoder layer — the stride of the staged order. */
-    const val PARTS_PER_LAYER: Int = 9
 }

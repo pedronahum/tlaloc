@@ -45,15 +45,15 @@ class HfLlamaRealPrefillParityTest {
         val dir = checkpointDir()
         assumeTrue(dir != null, "no TinyLlama checkpoint — see HfLlamaCheckpointTest for the fetch command")
 
-        HfLlamaCheckpoint.open(dir!!).use { ckpt ->
+        HfCheckpoint.open(dir!!).use { ckpt ->
             val config = ckpt.config.copy(numLayers = layers)
             val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = blockSize)
             val bucket = DecodeBucket(batch = 1, maxContext = context)
-            val decode = HfLlamaDecodeGraph.build(HfLlamaDecodeGraph.spec(config, model, bucket), config)
-            val prefill = HfLlamaDecodeGraph.build(
-                HfLlamaDecodeGraph.spec(config, model, bucket, DecodeGraphKind.PREFILL), config,
+            val decode = HfDecoderGraph.build(HfDecoderGraph.spec(config, model, bucket), config)
+            val prefill = HfDecoderGraph.build(
+                HfDecoderGraph.spec(config, model, bucket, DecodeGraphKind.PREFILL), config,
             )
-            val weights = HfLlamaStagedWeights.stage(ckpt, config)
+            val weights = HfStagedWeights.stage(ckpt, config)
             val poolSize = numBlocks * blockSize * model.numKvHeads * model.headDim
             // Pages 2 and 3: the sequence does not start at page 0.
             val table = floatArrayOf(2f, 3f)

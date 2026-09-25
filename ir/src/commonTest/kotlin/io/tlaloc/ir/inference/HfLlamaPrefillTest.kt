@@ -25,7 +25,7 @@ import kotlin.test.assertFalse
  */
 class HfLlamaPrefillTest {
 
-    private val config = HfLlamaConfig(
+    private val config = HfDecoderConfig(
         architecture = "LlamaForCausalLM",
         modelType = "llama",
         hiddenSize = 16,
@@ -50,7 +50,7 @@ class HfLlamaPrefillTest {
     /** Deterministic random weights, scaled so the logits are not flat. */
     private val weights: List<FloatArray> = run {
         val rng = Random(20260925)
-        HfLlamaDecodeGraph.weightSlots(config).map { slot ->
+        HfDecoderGraph.weightSlots(config).map { slot ->
             val n = slot.type.dims.fold(1) { a, b -> a * b }
             if (slot.type.dims.size == 1) {
                 FloatArray(n) { 1f + 0.1f * (rng.nextFloat() - 0.5f) } // norm gains
@@ -65,8 +65,8 @@ class HfLlamaPrefillTest {
     private fun emptyPools() = List(2 * config.numLayers) { FloatArray(poolSize) }
 
     private fun graph(kind: DecodeGraphKind, batch: Int, context: Int): DxirFunction =
-        HfLlamaDecodeGraph.build(
-            HfLlamaDecodeGraph.spec(config, model, DecodeBucket(batch, context), kind),
+        HfDecoderGraph.build(
+            HfDecoderGraph.spec(config, model, DecodeBucket(batch, context), kind),
             config,
         )
 
@@ -155,7 +155,7 @@ class HfLlamaPrefillTest {
 
     @Test
     fun thePrefillSignatureIsTheDecodeSignatureWithALongerTokenAxis() {
-        val spec = HfLlamaDecodeGraph.spec(config, model, DecodeBucket(1, context), DecodeGraphKind.PREFILL)
+        val spec = HfDecoderGraph.spec(config, model, DecodeBucket(1, context), DecodeGraphKind.PREFILL)
         assertEquals(listOf(1, context), spec.tokenIdsType.dims)
         assertEquals(listOf(context), spec.slotMappingType.dims)
         assertEquals(listOf(1, 1, config.vocabSize), spec.logitsType.dims, "last position only")

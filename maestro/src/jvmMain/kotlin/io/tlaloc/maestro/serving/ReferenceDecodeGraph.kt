@@ -26,7 +26,7 @@ import kotlin.math.sqrt
  * one layer, weights as in-body constants. That is deliberately **not** a
  * Llama: it certifies the SEAM — export, load, compile, run, agree — and a
  * seam is certified by a graph small enough that a disagreement is
- * attributable. Real Llama checkpoints are exported by [HfLlamaServingExport].
+ * attributable. Real Llama checkpoints are exported by [HfServingExport].
  *
  * RoPE is absent: `positions` is an operand of the contract and is not
  * consumed by this graph, because the rotary tables are model-layer work.

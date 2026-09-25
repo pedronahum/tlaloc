@@ -50,7 +50,7 @@ class HfLlamaTest {
 
     @Test
     fun realTinyLlamaConfigParses() {
-        val c = HfLlamaConfig.parse(tinyLlamaConfigJson)
+        val c = HfDecoderConfig.parse(tinyLlamaConfigJson)
         assertEquals("LlamaForCausalLM", c.architecture)
         assertEquals("llama", c.modelType)
         assertEquals(2048, c.hiddenSize)
@@ -85,7 +85,7 @@ class HfLlamaTest {
              "num_hidden_layers":16,"num_attention_heads":32,"num_key_value_heads":8,
              "head_dim":128,"vocab_size":128256,"tie_word_embeddings":true}
         """.trimIndent()
-        val c = HfLlamaConfig.parse(json)
+        val c = HfDecoderConfig.parse(json)
         assertEquals(128, c.headDim)
         assertEquals(2048 / 32, 64)
         // The mapping uses head_dim, so q_proj is WIDER than hidden.
@@ -103,7 +103,7 @@ class HfLlamaTest {
             {"architectures":["LlamaForCausalLM"],"hidden_size":64,"intermediate_size":128,
              "num_hidden_layers":2,"num_attention_heads":4,"vocab_size":100}
         """.trimIndent()
-        val c = HfLlamaConfig.parse(json)
+        val c = HfDecoderConfig.parse(json)
         assertEquals(4, c.numKvHeads)
         assertTrue(c.isMultiHead)
         assertEquals(1, c.gqaGroup)
@@ -111,90 +111,90 @@ class HfLlamaTest {
 
     @Test
     fun theNameBijectionRoundTrips() {
-        val c = HfLlamaConfig.parse(tinyLlamaConfigJson)
-        val roles = HfLlamaNames.roles(c)
+        val c = HfDecoderConfig.parse(tinyLlamaConfigJson)
+        val roles = HfDecoderNames.roles(c)
         // 1 embedding + 22 layers * 9 + final norm + head = 201, which is
         // exactly the tensor count of the real checkpoint.
         assertEquals(1 + 22 * 9 + 1 + 1, roles.size)
         assertEquals(201, roles.size)
         for (role in roles) {
-            val name = HfLlamaNames.hfName(role)
-            assertEquals(role, HfLlamaNames.role(name), "round trip failed for $name")
+            val name = HfDecoderNames.hfName(role)
+            assertEquals(role, HfDecoderNames.role(name), "round trip failed for $name")
         }
         // Distinct names, i.e. the map really is injective.
-        assertEquals(roles.size, roles.map { HfLlamaNames.hfName(it) }.toSet().size)
+        assertEquals(roles.size, roles.map { HfDecoderNames.hfName(it) }.toSet().size)
     }
 
     @Test
     fun theSpellingsAreTheOnesHuggingFaceWrites() {
-        assertEquals("model.embed_tokens.weight", HfLlamaNames.hfName(LlamaWeightRole.EmbedTokens))
-        assertEquals("model.norm.weight", HfLlamaNames.hfName(LlamaWeightRole.FinalNorm))
-        assertEquals("lm_head.weight", HfLlamaNames.hfName(LlamaWeightRole.LmHead))
+        assertEquals("model.embed_tokens.weight", HfDecoderNames.hfName(DecoderWeightRole.EmbedTokens))
+        assertEquals("model.norm.weight", HfDecoderNames.hfName(DecoderWeightRole.FinalNorm))
+        assertEquals("lm_head.weight", HfDecoderNames.hfName(DecoderWeightRole.LmHead))
         assertEquals(
             "model.layers.7.self_attn.q_proj.weight",
-            HfLlamaNames.hfName(LlamaWeightRole.Layer(7, LlamaLayerPart.Q_PROJ)),
+            HfDecoderNames.hfName(DecoderWeightRole.Layer(7, DecoderLayerPart.Q_PROJ)),
         )
         assertEquals(
             "model.layers.0.mlp.down_proj.weight",
-            HfLlamaNames.hfName(LlamaWeightRole.Layer(0, LlamaLayerPart.DOWN_PROJ)),
+            HfDecoderNames.hfName(DecoderWeightRole.Layer(0, DecoderLayerPart.DOWN_PROJ)),
         )
         assertEquals(
             "model.layers.21.post_attention_layernorm.weight",
-            HfLlamaNames.hfName(LlamaWeightRole.Layer(21, LlamaLayerPart.POST_ATTENTION_LAYERNORM)),
+            HfDecoderNames.hfName(DecoderWeightRole.Layer(21, DecoderLayerPart.POST_ATTENTION_LAYERNORM)),
         )
     }
 
     @Test
     fun unknownNamesParseToNullRatherThanThrowing() {
         // A real vintage artifact: transformers < 4.36 persisted this buffer.
-        assertNull(HfLlamaNames.role("model.layers.0.self_attn.rotary_emb.inv_freq"))
-        assertNull(HfLlamaNames.role("model.layers.x.mlp.up_proj.weight"))
-        assertNull(HfLlamaNames.role("model.layers..mlp.up_proj.weight"))
-        assertNull(HfLlamaNames.role("model.layers.0.mlp.up_proj.bias"))
-        assertNull(HfLlamaNames.role("model.layers.0"))
-        assertNull(HfLlamaNames.role(""))
-        assertNull(HfLlamaNames.role("model.embed_tokens.weight.extra"))
+        assertNull(HfDecoderNames.role("model.layers.0.self_attn.rotary_emb.inv_freq"))
+        assertNull(HfDecoderNames.role("model.layers.x.mlp.up_proj.weight"))
+        assertNull(HfDecoderNames.role("model.layers..mlp.up_proj.weight"))
+        assertNull(HfDecoderNames.role("model.layers.0.mlp.up_proj.bias"))
+        assertNull(HfDecoderNames.role("model.layers.0"))
+        assertNull(HfDecoderNames.role(""))
+        assertNull(HfDecoderNames.role("model.embed_tokens.weight.extra"))
     }
 
     @Test
     fun expectedDimsEncodeTheTransposedLinearConvention() {
-        val c = HfLlamaConfig.parse(tinyLlamaConfigJson)
-        fun dims(p: LlamaLayerPart) =
-            HfLlamaNames.expectedDims(LlamaWeightRole.Layer(3, p), c).toList()
+        val c = HfDecoderConfig.parse(tinyLlamaConfigJson)
+        fun dims(p: DecoderLayerPart) =
+            HfDecoderNames.expectedDims(DecoderWeightRole.Layer(3, p), c).toList()
 
         // These four are the ones the real checkpoint was checked against, and
         // the ones a [in, out] convention would reverse.
-        assertEquals(listOf(256, 2048), dims(LlamaLayerPart.K_PROJ))
-        assertEquals(listOf(256, 2048), dims(LlamaLayerPart.V_PROJ))
-        assertEquals(listOf(5632, 2048), dims(LlamaLayerPart.GATE_PROJ))
-        assertEquals(listOf(2048, 5632), dims(LlamaLayerPart.DOWN_PROJ))
+        assertEquals(listOf(256, 2048), dims(DecoderLayerPart.K_PROJ))
+        assertEquals(listOf(256, 2048), dims(DecoderLayerPart.V_PROJ))
+        assertEquals(listOf(5632, 2048), dims(DecoderLayerPart.GATE_PROJ))
+        assertEquals(listOf(2048, 5632), dims(DecoderLayerPart.DOWN_PROJ))
         // Square, so these prove nothing on their own — recorded so a reader
         // knows why the rectangular ones above carry the claim.
-        assertEquals(listOf(2048, 2048), dims(LlamaLayerPart.Q_PROJ))
-        assertEquals(listOf(2048, 2048), dims(LlamaLayerPart.O_PROJ))
+        assertEquals(listOf(2048, 2048), dims(DecoderLayerPart.Q_PROJ))
+        assertEquals(listOf(2048, 2048), dims(DecoderLayerPart.O_PROJ))
 
-        assertEquals(listOf(2048), dims(LlamaLayerPart.INPUT_LAYERNORM))
+        assertEquals(listOf(2048), dims(DecoderLayerPart.INPUT_LAYERNORM))
         assertEquals(
             listOf(32000, 2048),
-            HfLlamaNames.expectedDims(LlamaWeightRole.EmbedTokens, c).toList(),
+            HfDecoderNames.expectedDims(DecoderWeightRole.EmbedTokens, c).toList(),
         )
         assertEquals(
             listOf(32000, 2048),
-            HfLlamaNames.expectedDims(LlamaWeightRole.LmHead, c).toList(),
+            HfDecoderNames.expectedDims(DecoderWeightRole.LmHead, c).toList(),
         )
 
-        assertTrue(HfLlamaNames.isTransposedLinear(LlamaWeightRole.LmHead))
-        assertTrue(HfLlamaNames.isTransposedLinear(LlamaWeightRole.Layer(0, LlamaLayerPart.Q_PROJ)))
-        assertFalse(HfLlamaNames.isTransposedLinear(LlamaWeightRole.EmbedTokens))
-        assertFalse(HfLlamaNames.isTransposedLinear(LlamaWeightRole.FinalNorm))
+        assertTrue(HfDecoderNames.isTransposedLinear(DecoderWeightRole.LmHead))
+        assertTrue(HfDecoderNames.isTransposedLinear(DecoderWeightRole.Layer(0, DecoderLayerPart.Q_PROJ)))
+        assertFalse(HfDecoderNames.isTransposedLinear(DecoderWeightRole.EmbedTokens))
+        assertFalse(HfDecoderNames.isTransposedLinear(DecoderWeightRole.FinalNorm))
         assertFalse(
-            HfLlamaNames.isTransposedLinear(LlamaWeightRole.Layer(0, LlamaLayerPart.INPUT_LAYERNORM)),
+            HfDecoderNames.isTransposedLinear(DecoderWeightRole.Layer(0, DecoderLayerPart.INPUT_LAYERNORM)),
         )
     }
 
     @Test
     fun theConfigBecomesADecodeModelShape() {
-        val c = HfLlamaConfig.parse(tinyLlamaConfigJson)
+        val c = HfDecoderConfig.parse(tinyLlamaConfigJson)
         val s = c.toDecodeModelShape(numBlocks = 64, blockSize = 16)
         assertEquals(32000, s.vocabSize)
         assertEquals(2048, s.hiddenSize)
@@ -213,7 +213,7 @@ class HfLlamaTest {
             "\"rope_scaling\": null",
             "\"rope_scaling\": {\"rope_type\": \"llama3\", \"factor\": 8.0}",
         )
-        val c = HfLlamaConfig.parse(json)
+        val c = HfDecoderConfig.parse(json)
         assertEquals("llama3", c.ropeScalingType)
         val e = assertFailsWith<JsonException> { c.toDecodeModelShape(4, 4) }
         assertTrue("llama3" in e.message!!, e.message!!)
@@ -227,19 +227,19 @@ class HfLlamaTest {
             "\"rope_scaling\": null",
             "\"rope_scaling\": {\"type\": \"linear\", \"factor\": 4.0}",
         )
-        assertEquals("linear", HfLlamaConfig.parse(json).ropeScalingType)
+        assertEquals("linear", HfDecoderConfig.parse(json).ropeScalingType)
         // …and HF's own way of writing "no scaling at all" is not a refusal.
         val unscaled = tinyLlamaConfigJson.replace(
             "\"rope_scaling\": null",
             "\"rope_scaling\": {\"rope_type\": \"default\"}",
         )
-        assertNull(HfLlamaConfig.parse(unscaled).ropeScalingType)
+        assertNull(HfDecoderConfig.parse(unscaled).ropeScalingType)
     }
 
     @Test
     fun attentionBiasIsRefusedByName() {
         val json = tinyLlamaConfigJson.replace("\"attention_bias\": false", "\"attention_bias\": true")
-        val c = HfLlamaConfig.parse(json)
+        val c = HfDecoderConfig.parse(json)
         assertTrue(c.attentionBias)
         val e = assertFailsWith<JsonException> { c.toDecodeModelShape(4, 4) }
         assertTrue("attention_bias" in e.message!!, e.message!!)
@@ -248,10 +248,10 @@ class HfLlamaTest {
     @Test
     fun aForeignArchitectureIsRefusedUnlessTheCallerOptsOut() {
         val json = tinyLlamaConfigJson.replace("LlamaForCausalLM", "MixtralForCausalLM")
-        val e = assertFailsWith<JsonException> { HfLlamaConfig.parse(json) }
+        val e = assertFailsWith<JsonException> { HfDecoderConfig.parse(json) }
         assertTrue("MixtralForCausalLM" in e.message!!, e.message!!)
         // Opting out is explicit and gives the same numbers.
-        val c = HfLlamaConfig.parse(json, strictArchitecture = false)
+        val c = HfDecoderConfig.parse(json, strictArchitecture = false)
         assertEquals("MixtralForCausalLM", c.architecture)
         assertEquals(22, c.numLayers)
     }
@@ -264,7 +264,7 @@ class HfLlamaTest {
         )) {
             val json = tinyLlamaConfigJson.replace("\"$key\":", "\"${key}_typo\":")
             val e = assertFailsWith<JsonException>("$key should be required") {
-                HfLlamaConfig.parse(json)
+                HfDecoderConfig.parse(json)
             }
             assertTrue(key in e.message!!, "${e.message}")
         }
@@ -273,7 +273,7 @@ class HfLlamaTest {
     @Test
     fun anIndivisibleGqaGroupingIsRefused() {
         val json = tinyLlamaConfigJson.replace("\"num_key_value_heads\": 4", "\"num_key_value_heads\": 5")
-        val e = assertFailsWith<IllegalArgumentException> { HfLlamaConfig.parse(json) }
+        val e = assertFailsWith<IllegalArgumentException> { HfDecoderConfig.parse(json) }
         assertTrue("num_key_value_heads" in e.message!! || "divide" in e.message!!, e.message!!)
     }
 
@@ -283,7 +283,7 @@ class HfLlamaTest {
             {"architectures":["LlamaForCausalLM"],"hidden_size":100,"intermediate_size":128,
              "num_hidden_layers":2,"num_attention_heads":3,"vocab_size":100}
         """.trimIndent()
-        val e = assertFailsWith<JsonException> { HfLlamaConfig.parse(json) }
+        val e = assertFailsWith<JsonException> { HfDecoderConfig.parse(json) }
         assertTrue("head_dim" in e.message!!, e.message!!)
     }
 }

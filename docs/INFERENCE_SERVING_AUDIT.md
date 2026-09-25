@@ -1536,11 +1536,11 @@ to be certified some other way (it was; see below).
 
 **What landed.**
 
-1. `ir/.../inference/HfLlama.kt` (commonMain) — `HfLlamaConfig` (config.json
-   through `:core`'s strict `parseJson`), `LlamaWeightRole` /
-   `LlamaLayerPart`, and `HfLlamaNames`: the HF-name <-> role **bijection**,
+1. `ir/.../inference/HfLlama.kt` (commonMain) — `HfDecoderConfig` (config.json
+   through `:core`'s strict `parseJson`), `DecoderWeightRole` /
+   `DecoderLayerPart`, and `HfDecoderNames`: the HF-name <-> role **bijection**,
    the role list a config implies, and `expectedDims(role, config)`.
-2. `ir/.../inference/HfLlamaCheckpoint.kt` (jvmMain) — the only part that
+2. `ir/.../inference/HfCheckpoint.kt` (jvmMain) — the only part that
    touches a filesystem. Opens a directory through §0.4.468's
    `SafetensorsIndex.openCheckpoint`, so **sharding is already handled and
    this file never learns which form it got**; TinyLlama is single-file, a
@@ -1631,7 +1631,7 @@ same trade and was right.
 - **`WeightSource` exposes no `dtype(name)`.** Asking a checkpoint what
   width a tensor is stored at currently means decoding it. The fix is a
   header accessor in `:core` beside the parser that already knows; until
-  then `HfLlamaConfig.storageDType` reports `torch_dtype` (what the producer
+  then `HfDecoderConfig.storageDType` reports `torch_dtype` (what the producer
   INTENDED, not what the bytes ARE) and the test closes the gap by opening
   the same file through `SafetensorsFile` directly.
 - **`:ir`'s Test JVM heap is now 2 GB** (Gradle's default is 512 MB). Lane
@@ -1641,7 +1641,7 @@ same trade and was right.
   when a `data_offsets` base or a short read is wrong.
 - **No graph is built from these weights yet.** Roles in, tensors out. H3c-2
   is `DecodeGraphSpec` + `ServingArtifactWriter` fed from a
-  `HfLlamaCheckpoint`, and it is where the transpose stops being a
+  `HfCheckpoint`, and it is where the transpose stops being a
   documented fact and becomes a matmul.
 - **The tokenizer is untouched.** `vllm serve` needs it and `tokenizer.json`
   / `tokenizer.model` were fetched alongside the weights, but nothing here
@@ -1658,16 +1658,16 @@ against HuggingFace transformers.**
 
 **What landed, four files.**
 
-1. `ir/.../inference/HfLlamaDecodeGraph.kt` (commonMain) — the builder.
+1. `ir/.../inference/HfDecoderGraph.kt` (commonMain) — the builder.
    `embed -> N x (rms_norm -> q/k/v -> RoPE -> KV_CACHE_WRITE x2 ->
    PAGED_ATTENTION -> o_proj -> +residual -> rms_norm -> SwiGLU -> +residual)
-   -> final rms_norm -> lm_head`. Pure `DxirBuilder` over an `HfLlamaConfig`;
+   -> final rms_norm -> lm_head`. Pure `DxirBuilder` over an `HfDecoderConfig`;
    touches no file.
-2. `ir/.../inference/HfLlamaStagedWeights.kt` (jvmMain) — **the transpose,
+2. `ir/.../inference/HfStagedWeights.kt` (jvmMain) — **the transpose,
    performed.** §0.4.478's `[out, in]` layout fact stops being documentation
    here: the seven Linears per layer and `lm_head` are transposed ONCE,
    host-side, into math layout; the embedding table and the norm gains are
-   not, and the predicate that decides is `HfLlamaNames.isTransposedLinear`
+   not, and the predicate that decides is `HfDecoderNames.isTransposedLinear`
    rather than a second list.
 3. `harness/python/hf_llama_reference.py` — the oracle. Imports torch and
    transformers ON PURPOSE, runs in the **vLLM venv** (torch 2.13.0+cu130,
@@ -1710,7 +1710,7 @@ still-open deferral — a PERFORMANCE deferral, not a correctness one.
 | …and the server would emit the same text | the same, per position | **argmax exact, and the whole top-5 ORDER exact** |
 | the staged transpose is load-bearing | the same graph with `q_proj` staged in the file's `[out, in]` layout (shape-legal: q is square on this model) | the logits MOVE, by > 1e-2 |
 | the built graph IS the contract | `DecodeGraphSpec.verifySignature` inside `build()`, and again as a test | exact, per slot |
-| every staged Linear slot is the REVERSE of its file dims, every non-Linear identical | hermetic, against `HfLlamaNames.expectedDims` | exact dims, 7 per layer + `lm_head` |
+| every staged Linear slot is the REVERSE of its file dims, every non-Linear identical | hermetic, against `HfDecoderNames.expectedDims` | exact dims, 7 per layer + `lm_head` |
 | the RoPE tables are HF's DUPLICATED form | `headDim = 2` makes `inv_freq[0] = 1`, so the angle at position p is exactly p radians — written down, not recomputed | 1e-6, and `cos[p][0] == cos[p][1]` exactly |
 
 **The floor is fp32-vs-fp32 on CPU, deliberately.** bf16 -> f32 is exact
@@ -1790,7 +1790,7 @@ PJRT-CUDA — where it produces, token for token, what HuggingFace produces.
    here, it is impossible.
 4. `ServingArtifact.weight_buffers()` / `verify_weights()` — staged ONCE per
    artifact, held as live device buffers, bound by NAME in `run_decode`.
-5. `HfLlamaServingExport` + `./gradlew :maestro:exportLlamaServingArtifact`.
+5. `HfServingExport` + `./gradlew :maestro:exportLlamaServingArtifact`.
 6. `harness/python/run_llama_generate.py` (stdlib + `tlaloc_serve`, the
    deployment side) and `harness/python/hf_llama_greedy_oracle.py` (torch +
    transformers, the vLLM venv, ON PURPOSE — not serving-path code).
@@ -2333,9 +2333,9 @@ measured and closed out the KPTX performance tier (**2333 → 2336**).
 | 0.4.475 | H6a | `harness/python/tlaloc_pjrt.py` — the PJRT C API bound from Python with **ctypes alone**, mirroring the FFM runtime; jax blocked by an import guard while it runs | 2292 → 2294 |
 | 0.4.476 | H6b | `tlaloc_serve.py` rewired onto that binding — the **whole** serving path runs with no jax, jaxlib, torch or numpy, and the distribution's dependency list is empty | 2294 → 2295 |
 | 0.4.477 | H7 | `~/.local/venvs/vllm` (vLLM 0.29.0, its own venv), the live lane run, `platform.py`+`worker.py` CERTIFIED, one real bug found and fixed, `exportServingArtifact` | 2295 → 2296 |
-| 0.4.478 | H3c-1 | a REAL TinyLlama-1.1B checkpoint on disk, and `HfLlamaConfig` + `HfLlamaNames` + `HfLlamaCheckpoint` — HF names to roles, with the transposed-`[out, in]` layout VERIFIED against it and the bytes checked against torch | 2296 → 2320 |
-| 0.4.479 | H3c-2 | `HfLlamaDecodeGraph` + `HfLlamaStagedWeights` + `DecodeGraphSpec.weightSlots` — the real checkpoint becomes a decode graph, certified against HF transformers at **1e-5 relative with argmax and top-5 exact**; RSQRT/SILU interpreter arms found and closed on the way | 2320 → 2330 |
-| 0.4.480 | H3c-3 | `ServingWeightsPointer.table` + `buffer_from_file` + `HfLlamaServingExport` — the artifact carries a staged weight table and a REAL 22-layer TinyLlama serves on PJRT-CUDA, **6/6 generated token ids equal to HuggingFace** | 2330 → 2333 |
+| 0.4.478 | H3c-1 | a REAL TinyLlama-1.1B checkpoint on disk, and `HfDecoderConfig` + `HfDecoderNames` + `HfCheckpoint` — HF names to roles, with the transposed-`[out, in]` layout VERIFIED against it and the bytes checked against torch | 2296 → 2320 |
+| 0.4.479 | H3c-2 | `HfDecoderGraph` + `HfStagedWeights` + `DecodeGraphSpec.weightSlots` — the real checkpoint becomes a decode graph, certified against HF transformers at **1e-5 relative with argmax and top-5 exact**; RSQRT/SILU interpreter arms found and closed on the way | 2320 → 2330 |
+| 0.4.480 | H3c-3 | `ServingWeightsPointer.table` + `buffer_from_file` + `HfServingExport` — the artifact carries a staged weight table and a REAL 22-layer TinyLlama serves on PJRT-CUDA, **6/6 generated token ids equal to HuggingFace** | 2330 → 2333 |
 | 0.4.481 | H4b (K1) | `KptxPagedAttentionBenchTest` + [KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md) — the paged-attention tier's baselines, measured on the DEVICE instead of through the host round trip: the kernel is **1.4–1.6× faster** than XLA's lowering at 8B-shaped decode points and 1.9× slower at toy ones, §0.4.471's "1.5× slower" is retired as a staging measurement, and the dominant cost is the GQA re-read, not the score matrix | 2333 → 2335 |
 | 0.4.482 | H4b (K2) | the tier's first kernel change — `kptx_paged_out` gets a `(part, d)` decomposition (64 → 256 live threads at headDim 64), certified at the **same 1.1920929e-7** against the Double paged walk — and it measures **NOTHING**: a controlled null that bounds stage 3 at **≤ 16% of the chain** and exposes the real defect, **stage 1's K walk is 8×-read-amplified across a warp while stage 3's V walk was always coalesced**. Registry still empty | 2335 → 2336 |
 | 0.4.483 | H3c + H4b close-out (K3) | this sweep + [KPTX_PAGED_PERF.md §8](KPTX_PAGED_PERF.md) (the registry verdict, shape-conditional registration REJECTED by name, §4 and §7.4 merged into one ranked order) + [SERVING_RUNBOOK.md §10](SERVING_RUNBOOK.md) (the real-model demo as four copy-pasteable steps; the runbook's retired 465 µs KPTX verdict replaced with K1's device table and a two-line opt-in recipe; the duplicate section 5 renumbered). Invariants re-verified by grep, not assumed — docs only | 2336 → 2336 (docs only) |

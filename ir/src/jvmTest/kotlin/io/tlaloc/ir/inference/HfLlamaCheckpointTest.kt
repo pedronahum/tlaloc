@@ -27,8 +27,9 @@ import kotlin.test.assertTrue
  *
  * **A. HERMETIC.** Tiny safetensors checkpoints the test writes itself, byte
  * by byte, to certify the cases a single downloaded model cannot show: TIED
- * embeddings (TinyLlama is untied), the config/file disagreement about tying
- * in BOTH directions, and a transposed projection caught by name. These run
+ * embeddings (TinyLlama is untied), a tied head that is also stored (accepted
+ * when identical to the table, refused when not), an untied head that is
+ * missing, and a transposed projection caught by name. These run
  * everywhere and are the ones that gate `./gradlew test` on a fresh machine.
  *
  * **B. THE REAL CHECKPOINT.** TinyLlama-1.1B-Chat-v1.0, 2.2 GB of bf16, at
@@ -59,24 +60,24 @@ class HfLlamaCheckpointTest {
     @Test
     fun tiedEmbeddingsResolveTheHeadToTheEmbeddingTable() {
         val dir = writeCheckpoint(tied = true, includeLmHead = false)
-        HfLlamaCheckpoint.open(dir).use { c ->
+        HfCheckpoint.open(dir).use { c ->
             assertTrue(c.config.tieWordEmbeddings)
             assertTrue(c.tiedEmbeddings)
             assertFalse(c.lmHeadPresent)
             assertEquals(
-                HfLlamaNames.EMBED_TOKENS,
-                c.resolveName(LlamaWeightRole.LmHead),
+                HfDecoderNames.EMBED_TOKENS,
+                c.resolveName(DecoderWeightRole.LmHead),
                 "a tied head must read the embedding table's bytes",
             )
             // Every other role still resolves to its own name.
             assertEquals(
                 "model.layers.1.mlp.up_proj.weight",
-                c.resolveName(LlamaWeightRole.Layer(1, LlamaLayerPart.UP_PROJ)),
+                c.resolveName(DecoderWeightRole.Layer(1, DecoderLayerPart.UP_PROJ)),
             )
             assertTrue(c.verifyInventory().isEmpty())
-            val head = c.load(LlamaWeightRole.LmHead)
-            val embed = c.load(LlamaWeightRole.EmbedTokens)
-            assertEquals(HfLlamaNames.EMBED_TOKENS, head.name)
+            val head = c.load(DecoderWeightRole.LmHead)
+            val embed = c.load(DecoderWeightRole.EmbedTokens)
+            assertEquals(HfDecoderNames.EMBED_TOKENS, head.name)
             assertEquals(listOf(TINY_VOCAB, TINY_HIDDEN), head.dims.toList())
             assertContentEquals(embed.toF32Array(), head.toF32Array())
         }
@@ -85,28 +86,53 @@ class HfLlamaCheckpointTest {
     @Test
     fun anUntiedCheckpointKeepsTheHeadSeparate() {
         val dir = writeCheckpoint(tied = false, includeLmHead = true)
-        HfLlamaCheckpoint.open(dir).use { c ->
+        HfCheckpoint.open(dir).use { c ->
             assertFalse(c.tiedEmbeddings)
-            assertEquals(HfLlamaNames.LM_HEAD, c.resolveName(LlamaWeightRole.LmHead))
+            assertEquals(HfDecoderNames.LM_HEAD, c.resolveName(DecoderWeightRole.LmHead))
             assertTrue(c.verifyInventory().isEmpty())
             // Different bytes, so the two roles are genuinely distinct.
-            val head = c.load(LlamaWeightRole.LmHead).toF32Array()
-            val embed = c.load(LlamaWeightRole.EmbedTokens).toF32Array()
+            val head = c.load(DecoderWeightRole.LmHead).toF32Array()
+            val embed = c.load(DecoderWeightRole.EmbedTokens).toF32Array()
             assertTrue(head.indices.any { head[it] != embed[it] })
         }
     }
 
     @Test
-    fun aConfigThatDisagreesWithItsOwnFileAboutTyingIsRefusedBothWays() {
-        val saysTiedButHasHead = writeCheckpoint(tied = true, includeLmHead = true)
-        val e1 = assertFailsWith<JsonException> { HfLlamaCheckpoint.open(saysTiedButHasHead) }
-        assertTrue("tie_word_embeddings=true" in e1.message!!, e1.message!!)
-        assertTrue("PRESENT" in e1.message!!, e1.message!!)
-
+    fun anUntiedConfigWithNoHeadInTheFileIsRefused() {
         val saysUntiedButHasNoHead = writeCheckpoint(tied = false, includeLmHead = false)
-        val e2 = assertFailsWith<JsonException> { HfLlamaCheckpoint.open(saysUntiedButHasNoHead) }
+        val e2 = assertFailsWith<JsonException> { HfCheckpoint.open(saysUntiedButHasNoHead) }
         assertTrue("tie_word_embeddings=false" in e2.message!!, e2.message!!)
         assertTrue("ABSENT" in e2.message!!, e2.message!!)
+    }
+
+    /**
+     * A tied checkpoint may also store `lm_head.weight` (Qwen3-0.6B does).
+     * It is accepted when the stored head is the embedding table bit for bit,
+     * and the head is read from the table either way.
+     */
+    @Test
+    fun aTiedCheckpointThatAlsoStoresAnIdenticalHeadIsAccepted() {
+        val dir = writeCheckpoint(tied = true, includeLmHead = true, headCopiesEmbed = true)
+        HfCheckpoint.open(dir).use { c ->
+            assertTrue(c.tiedEmbeddings)
+            assertTrue(c.lmHeadPresent)
+            assertEquals(HfDecoderNames.EMBED_TOKENS, c.resolveName(DecoderWeightRole.LmHead))
+            c.verifyTiedHead()
+            assertTrue(c.verifyInventory().isEmpty(), "the stored head is accounted for")
+            HfStagedWeights.stage(c)
+        }
+    }
+
+    /** Negative control of the test above: a stored head that differs from the table. */
+    @Test
+    fun aTiedCheckpointWhoseStoredHeadDiffersIsRefusedByName() {
+        val dir = writeCheckpoint(tied = true, includeLmHead = true, headCopiesEmbed = false)
+        HfCheckpoint.open(dir).use { c ->
+            val e = assertFailsWith<JsonException> { c.verifyTiedHead() }
+            assertTrue("lm_head.weight" in e.message!!, e.message!!)
+            assertTrue("not the embedding table" in e.message!!, e.message!!)
+            assertFailsWith<JsonException> { HfStagedWeights.stage(c) }
+        }
     }
 
     @Test
@@ -120,9 +146,9 @@ class HfLlamaCheckpointTest {
                 "model.layers.0.self_attn.k_proj.weight" to intArrayOf(TINY_HIDDEN, TINY_KV_OUT),
             ),
         )
-        HfLlamaCheckpoint.open(dir).use { c ->
+        HfCheckpoint.open(dir).use { c ->
             val e = assertFailsWith<JsonException> {
-                c.load(LlamaWeightRole.Layer(0, LlamaLayerPart.K_PROJ))
+                c.load(DecoderWeightRole.Layer(0, DecoderLayerPart.K_PROJ))
             }
             assertTrue("k_proj" in e.message!!, e.message!!)
             assertTrue("[$TINY_HIDDEN, $TINY_KV_OUT]" in e.message!!, e.message!!)
@@ -134,7 +160,7 @@ class HfLlamaCheckpointTest {
     @Test
     fun aMissingTensorIsNamedByVerifyInventory() {
         val dir = writeCheckpoint(tied = false, includeLmHead = true, drop = setOf("model.norm.weight"))
-        HfLlamaCheckpoint.open(dir).use { c ->
+        HfCheckpoint.open(dir).use { c ->
             val e = assertFailsWith<JsonException> { c.verifyInventory() }
             assertTrue("model.norm.weight" in e.message!!, e.message!!)
         }
@@ -147,7 +173,7 @@ class HfLlamaCheckpointTest {
             includeLmHead = true,
             extra = mapOf("model.layers.0.self_attn.rotary_emb.inv_freq" to intArrayOf(4)),
         )
-        HfLlamaCheckpoint.open(dir).use { c ->
+        HfCheckpoint.open(dir).use { c ->
             assertEquals(
                 listOf("model.layers.0.self_attn.rotary_emb.inv_freq"),
                 c.verifyInventory(),
@@ -158,7 +184,7 @@ class HfLlamaCheckpointTest {
     @Test
     fun aDirectoryWithNoConfigIsRefusedByName() {
         val dir = createTempDirectory("hf-llama-noconfig").toFile().also { it.deleteOnExit() }.toPath()
-        val e = assertFailsWith<JsonException> { HfLlamaCheckpoint.open(dir) }
+        val e = assertFailsWith<JsonException> { HfCheckpoint.open(dir) }
         assertTrue("config.json" in e.message!!, e.message!!)
     }
 
@@ -167,7 +193,7 @@ class HfLlamaCheckpointTest {
     @Test
     fun theRealTinyLlamaCheckpointMatchesItsConfigTensorForTensor() {
         val dir = realCheckpoint() ?: return
-        HfLlamaCheckpoint.open(dir).use { c ->
+        HfCheckpoint.open(dir).use { c ->
             val cfg = c.config
             assertEquals("LlamaForCausalLM", cfg.architecture)
             assertEquals(2048, cfg.hiddenSize)
@@ -185,7 +211,7 @@ class HfLlamaCheckpointTest {
 
             // Every role present, nothing in the file left unmapped: 201
             // tensors and 201 roles, a total bijection.
-            assertEquals(201, HfLlamaNames.roles(cfg).size)
+            assertEquals(201, HfDecoderNames.roles(cfg).size)
             assertEquals(emptyList(), c.verifyInventory())
             assertEquals(201, c.names.size)
 
@@ -193,10 +219,10 @@ class HfLlamaCheckpointTest {
             // 201 tensors at once: expectedDims — which encodes [out, in] —
             // equals what the producer wrote, everywhere.
             SafetensorsFile.open(dir.resolve("model.safetensors")).use { f ->
-                for (role in HfLlamaNames.roles(cfg)) {
+                for (role in HfDecoderNames.roles(cfg)) {
                     val e = f.header.entry(c.resolveName(role))
                     assertEquals(
-                        HfLlamaNames.expectedDims(role, cfg).toList(),
+                        HfDecoderNames.expectedDims(role, cfg).toList(),
                         e.dims,
                         "layout disagreement at $role (${e.name})",
                     )
@@ -245,10 +271,10 @@ class HfLlamaCheckpointTest {
         }
         assertEquals(201, (oracle["tensor_count"] as JsonNumber).asInt("tensor_count"))
 
-        HfLlamaCheckpoint.open(dir).use { c ->
+        HfCheckpoint.open(dir).use { c ->
             val tensors = (oracle["tensors"] as JsonObject)
             for ((name, index) in probes) {
-                val role = HfLlamaNames.role(name)!!
+                val role = HfDecoderNames.role(name)!!
                 val t = c.load(role)
                 assertEquals(BF16, t.dtype, name)
                 val o = tensors.obj(name)
@@ -272,10 +298,10 @@ class HfLlamaCheckpointTest {
             // read cross-checked against a second implementation.
             val shapes = oracle.obj("shapes")
             val dtypes = oracle.obj("dtypes")
-            for (role in HfLlamaNames.roles(c.config)) {
+            for (role in HfDecoderNames.roles(c.config)) {
                 val n = c.resolveName(role)
                 assertEquals(
-                    HfLlamaNames.expectedDims(role, c.config).toList(),
+                    HfDecoderNames.expectedDims(role, c.config).toList(),
                     shapes.arr(n).asIntList(n),
                     "torch's shape for $n",
                 )
@@ -355,8 +381,9 @@ class HfLlamaCheckpointTest {
         overrideDims: Map<String, IntArray> = emptyMap(),
         drop: Set<String> = emptySet(),
         extra: Map<String, IntArray> = emptyMap(),
+        headCopiesEmbed: Boolean = false,
     ): Path {
-        val cfg = HfLlamaConfig(
+        val cfg = HfDecoderConfig(
             architecture = "LlamaForCausalLM", modelType = "llama",
             hiddenSize = TINY_HIDDEN, intermediateSize = TINY_INTER, numLayers = TINY_LAYERS,
             numHeads = TINY_HEADS, numKvHeads = TINY_KV_HEADS, headDim = TINY_HEAD_DIM,
@@ -365,11 +392,11 @@ class HfLlamaCheckpointTest {
             torchDtype = "float32", ropeScalingType = null,
         )
         val plan = LinkedHashMap<String, IntArray>()
-        for (role in HfLlamaNames.roles(cfg)) {
-            if (role == LlamaWeightRole.LmHead && !includeLmHead) continue
-            val n = HfLlamaNames.hfName(role)
+        for (role in HfDecoderNames.roles(cfg)) {
+            if (role == DecoderWeightRole.LmHead && !includeLmHead) continue
+            val n = HfDecoderNames.hfName(role)
             if (n in drop) continue
-            plan[n] = overrideDims[n] ?: HfLlamaNames.expectedDims(role, cfg)
+            plan[n] = overrideDims[n] ?: HfDecoderNames.expectedDims(role, cfg)
         }
         plan.putAll(extra)
 
@@ -388,8 +415,10 @@ class HfLlamaCheckpointTest {
             val (name, dims) = e
             val count = dims.fold(1) { a, d -> a * d }
             val begin = off
+            // The embedding table is the first entry, written with seed 1.
+            val s = if (headCopiesEmbed && name == HfDecoderNames.LM_HEAD) 1 else seed
             for (k in 0 until count) {
-                val bits = java.lang.Float.floatToRawIntBits((seed * 0.125f) + k * 0.001953125f)
+                val bits = java.lang.Float.floatToRawIntBits((s * 0.125f) + k * 0.001953125f)
                 for (b in 0 until 4) body.write((bits ushr (8 * b)) and 0xFF)
             }
             off += count * 4L
@@ -410,7 +439,7 @@ class HfLlamaCheckpointTest {
         return dir
     }
 
-    private fun configJson(c: HfLlamaConfig): String = buildString {
+    private fun configJson(c: HfDecoderConfig): String = buildString {
         append("{\"architectures\":[\"").append(c.architecture).append("\"],")
         append("\"model_type\":\"").append(c.modelType).append("\",")
         append("\"hidden_size\":").append(c.hiddenSize).append(',')

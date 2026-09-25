@@ -172,11 +172,12 @@ public final class io/tlaloc/maestro/WorkflowKt {
 	public static final fun workflow (Lio/tlaloc/core/ProgramScope;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/maestro/Workflow;
 }
 
-public final class io/tlaloc/maestro/serving/HfLlamaServingExport {
+public final class io/tlaloc/maestro/serving/HfServingExport {
 	public static final field DEFAULT_NUM_BLOCKS I
-	public static final field INSTANCE Lio/tlaloc/maestro/serving/HfLlamaServingExport;
-	public final fun export (Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;Z)Lio/tlaloc/maestro/serving/ServingManifest;
-	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/HfLlamaServingExport;Lio/tlaloc/ir/inference/HfLlamaCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfLlamaConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ZILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static final field INSTANCE Lio/tlaloc/maestro/serving/HfServingExport;
+	public final fun export (Lio/tlaloc/ir/inference/HfCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;Z)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/HfServingExport;Lio/tlaloc/ir/inference/HfCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ZILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun modelNameFor (Ljava/nio/file/Path;)Ljava/lang/String;
 }
 
 public final class io/tlaloc/maestro/serving/ReferenceDecodeGraph {

@@ -584,9 +584,9 @@ into either venv** — 2.2 GB of weights are not a Python package:
     allow_patterns=['*.json','*.safetensors','tokenizer*'])"
 ```
 
-That directory is what `HfLlamaCheckpoint.open(dir)` reads: `config.json`
-through `:core`'s strict parser into an `HfLlamaConfig`, and any of the
-checkpoint's 201 tensors by `LlamaWeightRole` — shape-verified against the
+That directory is what `HfCheckpoint.open(dir)` reads: `config.json`
+through `:core`'s strict parser into an `HfDecoderConfig`, and any of the
+checkpoint's 201 tensors by `DecoderWeightRole` — shape-verified against the
 config on every load. Sharded checkpoints work unchanged
 (`SafetensorsIndex`); this one is single-file.
 

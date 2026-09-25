@@ -5,7 +5,7 @@ import io.tlaloc.core.io.JsonNumber
 import io.tlaloc.core.io.JsonObject
 import io.tlaloc.core.io.parseJson
 import io.tlaloc.ir.inference.DecodeBucketPolicy
-import io.tlaloc.ir.inference.HfLlamaCheckpoint
+import io.tlaloc.ir.inference.HfCheckpoint
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -94,8 +94,8 @@ class HfLlamaServingArtifactTest {
             assertEquals(maxNew, oracleIds.size, "the oracle generated a different budget")
 
             // --- export the artifact the deployment would ship -----------
-            val manifest = HfLlamaCheckpoint.open(ckptDir).use { ckpt ->
-                HfLlamaServingExport.export(
+            val manifest = HfCheckpoint.open(ckptDir).use { ckpt ->
+                HfServingExport.export(
                     ckpt = ckpt, dir = dir.resolve("artifact"),
                     policy = DecodeBucketPolicy(
                         maxBatch = 1, maxContext = CONTEXT,

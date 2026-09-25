@@ -216,22 +216,26 @@ tasks.register<JavaExec>("exportTritonModel") {
 }
 
 /**
- * §0.4.480 (H3c-3) — `exportLlamaServingArtifact`: the same act for a REAL
- * HuggingFace Llama checkpoint.
+ * `exportHfServingArtifact` (also registered as `exportLlamaServingArtifact`,
+ * its earlier name): write a serving artifact for a real HuggingFace
+ * decoder checkpoint of a supported family (Llama, Qwen3).
  *
- *     ./gradlew :maestro:exportLlamaServingArtifact \
+ *     ./gradlew :maestro:exportHfServingArtifact \
  *         -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
  *         -PoutDir=/tmp/tlaloc-llama-artifact [-PnumLayers=2] [-PmaxBatch=4] \
- *         [-PmaxContext=64] [-PblockSize=16] [-PnumBlocks=64] [-Pprefill=false]
+ *         [-PmaxContext=64] [-PblockSize=16] [-PnumBlocks=64] [-Pprefill=false] \
+ *         [-PmodelName=Qwen/Qwen3-0.6B]
  *
- * Same classpath rule as [exportServingArtifact] and for the same reason.
- * The heap is raised because the export TRANSPOSES: §0.4.479's host-side
- * `[out, in] -> [in, out]` pass holds a tensor and its transpose at once,
- * and TinyLlama's embedding table is 262 MiB staged as f32.
+ * `-PckptDir` may be a HuggingFace cache snapshot
+ * (`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>`); the
+ * model name is then `Qwen/Qwen3-0.6B` unless `-PmodelName` says otherwise.
+ * Same classpath rule as [exportServingArtifact]. The heap is raised because
+ * the export transposes each Linear host-side and holds a tensor and its
+ * transpose at once.
  */
-tasks.register<JavaExec>("exportLlamaServingArtifact") {
+for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArtifact")) tasks.register<JavaExec>(exportTaskName) {
     group = "tlaloc"
-    description = "Write a serving artifact for a real HF Llama checkpoint (-PckptDir) to -PoutDir"
+    description = "Write a serving artifact for a real HF Llama or Qwen3 checkpoint (-PckptDir) to -PoutDir"
     val tools = kotlin.jvm().compilations.getByName("tools")
     dependsOn(tools.compileTaskProvider)
     classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
@@ -253,14 +257,14 @@ tasks.register<JavaExec>("exportLlamaServingArtifact") {
             listOf(
                 p("ckptDir").ifBlank {
                     throw GradleException(
-                        "exportLlamaServingArtifact needs -PckptDir=<an HF checkpoint directory>",
+                        "$exportTaskName needs -PckptDir=<an HF checkpoint directory>",
                     )
                 },
                 p("outDir").ifBlank {
                     layout.buildDirectory.dir("llama-serving-artifact").get().asFile.absolutePath
                 },
                 p("numLayers"), p("maxBatch"), p("maxContext"), p("blockSize"), p("numBlocks"),
-                p("prefill"),
+                p("prefill"), p("modelName"),
             )
         },
     )

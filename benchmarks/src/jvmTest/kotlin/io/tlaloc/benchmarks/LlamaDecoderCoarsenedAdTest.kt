@@ -123,7 +123,7 @@ class LlamaDecoderCoarsenedAdTest {
      * the reference evaluator, so the Llama primal could not be run on the
      * host at all. MEAN and SOFTMAX had since acquired arms; RSQRT and SILU
      * had not, and §0.4.479 gave them one — found by building a REAL Llama
-     * decode graph (`HfLlamaDecodeGraph`) and discovering that the reference
+     * decode graph (`HfDecoderGraph`) and discovering that the reference
      * evaluator refused the two ops every transformer in this repo is made
      * of, while the StableHLO emitter, the cost model, TileFusion and two
      * RECOGNIZER ANCHORS all handled them.

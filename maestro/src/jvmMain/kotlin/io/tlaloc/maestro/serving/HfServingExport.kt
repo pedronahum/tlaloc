@@ -5,14 +5,14 @@ import io.tlaloc.ir.inference.DecodeBucket
 import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.DecodeGraphSpec
-import io.tlaloc.ir.inference.HfLlamaCheckpoint
-import io.tlaloc.ir.inference.HfLlamaConfig
-import io.tlaloc.ir.inference.HfLlamaDecodeGraph
-import io.tlaloc.ir.inference.HfLlamaStagedWeights
+import io.tlaloc.ir.inference.HfCheckpoint
+import io.tlaloc.ir.inference.HfDecoderConfig
+import io.tlaloc.ir.inference.HfDecoderGraph
+import io.tlaloc.ir.inference.HfStagedWeights
 import java.nio.file.Path
 
 /**
- * Export a **real HuggingFace Llama checkpoint** as a
+ * Export a **real HuggingFace decoder checkpoint** (any [io.tlaloc.ir.inference.HfModelFamily]) as a
  * serving artifact.
  *
  * This is the other end of the line [ServingArtifactWriter] draws. It
@@ -40,7 +40,7 @@ import java.nio.file.Path
  * label: it is what a serving frontend needs in order to find the tokenizer
  * and `config.json` that go with these weights.
  */
-object HfLlamaServingExport {
+object HfServingExport {
 
     /**
      * Pages in the pool. Not derived from the ladder, and deliberately so:
@@ -50,6 +50,22 @@ object HfLlamaServingExport {
      * The exporter's job is to state the one the bodies were compiled for.
      */
     const val DEFAULT_NUM_BLOCKS: Int = 64
+
+    /**
+     * The model name for a checkpoint directory. A HuggingFace cache snapshot
+     * (`…/models--Qwen--Qwen3-0.6B/snapshots/<revision>`) gives the repo id,
+     * `Qwen/Qwen3-0.6B`; any other directory gives its own name.
+     */
+    fun modelNameFor(dir: Path): String {
+        val abs = dir.toAbsolutePath().normalize()
+        val parent = abs.parent
+        val repo = parent?.parent?.fileName?.toString()
+        if (parent?.fileName?.toString() == "snapshots" && repo != null && repo.startsWith("models--")) {
+            val parts = repo.removePrefix("models--").split("--", limit = 2)
+            if (parts.size == 2 && parts.all { it.isNotEmpty() }) return parts[0] + "/" + parts[1]
+        }
+        return abs.fileName.toString()
+    }
 
     /**
      * Build the decode ladder for [ckpt] under [config] and write it to [dir].
@@ -63,28 +79,28 @@ object HfLlamaServingExport {
      * @param config usually `ckpt.config`, or a `copy(numLayers = n)` of it.
      */
     fun export(
-        ckpt: HfLlamaCheckpoint,
+        ckpt: HfCheckpoint,
         dir: Path,
-        config: HfLlamaConfig = ckpt.config,
+        config: HfDecoderConfig = ckpt.config,
         policy: DecodeBucketPolicy,
         numBlocks: Int = DEFAULT_NUM_BLOCKS,
-        modelName: String = ckpt.dir.fileName.toString(),
+        modelName: String = modelNameFor(ckpt.dir),
         prefill: Boolean = true,
     ): ServingManifest {
         val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = policy.blockSize)
-        val decodeSpecs = policy.allBuckets.map { HfLlamaDecodeGraph.spec(config, model, it) }
+        val decodeSpecs = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) }
         val prefillSpecs = if (!prefill) emptyList() else policy.contextLadder.map { c ->
-            HfLlamaDecodeGraph.spec(config, model, DecodeBucket(1, c), DecodeGraphKind.PREFILL)
+            HfDecoderGraph.spec(config, model, DecodeBucket(1, c), DecodeGraphKind.PREFILL)
         }
         val specs = decodeSpecs + prefillSpecs
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
-            HfLlamaDecodeGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
+            HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
         }
         // The slot ORDER is the contract (a loader binds by index), so the
         // exporter resolves a slot to its index in the very list the spec was
         // built from rather than re-deriving one. An index lookup by name is
         // O(n) per slot and n is ~200; a map keeps the export linear.
-        val slotIndex = HfLlamaDecodeGraph.weightSlots(config)
+        val slotIndex = HfDecoderGraph.weightSlots(config)
             .withIndex().associate { (i, s) -> s.name to i }
         return ServingArtifactWriter.export(
             dir = dir,
@@ -93,15 +109,15 @@ object HfLlamaServingExport {
             // The layer count is IN it: a 2-layer reduction of TinyLlama is a
             // different model, and an executable cache that thought otherwise
             // would serve the wrong program.
-            modelHash = "hf-llama:$modelName:L${config.numLayers}:" +
+            modelHash = "hf-${config.family.id}:$modelName:L${config.numLayers}:" +
                 "h${config.hiddenSize}:v${config.vocabSize}",
             model = model,
             ladder = ServingArtifactWriter.ladderOf(policy),
             specs = specs,
             stageWeight = { slot ->
                 val i = slotIndex[slot.name]
-                    ?: error("HfLlamaServingExport: no weight slot named '${slot.name}'")
-                HfLlamaStagedWeights.stageAt(ckpt, config, i)
+                    ?: error("HfServingExport: no weight slot named '${slot.name}'")
+                HfStagedWeights.stageAt(ckpt, config, i)
             },
             build = build,
         )

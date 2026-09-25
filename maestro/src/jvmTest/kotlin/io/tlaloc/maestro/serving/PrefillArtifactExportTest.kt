@@ -3,8 +3,8 @@ package io.tlaloc.maestro.serving
 import io.tlaloc.ir.inference.DecodeBucket
 import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.DecodeGraphKind
-import io.tlaloc.ir.inference.HfLlamaConfig
-import io.tlaloc.ir.inference.HfLlamaDecodeGraph
+import io.tlaloc.ir.inference.HfDecoderConfig
+import io.tlaloc.ir.inference.HfDecoderGraph
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.random.Random
@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
 
 /**
  * A Llama serving artifact with prefill entries, exported the way
- * `HfLlamaServingExport` exports a checkpoint (same specs, same builder, same
+ * `HfServingExport` exports a checkpoint (same specs, same builder, same
  * writer), over a small random-weight config so that no checkpoint is needed.
  * Checks the manifest the Triton backend's sequence mode reads: version, the
  * two kinds of entries, their shapes, and StableHLO bodies that the backend's
@@ -22,7 +22,7 @@ import kotlin.test.assertTrue
  */
 class PrefillArtifactExportTest {
 
-    private val config = HfLlamaConfig(
+    private val config = HfDecoderConfig(
         architecture = "LlamaForCausalLM",
         modelType = "llama",
         hiddenSize = 16,
@@ -44,9 +44,9 @@ class PrefillArtifactExportTest {
     private fun export(dir: Path, prefill: Boolean): ServingManifest {
         val policy = DecodeBucketPolicy(maxBatch = 2, maxContext = 16, blockSize = 4, minContext = 8)
         val model = config.toDecodeModelShape(numBlocks = 9, blockSize = 4)
-        val decode = policy.allBuckets.map { HfLlamaDecodeGraph.spec(config, model, it) }
+        val decode = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) }
         val pre = if (!prefill) emptyList() else policy.contextLadder.map {
-            HfLlamaDecodeGraph.spec(config, model, DecodeBucket(1, it), DecodeGraphKind.PREFILL)
+            HfDecoderGraph.spec(config, model, DecodeBucket(1, it), DecodeGraphKind.PREFILL)
         }
         val rng = Random(7)
         return ServingArtifactWriter.export(
@@ -55,7 +55,7 @@ class PrefillArtifactExportTest {
             stageWeight = { slot ->
                 FloatArray(slot.type.dims.fold(1) { a, b -> a * b }) { rng.nextFloat() - 0.5f }
             },
-            build = { HfLlamaDecodeGraph.build(it, config) },
+            build = { HfDecoderGraph.build(it, config) },
         )
     }
 

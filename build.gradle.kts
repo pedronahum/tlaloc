@@ -1101,7 +1101,7 @@ tasks.register("apiDocs") {
 // all removals, all of members no Kotlin or Java source can name: the public
 // ACC_SYNTHETIC constructor Kotlin emits (trailing `DefaultConstructorMarker`)
 // beside a `private constructor` — `SafetensorsFile`, `SafetensorsIndex`,
-// `HfLlamaCheckpoint`, `DecodeBucketPolicy` — and the two `const val` fields of
+// `HfCheckpoint`, `DecodeBucketPolicy` — and the two `const val` fields of
 // `Scheduled`'s `private companion object`, which are `public static final` in
 // bytecode but private in Kotlin (and inlined by javac anyway). BCV read bytecode
 // flags; KGP reads the Kotlin declaration.

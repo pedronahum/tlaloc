@@ -24,12 +24,12 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   staged weights at model load and keeps the KV pools on the device between
   requests. TinyLlama-1.1B served this way produces the same six greedy token ids
   as HuggingFace transformers for "The capital of France is".
-- **Prefill entries.** `HfLlamaDecodeGraph` builds a prefill graph: a chunk of
+- **Prefill entries.** `HfDecoderGraph` builds a prefill graph: a chunk of
   tokens per sequence in one call, each token an attention row with a causal
   context of its position + 1, right-aligned, returning the last token's logits.
   In the reference interpreter its logits and KV pools equal the decode loop's
   bit for bit (a random-weight model and two real TinyLlama layers).
-  `HfLlamaServingExport` writes one prefill entry per context bucket
+  `HfServingExport` writes one prefill entry per context bucket
   (`-Pprefill=false` to leave them out).
 - **Serving manifest `tlaloc-serving-v2`.** Adds prefill entries; decode entries
   are unchanged and `tlaloc-serving-v1` artifacts are still read. The prefill
@@ -44,6 +44,38 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   KV pools (`-PkvMode=client` for the previous form). On the GB10, TinyLlama's
   6-token prefill takes about 26 ms and four concurrent sequences decode about
   twice as many tokens per second as one.
+- **Qwen3.** `HfModelFamily` describes a HuggingFace decoder family: its
+  architectures, the `config.json` keys it may carry, and one `DecoderLayerSpec`
+  per layer. `Qwen3ForCausalLM` is the second family after Llama: a per-head
+  RMSNorm on q and k before RoPE, `head_dim` independent of `hidden_size`, and a
+  tied head that the file may also store (accepted only when it is bit-for-bit the
+  embedding table). A config key the family does not know is refused by name at
+  parse. Sliding-window layers, layers without RoPE, post-attention and
+  post-feedforward norms, logit soft-capping, attention or MLP biases and
+  activations other than SiLU are recorded and refused by name when a graph is
+  built. Qwen3-0.6B, all 28 layers, greedy-decodes the same 16 token ids as
+  HuggingFace transformers for a plain and a chat-template prompt, in the
+  reference interpreter and served by Triton. `:maestro:exportHfServingArtifact`
+  exports it (`exportLlamaServingArtifact` remains as a second name).
+
+### Changed
+
+- **HF decoder types renamed for the second family.** `HfLlamaConfig` is now
+  `HfDecoderConfig`, `HfLlamaNames` `HfDecoderNames`, `LlamaWeightRole`
+  `DecoderWeightRole`, `LlamaLayerPart` `DecoderLayerPart`, `HfLlamaDecodeGraph`
+  `HfDecoderGraph`, `HfLlamaCheckpoint` `HfCheckpoint`, `HfLlamaStagedWeights`
+  `HfStagedWeights` and `HfLlamaServingExport` `HfServingExport`. The old names
+  remain as deprecated type aliases, so source written against alpha02 still
+  compiles; the binary names changed. `HfDecoderGraph.PARTS_PER_LAYER` is gone:
+  the number of tensors per layer is `DecoderLayerSpec.parts.size`, 9 for Llama
+  and 11 for Qwen3.
+- **RoPE tables sized to the entry.** The decode and prefill graphs carry cos and
+  sin tables for the positions the entry can reach (its context, capped by
+  `max_position_embeddings`) instead of every position the model supports.
+- **A tied checkpoint may also store `lm_head.weight`.** `HfCheckpoint.open` used
+  to refuse it; it now reads the head from the embedding table, as transformers
+  does, and `HfStagedWeights` refuses the file by name if the stored head differs
+  from the table.
 
 ## [0.1.0-alpha02] — 2026-09-24
 

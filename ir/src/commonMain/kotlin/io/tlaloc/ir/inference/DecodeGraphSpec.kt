@@ -123,7 +123,7 @@ data class DecodeGraphSpec(
      *   *artifact* is still per-checkpoint.
      *
      * The ORDER is fixed by whoever builds the graph (for Llama:
-     * [HfLlamaDecodeGraph.weightSlots]) and is part of the contract, because a
+     * [HfDecoderGraph.weightSlots]) and is part of the contract, because a
      * loader binds by index.
      *
      * The serving artifact writes one file per slot, in this order, and

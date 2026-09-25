@@ -22,8 +22,8 @@ import kotlin.test.assertTrue
  * §0.4.478 put a real TinyLlama-1.1B checkpoint on disk and proved this repo
  * reads its bytes exactly and knows its layout. What it explicitly did NOT do
  * is compute anything with them. This lane does: it builds
- * [HfLlamaDecodeGraph] over the real config, stages the real weights through
- * [HfLlamaStagedWeights] (transposing the Linears — the §0.4.478 layout fact,
+ * [HfDecoderGraph] over the real config, stages the real weights through
+ * [HfStagedWeights] (transposing the Linears — the §0.4.478 layout fact,
  * now load-bearing), runs a prefill as a sequence of single-token decode steps
  * threading the KV pools, and compares the LOGITS against
  * `transformers.AutoModelForCausalLM` in the vLLM venv.
@@ -168,21 +168,21 @@ class HfLlamaRealDecodeParityTest {
         val python = vllmPython()
         assumeTrue(python != null, "no vLLM-venv python (~/.local/venvs/vllm/bin/python) — skipping")
 
-        HfLlamaCheckpoint.open(dir!!).use { ckpt ->
+        HfCheckpoint.open(dir!!).use { ckpt ->
             val config = ckpt.config.copy(numLayers = reducedLayers)
             val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = blockSize)
             val bucket = DecodeBucket(batch = 1, maxContext = numBlocks * blockSize)
-            val spec = HfLlamaDecodeGraph.spec(config, model, bucket)
-            val fn = HfLlamaDecodeGraph.build(spec, config)
+            val spec = HfDecoderGraph.spec(config, model, bucket)
+            val fn = HfDecoderGraph.build(spec, config)
 
             // The staged weights ARE the checkpoint's, transposed where the
             // HF convention says they are stored transposed.
-            val weights = HfLlamaStagedWeights.stage(ckpt, config)
+            val weights = HfStagedWeights.stage(ckpt, config)
             assertEquals(spec.weightSlots.size, weights.size, "staged weight count")
             assertEquals(
-                1 + reducedLayers * HfLlamaDecodeGraph.PARTS_PER_LAYER + 2,
+                1 + reducedLayers * 9 + 2,
                 weights.size,
-                "embed + $reducedLayers x ${HfLlamaDecodeGraph.PARTS_PER_LAYER} + finalNorm + head",
+                "embed + $reducedLayers x ${9} + finalNorm + head",
             )
 
             val oracle = runOracle(dir, python!!, tokens, reducedLayers)
@@ -267,13 +267,13 @@ class HfLlamaRealDecodeParityTest {
         val dir = checkpointDir()
         assumeTrue(dir != null, "no HF Llama checkpoint — skipping")
 
-        HfLlamaCheckpoint.open(dir!!).use { ckpt ->
+        HfCheckpoint.open(dir!!).use { ckpt ->
             val config = ckpt.config.copy(numLayers = 1)
             val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = blockSize)
             val bucket = DecodeBucket(batch = 1, maxContext = numBlocks * blockSize)
-            val spec = HfLlamaDecodeGraph.spec(config, model, bucket)
-            val fn = HfLlamaDecodeGraph.build(spec, config)
-            val weights = HfLlamaStagedWeights.stage(ckpt, config)
+            val spec = HfDecoderGraph.spec(config, model, bucket)
+            val fn = HfDecoderGraph.build(spec, config)
+            val weights = HfStagedWeights.stage(ckpt, config)
 
             val poolSize = numBlocks * blockSize * model.numKvHeads * model.headDim
             val blockTables = FloatArray(spec.maxBlocksPerSeq) { it.toFloat() }
@@ -316,7 +316,7 @@ class HfLlamaRealDecodeParityTest {
             val qIdx = 2
             val d = config.hiddenSize
             val bad = weights.toMutableList()
-            bad[qIdx] = HfLlamaStagedWeights.transpose(weights[qIdx], d, d)
+            bad[qIdx] = HfStagedWeights.transpose(weights[qIdx], d, d)
             val wrong = runTo(bad)
 
             var moved = 0.0
@@ -324,7 +324,7 @@ class HfLlamaRealDecodeParityTest {
             assertTrue(
                 moved > 1e-2,
                 "un-transposing q_proj moved the logits by only $moved — the transpose in " +
-                    "HfLlamaStagedWeights is then not load-bearing, which cannot be true",
+                    "HfStagedWeights is then not load-bearing, which cannot be true",
             )
         }
     }

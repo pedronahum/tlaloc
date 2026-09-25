@@ -26,8 +26,15 @@
 #      freeing pages, pool exhaustion), run it again with --perturb (must
 #      fail), and stop the server. Without the checkpoint this step is
 #      skipped by name.
+#   7. optional, Qwen3: if Qwen/Qwen3-0.6B is in the HuggingFace cache, export
+#      it the same way (Gradle, no server running), start a server, run
+#      fixture_checks.py against the committed HuggingFace fixture (a plain
+#      and a chat-template prompt, 16 greedy ids each over HTTP and gRPC,
+#      logits within TF32 tolerance, and the prefill and decode timings), run
+#      it again with --perturb (must fail), and stop the server. Without the
+#      checkpoint this step is skipped by name.
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
-# passes, step 4 fails, and step 6 passes or is skipped.
+# passes, step 4 fails, and steps 6 and 7 pass or are skipped.
 #
 #   triton/verify.sh
 #
@@ -43,6 +50,11 @@
 #                         [triton/build/tinyllama]; an existing model is reused
 #   TINYLLAMA_REEXPORT=1  export again even if the model exists
 #   SKIP_TINYLLAMA=1      skip step 6
+#   QWEN3_CHECKPOINT      [the Qwen/Qwen3-0.6B snapshot the fixture names, in
+#                         ~/.cache/huggingface/hub]
+#   QWEN3_DIR             [triton/build/qwen3]; an existing model is reused
+#   QWEN3_REEXPORT=1      export again even if the model exists
+#   SKIP_QWEN3=1          skip step 7
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,7 +66,7 @@ export HTTP_PORT="${HTTP_PORT:-8000}" GRPC_PORT="${GRPC_PORT:-8001}" METRICS_POR
 LOG="${VERIFY_LOG:-$(mktemp -t tlaloc-triton-verify.XXXXXX.log)}"
 
 cleanup() {
-  docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-device" >/dev/null 2>&1 || true
+  docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-qwen3" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -207,6 +219,49 @@ else
   grep -c "^FAIL" "$LOG.tinyllama.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   if ! curl -sf "localhost:$HTTP_PORT/v2/health/live" >/dev/null; then
     echo "FAIL: the server is not live at the end of the sequence checks" >&2
+    exit 1
+  fi
+  stop_server
+fi
+
+# --- Qwen3 -------------------------------------------------------------------
+QWEN3_FIXTURE="$ROOT/ir/src/jvmTest/resources/io/tlaloc/ir/inference/qwen3_0_6b_greedy.json"
+QWEN3_REV="$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1]))['revision'])" "$QWEN3_FIXTURE")"
+QCKPT="${QWEN3_CHECKPOINT:-$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/$QWEN3_REV}"
+Q_DIR="${QWEN3_DIR:-$HERE/build/qwen3}"
+
+echo "== qwen3"
+if [[ "${SKIP_QWEN3:-}" == 1 ]]; then
+  echo "SKIP qwen3: SKIP_QWEN3=1"
+elif [[ ! -f "$QCKPT/model.safetensors" ]]; then
+  echo "SKIP qwen3: no Qwen/Qwen3-0.6B checkpoint at $QCKPT (hf download Qwen/Qwen3-0.6B)"
+else
+  Q_CONFIG="$Q_DIR/repository/qwen3/config.pbtxt"
+  if [[ "${QWEN3_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$Q_CONFIG" 2>/dev/null; then
+    # Gradle runs here with no Triton container up.
+    rm -rf "$Q_DIR"
+    mkdir -p "$Q_DIR"
+    (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
+      -PckptDir="$QCKPT" -PoutDir="$Q_DIR/artifact" -PmaxBatch=4)
+    (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+      -PartifactDir="$Q_DIR/artifact" -PoutDir="$Q_DIR/repository" -PmodelName=qwen3 \
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+  fi
+  export CONTAINER_NAME="$BASE_NAME-qwen3" MODEL_REPOSITORY="$Q_DIR/repository"
+  start_server "$LOG.qwen3" 600
+  grep -o "uploaded [0-9]* weights.*" "$LOG.qwen3" | head -1
+  "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model qwen3 --fixture "$QWEN3_FIXTURE"
+  echo "== qwen3 negative control (must fail)"
+  if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model qwen3 --fixture "$QWEN3_FIXTURE" --perturb >"$LOG.qwen3.negative" 2>&1; then
+    echo "FAIL: the Qwen3 fixture checks passed with wrong expected ids" >&2
+    cat "$LOG.qwen3.negative" >&2
+    exit 1
+  fi
+  grep -c "^FAIL" "$LOG.qwen3.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+  if ! curl -sf "localhost:$HTTP_PORT/v2/health/live" >/dev/null; then
+    echo "FAIL: the server is not live at the end of the Qwen3 checks" >&2
     exit 1
   fi
   stop_server

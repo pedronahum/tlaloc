@@ -21,6 +21,7 @@ an instance group names gets its own PJRT client.
 | | What | Where it ran |
 |---|---|---|
 | ✅ | Sequence mode, prefill and batched decode, TinyLlama-1.1B | GB10, `verify.sh` |
+| ✅ | Qwen3-0.6B: 16 greedy ids equal HuggingFace's for a plain and a chat-template prompt | GB10, `verify.sh` |
 | ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`) | GB10, `verify.sh` |
 | ✅ | CUDA shared memory inputs read in place, outputs written device to device | GB10, `verify.sh` |
 | ✅ | FP32, FP64, FP16, BF16, INT8, INT32, INT64, UINT8, BOOL over HTTP and gRPC | GB10, `verify.sh` |
@@ -45,11 +46,12 @@ triton/
   sequence_client.py    a client for a sequence-mode model (Python, tritonclient)
   generate_client.py    greedy decoding from text against a sequence-mode model
   sequence_checks.py    the TinyLlama sequence-mode checks verify.sh runs
+  fixture_checks.py     greedy decoding against a HuggingFace fixture (the Qwen3 checks)
 ```
 
 `backends/` (the built `.so`), `pjrt/` (the downloaded plugin) and `build/`
-(the device test and the TinyLlama model verify.sh writes) are build outputs
-and are not committed.
+(the device test and the TinyLlama and Qwen3 models verify.sh writes) are
+build outputs and are not committed.
 
 ## Prerequisites
 
@@ -186,6 +188,23 @@ server is up. It then starts a server on that repository and:
 Without the checkpoint this step prints `SKIP tinyllama` and the run can
 still pass; `SKIP_TINYLLAMA=1` skips it on purpose.
 
+Then, if Qwen/Qwen3-0.6B (Apache-2.0) is in the HuggingFace cache at the
+revision the fixture names (`hf download Qwen/Qwen3-0.6B`; `QWEN3_CHECKPOINT`
+overrides the directory), `verify.sh` exports it the same way into
+`triton/build/qwen3/` as the sequence-mode model `qwen3` (`QWEN3_REEXPORT=1`
+exports again), starts a server on it and runs `fixture_checks.py` against
+`ir/src/jvmTest/resources/io/tlaloc/ir/inference/qwen3_0_6b_greedy.json`. That
+fixture is HuggingFace transformers greedy-decoding 16 tokens in float32 on
+the CPU with eager attention (`harness/python/hf_greedy_fixture.py`), for
+" The capital of France is" and for "What is the capital of France? Answer in
+one word." rendered with Qwen3's chat template (thinking off). For each prompt,
+over HTTP and gRPC, the prompt is one prefill request and the 16 generated ids
+must equal the fixture's; the first position's top-20 logits and the chosen
+logit at every position must be within 2e-3 of the largest logit (measured:
+2.6e-4 and 3.3e-4; TF32). It prints the prefill and decode timings, then runs
+`fixture_checks.py --perturb` (wrong expected ids), which must fail. Without
+the checkpoint this step prints `SKIP qwen3`; `SKIP_QWEN3=1` skips it.
+
 A request with curl:
 
 ```bash
@@ -246,7 +265,7 @@ TritonModelRepository.write(artifactDir, repositoryDir, "tinyllama")
 text alone. The same from Gradle, for an artifact already on disk:
 
 ```bash
-./gradlew :maestro:exportLlamaServingArtifact \
+./gradlew :maestro:exportHfServingArtifact \
     -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
     -PoutDir=/abs/tinyllama-artifact
 ./gradlew :maestro:exportTritonModel -PartifactDir=/abs/tinyllama-artifact \
@@ -255,6 +274,15 @@ MODEL_REPOSITORY=/abs/model_repository triton/run_server.sh
 python triton/generate_client.py --model tinyllama \
     --tokenizer $HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0/tokenizer.json
 ```
+
+`exportHfServingArtifact` (also registered under its earlier name,
+`exportLlamaServingArtifact`) reads Llama and Qwen3 checkpoints. `-PckptDir`
+may be a HuggingFace cache snapshot, for example
+`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<revision>`; the
+manifest's model name is then the repo id, `Qwen/Qwen3-0.6B`. Qwen3's
+tokenizer is byte-level BPE, which `generate_client.py`'s word lookup does not
+implement, so give it ids with `--prompt` (the fixture's `promptTokens`, for
+example).
 
 The artifact's files are hard-linked into the version directory when both are
 on one file system, and copied otherwise. They are real files either way, so
@@ -268,7 +296,7 @@ way. `-PmaxSequenceIdleMicros` and `-PmaxQueueDelayMicros` set the sequence
 batcher's idle timeout (default 60 s) and batching delay (default 1 ms).
 
 The TinyLlama commands above export decode entries for batch 1 only; add
-`-PmaxBatch=4` to `exportLlamaServingArtifact` to let the backend batch up to
+`-PmaxBatch=4` to `exportHfServingArtifact` to let the backend batch up to
 four sequences' decode steps (three decode entries plus the prefill entry:
 four XLA compiles at load, about 15 s for TinyLlama).
 
@@ -399,6 +427,12 @@ each, and together produce about 82 to 87 tokens/s, about twice one sequence's
 rate; 48 requests ran in 22 or 23 executions. The Python driver in
 `docs/SERVING_RUNBOOK.md` takes 1.35 s per step, because it copies every KV
 pool to the host and back. These are single measurements, not a benchmark.
+
+Qwen3-0.6B (f32 weights, context 64, gRPC, medians of 5 to 10 runs of 16
+tokens): the model loads in about 20 s (four XLA compiles of 3.5 to 6.6 s,
+1.2 s to upload 2867 MiB of weights). Prefill takes about 25 ms for the 5-token
+and for the 24-token prompt alike, since both run the padded 64-token prefill
+entry. A decode step of one sequence takes about 19 ms (about 52 tokens/s).
 
 ## Model configuration
 
@@ -587,4 +621,5 @@ defaults.
   sequence ID. The client that allocates pages must be the only client of
   that model, or the clients must agree on the pages.
 - The weights and KV pools are f32 on the device, as the artifact stores them
-  (TinyLlama: 4.1 GiB of weights).
+  (TinyLlama: 4.1 GiB of weights; Qwen3-0.6B: 2.8 GiB, of which 594 MiB is the
+  tied head, staged as a second, transposed copy of the embedding table).
