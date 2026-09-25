@@ -31,6 +31,12 @@ struct PjrtPlugin {
 // major version, and calls PJRT_Plugin_Initialize.
 std::string LoadPjrtPlugin(const std::string& path, const PjrtPlugin** out);
 
+// Asks the kernel to drop the page cache of a file that has been read. A
+// weight file is read once, uploaded and never read again; on a machine whose
+// GPU shares system memory (GB10), 56 GB of cached weight files would compete
+// with the 56 GB the device copies of the same weights occupy.
+void DropFileCache(const std::string& path);
+
 // Allocator options for the XLA GPU plugin. Without them the plugin reserves
 // 75% of device memory at client creation; on a machine whose GPU memory is
 // the system RAM that has taken the whole machine down.

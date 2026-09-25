@@ -733,6 +733,8 @@ ModelState::LoadWeights(DeviceModel* device)
     if (size > 0 && !in.read(bytes.data(), static_cast<std::streamsize>(size))) {
       return Err(TRITONSERVER_ERROR_INTERNAL, Where() + "reading the weight file " + path + " failed");
     }
+    in.close();
+    tlaloc_triton::DropFileCache(path);
     HostInput host;
     host.data = bytes.data();
     host.byte_size = size;

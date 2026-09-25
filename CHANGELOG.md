@@ -13,6 +13,27 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Muse Glimmer (text).** `HfModelFamily.MuseGlimmer` reads
+  `MuseGlimmerForConditionalGeneration` checkpoints: the decoder config under
+  `text_config`, tensors under `model.language_model.`, the vision encoder's
+  tensors listed and not read, the image and video placeholder ids refused by
+  name (`HfDecoderConfig.checkTextOnlyTokens`). meta-models/Muse-Glimmer-30B
+  (Apache-2.0) serves through Triton with its weights in bf16 and greedy-decodes
+  the ids of HuggingFace transformers run with the same arithmetic, 32 of 32.
+- **Decoder layer features.** Sliding-window attention (an optional
+  `sliding_window` attribute on `PAGED_ATTENTION`), layers without RoPE,
+  attention and MLP output norms, `(1 + w)` norm gains, gainless q/k norms, a
+  query scale, an attention output gate, an embedding norm, and a logit
+  multiplier with final-logit soft-capping. `DecoderLayerPart` gains
+  `ATTN_GATE_PROJ`, `ATTENTION_OUTPUT_NORM` and `FEEDFORWARD_OUTPUT_NORM`.
+- **bf16 weights in serving artifacts.** `HfDecoderConfig.weightDType`;
+  `HfStagedWeights.writeSlot` streams a slot's bytes a block at a time;
+  `ServingArtifactWriter.export` takes a `writeWeight` callback and writes F32
+  or BF16 weight files. `WeightSource`, `SafetensorsFile`, `SafetensorsIndex`
+  and `HfCheckpoint` read a tensor's header entry and raw byte ranges.
+- **`harness/python/muse_glimmer_fixture.py`** writes the Muse Glimmer
+  fixtures, including a five-layer model with closed-form weights.
+
 - **NVIDIA Triton backend.** `triton/` holds `libtriton_tlaloc.so`, a Triton
   Inference Server backend that compiles Tlaloc StableHLO through a PJRT plugin
   and serves it over Triton's HTTP and gRPC endpoints. It is not a Gradle module
@@ -59,6 +80,13 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   exports it (`exportLlamaServingArtifact` remains as a second name).
 
 ### Changed
+
+- `PAGED_ATTENTION`'s two f32 dots are emitted with HIGHEST precision, so XLA
+  does not run them in TF32 on a GPU.
+- A config with sliding-window layers, layers without RoPE, output norms or
+  final-logit soft-capping now builds a graph instead of being refused by name;
+  `attn_logit_softcapping` is still refused.
+- The Triton backend drops the page cache of each weight file after uploading it.
 
 - **HF decoder types renamed for the second family.** `HfLlamaConfig` is now
   `HfDecoderConfig`, `HfLlamaNames` `HfDecoderNames`, `LlamaWeightRole`

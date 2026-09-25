@@ -33,8 +33,22 @@
 #      logits within TF32 tolerance, and the prefill and decode timings), run
 #      it again with --perturb (must fail), and stop the server. Without the
 #      checkpoint this step is skipped by name.
+#   8. optional and opt-in (MUSE_GLIMMER=1), Muse Glimmer: 28 billion text
+#      parameters, 56 GB of bf16 weights on the device. It needs the
+#      meta-models/Muse-Glimmer-30B snapshot the fixtures name, and refuses by
+#      name to start any step when MemAvailable is below that step's need plus
+#      a 16 GiB margin (the GPU shares system memory on the GB10). Export
+#      (Gradle, no server running), drop the page cache of the checkpoint and
+#      the artifact, start a server whose PJRT memory fraction covers the
+#      weights plus 8 GiB (computed from the manifest and MemTotal, and
+#      printed), run fixture_checks.py against the two committed fixtures:
+#      transformers in bfloat16 (the ids must be equal as far as the two
+#      references agree with each other) and transformers with bf16 weights
+#      and f32 activations (all ids, and the logits within twice the oracle's
+#      own float32-vs-float64 noise), then --perturb (must fail), and print
+#      the peak memory in use.
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
-# passes, step 4 fails, and steps 6 and 7 pass or are skipped.
+# passes, step 4 fails, and steps 6, 7 and 8 pass or are skipped.
 #
 #   triton/verify.sh
 #
@@ -55,6 +69,9 @@
 #   QWEN3_DIR             [triton/build/qwen3]; an existing model is reused
 #   QWEN3_REEXPORT=1      export again even if the model exists
 #   SKIP_QWEN3=1          skip step 7
+#   MUSE_GLIMMER=1        run step 8
+#   MUSE_GLIMMER_DIR      [triton/build/muse-glimmer]; an existing model is reused
+#   MUSE_GLIMMER_REEXPORT=1  export again even if the model exists
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,8 +82,11 @@ export CONTAINER_NAME="$BASE_NAME"
 export HTTP_PORT="${HTTP_PORT:-8000}" GRPC_PORT="${GRPC_PORT:-8001}" METRICS_PORT="${METRICS_PORT:-8002}"
 LOG="${VERIFY_LOG:-$(mktemp -t tlaloc-triton-verify.XXXXXX.log)}"
 
+PEAK_PID=""
 cleanup() {
-  docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-qwen3" "$BASE_NAME-device" >/dev/null 2>&1 || true
+  [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
+  docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-qwen3" "$BASE_NAME-muse" \
+    "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -265,5 +285,97 @@ else
     exit 1
   fi
   stop_server
+fi
+
+# --- Muse Glimmer ------------------------------------------------------------
+FX_DIR="$ROOT/ir/src/jvmTest/resources/io/tlaloc/ir/inference"
+MUSE_BF16="$FX_DIR/muse_glimmer_30b_bf16_greedy.json"
+MUSE_MIXED="$FX_DIR/muse_glimmer_30b_mixed_greedy.json"
+
+# mem_check <GiB> <step>: refuse by name unless MemAvailable covers it plus 16 GiB.
+mem_check() {
+  local need="$1" step="$2" avail
+  avail=$(awk '/MemAvailable/ {printf "%d", $2 / 1048576}' /proc/meminfo)
+  echo "memory before $step: ${avail} GiB available, ${need} GiB needed plus a 16 GiB margin"
+  if (( avail < need + 16 )); then
+    echo "FAIL: refusing to $step with ${avail} GiB available" >&2
+    exit 1
+  fi
+}
+
+# drop_cache <paths...>: drop the page cache of every file under them.
+drop_cache() {
+  "$PY" - "$@" <<'PYEOF'
+import os, sys
+for root in sys.argv[1:]:
+    for d, _, files in os.walk(root, followlinks=True):
+        for f in files:
+            try:
+                fd = os.open(os.path.join(d, f), os.O_RDONLY)
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                os.close(fd)
+            except OSError:
+                pass
+PYEOF
+}
+
+echo "== muse glimmer"
+if [[ "${MUSE_GLIMMER:-}" != 1 ]]; then
+  echo "SKIP muse glimmer: opt-in, set MUSE_GLIMMER=1 (56 GB of weights on the device)"
+else
+  MUSE_REV="$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1]))['revision'])" "$MUSE_BF16")"
+  MCKPT="$HOME/.cache/huggingface/hub/models--meta-models--Muse-Glimmer-30B/snapshots/$MUSE_REV"
+  M_DIR="${MUSE_GLIMMER_DIR:-$HERE/build/muse-glimmer}"
+  if [[ ! -f "$MCKPT/model.safetensors.index.json" ]]; then
+    echo "SKIP muse glimmer: no meta-models/Muse-Glimmer-30B checkpoint at $MCKPT"
+  else
+    M_CONFIG="$M_DIR/repository/muse/config.pbtxt"
+    if [[ "${MUSE_GLIMMER_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$M_CONFIG" 2>/dev/null; then
+      mem_check 8 "export Muse Glimmer"
+      rm -rf "$M_DIR"
+      mkdir -p "$M_DIR"
+      # Context 128: the chat prompt is 68 tokens and 16 more are generated.
+      (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
+        -PckptDir="$MCKPT" -PoutDir="$M_DIR/artifact" -PmaxBatch=1 -PmaxContext=128)
+      (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+        -PartifactDir="$M_DIR/artifact" -PoutDir="$M_DIR/repository" -PmodelName=muse \
+        -PkvMode=sequence -PmaxSequenceIdleMicros=60000000)
+    fi
+    drop_cache "$MCKPT/" "$M_DIR/artifact"
+    WEIGHT_BYTES="$("$PY" -c "import json,sys; print(sum(w['byteLength'] for w in json.load(open(sys.argv[1]))['weights']['table']))" "$M_DIR/artifact/tlaloc-serving.json")"
+    MEM_TOTAL="$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo)"
+    FRACTION="$("$PY" -c "import sys; print(round((int(sys.argv[1]) + 8 * 2**30) / int(sys.argv[2]), 3))" "$WEIGHT_BYTES" "$MEM_TOTAL")"
+    echo "weights $((WEIGHT_BYTES / 2**30)) GiB of $((MEM_TOTAL / 2**30)) GiB: PJRT memory fraction $FRACTION"
+    mem_check $(( WEIGHT_BYTES / 2**30 + 8 )) "load Muse Glimmer"
+    export CONTAINER_NAME="$BASE_NAME-muse" MODEL_REPOSITORY="$M_DIR/repository"
+    PEAK_FILE="$(mktemp)"
+    ( peak=0; while sleep 1; do
+        used=$(awk '/MemTotal/ {t=$2} /MemAvailable/ {a=$2} END {printf "%d", (t - a) / 1048576}' /proc/meminfo)
+        (( used > peak )) && peak=$used && echo "$peak" >"$PEAK_FILE"
+      done ) &
+    PEAK_PID=$!
+    export TLALOC_PJRT_MEMORY_FRACTION="$FRACTION"
+    start_server "$LOG.muse" 1800
+    grep -o "compiled .* in [0-9]* ms" "$LOG.muse" || true
+    grep -o "uploaded [0-9]* weights.*" "$LOG.muse" | head -1
+    echo "-- against transformers in bfloat16"
+    "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model muse --fixture "$MUSE_BF16" --ids-only --common-prefix-with "$MUSE_MIXED" --repeat 3
+    echo "-- against transformers with bf16 weights and f32 activations"
+    "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model muse --fixture "$MUSE_MIXED" --noise-factor 2 --repeat 0
+    echo "== muse glimmer negative control (must fail)"
+    if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+        --model muse --fixture "$MUSE_MIXED" --noise-factor 2 --repeat 0 --perturb >"$LOG.muse.negative" 2>&1; then
+      echo "FAIL: the Muse Glimmer fixture checks passed with wrong expected ids" >&2
+      cat "$LOG.muse.negative" >&2
+      exit 1
+    fi
+    grep -c "^FAIL" "$LOG.muse.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+    kill "$PEAK_PID" 2>/dev/null || true
+    PEAK_PID=""
+    echo "peak memory in use (system and GPU, unified): $(cat "$PEAK_FILE") GiB"
+    stop_server
+  fi
 fi
 echo "VERIFY PASSED"

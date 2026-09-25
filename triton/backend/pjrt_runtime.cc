@@ -4,6 +4,8 @@
 #include "pjrt_runtime.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <cstddef>
 #include <cstring>
@@ -111,6 +113,15 @@ FromPjrtType(PJRT_Buffer_Type t)
     case PJRT_Buffer_Type_PRED: return DType::BOOL;
     default: return DType::UNSUPPORTED;
   }
+}
+
+void
+DropFileCache(const std::string& path)
+{
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) return;
+  ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+  ::close(fd);
 }
 
 std::string

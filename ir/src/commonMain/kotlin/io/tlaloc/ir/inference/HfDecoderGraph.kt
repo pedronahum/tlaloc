@@ -1,5 +1,6 @@
 package io.tlaloc.ir.inference
 
+import io.tlaloc.core.BF16
 import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirFunction
@@ -26,25 +27,34 @@ import kotlin.math.sqrt
 //     row, with no new op kind. The chunk is right-aligned (padding rows
 //     first, slot -1), so the last real token is always row T - 1 and the
 //     graph returns that row's logits.
-//   * PER-LAYER SPECS. Each layer is built from its [DecoderLayerSpec]; the
-//     graph implements full causal attention with RoPE and the optional
-//     per-head q/k RMSNorm (Qwen3). Everything else a spec or config can ask
-//     for is refused by name in [HfDecoderConfig.toDecodeModelShape] and never
-//     reaches here.
-//   * FLOAT32 THROUGHOUT. A bf16 checkpoint is widened to f32 at ingestion
-//     (exactly: bf16 -> f32 is a 16-bit shift).
+//   * PER-LAYER SPECS. Each layer is built from its [DecoderLayerSpec]: full
+//     or sliding-window causal attention, RoPE or none, per-head q/k RMSNorm
+//     with or without a gain, an attention output gate, and norms on the
+//     attention and MLP outputs. What a config asks for and the graph does not
+//     implement is refused by name in [HfDecoderConfig.toDecodeModelShape].
+//   * ACTIVATIONS IN FLOAT32. With F32 weights (Llama, Qwen3) a bf16
+//     checkpoint is widened at ingestion (exactly: bf16 -> f32 is a 16-bit
+//     shift) and everything is f32. With BF16 weights (Muse Glimmer) the
+//     weights stay bf16 on the device; each projection rounds its f32 input
+//     to bf16 and multiplies bf16 by bf16 into an f32 result, so the products
+//     are exact and the sums are f32. Norms, RoPE, attention, the residual
+//     stream and the logits stay f32.
 //   * NO SAMPLING. Logits out; the sampler is host-side.
 
 /**
  * Builds the decode graph the serving contract calls.
  *
  * ```
- *   embed
- *   ├─ per layer ─ rms_norm → q/k/v → [q/k rms_norm] → RoPE → KV_CACHE_WRITE ×2
- *   │              → PAGED_ATTENTION → o_proj → +residual
- *   │              → rms_norm → SwiGLU → down_proj → +residual
- *   └─ final rms_norm → lm_head → logits
+ *   embed → [rms_norm]
+ *   ├─ per layer ─ rms_norm → q/k/v → [q/k rms_norm] → [q scale] → [RoPE] → KV_CACHE_WRITE ×2
+ *   │              → PAGED_ATTENTION (full or sliding window) → [× sigmoid(gate)]
+ *   │              → o_proj → [rms_norm] → +residual
+ *   │              → rms_norm → SwiGLU → down_proj → [rms_norm] → +residual
+ *   └─ final rms_norm → lm_head → [× multiplier] → [cap · tanh(· / cap)] → logits
  * ```
+ *
+ * The bracketed steps are the ones a [DecoderLayerSpec] or an
+ * [HfDecoderConfig] setting turns on.
  *
  * The signature is [DecodeGraphSpec]'s, with [weightSlots] appended; the
  * built function is checked against it by [DecodeGraphSpec.verifySignature].
@@ -73,7 +83,7 @@ object HfDecoderGraph {
         weightRoles(config).map { role ->
             val fileDims = HfDecoderNames.expectedDims(role, config).toList()
             val dims = if (HfDecoderNames.isTransposedLinear(role)) fileDims.reversed() else fileDims
-            DecodeSlot(slotName(role), DxirType(F32, dims), DecodeSlotRole.WEIGHT)
+            DecodeSlot(slotName(role), DxirType(config.weightDType, dims), DecodeSlotRole.WEIGHT)
         }
 
     /** The [DecoderWeightRole] each slot of [weightSlots] carries, same order. */
@@ -96,6 +106,9 @@ object HfDecoderGraph {
             DecoderLayerPart.GATE_PROJ -> "gateProj"
             DecoderLayerPart.UP_PROJ -> "upProj"
             DecoderLayerPart.DOWN_PROJ -> "downProj"
+            DecoderLayerPart.ATTN_GATE_PROJ -> "attnGate"
+            DecoderLayerPart.ATTENTION_OUTPUT_NORM -> "attnOutNorm"
+            DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> "ffnOutNorm"
         } + role.layer
     }
 
@@ -236,8 +249,8 @@ object HfDecoderGraph {
         val half = hd / 2
         val qOut = config.qProjOut
         val kvOut = config.kvProjOut
-        val eps = config.rmsNormEps.toFloat()
         val scale = 1.0f / sqrt(hd.toFloat())
+        val wdt = config.weightDType
         // The table covers the positions this entry can reach: its context,
         // capped by the model's own limit. Qwen3's 40960 positions at
         // head_dim 128 would be 42 MB of constants in every body.
@@ -265,21 +278,47 @@ object HfDecoderGraph {
                 weight(DecoderWeightRole.Layer(l, part))
 
             // ---- helpers ------------------------------------------------
-            val epsConsts = HashMap<List<Int>, DxirNode>()
+            val epsConsts = HashMap<Pair<List<Int>, Float>, DxirNode>()
+
+            /** A weight as f32: the slot itself, or its exact widening from bf16. */
+            fun f32(x: DxirNode): DxirNode =
+                if (x.type.dtype == F32) x else op(OpKind.CAST, listOf(x), DxirType(F32, x.type.dims))
 
             /**
-             * HF's RMSNorm over the last axis of [dims]:
-             * `x * rsqrt(mean(x^2) + eps) * gain`, with `gain` of the last
-             * axis' width. Rank 2 for the hidden-state norms, rank 3
-             * (`[rows, heads, headDim]`) for Qwen3's per-head q/k norms.
+             * `x @ W` for a staged weight `W` (`[in, out]`). With BF16 weights
+             * the f32 input is rounded to bf16 and the product is taken into
+             * an f32 result: exact products, f32 sums.
              */
-            fun rmsNorm(x: DxirNode, gain: DxirNode, dims: List<Int>): DxirNode {
+            fun proj(x: DxirNode, wt: DxirNode, out: Int): DxirNode {
+                val rows = x.type.dims[0]
+                val lhs = if (wt.type.dtype == F32) {
+                    x
+                } else {
+                    op(OpKind.CAST, listOf(x), DxirType(wt.type.dtype, x.type.dims))
+                }
+                return op(OpKind.MATMUL, listOf(lhs, wt), DxirType(F32, listOf(rows, out)))
+            }
+
+            /**
+             * RMSNorm over the last axis of [dims]:
+             * `x * rsqrt(mean(x^2) + eps)`, times `gain` (or `1 + gain` when
+             * [plusOne]) when there is one. Rank 2 for the hidden-state norms,
+             * rank 3 (`[rows, heads, headDim]`) for the per-head q/k norms.
+             */
+            fun rmsNorm(
+                x: DxirNode,
+                gain: DxirNode?,
+                dims: List<Int>,
+                eps: Double = config.rmsNormEps,
+                plusOne: Boolean = false,
+            ): DxirNode {
                 val rank = dims.size
                 val tX = DxirType(F32, dims)
                 val rowDims = dims.dropLast(1) + 1
                 val tRow = DxirType(F32, rowDims)
-                val epsConst = epsConsts.getOrPut(rowDims) {
-                    const(FloatArray(rowDims.fold(1) { a, n -> a * n }) { eps }, tRow)
+                val epsF = eps.toFloat()
+                val epsConst = epsConsts.getOrPut(rowDims to epsF) {
+                    const(FloatArray(rowDims.fold(1) { a, n -> a * n }) { epsF }, tRow)
                 }
                 val sq = op(OpKind.MUL, listOf(x, x), tX)
                 val mean = op(
@@ -288,8 +327,14 @@ object HfDecoderGraph {
                 )
                 val rsq = op(OpKind.RSQRT, listOf(op(OpKind.ADD, listOf(mean, epsConst), tRow)), tRow)
                 val scaled = op(OpKind.MUL, listOf(x, rsq), tX)
+                if (gain == null) return scaled
+                val n = dims.last()
+                var g = f32(gain)
+                if (plusOne) {
+                    g = op(OpKind.ADD, listOf(g, const(1f, DxirType(F32, listOf(n)))), g.type)
+                }
                 val gainRow = op(
-                    OpKind.RESHAPE, listOf(gain), DxirType(F32, List(rank - 1) { 1 } + dims.last()),
+                    OpKind.RESHAPE, listOf(g), DxirType(F32, List(rank - 1) { 1 } + n),
                 )
                 val gainB = op(
                     OpKind.BROADCAST, listOf(gainRow), tX,
@@ -297,6 +342,10 @@ object HfDecoderGraph {
                 )
                 return op(OpKind.MUL, listOf(scaled, gainB), tX)
             }
+
+            /** `x * c` for a scalar constant [c] (a splat). */
+            fun times(x: DxirNode, c: Double): DxirNode =
+                op(OpKind.MUL, listOf(x, const(c.toFloat(), x.type)), x.type)
 
             /** HF `rotate_half`: `cat(-x[..., d/2:], x[..., :d/2])`. */
             fun rotateHalf(x: DxirNode, heads: Int): DxirNode {
@@ -332,10 +381,13 @@ object HfDecoderGraph {
             // of a constant table by that operand is an EMBEDDING: the same
             // gather the token lookup is, over a different table.
             val posFlat = op(OpKind.RESHAPE, listOf(positions), DxirType(idx, listOf(r)))
-            val cosT = const(cosTable, DxirType(F32, listOf(ropePositions, hd)))
-            val sinT = const(sinTable, DxirType(F32, listOf(ropePositions, hd)))
-            val cosRow = op(OpKind.EMBEDDING, listOf(cosT, posFlat), DxirType(F32, listOf(r, hd)))
-            val sinRow = op(OpKind.EMBEDDING, listOf(sinT, posFlat), DxirType(F32, listOf(r, hd)))
+            val anyRope = (0 until m.numLayers).any { config.layer(it).rope }
+            val ropeRows: Pair<DxirNode, DxirNode>? = if (!anyRope) null else {
+                val cosT = const(cosTable, DxirType(F32, listOf(ropePositions, hd)))
+                val sinT = const(sinTable, DxirType(F32, listOf(ropePositions, hd)))
+                op(OpKind.EMBEDDING, listOf(cosT, posFlat), DxirType(F32, listOf(r, hd))) to
+                    op(OpKind.EMBEDDING, listOf(sinT, posFlat), DxirType(F32, listOf(r, hd)))
+            }
 
             fun bcastToHeads(row: DxirNode, heads: Int): DxirNode {
                 val unsq = op(OpKind.RESHAPE, listOf(row), DxirType(F32, listOf(r, 1, hd)))
@@ -344,19 +396,17 @@ object HfDecoderGraph {
                     attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)),
                 )
             }
-            val cosQ = bcastToHeads(cosRow, config.numHeads)
-            val sinQ = bcastToHeads(sinRow, config.numHeads)
-            val cosK = bcastToHeads(cosRow, config.numKvHeads)
-            val sinK = bcastToHeads(sinRow, config.numKvHeads)
+            val ropeQ = ropeRows?.let { (c, s) -> bcastToHeads(c, config.numHeads) to bcastToHeads(s, config.numHeads) }
+            val ropeK = ropeRows?.let { (c, s) -> bcastToHeads(c, config.numKvHeads) to bcastToHeads(s, config.numKvHeads) }
 
             /** `x*cos + rotate_half(x)*sin`, HF's `apply_rotary_pos_emb`. */
-            fun rope(x: DxirNode, heads: Int, c: DxirNode, s: DxirNode): DxirNode {
+            fun rope(x: DxirNode, heads: Int, cs: Pair<DxirNode, DxirNode>): DxirNode {
                 val t3 = DxirType(F32, listOf(r, heads, hd))
                 return op(
                     OpKind.ADD,
                     listOf(
-                        op(OpKind.MUL, listOf(x, c), t3),
-                        op(OpKind.MUL, listOf(rotateHalf(x, heads), s), t3),
+                        op(OpKind.MUL, listOf(x, cs.first), t3),
+                        op(OpKind.MUL, listOf(rotateHalf(x, heads), cs.second), t3),
                     ),
                     t3,
                 )
@@ -395,42 +445,39 @@ object HfDecoderGraph {
             // ---- embed ---------------------------------------------------
             val embed3 = op(
                 OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.EmbedTokens), tokenIds),
-                DxirType(F32, listOf(b, t, d)),
+                DxirType(wdt, listOf(b, t, d)),
             )
-            var h = op(OpKind.RESHAPE, listOf(embed3), tH)
+            var h = f32(op(OpKind.RESHAPE, listOf(embed3), DxirType(wdt, listOf(r, d))))
+            if (config.embeddingNorm) h = rmsNorm(h, null, listOf(r, d))
             val tQ3 = DxirType(F32, listOf(r, config.numHeads, hd))
             val tKv3 = DxirType(F32, listOf(r, config.numKvHeads, hd))
+            val plusOne = config.layerNormGainPlusOne
 
             // ---- decoder layers -----------------------------------------
             val poolOuts = ArrayList<DxirNode>(2 * m.numLayers)
             for (l in 0 until m.numLayers) {
                 val layerSpec = config.layer(l)
-                val hn = rmsNorm(h, layerWeight(l, DecoderLayerPart.INPUT_LAYERNORM), listOf(r, d))
+                val hn = rmsNorm(
+                    h, layerWeight(l, DecoderLayerPart.INPUT_LAYERNORM), listOf(r, d), plusOne = plusOne,
+                )
 
-                val q = op(
-                    OpKind.MATMUL, listOf(hn, layerWeight(l, DecoderLayerPart.Q_PROJ)),
-                    DxirType(F32, listOf(r, qOut)),
-                )
-                val k = op(
-                    OpKind.MATMUL, listOf(hn, layerWeight(l, DecoderLayerPart.K_PROJ)),
-                    DxirType(F32, listOf(r, kvOut)),
-                )
-                val v = op(
-                    OpKind.MATMUL, listOf(hn, layerWeight(l, DecoderLayerPart.V_PROJ)),
-                    DxirType(F32, listOf(r, kvOut)),
-                )
+                val q = proj(hn, layerWeight(l, DecoderLayerPart.Q_PROJ), qOut)
+                val k = proj(hn, layerWeight(l, DecoderLayerPart.K_PROJ), kvOut)
+                val v = proj(hn, layerWeight(l, DecoderLayerPart.V_PROJ), kvOut)
 
                 var q3: DxirNode = op(OpKind.RESHAPE, listOf(q), tQ3)
                 var k3: DxirNode = op(OpKind.RESHAPE, listOf(k), tKv3)
                 val v3 = op(OpKind.RESHAPE, listOf(v), tKv3)
                 if (layerSpec.qkNorm) {
-                    // Qwen3: RMSNorm over each head's head_dim, before RoPE.
-                    q3 = rmsNorm(q3, layerWeight(l, DecoderLayerPart.Q_NORM), tQ3.dims)
-                    k3 = rmsNorm(k3, layerWeight(l, DecoderLayerPart.K_NORM), tKv3.dims)
+                    // RMSNorm over each head's head_dim, before RoPE.
+                    val g = layerSpec.qkNormGain
+                    q3 = rmsNorm(q3, if (g) layerWeight(l, DecoderLayerPart.Q_NORM) else null, tQ3.dims)
+                    k3 = rmsNorm(k3, if (g) layerWeight(l, DecoderLayerPart.K_NORM) else null, tKv3.dims)
                 }
+                if (config.queryScale != 1.0) q3 = times(q3, config.queryScale)
 
-                val qRot = rope(q3, config.numHeads, cosQ, sinQ)
-                val kRot = rope(k3, config.numKvHeads, cosK, sinK)
+                val qRot = if (layerSpec.rope) rope(q3, config.numHeads, ropeQ!!) else q3
+                val kRot = if (layerSpec.rope) rope(k3, config.numKvHeads, ropeK!!) else k3
 
                 val (keyIn, valIn) = pools[l]
                 val kc = op(OpKind.KV_CACHE_WRITE, listOf(keyIn, kRot, slotMapping), spec.poolType)
@@ -438,31 +485,52 @@ object HfDecoderGraph {
                 poolOuts += kc
                 poolOuts += vc
 
+                val attAttrs = buildMap<String, Any> {
+                    put("scale", scale.toDouble())
+                    if (layerSpec.attention == AttentionKind.SLIDING) {
+                        put(io.tlaloc.ir.PagedAttentionAttrs.SLIDING_WINDOW, layerSpec.slidingWindow!!)
+                    }
+                }
                 val att = op(
                     OpKind.PAGED_ATTENTION,
                     listOf(qRot, kc, vc, rowTables, rowLens),
                     DxirType(F32, listOf(r, config.numHeads, hd)),
-                    mapOf("scale" to scale.toDouble()),
+                    attAttrs,
                 )
-                val attFlat = op(OpKind.RESHAPE, listOf(att), DxirType(F32, listOf(r, qOut)))
-                val attProj = op(
-                    OpKind.MATMUL, listOf(attFlat, layerWeight(l, DecoderLayerPart.O_PROJ)), tH,
-                )
+                var attFlat = op(OpKind.RESHAPE, listOf(att), DxirType(F32, listOf(r, qOut)))
+                if (layerSpec.attentionOutputGate) {
+                    val gate = proj(hn, layerWeight(l, DecoderLayerPart.ATTN_GATE_PROJ), qOut)
+                    attFlat = op(
+                        OpKind.MUL, listOf(attFlat, op(OpKind.SIGMOID, listOf(gate), gate.type)), attFlat.type,
+                    )
+                }
+                var attProj = proj(attFlat, layerWeight(l, DecoderLayerPart.O_PROJ), d)
+                if (layerSpec.postAttentionOutputNorm) {
+                    attProj = rmsNorm(
+                        attProj, layerWeight(l, DecoderLayerPart.ATTENTION_OUTPUT_NORM), listOf(r, d),
+                        eps = config.outputNormEps, plusOne = plusOne,
+                    )
+                }
                 val hAttn = op(OpKind.ADD, listOf(h, attProj), tH)
 
                 val hn2 = rmsNorm(
                     hAttn, layerWeight(l, DecoderLayerPart.POST_ATTENTION_LAYERNORM), listOf(r, d),
+                    plusOne = plusOne,
                 )
-                val gate = op(OpKind.MATMUL, listOf(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ)), tFf)
-                val up = op(OpKind.MATMUL, listOf(hn2, layerWeight(l, DecoderLayerPart.UP_PROJ)), tFf)
+                val gate = proj(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ), config.intermediateSize)
+                val up = proj(hn2, layerWeight(l, DecoderLayerPart.UP_PROJ), config.intermediateSize)
                 val swiglu = op(
                     OpKind.MUL,
                     listOf(op(OpKind.SILU, listOf(gate), tFf), up),
                     tFf,
                 )
-                val down = op(
-                    OpKind.MATMUL, listOf(swiglu, layerWeight(l, DecoderLayerPart.DOWN_PROJ)), tH,
-                )
+                var down = proj(swiglu, layerWeight(l, DecoderLayerPart.DOWN_PROJ), d)
+                if (layerSpec.postFeedforwardNorm) {
+                    down = rmsNorm(
+                        down, layerWeight(l, DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM), listOf(r, d),
+                        eps = config.outputNormEps, plusOne = plusOne,
+                    )
+                }
                 h = op(OpKind.ADD, listOf(hAttn, down), tH)
             }
 
@@ -484,10 +552,15 @@ object HfDecoderGraph {
 
             // ---- final norm + head ---------------------------------------
             val hf = rmsNorm(last, weight(DecoderWeightRole.FinalNorm), listOf(b, d))
-            val logits2 = op(
-                OpKind.MATMUL, listOf(hf, weight(DecoderWeightRole.LmHead)),
-                DxirType(F32, listOf(b, config.vocabSize)),
-            )
+            var logits2 = proj(hf, weight(DecoderWeightRole.LmHead), config.vocabSize)
+            if (config.logitMultiplier != 1.0) logits2 = times(logits2, config.logitMultiplier)
+            val cap = config.finalLogitSoftcap
+            if (cap != null) {
+                // cap * tanh(z / cap), in the reference's order of operations.
+                val capConst = const(cap.toFloat(), logits2.type)
+                val z = op(OpKind.DIV, listOf(logits2, capConst), logits2.type)
+                logits2 = op(OpKind.MUL, listOf(op(OpKind.TANH, listOf(z), z.type), capConst), z.type)
+            }
             listOf(op(OpKind.RESHAPE, listOf(logits2), spec.logitsType)) + poolOuts
         }
         spec.verifySignature(fn, "HfDecoderGraph")

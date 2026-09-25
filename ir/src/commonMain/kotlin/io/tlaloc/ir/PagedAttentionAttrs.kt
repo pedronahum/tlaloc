@@ -21,8 +21,12 @@ import io.tlaloc.core.I64
  *   → out        [numSeqs, numHeads, headDim]                    float
  * ```
  *
- * Attributes: `scale: Number` — the softmax temperature, REQUIRED. It is the
- * only attribute, deliberately: every other quantity a paged-attention kernel
+ * Attributes: `scale: Number` — the softmax temperature, REQUIRED — and
+ * `sliding_window: Number`, OPTIONAL: when present the row attends only to
+ * its last `sliding_window` positions, `t` in `[seqLen - window, seqLen)`.
+ * That is transformers' `kv_idx > q_idx - sliding_window` with the query at
+ * `seqLen - 1`: the window counts the query's own position. Both are model
+ * config literals, not dims. Every other quantity a paged-attention kernel
  * wants (`blockSize`, `numKvHeads`, the GQA `group`, `maxBlocksPerSeq`) is
  * DERIVED from operand shapes here. The sentinel-dims rule forbids
  * baking dim-derived values into attrs, and derivation additionally makes
@@ -52,7 +56,13 @@ object PagedAttentionAttrs {
         val numKvHeads: Int,
         val maxBlocksPerSeq: Int,
         val scale: Double,
+        /** Positions a row attends to, counting its own; null for full causal attention. */
+        val slidingWindow: Int? = null,
     ) {
+        /** The first live position of a row whose sequence has [seqLen] positions. */
+        fun firstLive(seqLen: Int): Int =
+            if (slidingWindow == null) 0 else maxOf(0, seqLen - slidingWindow)
+
         /** GQA grouping: how many query heads share one kv head. */
         val group: Int get() = numHeads / numKvHeads
 
@@ -136,6 +146,15 @@ object PagedAttentionAttrs {
             }
         }
 
+        val window = op.attrs[SLIDING_WINDOW]?.let { w ->
+            val n = (w as? Number)
+                ?: error("$layer: PAGED_ATTENTION '$SLIDING_WINDOW' must be a number, got $w")
+            require(n.toDouble() == n.toInt().toDouble() && n.toInt() >= 1) {
+                "$layer: PAGED_ATTENTION '$SLIDING_WINDOW' must be a whole number >= 1, got $w"
+            }
+            n.toInt()
+        }
+
         return Parsed(
             numSeqs = numSeqs,
             numHeads = numHeads,
@@ -145,8 +164,12 @@ object PagedAttentionAttrs {
             numKvHeads = numKvHeads,
             maxBlocksPerSeq = maxBlocksPerSeq,
             scale = scale,
+            slidingWindow = window,
         )
     }
+
+    /** The attr key of the optional sliding window. */
+    const val SLIDING_WINDOW: String = "sliding_window"
 
     private fun isIntegral(d: DType): Boolean = d == I32 || d == I64
 }

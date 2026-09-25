@@ -19,7 +19,8 @@ import io.tlaloc.ir.recognizer.quant.KvQuantConfig
 // jvmMain).
 //
 //   1. [HfModelFamily]    - what a family's config.json may say, and how each
-//                           of its layers is built. Llama and Qwen3 today.
+//                           of its layers is built. Llama, Qwen3 and Muse
+//                           Glimmer (text only) today.
 //   2. [HfDecoderConfig]  - config.json, read through :core's strict parseJson,
 //                           into the numbers and per-layer specs a graph is
 //                           built from. A key the family does not know is
@@ -71,12 +72,29 @@ enum class DecoderLayerPart {
 
     /** Per-head RMSNorm gain on the keys, `[headDim]`, applied before RoPE (Qwen3). */
     K_NORM,
+
+    /**
+     * The attention output gate, `[numHeads * headDim, hiddenSize]`: the
+     * attention output is multiplied by `sigmoid(x @ gate^T)` before o_proj,
+     * where `x` is the layer's normalized input (Muse Glimmer).
+     */
+    ATTN_GATE_PROJ,
+
+    /**
+     * RMSNorm gain on the attention output, before its residual add
+     * (Gemma-style families; Muse Glimmer spells it `post_attention_layernorm`).
+     */
+    ATTENTION_OUTPUT_NORM,
+
+    /** RMSNorm gain on the MLP output, before its residual add (`post_feedforward_layernorm`). */
+    FEEDFORWARD_OUTPUT_NORM,
     ;
 
     /** True for the RMSNorm gains, which are rank-1 and not transposed. */
     val isNorm: Boolean
         get() = this == INPUT_LAYERNORM || this == POST_ATTENTION_LAYERNORM ||
-            this == Q_NORM || this == K_NORM
+            this == Q_NORM || this == K_NORM ||
+            this == ATTENTION_OUTPUT_NORM || this == FEEDFORWARD_OUTPUT_NORM
 }
 
 /** How a layer's attention sees the context. */
@@ -93,24 +111,31 @@ enum class AttentionKind {
  * q/k/v/o projections, paged attention, a gated SiLU MLP, two residual adds).
  *
  * The fields are the per-layer differences between the families this repo
- * reads and the Gemma-style families it is laid out to read next. The decode
- * graph implements [qkNorm] and full attention with RoPE; the other settings
- * are recorded when a config asks for them and refused by name in
- * [HfDecoderConfig.toDecodeModelShape] (see [unsupported]) until the graph
- * implements them.
+ * reads. The decode graph implements every one of them.
  */
 data class DecoderLayerSpec(
     val attention: AttentionKind = AttentionKind.FULL,
-    /** The window of a [AttentionKind.SLIDING] layer, in positions. */
+    /**
+     * The window of a [AttentionKind.SLIDING] layer, in positions: a query
+     * at position `p` sees the positions `p - window + 1 .. p`, as
+     * transformers' sliding-window mask does.
+     */
     val slidingWindow: Int? = null,
     /** False for a layer that applies no rotary embedding (NoPE). */
     val rope: Boolean = true,
-    /** Per-head RMSNorm on q and k before RoPE, as Qwen3 does. */
+    /** Per-head RMSNorm on q and k before RoPE, as Qwen3 and Muse Glimmer do. */
     val qkNorm: Boolean = false,
     /** An RMSNorm on the attention output before its residual add, as Gemma 2 and 3 do. */
     val postAttentionOutputNorm: Boolean = false,
     /** An RMSNorm on the MLP output before its residual add, as Gemma 2 and 3 do. */
     val postFeedforwardNorm: Boolean = false,
+    /**
+     * Whether the q/k norms carry a learned gain ([DecoderLayerPart.Q_NORM],
+     * [DecoderLayerPart.K_NORM]). Muse Glimmer's have none.
+     */
+    val qkNormGain: Boolean = true,
+    /** The attention output is gated by `sigmoid` of a projection of the layer input (Muse Glimmer). */
+    val attentionOutputGate: Boolean = false,
 ) {
     init {
         require((attention == AttentionKind.SLIDING) == (slidingWindow != null)) {
@@ -124,8 +149,11 @@ data class DecoderLayerSpec(
 
     /**
      * The layer's weight tensors in the order the decode graph takes them:
-     * input norm, q/k/v, the q/k norms when [qkNorm], o, post-attention norm,
-     * gate/up/down.
+     * input norm, q/k/v, the q/k norm gains when [qkNorm] and [qkNormGain],
+     * the attention gate when [attentionOutputGate], o, the attention output
+     * norm when [postAttentionOutputNorm], the norm before the MLP,
+     * gate/up/down, and the MLP output norm when [postFeedforwardNorm].
+     * Llama's and Qwen3's orders are unchanged by the optional parts.
      */
     val parts: List<DecoderLayerPart>
         get() = buildList {
@@ -133,24 +161,26 @@ data class DecoderLayerSpec(
             add(DecoderLayerPart.Q_PROJ)
             add(DecoderLayerPart.K_PROJ)
             add(DecoderLayerPart.V_PROJ)
-            if (qkNorm) {
+            if (qkNorm && qkNormGain) {
                 add(DecoderLayerPart.Q_NORM)
                 add(DecoderLayerPart.K_NORM)
             }
+            if (attentionOutputGate) add(DecoderLayerPart.ATTN_GATE_PROJ)
             add(DecoderLayerPart.O_PROJ)
+            if (postAttentionOutputNorm) add(DecoderLayerPart.ATTENTION_OUTPUT_NORM)
             add(DecoderLayerPart.POST_ATTENTION_LAYERNORM)
             add(DecoderLayerPart.GATE_PROJ)
             add(DecoderLayerPart.UP_PROJ)
             add(DecoderLayerPart.DOWN_PROJ)
+            if (postFeedforwardNorm) add(DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM)
         }
 
-    /** The settings of this layer the decode graph does not implement, by name. */
-    fun unsupported(): List<String> = buildList {
-        if (attention == AttentionKind.SLIDING) add("sliding-window attention (window $slidingWindow)")
-        if (!rope) add("a layer without RoPE")
-        if (postAttentionOutputNorm) add("a post-attention output norm")
-        if (postFeedforwardNorm) add("a post-feedforward norm")
-    }
+    /**
+     * The settings of this layer the decode graph does not implement, by
+     * name. Empty: every setting above is implemented. Kept so a setting added
+     * here before its graph code is refused rather than dropped.
+     */
+    fun unsupported(): List<String> = emptyList()
 }
 
 /**
@@ -159,12 +189,11 @@ data class DecoderLayerSpec(
  * and how its tensors are spelled.
  *
  * Adding a family means adding an object here: its architectures, the keys
- * its parser reads beyond the shared ones ([extraKeys]), and [layers], which
- * turns its config into one [DecoderLayerSpec] per layer. A Gemma-style
- * family would read `layer_types`/`sliding_window` into sliding layers, its
- * soft-capping keys into [HfDecoderConfig.finalLogitSoftcap] and
- * [HfDecoderConfig.attnLogitSoftcap], set the post-norm flags, and spell its
- * extra norms in [leaf].
+ * its parser reads beyond the shared ones ([extraKeys]), [layers], which
+ * turns its config into one [DecoderLayerSpec] per layer, and [refine] for
+ * the model-wide numerics beyond Llama's (norm conventions, scale factors,
+ * soft-capping). A multimodal checkpoint whose decoder config sits under a
+ * key of its own names that key in [textConfigKey].
  */
 sealed class HfModelFamily(
     /** Short name used in messages and in serving model hashes. */
@@ -176,6 +205,33 @@ sealed class HfModelFamily(
 ) {
     /** Keys this family reads in addition to [SHARED_KEYS]. */
     open val extraKeys: Set<String> = emptySet()
+
+    /**
+     * The key of the decoder's own config inside `config.json`, for a
+     * multimodal checkpoint (`"text_config"`), or null when the file is the
+     * decoder config itself.
+     */
+    open val textConfigKey: String? = null
+
+    /** Keys the OUTER config may carry when [textConfigKey] is set; any other is refused. */
+    open val outerKeys: Set<String> = emptySet()
+
+    /** The prefix of the decoder's tensors in the checkpoint: `model.` or `model.language_model.`. */
+    open val modelPrefix: String = "model."
+
+    /**
+     * The dtype the decode graph stages this family's weights in. F32 for
+     * the families small enough to widen; BF16 where the f32 copy would not
+     * fit the device.
+     */
+    open val defaultWeightDType: DType = F32
+
+    /**
+     * The config after the family's model-wide settings are read from
+     * [root] (the decoder config) and [outer] (the file, which is [root] for
+     * a flat config). The default reads nothing.
+     */
+    open fun refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig = config
 
     /** The layer every layer is when the config states no per-layer differences. */
     abstract val defaultLayer: DecoderLayerSpec
@@ -197,6 +253,9 @@ sealed class HfModelFamily(
         DecoderLayerPart.POST_ATTENTION_LAYERNORM -> "post_attention_layernorm.weight"
         DecoderLayerPart.Q_NORM -> "self_attn.q_norm.weight"
         DecoderLayerPart.K_NORM -> "self_attn.k_norm.weight"
+        DecoderLayerPart.ATTN_GATE_PROJ -> "self_attn.gate_proj.weight"
+        DecoderLayerPart.ATTENTION_OUTPUT_NORM -> "post_attention_output_norm.weight"
+        DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> "post_feedforward_layernorm.weight"
     }
 
     /** Every key this family's config may carry: read, or known not to change the forward pass. */
@@ -246,9 +305,111 @@ sealed class HfModelFamily(
         }
     }
 
+    /**
+     * `MuseGlimmerForConditionalGeneration`, text only: the decoder under
+     * `text_config`, tensors under `model.language_model.`, and the vision
+     * encoder's tensors left unread. Every layer has
+     *
+     * - (1 + w) RMSNorms: before attention, on the attention output (eps
+     *   `post_norm_eps`), before the MLP, and on the MLP output (eps
+     *   `post_norm_eps`);
+     * - gainless per-head RMSNorms on q and k, q then scaled by
+     *   `qk_scale_factor`;
+     * - RoPE on the layers whose `layer_rope_theta` is non-zero (with the
+     *   global theta, as transformers applies it), none on the others;
+     * - sliding-window or full attention from `layer_types`;
+     * - the attention output multiplied by `sigmoid(gate_proj(x))`.
+     *
+     * The embeddings go through a gainless RMSNorm, the final norm is a
+     * plain `w` RMSNorm, and the logits are `cap * tanh(z * output_multiplier / cap)`
+     * with `cap = final_logit_softcapping`. Weights stay bf16 on the device.
+     * The image and video placeholder tokens are refused by name
+     * ([HfDecoderConfig.refusedTokenIds]).
+     */
+    data object MuseGlimmer : HfModelFamily(
+        "muse_glimmer", setOf("MuseGlimmerForConditionalGeneration"), setOf("muse_glimmer"),
+    ) {
+        override val extraKeys: Set<String> = setOf(
+            "sliding_window", "layer_types", "layer_rope_theta", "hidden_activation",
+            "final_logit_softcapping", "qk_scale_factor", "output_multiplier", "post_norm_eps",
+        )
+        override val textConfigKey: String = "text_config"
+        override val outerKeys: Set<String> = setOf(
+            "architectures", "model_type", "dtype", "torch_dtype", "transformers_version",
+            "text_config", "vision_config", "image_token_id", "video_token_id",
+            "out_hidden_size", "projector_hidden_act", "projector_hidden_size",
+        )
+        override val modelPrefix: String = "model.language_model."
+        override val defaultWeightDType: DType = BF16
+        override val defaultLayer: DecoderLayerSpec = DecoderLayerSpec(
+            qkNorm = true, qkNormGain = false, attentionOutputGate = true,
+            postAttentionOutputNorm = true, postFeedforwardNorm = true,
+        )
+
+        override fun leaf(part: DecoderLayerPart): String = when (part) {
+            // The norm in front of the MLP; Llama's name for it is Muse's
+            // name for the attention output norm.
+            DecoderLayerPart.POST_ATTENTION_LAYERNORM -> "pre_feedforward_layernorm.weight"
+            DecoderLayerPart.ATTENTION_OUTPUT_NORM -> "post_attention_layernorm.weight"
+            else -> super.leaf(part)
+        }
+
+        override fun layers(root: JsonObject, numLayers: Int): List<DecoderLayerSpec> {
+            // transformers' defaults: every 4th layer counted back from the
+            // last is full attention without RoPE, the others sliding with RoPE.
+            fun lastOfFour(l: Int) = (numLayers - 1 - l) % 4 == 0
+            val types = layerTypes(root, numLayers)
+                ?: List(numLayers) { if (lastOfFour(it)) FULL_ATTENTION else SLIDING_ATTENTION }
+            val thetas = layerRopeThetas(root, numLayers)
+            val window = root.optIntKey("sliding_window") ?: 2048
+            return types.mapIndexed { l, t ->
+                val rope = thetas?.let { it[l] != 0.0 } ?: !lastOfFour(l)
+                when (t) {
+                    FULL_ATTENTION -> defaultLayer.copy(rope = rope)
+                    SLIDING_ATTENTION -> defaultLayer.copy(
+                        attention = AttentionKind.SLIDING, slidingWindow = window, rope = rope,
+                    )
+                    else -> throw JsonException(
+                        "HfDecoderConfig: layer_types[$l] = '$t' is not one of " +
+                            "'$FULL_ATTENTION' or '$SLIDING_ATTENTION'",
+                    )
+                }
+            }
+        }
+
+        override fun refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
+            // transformers builds one rotary table from the global theta and
+            // uses layer_rope_theta only as on/off. A layer theta that is
+            // neither 0 nor the global one would mean something else to
+            // whoever wrote it, so it is refused rather than guessed at.
+            layerRopeThetas(root, config.numLayers)?.forEachIndexed { l, th ->
+                if (th != 0.0 && th != config.ropeTheta) {
+                    throw JsonException(
+                        "HfDecoderConfig: layer_rope_theta[$l] = $th is neither 0 (no RoPE) nor " +
+                            "the global rope_theta ${config.ropeTheta}; transformers would apply " +
+                            "the global theta to it. Refused by name",
+                    )
+                }
+            }
+            val softcap = (root["final_logit_softcapping"] as? JsonNumber)?.value ?: 20.0
+            return config.copy(
+                finalLogitSoftcap = softcap,
+                logitMultiplier = (root["output_multiplier"] as? JsonNumber)?.value ?: 0.19611613513818404,
+                queryScale = (root["qk_scale_factor"] as? JsonNumber)?.value ?: 3.87,
+                postNormEps = (root["post_norm_eps"] as? JsonNumber)?.value ?: 1e-8,
+                embeddingNorm = true,
+                layerNormGainPlusOne = true,
+                refusedTokenIds = buildMap {
+                    outer.optIntKey("image_token_id")?.let { put(it, "image_token_id") }
+                    outer.optIntKey("video_token_id")?.let { put(it, "video_token_id") }
+                },
+            )
+        }
+    }
+
     companion object {
         /** Every family this repo reads. */
-        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3)
+        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, MuseGlimmer)
 
         /** The family whose [architectures] contain [architecture], or null. */
         fun forArchitecture(architecture: String): HfModelFamily? =
@@ -292,6 +453,20 @@ sealed class HfModelFamily(
             return arr.elements.mapIndexed { i, e ->
                 (e as? JsonString)?.value
                     ?: throw JsonException("HfDecoderConfig: layer_types[$i] is not a string")
+            }
+        }
+
+        private fun layerRopeThetas(root: JsonObject, numLayers: Int): List<Double>? {
+            val arr = root["layer_rope_theta"] as? JsonArray ?: return null
+            if (arr.elements.size != numLayers) {
+                throw JsonException(
+                    "HfDecoderConfig: layer_rope_theta has ${arr.elements.size} entries for " +
+                        "$numLayers layers",
+                )
+            }
+            return arr.elements.mapIndexed { i, e ->
+                (e as? JsonNumber)?.value
+                    ?: throw JsonException("HfDecoderConfig: layer_rope_theta[$i] is not a number")
             }
         }
 
@@ -358,10 +533,36 @@ data class HfDecoderConfig(
      * first [numLayers] entries, which is how a reduced model is made.
      */
     val layers: List<DecoderLayerSpec>? = null,
-    /** Gemma-style `final_logit_softcapping`. Refused by the graph. */
+    /**
+     * `final_logit_softcapping`: the logits become `cap * tanh(z / cap)`,
+     * where `z` is the head's output times [logitMultiplier].
+     */
     val finalLogitSoftcap: Double? = null,
     /** Gemma-style `attn_logit_softcapping`. Refused by the graph. */
     val attnLogitSoftcap: Double? = null,
+    /**
+     * The dtype the weights are staged in on the device. F32 widens a bf16
+     * checkpoint exactly; BF16 keeps it as stored, and every projection then
+     * rounds its f32 input to bf16 and accumulates in f32 (see [HfDecoderGraph]).
+     */
+    val weightDType: DType = family.defaultWeightDType,
+    /** The embedding rows go through a gainless RMSNorm (eps [rmsNormEps]) before the first layer. */
+    val embeddingNorm: Boolean = false,
+    /** The layer RMSNorms multiply by `1 + w` rather than `w` (the final norm keeps `w`). */
+    val layerNormGainPlusOne: Boolean = false,
+    /** The eps of the attention and MLP output norms, when it is not [rmsNormEps]. */
+    val postNormEps: Double? = null,
+    /** A factor the normalized queries are multiplied by, before RoPE (`qk_scale_factor`). */
+    val queryScale: Double = 1.0,
+    /** A factor the head's output is multiplied by before soft-capping (`output_multiplier`). */
+    val logitMultiplier: Double = 1.0,
+    /**
+     * Token ids a text-only graph must not be fed, with the config key that
+     * names each: a multimodal checkpoint's image and video placeholders,
+     * whose rows transformers replaces with vision features. See
+     * [checkTextOnlyTokens].
+     */
+    val refusedTokenIds: Map<Int, String> = emptyMap(),
 ) {
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {
@@ -378,7 +579,31 @@ data class HfDecoderConfig(
         require(layers == null || layers.size >= numLayers) {
             "HfDecoderConfig: ${layers?.size} layer specs for $numLayers layers"
         }
+        require(weightDType == F32 || weightDType == BF16) {
+            "HfDecoderConfig: weights are staged as F32 or BF16, not $weightDType"
+        }
+        require(finalLogitSoftcap == null || finalLogitSoftcap > 0.0) {
+            "HfDecoderConfig: final_logit_softcapping must be > 0, got $finalLogitSoftcap"
+        }
     }
+
+    /**
+     * Refuse by name any id in [ids] that [refusedTokenIds] lists: a text-only
+     * graph would embed the placeholder's own row where transformers puts
+     * vision features, and serve a different model.
+     */
+    fun checkTextOnlyTokens(ids: IntArray) {
+        for ((i, id) in ids.withIndex()) {
+            val key = refusedTokenIds[id] ?: continue
+            throw JsonException(
+                "HfDecoderConfig ($family): token $i is $id, the $key placeholder; this graph " +
+                    "is text only (the vision encoder is not read), so it is refused by name",
+            )
+        }
+    }
+
+    /** The eps of the attention and MLP output norms. */
+    val outputNormEps: Double get() = postNormEps ?: rmsNormEps
 
     /** The spec of layer [l]. */
     fun layer(l: Int): DecoderLayerSpec {
@@ -427,7 +652,6 @@ data class HfDecoderConfig(
         }
         if (mlpBias) add("mlp_bias=true (gate/up/down carry bias vectors)")
         if (hiddenAct != "silu") add("hidden_act '$hiddenAct' (the MLP is SwiGLU with SiLU)")
-        if (finalLogitSoftcap != null) add("final_logit_softcapping $finalLogitSoftcap")
         if (attnLogitSoftcap != null) add("attn_logit_softcapping $attnLogitSoftcap")
         for (l in 0 until numLayers) {
             for (u in layer(l).unsupported()) add("layer $l: $u")
@@ -487,14 +711,14 @@ data class HfDecoderConfig(
          * no family has roles for. The key check applies either way.
          */
         fun parse(json: String, strictArchitecture: Boolean = true): HfDecoderConfig {
-            val root = parseJson(json) as? JsonObject
+            val outer = parseJson(json) as? JsonObject
                 ?: throw JsonException("HfDecoderConfig: config.json is not a JSON object")
 
-            val arch = (root["architectures"] as? JsonArray)
+            val arch = (outer["architectures"] as? JsonArray)
                 ?.elements?.firstOrNull()
                 ?.let { (it as? JsonString)?.value }
                 ?: "<unstated>"
-            val modelType = (root["model_type"] as? JsonString)?.value ?: "<unstated>"
+            val modelType = (outer["model_type"] as? JsonString)?.value ?: "<unstated>"
             val family = HfModelFamily.forArchitecture(arch)
                 ?: if (strictArchitecture) {
                     throw JsonException(
@@ -507,6 +731,23 @@ data class HfDecoderConfig(
                     HfModelFamily.forModelType(modelType) ?: HfModelFamily.Llama
                 }
 
+            // A multimodal file: its own keys are checked against the
+            // family's outer set, and the decoder config is the nested object.
+            val nestedKey = family.textConfigKey
+            val root = if (nestedKey == null) {
+                outer
+            } else {
+                val unknownOuter = outer.fields.keys.filter { it !in family.outerKeys }.sorted()
+                if (unknownOuter.isNotEmpty()) {
+                    throw JsonException(
+                        "HfDecoderConfig: config.json has key(s) " +
+                            "${unknownOuter.joinToString { "'$it'" }} that the $family family " +
+                            "neither reads nor knows to be inert. Refused by name",
+                    )
+                }
+                outer[nestedKey] as? JsonObject
+                    ?: throw JsonException("HfDecoderConfig: config.json has no '$nestedKey' object")
+            }
             val unknown = root.fields.keys.filter { it !in family.knownKeys }.sorted()
             if (unknown.isNotEmpty()) {
                 throw JsonException(
@@ -548,14 +789,18 @@ data class HfDecoderConfig(
                 tieWordEmbeddings = (root["tie_word_embeddings"] as? JsonBool)?.value ?: false,
                 attentionBias = (root["attention_bias"] as? JsonBool)?.value ?: false,
                 torchDtype = (root["torch_dtype"] as? JsonString)?.value
-                    ?: (root["dtype"] as? JsonString)?.value,
+                    ?: (root["dtype"] as? JsonString)?.value
+                    ?: (outer["torch_dtype"] as? JsonString)?.value
+                    ?: (outer["dtype"] as? JsonString)?.value,
                 ropeScalingType = ropeScalingTypeOf(root["rope_scaling"])
                     ?: ropeScalingTypeOf(ropeParams),
                 family = family,
-                hiddenAct = (root["hidden_act"] as? JsonString)?.value ?: "silu",
+                hiddenAct = (root["hidden_act"] as? JsonString)?.value
+                    ?: (root["hidden_activation"] as? JsonString)?.value
+                    ?: "silu",
                 mlpBias = (root["mlp_bias"] as? JsonBool)?.value ?: false,
                 layers = family.layers(root, numLayers),
-            )
+            ).let { family.refine(root, outer, it) }
         }
 
         /**
@@ -593,7 +838,9 @@ data class HfDecoderConfig(
  */
 object HfDecoderNames {
 
+    /** The embedding table's name under the `model.` prefix; see [hfName] for other prefixes. */
     const val EMBED_TOKENS: String = "model.embed_tokens.weight"
+    /** The final norm's name under the `model.` prefix; see [hfName] for other prefixes. */
     const val FINAL_NORM: String = "model.norm.weight"
     const val LM_HEAD: String = "lm_head.weight"
 
@@ -604,10 +851,10 @@ object HfDecoderNames {
     /** The full HF tensor name for a role. */
     fun hfName(role: DecoderWeightRole, family: HfModelFamily = HfModelFamily.Llama): String =
         when (role) {
-            DecoderWeightRole.EmbedTokens -> EMBED_TOKENS
-            DecoderWeightRole.FinalNorm -> FINAL_NORM
+            DecoderWeightRole.EmbedTokens -> "${family.modelPrefix}embed_tokens.weight"
+            DecoderWeightRole.FinalNorm -> "${family.modelPrefix}norm.weight"
             DecoderWeightRole.LmHead -> LM_HEAD
-            is DecoderWeightRole.Layer -> "model.layers.${role.layer}.${family.leaf(role.part)}"
+            is DecoderWeightRole.Layer -> "${family.modelPrefix}layers.${role.layer}.${family.leaf(role.part)}"
         }
 
     /**
@@ -617,12 +864,13 @@ object HfDecoderNames {
      */
     fun role(name: String, family: HfModelFamily = HfModelFamily.Llama): DecoderWeightRole? {
         when (name) {
-            EMBED_TOKENS -> return DecoderWeightRole.EmbedTokens
-            FINAL_NORM -> return DecoderWeightRole.FinalNorm
+            hfName(DecoderWeightRole.EmbedTokens, family) -> return DecoderWeightRole.EmbedTokens
+            hfName(DecoderWeightRole.FinalNorm, family) -> return DecoderWeightRole.FinalNorm
             LM_HEAD -> return DecoderWeightRole.LmHead
         }
-        if (!name.startsWith(LAYER_PREFIX)) return null
-        val rest = name.substring(LAYER_PREFIX.length)
+        val layerPrefix = "${family.modelPrefix}layers."
+        if (!name.startsWith(layerPrefix)) return null
+        val rest = name.substring(layerPrefix.length)
         val dot = rest.indexOf('.')
         if (dot <= 0) return null
         val idx = rest.substring(0, dot).toIntOrNull() ?: return null
@@ -631,8 +879,6 @@ object HfDecoderNames {
         val part = DecoderLayerPart.entries.firstOrNull { family.leaf(it) == leaf } ?: return null
         return DecoderWeightRole.Layer(idx, part)
     }
-
-    private const val LAYER_PREFIX = "model.layers."
 
     /**
      * Every role a decode graph of this config needs, in the graph's order:
@@ -674,6 +920,9 @@ object HfDecoderNames {
             DecoderLayerPart.POST_ATTENTION_LAYERNORM -> intArrayOf(config.hiddenSize)
             DecoderLayerPart.Q_NORM -> intArrayOf(config.headDim)
             DecoderLayerPart.K_NORM -> intArrayOf(config.headDim)
+            DecoderLayerPart.ATTN_GATE_PROJ -> intArrayOf(config.qProjOut, config.hiddenSize)
+            DecoderLayerPart.ATTENTION_OUTPUT_NORM -> intArrayOf(config.hiddenSize)
+            DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> intArrayOf(config.hiddenSize)
         }
     }
 

@@ -850,12 +850,15 @@ public final class io/tlaloc/core/io/SafetensorsEntry {
 public final class io/tlaloc/core/io/SafetensorsFile : java/lang/AutoCloseable {
 	public static final field Companion Lio/tlaloc/core/io/SafetensorsFile$Companion;
 	public fun close ()V
+	public final fun entry (Ljava/lang/String;)Lio/tlaloc/core/io/SafetensorsEntry;
 	public final fun getHeader ()Lio/tlaloc/core/io/SafetensorsHeader;
 	public final fun getMetadata ()Ljava/util/Map;
 	public final fun getNames ()Ljava/util/Set;
 	public final fun getPath ()Ljava/nio/file/Path;
 	public final fun load (Ljava/lang/String;)Lio/tlaloc/core/io/LoadedTensor;
 	public final fun loadAll ()Ljava/util/Map;
+	public final fun readBytes (Ljava/lang/String;J[BII)V
+	public static synthetic fun readBytes$default (Lio/tlaloc/core/io/SafetensorsFile;Ljava/lang/String;J[BIIILjava/lang/Object;)V
 }
 
 public final class io/tlaloc/core/io/SafetensorsFile$Companion {
@@ -882,6 +885,7 @@ public final class io/tlaloc/core/io/SafetensorsHeader {
 public final class io/tlaloc/core/io/SafetensorsIndex : java/lang/AutoCloseable {
 	public static final field Companion Lio/tlaloc/core/io/SafetensorsIndex$Companion;
 	public fun close ()V
+	public final fun entry (Ljava/lang/String;)Lio/tlaloc/core/io/SafetensorsEntry;
 	public final fun getIndexPath ()Ljava/nio/file/Path;
 	public final fun getMetadata ()Ljava/util/Map;
 	public final fun getNames ()Ljava/util/Set;
@@ -889,6 +893,8 @@ public final class io/tlaloc/core/io/SafetensorsIndex : java/lang/AutoCloseable 
 	public final fun getWeightMap ()Ljava/util/Map;
 	public final fun load (Ljava/lang/String;)Lio/tlaloc/core/io/LoadedTensor;
 	public final fun loadAll ()Ljava/util/Map;
+	public final fun readBytes (Ljava/lang/String;J[BII)V
+	public static synthetic fun readBytes$default (Lio/tlaloc/core/io/SafetensorsIndex;Ljava/lang/String;J[BIIILjava/lang/Object;)V
 }
 
 public final class io/tlaloc/core/io/SafetensorsIndex$Companion {
@@ -921,8 +927,15 @@ public final class io/tlaloc/core/io/SafetensorsWriter {
 }
 
 public abstract interface class io/tlaloc/core/io/WeightSource : java/lang/AutoCloseable {
+	public fun entry (Ljava/lang/String;)Lio/tlaloc/core/io/SafetensorsEntry;
 	public abstract fun getNames ()Ljava/util/Set;
 	public abstract fun load (Ljava/lang/String;)Lio/tlaloc/core/io/LoadedTensor;
+	public fun readBytes (Ljava/lang/String;J[BII)V
+}
+
+public final class io/tlaloc/core/io/WeightSource$DefaultImpls {
+	public static fun entry (Lio/tlaloc/core/io/WeightSource;Ljava/lang/String;)Lio/tlaloc/core/io/SafetensorsEntry;
+	public static fun readBytes (Lio/tlaloc/core/io/WeightSource;Ljava/lang/String;J[BII)V
 }
 
 public final class io/tlaloc/core/ops/BroadcastOpsKt {

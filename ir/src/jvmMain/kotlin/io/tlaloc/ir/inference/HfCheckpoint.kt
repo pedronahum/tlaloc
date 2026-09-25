@@ -2,6 +2,7 @@ package io.tlaloc.ir.inference
 
 import io.tlaloc.core.io.JsonException
 import io.tlaloc.core.io.LoadedTensor
+import io.tlaloc.core.io.SafetensorsEntry
 import io.tlaloc.core.io.SafetensorsIndex
 import io.tlaloc.core.io.WeightSource
 import java.nio.charset.StandardCharsets
@@ -61,8 +62,11 @@ class HfCheckpoint private constructor(
      * the lookup is `E[token]`).
      */
     fun resolveName(role: DecoderWeightRole): String =
-        if (role == DecoderWeightRole.LmHead && tiedEmbeddings) HfDecoderNames.EMBED_TOKENS
-        else HfDecoderNames.hfName(role, config.family)
+        if (role == DecoderWeightRole.LmHead && tiedEmbeddings) {
+            HfDecoderNames.hfName(DecoderWeightRole.EmbedTokens, config.family)
+        } else {
+            HfDecoderNames.hfName(role, config.family)
+        }
 
     /** Load one role's tensor, dims verified against the config. */
     fun load(role: DecoderWeightRole): LoadedTensor {
@@ -90,17 +94,28 @@ class HfCheckpoint private constructor(
     }
 
     /**
-     * NAMED GAP: there is no `dtype(name)` here, because [WeightSource]
-     * exposes only `load`, and asking "what width is this stored at" by
-     * decoding a 128 MB embedding table is not an answer. Widening
-     * `WeightSource` with a header accessor is the fix and it belongs in
-     * `:core` beside the parser that already knows; until then a caller that
-     * needs the storage width reads [HfDecoderConfig.storageDType], which is
-     * `torch_dtype` and is what the producer INTENDED rather than what the
-     * bytes ARE. `HfLlamaCheckpointTest` closes the gap for the certification
-     * by opening the same file through `SafetensorsFile` and reading the
-     * header directly.
+     * The header entry of one role's tensor, dims verified against the
+     * config, without reading its bytes. Pair with [readBytes] to read a
+     * tensor too large for one JVM array.
      */
+    fun entry(role: DecoderWeightRole): SafetensorsEntry {
+        val name = resolveName(role)
+        if (name !in weights.names) {
+            throw JsonException("HfCheckpoint: $dir has no tensor '$name' for role $role")
+        }
+        val e = weights.entry(name)
+        val want = HfDecoderNames.expectedDims(role, config)
+        if (e.dims != want.toList()) {
+            throw JsonException(
+                "HfCheckpoint: '$name' is ${e.dims} but this config says ${want.toList()}",
+            )
+        }
+        return e
+    }
+
+    /** Raw bytes of one role's tensor, [length] of them from [byteOffset]; see [WeightSource.readBytes]. */
+    fun readBytes(role: DecoderWeightRole, byteOffset: Long, into: ByteArray, offset: Int = 0, length: Int = into.size - offset) =
+        weights.readBytes(resolveName(role), byteOffset, into, offset, length)
 
     /**
      * Check the whole inventory WITHOUT reading a single weight byte: every
@@ -141,7 +156,7 @@ class HfCheckpoint private constructor(
     fun verifyTiedHead() {
         if (!tiedEmbeddings || !lmHeadPresent) return
         val head = weights.load(HfDecoderNames.LM_HEAD)
-        val table = weights.load(HfDecoderNames.EMBED_TOKENS)
+        val table = weights.load(HfDecoderNames.hfName(DecoderWeightRole.EmbedTokens, config.family))
         val a = head.toF32Array()
         val b = table.toF32Array()
         val same = head.dims.contentEquals(table.dims) && a.size == b.size &&

@@ -1813,7 +1813,9 @@ object DxirInterpreter {
      * `L % blockSize != 0`, and everything at or beyond `L` is not read at all
      * (it is stale or unallocated memory — reading it is the classic paged
      * bug, so the walk never indexes past `L`, and a partially-filled last
-     * page is a first-class oracle case).
+     * page is a first-class oracle case). With a `sliding_window` attr the
+     * positions before `L - window` are dead too: they are scored (the walk
+     * is simpler that way) but take no part in the softmax or the V sum.
      *
      * Per (sequence, query head) the walk is the library's attention convention
      * with DOUBLE accumulators throughout — QKᵀ·scale, max-shifted softmax,
@@ -1872,9 +1874,15 @@ object DxirInterpreter {
                         if (sc > maxScore) maxScore = sc
                     }
                 }
-                // 2. max-shifted softmax over the LIVE context only.
+                // 2. max-shifted softmax over the LIVE context only: with a
+                // sliding window, the positions before firstLive(len) are dead.
+                val first = p.firstLive(len)
+                if (first > 0) {
+                    maxScore = Double.NEGATIVE_INFINITY
+                    for (t in first until len) if (scores[t] > maxScore) maxScore = scores[t]
+                }
                 var denom = 0.0
-                for (t in 0 until len) {
+                for (t in first until len) {
                     val e = kotlin.math.exp(scores[t] - maxScore)
                     scores[t] = e
                     denom += e
@@ -1886,6 +1894,7 @@ object DxirInterpreter {
                     val base = page * p.blockSize
                     val slots = minOf(p.blockSize, len - base)
                     for (slot in 0 until slots) {
+                        if (base + slot < first) continue
                         val w = scores[base + slot] / denom
                         val vOff = ((blockId * p.blockSize + slot) * p.numKvHeads + kv) * d
                         for (j in 0 until d) acc[j] += w * valueCache[vOff + j]

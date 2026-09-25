@@ -1,5 +1,6 @@
 package io.tlaloc.maestro.serving
 
+import io.tlaloc.core.BF16
 import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirModule
@@ -14,10 +15,13 @@ import io.tlaloc.maestro.ProgramManifest
 import io.tlaloc.maestro.TypeDescriptor
 import io.tlaloc.maestro.sha256Hex
 import io.tlaloc.stablehlo.toStablehlo
+import java.io.BufferedOutputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.DigestOutputStream
 import java.security.MessageDigest
 
 /**
@@ -98,6 +102,10 @@ object ServingArtifactWriter {
      *   is 4.4 GB, and a list would hold every tensor resident while the
      *   writer is only ever looking at one. Peak heap is the largest single
      *   tensor plus its transpose, not the model.
+     * @param writeWeight the streaming form of [stageWeight]: writes ONE slot's
+     *   bytes (math layout, little-endian, the slot's dtype, F32 or BF16) to
+     *   the stream and returns how many it wrote. For weights too large to
+     *   hold as one array. Give at most one of the two.
      */
     fun export(
         dir: Path,
@@ -108,6 +116,7 @@ object ServingArtifactWriter {
         specs: List<DecodeGraphSpec>,
         weights: ServingWeightsPointer = ServingWeightsPointer.embedded(),
         stageWeight: ((DecodeSlot) -> FloatArray)? = null,
+        writeWeight: ((DecodeSlot, OutputStream) -> Long)? = null,
         build: (DecodeGraphSpec) -> DxirFunction,
     ): ServingManifest {
         require(specs.isNotEmpty()) {
@@ -133,7 +142,13 @@ object ServingArtifactWriter {
                     "artifact and bound by every entry, so the signatures must be identical"
             }
         }
-        require(weightSlots.isEmpty() == (stageWeight == null)) {
+        require(stageWeight == null || writeWeight == null) {
+            "ServingArtifactWriter.export: give stageWeight or writeWeight, not both"
+        }
+        val writer: ((DecodeSlot, OutputStream) -> Long)? = writeWeight ?: stageWeight?.let { stage ->
+            { slot, out -> writeFloats(stage(slot), out) }
+        }
+        require(weightSlots.isEmpty() == (writer == null)) {
             if (weightSlots.isEmpty()) {
                 "ServingArtifactWriter.export: a stageWeight callback was supplied for specs " +
                     "that declare no weight slots — the bytes would be written into the " +
@@ -148,7 +163,7 @@ object ServingArtifactWriter {
         Files.createDirectories(dir.resolve(BODIES_DIR))
         Files.createDirectories(dir.resolve(PROGRAMS_DIR))
         val weightsPointer =
-            if (stageWeight == null) weights else stageWeights(dir, weightSlots, stageWeight)
+            if (writer == null) weights else stageWeights(dir, weightSlots, writer)
 
         val entries = specs.map { spec ->
             val fn = build(spec)
@@ -259,40 +274,41 @@ object ServingArtifactWriter {
     private fun stageWeights(
         dir: Path,
         slots: List<DecodeSlot>,
-        stage: (DecodeSlot) -> FloatArray,
+        write: (DecodeSlot, OutputStream) -> Long,
     ): ServingWeightsPointer {
         Files.createDirectories(dir.resolve(WEIGHTS_DIR))
-        val digest = MessageDigest.getInstance("SHA-256")
         val table = slots.mapIndexed { i, slot ->
             require(slot.role == DecodeSlotRole.WEIGHT) {
                 "ServingArtifactWriter: slot '${slot.name}' in the weight signature has role " +
                     "${slot.role}, not WEIGHT"
             }
-            require(slot.type.dtype == F32) {
-                "ServingArtifactWriter: staged weight '${slot.name}' is ${slot.type.dtype}; " +
-                    "the serving artifact holds f32 weights only. A bf16 weight table is not " +
-                    "supported: it needs the graph itself to be a bf16 graph, not a " +
-                    "file-format change"
+            val width = when (slot.type.dtype) {
+                F32 -> 4L
+                BF16 -> 2L
+                else -> throw IllegalArgumentException(
+                    "ServingArtifactWriter: staged weight '${slot.name}' is ${slot.type.dtype}; " +
+                        "the serving artifact holds F32 or BF16 weights",
+                )
             }
-            val data = stage(slot)
-            val want = slot.type.dims.fold(1) { a, b -> a * b }
-            require(data.size == want) {
-                "ServingArtifactWriter: staged weight '${slot.name}' has ${data.size} elements " +
-                    "but the slot declares ${slot.type.dims} = $want"
-            }
-            val bytes = ByteArray(data.size * 4)
-            val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            for (v in data) bb.putFloat(v)
+            val want = slot.type.dims.fold(1L) { a, b -> a * b } * width
             val name = "$WEIGHTS_DIR/${i.toString().padStart(4, '0')}_${slot.name}.bin"
-            Files.write(dir.resolve(name), bytes)
-            digest.reset()
+            val digest = MessageDigest.getInstance("SHA-256")
+            val written = DigestOutputStream(
+                BufferedOutputStream(Files.newOutputStream(dir.resolve(name)), 1 shl 20), digest,
+            ).use { out -> write(slot, out) }
+            val onDisk = Files.size(dir.resolve(name))
+            require(written == want && onDisk == want) {
+                "ServingArtifactWriter: staged weight '${slot.name}' wrote $written bytes " +
+                    "($onDisk on disk) but the slot declares ${slot.type.dims} x ${slot.type.dtype} " +
+                    "= $want"
+            }
             ServingWeightFile(
                 name = slot.name,
                 path = name,
                 dtype = slot.type.dtype.name,
                 dims = slot.type.dims,
-                byteLength = bytes.size.toLong(),
-                sha256 = digest.digest(bytes).joinToString("") { b ->
+                byteLength = want,
+                sha256 = digest.digest().joinToString("") { b ->
                     ((b.toInt() and 0xFF) + 0x100).toString(16).substring(1)
                 },
             )
@@ -303,6 +319,21 @@ object ServingArtifactWriter {
             embedded = false,
             table = table,
         )
+    }
+
+    /** Little-endian f32 bytes of [data], written in pieces; returns the byte count. */
+    private fun writeFloats(data: FloatArray, out: OutputStream): Long {
+        val piece = 65536
+        val bb = ByteBuffer.allocate(4 * piece).order(ByteOrder.LITTLE_ENDIAN)
+        var i = 0
+        while (i < data.size) {
+            val n = minOf(piece, data.size - i)
+            bb.clear()
+            for (k in 0 until n) bb.putFloat(data[i + k])
+            out.write(bb.array(), 0, 4 * n)
+            i += n
+        }
+        return 4L * data.size
     }
 
     /** The MLIR symbol every exported entry is called through. */

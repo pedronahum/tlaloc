@@ -2890,6 +2890,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
      *   3. Qr = reshape(query) [S, Hkv, G, D]                 (GQA grouping)
      *   4. scores = dot_general(Qr, Kg) batching S,Hkv → [S, Hkv, G, M*P]
      *   5. scale, then MASK: iota over the context axis >= seqLens[s] → -Inf
+     *      (and, with a sliding window W, iota < seqLens[s] - W → -Inf)
      *   6. max-shifted softmax over the context axis
      *   7. out = dot_general(probs, Vg) → [S, Hkv, G, D], reshape → [S, H, D]
      * ```
@@ -2957,12 +2958,18 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         out.appendLine("$step$qr = stablehlo.reshape ${ops[0]} : (${qType.toMlir()}) -> ${qGroupedT.toMlir()}")
 
         // 3. scores = Q · Kᵀ over headDim, batched over (sequence, kv head).
+        // Both attention dots ask for HIGHEST precision when f32: XLA's
+        // default lets a GPU run an f32 dot in TF32 (a 10-bit mantissa), and
+        // with normalized, scaled queries the scores reach tens, where TF32
+        // moves a softmax weight by percents. Decode attention is a small
+        // share of a step, so exactness costs little.
+        val precision = if (dt == F32) ", precision = [HIGHEST, HIGHEST]" else ""
         val scoresT = DxirType(dt, listOf(s, hkv, g, ctx))
         val scoresMlir = scoresT.toMlir()
         val scores = synth()
         out.appendLine(
             "$step$scores = stablehlo.dot_general $qr, $kWin, batching_dims = [0, 1] x [0, 2], " +
-                "contracting_dims = [3] x [3] : (${qGroupedT.toMlir()}, ${windowT.toMlir()}) -> $scoresMlir",
+                "contracting_dims = [3] x [3]$precision : (${qGroupedT.toMlir()}, ${windowT.toMlir()}) -> $scoresMlir",
         )
         val scaleC = synth(); val scaleBc = synth(); val scaled = synth()
         out.appendLine("$step$scaleC = stablehlo.constant dense<${p.scale.toFloat()}> : $scalarT")
@@ -2976,7 +2983,22 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         val iota = synth(); val lensBc = synth(); val live = synth()
         out.appendLine("$step$iota = stablehlo.iota dim = 3 : ${idxT.toMlir()}")
         out.appendLine("$step$lensBc = stablehlo.broadcast_in_dim ${ops[4]}, dims = [0] : (${lType.toMlir()}) -> ${idxT.toMlir()}")
-        out.appendLine("$step$live = stablehlo.compare LT, $iota, $lensBc, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
+        // A sliding window also kills the positions before seqLens[s] - window
+        // (transformers' kv_idx > q_idx - window, the query at seqLens[s] - 1).
+        val window = p.slidingWindow
+        if (window == null) {
+            out.appendLine("$step$live = stablehlo.compare LT, $iota, $lensBc, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
+        } else {
+            val beforeEnd = synth()
+            out.appendLine("$step$beforeEnd = stablehlo.compare LT, $iota, $lensBc, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
+            val idxScalarT = "tensor<${mlirElementType(lType.dtype)}>"
+            val w = synth(); val wBc = synth(); val start = synth(); val afterStart = synth()
+            out.appendLine("$step$w = stablehlo.constant dense<$window> : $idxScalarT")
+            out.appendLine("$step$wBc = stablehlo.broadcast_in_dim $w, dims = [] : ($idxScalarT) -> ${idxT.toMlir()}")
+            out.appendLine("$step$start = stablehlo.subtract $lensBc, $wBc : ${idxT.toMlir()}")
+            out.appendLine("$step$afterStart = stablehlo.compare GE, $iota, $start, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
+            out.appendLine("$step$live = stablehlo.and $beforeEnd, $afterStart : ${predT.toMlir()}")
+        }
         val negInf = synth(); val negInfBc = synth(); val masked = synth()
         out.appendLine("$step$negInf = stablehlo.constant dense<${negInfLiteral(dt)}> : $scalarT")
         out.appendLine("$step$negInfBc = stablehlo.broadcast_in_dim $negInf, dims = [] : ($scalarT) -> $scoresMlir")
@@ -3010,7 +3032,7 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
         val ctxOut = synth()
         out.appendLine(
             "$step$ctxOut = stablehlo.dot_general $probs, $vWin, batching_dims = [0, 1] x [0, 2], " +
-                "contracting_dims = [3] x [1] : ($scoresMlir, ${windowT.toMlir()}) -> ${ctxOutT.toMlir()}",
+                "contracting_dims = [3] x [1]$precision : ($scoresMlir, ${windowT.toMlir()}) -> ${ctxOutT.toMlir()}",
         )
         out.appendLine("$step$name = stablehlo.reshape $ctxOut : (${ctxOutT.toMlir()}) -> ${node.type.toMlir()}")
     }

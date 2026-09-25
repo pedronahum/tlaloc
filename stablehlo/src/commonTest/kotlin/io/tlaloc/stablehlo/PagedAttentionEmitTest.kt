@@ -67,6 +67,28 @@ class PagedAttentionEmitTest {
     }
 
     @Test
+    fun aSlidingWindowAddsTheLowerBoundOfTheMask() {
+        val plain = mlir()
+        val text = pagedFn(mapOf("scale" to 0.5, "sliding_window" to 3)).toStablehlo()
+        // The window's lower bound: t >= seqLens[s] - 3, and-ed with t < seqLens[s].
+        assertTrue("stablehlo.constant dense<3> : tensor<i32>" in text, "window constant missing:\n$text")
+        assertTrue("stablehlo.compare GE" in text, "the lower bound is `t >= seqLens[s] - window`:\n$text")
+        assertTrue("stablehlo.and" in text, "the two bounds must be and-ed:\n$text")
+        // Negative control: without the attr the emission has neither.
+        assertTrue("stablehlo.compare GE" !in plain && "stablehlo.and" !in plain, plain)
+    }
+
+    @Test
+    fun bothAttentionDotsAskForHighestPrecisionInF32() {
+        // XLA may otherwise run an f32 dot in TF32 on a GPU.
+        val text = mlir()
+        kotlin.test.assertEquals(
+            2, text.lines().count { "stablehlo.dot_general" in it && "precision = [HIGHEST, HIGHEST]" in it },
+            text,
+        )
+    }
+
+    @Test
     fun emitsTheSeqLensMaskRatherThanASequenceSlice() {
         val text = mlir()
         // iota over the context axis, compared against the broadcast seqLens.

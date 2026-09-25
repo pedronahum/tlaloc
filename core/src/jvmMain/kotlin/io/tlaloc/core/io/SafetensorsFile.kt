@@ -48,6 +48,36 @@ class SafetensorsFile private constructor(
     fun loadAll(): Map<String, LoadedTensor> =
         header.entries.keys.associateWith { load(it) }
 
+    /** The header entry of one tensor: its wire dtype, dims and byte range. */
+    fun entry(name: String): SafetensorsEntry = header.entry(name)
+
+    /**
+     * Copy [length] raw bytes of tensor [name], starting [byteOffset] bytes
+     * into it, into [into] at [offset]. No decoding: the bytes are the file's,
+     * little-endian in the tensor's wire dtype. This is how a tensor larger
+     * than a JVM array (a 2.7 GB bf16 embedding table) is read, a piece at a
+     * time.
+     */
+    fun readBytes(name: String, byteOffset: Long, into: ByteArray, offset: Int = 0, length: Int = into.size - offset) {
+        val e = header.entry(name)
+        require(byteOffset >= 0 && length >= 0 && byteOffset + length <= e.byteLength) {
+            "safetensors: bytes [$byteOffset, ${byteOffset + length}) are outside '$name' " +
+                "(${e.byteLength} bytes)"
+        }
+        require(offset >= 0 && offset + length <= into.size) {
+            "safetensors: $length bytes at $offset do not fit a ${into.size}-byte buffer"
+        }
+        val bb = ByteBuffer.wrap(into, offset, length)
+        var pos = header.dataStart + e.begin + byteOffset
+        while (bb.hasRemaining()) {
+            val n = channel.read(bb, pos)
+            if (n < 0) {
+                throw JsonException("safetensors: $path ended at $pos while reading '$name'")
+            }
+            pos += n
+        }
+    }
+
     private fun readRange(fileOffset: Long, length: Long): ByteArray {
         if (length > Int.MAX_VALUE) {
             throw JsonException("safetensors: tensor range of $length bytes exceeds a JVM array")
@@ -161,6 +191,21 @@ class SafetensorsIndex private constructor(
 
     fun loadAll(): Map<String, LoadedTensor> = weightMap.keys.associateWith { load(it) }
 
+    /** The header entry of one tensor, from the shard that holds it. */
+    fun entry(name: String): SafetensorsEntry = shardOf(name).entry(name)
+
+    /** [SafetensorsFile.readBytes] on the shard that holds [name]. */
+    fun readBytes(name: String, byteOffset: Long, into: ByteArray, offset: Int = 0, length: Int = into.size - offset) =
+        shardOf(name).readBytes(name, byteOffset, into, offset, length)
+
+    private fun shardOf(name: String): SafetensorsFile {
+        val shard = weightMap[name] ?: throw JsonException(
+            "safetensors index: no tensor named '$name' in ${indexPath.fileName} " +
+                "(${weightMap.size} entries across ${shardNames.size} shards)",
+        )
+        return open.getOrPut(shard) { SafetensorsFile.open(indexPath.parent.resolve(shard)) }
+    }
+
     override fun close() {
         var first: Throwable? = null
         for (f in open.values) {
@@ -218,16 +263,30 @@ class SafetensorsIndex private constructor(
 interface WeightSource : AutoCloseable {
     val names: Set<String>
     fun load(name: String): LoadedTensor
+
+    /** The header entry of one tensor (wire dtype, dims, byte length), without reading it. */
+    fun entry(name: String): SafetensorsEntry =
+        throw UnsupportedOperationException("${this::class.simpleName} does not expose header entries")
+
+    /** Raw bytes of a tensor, a range at a time; see [SafetensorsFile.readBytes]. */
+    fun readBytes(name: String, byteOffset: Long, into: ByteArray, offset: Int, length: Int): Unit =
+        throw UnsupportedOperationException("${this::class.simpleName} does not expose raw bytes")
 }
 
 private class FileWeightSource(private val f: SafetensorsFile) : WeightSource {
     override val names: Set<String> get() = f.names
     override fun load(name: String): LoadedTensor = f.load(name)
+    override fun entry(name: String): SafetensorsEntry = f.entry(name)
+    override fun readBytes(name: String, byteOffset: Long, into: ByteArray, offset: Int, length: Int) =
+        f.readBytes(name, byteOffset, into, offset, length)
     override fun close() = f.close()
 }
 
 private class IndexWeightSource(private val i: SafetensorsIndex) : WeightSource {
     override val names: Set<String> get() = i.names
     override fun load(name: String): LoadedTensor = i.load(name)
+    override fun entry(name: String): SafetensorsEntry = i.entry(name)
+    override fun readBytes(name: String, byteOffset: Long, into: ByteArray, offset: Int, length: Int) =
+        i.readBytes(name, byteOffset, into, offset, length)
     override fun close() = i.close()
 }

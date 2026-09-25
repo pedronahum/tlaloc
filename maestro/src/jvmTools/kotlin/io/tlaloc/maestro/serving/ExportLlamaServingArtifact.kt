@@ -47,6 +47,16 @@ fun main(args: Array<String>) {
             maxBatch = maxBatch, maxContext = maxContext,
             blockSize = blockSize, minContext = maxContext,
         )
+        // Tensors the decoder does not read (a multimodal checkpoint's vision
+        // encoder) are listed, not silently dropped.
+        val unread = ckpt.verifyInventory()
+        if (unread.isNotEmpty()) {
+            println(
+                "${unread.size} checkpoint tensors are not read by the ${config.family} decoder, " +
+                    "e.g. ${unread.take(3).joinToString()}",
+            )
+        }
+        println("weights staged as ${config.weightDType}")
         val t0 = System.nanoTime()
         val manifest = HfServingExport.export(
             ckpt = ckpt, dir = outDir, config = config, policy = policy,

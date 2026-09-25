@@ -22,6 +22,7 @@ an instance group names gets its own PJRT client.
 |---|---|---|
 | ✅ | Sequence mode, prefill and batched decode, TinyLlama-1.1B | GB10, `verify.sh` |
 | ✅ | Qwen3-0.6B: 16 greedy ids equal HuggingFace's for a plain and a chat-template prompt | GB10, `verify.sh` |
+| ✅ | Muse Glimmer 30B, text decoder, bf16 weights: 32 greedy ids equal HuggingFace's run with the same arithmetic | GB10, `verify.sh` with `MUSE_GLIMMER=1` |
 | ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`) | GB10, `verify.sh` |
 | ✅ | CUDA shared memory inputs read in place, outputs written device to device | GB10, `verify.sh` |
 | ✅ | FP32, FP64, FP16, BF16, INT8, INT32, INT64, UINT8, BOOL over HTTP and gRPC | GB10, `verify.sh` |
@@ -205,6 +206,35 @@ logit at every position must be within 2e-3 of the largest logit (measured:
 `fixture_checks.py --perturb` (wrong expected ids), which must fail. Without
 the checkpoint this step prints `SKIP qwen3`; `SKIP_QWEN3=1` skips it.
 
+With `MUSE_GLIMMER=1`, and meta-models/Muse-Glimmer-30B (Apache-2.0, 59 GB,
+not gated) in the HuggingFace cache at the revision the fixtures name
+(`hf download meta-models/Muse-Glimmer-30B`), `verify.sh` also serves its text
+decoder. The step is opt-in because it puts 56 GB of bf16 weights on the
+device; before the export and before the load it refuses by name if
+MemAvailable is below what the step needs plus 16 GiB, because the GB10's GPU
+shares system memory and a runaway allocation there can take the machine
+down. It exports into `triton/build/muse-glimmer/` (batch 1, context 128,
+since the chat prompt is 68 tokens; `MUSE_GLIMMER_REEXPORT=1` exports again),
+drops the page cache of the checkpoint and the artifact, and starts the server
+with a PJRT memory fraction of the weights plus 8 GiB over MemTotal (0.49 on
+the GB10), printed. Two fixtures, both from `harness/python/muse_glimmer_fixture.py`
+(transformers 5.17 on the CPU, eager attention, 16 greedy tokens for
+" The capital of France is" and a chat-template prompt with a fixed
+`current_date`):
+
+- `muse_glimmer_30b_mixed_greedy.json`: bf16 weights, f32 activations, each
+  projection's input rounded to bf16, RoPE tables in float64: the graph's own
+  arithmetic. All 32 ids must be equal, and the logits within twice the
+  fixture's `referenceNoise`, which is how far that same run moves when its
+  activations are float64 instead of float32 (up to 9.1e-3 of the largest
+  logit).
+- `muse_glimmer_30b_bf16_greedy.json`: transformers in bfloat16 as it runs by
+  default. Only the ids are compared (`--ids-only`), and only as far as the
+  two fixtures agree (`--common-prefix-with`): they choose differently at the
+  chat prompt's 16th token (margins 0.31 and 0.12), which is reported.
+
+Then `--perturb`, which must fail, and the peak memory in use.
+
 A request with curl:
 
 ```bash
@@ -276,7 +306,8 @@ python triton/generate_client.py --model tinyllama \
 ```
 
 `exportHfServingArtifact` (also registered under its earlier name,
-`exportLlamaServingArtifact`) reads Llama and Qwen3 checkpoints. `-PckptDir`
+`exportLlamaServingArtifact`) reads Llama, Qwen3 and Muse Glimmer checkpoints
+(the last text only: the vision encoder's tensors are listed and not read). `-PckptDir`
 may be a HuggingFace cache snapshot, for example
 `~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<revision>`; the
 manifest's model name is then the repo id, `Qwen/Qwen3-0.6B`. Qwen3's
@@ -433,6 +464,14 @@ tokens): the model loads in about 20 s (four XLA compiles of 3.5 to 6.6 s,
 1.2 s to upload 2867 MiB of weights). Prefill takes about 25 ms for the 5-token
 and for the 24-token prompt alike, since both run the padded 64-token prefill
 entry. A decode step of one sequence takes about 19 ms (about 52 tokens/s).
+
+Muse Glimmer 30B (bf16 weights, context 128, gRPC, medians of 3 runs of 16
+tokens): the model loads in about 105 s (two XLA compiles of 8 and 10 s, 86 s
+to upload 53128 MiB of weights). Prefill takes about 310 ms (the padded
+128-token entry), a decode step about 245 ms (4.1 tokens/s), which is about
+what reading 56 GB of weights per token at the GB10's memory bandwidth allows.
+The server process held 60 GiB of device memory under a memory fraction of
+0.49; the machine peaked at 85 to 90 GiB in use over two runs.
 
 ## Model configuration
 

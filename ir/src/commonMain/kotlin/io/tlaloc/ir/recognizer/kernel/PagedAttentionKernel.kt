@@ -52,6 +52,7 @@ import io.tlaloc.ir.PagedAttentionAttrs
  * - anything [PagedAttentionAttrs] refuses, and any dtype other than F32:
  *   the kernel is the correctness tier's f32 loops (bf16 pools are not
  *   supported, as they are not in the op's own emission).
+ * - a `sliding_window` attr: the kernel masks by `seqLens` only.
  *
  * **Not in [defaultInferenceKernelTemplates]** — the KPTX lane is opt-in
  * per pipeline, the standing convention for every KPTX template: claiming
@@ -67,6 +68,8 @@ val PagedAttentionKernel: KernelTemplate = KernelTemplate { node, target ->
     val allF32 = node.operands.take(3).all { it.type.dtype == F32 } &&
         node.type.dtype == F32
     if (!allF32) return@KernelTemplate null
+    // The kernel masks by seqLens only; a windowed row stays on the reference form.
+    if (parsed.slidingWindow != null) return@KernelTemplate null
     KernelDescriptor(
         kernelName = "kptx_paged_attention",
         vendor = "tlaloc",

@@ -191,7 +191,14 @@ backend that compiles it with the PJRT CUDA plugin. A Tlaloc-generated gradient
 answers over Triton's HTTP and gRPC endpoints with the same bits the DXIR
 interpreter produces, and the TinyLlama artifact, written as a Triton model from
 Kotlin, generates the same 6 token ids with its weights and KV cache held by the
-backend. → [triton/](triton/README.md)
+backend. The same path serves Qwen3-0.6B and the text decoder of Muse Glimmer
+(meta-models/Muse-Glimmer-30B: 28 billion parameters, sliding-window and NoPE
+layers, soft-capped logits), whose 56 GB of weights stay bf16 on the GB10, at
+about 245 ms a token. Its greedy ids equal those of HuggingFace transformers run
+with the same arithmetic (bf16 weights, f32 activations), 32 of 32, and those of
+transformers in bfloat16 up to the one token where the two transformers runs
+differ from each other.
+→ [triton/](triton/README.md)
 
 ---
 
@@ -317,7 +324,7 @@ Every claim in this repository carries one of these marks:
 | dtypes — F32, F64, I32, BF16 | ✅ | Includes native PJRT bf16 and mixed precision. ❌ no F16/FP8 |
 | Model layer, optimizers, schedules, clipping, checkpoints (`:nn`) | ✅ | Loss curve matches PyTorch to 7 decimals; checkpoint round trip is bit-identical |
 | Training on GPU | ✅ | Certified on an NVIDIA GB10 (Blackwell, aarch64) |
-| Inference — paged attention, KV cache, safetensors, framework-free serving | ✅ | Real TinyLlama-1.1B, 6/6 tokens identical to HuggingFace, also through vLLM |
+| Inference — paged attention, KV cache, safetensors, framework-free serving | ✅ | Real TinyLlama-1.1B, 6/6 tokens identical to HuggingFace, also through vLLM; Qwen3-0.6B and Muse Glimmer 30B (text, bf16 weights) through Triton with HuggingFace's greedy ids |
 | StableHLO + Shardy emission, PJRT from Kotlin (FFM) and Python (ctypes), IREE | ✅ | No JNI anywhere |
 | KPTX — PTX DSL, parser, transpiler, kernel claiming | ✅ | Paged attention 1.4–1.9× faster than XLA at 8B-shaped decode points, 1.6–1.8× slower at toy shapes. Not registered by default |
 | Public API surface — opt-in marker, ABI baseline, API reference | ✅ | `checkKotlinAbi` against a committed baseline for every published module, wired into `check` |

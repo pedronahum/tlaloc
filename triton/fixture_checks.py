@@ -16,7 +16,19 @@ request and the rest one token per request (sequence_client.py). Checks:
   logits  the top-k logits of the first position and the chosen logit at
           every position are within --tol of the largest logit magnitude
           (XLA's GPU f32 matmuls run in TF32, so this is not the CPU
-          tolerance)
+          tolerance). With --noise-factor F and a fixture that records
+          referenceNoise (how far the oracle's own float32 arithmetic is
+          from float64, per step; muse_glimmer_fixture.py --noise), the
+          tolerance of a prompt is F times its largest referenceNoise
+          instead: two float32 implementations each that far from exact can
+          be twice that far from each other.
+
+With --ids-only the logits are not compared (a fixture computed in another
+arithmetic, such as bfloat16 activations, is a reference for the tokens, not
+for the logits). With --common-prefix-with OTHER, the ids are compared only as
+far as this fixture and OTHER (the same prompts through another reference)
+agree; where the two references themselves choose differently the position is
+reported with both margins and not compared.
 
 Then it times each prompt --repeat times over gRPC and prints the median
 prefill time and the median decode step. With --perturb the expected ids are
@@ -55,6 +67,11 @@ def main():
     ap.add_argument("--fixture", required=True)
     ap.add_argument("--tol", type=float, default=2e-3,
                     help="logit tolerance relative to the largest logit magnitude")
+    ap.add_argument("--noise-factor", type=float, default=None,
+                    help="tolerance = this times the prompt's largest referenceNoise, when recorded")
+    ap.add_argument("--ids-only", action="store_true", help="compare the ids, not the logits")
+    ap.add_argument("--common-prefix-with", default=None,
+                    help="compare ids only where this fixture and that one agree")
     ap.add_argument("--repeat", type=int, default=5, help="timing runs of the first prompt")
     ap.add_argument("--perturb", action="store_true", help="expect wrong ids (negative control)")
     args = ap.parse_args()
@@ -63,22 +80,42 @@ def main():
         fx = json.load(fh)
     max_new = int(fx["maxNew"])
     corrid = 7000
+    other = None
+    if args.common_prefix_with:
+        with open(args.common_prefix_with) as fh:
+            other = json.load(fh)["prompts"]
 
     for proto, url in (("http", args.http), ("grpc", args.grpc)):
         client = SequenceClient(url, args.model, proto)
         for p in fx["prompts"]:
             corrid += 1
             want = list(p["generatedTokens"])
+            n = len(want)
+            if other is not None:
+                o = next(q for q in other if q["promptTokens"] == p["promptTokens"])
+                n = next((i for i, (a, b) in enumerate(zip(want, o["generatedTokens"])) if a != b), n)
+                if n < len(want):
+                    print(f"note {p['kind']} prompt: the two references choose differently from "
+                          f"position {n} ({want[n]} with margin {p['margins'][n]:.3g}, "
+                          f"{o['generatedTokens'][n]} with margin {o['margins'][n]:.3g}); "
+                          f"ids compared up to it")
             if args.perturb:
-                want[-1] += 1
+                want[n - 1] += 1
             ids, _, _, logits = client.generate(corrid, p["promptTokens"], max_new)
-            first_diff = next((i for i, (a, b) in enumerate(zip(ids, want)) if a != b), None)
+            first_diff = next((i for i, (a, b) in enumerate(zip(ids[:n], want[:n])) if a != b), None)
             check(
-                ids == want,
-                f"{proto} {p['kind']} prompt ({len(p['promptTokens'])} tokens): {max_new} ids "
-                + ("equal HuggingFace's" if ids == want
+                ids[:n] == want[:n],
+                f"{proto} {p['kind']} prompt ({len(p['promptTokens'])} tokens): {n} of {max_new} ids "
+                + ("equal HuggingFace's" if ids[:n] == want[:n]
                    else f"differ from HuggingFace's at position {first_diff}: {ids} vs {want}"),
             )
+            if n < len(want):
+                print(f"     ids after position {n}: {ids[n:]} (this reference: {want[n:]})")
+            if args.ids_only:
+                continue
+            tol = args.tol
+            if args.noise_factor is not None and p.get("referenceNoise"):
+                tol = args.noise_factor * max(p["referenceNoise"])
             first = np.asarray(logits[0], dtype=np.float64)
             denom = max(1.0, float(np.max(np.abs(first))))
             idx = np.asarray(p["step1TopKIndices"])
@@ -89,9 +126,9 @@ def main():
                 d = max(1.0, float(np.max(np.abs(row))))
                 chosen = max(chosen, abs(float(row[t]) - p["chosenLogits"][i]) / d)
             check(
-                top <= args.tol and chosen <= args.tol,
+                top <= tol and chosen <= tol,
                 f"{proto} {p['kind']} prompt: step-1 top-{len(idx)} logits within {top:.2e}, "
-                f"chosen logits within {chosen:.2e} of HuggingFace's (tolerance {args.tol:g})",
+                f"chosen logits within {chosen:.2e} of HuggingFace's (tolerance {tol:.2e})",
             )
 
     if not args.perturb and args.repeat > 0:

@@ -110,14 +110,19 @@ object HfServingExport {
             // different model, and an executable cache that thought otherwise
             // would serve the wrong program.
             modelHash = "hf-${config.family.id}:$modelName:L${config.numLayers}:" +
-                "h${config.hiddenSize}:v${config.vocabSize}",
+                "h${config.hiddenSize}:v${config.vocabSize}" +
+                // Existing f32 hashes are unchanged; a bf16 weight table is a
+                // different program input and says so.
+                if (config.weightDType == io.tlaloc.core.F32) "" else ":w${config.weightDType.name}",
             model = model,
             ladder = ServingArtifactWriter.ladderOf(policy),
             specs = specs,
-            stageWeight = { slot ->
+            // Streamed slot by slot: a bf16 Muse Glimmer table is 56 GB and
+            // its embedding table alone is larger than a JVM array.
+            writeWeight = { slot, out ->
                 val i = slotIndex[slot.name]
                     ?: error("HfServingExport: no weight slot named '${slot.name}'")
-                HfStagedWeights.stageAt(ckpt, config, i)
+                HfStagedWeights.writeSlot(ckpt, config, i, out)
             },
             build = build,
         )

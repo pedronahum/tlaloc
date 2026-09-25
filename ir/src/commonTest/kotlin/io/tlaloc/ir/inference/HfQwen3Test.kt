@@ -129,7 +129,7 @@ class HfQwen3Test {
     }
 
     @Test
-    fun slidingLayersAreReadTheWayTransformersReadsThemAndRefusedByTheGraph() {
+    fun slidingLayersAreReadTheWayTransformersReadsThem() {
         val json = qwen3ConfigJson
             .replace("\"use_sliding_window\": false", "\"use_sliding_window\": true")
             .replace("\"sliding_window\": null", "\"sliding_window\": 4096")
@@ -138,11 +138,9 @@ class HfQwen3Test {
         assertEquals(AttentionKind.FULL, c.layer(19).attention)
         assertEquals(AttentionKind.SLIDING, c.layer(20).attention)
         assertEquals(4096, c.layer(27).slidingWindow)
-        val e = assertFailsWith<JsonException> { c.toDecodeModelShape(4, 16) }
-        assertTrue("layer 20: sliding-window attention (window 4096)" in e.message!!, e.message!!)
-        assertTrue("refused BY NAME" in e.message!!, e.message!!)
-        // A reduced copy that keeps only full layers builds.
-        c.copy(numLayers = 20).toDecodeModelShape(4, 16)
+        // The graph implements sliding windows (certified in HfMuseGlimmerTest).
+        assertTrue(c.unsupportedFeatures().isEmpty(), "${c.unsupportedFeatures()}")
+        c.toDecodeModelShape(4, 16)
     }
 
     @Test
@@ -163,22 +161,18 @@ class HfQwen3Test {
     }
 
     @Test
-    fun theGemmaStyleSettingsAreRecordedAndRefusedByName() {
+    fun whatTheGraphDoesNotImplementIsRefusedByName() {
         val base = HfDecoderConfig.parse(qwen3ConfigJson).copy(numLayers = 2)
         val capped = base.copy(finalLogitSoftcap = 30.0, attnLogitSoftcap = 50.0)
         val e1 = assertFailsWith<JsonException> { capped.toDecodeModelShape(4, 16) }
-        assertTrue("final_logit_softcapping 30.0" in e1.message!!, e1.message!!)
         assertTrue("attn_logit_softcapping 50.0" in e1.message!!, e1.message!!)
-
+        // Final-logit soft-capping, layers without RoPE and the output norms
+        // are implemented (Muse Glimmer), so they build.
+        base.copy(finalLogitSoftcap = 30.0).toDecodeModelShape(4, 16)
         val gemmaLayer = DecoderLayerSpec(
             rope = false, postAttentionOutputNorm = true, postFeedforwardNorm = true,
         )
-        val e2 = assertFailsWith<JsonException> {
-            base.copy(layers = listOf(DecoderLayerSpec(qkNorm = true), gemmaLayer)).toDecodeModelShape(4, 16)
-        }
-        assertTrue("layer 1: a layer without RoPE" in e2.message!!, e2.message!!)
-        assertTrue("post-attention output norm" in e2.message!!, e2.message!!)
-        assertTrue("post-feedforward norm" in e2.message!!, e2.message!!)
+        base.copy(layers = listOf(DecoderLayerSpec(qkNorm = true), gemmaLayer)).toDecodeModelShape(4, 16)
 
         val gelu = HfDecoderConfig.parse(qwen3ConfigJson.replace("\"silu\"", "\"gelu_pytorch_tanh\""))
         val e3 = assertFailsWith<JsonException> { gelu.toDecodeModelShape(4, 16) }

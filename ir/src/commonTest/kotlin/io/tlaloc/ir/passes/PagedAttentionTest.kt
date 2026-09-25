@@ -57,14 +57,19 @@ class PagedAttentionTest {
     private val tableType = DxirType(I32, listOf(numSeqs, maxBlocksPerSeq))
     private val lensType = DxirType(I32, listOf(numSeqs))
 
-    private fun pagedFn(scaleAttr: Double = scale): DxirFunction = DxirBuilder.function("paged") {
-        val q = param("q", qType)
-        val k = param("k", cacheType)
-        val v = param("v", cacheType)
-        val t = param("t", tableType)
-        val l = param("l", lensType)
-        listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), qType, mapOf("scale" to scaleAttr)))
-    }
+    private fun pagedFn(scaleAttr: Double = scale, window: Int? = null): DxirFunction =
+        DxirBuilder.function("paged") {
+            val q = param("q", qType)
+            val k = param("k", cacheType)
+            val v = param("v", cacheType)
+            val t = param("t", tableType)
+            val l = param("l", lensType)
+            val attrs = buildMap<String, Any> {
+                put("scale", scaleAttr)
+                if (window != null) put("sliding_window", window)
+            }
+            listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), qType, attrs))
+        }
 
     /** Deterministic spread-out values; an LCG so the test carries its own data. */
     private fun pseudo(n: Int, seed: Int): FloatArray {
@@ -90,10 +95,13 @@ class PagedAttentionTest {
         table: IntArray,
         lens: IntArray,
         scaleUsed: Double = scale,
+        window: Int? = null,
     ): FloatArray {
         val out = FloatArray(numSeqs * numHeads * headDim)
         for (s in 0 until numSeqs) {
             val len = lens[s]
+            // The live positions: all of [0, len), or its last `window` of them.
+            val first = if (window == null) 0 else maxOf(0, len - window)
             // Gather: window[t, kv, :] = cache[table[s][t / P], t % P, kv, :]
             val kWin = FloatArray(ctx * numKvHeads * headDim)
             val vWin = FloatArray(ctx * numKvHeads * headDim)
@@ -114,19 +122,19 @@ class PagedAttentionTest {
                 val kv = h / group
                 val qOff = (s * numHeads + h) * headDim
                 val logits = DoubleArray(len)
-                for (t in 0 until len) {
+                for (t in first until len) {
                     var dot = 0.0
                     for (j in 0 until headDim) {
                         dot += query[qOff + j].toDouble() * kWin[(t * numKvHeads + kv) * headDim + j]
                     }
                     logits[t] = dot * scaleUsed
                 }
-                val mx = logits.maxOrNull() ?: 0.0
+                val mx = (first until len).maxOfOrNull { logits[it] } ?: 0.0
                 var denom = 0.0
-                for (t in 0 until len) { logits[t] = exp(logits[t] - mx); denom += logits[t] }
+                for (t in first until len) { logits[t] = exp(logits[t] - mx); denom += logits[t] }
                 for (j in 0 until headDim) {
                     var acc = 0.0
-                    for (t in 0 until len) {
+                    for (t in first until len) {
                         acc += (logits[t] / denom) * vWin[(t * numKvHeads + kv) * headDim + j]
                     }
                     out[qOff + j] = acc.toFloat()
@@ -153,8 +161,9 @@ class PagedAttentionTest {
         table: IntArray,
         lens: IntArray,
         scaleAttr: Double = scale,
+        window: Int? = null,
     ): FloatArray = DxirInterpreter.evalFunction(
-        pagedFn(scaleAttr),
+        pagedFn(scaleAttr, window),
         listOf(
             query, keyCache, valueCache,
             FloatArray(table.size) { table[it].toFloat() },
@@ -202,6 +211,83 @@ class PagedAttentionTest {
                 what = "seqLens ${lens.toList()}",
             )
         }
+    }
+
+    /**
+     * A sliding window of W keeps each row's last W positions, its own
+     * included. Every window from 1 to the context, over every length, with a
+     * permuted table so a window boundary falls inside a page and across one.
+     */
+    @Test
+    fun aSlidingWindowMatchesTheDenseWalkOverTheLastWindowPositions() {
+        val q = pseudo(numSeqs * numHeads * headDim, 41)
+        val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 43)
+        val v = pseudo(numBlocks * blockSize * numKvHeads * headDim, 47)
+        val table = intArrayOf(5, 3, 1, 0, 4, 2)
+        for (w in 1..ctx) {
+            for (len0 in 1..ctx) {
+                val lens = intArrayOf(len0, ctx - len0 + 1)
+                assertClose(
+                    denseReference(q, k, v, table, lens, window = w),
+                    runPaged(q, k, v, table, lens, window = w),
+                    what = "window $w, seqLens ${lens.toList()}",
+                )
+            }
+        }
+    }
+
+    /**
+     * Negative control: at length 5 a window of 2 is not full attention, and
+     * a window as long as the context is.
+     */
+    @Test
+    fun theWindowChangesTheAnswerOnlyWhenItIsShorterThanTheRow() {
+        val q = pseudo(numSeqs * numHeads * headDim, 53)
+        val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 59)
+        val v = pseudo(numBlocks * blockSize * numKvHeads * headDim, 61)
+        val table = intArrayOf(4, 1, 5, 2, 0, 3)
+        val lens = intArrayOf(5, 6)
+        val full = runPaged(q, k, v, table, lens)
+        val windowed = runPaged(q, k, v, table, lens, window = 2)
+        val moved = full.indices.maxOf { abs(full[it] - windowed[it]) }
+        assertTrue(moved > 1e-2f, "a window of 2 over rows of 5 and 6 moved the output by only $moved")
+        assertClose(full, runPaged(q, k, v, table, lens, window = ctx), what = "window = context")
+    }
+
+    /** Hand-exact: all scores tie, so a window of 2 averages the last two live V rows. */
+    @Test
+    fun handExactWindowAveragesTheLastTwoRows() {
+        val q = FloatArray(numSeqs * numHeads * headDim) { 1f }
+        val k = FloatArray(numBlocks * blockSize * numKvHeads * headDim)
+        val v = FloatArray(numBlocks * blockSize * numKvHeads * headDim) { 1000f }
+        val table = intArrayOf(2, 0, 4, 5, 3, 1)
+        val lens = intArrayOf(5, 3)
+        for (s in 0 until numSeqs) {
+            for (t in 0 until lens[s]) {
+                val blk = table[s * maxBlocksPerSeq + t / blockSize]
+                for (kv in 0 until numKvHeads) {
+                    for (j in 0 until headDim) {
+                        v[((blk * blockSize + t % blockSize) * numKvHeads + kv) * headDim + j] =
+                            if (t < lens[s] - 2) 1000f else (t + 1).toFloat()
+                    }
+                }
+            }
+        }
+        val got = runPaged(q, k, v, table, lens, window = 2)
+        for (h in 0 until numHeads) {
+            kotlin.test.assertEquals(4.5f, got[(0 * numHeads + h) * headDim], 1e-5f, "seq0 h$h")
+            kotlin.test.assertEquals(2.5f, got[(1 * numHeads + h) * headDim], 1e-5f, "seq1 h$h")
+        }
+    }
+
+    @Test
+    fun aWindowBelowOneIsRefusedByName() {
+        val q = pseudo(numSeqs * numHeads * headDim, 3)
+        val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 5)
+        val ex = assertFailsWith<IllegalArgumentException> {
+            runPaged(q, k, k, intArrayOf(0, 1, 2, 3, 4, 5), intArrayOf(2, 2), window = 0)
+        }
+        assertTrue("sliding_window" in (ex.message ?: ""), "must name sliding_window; got ${ex.message}")
     }
 
     // --- Oracle 2: the hand-exact case. --------------------------------

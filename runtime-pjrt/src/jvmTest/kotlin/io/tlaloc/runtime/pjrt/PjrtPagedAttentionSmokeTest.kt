@@ -57,7 +57,7 @@ class PjrtPagedAttentionSmokeTest {
     private val table = intArrayOf(4, 1, 5, 2, 0, 3)
     private val lens = intArrayOf(6, 3)
 
-    private fun pagedFn(): DxirFunction = DxirBuilder.function("paged_gpu") {
+    private fun pagedFn(window: Int? = null): DxirFunction = DxirBuilder.function("paged_gpu") {
         val q = param("q", qType)
         val k = param("k", cacheType)
         val v = param("v", cacheType)
@@ -69,7 +69,11 @@ class PjrtPagedAttentionSmokeTest {
             FloatArray(lens.size) { lens[it].toFloat() },
             DxirType(I32, listOf(numSeqs)),
         )
-        listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), qType, mapOf("scale" to scale)))
+        val attrs = buildMap<String, Any> {
+            put("scale", scale)
+            if (window != null) put("sliding_window", window)
+        }
+        listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), qType, attrs))
     }
 
     private fun pseudo(n: Int, seed: Int): FloatArray {
@@ -107,6 +111,36 @@ class PjrtPagedAttentionSmokeTest {
                 "[pjrt-paged] gather-composed PAGED_ATTENTION emission agrees with the " +
                     "interpreter on GB10 (permuted block table, partial last page); worst |d| = $worst",
             )
+        }
+    }
+
+    /**
+     * The sliding-window mask on the GPU: windows 1, 2 and 4 over rows of 6
+     * and 3 positions, so a window edge falls inside a page and on one. The
+     * windowed outputs must also differ from the full-attention output
+     * (negative control), or the mask would be unobserved.
+     */
+    @Test
+    fun slidingWindowEmissionMatchesInterpreterOnGpu() {
+        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+
+        val q = pseudo(numSeqs * numHeads * headDim, 109)
+        val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 113)
+        val v = pseudo(numBlocks * blockSize * numKvHeads * headDim, 127)
+        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+            val full = session.runOn(pagedFn(), listOf(q, k, v)).single()
+            for (w in listOf(1, 2, 4)) {
+                val fn = pagedFn(w)
+                val want = DxirInterpreter.evalFunction(fn, listOf(q, k, v))[0]
+                val got = session.runOn(fn, listOf(q, k, v)).single()
+                var worst = 0f
+                for (i in want.indices) worst = maxOf(worst, abs(want[i] - got[i]))
+                assertTrue(worst <= 1e-4f, "window $w: GPU vs interpreter worst |d| = $worst")
+                val moved = want.indices.maxOf { abs(full[it] - got[it]) }
+                assertTrue(moved > 1e-2f, "window $w did not change the output (moved $moved)")
+                println("[pjrt-paged] sliding window $w agrees with the interpreter on GB10; worst |d| = $worst")
+            }
         }
     }
 }
