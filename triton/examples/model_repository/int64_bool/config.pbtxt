@@ -1,0 +1,16 @@
+# i64 and bool tensors, emitted by Tlaloc (./gradlew :maestro:exportTritonExamples):
+# Y = x . x + x over i64, ABOVE_AND_B = (x . x > x) and b, NOT_B = not b.
+name: "int64_bool"
+backend: "tlaloc"
+max_batch_size: 0
+input [
+  { name: "X" data_type: TYPE_INT64 dims: [ 4 ] },
+  { name: "B" data_type: TYPE_BOOL dims: [ 4 ] }
+]
+output [
+  { name: "Y" data_type: TYPE_INT64 dims: [ 4 ] },
+  { name: "ABOVE_AND_B" data_type: TYPE_BOOL dims: [ 4 ] },
+  { name: "NOT_B" data_type: TYPE_BOOL dims: [ 4 ] }
+]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "model.mlir" } }

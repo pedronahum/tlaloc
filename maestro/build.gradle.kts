@@ -155,11 +155,12 @@ tasks.register<JavaExec>("exportServingArtifact") {
  *
  *     ./gradlew :maestro:exportTritonExamples -PoutDir=$PWD/triton/examples
  *
- * Writes `model_repository/<model>/1/model.mlir` (StableHLO text emitted by
- * Tlaloc) and `reference/<model>.json` (the DXIR interpreter's result for the
- * same graph). The `config.pbtxt` files of the three single-function models
- * are written by hand and not touched; `reference_decode` is written whole by
- * `TritonModelRepository`, configuration included.
+ * Writes the models' StableHLO text emitted by Tlaloc under
+ * `model_repository/<model>/1/` and `reference/<model>.json` (the DXIR
+ * interpreter's result for the same graph). The `config.pbtxt` files of the
+ * function models are written by hand and not touched, and so is the
+ * hand-written `dtypes_small`; `reference_decode` and `reference_sequence` are
+ * written whole by `TritonModelRepository`, configuration included.
  */
 tasks.register<JavaExec>("exportTritonExamples") {
     group = "tlaloc"

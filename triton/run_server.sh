@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Starts tritonserver in the Triton container with the tlaloc backend, a model
-# repository and a PJRT plugin mounted read-only.
+# repository and a PJRT plugin mounted read-only. The container shares the
+# host's IPC namespace (--ipc=host), which CUDA shared memory clients need.
 #
 #   triton/run_server.sh [--detach] [extra tritonserver arguments...]
 #
@@ -39,6 +40,7 @@ if [[ ! -f "$PLUGIN" ]]; then
 fi
 
 exec docker run "${DETACH[@]}" --rm --name "$NAME" \
+  --ipc=host \
   --gpus all \
   -p "${HTTP_PORT:-8000}:8000" -p "${GRPC_PORT:-8001}:8001" -p "${METRICS_PORT:-8002}:8002" \
   -v /dev/shm:/dev/shm \

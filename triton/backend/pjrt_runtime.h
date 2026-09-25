@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,13 +39,20 @@ struct ClientOptions {
   bool preallocate = false;
 };
 
+// Whether a device pointer can be handed to PJRT as an argument without a
+// copy: XLA's GPU entry parameters must be 16-byte aligned.
+constexpr size_t kDeviceArgumentAlignment = 16;
+
 class PjrtExecutable;
 class PjrtBuffer;
 
 class PjrtClient {
  public:
+  // A client that sees one device: the GPU whose CUDA ordinal is `device`
+  // (the plugin's "visible_devices" option). Refused by name when the plugin
+  // has no such device, or when the device it gives back is another one.
   static std::string Create(
-      const PjrtPlugin* plugin, const ClientOptions& options,
+      const PjrtPlugin* plugin, const ClientOptions& options, int device,
       std::unique_ptr<PjrtClient>* out);
   ~PjrtClient();
 
@@ -52,6 +60,12 @@ class PjrtClient {
   const std::string& platform() const { return platform_; }
   size_t device_count() const { return devices_.size(); }
   const ClientOptions& options() const { return options_; }
+  // The CUDA ordinal of the one device this client runs on.
+  int device_ordinal() const { return ordinal_; }
+  // True when the plugin can wrap device memory it does not own
+  // (PJRT_Client_CreateViewOfDeviceBuffer) and hand out the device address
+  // of a result (PJRT_Buffer_OpaqueDeviceMemoryDataPointer).
+  bool SupportsDeviceViews() const;
 
   // Compiles MLIR text whose entry function is public and named main.
   std::string Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* out);
@@ -65,6 +79,7 @@ class PjrtClient {
   std::vector<PJRT_Device*> devices_;
   std::string platform_;
   ClientOptions options_;
+  int ordinal_ = 0;
 };
 
 // A host tensor handed to Execute or Upload. `data` must stay valid for the
@@ -94,11 +109,16 @@ class PjrtBuffer {
   PJRT_Buffer* buffer_ = nullptr;
 };
 
-// One argument of an execution: a device buffer when `device` is set,
-// otherwise the host tensor `host`, copied to the device for this call.
+// One argument of an execution, in order of preference:
+//   `device`      a PJRT buffer the caller owns (a weight, state),
+//   `device_ptr`  memory on the client's GPU that the caller owns, described
+//                 by `host.dtype` and `host.dims`, read in place through a
+//                 PJRT view (no copy) and never donated,
+//   `host`        a host tensor, copied to the device for this call.
 struct ExecuteArg {
   HostInput host;
   const PjrtBuffer* device = nullptr;
+  const void* device_ptr = nullptr;
 };
 
 // Device results of one execution. Destroys its buffers when it goes away.
@@ -110,6 +130,13 @@ class PjrtResults {
   std::string Describe(size_t i, DType* dtype, std::vector<int64_t>* dims) const;
   // Copies output `i` into `dst`, which must be exactly `byte_size` bytes.
   std::string CopyToHost(size_t i, void* dst, size_t byte_size) const;
+  // Calls `use` with the device address of output `i` when the output is
+  // stored densely, row-major, in exactly `byte_size` bytes; the address is
+  // valid only during the call. Sets `*dense` false and does not call `use`
+  // when the storage differs (a padded or tiled layout).
+  std::string WithDevicePointer(
+      size_t i, size_t byte_size, bool* dense,
+      const std::function<std::string(const void*)>& use) const;
   // Takes output `i` out of the results, to keep it on the device.
   std::unique_ptr<PjrtBuffer> Release(size_t i);
 

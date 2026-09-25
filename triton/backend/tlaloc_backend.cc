@@ -4,17 +4,28 @@
 // Triton backend "tlaloc": serves StableHLO emitted by Tlaloc through the
 // PJRT C API.
 //
-// One PJRT client per plugin path, shared by every model that uses that
-// plugin, created with allocator options (memory fraction, no
-// preallocation) and destroyed when the last such model unloads. Each model
-// compiles its artifact(s) once at load; each artifact is one shape bucket,
-// and a request runs on the bucket whose input shapes it matches exactly.
+// One PJRT client per plugin path and GPU, shared by every model that uses
+// that plugin on that GPU, created with allocator options (memory fraction,
+// no preallocation) and destroyed when the last such model unloads. Each
+// model compiles its artifact(s) at load, once for every GPU its
+// instance_group names; each artifact is one shape bucket. A request runs on
+// the bucket whose input shapes it matches exactly; a model with
+// max_batch_size > 0 concatenates the requests Triton hands it along dim 0,
+// runs them on the smallest bucket whose batch holds them all (padding the
+// rest with zeros) and splits the results.
+//
+// Request tensors in GPU memory on the instance's GPU (CUDA shared memory
+// from the client) are read in place through a PJRT view; outputs that
+// Triton places in GPU memory are copied device to device. Everything else
+// goes through the host.
 //
 // A model whose config names a serving manifest ("serving_manifest") runs in
 // sequence mode instead (sequence_mode.h): the sequence batcher routes each
 // sequence's requests by correlation ID and the backend keeps its KV pages.
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -139,18 +150,19 @@ ParseBackendConfig(TRITONBACKEND_Backend* backend, BackendState* state)
 }
 
 // ---------------------------------------------------------------------------
-// Shared clients, one per plugin path.
+// Shared clients, one per plugin path and GPU.
 
 std::mutex g_clients_mu;
-std::map<std::string, std::weak_ptr<PjrtClient>> g_clients;
+std::map<std::pair<std::string, int>, std::weak_ptr<PjrtClient>> g_clients;
 
 TRITONSERVER_Error*
 AcquireClient(
-    const std::string& plugin_path, const ClientOptions& options,
+    const std::string& plugin_path, int device, const ClientOptions& options,
     std::shared_ptr<PjrtClient>* out)
 {
   std::lock_guard<std::mutex> lock(g_clients_mu);
-  auto it = g_clients.find(plugin_path);
+  const auto key = std::make_pair(plugin_path, device);
+  auto it = g_clients.find(key);
   if (it != g_clients.end()) {
     if (auto live = it->second.lock()) {
       *out = live;
@@ -161,22 +173,26 @@ AcquireClient(
   std::string err = tlaloc_triton::LoadPjrtPlugin(plugin_path, &plugin);
   if (!err.empty()) return Err(TRITONSERVER_ERROR_UNAVAILABLE, "tlaloc backend: " + err);
   std::unique_ptr<PjrtClient> client;
-  err = PjrtClient::Create(plugin, options, &client);
+  err = PjrtClient::Create(plugin, options, device, &client);
   if (!err.empty()) return Err(TRITONSERVER_ERROR_UNAVAILABLE, "tlaloc backend: " + err);
   std::ostringstream m;
-  m << "tlaloc backend: PJRT client created on platform '" << client->platform() << "' with "
-    << client->device_count() << " device(s), PJRT C API " << plugin->major << "."
-    << plugin->minor << ", memory_fraction=" << options.memory_fraction
+  m << "tlaloc backend: PJRT client created on platform '" << client->platform() << "' for GPU "
+    << client->device_ordinal() << ", PJRT C API " << plugin->major << "."
+    << plugin->minor << ", device views "
+    << (client->SupportsDeviceViews() ? "supported" : "not supported")
+    << ", memory_fraction=" << options.memory_fraction
     << ", preallocate=" << (options.preallocate ? "true" : "false") << ", plugin "
     << plugin_path;
   LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
-  std::shared_ptr<PjrtClient> shared(client.release(), [plugin_path](PjrtClient* c) {
+  std::shared_ptr<PjrtClient> shared(client.release(), [plugin_path, device](PjrtClient* c) {
     LOG_MESSAGE(
         TRITONSERVER_LOG_INFO,
-        ("tlaloc backend: destroying the PJRT client for " + plugin_path).c_str());
+        ("tlaloc backend: destroying the PJRT client for GPU " + std::to_string(device) +
+         " and " + plugin_path)
+            .c_str());
     delete c;
   });
-  g_clients[plugin_path] = shared;
+  g_clients[key] = shared;
   *out = shared;
   return nullptr;
 }
@@ -218,7 +234,17 @@ struct ResultPlan {
 struct Bucket {
   std::string file;
   FunctionSignature signature;
-  std::unique_ptr<PjrtExecutable> executable;
+  int64_t batch = 0;  // leading dim of every input and output, when max_batch_size > 0
+};
+
+// What a model holds on one GPU: its client, one executable per bucket and
+// the uploaded weights. The client is declared first, so it goes last.
+struct DeviceModel {
+  int ordinal = 0;
+  std::shared_ptr<PjrtClient> client;
+  std::vector<std::unique_ptr<PjrtExecutable>> executables;  // one per bucket
+  std::vector<std::unique_ptr<PjrtBuffer>> weights;          // one slot per argument
+  bool views = false;  // read GPU inputs in place, write GPU outputs device to device
 };
 
 // Element count; 1 for a rank-0 tensor. (The backend utilities'
@@ -273,10 +299,31 @@ class ModelState : public BackendModel {
   const std::vector<Bucket>& buckets() const { return buckets_; }
   const std::vector<ArgPlan>& args() const { return args_; }
   const std::vector<ResultPlan>& results() const { return results_; }
-  const PjrtBuffer* weight(size_t arg) const { return weights_[arg].get(); }
-  PjrtClient* client() const { return client_.get(); }
-  // Non-null for a sequence-mode model.
-  const SequenceModel* sequence() const { return sequence_.get(); }
+  // The model on CUDA device `ordinal`, or nullptr if no instance runs there.
+  const DeviceModel* device(int ordinal) const
+  {
+    for (const auto& d : devices_) {
+      if (d->ordinal == ordinal) return d.get();
+    }
+    return nullptr;
+  }
+  // Non-null for a sequence-mode model with an instance on GPU `ordinal`.
+  const SequenceModel* sequence(int ordinal) const
+  {
+    auto it = sequences_.find(ordinal);
+    return it == sequences_.end() ? nullptr : it->second.get();
+  }
+  bool sequence_mode() const { return !sequences_.empty(); }
+  // The largest batch a bucket takes (max_batch_size > 0).
+  int64_t max_bucket_batch() const { return max_bucket_batch_; }
+
+  // Logs `what` once per model and key: which data path a tensor took.
+  void LogPathOnce(const std::string& key, const std::string& what) const
+  {
+    std::lock_guard<std::mutex> lock(logged_mu_);
+    if (!logged_.insert(key).second) return;
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, ("tlaloc backend: " + Where() + what).c_str());
+  }
 
  private:
   explicit ModelState(TRITONBACKEND_Model* model) : BackendModel(model) {}
@@ -285,7 +332,9 @@ class ModelState : public BackendModel {
   TRITONSERVER_Error* Parameter(const std::string& key, std::string* value);
   TRITONSERVER_Error* ParsePlan();
   TRITONSERVER_Error* CheckSignature(const std::string& path, const FunctionSignature& sig);
-  TRITONSERVER_Error* LoadWeights();
+  TRITONSERVER_Error* CheckBatching();
+  TRITONSERVER_Error* Devices(std::vector<int>* ordinals);
+  TRITONSERVER_Error* LoadWeights(DeviceModel* device);
   TRITONSERVER_Error* InsideVersionDir(const std::string& item, const std::string& what) const;
   std::string VersionDir() const
   {
@@ -293,17 +342,17 @@ class ModelState : public BackendModel {
   }
   std::string Where() const { return "model '" + Name() + "': "; }
 
-  // Declared before the buckets and weights so that those are destroyed
-  // first.
-  std::shared_ptr<PjrtClient> client_;
   std::vector<TensorSpec> inputs_;
   std::vector<TensorSpec> outputs_;
   std::vector<ArgPlan> args_;
   std::vector<ResultPlan> results_;
   bool explicit_arguments_ = false;
   std::vector<Bucket> buckets_;
-  std::vector<std::unique_ptr<PjrtBuffer>> weights_;  // one slot per argument
-  std::unique_ptr<SequenceModel> sequence_;
+  int64_t max_bucket_batch_ = 0;
+  std::vector<std::unique_ptr<DeviceModel>> devices_;
+  std::map<int, std::unique_ptr<SequenceModel>> sequences_;
+  mutable std::mutex logged_mu_;
+  mutable std::set<std::string> logged_;
 };
 
 TRITONSERVER_Error*
@@ -656,9 +705,9 @@ ModelState::CheckSignature(const std::string& path, const FunctionSignature& sig
 // Uploads every weight argument from its file. The file is the tensor's
 // bytes, dense, row-major and little-endian, with no header.
 TRITONSERVER_Error*
-ModelState::LoadWeights()
+ModelState::LoadWeights(DeviceModel* device)
 {
-  weights_.resize(args_.size());
+  device->weights.resize(args_.size());
   const uint64_t t0 = NowNs();
   uint64_t total = 0;
   size_t count = 0;
@@ -689,7 +738,7 @@ ModelState::LoadWeights()
     host.byte_size = size;
     host.dtype = t.dtype;
     host.dims = t.dims;
-    std::string err = PjrtBuffer::Upload(client_.get(), host, &weights_[i]);
+    std::string err = PjrtBuffer::Upload(device->client.get(), host, &device->weights[i]);
     if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + ": " + err);
     total += size;
     ++count;
@@ -697,8 +746,87 @@ ModelState::LoadWeights()
   if (count > 0) {
     std::ostringstream m;
     m << "tlaloc backend: " << Where() << "uploaded " << count << " weights ("
-      << total / (1024 * 1024) << " MiB) in " << (NowNs() - t0) / 1000000 << " ms";
+      << total / (1024 * 1024) << " MiB) to GPU " << device->ordinal << " in "
+      << (NowNs() - t0) / 1000000 << " ms";
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+  }
+  return nullptr;
+}
+
+// The CUDA ordinals the instance groups run on. A KIND_GPU group names its
+// GPUs (Triton fills in every visible GPU when the config names none); a
+// KIND_CPU or KIND_MODEL instance runs on GPU 0.
+TRITONSERVER_Error*
+ModelState::Devices(std::vector<int>* ordinals)
+{
+  std::set<int> set;
+  common::TritonJson::Value groups;
+  if (ModelConfig().Find("instance_group", &groups)) {
+    for (size_t g = 0; g < groups.ArraySize(); ++g) {
+      common::TritonJson::Value group;
+      RETURN_IF_ERROR(groups.IndexAsObject(g, &group));
+      std::string kind;
+      if (group.MemberAsString("kind", &kind) != nullptr) kind = "KIND_GPU";
+      common::TritonJson::Value gpus;
+      if (kind == "KIND_GPU" && group.Find("gpus", &gpus) && gpus.ArraySize() > 0) {
+        for (size_t k = 0; k < gpus.ArraySize(); ++k) {
+          int64_t id = 0;
+          RETURN_IF_ERROR(gpus.IndexAsInt(k, &id));
+          set.insert(static_cast<int>(id));
+        }
+      } else {
+        set.insert(0);
+      }
+    }
+  }
+  if (set.empty()) set.insert(0);
+  ordinals->assign(set.begin(), set.end());
+  return nullptr;
+}
+
+// max_batch_size > 0: every bucket takes one batch size B as the leading dim
+// of every input and output, rows are independent, and the largest B covers
+// max_batch_size.
+TRITONSERVER_Error*
+ModelState::CheckBatching()
+{
+  if (MaxBatchSize() <= 0) return nullptr;
+  for (Bucket& b : buckets_) {
+    int64_t batch = -1;
+    auto lead = [&](const tlaloc_triton::TensorType& t, const std::string& what) -> TRITONSERVER_Error* {
+      if (t.dims.empty()) {
+        return Err(
+            TRITONSERVER_ERROR_INVALID_ARG,
+            Where() + b.file + ": " + what + " is " + t.text + ", which has no batch dimension; "
+            "with max_batch_size > 0 every input and output leads with the batch");
+      }
+      if (batch == -1) batch = t.dims[0];
+      if (t.dims[0] != batch) {
+        return Err(
+            TRITONSERVER_ERROR_INVALID_ARG,
+            Where() + b.file + ": " + what + " is " + t.text + " but the other tensors lead "
+            "with batch " + std::to_string(batch) + "; every input and output of one artifact "
+            "takes the same batch");
+      }
+      return nullptr;
+    };
+    for (size_t i = 0; i < args_.size(); ++i) {
+      if (args_[i].source != ArgSource::INPUT) continue;
+      RETURN_IF_ERROR(lead(b.signature.args[i], "input '" + args_[i].name + "'"));
+    }
+    for (size_t j = 0; j < results_.size(); ++j) {
+      RETURN_IF_ERROR(lead(b.signature.results[j], "output '" + results_[j].name + "'"));
+    }
+    b.batch = batch;
+    max_bucket_batch_ = std::max(max_bucket_batch_, batch);
+  }
+  if (max_bucket_batch_ < MaxBatchSize()) {
+    return Err(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        Where() + "max_batch_size is " + std::to_string(MaxBatchSize()) +
+            " but the largest artifact takes batch " + std::to_string(max_bucket_batch_) +
+            "; export an artifact for batch " + std::to_string(MaxBatchSize()) +
+            " or lower max_batch_size");
   }
   return nullptr;
 }
@@ -711,8 +839,19 @@ ModelState::Load(const BackendState& backend)
   RETURN_IF_ERROR(Parameter("entry", &entry));
   RETURN_IF_ERROR(Parameter("pjrt_plugin_path", &plugin_path));
   RETURN_IF_ERROR(Parameter("serving_manifest", &manifest));
+  std::string zero_copy;
+  RETURN_IF_ERROR(Parameter("zero_copy", &zero_copy));
   entry = Trim(entry);
   manifest = Trim(manifest);
+  zero_copy = Trim(zero_copy);
+  if (!zero_copy.empty() && zero_copy != "true" && zero_copy != "false") {
+    return Err(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        Where() + "the 'zero_copy' parameter must be true or false, got '" + zero_copy + "'");
+  }
+  const bool views_wanted = zero_copy != "false";
+  std::vector<int> ordinals;
+  RETURN_IF_ERROR(Devices(&ordinals));
 
   if (Trim(plugin_path).empty()) plugin_path = backend.plugin_path;
   if (Trim(plugin_path).empty()) plugin_path = EnvOr("TLALOC_PJRT_PLUGIN_PATH", "");
@@ -737,12 +876,14 @@ ModelState::Load(const BackendState& backend)
           "'entry', 'arguments' or 'results': the manifest names the entries and binds "
           "their arguments");
     }
-    auto acquire = [&](std::shared_ptr<PjrtClient>* out) -> TRITONSERVER_Error* {
-      RETURN_IF_ERROR(AcquireClient(plugin_path, backend.options, &client_));
-      *out = client_;
-      return nullptr;
-    };
-    return SequenceModel::Load(Name(), VersionDir(), manifest, ModelConfig(), acquire, &sequence_);
+    for (int ordinal : ordinals) {
+      auto acquire = [&](std::shared_ptr<PjrtClient>* out) -> TRITONSERVER_Error* {
+        return AcquireClient(plugin_path, ordinal, backend.options, out);
+      };
+      RETURN_IF_ERROR(SequenceModel::Load(
+          Name(), VersionDir(), manifest, ModelConfig(), acquire, &sequences_[ordinal]));
+    }
+    return nullptr;
   }
 
   RETURN_IF_ERROR(ReadSpecs("input", &inputs_));
@@ -756,6 +897,14 @@ ModelState::Load(const BackendState& backend)
         "relative to the model version directory");
   }
   RETURN_IF_ERROR(ParsePlan());
+  for (const ArgPlan& p : args_) {
+    if (p.source == ArgSource::STATE && MaxBatchSize() > 0) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          Where() + "state '" + p.name + "' cannot be combined with max_batch_size > 0: "
+          "batched requests are independent rows and share no state. Use max_batch_size: 0");
+    }
+  }
 
   // Parse every bucket before touching the GPU, so that a config mistake
   // costs no client.
@@ -804,32 +953,120 @@ ModelState::Load(const BackendState& backend)
   if (buckets_.empty()) {
     return Err(TRITONSERVER_ERROR_INVALID_ARG, Where() + "the 'artifact' parameter names no file");
   }
+  RETURN_IF_ERROR(CheckBatching());
 
-  RETURN_IF_ERROR(AcquireClient(plugin_path, backend.options, &client_));
-  for (size_t i = 0; i < buckets_.size(); ++i) {
-    const uint64_t t0 = NowNs();
-    std::string err = client_->Compile(texts[i], &buckets_[i].executable);
-    if (!err.empty()) {
-      return Err(TRITONSERVER_ERROR_INVALID_ARG, Where() + buckets_[i].file + ": " + err);
+  for (int ordinal : ordinals) {
+    auto device = std::make_unique<DeviceModel>();
+    device->ordinal = ordinal;
+    RETURN_IF_ERROR(AcquireClient(plugin_path, ordinal, backend.options, &device->client));
+    device->views = views_wanted && device->client->SupportsDeviceViews();
+    for (size_t i = 0; i < buckets_.size(); ++i) {
+      const uint64_t t0 = NowNs();
+      std::unique_ptr<PjrtExecutable> exe;
+      std::string err = device->client->Compile(texts[i], &exe);
+      if (!err.empty()) {
+        return Err(TRITONSERVER_ERROR_INVALID_ARG, Where() + buckets_[i].file + ": " + err);
+      }
+      if (exe->num_outputs() != results_.size()) {
+        return Err(
+            TRITONSERVER_ERROR_INTERNAL,
+            Where() + buckets_[i].file + " compiled to " + std::to_string(exe->num_outputs()) +
+                " outputs, expected " + std::to_string(results_.size()));
+      }
+      device->executables.push_back(std::move(exe));
+      std::ostringstream m;
+      m << "tlaloc backend: " << Where() << "compiled " << buckets_[i].file << " (@"
+        << buckets_[i].signature.name << ") for GPU " << ordinal << " in "
+        << (NowNs() - t0) / 1000000 << " ms";
+      LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
     }
-    if (buckets_[i].executable->num_outputs() != results_.size()) {
-      return Err(
-          TRITONSERVER_ERROR_INTERNAL,
-          Where() + buckets_[i].file + " compiled to " +
-              std::to_string(buckets_[i].executable->num_outputs()) + " outputs, expected " +
-              std::to_string(results_.size()));
-    }
+    RETURN_IF_ERROR(LoadWeights(device.get()));
     std::ostringstream m;
-    m << "tlaloc backend: " << Where() << "compiled " << buckets_[i].file << " (@"
-      << buckets_[i].signature.name << ") in " << (NowNs() - t0) / 1000000 << " ms";
+    m << "tlaloc backend: " << Where() << "GPU " << ordinal << " ready; GPU-memory tensors "
+      << (device->views ? "are read in place and written device to device"
+                        : (views_wanted ? "go through the host (the plugin has no device views)"
+                                        : "go through the host (zero_copy is false)"))
+      << (MaxBatchSize() > 0
+              ? "; requests are batched along dim 0 up to batch " +
+                    std::to_string(max_bucket_batch_)
+              : "");
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+    devices_.push_back(std::move(device));
   }
-  RETURN_IF_ERROR(LoadWeights());
   return nullptr;
 }
 
 // ---------------------------------------------------------------------------
 // Instance state.
+
+// One request's input tensor, ready to run: in place in host memory, in
+// place in GPU memory of the instance's GPU (`device_ptr`), or gathered into
+// `staging` (several buffers, or GPU memory that cannot be read in place).
+struct RequestTensor {
+  HostInput host;  // dtype, dims, byte size; `data` unless device_ptr
+  const void* device_ptr = nullptr;
+  std::vector<char> staging;
+};
+
+// A request that has been read and checked, with its response.
+struct Pending {
+  TRITONBACKEND_Request* request = nullptr;
+  TRITONBACKEND_Response* response = nullptr;
+  uint64_t start_ns = 0;
+  std::vector<RequestTensor> inputs;  // by config input
+  int64_t batch = 1;                  // leading dim, when max_batch_size > 0
+  TRITONSERVER_Error* error = nullptr;
+};
+
+TRITONSERVER_Error*
+CopyToHost(
+    const void* src, TRITONSERVER_MemoryType mt, size_t bytes, char* dst,
+    const std::string& what)
+{
+  if (mt == TRITONSERVER_MEMORY_GPU) {
+#ifdef TRITON_ENABLE_GPU
+    cudaError_t e = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
+    if (e != cudaSuccess) {
+      return Err(
+          TRITONSERVER_ERROR_INTERNAL,
+          what + ": copying from GPU memory failed: " + cudaGetErrorString(e));
+    }
+    return nullptr;
+#else
+    return Err(
+        TRITONSERVER_ERROR_UNSUPPORTED,
+        what + " is in GPU memory and this build of the tlaloc backend has no CUDA");
+#endif
+  }
+  std::memcpy(dst, src, bytes);
+  return nullptr;
+}
+
+// Copies host bytes into a response buffer of either memory type.
+TRITONSERVER_Error*
+CopyFromHost(
+    const void* src, size_t bytes, void* dst, TRITONSERVER_MemoryType mt,
+    const std::string& what)
+{
+  if (bytes == 0) return nullptr;
+  if (mt == TRITONSERVER_MEMORY_GPU) {
+#ifdef TRITON_ENABLE_GPU
+    cudaError_t e = cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) {
+      return Err(
+          TRITONSERVER_ERROR_INTERNAL,
+          what + ": copying to GPU memory failed: " + cudaGetErrorString(e));
+    }
+    return nullptr;
+#else
+    return Err(
+        TRITONSERVER_ERROR_UNSUPPORTED,
+        what + " was given GPU memory and this build of the tlaloc backend has no CUDA");
+#endif
+  }
+  std::memcpy(dst, src, bytes);
+  return nullptr;
+}
 
 class ModelInstanceState : public BackendModelInstance {
  public:
@@ -846,11 +1083,22 @@ class ModelInstanceState : public BackendModelInstance {
   {
   }
   TRITONSERVER_Error* InitState();
-  TRITONSERVER_Error* Run(
-      TRITONBACKEND_Request* request, TRITONBACKEND_Response* response,
-      uint64_t* compute_start, uint64_t* compute_end, uint64_t* batch);
+  // Reads and checks the request's inputs into `p`.
+  TRITONSERVER_Error* Prepare(Pending* p);
+  // The bucket for `total` rows of the group's shapes: the one whose input
+  // shapes match exactly (max_batch_size 0), or the smallest batch >= total
+  // whose other dims match. nullptr if none.
+  const Bucket* Choose(const Pending& first, int64_t total, size_t* index) const;
+  std::string DescribeShapes(const Pending& p) const;
+  // Runs `group` as one execution and fills every response of the group.
+  TRITONSERVER_Error* Execute(
+      const std::vector<Pending*>& group, uint64_t* compute_start, uint64_t* compute_end);
+  TRITONSERVER_Error* WriteOutput(
+      Pending* p, const TensorSpec& out, std::vector<int64_t> dims, const char* host_rows,
+      const tlaloc_triton::PjrtResults* results, size_t j, size_t bytes);
 
   ModelState* model_state_;
+  const DeviceModel* device_ = nullptr;
   // State buffers by name, on the device, replaced after every request.
   std::map<std::string, std::unique_ptr<PjrtBuffer>> state_;
   // Sequence mode: per-sequence KV pages and the pools.
@@ -871,21 +1119,29 @@ ModelInstanceState::Create(
         std::string("unexpected nullptr in BackendModelInstanceException"));
     RETURN_IF_ERROR(ex.err_);
   }
-  if ((*state)->Kind() == TRITONSERVER_INSTANCEGROUPKIND_GPU && (*state)->DeviceId() != 0) {
-    std::string name = (*state)->Name();
-    delete *state;
-    *state = nullptr;
-    return Err(
-        TRITONSERVER_ERROR_INVALID_ARG,
-        "instance '" + name + "': the tlaloc backend runs every instance on PJRT device 0; "
-        "set instance_group gpus: [ 0 ] (or use KIND_CPU / KIND_MODEL)");
-  }
+  ModelInstanceState* s = *state;
+  const int ordinal = s->Kind() == TRITONSERVER_INSTANCEGROUPKIND_GPU ? s->DeviceId() : 0;
   TRITONSERVER_Error* err = nullptr;
-  if (model_state->sequence() != nullptr) {
-    err = SequenceInstance::Create(
-        model_state->sequence(), (*state)->Name(), instance, &(*state)->sequence_);
+  if (model_state->sequence_mode()) {
+    const SequenceModel* seq = model_state->sequence(ordinal);
+    if (seq == nullptr) {
+      err = Err(
+          TRITONSERVER_ERROR_INTERNAL,
+          "instance '" + s->Name() + "' runs on GPU " + std::to_string(ordinal) +
+              ", which the model was not loaded for");
+    } else {
+      err = SequenceInstance::Create(seq, s->Name(), instance, &s->sequence_);
+    }
   } else {
-    err = (*state)->InitState();
+    s->device_ = model_state->device(ordinal);
+    if (s->device_ == nullptr) {
+      err = Err(
+          TRITONSERVER_ERROR_INTERNAL,
+          "instance '" + s->Name() + "' runs on GPU " + std::to_string(ordinal) +
+              ", which the model was not loaded for");
+    } else {
+      err = s->InitState();
+    }
   }
   if (err != nullptr) {
     delete *state;
@@ -913,7 +1169,7 @@ ModelInstanceState::InitState()
     host.byte_size = bytes;
     host.dtype = t.dtype;
     host.dims = t.dims;
-    std::string err = PjrtBuffer::Upload(model.client(), host, &state_[p.name]);
+    std::string err = PjrtBuffer::Upload(device_->client.get(), host, &state_[p.name]);
     if (!err.empty()) {
       return Err(
           TRITONSERVER_ERROR_INTERNAL,
@@ -925,61 +1181,31 @@ ModelInstanceState::InitState()
   if (count > 0) {
     std::ostringstream m;
     m << "tlaloc backend: instance '" << Name() << "': " << count << " state buffers ("
-      << total / 1024 << " KiB) zeroed on the device";
+      << total / 1024 << " KiB) zeroed on GPU " << device_->ordinal;
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
   }
   return nullptr;
 }
 
 TRITONSERVER_Error*
-CopyToHost(
-    const void* src, TRITONSERVER_MemoryType mt, size_t bytes, char* dst,
-    const std::string& what)
-{
-  if (mt == TRITONSERVER_MEMORY_GPU) {
-#ifdef TRITON_ENABLE_GPU
-    cudaError_t e = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
-    if (e != cudaSuccess) {
-      return Err(
-          TRITONSERVER_ERROR_INTERNAL,
-          what + ": copying from GPU memory failed: " + cudaGetErrorString(e));
-    }
-    return nullptr;
-#else
-    return Err(
-        TRITONSERVER_ERROR_UNSUPPORTED,
-        what + " is in GPU memory and this build of the tlaloc backend has no CUDA");
-#endif
-  }
-  std::memcpy(dst, src, bytes);
-  return nullptr;
-}
-
-TRITONSERVER_Error*
-ModelInstanceState::Run(
-    TRITONBACKEND_Request* request, TRITONBACKEND_Response* response,
-    uint64_t* compute_start, uint64_t* compute_end, uint64_t* batch)
+ModelInstanceState::Prepare(Pending* p)
 {
   const ModelState& model = *model_state_;
   const auto& specs = model.inputs();
-  const auto& plan = model.args();
-
   uint32_t input_count = 0;
-  RETURN_IF_ERROR(TRITONBACKEND_RequestInputCount(request, &input_count));
+  RETURN_IF_ERROR(TRITONBACKEND_RequestInputCount(p->request, &input_count));
   if (input_count != specs.size()) {
     return Err(
         TRITONSERVER_ERROR_INVALID_ARG,
         "expected " + std::to_string(specs.size()) + " inputs, got " +
             std::to_string(input_count));
   }
-
-  std::vector<HostInput> host(specs.size());
-  std::vector<std::vector<char>> staging(specs.size());
-  std::vector<std::vector<int64_t>> shapes(specs.size());
+  p->inputs.resize(specs.size());
   for (size_t i = 0; i < specs.size(); ++i) {
     const TensorSpec& spec = specs[i];
+    RequestTensor& t = p->inputs[i];
     TRITONBACKEND_Input* input = nullptr;
-    RETURN_IF_ERROR(TRITONBACKEND_RequestInput(request, spec.name.c_str(), &input));
+    RETURN_IF_ERROR(TRITONBACKEND_RequestInput(p->request, spec.name.c_str(), &input));
     TRITONSERVER_DataType dt;
     const int64_t* shape = nullptr;
     uint32_t dims = 0;
@@ -994,18 +1220,30 @@ ModelInstanceState::Run(
           "input '" + spec.name + "' is " + TRITONSERVER_DataTypeString(dt) + ", expected " +
               tlaloc_triton::TritonName(spec.dtype));
     }
-    shapes[i].assign(shape, shape + dims);
-    const uint64_t expected = Elements(shapes[i]) * tlaloc_triton::ByteWidth(dtype);
+    t.host.dims.assign(shape, shape + dims);
+    const uint64_t expected = Elements(t.host.dims) * tlaloc_triton::ByteWidth(dtype);
     if (byte_size != expected) {
       return Err(
           TRITONSERVER_ERROR_INVALID_ARG,
           "input '" + spec.name + "' has " + std::to_string(byte_size) + " bytes, but shape " +
-              ShapeString(shapes[i]) + " of " + tlaloc_triton::TritonName(dtype) + " needs " +
+              ShapeString(t.host.dims) + " of " + tlaloc_triton::TritonName(dtype) + " needs " +
               std::to_string(expected));
     }
-    host[i].dtype = dtype;
-    host[i].dims = shapes[i];
-    host[i].byte_size = byte_size;
+    t.host.dtype = dtype;
+    t.host.byte_size = byte_size;
+    if (model.MaxBatchSize() > 0) {
+      if (t.host.dims.empty()) {
+        return Err(TRITONSERVER_ERROR_INVALID_ARG, "input '" + spec.name + "' has no batch dimension");
+      }
+      if (i == 0) {
+        p->batch = t.host.dims[0];
+      } else if (t.host.dims[0] != p->batch) {
+        return Err(
+            TRITONSERVER_ERROR_INVALID_ARG,
+            "input '" + spec.name + "' has batch " + std::to_string(t.host.dims[0]) +
+                " but input '" + specs[0].name + "' has " + std::to_string(p->batch));
+      }
+    }
 
     const void* ptr = nullptr;
     uint64_t size = 0;
@@ -1014,11 +1252,25 @@ ModelInstanceState::Run(
     if (buffers == 1) {
       RETURN_IF_ERROR(TRITONBACKEND_InputBuffer(input, 0, &ptr, &size, &mt, &mid));
       if (mt != TRITONSERVER_MEMORY_GPU) {
-        host[i].data = ptr;  // host memory: hand it to PJRT as is
+        t.host.data = ptr;  // host memory: hand it to PJRT as is
         continue;
       }
+      const bool aligned =
+          reinterpret_cast<uintptr_t>(ptr) % tlaloc_triton::kDeviceArgumentAlignment == 0;
+      if (device_->views && mid == device_->ordinal && aligned) {
+        t.device_ptr = ptr;  // GPU memory on our GPU: read in place
+        continue;
+      }
+      std::string why = !device_->views ? "the model does not read GPU memory in place"
+                        : mid != device_->ordinal
+                            ? "it is on GPU " + std::to_string(mid) + ", this instance on GPU " +
+                                  std::to_string(device_->ordinal)
+                            : "it is not 16-byte aligned";
+      model.LogPathOnce(
+          "host-in:" + spec.name,
+          "input '" + spec.name + "' is in GPU memory and goes through the host: " + why);
     }
-    staging[i].resize(byte_size);
+    t.staging.resize(byte_size);
     size_t offset = 0;
     for (uint32_t b = 0; b < buffers; ++b) {
       mt = TRITONSERVER_MEMORY_CPU;
@@ -1030,35 +1282,19 @@ ModelInstanceState::Run(
             "input '" + spec.name + "' buffers exceed its declared byte size");
       }
       RETURN_IF_ERROR(
-          CopyToHost(ptr, mt, size, staging[i].data() + offset, "input '" + spec.name + "'"));
+          CopyToHost(ptr, mt, size, t.staging.data() + offset, "input '" + spec.name + "'"));
       offset += size;
     }
-    host[i].data = staging[i].data();
+    t.host.data = t.staging.data();
   }
-
-  // Pick the bucket compiled for exactly these input shapes.
-  const Bucket* bucket = nullptr;
-  for (const Bucket& b : model.buckets()) {
-    bool match = true;
-    for (size_t a = 0; a < plan.size(); ++a) {
-      if (plan[a].source != ArgSource::INPUT) continue;
-      const auto& want = b.signature.args[a].dims;
-      const auto& have = shapes[plan[a].input];
-      match &= want == have || IsScalarAsOne(have, want);
-    }
-    if (match) {
-      bucket = &b;
-      break;
-    }
-  }
-  if (bucket == nullptr) {
-    std::string have, want;
-    for (const auto& s : shapes) have += (have.empty() ? "" : ", ") + ShapeString(s);
+  size_t index = 0;
+  if (Choose(*p, p->batch, &index) == nullptr) {
+    std::string want;
     for (const Bucket& b : model.buckets()) {
       std::string one;
       for (size_t k = 0; k < specs.size(); ++k) {
-        for (size_t a = 0; a < plan.size(); ++a) {
-          if (plan[a].source == ArgSource::INPUT && plan[a].input == k) {
+        for (size_t a = 0; a < model.args().size(); ++a) {
+          if (model.args()[a].source == ArgSource::INPUT && model.args()[a].input == k) {
             one += (one.empty() ? "" : ", ") + ShapeString(b.signature.args[a].dims);
           }
         }
@@ -1067,36 +1303,185 @@ ModelInstanceState::Run(
     }
     return Err(
         TRITONSERVER_ERROR_INVALID_ARG,
-        "no compiled artifact takes input shapes (" + have + "); this model serves " + want);
+        "no compiled artifact takes input shapes (" + DescribeShapes(*p) +
+            "); this model serves " + want +
+            (model.MaxBatchSize() > 0 ? " (dim 0 is the batch; a smaller batch is padded)" : ""));
   }
+  return nullptr;
+}
 
+std::string
+ModelInstanceState::DescribeShapes(const Pending& p) const
+{
+  std::string have;
+  for (const auto& t : p.inputs) have += (have.empty() ? "" : ", ") + ShapeString(t.host.dims);
+  return have;
+}
+
+const Bucket*
+ModelInstanceState::Choose(const Pending& first, int64_t total, size_t* index) const
+{
+  const ModelState& model = *model_state_;
+  const auto& plan = model.args();
+  const Bucket* best = nullptr;
+  const auto& buckets = model.buckets();
+  for (size_t k = 0; k < buckets.size(); ++k) {
+    const Bucket& b = buckets[k];
+    bool match = true;
+    for (size_t a = 0; a < plan.size() && match; ++a) {
+      if (plan[a].source != ArgSource::INPUT) continue;
+      const auto& want = b.signature.args[a].dims;
+      const auto& have = first.inputs[plan[a].input].host.dims;
+      if (model.MaxBatchSize() > 0) {
+        match = want.size() == have.size() && b.batch >= total &&
+                std::equal(want.begin() + 1, want.end(), have.begin() + 1);
+      } else {
+        match = want == have || IsScalarAsOne(have, want);
+      }
+    }
+    if (match && (best == nullptr || b.batch < best->batch)) {
+      best = &b;
+      *index = k;
+    }
+  }
+  return best;
+}
+
+// Writes output `out` of one request. `host_rows` holds its rows when the
+// results were split on the host; otherwise the whole result `j` belongs to
+// this request and is copied from the device (device to device when Triton
+// gave GPU memory on our GPU).
+TRITONSERVER_Error*
+ModelInstanceState::WriteOutput(
+    Pending* p, const TensorSpec& out, std::vector<int64_t> dims, const char* host_rows,
+    const tlaloc_triton::PjrtResults* results, size_t j, size_t bytes)
+{
+  const ModelState& model = *model_state_;
+  DType dtype = out.dtype;
+  if (IsScalarAsOne(out.shape, dims)) dims = {1};
+  TRITONBACKEND_Output* output = nullptr;
+  RETURN_IF_ERROR(TRITONBACKEND_ResponseOutput(
+      p->response, &output, out.name.c_str(),
+      TRITONSERVER_StringToDataType(tlaloc_triton::TritonName(dtype)), dims.data(),
+      static_cast<uint32_t>(dims.size())));
+  void* buffer = nullptr;
+  TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
+  int64_t mid = 0;
+  RETURN_IF_ERROR(TRITONBACKEND_OutputBuffer(output, &buffer, bytes, &mt, &mid));
+  const std::string what = "output '" + out.name + "'";
+  if (host_rows != nullptr) return CopyFromHost(host_rows, bytes, buffer, mt, what);
+  if (mt == TRITONSERVER_MEMORY_GPU) {
+#ifdef TRITON_ENABLE_GPU
+    if (device_->views && mid == device_->ordinal) {
+      bool dense = false;
+      std::string err = results->WithDevicePointer(j, bytes, &dense, [&](const void* src) {
+        cudaError_t e = cudaMemcpy(buffer, src, bytes, cudaMemcpyDeviceToDevice);
+        return e == cudaSuccess ? std::string() : std::string(cudaGetErrorString(e));
+      });
+      if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, what + ": " + err);
+      if (dense) {
+        model.LogPathOnce(
+            "d2d-out:" + out.name, what + " is copied device to device into GPU memory");
+        return nullptr;
+      }
+      model.LogPathOnce(
+          "host-out:" + out.name,
+          what + " goes through the host: its device storage is not dense row-major");
+    } else {
+      model.LogPathOnce(
+          "host-out:" + out.name,
+          what + " was given GPU memory and goes through the host: " +
+              (device_->views ? "it is on GPU " + std::to_string(mid)
+                              : std::string("the model does not write GPU memory directly")));
+    }
+    std::vector<char> tmp(bytes);
+    std::string err = results->CopyToHost(j, tmp.data(), bytes);
+    if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, err);
+    return CopyFromHost(tmp.data(), bytes, buffer, mt, what);
+#else
+    return Err(
+        TRITONSERVER_ERROR_UNSUPPORTED,
+        what + " was given GPU memory and this build of the tlaloc backend has no CUDA");
+#endif
+  }
+  std::string err = results->CopyToHost(j, buffer, bytes);
+  if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, err);
+  return nullptr;
+}
+
+TRITONSERVER_Error*
+ModelInstanceState::Execute(
+    const std::vector<Pending*>& group, uint64_t* compute_start, uint64_t* compute_end)
+{
+  const ModelState& model = *model_state_;
+  const auto& plan = model.args();
+  const auto& specs = model.inputs();
+  int64_t total = 0;
+  for (const Pending* p : group) total += p->batch;
+  size_t index = 0;
+  const Bucket* bucket = Choose(*group[0], total, &index);
+  if (bucket == nullptr) {
+    return Err(
+        TRITONSERVER_ERROR_INTERNAL,
+        "no compiled artifact takes " + std::to_string(total) + " rows of input shapes (" +
+            DescribeShapes(*group[0]) + ")");
+  }
+  // One request that fills the bucket runs on its own tensors; otherwise the
+  // rows are gathered on the host, zero-padded to the bucket's batch.
+  const bool direct = group.size() == 1 && (model.MaxBatchSize() <= 0 || bucket->batch == total);
+  std::vector<std::vector<char>> gathered(specs.size());
   std::vector<ExecuteArg> args(plan.size());
   for (size_t a = 0; a < plan.size(); ++a) {
     switch (plan[a].source) {
-      case ArgSource::INPUT:
-        args[a].host = host[plan[a].input];
-        // PJRT gets the entry function's own shapes ([1] -> rank 0).
-        args[a].host.dims = bucket->signature.args[a].dims;
+      case ArgSource::INPUT: {
+        const size_t k = plan[a].input;
+        const auto& dims = bucket->signature.args[a].dims;  // [1] -> rank 0, padded batch
+        if (direct) {
+          const RequestTensor& t = group[0]->inputs[k];
+          args[a].host = t.host;
+          args[a].device_ptr = t.device_ptr;
+          if (t.device_ptr != nullptr) {
+            model.LogPathOnce(
+                "view-in:" + specs[k].name,
+                "input '" + specs[k].name + "' is read in place from GPU memory (no host copy)");
+          }
+        } else {
+          const size_t width = tlaloc_triton::ByteWidth(specs[k].dtype);
+          const size_t row = static_cast<size_t>(Elements(dims) / bucket->batch) * width;
+          gathered[k].assign(row * bucket->batch, 0);
+          size_t offset = 0;
+          for (const Pending* p : group) {
+            const RequestTensor& t = p->inputs[k];
+            if (t.device_ptr != nullptr) {
+              RETURN_IF_ERROR(CopyToHost(
+                  t.device_ptr, TRITONSERVER_MEMORY_GPU, t.host.byte_size,
+                  gathered[k].data() + offset, "input '" + specs[k].name + "'"));
+            } else if (t.host.byte_size > 0) {
+              std::memcpy(gathered[k].data() + offset, t.host.data, t.host.byte_size);
+            }
+            offset += t.host.byte_size;
+          }
+          args[a].host.data = gathered[k].data();
+          args[a].host.byte_size = gathered[k].size();
+          args[a].host.dtype = specs[k].dtype;
+        }
+        args[a].host.dims = dims;
         break;
+      }
       case ArgSource::WEIGHT:
-        args[a].device = model.weight(a);
+        args[a].device = device_->weights[a].get();
         break;
       case ArgSource::STATE:
         args[a].device = state_.at(plan[a].name).get();
         break;
     }
   }
-  if (model.MaxBatchSize() > 0 && !shapes.empty() && !shapes[0].empty()) {
-    *batch = static_cast<uint64_t>(shapes[0][0]);
-  }
 
   *compute_start = NowNs();
   std::unique_ptr<PjrtResults> results;
-  std::string err = bucket->executable->Execute(args, &results);
+  std::string err = device_->executables[index]->Execute(args, &results);
   *compute_end = NowNs();
-  if (!err.empty()) {
-    return Err(TRITONSERVER_ERROR_INTERNAL, bucket->file + ": " + err);
-  }
+  if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, bucket->file + ": " + err);
   // The execution ran, so its state results replace the state it read, even
   // if sending the response fails below or the client asked for no output.
   const auto& sinks = model.results();
@@ -1104,20 +1489,10 @@ ModelInstanceState::Run(
     if (sinks[j].sink == ResultSink::STATE) state_[sinks[j].name] = results->Release(j);
   }
 
-  std::set<std::string> requested;
-  uint32_t requested_count = 0;
-  RETURN_IF_ERROR(TRITONBACKEND_RequestOutputCount(request, &requested_count));
-  for (uint32_t i = 0; i < requested_count; ++i) {
-    const char* name = nullptr;
-    RETURN_IF_ERROR(TRITONBACKEND_RequestOutputName(request, i, &name));
-    requested.insert(name);
-  }
-
   const auto& outs = model.outputs();
   for (size_t j = 0; j < sinks.size(); ++j) {
     if (sinks[j].sink != ResultSink::OUTPUT) continue;
     const TensorSpec& out = outs[sinks[j].output];
-    if (requested_count > 0 && requested.count(out.name) == 0) continue;
     DType dtype;
     std::vector<int64_t> dims;
     err = results->Describe(j, &dtype, &dims);
@@ -1129,36 +1504,42 @@ ModelInstanceState::Run(
               ", expected " + tlaloc_triton::TritonName(out.dtype));
     }
     const size_t bytes = Elements(dims) * tlaloc_triton::ByteWidth(dtype);
-    if (IsScalarAsOne(out.shape, dims)) dims = {1};
-    TRITONBACKEND_Output* output = nullptr;
-    RETURN_IF_ERROR(TRITONBACKEND_ResponseOutput(
-        response, &output, out.name.c_str(),
-        TRITONSERVER_StringToDataType(tlaloc_triton::TritonName(dtype)), dims.data(),
-        static_cast<uint32_t>(dims.size())));
-    void* buffer = nullptr;
-    TRITONSERVER_MemoryType mt = TRITONSERVER_MEMORY_CPU;
-    int64_t mid = 0;
-    RETURN_IF_ERROR(TRITONBACKEND_OutputBuffer(output, &buffer, bytes, &mt, &mid));
-    if (mt == TRITONSERVER_MEMORY_GPU) {
-#ifdef TRITON_ENABLE_GPU
-      std::vector<char> tmp(bytes);
-      err = results->CopyToHost(j, tmp.data(), bytes);
-      if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, err);
-      cudaError_t e = cudaMemcpy(buffer, tmp.data(), bytes, cudaMemcpyHostToDevice);
-      if (e != cudaSuccess) {
-        return Err(
-            TRITONSERVER_ERROR_INTERNAL, "output '" + out.name +
-                                             "': copying to GPU memory failed: " +
-                                             cudaGetErrorString(e));
+    // Split by rows: the whole result comes to the host once.
+    std::vector<char> all;
+    size_t row = 0;
+    if (!direct) {
+      all.resize(std::max<size_t>(bytes, 1));  // never a null data pointer
+      if (bytes > 0) {
+        err = results->CopyToHost(j, all.data(), bytes);
+        if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, err);
       }
-#else
-      return Err(
-          TRITONSERVER_ERROR_UNSUPPORTED,
-          "output '" + out.name + "' was given GPU memory and this build has no CUDA");
-#endif
-    } else {
-      err = results->CopyToHost(j, buffer, bytes);
-      if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, err);
+      row = bytes / static_cast<size_t>(bucket->batch);
+    }
+    size_t offset = 0;
+    for (Pending* p : group) {
+      const size_t mine = row * static_cast<size_t>(p->batch);
+      const size_t at = offset;
+      offset += mine;
+      if (p->error != nullptr) continue;
+      std::set<std::string> requested;
+      uint32_t requested_count = 0;
+      p->error = TRITONBACKEND_RequestOutputCount(p->request, &requested_count);
+      for (uint32_t i = 0; i < requested_count && p->error == nullptr; ++i) {
+        const char* name = nullptr;
+        p->error = TRITONBACKEND_RequestOutputName(p->request, i, &name);
+        if (p->error == nullptr) requested.insert(name);
+      }
+      if (p->error != nullptr) continue;
+      const bool wanted = requested_count == 0 || requested.count(out.name) > 0;
+      if (direct) {
+        if (wanted) p->error = WriteOutput(p, out, dims, nullptr, results.get(), j, bytes);
+        continue;
+      }
+      if (wanted) {
+        std::vector<int64_t> rows = dims;
+        rows[0] = p->batch;
+        p->error = WriteOutput(p, out, rows, all.data() + at, nullptr, j, mine);
+      }
     }
   }
   return nullptr;
@@ -1171,56 +1552,116 @@ ModelInstanceState::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t c
     sequence_->ProcessRequests(requests, count);
     return;
   }
+  const ModelState& model = *model_state_;
   const uint64_t exec_start = NowNs();
-  uint64_t first_compute_start = 0, last_compute_end = 0, total_batch = 0;
+
+  std::vector<Pending> pending(count);
   for (uint32_t r = 0; r < count; ++r) {
-    TRITONBACKEND_Request* request = requests[r];
-    const uint64_t request_start = NowNs();
-    uint64_t compute_start = request_start, compute_end = request_start, batch = 1;
-    TRITONBACKEND_Response* response = nullptr;
-    TRITONSERVER_Error* err = TRITONBACKEND_ResponseNew(&response, request);
-    if (err == nullptr) {
-      try {
-        err = Run(request, response, &compute_start, &compute_end, &batch);
+    Pending& p = pending[r];
+    p.request = requests[r];
+    p.start_ns = NowNs();
+    p.error = TRITONBACKEND_ResponseNew(&p.response, p.request);
+    if (p.error != nullptr) {
+      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, TRITONSERVER_ErrorMessage(p.error));
+      p.response = nullptr;
+      continue;
+    }
+    try {
+      p.error = Prepare(&p);
+    }
+    catch (const std::exception& ex) {
+      p.error = Err(TRITONSERVER_ERROR_INTERNAL, std::string("tlaloc backend: ") + ex.what());
+    }
+  }
+
+  // Groups run as one execution each: consecutive requests whose non-batch
+  // shapes agree and whose rows fit one bucket. Without max_batch_size every
+  // request is its own group.
+  auto same_shapes = [](const Pending& a, const Pending& b) {
+    for (size_t i = 0; i < a.inputs.size(); ++i) {
+      const auto& x = a.inputs[i].host.dims;
+      const auto& y = b.inputs[i].host.dims;
+      if (x.size() != y.size() || !std::equal(x.begin() + 1, x.end(), y.begin() + 1)) return false;
+    }
+    return true;
+  };
+  std::vector<std::vector<Pending*>> groups;
+  int64_t rows = 0;
+  for (Pending& p : pending) {
+    if (p.error != nullptr) continue;
+    size_t unused = 0;
+    const bool joins = model.MaxBatchSize() > 0 && !groups.empty() &&
+                       same_shapes(*groups.back()[0], p) &&
+                       Choose(*groups.back()[0], rows + p.batch, &unused) != nullptr;
+    if (joins) {
+      groups.back().push_back(&p);
+      rows += p.batch;
+    } else {
+      groups.push_back({&p});
+      rows = p.batch;
+    }
+  }
+
+  for (auto& group : groups) {
+    uint64_t compute_start = NowNs(), compute_end = compute_start;
+    TRITONSERVER_Error* err = nullptr;
+    try {
+      err = Execute(group, &compute_start, &compute_end);
+    }
+    catch (const std::exception& ex) {
+      err = Err(TRITONSERVER_ERROR_INTERNAL, std::string("tlaloc backend: ") + ex.what());
+    }
+    catch (...) {
+      err = Err(TRITONSERVER_ERROR_INTERNAL, "tlaloc backend: unknown exception");
+    }
+    int64_t batch = 0;
+    for (Pending* p : group) {
+      if (err != nullptr && p->error == nullptr) {
+        p->error = TRITONSERVER_ErrorNew(TRITONSERVER_ErrorCode(err), TRITONSERVER_ErrorMessage(err));
       }
-      catch (const std::exception& ex) {
-        err = Err(TRITONSERVER_ERROR_INTERNAL, std::string("tlaloc backend: ") + ex.what());
-      }
-      catch (...) {
-        err = Err(TRITONSERVER_ERROR_INTERNAL, "tlaloc backend: unknown exception");
-      }
-      const bool ok = err == nullptr;
-      if (!ok) {
-        std::string msg = "model '" + model_state_->Name() + "': " + TRITONSERVER_ErrorMessage(err);
+      batch += p->batch;
+      LOG_IF_ERROR(
+          TRITONBACKEND_ModelInstanceReportStatistics(
+              TritonModelInstance(), p->request, p->error == nullptr, p->start_ns, compute_start,
+              compute_end, NowNs()),
+          "failed to report request statistics");
+      p->start_ns = 0;  // statistics reported
+    }
+    if (err != nullptr) TRITONSERVER_ErrorDelete(err);
+    LOG_IF_ERROR(
+        TRITONBACKEND_ModelInstanceReportBatchStatistics(
+            TritonModelInstance(), static_cast<uint64_t>(model.MaxBatchSize() > 0 ? batch : 1),
+            exec_start, compute_start, compute_end, NowNs()),
+        "failed to report batch statistics");
+  }
+
+  for (Pending& p : pending) {
+    if (p.response != nullptr) {
+      TRITONSERVER_Error* err = p.error;
+      if (err != nullptr) {
+        std::string msg = "model '" + model.Name() + "': " + TRITONSERVER_ErrorMessage(err);
         TRITONSERVER_Error_Code code = TRITONSERVER_ErrorCode(err);
         TRITONSERVER_ErrorDelete(err);
         err = Err(code, msg);
       }
+      if (p.start_ns != 0) {  // refused before it ran
+        const uint64_t now = NowNs();
+        LOG_IF_ERROR(
+            TRITONBACKEND_ModelInstanceReportStatistics(
+                TritonModelInstance(), p.request, false, p.start_ns, now, now, now),
+            "failed to report request statistics");
+      }
       LOG_IF_ERROR(
-          TRITONBACKEND_ResponseSend(response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
+          TRITONBACKEND_ResponseSend(p.response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
           "failed to send the response");
-      LOG_IF_ERROR(
-          TRITONBACKEND_ModelInstanceReportStatistics(
-              TritonModelInstance(), request, ok, request_start, compute_start, compute_end,
-              NowNs()),
-          "failed to report request statistics");
       if (err != nullptr) TRITONSERVER_ErrorDelete(err);
-    } else {
-      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, TRITONSERVER_ErrorMessage(err));
-      TRITONSERVER_ErrorDelete(err);
+    } else if (p.error != nullptr) {
+      TRITONSERVER_ErrorDelete(p.error);
     }
-    if (first_compute_start == 0) first_compute_start = compute_start;
-    last_compute_end = compute_end;
-    total_batch += batch;
     LOG_IF_ERROR(
-        TRITONBACKEND_RequestRelease(request, TRITONSERVER_REQUEST_RELEASE_ALL),
+        TRITONBACKEND_RequestRelease(p.request, TRITONSERVER_REQUEST_RELEASE_ALL),
         "failed to release the request");
   }
-  LOG_IF_ERROR(
-      TRITONBACKEND_ModelInstanceReportBatchStatistics(
-          TritonModelInstance(), total_batch, exec_start, first_compute_start, last_compute_end,
-          NowNs()),
-      "failed to report batch statistics");
 }
 
 }  // namespace

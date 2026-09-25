@@ -56,6 +56,14 @@ AwaitAndDestroy(const PJRT_Api* api, PJRT_Event* event)
   return err.empty() ? derr : err;
 }
 
+// The memory under a view belongs to the caller; the plugin calls this when
+// the view goes away. (The XLA GPU plugin calls it unconditionally, so it
+// must not be null.)
+void
+ViewReleased(void* /*device_buffer_ptr*/, void* /*user_arg*/)
+{
+}
+
 void
 DestroyBuffer(const PJRT_Api* api, PJRT_Buffer* buffer)
 {
@@ -162,16 +170,19 @@ LoadPjrtPlugin(const std::string& path, const PjrtPlugin** out)
 
 std::string
 PjrtClient::Create(
-    const PjrtPlugin* plugin, const ClientOptions& options,
+    const PjrtPlugin* plugin, const ClientOptions& options, int device,
     std::unique_ptr<PjrtClient>* out)
 {
   if (!(options.memory_fraction > 0.0f && options.memory_fraction <= 1.0f)) {
     return "memory fraction must be in (0, 1], got " + std::to_string(options.memory_fraction);
   }
+  if (device < 0) return "GPU " + std::to_string(device) + " is not a device ordinal";
   const PJRT_Api* api = plugin->api;
   const char kFraction[] = "memory_fraction";
   const char kPreallocate[] = "preallocate";
-  PJRT_NamedValue named[2]{};
+  const char kVisible[] = "visible_devices";
+  const int64_t visible[1] = {device};
+  PJRT_NamedValue named[3]{};
   named[0].struct_size = PJRT_NamedValue_STRUCT_SIZE;
   named[0].name = kFraction;
   named[0].name_size = sizeof(kFraction) - 1;
@@ -184,13 +195,21 @@ PjrtClient::Create(
   named[1].type = PJRT_NamedValue_kBool;
   named[1].bool_value = options.preallocate;
   named[1].value_size = 1;
+  // One client per GPU: the plugin only sees `device`.
+  named[2].struct_size = PJRT_NamedValue_STRUCT_SIZE;
+  named[2].name = kVisible;
+  named[2].name_size = sizeof(kVisible) - 1;
+  named[2].type = PJRT_NamedValue_kInt64List;
+  named[2].int64_array_value = visible;
+  named[2].value_size = 1;
 
+  const std::string gpu = "GPU " + std::to_string(device);
   PJRT_Client_Create_Args create{};
   create.struct_size = PJRT_Client_Create_Args_STRUCT_SIZE;
   create.create_options = named;
-  create.num_options = 2;
+  create.num_options = 3;
   std::string err = TakeError(api, api->PJRT_Client_Create(&create));
-  if (!err.empty()) return "PJRT_Client_Create failed: " + err;
+  if (!err.empty()) return "PJRT_Client_Create for " + gpu + " failed: " + err;
 
   std::unique_ptr<PjrtClient> client(new PjrtClient());
   client->plugin_ = plugin;
@@ -209,14 +228,40 @@ PjrtClient::Create(
   devices.client = create.client;
   err = TakeError(api, api->PJRT_Client_AddressableDevices(&devices));
   if (!err.empty()) return "PJRT_Client_AddressableDevices failed: " + err;
-  if (devices.num_addressable_devices == 0) {
-    return "the PJRT client on platform " + client->platform_ + " has no addressable devices";
+  if (devices.num_addressable_devices != 1) {
+    return "the PJRT client for " + gpu + " on platform " + client->platform_ + " has " +
+           std::to_string(devices.num_addressable_devices) +
+           " addressable devices; it was created to see exactly that one";
   }
   client->devices_.assign(
       devices.addressable_devices,
       devices.addressable_devices + devices.num_addressable_devices);
+  PJRT_Device_LocalHardwareId_Args hw{};
+  hw.struct_size = PJRT_Device_LocalHardwareId_Args_STRUCT_SIZE;
+  hw.device = client->devices_[0];
+  err = TakeError(api, api->PJRT_Device_LocalHardwareId(&hw));
+  if (!err.empty()) return "PJRT_Device_LocalHardwareId failed: " + err;
+  if (hw.local_hardware_id != device) {
+    return "the PJRT client created for " + gpu + " runs on GPU " +
+           std::to_string(hw.local_hardware_id) + " instead: the plugin has no " + gpu +
+           " or does not honour visible_devices";
+  }
+  client->ordinal_ = device;
   *out = std::move(client);
   return "";
+}
+
+bool
+PjrtClient::SupportsDeviceViews() const
+{
+  const PJRT_Api* api = plugin_->api;
+  constexpr size_t kNeed =
+      offsetof(PJRT_Api, PJRT_Client_CreateViewOfDeviceBuffer) + sizeof(void*);
+  return api->struct_size >= kNeed && api->PJRT_Client_CreateViewOfDeviceBuffer != nullptr &&
+         api->PJRT_Buffer_OpaqueDeviceMemoryDataPointer != nullptr &&
+         api->PJRT_Buffer_OnDeviceSizeInBytes != nullptr &&
+         api->PJRT_Buffer_IncreaseExternalReferenceCount != nullptr &&
+         api->PJRT_Buffer_DecreaseExternalReferenceCount != nullptr;
 }
 
 PjrtClient::~PjrtClient()
@@ -351,10 +396,31 @@ PjrtExecutable::Execute(
   } uploaded{api, {}};
 
   std::vector<PJRT_Buffer*> arguments;
+  std::vector<int64_t> views;  // argument indices that alias caller memory
   arguments.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
     if (args[i].device != nullptr) {
       arguments.push_back(args[i].device->buffer_);
+      continue;
+    }
+    if (args[i].device_ptr != nullptr) {
+      const HostInput& h = args[i].host;
+      PJRT_Client_CreateViewOfDeviceBuffer_Args view{};
+      view.struct_size = PJRT_Client_CreateViewOfDeviceBuffer_Args_STRUCT_SIZE;
+      view.client = client_->client_;
+      view.device_buffer_ptr = const_cast<void*>(args[i].device_ptr);
+      view.dims = h.dims.empty() ? nullptr : h.dims.data();
+      view.num_dims = h.dims.size();
+      view.element_type = ToPjrtType(h.dtype);
+      view.device = device;
+      view.on_delete_callback = &ViewReleased;
+      std::string err = TakeError(api, api->PJRT_Client_CreateViewOfDeviceBuffer(&view));
+      if (!err.empty()) {
+        return "wrapping input " + std::to_string(i) + " in GPU memory failed: " + err;
+      }
+      uploaded.buffers.push_back(view.buffer);  // destroying a view frees nothing
+      arguments.push_back(view.buffer);
+      views.push_back(static_cast<int64_t>(i));
       continue;
     }
     PJRT_Buffer* buffer = nullptr;
@@ -372,6 +438,9 @@ PjrtExecutable::Execute(
 
   PJRT_ExecuteOptions options{};
   options.struct_size = PJRT_ExecuteOptions_STRUCT_SIZE;
+  // Memory the caller owns is read, never written.
+  options.non_donatable_input_indices = views.empty() ? nullptr : views.data();
+  options.num_non_donatable_input_indices = views.size();
   PJRT_Buffer* const* argument_list = arguments.data();
   PJRT_Buffer** output_list = results->buffers_.data();
   PJRT_Event* complete = nullptr;
@@ -449,6 +518,43 @@ PjrtResults::CopyToHost(size_t i, void* dst, size_t byte_size) const
   err = TakeError(api_, api_->PJRT_Buffer_ToHostBuffer(&copy));
   if (!err.empty()) return "PJRT_Buffer_ToHostBuffer failed: " + err;
   return AwaitAndDestroy(api_, copy.event);
+}
+
+std::string
+PjrtResults::WithDevicePointer(
+    size_t i, size_t byte_size, bool* dense,
+    const std::function<std::string(const void*)>& use) const
+{
+  *dense = false;
+  PJRT_Buffer_OnDeviceSizeInBytes_Args size{};
+  size.struct_size = PJRT_Buffer_OnDeviceSizeInBytes_Args_STRUCT_SIZE;
+  size.buffer = buffers_[i];
+  std::string err = TakeError(api_, api_->PJRT_Buffer_OnDeviceSizeInBytes(&size));
+  if (!err.empty()) return "PJRT_Buffer_OnDeviceSizeInBytes failed: " + err;
+  if (size.on_device_size_in_bytes != byte_size) return "";
+  *dense = true;
+
+  // The address is only guaranteed while an external reference is held.
+  PJRT_Buffer_IncreaseExternalReferenceCount_Args inc{};
+  inc.struct_size = PJRT_Buffer_IncreaseExternalReferenceCount_Args_STRUCT_SIZE;
+  inc.buffer = buffers_[i];
+  err = TakeError(api_, api_->PJRT_Buffer_IncreaseExternalReferenceCount(&inc));
+  if (!err.empty()) return "PJRT_Buffer_IncreaseExternalReferenceCount failed: " + err;
+  PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args ptr{};
+  ptr.struct_size = PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args_STRUCT_SIZE;
+  ptr.buffer = buffers_[i];
+  err = TakeError(api_, api_->PJRT_Buffer_OpaqueDeviceMemoryDataPointer(&ptr));
+  if (err.empty()) {
+    err = use(ptr.device_memory_ptr);
+  } else {
+    err = "PJRT_Buffer_OpaqueDeviceMemoryDataPointer failed: " + err;
+  }
+  PJRT_Buffer_DecreaseExternalReferenceCount_Args dec{};
+  dec.struct_size = PJRT_Buffer_DecreaseExternalReferenceCount_Args_STRUCT_SIZE;
+  dec.buffer = buffers_[i];
+  std::string derr = TakeError(api_, api_->PJRT_Buffer_DecreaseExternalReferenceCount(&dec));
+  if (err.empty() && !derr.empty()) err = "PJRT_Buffer_DecreaseExternalReferenceCount failed: " + derr;
+  return err;
 }
 
 }  // namespace tlaloc_triton

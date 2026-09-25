@@ -1,0 +1,11 @@
+# large_io with zero_copy false: tensors in GPU memory go through the host
+# (device to host before the call, host to device after). The baseline
+# large_io is measured against.
+name: "large_io_host"
+backend: "tlaloc"
+max_batch_size: 0
+input [ { name: "X" data_type: TYPE_FP32 dims: [ 4194304 ] } ]
+output [ { name: "Y" data_type: TYPE_FP32 dims: [ 4194304 ] } ]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "model.mlir" } }
+parameters: { key: "zero_copy" value: { string_value: "false" } }

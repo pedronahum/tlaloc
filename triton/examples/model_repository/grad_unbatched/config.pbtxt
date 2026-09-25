@@ -1,0 +1,10 @@
+# The same artifacts as grad_batched, without dynamic batching: every request
+# runs on its own, on the smallest artifact that holds its rows. The baseline
+# grad_batched is compared against.
+name: "grad_unbatched"
+backend: "tlaloc"
+max_batch_size: 8
+input [ { name: "A" data_type: TYPE_FP32 dims: [ 2, 2 ] } ]
+output [ { name: "GRAD" data_type: TYPE_FP32 dims: [ 2, 2 ] } ]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "grad_b1.mlir, grad_b2.mlir, grad_b4.mlir, grad_b8.mlir" } }

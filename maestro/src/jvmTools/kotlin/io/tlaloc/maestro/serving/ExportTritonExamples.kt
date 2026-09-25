@@ -1,9 +1,11 @@
 package io.tlaloc.maestro.serving
 
 import io.tlaloc.core.BF16
+import io.tlaloc.core.Bool
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
+import io.tlaloc.core.I64
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirType
@@ -21,7 +23,7 @@ import java.nio.file.Path
  * (`triton/examples/model_repository/`) and the reference values its verify
  * script checks against (`triton/examples/reference/`).
  *
- * Four models:
+ * The models:
  *
  * - `matmul_sumsq`: `f(A) = sum(A · A)` for a 2x2 `A`, reverse-transformed with
  *   the forward value kept, so the served function returns `(f(A), df/dA)`.
@@ -31,6 +33,15 @@ import java.nio.file.Path
  *   output per dtype. It exists to exercise the backend's non-f32 paths.
  * - `buckets`: `x · x + x` over f32 vectors, emitted twice, for length 4 and
  *   for length 8. The model serves both files, one per shape.
+ * - `int64_bool`: i64 and bool tensors: `x · x + x` over i64, `(x · x > x) and b`
+ *   and `not b`. The i64 values go past the i32 range.
+ * - `grad_batched` and `grad_unbatched`: the gradient of `sum(A · A)` for a
+ *   batch of 2x2 matrices, emitted for batch 1, 2, 4 and 8. The two models
+ *   serve the same files; only `grad_batched` turns on Triton's dynamic
+ *   batching. Rows are independent, so each row is `df/dA` of its own `A`.
+ * - `large_io` and `large_io_host`: `x · x + x` over 4Mi f32 values (16 MiB in,
+ *   16 MiB out), for measuring what reading and writing GPU memory in place
+ *   saves; `large_io_host` sets `zero_copy` false.
  * - `reference_decode`: the reference decode graph's serving artifact (one
  *   attention layer over a paged KV cache, six compiled batch/context
  *   entries), written by [TritonModelRepository.write] in client mode. Its
@@ -97,6 +108,57 @@ fun main(args: Array<String>) {
         writeModule(repo.resolve("buckets/1/len$n.mlir"), bucket.toStablehlo())
     }
 
+    // int64_bool ----------------------------------------------------------
+    val int64Bool = DxirBuilder.function("int64_bool") {
+        val ti = DxirType(I64, listOf(4))
+        val tb = DxirType(Bool, listOf(4))
+        val x = param("x", ti)
+        val b = param("b", tb)
+        val xx = op(OpKind.MUL, listOf(x, x), ti)
+        val y = op(OpKind.ADD, listOf(xx, x), ti)
+        val above = op(OpKind.COMPARE, listOf(xx, x), tb, mapOf("direction" to "GT"))
+        listOf(y, op(OpKind.LAND, listOf(above, b), tb), op(OpKind.NOT, listOf(b), tb))
+    }
+    writeModule(repo.resolve("int64_bool/1/model.mlir"), int64Bool.toStablehlo())
+
+    // grad_batched / grad_unbatched ------------------------------------------
+    val batches = listOf(1, 2, 4, 8)
+    var batchedReference = ""
+    for (b in batches) {
+        val t = DxirType(F32, listOf(b, 2, 2))
+        val sumsq = DxirBuilder.function("batched_sumsq_b$b") {
+            val a = param("A", t)
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MATMUL, listOf(a, a), t)), scalar))
+        }
+        val grad = DxirReverseTransform.apply(sumsq)
+        for (model in listOf("grad_batched", "grad_unbatched")) {
+            writeModule(repo.resolve("$model/1/grad_b$b.mlir"), grad.toStablehlo())
+        }
+        if (b == batches.last()) {
+            // Small integers, so every product and sum is exact in f32.
+            val a = FloatArray(b * 4) { ((it * 5) % 17 - 8).toFloat() }
+            val g = DxirInterpreter.evalFunction(grad, listOf(a)).single()
+            batchedReference = buildString {
+                append("{\n")
+                append("  \"source\": \"DXIR interpreter, exportTritonExamples\",\n")
+                append("  \"inputs\": {\"A\": {\"shape\": [$b, 2, 2], \"data\": ${floats(a)}}},\n")
+                append("  \"outputs\": {\"GRAD\": {\"shape\": [$b, 2, 2], \"data\": ${floats(g)}}}\n")
+                append("}\n")
+            }
+        }
+    }
+    Files.writeString(reference.resolve("grad_batched.json"), batchedReference)
+
+    // large_io / large_io_host ----------------------------------------------
+    val large = DxirBuilder.function("large_square_plus") {
+        val t = DxirType(F32, listOf(LARGE_IO_ELEMENTS))
+        val x = param("x", t)
+        listOf(op(OpKind.ADD, listOf(op(OpKind.MUL, listOf(x, x), t), x), t))
+    }
+    for (model in listOf("large_io", "large_io_host")) {
+        writeModule(repo.resolve("$model/1/model.mlir"), large.toStablehlo())
+    }
+
     // reference_decode ----------------------------------------------------
     val artifact = Files.createTempDirectory("tlaloc-reference-decode")
     try {
@@ -116,6 +178,9 @@ fun main(args: Array<String>) {
     Files.writeString(reference.resolve("reference_decode.json"), referenceDecodeSteps())
     println("wrote ${repo.toAbsolutePath()}")
 }
+
+/** 4Mi f32 values: 16 MiB each way. */
+private const val LARGE_IO_ELEMENTS = 4 * 1024 * 1024
 
 private fun writeModule(path: Path, mlir: String) {
     Files.createDirectories(path.parent)

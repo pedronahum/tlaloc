@@ -1,0 +1,16 @@
+# The gradient of sum(A . A) for a batch of 2x2 matrices, emitted by Tlaloc
+# (./gradlew :maestro:exportTritonExamples) for batch 1, 2, 4 and 8. Rows are
+# independent: row i of GRAD is df/dA of row i of A.
+#
+# Dynamic batching: Triton gathers concurrent requests (up to max_batch_size
+# rows) and hands them to the backend in one call; the backend concatenates
+# them along dim 0, runs the smallest artifact whose batch holds them all
+# (zero-padding the rest), and gives each request its own rows back.
+name: "grad_batched"
+backend: "tlaloc"
+max_batch_size: 8
+input [ { name: "A" data_type: TYPE_FP32 dims: [ 2, 2 ] } ]
+output [ { name: "GRAD" data_type: TYPE_FP32 dims: [ 2, 2 ] } ]
+dynamic_batching { max_queue_delay_microseconds: 200 }
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "grad_b1.mlir, grad_b2.mlir, grad_b4.mlir, grad_b8.mlir" } }

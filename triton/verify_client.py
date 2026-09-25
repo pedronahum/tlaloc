@@ -25,6 +25,19 @@ Expected values:
                 sequence's pages by correlation ID. The reference steps' first
                 sequence sent one token per request and all at once, two more
                 sequences, and requests the backend must refuse by name.
+  int64_bool    i64 and bool tensors emitted by Tlaloc, computed here exactly.
+  dtypes_small  f16, i8 and u8 through a hand-written StableHLO module (Tlaloc
+                has no such dtypes), computed here exactly.
+  grad_batched / grad_unbatched
+                the gradient of sum(A . A) per 2x2 row, against the DXIR
+                interpreter (examples/reference/grad_batched.json) and the
+                closed form rowsum(A)[q] + colsum(A)[p], bit for bit; many
+                concurrent one-row requests, which Triton's dynamic batcher
+                gathers for grad_batched, each get exactly their own row back.
+  zero copy     matmul_sumsq and large_io with inputs and outputs in CUDA
+                shared memory over gRPC: the same bits as the host path, and
+                the input region is left unchanged. (verify.sh checks the
+                server log for which path each tensor took.)
 
 --perturb changes one expected GRAD value; the run must then fail. That is
 the negative control: it shows a wrong answer is caught.
@@ -72,6 +85,220 @@ def bf16_round(x):
     bits = struct.unpack("<I", struct.pack("<f", x))[0]
     bits = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000
     return struct.unpack("<f", struct.pack("<I", bits))[0]
+
+
+def check_exact(label, got, want):
+    """Equality of integer or bool lists, compared as Python ints."""
+    ok = [int(g) for g in got] == [int(w) for w in want]
+    print(f"  {'ok  ' if ok else 'FAIL'} {label}: got {list(got)} want {list(want)}")
+    if not ok:
+        FAILURES.append(label)
+
+
+def dtypes_wide(kind, mod, url, np, perturb):
+    """INT64 and BOOL (int64_bool, emitted by Tlaloc) and FP16, INT8, UINT8
+    (dtypes_small, hand-written StableHLO) over one transport."""
+    print(f"{kind}  int64_bool, dtypes_small  {url}")
+    client = mod.InferenceServerClient(url=url)
+
+    def inp(name, arr, dt):
+        i = mod.InferInput(name, list(arr.shape), dt)
+        if kind == "http":
+            i.set_data_from_numpy(arr, binary_data=True)
+        else:
+            i.set_data_from_numpy(arr)
+        return i
+
+    x = [1, 2, -5, 3_000_000_000]  # x * x + x = 9e18 + 3e9, past the i32 range
+    b = [True, True, False, True]
+    want_y = [v * v + v for v in x]
+    if perturb:
+        want_y[3] += 1
+    res = client.infer("int64_bool", [inp("X", np.array(x, dtype=np.int64), "INT64"),
+                                      inp("B", np.array(b, dtype=np.bool_), "BOOL")])
+    y = res.as_numpy("Y")
+    check_exact(f"{kind} int64_bool Y (INT64)", y.tolist(), want_y)
+    check_exact(f"{kind} int64_bool ABOVE_AND_B (BOOL)", res.as_numpy("ABOVE_AND_B").tolist(),
+                [v * v > v and c for v, c in zip(x, b)])
+    check_exact(f"{kind} int64_bool NOT_B (BOOL)", res.as_numpy("NOT_B").tolist(), [not c for c in b])
+    if y.dtype != np.int64 or res.as_numpy("NOT_B").dtype != np.bool_:
+        print(f"  FAIL {kind} int64_bool output dtypes {y.dtype} {res.as_numpy('NOT_B').dtype}")
+        FAILURES.append(f"{kind} int64_bool dtypes")
+
+    xf = [1.0, 2.0, -0.5, 3.0]
+    xi = [1, 2, -5, 10]
+    xu = [1, 2, 5, 15]
+    res = client.infer("dtypes_small", [inp("X_F16", np.array(xf, dtype=np.float16), "FP16"),
+                                        inp("X_I8", np.array(xi, dtype=np.int8), "INT8"),
+                                        inp("X_U8", np.array(xu, dtype=np.uint8), "UINT8")])
+    yf = res.as_numpy("Y_F16")
+    check(f"{kind} dtypes_small Y_F16 (FP16)", yf.astype(np.float32).tolist(), [v * v + v for v in xf])
+    check_exact(f"{kind} dtypes_small Y_I8 (INT8)", res.as_numpy("Y_I8").tolist(), [v * v + v for v in xi])
+    check_exact(f"{kind} dtypes_small Y_U8 (UINT8)", res.as_numpy("Y_U8").tolist(), [v * v + v for v in xu])
+    if yf.dtype != np.float16 or res.as_numpy("Y_I8").dtype != np.int8 \
+            or res.as_numpy("Y_U8").dtype != np.uint8:
+        print(f"  FAIL {kind} dtypes_small output dtypes")
+        FAILURES.append(f"{kind} dtypes_small dtypes")
+
+
+def grad_rows(np, a):
+    """Closed-form df/dA of sum(A . A) per row: rowsum(A)[q] + colsum(A)[p]."""
+    a = np.asarray(a, dtype=np.float32).reshape(-1, 2, 2)
+    return (a.sum(axis=2)[:, None, :] + a.sum(axis=1)[:, :, None]).astype(np.float32)
+
+
+def model_counts(client, name):
+    stats = client.get_inference_statistics(model_name=name, as_json=True)["model_stats"][0]
+    return int(stats.get("inference_count", 0)), int(stats.get("execution_count", 0))
+
+
+def batching(grpc, np, grpcclient, reference, perturb):
+    """Dynamic batching of the gradient model: every request gets its own
+    rows back, batched or not, bit for bit."""
+    import concurrent.futures
+    import random
+    import threading
+
+    print(f"grpc  grad_batched, grad_unbatched  {grpc}")
+    ref = json.loads(Path(reference).read_text())
+    a = np.array(ref["inputs"]["A"]["data"], dtype=np.float32).reshape(ref["inputs"]["A"]["shape"])
+    want = np.array(ref["outputs"]["GRAD"]["data"], dtype=np.float32).reshape(a.shape)
+    closed = grad_rows(np, a)
+    if perturb:
+        want = want.copy()
+        want[5, 1, 0] += 1.0
+    check("interpreter reference vs closed form", want.reshape(-1).tolist(), closed.reshape(-1).tolist())
+
+    def infer(client, model, rows):
+        i = grpcclient.InferInput("A", list(rows.shape), "FP32")
+        i.set_data_from_numpy(rows)
+        return client.infer(model, [i]).as_numpy("GRAD")
+
+    client = grpcclient.InferenceServerClient(url=grpc)
+    for model in ("grad_batched", "grad_unbatched"):
+        got = infer(client, model, a)
+        check(f"{model} 8 rows in one request vs interpreter", got.reshape(-1).tolist(),
+              want.reshape(-1).tolist())
+        got = infer(client, model, a[:3])  # runs on the batch-4 artifact, one row of padding
+        check(f"{model} 3 rows (padded to 4) vs interpreter", got.reshape(-1).tolist(),
+              want[:3].reshape(-1).tolist())
+
+    # Concurrent one-row requests, random small integers (exact in f32).
+    rng = random.Random(7)
+    rows = [np.array([[rng.randint(-8, 8) for _ in range(2)] for _ in range(2)],
+                     dtype=np.float32).reshape(1, 2, 2) for _ in range(512)]
+    expected = [grad_rows(np, r) for r in rows]
+    if perturb:
+        expected[17] = expected[17].copy()
+        expected[17][0, 0, 0] += 1.0
+    results = {}
+    for model in ("grad_batched", "grad_unbatched"):
+        before = model_counts(client, model)
+        local = threading.local()
+
+        def one(k, model=model):
+            if not hasattr(local, "client"):
+                local.client = grpcclient.InferenceServerClient(url=grpc)
+            return infer(local.client, model, rows[k])
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as pool:
+            got = list(pool.map(one, range(len(rows))))
+        after = model_counts(client, model)
+        results[model] = got
+        bad = [k for k in range(len(rows)) if got[k].tobytes() != expected[k].tobytes()]
+        ok = not bad
+        print(f"  {'ok  ' if ok else 'FAIL'} {model}: {len(rows)} concurrent one-row requests, "
+              f"{len(rows) - len(bad)} match the closed form bit for bit"
+              + (f" (first mismatch: request {bad[0]})" if bad else ""))
+        if not ok:
+            FAILURES.append(f"{model} concurrent rows")
+        inferences, executions = after[0] - before[0], after[1] - before[1]
+        print(f"       {model}: {inferences} inferences in {executions} executions")
+        if model == "grad_batched" and not executions < inferences:
+            print("  FAIL grad_batched: no requests were batched together")
+            FAILURES.append("grad_batched batched nothing")
+        if model == "grad_unbatched" and executions != inferences:
+            print("  FAIL grad_unbatched: requests were batched together")
+            FAILURES.append("grad_unbatched batched")
+    same = all(x.tobytes() == y.tobytes() for x, y in zip(results["grad_batched"], results["grad_unbatched"]))
+    print(f"  {'ok  ' if same else 'FAIL'} batched and unbatched answers are identical for all "
+          f"{len(rows)} requests")
+    if not same:
+        FAILURES.append("batched vs unbatched")
+
+
+def zero_copy(grpc, np, grpcclient, ref_value, ref_grad):
+    """Inputs and outputs in CUDA shared memory over gRPC."""
+    try:
+        import tritonclient.utils.cuda_shared_memory as cudashm
+    except Exception as e:  # noqa: BLE001 - missing cuda-python or no GPU
+        print(f"FAIL zero copy: tritonclient's CUDA shared memory is unavailable ({e}); "
+              "install tritonclient[all] (it needs cuda-python for the CUDA version of the driver)")
+        FAILURES.append("zero copy unavailable")
+        return
+    print(f"grpc  zero copy (CUDA shared memory)  {grpc}")
+    client = grpcclient.InferenceServerClient(url=grpc)
+    client.unregister_cuda_shared_memory()
+    regions = []
+
+    def region(name, nbytes):
+        h = cudashm.create_shared_memory_region(name, nbytes, 0)
+        regions.append(h)
+        client.register_cuda_shared_memory(name, cudashm.get_raw_handle(h), 0, nbytes)
+        return h
+
+    try:
+        a = np.array([[1, 2], [3, 4]], dtype=np.float32)
+        h_in = region("tl_a", a.nbytes)
+        h_grad = region("tl_grad", 16)
+        h_value = region("tl_value", 4)
+        cudashm.set_shared_memory_region(h_in, [a])
+        i = grpcclient.InferInput("A", [2, 2], "FP32")
+        i.set_shared_memory("tl_a", a.nbytes)
+        o_grad = grpcclient.InferRequestedOutput("GRAD")
+        o_grad.set_shared_memory("tl_grad", 16)
+        o_value = grpcclient.InferRequestedOutput("VALUE")
+        o_value.set_shared_memory("tl_value", 4)
+        client.infer("matmul_sumsq", [i], outputs=[o_grad, o_value])
+        check("grpc cuda-shm matmul_sumsq GRAD vs interpreter",
+              cudashm.get_contents_as_numpy(h_grad, np.float32, [4]).tolist(), ref_grad)
+        check("grpc cuda-shm matmul_sumsq VALUE vs interpreter",
+              cudashm.get_contents_as_numpy(h_value, np.float32, [1]).tolist(), ref_value)
+
+        n = 4 * 1024 * 1024
+        x = (np.arange(n, dtype=np.float32) % 1024) * np.float32(0.5) - np.float32(256)
+        want = x * x + x  # exact: every value is a multiple of 0.25 below 2^17
+        h_x = region("tl_x", x.nbytes)
+        h_y = region("tl_y", x.nbytes)
+        for model in ("large_io", "large_io_host"):
+            cudashm.set_shared_memory_region(h_x, [x])
+            cudashm.set_shared_memory_region(h_y, [np.zeros(n, dtype=np.float32)])
+            i = grpcclient.InferInput("X", [n], "FP32")
+            i.set_shared_memory("tl_x", x.nbytes)
+            o = grpcclient.InferRequestedOutput("Y")
+            o.set_shared_memory("tl_y", x.nbytes)
+            client.infer(model, [i], outputs=[o])
+            y = cudashm.get_contents_as_numpy(h_y, np.float32, [n])
+            ok = y.tobytes() == want.tobytes()
+            print(f"  {'ok  ' if ok else 'FAIL'} grpc cuda-shm {model}: all {n} values equal x * x + x "
+                  f"bit for bit")
+            if not ok:
+                FAILURES.append(f"cuda-shm {model}")
+            unchanged = cudashm.get_contents_as_numpy(h_x, np.float32, [n]).tobytes() == x.tobytes()
+            print(f"  {'ok  ' if unchanged else 'FAIL'} grpc cuda-shm {model}: the input region is unchanged")
+            if not unchanged:
+                FAILURES.append(f"cuda-shm {model} input written")
+        i = grpcclient.InferInput("X", [n], "FP32")
+        i.set_data_from_numpy(x)
+        y = client.infer("large_io", [i]).as_numpy("Y")
+        ok = y.tobytes() == want.tobytes()
+        print(f"  {'ok  ' if ok else 'FAIL'} grpc large_io without shared memory: the same bits")
+        if not ok:
+            FAILURES.append("large_io host bytes")
+    finally:
+        client.unregister_cuda_shared_memory()
+        for h in regions:
+            cudashm.destroy_shared_memory_region(h)
 
 
 def buckets(http, np, httpclient):
@@ -221,6 +448,36 @@ def reference_sequence(kind, mod, url, np, steps):
         step(corrid, [], end=True)
 
 
+def refusals_batching(http):
+    """Batching configurations the backend must refuse at load, by name."""
+    print(f"refusals batching  {http}")
+    with urllib.request.urlopen(f"http://{http}/v2/models/grad_batched/config") as r:
+        batched = json.load(r)
+    with urllib.request.urlopen(f"http://{http}/v2/models/reference_decode/config") as r:
+        decode = json.load(r)
+    too_big = json.loads(json.dumps(batched))
+    too_big["max_batch_size"] = 16
+    stateful = json.loads(json.dumps(decode))
+    stateful["max_batch_size"] = 4
+    cases = [
+        ("grad_batched", "max_batch_size above the largest artifact", too_big,
+         "max_batch_size is 16 but the largest artifact takes batch 8"),
+        ("reference_decode", "state with max_batch_size > 0", stateful,
+         "state 'keyCache0' cannot be combined with max_batch_size > 0"),
+    ]
+    for name, label, config, needle in cases:
+        status, body = load(http, name, config)
+        ok = status != 200 and needle in body
+        print(f"  {'ok  ' if ok else 'FAIL'} refused: {label}: HTTP {status} {body.strip()[:200]}")
+        if not ok:
+            FAILURES.append(f"refusal: {label}")
+        status, body = load(http, name)
+        ok = status == 200
+        print(f"  {'ok  ' if ok else 'FAIL'} reload {name} from config.pbtxt: HTTP {status}")
+        if not ok:
+            FAILURES.append(f"reload {name}")
+
+
 def refusals_sequence(http):
     """Sequence-mode configurations the backend must refuse at load, by name."""
     print(f"refusals sequence mode  {http}")
@@ -329,6 +586,11 @@ def refusals(http):
         ("result writing a state no argument reads",
          variant({**good, "results": "output:VALUE, output:GRAD, state:kv"}),
          "the 'results' parameter writes state 'kv', which no state: argument"),
+        ("zero_copy that is not true or false", variant({**good, "zero_copy": "yes"}),
+         "the 'zero_copy' parameter must be true or false, got 'yes'"),
+        ("a GPU this machine does not have",
+         variant(good, instance_group=[{"kind": "KIND_GPU", "count": 1, "gpus": [7]}]),
+         "gpu id 7"),
     ]
     for label, config, needle in cases:
         status, body = load(http, "matmul_sumsq", config)
@@ -360,6 +622,8 @@ def main():
     ap.add_argument("--reference", default=str(Path(__file__).parent / "examples/reference/matmul_sumsq.json"))
     ap.add_argument("--reference-decode",
                     default=str(Path(__file__).parent / "examples/reference/reference_decode.json"))
+    ap.add_argument("--reference-batched",
+                    default=str(Path(__file__).parent / "examples/reference/grad_batched.json"))
     ap.add_argument("--perturb", action="store_true",
                     help="negative control: expect a wrong GRAD and a wrong decode logit")
     args = ap.parse_args()
@@ -493,8 +757,14 @@ def main():
     for kind, mod, url in (("http", httpclient, args.http), ("grpc", grpcclient, args.grpc)):
         reference_sequence(kind, mod, url, np, steps)
 
+    for kind, mod, url in (("http", httpclient, args.http), ("grpc", grpcclient, args.grpc)):
+        dtypes_wide(kind, mod, url, np, args.perturb)
+    batching(args.grpc, np, grpcclient, args.reference_batched, args.perturb)
+    zero_copy(args.grpc, np, grpcclient, ref_value, ref_grad)
+
     buckets(args.http, np, httpclient)
     refusals(args.http)
+    refusals_batching(args.http)
     refusals_sequence(args.http)
 
     if FAILURES:

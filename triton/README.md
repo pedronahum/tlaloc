@@ -13,6 +13,20 @@ backend keeps the sequence's KV pages on the device, a prompt runs as one
 prefill call, and the decode steps of several sequences run as one batch. A
 client sends token ids and gets the next token's logits back.
 
+A stateless model can use Triton's dynamic batcher: the backend concatenates
+the requests along dim 0 and runs them as one call. Tensors a client places
+in CUDA shared memory are read and written in place on the GPU, and each GPU
+an instance group names gets its own PJRT client.
+
+| | What | Where it ran |
+|---|---|---|
+| ✅ | Sequence mode, prefill and batched decode, TinyLlama-1.1B | GB10, `verify.sh` |
+| ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`) | GB10, `verify.sh` |
+| ✅ | CUDA shared memory inputs read in place, outputs written device to device | GB10, `verify.sh` |
+| ✅ | FP32, FP64, FP16, BF16, INT8, INT32, INT64, UINT8, BOOL over HTTP and gRPC | GB10, `verify.sh` |
+| ✅ | GPU 0 selected by ordinal; a GPU the machine does not have is refused by name | GB10, `verify.sh` |
+| 🧪 | Instances on GPUs other than 0, one PJRT client per GPU | Not run: the GB10 has one GPU |
+
 This directory is not a Gradle module and is not published to Maven.
 
 ```
@@ -20,21 +34,22 @@ triton/
   backend/              the backend source (C++17); sequence_mode.{h,cc} is sequence mode
   third_party/          vendored upstream headers and sources (see docs/vendoring.md)
   examples/
-    model_repository/   five example models, emitted by Tlaloc
+    model_repository/   the example models, emitted by Tlaloc (one written by hand, and marked so)
     reference/          the DXIR interpreter's results for them
   build_backend.sh      builds the backend inside the Triton container
   fetch_pjrt_plugin.sh  downloads the PJRT CUDA plugin
   run_server.sh         starts tritonserver with the backend and a model repository
   verify.sh             end-to-end check: start, infer over HTTP and gRPC, compare, stop
   verify_client.py      the client half of verify.sh
+  perf_client.py        the measurements verify.sh prints (batching, zero copy)
   sequence_client.py    a client for a sequence-mode model (Python, tritonclient)
   generate_client.py    greedy decoding from text against a sequence-mode model
   sequence_checks.py    the TinyLlama sequence-mode checks verify.sh runs
 ```
 
 `backends/` (the built `.so`), `pjrt/` (the downloaded plugin) and `build/`
-(the TinyLlama model verify.sh writes) are build outputs and are not
-committed.
+(the device test and the TinyLlama model verify.sh writes) are build outputs
+and are not committed.
 
 ## Prerequisites
 
@@ -47,9 +62,13 @@ committed.
   API 0.104, CUDA 13), checks its sha256 and unpacks the one `.so` needed. Its
   CUDA major version matches the container, so it uses the container's CUDA
   libraries and nothing else has to be mounted.
-- For `verify.sh`: `curl`, and a Python with `tritonclient[http,grpc]`
-  (`pip install "tritonclient[http,grpc]"` in any virtual environment; point
-  `TRITON_CLIENT_PYTHON` at its `python`).
+- For `verify.sh`: `curl`, and a Python with `tritonclient[all]` whose
+  `cuda-python` matches the CUDA major version of the host driver's
+  libraries that the client can load. On the GB10 (driver 580, CUDA 13)
+  tritonclient 2.72 needs `cuda-python` 12.x: with `cuda-bindings` 13 its
+  CUDA shared memory helper fails (`cudaIpcMemHandle_t` has no `reserved`).
+  For example `pip install "tritonclient[all]==2.72.0" "cuda-python>=12.8,<13"`
+  in a virtual environment; point `TRITON_CLIENT_PYTHON` at its `python`.
 
 Tested on an NVIDIA GB10 (aarch64, unified memory) with host driver
 580.126.09.
@@ -64,17 +83,44 @@ triton/run_server.sh            # serve the example repository on ports 8000-800
 ```
 
 `build_backend.sh` also builds and runs the unit test for the StableHLO text
-reader (`backend/test/stablehlo_text_test.cc`) before it links the backend.
+reader (`backend/test/stablehlo_text_test.cc`) before it links the backend,
+and builds `build/tests/pjrt_device_test` (`backend/test/pjrt_device_test.cc`),
+which needs a GPU and is run by `verify.sh`.
 
-`verify.sh` starts the server, waits for it to be ready, and runs
+`verify.sh` first runs `pjrt_device_test` in the Triton container against the
+real plugin: a PJRT client created for GPU 0 sees exactly one device, CUDA
+ordinal 0; a client for a GPU the machine does not have (GPU 7 here) is
+refused with a message naming it; and `x * x + x` over 1024 values read in
+place from `cudaMalloc` memory, with the result copied device to device, gives
+the same bits as the host path and leaves the input unchanged. Run again with
+one wrong expected value, it must fail.
+
+It then starts the server, waits for it to be ready, and runs
 `verify_client.py`, which checks:
 
 - `matmul_sumsq` over KServe v2 JSON, tritonclient HTTP and tritonclient gRPC,
   bit for bit against the DXIR interpreter's result
   (`examples/reference/matmul_sumsq.json`) and against the closed form
   (value 54, gradient `[[7, 11], [9, 13]]`);
-- `dtypes` (FP64, BF16, INT32) over HTTP and gRPC, bit for bit, including a
-  request that asks for only one output;
+- `dtypes` (FP64, BF16, INT32), `int64_bool` (INT64, BOOL) and
+  `dtypes_small` (FP16, INT8, UINT8) over HTTP and gRPC, exactly, including a
+  request that asks for only one output. The INT64 values go past the INT32
+  range (`3e9 * 3e9 + 3e9`);
+- `grad_batched` and `grad_unbatched` over gRPC: 8 rows in one request and 3
+  rows (run on the batch-4 artifact with a row of padding) against the DXIR
+  interpreter (`examples/reference/grad_batched.json`) and the closed form
+  `rowsum(A)[q] + colsum(A)[p]`, bit for bit; then 512 one-row requests from
+  32 threads to each model. Every request gets exactly its own row back, the
+  two models' answers are identical, Triton's statistics show that
+  `grad_batched` ran them in fewer executions than requests (162 and 181
+  executions for the 512 in two runs) and `grad_unbatched` in one execution each;
+- CUDA shared memory over gRPC: `matmul_sumsq` with `A`, `GRAD` and `VALUE` in
+  CUDA shared memory against the interpreter, and `large_io` and
+  `large_io_host` (16 MiB in, 16 MiB out) against the closed form, bit for
+  bit, with the input region unchanged afterwards; `large_io` without shared
+  memory gives the same bits. The server log must then say that `large_io`
+  read `X` in place and copied `Y` device to device, that `large_io_host`
+  took both through the host, and not the other way round;
 - `buckets` at both compiled lengths, and a third length that the backend
   refuses;
 - `reference_decode` over HTTP and gRPC: five decode steps (two batch/context
@@ -92,15 +138,18 @@ reader (`backend/test/stablehlo_text_test.cc`) before it links the backend.
   refuse by name (a prompt longer than the compiled context, a token outside
   the vocabulary, a step without START, a step after END, an empty request
   without END) and an empty END request that returns no logits;
-- eleven model configurations the backend must refuse at load, and seven
-  sequence-mode configurations (no `sequence_batching`, the direct strategy,
+- thirteen model configurations the backend or Triton must refuse at load
+  (including `zero_copy: "yes"` and `gpus: [ 7 ]`), two batching
+  configurations (`max_batch_size` above the largest artifact's batch, and
+  state with `max_batch_size > 0`), and seven sequence-mode configurations (no `sequence_batching`, the direct strategy,
   no CORRID control, `max_batch_size: 0`, `serving_manifest` combined with
   `artifact`, a manifest outside the version directory, two inputs), each by
   the expected message, each followed by a reload of the good configuration;
 - that the server is still live at the end.
 
 It then runs the client again with deliberately wrong expected values, and
-that run must fail. It stops the container.
+that run must fail. It prints the measurements of `perf_client.py`
+(`SKIP_PERF=1` skips them) and stops the container.
 
 Last, if the TinyLlama-1.1B checkpoint is in
 `~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0`
@@ -156,10 +205,17 @@ curl -s localhost:8000/v2/models/matmul_sumsq/infer \
 | `buckets` | `x · x + x`, compiled for length 4 and length 8 | `X` FP32 [-1] | `Y` FP32 [-1] |
 | `reference_decode` | one decode step of Tlaloc's reference decode graph (embedding, paged attention over a KV cache, LM head), six batch/context entries | `tokenIds`, `positions` INT32 [-1,1], `blockTables` INT32 [-1,-1], `seqLens`, `slotMapping` INT32 [-1] | `logits` FP32 [-1,1,11] |
 | `reference_sequence` | the `reference_decode` artifact in sequence mode | `TOKENS` INT32 [-1] (batch dim added, max batch 4), START/END/CORRID controls | `LOGITS` FP32 [11] |
+| `int64_bool` | `x · x + x` over i64, `(x · x > x) and b`, `not b` | `X` INT64 [4], `B` BOOL [4] | `Y` INT64, `ABOVE_AND_B` BOOL, `NOT_B` BOOL |
+| `dtypes_small` | `x · x + x` over f16, i8 and u8. **Written by hand**: Tlaloc's `DType` has no f16, i8 or u8, so this model shows only that the backend moves those types unchanged | `X_F16` FP16 [4], `X_I8` INT8 [4], `X_U8` UINT8 [4] | `Y_F16`, `Y_I8`, `Y_U8` |
+| `grad_batched` | `df/dA` of `sum(A · A)` per 2x2 row, compiled for batch 1, 2, 4 and 8, with `dynamic_batching` | `A` FP32 [2,2] (batch dim added, max batch 8) | `GRAD` FP32 [2,2] |
+| `grad_unbatched` | the same files without `dynamic_batching` | as `grad_batched` | as `grad_batched` |
+| `large_io` | `x · x + x` over 4Mi f32 values (16 MiB each way) | `X` FP32 [4194304] | `Y` FP32 [4194304] |
+| `large_io_host` | `large_io` with `zero_copy: "false"` | as `large_io` | as `large_io` |
 
-The `.mlir` files, the `reference_decode` and `reference_sequence` model directories and the files in
-`examples/reference/` are generated by Tlaloc. The gradient is Tlaloc's reverse-mode transform of the DXIR graph for
-`f`, not hand-written StableHLO. To regenerate them (JDK 25, from the
+The `.mlir` files (except `dtypes_small`'s), the `reference_decode` and
+`reference_sequence` model directories and the files in `examples/reference/`
+are generated by Tlaloc. The gradients are Tlaloc's reverse-mode transform of
+the DXIR graph, not hand-written StableHLO. To regenerate them (JDK 25, from the
 repository root):
 
 ```bash
@@ -167,7 +223,7 @@ repository root):
 ```
 
 The source is `maestro/src/jvmTools/kotlin/io/tlaloc/maestro/serving/ExportTritonExamples.kt`.
-The `config.pbtxt` files of the first three models are written by hand;
+The `config.pbtxt` files of the models other than these two are written by hand;
 `reference_decode` and `reference_sequence` are written whole from their
 serving artifact, as described in the next section.
 
@@ -358,6 +414,7 @@ first argument, the first `output` the first result.
 | `pjrt_plugin_path` | no | PJRT plugin `.so` for this model. Overrides the backend setting below. |
 | `arguments` | no | One item per argument of the entry function, in order, comma-separated: `input:<name>` (a config input), `weight:<file>` (a raw little-endian file in the version directory, dense and row-major with no header, uploaded once at load; its size must match the argument's type), or `state:<name>` (a buffer the model instance keeps on the device, zero at start). Every config input must appear exactly once. |
 | `results` | no | One item per result, in order: `output:<name>` (a config output) or `state:<name>` (replaces that state after the request runs). Every config output must appear exactly once, and every state read by `arguments` must be written by exactly one result. |
+| `zero_copy` | no | `true` (default) or `false`. With `false`, tensors in GPU memory go through the host; see "GPU memory in and out". |
 
 At load the backend reads each artifact's entry signature and checks it
 against `config.pbtxt`: the number of inputs and outputs, each data type, and
@@ -370,16 +427,102 @@ Triton has no rank-0 tensors in a model with `max_batch_size: 0`. Declare a
 rank-0 argument or result as `dims: [ 1 ]`; the backend maps one to the
 other.
 
-Data types: FP32, FP64, FP16, BF16, INT8, INT32, INT64, UINT8 and BOOL. Any
-other type is refused by name at load. `verify.sh` exercises FP32, FP64, BF16
-and INT32; the other five use the same code path with a different element
-width and have not been run.
+Data types: FP32, FP64, FP16, BF16, INT8, INT32, INT64, UINT8 and BOOL, all
+run by `verify.sh` over HTTP and gRPC. Any other type is refused by name at
+load. Tlaloc emits FP32, FP64, BF16, INT32, INT64 and BOOL; FP16, INT8 and
+UINT8 are run from a hand-written module (`dtypes_small`).
 
-With `max_batch_size > 0` the leading `-1` of each tensor is the batch
-dimension and the artifact must have been emitted for the exact batch sizes
-that will arrive (one bucket per batch size). The backend does not
-concatenate requests: each request in a Triton batch runs on its own. None
-of the example models batches, so this path has not been run.
+### Batching (`max_batch_size > 0`)
+
+With `max_batch_size > 0` the leading dimension of every tensor is the batch.
+Every artifact of the model takes one batch size `B` as dim 0 of each input
+and each output (the backend checks this at load), and the largest `B` must
+be at least `max_batch_size`. Rows must be independent: row `i` of every
+output depends only on row `i` of the inputs. That is Triton's contract for
+batching, and it is why `state:` arguments are refused with
+`max_batch_size > 0`.
+
+When Triton hands the backend several requests in one call (the dynamic
+batcher, `dynamic_batching { ... }`), the backend groups consecutive requests
+whose non-batch dimensions agree, concatenates each group along dim 0 on the
+host, runs the artifact with the smallest `B` that holds the group's rows,
+with the remaining rows zero, and gives each request its own rows of every
+output. A single request whose rows fill a bucket exactly runs on its own
+tensors (and can read GPU memory in place, below). Without
+`dynamic_batching` each request runs alone, padded to the smallest bucket
+that holds it. Triton's statistics count one execution per group.
+
+Export one artifact per batch size you want to run at; more sizes mean more
+compiles at load and less padding per call. The example `grad_batched`
+compiles batch 1, 2, 4 and 8.
+
+### GPU memory in and out
+
+A client can put input and output tensors in CUDA shared memory
+(`tritonclient.utils.cuda_shared_memory`, registered with
+`register_cuda_shared_memory`). Triton then hands the backend GPU pointers.
+
+- An input in one buffer on the instance's GPU, 16-byte aligned, is wrapped
+  in a PJRT buffer with `PJRT_Client_CreateViewOfDeviceBuffer` and read in
+  place: no copy through the host. The argument is marked non-donatable, so
+  XLA never writes into the client's memory.
+- An output Triton places in GPU memory on the instance's GPU is copied
+  device to device (`cudaMemcpy` from `PJRT_Buffer_OpaqueDeviceMemoryDataPointer`,
+  holding an external reference for the copy) when PJRT stores it densely in
+  exactly the tensor's byte size, which is the case for the XLA GPU plugin's
+  default layout.
+- Anything else (host memory, several buffers, another GPU, unaligned memory,
+  `zero_copy: "false"`, a plugin without these functions, a batched group)
+  goes through the host as before.
+
+The server log names the path the first time a model uses it, per tensor:
+`input 'X' is read in place from GPU memory (no host copy)`, `output 'Y' is
+copied device to device into GPU memory`, or `... goes through the host:
+<why>`. `run_server.sh` starts the container with `--ipc=host`, which CUDA
+IPC between the client's process and the server needs.
+
+### Measured on the GB10 (batching, GPU memory)
+
+`perf_client.py`, run by `verify.sh` over gRPC; the ranges are two runs. These
+are not a benchmark.
+
+| | Requests/s | Executions for 4000 requests |
+|---|---|---|
+| `grad_unbatched`, one-row requests, 32 in flight | 1,440 to 1,590 | 4000 |
+| `grad_batched`, the same requests | 7,700 to 7,810 | 760 to 830 (4.8 to 5.2 requests each) |
+
+| `large_io`, 16 MiB in and 16 MiB out | Client latency (median) | Server time per request |
+|---|---|---|
+| CUDA shared memory, read and written in place | 1.3 to 1.4 ms | 0.5 to 0.6 ms |
+| CUDA shared memory, through the host (`large_io_host`) | 5.2 to 5.7 ms | 4.5 to 4.8 ms (0.7 input, 1.5 to 1.7 compute including the upload, 2.2 to 2.3 output) |
+| gRPC bytes, no shared memory | 61 to 62 ms | 3.9 to 4.1 ms |
+
+On this machine the host round trip that reading and writing in place removes
+is about 4 ms of the server's 4.5 to 4.8 ms for 32 MiB of traffic. The GB10's GPU
+memory is the system RAM; the saving on a discrete GPU, where these copies
+cross PCIe, has not been measured. Most of the 62 ms without
+shared memory is moving 32 MiB through gRPC.
+
+### GPUs
+
+The backend creates one PJRT client per plugin and GPU, with the plugin's
+`visible_devices` option set to that GPU's CUDA ordinal, and checks that the
+client's one device has that ordinal (`PJRT_Device_LocalHardwareId`). At load
+a model compiles its artifacts and uploads its weights once for every GPU its
+`instance_group` names (`KIND_CPU` and `KIND_MODEL` instances run on GPU 0),
+and each instance runs on its own GPU's executables. In sequence mode each GPU
+gets its own copy of the model, and each instance its own pools, as before.
+
+A `gpus` entry the machine does not have is refused by Triton itself before
+the backend is called (`instance group ... specifies invalid or unsupported
+gpu id 7`); `verify.sh` checks that message. If the plugin were asked for such
+a GPU anyway, the backend refuses the client by name: the XLA CUDA plugin
+0.10.0 does not fail on `visible_devices: [7]` on a one-GPU machine, it gives
+back GPU 0, and the ordinal check catches that (`the PJRT client created for
+GPU 7 runs on GPU 0 instead`); `pjrt_device_test` certifies it.
+
+🧪 Instances on a GPU other than 0 have not run: the GB10 has one GPU. What
+ran is GPU 0 selected through `visible_devices` and the refusal above.
 
 ## Backend configuration and GPU memory
 
@@ -399,12 +542,14 @@ that is 75% of the machine's memory, and a few such clients can take the
 machine down. The default here is 0.3 rather than Tlaloc's usual 0.5 because
 Triton itself also allocates GPU memory in the same process.
 
-The backend creates one PJRT client per plugin path and shares it between all
-models that use that plugin. It is created when the first such model loads
-and destroyed when the last one unloads. Each model's executables are
-destroyed when the model unloads.
+The backend creates one PJRT client per plugin path and GPU and shares it
+between all models that use that plugin on that GPU. It is created when the
+first such model loads and destroyed when the last one unloads. Each model's
+executables are destroyed when the model unloads. `memory_fraction` applies
+to each client, that is to each GPU.
 
-`run_server.sh` mounts the model repository at `/models`, the backend at
+`run_server.sh` starts the container with `--ipc=host` (for CUDA shared
+memory clients) and mounts the model repository at `/models`, the backend at
 `/opt/tritonserver/backends/tlaloc`, the plugin at
 `/opt/pjrt/xla_cuda_plugin.so` (all read-only) and the host's `/dev/shm` (for
 system shared memory clients), sets `TLALOC_PJRT_PLUGIN_PATH`, and passes any
@@ -419,14 +564,12 @@ defaults.
   signature.
 - Static shapes only. A `?` dimension in the entry signature is refused;
   export one artifact per shape and list them in `artifact`.
-- One device. Every instance runs on PJRT device 0; a `KIND_GPU` instance on
-  any other GPU is refused. On a multi-GPU host, set `gpus: [ 0 ]` or
-  restrict the container to one GPU.
-- Inputs are copied to the device and outputs back to host memory for each
-  request. Input tensors in GPU memory (CUDA shared memory) are first copied
-  to the host, and outputs Triton places in GPU memory are copied there from
-  the host; `verify.sh` does not exercise these two paths. There is no
-  zero-copy path yet.
+- More than one GPU has not run (see "GPUs").
+- Host-memory inputs are copied to the device and outputs back to host memory
+  for each request. Requests batched together are concatenated on the host,
+  including those whose tensors are in GPU memory. Sequence mode reads its
+  token ids from host memory (they are a few bytes) and writes logits through
+  the host.
 - A model that fails to load stays in the repository index as
   `UNAVAILABLE`. With Triton's default `--strict-readiness=true` the server
   then answers `/v2/health/ready` with 400 until that model loads, while

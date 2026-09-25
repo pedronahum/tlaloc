@@ -1,0 +1,18 @@
+# x . x + x over f16, i8 and u8. WRITTEN BY HAND, not emitted by Tlaloc:
+# Tlaloc's DType has no f16, i8 or u8, so this model only shows that the
+# backend moves those types between Triton and PJRT unchanged.
+name: "dtypes_small"
+backend: "tlaloc"
+max_batch_size: 0
+input [
+  { name: "X_F16" data_type: TYPE_FP16 dims: [ 4 ] },
+  { name: "X_I8" data_type: TYPE_INT8 dims: [ 4 ] },
+  { name: "X_U8" data_type: TYPE_UINT8 dims: [ 4 ] }
+]
+output [
+  { name: "Y_F16" data_type: TYPE_FP16 dims: [ 4 ] },
+  { name: "Y_I8" data_type: TYPE_INT8 dims: [ 4 ] },
+  { name: "Y_U8" data_type: TYPE_UINT8 dims: [ 4 ] }
+]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "model.mlir" } }
