@@ -18,7 +18,8 @@
 //
 // When a sequence needs pages the pool does not have, the backend reclaims
 // pages from sequences Triton has ended without telling it (idle for longer
-// than the reclaim rule in sequence_mode.cc), least recently active first, and
+// than the reclaim rule in sequence_mode.cc; every request Triton hands over,
+// refused or not, counts as activity), least recently active first, and
 // only as many as the request needs. It never takes pages from a sequence
 // Triton still holds: if reclaiming is not enough the request is refused by
 // name (UNAVAILABLE), the refusal lists the sequences holding pages, and a

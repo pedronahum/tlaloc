@@ -326,7 +326,8 @@ compiles every entry and uploads the weights. Per request:
 - the backend derives each sequence's block table and slots from the pages it
   holds; the client sends token ids only;
 - when pages run short, the backend reclaims them only from sequences Triton
-  has already ended (idle past the rule), least recently active first and
+  has already ended (idle past the rule; a request the backend refuses still
+  counts as activity, as it does for Triton), least recently active first and
   only as many as needed; otherwise it refuses the request by name, listing
   the sequences that hold pages, and a sequence refused mid-generation keeps
   its pages and KV so the same request can be sent again. A live sequence is
@@ -370,8 +371,8 @@ is the system RAM), driver 580.126.09.
 | (iii) Triton, TinyLlama-1.1B | ✅ GB10 | `triton/verify.sh`: HuggingFace's 6 ids over HTTP and gRPC; four concurrent sequences each equal their solo run; page exhaustion and idle timeout |
 | (i) framework-free Python, a prompt as one prefill call | ✅ GB10 | `HfLlamaServingArtifactTest`: TinyLlama's 6-token prompt runs as one call of `prefill_b1_c64` and the 6 ids equal HuggingFace's; the vLLM lane on the same artifact (whose runner writes the prompt with one prefill call) gives the same ids |
 | (iii) Triton, Qwen3-0.6B | ✅ GB10 | `verify.sh`: 16 ids equal HuggingFace's for a plain and a chat-template prompt, the plain one also sent as text; the tied head reads the embedding table (310 weights, 2273 MiB, against 2867 MiB with a copy); about 15 ms a token |
-| (iii) Triton, Qwen3-0.6B with bf16 weights | ✅ GB10 | `verify.sh`: 1136 MiB on the device (half), all 32 ids equal HuggingFace's, logits within 3.0e-3 of the largest; about 11 ms a token |
-| (iii) Triton, a full page pool | ✅ GB10 | `verify.sh` (TinyLlama): a live sequence that needs a page when 21 sequences hold the pool is refused by name, nothing is reclaimed from live sequences, and after another sequence ends the same request succeeds and the sequence's ids equal its solo run's; abandoned sequences' pages are reclaimed least recently active first, only as many as needed (read from the server log) |
+| (iii) Triton, Qwen3-0.6B with bf16 weights | ✅ GB10 | `verify.sh`: 1136 MiB on the device (half), all 32 ids equal HuggingFace's, logits within 3.0e-3 of the largest (6e-3 required; at the f32 artifact's 2e-3 the check fails, so it tells bf16 weights from f32 ones); about 11 ms a token |
+| (iii) Triton, a full page pool | ✅ GB10 | `verify.sh` (TinyLlama): a live sequence that needs a page when 21 sequences hold the pool is refused by name, nothing is reclaimed from live sequences, and after another sequence ends the same request succeeds and the sequence's ids equal its solo run's; abandoned sequences' pages are reclaimed least recently active first, only as many as needed (read from the server log); a sequence whose requests are being refused is not reclaimed (Triton counts them as activity), and a refused second START does not leave the earlier sequence's KV to be continued; both checks failed against the backend before these rules |
 | (iii) Triton, preemption of live sequences (KV swap or recompute) | 📐 | not built |
 | (iii) Triton, image and video placeholder ids refused | ✅ GB10 | `verify.sh`: the window models' stand-in ids are refused by name in a START and mid-sequence, the sequence unchanged; Muse Glimmer's 200091 and 200092 with `MUSE_GLIMMER=1` |
 | (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic, served from a v3 artifact whose 39 sliding layers are in the windowed pool; about 265 ms a token (241 ms with the batcher's 1 ms queue delay) |

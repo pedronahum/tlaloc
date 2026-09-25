@@ -46,13 +46,15 @@
 #      server log), run it again with --perturb (must fail), run prefill_checks.py (1, 2 and 4 prompts prefilled together
 #      give their solo argmax and decoded ids, in one call: the log must show
 #      prefill_b4_c64 running four sequences; prefill throughput), run it with
-#      --perturb (must fail), and stop the server. Control: serve the same model with
+#      --perturb (must fail), run it on prompts of 2, 55, 9 and 30 tokens in
+#      one call (and with --perturb), and stop the server. Control: serve the same model with
 #      donate_kv_pools false; the log must show the pools copied in 100 of
 #      100 runs, and the 100 ids must equal those generated in place. Then
 #      serve the same model with a 200 ms
 #      idle timeout and run sequence_checks.py --queued: with steps waiting in
 #      Triton's queue past the timeout, no step Triton accepts may find its
-#      sequence's pages freed. Without the checkpoint this step is skipped by
+#      sequence's pages freed, and a sequence sent only refused requests for
+#      over ten timeouts is not reclaimed. Without the checkpoint this step is skipped by
 #      name.
 #   7. optional, Qwen3: if Qwen/Qwen3-0.6B is in the HuggingFace cache, export
 #      it the same way (Gradle, no server running), start a server, run
@@ -68,7 +70,8 @@
 #      the fixture's text prompt as text (the ids must be the fixture's
 #      prompt and continuation; a wrong expectation must fail). Then the same
 #      checkpoint exported with bf16 weights: half the MiB on the device, all
-#      32 ids equal, logits within 1e-2 of the largest, and --perturb must
+#      32 ids equal, logits within 6e-3 of the largest (and not within the f32
+#      tolerance of 2e-3), and --perturb must
 #      fail. Without the checkpoint this step is skipped by name.
 #   8. optional and opt-in (MUSE_GLIMMER=1), Muse Glimmer: 28 billion text
 #      parameters, 56 GB of bf16 weights on the device. It needs the
@@ -381,6 +384,21 @@ else
     exit 1
   fi
   grep -c "FAIL" "$LOG.tinyllama.prefill-negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+  echo "== tinyllama batched prefill, prompts of 2, 55, 9 and 30 tokens"
+  # Rows of very different lengths in one call: the 2-token prompt is right-
+  # aligned behind 62 padding positions of the 64-token entry.
+  TL_W="450,7483,310,3444,338,450,10150,15754,297,278,21635,1788,338,1619,25448,2927,338,450,937,6673,310,278,3303,3900,471"
+  TL_RAGGED="1,450;1,$TL_W,$TL_W,450,7483,310,3444;1,450,7483,310,3444,338,450,10150,15754;1,$TL_W,450,7483,310,3444"
+  "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model tinyllama --prompts "$TL_RAGGED" --require-ids --repeats 1 --id-base 95000
+  if "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model tinyllama --prompts "$TL_RAGGED" --require-ids --repeats 1 --id-base 96000 --perturb \
+      >"$LOG.tinyllama.ragged-negative" 2>&1; then
+    echo "FAIL: the prefill checks of very different lengths passed comparing each prompt with the next one" >&2
+    cat "$LOG.tinyllama.ragged-negative" >&2
+    exit 1
+  fi
+  grep -c "FAIL" "$LOG.tinyllama.ragged-negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   if ! curl -sf "localhost:$HTTP_PORT/v2/health/live" >/dev/null; then
     echo "FAIL: the server is not live at the end of the sequence checks" >&2
     exit 1
@@ -428,7 +446,7 @@ else
     "$TL_CONFIG" >"$QUEUED_REPO/tinyllama/config.pbtxt"
   export CONTAINER_NAME="$BASE_NAME-queued" MODEL_REPOSITORY="$QUEUED_REPO"
   start_server "$LOG.queued" 600
-  "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --model tinyllama --queued
+  "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --model tinyllama --queued --log "$LOG.queued"
   stop_server
   rm -rf "$QUEUED_REPO"
 fi
@@ -538,16 +556,26 @@ else
   fi
   echo "  ok   weights on the device: $BF16_MIB MiB in bf16, $F32_MIB MiB in f32"
   # Measured: every id equal, logits within 3.0e-3 of the largest (f32
-  # weights: 5.6e-4); the tolerance is 1e-2.
+  # weights: 5.6e-4); the tolerance is 6e-3, twice the measured difference.
   "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
-    --model qwen3 --fixture "$QWEN3_FIXTURE" --tol 1e-2 --repeat 3
+    --model qwen3 --fixture "$QWEN3_FIXTURE" --tol 6e-3 --repeat 3
   if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
-      --model qwen3 --fixture "$QWEN3_FIXTURE" --tol 1e-2 --repeat 0 --perturb >"$LOG.qwen3-bf16.negative" 2>&1; then
+      --model qwen3 --fixture "$QWEN3_FIXTURE" --tol 6e-3 --repeat 0 --perturb >"$LOG.qwen3-bf16.negative" 2>&1; then
     echo "FAIL: the bf16 Qwen3 fixture checks passed with wrong expected ids" >&2
     cat "$LOG.qwen3-bf16.negative" >&2
     exit 1
   fi
   grep -c "^FAIL" "$LOG.qwen3-bf16.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+  # The logit comparison tells bf16 weights from f32 ones: at the f32
+  # artifact's tolerance (2e-3) the bf16 logits must fail it.
+  if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model qwen3 --fixture "$QWEN3_FIXTURE" --tol 2e-3 --repeat 0 >"$LOG.qwen3-bf16.tight" 2>&1 \
+      || ! grep -q "^FAIL .*logits within" "$LOG.qwen3-bf16.tight"; then
+    echo "FAIL: the bf16 logits passed the f32 tolerance of 2e-3, or failed on something else" >&2
+    cat "$LOG.qwen3-bf16.tight" >&2
+    exit 1
+  fi
+  grep -c "^FAIL .*logits within" "$LOG.qwen3-bf16.tight" | xargs -I{} echo "  ok   at the f32 tolerance of 2e-3 the bf16 logits fail ({} failing checks)"
   stop_server
 fi
 

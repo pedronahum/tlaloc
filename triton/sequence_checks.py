@@ -24,6 +24,10 @@ Run by verify.sh against a server holding the `tinyllama` sequence-mode model
              no live sequence is reclaimed, and once another sequence ends the
              same request succeeds and the sequence continues with exactly the
              ids it gets alone
+  restart-refused
+             a second START for a live sequence ID that the backend refuses
+             (a token outside the vocabulary) still ends the earlier sequence
+             in Triton, so the next step must not continue its KV
   idle       sequences abandoned without END lose their pages once they have
              been idle for twice max_sequence_idle_microseconds (plus a few
              executions of queueing allowance) and a new sequence needs them;
@@ -40,7 +44,11 @@ checks only that the backend never frees a sequence Triton still holds: 12 to
 than the timeout. Triton ends some sequences itself (their next step is
 refused for lacking START, which is Triton's rule), but no step Triton
 accepts may be refused by the backend for having no KV state. (A START the
-full page pool refuses by name is allowed.)
+full page pool refuses by name is allowed.) Then one sequence is sent a
+refused request (a token outside the vocabulary) every 50 ms for over ten
+idle timeouts while new sequences run the page pool out: Triton counts every
+request as activity, so the backend must not reclaim that sequence, and it
+must continue with the ids it gets alone.
 """
 
 import argparse
@@ -167,7 +175,81 @@ def pressure(http, fresh, long_prompt, grower_prompt, fits, expect_solo, log_pat
         http.end(sid)
 
 
-def queued(url, model):
+def refused_alive(url, model, log_path):
+    """A sequence whose requests are refused is still alive in Triton (every
+    request that arrives restarts its idle timer), so the backend must not
+    reclaim its pages as idle."""
+    print("== refused requests keep a sequence alive")
+    block, blocks, _, idle_us = config(url, model)
+    fits = (blocks - 1) // 3
+    long_prompt = [1] + [450] * (3 * block - 2)
+    c = SequenceClient(url, model, "http")
+    solo = c.generate(74000, FRANCE, 6)[0]
+    sid = 74001
+    ids = [int(np.argmax(c.step(sid, FRANCE, start=True)))]
+    ids.append(int(np.argmax(c.step(sid, ids[-1:]))))
+    stop = threading.Event()
+    other = []
+    refusals = [0]
+
+    def keep_alive():
+        k = SequenceClient(url, model, "http")
+        while not stop.is_set():
+            try:
+                k.step(sid, [10 ** 6])  # outside the vocabulary: refused by the backend
+                other.append("a request outside the vocabulary was accepted")
+            except Exception as e:  # noqa: BLE001 - classified below
+                if "outside the vocabulary" in str(e):
+                    refusals[0] += 1
+                else:
+                    other.append(str(e)[:160])
+            time.sleep(0.05)
+
+    t = threading.Thread(target=keep_alive)
+    t.start()
+    # Long past the backend's reclaim limit (twice the idle timeout plus
+    # queueing), with a refused request every 50 ms, which Triton counts.
+    time.sleep(10 * idle_us / 1e6 + 0.5)
+    mark = log_size(log_path)
+    holders, pool_refusals = [], 0
+    for i in range(fits + 1):
+        h = 74100 + i
+        try:
+            c.step(h, long_prompt, start=True)
+            holders.append(h)
+        except Exception as e:  # noqa: BLE001 - a refusal by name is allowed
+            if "KV page pool exhausted" not in str(e):
+                other.append(str(e)[:160])
+            pool_refusals += 1
+    stop.set()
+    t.join()
+    # At once: Triton ends the sequence 200 ms after its last request.
+    try:
+        while len(ids) < len(solo):
+            ids.append(int(np.argmax(c.step(sid, ids[-1:]))))
+        c.end(sid)
+    except Exception as e:  # noqa: BLE001 - reported below
+        ids.append(f"refused: {str(e)[:160]}")
+    check(refusals[0] > 0 and not other,
+          f"sequence {sid} was sent {refusals[0]} refused requests, and nothing else went wrong "
+          f"({other[:2]})")
+    check(ids == solo, f"sequence {sid} continues after its refused requests with its ids alone: "
+                       f"{ids} == {solo} ({pool_refusals} START(s) refused for a full pool)")
+    got = reclaimed(log_path, mark)
+    if got is not None:
+        check(sid not in got, f"sequence {sid} was not reclaimed while its requests were being refused "
+                              f"(reclaimed: {got[:8]}{'...' if len(got) > 8 else ''})")
+    check(pool_refusals > 0 or bool(got),
+          f"the {fits + 1} STARTs ran the pool out, so the backend had to reclaim or refuse "
+          f"({pool_refusals} refused, {len(got or [])} reclaimed; so the checks above can fail)")
+    for h in holders:
+        try:
+            c.end(h)
+        except Exception:  # noqa: BLE001 - Triton may have ended an idle holder itself
+            pass
+
+
+def queued(url, model, log_path=""):
     """The backend must not free a sequence whose next request is queued."""
     import collections
 
@@ -208,6 +290,7 @@ def queued(url, model):
     check(backend_lost == 0,
           f"no step Triton accepted was refused for having no KV state "
           f"({backend_lost} were; {finished} sequences finished)")
+    refused_alive(url, model, log_path)
     print()
     print(f"{len(failures)} check(s) FAILED" if failures else "all queued checks passed")
     return 1 if failures else 0
@@ -224,7 +307,7 @@ def main():
     ap.add_argument("--log", default="", help="the server log, to check which sequences were reclaimed")
     args = ap.parse_args()
     if args.queued:
-        return queued(args.http, args.model)
+        return queued(args.http, args.model, args.log)
 
     expect = list(HF_IDS)
     if args.perturb:
@@ -359,6 +442,18 @@ def main():
         http.end(sid)
     ids, _, _, _ = http.generate(fresh(), FRANCE, 6)
     check(ids == expect, "after ending the held sequences a new sequence decodes correctly")
+
+    # -- restart refused -------------------------------------------------------
+    print("== restart-refused")
+    sid = fresh()
+    http.step(sid, FRANCE, start=True)
+    hit, msg = refused(lambda: http.step(sid, [10 ** 6], start=True), "outside the vocabulary")
+    check(hit, f"a second START for a live sequence with a token outside the vocabulary is refused: {msg[:100]}")
+    # Triton ends the earlier sequence at the second START all the same, so
+    # its KV must not be continued.
+    hit, msg = refused(lambda: http.step(sid, [450]), "has no KV state")
+    check(hit, f"the next step does not continue the earlier sequence's KV: {msg[:100]}")
+    http.end(sid)
 
     # -- idle ----------------------------------------------------------------
     print("== idle")

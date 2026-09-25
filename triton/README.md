@@ -273,7 +273,16 @@ server is up. It then starts a server on that repository and:
     new sequences reclaimed the other 20 in the order they went idle;
   - queued (a second server, the same model with a 200 ms idle timeout):
     12, 24 and 32 concurrent sequences, so steps wait in Triton's queue past
-    the timeout; no step Triton accepts is refused for having no KV state;
+    the timeout; no step Triton accepts is refused for having no KV state.
+    Then one sequence is sent a refused request (a token outside the
+    vocabulary) every 50 ms for 2.5 s while 22 new sequences run the pool
+    out: it is not reclaimed (read from the log) and continues with its solo
+    ids. A backend that counted only the requests that ran reclaimed it, and
+    its next step was refused for having no KV state;
+  - restart-refused: a second START for a live sequence ID, refused for a
+    token outside the vocabulary, still ends the earlier sequence in Triton,
+    so the next step is refused for having no KV state instead of continuing
+    the earlier sequence's KV (which a backend without this rule did);
 - runs `sequence_checks.py --perturb` (wrong expected ids, for the prefill
   and pressure checks), which must fail;
 - runs `prefill_checks.py` with `sequence_checks.py`'s four prompts: one, two
@@ -282,7 +291,10 @@ server is up. It then starts a server on that repository and:
   prompt's argmax and 8 greedy ids equal its solo run's, with logits within
   5e-3 of the largest (measured: at most 6.2e-4; a batch-2 or batch-4 entry
   is a different executable under TF32). Then with `--perturb`, which must
-  fail. It prints the prefill throughput (below).
+  fail. It prints the prefill throughput (below). It runs again with four
+  prompts of 2, 55, 9 and 30 tokens, so that one call holds a 2-token row
+  behind 62 padding positions next to a 55-token row (measured: logits
+  within 5.6e-4, the same ids), and with `--perturb`;
 
 Without the checkpoint this step prints `SKIP tinyllama` and the run can
 still pass; `SKIP_TINYLLAMA=1` skips it on purpose.
@@ -316,8 +328,9 @@ fixture's; with one wrong expected id it must fail. Then the same checkpoint
 is exported with bf16 weights (`-PweightDType=bf16`) into
 `triton/build/qwen3-bf16/` and served: the upload must be half the f32
 model's MiB (1136 against 2273), all 32 ids must equal the fixture's, the
-logits must be within 1e-2 of the largest (measured 3.0e-3: every projection
-rounds its input to bf16), and `--perturb` must fail. A decode step takes
+logits must be within 6e-3 of the largest (measured 3.0e-3: every projection
+rounds its input to bf16), and `--perturb` must fail. As a control on the
+logit check, the bf16 model must fail the f32 model's tolerance of 2e-3. A decode step takes
 11.3 ms against 15.4 ms with f32 weights. Without the checkpoint this step
 prints `SKIP qwen3`; `SKIP_QWEN3=1` skips it.
 
@@ -617,7 +630,12 @@ this; `generate_client.py` adds a tokenizer.
   exported before its bodies carried the alias is served with the pools
   copied, and the log says so. If a failed execution takes the donated pools
   with it, the rest of that batch is refused, every sequence is freed (a
-  later request must START again) and new pools are zeroed.
+  later request must START again) and new pools are zeroed. A request of
+  several calls (a prompt split by the chunk or the windowed ring) that
+  fails after one of its calls ran frees its sequence and says so: part of
+  its tokens are in the KV, and the ring may have written over positions its
+  first call read, so neither continuing nor sending it again would be
+  right.
 - **END** frees the sequence's pages (and its ring) after its step.
 - **Pages run short.** When a request needs more pages than are free, the
   backend reclaims pages from sequences Triton has already ended without
@@ -645,7 +663,9 @@ this; `generate_client.py` adds a tokenizer.
   sequence only when it has no request in the current batch and has not run
   for twice the timeout plus the longest wait the oldest strategy allows a
   queued request: one execution (the longest seen so far) per
-  `max_batch_size` live sequences. With the timeout alone the backend freed
+  `max_batch_size` live sequences. Every request Triton hands over counts as
+  activity, including one the backend refuses (Triton restarts its own timer
+  for it too). With the timeout alone the backend freed
   sequences Triton still held once steps queued behind other sequences;
   `sequence_checks.py --queued` (a 200 ms timeout, 12 to 32 concurrent
   sequences) catches that, and fails against a backend without the rule. The
@@ -661,7 +681,9 @@ largest compiled context; a step for a sequence the backend holds nothing
 for; a token id outside the vocabulary; a token id the manifest refuses
 (`token 3 of the request is 200092, the model's image_token_id placeholder;
 ...`), which leaves the sequence as it was; a request with no tokens and no
-END. A refused START leaves no
+END. A refused request that carries START still starts a new sequence in
+Triton, which ends any earlier sequence with that ID, so the backend frees
+the earlier sequence's KV. A refused START leaves no
 state behind; Triton still counts the sequence as live until END or the idle
 timeout, so a client should send END for it.
 

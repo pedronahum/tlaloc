@@ -173,6 +173,12 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **`triton/verify.sh` checks more.** The bf16 Qwen3 logits must be within
+  6e-3 of the largest (measured 3.0e-3; it was 1e-2), and must fail the f32
+  artifact's 2e-3, so the logit comparison is shown to tell the two apart.
+  TinyLlama's batched prefill also runs four prompts of 2, 55, 9 and 30 tokens
+  in one call (logits within 5.6e-4 of each solo run, the same ids), with its
+  `--perturb` control.
 - **Prefill attention gathers each sequence's pages once.** `PAGED_ATTENTION`
   accepts fewer block tables than query rows, one per equal group of
   consecutive rows (`PagedAttentionAttrs.rowsPerTable`, derived from the
@@ -249,6 +255,29 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   from the table.
 
 ### Fixed
+
+- **A sequence whose requests were being refused could lose its pages.** The
+  Triton backend counted a sequence as active only when one of its requests
+  ran, while Triton restarts its idle timer for every request, refused or
+  not. A sequence sent refused requests (a token outside the vocabulary, a
+  placeholder id, a context too long) for longer than the reclaim limit was
+  reclaimed while Triton still held it, and its next step was refused for
+  having no KV state. Every request of a held sequence now counts, and a
+  sequence with any request in the batch is not reclaimed.
+  `sequence_checks.py --queued` sends one sequence a refused request every
+  50 ms while new sequences run the pool out; it failed before the fix and
+  passes after.
+- **A refused START could leave an earlier sequence's KV to be continued.**
+  Triton ends the earlier sequence with that ID at a second START even when
+  the backend refuses the request, but the backend kept its KV, and the next
+  step continued it. The backend now frees it (`restart-refused` in
+  `sequence_checks.py`, which failed before the fix).
+- **A request of several calls that failed part way left its sequence
+  inconsistent.** When a prompt split into several calls failed after one of
+  them ran, the sequence kept the tokens that ran and the error did not say
+  so; with a windowed ring the positions the first call read may already be
+  written over. The sequence is now freed and the error says so. No check
+  makes a later call fail on demand, so this path is not exercised.
 
 - **An output written device to device into CUDA shared memory could arrive
   empty.** A device-to-device `cudaMemcpy` returns before the copy is done, and

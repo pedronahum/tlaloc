@@ -920,6 +920,11 @@ struct SequenceInstance::Work {
   size_t ring_held = 0;   // windowed pages it holds
   uint64_t compute_start = 0;
   uint64_t compute_end = 0;
+  // Set when a request of several calls fails after an earlier call of it
+  // ran: part of its tokens are in the KV and the windowed ring may have
+  // written over positions the request's first call read, so the sequence
+  // cannot be continued or the request sent again; it is freed.
+  bool lost = false;
 };
 
 TRITONSERVER_Error*
@@ -1140,7 +1145,9 @@ SequenceInstance::Parse(Work* w)
           "token " + std::to_string(i) + " of the request is " + std::to_string(t) + ", the model's " +
           refused->second + " placeholder; this artifact serves the text decoder only (the "
           "vision encoder is not in it, so the placeholder would be embedded as an ordinary "
-          "token), and the backend refuses it. The sequence's state is unchanged");
+          "token), and the backend refuses it. " +
+          (w->start ? std::string("The sequence holds no KV state: start it again without the placeholder")
+                    : std::string("The sequence's state is unchanged")));
     }
   }
   return nullptr;
@@ -1358,10 +1365,19 @@ SequenceInstance::RunPrompts(
   std::vector<Prompt> prompts;
   for (Work* w : works) prompts.push_back({w, w->tokens, w->position});
   // Sets the error of every work of `group` from `err`, and deletes `err`.
-  auto fail = [](const std::vector<Work*>& group, TRITONSERVER_Error* err) {
+  // `ran` says whether an earlier call of each work's request ran.
+  auto fail = [](const std::vector<Work*>& group, const std::vector<bool>& ran, TRITONSERVER_Error* err) {
     if (err == nullptr) return;
-    for (Work* w : group) {
-      if (w->err == nullptr) w->err = Err(TRITONSERVER_ErrorCode(err), TRITONSERVER_ErrorMessage(err));
+    for (size_t i = 0; i < group.size(); ++i) {
+      Work* w = group[i];
+      if (w->err != nullptr) continue;
+      std::string msg = TRITONSERVER_ErrorMessage(err);
+      if (ran[i]) {
+        w->lost = true;
+        msg += "; an earlier call of this request had run, so sequence " + std::to_string(w->corrid) +
+               " is freed: start it again";
+      }
+      w->err = Err(TRITONSERVER_ErrorCode(err), msg);
     }
     TRITONSERVER_ErrorDelete(err);
   };
@@ -1398,9 +1414,11 @@ SequenceInstance::RunPrompts(
       const size_t most = static_cast<size_t>(std::max(1, model_->MaxPrefillBatch(g.first)));
       for (size_t i = 0; i < g.second.size(); i += most) {
         std::vector<Work*> rows;
+        std::vector<bool> ran;
         int tokens = 1;
         for (size_t k = i; k < std::min(g.second.size(), i + most); ++k) {
           rows.push_back(g.second[k]->w);
+          ran.push_back(g.second[k]->done > 0);
           tokens = std::max(tokens, static_cast<int>(g.second[k]->n));
         }
         const ServingEntrySpec* e = model_->Prefill(static_cast<int>(rows.size()), g.first, tokens);
@@ -1411,7 +1429,7 @@ SequenceInstance::RunPrompts(
                                " tokens per sequence")
                          : Run(*e, rows, compute_start, compute_end);
         note();
-        fail(rows, err);
+        fail(rows, ran, err);
       }
     }
     for (Prompt* p : stepwise) {
@@ -1426,7 +1444,7 @@ SequenceInstance::RunPrompts(
             d == nullptr ? Invalid("no decode entry covers batch 1 and context " + std::to_string(w->position + 1))
                          : Run(*d, {w}, compute_start, compute_end);
         note();
-        fail({w}, err);
+        fail({w}, {p->done + j > 0}, err);
       }
     }
     for (auto& g : by_context) {
@@ -1478,7 +1496,13 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
     w.request = requests[r];
     w.err = TRITONBACKEND_ResponseNew(&w.response, w.request);
     if (w.err == nullptr) w.err = Parse(&w);
-    if (w.err == nullptr) batch_.insert(w.corrid);
+    // A sequence with a request in the batch, refused or not, is not reclaimed.
+    if (w.corrid != 0) batch_.insert(w.corrid);
+    if (w.err != nullptr && w.start) {
+      // Triton has started a new sequence under this ID all the same: the
+      // KV of an earlier sequence with the ID must not be continued.
+      Free(w.corrid, "was started again by a refused request");
+    }
   }
   for (Work& w : works) {
     if (w.err == nullptr) w.err = Admit(&w);
@@ -1520,8 +1544,12 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
     if (w.err == nullptr && w.response != nullptr) w.err = Respond(&w);
     if (w.end) {
       Free(w.corrid, w.err == nullptr ? "ended" : "ended with an error");
-    } else if (w.seq != nullptr && sequences_.count(w.corrid)) {
-      w.seq->last_ns = NowNs();
+    } else if (w.lost) {
+      Free(w.corrid, "lost its place: a call after the request's first failed");
+    } else if (auto it = sequences_.find(w.corrid); it != sequences_.end()) {
+      // Every request Triton hands over, refused or not, restarts Triton's
+      // idle timer for the sequence, so it restarts the backend's too.
+      it->second.last_ns = NowNs();
     }
     const bool ok = w.err == nullptr;
     if (w.response != nullptr) {
