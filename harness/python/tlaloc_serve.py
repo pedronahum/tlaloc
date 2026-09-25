@@ -73,10 +73,14 @@ covers that lane unchanged and the jax engine goes.
 WHAT IS STILL DEFERRED
 ======================
 
-Buffer DONATION (the manifest carries `donationPairs`; neither engine wires
-them into compile options yet — every step still round-trips whole pools
-through the host, which is the next measurable win and the reason this is
-a correctness artifact rather than a throughput one), sampling (host-side,
+Device-resident KV pools. The bodies alias each KV_POOL_OUT to its
+KV_POOL_IN (`tf.aliasing_output`, from the manifest's `donationPairs`), and
+the Triton backend donates its pools so they are updated in place. This
+module still takes and returns the pools as host lists, so every step
+uploads them and reads them back whole; the upload is a temporary that XLA
+writes in place, which saves nothing that matters next to the host round
+trip. That round trip is the next measurable win and the reason this is a
+correctness artifact rather than a throughput one. Also deferred: sampling (host-side,
 outside this module), multi-device execution, and bf16/int8 pools end to end
 (the dtype mapping below handles them; nothing has exported one yet).
 
@@ -88,7 +92,7 @@ number for them (1.1e9 Python floats is not a slow path, it is an impossible
 one), and are held as live device buffers for the artifact's lifetime. What
 is NOT done: the KV pools still round-trip to the host every step, so a
 22-layer model pays that in Python list construction per token. That is the
-donation item above, and it is now the dominant cost of a real decode.
+device-resident pools item above, and it is the dominant cost of a real decode.
 """
 
 from __future__ import annotations

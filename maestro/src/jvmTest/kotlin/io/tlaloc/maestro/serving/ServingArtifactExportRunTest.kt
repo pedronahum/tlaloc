@@ -142,6 +142,21 @@ class ServingArtifactExportRunTest {
                     2 * m.numLayers, e.donationPairs.size,
                     "${e.entryId}: every KV pool is a donation candidate",
                 )
+                // And the body tells XLA so: exactly the paired parameters carry
+                // tf.aliasing_output, naming the result they pair with.
+                val signature = text.substringAfter("func.func @main(").substringBefore(") -> (")
+                val params = signature.split(Regex(", (?=%)"))
+                assertEquals(e.inputs.size, params.size, "${e.entryId}: parameter count")
+                val pairs = e.donationPairs.associate { it[0] to it[1] }
+                val aliasAttr = Regex("""\{tf\.aliasing_output = (\d+) : i32\}""")
+                for ((i, param) in params.withIndex()) {
+                    val alias = aliasAttr.find(param)?.groupValues?.get(1)?.toInt()
+                    assertEquals(
+                        pairs[i], alias,
+                        "${e.entryId}: parameter $i (${e.inputs[i].name}) must alias " +
+                            "${pairs[i] ?: "no result"}: $param",
+                    )
+                }
                 assertEquals(
                     spec.executableCacheKey(ReferenceDecodeGraph.MODEL_HASH).substringBefore("/b"),
                     e.cacheKey.substringBefore("/b"),

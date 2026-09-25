@@ -25,6 +25,7 @@ an instance group names gets its own PJRT client.
 | ✅ | Muse Glimmer 30B, text decoder, bf16 weights: 32 greedy ids equal HuggingFace's run with the same arithmetic | GB10, `verify.sh` with `MUSE_GLIMMER=1` |
 | ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`) | GB10, `verify.sh` |
 | ✅ | CUDA shared memory inputs read in place, outputs written device to device | GB10, `verify.sh` |
+| ✅ | KV pools updated in place: donated to each execution, never copied (100 of 100 runs checked by device address; a control without donation is seen copying) | GB10, `verify.sh` |
 | ✅ | FP32, FP64, FP16, BF16, INT8, INT32, INT64, UINT8, BOOL over HTTP and gRPC | GB10, `verify.sh` |
 | ✅ | GPU 0 selected by ordinal; a GPU the machine does not have is refused by name | GB10, `verify.sh` |
 | 🧪 | Instances on GPUs other than 0, one PJRT client per GPU | Not run: the GB10 has one GPU |
@@ -140,7 +141,8 @@ It then starts the server, waits for it to be ready, and runs
   TF32, which is why this one is not bit for bit. A step sent on a page that
   no earlier request wrote must then disagree with the reference, which shows
   that the agreement depends on the carried state;
-- `reference_sequence` over HTTP and gRPC: the same artifact in sequence mode.
+- `reference_sequence` over HTTP and gRPC: the same artifact in sequence mode
+  (the log must show its KV pools updated in place).
   The reference steps' first sequence sent one token per request, then all
   four tokens in one request, and two more one-token sequences, each against
   the interpreter within 1e-3; then requests the backend or Triton must
@@ -350,7 +352,7 @@ by its role:
 | `tokenIds`, `positions`, `blockTables`, `seqLens`, `slotMapping` | inputs, INT32, under the slot's own name. A dimension that differs between entries (batch size, block-table width) is `-1`; each request runs on the entry compiled for exactly its shapes. |
 | `logits` | output |
 | staged weights | `weight:` arguments. The backend reads each file when the model loads and keeps it on the device; no request carries weights. |
-| KV pools (`keyCacheN`, `valueCacheN`) and their `…Out` results | `state:` arguments and results. Each model instance holds its pools on the device, zero at start; every request reads them and replaces them with the results the manifest's donation pairs name. |
+| KV pools (`keyCacheN`, `valueCacheN`) and their `…Out` results | `state:` arguments and results. Each model instance holds its pools on the device, zero at start; every request reads them and replaces them with the results the manifest's donation pairs name. The backend donates every `state:` buffer to the execution, so a body that aliases it to its result (as a Tlaloc serving artifact's does) updates it in place. |
 
 The pools belong to a model instance, so the generated model has one
 instance, and requests to it run one at a time. The client allocates pages,
@@ -421,6 +423,22 @@ this; `generate_client.py` adds a tokenizer.
   smallest decode entry whose batch and context cover them, with padding rows
   for the rest of the batch. Without a prefill entry (a v1 artifact, or
   `-Pprefill=false`), the tokens of a longer request run as decode steps.
+- **KV pools** are the instance's, on the device, zeroed at load. Every
+  execution is handed them (donated) and returns the updated pools; the
+  artifact's bodies alias each `KV_POOL_OUT` to its `KV_POOL_IN`
+  (`tf.aliasing_output` on the parameter), so XLA writes each pool where it
+  is and nothing is copied. After every run the backend compares each pool's
+  device address with the one it had before the run, logs the result for
+  the first run of each entry (`decode_b1_c64 updated the 44 KV pools in
+  place ...`, or a warning that they were written to new device memory) and
+  after 100 runs (`in 100 runs the 44 KV pools were updated in place 100
+  times and copied 0 times`). The model parameter `donate_kv_pools` set to
+  `false` hands the executions the pools without donating them, so XLA
+  copies them first; it exists as the control for that check. An artifact
+  exported before its bodies carried the alias is served with the pools
+  copied, and the log says so. If a failed execution takes the donated pools
+  with it, the rest of that batch is refused, every sequence is freed (a
+  later request must START again) and new pools are zeroed.
 - **END** frees the sequence's pages after its step.
 - **Idle timeout.** In the oldest strategy Triton ends a sequence that has
   been idle longer than `max_sequence_idle_microseconds` without telling the
@@ -479,6 +497,15 @@ rate; 48 requests ran in 22 or 23 executions. The Python driver in
 `docs/SERVING_RUNBOOK.md` takes 1.35 s per step, because it copies every KV
 pool to the host and back. These are single measurements, not a benchmark.
 
+KV pools in place against copied (`donate_kv_pools: false`), measured with
+another process keeping the GPU 95% busy, the two servers alternated three
+times, server-side time of a batch-1 decode step over 235 steps each:
+Qwen3-0.6B (56 pools, 224 MiB) takes 11.5 ms at its fastest in place against
+16.2 ms copied (medians 13.1 to 23.8 ms against 25.8 to 32.5 ms); TinyLlama
+(44 pools, 44 MiB) 18.3 ms against 19.3 ms at its fastest, with medians that
+the other process's load makes too noisy to separate. The timings above and
+below were taken before the pools were updated in place, on an idle GPU.
+
 Qwen3-0.6B (f32 weights, context 64, gRPC, medians of 5 to 10 runs of 16
 tokens): the model loads in about 20 s (four XLA compiles of 3.5 to 6.6 s,
 1.2 s to upload 2867 MiB of weights). Prefill takes about 25 ms for the 5-token
@@ -508,6 +535,7 @@ first argument, the first `output` the first result.
 | `arguments` | no | One item per argument of the entry function, in order, comma-separated: `input:<name>` (a config input), `weight:<file>` (a raw little-endian file in the version directory, dense and row-major with no header, uploaded once at load; its size must match the argument's type), or `state:<name>` (a buffer the model instance keeps on the device, zero at start). Every config input must appear exactly once. |
 | `results` | no | One item per result, in order: `output:<name>` (a config output) or `state:<name>` (replaces that state after the request runs). Every config output must appear exactly once, and every state read by `arguments` must be written by exactly one result. |
 | `zero_copy` | no | `true` (default) or `false`. With `false`, tensors in GPU memory go through the host; see "GPU memory in and out". |
+| `donate_kv_pools` | no | Sequence mode only. `true` (default) or `false`. With `false` the executions are not handed the KV pools to write in place, so XLA copies them every run; see "Sequence mode". |
 
 At load the backend reads each artifact's entry signature and checks it
 against `config.pbtxt`: the number of inputs and outputs, each data type, and
@@ -674,8 +702,7 @@ defaults.
   that needs a page when none is free is refused mid-generation rather than
   paused. Only the oldest strategy. Prefill entries are batch 1, so two
   prompts in one Triton batch run as two calls. Sampling is the client's
-  (the backend returns logits). The pools are copied by each execution
-  rather than donated (the PJRT execute call does not donate buffers yet).
+  (the backend returns logits).
 - Client mode: state is per model instance and is not tied to a Triton
   sequence ID. The client that allocates pages must be the only client of
   that model, or the clients must agree on the pages.

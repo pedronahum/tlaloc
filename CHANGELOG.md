@@ -96,6 +96,24 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **KV pools are updated in place.** `toStablehlo` takes `outputAliases`, and
+  every serving body the artifact writer emits marks each `KV_POOL_IN`
+  parameter with `tf.aliasing_output` naming its `KV_POOL_OUT` (the manifest's
+  `donationPairs`). The Triton backend donates the pools (and any `state:`
+  buffer) to each execution, so XLA writes them where they are instead of
+  copying 44 MiB (TinyLlama) or 224 MiB (Qwen3-0.6B) per run. The backend checks
+  every pool's device address after each run and logs it; `verify.sh` requires
+  100 of 100 runs in place for both models and runs a control with the new
+  model parameter `donate_kv_pools: false`, which must be seen copying in 100 of
+  100 runs and give the same 100 ids. Measured on the GB10 while another
+  process kept the GPU 95% busy, alternating the two servers three times
+  (server-side time of a batch-1 decode step, 235 steps per run): Qwen3-0.6B's
+  fastest step 11.5 ms in place against 16.2 ms copied, medians 13.1 to 23.8 ms
+  against 25.8 to 32.5 ms; TinyLlama's fastest step 18.3 ms against 19.3 ms,
+  with medians too noisy to separate. Artifacts exported before this change
+  still serve, with the pools copied and a warning in the log; `verify.sh`
+  exports them again. The framework-free Python runtime and the vLLM plugin
+  still pass the pools as host lists.
 - `PAGED_ATTENTION`'s two f32 dots are emitted with HIGHEST precision, so XLA
   does not run them in TF32 on a GPU.
 - A config with sliding-window layers, layers without RoPE, output norms or
@@ -122,6 +140,12 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- **An output written device to device into CUDA shared memory could arrive
+  empty.** A device-to-device `cudaMemcpy` returns before the copy is done, and
+  the backend sent the response (and let PJRT free the result) without waiting
+  for it. With the GPU busy with another process, `matmul_sumsq`'s outputs came
+  back as zeros in two of three runs of `verify_client.py`; the backend now
+  synchronizes after the copy, and six runs out of six pass on the same busy GPU.
 - **The Triton backend no longer frees a sequence Triton still holds.** In
   sequence mode the backend freed the pages of any sequence it had not run for
   `max_sequence_idle_microseconds`, counted from the end of its last execution.

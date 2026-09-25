@@ -2,9 +2,11 @@
 # End-to-end check of the tlaloc backend on a GPU:
 #   0. run pjrt_device_test (built by build_backend.sh) in the Triton
 #      container: a PJRT client for GPU 0 sees exactly GPU 0, a client for a
-#      GPU the machine does not have is refused by name, and an input read in
-#      place from cudaMalloc memory gives the same bits as the host path; then
-#      with --perturb, which must fail,
+#      GPU the machine does not have is refused by name, an input read in
+#      place from cudaMalloc memory gives the same bits as the host path, and
+#      a state whose parameter is aliased to the output is updated in place
+#      for 100 steps (the same check sees the copy without the alias or
+#      without donation); then with --perturb, which must fail,
 #   1. start tritonserver (run_server.sh) with the example model repository,
 #   2. wait until it is ready,
 #   3. run verify_client.py: KServe v2 JSON, tritonclient HTTP and gRPC,
@@ -12,7 +14,8 @@
 #      decode steps with backend-held KV pools, and load-time refusals; every
 #      value must match. The server log must then show that tensors in CUDA
 #      shared memory were read in place and written device to device by
-#      large_io, and went through the host for large_io_host,
+#      large_io, and went through the host for large_io_host, and that
+#      reference_sequence updated its KV pools in place,
 #   4. run it again with --perturb (wrong expected values), which must FAIL,
 #   5. print the measurements of perf_client.py (dynamic batching throughput,
 #      the host round trip that zero copy saves) and stop the server,
@@ -21,10 +24,15 @@
 #      entry) and write it as a sequence-mode Triton model with a 5 s idle
 #      timeout (Gradle, with no server running), start a server on that
 #      repository, greedy-decode "The capital of France is" with
-#      generate_client.py (the six ids must equal HuggingFace's), run
+#      generate_client.py (the six ids must equal HuggingFace's), generate
+#      50 ids twice more (the server log must show every run writing the KV
+#      pools at their own device addresses, 100 of 100 runs in place), run
 #      sequence_checks.py (prefill, concurrent sequences, END and idle
 #      freeing pages, pool exhaustion), run it again with --perturb (must
-#      fail), and stop the server. Then serve the same model with a 200 ms
+#      fail), and stop the server. Control: serve the same model with
+#      donate_kv_pools false; the log must show the pools copied in 100 of
+#      100 runs, and the 100 ids must equal those generated in place. Then
+#      serve the same model with a 200 ms
 #      idle timeout and run sequence_checks.py --queued: with steps waiting in
 #      Triton's queue past the timeout, no step Triton accepts may find its
 #      sequence's pages freed. Without the checkpoint this step is skipped by
@@ -33,7 +41,8 @@
 #      it the same way (Gradle, no server running), start a server, run
 #      fixture_checks.py against the committed HuggingFace fixture (a plain
 #      and a chat-template prompt, 16 greedy ids each over HTTP and gRPC,
-#      logits within TF32 tolerance, and the prefill and decode timings), run
+#      logits within TF32 tolerance, and the prefill and decode timings),
+#      check that the KV pools were updated in place, run
 #      it again with --perturb (must fail), and stop the server. Without the
 #      checkpoint this step is skipped by name.
 #   8. optional and opt-in (MUSE_GLIMMER=1), Muse Glimmer: 28 billion text
@@ -48,7 +57,8 @@
 #      transformers in bfloat16 (the ids must be equal as far as the two
 #      references agree with each other) and transformers with bf16 weights
 #      and f32 activations (all ids, and the logits within twice the oracle's
-#      own float32-vs-float64 noise), then --perturb (must fail), and print
+#      own float32-vs-float64 noise), check that the KV pools were updated
+#      in place, then --perturb (must fail), and print
 #      the peak memory in use.
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7 and 8 pass or are skipped.
@@ -65,7 +75,8 @@
 #   TINYLLAMA_CHECKPOINT  [~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0]
 #   TINYLLAMA_DIR         where the artifact and its model repository are written
 #                         [triton/build/tinyllama]; an existing model is reused
-#   TINYLLAMA_REEXPORT=1  export again even if the model exists
+#   TINYLLAMA_REEXPORT=1  export again even if the model exists (a model whose
+#                         bodies do not alias the KV pools is always exported again)
 #   SKIP_TINYLLAMA=1      skip step 6
 #   QWEN3_CHECKPOINT      [the Qwen/Qwen3-0.6B snapshot the fixture names, in
 #                         ~/.cache/huggingface/hub]
@@ -88,8 +99,8 @@ LOG="${VERIFY_LOG:-$(mktemp -t tlaloc-triton-verify.XXXXXX.log)}"
 PEAK_PID=""
 cleanup() {
   [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
-  docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-qwen3" "$BASE_NAME-muse" \
-    "$BASE_NAME-device" >/dev/null 2>&1 || true
+  docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" \
+    "$BASE_NAME-qwen3" "$BASE_NAME-muse" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -156,19 +167,37 @@ echo "== checks"
 "$PY" "$HERE/verify_client.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT"
 
 echo "== data paths in the server log"
-expect_log() {
-  if ! grep -qF "$1" "$LOG"; then
-    echo "FAIL: the server log has no line with: $1" >&2
+# expect_in <log> <text> / refuse_in <log> <text>: the log must (not) have a
+# line with the text. expect_log and refuse_log read the step 3 log.
+expect_in() {
+  if ! grep -qF "$2" "$1"; then
+    echo "FAIL: the server log has no line with: $2" >&2
     exit 1
   fi
-  echo "  ok   log: $1"
+  echo "  ok   log: $2"
 }
-refuse_log() {
-  if grep -qF "$1" "$LOG"; then
-    echo "FAIL: the server log has a line with: $1" >&2
+refuse_in() {
+  if grep -qF "$2" "$1"; then
+    echo "FAIL: the server log has a line with: $2" >&2
     exit 1
   fi
-  echo "  ok   log has no: $1"
+  echo "  ok   log has no: $2"
+}
+expect_log() { expect_in "$LOG" "$1"; }
+refuse_log() { refuse_in "$LOG" "$1"; }
+# aliased <artifact dir>: its bodies alias the KV pools to their outputs (an
+# artifact exported before they did is exported again).
+aliased() { grep -qs "tf.aliasing_output" "$1"/bodies/*.mlir; }
+# pools_in_place <log>: every run the log reports on wrote the KV pools at
+# their own device addresses, including a count over 100 runs.
+pools_in_place() {
+  if ! grep -qE "decode_b1_c[0-9]+ updated the [0-9]+ KV pools in place" "$1"; then
+    echo "FAIL: the server log does not show the KV pools updated in place" >&2
+    exit 1
+  fi
+  grep -oE "decode_b1_c[0-9]+ updated the [0-9]+ KV pools in place.*" "$1" | head -1 | sed 's/^/  ok   log: /'
+  expect_in "$1" "KV pools were updated in place 100 times and copied 0 times"
+  refuse_in "$1" "to new device memory"
 }
 expect_log "model 'large_io': input 'X' is read in place from GPU memory (no host copy)"
 expect_log "model 'large_io': output 'Y' is copied device to device into GPU memory"
@@ -177,6 +206,8 @@ expect_log "model 'large_io_host': input 'X' is in GPU memory and goes through t
 expect_log "model 'large_io_host': output 'Y' was given GPU memory and goes through the host"
 refuse_log "model 'large_io': input 'X' is in GPU memory and goes through the host"
 refuse_log "model 'large_io_host': input 'X' is read in place"
+expect_log "decode_b1_c2 updated the 2 KV pools in place"
+refuse_log "to new device memory"
 
 echo "== negative control (must fail)"
 if "$PY" "$HERE/verify_client.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" --perturb >"$LOG.negative" 2>&1; then
@@ -213,6 +244,7 @@ elif [[ ! -f "$CKPT/model.safetensors" || ! -f "$CKPT/tokenizer.json" ]]; then
 else
   TL_CONFIG="$TL_DIR/repository/tinyllama/config.pbtxt"
   if [[ "${TINYLLAMA_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$TL_CONFIG" 2>/dev/null \
+      || ! aliased "$TL_DIR/artifact" \
       || ! grep -q "max_sequence_idle_microseconds: 5000000$" "$TL_CONFIG"; then
     # Gradle runs here with no Triton container up.
     rm -rf "$TL_DIR"
@@ -229,6 +261,20 @@ else
   "$PY" "$HERE/generate_client.py" --url "localhost:$HTTP_PORT" --model tinyllama \
     --tokenizer "$CKPT/tokenizer.json" --text "The capital of France is" --max-new 6 \
     --expect "$EXPECT"
+  # Two longer generations: 100 runs on the pools, whose ids the control
+  # below must reproduce with the pools copied instead.
+  long_ids() {
+    for id in 11 12; do
+      "$PY" "$HERE/generate_client.py" --url "localhost:$HTTP_PORT" --model tinyllama \
+        --tokenizer "$CKPT/tokenizer.json" --text "The capital of France is" --max-new 50 \
+        --sequence-id "$id" --expect-prefix "$EXPECT" | tee -a "$1" | grep -E "median|FAIL|ok"
+    done
+  }
+  : >"$LOG.tinyllama.ids"
+  long_ids "$LOG.tinyllama.ids"
+  echo "== tinyllama KV pools"
+  grep -o "compiled decode_b1_c64 .*" "$LOG.tinyllama" | sed 's/^/  /'
+  pools_in_place "$LOG.tinyllama"
   echo "== tinyllama sequence checks"
   "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
     --model tinyllama
@@ -245,6 +291,34 @@ else
     exit 1
   fi
   stop_server
+
+  # Control: the same model with donate_kv_pools false. The executions are
+  # not handed the pools, so XLA copies them; the check above must see that,
+  # and the ids must not change.
+  echo "== tinyllama control: KV pools not donated (must be seen copied)"
+  COPY_REPO="$TL_DIR/copy-repository"
+  rm -rf "$COPY_REPO"
+  mkdir -p "$COPY_REPO"
+  cp -al "$TL_DIR/repository/tinyllama" "$COPY_REPO/tinyllama"
+  rm "$COPY_REPO/tinyllama/config.pbtxt"
+  { cat "$TL_CONFIG"; echo 'parameters: { key: "donate_kv_pools" value: { string_value: "false" } }'; } \
+    >"$COPY_REPO/tinyllama/config.pbtxt"
+  export CONTAINER_NAME="$BASE_NAME-copy" MODEL_REPOSITORY="$COPY_REPO"
+  start_server "$LOG.copy" 600
+  : >"$LOG.copy.ids"
+  long_ids "$LOG.copy.ids"
+  stop_server
+  rm -rf "$COPY_REPO"
+  expect_in "$LOG.copy" "executions are not handed the pools (donate_kv_pools is false)"
+  expect_in "$LOG.copy" "KV pools were updated in place 0 times and copied 100 times"
+  refuse_in "$LOG.copy" "KV pools in place"
+  if ! diff <(grep "^generated" "$LOG.tinyllama.ids") <(grep "^generated" "$LOG.copy.ids") >/dev/null; then
+    echo "FAIL: the ids with the pools copied differ from the ids with the pools updated in place" >&2
+    exit 1
+  fi
+  echo "  ok   the 100 ids with the pools copied equal those with the pools updated in place"
+  median() { grep -o "median decode step [0-9.]* ms" "$1" | awk '{print $4}' | sort -n | head -1; }
+  echo "  median decode step: $(median "$LOG.tinyllama.ids") ms in place, $(median "$LOG.copy.ids") ms copied (the faster of two generations)"
 
   # The same model (hard links, no copy of the weights) with a 200 ms idle
   # timeout: many concurrent sequences make steps wait in Triton's queue for
@@ -277,7 +351,8 @@ elif [[ ! -f "$QCKPT/model.safetensors" ]]; then
   echo "SKIP qwen3: no Qwen/Qwen3-0.6B checkpoint at $QCKPT (hf download Qwen/Qwen3-0.6B)"
 else
   Q_CONFIG="$Q_DIR/repository/qwen3/config.pbtxt"
-  if [[ "${QWEN3_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$Q_CONFIG" 2>/dev/null; then
+  if [[ "${QWEN3_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$Q_CONFIG" 2>/dev/null \
+      || ! aliased "$Q_DIR/artifact"; then
     # Gradle runs here with no Triton container up.
     rm -rf "$Q_DIR"
     mkdir -p "$Q_DIR"
@@ -292,6 +367,8 @@ else
   grep -o "uploaded [0-9]* weights.*" "$LOG.qwen3" | head -1
   "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
     --model qwen3 --fixture "$QWEN3_FIXTURE"
+  echo "== qwen3 KV pools"
+  pools_in_place "$LOG.qwen3"
   echo "== qwen3 negative control (must fail)"
   if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
       --model qwen3 --fixture "$QWEN3_FIXTURE" --perturb >"$LOG.qwen3.negative" 2>&1; then
@@ -350,7 +427,8 @@ else
     echo "SKIP muse glimmer: no meta-models/Muse-Glimmer-30B checkpoint at $MCKPT"
   else
     M_CONFIG="$M_DIR/repository/muse/config.pbtxt"
-    if [[ "${MUSE_GLIMMER_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$M_CONFIG" 2>/dev/null; then
+    if [[ "${MUSE_GLIMMER_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$M_CONFIG" 2>/dev/null \
+        || ! aliased "$M_DIR/artifact"; then
       mem_check 8 "export Muse Glimmer"
       rm -rf "$M_DIR"
       mkdir -p "$M_DIR"
@@ -384,6 +462,13 @@ else
     echo "-- against transformers with bf16 weights and f32 activations"
     "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
       --model muse --fixture "$MUSE_MIXED" --noise-factor 2 --repeat 0
+    echo "== muse glimmer KV pools"
+    if ! grep -qE "updated the [0-9]+ KV pools in place" "$LOG.muse"; then
+      echo "FAIL: the server log does not show the KV pools updated in place" >&2
+      exit 1
+    fi
+    grep -oE "decode_b1_c[0-9]+ updated the [0-9]+ KV pools in place.*" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /'
+    refuse_in "$LOG.muse" "to new device memory"
     echo "== muse glimmer negative control (must fail)"
     if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
         --model muse --fixture "$MUSE_MIXED" --noise-factor 2 --repeat 0 --perturb >"$LOG.muse.negative" 2>&1; then

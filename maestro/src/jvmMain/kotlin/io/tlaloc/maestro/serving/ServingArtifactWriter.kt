@@ -175,7 +175,11 @@ object ServingArtifactWriter {
                     "a program it was asked to execute"
             }
 
-            val text = DxirModule(listOf(fn)).toStablehlo()
+            // Each KV_POOL_OUT is written over the KV_POOL_IN it pairs with,
+            // so a runtime that donates the pools updates them in place.
+            val text = DxirModule(listOf(fn)).toStablehlo(
+                outputAliases = mapOf(fn.name to spec.donationPairs.toMap()),
+            )
             val bytes = text.toByteArray(Charsets.UTF_8)
             val hash = sha256Hex(bytes)
             val bodyPath = "$BODIES_DIR/$hash.mlir"

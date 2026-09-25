@@ -21,11 +21,11 @@ single place that rule is written down.
 
 * **The pools are swapped, not mutated.** `run_decode` returns new pool
   arrays (the graph's `KV_CACHE_WRITE` produces a value, because the IR is
-  functional) and this class rebinds them. Buffer DONATION — making XLA
-  reuse the input buffer so the swap costs nothing — is H3a's named
-  deferral, still open: the manifest carries `donationPairs` and nothing
-  wires them into `CompileOptions` yet. Until it does, a step copies the
-  pool, and that is a PERFORMANCE fact, not a correctness one.
+  functional) and this class rebinds them. The bodies alias each pool
+  output to its input, so a runtime that keeps the pools on the device and
+  donates them swaps them for free (the Triton backend does); `run_decode`
+  takes and returns host lists, so here a step still moves every pool to
+  the host and back, and that is a PERFORMANCE fact, not a correctness one.
 
 * **A sequence is admitted with a one-token prompt, and a longer prompt is
   refused BY NAME.** There is no prefill entry in the artifact yet (H3a's

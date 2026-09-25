@@ -407,11 +407,14 @@ PjrtExecutable::Execute(
   } uploaded{api, {}};
 
   std::vector<PJRT_Buffer*> arguments;
-  std::vector<int64_t> views;  // argument indices that alias caller memory
+  // Argument indices the execution must not write: views of caller memory
+  // and device buffers the caller keeps.
+  std::vector<int64_t> kept;
   arguments.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
     if (args[i].device != nullptr) {
       arguments.push_back(args[i].device->buffer_);
+      if (!args[i].donate) kept.push_back(static_cast<int64_t>(i));
       continue;
     }
     if (args[i].device_ptr != nullptr) {
@@ -431,7 +434,7 @@ PjrtExecutable::Execute(
       }
       uploaded.buffers.push_back(view.buffer);  // destroying a view frees nothing
       arguments.push_back(view.buffer);
-      views.push_back(static_cast<int64_t>(i));
+      kept.push_back(static_cast<int64_t>(i));
       continue;
     }
     PJRT_Buffer* buffer = nullptr;
@@ -449,9 +452,9 @@ PjrtExecutable::Execute(
 
   PJRT_ExecuteOptions options{};
   options.struct_size = PJRT_ExecuteOptions_STRUCT_SIZE;
-  // Memory the caller owns is read, never written.
-  options.non_donatable_input_indices = views.empty() ? nullptr : views.data();
-  options.num_non_donatable_input_indices = views.size();
+  // Memory the caller keeps is read, never written.
+  options.non_donatable_input_indices = kept.empty() ? nullptr : kept.data();
+  options.num_non_donatable_input_indices = kept.size();
   PJRT_Buffer* const* argument_list = arguments.data();
   PJRT_Buffer** output_list = results->buffers_.data();
   PJRT_Event* complete = nullptr;
@@ -471,6 +474,72 @@ PjrtExecutable::Execute(
   if (!err.empty()) return "execution failed: " + err;
   *out = std::move(results);
   return "";
+}
+
+std::string
+PjrtExecutable::MemoryStats(CompiledMemory* out) const
+{
+  const PJRT_Api* api = client_->plugin_->api;
+  constexpr size_t kNeed =
+      offsetof(PJRT_Api, PJRT_Executable_GetCompiledMemoryStats) + sizeof(void*);
+  if (api->struct_size < kNeed || api->PJRT_Executable_GetCompiledMemoryStats == nullptr) {
+    return "the PJRT plugin does not report compiled memory (PJRT_Executable_GetCompiledMemoryStats)";
+  }
+  PJRT_LoadedExecutable_GetExecutable_Args get{};
+  get.struct_size = PJRT_LoadedExecutable_GetExecutable_Args_STRUCT_SIZE;
+  get.loaded_executable = exe_;
+  std::string err = TakeError(api, api->PJRT_LoadedExecutable_GetExecutable(&get));
+  if (!err.empty()) return "PJRT_LoadedExecutable_GetExecutable failed: " + err;
+  PJRT_Executable_GetCompiledMemoryStats_Args stats{};
+  stats.struct_size = PJRT_Executable_GetCompiledMemoryStats_Args_STRUCT_SIZE;
+  stats.executable = get.executable;
+  err = TakeError(api, api->PJRT_Executable_GetCompiledMemoryStats(&stats));
+  PJRT_Executable_Destroy_Args destroy{};
+  destroy.struct_size = PJRT_Executable_Destroy_Args_STRUCT_SIZE;
+  destroy.executable = get.executable;
+  TakeError(api, api->PJRT_Executable_Destroy(&destroy));
+  if (!err.empty()) return "PJRT_Executable_GetCompiledMemoryStats failed: " + err;
+  out->argument = stats.argument_size_in_bytes;
+  out->output = stats.output_size_in_bytes;
+  out->alias = stats.alias_size_in_bytes;
+  out->temp = stats.temp_size_in_bytes;
+  return "";
+}
+
+std::string
+PjrtBuffer::DeviceAddress(const void** out) const
+{
+  PJRT_Buffer_IncreaseExternalReferenceCount_Args inc{};
+  inc.struct_size = PJRT_Buffer_IncreaseExternalReferenceCount_Args_STRUCT_SIZE;
+  inc.buffer = buffer_;
+  std::string err = TakeError(api_, api_->PJRT_Buffer_IncreaseExternalReferenceCount(&inc));
+  if (!err.empty()) return "PJRT_Buffer_IncreaseExternalReferenceCount failed: " + err;
+  PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args ptr{};
+  ptr.struct_size = PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args_STRUCT_SIZE;
+  ptr.buffer = buffer_;
+  err = TakeError(api_, api_->PJRT_Buffer_OpaqueDeviceMemoryDataPointer(&ptr));
+  if (err.empty()) {
+    *out = ptr.device_memory_ptr;
+  } else {
+    err = "PJRT_Buffer_OpaqueDeviceMemoryDataPointer failed: " + err;
+  }
+  PJRT_Buffer_DecreaseExternalReferenceCount_Args dec{};
+  dec.struct_size = PJRT_Buffer_DecreaseExternalReferenceCount_Args_STRUCT_SIZE;
+  dec.buffer = buffer_;
+  std::string derr = TakeError(api_, api_->PJRT_Buffer_DecreaseExternalReferenceCount(&dec));
+  if (err.empty() && !derr.empty()) err = "PJRT_Buffer_DecreaseExternalReferenceCount failed: " + derr;
+  return err;
+}
+
+bool
+PjrtBuffer::IsDeleted() const
+{
+  if (buffer_ == nullptr) return true;
+  PJRT_Buffer_IsDeleted_Args args{};
+  args.struct_size = PJRT_Buffer_IsDeleted_Args_STRUCT_SIZE;
+  args.buffer = buffer_;
+  if (!TakeError(api_, api_->PJRT_Buffer_IsDeleted(&args)).empty()) return true;
+  return args.is_deleted;
 }
 
 PjrtResults::~PjrtResults()

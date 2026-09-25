@@ -932,6 +932,60 @@ class EmitterTest {
         assertTrue(mlir.contains("func.func @b"), mlir)
     }
 
+    // A step that returns (logits, next state): the state result is the one a
+    // runtime wants written over the state parameter.
+    private fun stateStep() = DxirBuilder.function("main") {
+        val t = DxirType(F32, listOf(4))
+        val x = param("x", t)
+        val state = param("state", t)
+        val logits = op(OpKind.MUL, listOf(x, x), t)
+        val next = op(OpKind.ADD, listOf(state, x), t)
+        listOf(logits, next)
+    }
+
+    @Test
+    fun outputAliasesAreEmittedAsTfAliasingOutputOnTheirParametersOnly() {
+        val fn = stateStep()
+        val mlir = DxirModule(listOf(fn)).toStablehlo(outputAliases = mapOf("main" to mapOf(1 to 1)))
+        assertTrue(
+            mlir.contains(
+                "func.func @main(%0: tensor<4xf32>, %1: tensor<4xf32> {tf.aliasing_output = 1 : i32}) -> " +
+                    "(tensor<4xf32>, tensor<4xf32>)",
+            ),
+            mlir,
+        )
+        assertEquals(1, Regex("tf\\.aliasing_output").findAll(mlir).count(), mlir)
+        // Control: without aliases the same function carries no attribute, and
+        // the body is otherwise the same text.
+        val plain = DxirModule(listOf(fn)).toStablehlo()
+        assertTrue("aliasing_output" !in plain, plain)
+        assertEquals(plain, mlir.replace(" {tf.aliasing_output = 1 : i32}", ""))
+    }
+
+    @Test
+    fun outputAliasesThatCannotBeHonouredAreRefusedByName() {
+        val fn = stateStep()
+        val range = assertFailsWith<IllegalArgumentException> { fn.toStablehlo(outputAliases = mapOf(2 to 1)) }
+        assertTrue("2 parameters" in range.message!!, range.message)
+        val result = assertFailsWith<IllegalArgumentException> { fn.toStablehlo(outputAliases = mapOf(1 to 5)) }
+        assertTrue("result 5" in result.message!!, result.message)
+        val twice = assertFailsWith<IllegalArgumentException> {
+            fn.toStablehlo(outputAliases = mapOf(0 to 1, 1 to 1))
+        }
+        assertTrue("more than one parameter" in twice.message!!, twice.message)
+        val wide = DxirBuilder.function("main") {
+            val x = param("x", DxirType(F32, listOf(4)))
+            val y = param("y", DxirType(F32, listOf(8)))
+            listOf(x, y)
+        }
+        val type = assertFailsWith<IllegalArgumentException> { wide.toStablehlo(outputAliases = mapOf(1 to 0)) }
+        assertTrue("of its own type" in type.message!!, type.message)
+        val unknown = assertFailsWith<IllegalArgumentException> {
+            DxirModule(listOf(fn)).toStablehlo(outputAliases = mapOf("step" to mapOf(1 to 1)))
+        }
+        assertTrue("[step]" in unknown.message!!, unknown.message)
+    }
+
     @Test
     fun capturedAutogradFunctionLowersToValidStablehloShape() {
         // End-to-end: tracing → dxir → StableHLO text.

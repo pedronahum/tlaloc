@@ -110,7 +110,12 @@ The manifest records:
   signature with a role per input (`TOKEN_IDS`, `POSITIONS`, `BLOCK_TABLES`,
   `SEQ_LENS`, `SLOT_MAPPING`, `KV_POOL_IN`, weight slots) and output
   (`LOGITS`, `KV_POOL_OUT`);
-- **the weight table**: slot name, dtype, shape and byte length of each file.
+- **the weight table**: slot name, dtype, shape and byte length of each file;
+- **the donation pairs**: each `KV_POOL_OUT` output with the `KV_POOL_IN`
+  input it replaces. The body says the same thing to XLA: each paired
+  parameter of `@main` carries `tf.aliasing_output = <output index>`, so a
+  runtime that donates the pool buffers gets each updated pool written in
+  place, in the memory of the pool it read.
 
 The weights are read from the checkpoint's safetensors and written as raw
 files with no header: the file is the operand. Linears are transposed from
@@ -135,7 +140,7 @@ memory, which on a GB10 is 75% of the machine's RAM.
 | Python packages in the serving process | none beyond the standard library | vLLM and torch (vLLM's own); no torch model is built | none: the backend is C++ |
 | Weights | uploaded once, on the device | uploaded once, on the device | uploaded once per GPU at model load, on the device |
 | KV pages | the caller allocates pages | vLLM's block manager allocates them | the backend allocates them per sequence (correlation ID) and frees them on END, or, when pages run short, after twice the idle timeout plus a queueing allowance |
-| KV pools between steps | copied to the host and back every step | as in (i) | on the device; each execution copies them rather than donating |
+| KV pools between steps | copied to the host and back every step | as in (i) | on the device, updated in place: each execution is handed the pools and writes them where they are |
 | Prompt | one decode step per token | one decode step per token (chunked prefill refused by name) | one prefill call |
 | Batching | the caller builds the batch | vLLM's scheduler | decode steps of different sequences in one call (Triton's sequence batcher, oldest strategy) |
 | Sampling | greedy, host-side | vLLM's sampler over the returned logits | the client's; the server returns logits |
@@ -149,7 +154,8 @@ with an import guard that raises on those modules.
 [examples/gpu-inference/serve.py](../examples/gpu-inference/) is the
 runnable form. It is a correctness path, not a throughput one: the KV pools
 cross to the host as Python lists every step, which is why a TinyLlama step
-takes about 1.35 s.
+takes about 1.35 s. The pool aliases in the bodies do not help here: the
+pools are uploaded fresh every step, so there is no device pool to keep.
 
 ### (ii) vLLM platform plugin
 
@@ -179,7 +185,14 @@ compiles every entry and uploads the weights. Per request:
   sequences that Triton hands over together run as one decode call on the
   smallest entry that holds them;
 - the backend derives each sequence's block table and slots from the pages it
-  holds; the client sends token ids only.
+  holds; the client sends token ids only;
+- the KV pools are donated to each execution, and XLA writes the updated
+  pools over them (the alias in the body): the pools stay at the device
+  addresses they were given at load and no execution copies them. The
+  backend checks the addresses after every run and logs the result;
+  `verify.sh` requires 100 of 100 runs in place, and a control served with
+  the model parameter `donate_kv_pools` set to `false` must show 100 of 100
+  copied, with the same ids.
 
 The backend also serves any Tlaloc StableHLO that is not a language model:
 `config.pbtxt` parameters `arguments` and `results` bind each argument to an

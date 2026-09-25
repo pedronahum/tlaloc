@@ -12,7 +12,15 @@
 //   3. x * x + x runs on an input the runtime reads in place from cudaMalloc
 //      memory (a PJRT view, no host copy), and the result is copied device
 //      to device into another cudaMalloc buffer; both the view path and the
-//      host path give the exact expected values.
+//      host path give the exact expected values;
+//   4. a 1 MiB state whose parameter carries `tf.aliasing_output` is updated
+//      in place: XLA plans 1 MiB of arguments as aliased, and over 100 steps
+//      that each donate the state and keep the output as the next step's
+//      state, the output stays at the device address the state was uploaded
+//      to and holds every value written; the same check detects the copy in
+//      the two controls, the program without the attribute and the program
+//      with it whose state is not donated (new memory every step, the kept
+//      input unchanged).
 //
 // --perturb expects one wrong value, so the run must fail (negative control).
 // Exit status 0 when every check passes.
@@ -46,6 +54,120 @@ const char kModule[] = R"(func.func @main(%x: tensor<1024xf32>) -> tensor<1024xf
   return %1 : tensor<1024xf32>
 }
 )";
+
+// A state of 262144 floats (1 MiB); step i writes i + 1 at index i.
+const char kAliasedStep[] = R"(func.func @main(%s: tensor<262144xf32> {tf.aliasing_output = 0 : i32}, %i: tensor<i32>) -> tensor<262144xf32> {
+  %one = stablehlo.constant dense<1.0> : tensor<f32>
+  %f = stablehlo.convert %i : (tensor<i32>) -> tensor<f32>
+  %v = stablehlo.add %f, %one : tensor<f32>
+  %u = stablehlo.reshape %v : (tensor<f32>) -> tensor<1xf32>
+  %0 = stablehlo.dynamic_update_slice %s, %u, %i : (tensor<262144xf32>, tensor<1xf32>, tensor<i32>) -> tensor<262144xf32>
+  return %0 : tensor<262144xf32>
+}
+)";
+
+struct InPlaceRun {
+  std::string err;
+  int64_t alias_bytes = -1;
+  int same_address_steps = 0;  // steps whose output is at the address of that step's state
+  bool at_home = true;         // every output at the address the state was uploaded to
+  bool values_ok = false;
+  bool kept_input_unchanged = false;  // only meaningful when not donating
+};
+
+// Runs `steps` steps of `module`, each keeping its output as the next step's
+// state. With `donate` the state is handed to the execution.
+InPlaceRun
+RunInPlace(PjrtClient* client, const std::string& module, bool donate, int steps)
+{
+  InPlaceRun r;
+  const size_t n = 262144, bytes = n * sizeof(float);
+  std::unique_ptr<PjrtExecutable> exe;
+  r.err = client->Compile(PrepareForXla(module, "main"), &exe);
+  if (!r.err.empty()) return r;
+  CompiledMemory mem;
+  r.err = exe->MemoryStats(&mem);
+  if (!r.err.empty()) return r;
+  r.alias_bytes = mem.alias;
+
+  std::vector<float> zeros(n, 0.0f);
+  HostInput h;
+  h.data = zeros.data();
+  h.byte_size = bytes;
+  h.dtype = DType::F32;
+  h.dims = {static_cast<int64_t>(n)};
+  std::unique_ptr<PjrtBuffer> state;
+  r.err = PjrtBuffer::Upload(client, h, &state);
+  if (!r.err.empty()) return r;
+  std::unique_ptr<PjrtBuffer> first;  // kept alive when not donating, to check it
+  const void* home = nullptr;
+  r.err = state->DeviceAddress(&home);
+  if (!r.err.empty()) return r;
+
+  for (int i = 0; i < steps; ++i) {
+    const void* in = nullptr;
+    r.err = state->DeviceAddress(&in);
+    if (!r.err.empty()) return r;
+    int32_t index = i;
+    ExecuteArg s, idx;
+    s.device = state.get();
+    s.donate = donate;
+    idx.host.data = &index;
+    idx.host.byte_size = 4;
+    idx.host.dtype = DType::I32;
+    std::unique_ptr<PjrtResults> results;
+    r.err = exe->Execute({s, idx}, &results);
+    if (!r.err.empty()) return r;
+    std::unique_ptr<PjrtBuffer> next = results->Release(0);
+    const void* at = nullptr;
+    r.err = next->DeviceAddress(&at);
+    if (!r.err.empty()) return r;
+    if (at == in) ++r.same_address_steps;
+    if (at != home) r.at_home = false;
+    if (!donate && i == 0) first = std::move(state);
+    state = std::move(next);
+  }
+
+  std::vector<float> got(n), want(n, 0.0f);
+  for (int i = 0; i < steps; ++i) want[i] = static_cast<float>(i + 1);
+  std::unique_ptr<PjrtResults> none;
+  // Read the final state back through a one-step identity: the host copy of a
+  // PjrtBuffer goes through PjrtResults, so run the step once more at an index
+  // past the checked range and compare the rest.
+  int32_t index = steps;
+  ExecuteArg s, idx;
+  s.device = state.get();
+  idx.host.data = &index;
+  idx.host.byte_size = 4;
+  idx.host.dtype = DType::I32;
+  r.err = exe->Execute({s, idx}, &none);
+  if (!r.err.empty()) return r;
+  r.err = none->CopyToHost(0, got.data(), bytes);
+  if (!r.err.empty()) return r;
+  want[steps] = static_cast<float>(steps + 1);
+  r.values_ok = std::memcmp(got.data(), want.data(), bytes) == 0;
+  if (first) {
+    ExecuteArg f;
+    f.device = first.get();
+    idx.host.data = &index;
+    r.err = exe->Execute({f, idx}, &none);
+    if (!r.err.empty()) return r;
+    r.err = none->CopyToHost(0, got.data(), bytes);
+    if (!r.err.empty()) return r;
+    std::vector<float> only(n, 0.0f);
+    only[steps] = static_cast<float>(steps + 1);
+    r.kept_input_unchanged = std::memcmp(got.data(), only.data(), bytes) == 0;
+  }
+  return r;
+}
+
+std::string
+Replace(std::string s, const std::string& from, const std::string& to)
+{
+  const size_t at = s.find(from);
+  if (at != std::string::npos) s.replace(at, from.size(), to);
+  return s;
+}
 
 }  // namespace
 
@@ -123,6 +245,7 @@ main(int argc, char** argv)
   bool dense = false;
   err = results->WithDevicePointer(0, bytes, &dense, [&](const void* src) -> std::string {
     cudaError_t e = cudaMemcpy(d_out, src, bytes, cudaMemcpyDeviceToDevice);
+    if (e == cudaSuccess) e = cudaStreamSynchronize(0);  // D2D cudaMemcpy is asynchronous
     return e == cudaSuccess ? "" : cudaGetErrorString(e);
   });
   Check(err.empty() && dense, "result copied device to device (dense storage)");
@@ -150,6 +273,36 @@ main(int argc, char** argv)
 
   cudaFree(d_in);
   cudaFree(d_out);
+
+  // In-place state: the aliased program with the state donated, then the two
+  // controls the check must see copying.
+  const int steps = 100;
+  const int64_t mib = 262144 * 4;
+  InPlaceRun in_place = RunInPlace(client.get(), kAliasedStep, true, steps);
+  Check(in_place.err.empty(), "aliased state program ran" + (in_place.err.empty() ? "" : ": " + in_place.err));
+  Check(in_place.alias_bytes == mib,
+        "XLA plans " + std::to_string(in_place.alias_bytes) + " bytes of arguments aliased to outputs (" +
+            std::to_string(mib) + " expected)");
+  Check(in_place.same_address_steps == steps && in_place.at_home,
+        std::to_string(in_place.same_address_steps) + " of " + std::to_string(steps) +
+            " donated steps wrote the state at its own address, the one it was uploaded to "
+            "(updated in place)");
+  Check(in_place.values_ok, "the in-place state holds all 101 values written");
+
+  InPlaceRun no_alias = RunInPlace(
+      client.get(), Replace(kAliasedStep, " {tf.aliasing_output = 0 : i32}", ""), true, steps);
+  Check(no_alias.err.empty() && no_alias.alias_bytes == 0 && no_alias.same_address_steps == 0 &&
+            no_alias.values_ok,
+        "control, no alias attribute: 0 bytes aliased, " + std::to_string(no_alias.same_address_steps) +
+            " of " + std::to_string(steps) + " steps at their state's address (the check sees the copy)" +
+            (no_alias.err.empty() ? "" : ": " + no_alias.err));
+  InPlaceRun kept = RunInPlace(client.get(), kAliasedStep, false, steps);
+  Check(kept.err.empty() && kept.alias_bytes == mib && kept.same_address_steps == 0 && kept.values_ok &&
+            kept.kept_input_unchanged,
+        "control, alias attribute but the state not donated: " + std::to_string(kept.same_address_steps) +
+            " of " + std::to_string(steps) + " steps at their state's address, the kept input unchanged" +
+            (kept.err.empty() ? "" : ": " + kept.err));
+
   if (failures > 0) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

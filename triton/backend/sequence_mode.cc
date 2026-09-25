@@ -341,6 +341,15 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
         (start_input_.empty() ? " START" : "") + (end_input_.empty() ? " END" : "") +
         (corrid_input_.empty() ? " CORRID" : ""));
   }
+  triton::common::TritonJson::Value params;
+  if (config.Find("parameters", &params) && params.Find("donate_kv_pools")) {
+    std::string donate;
+    RETURN_IF_ERROR(GetParameterValue(params, "donate_kv_pools", &donate));
+    if (donate != "true" && donate != "false") {
+      return Invalid(Where() + "the 'donate_kv_pools' parameter must be true or false, got '" + donate + "'");
+    }
+    donate_pools_ = donate == "true";
+  }
   uint64_t idle_us = 1000000;  // Triton's default
   MemberAsU64(sb, "max_sequence_idle_microseconds", &idle_us);
   idle_ns_ = idle_us * 1000;
@@ -602,6 +611,11 @@ SequenceModel::CompileEntries()
       std::ostringstream m;
       m << "tlaloc backend: " << Where() << "compiled " << e.id << " (" << e.body_path << ") in "
         << (NowNs() - t0) / 1000000 << " ms";
+      tlaloc_triton::CompiledMemory mem;
+      if (exe->MemoryStats(&mem).empty()) {
+        m << "; XLA writes outputs over " << mem.alias / (1024 * 1024) << " MiB of its "
+          << mem.argument / (1024 * 1024) << " MiB of arguments";
+      }
       LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
       hit = executables_.emplace(e.body_path, std::move(exe)).first;
     }
@@ -725,27 +739,82 @@ SequenceInstance::Create(
 {
   std::unique_ptr<SequenceInstance> s(new SequenceInstance(model, name, instance));
   uint64_t total = 0;
-  for (const SlotSpec& p : model->pools()) {
-    const size_t bytes = Elements(p.dims) * tlaloc_triton::ByteWidth(p.dtype);
-    std::vector<char> zeros(bytes, 0);
-    HostInput host;
-    host.data = zeros.data();
-    host.byte_size = bytes;
-    host.dtype = p.dtype;
-    host.dims = p.dims;
-    std::string err = PjrtBuffer::Upload(model->client(), host, &s->state_[p.name]);
-    if (!err.empty()) {
-      return Err(TRITONSERVER_ERROR_INTERNAL, "instance '" + name + "': KV pool '" + p.name + "': " + err);
-    }
-    total += bytes;
-  }
+  std::string err = s->ZeroPools(&total);
+  if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, "instance '" + name + "': " + err);
+  s->pool_bytes_ = total;
   std::ostringstream m;
   m << "tlaloc backend: instance '" << name << "': " << model->pools().size() << " KV pools ("
     << total / (1024 * 1024) << " MiB) zeroed; " << s->pool_.capacity()
-    << " pages for sequences (page 0 is the padding page)";
+    << " pages for sequences (page 0 is the padding page); "
+    << (model->donate_pools() ? "each execution is handed the pools to update in place"
+                              : "executions are not handed the pools (donate_kv_pools is false)");
   LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
   *out = std::move(s);
   return nullptr;
+}
+
+std::string
+SequenceInstance::ZeroPools(uint64_t* bytes)
+{
+  *bytes = 0;
+  pool_address_.clear();
+  const bool addresses = model_->client()->SupportsDeviceViews();
+  for (const SlotSpec& p : model_->pools()) {
+    const size_t size = Elements(p.dims) * tlaloc_triton::ByteWidth(p.dtype);
+    std::vector<char> zeros(size, 0);
+    HostInput host;
+    host.data = zeros.data();
+    host.byte_size = size;
+    host.dtype = p.dtype;
+    host.dims = p.dims;
+    std::string err = PjrtBuffer::Upload(model_->client(), host, &state_[p.name]);
+    if (!err.empty()) return "KV pool '" + p.name + "': " + err;
+    if (addresses) {
+      const void* at = nullptr;
+      err = state_[p.name]->DeviceAddress(&at);
+      if (!err.empty()) return "KV pool '" + p.name + "': " + err;
+      pool_address_[p.name] = at;
+    }
+    *bytes += size;
+  }
+  return "";
+}
+
+void
+SequenceInstance::CheckInPlace(const ServingEntrySpec& e)
+{
+  if (pool_address_.empty()) return;
+  bool in_place = true;
+  for (auto& kv : pool_address_) {
+    const void* at = nullptr;
+    if (!state_.at(kv.first)->DeviceAddress(&at).empty()) return;
+    in_place &= at == kv.second;
+    kv.second = at;
+  }
+  ++runs_;
+  if (in_place) ++in_place_runs_;
+  const std::string mib = std::to_string(pool_bytes_ / (1024 * 1024)) + " MiB";
+  const std::string pools = std::to_string(pool_address_.size()) + " KV pools";
+  if (reported_.insert(e.id).second) {
+    std::ostringstream m;
+    m << "tlaloc backend: instance '" << name_ << "': " << e.id;
+    if (in_place) {
+      m << " updated the " << pools << " in place (each output at the device address of its "
+        << "pool; " << mib << " not copied)";
+    } else {
+      m << " wrote the " << pools << " to new device memory, copying " << mib << " per run ("
+        << (model_->donate_pools() ? "the artifact does not alias them to its outputs"
+                                   : "donate_kv_pools is false")
+        << ")";
+    }
+    LOG_MESSAGE(in_place ? TRITONSERVER_LOG_INFO : TRITONSERVER_LOG_WARN, m.str().c_str());
+  }
+  if (runs_ == 100) {
+    std::ostringstream m;
+    m << "tlaloc backend: instance '" << name_ << "': in 100 runs the " << pools << " were updated "
+      << "in place " << in_place_runs_ << " times and copied " << runs_ - in_place_runs_ << " times";
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+  }
 }
 
 void
@@ -889,6 +958,12 @@ SequenceInstance::Run(
     const ServingEntrySpec& e, const std::vector<Work*>& rows, uint64_t* compute_start,
     uint64_t* compute_end)
 {
+  if (pools_lost_) {
+    return Err(
+        TRITONSERVER_ERROR_INTERNAL,
+        e.id + ": an earlier execution in this batch failed and took the KV pools with it; "
+        "every sequence of instance '" + name_ + "' has lost its KV state");
+  }
   const int B = e.batch, T = e.tokens_per_seq, M = e.max_blocks, bs = model_->block_size();
   // The padding convention (DecodePadding): token 0, position 0, page 0,
   // sequence length 1, slot -1 (the KV write is dropped).
@@ -926,28 +1001,44 @@ SequenceInstance::Run(
     else if (s.role == "BLOCK_TABLES") args[i].host = host(tables, s.dims);
     else if (s.role == "SEQ_LENS") args[i].host = host(lens, s.dims);
     else if (s.role == "SLOT_MAPPING") args[i].host = host(slots, s.dims);
-    else if (s.role == "KV_POOL_IN") args[i].device = state_.at(s.name).get();
-    else args[i].device = model_->weight(s.name);
+    else if (s.role == "KV_POOL_IN") {
+      // Donated: the artifact aliases each KV_POOL_OUT to its KV_POOL_IN, so
+      // the step writes the pool in place and hands it back as that output.
+      args[i].device = state_.at(s.name).get();
+      args[i].donate = model_->donate_pools();
+    } else {
+      args[i].device = model_->weight(s.name);
+    }
   }
   *compute_start = NowNs();
   std::unique_ptr<PjrtResults> results;
   std::string err = e.executable->Execute(args, &results);
-  if (err.empty()) {
-    for (size_t j = 0; j < e.outputs.size() && err.empty(); ++j) {
-      if (e.outputs[j].role != "LOGITS") continue;
-      std::vector<float> all(size_t(B) * model_->vocab());
-      err = results->CopyToHost(j, all.data(), all.size() * 4);
-      if (!err.empty()) break;
-      for (size_t r = 0; r < rows.size(); ++r) {
-        rows[r]->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
-      }
+  if (!err.empty()) {
+    *compute_end = NowNs();
+    for (const auto& kv : state_) pools_lost_ |= kv.second->IsDeleted();
+    return Err(
+        TRITONSERVER_ERROR_INTERNAL,
+        e.id + ": " + err +
+            (pools_lost_ ? "; the execution took the KV pools with it, so every sequence of instance '" +
+                               name_ + "' loses its KV state"
+                         : ""));
+  }
+  // The pools first: a donated pool now lives only in the results.
+  for (size_t j = 0; j < e.outputs.size(); ++j) {
+    if (e.replaces[j] >= 0) state_[e.inputs[e.replaces[j]].name] = results->Release(j);
+  }
+  CheckInPlace(e);
+  for (size_t j = 0; j < e.outputs.size() && err.empty(); ++j) {
+    if (e.outputs[j].role != "LOGITS") continue;
+    std::vector<float> all(size_t(B) * model_->vocab());
+    err = results->CopyToHost(j, all.data(), all.size() * 4);
+    if (!err.empty()) break;
+    for (size_t r = 0; r < rows.size(); ++r) {
+      rows[r]->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
     }
   }
   *compute_end = NowNs();
   if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + err);
-  for (size_t j = 0; j < e.outputs.size(); ++j) {
-    if (e.replaces[j] >= 0) state_[e.inputs[e.replaces[j]].name] = results->Release(j);
-  }
   for (Work* w : rows) {
     w->seq->length = w->position + static_cast<int>(w->tokens.size());
     w->compute_start = *compute_start;
@@ -1107,6 +1198,22 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
     LOG_IF_ERROR(
         TRITONBACKEND_RequestRelease(w.request, TRITONSERVER_REQUEST_RELEASE_ALL),
         "failed to release the request");
+  }
+  if (pools_lost_) {
+    // Every sequence's KV state went with the donated pools: free them all
+    // (a later request for one must START again) and zero new pools.
+    std::vector<uint64_t> all;
+    for (const auto& kv : sequences_) all.push_back(kv.first);
+    for (uint64_t id : all) Free(id, "lost its KV state with a failed execution");
+    uint64_t bytes = 0;
+    std::string err = ZeroPools(&bytes);
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_ERROR,
+        ("tlaloc backend: instance '" + name_ + "': a failed execution took the KV pools; " +
+         std::to_string(all.size()) + " sequence(s) freed; " +
+         (err.empty() ? "new pools zeroed" : "zeroing new pools failed: " + err))
+            .c_str());
+    pools_lost_ = !err.empty();
   }
   max_exec_ns_ = std::max(max_exec_ns_, NowNs() - exec_start);
   if (first_compute == 0) first_compute = last_compute = NowNs();

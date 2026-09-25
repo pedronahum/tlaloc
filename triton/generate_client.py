@@ -65,6 +65,8 @@ def main():
     ap.add_argument("--max-new", type=int, default=6)
     ap.add_argument("--sequence-id", type=int, default=1)
     ap.add_argument("--expect", default="", help="comma-separated ids the generation must equal")
+    ap.add_argument("--expect-prefix", default="",
+                    help="comma-separated ids the generation must start with")
     args = ap.parse_args()
 
     from sequence_client import SequenceClient
@@ -95,6 +97,12 @@ def main():
             print(f"FAIL generated {generated}, expected {want}")
             return 1
         print(f"ok   generated ids equal the expected {len(want)} ids")
+    if args.expect_prefix:
+        want = [int(t) for t in args.expect_prefix.split(",") if t.strip()]
+        if generated[: len(want)] != want:
+            print(f"FAIL generated {generated[:len(want)]}..., expected to start with {want}")
+            return 1
+        print(f"ok   the {len(generated)} generated ids start with the expected {len(want)}")
     return 0
 
 

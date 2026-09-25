@@ -26,7 +26,22 @@ import io.tlaloc.ir.KvCacheWriteAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 
-fun DxirModule.toStablehlo(): String = buildString {
+/**
+ * The module as StableHLO text.
+ *
+ * [outputAliases] maps a function name to the parameters its results are
+ * written over: parameter index to result index. Each pair is emitted as the
+ * parameter's `tf.aliasing_output` attribute, which XLA reads as an
+ * input-output alias. A runtime that donates such a parameter's buffer gets
+ * the result in the same device memory, so state carried from one execution
+ * to the next (a KV pool) is updated in place instead of copied. A runtime
+ * that does not donate it gets a copy, and the same values.
+ */
+fun DxirModule.toStablehlo(outputAliases: Map<String, Map<Int, Int>> = emptyMap()): String = buildString {
+    val unknown = outputAliases.keys - functions.map { it.name }.toSet()
+    require(unknown.isEmpty()) {
+        "toStablehlo: output aliases name ${unknown.sorted()}, which the module does not define"
+    }
     appendLine("module {")
     // Aggregate meshes: module-level + any declared per-function. SDY requires them
     // at module scope; our DxirBuilder places them per-function by default.
@@ -35,16 +50,45 @@ fun DxirModule.toStablehlo(): String = buildString {
     if (allMeshes.isNotEmpty() && functions.isNotEmpty()) appendLine()
     functions.forEachIndexed { i, fn ->
         if (i > 0) appendLine()
-        append(fn.toStablehlo(indent = "  "))
+        append(fn.toStablehlo(indent = "  ", outputAliases = outputAliases[fn.name].orEmpty()))
     }
     append("}")
     appendLine()
 }
 
-fun DxirFunction.toStablehlo(indent: String = ""): String =
-    StablehloEmitter(this, indent).emit()
+/**
+ * The function as StableHLO text. [outputAliases] maps a parameter index to
+ * the index of the result written over it (see [DxirModule.toStablehlo]);
+ * each result is written over at most one parameter, of the same type.
+ */
+fun DxirFunction.toStablehlo(indent: String = "", outputAliases: Map<Int, Int> = emptyMap()): String =
+    StablehloEmitter(this, indent, outputAliases).emit()
 
-internal class StablehloEmitter(private val fn: DxirFunction, private val indent: String) {
+internal class StablehloEmitter(
+    private val fn: DxirFunction,
+    private val indent: String,
+    private val outputAliases: Map<Int, Int> = emptyMap(),
+) {
+
+    init {
+        for ((p, r) in outputAliases) {
+            require(p in fn.params.indices) {
+                "toStablehlo: @${fn.name} has ${fn.params.size} parameters; an output alias names parameter $p"
+            }
+            require(r in fn.returns.indices) {
+                "toStablehlo: @${fn.name} has ${fn.returns.size} results; parameter $p is aliased to result $r"
+            }
+            require(fn.params[p].type == fn.returns[r].type) {
+                "toStablehlo: @${fn.name} aliases parameter $p (${fn.params[p].type.toMlir()}) to result " +
+                    "$r (${fn.returns[r].type.toMlir()}); a result can only be written over a parameter " +
+                    "of its own type"
+            }
+        }
+        val twice = outputAliases.values.groupBy { it }.filterValues { it.size > 1 }.keys
+        require(twice.isEmpty()) {
+            "toStablehlo: @${fn.name} writes result(s) ${twice.sorted()} over more than one parameter"
+        }
+    }
 
     private val out = StringBuilder()
     /**
@@ -66,9 +110,10 @@ internal class StablehloEmitter(private val fn: DxirFunction, private val indent
     }
 
     fun emit(): String {
-        val paramList = fn.params.joinToString(", ") { p ->
+        val paramList = fn.params.withIndex().joinToString(", ") { (i, p) ->
             ssa[p.id] = listOf("%${p.id}")
-            "%${p.id}: ${p.type.toMlir()}"
+            val alias = outputAliases[i]?.let { " {tf.aliasing_output = $it : i32}" } ?: ""
+            "%${p.id}: ${p.type.toMlir()}$alias"
         }
         val retTypeList = fn.returns.joinToString(", ") { it.type.toMlir() }
         // MLIR requires parens around multi-result func return types; single is bare.

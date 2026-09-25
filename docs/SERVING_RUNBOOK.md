@@ -862,10 +862,11 @@ this prompt there is no divergence to report.
 
 **The median is not a throughput claim.** The KV pools still round-trip to
 the host every step as flat Python lists — 44 pools × 32768 floats per token,
-built and unpacked in pure Python. That is buffer DONATION, which has ridden
-`donationPairs` in the manifest; it is now the dominant cost of a real decode,
-and measurable for the first time. The weights, by contrast, are uploaded
-once and held.
+built and unpacked in pure Python. Keeping the pools on the device is what
+removes that; the bodies alias them (`donationPairs`, as `tf.aliasing_output`)
+and the Triton backend updates them in place, but this driver still passes
+host lists. It is the dominant cost of a real decode here. The weights, by
+contrast, are uploaded once and held.
 
 ### 10.5 What does NOT work, by name
 

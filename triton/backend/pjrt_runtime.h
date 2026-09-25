@@ -107,6 +107,13 @@ class PjrtBuffer {
   // needed.
   static std::string Upload(
       PjrtClient* client, const HostInput& host, std::unique_ptr<PjrtBuffer>* out);
+  // The device address of the buffer's memory. Two buffers at the same
+  // address share their memory: an output written in place over a donated
+  // input has the address the input had.
+  std::string DeviceAddress(const void** out) const;
+  // True once the buffer's memory has been handed to an execution that wrote
+  // an output over it (a donated argument), or deleted.
+  bool IsDeleted() const;
 
  private:
   friend class PjrtExecutable;
@@ -116,15 +123,27 @@ class PjrtBuffer {
 };
 
 // One argument of an execution, in order of preference:
-//   `device`      a PJRT buffer the caller owns (a weight, state),
+//   `device`      a PJRT buffer the caller owns (a weight, state); never
+//                 donated unless `donate` is set,
 //   `device_ptr`  memory on the client's GPU that the caller owns, described
 //                 by `host.dtype` and `host.dims`, read in place through a
 //                 PJRT view (no copy) and never donated,
 //   `host`        a host tensor, copied to the device for this call.
+// A host tensor is copied to a temporary buffer that the execution may
+// donate.
+//
+// `donate` (with `device` only) hands the buffer to the execution. When the
+// program aliases that parameter to an output (the `tf.aliasing_output`
+// argument attribute of its entry function), the output is written in the
+// same device memory, nothing is copied, and the argument's buffer is left
+// deleted: the caller must replace it with that output. When the program has
+// no alias for it, donating changes nothing. A device buffer that is not
+// donated is never written; a program that aliases it then copies it first.
 struct ExecuteArg {
   HostInput host;
   const PjrtBuffer* device = nullptr;
   const void* device_ptr = nullptr;
+  bool donate = false;
 };
 
 // Device results of one execution. Destroys its buffers when it goes away.
@@ -152,10 +171,22 @@ class PjrtResults {
   std::vector<PJRT_Buffer*> buffers_;
 };
 
+// What XLA planned for one execution, in bytes of device memory
+// (PJRT_Executable_GetCompiledMemoryStats). `alias` is the part of the
+// arguments that outputs are written over in place.
+struct CompiledMemory {
+  int64_t argument = 0;
+  int64_t output = 0;
+  int64_t alias = 0;
+  int64_t temp = 0;
+};
+
 class PjrtExecutable {
  public:
   ~PjrtExecutable();
   size_t num_outputs() const { return num_outputs_; }
+  // Refused by name when the plugin does not report compiled memory.
+  std::string MemoryStats(CompiledMemory* out) const;
   // Uploads the host arguments to device 0, runs, and waits for completion.
   std::string Execute(const std::vector<ExecuteArg>& args, std::unique_ptr<PjrtResults>* out);
 

@@ -1377,7 +1377,11 @@ ModelInstanceState::WriteOutput(
     if (device_->views && mid == device_->ordinal) {
       bool dense = false;
       std::string err = results->WithDevicePointer(j, bytes, &dense, [&](const void* src) {
+        // A device-to-device cudaMemcpy returns before the copy is done: wait
+        // for it, so that the response never leaves (and PJRT never frees
+        // the result) before the bytes have landed.
         cudaError_t e = cudaMemcpy(buffer, src, bytes, cudaMemcpyDeviceToDevice);
+        if (e == cudaSuccess) e = cudaStreamSynchronize(0);
         return e == cudaSuccess ? std::string() : std::string(cudaGetErrorString(e));
       });
       if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, what + ": " + err);
@@ -1474,7 +1478,10 @@ ModelInstanceState::Execute(
         args[a].device = device_->weights[a].get();
         break;
       case ArgSource::STATE:
+        // Every state is replaced by a result after the run, so it is
+        // donated: a program that aliases it writes it in place.
         args[a].device = state_.at(plan[a].name).get();
+        args[a].donate = true;
         break;
     }
   }
@@ -1483,7 +1490,19 @@ ModelInstanceState::Execute(
   std::unique_ptr<PjrtResults> results;
   std::string err = device_->executables[index]->Execute(args, &results);
   *compute_end = NowNs();
-  if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, bucket->file + ": " + err);
+  if (!err.empty()) {
+    bool lost = false;
+    for (const auto& kv : state_) lost |= kv.second->IsDeleted();
+    if (lost) {
+      // The failed execution took the donated state: start again from zeros.
+      TRITONSERVER_Error* reset = InitState();
+      const std::string why = reset == nullptr ? std::string("state zeroed again")
+                                               : std::string("zeroing it failed: ") + TRITONSERVER_ErrorMessage(reset);
+      if (reset != nullptr) TRITONSERVER_ErrorDelete(reset);
+      err += "; the execution took the model's state with it (" + why + ")";
+    }
+    return Err(TRITONSERVER_ERROR_INTERNAL, bucket->file + ": " + err);
+  }
   // The execution ran, so its state results replace the state it read, even
   // if sending the response fails below or the client asked for no output.
   const auto& sinks = model.results();

@@ -81,6 +81,9 @@ class SequenceModel {
   const std::string& start_input() const { return start_input_; }
   const std::string& end_input() const { return end_input_; }
   const std::string& corrid_input() const { return corrid_input_; }
+  // Whether executions are handed the KV pools to write in place (parameter
+  // "donate_kv_pools", true unless set to false).
+  bool donate_pools() const { return donate_pools_; }
   // KV pool state names and their type, in the order entries read them.
   const std::vector<SlotSpec>& pools() const { return pools_; }
 
@@ -117,6 +120,7 @@ class SequenceModel {
   int max_decode_batch_ = 0;
   int64_t max_batch_size_ = 0;
   uint64_t idle_ns_ = 0;
+  bool donate_pools_ = true;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
 };
 
@@ -167,6 +171,13 @@ class SequenceInstance {
   TRITONSERVER_Error* Run(const ServingEntrySpec& entry, const std::vector<Work*>& rows,
                           uint64_t* compute_start, uint64_t* compute_end);
   TRITONSERVER_Error* Respond(Work* w);
+  // Uploads zeroed KV pools (replacing any) and records their device
+  // addresses; `bytes` is their total size.
+  std::string ZeroPools(uint64_t* bytes);
+  // After a run of `e`: whether every KV pool output is at the device address
+  // its pool had before the run (written in place, not copied). Logged for
+  // the first run of each entry and summed over the first 100 runs.
+  void CheckInPlace(const ServingEntrySpec& e);
 
   const SequenceModel* model_;
   std::string name_;
@@ -176,6 +187,17 @@ class SequenceInstance {
   std::set<uint64_t> batch_;  // correlation IDs with a request in the batch being run
   uint64_t max_exec_ns_ = 0;  // the longest ProcessRequests call so far
   std::map<std::string, std::unique_ptr<tlaloc_triton::PjrtBuffer>> state_;
+  uint64_t pool_bytes_ = 0;
+  // Device address of each KV pool before the next run (empty when the
+  // plugin cannot report addresses).
+  std::map<std::string, const void*> pool_address_;
+  uint64_t runs_ = 0;
+  uint64_t in_place_runs_ = 0;
+  std::set<std::string> reported_;  // entries whose first run was logged
+  // Set when a failed execution took the donated pools with it: every
+  // sequence's KV state is gone. The rest of the batch is refused, then all
+  // sequences are freed and the pools zeroed again.
+  bool pools_lost_ = false;
 };
 
 }}}  // namespace triton::backend::tlaloc
