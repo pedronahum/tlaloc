@@ -15,7 +15,10 @@ import java.nio.file.Path
  * Arguments, positionally: checkpoint dir, output dir, then optional
  * `numLayers`, `maxBatch`, `maxContext`, `blockSize`, `numBlocks`, `prefill`
  * (`true` or `false`, default `true`: one prefill entry per context bucket),
- * `modelName` (default [HfServingExport.modelNameFor] of the checkpoint dir).
+ * `modelName` (default [HfServingExport.modelNameFor] of the checkpoint dir),
+ * `windowedKv` (`true` or `false`, default `true`: a model with sliding-window
+ * layers keeps their KV in a windowed pool; `false` gives them full-history
+ * pools).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -25,7 +28,7 @@ import java.nio.file.Path
 fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
-            "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName]"
+            "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -38,6 +41,11 @@ fun main(args: Array<String>) {
         "", "true" -> true
         "false" -> false
         else -> throw IllegalArgumentException("prefill must be true or false, got '$p'")
+    }
+    val windowedKv = when (val w = args.getOrNull(9)?.trim().orEmpty()) {
+        "", "true" -> true
+        "false" -> false
+        else -> throw IllegalArgumentException("windowedKv must be true or false, got '$w'")
     }
 
     HfCheckpoint.open(ckptDir).use { ckpt ->
@@ -62,6 +70,7 @@ fun main(args: Array<String>) {
             ckpt = ckpt, dir = outDir, config = config, policy = policy,
             numBlocks = numBlocks,
             prefill = prefill,
+            windowedKv = windowedKv,
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )
@@ -73,6 +82,12 @@ fun main(args: Array<String>) {
                 "in %.1fs".format(secs),
         )
         println("  model ${manifest.modelName}  hash ${manifest.modelHash}")
+        manifest.model.windowedKv?.let {
+            println(
+                "  windowed KV pool: layers ${it.layers}, window ${it.window}, a ring of " +
+                    "${it.ringPages} pages per sequence, ${it.numBlocks} pages",
+            )
+        }
         for (e in manifest.entries) println("  ${e.entryId}  ${e.bodyPath}")
     }
 }

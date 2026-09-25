@@ -11,10 +11,19 @@ import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.passes.DxirInterpreter
+import io.tlaloc.ir.inference.AttentionKind
+import io.tlaloc.ir.inference.DecodeBucket
+import io.tlaloc.ir.inference.DecodeBucketPolicy
+import io.tlaloc.ir.inference.DecodeGraphKind
+import io.tlaloc.ir.inference.DecoderLayerSpec
+import io.tlaloc.ir.inference.HfDecoderConfig
+import io.tlaloc.ir.inference.HfDecoderGraph
+import io.tlaloc.ir.inference.HfModelFamily
 import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.stablehlo.toStablehlo
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlin.random.Random
 
 /**
  * Entry point of `./gradlew :maestro:exportTritonExamples -PoutDir=<triton/examples>`.
@@ -48,6 +57,14 @@ import java.nio.file.Path
  *   `config.pbtxt` is generated from the manifest rather than written by hand.
  * - `reference_sequence`: the same artifact in sequence mode (the backend
  *   keeps each sequence's KV pages by correlation ID).
+ * - `window_sequence` and `window_sequence_full`: a three-layer decoder with
+ *   seeded random weights whose first two layers attend over a sliding
+ *   window of 8 positions, in pages of 4, up to 64 positions. In
+ *   `window_sequence` the two sliding layers keep their KV in a windowed pool
+ *   (a ring of 3 pages per sequence); in `window_sequence_full` every layer
+ *   keeps full-history pages. The two must give the same logits.
+ *   `window_sequence/1/tlaloc-serving-short-ring.json` is its manifest with a
+ *   ring of one page, which the backend must refuse at load.
  *
  * The reference files hold the DXIR interpreter's results for the same graphs
  * that were emitted, so served values are compared against Tlaloc's own
@@ -176,8 +193,83 @@ fun main(args: Array<String>) {
         artifact.toFile().deleteRecursively()
     }
     Files.writeString(reference.resolve("reference_decode.json"), referenceDecodeSteps())
+
+    // window_sequence / window_sequence_full --------------------------------
+    for ((name, windowed) in listOf("window_sequence" to true, "window_sequence_full" to false)) {
+        val dir = Files.createTempDirectory("tlaloc-$name")
+        try {
+            exportWindowModel(dir, windowed)
+            val model = TritonModelRepository.write(dir, repo, name, TritonModelRepository.KvMode.SEQUENCE)
+            println("  $model")
+            if (windowed) {
+                // For a load-time refusal: the same manifest with a ring of one
+                // page, which holds 4 positions of a window of 8.
+                val m = ServingManifest.fromJson(Files.readString(dir.resolve(ServingManifest.FILE_NAME)))
+                val short = m.copy(model = m.model.copy(windowedKv = m.model.windowedKv!!.copy(ringPages = 1)))
+                Files.writeString(model.resolve("1/$SHORT_RING_MANIFEST"), short.toJson())
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
     println("wrote ${repo.toAbsolutePath()}")
 }
+
+/**
+ * The decoder of `window_sequence`: layers 0 and 1 attend over a sliding
+ * window of 8 positions, layer 2 over the full history.
+ */
+private val WINDOW_MODEL = HfDecoderConfig(
+    architecture = "LlamaForCausalLM", modelType = "llama",
+    hiddenSize = 32, intermediateSize = 48, numLayers = 3,
+    numHeads = 4, numKvHeads = 2, headDim = 8, vocabSize = 64,
+    rmsNormEps = 1e-6, ropeTheta = 10000.0, maxPositionEmbeddings = 64,
+    tieWordEmbeddings = false, attentionBias = false, torchDtype = "float32",
+    ropeScalingType = null, family = HfModelFamily.Llama,
+    layers = listOf(
+        DecoderLayerSpec(attention = AttentionKind.SLIDING, slidingWindow = 8),
+        DecoderLayerSpec(attention = AttentionKind.SLIDING, slidingWindow = 8),
+        DecoderLayerSpec(attention = AttentionKind.FULL),
+    ),
+)
+
+/**
+ * Export [WINDOW_MODEL] into [dir]: decode entries for batches 1 and 2 at
+ * contexts 16, 32 and 64, a prefill entry per context, pages of 4, room for
+ * four sequences of 64 positions. With [windowed] the sliding layers get a
+ * windowed KV pool.
+ */
+private fun exportWindowModel(dir: Path, windowed: Boolean) {
+    val config = WINDOW_MODEL
+    val policy = DecodeBucketPolicy(maxBatch = 2, maxContext = 64, blockSize = 4, minContext = 16)
+    val numBlocks = 1 + 4 * 16
+    val window = if (!windowed) null else config.windowedKvPool(4, 64, numBlocks)
+    val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = 4, windowedKv = window)
+    val specs = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) } +
+        policy.contextLadder.map { HfDecoderGraph.spec(config, model, DecodeBucket(1, it), DecodeGraphKind.PREFILL) }
+    val rng = Random(20260925)
+    val weights = HfDecoderGraph.weightSlots(config).associate { slot ->
+        val n = slot.type.dims.fold(1) { a, b -> a * b }
+        slot.name to if (slot.type.dims.size == 1) {
+            FloatArray(n) { 1f + 0.5f * (rng.nextFloat() - 0.5f) }
+        } else {
+            FloatArray(n) { 0.6f * (rng.nextFloat() - 0.5f) }
+        }
+    }
+    ServingArtifactWriter.export(
+        dir = dir,
+        modelName = if (windowed) "window-sequence" else "window-sequence-full",
+        modelHash = "window-sequence-v1",
+        model = model,
+        ladder = ServingArtifactWriter.ladderOf(policy),
+        specs = specs,
+        stageWeight = { slot -> weights.getValue(slot.name) },
+        build = { spec -> HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT) },
+    )
+}
+
+/** A manifest of `window_sequence` whose ring is too short; the backend refuses it at load. */
+private const val SHORT_RING_MANIFEST = "tlaloc-serving-short-ring.json"
 
 /** 4Mi f32 values: 16 MiB each way. */
 private const val LARGE_IO_ELEMENTS = 4 * 1024 * 1024

@@ -245,6 +245,9 @@ object ServingArtifactWriter {
                         codeDtype = model.kvDtype.name,
                     )
                 },
+                windowedKv = model.windowedKv?.let {
+                    ServingWindowedKv(it.window, it.layers, it.numBlocks, it.ringPages)
+                },
             ),
             bucketLadder = ladder,
             weights = weightsPointer,

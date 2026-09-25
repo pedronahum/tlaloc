@@ -522,6 +522,12 @@ class ServingArtifact:
     def __init__(self, root: Path, manifest: dict, platform: str = "cuda",
                  engine: str | None = None, plugin_path: str | None = None):
         engine = engine or default_engine_for(platform)
+        if manifest.get("schemaVersion") == "tlaloc-serving-v3":
+            raise ValueError(
+                f"{root}: a tlaloc-serving-v3 artifact has a windowed KV pool (its sliding-window "
+                f"layers keep a ring of pages per sequence), which this runtime does not fill; "
+                f"serve it with the Triton backend, or export it with windowedKv=false"
+            )
         if manifest.get("schemaVersion") not in READABLE_SCHEMA_VERSIONS:
             raise ValueError(
                 f"{root}: schemaVersion {manifest.get('schemaVersion')!r} is not one of "

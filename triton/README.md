@@ -152,14 +152,40 @@ It then starts the server, waits for it to be ready, and runs
 - thirteen model configurations the backend or Triton must refuse at load
   (including `zero_copy: "yes"` and `gpus: [ 7 ]`), two batching
   configurations (`max_batch_size` above the largest artifact's batch, and
-  state with `max_batch_size > 0`), and seven sequence-mode configurations (no `sequence_batching`, the direct strategy,
+  state with `max_batch_size > 0`), and nine sequence-mode configurations (no `sequence_batching`, the direct strategy,
   no CORRID control, `max_batch_size: 0`, `serving_manifest` combined with
-  `artifact`, a manifest outside the version directory, two inputs), each by
+  `artifact`, a manifest outside the version directory, two inputs, a
+  `KV_PAGES` output of three, and `window_sequence` pointed at
+  `tlaloc-serving-short-ring.json`, its manifest with a ring of one page,
+  which holds 4 positions of a window of 8), each by
   the expected message, each followed by a reload of the good configuration;
 - that the server is still live at the end.
 
-It then runs the client again with deliberately wrong expected values, and
-that run must fail. It prints the measurements of `perf_client.py`
+Then `window_checks.py` runs `window_sequence` against `window_sequence_full`
+(the same decoder with full-history pages):
+
+- one sequence grown to 60 positions (a 13-token prompt, single tokens, a
+  9-token request once the window is full, single tokens): after every
+  request `KV_PAGES` reports `ceil(length / 4)` full pages for both models,
+  and `min(3, ceil(length / 4))` windowed pages for `window_sequence` (so 3
+  while the full pages reach 15) and none for the full-history model;
+- the logits of every request equal those of the full-history model sent the
+  same calls (the backend splits the 13 tokens into 12 and 1 and the 9 into 5
+  and 4 for the ring; the client sends the full-history model those calls),
+  within 1e-4 of the largest logit; the run measures 5.3e-7, and a ring
+  error moves them by about 1. The full-history model sent the requests whole
+  (one prefill call instead of two, a different entry under TF32) agrees
+  within 5e-3 (7.6e-4 measured), with the same argmax. Over HTTP and gRPC;
+- three sequences stepped concurrently get the logits they get alone, within
+  5e-3;
+- with every ring of the windowed pool taken, one more START is refused by
+  name (`windowed KV page pool exhausted`), and runs after an END;
+- the log must show the windowed pool at load and 100 of 100 runs with its 6
+  pools updated in place.
+
+It then runs both clients again with deliberately wrong expected values (the
+window checks compare each request with the next one), and both runs must
+fail. It prints the measurements of `perf_client.py`
 (`SKIP_PERF=1` skips them) and stops the container.
 
 Last, if the TinyLlama-1.1B checkpoint is in
@@ -266,7 +292,9 @@ curl -s localhost:8000/v2/models/matmul_sumsq/infer \
 | `dtypes` | `x · x + x` for three dtypes | `X_F64` FP64 [4], `X_BF16` BF16 [4], `X_I32` INT32 [4] | `Y_F64`, `Y_BF16`, `Y_I32` |
 | `buckets` | `x · x + x`, compiled for length 4 and length 8 | `X` FP32 [-1] | `Y` FP32 [-1] |
 | `reference_decode` | one decode step of Tlaloc's reference decode graph (embedding, paged attention over a KV cache, LM head), six batch/context entries | `tokenIds`, `positions` INT32 [-1,1], `blockTables` INT32 [-1,-1], `seqLens`, `slotMapping` INT32 [-1] | `logits` FP32 [-1,1,11] |
-| `reference_sequence` | the `reference_decode` artifact in sequence mode | `TOKENS` INT32 [-1] (batch dim added, max batch 4), START/END/CORRID controls | `LOGITS` FP32 [11] |
+| `reference_sequence` | the `reference_decode` artifact in sequence mode | `TOKENS` INT32 [-1] (batch dim added, max batch 4), START/END/CORRID controls | `LOGITS` FP32 [11], `KV_PAGES` INT32 [2] |
+| `window_sequence` | a three-layer decoder with seeded random weights, sequence mode: layers 0 and 1 attend over a sliding window of 8 positions and keep their KV in a windowed pool (rings of 3 pages of 4 tokens), layer 2 over the full history; contexts 16, 32 and 64, batches 1 and 2, a prefill entry per context | as `reference_sequence` (max batch 2) | `LOGITS` FP32 [64], `KV_PAGES` INT32 [2] |
+| `window_sequence_full` | the same decoder and weights with full-history pages for every layer | as `window_sequence` | as `window_sequence` |
 | `int64_bool` | `x · x + x` over i64, `(x · x > x) and b`, `not b` | `X` INT64 [4], `B` BOOL [4] | `Y` INT64, `ABOVE_AND_B` BOOL, `NOT_B` BOOL |
 | `dtypes_small` | `x · x + x` over f16, i8 and u8. **Written by hand**: Tlaloc's `DType` has no f16, i8 or u8, so this model shows only that the backend moves those types unchanged | `X_F16` FP16 [4], `X_I8` INT8 [4], `X_U8` UINT8 [4] | `Y_F16`, `Y_I8`, `Y_U8` |
 | `grad_batched` | `df/dA` of `sum(A · A)` per 2x2 row, compiled for batch 1, 2, 4 and 8, with `dynamic_batching` | `A` FP32 [2,2] (batch dim added, max batch 8) | `GRAD` FP32 [2,2] |
@@ -274,9 +302,9 @@ curl -s localhost:8000/v2/models/matmul_sumsq/infer \
 | `large_io` | `x · x + x` over 4Mi f32 values (16 MiB each way) | `X` FP32 [4194304] | `Y` FP32 [4194304] |
 | `large_io_host` | `large_io` with `zero_copy: "false"` | as `large_io` | as `large_io` |
 
-The `.mlir` files (except `dtypes_small`'s), the `reference_decode` and
-`reference_sequence` model directories and the files in `examples/reference/`
-are generated by Tlaloc. The gradients are Tlaloc's reverse-mode transform of
+The `.mlir` files (except `dtypes_small`'s), the `reference_decode`,
+`reference_sequence`, `window_sequence` and `window_sequence_full` model
+directories and the files in `examples/reference/` are generated by Tlaloc. The gradients are Tlaloc's reverse-mode transform of
 the DXIR graph, not hand-written StableHLO. To regenerate them (JDK 25, from the
 repository root):
 
@@ -285,9 +313,10 @@ repository root):
 ```
 
 The source is `maestro/src/jvmTools/kotlin/io/tlaloc/maestro/serving/ExportTritonExamples.kt`.
-The `config.pbtxt` files of the models other than these two are written by hand;
-`reference_decode` and `reference_sequence` are written whole from their
-serving artifact, as described in the next section.
+The `config.pbtxt` files of the other models are written by hand;
+`reference_decode`, `reference_sequence`, `window_sequence` and
+`window_sequence_full` are written whole from their serving artifact, as
+described in the next section.
 
 ## Exporting a Triton model repository from Kotlin
 
@@ -375,7 +404,8 @@ uploads the weights. `TritonModelRepository` writes this configuration:
 ```
 max_batch_size: 4                      # the artifact's largest decode batch
 input  [ { name: "TOKENS" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true } ]
-output [ { name: "LOGITS" data_type: TYPE_FP32 dims: [ 32000 ] } ]
+output [ { name: "LOGITS" data_type: TYPE_FP32 dims: [ 32000 ] },
+         { name: "KV_PAGES" data_type: TYPE_INT32 dims: [ 2 ] } ]
 sequence_batching {
   max_sequence_idle_microseconds: 60000000
   control_input [
@@ -393,7 +423,11 @@ parameters: { key: "serving_manifest" value: { string_value: "tlaloc-serving.jso
 Each request is one step of one sequence: `TOKENS` `[1, n]` with the
 sequence's correlation ID (`sequence_id` in tritonclient), and the
 `sequence_start` / `sequence_end` flags. The response is `LOGITS` `[1, vocab]`,
-the logits of the last token sent. A client
+the logits of the last token sent, and, when the client asks for it,
+`KV_PAGES` `[1, 2]`: the pages the sequence holds after the request in the KV
+pool and in the windowed KV pool (0 without one). The output is optional in
+`config.pbtxt`; a model written before it existed serves without it. A
+client
 
 1. sends the prompt with START. The backend runs it as one prefill call;
 2. sends each chosen token alone. Each is a decode step;
@@ -415,9 +449,23 @@ this; `generate_client.py` adds a tokenizer.
   of them, lowest page first, from the instance's pool. Page 0 is never
   allocated: padding rows of a batch point at it. The block table and slot of
   every token are derived from the page list; the client never sends them.
+- **Windowed pages.** An artifact with a windowed KV pool (`tlaloc-serving-v3`;
+  a model with sliding-window layers, such as Muse Glimmer) has a second page
+  pool for those layers. Each sequence holds a ring of at most `ringPages`
+  of its pages, taken as it grows: logical block `b` is on the ring's page
+  `b % ringPages`, so a position is written over the one `ringPages *
+  blockSize` positions before it, which has left the window. The window
+  block table and slots are derived from the ring. The load log states the
+  pool (`windowed KV pool for 39 sliding layers (window 2048): 64 pages, a
+  ring of at most 8 pages per sequence`). See
+  [SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md#sliding-window-layers-the-windowed-kv-pool).
 - **Entry selection.** A request of `n > 1` tokens runs on the smallest
   prefill entry whose context covers the sequence's length after it, one call,
-  with the tokens right-aligned in the chunk. A one-token request runs on a
+  with the tokens right-aligned in the chunk. With a windowed KV pool, a
+  request is first split into calls of at most `ringPages * blockSize -
+  min(start, window - 1)` tokens, the most the ring holds while the call's
+  first row still reads its window; each call runs on its own prefill entry
+  (or as a decode step when it is one token). A one-token request runs on a
   decode entry. All one-token requests in one Triton batch (different
   sequences, which the oldest strategy guarantees) run as one call on the
   smallest decode entry whose batch and context cover them, with padding rows
@@ -439,7 +487,7 @@ this; `generate_client.py` adds a tokenizer.
   copied, and the log says so. If a failed execution takes the donated pools
   with it, the rest of that batch is refused, every sequence is freed (a
   later request must START again) and new pools are zeroed.
-- **END** frees the sequence's pages after its step.
+- **END** frees the sequence's pages (and its ring) after its step.
 - **Idle timeout.** In the oldest strategy Triton ends a sequence that has
   been idle longer than `max_sequence_idle_microseconds` without telling the
   backend (its log says `Reaper: CORRID n: max sequence idle exceeded`). The
@@ -460,7 +508,7 @@ this; `generate_client.py` adds a tokenizer.
 Refused by name, with the server staying up: a START (or growth) that needs
 more pages than are free (`KV page pool exhausted: sequence n needs k more
 page(s) ... End a sequence (sequence_end) or export the artifact with more
-pages (numBlocks)`); a sequence that would pass the largest compiled context;
+pages (numBlocks)`, or `windowed KV page pool exhausted: ...`); a sequence that would pass the largest compiled context;
 a step for a sequence the backend holds nothing for; a token id outside the
 vocabulary; a request with no tokens and no END. A refused START leaves no
 state behind; Triton still counts the sequence as live until END or the idle

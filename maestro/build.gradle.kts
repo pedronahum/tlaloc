@@ -224,7 +224,7 @@ tasks.register<JavaExec>("exportTritonModel") {
  *         -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
  *         -PoutDir=/tmp/tlaloc-llama-artifact [-PnumLayers=2] [-PmaxBatch=4] \
  *         [-PmaxContext=64] [-PblockSize=16] [-PnumBlocks=64] [-Pprefill=false] \
- *         [-PmodelName=Qwen/Qwen3-0.6B]
+ *         [-PmodelName=Qwen/Qwen3-0.6B] [-PwindowedKv=false]
  *
  * `-PckptDir` may be a HuggingFace cache snapshot
  * (`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>`); the
@@ -264,7 +264,7 @@ for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArti
                     layout.buildDirectory.dir("llama-serving-artifact").get().asFile.absolutePath
                 },
                 p("numLayers"), p("maxBatch"), p("maxContext"), p("blockSize"), p("numBlocks"),
-                p("prefill"), p("modelName"),
+                p("prefill"), p("modelName"), p("windowedKv"),
             )
         },
     )

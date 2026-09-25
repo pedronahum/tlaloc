@@ -13,6 +13,26 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Windowed KV pool for sliding-window layers.** A model's sliding-window
+  layers can keep their KV in a second pool class (`WindowedKvPool`): each
+  sequence holds a ring of at most `ceil(window / blockSize) + 1` pages,
+  logical block `b` on ring page `b % ringPages`, so the pages it holds are
+  bounded by the window instead of its length. The decode contract gains
+  the `WINDOW_BLOCK_TABLES`, `WINDOW_SLOT_MAPPING`, `WINDOW_KV_POOL_IN` and
+  `WINDOW_KV_POOL_OUT` roles; `PAGED_ATTENTION` is unchanged. An artifact
+  with such a pool is `tlaloc-serving-v3` (`ServingModelShape.windowedKv`
+  states the window, the layers, the pages and the ring), and
+  `HfServingExport` writes one by default for a model with sliding layers
+  (`windowedKv = false`, or `-PwindowedKv=false`, keeps full-history pools).
+  The Triton backend keeps each sequence's ring, fills the window tables from
+  it and splits a request into calls the ring can hold. For Muse Glimmer the
+  computed KV per sequence at 32,768 positions is 989 MiB instead of
+  3,328 MiB. `tlaloc_serve.py` and the vLLM plugin refuse a v3 artifact by
+  its schema version.
+- **`KV_PAGES` output (Triton sequence mode).** An optional INT32 `[2]`
+  output: the pages a sequence holds after a request in the KV pool and the
+  windowed KV pool. `TritonModelRepository` declares it; the backend serves
+  a model with or without it.
 - **`examples/triton-llm`.** A standalone example: its Gradle build exports a
   HuggingFace checkpoint (Qwen3-0.6B by default, TinyLlama-1.1B-Chat or the
   Muse Glimmer 30B text decoder) as a Triton model repository with

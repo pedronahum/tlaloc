@@ -643,6 +643,11 @@ class LoaderIsStandardLibraryOnly(unittest.TestCase):
             self.s.ServingArtifact(Path("/nonexistent"), {"schemaVersion": "v99"})
         self.assertIn("refusing an artifact of unknown shape", str(cm.exception))
 
+    def test_an_artifact_with_a_windowed_kv_pool_is_refused_by_name(self):
+        with self.assertRaises(ValueError) as cm:
+            self.s.ServingArtifact(Path("/nonexistent"), {"schemaVersion": "tlaloc-serving-v3"})
+        self.assertIn("windowed KV pool", str(cm.exception))
+
     def test_finding_a_plugin_refuses_a_path_that_is_not_there(self):
         with self.assertRaises(FileNotFoundError):
             self.s.find_pjrt_plugin("/definitely/not/a/plugin.so")

@@ -11,7 +11,8 @@ input [
   { name: "TOKENS" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true }
 ]
 output [
-  { name: "LOGITS" data_type: TYPE_FP32 dims: [ 11 ] }
+  { name: "LOGITS" data_type: TYPE_FP32 dims: [ 11 ] },
+  { name: "KV_PAGES" data_type: TYPE_INT32 dims: [ 2 ] }
 ]
 sequence_batching {
   max_sequence_idle_microseconds: 60000000

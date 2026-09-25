@@ -76,6 +76,12 @@ object HfServingExport {
      * prefills a prompt of up to `context` tokens with one call instead of one
      * decode step per token.
      *
+     * With [windowedKv] (the default) a config with sliding-window layers
+     * gets a windowed KV pool ([HfDecoderConfig.windowedKvPool]): those
+     * layers keep a ring of pages per sequence, bounded by the window, and
+     * the artifact is `tlaloc-serving-v3`. Without it, or without sliding
+     * layers, every layer keeps full-history pages.
+     *
      * @param config usually `ckpt.config`, or a `copy(numLayers = n)` of it.
      */
     fun export(
@@ -86,8 +92,12 @@ object HfServingExport {
         numBlocks: Int = DEFAULT_NUM_BLOCKS,
         modelName: String = modelNameFor(ckpt.dir),
         prefill: Boolean = true,
+        windowedKv: Boolean = true,
     ): ServingManifest {
-        val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = policy.blockSize)
+        val window = if (!windowedKv) null else config.windowedKvPool(
+            blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
+        )
+        val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window)
         val decodeSpecs = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) }
         val prefillSpecs = if (!prefill) emptyList() else policy.contextLadder.map { c ->
             HfDecoderGraph.spec(config, model, DecodeBucket(1, c), DecodeGraphKind.PREFILL)

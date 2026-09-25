@@ -88,7 +88,7 @@ data class ServingManifest(
     /** One per compiled ladder point. Order is the writer's; lookup is by
      *  (kind, batch, context) — see [entryFor]. */
     val entries: List<ServingEntry>,
-    val schemaVersion: String = SCHEMA_VERSION,
+    val schemaVersion: String = if (model.windowedKv == null) SCHEMA_VERSION else SCHEMA_VERSION_3,
 ) {
     init {
         require(schemaVersion in READABLE_VERSIONS) {
@@ -100,6 +100,33 @@ data class ServingManifest(
             "ServingManifest: a $SCHEMA_VERSION_1 artifact with prefill entries — prefill " +
                 "entries are defined from $SCHEMA_VERSION on (right-aligned chunk, last-position " +
                 "logits), so this artifact claims a contract its version does not have"
+        }
+        require((schemaVersion == SCHEMA_VERSION_3) == (model.windowedKv != null)) {
+            "ServingManifest: a $schemaVersion artifact " +
+                (if (model.windowedKv == null) "without" else "with") + " a windowed KV pool — " +
+                "windowed pools are defined in $SCHEMA_VERSION_3 and only there, so a reader of " +
+                "an older version refuses such an artifact instead of binding its pools wrong"
+        }
+        val w = model.windowedKv
+        for (e in entries) {
+            val roles = e.inputs.map { it.role }.toSet() + e.outputs.map { it.role }
+            val windowRoles = setOf(
+                DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING,
+                DecodeSlotRole.WINDOW_KV_POOL_IN, DecodeSlotRole.WINDOW_KV_POOL_OUT,
+            )
+            require(if (w == null) roles.none { it in windowRoles } else roles.containsAll(windowRoles)) {
+                "ServingManifest: entry ${e.entryId} " +
+                    (if (w == null) "has window slots but the model has no windowed KV pool"
+                    else "lacks one of ${windowRoles.joinToString()} but the model has a windowed KV pool")
+            }
+            if (w != null) {
+                val pools = e.inputs.filter { it.role == DecodeSlotRole.WINDOW_KV_POOL_IN }
+                require(pools.size == 2 * w.layers.size && pools.all { it.type.dims == w.kvPoolDims(model) }) {
+                    "ServingManifest: entry ${e.entryId} has ${pools.size} WINDOW_KV_POOL_IN slots; the " +
+                        "windowed pool class of layers ${w.layers} has ${2 * w.layers.size} of dims " +
+                        "${w.kvPoolDims(model)}"
+                }
+            }
         }
         require(modelName.isNotBlank()) { "ServingManifest: modelName must not be blank" }
         require(modelHash.isNotBlank()) {
@@ -161,14 +188,27 @@ data class ServingManifest(
          *   both kinds the same way. Decode entries are unchanged.
          *
          * A v1 artifact is still read.
+         *
+         * This is the version of an artifact without a windowed KV pool; one
+         * with a windowed pool is [SCHEMA_VERSION_3].
          */
         const val SCHEMA_VERSION: String = "tlaloc-serving-v2"
+
+        /**
+         * `tlaloc-serving-v3`: v2 plus a WINDOWED KV POOL class
+         * ([ServingModelShape.windowedKv]): the sliding-window layers it
+         * lists keep their KV in pools of their own, which a runtime fills
+         * through a ring of pages per sequence, with the window block tables
+         * and slot mapping as two more request tensors. Written only for an
+         * artifact that has such a pool, so that a v2 reader refuses it.
+         */
+        const val SCHEMA_VERSION_3: String = "tlaloc-serving-v3"
 
         /** The first version, decode entries only. */
         const val SCHEMA_VERSION_1: String = "tlaloc-serving-v1"
 
         /** Every version [fromJson] accepts. */
-        val READABLE_VERSIONS: List<String> = listOf(SCHEMA_VERSION_1, SCHEMA_VERSION)
+        val READABLE_VERSIONS: List<String> = listOf(SCHEMA_VERSION_1, SCHEMA_VERSION, SCHEMA_VERSION_3)
 
         /** The manifest's filename inside the artifact directory. */
         const val FILE_NAME: String = "tlaloc-serving.json"
@@ -226,6 +266,8 @@ data class ServingModelShape(
      * scale vector, and which code range they live in.
      */
     val kvQuant: ServingKvQuant? = null,
+    /** The windowed KV pool class, or null when every layer keeps full-history pages. */
+    val windowedKv: ServingWindowedKv? = null,
 ) {
     val kvPoolAxisOrder: List<String> = listOf("numBlocks", "blockSize", "numKvHeads", "headDim")
     val kvPoolDims: List<Int> = listOf(numBlocks, blockSize, numKvHeads, headDim)
@@ -245,6 +287,7 @@ data class ServingModelShape(
         append("\"kvQuant\":").append(kvQuant?.toJson() ?: "null").append(',')
         append("\"kvPoolAxisOrder\":").append(kvPoolAxisOrder.joinToString(",", "[", "]") { jsonStr(it) }).append(',')
         append("\"kvPoolDims\":").append(kvPoolDims.joinToString(",", "[", "]"))
+        if (windowedKv != null) append(",\"windowedKv\":").append(windowedKv.toJson(this@ServingModelShape))
         append("}")
     }
 
@@ -259,6 +302,52 @@ data class ServingModelShape(
             // before this slice is still a legal artifact, and the reader says
             // so instead of failing on a field it did not have.
             kvQuant = (o["kvQuant"] as? JsonObject)?.let { ServingKvQuant.fromJson(it) },
+            windowedKv = (o["windowedKv"] as? JsonObject)?.let { ServingWindowedKv.fromJson(it) },
+        )
+    }
+}
+
+/**
+ * The windowed KV pool class, as the artifact publishes it: the
+ * sliding-window layers whose pools hold a ring of [ringPages] pages per
+ * sequence (see `io.tlaloc.ir.inference.WindowedKvPool`).
+ *
+ * A runtime keeps, per sequence, a ring of at most [ringPages] pages of this
+ * class, gives logical block `b` the ring's page `b % ringPages`, fills the
+ * WINDOW_BLOCK_TABLES and WINDOW_SLOT_MAPPING inputs from it, and splits a
+ * request so that no call writes more than
+ * `ringPages * blockSize - min(start, window - 1)` tokens.
+ */
+data class ServingWindowedKv(
+    /** The largest sliding window of [layers]. */
+    val window: Int,
+    /** The layers whose pools are of this class, ascending. */
+    val layers: List<Int>,
+    /** Pages in each pool of this class; page 0 is the padding page. */
+    val numBlocks: Int,
+    /** The most pages one sequence holds in this class. */
+    val ringPages: Int,
+) {
+    init {
+        require(window >= 1 && ringPages >= 1 && numBlocks >= 1 + ringPages && layers.isNotEmpty()) {
+            "ServingWindowedKv: window $window, ringPages $ringPages, numBlocks $numBlocks, layers $layers"
+        }
+    }
+
+    /** The dims of one pool of this class. */
+    fun kvPoolDims(model: ServingModelShape): List<Int> =
+        listOf(numBlocks, model.blockSize, model.numKvHeads, model.headDim)
+
+    fun toJson(model: ServingModelShape): String =
+        "{\"window\":$window,\"layers\":${layers.joinToString(",", "[", "]")},\"numBlocks\":$numBlocks," +
+            "\"ringPages\":$ringPages,\"kvPoolDims\":${kvPoolDims(model).joinToString(",", "[", "]")}}"
+
+    companion object {
+        fun fromJson(o: JsonObject): ServingWindowedKv = ServingWindowedKv(
+            window = o.int("window"),
+            layers = o.arr("layers").asIntList("windowedKv.layers"),
+            numBlocks = o.int("numBlocks"),
+            ringPages = o.int("ringPages"),
         )
     }
 }

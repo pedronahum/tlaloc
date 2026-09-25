@@ -671,6 +671,7 @@ data class HfDecoderConfig(
         blockSize: Int,
         dtype: DType = F32,
         kvQuant: KvQuantConfig? = null,
+        windowedKv: WindowedKvPool? = null,
     ): DecodeModelShape {
         val unsupported = unsupportedFeatures()
         if (unsupported.isNotEmpty()) {
@@ -692,6 +693,43 @@ data class HfDecoderConfig(
             dtype = dtype,
             kvDtype = if (kvQuant != null) io.tlaloc.core.I32 else dtype,
             kvQuant = kvQuant,
+            windowedKv = windowedKv,
+        )
+    }
+
+    /**
+     * The [WindowedKvPool] for this config's sliding-window layers, or null
+     * when it has none: every sliding layer, the largest of their windows,
+     * and a ring of [ringPages] pages (by default
+     * [WindowedKvPool.defaultRingPages], capped at the pages of
+     * [maxContext], beyond which a ring never wraps).
+     *
+     * [numBlocks] is the budget of each windowed pool. By default it holds as
+     * many full rings as the full-history pool of [fullNumBlocks] pages holds
+     * sequences of [maxContext] positions (rounded up), and never more pages
+     * than that pool. A sequence never holds more windowed pages than full
+     * ones, so a smaller budget can refuse a sequence the full pool would
+     * take: the backend refuses it by name, as it does when the full pool
+     * runs out.
+     */
+    fun windowedKvPool(
+        blockSize: Int,
+        maxContext: Int,
+        fullNumBlocks: Int,
+        ringPages: Int? = null,
+        numBlocks: Int? = null,
+    ): WindowedKvPool? {
+        val sliding = (0 until numLayers).filter { layer(it).attention == AttentionKind.SLIDING }
+        if (sliding.isEmpty()) return null
+        val window = sliding.maxOf { layer(it).slidingWindow!! }
+        val contextPages = (maxContext + blockSize - 1) / blockSize
+        val ring = ringPages ?: minOf(WindowedKvPool.defaultRingPages(window, blockSize), contextPages)
+        val sequences = (fullNumBlocks - 1 + contextPages - 1) / contextPages
+        return WindowedKvPool(
+            window = window,
+            layers = sliding,
+            numBlocks = numBlocks ?: minOf(fullNumBlocks, 1 + maxOf(1, sequences) * ring),
+            ringPages = ring,
         )
     }
 

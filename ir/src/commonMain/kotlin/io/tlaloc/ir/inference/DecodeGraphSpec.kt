@@ -42,6 +42,16 @@ import io.tlaloc.ir.recognizer.quant.KvQuantConfig
  *     1 .. 2L      kv pools     the SAME shapes, updated
  * ```
  *
+ * A model with a [WindowedKvPool] (sliding-window layers whose KV pages are
+ * recycled) has two more scheduler inputs after `slotMapping`:
+ * `windowBlockTables` `[B, maxBlocksPerSeq]` and `windowSlotMapping`
+ * `[B * T]`, which the windowed layers read instead of `blockTables` and
+ * `slotMapping`. Its windowed layers' pools are
+ * `[windowedKv.numBlocks, blockSize, numKvHeads, headDim]`, with the roles
+ * [DecodeSlotRole.WINDOW_KV_POOL_IN] and [DecodeSlotRole.WINDOW_KV_POOL_OUT];
+ * the pools stay in layer order, so the pools start at input 7
+ * ([kvPoolInputBase]).
+ *
  * `T` is the token axis: **1 for decode**, the bucket's context width for
  * **prefill**. That is the whole difference — which is why this is one
  * contract with a [DecodeGraphKind] and not two.
@@ -146,6 +156,32 @@ data class DecodeGraphSpec(
     val poolType: DxirType =
         DxirType(model.kvDtype, listOf(model.numBlocks, model.blockSize, model.numKvHeads, model.headDim))
 
+    /** The type of a windowed layer's pool, or null without a [WindowedKvPool]. */
+    val windowPoolType: DxirType? = model.windowedKv?.let {
+        DxirType(model.kvDtype, listOf(it.numBlocks, model.blockSize, model.numKvHeads, model.headDim))
+    }
+
+    /** Whether layer [l] keeps its KV in the windowed pool class. */
+    fun isWindowed(l: Int): Boolean = model.windowedKv?.layers?.contains(l) == true
+
+    /** The pool type of layer [l]: [windowPoolType] for a windowed layer, else [poolType]. */
+    fun poolTypeOf(l: Int): DxirType = if (isWindowed(l)) windowPoolType!! else poolType
+
+    /** Index of the first KV pool input: after the five scheduler tensors, or seven with a windowed pool. */
+    val kvPoolInputBase: Int = if (model.windowedKv == null) KV_POOL_INPUT_BASE else KV_POOL_INPUT_BASE + 2
+
+    init {
+        val w = model.windowedKv
+        if (w != null) {
+            val need = minOf(WindowedKvPool.minRingPages(w.window, model.blockSize), maxBlocksPerSeq)
+            require(w.ringPages >= need) {
+                "DecodeGraphSpec: a windowed ring of ${w.ringPages} pages cannot hold a window of " +
+                    "${w.window} positions in pages of ${model.blockSize} at context " +
+                    "${bucket.maxContext}; a decode step needs $need"
+            }
+        }
+    }
+
     val tokenIdsType: DxirType = DxirType(I32, listOf(bucket.batch, tokensPerSeq))
     val positionsType: DxirType = DxirType(I32, listOf(bucket.batch, tokensPerSeq))
     val blockTablesType: DxirType = DxirType(I32, listOf(bucket.batch, maxBlocksPerSeq))
@@ -161,9 +197,14 @@ data class DecodeGraphSpec(
         add(DecodeSlot("blockTables", blockTablesType, DecodeSlotRole.BLOCK_TABLES))
         add(DecodeSlot("seqLens", seqLensType, DecodeSlotRole.SEQ_LENS))
         add(DecodeSlot("slotMapping", slotMappingType, DecodeSlotRole.SLOT_MAPPING))
+        if (model.windowedKv != null) {
+            add(DecodeSlot("windowBlockTables", blockTablesType, DecodeSlotRole.WINDOW_BLOCK_TABLES))
+            add(DecodeSlot("windowSlotMapping", slotMappingType, DecodeSlotRole.WINDOW_SLOT_MAPPING))
+        }
         for (l in 0 until model.numLayers) {
-            add(DecodeSlot("keyCache$l", poolType, DecodeSlotRole.KV_POOL_IN))
-            add(DecodeSlot("valueCache$l", poolType, DecodeSlotRole.KV_POOL_IN))
+            val role = if (isWindowed(l)) DecodeSlotRole.WINDOW_KV_POOL_IN else DecodeSlotRole.KV_POOL_IN
+            add(DecodeSlot("keyCache$l", poolTypeOf(l), role))
+            add(DecodeSlot("valueCache$l", poolTypeOf(l), role))
         }
         addAll(weightSlots)
     }
@@ -172,8 +213,9 @@ data class DecodeGraphSpec(
     val outputs: List<DecodeSlot> = buildList {
         add(DecodeSlot("logits", logitsType, DecodeSlotRole.LOGITS))
         for (l in 0 until model.numLayers) {
-            add(DecodeSlot("keyCache${l}Out", poolType, DecodeSlotRole.KV_POOL_OUT))
-            add(DecodeSlot("valueCache${l}Out", poolType, DecodeSlotRole.KV_POOL_OUT))
+            val role = if (isWindowed(l)) DecodeSlotRole.WINDOW_KV_POOL_OUT else DecodeSlotRole.KV_POOL_OUT
+            add(DecodeSlot("keyCache${l}Out", poolTypeOf(l), role))
+            add(DecodeSlot("valueCache${l}Out", poolTypeOf(l), role))
         }
     }
 
@@ -183,7 +225,7 @@ data class DecodeGraphSpec(
      * aliases output `o`; the pool is written in place and nothing is copied.
      */
     val donationPairs: List<Pair<Int, Int>>
-        get() = (0 until 2 * model.numLayers).map { p -> Pair(KV_POOL_INPUT_BASE + p, 1 + p) }
+        get() = (0 until 2 * model.numLayers).map { p -> Pair(kvPoolInputBase + p, 1 + p) }
 
     /**
      * The executable-cache key: what a serving process looks a compiled decode
@@ -220,6 +262,9 @@ data class DecodeGraphSpec(
             "t$tokensPerSeq",
             "dt${model.dtype.name}",
             "kv${model.kvDtype.name}",
+        ).plus(
+            // A windowed pool changes the signature; artifacts without one keep their keys.
+            listOfNotNull(model.windowedKv?.let { "w${it.window}r${it.ringPages}n${it.numBlocks}" }),
         ).joinToString("/")
     }
 
@@ -258,8 +303,9 @@ data class DecodeGraphSpec(
             "layers=${model.numLayers}, dtype=${model.dtype.name})"
 
     companion object {
-        /** First input index of the KV pools — the five scheduler tensors come
-         *  first, then `2 * numLayers` pools. */
+        /** First input index of the KV pools without a windowed pool — the five
+         *  scheduler tensors come first, then `2 * numLayers` pools. With one,
+         *  see [kvPoolInputBase]. */
         const val KV_POOL_INPUT_BASE: Int = 5
     }
 }
@@ -275,6 +321,18 @@ data class DecodeSlot(val name: String, val type: DxirType, val role: DecodeSlot
 enum class DecodeSlotRole {
     TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING,
     KV_POOL_IN, KV_POOL_OUT, LOGITS,
+
+    /** The block tables of the [WindowedKvPool] layers: entry `b` is the ring page of logical block `b`. */
+    WINDOW_BLOCK_TABLES,
+
+    /** The slot mapping of the [WindowedKvPool] layers: each token's slot on its ring page. */
+    WINDOW_SLOT_MAPPING,
+
+    /** A [WindowedKvPool] layer's pool, as [KV_POOL_IN] is a full-history layer's. */
+    WINDOW_KV_POOL_IN,
+
+    /** A [WindowedKvPool] layer's updated pool, aliased to its [WINDOW_KV_POOL_IN]. */
+    WINDOW_KV_POOL_OUT,
 
     /**
      * A model weight staged as an operand rather than baked in as a
@@ -318,6 +376,11 @@ data class DecodeModelShape(
      * by name here for the same reason it is refused in the codec and the op.
      */
     val kvQuant: KvQuantConfig? = null,
+    /**
+     * The sliding-window layers whose KV pages are recycled, or null when
+     * every layer keeps full-history pages. See [WindowedKvPool].
+     */
+    val windowedKv: WindowedKvPool? = null,
 ) {
     init {
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
@@ -331,6 +394,11 @@ data class DecodeModelShape(
         require(numLayers >= 1) { "DecodeModelShape: numLayers must be >= 1, got $numLayers" }
         require(numBlocks >= 1 && blockSize >= 1) {
             "DecodeModelShape: numBlocks/blockSize must be >= 1, got $numBlocks/$blockSize"
+        }
+        windowedKv?.let { w ->
+            require(w.layers.last() < numLayers) {
+                "DecodeModelShape: windowed layers ${w.layers} name a layer outside 0..${numLayers - 1}"
+            }
         }
         val q = kvQuant
         if (q != null) {

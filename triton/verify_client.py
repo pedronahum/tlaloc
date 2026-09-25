@@ -512,6 +512,8 @@ def refusals_sequence(http):
         ("two inputs", variant(lambda c: c["input"].append(
             {"name": "EXTRA", "data_type": "TYPE_INT32", "dims": [-1]})),
          "declares exactly one input"),
+        ("a pages output of three", variant(lambda c: c["output"][1].update({"dims": [3]})),
+         "the pages output is [ 2 ]"),
     ]
     for label, config, needle in cases:
         status, body = load(http, "reference_sequence", config)
@@ -524,6 +526,22 @@ def refusals_sequence(http):
     print(f"  {'ok  ' if ok else 'FAIL'} reload reference_sequence from config.pbtxt: HTTP {status}")
     if not ok:
         FAILURES.append("reload reference_sequence")
+    # A windowed KV pool whose ring is shorter than the window.
+    with urllib.request.urlopen(f"http://{http}/v2/models/window_sequence/config") as r:
+        window = json.load(r)
+    window["parameters"]["serving_manifest"] = {"string_value": "tlaloc-serving-short-ring.json"}
+    status, body = load(http, "window_sequence", window)
+    needle = "so a decode step would read a position already written over"
+    ok = status != 200 and needle in body
+    print(f"  {'ok  ' if ok else 'FAIL'} refused: a windowed ring shorter than the window: HTTP {status} "
+          f"{body.strip()[:200]}")
+    if not ok:
+        FAILURES.append("refusal: sequence short ring")
+    status, body = load(http, "window_sequence")
+    ok = status == 200
+    print(f"  {'ok  ' if ok else 'FAIL'} reload window_sequence from config.pbtxt: HTTP {status}")
+    if not ok:
+        FAILURES.append("reload window_sequence")
 
 
 def load(http, name, config=None):

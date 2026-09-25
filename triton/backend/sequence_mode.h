@@ -7,6 +7,14 @@
 // length, keyed by correlation ID, and chooses the artifact entry (prefill or
 // decode, batch and context bucket) for every request itself. A client sends
 // token ids and gets the logits of the last one back.
+//
+// An artifact with a windowed KV pool (tlaloc-serving-v3) has a second pool
+// class for its sliding-window layers. Each sequence holds a ring of at most
+// ring_pages pages of it: logical block b is on the ring's page b % ring_pages,
+// so position p is written over position p - ring_pages * block_size, which
+// has left the window. A request is split into calls of at most
+// ring_pages * block_size - min(start, window - 1) tokens, so that no call
+// writes over a position one of its own rows still reads.
 
 #pragma once
 
@@ -84,8 +92,19 @@ class SequenceModel {
   // Whether executions are handed the KV pools to write in place (parameter
   // "donate_kv_pools", true unless set to false).
   bool donate_pools() const { return donate_pools_; }
-  // KV pool state names and their type, in the order entries read them.
+  // KV pool state names and their type, in the order entries read them
+  // (full-history and windowed pools both).
   const std::vector<SlotSpec>& pools() const { return pools_; }
+  // The windowed pool class (all zero without one).
+  bool windowed() const { return window_ > 0; }
+  int window() const { return window_; }
+  int window_num_blocks() const { return window_num_blocks_; }
+  int ring_pages() const { return ring_pages_; }
+  // The most tokens one call may write for a sequence whose next position is
+  // `start`: all of them without a windowed pool, else what the ring holds.
+  int MaxTokensPerCall(int start) const;
+  // The KV_PAGES output's name, or empty when config.pbtxt does not declare it.
+  const std::string& pages_output() const { return pages_output_; }
 
   // The cheapest decode entry with batch >= `batch` and context >= `context`,
   // or nullptr.
@@ -115,6 +134,10 @@ class SequenceModel {
   std::vector<SlotSpec> pools_;
   int vocab_ = 0;
   int num_blocks_ = 0;
+  int window_ = 0;
+  int window_num_blocks_ = 0;
+  int ring_pages_ = 0;
+  std::vector<int> window_layers_;
   int block_size_ = 0;
   int max_context_ = 0;
   int max_decode_batch_ = 0;
@@ -122,10 +145,12 @@ class SequenceModel {
   uint64_t idle_ns_ = 0;
   bool donate_pools_ = true;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
+  std::string pages_output_;
 };
 
-// The KV pages of one model instance. Page 0 is never handed out: it is the
-// page padding rows of a batch point their block tables at.
+// The KV pages of one model instance, of one pool class. Page 0 is never
+// handed out: it is the page padding rows of a batch point their block tables
+// at.
 class PagePool {
  public:
   explicit PagePool(int num_blocks);
@@ -142,6 +167,7 @@ class PagePool {
 
 struct SequenceState {
   std::vector<int> pages;
+  std::vector<int> ring;  // windowed pages: logical block b is on ring[b % ring_pages]
   int length = 0;  // tokens whose KV is in the pool
   uint64_t last_ns = 0;
 };
@@ -158,11 +184,17 @@ class SequenceInstance {
   struct Work;
   SequenceInstance(const SequenceModel* model, const std::string& name,
                    TRITONBACKEND_ModelInstance* instance)
-      : model_(model), name_(name), instance_(instance), pool_(model->num_blocks())
+      : model_(model), name_(name), instance_(instance), pool_(model->num_blocks()),
+        window_pool_(model->windowed() ? model->window_num_blocks() : 1)
   {
   }
   TRITONSERVER_Error* Parse(Work* w);
   TRITONSERVER_Error* Admit(Work* w);
+  // Runs a request of several tokens: calls of at most MaxTokensPerCall
+  // tokens, each through the smallest prefill entry that covers it, or one
+  // decode step per token when no prefill entry does.
+  TRITONSERVER_Error* RunTokens(Work* w, uint64_t* compute_start, uint64_t* compute_end,
+                                const std::function<void()>& note);
   // Frees the sequences Triton has ended for being idle (see the definition).
   void Reap(uint64_t now);
   void Free(uint64_t corrid, const char* why);
@@ -183,6 +215,7 @@ class SequenceInstance {
   std::string name_;
   TRITONBACKEND_ModelInstance* instance_;
   PagePool pool_;
+  PagePool window_pool_;
   std::unordered_map<uint64_t, SequenceState> sequences_;
   std::set<uint64_t> batch_;  // correlation IDs with a request in the batch being run
   uint64_t max_exec_ns_ = 0;  // the longest ProcessRequests call so far

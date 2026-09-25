@@ -239,6 +239,17 @@ object HfDecoderGraph {
             "HfDecoderGraph.build: spec has ${m.numLayers} layers, config has " +
                 "${config.numLayers}"
         }
+        m.windowedKv?.let { w ->
+            for (l in w.layers) {
+                val ls = config.layer(l)
+                require(ls.attention == AttentionKind.SLIDING && ls.slidingWindow!! <= w.window) {
+                    "HfDecoderGraph.build: layer $l keeps its KV in the windowed pool (window " +
+                        "${w.window}), but it is ${ls.attention} attention" +
+                        (ls.slidingWindow?.let { " with window $it" } ?: "") +
+                        "; a recycled page would drop positions it still reads"
+                }
+            }
+        }
         val b = spec.bucket.batch
         val t = spec.tokensPerSeq
         // Token rows: every per-token op runs on B * T rows.
@@ -267,8 +278,10 @@ object HfDecoderGraph {
             val blockTables = param("blockTables", spec.blockTablesType)
             val seqLens = param("seqLens", spec.seqLensType)
             val slotMapping = param("slotMapping", spec.slotMappingType)
+            val windowTables = if (m.windowedKv == null) null else param("windowBlockTables", spec.blockTablesType)
+            val windowSlots = if (m.windowedKv == null) null else param("windowSlotMapping", spec.slotMappingType)
             val pools = (0 until m.numLayers).map { l ->
-                param("keyCache$l", spec.poolType) to param("valueCache$l", spec.poolType)
+                param("keyCache$l", spec.poolTypeOf(l)) to param("valueCache$l", spec.poolTypeOf(l))
             }
             val w = spec.weightSlots.map { param(it.name, it.type) }
             val byRole: Map<DecoderWeightRole, DxirNode> =
@@ -416,14 +429,11 @@ object HfDecoderGraph {
             // Decode: one row per sequence, the operands as given. Prefill:
             // one row per token, reading its sequence's block table with a
             // causal length of position + 1.
-            val rowTables: DxirNode
-            val rowLens: DxirNode
-            if (spec.kind == DecodeGraphKind.DECODE) {
-                rowTables = blockTables
-                rowLens = seqLens
-            } else {
+            // The windowed layers read their own tables, built the same way.
+            fun perRow(tables: DxirNode): DxirNode {
+                if (spec.kind == DecodeGraphKind.DECODE) return tables
                 val tables3 = op(
-                    OpKind.RESHAPE, listOf(blockTables),
+                    OpKind.RESHAPE, listOf(tables),
                     DxirType(spec.blockTablesType.dtype, listOf(b, 1, maxBlocks)),
                 )
                 val perToken = op(
@@ -431,10 +441,17 @@ object HfDecoderGraph {
                     DxirType(spec.blockTablesType.dtype, listOf(b, t, maxBlocks)),
                     attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)),
                 )
-                rowTables = op(
+                return op(
                     OpKind.RESHAPE, listOf(perToken),
                     DxirType(spec.blockTablesType.dtype, listOf(r, maxBlocks)),
                 )
+            }
+            val rowTables = perRow(blockTables)
+            val windowRowTables = windowTables?.let { perRow(it) }
+            val rowLens: DxirNode
+            if (spec.kind == DecodeGraphKind.DECODE) {
+                rowLens = seqLens
+            } else {
                 rowLens = op(
                     OpKind.ADD,
                     listOf(posFlat, const(1, DxirType(idx, listOf(r)))),
@@ -480,8 +497,11 @@ object HfDecoderGraph {
                 val kRot = if (layerSpec.rope) rope(k3, config.numKvHeads, ropeK!!) else k3
 
                 val (keyIn, valIn) = pools[l]
-                val kc = op(OpKind.KV_CACHE_WRITE, listOf(keyIn, kRot, slotMapping), spec.poolType)
-                val vc = op(OpKind.KV_CACHE_WRITE, listOf(valIn, v3, slotMapping), spec.poolType)
+                val windowed = spec.isWindowed(l)
+                val slots = if (windowed) windowSlots!! else slotMapping
+                val tables = if (windowed) windowRowTables!! else rowTables
+                val kc = op(OpKind.KV_CACHE_WRITE, listOf(keyIn, kRot, slots), spec.poolTypeOf(l))
+                val vc = op(OpKind.KV_CACHE_WRITE, listOf(valIn, v3, slots), spec.poolTypeOf(l))
                 poolOuts += kc
                 poolOuts += vc
 
@@ -493,7 +513,7 @@ object HfDecoderGraph {
                 }
                 val att = op(
                     OpKind.PAGED_ATTENTION,
-                    listOf(qRot, kc, vc, rowTables, rowLens),
+                    listOf(qRot, kc, vc, tables, rowLens),
                     DxirType(F32, listOf(r, config.numHeads, hd)),
                     attAttrs,
                 )

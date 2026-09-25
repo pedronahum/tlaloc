@@ -58,6 +58,22 @@ class SequenceClient:
         logits = res.as_numpy("LOGITS")
         return None if logits is None else logits.reshape(-1)
 
+    def step_pages(self, corrid, tokens, start=False, end=False):
+        """As step, and also returns KV_PAGES: the pages the sequence holds
+        after the request, in the full-history and the windowed KV pools."""
+        arr = np.asarray(tokens, dtype=np.int32).reshape(1, -1)
+        inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
+        if self.protocol == "http":
+            inp.set_data_from_numpy(arr, binary_data=True)
+        else:
+            inp.set_data_from_numpy(arr)
+        outs = [self.tc.InferRequestedOutput(n) for n in ("LOGITS", "KV_PAGES")]
+        res = self.client.infer(
+            self.model, [inp], outputs=outs,
+            sequence_id=int(corrid), sequence_start=bool(start), sequence_end=bool(end),
+        )
+        return res.as_numpy("LOGITS").reshape(-1), res.as_numpy("KV_PAGES").reshape(-1)
+
     def end(self, corrid):
         """End a sequence without running a step."""
         self.step(corrid, [], end=True)

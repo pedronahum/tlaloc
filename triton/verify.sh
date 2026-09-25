@@ -15,8 +15,13 @@
 #      value must match. The server log must then show that tensors in CUDA
 #      shared memory were read in place and written device to device by
 #      large_io, and went through the host for large_io_host, and that
-#      reference_sequence updated its KV pools in place,
-#   4. run it again with --perturb (wrong expected values), which must FAIL,
+#      reference_sequence updated its KV pools in place; then window_checks.py:
+#      a decoder whose sliding-window layers keep their KV in a windowed pool
+#      (a ring of 3 pages per sequence) holds at most 3 windowed pages as a
+#      sequence grows to 60 positions and gives the logits of the same model
+#      with full-history pages, over HTTP and gRPC, alone and batched, and a
+#      START with every ring taken is refused by name,
+#   4. run both again with --perturb (wrong expected values), which must FAIL,
 #   5. print the measurements of perf_client.py (dynamic batching throughput,
 #      the host round trip that zero copy saves) and stop the server,
 #   6. optional, TinyLlama: if the TinyLlama-1.1B checkpoint is present,
@@ -58,8 +63,8 @@
 #      references agree with each other) and transformers with bf16 weights
 #      and f32 activations (all ids, and the logits within twice the oracle's
 #      own float32-vs-float64 noise), check that the KV pools were updated
-#      in place, then --perturb (must fail), and print
-#      the peak memory in use.
+#      in place and that its 39 sliding-window layers have a windowed KV pool,
+#      then --perturb (must fail), and print the peak memory in use.
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7 and 8 pass or are skipped.
 #
@@ -209,6 +214,13 @@ refuse_log "model 'large_io_host': input 'X' is read in place"
 expect_log "decode_b1_c2 updated the 2 KV pools in place"
 refuse_log "to new device memory"
 
+echo "== windowed KV pool"
+"$PY" "$HERE/window_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT"
+expect_log "model 'window_sequence': uploaded 30 weights"
+expect_log "windowed KV pool for 2 sliding layers (window 8): 13 pages, a ring of at most 3 pages per sequence"
+expect_log "instance 'window_sequence_0_0': 6 KV pools (0 MiB) zeroed; 64 pages for sequences (page 0 is the padding page); 12 windowed pages, at most 3 per sequence"
+expect_log "instance 'window_sequence_0_0': in 100 runs the 6 KV pools were updated in place 100 times and copied 0 times"
+
 echo "== negative control (must fail)"
 if "$PY" "$HERE/verify_client.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" --perturb >"$LOG.negative" 2>&1; then
   echo "FAIL: the negative control passed; the checks cannot tell a wrong answer from a right one" >&2
@@ -216,6 +228,12 @@ if "$PY" "$HERE/verify_client.py" --http "localhost:$HTTP_PORT" --grpc "localhos
   exit 1
 fi
 grep -c "FAIL" "$LOG.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+if "$PY" "$HERE/window_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" --perturb >"$LOG.window-negative" 2>&1; then
+  echo "FAIL: the window checks passed comparing each request with the next one" >&2
+  cat "$LOG.window-negative" >&2
+  exit 1
+fi
+grep -c "FAIL" "$LOG.window-negative" | xargs -I{} echo "window negative control failed as it must ({} failing checks)"
 
 if [[ "${SKIP_PERF:-}" != 1 ]]; then
   echo "== measurements"
@@ -427,8 +445,10 @@ else
     echo "SKIP muse glimmer: no meta-models/Muse-Glimmer-30B checkpoint at $MCKPT"
   else
     M_CONFIG="$M_DIR/repository/muse/config.pbtxt"
+    # A model exported before its sliding layers had a windowed KV pool is
+    # exported again.
     if [[ "${MUSE_GLIMMER_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$M_CONFIG" 2>/dev/null \
-        || ! aliased "$M_DIR/artifact"; then
+        || ! aliased "$M_DIR/artifact" || ! grep -q '"windowedKv"' "$M_DIR/artifact/tlaloc-serving.json"; then
       mem_check 8 "export Muse Glimmer"
       rm -rf "$M_DIR"
       mkdir -p "$M_DIR"
@@ -469,6 +489,8 @@ else
     fi
     grep -oE "decode_b1_c[0-9]+ updated the [0-9]+ KV pools in place.*" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /'
     refuse_in "$LOG.muse" "to new device memory"
+    expect_in "$LOG.muse" "windowed KV pool for 39 sliding layers (window 2048)"
+    grep -oE "instance 'muse_0_0': [0-9]+ KV pools \([0-9]+ MiB\) zeroed[^;]*;[^;]*;[^;]*;" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /' || true
     echo "== muse glimmer negative control (must fail)"
     if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
         --model muse --fixture "$MUSE_MIXED" --noise-factor 2 --repeat 0 --perturb >"$LOG.muse.negative" 2>&1; then

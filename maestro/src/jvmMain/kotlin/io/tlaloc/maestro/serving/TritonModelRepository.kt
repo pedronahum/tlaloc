@@ -24,9 +24,10 @@ import java.nio.file.StandardCopyOption
  *
  * The generated model uses Triton's sequence batcher (oldest strategy) and
  * the backend's sequence mode: `config.pbtxt` names the manifest
- * (`serving_manifest`) and declares one input, `TOKENS` (INT32 `[-1]`), one
- * output, `LOGITS` (FP32 `[vocab]`), and the START, END and CORRID control
- * inputs. A client sends a sequence's token ids with a correlation ID; the
+ * (`serving_manifest`) and declares one input, `TOKENS` (INT32 `[-1]`), two
+ * outputs, `LOGITS` (FP32 `[vocab]`) and `KV_PAGES` (INT32 `[2]`, the pages
+ * the sequence holds in the full-history and the windowed pools; a client
+ * asks for it or not), and the START, END and CORRID control inputs. A client sends a sequence's token ids with a correlation ID; the
  * backend allocates the sequence's KV pages on START, frees them on END (or,
  * when pages run short, once the sequence has been idle for twice
  * `max_sequence_idle_microseconds` plus a queueing allowance),
@@ -34,7 +35,9 @@ import java.nio.file.StandardCopyOption
  * fits and a one-token request through a decode entry together with the
  * other sequences' steps in the same batch, and answers with the last
  * token's logits. `max_batch_size` is the artifact's largest decode batch.
- * See [SequenceOptions] for the knobs.
+ * For an artifact with a windowed KV pool the backend also keeps each
+ * sequence's ring of windowed pages and splits a request into calls the ring
+ * can hold. See [SequenceOptions] for the knobs.
  *
  * ## Client mode
  *
@@ -109,7 +112,17 @@ object TritonModelRepository {
     private val REQUEST_INPUT_ROLES = setOf(
         DecodeSlotRole.TOKEN_IDS, DecodeSlotRole.POSITIONS, DecodeSlotRole.BLOCK_TABLES,
         DecodeSlotRole.SEQ_LENS, DecodeSlotRole.SLOT_MAPPING,
+        DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING,
     )
+
+    private val POOL_IN_ROLES = setOf(DecodeSlotRole.KV_POOL_IN, DecodeSlotRole.WINDOW_KV_POOL_IN)
+
+    /**
+     * The optional output of a [KvMode.SEQUENCE] model: INT32 `[2]`, the
+     * pages the sequence holds after the request in the full-history pool
+     * and in the windowed pool (0 without one).
+     */
+    const val KV_PAGES: String = "KV_PAGES"
 
     /**
      * The `config.pbtxt` text for [manifest] served as the Triton model
@@ -153,7 +166,7 @@ object TritonModelRepository {
                                 "manifest's weight table, so there is no file to load it from",
                         )
                     )
-                DecodeSlotRole.KV_POOL_IN -> "state:${slot.name}"
+                in POOL_IN_ROLES -> "state:${slot.name}"
                 in REQUEST_INPUT_ROLES -> "input:${slot.name}"
                 else -> throw IllegalArgumentException(
                     "TritonModelRepository: input slot '${slot.name}' has role ${slot.role}, " +
@@ -165,17 +178,18 @@ object TritonModelRepository {
         val results = first.outputs.mapIndexed { j, slot ->
             when (slot.role) {
                 DecodeSlotRole.LOGITS -> "output:${slot.name}"
-                DecodeSlotRole.KV_POOL_OUT -> {
+                DecodeSlotRole.KV_POOL_OUT, DecodeSlotRole.WINDOW_KV_POOL_OUT -> {
                     val i = pairedInput[j]
                         ?: throw IllegalArgumentException(
                             "TritonModelRepository: KV_POOL_OUT '${slot.name}' (result $j) has no " +
                                 "donation pair, so no KV_POOL_IN it updates",
                         )
                     val input = first.inputs[i]
-                    require(input.role == DecodeSlotRole.KV_POOL_IN && input.type == slot.type) {
-                        "TritonModelRepository: KV_POOL_OUT '${slot.name}' is paired with input " +
+                    val wantRole = if (slot.role == DecodeSlotRole.KV_POOL_OUT) DecodeSlotRole.KV_POOL_IN else DecodeSlotRole.WINDOW_KV_POOL_IN
+                    require(input.role == wantRole && input.type == slot.type) {
+                        "TritonModelRepository: ${slot.role} '${slot.name}' is paired with input " +
                             "'${input.name}' (${input.role}, ${input.type.dtype}${input.type.dims}), " +
-                            "not a KV_POOL_IN of type ${slot.type.dtype}${slot.type.dims}"
+                            "not a $wantRole of type ${slot.type.dtype}${slot.type.dims}"
                     }
                     "state:${input.name}"
                 }
@@ -185,7 +199,7 @@ object TritonModelRepository {
                 )
             }
         }
-        val hasState = first.inputs.any { it.role == DecodeSlotRole.KV_POOL_IN }
+        val hasState = first.inputs.any { it.role in POOL_IN_ROLES }
         if (hasState && kv == KvMode.SEQUENCE) return sequenceConfig(manifest, modelName, options)
 
         fun tensor(index: Int, slot: ServingSlot, side: (ServingEntry) -> List<ServingSlot>): String {
@@ -241,8 +255,18 @@ object TritonModelRepository {
                 // client needs to fill blockTables and slotMapping.
                 parameter("kv_block_size", manifest.model.blockSize.toString())
                 parameter("kv_num_blocks", manifest.model.numBlocks.toString())
+                windowParameters(manifest)
             }
         }
+    }
+
+    /** The windowed pool's geometry, for clients; nothing without a windowed pool. */
+    private fun StringBuilder.windowParameters(manifest: ServingManifest) {
+        val w = manifest.model.windowedKv ?: return
+        parameter("kv_window", w.window.toString())
+        parameter("kv_window_layers", w.layers.joinToString(","))
+        parameter("kv_window_num_blocks", w.numBlocks.toString())
+        parameter("kv_window_ring_pages", w.ringPages.toString())
     }
 
     private fun sequenceConfig(manifest: ServingManifest, modelName: String, options: SequenceOptions): String {
@@ -271,7 +295,8 @@ object TritonModelRepository {
             append("  { name: \"$TOKENS\" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true }\n")
             append("]\n")
             append("output [\n")
-            append("  { name: \"$LOGITS\" data_type: TYPE_FP32 dims: [ $vocab ] }\n")
+            append("  { name: \"$LOGITS\" data_type: TYPE_FP32 dims: [ $vocab ] },\n")
+            append("  { name: \"$KV_PAGES\" data_type: TYPE_INT32 dims: [ 2 ] }\n")
             append("]\n")
             append("sequence_batching {\n")
             append("  max_sequence_idle_microseconds: ${options.maxSequenceIdleMicros}\n")
@@ -281,9 +306,11 @@ object TritonModelRepository {
             append("    { name: \"CORRID\" control [ { kind: CONTROL_SEQUENCE_CORRID data_type: TYPE_UINT64 } ] }\n")
             append("  ]\n")
             append("  oldest {\n")
-            // Every live sequence holds at least one page, and page 0 is the
-            // padding page, so no more than numBlocks - 1 can be live at once.
-            append("    max_candidate_sequences: ${maxOf(1, manifest.model.numBlocks - 1)}\n")
+            // Every live sequence holds at least one page of each pool, and
+            // page 0 is the padding page, so no more than numBlocks - 1 can be
+            // live at once.
+            val pages = minOf(manifest.model.numBlocks, manifest.model.windowedKv?.numBlocks ?: Int.MAX_VALUE)
+            append("    max_candidate_sequences: ${maxOf(1, pages - 1)}\n")
             append("    preferred_batch_size: [ $maxBatch ]\n")
             append("    max_queue_delay_microseconds: ${options.maxQueueDelayMicros}\n")
             append("  }\n")
@@ -294,6 +321,7 @@ object TritonModelRepository {
             parameter("kv_block_size", manifest.model.blockSize.toString())
             parameter("kv_num_blocks", manifest.model.numBlocks.toString())
             parameter("max_context", decode.maxOf { it.context }.toString())
+            windowParameters(manifest)
         }
     }
 

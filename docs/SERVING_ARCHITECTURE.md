@@ -91,7 +91,7 @@ built.
 
 ```
 <artifact>/
-  tlaloc-serving.json      the manifest (schema tlaloc-serving-v2)
+  tlaloc-serving.json      the manifest (tlaloc-serving-v2, or v3 with a windowed KV pool)
   bodies/<sha256>.mlir     one StableHLO module per entry, named by its hash
   programs/<entry>.json    each entry's inputs and outputs
   weights/NNNN_<slot>.bin  one raw little-endian file per weight tensor
@@ -101,15 +101,17 @@ The manifest records:
 
 - **the model shape**: layers, heads, KV heads, head size, vocabulary, and
   the KV pool: `numBlocks` pages of `blockSize` tokens per layer, for K and
-  for V;
+  for V; for a model with sliding-window layers, the **windowed KV pool**
+  (below): its window, its layers, its pages and its ring size;
 - **the buckets**: a batch ladder and a context ladder. Each (batch, context)
   point is one decode entry; each context also gets a prefill entry at batch
   1. A server runs a request on the smallest entry that holds it and pads the
   rest;
 - **the entries**: kind, batch, context, body path and hash, and the
   signature with a role per input (`TOKEN_IDS`, `POSITIONS`, `BLOCK_TABLES`,
-  `SEQ_LENS`, `SLOT_MAPPING`, `KV_POOL_IN`, weight slots) and output
-  (`LOGITS`, `KV_POOL_OUT`);
+  `SEQ_LENS`, `SLOT_MAPPING`, `KV_POOL_IN`, weight slots, and with a windowed
+  pool `WINDOW_BLOCK_TABLES`, `WINDOW_SLOT_MAPPING`, `WINDOW_KV_POOL_IN`) and
+  output (`LOGITS`, `KV_POOL_OUT`, `WINDOW_KV_POOL_OUT`);
 - **the weight table**: slot name, dtype, shape and byte length of each file;
 - **the donation pairs**: each `KV_POOL_OUT` output with the `KV_POOL_IN`
   input it replaces. The body says the same thing to XLA: each paired
@@ -126,6 +128,55 @@ frontend finds the tokenizer.
 Every body is checked against its signature at export time. The export needs
 no GPU and loads no PJRT plugin.
 
+### Sliding-window layers: the windowed KV pool
+
+A sliding-window layer with window `W` reads, for the token at position `p`,
+only the positions `p - W + 1 .. p`. Its older keys and values are never read
+again, so keeping them is wasted memory. When a model has such layers (Muse
+Glimmer: 39 of its 52 layers, window 2048), the export puts them in a second
+pool class, the windowed KV pool, and writes a `tlaloc-serving-v3` manifest.
+The full-attention layers keep full-history pages as before.
+
+- Each sequence holds a **ring** of at most `ringPages` pages of the windowed
+  pool. Logical block `b` of the sequence is on the ring's page
+  `b % ringPages`, so position `p` is written over position
+  `p - ringPages * blockSize`, which has left the window.
+- The windowed layers get their own block table and slot mapping
+  (`WINDOW_BLOCK_TABLES`, `WINDOW_SLOT_MAPPING`), as wide as the full ones:
+  entry `b` is the ring page of block `b`. `PAGED_ATTENTION` is unchanged; it
+  reads only the positions in the window, and those are all still in the
+  ring.
+- A ring of `ceil(W / blockSize)` pages holds one window, and a decode step
+  needs no more; the default is one page more. A call that writes `n` tokens
+  starting at `p0` needs `min(p0, W - 1) + n` positions at once, so a runtime
+  splits a longer request into calls of at most
+  `ringPages * blockSize - min(p0, W - 1)` tokens. With the spare page every
+  call can write at least `blockSize + 1` tokens.
+- The ring is capped at the pages of the largest context, where it never
+  wraps. The windowed pool's page budget defaults to as many rings as the
+  full pool holds sequences of the largest context, capped at the full
+  pool's pages.
+
+KV bytes per sequence for Muse Glimmer (f32 keys and values, 2 KV heads of
+128, pages of 16 tokens: 32 KiB per page per layer; ring of 129 pages),
+computed from that geometry:
+
+| Positions | Full history, 52 layers | Windowed pool for 39 layers | Ratio |
+|---|---|---|---|
+| 2,048 | 208 MiB | 208 MiB | 1.00 (128 pages, the ring has not filled) |
+| 8,192 | 832 MiB | 365 MiB | 2.28 |
+| 32,768 | 3,328 MiB | 989 MiB | 3.36 |
+
+As the context grows the ratio approaches 52 / 13 = 4, because the 13
+full-attention layers still grow with the sequence. The artifact `verify.sh`
+serves has a context of 128 tokens, so its ring is capped at 8 pages and the
+two layouts hold the same bytes there.
+
+The two framework-free runtimes, (i) and (ii) below, read `v1` and `v2`
+artifacts and refuse a `v3` one by its schema version; only the Triton
+backend fills a windowed pool. Export with `-PwindowedKv=false` for an
+artifact they can read.
+
 ## 4. Three ways to serve it
 
 All three compile the StableHLO with a PJRT plugin (the XLA CUDA plugin,
@@ -139,7 +190,7 @@ memory, which on a GB10 is 75% of the machine's RAM.
 | Process | one Python process: `tlaloc_serve.py` and `tlaloc_pjrt.py` (ctypes) load the plugin `.so` | vLLM's engine and worker processes; `vllm-tlaloc` replaces the model runner | `tritonserver` in the Triton container; `libtriton_tlaloc.so` loads the plugin `.so` |
 | Python packages in the serving process | none beyond the standard library | vLLM and torch (vLLM's own); no torch model is built | none: the backend is C++ |
 | Weights | uploaded once, on the device | uploaded once, on the device | uploaded once per GPU at model load, on the device |
-| KV pages | the caller allocates pages | vLLM's block manager allocates them | the backend allocates them per sequence (correlation ID) and frees them on END, or, when pages run short, after twice the idle timeout plus a queueing allowance |
+| KV pages | the caller allocates pages | vLLM's block manager allocates them | the backend allocates them per sequence (correlation ID) and frees them on END, or, when pages run short, after twice the idle timeout plus a queueing allowance; a sliding-window layer's pages are a ring per sequence, bounded by the window |
 | KV pools between steps | copied to the host and back every step | as in (i) | on the device, updated in place: each execution is handed the pools and writes them where they are |
 | Prompt | one decode step per token | one decode step per token (chunked prefill refused by name) | one prefill call |
 | Batching | the caller builds the batch | vLLM's scheduler | decode steps of different sequences in one call (Triton's sequence batcher, oldest strategy) |
@@ -172,9 +223,11 @@ size is a different compiled program.
 `TritonModelRepository.write(artifactDir, repositoryDir, name)` (or
 `:maestro:exportTritonModel`) turns the artifact into a Triton model: a
 `config.pbtxt` and a version directory holding the artifact's files. In
-sequence mode the configuration has one input `TOKENS` (INT32 `[1, n]`), one
-output `LOGITS` (FP32 `[1, vocab]`), the START/END/CORRID controls and the
-`serving_manifest` parameter.
+sequence mode the configuration has one input `TOKENS` (INT32 `[1, n]`), the
+output `LOGITS` (FP32 `[1, vocab]`), the optional output `KV_PAGES` (INT32
+`[2]`: the pages the sequence holds in the full-history and the windowed
+pools, returned when a client asks for it), the START/END/CORRID controls and
+the `serving_manifest` parameter.
 
 At load the backend reads the manifest, checks every body's signature,
 compiles every entry and uploads the weights. Per request:
@@ -186,6 +239,10 @@ compiles every entry and uploads the weights. Per request:
   smallest entry that holds them;
 - the backend derives each sequence's block table and slots from the pages it
   holds; the client sends token ids only;
+- with a windowed KV pool the backend also keeps each sequence's ring of
+  windowed pages, fills the window block table and slots from it, and splits
+  a request into calls the ring can hold (each through the smallest prefill
+  entry that covers it);
 - the KV pools are donated to each execution, and XLA writes the updated
   pools over them (the alias in the body): the pools stay at the device
   addresses they were given at load and no execution copies them. The
@@ -215,7 +272,8 @@ is the system RAM), driver 580.126.09.
 | (ii) `vllm serve` (the HTTP server) | 🧪 | written, never started |
 | (iii) Triton, TinyLlama-1.1B | ✅ GB10 | `triton/verify.sh`: HuggingFace's 6 ids over HTTP and gRPC; four concurrent sequences each equal their solo run; page exhaustion and idle timeout |
 | (iii) Triton, Qwen3-0.6B | ✅ GB10 | `verify.sh`: 16 ids equal HuggingFace's for a plain and a chat-template prompt; about 19 ms a token |
-| (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic; about 245 ms a token |
+| (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic, served from a v3 artifact whose 39 sliding layers are in the windowed pool; about 245 ms a token |
+| (iii) Triton, windowed KV pool for sliding-window layers | ✅ GB10 | `verify.sh`: a three-layer decoder with random weights (window 8, pages of 4, rings of 3 pages) grown to 60 positions holds at most 3 windowed pages while its full pages reach 15, and its logits equal the same model with full-history pages sent the same calls (worst 5.3e-7 of the largest logit), over HTTP and gRPC, alone and batched; the reference interpreter gives bit-identical logits for the two layouts over several windows, and a ring one page short or a call one token too long changes them |
 | (iii) Triton, dynamic batching, CUDA shared memory, nine dtypes | ✅ GB10 | `verify.sh` |
 | (iii) Triton on GPUs other than 0 | 🧪 | written; the GB10 has one GPU |
 | Any of the three on a TPU | 🧪 | the artifact is platform-neutral StableHLO; no TPU has run it ([TPU_BRINGUP.md](TPU_BRINGUP.md)) |
