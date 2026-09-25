@@ -140,11 +140,26 @@ data class DecodeGraphSpec(
      * names them in its manifest's weight table.
      */
     val weightSlots: List<DecodeSlot> = emptyList(),
+    /**
+     * PREFILL only: the most tokens per sequence one call takes, when fewer
+     * than the context. Null (the default) takes the whole context. A call
+     * computes attention over the whole context for each of its tokens, so
+     * its memory grows with `tokens * context`; a long context needs a
+     * shorter chunk, and a longer prompt is prefilled in several calls.
+     */
+    val prefillChunk: Int? = null,
 ) {
-    /** The token axis: 1 for decode, the bucket's context width for prefill. */
+    init {
+        require(prefillChunk == null || (kind == DecodeGraphKind.PREFILL && prefillChunk >= 1)) {
+            "DecodeGraphSpec: prefillChunk $prefillChunk applies to a prefill entry and must be >= 1 " +
+                "(this is a ${kind.name.lowercase()} entry)"
+        }
+    }
+
+    /** The token axis: 1 for decode; for prefill the context width, or [prefillChunk] when smaller. */
     val tokensPerSeq: Int = when (kind) {
         DecodeGraphKind.DECODE -> 1
-        DecodeGraphKind.PREFILL -> bucket.maxContext
+        DecodeGraphKind.PREFILL -> minOf(bucket.maxContext, prefillChunk ?: bucket.maxContext)
     }
 
     /** Block-table width, exact because context buckets are page-aligned. */

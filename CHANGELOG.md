@@ -13,6 +13,31 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Prefill in chunks, and context ladders from the export tool.**
+  `HfServingExport.export(prefillChunk = N)` (`-PprefillChunk=N`) gives each
+  prefill entry at most `N` tokens per sequence, so a long context does not
+  need a call whose attention scores every token against every position; a
+  longer prompt runs as several calls, and a windowed ring is sized so that
+  an `N`-token call fits past the window. `-PcontextLadder=512,2048,8192`
+  sets the context buckets. The Triton backend picks a prefill entry by the
+  call's tokens as well as its context and states the chunk at load;
+  `tlaloc_serve.py`'s `prefill_entry` takes the chunk length. In the
+  reference interpreter chunked prefill gives the whole-context logits bit
+  for bit (`BatchedPrefillTest`); `verify.sh` serves a windowed example model
+  with 6-token chunks (`window_sequence_chunked`) and matches the
+  full-history model sent the same calls.
+- **Muse Glimmer at contexts up to 32,768 with up to four sequences.**
+  Measured through Triton on the GB10 (`triton/context_bench.py`): a decode
+  step takes 265 ms at context 512 and 317 ms at 32,768 for one sequence;
+  four sequences together produce 16.7 tokens/s at 512 and 9.6 at 32,768;
+  a 32,688-token prompt prefills in 230 s. A 2,305-token prompt whose fact lies outside the sliding window of the question gives the 16 ids transformers gives with the same arithmetic, starting with the fact (" 4719."), logits within 8.4e-3 of the largest (`verify.sh` with `MUSE_GLIMMER=1`, the new fixture `muse_glimmer_30b_needle_mixed_greedy.json`).
+- **`examples/triton-llm` serves Muse Glimmer at contexts up to 8,192**
+  (256, 2,048 and 8,192, prefill in 512-token calls); the chat answer is
+  unchanged and a decode step still takes about 250 ms.
+- **The compile log states each entry's temporary memory** (from
+  `PJRT_Executable_GetCompiledMemoryStats`), so a deployment can size the
+  PJRT memory fraction from it.
+
 - **Refused placeholder tokens in the manifest.** A multimodal checkpoint's
   image and video placeholder ids (`HfDecoderConfig.refusedTokenIds`) are
   listed in the artifact (`ServingModelShape.refusedTokens`, written only when
@@ -147,6 +172,16 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   exports it (`exportLlamaServingArtifact` remains as a second name).
 
 ### Changed
+
+- **Prefill attention gathers each sequence's pages once.** `PAGED_ATTENTION`
+  accepts fewer block tables than query rows, one per equal group of
+  consecutive rows (`PagedAttentionAttrs.rowsPerTable`, derived from the
+  shapes), and the prefill graph passes each sequence's table once instead
+  of repeating it per token. The emitter then gathers `[tables, context]`
+  keys and values instead of `[tokens, context]`: 4 MiB per layer instead of
+  8 GiB for Muse Glimmer at 2,048 tokens. On the GB10 the new lowering gives
+  the per-row lowering's output exactly; the KPTX paged kernel declines
+  shared tables. Prefill bodies change; decode bodies do not.
 
 - **A tied head reads the embedding table.** `HfDecoderGraph` gives a tied
   head no weight slot: it is one `MATMUL` contracting the hidden axis of the

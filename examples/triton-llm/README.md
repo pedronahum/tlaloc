@@ -94,15 +94,21 @@ repository's `triton/` directory for the backend and the server script.
 `~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0`, where the
 repository's other examples keep it.
 
-Each model is compiled for batch 1 and contexts 64, 128 and 256 tokens: a
-decode entry and a prefill entry for each, six XLA compiles when the model
-loads. The server runs each request on the smallest entry that holds the
-conversation, so a short one does not pay for 256 positions. The prompt and
-the answer together must fit in 256 tokens; `chat.py` stops there.
+Qwen3 and TinyLlama are compiled for batch 1 and contexts 64, 128 and 256
+tokens: a decode entry and a prefill entry for each, six XLA compiles when
+the model loads. The server runs each request on the smallest entry that
+holds the conversation, so a short one does not pay for 256 positions. The
+prompt and the answer together must fit in 256 tokens; `chat.py` stops there.
+Muse Glimmer is compiled for contexts 256, 2,048 and 8,192, with prefill in
+calls of at most 512 tokens and KV pages for one sequence of 8,192
+positions: a prompt of thousands of tokens fits. Its decode step costs
+about the same at every one of these contexts (250 to 275 ms; measured up to
+32,768 in [SERVING_ARCHITECTURE.md](../../docs/SERVING_ARCHITECTURE.md#long-contexts-prefill-in-chunks)),
+so the longer context costs little but compile time.
 
 **Muse Glimmer needs about 60 GB of GPU memory.** Its 52 GiB of bf16 weights
 are exported to `build/muse-glimmer/` (the export writes 52 GiB to disk and
-took 165 s here) and uploaded at load (85 s here). On a GB10 the GPU's memory
+took 174 s here) and uploaded at load (82 s here). On a GB10 the GPU's memory
 is the system RAM, so the weights come out of the memory everything else on
 the machine uses. `run.sh` prints a warning, skips by name unless 80 GiB are
 available before the export, checks again before the load, drops the
@@ -200,14 +206,14 @@ WARNING: Muse Glimmer puts 56 GB of bf16 weights on the GPU; the export
 checkpoint  /home/pedro/.cache/huggingface/hub/models--meta-models--Muse-Glimmer-30B/snapshots/a4e59da52a7bc87ae7251dd5545c0dd437c44b68
 family      muse_glimmer, 52 layers, hidden 6656, vocab 202048, weights as bf16
             809 checkpoint tensors are not part of the text decoder and are not read
-entries     decode at batch 1..1 and prefill at batch 1, for contexts 64, 128, 256; KV pages of 16 tokens
-artifact    6 entries, 627 weight files (53128 MiB) in 165.3 s
-              decode_b1_c64
-              decode_b1_c128
+entries     decode at batch 1..1 and prefill at batch 1, for contexts 256, 2048, 8192; KV pages of 16 tokens; prefill in calls of at most 512 tokens
+artifact    6 entries, 627 weight files (53128 MiB) in 174.0 s
               decode_b1_c256
-              prefill_b1_c64
-              prefill_b1_c128
+              decode_b1_c2048
+              decode_b1_c8192
               prefill_b1_c256
+              prefill_b1_c2048
+              prefill_b1_c8192
 triton      /home/pedro/programming/tlaloc/examples/triton-llm/build/muse-glimmer/repository/muse-glimmer/config.pbtxt
 ```
 
@@ -218,8 +224,8 @@ WARNING: Muse Glimmer puts 56 GB of bf16 weights on the GPU; the export
          writes 56 GB to /home/pedro/programming/tlaloc/examples/triton-llm/build/muse-glimmer and the load takes minutes.
 == export: reusing /home/pedro/programming/tlaloc/examples/triton-llm/build/muse-glimmer/repository (REEXPORT=1 writes it again)
 == starting Triton (tlaloc-triton-llm, PJRT memory fraction 0.492, log: /home/pedro/programming/tlaloc/examples/triton-llm/build/muse-glimmer/server.log)
-ready in 139 s: uploaded 627 weights (53128 MiB) in 82917 ms; 6 entries, KV pool of 64 pages x 16 tokens, largest context 256, largest decode batch 1, sequence idle timeout 60000000 us
-== chat (gRPC, localhost:8001)
+ready in 139 s: uploaded 627 weights (53128 MiB) in 81999 ms; 6 entries, KV pool of 513 pages x 16 tokens, largest context 8192, largest decode batch 1, largest prefill batch 1, at most 512 tokens per sequence in a prefill call, sequence idle timeout 60000000 us; refuses token ids 200091 (video_token_id) 200092 (image_token_id); windowed KV pool for 39 sliding layers (window 2048): 161 pages, a ring of at most 160 pages per sequence
+== chat (gRPC, localhost:8021)
 question  Why is the sky blue? Answer in two sentences.
 prompt    67 tokens after the chat template
 answer     to=self<|message|>Why is the sky blue? Answer in two sentences.
@@ -231,8 +237,8 @@ answer     to=self<|message|>Why is the sky blue? Answer in two sentences.
           Let's output two sentences.<|eom|><|start|>assistant to=user<|message|>The sky appears blue because sunlight is scattered by molecules in Earth's atmosphere, and shorter blue wavelengths scatter more than longer red wavelengths. This Rayleigh scattering sends blue light toward our eyes from all directions, while the sun itself looks whiter or redder near the horizon.
 
 generated 97 tokens, stopped by end-of-turn token 200008
-prefill   67 tokens in one request: 368 ms
-decode    median 252.1 ms a token over 97 requests (4.0 tokens/s)
+prefill   67 tokens in one request: 457 ms
+decode    median 250.2 ms a token over 97 requests (4.0 tokens/s)
 ```
 
 Muse Glimmer's chat template has the model reason in a channel addressed to
@@ -248,17 +254,18 @@ allows at the GB10's memory bandwidth.
 
 | | Qwen3-0.6B | TinyLlama-1.1B | Muse Glimmer 30B |
 |---|---|---|---|
-| Export (Kotlin) | 5.0 s | 6.8 s | 165 s |
+| Export (Kotlin) | 5.0 s | 6.8 s | 174 s |
 | Server ready (six XLA compiles, weight upload) | 26 to 28 s | 28 to 32 s | 133 to 139 s |
-| Prefill of the chat prompt, one request | 64 to 66 ms (23 to 24 tokens) | 73 ms (27 tokens) | 368 ms (67 tokens) |
-| Decode, median per token | 15.5 ms | 26.5 ms | 252 ms |
+| Prefill of the chat prompt, one request | 64 to 66 ms (23 to 24 tokens) | 73 ms (27 tokens) | 457 ms (67 tokens) |
+| Decode, median per token | 15.5 ms | 26.5 ms | 250 ms |
 
 The Qwen3 column is from after its tied head began reading the embedding
 table (2273 MiB of weights instead of 2867 MiB); before, the decode step took
 20.5 ms and the prefill 80 to 82 ms.
 
 The prefill is the first request the server runs after loading, and it runs on
-the 64-token entry (Muse Glimmer's 67-token prompt on the 128-token entry).
+the 64-token entry (Muse Glimmer's 67-token prompt on the 256-token entry;
+368 ms on the 128-token entry of the earlier export).
 The client measures each request from gRPC call to response, so the numbers
 include the round trip.
 

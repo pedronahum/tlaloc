@@ -27,6 +27,7 @@
 #   HTTP_PORT / GRPC_PORT / METRICS_PORT   [8000 / 8001 / 8002]
 #   REEXPORT=1      export again even if build/<model>/ has a model
 #   MAX_NEW         the most tokens to generate [160]; the context is 256
+#                   (8192 for Muse Glimmer)
 #   REASONING_STRENGTH  Muse Glimmer's chat template variable [low]
 set -euo pipefail
 
@@ -227,8 +228,10 @@ TEMPLATE_VARS=()
 # in a channel of its own before it answers; low keeps that part short.
 [[ "$MODEL" == muse-glimmer ]] && TEMPLATE_VARS=(--template-var "current_date=$(date +%F)"
   --template-var "reasoning_strength=${REASONING_STRENGTH:-low}")
+CONTEXT=256
+[[ "$MODEL" == muse-glimmer ]] && CONTEXT=8192
 "$PY" "$HERE/chat.py" --url "localhost:$GRPC_PORT" --model "$MODEL" --checkpoint "$CKPT" \
-  --question "$QUESTION" --max-new "${MAX_NEW:-160}" --context 256 "${TEMPLATE_VARS[@]}"
+  --question "$QUESTION" --max-new "${MAX_NEW:-160}" --context "$CONTEXT" "${TEMPLATE_VARS[@]}"
 
 # --- 6. Stop ------------------------------------------------------------------
 # (the EXIT trap removes the container)

@@ -784,13 +784,14 @@ class ServingArtifact:
 
     # --- prefill -------------------------------------------------------
 
-    def prefill_entry(self, batch: int, context: int) -> Entry | None:
-        """The cheapest prefill entry with batch >= `batch` and context >=
-        `context`, or None (an artifact without prefill entries, or a prompt
-        longer than its largest context)."""
+    def prefill_entry(self, batch: int, context: int, tokens: int = 1) -> Entry | None:
+        """The cheapest prefill entry with batch >= `batch`, context >=
+        `context` and at least `tokens` tokens per sequence, or None (an
+        artifact without prefill entries, a prompt longer than its largest
+        context, or a chunk longer than any entry takes)."""
         best = None
         for e in self.entries:
-            if e.kind != "prefill" or e.batch < batch or e.context < context:
+            if e.kind != "prefill" or e.batch < batch or e.context < context or e.tokens_per_seq < tokens:
                 continue
             if best is None or e.batch * e.context < best.batch * best.context:
                 best = e
@@ -832,12 +833,13 @@ class ServingArtifact:
         for chunk in chunks:
             self.check_tokens(chunk)
         need = max(int(s) + len(c) for s, c in zip(starts, chunks))
-        entry = self.prefill_entry(n, need)
+        longest = max(len(c) for c in chunks)
+        entry = self.prefill_entry(n, need, longest)
         if entry is None:
             raise ValueError(
-                f"run_prefill: no prefill entry holds {n} sequence(s) up to position {need}; "
-                f"compiled: " + ", ".join(
-                    f"({e.batch},{e.context})" for e in self.entries if e.kind == "prefill"
+                f"run_prefill: no prefill entry holds {n} sequence(s) of up to {longest} tokens "
+                f"up to position {need}; compiled (batch, context, tokens): " + ", ".join(
+                    f"({e.batch},{e.context},{e.tokens_per_seq})" for e in self.entries if e.kind == "prefill"
                 ) + ". Run the tokens as decode steps instead"
             )
         b, t, mbs, bs = entry.batch, entry.tokens_per_seq, entry.max_blocks_per_seq, self.block_size

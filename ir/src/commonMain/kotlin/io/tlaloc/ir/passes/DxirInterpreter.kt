@@ -1809,13 +1809,15 @@ object DxirInterpreter {
      * The PAGED_ATTENTION reference walk — vLLM's decode
      * primitive, attention over a block-table-indexed KV page pool.
      *
-     * Per sequence `s` with length `L = seqLens[s]`, the logical context
-     * position `t ∈ [0, L)` lives in page `blockTables[s][t / blockSize]` at
+     * Per query row `s` with length `L = seqLens[s]`, the logical context
+     * position `t ∈ [0, L)` lives in page `blockTables[b][t / blockSize]` at
      * slot `t % blockSize`; the last page is PARTIALLY FILLED whenever
      * `L % blockSize != 0`, and everything at or beyond `L` is not read at all
      * (it is stale or unallocated memory — reading it is the classic paged
      * bug, so the walk never indexes past `L`, and a partially-filled last
-     * page is a first-class oracle case). With a `sliding_window` attr the
+     * page is a first-class oracle case). `b` is `s`, or `s / rowsPerTable`
+     * when consecutive rows share a table ([io.tlaloc.ir.PagedAttentionAttrs]).
+     * With a `sliding_window` attr the
      * positions before `L - window` are dead too: they are scored (the walk
      * is simpler that way) but take no part in the softmax or the V sum.
      *
@@ -1852,6 +1854,8 @@ object DxirInterpreter {
                     "[0, maxBlocksPerSeq * blockSize = ${p.maxContextLen}]"
             }
             if (len == 0) continue // an empty sequence contributes nothing; its output stays zero
+            // Rows that share a block table (a prefill chunk) read the same pages.
+            val table = p.tableOf(s)
             val pagesUsed = (len + p.blockSize - 1) / p.blockSize
             for (h in 0 until p.numHeads) {
                 val kv = h / p.group
@@ -1859,9 +1863,9 @@ object DxirInterpreter {
                 // 1. scores[t] = scale · <Q[s,h,:], K[page(t), slot(t), kv, :]>
                 var maxScore = Double.NEGATIVE_INFINITY
                 for (page in 0 until pagesUsed) {
-                    val blockId = blockTables[s * p.maxBlocksPerSeq + page]
+                    val blockId = blockTables[table * p.maxBlocksPerSeq + page]
                     require(blockId in 0 until p.numBlocks) {
-                        "DxirInterpreter: PAGED_ATTENTION blockTables[$s][$page] = $blockId is " +
+                        "DxirInterpreter: PAGED_ATTENTION blockTables[$table][$page] = $blockId is " +
                             "outside [0, numBlocks = ${p.numBlocks}) — a block table must name " +
                             "allocated pages for every slot it covers"
                     }
@@ -1892,7 +1896,7 @@ object DxirInterpreter {
                 // 3. out[s,h,:] = Σ_t p[t] · V[page(t), slot(t), kv, :]
                 acc.fill(0.0)
                 for (page in 0 until pagesUsed) {
-                    val blockId = blockTables[s * p.maxBlocksPerSeq + page]
+                    val blockId = blockTables[table * p.maxBlocksPerSeq + page]
                     val base = page * p.blockSize
                     val slots = minOf(p.blockSize, len - base)
                     for (slot in 0 until slots) {

@@ -309,9 +309,10 @@ def _slot(name, role, dtype, dims):
     return {"name": name, "role": role, "type": {"dtype": dtype, "dims": list(dims)}}
 
 
-def _prefill_manifest(refused=()):
+def _prefill_manifest(refused=(), prefill_tokens=8):
     """A one-layer artifact at blockSize 2 with a decode entry (1, 8) and a
-    prefill entry (2, 8): eight tokens per row, a four-page table."""
+    prefill entry (2, 8): eight tokens per row (or `prefill_tokens`), a
+    four-page table."""
     pool = [8, 2, 1, 2]
 
     def entry(kind, b, t):
@@ -342,7 +343,7 @@ def _prefill_manifest(refused=()):
                   "refusedTokens": [{"id": i, "configKey": "image_token_id"} for i in refused]},
         "bucketLadder": {"blockSize": 2, "batch": [1, 2], "context": [8]},
         "weights": {"format": "embedded", "path": None, "embedded": True},
-        "entries": [entry("decode", 1, 1), entry("prefill", 2, 8)],
+        "entries": [entry("decode", 1, 1), entry("prefill", 2, prefill_tokens)],
     }
 
 
@@ -365,10 +366,11 @@ class _RecordingEngine:
         pass
 
 
-def _artifact(refused=()):
+def _artifact(refused=(), prefill_tokens=8):
     import tlaloc_serve
 
-    art = tlaloc_serve.ServingArtifact(Path("/nonexistent"), _prefill_manifest(refused), platform="cpu",
+    art = tlaloc_serve.ServingArtifact(Path("/nonexistent"), _prefill_manifest(refused, prefill_tokens),
+                                       platform="cpu",
                                        engine="jax")
     art.engine = _RecordingEngine()
     art.compiled = lambda entry: entry.entry_id
@@ -412,6 +414,19 @@ class RunPrefillTest(unittest.TestCase):
         self.assertIsNone(art.prefill_entry(3, 4))
         with self.assertRaisesRegex(ValueError, "no prefill entry holds 3 sequence"):
             art.run_prefill([[1, 2]] * 3, [0] * 3, [[1], [2], [3]], art.empty_pools())
+
+    def test_a_chunk_longer_than_the_entry_takes_is_refused_by_name(self):
+        """An entry of 4 tokens per sequence at context 8 holds a 4-token
+        chunk at position 4, and no 5-token chunk."""
+        art = _artifact(prefill_tokens=4)
+        self.assertIsNone(art.prefill_entry(1, 5, 5))
+        self.assertIsNotNone(art.prefill_entry(1, 5, 4))
+        with self.assertRaisesRegex(ValueError, "no prefill entry holds 1 sequence\\(s\\) of up to 5 tokens"):
+            art.run_prefill([[1, 1, 1, 1, 1]], [0], [[1, 2, 3]], art.empty_pools())
+        art.run_prefill([[1, 1, 1, 1]], [4], [[1, 2, 3, 4]], art.empty_pools())
+        call = art.engine.calls[0]
+        self.assertEqual([4, 5, 6, 7] + [0] * 4, call["POSITIONS"])
+        self.assertEqual([8], call["SEQ_LENS"][:1])
 
     def test_a_refused_token_is_refused_by_name_before_anything_runs(self):
         art = _artifact(refused=(2,))

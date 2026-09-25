@@ -75,14 +75,18 @@
 #      meta-models/Muse-Glimmer-30B snapshot the fixtures name, and refuses by
 #      name to start any step when MemAvailable is below that step's need plus
 #      a 16 GiB margin (the GPU shares system memory on the GB10). Export
-#      (Gradle, no server running), drop the page cache of the checkpoint and
-#      the artifact, start a server whose PJRT memory fraction covers the
-#      weights plus 8 GiB (computed from the manifest and MemTotal, and
-#      printed), run fixture_checks.py against the two committed fixtures:
+#      (Gradle, no server running) for contexts 512 to 32,768, decode batches
+#      1, 2 and 4 and prefill in chunks of 512, drop the page cache of the
+#      checkpoint and the artifact, start a server whose PJRT memory fraction
+#      covers the weights plus 15 GiB (computed from the manifest and
+#      MemTotal, and printed), run fixture_checks.py against the three
+#      committed fixtures:
 #      transformers in bfloat16 (the ids must be equal as far as the two
 #      references agree with each other) and transformers with bf16 weights
 #      and f32 activations (all ids, and the logits within twice the oracle's
-#      own float32-vs-float64 noise), check that the KV pools were updated
+#      own float32-vs-float64 noise), and a 2,305-token prompt whose fact is
+#      outside the sliding window of the question (16 ids equal, logits
+#      within 2e-2 of the largest), check that the KV pools were updated
 #      in place and that its 39 sliding-window layers have a windowed KV pool,
 #      that its image and video placeholder ids (200092, 200091) are refused by
 #      name, then --perturb (must fail), and print the peak memory in use.
@@ -113,6 +117,8 @@
 #   MUSE_GLIMMER=1        run step 8
 #   MUSE_GLIMMER_DIR      [triton/build/muse-glimmer]; an existing model is reused
 #   MUSE_GLIMMER_REEXPORT=1  export again even if the model exists
+#   MUSE_CONTEXT_BENCH    e.g. 512,2048,8192: also run context_bench.py at those
+#                         contexts (32768 adds about 20 minutes)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -256,6 +262,12 @@ expect_log "windowed KV pool for 2 sliding layers (window 8): 13 pages, a ring o
 expect_log "refuses token ids 62 (image_token_id) 63 (video_token_id)"
 expect_log "instance 'window_sequence_0_0': 6 KV pools (0 MiB) zeroed; 64 pages for sequences (page 0 is the padding page); 12 windowed pages, at most 3 per sequence"
 expect_log "instance 'window_sequence_0_0': in 100 runs the 6 KV pools were updated in place 100 times and copied 0 times"
+expect_re "$LOG" "model 'window_sequence_chunked': uploaded 30 weights.*largest prefill batch 2, at most 6 tokens per sequence in a prefill call.*a ring of at most 4 pages per sequence"
+# Control: window_sequence's entries take their whole context.
+if grep "model 'window_sequence': uploaded" "$LOG" | grep -q "tokens per sequence in a prefill call"; then
+  echo "FAIL: window_sequence's load line states a prefill chunk" >&2
+  exit 1
+fi
 
 echo "== negative control (must fail)"
 if "$PY" "$HERE/verify_client.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" --perturb >"$LOG.negative" 2>&1; then
@@ -272,7 +284,7 @@ fi
 grep -c "FAIL" "$LOG.window-negative" | xargs -I{} echo "window negative control failed as it must ({} failing checks)"
 
 echo "== batched prefill"
-for m in window_sequence window_sequence_full; do
+for m in window_sequence window_sequence_full window_sequence_chunked; do
   "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
     --model "$m" --repeats 3
   expect_re "$LOG" "instance '${m}_0_0': prefill_b2_c[0-9]+ ran 2 sequence"
@@ -543,6 +555,10 @@ fi
 FX_DIR="$ROOT/ir/src/jvmTest/resources/io/tlaloc/ir/inference"
 MUSE_BF16="$FX_DIR/muse_glimmer_30b_bf16_greedy.json"
 MUSE_MIXED="$FX_DIR/muse_glimmer_30b_mixed_greedy.json"
+MUSE_NEEDLE="$FX_DIR/muse_glimmer_30b_needle_mixed_greedy.json"
+# The long-context export: context buckets, decode batches 1, 2 and 4, batch-1
+# prefill in chunks of 512, and a full pool of four sequences at 32,768.
+MUSE_LADDER="512,2048,8192,32768"
 
 # mem_check <GiB> <step>: refuse by name unless MemAvailable covers it plus 16 GiB.
 mem_check() {
@@ -582,27 +598,34 @@ else
     echo "SKIP muse glimmer: no meta-models/Muse-Glimmer-30B checkpoint at $MCKPT"
   else
     M_CONFIG="$M_DIR/repository/muse/config.pbtxt"
-    # A model exported before its sliding layers had a windowed KV pool is
-    # exported again.
+    # A model exported before its sliding layers had a windowed KV pool, or
+    # before the long-context ladder, is exported again.
     if [[ "${MUSE_GLIMMER_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$M_CONFIG" 2>/dev/null \
         || ! aliased "$M_DIR/artifact" || ! grep -q '"windowedKv"' "$M_DIR/artifact/tlaloc-serving.json" \
-        || ! grep -q '"refusedTokens"' "$M_DIR/artifact/tlaloc-serving.json"; then
+        || ! grep -q '"refusedTokens"' "$M_DIR/artifact/tlaloc-serving.json" \
+        || ! grep -q "\"context\":\[$MUSE_LADDER\]" "$M_DIR/artifact/tlaloc-serving.json"; then
       mem_check 8 "export Muse Glimmer"
       rm -rf "$M_DIR"
       mkdir -p "$M_DIR"
-      # Context 128: the chat prompt is 68 tokens and 16 more are generated.
       (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
-        -PckptDir="$MCKPT" -PoutDir="$M_DIR/artifact" -PmaxBatch=1 -PmaxContext=128)
+        -PckptDir="$MCKPT" -PoutDir="$M_DIR/artifact" -PmaxBatch=4 -PcontextLadder="$MUSE_LADDER" \
+        -PprefillMaxBatch=1 -PprefillChunk=512 -PnumBlocks=8193)
+      # A 32,768-token prompt prefills in about 4 minutes: sequences held
+      # meanwhile must not time out. Steps of several sequences arrive more
+      # than 1 ms apart, so the batcher waits up to 20 ms to batch them.
       (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
         -PartifactDir="$M_DIR/artifact" -PoutDir="$M_DIR/repository" -PmodelName=muse \
-        -PkvMode=sequence -PmaxSequenceIdleMicros=60000000)
+        -PkvMode=sequence -PmaxSequenceIdleMicros=600000000 -PmaxQueueDelayMicros=20000)
     fi
     drop_cache "$MCKPT/" "$M_DIR/artifact"
     WEIGHT_BYTES="$("$PY" -c "import json,sys; print(sum(w['byteLength'] for w in json.load(open(sys.argv[1]))['weights']['table']))" "$M_DIR/artifact/tlaloc-serving.json")"
     MEM_TOTAL="$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo)"
-    FRACTION="$("$PY" -c "import sys; print(round((int(sys.argv[1]) + 8 * 2**30) / int(sys.argv[2]), 3))" "$WEIGHT_BYTES" "$MEM_TOTAL")"
+    # Weights, the 4 GiB of KV pools, the largest entry's 4 GiB of temporary
+    # memory (the compile log states it) and 7 GiB to spare.
+    FRACTION="$("$PY" -c "import sys; print(round((int(sys.argv[1]) + 15 * 2**30) / int(sys.argv[2]), 3))" "$WEIGHT_BYTES" "$MEM_TOTAL")"
     echo "weights $((WEIGHT_BYTES / 2**30)) GiB of $((MEM_TOTAL / 2**30)) GiB: PJRT memory fraction $FRACTION"
-    mem_check $(( WEIGHT_BYTES / 2**30 + 8 )) "load Muse Glimmer"
+    # The server also holds about 9 GiB on the host.
+    mem_check $(( WEIGHT_BYTES / 2**30 + 15 + 9 )) "load Muse Glimmer"
     export CONTAINER_NAME="$BASE_NAME-muse" MODEL_REPOSITORY="$M_DIR/repository"
     PEAK_FILE="$(mktemp)"
     ( peak=0; while sleep 1; do
@@ -620,6 +643,11 @@ else
     echo "-- against transformers with bf16 weights and f32 activations"
     "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
       --model muse --fixture "$MUSE_MIXED" --noise-factor 2 --repeat 0
+    echo "-- a fact 2,190 tokens before the question, outside the sliding window (2,305-token prompt)"
+    "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model muse --fixture "$MUSE_NEEDLE" --tol 2e-2 --repeat 0
+    expect_in "$LOG.muse" "at most 512 tokens per sequence in a prefill call"
+    expect_re "$LOG.muse" "compiled prefill_b1_c32768 .* needs [0-9]+ MiB of temporary memory"
     echo "== muse glimmer KV pools"
     if ! grep -qE "updated the [0-9]+ KV pools in place" "$LOG.muse"; then
       echo "FAIL: the server log does not show the KV pools updated in place" >&2
@@ -650,12 +678,17 @@ PYEOF
     grep -oE "instance 'muse_0_0': [0-9]+ KV pools \([0-9]+ MiB\) zeroed[^;]*;[^;]*;[^;]*;" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /' || true
     echo "== muse glimmer negative control (must fail)"
     if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
-        --model muse --fixture "$MUSE_MIXED" --noise-factor 2 --repeat 0 --perturb >"$LOG.muse.negative" 2>&1; then
+        --model muse --fixture "$MUSE_NEEDLE" --tol 2e-2 --repeat 0 --perturb >"$LOG.muse.negative" 2>&1; then
       echo "FAIL: the Muse Glimmer fixture checks passed with wrong expected ids" >&2
       cat "$LOG.muse.negative" >&2
       exit 1
     fi
     grep -c "^FAIL" "$LOG.muse.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+    if [[ -n "${MUSE_CONTEXT_BENCH:-}" ]]; then
+      echo "== muse glimmer timings at contexts $MUSE_CONTEXT_BENCH"
+      "$PY" "$HERE/context_bench.py" --grpc "localhost:$GRPC_PORT" --http "localhost:$HTTP_PORT" \
+        --model muse --contexts "$MUSE_CONTEXT_BENCH"
+    fi
     kill "$PEAK_PID" 2>/dev/null || true
     PEAK_PID=""
     echo "peak memory in use (system and GPU, unified): $(cat "$PEAK_FILE") GiB"

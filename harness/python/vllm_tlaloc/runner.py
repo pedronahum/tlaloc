@@ -131,7 +131,7 @@ class TlalocModelRunner:
         self.tokens[seq_id] = list(prompt)
         walk = prompt[:-1]
         find = getattr(self.artifact, "prefill_entry", None)
-        if len(walk) >= 2 and find is not None and find(1, len(walk)) is not None:
+        if len(walk) >= 2 and find is not None and find(1, len(walk), len(walk)) is not None:
             s = self.pool.reserve(seq_id, len(walk))
             _, pools = self.artifact.run_prefill([walk], [0], [list(s.blocks)], kv_pools=self.kv_pools)
             self.kv_pools = pools

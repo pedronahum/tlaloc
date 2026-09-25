@@ -81,6 +81,12 @@ object HfServingExport {
      * its KV is never written. A row prefilled in a batch gets, in the
      * reference interpreter, the logits and KV it gets alone.
      *
+     * With [prefillChunk] a prefill entry takes at most that many tokens
+     * per sequence (its context when that is smaller), and a longer prompt is
+     * prefilled in several calls. Each token of a call attends over the whole
+     * context, so a call's attention memory grows with chunk times context;
+     * a long context needs a chunk shorter than itself.
+     *
      * Refuses by name a [prefillMaxBatch] that is negative or above the
      * largest decode batch: a Triton model's `max_batch_size` is the largest
      * decode batch, and no batch of requests is larger.
@@ -90,16 +96,20 @@ object HfServingExport {
         model: DecodeModelShape,
         policy: DecodeBucketPolicy,
         prefillMaxBatch: Int = policy.maxBatch,
+        prefillChunk: Int? = null,
     ): List<DecodeGraphSpec> {
         require(prefillMaxBatch in 0..policy.maxBatch) {
             "HfServingExport: prefillMaxBatch $prefillMaxBatch must be between 0 (no prefill " +
                 "entries) and the largest decode batch ${policy.maxBatch}"
         }
+        require(prefillChunk == null || prefillChunk >= 1) {
+            "HfServingExport: prefillChunk must be >= 1, got $prefillChunk"
+        }
         val decode = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) }
         val batches = policy.batchLadder.filter { it <= prefillMaxBatch }
         val prefill = batches.flatMap { b ->
             policy.contextLadder.map { c ->
-                HfDecoderGraph.spec(config, model, DecodeBucket(b, c), DecodeGraphKind.PREFILL)
+                HfDecoderGraph.spec(config, model, DecodeBucket(b, c), DecodeGraphKind.PREFILL, prefillChunk)
             }
         }
         return decode + prefill
@@ -121,6 +131,10 @@ object HfServingExport {
      * the artifact is `tlaloc-serving-v3`. Without it, or without sliding
      * layers, every layer keeps full-history pages.
      *
+     * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
+     * windowed ring is then sized so that a call of that many tokens fits
+     * past the window ([HfDecoderConfig.windowedKvPool]).
+     *
      * @param config usually `ckpt.config`, or a `copy(numLayers = n)` of it.
      */
     fun export(
@@ -133,12 +147,14 @@ object HfServingExport {
         prefill: Boolean = true,
         windowedKv: Boolean = true,
         prefillMaxBatch: Int = policy.maxBatch,
+        prefillChunk: Int? = null,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
+            prefillChunk = if (prefill) prefillChunk else null,
         )
         val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window)
-        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0)
+        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
             HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
         }

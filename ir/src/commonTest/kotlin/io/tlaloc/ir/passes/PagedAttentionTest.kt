@@ -358,6 +358,70 @@ class PagedAttentionTest {
 
     // --- Loud validation. ----------------------------------------------
 
+    /**
+     * Rows that share a block table: three rows per table (a prefill chunk of
+     * three tokens per sequence, each with its own causal length) give, bit
+     * for bit, what the same rows give with the table repeated per row. With
+     * and without a sliding window. Negative control: the tables swapped
+     * between the two sequences change the output.
+     */
+    @Test
+    fun rowsSharingATableEqualRowsWithTheTableRepeated() {
+        val rows = 6
+        val perTable = 3
+        val q = pseudo(rows * numHeads * headDim, 211)
+        val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 223)
+        val v = pseudo(numBlocks * blockSize * numKvHeads * headDim, 227)
+        val tables = floatArrayOf(4f, 1f, 5f, 2f, 0f, 3f)
+        // Causal lengths: sequence 0 at positions 3, 4, 5; sequence 1 at 1, 2, 3.
+        val lens = floatArrayOf(4f, 5f, 6f, 2f, 3f, 4f)
+        val rowQ = DxirType(F32, listOf(rows, numHeads, headDim))
+        fun fn(tableRows: Int, window: Int?) = DxirBuilder.function("shared") {
+            val qq = param("q", rowQ)
+            val kk = param("k", cacheType)
+            val vv = param("v", cacheType)
+            val t = param("t", DxirType(I32, listOf(tableRows, maxBlocksPerSeq)))
+            val l = param("l", DxirType(I32, listOf(rows)))
+            val attrs = buildMap<String, Any> {
+                put("scale", scale)
+                if (window != null) put("sliding_window", window)
+            }
+            listOf(op(OpKind.PAGED_ATTENTION, listOf(qq, kk, vv, t, l), rowQ, attrs))
+        }
+        val repeated = FloatArray(rows * maxBlocksPerSeq) { tables[(it / maxBlocksPerSeq / perTable) * maxBlocksPerSeq + it % maxBlocksPerSeq] }
+        for (window in listOf(null, 2)) {
+            val shared = DxirInterpreter.evalFunction(fn(2, window), listOf(q, k, v, tables, lens))[0]
+            val perRow = DxirInterpreter.evalFunction(fn(rows, window), listOf(q, k, v, repeated, lens))[0]
+            kotlin.test.assertContentEquals(perRow, shared, "window $window")
+            val swapped = floatArrayOf(2f, 0f, 3f, 4f, 1f, 5f)
+            val other = DxirInterpreter.evalFunction(fn(2, window), listOf(q, k, v, swapped, lens))[0]
+            assertTrue(!other.contentEquals(shared), "window $window: the tables are read")
+        }
+        val parsed = io.tlaloc.ir.PagedAttentionAttrs.parse(
+            fn(2, null).body.filterIsInstance<io.tlaloc.ir.DxirOp>().single(), "test",
+        )
+        kotlin.test.assertEquals(3, parsed.rowsPerTable)
+        kotlin.test.assertEquals(1, parsed.tableOf(5))
+    }
+
+    @Test
+    fun tablesThatDoNotDivideTheRowsAreRefusedByName() {
+        val rowQ = DxirType(F32, listOf(3, numHeads, headDim))
+        val f = DxirBuilder.function("bad") {
+            val qq = param("q", rowQ)
+            val kk = param("k", cacheType)
+            val vv = param("v", cacheType)
+            val t = param("t", DxirType(I32, listOf(2, maxBlocksPerSeq)))
+            val l = param("l", DxirType(I32, listOf(3)))
+            listOf(op(OpKind.PAGED_ATTENTION, listOf(qq, kk, vv, t, l), rowQ, mapOf("scale" to scale)))
+        }
+        val ex = assertFailsWith<IllegalArgumentException> {
+            io.tlaloc.ir.PagedAttentionAttrs.parse(f.body.filterIsInstance<io.tlaloc.ir.DxirOp>().single(), "test")
+        }
+        assertTrue("blockTables has 2 rows but query has 3 rows" in ex.message.orEmpty(), ex.message)
+    }
+
+
     @Test
     fun outOfRangeBlockIdRefusesByName() {
         val q = pseudo(numSeqs * numHeads * headDim, 3)

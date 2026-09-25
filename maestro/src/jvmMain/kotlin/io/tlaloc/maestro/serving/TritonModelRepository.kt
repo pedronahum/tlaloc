@@ -289,6 +289,11 @@ object TritonModelRepository {
             append("# sequence's KV pages; a request of several tokens runs as ")
             append(if (prefill.isEmpty()) "decode steps" else "a prefill chunk")
             append(",\n# one token as a decode step batched with other sequences' steps.\n")
+            val chunk = prefill.maxOfOrNull { it.tokensPerSeq } ?: 0
+            if (prefill.any { it.tokensPerSeq < it.context }) {
+                append("# A prefill call takes at most $chunk tokens per sequence; a longer request\n")
+                append("# runs as several calls.\n")
+            }
             val prefillBatch = prefill.maxOfOrNull { it.batch } ?: 0
             if (prefillBatch > 1) {
                 append("# The prompts of up to $prefillBatch sequences in one batch share a prefill call.\n")

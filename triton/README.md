@@ -30,6 +30,7 @@ an instance group names gets its own PJRT client.
 | ✅ | A live sequence that needs a page when the pool is full is refused by name and keeps its KV; idle sequences' pages are reclaimed least recently active first | GB10, `verify.sh` (TinyLlama) |
 | 📐 | Preempting a live sequence (swapping its KV out or recomputing it) | Designed, not built |
 | ✅ | Muse Glimmer 30B, text decoder, bf16 weights: 32 greedy ids equal HuggingFace's run with the same arithmetic | GB10, `verify.sh` with `MUSE_GLIMMER=1` |
+| ✅ | Muse Glimmer at contexts 512 to 32,768 with up to four sequences, prefill in 512-token calls; a 2,305-token prompt whose fact is outside the sliding window gives HuggingFace's 16 ids | GB10, `verify.sh` with `MUSE_GLIMMER=1`, `context_bench.py` |
 | ✅ | Prompts of several sequences prefilled in one call: 2 and 4 TinyLlama and Qwen3-0.6B prompts give their solo argmax and the same 8 greedy ids as alone | GB10, `verify.sh` |
 | ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`), ragged batches grouped by the shape of their rows | GB10, `verify.sh` |
 | ✅ | CUDA shared memory inputs read in place, outputs written device to device | GB10, `verify.sh` |
@@ -207,8 +208,17 @@ Then `window_checks.py` runs `window_sequence` against `window_sequence_full`
 - the log must show the windowed pool at load and 100 of 100 runs with its 6
   pools updated in place.
 
-Then `prefill_checks.py` runs on `window_sequence` and on
-`window_sequence_full`: one prompt, then two prompts sent together from two
+`window_sequence_chunked` is the same decoder with its prefill entries at
+6 tokens per sequence and rings of 4 pages (`ceil((8 - 1 + 6) / 4)`). Grown
+the same way, the 13- and 9-token requests run as calls of at most 6: it must
+hold at most 4 windowed pages, and its logits must equal the full-history
+model's sent the same calls within 1e-4 of the largest (measured: 36 of 40
+bit for bit, the rest within 1.2e-7) and sent the requests whole within 5e-3
+with the same argmax. The load log must state the 6-token chunk and the
+4-page ring.
+
+Then `prefill_checks.py` runs on `window_sequence`, `window_sequence_full`
+and `window_sequence_chunked`: one prompt, then two prompts sent together from two
 threads (13 and 5 random ids; the 13 are split 12 and 1 for the ring). The
 two must run in one execution, the log must show `prefill_b2_c16 ran 2
 sequence(s)`, and each prompt's last-token logits must be within 5e-3 of its
@@ -318,14 +328,19 @@ decoder. The step is opt-in because it puts 56 GB of bf16 weights on the
 device; before the export and before the load it refuses by name if
 MemAvailable is below what the step needs plus 16 GiB, because the GB10's GPU
 shares system memory and a runaway allocation there can take the machine
-down. It exports into `triton/build/muse-glimmer/` (batch 1, context 128,
-since the chat prompt is 68 tokens; `MUSE_GLIMMER_REEXPORT=1` exports again),
-drops the page cache of the checkpoint and the artifact, and starts the server
-with a PJRT memory fraction of the weights plus 8 GiB over MemTotal (0.49 on
-the GB10), printed. Two fixtures, both from `harness/python/muse_glimmer_fixture.py`
+down. It exports into `triton/build/muse-glimmer/` for contexts 512, 2,048,
+8,192 and 32,768, decode batches 1, 2 and 4, batch-1 prefill in calls of at
+most 512 tokens and a pool for four sequences of 32,768 positions (8,193
+pages), with a sequence idle timeout of 600 s and a queue delay of 20 ms
+(`MUSE_GLIMMER_REEXPORT=1` exports again; so does a model exported for
+another ladder). It drops the page cache of the checkpoint and the artifact
+and starts the server with a PJRT memory fraction of the weights plus 15 GiB
+over MemTotal (0.55 on the GB10: 4 GiB of KV pools, 4 GiB of temporary
+memory for the largest entry, which the compile log states, and room to
+spare), printed. Three fixtures, all from `harness/python/muse_glimmer_fixture.py`
 (transformers 5.17 on the CPU, eager attention, 16 greedy tokens for
-" The capital of France is" and a chat-template prompt with a fixed
-`current_date`):
+" The capital of France is", a chat-template prompt with a fixed
+`current_date`, and a long text prompt):
 
 - `muse_glimmer_30b_mixed_greedy.json`: bf16 weights, f32 activations, each
   projection's input rounded to bf16, RoPE tables in float64: the graph's own
@@ -333,6 +348,18 @@ the GB10), printed. Two fixtures, both from `harness/python/muse_glimmer_fixture
   fixture's `referenceNoise`, which is how far that same run moves when its
   activations are float64 instead of float32 (up to 9.1e-3 of the largest
   logit).
+- `muse_glimmer_30b_needle_mixed_greedy.json`: the same arithmetic, for a
+  2,305-token field report with one fact near its start ("the vault code for
+  the Lindqvist archive is 4719") and a question about it at the end, 2,190
+  tokens later: outside the 2,048-token window of the 39 sliding layers, so
+  only the 13 full-attention layers can read it. transformers answers
+  " 4719." and goes on reasoning. The prompt runs as five prefill calls.
+  All 16 ids must be equal and the logits within 2e-2 of the largest (the
+  fixture has no `referenceNoise`; twice the other prompts' is 1.2e-2 and
+  1.8e-2); measured 8.4e-3. `--perturb` on this fixture must fail. The
+  fixture holds the prompt's text (`prompts[0].input`); `muse_glimmer_fixture.py
+  real --precision mixed --f64-rope --text "<that text>"` writes it again (263 s
+  on the GB10's CPU, about 60 GB of memory; run it with no server up).
 - `muse_glimmer_30b_bf16_greedy.json`: transformers in bfloat16 as it runs by
   default. Only the ids are compared (`--ids-only`), and only as far as the
   two fixtures agree (`--common-prefix-with`): they choose differently at the
@@ -342,7 +369,9 @@ The log must list the refused placeholder ids (`refuses token ids 200091
 (video_token_id) 200092 (image_token_id)`), and a START holding either is
 refused by name. Then `--perturb`, which must fail, and the peak memory in
 use. An artifact exported before its manifest listed the placeholder ids is
-exported again.
+exported again. With `MUSE_CONTEXT_BENCH=512,2048,8192` it also runs
+`context_bench.py` at those contexts (below; adding 32768 takes about 20
+minutes more).
 
 A request with curl:
 
@@ -547,7 +576,12 @@ this; `generate_client.py` adds a tokenizer.
   [SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md#sliding-window-layers-the-windowed-kv-pool).
 - **Entry selection.** A request of `n > 1` tokens runs on the smallest
   prefill entry whose context covers the sequence's length after it, one call,
-  with the tokens right-aligned in the chunk. With a windowed KV pool, a
+  with the tokens right-aligned in the chunk. An artifact exported with
+  `-PprefillChunk=N` has prefill entries of at most `N` tokens per sequence
+  (`tokensPerSeq` below the context); a longer request runs as calls of at
+  most `N` tokens, each on the smallest entry whose context holds its last
+  position, and the load log says so (`at most 512 tokens per sequence in a
+  prefill call`). With a windowed KV pool, a
   request is first split into calls of at most `ringPages * blockSize -
   min(start, window - 1)` tokens, the most the ring holds while the call's
   first row still reads its window; each call runs on its own prefill entry
@@ -690,13 +724,33 @@ tokens): the model loads in about 20 s (four XLA compiles of 3.5 to 6.6 s,
 and for the 24-token prompt alike, since both run the padded 64-token prefill
 entry. A decode step of one sequence takes about 19 ms (about 52 tokens/s).
 
-Muse Glimmer 30B (bf16 weights, context 128, gRPC, medians of 3 runs of 16
-tokens): the model loads in about 105 s (two XLA compiles of 8 and 10 s, 86 s
-to upload 53128 MiB of weights). Prefill takes about 310 ms (the padded
-128-token entry), a decode step about 245 ms (4.1 tokens/s), which is about
-what reading 56 GB of weights per token at the GB10's memory bandwidth allows.
-The server process held 60 GiB of device memory under a memory fraction of
-0.49; the machine peaked at 85 to 90 GiB in use over two runs.
+Muse Glimmer 30B (bf16 weights, the long-context export `verify.sh` serves:
+contexts 512 to 32,768, decode batches 1, 2 and 4, 512-token prefill calls):
+the model loads in about 3.5 minutes (16 XLA compiles in 2 minutes, from 3.7
+s to 13.7 s each, and 82 s to upload 53128 MiB of weights); the largest
+entry, prefill at 32,768, needs 4125 MiB of temporary memory, and the KV
+pools take 4109 MiB. With `context_bench.py` (gRPC, four sequences per
+context, prompts of seeded random ids, medians over 16 steps per sequence):
+
+| Context bucket | Prompt | Prefill | 1 sequence | 2 sequences | 4 sequences |
+|---|---|---|---|---|---|
+| 512 | 432 tokens | 0.56 s | 265 ms a token | 267 ms a step, 7.5 tokens/s | 238 ms a step, 16.7 tokens/s |
+| 2,048 | 1,968 | 2.6 s | 268 ms | 272 ms, 7.3 tokens/s | 248 ms, 16.0 tokens/s |
+| 8,192 | 8,112 | 17.0 s | 275 ms | 286 ms, 7.0 tokens/s | 279 ms, 14.3 tokens/s |
+| 32,768 | 32,688 | 230 s | 317 ms | 352 ms, 5.7 tokens/s | 416 ms, 9.6 tokens/s |
+
+A decode step reads the 52 GiB of weights once whatever the batch, so four
+sequences cost about what one does until attention over 32,768 positions
+shows. The export sets the batcher's queue delay to 20 ms: with 1 ms, the
+steps of two and four sequences (each client receiving an 800 KB logits
+vector) arrived more than 1 ms apart and ran 32 steps in 31 executions and 64
+in 35; with 20 ms every round ran as one execution, and a lone sequence pays
+about 24 ms a token for the wait (265 ms against 241 ms). A 512-token prefill
+call takes about 0.55 s at context 512 and about 4.5 s at 32,768, because
+every call scores its tokens against every position of its entry's context,
+the sliding layers' included. Under a PJRT memory fraction of 0.55 the
+machine peaked at 87 to 90 GiB in use during these runs, and at 96 GiB in
+the `verify.sh` run.
 
 ## Model configuration
 

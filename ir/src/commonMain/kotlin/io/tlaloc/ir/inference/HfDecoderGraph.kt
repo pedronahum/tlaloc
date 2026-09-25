@@ -135,6 +135,7 @@ object HfDecoderGraph {
         model: DecodeModelShape,
         bucket: DecodeBucket,
         kind: DecodeGraphKind = DecodeGraphKind.DECODE,
+        prefillChunk: Int? = null,
     ): DecodeGraphSpec {
         require(model.numLayers == config.numLayers && model.hiddenSize == config.hiddenSize) {
             "HfDecoderGraph.spec: model shape $model does not describe this config " +
@@ -145,6 +146,7 @@ object HfDecoderGraph {
             bucket = bucket,
             kind = kind,
             weightSlots = weightSlots(config),
+            prefillChunk = prefillChunk,
         )
     }
 
@@ -212,10 +214,11 @@ object HfDecoderGraph {
      *
      * - both [OpKind.KV_CACHE_WRITE]s of a layer run before its attention, so
      *   every token of the chunk is in the pool when any row reads it;
-     * - row `i` reads its sequence's block table (the `blockTables` row,
-     *   broadcast over the token axis) with a context length of
-     *   `positions[i] + 1`, which is the causal mask: a token sees itself and
-     *   everything before it, and nothing written after it.
+     * - row `i` reads its sequence's block table (the T rows of a sequence
+     *   share its `blockTables` row, see [io.tlaloc.ir.PagedAttentionAttrs])
+     *   with a context length of `positions[i] + 1`, which is the causal
+     *   mask: a token sees itself and everything before it, and nothing
+     *   written after it.
      *
      * So each row computes what the decode loop computes at that position.
      * The prefill graph does not read `seqLens`; the operand stays in the
@@ -441,27 +444,13 @@ object HfDecoderGraph {
 
             // ---- attention rows -------------------------------------------
             // Decode: one row per sequence, the operands as given. Prefill:
-            // one row per token, reading its sequence's block table with a
-            // causal length of position + 1.
-            // The windowed layers read their own tables, built the same way.
-            fun perRow(tables: DxirNode): DxirNode {
-                if (spec.kind == DecodeGraphKind.DECODE) return tables
-                val tables3 = op(
-                    OpKind.RESHAPE, listOf(tables),
-                    DxirType(spec.blockTablesType.dtype, listOf(b, 1, maxBlocks)),
-                )
-                val perToken = op(
-                    OpKind.BROADCAST, listOf(tables3),
-                    DxirType(spec.blockTablesType.dtype, listOf(b, t, maxBlocks)),
-                    attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)),
-                )
-                return op(
-                    OpKind.RESHAPE, listOf(perToken),
-                    DxirType(spec.blockTablesType.dtype, listOf(r, maxBlocks)),
-                )
-            }
-            val rowTables = perRow(blockTables)
-            val windowRowTables = windowTables?.let { perRow(it) }
+            // one row per token with a causal length of position + 1; the T
+            // rows of a sequence share its block table (PAGED_ATTENTION reads
+            // table r / T for row r), so the pages are gathered once per
+            // sequence and not once per token. The windowed layers read their
+            // own tables the same way.
+            val rowTables = blockTables
+            val windowRowTables = windowTables
             val rowLens: DxirNode
             if (spec.kind == DecodeGraphKind.DECODE) {
                 rowLens = seqLens

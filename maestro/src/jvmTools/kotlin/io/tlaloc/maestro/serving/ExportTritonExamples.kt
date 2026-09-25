@@ -71,6 +71,11 @@ import kotlin.random.Random
  *   placeholders: the manifest lists them and the backend refuses them.
  *   `window_sequence/1/tlaloc-serving-short-ring.json` is its manifest with a
  *   ring of one page, which the backend must refuse at load.
+ * - `window_sequence_chunked`: the same decoder and weights with the windowed
+ *   pool, whose prefill entries take at most 6 tokens per sequence (fewer
+ *   than any context) and whose ring (4 pages) holds a 6-token call past the
+ *   window. A longer request runs as several prefill calls; its logits must
+ *   agree with the full-history model's.
  *
  * The reference files hold the DXIR interpreter's results for the same graphs
  * that were emitted, so served values are compared against Tlaloc's own
@@ -214,13 +219,17 @@ fun main(args: Array<String>) {
     Files.writeString(reference.resolve("reference_decode.json"), referenceDecodeSteps())
 
     // window_sequence / window_sequence_full --------------------------------
-    for ((name, windowed) in listOf("window_sequence" to true, "window_sequence_full" to false)) {
+    for ((name, windowed, chunk) in listOf(
+        Triple("window_sequence", true, null),
+        Triple("window_sequence_full", false, null),
+        Triple("window_sequence_chunked", true, WINDOW_CHUNK),
+    )) {
         val dir = Files.createTempDirectory("tlaloc-$name")
         try {
-            exportWindowModel(dir, windowed)
+            exportWindowModel(dir, windowed, chunk)
             val model = TritonModelRepository.write(dir, repo, name, TritonModelRepository.KvMode.SEQUENCE)
             println("  $model")
-            if (windowed) {
+            if (windowed && chunk == null) {
                 // For a load-time refusal: the same manifest with a ring of one
                 // page, which holds 4 positions of a window of 8.
                 val m = ServingManifest.fromJson(Files.readString(dir.resolve(ServingManifest.FILE_NAME)))
@@ -260,13 +269,13 @@ private val WINDOW_MODEL = HfDecoderConfig(
  * and 2 at contexts 16, 32 and 64, pages of 4, room for four sequences of 64
  * positions. With [windowed] the sliding layers get a windowed KV pool.
  */
-private fun exportWindowModel(dir: Path, windowed: Boolean) {
+private fun exportWindowModel(dir: Path, windowed: Boolean, chunk: Int? = null) {
     val config = WINDOW_MODEL
     val policy = DecodeBucketPolicy(maxBatch = 2, maxContext = 64, blockSize = 4, minContext = 16)
     val numBlocks = 1 + 4 * 16
-    val window = if (!windowed) null else config.windowedKvPool(4, 64, numBlocks)
+    val window = if (!windowed) null else config.windowedKvPool(4, 64, numBlocks, prefillChunk = chunk)
     val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = 4, windowedKv = window)
-    val specs = HfServingExport.specs(config, model, policy)
+    val specs = HfServingExport.specs(config, model, policy, prefillChunk = chunk)
     val rng = Random(20260925)
     val weights = HfDecoderGraph.weightSlots(config).associate { slot ->
         val n = slot.type.dims.fold(1) { a, b -> a * b }
@@ -278,7 +287,11 @@ private fun exportWindowModel(dir: Path, windowed: Boolean) {
     }
     ServingArtifactWriter.export(
         dir = dir,
-        modelName = if (windowed) "window-sequence" else "window-sequence-full",
+        modelName = when {
+            chunk != null -> "window-sequence-chunked"
+            windowed -> "window-sequence"
+            else -> "window-sequence-full"
+        },
         modelHash = "window-sequence-v1",
         model = model,
         ladder = ServingArtifactWriter.ladderOf(policy),
@@ -288,6 +301,13 @@ private fun exportWindowModel(dir: Path, windowed: Boolean) {
         refusedTokenIds = config.refusedTokenIds,
     )
 }
+
+/**
+ * The prefill chunk of `window_sequence_chunked`: its prefill entries take at
+ * most 6 tokens per sequence, and its ring is sized for a 6-token call past
+ * the window, `ceil((8 - 1 + 6) / 4)` = 4 pages.
+ */
+private const val WINDOW_CHUNK = 6
 
 /** A manifest of `window_sequence` whose ring is too short; the backend refuses it at load. */
 private const val SHORT_RING_MANIFEST = "tlaloc-serving-short-ring.json"

@@ -225,7 +225,7 @@ tasks.register<JavaExec>("exportTritonModel") {
  *         -PoutDir=/tmp/tlaloc-llama-artifact [-PnumLayers=2] [-PmaxBatch=4] \
  *         [-PmaxContext=64] [-PblockSize=16] [-PnumBlocks=64] [-Pprefill=false] \
  *         [-PmodelName=Qwen/Qwen3-0.6B] [-PwindowedKv=false] [-PprefillMaxBatch=1] \
- *         [-PweightDType=bf16]
+ *         [-PweightDType=bf16] [-PcontextLadder=512,2048,8192] [-PprefillChunk=512]
  *
  * `-PckptDir` may be a HuggingFace cache snapshot
  * (`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>`); the
@@ -266,7 +266,7 @@ for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArti
                 },
                 p("numLayers"), p("maxBatch"), p("maxContext"), p("blockSize"), p("numBlocks"),
                 p("prefill"), p("modelName"), p("windowedKv"), p("prefillMaxBatch"),
-                p("weightDType"),
+                p("weightDType"), p("contextLadder"), p("prefillChunk"),
             )
         },
     )

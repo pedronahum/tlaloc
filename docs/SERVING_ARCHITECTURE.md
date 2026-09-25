@@ -88,7 +88,11 @@ one module per entry, with the entry function named `main`:
 
 - `PAGED_ATTENTION` lowers to `gather` over the pages the block table names,
   two `dot_general`s at HIGHEST precision (so XLA does not run them in TF32)
-  and a masked softmax.
+  and a masked softmax. In a prefill body the tokens of one sequence share
+  its block table, so its pages are gathered once and every token attends
+  over them with its own causal length; gathering them once per token would
+  take `tokens x context` keys and values per layer (8 GiB per layer for Muse
+  Glimmer at 2,048 tokens and context 2,048).
 - `KV_CACHE_WRITE` lowers to `scatter` into the pool at the token's slot.
 - bf16 weights (Muse Glimmer by default, Llama and Qwen3 with
   `-PweightDType=bf16`) stay bf16: each projection rounds its f32 input to
@@ -121,7 +125,9 @@ The manifest records:
   point is one decode entry and one prefill entry (`-PprefillMaxBatch`, or
   `HfServingExport.export(prefillMaxBatch = ...)`, caps the prefill batches;
   1 gives the batch-1 prefill entries alone). A server runs a request on the
-  smallest entry that holds it and pads the rest;
+  smallest entry that holds it and pads the rest. A prefill entry takes its
+  whole context per call unless the export sets a chunk (`-PprefillChunk`,
+  below); `-PcontextLadder=512,2048,8192` sets the context buckets;
 - **the entries**: kind, batch, context, body path and hash, and the
   signature with a role per input (`TOKEN_IDS`, `POSITIONS`, `BLOCK_TABLES`,
   `SEQ_LENS`, `SLOT_MAPPING`, `KV_POOL_IN`, weight slots, and with a windowed
@@ -189,8 +195,62 @@ computed from that geometry:
 
 As the context grows the ratio approaches 52 / 13 = 4, because the 13
 full-attention layers still grow with the sequence. The artifact `verify.sh`
-serves has a context of 128 tokens, so its ring is capped at 8 pages and the
-two layouts hold the same bytes there.
+serves reaches 32,768 positions with prefill calls of 512 tokens, so its ring
+is 160 pages (below): its pools, room for four sequences of 32,768 positions,
+take 4,109 MiB on the device, where full-history pages for the same four
+would take 13,312 MiB.
+
+### Long contexts: prefill in chunks
+
+Each token of a prefill call attends over the call's whole context, masked
+to its own causal length, so the call's attention memory grows with tokens
+times context: 2 GiB of scores per layer for one 512-token call at context
+32,768 in Muse Glimmer, 128 GiB if the call took all 32,768 tokens. With
+`-PprefillChunk=N` (`HfServingExport.export(prefillChunk = N)`) a prefill
+entry takes at most `N` tokens per sequence (`tokensPerSeq` in the
+manifest), and a runtime prefills a longer prompt in several calls, each on
+the smallest entry whose context holds the call's last position. The
+windowed ring is sized so that an `N`-token call fits past the window:
+`ceil((window - 1 + N) / blockSize)` pages (160 for Muse Glimmer with
+`N = 512`, against 129). In the reference interpreter chunked prefill gives
+the logits of whole-context prefill bit for bit, with full-history and
+windowed pools, and the same chunks through a ring one page too short change
+them (`BatchedPrefillTest`); through Triton a windowed model with 6-token
+chunks matches the full-history model sent the same calls (36 of 40 requests
+bit for bit, the rest within 1.2e-7 of the largest logit).
+
+Muse Glimmer exported with contexts 512, 2,048, 8,192 and 32,768, decode
+batches 1, 2 and 4, batch-1 prefill in chunks of 512, and a full pool of
+8,193 pages (four sequences of 32,768 positions), served by Triton on the
+GB10 (`triton/context_bench.py`, gRPC; prompts of seeded random ids, four
+sequences per context; decode medians over 16 steps per sequence):
+
+| Context bucket | Prompt | Prefill | 1 sequence | 2 sequences | 4 sequences |
+|---|---|---|---|---|---|
+| 512 | 432 tokens | 0.56 s (766 tokens/s) | 265 ms a token | 267 ms a step, 7.5 tokens/s | 238 ms a step, 16.7 tokens/s |
+| 2,048 | 1,968 | 2.6 s (751 tokens/s) | 268 ms | 272 ms, 7.3 tokens/s | 248 ms, 16.0 tokens/s |
+| 8,192 | 8,112 | 17.0 s (476 tokens/s) | 275 ms | 286 ms, 7.0 tokens/s | 279 ms, 14.3 tokens/s |
+| 32,768 | 32,688 | 230 s (142 tokens/s) | 317 ms | 352 ms, 5.7 tokens/s | 416 ms, 9.6 tokens/s |
+
+- Decode is bound by reading the 52 GiB of weights, so up to 8,192
+  positions four sequences cost about what one does. At 32,768 attention
+  shows: each step gathers and scores every position of the bucket, for the
+  sliding layers too (masked outside the window).
+- Prefill slows with the bucket for the same reason: every 512-token call
+  scores its tokens against the whole context of its entry, about 0.55 s at
+  context 512 and about 4.5 s at 32,768. A 32,768-token prompt takes 64 calls.
+- The 16 compiles took 2 minutes at load and the weights 90 s. XLA reports
+  4.0 GiB of temporary memory for the largest entry (prefill at 32,768);
+  the KV pools are 4.0 GiB. Under a PJRT memory fraction of 0.55 the machine
+  peaked at 87 to 90 GiB in use, about 9 GiB of it other processes.
+- Four sequences stepping together ran as one execution per step only with
+  the sequence batcher's queue delay at 20 ms (`-PmaxQueueDelayMicros=20000`):
+  with the default 1 ms, clients that each receive an 800 KB logits vector
+  sent their next steps more than 1 ms apart, and two sequences ran 32 steps
+  in 31 executions, four ran 64 in 35. The delay costs a lone sequence about
+  24 ms a token (241 ms against 265 ms).
+- Scoring only the positions a sliding layer can see, and a paged kernel
+  that does not gather at all, are not started (⬜).
 
 The two framework-free runtimes, (i) and (ii) below, read `v1` and `v2`
 artifacts and refuse a `v3` one by its schema version; only the Triton
@@ -314,7 +374,9 @@ is the system RAM), driver 580.126.09.
 | (iii) Triton, a full page pool | ✅ GB10 | `verify.sh` (TinyLlama): a live sequence that needs a page when 21 sequences hold the pool is refused by name, nothing is reclaimed from live sequences, and after another sequence ends the same request succeeds and the sequence's ids equal its solo run's; abandoned sequences' pages are reclaimed least recently active first, only as many as needed (read from the server log) |
 | (iii) Triton, preemption of live sequences (KV swap or recompute) | 📐 | not built |
 | (iii) Triton, image and video placeholder ids refused | ✅ GB10 | `verify.sh`: the window models' stand-in ids are refused by name in a START and mid-sequence, the sequence unchanged; Muse Glimmer's 200091 and 200092 with `MUSE_GLIMMER=1` |
-| (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic, served from a v3 artifact whose 39 sliding layers are in the windowed pool; about 245 ms a token |
+| (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic, served from a v3 artifact whose 39 sliding layers are in the windowed pool; about 265 ms a token (241 ms with the batcher's 1 ms queue delay) |
+| (iii) Triton, Muse Glimmer at contexts up to 32,768 and four sequences, prefill in 512-token calls | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: a 2,305-token prompt whose fact lies 2,190 tokens before the question (outside the sliding window) gives the 16 ids transformers gives with the same arithmetic, logits within 8.4e-3 of the largest; the short prompts keep their 32 ids. Timings from `context_bench.py` in the table above |
+| (iii) Triton, prefill in chunks shorter than the context | ✅ GB10 | `verify.sh`: `window_sequence_chunked` (6-token prefill calls, rings of 4 pages) matches the full-history model sent the same calls (36 of 40 requests bit for bit, the rest within 1.2e-7); the reference interpreter gives whole-context logits bit for bit, and chunks through a ring one page short change them |
 | (iii) Triton, windowed KV pool for sliding-window layers | ✅ GB10 | `verify.sh`: a three-layer decoder with random weights (window 8, pages of 4, rings of 3 pages) grown to 60 positions holds at most 3 windowed pages while its full pages reach 15, and its logits equal the same model with full-history pages sent the same calls (worst 5.3e-7 of the largest logit), over HTTP and gRPC, alone and batched; the reference interpreter gives bit-identical logits for the two layouts over several windows, and a ring one page short or a call one token too long changes them |
 | (iii) Triton, prompts of several sequences prefilled in one call | ✅ GB10 | `verify.sh`: 2 and 4 TinyLlama and Qwen3-0.6B prompts sent together run in one call of a batch-2 or batch-4 prefill entry and give their solo argmax and the same 8 greedy ids as alone, over HTTP and gRPC (logits within 5e-3 of the largest; the batched entry is a different executable under TF32); the reference interpreter gives the solo logits and the solo continuation bit for bit, with full-history and windowed pools, and padding that writes its KV or a left-aligned row changes them |
 | (iii) Triton, dynamic batching, CUDA shared memory, nine dtypes | ✅ GB10 | `verify.sh`; a ragged batch is grouped by the shape of its rows: 216 requests of two widths ran in 74 to 76 executions against 119 to 134 when only consecutive requests of one width run together (the `group_by_shape` false control), with every request's rows identical |

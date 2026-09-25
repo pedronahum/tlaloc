@@ -120,7 +120,7 @@ def main() -> int:
         tokens = list(prompt)
         generated: list[int] = []
         step_ms: list[float] = []
-        prefill = None if args.no_prefill or len(prompt) < 2 else art.prefill_entry(1, len(prompt))
+        prefill = None if args.no_prefill or len(prompt) < 2 else art.prefill_entry(1, len(prompt), len(prompt))
         if prefill is not None:
             # The whole prompt in one call; its last token's logits give the
             # first generated id.

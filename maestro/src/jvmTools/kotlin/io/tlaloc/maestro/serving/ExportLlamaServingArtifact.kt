@@ -23,7 +23,12 @@ import java.nio.file.Path
  * arrive together are prefilled in one call), `weightDType` (`f32` or `bf16`,
  * default the family's: f32 for Llama and Qwen3, bf16 for Muse Glimmer; bf16
  * keeps a bf16 checkpoint's weights as stored, half the bytes of f32, and
- * every projection then rounds its input to bf16 and sums in f32).
+ * every projection then rounds its input to bf16 and sums in f32),
+ * `contextLadder` (comma-separated context buckets, e.g. `512,2048,8192`;
+ * default the one context `maxContext`; when given, `maxContext` may be
+ * blank and otherwise must equal its largest) and `prefillChunk` (default
+ * none: a prefill entry takes its whole context; with it, at most that many
+ * tokens per sequence per call, see [HfServingExport.specs]).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -34,13 +39,21 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
     val outDir = Path.of(args[1])
     val maxBatch = arg(3, 1)
-    val maxContext = arg(4, 64)
+    val ladder = args.getOrNull(12)?.trim().orEmpty().takeIf { it.isNotEmpty() }?.split(',')?.map {
+        it.trim().toIntOrNull()
+            ?: throw IllegalArgumentException("contextLadder must be comma-separated integers, got '${args[12]}'")
+    }
+    val maxContext = arg(4, ladder?.max() ?: 64)
+    require(ladder == null || ladder.max() == maxContext) {
+        "contextLadder $ladder ends at ${ladder!!.max()} but maxContext is $maxContext"
+    }
+    val prefillChunk = args.getOrNull(13)?.takeIf { it.isNotBlank() }?.toInt()
     val blockSize = arg(5, 16)
     val numBlocks = arg(6, HfServingExport.DEFAULT_NUM_BLOCKS)
     val prefill = when (val p = args.getOrNull(7)?.trim().orEmpty()) {
@@ -67,9 +80,12 @@ fun main(args: Array<String>) {
         val config = ckpt.config.copy(numLayers = layers).let {
             if (weightDType == null) it else it.copy(weightDType = weightDType)
         }
-        val policy = DecodeBucketPolicy(
+        val single = DecodeBucketPolicy(
             maxBatch = maxBatch, maxContext = maxContext,
             blockSize = blockSize, minContext = maxContext,
+        )
+        val policy = if (ladder == null) single else DecodeBucketPolicy.withLadders(
+            batchLadder = single.batchLadder, contextLadder = ladder.sorted(), blockSize = blockSize,
         )
         // Tensors the decoder does not read (a multimodal checkpoint's vision
         // encoder) are listed, not silently dropped.
@@ -88,6 +104,7 @@ fun main(args: Array<String>) {
             prefill = prefill,
             windowedKv = windowedKv,
             prefillMaxBatch = prefillMaxBatch,
+            prefillChunk = prefillChunk,
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )

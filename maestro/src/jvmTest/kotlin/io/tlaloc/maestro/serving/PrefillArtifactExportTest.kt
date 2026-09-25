@@ -45,12 +45,12 @@ class PrefillArtifactExportTest {
     private val model = config.toDecodeModelShape(numBlocks = 9, blockSize = 4)
 
     /** Exports with prefill entries up to batch [prefillMaxBatch] (0: none), as HfServingExport does. */
-    private fun export(dir: Path, prefillMaxBatch: Int): ServingManifest {
+    private fun export(dir: Path, prefillMaxBatch: Int, prefillChunk: Int? = null): ServingManifest {
         val rng = Random(7)
         return ServingArtifactWriter.export(
             dir = dir, modelName = "tiny-llama", modelHash = "tiny-llama-hash", model = model,
             ladder = ServingArtifactWriter.ladderOf(policy),
-            specs = HfServingExport.specs(config, model, policy, prefillMaxBatch),
+            specs = HfServingExport.specs(config, model, policy, prefillMaxBatch, prefillChunk),
             stageWeight = { slot ->
                 FloatArray(slot.type.dims.fold(1) { a, b -> a * b }) { rng.nextFloat() - 0.5f }
             },
@@ -91,6 +91,37 @@ class PrefillArtifactExportTest {
             assertTrue("{ name: \"LOGITS\" data_type: TYPE_FP32 dims: [ 23 ] }" in cfg, cfg)
             assertTrue("max_candidate_sequences: 8\n" in cfg, cfg)
             assertTrue("share a prefill call" !in cfg, cfg)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * With a prefill chunk of 12 the context-16 entries take 12 tokens per
+     * sequence and the context-8 entries their whole 8; the body's token
+     * axis and slot mapping follow, and the Triton config says so. Control:
+     * without the chunk no entry is shorter than its context.
+     */
+    @Test
+    fun aPrefillChunkShortensTheLongerContextsEntries() {
+        val dir = Files.createTempDirectory("tlaloc-chunked-prefill-artifact")
+        try {
+            val m = export(dir, prefillMaxBatch = 2, prefillChunk = 12)
+            val p16 = m.entryFor(DecodeGraphKind.PREFILL, 2, 16)
+            assertEquals(12, p16.tokensPerSeq)
+            assertEquals(8, m.entryFor(DecodeGraphKind.PREFILL, 1, 8).tokensPerSeq)
+            assertEquals(listOf(2, 12), p16.inputs.first { it.name == "tokenIds" }.type.dims)
+            assertEquals(listOf(24), p16.inputs.first { it.name == "slotMapping" }.type.dims)
+            // The block tables still cover the whole context.
+            assertEquals(listOf(2, 4), p16.inputs.first { it.name == "blockTables" }.type.dims)
+            assertTrue("tensor<2x12xi32>" in Files.readString(dir.resolve(p16.bodyPath)))
+            val back = ServingManifest.fromJson(Files.readString(dir.resolve(ServingManifest.FILE_NAME)))
+            assertEquals(m, back)
+            val cfg = TritonModelRepository.config(back, "tiny")
+            assertTrue("A prefill call takes at most 12 tokens per sequence" in cfg, cfg)
+            val whole = HfServingExport.specs(config, model, policy, 2)
+            assertTrue(whole.filter { it.kind == DecodeGraphKind.PREFILL }.all { it.tokensPerSeq == it.bucket.maxContext })
+            assertFailsWith<IllegalArgumentException> { HfServingExport.specs(config, model, policy, 2, prefillChunk = 0) }
         } finally {
             dir.toFile().deleteRecursively()
         }

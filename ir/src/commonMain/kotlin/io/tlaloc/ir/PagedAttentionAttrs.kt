@@ -16,10 +16,19 @@ import io.tlaloc.core.I64
  *   0 query      [numSeqs, numHeads, headDim]                    float
  *   1 keyCache   [numBlocks, blockSize, numKvHeads, headDim]     float
  *   2 valueCache [numBlocks, blockSize, numKvHeads, headDim]     float
- *   3 blockTables[numSeqs, maxBlocksPerSeq]                      integer
+ *   3 blockTables[numTables, maxBlocksPerSeq]                    integer
  *   4 seqLens    [numSeqs]                                       integer
  *   → out        [numSeqs, numHeads, headDim]                    float
  * ```
+ *
+ * Each query row has its own length. The block tables are one per row
+ * (`numTables == numSeqs`, a decode step), or one per group of
+ * `rowsPerTable = numSeqs / numTables` consecutive rows (a prefill chunk:
+ * every token of a sequence reads that sequence's pages, each with its own
+ * causal length). Row `s` reads table `s / rowsPerTable`. The ratio is
+ * derived from the shapes, never an attr, and a `numTables` that does not
+ * divide `numSeqs` is refused. A lowering can then gather a sequence's pages
+ * once for all its rows instead of once per row.
  *
  * Attributes: `scale: Number` — the softmax temperature, REQUIRED — and
  * `sliding_window: Number`, OPTIONAL: when present the row attends only to
@@ -58,7 +67,15 @@ object PagedAttentionAttrs {
         val scale: Double,
         /** Positions a row attends to, counting its own; null for full causal attention. */
         val slidingWindow: Int? = null,
+        /** Block tables: [numSeqs], or fewer when rows share a table. */
+        val numTables: Int = numSeqs,
     ) {
+        /** Consecutive query rows that read one block table: 1 for a decode step. */
+        val rowsPerTable: Int get() = numSeqs / numTables
+
+        /** The block table row query row [row] reads. */
+        fun tableOf(row: Int): Int = row / rowsPerTable
+
         /** The first live position of a row whose sequence has [seqLen] positions. */
         fun firstLive(seqLen: Int): Int =
             if (slidingWindow == null) 0 else maxOf(0, seqLen - slidingWindow)
@@ -98,7 +115,7 @@ object PagedAttentionAttrs {
             "$layer: PAGED_ATTENTION valueCache shape ${v.dims} must match keyCache ${k.dims} " +
                 "(the two pools are indexed by the SAME block table)"
         }
-        require(t.rank == 2) { "$layer: PAGED_ATTENTION blockTables must be rank-2 [numSeqs, maxBlocksPerSeq], got ${t.dims}" }
+        require(t.rank == 2) { "$layer: PAGED_ATTENTION blockTables must be rank-2 [numTables, maxBlocksPerSeq], got ${t.dims}" }
         require(l.rank == 1) { "$layer: PAGED_ATTENTION seqLens must be rank-1 [numSeqs], got ${l.dims}" }
         require(isIntegral(t.dtype)) { "$layer: PAGED_ATTENTION blockTables must be an integer tensor, got ${t.dtype}" }
         require(isIntegral(l.dtype)) { "$layer: PAGED_ATTENTION seqLens must be an integer tensor, got ${l.dtype}" }
@@ -114,8 +131,9 @@ object PagedAttentionAttrs {
         require(k.dims[3] == headDim) {
             "$layer: PAGED_ATTENTION keyCache headDim ${k.dims[3]} must match query headDim $headDim"
         }
-        require(t.dims[0] == numSeqs) {
-            "$layer: PAGED_ATTENTION blockTables has ${t.dims[0]} rows but query has $numSeqs sequences"
+        require(t.dims[0] >= 1 && numSeqs % t.dims[0] == 0) {
+            "$layer: PAGED_ATTENTION blockTables has ${t.dims[0]} rows but query has $numSeqs rows; " +
+                "the tables must be one per row or one per equal group of consecutive rows"
         }
         require(l.dims[0] == numSeqs) {
             "$layer: PAGED_ATTENTION seqLens has ${l.dims[0]} entries but query has $numSeqs sequences"
@@ -165,6 +183,7 @@ object PagedAttentionAttrs {
             maxBlocksPerSeq = maxBlocksPerSeq,
             scale = scale,
             slidingWindow = window,
+            numTables = t.dims[0],
         )
     }
 

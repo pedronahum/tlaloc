@@ -31,6 +31,13 @@ import kotlin.test.assertTrue
  * Negative controls: padding tokens that write their KV (over position 0 of
  * the sequence in the row before, instead of nowhere), and a row whose tokens
  * are left-aligned; both must change a row's logits.
+ *
+ * Chunked prefill: entries that take at most `prefillChunk` tokens per
+ * sequence (fewer than the context) prefill a longer prompt in several
+ * calls and give the same logits, bit for bit, as entries that take the
+ * whole context; with a windowed pool the ring is sized so that a whole
+ * chunk fits past the window. Negative control: the same chunks through the
+ * default ring, one page too short for them, change the logits.
  */
 class BatchedPrefillTest {
 
@@ -91,12 +98,19 @@ class BatchedPrefillTest {
         val windowed: Boolean,
         val padWrites: Boolean = false,
         val leftAligned: String? = null,
+        val chunk: Int? = null,
+        ringPages: Int? = null,
+        /** Split calls by the ring (the backend's rule); the ring control turns it off. */
+        val splitForRing: Boolean = true,
     ) {
-        val pool = if (!windowed) null else config.windowedKvPool(bs, context, fullBlocks)
+        val pool = if (!windowed) null else config.windowedKvPool(bs, context, fullBlocks, ringPages, prefillChunk = chunk)
         val model = config.toDecodeModelShape(numBlocks = fullBlocks, blockSize = bs, windowedKv = pool)
         private val built = HashMap<Pair<DecodeGraphKind, Int>, Pair<DecodeGraphSpec, DxirFunction>>()
         fun graph(kind: DecodeGraphKind, batch: Int) = built.getOrPut(kind to batch) {
-            val spec = HfDecoderGraph.spec(config, model, DecodeBucket(batch, context), kind)
+            val spec = HfDecoderGraph.spec(
+                config, model, DecodeBucket(batch, context), kind,
+                prefillChunk = if (kind == DecodeGraphKind.PREFILL) chunk else null,
+            )
             spec to HfDecoderGraph.build(spec, config)
         }
         var pools: List<FloatArray> = graph(DecodeGraphKind.DECODE, 1).first.let { spec ->
@@ -189,7 +203,8 @@ class BatchedPrefillTest {
                 val round = work.mapNotNull { (seq, toks) ->
                     val i = done.getValue(seq)
                     if (i >= toks.size) return@mapNotNull null
-                    val most = pool?.maxTokensPerCall(length[seq] ?: 0, bs) ?: toks.size
+                    val ringMost = if (splitForRing) pool?.maxTokensPerCall(length[seq] ?: 0, bs) else null
+                    val most = minOf(ringMost ?: toks.size, chunk ?: toks.size)
                     seq to toks.copyOfRange(i, minOf(toks.size, i + most))
                 }
                 if (round.isEmpty()) break
@@ -224,6 +239,17 @@ class BatchedPrefillTest {
             h.continueAll(listOf(s), steps)
             h.rowsOf(s)
         }
+
+    /**
+     * The rows at the positions both runs returned logits for (a chunked
+     * prefill returns them at other chunk ends): the last prompt position and
+     * every decode step, at least [common] of them.
+     */
+    private fun assertSameCommonRows(want: List<Row>, got: List<Row>, common: Int, what: String) {
+        val both = want.map { it.position }.intersect(got.map { it.position }.toSet())
+        assertEquals(common, both.size, "$what: positions returned by both runs")
+        assertSameRows(want.filter { it.position in both }, got.filter { it.position in both }, what)
+    }
 
     private fun assertSameRows(want: List<Row>, got: List<Row>, what: String) {
         assertEquals(want.map { it.position }, got.map { it.position }, "$what: positions")
@@ -329,6 +355,82 @@ class BatchedPrefillTest {
         assertFalse(want.getValue("B").single().logits.contentEquals(h.rowsOf("B").single().logits))
         // The other rows are untouched by it.
         for (s in listOf("A", "D")) assertSameRows(want.getValue(s), h.rowsOf(s), "sequence $s")
+    }
+
+    @Test
+    fun chunkedPrefillGivesTheWholeContextLogitsBitForBit() {
+        for (windowed in listOf(false, true)) {
+            val seqs = listOf("A", "C")
+            val want = solo(windowed, seqs, steps = 4)
+            val h = Host(windowed, chunk = 5)
+            // The prefill entries take 5 tokens per sequence, not the context's 48.
+            assertEquals(5, h.graph(DecodeGraphKind.PREFILL, 2).first.tokensPerSeq)
+            h.prefillTogether(seqs.map { it to prompts.getValue(it) })
+            // A (11 tokens: 5 + 5 + 1) and C (17: 5 + 5 + 5 + 2) in 4 rounds.
+            assertEquals(listOf(seqs, seqs, seqs, listOf("C")), h.calls)
+            h.continueAll(seqs, steps = 4)
+            for (s in seqs) {
+                assertSameCommonRows(want.getValue(s), h.rowsOf(s), 5, "windowed=$windowed, sequence $s")
+            }
+        }
+    }
+
+    @Test
+    fun theRingIsSizedForAChunkPastTheWindow() {
+        // Window 8, pages of 4: the default ring is 3 pages (12 positions); a
+        // call of 8 tokens past the window needs 7 + 8 = 15, so 4 pages.
+        assertEquals(3, config.windowedKvPool(bs, context, fullBlocks)!!.ringPages)
+        val pool = config.windowedKvPool(bs, context, fullBlocks, prefillChunk = 8)!!
+        assertEquals(4, pool.ringPages)
+        assertTrue(pool.maxTokensPerCall(start = 40, blockSize = bs) >= 8)
+        // Capped at the context's pages, where a ring never wraps.
+        assertEquals(context / bs, config.windowedKvPool(bs, context, fullBlocks, prefillChunk = 1000)!!.ringPages)
+        val a = prompts.getValue("C")
+        val want = solo(windowed = true, listOf("C"), steps = 2).getValue("C")
+        val h = Host(windowed = true, chunk = 8)
+        h.prefillTogether(listOf("C" to a))
+        // 17 tokens in chunks of 8, none split by the ring.
+        assertEquals(listOf(listOf("C"), listOf("C"), listOf("C")), h.calls)
+        h.continueAll(listOf("C"), 2)
+        assertSameCommonRows(want, h.rowsOf("C"), 3, "ring of 4 pages")
+    }
+
+    /**
+     * Negative control: the same chunks of 8 through the default ring of 3
+     * pages, not split for it: the second chunk writes positions 8..15 over
+     * 0..3, which its first rows still read, and the logits change.
+     */
+    @Test
+    fun chunksTooLongForTheRingChangeTheLogits() {
+        val a = prompts.getValue("C")
+        val want = solo(windowed = true, listOf("C"), steps = 2).getValue("C")
+        val h = Host(windowed = true, chunk = 8, ringPages = 3, splitForRing = false)
+        h.prefillTogether(listOf("C" to a))
+        assertEquals(3, h.calls.size)
+        h.continueAll(listOf("C"), 2)
+        val common = want.map { it.position }.intersect(h.rowsOf("C").map { it.position }.toSet())
+        assertEquals(3, common.size, "the last prompt position and two decode steps")
+        val w = want.filter { it.position in common }
+        val got = h.rowsOf("C").filter { it.position in common }
+        assertTrue(w.zip(got).none { (x, y) -> x.logits.contentEquals(y.logits) }, "the overwritten positions were read")
+    }
+
+    @Test
+    fun aPrefillChunkIsRefusedOnADecodeEntry() {
+        val model = config.toDecodeModelShape(numBlocks = fullBlocks, blockSize = bs)
+        val e = kotlin.runCatching {
+            HfDecoderGraph.spec(config, model, DecodeBucket(1, context), DecodeGraphKind.DECODE, prefillChunk = 4)
+        }.exceptionOrNull()
+        assertTrue(e?.message?.contains("prefillChunk 4 applies to a prefill entry") == true, "got ${e?.message}")
+        val zero = kotlin.runCatching {
+            HfDecoderGraph.spec(config, model, DecodeBucket(1, context), DecodeGraphKind.PREFILL, prefillChunk = 0)
+        }.exceptionOrNull()
+        assertTrue(zero?.message?.contains("must be >= 1") == true, "got ${zero?.message}")
+        // A chunk at least the context takes the whole context.
+        assertEquals(
+            context,
+            HfDecoderGraph.spec(config, model, DecodeBucket(1, context), DecodeGraphKind.PREFILL, prefillChunk = 99).tokensPerSeq,
+        )
     }
 
     @Test

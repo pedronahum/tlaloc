@@ -66,6 +66,36 @@ class PagedAttentionEmitTest {
         assertTrue("index_vector_dim = 2" in text, "table entries are scalar page ids:\n$text")
     }
 
+    /**
+     * Rows that share a table (a prefill chunk): the pages are gathered once
+     * per TABLE, into [tables, ctx, Hkv, D], and the dots batch over (table,
+     * kv head) with the rows as a free axis. Control: the per-row form (one
+     * table per row) gathers per row and batches over (row, kv head).
+     */
+    @Test
+    fun rowsSharingATableGatherEachTableOnce() {
+        val rows = 6
+        val rowQ = DxirType(F32, listOf(rows, numHeads, headDim))
+        fun fn(tableRows: Int) = DxirBuilder.function("shared") {
+            val q = param("q", rowQ)
+            val k = param("k", cacheType)
+            val v = param("v", cacheType)
+            val t = param("t", DxirType(I32, listOf(tableRows, maxBlocksPerSeq)))
+            val l = param("l", DxirType(I32, listOf(rows)))
+            listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), rowQ, mapOf("scale" to 0.5)))
+        }
+        val ctx = maxBlocksPerSeq * blockSize
+        val shared = fn(2).toStablehlo()
+        assertTrue("-> tensor<2x${ctx}x${numKvHeads}x${headDim}xf32>" in shared, "one window per table:\n$shared")
+        assertTrue("batching_dims = [0, 2] x [0, 2], contracting_dims = [4] x [3]" in shared, shared)
+        assertTrue("tensor<2x${numKvHeads}x3x${numHeads / numKvHeads}x${ctx}xf32>" in shared, "scores [R, Hkv, Q, G, ctx]:\n$shared")
+        assertTrue("stablehlo.transpose" in shared && "dims = [0, 2, 1, 3, 4]" in shared, shared)
+        val perRow = fn(rows).toStablehlo()
+        assertTrue("-> tensor<${rows}x${ctx}x${numKvHeads}x${headDim}xf32>" in perRow, perRow)
+        assertTrue("batching_dims = [0, 2] x [0, 2]" !in perRow && "stablehlo.transpose" !in perRow, perRow)
+    }
+
+
     @Test
     fun aSlidingWindowAddsTheLowerBoundOfTheMask() {
         val plain = mlir()

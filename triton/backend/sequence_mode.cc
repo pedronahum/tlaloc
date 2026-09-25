@@ -620,7 +620,8 @@ SequenceModel::ReadManifest(const std::string& text)
       }
     }
     if (logits != 1) return Invalid(eat + "needs exactly one LOGITS output");
-    if (s.prefill ? T != s.context : T != 1) {
+    // A prefill entry takes a chunk of up to its context per sequence.
+    if (s.prefill ? (T < 1 || T > s.context) : T != 1) {
       return Invalid(eat + "tokensPerSeq " + std::to_string(T) + " does not fit its kind");
     }
     if (int64_t(M) * block_size_ < s.context) {
@@ -661,6 +662,7 @@ SequenceModel::ReadManifest(const std::string& text)
       max_decode_batch_ = std::max(max_decode_batch_, e.batch);
     } else {
       max_prefill_batch_ = std::max(max_prefill_batch_, e.batch);
+      max_prefill_tokens_ = std::max(max_prefill_tokens_, e.tokens_per_seq);
     }
   }
   if (max_decode_batch_ == 0) return Invalid(at + "has no decode entry");
@@ -768,7 +770,8 @@ SequenceModel::CompileEntries()
       tlaloc_triton::CompiledMemory mem;
       if (exe->MemoryStats(&mem).empty()) {
         m << "; XLA writes outputs over " << mem.alias / (1024 * 1024) << " MiB of its "
-          << mem.argument / (1024 * 1024) << " MiB of arguments";
+          << mem.argument / (1024 * 1024) << " MiB of arguments, and needs " << mem.temp / (1024 * 1024)
+          << " MiB of temporary memory";
       }
       LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
       hit = executables_.emplace(e.body_path, std::move(exe)).first;
@@ -816,8 +819,11 @@ SequenceModel::UploadWeights()
     << total / (1024 * 1024) << " MiB) in " << (NowNs() - t0) / 1000000 << " ms; "
     << entries_.size() << " entries, KV pool of " << num_blocks_ << " pages x " << block_size_
     << " tokens, largest context " << max_context_ << ", largest decode batch "
-    << max_decode_batch_ << ", largest prefill batch " << max_prefill_batch_
-    << ", sequence idle timeout " << idle_ns_ / 1000 << " us";
+    << max_decode_batch_ << ", largest prefill batch " << max_prefill_batch_;
+  if (max_prefill_tokens_ > 0 && max_prefill_tokens_ < max_context_) {
+    m << ", at most " << max_prefill_tokens_ << " tokens per sequence in a prefill call";
+  }
+  m << ", sequence idle timeout " << idle_ns_ / 1000 << " us";
   if (!refused_tokens_.empty()) {
     m << "; refuses token ids";
     for (const auto& kv : refused_tokens_) m << " " << kv.first << " (" << kv.second << ")";
@@ -843,11 +849,11 @@ SequenceModel::Decode(int batch, int context) const
 }
 
 const ServingEntrySpec*
-SequenceModel::Prefill(int batch, int context) const
+SequenceModel::Prefill(int batch, int context, int tokens) const
 {
   const ServingEntrySpec* best = nullptr;
   for (const ServingEntrySpec& e : entries_) {
-    if (!e.prefill || e.batch < batch || e.context < context) continue;
+    if (!e.prefill || e.batch < batch || e.context < context || e.tokens_per_seq < tokens) continue;
     if (best == nullptr || int64_t(e.batch) * e.context < int64_t(best->batch) * best->context) best = &e;
   }
   return best;
@@ -866,8 +872,9 @@ SequenceModel::MaxPrefillBatch(int context) const
 int
 SequenceModel::MaxTokensPerCall(int start) const
 {
-  if (!windowed()) return std::numeric_limits<int>::max();
-  return std::max(1, ring_pages_ * block_size_ - std::min(start, window_ - 1));
+  const int chunk = max_prefill_tokens_ > 0 ? max_prefill_tokens_ : std::numeric_limits<int>::max();
+  if (!windowed()) return chunk;
+  return std::max(1, std::min(chunk, ring_pages_ * block_size_ - std::min(start, window_ - 1)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,7 +1378,8 @@ SequenceInstance::RunPrompts(
       p.n = std::min(p.all.size() - p.done, static_cast<size_t>(model_->MaxTokensPerCall(at)));
       p.w->tokens.assign(p.all.begin() + p.done, p.all.begin() + p.done + p.n);
       p.w->position = at;
-      const ServingEntrySpec* e = p.n > 1 ? model_->Prefill(1, at + static_cast<int>(p.n)) : nullptr;
+      const ServingEntrySpec* e =
+          p.n > 1 ? model_->Prefill(1, at + static_cast<int>(p.n), static_cast<int>(p.n)) : nullptr;
       if (e == nullptr) {
         stepwise.push_back(&p);
         continue;
@@ -1390,12 +1398,17 @@ SequenceInstance::RunPrompts(
       const size_t most = static_cast<size_t>(std::max(1, model_->MaxPrefillBatch(g.first)));
       for (size_t i = 0; i < g.second.size(); i += most) {
         std::vector<Work*> rows;
-        for (size_t k = i; k < std::min(g.second.size(), i + most); ++k) rows.push_back(g.second[k]->w);
-        const ServingEntrySpec* e = model_->Prefill(static_cast<int>(rows.size()), g.first);
+        int tokens = 1;
+        for (size_t k = i; k < std::min(g.second.size(), i + most); ++k) {
+          rows.push_back(g.second[k]->w);
+          tokens = std::max(tokens, static_cast<int>(g.second[k]->n));
+        }
+        const ServingEntrySpec* e = model_->Prefill(static_cast<int>(rows.size()), g.first, tokens);
         TRITONSERVER_Error* err =
             e == nullptr ? Invalid(
                                "no prefill entry covers batch " + std::to_string(rows.size()) +
-                               " and context " + std::to_string(g.first))
+                               ", context " + std::to_string(g.first) + " and " + std::to_string(tokens) +
+                               " tokens per sequence")
                          : Run(*e, rows, compute_start, compute_end);
         note();
         fail(rows, err);

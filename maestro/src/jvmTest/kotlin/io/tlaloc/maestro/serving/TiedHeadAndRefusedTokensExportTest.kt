@@ -70,7 +70,11 @@ class TiedHeadAndRefusedTokensExportTest {
                         "\\(tensor<1x16xf32>, tensor<29x16xf32>\\) -> tensor<1x29xf32>").containsMatchIn(body),
                     "${e.entryId}: no head dot_general against the table",
                 )
-                assertFalse("stablehlo.transpose" in body, "${e.entryId}: a transpose in the body")
+                // No transpose of the table (a prefill body transposes its attention rows).
+                assertFalse(
+                    Regex("stablehlo\\.transpose .*\\(tensor<29x16xf32>\\)").containsMatchIn(body),
+                    "${e.entryId}: a transpose of the table in the body",
+                )
             }
             m.weights.table.sumOf { it.byteLength }
         }

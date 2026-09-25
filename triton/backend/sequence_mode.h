@@ -116,7 +116,8 @@ class SequenceModel {
   int window_num_blocks() const { return window_num_blocks_; }
   int ring_pages() const { return ring_pages_; }
   // The most tokens one call may write for a sequence whose next position is
-  // `start`: all of them without a windowed pool, else what the ring holds.
+  // `start`: what the windowed ring holds (all of them without a windowed
+  // pool), and no more than the largest prefill entry takes per sequence.
   int MaxTokensPerCall(int start) const;
   // The KV_PAGES output's name, or empty when config.pbtxt does not declare it.
   const std::string& pages_output() const { return pages_output_; }
@@ -124,9 +125,9 @@ class SequenceModel {
   // The cheapest decode entry with batch >= `batch` and context >= `context`,
   // or nullptr.
   const ServingEntrySpec* Decode(int batch, int context) const;
-  // The cheapest prefill entry with batch >= `batch` and context >=
-  // `context`, or nullptr.
-  const ServingEntrySpec* Prefill(int batch, int context) const;
+  // The cheapest prefill entry with batch >= `batch`, context >= `context`
+  // and at least `tokens` tokens per sequence, or nullptr.
+  const ServingEntrySpec* Prefill(int batch, int context, int tokens) const;
   // The largest batch of the prefill entries of context `context` (0 if none).
   int MaxPrefillBatch(int context) const;
   // The largest batch of any prefill entry (0 without prefill entries).
@@ -164,6 +165,8 @@ class SequenceModel {
   int max_context_ = 0;
   int max_decode_batch_ = 0;
   int max_prefill_batch_ = 0;
+  // The most tokens per sequence any prefill entry takes (0 without prefill).
+  int max_prefill_tokens_ = 0;
   int64_t max_batch_size_ = 0;
   uint64_t idle_ns_ = 0;
   bool donate_pools_ = true;

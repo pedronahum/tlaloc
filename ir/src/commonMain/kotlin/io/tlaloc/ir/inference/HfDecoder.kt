@@ -711,6 +711,12 @@ data class HfDecoderConfig(
      * [WindowedKvPool.defaultRingPages], capped at the pages of
      * [maxContext], beyond which a ring never wraps).
      *
+     * With [prefillChunk] the default ring is long enough for a prefill call
+     * of that many tokens past the window: `ceil((window - 1 + prefillChunk) /
+     * blockSize)` pages when that is more than the default (still capped at
+     * [maxContext]). A shorter ring would split each such call into calls of
+     * at most `ringPages * blockSize - (window - 1)` tokens.
+     *
      * [numBlocks] is the budget of each windowed pool. By default it holds as
      * many full rings as the full-history pool of [fullNumBlocks] pages holds
      * sequences of [maxContext] positions (rounded up), and never more pages
@@ -725,12 +731,18 @@ data class HfDecoderConfig(
         fullNumBlocks: Int,
         ringPages: Int? = null,
         numBlocks: Int? = null,
+        prefillChunk: Int? = null,
     ): WindowedKvPool? {
+        require(prefillChunk == null || prefillChunk >= 1) {
+            "HfDecoderConfig.windowedKvPool: prefillChunk must be >= 1, got $prefillChunk"
+        }
         val sliding = (0 until numLayers).filter { layer(it).attention == AttentionKind.SLIDING }
         if (sliding.isEmpty()) return null
         val window = sliding.maxOf { layer(it).slidingWindow!! }
         val contextPages = (maxContext + blockSize - 1) / blockSize
-        val ring = ringPages ?: minOf(WindowedKvPool.defaultRingPages(window, blockSize), contextPages)
+        val forChunk = prefillChunk?.let { (window - 1 + it + blockSize - 1) / blockSize } ?: 0
+        val ring = ringPages
+            ?: minOf(maxOf(WindowedKvPool.defaultRingPages(window, blockSize), forChunk), contextPages)
         val sequences = (fullNumBlocks - 1 + contextPages - 1) / contextPages
         return WindowedKvPool(
             window = window,

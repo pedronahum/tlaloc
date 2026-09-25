@@ -54,19 +54,19 @@ fun main(args: Array<String>) {
         }
 
         // The compiled shapes. Each (batch, context) point is one XLA compile
-        // when the server loads the model. The context ladder is 64, 128 and
-        // 256: the server runs each request on the smallest entry that holds
-        // the sequence, so a short conversation does not pay for 256
-        // positions of attention. Each context gets a decode entry and a
-        // prefill entry (a prompt runs as one call).
-        val policy = DecodeBucketPolicy(
-            maxBatch = model.maxBatch,
-            maxContext = MAX_CONTEXT,
+        // when the server loads the model. The server runs each request on
+        // the smallest entry that holds the sequence, so a short conversation
+        // does not pay for the largest context's attention. Each context gets
+        // a decode entry and a prefill entry (a prompt runs as one call, or as
+        // calls of at most `prefillChunk` tokens).
+        val policy = DecodeBucketPolicy.withLadders(
+            batchLadder = listOf(model.maxBatch),
+            contextLadder = model.contexts,
             blockSize = BLOCK_SIZE,
-            minContext = MIN_CONTEXT,
         )
         println("entries     decode at batch 1..${model.maxBatch} and prefill at batch 1, " +
-            "for contexts ${policy.contextLadder.joinToString()}; KV pages of $BLOCK_SIZE tokens")
+            "for contexts ${policy.contextLadder.joinToString()}; KV pages of $BLOCK_SIZE tokens" +
+            (model.prefillChunk?.let { "; prefill in calls of at most $it tokens" } ?: ""))
 
         val t0 = System.nanoTime()
         val manifest = HfServingExport.export(
@@ -74,6 +74,9 @@ fun main(args: Array<String>) {
             dir = artifactDir,
             policy = policy,
             prefill = true,
+            // Pages for one sequence of the largest context, plus the padding page.
+            numBlocks = maxOf(HfServingExport.DEFAULT_NUM_BLOCKS, 1 + model.contexts.max() / BLOCK_SIZE),
+            prefillChunk = model.prefillChunk,
         )
         val secs = (System.nanoTime() - t0) / 1e9
         val bytes = manifest.weights.table.sumOf { it.byteLength }
@@ -91,22 +94,23 @@ fun main(args: Array<String>) {
 /** KV page size in tokens. */
 private const val BLOCK_SIZE = 16
 
-/** The context ladder: a chat prompt plus its answer fits in [MAX_CONTEXT]. */
-private const val MIN_CONTEXT = 64
-private const val MAX_CONTEXT = 256
-
 /**
- * The largest decode batch compiled for each model. The example asks one
- * question at a time, so batch 1 is all it needs; the server batches the
- * decode steps of concurrent sequences up to this size.
+ * The compiled shapes of each model. The example asks one question at a time,
+ * so batch 1 is all it needs; the server batches the decode steps of
+ * concurrent sequences up to [maxBatch]. A chat prompt plus its answer fits
+ * in 256 tokens; Muse Glimmer also gets contexts of 2,048 and 8,192 for long
+ * prompts, with prefill in calls of at most 512 tokens (a whole-context call
+ * at 8,192 would score 8,192 tokens against 8,192 positions at once).
  */
-private class ModelShape(val maxBatch: Int)
+private class ModelShape(val maxBatch: Int, val contexts: List<Int>, val prefillChunk: Int? = null)
+
+private val SHORT = listOf(64, 128, 256)
 
 private val MODELS = mapOf(
-    "qwen3" to ModelShape(maxBatch = 1),
-    "tinyllama" to ModelShape(maxBatch = 1),
+    "qwen3" to ModelShape(maxBatch = 1, contexts = SHORT),
+    "tinyllama" to ModelShape(maxBatch = 1, contexts = SHORT),
     // 56 GB of bf16 weights; every extra entry is another compile of a 30B model.
-    "muse-glimmer" to ModelShape(maxBatch = 1),
+    "muse-glimmer" to ModelShape(maxBatch = 1, contexts = listOf(256, 2048, 8192), prefillChunk = 512),
 )
 
 private class Opts(val model: String, val checkpoint: Path, val out: Path) {

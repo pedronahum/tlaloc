@@ -53,6 +53,8 @@ import io.tlaloc.ir.PagedAttentionAttrs
  *   the kernel is the correctness tier's f32 loops (bf16 pools are not
  *   supported, as they are not in the op's own emission).
  * - a `sliding_window` attr: the kernel masks by `seqLens` only.
+ * - rows that share a block table (a prefill chunk): the kernel reads one
+ *   table per row.
  *
  * **Not in [defaultInferenceKernelTemplates]** — the KPTX lane is opt-in
  * per pipeline, the standing convention for every KPTX template: claiming
@@ -70,6 +72,8 @@ val PagedAttentionKernel: KernelTemplate = KernelTemplate { node, target ->
     if (!allF32) return@KernelTemplate null
     // The kernel masks by seqLens only; a windowed row stays on the reference form.
     if (parsed.slidingWindow != null) return@KernelTemplate null
+    // The kernel reads one table per row; shared tables stay on the reference form.
+    if (parsed.rowsPerTable != 1) return@KernelTemplate null
     KernelDescriptor(
         kernelName = "kptx_paged_attention",
         vendor = "tlaloc",

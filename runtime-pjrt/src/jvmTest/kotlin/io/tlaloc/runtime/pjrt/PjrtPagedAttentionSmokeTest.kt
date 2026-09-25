@@ -143,4 +143,57 @@ class PjrtPagedAttentionSmokeTest {
             }
         }
     }
+
+    /**
+     * Rows that share a block table (a prefill chunk of three tokens per
+     * sequence, each with its own causal length) through the shared-table
+     * lowering: it agrees with the interpreter, with and without a sliding
+     * window, and with the per-row lowering of the same rows (the table
+     * repeated per row) to the float floor. Control: swapped tables move it.
+     */
+    @Test
+    fun rowsSharingATableMatchTheInterpreterOnGpu() {
+        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+
+        val rows = 6
+        val rowQ = DxirType(F32, listOf(rows, numHeads, headDim))
+        val lensRows = intArrayOf(4, 5, 6, 2, 3, 4)
+        fun fn(tables: IntArray, tableRows: Int, window: Int?) = DxirBuilder.function("shared_gpu") {
+            val q = param("q", rowQ)
+            val k = param("k", cacheType)
+            val v = param("v", cacheType)
+            val t = const(FloatArray(tables.size) { tables[it].toFloat() }, DxirType(I32, listOf(tableRows, maxBlocksPerSeq)))
+            val l = const(FloatArray(rows) { lensRows[it].toFloat() }, DxirType(I32, listOf(rows)))
+            val attrs = buildMap<String, Any> {
+                put("scale", scale)
+                if (window != null) put("sliding_window", window)
+            }
+            listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), rowQ, attrs))
+        }
+        val repeated = IntArray(rows * maxBlocksPerSeq) { table[(it / maxBlocksPerSeq / 3) * maxBlocksPerSeq + it % maxBlocksPerSeq] }
+        val swapped = intArrayOf(2, 0, 3, 4, 1, 5)
+        val q = pseudo(rows * numHeads * headDim, 131)
+        val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 137)
+        val v = pseudo(numBlocks * blockSize * numKvHeads * headDim, 139)
+        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+            for (w in listOf(null, 2)) {
+                val shared = fn(table, 2, w)
+                val want = DxirInterpreter.evalFunction(shared, listOf(q, k, v))[0]
+                val got = session.runOn(shared, listOf(q, k, v)).single()
+                val perRow = session.runOn(fn(repeated, rows, w), listOf(q, k, v)).single()
+                val worst = want.indices.maxOf { abs(want[it] - got[it]) }
+                val vsPerRow = want.indices.maxOf { abs(perRow[it] - got[it]) }
+                assertTrue(worst <= 1e-4f, "window $w: GPU vs interpreter worst |d| = $worst")
+                assertTrue(vsPerRow <= 1e-4f, "window $w: shared vs per-row lowering worst |d| = $vsPerRow")
+                val moved = session.runOn(fn(swapped, 2, w), listOf(q, k, v)).single()
+                    .let { o -> want.indices.maxOf { abs(o[it] - got[it]) } }
+                assertTrue(moved > 1e-2f, "window $w: swapped tables did not change the output (moved $moved)")
+                println(
+                    "[pjrt-paged] rows sharing a table (window $w) agree with the interpreter on GB10; " +
+                        "worst |d| = $worst, against the per-row lowering $vsPerRow",
+                )
+            }
+        }
+    }
 }

@@ -38,6 +38,13 @@ three-layer decoder twice: `window_sequence`, whose two sliding-window layers
              sequence as it was (its next logits equal those of a sequence that
              never sent it); id 61 (the control) is accepted
 
+  chunked    window_sequence_chunked, whose prefill entries take at most 6
+             tokens per sequence and whose ring is 4 pages, grown the same
+             way: the 13- and 9-token requests run as several calls, it holds
+             at most 4 windowed pages, and its logits equal the full-history
+             model's sent the same calls (within 1e-4) and sent the requests
+             whole (within 5e-3, the same argmax)
+
 Exit status 0 only if every check passes. With --perturb each request of
 window_sequence is compared with the full-history model's NEXT request, so the
 run must fail.
@@ -76,18 +83,19 @@ def tokens(seed, n, vocab=62):
     return [int(t) for t in np.random.default_rng(seed).integers(0, vocab, n)]
 
 
-def split(start, n, ring, bs, window):
+def split(start, n, ring, bs, window, chunk=None):
     """The calls the backend makes of a request of n tokens at `start`:
-    each at most ring * bs - min(position, window - 1) tokens."""
+    each at most ring * bs - min(position, window - 1) tokens, and at most
+    `chunk` (the prefill entries' tokens per sequence) when given."""
     calls = []
     while n > 0:
-        k = min(n, max(1, ring * bs - min(start, window - 1)))
+        k = min(n, max(1, ring * bs - min(start, window - 1)), chunk or n)
         calls.append(k)
         start, n = start + k, n - k
     return calls
 
 
-def schedule(client, corrid, seed, ring=None, bs=4, window=8):
+def schedule(client, corrid, seed, ring=None, bs=4, window=8, chunk=None):
     """One sequence of 60 ids drawn with `seed`; returns [(length, logits,
     pages)] per request. With `ring`, each request is sent as the calls the
     backend would split it into for that ring, and the last call's result is
@@ -96,7 +104,7 @@ def schedule(client, corrid, seed, ring=None, bs=4, window=8):
     requests = [ids[0:13]] + [[t] for t in ids[13:24]] + [ids[24:33]] + [[t] for t in ids[33:60]]
     out, length = [], 0
     for i, req in enumerate(requests):
-        parts = [len(req)] if ring is None else split(length, len(req), ring, bs, window)
+        parts = [len(req)] if ring is None else split(length, len(req), ring, bs, window, chunk)
         at = 0
         for j, k in enumerate(parts):
             last = i == len(requests) - 1 and j == len(parts) - 1
@@ -145,6 +153,33 @@ def run(proto, url, http, perturb):
     check(worst <= 1e-4, f"{proto} logits of all {len(win)} requests equal the full-history model's sent "
                          f"the same calls: worst {worst:.2e} of the largest logit, {same} of {len(win)} bit for bit")
     worst, same, argmax = worst_rel(list(zip(win, shift(whole))))
+    check(worst <= 5e-3 and argmax, f"{proto} and the full-history model sent the requests whole: worst "
+                                    f"{worst:.2e} of the largest logit, argmax equal: {argmax}")
+
+
+def chunked(proto, url, http, perturb):
+    """window_sequence_chunked: prefill entries of at most 6 tokens per
+    sequence, a ring sized for a 6-token call past the window. The backend
+    runs a longer request as several calls; the logits must agree with the
+    full-history model sent the same calls."""
+    print(f"{proto}  window_sequence_chunked vs window_sequence_full  {url}")
+    p = params(http, "window_sequence_chunked")
+    bs, ring = int(p["kv_block_size"]), int(p["kv_window_ring_pages"])
+    check(ring == 4, f"window_sequence_chunked has rings of {ring} pages: ceil((8 - 1 + 6) / 4) = 4")
+    base = 400 if proto == "http" else 450
+    got = schedule(SequenceClient(url, "window_sequence_chunked", proto), base + 1, seed=1)
+    full = schedule(SequenceClient(url, "window_sequence_full", proto), base + 2, seed=1, ring=ring, bs=bs, chunk=6)
+    whole = schedule(SequenceClient(url, "window_sequence_full", proto), base + 3, seed=1)
+    want_ring = [min(ring, (n + bs - 1) // bs) for n, _, _ in got]
+    check([int(pg[1]) for _, _, pg in got] == want_ring,
+          f"{proto} window_sequence_chunked holds at most {ring} windowed pages")
+    shift = (lambda xs: xs[1:] + xs[:1]) if perturb else (lambda xs: xs)
+    worst, same, argmax = worst_rel(list(zip(got, shift(full))))
+    check(worst <= 1e-4 and argmax,
+          f"{proto} logits of all {len(got)} requests (the 13- and 9-token ones run in calls of at most 6) "
+          f"equal the full-history model's sent the same calls: worst {worst:.2e} of the largest logit, "
+          f"{same} of {len(got)} bit for bit")
+    worst, same, argmax = worst_rel(list(zip(got, shift(whole))))
     check(worst <= 5e-3 and argmax, f"{proto} and the full-history model sent the requests whole: worst "
                                     f"{worst:.2e} of the largest logit, argmax equal: {argmax}")
 
@@ -229,6 +264,8 @@ def main():
     args = ap.parse_args()
     run("http", args.http, args.http, args.perturb)
     run("grpc", args.grpc, args.http, args.perturb)
+    chunked("http", args.http, args.http, args.perturb)
+    chunked("grpc", args.grpc, args.http, args.perturb)
     if not args.perturb:
         batched(args.http)
         exhausted(args.http, args.http)
