@@ -189,7 +189,9 @@ HuggingFace transformers — from the direct driver and from vLLM 0.29.0's
 Tlaloc StableHLO also serves from NVIDIA Triton Inference Server through a C++
 backend that compiles it with the PJRT CUDA plugin. A Tlaloc-generated gradient
 answers over Triton's HTTP and gRPC endpoints with the same bits the DXIR
-interpreter produces. → [triton/](triton/README.md)
+interpreter produces, and the TinyLlama artifact, written as a Triton model from
+Kotlin, generates the same 6 token ids with its weights and KV cache held by the
+backend. → [triton/](triton/README.md)
 
 ---
 

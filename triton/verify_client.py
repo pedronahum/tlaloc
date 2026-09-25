@@ -16,6 +16,10 @@ Expected values:
                 A = [[1, 2], [3, 4]]. Compared bit for bit.
   dtypes        x*x + x, computed here. Every value is exactly representable
                 in its dtype, so this is compared bit for bit too.
+  reference_decode
+                decode steps with the KV pools held by the backend, against
+                the DXIR interpreter (examples/reference/reference_decode.json),
+                within 1e-3 of the largest logit and with the same argmax.
 
 --perturb changes one expected GRAD value; the run must then fail. That is
 the negative control: it shows a wrong answer is caught.
@@ -84,6 +88,80 @@ def buckets(http, np, httpclient):
         FAILURES.append("live after refusal")
 
 
+def close(label, got, want, rel=1e-3):
+    """Every |got - want| <= rel * max|want|, and the argmax agrees."""
+    scale = max(abs(w) for w in want) or 1.0
+    worst = max(abs(g - w) for g, w in zip(got, want)) if len(got) == len(want) else float("inf")
+    arg = max(range(len(got)), key=got.__getitem__) == max(range(len(want)), key=want.__getitem__) \
+        if len(got) == len(want) and got else False
+    ok = worst <= rel * scale and arg
+    print(f"  {'ok  ' if ok else 'FAIL'} {label}: max |diff| {worst:.2e} (bound {rel * scale:.2e}), "
+          f"argmax {'agrees' if arg else 'differs'}")
+    if not ok:
+        FAILURES.append(label)
+
+
+def reference_decode(kind, mod, url, np, steps):
+    """Decode steps of the reference decode graph, KV pools kept by the backend.
+
+    The expected logits are the DXIR interpreter's, with the pools carried
+    from step to step. XLA's GPU f32 dot runs as TF32, so the comparison is
+    within 1e-3 of the step's largest logit, plus an exact argmax, rather
+    than bit for bit. Steps 2 to 4 attend over keys and values that earlier
+    requests wrote, so they only agree if the backend carried the state.
+    """
+    print(f"reference_decode  {kind} {url}")
+    client = mod.InferenceServerClient(url=url)
+    for k, step in enumerate(steps):
+        inputs = []
+        for name, t in step["inputs"].items():
+            arr = np.array(t["data"], dtype=np.int32).reshape(t["shape"])
+            i = mod.InferInput(name, list(arr.shape), "INT32")
+            if kind == "http":
+                i.set_data_from_numpy(arr, binary_data=True)
+            else:
+                i.set_data_from_numpy(arr)
+            inputs.append(i)
+        res = client.infer("reference_decode", inputs)
+        logits = res.as_numpy("logits")
+        want = step["outputs"]["logits"]
+        if list(logits.shape) != want["shape"]:
+            print(f"  FAIL {kind} step {k}: logits shape {list(logits.shape)}, want {want['shape']}")
+            FAILURES.append(f"{kind} reference_decode step {k} shape")
+            continue
+        batch = want["shape"][0]
+        row = len(want["data"]) // batch
+        for b in range(batch):
+            close(f"{kind} reference_decode step {k} row {b} (batch {batch})",
+                  logits.reshape(-1)[b * row:(b + 1) * row].tolist(),
+                  want["data"][b * row:(b + 1) * row])
+
+    # The same token and position as step 1, on page 5, whose slot for
+    # position 0 no request has written. Its logits must NOT match step 1's:
+    # that is what shows step 1's agreement depends on the earlier request.
+    step = json.loads(json.dumps(steps[1]))
+    step["inputs"]["blockTables"]["data"] = [5, 0]
+    step["inputs"]["slotMapping"]["data"] = [5 * 2 + 1]
+    inputs = []
+    for name, t in step["inputs"].items():
+        arr = np.array(t["data"], dtype=np.int32).reshape(t["shape"])
+        i = mod.InferInput(name, list(arr.shape), "INT32")
+        if kind == "http":
+            i.set_data_from_numpy(arr, binary_data=True)
+        else:
+            i.set_data_from_numpy(arr)
+        inputs.append(i)
+    got = client.infer("reference_decode", inputs).as_numpy("logits").reshape(-1).tolist()
+    want = steps[1]["outputs"]["logits"]["data"]
+    worst = max(abs(g - w) for g, w in zip(got, want))
+    bound = 1e-3 * max(abs(w) for w in want)
+    ok = worst > 10 * bound
+    print(f"  {'ok  ' if ok else 'FAIL'} {kind} step 1 on an unwritten page differs from step 1: "
+          f"max |diff| {worst:.2e} (must exceed {10 * bound:.2e})")
+    if not ok:
+        FAILURES.append(f"{kind} reference_decode state dependence")
+
+
 def load(http, name, config=None):
     """POST /v2/repository/models/<name>/load; returns (status, body)."""
     body = {} if config is None else {"parameters": {"config": json.dumps(config)}}
@@ -134,6 +212,16 @@ def refusals(http):
         ("unsupported data type",
          variant(good, input=[{"name": "A", "data_type": "TYPE_STRING", "dims": [2, 2]}]),
          "has data_type TYPE_STRING"),
+        ("argument that is not input:, weight: or state:", variant({**good, "arguments": "A"}),
+         "argument 'A' in the 'arguments' parameter is not input:<name>, weight:<file> or state:<name>"),
+        ("argument naming an undeclared input", variant({**good, "arguments": "input:B"}),
+         "the 'arguments' parameter names input 'B', which config.pbtxt does not declare"),
+        ("weight file outside the version directory",
+         variant({**good, "arguments": "input:A, weight:../w.bin"}),
+         "weight file '../w.bin' leaves the model version directory"),
+        ("result writing a state no argument reads",
+         variant({**good, "results": "output:VALUE, output:GRAD, state:kv"}),
+         "the 'results' parameter writes state 'kv', which no state: argument"),
     ]
     for label, config, needle in cases:
         status, body = load(http, "matmul_sumsq", config)
@@ -163,7 +251,10 @@ def main():
     ap.add_argument("--http", default="localhost:8000")
     ap.add_argument("--grpc", default="localhost:8001")
     ap.add_argument("--reference", default=str(Path(__file__).parent / "examples/reference/matmul_sumsq.json"))
-    ap.add_argument("--perturb", action="store_true", help="negative control: expect a wrong GRAD")
+    ap.add_argument("--reference-decode",
+                    default=str(Path(__file__).parent / "examples/reference/reference_decode.json"))
+    ap.add_argument("--perturb", action="store_true",
+                    help="negative control: expect a wrong GRAD and a wrong decode logit")
     args = ap.parse_args()
 
     ref = json.loads(Path(args.reference).read_text())
@@ -284,6 +375,14 @@ def main():
             lambda: client.infer("matmul_sumsq", [inp("A", np.zeros((3, 3), dtype=np.float32), "FP32")]),
             "unexpected shape",
         )
+
+    # Both transports replay the same steps. The second pass writes the same
+    # keys and values into the same slots, so it expects the same logits.
+    steps = json.loads(Path(args.reference_decode).read_text())["steps"]
+    if args.perturb:
+        steps[1]["outputs"]["logits"]["data"][0] += 1.0
+    for kind, mod, url in (("http", httpclient, args.http), ("grpc", grpcclient, args.grpc)):
+        reference_decode(kind, mod, url, np, steps)
 
     buckets(args.http, np, httpclient)
     refusals(args.http)

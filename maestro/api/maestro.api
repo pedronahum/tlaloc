@@ -443,3 +443,11 @@ public final class io/tlaloc/maestro/serving/ServingWeightsPointer$Companion {
 	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingWeightsPointer;
 }
 
+public final class io/tlaloc/maestro/serving/TritonModelRepository {
+	public static final field BACKEND Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/maestro/serving/TritonModelRepository;
+	public static final field VERSION Ljava/lang/String;
+	public final fun config (Lio/tlaloc/maestro/serving/ServingManifest;Ljava/lang/String;)Ljava/lang/String;
+	public final fun write (Ljava/nio/file/Path;Ljava/nio/file/Path;Ljava/lang/String;)Ljava/nio/file/Path;
+}
+

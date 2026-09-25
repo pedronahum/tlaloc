@@ -37,8 +37,10 @@ namespace triton { namespace backend { namespace tlaloc {
 
 using tlaloc_triton::ClientOptions;
 using tlaloc_triton::DType;
+using tlaloc_triton::ExecuteArg;
 using tlaloc_triton::FunctionSignature;
 using tlaloc_triton::HostInput;
+using tlaloc_triton::PjrtBuffer;
 using tlaloc_triton::PjrtClient;
 using tlaloc_triton::PjrtExecutable;
 using tlaloc_triton::PjrtPlugin;
@@ -183,6 +185,31 @@ struct TensorSpec {
   std::vector<int64_t> shape;  // what the model sees; -1 = any
 };
 
+// Where an argument of the entry function comes from.
+enum class ArgSource {
+  INPUT,   // a request tensor, by its config.pbtxt input name
+  WEIGHT,  // a raw little-endian file in the version directory, uploaded at load
+  STATE,   // a device buffer owned by the model instance, zero at start
+};
+
+struct ArgPlan {
+  ArgSource source = ArgSource::INPUT;
+  std::string name;  // input name, weight file, or state name
+  size_t input = 0;  // index into the config inputs, for INPUT
+};
+
+// Where a result of the entry function goes.
+enum class ResultSink {
+  OUTPUT,  // a response tensor, by its config.pbtxt output name
+  STATE,   // replaces the instance's state of that name
+};
+
+struct ResultPlan {
+  ResultSink sink = ResultSink::OUTPUT;
+  std::string name;
+  size_t output = 0;  // index into the config outputs, for OUTPUT
+};
+
 struct Bucket {
   std::string file;
   FunctionSignature signature;
@@ -218,6 +245,20 @@ ShapeAccepts(const std::vector<int64_t>& pattern, const std::vector<int64_t>& di
   return true;
 }
 
+// Comma-separated items, trimmed, empty items dropped.
+std::vector<std::string>
+SplitList(const std::string& list)
+{
+  std::vector<std::string> items;
+  std::stringstream in(list);
+  std::string item;
+  while (std::getline(in, item, ',')) {
+    item = Trim(item);
+    if (!item.empty()) items.push_back(item);
+  }
+  return items;
+}
+
 class ModelState : public BackendModel {
  public:
   static TRITONSERVER_Error* Create(TRITONBACKEND_Model* model, ModelState** state);
@@ -225,19 +266,36 @@ class ModelState : public BackendModel {
   const std::vector<TensorSpec>& inputs() const { return inputs_; }
   const std::vector<TensorSpec>& outputs() const { return outputs_; }
   const std::vector<Bucket>& buckets() const { return buckets_; }
+  const std::vector<ArgPlan>& args() const { return args_; }
+  const std::vector<ResultPlan>& results() const { return results_; }
+  const PjrtBuffer* weight(size_t arg) const { return weights_[arg].get(); }
+  PjrtClient* client() const { return client_.get(); }
 
  private:
   explicit ModelState(TRITONBACKEND_Model* model) : BackendModel(model) {}
   TRITONSERVER_Error* Load(const BackendState& backend);
   TRITONSERVER_Error* ReadSpecs(const char* key, std::vector<TensorSpec>* specs);
   TRITONSERVER_Error* Parameter(const std::string& key, std::string* value);
+  TRITONSERVER_Error* ParsePlan();
+  TRITONSERVER_Error* CheckSignature(const std::string& path, const FunctionSignature& sig);
+  TRITONSERVER_Error* LoadWeights();
+  TRITONSERVER_Error* InsideVersionDir(const std::string& item, const std::string& what) const;
+  std::string VersionDir() const
+  {
+    return JoinPath({RepositoryPath(), std::to_string(Version())});
+  }
   std::string Where() const { return "model '" + Name() + "': "; }
 
-  // Declared before the buckets so that executables are destroyed first.
+  // Declared before the buckets and weights so that those are destroyed
+  // first.
   std::shared_ptr<PjrtClient> client_;
   std::vector<TensorSpec> inputs_;
   std::vector<TensorSpec> outputs_;
+  std::vector<ArgPlan> args_;
+  std::vector<ResultPlan> results_;
+  bool explicit_arguments_ = false;
   std::vector<Bucket> buckets_;
+  std::vector<std::unique_ptr<PjrtBuffer>> weights_;  // one slot per argument
 };
 
 TRITONSERVER_Error*
@@ -319,6 +377,325 @@ ModelState::ReadSpecs(const char* key, std::vector<TensorSpec>* specs)
 }
 
 TRITONSERVER_Error*
+ModelState::InsideVersionDir(const std::string& item, const std::string& what) const
+{
+  if (item[0] == '/') {
+    return Err(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        Where() + what + " '" + item + "' is an absolute path; " + what +
+            "s are named relative to the model version directory " + VersionDir());
+  }
+  std::stringstream parts(item);
+  std::string part;
+  while (std::getline(parts, part, '/')) {
+    if (part == "..") {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          Where() + what + " '" + item + "' leaves the model version directory " +
+              VersionDir() + "; " + what + "s must be files inside it");
+    }
+  }
+  return nullptr;
+}
+
+// Reads the 'arguments' and 'results' parameters, or derives the positional
+// default: every config input in order, every config output in order.
+TRITONSERVER_Error*
+ModelState::ParsePlan()
+{
+  std::string arguments, results;
+  RETURN_IF_ERROR(Parameter("arguments", &arguments));
+  RETURN_IF_ERROR(Parameter("results", &results));
+
+  auto split = [](const std::string& item, std::string* kind, std::string* name) {
+    size_t colon = item.find(':');
+    if (colon == std::string::npos) return false;
+    *kind = Trim(item.substr(0, colon));
+    *name = Trim(item.substr(colon + 1));
+    return !name->empty();
+  };
+
+  std::vector<bool> input_used(inputs_.size(), false);
+  std::set<std::string> states;
+  explicit_arguments_ = !Trim(arguments).empty();
+  if (!explicit_arguments_) {
+    for (size_t i = 0; i < inputs_.size(); ++i) {
+      args_.push_back({ArgSource::INPUT, inputs_[i].name, i});
+      input_used[i] = true;
+    }
+  } else {
+    for (const std::string& item : SplitList(arguments)) {
+      std::string kind, name;
+      if (!split(item, &kind, &name) || (kind != "input" && kind != "weight" && kind != "state")) {
+        return Err(
+            TRITONSERVER_ERROR_INVALID_ARG,
+            Where() + "argument '" + item + "' in the 'arguments' parameter is not "
+            "input:<name>, weight:<file> or state:<name>");
+      }
+      ArgPlan plan;
+      plan.name = name;
+      if (kind == "input") {
+        plan.source = ArgSource::INPUT;
+        size_t k = 0;
+        while (k < inputs_.size() && inputs_[k].name != name) ++k;
+        if (k == inputs_.size()) {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              Where() + "the 'arguments' parameter names input '" + name +
+                  "', which config.pbtxt does not declare");
+        }
+        if (input_used[k]) {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              Where() + "the 'arguments' parameter binds input '" + name + "' twice");
+        }
+        input_used[k] = true;
+        plan.input = k;
+      } else if (kind == "weight") {
+        plan.source = ArgSource::WEIGHT;
+        RETURN_IF_ERROR(InsideVersionDir(name, "weight file"));
+      } else {
+        plan.source = ArgSource::STATE;
+        if (!states.insert(name).second) {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              Where() + "the 'arguments' parameter binds state '" + name + "' twice");
+        }
+      }
+      args_.push_back(plan);
+    }
+    for (size_t k = 0; k < inputs_.size(); ++k) {
+      if (!input_used[k]) {
+        return Err(
+            TRITONSERVER_ERROR_INVALID_ARG,
+            Where() + "config.pbtxt input '" + inputs_[k].name +
+                "' is not bound by the 'arguments' parameter");
+      }
+    }
+  }
+
+  std::vector<bool> output_used(outputs_.size(), false);
+  std::set<std::string> written;
+  if (Trim(results).empty()) {
+    for (size_t j = 0; j < outputs_.size(); ++j) {
+      results_.push_back({ResultSink::OUTPUT, outputs_[j].name, j});
+      output_used[j] = true;
+    }
+  } else {
+    for (const std::string& item : SplitList(results)) {
+      std::string kind, name;
+      if (!split(item, &kind, &name) || (kind != "output" && kind != "state")) {
+        return Err(
+            TRITONSERVER_ERROR_INVALID_ARG,
+            Where() + "result '" + item + "' in the 'results' parameter is not "
+            "output:<name> or state:<name>");
+      }
+      ResultPlan plan;
+      plan.name = name;
+      if (kind == "output") {
+        plan.sink = ResultSink::OUTPUT;
+        size_t k = 0;
+        while (k < outputs_.size() && outputs_[k].name != name) ++k;
+        if (k == outputs_.size()) {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              Where() + "the 'results' parameter names output '" + name +
+                  "', which config.pbtxt does not declare");
+        }
+        if (output_used[k]) {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              Where() + "the 'results' parameter binds output '" + name + "' twice");
+        }
+        output_used[k] = true;
+        plan.output = k;
+      } else {
+        plan.sink = ResultSink::STATE;
+        if (states.count(name) == 0) {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              Where() + "the 'results' parameter writes state '" + name +
+                  "', which no state: argument in the 'arguments' parameter reads");
+        }
+        if (!written.insert(name).second) {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              Where() + "the 'results' parameter writes state '" + name + "' twice");
+        }
+      }
+      results_.push_back(plan);
+    }
+    for (size_t k = 0; k < outputs_.size(); ++k) {
+      if (!output_used[k]) {
+        return Err(
+            TRITONSERVER_ERROR_INVALID_ARG,
+            Where() + "config.pbtxt output '" + outputs_[k].name +
+                "' is not bound by the 'results' parameter");
+      }
+    }
+  }
+  for (const std::string& s : states) {
+    if (written.count(s) == 0) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          Where() + "state '" + s + "' is read by the 'arguments' parameter but no result "
+          "in the 'results' parameter writes it");
+    }
+  }
+  return nullptr;
+}
+
+// The entry signature must agree with config.pbtxt and with the argument and
+// result plan. Weights and state keep one type across all buckets.
+TRITONSERVER_Error*
+ModelState::CheckSignature(const std::string& path, const FunctionSignature& sig)
+{
+  auto count = [&](const char* what, size_t have, size_t want) -> TRITONSERVER_Error* {
+    if (have == want) return nullptr;
+    const bool planned = std::string(what) == "input" ? explicit_arguments_ : false;
+    return Err(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        Where() + path + ": @" + sig.name + " has " + std::to_string(have) + " " + what +
+            "s but " + (planned ? "the 'arguments' parameter binds " : "config.pbtxt declares ") +
+            std::to_string(want));
+  };
+  RETURN_IF_ERROR(count("input", sig.args.size(), args_.size()));
+  RETURN_IF_ERROR(count("output", sig.results.size(), results_.size()));
+
+  auto basic = [&](const std::string& at, const tlaloc_triton::TensorType& t) -> TRITONSERVER_Error* {
+    if (t.dtype == DType::UNSUPPORTED) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          at + "has element type " + t.element + ", which the tlaloc backend does not serve");
+    }
+    for (int64_t d : t.dims) {
+      if (d < 0) {
+        return Err(
+            TRITONSERVER_ERROR_INVALID_ARG,
+            at + "is " + t.text + ", which has a dynamic dimension. Export one artifact "
+            "per shape and list them all in the 'artifact' parameter");
+      }
+    }
+    return nullptr;
+  };
+  auto against = [&](const std::string& at, const tlaloc_triton::TensorType& t,
+                     const TensorSpec& spec) -> TRITONSERVER_Error* {
+    if (t.dtype != spec.dtype) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          at + "is " + t.text + " but config.pbtxt says " + tlaloc_triton::TritonName(spec.dtype));
+    }
+    if (!ShapeAccepts(spec.shape, t.dims)) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          at + "is " + t.text + " but config.pbtxt allows shape " + ShapeString(spec.shape) +
+              (MaxBatchSize() > 0 ? " (the leading -1 is the batch dimension)" : ""));
+    }
+    return nullptr;
+  };
+  auto fixed = [&](const std::string& at, const tlaloc_triton::TensorType& t,
+                   const tlaloc_triton::TensorType& first) -> TRITONSERVER_Error* {
+    if (t.dtype != first.dtype || t.dims != first.dims) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          at + "is " + t.text + " but " + buckets_[0].file + " has " + first.text +
+              "; weights and state have one type across all artifacts of a model");
+    }
+    return nullptr;
+  };
+
+  for (size_t i = 0; i < args_.size(); ++i) {
+    const auto& t = sig.args[i];
+    const ArgPlan& p = args_[i];
+    const char* kind = p.source == ArgSource::INPUT ? "input" :
+                       p.source == ArgSource::WEIGHT ? "weight" : "state";
+    std::string at = Where() + path + ": argument " + std::to_string(i) + " (" + kind + " '" +
+                     p.name + "') ";
+    if (!explicit_arguments_) {
+      at = Where() + path + ": input " + std::to_string(i) + " ('" + p.name + "') ";
+    }
+    RETURN_IF_ERROR(basic(at, t));
+    if (p.source == ArgSource::INPUT) {
+      RETURN_IF_ERROR(against(at, t, inputs_[p.input]));
+    } else if (!buckets_.empty()) {
+      RETURN_IF_ERROR(fixed(at, t, buckets_[0].signature.args[i]));
+    }
+  }
+  for (size_t j = 0; j < results_.size(); ++j) {
+    const auto& t = sig.results[j];
+    const ResultPlan& p = results_[j];
+    std::string at = Where() + path + ": output " + std::to_string(j) + " ('" + p.name + "') ";
+    RETURN_IF_ERROR(basic(at, t));
+    if (p.sink == ResultSink::OUTPUT) {
+      RETURN_IF_ERROR(against(at, t, outputs_[p.output]));
+      continue;
+    }
+    for (size_t i = 0; i < args_.size(); ++i) {
+      if (args_[i].source == ArgSource::STATE && args_[i].name == p.name) {
+        const auto& read = sig.args[i];
+        if (read.dtype != t.dtype || read.dims != t.dims) {
+          return Err(
+              TRITONSERVER_ERROR_INVALID_ARG,
+              at + "is " + t.text + " but it replaces state '" + p.name + "', which argument " +
+                  std::to_string(i) + " reads as " + read.text);
+        }
+      }
+    }
+  }
+  return nullptr;
+}
+
+// Uploads every weight argument from its file. The file is the tensor's
+// bytes, dense, row-major and little-endian, with no header.
+TRITONSERVER_Error*
+ModelState::LoadWeights()
+{
+  weights_.resize(args_.size());
+  const uint64_t t0 = NowNs();
+  uint64_t total = 0;
+  size_t count = 0;
+  for (size_t i = 0; i < args_.size(); ++i) {
+    if (args_[i].source != ArgSource::WEIGHT) continue;
+    const auto& t = buckets_[0].signature.args[i];
+    const std::string path = JoinPath({VersionDir(), args_[i].name});
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+      return Err(TRITONSERVER_ERROR_NOT_FOUND, Where() + "cannot read the weight file " + path);
+    }
+    const uint64_t size = static_cast<uint64_t>(in.tellg());
+    const uint64_t need = Elements(t.dims) * tlaloc_triton::ByteWidth(t.dtype);
+    if (size != need) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          Where() + "the weight file " + path + " has " + std::to_string(size) +
+              " bytes; argument " + std::to_string(i) + " is " + t.text + " and needs " +
+              std::to_string(need));
+    }
+    std::vector<char> bytes(size);
+    in.seekg(0);
+    if (size > 0 && !in.read(bytes.data(), static_cast<std::streamsize>(size))) {
+      return Err(TRITONSERVER_ERROR_INTERNAL, Where() + "reading the weight file " + path + " failed");
+    }
+    HostInput host;
+    host.data = bytes.data();
+    host.byte_size = size;
+    host.dtype = t.dtype;
+    host.dims = t.dims;
+    std::string err = PjrtBuffer::Upload(client_.get(), host, &weights_[i]);
+    if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + ": " + err);
+    total += size;
+    ++count;
+  }
+  if (count > 0) {
+    std::ostringstream m;
+    m << "tlaloc backend: " << Where() << "uploaded " << count << " weights ("
+      << total / (1024 * 1024) << " MiB) in " << (NowNs() - t0) / 1000000 << " ms";
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+  }
+  return nullptr;
+}
+
+TRITONSERVER_Error*
 ModelState::Load(const BackendState& backend)
 {
   RETURN_IF_ERROR(ReadSpecs("input", &inputs_));
@@ -337,6 +714,7 @@ ModelState::Load(const BackendState& backend)
         "\"artifact\" value: { string_value: \"model.mlir\" } } naming the StableHLO file, "
         "relative to the model version directory");
   }
+  RETURN_IF_ERROR(ParsePlan());
 
   if (Trim(plugin_path).empty()) plugin_path = backend.plugin_path;
   if (Trim(plugin_path).empty()) plugin_path = EnvOr("TLALOC_PJRT_PLUGIN_PATH", "");
@@ -351,31 +729,10 @@ ModelState::Load(const BackendState& backend)
 
   // Parse every bucket before touching the GPU, so that a config mistake
   // costs no client.
-  const std::string version_dir = JoinPath({RepositoryPath(), std::to_string(Version())});
-  std::stringstream list(artifact_list);
-  std::string item;
+  const std::string version_dir = VersionDir();
   std::vector<std::string> texts;
-  while (std::getline(list, item, ',')) {
-    item = Trim(item);
-    if (item.empty()) continue;
-    if (item[0] == '/') {
-      return Err(
-          TRITONSERVER_ERROR_INVALID_ARG,
-          Where() + "artifact '" + item + "' is an absolute path; artifacts are named "
-          "relative to the model version directory " + version_dir);
-    }
-    {
-      std::stringstream parts(item);
-      std::string part;
-      while (std::getline(parts, part, '/')) {
-        if (part == "..") {
-          return Err(
-              TRITONSERVER_ERROR_INVALID_ARG,
-              Where() + "artifact '" + item + "' leaves the model version directory " +
-                  version_dir + "; artifacts must be files inside it");
-        }
-      }
-    }
+  for (const std::string& item : SplitList(artifact_list)) {
+    RETURN_IF_ERROR(InsideVersionDir(item, "artifact"));
     const std::string path = JoinPath({version_dir, item});
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -397,51 +754,7 @@ ModelState::Load(const BackendState& backend)
         !tlaloc_triton::SelectEntry(functions, entry, &sig, &perr)) {
       return Err(TRITONSERVER_ERROR_INVALID_ARG, Where() + path + ": " + perr);
     }
-
-    // The signature must agree with config.pbtxt, positionally.
-    auto check = [&](const char* what, const std::vector<TensorSpec>& specs,
-                     const std::vector<tlaloc_triton::TensorType>& types) -> TRITONSERVER_Error* {
-      if (specs.size() != types.size()) {
-        return Err(
-            TRITONSERVER_ERROR_INVALID_ARG,
-            Where() + path + ": @" + sig.name + " has " + std::to_string(types.size()) + " " +
-                what + "s but config.pbtxt declares " + std::to_string(specs.size()));
-      }
-      for (size_t i = 0; i < specs.size(); ++i) {
-        const auto& t = types[i];
-        std::string at = Where() + path + ": " + what + " " + std::to_string(i) + " ('" +
-                         specs[i].name + "') ";
-        if (t.dtype == DType::UNSUPPORTED) {
-          return Err(
-              TRITONSERVER_ERROR_INVALID_ARG,
-              at + "has element type " + t.element + ", which the tlaloc backend does not serve");
-        }
-        for (int64_t d : t.dims) {
-          if (d < 0) {
-            return Err(
-                TRITONSERVER_ERROR_INVALID_ARG,
-                at + "is " + t.text + ", which has a dynamic dimension. Export one artifact "
-                "per shape and list them all in the 'artifact' parameter");
-          }
-        }
-        if (t.dtype != specs[i].dtype) {
-          return Err(
-              TRITONSERVER_ERROR_INVALID_ARG,
-              at + "is " + t.text + " but config.pbtxt says " +
-                  tlaloc_triton::TritonName(specs[i].dtype));
-        }
-        if (!ShapeAccepts(specs[i].shape, t.dims)) {
-          return Err(
-              TRITONSERVER_ERROR_INVALID_ARG,
-              at + "is " + t.text + " but config.pbtxt allows shape " +
-                  ShapeString(specs[i].shape) +
-                  (MaxBatchSize() > 0 ? " (the leading -1 is the batch dimension)" : ""));
-        }
-      }
-      return nullptr;
-    };
-    RETURN_IF_ERROR(check("input", inputs_, sig.args));
-    RETURN_IF_ERROR(check("output", outputs_, sig.results));
+    RETURN_IF_ERROR(CheckSignature(path, sig));
     for (const Bucket& b : buckets_) {
       bool same = true;
       for (size_t i = 0; i < sig.args.size(); ++i) same &= b.signature.args[i].dims == sig.args[i].dims;
@@ -469,18 +782,19 @@ ModelState::Load(const BackendState& backend)
     if (!err.empty()) {
       return Err(TRITONSERVER_ERROR_INVALID_ARG, Where() + buckets_[i].file + ": " + err);
     }
-    if (buckets_[i].executable->num_outputs() != outputs_.size()) {
+    if (buckets_[i].executable->num_outputs() != results_.size()) {
       return Err(
           TRITONSERVER_ERROR_INTERNAL,
           Where() + buckets_[i].file + " compiled to " +
               std::to_string(buckets_[i].executable->num_outputs()) + " outputs, expected " +
-              std::to_string(outputs_.size()));
+              std::to_string(results_.size()));
     }
     std::ostringstream m;
     m << "tlaloc backend: " << Where() << "compiled " << buckets_[i].file << " (@"
       << buckets_[i].signature.name << ") in " << (NowNs() - t0) / 1000000 << " ms";
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
   }
+  RETURN_IF_ERROR(LoadWeights());
   return nullptr;
 }
 
@@ -501,11 +815,14 @@ class ModelInstanceState : public BackendModelInstance {
       : BackendModelInstance(model_state, instance), model_state_(model_state)
   {
   }
+  TRITONSERVER_Error* InitState();
   TRITONSERVER_Error* Run(
       TRITONBACKEND_Request* request, TRITONBACKEND_Response* response,
       uint64_t* compute_start, uint64_t* compute_end, uint64_t* batch);
 
   ModelState* model_state_;
+  // State buffers by name, on the device, replaced after every request.
+  std::map<std::string, std::unique_ptr<PjrtBuffer>> state_;
 };
 
 TRITONSERVER_Error*
@@ -530,6 +847,48 @@ ModelInstanceState::Create(
         TRITONSERVER_ERROR_INVALID_ARG,
         "instance '" + name + "': the tlaloc backend runs every instance on PJRT device 0; "
         "set instance_group gpus: [ 0 ] (or use KIND_CPU / KIND_MODEL)");
+  }
+  TRITONSERVER_Error* err = (*state)->InitState();
+  if (err != nullptr) {
+    delete *state;
+    *state = nullptr;
+  }
+  return err;
+}
+
+// Every state argument starts as zeros of its type.
+TRITONSERVER_Error*
+ModelInstanceState::InitState()
+{
+  const ModelState& model = *model_state_;
+  const auto& sig = model.buckets()[0].signature;
+  size_t count = 0;
+  uint64_t total = 0;
+  for (size_t i = 0; i < model.args().size(); ++i) {
+    const ArgPlan& p = model.args()[i];
+    if (p.source != ArgSource::STATE) continue;
+    const auto& t = sig.args[i];
+    const size_t bytes = Elements(t.dims) * tlaloc_triton::ByteWidth(t.dtype);
+    std::vector<char> zeros(bytes, 0);
+    HostInput host;
+    host.data = zeros.data();
+    host.byte_size = bytes;
+    host.dtype = t.dtype;
+    host.dims = t.dims;
+    std::string err = PjrtBuffer::Upload(model.client(), host, &state_[p.name]);
+    if (!err.empty()) {
+      return Err(
+          TRITONSERVER_ERROR_INTERNAL,
+          "instance '" + Name() + "': state '" + p.name + "': " + err);
+    }
+    ++count;
+    total += bytes;
+  }
+  if (count > 0) {
+    std::ostringstream m;
+    m << "tlaloc backend: instance '" << Name() << "': " << count << " state buffers ("
+      << total / 1024 << " KiB) zeroed on the device";
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
   }
   return nullptr;
 }
@@ -565,6 +924,7 @@ ModelInstanceState::Run(
 {
   const ModelState& model = *model_state_;
   const auto& specs = model.inputs();
+  const auto& plan = model.args();
 
   uint32_t input_count = 0;
   RETURN_IF_ERROR(TRITONBACKEND_RequestInputCount(request, &input_count));
@@ -642,9 +1002,11 @@ ModelInstanceState::Run(
   const Bucket* bucket = nullptr;
   for (const Bucket& b : model.buckets()) {
     bool match = true;
-    for (size_t i = 0; i < shapes.size(); ++i) {
-      const auto& want = b.signature.args[i].dims;
-      match &= want == shapes[i] || IsScalarAsOne(shapes[i], want);
+    for (size_t a = 0; a < plan.size(); ++a) {
+      if (plan[a].source != ArgSource::INPUT) continue;
+      const auto& want = b.signature.args[a].dims;
+      const auto& have = shapes[plan[a].input];
+      match &= want == have || IsScalarAsOne(have, want);
     }
     if (match) {
       bucket = &b;
@@ -656,25 +1018,52 @@ ModelInstanceState::Run(
     for (const auto& s : shapes) have += (have.empty() ? "" : ", ") + ShapeString(s);
     for (const Bucket& b : model.buckets()) {
       std::string one;
-      for (const auto& a : b.signature.args) one += (one.empty() ? "" : ", ") + ShapeString(a.dims);
+      for (size_t k = 0; k < specs.size(); ++k) {
+        for (size_t a = 0; a < plan.size(); ++a) {
+          if (plan[a].source == ArgSource::INPUT && plan[a].input == k) {
+            one += (one.empty() ? "" : ", ") + ShapeString(b.signature.args[a].dims);
+          }
+        }
+      }
       want += (want.empty() ? "(" : "; (") + one + ")";
     }
     return Err(
         TRITONSERVER_ERROR_INVALID_ARG,
         "no compiled artifact takes input shapes (" + have + "); this model serves " + want);
   }
-  // PJRT gets the entry function's own shapes ([1] -> rank 0).
-  for (size_t i = 0; i < host.size(); ++i) host[i].dims = bucket->signature.args[i].dims;
+
+  std::vector<ExecuteArg> args(plan.size());
+  for (size_t a = 0; a < plan.size(); ++a) {
+    switch (plan[a].source) {
+      case ArgSource::INPUT:
+        args[a].host = host[plan[a].input];
+        // PJRT gets the entry function's own shapes ([1] -> rank 0).
+        args[a].host.dims = bucket->signature.args[a].dims;
+        break;
+      case ArgSource::WEIGHT:
+        args[a].device = model.weight(a);
+        break;
+      case ArgSource::STATE:
+        args[a].device = state_.at(plan[a].name).get();
+        break;
+    }
+  }
   if (model.MaxBatchSize() > 0 && !shapes.empty() && !shapes[0].empty()) {
     *batch = static_cast<uint64_t>(shapes[0][0]);
   }
 
   *compute_start = NowNs();
   std::unique_ptr<PjrtResults> results;
-  std::string err = bucket->executable->Execute(host, &results);
+  std::string err = bucket->executable->Execute(args, &results);
   *compute_end = NowNs();
   if (!err.empty()) {
     return Err(TRITONSERVER_ERROR_INTERNAL, bucket->file + ": " + err);
+  }
+  // The execution ran, so its state results replace the state it read, even
+  // if sending the response fails below or the client asked for no output.
+  const auto& sinks = model.results();
+  for (size_t j = 0; j < sinks.size(); ++j) {
+    if (sinks[j].sink == ResultSink::STATE) state_[sinks[j].name] = results->Release(j);
   }
 
   std::set<std::string> requested;
@@ -687,23 +1076,25 @@ ModelInstanceState::Run(
   }
 
   const auto& outs = model.outputs();
-  for (size_t j = 0; j < outs.size(); ++j) {
-    if (requested_count > 0 && requested.count(outs[j].name) == 0) continue;
+  for (size_t j = 0; j < sinks.size(); ++j) {
+    if (sinks[j].sink != ResultSink::OUTPUT) continue;
+    const TensorSpec& out = outs[sinks[j].output];
+    if (requested_count > 0 && requested.count(out.name) == 0) continue;
     DType dtype;
     std::vector<int64_t> dims;
     err = results->Describe(j, &dtype, &dims);
     if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, err);
-    if (dtype != outs[j].dtype) {
+    if (dtype != out.dtype) {
       return Err(
           TRITONSERVER_ERROR_INTERNAL,
-          "output '" + outs[j].name + "' came back as " + tlaloc_triton::TritonName(dtype) +
-              ", expected " + tlaloc_triton::TritonName(outs[j].dtype));
+          "output '" + out.name + "' came back as " + tlaloc_triton::TritonName(dtype) +
+              ", expected " + tlaloc_triton::TritonName(out.dtype));
     }
     const size_t bytes = Elements(dims) * tlaloc_triton::ByteWidth(dtype);
-    if (IsScalarAsOne(outs[j].shape, dims)) dims = {1};
+    if (IsScalarAsOne(out.shape, dims)) dims = {1};
     TRITONBACKEND_Output* output = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_ResponseOutput(
-        response, &output, outs[j].name.c_str(),
+        response, &output, out.name.c_str(),
         TRITONSERVER_StringToDataType(tlaloc_triton::TritonName(dtype)), dims.data(),
         static_cast<uint32_t>(dims.size())));
     void* buffer = nullptr;
@@ -718,14 +1109,14 @@ ModelInstanceState::Run(
       cudaError_t e = cudaMemcpy(buffer, tmp.data(), bytes, cudaMemcpyHostToDevice);
       if (e != cudaSuccess) {
         return Err(
-            TRITONSERVER_ERROR_INTERNAL, "output '" + outs[j].name +
+            TRITONSERVER_ERROR_INTERNAL, "output '" + out.name +
                                              "': copying to GPU memory failed: " +
                                              cudaGetErrorString(e));
       }
 #else
       return Err(
           TRITONSERVER_ERROR_UNSUPPORTED,
-          "output '" + outs[j].name + "' was given GPU memory and this build has no CUDA");
+          "output '" + out.name + "' was given GPU memory and this build has no CUDA");
 #endif
     } else {
       err = results->CopyToHost(j, buffer, bytes);

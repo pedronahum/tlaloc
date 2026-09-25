@@ -39,6 +39,7 @@ struct ClientOptions {
 };
 
 class PjrtExecutable;
+class PjrtBuffer;
 
 class PjrtClient {
  public:
@@ -57,6 +58,7 @@ class PjrtClient {
 
  private:
   friend class PjrtExecutable;
+  friend class PjrtBuffer;
   PjrtClient() = default;
   const PjrtPlugin* plugin_ = nullptr;
   PJRT_Client* client_ = nullptr;
@@ -65,12 +67,38 @@ class PjrtClient {
   ClientOptions options_;
 };
 
-// A host tensor handed to Execute. `data` must stay valid for the call.
+// A host tensor handed to Execute or Upload. `data` must stay valid for the
+// call.
 struct HostInput {
   const void* data = nullptr;
   size_t byte_size = 0;
   DType dtype = DType::UNSUPPORTED;
   std::vector<int64_t> dims;
+};
+
+// A buffer on device 0 that outlives one execution: a weight uploaded at
+// model load, or state carried from one request to the next. Destroyed with
+// the object.
+class PjrtBuffer {
+ public:
+  ~PjrtBuffer();
+  // Copies `host` to device 0 and waits until the host bytes are no longer
+  // needed.
+  static std::string Upload(
+      PjrtClient* client, const HostInput& host, std::unique_ptr<PjrtBuffer>* out);
+
+ private:
+  friend class PjrtExecutable;
+  friend class PjrtResults;
+  const PJRT_Api* api_ = nullptr;
+  PJRT_Buffer* buffer_ = nullptr;
+};
+
+// One argument of an execution: a device buffer when `device` is set,
+// otherwise the host tensor `host`, copied to the device for this call.
+struct ExecuteArg {
+  HostInput host;
+  const PjrtBuffer* device = nullptr;
 };
 
 // Device results of one execution. Destroys its buffers when it goes away.
@@ -82,6 +110,8 @@ class PjrtResults {
   std::string Describe(size_t i, DType* dtype, std::vector<int64_t>* dims) const;
   // Copies output `i` into `dst`, which must be exactly `byte_size` bytes.
   std::string CopyToHost(size_t i, void* dst, size_t byte_size) const;
+  // Takes output `i` out of the results, to keep it on the device.
+  std::unique_ptr<PjrtBuffer> Release(size_t i);
 
  private:
   friend class PjrtExecutable;
@@ -93,8 +123,8 @@ class PjrtExecutable {
  public:
   ~PjrtExecutable();
   size_t num_outputs() const { return num_outputs_; }
-  // Uploads the inputs to device 0, runs, and waits for completion.
-  std::string Execute(const std::vector<HostInput>& inputs, std::unique_ptr<PjrtResults>* out);
+  // Uploads the host arguments to device 0, runs, and waits for completion.
+  std::string Execute(const std::vector<ExecuteArg>& args, std::unique_ptr<PjrtResults>* out);
 
  private:
   friend class PjrtClient;

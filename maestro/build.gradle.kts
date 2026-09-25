@@ -157,7 +157,9 @@ tasks.register<JavaExec>("exportServingArtifact") {
  *
  * Writes `model_repository/<model>/1/model.mlir` (StableHLO text emitted by
  * Tlaloc) and `reference/<model>.json` (the DXIR interpreter's result for the
- * same graph). The `config.pbtxt` files are written by hand and not touched.
+ * same graph). The `config.pbtxt` files of the three single-function models
+ * are written by hand and not touched; `reference_decode` is written whole by
+ * `TritonModelRepository`, configuration included.
  */
 tasks.register<JavaExec>("exportTritonExamples") {
     group = "tlaloc"
@@ -171,6 +173,41 @@ tasks.register<JavaExec>("exportTritonExamples") {
             listOf(
                 (project.findProperty("outDir") as String?)
                     ?: rootProject.layout.projectDirectory.dir("triton/examples").asFile.absolutePath,
+            )
+        },
+    )
+}
+
+/**
+ * `exportTritonModel`: write a serving artifact into a Triton model repository
+ * for the `tlaloc` backend (triton/README.md).
+ *
+ *     ./gradlew :maestro:exportTritonModel -PartifactDir=/abs/artifact \
+ *         -PoutDir=/abs/model_repository [-PmodelName=tinyllama]
+ *
+ * The artifact comes from [exportServingArtifact] or [exportLlamaServingArtifact].
+ * Its files are hard-linked into `<outDir>/<modelName>/1/` when both are on one
+ * file system and copied otherwise, and `config.pbtxt` is generated from the
+ * manifest.
+ */
+tasks.register<JavaExec>("exportTritonModel") {
+    group = "tlaloc"
+    description = "Write a serving artifact (-PartifactDir) as a Triton model in -PoutDir"
+    val tools = kotlin.jvm().compilations.getByName("tools")
+    dependsOn(tools.compileTaskProvider)
+    classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
+    mainClass.set("io.tlaloc.maestro.serving.ExportTritonModelKt")
+    argumentProviders.add(
+        CommandLineArgumentProvider {
+            fun p(name: String) = (project.findProperty(name) as String?) ?: ""
+            listOf(
+                p("artifactDir").ifBlank {
+                    throw GradleException("exportTritonModel needs -PartifactDir=<a serving artifact>")
+                },
+                p("outDir").ifBlank {
+                    throw GradleException("exportTritonModel needs -PoutDir=<a model repository>")
+                },
+                p("modelName"),
             )
         },
     )

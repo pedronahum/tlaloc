@@ -953,3 +953,31 @@ because `PAGED_ATTENTION`'s ragged chunked-prefill form is not
 implemented. Causal attention makes them compute exactly what a fused prefill
 would; at ~1.35 s/step a six-token prompt spends ~7 s before its first
 generated token. That is what the ragged form is worth.
+
+## 12. Serving through Triton
+
+The same artifact serves through NVIDIA Triton Inference Server with the
+`tlaloc` backend in [`triton/`](../triton/README.md). `TritonModelRepository`
+in `:maestro` writes the artifact as a Triton model: the version directory
+holds the artifact's files, and a generated `config.pbtxt` makes the token
+ids, positions, block tables, sequence lengths and slot mapping request inputs
+and the logits the output. The backend loads the staged weights onto the
+device once, at model load, and keeps the KV pools on the device between
+requests, so a request carries only the step's own tensors.
+
+```bash
+./gradlew :maestro:exportTritonModel -PartifactDir=/tmp/tl-llama \
+    -PoutDir=/tmp/tl-triton-repository -PmodelName=tinyllama
+MODEL_REPOSITORY=/tmp/tl-triton-repository triton/run_server.sh
+python triton/generate_client.py --model tinyllama \
+    --tokenizer $HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0/tokenizer.json
+```
+
+`/tmp/tl-llama` is the artifact from section 10.2. `triton/verify.sh` runs
+these steps when the checkpoint is present, and requires the six generated
+ids to equal HuggingFace's, `[3681, 29889, 13, 13, 29906, 29889]`. On the GB10
+a decode step through Triton over HTTP took about 23 ms, where the Python
+driver of section 10.4 takes 1.35 s, because the pools no longer go to the
+host and back on every step. Building the backend, the PJRT plugin it loads,
+GPU memory settings and the limits are in
+[triton/README.md](../triton/README.md).

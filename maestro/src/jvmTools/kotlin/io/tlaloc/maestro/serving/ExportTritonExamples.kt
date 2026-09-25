@@ -21,7 +21,7 @@ import java.nio.file.Path
  * (`triton/examples/model_repository/`) and the reference values its verify
  * script checks against (`triton/examples/reference/`).
  *
- * Three models:
+ * Four models:
  *
  * - `matmul_sumsq`: `f(A) = sum(A · A)` for a 2x2 `A`, reverse-transformed with
  *   the forward value kept, so the served function returns `(f(A), df/dA)`.
@@ -31,10 +31,16 @@ import java.nio.file.Path
  *   output per dtype. It exists to exercise the backend's non-f32 paths.
  * - `buckets`: `x · x + x` over f32 vectors, emitted twice, for length 4 and
  *   for length 8. The model serves both files, one per shape.
+ * - `reference_decode`: the reference decode graph's serving artifact (one
+ *   attention layer over a paged KV cache, six compiled batch/context
+ *   entries), written by [TritonModelRepository.write]. Its `config.pbtxt` is
+ *   generated from the manifest rather than written by hand.
  *
- * The reference file for `matmul_sumsq` holds the DXIR interpreter's result
- * for the same graph that was emitted, so the served value is compared
- * against Tlaloc's own evaluation and not only against a hand-written number.
+ * The reference files hold the DXIR interpreter's results for the same graphs
+ * that were emitted, so served values are compared against Tlaloc's own
+ * evaluation and not only against hand-written numbers. For
+ * `reference_decode` that is a sequence of decode steps with the KV pools
+ * carried from one step to the next, as the backend carries them.
  */
 fun main(args: Array<String>) {
     val out = Path.of(args.firstOrNull() ?: "triton/examples")
@@ -88,6 +94,17 @@ fun main(args: Array<String>) {
         }
         writeModule(repo.resolve("buckets/1/len$n.mlir"), bucket.toStablehlo())
     }
+
+    // reference_decode ----------------------------------------------------
+    val artifact = Files.createTempDirectory("tlaloc-reference-decode")
+    try {
+        ReferenceDecodeGraph.exportTo(artifact)
+        val model = TritonModelRepository.write(artifact, repo, "reference_decode")
+        println("  $model")
+    } finally {
+        artifact.toFile().deleteRecursively()
+    }
+    Files.writeString(reference.resolve("reference_decode.json"), referenceDecodeSteps())
     println("wrote ${repo.toAbsolutePath()}")
 }
 
@@ -98,3 +115,65 @@ private fun writeModule(path: Path, mlir: String) {
 }
 
 private fun floats(a: FloatArray): String = a.joinToString(", ", "[", "]") { it.toString() }
+
+private fun ints(a: FloatArray): String = a.joinToString(", ", "[", "]") { it.toInt().toString() }
+
+/**
+ * Decode steps of the reference graph, evaluated by the DXIR interpreter with
+ * the KV pools starting at zero and carried from each step to the next.
+ *
+ * One sequence of four tokens on pages 1 and 2 through the (batch 1,
+ * context 4) entry, then two new sequences, one token each, on pages 3 and
+ * 4 through the (batch 2, context 2) entry. The second pair reads pools that
+ * already hold the first sequence's keys and values.
+ */
+private fun referenceDecodeSteps(): String {
+    val model = ReferenceDecodeGraph.MODEL
+    val specs = ServingArtifactWriter.decodeSpecs(model, ReferenceDecodeGraph.POLICY)
+    val poolSize = model.numBlocks * model.blockSize * model.numKvHeads * model.headDim
+    var key = FloatArray(poolSize)
+    var value = FloatArray(poolSize)
+    val bs = model.blockSize
+
+    class Step(val batch: Int, val context: Int, val tokens: List<Int>, val positions: List<Int>,
+               val tables: List<List<Int>>)
+    val steps = listOf(3, 7, 1, 9).mapIndexed { p, t ->
+        Step(1, 4, listOf(t), listOf(p), listOf(listOf(1, 2)))
+    } + Step(2, 2, listOf(4, 10), listOf(0, 0), listOf(listOf(3), listOf(4)))
+
+    val out = StringBuilder()
+    out.append("{\n  \"source\": \"DXIR interpreter, exportTritonExamples\",\n")
+    out.append("  \"steps\": [\n")
+    steps.forEachIndexed { k, s ->
+        val spec = specs.single { it.bucket.batch == s.batch && it.bucket.maxContext == s.context }
+        val fn = ReferenceDecodeGraph.build(spec)
+        val tokenIds = FloatArray(s.batch) { s.tokens[it].toFloat() }
+        val positions = FloatArray(s.batch) { s.positions[it].toFloat() }
+        val tables = FloatArray(s.batch * spec.maxBlocksPerSeq) {
+            s.tables[it / spec.maxBlocksPerSeq][it % spec.maxBlocksPerSeq].toFloat()
+        }
+        val seqLens = FloatArray(s.batch) { (s.positions[it] + 1).toFloat() }
+        val slots = FloatArray(s.batch) {
+            val p = s.positions[it]
+            (s.tables[it][p / bs] * bs + p % bs).toFloat()
+        }
+        val result = DxirInterpreter.evalFunction(
+            fn, listOf(tokenIds, positions, tables, seqLens, slots, key, value),
+        )
+        key = result[1]
+        value = result[2]
+        val v = model.vocabSize
+        out.append("    {\"inputs\": {")
+        out.append("\"tokenIds\": {\"shape\": [${s.batch}, 1], \"data\": ${ints(tokenIds)}}, ")
+        out.append("\"positions\": {\"shape\": [${s.batch}, 1], \"data\": ${ints(positions)}}, ")
+        out.append("\"blockTables\": {\"shape\": [${s.batch}, ${spec.maxBlocksPerSeq}], ")
+        out.append("\"data\": ${ints(tables)}}, ")
+        out.append("\"seqLens\": {\"shape\": [${s.batch}], \"data\": ${ints(seqLens)}}, ")
+        out.append("\"slotMapping\": {\"shape\": [${s.batch}], \"data\": ${ints(slots)}}},\n")
+        out.append("     \"outputs\": {\"logits\": {\"shape\": [${s.batch}, 1, $v], ")
+        out.append("\"data\": ${floats(result[0])}}}}")
+        out.append(if (k == steps.lastIndex) "\n" else ",\n")
+    }
+    out.append("  ]\n}\n")
+    return out.toString()
+}

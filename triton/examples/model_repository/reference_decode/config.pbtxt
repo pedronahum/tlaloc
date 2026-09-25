@@ -1,0 +1,22 @@
+# Written by Tlaloc from the serving artifact 'tlaloc-reference-decode'
+# (reference-decode-lcg-v1), 6 entries: decode_b1_c2, decode_b1_c4, decode_b2_c2, decode_b2_c4, decode_b4_c2, decode_b4_c4.
+# The KV pools are state of the model instance: zero at start, updated by every
+# request. The client allocates pages through blockTables and slotMapping.
+name: "reference_decode"
+backend: "tlaloc"
+max_batch_size: 0
+input [
+  { name: "tokenIds" data_type: TYPE_INT32 dims: [ -1, 1 ] },
+  { name: "positions" data_type: TYPE_INT32 dims: [ -1, 1 ] },
+  { name: "blockTables" data_type: TYPE_INT32 dims: [ -1, -1 ] },
+  { name: "seqLens" data_type: TYPE_INT32 dims: [ -1 ] },
+  { name: "slotMapping" data_type: TYPE_INT32 dims: [ -1 ] }
+]
+output [
+  { name: "logits" data_type: TYPE_FP32 dims: [ -1, 1, 11 ] }
+]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "bodies/917676809d69dc0f565c94bec3043e03a76a3319ca40031040e8bc6f67978da6.mlir, bodies/b92b107ce14c2294bbc405eae1af38d561237792aad36beb1b27ddce403a3a65.mlir, bodies/d0df315053ba7d7e4fdae8b1edadae90124771436ec33ffc5ec28bd51213ff51.mlir, bodies/4f7a236ffdf59327aae686cafcef8a52bb922efcb5f49bd7bbb5f755139785a3.mlir, bodies/ab02c7c995492bf2f539ae0f93f4ab43e606ce861fa17cbc3ed10d1fb059556b.mlir, bodies/57eee34ace6f0bb42c9ba8578df71b3cdd67c810cb7451eda3cdd4e81acc7cd2.mlir" } }
+parameters: { key: "entry" value: { string_value: "main" } }
+parameters: { key: "arguments" value: { string_value: "input:tokenIds, input:positions, input:blockTables, input:seqLens, input:slotMapping, state:keyCache0, state:valueCache0" } }
+parameters: { key: "results" value: { string_value: "output:logits, state:keyCache0, state:valueCache0" } }

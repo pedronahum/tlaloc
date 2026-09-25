@@ -283,43 +283,87 @@ PjrtExecutable::~PjrtExecutable()
   TakeError(api, api->PJRT_LoadedExecutable_Destroy(&args));
 }
 
+namespace {
+
+// Copies a host tensor to `device`; on success `*out` owns the new buffer.
+std::string
+UploadToDevice(
+    const PJRT_Api* api, PJRT_Client* client, PJRT_Device* device, const HostInput& h,
+    PJRT_Buffer** out)
+{
+  PJRT_Client_BufferFromHostBuffer_Args up{};
+  up.struct_size = PJRT_Client_BufferFromHostBuffer_Args_STRUCT_SIZE;
+  up.client = client;
+  up.data = h.data;
+  up.type = ToPjrtType(h.dtype);
+  up.dims = h.dims.empty() ? nullptr : h.dims.data();
+  up.num_dims = h.dims.size();
+  up.host_buffer_semantics = PJRT_HostBufferSemantics_kImmutableOnlyDuringCall;
+  up.device = device;
+  std::string err = TakeError(api, api->PJRT_Client_BufferFromHostBuffer(&up));
+  if (!err.empty()) return err;
+  err = AwaitAndDestroy(api, up.done_with_host_buffer);
+  if (!err.empty()) {
+    DestroyBuffer(api, up.buffer);
+    return err;
+  }
+  *out = up.buffer;
+  return "";
+}
+
+}  // namespace
+
+PjrtBuffer::~PjrtBuffer()
+{
+  DestroyBuffer(api_, buffer_);
+}
+
+std::string
+PjrtBuffer::Upload(PjrtClient* client, const HostInput& host, std::unique_ptr<PjrtBuffer>* out)
+{
+  const PJRT_Api* api = client->plugin_->api;
+  PJRT_Buffer* buffer = nullptr;
+  std::string err = UploadToDevice(api, client->client_, client->devices_[0], host, &buffer);
+  if (!err.empty()) return "copying to the device failed: " + err;
+  std::unique_ptr<PjrtBuffer> b(new PjrtBuffer());
+  b->api_ = api;
+  b->buffer_ = buffer;
+  *out = std::move(b);
+  return "";
+}
+
 std::string
 PjrtExecutable::Execute(
-    const std::vector<HostInput>& inputs, std::unique_ptr<PjrtResults>* out)
+    const std::vector<ExecuteArg>& args, std::unique_ptr<PjrtResults>* out)
 {
   const PJRT_Api* api = client_->plugin_->api;
   PJRT_Device* device = client_->devices_[0];
 
-  // Input buffers are destroyed on every path out of this function.
-  struct Inputs {
+  // Buffers uploaded for this call are destroyed on every path out of this
+  // function; device arguments are borrowed.
+  struct Uploaded {
     const PJRT_Api* api;
     std::vector<PJRT_Buffer*> buffers;
-    ~Inputs()
+    ~Uploaded()
     {
       for (PJRT_Buffer* b : buffers) DestroyBuffer(api, b);
     }
-  } in{api, {}};
+  } uploaded{api, {}};
 
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    const HostInput& h = inputs[i];
-    PJRT_Client_BufferFromHostBuffer_Args up{};
-    up.struct_size = PJRT_Client_BufferFromHostBuffer_Args_STRUCT_SIZE;
-    up.client = client_->client_;
-    up.data = h.data;
-    up.type = ToPjrtType(h.dtype);
-    up.dims = h.dims.empty() ? nullptr : h.dims.data();
-    up.num_dims = h.dims.size();
-    up.host_buffer_semantics = PJRT_HostBufferSemantics_kImmutableOnlyDuringCall;
-    up.device = device;
-    std::string err = TakeError(api, api->PJRT_Client_BufferFromHostBuffer(&up));
+  std::vector<PJRT_Buffer*> arguments;
+  arguments.reserve(args.size());
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (args[i].device != nullptr) {
+      arguments.push_back(args[i].device->buffer_);
+      continue;
+    }
+    PJRT_Buffer* buffer = nullptr;
+    std::string err = UploadToDevice(api, client_->client_, device, args[i].host, &buffer);
     if (!err.empty()) {
       return "copying input " + std::to_string(i) + " to the device failed: " + err;
     }
-    in.buffers.push_back(up.buffer);
-    err = AwaitAndDestroy(api, up.done_with_host_buffer);
-    if (!err.empty()) {
-      return "copying input " + std::to_string(i) + " to the device failed: " + err;
-    }
+    uploaded.buffers.push_back(buffer);
+    arguments.push_back(buffer);
   }
 
   std::unique_ptr<PjrtResults> results(new PjrtResults());
@@ -328,7 +372,7 @@ PjrtExecutable::Execute(
 
   PJRT_ExecuteOptions options{};
   options.struct_size = PJRT_ExecuteOptions_STRUCT_SIZE;
-  PJRT_Buffer* const* argument_list = in.buffers.data();
+  PJRT_Buffer* const* argument_list = arguments.data();
   PJRT_Buffer** output_list = results->buffers_.data();
   PJRT_Event* complete = nullptr;
 
@@ -338,7 +382,7 @@ PjrtExecutable::Execute(
   run.options = &options;
   run.argument_lists = &argument_list;
   run.num_devices = 1;
-  run.num_args = in.buffers.size();
+  run.num_args = arguments.size();
   run.output_lists = &output_list;
   run.device_complete_events = &complete;
   std::string err = TakeError(api, api->PJRT_LoadedExecutable_Execute(&run));
@@ -352,6 +396,16 @@ PjrtExecutable::Execute(
 PjrtResults::~PjrtResults()
 {
   for (PJRT_Buffer* b : buffers_) DestroyBuffer(api_, b);
+}
+
+std::unique_ptr<PjrtBuffer>
+PjrtResults::Release(size_t i)
+{
+  std::unique_ptr<PjrtBuffer> b(new PjrtBuffer());
+  b->api_ = api_;
+  b->buffer_ = buffers_[i];
+  buffers_[i] = nullptr;
+  return b;
 }
 
 std::string

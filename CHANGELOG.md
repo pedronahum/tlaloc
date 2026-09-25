@@ -11,7 +11,19 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **NVIDIA Triton backend.** `triton/` holds `libtriton_tlaloc.so`, a Triton
+  Inference Server backend that compiles Tlaloc StableHLO through a PJRT plugin
+  and serves it over Triton's HTTP and gRPC endpoints. It is not a Gradle module
+  and is not published to Maven. `triton/verify.sh` checks it end to end in the
+  Triton 25.11 container. See [triton/README.md](triton/README.md).
+- **Serving artifacts as Triton models.** `TritonModelRepository` (`:maestro`) and
+  the Gradle task `:maestro:exportTritonModel` write a serving artifact into a
+  Triton model repository with a generated `config.pbtxt`. The backend loads the
+  staged weights at model load and keeps the KV pools on the device between
+  requests. TinyLlama-1.1B served this way produces the same six greedy token ids
+  as HuggingFace transformers for "The capital of France is".
 
 ## [0.1.0-alpha02] — 2026-09-24
 
