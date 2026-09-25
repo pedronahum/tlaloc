@@ -32,9 +32,10 @@ import java.nio.file.StandardCopyOption
  * when pages run short, once the sequence has been idle for twice
  * `max_sequence_idle_microseconds` plus a queueing allowance),
  * runs a request of several tokens through the smallest prefill entry that
- * fits and a one-token request through a decode entry together with the
- * other sequences' steps in the same batch, and answers with the last
- * token's logits. `max_batch_size` is the artifact's largest decode batch.
+ * fits (the requests of several sequences in one batch together, when the
+ * artifact has prefill entries of batch > 1) and a one-token request through
+ * a decode entry together with the other sequences' steps in the same batch,
+ * and answers with the last token's logits. `max_batch_size` is the artifact's largest decode batch.
  * For an artifact with a windowed KV pool the backend also keeps each
  * sequence's ring of windowed pages and splits a request into calls the ring
  * can hold. See [SequenceOptions] for the knobs.
@@ -288,6 +289,10 @@ object TritonModelRepository {
             append("# sequence's KV pages; a request of several tokens runs as ")
             append(if (prefill.isEmpty()) "decode steps" else "a prefill chunk")
             append(",\n# one token as a decode step batched with other sequences' steps.\n")
+            val prefillBatch = prefill.maxOfOrNull { it.batch } ?: 0
+            if (prefillBatch > 1) {
+                append("# The prompts of up to $prefillBatch sequences in one batch share a prefill call.\n")
+            }
             append("name: \"$modelName\"\n")
             append("backend: \"$BACKEND\"\n")
             append("max_batch_size: $maxBatch\n")

@@ -10,9 +10,10 @@
 // model compiles its artifact(s) at load, once for every GPU its
 // instance_group names; each artifact is one shape bucket. A request runs on
 // the bucket whose input shapes it matches exactly; a model with
-// max_batch_size > 0 concatenates the requests Triton hands it along dim 0,
-// runs them on the smallest bucket whose batch holds them all (padding the
-// rest with zeros) and splits the results.
+// max_batch_size > 0 groups the requests Triton hands it by the shape of
+// their rows, concatenates each group along dim 0, runs it on the smallest
+// bucket whose batch holds it (padding the rest with zeros) and splits the
+// results.
 //
 // Request tensors in GPU memory on the instance's GPU (CUDA shared memory
 // from the client) are read in place through a PJRT view; outputs that
@@ -316,6 +317,10 @@ class ModelState : public BackendModel {
   bool sequence_mode() const { return !sequences_.empty(); }
   // The largest batch a bucket takes (max_batch_size > 0).
   int64_t max_bucket_batch() const { return max_bucket_batch_; }
+  // Whether the requests of a batch are grouped by the shape of their rows
+  // (parameter "group_by_shape", true unless set to false), or only
+  // consecutive requests of one shape run together.
+  bool group_by_shape() const { return group_by_shape_; }
 
   // Logs `what` once per model and key: which data path a tensor took.
   void LogPathOnce(const std::string& key, const std::string& what) const
@@ -349,6 +354,7 @@ class ModelState : public BackendModel {
   bool explicit_arguments_ = false;
   std::vector<Bucket> buckets_;
   int64_t max_bucket_batch_ = 0;
+  bool group_by_shape_ = true;
   std::vector<std::unique_ptr<DeviceModel>> devices_;
   std::map<int, std::unique_ptr<SequenceModel>> sequences_;
   mutable std::mutex logged_mu_;
@@ -841,16 +847,24 @@ ModelState::Load(const BackendState& backend)
   RETURN_IF_ERROR(Parameter("entry", &entry));
   RETURN_IF_ERROR(Parameter("pjrt_plugin_path", &plugin_path));
   RETURN_IF_ERROR(Parameter("serving_manifest", &manifest));
-  std::string zero_copy;
+  std::string zero_copy, group_by_shape;
   RETURN_IF_ERROR(Parameter("zero_copy", &zero_copy));
+  RETURN_IF_ERROR(Parameter("group_by_shape", &group_by_shape));
   entry = Trim(entry);
   manifest = Trim(manifest);
   zero_copy = Trim(zero_copy);
+  group_by_shape = Trim(group_by_shape);
   if (!zero_copy.empty() && zero_copy != "true" && zero_copy != "false") {
     return Err(
         TRITONSERVER_ERROR_INVALID_ARG,
         Where() + "the 'zero_copy' parameter must be true or false, got '" + zero_copy + "'");
   }
+  if (!group_by_shape.empty() && group_by_shape != "true" && group_by_shape != "false") {
+    return Err(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        Where() + "the 'group_by_shape' parameter must be true or false, got '" + group_by_shape + "'");
+  }
+  group_by_shape_ = group_by_shape != "false";
   const bool views_wanted = zero_copy != "false";
   std::vector<int> ordinals;
   RETURN_IF_ERROR(Devices(&ordinals));
@@ -990,7 +1004,9 @@ ModelState::Load(const BackendState& backend)
                                         : "go through the host (zero_copy is false)"))
       << (MaxBatchSize() > 0
               ? "; requests are batched along dim 0 up to batch " +
-                    std::to_string(max_bucket_batch_)
+                    std::to_string(max_bucket_batch_) +
+                    (group_by_shape_ ? ", grouped by the shape of their rows"
+                                     : ", only consecutive requests of one shape together (group_by_shape is false)")
               : "");
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
     devices_.push_back(std::move(device));
@@ -1595,32 +1611,48 @@ ModelInstanceState::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t c
     }
   }
 
-  // Groups run as one execution each: consecutive requests whose non-batch
-  // shapes agree and whose rows fit one bucket. Without max_batch_size every
-  // request is its own group.
-  auto same_shapes = [](const Pending& a, const Pending& b) {
-    for (size_t i = 0; i < a.inputs.size(); ++i) {
-      const auto& x = a.inputs[i].host.dims;
-      const auto& y = b.inputs[i].host.dims;
-      if (x.size() != y.size() || !std::equal(x.begin() + 1, x.end(), y.begin() + 1)) return false;
-    }
-    return true;
+  // Groups run as one execution each. With max_batch_size, the requests of
+  // the batch are keyed by the shape of their rows (every input's dims after
+  // the batch dim): requests of one key form groups in arrival order, each
+  // as many rows as one bucket takes, and the groups run in the order they
+  // were opened. A batch of ragged requests (allow_ragged_batch) mixing two
+  // widths therefore runs as one execution per width, not one per change of
+  // width. Every request keeps its own response, so its rows come back to it
+  // whichever group it ran in. With group_by_shape false only consecutive
+  // requests of one key run together. Without max_batch_size every request
+  // is its own group. (A model with state has no max_batch_size, so its
+  // requests keep their order.)
+  const bool by_shape = model.group_by_shape();
+  auto row_shape = [](const Pending& p) {
+    std::vector<std::vector<int64_t>> key;
+    for (const auto& t : p.inputs) key.emplace_back(t.host.dims.begin() + (t.host.dims.empty() ? 0 : 1), t.host.dims.end());
+    return key;
   };
   std::vector<std::vector<Pending*>> groups;
-  int64_t rows = 0;
+  std::map<std::vector<std::vector<int64_t>>, size_t> open;  // key -> its group being filled
+  std::vector<int64_t> rows;  // rows of each group
+  std::vector<std::vector<int64_t>> last_key;
   for (Pending& p : pending) {
     if (p.error != nullptr) continue;
-    size_t unused = 0;
-    const bool joins = model.MaxBatchSize() > 0 && !groups.empty() &&
-                       same_shapes(*groups.back()[0], p) &&
-                       Choose(*groups.back()[0], rows + p.batch, &unused) != nullptr;
-    if (joins) {
-      groups.back().push_back(&p);
-      rows += p.batch;
-    } else {
+    if (model.MaxBatchSize() <= 0) {
       groups.push_back({&p});
-      rows = p.batch;
+      rows.push_back(p.batch);
+      continue;
     }
+    const auto key = row_shape(p);
+    auto it = open.find(key);
+    size_t unused = 0;
+    const bool joins = it != open.end() && (by_shape || key == last_key) &&
+                       Choose(*groups[it->second][0], rows[it->second] + p.batch, &unused) != nullptr;
+    if (joins) {
+      groups[it->second].push_back(&p);
+      rows[it->second] += p.batch;
+    } else {
+      open[key] = groups.size();
+      groups.push_back({&p});
+      rows.push_back(p.batch);
+    }
+    last_key = key;
   }
 
   for (auto& group : groups) {

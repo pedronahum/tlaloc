@@ -1,6 +1,5 @@
 package io.tlaloc.maestro.serving
 
-import io.tlaloc.ir.inference.DecodeBucket
 import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.HfDecoderConfig
@@ -10,6 +9,7 @@ import java.nio.file.Path
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -41,17 +41,16 @@ class PrefillArtifactExportTest {
         ropeScalingType = null,
     )
 
-    private fun export(dir: Path, prefill: Boolean): ServingManifest {
-        val policy = DecodeBucketPolicy(maxBatch = 2, maxContext = 16, blockSize = 4, minContext = 8)
-        val model = config.toDecodeModelShape(numBlocks = 9, blockSize = 4)
-        val decode = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) }
-        val pre = if (!prefill) emptyList() else policy.contextLadder.map {
-            HfDecoderGraph.spec(config, model, DecodeBucket(1, it), DecodeGraphKind.PREFILL)
-        }
+    private val policy = DecodeBucketPolicy(maxBatch = 2, maxContext = 16, blockSize = 4, minContext = 8)
+    private val model = config.toDecodeModelShape(numBlocks = 9, blockSize = 4)
+
+    /** Exports with prefill entries up to batch [prefillMaxBatch] (0: none), as HfServingExport does. */
+    private fun export(dir: Path, prefillMaxBatch: Int): ServingManifest {
         val rng = Random(7)
         return ServingArtifactWriter.export(
             dir = dir, modelName = "tiny-llama", modelHash = "tiny-llama-hash", model = model,
-            ladder = ServingArtifactWriter.ladderOf(policy), specs = decode + pre,
+            ladder = ServingArtifactWriter.ladderOf(policy),
+            specs = HfServingExport.specs(config, model, policy, prefillMaxBatch),
             stageWeight = { slot ->
                 FloatArray(slot.type.dims.fold(1) { a, b -> a * b }) { rng.nextFloat() - 0.5f }
             },
@@ -63,7 +62,7 @@ class PrefillArtifactExportTest {
     fun prefillEntriesAreWrittenBesideTheDecodeLadder() {
         val dir = Files.createTempDirectory("tlaloc-prefill-artifact")
         try {
-            val m = export(dir, prefill = true)
+            val m = export(dir, prefillMaxBatch = 1)
             assertEquals(ServingManifest.SCHEMA_VERSION, m.schemaVersion)
             assertEquals(
                 listOf("decode_b1_c8", "decode_b1_c16", "decode_b2_c8", "decode_b2_c16", "prefill_b1_c8", "prefill_b1_c16"),
@@ -91,6 +90,7 @@ class PrefillArtifactExportTest {
             assertTrue("a request of several tokens runs as a prefill chunk" in cfg, cfg)
             assertTrue("{ name: \"LOGITS\" data_type: TYPE_FP32 dims: [ 23 ] }" in cfg, cfg)
             assertTrue("max_candidate_sequences: 8\n" in cfg, cfg)
+            assertTrue("share a prefill call" !in cfg, cfg)
         } finally {
             dir.toFile().deleteRecursively()
         }
@@ -100,12 +100,54 @@ class PrefillArtifactExportTest {
     fun withoutPrefillTheConfigSaysPromptsRunAsDecodeSteps() {
         val dir = Files.createTempDirectory("tlaloc-noprefill-artifact")
         try {
-            val m = export(dir, prefill = false)
+            val m = export(dir, prefillMaxBatch = 0)
             assertTrue(m.entries.none { it.kind == DecodeGraphKind.PREFILL })
             val cfg = TritonModelRepository.config(m, "tiny")
             assertTrue("a request of several tokens runs as decode steps" in cfg, cfg)
         } finally {
             dir.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun batchedPrefillEntriesTakeSeveralPromptsInOneCall() {
+        val dir = Files.createTempDirectory("tlaloc-batched-prefill-artifact")
+        try {
+            val m = export(dir, prefillMaxBatch = 2)
+            assertEquals(
+                listOf(
+                    "decode_b1_c8", "decode_b1_c16", "decode_b2_c8", "decode_b2_c16",
+                    "prefill_b1_c8", "prefill_b1_c16", "prefill_b2_c8", "prefill_b2_c16",
+                ),
+                m.entries.map { it.entryId },
+            )
+            val p = m.entryFor(DecodeGraphKind.PREFILL, 2, 16)
+            assertEquals(listOf(2, 16), p.inputs.first { it.name == "tokenIds" }.type.dims)
+            assertEquals(listOf(2, 4), p.inputs.first { it.name == "blockTables" }.type.dims)
+            assertEquals(listOf(32), p.inputs.first { it.name == "slotMapping" }.type.dims)
+            assertEquals(listOf(2, 1, config.vocabSize), p.outputs[0].type.dims)
+            val body = Files.readString(dir.resolve(p.bodyPath))
+            assertTrue("tensor<2x16xi32>" in body, "tokenIds [2, 16] in the batched prefill body")
+            assertTrue("tensor<2x1x23xf32>" in body, "each row's last-position logits")
+            val cfg = TritonModelRepository.config(m, "tiny")
+            assertTrue("The prompts of up to 2 sequences in one batch share a prefill call." in cfg, cfg)
+            assertTrue("max_batch_size: 2\n" in cfg, cfg)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun theDefaultPrefillLadderIsTheBatchLadderAndALargerOneIsRefusedByName() {
+        val specs = HfServingExport.specs(config, model, policy)
+        assertEquals(
+            listOf(1 to 8, 1 to 16, 2 to 8, 2 to 16),
+            specs.filter { it.kind == DecodeGraphKind.PREFILL }.map { it.bucket.batch to it.bucket.maxContext },
+        )
+        assertEquals(4, HfServingExport.specs(config, model, policy, prefillMaxBatch = 0).size)
+        val e = assertFailsWith<IllegalArgumentException> {
+            HfServingExport.specs(config, model, policy, prefillMaxBatch = 3)
+        }
+        assertTrue("prefillMaxBatch 3" in e.message!! && "largest decode batch 2" in e.message!!, e.message!!)
     }
 }

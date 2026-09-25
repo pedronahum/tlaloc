@@ -1,0 +1,17 @@
+# x . x + x over rows of 4 or of 8 f32 values, emitted by Tlaloc
+# (./gradlew :maestro:exportTritonExamples) for batch 1, 2, 4 and 8 at each
+# width. Rows are independent.
+#
+# Ragged dynamic batching: allow_ragged_batch lets Triton put requests of both
+# widths in one batch. The backend groups the batch's requests by the shape of
+# their rows, keeping each group in arrival order, runs each group on the
+# smallest artifact of its width whose batch holds it, and gives each request
+# its own rows back.
+name: "ragged_batched"
+backend: "tlaloc"
+max_batch_size: 8
+input [ { name: "X" data_type: TYPE_FP32 dims: [ -1 ] allow_ragged_batch: true } ]
+output [ { name: "Y" data_type: TYPE_FP32 dims: [ -1 ] } ]
+dynamic_batching { max_queue_delay_microseconds: 2000 }
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "square_plus_b1_n4.mlir, square_plus_b2_n4.mlir, square_plus_b4_n4.mlir, square_plus_b8_n4.mlir, square_plus_b1_n8.mlir, square_plus_b2_n8.mlir, square_plus_b4_n8.mlir, square_plus_b8_n8.mlir" } }

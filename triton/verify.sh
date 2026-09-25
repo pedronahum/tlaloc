@@ -10,7 +10,9 @@
 #   1. start tritonserver (run_server.sh) with the example model repository,
 #   2. wait until it is ready,
 #   3. run verify_client.py: KServe v2 JSON, tritonclient HTTP and gRPC,
-#      every dtype, shape buckets, dynamic batching, CUDA shared memory,
+#      every dtype, shape buckets, dynamic batching, requests of two widths
+#      in one ragged batch (grouped by shape: fewer executions than the
+#      group_by_shape false control, the same rows), CUDA shared memory,
 #      decode steps with backend-held KV pools, and load-time refusals; every
 #      value must match. The server log must then show that tensors in CUDA
 #      shared memory were read in place and written device to device by
@@ -20,7 +22,10 @@
 #      (a ring of 3 pages per sequence) holds at most 3 windowed pages as a
 #      sequence grows to 60 positions and gives the logits of the same model
 #      with full-history pages, over HTTP and gRPC, alone and batched, and a
-#      START with every ring taken is refused by name,
+#      START with every ring taken is refused by name; then prefill_checks.py
+#      on both window models: two prompts sent together are prefilled in one
+#      call (the log must show a batch-2 prefill entry running two sequences)
+#      and each gets its solo logits, and --perturb must fail,
 #   4. run both again with --perturb (wrong expected values), which must FAIL,
 #   5. print the measurements of perf_client.py (dynamic batching throughput,
 #      the host round trip that zero copy saves) and stop the server,
@@ -34,7 +39,10 @@
 #      pools at their own device addresses, 100 of 100 runs in place), run
 #      sequence_checks.py (prefill, concurrent sequences, END and idle
 #      freeing pages, pool exhaustion), run it again with --perturb (must
-#      fail), and stop the server. Control: serve the same model with
+#      fail), run prefill_checks.py (1, 2 and 4 prompts prefilled together
+#      give their solo argmax and decoded ids, in one call: the log must show
+#      prefill_b4_c64 running four sequences; prefill throughput), run it with
+#      --perturb (must fail), and stop the server. Control: serve the same model with
 #      donate_kv_pools false; the log must show the pools copied in 100 of
 #      100 runs, and the 100 ids must equal those generated in place. Then
 #      serve the same model with a 200 ms
@@ -48,7 +56,9 @@
 #      and a chat-template prompt, 16 greedy ids each over HTTP and gRPC,
 #      logits within TF32 tolerance, and the prefill and decode timings),
 #      check that the KV pools were updated in place, run
-#      it again with --perturb (must fail), and stop the server. Without the
+#      it again with --perturb (must fail), run prefill_checks.py on the
+#      fixture's prompts as for TinyLlama (and with --perturb, which must
+#      fail), and stop the server. Without the
 #      checkpoint this step is skipped by name.
 #   8. optional and opt-in (MUSE_GLIMMER=1), Muse Glimmer: 28 billion text
 #      parameters, 56 GB of bf16 weights on the device. It needs the
@@ -189,10 +199,21 @@ refuse_in() {
   echo "  ok   log has no: $2"
 }
 expect_log() { expect_in "$LOG" "$1"; }
+# expect_re <log> <extended regex>: the log must have a matching line.
+expect_re() {
+  if ! grep -qE "$2" "$1"; then
+    echo "FAIL: the server log has no line matching: $2" >&2
+    exit 1
+  fi
+  grep -oE "$2.*" "$1" | head -1 | sed 's/^/  ok   log: /'
+}
 refuse_log() { refuse_in "$LOG" "$1"; }
 # aliased <artifact dir>: its bodies alias the KV pools to their outputs (an
 # artifact exported before they did is exported again).
 aliased() { grep -qs "tf.aliasing_output" "$1"/bodies/*.mlir; }
+# batched_prefill <artifact dir>: it has prefill entries of batch 2 (an
+# artifact exported before it did is exported again).
+batched_prefill() { grep -qs "programs/prefill_b2_" "$1/tlaloc-serving.json"; }
 # pools_in_place <log>: every run the log reports on wrote the KV pools at
 # their own device addresses, including a count over 100 runs.
 pools_in_place() {
@@ -211,6 +232,8 @@ expect_log "model 'large_io_host': input 'X' is in GPU memory and goes through t
 expect_log "model 'large_io_host': output 'Y' was given GPU memory and goes through the host"
 refuse_log "model 'large_io': input 'X' is in GPU memory and goes through the host"
 refuse_log "model 'large_io_host': input 'X' is read in place"
+expect_log "model 'ragged_batched': GPU 0 ready; GPU-memory tensors are read in place and written device to device; requests are batched along dim 0 up to batch 8, grouped by the shape of their rows"
+expect_log "model 'ragged_consecutive': GPU 0 ready; GPU-memory tensors are read in place and written device to device; requests are batched along dim 0 up to batch 8, only consecutive requests of one shape together (group_by_shape is false)"
 expect_log "decode_b1_c2 updated the 2 KV pools in place"
 refuse_log "to new device memory"
 
@@ -234,6 +257,20 @@ if "$PY" "$HERE/window_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhos
   exit 1
 fi
 grep -c "FAIL" "$LOG.window-negative" | xargs -I{} echo "window negative control failed as it must ({} failing checks)"
+
+echo "== batched prefill"
+for m in window_sequence window_sequence_full; do
+  "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model "$m" --repeats 3
+  expect_re "$LOG" "instance '${m}_0_0': prefill_b2_c[0-9]+ ran 2 sequence"
+done
+if "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model window_sequence_full --repeats 1 --perturb >"$LOG.prefill-negative" 2>&1; then
+  echo "FAIL: the batched prefill checks passed comparing each prompt with the next one" >&2
+  cat "$LOG.prefill-negative" >&2
+  exit 1
+fi
+grep -c "FAIL" "$LOG.prefill-negative" | xargs -I{} echo "batched prefill negative control failed as it must ({} failing checks)"
 
 if [[ "${SKIP_PERF:-}" != 1 ]]; then
   echo "== measurements"
@@ -262,7 +299,7 @@ elif [[ ! -f "$CKPT/model.safetensors" || ! -f "$CKPT/tokenizer.json" ]]; then
 else
   TL_CONFIG="$TL_DIR/repository/tinyllama/config.pbtxt"
   if [[ "${TINYLLAMA_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$TL_CONFIG" 2>/dev/null \
-      || ! aliased "$TL_DIR/artifact" \
+      || ! aliased "$TL_DIR/artifact" || ! batched_prefill "$TL_DIR/artifact" \
       || ! grep -q "max_sequence_idle_microseconds: 5000000$" "$TL_CONFIG"; then
     # Gradle runs here with no Triton container up.
     rm -rf "$TL_DIR"
@@ -304,6 +341,21 @@ else
     exit 1
   fi
   grep -c "^FAIL" "$LOG.tinyllama.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+  echo "== tinyllama batched prefill"
+  # sequence_checks.py's four prompts: "The capital of France is", "The largest
+  # planet in the solar system is", "My favorite color is", "The first
+  # president of the United States was".
+  TL_PROMPTS="1,450,7483,310,3444,338;1,450,10150,15754,297,278,21635,1788,338;1,1619,25448,2927,338;1,450,937,6673,310,278,3303,3900,471"
+  "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model tinyllama --prompts "$TL_PROMPTS" --require-ids
+  expect_re "$LOG.tinyllama" "instance 'tinyllama_0_0': prefill_b4_c64 ran 4 sequence"
+  if "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model tinyllama --prompts "$TL_PROMPTS" --require-ids --repeats 1 --perturb >"$LOG.tinyllama.prefill-negative" 2>&1; then
+    echo "FAIL: the batched prefill checks passed comparing each prompt with the next one" >&2
+    cat "$LOG.tinyllama.prefill-negative" >&2
+    exit 1
+  fi
+  grep -c "FAIL" "$LOG.tinyllama.prefill-negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   if ! curl -sf "localhost:$HTTP_PORT/v2/health/live" >/dev/null; then
     echo "FAIL: the server is not live at the end of the sequence checks" >&2
     exit 1
@@ -370,7 +422,7 @@ elif [[ ! -f "$QCKPT/model.safetensors" ]]; then
 else
   Q_CONFIG="$Q_DIR/repository/qwen3/config.pbtxt"
   if [[ "${QWEN3_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$Q_CONFIG" 2>/dev/null \
-      || ! aliased "$Q_DIR/artifact"; then
+      || ! aliased "$Q_DIR/artifact" || ! batched_prefill "$Q_DIR/artifact"; then
     # Gradle runs here with no Triton container up.
     rm -rf "$Q_DIR"
     mkdir -p "$Q_DIR"
@@ -395,6 +447,17 @@ else
     exit 1
   fi
   grep -c "^FAIL" "$LOG.qwen3.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+  echo "== qwen3 batched prefill"
+  "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model qwen3 --fixture "$QWEN3_FIXTURE" --require-ids
+  expect_re "$LOG.qwen3" "instance 'qwen3_0_0': prefill_b4_c64 ran 4 sequence"
+  if "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model qwen3 --fixture "$QWEN3_FIXTURE" --require-ids --repeats 1 --perturb >"$LOG.qwen3.prefill-negative" 2>&1; then
+    echo "FAIL: the Qwen3 batched prefill checks passed comparing each prompt with the next one" >&2
+    cat "$LOG.qwen3.prefill-negative" >&2
+    exit 1
+  fi
+  grep -c "FAIL" "$LOG.qwen3.prefill-negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   if ! curl -sf "localhost:$HTTP_PORT/v2/health/live" >/dev/null; then
     echo "FAIL: the server is not live at the end of the Qwen3 checks" >&2
     exit 1

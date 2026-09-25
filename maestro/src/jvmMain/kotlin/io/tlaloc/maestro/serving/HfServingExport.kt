@@ -5,6 +5,7 @@ import io.tlaloc.ir.inference.DecodeBucket
 import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.DecodeGraphSpec
+import io.tlaloc.ir.inference.DecodeModelShape
 import io.tlaloc.ir.inference.HfCheckpoint
 import io.tlaloc.ir.inference.HfDecoderConfig
 import io.tlaloc.ir.inference.HfDecoderGraph
@@ -68,13 +69,51 @@ object HfServingExport {
     }
 
     /**
+     * The entries of an artifact: a decode entry per bucket of [policy], then
+     * a prefill entry per batch of the batch ladder up to [prefillMaxBatch]
+     * (none when it is 0) and per context bucket.
+     *
+     * A prefill entry of batch `b` takes the prompts of up to `b` sequences
+     * in one call, each right-aligned in its own row of the token axis with
+     * its own positions, block table and slots, and returns each row's
+     * last-token logits. Rows do not read each other: the causal length of a
+     * token is its position plus one, and a padding token's slot is -1, so
+     * its KV is never written. A row prefilled in a batch gets, in the
+     * reference interpreter, the logits and KV it gets alone.
+     *
+     * Refuses by name a [prefillMaxBatch] that is negative or above the
+     * largest decode batch: a Triton model's `max_batch_size` is the largest
+     * decode batch, and no batch of requests is larger.
+     */
+    fun specs(
+        config: HfDecoderConfig,
+        model: DecodeModelShape,
+        policy: DecodeBucketPolicy,
+        prefillMaxBatch: Int = policy.maxBatch,
+    ): List<DecodeGraphSpec> {
+        require(prefillMaxBatch in 0..policy.maxBatch) {
+            "HfServingExport: prefillMaxBatch $prefillMaxBatch must be between 0 (no prefill " +
+                "entries) and the largest decode batch ${policy.maxBatch}"
+        }
+        val decode = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) }
+        val batches = policy.batchLadder.filter { it <= prefillMaxBatch }
+        val prefill = batches.flatMap { b ->
+            policy.contextLadder.map { c ->
+                HfDecoderGraph.spec(config, model, DecodeBucket(b, c), DecodeGraphKind.PREFILL)
+            }
+        }
+        return decode + prefill
+    }
+
+    /**
      * Build the decode ladder for [ckpt] under [config] and write it to [dir].
      *
-     * With [prefill] (the default) the artifact also gets one prefill entry
-     * per context bucket, at batch 1: a chunk of `context` tokens that writes
-     * their KV and returns the last token's logits in one call. A server
-     * prefills a prompt of up to `context` tokens with one call instead of one
-     * decode step per token.
+     * With [prefill] (the default) the artifact also gets prefill entries
+     * (see [specs]): a chunk of `context` tokens per sequence that writes
+     * their KV and returns each sequence's last-token logits in one call. A
+     * server prefills a prompt of up to `context` tokens with one call instead
+     * of one decode step per token, and the prompts of up to
+     * [prefillMaxBatch] sequences that arrive together with one call.
      *
      * With [windowedKv] (the default) a config with sliding-window layers
      * gets a windowed KV pool ([HfDecoderConfig.windowedKvPool]): those
@@ -93,16 +132,13 @@ object HfServingExport {
         modelName: String = modelNameFor(ckpt.dir),
         prefill: Boolean = true,
         windowedKv: Boolean = true,
+        prefillMaxBatch: Int = policy.maxBatch,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
         )
         val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window)
-        val decodeSpecs = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) }
-        val prefillSpecs = if (!prefill) emptyList() else policy.contextLadder.map { c ->
-            HfDecoderGraph.spec(config, model, DecodeBucket(1, c), DecodeGraphKind.PREFILL)
-        }
-        val specs = decodeSpecs + prefillSpecs
+        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
             HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
         }

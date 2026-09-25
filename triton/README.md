@@ -10,11 +10,13 @@ HTTP and gRPC (KServe v2) endpoints.
 A language model exported by Tlaloc is served in sequence mode: Triton's
 sequence batcher routes each sequence's requests by correlation ID, the
 backend keeps the sequence's KV pages on the device, a prompt runs as one
-prefill call, and the decode steps of several sequences run as one batch. A
-client sends token ids and gets the next token's logits back.
+prefill call (the prompts of several sequences that arrive together, as one
+call), and the decode steps of several sequences run as one batch. A client
+sends token ids and gets the next token's logits back.
 
-A stateless model can use Triton's dynamic batcher: the backend concatenates
-the requests along dim 0 and runs them as one call. Tensors a client places
+A stateless model can use Triton's dynamic batcher: the backend groups the
+requests by the shape of their rows, concatenates each group along dim 0 and
+runs it as one call. Tensors a client places
 in CUDA shared memory are read and written in place on the GPU, and each GPU
 an instance group names gets its own PJRT client.
 
@@ -23,7 +25,8 @@ an instance group names gets its own PJRT client.
 | ✅ | Sequence mode, prefill and batched decode, TinyLlama-1.1B | GB10, `verify.sh` |
 | ✅ | Qwen3-0.6B: 16 greedy ids equal HuggingFace's for a plain and a chat-template prompt | GB10, `verify.sh` |
 | ✅ | Muse Glimmer 30B, text decoder, bf16 weights: 32 greedy ids equal HuggingFace's run with the same arithmetic | GB10, `verify.sh` with `MUSE_GLIMMER=1` |
-| ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`) | GB10, `verify.sh` |
+| ✅ | Prompts of several sequences prefilled in one call: 2 and 4 TinyLlama and Qwen3-0.6B prompts give their solo argmax and the same 8 greedy ids as alone | GB10, `verify.sh` |
+| ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`), ragged batches grouped by the shape of their rows | GB10, `verify.sh` |
 | ✅ | CUDA shared memory inputs read in place, outputs written device to device | GB10, `verify.sh` |
 | ✅ | KV pools updated in place: donated to each execution, never copied (100 of 100 runs checked by device address; a control without donation is seen copying) | GB10, `verify.sh` |
 | ✅ | FP32, FP64, FP16, BF16, INT8, INT32, INT64, UINT8, BOOL over HTTP and gRPC | GB10, `verify.sh` |
@@ -124,6 +127,16 @@ It then starts the server, waits for it to be ready, and runs
   two models' answers are identical, Triton's statistics show that
   `grad_batched` ran them in fewer executions than requests (162 and 181
   executions for the 512 in two runs) and `grad_unbatched` in one execution each;
+- `ragged_batched` and `ragged_consecutive` over gRPC: three rounds of 72
+  requests sent at once, each one or two rows of width 4 or 8 chosen at
+  random, so that Triton's batches mix the two widths. Every request gets
+  exactly its own rows of `x · x + x` back from both models, and the two
+  models' answers are identical. Grouped by the shape of their rows
+  (`ragged_batched`) the 216 requests must run in fewer executions than
+  grouped consecutively (`ragged_consecutive`), and in at most half as many
+  executions as requests (measured: 74 to 76 executions against 119 to
+  134; with one-row requests only, 72 requests ran in 23 executions against
+  43). The log must show each model's grouping at load;
 - CUDA shared memory over gRPC: `matmul_sumsq` with `A`, `GRAD` and `VALUE` in
   CUDA shared memory against the interpreter, and `large_io` and
   `large_io_host` (16 MiB in, 16 MiB out) against the closed form, bit for
@@ -183,9 +196,17 @@ Then `window_checks.py` runs `window_sequence` against `window_sequence_full`
 - the log must show the windowed pool at load and 100 of 100 runs with its 6
   pools updated in place.
 
-It then runs both clients again with deliberately wrong expected values (the
-window checks compare each request with the next one), and both runs must
-fail. It prints the measurements of `perf_client.py`
+Then `prefill_checks.py` runs on `window_sequence` and on
+`window_sequence_full`: one prompt, then two prompts sent together from two
+threads (13 and 5 random ids; the 13 are split 12 and 1 for the ring). The
+two must run in one execution, the log must show `prefill_b2_c16 ran 2
+sequence(s)`, and each prompt's last-token logits must be within 5e-3 of its
+solo run's largest logit (measured: 0 to 3.8e-4), with the solo argmax where
+the solo top two are further apart than that.
+
+It then runs the three clients again with deliberately wrong expected values
+(the window checks compare each request with the next one, the prefill checks
+each prompt with the next one), and all three runs must fail. It prints the measurements of `perf_client.py`
 (`SKIP_PERF=1` skips them) and stops the container.
 
 Last, if the TinyLlama-1.1B checkpoint is in
@@ -223,7 +244,14 @@ server is up. It then starts a server on that repository and:
   - queued (a second server, the same model with a 200 ms idle timeout):
     12, 24 and 32 concurrent sequences, so steps wait in Triton's queue past
     the timeout; no step Triton accepts is refused for having no KV state;
-- runs `sequence_checks.py --perturb` (wrong expected ids), which must fail.
+- runs `sequence_checks.py --perturb` (wrong expected ids), which must fail;
+- runs `prefill_checks.py` with `sequence_checks.py`'s four prompts: one, two
+  and four prompts sent together, over HTTP and gRPC, each run in one
+  execution (the log must show `prefill_b4_c64 ran 4 sequence(s)`), and each
+  prompt's argmax and 8 greedy ids equal its solo run's, with logits within
+  5e-3 of the largest (measured: at most 6.2e-4; a batch-2 or batch-4 entry
+  is a different executable under TF32). Then with `--perturb`, which must
+  fail. It prints the prefill throughput (below).
 
 Without the checkpoint this step prints `SKIP tinyllama` and the run can
 still pass; `SKIP_TINYLLAMA=1` skips it on purpose.
@@ -242,7 +270,11 @@ over HTTP and gRPC, the prompt is one prefill request and the 16 generated ids
 must equal the fixture's; the first position's top-20 logits and the chosen
 logit at every position must be within 2e-3 of the largest logit (measured:
 2.6e-4 and 3.3e-4; TF32). It prints the prefill and decode timings, then runs
-`fixture_checks.py --perturb` (wrong expected ids), which must fail. Without
+`fixture_checks.py --perturb` (wrong expected ids), which must fail, and
+`prefill_checks.py` as for TinyLlama, on four prompts from the fixture (its two
+prompts, and each followed by the first tokens of its continuation: 5, 24, 11
+and 27 tokens; logits measured within 9.0e-4 of the largest), and with
+`--perturb`, which must fail. Without
 the checkpoint this step prints `SKIP qwen3`; `SKIP_QWEN3=1` skips it.
 
 With `MUSE_GLIMMER=1`, and meta-models/Muse-Glimmer-30B (Apache-2.0, 59 GB,
@@ -293,12 +325,14 @@ curl -s localhost:8000/v2/models/matmul_sumsq/infer \
 | `buckets` | `x · x + x`, compiled for length 4 and length 8 | `X` FP32 [-1] | `Y` FP32 [-1] |
 | `reference_decode` | one decode step of Tlaloc's reference decode graph (embedding, paged attention over a KV cache, LM head), six batch/context entries | `tokenIds`, `positions` INT32 [-1,1], `blockTables` INT32 [-1,-1], `seqLens`, `slotMapping` INT32 [-1] | `logits` FP32 [-1,1,11] |
 | `reference_sequence` | the `reference_decode` artifact in sequence mode | `TOKENS` INT32 [-1] (batch dim added, max batch 4), START/END/CORRID controls | `LOGITS` FP32 [11], `KV_PAGES` INT32 [2] |
-| `window_sequence` | a three-layer decoder with seeded random weights, sequence mode: layers 0 and 1 attend over a sliding window of 8 positions and keep their KV in a windowed pool (rings of 3 pages of 4 tokens), layer 2 over the full history; contexts 16, 32 and 64, batches 1 and 2, a prefill entry per context | as `reference_sequence` (max batch 2) | `LOGITS` FP32 [64], `KV_PAGES` INT32 [2] |
+| `window_sequence` | a three-layer decoder with seeded random weights, sequence mode: layers 0 and 1 attend over a sliding window of 8 positions and keep their KV in a windowed pool (rings of 3 pages of 4 tokens), layer 2 over the full history; contexts 16, 32 and 64, decode and prefill entries for batches 1 and 2 | as `reference_sequence` (max batch 2) | `LOGITS` FP32 [64], `KV_PAGES` INT32 [2] |
 | `window_sequence_full` | the same decoder and weights with full-history pages for every layer | as `window_sequence` | as `window_sequence` |
 | `int64_bool` | `x · x + x` over i64, `(x · x > x) and b`, `not b` | `X` INT64 [4], `B` BOOL [4] | `Y` INT64, `ABOVE_AND_B` BOOL, `NOT_B` BOOL |
 | `dtypes_small` | `x · x + x` over f16, i8 and u8. **Written by hand**: Tlaloc's `DType` has no f16, i8 or u8, so this model shows only that the backend moves those types unchanged | `X_F16` FP16 [4], `X_I8` INT8 [4], `X_U8` UINT8 [4] | `Y_F16`, `Y_I8`, `Y_U8` |
 | `grad_batched` | `df/dA` of `sum(A · A)` per 2x2 row, compiled for batch 1, 2, 4 and 8, with `dynamic_batching` | `A` FP32 [2,2] (batch dim added, max batch 8) | `GRAD` FP32 [2,2] |
 | `grad_unbatched` | the same files without `dynamic_batching` | as `grad_batched` | as `grad_batched` |
+| `ragged_batched` | `x · x + x` over rows of 4 or of 8 values, compiled for batch 1, 2, 4 and 8 at each width, with `dynamic_batching` and `allow_ragged_batch`, so one batch can hold both widths | `X` FP32 [-1] (batch dim added, max batch 8) | `Y` FP32 [-1] |
+| `ragged_consecutive` | the same files and batching with `group_by_shape: "false"` (the control) | as `ragged_batched` | as `ragged_batched` |
 | `large_io` | `x · x + x` over 4Mi f32 values (16 MiB each way) | `X` FP32 [4194304] | `Y` FP32 [4194304] |
 | `large_io_host` | `large_io` with `zero_copy: "false"` | as `large_io` | as `large_io` |
 
@@ -370,8 +404,10 @@ batcher's idle timeout (default 60 s) and batching delay (default 1 ms).
 
 The TinyLlama commands above export decode entries for batch 1 only; add
 `-PmaxBatch=4` to `exportHfServingArtifact` to let the backend batch up to
-four sequences' decode steps (three decode entries plus the prefill entry:
-four XLA compiles at load, about 15 s for TinyLlama).
+four sequences' decode steps and prefill up to four prompts in one call
+(three decode entries and three prefill entries: six XLA compiles at load,
+about 25 s for TinyLlama). `-PprefillMaxBatch=1` keeps the batch-1 prefill
+entry alone.
 
 In client mode the generated `config.pbtxt` maps each slot of the manifest
 by its role:
@@ -471,6 +507,17 @@ this; `generate_client.py` adds a tokenizer.
   smallest decode entry whose batch and context cover them, with padding rows
   for the rest of the batch. Without a prefill entry (a v1 artifact, or
   `-Pprefill=false`), the tokens of a longer request run as decode steps.
+- **Prompts together.** The requests of several tokens in one Triton batch
+  (several sequences started at once) run in rounds: each round takes every
+  request's next call (all its tokens, or what the windowed ring holds), and
+  the calls whose smallest covering prefill entry has the same context run
+  as one call on the smallest prefill entry whose batch holds them, each
+  right-aligned in its own row. Calls of different context buckets are not
+  merged: a call computes every row at its entry's context. The first call
+  of each prefill entry with several prompts is logged
+  (`prefill_b4_c64 ran 4 sequence(s) in 39170 us`). An artifact exported with
+  `-PprefillMaxBatch=1` has batch-1 prefill entries only and runs one call
+  per prompt.
 - **KV pools** are the instance's, on the device, zeroed at load. Every
   execution is handed them (donated) and returns the updated pools; the
   artifact's bodies alias each `KV_POOL_OUT` to its `KV_POOL_IN`
@@ -545,6 +592,19 @@ rate; 48 requests ran in 22 or 23 executions. The Python driver in
 `docs/SERVING_RUNBOOK.md` takes 1.35 s per step, because it copies every KV
 pool to the host and back. These are single measurements, not a benchmark.
 
+Prompts sent together (`prefill_checks.py`, HTTP, the median of 5 rounds, each
+round one execution; the sequences are ended after the timed prefill):
+
+| | 1 prompt | 2 together | 2 one after the other | 4 together | 4 one after the other |
+|---|---|---|---|---|---|
+| TinyLlama-1.1B (prompts of 6, 9, 5, 9 tokens) | 25 ms | 29 ms | 54 ms | 35 ms (113 prompts/s) | 112 ms (36 prompts/s) |
+| Qwen3-0.6B (5, 24, 11, 27 tokens) | 23 ms | 35 ms | 52 ms | 61 ms (66 prompts/s) | 101 ms (40 prompts/s) |
+
+Every entry is padded to 64 tokens a row, so a batch-4 call computes 256
+token rows; it still reads the weights once and dispatches once. A prompt
+whose request also carries END was not batched with the others: four such
+prompts ran in two executions, two in two, in every round measured.
+
 KV pools in place against copied (`donate_kv_pools: false`), measured with
 another process keeping the GPU 95% busy, the two servers alternated three
 times, server-side time of a batch-1 decode step over 235 steps each:
@@ -612,11 +672,19 @@ batching, and it is why `state:` arguments are refused with
 `max_batch_size > 0`.
 
 When Triton hands the backend several requests in one call (the dynamic
-batcher, `dynamic_batching { ... }`), the backend groups consecutive requests
-whose non-batch dimensions agree, concatenates each group along dim 0 on the
+batcher, `dynamic_batching { ... }`), the backend keys each request by the
+shape of its rows (every input's dimensions after the batch), groups the
+requests of one key in arrival order, as many rows per group as the largest
+artifact of that shape takes, concatenates each group along dim 0 on the
 host, runs the artifact with the smallest `B` that holds the group's rows,
 with the remaining rows zero, and gives each request its own rows of every
-output. A single request whose rows fill a bucket exactly runs on its own
+output. Requests of different shapes reach one batch only with
+`allow_ragged_batch: true` on the input; a batch of two widths then runs as
+two executions. The model parameter `group_by_shape: "false"` groups only
+consecutive requests of one shape (the example `ragged_consecutive`, which
+`verify.sh` uses as the control: 216 requests of two widths ran in 74 to 76
+executions grouped by shape and 119 to 134 grouped consecutively, with the
+same rows). A single request whose rows fill a bucket exactly runs on its own
 tensors (and can read GPU memory in place, below). Without
 `dynamic_batching` each request runs alone, padded to the smallest bucket
 that holds it. Triton's statistics count one execution per group.
@@ -748,9 +816,12 @@ defaults.
 - Sequence mode: one instance per model (the pools are its state); pages are
   allocated as a sequence grows and there is no preemption, so a sequence
   that needs a page when none is free is refused mid-generation rather than
-  paused. Only the oldest strategy. Prefill entries are batch 1, so two
-  prompts in one Triton batch run as two calls. Sampling is the client's
-  (the backend returns logits).
+  paused. Only the oldest strategy. Prompts in one Triton batch share a
+  prefill call only when they fall in one context bucket, and the batcher's
+  `max_queue_delay_microseconds` (1 ms by default) is all the time it waits
+  for them. Prompts whose request also carries END were not batched together
+  by Triton in the measurements above. Sampling is the client's (the backend
+  returns logits).
 - Client mode: state is per model instance and is not tied to a Triton
   sequence ID. The client that allocates pages must be the only client of
   that model, or the clients must agree on the pages.

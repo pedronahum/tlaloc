@@ -54,8 +54,15 @@ logistic, slices). The steps in brackets are switched on per layer by the
 family.
 
 A graph is either a **decode** entry (one new token per sequence, batch `B`)
-or a **prefill** entry (a chunk of up to `context` tokens of one sequence, in
-one call). Both return the logits of each sequence's last token.
+or a **prefill** entry (a chunk of up to `context` tokens for each of `B`
+sequences, in one call). Both return the logits of each sequence's last
+token. In a prefill entry each sequence has its own row of the token axis,
+right-aligned: padding tokens first (slot -1, so their KV is never written),
+then the sequence's tokens, each with its own position. A token's causal
+length is its position plus one, so a row never reads another row's tokens,
+and a prompt prefilled together with others gets, in the reference
+interpreter, the logits and KV it gets alone, bit for bit
+(`BatchedPrefillTest`).
 
 **Kotlin model code.** A model written with the `nn` layers, or a function
 under `grad { }`, is captured or traced into DXIR. The recognizers then find
@@ -104,9 +111,10 @@ The manifest records:
   for V; for a model with sliding-window layers, the **windowed KV pool**
   (below): its window, its layers, its pages and its ring size;
 - **the buckets**: a batch ladder and a context ladder. Each (batch, context)
-  point is one decode entry; each context also gets a prefill entry at batch
-  1. A server runs a request on the smallest entry that holds it and pads the
-  rest;
+  point is one decode entry and one prefill entry (`-PprefillMaxBatch`, or
+  `HfServingExport.export(prefillMaxBatch = ...)`, caps the prefill batches;
+  1 gives the batch-1 prefill entries alone). A server runs a request on the
+  smallest entry that holds it and pads the rest;
 - **the entries**: kind, batch, context, body path and hash, and the
   signature with a role per input (`TOKEN_IDS`, `POSITIONS`, `BLOCK_TABLES`,
   `SEQ_LENS`, `SLOT_MAPPING`, `KV_POOL_IN`, weight slots, and with a windowed
@@ -192,8 +200,8 @@ memory, which on a GB10 is 75% of the machine's RAM.
 | Weights | uploaded once, on the device | uploaded once, on the device | uploaded once per GPU at model load, on the device |
 | KV pages | the caller allocates pages | vLLM's block manager allocates them | the backend allocates them per sequence (correlation ID) and frees them on END, or, when pages run short, after twice the idle timeout plus a queueing allowance; a sliding-window layer's pages are a ring per sequence, bounded by the window |
 | KV pools between steps | copied to the host and back every step | as in (i) | on the device, updated in place: each execution is handed the pools and writes them where they are |
-| Prompt | one decode step per token | one decode step per token (chunked prefill refused by name) | one prefill call |
-| Batching | the caller builds the batch | vLLM's scheduler | decode steps of different sequences in one call (Triton's sequence batcher, oldest strategy) |
+| Prompt | one decode step per token | one decode step per token (chunked prefill refused by name) | one prefill call; the prompts of sequences started together in one call |
+| Batching | the caller builds the batch | vLLM's scheduler | decode steps of different sequences in one call, and prompts of different sequences in one prefill call (Triton's sequence batcher, oldest strategy) |
 | Sampling | greedy, host-side | vLLM's sampler over the returned logits | the client's; the server returns logits |
 
 ### (i) Framework-free Python
@@ -233,7 +241,11 @@ At load the backend reads the manifest, checks every body's signature,
 compiles every entry and uploads the weights. Per request:
 
 - a client sends the prompt with START; the backend runs it on the smallest
-  prefill entry that holds it, as one call;
+  prefill entry that holds it, as one call. The prompts that Triton hands
+  over together (several clients starting sequences at once) run as one
+  call when they fall in one context bucket, on the smallest prefill entry
+  whose batch holds them; prompts of different context buckets are not
+  merged, because a call computes every row at its entry's context;
 - each later request carries one token; the one-token requests of different
   sequences that Triton hands over together run as one decode call on the
   smallest entry that holds them;
@@ -254,7 +266,9 @@ compiles every entry and uploads the weights. Per request:
 The backend also serves any Tlaloc StableHLO that is not a language model:
 `config.pbtxt` parameters `arguments` and `results` bind each argument to an
 input, a weight file or a piece of per-instance state. Stateless models can
-use Triton's dynamic batcher, tensors in CUDA shared memory are read in place
+use Triton's dynamic batcher (the backend groups a batch's requests by the
+shape of their rows, so a ragged batch of two widths runs as two
+executions), tensors in CUDA shared memory are read in place
 and outputs written device to device, and each GPU an instance group names
 gets its own PJRT client. Details and limits: [triton/README.md](../triton/README.md).
 
@@ -274,7 +288,8 @@ is the system RAM), driver 580.126.09.
 | (iii) Triton, Qwen3-0.6B | ✅ GB10 | `verify.sh`: 16 ids equal HuggingFace's for a plain and a chat-template prompt; about 19 ms a token |
 | (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic, served from a v3 artifact whose 39 sliding layers are in the windowed pool; about 245 ms a token |
 | (iii) Triton, windowed KV pool for sliding-window layers | ✅ GB10 | `verify.sh`: a three-layer decoder with random weights (window 8, pages of 4, rings of 3 pages) grown to 60 positions holds at most 3 windowed pages while its full pages reach 15, and its logits equal the same model with full-history pages sent the same calls (worst 5.3e-7 of the largest logit), over HTTP and gRPC, alone and batched; the reference interpreter gives bit-identical logits for the two layouts over several windows, and a ring one page short or a call one token too long changes them |
-| (iii) Triton, dynamic batching, CUDA shared memory, nine dtypes | ✅ GB10 | `verify.sh` |
+| (iii) Triton, prompts of several sequences prefilled in one call | ✅ GB10 | `verify.sh`: 2 and 4 TinyLlama and Qwen3-0.6B prompts sent together run in one call of a batch-2 or batch-4 prefill entry and give their solo argmax and the same 8 greedy ids as alone, over HTTP and gRPC (logits within 5e-3 of the largest; the batched entry is a different executable under TF32); the reference interpreter gives the solo logits and the solo continuation bit for bit, with full-history and windowed pools, and padding that writes its KV or a left-aligned row changes them |
+| (iii) Triton, dynamic batching, CUDA shared memory, nine dtypes | ✅ GB10 | `verify.sh`; a ragged batch is grouped by the shape of its rows: 216 requests of two widths ran in 74 to 76 executions against 119 to 134 when only consecutive requests of one width run together (the `group_by_shape` false control), with every request's rows identical |
 | (iii) Triton on GPUs other than 0 | 🧪 | written; the GB10 has one GPU |
 | Any of the three on a TPU | 🧪 | the artifact is platform-neutral StableHLO; no TPU has run it ([TPU_BRINGUP.md](TPU_BRINGUP.md)) |
 | A discrete GPU (PCIe, separate device memory) | not run | every measurement here is on unified memory |

@@ -1,0 +1,13 @@
+# The same artifacts and batching as ragged_batched, with group_by_shape
+# false: the backend runs together only consecutive requests of one width, as
+# it did before it grouped by shape. The control for ragged_batched's count
+# of executions.
+name: "ragged_consecutive"
+backend: "tlaloc"
+max_batch_size: 8
+input [ { name: "X" data_type: TYPE_FP32 dims: [ -1 ] allow_ragged_batch: true } ]
+output [ { name: "Y" data_type: TYPE_FP32 dims: [ -1 ] } ]
+dynamic_batching { max_queue_delay_microseconds: 2000 }
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "artifact" value: { string_value: "square_plus_b1_n4.mlir, square_plus_b2_n4.mlir, square_plus_b4_n4.mlir, square_plus_b8_n4.mlir, square_plus_b1_n8.mlir, square_plus_b2_n8.mlir, square_plus_b4_n8.mlir, square_plus_b8_n8.mlir" } }
+parameters: { key: "group_by_shape" value: { string_value: "false" } }

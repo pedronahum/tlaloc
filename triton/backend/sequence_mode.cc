@@ -643,6 +643,8 @@ SequenceModel::ReadManifest(const std::string& text)
     if (!e.prefill) {
       max_context_ = std::max(max_context_, e.context);
       max_decode_batch_ = std::max(max_decode_batch_, e.batch);
+    } else {
+      max_prefill_batch_ = std::max(max_prefill_batch_, e.batch);
     }
   }
   if (max_decode_batch_ == 0) return Invalid(at + "has no decode entry");
@@ -798,7 +800,8 @@ SequenceModel::UploadWeights()
     << total / (1024 * 1024) << " MiB) in " << (NowNs() - t0) / 1000000 << " ms; "
     << entries_.size() << " entries, KV pool of " << num_blocks_ << " pages x " << block_size_
     << " tokens, largest context " << max_context_ << ", largest decode batch "
-    << max_decode_batch_ << ", sequence idle timeout " << idle_ns_ / 1000 << " us";
+    << max_decode_batch_ << ", largest prefill batch " << max_prefill_batch_
+    << ", sequence idle timeout " << idle_ns_ / 1000 << " us";
   if (windowed()) {
     m << "; windowed KV pool for " << window_layers_.size() << " sliding layers (window " << window_
       << "): " << window_num_blocks_ << " pages, a ring of at most " << ring_pages_
@@ -820,14 +823,24 @@ SequenceModel::Decode(int batch, int context) const
 }
 
 const ServingEntrySpec*
-SequenceModel::Prefill(int context) const
+SequenceModel::Prefill(int batch, int context) const
 {
   const ServingEntrySpec* best = nullptr;
   for (const ServingEntrySpec& e : entries_) {
-    if (!e.prefill || e.context < context) continue;
+    if (!e.prefill || e.batch < batch || e.context < context) continue;
     if (best == nullptr || int64_t(e.batch) * e.context < int64_t(best->batch) * best->context) best = &e;
   }
   return best;
+}
+
+int
+SequenceModel::MaxPrefillBatch(int context) const
+{
+  int most = 0;
+  for (const ServingEntrySpec& e : entries_) {
+    if (e.prefill && e.context == context) most = std::max(most, e.batch);
+  }
+  return most;
 }
 
 int
@@ -1232,48 +1245,103 @@ SequenceInstance::Run(
   std::ostringstream m;
   m << "tlaloc backend: instance '" << name_ << "': " << e.id << " ran " << rows.size()
     << " sequence(s) in " << (*compute_end - *compute_start) / 1000 << " us";
-  LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, m.str().c_str());
+  // The first call of each prefill entry with each number (> 1) of prompts
+  // is logged, so that a log shows prompts were prefilled together.
+  const bool first_batched =
+      e.prefill && rows.size() > 1 && batched_reported_.insert(e.id + "/" + std::to_string(rows.size())).second;
+  LOG_MESSAGE(first_batched ? TRITONSERVER_LOG_INFO : TRITONSERVER_LOG_VERBOSE, m.str().c_str());
   return nullptr;
 }
 
-TRITONSERVER_Error*
-SequenceInstance::RunTokens(
-    Work* w, uint64_t* compute_start, uint64_t* compute_end, const std::function<void()>& note)
+void
+SequenceInstance::RunPrompts(
+    const std::vector<Work*>& works, uint64_t* compute_start, uint64_t* compute_end,
+    const std::function<void()>& note)
 {
-  const std::vector<int32_t> all = w->tokens;
-  const int start = w->position;
-  TRITONSERVER_Error* err = nullptr;
-  size_t done = 0;
-  while (done < all.size() && err == nullptr) {
-    // A chunk the windowed ring can hold (all of it without a windowed pool),
-    // through the smallest prefill entry covering it.
-    const int at = start + static_cast<int>(done);
-    const size_t n = std::min(all.size() - done, static_cast<size_t>(model_->MaxTokensPerCall(at)));
-    w->tokens.assign(all.begin() + done, all.begin() + done + n);
-    w->position = at;
-    const ServingEntrySpec* e = n > 1 ? model_->Prefill(at + static_cast<int>(n)) : nullptr;
-    if (e != nullptr) {
-      err = Run(*e, {w}, compute_start, compute_end);
-      note();
-    } else {
-      // No prefill entry covers it: one decode step per token.
-      for (size_t j = 0; j < n && err == nullptr; ++j) {
-        w->tokens = {all[done + j]};
-        w->position = at + static_cast<int>(j);
-        const ServingEntrySpec* d = model_->Decode(1, w->position + 1);
-        if (d == nullptr) {
-          err = Invalid("no decode entry covers batch 1 and context " + std::to_string(w->position + 1));
-          break;
-        }
-        err = Run(*d, {w}, compute_start, compute_end);
+  struct Prompt {
+    Work* w;
+    std::vector<int32_t> all;  // the request's tokens
+    int start;                 // the position of all[0]
+    size_t done = 0;           // tokens already run
+    size_t n = 0;              // tokens of this round's call
+  };
+  std::vector<Prompt> prompts;
+  for (Work* w : works) prompts.push_back({w, w->tokens, w->position});
+  // Sets the error of every work of `group` from `err`, and deletes `err`.
+  auto fail = [](const std::vector<Work*>& group, TRITONSERVER_Error* err) {
+    if (err == nullptr) return;
+    for (Work* w : group) {
+      if (w->err == nullptr) w->err = Err(TRITONSERVER_ErrorCode(err), TRITONSERVER_ErrorMessage(err));
+    }
+    TRITONSERVER_ErrorDelete(err);
+  };
+  for (;;) {
+    // This round's call of every request with tokens left: all of them, or
+    // as many as the windowed ring can hold. The calls that a prefill entry
+    // covers are keyed by the context of the smallest one; the rest run one
+    // decode step per token.
+    std::vector<std::pair<int, std::vector<Prompt*>>> by_context;  // in order of first appearance
+    std::vector<Prompt*> stepwise;
+    for (Prompt& p : prompts) {
+      if (p.w->err != nullptr || p.done >= p.all.size()) continue;
+      const int at = p.start + static_cast<int>(p.done);
+      p.n = std::min(p.all.size() - p.done, static_cast<size_t>(model_->MaxTokensPerCall(at)));
+      p.w->tokens.assign(p.all.begin() + p.done, p.all.begin() + p.done + p.n);
+      p.w->position = at;
+      const ServingEntrySpec* e = p.n > 1 ? model_->Prefill(1, at + static_cast<int>(p.n)) : nullptr;
+      if (e == nullptr) {
+        stepwise.push_back(&p);
+        continue;
+      }
+      auto it = std::find_if(by_context.begin(), by_context.end(), [&](const auto& g) { return g.first == e->context; });
+      if (it == by_context.end()) {
+        by_context.push_back({e->context, {}});
+        it = by_context.end() - 1;
+      }
+      it->second.push_back(&p);
+    }
+    if (by_context.empty() && stepwise.empty()) break;
+    for (const auto& g : by_context) {
+      // Rows of a context bucket are not merged into a longer one: a call
+      // computes every row at its entry's context.
+      const size_t most = static_cast<size_t>(std::max(1, model_->MaxPrefillBatch(g.first)));
+      for (size_t i = 0; i < g.second.size(); i += most) {
+        std::vector<Work*> rows;
+        for (size_t k = i; k < std::min(g.second.size(), i + most); ++k) rows.push_back(g.second[k]->w);
+        const ServingEntrySpec* e = model_->Prefill(static_cast<int>(rows.size()), g.first);
+        TRITONSERVER_Error* err =
+            e == nullptr ? Invalid(
+                               "no prefill entry covers batch " + std::to_string(rows.size()) +
+                               " and context " + std::to_string(g.first))
+                         : Run(*e, rows, compute_start, compute_end);
         note();
+        fail(rows, err);
       }
     }
-    done += n;
+    for (Prompt* p : stepwise) {
+      // No prefill entry covers the call: one decode step per token.
+      Work* w = p->w;
+      const int at = w->position;
+      for (size_t j = 0; j < p->n && w->err == nullptr; ++j) {
+        w->tokens = {p->all[p->done + j]};
+        w->position = at + static_cast<int>(j);
+        const ServingEntrySpec* d = model_->Decode(1, w->position + 1);
+        TRITONSERVER_Error* err =
+            d == nullptr ? Invalid("no decode entry covers batch 1 and context " + std::to_string(w->position + 1))
+                         : Run(*d, {w}, compute_start, compute_end);
+        note();
+        fail({w}, err);
+      }
+    }
+    for (auto& g : by_context) {
+      for (Prompt* p : g.second) p->done += p->n;
+    }
+    for (Prompt* p : stepwise) p->done += p->n;
   }
-  w->tokens = all;
-  w->position = start;
-  return err;
+  for (Prompt& p : prompts) {
+    p.w->tokens = p.all;
+    p.w->position = p.start;
+  }
 }
 
 TRITONSERVER_Error*
@@ -1320,8 +1388,9 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
     if (w.err == nullptr) w.err = Admit(&w);
   }
 
-  // A request with several tokens runs as prefill chunks (RunTokens). Decode:
-  // every one-token request, several sequences per call.
+  // The requests with several tokens run as prefill calls, together where a
+  // prefill entry of batch > 1 takes them (RunPrompts). Decode: every
+  // one-token request, several sequences per call.
   std::vector<Work*> decode, several;
   for (Work& w : works) {
     if (w.err != nullptr || w.tokens.empty()) continue;
@@ -1332,7 +1401,7 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
     if (first_compute == 0) first_compute = cs;
     last_compute = ce;
   };
-  for (Work* w : several) w->err = RunTokens(w, &cs, &ce, note);
+  RunPrompts(several, &cs, &ce, note);
   const size_t max_b = static_cast<size_t>(model_->max_decode_batch());
   for (size_t i = 0; i < decode.size(); i += max_b) {
     std::vector<Work*> rows(decode.begin() + i, decode.begin() + std::min(decode.size(), i + max_b));

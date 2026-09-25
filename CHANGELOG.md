@@ -13,6 +13,18 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Prompts of several sequences prefilled in one call.** `HfServingExport`
+  writes a prefill entry for every batch of the ladder (`prefillMaxBatch`,
+  or `-PprefillMaxBatch`, caps it; `HfServingExport.specs` lists the
+  entries). Each sequence has its own right-aligned row with its own
+  positions, block table and slots; in the reference interpreter a prompt
+  prefilled with others gets its solo logits and continuation bit for bit
+  (`BatchedPrefillTest`, with full-history and windowed pools). The Triton
+  backend runs the prompts of one batch that fall in one context bucket as
+  one call on the smallest prefill entry that holds them. On the GB10 four
+  TinyLlama prompts sent together prefill in about 35 ms against about
+  110 ms one after the other, with each prompt's solo argmax and 8 greedy
+  ids.
 - **Windowed KV pool for sliding-window layers.** A model's sliding-window
   layers can keep their KV in a second pool class (`WindowedKvPool`): each
   sequence holds a ring of at most `ceil(window / blockSize) + 1` pages,
@@ -116,6 +128,12 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **Triton dynamic batching groups requests by shape.** A batch's requests
+  are keyed by the shape of their rows and each key's requests run together
+  in arrival order, instead of only consecutive requests of one shape. A
+  ragged batch (`allow_ragged_batch`) of two widths runs as two executions:
+  216 requests ran in 74 to 76 executions instead of 119 to 134. The model
+  parameter `group_by_shape: "false"` keeps the old grouping.
 - **KV pools are updated in place.** `toStablehlo` takes `outputAliases`, and
   every serving body the artifact writer emits marks each `KV_POOL_IN`
   parameter with `tf.aliasing_output` naming its `KV_POOL_OUT` (the manifest's

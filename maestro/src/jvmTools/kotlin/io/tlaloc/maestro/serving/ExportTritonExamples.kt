@@ -12,9 +12,7 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.passes.DxirInterpreter
 import io.tlaloc.ir.inference.AttentionKind
-import io.tlaloc.ir.inference.DecodeBucket
 import io.tlaloc.ir.inference.DecodeBucketPolicy
-import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.DecoderLayerSpec
 import io.tlaloc.ir.inference.HfDecoderConfig
 import io.tlaloc.ir.inference.HfDecoderGraph
@@ -48,6 +46,12 @@ import kotlin.random.Random
  *   batch of 2x2 matrices, emitted for batch 1, 2, 4 and 8. The two models
  *   serve the same files; only `grad_batched` turns on Triton's dynamic
  *   batching. Rows are independent, so each row is `df/dA` of its own `A`.
+ * - `ragged_batched` and `ragged_consecutive`: `x · x + x` over rows of 4 or
+ *   of 8 f32 values, emitted for batch 1, 2, 4 and 8 at each width. Both
+ *   serve the same files with dynamic batching of ragged requests, so one
+ *   batch can hold requests of both widths. `ragged_batched` runs each width
+ *   of a batch as one execution; `ragged_consecutive` sets `group_by_shape`
+ *   false and runs only consecutive requests of one width together.
  * - `large_io` and `large_io_host`: `x · x + x` over 4Mi f32 values (16 MiB in,
  *   16 MiB out), for measuring what reading and writing GPU memory in place
  *   saves; `large_io_host` sets `zero_copy` false.
@@ -166,6 +170,19 @@ fun main(args: Array<String>) {
     }
     Files.writeString(reference.resolve("grad_batched.json"), batchedReference)
 
+    // ragged_batched / ragged_consecutive ------------------------------------
+    // x . x + x over rows of 4 or of 8 f32 values, for batch 1, 2, 4 and 8.
+    for (n in listOf(4, 8)) for (b in batches) {
+        val t = DxirType(F32, listOf(b, n))
+        val fn = DxirBuilder.function("square_plus_b${b}_n$n") {
+            val x = param("x", t)
+            listOf(op(OpKind.ADD, listOf(op(OpKind.MUL, listOf(x, x), t), x), t))
+        }
+        for (model in listOf("ragged_batched", "ragged_consecutive")) {
+            writeModule(repo.resolve("$model/1/square_plus_b${b}_n$n.mlir"), fn.toStablehlo())
+        }
+    }
+
     // large_io / large_io_host ----------------------------------------------
     val large = DxirBuilder.function("large_square_plus") {
         val t = DxirType(F32, listOf(LARGE_IO_ELEMENTS))
@@ -234,10 +251,9 @@ private val WINDOW_MODEL = HfDecoderConfig(
 )
 
 /**
- * Export [WINDOW_MODEL] into [dir]: decode entries for batches 1 and 2 at
- * contexts 16, 32 and 64, a prefill entry per context, pages of 4, room for
- * four sequences of 64 positions. With [windowed] the sliding layers get a
- * windowed KV pool.
+ * Export [WINDOW_MODEL] into [dir]: decode and prefill entries for batches 1
+ * and 2 at contexts 16, 32 and 64, pages of 4, room for four sequences of 64
+ * positions. With [windowed] the sliding layers get a windowed KV pool.
  */
 private fun exportWindowModel(dir: Path, windowed: Boolean) {
     val config = WINDOW_MODEL
@@ -245,8 +261,7 @@ private fun exportWindowModel(dir: Path, windowed: Boolean) {
     val numBlocks = 1 + 4 * 16
     val window = if (!windowed) null else config.windowedKvPool(4, 64, numBlocks)
     val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = 4, windowedKv = window)
-    val specs = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) } +
-        policy.contextLadder.map { HfDecoderGraph.spec(config, model, DecodeBucket(1, it), DecodeGraphKind.PREFILL) }
+    val specs = HfServingExport.specs(config, model, policy)
     val rng = Random(20260925)
     val weights = HfDecoderGraph.weightSlots(config).associate { slot ->
         val n = slot.type.dims.fold(1) { a, b -> a * b }

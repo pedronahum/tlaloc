@@ -15,6 +15,11 @@
 // has left the window. A request is split into calls of at most
 // ring_pages * block_size - min(start, window - 1) tokens, so that no call
 // writes over a position one of its own rows still reads.
+//
+// The requests of several tokens that arrive in one batch (the prompts of
+// sequences started together) are prefilled together: an artifact with
+// prefill entries of batch > 1 runs the prompts of a context bucket in one
+// call, each right-aligned in its own row.
 
 #pragma once
 
@@ -109,9 +114,13 @@ class SequenceModel {
   // The cheapest decode entry with batch >= `batch` and context >= `context`,
   // or nullptr.
   const ServingEntrySpec* Decode(int batch, int context) const;
-  // The cheapest prefill entry of batch >= 1 and context >= `context`, or
-  // nullptr.
-  const ServingEntrySpec* Prefill(int context) const;
+  // The cheapest prefill entry with batch >= `batch` and context >=
+  // `context`, or nullptr.
+  const ServingEntrySpec* Prefill(int batch, int context) const;
+  // The largest batch of the prefill entries of context `context` (0 if none).
+  int MaxPrefillBatch(int context) const;
+  // The largest batch of any prefill entry (0 without prefill entries).
+  int max_prefill_batch() const { return max_prefill_batch_; }
 
  private:
   SequenceModel() = default;
@@ -141,6 +150,7 @@ class SequenceModel {
   int block_size_ = 0;
   int max_context_ = 0;
   int max_decode_batch_ = 0;
+  int max_prefill_batch_ = 0;
   int64_t max_batch_size_ = 0;
   uint64_t idle_ns_ = 0;
   bool donate_pools_ = true;
@@ -190,11 +200,15 @@ class SequenceInstance {
   }
   TRITONSERVER_Error* Parse(Work* w);
   TRITONSERVER_Error* Admit(Work* w);
-  // Runs a request of several tokens: calls of at most MaxTokensPerCall
-  // tokens, each through the smallest prefill entry that covers it, or one
-  // decode step per token when no prefill entry does.
-  TRITONSERVER_Error* RunTokens(Work* w, uint64_t* compute_start, uint64_t* compute_end,
-                                const std::function<void()>& note);
+  // Runs the requests of several tokens of one batch (each work's error is
+  // set in the work). In rounds: each round takes from every request the
+  // next call's worth of tokens, at most MaxTokensPerCall, and runs the
+  // calls that fall in one prefill context bucket together, as many per call
+  // as the largest prefill batch of that context, each group through the
+  // smallest prefill entry covering it. A call no prefill entry covers runs
+  // as one decode step per token.
+  void RunPrompts(const std::vector<Work*>& works, uint64_t* compute_start, uint64_t* compute_end,
+                  const std::function<void()>& note);
   // Frees the sequences Triton has ended for being idle (see the definition).
   void Reap(uint64_t now);
   void Free(uint64_t corrid, const char* why);
@@ -227,6 +241,7 @@ class SequenceInstance {
   uint64_t runs_ = 0;
   uint64_t in_place_runs_ = 0;
   std::set<std::string> reported_;  // entries whose first run was logged
+  std::set<std::string> batched_reported_;  // "<prefill entry>/<prompts>" whose first run was logged
   // Set when a failed execution took the donated pools with it: every
   // sequence's KV state is gone. The rest of the batch is refused, then all
   // sequences are freed and the pools zeroed again.

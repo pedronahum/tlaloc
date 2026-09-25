@@ -34,12 +34,19 @@ Expected values:
                 closed form rowsum(A)[q] + colsum(A)[p], bit for bit; many
                 concurrent one-row requests, which Triton's dynamic batcher
                 gathers for grad_batched, each get exactly their own row back.
+  ragged_batched / ragged_consecutive
+                x*x + x over rows of width 4 or 8, computed here exactly;
+                requests of both widths sent at once each get exactly their
+                own rows back, and grouping a batch by the shape of its rows
+                (ragged_batched) runs fewer executions than grouping only
+                consecutive requests of one width (ragged_consecutive).
   zero copy     matmul_sumsq and large_io with inputs and outputs in CUDA
                 shared memory over gRPC: the same bits as the host path, and
                 the input region is left unchanged. (verify.sh checks the
                 server log for which path each tensor took.)
 
---perturb changes one expected GRAD value; the run must then fail. That is
+--perturb changes one expected GRAD value (and one decode logit and one
+ragged row); the run must then fail. That is
 the negative control: it shows a wrong answer is caught.
 
 Exit status 0 when every check passes, 1 otherwise.
@@ -225,6 +232,85 @@ def batching(grpc, np, grpcclient, reference, perturb):
           f"{len(rows)} requests")
     if not same:
         FAILURES.append("batched vs unbatched")
+
+
+# Rows per request of the ragged check: mostly one, sometimes two.
+ROWS = (1, 1, 2)
+
+
+def ragged(grpc, np, grpcclient, perturb, rounds=3, per_round=72):
+    """Ragged dynamic batching: requests of rows of width 4 and of width 8
+    (one or two rows each, in random order) sent all at once, so that one
+    batch holds both widths. Every request must get exactly its own rows of
+    x*x + x back. ragged_batched runs each width of a batch as one execution;
+    ragged_consecutive (group_by_shape false, the control) runs only
+    consecutive requests of one width together, so it must need more
+    executions for the same requests."""
+    import concurrent.futures
+    import random
+    import threading
+
+    print(f"grpc  ragged_batched, ragged_consecutive  {grpc}")
+    rng = random.Random(11)
+    requests = []
+    for _ in range(rounds * per_round):
+        width = rng.choice((4, 8))
+        rows = rng.choice(ROWS)
+        requests.append(np.array([[rng.randint(-8, 8) for _ in range(width)] for _ in range(rows)],
+                                 dtype=np.float32))
+    expected = [x * x + x for x in requests]
+    if perturb:
+        expected[29] = expected[29].copy()
+        expected[29][0, 0] += 1.0
+    client = grpcclient.InferenceServerClient(url=grpc)
+    counts, answers = {}, {}
+    for model in ("ragged_batched", "ragged_consecutive"):
+        local = threading.local()
+
+        def one(k, model=model):
+            if not hasattr(local, "client"):
+                local.client = grpcclient.InferenceServerClient(url=grpc)
+            x = requests[k]
+            i = grpcclient.InferInput("X", list(x.shape), "FP32")
+            i.set_data_from_numpy(x)
+            return local.client.infer(model, [i]).as_numpy("Y")
+
+        before = model_counts(client, model)
+        got = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=per_round) as pool:
+            for r in range(rounds):
+                got += list(pool.map(one, range(r * per_round, (r + 1) * per_round)))
+        after = model_counts(client, model)
+        answers[model] = got
+        bad = [k for k in range(len(requests))
+               if got[k].shape != expected[k].shape or got[k].tobytes() != expected[k].tobytes()]
+        ok = not bad
+        print(f"  {'ok  ' if ok else 'FAIL'} {model}: {len(requests)} concurrent requests of widths 4 "
+              f"and 8, {len(requests) - len(bad)} get their own rows bit for bit"
+              + (f" (first mismatch: request {bad[0]})" if bad else ""))
+        if not ok:
+            FAILURES.append(f"{model} rows")
+        counts[model] = (after[0] - before[0], after[1] - before[1])
+        print(f"       {model}: {len(requests)} requests ({counts[model][0]} rows) in "
+              f"{counts[model][1]} executions")
+    grouped, control = counts["ragged_batched"], counts["ragged_consecutive"]
+    ok = grouped[1] < control[1]
+    print(f"  {'ok  ' if ok else 'FAIL'} grouping by shape ran {grouped[1]} executions where running "
+          f"consecutive requests of one width together ran {control[1]}")
+    if not ok:
+        FAILURES.append("ragged grouping by shape")
+    # A batch of requests of two widths needs 2 executions grouped by shape,
+    # so executions fall well below requests.
+    ok = 2 * grouped[1] <= len(requests)
+    print(f"  {'ok  ' if ok else 'FAIL'} ragged_batched: {len(requests)} requests in {grouped[1]} executions "
+          f"(at most half as many executions as requests)")
+    if not ok:
+        FAILURES.append("ragged_batched batched too little")
+    same = all(x.tobytes() == y.tobytes()
+               for x, y in zip(answers["ragged_batched"], answers["ragged_consecutive"]))
+    print(f"  {'ok  ' if same else 'FAIL'} both models' answers are identical for all {len(requests)} requests")
+    if not same:
+        FAILURES.append("ragged batched vs consecutive")
 
 
 def zero_copy(grpc, np, grpcclient, ref_value, ref_grad):
@@ -778,6 +864,7 @@ def main():
     for kind, mod, url in (("http", httpclient, args.http), ("grpc", grpcclient, args.grpc)):
         dtypes_wide(kind, mod, url, np, args.perturb)
     batching(args.grpc, np, grpcclient, args.reference_batched, args.perturb)
+    ragged(args.grpc, np, grpcclient, args.perturb)
     zero_copy(args.grpc, np, grpcclient, ref_value, ref_grad)
 
     buckets(args.http, np, httpclient)

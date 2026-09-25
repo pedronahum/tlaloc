@@ -18,7 +18,9 @@ import java.nio.file.Path
  * `modelName` (default [HfServingExport.modelNameFor] of the checkpoint dir),
  * `windowedKv` (`true` or `false`, default `true`: a model with sliding-window
  * layers keeps their KV in a windowed pool; `false` gives them full-history
- * pools).
+ * pools), `prefillMaxBatch` (default `maxBatch`: prefill entries for every
+ * batch of the ladder up to it, so the prompts of several sequences that
+ * arrive together are prefilled in one call).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -28,7 +30,8 @@ import java.nio.file.Path
 fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
-            "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv]"
+            "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
+            "[prefillMaxBatch]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -47,6 +50,8 @@ fun main(args: Array<String>) {
         "false" -> false
         else -> throw IllegalArgumentException("windowedKv must be true or false, got '$w'")
     }
+
+    val prefillMaxBatch = arg(10, maxBatch)
 
     HfCheckpoint.open(ckptDir).use { ckpt ->
         val layers = arg(2, ckpt.config.numLayers)
@@ -71,6 +76,7 @@ fun main(args: Array<String>) {
             numBlocks = numBlocks,
             prefill = prefill,
             windowedKv = windowedKv,
+            prefillMaxBatch = prefillMaxBatch,
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )

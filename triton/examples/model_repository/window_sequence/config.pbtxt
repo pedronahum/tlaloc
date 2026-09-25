@@ -1,9 +1,10 @@
 # Written by Tlaloc from the serving artifact 'window-sequence'
-# (window-sequence-v1), 9 entries: decode_b1_c16, decode_b1_c32, decode_b1_c64, decode_b2_c16, decode_b2_c32, decode_b2_c64, prefill_b1_c16, prefill_b1_c32, prefill_b1_c64.
+# (window-sequence-v1), 12 entries: decode_b1_c16, decode_b1_c32, decode_b1_c64, decode_b2_c16, decode_b2_c32, decode_b2_c64, prefill_b1_c16, prefill_b1_c32, prefill_b1_c64, prefill_b2_c16, prefill_b2_c32, prefill_b2_c64.
 # Sequence mode: a request sends one sequence's token ids (with its correlation
 # ID and START/END flags) and gets the last token's logits. The backend keeps each
 # sequence's KV pages; a request of several tokens runs as a prefill chunk,
 # one token as a decode step batched with other sequences' steps.
+# The prompts of up to 2 sequences in one batch share a prefill call.
 name: "window_sequence"
 backend: "tlaloc"
 max_batch_size: 2
