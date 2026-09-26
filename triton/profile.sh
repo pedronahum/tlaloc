@@ -37,6 +37,8 @@
 #   HTTP_PORT / GRPC_PORT / METRICS_PORT [8020 / 8021 / 8022]
 #   TRITON_CLIENT_PYTHON [python3]  a Python with tritonclient[grpc] and numpy
 #   PJRT_PLUGIN [triton/pjrt/xla_cuda13/xla_cuda_plugin.so]
+#   BACKEND_DIR [triton/backends/tlaloc]  the backend build to serve with (for A/B runs)
+#   XLA_EXTRA_FLAGS [""]   appended to the plugin's XLA_FLAGS
 #
 # The run is refused by name when MemAvailable is below the weights plus
 # EXTRA_GIB plus 9 GiB for the server's host side plus a 16 GiB margin, or when
@@ -120,17 +122,21 @@ idle_gate "before loading"
 
 ENVS=(-e TLALOC_PJRT_PLUGIN_PATH=/opt/pjrt/xla_cuda_plugin.so
       -e TLALOC_PJRT_MEMORY_FRACTION="$FRACTION" -e TLALOC_PJRT_PREALLOCATE=false)
+XLA_FLAGS_ALL="${XLA_EXTRA_FLAGS:-}"
 if [[ "${XLA_DUMP:-0}" == 1 ]]; then
   mkdir -p "$OUT_DIR/xla_dump"
-  ENVS+=(-e XLA_FLAGS="--xla_dump_to=/profile/xla_dump --xla_dump_hlo_as_text")
+  XLA_FLAGS_ALL="--xla_dump_to=/profile/xla_dump --xla_dump_hlo_as_text $XLA_FLAGS_ALL"
 fi
+[[ -n "$XLA_FLAGS_ALL" ]] && ENVS+=(-e XLA_FLAGS="$XLA_FLAGS_ALL")
+BACKEND_DIR="$(realpath "${BACKEND_DIR:-$HERE/backends/tlaloc}")"
+echo "backend $BACKEND_DIR/libtriton_tlaloc.so ($(md5sum <"$BACKEND_DIR/libtriton_tlaloc.so" | cut -c1-8))${XLA_FLAGS_ALL:+; XLA_FLAGS=$XLA_FLAGS_ALL}"
 CMD=(tritonserver --model-repository=/models --model-control-mode=explicit --load-model="$MODEL")
 if [[ "$MODE" == nsys ]]; then
   CMD=(nsys launch --session-new="$SESSION" --trace=cuda,nvtx --cuda-graph-trace=node "${CMD[@]}" --log-verbose=1)
 fi
 docker run -d --rm --name "$NAME" --ipc=host --gpus all \
   -p "$HTTP_PORT:8000" -p "$GRPC_PORT:8001" -p "$METRICS_PORT:8002" \
-  -v "$HERE/backends/tlaloc:/opt/tritonserver/backends/tlaloc:ro" \
+  -v "$BACKEND_DIR:/opt/tritonserver/backends/tlaloc:ro" \
   -v "$MODEL_DIR/repository:/models:ro" \
   -v "$PLUGIN:/opt/pjrt/xla_cuda_plugin.so:ro" \
   -v "$OUT_DIR:/profile" \

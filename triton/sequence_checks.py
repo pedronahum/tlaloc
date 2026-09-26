@@ -38,6 +38,16 @@ Prints timings (prefill, ms per decode step alone and concurrently). Exit
 status 0 only if every check passes. With --perturb the expected ids are
 wrong and only the prefill and pressure checks run, so the run must fail.
 
+With --batching it checks only how steps are batched: one sequence decoding
+alone waits less than --lone-wait-ms (default 0.5) per step before its
+execution starts (Triton's queue time plus the backend's input time, from the
+model's statistics), and four sequences whose clients each pause a random 0
+to 5 ms before every step (more than a 1 ms queue delay covers) still run
+their decode steps together: at most two executions more than the steps of
+one sequence, and each gets exactly the ids it gets alone. Against a model
+batched by Triton with a 1 ms queue delay (backend_batching false) both must
+fail.
+
 With --queued (against a copy of the model with a 200 ms idle timeout) it
 checks only that the backend never frees a sequence Triton still holds: 12 to
 32 sequences decode concurrently, so steps wait in Triton's queue for longer
@@ -99,6 +109,15 @@ def stats(url, model):
     with urllib.request.urlopen(f"http://{url}/v2/models/{model}/stats") as r:
         s = json.load(r)["model_stats"][0]
     return int(s["inference_count"]), int(s["execution_count"])
+
+
+def wait_stats(url, model):
+    """(successful requests, ns they spent in Triton's queue plus the backend's
+    input time: everything before their execution started)."""
+    with urllib.request.urlopen(f"http://{url}/v2/models/{model}/stats") as r:
+        inf = json.load(r)["model_stats"][0]["inference_stats"]
+    return (int(inf["success"]["count"]),
+            int(inf["queue"]["ns"]) + int(inf["compute_input"]["ns"]))
 
 
 def refused(fn, needle):
@@ -249,6 +268,76 @@ def refused_alive(url, model, log_path):
             pass
 
 
+def batching(url, model, lone_wait_ms, perturb):
+    """A lone sequence does not wait; sequences decoding together batch even
+    when their clients reply at different times."""
+    import random
+
+    c = SequenceClient(url, model, "http")
+    c.generate(80000, FRANCE, 4)  # warm-up
+    n_steps = 24
+    ids = c.generate(80001, FRANCE, 2, keep=True)[0]
+    n0, w0 = wait_stats(url, model)
+    last = ids[-1]
+    for _ in range(n_steps):
+        last = int(np.argmax(c.step(80001, [last])))
+    n1, w1 = wait_stats(url, model)
+    c.end(80001)
+    wait_ms = (w1 - w0) / max(n1 - n0, 1) / 1e6
+    limit = lone_wait_ms
+    check(n1 - n0 == n_steps and wait_ms < limit,
+          f"one sequence alone: {n1 - n0} steps waited {wait_ms:.3f} ms each on average before "
+          f"their execution started (limit {limit} ms)")
+
+    n_new = 16
+    single = [c.generate(80100 + i, p, n_new)[0] for i, p in enumerate(PROMPTS)]
+    results, errors = [None] * len(PROMPTS), []
+    started = threading.Barrier(len(PROMPTS) + 1)
+    prompted = threading.Barrier(len(PROMPTS) + 1)
+    base = 80200
+
+    def worker(i):
+        try:
+            w = SequenceClient(url, model, "http")
+            rng = random.Random(i)
+            started.wait()
+            out = [int(np.argmax(w.step(base + i, PROMPTS[i], start=True)))]
+            prompted.wait()
+            prompted.wait()
+            for k in range(1, n_new):
+                time.sleep(rng.uniform(0.0, 0.005))
+                out.append(int(np.argmax(w.step(base + i, [out[-1]], end=(k == n_new - 1)))))
+            results[i] = out
+        except Exception as e:  # noqa: BLE001 - reported below
+            errors.append(f"sequence {i}: {e}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(PROMPTS))]
+    for t in threads:
+        t.start()
+    started.wait()
+    prompted.wait()  # every prompt prefilled
+    inf0, exe0 = stats(url, model)
+    prompted.wait()
+    for t in threads:
+        t.join()
+    inf1, exe1 = stats(url, model)
+    check(not errors, "no request of the four jittered sequences failed" + (f": {errors}" if errors else ""))
+    for i in range(len(PROMPTS)):
+        want = list(single[i])
+        if perturb:
+            want[-1] += 1
+        check(results[i] == want, f"jittered sequence {i}: ids == its ids alone ({single[i][:6]}...)")
+    steps = inf1 - inf0
+    execs = exe1 - exe0
+    most = (n_new - 1) + 2
+    check(steps == len(PROMPTS) * (n_new - 1) and execs <= most,
+          f"four sequences pausing 0-5 ms before each step: {steps} decode steps ran in {execs} "
+          f"executions (at most {most}: one per step of a sequence, plus two)")
+    print()
+    print(f"{len(failures)} check(s) FAILED" if failures else "all batching checks passed")
+    return 1 if failures else 0
+
+
 def queued(url, model, log_path=""):
     """The backend must not free a sequence whose next request is queued."""
     import collections
@@ -305,9 +394,14 @@ def main():
     ap.add_argument("--queued", action="store_true",
                     help="only the queued-sequence check (a model with a short idle timeout)")
     ap.add_argument("--log", default="", help="the server log, to check which sequences were reclaimed")
+    ap.add_argument("--batching", action="store_true",
+                    help="only the batching checks: a lone sequence does not wait, jittered ones batch")
+    ap.add_argument("--lone-wait-ms", type=float, default=0.5)
     args = ap.parse_args()
     if args.queued:
         return queued(args.http, args.model, args.log)
+    if args.batching:
+        return batching(args.http, args.model, args.lone_wait_ms, args.perturb)
 
     expect = list(HF_IDS)
     if args.perturb:

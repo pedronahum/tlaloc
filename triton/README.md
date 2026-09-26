@@ -350,7 +350,7 @@ shares system memory and a runaway allocation there can take the machine
 down. It exports into `triton/build/muse-glimmer/` for contexts 512, 2,048,
 8,192 and 32,768, decode batches 1, 2 and 4, batch-1 prefill in calls of at
 most 512 tokens and a pool for four sequences of 32,768 positions (8,193
-pages), with a sequence idle timeout of 600 s and a queue delay of 20 ms
+pages), with a sequence idle timeout of 600 s
 (`MUSE_GLIMMER_REEXPORT=1` exports again; so does a model exported for
 another ladder). It drops the page cache of the checkpoint and the artifact
 and starts the server with a PJRT memory fraction of the weights plus 15 GiB
@@ -498,7 +498,8 @@ section). `TritonModelRepository.write(..., kv = KvMode.CLIENT)`, or
 `-PkvMode=client`, writes the client-managed form instead, in which the client
 names pages and slots in every request; `reference_decode` is written that
 way. `-PmaxSequenceIdleMicros` and `-PmaxQueueDelayMicros` set the sequence
-batcher's idle timeout (default 60 s) and batching delay (default 1 ms).
+batcher's idle timeout (default 60 s) and queue delay (default 0: the
+backend forms the batches, see "Batching" under "Sequence mode").
 
 The TinyLlama commands above export decode entries for batch 1 only; add
 `-PmaxBatch=4` to `exportHfServingArtifact` to let the backend batch up to
@@ -547,7 +548,7 @@ sequence_batching {
     { name: "END"    control [ { kind: CONTROL_SEQUENCE_END    int32_false_true: [ 0, 1 ] } ] },
     { name: "CORRID" control [ { kind: CONTROL_SEQUENCE_CORRID data_type: TYPE_UINT64 } ] }
   ]
-  oldest { max_candidate_sequences: 63 preferred_batch_size: [ 4 ] max_queue_delay_microseconds: 1000 }
+  oldest { max_candidate_sequences: 63 preferred_batch_size: [ 4 ] max_queue_delay_microseconds: 0 }
 }
 parameters: { key: "serving_manifest" value: { string_value: "tlaloc-serving.json" } }
 ```
@@ -605,12 +606,44 @@ this; `generate_client.py` adds a tokenizer.
   min(start, window - 1)` tokens, the most the ring holds while the call's
   first row still reads its window; each call runs on its own prefill entry
   (or as a decode step when it is one token). A one-token request runs on a
-  decode entry. All one-token requests in one Triton batch (different
+  decode entry. All one-token requests in one batch (different
   sequences, which the oldest strategy guarantees) run as one call on the
   smallest decode entry whose batch and context cover them, with padding rows
   for the rest of the batch. Without a prefill entry (a v1 artifact, or
   `-Pprefill=false`), the tokens of a longer request run as decode steps.
-- **Prompts together.** The requests of several tokens in one Triton batch
+- **Batching.** Triton hands each request over as soon as it arrives (the
+  export sets `max_queue_delay_microseconds` to 0), and the backend forms
+  the batches on a thread of its own. A batch runs once every sequence that
+  took a decode step in the previous batch, and is still held, has its next
+  request in; a lone sequence therefore never waits, and sequences decoding
+  together stay together however far apart their clients' replies arrive.
+  If one of them does not come back within `cohort_wait_microseconds`
+  (default 20000, counted from when the batch could first have run), the
+  batch runs without it and the log says so (`a batch of 1 request(s) ran
+  without sequence(s) 90001 90002 90003 of the previous batch after waiting
+  20000 us`: three clients that stopped stepping without END).
+  A prompt waits up to `prompt_wait_microseconds` (default 2000) after it
+  arrived for prompts sent with it. The time a request waits in the backend
+  is part of Triton's compute input time for it. With the model parameter
+  `backend_batching` set to `false` the batches are the ones Triton's
+  sequence batcher forms, after its queue delay; the load log states which.
+  `sequence_checks.py --batching` checks the policy: one sequence alone
+  waits under 0.5 ms a step before its execution starts, and four sequences
+  whose clients pause 0 to 5 ms before each step run 60 steps in at most 17
+  executions; batched by Triton with a 1 ms queue delay, the same checks
+  fail (1.2 ms of waiting, 35 executions).
+- **Per step on the host.** The integer inputs of a step (token ids,
+  positions, block tables, lengths, slots) are written into pinned host
+  memory mapped into the GPU, which the executions read in place through
+  PJRT views made on each entry's first run, with no copy
+  (`pack_step_inputs`, default `true`; `false` uploads each input as its own
+  buffer). The logits copy is asked for as soon as the execution is queued,
+  so it follows the execution on the device and the host wakes once
+  (`overlap_logits_copy`, default `true`). The first 100 runs of each entry
+  log the host time of a run (`decode_b1_c64 host time per run, median of
+  100 runs: inputs 94 us, launch 963 us, until the logits are on the host
+  8365 us, after 91 us`, Qwen3-0.6B bf16 on a GPU shared with the desktop).
+- **Prompts together.** The requests of several tokens in one batch
   (several sequences started at once) run in rounds: each round takes every
   request's next call (all its tokens, or what the windowed ring holds), and
   the calls whose smallest covering prefill entry has the same context run
@@ -630,7 +663,7 @@ this; `generate_client.py` adds a tokenizer.
   the first run of each entry (`decode_b1_c64 updated the 44 KV pools in
   place ...`, or a warning that they were written to new device memory) and
   after 100 runs (`in 100 runs the 44 KV pools were updated in place 100
-  times and copied 0 times`). The model parameter `donate_kv_pools` set to
+  times and copied 0 times`); later runs are not checked. The model parameter `donate_kv_pools` set to
   `false` hands the executions the pools without donating them, so XLA
   copies them first; it exists as the control for that check. An artifact
   exported before its bodies carried the alias is served with the pools
@@ -771,11 +804,13 @@ shared and before sliding layers read their ring:
 
 A decode step reads the 52 GiB of weights once whatever the batch, so four
 sequences cost about what one does until attention over 32,768 positions
-shows. The export sets the batcher's queue delay to 20 ms: with 1 ms, the
-steps of two and four sequences (each client receiving an 800 KB logits
-vector) arrived more than 1 ms apart and ran 32 steps in 31 executions and 64
-in 35; with 20 ms every round ran as one execution, and a lone sequence pays
-about 24 ms a token for the wait (265 ms against 241 ms). A 512-token prefill
+shows. These runs were batched by Triton after a 20 ms queue delay: with
+1 ms, the steps of two and four sequences (each client receiving an 800 KB
+logits vector) arrived more than 1 ms apart and ran 32 steps in 31
+executions and 64 in 35; with 20 ms every round ran as one execution, and a
+lone sequence paid about 24 ms a token for the wait (265 ms against 241 ms).
+The backend now forms the batches itself and the export sets no delay (see
+"Batching" above, and `docs/SERVING_ARCHITECTURE.md`, section 6). A 512-token prefill
 call took about 0.55 s at context 512 and about 4.5 s at 32,768, because
 every call scored its tokens against every position of its entry's context,
 the sliding layers' included. Now a sliding layer scores its ring and a call
@@ -827,6 +862,12 @@ Measured with it on an idle GPU (gRPC, one sequence, medians of three runs):
 
 Where that time goes, kernel by kernel, is in
 [SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md#6-where-the-time-goes).
+Those runs were batched by Triton after a queue delay (1 ms, and 20 ms for
+Muse Glimmer), which is the "Queue" column. With the backend batching and no
+delay the queue is about 0.2 ms, measured on a GPU the desktop kept 15 to 22%
+busy: Qwen3-0.6B bf16 11.7 ms a token against 13.0 ms served the old way in
+turn, f32 17.1 against 19.0, TinyLlama 26.6 against 27.6 (tables in the same
+section).
 
 ## Model configuration
 
@@ -844,6 +885,11 @@ first argument, the first `output` the first result.
 | `results` | no | One item per result, in order: `output:<name>` (a config output) or `state:<name>` (replaces that state after the request runs). Every config output must appear exactly once, and every state read by `arguments` must be written by exactly one result. |
 | `zero_copy` | no | `true` (default) or `false`. With `false`, tensors in GPU memory go through the host; see "GPU memory in and out". |
 | `donate_kv_pools` | no | Sequence mode only. `true` (default) or `false`. With `false` the executions are not handed the KV pools to write in place, so XLA copies them every run; see "Sequence mode". |
+| `backend_batching` | no | Sequence mode only. `true` (default): the backend forms the batches, waiting only for the sequences that decoded in its previous batch; `false`: the batches Triton's sequence batcher forms. See "Batching" under "Sequence mode". |
+| `cohort_wait_microseconds` | no | Sequence mode with backend batching. The most a batch waits for the sequences of the previous one (default 20000). |
+| `prompt_wait_microseconds` | no | Sequence mode with backend batching. The most a prompt waits for prompts sent with it (default 2000). |
+| `pack_step_inputs` | no | Sequence mode only. `true` (default): a step's integer inputs are written into mapped pinned host memory the executions read in place; `false`: one upload per input. |
+| `overlap_logits_copy` | no | Sequence mode only. `true` (default): the logits copy is queued behind the execution; `false`: it is asked for after the host sees the execution finish. |
 
 At load the backend reads each artifact's entry signature and checks it
 against `config.pbtxt`: the number of inputs and outputs, each data type, and
@@ -1017,10 +1063,10 @@ defaults.
   allocated as a sequence grows and live sequences are not preempted, so a
   sequence that needs a page when none is free (and none can be reclaimed
   from a sequence Triton has ended) is refused mid-generation, keeping its
-  KV, rather than paused; the client sends the request again. Only the oldest strategy. Prompts in one Triton batch share a
-  prefill call only when they fall in one context bucket, and the batcher's
-  `max_queue_delay_microseconds` (1 ms by default) is all the time it waits
-  for them. Prompts whose request also carries END were not batched together
+  KV, rather than paused; the client sends the request again. Only the oldest strategy. Prompts in one batch share a
+  prefill call only when they fall in one context bucket, and
+  `prompt_wait_microseconds` (2 ms by default) is all the time the backend
+  waits for them. Prompts whose request also carries END were not batched together
   by Triton in the measurements above. Sampling is the client's (the backend
   returns logits).
 - Client mode: state is per model instance and is not tied to a Triton

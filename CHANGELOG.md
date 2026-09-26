@@ -13,6 +13,32 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **The Triton backend batches decode steps itself.** Triton hands each
+  request over at once (`TritonModelRepository` now writes
+  `max_queue_delay_microseconds: 0`), and a batch runs once every sequence
+  that decoded in the previous batch has its next request in, or after
+  `cohort_wait_microseconds` (20 ms) without it; a prompt waits up to 2 ms
+  for prompts sent with it. A lone sequence no longer waits a queue delay,
+  and sequences decoding together stay together whatever the spread of
+  their clients. `backend_batching: false` restores Triton's batching.
+  `sequence_checks.py --batching` (in `verify.sh`): one TinyLlama sequence
+  waits 0.35 ms a step, four clients pausing 0 to 5 ms run 60 steps in 16
+  executions; batched by Triton after 1 ms, the same checks fail (1.18 ms,
+  35 executions). Measured with the old and new backends served in turn,
+  with the desktop keeping the GPU 15 to 22% busy (contended): Qwen3-0.6B
+  bf16 11.7 ms a token against 13.0, f32 17.1 against 19.0, TinyLlama 26.6
+  against 27.6, Muse Glimmer 335.6 ms against 351.7, and four Muse Glimmer
+  sequences still one execution per step (`docs/SERVING_ARCHITECTURE.md`,
+  section 6).
+- **Fewer host steps per execution in the Triton backend.** A step's integer
+  inputs are written into mapped pinned host memory the executions read in
+  place (`pack_step_inputs`), the logits copy is queued behind the
+  execution (`overlap_logits_copy`), the KV pools' addresses are checked
+  for the first 100 runs only, and the first 100 runs of each entry log
+  their host time by part. Under the same contention the server time moved
+  by less than the noise; the input part fell from 174 us to 64 us on
+  Qwen3-0.6B, and what remains is PJRT's launch call, about 0.6 ms.
+
 - **`triton/profile.sh`: where serving time goes.** It times decode steps
   and prefill calls of a sequence-mode model through Triton, after checking
   that the GPU is idle (it waits, or labels the numbers contended), and with

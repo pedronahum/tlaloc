@@ -389,8 +389,35 @@ PjrtBuffer::Upload(PjrtClient* client, const HostInput& host, std::unique_ptr<Pj
 }
 
 std::string
+PjrtBuffer::View(
+    PjrtClient* client, const void* device_ptr, DType dtype, const std::vector<int64_t>& dims,
+    std::unique_ptr<PjrtBuffer>* out)
+{
+  const PJRT_Api* api = client->plugin_->api;
+  if (reinterpret_cast<uintptr_t>(device_ptr) % kDeviceArgumentAlignment != 0) {
+    return "a view needs " + std::to_string(kDeviceArgumentAlignment) + "-byte aligned device memory";
+  }
+  PJRT_Client_CreateViewOfDeviceBuffer_Args view{};
+  view.struct_size = PJRT_Client_CreateViewOfDeviceBuffer_Args_STRUCT_SIZE;
+  view.client = client->client_;
+  view.device_buffer_ptr = const_cast<void*>(device_ptr);
+  view.dims = dims.empty() ? nullptr : dims.data();
+  view.num_dims = dims.size();
+  view.element_type = ToPjrtType(dtype);
+  view.device = client->devices_[0];
+  view.on_delete_callback = &ViewReleased;
+  std::string err = TakeError(api, api->PJRT_Client_CreateViewOfDeviceBuffer(&view));
+  if (!err.empty()) return "PJRT_Client_CreateViewOfDeviceBuffer failed: " + err;
+  std::unique_ptr<PjrtBuffer> b(new PjrtBuffer());
+  b->api_ = api;
+  b->buffer_ = view.buffer;
+  *out = std::move(b);
+  return "";
+}
+
+std::string
 PjrtExecutable::Execute(
-    const std::vector<ExecuteArg>& args, std::unique_ptr<PjrtResults>* out)
+    const std::vector<ExecuteArg>& args, std::unique_ptr<PjrtResults>* out, bool wait)
 {
   const PJRT_Api* api = client_->plugin_->api;
   PJRT_Device* device = client_->devices_[0];
@@ -470,10 +497,25 @@ PjrtExecutable::Execute(
   run.device_complete_events = &complete;
   std::string err = TakeError(api, api->PJRT_LoadedExecutable_Execute(&run));
   if (!err.empty()) return "PJRT_LoadedExecutable_Execute failed: " + err;
-  err = AwaitAndDestroy(api, complete);
-  if (!err.empty()) return "execution failed: " + err;
+  // The arguments made for this call live as long as the execution may.
+  results->inputs_.swap(uploaded.buffers);
+  results->complete_ = complete;
+  if (wait) {
+    err = results->Await();
+    if (!err.empty()) return err;
+  }
   *out = std::move(results);
   return "";
+}
+
+std::string
+PjrtResults::Await()
+{
+  if (complete_ == nullptr) return "";
+  PJRT_Event* event = complete_;
+  complete_ = nullptr;
+  std::string err = AwaitAndDestroy(api_, event);
+  return err.empty() ? "" : "execution failed: " + err;
 }
 
 std::string
@@ -544,7 +586,9 @@ PjrtBuffer::IsDeleted() const
 
 PjrtResults::~PjrtResults()
 {
+  Await();
   for (PJRT_Buffer* b : buffers_) DestroyBuffer(api_, b);
+  for (PJRT_Buffer* b : inputs_) DestroyBuffer(api_, b);
 }
 
 std::unique_ptr<PjrtBuffer>

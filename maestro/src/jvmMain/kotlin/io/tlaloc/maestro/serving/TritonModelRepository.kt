@@ -88,13 +88,16 @@ object TritonModelRepository {
      *
      * @param maxSequenceIdleMicros how long a sequence may go without a request
      *   before Triton ends it and the backend frees its pages.
-     * @param maxQueueDelayMicros how long the batcher may hold a sequence's
-     *   request to batch it with other sequences' steps. It is added to every
-     *   step of a lone sequence, so keep it small.
+     * @param maxQueueDelayMicros how long Triton's sequence batcher may hold a
+     *   sequence's request to batch it with other sequences' steps before the
+     *   backend sees it. The backend forms its own batches (it waits for the
+     *   sequences that decoded in its previous batch, and a lone sequence does
+     *   not wait), so the default is 0: a delay here is added to every step
+     *   of fewer sequences than `preferred_batch_size`.
      */
     data class SequenceOptions(
         val maxSequenceIdleMicros: Long = 60_000_000,
-        val maxQueueDelayMicros: Long = 1_000,
+        val maxQueueDelayMicros: Long = 0,
     ) {
         init {
             require(maxSequenceIdleMicros >= 1 && maxQueueDelayMicros >= 0) {
@@ -288,7 +291,9 @@ object TritonModelRepository {
             append("# ID and START/END flags) and gets the last token's logits. The backend keeps each\n")
             append("# sequence's KV pages; a request of several tokens runs as ")
             append(if (prefill.isEmpty()) "decode steps" else "a prefill chunk")
-            append(",\n# one token as a decode step batched with other sequences' steps.\n")
+            append(",\n# one token as a decode step batched with other sequences' steps. Triton hands\n")
+            append("# each request over at once; the backend batches the steps of the sequences that\n")
+            append("# decode together.\n")
             val chunk = prefill.maxOfOrNull { it.tokensPerSeq } ?: 0
             if (prefill.any { it.tokensPerSeq < it.context }) {
                 append("# A prefill call takes at most $chunk tokens per sequence; a longer request\n")

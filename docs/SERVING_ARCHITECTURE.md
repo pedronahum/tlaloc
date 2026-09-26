@@ -348,14 +348,16 @@ At load the backend reads the manifest, checks every body's signature,
 compiles every entry and uploads the weights. Per request:
 
 - a client sends the prompt with START; the backend runs it on the smallest
-  prefill entry that holds it, as one call. The prompts that Triton hands
-  over together (several clients starting sequences at once) run as one
+  prefill entry that holds it, as one call. The prompts that arrive
+  within 2 ms of each other (several clients starting sequences at once) run as one
   call when they fall in one context bucket, on the smallest prefill entry
   whose batch holds them; prompts of different context buckets are not
   merged, because a call computes every row at its entry's context;
-- each later request carries one token; the one-token requests of different
-  sequences that Triton hands over together run as one decode call on the
-  smallest entry that holds them;
+- each later request carries one token; the backend forms the batches
+  itself: a batch runs once every sequence that decoded in the previous
+  batch has its next request in (a lone sequence does not wait; see
+  "Per-step overhead and batching" in section 6), and its one-token requests
+  run as one decode call on the smallest entry that holds them;
 - the backend derives each sequence's block table and slots from the pages it
   holds; the client sends token ids only;
 - when pages run short, the backend reclaims them only from sequences Triton
@@ -465,7 +467,8 @@ queue and the gRPC round trip.
 - The bf16 weights are read as bf16. In a decode step the convert to f32 is
   inside the matmul kernel (a Triton gemm fusion), and no weight is
   converted into a buffer of its own.
-- Outside the kernels, per step: the sequence batcher's queue delay (1.2 ms
+- Outside the kernels, per step (before the changes in "Per-step overhead
+  and batching" below): the sequence batcher's queue delay (1.2 ms
   for TinyLlama and Qwen3, whose configs wait up to 1 ms; 20.5 ms for Muse
   Glimmer, whose export waits up to 20 ms so that concurrent sequences
   batch). Then 0.8 to 3.7 ms from the first input copy to the first kernel.
@@ -573,15 +576,107 @@ shows:
 - The weight matmuls do not depend on the context: about 460 ms a call on an
   idle GPU, 29 s of a 32,768-token prompt.
 
+### Per-step overhead and batching
+
+What changed in the Triton backend:
+
+- **Batching.** Triton hands each request over at once (the export sets
+  `max_queue_delay_microseconds` to 0), and the backend forms the batches
+  on its own thread. A batch runs once every sequence that took a decode
+  step in the previous batch, and is still held, has its next request in,
+  or after `cohort_wait_microseconds` (20 ms) without it. A lone sequence
+  no longer waits for a queue delay, and sequences decoding together stay
+  together whatever the spread of their clients' replies. A prompt waits
+  up to 2 ms for prompts sent with it (1 ms missed one of two prompts
+  sent together from Python gRPC threads in a `verify.sh` run).
+- **Inputs.** A step's integer inputs are written into pinned host memory
+  mapped into the GPU and read in place through PJRT views made once per
+  entry, instead of five to seven uploads.
+- **Logits.** The copy is asked for as soon as the execution is queued, so
+  the host wakes once, when the logits are there.
+- The KV pools' device addresses are checked for the first 100 runs and
+  the first run of each entry, no longer after every run.
+
+`sequence_checks.py --batching` (in `verify.sh`) checks the batching policy on
+TinyLlama: one sequence alone waits 0.35 ms a step before its execution
+starts (Triton's queue 0.21 ms, the backend 0.12 ms), and four sequences whose
+clients pause 0 to 5 ms before each step run 60 steps in 16 executions. The
+same model batched by Triton after a 1 ms queue delay fails both: 1.18 ms of
+waiting, and 35 executions for the 60 steps.
+
+Measured with `profile.sh` (gRPC, one sequence, `decode:8:32`), the old
+backend and configuration and the new ones served in turn, three rounds, each
+the median of three runs; the table gives the median of the three rounds.
+**Contended**: for the whole session the desktop kept the GPU 15 to 22% busy
+(nvidia-smi, median over 10 s, before loading and before timing; a 45-minute
+wait did not see it idle), so every time here is longer than on an idle GPU,
+and differences under about 0.3 ms are within the noise.
+
+| Model, weights | Client before | Client after | Server before | Server after | Queue before | Queue after |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B, bf16 | 12.97 ms | 11.71 ms | 10.07 ms | 9.85 ms | 1.18 ms | 0.22 ms |
+| Qwen3-0.6B, f32 | 18.99 ms | 17.08 ms | 15.77 ms | 15.60 ms | 1.18 ms | 0.20 ms |
+| TinyLlama-1.1B, f32 | 27.64 ms | 26.62 ms | 25.21 ms | 24.94 ms | 1.17 ms | 0.19 ms |
+
+Muse Glimmer (the long-context export; old backend with its 20 ms queue
+delay and new backend with none, served in turn, three rounds; decode with
+`profile.sh`'s client, one sequence, medians of three runs of 16 steps; the
+rest with `context_bench.py`, four sequences per context, 16 steps each;
+contended as above):
+
+| Measured | Before | After |
+|---|---|---|
+| a decode step at position 400 (context 512), client | 351.7 ms | 335.6 ms |
+| same, queue / server compute | 20.3 / 329.9 ms | 0.2 / 333.3 ms |
+| a decode step at position 6,000 (context 8,192), client | 360.4 ms | 343.5 ms |
+| a 432-token prompt (context 512) | 796 ms | 765 ms |
+| an 8,112-token prompt (context 8,192) | 16.8 s | 16.4 s |
+| context 512: 1 / 2 / 4 sequences, ms a step | 356 / 354 / 341 | 339 / 340 / 338 |
+| context 512: 4 sequences, tokens/s; executions for 64 steps | 11.66; 16, 16, 16 | 11.78; 16, 16, 16 |
+| context 8,192: 1 / 2 / 4 sequences, ms a step | 362 / 367 / 364 | 347 / 352 / 369 |
+| context 8,192: 4 sequences, tokens/s; executions for 64 steps | 10.94; 16, 16, 16 | 10.63; 16, 16, 17 |
+
+A lone Muse Glimmer sequence saves the 20 ms wait (16 to 17 ms a token at
+the client, 5%), and four sequences still run one execution per step, with
+the same throughput within the noise. Server compute did not change beyond
+the noise. The backend logged two batches per session that ran without
+their cohort after 20 ms: `context_bench.py` stops the clients of one phase
+without END before the next phase starts, the case the wait bound is for.
+
+Host time of a decode step after the change, from the backend's own log
+(the median of the first 100 runs of `decode_b1_c64`, median of three
+rounds): Qwen3-0.6B bf16 64 us to write the inputs, 591 us in the launch
+call (PJRT's execute for 366 arguments and `cuGraphLaunch`), 9.1 ms until
+the logits are on the host, 91 us after; Qwen3-0.6B f32 60, 605 us, 14.6 ms,
+88 us; TinyLlama 64, 727 us, 24.0 ms, 69 us.
+
+- The gain is the queue wait: about 1 ms a token for the small models and
+  about 20 ms for Muse Glimmer. The host-side changes did not move the server
+  time by more than the noise. On Qwen3-0.6B bf16 (three rounds each): the
+  inputs uploaded one by one took 174 us, written once into device memory
+  with `cudaMemcpy` 209 us, and written into mapped host memory 93 us (64 us
+  in the final build), with server times of 10.16, 10.21 and 10.05 ms. The
+  first two could wait for a slice of the shared GPU; the mapped form needs
+  no copy at all, and it keeps the arguments at fixed addresses (the CUDA
+  graph was not re-recorded between steps in either form, per XLA's log).
+  Asking for the logits copy early could not be told apart from asking
+  after the execution under this load.
+- XLA options tried and not kept: `--xla_gpu_require_exclusive_lock=true`
+  changed nothing (server 10.07 against 10.30 ms, within the noise), and
+  disabling command buffers moved 3 ms into the launch call and out of the
+  wait, for the same total. Each step already is one CUDA graph.
+- What remains on the host is the launch call, about 0.6 ms a step for the
+  small models, which is PJRT and XLA's own work per execution. Clients also
+  pull the full logits vector each step (600 KB for Qwen3, 800 KB for Muse
+  Glimmer); a smaller output (the argmax, or the top k) would shorten the
+  client side and is not built (⬜).
+
 ### What would make it faster (estimates)
 
-- Decode, every model: send a request's logits copy with the execution
-  instead of after it (0.9 to 1.7 ms a step), upload the integer inputs as
-  one buffer (up to 2 ms for Muse Glimmer), and a queue delay that does not
-  make a lone sequence wait (20.5 ms a token for Muse Glimmer, 1.2 ms for
-  the others). Muse Glimmer would go from 268 ms to about 247 ms a token,
-  Qwen3-0.6B from 17.1 to about 14.5 ms (f32) and from 11.3 to about 8.7 ms
-  (bf16). Not started (⬜).
+- Decode, every model: the queue wait, the input uploads and the late
+  logits copy are done (previous subsection). The launch call, about 0.6 ms
+  a step, is PJRT's; a smaller output than the full logits would save the
+  client part of a step (⬜).
 - Prefill (the ring and the blockwise loop are done, above): what is left
   is the full layers' score passes, which only a fused attention kernel
   that keeps a block's scores on chip would remove (⬜), and the per-block

@@ -64,7 +64,9 @@ class TritonModelRepositoryTest {
                 # Sequence mode: a request sends one sequence's token ids (with its correlation
                 # ID and START/END flags) and gets the last token's logits. The backend keeps each
                 # sequence's KV pages; a request of several tokens runs as decode steps,
-                # one token as a decode step batched with other sequences' steps.
+                # one token as a decode step batched with other sequences' steps. Triton hands
+                # each request over at once; the backend batches the steps of the sequences that
+                # decode together.
                 name: "reference_decode"
                 backend: "tlaloc"
                 max_batch_size: 4
@@ -85,7 +87,7 @@ class TritonModelRepositoryTest {
                   oldest {
                     max_candidate_sequences: 5
                     preferred_batch_size: [ 4 ]
-                    max_queue_delay_microseconds: 1000
+                    max_queue_delay_microseconds: 0
                   }
                 }
                 instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
@@ -99,10 +101,10 @@ class TritonModelRepositoryTest {
             assertEquals(expected, TritonModelRepository.config(manifest, "reference_decode"))
             val tuned = TritonModelRepository.config(
                 manifest, "reference_decode",
-                options = TritonModelRepository.SequenceOptions(maxSequenceIdleMicros = 5, maxQueueDelayMicros = 0),
+                options = TritonModelRepository.SequenceOptions(maxSequenceIdleMicros = 5, maxQueueDelayMicros = 2000),
             )
             assertTrue("max_sequence_idle_microseconds: 5\n" in tuned)
-            assertTrue("max_queue_delay_microseconds: 0\n" in tuned)
+            assertTrue("max_queue_delay_microseconds: 2000\n" in tuned)
         }
     }
 

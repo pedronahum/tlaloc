@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -415,17 +416,50 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
         (corrid_input_.empty() ? " CORRID" : ""));
   }
   triton::common::TritonJson::Value params;
-  if (config.Find("parameters", &params) && params.Find("donate_kv_pools")) {
-    std::string donate;
-    RETURN_IF_ERROR(GetParameterValue(params, "donate_kv_pools", &donate));
-    if (donate != "true" && donate != "false") {
-      return Invalid(Where() + "the 'donate_kv_pools' parameter must be true or false, got '" + donate + "'");
+  const bool has_params = config.Find("parameters", &params);
+  auto flag = [&](const char* key, bool* out) -> TRITONSERVER_Error* {
+    if (!has_params || !params.Find(key)) return nullptr;
+    std::string v;
+    RETURN_IF_ERROR(GetParameterValue(params, key, &v));
+    if (v != "true" && v != "false") {
+      return Invalid(Where() + "the '" + key + "' parameter must be true or false, got '" + v + "'");
     }
-    donate_pools_ = donate == "true";
+    *out = v == "true";
+    return nullptr;
+  };
+  RETURN_IF_ERROR(flag("donate_kv_pools", &donate_pools_));
+  RETURN_IF_ERROR(flag("pack_step_inputs", &pack_step_inputs_));
+  RETURN_IF_ERROR(flag("overlap_logits_copy", &overlap_logits_copy_));
+  RETURN_IF_ERROR(flag("backend_batching", &backend_batching_));
+  if (has_params && params.Find("cohort_wait_microseconds")) {
+    std::string v;
+    RETURN_IF_ERROR(GetParameterValue(params, "cohort_wait_microseconds", &v));
+    char* end = nullptr;
+    const unsigned long long us = std::strtoull(v.c_str(), &end, 10);
+    if (v.empty() || *end != '\0' || us > 10000000ULL) {
+      return Invalid(
+          Where() + "the 'cohort_wait_microseconds' parameter must be a whole number of microseconds "
+          "from 0 to 10000000, got '" + v + "'");
+    }
+    cohort_wait_ns_ = us * 1000;
+  }
+  if (has_params && params.Find("prompt_wait_microseconds")) {
+    std::string v;
+    RETURN_IF_ERROR(GetParameterValue(params, "prompt_wait_microseconds", &v));
+    char* end = nullptr;
+    const unsigned long long us = std::strtoull(v.c_str(), &end, 10);
+    if (v.empty() || *end != '\0' || us > 10000000ULL) {
+      return Invalid(
+          Where() + "the 'prompt_wait_microseconds' parameter must be a whole number of microseconds "
+          "from 0 to 10000000, got '" + v + "'");
+    }
+    prompt_wait_ns_ = us * 1000;
   }
   uint64_t idle_us = 1000000;  // Triton's default
   MemberAsU64(sb, "max_sequence_idle_microseconds", &idle_us);
   idle_ns_ = idle_us * 1000;
+  triton::common::TritonJson::Value oldest;
+  if (sb.Find("oldest", &oldest)) MemberAsU64(oldest, "max_queue_delay_microseconds", &queue_delay_us_);
   return nullptr;
 }
 
@@ -918,6 +952,8 @@ struct SequenceInstance::Work {
   std::vector<float> logits;
   size_t pages_held = 0;  // pages the sequence holds after the request
   size_t ring_held = 0;   // windowed pages it holds
+  uint64_t arrival = 0;  // when Triton handed the request over
+  bool ok = false;       // answered without an error
   uint64_t compute_start = 0;
   uint64_t compute_end = 0;
   // Set when a request of several calls fails after an earlier call of it
@@ -927,6 +963,13 @@ struct SequenceInstance::Work {
   bool lost = false;
 };
 
+SequenceInstance::SequenceInstance(
+    const SequenceModel* model, const std::string& name, TRITONBACKEND_ModelInstance* instance)
+    : model_(model), name_(name), instance_(instance), pool_(model->num_blocks()),
+      window_pool_(model->windowed() ? model->window_num_blocks() : 1)
+{
+}
+
 TRITONSERVER_Error*
 SequenceInstance::Create(
     const SequenceModel* model, const std::string& name, TRITONBACKEND_ModelInstance* instance,
@@ -935,6 +978,8 @@ SequenceInstance::Create(
   std::unique_ptr<SequenceInstance> s(new SequenceInstance(model, name, instance));
   uint64_t total = 0;
   std::string err = s->ZeroPools(&total);
+  if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, "instance '" + name + "': " + err);
+  err = s->AllocateStaging();
   if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, "instance '" + name + "': " + err);
   s->pool_bytes_ = total;
   std::ostringstream m;
@@ -947,9 +992,145 @@ SequenceInstance::Create(
   }
   m << (model->donate_pools() ? "each execution is handed the pools to update in place"
                               : "executions are not handed the pools (donate_kv_pools is false)");
+  if (s->device_staging_ != nullptr) {
+    m << "; a step's integer inputs are written into " << s->staging_bytes_
+      << " bytes of pinned host memory the executions read in place (no copy)";
+  } else {
+    m << "; a step's integer inputs are uploaded one by one"
+      << (model->pack_step_inputs() ? " (the plugin cannot read device memory in place)"
+                                    : " (pack_step_inputs is false)");
+  }
+  m << (model->overlap_logits_copy() ? "; the logits copy is queued behind each execution"
+                                     : "; the logits are copied once the host sees an execution finish "
+                                       "(overlap_logits_copy is false)");
+  if (model->backend_batching()) {
+    m << "; the backend batches steps itself: a batch waits for the sequences that decoded in the "
+      << "previous one for up to " << model->cohort_wait_ns() / 1000 << " us (a lone sequence does not "
+      << "wait), and a prompt for others sent with it for up to " << model->prompt_wait_ns() / 1000 << " us";
+    if (model->queue_delay_us() > 0) {
+      m << " (but Triton's max_queue_delay_microseconds of " << model->queue_delay_us()
+        << " still holds every request of fewer than preferred_batch_size sequences before the "
+        << "backend sees it; set it to 0)";
+    }
+  } else {
+    m << "; batches are the ones Triton's sequence batcher forms (backend_batching is false)";
+  }
   LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+  if (model->backend_batching()) s->worker_ = std::thread([p = s.get()] { p->Loop(); });
   *out = std::move(s);
   return nullptr;
+}
+
+SequenceInstance::~SequenceInstance()
+{
+  if (worker_.joinable()) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      stopping_ = true;
+    }
+    arrived_.notify_all();
+    worker_.join();  // runs what is still queued first
+  }
+  // The views over the staging memory go before the memory.
+  layouts_.clear();
+#ifdef TRITON_ENABLE_GPU
+  if (host_staging_ != nullptr) cudaFreeHost(host_staging_);
+#endif
+}
+
+namespace {
+
+constexpr size_t kNotStaged = std::numeric_limits<size_t>::max();
+// Each input starts on its own 256 bytes, as cudaMalloc aligns its blocks.
+constexpr size_t kStagingAlign = 256;
+
+size_t
+StagedBytes(const ServingEntrySpec& e, std::vector<size_t>* offsets)
+{
+  size_t at = 0;
+  if (offsets != nullptr) offsets->assign(e.inputs.size(), kNotStaged);
+  for (size_t i = 0; i < e.inputs.size(); ++i) {
+    const SlotSpec& s = e.inputs[i];
+    if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role)) continue;
+    if (offsets != nullptr) (*offsets)[i] = at;
+    at += (Elements(s.dims) * 4 + kStagingAlign - 1) / kStagingAlign * kStagingAlign;
+  }
+  return at;
+}
+
+}  // namespace
+
+std::string
+SequenceInstance::AllocateStaging()
+{
+  if (!model_->pack_step_inputs() || !model_->client()->SupportsDeviceViews()) return "";
+#ifdef TRITON_ENABLE_GPU
+  size_t bytes = 0;
+  for (const ServingEntrySpec& e : model_->entries()) bytes = std::max(bytes, StagedBytes(e, nullptr));
+  if (bytes == 0) return "";
+  // Pinned host memory mapped into the GPU's address space: the executions
+  // read the inputs where the host wrote them, with no copy.
+  cudaError_t c = cudaSetDevice(model_->client()->device_ordinal());
+  if (c == cudaSuccess) c = cudaHostAlloc(&host_staging_, bytes, cudaHostAllocMapped);
+  if (c == cudaSuccess) c = cudaHostGetDevicePointer(&device_staging_, host_staging_, 0);
+  if (c != cudaSuccess) {
+    return "allocating " + std::to_string(bytes) + " bytes for step inputs (pack_step_inputs): " +
+           cudaGetErrorString(c);
+  }
+  std::memset(host_staging_, 0, bytes);
+  staging_bytes_ = bytes;
+#endif
+  return "";
+}
+
+std::string
+SequenceInstance::Layout(const ServingEntrySpec& e, StepLayout** out)
+{
+  auto it = layouts_.find(e.id);
+  if (it != layouts_.end()) {
+    *out = &it->second;
+    return "";
+  }
+  StepLayout l;
+  l.bytes = StagedBytes(e, &l.offset);
+  l.views.resize(e.inputs.size());
+  for (size_t i = 0; i < e.inputs.size(); ++i) {
+    if (l.offset[i] == kNotStaged) continue;
+    std::string err = PjrtBuffer::View(
+        model_->client(), static_cast<char*>(device_staging_) + l.offset[i], DType::I32, e.inputs[i].dims,
+        &l.views[i]);
+    if (!err.empty()) return "input '" + e.inputs[i].name + "' in the step staging memory: " + err;
+  }
+  *out = &layouts_.emplace(e.id, std::move(l)).first->second;
+  return "";
+}
+
+void
+SequenceInstance::Clock(
+    const ServingEntrySpec& e, uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4)
+{
+  StepClock& c = clocks_[e.id];
+  c.inputs.push_back((t1 - t0) / 1000);
+  c.launch.push_back((t2 - t1) / 1000);
+  c.wait.push_back((t3 - t2) / 1000);
+  c.after.push_back((t4 - t3) / 1000);
+  if (c.inputs.size() < 100) return;
+  auto median = [](std::vector<uint64_t>* v) {
+    std::nth_element(v->begin(), v->begin() + v->size() / 2, v->end());
+    return (*v)[v->size() / 2];
+  };
+  std::ostringstream m;
+  m << "tlaloc backend: instance '" << name_ << "': " << e.id << " host time per run, median of "
+    << c.inputs.size() << " runs: inputs " << median(&c.inputs) << " us, launch " << median(&c.launch)
+    << " us, until the logits are on the host " << median(&c.wait) << " us, after " << median(&c.after)
+    << " us (" << (device_staging_ != nullptr ? "packed inputs" : "inputs uploaded one by one") << ", "
+    << (model_->overlap_logits_copy() ? "logits copy queued behind the execution"
+                                      : "logits copied after the execution")
+    << ")";
+  // The first 100 runs of each entry are logged; later ones only verbosely.
+  LOG_MESSAGE(
+      clock_reported_.insert(e.id).second ? TRITONSERVER_LOG_INFO : TRITONSERVER_LOG_VERBOSE, m.str().c_str());
+  c = StepClock();
 }
 
 std::string
@@ -982,7 +1163,10 @@ SequenceInstance::ZeroPools(uint64_t* bytes)
 void
 SequenceInstance::CheckInPlace(const ServingEntrySpec& e)
 {
-  if (pool_address_.empty()) return;
+  // Whether an entry writes the pools in place is fixed when it is compiled:
+  // its first run tells, and the count covers the first 100 runs. Later runs
+  // are not checked (each check asks PJRT for every pool's address).
+  if (pool_address_.empty() || (runs_ >= 100 && reported_.count(e.id))) return;
   bool in_place = true;
   for (auto& kv : pool_address_) {
     const void* at = nullptr;
@@ -1064,8 +1248,13 @@ SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id
 {
   const uint64_t limit = ReclaimLimit();
   std::vector<std::pair<uint64_t, uint64_t>> idle;  // last_ns, id
+  std::set<uint64_t> queued;  // sequences with a request waiting to run
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& w : inbox_) queued.insert(w->corrid);
+  }
   for (const auto& kv : sequences_) {
-    if (batch_.count(kv.first)) continue;
+    if (batch_.count(kv.first) || queued.count(kv.first)) continue;
     if (now > kv.second.last_ns && now - kv.second.last_ns > limit) idle.emplace_back(kv.second.last_ns, kv.first);
   }
   std::sort(idle.begin(), idle.end());
@@ -1276,25 +1465,44 @@ SequenceInstance::Run(
     }
     lens[r] = w->position + n;
   }
-  auto host = [](const std::vector<int32_t>& v, const std::vector<int64_t>& dims) {
-    HostInput h;
-    h.data = v.data();
-    h.byte_size = v.size() * 4;
-    h.dtype = DType::I32;
-    h.dims = dims;
-    return h;
-  };
+  const uint64_t t0 = NowNs();
+  // The step's integer inputs: written into the mapped staging memory, which
+  // the execution reads in place through views made on the entry's first run
+  // (the previous execution that read it has finished: every run waits for
+  // its own); or uploaded one by one.
+  StepLayout* layout = nullptr;
+  if (device_staging_ != nullptr) {
+    std::string lerr = Layout(e, &layout);
+    if (!lerr.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + lerr);
+  }
+  std::vector<std::unique_ptr<PjrtBuffer>> uploads;
   std::vector<ExecuteArg> args(e.inputs.size());
   for (size_t i = 0; i < e.inputs.size(); ++i) {
     const SlotSpec& s = e.inputs[i];
-    if (s.role == "TOKEN_IDS") args[i].host = host(tokens, s.dims);
-    else if (s.role == "POSITIONS") args[i].host = host(positions, s.dims);
-    else if (s.role == "BLOCK_TABLES") args[i].host = host(tables, s.dims);
-    else if (s.role == "SEQ_LENS") args[i].host = host(lens, s.dims);
-    else if (s.role == "SLOT_MAPPING") args[i].host = host(slots, s.dims);
-    else if (s.role == "WINDOW_BLOCK_TABLES") args[i].host = host(wtables, s.dims);
-    else if (s.role == "WINDOW_SLOT_MAPPING") args[i].host = host(wslots, s.dims);
-    else if (IsPoolIn(s.role)) {
+    const std::vector<int32_t>* v = nullptr;
+    if (s.role == "TOKEN_IDS") v = &tokens;
+    else if (s.role == "POSITIONS") v = &positions;
+    else if (s.role == "BLOCK_TABLES") v = &tables;
+    else if (s.role == "SEQ_LENS") v = &lens;
+    else if (s.role == "SLOT_MAPPING") v = &slots;
+    else if (s.role == "WINDOW_BLOCK_TABLES") v = &wtables;
+    else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
+    if (v != nullptr) {
+      if (layout != nullptr) {
+        std::memcpy(static_cast<char*>(host_staging_) + layout->offset[i], v->data(), v->size() * 4);
+        args[i].device = layout->views[i].get();
+      } else {
+        HostInput h;
+        h.data = v->data();
+        h.byte_size = v->size() * 4;
+        h.dtype = DType::I32;
+        h.dims = s.dims;
+        uploads.emplace_back();
+        std::string uerr = PjrtBuffer::Upload(model_->client(), h, &uploads.back());
+        if (!uerr.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": input '" + s.name + "': " + uerr);
+        args[i].device = uploads.back().get();
+      }
+    } else if (IsPoolIn(s.role)) {
       // Donated: the artifact aliases each KV_POOL_OUT to its KV_POOL_IN, so
       // the step writes the pool in place and hands it back as that output.
       args[i].device = state_.at(s.name).get();
@@ -1303,9 +1511,23 @@ SequenceInstance::Run(
       args[i].device = model_->weight(s.name);
     }
   }
-  *compute_start = NowNs();
+  const uint64_t t1 = NowNs();
+  *compute_start = t0;
   std::unique_ptr<PjrtResults> results;
-  std::string err = e.executable->Execute(args, &results);
+  std::string err = e.executable->Execute(args, &results, /*wait=*/false);
+  const uint64_t t2 = NowNs();
+  // The logits: asked for now, the copy follows the execution on the device
+  // and the host wakes once; or after the host has seen the execution end.
+  std::vector<float> all(size_t(B) * model_->vocab());
+  size_t logits_at = e.outputs.size();
+  for (size_t j = 0; j < e.outputs.size(); ++j) {
+    if (e.outputs[j].role == "LOGITS") logits_at = j;
+  }
+  std::string copy_err;
+  if (err.empty() && model_->overlap_logits_copy()) {
+    copy_err = results->CopyToHost(logits_at, all.data(), all.size() * 4);
+  }
+  if (err.empty()) err = results->Await();
   if (!err.empty()) {
     *compute_end = NowNs();
     for (const auto& kv : state_) pools_lost_ |= kv.second->IsDeleted();
@@ -1316,22 +1538,21 @@ SequenceInstance::Run(
                                name_ + "' loses its KV state"
                          : ""));
   }
+  if (!model_->overlap_logits_copy()) copy_err = results->CopyToHost(logits_at, all.data(), all.size() * 4);
+  const uint64_t t3 = NowNs();
   // The pools first: a donated pool now lives only in the results.
   for (size_t j = 0; j < e.outputs.size(); ++j) {
     if (e.replaces[j] >= 0) state_[e.inputs[e.replaces[j]].name] = results->Release(j);
   }
   CheckInPlace(e);
-  for (size_t j = 0; j < e.outputs.size() && err.empty(); ++j) {
-    if (e.outputs[j].role != "LOGITS") continue;
-    std::vector<float> all(size_t(B) * model_->vocab());
-    err = results->CopyToHost(j, all.data(), all.size() * 4);
-    if (!err.empty()) break;
-    for (size_t r = 0; r < rows.size(); ++r) {
-      rows[r]->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
-    }
+  if (!copy_err.empty()) {
+    *compute_end = NowNs();
+    return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + copy_err);
+  }
+  for (size_t r = 0; r < rows.size(); ++r) {
+    rows[r]->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
   }
   *compute_end = NowNs();
-  if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + err);
   for (Work* w : rows) {
     w->seq->length = w->position + static_cast<int>(w->tokens.size());
     w->pages_held = w->seq->pages.size();
@@ -1339,6 +1560,7 @@ SequenceInstance::Run(
     w->compute_start = *compute_start;
     w->compute_end = *compute_end;
   }
+  Clock(e, t0, t1, t2, t3, *compute_end);
   std::ostringstream m;
   m << "tlaloc backend: instance '" << name_ << "': " << e.id << " ran " << rows.size()
     << " sequence(s) in " << (*compute_end - *compute_start) / 1000 << " us";
@@ -1485,17 +1707,143 @@ SequenceInstance::Respond(Work* w)
 }
 
 void
+SequenceInstance::Intake(TRITONBACKEND_Request* request, uint64_t arrival, Work* w)
+{
+  w->request = request;
+  w->arrival = arrival;
+  w->err = TRITONBACKEND_ResponseNew(&w->response, w->request);
+  if (w->err == nullptr) w->err = Parse(w);
+}
+
+void
 SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t count)
 {
-  const uint64_t exec_start = NowNs();
-
-  std::vector<Work> works(count);
-  batch_.clear();
+  const uint64_t now = NowNs();
+  std::vector<std::unique_ptr<Work>> works(count);
   for (uint32_t r = 0; r < count; ++r) {
-    Work& w = works[r];
-    w.request = requests[r];
-    w.err = TRITONBACKEND_ResponseNew(&w.response, w.request);
-    if (w.err == nullptr) w.err = Parse(&w);
+    works[r].reset(new Work());
+    Intake(requests[r], now, works[r].get());
+  }
+  if (!model_->backend_batching()) {
+    std::vector<Work*> batch;
+    for (auto& w : works) batch.push_back(w.get());
+    RunBatch(batch, now);
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& w : works) inbox_.push_back(std::move(w));
+  }
+  arrived_.notify_one();
+}
+
+void
+SequenceInstance::Loop()
+{
+  std::vector<std::unique_ptr<Work>> pending;  // in arrival order
+  for (;;) {
+    bool waited = false, timed_out = false;
+    std::vector<uint64_t> absent;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      for (;;) {
+        while (!inbox_.empty()) {
+          pending.push_back(std::move(inbox_.front()));
+          inbox_.pop_front();
+        }
+        if (pending.empty()) {
+          if (stopping_) return;
+          arrived_.wait(lock);
+          continue;
+        }
+        if (stopping_) break;
+        const uint64_t now = NowNs();
+        uint64_t until = std::numeric_limits<uint64_t>::max();
+        // The sequences that decoded in the last batch, still held, without
+        // a request in: waited for up to cohort_wait from when this batch
+        // could first have run.
+        std::set<uint64_t> in;
+        for (const auto& w : pending) in.insert(w->corrid);
+        absent.clear();
+        for (uint64_t id : cohort_) {
+          if (!in.count(id) && sequences_.count(id)) absent.push_back(id);
+        }
+        timed_out = false;
+        if (!absent.empty()) {
+          const uint64_t deadline =
+              std::max(pending.front()->arrival, last_batch_end_) + model_->cohort_wait_ns();
+          if (now < deadline) until = deadline;
+          else timed_out = true;
+        }
+        // A prompt waits up to prompt_wait after its arrival for the prompts
+        // sent with it, to be prefilled together.
+        for (const auto& w : pending) {
+          if (w->err != nullptr || w->tokens.size() < 2) continue;
+          const uint64_t deadline = w->arrival + model_->prompt_wait_ns();
+          if (now < deadline) until = std::min(until, deadline);
+          break;  // the oldest prompt
+        }
+        if (until == std::numeric_limits<uint64_t>::max()) break;
+        waited = true;
+        arrived_.wait_for(lock, std::chrono::nanoseconds(until - now));
+      }
+    }
+    // One request per sequence per batch (Triton hands over the next request
+    // of a sequence only after the last one is released, so this only guards).
+    std::vector<std::unique_ptr<Work>> later;
+    std::vector<Work*> batch;
+    std::set<uint64_t> ids;
+    std::vector<std::unique_ptr<Work>> run;
+    for (auto& w : pending) {
+      if (w->corrid != 0 && !ids.insert(w->corrid).second) {
+        later.push_back(std::move(w));
+      } else {
+        batch.push_back(w.get());
+        run.push_back(std::move(w));
+      }
+    }
+    pending = std::move(later);
+    ++batches_;
+    waited_batches_ += waited || timed_out;
+    if (timed_out) {
+      ++timed_out_batches_;
+      std::ostringstream m;
+      m << "tlaloc backend: instance '" << name_ << "': a batch of " << batch.size()
+        << " request(s) ran without sequence(s)";
+      for (size_t i = 0; i < absent.size() && i < 6; ++i) m << " " << absent[i];
+      if (absent.size() > 6) m << " ...";
+      m << " of the previous batch after waiting " << model_->cohort_wait_ns() / 1000
+        << " us (cohort_wait_microseconds); " << timed_out_batches_ << " of " << batches_
+        << " batches so far ran without all of the previous one";
+      LOG_MESSAGE(timed_out_batches_ <= 10 ? TRITONSERVER_LOG_INFO : TRITONSERVER_LOG_VERBOSE, m.str().c_str());
+    }
+    RunBatch(batch, NowNs());
+    // The next batch waits for the sequences that took a decode step in this
+    // one, were not refused and are still held: a client generating tokens
+    // sends its next step as soon as it has the logits. (A sequence whose
+    // prompt was just prefilled is not waited for: its client may hold it.)
+    cohort_.clear();
+    for (Work* w : batch) {
+      if (w->ok && w->tokens.size() == 1 && sequences_.count(w->corrid)) cohort_.insert(w->corrid);
+    }
+    last_batch_end_ = NowNs();
+    if (batches_ % 1000 == 0) {
+      std::ostringstream m;
+      m << "tlaloc backend: instance '" << name_ << "': of " << batches_ << " batches, " << waited_batches_
+        << " waited for sequences of the previous batch and " << timed_out_batches_
+        << " ran without all of them";
+      LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, m.str().c_str());
+    }
+  }
+}
+
+void
+SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
+{
+  const uint32_t count = static_cast<uint32_t>(batch.size());
+  batch_.clear();
+  for (Work* wp : batch) {
+    Work& w = *wp;
     // A sequence with a request in the batch, refused or not, is not reclaimed.
     if (w.corrid != 0) batch_.insert(w.corrid);
     if (w.err != nullptr && w.start) {
@@ -1504,17 +1852,17 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
       Free(w.corrid, "was started again by a refused request");
     }
   }
-  for (Work& w : works) {
-    if (w.err == nullptr) w.err = Admit(&w);
+  for (Work* w : batch) {
+    if (w->err == nullptr) w->err = Admit(w);
   }
 
   // The requests with several tokens run as prefill calls, together where a
   // prefill entry of batch > 1 takes them (RunPrompts). Decode: every
   // one-token request, several sequences per call.
   std::vector<Work*> decode, several;
-  for (Work& w : works) {
-    if (w.err != nullptr || w.tokens.empty()) continue;
-    (w.tokens.size() == 1 ? decode : several).push_back(&w);
+  for (Work* w : batch) {
+    if (w->err != nullptr || w->tokens.empty()) continue;
+    (w->tokens.size() == 1 ? decode : several).push_back(w);
   }
   uint64_t first_compute = 0, last_compute = 0, cs = 0, ce = 0;
   auto note = [&]() {
@@ -1540,7 +1888,8 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
     if (err != nullptr) TRITONSERVER_ErrorDelete(err);
   }
 
-  for (Work& w : works) {
+  for (Work* wp : batch) {
+    Work& w = *wp;
     if (w.err == nullptr && w.response != nullptr) w.err = Respond(&w);
     if (w.end) {
       Free(w.corrid, w.err == nullptr ? "ended" : "ended with an error");
@@ -1552,6 +1901,7 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
       it->second.last_ns = NowNs();
     }
     const bool ok = w.err == nullptr;
+    w.ok = ok;
     if (w.response != nullptr) {
       TRITONSERVER_Error* send = nullptr;
       if (!ok) {
@@ -1566,11 +1916,14 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
     } else if (!ok) {
       LOG_MESSAGE(TRITONSERVER_LOG_ERROR, TRITONSERVER_ErrorMessage(w.err));
     }
+    // From the request's arrival: time it waited for its batch (backend
+    // batching) counts as the request's input time.
+    const uint64_t start = std::min(w.arrival, exec_start);
     const uint64_t cstart = w.compute_start ? w.compute_start : exec_start;
     const uint64_t cend = w.compute_end ? w.compute_end : cstart;
     LOG_IF_ERROR(
         TRITONBACKEND_ModelInstanceReportStatistics(
-            instance_, w.request, ok, exec_start, cstart, cend, NowNs()),
+            instance_, w.request, ok, start, cstart, cend, NowNs()),
         "failed to report request statistics");
     if (w.err != nullptr) TRITONSERVER_ErrorDelete(w.err);
     LOG_IF_ERROR(

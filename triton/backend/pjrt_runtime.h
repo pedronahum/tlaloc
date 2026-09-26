@@ -107,6 +107,14 @@ class PjrtBuffer {
   // needed.
   static std::string Upload(
       PjrtClient* client, const HostInput& host, std::unique_ptr<PjrtBuffer>* out);
+  // A buffer over memory the caller owns on the client's GPU (`device_ptr`,
+  // 16-byte aligned, of `dtype` and `dims`), read in place by every execution
+  // it is passed to and never written or freed by PJRT. The memory must
+  // outlive the buffer, and the caller may change it only while no execution
+  // that reads it is running.
+  static std::string View(
+      PjrtClient* client, const void* device_ptr, DType dtype, const std::vector<int64_t>& dims,
+      std::unique_ptr<PjrtBuffer>* out);
   // The device address of the buffer's memory. Two buffers at the same
   // address share their memory: an output written in place over a donated
   // input has the address the input had.
@@ -146,14 +154,21 @@ struct ExecuteArg {
   bool donate = false;
 };
 
-// Device results of one execution. Destroys its buffers when it goes away.
+// Device results of one execution. Destroys its buffers when it goes away,
+// after waiting for the execution if it may still be running.
 class PjrtResults {
  public:
   ~PjrtResults();
   size_t size() const { return buffers_.size(); }
+  // Waits until the execution has finished; its error, if it failed. Returns
+  // at once when it was already awaited.
+  std::string Await();
   // Element type and dimensions of output `i`.
   std::string Describe(size_t i, DType* dtype, std::vector<int64_t>* dims) const;
   // Copies output `i` into `dst`, which must be exactly `byte_size` bytes.
+  // The copy is queued behind the execution on the device, so it may be
+  // asked for before the execution has finished (Await): the host then wakes
+  // once, when the bytes are there.
   std::string CopyToHost(size_t i, void* dst, size_t byte_size) const;
   // Calls `use` with the device address of output `i` when the output is
   // stored densely, row-major, in exactly `byte_size` bytes; the address is
@@ -169,6 +184,10 @@ class PjrtResults {
   friend class PjrtExecutable;
   const PJRT_Api* api_ = nullptr;
   std::vector<PJRT_Buffer*> buffers_;
+  // Buffers made for this execution's arguments (host copies, views), kept
+  // until it has finished.
+  std::vector<PJRT_Buffer*> inputs_;
+  PJRT_Event* complete_ = nullptr;
 };
 
 // What XLA planned for one execution, in bytes of device memory
@@ -187,8 +206,12 @@ class PjrtExecutable {
   size_t num_outputs() const { return num_outputs_; }
   // Refused by name when the plugin does not report compiled memory.
   std::string MemoryStats(CompiledMemory* out) const;
-  // Uploads the host arguments to device 0, runs, and waits for completion.
-  std::string Execute(const std::vector<ExecuteArg>& args, std::unique_ptr<PjrtResults>* out);
+  // Uploads the host arguments to device 0 and runs. With `wait` it returns
+  // once the execution has finished; without, once it is queued on the
+  // device, and the caller calls Await on the results (a failure of the
+  // execution itself is only reported there).
+  std::string Execute(
+      const std::vector<ExecuteArg>& args, std::unique_ptr<PjrtResults>* out, bool wait = true);
 
  private:
   friend class PjrtClient;

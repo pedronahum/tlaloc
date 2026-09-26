@@ -31,15 +31,31 @@
 // sequences started together) are prefilled together: an artifact with
 // prefill entries of batch > 1 runs the prompts of a context bucket in one
 // call, each right-aligned in its own row.
+//
+// Batching (parameter "backend_batching", true unless set to false): the
+// backend takes each request as soon as Triton hands it over and forms its
+// own batches on a thread of the instance. A batch runs as soon as every
+// sequence that took a decode step in the previous batch (and is still held)
+// has its next request in, or once the first request of the batch has waited
+// "cohort_wait_microseconds" (default 20000) for them. A lone sequence never
+// waits, and sequences decoding together keep running together whatever the
+// spread of their clients' replies. A prompt (a request of several tokens)
+// waits up to "prompt_wait_microseconds" (default 2000) after it arrived for
+// prompts sent with it, which are then prefilled together. With backend_batching false, each batch
+// is the one Triton's sequence batcher formed (max_queue_delay_microseconds).
 
 #pragma once
 
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -108,6 +124,24 @@ class SequenceModel {
   // Whether executions are handed the KV pools to write in place (parameter
   // "donate_kv_pools", true unless set to false).
   bool donate_pools() const { return donate_pools_; }
+  // Whether a step's integer inputs (token ids, positions, block tables,
+  // lengths, slots) are written into pinned host memory mapped into the GPU,
+  // which the executions read in place (parameter "pack_step_inputs", true
+  // unless set to false), instead of one upload per input.
+  bool pack_step_inputs() const { return pack_step_inputs_; }
+  // Whether the logits copy is asked for as soon as the execution is queued,
+  // so that it follows the execution on the device (parameter
+  // "overlap_logits_copy", true unless set to false), instead of after the
+  // host has seen the execution finish.
+  bool overlap_logits_copy() const { return overlap_logits_copy_; }
+  // Whether the backend forms its own batches (see the top of this file).
+  bool backend_batching() const { return backend_batching_; }
+  // How long a batch may wait for the sequences of the previous one.
+  uint64_t cohort_wait_ns() const { return cohort_wait_ns_; }
+  // How long a prompt may wait for other prompts sent with it.
+  uint64_t prompt_wait_ns() const { return prompt_wait_ns_; }
+  // The sequence batcher's max_queue_delay_microseconds (0 when unset).
+  uint64_t queue_delay_us() const { return queue_delay_us_; }
   // KV pool state names and their type, in the order entries read them
   // (full-history and windowed pools both).
   const std::vector<SlotSpec>& pools() const { return pools_; }
@@ -171,6 +205,12 @@ class SequenceModel {
   int64_t max_batch_size_ = 0;
   uint64_t idle_ns_ = 0;
   bool donate_pools_ = true;
+  bool pack_step_inputs_ = true;
+  bool overlap_logits_copy_ = true;
+  bool backend_batching_ = true;
+  uint64_t cohort_wait_ns_ = 20000000;
+  uint64_t prompt_wait_ns_ = 2000000;
+  uint64_t queue_delay_us_ = 0;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
   std::string pages_output_;
   std::map<int32_t, std::string> refused_tokens_;
@@ -206,16 +246,32 @@ class SequenceInstance {
       const SequenceModel* model, const std::string& name,
       TRITONBACKEND_ModelInstance* instance, std::unique_ptr<SequenceInstance>* out);
 
+  ~SequenceInstance();
+  // Called by Triton. With backend batching the requests are queued for the
+  // instance's thread and this returns at once; otherwise they run here.
   void ProcessRequests(TRITONBACKEND_Request** requests, uint32_t count);
 
  private:
   struct Work;
+  // Where each integer input of an entry sits in the step staging memory,
+  // and the PJRT views over those places, made on the entry's first run.
+  struct StepLayout {
+    std::vector<size_t> offset;  // per entry input; kNotStaged for the others
+    size_t bytes = 0;
+    std::vector<std::unique_ptr<tlaloc_triton::PjrtBuffer>> views;
+  };
+  // Host time of the runs of one entry, in microseconds, per part of a run.
+  struct StepClock {
+    std::vector<uint64_t> inputs, launch, wait, after;
+  };
   SequenceInstance(const SequenceModel* model, const std::string& name,
-                   TRITONBACKEND_ModelInstance* instance)
-      : model_(model), name_(name), instance_(instance), pool_(model->num_blocks()),
-        window_pool_(model->windowed() ? model->window_num_blocks() : 1)
-  {
-  }
+                   TRITONBACKEND_ModelInstance* instance);
+  // Creates the response and reads the request (no instance state).
+  void Intake(TRITONBACKEND_Request* request, uint64_t arrival, Work* w);
+  // Runs one batch: admits, prefills, decodes, responds and releases.
+  void RunBatch(const std::vector<Work*>& works, uint64_t exec_start);
+  // The instance's batching thread (backend_batching).
+  void Loop();
   TRITONSERVER_Error* Parse(Work* w);
   TRITONSERVER_Error* Admit(Work* w);
   // Runs the requests of several tokens of one batch (each work's error is
@@ -246,9 +302,17 @@ class SequenceInstance {
   // Uploads zeroed KV pools (replacing any) and records their device
   // addresses; `bytes` is their total size.
   std::string ZeroPools(uint64_t* bytes);
+  // Allocates the step staging memory (mapped pinned host memory) when the model packs
+  // step inputs; empty on success.
+  std::string AllocateStaging();
+  // The staging layout of `e`, made (with its views) on first use.
+  std::string Layout(const ServingEntrySpec& e, StepLayout** out);
+  // Records one run's host time; logs medians over each 100 runs of an entry.
+  void Clock(const ServingEntrySpec& e, uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4);
   // After a run of `e`: whether every KV pool output is at the device address
   // its pool had before the run (written in place, not copied). Logged for
-  // the first run of each entry and summed over the first 100 runs.
+  // the first run of each entry and summed over the first 100 runs; later
+  // runs are not checked.
   void CheckInPlace(const ServingEntrySpec& e);
 
   const SequenceModel* model_;
@@ -272,6 +336,26 @@ class SequenceInstance {
   // sequence's KV state is gone. The rest of the batch is refused, then all
   // sequences are freed and the pools zeroed again.
   bool pools_lost_ = false;
+  // Step staging (pack_step_inputs): `staging_bytes_` of pinned host memory
+  // and its device address; null when inputs are uploaded one by one.
+  void* host_staging_ = nullptr;
+  void* device_staging_ = nullptr;
+  size_t staging_bytes_ = 0;
+  std::map<std::string, StepLayout> layouts_;
+  std::map<std::string, StepClock> clocks_;
+  std::set<std::string> clock_reported_;  // entries whose first 100 runs were logged
+  // Backend batching: requests Triton handed over, not yet run (guarded by
+  // mu_), and the sequences of the last batch that ran.
+  std::mutex mu_;
+  std::condition_variable arrived_;
+  std::deque<std::unique_ptr<Work>> inbox_;
+  bool stopping_ = false;
+  std::set<uint64_t> cohort_;
+  uint64_t last_batch_end_ = 0;
+  uint64_t batches_ = 0;
+  uint64_t waited_batches_ = 0;   // batches that waited for their cohort
+  uint64_t timed_out_batches_ = 0;  // ... and ran without all of it
+  std::thread worker_;
 };
 
 }}}  // namespace triton::backend::tlaloc

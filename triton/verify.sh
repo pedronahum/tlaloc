@@ -47,7 +47,12 @@
 #      give their solo argmax and decoded ids, in one call: the log must show
 #      prefill_b4_c64 running four sequences; prefill throughput), run it with
 #      --perturb (must fail), run it on prompts of 2, 55, 9 and 30 tokens in
-#      one call (and with --perturb), and stop the server. Control: serve the same model with
+#      one call (and with --perturb), run sequence_checks.py --batching (a lone
+#      sequence waits under 0.5 ms per step before its execution starts, and
+#      four sequences whose clients pause 0-5 ms before each step still run
+#      their steps together; and with --perturb, which must fail), and stop the
+#      server. Control: the same model batched by Triton with a 1 ms queue
+#      delay (backend_batching false) must fail both batching checks. Control: serve the same model with
 #      donate_kv_pools false; the log must show the pools copied in 100 of
 #      100 runs, and the 100 ids must equal those generated in place. Then
 #      serve the same model with a 200 ms
@@ -135,7 +140,7 @@ LOG="${VERIFY_LOG:-$(mktemp -t tlaloc-triton-verify.XXXXXX.log)}"
 PEAK_PID=""
 cleanup() {
   [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
-  docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" \
+  docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" "$BASE_NAME-triton-batching" \
     "$BASE_NAME-qwen3" "$BASE_NAME-qwen3-bf16" "$BASE_NAME-muse" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
@@ -229,6 +234,9 @@ expect_re() {
   grep -oE "$2.*" "$1" | head -1 | sed 's/^/  ok   log: /'
 }
 refuse_log() { refuse_in "$LOG" "$1"; }
+# batched_by_backend <config.pbtxt>: written with no Triton queue delay (the
+# backend forms the batches); a config written before is written again.
+batched_by_backend() { grep -q "max_queue_delay_microseconds: 0$" "$1"; }
 # aliased <artifact dir>: its bodies alias the KV pools to their outputs (an
 # artifact exported before they did is exported again).
 aliased() { grep -qs "tf.aliasing_output" "$1"/bodies/*.mlir; }
@@ -337,6 +345,10 @@ else
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$TL_DIR/artifact" -PoutDir="$TL_DIR/repository" -PmodelName=tinyllama \
       -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+  elif ! batched_by_backend "$TL_CONFIG"; then
+    (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+      -PartifactDir="$TL_DIR/artifact" -PoutDir="$TL_DIR/repository" -PmodelName=tinyllama \
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
   fi
   export CONTAINER_NAME="$BASE_NAME-tinyllama" MODEL_REPOSITORY="$TL_DIR/repository"
   start_server "$LOG.tinyllama" 600
@@ -399,6 +411,14 @@ else
     exit 1
   fi
   grep -c "FAIL" "$LOG.tinyllama.ragged-negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+  echo "== tinyllama batching: a lone sequence does not wait, jittered sequences batch"
+  "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --model tinyllama --batching
+  if "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --model tinyllama --batching --perturb \
+      >"$LOG.tinyllama.batching-negative" 2>&1; then
+    echo "FAIL: the batching checks passed with wrong expected ids" >&2
+    exit 1
+  fi
+  grep -c "^FAIL" "$LOG.tinyllama.batching-negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   if ! curl -sf "localhost:$HTTP_PORT/v2/health/live" >/dev/null; then
     echo "FAIL: the server is not live at the end of the sequence checks" >&2
     exit 1
@@ -432,6 +452,38 @@ else
   echo "  ok   the 100 ids with the pools copied equal those with the pools updated in place"
   median() { grep -o "median decode step [0-9.]* ms" "$1" | awk '{print $4}' | sort -n | head -1; }
   echo "  median decode step: $(median "$LOG.tinyllama.ids") ms in place, $(median "$LOG.copy.ids") ms copied (the faster of two generations)"
+
+  # Control: the same model batched by Triton's sequence batcher with a 1 ms
+  # queue delay, as models were served before the backend batched: a lone
+  # sequence waits the delay, and jittered clients split into batches.
+  echo "== tinyllama control: batched by Triton with a 1 ms queue delay (must fail the batching checks)"
+  TB_REPO="$TL_DIR/triton-batching-repository"
+  rm -rf "$TB_REPO"
+  mkdir -p "$TB_REPO"
+  cp -al "$TL_DIR/repository/tinyllama" "$TB_REPO/tinyllama"
+  rm "$TB_REPO/tinyllama/config.pbtxt"
+  { sed 's/^    max_queue_delay_microseconds: .*/    max_queue_delay_microseconds: 1000/' "$TL_CONFIG"
+    echo 'parameters: { key: "backend_batching" value: { string_value: "false" } }'; } \
+    >"$TB_REPO/tinyllama/config.pbtxt"
+  export CONTAINER_NAME="$BASE_NAME-triton-batching" MODEL_REPOSITORY="$TB_REPO"
+  start_server "$LOG.triton-batching" 600
+  if "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --model tinyllama --batching \
+      >"$LOG.triton-batching.checks" 2>&1; then
+    echo "FAIL: the batching checks passed with Triton batching after a 1 ms delay" >&2
+    cat "$LOG.triton-batching.checks" >&2
+    exit 1
+  fi
+  stop_server
+  rm -rf "$TB_REPO"
+  expect_in "$LOG.triton-batching" "batches are the ones Triton's sequence batcher forms (backend_batching is false)"
+  for what in "one sequence alone" "four sequences pausing"; do
+    if ! grep -q "^FAIL $what" "$LOG.triton-batching.checks"; then
+      echo "FAIL: the control did not fail the check '$what'" >&2
+      cat "$LOG.triton-batching.checks" >&2
+      exit 1
+    fi
+    grep "^FAIL $what" "$LOG.triton-batching.checks" | sed 's/^FAIL /  ok   control fails: /'
+  done
 
   # The same model (hard links, no copy of the weights) with a 200 ms idle
   # timeout: many concurrent sequences make steps wait in Triton's queue for
@@ -473,6 +525,10 @@ else
     mkdir -p "$Q_DIR"
     (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
       -PckptDir="$QCKPT" -PoutDir="$Q_DIR/artifact" -PmaxBatch=4)
+    (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+      -PartifactDir="$Q_DIR/artifact" -PoutDir="$Q_DIR/repository" -PmodelName=qwen3 \
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+  elif ! batched_by_backend "$Q_CONFIG"; then
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$Q_DIR/artifact" -PoutDir="$Q_DIR/repository" -PmodelName=qwen3 \
       -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
@@ -542,6 +598,10 @@ else
     mkdir -p "$QB_DIR"
     (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
       -PckptDir="$QCKPT" -PoutDir="$QB_DIR/artifact" -PmaxBatch=4 -PweightDType=bf16)
+    (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+      -PartifactDir="$QB_DIR/artifact" -PoutDir="$QB_DIR/repository" -PmodelName=qwen3 \
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+  elif ! batched_by_backend "$QB_DIR/repository/qwen3/config.pbtxt"; then
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$QB_DIR/artifact" -PoutDir="$QB_DIR/repository" -PmodelName=qwen3 \
       -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
@@ -638,12 +698,15 @@ else
       (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
         -PckptDir="$MCKPT" -PoutDir="$M_DIR/artifact" -PmaxBatch=4 -PcontextLadder="$MUSE_LADDER" \
         -PprefillMaxBatch=1 -PprefillChunk=512 -PnumBlocks=8193)
-      # A 32,768-token prompt prefills in about 4 minutes: sequences held
-      # meanwhile must not time out. Steps of several sequences arrive more
-      # than 1 ms apart, so the batcher waits up to 20 ms to batch them.
+      # A 32,768-token prompt prefills in about a minute: sequences held
+      # meanwhile must not time out.
       (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
         -PartifactDir="$M_DIR/artifact" -PoutDir="$M_DIR/repository" -PmodelName=muse \
-        -PkvMode=sequence -PmaxSequenceIdleMicros=600000000 -PmaxQueueDelayMicros=20000)
+        -PkvMode=sequence -PmaxSequenceIdleMicros=600000000)
+    elif ! batched_by_backend "$M_CONFIG"; then
+      (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+        -PartifactDir="$M_DIR/artifact" -PoutDir="$M_DIR/repository" -PmodelName=muse \
+        -PkvMode=sequence -PmaxSequenceIdleMicros=600000000)
     fi
     drop_cache "$MCKPT/" "$M_DIR/artifact"
     WEIGHT_BYTES="$("$PY" -c "import json,sys; print(sum(w['byteLength'] for w in json.load(open(sys.argv[1]))['weights']['table']))" "$M_DIR/artifact/tlaloc-serving.json")"
