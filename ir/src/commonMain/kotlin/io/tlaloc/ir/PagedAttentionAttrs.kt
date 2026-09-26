@@ -35,7 +35,19 @@ import io.tlaloc.core.I64
  * its last `sliding_window` positions, `t` in `[seqLen - window, seqLen)`.
  * That is transformers' `kv_idx > q_idx - sliding_window` with the query at
  * `seqLen - 1`: the window counts the query's own position. Both are model
- * config literals, not dims. Every other quantity a paged-attention kernel
+ * config literals, not dims.
+ *
+ * `ring: Boolean`, OPTIONAL and only with a sliding window: the block table
+ * is a RING of the row's pages. Logical block `b` of the row is at column
+ * `b % maxBlocksPerSeq`, so the table holds the last
+ * `maxBlocksPerSeq * blockSize` positions and a row may be longer than that.
+ * The window must fit in the ring (`sliding_window <= maxBlocksPerSeq *
+ * blockSize`), and the caller promises that no position in a row's window
+ * has been written over by a later one ([io.tlaloc.ir.inference.WindowedKvPool]
+ * states when that holds). A sliding layer then reads a table as wide as its
+ * ring instead of one as wide as the context.
+ *
+ * Every other quantity a paged-attention kernel
  * wants (`blockSize`, `numKvHeads`, the GQA `group`, `maxBlocksPerSeq`) is
  * DERIVED from operand shapes here. The sentinel-dims rule forbids
  * baking dim-derived values into attrs, and derivation additionally makes
@@ -69,7 +81,26 @@ object PagedAttentionAttrs {
         val slidingWindow: Int? = null,
         /** Block tables: [numSeqs], or fewer when rows share a table. */
         val numTables: Int = numSeqs,
+        /** True when the block table is a ring of the row's last [maxContextLen] positions. */
+        val ring: Boolean = false,
     ) {
+        /** The constructor without [ring], as it was before rings (a full-width table). */
+        constructor(
+            numSeqs: Int,
+            numHeads: Int,
+            headDim: Int,
+            numBlocks: Int,
+            blockSize: Int,
+            numKvHeads: Int,
+            maxBlocksPerSeq: Int,
+            scale: Double,
+            slidingWindow: Int?,
+            numTables: Int,
+        ) : this(
+            numSeqs, numHeads, headDim, numBlocks, blockSize, numKvHeads, maxBlocksPerSeq, scale,
+            slidingWindow, numTables, false,
+        )
+
         /** Consecutive query rows that read one block table: 1 for a decode step. */
         val rowsPerTable: Int get() = numSeqs / numTables
 
@@ -83,8 +114,15 @@ object PagedAttentionAttrs {
         /** GQA grouping: how many query heads share one kv head. */
         val group: Int get() = numHeads / numKvHeads
 
-        /** The dense window width the gather-composed reference form materialises. */
+        /**
+         * The positions the block table covers, which is the dense width the
+         * gather-composed reference form materialises: a row's whole context,
+         * or with [ring] its last [maxContextLen] positions.
+         */
         val maxContextLen: Int get() = maxBlocksPerSeq * blockSize
+
+        /** The table column that holds logical block [block] of a row. */
+        fun columnOf(block: Int): Int = if (ring) block % maxBlocksPerSeq else block
     }
 
     /**
@@ -173,6 +211,21 @@ object PagedAttentionAttrs {
             n.toInt()
         }
 
+        val ring = op.attrs[RING]?.let { f ->
+            require(f is Boolean) { "$layer: PAGED_ATTENTION '$RING' must be a Boolean, got $f" }
+            f
+        } ?: false
+        if (ring) {
+            require(window != null) {
+                "$layer: PAGED_ATTENTION '$RING' needs a '$SLIDING_WINDOW': a row reads its whole " +
+                    "context, and a ring holds only its last ${maxBlocksPerSeq * blockSize} positions"
+            }
+            require(window <= maxBlocksPerSeq * blockSize) {
+                "$layer: PAGED_ATTENTION ring of $maxBlocksPerSeq pages of $blockSize holds " +
+                    "${maxBlocksPerSeq * blockSize} positions, fewer than the sliding window $window"
+            }
+        }
+
         return Parsed(
             numSeqs = numSeqs,
             numHeads = numHeads,
@@ -184,11 +237,15 @@ object PagedAttentionAttrs {
             scale = scale,
             slidingWindow = window,
             numTables = t.dims[0],
+            ring = ring,
         )
     }
 
     /** The attr key of the optional sliding window. */
     const val SLIDING_WINDOW: String = "sliding_window"
+
+    /** The attr key of the optional ring flag. */
+    const val RING: String = "ring"
 
     private fun isIntegral(d: DType): Boolean = d == I32 || d == I64
 }

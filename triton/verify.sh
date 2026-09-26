@@ -648,8 +648,8 @@ else
     drop_cache "$MCKPT/" "$M_DIR/artifact"
     WEIGHT_BYTES="$("$PY" -c "import json,sys; print(sum(w['byteLength'] for w in json.load(open(sys.argv[1]))['weights']['table']))" "$M_DIR/artifact/tlaloc-serving.json")"
     MEM_TOTAL="$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo)"
-    # Weights, the 4 GiB of KV pools, the largest entry's 4 GiB of temporary
-    # memory (the compile log states it) and 7 GiB to spare.
+    # Weights, the 4 GiB of KV pools, the largest entry's temporary memory
+    # (under 0.5 GiB; the compile log states it) and room to spare.
     FRACTION="$("$PY" -c "import sys; print(round((int(sys.argv[1]) + 15 * 2**30) / int(sys.argv[2]), 3))" "$WEIGHT_BYTES" "$MEM_TOTAL")"
     echo "weights $((WEIGHT_BYTES / 2**30)) GiB of $((MEM_TOTAL / 2**30)) GiB: PJRT memory fraction $FRACTION"
     # The server also holds about 9 GiB on the host.

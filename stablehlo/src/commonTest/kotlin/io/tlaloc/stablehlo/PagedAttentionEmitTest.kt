@@ -118,6 +118,76 @@ class PagedAttentionEmitTest {
         )
     }
 
+    /**
+     * Rows sharing a table (prefill) spell their dots as the f32 algorithm:
+     * f32 operands, products and sums, which XLA may run as its own GEMM.
+     * Neither form lets the GPU round an operand to TF32.
+     */
+    @Test
+    fun rowsSharingATableAskForTheF32DotAlgorithm() {
+        val rows = 6
+        val rowQ = DxirType(F32, listOf(rows, numHeads, headDim))
+        val text = DxirBuilder.function("shared") {
+            val q = param("q", rowQ)
+            val k = param("k", cacheType)
+            val v = param("v", cacheType)
+            val t = param("t", DxirType(I32, listOf(2, maxBlocksPerSeq)))
+            val l = param("l", DxirType(I32, listOf(rows)))
+            listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), rowQ, mapOf("scale" to 0.5)))
+        }.toStablehlo()
+        val algorithm = "algorithm = <lhs_precision_type = f32, rhs_precision_type = f32, accumulation_type = f32"
+        kotlin.test.assertEquals(2, text.lines().count { "stablehlo.dot_general" in it && algorithm in it }, text)
+        assertTrue("HIGHEST" !in text && "tf32" !in text, text)
+    }
+
+    /**
+     * A ring table: the position ring index i holds is `age = (L + N - 1 - i)
+     * rem N` behind the row's last one, live when `age < W` and `age < L`.
+     * Control: the same op without `ring` has no remainder.
+     */
+    @Test
+    fun aRingMasksByTheAgeOfEachRingSlot() {
+        val attrs = mapOf("scale" to 0.5, "sliding_window" to 4)
+        val text = pagedFn(attrs + ("ring" to true)).toStablehlo()
+        val n = maxBlocksPerSeq * blockSize
+        assertTrue("stablehlo.remainder" in text, text)
+        assertTrue("stablehlo.constant dense<${n - 1}> : tensor<i32>" in text, "L + N - 1:\n$text")
+        assertTrue("stablehlo.constant dense<$n> : tensor<i32>" in text, "rem N:\n$text")
+        assertTrue("stablehlo.constant dense<4> : tensor<i32>" in text, "age < W:\n$text")
+        assertTrue("stablehlo.remainder" !in pagedFn(attrs).toStablehlo())
+    }
+
+    /**
+     * Rows sharing a table over a context of two key blocks (4,096 positions
+     * in pages of 16) take the blockwise form: one `stablehlo.while` whose
+     * body slices a block of 2,048 keys, with the running max and sum
+     * carried; nothing of the width of the context is scored. A context of
+     * one key block (2,048) keeps the one-pass form.
+     */
+    @Test
+    fun aContextOfSeveralKeyBlocksIsAttendedBlockByBlock() {
+        val rows = 4
+        val rowQ = DxirType(F32, listOf(rows, numHeads, headDim))
+        fun fn(width: Int) = DxirBuilder.function("long") {
+            val pool = DxirType(F32, listOf(width + 1, 16, numKvHeads, headDim))
+            val q = param("q", rowQ)
+            val k = param("k", pool)
+            val v = param("v", pool)
+            val t = param("t", DxirType(I32, listOf(1, width)))
+            val l = param("l", DxirType(I32, listOf(rows)))
+            listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), rowQ, mapOf("scale" to 0.5)))
+        }
+        val long = fn(256).toStablehlo()
+        kotlin.test.assertEquals(1, long.lines().count { "\"stablehlo.while\"" in it }, long)
+        assertTrue("stablehlo.dynamic_slice" in long && "sizes = [1, 2048, $numKvHeads, $headDim]" in long, long)
+        val g = numHeads / numKvHeads
+        assertTrue("tensor<1x${numKvHeads}x${rows}x${g}x2048xf32>" in long, "scores of one key block:\n$long")
+        assertTrue("x4096xf32>" !in long.substringAfter("stablehlo.while"), "a score as wide as the context:\n$long")
+        assertTrue("stablehlo.is_finite" in long, long)
+        val short = fn(128).toStablehlo()
+        assertTrue("stablehlo.while" !in short && "tensor<1x${numKvHeads}x${rows}x${g}x2048xf32>" in short, short)
+    }
+
     @Test
     fun emitsTheSeqLensMaskRatherThanASequenceSlice() {
         val text = mlir()

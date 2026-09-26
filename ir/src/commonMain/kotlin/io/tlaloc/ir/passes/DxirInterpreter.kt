@@ -1820,6 +1820,11 @@ object DxirInterpreter {
      * With a `sliding_window` attr the
      * positions before `L - window` are dead too: they are scored (the walk
      * is simpler that way) but take no part in the softmax or the V sum.
+     * With `ring` the table is a ring (logical block `b` at column
+     * `b % maxBlocksPerSeq`) and the dead positions are not read at all: they
+     * may have been written over. The live positions are visited in the same
+     * order with the same arithmetic, so a ring and a full-width table naming
+     * the same pages give bit-identical rows.
      *
      * Per (sequence, query head) the walk is the library's attention convention
      * with DOUBLE accumulators throughout — QKᵀ·scale, max-shifted softmax,
@@ -1847,6 +1852,7 @@ object DxirInterpreter {
         val scores = DoubleArray(p.maxContextLen)
         val acc = DoubleArray(d)
 
+        if (p.ring) return evalRingPagedAttention(p, query, keyCache, valueCache, blockTables, seqLens)
         for (s in 0 until p.numSeqs) {
             val len = seqLens[s]
             require(len >= 0 && len <= p.maxContextLen) {
@@ -1905,6 +1911,72 @@ object DxirInterpreter {
                         val vOff = ((blockId * p.blockSize + slot) * p.numKvHeads + kv) * d
                         for (j in 0 until d) acc[j] += w * valueCache[vOff + j]
                     }
+                }
+                for (j in 0 until d) out[qOff + j] = acc[j].toFloat()
+            }
+        }
+        return out
+    }
+
+    /**
+     * [evalPagedAttention] over a ring table: only the live positions
+     * `[firstLive(len), len)` are read, each from column
+     * `(t / blockSize) % maxBlocksPerSeq`. The max, the exponentials, the
+     * denominator and the V sum are taken over the live positions in
+     * ascending order, as the full-width walk takes them.
+     */
+    private fun evalRingPagedAttention(
+        p: io.tlaloc.ir.PagedAttentionAttrs.Parsed,
+        query: FloatArray,
+        keyCache: FloatArray,
+        valueCache: FloatArray,
+        blockTables: IntArray,
+        seqLens: IntArray,
+    ): FloatArray {
+        val d = p.headDim
+        val out = FloatArray(p.numSeqs * p.numHeads * d)
+        val window = p.slidingWindow!!
+        val scores = DoubleArray(window)
+        val acc = DoubleArray(d)
+        for (s in 0 until p.numSeqs) {
+            val len = seqLens[s]
+            require(len >= 0) { "DxirInterpreter: PAGED_ATTENTION seqLens[$s] = $len is negative" }
+            if (len == 0) continue
+            val table = p.tableOf(s)
+            val first = p.firstLive(len)
+            fun slotOf(t: Int): Int {
+                val col = p.columnOf(t / p.blockSize)
+                val blockId = blockTables[table * p.maxBlocksPerSeq + col]
+                require(blockId in 0 until p.numBlocks) {
+                    "DxirInterpreter: PAGED_ATTENTION blockTables[$table][$col] = $blockId is " +
+                        "outside [0, numBlocks = ${p.numBlocks}) — a block table must name " +
+                        "allocated pages for every slot it covers"
+                }
+                return blockId * p.blockSize + t % p.blockSize
+            }
+            for (h in 0 until p.numHeads) {
+                val kv = h / p.group
+                val qOff = (s * p.numHeads + h) * d
+                var maxScore = Double.NEGATIVE_INFINITY
+                for (t in first until len) {
+                    val kOff = (slotOf(t) * p.numKvHeads + kv) * d
+                    var dot = 0.0
+                    for (j in 0 until d) dot += query[qOff + j].toDouble() * keyCache[kOff + j]
+                    val sc = dot * p.scale
+                    scores[t - first] = sc
+                    if (sc > maxScore) maxScore = sc
+                }
+                var denom = 0.0
+                for (t in first until len) {
+                    val e = kotlin.math.exp(scores[t - first] - maxScore)
+                    scores[t - first] = e
+                    denom += e
+                }
+                acc.fill(0.0)
+                for (t in first until len) {
+                    val w = scores[t - first] / denom
+                    val vOff = (slotOf(t) * p.numKvHeads + kv) * d
+                    for (j in 0 until d) acc[j] += w * valueCache[vOff + j]
                 }
                 for (j in 0 until d) out[qOff + j] = acc[j].toFloat()
             }

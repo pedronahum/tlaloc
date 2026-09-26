@@ -183,6 +183,28 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **Long-context prefill attends only what it needs.** A sliding layer whose
+  KV lives in a windowed ring now reads the ring (`PAGED_ATTENTION` with the
+  new `ring = true` attr: the first `ringPages` columns of its table,
+  masked by each slot's age) instead of a table as wide as the bucket, in
+  decode and prefill. Rows sharing a table over a context of several key
+  blocks lower to a `stablehlo.while` over blocks of 2,048 keys with a
+  running max and sum, from the first block any row can see to the block of
+  the call's last position, so no context-wide score tensor is written and a
+  call early in a large bucket scores only what it has. Prefill attention
+  dots name the f32 dot algorithm (f32 products and sums, as `HIGHEST`),
+  which XLA runs as its own GEMM instead of a cuBLAS SIMT kernel. Muse
+  Glimmer through Triton on an idle GPU, before and after served in turn: a
+  512-token call at positions 31,744 takes 1.39 s instead of 4.50 s, one at
+  8,704 0.88 s instead of 4.49 s, a 31,744-token prompt 62.6 s instead of
+  222.8 s, a decode step at 30,000 positions 283 ms instead of 315 ms; the
+  largest entry needs 453 MiB of temporary memory instead of 4,125 MiB. The
+  interpreter reads the same bits through a ring as through the full-width
+  table, `verify.sh` (with `MUSE_GLIMMER=1`) keeps every token id, and the
+  windowed example model now agrees with its full-history twin within 1.2e-6
+  of the largest logit on the GPU instead of bit for bit (its sliding layers
+  sum over 12 positions where the twin's sum over 64).
+
 - **The ABI baselines record the serving changes.** `ir.api`, `maestro.api` and
   `stablehlo.api` are dumped again. Classes that gained a defaulted property
   (`PagedAttentionAttrs.Parsed`, `DecodeModelShape`, `DecodeGraphSpec`,

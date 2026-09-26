@@ -182,6 +182,28 @@ class WindowedKvPoolTest {
         assertTrue("with window 8" in e2.message!!, e2.message!!)
     }
 
+    /**
+     * The sliding layers read their ring, not the bucket: their attention
+     * takes the first ringPages columns of the windowed table as a ring. A
+     * bucket no wider than the ring reads the table as it is, and the full
+     * layer always reads its own table.
+     */
+    @Test
+    fun theSlidingLayersReadOnlyTheirRing() {
+        val model = tiny.toDecodeModelShape(numBlocks = fullBlocks, blockSize = bs, windowedKv = windowed())
+        fun attention(context: Int, kind: DecodeGraphKind) =
+            HfDecoderGraph.build(HfDecoderGraph.spec(tiny, model, DecodeBucket(1, context), kind), tiny)
+                .body.filterIsInstance<io.tlaloc.ir.DxirOp>().filter { it.op == io.tlaloc.ir.OpKind.PAGED_ATTENTION }
+        for (kind in listOf(DecodeGraphKind.DECODE, DecodeGraphKind.PREFILL)) {
+            val ops = attention(context, kind)
+            assertEquals(listOf(true, true, false), ops.map { it.attrs["ring"] == true }, "$kind")
+            assertEquals(listOf(3, 3, 12), ops.map { it.operands[3].type.dims[1] }, "$kind")
+            val short = attention(12, kind)
+            assertEquals(listOf(false, false, false), short.map { it.attrs["ring"] == true }, "$kind at 12")
+            assertEquals(listOf(3, 3, 3), short.map { it.operands[3].type.dims[1] }, "$kind at 12")
+        }
+    }
+
     // ------------------------------------------- the interpreter's logits
 
     private val weights: List<FloatArray> = run {

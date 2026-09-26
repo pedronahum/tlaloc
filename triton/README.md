@@ -195,8 +195,10 @@ Then `window_checks.py` runs `window_sequence` against `window_sequence_full`
 - the logits of every request equal those of the full-history model sent the
   same calls (the backend splits the 13 tokens into 12 and 1 and the 9 into 5
   and 4 for the ring; the client sends the full-history model those calls),
-  within 1e-4 of the largest logit; the run measures 5.3e-7, and a ring
-  error moves them by about 1. The full-history model sent the requests whole
+  within 1e-4 of the largest logit; the run measures 1.2e-6 (1 of 40 bit
+  for bit: the windowed model's sliding layers score their 12-position ring
+  and the full-history model's score 64 positions, so the GPU sums in
+  another order), and a ring error moves them by about 1. The full-history model sent the requests whole
   (one prefill call instead of two, a different entry under TF32) agrees
   within 5e-3 (7.6e-4 measured), with the same argmax. Over HTTP and gRPC;
 - three sequences stepped concurrently get the logits they get alone, within
@@ -216,8 +218,8 @@ Then `window_checks.py` runs `window_sequence` against `window_sequence_full`
 6 tokens per sequence and rings of 4 pages (`ceil((8 - 1 + 6) / 4)`). Grown
 the same way, the 13- and 9-token requests run as calls of at most 6: it must
 hold at most 4 windowed pages, and its logits must equal the full-history
-model's sent the same calls within 1e-4 of the largest (measured: 36 of 40
-bit for bit, the rest within 1.2e-7) and sent the requests whole within 5e-3
+model's sent the same calls within 1e-4 of the largest (measured: 5 of 40
+bit for bit, the rest within 9.9e-7) and sent the requests whole within 5e-3
 with the same argmax. The load log must state the 6-token chunk and the
 4-page ring.
 
@@ -352,9 +354,9 @@ pages), with a sequence idle timeout of 600 s and a queue delay of 20 ms
 (`MUSE_GLIMMER_REEXPORT=1` exports again; so does a model exported for
 another ladder). It drops the page cache of the checkpoint and the artifact
 and starts the server with a PJRT memory fraction of the weights plus 15 GiB
-over MemTotal (0.55 on the GB10: 4 GiB of KV pools, 4 GiB of temporary
-memory for the largest entry, which the compile log states, and room to
-spare), printed. Three fixtures, all from `harness/python/muse_glimmer_fixture.py`
+over MemTotal (0.55 on the GB10: 4 GiB of KV pools, the temporary memory
+of the largest entry, under 0.5 GiB, which the compile log states, and room
+to spare), printed. Three fixtures, all from `harness/python/muse_glimmer_fixture.py`
 (transformers 5.17 on the CPU, eager attention, 16 greedy tokens for
 " The capital of France is", a chat-template prompt with a fixed
 `current_date`, and a long text prompt):
@@ -373,7 +375,7 @@ spare), printed. Three fixtures, all from `harness/python/muse_glimmer_fixture.p
   " 4719." and goes on reasoning. The prompt runs as five prefill calls.
   All 16 ids must be equal and the logits within 2e-2 of the largest (the
   fixture has no `referenceNoise`; twice the other prompts' is 1.2e-2 and
-  1.8e-2); measured 8.4e-3. `--perturb` on this fixture must fail. The
+  1.8e-2); measured 7.7e-3. `--perturb` on this fixture must fail. The
   fixture holds the prompt's text (`prompts[0].input`); `muse_glimmer_fixture.py
   real --precision mixed --f64-rope --text "<that text>"` writes it again (263 s
   on the GB10's CPU, about 60 GB of memory; run it with no server up).
@@ -754,9 +756,11 @@ Muse Glimmer 30B (bf16 weights, the long-context export `verify.sh` serves:
 contexts 512 to 32,768, decode batches 1, 2 and 4, 512-token prefill calls):
 the model loads in about 3.5 minutes (16 XLA compiles in 2 minutes, from 3.7
 s to 13.7 s each, and 82 s to upload 53128 MiB of weights); the largest
-entry, prefill at 32,768, needs 4125 MiB of temporary memory, and the KV
-pools take 4109 MiB. With `context_bench.py` (gRPC, four sequences per
-context, prompts of seeded random ids, medians over 16 steps per sequence):
+entry, prefill at 32,768, needs 453 MiB of temporary memory (4125 MiB before
+prefill attended block by block), and the KV pools take 4109 MiB. With
+`context_bench.py` (gRPC, four sequences per context, prompts of seeded
+random ids, medians over 16 steps per sequence), measured with the GPU
+shared and before sliding layers read their ring:
 
 | Context bucket | Prompt | Prefill | 1 sequence | 2 sequences | 4 sequences |
 |---|---|---|---|---|---|
@@ -772,9 +776,13 @@ steps of two and four sequences (each client receiving an 800 KB logits
 vector) arrived more than 1 ms apart and ran 32 steps in 31 executions and 64
 in 35; with 20 ms every round ran as one execution, and a lone sequence pays
 about 24 ms a token for the wait (265 ms against 241 ms). A 512-token prefill
-call takes about 0.55 s at context 512 and about 4.5 s at 32,768, because
-every call scores its tokens against every position of its entry's context,
-the sliding layers' included. Under a PJRT memory fraction of 0.55 the
+call took about 0.55 s at context 512 and about 4.5 s at 32,768, because
+every call scored its tokens against every position of its entry's context,
+the sliding layers' included. Now a sliding layer scores its ring and a call
+attends block by block up to its last position: on an idle GPU a call at
+positions 8,704 takes 0.88 s instead of 4.49 s, one at 31,744 takes 1.39 s
+instead of 4.50 s, and a 31,744-token prompt 62.6 s instead of 222.8 s
+(`docs/SERVING_ARCHITECTURE.md`, section 6). Under a PJRT memory fraction of 0.55 the
 machine peaked at 87 to 90 GiB in use during these runs, and at 96 GiB in
 the `verify.sh` run. Those runs shared the GPU with another process; the
 numbers below did not.

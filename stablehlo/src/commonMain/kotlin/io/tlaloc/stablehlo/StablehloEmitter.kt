@@ -70,6 +70,27 @@ fun DxirModule.toStablehlo(outputAliases: Map<String, Map<Int, Int>> = emptyMap(
 fun DxirFunction.toStablehlo(indent: String = "", outputAliases: Map<Int, Int> = emptyMap()): String =
     StablehloEmitter(this, indent, outputAliases).emit()
 
+/**
+ * The widest key block, in positions, of the blockwise PAGED_ATTENTION form
+ * (see StablehloEmitter.emitBlockwisePagedAttention).
+ */
+internal const val BLOCKWISE_KEY_POSITIONS: Int = 2048
+
+/** Below this many positions per key block the one-pass form is kept. */
+internal const val BLOCKWISE_MIN_KEY_POSITIONS: Int = 256
+
+/**
+ * The dot algorithm of the prefill attention dots: f32 operands, f32
+ * products and f32 sums, the arithmetic `precision = HIGHEST` asks for.
+ * Spelled as an algorithm, XLA may run it as its own f32 GEMM instead of a
+ * cuBLAS SIMT kernel, which on the GB10 is about 1.3 times faster for these
+ * shapes; neither form rounds an operand to TF32 or bf16.
+ */
+internal const val F32_DOT_ALGORITHM: String =
+    ", algorithm = <lhs_precision_type = f32, rhs_precision_type = f32, accumulation_type = f32, " +
+        "lhs_component_count = 1, rhs_component_count = 1, num_primitive_operations = 1, " +
+        "allow_imprecise_accumulation = false>"
+
 internal class StablehloEmitter(
     private val fn: DxirFunction,
     private val indent: String,
@@ -3032,25 +3053,10 @@ internal class StablehloEmitter(
         // The iota rides in the seqLens dtype so the compare needs no convert.
         val idxT = DxirType(lType.dtype, listOf(s, hkv, g, ctx))
         val predT = DxirType(Bool, listOf(s, hkv, g, ctx))
-        val iota = synth(); val lensBc = synth(); val live = synth()
+        val iota = synth(); val lensBc = synth()
         out.appendLine("$step$iota = stablehlo.iota dim = 3 : ${idxT.toMlir()}")
         out.appendLine("$step$lensBc = stablehlo.broadcast_in_dim ${ops[4]}, dims = [0] : (${lType.toMlir()}) -> ${idxT.toMlir()}")
-        // A sliding window also kills the positions before seqLens[s] - window
-        // (transformers' kv_idx > q_idx - window, the query at seqLens[s] - 1).
-        val window = p.slidingWindow
-        if (window == null) {
-            out.appendLine("$step$live = stablehlo.compare LT, $iota, $lensBc, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
-        } else {
-            val beforeEnd = synth()
-            out.appendLine("$step$beforeEnd = stablehlo.compare LT, $iota, $lensBc, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
-            val idxScalarT = "tensor<${mlirElementType(lType.dtype)}>"
-            val w = synth(); val wBc = synth(); val start = synth(); val afterStart = synth()
-            out.appendLine("$step$w = stablehlo.constant dense<$window> : $idxScalarT")
-            out.appendLine("$step$wBc = stablehlo.broadcast_in_dim $w, dims = [] : ($idxScalarT) -> ${idxT.toMlir()}")
-            out.appendLine("$step$start = stablehlo.subtract $lensBc, $wBc : ${idxT.toMlir()}")
-            out.appendLine("$step$afterStart = stablehlo.compare GE, $iota, $start, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
-            out.appendLine("$step$live = stablehlo.and $beforeEnd, $afterStart : ${predT.toMlir()}")
-        }
+        val live = emitLiveMask(step, iota, lensBc, idxT, predT, p)
         val negInf = synth(); val negInfBc = synth(); val masked = synth()
         out.appendLine("$step$negInf = stablehlo.constant dense<${negInfLiteral(dt)}> : $scalarT")
         out.appendLine("$step$negInfBc = stablehlo.broadcast_in_dim $negInf, dims = [] : ($scalarT) -> $scoresMlir")
@@ -3126,6 +3132,8 @@ internal class StablehloEmitter(
         val d = p.headDim; val m = p.maxBlocksPerSeq; val bs = p.blockSize
         val ctx = p.maxContextLen
         val scalarT = "tensor<${mlirElementType(dt)}>"
+        val keyBlocks = blockwiseKeyPages(p)
+        if (keyBlocks != null && dt == F32) return emitBlockwisePagedAttention(step, name, ops, node, p, keyBlocks)
 
         val gatheredT = DxirType(dt, listOf(r, m, bs, hkv, d))
         val windowT = DxirType(dt, listOf(r, ctx, hkv, d))
@@ -3151,7 +3159,9 @@ internal class StablehloEmitter(
         val qr = synth()
         out.appendLine("$step$qr = stablehlo.reshape ${ops[0]} : (${qType.toMlir()}) -> ${qGroupedT.toMlir()}")
 
-        val precision = if (dt == F32) ", precision = [HIGHEST, HIGHEST]" else ""
+        // f32 products and sums, as in the per-row form, spelled as an
+        // algorithm (see F32_DOT_ALGORITHM).
+        val precision = if (dt == F32) F32_DOT_ALGORITHM else ""
         val scoresT = DxirType(dt, listOf(r, hkv, qn, g, ctx))
         val scoresMlir = scoresT.toMlir()
         val scores = synth()
@@ -3168,24 +3178,11 @@ internal class StablehloEmitter(
         val idxT = DxirType(lType.dtype, listOf(r, hkv, qn, g, ctx))
         val predT = DxirType(Bool, listOf(r, hkv, qn, g, ctx))
         val lens2T = DxirType(lType.dtype, listOf(r, qn))
-        val iota = synth(); val lens2 = synth(); val lensBc = synth(); val live = synth()
+        val iota = synth(); val lens2 = synth(); val lensBc = synth()
         out.appendLine("$step$iota = stablehlo.iota dim = 4 : ${idxT.toMlir()}")
         out.appendLine("$step$lens2 = stablehlo.reshape ${ops[4]} : (${lType.toMlir()}) -> ${lens2T.toMlir()}")
         out.appendLine("$step$lensBc = stablehlo.broadcast_in_dim $lens2, dims = [0, 2] : (${lens2T.toMlir()}) -> ${idxT.toMlir()}")
-        val window = p.slidingWindow
-        if (window == null) {
-            out.appendLine("$step$live = stablehlo.compare LT, $iota, $lensBc, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
-        } else {
-            val beforeEnd = synth()
-            out.appendLine("$step$beforeEnd = stablehlo.compare LT, $iota, $lensBc, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
-            val idxScalarT = "tensor<${mlirElementType(lType.dtype)}>"
-            val w = synth(); val wBc = synth(); val start = synth(); val afterStart = synth()
-            out.appendLine("$step$w = stablehlo.constant dense<$window> : $idxScalarT")
-            out.appendLine("$step$wBc = stablehlo.broadcast_in_dim $w, dims = [] : ($idxScalarT) -> ${idxT.toMlir()}")
-            out.appendLine("$step$start = stablehlo.subtract $lensBc, $wBc : ${idxT.toMlir()}")
-            out.appendLine("$step$afterStart = stablehlo.compare GE, $iota, $start, SIGNED : (${idxT.toMlir()}, ${idxT.toMlir()}) -> ${predT.toMlir()}")
-            out.appendLine("$step$live = stablehlo.and $beforeEnd, $afterStart : ${predT.toMlir()}")
-        }
+        val live = emitLiveMask(step, iota, lensBc, idxT, predT, p)
         val negInf = synth(); val negInfBc = synth(); val masked = synth()
         out.appendLine("$step$negInf = stablehlo.constant dense<${negInfLiteral(dt)}> : $scalarT")
         out.appendLine("$step$negInfBc = stablehlo.broadcast_in_dim $negInf, dims = [] : ($scalarT) -> $scoresMlir")
@@ -3221,6 +3218,323 @@ internal class StablehloEmitter(
         val rowsT = DxirType(dt, listOf(r, qn, hkv, g, d))
         val rows = synth()
         out.appendLine("$step$rows = stablehlo.transpose $ctxOut, dims = [0, 2, 1, 3, 4] : (${ctxOutT.toMlir()}) -> ${rowsT.toMlir()}")
+        out.appendLine("$step$name = stablehlo.reshape $rows : (${rowsT.toMlir()}) -> ${node.type.toMlir()}")
+    }
+
+    /**
+     * The predicate "position [iota] is live for its row", given the row's
+     * length broadcast to the same shape ([lensBc]).
+     *
+     * - Full attention: `iota < L`.
+     * - A sliding window `W`: also `iota >= L - W` (transformers'
+     *   `kv_idx > q_idx - window` with the query at `L - 1`).
+     * - A ring of `N` positions ([PagedAttentionAttrs.Parsed.ring]): [iota] is
+     *   the index into the ring, and the position it holds is `age` positions
+     *   behind the row's last one, `age = (L - 1 - iota) mod N`, computed as
+     *   `(L + N - 1 - iota) rem N` so that the dividend is never negative. It
+     *   is live when `age < W` (inside the window) and `age < L` (a position
+     *   the row has, not one before position 0).
+     */
+    private fun emitLiveMask(
+        step: String,
+        iota: String,
+        lensBc: String,
+        idxT: DxirType,
+        predT: DxirType,
+        p: PagedAttentionAttrs.Parsed,
+    ): String {
+        val it = idxT.toMlir()
+        val pt = predT.toMlir()
+        val idxScalarT = "tensor<${mlirElementType(idxT.dtype)}>"
+        fun splat(v: Int): String {
+            val c = synth(); val bc = synth()
+            out.appendLine("$step$c = stablehlo.constant dense<$v> : $idxScalarT")
+            out.appendLine("$step$bc = stablehlo.broadcast_in_dim $c, dims = [] : ($idxScalarT) -> $it")
+            return bc
+        }
+        fun cmp(dir: String, a: String, b: String): String {
+            val r = synth()
+            out.appendLine("$step$r = stablehlo.compare $dir, $a, $b, SIGNED : ($it, $it) -> $pt")
+            return r
+        }
+        fun and(a: String, b: String): String {
+            val r = synth()
+            out.appendLine("$step$r = stablehlo.and $a, $b : $pt")
+            return r
+        }
+        val window = p.slidingWindow
+        if (p.ring) {
+            val n = p.maxContextLen
+            val shifted = synth(); val num = synth(); val age = synth()
+            out.appendLine("$step$shifted = stablehlo.add $lensBc, ${splat(n - 1)} : $it")
+            out.appendLine("$step$num = stablehlo.subtract $shifted, $iota : $it")
+            out.appendLine("$step$age = stablehlo.remainder $num, ${splat(n)} : $it")
+            return and(cmp("LT", age, splat(window!!)), cmp("LT", age, lensBc))
+        }
+        val beforeEnd = cmp("LT", iota, lensBc)
+        if (window == null) return beforeEnd
+        val start = synth()
+        out.appendLine("$step$start = stablehlo.subtract $lensBc, ${splat(window)} : $it")
+        return and(beforeEnd, cmp("GE", iota, start))
+    }
+
+    /**
+     * How many pages one key block of [emitBlockwisePagedAttention] spans,
+     * or null when the shared-table form keeps its one-pass shape: a ring
+     * (at most a window and a chunk wide), or a context of a single block.
+     * The block is the largest divisor of the table's width that spans at
+     * most [BLOCKWISE_KEY_POSITIONS] positions, so that every block starts
+     * inside the gathered window and `dynamic_slice` never clamps it.
+     */
+    private fun blockwiseKeyPages(p: PagedAttentionAttrs.Parsed): Int? {
+        if (p.ring) return null
+        val m = p.maxBlocksPerSeq
+        val most = maxOf(1, BLOCKWISE_KEY_POSITIONS / p.blockSize)
+        val pages = (minOf(m, most) downTo 1).first { m % it == 0 }
+        return if (m / pages >= 2 && pages * p.blockSize >= BLOCKWISE_MIN_KEY_POSITIONS) pages else null
+    }
+
+    /**
+     * PAGED_ATTENTION with shared tables over a context of several key
+     * blocks: attention one block of keys at a time, with a running max and
+     * sum (the online softmax), so that no `[rows, heads, context]` score or
+     * probability tensor is ever materialised, and only up to the longest
+     * row of the call.
+     * ```
+     *   Kg, Vg = gather(pools, blockTables)       [R, ctx, Hkv, D]
+     *   m = -Inf, l = 0, acc = 0                   per (row, head)
+     *   for block i in [first, last):              a stablehlo.while
+     *     s    = scale * Qr · Kg[i]ᵀ, masked       [R, Hkv, Q, G, kb]
+     *     m'   = max(m, max(s))
+     *     e    = exp(s - m'),  c = exp(m - m')
+     *     l    = l * c + sum(e)
+     *     acc  = acc * c + e · Vg[i]
+     *   out = acc / l
+     * ```
+     * `last` is the block holding the longest row's last position, so a
+     * call early in a large bucket scores only the positions it has. With a
+     * sliding window, `first` is the block of the earliest live position of
+     * any row. A block where a row has no live position yet leaves that row's
+     * `m` at -Inf; the exponentials are then taken against 0 instead, so they
+     * are `exp(-Inf) = 0` and never NaN. A row with no live position at all
+     * (length 0) comes out 0, as in the interpreter.
+     *
+     * The dots are the shared one-pass form's ([F32_DOT_ALGORITHM]); what
+     * differs is the order of the sums, and the division by `l` coming after
+     * the V sum instead of before it.
+     */
+    private fun emitBlockwisePagedAttention(
+        step: String,
+        name: String,
+        ops: List<String>,
+        node: DxirOp,
+        p: PagedAttentionAttrs.Parsed,
+        keyPages: Int,
+    ) {
+        val qType = node.operands[0].type
+        val kType = node.operands[1].type
+        val vType = node.operands[2].type
+        val tType = node.operands[3].type
+        val lType = node.operands[4].type
+        val dt = qType.dtype
+        val r = p.numTables; val qn = p.rowsPerTable; val hkv = p.numKvHeads; val g = p.group
+        val d = p.headDim; val m = p.maxBlocksPerSeq; val bs = p.blockSize
+        val ctx = p.maxContextLen
+        val kb = keyPages * bs
+        val blocks = ctx / kb
+        val scalarT = "tensor<${mlirElementType(dt)}>"
+        val idx = lType.dtype
+        val idxS = "tensor<${mlirElementType(idx)}>"
+
+        val gatheredT = DxirType(dt, listOf(r, m, bs, hkv, d))
+        val windowT = DxirType(dt, listOf(r, ctx, hkv, d))
+        fun gatherPages(cache: String, cacheType: DxirType): String {
+            val gathered = synth()
+            emitGatherOp(
+                step, gathered, cache, ops[3], cacheType, tType, gatheredT,
+                offsetDims = listOf(2, 3, 4),
+                collapsedSliceDims = listOf(0),
+                startIndexMap = listOf(0),
+                indexVectorDim = tType.rank,
+                sliceSizes = listOf(1, bs, hkv, d),
+                indicesAreSorted = false,
+            )
+            val flat = synth()
+            out.appendLine("$step$flat = stablehlo.reshape $gathered : (${gatheredT.toMlir()}) -> ${windowT.toMlir()}")
+            return flat
+        }
+        val kWin = gatherPages(ops[1], kType)
+        val vWin = gatherPages(ops[2], vType)
+        val qGroupedT = DxirType(dt, listOf(r, qn, hkv, g, d))
+        val qr = synth()
+        out.appendLine("$step$qr = stablehlo.reshape ${ops[0]} : (${qType.toMlir()}) -> ${qGroupedT.toMlir()}")
+        val lens2T = DxirType(idx, listOf(r, qn))
+        val lens2 = synth()
+        out.appendLine("$step$lens2 = stablehlo.reshape ${ops[4]} : (${lType.toMlir()}) -> ${lens2T.toMlir()}")
+
+        fun iconst(v: Int): String {
+            val c = synth()
+            out.appendLine("$step$c = stablehlo.constant dense<$v> : $idxS")
+            return c
+        }
+        // The blocks [first, last): last holds the longest row's last position.
+        val maxLen = synth()
+        out.appendLine(
+            "$step$maxLen = stablehlo.reduce($lens2 init: ${iconst(0)}) applies stablehlo.maximum " +
+                "across dimensions = [0, 1] : (${lens2T.toMlir()}, $idxS) -> $idxS",
+        )
+        val lastUp = synth(); val lastQ = synth(); val last = synth()
+        out.appendLine("$step$lastUp = stablehlo.add $maxLen, ${iconst(kb - 1)} : $idxS")
+        out.appendLine("$step$lastQ = stablehlo.divide $lastUp, ${iconst(kb)} : $idxS")
+        out.appendLine("$step$last = stablehlo.minimum $lastQ, ${iconst(blocks)} : $idxS")
+        val window = p.slidingWindow
+        val first = if (window == null) {
+            iconst(0)
+        } else {
+            // The earliest live position of any row: min(L) - W, at least 0.
+            val minLen = synth(); val early = synth(); val clamped = synth(); val f = synth()
+            out.appendLine(
+                "$step$minLen = stablehlo.reduce($lens2 init: ${iconst(ctx)}) applies stablehlo.minimum " +
+                    "across dimensions = [0, 1] : (${lens2T.toMlir()}, $idxS) -> $idxS",
+            )
+            out.appendLine("$step$early = stablehlo.subtract $minLen, ${iconst(window)} : $idxS")
+            out.appendLine("$step$clamped = stablehlo.maximum $early, ${iconst(0)} : $idxS")
+            out.appendLine("$step$f = stablehlo.divide $clamped, ${iconst(kb)} : $idxS")
+            f
+        }
+
+        val statT = DxirType(dt, listOf(r, hkv, qn, g))
+        val accT = DxirType(dt, listOf(r, hkv, qn, g, d))
+        val blkT = DxirType(dt, listOf(r, kb, hkv, d))
+        val sT = DxirType(dt, listOf(r, hkv, qn, g, kb))
+        val idx5T = DxirType(idx, sT.dims)
+        val pred5T = DxirType(Bool, sT.dims)
+        val predStatT = DxirType(Bool, statT.dims)
+        fun fsplat(lit: String, t: DxirType): String {
+            val c = synth(); val bc = synth()
+            out.appendLine("$step$c = stablehlo.constant dense<$lit> : $scalarT")
+            out.appendLine("$step$bc = stablehlo.broadcast_in_dim $c, dims = [] : ($scalarT) -> ${t.toMlir()}")
+            return bc
+        }
+        val m0 = fsplat(negInfLiteral(dt), statT)
+        val l0 = fsplat("0.0", statT)
+        val acc0 = fsplat("0.0", accT)
+
+        val carriedT = listOf(
+            idxS, idxS, statT.toMlir(), statT.toMlir(), accT.toMlir(),
+            windowT.toMlir(), windowT.toMlir(), qGroupedT.toMlir(), lens2T.toMlir(),
+        )
+        val typesStr = carriedT.joinToString(", ")
+        val loop = synth()
+        out.appendLine(
+            "$step$loop:${carriedT.size} = \"stablehlo.while\"($first, $last, $m0, $l0, $acc0, $kWin, $vWin, $qr, $lens2) ({",
+        )
+        val inner = "$step    "
+        // cond: i < last
+        run {
+            val a = List(carriedT.size) { synth() }
+            out.appendLine("$step  ^bb0(${a.indices.joinToString(", ") { "${a[it]}: ${carriedT[it]}" }}):")
+            val c = synth()
+            out.appendLine("$inner$c = stablehlo.compare LT, ${a[0]}, ${a[1]}, SIGNED : ($idxS, $idxS) -> tensor<i1>")
+            out.appendLine("$inner\"stablehlo.return\"($c) : (tensor<i1>) -> ()")
+        }
+        out.appendLine("$step}, {")
+        run {
+            val a = List(carriedT.size) { synth() }
+            val (i, lastA, mA, lA, accA) = a
+            val kA = a[5]; val vA = a[6]; val qA = a[7]; val lensA = a[8]
+            out.appendLine("$step  ^bb0(${a.indices.joinToString(", ") { "${a[it]}: ${carriedT[it]}" }}):")
+            fun ic(v: Int): String {
+                val c = synth()
+                out.appendLine("$inner$c = stablehlo.constant dense<$v> : $idxS")
+                return c
+            }
+            fun fs(lit: String, t: DxirType): String {
+                val c = synth(); val bc = synth()
+                out.appendLine("$inner$c = stablehlo.constant dense<$lit> : $scalarT")
+                out.appendLine("$inner$bc = stablehlo.broadcast_in_dim $c, dims = [] : ($scalarT) -> ${t.toMlir()}")
+                return bc
+            }
+            val off = synth(); val zero = ic(0)
+            out.appendLine("$inner$off = stablehlo.multiply $i, ${ic(kb)} : $idxS")
+            val kBlk = synth(); val vBlk = synth()
+            out.appendLine(
+                "$inner$kBlk = stablehlo.dynamic_slice $kA, $zero, $off, $zero, $zero, sizes = [$r, $kb, $hkv, $d] " +
+                    ": (${windowT.toMlir()}, $idxS, $idxS, $idxS, $idxS) -> ${blkT.toMlir()}",
+            )
+            out.appendLine(
+                "$inner$vBlk = stablehlo.dynamic_slice $vA, $zero, $off, $zero, $zero, sizes = [$r, $kb, $hkv, $d] " +
+                    ": (${windowT.toMlir()}, $idxS, $idxS, $idxS, $idxS) -> ${blkT.toMlir()}",
+            )
+            val precision = F32_DOT_ALGORITHM
+            val sc = synth(); val scaled = synth()
+            out.appendLine(
+                "$inner$sc = stablehlo.dot_general $qA, $kBlk, batching_dims = [0, 2] x [0, 2], " +
+                    "contracting_dims = [4] x [3]$precision : (${qGroupedT.toMlir()}, ${blkT.toMlir()}) -> ${sT.toMlir()}",
+            )
+            out.appendLine("$inner$scaled = stablehlo.multiply $sc, ${fs(p.scale.toFloat().toString(), sT)} : ${sT.toMlir()}")
+            // Positions of this block, and each row's length.
+            val iota = synth(); val offBc = synth(); val pos = synth(); val lensBc = synth()
+            out.appendLine("$inner$iota = stablehlo.iota dim = 4 : ${idx5T.toMlir()}")
+            out.appendLine("$inner$offBc = stablehlo.broadcast_in_dim $off, dims = [] : ($idxS) -> ${idx5T.toMlir()}")
+            out.appendLine("$inner$pos = stablehlo.add $iota, $offBc : ${idx5T.toMlir()}")
+            out.appendLine("$inner$lensBc = stablehlo.broadcast_in_dim $lensA, dims = [0, 2] : (${lens2T.toMlir()}) -> ${idx5T.toMlir()}")
+            val live = emitLiveMask(inner, pos, lensBc, idx5T, pred5T, p)
+            val masked = synth()
+            out.appendLine("$inner$masked = stablehlo.select $live, $scaled, ${fs(negInfLiteral(dt), sT)} : ${pred5T.toMlir()}, ${sT.toMlir()}")
+            val fin = synth(); val mSafe = synth(); val mNew = synth(); val e = synth()
+            val lNew = synth(); val corr = synth()
+            val maxInit = synth(); val bm = synth()
+            out.appendLine("$inner$maxInit = stablehlo.constant dense<${negInfLiteral(dt)}> : $scalarT")
+            out.appendLine(
+                "$inner$bm = stablehlo.reduce($masked init: $maxInit) applies stablehlo.maximum across dimensions = [4] " +
+                    ": (${sT.toMlir()}, $scalarT) -> ${statT.toMlir()}",
+            )
+            out.appendLine("$inner$mNew = stablehlo.maximum $mA, $bm : ${statT.toMlir()}")
+            // Exponentials against the running max, or against 0 while a row has none.
+            out.appendLine("$inner$fin = stablehlo.is_finite $mNew : (${statT.toMlir()}) -> ${predStatT.toMlir()}")
+            out.appendLine("$inner$mSafe = stablehlo.select $fin, $mNew, ${fs("0.0", statT)} : ${predStatT.toMlir()}, ${statT.toMlir()}")
+            val mBc = synth(); val shifted = synth()
+            out.appendLine("$inner$mBc = stablehlo.broadcast_in_dim $mSafe, dims = [0, 1, 2, 3] : (${statT.toMlir()}) -> ${sT.toMlir()}")
+            out.appendLine("$inner$shifted = stablehlo.subtract $masked, $mBc : ${sT.toMlir()}")
+            out.appendLine("$inner$e = stablehlo.exponential $shifted : ${sT.toMlir()}")
+            val dm = synth()
+            out.appendLine("$inner$dm = stablehlo.subtract $mA, $mSafe : ${statT.toMlir()}")
+            out.appendLine("$inner$corr = stablehlo.exponential $dm : ${statT.toMlir()}")
+            val sumInit = synth(); val bsum = synth(); val lScaled = synth()
+            out.appendLine("$inner$sumInit = stablehlo.constant dense<0.0> : $scalarT")
+            out.appendLine(
+                "$inner$bsum = stablehlo.reduce($e init: $sumInit) applies stablehlo.add across dimensions = [4] " +
+                    ": (${sT.toMlir()}, $scalarT) -> ${statT.toMlir()}",
+            )
+            out.appendLine("$inner$lScaled = stablehlo.multiply $lA, $corr : ${statT.toMlir()}")
+            out.appendLine("$inner$lNew = stablehlo.add $lScaled, $bsum : ${statT.toMlir()}")
+            val pv = synth(); val corrBc = synth(); val accScaled = synth(); val accNew = synth()
+            out.appendLine(
+                "$inner$pv = stablehlo.dot_general $e, $vBlk, batching_dims = [0, 1] x [0, 2], " +
+                    "contracting_dims = [4] x [1]$precision : (${sT.toMlir()}, ${blkT.toMlir()}) -> ${accT.toMlir()}",
+            )
+            out.appendLine("$inner$corrBc = stablehlo.broadcast_in_dim $corr, dims = [0, 1, 2, 3] : (${statT.toMlir()}) -> ${accT.toMlir()}")
+            out.appendLine("$inner$accScaled = stablehlo.multiply $accA, $corrBc : ${accT.toMlir()}")
+            out.appendLine("$inner$accNew = stablehlo.add $accScaled, $pv : ${accT.toMlir()}")
+            val iNew = synth()
+            out.appendLine("$inner$iNew = stablehlo.add $i, ${ic(1)} : $idxS")
+            out.appendLine(
+                "$inner\"stablehlo.return\"($iNew, $lastA, $mNew, $lNew, $accNew, $kA, $vA, $qA, $lensA) : ($typesStr) -> ()",
+            )
+        }
+        out.appendLine("$step}) : ($typesStr) -> ($typesStr)")
+
+        // out = acc / l, and 0 for a row with no live position (l = 0).
+        val lSum = "$loop#3"; val acc = "$loop#4"
+        val pos = synth(); val den = synth(); val denBc = synth(); val ctxOut = synth()
+        out.appendLine("$step$pos = stablehlo.compare GT, $lSum, ${fsplat("0.0", statT)}, FLOAT : (${statT.toMlir()}, ${statT.toMlir()}) -> ${predStatT.toMlir()}")
+        out.appendLine("$step$den = stablehlo.select $pos, $lSum, ${fsplat("1.0", statT)} : ${predStatT.toMlir()}, ${statT.toMlir()}")
+        out.appendLine("$step$denBc = stablehlo.broadcast_in_dim $den, dims = [0, 1, 2, 3] : (${statT.toMlir()}) -> ${accT.toMlir()}")
+        out.appendLine("$step$ctxOut = stablehlo.divide $acc, $denBc : ${accT.toMlir()}")
+        val rowsT = DxirType(dt, listOf(r, qn, hkv, g, d))
+        val rows = synth()
+        out.appendLine("$step$rows = stablehlo.transpose $ctxOut, dims = [0, 2, 1, 3, 4] : (${accT.toMlir()}) -> ${rowsT.toMlir()}")
         out.appendLine("$step$name = stablehlo.reshape $rows : (${rowsT.toMlir()}) -> ${node.type.toMlir()}")
     }
 

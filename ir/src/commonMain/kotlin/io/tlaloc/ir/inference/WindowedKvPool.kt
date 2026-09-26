@@ -15,16 +15,19 @@ package io.tlaloc.ir.inference
  * position is written over the position `ringPages * blockSize` before it,
  * which has left the window.
  *
- * ## Why the paged-attention op does not change
+ * ## How the windowed layers read the ring
  *
  * The windowed layers get their own block table and slot mapping
  * ([DecodeSlotRole.WINDOW_BLOCK_TABLES], [DecodeSlotRole.WINDOW_SLOT_MAPPING]),
  * as wide as the full ones: entry `b` of a sequence's windowed block table
- * is the ring page of logical block `b`. The op reads no position outside
- * the window, and (below) no position in the window has been written over,
- * so every position it reads is at the slot the table names, holding that
- * position's keys and values. The positions it does not read are masked, as
- * they are in a full-history pool.
+ * is the ring page of logical block `b`, so its first [ringPages] entries
+ * are the ring itself. When the bucket is wider than the ring, the graph
+ * reads only those entries, as a ring
+ * ([io.tlaloc.ir.PagedAttentionAttrs.RING]): a sliding layer scores at most
+ * `ringPages * blockSize` positions whatever the bucket's context. The op
+ * reads no position outside the window, and (below) no position in the
+ * window has been written over, so every position it reads is at the slot
+ * the ring names, holding that position's keys and values.
  *
  * ## How many pages the ring needs
  *

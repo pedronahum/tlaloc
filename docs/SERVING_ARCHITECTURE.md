@@ -87,12 +87,31 @@ The StableHLO emitter (`:stablehlo`) writes each graph as textual StableHLO,
 one module per entry, with the entry function named `main`:
 
 - `PAGED_ATTENTION` lowers to `gather` over the pages the block table names,
-  two `dot_general`s at HIGHEST precision (so XLA does not run them in TF32)
-  and a masked softmax. In a prefill body the tokens of one sequence share
-  its block table, so its pages are gathered once and every token attends
-  over them with its own causal length; gathering them once per token would
-  take `tokens x context` keys and values per layer (8 GiB per layer for Muse
-  Glimmer at 2,048 tokens and context 2,048).
+  two `dot_general`s in f32 (never TF32 or bf16) and a masked softmax. In a
+  prefill body the tokens of one sequence share its block table, so its
+  pages are gathered once and every token attends over them with its own
+  causal length; gathering them once per token would take
+  `tokens x context` keys and values per layer (8 GiB per layer for Muse
+  Glimmer at 2,048 tokens and context 2,048). Decode dots ask for
+  `precision = HIGHEST`; prefill dots name the f32 dot algorithm (f32
+  operands, products and sums), which XLA runs as its own f32 GEMM, about
+  1.3 times faster than the cuBLAS SIMT kernel it picks for HIGHEST on the
+  GB10.
+- **Blockwise attention.** When the tokens of a prefill call share a table
+  and its context spans several key blocks of 2,048 positions, the lowering
+  is a `stablehlo.while` over the key blocks instead: each iteration slices
+  2,048 keys and values, scores them, and folds them into a running max, a
+  running sum and a running P.V (the online softmax), so no score tensor as
+  wide as the context is written. The loop runs from the first block any
+  row can see to the block holding the call's last position, so a call
+  early in a large bucket scores only the positions its sequence has. In
+  f32 the result differs from the one-pass form only in the order of the
+  sums: on the GB10 it agrees with the interpreter's walk within 6e-8
+  (`PjrtBlockwisePagedAttentionTest`).
+- A sliding layer whose table is a ring (`ring = true`, section 3) scores
+  only the ring, masking each ring slot by its age: the slot at index `i`
+  holds the position `(L - 1 - i) mod N` behind the row's last one, live
+  when that is less than the window and less than `L`.
 - `KV_CACHE_WRITE` lowers to `scatter` into the pool at the token's slot.
 - bf16 weights (Muse Glimmer by default, Llama and Qwen3 with
   `-PweightDType=bf16`) stay bf16: each projection rounds its f32 input to
@@ -169,9 +188,13 @@ The full-attention layers keep full-history pages as before.
   `p - ringPages * blockSize`, which has left the window.
 - The windowed layers get their own block table and slot mapping
   (`WINDOW_BLOCK_TABLES`, `WINDOW_SLOT_MAPPING`), as wide as the full ones:
-  entry `b` is the ring page of block `b`. `PAGED_ATTENTION` is unchanged; it
-  reads only the positions in the window, and those are all still in the
-  ring.
+  entry `b` is the ring page of block `b`, so the first `ringPages` entries
+  are the ring. When the bucket is wider than the ring, the graph passes
+  only those entries to `PAGED_ATTENTION` with `ring = true`: a sliding
+  layer gathers and scores the ring's `ringPages * blockSize` positions
+  (2,560 for Muse Glimmer), not the bucket's, and masks each by how far
+  behind the row's last position it is. The positions in the window are
+  all still in the ring (below).
 - A ring of `ceil(W / blockSize)` pages holds one window, and a decode step
   needs no more; the default is one page more. A call that writes `n` tokens
   starting at `p0` needs `min(p0, W - 1) + n` positions at once, so a runtime
@@ -202,10 +225,14 @@ would take 13,312 MiB.
 
 ### Long contexts: prefill in chunks
 
-Each token of a prefill call attends over the call's whole context, masked
-to its own causal length, so the call's attention memory grows with tokens
-times context: 2 GiB of scores per layer for one 512-token call at context
-32,768 in Muse Glimmer, 128 GiB if the call took all 32,768 tokens. With
+Each token of a prefill call attends over the call's context, masked to its
+own causal length, so the call's attention work grows with tokens times
+context: one 512-token call at context 32,768 in Muse Glimmer scores 512
+tokens x 32 heads x 32,768 positions in each full-attention layer, and a
+call that took all 32,768 tokens would score 64 times as many. The emitter never writes those scores at once: a
+context of several key blocks is attended one block of 2,048 keys at a time
+(below, "Blockwise attention"), so the largest Muse Glimmer entry needs
+453 MiB of temporary memory instead of 4,125 MiB. With
 `-PprefillChunk=N` (`HfServingExport.export(prefillChunk = N)`) a prefill
 entry takes at most `N` tokens per sequence (`tokensPerSeq` in the
 manifest), and a runtime prefills a longer prompt in several calls, each on
@@ -216,14 +243,20 @@ windowed ring is sized so that an `N`-token call fits past the window:
 the logits of whole-context prefill bit for bit, with full-history and
 windowed pools, and the same chunks through a ring one page too short change
 them (`BatchedPrefillTest`); through Triton a windowed model with 6-token
-chunks matches the full-history model sent the same calls (36 of 40 requests
-bit for bit, the rest within 1.2e-7 of the largest logit).
+chunks matches the full-history model sent the same calls (5 of 40 requests
+bit for bit, the rest within 9.9e-7 of the largest logit; the windowed
+model's sliding layers score a 16-position ring where the full-history
+model's score 64 positions, so the GPU sums in another order).
 
 Muse Glimmer exported with contexts 512, 2,048, 8,192 and 32,768, decode
 batches 1, 2 and 4, batch-1 prefill in chunks of 512, and a full pool of
 8,193 pages (four sequences of 32,768 positions), served by Triton on the
 GB10 (`triton/context_bench.py`, gRPC; prompts of seeded random ids, four
-sequences per context; decode medians over 16 steps per sequence):
+sequences per context; decode medians over 16 steps per sequence). This
+table was measured while another process shared the GPU, and before sliding
+layers read their ring and prefill attended block by block; section 6 has
+the same model before and after that change on an idle GPU (a 31,744-token
+prompt in 62.6 s instead of 222.8 s):
 
 | Context bucket | Prompt | Prefill | 1 sequence | 2 sequences | 4 sequences |
 |---|---|---|---|---|---|
@@ -234,14 +267,14 @@ sequences per context; decode medians over 16 steps per sequence):
 
 - Decode is bound by reading the 52 GiB of weights, so up to 8,192
   positions four sequences cost about what one does. At 32,768 attention
-  shows: each step gathers and scores every position of the bucket, for the
-  sliding layers too (masked outside the window).
-- Prefill slows with the bucket for the same reason: every 512-token call
-  scores its tokens against the whole context of its entry, about 0.55 s at
+  showed: each step gathered and scored every position of the bucket, for
+  the sliding layers too (masked outside the window).
+- Prefill slowed with the bucket for the same reason: every 512-token call
+  scored its tokens against the whole context of its entry, about 0.55 s at
   context 512 and about 4.5 s at 32,768. A 32,768-token prompt takes 64 calls.
-- The 16 compiles took 2 minutes at load and the weights 90 s. XLA reports
-  4.0 GiB of temporary memory for the largest entry (prefill at 32,768);
-  the KV pools are 4.0 GiB. Under a PJRT memory fraction of 0.55 the machine
+- The 16 compiles took 2 minutes at load and the weights 90 s. XLA reported
+  4.0 GiB of temporary memory for the largest entry (prefill at 32,768),
+  453 MiB since prefill attends block by block; the KV pools are 4.0 GiB. Under a PJRT memory fraction of 0.55 the machine
   peaked at 87 to 90 GiB in use, about 9 GiB of it other processes.
 - Four sequences stepping together ran as one execution per step only with
   the sequence batcher's queue delay at 20 ms (`-PmaxQueueDelayMicros=20000`):
@@ -249,8 +282,8 @@ sequences per context; decode medians over 16 steps per sequence):
   sent their next steps more than 1 ms apart, and two sequences ran 32 steps
   in 31 executions, four ran 64 in 35. The delay costs a lone sequence about
   24 ms a token (241 ms against 265 ms).
-- Scoring only the positions a sliding layer can see, and a paged kernel
-  that does not gather at all, are not started (⬜).
+- Sliding layers now score only their ring (section 2). A paged kernel that
+  does not gather at all is not started (⬜).
 
 The two framework-free runtimes, (i) and (ii) below, read `v1` and `v2`
 artifacts and refuse a `v3` one by its schema version; only the Triton
@@ -376,8 +409,8 @@ is the system RAM), driver 580.126.09.
 | (iii) Triton, preemption of live sequences (KV swap or recompute) | 📐 | not built |
 | (iii) Triton, image and video placeholder ids refused | ✅ GB10 | `verify.sh`: the window models' stand-in ids are refused by name in a START and mid-sequence, the sequence unchanged; Muse Glimmer's 200091 and 200092 with `MUSE_GLIMMER=1` |
 | (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic, served from a v3 artifact whose 39 sliding layers are in the windowed pool; about 265 ms a token (241 ms with the batcher's 1 ms queue delay) |
-| (iii) Triton, Muse Glimmer at contexts up to 32,768 and four sequences, prefill in 512-token calls | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: a 2,305-token prompt whose fact lies 2,190 tokens before the question (outside the sliding window) gives the 16 ids transformers gives with the same arithmetic, logits within 8.4e-3 of the largest; the short prompts keep their 32 ids. Timings from `context_bench.py` in the table above |
-| (iii) Triton, prefill in chunks shorter than the context | ✅ GB10 | `verify.sh`: `window_sequence_chunked` (6-token prefill calls, rings of 4 pages) matches the full-history model sent the same calls (36 of 40 requests bit for bit, the rest within 1.2e-7); the reference interpreter gives whole-context logits bit for bit, and chunks through a ring one page short change them |
+| (iii) Triton, Muse Glimmer at contexts up to 32,768 and four sequences, prefill in 512-token calls | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: a 2,305-token prompt whose fact lies 2,190 tokens before the question (outside the sliding window) gives the 16 ids transformers gives with the same arithmetic, logits within 7.7e-3 of the largest; the short prompts keep their 32 ids. Timings from `context_bench.py` in the table above |
+| (iii) Triton, prefill in chunks shorter than the context | ✅ GB10 | `verify.sh`: `window_sequence_chunked` (6-token prefill calls, rings of 4 pages) matches the full-history model sent the same calls (5 of 40 requests bit for bit, the rest within 9.9e-7); the reference interpreter gives whole-context logits bit for bit, and chunks through a ring one page short change them |
 | (iii) Triton, windowed KV pool for sliding-window layers | ✅ GB10 | `verify.sh`: a three-layer decoder with random weights (window 8, pages of 4, rings of 3 pages) grown to 60 positions holds at most 3 windowed pages while its full pages reach 15, and its logits equal the same model with full-history pages sent the same calls (worst 5.3e-7 of the largest logit), over HTTP and gRPC, alone and batched; the reference interpreter gives bit-identical logits for the two layouts over several windows, and a ring one page short or a call one token too long changes them |
 | (iii) Triton, prompts of several sequences prefilled in one call | ✅ GB10 | `verify.sh`: 2 and 4 TinyLlama and Qwen3-0.6B prompts sent together run in one call of a batch-2 or batch-4 prefill entry and give their solo argmax and the same 8 greedy ids as alone, over HTTP and gRPC (logits within 5e-3 of the largest; the batched entry is a different executable under TF32); the reference interpreter gives the solo logits and the solo continuation bit for bit, with full-history and windowed pools, and padding that writes its KV or a left-aligned row changes them |
 | (iii) Triton, dynamic batching, CUDA shared memory, nine dtypes | ✅ GB10 | `verify.sh`; a ragged batch is grouped by the shape of its rows: 216 requests of two widths ran in 74 to 76 executions against 119 to 134 when only consecutive requests of one width run together (the `group_by_shape` false control), with every request's rows identical |
@@ -443,10 +476,14 @@ queue and the gRPC round trip.
   asks for the copy (these phases were read under the profiler).
 - The attention of a step (page gathers, scores, softmax) is under 1% of
   kernel time at context 512 and 3% at 8,192 for Muse Glimmer. At 8,192 each
-  sliding layer gathers all 512 pages of its block table, 8 MiB of f32 KV,
-  although its ring holds at most 160 pages.
+  sliding layer gathered all 512 pages of its block table, 8 MiB of f32 KV,
+  although its ring holds at most 160 pages; it now reads the ring (next
+  subsections).
 
 ### Muse Glimmer prefill, one 512-token call
+
+Measured before sliding layers read their ring and before blockwise
+attention (the next subsection has the numbers after):
 
 | Context bucket | Client | Server | Kernels | Attention (scores, softmax, P.V) | Weight matmuls |
 |---|---|---|---|---|---|
@@ -477,7 +514,66 @@ At 32,768:
 - The attention dots read f32 K and V from f32 KV pools. Those are the only
   matmuls in the model that run in f32.
 
-### What would make it faster (estimates, not started ⬜)
+### Muse Glimmer prefill after rings and blockwise attention
+
+Sliding layers now read their ring, and a call over a context of several key
+blocks attends 2,048 keys at a time up to its last position (section 2). The
+same `profile.sh` workloads, the artifact from before and the artifact from
+after served in turn (before, after, before, after) with the GPU otherwise
+idle; client time over gRPC, medians of the runs (before: 4, after: 2).
+From the second "after" session on, the desktop kept the GPU 16 to 20% busy
+for hours; its runs, 27 to 42% slower, are left out, as is the last
+"before" decode run at 30,000 (420 ms), which that load reached:
+
+| Measured | Context bucket | Before | After |
+|---|---|---|---|
+| a 512-token call at positions 1,536 to 2,047 | 2,048 | 710 ms | 656 ms |
+| a 512-token call at 7,680 to 8,191 | 8,192 | 1,225 ms | 823 ms |
+| a 512-token call at 8,704 to 9,215 | 32,768 | 4,488 ms | 882 ms |
+| a 512-token call at 31,744 to 32,255 | 32,768 | 4,498 ms | 1,394 ms |
+| a 1,536-token prompt (3 calls) | up to 2,048 | 1.96 s | 1.85 s |
+| a 7,680-token prompt (15 calls) | up to 8,192 | 15.8 s | 10.7 s |
+| an 8,704-token prompt (17 calls) | up to 32,768 | 21.5 s | 12.4 s |
+| a 31,744-token prompt (62 calls) | up to 32,768 | 222.8 s | 62.6 s |
+| a decode step at position 400 | 512 | 269.5 ms | 266.0 ms |
+| a decode step at position 6,000 | 8,192 | 278.6 ms | 270.6 ms |
+| a decode step at position 30,000 | 32,768 | 314.9 ms | 282.8 ms |
+
+- A call now costs what its position needs, not what its bucket holds: at
+  32,768 the call at 8,704 is five times cheaper than before and the call at
+  31,744 three times. XLA's temporary memory for the largest entry fell from
+  4,125 MiB to 453 MiB.
+- A 32,768-token prompt takes about a minute instead of almost four.
+- Decode gains where sliding layers used to gather the whole bucket: 32 ms a
+  token at 30,000 positions, about 8 at 6,000.
+
+What remains, from one Nsight Systems capture of the new artifact
+(`MODE=nsys`). The desktop kept the GPU 16 to 20% busy during it, so its
+kernels ran slower than they do on an idle GPU (the call at 31,744 took
+1.96 s under the profiler against 1.39 s idle); the shares are what it
+shows:
+
+| Where the time of a call goes | At 8,704 | At 31,744 |
+|---|---|---|
+| Weight matmuls | 611 ms (52%) | 616 ms (33%) |
+| The 13 full layers' blockwise attention | 270 ms (23%), 5 blocks each | 865 ms (47%), 16 blocks each |
+| The 39 sliding layers' attention over their ring | 177 ms (15%) | 171 ms (9%) |
+| Page gathers, norms, RoPE, KV writes | 64 ms (5%) | 73 ms (4%) |
+| No kernel running (the loop's condition read back per block) | 50 ms (4%) | 124 ms (7%) |
+
+- A block of the full layers' loop is four kernels: the score dot (f32,
+  0.7 ms), the max over the block (0.6 ms), the exponentials and their sum
+  (1.8 ms: it reads the 128 MiB score block and writes the exponentials
+  back), and the P.V dot (0.9 ms). The two passes over the scores are
+  bound by memory, as the one-pass form's were; what changed is that they
+  cover the positions the call has, and the sliding layers' only the ring.
+- XLA reads a `while` loop's condition back to the host once per block, so
+  each block costs a synchronisation: about 0.6 ms of 208 blocks per call
+  at 31,744.
+- The weight matmuls do not depend on the context: about 460 ms a call on an
+  idle GPU, 29 s of a 32,768-token prompt.
+
+### What would make it faster (estimates)
 
 - Decode, every model: send a request's logits copy with the execution
   instead of after it (0.9 to 1.7 ms a step), upload the integer inputs as
@@ -485,17 +581,13 @@ At 32,768:
   make a lone sequence wait (20.5 ms a token for Muse Glimmer, 1.2 ms for
   the others). Muse Glimmer would go from 268 ms to about 247 ms a token,
   Qwen3-0.6B from 17.1 to about 14.5 ms (f32) and from 11.3 to about 8.7 ms
-  (bf16).
-- Prefill: a sliding layer attends over its ring (at most 2,560 positions
-  for a 512-token call) instead of the bucket. That removes about 12/13 of
-  the attention work of 39 of the 52 layers, taking a call at 32,768 from
-  4.4 s to about 1.7 s. On top of that, attention whose score and P.V dots
-  run on tensor cores and whose softmax is not materialized (running
-  max and sum over blocks of keys, stopping at the sequence's length) would
-  take the full layers from about 75 ms to a few ms each: about 0.6 to
-  0.8 s a call, and a 32,688-token prompt (64 calls) in about 35 to 50 s
-  instead of 230 s. The same ring-sized table removes the bucket-wide page gather from
-  decode.
+  (bf16). Not started (⬜).
+- Prefill (the ring and the blockwise loop are done, above): what is left
+  is the full layers' score passes, which only a fused attention kernel
+  that keeps a block's scores on chip would remove (⬜), and the per-block
+  synchronisation of the `while` loop. Running the attention dots in TF32 or
+  bf16 would change numerics and would be an opt-in. Decode of the full
+  layers still gathers the whole bucket (⬜).
 - Decode is at the memory ceiling, so only fewer bytes make it faster:
   8-bit weights (opt in, never the default) would roughly halve Muse
-  Glimmer's 53 GB and its step to about 125 to 135 ms.
+  Glimmer's 53 GB and its step to about 125 to 135 ms. Not started (⬜).

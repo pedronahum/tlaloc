@@ -422,6 +422,99 @@ class PagedAttentionTest {
     }
 
 
+    // ---------------------------------------------------------------- ring
+
+    /**
+     * A ring of 3 pages of 2 (6 positions) for a window of 4, filled the way
+     * a runtime fills it: position t on ring page (t / 2) % 3, later
+     * positions writing over earlier ones. Rows of 3, 6 and 11 positions (the
+     * last one wrapped the ring once) read the same positions through the
+     * ring as through a table of 6 columns naming ring[b % 3], and the walk
+     * gives the same bits.
+     */
+    private fun ringCase(): Triple<FloatArray, FloatArray, List<IntArray>> {
+        val slot = numKvHeads * headDim
+        val k = FloatArray(10 * blockSize * slot)
+        val v = FloatArray(10 * blockSize * slot)
+        val rings = listOf(intArrayOf(4, 1, 7), intArrayOf(2, 9, 5), intArrayOf(8, 3, 6))
+        val lens = intArrayOf(3, 6, 11)
+        for (s in 0 until 3) {
+            val kk = pseudo(lens[s] * slot, 40 + s)
+            val vv = pseudo(lens[s] * slot, 50 + s)
+            for (t in 0 until lens[s]) {
+                val at = (rings[s][(t / blockSize) % 3] * blockSize + t % blockSize) * slot
+                kk.copyInto(k, at, t * slot, (t + 1) * slot)
+                vv.copyInto(v, at, t * slot, (t + 1) * slot)
+            }
+        }
+        return Triple(k, v, rings)
+    }
+
+    private fun ringFn(width: Int, rows: Int, tables: Int, ring: Boolean, window: Int = 4) = DxirBuilder.function("ring") {
+        val rowQ = DxirType(F32, listOf(rows, numHeads, headDim))
+        val pool = DxirType(F32, listOf(10, blockSize, numKvHeads, headDim))
+        val q = param("q", rowQ)
+        val k = param("k", pool)
+        val v = param("v", pool)
+        val t = param("t", DxirType(I32, listOf(tables, width)))
+        val l = param("l", DxirType(I32, listOf(rows)))
+        val attrs = buildMap<String, Any> {
+            put("scale", scale)
+            put("sliding_window", window)
+            if (ring) put(io.tlaloc.ir.PagedAttentionAttrs.RING, true)
+        }
+        listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), rowQ, attrs))
+    }
+
+    @Test
+    fun aRingTableReadsWhatAFullWidthTableReadsBitForBit() {
+        val (k, v, rings) = ringCase()
+        val q = pseudo(3 * numHeads * headDim, 61)
+        val lens = floatArrayOf(3f, 6f, 11f)
+        val ringTable = FloatArray(9) { rings[it / 3][it % 3].toFloat() }
+        val fullTable = FloatArray(18) { rings[it / 6][(it % 6) % 3].toFloat() }
+        val fromRing = DxirInterpreter.evalFunction(ringFn(3, 3, 3, ring = true), listOf(q, k, v, ringTable, lens))[0]
+        val fromFull = DxirInterpreter.evalFunction(ringFn(6, 3, 3, ring = false), listOf(q, k, v, fullTable, lens))[0]
+        for (i in fromRing.indices) {
+            kotlin.test.assertEquals(fromFull[i].toRawBits(), fromRing[i].toRawBits(), "lane $i")
+        }
+        // Rows sharing the ring: the last two positions of the wrapped
+        // sequence (lengths 10 and 11) as a prefill chunk.
+        val q2 = pseudo(2 * numHeads * headDim, 67)
+        val lens2 = floatArrayOf(10f, 11f)
+        val r2 = DxirInterpreter.evalFunction(
+            ringFn(3, 2, 1, ring = true), listOf(q2, k, v, FloatArray(3) { rings[2][it].toFloat() }, lens2),
+        )[0]
+        val f2 = DxirInterpreter.evalFunction(
+            ringFn(6, 2, 1, ring = false), listOf(q2, k, v, FloatArray(6) { rings[2][it % 3].toFloat() }, lens2),
+        )[0]
+        for (i in r2.indices) kotlin.test.assertEquals(f2[i].toRawBits(), r2[i].toRawBits(), "shared lane $i")
+        // Control: the ring rotated by one page reads other positions.
+        val rotated = FloatArray(9) { rings[it / 3][(it % 3 + 1) % 3].toFloat() }
+        val moved = DxirInterpreter.evalFunction(ringFn(3, 3, 3, ring = true), listOf(q, k, v, rotated, lens))[0]
+        assertTrue(fromRing.indices.any { abs(moved[it] - fromRing[it]) > 1e-3f }, "a rotated ring went unnoticed")
+    }
+
+    @Test
+    fun aRingWithoutAWindowOrNarrowerThanItIsRefusedByName() {
+        fun parse(f: DxirFunction) =
+            io.tlaloc.ir.PagedAttentionAttrs.parse(f.body.filterIsInstance<io.tlaloc.ir.DxirOp>().single(), "test")
+        // The window of 4 fits a ring of 2 pages of 2; 5 does not.
+        kotlin.test.assertEquals(true, parse(ringFn(2, 3, 3, ring = true, window = 4)).ring)
+        val narrow = assertFailsWith<IllegalArgumentException> { parse(ringFn(2, 3, 3, ring = true, window = 5)) }
+        assertTrue("fewer than the sliding window 5" in narrow.message.orEmpty(), narrow.message)
+        val noWindow = DxirBuilder.function("ring") {
+            val q = param("q", qType)
+            val k = param("k", cacheType)
+            val v = param("v", cacheType)
+            val t = param("t", tableType)
+            val l = param("l", lensType)
+            listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), qType, mapOf("scale" to scale, "ring" to true)))
+        }
+        val e = assertFailsWith<IllegalArgumentException> { parse(noWindow) }
+        assertTrue("'ring' needs a 'sliding_window'" in e.message.orEmpty(), e.message)
+    }
+
     @Test
     fun outOfRangeBlockIdRefusesByName() {
         val q = pseudo(numSeqs * numHeads * headDim, 3)

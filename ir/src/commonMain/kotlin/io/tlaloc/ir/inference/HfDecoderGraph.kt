@@ -450,7 +450,27 @@ object HfDecoderGraph {
             // sequence and not once per token. The windowed layers read their
             // own tables the same way.
             val rowTables = blockTables
-            val windowRowTables = windowTables
+            // A windowed layer reads only its ring: column j of its table is
+            // ring page j (logical block b is on column b % ringPages), so the
+            // first ringPages columns are the whole ring and the op reads them
+            // as one (PagedAttentionAttrs.RING). A sliding layer then scores
+            // at most ringPages * blockSize positions, not the bucket's
+            // context. When the bucket is no longer than the ring, the table
+            // never wraps and is read as it is.
+            val ringPages = m.windowedKv?.ringPages
+            val ringRead = ringPages != null && ringPages < maxBlocks
+            val windowRowTables = if (windowTables == null || !ringRead) {
+                windowTables
+            } else {
+                op(
+                    OpKind.SLICE, listOf(windowTables), DxirType(spec.blockTablesType.dtype, listOf(b, ringPages!!)),
+                    attrs = mapOf(
+                        "start_indices" to listOf(0, 0),
+                        "limit_indices" to listOf(b, ringPages),
+                        "strides" to listOf(1, 1),
+                    ),
+                )
+            }
             val rowLens: DxirNode
             if (spec.kind == DecodeGraphKind.DECODE) {
                 rowLens = seqLens
@@ -513,6 +533,7 @@ object HfDecoderGraph {
                     if (layerSpec.attention == AttentionKind.SLIDING) {
                         put(io.tlaloc.ir.PagedAttentionAttrs.SLIDING_WINDOW, layerSpec.slidingWindow!!)
                     }
+                    if (windowed && ringRead) put(io.tlaloc.ir.PagedAttentionAttrs.RING, true)
                 }
                 val att = op(
                     OpKind.PAGED_ATTENTION,

@@ -463,7 +463,11 @@ enum class OpKind {
     // [numSeqs, maxBlocksPerSeq*blockSize, numKvHeads, headDim] window, mask
     // past seqLen with -inf, then dense GQA attention. A fused vendor/KPTX
     // paged kernel with recognizer claiming is Phase H4 — the whole point of
-    // the coarse kind being a kind.
+    // the coarse kind being a kind. Rows that share a table over a context of
+    // several key blocks are emitted block by block instead, with a running
+    // max and sum, so no score tensor as wide as the context is written; a
+    // `ring` table (a sliding layer's ring of pages) is masked by the age of
+    // each ring slot. See io.tlaloc.ir.PagedAttentionAttrs.
     PAGED_ATTENTION,
 
     // §0.4.466 — Phase H1b (docs/INFERENCE_SERVING_AUDIT.md §2 gap 2): the
