@@ -337,8 +337,13 @@ model's MiB (1136 against 2273), all 32 ids must equal the fixture's, the
 logits must be within 6e-3 of the largest (measured 3.0e-3: every projection
 rounds its input to bf16), and `--perturb` must fail. As a control on the
 logit check, the bf16 model must fail the f32 model's tolerance of 2e-3. A decode step takes
-11.3 ms against 15.4 ms with f32 weights. Without the checkpoint this step
-prints `SKIP qwen3`; `SKIP_QWEN3=1` skips it.
+11.3 ms against 15.4 ms with f32 weights. Last, the checkpoint is exported
+with bf16 weights and int8 projections (`-PweightQuant=int8`) into
+`triton/build/qwen3-bf16-int8/`: the upload must be 506 weights and under
+70% of the bf16 model's MiB (718 against 1136), all 32 ids must equal the
+fixture's (the logits are not compared: quantization changes them), and
+`--perturb` must fail. Without the checkpoint this step prints
+`SKIP qwen3`; `SKIP_QWEN3=1` skips it.
 
 With `MUSE_GLIMMER=1`, and meta-models/Muse-Glimmer-30B (Apache-2.0, 59 GB,
 not gated) in the HuggingFace cache at the revision the fixtures name
@@ -480,6 +485,36 @@ SentencePiece vocabulary word by word (TinyLlama) and a byte-level one needs
 ids (`--prompt`). `-PweightDType=bf16` stages the weights as bf16 (the
 default is f32 for Llama and Qwen3, bf16 for Muse Glimmer): half the device
 memory, and each projection rounds its input to bf16 and sums in f32.
+
+`-PweightQuant=int8` (opt-in; the default is `none`) stores each layer's
+projection weights as int8 with one f32 scale per output channel, next to
+their scales in the weight table (`qProj0`, `qProj0Scale`); the embedding
+table, the norms and the head keep the weight dtype. It halves the bytes a
+decode step reads for a bf16 model. It changes the numerics, so an int8
+model is compared with the unquantized one rather than expected to equal
+it: `quant_checks.py` reports, for the greedy fixtures, how many ids it
+reproduces, and, for the first tokens of the wikitext-103 test split, the
+perplexity and the share of argmaxes equal to a saved run of the other
+model:
+
+```bash
+python triton/quant_checks.py --grpc localhost:8021 --model muse \
+    --fixture ir/src/jvmTest/resources/io/tlaloc/ir/inference/muse_glimmer_30b_bf16_greedy.json \
+    --tokenizer <checkpoint>/tokenizer.json --text-tokens 480 --bos 200000 \
+    --label int8 --save int8.json --compare bf16.json
+```
+
+Measured on the GB10 (section 6 of
+[SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md#int8-weights-opt-in)
+has the tables): Muse Glimmer with int8 weights keeps all 48 fixture ids of
+the bf16 model (the needle answer is still " 4719."), its perplexity moves
+by −0.14% and 99.0% of the argmaxes agree; with the GPU idle a decode step
+takes 138 ms instead of 244 ms (7.2 tokens/s instead of 4.1), a 512-token
+prefill call about 160 ms longer, and the weights take 29,143 MiB instead of
+53,128 MiB. Qwen3-0.6B
+keeps its 32 ids, +1.1% perplexity, 96% argmax agreement, and a decode
+step takes 8.8 ms instead of 10.4 (bf16 weights). `verify.sh`
+serves Qwen3-0.6B with int8 weights and requires its 32 fixture ids.
 
 A checkpoint that ties its head to the embedding table (Qwen3) has no head
 weight in the artifact: the head is one `dot_general` that contracts the

@@ -12,6 +12,7 @@ import io.tlaloc.core.HostF64Storage
 import io.tlaloc.core.HostI32Storage
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
+import io.tlaloc.core.I8
 import io.tlaloc.core.TensorStorage
 
 // §0.4.502 (Tier 2 item 7) — the safetensors WRITER, the other half of
@@ -124,6 +125,7 @@ object SafetensorsWriter {
                 "constructed to write; the reader refuses to read one for the same reason",
         )
         Bool -> refuseDType(dt, "no host storage at this width")
+        I8 -> refuseDType(dt, "no host storage at this width")
         // DELIBERATELY NO `else`. [DType] is sealed, so this `when` is
         // exhaustive, and a new DType added to `:core` breaks THIS FILE at
         // compile time with the author's cursor on the decision they have to

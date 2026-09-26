@@ -50,7 +50,18 @@ CHAT_PYTHON=/tmp/chat-venv/bin/python examples/triton-llm/run.sh
 CHAT_PYTHON=/tmp/chat-venv/bin/python examples/triton-llm/run.sh --question "What is the capital of France? Answer in one word."
 CHAT_PYTHON=/tmp/chat-venv/bin/python examples/triton-llm/run.sh --model tinyllama
 CHAT_PYTHON=/tmp/chat-venv/bin/python examples/triton-llm/run.sh --model muse-glimmer   # read the warning below first
+CHAT_PYTHON=/tmp/chat-venv/bin/python examples/triton-llm/run.sh --model muse-glimmer --quant int8
 ```
+
+`--quant int8` exports the layers' projection weights as int8 with one scale
+per output channel (into `build/<model>-int8/`). A decode step reads about
+half the bytes, so for Muse Glimmer it takes 139 ms instead of 250 and the
+weights take 29 GiB instead of 52. The answers are close to the original
+model's, not the same bits: served through Triton, the int8 Muse Glimmer
+gave the same 48 greedy ids as the bf16 one on the repository's fixtures,
+and 99% of its argmaxes over 480 wikitext tokens agreed
+([SERVING_ARCHITECTURE.md](../../docs/SERVING_ARCHITECTURE.md#int8-weights-opt-in)).
+The default is `none`.
 
 `run.sh` does six things:
 
@@ -87,6 +98,7 @@ repository's `triton/` directory for the backend and the server script.
 | `qwen3` (default) | Qwen/Qwen3-0.6B | Apache-2.0 | 2.8 GiB, f32 | ✅ ran on the GB10 |
 | `tinyllama` | TinyLlama/TinyLlama-1.1B-Chat-v1.0 | Apache-2.0 | 4.1 GiB, f32 | ✅ ran on the GB10 |
 | `muse-glimmer` | meta-models/Muse-Glimmer-30B, text decoder only | Apache-2.0 | 52 GiB, bf16 | ✅ ran on the GB10 |
+| `muse-glimmer --quant int8` | the same | Apache-2.0 | 28.5 GiB, int8 projections | ✅ ran on the GB10 |
 
 `run.sh` finds the checkpoint in the HuggingFace cache
 (`$HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`);
@@ -250,14 +262,40 @@ run without reaching the answer) and today's date as `current_date`. At 4
 tokens/s the decode speed is about what reading 52 GiB of weights per token
 allows at the GB10's memory bandwidth.
 
+`run.sh --model muse-glimmer --quant int8`, run on 2026-09-26 with the GPU
+otherwise idle (export from an earlier run, 146 s for 29,143 MiB):
+
+```
+WARNING: Muse Glimmer with int8 layer weights puts 31 GB of weights on the GPU;
+         the export writes 31 GB to /home/pedro/programming/tlaloc/examples/triton-llm/build/muse-glimmer-int8 and the load takes minutes.
+== export: reusing /home/pedro/programming/tlaloc/examples/triton-llm/build/muse-glimmer-int8/repository (REEXPORT=1 writes it again)
+== starting Triton (tlaloc-triton-llm, PJRT memory fraction 0.3, log: /home/pedro/programming/tlaloc/examples/triton-llm/build/muse-glimmer-int8/server.log)
+ready in 116 s: uploaded 1043 weights (29143 MiB) in 44880 ms; 6 entries, KV pool of 513 pages x 16 tokens, largest context 8192, largest decode batch 1, largest prefill batch 1, at most 512 tokens per sequence in a prefill call, sequence idle timeout 60000000 us; refuses token ids 200091 (video_token_id) 200092 (image_token_id); windowed KV pool for 39 sliding layers (window 2048): 161 pages, a ring of at most 160 pages per sequence
+== chat (gRPC, localhost:8021)
+question  What is the capital of France? Answer in one word.
+prompt    68 tokens after the chat template
+answer     to=self<|message|>What is the capital of France? Answer in one word.
+          
+          Answer in one word. Capital of France is Paris.
+          
+          Should output one word. Probably "Paris".<|eom|><|start|>assistant to=user<|message|>Paris
+
+generated 42 tokens, stopped by end-of-turn token 200008
+prefill   68 tokens in one request: 403 ms
+decode    median 138.7 ms a token over 42 requests (7.2 tokens/s)
+```
+
+(Ports 8020 to 8022 were used, through `HTTP_PORT`, `GRPC_PORT` and
+`METRICS_PORT`.)
+
 ### Timings
 
-| | Qwen3-0.6B | TinyLlama-1.1B | Muse Glimmer 30B |
-|---|---|---|---|
-| Export (Kotlin) | 5.0 s | 6.8 s | 174 s |
-| Server ready (six XLA compiles, weight upload) | 26 to 28 s | 28 to 32 s | 133 to 139 s |
-| Prefill of the chat prompt, one request | 64 to 66 ms (23 to 24 tokens) | 73 ms (27 tokens) | 457 ms (67 tokens) |
-| Decode, median per token | 15.5 ms | 26.5 ms | 250 ms |
+| | Qwen3-0.6B | TinyLlama-1.1B | Muse Glimmer 30B | Muse Glimmer, `--quant int8` |
+|---|---|---|---|---|
+| Export (Kotlin) | 5.0 s | 6.8 s | 174 s | 146 s |
+| Server ready (six XLA compiles, weight upload) | 26 to 28 s | 28 to 32 s | 133 to 139 s | 116 s |
+| Prefill of the chat prompt, one request | 64 to 66 ms (23 to 24 tokens) | 73 ms (27 tokens) | 457 ms (67 tokens) | 403 ms (68 tokens) |
+| Decode, median per token | 15.5 ms | 26.5 ms | 250 ms | 138.7 ms |
 
 The Qwen3 column is from after its tied head began reading the embedding
 table (2273 MiB of weights instead of 2867 MiB); before, the decode step took

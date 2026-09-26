@@ -2,6 +2,7 @@ package io.tlaloc.maestro.serving
 
 import io.tlaloc.core.BF16
 import io.tlaloc.core.F32
+import io.tlaloc.core.I8
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirModule
 import io.tlaloc.ir.inference.DecodeBucket
@@ -103,7 +104,7 @@ object ServingArtifactWriter {
      *   writer is only ever looking at one. Peak heap is the largest single
      *   tensor plus its transpose, not the model.
      * @param writeWeight the streaming form of [stageWeight]: writes ONE slot's
-     *   bytes (math layout, little-endian, the slot's dtype, F32 or BF16) to
+     *   bytes (math layout, little-endian, the slot's dtype, F32, BF16 or I8) to
      *   the stream and returns how many it wrote. For weights too large to
      *   hold as one array. Give at most one of the two.
      * @param refusedTokenIds token ids a server must refuse, with the config
@@ -297,9 +298,10 @@ object ServingArtifactWriter {
             val width = when (slot.type.dtype) {
                 F32 -> 4L
                 BF16 -> 2L
+                I8 -> 1L
                 else -> throw IllegalArgumentException(
                     "ServingArtifactWriter: staged weight '${slot.name}' is ${slot.type.dtype}; " +
-                        "the serving artifact holds F32 or BF16 weights",
+                        "the serving artifact holds F32, BF16 or I8 weights",
                 )
             }
             val want = slot.type.dims.fold(1L) { a, b -> a * b } * width

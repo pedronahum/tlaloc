@@ -671,6 +671,109 @@ the logits are on the host, 91 us after; Qwen3-0.6B f32 60, 605 us, 14.6 ms,
   Glimmer); a smaller output (the argmax, or the top k) would shorten the
   client side and is not built (⬜).
 
+### Int8 weights (opt-in)
+
+Decode reads every weight once a step and is at the memory ceiling, so the
+remaining lever is fewer bytes. `-PweightQuant=int8` at export
+(`HfDecoderConfig.weightQuant = WeightQuant.INT8`) stores each layer's
+Linear weights (q, k, v, o, the attention output gate, gate, up, down) as
+int8 with one f32 scale per output channel:
+
+```
+scale[o]   = max_i |W[o, i]| / 127          (1 for an all-zero row)
+code[o, i] = clamp(round_half_even(W[o, i] / scale[o]), -127, 127)
+```
+
+computed in f32 from the checkpoint's values at export. The embedding
+table, the norms and the head keep the model's weight dtype. In the
+artifact a quantized weight is an `i8` file followed by its scales
+(`qProj0`, then `qProj0Scale`, f32 `[out]`), and the model hash ends in
+`:qint8`. In the graph a projection widens the codes to the compute dtype
+(exact), multiplies into f32 as before and multiplies each output column by
+its scale; XLA fuses the widening into the decode matmul, so the weights are
+read as int8. It is never the default: it changes the model's numerics.
+
+**Which format.** `harness/python/bench_weight_quant.py` times a Muse
+Glimmer-sized projection (6656 x 19968, 32 in one program) through PJRT with
+the jax-cuda13 0.10.0 plugin on the GB10, GPU idle (median 0% over 10 s
+before and after), medians of 7 runs:
+
+| Weights | ms a projection, batch 1 / 4 | GB/s of weights |
+|---|---|---|
+| bf16 (today's Muse Glimmer) | 1.178 / 1.189 | 226 / 224 |
+| int8, widened to bf16 in the program, scale after the dot | 0.630 / 0.623 | 211 / 213 |
+| float8 e4m3, widened to bf16 | 0.649 / 0.614 | 205 / 216 |
+| float8 e4m3 input and weights, one f8 dot | 0.644 / 0.621 | 206 / 214 |
+| int4, widened to bf16 | 0.430 / 0.371 | 154 / 179 |
+| float4 e2m1, widened to bf16 | 1.263 / 1.283 | 53 / 52 |
+| NVFP4 (`__op$block_scaled_dot`, f4 input and weights, e4m3 scales per 16) | 0.544 / 0.540 | 122 / 123 |
+| MXFP4 (the same with e8m0 scales per 32) | 17.4 / 30.9 | 4 / 2 |
+
+int8 and float8 both run at the memory rate and halve the time. int8 is the
+one implemented: per-channel int8 keeps 127 even steps per row, float8 has
+three mantissa bits, and the f8 dot would also round the activations. int4
+is 1.5x faster than int8 at batch 1 (1.7x at 4) but runs at 154 GB/s,
+and 15 levels per channel needs group scales to hold quality (not built,
+⬜). NVFP4 is reachable in this XLA through the block-scaled dot custom call,
+but it rounds the activations to 4 bits too and ran at 122 GB/s; plain
+float4 weights are widened by a separate, slow pass.
+
+**Quality.** `triton/quant_checks.py` against the unquantized model served
+the same way: the greedy fixtures (identical prefix and teacher-forced top-1
+agreement), the first 480 tokens of the wikitext-103 test split scored one
+decode step at a time (perplexity), and the argmax at each of those
+positions compared with the unquantized model's:
+
+| Model | Fixture ids equal to the unquantized model's | Perplexity, unquantized → int8 | Text top-1 agreement |
+|---|---|---|---|
+| Muse Glimmer, bf16 → int8 | 48 of 48 (text, chat, needle; the needle answer is still " 4719.") | 5.6101 → 5.6022 (−0.14%) | 475 of 480 (99.0%) |
+| Qwen3-0.6B, bf16 → int8 | 32 of 32 (all equal HuggingFace's) | 19.438 → 19.665 (+1.17%) | 459 of 479 (95.8%) |
+| Qwen3-0.6B, f32 → int8 (f32 activations) | 32 of 32 (all equal HuggingFace's) | 19.444 → 19.658 (+1.10%) | 461 of 479 (96.2%) |
+
+For reference, Qwen3's bf16 weights against its f32 ones: perplexity −0.03%,
+476 of 479 argmaxes equal. Against the transformers fixtures, the int8 Muse
+Glimmer reproduces what the bf16 one does: the text and needle prompts'
+32 ids, and 15 of 16 on the chat prompt, whose 16th step is where
+transformers' bf16 and f32 runs choose differently (margin 0.31). `verify.sh`
+runs Qwen3-0.6B with int8 weights and requires all 32 fixture ids (and that
+the check fails with wrong ids).
+
+**Speed and memory.** Measured with `triton/profile.sh` (gRPC, one sequence, medians of three
+runs), the unquantized and the int8 artifact served in turn, three rounds;
+the table gives the median of the rounds. The GPU was idle for every run
+(nvidia-smi median 0% over 10 s before loading and again before timing).
+Muse Glimmer is the long-context export (contexts 512 to 32,768), Qwen3-0.6B
+the 64-token one.
+
+| Measured | Unquantized | Int8 |
+|---|---|---|
+| Muse Glimmer, a decode step at position 400, client / server | 244.5 / 241.7 ms | 138.4 / 135.9 ms |
+| Muse Glimmer, a decode step at position 6,000, client / server | 249.1 / 246.9 ms | 143.4 / 140.1 ms |
+| Muse Glimmer, a 512-token prefill call at position 1,536 | 649 ms | 805 ms |
+| Muse Glimmer, a 512-token prefill call at position 7,680 | 811 ms | 976 ms |
+| Muse Glimmer, weights on the device; upload | 53,128 MiB; 82 s | 29,143 MiB; 44 s |
+| Muse Glimmer, least memory available system-wide while serving | 30 to 32 GiB | 61 to 63 GiB |
+| Qwen3-0.6B bf16 weights, a decode step, client / server | 10.36 / 8.57 ms | 8.75 / 6.81 ms |
+| Qwen3-0.6B f32 weights, a decode step, client / server | 15.65 / 13.54 ms | 10.15 / 8.25 ms |
+
+Earlier in the same session the desktop kept the GPU 16 to 22% busy for two
+rounds (a 45-minute wait never saw it idle); under that contention the Muse
+Glimmer step at position 400 took 331.5 ms against 186.8 ms, the same ratio.
+
+- A Muse Glimmer decode step reads 29.1 GB instead of 53.0 GB, and takes
+  56% of the time (7.2 tokens/s instead of 4.1): the byte ratio is 55%. At
+  233 GB/s the floor is 125 ms; the step's server time is 136 ms.
+  Qwen3-0.6B gains less: its embedding table, which is also its head, stays
+  bf16 or f32 and is a large share of its bytes.
+- Prefill is slower: about 160 ms more per 512-token call (a quarter
+  more). The prefill matmuls are tensor-core GEMMs, and the widening costs
+  more there than in decode; where the time goes was not profiled (⬜). A
+  512-token chunk of prompt costs about what one and a half decode steps
+  save, so a request comes out ahead once it generates more than about
+  1.5 tokens per 512 prompt tokens.
+- The weights take 29,143 MiB on the device instead of 53,128 MiB, and load
+  in 44 s instead of 82 s.
+
 ### What would make it faster (estimates)
 
 - Decode, every model: the queue wait, the input uploads and the late
@@ -683,6 +786,8 @@ the logits are on the host, 91 us after; Qwen3-0.6B f32 60, 605 us, 14.6 ms,
   synchronisation of the `while` loop. Running the attention dots in TF32 or
   bf16 would change numerics and would be an opt-in. Decode of the full
   layers still gathers the whole bucket (⬜).
-- Decode is at the memory ceiling, so only fewer bytes make it faster:
-  8-bit weights (opt in, never the default) would roughly halve Muse
-  Glimmer's 53 GB and its step to about 125 to 135 ms. Not started (⬜).
+- Decode is at the memory ceiling, so only fewer bytes make it faster.
+  Int8 weights are built (opt-in, above). Next: int4 with group scales
+  (about 1.5x faster than int8 in the micro-benchmark, ⬜), an int8 GEMM
+  for prefill that reads the codes directly instead of widening them first
+  (⬜), and bf16 or int8 KV pools (⬜).

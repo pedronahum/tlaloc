@@ -6,6 +6,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
+import io.tlaloc.core.I8
 import io.tlaloc.ir.AllReduceAttrs
 import io.tlaloc.ir.DxirBlock
 import io.tlaloc.ir.DxirBlockArg
@@ -997,7 +998,7 @@ internal class StablehloEmitter(
             // §0.4.456 (G1b) — bf16 is a float dtype: same decimal splat
             // literals (MLIR rounds them to the element type) and FLOAT compare.
             is F32, is F64, is BF16 -> Triple("0.0", "1.0", "FLOAT")
-            is I32, is I64 -> Triple("0", "1", "SIGNED")
+            is I8, is I32, is I64 -> Triple("0", "1", "SIGNED")
             is Bool -> error("STEP on bool input is not meaningful")
         }
         val zero = synth(); val one = synth(); val gt = synth()
@@ -2718,7 +2719,7 @@ internal class StablehloEmitter(
         val cmpSuffix = when (inputType.dtype) {
             // §0.4.456 (G1b) — bf16 values compare as floats.
             is F32, is F64, is BF16 -> "FLOAT"
-            is I32, is I64 -> "SIGNED"
+            is I8, is I32, is I64 -> "SIGNED"
             is Bool -> "UNSIGNED"
         }
 

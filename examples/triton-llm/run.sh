@@ -5,7 +5,11 @@
 # Export a HuggingFace checkpoint with Tlaloc, serve it with Triton and
 # libtriton_tlaloc.so, and ask it a question.
 #
-#   examples/triton-llm/run.sh [--model qwen3|tinyllama|muse-glimmer] [--question "..."]
+#   examples/triton-llm/run.sh [--model qwen3|tinyllama|muse-glimmer] [--question "..."] [--quant int8]
+#
+# --quant int8 exports the layers' projection weights as int8 with one scale
+# per output channel (half the bytes of bf16; the answers are close to the
+# original model's, not identical). It goes to build/<model>-int8/.
 #
 # Steps:
 #   1. check what the run needs, and skip by name (exit 0) if something is
@@ -37,11 +41,13 @@ TRITON="$ROOT/triton"
 
 MODEL=qwen3
 QUESTION="Why is the sky blue? Answer in two sentences."
+QUANT=none
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model) MODEL="$2"; shift 2 ;;
     --question) QUESTION="$2"; shift 2 ;;
-    *) echo "usage: $0 [--model qwen3|tinyllama|muse-glimmer] [--question TEXT]" >&2; exit 2 ;;
+    --quant) QUANT="$2"; shift 2 ;;
+    *) echo "usage: $0 [--model qwen3|tinyllama|muse-glimmer] [--question TEXT] [--quant none|int8]" >&2; exit 2 ;;
   esac
 done
 
@@ -86,6 +92,11 @@ case "$MODEL" in
     WEIGHTS_FILE=model.safetensors.index.json
     ;;
   *) echo "unknown --model '$MODEL'; one of qwen3, tinyllama, muse-glimmer" >&2; exit 2 ;;
+esac
+case "$QUANT" in
+  none) BUILD_NAME="$MODEL" ;;
+  int8) BUILD_NAME="$MODEL-int8" ;;
+  *) echo "unknown --quant '$QUANT'; one of none, int8" >&2; exit 2 ;;
 esac
 
 command -v docker >/dev/null || skip "no docker on PATH. Triton runs in a container."
@@ -134,14 +145,21 @@ gib_available() { awk '/MemAvailable/ {printf "%d", $2 / 1048576}' /proc/meminfo
 if [[ "$MODEL" == muse-glimmer ]]; then
   # The GB10's GPU memory is the system RAM: 56 GB of weights on the device
   # come out of the same pool as everything else on the machine.
-  echo "WARNING: Muse Glimmer puts 56 GB of bf16 weights on the GPU; the export"
-  echo "         writes 56 GB to $HERE/build/muse-glimmer and the load takes minutes."
+  if [[ "$QUANT" == int8 ]]; then
+    echo "WARNING: Muse Glimmer with int8 layer weights puts 31 GB of weights on the GPU;"
+    echo "         the export writes 31 GB to $HERE/build/$BUILD_NAME and the load takes minutes."
+    NEED_GIB=55
+  else
+    echo "WARNING: Muse Glimmer puts 56 GB of bf16 weights on the GPU; the export"
+    echo "         writes 56 GB to $HERE/build/muse-glimmer and the load takes minutes."
+    NEED_GIB=80
+  fi
   AVAIL="$(gib_available)"
-  (( AVAIL >= 80 )) || skip "Muse Glimmer needs 80 GiB of available memory (56 GiB of weights, 8 GiB of" \
+  (( AVAIL >= NEED_GIB )) || skip "Muse Glimmer needs $NEED_GIB GiB of available memory (its weights, 8 GiB of" \
     "working memory, a 16 GiB margin); this machine has $AVAIL GiB available."
 fi
 
-OUT="$HERE/build/$MODEL"
+OUT="$HERE/build/$BUILD_NAME"
 LOG="$OUT/server.log"
 
 # --- 2. Kotlin writes the Triton model repository -----------------------------
@@ -149,7 +167,7 @@ LOG="$OUT/server.log"
 if [[ "${REEXPORT:-}" == 1 || ! -f "$OUT/repository/$MODEL/config.pbtxt" ]]; then
   echo "== export (Kotlin)"
   "$ROOT/gradlew" -q -p "$HERE" run \
-    --args="--model $MODEL --checkpoint $CKPT --out $OUT"
+    --args="--model $MODEL --checkpoint $CKPT --out $OUT --quant $QUANT"
 else
   echo "== export: reusing $OUT/repository (REEXPORT=1 writes it again)"
 fi

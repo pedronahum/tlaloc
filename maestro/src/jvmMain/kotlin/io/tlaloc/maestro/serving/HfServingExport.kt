@@ -10,6 +10,7 @@ import io.tlaloc.ir.inference.HfCheckpoint
 import io.tlaloc.ir.inference.HfDecoderConfig
 import io.tlaloc.ir.inference.HfDecoderGraph
 import io.tlaloc.ir.inference.HfStagedWeights
+import io.tlaloc.ir.inference.WeightQuant
 import java.nio.file.Path
 
 /**
@@ -131,6 +132,10 @@ object HfServingExport {
      * the artifact is `tlaloc-serving-v3`. Without it, or without sliding
      * layers, every layer keeps full-history pages.
      *
+     * [config]'s [io.tlaloc.ir.inference.HfDecoderConfig.weightQuant] stages
+     * the layers' Linear weights as int8 codes and per-output-channel scales
+     * (opt-in; see [WeightQuant]). The model hash then says so.
+     *
      * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
      * windowed ring is then sized so that a call of that many tokens fits
      * past the window ([HfDecoderConfig.windowedKvPool]).
@@ -176,6 +181,8 @@ object HfServingExport {
                 // Existing f32 hashes are unchanged; a bf16 weight table is a
                 // different program input and says so.
                 (if (config.weightDType == io.tlaloc.core.F32) "" else ":w${config.weightDType.name}") +
+                // Quantized weights are different weights.
+                (if (config.weightQuant == WeightQuant.NONE) "" else ":q${config.weightQuant.tag}") +
                 // A tied head that reads the embedding table binds one weight
                 // fewer than one staged as a copy: a different signature.
                 (if (HfDecoderGraph.headReadsEmbedding(config)) ":tiedHead" else ""),

@@ -2,6 +2,7 @@ package io.tlaloc.ir.inference
 
 import io.tlaloc.core.BF16
 import io.tlaloc.core.F32
+import io.tlaloc.core.I8
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirType
@@ -69,7 +70,9 @@ object HfDecoderGraph {
     /**
      * The staged-weight signature, in the one canonical order a loader binds
      * by index: the embedding table, each layer's [DecoderLayerSpec.parts],
-     * the final norm and the head ([weightRoles] gives the role of each).
+     * the final norm and the head ([weightSlotSources] gives the source of
+     * each). Under [HfDecoderConfig.weightQuant] a quantized weight is int8
+     * and is followed by its f32 scales.
      *
      * The dims are math layout `[in, out]`, not the file's `[out, in]`. HF
      * stores every `nn.Linear` weight transposed (`F.linear(x, W)` is
@@ -80,14 +83,44 @@ object HfDecoderGraph {
      * ([HfDecoderNames.isTransposedLinear] is the predicate for both).
      */
     fun weightSlots(config: HfDecoderConfig): List<DecodeSlot> =
-        weightRoles(config).map { role ->
+        weightSlotSources(config).map { src ->
+            val role = src.role
             val fileDims = HfDecoderNames.expectedDims(role, config).toList()
             val dims = if (HfDecoderNames.isTransposedLinear(role)) fileDims.reversed() else fileDims
-            DecodeSlot(slotName(role), DxirType(config.weightDType, dims), DecodeSlotRole.WEIGHT)
+            when {
+                src.scale ->
+                    DecodeSlot(slotName(role) + "Scale", DxirType(F32, listOf(dims.last())), DecodeSlotRole.WEIGHT)
+                HfDecoderNames.isQuantized(role, config) ->
+                    DecodeSlot(slotName(role), DxirType(I8, dims), DecodeSlotRole.WEIGHT)
+                else -> DecodeSlot(slotName(role), DxirType(config.weightDType, dims), DecodeSlotRole.WEIGHT)
+            }
         }
 
     /**
-     * The [DecoderWeightRole] each slot of [weightSlots] carries, same order.
+     * What one weight slot holds: the weight of [role], or, when [scale], the
+     * per-output-channel scales of that role's quantized weight.
+     */
+    data class WeightSlotSource(val role: DecoderWeightRole, val scale: Boolean = false)
+
+    /**
+     * The source of each slot of [weightSlots], same order: one per role of
+     * [weightRoles], and under [HfDecoderConfig.weightQuant] a scale slot
+     * (`qProj0Scale`, f32 `[out]`) right after each quantized weight
+     * ([HfDecoderNames.isQuantized]), whose slot is then int8. Without
+     * quantization the slots are exactly the roles.
+     */
+    fun weightSlotSources(config: HfDecoderConfig): List<WeightSlotSource> =
+        weightRoles(config).flatMap { role ->
+            if (HfDecoderNames.isQuantized(role, config)) {
+                listOf(WeightSlotSource(role), WeightSlotSource(role, scale = true))
+            } else {
+                listOf(WeightSlotSource(role))
+            }
+        }
+
+    /**
+     * The [DecoderWeightRole]s whose weights are staged, in slot order
+     * ([weightSlotSources] adds the scale slots of quantized weights).
      *
      * A tied head ([HfDecoderConfig.tieWordEmbeddings]) has no slot of its
      * own unless [HfDecoderConfig.tiedHeadCopy] asks for one: the head
@@ -301,8 +334,12 @@ object HfDecoderGraph {
                 param("keyCache$l", spec.poolTypeOf(l)) to param("valueCache$l", spec.poolTypeOf(l))
             }
             val w = spec.weightSlots.map { param(it.name, it.type) }
+            val sources = weightSlotSources(config)
             val byRole: Map<DecoderWeightRole, DxirNode> =
-                weightRoles(config).withIndex().associate { (i, role) -> role to w[i] }
+                sources.withIndex().filter { !it.value.scale }.associate { (i, src) -> src.role to w[i] }
+            // The per-output-channel scales of a quantized weight, keyed by the weight's node.
+            val scaleOf: Map<DxirNode, DxirNode> =
+                sources.withIndex().filter { it.value.scale }.associate { (i, src) -> byRole.getValue(src.role) to w[i] }
             fun weight(role: DecoderWeightRole): DxirNode = byRole.getValue(role)
             fun layerWeight(l: Int, part: DecoderLayerPart): DxirNode =
                 weight(DecoderWeightRole.Layer(l, part))
@@ -318,15 +355,28 @@ object HfDecoderGraph {
              * `x @ W` for a staged weight `W` (`[in, out]`). With BF16 weights
              * the f32 input is rounded to bf16 and the product is taken into
              * an f32 result: exact products, f32 sums.
+             *
+             * An int8 weight (see [WeightQuant.INT8]) is widened to the
+             * config's weight dtype (exact), multiplied the same way, and each
+             * output column of the f32 result is multiplied by its scale.
              */
             fun proj(x: DxirNode, wt: DxirNode, out: Int): DxirNode {
                 val rows = x.type.dims[0]
-                val lhs = if (wt.type.dtype == F32) {
+                val scales = scaleOf[wt]
+                val rhs = if (scales == null) wt else op(OpKind.CAST, listOf(wt), DxirType(wdt, wt.type.dims))
+                val lhs = if (rhs.type.dtype == F32) {
                     x
                 } else {
-                    op(OpKind.CAST, listOf(x), DxirType(wt.type.dtype, x.type.dims))
+                    op(OpKind.CAST, listOf(x), DxirType(rhs.type.dtype, x.type.dims))
                 }
-                return op(OpKind.MATMUL, listOf(lhs, wt), DxirType(F32, listOf(rows, out)))
+                val y = op(OpKind.MATMUL, listOf(lhs, rhs), DxirType(F32, listOf(rows, out)))
+                if (scales == null) return y
+                val scaleRow = op(OpKind.RESHAPE, listOf(scales), DxirType(F32, listOf(1, out)))
+                val scaleB = op(
+                    OpKind.BROADCAST, listOf(scaleRow), y.type,
+                    attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
+                )
+                return op(OpKind.MUL, listOf(y, scaleB), y.type)
             }
 
             /**

@@ -13,6 +13,24 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Opt-in int8 weights for serving.** `-PweightQuant=int8`
+  (`HfDecoderConfig.weightQuant = WeightQuant.INT8`; the default is `NONE`)
+  stores each layer's projection weights as int8 codes with one f32 scale
+  per output channel; the embedding table, the norms and the head keep
+  their dtype. The graph widens the codes into the matmul and scales the
+  output columns. `io.tlaloc.core.I8` is a new `DType` for them (StableHLO
+  `i8`). `triton/quant_checks.py` measures an int8 model against the
+  unquantized one (fixture ids, wikitext-103 perplexity, argmax agreement)
+  and `harness/python/bench_weight_quant.py` times int8, float8, int4,
+  float4 and NVFP4 projections through PJRT. On the GB10: Muse Glimmer
+  keeps all 48 fixture ids of the bf16 model, perplexity 5.610 → 5.602,
+  a decode step 138 ms instead of 244 (GPU idle), 29 GiB of weights instead of
+  52; Qwen3-0.6B keeps its 32 ids with +1.1% perplexity, and
+  `verify.sh` now requires them with int8 weights. Prefill is slower, since
+  the widening is not fused into the tensor-core GEMM
+  (`docs/SERVING_ARCHITECTURE.md`, section 6). `examples/triton-llm/run.sh
+  --quant int8` exports and serves a model this way.
+
 - **The Triton backend batches decode steps itself.** Triton hands each
   request over at once (`TritonModelRepository` now writes
   `max_queue_delay_microseconds: 0`), and a batch runs once every sequence

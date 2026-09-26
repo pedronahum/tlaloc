@@ -238,8 +238,11 @@ class HfMuseGlimmerTest {
      * one prefill call (right-aligned in a chunk of [context] rows), then one
      * decode step per token. With [prefillLen] 0 every token is a decode step.
      */
-    private fun run(config: HfDecoderConfig, prefillLen: Int = 0): Map<Int, FloatArray> {
-        val weights = staged(config)
+    private fun run(
+        config: HfDecoderConfig,
+        prefillLen: Int = 0,
+        weights: List<FloatArray> = staged(config),
+    ): Map<Int, FloatArray> {
         var pools = emptyPools(config)
         val out = LinkedHashMap<Int, FloatArray>()
         if (prefillLen > 0) {
@@ -366,8 +369,8 @@ class HfMuseGlimmerTest {
      * transposed in several bands, each read in several chunks), must be the
      * staged floats' bf16 bits.
      */
-    @Test
-    fun theStreamingBf16WriterTransposesInBandsExactly() {
+    /** [body] with the tiny model written as a bf16 safetensors checkpoint. */
+    private fun <T> withCheckpoint(body: (HfCheckpoint) -> T): T {
         val dir = Files.createTempDirectory("muse-tiny")
         try {
             Files.writeString(dir.resolve("config.json"), (fixture["configJson"] as JsonString).value)
@@ -379,23 +382,165 @@ class HfMuseGlimmerTest {
                 )
             }
             SafetensorsFileWriter.write(dir.resolve("model.safetensors"), tensors)
-            HfCheckpoint.open(dir).use { ckpt ->
-                assertTrue(ckpt.verifyInventory().isEmpty())
-                val want = staged(tiny)
-                for (i in want.indices) {
-                    val bytes = ByteArrayOutputStream()
-                    val n = HfStagedWeights.writeSlot(ckpt, tiny, i, bytes, blockBytes = 64)
-                    val b = bytes.toByteArray()
-                    assertEquals(2L * want[i].size, n)
-                    val got = FloatArray(want[i].size) {
-                        val bits = (b[2 * it].toInt() and 0xFF) or ((b[2 * it + 1].toInt() and 0xFF) shl 8)
-                        bf16BitsToFloat(bits.toShort())
-                    }
-                    assertContentEquals(want[i], got, "slot $i (${HfDecoderGraph.weightSlots(tiny)[i].name})")
-                }
-            }
+            return HfCheckpoint.open(dir).use(body)
         } finally {
             dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun theStreamingBf16WriterTransposesInBandsExactly() {
+        withCheckpoint { ckpt ->
+            assertTrue(ckpt.verifyInventory().isEmpty())
+            val want = staged(tiny)
+            for (i in want.indices) {
+                val bytes = ByteArrayOutputStream()
+                val n = HfStagedWeights.writeSlot(ckpt, tiny, i, bytes, blockBytes = 64)
+                val b = bytes.toByteArray()
+                assertEquals(2L * want[i].size, n)
+                val got = FloatArray(want[i].size) {
+                    val bits = (b[2 * it].toInt() and 0xFF) or ((b[2 * it + 1].toInt() and 0xFF) shl 8)
+                    bf16BitsToFloat(bits.toShort())
+                }
+                assertContentEquals(want[i], got, "slot $i (${HfDecoderGraph.weightSlots(tiny)[i].name})")
+            }
+        }
+    }
+
+    // ------------------------------------------------------ int8 weights
+
+    private val int8: HfDecoderConfig by lazy { tiny.copy(weightQuant = WeightQuant.INT8) }
+
+    private val linearParts = setOf(
+        DecoderLayerPart.Q_PROJ, DecoderLayerPart.K_PROJ, DecoderLayerPart.V_PROJ, DecoderLayerPart.O_PROJ,
+        DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ,
+        DecoderLayerPart.ATTN_GATE_PROJ,
+    )
+
+    @Test
+    fun int8QuantizesTheLayerLinearsOnlyAndAddsTheirScales() {
+        assertEquals(HfDecoderGraph.weightSlots(tiny), HfDecoderGraph.weightSlots(tiny.copy(weightQuant = WeightQuant.NONE)))
+        val roles = HfDecoderGraph.weightRoles(int8)
+        val sources = HfDecoderGraph.weightSlotSources(int8)
+        val slots = HfDecoderGraph.weightSlots(int8)
+        val linears = roles.count { it is DecoderWeightRole.Layer && it.part in linearParts }
+        assertTrue(linears >= 7 * int8.numLayers, "at least seven Linears per layer, got $linears")
+        assertEquals(roles.size + linears, slots.size)
+        assertEquals(roles, sources.filter { !it.scale }.map { it.role })
+        for ((i, src) in sources.withIndex()) {
+            val slot = slots[i]
+            val isLinear = src.role is DecoderWeightRole.Layer && (src.role as DecoderWeightRole.Layer).part in linearParts
+            when {
+                src.scale -> {
+                    assertEquals(HfDecoderGraph.slotName(src.role) + "Scale", slot.name)
+                    assertEquals(io.tlaloc.core.F32, slot.type.dtype)
+                    assertEquals(listOf(slots[i - 1].type.dims.last()), slot.type.dims, slot.name)
+                    assertEquals(src.role, sources[i - 1].role)
+                }
+                isLinear -> assertEquals(io.tlaloc.core.I8, slot.type.dtype, slot.name)
+                else -> assertEquals(tiny.weightDType, slot.type.dtype, slot.name)
+            }
+        }
+    }
+
+    /**
+     * The quantizer against the formula written out here: per output channel
+     * (a row of the file's `[out, in]`), `scale = max|w| / 127` and
+     * `code = rint(w / scale)`, staged transposed. The streaming writer, with
+     * a 64-byte block, writes the same codes and the scales' f32 bits.
+     */
+    @Test
+    fun theInt8CodesAndScalesFollowTheFormulaAndStreamExactly() {
+        withCheckpoint { ckpt ->
+            val sources = HfDecoderGraph.weightSlotSources(int8)
+            val slots = HfDecoderGraph.weightSlots(int8)
+            val staged = HfStagedWeights.stage(ckpt, int8)
+            var checked = 0
+            for ((i, src) in sources.withIndex()) {
+                if (!HfDecoderNames.isQuantized(src.role, int8)) continue
+                val file = fileTensors.getValue(HfDecoderNames.hfName(src.role, int8.family))
+                val (rows, cols) = HfDecoderNames.expectedDims(src.role, int8).let { it[0] to it[1] }
+                val scales = FloatArray(rows) { r ->
+                    val m = (0 until cols).maxOf { abs(file[r * cols + it]) }
+                    if (m == 0f) 1f else m / 127f
+                }
+                val bytes = ByteArrayOutputStream()
+                val n = HfStagedWeights.writeSlot(ckpt, int8, i, bytes, blockBytes = 64)
+                val b = bytes.toByteArray()
+                if (src.scale) {
+                    assertEquals(4L * rows, n)
+                    val buf = java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for (r in 0 until rows) {
+                        assertEquals(scales[r].toRawBits(), staged[i][r].toRawBits(), "${slots[i].name}[$r]")
+                        assertEquals(scales[r].toRawBits(), buf.getFloat(4 * r).toRawBits(), "${slots[i].name}[$r] written")
+                    }
+                } else {
+                    assertEquals(rows.toLong() * cols, n)
+                    for (r in 0 until rows) {
+                        var maxCode = 0
+                        for (c in 0 until cols) {
+                            val code = Math.rint((file[r * cols + c] / scales[r]).toDouble()).toInt()
+                            assertEquals(code.toFloat(), staged[i][c * rows + r], "${slots[i].name}[$c, $r]")
+                            assertEquals(code.toByte(), b[c * rows + r], "${slots[i].name}[$c, $r] written")
+                            maxCode = maxOf(maxCode, abs(code))
+                        }
+                        assertEquals(127, maxCode, "${slots[i].name}: the largest weight of row $r is code 127")
+                    }
+                    checked++
+                }
+            }
+            assertTrue(checked >= 7 * int8.numLayers, "checked $checked quantized Linears")
+        }
+    }
+
+    /**
+     * The int8 graph computes `(x @ codes) * scales`: with f32 weights it
+     * gives the logits of the unquantized graph fed `codes * scales`, to
+     * f32 rounding. Against transformers (the unquantized model) it differs
+     * by the quantization error, which is reported; a wrong scale moves it.
+     */
+    @Test
+    fun theInt8GraphIsTheGraphOfTheDequantizedWeights() {
+        withCheckpoint { ckpt ->
+            val f32 = tiny.copy(weightDType = io.tlaloc.core.F32)
+            val q32 = f32.copy(weightQuant = WeightQuant.INT8)
+            val staged = HfStagedWeights.stage(ckpt, q32)
+            val sources = HfDecoderGraph.weightSlotSources(q32)
+            val slots = HfDecoderGraph.weightSlots(q32)
+            val dequantized = sources.indices.filter { !sources[it].scale }.map { i ->
+                if (!HfDecoderNames.isQuantized(sources[i].role, q32)) {
+                    staged[i]
+                } else {
+                    val out = slots[i].type.dims.last()
+                    val scales = staged[i + 1]
+                    FloatArray(staged[i].size) { staged[i][it] * scales[it % out] }
+                }
+            }
+            val quantized = run(q32, weights = staged)
+            val reference = run(f32, weights = dequantized)
+            var w = 0.0
+            for ((pos, row) in quantized) {
+                val ref = reference.getValue(pos)
+                val denom = max(1.0, ref.maxOf { abs(it).toDouble() })
+                for (v in row.indices) w = max(w, abs(row[v] - ref[v]) / denom)
+            }
+            assertTrue(w <= tol, "int8 graph vs dequantized weights: worst relative difference $w")
+            val cost = worst(quantized)
+            println("[muse-glimmer tiny] int8 weights: $w from the dequantized graph, $cost from transformers")
+            // The tiny model's weights are spread evenly over their range, the
+            // hardest case for 127 levels per row: a few percent of the largest logit.
+            assertTrue(cost > 0.0 && cost < 0.1, "int8 vs transformers: $cost")
+            // bf16 activations with int8 weights: the default path of a quantized Muse Glimmer.
+            val bf16 = run(int8, weights = HfStagedWeights.stage(ckpt, int8))
+            println("[muse-glimmer tiny] int8 weights, bf16 activations: ${worst(bf16)} from transformers")
+            assertTrue(worst(bf16) < 0.15, "int8 with bf16 activations vs transformers: ${worst(bf16)}")
+            // Control: the scales of the first quantized Linear reversed.
+            val first = sources.indexOfFirst { it.scale }
+            val wrong = staged.toMutableList().also { it[first] = staged[first].reversedArray() }
+            val moved = worst(run(q32, weights = wrong), oracle = quantized.let { m ->
+                List(prompt.size) { p -> m.getValue(p).map { it.toDouble() }.toDoubleArray() }
+            })
+            assertTrue(moved > controlMoves, "reversed scales moved the logits by only $moved")
         }
     }
 }

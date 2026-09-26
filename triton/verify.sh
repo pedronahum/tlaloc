@@ -77,7 +77,9 @@
 #      checkpoint exported with bf16 weights: half the MiB on the device, all
 #      32 ids equal, logits within 6e-3 of the largest (and not within the f32
 #      tolerance of 2e-3), and --perturb must
-#      fail. Without the checkpoint this step is skipped by name.
+#      fail. Then bf16 weights with int8 projections (-PweightQuant=int8):
+#      under 70% of the bf16 MiB, all 32 ids equal (logits not compared),
+#      --perturb must fail. Without the checkpoint this step is skipped by name.
 #   8. optional and opt-in (MUSE_GLIMMER=1), Muse Glimmer: 28 billion text
 #      parameters, 56 GB of bf16 weights on the device. It needs the
 #      meta-models/Muse-Glimmer-30B snapshot the fixtures name, and refuses by
@@ -636,6 +638,45 @@ else
     exit 1
   fi
   grep -c "^FAIL .*logits within" "$LOG.qwen3-bf16.tight" | xargs -I{} echo "  ok   at the f32 tolerance of 2e-3 the bf16 logits fail ({} failing checks)"
+  stop_server
+
+  # The same checkpoint with bf16 weights and the layers' projections as int8
+  # codes with per-output-channel scales (-PweightQuant=int8, opt-in at
+  # export). Quantization changes the logits, so only the ids are checked:
+  # measured, all 32 are the fixture's (and 96% of the argmaxes over 479
+  # wikitext tokens agree with the bf16 model's, triton/quant_checks.py).
+  echo "== qwen3 int8 weights"
+  QI_DIR="${QWEN3_INT8_DIR:-$HERE/build/qwen3-bf16-int8}"
+  if [[ "${QWEN3_REEXPORT:-}" == 1 ]] || ! grep -q '"serving_manifest"' "$QI_DIR/repository/qwen3/config.pbtxt" 2>/dev/null \
+      || ! grep -q ':wbf16:qint8:tiedHead"' "$QI_DIR/artifact/tlaloc-serving.json" 2>/dev/null \
+      || ! batched_by_backend "$QI_DIR/repository/qwen3/config.pbtxt"; then
+    rm -rf "$QI_DIR"
+    mkdir -p "$QI_DIR"
+    (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
+      -PckptDir="$QCKPT" -PoutDir="$QI_DIR/artifact" -PmaxBatch=4 -PweightDType=bf16 -PweightQuant=int8)
+    (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+      -PartifactDir="$QI_DIR/artifact" -PoutDir="$QI_DIR/repository" -PmodelName=qwen3 \
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+  fi
+  export CONTAINER_NAME="$BASE_NAME-qwen3-int8" MODEL_REPOSITORY="$QI_DIR/repository"
+  start_server "$LOG.qwen3-int8" 600
+  INT8_MIB="$(grep -o "model 'qwen3': uploaded 506 weights ([0-9]* MiB)" "$LOG.qwen3-int8" | head -1 | grep -o "([0-9]*" | tr -d '(')"
+  # The 28 x 7 projections at one byte instead of two, 196 scale vectors, and
+  # the embedding table (also the head) and the norms unchanged in bf16.
+  if [[ -z "$INT8_MIB" ]] || (( INT8_MIB * 10 > BF16_MIB * 7 )); then
+    echo "FAIL: int8 weights are ${INT8_MIB:-?} MiB against ${BF16_MIB} MiB in bf16 (506 weights expected)" >&2
+    exit 1
+  fi
+  echo "  ok   weights on the device: $INT8_MIB MiB with int8 projections, $BF16_MIB MiB in bf16"
+  "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+    --model qwen3 --fixture "$QWEN3_FIXTURE" --ids-only --repeat 1
+  if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model qwen3 --fixture "$QWEN3_FIXTURE" --ids-only --repeat 0 --perturb >"$LOG.qwen3-int8.negative" 2>&1; then
+    echo "FAIL: the int8 Qwen3 fixture checks passed with wrong expected ids" >&2
+    cat "$LOG.qwen3-int8.negative" >&2
+    exit 1
+  fi
+  grep -c "^FAIL" "$LOG.qwen3-int8.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   stop_server
 fi
 

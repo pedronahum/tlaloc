@@ -1087,6 +1087,12 @@ object DxirInterpreter {
                         srcDtype == io.tlaloc.core.BF16) &&
                         (dstDtype == io.tlaloc.core.I32 || dstDtype == io.tlaloc.core.I64) ->
                         FloatArray(a.size) { a[it].toInt().toFloat() }
+                    // To int8: truncate toward zero, as StableHLO's convert does for a
+                    // value in range (outside it the result is left undefined there; this
+                    // wraps). Widening int8 is the copy below.
+                    (srcDtype == io.tlaloc.core.F32 || srcDtype == io.tlaloc.core.F64 ||
+                        srcDtype == io.tlaloc.core.BF16) && dstDtype == io.tlaloc.core.I8 ->
+                        FloatArray(a.size) { a[it].toInt().toByte().toFloat() }
                     // §0.4.456 (G1b) — f32→bf16 narrows through the §0.4.455 RNE
                     // helpers and stores the WIDENED forms of the rounded numbers
                     // (the FloatArray convention, see [snapToBf16]). Written

@@ -7,6 +7,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
+import io.tlaloc.core.I8
 import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirOp
@@ -1570,6 +1571,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // precision casts. Null = "not synthesizable here", the same
             // convention Bool uses, surfaced by the caller.
             BF16 -> null
+            I8 -> null // int8 exists for quantized weights in serving graphs, not in grad{} programs.
         }
     }
 
@@ -4315,6 +4317,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             I64 -> "toLong"
             Bool -> return null
             BF16 -> return null // §0.4.455/§0.4.456: no Kotlin bf16 primitive to cast to (frontend refusal is the ratified convention).
+            I8 -> return null
         }
         return srcCls.owner.declarations
             .asSequence()
@@ -4708,6 +4711,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             I64 -> IrConstImpl.long(startOffset, endOffset, ty, if (one) 1L else 0L)
             Bool -> null
             BF16 -> null // §0.4.455: no bf16 primitive; see irConstFor's BF16 arm.
+            I8 -> null
         }
     }
 
@@ -4728,6 +4732,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 // §0.4.456 decided: reverse source does NOT spell bf16 locals as
                 // Float — the readable story is the f32 graph between the casts.
                 BF16 -> return null
+                I8 -> return null
             }
         }
         // Rank-1 F32: use the call-site-harvested IrType (preserves the source-level shape
@@ -5007,6 +5012,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         I64 -> pluginContext.irBuiltIns.longClass
         Bool -> null
         BF16 -> null // §0.4.455: no bf16 primitive class on the JVM (frontend refusal ratified in §0.4.456).
+        I8 -> null
     }
 
     private fun findBinaryOp(opName: String, dxirType: DxirType, context: SynthesisContext): IrSimpleFunctionSymbol? {

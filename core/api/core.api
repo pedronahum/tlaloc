@@ -312,6 +312,15 @@ public final class io/tlaloc/core/I64 : io/tlaloc/core/DType {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/core/I8 : io/tlaloc/core/DType {
+	public static final field INSTANCE Lio/tlaloc/core/I8;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun getSizeBytes ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public abstract interface class io/tlaloc/core/IndexName {
 	public abstract fun getName ()Ljava/lang/String;
 }

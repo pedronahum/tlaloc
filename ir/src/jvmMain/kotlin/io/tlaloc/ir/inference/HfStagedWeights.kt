@@ -2,6 +2,7 @@ package io.tlaloc.ir.inference
 
 import io.tlaloc.core.BF16
 import io.tlaloc.core.F32
+import io.tlaloc.core.I8
 import io.tlaloc.core.floatToBf16Bits
 import io.tlaloc.core.io.JsonException
 import java.io.OutputStream
@@ -48,6 +49,10 @@ import java.io.OutputStream
  * copy would not fit the device) [writeSlot] copies the file's bf16 bytes to
  * the artifact a block at a time, transposing the Linears on the way, so no
  * tensor is ever widened and no JVM array holds more than [BLOCK_BYTES].
+ *
+ * Under [WeightQuant.INT8] a layer's Linear is staged as int8 codes and its
+ * f32 per-output-channel scales, two slots ([quantizeInt8]); the codes are
+ * the one array held whole, one byte per element.
  */
 object HfStagedWeights {
 
@@ -68,10 +73,10 @@ object HfStagedWeights {
                 "checkpoint has ${ckpt.config.numLayers}"
         }
         val slots = HfDecoderGraph.weightSlots(config)
-        val roles = HfDecoderGraph.weightRoles(config)
-        check(slots.size == roles.size) {
-            "HfStagedWeights: ${slots.size} slots vs ${roles.size} roles — " +
-                "HfDecoderGraph.weightSlots and .weightRoles must stay in lockstep"
+        val sources = HfDecoderGraph.weightSlotSources(config)
+        check(slots.size == sources.size) {
+            "HfStagedWeights: ${slots.size} slots vs ${sources.size} sources — " +
+                "HfDecoderGraph.weightSlots and .weightSlotSources must stay in lockstep"
         }
         return slots.indices.map { i -> stageAt(ckpt, config, i) }
     }
@@ -86,13 +91,20 @@ object HfStagedWeights {
      */
     fun stageAt(ckpt: HfCheckpoint, config: HfDecoderConfig, index: Int): FloatArray {
         val slots = HfDecoderGraph.weightSlots(config)
-        val roles = HfDecoderGraph.weightRoles(config)
+        val sources = HfDecoderGraph.weightSlotSources(config)
         require(index in slots.indices) {
             "HfStagedWeights.stageAt: slot $index is outside 0..${slots.size - 1}"
         }
+        val source = sources[index]
+        if (HfDecoderNames.isQuantized(source.role, config)) {
+            // The codes as floats (the interpreter's convention for every
+            // dtype), or the scales.
+            val q = quantizeInt8(ckpt, source.role, config)
+            return if (source.scale) q.scales.copyOf() else FloatArray(q.codes.size) { q.codes[it].toFloat() }
+        }
         return run {
             val i = index
-            val role = roles[i]
+            val role = source.role
             val slot = slots[i]
             if (readsHead(role, config)) ckpt.verifyTiedHead()
             val t = loadFor(ckpt, role, config)
@@ -176,13 +188,18 @@ object HfStagedWeights {
     ): Long {
         require(blockBytes >= 2) { "HfStagedWeights.writeSlot: blockBytes must be >= 2, got $blockBytes" }
         val slots = HfDecoderGraph.weightSlots(config)
-        val roles = HfDecoderGraph.weightRoles(config)
+        val sources = HfDecoderGraph.weightSlotSources(config)
         require(index in slots.indices) {
             "HfStagedWeights.writeSlot: slot $index is outside 0..${slots.size - 1}"
         }
         val slot = slots[index]
-        val role = roles[index]
+        val role = sources[index].role
         when (slot.type.dtype) {
+            I8 -> {
+                val q = quantizeInt8(ckpt, role, config, blockBytes)
+                out.write(q.codes)
+                return q.codes.size.toLong()
+            }
             F32 -> {
                 val data = stageAt(ckpt, config, index)
                 val buf = java.nio.ByteBuffer.allocate(4 * 65536).order(java.nio.ByteOrder.LITTLE_ENDIAN)
@@ -225,8 +242,123 @@ object HfStagedWeights {
             }
             else -> throw JsonException(
                 "HfStagedWeights.writeSlot: slot '${slot.name}' is ${slot.type.dtype}; weights are " +
-                    "staged as F32 or BF16",
+                    "staged as F32, BF16 or (quantized) I8",
             )
+        }
+    }
+
+    /**
+     * A Linear quantized to int8 per output channel ([WeightQuant.INT8]):
+     * [codes] in math layout `[in, out]` (row-major, the file's `[out, in]`
+     * transposed) and one [scales] entry per output channel.
+     */
+    class Int8Linear(val codes: ByteArray, val scales: FloatArray)
+
+    /**
+     * Quantize [role]'s weight as [WeightQuant] describes: per output channel
+     * (a row of the file's `[out, in]`), `scale = max|w| / 127` in f32 (1 for
+     * an all-zero row) and `code = clamp(rint(w / scale), -127, 127)`, with
+     * `w` the checkpoint's value widened to f32.
+     *
+     * The rows are read [blockBytes] at a time, so only the codes (one byte
+     * per element) are held whole. The last result is kept, because the
+     * exporter writes a weight's codes and then its scales as two slots.
+     */
+    fun quantizeInt8(
+        ckpt: HfCheckpoint,
+        role: DecoderWeightRole,
+        config: HfDecoderConfig,
+        blockBytes: Int = BLOCK_BYTES,
+    ): Int8Linear {
+        require(HfDecoderNames.isTransposedLinear(role)) {
+            "HfStagedWeights.quantizeInt8: $role is not a Linear weight"
+        }
+        synchronized(this) {
+            val hit = lastQuantized
+            if (hit != null && hit.first === ckpt && hit.second == role) return hit.third
+        }
+        val e = ckpt.entry(role)
+        val want = HfDecoderNames.expectedDims(role, config)
+        if (e.dims != want.toList()) {
+            throw JsonException(
+                "HfStagedWeights: ${ckpt.resolveName(role)} is ${e.dims} but the config " +
+                    "this graph is being built for says ${want.toList()}",
+            )
+        }
+        val rows = e.dims[0]
+        val cols = e.dims[1]
+        require(rows.toLong() * cols <= Int.MAX_VALUE - 8) {
+            "HfStagedWeights.quantizeInt8: ${ckpt.resolveName(role)} has ${rows.toLong() * cols} " +
+                "elements, more than one array of codes holds"
+        }
+        val codes = ByteArray(rows * cols)
+        val scales = FloatArray(rows)
+        val row = FloatArray(cols)
+        forEachRow(ckpt, role, e.wireDType, rows, cols, blockBytes, row) { r ->
+            var max = 0f
+            for (c in 0 until cols) max = maxOf(max, kotlin.math.abs(row[c]))
+            val scale = if (max == 0f) 1f else max / 127f
+            scales[r] = scale
+            for (c in 0 until cols) {
+                val q = Math.rint((row[c] / scale).toDouble()).coerceIn(-127.0, 127.0).toInt()
+                codes[c * rows + r] = q.toByte()
+            }
+        }
+        val result = Int8Linear(codes, scales)
+        synchronized(this) { lastQuantized = Triple(ckpt, role, result) }
+        return result
+    }
+
+    private var lastQuantized: Triple<HfCheckpoint, DecoderWeightRole, Int8Linear>? = null
+
+    /**
+     * Call [body] with each row of a `[rows, cols]` tensor widened to f32 in
+     * [row], reading whole rows [blockBytes] at a time. BF16 and F32 files
+     * are read in place; any other wire dtype is loaded whole.
+     */
+    private inline fun forEachRow(
+        ckpt: HfCheckpoint,
+        role: DecoderWeightRole,
+        wire: String,
+        rows: Int,
+        cols: Int,
+        blockBytes: Int,
+        row: FloatArray,
+        body: (Int) -> Unit,
+    ) {
+        val width = when (wire) {
+            "BF16" -> 2
+            "F32" -> 4
+            else -> 0
+        }
+        if (width == 0) {
+            val all = ckpt.load(role).toF32Array()
+            for (r in 0 until rows) {
+                System.arraycopy(all, r * cols, row, 0, cols)
+                body(r)
+            }
+            return
+        }
+        val chunkRows = maxOf(1, minOf(rows.toLong(), blockBytes / (width.toLong() * cols)).toInt())
+        val chunk = ByteArray(width * chunkRows * cols)
+        val buf = java.nio.ByteBuffer.wrap(chunk).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        var r0 = 0
+        while (r0 < rows) {
+            val rc = minOf(chunkRows, rows - r0)
+            ckpt.readBytes(role, width.toLong() * r0 * cols, chunk, 0, width * rc * cols)
+            for (r in 0 until rc) {
+                val base = width * r * cols
+                if (width == 2) {
+                    for (c in 0 until cols) {
+                        val bits = (buf.getShort(base + 2 * c).toInt() and 0xFFFF) shl 16
+                        row[c] = Float.fromBits(bits)
+                    }
+                } else {
+                    for (c in 0 until cols) row[c] = buf.getFloat(base + 4 * c)
+                }
+                body(r0 + r)
+            }
+            r0 += rc
         }
     }
 

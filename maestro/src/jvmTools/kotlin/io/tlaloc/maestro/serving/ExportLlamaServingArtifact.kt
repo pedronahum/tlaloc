@@ -2,6 +2,7 @@ package io.tlaloc.maestro.serving
 
 import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.HfCheckpoint
+import io.tlaloc.ir.inference.WeightQuant
 import java.nio.file.Path
 
 /**
@@ -26,9 +27,13 @@ import java.nio.file.Path
  * every projection then rounds its input to bf16 and sums in f32),
  * `contextLadder` (comma-separated context buckets, e.g. `512,2048,8192`;
  * default the one context `maxContext`; when given, `maxContext` may be
- * blank and otherwise must equal its largest) and `prefillChunk` (default
+ * blank and otherwise must equal its largest), `prefillChunk` (default
  * none: a prefill entry takes its whole context; with it, at most that many
- * tokens per sequence per call, see [HfServingExport.specs]).
+ * tokens per sequence per call, see [HfServingExport.specs]) and
+ * `weightQuant` (`none`, the default, or `int8`: the layers' Linear weights
+ * as int8 codes with one f32 scale per output channel, see
+ * [io.tlaloc.ir.inference.WeightQuant]; it changes the model's numerics and
+ * is never on by default).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -39,7 +44,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -75,11 +80,14 @@ fun main(args: Array<String>) {
         else -> throw IllegalArgumentException("weightDType must be f32 or bf16, got '$w'")
     }
 
+    val weightQuant = args.getOrNull(14)?.takeIf { it.isNotBlank() }
+        ?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE
+
     HfCheckpoint.open(ckptDir).use { ckpt ->
         val layers = arg(2, ckpt.config.numLayers)
         val config = ckpt.config.copy(numLayers = layers).let {
             if (weightDType == null) it else it.copy(weightDType = weightDType)
-        }
+        }.copy(weightQuant = weightQuant)
         val single = DecodeBucketPolicy(
             maxBatch = maxBatch, maxContext = maxContext,
             blockSize = blockSize, minContext = maxContext,
@@ -96,7 +104,10 @@ fun main(args: Array<String>) {
                     "e.g. ${unread.take(3).joinToString()}",
             )
         }
-        println("weights staged as ${config.weightDType}")
+        println(
+            "weights staged as ${config.weightDType}" +
+                if (weightQuant == WeightQuant.NONE) "" else ", layer projections quantized to ${weightQuant.tag}",
+        )
         val t0 = System.nanoTime()
         val manifest = HfServingExport.export(
             ckpt = ckpt, dir = outDir, config = config, policy = policy,

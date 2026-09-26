@@ -7,6 +7,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
+import io.tlaloc.core.I8
 import io.tlaloc.ir.DxirBlock
 import io.tlaloc.ir.DxirBlockArg
 import io.tlaloc.ir.DxirBuilder
@@ -438,6 +439,7 @@ object DxirCanonical {
             // (the reverse-transform CSE keys include result types, so the
             // spelling must parse back); bf16 CONSTANTS stay refused below.
             "bf16" -> BF16
+            "i8" -> I8
             "i32" -> I32
             "i64" -> I64
             "bool" -> Bool
@@ -451,6 +453,7 @@ object DxirCanonical {
     private fun valueHex(value: Any, type: DxirType): String = when (type.dtype) {
         F32 -> (value as Float).toRawBits().toUInt().toString(16).padStart(8, '0')
         F64 -> (value as Double).toRawBits().toULong().toString(16).padStart(16, '0')
+        I8 -> (value as Int).toUInt().toString(16).padStart(8, '0')
         I32 -> (value as Int).toUInt().toString(16).padStart(8, '0')
         I64 -> (value as Long).toULong().toString(16).padStart(16, '0')
         Bool -> if (value as Boolean) "1" else "0"
@@ -467,6 +470,7 @@ object DxirCanonical {
     private fun parseValue(s: String, type: DxirType): Any = when (type.dtype) {
         F32 -> Float.fromBits(s.toUInt(16).toInt())
         F64 -> Double.fromBits(s.toULong(16).toLong())
+        I8 -> s.toUInt(16).toInt()
         I32 -> s.toUInt(16).toInt()
         I64 -> s.toULong(16).toLong()
         Bool -> s == "1"

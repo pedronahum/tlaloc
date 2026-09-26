@@ -30,6 +30,16 @@ data object BF16 : DType {
     override val name = "bf16"
 }
 
+/**
+ * Signed 8-bit integer. Used for weight-only quantized projections: the
+ * weights are stored as int8 codes and widened in the graph (exactly, every
+ * code is representable in bf16 and f32) before the matmul.
+ */
+data object I8 : DType {
+    override val sizeBytes = 1
+    override val name = "i8"
+}
+
 data object I32 : DType {
     override val sizeBytes = 4
     override val name = "i32"

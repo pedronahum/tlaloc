@@ -7,6 +7,7 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
+import io.tlaloc.core.I8
 import io.tlaloc.ir.DxirType
 
 /**
@@ -35,6 +36,7 @@ fun DxirType.toMlir(): String {
 internal fun mlirElementType(dtype: DType): String = when (dtype) {
     is F32 -> "f32"
     is F64 -> "f64"
+    is I8 -> "i8"
     is I32 -> "i32"
     is I64 -> "i64"
     is Bool -> "i1"
@@ -90,6 +92,7 @@ internal fun denseIntFromArray(values: FloatArray, dims: List<Int>): String {
 internal fun negInfLiteral(dtype: DType): String = when (dtype) {
     is F32 -> "0xFF800000"
     is F64 -> "0xFFF0000000000000"
+    is I8 -> Byte.MIN_VALUE.toString()
     is I32 -> Int.MIN_VALUE.toString()
     is I64 -> Long.MIN_VALUE.toString()
     is Bool -> "false"
@@ -106,6 +109,7 @@ internal fun negInfLiteral(dtype: DType): String = when (dtype) {
 internal fun posInfLiteral(dtype: DType): String = when (dtype) {
     is F32 -> "0x7F800000"
     is F64 -> "0x7FF0000000000000"
+    is I8 -> Byte.MAX_VALUE.toString()
     is I32 -> Int.MAX_VALUE.toString()
     is I64 -> Long.MAX_VALUE.toString()
     is Bool -> "true"

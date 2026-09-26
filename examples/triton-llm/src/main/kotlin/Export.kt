@@ -1,5 +1,6 @@
 import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.HfCheckpoint
+import io.tlaloc.ir.inference.WeightQuant
 import io.tlaloc.maestro.serving.HfServingExport
 import io.tlaloc.maestro.serving.TritonModelRepository
 import java.nio.file.Files
@@ -26,7 +27,12 @@ import kotlin.io.path.isDirectory
  * server that runs the result is Triton with `libtriton_tlaloc.so`, a C++
  * backend; there is no JVM in it.
  *
- *     run --args="--model qwen3 --checkpoint <dir> --out <dir>"
+ *     run --args="--model qwen3 --checkpoint <dir> --out <dir> [--quant int8]"
+ *
+ * `--quant int8` stores the layers' projection weights as int8 with one
+ * scale per output channel: half the bytes of bf16, so a decode step that
+ * reads every weight is faster, and the outputs are close to the original
+ * model's but not identical. The default is `none`.
  */
 fun main(args: Array<String>) {
     val opts = Opts.parse(args)
@@ -40,10 +46,11 @@ fun main(args: Array<String>) {
     Files.createDirectories(opts.out)
 
     HfCheckpoint.open(opts.checkpoint).use { ckpt ->
-        val config = ckpt.config
+        val config = ckpt.config.copy(weightQuant = opts.quant)
         println("checkpoint  ${opts.checkpoint}")
         println("family      ${config.family.id}, ${config.numLayers} layers, hidden ${config.hiddenSize}, " +
-            "vocab ${config.vocabSize}, weights as ${config.weightDType.name}")
+            "vocab ${config.vocabSize}, weights as ${config.weightDType.name}" +
+            if (opts.quant == WeightQuant.NONE) "" else ", layer projections as ${opts.quant.tag}")
 
         // Tensors the text decoder does not read (a multimodal checkpoint's
         // vision encoder) are listed rather than dropped silently.
@@ -72,6 +79,7 @@ fun main(args: Array<String>) {
         val manifest = HfServingExport.export(
             ckpt = ckpt,
             dir = artifactDir,
+            config = config,
             policy = policy,
             prefill = true,
             // Pages for one sequence of the largest context, plus the padding page.
@@ -113,12 +121,13 @@ private val MODELS = mapOf(
     "muse-glimmer" to ModelShape(maxBatch = 1, contexts = listOf(256, 2048, 8192), prefillChunk = 512),
 )
 
-private class Opts(val model: String, val checkpoint: Path, val out: Path) {
+private class Opts(val model: String, val checkpoint: Path, val out: Path, val quant: WeightQuant) {
     companion object {
         fun parse(args: Array<String>): Opts {
             var model = "qwen3"
             var checkpoint: Path? = null
             var out: Path? = null
+            var quant = WeightQuant.NONE
             var i = 0
             while (i < args.size) {
                 val a = args[i]
@@ -127,13 +136,15 @@ private class Opts(val model: String, val checkpoint: Path, val out: Path) {
                     "--model" -> model = next()
                     "--checkpoint" -> checkpoint = Path.of(next())
                     "--out" -> out = Path.of(next())
-                    else -> error("unknown argument '$a'. usage: --model NAME --checkpoint DIR --out DIR")
+                    "--quant" -> quant = WeightQuant.parse(next())
+                    else -> error("unknown argument '$a'. usage: --model NAME --checkpoint DIR --out DIR [--quant int8]")
                 }
                 i++
             }
             requireNotNull(checkpoint) { "--checkpoint is required (run.sh finds it in the HuggingFace cache)" }
             require(checkpoint.isDirectory()) { "--checkpoint $checkpoint is not a directory" }
-            return Opts(model, checkpoint, out ?: Path.of("build", model))
+            val dir = if (quant == WeightQuant.NONE) model else "$model-${quant.tag}"
+            return Opts(model, checkpoint, out ?: Path.of("build", dir), quant)
         }
     }
 }

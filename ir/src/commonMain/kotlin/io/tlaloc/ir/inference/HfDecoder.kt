@@ -570,6 +570,13 @@ data class HfDecoderConfig(
      * kept as the control the direct head is compared with.
      */
     val tiedHeadCopy: Boolean = false,
+    /**
+     * Weight-only quantization of the layers' Linear weights, [WeightQuant.NONE]
+     * by default. With [WeightQuant.INT8] they are staged as int8 codes plus
+     * one f32 scale per output channel (see [WeightQuant] and
+     * [HfDecoderGraph.weightSlots]); everything else keeps [weightDType].
+     */
+    val weightQuant: WeightQuant = WeightQuant.NONE,
 ) {
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {
@@ -993,4 +1000,13 @@ object HfDecoderNames {
         DecoderWeightRole.LmHead -> true
         is DecoderWeightRole.Layer -> !role.part.isNorm
     }
+
+    /**
+     * True when [role] is staged quantized under [config]'s
+     * [HfDecoderConfig.weightQuant]: a layer's Linear weight, and only when
+     * quantization is on. The embedding table, the norms and the head are
+     * never quantized.
+     */
+    fun isQuantized(role: DecoderWeightRole, config: HfDecoderConfig): Boolean =
+        config.weightQuant != WeightQuant.NONE && role is DecoderWeightRole.Layer && !role.part.isNorm
 }
