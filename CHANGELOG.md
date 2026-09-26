@@ -13,6 +13,16 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **`triton/profile.sh`: where serving time goes.** It times decode steps
+  and prefill calls of a sequence-mode model through Triton, after checking
+  that the GPU is idle (it waits, or labels the numbers contended), and with
+  `MODE=nsys XLA_DUMP=1` captures each workload with Nsight Systems;
+  `profile_report.py` ties each kernel to its HLO instruction and sums the
+  time by model component. On the GB10 with the GPU idle, a Muse Glimmer
+  decode step takes 268 ms (243 ms of kernels against a 228 ms bandwidth
+  floor, and a 20.5 ms queue delay), and a 512-token prefill call takes
+  0.72 s at context 2,048 and 4.6 s at 32,768, where 88% of it is attention
+  over the whole bucket (`docs/SERVING_ARCHITECTURE.md`, section 6).
 - **Prefill in chunks, and context ladders from the export tool.**
   `HfServingExport.export(prefillChunk = N)` (`-PprefillChunk=N`) gives each
   prefill entry at most `N` tokens per sequence, so a long context does not

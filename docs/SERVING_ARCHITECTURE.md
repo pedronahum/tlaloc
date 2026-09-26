@@ -388,3 +388,114 @@ is the system RAM), driver 580.126.09.
 The measured timings, and what they include, are in
 [triton/README.md](../triton/README.md#measured-on-the-gb10) and
 [SERVING_RUNBOOK.md](SERVING_RUNBOOK.md).
+
+## 6. Where the time goes
+
+Measured through Triton on the GB10 with `triton/profile.sh`. The GPU was
+otherwise idle: nvidia-smi read a median of 0% over 10 s before loading and
+again before timing, and no other container was running. The context table
+in section 3 was measured while another process kept the GPU busy. Times are
+per request of one sequence over gRPC, medians of three runs. The kernel
+breakdown comes from one Nsight Systems capture per workload (the server
+under `nsys launch`), with each kernel tied to its HLO instruction through
+XLA's dump (`profile_report.py`).
+
+What the machine can do, measured with a CUDA program on the same GPU: a
+kernel streams memory at 233 GB/s (the nominal LPDDR5X rate is 273 GB/s),
+and cuBLAS multiplies 512x6656 by 6656x19968 at 70 TFLOPS in bf16 on tensor
+cores, 33 TFLOPS in TF32 and 19 TFLOPS in plain f32.
+
+### Decode, one sequence
+
+A step reads every weight once, except an untied embedding table, of which
+it reads one row. The floor is those bytes at 273 GB/s and at 233 GB/s.
+
+| Model, weights | Bytes a step reads | Floor 273 / 233 GB/s | Kernels | Server | Client |
+|---|---|---|---|---|---|
+| TinyLlama-1.1B, f32 | 4.14 GB | 15.2 / 17.8 ms | 18.3 ms (444 kernels) | 20.5 ms | 22.9 ms |
+| Qwen3-0.6B, f32 | 2.38 GB | 8.7 / 10.2 ms | 11.4 ms (621) | 13.9 ms | 17.1 ms |
+| Qwen3-0.6B, bf16 | 1.19 GB | 4.4 / 5.1 ms | 6.7 ms (648) | 8.6 ms | 11.3 ms |
+| Muse Glimmer, bf16, context 512 | 53.0 GB | 194 / 228 ms | 243 ms (1,569) | 246 ms | 268 ms |
+| Muse Glimmer, bf16, context 8,192 | 53.0 GB | 194 / 228 ms | 251 ms (1,621) | 255 ms | 277 ms |
+
+"Server" is Triton's compute time for the request: the backend builds the
+inputs, runs the program and copies the logits back. "Client" adds the
+queue and the gRPC round trip.
+
+- Each step is one CUDA graph with no gaps between its kernels. The kernels
+  that read weights take 88% (Qwen3 bf16) to 99% (Muse Glimmer) of kernel
+  time. Muse Glimmer's MLP and head run at 217 to 237 GB/s and its attention
+  projections at 176 to 222; TinyLlama's projections at 227 to 236 and
+  Qwen3's f32 ones at 213 to 231. These are at or near the 233 GB/s
+  ceiling. Qwen3's bf16 projections are not: its query projection runs at
+  132 GB/s.
+- The bf16 weights are read as bf16. In a decode step the convert to f32 is
+  inside the matmul kernel (a Triton gemm fusion), and no weight is
+  converted into a buffer of its own.
+- Outside the kernels, per step: the sequence batcher's queue delay (1.2 ms
+  for TinyLlama and Qwen3, whose configs wait up to 1 ms; 20.5 ms for Muse
+  Glimmer, whose export waits up to 20 ms so that concurrent sequences
+  batch). Then 0.8 to 3.7 ms from the first input copy to the first kernel.
+  The backend uploads five to seven small integer inputs one at a time, and
+  `cuGraphLaunch` alone takes 0.5 ms for Qwen3's graph and 1.35 ms for
+  Muse Glimmer's. Last, 0.9 to 1.7 ms from the last kernel to the logits
+  copy, because the backend waits for the execution to finish before it
+  asks for the copy (these phases were read under the profiler).
+- The attention of a step (page gathers, scores, softmax) is under 1% of
+  kernel time at context 512 and 3% at 8,192 for Muse Glimmer. At 8,192 each
+  sliding layer gathers all 512 pages of its block table, 8 MiB of f32 KV,
+  although its ring holds at most 160 pages.
+
+### Muse Glimmer prefill, one 512-token call
+
+| Context bucket | Client | Server | Kernels | Attention (scores, softmax, P.V) | Weight matmuls |
+|---|---|---|---|---|---|
+| 2,048 | 722 ms | 699 ms | 706 ms | 214 ms (30%) | 465 ms |
+| 8,192 | 1,301 ms | 1,277 ms | 1,210 ms | 716 ms (59%) | 461 ms |
+| 32,768 | 4,598 ms | 4,574 ms | 4,383 ms | 3,872 ms (88%) | 462 ms |
+
+At 32,768:
+
+| Component | Time | Share | What it is |
+|---|---|---|---|
+| Score and P.V dots | 2,000 ms | 46% | cuBLAS, f32 with `HIGHEST` precision (no tensor cores), 7 TFLOPS |
+| Softmax and mask passes | 1,872 ms | 43% | three to four passes over a 2 GiB f32 score tensor per layer, at 243 GB/s |
+| MLP (gate, up, down) | 360 ms | 8% | bf16 x bf16 into f32 on tensor cores, 56 to 61 TFLOPS |
+| Attention projections | 91 ms | 2% | q, k, v fused at 36 TFLOPS; the gate and the output projection at 63 to 67 |
+| The head, one row | 12 ms | 0.3% | 2.7 GB at 231 GB/s |
+| Everything else | 48 ms | 1% | norms, RoPE, KV writes |
+
+- Every layer, sliding or full, materializes a score tensor
+  `f32[2, 8192, 32768]` (2 GiB) and a probability tensor of the same size,
+  over every position of the bucket. The window is applied only as a mask on
+  it, so a sliding layer does the work of a full one. XLA reports 4,125 MiB
+  of temporary memory for this entry.
+- The call costs the same wherever the sequence is in the bucket. A call at
+  positions 8,704 to 9,215 scores 32,768 positions.
+- The weight matmuls take about 460 ms at every bucket, at 80 to 95% of the
+  bf16 tensor-core rate for the MLP and the gate and output projections.
+- The attention dots read f32 K and V from f32 KV pools. Those are the only
+  matmuls in the model that run in f32.
+
+### What would make it faster (estimates, not started ⬜)
+
+- Decode, every model: send a request's logits copy with the execution
+  instead of after it (0.9 to 1.7 ms a step), upload the integer inputs as
+  one buffer (up to 2 ms for Muse Glimmer), and a queue delay that does not
+  make a lone sequence wait (20.5 ms a token for Muse Glimmer, 1.2 ms for
+  the others). Muse Glimmer would go from 268 ms to about 247 ms a token,
+  Qwen3-0.6B from 17.1 to about 14.5 ms (f32) and from 11.3 to about 8.7 ms
+  (bf16).
+- Prefill: a sliding layer attends over its ring (at most 2,560 positions
+  for a 512-token call) instead of the bucket. That removes about 12/13 of
+  the attention work of 39 of the 52 layers, taking a call at 32,768 from
+  4.4 s to about 1.7 s. On top of that, attention whose score and P.V dots
+  run on tensor cores and whose softmax is not materialized (running
+  max and sum over blocks of keys, stopping at the sequence's length) would
+  take the full layers from about 75 ms to a few ms each: about 0.6 to
+  0.8 s a call, and a 32,688-token prompt (64 calls) in about 35 to 50 s
+  instead of 230 s. The same ring-sized table removes the bucket-wide page gather from
+  decode.
+- Decode is at the memory ceiling, so only fewer bytes make it faster:
+  8-bit weights (opt in, never the default) would roughly halve Muse
+  Glimmer's 53 GB and its step to about 125 to 135 ms.

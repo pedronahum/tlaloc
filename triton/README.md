@@ -64,6 +64,10 @@ triton/
   generate_client.py    greedy decoding from text against a sequence-mode model
   sequence_checks.py    the TinyLlama sequence-mode checks verify.sh runs
   fixture_checks.py     greedy decoding against a HuggingFace fixture (the Qwen3 checks)
+  context_bench.py      prefill and decode timings of a sequence-mode model at several contexts
+  profile.sh            times decode steps and prefill calls, optionally under Nsight Systems
+  profile_client.py     the client half of profile.sh
+  profile_report.py     summarises a capture: executions, kernels by model component
 ```
 
 `backends/` (the built `.so`), `pjrt/` (the downloaded plugin) and `build/`
@@ -772,7 +776,49 @@ call takes about 0.55 s at context 512 and about 4.5 s at 32,768, because
 every call scores its tokens against every position of its entry's context,
 the sliding layers' included. Under a PJRT memory fraction of 0.55 the
 machine peaked at 87 to 90 GiB in use during these runs, and at 96 GiB in
-the `verify.sh` run.
+the `verify.sh` run. Those runs shared the GPU with another process; the
+numbers below did not.
+
+### Profiling
+
+`profile.sh` serves one model on ports 8020 to 8022 and times workloads on
+it: `decode:PREFIX:STEPS` (single-token steps after a PREFIX-token prompt)
+and `prefill:PREFIX:CHUNKS` (512-token requests, each one prefill call at
+the bucket that holds it). It first checks that the GPU is idle (nvidia-smi
+sampled for 10 s, before loading and again before timing). If the GPU is
+busy it waits up to 45 minutes, then labels every number contended. It
+reports the client's time per request (median of three runs) with Triton's
+compute and queue time for it:
+
+```bash
+TRITON_CLIENT_PYTHON=/path/to/venv/bin/python MAX_ID=200000 REFUSED=200091,200092 \
+  triton/profile.sh triton/build/muse-glimmer muse decode:400:16 prefill:8704:3
+```
+
+With `MODE=nsys XLA_DUMP=1` the server runs under the Triton container's own
+`nsys launch`, each workload's first run is captured, and XLA writes its
+optimized HLO. `profile_report.py` then ties every kernel to the HLO
+instruction that launched it and sums kernel time by model component (the
+weight each matmul reads, KV writes and gathers, attention dots, softmax),
+with the bytes and FLOPs behind each. It also splits a step into host time,
+input copies and launch, kernels, and the wait for the logits copy, and
+lists each dot's operand types and the largest intermediate buffers.
+
+Measured with it on an idle GPU (gRPC, one sequence, medians of three runs):
+
+| | Client | Triton compute | Queue |
+|---|---|---|---|
+| TinyLlama-1.1B decode step (f32) | 22.9 ms | 20.5 ms | 1.2 ms |
+| Qwen3-0.6B decode step (f32) | 17.1 ms | 13.9 ms | 1.2 ms |
+| Qwen3-0.6B decode step (bf16) | 11.3 ms | 8.6 ms | 1.2 ms |
+| Muse Glimmer decode step, context 512 | 268 ms | 246 ms | 20.5 ms |
+| Muse Glimmer decode step, context 8,192 | 277 ms | 255 ms | 20.6 ms |
+| Muse Glimmer 512-token prefill call, context 2,048 | 722 ms | 699 ms | 20.5 ms |
+| same, context 8,192 | 1,301 ms | 1,277 ms | 20.6 ms |
+| same, context 32,768 | 4,598 ms | 4,574 ms | 20.4 ms |
+
+Where that time goes, kernel by kernel, is in
+[SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md#6-where-the-time-goes).
 
 ## Model configuration
 
