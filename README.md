@@ -2,61 +2,30 @@
 
 # Tlaloc
 
-**Autodiff for Kotlin — compiled, typed, and readable.**
+**Compile-time automatic differentiation and GPU serving for Kotlin**
 
-[Quickstart](#quickstart) · [Install](#install) · [Examples](examples/) · [Maturity](#maturity) · [Docs](#documentation) · [License](#license)
+[![build](https://github.com/pedronahum/tlaloc/actions/workflows/build.yml/badge.svg)](https://github.com/pedronahum/tlaloc/actions/workflows/build.yml)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.pedronahum/tlaloc-core)](https://central.sonatype.com/namespace/io.github.pedronahum)
+[![javadoc](https://javadoc.io/badge2/io.github.pedronahum/tlaloc-core-jvm/javadoc.svg)](https://javadoc.io/doc/io.github.pedronahum/tlaloc-core-jvm)
+
+[**Transformations**](#transformations)
+| [**Training**](#training)
+| [**Serving**](#serving)
+| [**Install**](#installation)
+| [**Examples**](examples/)
+| [**Changelog**](CHANGELOG.md)
+| [**Docs**](#documentation)
 
 </div>
 
----
+## What is Tlaloc?
 
-Tlaloc differentiates ordinary Kotlin functions at compile time. A K2 compiler
-plugin rewrites `grad { }` into gradient code in your bytecode, and lowers it to
-[StableHLO] to run on GPU through [PJRT] or [IREE].
-
-There is no tape, no `requires_grad`, and no framework object in your types.
-`grad { f }` gives back a plain Kotlin function.
-
-```kotlin
-val g = grad { a: DTensor<Rank2<Sym, Sym>, F32> -> (a matmul a).sum().toFloat() }
-```
-
-Four things follow, and they are the reasons to look at Tlaloc rather than JAX or
-PyTorch:
-
-- **Gradients are code, not a runtime trace.** The derivative is synthesized into
-  your bytecode during compilation.
-- **Gradients are code you can read.** One compiler flag prints the derivative as
-  Kotlin source. That source compiles, runs without the plugin, and is
-  bit-identical to what the compiler produced.
-- **Shape bugs are compile errors.** Rank, dtype and *axis names* live in the
-  Kotlin type system.
-- **Deployment is an artifact, not a runtime.** A compiled model is a directory of
-  StableHLO. Serving it needs a PJRT plugin `.so` and a driver — no JVM, no Python
-  framework, nothing of Tlaloc in the process.
-
-> **Alpha — `0.1.0-alpha02`.** The automated suite includes live GPU runs on an
-> NVIDIA GB10 ([CAPABILITIES.md](docs/CAPABILITIES.md) has the count and what each
-> test pins). Published on Maven Central as `io.github.pedronahum:tlaloc-*`.
-> APIs change without deprecation cycles
-> ([COMPATIBILITY.md](docs/COMPATIBILITY.md)). [Maturity](#maturity) says what runs
-> where.
-
-[StableHLO]: https://openxla.org/stablehlo
-[PJRT]: https://openxla.org/xla/pjrt
-[IREE]: https://iree.dev
-
----
-
-## Quickstart
-
-JDK 25 to build, Kotlin 2.4.20. No GPU required.
-
-```bash
-git clone https://github.com/pedronahum/tlaloc && cd tlaloc
-./gradlew publishToMavenLocal -x test
-./gradlew -p examples/quickstart run
-```
+Tlaloc is a Kotlin library for differentiable array programs. A K2 compiler
+plugin turns `grad { }` into gradient code at compile time. Tensors carry their
+rank, dtype and axis names in the Kotlin type. Programs lower to
+[StableHLO](https://openxla.org/stablehlo) and run on NVIDIA GPUs through
+[PJRT](https://openxla.org/xla/pjrt) or [IREE](https://iree.dev), or on the CPU
+through a reference interpreter.
 
 ```kotlin
 import io.tlaloc.autograd.grad
@@ -72,73 +41,104 @@ fun main() {
 }
 ```
 
-Call `g` in a hot loop and nothing allocates a tape, because there is no tape.
+`grad { f }` returns a plain Kotlin function. There is no tape and no runtime
+tracing. A model compiled for serving is a directory of StableHLO plus weights;
+serving it needs a PJRT plugin and a GPU driver, not a JVM.
 
----
+This is an alpha, `0.1.0-alpha02`. APIs can change between alphas without a
+deprecation cycle ([COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
-## What is different
+### Contents
+
+* [Transformations](#transformations)
+* [Typed tensors](#typed-tensors)
+* [Training](#training)
+* [Serving](#serving)
+* [Supported platforms](#supported-platforms)
+* [Installation](#installation)
+* [Sharp edges](#sharp-edges)
+* [Examples](#examples)
+* [Documentation](#documentation)
+
+## Transformations
+
+Each transformation takes a lambda and returns a function. The compiler plugin
+builds the derivative when your code compiles.
+
+### Reverse mode: `grad`
+
+```kotlin
+val df = grad { x: Float -> x * x * x }
+df(2f)                                    // 12.0
+
+val dfdxy = grad2 { x: Float, y: Float -> x * y + x }
+```
+
+`grad2` and `grad3` take two and three arguments. `valueAndGrad` returns the
+value too.
+
+### Forward mode and higher order
+
+```kotlin
+val f   = jvp { x: Float -> x * x * x }
+f(2f, 1f)                                 // 12.0, the directional derivative
+
+val j = jacobian { x: DTensor<Rank1<Sym>, F32> -> x * x }                   // diag(2x)
+val h = hessian  { x: DTensor<Rank1<Sym>, F32> -> (x * x).sum().toFloat() } // 2·I
+```
+
+`vjp` and `jacobianReverse` are also available, and the transformations nest.
+
+### Loops, branches and custom rules
+
+`if`, `when` and `for` loops inside the lambda are differentiated.
+[`examples/differentiable-physics`](examples/differentiable-physics/)
+differentiates a 38-step Euler integrator. `customVjp`, `customJvp` and
+`customVjpJvp` supply your own derivative for a function.
+
+The lambda can use values declared outside it. Compile-time constants are
+folded in; other values become parameters of the generated function. A lambda
+the plugin cannot differentiate is a compile error that names the reason.
 
 ### Read the derivative
 
 ```kotlin
 tlaloc {
     dumpGradSource.set(true)                                   // print it
-    dumpGradSourceDir.set(layout.buildDirectory.dir("grads"))  // one .kt per lambda, in grads/main
+    dumpGradSourceDir.set(layout.buildDirectory.dir("grads"))  // one .kt per lambda
 }
 ```
 
-For `f(x) = x·σ(x) / √(1 + log(1 + eˣ))` that writes:
+The plugin prints the derivative as Kotlin source. That source compiles without
+the plugin and returns the same bits as the compiled gradient.
+[`examples/readable-gradients`](examples/readable-gradients/) checks this at 7
+points. → [READABLE_REVERSE.md](docs/READABLE_REVERSE.md)
 
-```kotlin
-fun grad_body_grad(x: DTensor<ScalarShape, F32>): DTensor<ScalarShape, F32> {
-    val v1  = x.sigmoid()      // %1  = SIGMOID(%0)
-    val v2  = (x * v1)         // %2  = MUL(%0, %1)
-    ...
-    val v32 = (v26 + v31)      // %32 = ADD(%26, %31)
-    return v32
-}
-```
-
-Every line is a real `io.tlaloc.core` call, so the file compiles and runs on its
-own. [`examples/readable-gradients`](examples/readable-gradients/) recompiles it in
-a separate source set and checks it against the compiled gradient: raw-bit
-identical at all 7 test points. → [READABLE_REVERSE.md](docs/READABLE_REVERSE.md)
-
-### Axis names the type checker enforces
+## Typed tensors
 
 ```kotlin
 val activations: DTensor<Rank2<Named<Batch, Sym>, Named<SeqLen, Sym>>, F32> = ...
 val weights:     DTensor<Rank2<Named<SeqLen, Sym>, Named<Hidden, Sym>>, F32> = ...
 
-val hidden = activations contract weights   // OK: they share SeqLen
+val hidden = activations contract weights   // compiles: both have SeqLen
 ```
 
-Swap in a `Hidden × Hidden` matrix and the call does not resolve. The plugin adds
-`NAMED_INDEX_MISMATCH`, `TENSOR_SHAPE_MISMATCH` and `NOT_DIFFERENTIABLE` on top,
-reported at the offending call's own file, line and column.
+With a `Hidden × Hidden` weight the call does not compile. Shape and
+differentiability errors are reported at the call's file, line and column.
 → [`examples/named-indices`](examples/named-indices/)
 
-### Differentiate through a loop
+| | |
+|---|---|
+| dtypes | F32, F64, I32, BF16 (I8 for quantized serving weights) |
+| Ops | elementwise, broadcasting, reductions, shape ops, matmul, conv2d, pooling, softmax, embedding, losses, batch norm |
+| Special functions | `lgamma`, `digamma`, `polygamma`, `integral` |
+| Random numbers | stateless threefry-2x32, bit-exact with JAX |
+| Sparse | rank-2 CSR, sparse × dense matmul under `grad` (CPU only) |
 
-Control flow inside `grad { }` is differentiated, not unrolled by hand. Coarsening
-follows Shen et al., *Coarsening Optimization for Differentiable Programming*
-([OOPSLA 2021][phi]), with a closed-form solver behind it.
-[`examples/differentiable-physics`](examples/differentiable-physics/) puts a
-38-step Euler integrator in a `valueAndGrad2 { }` and gets an 823-operation derivative of
-the whole simulator.
+## Training
 
-Forward mode is `jvp` / `jvp2`. `vjp`, `jacobian`, `jacobianReverse` and `hessian`
-are there and nest. Custom rules go in with `customVjp`, `customJvp`,
-`customVjpJvp`. A lambda may reference values declared outside it — compile-time
-constants are folded, runtime values become bound parameters — and a body the
-plugin cannot lower is a build error carrying the reason.
-
-[phi]: https://doi.org/10.1145/3485507
-
-### Train, checkpoint, serve
-
-`:nn` is functional: layers are immutable, a training step returns a new model,
-optimizers are pure `(params, grads, state) → (params', state')`.
+`:nn` has immutable layers and pure optimizers: a training step returns a new
+model and a new optimizer state.
 
 ```kotlin
 val keys = RandomKey.fromSeed(7).split(2)
@@ -153,62 +153,74 @@ val optimizer = Adam(learningRate = 0.02f)
 var model = model0
 var state = optimizer.initialState()
 repeat(60) {
-    val out = step.run(model, listOf(x))   // loss and gradients, on the host
+    val out = step.run(model, listOf(x))   // loss and gradients
     val (nextModel, nextState) = optimizer.step(model, out.gradients, state)
     model = nextModel; state = nextState
 }
 
-saveCheckpoint(path, model, optimizer, state)   // one safetensors file, resumable
+saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 ```
 
-No `.backward()`, no `zero_grad()`. `capture` traces the model once; `step.run`
-evaluates the captured gradient on the host interpreter. The same captured program
-also lowers to StableHLO: [`examples/gpu-training`](examples/gpu-training/) runs it
-on PJRT-CUDA, 600 Adam steps in 2.02 s (3.4 ms/step) on a GB10, loss
-`0.992 → 0.047`, 98.0 % held out. The checkpoint is an ordinary safetensors file
-that `safetensors.torch.load_file` opens, and a resumed run matches the
-uninterrupted one bit for bit.
+| | |
+|---|---|
+| Layers | Dense, Conv2d, MaxPool, AvgPool, BatchNorm, Dropout, Embedding, EmbeddingBag, GRU, Flatten |
+| Optimizers | SGD, Momentum, RMSprop, Adam |
+| Also | learning-rate schedules, gradient clipping, bf16 mixed precision, checkpoints that resume bit for bit |
+| On the GPU | [`examples/gpu-training`](examples/gpu-training/): 600 Adam steps in 2.02 s on a GB10, 98.0 % held-out accuracy; [`examples/mnist`](examples/mnist/): 93.66 % on MNIST |
 
-Inference goes the other way — Kotlin writes an artifact and exits:
+## Serving
 
-```bash
-./gradlew -p examples/gpu-inference run          # Kotlin writes the artifact
-/usr/bin/python3 examples/gpu-inference/serve.py # no jax, no torch, no numpy
-# finds a jax CUDA plugin under a venv; otherwise set TLALOC_PJRT_PLUGIN_PATH
-```
+Kotlin reads a Hugging Face checkpoint and writes a serving artifact: StableHLO
+prefill and decode programs, the weights as safetensors, and a manifest. Three
+runtimes load it. All three compile it with a PJRT plugin, and none runs a JVM.
 
-```
-    prompt      ' The capital of France is'
-    completion  ' Paris.\n\n2.'
-```
+| Runtime | What it is |
+|---|---|
+| NVIDIA Triton | `libtriton_tlaloc.so`, a Triton backend. HTTP and gRPC, Triton's sequence batcher, KV cache held by the backend. → [triton/](triton/README.md) |
+| vLLM | a vLLM platform plugin; `LLM.generate()` runs a Tlaloc artifact |
+| Python | a small runtime that calls the PJRT C API through ctypes, with no JAX, PyTorch or NumPy |
 
-A real TinyLlama-1.1B, all 22 layers, generated 6 of 6 token ids identical to
-HuggingFace transformers — from the direct driver and from vLLM 0.29.0's
-`LLM.generate()`. → [SERVING_RUNBOOK.md](docs/SERVING_RUNBOOK.md)
+**Models.** Each one generates the same greedy token ids as Hugging Face
+transformers.
 
-Tlaloc StableHLO also serves from NVIDIA Triton Inference Server through a C++
-backend that compiles it with the PJRT CUDA plugin. A Tlaloc-generated gradient
-answers over Triton's HTTP and gRPC endpoints with the same bits the DXIR
-interpreter produces, and the TinyLlama artifact, written as a Triton model from
-Kotlin, generates the same 6 token ids with its weights and KV cache held by the
-backend. The same path serves Qwen3-0.6B and the text decoder of Muse Glimmer
-(meta-models/Muse-Glimmer-30B: 28 billion parameters, sliding-window and NoPE
-layers, soft-capped logits), whose 56 GB of weights stay bf16 on the GB10, at
-about 245 ms a token. Its greedy ids equal those of HuggingFace transformers run
-with the same arithmetic (bf16 weights, f32 activations), 32 of 32, and those of
-transformers in bfloat16 up to the one token where the two transformers runs
-differ from each other.
-[`examples/triton-llm`](examples/triton-llm/) runs it in one script: export,
-serve, and a chat client that streams the answer.
-→ [triton/](triton/README.md) · how the pieces fit:
-[SERVING_ARCHITECTURE.md](docs/SERVING_ARCHITECTURE.md)
+| Model | Weights | Decode step (GB10, Triton) |
+|---|---|---|
+| [TinyLlama-1.1B](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0) | f32 | 21.7 ms |
+| [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) | bf16 | 10.7 ms |
+| [Muse Glimmer 30B](https://huggingface.co/meta-models/Muse-Glimmer-30B), text only | bf16, 53 GB | 244 ms |
+| Muse Glimmer 30B, text only | int8 (opt-in), 29 GB | 140 ms |
 
----
+Muse Glimmer runs contexts up to 32,768 tokens and several sequences at once. A
+31,744-token prompt prefills in 62 s. Int8 weights keep its fixture answers and
+change perplexity from 5.610 to 5.602.
 
-## Install
+**Serving features:** paged attention; sliding-window layers whose KV cache is
+bounded by the window; chunked and batched prefill; KV cache updated in place;
+continuous batching of decode steps; CUDA shared-memory inputs and outputs;
+dynamic batching for stateless models.
 
-From Maven Central. The Gradle plugin is published there too, not to the Gradle
-Plugin Portal, so `pluginManagement` needs `mavenCentral()`:
+[`examples/triton-llm`](examples/triton-llm/) exports Qwen3-0.6B, starts Triton
+and streams a chat answer in one script.
+→ [SERVING_ARCHITECTURE.md](docs/SERVING_ARCHITECTURE.md)
+
+## Supported platforms
+
+|  | Linux aarch64 | Linux x86_64 | macOS arm64 | Windows |
+|---|---|---|---|---|
+| Build, library, CPU interpreter | ✅ | ✅ | ✅ | not tested |
+| NVIDIA GPU (PJRT) | ✅ | expected, not tested | n/a | not tested |
+| Triton serving | ✅ | expected, not tested | n/a | n/a |
+| Google TPU | written, never run | written, never run | n/a | n/a |
+
+All GPU results come from one machine, an NVIDIA GB10 (Blackwell, aarch64). CI
+builds and tests the library on the three operating systems in the table, with
+no GPU. → [CAPABILITIES.md](docs/CAPABILITIES.md) lists every capability and
+the test that certifies it.
+
+## Installation
+
+From Maven Central. The Gradle plugin is also on Maven Central, not on the
+Gradle Plugin Portal, so `pluginManagement` needs `mavenCentral()`.
 
 ```kotlin
 // settings.gradle.kts
@@ -242,52 +254,64 @@ dependencies {
 }
 ```
 
-The Gradle plugin applies `tlaloc-compiler-plugin` of its own version to every
-Kotlin/JVM compilation; its options go in a `tlaloc { }` block. The BOM keeps
-every `tlaloc-*` artifact on one version.
+| Requirement | |
+|---|---|
+| Kotlin | 2.4.20 – 2.4.29; other versions are refused at compile time. On Kotlin 2.3.x, use `0.1.0-alpha01`. |
+| JDK | 25 to build code that uses `grad { }`. 21 to run it, except GPU execution, which needs 25. |
+| GPU | an NVIDIA driver and a PJRT CUDA plugin, e.g. `pip install "jax[cuda12]"` in a virtual environment ([GETTING_STARTED.md](docs/GETTING_STARTED.md#5-running-on-a-gpu)) |
+| Triton serving | Docker and `nvcr.io/nvidia/tritonserver:25.11-py3` ([triton/](triton/README.md)) |
 
-**JDK 25 to build, JDK 21 to run.** Kotlin loads a compiler plugin inside the
-compiler's own JVM and `compiler-plugin` is Java 25 bytecode, so building
-`grad { }` needs 25. The library modules target Java 21, so running what you built
-needs only 21 — except PJRT and CUDA execution, which need 25.
+To build from source, run `./gradlew publishToMavenLocal -x test` in a checkout
+and put `mavenLocal()` first in both repository blocks.
 
-**Also:** Kotlin 2.4.20–2.4.29, refused by name outside that range (on Kotlin
-2.3.x, use `0.1.0-alpha01`; [COMPATIBILITY.md](docs/COMPATIBILITY.md) has the
-table) · JVM only ·
-for GPU, a PJRT plugin `.so` and an NVIDIA driver · Symja (LGPL-3.0) is optional
-and not in your dependency graph unless you add it.
+Walkthrough, plugin options, configuration and troubleshooting:
+[GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
-To build from source instead, run `./gradlew publishToMavenLocal -x test` in a
-checkout and put `mavenLocal()` first in both repository blocks.
+## Sharp edges
 
-Full walkthrough and the five plugin options:
-[GETTING_STARTED.md](docs/GETTING_STARTED.md). Per-module detail:
-[COMPATIBILITY.md](docs/COMPATIBILITY.md).
-
----
+- **Alpha.** Names and signatures can change between alphas.
+- **The CPU interpreter is for correctness, not speed.** Performance numbers are
+  for the GPU path.
+- **Tlaloc does not generate GPU code.** XLA and IREE do. KPTX, a PTX kernel DSL,
+  can replace a recognized op, but no kernel is on by default: its paged
+  attention wins at large shapes and loses at small ones
+  ([KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md)).
+- **One Kotlin release per Tlaloc version**, because the plugin uses compiler
+  internals.
+- **No Python API.** Other languages use the StableHLO artifact.
+- **Not written yet or never run:** TPU, multi-host training, more than one GPU
+  per Triton model, preempting a live sequence, image input for Muse Glimmer.
+- **Symja** (LGPL-3.0), used to differentiate loops whose trip count is not a
+  compile-time constant, is optional and not in your dependency graph unless you
+  add it.
 
 ## Examples
 
-Eleven standalone projects under [`examples/`](examples/), each with its own Gradle
-build resolving Tlaloc from `mavenLocal`. Delete the rest of the repo and they
-still run. Six need nothing but a JDK; the others name what they are missing and
-exit `0`. The eight below are the user-facing ones.
+Standalone projects under [`examples/`](examples/). Each has its own Gradle build
+and skips by name when its hardware is missing.
 
 | | | Needs |
 |---|---|---|
-| [`readable-gradients/`](examples/readable-gradients/) | the derivative printed as Kotlin, recompiled without the plugin, agreeing bit for bit | — |
-| [`differentiable-physics/`](examples/differentiable-physics/) | gradient descent through a physics simulator, and the shot goes in | — |
-| [`quickstart/`](examples/quickstart/) | `grad {}` over a matmul, plus a shape bug the compiler rejects | — |
-| [`named-indices/`](examples/named-indices/) | axis names in the tensor type, so a transposed weight fails overload resolution | — |
-| [`mnist/`](examples/mnist/) | the real MNIST at 93.66 %, test digits as ASCII | CUDA · 11 MB |
-| [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on a Blackwell, 98.0 % held out | CUDA |
-| [`gpu-inference/`](examples/gpu-inference/) | Kotlin compiles TinyLlama; a bare `python3` answers `' Paris.'` | CUDA |
-| [`triton-llm/`](examples/triton-llm/) | Kotlin exports Qwen3-0.6B as a Triton model; a chat client streams the answer | CUDA · Docker · Triton |
+| [`quickstart/`](examples/quickstart/) | `grad {}` over a matmul, and a shape error the compiler rejects | JDK |
+| [`readable-gradients/`](examples/readable-gradients/) | the derivative printed as Kotlin, recompiled, same bits | JDK |
+| [`differentiable-physics/`](examples/differentiable-physics/) | gradient descent through a physics simulation | JDK |
+| [`named-indices/`](examples/named-indices/) | axis names in the tensor type | JDK |
+| [`mnist/`](examples/mnist/) | MNIST to 93.66 % | CUDA |
+| [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on the GPU | CUDA |
+| [`gpu-inference/`](examples/gpu-inference/) | TinyLlama compiled from Kotlin, served by plain `python3` | CUDA |
+| [`triton-llm/`](examples/triton-llm/) | Qwen3-0.6B or Muse Glimmer on Triton, with a streaming chat client | CUDA, Docker |
 
-[`examples/README.md`](examples/README.md) has the reading order, the three
-internals projects, and verbatim output from the last full run.
+## Documentation
 
----
+| | |
+|---|---|
+| [GETTING_STARTED.md](docs/GETTING_STARTED.md) | install, first gradient, GPU setup, configuration, troubleshooting |
+| [CAPABILITIES.md](docs/CAPABILITIES.md) | every capability, its status, and the test behind it |
+| [SERVING_ARCHITECTURE.md](docs/SERVING_ARCHITECTURE.md) | how serving works, and where the time goes |
+| [COMPATIBILITY.md](docs/COMPATIBILITY.md) · [CHANGELOG.md](CHANGELOG.md) | what may change, and what did |
+| [API reference](https://javadoc.io/doc/io.github.pedronahum/tlaloc-core-jvm) | per module on javadoc.io; `./gradlew apiDocs` builds all modules locally |
+
+Design documents are in [`docs/`](docs/).
 
 ## How it works
 
@@ -297,120 +321,25 @@ internals projects, and verbatim output from the last full run.
   grad { f }   ──────►   reverse transform ──► DXIR ──► StableHLO ──► PJRT  (CUDA, TPU*)
   typed tensors          on the lambda's IR     │       + Shardy  ──► IREE  (CPU, CUDA)
   named axes             (also: Kotlin source)  │                  ──► host interpreter
-                                                └── recognize + coarsen (FlashAttention,
-                                                    GQA, RMSNorm, RoPE, SwiGLU, …), and
-                                                    optionally claim ops with KPTX kernels
+                                                └── recognize + coarsen (attention,
+                                                    RMSNorm, RoPE, SwiGLU, …)
 ```
 
-Tlaloc does not write CUDA. It lowers to MLIR and lets XLA or IREE do codegen,
-except where a KPTX kernel claims a recognized op. The device decision lives in the
-artifact, upstream of the runtime.
-
----
-
-## Maturity
-
-Every claim in this repository carries one of these marks:
-
-| | |
-|---|---|
-| ✅ **Certified** | an automated test pins it, and the docs say on what hardware it ran |
-| 🧪 **Written** | the code exists and unit-tests pass, but the end-to-end path has never run — the reason is always stated |
-| 📐 **Designed** | a design document exists; no implementation |
-| ❌ **Not planned** | |
-
-| Area | | |
-|---|---|---|
-| Autodiff — reverse, forward, higher-order, custom rules, control flow | ✅ | Full [DiffKT](https://github.com/facebookresearch/diffkt) parity; one engine, no runtime tape |
-| Readable gradient source | ✅ | Printed source compiles and matches the compiled gradient bit for bit |
-| Typed tensors, named axes | ✅ | Mismatches are compile errors |
-| Op surface, NN ops, special functions, stateless RNG, sparse | ✅ | RNG is bit-exact against JAX's threefry stream |
-| dtypes — F32, F64, I32, BF16 | ✅ | Includes native PJRT bf16 and mixed precision. ❌ no F16/FP8 |
-| Model layer, optimizers, schedules, clipping, checkpoints (`:nn`) | ✅ | Loss curve matches PyTorch to 7 decimals; checkpoint round trip is bit-identical |
-| Training on GPU | ✅ | Certified on an NVIDIA GB10 (Blackwell, aarch64) |
-| Inference — paged attention, KV cache, safetensors, framework-free serving | ✅ | Real TinyLlama-1.1B, 6/6 tokens identical to HuggingFace, also through vLLM; Qwen3-0.6B and Muse Glimmer 30B (text, bf16 weights) through Triton with HuggingFace's greedy ids |
-| StableHLO + Shardy emission, PJRT from Kotlin (FFM) and Python (ctypes), IREE | ✅ | No JNI anywhere |
-| KPTX — PTX DSL, parser, transpiler, kernel claiming | ✅ | Paged attention 1.4–1.9× faster than XLA at 8B-shaped decode points, 1.6–1.8× slower at toy shapes. Not registered by default |
-| Public API surface — opt-in marker, ABI baseline, API reference | ✅ | `checkKotlinAbi` against a committed baseline for every published module, wired into `check` |
-| Google TPU | 🧪 | Plugin lane, gating and a self-skipping smoke suite exist. Nothing has ever run on a TPU |
-| IDE diagnostics — the "red squiggle" | 🧪 | Source positions are certified; no test drives IntelliJ |
-| Distributed / multi-GPU training | 📐 | Design and marshalling done; needs 2+ hosts |
-| Android / iOS / WASM | ❌ | Modules are KMP-structured, so these are reachable later; no target is declared |
-
-Row by row, with what pins each one: [CAPABILITIES.md](docs/CAPABILITIES.md).
-
-### Limits
-
-- **JVM only. No Python API.** Interop is via StableHLO artifacts, not bindings.
-- **The interpreter is a correctness engine, not a fast CPU backend.** Performance
-  claims mean the compiled GPU path.
-- **Codegen is mostly XLA's.** KPTX wins at 8B-shaped paged attention and loses at
-  small shapes, so none is registered by default. The losses are published in
-  [KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md).
-- **TPU is written, not run.** Treat every TPU claim as untested.
-- **No IDE plugin and no hosted docs.** `./gradlew apiDocs` builds the API reference
-  locally.
-- **Not a PyTorch clone.** The model layer targets DiffKT's surface, not `torch.nn`'s.
-- **One copyleft dependency you do not inherit.** Symja (LGPL-3.0) is `compileOnly`
-  and kept out of published POMs by a gate. There is no Symja-free `SymbolicEngine`,
-  so a policy forbidding LGPL outright means no CAS, and no differentiating a loop
-  whose trip count is not a compile-time constant.
-
----
-
-## Documentation
-
-| | |
-|---|---|
-| [GETTING_STARTED.md](docs/GETTING_STARTED.md) | Install, first gradient, first compile error |
-| [CAPABILITIES.md](docs/CAPABILITIES.md) | The capability matrix and what certifies each row |
-| [COMPATIBILITY.md](docs/COMPATIBILITY.md) · [CHANGELOG.md](CHANGELOG.md) | What alpha promises, what may break, what changed |
-| [READABLE_REVERSE.md](docs/READABLE_REVERSE.md) | Generated gradient source, beside its input |
-| [SERVING_ARCHITECTURE.md](docs/SERVING_ARCHITECTURE.md) | How serving works: Kotlin export, the artifact, and the three ways to serve it (Python, vLLM, Triton) |
-| **API reference** | `./gradlew apiDocs` → `build/docs/api/index.html` (not hosted) |
-
-Design documents for the IR, the emitter, the serving path, KPTX, TPU bring-up and
-distributed execution are in [`docs/`](docs/).
-
----
+Loops are coarsened before differentiation, following Shen et al., *Coarsening
+Optimization for Differentiable Programming* ([OOPSLA 2021](https://doi.org/10.1145/3485507)).
 
 ## Development
 
 ```bash
-./gradlew test                    # the whole suite
-./gradlew test --rerun-tasks      # a true clean-room re-run
-bash scripts/count-tests.sh       # aggregate count across modules
-bash scripts/onboarding-smoke.sh  # publish + run the quickstart, end to end
-bash scripts/jdk21-smoke.sh       # run a synthesized gradient on a real JDK 21
+./gradlew test                    # the suite
+./gradlew test --rerun-tasks      # re-run everything
+bash scripts/onboarding-smoke.sh  # publish, then build the README's install blocks
+bash triton/verify.sh             # Triton backend, end to end (GPU + Docker)
 ```
 
-CI runs five lanes: the suite on x86_64 Linux, aarch64 Linux and arm64 macOS, the
-library suites on a JDK 21, and a next-Kotlin probe that is allowed to fail. A
-release is tagged only on a commit where the four build lanes are green
-([RELEASING.md](docs/RELEASING.md)). A green runner means the platform-neutral subset passes
-— a runner has no GPU, no PJRT plugin, no IREE and no oracle venv, and every test
-needing one self-skips by name. The GPU rows above are certified on the GB10, not by
-CI.
-
-The next-Kotlin lane is green by construction, so read its step outcomes rather than
-its checkmark. Its current answer, for 2.5.0-Beta1: the library modules compile
-and pass, the compiler plugin compiles, and the plugin refuses 2.5 by name until
-it is ported.
-
-House style, if you are contributing:
-
-- **Claims are certified.** A capability ships with a test against an analytic or
-  cross-implementation oracle, not a screenshot.
-- **Unsupported cases refuse loudly, by name.** Nothing silently degrades.
-- **Anything deferred is named in a design document.**
-- **Negative results get published too.**
-  [KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md) exists because our own kernel lost
-  to XLA.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the build and review checklist and
-[SECURITY.md](SECURITY.md) for reporting vulnerabilities.
-
----
+Tests that need a GPU, Docker or a model download skip by name without it.
+Contributions: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports:
+[SECURITY.md](SECURITY.md).
 
 ## Acknowledgments
 

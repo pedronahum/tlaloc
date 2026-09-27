@@ -34,8 +34,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * The README's "Axis names the type checker enforces" and "Train, checkpoint,
- * serve" snippets, verbatim between the SNIPPET markers, so the README cannot
+ * The README's "Typed tensors" and "Training"
+ * snippets, verbatim between the SNIPPET markers, so the README cannot
  * show code that does not compile against the published API. When a snippet
  * in README.md changes, change it here too.
  */
@@ -49,7 +49,7 @@ class ReadmeSnippetsTest {
             Tensors.f32Matrix(3, 4, FloatArray(12) { 0.1f * (it + 1) })
 
         // SNIPPET
-        val hidden = activations contract weights   // OK: they share SeqLen
+        val hidden = activations contract weights   // compiles: both have SeqLen
         // END SNIPPET
 
         val typed: DTensor<Rank2<Named<Batch, Sym>, Named<Hidden, Sym>>, F32> = hidden
@@ -80,12 +80,12 @@ class ReadmeSnippetsTest {
         var model = model0
         var state = optimizer.initialState()
         repeat(60) {
-            val out = step.run(model, listOf(x))   // loss and gradients, on the host
+            val out = step.run(model, listOf(x))   // loss and gradients
             val (nextModel, nextState) = optimizer.step(model, out.gradients, state)
             model = nextModel; state = nextState
         }
 
-        saveCheckpoint(path, model, optimizer, state)   // one safetensors file, resumable
+        saveCheckpoint(path, model, optimizer, state)   // one safetensors file
         // END SNIPPET
 
         val before = step.run(model0, listOf(x)).loss
