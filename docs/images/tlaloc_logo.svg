@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-labelledby="t">
+  <title id="t">Tlaloc</title>
+  <!-- A scroll cloud raining three drops joined as a small graph. -->
+  <circle cx="60" cy="60" r="56" fill="#F2F1EC"/>
+  <path d="M28 58 C22 58 18 53 20 47 C22 41 29 40 32 43 C32 35 40 29 48 32 C51 24 63 21 70 28 C77 23 88 27 88 36 C95 36 100 42 98 49 C96 55 91 58 86 58 Z" fill="none" stroke="#5B3A29" stroke-width="4.4" stroke-linejoin="round"/>
+  <path d="M44 46 C44 41 50 40 51 44 C52 47 48 48 47 46" fill="none" stroke="#5B3A29" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M68 42 C68 37 74 36 75 40 C76 43 72 44 71 42" fill="none" stroke="#5B3A29" stroke-width="3.2" stroke-linecap="round"/>
+  <g stroke="#2F7F8C" stroke-width="2.2">
+    <line x1="44" y1="74" x2="60" y2="87"/>
+    <line x1="76" y1="74" x2="60" y2="87"/>
+    <line x1="44" y1="74" x2="76" y2="74"/>
+  </g>
+  <g fill="#2F7F8C">
+    <path d="M44 63 C42 67 39 70 39 73.5 a5 5 0 0 0 10 0 C49 70 46 67 44 63 Z"/>
+    <path d="M76 63 C74 67 71 70 71 73.5 a5 5 0 0 0 10 0 C81 70 78 67 76 63 Z"/>
+    <path d="M60 76 C58 80 55 83 55 86.5 a5 5 0 0 0 10 0 C65 83 62 80 60 76 Z"/>
+  </g>
+</svg>

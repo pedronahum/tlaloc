@@ -1,4 +1,5 @@
 <div align="center">
+<img src="docs/images/tlaloc_logo.svg" alt="Tlaloc logo: a rain cloud raining three drops joined as a graph" width="180">
 
 # Tlaloc
 
