@@ -107,7 +107,11 @@ one module per entry, with the entry function named `main`:
   early in a large bucket scores only the positions its sequence has. In
   f32 the result differs from the one-pass form only in the order of the
   sums: on the GB10 it agrees with the interpreter's walk within 6e-8
-  (`PjrtBlockwisePagedAttentionTest`).
+  (`PjrtBlockwisePagedAttentionTest`), and within 2.4e-7 of both the
+  interpreter and the one-pass per-row form at the edges: lengths at and
+  one past a block boundary, lengths 0 and 1 (a row of length 0 comes out
+  0), a call with no live position, a window whose start crosses a block
+  boundary inside one call, and blocks fully masked for some rows.
 - A sliding layer whose table is a ring (`ring = true`, section 3) scores
   only the ring, masking each ring slot by its age: the slot at index `i`
   holds the position `(L - 1 - i) mod N` behind the row's last one, live
@@ -736,7 +740,10 @@ Glimmer reproduces what the bf16 one does: the text and needle prompts'
 32 ids, and 15 of 16 on the chat prompt, whose 16th step is where
 transformers' bf16 and f32 runs choose differently (margin 0.31). `verify.sh`
 runs Qwen3-0.6B with int8 weights and requires all 32 fixture ids (and that
-the check fails with wrong ids).
+the check fails with wrong ids). It also serves the same model with its codes
+quantized along the input axis while the scales stay per output channel
+(`triton/int8_wrong_axis.py`, a quantizer bug), and requires the ids to fail:
+all 32 differ, and that model's perplexity on the same text is 3.4 million.
 
 **Speed and memory.** Measured with `triton/profile.sh` (gRPC, one sequence, medians of three
 runs), the unquantized and the int8 artifact served in turn, three rounds;
@@ -773,6 +780,60 @@ Glimmer step at position 400 took 331.5 ms against 186.8 ms, the same ratio.
   1.5 tokens per 512 prompt tokens.
 - The weights take 29,143 MiB on the device instead of 53,128 MiB, and load
   in 44 s instead of 82 s.
+
+### Rechecked on an idle GPU
+
+The three changes above measured again together, each against the state
+before it, with the GPU idle for every run (nvidia-smi median 0% over 10 s
+before loading and again before timing, no other container running). Four
+Muse Glimmer configurations were served in turn, three rounds; each number
+is the median of the three rounds (`profile.sh`, gRPC, one sequence; a
+decode number is the median of 16 steps):
+
+- **A**: the artifact from before rings and blockwise attention, the backend
+  from before backend batching, a 20 ms queue delay;
+- **B**: the artifact with rings and blockwise attention, the same old
+  backend and delay;
+- **C**: the same artifact, the current backend, no queue delay;
+- **D**: the int8 artifact, the current backend, no queue delay.
+
+The bodies of B and C are the ones a fresh export of the current code writes
+(same content hashes).
+
+| Measured, client time | A | B | C | D |
+|---|---|---|---|---|
+| a decode step at position 400 | 267.8 ms | 265.9 ms | 244.3 ms | 139.7 ms |
+| a decode step at position 6,000 | 273.3 ms | 270.1 ms | 249.4 ms | 144.1 ms |
+| a 512-token call at 1,536 | 708 ms | 675 ms | 653 ms | 799 ms |
+| a 512-token call at 7,680 | 1,233 ms | 840 ms | 813 ms | 976 ms |
+| a 512-token call at 31,744 | 4,389 ms | 1,378 ms | | |
+| a 7,680-token prompt | 15.9 s | 11.0 s | 10.9 s | 13.1 s |
+| a 31,744-token prompt | 225.2 s | 62.2 s | | |
+| queue time a request | 20.5 ms | 20.5 ms | 0.35 ms | 0.3 ms |
+
+- Rings and blockwise attention (A to B): as measured before, within 3% of
+  every number in the table of that subsection.
+- Backend batching (B to C): 21.6 ms less a Muse Glimmer token (8%); the
+  server's compute time is the same (242.0 and 241.1 ms). The small models,
+  old backend with Triton's 1 ms delay against the current one, three rounds
+  of three runs of `decode:8:32`: TinyLlama 22.86 to 21.66 ms, Qwen3-0.6B f32
+  16.79 to 15.39 ms, bf16 11.33 to 10.70 ms, queue 1.18 to 0.24 ms. Each
+  gain is the queue delay it removes, 0.6 to 1.4 ms for the small models.
+  The contended table above overstated the Qwen3-0.6B gains by 0.5 to
+  0.6 ms and understated TinyLlama's by 0.2 ms and Muse Glimmer's by 5.5 ms.
+- Int8 weights (C to D): a decode step 43% shorter, a 512-token call 146 to
+  163 ms longer, as measured before.
+- The first session of the day, run A of round 1, had decode steps of
+  640 to 810 ms after the third and a 31,744-token prompt of 349 s, on an
+  idle GPU; no later session did. It is kept in the medians.
+
+Two correctness checks came with this. Step inputs read from mapped host
+memory and inputs uploaded one by one give bit-identical logits over 123
+TinyLlama steps of three sequences decoded in turn, and so does each
+sequence decoded alone, once XLA's autotuning is fixed
+(`--xla_gpu_autotune_level=0`). With autotuning on, two loads of the same
+model differ by up to 0.017 in a logit: XLA picks its kernels again on each
+load. Within one load the logits repeat bit for bit.
 
 ### What would make it faster (estimates)
 

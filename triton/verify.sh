@@ -79,7 +79,8 @@
 #      tolerance of 2e-3), and --perturb must
 #      fail. Then bf16 weights with int8 projections (-PweightQuant=int8):
 #      under 70% of the bf16 MiB, all 32 ids equal (logits not compared),
-#      --perturb must fail. Without the checkpoint this step is skipped by name.
+#      --perturb must fail, and the same model with its codes quantized along
+#      the input axis (int8_wrong_axis.py) must fail the ids. Without the checkpoint this step is skipped by name.
 #   8. optional and opt-in (MUSE_GLIMMER=1), Muse Glimmer: 28 billion text
 #      parameters, 56 GB of bf16 weights on the device. It needs the
 #      meta-models/Muse-Glimmer-30B snapshot the fixtures name, and refuses by
@@ -143,7 +144,8 @@ PEAK_PID=""
 cleanup() {
   [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
   docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" "$BASE_NAME-triton-batching" \
-    "$BASE_NAME-qwen3" "$BASE_NAME-qwen3-bf16" "$BASE_NAME-muse" "$BASE_NAME-device" >/dev/null 2>&1 || true
+    "$BASE_NAME-qwen3" "$BASE_NAME-qwen3-bf16" "$BASE_NAME-qwen3-int8" "$BASE_NAME-qwen3-int8-wrong-axis" \
+    "$BASE_NAME-muse" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -678,6 +680,23 @@ else
   fi
   grep -c "^FAIL" "$LOG.qwen3-int8.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   stop_server
+  # Control: the same model with its int8 codes quantized along the input
+  # axis while the scales stay per output channel (a quantizer bug). The
+  # fixture ids must not survive it.
+  QW_REPO="$QI_DIR/wrong-axis-repository"
+  rm -rf "$QW_REPO"; mkdir -p "$QW_REPO"
+  "$PY" "$HERE/int8_wrong_axis.py" "$QI_DIR/repository/qwen3" "$QW_REPO/qwen3"
+  export CONTAINER_NAME="$BASE_NAME-qwen3-int8-wrong-axis" MODEL_REPOSITORY="$QW_REPO"
+  start_server "$LOG.qwen3-int8-wrong-axis" 600
+  if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
+      --model qwen3 --fixture "$QWEN3_FIXTURE" --ids-only --repeat 0 >"$LOG.qwen3-int8-wrong-axis.ids" 2>&1; then
+    echo "FAIL: int8 codes quantized along the wrong axis kept the fixture ids" >&2
+    cat "$LOG.qwen3-int8-wrong-axis.ids" >&2
+    exit 1
+  fi
+  grep -c "^FAIL" "$LOG.qwen3-int8-wrong-axis.ids" | xargs -I{} echo "wrong-axis int8 control failed as it must ({} failing checks)"
+  stop_server
+  rm -rf "$QW_REPO"
 fi
 
 # --- Muse Glimmer ------------------------------------------------------------

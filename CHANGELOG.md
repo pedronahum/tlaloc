@@ -227,6 +227,23 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **The serving performance numbers were measured again on an idle GPU.**
+  Four Muse Glimmer configurations served in turn, three rounds: rings and
+  blockwise attention take a 512-token call at 31,744 from 4.39 to 1.38 s
+  and a 31,744-token prompt from 225.2 to 62.2 s; backend batching takes a
+  lone token from 265.9 to 244.3 ms (Qwen3-0.6B bf16 11.33 to 10.70 ms,
+  f32 16.79 to 15.39, TinyLlama 22.86 to 21.66; the first measurements
+  were contended); int8 weights take it to 139.7 ms and a 512-token call
+  146 to 163 ms longer. `PjrtBlockwisePagedAttentionTest` covers the
+  blockwise form at block boundaries, lengths 0 and 1, an empty call, a
+  window crossing a block boundary and fully masked blocks, against the
+  interpreter and the per-row form, and ring decode at lengths 1, the
+  window, the ring and twice the ring. `verify.sh` serves the int8 Qwen3
+  model with its codes quantized along the wrong axis
+  (`triton/int8_wrong_axis.py`) and requires its fixture ids to fail. Step
+  inputs read from mapped host memory give the logits of inputs uploaded
+  one by one bit for bit.
+
 - **Long-context prefill attends only what it needs.** A sliding layer whose
   KV lives in a windowed ring now reads the ring (`PAGED_ATTENTION` with the
   new `ring = true` attr: the first `ringPages` columns of its table,
@@ -342,6 +359,10 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   from the table.
 
 ### Fixed
+
+- **`verify.sh` left an int8 Qwen3 container running when that step
+  failed.** Its exit cleanup did not name the int8 container; it now names
+  it and the new wrong-axis control's.
 
 - **A sequence whose requests were being refused could lose its pages.** The
   Triton backend counted a sequence as active only when one of its requests

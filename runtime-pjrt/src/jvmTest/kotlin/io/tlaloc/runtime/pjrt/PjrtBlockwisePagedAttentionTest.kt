@@ -123,6 +123,85 @@ class PjrtBlockwisePagedAttentionTest {
     }
 
     /**
+     * The blockwise form at its edges, against the interpreter and against
+     * the per-row form (one table per row, the one-pass softmax over the
+     * whole context), on a context of three key blocks (6,144 positions):
+     *
+     * - lengths at a block boundary (2,048, 4,096 and the whole context) and
+     *   one past it (2,049, where the last block has one live position);
+     * - lengths of 1, and rows of length 0 next to live rows (0 out);
+     * - every row of length 0 (the loop runs no block);
+     * - a window of 2,048 whose start crosses the boundary at 2,048 inside
+     *   one chunk, and one that starts exactly on it;
+     * - blocks that are fully masked for a row: a row live only in block 0
+     *   next to a row live only in block 2, with block 1 masked for both.
+     */
+    @Test
+    fun blockwiseEdgesMatchTheInterpreterAndThePerRowFormOnGpu() {
+        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        val rows = 8
+        val tables = 2
+        val sh = Shape(rows = rows, tables = tables, heads = 4, kvHeads = 2, headDim = 8, blockSize = 16, numBlocks = 400, tableWidth = 384)
+        val poolN = sh.numBlocks * sh.blockSize * sh.kvHeads * sh.headDim
+        val q = pseudo(rows * sh.heads * sh.headDim, 21)
+        val k = pseudo(poolN, 23).also { a -> for (i in a.indices) a[i] *= 4f }
+        val v = pseudo(poolN, 29)
+        val shared = pages(sh, tables, sh.tableWidth)
+        // The per-row form: each row gets its own copy of its table.
+        val perRowTables = FloatArray(rows * sh.tableWidth) { i ->
+            val r = i / sh.tableWidth
+            shared[(r / (rows / tables)) * sh.tableWidth + i % sh.tableWidth]
+        }
+        val perRowShape = Shape(rows, rows, sh.heads, sh.kvHeads, sh.headDim, sh.blockSize, sh.numBlocks, sh.tableWidth)
+        val cases = listOf(
+            Triple("boundaries", null, intArrayOf(2047, 2048, 2049, 4096, 4095, 4097, 6143, 6144)),
+            Triple("lengths 1 and 0", null, intArrayOf(1, 0, 1, 2, 0, 1, 2049, 1)),
+            Triple("all empty", null, IntArray(rows)),
+            Triple("window crossing 2048", 2048, intArrayOf(4090, 4093, 4096, 4097, 4094, 4095, 4096, 4100)),
+            Triple("window starting on 2048", 2048, intArrayOf(4096, 4096, 4096, 4096, 2048, 2048, 2049, 2050)),
+            Triple("fully masked blocks", 300, intArrayOf(10, 11, 12, 13, 6000, 6001, 6002, 6003)),
+            Triple("fully masked, no window", null, intArrayOf(10, 11, 12, 13, 6000, 6001, 6002, 6003)),
+        )
+        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+            for ((label, window, lensI) in cases) {
+                val lens = FloatArray(rows) { lensI[it].toFloat() }
+                val f = fn(sh, 0.35, window, ring = false)
+                assertTrue("stablehlo.while" in f.toStablehlo(), "$label: context 6144 in shared tables takes the blockwise form")
+                val inputs = listOf(q, k, v, shared, lens)
+                val want = DxirInterpreter.evalFunction(f, inputs)[0]
+                val got = session.runOn(f, inputs).single()
+                assertTrue(got.all { it.isFinite() }, "$label: the blockwise form produced a non-finite value")
+                val w = worst(want, got)
+                assertTrue(w <= 1e-4f, "$label: GPU vs interpreter worst |d| = $w")
+                val lane = sh.heads * sh.headDim
+                for (r in 0 until rows) {
+                    if (lensI[r] != 0) continue
+                    for (j in 0 until lane) assertEquals(0f, got[r * lane + j], "$label: row $r of length 0 is not 0")
+                }
+                // The per-row form over the same pages (rows of length 0 left
+                // out: its one-pass softmax has nothing to divide by there).
+                val old = session.runOn(fn(perRowShape, 0.35, window, ring = false), listOf(q, k, v, perRowTables, lens)).single()
+                var wOld = 0f
+                for (r in 0 until rows) {
+                    if (lensI[r] == 0) continue
+                    for (j in 0 until lane) wOld = maxOf(wOld, abs(old[r * lane + j] - got[r * lane + j]))
+                }
+                assertTrue(wOld <= 1e-4f, "$label: blockwise vs per-row form worst |d| = $wOld")
+                println("[pjrt-paged-long] blockwise edge '$label': worst |d| = $w against the interpreter, $wOld against the per-row form")
+            }
+            // Control: moving one row's length by one position moves that row only.
+            val base = intArrayOf(2047, 2048, 2049, 4096, 4095, 4097, 6143, 6144)
+            val f = fn(sh, 0.35, null, ring = false)
+            val a = session.runOn(f, listOf(q, k, v, shared, FloatArray(rows) { base[it].toFloat() })).single()
+            val b = session.runOn(f, listOf(q, k, v, shared, FloatArray(rows) { (base[it] - if (it == 2) 1 else 0).toFloat() })).single()
+            val lane = sh.heads * sh.headDim
+            val moved = (0 until rows).filter { r -> (0 until lane).any { j -> a[r * lane + j] != b[r * lane + j] } }
+            assertEquals(listOf(2), moved, "a length one shorter must move exactly its own row")
+        }
+    }
+
+    /**
      * A ring of 5 pages of 4 (20 positions) for a window of 12, filled as a
      * runtime fills it: position t on ring page (t / 4) % 5, the latest
      * write winning. Read as a ring and as a full-width table over the same
@@ -186,6 +265,57 @@ class PjrtBlockwisePagedAttentionTest {
             val w4 = worst(r4, g4)
             assertTrue(w4 <= 1e-4f, "prefill through a ring: GPU vs interpreter worst |d| = $w4")
             println("[pjrt-paged-long] ring prefill rows: worst |d| = $w4")
+        }
+    }
+
+    /**
+     * Ring decode at the ring's edges: lengths of 1, the window (12), the
+     * ring (20), twice the ring (40, the ring's column 0 just rewritten) and
+     * one past it (41), each row's ring filled as a runtime fills it. The
+     * interpreter's ring walk must give the bits of a full-width table over
+     * the same pages, and the GPU must agree with it.
+     */
+    @Test
+    fun ringDecodeAtTheRingsEdgesOnGpu() {
+        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
+        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        val bs = 4; val ringPages = 5; val window = 12; val width = 16
+        val heads = 4; val kvHeads = 2; val hd = 8
+        val lensI = intArrayOf(1, 12, 20, 40, 41)
+        val n = lensI.size
+        val numBlocks = 1 + n * ringPages
+        val rings = List(n) { s -> IntArray(ringPages) { 1 + s * ringPages + (it * 3 + s) % ringPages } }
+        val slot = hd * kvHeads
+        val k = FloatArray(numBlocks * bs * slot)
+        val v = FloatArray(numBlocks * bs * slot)
+        for (s in 0 until n) {
+            val kk = pseudo(lensI[s] * slot, 300 + s)
+            val vv = pseudo(lensI[s] * slot, 400 + s)
+            for (t in 0 until lensI[s]) {
+                val at = (rings[s][(t / bs) % ringPages] * bs + t % bs) * slot
+                kk.copyInto(k, at, t * slot, (t + 1) * slot)
+                vv.copyInto(v, at, t * slot, (t + 1) * slot)
+            }
+        }
+        val ringT = FloatArray(n * ringPages) { rings[it / ringPages][it % ringPages].toFloat() }
+        val fullT = FloatArray(n * width) { rings[it / width][(it % width) % ringPages].toFloat() }
+        val q = pseudo(n * heads * hd, 31)
+        val lens = FloatArray(n) { lensI[it].toFloat() }
+        val ringFn = fn(Shape(n, n, heads, kvHeads, hd, bs, numBlocks, ringPages), 0.4, window, ring = true)
+        val fullFn = fn(Shape(n, n, heads, kvHeads, hd, bs, numBlocks, width), 0.4, window, ring = false)
+        val fromRing = DxirInterpreter.evalFunction(ringFn, listOf(q, k, v, ringT, lens))[0]
+        val fromFull = DxirInterpreter.evalFunction(fullFn, listOf(q, k, v, fullT, lens))[0]
+        for (i in fromRing.indices) assertEquals(fromFull[i].toRawBits(), fromRing[i].toRawBits(), "lane $i: ring vs full-width table")
+        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+            val got = session.runOn(ringFn, listOf(q, k, v, ringT, lens)).single()
+            val w = worst(fromRing, got)
+            assertTrue(w <= 1e-4f, "ring decode at the edges: GPU vs interpreter worst |d| = $w")
+            // Control: a window of the whole ring (20) reads 8 more
+            // positions for the rows longer than 12, and moves them.
+            val wider = fn(Shape(n, n, heads, kvHeads, hd, bs, numBlocks, ringPages), 0.4, window + 8, ring = true)
+            val moved = session.runOn(wider, listOf(q, k, v, ringT, lens)).single()
+            assertTrue(worst(moved, got) > 1e-3f, "a wider window did not move the output")
+            println("[pjrt-paged-long] ring decode at lengths ${lensI.toList()}: worst |d| = $w")
         }
     }
 

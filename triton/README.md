@@ -514,7 +514,10 @@ prefill call about 160 ms longer, and the weights take 29,143 MiB instead of
 53,128 MiB. Qwen3-0.6B
 keeps its 32 ids, +1.1% perplexity, 96% argmax agreement, and a decode
 step takes 8.8 ms instead of 10.4 (bf16 weights). `verify.sh`
-serves Qwen3-0.6B with int8 weights and requires its 32 fixture ids.
+serves Qwen3-0.6B with int8 weights and requires its 32 fixture ids, and
+serves it again with the codes quantized along the input axis
+(`int8_wrong_axis.py`, the scales left per output channel), where the ids
+must fail.
 
 A checkpoint that ties its head to the embedding table (Qwen3) has no head
 weight in the artifact: the head is one `dot_general` that contracts the
@@ -899,10 +902,11 @@ Where that time goes, kernel by kernel, is in
 [SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md#6-where-the-time-goes).
 Those runs were batched by Triton after a queue delay (1 ms, and 20 ms for
 Muse Glimmer), which is the "Queue" column. With the backend batching and no
-delay the queue is about 0.2 ms, measured on a GPU the desktop kept 15 to 22%
-busy: Qwen3-0.6B bf16 11.7 ms a token against 13.0 ms served the old way in
-turn, f32 17.1 against 19.0, TinyLlama 26.6 against 27.6 (tables in the same
-section).
+delay the queue is about 0.3 ms. On an idle GPU, the old and new ways served
+in turn for three rounds: Qwen3-0.6B bf16 10.70 ms a token against 11.33 ms,
+f32 15.39 against 16.79, TinyLlama 21.66 against 22.86, Muse Glimmer 244.3
+against 265.9 (tables in the same section, with the first measurements, taken
+on a GPU the desktop kept 15 to 22% busy).
 
 ## Model configuration
 
