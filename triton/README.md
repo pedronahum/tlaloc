@@ -666,7 +666,7 @@ this; `generate_client.py` adds a tokenizer.
   `backend_batching` set to `false` the batches are the ones Triton's
   sequence batcher forms, after its queue delay; the load log states which.
   `sequence_checks.py --batching` checks the policy: one sequence alone
-  waits under 0.5 ms a step before its execution starts, and four sequences
+  waits under 0.8 ms a step before its execution starts, and four sequences
   whose clients pause 0 to 5 ms before each step run 60 steps in at most 17
   executions; batched by Triton with a 1 ms queue delay, the same checks
   fail (1.2 ms of waiting, 35 executions).

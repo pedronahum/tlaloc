@@ -39,14 +39,16 @@ status 0 only if every check passes. With --perturb the expected ids are
 wrong and only the prefill and pressure checks run, so the run must fail.
 
 With --batching it checks only how steps are batched: one sequence decoding
-alone waits less than --lone-wait-ms (default 0.5) per step before its
+alone waits less than --lone-wait-ms (default 0.8) per step before its
 execution starts (Triton's queue time plus the backend's input time, from the
 model's statistics), and four sequences whose clients each pause a random 0
 to 5 ms before every step (more than a 1 ms queue delay covers) still run
 their decode steps together: at most two executions more than the steps of
 one sequence, and each gets exactly the ids it gets alone. Against a model
 batched by Triton with a 1 ms queue delay (backend_batching false) both must
-fail.
+fail. On an idle GB10 a lone TinyLlama sequence waited 0.30 to 0.51 ms a step
+on average over seven runs, and about 1.2 ms batched by Triton; the 0.8 ms
+limit sits between the two.
 
 With --queued (against a copy of the model with a 200 ms idle timeout) it
 checks only that the backend never frees a sequence Triton still holds: 12 to
@@ -396,7 +398,7 @@ def main():
     ap.add_argument("--log", default="", help="the server log, to check which sequences were reclaimed")
     ap.add_argument("--batching", action="store_true",
                     help="only the batching checks: a lone sequence does not wait, jittered ones batch")
-    ap.add_argument("--lone-wait-ms", type=float, default=0.5)
+    ap.add_argument("--lone-wait-ms", type=float, default=0.8)
     args = ap.parse_args()
     if args.queued:
         return queued(args.http, args.model, args.log)

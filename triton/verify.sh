@@ -48,7 +48,7 @@
 #      prefill_b4_c64 running four sequences; prefill throughput), run it with
 #      --perturb (must fail), run it on prompts of 2, 55, 9 and 30 tokens in
 #      one call (and with --perturb), run sequence_checks.py --batching (a lone
-#      sequence waits under 0.5 ms per step before its execution starts, and
+#      sequence waits under 0.8 ms per step before its execution starts, and
 #      four sequences whose clients pause 0-5 ms before each step still run
 #      their steps together; and with --perturb, which must fail), and stop the
 #      server. Control: the same model batched by Triton with a 1 ms queue

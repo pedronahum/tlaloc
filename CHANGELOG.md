@@ -364,6 +364,13 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   failed.** Its exit cleanup did not name the int8 container; it now names
   it and the new wrong-axis control's.
 
+- **The lone-sequence wait limit of `sequence_checks.py --batching` sat
+  inside its own noise.** On an idle GPU a lone TinyLlama sequence waited
+  0.30 to 0.51 ms a step on average over seven runs, and one `verify.sh`
+  run failed at 0.506 ms against the 0.5 ms limit. The limit is now 0.8 ms,
+  between that spread and the 1.2 ms the Triton-batched control waits,
+  which must still fail.
+
 - **A sequence whose requests were being refused could lose its pages.** The
   Triton backend counted a sequence as active only when one of its requests
   ran, while Triton restarts its idle timer for every request, refused or

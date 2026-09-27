@@ -444,6 +444,45 @@ kernel streams memory at 233 GB/s (the nominal LPDDR5X rate is 273 GB/s),
 and cuBLAS multiplies 512x6656 by 6656x19968 at 70 TFLOPS in bf16 on tensor
 cores, 33 TFLOPS in TF32 and 19 TFLOPS in plain f32.
 
+### Before and after, in one table
+
+The three changes described below (sliding layers read their ring and
+long calls attend block by block; the backend forms its own batches; opt-in
+int8 weights), each figure the median of three rounds served in turn on an
+idle GPU (setups A to D of "Rechecked on an idle GPU"). "Before" is the
+artifact and backend from before all three, with Muse Glimmer's 20 ms
+queue delay; "after" is the current default (bf16 weights, no queue
+delay). Client time over gRPC, one sequence.
+
+| Idle GPU | Before | After, default | After, int8 weights (opt-in) |
+|---|---|---|---|
+| Muse Glimmer decode step at position 400 | 267.8 ms | 244.3 ms | 139.7 ms |
+| Muse Glimmer decode step at position 6,000 | 273.3 ms | 249.4 ms | 144.1 ms |
+| Muse Glimmer 512-token call at 1,536 | 708 ms | 653 ms | 799 ms |
+| Muse Glimmer 512-token call at 7,680 | 1,233 ms | 813 ms | 976 ms |
+| Muse Glimmer 512-token call at 31,744 | 4,389 ms | 1,378 ms (1) | not measured |
+| Muse Glimmer 7,680-token prompt | 15.9 s | 10.9 s | 13.1 s |
+| Muse Glimmer 31,744-token prompt | 225.2 s | 62.2 s (1) | not measured |
+| Muse Glimmer queue time a request | 20.5 ms | 0.35 ms | 0.3 ms |
+| TinyLlama-1.1B f32 decode step | 22.86 ms | 21.66 ms | |
+| Qwen3-0.6B f32 decode step | 16.79 ms | 15.39 ms | |
+| Qwen3-0.6B bf16 decode step | 11.33 ms | 10.70 ms | |
+
+(1) Measured with the old backend and its 20 ms queue delay (setup B).
+The current backend changes a request's queue time, not its compute
+(242.0 against 241.1 ms a decode step), so it moves a 1.4 s call by about
+20 ms and a 62-call prompt by about 1.3 s.
+
+The small models' "before" is the old backend with Triton's 1 ms queue
+delay; their weights were not changed.
+
+Numbers taken while another process kept the GPU 88 to 95% busy are not
+comparable with the table above and are labelled contended wherever they
+appear: the context table in section 3 (a Muse Glimmer token 265 to
+317 ms, a 32,688-token prompt 230 s, both before the ring and blockwise
+attention) and the first backend-batching measurement (a Muse Glimmer
+token 351.7 to 335.6 ms, contended).
+
 ### Decode, one sequence
 
 A step reads every weight once, except an untied embedding table, of which
