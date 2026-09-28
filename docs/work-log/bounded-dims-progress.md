@@ -3,6 +3,70 @@
 Design: [../design/bounded-dims.md](../design/bounded-dims.md). Branch `feat/bounded-dims`
 from `main` at `cc183fa`. Not pushed.
 
+## Summary for the reviewer
+
+**Shipped.** Bounded dimensions, end to end, marked `@ExperimentalTlalocApi`:
+
+| Layer | What | Evidence |
+|---|---|---|
+| Types (`:core`) | `DimBound(max)`, atom `Bounded<B>`; the bound object is the axis's identity | `BoundedTest` |
+| Compile time (plugin) | `BOUNDED_DIM_EXCEEDED`, `BOUNDED_AXIS_MISMATCH`, `BOUNDED_DIM_INVALID`, `BOUNDED_SPEC_ARITY`, at file/line/column; `matmul`/`contract` mixing rejected by Kotlin's type checker; `grad {}` over bounded params at every size | `BoundedDimCompileCheckTest` (10) |
+| Interpreter (`:autograd`) | `boundedProgram`, `specOf<S>`, exact and bucketed runs with valid-mask/length inputs, `checkPadding`, `valueAndGrad` training steps, `BoundedExecutor` | `BoundedProgramTest` (14): static-shape and analytic oracles at every size |
+| Export (`:maestro`) | one body per bucket + `tlaloc-bounded.json` (`tlaloc-bounded-v1`); refused when padding changes the result | `BoundedProgramExportTest` |
+| Python runtime | `harness/python/tlaloc_bounded.py` | 15 unit tests; PJRT-CUDA at every size up to the bound (`BoundedArtifactRunTest`) |
+| Triton | backend bounded mode (`bounded_manifest`), `TritonModelRepository` writes it | `verify.sh` passed on the GB10, HTTP and gRPC |
+| vLLM | refuses a bounded artifact by name (through `tlaloc_serve`) | `tlaloc_bounded_test` |
+| GPU training | bucketed steps on a `PjrtSession` | `PjrtBoundedTrainingTest`: 4 executables vs 27 |
+
+Compile counts (GB10): 200 mixed-length requests (1..512, 163 distinct) through an
+attention block: 163 compiles / 264 s at exact lengths, 6 / 7.6 s bucketed; execution
+13 % slower from padding. LLM serving is unchanged: TinyLlama's greedy ids still equal
+Hugging Face's (`HfLlamaServingArtifactTest`, direct and vLLM), and Qwen3-0.6B f32, bf16
+and int8 still give 16 of 16 ids through Triton (`verify.sh`).
+
+**Not shipped, and why.**
+- Bounded dynamic StableHLO. A `#stablehlo.bounds` parameter compiles on XLA GPU, but the
+  PJRT C API that all three runtimes use cannot create a buffer for it; dynamism inside a
+  program (`set_dimension_size`) runs on the GPU for one reduction checked, but the
+  interpreter, IREE and the rest of the op set are unverified. The spike is in the design
+  doc; it is the path to one compile per bound instead of one per bucket.
+- Triton bounded mode: one output, no dynamic batching, host path only; rank-0 tensors
+  refused by name.
+- The language-model exporter's ladders are not derived from a `DimBound` (it already
+  buckets).
+
+**Known limitations.**
+- The compile-time bound check reads `max` from a bound declared in the module being
+  compiled; a bound from a dependency is checked at run time only.
+- Only constant sizes are checked at compile time; sizes inside a `grad {}` lambda are
+  `-1` as before.
+- Correct padding is the program's job (masks); the exporter checks it in the
+  interpreter at the edges of every bucket, not at every size.
+- `BoundedProgram` is not thread-safe, and exact-size runs keep one trace per size.
+- A dot on the GPU runs in TF32, so GPU-vs-interpreter bands are 2e-3 for programs with
+  a matmul (1e-4 without).
+
+**Review first.**
+1. The type encoding: a bound is an `object X : DimBound(n)` used as `Bounded<X>`, and
+   the object is the axis identity (two independent axes need two objects). Kotlin has no
+   integer type parameters; this is the choice everything else rests on.
+2. The manifest: a new file and version (`tlaloc-bounded.json`, `tlaloc-bounded-v1`)
+   rather than a `tlaloc-serving-v4`, and a reader that refuses unknown keys (the serving
+   readers ignore them). `BoundedManifest.kt`, `tlaloc_bounded.validate`,
+   `bounded_mode.cc ReadManifest` are three readers of one schema.
+3. The padding contract: masks are program inputs the runtime fills, and the exporter
+   refuses a program whose padded result differs from the exact one.
+4. `BoundedTrace.cacheKey` (content-addressed; an earlier name-based key could alias two
+   programs, found in review).
+5. The C++ bounded mode (`triton/backend/bounded_mode.cc`), new code in the server.
+
+Also found: regenerating the Triton examples (`exportTritonExamples`) changes four
+committed `config.pbtxt` files on `main` (pre-existing drift; not touched here).
+
+Final clean-room run (2026-09-29 00:04, `./gradlew test --rerun-tasks --continue`):
+2,838 tests (baseline 2,797, +41), 0 failures, 102 skipped (the baseline's 101 plus
+`LlamaDecoderPytorchBenchTest`, which skips itself when it sees concurrent load).
+
 ## Baseline (before any change)
 
 - 2026-09-28 22:28, `./gradlew test --rerun-tasks --continue` at `cc183fa`: 2,797 tests,
@@ -242,9 +306,9 @@ Ten findings, all addressed:
 
 ## Open problems
 
-(none yet)
+- None blocking. See "Known limitations" above.
 
 ## Next step
 
-The final hour: CHANGELOG, CAPABILITIES, README, and the summary at the top of this log.
-Before it, if time allows: review the branch diff for defects.
+Done. For a follow-up: the bounded-dynamic StableHLO path (design doc, "Bounded dynamic
+StableHLO: what was checked"), then Triton batching of bounded requests.

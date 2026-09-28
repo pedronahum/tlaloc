@@ -13,18 +13,20 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **2,919** automated tests: 2,797 that `./gradlew test` runs, and 122
+The suite has **2,960** automated tests: 2,838 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). All
-2,797 were counted in a clean-room `./gradlew test --rerun-tasks --continue` on
-2026-09-28, 0 failures; the 122 were counted earlier in each Maestro module's own
+2,838 were counted in a clean-room `./gradlew test --rerun-tasks --continue` on
+2026-09-29, 0 failures; the 122 were counted earlier in each Maestro module's own
 `test --rerun`, 0 failures, and not re-run for this count. (Two GPU and CPU timing
-assertions fail now and then under machine load: `LlamaDecoderPytorchBenchTest`'s
-"backward slower than forward" and `KptxPagedAttentionBenchTest`'s dispatch floor;
-both passed in the counted run.)
-On the GB10 workstation where they were counted, 101 of them skip by name: 88 MLIR
+assertions fail now and then under machine load: `KptxPagedAttentionBenchTest`'s
+dispatch floor, which passed in the counted run, and `LlamaDecoderPytorchBenchTest`'s
+"backward slower than forward", which skipped itself in the counted run because it saw
+concurrent load.)
+On the GB10 workstation where they were counted, 102 of them skipped by name: 88 MLIR
 round trips that need `stablehlo-translate` or `sdy-opt`, 12 TPU tests (5 smoke, 7
-Mosaic kernels), and one timing run that needs `TLALOC_PAGED_BENCH=1`. This is the one place the documentation states the count.
+Mosaic kernels), one timing run that needs `TLALOC_PAGED_BENCH=1`, and the
+load-sensitive timing check above. This is the one place the documentation states the count.
 
 ## Automatic differentiation
 
@@ -45,6 +47,7 @@ Mosaic kernels), and one timing run that needs `TLALOC_PAGED_BENCH=1`. This is t
 |---|---|---|
 | Shape- and dtype-typed tensors | ✅ | `DTensor<Rank2<Sym, Sym>, F32>`; mismatches are compile errors |
 | Named axes | ✅ | `Named<N, A>`; a contract over misaligned axis names does not compile |
+| Bounded dimensions (experimental) — `Bounded<B>` with `object B : DimBound(max)` | ✅ | A constant size outside `1..max`, two bounds on axes an elementwise operator aligns, and a bound below 1 are compile errors at the call's file, line and column (`BoundedDimCompileCheckTest`); a bound from another compiled module is checked at run time only. `boundedProgram` runs at any size in the interpreter, exact or padded to a bucket with valid-mask inputs, and equals a static-shape program at every size (`BoundedProgramTest`); `valueAndGrad` gives a loss and its gradients per bucket, equal to the analytic ones at every size. [Design](design/bounded-dims.md) |
 | Op surface — elementwise, broadcasting, reductions, shape ops, `concat`/`slice`/`pad`, `where` | ✅ | Full [DiffKT](https://github.com/facebookresearch/diffkt) parity, closed |
 | NN ops — conv2d (incl. grouped/depthwise), pooling, softmax, embedding, losses, batch norm | ✅ | |
 | Special functions — `lgamma`, `digamma`, `polygamma`, `integral` | ✅ | |
@@ -79,6 +82,8 @@ Mosaic kernels), and one timing run that needs `TLALOC_PAGED_BENCH=1`. This is t
 | Capability | Status | Notes |
 |---|---|---|
 | Paged attention, KV-cache writes, decode bucketing | ✅ | Inference-only ops; they refuse differentiation by name. Paged attention takes an optional `sliding_window` (a row sees its last W positions, its own included, as transformers' mask does), checked against a dense walk for every window and length in the interpreter and against the interpreter on the GB10. Its two f32 dots are emitted with HIGHEST precision, so XLA does not run them in TF32 |
+| Bounded programs served without a compile per size | ✅ GB10 | `BoundedProgramExport` writes one body per bucket and `tlaloc-bounded.json` (`tlaloc-bounded-v1`), refused when padding changes the result in the interpreter. `tlaloc_bounded.py` on PJRT-CUDA: a masked mean, a masked softmax, a two-bound embedding and a training step at every size up to the bound against the interpreter (`BoundedArtifactRunTest`). Triton's bounded mode: two example models at every length 1..16 over HTTP and gRPC (`verify.sh`). 200 requests of mixed length through attention: 6 compiles against 163 at exact lengths, execution 13 % slower from padding. Bounded dynamic StableHLO is not used: the PJRT C API cannot create its buffers ([design](design/bounded-dims.md)) |
+| A training loop over batches of varying length on the GPU | ✅ GB10 | `BoundedProgram.valueAndGrad` run through a `PjrtSession` (`BoundedExecutor`): 40 SGD steps over lengths 1..64 compile 4 executables, one per bucket, where exact lengths compile 27 (`PjrtBoundedTrainingTest`) |
 | HuggingFace safetensors ingestion | ✅ | Kotlin parser; certified against torch reading the same bytes |
 | safetensors WRITING | ✅ | F32/F64/I32/BF16, header padded and tensors ordered so every offset is naturally aligned; certified both ways against the reference `safetensors` library on raw bytes. Sharded and streamed output are not supported; F16/FP8 refuse by name |
 | A real Llama serving end to end | ✅ | TinyLlama-1.1B, all 22 layers, on PJRT-CUDA — 6/6 generated token ids identical to HuggingFace transformers, driven directly *and* through vLLM |
