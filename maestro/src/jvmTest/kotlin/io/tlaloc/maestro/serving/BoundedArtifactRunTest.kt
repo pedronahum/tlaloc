@@ -14,6 +14,7 @@ import io.tlaloc.autograd.softmax
 import io.tlaloc.autograd.specOf
 import io.tlaloc.autograd.sum
 import io.tlaloc.autograd.tanh
+import io.tlaloc.autograd.transpose
 import io.tlaloc.autograd.times
 import io.tlaloc.core.Bounded
 import io.tlaloc.core.DTensor
@@ -45,6 +46,7 @@ import kotlin.test.fail
 object MaxSeqRun : DimBound(64)
 object MaxRowsRun : DimBound(4)
 object MaxColsRun : DimBound(16)
+object MaxSeqBench : DimBound(512)
 
 /**
  * A bounded-program artifact served by `harness/python/tlaloc_bounded.py` on a PJRT plugin, at
@@ -151,6 +153,75 @@ class BoundedArtifactRunTest {
             "$vsInterpreter, bucketed against one body per size $vsPerSize (relative to max(1, |y|))")
     }
 
+    /**
+     * The compile-count measurement (docs/work-log/bounded-dims-progress.md). A mixed-length
+     * workload, 200 requests with lengths drawn from 1..512 (seed 2026), through single-head
+     * self-attention with a masked key softmax and a masked mean pool, served two ways: one
+     * body per distinct length (what a per-shape export compiles), and the bounded export's
+     * power-of-two buckets 16..512. Both run in one process each through tlaloc_bounded on
+     * PJRT-CUDA. Opt-in: `TLALOC_BOUNDED_BENCH=1`.
+     */
+    @Test
+    fun `mixed-length workload, compiles per distinct length against compiles per bucket`() {
+        if (System.getenv("TLALOC_BOUNDED_BENCH") != "1") {
+            println("[skip] set TLALOC_BOUNDED_BENCH=1 to run the mixed-length compile-count measurement"); return
+        }
+        val d = 64
+        val program = boundedProgram(
+            "attention_pool",
+            listOf(
+                specOf<Rank2<Bounded<MaxSeqBench>, Sym>>(F32, d),
+                specOf<Rank2<Sym, Sym>>(F32, d, d),
+                specOf<Rank2<Sym, Sym>>(F32, d, d),
+                specOf<Rank2<Sym, Sym>>(F32, d, d),
+            ),
+            specOf<Rank1<Sym>>(F32, d),
+        ) { xs, ctx ->
+            val x = xs[0]
+            val q = x matmulShape xs[1]
+            val k = x matmulShape xs[2]
+            val v = x matmulShape xs[3]
+            val mask = ctx.validMask(MaxSeqBench)
+            val scores = (q matmulShape k.transpose<Shape>(1, 0)) * 0.125f
+            val biased = scores + scores.broadcastAlong<Shape>((mask - 1f) * 1e9f, 1)
+            val o = biased.softmax() matmulShape v
+            (o * o.broadcastAlong<Shape>(mask, 0)).sum<Rank1<Sym>>(intArrayOf(0)) / ctx.validLength(MaxSeqBench)
+        }
+        var state = 2026L
+        fun next(bound: Int): Int {
+            state = state * 6364136223846793005L + 1442695040888963407L
+            return ((state ushr 33) % bound).toInt() + 1
+        }
+        val lengths = List(200) { next(MaxSeqBench.max) }
+        val weights = (1..3).map { f32(intArrayOf(d, d), 100 + it) }
+        val inputs = lengths.map { n -> listOf(f32(intArrayOf(n, d), n)) + weights }
+        val distinct = lengths.distinct().sorted()
+
+        val bucketLadders = BucketLadders.powersOfTwo(program.bounds, minBucket = 16)
+        val t0 = System.nanoTime()
+        val bucketed = serve(program, bucketLadders, inputs) ?: return
+        val bucketedWall = (System.nanoTime() - t0) / 1e9
+        val perLength = BucketLadders(mapOf(MaxSeqBench to (distinct + MaxSeqBench.max).distinct()))
+        val t1 = System.nanoTime()
+        val exact = serve(program, perLength, inputs, paddingCheckSizes = listOf(mapOf(MaxSeqBench to distinct.first()))) ?: return
+        val exactWall = (System.nanoTime() - t1) / 1e9
+        var worst = 0f
+        for (i in inputs.indices) {
+            worst = maxOf(worst, assertClose(exact.results[i].second, bucketed.results[i].second, "request $i (length ${lengths[i]})", 2e-3f))
+        }
+        val touched = lengths.map { bucketLadders.bucketFor(MaxSeqBench, it) }.distinct().size
+        assertEquals(touched, bucketed.compileCount)
+        assertEquals(distinct.size, exact.compileCount)
+        println(
+            "[bounded-bench] ${lengths.size} requests, lengths 1..${MaxSeqBench.max}, ${distinct.size} distinct, on ${bucketed.platform}\n" +
+                "[bounded-bench] one body per length: ${exact.compileCount} compiles, %.2f s compiling, %.2f s executing, %.1f s export+serve wall\n"
+                    .format(exact.compileSeconds, exact.runSeconds - exact.compileSeconds, exactWall) +
+                "[bounded-bench] buckets ${bucketLadders.ladder(MaxSeqBench)}: ${bucketed.compileCount} compiles, %.2f s compiling, %.2f s executing, %.1f s export+serve wall\n"
+                    .format(bucketed.compileSeconds, bucketed.runSeconds - bucketed.compileSeconds, bucketedWall) +
+                "[bounded-bench] largest difference between the two, relative to max(1, |y|): $worst",
+        )
+    }
+
     @Test
     fun `the python runtime's unit lane passes`() {
         val python = resolvePython() ?: run { println("[skip] no python3 for tlaloc_bounded_test"); return }
@@ -186,6 +257,7 @@ class BoundedArtifactRunTest {
         val results: List<Pair<List<Int>, FloatArray>>,
         val compileCount: Int,
         val compileSeconds: Double,
+        val runSeconds: Double,
     )
 
     private fun f32(dims: IntArray, salt: Int): DTensor<Shape, F32> {
@@ -225,12 +297,18 @@ class BoundedArtifactRunTest {
     }
 
     /** Exports [program] with [ladders], serves [inputs] through Python on CUDA; null when skipped. */
-    private fun serve(program: BoundedProgram, ladders: BucketLadders, inputs: List<List<DTensor<*, *>>>): Served? {
+    private fun serve(
+        program: BoundedProgram,
+        ladders: BucketLadders,
+        inputs: List<List<DTensor<*, *>>>,
+        paddingCheckSizes: List<Map<DimBound, Int>>? = null,
+    ): Served? {
         val python = resolvePython() ?: run { println("[skip] no python3 for the bounded-artifact lane"); return null }
         val dir = Files.createTempDirectory("tlaloc-bounded-run")
         try {
             val artifact = dir.resolve("artifact")
-            BoundedProgramExport.export(program, artifact, ladders)
+            if (paddingCheckSizes == null) BoundedProgramExport.export(program, artifact, ladders)
+            else BoundedProgramExport.export(program, artifact, ladders, paddingCheckSizes = paddingCheckSizes)
             val request = dir.resolve("request.json")
             Files.writeString(request, requestJson(inputs))
             val output = dir.resolve("out.json")
@@ -262,6 +340,7 @@ class BoundedArtifactRunTest {
                 results,
                 (out["compileCount"] as JsonNumber).asInt("compileCount"),
                 (out["compileSeconds"] as JsonNumber).value,
+                (out["runSeconds"] as JsonNumber).value,
             )
         } finally {
             dir.toFile().deleteRecursively()

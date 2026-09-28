@@ -288,8 +288,8 @@ public final class io/tlaloc/maestro/serving/BoundedProgramExport {
 	public static final field ENTRY_POINT Ljava/lang/String;
 	public static final field INSTANCE Lio/tlaloc/maestro/serving/BoundedProgramExport;
 	public static final field PROGRAMS_DIR Ljava/lang/String;
-	public final fun export (Lio/tlaloc/autograd/BoundedProgram;Ljava/nio/file/Path;Lio/tlaloc/autograd/BucketLadders;F)Lio/tlaloc/maestro/serving/BoundedManifest;
-	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/BoundedProgramExport;Lio/tlaloc/autograd/BoundedProgram;Ljava/nio/file/Path;Lio/tlaloc/autograd/BucketLadders;FILjava/lang/Object;)Lio/tlaloc/maestro/serving/BoundedManifest;
+	public final fun export (Lio/tlaloc/autograd/BoundedProgram;Ljava/nio/file/Path;Lio/tlaloc/autograd/BucketLadders;FLjava/util/List;)Lio/tlaloc/maestro/serving/BoundedManifest;
+	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/BoundedProgramExport;Lio/tlaloc/autograd/BoundedProgram;Ljava/nio/file/Path;Lio/tlaloc/autograd/BucketLadders;FLjava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/BoundedManifest;
 	public final fun load (Ljava/nio/file/Path;)Lio/tlaloc/maestro/serving/BoundedManifest;
 }
 

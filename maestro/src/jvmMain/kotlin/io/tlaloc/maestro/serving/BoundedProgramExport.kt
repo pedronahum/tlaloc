@@ -22,7 +22,8 @@ import java.security.MessageDigest
  * of buckets, and a [BoundedManifest] (docs/design/bounded-dims.md).
  *
  * Before writing anything it compares, in the reference interpreter, the padded result with
- * the exact-size result at the edges of every bucket ([BoundedProgram.checkPadding]), and
+ * the exact-size result at the edges of every bucket ([BoundedProgram.checkPadding]; or at
+ * `paddingCheckSizes`), and
  * refuses the export when they differ by more than the tolerance: a program that reads a
  * padded position without masking it would otherwise serve wrong answers for every size that
  * is not a bucket size.
@@ -38,9 +39,11 @@ object BoundedProgramExport {
         dir: Path,
         ladders: BucketLadders = BucketLadders.powersOfTwo(program.bounds),
         tolerance: Float = 1e-5f,
+        paddingCheckSizes: List<Map<DimBound, Int>> = program.edgeSizes(ladders),
     ): BoundedManifest {
         for (b in program.bounds) ladders.ladder(b)
-        val report = program.checkPadding(ladders, tolerance = tolerance)
+        require(paddingCheckSizes.isNotEmpty()) { "BoundedProgramExport '${program.name}': no sizes to check padding at" }
+        val report = program.checkPadding(ladders, paddingCheckSizes, tolerance = tolerance)
         require(report.passed) {
             "BoundedProgramExport '${program.name}': at sizes ${report.worstSizes?.describe()} the padded result " +
                 "differs from the exact one by ${report.maxDifference} (relative to max(1, max |exact|)), over the " +
