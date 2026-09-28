@@ -67,6 +67,12 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   eigenvector derivative is infinite at a repeated eigenvalue (as in JAX), the
   eigenvalue derivative is not. New DXIR kinds `EIGH_W` and `EIGH_V`, lowered as
   one `stablehlo.while` over all rotations and a `stablehlo.sort`.
+- **`rk4` and `rk4Trajectory`** (`:nn`), the classical fixed-step fourth-order
+  Runge–Kutta integrator for `y' = f(t, y)`, on capture-API `Tracer`s (the
+  captured function is the unrolled integrator, differentiable in reverse and
+  forward mode with respect to the initial state and every tensor `f` reads) and
+  on host `DTensor`s. Inside `grad { }` the integrator loop is written in the
+  lambda instead, as in `examples/differentiable-physics`.
 
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,

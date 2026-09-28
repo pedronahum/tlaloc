@@ -16,7 +16,7 @@ Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`.
 | Tier 2: `solve`, `det` (LU) | done | 6 |
 | Tier 2: `qr` (`qrQ`, `qrR`) | done | 7 |
 | Tier 3: `eigh` (`eighValues`, `eighVectors`) | done | 8 |
-| Tier 3: RK4 integrator | not started | |
+| Tier 3: RK4 integrator (`rk4`, `rk4Trajectory` in `:nn`) | done | 9 |
 
 ## Commit 1: `TRIANGLE`, `triangularSolve`, `cholesky`
 
@@ -165,6 +165,28 @@ the eigenvalue gradient is finite and the eigenvector gradient is not.
 Limitations: fixed sweeps (not adaptive; for large or badly scaled matrices 20 sweeps
 may not converge to rounding); on the GPU `20·n(n−1)/2` sequential loop steps.
 
+## Commit 9: RK4
+
+`:nn/Ode.kt`. A reusable integrator cannot be called inside `grad { }`: the plugin lowers
+only calls it knows by name, and a library function taking `f` as a lambda is not one
+(an `inline` function is still a call at the FIR stage, where the plugin runs). So
+`rk4` is built on the capture API (`Tracer`), the route `:nn` training uses: the
+captured function is the unrolled integrator and both transforms differentiate it
+with respect to `y0` and every leaf `f` reads. A host `DTensor` overload computes the
+same steps. `grad { }` users write the loop in the lambda, which the plugin already
+differentiates (`examples/differentiable-physics`).
+
+Tests (`OdeTest`): the host result equals RK4's exact amplification factor
+`R(−dt)ⁿ` for linear decay (which pins the coefficients) and its error ratio for
+halved steps is RK4's 19.75; a captured damped oscillator's gradient with respect to
+`M` and `y0`, and its tangent, against finite differences of a Double RK4; gradient
+descent through the captured integrator recovers a damping coefficient (1.0 → 0.3).
+First attempt of the fit used step 2, above 2/L″ ≈ 0.87, and diverged; step 0.5.
+Mutating a coefficient in either overload fails the tests.
+
+Not done: the captured integrator was not run on PJRT (its graph is MATMUL/ADD/MUL,
+all GPU-certified already; `:runtime-pjrt` tests do not depend on `:nn`).
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -189,4 +211,4 @@ may not converge to rounding); on the GPU `20·n(n−1)/2` sequential loop steps
 
 ## Next step
 
-RK4 integrator (fixed step), following `examples/differentiable-physics`.
+Docs: CAPABILITIES.md, README op table, summary at the top of this log.
