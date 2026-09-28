@@ -13,17 +13,18 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **2,765** automated tests: 2,643 that `./gradlew test` runs, and 122
+The suite has **2,919** automated tests: 2,797 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). All
-2,643 were counted in a clean-room `./gradlew test --rerun-tasks --continue`, and the
-122 in each Maestro module's own `test --rerun`, 0 failures. (One CPU timing
-assertion, `LlamaDecoderPytorchBenchTest`'s "backward slower than forward", fails
-now and then under machine load; in the run before the counted one it failed, in
-the counted one it passed.)
-On the GB10 workstation where they were counted, 94 of them skip by name: 88 MLIR
-round trips that need `stablehlo-translate` or `sdy-opt`, 5 TPU smoke tests, and
-one timing run that needs `TLALOC_PAGED_BENCH=1`. This is the one place the documentation states the count.
+2,797 were counted in a clean-room `./gradlew test --rerun-tasks --continue` on
+2026-09-28, 0 failures; the 122 were counted earlier in each Maestro module's own
+`test --rerun`, 0 failures, and not re-run for this count. (Two GPU and CPU timing
+assertions fail now and then under machine load: `LlamaDecoderPytorchBenchTest`'s
+"backward slower than forward" and `KptxPagedAttentionBenchTest`'s dispatch floor;
+both passed in the counted run.)
+On the GB10 workstation where they were counted, 101 of them skip by name: 88 MLIR
+round trips that need `stablehlo-translate` or `sdy-opt`, 12 TPU tests (5 smoke, 7
+Mosaic kernels), and one timing run that needs `TLALOC_PAGED_BENCH=1`. This is the one place the documentation states the count.
 
 ## Automatic differentiation
 
