@@ -385,6 +385,8 @@ internal object KotlinSourceRenderer {
             OpKind.DET -> ranked("${r(0)}.det()")
             OpKind.QR_Q -> ranked("${r(0)}.qrQ()")
             OpKind.QR_R -> ranked("${r(0)}.qrR()")
+            OpKind.EIGH_W -> ranked("${r(0)}.eighValues()")
+            OpKind.EIGH_V -> ranked("${r(0)}.eighVectors()")
             OpKind.SOLVE -> {
                 val tr = op.attrs["transpose_a"] as? Boolean ?: refuse(op, "missing Boolean attr 'transpose_a'")
                 ranked("${r(0)}.solve(${r(1)}, $tr)")

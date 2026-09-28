@@ -166,6 +166,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.type.rank == 4 && op.type.dtype == F32) {
             return deriveResultIrTypeRank4(op, operandIrTypes)
         }
+        // EIGH_W: [n] from an [n, n] operand, its row atom.
+        if (op.op == OpKind.EIGH_W && op.type.dtype == F32) {
+            val aIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+            val atoms = shapeAtomsOf(aIr, 2) ?: return null
+            return rebuildShapeAtoms(aIr, listOf(atoms[0]), 1)
+        }
         if (op.type.rank != 2) return null
         if (op.type.dtype != F32 && op.op != OpKind.COMPARE) return null
         return when (op.op) {
@@ -226,7 +232,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 operandIrTypes[op.operands[1].id]
             }
             // QR's Q is shaped like A (m×n); R is n×n, both atoms A's column atom.
-            OpKind.QR_Q -> operandIrTypes[op.operands[0].id]
+            OpKind.QR_Q, OpKind.EIGH_V -> operandIrTypes[op.operands[0].id]
             OpKind.QR_R -> {
                 val aIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
                 val atoms = shapeAtomsOf(aIr, 2) ?: return null
@@ -1738,7 +1744,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
         if (op.op == OpKind.TRANSPOSE) return irTranspose(op, env, context)
         if (op.op == OpKind.CHOLESKY || op.op == OpKind.TRIANGULAR_SOLVE || op.op == OpKind.TRIANGLE ||
-            op.op == OpKind.SOLVE || op.op == OpKind.DET || op.op == OpKind.QR_Q || op.op == OpKind.QR_R
+            op.op == OpKind.SOLVE || op.op == OpKind.DET || op.op == OpKind.QR_Q || op.op == OpKind.QR_R ||
+            op.op == OpKind.EIGH_W || op.op == OpKind.EIGH_V
         ) {
             return irLinalg(op, env, context)
         }
@@ -4914,6 +4921,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         if (op.op == OpKind.DET) return irDet(op, env, context)
+        if (op.op == OpKind.EIGH_W) return irEighValues(op, env, context)
         if (op.type.rank != 2 || op.type.dtype != F32) return null
         if (op.operands.any { it.type.rank != 2 || it.type.dtype != F32 }) return null
         val decls = op.operands.map { env[it.id] ?: return null }
@@ -4928,11 +4936,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.SOLVE -> "solve" to 2
             OpKind.QR_Q -> "qrQ" to 0
             OpKind.QR_R -> "qrR" to 0
+            OpKind.EIGH_V -> "eighVectors" to 0
             else -> return null
         }
         val sym = linalgF32Symbol(name, regular) ?: return null
         val typeArgs = when (op.op) {
-            OpKind.CHOLESKY -> listOf(atoms[0][0])
+            OpKind.CHOLESKY, OpKind.EIGH_V -> listOf(atoms[0][0])
             OpKind.TRIANGULAR_SOLVE, OpKind.SOLVE -> listOf(atoms[0][0], atoms[1][1])
             else -> listOf(atoms[0][0], atoms[0][1])
         }
@@ -4966,6 +4975,26 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
             else -> Unit
         }
+        return call
+    }
+
+    /** `EIGH_W(a)` → `a.eighValues()`, a rank-1 result whose atom is `a`'s row atom. */
+    private fun IrBuilderWithScope.irEighValues(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val a = op.operands.singleOrNull() ?: return null
+        if (a.type.rank != 2 || a.type.dtype != F32 || op.type.rank != 1) return null
+        val decl = env[a.id] ?: return null
+        val ir = irTypeForNode(a, context) as? IrSimpleType ?: return null
+        val atoms = shapeAtomsOf(ir, 2) ?: return null
+        val sym = linalgF32Symbol("eighValues", 0) ?: return null
+        val resultIrType = irTypeForNode(op, context) ?: rebuildShapeAtoms(ir, listOf(atoms[0]), 1) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(startOffset = startOffset, endOffset = endOffset, type = resultIrType, symbol = sym)
+        if (call.typeArguments.size != 1) return null
+        call.typeArguments[0] = atoms[0]
+        call.arguments[0] = irGet(decl)
         return call
     }
 

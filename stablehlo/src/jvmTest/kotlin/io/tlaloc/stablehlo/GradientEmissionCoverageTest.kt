@@ -138,6 +138,10 @@ class GradientEmissionCoverageTest {
         // CHOLESKY, whose gradient graph holds all three linear-algebra kinds.
         unaryLoss("cholesky", OpKind.CHOLESKY, listOf(3, 3)),
         unaryLoss("qr_q", OpKind.QR_Q, listOf(4, 3)),
+        unaryLoss("eigh_v", OpKind.EIGH_V, listOf(3, 3)),
+        squaredSumLoss("eigh_w", listOf("a" to DxirType(F32, listOf(3, 3))), DxirType(F32, listOf(3))) { ps ->
+            op(OpKind.EIGH_W, listOf(ps[0]), DxirType(F32, listOf(3)))
+        },
         squaredSumLoss("qr_r", listOf("a" to DxirType(F32, listOf(4, 3))), DxirType(F32, listOf(3, 3))) { ps ->
             op(OpKind.QR_R, listOf(ps[0]), DxirType(F32, listOf(3, 3)))
         },

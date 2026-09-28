@@ -15,7 +15,8 @@ Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`.
 | `examples/gaussian-process` | done | 5 |
 | Tier 2: `solve`, `det` (LU) | done | 6 |
 | Tier 2: `qr` (`qrQ`, `qrR`) | done | 7 |
-| Tier 3: `eigh`, RK4 | not started | |
+| Tier 3: `eigh` (`eighValues`, `eighVectors`) | done | 8 |
+| Tier 3: RK4 integrator | not started | |
 
 ## Commit 1: `TRIANGLE`, `triangularSolve`, `cholesky`
 
@@ -146,6 +147,24 @@ mutation that kept the diagonal in Ω was equivalent (it cancels).
 Limitations: rows ≥ columns only (a wide matrix is refused by name); full column
 rank for derivatives (they divide by `R`).
 
+## Commit 8: `eigh`
+
+`EIGH_W` / `EIGH_V`, single-result for the QR reason. Algorithm: cyclic Jacobi on
+`sym(A)` with a fixed `EIGH_SWEEPS = 20`, chosen so that the interpreter and the
+StableHLO loop run exactly the same rotations (a convergence test would need an extra
+reduction per sweep in the loop; a rotation with `A[p][q] = 0` is the identity, so the
+surplus sweeps change nothing). Eigenvector signs: largest-magnitude entry positive,
+so `V` is a continuous function of `A` where eigenvalues are distinct and finite
+differences are meaningful; JAX/LAPACK signs are arbitrary, so the JAX parity test
+compares `w`, `|V|`, and the gradient of `Σw³ + Σ(V⊙V)⊙W`, which is sign-blind.
+Rules: JAX's JVP and its adjoint (checked in numpy before writing Kotlin: 1.7e-9).
+`F = 1/(I + D) − I` (JAX's spelling) built from DXIR broadcasting (`w − wᵀ` as
+`SUB([n], [n, 1])`). The degenerate-eigenvalue behaviour is pinned: at `sym(A) = I`
+the eigenvalue gradient is finite and the eigenvector gradient is not.
+
+Limitations: fixed sweeps (not adaptive; for large or badly scaled matrices 20 sweeps
+may not converge to rounding); on the GPU `20·n(n−1)/2` sequential loop steps.
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -170,4 +189,4 @@ rank for derivatives (they divide by `R`).
 
 ## Next step
 
-Tier 3: `eigh` (Jacobi eigenvalue iteration, fixed sweep count, StableHLO `while`), then RK4.
+RK4 integrator (fixed step), following `examples/differentiable-physics`.

@@ -5,6 +5,8 @@ import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.ops.cholesky
 import io.tlaloc.core.ops.det
+import io.tlaloc.core.ops.eighValues
+import io.tlaloc.core.ops.eighVectors
 import io.tlaloc.core.ops.qrQ
 import io.tlaloc.core.ops.qrR
 import io.tlaloc.core.ops.solve
@@ -116,4 +118,16 @@ fun <M : ShapeAtom, N : ShapeAtom> Tracer<Rank2<M, N>>.qrQ(): Tracer<Rank2<M, N>
 fun <M : ShapeAtom, N : ShapeAtom> Tracer<Rank2<M, N>>.qrR(): Tracer<Rank2<N, N>> {
     val out = toDTensor().qrR()
     return Tracer(tape, tape.op(OpKind.QR_R, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
+}
+
+/** Capture-API [io.tlaloc.core.ops.eighValues]. */
+fun <N : ShapeAtom> Tracer<Rank2<N, N>>.eighValues(): Tracer<io.tlaloc.core.Rank1<N>> {
+    val out = toDTensor().eighValues()
+    return Tracer(tape, tape.op(OpKind.EIGH_W, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
+}
+
+/** Capture-API [io.tlaloc.core.ops.eighVectors]. */
+fun <N : ShapeAtom> Tracer<Rank2<N, N>>.eighVectors(): Tracer<Rank2<N, N>> {
+    val out = toDTensor().eighVectors()
+    return Tracer(tape, tape.op(OpKind.EIGH_V, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
 }

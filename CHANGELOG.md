@@ -60,6 +60,13 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   both from one factorization and is host-only. New DXIR kinds `QR_Q` and `QR_R`,
   lowered as a `stablehlo.while` loop over the columns; a `grad {}` body that uses
   both factors factors twice.
+- **`eighValues()`, `eighVectors()` and `eigh()`**: the eigendecomposition of
+  `(A + Aᵀ)/2` by cyclic Jacobi (a fixed 20 sweeps), eigenvalues ascending,
+  each eigenvector signed so its largest-magnitude entry is positive, F32 and
+  F64. Differentiable in reverse and forward mode with JAX's `eigh` rules; the
+  eigenvector derivative is infinite at a repeated eigenvalue (as in JAX), the
+  eigenvalue derivative is not. New DXIR kinds `EIGH_W` and `EIGH_V`, lowered as
+  one `stablehlo.while` over all rotations and a `stablehlo.sort`.
 
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,

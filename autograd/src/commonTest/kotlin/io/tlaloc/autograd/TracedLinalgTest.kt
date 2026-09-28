@@ -140,4 +140,28 @@ class TracedLinalgTest {
         val scale = want.maxOf { abs(it) }
         for (i in want.indices) assertTrue(abs(want[i] - g[i]) <= 1e-4 * scale, "dA[$i] = ${g[i]}, want ${want[i]}")
     }
+
+    @Test
+    fun capturedEighGradientMatchesFiniteDifferences() {
+        val fn = capture(
+            f = { x: Tracer<Rank2<Sym, Sym>> ->
+                val w = x.eighValues()
+                val v = x.eighVectors()
+                (w * w * w).sum() + (v * v * v).sum()
+            },
+            input = Tensors.f32Matrix<Sym, Sym>(n, n, f(a)),
+            name = "eigh",
+        )
+        val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(fn), listOf(f(a))).single()
+        fun lossD(x: DoubleArray): Double {
+            val (w, v) = LinalgKernels.eigh(x, n)
+            return w.sumOf { it * it * it } + v.sumOf { it * it * it }
+        }
+        val h = 1e-5
+        val want = DoubleArray(a.size) { i ->
+            (lossD(a.copyOf().also { it[i] += h }) - lossD(a.copyOf().also { it[i] -= h })) / (2 * h)
+        }
+        val scale = want.maxOf { abs(it) }
+        for (i in want.indices) assertTrue(abs(want[i] - g[i]) <= 1e-4 * scale, "dA[$i] = ${g[i]}, want ${want[i]}")
+    }
 }

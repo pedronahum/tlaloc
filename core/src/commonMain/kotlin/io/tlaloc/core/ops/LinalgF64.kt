@@ -146,3 +146,23 @@ fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F64>.qr(): Pair<DTensor<
     return DTensor<Rank2<M, N>, F64>(HostF64Storage(q), intArrayOf(m, n), F64) to
         DTensor<Rank2<N, N>, F64>(HostF64Storage(r), intArrayOf(n, n), F64)
 }
+
+/** F64 [eighValues]. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.eighValues(): DTensor<io.tlaloc.core.Rank1<N>, F64> {
+    val n = squareDimF64(this, "eighValues")
+    return DTensor(HostF64Storage(LinalgKernels.eigh(f64Data(this), n).first), intArrayOf(n), F64)
+}
+
+/** F64 [eighVectors]. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.eighVectors(): DTensor<Rank2<N, N>, F64> {
+    val n = squareDimF64(this, "eighVectors")
+    return DTensor(HostF64Storage(LinalgKernels.eigh(f64Data(this), n).second), intArrayOf(n, n), F64)
+}
+
+/** F64 [eigh]. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.eigh(): Pair<DTensor<io.tlaloc.core.Rank1<N>, F64>, DTensor<Rank2<N, N>, F64>> {
+    val n = squareDimF64(this, "eigh")
+    val (w, v) = LinalgKernels.eigh(f64Data(this), n)
+    return DTensor<io.tlaloc.core.Rank1<N>, F64>(HostF64Storage(w), intArrayOf(n), F64) to
+        DTensor<Rank2<N, N>, F64>(HostF64Storage(v), intArrayOf(n, n), F64)
+}

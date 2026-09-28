@@ -120,6 +120,8 @@ public final class io/tlaloc/autograd/TapeEntry {
 public final class io/tlaloc/autograd/TracedLinalgKt {
 	public static final fun cholesky (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun det (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun eighValues (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun eighVectors (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun identityLike (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun invSpd (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun logDetSpd (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;

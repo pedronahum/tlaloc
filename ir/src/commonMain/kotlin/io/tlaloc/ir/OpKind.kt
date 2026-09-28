@@ -115,6 +115,17 @@ enum class OpKind {
     // JVPs are JAX's `qr_jvp_rule`. Lowered as a `stablehlo.while` over the columns.
     QR_Q, QR_R,
 
+    // EIGH_W(A) → w (rank 1, ascending) and EIGH_V(A) → V (n×n, eigenvectors as
+    // columns): the eigendecomposition of sym(A) = (A + Aᵀ)/2 by cyclic Jacobi
+    // (`LinalgKernels.eigh`: a fixed number of sweeps, each column of V signed so its
+    // largest-magnitude entry is positive). Two single-result kinds for the reason
+    // QR_Q/QR_R are. Rules: JAX's `eigh_jvp_rule` (ẇ = diag(Vᵀ·Ṡ·V), V̇ = V·(F ⊙
+    // Vᵀ·Ṡ·V), F_ij = 1/(w_j − w_i) off the diagonal, Ṡ = sym(Ȧ)) and its adjoint,
+    // Ā = sym(V·(diag(w̄) + F ⊙ (Vᵀ·V̄))·Vᵀ). F is infinite at a repeated eigenvalue,
+    // so EIGH_V's derivatives are too there; EIGH_W's are not. Lowered as a
+    // `stablehlo.while` over the rotations, then a `stablehlo.sort`.
+    EIGH_W, EIGH_V,
+
     // §0.4.363 — 2-D window pooling (DiffKT-gap item 4, pooling half).
     // NCHW, attrs: `window` [kh, kw], `window_strides` [sh, sw], `padding`
     // [[top, bottom], [left, right]]. Lowered to `stablehlo.reduce_window`

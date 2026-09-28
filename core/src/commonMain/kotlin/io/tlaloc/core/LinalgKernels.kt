@@ -223,4 +223,64 @@ object LinalgKernels {
         val r = DoubleArray(n * n) { if (it % n >= it / n) w[it] else 0.0 }
         return qOut to r
     }
+
+    /** Jacobi sweeps [eigh] runs; each is a pass over all `n(n−1)/2` pairs. */
+    const val EIGH_SWEEPS: Int = 20
+
+    /**
+     * Eigendecomposition of the symmetric `sym(A) = (A + Aᵀ)/2` by cyclic Jacobi
+     * rotations, [EIGH_SWEEPS] sweeps over the pairs `p < q` in row order (a rotation
+     * with `A[p][q] = 0` is the identity). Returns the eigenvalues in ascending order
+     * (a stable sort) and the eigenvectors as the columns of an `n×n` matrix, each
+     * column's sign chosen so that its largest-magnitude entry (the first, on ties)
+     * is positive. The sign rule makes the eigenvectors continuous in `A` wherever the
+     * eigenvalues are distinct.
+     */
+    fun eigh(a: DoubleArray, n: Int): Pair<DoubleArray, DoubleArray> {
+        require(a.size == n * n) { "eigh: ${a.size} elements for a $n×$n matrix" }
+        val w = DoubleArray(n * n) { 0.5 * (a[it] + a[(it % n) * n + it / n]) }
+        val v = DoubleArray(n * n) { if (it / n == it % n) 1.0 else 0.0 }
+        repeat(EIGH_SWEEPS) {
+            for (p in 0 until n) for (q in p + 1 until n) {
+                val apq = w[p * n + q]
+                var c = 1.0
+                var s = 0.0
+                if (apq != 0.0) {
+                    val tau = (w[q * n + q] - w[p * n + p]) / (2 * apq)
+                    val t = (if (tau >= 0) 1.0 else -1.0) / (kotlin.math.abs(tau) + sqrt(1 + tau * tau))
+                    c = 1 / sqrt(1 + t * t)
+                    s = t * c
+                }
+                for (k in 0 until n) {
+                    val kp = w[k * n + p]
+                    val kq = w[k * n + q]
+                    w[k * n + p] = c * kp - s * kq
+                    w[k * n + q] = s * kp + c * kq
+                }
+                for (k in 0 until n) {
+                    val pk = w[p * n + k]
+                    val qk = w[q * n + k]
+                    w[p * n + k] = c * pk - s * qk
+                    w[q * n + k] = s * pk + c * qk
+                }
+                w[p * n + q] = 0.0
+                w[q * n + p] = 0.0
+                for (k in 0 until n) {
+                    val kp = v[k * n + p]
+                    val kq = v[k * n + q]
+                    v[k * n + p] = c * kp - s * kq
+                    v[k * n + q] = s * kp + c * kq
+                }
+            }
+        }
+        val order = (0 until n).sortedBy { w[it * n + it] }
+        val values = DoubleArray(n) { w[order[it] * n + order[it]] }
+        val vectors = DoubleArray(n * n) { v[(it / n) * n + order[it % n]] }
+        for (j in 0 until n) {
+            var best = 0
+            for (i in 1 until n) if (kotlin.math.abs(vectors[i * n + j]) > kotlin.math.abs(vectors[best * n + j])) best = i
+            if (vectors[best * n + j] < 0) for (i in 0 until n) vectors[i * n + j] = -vectors[i * n + j]
+        }
+        return values to vectors
+    }
 }

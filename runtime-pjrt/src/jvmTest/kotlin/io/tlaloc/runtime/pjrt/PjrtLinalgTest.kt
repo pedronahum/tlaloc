@@ -447,4 +447,56 @@ class PjrtLinalgTest {
             assertTrue(d <= 1e-7, "qr dA: $d")
         }
     }
+
+    private fun eighLoss(dtype: DType) = DxirBuilder.function("eigh_loss") {
+        val a = param("a", t(dtype, n, n))
+        val ww = param("ww", t(dtype, n))
+        val wv = param("wv", t(dtype, n, n))
+        val w = op(OpKind.EIGH_W, listOf(a), t(dtype, n))
+        val v = op(OpKind.EIGH_V, listOf(a), t(dtype, n, n))
+        val lw = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(w, ww), t(dtype, n))), t(dtype))
+        val lv = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(v, wv), t(dtype, n, n))), t(dtype))
+        listOf(op(OpKind.ADD, listOf(lw, lv), t(dtype)))
+    }
+
+    @Test
+    fun eighLoweringMatchesTheKernelAndItsGradientMatchesFiniteDifferences() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val ww = doubleArrayOf(0.7, -1.2, 0.4, 0.9)
+        TestBackend.session().use { session ->
+            // f64 forward against LinalgKernels.eigh: nonsymmetric input (symmetrized),
+            // an SPD matrix, a diagonal one (no rotation does anything), 1×1.
+            val cases = listOf(n to gen, n to spd, 3 to doubleArrayOf(3.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 2.0), 1 to doubleArrayOf(-4.0))
+            for ((k, a) in cases) {
+                val (wWant, vWant) = LinalgKernels.eigh(a, k)
+                val wFn = DxirBuilder.function("w") { listOf(op(OpKind.EIGH_W, listOf(param("a", t(F64, k, k))), t(F64, k))) }
+                val vFn = DxirBuilder.function("v") { listOf(op(OpKind.EIGH_V, listOf(param("a", t(F64, k, k))), t(F64, k, k))) }
+                val wGot = session.runOnF64(wFn, listOf(a)).single()
+                val vGot = session.runOnF64(vFn, listOf(a)).single()
+                assertTrue(maxRelDiff(wWant, wGot) <= 1e-12, "eigenvalues of $k×$k: ${maxRelDiff(wWant, wGot)}")
+                assertTrue(maxRelDiff(vWant, vGot) <= 1e-12, "eigenvectors of $k×$k: ${maxRelDiff(vWant, vGot)}")
+            }
+            val f32Loss = eighLoss(F32)
+            for (g in listOf(f32Loss, DxirReverseTransform.apply(f32Loss))) {
+                val inputs = listOf(f32(gen), f32(ww), f32(w44))
+                val want = DxirInterpreter.evalFunction(g, inputs)
+                val got = session.runOn(g, inputs)
+                for (r in want.indices) {
+                    val d = maxRelDiff(
+                        DoubleArray(want[r].size) { want[r][it].toDouble() },
+                        DoubleArray(got[r].size) { got[r][it].toDouble() },
+                    )
+                    assertTrue(d <= TestBackend.defaultDotRelTolerance, "${g.name} result $r: $d")
+                }
+            }
+            fun lossD(a: DoubleArray): Double {
+                val (w, v) = LinalgKernels.eigh(a, n)
+                return dot(w, ww) + dot(v, w44)
+            }
+            val g = session.runOnF64(DxirReverseTransform.apply(eighLoss(F64)), listOf(gen, ww, w44))
+            val d = maxRelDiff(fdGrad(gen, 1e-6, ::lossD), g[0])
+            assertTrue(d <= 1e-7, "eigh dA: $d")
+        }
+    }
 }

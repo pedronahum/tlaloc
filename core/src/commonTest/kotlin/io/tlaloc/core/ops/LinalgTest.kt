@@ -208,4 +208,21 @@ class LinalgTest {
         val wide = f64(2, 3, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
         assertTrue(assertFailsWith<IllegalArgumentException> { wide.qrR() }.message!!.contains("rows ≥ columns"))
     }
+
+    @Test
+    fun eighHostFunctions() {
+        // [[2, 1], [1, 2]]: eigenvalues 1 and 3, eigenvectors (1, −1)/√2 and (1, 1)/√2
+        // (signed so the first largest entry is positive).
+        val a = f64(2, 2, 2.0, 1.0, 1.0, 2.0)
+        val (w, v) = a.eigh()
+        assertContentEquals(w.data(), a.eighValues().data())
+        assertContentEquals(v.data(), a.eighVectors().data())
+        assertEquals(1.0, w.data()[0], 1e-15)
+        assertEquals(3.0, w.data()[1], 1e-15)
+        val r = 1 / kotlin.math.sqrt(2.0)
+        val want = doubleArrayOf(r, r, -r, r)
+        for (i in want.indices) assertEquals(want[i], v.data()[i], 1e-15)
+        val w32 = Tensors.f32Matrix<Sym, Sym>(2, 2, floatArrayOf(2f, 1f, 1f, 2f)).eighValues().hostF32()
+        assertEquals(listOf(1f, 3f), w32.toList())
+    }
 }

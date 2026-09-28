@@ -636,6 +636,12 @@ object DxirInterpreter {
                 val (q, r) = LinalgKernels.qr(widen(a), t.dims[0], t.dims[1])
                 (if (op.op == OpKind.QR_Q) q else r).narrow()
             }
+            OpKind.EIGH_W, OpKind.EIGH_V -> {
+                val n = linalgSquareDim(op.operands[0].type, op.op.name)
+                val a = evalNode(op.operands[0], env, multiResults)
+                val (w, v) = LinalgKernels.eigh(widen(a), n)
+                (if (op.op == OpKind.EIGH_W) w else v).narrow()
+            }
             OpKind.DET -> {
                 val n = linalgSquareDim(op.operands[0].type, "DET")
                 val a = evalNode(op.operands[0], env, multiResults)

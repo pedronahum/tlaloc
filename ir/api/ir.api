@@ -399,6 +399,8 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field DIGAMMA Lio/tlaloc/ir/OpKind;
 	public static final field DIV Lio/tlaloc/ir/OpKind;
 	public static final field DOT Lio/tlaloc/ir/OpKind;
+	public static final field EIGH_V Lio/tlaloc/ir/OpKind;
+	public static final field EIGH_W Lio/tlaloc/ir/OpKind;
 	public static final field EMBEDDING Lio/tlaloc/ir/OpKind;
 	public static final field EMBEDDING_GRAD Lio/tlaloc/ir/OpKind;
 	public static final field EXP Lio/tlaloc/ir/OpKind;
@@ -1519,6 +1521,8 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getDigammaRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getDivRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getDotRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getEighVRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getEighWRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getEmbeddingRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getExpRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getGatherRule ()Lio/tlaloc/ir/passes/VjpRule;

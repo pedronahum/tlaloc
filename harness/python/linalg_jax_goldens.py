@@ -130,5 +130,19 @@ def main():
     emit("qrGrad", jax.grad(qr_loss)(TALL))
 
 
+    # Eigenvector signs are arbitrary in JAX (LAPACK), so the pinned values are w,
+    # |V| and the gradient of a loss that does not see the signs.
+    w, v = jnp.linalg.eigh((GEN + GEN.T) / 2)
+    emit("eighW", w)
+    emit("eighAbsV", jnp.abs(v))
+    wv = jnp.arange(N * N, dtype=jnp.float64).reshape(N, N) / 7.0 - 1.0
+
+    def eigh_loss(a):
+        w, v = jnp.linalg.eigh(a, symmetrize_input=True)
+        return cube_sum(w) + jnp.sum(v * v * wv)
+
+    emit("eighGrad", jax.grad(eigh_loss)(GEN))
+
+
 if __name__ == "__main__":
     main()

@@ -484,6 +484,26 @@ object DxirForwardTransform {
                     b.op(OpKind.MATMUL, listOf(b.op(OpKind.SUB, listOf(c, omega), r.type), r), ty)
                 }
             }
+            // JAX's eigh_jvp_rule: M = Vᵀ·sym(Ȧ)·V, ẇ = diag(M), V̇ = V·(F ⊙ M).
+            OpKind.EIGH_W, OpKind.EIGH_V -> {
+                val a = vOps[0]
+                val vecs = if (node.op == OpKind.EIGH_V) v else VjpRegistry.eighV(b, a)
+                val aDot = t(node.operands[0])
+                val s = b.op(
+                    OpKind.TRIANGLE,
+                    listOf(b.op(OpKind.ADD, listOf(aDot, transpose2(b, aDot)), a.type)),
+                    a.type,
+                    mapOf("lower" to 0.5, "diagonal" to 0.5, "upper" to 0.5),
+                )
+                val m = b.op(OpKind.MATMUL, listOf(transpose2(b, vecs), b.op(OpKind.MATMUL, listOf(s, vecs), a.type)), a.type)
+                if (node.op == OpKind.EIGH_W) {
+                    val diag = b.op(OpKind.TRIANGLE, listOf(m), a.type, mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
+                    b.op(OpKind.SUM, listOf(diag), ty, mapOf("reduction_dims" to listOf(1)))
+                } else {
+                    val f = VjpRegistry.eighF(b, VjpRegistry.eighW(b, a), a)
+                    b.op(OpKind.MATMUL, listOf(vecs, b.op(OpKind.MUL, listOf(f, m), a.type)), ty)
+                }
+            }
             // ḋ = d·tr(A⁻¹·Ȧ), the trace as the sum of TRIANGLE(…, 0, 1, 0). `v` is d.
             OpKind.DET -> {
                 val a = vOps[0]

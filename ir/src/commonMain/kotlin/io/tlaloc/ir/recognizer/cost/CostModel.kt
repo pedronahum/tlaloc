@@ -124,6 +124,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     //   LU of [n, n]: 2n³/3; SOLVE adds 2·n²·k for the two triangular solves.
     //   Householder QR of [m, n] with Q formed: about 2mn² + 4m²n.
     OpKind.QR_Q, OpKind.QR_R -> op.operands[0].type.dims.let { (m, n) -> 2.0 * m * n * n + 4.0 * m * m * n }
+    //   Jacobi eigh: EIGH_SWEEPS sweeps of n(n−1)/2 rotations, 12n each.
+    OpKind.EIGH_W, OpKind.EIGH_V -> op.operands[0].type.dims[0].toDouble().let {
+        io.tlaloc.core.LinalgKernels.EIGH_SWEEPS * it * (it - 1) / 2.0 * 12.0 * it
+    }
     OpKind.DET -> op.operands[0].type.dims[0].toDouble().let { 2.0 * it * it * it / 3.0 }
     OpKind.SOLVE -> op.operands[0].type.dims[0].toDouble().let { 2.0 * it * it * it / 3.0 + 2.0 * it * it * op.type.dims[1] }
 

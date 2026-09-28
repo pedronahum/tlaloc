@@ -267,6 +267,7 @@ internal class StablehloEmitter(
             OpKind.SOLVE -> emitSolve(step, name, ops[0], ops[1], node)
             OpKind.DET -> emitDet(step, name, ops[0], node)
             OpKind.QR_Q, OpKind.QR_R -> emitQr(step, name, ops[0], node)
+            OpKind.EIGH_W, OpKind.EIGH_V -> emitEigh(step, name, ops[0], node)
             OpKind.TRIANGLE -> emitTriangle(
                 step, name, ops[0], node.type,
                 linalgScale(node, "lower"), linalgScale(node, "diagonal"), linalgScale(node, "upper"),
@@ -4535,6 +4536,187 @@ internal class StablehloEmitter(
             out.appendLine("$step$top = stablehlo.slice $loop#1 [0:$n, 0:$n] : ($wT) -> ${node.type.toMlir()}")
             emitTriangle(step, name, top, node.type, 0.0, 1.0, 1.0)
         }
+    }
+
+    /**
+     * EIGH_W / EIGH_V → [io.tlaloc.core.LinalgKernels.eigh] in StableHLO: `sym(A)`,
+     * then one flat `stablehlo.while` over all `EIGH_SWEEPS · n(n−1)/2` Jacobi
+     * rotations (the pair `(p, q)` of step `t` read from two constant tables), each
+     * rotating two columns and two rows of `A` and two columns of `V` with
+     * `dynamic_slice`/`dynamic_update_slice`; then the diagonal, a stable ascending
+     * `stablehlo.sort` carrying the column indices, the columns of `V` reordered by a
+     * 0/1 matrix product at `HIGHEST` precision, and each column signed so its
+     * largest-magnitude entry (the first on ties) is positive.
+     */
+    private fun emitEigh(step: String, name: String, a: String, node: DxirOp) {
+        val aType = node.operands[0].type
+        requireLinalgMatrix(node, aType)
+        val n = aType.dims[0]
+        require(aType.dims[1] == n) { "${node.op} needs a square operand; got ${aType.dims}" }
+        val f = mlirElementType(aType.dtype)
+        val t = aType.toMlir()
+        val idxS = "tensor<i32>"
+        val scalarT = "tensor<$f>"
+        val colT = "tensor<${n}x1x$f>"
+        val rowT = "tensor<1x${n}x$f>"
+        val vecT = "tensor<${n}x$f>"
+        val idxV = "tensor<${n}xi32>"
+        val idxMat = "tensor<${n}x${n}xi32>"
+        val predMat = "tensor<${n}x${n}xi1>"
+        val hp = "precision = [HIGHEST, HIGHEST]"
+        fun v(line: String, indent: String = step): String = synth().also { out.appendLine("$indent$it = $line") }
+        val at = v("stablehlo.transpose $a, dims = [1, 0] : ($t) -> $t")
+        val sum = v("stablehlo.add $a, $at : $t")
+        val half = v("stablehlo.constant dense<5.0e-01> : $t")
+        val sym = v("stablehlo.multiply $sum, $half : $t")
+        val ri = v("stablehlo.iota dim = 0 : $idxMat")
+        val ci = v("stablehlo.iota dim = 1 : $idxMat")
+        val onDiag = v("stablehlo.compare EQ, $ri, $ci, SIGNED : ($idxMat, $idxMat) -> $predMat")
+        val eye = v("stablehlo.convert $onDiag : ($predMat) -> $t")
+        val pairs = (0 until n).flatMap { p -> (p + 1 until n).map { q -> p to q } }
+        var diagonalized = sym
+        var vectors = eye
+        if (pairs.isNotEmpty()) {
+            val total = io.tlaloc.core.LinalgKernels.EIGH_SWEEPS * pairs.size
+            val pairT = "tensor<${pairs.size}xi32>"
+            val pTab = v("stablehlo.constant dense<[${pairs.joinToString(", ") { it.first.toString() }}]> : $pairT")
+            val qTab = v("stablehlo.constant dense<[${pairs.joinToString(", ") { it.second.toString() }}]> : $pairT")
+            val t0 = v("stablehlo.constant dense<0> : $idxS")
+            val carried = listOf(idxS, t, t)
+            val types = carried.joinToString(", ")
+            val loop = synth()
+            out.appendLine("$step$loop:3 = \"stablehlo.while\"($t0, $sym, $eye) ({")
+            val inner = "$step    "
+            run {
+                val args = List(3) { synth() }
+                out.appendLine("$step  ^bb0(${args.indices.joinToString(", ") { "${args[it]}: ${carried[it]}" }}):")
+                val lim = v("stablehlo.constant dense<$total> : $idxS", inner)
+                val c = v("stablehlo.compare LT, ${args[0]}, $lim, SIGNED : ($idxS, $idxS) -> tensor<i1>", inner)
+                out.appendLine("$inner\"stablehlo.return\"($c) : (tensor<i1>) -> ()")
+            }
+            out.appendLine("$step}, {")
+            run {
+                val args = List(3) { synth() }
+                val (it0, m, vec) = args
+                out.appendLine("$step  ^bb0(${args.indices.joinToString(", ") { "${args[it]}: ${carried[it]}" }}):")
+                fun w(line: String) = v(line, inner)
+                val zero = w("stablehlo.constant dense<0> : $idxS")
+                val one = w("stablehlo.constant dense<1> : $idxS")
+                val np = w("stablehlo.constant dense<${pairs.size}> : $idxS")
+                val slot = w("stablehlo.remainder $it0, $np : $idxS")
+                val p1 = w("stablehlo.dynamic_slice $pTab, $slot, sizes = [1] : ($pairT, $idxS) -> tensor<1xi32>")
+                val p = w("stablehlo.reshape $p1 : (tensor<1xi32>) -> $idxS")
+                val q1 = w("stablehlo.dynamic_slice $qTab, $slot, sizes = [1] : ($pairT, $idxS) -> tensor<1xi32>")
+                val q = w("stablehlo.reshape $q1 : (tensor<1xi32>) -> $idxS")
+                fun entry(i: String, j: String): String {
+                    val e = w("stablehlo.dynamic_slice $m, $i, $j, sizes = [1, 1] : ($t, $idxS, $idxS) -> tensor<1x1x$f>")
+                    return w("stablehlo.reshape $e : (tensor<1x1x$f>) -> $scalarT")
+                }
+                val app = entry(p, p)
+                val aqq = entry(q, q)
+                val apq = entry(p, q)
+                val zeroS = w("stablehlo.constant dense<0.0> : $scalarT")
+                val oneS = w("stablehlo.constant dense<1.0> : $scalarT")
+                val twoS = w("stablehlo.constant dense<2.0> : $scalarT")
+                val isZero = w("stablehlo.compare EQ, $apq, $zeroS, FLOAT : ($scalarT, $scalarT) -> tensor<i1>")
+                val diff = w("stablehlo.subtract $aqq, $app : $scalarT")
+                val twoApq = w("stablehlo.multiply $twoS, $apq : $scalarT")
+                val tau = w("stablehlo.divide $diff, $twoApq : $scalarT")
+                val nonNeg = w("stablehlo.compare GE, $tau, $zeroS, FLOAT : ($scalarT, $scalarT) -> tensor<i1>")
+                val minusOne = w("stablehlo.constant dense<-1.0> : $scalarT")
+                val sg = w("stablehlo.select $nonNeg, $oneS, $minusOne : tensor<i1>, $scalarT")
+                val absTau = w("stablehlo.abs $tau : $scalarT")
+                val tau2 = w("stablehlo.multiply $tau, $tau : $scalarT")
+                val onePlus = w("stablehlo.add $oneS, $tau2 : $scalarT")
+                val root = w("stablehlo.sqrt $onePlus : $scalarT")
+                val den = w("stablehlo.add $absTau, $root : $scalarT")
+                val tt = w("stablehlo.divide $sg, $den : $scalarT")
+                val tt2 = w("stablehlo.multiply $tt, $tt : $scalarT")
+                val onePlusT = w("stablehlo.add $oneS, $tt2 : $scalarT")
+                val rootT = w("stablehlo.sqrt $onePlusT : $scalarT")
+                val c0 = w("stablehlo.divide $oneS, $rootT : $scalarT")
+                val s0 = w("stablehlo.multiply $tt, $c0 : $scalarT")
+                val c = w("stablehlo.select $isZero, $oneS, $c0 : tensor<i1>, $scalarT")
+                val sn = w("stablehlo.select $isZero, $zeroS, $s0 : tensor<i1>, $scalarT")
+                // (x, y) ↦ (c·x − s·y, s·x + c·y) on two slices of type [sliceT].
+                fun rotate(x: String, y: String, sliceT: String): Pair<String, String> {
+                    val cB = w("stablehlo.broadcast_in_dim $c, dims = [] : ($scalarT) -> $sliceT")
+                    val sB = w("stablehlo.broadcast_in_dim $sn, dims = [] : ($scalarT) -> $sliceT")
+                    val cx = w("stablehlo.multiply $cB, $x : $sliceT")
+                    val sy = w("stablehlo.multiply $sB, $y : $sliceT")
+                    val sx = w("stablehlo.multiply $sB, $x : $sliceT")
+                    val cy = w("stablehlo.multiply $cB, $y : $sliceT")
+                    return w("stablehlo.subtract $cx, $sy : $sliceT") to w("stablehlo.add $sx, $cy : $sliceT")
+                }
+                fun rotateColumns(mat: String): String {
+                    val cp = w("stablehlo.dynamic_slice $mat, $zero, $p, sizes = [$n, 1] : ($t, $idxS, $idxS) -> $colT")
+                    val cq = w("stablehlo.dynamic_slice $mat, $zero, $q, sizes = [$n, 1] : ($t, $idxS, $idxS) -> $colT")
+                    val (np1, nq1) = rotate(cp, cq, colT)
+                    val m1 = w("stablehlo.dynamic_update_slice $mat, $np1, $zero, $p : ($t, $colT, $idxS, $idxS) -> $t")
+                    return w("stablehlo.dynamic_update_slice $m1, $nq1, $zero, $q : ($t, $colT, $idxS, $idxS) -> $t")
+                }
+                val m2 = rotateColumns(m)
+                val rp = w("stablehlo.dynamic_slice $m2, $p, $zero, sizes = [1, $n] : ($t, $idxS, $idxS) -> $rowT")
+                val rq = w("stablehlo.dynamic_slice $m2, $q, $zero, sizes = [1, $n] : ($t, $idxS, $idxS) -> $rowT")
+                val (nrp, nrq) = rotate(rp, rq, rowT)
+                val m3 = w("stablehlo.dynamic_update_slice $m2, $nrp, $p, $zero : ($t, $rowT, $idxS, $idxS) -> $t")
+                val m4 = w("stablehlo.dynamic_update_slice $m3, $nrq, $q, $zero : ($t, $rowT, $idxS, $idxS) -> $t")
+                val z = w("stablehlo.constant dense<0.0> : tensor<1x1x$f>")
+                val m5 = w("stablehlo.dynamic_update_slice $m4, $z, $p, $q : ($t, tensor<1x1x$f>, $idxS, $idxS) -> $t")
+                val m6 = w("stablehlo.dynamic_update_slice $m5, $z, $q, $p : ($t, tensor<1x1x$f>, $idxS, $idxS) -> $t")
+                val vec2 = rotateColumns(vec)
+                val next = w("stablehlo.add $it0, $one : $idxS")
+                out.appendLine("$inner\"stablehlo.return\"($next, $m6, $vec2) : ($types) -> ()")
+            }
+            out.appendLine("$step}) : ($types) -> ($types)")
+            diagonalized = "$loop#1"
+            vectors = "$loop#2"
+        }
+        // The diagonal, sorted ascending with its column indices.
+        val zeros = v("stablehlo.constant dense<0.0> : $t")
+        val diagM = v("stablehlo.select $onDiag, $diagonalized, $zeros : $predMat, $t")
+        val zeroS = v("stablehlo.constant dense<0.0> : $scalarT")
+        val w0 = v("stablehlo.reduce($diagM init: $zeroS) applies stablehlo.add across dimensions = [1] : ($t, $scalarT) -> $vecT")
+        val iv = v("stablehlo.iota dim = 0 : $idxV")
+        val sorted = synth()
+        out.appendLine("$step$sorted:2 = \"stablehlo.sort\"($w0, $iv) ({")
+        run {
+            val x = synth(); val y = synth(); val i = synth(); val j = synth(); val lt = synth()
+            out.appendLine("$step  ^bb0($x: $scalarT, $y: $scalarT, $i: tensor<i32>, $j: tensor<i32>):")
+            out.appendLine("$step    $lt = stablehlo.compare LT, $x, $y, FLOAT : ($scalarT, $scalarT) -> tensor<i1>")
+            out.appendLine("$step    \"stablehlo.return\"($lt) : (tensor<i1>) -> ()")
+        }
+        out.appendLine("$step}) {dimension = 0 : i64, is_stable = true} : ($vecT, $idxV) -> ($vecT, $idxV)")
+        if (node.op == OpKind.EIGH_W) {
+            out.appendLine("$step$name = stablehlo.add $sorted#0, ${v("stablehlo.constant dense<0.0> : $vecT")} : $vecT")
+            return
+        }
+        // V's columns in sorted order: V·P with P[i][j] = (order[j] == i).
+        val orderB = v("stablehlo.broadcast_in_dim $sorted#1, dims = [1] : ($idxV) -> $idxMat")
+        val pick = v("stablehlo.compare EQ, $ri, $orderB, SIGNED : ($idxMat, $idxMat) -> $predMat")
+        val pMat = v("stablehlo.convert $pick : ($predMat) -> $t")
+        val vs = v("stablehlo.dot_general $vectors, $pMat, contracting_dims = [1] x [0], $hp : ($t, $t) -> $t")
+        // Sign: the first largest-magnitude entry of each column positive.
+        val absV = v("stablehlo.abs $vs : $t")
+        val negOne = v("stablehlo.constant dense<-1.0> : $scalarT")
+        val colMax = v("stablehlo.reduce($absV init: $negOne) applies stablehlo.maximum across dimensions = [0] : ($t, $scalarT) -> $vecT")
+        val colMaxB = v("stablehlo.broadcast_in_dim $colMax, dims = [1] : ($vecT) -> $t")
+        val atMax = v("stablehlo.compare EQ, $absV, $colMaxB, FLOAT : ($t, $t) -> $predMat")
+        val nM = v("stablehlo.constant dense<$n> : $idxMat")
+        val rowIfMax = v("stablehlo.select $atMax, $ri, $nM : $predMat, $idxMat")
+        val nS = v("stablehlo.constant dense<$n> : tensor<i32>")
+        val firstRow = v("stablehlo.reduce($rowIfMax init: $nS) applies stablehlo.minimum across dimensions = [0] : ($idxMat, tensor<i32>) -> $idxV")
+        val firstB = v("stablehlo.broadcast_in_dim $firstRow, dims = [1] : ($idxV) -> $idxMat")
+        val isFirst = v("stablehlo.compare EQ, $ri, $firstB, SIGNED : ($idxMat, $idxMat) -> $predMat")
+        val lead = v("stablehlo.select $isFirst, $vs, $zeros : $predMat, $t")
+        val leadV = v("stablehlo.reduce($lead init: $zeroS) applies stablehlo.add across dimensions = [0] : ($t, $scalarT) -> $vecT")
+        val zeroV = v("stablehlo.constant dense<0.0> : $vecT")
+        val neg = v("stablehlo.compare LT, $leadV, $zeroV, FLOAT : ($vecT, $vecT) -> tensor<${n}xi1>")
+        val onesV = v("stablehlo.constant dense<1.0> : $vecT")
+        val minusV = v("stablehlo.constant dense<-1.0> : $vecT")
+        val sign = v("stablehlo.select $neg, $minusV, $onesV : tensor<${n}xi1>, $vecT")
+        val signB = v("stablehlo.broadcast_in_dim $sign, dims = [1] : ($vecT) -> $t")
+        out.appendLine("$step$name = stablehlo.multiply $vs, $signB : $t")
     }
 
     /** DET → [emitLu], the product of the factor's diagonal, negated for an odd swap count. */

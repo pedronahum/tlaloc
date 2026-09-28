@@ -91,6 +91,10 @@ class LinalgJaxParityTest {
     val qrRValue = doubleArrayOf(-2.240535650240808, 0.013389655280323542, 0.9328126511958743, 0.0, -2.7349260898846013, 0.8272582020438082, 0.0, 0.0, -1.6838956098642723)
     val qrGrad = doubleArrayOf(-10.256177674404874, 4.369382164374007, -3.8666116535447315, -1.437101721909863, -16.935782318699978, -0.6747073448101896, 0.5906925658902518, -7.356261117580046, -6.817674595196675, -4.39752115349269, 10.094652225717406, -0.19277600270398512, -11.793384662119948, -7.43171805333102, -4.639439956583331)
 
+    val eighW = doubleArrayOf(-2.702499844012465, -0.10531169427342972, 2.13903107089542, 3.6687804673904747)
+    val eighAbsV = doubleArrayOf(0.5540107588049045, 0.5589128923269119, 0.14972237840304004, 0.5985579899429267, 0.6863320252764942, 0.4407354134270023, 0.4675932148109651, 0.3406717362710654, 0.40849672314140517, 0.33683602649245387, 0.6654477815420997, 0.5261664836154122, 0.2348421967854456, 0.6163685305066038, 0.562244648626185, 0.4988185364452028)
+    val eighGrad = doubleArrayOf(21.510000000000016, -1.049999999999985, -9.120000000000012, 13.740000000000023, -1.049999999999985, 18.01500000000003, -9.105000000000015, 6.930000000000022, -9.120000000000012, -9.105000000000015, 20.917500000000018, -3.3675000000000144, 13.740000000000023, 6.930000000000022, -3.3675000000000144, 15.607500000000028)
+
     private val scalar = DxirType(F32, emptyList())
 
     private fun f(a: DoubleArray) = FloatArray(a.size) { a[it].toFloat() }
@@ -279,5 +283,29 @@ class LinalgJaxParityTest {
             listOf(op(OpKind.ADD, listOf(cube(op(OpKind.QR_Q, listOf(a), at), at), cube(op(OpKind.QR_R, listOf(a), rt), rt)), scalar))
         }
         assertClose(qrGrad, DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(tall))).single(), "dA")
+    }
+
+    @Test
+    fun eighMatchesJaxUpToEigenvectorSigns() {
+        val t = DxirType(F32, listOf(n, n))
+        val wt = DxirType(F32, listOf(n))
+        val wFn = DxirBuilder.function("w") { listOf(op(OpKind.EIGH_W, listOf(param("a", t)), wt)) }
+        val vFn = DxirBuilder.function("v") { listOf(op(OpKind.EIGH_V, listOf(param("a", t)), t)) }
+        assertClose(eighW, DxirInterpreter.evalFunction(wFn, listOf(f(gen))).single(), "w")
+        val v = DxirInterpreter.evalFunction(vFn, listOf(f(gen))).single()
+        assertClose(eighAbsV, FloatArray(v.size) { kotlin.math.abs(v[it]) }, "|V|")
+        // Σ w³ + Σ (V ⊙ V) ⊙ W: blind to the eigenvectors' signs.
+        val wv = FloatArray(n * n) { it / 7f - 1f }
+        val loss = DxirBuilder.function("eigh_loss") {
+            val a = param("a", t)
+            val weights = param("wv", t)
+            val w = op(OpKind.EIGH_W, listOf(a), wt)
+            val vec = op(OpKind.EIGH_V, listOf(a), t)
+            val w3 = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(op(OpKind.MUL, listOf(w, w), wt), w), wt)), scalar)
+            val v2 = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(op(OpKind.MUL, listOf(vec, vec), t), weights), t)), scalar)
+            listOf(op(OpKind.ADD, listOf(w3, v2), scalar))
+        }
+        val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(gen), wv))
+        assertClose(eighGrad, g[0], "dA")
     }
 }

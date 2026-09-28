@@ -954,6 +954,62 @@ object VjpRegistry {
         }
     }
 
+    /** `V` of `eigh(A)`. */
+    internal fun eighV(builder: DxirBuilder, a: DxirNode): DxirNode = builder.op(OpKind.EIGH_V, listOf(a), a.type)
+
+    /** `w` of `eigh(A)`, rank 1. */
+    internal fun eighW(builder: DxirBuilder, a: DxirNode): DxirNode =
+        builder.op(OpKind.EIGH_W, listOf(a), DxirType(a.type.dtype, listOf(a.type.dims[0])))
+
+    /**
+     * `F_ij = 1/(w_j − w_i)` for `i ≠ j`, 0 on the diagonal, from the eigenvalues [w]:
+     * `1/(I + D) − I` with `D_ij = w_j − w_i` (JAX's spelling, which never divides by
+     * the diagonal's zeros). [template] is any `n×n` node, for the identity's extents.
+     */
+    internal fun eighF(builder: DxirBuilder, w: DxirNode, template: DxirNode): DxirNode {
+        val n = w.type.dims[0]
+        val t = DxirType(w.type.dtype, listOf(n, n))
+        val wCol = builder.op(OpKind.RESHAPE, listOf(w), DxirType(w.type.dtype, listOf(n, 1)))
+        val d = builder.op(OpKind.SUB, listOf(w, wCol), t)
+        val one = builder.const(floatLiteralForDtype(1.0, w.type.dtype), DxirType(w.type.dtype, emptyList()))
+        val eye = scaledIdentityLike(builder, one, template)
+        val inv = builder.op(OpKind.DIV, listOf(broadcastTo(builder, one, template, t), builder.op(OpKind.ADD, listOf(eye, d), t)), t)
+        return builder.op(OpKind.SUB, listOf(inv, eye), t)
+    }
+
+    /** `(X + Xᵀ)/2`, as TRIANGLE with every scale ½. */
+    private fun sym(builder: DxirBuilder, x: DxirNode): DxirNode =
+        triangle(builder, builder.op(OpKind.ADD, listOf(x, transpose2(builder, x)), x.type), 0.5, 0.5, 0.5)
+
+    /** `w = EIGH_W(A)`: `Ā = V·diag(w̄)·Vᵀ` (symmetric already). Finite at repeated eigenvalues. */
+    val EighWRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            require(a.type.rank == 2) { "EighWRule: rank-2 operand required, got ${a.type.dims}" }
+            val v = eighV(builder, a)
+            // V·diag(w̄): column j of V scaled by w̄_j (w̄ broadcasts along the rows).
+            val vw = builder.op(OpKind.MUL, listOf(v, upstream), a.type)
+            return listOf(a to matmul2(builder, vw, transpose2(builder, v)))
+        }
+    }
+
+    /**
+     * `V = EIGH_V(A)`: `Ā = sym(V·(F ⊙ (Vᵀ·V̄))·Vᵀ)`. Infinite (NaN) where two
+     * eigenvalues coincide, as JAX's rule is.
+     */
+    val EighVRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            require(a.type.rank == 2) { "EighVRule: rank-2 operand required, got ${a.type.dims}" }
+            val v = builder.op(OpKind.EIGH_V, listOf(a), op.type)
+            val f = eighF(builder, eighW(builder, a), a)
+            val g = builder.op(OpKind.MUL, listOf(f, matmul2(builder, transpose2(builder, v), upstream)), a.type)
+            return listOf(a to sym(builder, matmul2(builder, matmul2(builder, v, g), transpose2(builder, v))))
+        }
+    }
+
     /**
      * `L = CHOLESKY(A)`, the factor of `sym(A)`. Murray (2016): with `Φ(X)` the lower
      * triangle of `X` with its diagonal halved,
@@ -2245,6 +2301,8 @@ object VjpRegistry {
         OpKind.DET to DetRule,
         OpKind.QR_Q to QrQRule,
         OpKind.QR_R to QrRRule,
+        OpKind.EIGH_W to EighWRule,
+        OpKind.EIGH_V to EighVRule,
         OpKind.ATAN to AtanRule,
         // §0.4.402 — Phase C1 special functions; §0.4.405 closed the family
         // under differentiation (d ψ⁽ⁿ⁾ = ψ⁽ⁿ⁺¹⁾ climbs the ladder forever).

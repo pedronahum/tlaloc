@@ -4,6 +4,7 @@ import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
 import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.LinalgKernels
+import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.ShapeAtom
@@ -263,4 +264,44 @@ private fun qrDims(t: DTensor<*, *>): Pair<Int, Int> {
         "qr requires a rank-2 matrix with rows ≥ columns; got dims ${t.dims.toList()}"
     }
     return t.dims[0] to t.dims[1]
+}
+
+/**
+ * The eigenvalues of the symmetric matrix `(A + Aᵀ)/2` (`A` the receiver), in
+ * ascending order. Cyclic Jacobi rotations, a fixed
+ * [LinalgKernels.EIGH_SWEEPS] sweeps: accurate to rounding for well-scaled matrices
+ * of moderate size, but not an adaptive LAPACK routine.
+ *
+ * Differentiable, reverse and forward mode: `ẇ = diag(Vᵀ·Ṡ·V)`, `Ṡ = sym(Ȧ)`
+ * (JAX's `eigh` rule), finite also where eigenvalues repeat. On the GPU it is a
+ * `stablehlo.while` over all `EIGH_SWEEPS·n(n−1)/2` rotations, each `O(n)` work
+ * on two rows and two columns: sequential, and slow for large `n`.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.eighValues(): DTensor<Rank1<N>, F32> {
+    val n = squareDim(this, "eighValues")
+    return f32Tensor(LinalgKernels.eigh(f64Of(this), n).first, intArrayOf(n))
+}
+
+/**
+ * The eigenvectors of `(A + Aᵀ)/2`, as the columns of an `n×n` matrix in the order
+ * of [eighValues], each signed so that its largest-magnitude entry (the first, on
+ * ties) is positive. JAX and LAPACK sign eigenvectors arbitrarily, so columns can
+ * differ from theirs by a factor −1.
+ *
+ * Differentiable, reverse and forward mode: `V̇ = V·(F ⊙ (Vᵀ·Ṡ·V))` with
+ * `F_ij = 1/(w_j − w_i)` off the diagonal (JAX's rule). **At a repeated eigenvalue
+ * the eigenvectors are not unique and the derivative is infinite (NaN)**, as in
+ * JAX; it is inaccurate when two eigenvalues are close. See [eighValues] for the
+ * algorithm and its cost.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.eighVectors(): DTensor<Rank2<N, N>, F32> {
+    val n = squareDim(this, "eighVectors")
+    return f32Tensor(LinalgKernels.eigh(f64Of(this), n).second, intArrayOf(n, n))
+}
+
+/** `(eighValues(), eighVectors())` from one decomposition. Host-only: under `grad {}` use the two functions. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.eigh(): Pair<DTensor<Rank1<N>, F32>, DTensor<Rank2<N, N>, F32>> {
+    val n = squareDim(this, "eigh")
+    val (w, v) = LinalgKernels.eigh(f64Of(this), n)
+    return f32Tensor<Rank1<N>>(w, intArrayOf(n)) to f32Tensor<Rank2<N, N>>(v, intArrayOf(n, n))
 }

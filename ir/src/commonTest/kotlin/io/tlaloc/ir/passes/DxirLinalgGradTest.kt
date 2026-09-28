@@ -470,4 +470,93 @@ class DxirLinalgGradTest {
         val gm = fdGrad(DoubleArray(m * k) { tall[it] - h * v[it] }, ::lossD)
         assertClose(DoubleArray(m * k) { (gp[it] - gm[it]) / (2 * h) }, hv, 1e-3, "d(dA)")
     }
+
+    // --- eigh ---
+
+    @Test
+    fun eighDiagonalizesWithAscendingValuesAndSignedVectors() {
+        for (a in listOf(spd, gen, DoubleArray(16) { 1.0 / ((it / 4) + (it % 4) + 1) })) {
+            val (w, v) = LinalgKernels.eigh(a, n)
+            val s = DoubleArray(n * n) { 0.5 * (a[it] + a[(it % n) * n + it / n]) }
+            for (i in 0 until n - 1) assertTrue(w[i] <= w[i + 1], "ascending: ${w.toList()}")
+            for (j in 0 until n) {
+                // sym(A)·v_j = w_j·v_j and ‖v_j‖ = 1.
+                for (i in 0 until n) {
+                    val r = (0 until n).sumOf { s[i * n + it] * v[it * n + j] } - w[j] * v[i * n + j]
+                    assertTrue(abs(r) < 1e-13, "residual ($i, $j) = $r")
+                }
+                assertTrue(abs((0 until n).sumOf { v[it * n + j] * v[it * n + j] } - 1.0) < 1e-14)
+                val big = (0 until n).maxBy { abs(v[it * n + j]) }
+                assertTrue(v[big * n + j] > 0, "column $j's largest entry is positive")
+            }
+        }
+        // 1×1, and a repeated eigenvalue (the identity: w = [1, 1], V = I).
+        assertEquals(listOf(-3.0), LinalgKernels.eigh(doubleArrayOf(-3.0), 1).first.toList())
+        val (wI, vI) = LinalgKernels.eigh(doubleArrayOf(1.0, 0.0, 0.0, 1.0), 2)
+        assertEquals(listOf(1.0, 1.0), wI.toList())
+        assertEquals(listOf(1.0, 0.0, 0.0, 1.0), vI.toList())
+    }
+
+    private fun eighLoss(): io.tlaloc.ir.DxirFunction {
+        val t = DxirType(F32, listOf(n, n))
+        val wt = DxirType(F32, listOf(n))
+        return DxirBuilder.function("eigh_loss") {
+            val a = param("a", t)
+            val ww = param("ww", wt)
+            val wv = param("wv", t)
+            val w = op(OpKind.EIGH_W, listOf(a), wt)
+            val v = op(OpKind.EIGH_V, listOf(a), t)
+            val lw = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(w, ww), wt)), scalar)
+            val lv = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(v, wv), t)), scalar)
+            listOf(op(OpKind.ADD, listOf(lw, lv), scalar))
+        }
+    }
+
+    @Test
+    fun eighGradientTangentAndSecondOrderMatchFiniteDifferences() {
+        // `gen` has well-separated eigenvalues after symmetrization (gaps > 0.5), so
+        // F stays O(1) and the F32 tolerance of this class applies.
+        val ww = doubleArrayOf(0.7, -1.2, 0.4, 0.9)
+        fun lossD(a: DoubleArray): Double {
+            val (w, v) = LinalgKernels.eigh(a, n)
+            return dot(w, ww) + dot(v, w44)
+        }
+        val fn = eighLoss()
+        val grad = DxirReverseTransform.apply(fn)
+        val g = DxirInterpreter.evalFunction(grad, listOf(f(gen), f(ww), f(w44)))
+        val gWant = fdGrad(gen, ::lossD)
+        assertClose(gWant, g[0], 1e-4, "dA")
+        val v = DoubleArray(n * n) { ((it * 3) % 7 - 3) / 3.0 }
+        val zeros = listOf(FloatArray(n), FloatArray(n * n))
+        val jvp = DxirInterpreter.evalFunction(DxirForwardTransform.apply(fn), listOf(f(gen), f(ww), f(w44), f(v)) + zeros)
+        assertClose(doubleArrayOf(dot(gWant, v)), floatArrayOf(jvp[1].single()), 1e-4, "tangent")
+        val hv = DxirInterpreter.evalFunction(DxirForwardTransform.apply(grad), listOf(f(gen), f(ww), f(w44), f(v)) + zeros)[3]
+        val h = 1e-4
+        val gp = fdGrad(DoubleArray(n * n) { gen[it] + h * v[it] }, ::lossD)
+        val gm = fdGrad(DoubleArray(n * n) { gen[it] - h * v[it] }, ::lossD)
+        assertClose(DoubleArray(n * n) { (gp[it] - gm[it]) / (2 * h) }, hv, 1e-3, "d(dA)")
+    }
+
+    @Test
+    fun eigenvalueGradientIsFiniteAtARepeatedEigenvalueButTheVectorGradientIsNot() {
+        // sym(A) = I₂: d(w₀ + 2w₁)/dA exists in no direction-independent sense, but
+        // the rule's value V·diag(w̄)·Vᵀ is finite; the eigenvector rule divides by
+        // w₁ − w₀ = 0.
+        val t = DxirType(F32, listOf(2, 2))
+        val wt = DxirType(F32, listOf(2))
+        val wFn = DxirBuilder.function("w") {
+            val a = param("a", t)
+            val ww = param("ww", wt)
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(op(OpKind.EIGH_W, listOf(a), wt), ww), wt)), scalar))
+        }
+        val gw = DxirInterpreter.evalFunction(DxirReverseTransform.apply(wFn), listOf(floatArrayOf(1f, 0f, 0f, 1f), floatArrayOf(1f, 2f)))[0]
+        assertTrue(gw.all { it.isFinite() }, "eigenvalue gradient ${gw.toList()}")
+        val vFn = DxirBuilder.function("v") {
+            val a = param("a", t)
+            val wv = param("wv", t)
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(op(OpKind.EIGH_V, listOf(a), t), wv), t)), scalar))
+        }
+        val gv = DxirInterpreter.evalFunction(DxirReverseTransform.apply(vFn), listOf(floatArrayOf(1f, 0f, 0f, 1f), floatArrayOf(1f, 2f, 3f, 4f)))[0]
+        assertTrue(gv.any { !it.isFinite() }, "eigenvector gradient at a repeated eigenvalue: ${gv.toList()}")
+    }
 }
