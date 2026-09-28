@@ -133,6 +133,7 @@ differentiability errors are reported at the call's file, line and column.
 | dtypes | F32, F64, I32, BF16 (I8 for quantized serving weights) |
 | Ops | elementwise, broadcasting, reductions, shape ops, matmul, conv2d, pooling, softmax, embedding, losses, batch norm |
 | Special functions | `lgamma`, `digamma`, `polygamma`, `integral` |
+| Linear algebra | `cholesky`, `triangularSolve`, `solveSpd`, `logDetSpd`, `invSpd`, `solve`, `det`, `qrQ`/`qrR`, `eighValues`/`eighVectors`; rank 2, differentiable to any order |
 | Random numbers | stateless threefry-2x32, bit-exact with JAX |
 | Sparse | rank-2 CSR, sparse × dense matmul under `grad` (CPU only) |
 
@@ -300,6 +301,7 @@ and skips by name when its hardware is missing.
 | [`readable-gradients/`](examples/readable-gradients/) | the derivative printed as Kotlin, recompiled, same bits | JDK |
 | [`differentiable-physics/`](examples/differentiable-physics/) | gradient descent through a physics simulation | JDK |
 | [`named-indices/`](examples/named-indices/) | axis names in the tensor type | JDK |
+| [`gaussian-process/`](examples/gaussian-process/) | GP hyperparameters fitted through a Cholesky solve and log-determinant | JDK |
 | [`mnist/`](examples/mnist/) | MNIST to 93.66 % | CUDA |
 | [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on the GPU | CUDA |
 | [`fine-tune/`](examples/fine-tune/) | Qwen3-0.6B fine-tuned on the GPU with AdamW, saved as a Hugging Face checkpoint | CUDA |

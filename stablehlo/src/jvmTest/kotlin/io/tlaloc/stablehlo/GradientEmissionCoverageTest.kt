@@ -134,6 +134,42 @@ class GradientEmissionCoverageTest {
             "softmax_axis1", listOf("x" to r2), r2,
         ) { ps -> op(OpKind.SOFTMAX, listOf(ps[0]), r2, attrs = mapOf("axis" to 1)) },
         // Linear algebra.
+        // Dense linear algebra: every flag combination of TRIANGULAR_SOLVE, and
+        // CHOLESKY, whose gradient graph holds all three linear-algebra kinds.
+        unaryLoss("cholesky", OpKind.CHOLESKY, listOf(3, 3)),
+        unaryLoss("qr_q", OpKind.QR_Q, listOf(4, 3)),
+        unaryLoss("eigh_v", OpKind.EIGH_V, listOf(3, 3)),
+        squaredSumLoss("eigh_w", listOf("a" to DxirType(F32, listOf(3, 3))), DxirType(F32, listOf(3))) { ps ->
+            op(OpKind.EIGH_W, listOf(ps[0]), DxirType(F32, listOf(3)))
+        },
+        squaredSumLoss("qr_r", listOf("a" to DxirType(F32, listOf(4, 3))), DxirType(F32, listOf(3, 3))) { ps ->
+            op(OpKind.QR_R, listOf(ps[0]), DxirType(F32, listOf(3, 3)))
+        },
+        squaredSumLoss("det", listOf("a" to DxirType(F32, listOf(3, 3))), scalar) { ps -> op(OpKind.DET, listOf(ps[0]), scalar) },
+        *listOf(false, true).map { tr ->
+            squaredSumLoss(
+                "solve_t$tr",
+                listOf("a" to DxirType(F32, listOf(3, 3)), "b" to DxirType(F32, listOf(3, 2))),
+                DxirType(F32, listOf(3, 2)),
+            ) { ps -> op(OpKind.SOLVE, listOf(ps[0], ps[1]), DxirType(F32, listOf(3, 2)), attrs = mapOf("transpose_a" to tr)) }
+        }.toTypedArray(),
+        unaryLoss("triangle", OpKind.TRIANGLE, listOf(2, 3), attrs = mapOf("lower" to 1.0, "diagonal" to 0.5, "upper" to 0.0)),
+        *listOf(true, false).flatMap { lower ->
+            listOf(true, false).flatMap { transposeA ->
+                listOf(true, false).map { unit ->
+                    squaredSumLoss(
+                        "triangular_solve_l${lower}_t${transposeA}_u$unit",
+                        listOf("a" to DxirType(F32, listOf(3, 3)), "b" to DxirType(F32, listOf(3, 2))),
+                        DxirType(F32, listOf(3, 2)),
+                    ) { ps ->
+                        op(
+                            OpKind.TRIANGULAR_SOLVE, listOf(ps[0], ps[1]), DxirType(F32, listOf(3, 2)),
+                            attrs = mapOf("lower" to lower, "transpose_a" to transposeA, "unit_diagonal" to unit),
+                        )
+                    }
+                }
+            }
+        }.toTypedArray(),
         squaredSumLoss(
             "matmul", listOf("a" to DxirType(F32, listOf(2, 3)), "b" to DxirType(F32, listOf(3, 4))),
             DxirType(F32, listOf(2, 4)),

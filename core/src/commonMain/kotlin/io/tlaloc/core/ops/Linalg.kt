@@ -1,0 +1,310 @@
+package io.tlaloc.core.ops
+
+import io.tlaloc.core.DTensor
+import io.tlaloc.core.F32
+import io.tlaloc.core.HostF32Storage
+import io.tlaloc.core.LinalgKernels
+import io.tlaloc.core.Rank1
+import io.tlaloc.core.Rank2
+import io.tlaloc.core.ScalarShape
+import io.tlaloc.core.ShapeAtom
+import io.tlaloc.core.hostF32
+
+// Differentiable linear algebra, F32. Each function here is also the host twin the
+// K2 plugin calls from a synthesized gradient body, and each computes through
+// `LinalgKernels` in Double before narrowing, exactly as the `:ir` interpreter does.
+// The F64 overloads are in LinalgF64.kt: the two sets erase to the same JVM
+// signatures and need separate file facades.
+//
+// Under `grad {}` the boolean arguments must be literals, and none has a default:
+// the plugin reads arguments by position, and K2 does not reorder named arguments
+// before it runs.
+
+private fun squareDim(t: DTensor<*, *>, what: String): Int {
+    require(t.rank == 2 && t.dims[0] == t.dims[1]) {
+        "$what requires a square rank-2 matrix; got dims ${t.dims.toList()}"
+    }
+    return t.dims[0]
+}
+
+private fun f64Of(t: DTensor<*, F32>): DoubleArray {
+    val v = t.hostF32()
+    return DoubleArray(v.size) { v[it].toDouble() }
+}
+
+private fun <S : io.tlaloc.core.Shape> f32Tensor(v: DoubleArray, dims: IntArray): DTensor<S, F32> =
+    DTensor(HostF32Storage(FloatArray(v.size) { v[it].toFloat() }), dims, F32)
+
+/**
+ * Lower triangle of the matrix, the diagonal included; the rest is zero.
+ * Differentiable; its derivative keeps the same triangle of the upstream.
+ */
+fun <R : ShapeAtom, C : ShapeAtom> DTensor<Rank2<R, C>, F32>.tril(): DTensor<Rank2<R, C>, F32> =
+    scaleTriangles(1f, 1f, 0f)
+
+/**
+ * Upper triangle of the matrix, the diagonal included; the rest is zero.
+ * Differentiable; its derivative keeps the same triangle of the upstream.
+ */
+fun <R : ShapeAtom, C : ShapeAtom> DTensor<Rank2<R, C>, F32>.triu(): DTensor<Rank2<R, C>, F32> =
+    scaleTriangles(0f, 1f, 1f)
+
+/**
+ * Multiplies the entries below the diagonal by [lower], on it by [diagonal] and
+ * above it by [upper]. A zero scale writes an exact zero. The matrix need not be
+ * square. `tril()` is `scaleTriangles(1f, 1f, 0f)`.
+ *
+ * Linear in the matrix, and its own adjoint and tangent. The linear-algebra
+ * derivative rules use it for their triangle masks.
+ */
+fun <R : ShapeAtom, C : ShapeAtom> DTensor<Rank2<R, C>, F32>.scaleTriangles(
+    lower: Float,
+    diagonal: Float,
+    upper: Float,
+): DTensor<Rank2<R, C>, F32> {
+    require(rank == 2) { "scaleTriangles requires a rank-2 matrix; got dims ${dims.toList()}" }
+    val out = LinalgKernels.triangle(
+        f64Of(this), dims[0], dims[1], lower.toDouble(), diagonal.toDouble(), upper.toDouble(),
+    )
+    return f32Tensor(out, dims.copyOf())
+}
+
+/**
+ * Lower Cholesky factor `L` of a symmetric positive-definite matrix: `L·Lᵀ = A`,
+ * zero above the diagonal.
+ *
+ * The factor is taken of `(A + Aᵀ) / 2`, so both triangles are read and a matrix
+ * that is symmetric up to rounding is handled as symmetric. A matrix that is not
+ * positive definite gives NaN on and below the diagonal (0 above), on the host and
+ * on XLA alike.
+ *
+ * Differentiable in reverse and forward mode. The derivative is Murray's
+ * (*Differentiation of the Cholesky decomposition*, 2016): with
+ * `Φ(X)` = the lower triangle of `X` with its diagonal halved,
+ * `L̇ = L·Φ(L⁻¹·sym(Ȧ)·L⁻ᵀ)` and `Ā = sym(L⁻ᵀ·Φ(Lᵀ·L̄)·L⁻¹)`; each costs two
+ * triangular solves and a matrix product. Lowered to `stablehlo.cholesky`.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.cholesky(): DTensor<Rank2<N, N>, F32> {
+    val n = squareDim(this, "cholesky")
+    return f32Tensor(LinalgKernels.cholesky(f64Of(this), n), intArrayOf(n, n))
+}
+
+/**
+ * Solves `A·X = B` for `X`, where `A` (the receiver) is triangular: lower when
+ * [lower], upper otherwise. Only that triangle of `A` is read.
+ *
+ * Differentiable in both arguments, reverse and forward mode:
+ * `B̄ = A⁻ᵀ·X̄` (one more triangular solve) and `Ā = −B̄·Xᵀ` restricted to the
+ * triangle that was read. Lowered to `stablehlo.triangular_solve`.
+ */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.triangularSolve(
+    b: DTensor<Rank2<N, K>, F32>,
+    lower: Boolean,
+): DTensor<Rank2<N, K>, F32> = triangularSolve(b, lower, false, false)
+
+/**
+ * Solves `op(A)·X = B` for `X`, where `A` (the receiver) is triangular (lower when
+ * [lower]) and `op(A)` is `Aᵀ` when [transposeA], `A` otherwise. With
+ * [unitDiagonal] the diagonal of `A` is taken as ones and not read.
+ *
+ * Differentiable in both arguments; see the two-argument overload.
+ */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.triangularSolve(
+    b: DTensor<Rank2<N, K>, F32>,
+    lower: Boolean,
+    transposeA: Boolean,
+    unitDiagonal: Boolean,
+): DTensor<Rank2<N, K>, F32> {
+    val n = squareDim(this, "triangularSolve")
+    require(b.rank == 2 && b.dims[0] == n) {
+        "triangularSolve: B must be $n×k for a $n×$n A; got dims ${b.dims.toList()}"
+    }
+    val m = b.dims[1]
+    val x = LinalgKernels.triangularSolve(f64Of(this), f64Of(b), n, m, lower, transposeA, unitDiagonal)
+    return f32Tensor(x, intArrayOf(n, m))
+}
+
+/**
+ * Solves `A·X = B` for a symmetric positive-definite `A` (the receiver) through
+ * its Cholesky factor: `X = L⁻ᵀ·(L⁻¹·B)` with `L = cholesky(A)`. `A` is read as
+ * `(A + Aᵀ)/2`; a matrix that is not positive definite gives NaN.
+ *
+ * Differentiable in both arguments, reverse and forward mode. Under `grad {}` it
+ * is lowered to `cholesky` and two `triangularSolve`s and differentiated through
+ * their rules; the result equals implicit differentiation of `A·X = B`,
+ * `B̄ = A⁻¹·X̄` and `Ā = −sym(B̄·Xᵀ)`. Cost: one factorization (n³/3) and
+ * 2·n²·k for the solves; the reverse pass factors again only if the factor is not
+ * shared, and adds four triangular solves.
+ */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.solveSpd(
+    b: DTensor<Rank2<N, K>, F32>,
+): DTensor<Rank2<N, K>, F32> {
+    val l = cholesky()
+    return l.triangularSolve(l.triangularSolve(b, true, false, false), true, true, false)
+}
+
+/**
+ * `log det A` for a symmetric positive-definite `A` (the receiver), as
+ * `2·Σᵢ log Lᵢᵢ` with `L = cholesky(A)`. `A` is read as `(A + Aᵀ)/2`; a matrix
+ * that is not positive definite gives NaN. Never forms `det A`, so it does not
+ * overflow or underflow where the determinant would.
+ *
+ * Differentiable, reverse and forward mode and to any order (`hessian` included).
+ * Under `grad {}` it is lowered to `cholesky` and elementwise ops; its gradient is
+ * `A⁻¹` (symmetric, so equal to `A⁻ᵀ`).
+ *
+ * This host function sums in Double and rounds once; under `grad {}` the value
+ * comes from the lowered ops in F32, and the two can differ in the last bit.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.logDetSpd(): DTensor<ScalarShape, F32> {
+    val n = squareDim(this, "logDetSpd")
+    val l = LinalgKernels.cholesky(f64Of(this), n)
+    var s = 0.0
+    for (i in 0 until n) s += kotlin.math.ln(l[i * n + i])
+    return DTensor(HostF32Storage(floatArrayOf((2 * s).toFloat())), intArrayOf(), F32)
+}
+
+/**
+ * The identity matrix with the receiver's shape; the receiver's values are not
+ * read. Under `grad {}` its derivative is zero.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.identityLike(): DTensor<Rank2<N, N>, F32> {
+    val n = squareDim(this, "identityLike")
+    return DTensor(HostF32Storage(FloatArray(n * n) { if (it / n == it % n) 1f else 0f }), intArrayOf(n, n), F32)
+}
+
+/**
+ * `A⁻¹` for a symmetric positive-definite `A` (the receiver): `solveSpd(I)`,
+ * i.e. `L⁻ᵀ·L⁻¹` with `L = cholesky(A)`. `A` is read as `(A + Aᵀ)/2`; a matrix
+ * that is not positive definite gives NaN. To apply `A⁻¹` to a matrix, use
+ * [solveSpd], which is cheaper and more accurate than forming the inverse.
+ *
+ * Differentiable, reverse and forward mode; under `grad {}` it is lowered to
+ * `cholesky` and two `triangularSolve`s against the identity, and its
+ * derivative is `−A⁻¹·sym(Ȧ)·A⁻¹`. Cost: n³/3 for the factor and 2·n³ for the
+ * two solves.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.invSpd(): DTensor<Rank2<N, N>, F32> = solveSpd(identityLike())
+
+/**
+ * Solves `A·X = B` for a general square `A` (the receiver) by LU factorization with
+ * partial pivoting. A singular `A` divides by zero (±∞ or NaN in `X`), as LAPACK
+ * does; no check is made.
+ *
+ * Differentiable in both arguments, reverse and forward mode and to any order. The
+ * derivative is implicit differentiation, `B̄ = A⁻ᵀ·X̄` and `Ā = −B̄·Xᵀ`, one more
+ * solve with `Aᵀ`; the factorization's loop is never differentiated. On the GPU the
+ * factorization is a `stablehlo.while` loop over the columns (StableHLO has no LU):
+ * `n` sequential iterations of `O(n²)` work each, far slower than a vendor LU for
+ * large `n`. For a symmetric positive-definite `A`, [solveSpd] is cheaper.
+ */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.solve(b: DTensor<Rank2<N, K>, F32>): DTensor<Rank2<N, K>, F32> =
+    solve(b, false)
+
+/** Solves `op(A)·X = B`, `op(A)` being `Aᵀ` when [transposeA]; see the one-argument [solve]. */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.solve(
+    b: DTensor<Rank2<N, K>, F32>,
+    transposeA: Boolean,
+): DTensor<Rank2<N, K>, F32> {
+    val n = squareDim(this, "solve")
+    require(b.rank == 2 && b.dims[0] == n) { "solve: B must be $n×k for a $n×$n A; got dims ${b.dims.toList()}" }
+    return f32Tensor(LinalgKernels.solve(f64Of(this), f64Of(b), n, b.dims[1], transposeA), intArrayOf(n, b.dims[1]))
+}
+
+/**
+ * The determinant of a square matrix, by LU factorization with partial pivoting:
+ * the product of `U`'s diagonal, negated for an odd number of row swaps. Exactly 0
+ * when a pivot is exactly 0. Overflows and underflows where the determinant does;
+ * for a symmetric positive-definite matrix, [logDetSpd] does not.
+ *
+ * Differentiable, reverse and forward mode and to any order: `Ā = det(A)·A⁻ᵀ` and
+ * `ḋ = det(A)·tr(A⁻¹·Ȧ)`, each one [solve]. At a singular matrix the gradient is
+ * NaN (`0·∞`); JAX's cofactor-based rule is finite there when the rank is `n − 1`.
+ * On the GPU the factorization is the `stablehlo.while` loop described at [solve].
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.det(): DTensor<ScalarShape, F32> {
+    val n = squareDim(this, "det")
+    return DTensor(HostF32Storage(floatArrayOf(LinalgKernels.det(f64Of(this), n).toFloat())), intArrayOf(), F32)
+}
+
+/**
+ * `Q` of the reduced QR factorization `A = Q·R` of an `m×n` matrix, `m ≥ n`: `m×n`
+ * with orthonormal columns. Householder reflections with LAPACK's signs (the same
+ * `Q` and `R` as NumPy and JAX; `R`'s diagonal may be negative).
+ *
+ * Differentiable, reverse and forward mode, for a matrix of full column rank (the
+ * derivative divides by `R`). The rules are JAX's `qr` rules; under `grad {}` a body
+ * that uses both [qrQ] and [qrR] factors twice. On the GPU the factorization is a
+ * `stablehlo.while` loop over the columns (StableHLO has no QR): `n` sequential
+ * iterations of `O(m²)` work each. A wide matrix (`m < n`) is refused.
+ */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F32>.qrQ(): DTensor<Rank2<M, N>, F32> {
+    val (m, n) = qrDims(this)
+    return f32Tensor(LinalgKernels.qr(f64Of(this), m, n).first, intArrayOf(m, n))
+}
+
+/** `R` of the reduced QR factorization, `n×n` upper triangular; see [qrQ]. */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F32>.qrR(): DTensor<Rank2<N, N>, F32> {
+    val (m, n) = qrDims(this)
+    return f32Tensor(LinalgKernels.qr(f64Of(this), m, n).second, intArrayOf(n, n))
+}
+
+/**
+ * `(Q, R)` of the reduced QR factorization, from one factorization; see [qrQ]. Not
+ * lowered under `grad {}` (a lambda cannot return through a `Pair` it builds); use
+ * [qrQ] and [qrR] there.
+ */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F32>.qr(): Pair<DTensor<Rank2<M, N>, F32>, DTensor<Rank2<N, N>, F32>> {
+    val (m, n) = qrDims(this)
+    val (q, r) = LinalgKernels.qr(f64Of(this), m, n)
+    return f32Tensor<Rank2<M, N>>(q, intArrayOf(m, n)) to f32Tensor<Rank2<N, N>>(r, intArrayOf(n, n))
+}
+
+private fun qrDims(t: DTensor<*, *>): Pair<Int, Int> {
+    require(t.rank == 2 && t.dims[0] >= t.dims[1]) {
+        "qr requires a rank-2 matrix with rows ≥ columns; got dims ${t.dims.toList()}"
+    }
+    return t.dims[0] to t.dims[1]
+}
+
+/**
+ * The eigenvalues of the symmetric matrix `(A + Aᵀ)/2` (`A` the receiver), in
+ * ascending order. Cyclic Jacobi rotations, a fixed
+ * [LinalgKernels.EIGH_SWEEPS] sweeps: accurate to rounding for well-scaled matrices
+ * of moderate size, but not an adaptive LAPACK routine.
+ *
+ * Differentiable, reverse and forward mode: `ẇ = diag(Vᵀ·Ṡ·V)`, `Ṡ = sym(Ȧ)`
+ * (JAX's `eigh` rule), finite also where eigenvalues repeat. On the GPU it is a
+ * `stablehlo.while` over all `EIGH_SWEEPS·n(n−1)/2` rotations, each `O(n)` work
+ * on two rows and two columns: sequential, and slow for large `n`.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.eighValues(): DTensor<Rank1<N>, F32> {
+    val n = squareDim(this, "eighValues")
+    return f32Tensor(LinalgKernels.eigh(f64Of(this), n).first, intArrayOf(n))
+}
+
+/**
+ * The eigenvectors of `(A + Aᵀ)/2`, as the columns of an `n×n` matrix in the order
+ * of [eighValues], each signed so that its largest-magnitude entry (the first, on
+ * ties) is positive. JAX and LAPACK sign eigenvectors arbitrarily, so columns can
+ * differ from theirs by a factor −1. Where two entries of a column tie in magnitude
+ * with opposite signs, the sign is not continuous in `A` (and the host and the GPU,
+ * rounding differently, may choose differently).
+ *
+ * Differentiable, reverse and forward mode: `V̇ = V·(F ⊙ (Vᵀ·Ṡ·V))` with
+ * `F_ij = 1/(w_j − w_i)` off the diagonal (JAX's rule). **At a repeated eigenvalue
+ * the eigenvectors are not unique and the derivative is infinite (NaN)**, as in
+ * JAX; it is inaccurate when two eigenvalues are close. See [eighValues] for the
+ * algorithm and its cost.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.eighVectors(): DTensor<Rank2<N, N>, F32> {
+    val n = squareDim(this, "eighVectors")
+    return f32Tensor(LinalgKernels.eigh(f64Of(this), n).second, intArrayOf(n, n))
+}
+
+/** `(eighValues(), eighVectors())` from one decomposition. Host-only: under `grad {}` use the two functions. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.eigh(): Pair<DTensor<Rank1<N>, F32>, DTensor<Rank2<N, N>, F32>> {
+    val n = squareDim(this, "eigh")
+    val (w, v) = LinalgKernels.eigh(f64Of(this), n)
+    return f32Tensor<Rank1<N>>(w, intArrayOf(n)) to f32Tensor<Rank2<N, N>>(v, intArrayOf(n, n))
+}

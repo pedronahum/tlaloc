@@ -78,6 +78,54 @@ enum class OpKind {
     // Linear algebra
     MATMUL, DOT, CONV2D, CONV_TRANSPOSE2D,
 
+    // Dense linear algebra on rank-2 operands (no batch axes). The kernels are
+    // `io.tlaloc.core.LinalgKernels`, shared by the interpreter and the host twins.
+    //
+    // CHOLESKY(A) → L: the lower factor of sym(A) = (A + Aᵀ)/2, zero above the
+    // diagonal; NaN on and below it when sym(A) is not positive definite. Lowered to
+    // `stablehlo.cholesky` (lower = true) on the symmetrized operand, followed by a
+    // mask of the upper triangle, which StableHLO leaves unspecified.
+    //
+    // TRIANGULAR_SOLVE(A, B) → X with op(A)·X = B, left side only. Attrs `lower`,
+    // `transpose_a`, `unit_diagonal` (Booleans). Reads only the named triangle of A
+    // (strictly, when `unit_diagonal`). Lowered to `stablehlo.triangular_solve`.
+    //
+    // TRIANGLE(A) scales the strictly-lower part of A by attr `lower`, the diagonal
+    // by `diagonal` and the strictly-upper part by `upper` (Doubles); a zero scale
+    // writes an exact zero. Linear and self-adjoint: its VJP and JVP are itself. It
+    // is `tril`/`triu`, and the triangle masks of the two rules above.
+    CHOLESKY, TRIANGULAR_SOLVE, TRIANGLE,
+
+    // SOLVE(A, B) → X with op(A)·X = B for a general square A, op(A) = Aᵀ when attr
+    // `transpose_a` (Boolean). DET(A) → det A (a scalar). Both factor A by LU with
+    // partial pivoting; no LU factor is exposed as a value, so the derivative rules
+    // never differentiate the factorization: SOLVE's are implicit differentiation
+    // (another SOLVE with the other transpose flag), DET's are `det·A⁻ᵀ` and
+    // `det·tr(A⁻¹·Ȧ)`. StableHLO has no LU; the emitter writes the factorization as a
+    // `stablehlo.while` loop over the columns (n iterations, O(n²) work each), then
+    // `stablehlo.triangular_solve`s on the packed factor.
+    SOLVE, DET,
+
+    // QR_Q(A) → Q (m×n) and QR_R(A) → R (n×n): the reduced QR of an m×n A, m ≥ n, by
+    // Householder reflections with LAPACK's signs. Two single-result kinds instead of
+    // one two-result kind, because the forward transform and the IR synthesis handle
+    // single results; a body that needs both factors computes the factorization twice
+    // (XLA may merge the two loops). Each kind's rules recompute the other factor. The
+    // VJPs add up to the standard QR adjoint `Ā = (Q̄ + Q·copyltu(R·R̄ᵀ − Q̄ᵀ·Q))·R⁻ᵀ`, the
+    // JVPs are JAX's `qr_jvp_rule`. Lowered as a `stablehlo.while` over the columns.
+    QR_Q, QR_R,
+
+    // EIGH_W(A) → w (rank 1, ascending) and EIGH_V(A) → V (n×n, eigenvectors as
+    // columns): the eigendecomposition of sym(A) = (A + Aᵀ)/2 by cyclic Jacobi
+    // (`LinalgKernels.eigh`: a fixed number of sweeps, each column of V signed so its
+    // largest-magnitude entry is positive). Two single-result kinds for the reason
+    // QR_Q/QR_R are. Rules: JAX's `eigh_jvp_rule` (ẇ = diag(Vᵀ·Ṡ·V), V̇ = V·(F ⊙
+    // Vᵀ·Ṡ·V), F_ij = 1/(w_j − w_i) off the diagonal, Ṡ = sym(Ȧ)) and its adjoint,
+    // Ā = sym(V·(diag(w̄) + F ⊙ (Vᵀ·V̄))·Vᵀ). F is infinite at a repeated eigenvalue,
+    // so EIGH_V's derivatives are too there; EIGH_W's are not. Lowered as a
+    // `stablehlo.while` over the rotations, then a `stablehlo.sort`.
+    EIGH_W, EIGH_V,
+
     // §0.4.363 — 2-D window pooling (DiffKT-gap item 4, pooling half).
     // NCHW, attrs: `window` [kh, kw], `window_strides` [sh, sw], `padding`
     // [[top, bottom], [left, right]]. Lowered to `stablehlo.reduce_window`

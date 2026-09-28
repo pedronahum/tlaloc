@@ -13,6 +13,69 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Linear algebra: `cholesky`, `triangularSolve`, `tril`, `triu`,
+  `scaleTriangles`** (`io.tlaloc.core.ops`), on rank-2 `DTensor`s, F32 and F64,
+  differentiable in reverse and forward mode under `grad {}`, `jvp {}` and the
+  capture API. `cholesky` factors `(A + Aᵀ)/2`, as JAX does, and returns NaN on and
+  below the diagonal for a matrix that is not positive definite; its derivative is
+  Murray's (2016).
+  `triangularSolve` solves `op(A)·X = B` reading one triangle of `A`; its
+  derivative is by implicit differentiation. New DXIR kinds `CHOLESKY`,
+  `TRIANGULAR_SOLVE` and `TRIANGLE` lower to `stablehlo.cholesky`,
+  `stablehlo.triangular_solve` and an iota/select mask, and run on the GB10
+  through PJRT. Gradients match central finite differences (F32 in the
+  interpreter and through the plugin; F64 through PJRT), and JAX 0.10.0's
+  values and gradients (`harness/python/linalg_jax_goldens.py`). Printed
+  gradients (`toKotlinSource`) spell the new host functions and compile. `grad {}`
+  differentiates F32 tensors only, as for every other op; the F64 overloads run
+  on the host, and F64 gradient graphs run through `PjrtSession.runOnF64`.
+- **`solveSpd(b)`** solves `A·X = B` for a symmetric positive-definite `A`
+  through its Cholesky factor, F32 and F64. Under `grad {}` it is lowered to
+  `cholesky` and two `triangularSolve`s, so its derivative is theirs; it equals
+  implicit differentiation (`B̄ = A⁻¹·X̄`, `Ā = −sym(B̄·Xᵀ)`), which the tests
+  check directly, and matches JAX's `cho_solve`.
+- **`logDetSpd()`**, `log det A` for a symmetric positive-definite `A` as
+  `2·Σ log Lᵢᵢ`, F32 and F64, without forming the determinant. Differentiable to
+  any order: its gradient is `A⁻¹`, and `hessian {}` of it through the plugin
+  matches finite differences and JAX.
+- **`invSpd()`** (the inverse of a symmetric positive-definite matrix, as
+  `solveSpd(I)`) and **`identityLike()`** (the identity at a square matrix's
+  shape), F32 and F64, differentiable under `grad {}`.
+- **`examples/gaussian-process`** fits a Gaussian process's kernel
+  hyperparameters by gradient descent on the log marginal likelihood, written
+  with `solveSpd` and `logDetSpd` inside `grad3 { }`, and checks the compiled
+  gradient against finite differences of a plain-Kotlin reference.
+- **`solve(b)`, `solve(b, transposeA)` and `det()`** for general square
+  matrices, F32 and F64, by LU factorization with partial pivoting.
+  Differentiable to any order; the derivatives are implicit differentiation
+  (`solve`) and `det·A⁻ᵀ` (`det`), so the factorization is never
+  differentiated. New DXIR kinds `SOLVE` and `DET`. StableHLO has no LU, so the
+  emitter writes the factorization as a `stablehlo.while` loop over the columns
+  followed by `stablehlo.triangular_solve`s: correct on the GB10 (f64 results
+  within 1e-13 of the host kernel), but `n` sequential steps, far slower than a
+  vendor LU for large matrices. The gradient of `det` at a singular matrix is NaN. Flags
+  and scales may be passed as named arguments in any order.
+- **`qrQ()`, `qrR()` and `qr()`**: the reduced QR factorization of an `m×n`
+  matrix, `m ≥ n`, by Householder reflections with LAPACK's signs (the `Q` and
+  `R` NumPy and JAX return), F32 and F64. `qrQ` and `qrR` are differentiable in
+  reverse and forward mode (JAX's QR rules, for full column rank); `qr()` returns
+  both from one factorization and is host-only. New DXIR kinds `QR_Q` and `QR_R`,
+  lowered as a `stablehlo.while` loop over the columns; a `grad {}` body that uses
+  both factors factors twice.
+- **`eighValues()`, `eighVectors()` and `eigh()`**: the eigendecomposition of
+  `(A + Aᵀ)/2` by cyclic Jacobi (a fixed 20 sweeps), eigenvalues ascending,
+  each eigenvector signed so its largest-magnitude entry is positive, F32 and
+  F64. Differentiable in reverse and forward mode with JAX's `eigh` rules; the
+  eigenvector derivative is infinite at a repeated eigenvalue (as in JAX), the
+  eigenvalue derivative is not. New DXIR kinds `EIGH_W` and `EIGH_V`, lowered as
+  one `stablehlo.while` over all rotations and a `stablehlo.sort`.
+- **`rk4` and `rk4Trajectory`** (`:nn`), the classical fixed-step fourth-order
+  Runge–Kutta integrator for `y' = f(t, y)`, on capture-API `Tracer`s (the
+  captured function is the unrolled integrator, differentiable in reverse and
+  forward mode with respect to the initial state and every tensor `f` reads) and
+  on host `DTensor`s. Inside `grad { }` the integrator loop is written in the
+  lambda instead, as in `examples/differentiable-physics`.
+
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,
   a JUnit console launcher and `run-tests.sh`, from the new
@@ -99,6 +162,11 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- **Synthesis of a two-operand `BROADCAST` (a splat or stretch against a shape
+  template) takes the template's IrType.** It fell back to the call's first
+  tensor parameter, so a `grad {}` body whose first parameter had another rank
+  (a vector of hyperparameters before a matrix) was rejected when its gradient
+  held such a broadcast.
 - **The gradient of a broadcast that adds axes and also stretches a size-1
   axis** (`[3, 1] → [2, 3, 4]`) summed only the added axes, so the input's
   gradient came back with the wrong number of elements (12 for a 3-element

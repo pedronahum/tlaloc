@@ -48,6 +48,7 @@ import org.jetbrains.kotlin.ir.symbols.IrConstructorSymbol
 import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
 import org.jetbrains.kotlin.ir.types.IrSimpleType
+import org.jetbrains.kotlin.ir.types.classFqName
 import org.jetbrains.kotlin.ir.types.IrType
 import org.jetbrains.kotlin.ir.types.IrTypeArgument
 import org.jetbrains.kotlin.ir.types.defaultType
@@ -165,6 +166,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.type.rank == 4 && op.type.dtype == F32) {
             return deriveResultIrTypeRank4(op, operandIrTypes)
         }
+        // EIGH_W: [n] from an [n, n] operand, its row atom.
+        if (op.op == OpKind.EIGH_W && op.type.dtype == F32) {
+            val aIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+            val atoms = shapeAtomsOf(aIr, 2) ?: return null
+            return rebuildShapeAtoms(aIr, listOf(atoms[0]), 1)
+        }
         if (op.type.rank != 2) return null
         if (op.type.dtype != F32 && op.op != OpKind.COMPARE) return null
         return when (op.op) {
@@ -204,6 +211,32 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.SOFTMAX, OpKind.REVERSE -> {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
+            }
+            // A BROADCAST that carries a shape template (operand[1]) of its own
+            // rank has the template's shape: the scalar splats and equal-rank
+            // stretches the reverse rules and `identityLike` emit. Without this
+            // its IrType fell back to the call's first tensor parameter, which is
+            // wrong whenever that parameter has another rank.
+            OpKind.BROADCAST -> {
+                if (op.operands.size != 2 || op.operands[1].type.rank != op.type.rank) return null
+                operandIrTypes[op.operands[1].id]
+            }
+            // CHOLESKY and TRIANGLE keep their operand's shape; a TRIANGULAR_SOLVE's
+            // result is shaped like its right-hand side.
+            OpKind.CHOLESKY, OpKind.TRIANGLE -> {
+                if (op.operands.size != 1) return null
+                operandIrTypes[op.operands[0].id]
+            }
+            OpKind.TRIANGULAR_SOLVE, OpKind.SOLVE -> {
+                if (op.operands.size != 2) return null
+                operandIrTypes[op.operands[1].id]
+            }
+            // QR's Q is shaped like A (m×n); R is n×n, both atoms A's column atom.
+            OpKind.QR_Q, OpKind.EIGH_V -> operandIrTypes[op.operands[0].id]
+            OpKind.QR_R -> {
+                val aIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val atoms = shapeAtomsOf(aIr, 2) ?: return null
+                rebuildShapeAtoms(aIr, listOf(atoms[1], atoms[1]), 2)
             }
             // §0.4.198 — Forward-propagate through elementwise binary ops (ADD / SUB /
             // MUL / DIV) — output equals either operand's IrType (they must agree
@@ -1105,6 +1138,33 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             changed = true
                         }
                     }
+                    // CHOLESKY / TRIANGLE: operand and result share one IrType.
+                    // TRIANGULAR_SOLVE: B shares the result's; A is square, its
+                    // row atom the result's row atom.
+                    OpKind.CHOLESKY, OpKind.TRIANGLE, OpKind.QR_Q -> {
+                        if (n.operands.size != 1) continue
+                        val outputIr = paramIrTypeMap[n.id] ?: continue
+                        val operandId = n.operands[0].id
+                        if (paramIrTypeMap[operandId] == null && isAcceptedTensorType(n.operands[0].type)) {
+                            paramIrTypeMap[operandId] = outputIr
+                            changed = true
+                        }
+                    }
+                    OpKind.TRIANGULAR_SOLVE, OpKind.SOLVE -> {
+                        if (n.operands.size != 2) continue
+                        val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
+                        val bId = n.operands[1].id
+                        if (paramIrTypeMap[bId] == null && isAcceptedTensorType(n.operands[1].type)) {
+                            paramIrTypeMap[bId] = outputIr
+                            changed = true
+                        }
+                        val aId = n.operands[0].id
+                        if (paramIrTypeMap[aId] == null && isAcceptedTensorType(n.operands[0].type)) {
+                            val atoms = shapeAtomsOf(outputIr, 2) ?: continue
+                            paramIrTypeMap[aId] = rebuildShapeAtoms(outputIr, listOf(atoms[0], atoms[0]), 2) ?: continue
+                            changed = true
+                        }
+                    }
                     // §0.4.366 — backward propagate through the axis-reduction
                     // un-reduce chain (Phase A1). Stretch BROADCAST (equal rank):
                     // the keepdims-shaped operand takes the output's IrType — the
@@ -1683,6 +1743,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
         if (op.op == OpKind.TRANSPOSE) return irTranspose(op, env, context)
+        if (op.op == OpKind.CHOLESKY || op.op == OpKind.TRIANGULAR_SOLVE || op.op == OpKind.TRIANGLE ||
+            op.op == OpKind.SOLVE || op.op == OpKind.DET || op.op == OpKind.QR_Q || op.op == OpKind.QR_R ||
+            op.op == OpKind.EIGH_W || op.op == OpKind.EIGH_V
+        ) {
+            return irLinalg(op, env, context)
+        }
         // §0.4.396 — REVERSE (flip along literal axes, Phase C3).
         if (op.op == OpKind.REVERSE) return irReverse(op, env, context)
         if (op.op == OpKind.MATMUL) return irMatmul(op, env, context)
@@ -4839,6 +4905,139 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             call.arguments[i + 1] = intConst(a)
         }
         return call
+    }
+
+    /**
+     * The dense linear-algebra kinds → their F32 host twins in `:core/ops/Linalg.kt`:
+     * `CHOLESKY(a)` → `a.cholesky()`, `TRIANGULAR_SOLVE(a, b)` →
+     * `a.triangularSolve(b, lower, transposeA, unitDiagonal)` and `TRIANGLE(a)` →
+     * `a.scaleTriangles(lower, diagonal, upper)`, the attrs baked as constants. The
+     * shape type arguments are the operands' own atoms (`N` from `a`'s rows, `K`
+     * from `b`'s columns).
+     */
+    private fun IrBuilderWithScope.irLinalg(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.op == OpKind.DET) return irDet(op, env, context)
+        if (op.op == OpKind.EIGH_W) return irEighValues(op, env, context)
+        if (op.type.rank != 2 || op.type.dtype != F32) return null
+        if (op.operands.any { it.type.rank != 2 || it.type.dtype != F32 }) return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+        val atoms = op.operands.map { operand ->
+            val ir = irTypeForNode(operand, context) as? IrSimpleType ?: return null
+            shapeAtomsOf(ir, 2) ?: return null
+        }
+        val (name, regular) = when (op.op) {
+            OpKind.CHOLESKY -> "cholesky" to 0
+            OpKind.TRIANGULAR_SOLVE -> "triangularSolve" to 4
+            OpKind.TRIANGLE -> "scaleTriangles" to 3
+            OpKind.SOLVE -> "solve" to 2
+            OpKind.QR_Q -> "qrQ" to 0
+            OpKind.QR_R -> "qrR" to 0
+            OpKind.EIGH_V -> "eighVectors" to 0
+            else -> return null
+        }
+        val sym = linalgF32Symbol(name, regular) ?: return null
+        val typeArgs = when (op.op) {
+            OpKind.CHOLESKY, OpKind.EIGH_V -> listOf(atoms[0][0])
+            OpKind.TRIANGULAR_SOLVE, OpKind.SOLVE -> listOf(atoms[0][0], atoms[1][1])
+            else -> listOf(atoms[0][0], atoms[0][1])
+        }
+        val resultIrType = irTypeForNode(op, context)
+            ?: irTypeForNode(op.operands.last(), context) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.size != typeArgs.size) return null
+        typeArgs.forEachIndexed { i, t -> call.typeArguments[i] = t }
+        call.arguments[0] = irGet(decls[0])
+        when (op.op) {
+            OpKind.TRIANGULAR_SOLVE -> {
+                call.arguments[1] = irGet(decls[1])
+                for ((i, k) in listOf("lower", "transpose_a", "unit_diagonal").withIndex()) {
+                    call.arguments[i + 2] = boolConst(op.attrs[k] as? Boolean ?: return null)
+                }
+            }
+            OpKind.SOLVE -> {
+                call.arguments[1] = irGet(decls[1])
+                call.arguments[2] = boolConst(op.attrs["transpose_a"] as? Boolean ?: return null)
+            }
+            OpKind.TRIANGLE -> {
+                for ((i, k) in listOf("lower", "diagonal", "upper").withIndex()) {
+                    val v = (op.attrs[k] as? Number)?.toFloat() ?: return null
+                    call.arguments[i + 1] = IrConstImpl.float(startOffset, endOffset, pluginContext.irBuiltIns.floatType, v)
+                }
+            }
+            else -> Unit
+        }
+        return call
+    }
+
+    /** `EIGH_W(a)` → `a.eighValues()`, a rank-1 result whose atom is `a`'s row atom. */
+    private fun IrBuilderWithScope.irEighValues(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val a = op.operands.singleOrNull() ?: return null
+        if (a.type.rank != 2 || a.type.dtype != F32 || op.type.rank != 1) return null
+        val decl = env[a.id] ?: return null
+        val ir = irTypeForNode(a, context) as? IrSimpleType ?: return null
+        val atoms = shapeAtomsOf(ir, 2) ?: return null
+        val sym = linalgF32Symbol("eighValues", 0) ?: return null
+        val resultIrType = irTypeForNode(op, context) ?: rebuildShapeAtoms(ir, listOf(atoms[0]), 1) ?: return null
+        val call = IrCallImpl.fromSymbolOwner(startOffset = startOffset, endOffset = endOffset, type = resultIrType, symbol = sym)
+        if (call.typeArguments.size != 1) return null
+        call.typeArguments[0] = atoms[0]
+        call.arguments[0] = irGet(decl)
+        return call
+    }
+
+    /** `DET(a)` → `a.det().toFloat()`: scalars are primitive `Float`s in a synthesized body. */
+    private fun IrBuilderWithScope.irDet(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val a = op.operands.singleOrNull() ?: return null
+        if (a.type.rank != 2 || a.type.dtype != F32 || !op.type.isScalar) return null
+        val decl = env[a.id] ?: return null
+        val ir = irTypeForNode(a, context) as? IrSimpleType ?: return null
+        val atoms = shapeAtomsOf(ir, 2) ?: return null
+        val sym = linalgF32Symbol("det", 0) ?: return null
+        val toFloatSym = toFloatSymbol() ?: return null
+        val detCall = IrCallImpl.fromSymbolOwner(startOffset = startOffset, endOffset = endOffset, type = sym.owner.returnType, symbol = sym)
+        if (detCall.typeArguments.size != 1) return null
+        detCall.typeArguments[0] = atoms[0]
+        detCall.arguments[0] = irGet(decl)
+        val cast = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset, endOffset = endOffset, type = pluginContext.irBuiltIns.floatType, symbol = toFloatSym,
+        )
+        cast.arguments[0] = detCall
+        return cast
+    }
+
+    /**
+     * The F32 overload of a `:core/ops` linear-algebra function: the one whose
+     * receiver is `DTensor<…, F32>` and that has [regular] value parameters (the
+     * F64 twins in LinalgF64.kt share the name).
+     */
+    private fun linalgF32Symbol(name: String, regular: Int): IrSimpleFunctionSymbol? {
+        val callableId = CallableId(
+            packageName = FqName("io.tlaloc.core.ops"),
+            callableName = Name.identifier(name),
+        )
+        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+            val params = sym.owner.parameters
+            val receiver = params.firstOrNull { it.kind == IrParameterKind.ExtensionReceiver }?.type as? IrSimpleType
+            params.count { it.kind == IrParameterKind.Regular } == regular &&
+                receiver?.arguments?.getOrNull(1)?.typeOrNull?.classFqName?.asString() == "io.tlaloc.core.F32"
+        }
     }
 
     private fun IrBuilderWithScope.irTranspose(

@@ -10,6 +10,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirOpResult
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.DxirType
+import io.tlaloc.core.LinalgKernels
 import io.tlaloc.core.RandomKey
 import io.tlaloc.core.bf16BitsToFloat
 import io.tlaloc.core.digamma
@@ -593,6 +594,67 @@ object DxirInterpreter {
                     ?.map { (it as Number).toInt() }
                     ?: emptyList()
                 evalTranspose(inputType, perm, a)
+            }
+            // Dense linear algebra: every arm widens to Double, runs the shared
+            // `LinalgKernels` routine and narrows once, as the `:core` host twins do.
+            OpKind.CHOLESKY -> {
+                val n = linalgSquareDim(op.operands[0].type, "CHOLESKY")
+                val a = evalNode(op.operands[0], env, multiResults)
+                LinalgKernels.cholesky(widen(a), n).narrow()
+            }
+            OpKind.TRIANGULAR_SOLVE -> {
+                val n = linalgSquareDim(op.operands[0].type, "TRIANGULAR_SOLVE")
+                val bType = op.operands[1].type
+                require(bType.rank == 2 && bType.dims[0] == n) {
+                    "DxirInterpreter: TRIANGULAR_SOLVE needs B of shape [$n, k]; got ${bType.dims}"
+                }
+                val a = evalNode(op.operands[0], env, multiResults)
+                val b = evalNode(op.operands[1], env, multiResults)
+                LinalgKernels.triangularSolve(
+                    widen(a), widen(b), n, bType.dims[1],
+                    lower = linalgBoolAttr(op, "lower"),
+                    transposeA = linalgBoolAttr(op, "transpose_a"),
+                    unitDiagonal = linalgBoolAttr(op, "unit_diagonal"),
+                ).narrow()
+            }
+            OpKind.SOLVE -> {
+                val n = linalgSquareDim(op.operands[0].type, "SOLVE")
+                val bType = op.operands[1].type
+                require(bType.rank == 2 && bType.dims[0] == n) {
+                    "DxirInterpreter: SOLVE needs B of shape [$n, k]; got ${bType.dims}"
+                }
+                val a = evalNode(op.operands[0], env, multiResults)
+                val b = evalNode(op.operands[1], env, multiResults)
+                LinalgKernels.solve(widen(a), widen(b), n, bType.dims[1], linalgBoolAttr(op, "transpose_a")).narrow()
+            }
+            OpKind.QR_Q, OpKind.QR_R -> {
+                val t = op.operands[0].type
+                require(t.rank == 2 && t.dims[0] >= t.dims[1]) {
+                    "DxirInterpreter: ${op.op} needs a rank-2 operand with rows ≥ columns; got ${t.dims}"
+                }
+                val a = evalNode(op.operands[0], env, multiResults)
+                val (q, r) = LinalgKernels.qr(widen(a), t.dims[0], t.dims[1])
+                (if (op.op == OpKind.QR_Q) q else r).narrow()
+            }
+            OpKind.EIGH_W, OpKind.EIGH_V -> {
+                val n = linalgSquareDim(op.operands[0].type, op.op.name)
+                val a = evalNode(op.operands[0], env, multiResults)
+                val (w, v) = LinalgKernels.eigh(widen(a), n)
+                (if (op.op == OpKind.EIGH_W) w else v).narrow()
+            }
+            OpKind.DET -> {
+                val n = linalgSquareDim(op.operands[0].type, "DET")
+                val a = evalNode(op.operands[0], env, multiResults)
+                floatArrayOf(LinalgKernels.det(widen(a), n).toFloat())
+            }
+            OpKind.TRIANGLE -> {
+                val t = op.operands[0].type
+                require(t.rank == 2) { "DxirInterpreter: TRIANGLE needs a rank-2 operand; got ${t.dims}" }
+                val a = evalNode(op.operands[0], env, multiResults)
+                LinalgKernels.triangle(
+                    widen(a), t.dims[0], t.dims[1],
+                    linalgScaleAttr(op, "lower"), linalgScaleAttr(op, "diagonal"), linalgScaleAttr(op, "upper"),
+                ).narrow()
             }
             OpKind.REVERSE -> {
                 // §0.4.396 — flip along the listed axes (stablehlo.reverse).
@@ -2219,6 +2281,23 @@ object DxirInterpreter {
         }
         return out
     }
+
+    private fun widen(a: FloatArray): DoubleArray = DoubleArray(a.size) { a[it].toDouble() }
+
+    private fun DoubleArray.narrow(): FloatArray = FloatArray(size) { this[it].toFloat() }
+
+    private fun linalgSquareDim(t: DxirType, what: String): Int {
+        require(t.rank == 2 && t.dims[0] == t.dims[1] && t.dims[0] >= 0) {
+            "DxirInterpreter: $what needs a square rank-2 operand with known dims; got ${t.dims}"
+        }
+        return t.dims[0]
+    }
+
+    private fun linalgBoolAttr(op: DxirOp, name: String): Boolean =
+        op.attrs[name] as? Boolean ?: error("DxirInterpreter: ${op.op} is missing Boolean attr '$name'")
+
+    private fun linalgScaleAttr(op: DxirOp, name: String): Double =
+        (op.attrs[name] as? Number)?.toDouble() ?: error("DxirInterpreter: ${op.op} is missing numeric attr '$name'")
 
     private fun evalTranspose(inputType: DxirType, perm: List<Int>, a: FloatArray): FloatArray {
         val rank = inputType.rank

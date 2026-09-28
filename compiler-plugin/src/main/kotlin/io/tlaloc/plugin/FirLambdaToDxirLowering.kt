@@ -31,6 +31,7 @@ import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirLiteralExpression
 import org.jetbrains.kotlin.fir.expressions.PrivateConstantEvaluatorAPI
 import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
+import org.jetbrains.kotlin.fir.expressions.resolvedArgumentMapping
 import org.jetbrains.kotlin.fir.expressions.FirVarargArgumentsExpression
 import org.jetbrains.kotlin.types.ConstantValueKind
 import org.jetbrains.kotlin.fir.expressions.FirOperation
@@ -2494,6 +2495,139 @@ object FirLambdaToDxirLowering {
             return acc
         }
 
+        // Dense linear algebra (`:core/ops/Linalg.kt`), rank-2 F32. Arguments are
+        // read by the name of the parameter they bind to (FIR's resolved argument
+        // mapping), because the argument list is in source order and named arguments
+        // may come in any order. The flags and scales must be literals.
+        if (fqn in LINALG_OP_SET) {
+            val receiverExpr = receiver(call) ?: throw LoweringException("$fqn has no receiver")
+            val a = lowerExpr(receiverExpr, env, emitter)
+            if (a.type.rank != 2 || a.type.dtype != F32) {
+                throw LoweringException("$fqn requires a rank-2 F32 receiver under grad {}; got ${a.type}")
+            }
+            val args: Map<String, FirExpression> = call.resolvedArgumentMapping?.entries?.associate { (e, p) ->
+                p.name.asString() to ((e as? FirNamedArgumentExpression)?.expression ?: e)
+            } ?: throw LoweringException("$fqn: its arguments are not resolved")
+            fun requireSquare(what: String) {
+                val (r, c) = a.type.dims
+                if (r > 0 && c > 0 && r != c) throw LoweringException("$what requires a square matrix; got ${a.type.dims}")
+            }
+            fun boolArg(name: String): Boolean {
+                val e = args[name] ?: throw LoweringException("$fqn: no argument for '$name'")
+                if (e is FirLiteralExpression && e.kind == ConstantValueKind.Boolean) return e.value as Boolean
+                throw LoweringException("$fqn argument '$name' must be a Boolean literal")
+            }
+            fun tensorArg(name: String): DxirNode {
+                val e = args[name] ?: throw LoweringException("$fqn: no argument for '$name'")
+                val b = lowerExpr(e, env, emitter)
+                if (b.type.rank != 2 || b.type.dtype != F32) {
+                    throw LoweringException("$fqn requires a rank-2 F32 '$name'; got ${b.type}")
+                }
+                return b
+            }
+            fun triangle(x: DxirNode, lower: Double, diagonal: Double, upper: Double) = emitter.op(
+                kind = OpKind.TRIANGLE,
+                operands = listOf(x),
+                type = x.type,
+                attrs = mapOf("lower" to lower, "diagonal" to diagonal, "upper" to upper),
+            )
+            when (fqn) {
+                "io.tlaloc.core.ops.tril" -> return triangle(a, 1.0, 1.0, 0.0)
+                "io.tlaloc.core.ops.triu" -> return triangle(a, 0.0, 1.0, 1.0)
+                "io.tlaloc.core.ops.scaleTriangles" -> {
+                    val scales = listOf("lower", "diagonal", "upper").map { name ->
+                        val e = args[name] ?: throw LoweringException("$fqn: no argument for '$name'")
+                        floatLiteralArg(e)?.toDouble() ?: throw LoweringException("$fqn scale '$name' must be a Float literal")
+                    }
+                    return triangle(a, scales[0], scales[1], scales[2])
+                }
+                "io.tlaloc.core.ops.cholesky" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    return emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type)
+                }
+                // Composites: lowered to the primitives above, so their
+                // derivatives (and higher derivatives) come from those rules.
+                "io.tlaloc.core.ops.solveSpd" -> {
+                    requireSquare(fqn)
+                    val b = tensorArg("b")
+                    return choleskySolve(emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type), b, emitter)
+                }
+                "io.tlaloc.core.ops.solve" -> {
+                    requireSquare(fqn)
+                    val b = tensorArg("b")
+                    return emitter.op(
+                        kind = OpKind.SOLVE, operands = listOf(a, b), type = b.type,
+                        attrs = mapOf("transpose_a" to ("transposeA" in args && boolArg("transposeA"))),
+                    )
+                }
+                "io.tlaloc.core.ops.det" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    return emitter.op(kind = OpKind.DET, operands = listOf(a), type = DxirType(a.type.dtype, emptyList()))
+                }
+                "io.tlaloc.core.ops.qrQ", "io.tlaloc.core.ops.qrR" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    val (m, n) = a.type.dims
+                    if (m > 0 && n > 0 && m < n) throw LoweringException("$fqn requires rows ≥ columns; got ${a.type.dims}")
+                    return if (fqn.endsWith("qrQ")) {
+                        emitter.op(kind = OpKind.QR_Q, operands = listOf(a), type = a.type)
+                    } else {
+                        emitter.op(kind = OpKind.QR_R, operands = listOf(a), type = DxirType(a.type.dtype, listOf(n, n)))
+                    }
+                }
+                "io.tlaloc.core.ops.eighValues", "io.tlaloc.core.ops.eighVectors" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    return if (fqn.endsWith("eighValues")) {
+                        emitter.op(kind = OpKind.EIGH_W, operands = listOf(a), type = DxirType(a.type.dtype, listOf(a.type.dims[0])))
+                    } else {
+                        emitter.op(kind = OpKind.EIGH_V, operands = listOf(a), type = a.type)
+                    }
+                }
+                "io.tlaloc.core.ops.identityLike" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    return identityLike(a, emitter)
+                }
+                "io.tlaloc.core.ops.invSpd" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    val l = emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type)
+                    return choleskySolve(l, identityLike(a, emitter), emitter)
+                }
+                "io.tlaloc.core.ops.logDetSpd" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    // 2·Σᵢ log Lᵢᵢ. The diagonal is the row sum of TRIANGLE(L, 0, 1, 0):
+                    // every other entry of a row is an exact zero, so the sum is exact.
+                    val l = emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type)
+                    val diagType = DxirType(a.type.dtype, listOf(a.type.dims[0]))
+                    val diag = emitter.op(
+                        kind = OpKind.SUM,
+                        operands = listOf(triangle(l, 0.0, 1.0, 0.0)),
+                        type = diagType,
+                        attrs = mapOf("reduction_dims" to listOf(1)),
+                    )
+                    val logDiag = emitter.op(kind = OpKind.LOG, operands = listOf(diag), type = diagType)
+                    val half = emitter.op(
+                        kind = OpKind.SUM, operands = listOf(logDiag), type = DxirType(a.type.dtype, emptyList()),
+                    )
+                    return emitter.op(kind = OpKind.ADD, operands = listOf(half, half), type = half.type)
+                }
+                "io.tlaloc.core.ops.triangularSolve" -> {
+                    requireSquare(fqn)
+                    val b = tensorArg("b")
+                    val flags = mapOf(
+                        "lower" to boolArg("lower"),
+                        "transpose_a" to ("transposeA" in args && boolArg("transposeA")),
+                        "unit_diagonal" to ("unitDiagonal" in args && boolArg("unitDiagonal")),
+                    )
+                    return emitter.op(kind = OpKind.TRIANGULAR_SOLVE, operands = listOf(a, b), type = b.type, attrs = flags)
+                }
+            }
+        }
+
         // §0.4.367 — shape ops (DiffKT parity, Phase A2a): the RESHAPE family
         // (`squeeze(axis)` / `unsqueeze(axis)` / `flatten()` / `reshape(dims)`)
         // and permutation `transpose(perm)` (no-arg = reverse all axes; the
@@ -4016,6 +4150,57 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.mean" to OpKind.MEAN,
         "io.tlaloc.core.ops.max" to OpKind.MAX,
         "io.tlaloc.core.ops.min" to OpKind.MIN,
+    )
+
+    /** `L⁻ᵀ·(L⁻¹·B)`: the solve with `A = L·Lᵀ`, as two TRIANGULAR_SOLVEs. */
+    private fun choleskySolve(l: DxirNode, b: DxirNode, emitter: DxirEmitter): DxirNode {
+        fun solve(rhs: DxirNode, transposeA: Boolean) = emitter.op(
+            kind = OpKind.TRIANGULAR_SOLVE,
+            operands = listOf(l, rhs),
+            type = rhs.type,
+            attrs = mapOf("lower" to true, "transpose_a" to transposeA, "unit_diagonal" to false),
+        )
+        return solve(solve(b, false), true)
+    }
+
+    /**
+     * The identity at [a]'s shape: a 1 splat to `a`'s runtime extents (the
+     * two-operand BROADCAST, `a` a shape-only template) with everything off the
+     * diagonal zeroed by TRIANGLE.
+     */
+    private fun identityLike(a: DxirNode, emitter: DxirEmitter): DxirNode {
+        val one = emitter.const(if (a.type.dtype == F64) 1.0 else 1.0f, DxirType(a.type.dtype, emptyList()))
+        val ones = emitter.op(
+            kind = OpKind.BROADCAST,
+            operands = listOf(one, a),
+            type = a.type,
+            attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+        )
+        return emitter.op(
+            kind = OpKind.TRIANGLE,
+            operands = listOf(ones),
+            type = a.type,
+            attrs = mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0),
+        )
+    }
+
+    /** The dense linear-algebra user surface (`:core/ops/Linalg.kt`). */
+    private val LINALG_OP_SET: Set<String> = setOf(
+        "io.tlaloc.core.ops.tril",
+        "io.tlaloc.core.ops.triu",
+        "io.tlaloc.core.ops.scaleTriangles",
+        "io.tlaloc.core.ops.cholesky",
+        "io.tlaloc.core.ops.triangularSolve",
+        "io.tlaloc.core.ops.solveSpd",
+        "io.tlaloc.core.ops.logDetSpd",
+        "io.tlaloc.core.ops.identityLike",
+        "io.tlaloc.core.ops.invSpd",
+        "io.tlaloc.core.ops.solve",
+        "io.tlaloc.core.ops.det",
+        "io.tlaloc.core.ops.qrQ",
+        "io.tlaloc.core.ops.qrR",
+        "io.tlaloc.core.ops.eighValues",
+        "io.tlaloc.core.ops.eighVectors",
     )
 
     /** The RESHAPE-family + transpose user surface. */

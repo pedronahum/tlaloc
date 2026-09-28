@@ -623,6 +623,12 @@ public final class io/tlaloc/nn/NamedParameter {
 	public final fun getTensor ()Lio/tlaloc/core/DTensor;
 }
 
+public final class io/tlaloc/nn/OdeKt {
+	public static final fun rk4 (Lio/tlaloc/autograd/Tracer;FFILkotlin/jvm/functions/Function2;)Lio/tlaloc/autograd/Tracer;
+	public static final fun rk4 (Lio/tlaloc/core/DTensor;FFILkotlin/jvm/functions/Function2;)Lio/tlaloc/core/DTensor;
+	public static final fun rk4Trajectory (Lio/tlaloc/autograd/Tracer;FFILkotlin/jvm/functions/Function2;)Ljava/util/List;
+}
+
 public abstract interface class io/tlaloc/nn/Optimizer {
 	public abstract fun initialState ()Ljava/lang/Object;
 	public abstract fun step (Ljava/util/List;Ljava/util/Map;Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerStep;
