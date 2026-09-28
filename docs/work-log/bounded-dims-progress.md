@@ -28,6 +28,29 @@ from `main` at `cc183fa`. Not pushed.
   buckets. Scripts were in the session scratchpad, not committed; the table in the
   design doc has the results.
 
+### Step 1: type-level API (`2df17db`)
+
+- `DimBound(max)` and `Bounded<B>` in `:core` (`Shape.kt`), `@ExperimentalTlalocApi`.
+  `ShapeAtom` is sealed, so the atom has to live in `io.tlaloc.core`.
+- Suite: 2,801 tests (+4), 1 failure: the same KPTX timing test as the baseline.
+
+### Step 2: compile-time checks (`3cb4610`)
+
+- `TlalocBoundedDimChecker.kt`: `BOUNDED_DIM_EXCEEDED`, `BOUNDED_AXIS_MISMATCH`,
+  `BOUNDED_DIM_INVALID`, `BOUNDED_SPEC_ARITY` (the last for `specOf`, step 3).
+- Correction to the design doc's first draft: elementwise `+ - * /` do NOT reject
+  mixed shapes natively. `BroadcastOps.kt` has `<S1, S2> DTensor<S1>.plus(DTensor<S2>)`
+  returning `DTensor<Shape>`, so any two shapes type-check. `matmul` and `contract` do
+  reject mixed bounds natively (shared type variables). Hence `BOUNDED_AXIS_MISMATCH`
+  for the broadcasting operators: right-aligned axes with two different bound objects.
+  A bound against `Sym` is allowed (it may be a broadcast size-1 axis).
+- A bound's `max` comes from the delegating constructor call of a source-declared
+  object (`FirConstructorSymbol.resolvedDelegatedConstructorCall`); a bound in a
+  compiled dependency is skipped (test pins it).
+- `grad { }` over `DTensor<Rank1<Named<SeqLen, Bounded<MaxSeq>>>, F32>` lowers and gives
+  `2x` at every size 1..6 (the plugin maps the unknown atom to `-1`, as for `Sym`).
+- Suite: 2,810 tests, 0 failures, `BUILD SUCCESSFUL`.
+
 ## Decisions
 
 - Bucketing, not dynamic shapes (spike above).
@@ -44,5 +67,5 @@ from `main` at `cc183fa`. Not pushed.
 
 ## Next step
 
-Phase 2 step 1: `DimBound` and `Bounded` in `:core`, `@ExperimentalTlalocApi`, ABI dump
-updated.
+Step 3: `specOf<S>` (JVM, reads bounds from `typeOf<S>()`) and `BoundedProgram` in
+`:autograd` (exact-size runs, bucketed runs with valid masks, `checkPadding`).

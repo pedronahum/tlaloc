@@ -160,11 +160,15 @@ val xSpec = specOf<Rank2<Named<SeqLen, Bounded<MaxSeq>>, Named<Hidden, Sym>>>(F3
 ## Compile-time checks
 
 Kotlin's type checker already does part of it, because `DTensor`'s shape parameter is
-invariant and `contract`, `matmul` and the elementwise operators share type variables:
+invariant and `contract` and `matmul` share type variables between their operands:
 
-- mixing `Bounded<MaxSeq>` with `Bounded<MaxOther>`, or with `Sym`, in `+`, `matmul`
-  or a named `contract` is a type mismatch at the call's file, line and column. Tests
-  pin this; no new plugin code is needed for it.
+- mixing `Bounded<MaxSeq>` with `Bounded<MaxOther>`, or with `Sym`, in `matmul` or a
+  named `contract` is a type mismatch at the call's file, line and column. Tests pin
+  this.
+- The elementwise operators do not share one: `BroadcastOps.kt` declares
+  `<S1, S2> DTensor<S1>.plus(DTensor<S2>): DTensor<Shape>` (and `minus`, `times`, `div`),
+  so any two shapes type-check and broadcasting is checked at run time. The plugin
+  checks these calls (below).
 
 The plugin adds a FIR checker (`TlalocBoundedDimChecker`) for what the type checker
 cannot see, because it involves numbers:
@@ -172,7 +176,9 @@ cannot see, because it involves numbers:
 | Diagnostic | Where | When |
 |---|---|---|
 | `BOUNDED_DIM_EXCEEDED` (error) | a call whose result type has a `Bounded<B>` axis | the size argument for that axis is an integer constant greater than `B.max` or less than 1. Covers the `Tensors` factories (`f32Matrix`, `f32MatrixOf`, `f32Zeros`, `f32Tensor3`, ...) and `specOf`'s fixed sizes landing on a bounded axis |
+| `BOUNDED_AXIS_MISMATCH` (error) | the broadcasting `plus`, `minus`, `times`, `div` of `io.tlaloc.core.ops` | two axes aligned from the right carry different bound objects. A bound against an unbounded atom is allowed: it may be a size-1 axis that broadcasts |
 | `BOUNDED_DIM_INVALID` (error) | `object X : DimBound(n)` | `n` is an integer constant less than 1 |
+| `BOUNDED_SPEC_ARITY` (error) | `specOf<S>(dtype, fixedSizes...)` | the number of fixed sizes is not the number of unbounded axes of `S`, or a constant fixed size is below 1 |
 
 - Reported with `reporter.reportOn(expression.source, ...)`, the call's file, line and
   column, as the existing shape diagnostics are.
@@ -287,8 +293,8 @@ bounded program has none of that. The two share conventions: strict JSON through
 - `:core`: `Bounded` and `DimBound` construction; `max < 1` refused.
 - `:compiler-plugin`, negative compilation through the existing in-process harness:
   a literal size over the bound, at the call's line and column; a literal below 1;
-  a size at the bound compiles; an invalid `DimBound`; mixing two bounds in `+`,
-  `matmul` and `contract` rejected by the type checker at the call's position;
+  a size at the bound compiles; an invalid `DimBound`; mixing two bounds in `+`
+  (plugin) and in `matmul` and `contract` (type checker) at the call's position;
   `grad { }` over a `Bounded` parameter compiles and gives the same gradient as the
   `Sym` version at several sizes.
 - `:autograd`: `specOf` reads bounds and fixed sizes, and refuses a wrong count;
