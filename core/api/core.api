@@ -35,6 +35,10 @@ public final class io/tlaloc/core/Bool : io/tlaloc/core/DType {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/core/Bounded : io/tlaloc/core/ShapeAtom {
+	public fun <init> ()V
+}
+
 public final class io/tlaloc/core/BufferHandle : java/lang/AutoCloseable {
 	public static final synthetic fun box-impl (Lio/tlaloc/core/HandleRef;)Lio/tlaloc/core/BufferHandle;
 	public fun close ()V
@@ -170,6 +174,13 @@ public abstract interface class io/tlaloc/core/Differentiable {
 public final class io/tlaloc/core/Dim : io/tlaloc/core/IndexName {
 	public static final field INSTANCE Lio/tlaloc/core/Dim;
 	public fun getName ()Ljava/lang/String;
+}
+
+public abstract class io/tlaloc/core/DimBound {
+	public fun <init> (I)V
+	public fun getBoundName ()Ljava/lang/String;
+	public final fun getMax ()I
+	public fun toString ()Ljava/lang/String;
 }
 
 public final class io/tlaloc/core/DoubleScalar : io/tlaloc/core/DScalar {

@@ -85,3 +85,42 @@ class Rank6<A0 : ShapeAtom, A1 : ShapeAtom, A2 : ShapeAtom, A3 : ShapeAtom, A4 :
 class DynShape(val dims: IntArray) : Shape {
     override val rank: Int get() = dims.size
 }
+
+/**
+ * An upper bound for an axis whose size is known only at run time.
+ *
+ * Each bound is a singleton object, and the object is the axis's identity: within one
+ * program, every axis typed [Bounded] of the same object has the same size. Two axes
+ * that vary independently need two objects, even when their [max] is equal.
+ *
+ *     object MaxSeq : DimBound(4096)
+ *
+ * The compiler plugin reads [max] from the constructor call of a bound declared in the
+ * module it compiles, and reports a constant size over it as an error. A bound
+ * declared in another compiled module is checked at run time only.
+ */
+@ExperimentalTlalocApi
+abstract class DimBound(val max: Int) {
+    init {
+        require(max >= 1) { "DimBound: max must be at least 1, got $max" }
+    }
+
+    /** The name an exported artifact records for this bound: the object's simple class name. */
+    open val boundName: String
+        get() = this::class.simpleName ?: error("DimBound: a bound must be a named object")
+
+    override fun toString(): String = "$boundName(<= $max)"
+}
+
+/**
+ * A shape atom for an axis of size `1..B.max`, where [B] is a [DimBound] object.
+ *
+ * Use it anywhere an atom goes, positionally or inside [Named]:
+ *
+ *     DTensor<Rank2<Named<SeqLen, Bounded<MaxSeq>>, Named<Hidden, Sym>>, F32>
+ *
+ * The shape parameter of [DTensor] is invariant, so mixing `Bounded<MaxSeq>` with another
+ * bound, or with [Sym], in one operation is a type mismatch.
+ */
+@ExperimentalTlalocApi
+class Bounded<B : DimBound> : ShapeAtom

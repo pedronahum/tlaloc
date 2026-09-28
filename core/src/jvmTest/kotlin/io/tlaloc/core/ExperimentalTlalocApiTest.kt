@@ -92,6 +92,19 @@ class ExperimentalTlalocApiTest {
     }
 
     @Test
+    fun `the bounded-dimension atoms carry the marker`() {
+        // Bounded dimensions export to buckets whose manifest format is new
+        // (docs/design/bounded-dims.md); the type encoding may change shape with it.
+        listOf(DimBound::class.java, Bounded::class.java).forEach { cls ->
+            assertTrue(
+                MARKER_DESCRIPTOR in constantPoolOf(cls),
+                "${cls.simpleName} is part of the bounded-dimension surface, which is provisional " +
+                    "— it must carry @ExperimentalTlalocApi",
+            )
+        }
+    }
+
+    @Test
     fun `the certified surface does NOT carry the marker`() {
         // The counter-assertion, and the reason the marker is worth anything. An
         // annotation applied to everything teaches a reader to add `-opt-in=` once and
