@@ -34,13 +34,13 @@ every input value is exact in f32 and bf16.
 
 | Payload | Source | Inputs → results | Body |
 |---|---|---|---|
-| `rmsnorm_f32` | Pallas | f32[16,256], f32[1,256] → f32[16,256] | 1,601 B |
-| `rmsnorm_bf16` | Pallas | bf16[16,256], bf16[1,256] → bf16[16,256], f32 arithmetic inside | 1,775 B |
-| `matmul_f32` | Pallas | f32[8,256] · f32[256,128] → f32[8,128], `precision=HIGHEST` | 1,218 B |
-| `norm_swiglu_f32` | Pallas | x, norm weight, W_gate, W_up → (RMSNorm(x), silu(h·W_gate) ⊙ h·W_up): two results | 2,305 B |
-| `kv_update_inplace_f32` | Pallas | cache f32[16,128], new f32[4,128] → cache with rows 8–11 replaced by DMA; result aliased to the cache operand | 1,122 B |
-| `rmsnorm_f32_kmosaic` | Kotlin (`MosaicRmsNorm`) | as `rmsnorm_f32` | 1,198 B |
-| `rmsnorm_bf16_kmosaic` | Kotlin (`MosaicRmsNorm`) | as `rmsnorm_bf16` | 1,278 B |
+| `rmsnorm_f32` | Pallas | f32[16,256], f32[1,256] → f32[16,256] | 1,107 B |
+| `rmsnorm_bf16` | Pallas | bf16[16,256], bf16[1,256] → bf16[16,256], f32 arithmetic inside | 1,172 B |
+| `matmul_f32` | Pallas | f32[8,256] · f32[256,128] → f32[8,128], `precision=HIGHEST` | 940 B |
+| `norm_swiglu_f32` | Pallas | x, norm weight, W_gate, W_up → (RMSNorm(x), silu(h·W_gate) ⊙ h·W_up): two results | 1,571 B |
+| `kv_update_inplace_f32` | Pallas | cache f32[16,128], new f32[4,128] → cache with rows 8–11 replaced by DMA; result aliased to the cache operand | 893 B |
+| `rmsnorm_f32_kmosaic` | Kotlin (`MosaicRmsNorm`) | as `rmsnorm_f32` | 1,068 B |
+| `rmsnorm_bf16_kmosaic` | Kotlin (`MosaicRmsNorm`) | as `rmsnorm_bf16` | 1,133 B |
 
 Regenerate (CPU only; the Kotlin text is written by `TpuKernelFixtureCpuTest`):
 
@@ -50,7 +50,9 @@ JAX_PLATFORMS=cpu ~/.local/venvs/iree/bin/python harness/python/export_tpu_kerne
   --out runtime-pjrt/src/jvmTest/resources/tpu-kernels --kmosaic-dir runtime-pjrt/build/kmosaic
 ```
 
-The exporter is deterministic: two runs write identical files.
+The exporter is deterministic: two runs write identical files. It strips debug
+locations from every body (Pallas records the absolute path of the Python file
+that defined the kernel) and refuses to write a fixture that names a local path.
 
 ## Checked on the CPU host
 
@@ -58,7 +60,7 @@ The exporter is deterministic: two runs write identical files.
   its numpy reference (max |diff| 5.7e-6 for `norm_swiglu_f32`, at most
   1.2e-7 for the others).
 - `MosaicKernel.backendConfigJson()` re-emits the `backend_config` that
-  `jax.export` wrote, byte for byte (`TpuKernelFixtureCpuTest`).
+  `jax.export` wrote (with the stripped body), byte for byte (`TpuKernelFixtureCpuTest`).
 - Every emitted program parses and verifies with jaxlib's StableHLO and TPU
   dialects; its `backend_config` decodes as JSON to the manifest's body and
   config; the body parses as Mosaic bytecode at serialization version 9 and

@@ -6,7 +6,9 @@ Runs on a CPU host (no TPU needed). For each kernel it:
 2. pulls the ``stablehlo.custom_call @tpu_custom_call`` out of the exported
    module and decodes its ``backend_config`` JSON (the ``body`` field is the
    Mosaic module as MLIR bytecode after ``mosaic-serde{serialize=true}``);
-3. captures the Mosaic module text Pallas produced before serialization;
+3. strips debug locations from the body (Pallas records the absolute path
+   of the Python file that defined the kernel) and captures the Mosaic
+   module text Pallas produced before serialization;
 4. runs the same kernel in Pallas TPU interpret mode on the CPU and compares
    it to a numpy reference;
 5. writes ``<out>/<name>/manifest.json``, ``<name>/mosaic.mlir`` and one
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import os
 import platform
@@ -313,12 +316,46 @@ def serialize_text(text: str) -> bytes:
             raise ValueError("Mosaic module does not verify")
         ctx.allow_unregistered_dialects = True
         PassManager.parse(
-            f"builtin.module(mosaic-serde{{serialize=true target-version={MOSAIC_TARGET_VERSION}}})"
+            f"builtin.module(mosaic-serde{{serialize=true target-version={MOSAIC_TARGET_VERSION}}},strip-debuginfo)"
         ).run(mod.operation)
-        import io
         buf = io.BytesIO()
         mod.operation.write_bytecode(buf, desired_version=0)
         return buf.getvalue()
+
+
+def strip_debug_info(body: bytes) -> bytes:
+    """A serialized Mosaic body with every location replaced by `unknown`.
+
+    Pallas records the Python source location of each kernel op, so a body
+    exported by jax carries the absolute path of the file that defined the
+    kernel. Stripping makes the payload independent of the checkout it was
+    exported from; the ops, attributes and serialization version are kept."""
+    with mosaic_context() as ctx, ir.Location.unknown():
+        ctx.allow_unregistered_dialects = True
+        mod = ir.Module.parse(body)
+        PassManager.parse("builtin.module(strip-debuginfo)").run(mod.operation)
+        buf = io.BytesIO()
+        mod.operation.write_bytecode(buf, desired_version=0)
+        return buf.getvalue()
+
+
+LEAK_MARKERS = (b"/home/", b"worktrees", b"/Users/", b".py")
+
+
+def assert_no_local_paths(out_dir: Path) -> None:
+    """Refuse a fixture tree that names a local path anywhere: in any file,
+    or inside any base64 Mosaic body."""
+    for f in sorted(out_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        data = f.read_bytes()
+        blobs = [data]
+        if f.name == "manifest.json":
+            blobs.append(base64.b64decode(json.loads(data)["body_base64"]))
+        for blob in blobs:
+            for marker in LEAK_MARKERS:
+                if marker in blob:
+                    raise RuntimeError(f"{f} contains a local path marker {marker!r}")
 
 
 def canonical_text(text: str) -> str:
@@ -411,8 +448,11 @@ def export_one(k: dict, out_dir: Path) -> dict:
     module_text = exported.mlir_module()
     cc = extract_custom_call(module_text)
     cfg = json.loads(cc["backend_config"])
-    body_b64 = cfg["custom_call_config"].pop("body")
-    body = base64.b64decode(body_b64)
+    exported_b64 = cfg["custom_call_config"].pop("body")
+    body = strip_debug_info(base64.b64decode(exported_b64))
+    body_b64 = base64.b64encode(body).decode("ascii")
+    # The config JAX wrote, with the body swapped for the stripped one.
+    exported_backend_config = cc["backend_config"].replace(exported_b64, body_b64)
     if not _captured_mosaic:
         raise RuntimeError(f"{k['name']}: Mosaic module was not captured")
     mosaic_text = _captured_mosaic[-1]
@@ -438,7 +478,7 @@ def export_one(k: dict, out_dir: Path) -> dict:
         "body_base64": body_b64,
         "custom_call_config": cfg["custom_call_config"],
         "backend_config_extra": {kk: v for kk, v in cfg.items() if kk != "custom_call_config"},
-        "exported_backend_config": cc["backend_config"],
+        "exported_backend_config": exported_backend_config,
         "has_side_effect": cc["has_side_effect"],
         "input_output_aliases": {str(a): b for a, b in k["aliases"].items()},
         "inputs": k["inputs"],
@@ -510,6 +550,7 @@ def main() -> int:
             base = text_path.stem
             manifest = manifests.get(base) or json.loads((args.out / base / "manifest.json").read_text())
             export_kmosaic(text_path, args.out, base, manifest)
+    assert_no_local_paths(args.out)
     return 0
 
 

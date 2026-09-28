@@ -24,6 +24,26 @@ class TpuKernelFixtureCpuTest {
 
     private val fixtures by lazy { TpuKernelFixtures.NAMES.map { TpuKernelFixtures.load(it) } }
 
+    /** Checked-in payloads must not name the machine they were exported on:
+     * not in any file, and not inside a Mosaic body's debug locations. */
+    @Test
+    fun payloadsNameNoLocalPath() {
+        val markers = listOf("/home/", "worktrees", "/Users/", ".py")
+        val dir = Path.of(TpuKernelFixtures::class.java.getResource("/tpu-kernels")!!.toURI())
+        val files = Files.walk(dir).use { s -> s.filter { Files.isRegularFile(it) }.toList() }
+        assertTrue(files.size >= TpuKernelFixtures.NAMES.size * 3, "found only ${files.size} fixture files")
+        for (f in files) {
+            val texts = mutableListOf(String(Files.readAllBytes(f), Charsets.ISO_8859_1))
+            if (f.fileName.toString() == "manifest.json") {
+                val body = Regex("\"body_base64\": \"([^\"]+)\"").find(texts[0])!!.groupValues[1]
+                texts += String(java.util.Base64.getDecoder().decode(body), Charsets.ISO_8859_1)
+            }
+            for (t in texts) for (m in markers) {
+                assertFalse(m in t, "${dir.relativize(f)} contains '$m' (a local path)")
+            }
+        }
+    }
+
     @Test
     fun payloadsRecordTheirToolchain() {
         for (f in fixtures) {

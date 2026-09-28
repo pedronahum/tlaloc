@@ -11,7 +11,9 @@ Runs on a CPU host. Given the StableHLO text Tlaloc emitted for one fixture
 4. converts the program to HLO (the form the TPU compiler receives) and
    checks the custom-call instruction there;
 5. for a Pallas fixture: exports the same kernel with `jax.export` and checks
-   that JAX's HLO custom-call instruction equals Tlaloc's;
+   that JAX's HLO custom-call instruction equals Tlaloc's, once both Mosaic
+   bodies have their debug locations stripped (JAX's carries the path of the
+   checkout it ran from);
 6. for a Kotlin-emitted fixture (`--mosaic-text`): serializes that text again
    and checks it yields the checked-in body byte for byte;
 7. with `--reference-mlir`: compiles the program lowered to its reference
@@ -48,9 +50,12 @@ def normalise(mlir_text: str) -> str:
     return text
 
 
-def hlo_custom_call(module_text: str) -> str:
+def hlo_custom_call(module_text: str, strip_body=None) -> str:
     """The tpu_custom_call instruction of the program's HLO, with the
-    instruction and operand names and metadata removed."""
+    instruction and operand names and metadata removed. With [strip_body],
+    the Mosaic body in the backend config is replaced by
+    `strip_body(body)`, so bodies that differ only in debug locations
+    compare equal; everything else is compared as written."""
     import jaxlib._jax as jx
     comp = jx.mlir.mlir_module_to_xla_computation(module_text, use_tuple_args=False, return_tuple=False)
     hlo = comp.as_hlo_text()
@@ -59,6 +64,12 @@ def hlo_custom_call(module_text: str) -> str:
             line = re.sub(r"^\s*(ROOT\s+)?\S+ = ", "", line)
             line = re.sub(r"custom-call\([^)]*\)", "custom-call(...)", line)
             line = re.sub(r", metadata=\{[^}]*\}", "", line)
+            if strip_body is not None:
+                line = re.sub(
+                    r'("body": ")([A-Za-z0-9+/=]+)(")',
+                    lambda m: m.group(1) + strip_body(m.group(2)) + m.group(3),
+                    line,
+                )
             return line.strip()
     raise ValueError("no tpu_custom_call in the HLO:\n" + hlo)
 
@@ -132,7 +143,10 @@ def run(args) -> dict:
     kernel_text = ex.deserialize_body(body)
     checks.append(f"body is Mosaic bytecode at serialization version {version} and deserializes ({len(kernel_text)} chars)")
 
-    ours = hlo_custom_call(text)
+    def strip(b64: str) -> str:
+        return base64.b64encode(ex.strip_debug_info(base64.b64decode(b64))).decode("ascii")
+
+    ours = hlo_custom_call(text, strip)
     if ("output_to_operand_aliasing" in ours) != bool(manifest["input_output_aliases"]):
         raise AssertionError("HLO output_to_operand_aliasing does not match the manifest: " + ours[:400])
     checks.append("program converts to HLO: " + ours[:160].replace(manifest["body_base64"], "<body>") + " ...")
@@ -142,7 +156,7 @@ def run(args) -> dict:
         spec = next(k for k in ex.kernel_specs() if k["name"] == manifest["name"])
         shapes = [jax.ShapeDtypeStruct(tuple(s["shape"]), ex.JNP_DTYPE[s["dtype"]]) for s in spec["inputs"]]
         exported = jax.export.export(jax.jit(spec["call"]), platforms=["tpu"])(*shapes)
-        theirs = hlo_custom_call(exported.mlir_module())
+        theirs = hlo_custom_call(exported.mlir_module(), strip)
         if ours != theirs:
             raise AssertionError(f"HLO custom-call differs from JAX's:\n tlaloc: {ours[:600]}\n jax:    {theirs[:600]}")
         checks.append("HLO custom-call instruction is identical to the one JAX emits for the same Pallas kernel")
