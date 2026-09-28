@@ -53,6 +53,9 @@ class LinalgJaxParityTest {
     val solveUpperTValue = doubleArrayOf(0.35, -0.6, 0.11176470588235296, 1.4470588235294117, -0.08063725490196079, 0.0524509803921569, 0.6919633642930856, 0.5639060887512899)
     val solveUpperTGradA = doubleArrayOf(-0.4269375518023272, 2.2281698100296983, -0.008416124930425966, 0.036646408460739, 0.0, -5.760168582056423, 0.16308399267349044, -0.8110496431386093, 0.0, 0.0, -0.006739199417645123, 0.03462836626244022, 0.0, 0.0, 0.0, -0.8062702117367292)
     val solveUpperTGradB = doubleArrayOf(-0.307588337827235, -0.8909891167364324, 0.40417868823024955, 3.949387251517143, -0.14937641558780757, -0.10116311731026435, 0.7560209960902191, 0.5020895951538594)
+    val solveSpdValue = doubleArrayOf(0.050319189048976726, -0.2804008213092482, 0.15632171036688589, 0.47021966610472143, -0.12476324369911106, 0.04337360851450748, 0.31394257309153645, 0.0006141447509433244)
+    val solveSpdGradA = doubleArrayOf(0.0021976318589309414, 0.01813632323992024, -0.004530100529456775, 0.0041858859444838265, 0.01813632323992024, -0.07068809465307205, 0.005857357436929367, -0.01681250712769826, -0.004530100529456775, 0.005857357436929367, 0.0006279289056395608, 0.00389867723692403, 0.0041858859444838265, -0.01681250712769826, 0.00389867723692403, -0.019182760598347556)
+    val solveSpdGradB = doubleArrayOf(-0.00908004243390969, 0.006208011371002693, 0.030516719968379496, 0.1401848402872782, -0.004758572759412805, -0.028165142821204893, 0.06104279458044239, 0.03065824308757331)
 
     private val scalar = DxirType(F32, emptyList())
 
@@ -118,5 +121,26 @@ class LinalgJaxParityTest {
             assertClose(want[1], g[0], "dA $tag")
             assertClose(want[2], g[1], "dB $tag")
         }
+    }
+
+    /** `L⁻ᵀ·(L⁻¹·B)`, the lowering the plugin gives `solveSpd`. */
+    private fun DxirBuilder.solveSpd(a: io.tlaloc.ir.DxirNode, b: io.tlaloc.ir.DxirNode): io.tlaloc.ir.DxirNode {
+        val l = op(OpKind.CHOLESKY, listOf(a), a.type)
+        fun solve(rhs: io.tlaloc.ir.DxirNode, transposeA: Boolean) = op(
+            OpKind.TRIANGULAR_SOLVE, listOf(l, rhs), rhs.type,
+            attrs = mapOf("lower" to true, "transpose_a" to transposeA, "unit_diagonal" to false),
+        )
+        return solve(solve(b, false), true)
+    }
+
+    @Test
+    fun solveSpdMatchesJaxChoSolve() {
+        val at = DxirType(F32, listOf(n, n))
+        val bt = DxirType(F32, listOf(n, 2))
+        val (value, loss) = cubeLoss("solve_spd", listOf(at, bt), bt) { ps -> solveSpd(ps[0], ps[1]) }
+        assertClose(solveSpdValue, DxirInterpreter.evalFunction(value, listOf(f(spd), f(rhs))).single(), "X")
+        val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(spd), f(rhs)))
+        assertClose(solveSpdGradA, g[0], "dA")
+        assertClose(solveSpdGradB, g[1], "dB")
     }
 }

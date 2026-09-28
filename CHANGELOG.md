@@ -28,6 +28,11 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   gradients (`toKotlinSource`) spell the new host functions and compile. `grad {}`
   differentiates F32 tensors only, as for every other op; the F64 overloads run
   on the host, and F64 gradient graphs run through `PjrtSession.runOnF64`.
+- **`solveSpd(b)`** solves `A·X = B` for a symmetric positive-definite `A`
+  through its Cholesky factor, F32 and F64. Under `grad {}` it is lowered to
+  `cholesky` and two `triangularSolve`s, so its derivative is theirs; it equals
+  implicit differentiation (`B̄ = A⁻¹·X̄`, `Ā = −sym(B̄·Xᵀ)`), which the tests
+  check directly, and matches JAX's `cho_solve`.
 
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,

@@ -168,4 +168,35 @@ class PjrtLinalgTest {
             assertTrue(d <= 1e-4, "Hilbert(5) cholesky dA: $d")
         }
     }
+
+    @Test
+    fun f64SolveSpdGradientMatchesFiniteDifferences() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        // The plugin's lowering of solveSpd: cholesky, then L⁻¹·B, then L⁻ᵀ·Y.
+        // Tolerance as in f64GradientAndTangentGraphsMatchFiniteDifferences.
+        val fn = DxirBuilder.function("solve_spd_loss") {
+            val a = param("a", t(F64, n, n))
+            val b = param("b", t(F64, n, 2))
+            val w = param("w", t(F64, n, 2))
+            val l = op(OpKind.CHOLESKY, listOf(a), t(F64, n, n))
+            fun solve(rhs: io.tlaloc.ir.DxirNode, tr: Boolean) = op(
+                OpKind.TRIANGULAR_SOLVE, listOf(l, rhs), t(F64, n, 2),
+                attrs = mapOf("lower" to true, "transpose_a" to tr, "unit_diagonal" to false),
+            )
+            val x = solve(solve(b, false), true)
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(x, w), t(F64, n, 2))), t(F64)))
+        }
+        fun lossD(a: DoubleArray, b: DoubleArray): Double {
+            val l = LinalgKernels.cholesky(a, n)
+            val y = LinalgKernels.triangularSolve(l, b, n, 2, true, false, false)
+            return dot(LinalgKernels.triangularSolve(l, y, n, 2, true, true, false), w42)
+        }
+        TestBackend.session().use { session ->
+            val g = session.runOnF64(DxirReverseTransform.apply(fn), listOf(spd, rhs, w42))
+            val dA = maxRelDiff(fdGrad(spd, 1e-6) { lossD(it, rhs) }, g[0])
+            val dB = maxRelDiff(fdGrad(rhs, 1e-6) { lossD(spd, it) }, g[1])
+            assertTrue(dA <= 1e-7 && dB <= 1e-7, "solveSpd: dA $dA, dB $dB")
+        }
+    }
 }

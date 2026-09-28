@@ -60,3 +60,9 @@ fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.triangularSolve(
     )
     return Tracer(tape, e)
 }
+
+/** Capture-API [io.tlaloc.core.ops.solveSpd]: recorded as `cholesky` and two triangular solves. */
+fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.solveSpd(b: Tracer<Rank2<N, K>>): Tracer<Rank2<N, K>> {
+    val l = cholesky()
+    return l.triangularSolve(l.triangularSolve(b, true, false, false), true, true, false)
+}

@@ -9,7 +9,7 @@ Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`.
 | `TRIANGLE` (`tril`, `triu`, `scaleTriangles`) | done | 1 |
 | `triangularSolve` | done | 1 |
 | `cholesky` | done | 1 |
-| `solveSpd` | not started | |
+| `solveSpd` | done | 2 |
 | `logDetSpd` | not started | |
 | `invSpd` | not started | |
 | `examples/gaussian-process` | not started | |
@@ -55,6 +55,20 @@ Mutation checks (CONTRIBUTING: a new test must fail without the fix): changing �
 diagonal ½ → 1 in the Cholesky VJP or JVP, dropping the triangle mask or a
 transpose flag in the triangular-solve rules — each makes `DxirLinalgGradTest` fail.
 
+## Commit 2: `solveSpd`
+
+An FIR composite (`cholesky`, `L⁻¹·B`, `L⁻ᵀ·Y`); host twins F32/F64 and a
+capture-API twin built the same way. No new DXIR kind and no new rule: the
+derivative is the primitives'. Tests: host (textbook system, 1×1, Hilbert(8)
+residual), JAX `cho_solve` parity (value, dA, dB), plugin `grad2` and `jvp2`
+against finite differences and against the implicit-differentiation formulas
+`B̄ = A⁻¹·X̄`, `Ā = −sym(B̄·Xᵀ)`, F64 gradient graph on PJRT.
+
+Decision: no dedicated SOLVE_SPD kind with a hand-written implicit rule. The
+composite's reverse pass costs four triangular solves plus two small matmuls
+against two for a direct rule, but gives forward mode and every higher order for
+free and cannot disagree with the primitives.
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -79,5 +93,4 @@ transpose flag in the triangular-solve rules — each makes `DxirLinalgGradTest`
 
 ## Next step
 
-Run the full suite, commit, then `solveSpd` as an FIR composite of
-`cholesky` + two `triangularSolve`s.
+`logDetSpd` (FIR composite, with the `hessian` test), then `identityLike` + `invSpd`.

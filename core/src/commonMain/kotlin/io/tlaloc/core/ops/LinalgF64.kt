@@ -73,3 +73,11 @@ fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F64>.triangularSolve(
     val x = LinalgKernels.triangularSolve(f64Data(this), f64Data(b), n, m, lower, transposeA, unitDiagonal)
     return DTensor(HostF64Storage(x), intArrayOf(n, m), F64)
 }
+
+/** F64 [solveSpd]. */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F64>.solveSpd(
+    b: DTensor<Rank2<N, K>, F64>,
+): DTensor<Rank2<N, K>, F64> {
+    val l = cholesky()
+    return l.triangularSolve(l.triangularSolve(b, true, false, false), true, true, false)
+}

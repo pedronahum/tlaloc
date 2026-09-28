@@ -101,4 +101,37 @@ class LinalgTest {
         val d = data()
         return f64(c, r, *DoubleArray(r * c) { d[(it % r) * c + it / r] })
     }
+
+    @Test
+    fun solveSpdSolves() {
+        // A·X = B for the textbook matrix, X integer.
+        val a = f64(3, 3, 4.0, 12.0, -16.0, 12.0, 37.0, -43.0, -16.0, -43.0, 98.0)
+        val x = doubleArrayOf(1.0, -2.0, 3.0, 0.5, -1.0, 4.0)
+        val ad = a.data()
+        val b = DoubleArray(6)
+        for (i in 0 until 3) for (c in 0 until 2) for (p in 0 until 3) b[i * 2 + c] += ad[i * 3 + p] * x[p * 2 + c]
+        val got = a.solveSpd(f64(3, 2, *b)).data()
+        for (i in x.indices) assertTrue(abs(got[i] - x[i]) < 1e-12, "X[$i] = ${got[i]}, want ${x[i]}")
+        val got32 = Tensors.f32Matrix<Sym, Sym>(3, 3, FloatArray(9) { ad[it].toFloat() })
+            .solveSpd(Tensors.f32Matrix<Sym, Sym>(3, 2, FloatArray(6) { b[it].toFloat() })).hostF32()
+        for (i in x.indices) assertTrue(abs(got32[i] - x[i]) < 1e-3, "F32 X[$i] = ${got32[i]}, want ${x[i]}")
+        // 1×1.
+        assertContentEquals(doubleArrayOf(2.0), f64(1, 1, 4.0).solveSpd(f64(1, 1, 8.0)).data())
+    }
+
+    @Test
+    fun solveSpdOfHilbertHasSmallResidual() {
+        // Hilbert(8), cond 1.5e10: the error in X can be large, but the residual
+        // A·X − B of a backward-stable solve is at the level of ε·‖A‖·‖X‖.
+        val k = 8
+        val h = hilbert(k)
+        val b = f64(k, 1, *DoubleArray(k) { 1.0 })
+        val x = h.solveSpd(b).data()
+        val hd = h.data()
+        val xNorm = x.maxOf { abs(it) }
+        for (i in 0 until k) {
+            val r = (0 until k).sumOf { hd[i * k + it] * x[it] } - 1.0
+            assertTrue(abs(r) < 1e-14 * k * xNorm, "residual[$i] = $r (‖X‖∞ = $xNorm)")
+        }
+    }
 }

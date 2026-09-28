@@ -159,6 +159,80 @@ class LinalgGradientTest {
         assertClose(fdGrad(tri, triLoss), rows.getValue("tri"), "d (tril + triu)")
     }
 
+    private fun spdSolveD(a: DoubleArray, b: DoubleArray): DoubleArray {
+        val l = LinalgKernels.cholesky(a, n)
+        val y = LinalgKernels.triangularSolve(l, b, n, 2, lower = true, transposeA = false, unitDiagonal = false)
+        return LinalgKernels.triangularSolve(l, y, n, 2, lower = true, transposeA = true, unitDiagonal = false)
+    }
+
+    @Test
+    fun `solveSpd differentiates through the plugin and agrees with implicit differentiation`() {
+        val src = """
+            import io.tlaloc.autograd.grad2
+            import io.tlaloc.autograd.jvp2
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.solveSpd
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun show(name: String, t: DTensor<*, F32>) = println(name + " " + t.hostF32().joinToString(","))
+            fun main() {
+                val a = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(spd)}))
+                val b = Tensors.f32Matrix<Sym, Sym>(4, 2, floatArrayOf(${lit(rhs)}))
+                val v = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(dir)}))
+                val vb = Tensors.f32Matrix<Sym, Sym>(4, 2, floatArrayOf(${lit(rhs.map { -0.5 * it }.toDoubleArray())}))
+                val g = grad2 { x: DTensor<Rank2<Sym, Sym>, F32>, y: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val s = x.solveSpd(y)
+                    (s * s * s).sum().toFloat()
+                }
+                val (dA, dB) = g(a, b)
+                show("dA", dA)
+                show("dB", dB)
+                val j = jvp2 { x: DTensor<Rank2<Sym, Sym>, F32>, y: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val s = x.solveSpd(y)
+                    (s * s * s).sum().toFloat()
+                }
+                println("jvp " + j(a, b, v, vb))
+            }
+        """.trimIndent()
+        val result = compileAndRun(src)
+        assertEquals(
+            0, result.exitCode,
+            "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}",
+        )
+        val fellBack = result.messages.filter { "kept original call" in it.message }
+        assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
+        val rows = result.stdout.trim().lines().associate { line ->
+            val (k, v) = line.split(" ", limit = 2)
+            k to v.split(",").map { it.toFloat() }
+        }
+        val gA = fdGrad(spd) { cubeSum(spdSolveD(it, rhs)) }
+        val gB = fdGrad(rhs) { cubeSum(spdSolveD(spd, it)) }
+        assertClose(gA, rows.getValue("dA"), "d solveSpd / dA")
+        assertClose(gB, rows.getValue("dB"), "d solveSpd / dB")
+        val vb = rhs.map { -0.5 * it }.toDoubleArray()
+        val wantJvp = gA.indices.sumOf { gA[it] * dir[it] } + gB.indices.sumOf { gB[it] * vb[it] }
+        assertClose(doubleArrayOf(wantJvp), rows.getValue("jvp"), "jvp solveSpd")
+
+        // Implicit differentiation: X̄ = 3X², B̄ = A⁻¹·X̄, Ā = −sym(B̄·Xᵀ).
+        val x = spdSolveD(spd, rhs)
+        val bBar = spdSolveD(spd, DoubleArray(x.size) { 3 * x[it] * x[it] })
+        val implicit = DoubleArray(n * n) { idx ->
+            val i = idx / n
+            val j = idx % n
+            val ij = (0 until 2).sumOf { bBar[i * 2 + it] * x[j * 2 + it] }
+            val ji = (0 until 2).sumOf { bBar[j * 2 + it] * x[i * 2 + it] }
+            -0.5 * (ij + ji)
+        }
+        assertClose(implicit, rows.getValue("dA"), "dA against −sym(B̄·Xᵀ)")
+        assertClose(bBar, rows.getValue("dB"), "dB against A⁻¹·X̄")
+    }
+
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
 
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)

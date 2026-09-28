@@ -121,3 +121,22 @@ fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.triangularSolve(
     val x = LinalgKernels.triangularSolve(f64Of(this), f64Of(b), n, m, lower, transposeA, unitDiagonal)
     return f32Tensor(x, intArrayOf(n, m))
 }
+
+/**
+ * Solves `A·X = B` for a symmetric positive-definite `A` (the receiver) through
+ * its Cholesky factor: `X = L⁻ᵀ·(L⁻¹·B)` with `L = cholesky(A)`. `A` is read as
+ * `(A + Aᵀ)/2`; a matrix that is not positive definite gives NaN.
+ *
+ * Differentiable in both arguments, reverse and forward mode. Under `grad {}` it
+ * is lowered to `cholesky` and two `triangularSolve`s and differentiated through
+ * their rules; the result equals implicit differentiation of `A·X = B`,
+ * `B̄ = A⁻¹·X̄` and `Ā = −sym(B̄·Xᵀ)`. Cost: one factorization (n³/3) and
+ * 2·n²·k for the solves; the reverse pass factors again only if the factor is not
+ * shared, and adds four triangular solves.
+ */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.solveSpd(
+    b: DTensor<Rank2<N, K>, F32>,
+): DTensor<Rank2<N, K>, F32> {
+    val l = cholesky()
+    return l.triangularSolve(l.triangularSolve(b, true, false, false), true, true, false)
+}

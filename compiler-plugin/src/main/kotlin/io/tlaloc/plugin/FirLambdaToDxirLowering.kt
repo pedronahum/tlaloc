@@ -2543,6 +2543,17 @@ object FirLambdaToDxirLowering {
                     requireSquare(fqn)
                     return emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type)
                 }
+                // Composites: lowered to the primitives above, so their
+                // derivatives (and higher derivatives) come from those rules.
+                "io.tlaloc.core.ops.solveSpd" -> {
+                    if (args.size != 1) throw LoweringException("$fqn takes (b)")
+                    requireSquare(fqn)
+                    val b = lowerExpr(args[0], env, emitter)
+                    if (b.type.rank != 2 || b.type.dtype != F32) {
+                        throw LoweringException("$fqn requires a rank-2 F32 right-hand side; got ${b.type}")
+                    }
+                    return choleskySolve(emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type), b, emitter)
+                }
                 "io.tlaloc.core.ops.triangularSolve" -> {
                     if (args.size != 2 && args.size != 4) {
                         throw LoweringException("$fqn takes (b, lower) or (b, lower, transposeA, unitDiagonal)")
@@ -4077,6 +4088,17 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.min" to OpKind.MIN,
     )
 
+    /** `L⁻ᵀ·(L⁻¹·B)`: the solve with `A = L·Lᵀ`, as two TRIANGULAR_SOLVEs. */
+    private fun choleskySolve(l: DxirNode, b: DxirNode, emitter: DxirEmitter): DxirNode {
+        fun solve(rhs: DxirNode, transposeA: Boolean) = emitter.op(
+            kind = OpKind.TRIANGULAR_SOLVE,
+            operands = listOf(l, rhs),
+            type = rhs.type,
+            attrs = mapOf("lower" to true, "transpose_a" to transposeA, "unit_diagonal" to false),
+        )
+        return solve(solve(b, false), true)
+    }
+
     /** The dense linear-algebra user surface (`:core/ops/Linalg.kt`). */
     private val LINALG_OP_SET: Set<String> = setOf(
         "io.tlaloc.core.ops.tril",
@@ -4084,6 +4106,7 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.scaleTriangles",
         "io.tlaloc.core.ops.cholesky",
         "io.tlaloc.core.ops.triangularSolve",
+        "io.tlaloc.core.ops.solveSpd",
     )
 
     /** The RESHAPE-family + transpose user surface. */
