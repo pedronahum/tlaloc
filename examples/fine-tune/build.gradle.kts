@@ -13,6 +13,8 @@ dependencies {
     implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha02")
     // CausalLM, HfCausalLm, AdamW, capture, crossEntropy.
     implementation("io.github.pedronahum:tlaloc-nn:0.1.0-alpha02")
+    // HfTokenizer: the checkpoint's tokenizer.json, with the ids transformers gives.
+    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha02")
     // PjrtSession: XLA compiles the captured graphs and runs them on the GPU.
     implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha02")
 }

@@ -1,8 +1,8 @@
 # Releasing Tlaloc
 
 Tlaloc publishes to Maven Central under the group `io.github.pedronahum`. Every
-artifact id starts with `tlaloc-`. A release is 23 `tlaloc-*` artifacts plus the
-Gradle plugin marker, 24 publications in all:
+artifact id starts with `tlaloc-`. A release is 25 `tlaloc-*` artifacts plus the
+Gradle plugin marker, 26 publications in all:
 
 | Module | Artifact (Gradle resolves the `-jvm` one for you) |
 |---|---|
@@ -10,6 +10,7 @@ Gradle plugin marker, 24 publications in all:
 | `:ir` | `tlaloc-ir`, `tlaloc-ir-jvm` |
 | `:autograd` | `tlaloc-autograd`, `tlaloc-autograd-jvm` |
 | `:nn` | `tlaloc-nn`, `tlaloc-nn-jvm` |
+| `:tokenizer` | `tlaloc-tokenizer`, `tlaloc-tokenizer-jvm` |
 | `:stablehlo` | `tlaloc-stablehlo`, `tlaloc-stablehlo-jvm` |
 | `:maestro` | `tlaloc-maestro`, `tlaloc-maestro-jvm` |
 | `:runtime-pjrt` | `tlaloc-runtime-pjrt`, `tlaloc-runtime-pjrt-jvm` |
@@ -19,7 +20,7 @@ Gradle plugin marker, 24 publications in all:
 | `:compiler-plugin` | `tlaloc-compiler-plugin` |
 | `:gradle-plugin` | `tlaloc-gradle-plugin` |
 | `:gradle-plugin` (plugin marker) | `io.github.pedronahum.tlaloc:io.github.pedronahum.tlaloc.gradle.plugin`, a POM that points `plugins { id("io.github.pedronahum.tlaloc") }` at `tlaloc-gradle-plugin` |
-| `:bom` | `tlaloc-bom`, which constrains the other 22 |
+| `:bom` | `tlaloc-bom`, which constrains the other 24 |
 
 The Gradle project names have no prefix; the root `build.gradle.kts` adds it to
 every publication. The plugin marker's group and artifact id are fixed by Gradle's

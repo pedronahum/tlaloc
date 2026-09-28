@@ -170,6 +170,7 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 | Also | learning-rate schedules, gradient clipping, bf16 mixed precision, checkpoints that resume bit for bit |
 | On the GPU | [`examples/gpu-training`](examples/gpu-training/): 600 Adam steps in 2.02 s on a GB10, 98.0 % held-out accuracy; [`examples/mnist`](examples/mnist/): 93.66 % on MNIST |
 | Hugging Face models | `HfCausalLm` reads a Llama or Qwen3 checkpoint into a `CausalLM` and writes one back; [`examples/fine-tune`](examples/fine-tune/) fine-tunes Qwen3-0.6B on the GPU |
+| Tokenizers | `HfTokenizer` (`:tokenizer`) reads a checkpoint's `tokenizer.json` and gives the ids, decoded text and chat prompts transformers gives, for Qwen3, Muse Glimmer, TinyLlama, GPT-2 and Gemma 4 |
 
 ## Serving
 

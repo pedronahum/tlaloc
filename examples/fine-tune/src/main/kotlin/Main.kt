@@ -34,6 +34,8 @@ import io.tlaloc.nn.step
 import io.tlaloc.runtime.pjrt.PjrtBinaries
 import io.tlaloc.runtime.pjrt.PjrtSession
 import io.tlaloc.runtime.pjrt.PjrtTarget
+import io.tlaloc.tokenizer.HfTokenizer
+import io.tlaloc.tokenizer.load
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.absolutePathString
@@ -79,7 +81,7 @@ fun main(args: Array<String>) {
     }
     val out = Path.of(args.firstOrNull() ?: "build/qwen3-0.6b-france-rome")
 
-    val tokens = WordTokens.load(source)
+    val tokens = HfTokenizer.load(source)
     var t0 = System.nanoTime()
     val loaded = HfCausalLm.load(source)
     var model = loaded.model

@@ -14,7 +14,7 @@ plugins {
 // other module actually publishes, so a module added to the build without a line
 // here fails `check`.
 val kmpModules = listOf(
-    "core", "ir", "autograd", "nn", "stablehlo", "maestro",
+    "core", "ir", "autograd", "nn", "tokenizer", "stablehlo", "maestro",
     "runtime-pjrt", "runtime-cuda", "runtime-iree", "kptx",
 )
 val jvmModules = listOf("compiler-plugin", "gradle-plugin")

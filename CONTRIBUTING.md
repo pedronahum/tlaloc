@@ -5,8 +5,8 @@ small fix, open an issue first so the approach can be agreed before you write it
 
 ## Building
 
-- JDK 25 builds the repository. `core`, `ir`, `autograd`, `nn`, `stablehlo`, `maestro`
-  and the Gradle plugin target Java 21 bytecode; the compiler plugin, `kptx` and the
+- JDK 25 builds the repository. `core`, `ir`, `autograd`, `nn`, `tokenizer`, `stablehlo`,
+  `maestro` and the Gradle plugin target Java 21 bytecode; the compiler plugin, `kptx` and the
   runtime modules target Java 25.
 - `./gradlew test` runs the whole suite, including `checkKotlinAbi` and the POM checks.
 - Tests that need a GPU, a PJRT plugin, IREE or a Python venv skip themselves by name

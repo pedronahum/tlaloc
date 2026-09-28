@@ -20,7 +20,7 @@ The JDK floor differs per module:
 
 | | Bytecode | Why |
 |---|---|---|
-| `core` `ir` `autograd` `nn` `stablehlo` `maestro` | **Java 21** | compiled with `-Xjdk-release=21`, so no JDK 22+ API can slip in |
+| `core` `ir` `autograd` `nn` `tokenizer` `stablehlo` `maestro` | **Java 21** | compiled with `-Xjdk-release=21`, so no JDK 22+ API can slip in |
 | `runtime-pjrt` `runtime-cuda` `kptx` | Java 25 | the Foreign Function & Memory API ([JEP 454](https://openjdk.org/jeps/454)) |
 | `runtime-iree` | Java 25 | no test certifies an IREE run on a JDK 21 |
 | `compiler-plugin` | Java 25 | it reads K2 compiler internals, and Kotlin loads a plugin into the compiler's own JVM |
@@ -79,7 +79,8 @@ All **thirteen** published modules are on Maven Central under
 `tlaloc-autograd`, `tlaloc-nn`, `tlaloc-stablehlo`, `tlaloc-compiler-plugin`,
 `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`, `tlaloc-runtime-iree`,
 `tlaloc-kptx`, `tlaloc-maestro`, `tlaloc-gradle-plugin` (plugin id
-`io.github.pedronahum.tlaloc`) and `tlaloc-bom`.
+`io.github.pedronahum.tlaloc`) and `tlaloc-bom`. `tlaloc-tokenizer` came after
+0.1.0-alpha02 and is built from source until the next release.
 
 To build them from source instead (the examples in this repository do this):
 

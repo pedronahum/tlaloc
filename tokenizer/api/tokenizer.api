@@ -1,0 +1,92 @@
+public final class io/tlaloc/tokenizer/ChatMessage {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/tokenizer/ChatMessage;
+	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/ChatMessage;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/tokenizer/ChatMessage;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getContent ()Ljava/lang/String;
+	public final fun getReasoningContent ()Ljava/lang/String;
+	public final fun getRole ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/tokenizer/ChatOptions {
+	public fun <init> ()V
+	public fun <init> (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public synthetic fun <init> (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Z
+	public final fun component2 ()Ljava/lang/Boolean;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Ljava/lang/String;
+	public final fun copy (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/tokenizer/ChatOptions;
+	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/ChatOptions;ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/tokenizer/ChatOptions;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAddGenerationPrompt ()Z
+	public final fun getCurrentDate ()Ljava/lang/String;
+	public final fun getEnableThinking ()Ljava/lang/Boolean;
+	public final fun getKnowledgeCutoff ()Ljava/lang/String;
+	public final fun getReasoningStrength ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/tokenizer/ChatTemplate : java/lang/Enum {
+	public static final field Companion Lio/tlaloc/tokenizer/ChatTemplate$Companion;
+	public static final field MUSE_GLIMMER Lio/tlaloc/tokenizer/ChatTemplate;
+	public static final field QWEN3 Lio/tlaloc/tokenizer/ChatTemplate;
+	public static final field ZEPHYR Lio/tlaloc/tokenizer/ChatTemplate;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/tokenizer/ChatTemplate;
+	public static fun values ()[Lio/tlaloc/tokenizer/ChatTemplate;
+}
+
+public final class io/tlaloc/tokenizer/ChatTemplate$Companion {
+	public final fun recognize (Ljava/lang/String;)Lio/tlaloc/tokenizer/ChatTemplate;
+}
+
+public final class io/tlaloc/tokenizer/DecodeStream {
+	public final fun step (I)Ljava/lang/String;
+}
+
+public final class io/tlaloc/tokenizer/HfTokenizer {
+	public static final field Companion Lio/tlaloc/tokenizer/HfTokenizer$Companion;
+	public final fun applyChatTemplate (Ljava/util/List;Lio/tlaloc/tokenizer/ChatOptions;Lio/tlaloc/tokenizer/ChatTemplate;)Ljava/lang/String;
+	public static synthetic fun applyChatTemplate$default (Lio/tlaloc/tokenizer/HfTokenizer;Ljava/util/List;Lio/tlaloc/tokenizer/ChatOptions;Lio/tlaloc/tokenizer/ChatTemplate;ILjava/lang/Object;)Ljava/lang/String;
+	public final fun decode (Ljava/util/List;Z)Ljava/lang/String;
+	public final fun decode ([IZ)Ljava/lang/String;
+	public static synthetic fun decode$default (Lio/tlaloc/tokenizer/HfTokenizer;Ljava/util/List;ZILjava/lang/Object;)Ljava/lang/String;
+	public static synthetic fun decode$default (Lio/tlaloc/tokenizer/HfTokenizer;[IZILjava/lang/Object;)Ljava/lang/String;
+	public final fun decodeStream (Z)Lio/tlaloc/tokenizer/DecodeStream;
+	public static synthetic fun decodeStream$default (Lio/tlaloc/tokenizer/HfTokenizer;ZILjava/lang/Object;)Lio/tlaloc/tokenizer/DecodeStream;
+	public final fun encode (Ljava/lang/String;ZZ)[I
+	public static synthetic fun encode$default (Lio/tlaloc/tokenizer/HfTokenizer;Ljava/lang/String;ZZILjava/lang/Object;)[I
+	public final fun getBosToken ()Ljava/lang/String;
+	public final fun getBosTokenId ()Ljava/lang/Integer;
+	public final fun getChatTemplate ()Lio/tlaloc/tokenizer/ChatTemplate;
+	public final fun getEosToken ()Ljava/lang/String;
+	public final fun getEosTokenId ()Ljava/lang/Integer;
+	public final fun getPadToken ()Ljava/lang/String;
+	public final fun getVocabSize ()I
+	public final fun idToToken (I)Ljava/lang/String;
+	public final fun isSpecial (I)Z
+	public final fun tokenToId (Ljava/lang/String;)Ljava/lang/Integer;
+}
+
+public final class io/tlaloc/tokenizer/HfTokenizer$Companion {
+	public final fun fromJson (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/tokenizer/HfTokenizer;
+	public static synthetic fun fromJson$default (Lio/tlaloc/tokenizer/HfTokenizer$Companion;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/tokenizer/HfTokenizer;
+}
+
+public final class io/tlaloc/tokenizer/HfTokenizerFilesKt {
+	public static final fun load (Lio/tlaloc/tokenizer/HfTokenizer$Companion;Ljava/nio/file/Path;)Lio/tlaloc/tokenizer/HfTokenizer;
+}
+
+public final class io/tlaloc/tokenizer/UnsupportedTokenizerException : java/lang/IllegalArgumentException {
+	public fun <init> (Ljava/lang/String;)V
+}
+

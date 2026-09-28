@@ -57,6 +57,9 @@ val moduleDescriptions = mapOf(
     "nn" to
         "Layers, initializers, losses, optimizers and parameter handling over Tlaloc's " +
         "typed tensors, with DiffKT's model surface as the parity target.",
+    "tokenizer" to
+        "Hugging Face BPE tokenizers in Kotlin: tokenizer.json read and run with the ids " +
+        "transformers gives, streaming decode, and chat templates for Qwen3, TinyLlama and Muse Glimmer.",
     "stablehlo" to
         "StableHLO and Shardy emission from DXIR: the portable artifact Tlaloc programs " +
         "compile to.",
@@ -681,6 +684,7 @@ val tlalocJvmTargets = mapOf(
     "ir" to 21,
     "autograd" to 21,
     "nn" to 21,
+    "tokenizer" to 21,
     "stablehlo" to 21,
     // §0.4.503 decision, asked for explicitly: `:maestro` goes to 21. It imports no
     // `java.lang.foreign` anywhere in `jvmMain`, its four project dependencies are
@@ -1014,7 +1018,7 @@ val tlalocOptIns = listOf("io.tlaloc.core.ExperimentalTlalocApi")
 // spent a tier removing. Naming the two exceptions is better than a blanket flag
 // that talks to modules it cannot reach.
 val tlalocModulesSeeingCore = setOf(
-    "core", "ir", "autograd", "nn", "stablehlo",
+    "core", "ir", "autograd", "nn", "tokenizer", "stablehlo",
     "compiler-plugin", "maestro", "runtime-pjrt", "runtime-iree", "benchmarks",
 )
 
@@ -1039,6 +1043,7 @@ dependencies {
     dokka(project(":ir"))
     dokka(project(":autograd"))
     dokka(project(":nn"))
+    dokka(project(":tokenizer"))
     dokka(project(":stablehlo"))
     dokka(project(":compiler-plugin"))
     dokka(project(":maestro"))

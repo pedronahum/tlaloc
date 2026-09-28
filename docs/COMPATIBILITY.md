@@ -127,7 +127,7 @@ These are the commitments.
     `tlaloc { unsafeAllowUnsupportedKotlin.set(true) }` turns the refusal into a
     warning; a failure inside the compiler is then expected.
   - **JDK: 25 to build, 21 to run.** The library modules (`core`, `ir`,
-    `autograd`, `nn`, `stablehlo`, `maestro`) emit Java 21 bytecode and are
+    `autograd`, `nn`, `tokenizer`, `stablehlo`, `maestro`) emit Java 21 bytecode and are
     compiled with `-Xjdk-release=21`. The FFM runtime backends (`runtime-pjrt`,
     `runtime-cuda`, `kptx`), `runtime-iree` and `compiler-plugin` emit Java 25.
     Because Kotlin loads a compiler plugin into the compiler's own JVM, a project

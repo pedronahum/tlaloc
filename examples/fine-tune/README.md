@@ -91,11 +91,15 @@ the chat format.
 
 ## Tokens
 
-Tlaloc has no tokenizer. `WordTokens` looks each word up in the
-checkpoint's `vocab.json`, where Qwen3's byte-level BPE gives common words a
-token of their own (`" Paris"` is `"ĠParis"`), and refuses any word that is
-split into pieces. Every word in this example is a single token, and the ids
-are the ones transformers' tokenizer produces.
+`HfTokenizer.load` (`tlaloc-tokenizer`) reads the checkpoint's
+`tokenizer.json` and `tokenizer_config.json`. Its ids and decoded text are
+the ones transformers' `AutoTokenizer` gives:
+
+```kotlin
+val tokens = HfTokenizer.load(source)
+tokens.encode(" The capital of France is")   // [576, 6722, 315, 9625, 374]
+tokens.decode(listOf(21718, 13))             // " Rome."
+```
 
 Measured on the GB10 (aarch64), with another process's vLLM server holding
 35 GB of the GPU's memory.

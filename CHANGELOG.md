@@ -56,6 +56,19 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   still answering Madrid for Spain and Berlin for Germany (4 steps, 28 s on
   the GB10), and saves a checkpoint that transformers loads with the same
   answers.
+- **`:tokenizer` (`tlaloc-tokenizer`)**, Hugging Face BPE tokenizers in
+  Kotlin. `HfTokenizer.load(checkpoint)` reads `tokenizer.json`,
+  `tokenizer_config.json` and `chat_template.jinja`; `encode` (with
+  `allowSpecial = false` for untrusted text), `decode`, `decodeStream` and
+  `applyChatTemplate` give what transformers 5.17's `AutoTokenizer` gives
+  for Qwen3, Muse Glimmer, TinyLlama, GPT-2 and Gemma 4, checked against
+  goldens written by `harness/python/tokenizer_golden.py`. Chat templates
+  for Qwen3, TinyLlama and Muse Glimmer are Kotlin renderers, recognized by
+  the exact template source. On one GB10 core, English prose encodes at
+  18 to 26 MB/s with the byte-level vocabularies and 8 MB/s with
+  TinyLlama's and Gemma 4's; Muse Glimmer's 28 MB `tokenizer.json` loads
+  in 0.6 s. `examples/fine-tune` uses it in place of its whole-word
+  lookup.
 - **Traced ops** in `:autograd`: `transpose`, `softmax(axis)`,
   `max(axes)`, `broadcastTo` (NumPy rules), `splat` (a scalar broadcast,
   where `constantLike` writes every element into the graph), `logSoftmax`

@@ -187,12 +187,13 @@ jobs:
       # UnsupportedClassVersionError out of the test runner.
       #
       # Ran locally before being written down: all six suites, 1,822 tests, pass
-      # on OpenJDK 21.0.2 (2026-09-22, §0.4.504).
+      # on OpenJDK 21.0.2 (2026-09-22, §0.4.504). :tokenizer's suite passed on
+      # the same JDK when the module was added.
       - name: The 21-targeted modules' own suites, running ON a JDK 21
         run: |
           ./gradlew --no-daemon --stacktrace -PtlalocTestJdk=21 \
             :core:jvmTest :ir:jvmTest :autograd:jvmTest \
-            :nn:jvmTest :stablehlo:jvmTest :maestro:jvmTest
+            :nn:jvmTest :tokenizer:jvmTest :stablehlo:jvmTest :maestro:jvmTest
 
       # And the end-to-end consumer story: publish, compile examples/quickstart
       # at target 21 with the K2 plugin synthesizing a gradient, run the result
