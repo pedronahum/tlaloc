@@ -199,4 +199,45 @@ class PjrtLinalgTest {
             assertTrue(dA <= 1e-7 && dB <= 1e-7, "solveSpd: dA $dA, dB $dB")
         }
     }
+
+    @Test
+    fun f64LogDetGradientAndHessianVectorProductMatchFiniteDifferences() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        // The plugin's lowering of logDetSpd, in f64.
+        val fn = DxirBuilder.function("log_det") {
+            val a = param("a", t(F64, n, n))
+            val l = op(OpKind.CHOLESKY, listOf(a), t(F64, n, n))
+            val diag = op(
+                OpKind.SUM,
+                listOf(op(OpKind.TRIANGLE, listOf(l), t(F64, n, n), attrs = mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))),
+                t(F64, n),
+                attrs = mapOf("reduction_dims" to listOf(1)),
+            )
+            val half = op(OpKind.SUM, listOf(op(OpKind.LOG, listOf(diag), t(F64, n))), t(F64))
+            listOf(op(OpKind.ADD, listOf(half, half), t(F64)))
+        }
+        fun logDet(a: DoubleArray): Double {
+            val l = LinalgKernels.cholesky(a, n)
+            return 2 * (0 until n).sumOf { kotlin.math.ln(l[it * n + it]) }
+        }
+        val grad = DxirReverseTransform.apply(fn)
+        val v = DoubleArray(n * n) { ((it * 3) % 7 - 3) / 3.0 }
+        TestBackend.session().use { session ->
+            val value = session.runOnF64(fn, listOf(spd)).single().single()
+            assertTrue(abs(value - logDet(spd)) <= 1e-13 * abs(logDet(spd)), "log det $value")
+            val g = session.runOnF64(grad, listOf(spd)).single()
+            val gWant = fdGrad(spd, 1e-6, ::logDet)
+            assertTrue(maxRelDiff(gWant, g) <= 1e-7, "d log det: ${maxRelDiff(gWant, g)}")
+            // Hessian-vector product: forward over reverse, against central
+            // differences of the device gradient along v (h = 1e-5 on an f64
+            // gradient exact to ~1e-15: error ~1e-10).
+            val hv = session.runOnF64(DxirForwardTransform.apply(grad), listOf(spd, v))[1]
+            val h = 1e-5
+            val gp = session.runOnF64(grad, listOf(DoubleArray(n * n) { spd[it] + h * v[it] })).single()
+            val gm = session.runOnF64(grad, listOf(DoubleArray(n * n) { spd[it] - h * v[it] })).single()
+            val hvWant = DoubleArray(n * n) { (gp[it] - gm[it]) / (2 * h) }
+            assertTrue(maxRelDiff(hvWant, hv) <= 1e-7, "Hessian·v: ${maxRelDiff(hvWant, hv)}")
+        }
+    }
 }

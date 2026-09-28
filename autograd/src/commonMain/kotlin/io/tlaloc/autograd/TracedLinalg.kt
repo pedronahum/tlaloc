@@ -66,3 +66,9 @@ fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.solveSpd(b: Tracer<Rank2<
     val l = cholesky()
     return l.triangularSolve(l.triangularSolve(b, true, false, false), true, true, false)
 }
+
+/** Capture-API [io.tlaloc.core.ops.logDetSpd]: recorded as `cholesky`, the diagonal's row sum, `log` and `sum`. */
+fun <N : ShapeAtom> Tracer<Rank2<N, N>>.logDetSpd(): Tracer<io.tlaloc.core.ScalarShape> {
+    val half = cholesky().scaleTriangles(0f, 1f, 0f).sum<io.tlaloc.core.Rank1<N>>(intArrayOf(1)).log().sum()
+    return half + half
+}

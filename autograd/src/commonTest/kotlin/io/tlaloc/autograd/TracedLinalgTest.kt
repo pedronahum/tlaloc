@@ -67,4 +67,23 @@ class TracedLinalgTest {
             }
         }
     }
+
+    @Test
+    fun capturedLogDetHasGradientTheSymmetrizedInverse() {
+        val fn = capture(
+            f = { x: Tracer<Rank2<Sym, Sym>> -> x.logDetSpd() },
+            input = Tensors.f32Matrix<Sym, Sym>(n, n, f(a)),
+            name = "logdet",
+        )
+        val l = LinalgKernels.cholesky(a, n)
+        val want = 2 * (0 until n).sumOf { kotlin.math.ln(l[it * n + it]) }
+        val got = DxirInterpreter.evalFunction(fn, listOf(f(a))).single().single()
+        assertTrue(abs(got - want) < 1e-5, "log det = $got, want $want")
+        val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(fn), listOf(f(a))).single()
+        val eye = DoubleArray(n * n) { if (it / n == it % n) 1.0 else 0.0 }
+        val inv = LinalgKernels.triangularSolve(
+            l, LinalgKernels.triangularSolve(l, eye, n, n, true, false, false), n, n, true, true, false,
+        )
+        for (i in inv.indices) assertTrue(abs(inv[i] - g[i]) < 1e-5, "dA[$i] = ${g[i]}, want ${inv[i]}")
+    }
 }

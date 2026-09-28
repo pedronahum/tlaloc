@@ -81,3 +81,12 @@ fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F64>.solveSpd(
     val l = cholesky()
     return l.triangularSolve(l.triangularSolve(b, true, false, false), true, true, false)
 }
+
+/** F64 [logDetSpd]. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.logDetSpd(): DTensor<io.tlaloc.core.ScalarShape, F64> {
+    val n = squareDimF64(this, "logDetSpd")
+    val l = LinalgKernels.cholesky(f64Data(this), n)
+    var s = 0.0
+    for (i in 0 until n) s += kotlin.math.ln(l[i * n + i])
+    return DTensor(HostF64Storage(doubleArrayOf(2 * s)), intArrayOf(), F64)
+}

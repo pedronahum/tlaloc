@@ -2554,6 +2554,25 @@ object FirLambdaToDxirLowering {
                     }
                     return choleskySolve(emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type), b, emitter)
                 }
+                "io.tlaloc.core.ops.logDetSpd" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    // 2·Σᵢ log Lᵢᵢ. The diagonal is the row sum of TRIANGLE(L, 0, 1, 0):
+                    // every other entry of a row is an exact zero, so the sum is exact.
+                    val l = emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type)
+                    val diagType = DxirType(a.type.dtype, listOf(a.type.dims[0]))
+                    val diag = emitter.op(
+                        kind = OpKind.SUM,
+                        operands = listOf(triangle(l, 0.0, 1.0, 0.0)),
+                        type = diagType,
+                        attrs = mapOf("reduction_dims" to listOf(1)),
+                    )
+                    val logDiag = emitter.op(kind = OpKind.LOG, operands = listOf(diag), type = diagType)
+                    val half = emitter.op(
+                        kind = OpKind.SUM, operands = listOf(logDiag), type = DxirType(a.type.dtype, emptyList()),
+                    )
+                    return emitter.op(kind = OpKind.ADD, operands = listOf(half, half), type = half.type)
+                }
                 "io.tlaloc.core.ops.triangularSolve" -> {
                     if (args.size != 2 && args.size != 4) {
                         throw LoweringException("$fqn takes (b, lower) or (b, lower, transposeA, unitDiagonal)")
@@ -4107,6 +4126,7 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.cholesky",
         "io.tlaloc.core.ops.triangularSolve",
         "io.tlaloc.core.ops.solveSpd",
+        "io.tlaloc.core.ops.logDetSpd",
     )
 
     /** The RESHAPE-family + transpose user surface. */

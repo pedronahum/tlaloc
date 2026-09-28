@@ -233,6 +233,74 @@ class LinalgGradientTest {
         assertClose(bBar, rows.getValue("dB"), "dB against A⁻¹·X̄")
     }
 
+    /** `sym(A)⁻¹` in Double, the gradient of `log det sym(A)`. */
+    private fun symInverseD(a: DoubleArray): DoubleArray {
+        val sym = DoubleArray(n * n) { 0.5 * (a[it] + a[(it % n) * n + it / n]) }
+        val l = LinalgKernels.cholesky(sym, n)
+        val eye = DoubleArray(n * n) { if (it / n == it % n) 1.0 else 0.0 }
+        val y = LinalgKernels.triangularSolve(l, eye, n, n, lower = true, transposeA = false, unitDiagonal = false)
+        return LinalgKernels.triangularSolve(l, y, n, n, lower = true, transposeA = true, unitDiagonal = false)
+    }
+
+    @Test
+    fun `logDetSpd has gradient A inverse, a matching jvp, and a hessian through the plugin`() {
+        val src = """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.autograd.hessian
+            import io.tlaloc.autograd.jvp
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.logDetSpd
+            import io.tlaloc.core.ops.toFloat
+            fun show(name: String, t: DTensor<*, F32>) = println(name + " " + t.hostF32().joinToString(","))
+            fun main() {
+                val a = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(spd)}))
+                val v = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(dir)}))
+                val g = grad { x: DTensor<Rank2<Sym, Sym>, F32> -> x.logDetSpd().toFloat() }
+                show("grad", g(a))
+                val j = jvp { x: DTensor<Rank2<Sym, Sym>, F32> -> x.logDetSpd().toFloat() }
+                println("jvp " + j(a, v))
+                val h = hessian { x: DTensor<Rank2<Sym, Sym>, F32> -> x.logDetSpd().toFloat() }
+                show("hessian", h(a))
+                println("value " + a.logDetSpd().toFloat())
+            }
+        """.trimIndent()
+        val result = compileAndRun(src)
+        assertEquals(
+            0, result.exitCode,
+            "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}",
+        )
+        val fellBack = result.messages.filter { "kept original call" in it.message }
+        assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
+        val rows = result.stdout.trim().lines().associate { line ->
+            val (k, v) = line.split(" ", limit = 2)
+            k to v.split(",").map { it.toFloat() }
+        }
+        val logDet = { x: DoubleArray ->
+            val l = LinalgKernels.cholesky(x, n)
+            2 * (0 until n).sumOf { kotlin.math.ln(l[it * n + it]) }
+        }
+        assertClose(doubleArrayOf(logDet(spd)), rows.getValue("value"), "log det")
+        val inv = symInverseD(spd)
+        assertClose(inv, rows.getValue("grad"), "d log det = sym(A)⁻¹")
+        assertClose(fdGrad(spd, logDet), rows.getValue("grad"), "d log det against finite differences")
+        assertClose(doubleArrayOf(inv.indices.sumOf { inv[it] * dir[it] }), rows.getValue("jvp"), "jvp log det")
+        // Hessian: central differences of the exact gradient sym(A)⁻¹, column by
+        // column (h = 1e-5: truncation 1e-10, rounding 1e-11 relative).
+        val hWant = DoubleArray(n * n * n * n)
+        for (k in 0 until n * n) {
+            val hh = 1e-5
+            val gp = symInverseD(spd.copyOf().also { it[k] += hh })
+            val gm = symInverseD(spd.copyOf().also { it[k] -= hh })
+            for (i in 0 until n * n) hWant[i * n * n + k] = (gp[i] - gm[i]) / (2 * hh)
+        }
+        assertClose(hWant, rows.getValue("hessian"), "hessian of log det")
+    }
+
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
 
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)

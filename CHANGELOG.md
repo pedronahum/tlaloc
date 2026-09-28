@@ -33,6 +33,10 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   `cholesky` and two `triangularSolve`s, so its derivative is theirs; it equals
   implicit differentiation (`B̄ = A⁻¹·X̄`, `Ā = −sym(B̄·Xᵀ)`), which the tests
   check directly, and matches JAX's `cho_solve`.
+- **`logDetSpd()`**, `log det A` for a symmetric positive-definite `A` as
+  `2·Σ log Lᵢᵢ`, F32 and F64, without forming the determinant. Differentiable to
+  any order: its gradient is `A⁻¹`, and `hessian {}` of it through the plugin
+  matches finite differences and JAX.
 
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,

@@ -140,3 +140,24 @@ fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.solveSpd(
     val l = cholesky()
     return l.triangularSolve(l.triangularSolve(b, true, false, false), true, true, false)
 }
+
+/**
+ * `log det A` for a symmetric positive-definite `A` (the receiver), as
+ * `2·Σᵢ log Lᵢᵢ` with `L = cholesky(A)`. `A` is read as `(A + Aᵀ)/2`; a matrix
+ * that is not positive definite gives NaN. Never forms `det A`, so it does not
+ * overflow or underflow where the determinant would.
+ *
+ * Differentiable, reverse and forward mode and to any order (`hessian` included).
+ * Under `grad {}` it is lowered to `cholesky` and elementwise ops; its gradient is
+ * `A⁻¹` (symmetric, so equal to `A⁻ᵀ`).
+ *
+ * This host function sums in Double and rounds once; under `grad {}` the value
+ * comes from the lowered ops in F32, and the two can differ in the last bit.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.logDetSpd(): DTensor<ScalarShape, F32> {
+    val n = squareDim(this, "logDetSpd")
+    val l = LinalgKernels.cholesky(f64Of(this), n)
+    var s = 0.0
+    for (i in 0 until n) s += kotlin.math.ln(l[i * n + i])
+    return DTensor(HostF32Storage(floatArrayOf((2 * s).toFloat())), intArrayOf(), F32)
+}

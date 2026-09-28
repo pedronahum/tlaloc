@@ -134,4 +134,21 @@ class LinalgTest {
             assertTrue(abs(r) < 1e-14 * k * xNorm, "residual[$i] = $r (‖X‖∞ = $xNorm)")
         }
     }
+
+    @Test
+    fun logDetSpdValues() {
+        // Textbook matrix: det = (2·1·3)² = 36.
+        val a = f64(3, 3, 4.0, 12.0, -16.0, 12.0, 37.0, -43.0, -16.0, -43.0, 98.0)
+        assertTrue(abs(a.logDetSpd().data().single() - kotlin.math.ln(36.0)) < 1e-14)
+        assertEquals(
+            kotlin.math.ln(36.0).toFloat(),
+            Tensors.f32Matrix<Sym, Sym>(3, 3, FloatArray(9) { a.data()[it].toFloat() }).logDetSpd().hostF32().single(),
+        )
+        assertEquals(kotlin.math.ln(4.0), f64(1, 1, 4.0).logDetSpd().data().single())
+        // Hilbert(8): det = 1/365356847125734485878112256000000 (exact, rational
+        // elimination), log det = −74.97842732916048. The determinant itself is
+        // 2.7e-33; the log is computed without forming it.
+        val got = hilbert(8).logDetSpd().data().single()
+        assertTrue(abs(got - -74.97842732916048) < 1e-8, "log det H8 = $got")
+    }
 }

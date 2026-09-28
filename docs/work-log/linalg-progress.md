@@ -10,7 +10,7 @@ Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`.
 | `triangularSolve` | done | 1 |
 | `cholesky` | done | 1 |
 | `solveSpd` | done | 2 |
-| `logDetSpd` | not started | |
+| `logDetSpd` | done | 3 |
 | `invSpd` | not started | |
 | `examples/gaussian-process` | not started | |
 | Tier 2: `solve`, `det` (LU), `qr` | not started | |
@@ -69,6 +69,17 @@ composite's reverse pass costs four triangular solves plus two small matmuls
 against two for a direct rule, but gives forward mode and every higher order for
 free and cannot disagree with the primitives.
 
+## Commit 3: `logDetSpd`
+
+FIR composite: `2·Σ log(rowsum(TRIANGLE(L, 0, 1, 0)))`, the doubling as `s + s` so
+no constant is needed. The row sum reads the diagonal exactly (the rest of each row
+is an exact zero). The host twin sums in Double; the `grad {}` value comes from F32
+ops, and the two can differ in the last bit (documented in the KDoc). Tests: host
+(textbook det 36, 1×1, Hilbert(8) against the exact rational determinant), JAX
+value/gradient/full 16×16 Hessian at IR level, plugin `grad` (= sym(A)⁻¹ and finite
+differences), `jvp`, `hessian` (against finite differences of the exact gradient),
+capture API, F64 gradient and Hessian-vector product on PJRT.
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -93,4 +104,4 @@ free and cannot disagree with the primitives.
 
 ## Next step
 
-`logDetSpd` (FIR composite, with the `hessian` test), then `identityLike` + `invSpd`.
+`identityLike` + `invSpd`, then the GP example (draft in the session scratchpad).
