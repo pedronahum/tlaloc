@@ -118,6 +118,7 @@ public final class io/tlaloc/plugin/KotlinVersionGuard$Version {
 public final class io/tlaloc/plugin/TlalocCheckersExtension : org/jetbrains/kotlin/fir/analysis/extensions/FirAdditionalCheckersExtension {
 	public fun <init> (Lorg/jetbrains/kotlin/fir/FirSession;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;)V
 	public synthetic fun <init> (Lorg/jetbrains/kotlin/fir/FirSession;Lio/tlaloc/plugin/TlalocPluginOptions;Lio/tlaloc/plugin/TlalocLoweringHandoff;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun getDeclarationCheckers ()Lorg/jetbrains/kotlin/fir/analysis/checkers/declaration/DeclarationCheckers;
 	public fun getExpressionCheckers ()Lorg/jetbrains/kotlin/fir/analysis/checkers/expression/ExpressionCheckers;
 }
 
@@ -155,6 +156,10 @@ public final class io/tlaloc/plugin/TlalocCompilerPluginRegistrar : org/jetbrain
 
 public final class io/tlaloc/plugin/TlalocErrors : org/jetbrains/kotlin/diagnostics/KtDiagnosticsContainer {
 	public static final field INSTANCE Lio/tlaloc/plugin/TlalocErrors;
+	public final fun getBOUNDED_AXIS_MISMATCH ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getBOUNDED_DIM_EXCEEDED ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getBOUNDED_DIM_INVALID ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getBOUNDED_SPEC_ARITY ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
 	public final fun getINTERNAL_ERROR ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
 	public final fun getINTERNAL_ERROR_WARNING ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
 	public final fun getINTRINSIC_CALL ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
